@@ -649,6 +649,57 @@ test("REREAD: a truncated native read never clears the flag", async () => {
 	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
 });
 
+// --- ompkit-22kz5: whole-line pages and path forms (grader-19rm 2026-10-22: six ranged/paged AGENTS.md reads,
+// every write blocked, because omp marks any read shorter than the file `truncation.truncated`). ---
+
+/** omp's native read details for a page cut at a line boundary (shape observed in the grader-19rm session). */
+function linePage(extra: Record<string, unknown> = {}): Record<string, unknown> {
+	return { truncation: { truncated: true, truncatedBy: "lines", lastLinePartial: false, firstLineExceedsLimit: false, totalLines: 552, outputLines: 23, ...extra } };
+}
+
+async function readThenOwnedShow(h: FakeHost, cwd: string, path: string, result: unknown): Promise<unknown[]> {
+	await callAs(h, cwd, "r1", "read", { path });
+	await endAs(h, cwd, "r1", "read", result);
+	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
+	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
+	return callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
+}
+
+test("REREAD 22kz5: a whole-line page clears by ranged, symlinked [a] and relative [b] paths", async () => {
+	for (const pathOf of [
+		(agents: string) => `${agents}:1-20`,
+		(agents: string) => {
+			const link = join(base, `link-${Math.random().toString(36).slice(2)}`);
+			symlinkSync(join(agents, ".."), link);
+			return join(link, "AGENTS.md");
+		},
+		() => "AGENTS.md:1-20",
+	]) {
+		const { h, cwd, agents } = await rereadHost();
+		expect(await readThenOwnedShow(h, cwd, pathOf(agents), native("1:rules\n", linePage()))).toEqual([undefined]);
+	}
+});
+
+test("REREAD 22kz5 planted negatives: a byte cut, a partial line, an over-long first line or a column cut never clears", async () => {
+	for (const details of [
+		linePage({ truncatedBy: "bytes" }),
+		linePage({ lastLinePartial: true }),
+		linePage({ firstLineExceedsLimit: true }),
+		{ ...linePage(), meta: { limits: { columnTruncated: { maxColumn: 768, unit: "bytes" } } } },
+	]) {
+		const { h, cwd, agents } = await rereadHost();
+		const [blocked] = await readThenOwnedShow(h, cwd, `${agents}:1-20`, native("1:rules\n", details));
+		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+		expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
+	}
+});
+
+test("REREAD 22kz5 planted negative: a whole-line page of a different file never clears", async () => {
+	const { h, cwd } = await rereadHost(["NOTES.md"]);
+	const [blocked] = await readThenOwnedShow(h, cwd, join(cwd, "NOTES.md:1-20"), native("1:x\n", linePage()));
+	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+});
+
 test("REREAD: native content with no text blocks never clears the flag", async () => {
 	const { h, cwd, agents } = await rereadHost();
 	await callAs(h, cwd, "r1", "read", { path: agents });

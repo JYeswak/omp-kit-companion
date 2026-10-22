@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -352,6 +352,32 @@ function resultTainted(result: unknown): boolean {
 	return false;
 }
 
+/**
+ * A read whose shown text is whole lines of the file: untainted, or cut only at a line boundary by a page or a
+ * requested range (`truncatedBy: "lines"`). omp marks every ranged read of a longer file truncated, so the
+ * reminder's "read any line range" never cleared (ompkit-22kz5; grader-19rm 2026-10-22: six AGENTS.md reads, every
+ * verdict.json write blocked). A byte cut, a partial last line, an over-long first line or a column cut is never
+ * a complete page.
+ */
+function readPageComplete(result: unknown): boolean {
+	if (resultFailed(result)) return false;
+	const record = typeof result === "object" && result !== null ? result as Record<string, unknown> : null;
+	const details = record !== null && typeof record["details"] === "object" && record["details"] !== null
+		? record["details"] as Record<string, unknown> : null;
+	for (const source of [details, record]) {
+		if (source === null) continue;
+		for (const key of ["truncated", "isTruncated", "partial"]) {
+			if (source[key] === true) return false;
+		}
+	}
+	const columnCut = field(field(field(details, "meta"), "limits"), "columnTruncated");
+	if (columnCut !== undefined && columnCut !== null) return false;
+	const truncation = details === null ? undefined : details["truncation"];
+	if (field(truncation, "truncated") !== true) return true;
+	return field(truncation, "truncatedBy") === "lines" && field(truncation, "lastLinePartial") !== true
+		&& field(truncation, "firstLineExceedsLimit") !== true;
+}
+
 function parseBeadRow(stdout: string, id: string): { status: string; assignee: string | null } | null {
 	let parsed: unknown;
 	try {
@@ -541,15 +567,25 @@ export interface RereadCall {
 // The final assertion is a strict JS end anchor, including for line terminators.
 const READ_PATH_RANGE = /^(?:\d+(?:-\d*)?|-\d+|\d+\+\d+)(?:,(?:\d+(?:-\d*)?|-\d+|\d+\+\d+))*(?![\s\S])/;
 
+/** Same file: equal resolved paths, or equal real paths (a symlinked or aliased directory, ompkit-22kz5 [a]). */
+function samePath(candidate: string, expected: string): boolean {
+	if (candidate === expected) return true;
+	try {
+		return realpathSync(candidate) === realpathSync(expected);
+	} catch {
+		return false;
+	}
+}
+
 function readSelectorTargets(rawPath: string, cwd: string, expected: string, home: string): boolean {
 	const raw = rawPath.trim();
-	if (resolve(cwd, expandHome(raw, home)) === expected) return true;
+	if (samePath(resolve(cwd, expandHome(raw, home)), expected)) return true;
 	for (let split = raw.lastIndexOf(":"); split > 0; split = raw.lastIndexOf(":", split - 1)) {
 		const selector = raw.slice(split + 1);
 		const range = selector.startsWith("raw:") ? selector.slice(4)
 			: selector.endsWith(":raw") ? selector.slice(0, -4) : selector;
 		if ((selector === "raw" || READ_PATH_RANGE.test(range))
-			&& resolve(cwd, expandHome(raw.slice(0, split), home)) === expected) return true;
+			&& samePath(resolve(cwd, expandHome(raw.slice(0, split), home)), expected)) return true;
 	}
 	return false;
 }
@@ -567,7 +603,7 @@ export async function observeRereadResult(call: RereadCall, result: unknown, pen
 	exec: FlywheelExec, sessionTrackers: ReadonlyMap<string, TrackerRef> = new Map(), env: Record<string, string | undefined> = {}): Promise<boolean> {
 	const tool = call.toolName.toLowerCase();
 	if (tool === "read") {
-		if (resultTainted(result)) return false;
+		if (!readPageComplete(result)) return false;
 		const raw = field(call.input, "path");
 		if (typeof raw === "string" && pending.agentsPath !== null
 			&& readSelectorTargets(raw, call.cwd, pending.agentsPath, home)) {
