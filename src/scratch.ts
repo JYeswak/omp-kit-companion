@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 
@@ -179,8 +179,9 @@ function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null 
 
 function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 	const seat = SEAT_FIELDS.filter(field => seen[field] !== undefined);
-	if (seat.length === 1)
-		return { failure: { field: seat[0]!, problem: "needs both 'agent' and 'session' to name the owning seat" } };
+	// A session alone names no owner; an agent alone is the shell-made record (no single omp session to name), SCRATCHOWNER1.
+	if (seat.length === 1 && seen.session !== undefined)
+		return { failure: { field: "session", problem: "needs 'agent' to name the owning seat" } };
 	const binned = BIN_FIELDS.filter(field => seen[field] !== undefined);
 	const budgeted = BUDGET_FIELDS.filter(field => seen[field] !== undefined);
 	const base = (fields: readonly string[]): boolean => fields.every(field => seen[field] !== undefined) &&
@@ -195,8 +196,8 @@ function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 	}
 	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!))
 		return { failure: { field: "pid", problem: `is '${seen.pid}', want 1-6 digits with no leading zero` } };
-	if (seat.length === 2 && (!AGENT_PATTERN.test(seen.agent!) || !SESSION_PATTERN.test(seen.session!))) {
-		const bad = !AGENT_PATTERN.test(seen.agent!) ? "agent" : "session";
+	if ((seen.agent !== undefined && !AGENT_PATTERN.test(seen.agent)) || (seen.session !== undefined && !SESSION_PATTERN.test(seen.session))) {
+		const bad = seen.agent !== undefined && !AGENT_PATTERN.test(seen.agent) ? "agent" : "session";
 		return { failure: { field: bad, problem: `is '${seen[bad]}', want 1-64 chars of A-Za-z0-9._-` } };
 	}
 	const createdAt = seen.created_at ?? seen.created!;
@@ -1309,7 +1310,7 @@ function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | n
 	let errorCode: string | null = null;
 	try {
 		if (deps.remove) deps.remove(path);
-		else rmSync(path, { recursive: true, force: true });
+		else removeTreeRetrying(path);
 	} catch (error) {
 		errorCode = (error as NodeJS.ErrnoException).code ?? null;
 	}
@@ -1432,6 +1433,44 @@ function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
 	if (owner.agent === null || owner.session === null) return false;
 	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
 	return seat.agent === owner.agent && seat.sessions.includes(owner.session);
+}
+
+/**
+ * SCRATCHOWNER1 (ompkit-ngq78): the creator was a short-lived shell (`export TMPDIR=$(omp-kit scratch new ...)`), so no
+ * later caller descends from it. The same agent may release once that creator is provably dead, and only from the
+ * session the record names when it names one. A live (or unprovable) creator still binds release to its own tree.
+ */
+function callerIsSuccessorAgent(owner: ScratchOwner, deps: InspectDeps): boolean {
+	if (owner.agent === null) return false;
+	const state = owner.processStart !== null ? probeOwner(owner.pid, owner.processStart, deps.liveness)
+		: deps.liveness.signalAlive(owner.pid) || deps.liveness.psVisible(owner.pid) ? "live" : "dead";
+	if (state !== "dead") return false;
+	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
+	return seat.agent === owner.agent && (owner.session === null || seat.sessions.includes(owner.session));
+}
+
+/**
+ * REAPRO1 (ompkit-nuvvw): give every real dir under `root` (root included) owner rwx so a read-only install tree
+ * (`releases/<v>` 0555) can be emptied. lstat only: symlinks are never followed, nothing outside `root` is touched.
+ */
+function grantOwnerWrite(root: string): void {
+	let stat;
+	try { stat = lstatSync(root); } catch { return; }
+	if (!stat.isDirectory()) return;
+	try { chmodSync(root, (stat.mode & 0o7777) | 0o700); } catch { return; }
+	let names: string[];
+	try { names = readdirSync(root); } catch { return; }
+	for (const name of names) grantOwnerWrite(join(root, name));
+}
+
+/** Remove a tree; on failure grant owner rwx on its real dirs and retry once. */
+function removeTreeRetrying(path: string): void {
+	try {
+		rmSync(path, { recursive: true, force: true });
+	} catch {
+		grantOwnerWrite(path);
+		rmSync(path, { recursive: true, force: true });
+	}
 }
 
 export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: string; reason: string; ownerPid: number | null;
@@ -1581,7 +1620,7 @@ ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin
 	if (clear !== true) return held(clear === null ? "now-held-lsof-unavailable" : "now-held-open-fds");
 	// SCRATCHRETIRE1 AC5: the owner record and the release marker go last. A delete that fails partway (a nested dir the
 	// owner cannot write) used to take both with the first files and leave an unowned remnant nobody could re-release.
-	const remove = deps.removeTree ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
+	const remove = deps.removeTree ?? removeTreeRetrying;
 	try {
 		for (const name of readdirSync(dir)) {
 			if (name === ".owner" || name === RELEASE_FILE) continue;
@@ -1625,7 +1664,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	// release to its owner, and the marker pins the owner text and inode.
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith("."))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
-	const seatOwned = callerHoldsSeat(owner, deps);
+	const seatOwned = callerHoldsSeat(owner, deps) || callerIsSuccessorAgent(owner, deps);
 	if (!seatOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run))
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
 	const binRefusal = releaseBinRefusal(dir, owner, opts, deps);
@@ -1825,10 +1864,10 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Unseated callers keep pid owners.
 	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
 	const fields: Record<string, string | number> = { pid: process.pid, process_start: start, label, repo, created_at: createdAt, argv0: argv };
-	if (seat?.agent && seat.main) {
-		if (!AGENT_PATTERN.test(seat.agent) || !SESSION_PATTERN.test(seat.main)) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
+	if (seat?.agent) {
+		if (!AGENT_PATTERN.test(seat.agent) || (seat.main && !SESSION_PATTERN.test(seat.main))) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
 		fields.agent = seat.agent;
-		fields.session = seat.main;
+		if (seat.main) fields.session = seat.main;
 	}
 	for (const [key, value] of [["bin", bins.bin], ["purpose", bins.purpose], ["bead", bins.bead], ["expires", bins.expires]] as const) {
 		if (value === undefined) continue;
@@ -2047,7 +2086,7 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 		return { ...verdict, dir: deleting, action: "SKIP", reason: "final-delete-recheck-failed" };
 	}
 	try {
-		rmSync(deleting, { recursive: true, force: true });
+		removeTreeRetrying(deleting);
 	} catch {
 		return { ...verdict, dir: deleting, action: "SKIP", reason: "delete-failed" };
 	}

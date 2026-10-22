@@ -108,24 +108,27 @@ test("an open file or missing lsof evidence keeps the marked dir and is not succ
 	expect(existsSync(join(blind.dir, ".omp-kit-release"))).toBe(true);
 });
 
-// SCRATCHRETIRE1 AC5: a delete that fails partway (a nested dir the owner cannot write) keeps the released dir, reports
-// non-success with the retained responsibility, and claims no reclaimed bytes; once the cause clears, the same release retires it.
+// SCRATCHRETIRE1 AC5: a delete that fails partway keeps the released dir, reports non-success with the retained
+// responsibility, and claims no reclaimed bytes; once the cause clears, the same release retires it. A read-only nested
+// dir is no longer a cause (REAPRO1 grants owner rwx and retries), so the failure is injected through the removeTree
+// seam: the real remover takes `top.txt`, then the nested `locked` dir refuses, on every OS.
 test("a partial delete failure keeps the marked dir, is not success, and claims no bytes; a later --now retires it", () => {
 	const stuck = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
 	writeFileSync(join(stuck.dir, "top.txt"), "first");
 	const locked = join(stuck.dir, "locked");
 	mkdirSync(locked);
 	writeFileSync(join(locked, "inner.txt"), "second");
-	chmodSync(locked, 0o500);
-	try {
-		const held = releaseScratch(stuck.dir, stuck.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true });
+	const failingOnLocked = (path: string): void => {
+		if (path === locked) throw Object.assign(new Error("EACCES: injected"), { code: "EACCES" });
+		rmSync(path, { recursive: true, force: true });
+	};
+	{
+		const held = releaseScratch(stuck.dir, stuck.home, deps({ lsofSnapshot: new Set(), removeTree: failingOnLocked }), { bin: "throwaway", now: true });
 		expect(held).toMatchObject({ ok: false, changed: true, reason: "now-held-delete-failed" });
 		expect(held.detail).toContain("still yours to retire");
 		expect(Object.keys(held).filter((key) => ["bytes", "reclaimedBytes", "freedBytes", "bytesReclaimed"].includes(key))).toEqual([]);
 		expect(existsSync(stuck.dir)).toBe(true);
 		expect(existsSync(join(stuck.dir, ".omp-kit-release"))).toBe(true);
-	} finally {
-		chmodSync(locked, 0o700);
 	}
 	expect(releaseScratch(stuck.dir, stuck.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true }))
 		.toMatchObject({ ok: true, reason: "owner-released-deleted" });

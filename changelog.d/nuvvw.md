@@ -1,0 +1,2 @@
+### Fixed
+- `scratch release --now` and the reaper's delete no longer stop at `now-held-delete-failed` / `delete-failed` on dirs that hold read-only subdirs (installs leave `releases/<v>` at 0555). After a dir passes every existing gate (owner, inode, lsof), a failed removal gives each real dir inside it owner rwx and retries once. Symlinks are never followed, and nothing outside the dir is touched.

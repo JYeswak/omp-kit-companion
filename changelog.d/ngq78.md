@@ -1,0 +1,2 @@
+### Fixed
+- `omp-kit scratch release` no longer refuses `caller-not-owner` for a dir made by the documented `export TMPDIR=$(omp-kit scratch new ...)` pattern. `scratch new` now records the caller's agent name even when no single omp session can be named. Release is allowed once the recorded creator is dead, the caller is the same agent, and, when the record names a session, the caller holds that session. A different agent is still refused, and so is any caller while a different live owner holds the dir.
