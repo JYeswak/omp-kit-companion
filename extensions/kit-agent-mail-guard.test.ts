@@ -1,7 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import kitAgentMailGuard, {
 	ACK_VOCABULARY,
@@ -15,8 +14,17 @@ import kitAgentMailGuard, {
 	type MailWakeHooks,
 } from "./kit-agent-mail-guard";
 import type { FlywheelContext, FlywheelExecOptions, FlywheelExecResult, FlywheelToolCallEvent, FlywheelToolCallResult } from "./kit-flywheel-guard";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
-const base = mkdtempSync(join(tmpdir(), "kit-agent-mail-guard-"));
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
+
+const base = ownedTmp("kit-agent-mail-guard").path;
 afterAll(() => {
 	rmSync(base, { recursive: true, force: true });
 });
@@ -189,7 +197,7 @@ test("reads: missing and empty toolCallIds do not exempt distinct fetches", asyn
 });
 
 function gitInit(parent: string): string {
-	const cwd = mkdtempSync(join(parent, "repo-"));
+	const cwd = freshDir(parent, "repo-");
 	const git = Bun.spawnSync(["git", "init", "--quiet", cwd]);
 	if (git.exitCode !== 0) throw new Error(git.stderr.toString());
 	return cwd;
@@ -269,7 +277,7 @@ test("identity: reply_message is held to the same name", async () => {
 
 test("identity: with no AGENT_NAME the Agent Mail pane identity names the seat; with neither, sending is refused", async () => {
 	const cwd = fleetRepo();
-	const home = mkdtempSync(join(base, "home-"));
+	const home = freshDir(base, "home-");
 	const dir = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(cwd).digest("hex").slice(0, 12));
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, "7"), JSON.stringify({ name: "RedCat" }));

@@ -1,12 +1,20 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FlywheelExecOptions, FlywheelExecResult } from "./kit-flywheel-guard";
 import { createMailWake, messageIdOf } from "./kit-mail-wake";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
-const base = mkdtempSync(join(tmpdir(), "kit-mail-wake-"));
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
+
+const base = ownedTmp("kit-mail-wake").path;
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 const REPO = "/abs/fleet/omp-kit";
@@ -14,7 +22,7 @@ interface Call { command: string; args: string[]; options?: FlywheelExecOptions 
 
 /** A fleet: omp-test tab with live blocks 5 (RusticPine, director) and 9 (JadeThrush); GreenRabbit is a background agent. */
 function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number } = {}) {
-	const home = mkdtempSync(join(base, "home-"));
+	const home = freshDir(base, "home-");
 	const ident = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(REPO).digest("hex").slice(0, 12));
 	mkdirSync(ident, { recursive: true });
 	writeFileSync(join(ident, "tern-5"), JSON.stringify({ name: "RusticPine" }));

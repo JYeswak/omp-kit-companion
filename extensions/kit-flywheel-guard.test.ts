@@ -1,14 +1,22 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { compactionRereadMessage, FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { checkNoWait } from "./kit-flywheel-guard";
 import { checkBgWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
-const base = mkdtempSync(join(tmpdir(), "kit-flywheel-guard-"));
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
+
+const base = ownedTmp("kit-flywheel-guard").path;
 
 afterAll(() => {
 	rmSync(base, { recursive: true, force: true });
@@ -16,7 +24,7 @@ afterAll(() => {
 
 
 function identityHome(project: string, paneKey: string, content: string): string {
-	const home = mkdtempSync(join(base, "home-"));
+	const home = freshDir(base, "home-");
 	const hash = createHash("sha1").update(project).digest("hex").slice(0, 12);
 	const dir = join(home, ".config", "agent-mail", "identity", hash);
 	mkdirSync(dir, { recursive: true });
@@ -47,7 +55,7 @@ function brTable(table: Record<string, FlywheelExecResult>): Responder {
 // --- COMPACTION_REREAD ---------------------------------------------------
 
 function stockRepo(parent = base): string {
-	const cwd = mkdtempSync(join(parent, "stock-repo-"));
+	const cwd = freshDir(parent, "stock-repo-");
 	const git = Bun.spawnSync(["git", "init", "--quiet", cwd]);
 	if (git.exitCode !== 0) throw new Error(git.stderr.toString());
 	return cwd;
@@ -107,7 +115,7 @@ test("stock compaction: a tracker-only repo still requires an owned bead result"
 });
 
 test("stock compaction: an ancestor tracker remains applicable across a nested git boundary", async () => {
-	const parent = mkdtempSync(join(base, "ancestor-tracker-"));
+	const parent = freshDir(base, "ancestor-tracker-");
 	mkdirSync(join(parent, ".beads"));
 	const cwd = stockRepo(parent);
 	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
@@ -124,7 +132,7 @@ test("stock compaction: an ancestor tracker remains applicable across a nested g
 });
 
 test("COMPACTION_REREAD: session_compact injects a reread of the nearest AGENTS.md and br show", async () => {
-	const root = mkdtempSync(join(base, "proj-"));
+	const root = freshDir(base, "proj-");
 	const repo = join(root, "repo");
 	const cwd = join(repo, "pkg", "deep");
 	mkdirSync(cwd, { recursive: true });
@@ -142,7 +150,7 @@ test("COMPACTION_REREAD: session_compact injects a reread of the nearest AGENTS.
 });
 
 test("COMPACTION_REREAD: mid-run compaction injects at the next step boundary and names the pane identity", async () => {
-	const cwd = mkdtempSync(join(base, "proj-"));
+	const cwd = freshDir(base, "proj-");
 	writeFileSync(join(cwd, "AGENTS.md"), "rules\n");
 	const home = identityHome(cwd, "41", "{\"name\":\"AmberHeron\"}");
 	mkdirSync(join(cwd, ".beads"));
@@ -154,7 +162,7 @@ test("COMPACTION_REREAD: mid-run compaction injects at the next step boundary an
 });
 
 test("COMPACTION_REREAD negative: an ordinary turn emits nothing", async () => {
-	const cwd = mkdtempSync(join(base, "proj-"));
+	const cwd = freshDir(base, "proj-");
 	writeFileSync(join(cwd, "AGENTS.md"), "rules\n");
 	const h = await createFlywheelHost(base);
 	const c = h.ctx(cwd);
@@ -167,7 +175,7 @@ test("COMPACTION_REREAD negative: an ordinary turn emits nothing", async () => {
 // --- SELF_CLOSE_REFUSED --------------------------------------------------
 
 test("SELF_CLOSE_REFUSED: closing a bead assigned to the caller's pane identity is blocked", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const tracker = join(project, "tracker");
 	mkdirSync(tracker);
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
@@ -179,7 +187,7 @@ test("SELF_CLOSE_REFUSED: closing a bead assigned to the caller's pane identity 
 });
 
 test("SELF_CLOSE_REFUSED: bd close, composite pane key and plain-text identity file are honoured", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "fleet-0-3", "GreenLynx\n");
 	const respond: Responder = call => call.command === "tmux"
 		? { stdout: "fleet:0:3\n", stderr: "", code: 0 }
@@ -190,7 +198,7 @@ test("SELF_CLOSE_REFUSED: bd close, composite pane key and plain-text identity f
 });
 
 test("SELF_CLOSE_REFUSED: --actor, BR_ACTOR and BR_AGENT_NAME identify the caller", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const table = brTable({ "kit-3": bead("kit-3", "RedOwl") });
 	const flag = await createFlywheelHost(base, { respond: table });
 	expect((await toolCall(flag, project, "br --actor RedOwl close kit-3"))?.block).toBe(true);
@@ -201,7 +209,7 @@ test("SELF_CLOSE_REFUSED: --actor, BR_ACTOR and BR_AGENT_NAME identify the calle
 });
 
 test("SELF_CLOSE_REFUSED negative: a different closer is allowed silently", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"Director\"}");
 	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({ "kit-1": bead("kit-1", "BlueFox") }) });
 	expect(await toolCall(h, project, "br close kit-1 --reason \"bun test extensions/kit-flywheel-guard.test.ts -> 26 passed\"")).toBeUndefined();
@@ -209,7 +217,7 @@ test("SELF_CLOSE_REFUSED negative: a different closer is allowed silently", asyn
 });
 
 test("SELF_CLOSE_REFUSED negative: an unassigned bead is allowed with a warning", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
 	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({ "kit-4": bead("kit-4", null) }) });
 	const result = await toolCall(h, project, "br close kit-4");
@@ -219,7 +227,7 @@ test("SELF_CLOSE_REFUSED negative: an unassigned bead is allowed with a warning"
 });
 
 test("SELF_CLOSE_REFUSED: a close whose authorship probe fails is refused, never skipped (ompkit-xa5s.13)", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
 	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({}) });
 	const result = await toolCall(h, project, "br close kit-404 --reason \"bun test extensions/kit-flywheel-guard.test.ts -> 26 passed\"");
@@ -235,7 +243,7 @@ test("SELF_CLOSE_REFUSED: a close whose authorship probe fails is refused, never
 });
 
 test("SELF_CLOSE_REFUSED: garbled-probe close is refused with the s49q shape, exit 3 Issue not found (ompkit-xa5s.13)", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
 	// Planted negative replaying the jev s49q close sequence: the guard's own
 	// `br show` probe ran with mangled args, exited 3, and the old code let
@@ -257,7 +265,7 @@ test("SELF_CLOSE_REFUSED: garbled-probe close is refused with the s49q shape, ex
 });
 
 test("SELF_CLOSE_REFUSED negative: legit non-author close of s49q by CobaltCoyote still passes (ompkit-xa5s.13)", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"CobaltCoyote\"}");
 	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({ "s49q": bead("s49q", "BlueFox") }) });
 	expect(await toolCall(h, project, "br close s49q --reason \"bun test extensions/kit-flywheel-guard.test.ts -> pass\"")).toBeUndefined();
@@ -265,7 +273,7 @@ test("SELF_CLOSE_REFUSED negative: legit non-author close of s49q by CobaltCoyot
 });
 
 test("SELF_CLOSE_REFUSED negative: unknown caller identity is allowed with a warning", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { respond: brTable({ "kit-1": bead("kit-1", "BlueFox") }) });
 	const result = await toolCall(h, project, "br close kit-1");
 	expect(result?.block).toBeUndefined();
@@ -273,7 +281,7 @@ test("SELF_CLOSE_REFUSED negative: unknown caller identity is allowed with a war
 });
 
 test("SELF_CLOSE_REFUSED negative: close text that is not a br/bd close never consults br", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "BlueFox" }, respond: brTable({ "kit-1": bead("kit-1", "BlueFox") }) });
 	for (const command of [
 		"echo 'br close kit-1'",
@@ -304,7 +312,7 @@ test("REDIRECTION_IDS: shell redirections never become bead ids (ompkit-xa5s.8)"
 });
 
 test("SELF_CLOSE_REFUSED with redirection: assignee match still blocks, lookup uses the clean id", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
 	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({ "kit-9": bead("kit-9", "BlueFox") }) });
 	const result = await toolCall(h, project, "br close kit-9 --reason ok 2>&1 | tail -3");
@@ -389,7 +397,7 @@ test("BGDEADLINE1: unknown and service refusals carry job and deadline", async (
 
 /** Compacted host whose nearest AGENTS.md is `cwd/AGENTS.md`; identity TestWorker. */
 async function rereadHost(extra: string[] = [], identity: string | null = "TestWorker", respond?: Responder): Promise<{ h: FakeHost; cwd: string; agents: string }> {
-	const cwd = mkdtempSync(join(base, "reread-"));
+	const cwd = freshDir(base, "reread-");
 	const agents = join(cwd, "AGENTS.md");
 	writeFileSync(agents, "rules\n");
 	for (const name of extra) writeFileSync(join(cwd, name), "x\n");
@@ -406,7 +414,7 @@ async function callAs(h: FakeHost, cwd: string, id: string, toolName: string, in
 }
 
 test("GOAL_END_REFUSED: a fleet seat cannot drop or complete its own goal (J-2026-10-18-44)", async () => {
-	const cwd = mkdtempSync(join(base, "goal-"));
+	const cwd = freshDir(base, "goal-");
 	for (const env of [{ AGENT_NAME: "CopperTrout" }, { BR_ACTOR: "CopperTrout" }]) {
 		const h = await createFlywheelHost(base, { env });
 		for (const op of ["drop", "complete"]) {
@@ -419,7 +427,7 @@ test("GOAL_END_REFUSED: a fleet seat cannot drop or complete its own goal (J-202
 });
 
 test("GOAL_END_REFUSED negatives: get, create and resume pass; a session with no fleet identity may drop", async () => {
-	const cwd = mkdtempSync(join(base, "goal-"));
+	const cwd = freshDir(base, "goal-");
 	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
 	for (const input of [{ op: "get" }, { op: "create", objective: "x" }, { op: "resume" }]) {
 		expect(await callAs(seat, cwd, `g-${input.op}`, "goal", input)).toEqual([undefined]);
@@ -430,7 +438,7 @@ test("GOAL_END_REFUSED negatives: get, create and resume pass; a session with no
 });
 
 test("GOAL_SEND_REFUSED: a fleet seat cannot type a /goal line into any pane, bare or wrapped (J-2026-10-18-45)", async () => {
-	const cwd = mkdtempSync(join(base, "goal-"));
+	const cwd = freshDir(base, "goal-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "RusticPine" } });
 	for (const command of [
 		"tern send 5 paste '/goal set Do whatever I like'",
@@ -447,7 +455,7 @@ test("GOAL_SEND_REFUSED: a fleet seat cannot type a /goal line into any pane, ba
 });
 
 test("GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identity-less sessions pass", async () => {
-	const cwd = mkdtempSync(join(base, "goal-"));
+	const cwd = freshDir(base, "goal-");
 	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "RusticPine" } });
 	for (const command of [
 		"python3 ~/.claude/skills/omp-kit-orchestration/scripts/arm_seat.py --session omp-test --block 4117 --version 18 --set --apply",
@@ -463,7 +471,7 @@ test("GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identi
 });
 
 test("NO_WAIT_REFUSED: a fleet seat's idle_wait.py and sleep >= 30 s are refused, bare chained wrapped or sh -c (J-2026-10-18-43)", async () => {
-	const cwd = mkdtempSync(join(base, "nowait-"));
+	const cwd = freshDir(base, "nowait-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
 	for (const command of [
 		"python3 scripts/idle_wait.py --minutes 10",
@@ -493,7 +501,7 @@ test("NO_WAIT_REFUSED: a fleet seat's idle_wait.py and sleep >= 30 s are refused
 });
 
 test("NO_WAIT_REFUSED negatives: short sleeps, mere mentions and identity-less sessions pass", async () => {
-	const cwd = mkdtempSync(join(base, "nowait-"));
+	const cwd = freshDir(base, "nowait-");
 	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
 	for (const command of [
 		"sleep 2",
@@ -600,9 +608,9 @@ test("REREAD: a failed read never clears the flag", async () => {
 });
 
 test("REREAD: reading the wrong AGENTS.md never clears the flag", async () => {
-	const outer = mkdtempSync(join(base, "reread-outer-"));
+	const outer = freshDir(base, "reread-outer-");
 	writeFileSync(join(outer, "AGENTS.md"), "outer\n");
-	const cwd = mkdtempSync(join(base, "reread-inner-"));
+	const cwd = freshDir(base, "reread-inner-");
 	const agents = join(cwd, "AGENTS.md");
 	writeFileSync(agents, "inner\n");
 	mkdirSync(join(cwd, ".beads"));
@@ -799,7 +807,7 @@ test("REREAD: read and grep stay allowed while pending", async () => {
 });
 
 test("REREAD: without compaction nothing is blocked", async () => {
-	const cwd = mkdtempSync(join(base, "reread-plain-"));
+	const cwd = freshDir(base, "reread-plain-");
 	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestWorker" }, respond: brTable({ "k-1": bead("k-1", null) }) });
 	const c = h.ctx(cwd);
 	expect(await h.emit("tool_call", { toolCallId: "e1", toolName: "edit", input: { path: "f" } }, c)).toEqual([undefined]);
@@ -849,7 +857,7 @@ function blockResponder(fixture: BlockFixture, fail: "show" | "dep" | null = nul
 }
 
 async function blockCall(fixture: BlockFixture, command: string, fail: "show" | "dep" | null = null): Promise<FlywheelToolCallResult | undefined> {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { respond: blockResponder(fixture, fail) });
 	return toolCall(h, project, command);
 }
@@ -897,7 +905,7 @@ test("BLOCK_REFUSED: other status updates, other verbs and unreadable beads", as
 });
 
 test("BLOCK_REFUSED AC5: no br binary or no tracker stands the check down; a live tracker that cannot answer stays refused", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const stock = async (respond: Responder) => toolCall(await createFlywheelHost(base, { respond }), project, SET_BLOCKED);
 	const tmux = { stdout: "", stderr: "no server", code: 1 };
 	const noBr: Responder = call => {
@@ -973,7 +981,7 @@ function releaseResponder(fixture: ReleaseFixture): Responder {
 }
 
 async function closeCall(fixture: ReleaseFixture, command: string): Promise<FlywheelToolCallResult | undefined> {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { respond: releaseResponder(fixture) });
 	return toolCall(h, project, command);
 }
@@ -1008,7 +1016,7 @@ test("BLOCK_RELEASE_REQUIRED: another open blocker, a non-blocked dependent or a
 });
 
 test("BLOCK_RELEASE_REQUIRED AC5: outside a tracker a close is never a stranding refusal", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { respond: call => {
 		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
 		return { stdout: JSON.stringify({ error: { code: "NOT_INITIALIZED", message: "Beads not initialized" } }), stderr: "", code: 2 };
@@ -1137,7 +1145,7 @@ test("REREAD: a failed --json show is never confirmed, and a by-path br is confi
 
 /** Repo B (a tracker) and a responder: `br show` answers only in B (by cwd or B's --db); `br list` answers per tracker. */
 function repoB(show: FlywheelExecResult, listInB: FlywheelExecResult = { stdout: "[]", stderr: "", code: 0 }): { b: string; respond: Responder } {
-	const b = mkdtempSync(join(base, "repo-b-"));
+	const b = freshDir(base, "repo-b-");
 	mkdirSync(join(b, ".beads"));
 	const inB = (call: { args: string[]; options?: { cwd?: string } }) => call.options?.cwd === b || call.args.includes(join(b, ".beads", "beads.db"));
 	const respond: Responder = call => {
@@ -1189,7 +1197,7 @@ test("REREADSCOPE1: an unresolvable cd and someone else's bead in repo B never c
 
 /** A host whose session touched repo B (a successful br call there) before compacting in A. */
 async function touchedB(respond: Responder, b: string): Promise<{ h: FakeHost; cwd: string; agents: string }> {
-	const cwd = mkdtempSync(join(base, "reread-a-"));
+	const cwd = freshDir(base, "reread-a-");
 	const agents = join(cwd, "AGENTS.md");
 	writeFileSync(agents, "rules\n");
 	mkdirSync(join(cwd, ".beads"));
@@ -1238,7 +1246,7 @@ function scratchResponder(mine: FlywheelExecResult, beads: Record<string, Flywhe
 const OWED = [{ dir: "/r/var/agent-tmp/probe.1", state: "unreleased", bin: "unbinned" }, { dir: "/r/var/agent-tmp/hold.2", state: "hold-expired", bin: "hold" }];
 
 test("SCRATCH_DISPOSAL_REFUSED: moving a bead to in_review with unreleased dirs is refused, naming each dir", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: scratchResponder(mineAnswer(OWED)) });
 	const result = await toolCall(h, project, "br update kit-1 --status in_review --actor BlueFox");
 	expect(result?.block).toBe(true);
@@ -1252,7 +1260,7 @@ test("SCRATCH_DISPOSAL_REFUSED: moving a bead to in_review with unreleased dirs 
 });
 
 test("SCRATCH_DISPOSAL_REFUSED: a verifier's close of another seat's bead is refused while the verifier owes dirs, logged as close", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "Verifier" },
 		respond: scratchResponder(mineAnswer(OWED.slice(0, 1)), { "kit-2": bead("kit-2", "BlueFox") }) });
 	const result = await toolCall(h, project, "br close kit-2 --reason \"replayed\"");
@@ -1262,7 +1270,7 @@ test("SCRATCH_DISPOSAL_REFUSED: a verifier's close of another seat's bead is ref
 });
 
 test("SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unusable answer yields no advice", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const unusable: FlywheelExecResult[] = [
 		mineAnswer([]),
 		mineAnswer([{ dir: "/r/var/agent-tmp/omp.7", label: "omp", state: "unreleased", bin: "throwaway" }]),
@@ -1281,7 +1289,7 @@ test("SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unu
 });
 
 test("SCRATCH_DISPOSAL_REFUSED: a thrown exec never blocks (fail-open) and a long list is refused with a count", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const throwing = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: call => { if (call.command === "omp-kit") throw new Error("spawn failed"); return { stdout: "", code: 127 }; } });
 	expect(await toolCall(throwing, project, "br update kit-1 --status in_review --actor BlueFox")).toBeUndefined();
 	const many = Array.from({ length: 8 }, (_, index) => ({ dir: `/r/var/agent-tmp/d.${index}`, state: "unreleased", bin: "unbinned" }));
@@ -1295,7 +1303,7 @@ test("SCRATCH_DISPOSAL_REFUSED: a thrown exec never blocks (fail-open) and a lon
 });
 
 test("SCRATCH_OWED: other tracker commands and refused closes never ask omp-kit", async () => {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
 	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: scratchResponder(mineAnswer(OWED), { "kit-1": bead("kit-1", "BlueFox") }) });
 	const refused = await toolCall(h, project, "br close kit-1 --reason \"x\"");
@@ -1337,7 +1345,7 @@ function drainResponder(shows: Record<string, DrainRow>, lists: Record<string, D
 }
 
 async function drainCall(shows: Record<string, DrainRow>, lists: Record<string, DrainRow[]>, command: string, actor = "Holder"): Promise<FlywheelToolCallResult | undefined> {
-	const project = mkdtempSync(join(base, "proj-"));
+	const project = freshDir(base, "proj-");
 	const h = await createFlywheelHost(base, { env: { BR_ACTOR: actor }, respond: drainResponder(shows, lists) });
 	return toolCall(h, project, command);
 }
@@ -1418,7 +1426,7 @@ test("DRAIN1 custody: repairs on ownerless or open beads pass", async () => {
 // --- BGWAIT1 (ompkit-fp72.19.1.24): seats never block their turn on their own background work ---
 
 test("WAIT_REFUSED: a fleet seat's wait tool call is refused and names the next action (BGWAIT1)", async () => {
-	const cwd = mkdtempSync(join(base, "bgwait-"));
+	const cwd = freshDir(base, "bgwait-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
 	for (const input of [{}, { timeout: 120000 }]) {
 		const [result] = await callAs(h, cwd, "w", "wait", input);
@@ -1430,7 +1438,7 @@ test("WAIT_REFUSED: a fleet seat's wait tool call is refused and names the next 
 });
 
 test("WAIT_REFUSED: a fleet seat's sleep-poll loops, chained sleeps and time.sleep idles are refused (BGWAIT1)", async () => {
-	const cwd = mkdtempSync(join(base, "bgwait-"));
+	const cwd = freshDir(base, "bgwait-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
 	for (const command of [
 		"for i in $(seq 1 100); do [ -f rc ] && break; sleep 10; done",
@@ -1453,7 +1461,7 @@ test("WAIT_REFUSED: a fleet seat's sleep-poll loops, chained sleeps and time.sle
 });
 
 test("WAIT_REFUSED negatives: async jobs, short single sleeps and identity-less sessions pass (BGWAIT1)", async () => {
-	const cwd = mkdtempSync(join(base, "bgwait-"));
+	const cwd = freshDir(base, "bgwait-");
 	const seat = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
 	for (const input of [
 		{ command: "sleep 2" },

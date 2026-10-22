@@ -1,6 +1,5 @@
 import { afterAll, beforeEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
 	CC_BEAD_RE,
@@ -11,8 +10,17 @@ import {
 	type FlywheelToolCallResult,
 } from "./kit-flywheel-guard";
 import { createFlywheelHost, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
-const base = mkdtempSync(join(tmpdir(), "kit-guard-receipt-"));
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
+
+const base = ownedTmp("kit-guard-receipt").path;
 const savedCcState = process.env.CC_STATE;
 
 afterAll(() => {
@@ -22,7 +30,7 @@ afterAll(() => {
 });
 
 function stockRepo(): string {
-	const cwd = mkdtempSync(join(base, "repo-"));
+	const cwd = freshDir(base, "repo-");
 	const git = Bun.spawnSync(["git", "init", "--quiet", cwd]);
 	if (git.exitCode !== 0) throw new Error(git.stderr.toString());
 	return cwd;
@@ -47,7 +55,7 @@ function respond(table: Record<string, FlywheelExecResult>, cwd: string): Respon
 }
 
 function spoolState(): string {
-	const state = mkdtempSync(join(base, "cc-"));
+	const state = freshDir(base, "cc-");
 	mkdirSync(join(state, "spool"), { recursive: true });
 	process.env.CC_STATE = state;
 	delete process.env.OMP_KIT_CC;
@@ -226,7 +234,7 @@ test("unknown caller: allowed with a warning, receipt carries null actor and ver
 
 test("inert spool: no fleet state means no receipt and no warning", async () => {
 	const cwd = stockRepo();
-	const empty = mkdtempSync(join(base, "nostate-"));
+	const empty = freshDir(base, "nostate-");
 	process.env.CC_STATE = empty;
 	const h = await createFlywheelHost(base, { respond: respond({ "rc-7": bead("rc-7", "open", "BlueFox") }, cwd) });
 	const verdict = await closeCall(h, cwd, "r7", "br --actor Verifier close rc-7 --reason ok");

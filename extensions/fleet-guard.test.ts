@@ -1,14 +1,25 @@
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import fleetGuard, { handleToolCall, type GuardDeps } from "./fleet-guard.ts";
 import { liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
 import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import type { FleetGuardBlock, FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 import { parseOwnerFile } from "../src/scratch.ts";
-// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
+import { ownedTmp } from "../src/kitlib/tmp.ts";
+
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
+// Fresh clones have no var/agent-tmp; the owned fixture root below requires its parent to exist.
 mkdirSync(join(import.meta.dir, "../var/agent-tmp"), { recursive: true });
+const fleetOwned = ownedTmp("fleet-guard-test", { root: join(import.meta.dir, "../var/agent-tmp") });
+const fleetBase = fleetOwned.path;
+afterAll(() => fleetOwned.cleanup());
 
 const roots: string[] = [];
 afterEach(() => {
@@ -50,7 +61,7 @@ function fakePi(): FakePi {
 }
 
 function fixture(fleet = true): { cwd: string; pid: number } {
-	const cwd = mkdtempSync(join(import.meta.dir, "../var/agent-tmp", "fleet-entry-"));
+	const cwd = freshDir(fleetBase, "fleet-entry-");
 	roots.push(cwd);
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
@@ -142,7 +153,7 @@ test("SCRATCHBIN1: the session that recorded the seat releases its dir when it e
 });
 
 test("SCRATCHBIN1 planted negative: a respawn's session end leaves the dir for the successor", async () => {
-	const state = mkdtempSync(join(import.meta.dir, "../var/agent-tmp", "fleet-intent-"));
+	const state = freshDir(fleetBase, "fleet-intent-");
 	roots.push(state);
 	const released: string[] = [];
 	const pi = fakePi();
@@ -157,7 +168,7 @@ test("SCRATCHBIN1 planted negative: a respawn's session end leaves the dir for t
 });
 
 test("SCRATCHBIN1: with the real release, the ended session's dir carries the throwaway release marker and its owner is untouched", async () => {
-	const home = mkdtempSync(join(import.meta.dir, "../var/agent-tmp", "fleet-home-"));
+	const home = freshDir(fleetBase, "fleet-home-");
 	roots.push(home);
 	const project = join(home, "Developer", "proj");
 	mkdirSync(join(project, ".omp"), { recursive: true });
@@ -310,9 +321,8 @@ test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) pe
 			expect(result?.block === true).toBe(false);
 		}
 	};
-	const temp = mkdtempSync(join(tmpdir(), "stock-write-"));
+	const temp = ownedTmp("stock-write").path;
 	roots.push(temp);
-	writeFileSync(join(temp, ".owner"), `pid=${process.pid}\nlabel=stock-write\nrepo=${join(import.meta.dir, "..")}\ncreated=${new Date().toISOString()}\n`);
 	const target = join(temp, "x");
 	await admit({ toolName: "write", input: { path: target, content: "stock temporary output\n" } });
 	writeFileSync(target, "stock temporary output\n");

@@ -1,14 +1,22 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import kitComposerState, { composerRecordPath, type ComposerStateContext, type ComposerStateRecord } from "./kit-composer-state";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
-const base = realpathSync(mkdtempSync(join(tmpdir(), "kit-composer-state-")));
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
+
+const base = realpathSync(ownedTmp("kit-composer-state").path);
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 function repo(optedIn: boolean): string {
-	const cwd = mkdtempSync(join(base, "repo-"));
+	const cwd = freshDir(base, "repo-");
 	const git = Bun.spawnSync(["git", "init", "--quiet", cwd]);
 	if (git.exitCode !== 0) throw new Error(git.stderr.toString());
 	mkdirSync(join(cwd, ".omp"));
@@ -18,7 +26,7 @@ function repo(optedIn: boolean): string {
 
 async function seat(opts: { optedIn?: boolean; mode?: string } = {}) {
 	const handlers = new Map<string, ((event: never, ctx: ComposerStateContext) => unknown)[]>();
-	const home = mkdtempSync(join(base, "home-"));
+	const home = freshDir(base, "home-");
 	const sessionFile = join(home, "session.jsonl");
 	writeFileSync(sessionFile, "");
 	const state = { text: "", intervals: 0, cleared: 0 };

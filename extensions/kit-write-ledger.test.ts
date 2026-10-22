@@ -4,8 +4,7 @@
  */
 import { afterAll, beforeEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import kitSaveGuard, { omitPeerLedgerPaths, type SaveGuardApi, type SaveGuardContext } from "./kit-save-guard";
 import {
@@ -18,10 +17,19 @@ import {
 	resolveLedgerAgent,
 	type WriteLedgerEntry,
 } from "./kit-write-ledger";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
+
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
 
 // realpath: macOS /var -> /private/var would otherwise desync the guard's
 // lexical cwd keys from git's physical toplevel and silently skip attribution.
-const base = realpathSync(mkdtempSync(join(tmpdir(), "kit-write-ledger-")));
+const base = realpathSync(ownedTmp("kit-write-ledger").path);
 const savedEnv = { ...process.env };
 
 afterAll(() => {
@@ -52,7 +60,7 @@ function sh(cwd: string, ...args: string[]): void {
 }
 
 function fleetRepo(): string {
-	const root = mkdtempSync(join(base, "repo-"));
+	const root = freshDir(base, "repo-");
 	sh(root, "init");
 	mkdirSync(join(root, ".omp"));
 	writeFileSync(join(root, ".omp", "fleet.json"), '{"enabled":true}\n');

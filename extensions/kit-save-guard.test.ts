@@ -1,12 +1,20 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import kitSaveGuard, { type SaveGuardApi, type SaveGuardContext } from "./kit-save-guard";
 import { check as checkFleetGit } from "../src/fleet-guard/git";
 import { isMutatingCall } from "./kit-flywheel-guard";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 
-const base = mkdtempSync(join(tmpdir(), "kit-save-guard-"));
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
+
+const base = ownedTmp("kit-save-guard").path;
 
 afterAll(() => {
 	rmSync(base, { recursive: true, force: true });
@@ -22,7 +30,7 @@ function sh(cwd: string, ...args: string[]): { code: number; stdout: string } {
 
 /** Throwaway fleet repo; opt-in is real policy, and remote is a local bare upstream. */
 function repo(opts: { remote?: boolean; fleet?: boolean } = {}): string {
-	const root = mkdtempSync(join(base, "repo-"));
+	const root = freshDir(base, "repo-");
 	sh(root, "init");
 	if (opts.fleet !== false) {
 		mkdirSync(join(root, ".omp"));
@@ -31,7 +39,7 @@ function repo(opts: { remote?: boolean; fleet?: boolean } = {}): string {
 	}
 	sh(root, "commit", "--allow-empty", "-m", "init [test]");
 	if (opts.remote) {
-		const bare = mkdtempSync(join(base, "bare-"));
+		const bare = freshDir(base, "bare-");
 		sh(bare, "init", "--bare");
 		sh(root, "remote", "add", "origin", bare);
 		sh(root, "push", "-u", "origin", "main");
@@ -185,7 +193,7 @@ test("stock absent and explicit-off policies allow stops without any local fleet
 
 test("a nested stock Git repository does not inherit the containing fleet policy", async () => {
 	const parent = repo();
-	const nested = mkdtempSync(join(parent, "stock-"));
+	const nested = freshDir(parent, "stock-");
 	sh(nested, "init");
 	const fake = fakePi(nested);
 	const commands: string[] = [];
@@ -626,7 +634,7 @@ test("an unreported foreign write is omitted instead of authorizing a whole-file
 /** Commit `files` on top of origin's `ref` from a separate clone, push it, and fetch it into `root`. */
 function publishFromClone(root: string, files: Record<string, string | null>, label: string, ref = "main"): string {
 	const bare = sh(root, "remote", "get-url", "origin").stdout.trim();
-	const clone = mkdtempSync(join(base, `clone-${label}-`));
+	const clone = freshDir(base, `clone-${label}-`);
 	sh(clone, "clone", "--quiet", bare, ".");
 	for (const [relativePath, contents] of Object.entries(files)) {
 		if (contents === null) rmSync(join(clone, relativePath));
@@ -1334,7 +1342,7 @@ test("tmpdir repos attribute identically under /var and /private/var spellings",
 
 test("tmpdir negative: writes outside the repo still do not attribute", async () => {
 	const root = repo({ remote: true });
-	const outside = mkdtempSync(join(base, "outside-"));
+	const outside = freshDir(base, "outside-");
 	const fake = scratchFake(root, { code: 0, stdout: mineAnswer(0, []) });
 	await kitSaveGuard(fake.pi);
 	await startSession(fake);

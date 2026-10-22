@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import kitGuardOptIn, { CONFIG_REL_PATH, optInState, PROJECT_COPY_REL_PATH } from "./kit-guard-optin";
+import { cleanupAllOwnedTmp, ownedTmp } from "../src/kitlib/tmp.ts";
 
 type Handler = (...args: unknown[]) => unknown;
 
@@ -20,7 +20,7 @@ function fakePi() {
 
 /** A throwaway git root with optional opt-in marker and project-local guard copy. */
 function repo(opts: { config?: boolean; projectCopy?: boolean } = {}): string {
-	const root = mkdtempSync(join(tmpdir(), "kit-guard-optin-"));
+	const root = ownedTmp("kit-guard-optin").path;
 	mkdirSync(join(root, ".git"));
 	mkdirSync(join(root, ".omp"));
 	if (opts.config) writeFileSync(join(root, CONFIG_REL_PATH), "{}\n");
@@ -32,6 +32,7 @@ const startCwd = process.cwd();
 const startSrc = process.env.KIT_GUARD_SRC;
 afterEach(() => {
 	process.chdir(startCwd);
+	cleanupAllOwnedTmp();
 	if (startSrc === undefined) delete process.env.KIT_GUARD_SRC;
 	else process.env.KIT_GUARD_SRC = startSrc;
 });

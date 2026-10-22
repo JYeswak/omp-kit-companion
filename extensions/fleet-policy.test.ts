@@ -1,16 +1,25 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fleetPolicyState } from "./fleet-policy";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
+
+let freshSeq = 0;
+/** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
+function freshDir(parent: string, prefix: string): string {
+	const dir = join(parent, `${prefix}${process.pid}-${++freshSeq}`);
+	mkdirSync(dir);
+	return dir;
+}
 
 const repository = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const helperPath = fileURLToPath(new URL("./fleet-policy.ts", import.meta.url));
 const scratch = join(repository, "var", "agent-tmp");
 mkdirSync(scratch, { recursive: true });
-const base = mkdtempSync(join(scratch, "fleet-policy-test-"));
-writeFileSync(join(base, ".owner"), `pid=${process.pid}\nlabel=fleet-policy-test\nrepo=${repository}\ncreated=${new Date().toISOString()}\n`);
-afterAll(() => rmSync(base, { recursive: true, force: true }));
+const owned = ownedTmp("fleet-policy-test", { root: scratch });
+const base = owned.path;
+afterAll(() => owned.cleanup());
 
 function git(root: string, ...args: string[]): void {
 	const env = { ...process.env };
@@ -24,7 +33,7 @@ function git(root: string, ...args: string[]): void {
 }
 
 function repo(parent = base): string {
-	const root = mkdtempSync(join(parent, "repo-"));
+	const root = freshDir(parent, "repo-");
 	git(root, "init");
 	return root;
 }
@@ -39,7 +48,7 @@ test("stock policies need no Git or new files; explicit opt-in without Git is un
 		const root = repo();
 		if (enabled !== undefined) policy(root, JSON.stringify({ enabled }));
 		const before = readdirSync(root, { recursive: true }).sort();
-		const noTools = mkdtempSync(join(base, "no-tools-"));
+		const noTools = freshDir(base, "no-tools-");
 		const code = `import { fleetPolicyState } from ${JSON.stringify(helperPath)}; console.log(JSON.stringify(await fleetPolicyState(process.argv[1])));`;
 		const child = Bun.spawnSync([process.execPath, "-e", code, root], {
 			env: { ...process.env, PATH: noTools }, stdout: "pipe", stderr: "pipe", timeout: 3000,
@@ -67,7 +76,7 @@ test("only a real nearest repository with explicit true enables fleet policy", a
 test("a fake nested Git boundary cannot activate or inherit fleet policy", async () => {
 	const root = repo();
 	policy(root, '{"enabled":true}');
-	const fake = mkdtempSync(join(root, "not-a-repo-"));
+	const fake = freshDir(root, "not-a-repo-");
 	mkdirSync(join(fake, ".git"));
 	expect(await fleetPolicyState(fake)).toEqual({ kind: "off", root: fake });
 	policy(fake, '{"enabled":true}');
@@ -112,7 +121,7 @@ test("directory, symlink, dangling symlink and invalid parent policy paths are u
 		const target = join(root, "policy-target");
 		writeFileSync(target, '{"enabled":false}');
 		if (shape === "parent-link") {
-			const config = mkdtempSync(join(base, "config-"));
+			const config = freshDir(base, "config-");
 			writeFileSync(join(config, "fleet.json"), '{"enabled":false}');
 			symlinkSync(config, join(root, ".omp"));
 		} else if (shape === "parent-file") writeFileSync(join(root, ".omp"), "not a directory");

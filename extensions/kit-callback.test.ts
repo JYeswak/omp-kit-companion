@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runtimeTempRoot } from "../src/runtime.ts";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { dispatchAgentCallback, resetCallbackDedupe, type AgentEndEvent } from "./kit-callback.ts";
 
 const fixtures: string[] = [];
@@ -12,7 +13,7 @@ afterEach(() => {
 });
 
 function homeWithConfig(workerPanes: string[], coordinatorPane = "%54"): string {
-	const home = mkdtempSync(join(runtimeTempRoot(), "kit-callback-"));
+	const home = ownedTmp("kit-callback", { root: runtimeTempRoot() }).path;
 	fixtures.push(home);
 	const configDir = join(home, ".config", "omp-kit");
 	mkdirSync(configDir, { recursive: true });
@@ -46,7 +47,7 @@ test("agent_end sends IDLE with a bounded excerpt when no DONE line exists", asy
 test("agent_end is fail-silent for missing config, coordinator panes, and continuations", async () => {
 	const sent: string[] = [];
 	const send = (_session: string, _pane: string, text: string) => { sent.push(text); };
-	const missing = mkdtempSync(join(runtimeTempRoot(), "kit-callback-missing-"));
+	const missing = ownedTmp("kit-callback-missing", { root: runtimeTempRoot() }).path;
 	fixtures.push(missing);
 	expect(await dispatchAgentCallback(doneEvent("DONE x"), { home: missing, pane: "%37", send })).toBe(false);
 	const coordinator = homeWithConfig(["%54"], "%54");
