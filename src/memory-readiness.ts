@@ -92,6 +92,10 @@ const MEMORY_CONFIG_SOURCE_FINGERPRINTS = new Set([
 	// memory default off, no-op fallback and legacy false -> off unchanged. Agent-reviewed for omp-certify PR #90
 	// (ompkit-issue-pr-autopilot-w159).
 	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:6a4b300e8b14ceb406aed6dbd5d9d518183195744249fb054084e107b3b326a0",
+	// OMP 18.12.5/18.12.6 adds legacy memory migrations. Explicit memory.backend
+	// remains authoritative, but a legacy mnemosyne object is refused below;
+	// migrated provider.memoryModel remains an unverified model role.
+	"64c3de6e80b7dd24207024c2a4c3f075bc4bdfb4663f4633abbbff3d5e978b29:3eb39ad1b2ef2c84b06d79a24371d1fe053db064d86e6a36f5cb321148a8bc76:0d740c1ea27a5903d6e41d10f3582940d7496b11b3ebcf617b7ef47522e47771",
 ]);
 const MEMORY_CONFIG_SOURCE_FILES = [
 	"src/memory-backend/settings.ts",
@@ -394,6 +398,8 @@ export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promi
 		}
 	} else return unknown("Project-scoped effective settings were not inspected", "Provide the session project to inspect project overrides.");
 	const backend = setting(data, "memory", "backend");
+	if (backend === "mnemopi" && Object.hasOwn(data, "mnemosyne"))
+		return unknown("Legacy mnemosyne settings may be migrated into the effective Mnemopi config", "Inspect legacy mnemosyne settings before relying on the memory report.");
 	if (backend === undefined && setting(data, "memories", "enabled") !== undefined)
 		return unknown("Legacy memories.enabled requires OMP migration to resolve", "Inspect current memory.backend explicitly; do not migrate by reading settings.");
 	if (backend === undefined) return unknown("Backend unset; OMP defaults and overrides are not proven", "Inspect the installed OMP defaults and selected profile before relying on memory.");

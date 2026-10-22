@@ -179,6 +179,14 @@ test("malformed, unsupported and unsafe profile layers refuse an effective backe
 	writeFileSync(join(f.project, ".omp", "config.yml"), "memory: [oops\n");
 	expect((await f.inspect()).backend).toBe("UNVERIFIED");
 });
+test("legacy mnemosyne config refuses an effective Mnemopi claim before migration", async () => {
+	const f = fixture();
+	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemosyne:\n  dbPath: /outside/private.db\n  llmMode: none\n  noEmbeddings: true\n");
+	const report = await f.inspect();
+	expect(report.backend).toBe("UNVERIFIED");
+	expect(report.reason.toLowerCase()).toContain("legacy mnemosyne");
+	expect(JSON.stringify(report)).not.toContain("/outside/private.db");
+});
 
 test("custom store symlink and inaccessible store do not get dereferenced or certified", async () => {
 	const f = fixture();
