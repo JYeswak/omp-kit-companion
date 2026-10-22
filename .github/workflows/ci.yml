@@ -270,6 +270,7 @@ jobs:
           sh tests/cli/staged-readme.test.sh
           python3 tests/scripts/pysafe_test.py
           python3 tests/scripts/kitlib_run_test.py
+          python3 tests/scripts/kitlib_tmp_test.py
           python3 tests/scripts/pysafe_check_test.py
       - name: Fetch reviewed OMP memory source fixture (18.4.9)
         shell: bash
