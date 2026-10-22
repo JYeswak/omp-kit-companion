@@ -105,3 +105,38 @@ test("guard refuses an explicitly configured root with no matching project key",
 	expect(refused.exitCode, refused.stdout.toString()).not.toBe(0);
 	expect(refused.stderr.toString()).toContain("no Agent Mail archive matches this Git project");
 });
+
+// GUARDROOT1 (ompkit-2ayxn): an Agent Mail reinstall rewrote the companion's chain runner on 2026-10-06 and dropped
+// the omp-kit bootstrap that hands the resolved root to 50-agent-mail.py, which then checked its own default root,
+// matched no archive and allowed every commit. A chain run (no arguments) must refuse unless the root was handed off.
+test("chain run refuses when the runner did not hand the resolved root to its guard", () => {
+	const configured = git(["config", "--local", "--replace-all", "omp-kit.agent-mail-storage-root", liveStorageRoot]);
+	expect(configured.exitCode, configured.stderr.toString()).toBe(0);
+	const refused = Bun.spawnSync(["sh", gate], { cwd: fixture, env: baseEnv, stdout: "pipe", stderr: "pipe" });
+	expect(refused.exitCode, refused.stdout.toString()).not.toBe(0);
+	expect(refused.stderr.toString()).toContain("did not hand the resolved archive root");
+	expect(refused.stderr.toString()).toContain("install-pre-commit-storage-root-gate.sh");
+});
+
+test("chain run passes when the runner handed off the resolved root", () => {
+	const configured = git(["config", "--local", "--replace-all", "omp-kit.agent-mail-storage-root", liveStorageRoot]);
+	expect(configured.exitCode, configured.stderr.toString()).toBe(0);
+	const passed = Bun.spawnSync(["sh", gate], {
+		cwd: fixture,
+		env: { ...baseEnv, AGENT_MAIL_STORAGE_ROOT: liveStorageRoot, STORAGE_ROOT: liveStorageRoot },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	expect(passed.exitCode, passed.stderr.toString()).toBe(0);
+});
+
+test("chain run refuses a handed-off root that resolves a different archive than the guard reads", () => {
+	const refused = Bun.spawnSync(["sh", gate], {
+		cwd: fixture,
+		env: { ...baseEnv, AGENT_MAIL_STORAGE_ROOT: liveStorageRoot, STORAGE_ROOT: legacyStorageRoot },
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	expect(refused.exitCode, refused.stdout.toString()).not.toBe(0);
+	expect(refused.stderr.toString()).toContain("STORAGE_ROOT");
+});

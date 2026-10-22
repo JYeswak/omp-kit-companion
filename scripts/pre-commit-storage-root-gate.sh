@@ -148,4 +148,17 @@ if len(sys.argv) == 2 and sys.argv[1] == "--resolve-root":
     print(resolved_root)
 elif len(sys.argv) != 1:
     fail("usage: pre-commit-storage-root-gate.sh [--resolve-root]")
+else:
+    # Chain run (GUARDROOT1, ompkit-2ayxn): the Agent Mail guard after this hook reads STORAGE_ROOT, then
+    # AGENT_MAIL_STORAGE_ROOT, then its own default. Unless the runner's omp-kit bootstrap handed both the resolved
+    # root, the guard can match no archive and allow every commit, so a lost hand-off refuses here instead.
+    for name in ("STORAGE_ROOT", "AGENT_MAIL_STORAGE_ROOT"):
+        handed = os.environ.get(name, "").strip()
+        if not handed:
+            fail("the Agent Mail chain runner did not hand the resolved archive root to its guard ("
+                 + name + " is unset), so reservations would not be checked; an Agent Mail hook reinstall "
+                 "rewrites the runner. Re-run scripts/install-pre-commit-storage-root-gate.sh in this repository")
+        if os.path.realpath(os.path.expanduser(handed)) != resolved_root:
+            fail(name + " names " + handed + " but this repository's archive is under " + resolved_root
+                 + "; the guard would check the wrong archive")
 PY
