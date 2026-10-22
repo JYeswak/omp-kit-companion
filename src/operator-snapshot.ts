@@ -1,36 +1,24 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
+import { installedJobOwnedState, type OwnedStatePath } from "./service.ts";
 
 /** Profile files the kit could write; agent.db, sessions and caches change under normal agent use and are not watched. */
 const PROFILE_FILES = ["config.yml", "config.yaml", "config.json", "settings.json"] as const;
 const MAX_ENTRIES_PER_ROOT = 20_000;
 const MAX_BYTES_PER_ROOT = 512 * 1024 * 1024;
 
-/**
- * Children of the kit state root that the kit's own scheduled service jobs write on their own clock:
- * ci-poller (ci-runs.json), load-watch and heavy (load/), every job's lock and status (jobs/),
- * fleet-flush and fleet-watch logs and state, scratch-reaper (scratch-quarantine/, scratch-reap-log.jsonl),
- * the service TMPDIR (service-tmp/) and claude-save receipts. They change during any isolated test on a
- * machine running those jobs, and scratch-quarantine alone can hold over a million entries, so watching
- * them made every live update postcheck fail. Everything else under the state root stays watched,
- * including any new top-level file a run creates.
- */
-const SERVICE_OWNED_STATE: Record<string, true> = {
-	"ci-runs.json": true, load: true, jobs: true, "fleet-flush.jsonl": true, "fleet-watch.jsonl": true,
-	"fleet-watch-state.json": true, "scratch-quarantine": true, "scratch-reap-log.jsonl": true, "service-tmp": true,
-};
-const SERVICE_OWNED_STATE_FILE = /^claude-save-[A-Za-z0-9._-]+\.json$/;
-
-/** True when `path` is, or lies under, a service-owned child of `stateRoot`. */
-export function isServiceOwnedState(stateRoot: string, path: string): boolean {
-	const rel = relative(stateRoot, path);
-	if (!rel || rel.startsWith("..") || isAbsolute(rel)) return false;
-	const top = rel.split("/")[0]!;
-	return SERVICE_OWNED_STATE[top] === true || (top === rel && SERVICE_OWNED_STATE_FILE.test(top));
+/** True when `path` is, or lies under, state an installed service job writes on its own clock. */
+export function isOwnedState(owned: readonly OwnedStatePath[], path: string): boolean {
+	return owned.some(entry => {
+		const rel = relative(entry.path, path);
+		if (rel.startsWith("..") || isAbsolute(rel)) return false;
+		if (!entry.names) return true;
+		return rel !== "" && entry.names(rel.split("/")[0]!);
+	});
 }
 
-export type WatchedPaths = string[] & { stateRoot?: string };
+export type WatchedPaths = string[] & { owned?: readonly OwnedStatePath[] };
 export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[] };
 export type WatchedComparison = { unchanged: boolean; complete: boolean; watched: number; changed_paths: string[]; incomplete_paths: string[] };
 
@@ -38,8 +26,11 @@ export type WatchedComparison = { unchanged: boolean; complete: boolean; watched
  * Operator-side paths a kit run could plausibly write: OMP profile config files, rule and extension
  * directories, installed plugins, and the kit state root. Live scenarios run in a private HOME, so these
  * must be byte-identical before and after; everything else in the operator HOME may change concurrently.
+ * The one exception is state the kit's own service jobs write on their own clock (cc's store, ci-poller's
+ * cache, the scratch quarantine...): each job declares it, and only the jobs installed in `home` are
+ * excluded, so a write by anything else, including the run under test, still counts.
  */
-export function operatorWatchedPaths(home: string, stateRoot: string | null): WatchedPaths {
+export function operatorWatchedPaths(home: string, stateRoot: string | null, owned: readonly OwnedStatePath[] = installedJobOwnedState(home)): WatchedPaths {
 	const profileDirs = [join(home, ".omp", "agent")];
 	const pluginDirs = [join(home, ".omp", "plugins")];
 	try {
@@ -55,12 +46,13 @@ export function operatorWatchedPaths(home: string, stateRoot: string | null): Wa
 	// OMP links one package and updates these two registry files; plugin caches are unrelated state.
 	for (const dir of pluginDirs) paths.push(join(dir, "node_modules", "omp-kit-companion"),
 		join(dir, "installed_plugins.json"), join(dir, "omp-plugins.lock.json"));
-	if (stateRoot) { paths.push(stateRoot); paths.stateRoot = stateRoot; }
+	if (stateRoot) paths.push(stateRoot);
+	paths.owned = owned;
 	return paths;
 }
 
 /** Content and mode only: an mtime-only touch is not a change. An absent path is a recorded state, not an error. */
-export function snapshotWatched(paths: readonly string[] & { stateRoot?: string }): WatchedSnapshot {
+export function snapshotWatched(paths: readonly string[] & { owned?: readonly OwnedStatePath[] }): WatchedSnapshot {
 	const entries = new Map<string, string>();
 	const incomplete: string[] = [];
 	for (const root of paths) {
@@ -68,7 +60,7 @@ export function snapshotWatched(paths: readonly string[] & { stateRoot?: string 
 		let count = 0, bytes = 0, overflow = false;
 		const visit = (path: string): void => {
 			if (overflow) return;
-			if (paths.stateRoot && isServiceOwnedState(paths.stateRoot, path)) return;
+			if (paths.owned && isOwnedState(paths.owned, path)) return;
 			let stat;
 			try { stat = lstatSync(path); }
 			catch (error) {

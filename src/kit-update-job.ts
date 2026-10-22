@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
-import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, type KitPostcheckDetail, type KitReconcileResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
+import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, type KitPostcheck, type KitPostcheckDetail, type KitReconcileResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
 
 /** The job installs the kit for the whole machine: it has no project, and its service cwd (HOME) is never watched as one. */
@@ -43,7 +43,7 @@ export type KitUpdateJobResult = {
 	/** How the kit receipt ended: RECONCILED once its postimages verified, PENDING when they did not. */
 	receipt?: "RECONCILED" | "PENDING";
 	/** The release's full-test postcheck, with its reason and detail when it did not pass; it never decides the receipt. */
-	postcheck?: "PASS" | "FAIL" | "NOT_RUN"; postcheckReason?: string; postcheckDetail?: KitPostcheckDetail | null;
+	postcheck?: KitPostcheck["status"]; postcheckReason?: string; postcheckDetail?: KitPostcheckDetail | null;
 	relink?: "APPLIED" | "FAILED" | "NOT_RUN"; pluginReceiptId?: string; pluginUndoCommand?: string; service?: "APPLIED" | "FAILED" | "NOT_RUN";
 	/**
 	 * HOOKREFRESH1: fleet hook refresh after a successful install.

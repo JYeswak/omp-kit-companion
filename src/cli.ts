@@ -63,7 +63,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { ccServiceCommand, daemonLiveness, jobCodePrefix, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
+import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchLogPath, jobCodePrefix, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { defaultBudgetLedgerPath, releaseBudgetEntry } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
@@ -2853,7 +2853,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		if (job.name === "fleet-flush") {
 			const report = flushPending(liveFleetIo(), true);
-			try { logFlushReport(join(home, ".local", "state", "omp-kit", "fleet-flush.jsonl"), report, Date.now()); } catch {}
+			try { logFlushReport(fleetFlushLogPath(home), report, Date.now()); } catch {}
 			lock.release();
 			return { code: report.overall === "UNAVAILABLE" ? 3 : 0, data: { job: job.name, ...report }, verification: "UNVERIFIED" };
 		}
@@ -2862,7 +2862,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			if (!existsSync(configPath)) { lock.release(); return refusal("FLEET_WATCH_CONFIG_MISSING", "fleet-watch config is absent", "Create fleet-watch.json or leave the opt-in service disabled."); }
 			try {
 				const config = loadFleetWatchConfig(configPath);
-				const logPath = join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
+				const logPath = fleetWatchLogPath(home);
 				const watchClaim = readRunClaim(jobsDir, job.name);
 				const watchVersion = watchClaim === null ? null : claimIncarnation(watchClaim);
 				// ompkit-bj08.5 [d]: authority and launchers re-read at this

@@ -263,6 +263,16 @@ def _extract_members(members, parent):
                 output.flush()
                 os.fsync(output.fileno())
             dest.chmod(0o755 if name in ("bin/omp-kit", "scripts/receipt.py") or name.endswith(".sh") else 0o644)
+        # An empty read-only __pycache__ beside every shipped .py: importers of the release's modules
+        # cannot write bytecode into it (src/kit-release.ts sealBytecodeCaches does the same).
+        for cache in sorted({(staging / name).parent / "__pycache__" for name, (kind, _) in members.items()
+                             if kind == "file" and name.endswith(".py")}):
+            try:
+                cache.mkdir(mode=0o500)
+            except FileExistsError:
+                if cache.is_symlink() or not cache.is_dir():
+                    raise
+            cache.chmod(0o500)
     except BaseException:
         shutil.rmtree(staging)
         raise

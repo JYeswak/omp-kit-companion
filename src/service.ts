@@ -6,8 +6,8 @@ import { inspectStateRoot, repairStateRootMode } from "./state-root.ts";
 import { censusLoad, writeCensus } from "./load-doctor.ts";
 import { checkPlistContract, checkSystemdContract } from "./service-contract.ts";
 import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
-import { classifyScratchPressure, type ScratchPressure } from "./scratch.ts";
-import { fleetWatchRepos } from "./scratch.ts";
+import { classifyScratchPressure, fleetWatchRepos, quarantineDir, reapLogPath, type ScratchPressure } from "./scratch.ts";
+import { CACHE_NAME } from "./ci-cache.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -71,6 +71,11 @@ export async function superviseScratchJob(argv: readonly string[], env: NodeJS.P
 /** An operator-configured command a job runs directly (never a constant path in the kit). */
 export interface ServiceProgram { argv: string[]; cwd: string }
 /**
+ * Kit state a job writes on its own clock while it is installed: `path` and everything under it, or,
+ * with `names`, every direct child of `path` whose name it accepts (and that child's subtree).
+ */
+export interface OwnedStatePath { path: string; names?: (name: string) => boolean }
+/**
  * `restart: "always"` relaunches a daemon even after a clean exit (launchd KeepAlive true,
  * systemd Restart=always); the default daemon restarts only on failure.
  * `commandConfigKey` names the fleet-watch.json key holding `{argv, cwd}`; such a job
@@ -79,26 +84,63 @@ export interface ServiceProgram { argv: string[]; cwd: string }
 export interface ServiceJobDef {
 	name: string; label: string; kind: "watch" | "interval" | "daemon"; intervalSeconds: number; runAtLoad?: boolean;
 	restart?: "always"; commandConfigKey?: string; program?: ServiceProgram;
+	/**
+	 * State this job writes on its own schedule, beyond its own `jobs/<name>.*` records and the shared service
+	 * TMPDIR (see jobOwnedState). An isolated test excludes it only while the job is installed in that HOME.
+	 */
+	ownedState?: (home: string) => OwnedStatePath[];
 }
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
-	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
+	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false,
+		ownedState: home => [{ path: quarantineDir(home) }, { path: reapLogPath(home) }] },
 	"scratch-pressure": { name: "scratch-pressure", label: "com.omp-kit.scratch-pressure", kind: "interval", intervalSeconds: 60, runAtLoad: false },
 	"kit-update": { name: "kit-update", label: "com.omp-kit.kit-update", kind: "interval", intervalSeconds: 300, runAtLoad: false },
-	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false },
+	"fleet-watch": { name: "fleet-watch", label: "com.omp-kit.fleet-watch", kind: "interval", intervalSeconds: 120, runAtLoad: false,
+		ownedState: home => [{ path: fleetWatchLogPath(home) }, { path: join(dirname(fleetWatchLogPath(home)), "fleet-watch-state.json") }] },
 	"fleet-lessons": { name: "fleet-lessons", label: "com.omp-kit.fleet-lessons", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
- 	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: false },
- 	"ci-poller": { name: "ci-poller", label: "com.omp-kit.ci-poller", kind: "interval", intervalSeconds: 60, runAtLoad: false },
-	"claude-save": { name: "claude-save", label: "com.omp-kit.claude-save", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
-	"fleet-flush": { name: "fleet-flush", label: "com.omp-kit.fleet-flush", kind: "interval", intervalSeconds: 60, runAtLoad: false },
+	// The census dir; `omp-kit heavy` keeps its admission queue beside the census it admits against.
+	"load-watch": { name: "load-watch", label: "com.omp-kit.load-watch", kind: "interval", intervalSeconds: 60, runAtLoad: false,
+		ownedState: home => [{ path: join(kitStateDir(home), "load") }] },
+	"ci-poller": { name: "ci-poller", label: "com.omp-kit.ci-poller", kind: "interval", intervalSeconds: 60, runAtLoad: false,
+		ownedState: home => [{ path: join(kitStateDir(home), CACHE_NAME) }] },
+	"claude-save": { name: "claude-save", label: "com.omp-kit.claude-save", kind: "interval", intervalSeconds: 3600, runAtLoad: false,
+		ownedState: home => [{ path: kitStateDir(home), names: name => CLAUDE_SAVE_RECEIPT.test(name) }] },
+	"fleet-flush": { name: "fleet-flush", label: "com.omp-kit.fleet-flush", kind: "interval", intervalSeconds: 60, runAtLoad: false,
+		ownedState: home => [{ path: fleetFlushLogPath(home) }] },
 	// CC14 (.18.1 scaffolding for .18.2): the command-center server. Daemon
 	// kind only; the serve exec and heartbeat land in .18.2, which extends
-	// this entry rather than duplicating it.
-	"cc": { name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0 },
+	// this entry rather than duplicating it. Its store, cursors and spool (every
+	// kit command appends spool/kit while the store exists) are its CC_STATE.
+	"cc": { name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0, ownedState: home => [{ path: ccStateDir(home) }] },
 	// SENTINELLIVE1 (ompkit-b4zip): the fleet loop sentinel, supervised so it outlives the seat
 	// that launched it. Its command is operator data (fleet-watch.json `loopSentinel`).
 	"loop-sentinel": { name: "loop-sentinel", label: "com.omp-kit.loop-sentinel", kind: "daemon", intervalSeconds: 0, restart: "always", commandConfigKey: "loopSentinel" },
 };
+
+/** A claude-save run receipt, `claude-save-<runId>.json`, directly in the kit state root. */
+const CLAUDE_SAVE_RECEIPT = /^claude-save-[A-Za-z0-9._-]+\.json$/;
+
+/** Everything `job` writes on its own clock: its `jobs/<name>.*` lock and status records, the service TMPDIR, and its declared state. */
+export function jobOwnedState(home: string, job: ServiceJobDef): OwnedStatePath[] {
+	return [{ path: jobsDir(home), names: name => name.startsWith(`${job.name}.`) }, { path: serviceTmpDir(home) },
+		...(job.ownedState?.(home) ?? [])];
+}
+
+/** Jobs whose native definition (launchd plist or systemd service unit) is installed in `home`. */
+export function installedJobs(home: string, platform: NodeJS.Platform = process.platform): ServiceJobDef[] {
+	return Object.values(KNOWN_JOBS).filter(job => {
+		const definition = platform === "darwin" ? plistPath(home, serviceLabel(job.name))
+			: platform === "linux" ? join(home, ".config", "systemd", "user", `omp-kit-${job.name}.service`) : null;
+		if (definition === null) return false;
+		try { return lstatSync(definition).isFile(); } catch { return false; }
+	});
+}
+
+/** The owned state of every job installed in `home`; a job that is not installed owns nothing here. */
+export function installedJobOwnedState(home: string, platform: NodeJS.Platform = process.platform): OwnedStatePath[] {
+	return installedJobs(home, platform).flatMap(job => jobOwnedState(home, job));
+}
 
 export function fleetWatchConfigPath(home: string): string {
 	return process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
@@ -262,7 +304,7 @@ export interface CcServiceCommand { argv: string[]; env: { CC_STATE: string } }
 export function ccServiceCommand(home: string, adapter: string): CcServiceCommand {
 	return {
 		argv: ["python3", adapter, "serve", "--host", CC_SERVICE_HOST, "--port", String(CC_SERVICE_PORT), "--lanes"],
-		env: { CC_STATE: join(stateHome(home), "omp-kit", "cc") },
+		env: { CC_STATE: ccStateDir(home) },
 	};
 }
 
@@ -355,8 +397,26 @@ function stateHome(home: string): string {
 	return process.env.XDG_STATE_HOME ?? join(home, ".local", "state");
 }
 
+/** The kit state root the service jobs write: the plists and units pin XDG_STATE_HOME to stateHome(home). */
+function kitStateDir(home: string): string {
+	return join(stateHome(home), "omp-kit");
+}
+
+/** The cc service's CC_STATE: its store, ingest cursors and producer spools. */
+export function ccStateDir(home: string): string {
+	return join(kitStateDir(home), "cc");
+}
+
+/** fleet-flush and fleet-watch log under the default state home whatever XDG_STATE_HOME says. */
+export function fleetFlushLogPath(home: string): string {
+	return join(home, ".local", "state", "omp-kit", "fleet-flush.jsonl");
+}
+export function fleetWatchLogPath(home: string): string {
+	return join(home, ".local", "state", "omp-kit", "fleet-watch.jsonl");
+}
+
 function serviceTmpDir(home: string): string {
-	return join(stateHome(home), "omp-kit", "service-tmp");
+	return join(kitStateDir(home), "service-tmp");
 }
 
 const SERVICE_TMP_OWNER = "owner=omp-kit\npurpose=service-tmp\nversion=1\n";

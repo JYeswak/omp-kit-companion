@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { isSha256Hex } from "./regex-guards.ts";
@@ -265,6 +265,25 @@ export function verifyKitArchive(input: KitArchiveInput): VerifiedKitArchive {
  return verified;
 }
 
+/**
+ * A release root is immutable once verified, but any Python that imports a shipped module (cc, skills and
+ * hooks put the release's scripts/ on sys.path for pysafe) would write __pycache__/*.pyc into it, and the
+ * update postcheck would then see the release change under its isolated test. Every directory that ships a
+ * .py file gets an empty, read-only __pycache__: CPython (3.9 to 3.15 checked) finds it, fails to write the
+ * bytecode, and silently runs from source, whatever the caller's PYTHONDONTWRITEBYTECODE. Being empty, it
+ * is removed by an ordinary recursive delete. installer/install.py seals its extraction the same way.
+ */
+function sealBytecodeCaches(root: string, files: readonly string[]): void {
+ const caches = new Set(files.filter(file => file.endsWith(".py")).map(file => join(root, dirname(file), "__pycache__")));
+ for (const cache of caches) {
+  try { mkdirSync(cache, { mode: 0o500 }); }
+  catch (error) {
+   if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !lstatSync(cache).isDirectory()) throw error;
+  }
+  chmodSync(cache, 0o500);
+ }
+}
+
 /** Writes only into a new child of a caller-owned disposable staging parent.
  * The callback must invoke that exact staged binary with --info; never infer identity from its manifest.
  * P18 still rechecks assertFreshKitPlan while holding the shared P10 lock before activation.
@@ -294,6 +313,7 @@ export async function stageKitRelease(input: StageKitInput): Promise<StagedKitRe
     fsyncSync(fd);
    } finally { closeSync(fd); }
   }
+  sealBytecodeCaches(root, members.filter(member => member.kind === "file").map(member => member.path));
   const executable = join(root, RELEASE_BINARY_NAME);
   const identity = await input.probeBinaryInfo(executable);
   assertBinaryIdentity(identity, input.plan, verified);

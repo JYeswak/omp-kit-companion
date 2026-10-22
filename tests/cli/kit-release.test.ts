@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { validateReleaseIndex, validateReleaseManifest, previewKitRelease, verifyKitArchive, assertFreshKitPlan, stageKitRelease, type KitReleasePlan } from "../../src/kit-release";
 
@@ -197,5 +197,92 @@ describe("versioned release contract", () => {
     rmSync(work, { recursive: true, force: true });
    }
   }, 15_000);
+ }
+ // ompkit-2pkp1: cc, skills and hooks import the release's scripts/pysafe.py; their bytecode must never land in the release.
+ for (const route of ["staging", "standalone"] as const) {
+  test(`planted: a kit Python import writes no bytecode into a release installed through ${route}`, async () => {
+   const repo = join(import.meta.dir, "..", "..");
+   const base = join(repo, "var", "agent-tmp");
+   mkdirSync(base, { recursive: true });
+   const work = mkdtempSync(join(base, `bytecode-seal.${process.pid}.`));
+   writeFileSync(join(work, ".owner"), `pid=${process.pid}\nlabel=bytecode-seal\nrepo=${repo}\ncreated=${new Date().toISOString()}\n`);
+   try {
+    const probeData = { version: info.version, release: { source_tag: info.source_tag }, platform: info.platform };
+    const files = [
+     { name: "bin/omp-kit", bytes: Buffer.from(`#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({ data: probeData })}'\n`) },
+     { name: "scripts/pysafe.py", bytes: readFileSync(join(repo, "scripts/pysafe.py")) },
+     { name: "scripts/kitlib_run.py", bytes: readFileSync(join(repo, "scripts/kitlib_run.py")) },
+     { name: "skills/demo/scripts/helper.py", bytes: Buffer.from("VALUE = 7\n") },
+    ].sort((left, right) => left.name.localeCompare(right.name));
+    const releaseManifest = Buffer.from(JSON.stringify({
+     schema_version: 1, version: "1.2.3", source_tag: "v1.2.3",
+     files: files.map(file => ({ path: file.name, sha256: digest(file.bytes) })),
+    }));
+    const releaseArchive = tar([...files, { name: "release-manifest.json", bytes: releaseManifest }]);
+    const releaseAsset = { ...asset, sha256: digest(releaseArchive), manifest_sha256: digest(releaseManifest) };
+    const key = `${platform.os}-${platform.arch}-${platform.libc}`;
+    const releaseIndex = { ...index, assets: { [key]: releaseAsset } };
+    let installed: string;
+    if (route === "staging") {
+     const plan = await previewKitRelease({ currentVersion: "1.2.2", sourceTag: "v1.2.3", platform, fetchIndex: async () => releaseIndex });
+     if (plan.exitCode !== 0) throw new Error(plan.reason);
+     installed = (await stageKitRelease({
+      archive: releaseArchive, plan, stagingParent: work,
+      probeBinaryInfo: async executablePath => {
+       const child = Bun.spawn([executablePath, "--info"], { stdout: "pipe", stderr: "pipe" });
+       const observed = JSON.parse(await new Response(child.stdout).text()).data;
+       expect(await child.exited).toBe(0);
+       return { version: observed.version, source_tag: observed.release.source_tag, platform: observed.platform };
+      },
+     })).root;
+    } else {
+     const archivePath = join(work, releaseAsset.filename), indexPath = join(work, "index.json"), prefix = join(work, "installed");
+     writeFileSync(archivePath, releaseArchive);
+     writeFileSync(indexPath, JSON.stringify(releaseIndex));
+     // This policy double is explicitly synthetic; no real Sigstore claim.
+     writeFileSync(`${archivePath}.sigstore.json`, '{"fixture":true}\n');
+     const result = Bun.spawnSync(["python3", join(repo, "installer/install.py"), "install", indexPath, "1.2.3", key, archivePath, prefix, "0"], {
+      cwd: work, env: { ...process.env, TMPDIR: work, PYTHONDONTWRITEBYTECODE: "1",
+       PATH: [join(repo, "tests/fixtures/kit-release"), process.env.PATH ?? ""].join(delimiter) },
+      stdout: "pipe", stderr: "pipe",
+     });
+     expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
+     installed = join(prefix, "releases", "1.2.3");
+    }
+    const tree = (): string[] => {
+     const rows: string[] = [];
+     const visit = (path: string, rel: string): void => {
+      const stat = statSync(path);
+      rows.push(`${rel}:${(stat.mode & 0o7777).toString(8)}:${stat.size}:${stat.mtimeMs}`);
+      if (stat.isDirectory()) for (const name of readdirSync(path).sort()) visit(join(path, name), rel ? `${rel}/${name}` : name);
+     };
+     visit(installed, "");
+     return rows;
+    };
+    const before = tree();
+    expect(before.filter(row => row.includes("__pycache__")).map(row => row.split(":").slice(0, 2).join(":"))).toEqual([
+     "scripts/__pycache__:500", "skills/demo/scripts/__pycache__:500",
+    ]);
+    // The live importers' shape (cc_service, runbook_gate, skill hooks): scripts/ on sys.path, bytecode writing left on.
+    // Apple's /usr/bin/python3 redirects bytecode through sys.pycache_prefix; the fleet's Homebrew/uv 3.12-3.15 do not,
+    // and those wrote the release's __pycache__ on 2026-10-22, so the importer clears the prefix to behave like them.
+    const env: Record<string, string> = { ...process.env as Record<string, string>, TMPDIR: work };
+    delete env.PYTHONDONTWRITEBYTECODE;
+    delete env.PYTHONPYCACHEPREFIX;
+    const importer = (root: string) => Bun.spawnSync(["python3", "-c",
+     `import sys; sys.pycache_prefix = None; sys.path.insert(0, ${JSON.stringify(join(root, "scripts"))}); sys.path.insert(0, ${JSON.stringify(join(root, "skills/demo/scripts"))}); import kitlib_run, pysafe, helper; print(sys.dont_write_bytecode, helper.VALUE, pysafe.OK)`],
+     { cwd: work, env, stdout: "pipe", stderr: "pipe" });
+    const run = importer(installed);
+    expect(run.exitCode, run.stderr.toString()).toBe(0);
+    expect(run.stdout.toString().split(" ").slice(0, 2)).toEqual(["False", "7"]);
+    expect(tree()).toEqual(before);
+    // Control: the same importer against an unsealed cache does write bytecode, so the check above can fail.
+    chmodSync(join(installed, "scripts", "__pycache__"), 0o700);
+    expect(importer(installed).exitCode).toBe(0);
+    expect(readdirSync(join(installed, "scripts", "__pycache__")).filter(name => name.endsWith(".pyc")).length).toBeGreaterThan(0);
+   } finally {
+    rmSync(work, { recursive: true, force: true });
+   }
+  }, 30_000);
  }
 });

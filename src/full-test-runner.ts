@@ -13,7 +13,8 @@ import { summarizeTestCaseReports, type NativeTestCaseCounts } from "./test-case
 const STAGES = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
 export type FullStage = {
- status: "PASS" | "FAIL" | "NOT_RUN"; producer_rc: number | null; duration_ms: number | null; reason?: string;
+ /** DEFERRED: `omp-kit heavy` refused admission (RESOURCE_DEFERRED, rc 75), so the stage never judged anything. */
+ status: "PASS" | "FAIL" | "NOT_RUN" | "DEFERRED"; producer_rc: number | null; duration_ms: number | null; reason?: string;
  output?: { stdout_chars: number; stdout_head?: string; stdout_tail: string; stderr_tail: string };
 };
 export type FullTestProducerArtifacts = { directory: string; stdout_path: string; stderr_path: string };
@@ -40,8 +41,10 @@ export type FullTestResultReference = {
  retention: { status: "UNRETAINED" | "CITED_UNVERIFIED"; durable: false; citations: FullTestCitation[]; errors: string[] };
 };
 export type FullTestCause = { cause_code: string; cause_name: string; cause_message: string; cause_stack_head: string | null };
+/** DEFERRED: the only failure is a stage heavy admission deferred under load; never PASS, never a FAIL verdict on the release. */
+export type FullTestStatus = FastTestStatus | "DEFERRED";
 export type FullTestReport = {
- status: FastTestStatus; exitCode: 0 | 1 | 3; fast: FastTestReport; fast_duration_ms: number;
+ status: FullTestStatus; exitCode: 0 | 1 | 3; fast: FastTestReport; fast_duration_ms: number;
  omp_version: string | null; stages: Record<FullStageName, FullStage>;
  current_stage: { name: string; elapsed_ms: number } | null; cause: FullTestCause | null;
  proofs: { G4_live: { status: "PASS" | "FAIL" | "NOT_RUN"; expected_scenarios: number; observed_scenarios: number; plant: "PASS" | "FAIL" | "NOT_RUN" } };
@@ -431,6 +434,7 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
    }
    stages[name] = { status: match[1] === "GREEN" ? "PASS" : "FAIL", producer_rc: Number(match[3]),
     duration_ms: match[4] === undefined ? null : Number(match[4]) };
+   let deferral: string | null = null;
    if (match[1] === "RED") {
     const marker = `OMP_KIT_STAGE_START name=${name}\n`;
     const start = output.stdout.startsWith(marker) ? 0 : output.stdout.indexOf("\n" + marker);
@@ -447,16 +451,26 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
       stdout_tail: output.stdout.slice(Math.max(begin, until - 2500), until),
       stderr_tail: output.stderr.slice(-1000),
      };
+     // ladder.sh wraps every stage after manifest in `omp-kit heavy`, whose refusal to admit work under load is
+     // exit 75 with a RESOURCE_DEFERRED line (merged into the stage's stdout). The stage never ran its check.
+     if (match[3] === "75") deferral = output.stdout.slice(begin, until).split("\n")
+      .find(text => text.startsWith("RESOURCE_DEFERRED: "))?.slice("RESOURCE_DEFERRED: ".length).trim() ?? null;
+    }
+    if (deferral !== null) {
+     stages[name].status = "DEFERRED";
+     stages[name].reason = `omp-kit heavy deferred the stage before it ran: ${deferral}`;
     }
    }
    next++;
+   if (deferral !== null) { failures.push(`Stage ${name} deferred by heavy admission (producer_rc=75): ${deferral}`); break; }
   }
   if (match[1] === "RED") { failures.push(`Stage ${name} returned producer_rc=${match[3]}`); break; }
  }
+ const liveJudged = stages["e2e-live"].status === "PASS" || stages["e2e-live"].status === "FAIL";
  const ordinary = lines.filter(line => line.startsWith("ok    ")).map(line => line.slice(6));
  const observed = new Set(ordinary);
  const missing = ids.filter(id => !observed.has(id));
- if (stages["e2e-live"].status !== "NOT_RUN" && missing.length) failures.unshift("Live scenario rows missing: " + missing.join(", "));
+ if (liveJudged && missing.length) failures.unshift("Live scenario rows missing: " + missing.join(", "));
  const livePassed = stages["e2e-live"].status === "PASS" && ordinary.length === ids.length && ordinary.every((id, index) => id === ids[index]);
  if (stages["e2e-live"].status === "PASS" && !livePassed) failures.push("Live scenario rows did not match the exact shipped ordered scenario IDs");
  const plantPassed = stages["e2e-plant"].status === "PASS" && result.stdout.includes("plant RED as required: baseline kit-close-needs-evidence fires on the streamed prefix of an evidenced close");
@@ -464,7 +478,20 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
  if (result.code === 0 && (next !== STAGES.length || !/^LADDER: GREEN$/m.test(result.stdout))) failures.push("Producer returned success without every named GREEN stage and LADDER: GREEN");
  if (result.code !== 0 && !failures.length && !trustGuardNotRun) failures.push(`Ladder exited ${result.code} before a named RED stage`);
  return { stages, live_scenarios: { expected_ids: [...ids], observed_ids: ordinary,
-  status: stages["e2e-live"].status === "NOT_RUN" ? "NOT_RUN" : livePassed ? "PASS" : "FAIL" }, failures };
+  status: !liveJudged ? "NOT_RUN" : livePassed ? "PASS" : "FAIL" }, failures };
+}
+
+/**
+ * PASS needs every proof and no failure. When the only failure is a stage `omp-kit heavy` deferred before it
+ * ran, the release was not judged at all: DEFERRED (exit 3, like BLOCKED), never PASS and never a FAIL verdict.
+ * Any other failure beside a deferral (a changed operator file, a changed release) keeps the run FAIL.
+ */
+export function fullTestVerdict(input: { passed: boolean; blocked: boolean; cause: FullTestCause | null; failures: readonly string[];
+ stages: Record<FullStageName, FullStage> }): { status: FullTestStatus; exitCode: 0 | 1 | 3 } {
+ const deferredStage = Object.values(input.stages).some(stage => stage.status === "DEFERRED");
+ if (input.passed && !input.failures.length && !deferredStage) return { status: "PASS", exitCode: 0 };
+ if (deferredStage && input.cause === null && input.failures.length === 1) return { status: "DEFERRED", exitCode: 3 };
+ return input.blocked ? { status: "BLOCKED", exitCode: 3 } : { status: "FAIL", exitCode: 1 };
 }
 
 /** Actual OMP live calls run in a private HOME; never claim the operator's effective profile was certified. */
@@ -537,11 +564,13 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
  for (const path of [...snapshots.home.incomplete_paths, ...snapshots.project.incomplete_paths]) failures.push(`Operator file could not be read completely: ${path}`);
  const incomplete = !snapshots.release.complete || !snapshots.project.complete || !snapshots.home.complete;
  const passed = result.code === 0 && !failures.length && classified.live_scenarios.status === "PASS" && classified.stages["e2e-plant"].status === "PASS";
- const plant = classified.stages["e2e-plant"].status === "NOT_RUN" ? "NOT_RUN"
-  : classified.stages["e2e-plant"].status === "PASS" && !failures.includes("Planted negative control was not named RED") ? "PASS" : "FAIL";
+ const plantStatus = classified.stages["e2e-plant"].status;
+ const plant = plantStatus === "NOT_RUN" || plantStatus === "DEFERRED" ? "NOT_RUN"
+  : plantStatus === "PASS" && !failures.includes("Planted negative control was not named RED") ? "PASS" : "FAIL";
  const guardBlocked = classified.stages["cli-crosscheck"].reason?.startsWith("omp-trust-guard FAIL-CLOSED") === true;
  const blocked = result.code === 3 || guardBlocked || (incomplete && failures.length === 1 && result.code === 0);
- return { status: passed ? "PASS" : blocked ? "BLOCKED" : "FAIL", exitCode: passed ? 0 : blocked ? 3 : 1,
+ const { status, exitCode } = fullTestVerdict({ passed, blocked, cause, failures, stages: classified.stages });
+ return { status, exitCode,
   fast, fast_duration_ms, omp_version: ompVersion, stages: classified.stages,
   current_stage: currentStage, cause, live_scenarios: classified.live_scenarios,
   proofs: { G4_live: { status: classified.live_scenarios.status === "NOT_RUN" ? "NOT_RUN" : classified.live_scenarios.status === "PASS" && plant === "PASS" ? "PASS" : "FAIL",

@@ -7,7 +7,9 @@ import { runFullTest } from "../../src/full-test-runner.ts";
 import { runFastTest } from "../../src/test-runner.ts";
 import type { ReleaseAsset, ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
-import { applyKitUpdate, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
+import { applyKitUpdate, judgeKitPostcheck, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
+import { kitUpdateJobOverall } from "../../src/kit-update-job.ts";
+import { serviceLabel } from "../../src/service.ts";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 
 test("unknown update failure preserves its code and original message", () => {
@@ -360,6 +362,83 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
  // The advertised command's receipt is the one undo restores.
  expect(undoKitUpdate({ prefix: ctx.prefix, stateRoot: ctx.stateRoot, receiptId: result.receiptId })).toMatchObject({ status: "RESTORED", updatePending: false });
  expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.2/bin/omp-kit");
+}));
+
+// ompkit-2pkp1: on a live host the cc service writes its store every 15 s and every kit command appends its spool,
+// so the postcheck's isolation guard must tell an installed job's own state from a write it should catch.
+test("planted: a live cc writer during the isolated test is not an operator change; a write to an operator path still is", async () => fixture(async ctx => {
+	const stateHome = join(ctx.home, ".local", "state"), kitState = join(stateHome, "omp-kit"), cc = join(kitState, "cc");
+	const plist = join(ctx.home, "Library", "LaunchAgents", `${serviceLabel("cc")}.plist`);
+	const unit = join(ctx.home, ".config", "systemd", "user", "omp-kit-cc.service");
+	for (const definition of [plist, unit]) { mkdirSync(dirname(definition), { recursive: true }); writeFileSync(definition, "installed\n"); }
+	mkdirSync(join(cc, "spool", "kit"), { recursive: true });
+	mkdirSync(join(ctx.home, ".agents", "rules"), { recursive: true });
+	chmodSync(kitState, 0o700);
+	const ccFiles = [join(cc, "cc.db"), join(cc, "spool", "kit", "2026-10-22.jsonl")];
+	const operatorFile = join(ctx.home, ".agents", "rules", "planted.md");
+	// One real concurrent process writes both: the operator-path control proves it was writing inside the snapshot window.
+	const appends = ccFiles.map(file => `printf '%s\\n' "$n" >> '${file}'`).join("; ");
+	const writer = Bun.spawn(["/bin/sh", "-c", `n=0; while :; do n=$((n+1)); ${appends}; printf '%s\\n' "$n" > '${operatorFile}'; sleep 0.01; done`],
+		{ stdout: "ignore", stderr: "inherit" });
+	const previousXdg = process.env.XDG_STATE_HOME;
+	process.env.XDG_STATE_HOME = stateHome;
+	try {
+		// Poll for the writer's first iteration (a condition, not a guessed duration).
+		while (!existsSync(operatorFile)) await Bun.sleep(5);
+		const planned = await planKitUpdate({ ...input(ctx), stateRoot: kitState });
+		if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+		const result = await applyKitUpdate(planned);
+		const report = result.postcheck.report;
+		if (!report) throw new Error(`expected a full-test report, observed ${JSON.stringify(result.postcheck)}`);
+		const operatorFailures = report.failures.filter(failure => failure.startsWith("Operator file changed"));
+		// The guard still names a write the run itself makes to the operator state root (on a host with rch, the fast
+		// stage's in-process doctor records rch-socket-ino.json there), so assert the planted pair, not the whole list.
+		expect(operatorFailures, JSON.stringify(report.failures)).toContain("Operator file changed during failed fast stage: ~/.agents/rules/planted.md");
+		expect(operatorFailures.filter(failure => failure.includes("/omp-kit/cc")), JSON.stringify(report.failures)).toEqual([]);
+		expect(report.snapshots.home.changed_paths).toContain("~/.agents/rules/planted.md");
+		expect(report.snapshots.home.changed_paths.filter(path => path.includes("/omp-kit/cc"))).toEqual([]);
+	} finally {
+		writer.kill("SIGKILL");
+		await writer.exited;
+		if (previousXdg === undefined) delete process.env.XDG_STATE_HOME; else process.env.XDG_STATE_HOME = previousXdg;
+	}
+}));
+
+// ompkit-2pkp1: heavy admission deferring a ladder stage means the release was never judged; the update says DEFERRED.
+test("planted: a heavy-deferred postcheck reports DEFERRED, not FAIL, and never PASS", async () => fixture(async ctx => {
+	const planned = await planKitUpdate(input(ctx));
+	if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+	const result = await applyKitUpdate(planned);
+	const report = result.postcheck.report;
+	if (result.status !== "PARTIAL" || !report) throw new Error("expected a PARTIAL outcome carrying its full-test report");
+	const proofs = report.fast.proofs;
+	const fast = { ...report.fast, status: "PASS" as const, proofs: { ...proofs, G1_registration: { ...proofs.G1_registration, status: "PASS" as const },
+		G2_payload: { ...proofs.G2_payload, status: "PASS" as const }, G3_quiet_prefix: { ...proofs.G3_quiet_prefix, status: "PASS" as const } } };
+	const stages = Object.fromEntries(Object.entries(report.stages).map(([name, stage]) => [name, { ...stage, status: "NOT_RUN" as const }])) as typeof report.stages;
+	stages.manifest = { status: "PASS", producer_rc: 0, duration_ms: 1 };
+	stages["harness-gate"] = { status: "DEFERRED", producer_rc: 75, duration_ms: 1, reason: "omp-kit heavy deferred the stage before it ran: queue timeout" };
+	const deferral = "Stage harness-gate deferred by heavy admission (producer_rc=75): queue timeout";
+	const deferredReport = { ...report, fast, stages, status: "DEFERRED" as const, exitCode: 3 as const, omp_version: "18.12.1", failures: [deferral] };
+	const known = { identityKnown: true, changed: false };
+
+	const postcheck = judgeKitPostcheck(deferredReport, known);
+	expect(postcheck).toMatchObject({ status: "DEFERRED", matcher: "PASS", live: "NOT_RUN", reason: "KIT_POSTCHECK_DEFERRED" });
+	// Control: the same stage FAILing is a failed live test, and an OMP change still outranks a deferral.
+	const failedStages = { ...stages, "harness-gate": { ...stages["harness-gate"], status: "FAIL" as const } };
+	expect(judgeKitPostcheck({ ...deferredReport, stages: failedStages, status: "FAIL", exitCode: 1 }, known))
+		.toMatchObject({ status: "FAIL", live: "FAIL", reason: "KIT_LIVE_TEST_FAILED" });
+	expect(judgeKitPostcheck(deferredReport, { identityKnown: true, changed: true }).status).toBe("FAIL");
+	expect(judgeKitPostcheck(deferredReport, { identityKnown: false, changed: false }).status).toBe("FAIL");
+
+	const envelope = kitUpdateEnvelope(planned, { ...result, postcheck: { ...postcheck, reason: "KIT_POSTCHECK_DEFERRED" } });
+	expect(envelope.data, JSON.stringify(envelope.data)).toMatchObject({ overall: "UNVERIFIED", action: "PARTIAL", postcheck: "DEFERRED",
+		live: "NOT_RUN", reason: "KIT_POSTCHECK_DEFERRED" });
+	expect(envelope.data.postcheck_detail).toMatchObject({ status: "DEFERRED", deferred_stages: ["harness-gate"], failed_stages: [], failures: [deferral] });
+	expect(envelope.errors?.[0]).toMatchObject({ code: "KIT_POSTCHECK_DEFERRED" });
+	expect(envelope.errors?.[0]?.message).toContain(`Kit update to 1.2.3 is active but unverified: heavy admission deferred its postcheck; ${deferral}`);
+	expect(envelope.commands).toEqual([`omp-kit undo ${result.receiptId} --yes`]);
+	// The unattended job never reports a deferred postcheck as a clean cycle.
+	expect(kitUpdateJobOverall({ status: "UPDATED", receiptId: result.receiptId, activeVersion: "1.2.3", notification: true, postcheck: postcheck.status })).toBe("FINDINGS");
 }));
 
 // A later edit to the activated binary or link defeats post-image-based undo.

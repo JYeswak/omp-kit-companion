@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BundledRunInterruptedError } from "../../src/runtime.ts";
-import { classifyLadder, currentStageReport, describeFullTestProducer, recoverInterruptedRun, redactFullTestCause, retainProducerOutput } from "../../src/full-test-runner.ts";
+import { classifyLadder, currentStageReport, describeFullTestProducer, fullTestVerdict, recoverInterruptedRun, redactFullTestCause, retainProducerOutput } from "../../src/full-test-runner.ts";
 import { readTestCaseReports, summarizeTestCaseReports } from "../../src/test-case-report.ts";
 
 const names = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"];
@@ -38,6 +38,51 @@ test("mid-ladder RED exposes its producer status and keeps later stages NOT_RUN"
  expect(result.live_scenarios.status).toBe("NOT_RUN");
  expect(result.failures).toContain("Stage harness-gate returned producer_rc=7");
  expect(result.failures).not.toContain("Live scenario rows missing: scenario-one, scenario-two");
+});
+
+// ompkit-2pkp1: on a loaded host `omp-kit heavy` refuses a ladder stage (rc 75, RESOURCE_DEFERRED) before it runs anything.
+function deferredStageRun(command: string[], extraEnv: Record<string, string> = {}) {
+ const temp = mkdtempSync(join(tmpdir(), "omp-kit-ladder-deferral-"));
+ try {
+  const script = fileURLToPath(new URL("../../scripts/ladder.sh", import.meta.url));
+  const env = { ...process.env, HOME: temp, XDG_CONFIG_HOME: join(temp, "config"), XDG_STATE_HOME: join(temp, "state"),
+   XDG_DATA_HOME: join(temp, "data"), XDG_CACHE_HOME: join(temp, "cache"), TMPDIR: temp, TMUX_PANE: "", GITHUB_ACTIONS: "", ...extraEnv };
+  const child = Bun.spawnSync(["/bin/sh", script, "--selftest-timing", temp, ...command.map(part => part.replaceAll("$TEMP", temp))],
+   { env, stdout: "pipe", stderr: "pipe" });
+  return { code: child.exitCode, stdout: child.stdout.toString(), stderr: child.stderr.toString(), ran: existsSync(join(temp, "ran")) };
+ } finally { rmSync(temp, { recursive: true, force: true }); }
+}
+const cli = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
+const forgedHealthyDisk = fileURLToPath(new URL("./fixtures/forge-healthy-statfs.ts", import.meta.url));
+
+test("planted: a stage heavy defers under load is DEFERRED, never FAIL and never PASS", () => {
+ const run = deferredStageRun([process.execPath, "--preload", forgedHealthyDisk, cli, "heavy", "--no-wait", "--label", "harness-gate", "--",
+  "/bin/sh", "-c", "printf ran > \"$TEMP/ran\""], { OMP_KIT_HEAVY_FAKE_LOAD1: "1000000", OMP_KIT_DISK_OBSERVER: "statfs" });
+ expect(run.code, run.stdout + run.stderr).toBe(75);
+ expect(run.stdout).toContain("RESOURCE_DEFERRED: LOAD1 1000000.00 exceeds");
+ expect(run.ran).toBe(false);
+ const report = classifyLadder({ code: 1, stdout: run.stdout, stderr: run.stderr }, ["scenario-one"]);
+ expect(report.stages.manifest).toMatchObject({ status: "DEFERRED", producer_rc: 75 });
+ expect(report.stages.manifest.reason).toStartWith("omp-kit heavy deferred the stage before it ran: LOAD1 1000000.00 exceeds");
+ expect(report.failures).toEqual([expect.stringMatching(/^Stage manifest deferred by heavy admission \(producer_rc=75\): LOAD1 1000000\.00 exceeds/)]);
+ expect(report.live_scenarios.status).toBe("NOT_RUN");
+ expect(fullTestVerdict({ passed: false, blocked: false, cause: null, failures: report.failures, stages: report.stages }))
+  .toEqual({ status: "DEFERRED", exitCode: 3 });
+ // A deferral beside a real leak is a FAIL; a deferred stage can never be relabelled PASS.
+ expect(fullTestVerdict({ passed: false, blocked: false, cause: null, failures: [...report.failures, "Operator file changed during isolated test: ~/.agents/rules/x.md"], stages: report.stages }))
+  .toEqual({ status: "FAIL", exitCode: 1 });
+ expect(fullTestVerdict({ passed: true, blocked: false, cause: null, failures: report.failures, stages: report.stages }).status).toBe("DEFERRED");
+ expect(fullTestVerdict({ passed: true, blocked: false, cause: null, failures: [], stages: report.stages }).status).not.toBe("PASS");
+}, 30_000);
+
+test("control: a stage whose own command exits 75 without heavy's refusal stays FAIL", () => {
+ const run = deferredStageRun(["/bin/sh", "-c", "printf 'deferred: my own words\\n'; exit 75"]);
+ expect(run.code).toBe(75);
+ const report = classifyLadder({ code: 1, stdout: run.stdout, stderr: run.stderr }, []);
+ expect(report.stages.manifest).toMatchObject({ status: "FAIL", producer_rc: 75 });
+ expect(report.failures).toEqual(["Stage manifest returned producer_rc=75"]);
+ expect(fullTestVerdict({ passed: false, blocked: false, cause: null, failures: report.failures, stages: report.stages }))
+  .toEqual({ status: "FAIL", exitCode: 1 });
 });
 
 test("failed-stage JSON retains bounded verdict and tail without adjacent stage output", () => {

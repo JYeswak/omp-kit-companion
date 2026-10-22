@@ -35,7 +35,8 @@ export type KitUpdatePlan = KitUpdateInput & {
 };
 export type KitUpdateRefusal = { status: "REFUSED" | "NETWORK_UNAVAILABLE"; exitCode: 2 | 4; reason: string; provenance: "UNVERIFIED" };
 export type KitUpdatePreview = KitUpdatePlan | KitUpdateRefusal;
-export type KitPostcheck = { status: "PASS" | "FAIL" | "NOT_RUN"; matcher: "PASS" | "FAIL" | "NOT_RUN"; live: "PASS" | "FAIL" | "NOT_RUN"; report?: FullTestReport; reason?: string; cause?: FullTestCause };
+/** DEFERRED: heavy admission refused a ladder stage, so the release was never judged; it is not PASS and not a FAIL verdict. */
+export type KitPostcheck = { status: "PASS" | "FAIL" | "DEFERRED" | "NOT_RUN"; matcher: "PASS" | "FAIL" | "NOT_RUN"; live: "PASS" | "FAIL" | "NOT_RUN"; report?: FullTestReport; reason?: string; cause?: FullTestCause };
 export type KitUpdateResult = { status: "UPDATED" | "CURRENT" | "PARTIAL"; exitCode: 0 | 1; receiptId: string | null; activeVersion: string | null; postcheck: KitPostcheck; provenance: "INTEGRITY_ONLY" | "SIGSTORE_VERIFIED" };
 export type KitUndoInput = { prefix: string; stateRoot: string; receiptId: string };
 export function updateFailureCause(error: unknown, roots: readonly string[] = []): FullTestCause {
@@ -302,6 +303,25 @@ async function authenticateUpdateArchive(plan: KitUpdatePlan, archive: Buffer): 
  } finally { rmSync(snapshot, { recursive: true, force: true }); }
 }
 
+/**
+ * The kit postcheck verdict from a full-test report and the selected OMP's identity. PASS needs an unchanged, known
+ * OMP and every matcher, live and stage proof. A report DEFERRED by heavy admission becomes DEFERRED with reason
+ * KIT_POSTCHECK_DEFERRED and live NOT_RUN: the release was not judged, which is neither its pass nor its failure.
+ */
+export function judgeKitPostcheck(report: FullTestReport, omp: { identityKnown: boolean; changed: boolean }): KitPostcheck {
+ const matcher = report.fast.status === "PASS" && report.fast.proofs.G1_registration.status === "PASS" && report.fast.proofs.G2_payload.status === "PASS" && report.fast.proofs.G3_quiet_prefix.status === "PASS" ? "PASS" : "FAIL";
+ const deferred = report.status === "DEFERRED";
+ const live = deferred ? "NOT_RUN" : report.proofs.G4_live.status === "PASS" && Object.values(report.stages).every(stage => stage.status === "PASS") ? "PASS" : "FAIL";
+ const reason = !omp.identityKnown
+  ? report.omp_version === null ? "OMP_VERSION_UNVERIFIED" : "OMP_VERSION_MISMATCH"
+  : matcher !== "PASS" ? "KIT_FAST_TEST_FAILED"
+  : deferred ? "KIT_POSTCHECK_DEFERRED"
+  : live !== "PASS" ? "KIT_LIVE_TEST_FAILED"
+  : report.status !== "PASS" || report.exitCode !== 0 ? "KIT_POSTCHECK_FAILED" : undefined;
+ const judged = !omp.changed && omp.identityKnown && matcher === "PASS";
+ const status = !judged ? "FAIL" : deferred ? "DEFERRED" : report.status === "PASS" && report.exitCode === 0 && live === "PASS" ? "PASS" : "FAIL";
+ return { status, matcher, live, report, ...(reason ? { reason } : {}) };
+}
 
 /** Retains the update lock across staged activation, the real matcher, and the isolated P09 ladder. */
 export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResult> {
@@ -341,19 +361,11 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
    switchLink(plan.prefix, staged.version);
    if (!matches(plan.prefix, next)) throw new Error("KIT_POSTIMAGE_CHANGED");
    const report = await runFullTest({ root: targetRoot, executablePath: join(plan.prefix, "bin", "omp-kit"), home: plan.home, project: plan.project, stateRoot: plan.stateRoot } satisfies FullTestInput, expectedCounts);
-   const matcher = report.fast.status === "PASS" && report.fast.proofs.G1_registration.status === "PASS" && report.fast.proofs.G2_payload.status === "PASS" && report.fast.proofs.G3_quiet_prefix.status === "PASS" ? "PASS" : "FAIL";
-   const live = report.proofs.G4_live.status === "PASS" && Object.values(report.stages).every(stage => stage.status === "PASS") ? "PASS" : "FAIL";
    const observedOmp = selectedOmpSnapshot();
    const ompIdentityKnown = selectedOmp !== null && observedOmp !== null && report.omp_version !== null && report.omp_version === selectedOmp.version;
    const ompChanged = selectedOmp !== null && observedOmp !== null &&
     (!sameOmpSnapshot(selectedOmp, observedOmp) || (report.omp_version !== null && report.omp_version !== selectedOmp.version));
-   const postcheckReason = !ompIdentityKnown
-    ? report.omp_version === null ? "OMP_VERSION_UNVERIFIED" : "OMP_VERSION_MISMATCH"
-    : matcher !== "PASS" ? "KIT_FAST_TEST_FAILED"
-    : live !== "PASS" ? "KIT_LIVE_TEST_FAILED"
-    : report.status !== "PASS" || report.exitCode !== 0 ? "KIT_POSTCHECK_FAILED" : undefined;
-   postcheck = { status: !ompChanged && ompIdentityKnown && report.status === "PASS" && report.exitCode === 0 && matcher === "PASS" && live === "PASS" ? "PASS" : "FAIL",
-    matcher, live, report, ...(postcheckReason ? { reason: postcheckReason } : {}) };
+   postcheck = judgeKitPostcheck(report, { identityKnown: ompIdentityKnown, changed: ompChanged });
    if (ompChanged) throw new Error("OMP_CHANGED_DURING_KIT_UPDATE");
    if (postcheck.status !== "PASS" || !matches(plan.prefix, next) ||
     !verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256)) throw new Error(postcheck.reason ?? "KIT_POSTCHECK_FAILED");
@@ -375,10 +387,10 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
  } finally { heldLock.release(); }
 }
 
-/** A postcheck's named failed stages, changed operator paths, cause and first failures; null when nothing was reported. */
+/** A postcheck's named failed and heavy-deferred stages, changed operator paths, cause and first failures; null when nothing was reported. */
 export type KitPostcheckDetail =
  | { status: FullTestReport["status"]; omp_version: string | null; live: FullTestReport["proofs"]["G4_live"]; failed_stages: string[];
-  current_stage: FullTestReport["current_stage"]; cause: FullTestCause | null; changed_operator_paths: string[]; failures: string[] }
+  deferred_stages: string[]; current_stage: FullTestReport["current_stage"]; cause: FullTestCause | null; changed_operator_paths: string[]; failures: string[] }
  | { current_stage: null; cause: FullTestCause; failures: string[] };
 /**
  * The detail of `postcheck`, redacted under `roots`, capped at 20 failures.
@@ -395,6 +407,7 @@ export function kitPostcheckDetail(postcheck: KitPostcheck, roots: readonly stri
    ...(report.fast.status !== "PASS" ? ["fast-test"] : []),
    ...(report.omp_version === null ? ["omp-version"] : []),
   ],
+  deferred_stages: Object.entries(report.stages).filter(([, stage]) => stage.status === "DEFERRED").map(([name]) => name),
   current_stage: report.current_stage,
   cause,
   changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
@@ -402,17 +415,25 @@ export function kitPostcheckDetail(postcheck: KitPostcheck, roots: readonly stri
  } : cause ? { current_stage: null, cause, failures: [] } : null;
 }
 
-/** The `update --apply` CLI envelope. A failed postcheck names its stages and changed operator paths so the operator can act. */
+/**
+ * The `update --apply` CLI envelope. A failed postcheck names its stages and changed operator paths so the operator can act;
+ * one heavy admission deferred is UNVERIFIED, not FAIL, and says so.
+ */
 export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult): PresentationResult {
  const postcheckDetail = kitPostcheckDetail(outcome.postcheck, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]);
  const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
- return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" ? "FAIL" : "UNVERIFIED",
+ const deferred = outcome.postcheck.status === "DEFERRED";
+ return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" && !deferred ? "FAIL" : "UNVERIFIED",
   scope: "kit", action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,
   provenance: outcome.provenance, matcher: outcome.postcheck.matcher, live: outcome.postcheck.live,
   postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null, postcheck_detail: postcheckDetail },
   ...(recover ? { commands: [recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
-   message: `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
-   remediation: `Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
+   message: deferred
+    ? `Kit update to ${plan.release.version} is active but unverified: heavy admission deferred its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`
+    : `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
+   remediation: deferred
+    ? `Run omp-kit test --full --record when load allows heavy work. To return to ${plan.current.version} and clear the pending receipt: ${recover}`
+    : `Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
   verification: "UNVERIFIED" };
 }
 
