@@ -1,0 +1,1 @@
+FLEETOPTIN1 (ompkit-26xhq): opt this repo into the shipped fleet guards with `.omp/fleet.json {"enabled": true}`. Until now fleet-guard (scratch writes, blanket git, TMPDIR to owned scratch), kit-save-guard (write ledger) and kit-agent-mail-guard returned early in every fleet repo, because no repo had the opt-in file.
