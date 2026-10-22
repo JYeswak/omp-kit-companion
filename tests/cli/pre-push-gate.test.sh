@@ -439,7 +439,8 @@ git -C "$realrepo" config user.name "worker-1"
 git -C "$realrepo" config core.hooksPath "$realrepo/.git/hooks"
 cp "$ADAPTER" "$realrepo/scripts/pre-push-gate.sh"
 cp "$KITREPO/scripts/regexploit-gate.py" "$realrepo/scripts/regexploit-gate.py"
-git -C "$realrepo" add -- scripts/pre-push-gate.sh scripts/regexploit-gate.py
+cp "$KITREPO/scripts/pysafe.py" "$realrepo/scripts/pysafe.py"
+git -C "$realrepo" add -- scripts/pre-push-gate.sh scripts/regexploit-gate.py scripts/pysafe.py
 git -C "$realrepo" commit -qm "[test] ompkit-xade baseline"
 git init -q --bare "$remote"
 git -C "$realrepo" remote add origin "$remote"
