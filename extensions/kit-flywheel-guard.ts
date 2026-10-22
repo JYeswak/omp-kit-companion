@@ -1381,9 +1381,12 @@ export function checkBashAdmission(event: FlywheelToolCallEvent, owner: string |
 	const timeout = field(event.input, "timeout");
 	const givenDeadline = typeof timeout === "number" ? timeout : timeout === undefined ? null : "unknown" as const;
 	if (service) {
+		// GUARDNAME1 (ompkit-4w68n): `name` alone makes a call a long-lived service. A finite command that carries it
+		// (codex seats label calls with it) needs `name` dropped, not readiness added (CopperTrout, 2026-10-22).
+		const finiteFirst = "this call sets name, which runs it as a long-lived service; for finite work drop name";
 		if (async || timeout !== undefined) return bashAdmissionRefusal(
 			"SERVICE_MODE_CONFLICT", command, "named services use readiness and lifecycle, not finite async or timeout fields",
-			"remove async and timeout, then provide a readiness condition for a long-lived service",
+			`${finiteFirst} (then async and timeout are allowed); for a real service remove async and timeout and provide a readiness condition`,
 			attribution, givenDeadline,
 		);
 		if (serviceCommandIsFinite(command)) return bashAdmissionRefusal(
@@ -1393,7 +1396,7 @@ export function checkBashAdmission(event: FlywheelToolCallEvent, owner: string |
 		);
 		if (!hasServiceReadiness(field(event.input, "ready"))) return bashAdmissionRefusal(
 			"SERVICE_READINESS_REQUIRED", command, "a named service needs a log or port readiness condition and native lifecycle",
-			"provide ready.log or a valid ready.port; finite work must use the finite-command path",
+			`${finiteFirst}; for a real service provide ready.log or a valid ready.port`,
 			attribution, null,
 		);
 		return undefined;

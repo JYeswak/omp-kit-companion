@@ -372,10 +372,16 @@ test("BGDEADLINE1: unknown and service refusals carry job and deadline", async (
 	expect(conflict.code).toBe("SERVICE_MODE_CONFLICT");
 	expect(conflict.job).toBe("c1");
 	expect(conflict.deadline).toBe(10);
+	expect(conflict.next).toStartWith("this call sets name, which runs it as a long-lived service; for finite work drop name");
 	const unready = JSON.parse((await bashInput(h, { command: "bun run dev", name: "web" }))?.reason ?? "{}");
 	expect(unready.code).toBe("SERVICE_READINESS_REQUIRED");
 	expect(unready.job).toBe("c1");
 	expect(unready.deadline).toBeNull();
+	// GUARDNAME1 planted: the finite command a codex seat labelled with `name` is told to drop it, first.
+	const labelled = JSON.parse((await bashInput(h, { command: "br show ompkit-1 --json", name: "br-show", timeout: 60 }))?.reason ?? "{}");
+	expect(labelled.code).toBe("SERVICE_MODE_CONFLICT");
+	expect(labelled.next).toStartWith("this call sets name, which runs it as a long-lived service; for finite work drop name");
+	expect(unready.next).toStartWith("this call sets name, which runs it as a long-lived service; for finite work drop name");
 	expect(h.execs).toHaveLength(0);
 });
 
