@@ -45,7 +45,8 @@ function ensureStorage(root: string): { jobs: string; lock: string } {
  * SAVEFIRST1 (ompkit-774u.16): `override` is `--disk-observer`; it replaces
  * load.json's disk_observer for one call, so a save path (the pre-push gate)
  * can admit on physical bytes alone while sbh's policy floor stays a flag, not
- * a veto. The floor and every other setting still come from load.json.
+ * a veto. A caller override to statfs also ignores load.json's percentage floor;
+ * every other setting remains unchanged.
  */
 function loadConfig(override?: DiskObserver): HeavyConfig {
 	const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "omp-kit", "load.json");
@@ -67,7 +68,7 @@ function loadConfig(override?: DiskObserver): HeavyConfig {
 		throw new Error(`invalid heavy-work config: disk_observer must be "sbh", "statfs" or "auto": ${path}`);
 	if (floor !== null && (typeof floor !== "number" || !Number.isFinite(floor) || floor < 0 || floor > 50))
 		throw new Error(`invalid heavy-work config: disk_floor_pct must be 0..50: ${path}`);
-	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: floor };
+	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: override === "statfs" ? null : floor };
 }
 
 export function machineLoadBlockReason(load1: number, ncpu: number): string | null {
@@ -299,13 +300,6 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		process.stderr.write("heavy: expected `omp-kit heavy [--label LABEL] [--no-wait] [--disk-observer statfs|sbh|auto] -- <command...>`\n");
 		return 2;
 	}
-	// DISKSTAGE-WIRE1: staged statvfs admission is the real heavy entrypoint gate.
-	// It runs before queue/state mutation, so STOP and CRITICAL cannot enqueue work.
-	const staged = admitDiskWork("heavy");
-	if (!staged.allowed) {
-		process.stdout.write(`${staged.code}\n`);
-		return staged.code === "DISK_OBSERVER_UNAVAILABLE" ? HEAVY_PREREQ_MISSING : 10;
-	}
 	const envObserver = process.env.OMP_KIT_DISK_OBSERVER;
 	const envOverride = envObserver === undefined || envObserver === "" ? undefined : envObserver;
 	// SAVEFIRST1 (ompkit-774u.16): OMP_KIT_DISK_OBSERVER is the ambient form of
@@ -317,6 +311,13 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		const source = options.diskObserver !== undefined ? "--disk-observer" : "OMP_KIT_DISK_OBSERVER";
 		process.stderr.write(`heavy: ${source} must be "statfs", "sbh" or "auto", got "${override}"; no command was run\n`);
 		return 2;
+	}
+	// A caller-selected statfs observer makes the physical 10 GiB verdict
+	// authoritative; the later check still refuses low or unavailable capacity.
+	const staged = admitDiskWork("heavy", process.cwd(), { allowLowPercentForStatfs: override === "statfs" });
+	if (!staged.allowed) {
+		process.stdout.write(`${staged.code}\n`);
+		return staged.code === "DISK_OBSERVER_UNAVAILABLE" ? HEAVY_PREREQ_MISSING : 10;
 	}
 	const observerOverride = override as DiskObserver | undefined;
 	let config: HeavyConfig;

@@ -253,10 +253,16 @@ function saveFixture(sbhCode: number, config: Record<string, number>): SaveFixtu
 	chmodSync(join(bin, "sbh"), 0o755);
 	const fakeBun = join(bin, "bun");
 	const statfsPreload = join(root, "tests/cli/fixtures/forge-healthy-statfs.ts");
+	const runPrefix = `exec "${process.execPath}"`;
+	const healthyRunPrefix = `${runPrefix} --preload "${statfsPreload}"`;
 	writeFileSync(fakeBun, `#!/bin/sh
 if [ "$1" = "run" ]; then
   shift
-  exec "${process.execPath}" --preload "${statfsPreload}" "$@"
+  if [ "$FRESH_GATE_TEST_REAL_STATFS" = "1" ]; then
+    ${runPrefix} "$@"
+  else
+    ${healthyRunPrefix} "$@"
+  fi
 fi
 exec "${process.execPath}" "$@"
 `);
@@ -330,6 +336,7 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted (b): below the 10 GiB physica
 	const low = mkdtempSync(join(LOW_BASE as string, "fresh-gate-lowfs."));
 	try {
 		writeFileSync(join(low, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-lowfs\ncreated=${new Date().toISOString()}\n`);
+		fx.env.FRESH_GATE_TEST_REAL_STATFS = "1";
 		expect(freeBytes(low)).toBeLessThan(NEED_BYTES);
 		// The step runs in the archive; here the archive's src is the checkout's, reached from the small filesystem.
 		symlinkSync(join(root, "src"), join(low, "src"));

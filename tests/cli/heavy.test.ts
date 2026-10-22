@@ -678,6 +678,47 @@ test("oq1h.1 native: a floor above the measured percent defers through diskVerdi
 	}
 });
 
+test("SAVEFIRST1: explicit statfs saves bypass percent-stage refusal but auto and sbh retain it", async () => {
+	const root = fixture();
+	configure(root, { slots: 8, max_wait_s: 1, disk_observer: "auto", disk_floor_pct: 20 });
+	const statfsFixture = join(root, "nine-percent-statfs.ts");
+	writeFileSync(statfsFixture, `
+import { mock } from "bun:test";
+import * as realFs from "node:fs";
+const snapshot = { ...realFs };
+const realStatfs = realFs.statfsSync;
+function ninePercentStatfs(path: realFs.PathLike, options?: never) {
+	const observed = realStatfs(path, options);
+	const blockSize = Number(observed.bsize);
+	const bavail = Math.floor((12 * 1024 ** 3) / blockSize);
+	return { ...observed, bavail, blocks: Math.ceil(bavail / 0.09) };
+}
+mock.module("node:fs", () => ({ ...snapshot, default: { ...snapshot, statfsSync: ninePercentStatfs }, statfsSync: ninePercentStatfs }));
+`);
+	const marker = join(root, "explicit-statfs-marker");
+	const admittedByFlag = await invoke(root,
+		["heavy", "--no-wait", "--disk-observer", "statfs", "--label", "save-statfs-flag", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ PATH: NO_SBH_PATH }, { preload: statfsFixture });
+	expect(admittedByFlag.code).toBe(0);
+	expect(readFileSync(marker, "utf8")).toBe("ran");
+
+	const envMarker = join(root, "env-statfs-marker");
+	const admittedByEnvironment = await invoke(root,
+		["heavy", "--no-wait", "--label", "save-statfs-env", "--", "sh", "-c", `printf ran > '${envMarker}'`],
+		{ OMP_KIT_DISK_OBSERVER: "statfs", PATH: NO_SBH_PATH }, { preload: statfsFixture });
+	expect(admittedByEnvironment.code).toBe(0);
+	expect(readFileSync(envMarker, "utf8")).toBe("ran");
+
+	for (const observer of ["auto", "sbh"] as const) {
+		configure(root, { slots: 8, max_wait_s: 1, disk_observer: observer });
+		const generic = await invoke(root,
+			["heavy", "--no-wait", "--label", `generic-${observer}`, "--", "sh", "-c", "exit 0"],
+			{ PATH: NO_SBH_PATH }, { preload: statfsFixture });
+		expect(generic.code).toBe(10);
+		expect(generic.stdout).toContain("DISK_HEAVY_REFUSED");
+	}
+});
+
 // ---- SAVEFIRST1 (ompkit-774u.16): --disk-observer lets a save path admit on physical bytes -------------
 // The fixture disk must really hold the 10 GiB need for the "ample bytes" half; a runner without it
 // skips by name rather than passing on a different state.
@@ -729,7 +770,7 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted: --disk-observer statfs still
 		configure(root, { slots: 8, max_wait_s: 1 });
 		const marker = join(root, "lowfs-marker");
 		const result = await invoke(root, ["heavy", "--no-wait", "--disk-observer", "statfs", "--label", "lowfs-save", "--", "sh", "-c", `printf ran > '${marker}'`],
-			{ PATH: `${fakeSbh(root, 0, "native-bin")}:${NO_SBH_PATH}` }, { cwd });
+			{ PATH: `${fakeSbh(root, 0, "native-bin")}:${NO_SBH_PATH}` }, { cwd, preload: null });
 		expect(result.code).toBe(75);
 		expect(result.stderr).toContain("deferred: disk low (statfs) (--no-wait)");
 		expect(existsSync(marker)).toBe(false);

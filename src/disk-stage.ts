@@ -13,7 +13,7 @@ const BEAD = "ompkit-774u.9.8.1";
 export type DiskStage = "ok" | "warn" | "stop" | "critical" | "unknown";
 export type DiskRefusal = "DISK_HEAVY_REFUSED" | "DISK_WAVE_REFUSED" | "DISK_OBSERVER_UNAVAILABLE";
 export type DiskAdmission = { allowed: true; stage: DiskStage; freePct: number } | { allowed: false; stage: DiskStage; freePct: number | null; code: DiskRefusal; reaper: ReaperObservation };
-export type DiskStageOptions = { stateDir?: string; platform?: string; reaper?: ServiceRunner; readFreePct?: (path: string) => number | null; nowMs?: number };
+export type DiskStageOptions = { stateDir?: string; platform?: string; reaper?: ServiceRunner; readFreePct?: (path: string) => number | null; nowMs?: number; allowLowPercentForStatfs?: boolean };
 export type ReaperObservation = {
 	action: "NOOP" | "WARN" | "UNKNOWN" | "UNSUPPORTED" | "RECLAIM_TRIGGERED" | "RECLAIM_TRIGGER_FAILED";
 	command: readonly string[] | null;
@@ -93,6 +93,10 @@ export function admitDiskWork(kind: "heavy" | "wave", path = process.cwd(), opti
 		return { allowed: false, stage: "unknown", freePct, code: "DISK_OBSERVER_UNAVAILABLE", reaper: empty };
 	}
 	if (stage === "stop" || stage === "critical") {
+		if (kind === "heavy" && options.allowLowPercentForStatfs) {
+			receipt(root, stage, freePct, "heavy-admit-statfs-physical-check");
+			return { allowed: true, stage, freePct };
+		}
 		const action = reaper(root, freePct, options);
 		const code = kind === "heavy" ? "DISK_HEAVY_REFUSED" : "DISK_WAVE_REFUSED";
 		receipt(root, stage, freePct, `${kind}-refused`, { code, reaper: action });
