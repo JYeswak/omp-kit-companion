@@ -283,6 +283,36 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		if (rows === null) return { ok: false, why: `\`${amBin} agents list\` returned an unexpected shape` };
 		return { ok: true, rows };
 	}
+	async function exactAgent(projectKey: string, name: string, timeoutMs = AM_ROSTER_TIMEOUT_MS): Promise<{ ok: true; exists: boolean } | { ok: false; why: string }> {
+		let result;
+		try {
+			result = await pi.exec(amBin, ["agents", "show", "-p", projectKey, name, "--json"], { timeout: timeoutMs });
+		} catch (error) {
+			return { ok: false, why: error instanceof Error ? error.message : String(error) };
+		}
+		if (result.killed) return { ok: false, why: "exact lookup timed out" };
+		if (result.code !== 0) {
+			const jsonStart = result.stderr.indexOf("{");
+			if (jsonStart >= 0) {
+				try {
+					const error = JSON.parse(result.stderr.slice(jsonStart));
+					const detail = prop(prop(error, "error"), "data");
+					if (prop(prop(error, "error"), "type") === "AGENT_NOT_FOUND"
+						&& prop(detail, "agent_name") === name
+						&& prop(detail, "project") === projectKey) return { ok: true, exists: false };
+				} catch { /* An unrecognized failure is not proof of absence. */ }
+			}
+			return { ok: false, why: "exact lookup failed without authoritative AGENT_NOT_FOUND" };
+		}
+		let payload: unknown;
+		try { payload = JSON.parse(result.stdout); }
+		catch { return { ok: false, why: "exact lookup returned unparseable output" }; }
+		if (prop(payload, "name") !== name || typeof prop(payload, "project_id") !== "number"
+			|| !Number.isSafeInteger(prop(payload, "project_id")) || (prop(payload, "project_id") as number) <= 0) {
+			return { ok: false, why: "exact lookup returned a mismatched name or invalid project identity" };
+		}
+		return { ok: true, exists: true };
+	}
 
 	async function cachedRoster(projectKey: string, fresh = false): Promise<{ ok: true; rows: MailRosterRow[] } | { ok: false; why: string }> {
 		const hit = rosterCache.get(projectKey);
@@ -404,13 +434,20 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		}
 		const missing = recipients.filter(name => !roster.rows.some(row => row.name.toLowerCase() === name.toLowerCase()));
 		if (missing.length > 0) {
-			roster = await cachedRoster(key, true);
-			if (roster.ok) {
-				const stillMissing = recipients.filter(name => !roster.rows.some(row => row.name.toLowerCase() === name.toLowerCase()));
-				if (stillMissing.length === 0) return undefined;
-				return phantomRefusal(key, stillMissing[0]!, ctx.cwd);
+			const refreshed = await cachedRoster(key, true);
+			const stillMissing = refreshed.ok
+				? recipients.filter(name => !refreshed.rows.some(row => row.name.toLowerCase() === name.toLowerCase()))
+				: missing;
+			if (stillMissing.length > 5) return refuse("AM_ROSTER_UNAVAILABLE", "too many recipients are absent from the capped roster for bounded exact checks.");
+			const deadline = now() + scanBudgetMs;
+			for (const name of stillMissing) {
+				const remainingMs = deadline - now();
+				if (remainingMs <= 0) return refuse("AM_ROSTER_UNAVAILABLE", "the bounded exact-recipient lookup budget expired.");
+				const exact = await exactAgent(key, name, Math.min(AM_ROSTER_TIMEOUT_MS, remainingMs));
+				if (!exact.ok) return refuse("AM_ROSTER_UNAVAILABLE", `the exact lookup for "${name}" in ${key} was unavailable or malformed; registration is unknown, so the send is refused.`);
+				if (!exact.exists) return phantomRefusal(key, name, ctx.cwd);
 			}
-			return phantomRefusal(key, missing[0]!, ctx.cwd);
+			return undefined;
 		}
 		for (const name of recipients) {
 			const row = roster.rows.find(candidate => candidate.name.toLowerCase() === name.toLowerCase())!;

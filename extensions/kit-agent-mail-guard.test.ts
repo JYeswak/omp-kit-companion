@@ -497,9 +497,45 @@ const LOCALBENCH = "/Users/josh/Developer/localbench";
 /** Every exec the guard may issue is a read; the guard never registers, writes, or deletes. */
 function execsAreReadsOnly(execs: ExecCall[]): boolean {
 	return execs.every(call =>
-		(call.command === "am" && (call.args[1] === "list" || call.args[1] === "projects"))
+		(call.command === "am" && (call.args[1] === "list" || call.args[1] === "projects" || call.args[1] === "show"))
 		|| call.command === "br" || call.command === "tmux");
 }
+test("phantom capped roster: exact project-scoped lookup admits a valid older recipient", async () => {
+	const rows = Array.from({ length: 250 }, (_, index) => mailRow(`Recent${index}`));
+	rows[0] = mailRow("PlumRaven");
+	const respond: Responder = call => {
+		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "list") return { stdout: JSON.stringify(rows), stderr: "", code: 0 };
+		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "show") return { stdout: JSON.stringify({ id: 851, name: "OldRecipient", project_id: 233 }), stderr: "", code: 0 };
+		return fleetRespond({ [OMPKIT]: [mailRow("PlumRaven")] })(call);
+	};
+	const host = await createHost({}, respond);
+	expect(await host.mail(fleetRepo(), "send_message", send({ project_key: OMPKIT, to: ["OldRecipient"], cc: [] }))).toBeUndefined();
+	expect(host.execs.some(call => call.command === "am" && call.args.join(" ") === `agents show -p ${OMPKIT} OldRecipient --json`)).toBe(true);
+	expect(execsAreReadsOnly(host.execs)).toBe(true);
+});
+
+test("phantom capped roster: authoritative absence refuses; malformed, unavailable and wrong-name exact results remain unknown", async () => {
+	const rows = Array.from({ length: 250 }, (_, index) => mailRow(`Recent${index}`));
+	rows[0] = mailRow("PlumRaven");
+	const respondWith = (exact: FlywheelExecResult): Responder => call => {
+		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "list") return { stdout: JSON.stringify(rows), stderr: "", code: 0 };
+		if (call.command === "am" && call.args[0] === "agents" && call.args[1] === "show") return exact;
+		if (call.command === "am" && call.args[0] === "robot") return { stdout: JSON.stringify({ projects: [{ path: OMPKIT, agents: 250 }] }), stderr: "", code: 0 };
+		return brKnows(BEAD)(call);
+	};
+	const absent = await createHost({}, respondWith({ stdout: "", stderr: JSON.stringify({ error: { type: "AGENT_NOT_FOUND", data: { agent_name: "Missing", project: OMPKIT } } }), code: 1 }));
+	expect(code(await absent.mail(fleetRepo(), "send_message", send({ project_key: OMPKIT, to: ["Missing"], cc: [] })))).toBe("AM_PHANTOM_REFUSED");
+	for (const result of [
+		{ stdout: "not json", stderr: "", code: 0 },
+		{ stdout: "", stderr: "temporary server failure", code: 1 },
+		{ stdout: JSON.stringify({ id: 2, name: "Different", project_id: 233 }), stderr: "", code: 0 },
+		{ stdout: JSON.stringify({ id: 2, name: "Missing", project_id: 233 }), stderr: "", code: 0, killed: true },
+	]) {
+		const host = await createHost({}, respondWith(result));
+		expect(code(await host.mail(fleetRepo(), "send_message", send({ project_key: OMPKIT, to: ["Missing"], cc: [] })))).toBe("AM_ROSTER_UNAVAILABLE");
+	}
+});
+
 
 test("phantom (a): a send to a name registered only elsewhere is refused naming that project; no registration happens", async () => {
 	const h = await createHost({}, fleetRespond({
