@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCaseCorpus } from "../../src/case-corpus.ts";
@@ -78,5 +79,42 @@ describe("mechanical admission dispatch", () => {
 			await expect(assertDeterministicAdmission(c, { kit: KIT, evaluate: flipping }), `line ${c.line}`).rejects.toThrow(NONDETERMINISM_ERROR);
 			await expect(mechanicalVerdicts(c, WIDTHS, { kit: KIT, evaluate: flipping }), `line ${c.line}`).rejects.toThrow(NONDETERMINISM_ERROR);
 		}
+	});
+});
+
+// FLEETOPTIN1 (ompkit-26xhq) live probe 2026-10-22: fleet-guard set a seat's TMPDIR to its own
+// var/agent-tmp/omp.<pid> dir, then refused every write-tool write into it ("scratch ownership metadata is
+// invalid"): the admission parser accepted only the four legacy keys, never the seat owner fleet-guard
+// writes (agent/session/bin) or the JSON owner `omp-kit scratch new` writes.
+describe("scratch admission reads every owner form the kit writes", () => {
+	function repoWithOwner(owner: (repo: string) => string): { repo: string; target: string } {
+		const repo = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "owner-forms.")));
+		Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-C", repo, "init", "--quiet"]);
+		mkdirSync(join(repo, ".omp"));
+		writeFileSync(join(repo, ".omp/fleet.json"), '{"enabled":true}\n');
+		const scratch = join(repo, "var/agent-tmp/probe.4242");
+		mkdirSync(scratch, { recursive: true });
+		writeFileSync(join(scratch, ".owner"), owner(repo));
+		return { repo, target: join(scratch, "notes.txt") };
+	}
+	async function blocked(owner: (repo: string) => string): Promise<string | undefined> {
+		const { repo, target } = repoWithOwner(owner);
+		try {
+			const verdict = await durabilityCheck({ toolName: "write", input: { path: target, content: "raw capture\n" }, cwd: repo }, { cwd: repo });
+			return verdict?.block === true ? verdict.reason : undefined;
+		} finally { rmSync(repo, { recursive: true, force: true }); }
+	}
+	const created = "2026-10-22T04:40:41.583Z";
+	test("the seat owner fleet-guard writes (agent, session, bin) admits a write", async () => {
+		expect(await blocked(repo => `pid=4242\nlabel=omp\nrepo=${repo}\ncreated=${created}\nagent=FleetOptinProbe\nsession=01a161e9-4b73-761b-b7e9-2af2c2f494ce\nbin=throwaway\n`)).toBeUndefined();
+	});
+	test("the JSON owner `omp-kit scratch new` writes admits a write", async () => {
+		expect(await blocked(repo => JSON.stringify({ pid: 4242, process_start: "Wed Oct 21 22:40:00 2026", label: "probe", repo, created_at: created, argv0: "/omp-kit", agent: "PeachLeopard", session: "01a14ff8-63a4-7533-9e1f-54ac1fa2eff9", bead: "ompkit-26xhq" }))).toBeUndefined();
+	});
+	test("planted: an owner naming another repository is still refused", async () => {
+		expect(await blocked(() => `pid=4242\nlabel=omp\nrepo=/nonexistent/elsewhere\ncreated=${created}\n`)).toContain("does not identify this repository");
+	});
+	test("planted: malformed owner metadata is still refused", async () => {
+		expect(await blocked(() => "pid=4242\npid=4243\nlabel=omp\n")).toContain("scratch ownership metadata is invalid");
 	});
 });

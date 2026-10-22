@@ -7,6 +7,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { resolveFilesystemWriteTarget, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "./scratch.ts";
 import { pathToFileURL } from "node:url";
 import { resolveOmpIdentity } from "../paths.ts";
+import { parseOwnerFile } from "../scratch.ts";
 
 const LIMIT = 1_048_576;
 const INDEX_LIMIT = 8 * LIMIT;
@@ -165,15 +166,13 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			const scratch = join(scratchRoot, beneath[0]!);
 			const ownerPath = join(scratch, ".owner");
 			if ((await lstat(ownerPath)).isSymbolicLink()) return refuse("scratch ownership metadata is a symlink");
-			const owner = await readBounded(ownerPath, 4096);
-			const fields = new Map<string, string>();
-			for (const line of owner.trimEnd().split("\n")) {
-				const match = /^(pid|label|repo|created)=(.+)$/.exec(line);
-				if (!match || fields.has(match[1]!)) return refuse("scratch ownership metadata is invalid");
-				fields.set(match[1]!, match[2]!);
-			}
-			if (fields.size !== 4 || !/^[1-9]\d*$/.test(fields.get("pid") ?? "") || !Number.isFinite(Date.parse(fields.get("created") ?? "")) ||
-				await realpath(fields.get("repo")!) !== repo) return refuse("scratch ownership metadata does not identify this repository");
+			// The one owner parser the kit writes against: the seat owner (agent/session/bin) and the JSON owner
+			// from `omp-kit scratch new` are both owned scratch, not invalid metadata (ompkit-26xhq).
+			const owner = parseOwnerFile(await readBounded(ownerPath, 4096));
+			if (owner === null) return refuse("scratch ownership metadata is invalid");
+			const ownerRepo = await realpath(owner.repo).catch(() => null);
+			if (!Number.isInteger(owner.pid) || owner.pid < 1 || !Number.isFinite(Date.parse(owner.createdAt)) || ownerRepo !== repo)
+				return refuse("scratch ownership metadata does not identify this repository");
 			const snapshot = await git(repo, ["ls-files", "--stage", "-z"]);
 			const canonical = relative(scratch, physical);
 			const blobs = new Set<string>();
