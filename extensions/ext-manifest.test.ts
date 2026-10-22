@@ -9,6 +9,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import secretOutputGuard from "./secret-output-guard";
 import * as writeLedger from "./kit-write-ledger";
+import * as mailWake from "./kit-mail-wake";
 const ROOT = resolve(import.meta.dir, "..");
 
 export interface ExtensionManifest {
@@ -123,4 +124,22 @@ test("every manifest entry names a real file, and no file is both listed and not
 	}
 	const overlap = manifest.extensions.filter((file) => file in manifest.notLoadedExtensions);
 	expect(overlap).toEqual([]);
+});
+
+test("every loaded manifest entry default-exports an extension factory (omp refuses anything else on every fresh seat)", async () => {
+	const manifest = loadManifest(ROOT);
+	const bad: string[] = [];
+	for (const entry of manifest.extensions) {
+		// Runtime-selected: the entry list is read from package.json, so a static import cannot name it.
+		const mod = await import(join(ROOT, entry));
+		if (typeof mod.default !== "function") bad.push(entry);
+	}
+	// Planted 2026-10-22 (0.2.63): kit-mail-wake.ts, a library module, was listed and every new seat warned
+	// "Extension does not export a valid factory function".
+	expect(bad).toEqual([]);
+});
+
+test("planted: kit-mail-wake is a library module (no factory), so listing it as loaded fails the check above", () => {
+	expect("default" in mailWake).toBe(false);
+	expect(typeof mailWake.createMailWake).toBe("function");
 });

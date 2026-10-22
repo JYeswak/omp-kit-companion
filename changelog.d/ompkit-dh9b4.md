@@ -1,0 +1,1 @@
+MAILWAKEREG1 (ompkit-dh9b4): stop registering the library module extensions/kit-mail-wake.ts as an omp extension. It has no factory, and every fresh seat on 0.2.63 warned 'Extension does not export a valid factory function'. kit-agent-mail-guard already imports it. ext-manifest.test.ts now imports every loaded entry and requires a default-exported factory.

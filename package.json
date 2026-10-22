@@ -18,13 +18,13 @@
       "extensions/kit-upgrade-notice.ts",
       "extensions/kit-goal-keepalive.ts",
       "extensions/kit-agent-mail-guard.ts",
-      "extensions/secret-output-guard.ts",
-      "extensions/kit-mail-wake.ts"
+      "extensions/secret-output-guard.ts"
     ],
     "notLoadedExtensions": {
       "extensions/adapter.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/cass-search.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/dcg-tool-bridge.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
+      "extensions/kit-mail-wake.ts": "library module with no extension entrypoint; imported by extensions/kit-agent-mail-guard.ts",
       "extensions/delete-effect-admission.ts": "library module with no extension entrypoint; imported by extensions/slb-guard-fail-closed.ts",
       "extensions/ee-ambient-session-start.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/ee-failure-journal.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
