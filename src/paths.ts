@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { cachedOmpPackage, ensureOmpSource, ompSourceCacheRoot } from "./omp-source-cache.ts";
+import { cachedOmpPackage, ensureOmpSource, hasRequiredOmpSourceFiles, ompSourceCacheRoot } from "./omp-source-cache.ts";
 import { accessSync, closeSync, constants, existsSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -310,9 +310,7 @@ function ternManagedPackage(launcher: string, version: string | null, env: Recor
 	} catch {
 		return null;
 	}
-	for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) {
-		if (!existsSync(join(pkg, "src", file))) return null;
-	}
+	if (!hasRequiredOmpSourceFiles(join(root, version))) return null;
 	return realpath(pkg, "OMP Tern-managed package");
 }
 function packageRootFor(launcher: string, env: Record<string, string | undefined>): string {

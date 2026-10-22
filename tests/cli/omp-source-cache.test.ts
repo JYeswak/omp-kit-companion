@@ -13,6 +13,12 @@ afterAll(() => rmSync(base, { recursive: true, force: true }));
 let n = 0;
 const fresh = () => join(base, `cache-${++n}`);
 const PKG = ["node_modules", "@oh-my-pi", "pi-coding-agent"];
+const OTEL_RUNTIME_ENTRY = "node_modules/@opentelemetry/api/dist/index.mjs";
+function addOtelRuntime(versionDir: string): void {
+	const entry = join(versionDir, OTEL_RUNTIME_ENTRY);
+	mkdirSync(join(entry, ".."), { recursive: true });
+	writeFileSync(entry, "export const context = {};\n");
+}
 
 /** What a successful `bun add` leaves behind; every field can be planted wrong. */
 function fakeInstall(opts: { version?: string; integrity?: string | null; matcher?: boolean; status?: number } = {}) {
@@ -28,6 +34,7 @@ function fakeInstall(opts: { version?: string; integrity?: string | null; matche
 		mkdirSync(join(cwd, "node_modules", "@oh-my-pi", "pi-natives"), { recursive: true });
 		writeFileSync(join(cwd, "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives", version }));
 		writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
+		addOtelRuntime(cwd);
 		for (const file of opts.matcher === false ? ["export/ttsr.ts"] : ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) {
 			writeFileSync(join(pkg, "src", file), "export {};\n");
 		}
@@ -85,6 +92,18 @@ test("cached source refuses a forged or mismatched registry receipt", () => {
 		writeFileSync(receipt, JSON.stringify({ ...original, ...patch }));
 		expect(cachedOmpPackage("9.9.9", env)).toBeNull();
 	}
+});
+test("a cached package missing a declared runtime entrypoint is rejected and repaired", () => {
+	const cache = fresh();
+	const env = { OMP_KIT_OMP_SRC_CACHE: cache };
+	const pkg = ensureOmpSource("9.9.9", env, { install: fakeInstall().install });
+	const entry = join(cache, "9.9.9", OTEL_RUNTIME_ENTRY);
+	rmSync(entry);
+	expect(cachedOmpPackage("9.9.9", env)).toBeNull();
+	const repair = fakeInstall();
+	expect(ensureOmpSource("9.9.9", env, { install: repair.install })).toBe(pkg);
+	expect(repair.calls).toEqual(["@oh-my-pi/pi-coding-agent@9.9.9"]);
+	expect(existsSync(entry)).toBe(true);
 });
 
 test("Tern observe identity binds launcher bytes and exact-version cached source", () => {
@@ -170,6 +189,7 @@ function ternManaged(stated: string | null, pkgVersion: string | null, matcher =
 		mkdirSync(join(cache, "9.9.9", "node_modules", "@oh-my-pi", "pi-natives"), { recursive: true });
 		writeFileSync(join(cache, "9.9.9", "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives", version: pkgVersion }));
 		writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: pkgVersion }));
+		addOtelRuntime(join(cache, "9.9.9"));
 		for (const file of matcher ? ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"] : ["export/ttsr.ts", "capability/rule.ts"]) {
 			writeFileSync(join(pkg, "src", file), "export {};\n");
 		}
@@ -181,6 +201,13 @@ test("product resolver: a Tern-managed launcher resolves its corroborated packag
 	const { path, cache } = ternManaged("9.9.9", "9.9.9");
 	const identity = resolveOmpIdentity({ PATH: path, BUN_INSTALL: join(base, "no-bun"), OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" });
 	expect(identity.source).toBe(realpathSync(join(cache, "9.9.9", ...PKG, "src")));
+});
+test("Tern-managed source refuses a package missing a required runtime dependency", () => {
+	const { path, cache } = ternManaged("9.9.9", "9.9.9");
+	rmSync(join(cache, "9.9.9", OTEL_RUNTIME_ENTRY));
+	expect(() => resolveOmpIdentity({
+		PATH: path, BUN_INSTALL: join(base, "no-bun"), OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0",
+	})).toThrow("OMP_KIT_OMP_SRC_FETCH=0");
 });
 
 test("planted: a Tern state.json naming another version still refuses", () => {

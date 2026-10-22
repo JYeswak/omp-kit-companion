@@ -30,6 +30,13 @@ export function ompSourceCacheRoot(env: Record<string, string | undefined>): str
 function packageDir(versionDir: string): string {
 	return join(versionDir, "node_modules", ...PACKAGE_NAME.split("/"));
 }
+const RUNTIME_MODULE_FILES = ["node_modules/@opentelemetry/api/dist/index.mjs"] as const;
+/** Source consumers load the package's OTel facade as well as the three matcher files. */
+export function hasRequiredOmpSourceFiles(versionDir: string): boolean {
+	const pkg = packageDir(versionDir);
+	return MATCHER_FILES.every(file => existsSync(join(pkg, "src", file))) &&
+		RUNTIME_MODULE_FILES.every(file => existsSync(join(versionDir, file)));
+}
 
 function manifestVersion(pkgDir: string): unknown {
 	try {
@@ -57,7 +64,7 @@ export function cachedOmpPackage(version: string, env: Record<string, string | u
 	} catch {
 		return null;
 	}
-	if (!MATCHER_FILES.every(file => existsSync(join(pkg, "src", file)))) return null;
+	if (!hasRequiredOmpSourceFiles(versionDir)) return null;
 	return pkg;
 }
 
@@ -120,6 +127,8 @@ export function ensureOmpSource(version: string, env: Record<string, string | un
 		if (got !== version) throw new Error(`installed ${PACKAGE_NAME} reports version ${String(got)}, not ${version}`);
 		const missing = MATCHER_FILES.filter(file => !existsSync(join(packageDir(staging), "src", file)));
 		if (missing.length) throw new Error(`installed ${spec} lacks matcher source: ${missing.join(", ")}`);
+		const missingRuntime = RUNTIME_MODULE_FILES.filter(file => !existsSync(join(staging, file)));
+		if (missingRuntime.length) throw new Error(`installed ${spec} lacks required runtime source: ${missingRuntime.join(", ")}`);
 		const integrity = lockIntegrity(staging, version);
 		if (!integrity) throw new Error(`bun.lock has no sha512 integrity for ${spec}`);
 		const receipt = { package: PACKAGE_NAME, version, integrity, installed_at: (deps.now ?? (() => new Date()))().toISOString(), installer: "bun add --exact --ignore-scripts" };
