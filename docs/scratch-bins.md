@@ -38,15 +38,17 @@ A hold outlives its dead owner until it expires, and shows as `LIVE held-by-bead
 ## Disposing of a directory
 
 ```
-omp-kit scratch release DIR --bin throwaway
-omp-kit scratch release DIR --bin evidence --ref file:docs/evidence/receipts/run.outputs.txt
-omp-kit scratch release DIR --bin promote  --ref file:scripts/probe.ts
-omp-kit scratch release DIR --bin evidence --ref bead:ompkit-774u.15
+omp-kit scratch release DIR --bin throwaway --now
+omp-kit scratch release DIR --bin evidence --ref file:docs/evidence/receipts/run.outputs.txt --now
+omp-kit scratch release DIR --bin promote  --ref file:scripts/probe.ts --now
+omp-kit scratch release DIR --bin evidence --ref bead:ompkit-774u.15 --now
 ```
 
-The release is the owner's act: the caller must be the owner (its process, a child of it, or the seat that holds the recorded session). The release marker records the bin and the reference next to the owner text, device and inode it already pins. Refusals name the reason without moving anything: `ref-required`, `ref-invalid`, `ref-outside-repo`, `ref-missing`, `ref-not-tracked`, `ref-bead-unverified`, `throwaway-takes-no-ref`, `ref-without-bin`, `hold-is-declared-at-creation` and `bin-needs-structured-owner` (a free-form legacy owner cannot be binned).
+The release is the owner's act: the caller must be the owner (its process, a child of it, or the seat that holds the recorded session). The release marker records the bin and the reference next to the owner text, device and inode it already pins. Refusals name the reason without moving anything: `ref-required`, `ref-invalid`, `ref-outside-repo`, `ref-missing`, `ref-not-tracked`, `ref-bead-unverified`, `throwaway-takes-no-ref`, `ref-without-bin`, `hold-is-declared-at-creation`, `bin-needs-structured-owner` (a free-form legacy owner cannot be binned) and `now-needs-bin`.
 
-A release without `--bin` still works and is counted as unbinned.
+`--now` retires the directory in the same turn, which is how a finished task disposes of its scratch (SCRATCHRETIRE1): a throwaway at once, evidence and promote only after their reference has been verified. It rechecks what the reaper's final delete checks: the same device and inode, the unchanged owner text, the owner inside the scratch root, and no open file. When any recheck fails, the directory and its marker stay, the command exits `SCRATCH_RELEASE_HELD` with the reason (`now-held-open-fds`, `now-held-lsof-unavailable`, `now-held-owner-changed`, ...), and the directory remains yours to retire: clear the cause and run the same release with `--now` again. The reaper is only a backstop. Without `--now` the release only marks the directory.
+
+A release without `--bin` still works and is counted as unbinned; it cannot take `--now`.
 
 ## A reap is a gap report
 

@@ -3461,10 +3461,16 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		if ((binFlag !== undefined && bin === undefined) || (refFlag !== undefined && typeof refFlag !== "string"))
 			return refusal("SCRATCH_RELEASE_BIN_INVALID", `--bin must be one of ${SCRATCH_BINS.join("|")} and --ref a file:PATH or bead:ID value`,
 				"Pass --bin throwaway, or --bin evidence|promote with --ref; a hold is declared when the directory is created.");
-		// Delete-at-once (ompkit-774u.15): --now deletes a released throwaway in the same turn after the
-		// reaper-grade rechecks; any doubt keeps the marked dir for the reaper (ok, now-held-* reason).
+		// Delete-at-once (ompkit-774u.15, SCRATCHRETIRE1): --now retires the released dir in the same turn after the
+		// reaper-grade rechecks; a failed recheck keeps the marked dir and is not success.
 		const now = request.flags.has("--now");
 		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}), ...(now ? { now: true as const } : {}) });
+		if (!released.ok && released.changed) {
+			releaseBudgetEntry(defaultBudgetLedgerPath(), released.dir);
+			return refusal("SCRATCH_RELEASE_HELD",
+				`Scratch released but not retired: ${released.reason}${released.detail ? ` — ${released.detail}` : ""}`,
+				"Clear the cause (close open files, restore the owner record), then rerun the same release with --now.");
+		}
 		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED",
 			`Scratch release refused: ${released.reason}${released.detail ? ` — ${released.detail}` : ""}`,
 			"Use the exact owned task directory from its owner process; no directory was quarantined.");

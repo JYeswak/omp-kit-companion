@@ -1,7 +1,8 @@
-// ompkit-774u.15 SCRATCHBIN1 delete-at-once: `release --bin throwaway --now` deletes the dir in the
-// same turn after the reaper-grade rechecks (pinned device+inode, unchanged owner, owner inside the
-// root, no open files). Any doubt keeps the marked dir for the reaper (ok, now-held-*); --now is
-// refused without a throwaway bin, on free-prose owners, and never touches a hold.
+// ompkit-774u.15 SCRATCHBIN1 delete-at-once + SCRATCHRETIRE1 (ompkit-fp72.120.16.37): `release --bin <bin> --now`
+// retires the dir in the same turn after the reaper-grade rechecks (pinned device+inode, unchanged owner, owner inside
+// the root, no open files): throwaway at once, evidence and promote after their reference verified. Any doubt keeps the
+// marked dir and is NOT success (ok false, now-held-*); --now is refused without a bin, on free-prose owners, and never
+// touches a hold.
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -59,29 +60,44 @@ test("a throwaway release with now deletes the dir at once and logs the deletion
 	expect(events.filter((e) => e.event === "release-deleted" && e.dir === dir && e.bin === "throwaway")).toHaveLength(1);
 });
 
-test("now without a throwaway bin is refused and the dir stays unmarked", () => {
+test("now without a bin is refused and the dir stays unmarked", () => {
 	const plain = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
-	expect(releaseScratch(plain.dir, plain.home, deps(), { now: true })).toMatchObject({ ok: false, reason: "now-needs-throwaway" });
+	expect(releaseScratch(plain.dir, plain.home, deps(), { now: true })).toMatchObject({ ok: false, reason: "now-needs-bin" });
 	expect(existsSync(plain.dir)).toBe(true);
 	expect(existsSync(join(plain.dir, ".omp-kit-release"))).toBe(false);
+});
+
+const gitTracked: ScratchRunner = (args) => args[0] === "git" ? { code: 0, stdout: "package.json\n", stderr: "" } : clearRun(args);
+const gitUntracked: ScratchRunner = (args) => args[0] === "git" ? { code: 1, stdout: "", stderr: "error: pathspec" } : clearRun(args);
+
+test("SCRATCHRETIRE1 AC2: evidence with a verified reference retires its source at once", () => {
 	const evidenced = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
-	const gitTracked: ScratchRunner = (args) => args[0] === "git" ? { code: 0, stdout: "package.json\n", stderr: "" } : clearRun(args);
+	writeFileSync(join(evidenced.dir, "run.out"), "measured");
 	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json", now: true }))
-		.toMatchObject({ ok: false, reason: "now-needs-throwaway" });
+		.toMatchObject({ ok: true, changed: true, reason: "owner-released-deleted" });
+	expect(existsSync(evidenced.dir)).toBe(false);
+	expect(logEvents(evidenced.home).filter((e) => e.event === "release-deleted" && e.bin === "evidence")).toHaveLength(1);
+});
+
+test("SCRATCHRETIRE1 AC2 planted: an untracked reference refuses and preserves the source, unmarked", () => {
+	const evidenced = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
+	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitUntracked }), { bin: "evidence", ref: "file:package.json", now: true }))
+		.toMatchObject({ ok: false, changed: false, reason: "ref-not-tracked" });
 	expect(existsSync(evidenced.dir)).toBe(true);
 	expect(existsSync(join(evidenced.dir, ".omp-kit-release"))).toBe(false);
 });
 
-test("an open file holds the marked dir for the reaper; missing lsof evidence holds too", () => {
+test("an open file or missing lsof evidence keeps the marked dir and is not success", () => {
 	const busy = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
 	writeFileSync(join(busy.dir, "open.txt"), "held");
 	const held = releaseScratch(busy.dir, busy.home, deps({ lsofSnapshot: new Set([join(busy.dir, "open.txt")]) }), { bin: "throwaway", now: true });
-	expect(held).toMatchObject({ ok: true, changed: true, reason: "now-held-open-fds" });
+	expect(held).toMatchObject({ ok: false, changed: true, reason: "now-held-open-fds" });
+	expect(held.detail).toContain("still yours to retire");
 	expect(existsSync(busy.dir)).toBe(true);
 	expect(existsSync(join(busy.dir, ".omp-kit-release"))).toBe(true);
 	const blind = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
 	const unknown = releaseScratch(blind.dir, blind.home, deps({ lsofSnapshot: null }), { bin: "throwaway", now: true });
-	expect(unknown).toMatchObject({ ok: true, changed: true, reason: "now-held-lsof-unavailable" });
+	expect(unknown).toMatchObject({ ok: false, changed: true, reason: "now-held-lsof-unavailable" });
 	expect(existsSync(blind.dir)).toBe(true);
 	expect(existsSync(join(blind.dir, ".omp-kit-release"))).toBe(true);
 });
@@ -106,26 +122,36 @@ test("planted: a throwaway released without now is retired by the owner's later 
 	expect(logEvents(marked.home).filter((e) => e.event === "release-deleted" && e.dir === marked.dir)).toHaveLength(1);
 });
 
-test("control: a re-release without now, or of a dir released as evidence, keeps the dir", () => {
+test("control: a re-release without now, or under a different bin or ref, keeps the dir", () => {
 	const marked = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
 	releaseScratch(marked.dir, marked.home, deps(), { bin: "throwaway" });
 	expect(releaseScratch(marked.dir, marked.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: false, reason: "already-released" });
 	expect(existsSync(marked.dir)).toBe(true);
 	const evidenced = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
-	const gitTracked: ScratchRunner = (args) => args[0] === "git" ? { code: 0, stdout: "package.json\n", stderr: "" } : clearRun(args);
 	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json" }))
 		.toMatchObject({ ok: true, reason: "owner-released" });
-	const again = releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "throwaway", now: true });
-	expect(again.reason).not.toBe("owner-released-deleted");
+	const asThrowaway = releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "throwaway", now: true });
+	expect(asThrowaway.reason).not.toBe("owner-released-deleted");
+	const otherRef = releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:README.md", now: true });
+	expect(otherRef.reason).not.toBe("owner-released-deleted");
 	expect(existsSync(evidenced.dir)).toBe(true);
 });
 
-test("retiring a marker-only throwaway with an open file holds the dir and keeps its marker", () => {
+test("planted: evidence released without now is retired by the owner's later same-ref release with now", () => {
+	const evidenced = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
+	releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json" });
+	expect(existsSync(evidenced.dir)).toBe(true);
+	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json", now: true }))
+		.toMatchObject({ ok: true, changed: true, reason: "owner-released-deleted" });
+	expect(existsSync(evidenced.dir)).toBe(false);
+});
+
+test("retiring a marker-only throwaway with an open file keeps the dir and its marker, not success", () => {
 	const busy = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
 	writeFileSync(join(busy.dir, "open.txt"), "held");
 	releaseScratch(busy.dir, busy.home, deps(), { bin: "throwaway" });
 	const held = releaseScratch(busy.dir, busy.home, deps({ lsofSnapshot: new Set([join(busy.dir, "open.txt")]) }), { bin: "throwaway", now: true });
-	expect(held.reason).toBe("now-held-open-fds");
+	expect(held).toMatchObject({ ok: false, reason: "now-held-open-fds" });
 	expect(existsSync(join(busy.dir, ".omp-kit-release"))).toBe(true);
 });
 

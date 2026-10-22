@@ -1376,15 +1376,17 @@ function releaseBinRefusal(owner: ScratchOwner, opts: ScratchReleaseOptions, dep
 }
 
 /**
- * Same-turn deletion for a just-released throwaway (ompkit-774u.15 delete-at-once). Every recheck
- * mirrors the final delete gate in applyReap: pinned identity (device + inode), unchanged owner
- * text, owner still inside the scratch root, no open files. Any doubt keeps the dir — with its
- * release marker — for the reaper, reported as ok with a now-held-* reason. Quarantine stays for
- * the unsure; this path never moves a dir, never touches a hold, never deletes on a refusal.
+ * Same-turn retirement of a just-released dir (ompkit-774u.15 delete-at-once; SCRATCHRETIRE1 ompkit-fp72.120.16.37
+ * for evidence and promote, whose reference the caller verified first). Every recheck mirrors the final delete gate
+ * in applyReap: pinned identity (device + inode), unchanged owner text, owner still inside the scratch root, no open
+ * files. Any doubt keeps the dir with its release marker and is NOT success: the owner keeps the responsibility to
+ * retire it (a later --now once clear), the reaper is only a backstop. Never moves a dir, never touches a hold,
+ * never deletes on a refusal.
  */
 function deleteReleasedNow(dir: string, root: string, home: string, deps: InspectDeps, owner: ScratchOwner,
-ownerText: string, dev: number, ino: number, releasedAt: string): ScratchReleaseResult {
-	const held = (reason: string): ScratchReleaseResult => ({ ok: true, changed: true, dir, reason, ownerPid: owner.pid });
+ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin): ScratchReleaseResult {
+	const held = (reason: string): ScratchReleaseResult => ({ ok: false, changed: true, dir, reason, ownerPid: owner.pid,
+		detail: "released (marker kept) but not retired; it is still yours to retire with --now once the cause clears" });
 	let stat;
 	try {
 		stat = lstatSync(dir);
@@ -1410,7 +1412,7 @@ ownerText: string, dev: number, ino: number, releasedAt: string): ScratchRelease
 		return held("now-held-delete-failed");
 	}
 	if (existsSync(dir)) return held("now-held-delete-failed");
-	appendLog(home, { event: "release-deleted", dir, at: releasedAt, owner: owner.pid, bin: "throwaway" });
+	appendLog(home, { event: "release-deleted", dir, at: releasedAt, owner: owner.pid, bin });
 	return { ok: true, changed: true, dir, reason: "owner-released-deleted", ownerPid: owner.pid };
 }
 
@@ -1446,10 +1448,11 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
 	const binRefusal = releaseBinRefusal(owner, opts, deps);
 	if (binRefusal !== null) return { ok: false, changed: false, dir, reason: binRefusal, ownerPid: owner.pid };
-	// Delete-at-once (ompkit-774u.15, Joshua J-102): same-turn deletion is a throwaway-only path. Evidence and
-	// promote keep their reaper deletion; a hold is never deleted by its owner here.
-	if (opts.now === true && opts.bin !== "throwaway")
-		return { ok: false, changed: false, dir, reason: "now-needs-throwaway", ownerPid: owner.pid };
+	// Delete-at-once (ompkit-774u.15, Joshua J-102): a finished task retires its own scratch. Evidence and promote may
+	// retire too, because releaseBinRefusal above verified where their content went (SCRATCHRETIRE1 AC2); a bin-less
+	// release names no destination, and a hold is never released here.
+	if (opts.now === true && opts.bin === undefined)
+		return { ok: false, changed: false, dir, reason: "now-needs-bin", ownerPid: owner.pid };
 	if (owner.processStart !== null && !seatOwned) {
 		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "live") {
@@ -1461,14 +1464,14 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	if (existsSync(markerPath)) {
 		const prior = readReleaseRecord(dir);
 		if (prior && prior.ownerText === ownerText) {
-			// SCRATCHRETIRE1 (ompkit-fp72.120.16.37): disposal follows job completion, not the reaper. A throwaway its
-			// owner released marker-only (without --now) is retired by that owner's later `--bin throwaway --now` through
-			// the same rechecks, provided the marker still pins this very inode.
-			if (opts.now === true && opts.bin === "throwaway" && prior.bin === "throwaway") {
+			// SCRATCHRETIRE1 (ompkit-fp72.120.16.37): disposal follows job completion, not the reaper. A dir its owner
+			// released marker-only (without --now) is retired by that owner's later release with --now under the same bin
+			// and reference, through the same rechecks, provided the marker still pins this very inode.
+			if (opts.now === true && opts.bin !== undefined && prior.bin === opts.bin && (prior.ref ?? undefined) === opts.ref) {
 				const pinned = parseReleaseMarker(prior.markerText);
 				if (!pinned || pinned.device !== String(stat.dev) || pinned.inode !== String(stat.ino))
 					return { ok: false, changed: false, dir, reason: "release-marker-inode-mismatch", ownerPid: owner.pid };
-				return deleteReleasedNow(dir, root, home, deps, owner, ownerText, stat.dev, stat.ino, new Date(deps.now ?? Date.now()).toISOString());
+				return deleteReleasedNow(dir, root, home, deps, owner, ownerText, stat.dev, stat.ino, new Date(deps.now ?? Date.now()).toISOString(), opts.bin);
 			}
 			return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
 		}
@@ -1489,7 +1492,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 		`${stat.dev}:${stat.ino}` !== inodeOf(dir))
 		return { ok: false, changed: false, dir, reason: "directory-changed-during-release", ownerPid: owner.pid };
 	appendLog(home, { event: "release", dir, at: releasedAt, owner: owner.pid, bin: opts.bin ?? "unbinned" });
-	if (opts.now === true) return deleteReleasedNow(dir, root, home, deps, owner, ownerText, stat.dev, stat.ino, releasedAt);
+	if (opts.now === true && opts.bin !== undefined) return deleteReleasedNow(dir, root, home, deps, owner, ownerText, stat.dev, stat.ino, releasedAt, opts.bin);
 	return { ok: true, changed: true, dir, reason: "owner-released", ownerPid: owner.pid };
 }
 
