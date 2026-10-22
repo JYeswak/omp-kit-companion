@@ -129,6 +129,20 @@ test("retiring a marker-only throwaway with an open file holds the dir and keeps
 	expect(existsSync(join(busy.dir, ".omp-kit-release"))).toBe(true);
 });
 
+// The --now path existed in cli.ts but the command registry never declared the flag, so `omp-kit scratch release
+// DIR --bin throwaway --now` failed UNKNOWN_FLAG and delete-at-once was unreachable from the CLI (2026-10-22).
+test("the CLI accepts --now and retires the directory", () => {
+	const { dir, home } = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
+	writeFileSync(join(dir, "work.txt"), "done");
+	const cli = Bun.spawnSync([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir, "--bin", "throwaway", "--now", "--json"], {
+		cwd: repo, env: { ...process.env, HOME: home }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+	});
+	const out = JSON.parse(cli.stdout.toString()) as { ok: boolean; data?: { reason?: string }; errors?: { code: string }[] };
+	expect(out.errors?.map((e) => e.code) ?? []).not.toContain("UNKNOWN_FLAG");
+	expect(out.ok).toBe(true);
+	expect(existsSync(dir)).toBe(false);
+});
+
 test("now on a free-prose owner is refused: structured ownership first (79c377fe42 still applies)", () => {
 	const { dir, home } = fixture("just-a-label");
 	const released = releaseScratch(dir, home, deps(), { now: true });
