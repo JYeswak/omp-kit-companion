@@ -458,7 +458,7 @@ test("planted: foreign plist path fails loaded", () => {
   const rendered = renderLaunchdPlist(home, job, launcher, watch).text;
   const found = checkService({ home, job, launcher, watch, rendered,
     installed: { path: "x", text: rendered },
-    print: { loaded: true, path: "/tmp/evil.plist", state: "running", pid: 1, runs: 1, lastExit: 0 } }).find(check => check.id === "loaded");
+    print: { loaded: true, path: "/tmp/evil.plist", state: "running", pid: 1, runs: 1, lastExit: 0 } }).find(check => check.id === "loaded"); // tempsafe: fake launchctl plist path, never touched on disk
   expect(found?.status).toBe("FAIL");
 });
 
@@ -1089,11 +1089,11 @@ test("service commands refuse a non-test label namespace", () => {
 
 test("install refuses a label loaded from a different plist and names both paths", () => {
   const { home, launcher, watch } = fixture();
-  const foreign = { loaded: true, path: "/tmp/foreign.plist", state: "running", pid: 1, runs: 1, lastExit: 0 };
+  const foreign = { loaded: true, path: "/tmp/foreign.plist", state: "running", pid: 1, runs: 1, lastExit: 0 }; // tempsafe: fake launchctl plist path, never touched on disk
   const refused = installService(home, job, launcher, watch, null, foreign, runner([]));
   expect(refused.ok).toBe(false);
   expect(refused.error).toBe("LABEL_LOADED_ELSEWHERE");
-  expect(refused.detail).toContain("/tmp/foreign.plist");
+  expect(refused.detail).toContain("/tmp/foreign.plist"); // tempsafe: fake launchctl plist path, never touched on disk
   expect(refused.detail).toContain(join(home, "Library", "LaunchAgents", `${job.label}.plist`));
   const calls: string[][] = [];
   const taken = installService(home, job, launcher, watch, null, foreign,
