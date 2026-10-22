@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { admitActuator, type AdmissionInput } from "../../src/actuator-admission.ts";
-import { acquireRunLock, claimIncarnation, readRunClaim } from "../../src/service-run.ts";
+import { acquireRunLock, claimIncarnation, observeServiceLaunchers, readRunClaim } from "../../src/service-run.ts";
 
 // ompkit-bj08.5: lock-claim incarnation binding for the service-run branch.
 // The cli run handler double-reads the claim (gate time vs pre-body) and
@@ -70,4 +70,60 @@ test("a previous claim cannot admit a reacquired keeper in the same clock tick",
 	} finally {
 		second.lock.release();
 	}
+});
+
+// ompkit-bj08.5 [d]: the gate/body launcher set is observed via ps, never
+// derived from the keeper claim. A live second launcher outside the claim
+// refuses; substrings never match; ps failure is explicit.
+
+function psRun(stdout: string, code = 0): (args: readonly string[]) => { code: number; stdout: string } {
+	return (_args) => ({ code, stdout });
+}
+
+test("[d] observed launchers match exact argv tokens only", () => {
+	const out = [
+		"  101 /opt/bin/bun /repo/src/cli.ts service run fleet-watch --json",
+		"  202 /opt/bin/bun /repo/src/cli.ts service run fleet-watcher --json",
+		"  303 /usr/bin/companion-helper --daemon",
+		"  404 sh -c service run fleet-watch",
+		"notapid service run fleet-watch",
+		"505",
+	].join("\n");
+	const seen = observeServiceLaunchers(psRun(out), "fleet-watch");
+	if (!("launchers" in seen)) throw new Error("expected launchers, got " + JSON.stringify(seen));
+	expect(seen.launchers).toEqual([
+		{ pid: 101, command: "service run fleet-watch" },
+		{ pid: 404, command: "service run fleet-watch" },
+	]);
+});
+
+test("[d] planted: two live launchers against a one-launcher keeper claim refuse", () => {
+	const out = [
+		"  101 /opt/bin/bun /repo/src/cli.ts service run fleet-watch --json",
+		"  102 /opt/bin/bun /repo/src/cli.ts service run fleet-watch --json",
+	].join("\n");
+	const seen = observeServiceLaunchers(psRun(out), "fleet-watch");
+	if (!("launchers" in seen)) throw new Error("expected launchers, got " + JSON.stringify(seen));
+	const decision = admitActuator({
+		launcherBinding: "keeper",
+		authority: "ACTIVE",
+		authorityConfirmed: true,
+		authorityGeneration: "gen-1",
+		launchers: seen.launchers,
+		keeper: { pid: 101, command: "service run fleet-watch" },
+		packet: { action: "service-run", ownedAction: "service-run", generation: "gen-1" },
+		governedActions: ["service-run"],
+	});
+	expect(decision.verdict).toBe("REFUSE");
+	expect(decision.admittedAction).toBeNull();
+	expect(decision.reason).toContain("outside the keeper pid-file");
+});
+
+test("[d] ps failure is an explicit observation failure, never an empty set", () => {
+	expect(observeServiceLaunchers(psRun("", 1), "fleet-watch")).toEqual({
+		failure: "ps exited 1: launcher set unobservable",
+	});
+	expect(observeServiceLaunchers(() => { throw new Error("no ps"); }, "fleet-watch")).toEqual({
+		failure: "ps probe threw: no ps",
+	});
 });
