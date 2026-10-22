@@ -1715,7 +1715,12 @@ function policyCommand(request: ParsedCommand): CliResult {
 		const fallback = refusal(safe.includes(code) ? code : "POLICY_PLAN_FAILED",
 			"Policy plan or apply refused without claiming a completed change",
 			"Inspect the declared TTSR policy, selected profile configs and disabled rules, then replan.");
-		return safe.includes(code) ? fallback : { ...fallback, data: { ...fallback.data, cause_code: code, cause_message: message.slice(0, 200) } };
+		const cause = (message.startsWith(`${code}:`) ? message.slice(code.length + 1) : message.slice(code.length)).trim().slice(0, 200);
+		if (!cause) return fallback;
+		return { ...fallback,
+			data: { ...fallback.data, cause_code: code, cause_message: cause },
+			errors: fallback.errors?.map(error => ({ ...error, message: `${code}: ${cause}` })),
+		};
 	}
 }
 
@@ -2501,13 +2506,17 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const job = scoped[name!]!;
 			if (linux) {
 				const state = systemctlState(job, defaultRunner);
-				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active, state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath, lastExit: null, runs: null, last_run_at: readJobFinishedAt(home, name) };
+				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active,
+					query_ok: true, query_error: null,
+					state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath, lastExit: null, runs: null, last_run_at: readJobFinishedAt(home, name) };
 			}
 			const installed = readInstalledPlist(home, job.label);
 			const print = queryPrint(job.label);
-			return { name, label: job.label, installed: installed !== null, loaded: print.loaded, state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit, last_run_at: readJobFinishedAt(home, name) };
+			return { name, label: job.label, installed: installed !== null, loaded: print.query_ok ? print.loaded : null,
+				query_ok: print.query_ok, query_error: print.query_error,
+				state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit, loaded_plist: print.path, last_run_at: readJobFinishedAt(home, name) };
 		});
-		const down = rows.some(row => !row.loaded);
+		const down = rows.some(row => row.loaded === false);
 		return { code: down ? 1 : 0, data: { overall: down ? "FINDINGS" : "OK", job: names.join(","), status: rows }, verification: "UNVERIFIED" };
 	}
 	if (sub === "doctor") {
