@@ -13,10 +13,10 @@
 </div>
 
 <!-- kit-release:start -->
-Current release: v0.2.66
+Current release: v0.2.67
 <!-- kit-release:end -->
 
-A tested rule pack, 11 guard extensions, five skills, and a guarded CLI with
+A tested rule pack, 10 guard extensions, five skills, and a guarded CLI with
 44 top-level commands for an existing OMP install.
 
 ```sh
@@ -165,7 +165,7 @@ command it runs.
 
 ### Guard extensions
 
-The repo is an OMP plugin. `package.json` declares 11 extensions:
+The repo is an OMP plugin. `package.json` declares 10 extensions:
 
 | Extension | Hooks | Behavior |
 |---|---|---|
