@@ -86,10 +86,10 @@ test("an opted-in repository gets owned scratch and filesystem refusals", async 
 	const owner = readFileSync(join(repoRoot, "var", "agent-tmp", `omp.${pid}`, ".owner"), "utf8");
 	expect(owner).toContain(`pid=${pid}\nlabel=omp\n`);
 	const handler = pi.handlers[0]!;
-	const blocked = await handler({ toolName: "write", input: { path: "/tmp/x" } } as never);
+	const blocked = await handler({ toolName: "write", input: { path: "/tmp/x" } } as never); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 	expect(blocked?.block).toBe(true);
 	expect(blocked?.reason).toContain("fleet-guard scratch-write");
-	const quiet = await handler({ toolName: "read", input: { path: "/tmp/x" } } as never);
+	const quiet = await handler({ toolName: "read", input: { path: "/tmp/x" } } as never); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 	expect(quiet).toBeUndefined();
 });
 
@@ -191,7 +191,7 @@ test("scratch fires before git and reservations in the chain", async () => {
 	const both = await handleToolCall({ toolName: "bash", command: "git add -A" }, { cwd: "/tmp" });
 	expect(both?.reason).toContain("fleet-guard blanket-git");
 	const foreign = await handleToolCall(
-		{ toolName: "edit", input: { path: "/tmp/elsewhere.md" } }, { cwd: "/tmp" });
+		{ toolName: "edit", input: { path: "/tmp/elsewhere.md" } }, { cwd: "/tmp" }); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 	expect(foreign?.reason).toContain("fleet-guard scratch-write");
 });
 
@@ -199,7 +199,7 @@ test("logical routes traverse the chain without globally allowing tool calls", a
 	for (const path of ["proc://owned-job/kill", "agent://coordinator", "xd://report_issue"])
 		expect(await handleToolCall({ toolName: "write", input: { path } }, { cwd: "/private/tmp" })).toBeUndefined();
 	// A mixed target must still hit scratch, and a later reservation refusal must survive.
-	expect((await handleToolCall({ toolName: "edit", input: { paths: ["agent://coordinator", "/tmp/out"] } },
+	expect((await handleToolCall({ toolName: "edit", input: { paths: ["agent://coordinator", "/tmp/out"] } }, // tempsafe: fake tool-input path the guard only judges, never touched on disk
 		{ cwd: "/private/tmp" }))?.reason).toContain("scratch-write");
 	const { cwd } = fixture();
 	clearReservationCache();
@@ -217,7 +217,7 @@ test("registered handler uses the actual calling context's local mapping", async
 	const handler = pi.handlers[0]!;
 	const event = { toolName: "write", input: { path: "local://notes/out" } };
 	expect(await handler(event, { cwd: callingCwd, localProtocolOptions: { getArtifactsDir: () => join(cwd, "artifacts") } })).toBeUndefined();
-	expect((await handler(event, { cwd, localProtocolOptions: { getArtifactsDir: () => "/tmp/foreign-artifacts" } }))?.reason).toContain("scratch-write");
+	expect((await handler(event, { cwd, localProtocolOptions: { getArtifactsDir: () => "/tmp/foreign-artifacts" } }))?.reason).toContain("scratch-write"); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 	expect((await handler(event, { cwd, localProtocolOptions: { getArtifactsDir: () => null } }))?.reason).toContain("backing root");
 	expect((await handler(event, { cwd }))?.reason).toContain("backing root");
 	expect(await handler({ toolName: "write", input: { path: "proc://owned-job/kill" } }, { cwd: callingCwd })).toBeUndefined();
@@ -292,7 +292,7 @@ test("filesystem refusals survive an unavailable storage-root lookup", async () 
 	const { cwd, pid } = fixture();
 	try {
 		await fleetGuard(pi, { cwd, pid });
-		const refusal = await pi.handlers[0]!({ toolName: "write", input: { path: "/tmp/refused" } }, { cwd });
+		const refusal = await pi.handlers[0]!({ toolName: "write", input: { path: "/tmp/refused" } }, { cwd }); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 		expect(refusal?.reason).toContain("scratch-write");
 	} finally {
 		if (saved.url === undefined) delete process.env.AGENTMAIL_HTTP_URL; else process.env.AGENTMAIL_HTTP_URL = saved.url;
@@ -328,7 +328,7 @@ test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) pe
 	writeFileSync(target, "stock temporary output\n");
 	expect(readFileSync(target, "utf8")).toBe("stock temporary output\n");
 	// Admission only: never create or overwrite a system /tmp fixture.
-	await admit({ toolName: "write", input: { path: "/tmp/x", content: "stock temporary output\n" } });
+	await admit({ toolName: "write", input: { path: "/tmp/x", content: "stock temporary output\n" } }); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 	const git = (...args: string[]): string => {
 		const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
 		if (result.exitCode !== 0) throw new Error(result.stderr.toString());

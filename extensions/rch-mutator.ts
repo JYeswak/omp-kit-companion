@@ -238,7 +238,7 @@ async function selftest(): Promise<boolean> {
         toolName: "bash",
         toolCallId: "fixture",
         input: { command: "cargo check --workspace" },
-      }, { cwd: "/tmp/omp-rch-selftest", sessionManager: { getSessionId: () => "fixture-session" } });
+      }, { cwd: "/tmp/omp-rch-selftest", sessionManager: { getSessionId: () => "fixture-session" } }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
       assert(result?.input.command === "rch exec -- env RCH_CARGO_WRAPPER_BYPASS=1 cargo check --workspace", "native cargo rewrite lacks loop-break");
     },
   };
@@ -252,7 +252,7 @@ async function selftest(): Promise<boolean> {
           type: "tool_call",
           toolName: "bash",
           input: { command: "git status" },
-        }, { cwd: "/tmp/omp-rch-selftest" });
+        }, { cwd: "/tmp/omp-rch-selftest" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
         assert(result?.input.command === "rch exec -- git status", "non-cargo native rewrite changed");
       },
     },
@@ -261,7 +261,7 @@ async function selftest(): Promise<boolean> {
       run: async () => {
         const command = "rch exec -- env RCH_CARGO_WRAPPER_BYPASS=1 cargo check --workspace";
         const bridge = createRchMutator(async () => rewriteResult(command));
-        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "cargo check" } }, { cwd: "/tmp/omp-rch-selftest" });
+        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "cargo check" } }, { cwd: "/tmp/omp-rch-selftest" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
         assert(result?.input.command === command, "already-bypassed cargo rewrite changed");
       },
     },
@@ -270,7 +270,7 @@ async function selftest(): Promise<boolean> {
       run: async () => {
         const command = "rch exec -- cargo check --workspace && echo done";
         const bridge = createRchMutator(async () => rewriteResult(command));
-        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "cargo check" } }, { cwd: "/tmp/omp-rch-selftest" });
+        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "cargo check" } }, { cwd: "/tmp/omp-rch-selftest" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
         assert(result?.input.command === command, "compound native rewrite changed");
       },
     },
@@ -278,7 +278,7 @@ async function selftest(): Promise<boolean> {
       id: "omp-rch-mutator.silent-inverse",
       run: async () => {
         const bridge = createRchMutator(async () => ({ exitCode: 0, stdout: "", stderr: "", timedOut: false }));
-        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "git status" } }, { cwd: "/tmp/omp-rch-selftest" });
+        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "git status" } }, { cwd: "/tmp/omp-rch-selftest" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
         assert(result === undefined, "native silence changed the Bash input");
       },
     },
@@ -286,7 +286,7 @@ async function selftest(): Promise<boolean> {
       id: "omp-rch-mutator.malformed-fail-open",
       run: async () => {
         const bridge = createRchMutator(async () => ({ exitCode: 0, stdout: "not-json", stderr: "", timedOut: false }));
-        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "cargo check" } }, { cwd: "/tmp/omp-rch-selftest" });
+        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "cargo check" } }, { cwd: "/tmp/omp-rch-selftest" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
         assert(result === undefined, "malformed native output was not a no-op");
       },
     },

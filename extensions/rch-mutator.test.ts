@@ -8,7 +8,7 @@ import {
 } from "./rch-mutator";
 
 const context = {
-  cwd: "/tmp/omp-rch-test",
+  cwd: "/tmp/omp-rch-test", // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
   sessionManager: { getSessionId: () => "omp-rch-session" },
 };
 
@@ -61,11 +61,11 @@ describe("RCH OMP mutator", () => {
       };
     });
 
-    const result = await runner(buildRchPayload("cargo check --workspace", "omp-rch-session"), "/tmp/omp-rch-test");
+    const result = await runner(buildRchPayload("cargo check --workspace", "omp-rch-session"), "/tmp/omp-rch-test"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
 
     expect(result).toEqual(rewriteOutput());
     expect(argv).toEqual(["/Users/josh/.local/bin/rch"]);
-    expect(cwd).toBe("/tmp/omp-rch-test");
+    expect(cwd).toBe("/tmp/omp-rch-test"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
     expect(JSON.parse(input.trim())).toEqual(buildRchPayload("cargo check --workspace", "omp-rch-session"));
   });
 

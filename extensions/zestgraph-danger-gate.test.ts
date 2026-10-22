@@ -70,23 +70,23 @@ describe("zestgraph danger OMP bridge", () => {
       return child;
     });
 
-    const result = await runner(buildDangerPayload("git status"), "/tmp/omp-danger-test");
+    const result = await runner(buildDangerPayload("git status"), "/tmp/omp-danger-test"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
     capture.input = spawned.input();
 
     expect(result).toEqual(allowOutput());
     expect(capture.argv).toEqual(["/Users/josh/.local/bin/zestgraph-danger-gate"]);
-    expect(capture.cwd).toBe("/tmp/omp-danger-test");
+    expect(capture.cwd).toBe("/tmp/omp-danger-test"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
     expect(JSON.parse(capture.input!.trim())).toEqual(buildDangerPayload("git status"));
   });
 
   test("allows the native inverse decision", async () => {
     const bridge = createZestgraphDangerGate(async () => allowOutput());
-    await expect(bridge.handle(safeEvent("git status"), { cwd: "/tmp/project" })).resolves.toBeUndefined();
+    await expect(bridge.handle(safeEvent("git status"), { cwd: "/tmp/project" })).resolves.toBeUndefined(); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
   });
 
   test("blocks the native deny decision for a destructive fixture", async () => {
     const bridge = createZestgraphDangerGate(async () => denyOutput());
-    const result = await bridge.handle(safeEvent("git reset --hard HEAD"), { cwd: "/tmp/project" });
+    const result = await bridge.handle(safeEvent("git reset --hard HEAD"), { cwd: "/tmp/project" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
     expect(result).toEqual({ block: true, reason: "fixture refusal" });
   });
 
@@ -100,7 +100,7 @@ describe("zestgraph danger OMP bridge", () => {
       { exitCode: 0, stdout: "", stderr: "", timedOut: true },
     ]) {
       const bridge = createZestgraphDangerGate(async () => result);
-      const blocked = await bridge.handle(safeEvent("git status"), { cwd: "/tmp/project" });
+      const blocked = await bridge.handle(safeEvent("git status"), { cwd: "/tmp/project" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
       expect(blocked?.block).toBe(true);
     }
 

@@ -277,7 +277,7 @@ async function selftest(): Promise<boolean> {
         toolName: "bash",
         toolCallId: "fixture",
         input: { command: "git reset --hard HEAD" },
-      }, { cwd: "/tmp/omp-slb-selftest", sessionManager: { getSessionId: () => "fixture-session" } });
+      }, { cwd: "/tmp/omp-slb-selftest", sessionManager: { getSessionId: () => "fixture-session" } }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
       assert(result?.block === true, "native deny did not block");
     },
   };
@@ -287,7 +287,7 @@ async function selftest(): Promise<boolean> {
       id: "omp-slb-guard.allow",
       run: async () => {
         const bridge = createSlbGuard(async () => allowResult());
-        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "printf safe" } }, { cwd: "/tmp/omp-slb-selftest" });
+        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "printf safe" } }, { cwd: "/tmp/omp-slb-selftest" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
         assert(result === undefined, "native allow was blocked");
       },
     },
@@ -295,7 +295,7 @@ async function selftest(): Promise<boolean> {
       id: "omp-slb-guard.malformed",
       run: async () => {
         const bridge = createSlbGuard(async () => ({ exitCode: 0, stdout: "not-json", stderr: "", timedOut: false }));
-        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "printf safe" } }, { cwd: "/tmp/omp-slb-selftest" });
+        const result = await bridge.handle({ type: "tool_call", toolName: "bash", input: { command: "printf safe" } }, { cwd: "/tmp/omp-slb-selftest" }); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
         assert(result?.block === true, "malformed native output was not refused");
       },
     },

@@ -104,7 +104,7 @@ test("silences zero, missing, unparseable, and non-Bash results", async () => {
 test("malformed/untrusted input is data only and cannot execute shell text", async () => {
   const failures: unknown[] = [];
   const adapter = createObservationalAdapter({ failure: (value) => failures.push(value) });
-  const marker = `/tmp/omp-observational-must-not-execute-${crypto.randomUUID()}`;
+  const marker = `/tmp/omp-observational-must-not-execute-${crypto.randomUUID()}`; // tempsafe: marker path the test asserts is never created
   const untrusted = `printf '$(touch ${marker})'; exit 9`;
 
   assert.equal(

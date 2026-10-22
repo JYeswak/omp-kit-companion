@@ -10,7 +10,7 @@ import {
 } from "./skill-topology-session-start.ts";
 
 const context = {
-  cwd: "/tmp/topology-proof",
+  cwd: "/tmp/topology-proof", // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
   hasUI: false,
   ui: { notify() {} },
   sessionManager: { getSessionId: () => "session-proof" },
@@ -50,7 +50,7 @@ test("positive topology output is delivered as additive advisory messages", asyn
 
   await adapter.handle({ type: "session_start" }, context);
 
-  assert.deepEqual(receivedPayload, buildSessionStartPayload("session-proof", "/tmp/topology-proof"));
+  assert.deepEqual(receivedPayload, buildSessionStartPayload("session-proof", "/tmp/topology-proof")); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
   assert.deepEqual(messages, ["TOPOLOGY DRIFT", "SHADOW NOTE"]);
 });
 
@@ -127,8 +127,8 @@ test("native runner uses fixed argv, passes the session payload, and drains both
     return next;
   };
   const runner = makeTopologyHookRunner(spawn, 50);
-  const payload = buildSessionStartPayload("session-proof", "/tmp/topology-proof");
-  const results = await runner(payload, "/tmp/topology-proof");
+  const payload = buildSessionStartPayload("session-proof", "/tmp/topology-proof"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
+  const results = await runner(payload, "/tmp/topology-proof"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
 
   assert.deepEqual(calls.map(call => call.argv), [
     ["/Users/josh/.local/bin/zestgraph-skill-topology-gate", "--hook"],

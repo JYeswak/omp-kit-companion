@@ -11,7 +11,7 @@ import {
 } from "./ee-ambient-session-start.ts";
 
 const context: SessionStartContext = {
-  cwd: "/tmp/ee-ambient-test",
+  cwd: "/tmp/ee-ambient-test", // tempsafe: fake cwd and state path for the in-memory store, never touched on disk
   sessionManager: { getSessionId: () => "session-1" },
 };
 
@@ -56,7 +56,7 @@ test("delivers normal advisory output and invokes exact ee argv", async () => {
 
   assert.deepEqual(calls, [{
     argv: buildEeAmbientArgv(settings()),
-    cwd: "/tmp/ee-ambient-test",
+    cwd: "/tmp/ee-ambient-test", // tempsafe: fake cwd and state path for the in-memory store, never touched on disk
   }]);
   assert.equal(messages.length, 1);
   assert.equal(messages[0], "<!-- ee ambient_context schema=ee.ambient_context.v1 surface=session_start_orient budgetTokens=12000 verbosity=standard provenance=ee:ee.ambient_context.v1 -->\n{\"orient\":\"ok\"}");
@@ -115,7 +115,7 @@ test("duplicate session-start output is suppressed by content digest", async () 
   const messages: string[] = [];
   const store = memoryStore();
   const adapter = createEeAmbientSessionStartAdapter({
-    env: { EE_AMBIENT_CONTEXT_STATE_DIR: "/tmp/ee-ambient-state" },
+    env: { EE_AMBIENT_CONTEXT_STATE_DIR: "/tmp/ee-ambient-state" }, // tempsafe: fake cwd and state path for the in-memory store, never touched on disk
     runEe: async () => {
       calls += 1;
       return healthy('{"orient":"same"}');
@@ -130,7 +130,7 @@ test("duplicate session-start output is suppressed by content digest", async () 
   assert.equal(calls, 2, "native ee remains authoritative on each event");
   assert.equal(messages.length, 1);
   assert.equal(store.writes.length, 1);
-  assert.equal(store.writes[0]?.path, "/tmp/ee-ambient-state/ambient_context_seen.json");
+  assert.equal(store.writes[0]?.path, "/tmp/ee-ambient-state/ambient_context_seen.json"); // tempsafe: fake cwd and state path for the in-memory store, never touched on disk
 });
 
 test("foreign or malformed events are silent", async () => {

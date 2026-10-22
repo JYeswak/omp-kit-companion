@@ -8,7 +8,7 @@ import {
 } from "./slb-guard-fail-closed";
 
 const context = {
-  cwd: "/tmp/omp-slb-test",
+  cwd: "/tmp/omp-slb-test", // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
   sessionManager: { getSessionId: () => "omp-session-test" },
 };
 
@@ -75,11 +75,11 @@ describe("SLB fail-closed OMP bridge", () => {
       return spawned.child;
     });
 
-    const result = await runner(buildSlbPayload("printf safe", "omp-session-test"), "/tmp/omp-slb-test");
+    const result = await runner(buildSlbPayload("printf safe", "omp-session-test"), "/tmp/omp-slb-test"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
 
     expect(result).toEqual(allowOutput());
     expect(capture.argv).toEqual(["/Users/josh/.local/bin/slb-guard-fail-closed"]);
-    expect(capture.cwd).toBe("/tmp/omp-slb-test");
+    expect(capture.cwd).toBe("/tmp/omp-slb-test"); // tempsafe: fake cwd passed to a stubbed runner, never touched on disk
     expect(JSON.parse(spawned.input().trim())).toEqual(buildSlbPayload("printf safe", "omp-session-test"));
     expect(spawned.killed()).toBe(false);
   });
