@@ -163,9 +163,9 @@ console.log(times[190]! < 25 ? "OVERHEAD_OK" : "OVERHEAD_SLOW");
 EOF
 if MEASURE_SRC="$REPO/src/cc-spool.ts" MEASURE_STATE="$STATE" nice -n 10 bun "$STATE/measure.ts" > "$STATE/measure.log" 2>&1 \
 	&& grep -q OVERHEAD_OK "$STATE/measure.log"; then
-	pass "emission_overhead" "p95 < 5ms" "$(cat "$STATE/measure.log" | tr '\n' ' ')"
+	pass "emission_overhead" "p95 < 5ms" "$(tr '\n' ' ' < "$STATE/measure.log")"
 else
-	fail "emission_overhead" "p95 < 5ms" "$(cat "$STATE/measure.log" | tr '\n' ' ')"
+	fail "emission_overhead" "p95 < 5ms" "$(tr '\n' ' ' < "$STATE/measure.log")"
 fi
 
 rm -rf "$STATE"
