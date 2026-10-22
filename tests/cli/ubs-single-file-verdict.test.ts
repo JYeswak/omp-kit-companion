@@ -1,6 +1,6 @@
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "../..");
@@ -9,6 +9,7 @@ const script = join(root, "scripts/ubs-single-file-verdict.sh");
 const input = join(dir, "fixture.ts");
 const fakeBin = join(dir, "bin");
 const fakeUbs = join(fakeBin, "ubs");
+mkdirSync(fakeBin);
 writeFileSync(input, "export const control = 1;\n");
 writeFileSync(fakeUbs, "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"ok\",\"files\":1,\"findings\":[]}'\n");
 chmodSync(fakeUbs, 0o755);

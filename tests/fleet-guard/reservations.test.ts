@@ -109,8 +109,8 @@ describe("fleet guard reservation checks", () => {
 		process.env.AGENTMAIL_HTTP_BEARER_TOKEN = "proof-token";
 		delete process.env.AGENT_MAIL_STORAGE_ROOT;
 		try {
-			await expect(exportAgentMailStorageRoot()).resolves.toBe("/tmp/am1-proof");
-			expect(process.env.AGENT_MAIL_STORAGE_ROOT).toBe("/tmp/am1-proof");
+			await expect(exportAgentMailStorageRoot()).resolves.toBe("/tmp/am1-proof"); // tempsafe: mocked agent-mail response value, nothing created
+			expect(process.env.AGENT_MAIL_STORAGE_ROOT).toBe("/tmp/am1-proof"); // tempsafe: mocked agent-mail response value, nothing created
 		} finally {
 			server.stop(true);
 			if (saved.url === undefined) delete process.env.AGENTMAIL_HTTP_URL; else process.env.AGENTMAIL_HTTP_URL = saved.url;

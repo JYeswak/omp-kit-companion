@@ -168,14 +168,14 @@ describe("matchCitedBeads", () => {
 
 describe("state roots", () => {
 	test("explicit root wins, env override next, default is version-keyed", () => {
-		expect(resolveTernRefRoot("/tmp/x", {})).toBe("/tmp/x");
-		expect(resolveTernRefRoot(undefined, { OMP_KIT_TERN_REF_ROOT: "/tmp/env" })).toBe("/tmp/env");
-		expect(resolveTernRefRoot(undefined, { HOME: "/tmp/h", XDG_STATE_HOME: "/tmp/s" })).toBe("/tmp/s/omp-kit/tern-ref");
-		expect(ternRefDirFor("/tmp/s/omp-kit/tern-ref", "0.9.0")).toBe("/tmp/s/omp-kit/tern-ref/0.9.0");
+		expect(resolveTernRefRoot("/tmp/x", {})).toBe("/tmp/x"); // tempsafe: pure path resolution inputs, nothing created
+		expect(resolveTernRefRoot(undefined, { OMP_KIT_TERN_REF_ROOT: "/tmp/env" })).toBe("/tmp/env"); // tempsafe: pure path resolution inputs, nothing created
+		expect(resolveTernRefRoot(undefined, { HOME: "/tmp/h", XDG_STATE_HOME: "/tmp/s" })).toBe("/tmp/s/omp-kit/tern-ref"); // tempsafe: pure path resolution inputs, nothing created
+		expect(ternRefDirFor("/tmp/s/omp-kit/tern-ref", "0.9.0")).toBe("/tmp/s/omp-kit/tern-ref/0.9.0"); // tempsafe: pure path resolution inputs, nothing created
 	});
 	test("relative roots and non-versions refuse", () => {
 		throwsCode(() => resolveTernRefRoot("rel", {}), "INVALID_STATE_ROOT");
-		throwsCode(() => ternRefDirFor("/tmp/s", "0.9"), "INVALID_TERN_VERSION");
+		throwsCode(() => ternRefDirFor("/tmp/s", "0.9"), "INVALID_TERN_VERSION"); // tempsafe: pure path resolution inputs, nothing created
 	});
 });
 
@@ -232,7 +232,7 @@ describe("gradeRetrievalSystems", () => {
 });
 
 describe("validateReference runtime seams", () => {
-	const ROOT = "/tmp/tern-ref-seam";
+	const ROOT = "/tmp/tern-ref-seam"; // tempsafe: fake root for injected files/exec seams, nothing created
 	const DIR = `${ROOT}/0.9.0`;
 	const SOCKET = `${ROOT}/validate-scratch/ctl.sock`;
 	interface Seam {
@@ -296,7 +296,7 @@ describe("validateReference runtime seams", () => {
 		expect(result.code).toBe(0);
 	});
 	test("overlong scratch socket paths refuse before spawning", async () => {
-		const longRoot = `/tmp/${"d".repeat(120)}`;
+		const longRoot = `/tmp/${"d".repeat(120)}`; // tempsafe: fake root for injected files/exec seams, nothing created
 		const s = seam('{"id":"x","run":["state"],"expect":["y"]}\n');
 		let spawned = false;
 		await throwsCodeAsync(() => runTernRef("validate", { "--checks": `${ROOT}/checks.jsonl` }, { root: longRoot }, {
@@ -313,7 +313,7 @@ describe("queryReference backend interpreters", () => {
 	test("qwen searches run under the qwen interpreter, nomic under python3", async () => {
 		const seen: string[][] = [];
 		const store: Record<string, string> = {
-			"/tmp/tern-ref-q/0.9.0/manifest.json": formatManifest(manifest()),
+			"/tmp/tern-ref-q/0.9.0/manifest.json": formatManifest(manifest()), // tempsafe: fake root for injected files/exec seams, nothing created
 		};
 		const files: TernRefFiles = {
 			read: (path) => {
@@ -332,8 +332,8 @@ describe("queryReference backend interpreters", () => {
 			seen.push(argv);
 			return { exit: 0, stdout: "[]", stderr: "" };
 		};
-		await runTernRef("query", { "--query": "hi" }, { root: "/tmp/tern-ref-q", backend: "qwen" }, { exec, files });
-		await runTernRef("query", { "--query": "hi" }, { root: "/tmp/tern-ref-q", backend: "nomic" }, { exec, files });
+		await runTernRef("query", { "--query": "hi" }, { root: "/tmp/tern-ref-q", backend: "qwen" }, { exec, files }); // tempsafe: fake root for injected files/exec seams, nothing created
+		await runTernRef("query", { "--query": "hi" }, { root: "/tmp/tern-ref-q", backend: "nomic" }, { exec, files }); // tempsafe: fake root for injected files/exec seams, nothing created
 		expect(seen.length).toBe(2);
 		expect(seen[0]?.[0]).not.toBe("python3");
 		expect(seen[1]?.[0]).toBe("python3");
@@ -342,7 +342,7 @@ describe("queryReference backend interpreters", () => {
 
 describe("driftReference site forwarding", () => {
 	test("rebuild re-crawls the requested --site, never the canonical origin", async () => {
-		const ROOT = "/tmp/tern-ref-drift";
+		const ROOT = "/tmp/tern-ref-drift"; // tempsafe: fake root for injected files/exec seams, nothing created
 		const DIR = `${ROOT}/0.9.0`;
 		const SITE = "http://127.0.0.1:9999/tern/index.html";
 		const store: Record<string, string> = {

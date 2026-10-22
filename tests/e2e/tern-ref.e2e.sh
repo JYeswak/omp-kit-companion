@@ -109,7 +109,7 @@ step query-nomic 0 tern-ref query --root "$REF" --query "register an export" --b
 step query-qwen 0 tern-ref query --root "$REF" --query "headless session" --backend qwen --k 3 --json
 
 # --- 3. validate runtime checks (planted false claim must fail inside) -------
-LIVE_SOCK="/tmp/tern.sock"
+LIVE_SOCK="/tmp/tern.sock" # tempsafe: live tern socket path, only stat-checked
 if [ -S "$LIVE_SOCK" ]; then
 	LIVE_BEFORE="$(stat -f '%m %z' "$LIVE_SOCK" 2>/dev/null || stat -c '%Y %s' "$LIVE_SOCK")"
 else
