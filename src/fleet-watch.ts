@@ -8,6 +8,9 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, lstatSync, readFileSync, renameSync, unlinkSync, type Stats } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fsyncDirectory, writePrivate } from "./mutations.ts";
+import { appendReapReceipt, defaultGitLockLedgerPath, reapRepoGitLocks, type RepoReapResult, type ReapReceipt } from "./index-lock.ts";
+import { defaultRunner, type ScratchRunner } from "./scratch.ts";
+import { homedir } from "node:os";
 
 const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]/;
 /** Reserved uncommitted edits must exceed the work audit's 30-minute limit. */
@@ -43,12 +46,14 @@ export type FleetWatchRecoveryAction = { kind: TrackerRecoveryResult["kind"]; se
 export type FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION"; session: string; pane: string; checks: number; text: string; receipt: TrackerRetentionReceipt; repo?: string };
 /** An audit routing observation, not a delivery or acceptance receipt. */
 export type FleetWatchStrandedAction = { kind: "STRANDED_ESCALATED" | "STRANDED_UNRESOLVED"; session: string; pane: string; checks: number; text: string; repo: string };
+/** GITLOCK1 (ompkit-fp72.19.1.9): a stale empty git lock renamed aside under every reaper gate; the receipt is in the lock ledger. */
+export type FleetWatchGitLockAction = { kind: "GITLOCK_REAPED"; session: string; pane: string; checks: number; text: string; repo: string; receipt: ReapReceipt };
 /** A routing observation in the existing log, never a delivery or acceptance receipt. */
 export type FleetWatchPullAction = {
 	kind: "PULL_WARNINGS" | Extract<PreassignVerdict, { ready: false }>["kind"];
 	session: string; pane: string; checks: number; text: string; refusals: readonly PullRefusal[];
 };
-export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchPullAction | FleetWatchStrandedAction;
+export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchPullAction | FleetWatchStrandedAction | FleetWatchGitLockAction;
 export type FleetWatchCapture = { code: number; stdout: string; stderr: string };
 export type FleetWatchDecision = { busy: boolean; checks: number; actions: FleetWatchPaneAction[] };
 
@@ -1087,6 +1092,13 @@ export type FleetWatchOnceDeps = {
 	 */
 	retainTracker?: ((repo: string) => TrackerRetentionOutcome | null) | null;
 	/**
+	 * GITLOCK1 (ompkit-fp72.19.1.9): reap stale empty git locks once per repo per tick through every
+	 * gate in src/index-lock.ts (empty, age, lsof file and git-cwd clear, identity). Absent, the
+	 * canonical reapRepoGitLocks runs with the kit's bounded runner, the default 120 s age and the
+	 * kit's lock ledger; each field overrides one of those; null disables the phase.
+	 */
+	gitLockReap?: { run?: ScratchRunner; ledgerPath?: string; staleAfterMs?: number } | null;
+	/**
 	 * ompkit-bj08.5: pause/custody admission snapshot. Every send, sendKeys
 	 * and tracker-recovery effect consults it first; a refusal performs zero
 	 * effects and is recorded in the log. Absent, the legacy path runs.
@@ -1306,6 +1318,31 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			const action: FleetWatchRetentionAction = { kind: "TRACKER_QUARANTINE_RETENTION", session: sessionName, pane: "tracker", checks: 0, text: retention.text, receipt: retention.receipt, repo };
 			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
 			actions.push(action);
+		}
+	}
+	// GITLOCK1 (ompkit-fp72.19.1.9): one gated reap pass per unique repo per tick, after retention.
+	// Silent unless a lock is renamed aside; HELD, TOO_YOUNG, NON_EMPTY and UNKNOWN leave it in place.
+	const reapOptions = deps.gitLockReap;
+	if (reapOptions !== null) {
+		const ledger = reapOptions?.ledgerPath ?? defaultGitLockLedgerPath(homedir());
+		const reapOne = (target: string): RepoReapResult[] => reapRepoGitLocks(target, {
+			run: reapOptions?.run ?? defaultRunner, nowMs: deps.now, staleAfterMs: reapOptions?.staleAfterMs,
+		});
+		for (const [repo, sessionName] of retentionRepos) {
+			if (!admittedEffect(deps.admission, "git-lock-reap")) {
+				appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: sessionName, pane: "git", checks: 0, repo, text: "admission refused the git lock reap; no lock was moved" }) + "\n");
+				continue;
+			}
+			for (const result of reapOne(repo)) {
+				if (result.verdict !== "REAPED" || !result.receipt) continue;
+				const recorded = appendReapReceipt(ledger, result.receipt);
+				const action: FleetWatchGitLockAction = {
+					kind: "GITLOCK_REAPED", session: sessionName, pane: "git", checks: 0, repo, receipt: result.receipt,
+					text: `stale empty ${basename(result.file)} in ${repo} renamed aside to ${result.receipt.movedTo} (age ${Math.round(result.receipt.ageMs / 1000)}s; checks ${result.receipt.checks})${recorded ? "" : "; ledger write FAILED"}`,
+				};
+				appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
+				actions.push(action);
+			}
 		}
 	}
 	let stateDirty = recordStrandedAudit(config, deps, activeWatcher, actions);
