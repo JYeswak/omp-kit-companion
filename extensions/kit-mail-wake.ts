@@ -65,6 +65,19 @@ export interface MailToolResultEvent {
 }
 export interface MailToolResultPatch { content: unknown[] }
 
+/** The mail wake one guard instance drives: plan before a send, wake after its result. */
+export interface MailWake {
+	/** One recipient to its live seat, or why there is none plus the parent to re-address to. */
+	resolve(name: string, projectKey: string, blocks?: { session: string; block: string; cwd: string }[] | null): Promise<Resolution>;
+	/** Plans the wake for a send that passed every guard check; an ask with no wake path is refused NO_WAKE_PATH. */
+	beforeSend(toolCallId: unknown, tool: "send_message" | "reply_message", args: unknown, projectKey: string): Promise<FlywheelToolCallResult | undefined>;
+	/** Queues the planned wake once the send succeeded; returns the result patch naming each outcome. */
+	afterSend(event: MailToolResultEvent): Promise<MailToolResultPatch | undefined>;
+	/** Resolves once every wake still in flight has written its outcome row. */
+	settled(): Promise<void>;
+	ledgerPath: string;
+}
+
 interface Plan {
 	tool: "send_message" | "reply_message";
 	sender: string;
@@ -123,7 +136,7 @@ function parseResult(content: unknown): unknown {
 	try { return JSON.parse(text.slice(start)); } catch { return undefined; }
 }
 
-export function createMailWake(deps: MailWakeDeps) {
+export function createMailWake(deps: MailWakeDeps): MailWake {
 	const env = deps.env ?? process.env;
 	const home = deps.home ?? homedir();
 	const now = deps.now ?? Date.now;

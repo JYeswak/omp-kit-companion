@@ -12,6 +12,7 @@ import kitAgentMailGuard, {
 	subjectLead,
 	type AgentMailGuardApi,
 	type AgentMailGuardDeps,
+	type MailWakeHooks,
 } from "./kit-agent-mail-guard";
 import type { FlywheelContext, FlywheelExecOptions, FlywheelExecResult, FlywheelToolCallEvent, FlywheelToolCallResult } from "./kit-flywheel-guard";
 
@@ -26,12 +27,32 @@ const BEAD = "ompkit-1abc";
 interface ExecCall { command: string; args: string[]; options?: FlywheelExecOptions }
 type Responder = (call: ExecCall) => FlywheelExecResult | Promise<FlywheelExecResult>;
 type ToolHandler = (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown;
+type ResultHandler = (event: { toolCallId?: unknown; content?: unknown; isError?: unknown }, ctx: FlywheelContext) => unknown;
 
 interface Host {
 	call(event: FlywheelToolCallEvent, cwd: string, toolCallId?: string | null): Promise<FlywheelToolCallResult | undefined>;
 	/** A `write` to xd://mcp__mcp_agent_mail_<tool>, the way OMP routes an MCP call. */
 	mail(cwd: string, tool: string, args: unknown, toolCallId?: string | null): Promise<FlywheelToolCallResult | undefined>;
+	/** OMP's tool_result for one call, through every registered tool_result handler. */
+	result(cwd: string, toolCallId: string, content: unknown[], isError?: boolean): Promise<unknown>;
 	execs: ExecCall[];
+}
+
+/** A wake that records every call and wakes nobody: the default, so guard tests never touch Tern. */
+function recordingWake(block: string | null = null): MailWakeHooks & { before: unknown[][]; after: unknown[] } {
+	const before: unknown[][] = [];
+	const after: unknown[] = [];
+	return {
+		before, after,
+		beforeSend: async (...args) => {
+			before.push(args);
+			return block === null ? undefined : { block: true, reason: block };
+		},
+		afterSend: async event => {
+			after.push(event);
+			return { content: [...(Array.isArray(event.content) ? event.content : []), { type: "text", text: `woke ${String(event.toolCallId)}` }] };
+		},
+	};
 }
 
 /** Known beads answer `br show`; any other id misses the way br 0.7.4 does (JSON error on stdout, exit 3). */
@@ -88,17 +109,21 @@ function fleetRespond(rosters: Record<string, TestRosterRow[]>, ...ids: string[]
 
 async function createHost(deps: AgentMailGuardDeps = {}, respond: Responder = brKnows(BEAD)): Promise<Host> {
 	const handlers: ToolHandler[] = [];
+	const resultHandlers: ResultHandler[] = [];
 	const execs: ExecCall[] = [];
 	let dispatch = 0;
 	const pi: AgentMailGuardApi = {
-		on: (_event, handler) => void handlers.push(handler),
+		on: ((event: string, handler: ToolHandler & ResultHandler) => {
+			if (event === "tool_result") resultHandlers.push(handler);
+			else handlers.push(handler);
+		}) as AgentMailGuardApi["on"],
 		exec: async (command, args, options) => {
 			const call = { command, args, options };
 			execs.push(call);
 			return respond(call);
 		},
 	};
-	await kitAgentMailGuard(pi, { env: { AGENT_NAME: "PlumRaven" }, home: join(base, "no-home"), ...deps });
+	await kitAgentMailGuard(pi, { env: { AGENT_NAME: "PlumRaven" }, home: join(base, "no-home"), mailWake: recordingWake(), ...deps });
 	const call: Host["call"] = async (event, cwd, toolCallId) => {
 		const id = toolCallId === null ? undefined : toolCallId ?? `dispatch-${++dispatch}`;
 		const ctx: FlywheelContext = { cwd, isIdle: () => true };
@@ -108,7 +133,13 @@ async function createHost(deps: AgentMailGuardDeps = {}, respond: Responder = br
 	};
 	const mail: Host["mail"] = (cwd, tool, args, toolCallId) =>
 		call({ toolName: "write", input: { path: `${MAIL}${tool}`, content: JSON.stringify(args) } }, cwd, toolCallId);
-	return { call, mail, execs };
+	const result: Host["result"] = async (cwd, toolCallId, content, isError = false) => {
+		const ctx: FlywheelContext = { cwd, isIdle: () => true };
+		let patched: unknown;
+		for (const handler of resultHandlers) patched = (await handler({ toolCallId, content, isError }, ctx)) ?? patched;
+		return patched;
+	};
+	return { call, mail, result, execs };
 }
 test("reads: outer write and mounted fetch share one accepted logical call ID", async () => {
 	let clock = 1_000_000;
@@ -613,4 +644,41 @@ test("token: direct MCP-call form, object content, and empty-string token are st
 	const replyCall = await h.call({ toolName: "mcp__mcp_agent_mail_reply_message", input: reply() }, cwd);
 	const rinput = stampedArgs(replyCall);
 	expect(rinput?.sender_token).toBe(SEAT_TOKEN);
+});
+
+// MAILWAKE1 (ompkit-uk9wn): kit-mail-wake shipped as a library but no guard ever called it, so no send woke anyone
+// (2026-10-22: no mail-wake.jsonl ledger existed on the fleet host). These pin the wiring.
+test("wake: a send that passes every check plans its wake, and its result carries the wake outcome", async () => {
+	const wake = recordingWake();
+	const h = await createHost({ mailWake: wake });
+	const cwd = fleetRepo();
+	expect(code(await h.mail(cwd, "send_message", send(), "send-1"))).toBeUndefined();
+	expect(wake.before).toHaveLength(1);
+	expect(wake.before[0]!.slice(0, 2)).toEqual(["send-1", "send_message"]);
+	expect((wake.before[0]![2] as Record<string, unknown>).to).toEqual(["BlueLake"]);
+	expect(wake.before[0]![3]).toBe(BACKEND);
+	const patched = await h.result(cwd, "send-1", [{ type: "text", text: "{\"deliveries\":[]}" }]);
+	expect(JSON.stringify(patched)).toContain("woke send-1");
+	expect(wake.after).toHaveLength(1);
+});
+
+test("wake: planted, an ask with no wake path is refused before anything is sent", async () => {
+	const h = await createHost({ mailWake: recordingWake("NO_WAKE_PATH: BlueLake has no live seat") });
+	const verdict = await h.mail(fleetRepo(), "send_message", send(), "send-2");
+	expect(verdict?.block).toBe(true);
+	expect(verdict?.reason).toStartWith("NO_WAKE_PATH");
+});
+
+test("wake: a send the guard refuses never reaches the wake", async () => {
+	const wake = recordingWake();
+	const h = await createHost({ mailWake: wake });
+	expect(code(await h.mail(fleetRepo(), "send_message", send({ sender_name: "BlueLake" }), "send-3"))).toBe("AM_IDENTITY_MISMATCH");
+	expect(wake.before).toHaveLength(0);
+});
+
+test("wake: control, a repo that did not opt into the fleet plans no wake", async () => {
+	const wake = recordingWake();
+	const h = await createHost({ mailWake: wake });
+	expect(await h.mail(fleetRepo(false), "send_message", send(), "send-4")).toBeUndefined();
+	expect(wake.before).toHaveLength(0);
 });

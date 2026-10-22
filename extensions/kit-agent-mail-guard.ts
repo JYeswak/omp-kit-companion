@@ -12,6 +12,7 @@ import {
 	type FlywheelToolCallResult,
 	type TrackerRequest,
 } from "./kit-flywheel-guard";
+import { createMailWake, type MailToolResultEvent, type MailWake } from "./kit-mail-wake";
 
 /**
  * kit-agent-mail-guard (AMGUARD1, ompkit-774u.13.2): a seat's Agent Mail calls are checked at the act.
@@ -87,8 +88,12 @@ const BULK_READ_PATTERN = /(?:^|_)(?:mark_all|all_read|read_all|fetch_all|bulk)(
 
 export interface AgentMailGuardApi {
 	on(event: "tool_call", handler: (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown): void;
+	on(event: "tool_result", handler: (event: MailToolResultEvent, ctx: FlywheelContext) => unknown): void;
 	exec: FlywheelExec;
 }
+
+/** The two kit-mail-wake entry points the guard drives around one send. */
+export type MailWakeHooks = Pick<MailWake, "beforeSend" | "afterSend">;
 
 export interface AgentMailGuardDeps {
 	env?: Record<string, string | undefined>;
@@ -101,6 +106,8 @@ export interface AgentMailGuardDeps {
 	amBin?: string;
 	/** Cross-project scan budget in ms; defaults to AM_SCAN_BUDGET_MS. */
 	scanBudgetMs?: number;
+	/** The mail wake (MAILWAKE1); defaults to createMailWake over pi.exec. Injectable for tests. */
+	mailWake?: MailWakeHooks;
 }
 
 /** One registered agent row, as `am agents list -p <key> --json` returns it. */
@@ -224,6 +231,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	let scanner: RegExp[] | null = null;
 	let lastInbox: number | null = null;
 	let lastInboxToolCallId: string | null = null;
+	const wake: MailWakeHooks = deps.mailWake ?? createMailWake({ exec: pi.exec, env, home });
 
 	function secretScanner(): RegExp[] {
 		scanner ??= ruleConditions(readFileSync(rulePath, "utf8")).map(source => new RegExp(source));
@@ -538,11 +546,30 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			}
 			if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
 			const names = await seatNames(ctx, prop(call.args.value, "project_key"));
-			const verdict = await checkMessage(call.tool === "send_message" ? "send_message" : "reply_message", call.args.value, ctx, names);
+			const tool = call.tool === "send_message" ? "send_message" : "reply_message";
+			const verdict = await checkMessage(tool, call.args.value, ctx, names);
 			if (verdict !== undefined) return verdict;
+			// MAILWAKE1 (ompkit-uk9wn): plan the recipients' wake only once every check passed; an ask with no
+			// wake path is refused here (NO_WAKE_PATH) before anything is sent.
+			const projectKey = prop(call.args.value, "project_key");
+			const wakeVerdict = await wake.beforeSend(event.toolCallId, tool, call.args.value,
+				typeof projectKey === "string" && projectKey !== "" ? projectKey : ctx.cwd);
+			if (wakeVerdict !== undefined) return wakeVerdict;
 			return injectSenderToken(call, event, names);
 		} catch (error) {
 			return refuse("AM_GUARD_FAILED", `the check failed (${error instanceof Error ? error.message : String(error)}).`);
+		}
+	});
+
+	// MAILWAKE1: the planned wake fires on the send's result. afterSend acts only on a toolCallId beforeSend
+	// planned above, so every other tool result passes through untouched.
+	pi.on("tool_result", async event => {
+		try {
+			return await wake.afterSend(event);
+		} catch (error) {
+			const content = Array.isArray(event.content) ? event.content : [];
+			const why = error instanceof Error ? error.message : String(error);
+			return { content: [...content, { type: "text", text: `[kit-mail-wake] UNSIGNALED: the wake failed (${why}); the mail is persisted but wakes nobody.` }] };
 		}
 	});
 }
