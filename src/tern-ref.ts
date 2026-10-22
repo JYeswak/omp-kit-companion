@@ -212,21 +212,29 @@ export interface CitedBead {
 
 /** Find beads whose id, title, or description cites a changed chunk anchor.
  * Items are matched as opaque records (id plus every string field), so the
- * matcher survives `br list --json` shape drift; hits are listed only. */
+ * matcher survives `br list --json` shape drift; hits are listed only.
+ * Accepts the real `br list --json` envelope ({issues:[...]}) or a bare
+ * array; anything else refuses. */
 export function matchCitedBeads(brListJson: string, anchors: string[]): CitedBead[] {
-	let items: unknown;
+	let parsed: unknown;
 	try {
-		items = JSON.parse(brListJson);
+		parsed = JSON.parse(brListJson);
 	} catch {
 		throw new TernRefInputError("INVALID_BEAD_LIST", "Bead list is not JSON");
 	}
-	if (!Array.isArray(items)) throw new TernRefInputError("INVALID_BEAD_LIST", "Bead list is not an array");
+	let items: unknown = parsed;
+	if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && "issues" in parsed) {
+		const envelope = parsed.issues;
+		if (Array.isArray(envelope)) items = envelope;
+	}
+	if (!Array.isArray(items)) throw new TernRefInputError("INVALID_BEAD_LIST", "Bead list is not an array or {issues:[...]}");
 	const hits: CitedBead[] = [];
 	for (const item of items) {
-		if (typeof item !== "object" || item === null || typeof (item as Record<string, unknown>).id !== "string") continue;
-		const haystack = Object.values(item as Record<string, unknown>).filter((v) => typeof v === "string").join("\n").toLowerCase();
+		if (typeof item !== "object" || item === null || !("id" in item) || typeof item.id !== "string") continue;
+		const bead = item.id;
+		const haystack = Object.values(item).filter((v) => typeof v === "string").join("\n").toLowerCase();
 		for (const anchor of anchors) {
-			if (anchor.length > 0 && haystack.includes(anchor.toLowerCase())) hits.push({ bead: (item as Record<string, unknown>).id as string, anchor });
+			if (anchor.length > 0 && haystack.includes(anchor.toLowerCase())) hits.push({ bead, anchor });
 		}
 	}
 	return hits;
@@ -456,8 +464,10 @@ function queryReference(args: Record<string, string | boolean>, opts: TernRefOpt
 	const backend = opts.backend ?? (manifest.index_model.startsWith("nomic") ? "nomic" : "qwen");
 	const indexDir = backend === "nomic" ? `${dir}/idx-nomic` : `${dir}/idx-qwen`;
 	const k = opts.k ?? 10;
+	if (backend === "qwen") checkQwenPython(files);
+	const interpreter = backend === "qwen" ? QWEN_PYTHON : "python3";
 	const search = (query: string): unknown => {
-		const out = checkExec(exec(["python3", `${EMBED_SCRIPTS}/embed.py`, "search", "--index", indexDir, query, "-k", String(k)], { timeoutMs: 120000 }), "search");
+		const out = checkExec(exec([interpreter, `${EMBED_SCRIPTS}/embed.py`, "search", "--index", indexDir, query, "-k", String(k)], { timeoutMs: 120000 }), "search");
 		return JSON.parse(out);
 	};
 	const frozen = args["--queries"];
@@ -537,17 +547,28 @@ async function runRuntimeChecks(
 	const scratch = `${resolveTernRefRoot(opts.root)}/validate-scratch`;
 	files.mkdir(scratch);
 	const socket = `${scratch}/ctl.sock`;
+	if (socket.length >= 104) {
+		throw new TernRefInputError("SOCKET_PATH_TOO_LONG", `scratch socket path is ${socket.length} chars (macOS limit 103): re-run with a shorter --root`);
+	}
 	files.remove(socket);
 	const server = (spawn ?? defaultSpawn)(["tern", "serve", "--control", socket], { ...process.env, TERN_CONFIG_DIR: `${scratch}/config` });
 	try {
-		const deadline = Date.now() + 30000;
+		const deadline = Date.now() + 120000;
 		while (Date.now() < deadline) {
 			if (files.exists(socket)) break;
 			const { promise, resolve } = Promise.withResolvers<void>();
 			setTimeout(resolve, 200);
 			await promise;
 		}
-		if (!files.exists(socket)) throw new TernRefInputError("SERVE_UNAVAILABLE", "isolated tern serve never created its socket");
+		if (!files.exists(socket)) {
+			let hint = "";
+			try {
+				hint = `: ${files.read(`${scratch}/serve-stderr.log`).slice(-1000)}`;
+			} catch {
+				hint = "";
+			}
+			throw new TernRefInputError("SERVE_UNAVAILABLE", `isolated tern serve never created its socket${hint}`);
+		}
 		if (!control) throw new TernRefInputError("NO_CONTROL", "validate needs a control seam");
 		const report: { id: string; passed: boolean; planted: boolean }[] = [];
 		for (const check of checks) {
@@ -563,7 +584,20 @@ async function runRuntimeChecks(
 }
 
 function defaultSpawn(argv: string[], env: Record<string, string | undefined>): { kill(): void } {
-	const proc = Bun.spawn(argv, { env: { ...process.env, ...env }, stdout: "ignore", stderr: "ignore" });
+	const baseEnv = { ...process.env, ...env };
+	const flag = argv.indexOf("--control");
+	const socket = flag >= 0 ? argv[flag + 1] : undefined;
+	if (socket !== undefined) {
+		try {
+			const log = Bun.file(`${socket.slice(0, Math.max(0, socket.lastIndexOf("/")))}/serve-stderr.log`);
+			const proc = Bun.spawn(argv, { env: baseEnv, stdout: log, stderr: log });
+			return { kill: () => proc.kill() };
+		} catch {
+			const proc = Bun.spawn(argv, { env: baseEnv, stdout: "ignore", stderr: "ignore" });
+			return { kill: () => proc.kill() };
+		}
+	}
+	const proc = Bun.spawn(argv, { env: baseEnv, stdout: "ignore", stderr: "ignore" });
 	return { kill: () => proc.kill() };
 }
 
@@ -680,7 +714,9 @@ function driftReference(args: Record<string, string | boolean>, opts: TernRefOpt
 	if (changed.length === 0 && stored.tern_version === version) {
 		return { code: 0, data: { status: "clean", version } };
 	}
-	const rebuilt = buildReference({ "--force": true }, opts, exec, files);
+	const rebuildArgs: Record<string, string | boolean> = { "--force": true };
+	if (typeof args["--site"] === "string") rebuildArgs["--site"] = args["--site"];
+	const rebuilt = buildReference(rebuildArgs, opts, exec, files);
 	const current = parseManifest(files.read(`${dir}/manifest.json`));
 	const diff = diffManifests(stored, current);
 	const beadList = checkExec(exec(["br", "list", "--json"], { timeoutMs: 60000 }), "br list");

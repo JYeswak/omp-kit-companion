@@ -58,22 +58,24 @@ REPO="$(pwd)"
 need_file "$REPO/tests/cli/fixtures/tern-ref-checks.jsonl"
 
 # --- fixture site -----------------------------------------------------------
+# Pages live under /tern/ so the build's --prefix /tern/ crawl scope matches,
+# exactly like the real docs site. Links stay relative.
 SITE="$WORK/site"
-mkdir -p "$SITE"
-cat >"$SITE/index.html" <<'EOF'
+mkdir -p "$SITE/tern"
+cat >"$SITE/tern/index.html" <<'EOF'
 <html><head><title>Tern test docs</title></head><body><main>
 <h1>Test plugin SDK</h1>
 <p>Register an export with carly export.</p>
 <a href="run.html">run</a> <a href="serve.html">serve</a>
 </main></body></html>
 EOF
-cat >"$SITE/run.html" <<'EOF'
+cat >"$SITE/tern/run.html" <<'EOF'
 <html><head><title>run</title></head><body><main>
 <h1>run</h1><p>Types a command line and Enter into the focused pane.</p>
 <a href="index.html">index</a>
 </main></body></html>
 EOF
-cat >"$SITE/serve.html" <<'EOF'
+cat >"$SITE/tern/serve.html" <<'EOF'
 <html><head><title>serve</title></head><body><main>
 <h1>serve</h1><p>A headless session on a control endpoint, until quit.</p>
 <a href="index.html">index</a>
@@ -90,11 +92,16 @@ trap 'kill $SERVER_PID 2>/dev/null' EXIT INT TERM
 sleep 1
 
 REF="$WORK/ref"
-SITE_URL="http://127.0.0.1:$PORT/index.html"
+SITE_URL="http://127.0.0.1:$PORT/tern/index.html"
+VER="$(tern --version | sed -n 's/^tern \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')"
+case "$VER" in
+	[0-9]*.[0-9]*.[0-9]*) ;;
+	*) echo "cannot parse installed tern version" >&2; exit 2 ;;
+esac
 
 # --- 1. build ---------------------------------------------------------------
 step build 0 tern-ref build --root "$REF" --site "$SITE_URL" --json
-MANIFEST="$REF/0.9.0/manifest.json"
+MANIFEST="$REF/$VER/manifest.json"
 if [ -f "$MANIFEST" ]; then verdict_note="manifest present"; else verdict_note="manifest MISSING"; fi
 
 # --- 2. query both backends --------------------------------------------------
@@ -117,7 +124,7 @@ fi
 
 # --- 4. drift clean, then mutated --------------------------------------------
 step drift-clean 0 tern-ref drift --root "$REF" --site "$SITE_URL" --json
-printf '<!-- drift -->\n' >>"$SITE/serve.html"
+printf '<!-- drift -->\n' >>"$SITE/tern/serve.html"
 step drift-dirty 0 tern-ref drift --root "$REF" --site "$SITE_URL" --json
 
 # --- 5. mutant kills ----------------------------------------------------------
@@ -148,12 +155,13 @@ assert() {
 assert manifest-present test -f "$MANIFEST"
 assert socket-under-work grep -q -F "$WORK/ref/validate-scratch/ctl.sock" "$WORK/validate.out"
 assert config-under-work grep -q -F "$WORK/ref/validate-scratch/config" "$WORK/validate.out"
-assert nomic-index test -d "$REF/0.9.0/idx-nomic"
-assert qwen-index test -d "$REF/0.9.0/idx-qwen"
+assert nomic-index test -d "$REF/$VER/idx-nomic"
+assert qwen-index test -d "$REF/$VER/idx-qwen"
 assert scratch-dir test -d "$REF/validate-scratch"
 assert drift-saw-mutation grep -q "serve.html" "$WORK/drift-dirty.out"
-assert mutant-planted-code grep -q "PLANTED_PASSED" "$WORK/mutant-planted.err"
+assert mutant-planted-code grep -q "PLANTED_PASSED" "$WORK/mutant-planted.out"
 assert version-forced-reindex grep -q "reindexed" "$WORK/mutant-version.out"
+assert drift-kept-site grep -q "127.0.0.1" "$MANIFEST"
 if [ "$LIVE_BEFORE" = "$LIVE_AFTER" ]; then
 	assert live-socket-untouched true
 else

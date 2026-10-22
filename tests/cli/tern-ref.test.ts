@@ -15,8 +15,11 @@ import {
 	parseTernVersion,
 	resolveCrawlLink,
 	resolveTernRefRoot,
+	runTernRef,
 	ternRefDirFor,
 	TernRefInputError,
+	type TernRefExec,
+	type TernRefFiles,
 	type TernRefManifest,
 } from "../../src/tern-ref.ts";
 
@@ -143,15 +146,22 @@ describe("diffManifests", () => {
 });
 
 describe("matchCitedBeads", () => {
-	const fixture = JSON.stringify([
-		{ id: "ompkit-fp72.120.8", title: "TERNREF1 reference", description: "cites chunk PluginInfo" },
-		{ id: "ompkit-other", title: "unrelated", description: "nothing here" },
-	]);
-	test("lists the citing bead only", () => {
+	const realList = readFileSync(resolve(import.meta.dir, "fixtures", "tern-ref-br-list.json"), "utf8");
+	test("real br list --json envelope unwraps and the citing bead hits", () => {
+		const hits = matchCitedBeads(realList, ["tern.d.luau"]);
+		expect(hits.map((h) => h.bead)).toContain("ompkit-fp72.120.8");
+		for (const hit of hits) expect(hit.anchor).toBe("tern.d.luau");
+	});
+	test("bare arrays still match, envelopes without issues refuse", () => {
+		const fixture = JSON.stringify([
+			{ id: "ompkit-fp72.120.8", title: "TERNREF1 reference", description: "cites chunk PluginInfo" },
+			{ id: "ompkit-other", title: "unrelated", description: "nothing here" },
+		]);
 		expect(matchCitedBeads(fixture, ["PluginInfo"])).toEqual([{ bead: "ompkit-fp72.120.8", anchor: "PluginInfo" }]);
+		throwsCode(() => matchCitedBeads('{"total":0}', ["x"]), "INVALID_BEAD_LIST");
 	});
 	test("no anchor hit means no beads, and bad JSON refuses", () => {
-		expect(matchCitedBeads(fixture, ["NoSuchChunk"])).toEqual([]);
+		expect(matchCitedBeads(realList, ["NoSuchChunkAnchor-zzz"])).toEqual([]);
 		throwsCode(() => matchCitedBeads("nope", ["x"]), "INVALID_BEAD_LIST");
 	});
 });
@@ -218,5 +228,167 @@ describe("gradeRetrievalSystems", () => {
 		throwsCode(() => gradeRetrievalSystems(sealed, one, one), "UNLABELLED_ITEM");
 		const empty = JSON.stringify({ systems: [{ name: "nomic" }], queries: [{ qid: "q1" }], runs: { nomic: { q1: [] } } });
 		throwsCode(() => gradeRetrievalSystems(empty, labelsA, labelsB), "EMPTY_RANK");
+	});
+});
+
+describe("validateReference runtime seams", () => {
+	const ROOT = "/tmp/tern-ref-seam";
+	const DIR = `${ROOT}/0.9.0`;
+	const SOCKET = `${ROOT}/validate-scratch/ctl.sock`;
+	interface Seam {
+		files: TernRefFiles;
+		exec: TernRefExec;
+		spawn: () => { kill(): void };
+	}
+	function seam(checksJsonl: string): Seam {
+		const store: Record<string, string> = {
+			[`${DIR}/manifest.json`]: formatManifest(manifest()),
+			[`${ROOT}/checks.jsonl`]: checksJsonl,
+		};
+		let spawned = false;
+		const files: TernRefFiles = {
+			read: (path) => {
+				const hit = store[path];
+				if (hit === undefined) throw new Error(`seam has no file: ${path}`);
+				return hit;
+			},
+			write: (path, content) => { store[path] = content; },
+			mkdir: () => {},
+			exists: (path) => path === SOCKET ? spawned : store[path] !== undefined,
+			remove: () => {},
+			sha256Hex: () => "00".repeat(32),
+		};
+		const exec: TernRefExec = (argv) => {
+			if (argv[0] === "tern" && argv[1] === "--version") return { exit: 0, stdout: "tern 0.9.0 (56bd59f)\n", stderr: "" };
+			throw new Error(`seam has no command: ${argv.join(" ")}`);
+		};
+		return { files, exec, spawn: () => { spawned = true; return { kill: () => {} }; } };
+	}
+	async function throwsCodeAsync(fn: () => Promise<unknown>, code: string): Promise<void> {
+		try {
+			await fn();
+		} catch (error) {
+			if (error instanceof TernRefInputError) {
+				expect(error.code).toBe(code);
+				return;
+			}
+			throw error;
+		}
+		throw new Error(`expected throw ${code}, nothing threw`);
+	}
+	test("MUTANT KILL: a planted check whose expect matches refuses with PLANTED_PASSED", async () => {
+		const s = seam('{"id":"mutant-planted-pass","run":["state"],"expect":["SHAM"],"planted":true}\n');
+		await throwsCodeAsync(() => runTernRef("validate", { "--checks": `${ROOT}/checks.jsonl` }, { root: ROOT }, {
+			exec: s.exec,
+			files: s.files,
+			control: async () => ["SHAM"],
+			spawn: s.spawn,
+		}), "PLANTED_PASSED");
+	});
+	test("true checks that match pass with the scratch socket in the report", async () => {
+		const s = seam('{"id":"serve-state-ok","run":["state"],"expect":["\\"ok\\":true"]}\n');
+		const result = await runTernRef("validate", { "--checks": `${ROOT}/checks.jsonl` }, { root: ROOT }, {
+			exec: s.exec,
+			files: s.files,
+			control: async () => ['{"ok":true}'],
+			spawn: s.spawn,
+		});
+		expect(result.code).toBe(0);
+	});
+	test("overlong scratch socket paths refuse before spawning", async () => {
+		const longRoot = `/tmp/${"d".repeat(120)}`;
+		const s = seam('{"id":"x","run":["state"],"expect":["y"]}\n');
+		let spawned = false;
+		await throwsCodeAsync(() => runTernRef("validate", { "--checks": `${ROOT}/checks.jsonl` }, { root: longRoot }, {
+			exec: s.exec,
+			files: s.files,
+			control: async () => ["y"],
+			spawn: () => { spawned = true; return { kill: () => {} }; },
+		}), "SOCKET_PATH_TOO_LONG");
+		expect(spawned).toBe(false);
+	});
+});
+
+describe("queryReference backend interpreters", () => {
+	test("qwen searches run under the qwen interpreter, nomic under python3", async () => {
+		const seen: string[][] = [];
+		const store: Record<string, string> = {
+			"/tmp/tern-ref-q/0.9.0/manifest.json": formatManifest(manifest()),
+		};
+		const files: TernRefFiles = {
+			read: (path) => {
+				const hit = store[path];
+				if (hit === undefined) throw new Error(`seam has no file: ${path}`);
+				return hit;
+			},
+			write: () => {},
+			mkdir: () => {},
+			exists: () => true,
+			remove: () => {},
+			sha256Hex: () => "00".repeat(32),
+		};
+		const exec: TernRefExec = (argv) => {
+			if (argv[0] === "tern") return { exit: 0, stdout: "tern 0.9.0 (56bd59f)\n", stderr: "" };
+			seen.push(argv);
+			return { exit: 0, stdout: "[]", stderr: "" };
+		};
+		await runTernRef("query", { "--query": "hi" }, { root: "/tmp/tern-ref-q", backend: "qwen" }, { exec, files });
+		await runTernRef("query", { "--query": "hi" }, { root: "/tmp/tern-ref-q", backend: "nomic" }, { exec, files });
+		expect(seen.length).toBe(2);
+		expect(seen[0]?.[0]).not.toBe("python3");
+		expect(seen[1]?.[0]).toBe("python3");
+	});
+});
+
+describe("driftReference site forwarding", () => {
+	test("rebuild re-crawls the requested --site, never the canonical origin", async () => {
+		const ROOT = "/tmp/tern-ref-drift";
+		const DIR = `${ROOT}/0.9.0`;
+		const SITE = "http://127.0.0.1:9999/tern/index.html";
+		const store: Record<string, string> = {
+			[`${DIR}/manifest.json`]: formatManifest(manifest({ tern_version: "0.0.0", tern_commit: "oldcommit", pages: [], chunk_count: 0, chunk_sha256: [] })),
+		};
+		const crawlSites: string[] = [];
+		const files: TernRefFiles = {
+			read: (path) => {
+				const hit = store[path];
+				if (hit === undefined) throw new Error(`seam has no file: ${path}`);
+				return hit;
+			},
+			write: (path, content) => { store[path] = content; },
+			mkdir: () => {},
+			exists: (path) => path.endsWith("serve-env/bin/python") ? true : store[path] !== undefined,
+			remove: () => {},
+			sha256Hex: () => "00".repeat(32),
+		};
+		const pagesRow = `${JSON.stringify({ url: SITE, etag: null, sha256: "aa".repeat(32) })}\n`;
+		const exec: TernRefExec = (argv) => {
+			if (argv[0] === "tern" && argv[1] === "--version") return { exit: 0, stdout: "tern 0.9.0 (56bd59f)\n", stderr: "" };
+			if (argv.includes("crawl")) {
+				crawlSites.push(argv[argv.indexOf("--site") + 1] as string);
+				const out = argv[argv.indexOf("--out") + 1] as string;
+				store[out + "/pages.jsonl"] = pagesRow;
+				return { exit: 0, stdout: "{}", stderr: "" };
+			}
+			if (argv[0] === "tern" && argv[1] === "plugin") {
+				store[`${DIR}/types/tern.d.luau`] = "--- Doc.\nexport type Foo = string\n";
+				return { exit: 0, stdout: "", stderr: "" };
+			}
+			if (argv[0] === "tern" && argv[1] === "--help") return { exit: 0, stdout: "  tern run|wait ...\n", stderr: "" };
+			if (argv[0] === "tern" && argv[2] === "--help") return { exit: 0, stdout: "run help", stderr: "" };
+			if (argv.includes("extract")) {
+				store[`${DIR}/corpus.jsonl`] = `${JSON.stringify({ sha256: "bb".repeat(32) })}\n`;
+				return { exit: 0, stdout: "", stderr: "" };
+			}
+			if (argv.includes("index")) return { exit: 0, stdout: "", stderr: "" };
+			if (argv[0] === "br") return { exit: 0, stdout: "[]", stderr: "" };
+			throw new Error(`seam has no command: ${argv.join(" ")}`);
+		};
+		const result = await runTernRef("drift", { "--site": SITE }, { root: ROOT }, { exec, files });
+		expect(result.code).toBe(0);
+		expect(result.data["status"]).toBe("reindexed");
+		expect(crawlSites).toEqual([SITE, SITE]);
+		const rebuilt = parseManifest(store[`${DIR}/manifest.json`] as string);
+		expect(rebuilt.pages.map((p) => p.url)).toEqual([SITE]);
 	});
 });
