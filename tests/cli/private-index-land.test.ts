@@ -308,6 +308,20 @@ test("contradictory cached PASS evidence is a cache miss and cannot publish", ()
 	});
 	expect(contradictory.status, contradictory.stdout + contradictory.stderr).toBe(1);
 	expect(`${contradictory.stdout}${contradictory.stderr}`).toContain("cache miss");
+	const missingCount = JSON.parse(readFileSync(verdictPath, "utf8")) as { verdict: string; exit_code: number; evidence: Record<string, unknown> };
+	missingCount.verdict = "PASS";
+	missingCount.exit_code = 0;
+	delete missingCount.evidence.bun_files;
+	missingCount.evidence.bun_ran = 0;
+	missingCount.evidence.bun_fail = 0;
+	missingCount.evidence.shell_fail = 0;
+	missingCount.evidence.py_fail = 0;
+	writeFileSync(verdictPath, JSON.stringify(missingCount) + "\n");
+	const missing = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
+		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
+	});
+	expect(missing.status, missing.stdout + missing.stderr).toBe(1);
+	expect(`${missing.stdout}${missing.stderr}`).toContain("cache miss");
 });
 test("refuses a candidate whose exact full suite is red before origin advances", () => {
 	const { work, fakeBin } = fixture();

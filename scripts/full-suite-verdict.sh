@@ -115,12 +115,17 @@ try:
     evidence = e.get("evidence")
     assert isinstance(evidence, dict) and evidence.get("complete") is True
     assert isinstance(e.get("exit_code"), int)
-    failures = [evidence.get(name) for name in ("bun_fail", "shell_fail", "py_fail")]
-    assert all(isinstance(value, int) and value >= 0 for value in failures)
+    count_names = ("bun_files", "bun_ran", "bun_fail", "shell_suites", "shell_fail", "py_suites", "py_fail")
+    counts = [evidence.get(name) for name in count_names]
+    assert all(isinstance(value, int) and value >= 0 for value in counts)
+    bun_files, bun_ran, bun_fail, shell_suites, shell_fail, py_suites, py_fail = counts
+    assert bun_files + shell_suites + py_suites > 0
+    assert (bun_files == 0 and bun_ran == 0) or (bun_files > 0 and bun_ran > 0)
+    assert bun_fail <= bun_ran and shell_fail <= shell_suites and py_fail <= py_suites
     if e["verdict"] == "PASS":
-        assert e["exit_code"] == 0 and all(value == 0 for value in failures)
+        assert e["exit_code"] == 0 and bun_fail == shell_fail == py_fail == 0
     else:
-        assert e["exit_code"] != 0 and any(value > 0 for value in failures)
+        assert e["exit_code"] != 0 and (bun_fail > 0 or shell_fail > 0 or py_fail > 0)
     print("%s %s" % (e["verdict"], e["exit_code"]))
 except Exception:
     print("MISS")
