@@ -32,7 +32,8 @@ a path as described per language below.
           parts, is the left side of ``+``, the first argument of a join or
           resolve call (os.path.join), or of Path/PurePath used as the left
           side of ``/`` or with .joinpath.
-  Shell   mktemp in command position (line start, after ; & | ( ` { ! or
+  Shell   mktemp (bare or by absolute path, /usr/bin/mktemp) in command
+          position (line start, after ; & | ( ` { ! or
           then/do/else/if/while/until/exec/command), $TMPDIR / ${TMPDIR...}
           expansions, and /tmp/ path words (a bare /tmp, as in ``cd /tmp``,
           is not). Comments are stripped with quote state carried across
@@ -56,7 +57,8 @@ bodies) are not judged as their language, an arithmetic ``<<`` followed by a
 name is taken for a heredoc, ``"$dir"/tmp`` (closing quote before /tmp) is
 not a path word, and pragmas are not recognised inside heredoc bodies. A bare
 "/tmp" that reaches a path only through a variable (``t = "/tmp"`` then
-``join(t, x)``) or a non-first join argument is not seen.
+``join(t, x)``) or a non-first join argument is not seen, nor is a shell
+mktemp reached through a relative or variable path (``"$BIN"/mktemp``).
 
 Exempt (kitlib itself and this gate): see EXEMPT.
 
@@ -567,6 +569,33 @@ def _sh_tmp_word(code: str, start: int) -> bool:
     return False
 
 
+def _sh_path_char(ch: str) -> bool:
+    return ch.isalnum() or ch in "_./-"
+
+
+def _sh_mktemp_words(code: str) -> Iterable[int]:
+    """Start offsets of mktemp command words: bare ``mktemp`` or an absolute
+    path ending in it (``/usr/bin/mktemp``); a relative path or
+    ``$BIN/mktemp`` yields nothing. Each match walks back to the start of its
+    path-character run, stopping at the previous match and reusing that run's
+    start, so every character is walked at most once (linear in the line)."""
+    prev_pos, prev_run = -1, 0
+    for match in re.finditer(r"\bmktemp(?![A-Za-z0-9_.-])", code):
+        start = match.start()
+        run = start
+        while run > 0 and _sh_path_char(code[run - 1]):
+            if run == prev_pos:
+                run = prev_run
+                break
+            run -= 1
+        prev_pos, prev_run = start, run
+        if start and code[start - 1] == "/":
+            if code[run] == "/":
+                yield run
+        else:
+            yield start
+
+
 def _scan_sh(text: str) -> Tuple[Hits, Dict[int, str], List[Tuple[int, int, str]]]:
     hits: Hits = {}
     texts: Dict[int, str] = {}
@@ -581,9 +610,9 @@ def _scan_sh(text: str) -> Tuple[Hits, Dict[int, str], List[Tuple[int, int, str]
                 body = pending.pop(0) if pending else None
                 continue
             if not quoted:
-                for match in re.finditer(r"\bmktemp\b", line):
-                    if line[:match.start()].endswith(("$(", "`")):
-                        _add(hits, number, match.start() + 1, "mktemp")
+                for start in _sh_mktemp_words(line):
+                    if line[:start].endswith(("$(", "`")):
+                        _add(hits, number, start + 1, "mktemp")
                 for match in SH_TMPDIR_RE.finditer(line):
                     _add(hits, number, match.start() + 1, "$TMPDIR")
                 if number in hits:
@@ -595,9 +624,9 @@ def _scan_sh(text: str) -> Tuple[Hits, Dict[int, str], List[Tuple[int, int, str]
         pending.extend(opened)
         if pending and quote == "":
             body = pending.pop(0)
-        for match in re.finditer(r"\bmktemp(?![A-Za-z0-9_.-])", code):
-            if _sh_command_position(code, match.start()):
-                _add(hits, number, match.start() + 1, "mktemp")
+        for start in _sh_mktemp_words(code):
+            if _sh_command_position(code, start):
+                _add(hits, number, start + 1, "mktemp")
         for match in SH_TMPDIR_RE.finditer(code):
             _add(hits, number, match.start() + 1, "$TMPDIR")
         for match in TMP_WORD_RE.finditer(code):
