@@ -35,6 +35,12 @@
 #   OMP_KIT_SIGNING_KEYCHAIN           signing keychain (default: ~/Library/Keychains/uds-signing.keychain-db)
 #   OMP_KIT_SIGNING_KEYCHAIN_PASSWORD  file holding its password (default: ~/.config/uds/signing-keychain.pw)
 # Exit: 0 released (or dry run complete), 2 usage, 4 refused (nothing remote written before the tag step).
+# bash only, never `sh`: macOS /bin/sh is bash in POSIX mode, which runs the early stages, then aborts on the process
+# substitution at the sign stage with no failing command, so the EXIT trap re-exited 0 (2026-10-22 lead run of 0.2.73).
+if [ -z "${BASH_VERSION:-}" ] || (set -o | grep -q '^posix[[:space:]]*on'); then
+	echo "release-local: run it with bash (./scripts/release-local.sh), not sh" >&2
+	exit 2
+fi
 set -euo pipefail
 
 REPO="${OMP_KIT_REPO:-JYeswak/omp-kit-companion}"
