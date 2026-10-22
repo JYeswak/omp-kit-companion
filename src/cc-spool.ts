@@ -72,6 +72,7 @@ const TYPE_VERSIONS: Record<string, number> = {
 	"action.result": 1,
 	"bead.status": 1,
 	"source.tick": 1,
+	"cc.view": 1,
 	"cc.unknown": 1,
 };
 
@@ -178,6 +179,11 @@ function checkDataShape(type: string, data: Record<string, unknown>): void {
 		"source.tick": (d) =>
 			typeof (d as Record<string, unknown>).instance === "string" &&
 			typeof (d as Record<string, unknown>).records_seen === "number",
+		"cc.view": (d) =>
+			typeof (d as Record<string, unknown>).panel === "string" &&
+			typeof (d as Record<string, unknown>).route_id === "string" &&
+			((d as Record<string, unknown>).client === "loopback" ||
+				(d as Record<string, unknown>).client === "tailnet"),
 		"cc.unknown": (d) =>
 			typeof (d as Record<string, unknown>).class === "string" &&
 			typeof (d as Record<string, unknown>).scope === "string",

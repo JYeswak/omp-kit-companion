@@ -212,6 +212,23 @@ describe("cc-spool", () => {
 		expect(() => ccSpool("kit/x", { stateDir: ownedState() })).toThrow("PRODUCER_UNDECLARED_OR_UNSAFE");
 	});
 
+	test("cc.view accepts declared panel view shape and rejects invalid client", () => {
+		const st = ownedState();
+		const a = ccSpool("cc", { stateDir: st })!;
+		const env = a.envelope(
+			"cc.view",
+			{ panel: "Q1", route_id: "dashboard", client: "loopback" },
+			{ key: "cc:view:0001", timeMs: 1_769_000_000_000 },
+		);
+		expect(env.dataschema).toBe("cc.view@1");
+		expect(a.append([env])).toBe(1);
+		expect(() => a.envelope(
+			"cc.view",
+			{ panel: "Q1", route_id: "dashboard", client: "public" },
+			{ key: "cc:view:0002", timeMs: 1_769_000_000_000 },
+		)).toThrow("bad data shape");
+	});
+
 	test("undeclared type refused at envelope time", () => {
 		const st = ownedState();
 		const a = ccSpool("kit", { stateDir: st })!;
