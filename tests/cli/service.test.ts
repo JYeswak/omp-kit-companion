@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { checkService, checkServiceLinux, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
+import { checkService, checkServiceLinux, ciPollerEnvironment, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 import { superviseScratchJob } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
@@ -145,6 +145,36 @@ test("rendered plist calls the stable launcher directly with fixed env and watch
   expect(text).toContain(`<string>${expectedPath}</string>`);
   expect(text).toContain(`<string>${watch}</string>`);
   expect(text).toContain("<integer>60</integer>");
+});
+test("ci-poller persists explicit repo scope in native launchd and systemd definitions", () => {
+  const { home, launcher } = fixture();
+  const ciJob = KNOWN_JOBS["ci-poller"]!;
+  const saved = process.env.OMP_KIT_CI_REPOS;
+  process.env.OMP_KIT_CI_REPOS = "JYeswak/omp-kit-companion, JYeswak/zestroku, JYeswak/zestroku";
+  try {
+    expect(ciPollerEnvironment(ciJob)).toEqual([["OMP_KIT_CI_REPOS", "JYeswak/omp-kit-companion,JYeswak/zestroku"]]);
+    expect(renderLaunchdPlist(home, ciJob, launcher, null).text).toContain("<key>OMP_KIT_CI_REPOS</key>\n\t\t<string>JYeswak/omp-kit-companion,JYeswak/zestroku</string>");
+    expect(renderSystemdUnits(home, ciJob, launcher, null).service).toContain("Environment=OMP_KIT_CI_REPOS=\"JYeswak/omp-kit-companion,JYeswak/zestroku\"");
+  } finally {
+    if (saved === undefined) delete process.env.OMP_KIT_CI_REPOS;
+    else process.env.OMP_KIT_CI_REPOS = saved;
+  }
+});
+
+test("planted: ci-poller rejects empty, malformed, and oversized explicit scope", () => {
+  const ciJob = KNOWN_JOBS["ci-poller"]!;
+  const saved = process.env.OMP_KIT_CI_REPOS;
+  try {
+    for (const value of ["", "JYeswak/zestroku;rm", "x"]) {
+      process.env.OMP_KIT_CI_REPOS = value;
+      expect(() => ciPollerEnvironment(ciJob)).toThrow(/CI_REPOS_INVALID/);
+    }
+    process.env.OMP_KIT_CI_REPOS = "a".repeat(4097);
+    expect(() => ciPollerEnvironment(ciJob)).toThrow(/CI_REPOS_INVALID/);
+  } finally {
+    if (saved === undefined) delete process.env.OMP_KIT_CI_REPOS;
+    else process.env.OMP_KIT_CI_REPOS = saved;
+  }
 });
 test("fleet-watch plist captures TMUX_TMPDIR from the install environment", () => {
   const { home, launcher, watch } = fixture();

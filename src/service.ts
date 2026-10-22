@@ -383,6 +383,19 @@ function kitUpdateEnvironment(job: ServiceJobDef): [string, string][] {
 	return persisted;
 }
 
+const CI_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+/** Persist the explicitly approved CI scope in the native service definition. */
+export function ciPollerEnvironment(job: ServiceJobDef): [string, string][] {
+	const raw = process.env.OMP_KIT_CI_REPOS;
+	if (job.name !== "ci-poller" || raw === undefined) return [];
+	if (raw.length > 4096) throw new Error("CI_REPOS_INVALID: OMP_KIT_CI_REPOS exceeds 4096 characters");
+	const repos = [...new Set(raw.split(",").map(repo => repo.trim()).filter(Boolean))];
+	if (repos.length === 0 || repos.some(repo => !CI_REPO_PATTERN.test(repo))) {
+		throw new Error("CI_REPOS_INVALID: OMP_KIT_CI_REPOS must contain comma-separated owner/repo values");
+	}
+	return [["OMP_KIT_CI_REPOS", repos.join(",")]];
+}
+
 export interface RenderedPlist { label: string; text: string; launcher: string; watchPath: string | null }
 
 export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedPlist {
@@ -413,6 +426,7 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 			: []),
 		"\t\t<key>PATH</key>",
 		`\t\t<string>${xml(servicePath(home))}</string>`,
+		...ciPollerEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		...kitUpdateEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		"\t\t<key>OMP_KIT_JOB</key>",
 		`\t\t<string>${xml(job.name)}</string>`,
@@ -458,6 +472,7 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		...(job.name === "fleet-watch" && process.env.TMUX_TMPDIR
 			? [`Environment=TMUX_TMPDIR=${systemdQuote(process.env.TMUX_TMPDIR)}`]
 			: []),
+		...ciPollerEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...kitUpdateEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
 	];
