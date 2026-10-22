@@ -20,16 +20,16 @@ function configure(root: string, values: { slots?: number; max_wait_s?: number; 
 	writeFileSync(join(directory, "load.json"), JSON.stringify(values), { mode: 0o600 });
 }
 
-// Disk is machine state like load: every run puts a healthy stand-in sbh first
-// on PATH so the host's free space never decides a slot, signal or load test.
-// The HEAVYDISK1/HEAVYCI1 tests override PATH to plant each disk state.
+// Queue and load tests run at a controlled healthy disk reading; the native
+// cases below separately exercise the real pressure boundary and its mutant.
 function heavyEnv(root: string, extraEnv: Record<string, string> = {}): Record<string, string | undefined> {
 	const healthy = fakeSbh(root, 0, "healthy-bin");
 	return { ...process.env, HOME: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), PATH: `${healthy}:${process.env.PATH ?? ""}:/usr/bin:/bin`, TMUX_PANE: "", AGENT_NAME: "heavy-test", GITHUB_ACTIONS: "", ...QUIET_LOAD, ...extraEnv };
 }
 
-async function invoke(root: string, args: string[], extraEnv: Record<string, string> = {}, options: { cwd?: string; preload?: string } = {}) {
-	const preload = options.preload ? ["--preload", options.preload] : [];
+async function invoke(root: string, args: string[], extraEnv: Record<string, string> = {}, options: { cwd?: string; preload?: string | null } = {}) {
+	const preloadPath = options.preload === null ? undefined : options.preload ?? forgeHealthyStatfs;
+	const preload = preloadPath ? ["--preload", preloadPath] : [];
 	const child = Bun.spawn([process.execPath, ...preload, entry, ...args], {
 		cwd: options.cwd ?? root,
 		env: heavyEnv(root, extraEnv),
@@ -558,8 +558,8 @@ test("oq1h.1: auto with an erroring sbh fails fast with 69 naming the escape", a
 }, 40_000);
 
 // ---- oq1h.1 native cases: the real statfs through the real CLI -----------------------------------------
-// No production seam and no environment variable forges a disk here: pressure comes from a real small
-// filesystem, and the one forged reading is a --preload that only a test can name (fixtures/).
+// Native cases use a real small filesystem for pressure. The test-only preload
+// is limited to queue baselines and the planted forced-healthy mutant below.
 const NO_SBH_PATH = "/usr/bin:/bin";
 const forgeHealthyStatfs = resolve(import.meta.dir, "fixtures", "forge-healthy-statfs.ts");
 
@@ -605,7 +605,7 @@ async function nativeRun(input: { cwd: string; config?: Parameters<typeof config
 	const path = input.sbh === undefined ? NO_SBH_PATH : `${fakeSbh(root, input.sbh, "native-bin")}:${NO_SBH_PATH}`;
 	const marker = join(root, "native-marker");
 	const result = await invoke(root, ["heavy", "--no-wait", "--label", "oq1h1-native", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ PATH: path }, { cwd: input.cwd, preload: input.preload });
+		{ PATH: path }, { cwd: input.cwd, preload: input.preload ?? null });
 	return { code: result.code, stderr: result.stderr, ran: existsSync(marker) };
 }
 
