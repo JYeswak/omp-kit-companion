@@ -537,7 +537,10 @@ export function isApplyFailure(verdict: ScratchVerdict): boolean {
 export interface DiskCapacity { bavail: number; blocks: number }
 export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; statfs?: (path: string) => DiskCapacity | null; onInspect?: (path: string) => void; onProgress?: (verdict: ScratchVerdict, progress?: { done: number; total: number }) => void; lsofSnapshot?: Set<string> | null; runtimeRepo?: string | null;
 	/** Who is calling (host agent and held omp sessions); defaults to the real ps/lsof lookup for release, and is absent for create. */
-	callerSeat?: () => SeatIdentity }
+	callerSeat?: () => SeatIdentity;
+	/** Removes one path under a released dir for `release --now`; defaults to a forced recursive rm. A test plants a
+	 * remover that does nothing (the old marker-only release) and the physical-absence check must report it held. */
+	removeTree?: (path: string) => void }
 
 function dirSize(dir: string): number {
 	let total = 0;
@@ -1408,14 +1411,15 @@ ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin
 	if (clear !== true) return held(clear === null ? "now-held-lsof-unavailable" : "now-held-open-fds");
 	// SCRATCHRETIRE1 AC5: the owner record and the release marker go last. A delete that fails partway (a nested dir the
 	// owner cannot write) used to take both with the first files and leave an unowned remnant nobody could re-release.
+	const remove = deps.removeTree ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
 	try {
 		for (const name of readdirSync(dir)) {
 			if (name === ".owner" || name === RELEASE_FILE) continue;
-			rmSync(join(dir, name), { recursive: true, force: true });
+			remove(join(dir, name));
 		}
-		rmSync(join(dir, RELEASE_FILE), { force: true });
-		rmSync(join(dir, ".owner"), { force: true });
-		rmSync(dir, { recursive: true, force: true });
+		remove(join(dir, RELEASE_FILE));
+		remove(join(dir, ".owner"));
+		remove(dir);
 	} catch {
 		return held("now-held-delete-failed");
 	}

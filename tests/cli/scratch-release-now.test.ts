@@ -126,6 +126,21 @@ test("a partial delete failure keeps the marked dir, is not success, and claims 
 	expect(existsSync(stuck.dir)).toBe(false);
 });
 
+// SCRATCHRETIRE1 AC3 planted: the old marker-only release (a delete that removes nothing) must fail the physical-absence
+// check and be held, never success; the paired control, the real remover on the same shape, retires the dir.
+test("a delete that removes nothing is held by the physical-absence check; the real remover retires the dir", () => {
+	const planted = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
+	writeFileSync(join(planted.dir, "data.txt"), "kept");
+	const noop = releaseScratch(planted.dir, planted.home, deps({ lsofSnapshot: new Set(), removeTree: () => {} }), { bin: "throwaway", now: true });
+	expect(noop).toMatchObject({ ok: false, reason: "now-held-delete-failed" });
+	expect(existsSync(planted.dir)).toBe(true);
+	const control = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
+	writeFileSync(join(control.dir, "data.txt"), "gone");
+	expect(releaseScratch(control.dir, control.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(existsSync(control.dir)).toBe(false);
+});
+
 test("a hold is never deleted by now", () => {
 	const hold = fixture(ownerText(process.pid, "bin=hold\nbead=ompkit-774u.15\nexpires=2026-10-27\n"));
 	expect(releaseScratch(hold.dir, hold.home, deps(), { bin: "hold", now: true })).toMatchObject({ ok: false });
