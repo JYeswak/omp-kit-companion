@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, lstatSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform, type StagedKitRelease } from "./kit-release.ts";
 import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestInput, type FullTestReport } from "./full-test-runner.ts";
@@ -271,7 +272,7 @@ async function authenticateUpdateArchive(plan: KitUpdatePlan, archive: Buffer): 
  if (!bundleStat?.isFile() || bundleStat.isSymbolicLink()) throw new Error("KIT_ATTESTATION_BUNDLE_MISSING");
  if (bundleStat.size > 16 * 1024 * 1024) throw new Error("KIT_ATTESTATION_BUNDLE_INVALID");
  const bundle = regular(bundlePath);
- const snapshot = mkdtempSync(join(plan.stateRoot, "kit-attestation-"));
+ const snapshot = ownedTmp("kit-attestation", { root: plan.stateRoot }).path;
  try {
   const artifact = join(snapshot, basename(plan.archivePath));
   writeFileSync(artifact, archive, { mode: 0o600, flag: "wx" });

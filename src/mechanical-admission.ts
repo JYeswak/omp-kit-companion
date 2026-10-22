@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import * as path from "node:path";
 import type { CorpusCase } from "./case-corpus.ts";
 import { check as durabilityCheck } from "./fleet-guard/durability.ts";
@@ -38,7 +38,7 @@ interface Fixture {
  * Setup Git runs asynchronously, so independent cases may build their fixtures concurrently.
  */
 async function withFixture<T>(c: MechanicalCase, kit: string, use: (fixture: Fixture) => Promise<T>): Promise<T> {
-	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `mechanical-case.${process.pid}.`)));
+	const root = fs.realpathSync(ownedTmp("mechanical-case").path);
 	writeScratchOwner(root, { pid: process.pid, label: "mechanical-case", repo: kit, created: new Date().toISOString() });
 	try {
 		const env: Record<string, string> = {};

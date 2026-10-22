@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { isAbsolute, join } from "node:path";
 import { runCapabilitiesCheck, runContextInventory, validateProfileName, type CapabilitiesReport, type ContextInventory } from "./context.ts";
 
@@ -345,7 +345,7 @@ export async function renderSkillSet(input: SkillSetInput): Promise<SkillSetRepo
 			&& (names === undefined || !names.has(name)));
 		if (missing.length > 0) unresolved[key] = missing;
 	}
-	const capabilitiesPath = join(mkdtempSync(join(tmpdir(), "omp-kit-skill-set-")), "capabilities.json");
+	const capabilitiesPath = join(ownedTmp("omp-kit-skill-set").path, "capabilities.json");
 	try {
 		const global = await measureRecipe(input, profile, input.project, globalCandidate, globalInventory, capabilitiesPath);
 		const recipes: SkillSetProjectRecipe[] = [];

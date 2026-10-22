@@ -45,18 +45,18 @@ function runnerFor(repo: string): Runner | null {
 	return null;
 }
 function checkRunner(repo: string, runner: Runner, config: string | null): RepoRow {
-	const proposal = `Add var/agent-tmp and ${tmpdir()} exclusions to ${config ?? "the runner configuration"}; file a bead in ${repo}/.beads.`;
+	const proposal = `Add var/agent-tmp and ${tmpdir()} exclusions to ${config ?? "the runner configuration"}; file a bead in ${repo}/.beads.`; // tempsafe: names system temp in advice text, creates nothing
 	if (runner === "cargo" || runner === "go") {
 		return { repo, runner, config, verdict: "PASS", reason: `${runner} package discovery does not collect files from repository scratch without a module/package manifest`, fix_proposal: "No action required." };
 	}
 	if (config === null) return { repo, runner, config, verdict: "FAIL", reason: "runner configuration is absent; scratch exclusion cannot be verified", fix_proposal: proposal };
 	const source = readText(config);
 	const scratch = source.includes("var/agent-tmp") || source.includes("var\\/agent-tmp");
-	const systemTemp = source.includes(tmpdir()) || source.includes("/tmp/") || source.includes("/var/tmp/") || source.includes("/var/folders/") || source.includes("system-temp");
+	const systemTemp = source.includes(tmpdir()) || source.includes("/tmp/") || source.includes("/var/tmp/") || source.includes("/var/folders/") || source.includes("system-temp"); // tempsafe: matches config text against system temp, creates nothing
 	if (scratch && systemTemp) {
 		return { repo, runner, config, verdict: "PASS", reason: "runner configuration excludes repository scratch and system temporary paths", fix_proposal: "No action required." };
 	}
-	return { repo, runner, config, verdict: "FAIL", reason: `runner configuration does not exclude var/agent-tmp and system temp (${tmpdir()})`, fix_proposal: proposal };
+	return { repo, runner, config, verdict: "FAIL", reason: `runner configuration does not exclude var/agent-tmp and system temp (${tmpdir()})`, fix_proposal: proposal }; // tempsafe: names system temp in a report reason, creates nothing
 }
 
 export function inspectTestScope(configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(process.env.HOME ?? "", ".config", "omp-kit", "fleet-watch.json")): Finding {
@@ -85,5 +85,5 @@ export function inspectTestScope(configPath = process.env.OMP_KIT_FLEET_WATCH_CO
 	}
 	rows.sort((left, right) => left.repo.localeCompare(right.repo));
 	const failed = rows.filter(row => row.verdict === "FAIL");
-	return { component: "test-scope", status: failed.length ? "FAIL" : "OK", reason: failed.length ? `${failed.length} fleet test runner(s) lack scratch exclusions` : `Checked ${rows.length} fleet test runner(s); scratch boundaries are present`, recommended_action: failed.length ? failed[0]!.fix_proposal : "No action required.", evidence: { config: configPath, repos: rows, runner_count: rows.length, system_temp: tmpdir() } };
+	return { component: "test-scope", status: failed.length ? "FAIL" : "OK", reason: failed.length ? `${failed.length} fleet test runner(s) lack scratch exclusions` : `Checked ${rows.length} fleet test runner(s); scratch boundaries are present`, recommended_action: failed.length ? failed[0]!.fix_proposal : "No action required.", evidence: { config: configPath, repos: rows, runner_count: rows.length, system_temp: tmpdir() } }; // tempsafe: reports system temp path as evidence, creates nothing
 }

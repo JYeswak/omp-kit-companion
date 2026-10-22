@@ -846,7 +846,7 @@ export async function runIntegrations(input: IntegrationsInput): Promise<Integra
 			// Branch names must not embed the integration: shell errors echo the
 			// path, and judge regexes would self-match their own evidence.
 			const branch = `itg-${profile}-${runId}`;
-			const marker = integration === "fleet-guard" ? join("/tmp", `${branch}.txt`) : join(repo, "marker.txt");
+			const marker = integration === "fleet-guard" ? join("/tmp", `${branch}.txt`) : join(repo, "marker.txt"); // tempsafe: fleet-guard scenario must target /tmp so the guard refuses it; sandbox denies the write
 			const vars: Record<string, string> = { BRANCH: branch, MARKER: marker };
 			setupScenarioRepo(repo, fire.setup, vars);
 			const fireAttempt = await runLiveScenario({ ...input, profile, repo }, fire, vars);
@@ -854,7 +854,7 @@ export async function runIntegrations(input: IntegrationsInput): Promise<Integra
 			if (quiet) {
 				const quietRepo = `${repo}-quiet`;
 				const quietMarker = integration === "fleet-guard"
-					? join("/tmp", `${branch}-quiet.txt`) : join(quietRepo, "marker.txt");
+					? join("/tmp", `${branch}-quiet.txt`) : join(quietRepo, "marker.txt"); // tempsafe: fleet-guard scenario target under /tmp; sandbox denies or tmpfs-isolates the write
 				const quietVars = { ...vars, MARKER: quietMarker };
 				setupScenarioRepo(quietRepo, quiet.setup, quietVars);
 				quietAttempt = await runLiveScenario({ ...input, profile, repo: quietRepo }, quiet, quietVars);

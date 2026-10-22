@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { isAbsolute, join } from "node:path";
 import { CASE_HEADER } from "./case-corpus.ts";
 import { digest, EXTERNAL_PACK_LIMITS, readBoundedFile, readExternalPackSnapshot, type ExternalPackSnapshot } from "./external-pack.ts";
@@ -178,7 +179,7 @@ export async function runFalseFireReduction(input: FalseFireRunInput): Promise<F
 	const fixtureBytes = readBoundedFile(input.fixturePath, FIXTURE_MAX_BYTES, "false-fire fixture");
 	const fixtureDigest = digest(fixtureBytes);
 	const fixture = decodeFixture(fixtureBytes);
-	const scratch = mkdtempSync(join(runtimeTempRoot(), "false-fire-"));
+	const scratch = ownedTmp("false-fire", { root: runtimeTempRoot() }).path;
 	const casesPath = join(scratch, "witness.tsv");
 	const originalBytes = Buffer.byteLength(fixture.witness.snippet);
 	let baselineRules = "";

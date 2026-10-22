@@ -8,6 +8,7 @@ import { isatty } from "node:tty";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { RELEASE_DATA } from "./release-assets.ts";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { audit, undo, why } from "./audit.ts";
 import { LAND_GUARD_PUBLIC_IDENTITY, inspectLandGuard, landCommand } from "./land.ts";
 import { convergeCommand } from "./converge.ts";
@@ -1649,7 +1650,7 @@ async function mcpTestCommand(request: ParsedCommand): Promise<CliResult> {
 			return refusal("INVALID_EXPECT", `--expect ${expect.server} needs exactly one --call for that server and at most one --expect`, "Pass --call SERVER:TOOL:JSON and one --expect SERVER:REGEX per server; nothing was started.");
 		call.expect = expect.pattern;
 	}
-	const workDir = mkdtempSync(join(tmpdir(), "omp-kit-mcp-test-"));
+	const workDir = ownedTmp("omp-kit-mcp-test").path;
 	let rows;
 	try { rows = await probeMcpProfiles({ ompPath: launcher, profiles, ...(servers ? { servers } : {}), calls, startupTimeoutMs, callTimeoutMs, workDir }); }
 	finally { rmSync(workDir, { recursive: true, force: true }); }

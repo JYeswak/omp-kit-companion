@@ -1,5 +1,5 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { isAbsolute, join } from "node:path";
 import { resolveOmpIdentity } from "./paths.ts";
 import { runBundled } from "./runtime.ts";
@@ -183,7 +183,7 @@ export async function runCorpus(input: CorpusInput): Promise<CorpusReport> {
 	if (![input.root, input.executablePath].every(value => typeof value === "string" && isAbsolute(value))) {
 		throw new CorpusInputError("CORPUS_UNAVAILABLE", "Release root and executable must be absolute paths");
 	}
-	const scratch = mkdtempSync(join(tmpdir(), "omp-kit-corpus-"));
+	const scratch = ownedTmp("omp-kit-corpus").path;
 	const tsv = join(scratch, "corpus-fire-rate.tsv");
 	try {
 		const result = await runBundled(HARNESS,

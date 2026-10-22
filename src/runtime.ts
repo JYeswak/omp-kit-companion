@@ -99,7 +99,7 @@ export function runtimeTempRoot(): string {
 	}
 	const roots = systemTempRoots();
 	try {
-		const root = realpathSync(tmpdir());
+		const root = realpathSync(tmpdir()); // tempsafe: resolves system temp to validate the runtime root, creates nothing
 		const rootWithinSystemTemp = roots.some(systemRoot => {
 			const fromSystemRoot = relative(systemRoot, root);
 			return fromSystemRoot === "" || (fromSystemRoot !== ".." && !fromSystemRoot.startsWith(`..${sep}`) && !isAbsolute(fromSystemRoot));
@@ -172,7 +172,7 @@ async function runIsolated(
 	}
 	const absoluteScript = resolveBundledScript(script, realRoot);
 	const identity = resolveOmpIdentity(process.env);
-	const privateRoot = mkdtempSync(join(runtimeTempRoot(), "omp-kit-runtime-"));
+	const privateRoot = mkdtempSync(join(runtimeTempRoot(), "omp-kit-runtime-")); // tempsafe: runtime sandbox drains descendants before removal and may be retained; owned by ownership-registry row 4 (runtime-adapter.sh + scratch reaper)
 	let cleanupPrivateRoot = true;
 	try {
 		for (const directory of PRIVATE_DIRS) mkdirSync(join(privateRoot, directory), { mode: 0o700 });

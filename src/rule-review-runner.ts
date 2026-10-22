@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, rmSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { join } from "node:path";
 import { CASE_HEADER } from "./case-corpus.ts";
 import { ExternalPackInputError, readExternalPackSnapshot, type ExternalCaseSnapshot, type ExternalPackSnapshot } from "./external-pack.ts";
@@ -94,7 +95,7 @@ export async function runInstalledRuleReview(input: InstalledRuleReviewInput): P
 			return result;
 		}
 		const frozen = [...union.entries()].sort(([left], [right]) => compare(left, right)).map(([, value]) => value);
-		scratch = mkdtempSync(join(runtimeTempRoot(), "omp-kit-review-"));
+		scratch = ownedTmp("omp-kit-review", { root: runtimeTempRoot() }).path;
 		const cases = join(scratch, "frozen-witnesses.tsv");
 		writeFileSync(cases, CASE_HEADER + "\n" + frozen.map(({ row }) => caseRow(row)).join("\n") + "\n", { flag: "wx", mode: 0o600 });
 		const ruleMaps = {

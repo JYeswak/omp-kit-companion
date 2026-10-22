@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { observeOmpLauncherVersion, observeOmpManagers, resolveOmpIdentity } from "./paths.ts";
@@ -1243,15 +1244,17 @@ function copyProbeConfigs(fromDir: string, toDir: string): void {
  * the whole tree; call it in a finally.
  */
 export function isolatedProbeHome(home: string, profile: string): { home: string; cleanup: () => void } {
-	const root = mkdtempSync(join(tmpdir(), "omp-kit-probe-home-"));
+	// Owned: a killed probe used to leak omp-kit-probe-home-* (139 dirs, 11 GB).
+	const owned = ownedTmp("omp-kit-probe-home");
+	const root = owned.path;
 	const tempHome = join(root, "home");
 	copyProbeConfigs(join(home, ".omp", "agent"), join(tempHome, ".omp", "agent"));
 	copyProbeConfigs(join(home, ".omp", "profiles", profile, "agent"), join(tempHome, ".omp", "profiles", profile, "agent"));
 	return { home: tempHome, cleanup: () => {
 		try {
-			rmSync(root, { recursive: true, force: true });
+			owned.cleanup();
 		} catch {
-			// Best effort; the OS reaps temp.
+			// Best effort; the exit/signal registry retries and the reaper reads .owner.
 		}
 	} };
 }
@@ -1894,7 +1897,7 @@ function rchArgs(binary: string, args: readonly string[], timeoutMs: number): { 
 			// XDG_RUNTIME_DIR is set. Pin the SAME read-only socket parent before
 			// redirecting HOME/cache; config and RCH_SOCKET_PATH still override it.
 			const runtime = process.env.XDG_RUNTIME_DIR?.trim() ? process.env.XDG_RUNTIME_DIR : join(cache, "rch");
-			privateRoot = mkdtempSync(join(runtimeTempRoot(), "omp-kit-rch-probe-"));
+			privateRoot = ownedTmp("omp-kit-rch-probe", { root: runtimeTempRoot() }).path;
 			const privateHome = join(privateRoot, "home");
 			const privateTmp = join(privateRoot, "tmp");
 			for (const directory of ["home", "tmp", "config", "cache", "data", "state"]) mkdirSync(join(privateRoot, directory), { mode: 0o700 });

@@ -1,7 +1,8 @@
-import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { tmpdir, homedir } from "node:os";
+import { homedir } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 import { authorizeSourceAct } from "./source-authority.ts";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
@@ -257,7 +258,7 @@ function archiveFullSuiteJudge(repo: string, base: string): FullSuiteJudge | nul
 	if (archive.code !== 0 || archive.interrupted) return null;
 
 	let root: string;
-	try { root = mkdtempSync(join(repo, "var", "agent-tmp", "land-full-suite-gate.")); }
+	try { root = ownedTmp("land-full-suite-gate", { root: join(repo, "var", "agent-tmp") }).path; }
 	catch { return null; }
 	const extract = spawnSync("tar", ["-xf", "-", "-C", root], {
 		cwd: repo, env: gitEnvironment(), input: archive.out, encoding: "utf8",
@@ -747,9 +748,8 @@ function landPatchCommand(repo: string, request: ParsedCommand): CliResult {
 	}
 	// Reconstruct the caller selection onto fresh origin/main in a detached
 	// scratch worktree. The shared worktree and index never contribute bytes.
-	const tmpRoot = process.env.TMPDIR && isAbsolute(process.env.TMPDIR) ? process.env.TMPDIR : tmpdir();
 	let scratchBase = "";
-	try { scratchBase = mkdtempSync(join(tmpRoot, "omp-kit-land-patch-")); }
+	try { scratchBase = ownedTmp("omp-kit-land-patch").path; }
 	catch { return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "A scratch construction directory could not be created", "Restore temporary-directory access and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256); }
 	const scratch = join(scratchBase, "work");
 	const cleanup = (): void => {

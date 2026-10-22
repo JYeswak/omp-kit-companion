@@ -14,7 +14,8 @@
  * stash, branch creation, or force-push: a non-fast-forward push is reported.
  * Tests run on scratch repos only, never the operator's repo itself.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { isAbsolute, join } from "node:path";
 
 export const GITLEAKS_TIMEOUT_MS = 15_000;
@@ -168,7 +169,7 @@ function fail(ctx: Ctx, refusal: string, reason: string): ClaudeSaveResult {
 
 function materializeGitleaksTree(ctx: Ctx, treeId: string): { root: string; target: string } {
 	mkdirSync(ctx.stateRoot, { recursive: true, mode: 0o700 });
-	const root = mkdtempSync(join(ctx.stateRoot, "claude-save-gitleaks-"));
+	const root = ownedTmp("claude-save-gitleaks", { root: ctx.stateRoot }).path;
 	const target = join(root, "source");
 	const env = { GIT_INDEX_FILE: join(root, "index") };
 	try {

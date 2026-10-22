@@ -1,5 +1,6 @@
 import { isRecord } from "./type-guards.ts";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { realpathSync, rmSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { isAbsolute, join } from "node:path";
 import {
 	ExternalPackInputError,
@@ -352,7 +353,7 @@ export async function runExternalLive(input: ExternalLiveInput): Promise<Externa
 	let inputsUnchanged = true;
 	let bundleAfter = bundleAfterFast;
 	try {
-		workspace = mkdtempSync(join(runtimeTempRoot(), "omp-kit-external-live-"));
+		workspace = ownedTmp("omp-kit-external-live", { root: runtimeTempRoot() }).path;
 		const ruleBytes = readBoundedFile(selectedRule.path, EXTERNAL_PACK_LIMITS.ruleBytes, "Selected external rule");
 		if (digest(ruleBytes) !== selectedRule.sha256) {
 			liveFailures.push("SELECTED_RULE_CHANGED_BEFORE_LIVE");

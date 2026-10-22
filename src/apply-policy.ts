@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, type Stats } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, type Stats } from "node:fs";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readManifest, type Finding } from "./diagnostics.ts";
 import { ensureMutationStateRoot, fsyncDirectory, inspectPendingMutations, writePrivate, type Image } from "./mutations.ts";
@@ -200,7 +201,7 @@ function sameFileContents(left: FileImage | null, right: FileImage | null): bool
 	return left.image.sha256 === right.image.sha256 && left.image.size === right.image.size;
 }
 function nativePolicyRead(ompPath: string, home: string, profiles: readonly PolicyConfig[]): NativePolicyRead[] {
-	const scratch = mkdtempSync(join(runtimeTempRoot(), "omp-kit-ttsr-read-"));
+	const scratch = ownedTmp("omp-kit-ttsr-read", { root: runtimeTempRoot() }).path;
 	try {
 		const scratchInfo = lstatSync(scratch);
 		if (!scratchInfo.isDirectory() || scratchInfo.isSymbolicLink() || scratchInfo.uid !== process.getuid?.() || (scratchInfo.mode & 0o077) !== 0)
