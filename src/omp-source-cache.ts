@@ -69,7 +69,8 @@ export function cachedOmpPackage(version: string, env: Record<string, string | u
 }
 
 function defaultInstall(cwd: string, spec: string, env: Record<string, string | undefined>) {
-	const run = spawnSync("bun", ["add", spec, "--exact", "--ignore-scripts"], {
+	const cacheDir = join(cwd, ".bun-cache");
+	const run = spawnSync("bun", ["add", spec, "--exact", "--ignore-scripts", `--cache-dir=${cacheDir}`], {
 		cwd, encoding: "utf8", timeout: 600_000, env: { PATH: env.PATH ?? "", HOME: env.HOME ?? "", TMPDIR: env.TMPDIR ?? "" },
 	});
 	return { status: run.status, output: `${run.stdout ?? ""}${run.stderr ?? ""}` };
@@ -131,6 +132,7 @@ export function ensureOmpSource(version: string, env: Record<string, string | un
 		if (missingRuntime.length) throw new Error(`installed ${spec} lacks required runtime source: ${missingRuntime.join(", ")}`);
 		const integrity = lockIntegrity(staging, version);
 		if (!integrity) throw new Error(`bun.lock has no sha512 integrity for ${spec}`);
+		rmSync(join(staging, ".bun-cache"), { recursive: true, force: true });
 		const receipt = { package: PACKAGE_NAME, version, integrity, installed_at: (deps.now ?? (() => new Date()))().toISOString(), installer: "bun add --exact --ignore-scripts" };
 		writeFileSync(join(staging, ".verified.json"), `${JSON.stringify(receipt, null, 1)}\n`);
 		const final = join(root, version);

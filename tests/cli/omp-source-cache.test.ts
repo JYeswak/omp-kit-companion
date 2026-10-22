@@ -40,6 +40,8 @@ function fakeInstall(opts: { version?: string; integrity?: string | null; matche
 		}
 		const integrity = opts.integrity === undefined ? "sha512-R7BaZ9wxsrQhxfYxt8bXczwmfDctUPklqSLAeDulbl716WxnVCSBe6MYIscyJ+oRq7bqsq+s+tDNEf1HWG/R6A==" : opts.integrity;
 		writeFileSync(join(cwd, "bun.lock"), `{\n  "packages": {\n    "@oh-my-pi/pi-coding-agent": ["@oh-my-pi/pi-coding-agent@${version}", "", {}${integrity ? `, "${integrity}"` : ""}],\n  }\n}\n`);
+		mkdirSync(join(cwd, ".bun-cache"), { recursive: true });
+		writeFileSync(join(cwd, ".bun-cache", "registry-data"), "temporary");
 		return { status: opts.status ?? 0, output: "installed" };
 	};
 	return { install, calls };
@@ -51,6 +53,7 @@ test("installs exactly the requested version once, then serves it from the cache
 	const pkg = ensureOmpSource("9.9.9", env, { install: fake.install });
 	expect(pkg).toBe(join(env.OMP_KIT_OMP_SRC_CACHE, "9.9.9", ...PKG));
 	expect(existsSync(join(env.OMP_KIT_OMP_SRC_CACHE, "9.9.9", ".verified.json"))).toBe(true);
+	expect(existsSync(join(env.OMP_KIT_OMP_SRC_CACHE, "9.9.9", ".bun-cache"))).toBe(false);
 	expect(ensureOmpSource("9.9.9", env, { install: fake.install })).toBe(pkg);
 	expect(fake.calls).toEqual(["@oh-my-pi/pi-coding-agent@9.9.9"]);
 	expect(readdirSync(env.OMP_KIT_OMP_SRC_CACHE).filter(name => name.includes("staging"))).toEqual([]);
