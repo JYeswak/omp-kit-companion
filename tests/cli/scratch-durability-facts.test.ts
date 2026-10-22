@@ -39,6 +39,15 @@ test("index-only source content blocks even a differently named scratch target w
 	f.index("src/canonical.ts", event.input.content);
 	expect((await check(event, f.context))?.reason).toContain("tracked-source-copy content");
 });
+test("SCRATCHFP1: nested synthetic src fixture stays quiet while byte-equal shadow copy fires", async () => {
+	const f = fixture();
+	const syntheticPath = join(f.scratch, "crates", "uds", "src", "var", "fixture.fixture");
+	expect(await check({ toolName: "write", input: { path: syntheticPath, content: "synthetic fixture bytes\n" } }, f.context)).toBeUndefined();
+	const source = "export const canonicalValue = 42;\n";
+	f.index("src/canonical.ts", source);
+	const shadowPath = join(f.scratch, "src_copy", "renamed.ts");
+	expect((await check({ toolName: "write", input: { path: shadowPath, content: source } }, f.context))?.reason).toContain("tracked-source-copy");
+});
 
 test("canonical path evidence blocks a modified copy even without matching blob content", async () => {
 	const f = fixture();
