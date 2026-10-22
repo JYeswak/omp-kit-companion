@@ -1,0 +1,3 @@
+### Fixed
+
+- A write-tool write into owned scratch is no longer refused (`materialized source facts exceed admission limit`) in a repository that tracks more than 1024 files, such as omp-kit (2,613) or the companion (1,173). The working-copy source-copy comparison is now limited by how much work it does instead of by repository size: it runs `lstat` in parallel batches of 64 under a 1.5 s budget and hashes same-size candidates in batches. It still refuses, fail-closed, on real overload: more than 200,000 index entries or an exhausted time budget. Content that is byte-equal to a modified tracked working copy is still refused. (ompkit-ma3sn)

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -116,5 +116,47 @@ describe("scratch admission reads every owner form the kit writes", () => {
 	});
 	test("planted: malformed owner metadata is still refused", async () => {
 		expect(await blocked(() => "pid=4242\npid=4243\nlabel=omp\n")).toContain("scratch ownership metadata is invalid");
+	});
+});
+
+// SCRATCHOWNERFORM1 AC3 (ompkit-ma3sn) live probe 2026-10-22 on 0.2.65: a write-tool write of new content into a
+// seat's owned scratch was refused "materialized source facts exceed admission limit" in every repository with more
+// than 1024 tracked files (omp-kit 2613, companion 1173). The working-copy comparison is bounded by its work now.
+describe("owned-scratch admission in a repository with more than 1024 tracked files", () => {
+	const TRACKED = 1_500;
+	const repo = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "large-index.")));
+	const git = (...args: string[]) => {
+		const run = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "-C", repo, ...args]);
+		if (run.exitCode !== 0) throw new Error(run.stderr.toString());
+	};
+	git("init", "--quiet");
+	mkdirSync(join(repo, ".omp"));
+	writeFileSync(join(repo, ".omp/fleet.json"), '{"enabled":true}\n');
+	mkdirSync(join(repo, "src"));
+	for (let index = 0; index < TRACKED; index++) writeFileSync(join(repo, "src", `f${index}.txt`), `tracked source ${index}\n`);
+	git("add", "--", ".omp/fleet.json", "src");
+	git("commit", "--quiet", "-m", "fixture");
+	// A modified working copy: its bytes are in no index blob, only on disk.
+	const modified = "edited canonical working copy, not yet committed\n";
+	writeFileSync(join(repo, "src", "f1234.txt"), modified);
+	const scratch = join(repo, "var/agent-tmp/own.4242");
+	mkdirSync(scratch, { recursive: true });
+	writeFileSync(join(scratch, ".owner"), `pid=4242\nlabel=own\nrepo=${repo}\ncreated=2026-10-22T06:20:00.000Z\n`);
+	const write = (content: string) =>
+		durabilityCheck({ toolName: "write", input: { path: join(scratch, "probe-owned.txt"), content }, cwd: repo }, { cwd: repo });
+	afterAll(() => rmSync(repo, { recursive: true, force: true }));
+
+	test("the fixture really tracks more than 1024 files", () => {
+		const listed = Bun.spawnSync(["git", "-C", repo, "ls-files", "-z"]).stdout.toString().split("\0").filter(Boolean);
+		expect(listed.length).toBe(TRACKED + 1);
+	});
+	test("new content written into owned scratch is admitted", async () => {
+		expect(await write("raw capture from a probe run\n")).toBeUndefined();
+	});
+	test("planted: content byte-equal to a modified tracked working copy is refused", async () => {
+		expect((await write(modified))?.reason).toContain("tracked-source-copy content matches materialized canonical source");
+	});
+	test("planted: content equal to an indexed blob is refused before the working-copy walk", async () => {
+		expect((await write("tracked source 7\n"))?.reason).toContain("tracked-source-copy content matches the canonical Git index");
 	});
 });

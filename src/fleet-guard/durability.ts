@@ -40,35 +40,52 @@ function git(repo: string, args: string[], input?: string): Promise<string> {
 	return running.then(result => result.stdout);
 }
 
+// SCRATCHOWNERFORM1 (ompkit-ma3sn): the bound is the work this comparison may do, not the repository's size. Real
+// overload (an index past WORKING_COPY_ENTRY_LIMIT, or lstat time past the budget) still refuses, fail closed.
+const WORKING_COPY_ENTRY_LIMIT = 200_000;
+const WORKING_COPY_STAT_BUDGET_MS = 1_500;
+const STAT_BATCH = 64;
+const HASH_BATCH = 256;
+
 async function workingCopyMatches(repo: string, content: string, hash: string): Promise<boolean> {
 	const tracked = (await git(repo, ["ls-files", "-z"])).split("\0").filter(Boolean);
-	if (tracked.length > 1024) throw new Error("materialized source facts exceed admission limit");
+	if (tracked.length > WORKING_COPY_ENTRY_LIMIT) throw new Error("materialized source facts exceed admission limit");
 	const size = Buffer.byteLength(content);
+	const entries = tracked.filter(candidate => !inside("var/agent-tmp", candidate));
+	const deadline = Date.now() + WORKING_COPY_STAT_BUDGET_MS;
 	const candidates: string[] = [];
-	for (const candidate of tracked) {
-		if (inside("var/agent-tmp", candidate)) continue;
-		const path = join(repo, candidate);
-		if (!inside(repo, path)) throw new Error("materialized source path escapes its repository");
-		let stat: Stats;
-		try { stat = await lstat(path); }
-		catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-			throw error;
+	for (let start = 0; start < entries.length; start += STAT_BATCH) {
+		if (Date.now() > deadline) throw new Error("materialized source facts exceed admission time budget");
+		const facts = await Promise.all(entries.slice(start, start + STAT_BATCH).map(async candidate => {
+			const path = join(repo, candidate);
+			if (!inside(repo, path)) throw new Error("materialized source path escapes its repository");
+			try { return { candidate, path, stat: await lstat(path) }; }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+				throw error;
+			}
+		}));
+		for (const fact of facts) {
+			if (!fact) continue;
+			if (fact.stat.isSymbolicLink()) {
+				if (await readlink(fact.path) === content) return true;
+			} else if (fact.stat.isFile() && fact.stat.size === size) candidates.push(fact.candidate);
 		}
-		if (stat.isSymbolicLink()) {
-			if (await readlink(path) === content) return true;
-		} else if (stat.isFile() && stat.size === size) candidates.push(candidate);
 	}
-	if (candidates.length === 0) return false;
-	const hashes = (await git(repo, ["hash-object", "--no-filters", "--", ...candidates])).trimEnd().split("\n");
-	if (hashes.length !== candidates.length || hashes.some(value => !GIT_OBJECT_ID.test(value)))
-		throw new Error("materialized source blob identities are unavailable");
-	return hashes.includes(hash);
+	for (let start = 0; start < candidates.length; start += HASH_BATCH) {
+		const batch = candidates.slice(start, start + HASH_BATCH);
+		const hashes = (await git(repo, ["hash-object", "--no-filters", "--", ...batch])).trimEnd().split("\n");
+		if (hashes.length !== batch.length || hashes.some(value => !GIT_OBJECT_ID.test(value)))
+			throw new Error("materialized source blob identities are unavailable");
+		if (hashes.includes(hash)) return true;
+	}
+	return false;
 }
 
 
-interface Target { path: string; content?: string; replacement?: { old: string; next: string; all: boolean } }
-async function targets(event: FleetGuardEvent): Promise<Target[]> {
+export interface Target { path: string; content?: string; replacement?: { old: string; next: string; all: boolean } }
+/** Every filesystem target a write/edit payload names, through OMP's native edit inspection for patch payloads. */
+export async function targets(event: FleetGuardEvent): Promise<Target[]> {
 	const input = event.input;
 	if (input && typeof input === "object") {
 		const record = input as Record<string, unknown>;
@@ -109,7 +126,8 @@ async function patchTargets(patch: string): Promise<Target[]> {
 	throw new Error("native edit targets are unavailable");
 }
 
-async function physicalTarget(path: string): Promise<string> {
+/** Physical path of a possibly-missing target: the nearest existing ancestor's realpath plus the missing tail. */
+export async function physicalTarget(path: string): Promise<string> {
 	const tail: string[] = [];
 	let current = path;
 	for (let depth = 0; depth < 128; depth++) {
