@@ -252,6 +252,16 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		terminal: { outcome: "reaped", producer: "atomicReplace stale-tmp sweep" },
 		census: null, noCensus: "transient temp name: gone after rename except for crash orphans the sweep reaps", ownerBead: "ompkit-774u.12",
 	},
+	{
+		id: "composer-state", title: "Seat composer state ~/.local/state/omp-kit/composer/<sha1(session file)>.json (writer pid, empty, idle) and its <record>.<pid>.tmp",
+		rows: [], class: "REHOME", ownerKey: "agent+session", scope: "seat", survivesRespawn: true,
+		writers: ["extensions/kit-composer-state.ts"],
+		cancel: "the extension clears its timer and removes its record at session_shutdown",
+		crash: "a crashed seat leaves its record; respawn_seat.composer_record uses a record only when it is fresh (COMPOSER_RECORD_MAX_AGE_S) and its writer pid is alive, else falls back to the fail-closed screen check",
+		respawn: "keyed by the seat's session file, so the successor that resumes the session rewrites the same record with its own pid at session start",
+		terminal: { outcome: "self-heals", producer: "extensions/kit-composer-state.ts rewrite at session start and turn boundaries, removal at shutdown" },
+		census: null, noCensus: "one small record per live seat session, rewritten in place every 5 s; nothing accumulates to count", ownerBead: "ompkit-hznvg",
+	},
 ];
 
 /** Entries that account for an inventory row, for the coverage test and the doctor's row lookup. */
