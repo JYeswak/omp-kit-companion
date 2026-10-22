@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { runFleetWatchOnce } from "../../src/fleet-watch.ts";
 import type { ScratchRunner } from "../../src/scratch.ts";
 
@@ -15,7 +16,7 @@ const OLD = NOW - 10 * 60_000;
 function fixture(name: string): { scratch: string; repo: string; lock: string; log: string; ledger: string } {
 	const parent = join(resolve(import.meta.dir, "../.."), "var/agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const scratch = mkdtempSync(join(parent, `gitlock-reap-${name}.`));
+	const scratch = ownedTmp(`gitlock-reap-${name}`, { root: parent }).path;
 	const repo = join(scratch, "repo");
 	mkdirSync(repo, { recursive: true });
 	expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
@@ -119,3 +120,5 @@ test.skipIf(!hasLsof)("with no gitLockReap option the tick still reaps, using th
 		expect(actions.filter((action) => action.kind === "GITLOCK_REAPED")).toHaveLength(1);
 	} finally { rmSync(f.scratch, { recursive: true, force: true }); }
 });
+
+afterAll(() => cleanupAllOwnedTmp());

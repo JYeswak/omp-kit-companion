@@ -1,8 +1,9 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { readProfileWiring, runIntegrations } from "../../src/integrations.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -10,7 +11,7 @@ afterEach(() => {
 });
 
 function fixture() {
-	const root = fs.mkdtempSync(join(resolve(import.meta.dir, "../../var/agent-tmp"), "extbound-"));
+	const root = ownedTmp("extbound", { root: resolve(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(root);
 	const home = join(root, "home");
 	const agentDir = join(home, ".omp/profiles/proof/agent");
@@ -116,3 +117,5 @@ test("real public integration caller retains legitimate source evidence and neve
 		observed.mockRestore();
 	}
 });
+
+afterAll(() => cleanupAllOwnedTmp());

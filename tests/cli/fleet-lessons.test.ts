@@ -1,11 +1,12 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { lessonRecordId, type LessonEntry } from "../../src/lessons.ts";
 import { buildFleetLessonsReport, differentBlockerTrigger, gradeFailureRunIds, lowThroughputTriggers, parseLessonsConfig, readLessonsConfig, runClefShadow, runFleetLessonsOnce, scoreChanges, targetStageSurvey, type ClefClassifierConfig, type FleetHourlySample } from "../../src/fleet-lessons.ts";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { bunCapExec, runWithCap } from "../../src/service-run.ts";
 import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const envStack: { key: string; value: string | undefined }[][] = [];
 afterEach(() => {
@@ -315,7 +316,7 @@ test("A11 scheduled learning writes a real fleet report instead of accepting mat
 	const repoRoot = resolve(import.meta.dir, "../..");
 	const scratchRoot = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
-	const home = mkdtempSync(join(scratchRoot, `a11-consumer.${process.pid}.`));
+	const home = ownedTmp("a11-consumer", { root: scratchRoot }).path;
 	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-consumer\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
 	const kitRoot = join(home, "release");
 	for (const directory of ["release/bin", "release/config", "build-config", "build-cache", "build-data", "build-state", "build-bun"])
@@ -489,7 +490,7 @@ test("fleet producer refuses an intake tracker outside its registered repositori
 	const repoRoot = resolve(import.meta.dir, "../..");
 	const scratchRoot = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
-	const home = mkdtempSync(join(scratchRoot, `a11-intake.${process.pid}.`));
+	const home = ownedTmp("a11-intake", { root: scratchRoot }).path;
 	withEnv({ XDG_CONFIG_HOME: join(home, "xdg"), OMP_KIT_FLEET_CONFIG: undefined });
 	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-intake\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
 	const kitRoot = join(home, "kit");
@@ -509,7 +510,7 @@ test("a fleet lessons OFF transition before child execution is no-run, not a suc
 	const kitRoot = resolve(import.meta.dir, "../..");
 	const scratchRoot = join(kitRoot, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
-	const home = mkdtempSync(join(scratchRoot, `a11-off-race.${process.pid}.`));
+	const home = ownedTmp("a11-off-race", { root: scratchRoot }).path;
 	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-off-race\nrepo=${kitRoot}\ncreated=${new Date().toISOString()}\n`);
 	const launcher = join(home, ".local", "bin", "omp-kit");
 	mkdirSync(dirname(launcher), { recursive: true });
@@ -537,7 +538,7 @@ test("a capped producer group leaves no active nested process after timeout", as
 	const kitRoot = resolve(import.meta.dir, "../..");
 	const scratchRoot = join(kitRoot, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
-	const scratch = mkdtempSync(join(scratchRoot, `a11-descendant.${process.pid}.`));
+	const scratch = ownedTmp("a11-descendant", { root: scratchRoot }).path;
 	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=a11-descendant\nrepo=${kitRoot}\ncreated=${new Date().toISOString()}\n`);
 	const marker = join(scratch, "descendant.pid");
 	const result = await runWithCap({
@@ -567,7 +568,7 @@ test.each([
 	const repoRoot = resolve(import.meta.dir, "../..");
 	const scratchRoot = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
-	const home = mkdtempSync(join(scratchRoot, `a11-inventory.${process.pid}.`));
+	const home = ownedTmp("a11-inventory", { root: scratchRoot }).path;
 	withEnv({ XDG_CONFIG_HOME: join(home, "xdg"), OMP_KIT_FLEET_CONFIG: undefined });
 	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-inventory\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
 	const kitRoot = join(home, "kit");
@@ -611,7 +612,7 @@ test("service bodies refuse unsupported jobs while omp-watch still executes the 
 	const repoRoot = resolve(import.meta.dir, "../..");
 	const scratchRoot = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
-	const home = mkdtempSync(join(scratchRoot, `a11-service-bodies.${process.pid}.`));
+	const home = ownedTmp("a11-service-bodies", { root: scratchRoot }).path;
 	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-service-bodies\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
 	const release = join(home, "release");
 	mkdirSync(join(release, "bin"), { recursive: true });
@@ -635,7 +636,7 @@ test("service bodies refuse unsupported jobs while omp-watch still executes the 
 		cpSync(join(repoRoot, directory), join(release, directory), { recursive: true });
 	}
 	mkdirSync(join(release, "scripts"), { recursive: true });
-	for (const file of ["build-manifest.sh", "runtime-adapter.sh", "rule-class.ts"]) {
+	for (const file of ["build-manifest.sh", "kitlib-tmp.sh", "runtime-adapter.sh", "rule-class.ts"]) {
 		cpSync(join(repoRoot, "scripts", file), join(release, "scripts", file));
 	}
 	writeBundledHarness(release);
@@ -686,3 +687,5 @@ test("service bodies refuse unsupported jobs while omp-watch still executes the 
 	expect(watched.envelope.data.receipt.exit).toBe(matcher.exitCode);
 	expect(watched.code).toBe(matcher.exitCode === 0 ? 0 : 1);
 }, 90000);
+
+afterAll(() => cleanupAllOwnedTmp());

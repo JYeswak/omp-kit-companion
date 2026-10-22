@@ -1,14 +1,15 @@
-import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { inspectMcpReadiness, judgeTimeoutFit, mcpExample, readProbeEvidence, readStartupFailures } from "../../src/mcp-readiness.ts";
 import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const fixtures: string[] = [];
 afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function fixture() {
  const base = join(import.meta.dir, "../../var/agent-tmp");
- const root = mkdtempSync(join(base, "mcp-readiness-"));
+ const root = ownedTmp("mcp-readiness", { root: base }).path;
  fixtures.push(root);
  const home = join(root, "home");
  const project = join(root, "project");
@@ -241,3 +242,5 @@ test("doctor reports START_FAILED for a server failing at session start, OK for 
 	expect(servers.find((row: { name: string }) => row.name === "healthy")).toMatchObject({ startup: "OK" });
 	expect(servers.find((row: { name: string }) => row.name === "fresh")).toMatchObject({ startup: "UNKNOWN" });
 });
+
+afterAll(() => cleanupAllOwnedTmp());

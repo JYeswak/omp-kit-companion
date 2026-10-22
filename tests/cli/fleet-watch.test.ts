@@ -1,9 +1,9 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { FleetWatcher, paneIsBusy, paneTarget, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 const session: FleetWatchSession = { session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: "/repo", workerPanes: ["%1"], readyCommand: "br ready --json", skipLabels: ["directive"] };
 const config: FleetWatchConfig = { enabled: true, intervalSeconds: 60, noDecisionChecks: 5, sessions: [session] };
 
@@ -65,7 +65,7 @@ test("planted: successful capture with stderr is also treated as unknown", () =>
 test("planted: idle Steering · 1 submits M-Up then Enter once and logs the event", () => {
 	const scratchParent = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(scratchParent, { recursive: true });
-	const scratch = mkdtempSync(join(scratchParent, "fleet-watch."));
+	const scratch = ownedTmp("fleet-watch", { root: scratchParent }).path;
 	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-test\nrepo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	const logPath = join(scratch, "actions.jsonl");
 	const keySends: { session: string; pane: string; keys: string[] }[] = [];
@@ -129,7 +129,7 @@ test("healthy captures nudge the worker once at the idle threshold", () => {
 test("runFleetWatchOnce restores idle and decision-throttle state across fresh invocations", () => {
 	const scratchParent = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(scratchParent, { recursive: true });
-	const scratch = mkdtempSync(join(scratchParent, "fleet-watch-state."));
+	const scratch = ownedTmp("fleet-watch-state", { root: scratchParent }).path;
 	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-test\nrepo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	const logPath = join(scratch, "actions.jsonl");
 	const watchConfig = { ...config, noDecisionChecks: 2 };
@@ -179,7 +179,7 @@ test("runFleetWatchOnce restores idle and decision-throttle state across fresh i
 test("runFleetWatchOnce submits one queued steering message per pending count across fresh invocations", () => {
 	const scratchParent = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(scratchParent, { recursive: true });
-	const scratch = mkdtempSync(join(scratchParent, "fleet-watch-steering."));
+	const scratch = ownedTmp("fleet-watch-steering", { root: scratchParent }).path;
 	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-test\nrepo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	let pane = "Steering · 1\n⌥↑ to edit\n";
 	const keys: string[][] = [];
@@ -211,7 +211,7 @@ test("pane ids target the server-unique pane; other selectors stay scoped to the
 
 const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
 test.skipIf(!tmuxAvailable)("real tmux: a configured %id pane is captured, where session:%id is refused", () => {
-	const socket = join(tmpdir(), `f${process.pid.toString(36)}`);
+	const socket = join(ownedTmp("fleet-watch-tmux").path, "s");
 	expect(Buffer.byteLength(socket)).toBeLessThan(104);
 	const tmux = (...args: string[]) => spawnSync("tmux", ["-S", socket, ...args], { encoding: "utf8" });
 	try {
@@ -234,9 +234,9 @@ test.skipIf(!tmuxAvailable)("real tmux: a configured %id pane is captured, where
 test("planted GITLOCK1: tick reaps a stale lock and ledgers the receipt; null disables", () => {
 	const scratchParent = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(scratchParent, { recursive: true });
-	const scratch = mkdtempSync(join(scratchParent, "fleet-watch-gitlock."));
+	const scratch = ownedTmp("fleet-watch-gitlock", { root: scratchParent }).path;
 	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-gitlock-test\nrepo=${resolve(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "fleet-watch-gitlock-repo-")));
+	const root = realpathSync(ownedTmp("fleet-watch-gitlock-repo").path);
 	const gitDir = join(root, ".git");
 	mkdirSync(gitDir);
 	const lock = join(gitDir, "index.lock");
@@ -280,3 +280,5 @@ test("planted GITLOCK1: tick reaps a stale lock and ledgers the receipt; null di
 		if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
 	}
 });
+
+afterAll(() => cleanupAllOwnedTmp());

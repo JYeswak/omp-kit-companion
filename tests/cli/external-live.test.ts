@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
@@ -8,6 +8,7 @@ import { evaluateExternalLiveEvidence, runExternalLive, validateExternalLiveSche
 import { readExternalPackSnapshot, type ExternalPackSnapshot } from "../../src/external-pack.ts";
 import { reduceCandidate } from "../../src/reducer.ts";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 let scratch = "";
@@ -31,7 +32,7 @@ function copyResources(destination: string): void {
 }
 
 beforeAll(() => {
-	scratch = mkdtempSync(join(runtimeTempRoot(), "omp-kit-external-live-test-"));
+	scratch = ownedTmp("omp-kit-external-live-test", { root: runtimeTempRoot() }).path;
 	releaseRoot = join(scratch, "prefix", "releases", "v-test");
 	mkdirSync(join(releaseRoot, "bin"), { recursive: true });
 	copyResources(releaseRoot);
@@ -218,3 +219,5 @@ test("TRANSCRIPT_LIES: minimized claims cannot override an actually present forb
 	expect(verdict.status).toBe("FAIL");
 	expect(verdict.failures).toContain("EXPECTED_BLOCKED_MARKER_PRESENT");
 });
+
+afterAll(() => cleanupAllOwnedTmp());

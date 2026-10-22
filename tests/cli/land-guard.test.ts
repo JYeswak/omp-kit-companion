@@ -1,5 +1,6 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { checkCandidateTree, findStaleDeletions, type LandGit } from "../../src/land-guard.ts";
@@ -7,8 +8,7 @@ import { checkCandidateTree, findStaleDeletions, type LandGit } from "../../src/
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "land-guard-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=land-guard-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratch = ownedTmp("land-guard-test", { root: scratchRoot }).path;
 
 function git(repo: string, args: string[]): string {
 	const run = spawnSync("git", ["-c", "user.email=test@example.invalid", "-c", "user.name=worker", ...args], { cwd: repo, encoding: "utf8" });
@@ -78,3 +78,5 @@ test("LAND1: candidate that keeps newer lines but adds its own passes", () => {
 	const verdict = checkCandidateTree(repo, base, tip, mine, ["f.ts"]);
 	expect(verdict.ok).toBe(true);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

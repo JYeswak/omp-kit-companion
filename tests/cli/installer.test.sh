@@ -1,10 +1,11 @@
 #!/bin/sh
 set -eu
-: "${TMPDIR:?set a private test scratch directory}"
+: "${TMPDIR:?set a private test scratch directory}" # tempsafe: guard requires private scratch root, creates nothing
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd -P)
-WORK=$(mktemp -d "$TMPDIR/omp-kit-installer-test.XXXXXXXX")
+. "$ROOT/scripts/kitlib-tmp.sh"
+kitlib_tmp WORK omp-kit-installer-test
 server=
-trap '[ -z "$server" ] || { kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; }; rm -rf -- "$WORK"' EXIT HUP INT TERM
+kitlib_tmp_atexit '[ -z "$server" ] || { kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :; }'
 mkdir -m 700 "$WORK/assets" "$WORK/home"
 /usr/bin/env -u HOME "$ROOT/installer/install.sh" --help > "$WORK/help.log"
 python3 - "$WORK/help.log" <<'PY'

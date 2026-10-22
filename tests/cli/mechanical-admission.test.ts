@@ -1,10 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCaseCorpus } from "../../src/case-corpus.ts";
 import { check as durabilityCheck } from "../../src/fleet-guard/durability.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import {
 	assertDeterministicAdmission, mechanicalVerdicts, NONDETERMINISM_ERROR, PARTITION_ERROR,
 	reassemble, type AdmissionEvaluator, type MechanicalCase,
@@ -88,7 +89,7 @@ describe("mechanical admission dispatch", () => {
 // writes (agent/session/bin) or the JSON owner `omp-kit scratch new` writes.
 describe("scratch admission reads every owner form the kit writes", () => {
 	function repoWithOwner(owner: (repo: string) => string): { repo: string; target: string } {
-		const repo = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "owner-forms.")));
+		const repo = realpathSync(ownedTmp("owner-forms").path);
 		Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-C", repo, "init", "--quiet"]);
 		mkdirSync(join(repo, ".omp"));
 		writeFileSync(join(repo, ".omp/fleet.json"), '{"enabled":true}\n');
@@ -124,7 +125,7 @@ describe("scratch admission reads every owner form the kit writes", () => {
 // than 1024 tracked files (omp-kit 2613, companion 1173). The working-copy comparison is bounded by its work now.
 describe("owned-scratch admission in a repository with more than 1024 tracked files", () => {
 	const TRACKED = 1_500;
-	const repo = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "large-index.")));
+	const repo = realpathSync(ownedTmp("large-index").path);
 	const git = (...args: string[]) => {
 		const run = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "-C", repo, ...args]);
 		if (run.exitCode !== 0) throw new Error(run.stderr.toString());
@@ -160,3 +161,5 @@ describe("owned-scratch admission in a repository with more than 1024 tracked fi
 		expect((await write("tracked source 7\n"))?.reason).toContain("tracked-source-copy content matches the canonical Git index");
 	});
 });
+
+afterAll(() => cleanupAllOwnedTmp());

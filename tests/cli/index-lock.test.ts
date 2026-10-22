@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import {
 	indexLockStaleAfterMs,
 	lsofFileClear,
@@ -14,7 +15,7 @@ const AGE = 60_000;
 const clearRun: ScratchRunner = () => ({ code: 1, stdout: "", stderr: "" });
 
 function gitDirWithLock(ageMs: number, bytes: string): { gitDir: string; lock: string; root: string } {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "index-lock-")));
+	const root = realpathSync(ownedTmp("index-lock").path);
 	const gitDir = join(root, ".git");
 	const lock = join(gitDir, "index.lock");
 	mkdirSync(gitDir);
@@ -239,7 +240,7 @@ test("real repo: git holding index.lock blocks; after kill, dry-run reports with
 	// Integration test: exercises a real git lock-holder against the platform
 	// clock. Fake timers cannot work: the holder is a live git process and
 	// the lock file appears on its schedule, not in-process timers.
-const root = realpathSync(mkdtempSync(join(tmpdir(), "index-lock-real-")));
+const root = realpathSync(ownedTmp("index-lock-real").path);
 	try {
 		const git = (args: string[], opts?: { stdin?: "pipe" | "ignore" }) => Bun.spawnSync(["git", ...args],
 			{ cwd: root, stdout: "pipe", stderr: "pipe", stdin: opts?.stdin ?? "ignore" });
@@ -280,3 +281,5 @@ const root = realpathSync(mkdtempSync(join(tmpdir(), "index-lock-real-")));
 		rmSync(root, { recursive: true, force: true });
 	}
 }, 120_000);
+
+afterAll(() => cleanupAllOwnedTmp());

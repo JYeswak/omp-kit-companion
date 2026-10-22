@@ -10,7 +10,7 @@ import {
 const OBSERVED_CEILING = 11_059;
 
 const context = {
-	cwd: "/tmp/ee-orient-budget-test",
+	cwd: "/tmp/ee-orient-budget-test", // tempsafe: fake cwd value in fixture, nothing created
 	sessionManager: { getSessionId: () => "budget-probe" },
 };
 

@@ -1,11 +1,12 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BundledRunInterruptedError } from "../../src/runtime.ts";
 import { classifyLadder, currentStageReport, describeFullTestProducer, fullTestVerdict, recoverInterruptedRun, redactFullTestCause, retainProducerOutput } from "../../src/full-test-runner.ts";
 import { readTestCaseReports, summarizeTestCaseReports } from "../../src/test-case-report.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const names = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"];
 const successful = names.map(name => `GREEN ${name} producer_rc=0 duration_ms=120`).join("\n");
@@ -42,7 +43,7 @@ test("mid-ladder RED exposes its producer status and keeps later stages NOT_RUN"
 
 // ompkit-2pkp1: on a loaded host `omp-kit heavy` refuses a ladder stage (rc 75, RESOURCE_DEFERRED) before it runs anything.
 function deferredStageRun(command: string[], extraEnv: Record<string, string> = {}) {
- const temp = mkdtempSync(join(tmpdir(), "omp-kit-ladder-deferral-"));
+ const temp = ownedTmp("omp-kit-ladder-deferral").path;
  try {
   const script = fileURLToPath(new URL("../../scripts/ladder.sh", import.meta.url));
   const env = { ...process.env, HOME: temp, XDG_CONFIG_HOME: join(temp, "config"), XDG_STATE_HOME: join(temp, "state"),
@@ -157,7 +158,7 @@ test("every stage report carries a duration_ms field", () => {
 });
 
 test("a ladder stage retains its measured verdict after unterminated child output", () => {
- const temp = mkdtempSync(join(tmpdir(), "omp-kit-ladder-timing-"));
+ const temp = ownedTmp("omp-kit-ladder-timing").path;
  try {
   const script = fileURLToPath(new URL("../../scripts/ladder.sh", import.meta.url));
   const child = Bun.spawnSync(["sh", script, "--selftest-timing", temp, "/bin/sh", "-c", "printf partial-report; sleep 0.12"], { stdout: "pipe", stderr: "pipe" });
@@ -170,7 +171,7 @@ test("a ladder stage retains its measured verdict after unterminated child outpu
 });
 
 test("a running ladder stage streams evidence before interruption and retains its real producer status", async () => {
- const temp = mkdtempSync(join(tmpdir(), "omp-kit-ladder-interruption-"));
+ const temp = ownedTmp("omp-kit-ladder-interruption").path;
  const script = fileURLToPath(new URL("../../scripts/ladder.sh", import.meta.url));
  const producer = [
   `trap 'printf "producer-terminated\\n"; exit 23' TERM`,
@@ -277,7 +278,7 @@ test("cause redaction covers credential-shaped values and runtime root aliases w
  }
  const recovered = recoverInterruptedRun(Object.assign(new Error("read failed /private/tmp/owned-scratch/file"), {
   code: "STREAM_FAILED", name: "StreamFailure",
- }), ["/tmp/owned-scratch"]);
+ }), ["/tmp/owned-scratch"]); // tempsafe: fake scratch path string, nothing created
  expect(recovered.cause).toMatchObject({ cause_code: "STREAM_FAILED", cause_name: "StreamFailure",
   cause_message: "read failed <private-path>/file" });
 });
@@ -295,7 +296,7 @@ test("cause fields remain bounded on a long credential near-miss", () => {
 
 
 test("producer streams are retained in owned scratch and their paths are reported", () => {
- const repo = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-full-test-output-")));
+ const repo = realpathSync(ownedTmp("omp-kit-full-test-output").path);
  try {
   const output = { stdout: "full stage stdout\n", stderr: "full stage stderr\n" };
   const artifacts = retainProducerOutput(repo, output);
@@ -329,7 +330,7 @@ test("fail-closed trust guard marks cli-crosscheck NOT_RUN instead of a matcher 
 });
 
 async function referenceProducerFixture() {
- const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-result-reference-")));
+ const root = realpathSync(ownedTmp("omp-kit-result-reference").path);
  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
  for (const key of Object.keys(env)) if (key.startsWith("GIT_") && key !== "GIT_CONFIG_NOSYSTEM" && key !== "GIT_CONFIG_GLOBAL") delete env[key];
  const git = (...args: string[]): string => {
@@ -525,7 +526,7 @@ test("a real Bun cwd operand cannot relabel nested test output as immediate prod
 });
 
 test("real checker case records reject missing, duplicated, corrupt and unfinished execution evidence", () => {
- const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-source-cases-")));
+ const root = realpathSync(ownedTmp("omp-kit-source-cases").path);
  try {
   const path = join(root, "claim-selftest.jsonl");
   const child = Bun.spawnSync(["/bin/sh", fileURLToPath(new URL("../../checkers/check-claim-discipline.sh", import.meta.url)), "--selftest"], {
@@ -579,7 +580,7 @@ test("deeply nested unexpected case payload remains incomplete rather than escap
 });
 
 test("a lost shell outcome write cannot shrink into a completed execution window", () => {
- const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-case-write-loss-")));
+ const root = realpathSync(ownedTmp("omp-kit-case-write-loss").path);
  try {
   const path = join(root, "claim-selftest.jsonl");
   const script = [
@@ -600,3 +601,5 @@ test("a lost shell outcome write cannot shrink into a completed execution window
   expect(result.failing_names).toBe(null);
  } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+afterAll(() => cleanupAllOwnedTmp());

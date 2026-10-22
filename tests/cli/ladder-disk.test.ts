@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { sanitizedEnv } from "../../src/runtime.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 // SAVEFIRST1 (ompkit-774u.16), ReadmeGate instance: a heavy call nested inside the save
 // path (gate -> test --full -> ladder -> heavy, where ladder cannot take a per-call flag
@@ -36,7 +37,7 @@ test("SAVEFIRST1: the gate exports the statfs observer for everything under it",
 
 type DiskFixture = { dir: string; env: Record<string, string> };
 function diskFixture(sbhCode: number): DiskFixture {
-	const dir = mkdtempSync(join(scratchRoot, "ladder-disk-"));
+	const dir = ownedTmp("ladder-disk", { root: scratchRoot }).path;
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=ladder-disk-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
 	const bin = join(dir, "bin");
 	mkdirSync(bin);
@@ -140,3 +141,5 @@ test("SAVEFIRST1: without a repo root the flag prints with no owners suffix", ()
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 });
+
+afterAll(() => cleanupAllOwnedTmp());

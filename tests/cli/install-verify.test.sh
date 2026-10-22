@@ -4,10 +4,10 @@
 # tests installer authority-policy orchestration, not real cryptography.
 # Public release signature controls are a separate real-gh smoke.
 set -eu
-: "${TMPDIR:?set a private test scratch directory}"
+: "${TMPDIR:?set a private test scratch directory}" # tempsafe: guard requires private scratch root, creates nothing
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd -P)
-WORK=$(mktemp -d "$TMPDIR/omp-kit-install-verify-test.XXXXXXXX")
-trap 'rm -rf -- "$WORK"' EXIT HUP INT TERM
+. "$ROOT/scripts/kitlib-tmp.sh"
+kitlib_tmp WORK omp-kit-install-verify-test
 mkdir -m 700 "$WORK/assets" "$WORK/home"
 PLATFORM="$(/usr/bin/uname -s | tr '[:upper:]' '[:lower:]')-$(/usr/bin/uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/')-$(if [ "$(/usr/bin/uname -s)" = Darwin ]; then printf none; else printf gnu; fi)"
 ASSET=$(TMPDIR="$WORK" "$ROOT/scripts/package-release.sh" --version 1.2.3 --platform "$PLATFORM" --out "$WORK/assets")

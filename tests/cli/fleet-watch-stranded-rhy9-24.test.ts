@@ -1,10 +1,11 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FleetWatcher, runFleetWatchOnce, STRANDED_ESCALATION_LIMIT_MINUTES, type FleetWatchConfig, type FleetWatchSession, type FleetWatchOnceDeps } from "../../src/fleet-watch.ts";
 import { inspectWorkFleet, type WorkRepoReport } from "../../src/work-doctor.ts";
 import { projectSlug, type StaleReservedEdit } from "../../src/reservation-age.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const director: FleetWatchSession = { session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: "/repo", workerPanes: ["%1"], skipLabels: [] };
 const other: FleetWatchSession = { session: "other", coordinatorPane: "%55", coordinatorSession: "other", repo: "/other", workerPanes: ["%2"], skipLabels: [] };
@@ -107,7 +108,7 @@ test("planted negative: unknown ownership is unresolved, never misrouted", () =>
 });
 
 test("persisted episodes survive watcher restart and clear after save/push", () => {
-	const scratch = mkdtempSync(join(tmpdir(), "stranded-rhy9-24-"));
+	const scratch = ownedTmp("stranded-rhy9-24").path;
 	try {
 		const statePath = join(scratch, "state.json");
 		const logPath = join(scratch, "actions.jsonl");
@@ -145,7 +146,7 @@ test("refused escalation is not consumed and can be sent after admission recover
 });
 
 test("real work audit feeds the watcher at 29/31 minutes and clears after a local save/push", async () => {
-	const scratch = mkdtempSync(join(tmpdir(), "stranded-audit-boundary-"));
+	const scratch = ownedTmp("stranded-audit-boundary").path;
 	const git = (cwd: string, ...args: string[]) => {
 		const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
 		if (result.exitCode !== 0) throw new Error(result.stderr.toString());
@@ -200,3 +201,5 @@ test("real work audit feeds the watcher at 29/31 minutes and clears after a loca
 		rmSync(scratch, { recursive: true, force: true });
 	}
 }, 30_000);
+
+afterAll(() => cleanupAllOwnedTmp());

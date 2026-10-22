@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { checkExtensionImports, extractImportSpecifiers } from "../../src/extensions.ts";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
 
@@ -28,7 +29,7 @@ function writeHook(home: string, body: string): string {
 beforeAll(() => {
 	// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
 	const omp = resolveOmpIdentity(process.env);
-	base = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "omp-kit-extensions-"));
+	base = ownedTmp("omp-kit-extensions", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	const release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	for (const directory of [join(release, "bin"), join(release, "scripts"), join(base, "home")]) {
@@ -191,3 +192,5 @@ test("symlinked hook resolves relative imports from the link target", () => {
 	expect(report.findings).toEqual([]);
 	expect(report.status).toBe("OK");
 }, 120_000);
+
+afterAll(() => cleanupAllOwnedTmp());

@@ -1,6 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 // ompkit-bj08.5 round 2: pause and missing-source refusals through the real
 // CLI entrypoints. Each case runs `omp-kit service run` in a child process
@@ -21,7 +22,7 @@ function namespace(): string {
 }
 
 function fixtureHome(): string {
-	const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "entrypoint-refusal-"));
+	const home = ownedTmp("entrypoint-refusal", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(home);
 	const bin = join(home, ".local", "bin");
 	mkdirSync(bin, { recursive: true });
@@ -90,3 +91,5 @@ test("[b] planted via CLI: missing fleet-watch config refuses before any run", (
 	expect(result.envelope.errors?.[0]?.code).toBe("FLEET_WATCH_CONFIG_MISSING");
 	expect(existsSync(join(stateRoot(home), "fleet-watch.jsonl"))).toBe(false);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

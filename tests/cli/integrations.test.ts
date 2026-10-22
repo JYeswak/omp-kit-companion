@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
- import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, relative, resolve, sep } from "node:path";
@@ -9,6 +9,7 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 import { judgeFleet, readProfileWiring, resolveMockRuntime, runIntegrations, staticVerdict } from "../../src/integrations.ts";
 import type { LiveAttempt } from "../../src/integrations.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
  const REPO_ROOT = resolve(import.meta.dir, "../..");
 
@@ -51,13 +52,13 @@ function profileConfig(extensions: string[]): string {
 }
 
  beforeAll(() => {
- 	suiteTmp = mkdtempSync(join(REPO_ROOT, "var/agent-tmp", "suite-integrations-"));
+ 	suiteTmp = ownedTmp("suite-integrations", { root: join(REPO_ROOT, "var/agent-tmp") }).path;
  	process.env.TMPDIR = suiteTmp;
  	process.env.TMP = suiteTmp;
  	process.env.TEMP = suiteTmp;
  	const omp = resolveOmpIdentity(process.env);
  	ompLauncher = omp.launcher;
- 	base = mkdtempSync(join(tmpdir(), "omp-kit-integrations-"));
+ 	base = ownedTmp("omp-kit-integrations").path;
 	release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	home = join(base, "home");
@@ -172,11 +173,11 @@ function profileConfig(extensions: string[]): string {
  });
 
  test("suite TMPDIR discipline: a fixture cycle leaves session-omp-test unchanged in size", () => {
- 	expect(tmpdir()).toBe(suiteTmp);
+ 	expect(tmpdir()).toBe(suiteTmp); // tempsafe: probes that tmpdir resolves to the suite-owned dir
  	const session = join(REPO_ROOT, "var/agent-tmp", "session-omp-test");
  	if (!existsSync(session)) return;
  	const before = dirBytes(session);
- 	const probe = mkdtempSync(join(tmpdir(), "omp-kit-tmpdir-probe-"));
+ 	const probe = ownedTmp("omp-kit-tmpdir-probe").path;
  	writeFileSync(join(probe, "payload"), "x".repeat(65536));
  	rmSync(probe, { recursive: true, force: true });
  	expect(dirBytes(session)).toBe(before);
@@ -270,7 +271,7 @@ async function awaitPortFile(path: string): Promise<string> {
 }
 
 test("MOCKSPAWN1: the mock server launches through a real bun; a compiled launcher that treats the script as a command never serves", async () => {
-	const dir = mkdtempSync(join(base, "mockspawn-"));
+	const dir = ownedTmp("mockspawn", { root: base }).path;
 	const compiled = join(dir, "compiled-omp-kit");
 	// The installed release answers its script argument as a CLI command: UNKNOWN_COMMAND, exit 2, no port file.
 	writeFileSync(compiled, '#!/bin/sh\necho "UNKNOWN_COMMAND: $1" >&2\nexit 2\n', { mode: 0o755 });
@@ -320,7 +321,7 @@ test("integrations rejects OMP aliases and Darwin sandbox-temp work paths", asyn
 		workDir: join(base, "symlink-report-work"), out: join(ompAlias, "report.json") }))
 		.rejects.toMatchObject({ code: "INVALID_INTEGRATIONS_SELECTION" });
 	if (process.platform === "darwin") {
-		const unsafeTempWork = join("/tmp", `ompkit-integrations-${process.pid}`);
+		const unsafeTempWork = join("/tmp", `ompkit-integrations-${process.pid}`); // tempsafe: asserts system /tmp workDir is refused, never created
 		await expect(runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
 			workDir: unsafeTempWork })).rejects.toMatchObject({ code: "INVALID_INTEGRATIONS_SELECTION" });
 		expect(existsSync(unsafeTempWork)).toBe(false);
@@ -505,7 +506,7 @@ test("fleet-guard judge reads a contained marker and refusal source", () => {
 });
 
 test("kit-guard opt-in decision is on, off, and project-copy", async () => {
-	const root = mkdtempSync(join(tmpdir(), "omp-kit-optin-"));
+	const root = ownedTmp("omp-kit-optin").path;
 	mkdirSync(join(root, ".git"), { recursive: true });
 	try {
 		expect(optInState(root, undefined).kind).toBe("off");
@@ -519,3 +520,5 @@ test("kit-guard opt-in decision is on, off, and project-copy", async () => {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+afterAll(() => cleanupAllOwnedTmp());

@@ -3,11 +3,12 @@
 // tests/scripts/kitlib_run_test.py runs against scripts/kitlib_run.py, so the two
 // languages cannot drift. Each case runs real processes; survivors are found by
 // a marker unique to the case run in their command lines.
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run, type RunOptions, type RunResult } from "../../src/kitlib/run";
 
 type Expect = {
@@ -77,7 +78,7 @@ describe("kitlib run conformance corpus", () => {
 	for (const testCase of corpus.cases) {
 		test(testCase.id, async () => {
 			const marker = `kitlib-run-ts-${process.pid}-${randomBytes(6).toString("hex")}`;
-			const scratch = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "kitlib-run."));
+			const scratch = ownedTmp("kitlib-run").path;
 			const tmp = realpathSync(scratch);
 			try {
 				const argv = substitute(testCase.argv, marker, tmp);
@@ -110,7 +111,7 @@ describe("kitlib run conformance corpus", () => {
 describe("kitlib run cancellation", () => {
 	// The leader touches `ready` after forking its marker-bearing grandchild, so a kill always has a group member to reach.
 	const sleeper = (marker: string, ready: string) => ["/bin/sh", "-c", `/bin/sh -c 'sleep 30; : ${marker}' & : > '${ready}'; sleep 30; : ${marker}`];
-	const scratch = () => realpathSync(mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "kitlib-run.")));
+	const scratch = () => realpathSync(ownedTmp("kitlib-run").path);
 	test("an aborted signal kills the whole group and rejects with the reason", async () => {
 		const marker = `kitlib-run-ts-abort-${process.pid}-${randomBytes(6).toString("hex")}`;
 		const dir = scratch(), ready = join(dir, "ready");
@@ -148,3 +149,5 @@ process.exit(existsSync(${JSON.stringify(ready)}) ? 0 : 9);`;
 		}
 	}, 30_000);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

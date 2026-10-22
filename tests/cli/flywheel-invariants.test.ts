@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { check, REQUIRED_ANTI, REQUIRED_KERNEL } from "../../scripts/check-flywheel-invariants.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
-const scratch = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "fw-inv-"));
+const scratch = ownedTmp("fw-inv", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path;
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const HEADER = "id\tguide\tkind\tmechanism\tfire\tquiet";
@@ -13,7 +14,7 @@ const A = (name: string) => `complete-guide > The Complete Toolchain > Anti-Patt
 
 /** A minimal tree where one TTSR rule with fire/quiet corpus rows backs every required row. */
 function tree(): string {
-	const root = mkdtempSync(join(scratch, "tree-"));
+	const root = ownedTmp("tree", { root: scratch }).path;
 	mkdirSync(join(root, "rules"));
 	mkdirSync(join(root, "cases"));
 	writeFileSync(join(root, "rules/kit-demo.md"), "---\ncondition: 'x'\n---\nbody\n");
@@ -91,3 +92,5 @@ test("the shipped map passes against this tree", () => {
 	const result = check(root, readFileSync(join(root, "docs/flywheel-invariants.tsv"), "utf8"));
 	expect(result.failures).toEqual([]);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

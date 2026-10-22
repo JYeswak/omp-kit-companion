@@ -1,9 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
 import { inspectLspReadiness, planLspSetup, resolveOmpDefaults, type LspReadinessReport } from "../../src/lsp-readiness.ts";
 import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, probeLspReadiness } from "../../src/lsp-probe.ts";
 import { collectReadinessWaits } from "../../src/lsp-probe.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const fixtures: string[] = [];
@@ -62,7 +63,7 @@ function sourceTreeFor(root: string, ompPath: string): string | null {
 }
 
 function fixture(base = scratch) {
-	const root = mkdtempSync(join(base, "lsp-readiness-"));
+	const root = ownedTmp("lsp-readiness", { root: base }).path;
 	fixtures.push(root);
 	const home = join(root, "home");
 	const project = join(root, "project");
@@ -504,9 +505,11 @@ test("planted: isolated cold-refusal inputs stay distinguishable and missing evi
 	const report = await probeLspReadiness({
 		home: "/nonexistent-home", ompPath: "/nonexistent-omp",
 		// A .ts file with no candidate server reaches MISSING before any filesystem use.
-		readiness: { status: "UNVERIFIED", cwd: "/tmp", file: "/tmp/lsp-probe-missing-fixture.ts", file_outside_cwd: false, config_layers: [], opaque_layers: [], servers: [], runtime: "NOT_PROBED" },
+		readiness: { status: "UNVERIFIED", cwd: "/tmp", file: "/tmp/lsp-probe-missing-fixture.ts", file_outside_cwd: false, config_layers: [], opaque_layers: [], servers: [], runtime: "NOT_PROBED" }, // tempsafe: fake path value in fixture, nothing created
 	});
 	expect(report.status).toBe("MISSING");
 	expect(report.status).not.toBe("PASS");
 	expect(report.elapsed_ms).toBe(0);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

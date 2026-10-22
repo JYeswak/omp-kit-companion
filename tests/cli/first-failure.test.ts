@@ -1,8 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { firstFailure } from "../../src/cli.ts";
 import { applyScratch, defaultLiveness, defaultRunner, reapLogPath } from "../../src/scratch.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const roots: string[] = [];
 const savedState = process.env.XDG_STATE_HOME;
@@ -35,10 +36,10 @@ test("summary names nothing when everything held", () => {
 });
 
 test("unremovable quarantine target fails with dir, errno and summary naming it", () => {
-	const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "failure-home-"));
+	const home = ownedTmp("failure-home", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(home);
 	process.env.XDG_STATE_HOME = home;
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "failure-root-"));
+	const root = ownedTmp("failure-root", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(root);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	const stuck = join(root, "stuck.1");
@@ -66,3 +67,5 @@ test("unremovable quarantine target fails with dir, errno and summary naming it"
 	expect(summary).toContain(stuck);
 	expect(summary).toContain("atomic-quarantine-failed");
 });
+
+afterAll(() => cleanupAllOwnedTmp());

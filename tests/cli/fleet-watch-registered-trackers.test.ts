@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { loadFleetWatchConfig, runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.ts";
 import type { TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
 
@@ -9,10 +10,10 @@ import type { TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 
-function scratchDir(prefix: string): string {
+function scratchDir(label: string): string {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	return mkdtempSync(join(parent, prefix));
+	return ownedTmp(label, { root: parent }).path;
 }
 
 function fleetConfig(repoA: string, repoB: string, repoC: string, repoD: string): FleetWatchConfig {
@@ -47,7 +48,7 @@ function tickDeps(logPath: string, recoverCalls: [string, string][]) {
 }
 
 test("[a-positive] registry fixtures: exact coverage, no duplicates, foreign director blocked", () => {
-	const scratch = scratchDir("tracker-registry-ps3lo.");
+	const scratch = scratchDir("tracker-registry-ps3lo");
 	const logPath = join(scratch, "fleet-watch.jsonl");
 	try {
 		const recoverCalls: [string, string][] = [];
@@ -80,7 +81,7 @@ test("[a-positive] registry fixtures: exact coverage, no duplicates, foreign dir
 });
 
 test("[a-positive] loadFleetWatchConfig round-trips valid registeredTrackers", () => {
-	const scratch = scratchDir("tracker-registry-load-ps3lo.");
+	const scratch = scratchDir("tracker-registry-load-ps3lo");
 	try {
 		const path = join(scratch, "fleet-watch.json");
 		writeFileSync(path, JSON.stringify({
@@ -98,7 +99,7 @@ test("[a-positive] loadFleetWatchConfig round-trips valid registeredTrackers", (
 });
 
 test("[a-negative] loadFleetWatchConfig rejects malformed registeredTrackers", () => {
-	const scratch = scratchDir("tracker-registry-bad-ps3lo.");
+	const scratch = scratchDir("tracker-registry-bad-ps3lo");
 	try {
 		const cases: Array<{ name: string; value: unknown }> = [
 			{ name: "non-array", value: { repo: "a", session: "s1" } },
@@ -124,7 +125,7 @@ test("[a-negative] loadFleetWatchConfig rejects malformed registeredTrackers", (
 });
 
 test("[a-negative] absent registeredTrackers keeps legacy sessions-only coverage", () => {
-	const scratch = scratchDir("tracker-registry-absent-ps3lo.");
+	const scratch = scratchDir("tracker-registry-absent-ps3lo");
 	const logPath = join(scratch, "fleet-watch.jsonl");
 	try {
 		const recoverCalls: [string, string][] = [];
@@ -140,3 +141,5 @@ test("[a-negative] absent registeredTrackers keeps legacy sessions-only coverage
 		rmSync(scratch, { recursive: true, force: true });
 	}
 });
+
+afterAll(() => cleanupAllOwnedTmp());

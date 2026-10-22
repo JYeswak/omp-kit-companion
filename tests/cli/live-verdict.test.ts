@@ -1,13 +1,14 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const root = resolve(import.meta.dir, "../..");
 const scenarios = await Bun.file(join(root, "tests/live/scenarios.json")).json();
 const index = scenarios.findIndex((s: { id: string }) => s.id === "settings-no-checkout-remedy");
 if (index < 0) throw new Error("continuation scenario is missing");
-const fixture = mkdtempSync(join(tmpdir(), "kit-continuation-verdict-"));
+const fixture = ownedTmp("kit-continuation-verdict").path;
 const project = join(fixture, "project");
 mkdirSync(project);
 afterAll(() => rmSync(fixture, { recursive: true, force: true }));
@@ -50,3 +51,5 @@ test("successful JSON for an apply action is not PLAN evidence", () => {
 	const applied = '{"ok":true,"data":{"action":"APPLY"}}\n\nWall time 1ms';
 	expect(verdict(applied)).toMatch(/^FAIL:.*PLAN/);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

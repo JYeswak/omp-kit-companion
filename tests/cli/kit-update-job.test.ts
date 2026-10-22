@@ -1,15 +1,16 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { kitUpdateJobOverall, pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type KitUpdateJobDependencies, type KitUpdateJobResult } from "../../src/kit-update-job.ts";
 import type { KitUpdateResult } from "../../src/kit-update.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 const dirs: string[] = [];
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function config(enabled = true): KitUpdateJobConfig {
-	const root = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "l8-job-"))); dirs.push(root);
+	const root = realpathSync(ownedTmp("l8-job", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path); dirs.push(root);
 	writeFileSync(join(root, ".owner"), `pid=${process.pid}\nlabel=ompkit-fp72.22-test\nrepo=${join(import.meta.dir, "../..")}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	return { enabled, prefix: root, stateRoot: join(root, "state"), home: root, platform: { os: "darwin", arch: "arm64", libc: "none" }, pollRelease: async () => ({ indexPath: join(root, "index.json"), archivePath: join(root, "kit.tar"), version: "1.2.4", sourceTag: "v1.2.4" }) };
 }
@@ -559,3 +560,5 @@ test("poll-only install uses the published tuple when the static fallback is nul
 		expect(result).toMatchObject({ status: "UPDATED", receiptId: "r6", activeVersion: "1.2.4", relink: "APPLIED", pluginReceiptId: "plugin-r6", pluginUndoCommand: "omp-kit undo plugin-r6 --yes", service: "APPLIED" });
 	});
 });
+
+afterAll(() => cleanupAllOwnedTmp());

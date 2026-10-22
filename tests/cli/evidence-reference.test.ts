@@ -2,12 +2,13 @@
 // reader seams (`liveFleetIo` readFile and git) and a real disposable git repository. Every negative differs
 // from the valid control in exactly one boundary and must name its check; none may ever read as VERIFIED.
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { verifyEvidenceReference, type EvidenceIo, type EvidenceVerification, type GitLocator } from "../../src/evidence-reference.ts";
 import { liveFleetIo } from "../../src/fleet-flywheel-doctor.ts";
 import { describeFullTestProducer, type FullTestProducer, type FullTestResultReference } from "../../src/full-test-runner.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const BEAD = "ompkit-fp72.101";
 const MESSAGE = 63900;
@@ -43,8 +44,8 @@ const CASES = {
 
 async function fixture(source: string): Promise<Fixture> {
 	// `work` is the private producer root the runner redacts; `root` is the separate git repository that retains the logs.
-	const work = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-evidence-work-")));
-	const root = realpathSync(mkdtempSync(join(tmpdir(), "omp-kit-evidence-reference-")));
+	const work = realpathSync(ownedTmp("omp-kit-evidence-work").path);
+	const root = realpathSync(ownedTmp("omp-kit-evidence-reference").path);
 	roots.push(work, root);
 	const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_") && key !== "GIT_CONFIG_NOSYSTEM" && key !== "GIT_CONFIG_GLOBAL") delete env[key];
@@ -254,3 +255,5 @@ test("planted: a stream that names no retained log path is UNVERIFIED while its 
 	expectRefused(r, "UNVERIFIED", "LOG_PATH_ABSENT", "stdout");
 	expect(check(r, "OK", "stderr")).toBeDefined();
 });
+
+afterAll(() => cleanupAllOwnedTmp());

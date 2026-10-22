@@ -1,7 +1,8 @@
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ERROR_TEXT, judgeResult, ompMcpToolName, parseCallSpec, parseExpectSpec, probeMcpProfiles, RESULT_TEXT_CAP } from "../../src/mcp-probe.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const OMP = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 if (!OMP) throw new Error("mcp-probe tests require an installed OMP on PATH: the proof runs through OMP itself");
@@ -14,7 +15,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function fixture(modes: Record<string, string | { mode: string; env: Record<string, string> }>, dotenv?: string) {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(base, { recursive: true });
-	const root = mkdtempSync(join(base, "mcp-probe-"));
+	const root = ownedTmp("mcp-probe", { root: base }).path;
 	roots.push(root);
 	const home = join(root, "home"), agentDir = join(home, ".omp", "profiles", "alpha", "agent"), work = join(root, "work");
 	mkdirSync(agentDir, { recursive: true });
@@ -157,3 +158,5 @@ test("a slow answer is CALL_TIMEOUT at a small bound and CALLABLE when raised, w
 	const fallbackServer = JSON.parse(fallback.stdout.toString()).data.mcp.profiles[0].servers[0];
 	expect(fallbackServer).toMatchObject({ server: "slow", status: "CALLABLE", call: { bound_ms: 120000 } });
 }, 120_000);
+
+afterAll(() => cleanupAllOwnedTmp());

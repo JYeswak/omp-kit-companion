@@ -1,9 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const bases: string[] = [];
 afterEach(() => { for (const base of bases.splice(0)) rmSync(base, { recursive: true, force: true }); });
@@ -12,7 +13,7 @@ interface Healthy { home: string; project: string; release: string; ompBin: stri
 
 function sculpt(): Healthy {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
-	const base = mkdtempSync(join(scratch, "health-"));
+	const base = ownedTmp("health", { root: scratch }).path;
 	bases.push(base);
 	const release = join(base, "release");
 	const home = join(base, "home");
@@ -120,3 +121,5 @@ test("a 0755 state root makes health exit 1 naming the state root", () => {
 	expect(JSON.stringify(health.data)).toContain("755");
 	expect(health.data.data.not_judged.some((row: Row) => row.component === "matcher")).toBe(true);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

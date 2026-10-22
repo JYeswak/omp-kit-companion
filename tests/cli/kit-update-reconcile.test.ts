@@ -1,8 +1,9 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { reconcilePendingUpdate } from "../../src/kit-update.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 // ompkit-3isy.1 UPDREC1: a supported reconcile path for PARTIAL receipts.
 
@@ -23,7 +24,7 @@ function fixture(options: { liveBytes: Buffer; recordedBytes: Buffer; withActiva
 	liveBytes: Buffer.from("binary-0.2.17"),
 	recordedBytes: Buffer.from("binary-0.2.17"),
 }) {
-	const root = mkdtempSync(join(repoRoot, "var", "agent-tmp", "kit-update-reconcile-"));
+	const root = ownedTmp("kit-update-reconcile", { root: join(repoRoot, "var", "agent-tmp") }).path;
 	const prefix = makePrefix(root, "prefix", "0.2.17", options.liveBytes);
 	const stateRoot = join(root, "state");
 	mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
@@ -171,3 +172,5 @@ test("[1c] explicit relocated prefix records the observed binary path", () => {
 		rmSync(ctx.root, { recursive: true, force: true });
 	}
 });
+
+afterAll(() => cleanupAllOwnedTmp());

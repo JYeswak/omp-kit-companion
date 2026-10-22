@@ -1,10 +1,11 @@
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { chooseMcpSelection, insertMcpServers, McpApplyError, parseEnvCommand, planMcpApply, planMcpEdit, removeDisabledServer, scanRenderedSecrets, setMcpEnvValue, setMcpTimeoutValue, validateJsonSchema } from "../../src/mcp-apply.ts";
 import { listOmpProfiles, readSource } from "../../src/mcp-sources.ts";
 import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const OMP = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 if (!OMP) throw new Error("mcp-apply tests require an installed OMP on PATH (its mcp-schema.json is the contract)");
@@ -25,7 +26,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 function fixture(servers: Record<string, unknown>) {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(base, { recursive: true });
-	const root = mkdtempSync(join(base, "mcp-apply-"));
+	const root = ownedTmp("mcp-apply", { root: base }).path;
 	roots.push(root);
 	const home = join(root, "home"), state = join(root, "state"), cwd = join(root, "cwd");
 	for (const dir of [join(home, ".omp", "agent"), join(home, ".omp", "profiles", "alpha", "agent"), cwd]) mkdirSync(dir, { recursive: true });
@@ -273,3 +274,5 @@ test("edit mode --timeout-ms plans a one-key diff, applies with a receipt, and u
 	expect(JSON.parse(bare.stdout).errors[0].code).toBe("INVALID_TIMEOUT");
 	expect(readFileSync(f.alphaMcp, "utf8")).toBe(original);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

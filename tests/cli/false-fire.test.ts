@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
-import { cpSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const APPROVED_FIELDS = ["rule", "expect", "source", "tool", "path", "snippet"] as const;
@@ -20,7 +21,7 @@ let environment: Record<string, string>;
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
-	base = mkdtempSync(join(tmpdir(), "omp-kit-false-fire-"));
+	base = ownedTmp("omp-kit-false-fire").path;
 	const release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	unrelatedCwd = join(base, "unrelated-project");
@@ -211,3 +212,5 @@ test("test --live-fixture routes to strict schema validation; plain and --full m
 	expect(fullRefusal.exitCode).toBe(2);
 	expect(fullRefusal.envelope.errors?.[0]?.code).toBe("CONFLICTING_FLAGS");
 }, 60_000);
+
+afterAll(() => cleanupAllOwnedTmp());

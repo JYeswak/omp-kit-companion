@@ -1,11 +1,12 @@
 import { Database } from "bun:sqlite";
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeFullTestProducer } from "../../src/full-test-runner.ts";
 import { busyElapsedMs, flushPending, inspectCommunicationPurgatory, inspectDirectorDoingWork, inspectFleetScope, inspectRetainedEvidence, inspectStuckPending, liveFleetIo, parseComposer, parseQueuedBand, tmuxSocketArgs, type FleetIo, type MailSends } from "../../src/fleet-flywheel-doctor.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const NOW = Date.parse("2026-10-09T18:00:00Z");
 const MIN = 60_000;
@@ -157,7 +158,7 @@ test("missing Agent Mail store is UNVERIFIED", () => {
 });
 
 test("live io reads Agent Mail sqlite read-only and git trailers from a real repo", () => {
-	const root = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "fleet-doctor-"));
+	const root = ownedTmp("fleet-doctor").path;
 	try {
 		const db = new Database(join(root, "storage.sqlite3"));
 		db.run("CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT, created_at INTEGER)");
@@ -192,7 +193,7 @@ test("live io reads Agent Mail sqlite read-only and git trailers from a real rep
 });
 
 test("tmux socket: TMUX_TMPDIR wins, then a live ~/.tmux-sockets server, else default", () => {
-	const home = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "fleet-sock-"));
+	const home = ownedTmp("fleet-sock").path;
 	try {
 		const socket = join(home, ".tmux-sockets", `tmux-${process.getuid?.() ?? 0}`, "default");
 		expect(tmuxSocketArgs({ HOME: home }, () => true)).toEqual([]);
@@ -458,7 +459,7 @@ const EVIDENCE_MAIL = 64102;
 const evidenceRoots: string[] = [];
 afterAll(() => { for (const root of evidenceRoots) rmSync(root, { recursive: true, force: true }); });
 const evidenceBase = () => {
-	const dir = realpathSync(mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "fleet-evidence-")));
+	const dir = realpathSync(ownedTmp("fleet-evidence").path);
 	evidenceRoots.push(dir);
 	return dir;
 };
@@ -575,3 +576,5 @@ test("inspectFleetScope includes the retained-evidence inspector", () => {
 	const rows = inspectFleetScope({ ...evidenceIo([evidenceRepo("tampered")]), tmux: () => null });
 	expect(rows.some((row) => row.component === "RETAINED_EVIDENCE" && row.status === "FAIL")).toBe(true);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

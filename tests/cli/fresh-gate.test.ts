@@ -1,15 +1,16 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { cpSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = root.includes("/fresh-gate.") ? resolve(root, "..") : resolve(root, "var/agent-tmp");
 const gate = join(root, "scripts/fresh-gate.sh");
 
 function fixture(): string {
-	const dir = mkdtempSync(join(scratchRoot, "fresh-gate-test-"));
+	const dir = ownedTmp("fresh-gate-test", { root: scratchRoot }).path;
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
 	mkdirSync(join(dir, "rules"));
 	mkdirSync(join(dir, "scripts"));
@@ -245,7 +246,7 @@ function gateFunctions(source: string, names: readonly string[]): string {
 
 type SaveFixture = { dir: string; env: Record<string, string> };
 function saveFixture(sbhCode: number, config: Record<string, number>): SaveFixture {
-	const dir = mkdtempSync(join(scratchRoot, "fresh-gate-save-"));
+	const dir = ownedTmp("fresh-gate-save", { root: scratchRoot }).path;
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-save-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
 	const bin = join(dir, "bin");
 	mkdirSync(bin);
@@ -333,7 +334,7 @@ test("SAVEFIRST1: no WARN when sbh is healthy or absent", () => {
 test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted (b): below the 10 GiB physical floor the save step is still refused with a typed reason, even with sbh healthy", () => {
 	const source = readFileSync(gate, "utf8");
 	const fx = saveFixture(0, { slots: 8, max_wait_s: 1 });
-	const low = mkdtempSync(join(LOW_BASE as string, "fresh-gate-lowfs."));
+	const low = ownedTmp("fresh-gate-lowfs", { root: LOW_BASE as string }).path;
 	try {
 		writeFileSync(join(low, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-lowfs\ncreated=${new Date().toISOString()}\n`);
 		fx.env.FRESH_GATE_TEST_REAL_STATFS = "1";
@@ -426,7 +427,7 @@ test("SAVEFIRST1 planted (c): the 180 s budget subtracts queue wait but still ju
 // checkout's (heavy runs from it), the code under test lives in lib/ so the fixture owns its edits.
 const FOCUSED_FUNCTIONS = ["fail", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"];
 function affectedArchive(fx: SaveFixture, answer: number, expected: number, base = fx.dir): string {
-	const dir = mkdtempSync(join(base, "archive."));
+	const dir = ownedTmp("archive", { root: base }).path;
 	symlinkSync(join(root, "src"), join(dir, "src"));
 	mkdirSync(join(dir, "lib"));
 	mkdirSync(join(dir, "tests/cli"), { recursive: true });
@@ -506,7 +507,7 @@ test.skipIf(!AMPLE)("CIGATE1 shards: the selection runs in K parallel bun worker
 
 test("CIGATE1 shards: K is a quarter of the cores, 2..4, or an explicit positive override", () => {
 	const source = readFileSync(gate, "utf8");
-	const dir = mkdtempSync(join(scratchRoot, "fresh-gate-workers-"));
+	const dir = ownedTmp("fresh-gate-workers", { root: scratchRoot }).path;
 	try {
 		const probe = join(dir, "probe.sh");
 		writeFileSync(probe, `${gateFunctions(source, ["test_workers"])}test_workers\n`);
@@ -635,7 +636,7 @@ test("CIGATE1: the disk floor reads statfs and refuses unreadable space with a t
 test.skipIf(LOW_BASE === null)("CIGATE1 planted: below the 10 GiB physical floor the gate refuses naming the space needed, and no test runs", () => {
 	const source = readFileSync(gate, "utf8");
 	const fx = saveFixture(0, { slots: 8, max_wait_s: 1 });
-	const low = mkdtempSync(join(LOW_BASE as string, "fresh-gate-lowfs."));
+	const low = ownedTmp("fresh-gate-lowfs", { root: LOW_BASE as string }).path;
 	try {
 		writeFileSync(join(low, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-lowfs\ncreated=${new Date().toISOString()}\n`);
 		expect(freeBytes(low)).toBeLessThan(NEED_BYTES);
@@ -652,7 +653,7 @@ test.skipIf(LOW_BASE === null)("CIGATE1 planted: below the 10 GiB physical floor
 
 // ---- CIGATE1 CI-only manifest: explicit, printed exclusions that turn the verdict PARTIAL ----------
 function gateTree(fx: SaveFixture, manifest: string): string {
-	const dir = mkdtempSync(join(fx.dir, "gate."));
+	const dir = ownedTmp("gate", { root: fx.dir }).path;
 	mkdirSync(join(dir, "scripts"));
 	symlinkSync(join(root, "src"), join(dir, "src"));
 	for (const name of ["affected-tests.ts", "gate-disk-floor.ts"]) cpSync(join(root, "scripts", name), join(dir, "scripts", name));
@@ -787,3 +788,5 @@ test("hecp: fresh-gate preserves an explicit case root and forces no location de
 		rmSync(probe, { force: true });
 	}
 });
+
+afterAll(() => cleanupAllOwnedTmp());

@@ -1,8 +1,9 @@
-import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 // Integration test: exercises real SIGTERM delivery and child reaping against
 // the platform clock. Fake timers cannot work: the waits synchronize with a
@@ -109,7 +110,7 @@ test("lingering scenario child is reaped and the tree removes cleanly", async ()
 	// Integration test: exercises real child reaping against the platform
 	// clock. Fake timers cannot work: process death is observed through
 	// kill(2), not in-process timers.
-	const stubDir = mkdtempSync(join(tmpdir(), "e2e-stub-"));
+	const stubDir = ownedTmp("e2e-stub").path;
 	const stub = join(stubDir, "stub-omp.sh");
 	writeFileSync(stub, [
 		"#!/bin/sh",
@@ -166,3 +167,5 @@ test("lingering scenario child is reaped and the tree removes cleanly", async ()
 	expect(existsSync(kept[2])).toBe(false);
 	rmSync(stubDir, { recursive: true, force: true });
 }, 300_000);
+
+afterAll(() => cleanupAllOwnedTmp());

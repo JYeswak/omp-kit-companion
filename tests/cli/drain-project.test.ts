@@ -1,10 +1,11 @@
 // close-queue --project (ompkit-kdbz.1 box 4): the tracker resolves from the
 // project dir, not the cwd tracker. RED first: --project does not exist yet.
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 
@@ -25,7 +26,7 @@ function sh(args: string[], cwd: string): void {
 // Fixture project: a git repo whose HEAD names planted bead fxplant-1, with a
 // tracker that holds fxplant-1 open and nothing else.
 function fixtureProject(parent: string): { dir: string; sha: string } {
-	const dir = mkdtempSync(join(parent, "proj-"));
+	const dir = ownedTmp("proj", { root: parent }).path;
 	mkdirSync(join(dir, ".beads"), { recursive: true });
 	const db = new Database(join(dir, ".beads", "beads.db"));
 	db.exec("CREATE TABLE issues(id TEXT PRIMARY KEY, title TEXT, status TEXT, assignee TEXT, updated_at TEXT)");
@@ -40,7 +41,7 @@ function fixtureProject(parent: string): { dir: string; sha: string } {
 	return { dir, sha };
 }
 
-const home = mkdtempSync(join(tmpdir(), "drain-project-home-"));
+const home = ownedTmp("drain-project-home").path;
 
 test("close-queue --project returns that tracker's rows, not the cwd tracker's", () => {
 	const { dir, sha } = fixtureProject(home);
@@ -61,8 +62,10 @@ test("--db with --project together is refused naming both", () => {
 });
 
 test("a project dir with no tracker is refused naming the path", () => {
-	const empty = mkdtempSync(join(home, "empty-"));
+	const empty = ownedTmp("empty", { root: home }).path;
 	const r = run(["drain", "close-queue", "--project", empty, "--json"], home);
 	expect(r.rc).not.toBe(0);
 	expect(r.text).toContain(empty);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

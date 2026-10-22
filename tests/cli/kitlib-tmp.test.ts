@@ -5,14 +5,16 @@
 // process group under a root this test owns (made with ownedTmp itself) and
 // removes in `finally`, so the test leaves nothing behind.
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { parseOwnerFile } from "../../src/scratch";
 
-type Expect = { rc?: number | Record<string, number>; signal?: string; dirs: "gone" | "kept"; stdout_has?: string; stderr_has?: string };
-type Case = { id: string; action: string; label?: string; kill?: string; expect: Expect };
+type Expect = {
+	rc?: number | Record<string, number>; signal?: string; dirs: "gone" | "kept"; stdout_has?: string; stderr_has?: string; outside_intact?: boolean;
+};
+type Case = { id: string; action: string; label?: string; kill?: string; outside?: boolean; expect: Expect };
 type Negative = { id: string; case: string; action: string };
 type Lang = "ts" | "sh" | "dash";
 
@@ -21,7 +23,7 @@ const corpus = JSON.parse(readFileSync(join(REPO, "tests/fixtures/kitlib-tmp/cor
 const CHILD_DEADLINE_MS = 20_000;
 
 const TS_CHILD = `
-import { writeSync } from "node:fs";
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 // Runtime-selected: the library path arrives in KT_LIB because this source runs as bun -e, outside the module graph.
 const { ownedTmp } = await import(process.env.KT_LIB);
 const root = process.env.KT_ROOT;
@@ -46,6 +48,13 @@ else if (action === "bad-label") {
 	try { ownedTmp(process.env.KT_LABEL, { root }); writeSync(1, "ACCEPTED\\n"); }
 	catch (error) { writeSync(2, String(error.message) + "\\n"); writeSync(1, "REFUSED\\n"); }
 }
+else if (action === "readonly-tree") {
+	mkdirSync(a.path + "/ro/deep", { recursive: true });
+	writeFileSync(a.path + "/ro/deep/file", "x");
+	chmodSync(a.path + "/ro/deep", 0o555);
+	chmodSync(a.path + "/ro", 0o555);
+	symlinkSync(process.env.KT_OUTSIDE, a.path + "/link");
+}
 `;
 
 const SH_CHILD = `
@@ -66,6 +75,7 @@ case $KT_ACTION in
 	wait) sleep 60 & printf 'ready\\n'; wait ;;
 	cleanup-twice) kitlib_tmp_cleanup "$a"; kitlib_tmp_cleanup "$a"; kitlib_tmp_cleanup "$b"; kitlib_tmp_cleanup "$b"; printf 'cleaned\\n' ;;
 	bad-label) if kitlib_tmp c "$KT_LABEL"; then printf 'ACCEPTED\\n'; else printf 'REFUSED\\n'; fi ;;
+	readonly-tree) { mkdir -p "$a/ro/deep" && printf x >"$a/ro/deep/file" && chmod 0555 "$a/ro/deep" "$a/ro" && ln -s "$KT_OUTSIDE" "$a/link"; } || exit 91 ;;
 esac
 `;
 
@@ -76,10 +86,11 @@ function childArgv(lang: Lang): { argv: string[]; lib: string } {
 
 interface Outcome { code: number | null; signal: string | null; stdout: string; stderr: string; pid: number; timedOut: boolean }
 
-async function runChild(lang: Lang, action: string, root: string, kase: Case): Promise<Outcome> {
+async function runChild(lang: Lang, action: string, root: string, kase: Case, outside: string | null): Promise<Outcome> {
 	const { argv, lib } = childArgv(lang);
 	const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: root, KT_LIB: lib, KT_ROOT: root, KT_ACTION: action };
 	if (kase.label !== undefined) env.KT_LABEL = kase.label;
+	if (outside !== null) env.KT_OUTSIDE = outside;
 	const child = Bun.spawn(argv, { env, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
 	let timedOut = false;
 	// A real-clock bound on a real child process: no fake timer can drive another process.
@@ -170,9 +181,21 @@ async function runCase(lang: Lang, kase: Case, action = kase.action): Promise<st
 	try {
 		const root = join(owned.path, "root");
 		mkdirSync(root, { mode: 0o700 });
-		return judge(lang, await runChild(lang, action, root, kase), kase.expect, root);
+		let outside: string | null = null;
+		if (kase.outside) {
+			outside = join(owned.path, "outside");
+			mkdirSync(outside, { mode: 0o700 });
+			writeFileSync(join(outside, "keep"), "keep\n");
+			chmodSync(outside, 0o555);
+		}
+		const failures = judge(lang, await runChild(lang, action, root, kase, outside), kase.expect, root);
+		if (kase.expect.outside_intact && outside !== null) {
+			if ((statSync(outside).mode & 0o777) !== 0o555) failures.push(`OUTSIDE mode changed: ${(statSync(outside).mode & 0o777).toString(8)}`);
+			if (!existsSync(join(outside, "keep"))) failures.push("OUTSIDE lost its file keep");
+		}
+		return failures;
 	} finally {
-		owned.cleanup();
+		owned.cleanup(); // holds the 0555 OUTSIDE when the case has one: the fix dogfooded on the test's own root
 	}
 }
 
@@ -211,7 +234,7 @@ describe("kitlib tmp in-process surface", () => {
 	test("root defaults to os.tmpdir() and cleanupAllOwnedTmp removes every live dir", () => {
 		const first = ownedTmp("kitlib-default");
 		const second = ownedTmp("kitlib-default");
-		expect(first.path.startsWith(`${tmpdir().replace(/\/$/, "")}/kitlib-default.${process.pid}.`)).toBe(true);
+		expect(first.path.startsWith(`${tmpdir().replace(/\/$/, "")}/kitlib-default.${process.pid}.`)).toBe(true); // tempsafe: conformance of the default os.tmpdir root
 		expect(first.path).not.toBe(second.path);
 		cleanupAllOwnedTmp();
 		expect(existsSync(first.path) || existsSync(second.path)).toBe(false);
@@ -233,4 +256,18 @@ describe("kitlib tmp in-process surface", () => {
 		const kase: Case = { id: "sigterm-other-listener", action: "sigterm-other-listener", expect: { rc: 7, dirs: "gone", stdout_has: "other-listener" } };
 		expect(await runCase("ts", kase)).toEqual([]);
 	}, CHILD_DEADLINE_MS + 10_000);
+
+	test("cleanup() and cleanupAllOwnedTmp() remove a tree holding 0555 dirs", () => {
+		for (const remove of ["cleanup", "all"] as const) {
+			const owned = ownedTmp("kitlib-readonly");
+			mkdirSync(join(owned.path, "releases", "0.0.1"), { recursive: true });
+			writeFileSync(join(owned.path, "releases", "0.0.1", "bin"), "x");
+			chmodSync(join(owned.path, "releases", "0.0.1"), 0o555);
+			chmodSync(join(owned.path, "releases"), 0o555);
+			if (remove === "cleanup") owned.cleanup();
+			else cleanupAllOwnedTmp();
+			expect(existsSync(owned.path)).toBe(false);
+			owned.cleanup();
+		}
+	});
 });

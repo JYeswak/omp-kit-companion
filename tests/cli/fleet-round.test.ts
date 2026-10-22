@@ -57,7 +57,7 @@ function bundle(specs: Spec[], ready: string[], extra: Partial<{ docs: Record<st
 		git: { repo: "/home/user/demo", ref: "HEAD", head: "0".repeat(40), ls_files: Object.keys(extra.docs ?? CLEAN_DOCS).join("\n") },
 		docs: extra.docs ?? CLEAN_DOCS,
 		seats: {
-			tmux: [{ socket: "/tmp/tmux-test/default", output: extra.tmux === undefined ? "demo:0.1\t%7\t100\tdemo\t0\t1\n" : extra.tmux, error: extra.tmux === null ? "socket does not exist" : null }],
+			tmux: [{ socket: "/tmp/tmux-test/default", output: extra.tmux === undefined ? "demo:0.1\t%7\t100\tdemo\t0\t1\n" : extra.tmux, error: extra.tmux === null ? "socket does not exist" : null }], // tempsafe: fake path value in fixture, nothing created
 			ps: extra.ps === undefined ? "  100     1 -zsh\n  101   100 bun /home/user/.bun/bin/omp --profile x\n" : extra.ps,
 			identity_root: "/home/user/.config/agent-mail/identity",
 			identity: [{ key: "/home/user/demo", dir: `/home/user/.config/agent-mail/identity/${identityDirName("/home/user/demo")}`, files: extra.identity === undefined ? { "7": '{"name":"LiveAgent","session_name":"demo","pane_id":"%7","pane_pid":100,"socket_path":"/tmp/tmux-test/default","written_at":"2026-10-12T00:00:00Z"}' } : extra.identity }],

@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { validateReleaseIndex, validateReleaseManifest, previewKitRelease, verifyKitArchive, assertFreshKitPlan, stageKitRelease, type KitReleasePlan } from "../../src/kit-release";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const fixture = join(import.meta.dir, "..", "fixtures", "kit-release", "release-manifest.json");
 const manifestBytes = readFileSync(fixture);
@@ -114,7 +115,8 @@ describe("versioned release contract", () => {
  });
  test("stages verified bytes only in a disposable root and checks the staged executable --info", async () => {
   const base = join(import.meta.dir, "..", "..", "var", "agent-tmp");
-  const stagingParent = mkdtempSync(join(base, "kit-release-test-"));
+  const stagingParent = join(ownedTmp("kit-release-test", { root: base }).path, "staging");
+  mkdirSync(stagingParent);
   try {
    const plan = await fixturePlan();
    const probeBinaryInfo = async (executable: string) => {
@@ -136,13 +138,14 @@ describe("versioned release contract", () => {
    const repo = join(import.meta.dir, "..", "..");
    const base = join(repo, "var", "agent-tmp");
    mkdirSync(base, { recursive: true });
-   const work = mkdtempSync(join(base, `receipt-install.${process.pid}.`));
+   const work = ownedTmp("receipt-install", { root: base }).path;
    writeFileSync(join(work, ".owner"), `pid=${process.pid}\nlabel=receipt-install\nrepo=${repo}\ncreated=${new Date().toISOString()}\n`);
    try {
     const probeData = { version: info.version, release: { source_tag: info.source_tag }, platform: info.platform };
     const files = [
      { name: "bin/omp-kit", bytes: Buffer.from(`#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({ data: probeData })}'\n`) },
      { name: "scripts/receipt.py", bytes: readFileSync(join(repo, "scripts/receipt.py")) },
+     { name: "scripts/kitlib_tmp.py", bytes: readFileSync(join(repo, "scripts/kitlib_tmp.py")) },
      { name: "scripts/ordinary.py", bytes: Buffer.from("print('ordinary data file')\n") },
     ].sort((left, right) => left.name.localeCompare(right.name));
     const releaseManifest = Buffer.from(JSON.stringify({
@@ -204,7 +207,7 @@ describe("versioned release contract", () => {
    const repo = join(import.meta.dir, "..", "..");
    const base = join(repo, "var", "agent-tmp");
    mkdirSync(base, { recursive: true });
-   const work = mkdtempSync(join(base, `bytecode-seal.${process.pid}.`));
+   const work = ownedTmp("bytecode-seal", { root: base }).path;
    writeFileSync(join(work, ".owner"), `pid=${process.pid}\nlabel=bytecode-seal\nrepo=${repo}\ncreated=${new Date().toISOString()}\n`);
    try {
     const probeData = { version: info.version, release: { source_tag: info.source_tag }, platform: info.platform };
@@ -212,6 +215,7 @@ describe("versioned release contract", () => {
      { name: "bin/omp-kit", bytes: Buffer.from(`#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({ data: probeData })}'\n`) },
      { name: "scripts/pysafe.py", bytes: readFileSync(join(repo, "scripts/pysafe.py")) },
      { name: "scripts/kitlib_run.py", bytes: readFileSync(join(repo, "scripts/kitlib_run.py")) },
+     { name: "scripts/kitlib_tmp.py", bytes: readFileSync(join(repo, "scripts/kitlib_tmp.py")) },
      { name: "skills/demo/scripts/helper.py", bytes: Buffer.from("VALUE = 7\n") },
     ].sort((left, right) => left.name.localeCompare(right.name));
     const releaseManifest = Buffer.from(JSON.stringify({
@@ -286,3 +290,5 @@ describe("versioned release contract", () => {
   }, 30_000);
  }
 });
+
+afterAll(() => cleanupAllOwnedTmp());

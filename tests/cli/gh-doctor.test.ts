@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { githubFinding, hostsToken, probeGithubCapabilities, repairGithubHosts, type GhFetch, type GhFetchResponse } from "../../src/gh-doctor.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 function stubFetch(routes: Record<string, { status: number; scopes?: string; body: unknown }>, seen: string[]): GhFetch {
 	return async (url, init) => {
@@ -68,7 +68,7 @@ describe("github capability probes", () => {
 		const seen: string[] = [];
 		const rows = await probeGithubCapabilities({
 			foreignRepo: "acme/foreign", ownedRepo: "me/owned",
-			home: join(tmpdir(), "gh-doctor-no-home"),
+			home: join(ownedTmp("gh-doctor-no-home").path, "absent"),
 			ghToken: () => null,
 			fetchImpl: stubFetch(fullRoutes, seen),
 		});
@@ -77,7 +77,7 @@ describe("github capability probes", () => {
 		expect(seen).toHaveLength(0);
 	});
 	test("keyring token is used when hosts.yml carries none", async () => {
-		const base = mkdtempSync(join(tmpdir(), "gh-doctor-keyring-"));
+		const base = ownedTmp("gh-doctor-keyring").path;
 		try {
 			mkdirSync(join(base, ".config", "gh"), { recursive: true });
 			writeFileSync(join(base, ".config", "gh", "hosts.yml"), "github.com:\n    user: me\n    git_protocol: https\n");
@@ -115,7 +115,7 @@ describe("github capability probes", () => {
 
 describe("hosts.yml token scan", () => {
 	test("reads only the github.com oauth_token", () => {
-		const base = mkdtempSync(join(tmpdir(), "gh-doctor-hosts-"));
+		const base = ownedTmp("gh-doctor-hosts").path;
 		try {
 			mkdirSync(join(base, ".config", "gh"), { recursive: true });
 			const hostToken = ["ghp", "hoststoken1"].join("_");
@@ -132,13 +132,13 @@ describe("hosts.yml token scan", () => {
 	});
 
 	test("absent file yields null", () => {
-		expect(hostsToken(join(tmpdir(), "gh-doctor-absent"))).toBeNull();
+		expect(hostsToken(join(ownedTmp("gh-doctor-absent").path, "absent"))).toBeNull();
 	});
 });
 
 describe("hosts.yml repair", () => {
 	test("refuses the classic token", () => {
-		const base = mkdtempSync(join(tmpdir(), "gh-doctor-repair-"));
+		const base = ownedTmp("gh-doctor-repair").path;
 		try {
 			expect(() => repairGithubHosts(base, "ghp_classic999")).toThrow("refuses the classic token");
 		} finally {
@@ -147,7 +147,7 @@ describe("hosts.yml repair", () => {
 	});
 
 	test("writes the fine-grained token with owner-only mode and no secret printed", () => {
-		const base = mkdtempSync(join(tmpdir(), "gh-doctor-repair-"));
+		const base = ownedTmp("gh-doctor-repair").path;
 		try {
 			mkdirSync(join(base, ".config", "gh"), { recursive: true });
 			writeFileSync(join(base, ".config", "gh", "hosts.yml"), "github.com:\n    user: me\n    oauth_token: oldtoken\n");
@@ -201,7 +201,7 @@ describe("github finding fold", () => {
 
 describe("doctor --scope github entry", () => {
 	test("the real CLI returns the capability rows with no credential present", () => {
-		const home = mkdtempSync(join(tmpdir(), "gh-doctor-cli-"));
+		const home = ownedTmp("gh-doctor-cli").path;
 		try {
 			mkdirSync(join(home, "bin"));
 			writeFileSync(join(home, "bin", "gh"), "#!/bin/sh\nexit 1\n");
@@ -225,3 +225,5 @@ describe("doctor --scope github entry", () => {
 		}
 	});
 });
+
+afterAll(() => cleanupAllOwnedTmp());

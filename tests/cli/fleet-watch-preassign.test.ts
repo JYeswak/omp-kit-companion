@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
     choosePull,
@@ -15,6 +15,7 @@ import {
 	type ReadyRow,
 } from "../../src/fleet-watch.ts";
 import type { TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 // ompkit-bj08.5.1 PREASSIGN1: nudge eligibility gates with planted negatives.
 
@@ -27,7 +28,7 @@ const LEAF: ReadyRow = { id: "x-1", status: "open", assignee: null, labels: [], 
 function scratchLog(): string {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const dir = mkdtempSync(join(parent, "fleet-watch-preassign."));
+	const dir = ownedTmp("fleet-watch-preassign", { root: parent }).path;
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-preassign-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	return join(dir, "actions.jsonl");
 }
@@ -393,3 +394,5 @@ test("PULLADMIT1: a closed decision citation cannot replace a separately observe
 		})]),
 	});
 });
+
+afterAll(() => cleanupAllOwnedTmp());

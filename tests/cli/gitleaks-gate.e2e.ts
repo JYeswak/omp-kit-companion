@@ -1,13 +1,14 @@
 #!/usr/bin/env bun
 import { strict as assert } from "node:assert";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runClaudeSaveJob, runGitleaksScan, type ClaudeSaveGit, type GitleaksScanRequest, type GitleaksScanResult, type GitleaksScanner } from "../../src/claude-save-job.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 type CompletedScan = Extract<GitleaksScanResult, { disposition: "COMPLETED" }>;
 type Expectation = { job: "PUSHED"; scan: "COMPLETED" } | { job: "REFUSED"; refusal: string; scan: "COMPLETED" | "NOT_RUN" };
 
-const scratch = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "gitleaks-gate-e2e-"));
+const scratch = ownedTmp("gitleaks-gate-e2e", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path;
 const records: Record<string, unknown>[] = [];
 let assertionTotal = 0;
 

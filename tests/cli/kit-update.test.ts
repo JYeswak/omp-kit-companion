@@ -1,7 +1,7 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { runFullTest } from "../../src/full-test-runner.ts";
 import { runFastTest } from "../../src/test-runner.ts";
@@ -11,6 +11,7 @@ import { applyKitUpdate, judgeKitPostcheck, kitUpdateEnvelope, planKitUpdate, un
 import { kitUpdateJobOverall } from "../../src/kit-update-job.ts";
 import { serviceLabel } from "../../src/service.ts";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 test("unknown update failure preserves its code and original message", () => {
  expect(updateFailureCause(new Error("boom lower"))).toMatchObject({
@@ -70,7 +71,7 @@ function fixtureContractFiles(): FixtureFile[] {
 	return [{ name: "MANIFEST.tsv", bytes: manifestFile }, { name: "cases/cases.tsv", bytes: cases }, { name: "rules/rule-a.md", bytes: rule }];
 }
 async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: FixtureOptions = {}): Promise<T> {
-	const root = realpathSync(mkdtempSync(join(scratch, "kit-update-")));
+	const root = realpathSync(ownedTmp("kit-update", { root: scratch }).path);
 	const prefix = join(root, "prefix"), stateRoot = join(root, "state"), home = join(root, "home"), source = join(root, "source");
 	const selectedPlatform = options.platform ?? platform;
 	const currentVersion = options.currentVersion ?? "1.2.2", nextVersion = options.nextVersion ?? "1.2.3";
@@ -879,3 +880,4 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 			expect(visible).not.toContain(sentinel);
 }, 900_000);
 
+afterAll(() => cleanupAllOwnedTmp());

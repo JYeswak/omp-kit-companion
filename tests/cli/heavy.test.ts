@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { type DiskCapacity, decideDiskPressure, type DiskVerdict, diskVerdict, HEAVY_DISK_NEED_BYTES, HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
@@ -9,7 +10,7 @@ const entry = resolve(import.meta.dir, "../../src/cli.ts");
 function fixture(): string {
 	const root = join(process.cwd(), "var", "agent-tmp");
 	mkdirSync(root, { recursive: true, mode: 0o700 });
-	const dir = mkdtempSync(join(root, `heavy-test.${process.pid}.`));
+	const dir = ownedTmp("heavy-test", { root }).path;
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid} label=heavy-test repo=${process.cwd()} created=${new Date().toISOString()}\n`, { mode: 0o600 });
 	return dir;
 }
@@ -586,7 +587,7 @@ const LOW_BASE = lowCapacityBase();
 const LOW_FS_REQUIRED = process.platform === "linux" && process.env.GITHUB_ACTIONS === "true";
 
 async function onLowFilesystem(body: (directory: string) => Promise<void>): Promise<void> {
-	const directory = mkdtempSync(join(LOW_BASE as string, `omp-kit-heavy-test.${process.pid}.`));
+	const directory = ownedTmp("omp-kit-heavy-test", { root: LOW_BASE as string }).path;
 	writeFileSync(join(directory, ".owner"), `pid=${process.pid} label=heavy-test-lowfs created=${new Date().toISOString()}\n`, { mode: 0o600 });
 	try {
 		expect(measure(directory).freeBytes).toBeLessThan(HEAVY_DISK_NEED_BYTES);
@@ -791,3 +792,5 @@ test.skipIf(!FIXTURE_AMPLE)("SAVEFIRST1: a waiting job re-reads load.json each p
 	expect(readFileSync(marker, "utf8")).toBe("ran");
 	expect(Date.now() - started).toBeLessThan(8_000);
 }, 30_000);
+
+afterAll(() => cleanupAllOwnedTmp());

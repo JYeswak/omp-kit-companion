@@ -1,12 +1,13 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const limiter = resolve(import.meta.dir, "../../scripts/limit-process-tree.sh");
 
 test("bounded G4 launcher kills a forked descendant before it can mutate an unrelated path", async () => {
- const work = mkdtempSync(join(tmpdir(), "omp-kit-timeout-"));
+ const work = ownedTmp("omp-kit-timeout").path;
  const marker = join(work, "must-not-appear");
  try {
   const source = `(sleep 2; printf leaked > '${marker}') & wait`;
@@ -19,3 +20,5 @@ test("bounded G4 launcher kills a forked descendant before it can mutate an unre
   expect(existsSync(marker)).toBe(false);
  } finally { rmSync(work, { recursive: true, force: true }); }
 });
+
+afterAll(() => cleanupAllOwnedTmp());

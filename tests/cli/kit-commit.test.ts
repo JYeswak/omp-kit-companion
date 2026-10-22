@@ -1,8 +1,8 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import type { Subprocess } from "bun";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const WRAPPER = join(import.meta.dir, "../../scripts/kit-commit.py");
 const CLI = join(import.meta.dir, "../../src/cli.ts");
@@ -15,8 +15,8 @@ function git(root: string, args: string[], env?: Record<string, string>): { code
 	return { code: p.exitCode, out: p.stdout.toString(), err: p.stderr.toString() };
 }
 
-function fixture(prefix: string, hook: string | null): string {
-	const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+function fixture(label: string, hook: string | null): string {
+	const root = realpathSync(ownedTmp(label).path);
 	expect(git(root, ["init", "-q"]).code).toBe(0);
 	expect(git(root, ["config", "user.email", "t@e.invalid"]).code).toBe(0);
 	expect(git(root, ["config", "user.name", "t"]).code).toBe(0);
@@ -35,7 +35,7 @@ async function exitedText(proc: Subprocess): Promise<{ code: number; out: string
 }
 
 test("planted GITLOCK1: two concurrent wrapper commits both land with zero lock errors", async () => {
-	const root = fixture("kit-commit-race-", "#!/bin/sh\nsleep 4\n");
+	const root = fixture("kit-commit-race", "#!/bin/sh\nsleep 4\n");
 	try {
 		writeFileSync(join(root, "A"), "a1\n");
 		writeFileSync(join(root, "B"), "b1\n");
@@ -56,8 +56,8 @@ test("planted GITLOCK1: two concurrent wrapper commits both land with zero lock 
 }, 120_000);
 
 test("planted GITLOCK1: commit TERM-killed during its pre-commit hook leaves no index.lock", async () => {
-	const root = fixture("kit-commit-killed-", "#!/bin/sh\n# Hold .git/index.lock like a hook-spawned git command (the outer\n# commit itself holds no lock during hooks on modern git): sleep keeps the\n# stdin pipe open so update-index blocks holding the lock.\nsleep 30 | git update-index --stdin\n");
-	const shim = realpathSync(mkdtempSync(join(tmpdir(), "kit-commit-shim-")));
+	const root = fixture("kit-commit-killed", "#!/bin/sh\n# Hold .git/index.lock like a hook-spawned git command (the outer\n# commit itself holds no lock during hooks on modern git): sleep keeps the\n# stdin pipe open so update-index blocks holding the lock.\nsleep 30 | git update-index --stdin\n");
+	const shim = realpathSync(ownedTmp("kit-commit-shim").path);
 	try {
 		writeFileSync(join(root, "A"), "a1\n");
 		expect(git(root, ["add", "A"]).code).toBe(0);
@@ -89,8 +89,8 @@ test("planted GITLOCK1: commit TERM-killed during its pre-commit hook leaves no 
 }, 120_000);
 
 test("planted GITLOCK1: one transient lock collision is retried, not surfaced", async () => {
-	const root = fixture("kit-commit-retry-", null);
-	const shim = realpathSync(mkdtempSync(join(tmpdir(), "kit-commit-gitshim-")));
+	const root = fixture("kit-commit-retry", null);
+	const shim = realpathSync(ownedTmp("kit-commit-gitshim").path);
 	try {
 		const realGit = Bun.spawnSync(["sh", "-c", "command -v git"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" }).stdout.toString().trim();
 		expect(realGit).not.toBe("");
@@ -121,3 +121,5 @@ exec "${realGit}" "$@"
 		rmSync(shim, { recursive: true, force: true });
 	}
 }, 120_000);
+
+afterAll(() => cleanupAllOwnedTmp());

@@ -1,7 +1,8 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { inspectMcpSources } from "../../src/mcp-sources.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -11,7 +12,7 @@ const PLANTED_TOKEN = ["ghp", "PLANTEDTOKENVALUE0123456789abcdef"].join("_");
 test("sources inventory reads every harness config, shows env as names only, and maps every enumerated profile", () => {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(base, { recursive: true });
-	const root = mkdtempSync(join(base, "mcp-sources-"));
+	const root = ownedTmp("mcp-sources", { root: base }).path;
 	roots.push(root);
 	const home = join(root, "home"), cwd = join(root, "project");
 	for (const dir of [join(home, ".omp", "agent"), join(home, ".omp", "profiles", "work", "agent"), join(home, ".omp", "profiles", "off", "agent"), join(home, ".cursor"), join(home, ".codex"), cwd])
@@ -36,3 +37,5 @@ test("sources inventory reads every harness config, shows env as names only, and
 	expect(report.matrix.calc).toEqual({ default: "ABSENT", off: "DISABLED", work: "CONFIGURED" });
 	expect(readdirSync(home, { recursive: true }).map(String).sort().map(path => `${path}:${statSync(join(home, path)).mtimeMs}`)).toEqual(before);
 });
+
+afterAll(() => cleanupAllOwnedTmp());

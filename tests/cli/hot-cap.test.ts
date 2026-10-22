@@ -1,15 +1,16 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { auditReservationAge } from "../../src/reservation-age.ts";
 import { checkHotCap, HOT_CAP_MINUTES, isHotPath, isReservationTool, parseHotPaths, readHotPaths } from "../../src/fleet-guard/hot-cap.ts";
 import { check } from "../../src/fleet-guard/reservations.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 function hotRepo(): string {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp/hotcap-"));
+	const root = ownedTmp("hotcap", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	dirs.push(root);
 	mkdirSync(join(root, ".omp"), { recursive: true });
 	mkdirSync(join(root, "src"), { recursive: true });
@@ -61,7 +62,7 @@ test("non-exclusive long hold on a hot path passes", async () => {
 });
 
 test("no hot-paths file means no cap", async () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp/hotcap-"));
+	const root = ownedTmp("hotcap", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	dirs.push(root);
 	const block = await check(reserveEvent(["src/cli.ts"], true, 147), { cwd: root, repoRoot: root });
 	expect(block).toBeUndefined();
@@ -90,7 +91,7 @@ test("checkHotCap unit: cap boundary and message", () => {
 
 
 test("doctor audit lists only hot overdue holds when filtered", () => {
-	const archive = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp/hotcap-age-"));
+	const archive = ownedTmp("hotcap-age", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	dirs.push(archive);
 	const project = "org/repo";
 	const dir = join(archive, "projects", "org-repo", "file_reservations");
@@ -259,3 +260,5 @@ test("bash: renew --extend-seconds 8820 --paths on a hot path is refused; hold-a
 	expect(aged?.block).toBe(true);
 	expect(await check(amCmd("am file_reservations renew /p PlumRaven --extend-seconds 600 --paths src/other.ts"), ctx)).toBeUndefined();
 });
+
+afterAll(() => cleanupAllOwnedTmp());

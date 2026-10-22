@@ -1,7 +1,8 @@
-import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, LESSONS_RELATIVE_PATH, lessonDocumentAnchors, lessonRecordId, readLessonsLog, resolveLessonCurrency, writeCheckin, writeCheckinAndCommit, type LessonEntry } from "../../src/lessons.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
@@ -12,7 +13,7 @@ const now = new Date("2026-10-05T12:00:00.000Z");
 function fixture(): string {
 	mkdirSync(scratchRoot, { recursive: true });
 	// Archive gates put fixtures below a pre-push path; that text is not a guard verdict.
-	const root = mkdtempSync(join(scratchRoot, "lessons-test-pre-push-"));
+	const root = ownedTmp("lessons-test-pre-push", { root: scratchRoot }).path;
 	roots.push(root);
 	writeFileSync(join(root, ".owner"), `pid=${process.pid} label=lessons-test repo=${repoRoot} created=${new Date().toISOString()}\n`);
 	return root;
@@ -484,3 +485,5 @@ test("doctor reports a planted negative lesson that has no evidence", () => {
 	expect(report.overall).toBe("FAIL");
 	expect(report.findings.map(finding => finding.code)).toContain("NEGATIVE_EVIDENCE_MISSING");
 });
+
+afterAll(() => cleanupAllOwnedTmp());

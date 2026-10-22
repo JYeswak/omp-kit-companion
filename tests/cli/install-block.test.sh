@@ -10,8 +10,9 @@ set -u
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 README="$ROOT/README.md"
 REPO_TMP="$ROOT/var/agent-tmp"
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/install-block-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+. "$ROOT/scripts/kitlib-tmp.sh"
+KITLIB_TMP_ROOT=${TMPDIR:-$REPO_TMP} # tempsafe: selects the kitlib_tmp root, keeps repo-tmp fallback
+kitlib_tmp TMP install-block-test || exit 1
 
 pass=0
 fail=0
@@ -35,7 +36,7 @@ else
 fi
 
 # Guard markers present in the documented block.
-for marker in 'if \[ -z "\$KIT_VERSION" \]' 'rate-limit' 'gh auth login' 'nothing was downloaded' 'mktemp -d "\${TMPDIR:-/tmp}'; do
+for marker in 'if \[ -z "\$KIT_VERSION" \]' 'rate-limit' 'gh auth login' 'nothing was downloaded' 'mktemp -d "\${TMPDIR:-/tmp}'; do # tempsafe: grep marker for README install text, not temp creation
   if grep -q "$marker" "$TMP/blocks.txt"; then ok; else bad "marker missing: $marker"; fi
 done
 

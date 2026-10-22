@@ -3,9 +3,9 @@
 // registry), has genuine Agent Mail activity within 24 h, or holds a live reservation.
 // Planted negatives: an expired/released reservation, 25 h old mail and a dead Tern block
 // never make a holder live; any unreadable source turns DEAD into UNKNOWN.
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -13,10 +13,11 @@ import {
 	readMailLiveness, sanitizePaneKey, seatNames, tmuxPaneKeys,
 } from "../../src/holder-liveness.ts";
 import type { LivenessSources } from "../../src/holder-liveness.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const HOUR = 3600_000;
 const NOW = Date.parse("2026-10-22T05:00:00Z");
-const base = mkdtempSync(join(tmpdir(), "holder-liveness-"));
+const base = ownedTmp("holder-liveness").path;
 
 function ok<T>(value: T) { return { ok: true as const, value }; }
 const sources = (over: Partial<LivenessSources> = {}): LivenessSources => ({
@@ -76,7 +77,7 @@ test("tmux: panes give composite and bare keys; no server is an empty, readable 
 });
 
 test("seat names: identity files of live keys in any project folder, plain or JSON", () => {
-	const root = mkdtempSync(join(base, "identity-"));
+	const root = ownedTmp("identity", { root: base }).path;
 	mkdirSync(join(root, "aaaaaaaaaaaa"));
 	mkdirSync(join(root, "bbbbbbbbbbbb"));
 	writeFileSync(join(root, "aaaaaaaaaaaa", "tern-11"), "SeatOne\n");
@@ -129,7 +130,7 @@ test("planted: a missing store or unset root is unreadable for both mail and res
 });
 
 test("storage root: env first, then the Agent Mail config.env keys, else null", () => {
-	const home = mkdtempSync(join(base, "home-"));
+	const home = ownedTmp("home", { root: base }).path;
 	expect(agentMailStorageRoot({ AGENT_MAIL_STORAGE_ROOT: "/env/root" }, home)).toBe("/env/root");
 	expect(agentMailStorageRoot({}, home)).toBeNull();
 	mkdirSync(join(home, ".config", "mcp-agent-mail"), { recursive: true });
@@ -140,7 +141,7 @@ test("storage root: env first, then the Agent Mail config.env keys, else null", 
 });
 
 test("sources: one probe reads seats, mail and reservations together", () => {
-	const home = mkdtempSync(join(base, "home-"));
+	const home = ownedTmp("home", { root: base }).path;
 	const folder = join(home, ".config", "agent-mail", "identity", "cccccccccccc");
 	mkdirSync(folder, { recursive: true });
 	writeFileSync(join(folder, "tern-11"), "SeatOne\n");
@@ -158,3 +159,5 @@ test("sources: one probe reads seats, mail and reservations together", () => {
 	}, NOW);
 	expect(holderVerdict("Expired", noTern, NOW).liveness).toBe("UNKNOWN");
 });
+
+afterAll(() => cleanupAllOwnedTmp());

@@ -1,9 +1,10 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { FleetWatcher, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
 import type { AdmissionInput } from "../../src/actuator-admission.ts";
 import type { TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 // ompkit-bj08.5: pause negatives through the real fleet-watch branch.
 
@@ -14,7 +15,7 @@ const config: FleetWatchConfig = { enabled: true, intervalSeconds: 60, noDecisio
 function scratchLog(): string {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const dir = mkdtempSync(join(parent, "fleet-watch-admission."));
+	const dir = ownedTmp("fleet-watch-admission", { root: parent }).path;
 	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-admission-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	return join(dir, "actions.jsonl");
 }
@@ -81,3 +82,5 @@ test("[b] admitted nudge sends through the real branch", () => {
 	expect(actions.map((action) => action.kind)).toEqual(["NUDGED"]);
 	expect(run.sends).toHaveLength(1);
 });
+
+afterAll(() => cleanupAllOwnedTmp());
