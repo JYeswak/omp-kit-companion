@@ -282,7 +282,7 @@ bump)
 	printf '%s\n' "$promoted"
 	if [ "$rc" -eq 4 ]; then printf 'BUMP=skip REASON=nothing-to-release version=%s\n' "$version"; exit 4; fi
 	[ "$rc" -eq 0 ] || { echo "bump: promote failed (rc=$rc)" >&2; exit 1; }
-	stamped=$(cd "$repo" && sh "$SCRIPT_DIR/stamp-release-line.sh" --version "$version" 2>&1) || { echo "bump: stamp failed: $stamped" >&2; exit 1; }
+	stamped=$(cd "$repo" && sh "$SCRIPT_DIR/stamp-release-line.sh" --version "$version" --readme "$PWD/README.md" 2>&1) || { echo "bump: stamp failed: $stamped" >&2; exit 1; }
 	printf '%s\n' "$stamped"
 	# The tree was clean, and promote+stamp only rewrite tracked files, so -u stages exactly their result.
 	git -C "$repo" add -u -- .

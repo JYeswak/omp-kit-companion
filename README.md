@@ -53,10 +53,8 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Around that core sit diagnostics for 37 named scopes, opt-in guard extensions
-for multi-agent fleets, service jobs, and a self-updating release channel. The
-command registry exposes 44 top-level commands; the command reference below
-tracks every command and doctor scope.
+Diagnostics cover 38 scopes. The reference lists all 44 commands. Fleet
+guards, services and the update channel are opt-in.
 
 ### Why use omp-kit
 
@@ -65,7 +63,7 @@ tracks every command and doctor scope.
 | Know a rule fires | `omp-kit test` runs every authored case through the installed OMP matcher (G1 registration, G2 payload, G3 prefixes); `--full` adds the isolated live stage (G4) |
 | Change profiles safely | `apply rules\|policy\|extensions\|plugin\|mcp` print a plan; `--apply --yes` writes, records a receipt, and reads each changed key back |
 | Reverse a change | `omp-kit undo RUN_ID --yes` restores one receipt and refuses if a file changed since |
-| See what is broken | `omp-kit doctor --scope NAME` covers 37 scopes, from OMP identity to leaked secrets |
+| See what is broken | `omp-kit doctor --scope NAME` covers 38 scopes, from OMP identity to leaked secrets |
 | Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-agent-mail-guard`, `kit-guard-optin`, `kit-callback` extensions |
 | Stay current | The `kit-update` service installs each published release and relinks the plugin |
 | Script it | Every command takes `--json` and returns one envelope; `omp-kit schema --json` describes it |
@@ -133,7 +131,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 37 diagnostic scopes
+### Doctor: 38 diagnostic scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
@@ -611,6 +609,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope browsers` | Browser processes and leftover automation clones | `omp-kit doctor --scope browsers` |
 | `--scope services` | launchd jobs: running, idle, failing, path mismatch; `--services FILE` checks a required-jobs list | `omp-kit doctor --scope services` |
 | `--scope regex-tools` | Regex engineering tools on PATH | `omp-kit doctor --scope regex-tools` |
+| `--scope test-scope` | Runner scratch exclusions; `OMP_KIT_FLEET_WATCH_CONFIG` selects input | `omp-kit doctor --scope test-scope --json` |
 | `--scope dicklesworthstone` | Installed agent tools (`ntm`, `am`, `caam`, ...) behind their latest release | `omp-kit doctor --scope dicklesworthstone` |
 | `--scope beads` | Acceptance criteria kept in their dedicated field | `omp-kit doctor --scope beads --project PATH` |
 | `--scope reservations` | Exclusive Agent Mail holds past the age limit | `omp-kit doctor --scope reservations --project PATH` |
