@@ -251,6 +251,16 @@ function saveFixture(sbhCode: number, config: Record<string, number>): SaveFixtu
 	mkdirSync(bin);
 	writeFileSync(join(bin, "sbh"), `#!/bin/sh\nif [ "$1 $2 $3" = "check --need 10G" ]; then printf '{"command":"check","exit_code":${sbhCode},"free_pct":11.694169037987928}\\n'; exit ${sbhCode}; fi\nexit 0\n`);
 	chmodSync(join(bin, "sbh"), 0o755);
+	const fakeBun = join(bin, "bun");
+	const statfsPreload = join(root, "tests/cli/fixtures/forge-healthy-statfs.ts");
+	writeFileSync(fakeBun, `#!/bin/sh
+if [ "$1" = "run" ]; then
+  shift
+  exec "${process.execPath}" --preload "${statfsPreload}" "$@"
+fi
+exec "${process.execPath}" "$@"
+`);
+	chmodSync(fakeBun, 0o755);
 	mkdirSync(join(dir, "config", "omp-kit"), { recursive: true, mode: 0o700 });
 	writeFileSync(join(dir, "config", "omp-kit", "load.json"), JSON.stringify(config), { mode: 0o600 });
 	mkdirSync(join(dir, "work"));
