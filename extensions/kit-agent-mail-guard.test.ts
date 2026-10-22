@@ -28,9 +28,9 @@ type Responder = (call: ExecCall) => FlywheelExecResult | Promise<FlywheelExecRe
 type ToolHandler = (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown;
 
 interface Host {
-	call(event: FlywheelToolCallEvent, cwd: string): Promise<FlywheelToolCallResult | undefined>;
+	call(event: FlywheelToolCallEvent, cwd: string, toolCallId?: string | null): Promise<FlywheelToolCallResult | undefined>;
 	/** A `write` to xd://mcp__mcp_agent_mail_<tool>, the way OMP routes an MCP call. */
-	mail(cwd: string, tool: string, args: unknown): Promise<FlywheelToolCallResult | undefined>;
+	mail(cwd: string, tool: string, args: unknown, toolCallId?: string | null): Promise<FlywheelToolCallResult | undefined>;
 	execs: ExecCall[];
 }
 
@@ -89,6 +89,7 @@ function fleetRespond(rosters: Record<string, TestRosterRow[]>, ...ids: string[]
 async function createHost(deps: AgentMailGuardDeps = {}, respond: Responder = brKnows(BEAD)): Promise<Host> {
 	const handlers: ToolHandler[] = [];
 	const execs: ExecCall[] = [];
+	let dispatch = 0;
 	const pi: AgentMailGuardApi = {
 		on: (_event, handler) => void handlers.push(handler),
 		exec: async (command, args, options) => {
@@ -98,16 +99,50 @@ async function createHost(deps: AgentMailGuardDeps = {}, respond: Responder = br
 		},
 	};
 	await kitAgentMailGuard(pi, { env: { AGENT_NAME: "PlumRaven" }, home: join(base, "no-home"), ...deps });
-	const call: Host["call"] = async (event, cwd) => {
+	const call: Host["call"] = async (event, cwd, toolCallId) => {
+		const id = toolCallId === null ? undefined : toolCallId ?? `dispatch-${++dispatch}`;
 		const ctx: FlywheelContext = { cwd, isIdle: () => true };
 		let result: unknown;
-		for (const handler of handlers) result = (await handler({ type: "tool_call", toolCallId: "c1", ...event }, ctx)) ?? result;
+		for (const handler of handlers) result = (await handler({ type: "tool_call", ...event, toolCallId: id }, ctx)) ?? result;
 		return result as FlywheelToolCallResult | undefined;
 	};
-	const mail: Host["mail"] = (cwd, tool, args) =>
-		call({ toolName: "write", input: { path: `${MAIL}${tool}`, content: JSON.stringify(args) } }, cwd);
+	const mail: Host["mail"] = (cwd, tool, args, toolCallId) =>
+		call({ toolName: "write", input: { path: `${MAIL}${tool}`, content: JSON.stringify(args) } }, cwd, toolCallId);
 	return { call, mail, execs };
 }
+test("reads: outer write and mounted fetch share one accepted logical call ID", async () => {
+	let clock = 1_000_000;
+	const h = await createHost({ now: () => clock });
+	const cwd = fleetRepo();
+	const fetch = { project_key: "/abs/path/backend", agent_name: "PlumRaven", limit: 1, include_bodies: true, mark_read: false };
+	const id = "omp-logical-fetch";
+	expect(await h.mail(cwd, "fetch_inbox", fetch, id)).toBeUndefined();
+	expect(await h.call({ toolName: "mcp__mcp_agent_mail_fetch_inbox", input: fetch }, cwd, id)).toBeUndefined();
+	expect(code(await h.mail(cwd, "fetch_inbox", fetch, "distinct-fetch"))).toBe("AM_INBOX_RATE");
+	clock += AM_INBOX_INTERVAL_MS - 1;
+	expect(code(await h.mail(cwd, "fetch_inbox", fetch, "distinct-fetch-2"))).toBe("AM_INBOX_RATE");
+	clock += 1;
+	expect(await h.mail(cwd, "fetch_inbox", fetch, "distinct-fetch-3")).toBeUndefined();
+});
+test("reads: delayed nested reentry does not restart the accepted logical call window", async () => {
+	let clock = 1_000_000;
+	const h = await createHost({ now: () => clock });
+	const cwd = fleetRepo();
+	const fetch = { project_key: "/abs/path/backend", agent_name: "PlumRaven", limit: 1, include_bodies: true, mark_read: false };
+	expect(await h.mail(cwd, "fetch_inbox", fetch, "original")).toBeUndefined();
+	clock += AM_INBOX_INTERVAL_MS;
+	expect(await h.call({ toolName: "mcp__mcp_agent_mail_fetch_inbox", input: fetch }, cwd, "original")).toBeUndefined();
+	expect(await h.mail(cwd, "fetch_inbox", fetch, "next")).toBeUndefined();
+	expect(code(await h.mail(cwd, "fetch_inbox", fetch, "distinct"))).toBe("AM_INBOX_RATE");
+});
+test("reads: missing and empty toolCallIds do not exempt distinct fetches", async () => {
+	const h = await createHost();
+	const cwd = fleetRepo();
+	const fetch = { project_key: "/abs/path/backend", agent_name: "PlumRaven", limit: 1, include_bodies: true, mark_read: false };
+	expect(await h.mail(cwd, "fetch_inbox", fetch, null)).toBeUndefined();
+	expect(code(await h.mail(cwd, "fetch_inbox", fetch, ""))).toBe("AM_INBOX_RATE");
+	expect(code(await h.mail(cwd, "fetch_inbox", fetch, null))).toBe("AM_INBOX_RATE");
+});
 
 function gitInit(parent: string): string {
 	const cwd = mkdtempSync(join(parent, "repo-"));

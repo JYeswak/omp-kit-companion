@@ -223,6 +223,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	const rulePath = deps.secretRulePath ?? join(dirname(fileURLToPath(import.meta.url)), SECRET_RULE_REL_PATH);
 	let scanner: RegExp[] | null = null;
 	let lastInbox: number | null = null;
+	let lastInboxToolCallId: string | null = null;
 
 	function secretScanner(): RegExp[] {
 		scanner ??= ruleConditions(readFileSync(rulePath, "utf8")).map(source => new RegExp(source));
@@ -525,10 +526,14 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			}
 			if (call.tool === "fetch_inbox") {
 				const at = now();
+				const id = event.toolCallId;
+				const sameLogicalCall = typeof id === "string" && id !== "" && id === lastInboxToolCallId;
+				if (sameLogicalCall) return undefined;
 				if (lastInbox !== null && at - lastInbox < AM_INBOX_INTERVAL_MS) {
 					return refuse("AM_INBOX_RATE", `fetch_inbox ran ${Math.round((at - lastInbox) / 1000)} s ago; one fetch per ${AM_INBOX_INTERVAL_MS / 1000} s per seat. Wake on events instead of polling.`);
 				}
 				lastInbox = at;
+				lastInboxToolCallId = typeof id === "string" && id !== "" ? id : null;
 				return undefined;
 			}
 			if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
