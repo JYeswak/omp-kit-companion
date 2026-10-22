@@ -68,7 +68,18 @@ export async function superviseScratchJob(argv: readonly string[], env: NodeJS.P
 	return promise;
 }
 
-export interface ServiceJobDef { name: string; label: string; kind: "watch" | "interval" | "daemon"; intervalSeconds: number; runAtLoad?: boolean }
+/** An operator-configured command a job runs directly (never a constant path in the kit). */
+export interface ServiceProgram { argv: string[]; cwd: string }
+/**
+ * `restart: "always"` relaunches a daemon even after a clean exit (launchd KeepAlive true,
+ * systemd Restart=always); the default daemon restarts only on failure.
+ * `commandConfigKey` names the fleet-watch.json key holding `{argv, cwd}`; such a job
+ * renders that argv as its program and is UNCONFIGURED while the key is absent.
+ */
+export interface ServiceJobDef {
+	name: string; label: string; kind: "watch" | "interval" | "daemon"; intervalSeconds: number; runAtLoad?: boolean;
+	restart?: "always"; commandConfigKey?: string; program?: ServiceProgram;
+}
 export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"omp-watch": { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 },
 	"scratch-reaper": { name: "scratch-reaper", label: "com.omp-kit.scratch-reaper", kind: "interval", intervalSeconds: 21600, runAtLoad: false },
@@ -84,7 +95,83 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// kind only; the serve exec and heartbeat land in .18.2, which extends
 	// this entry rather than duplicating it.
 	"cc": { name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0 },
+	// SENTINELLIVE1 (ompkit-b4zip): the fleet loop sentinel, supervised so it outlives the seat
+	// that launched it. Its command is operator data (fleet-watch.json `loopSentinel`).
+	"loop-sentinel": { name: "loop-sentinel", label: "com.omp-kit.loop-sentinel", kind: "daemon", intervalSeconds: 0, restart: "always", commandConfigKey: "loopSentinel" },
 };
+
+export function fleetWatchConfigPath(home: string): string {
+	return process.env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
+}
+
+export type OperatorCommand =
+	| { status: "CONFIGURED"; program: ServiceProgram; configPath: string }
+	| { status: "UNCONFIGURED" | "INVALID"; reason: string; configPath: string };
+
+const MAX_OPERATOR_ARGV = 64;
+
+function cleanArg(value: unknown): value is string {
+	return typeof value === "string" && value !== "" && !/[\0\r\n]/.test(value);
+}
+
+/**
+ * Read a job's command from operator data: `{"<key>": {"argv": ["/abs/bin", ...], "cwd": "/abs/dir"}}`
+ * in fleet-watch.json. An absent file or key is UNCONFIGURED; anything present but unusable is
+ * INVALID with the reason. argv[0] must be absolute (launchd does not search PATH for it); cwd
+ * defaults to HOME. Never throws.
+ */
+export function resolveOperatorCommand(home: string, key: string, configPath = fleetWatchConfigPath(home)): OperatorCommand {
+	let text: string;
+	try {
+		text = readFileSync(configPath, "utf8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return code === "ENOENT"
+			? { status: "UNCONFIGURED", reason: `${configPath} does not exist`, configPath }
+			: { status: "INVALID", reason: `${configPath} is unreadable (${code ?? "error"})`, configPath };
+	}
+	let config: unknown;
+	try {
+		config = JSON.parse(text);
+	} catch {
+		return { status: "INVALID", reason: `${configPath} is not valid JSON`, configPath };
+	}
+	if (typeof config !== "object" || config === null || Array.isArray(config)) {
+		return { status: "INVALID", reason: `${configPath} is not a JSON object`, configPath };
+	}
+	const entry = (config as Record<string, unknown>)[key];
+	if (entry === undefined) return { status: "UNCONFIGURED", reason: `${configPath} has no ${key} key`, configPath };
+	if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+		return { status: "INVALID", reason: `${key} must be an object {argv, cwd}`, configPath };
+	}
+	const { argv, cwd } = entry as Record<string, unknown>;
+	if (!Array.isArray(argv) || argv.length === 0 || argv.length > MAX_OPERATOR_ARGV || !argv.every(cleanArg)) {
+		return { status: "INVALID", reason: `${key}.argv must be 1-${MAX_OPERATOR_ARGV} non-empty single-line strings`, configPath };
+	}
+	if (!isAbsolute(argv[0])) return { status: "INVALID", reason: `${key}.argv[0] must be an absolute path`, configPath };
+	if (cwd !== undefined && (!cleanArg(cwd) || !isAbsolute(cwd))) {
+		return { status: "INVALID", reason: `${key}.cwd must be an absolute path`, configPath };
+	}
+	return { status: "CONFIGURED", program: { argv: [...argv], cwd: typeof cwd === "string" ? cwd : home }, configPath };
+}
+
+/** Named refusal/status code prefix for a configured job: loop-sentinel -> LOOP_SENTINEL. */
+export function jobCodePrefix(name: string): string {
+	return name.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+}
+
+export type DaemonLiveness = "LIVE" | "DEAD" | "UNKNOWN";
+
+/**
+ * Liveness of a supervised daemon from one native status read. LIVE needs the job loaded with a
+ * running pid; loaded without a pid (spawn scheduled, crash loop), or a label launchd reports as
+ * not found, is DEAD; any other unanswered query is UNKNOWN, never DEAD.
+ */
+export function daemonLiveness(read: { loaded: boolean | null; pid: number | null; query_error?: string | null }): DaemonLiveness {
+	if (read.query_error === "LAUNCHCTL_NOT_FOUND_LABEL") return "DEAD";
+	if (read.loaded === null) return "UNKNOWN";
+	return read.loaded && read.pid !== null && read.pid > 0 ? "LIVE" : "DEAD";
+}
 
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
 
@@ -398,7 +485,16 @@ export function ciPollerEnvironment(job: ServiceJobDef): [string, string][] {
 
 export interface RenderedPlist { label: string; text: string; launcher: string; watchPath: string | null }
 
+/** The configured program of an operator-configured job; rendering one without its config is a caller bug. */
+function configuredProgram(job: ServiceJobDef): ServiceProgram | null {
+	if (job.commandConfigKey === undefined) return null;
+	if (job.program === undefined) throw new Error(`${jobCodePrefix(job.name)}_UNCONFIGURED: ${job.name} has no ${job.commandConfigKey} command to render`);
+	return job.program;
+}
+
 export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedPlist {
+	const program = configuredProgram(job);
+	const programArguments = program?.argv ?? [launcher, "service", "run", job.name];
 	const lines = [
 		'<?xml version="1.0" encoding="UTF-8"?>',
 		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -408,10 +504,7 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		`\t<string>${xml(job.label)}</string>`,
 		"\t<key>ProgramArguments</key>",
 		"\t<array>",
-		`\t\t<string>${xml(launcher)}</string>`,
-		"\t\t<string>service</string>",
-		"\t\t<string>run</string>",
-		`\t\t<string>${xml(job.name)}</string>`,
+		...programArguments.map(argument => `\t\t<string>${xml(argument)}</string>`),
 		"\t</array>",
 		"\t<key>EnvironmentVariables</key>",
 		"\t<dict>",
@@ -435,7 +528,9 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		`\t<string>${xml(join(home, "Library", "Logs", "omp-kit", `${job.name}.out.log`))}</string>`,
 		`\t<key>StandardErrorPath</key>`,
 		`\t<string>${xml(join(home, "Library", "Logs", "omp-kit", `${job.name}.err.log`))}</string>`,
-		...(job.kind === "daemon"
+		...(job.kind === "daemon" && job.restart === "always"
+			? ["\t<key>KeepAlive</key>", "\t<true/>", "\t<key>RunAtLoad</key>", "\t<true/>"]
+			: job.kind === "daemon"
 			? ["\t<key>KeepAlive</key>", "\t<dict>", "\t\t<key>SuccessfulExit</key>", "\t\t<false/>", "\t</dict>", "\t<key>RunAtLoad</key>", "\t<true/>"]
 			: job.kind === "watch" && watchPath
 			? ["\t<key>WatchPaths</key>", "\t<array>", `\t\t<string>${xml(watchPath)}</string>`, "\t</array>", "\t<key>RunAtLoad</key>", "\t<false/>"]
@@ -449,7 +544,7 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		"\t<key>LowPriorityIO</key>",
 		"\t<true/>",
 		`\t<key>WorkingDirectory</key>`,
-		`\t<string>${xml(home)}</string>`,
+		`\t<string>${xml(program?.cwd ?? home)}</string>`,
 		"</dict>",
 		"</plist>",
 		"",
@@ -464,6 +559,8 @@ function systemdQuote(value: string): string {
 }
 
 export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedSystemd {
+	const program = configuredProgram(job);
+	const execStart = program ? program.argv.map(systemdQuote).join(" ") : `${launcher} service run ${job.name}`;
 	const env = [
 		`Environment=HOME=${systemdQuote(home)}`,
 		`Environment=XDG_STATE_HOME=${systemdQuote(stateHome(home))}`,
@@ -483,10 +580,10 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		"[Service]",
 		"Type=simple",
 		"TimeoutStartSec=600",
-		`ExecStart=${launcher} service run ${job.name}`,
+		`ExecStart=${execStart}`,
 		...env,
-		`WorkingDirectory=${home}`,
-		"Restart=on-failure",
+		`WorkingDirectory=${program?.cwd ?? home}`,
+		job.restart === "always" ? "Restart=always" : "Restart=on-failure",
 		"RestartSec=60",
 		"",
 	].join("\n") : [
@@ -496,9 +593,9 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 		"[Service]",
 		"Type=oneshot",
 		"TimeoutStartSec=600",
-		`ExecStart=${launcher} service run ${job.name}`,
+		`ExecStart=${execStart}`,
 		...env,
-		`WorkingDirectory=${home}`,
+		`WorkingDirectory=${program?.cwd ?? home}`,
 		"",
 	].join("\n");
 	if (job.kind === "watch" && watchPath) {
@@ -797,7 +894,7 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 		checks.push({ id: "scope-sanity", status: "PASS", message: "User scope only", remediation: "None." });
 	}
 	// SVC1 contract checks over the installed (or freshly rendered) definition.
-	checks.push(...checkPlistContract(input.job.name, input.installed?.text ?? input.rendered));
+	checks.push(...checkPlistContract(input.job.name, input.installed?.text ?? input.rendered, input.job.restart ?? "on-failure"));
 	return checks;
 }
 export interface LinuxUnitInput {
@@ -854,7 +951,7 @@ export function checkServiceLinux(input: LinuxUnitInput): ServiceCheck[] {
 	}
 	checks.push({ id: "logs", status: "PASS", message: "Output goes to the journal; use omp-kit service logs (journalctl) to inspect", remediation: "None." });
 	// SVC1 contract checks over the installed (or freshly rendered) unit.
-	checks.push(...checkSystemdContract(input.job.name, installed ?? input.renderedService));
+	checks.push(...checkSystemdContract(input.job.name, installed ?? input.renderedService, input.job.restart ?? "on-failure"));
 	return checks;
 }
 export interface SystemdState { enabled: boolean; active: boolean; fragmentPath: string | null }

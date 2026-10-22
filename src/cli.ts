@@ -63,7 +63,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { ccServiceCommand } from "./service.ts";
+import { ccServiceCommand, daemonLiveness, jobCodePrefix, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { defaultBudgetLedgerPath, releaseBudgetEntry } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
@@ -2390,13 +2390,28 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	const linux = platform === "linux";
 	const scoped: Record<string, ServiceJobDef> = {};
+	// Operator-configured jobs (loop-sentinel): their command is read once per invocation from
+	// fleet-watch.json; an absent or unusable entry keeps the job UNCONFIGURED, never a crash.
+	const operator: Record<string, Exclude<OperatorCommand, { status: "CONFIGURED" }>> = {};
 	try {
-		for (const name of names) scoped[name] = { ...KNOWN_JOBS[name]!, label: serviceLabel(name) };
+		for (const name of names) {
+			const def = KNOWN_JOBS[name]!;
+			const command = def.commandConfigKey === undefined ? null : resolveOperatorCommand(home, def.commandConfigKey);
+			if (command !== null && command.status !== "CONFIGURED") operator[name] = command;
+			scoped[name] = { ...def, label: serviceLabel(name), ...(command?.status === "CONFIGURED" ? { program: command.program } : {}) };
+		}
 	} catch {
 		return refusal("TEST_LABEL_NAMESPACE_INVALID", `OMP_KIT_TEST_LABEL_NAMESPACE=${process.env.OMP_KIT_TEST_LABEL_NAMESPACE ?? "(unset)"} is not a test namespace`,
 			"Set OMP_KIT_TEST_LABEL_NAMESPACE=com.omp-kit.test.<random> in tests and smoke runs only; production leaves it unset.");
 	}
- const resolveJob = (name: string) => {
+	const unconfiguredRefusal = (name: string): CliResult => {
+		const command = operator[name]!;
+		const def = KNOWN_JOBS[name]!;
+		const code = `${jobCodePrefix(name)}_${command.status === "INVALID" ? "CONFIG_INVALID" : "UNCONFIGURED"}`;
+		return refusal(code, `${name} has no usable command: ${command.reason}`,
+			`Add "${def.commandConfigKey}": {"argv": ["/absolute/program", "arg", ...], "cwd": "/absolute/dir"} to ${command.configPath}; nothing was changed.`);
+	};
+	const resolveJob = (name: string) => {
 		const job = scoped[name]!;
 		const launcher = stableLauncher(home);
 		const watch = job.kind === "watch" ? resolveWatchTarget() : null;
@@ -2422,11 +2437,14 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		const [name] = names;
 		const { job, launcher, watch } = resolveJob(name!);
-		// CC14: daemon jobs are only offered when their fleet adapter
+		// SENTINELLIVE1: an operator-configured job without its command refuses before any
+		// render, backup or bootstrap, so nothing is written.
+		if (operator[job.name] !== undefined) return unconfiguredRefusal(job.name);
+		// CC14: the cc daemon is only offered when its fleet adapter
 		// resolves; otherwise the shipped companion stays inert. This gate
 		// runs before any plan render so `service install cc --plan` refuses
 		// on adapter-absent hosts instead of previewing a dead install.
-		if (job.kind === "daemon") {
+		if (job.name === "cc") {
 			const adapter = resolveFleetAdapter(home, CC_SERVICE_ADAPTER);
 			if (!adapter.ok) {
 				return refusal("FLEET_ADAPTER_ABSENT", `Daemon job ${job.name} needs the fleet checkout holding ${CC_SERVICE_ADAPTER}: ${adapter.reason}`,
@@ -2505,19 +2523,40 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	if (sub === "status") {
 		const rows = names.map(name => {
 			const job = scoped[name!]!;
+			let row: Record<string, unknown> & { loaded: boolean | null; installed: boolean };
+			let liveness: string;
 			if (linux) {
 				const state = systemctlState(job, defaultRunner);
-				return { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active,
+				row = { name, label: job.label, installed: state.fragmentPath !== null, loaded: state.enabled || state.active,
 					query_ok: true, query_error: null,
 					state: state.active ? "active" : state.enabled ? "enabled" : "absent", fragmentPath: state.fragmentPath, lastExit: null, runs: null, last_run_at: readJobFinishedAt(home, name) };
+				liveness = state.active ? "LIVE" : "DEAD";
+			} else {
+				const installed = readInstalledPlist(home, job.label);
+				const print = queryPrint(job.label);
+				const loaded = print.query_ok ? print.loaded : null;
+				row = { name, label: job.label, installed: installed !== null, loaded,
+					query_ok: print.query_ok, query_error: print.query_error,
+					state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit, loaded_plist: print.path, last_run_at: readJobFinishedAt(home, name) };
+				liveness = daemonLiveness({ loaded, pid: print.pid, query_error: print.query_error });
 			}
-			const installed = readInstalledPlist(home, job.label);
-			const print = queryPrint(job.label);
-			return { name, label: job.label, installed: installed !== null, loaded: print.query_ok ? print.loaded : null,
-				query_ok: print.query_ok, query_error: print.query_error,
-				state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit, loaded_plist: print.path, last_run_at: readJobFinishedAt(home, name) };
+			const unconfigured = operator[name];
+			if (unconfigured !== undefined) {
+				row.configured = unconfigured.status;
+				row.config_reason = unconfigured.reason;
+				// Never installed and not running: there is nothing to supervise. A sentinel run outside
+				// the supervisor is invisible here, so liveness is UNKNOWN, not DEAD.
+				if (!row.installed && row.loaded !== true) {
+					row.state = "UNCONFIGURED";
+					liveness = "UNKNOWN";
+				}
+			} else if (job.commandConfigKey !== undefined) {
+				row.configured = "CONFIGURED";
+			}
+			if (job.kind === "daemon") row.liveness = liveness;
+			return row;
 		});
-		const down = rows.some(row => row.loaded === false);
+		const down = rows.some(row => row.loaded === false && row.state !== "UNCONFIGURED");
 		return { code: down ? 1 : 0, data: { overall: down ? "FINDINGS" : "OK", job: names.join(","), status: rows }, verification: "UNVERIFIED" };
 	}
 	if (sub === "doctor") {
@@ -2534,6 +2573,15 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		let fixed = 0;
 		for (const name of names) {
 			const job = scoped[name!]!;
+			const unconfigured = operator[name!];
+			if (unconfigured !== undefined) {
+				// No command to render or compare; --fix never installs an unconfigured job.
+				const check: ServiceCheck = { id: "configured", status: "WARN",
+					message: `${name} is ${unconfigured.status}: ${unconfigured.reason}`,
+					remediation: `Add "${job.commandConfigKey}": {"argv": [...], "cwd": "..."} to ${unconfigured.configPath}, then run omp-kit service install ${name} --apply --yes.` };
+				allChecks.push({ ...check, job: name });
+				continue;
+			}
 			const launcher = stableLauncher(home);
 			const watch = job.kind === "watch" ? resolveWatchTarget() : null;
 			const checks = linux
@@ -2588,6 +2636,13 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		const job = scoped[name!]!;
 		const root = receiptStateRoot();
 		const jobsDir = root ? join(root, "jobs") : join(home, ".local", "state", "omp-kit", "jobs");
+		// SENTINELLIVE1: a configured-command job is executed by launchd/systemd directly from its
+		// rendered argv. A hand `service run` would start a second, unsupervised copy (the failure
+		// this job exists to end), so it is refused; the supervisor is the only runner.
+		if (job.commandConfigKey !== undefined) {
+			return refusal(`${jobCodePrefix(job.name)}_SUPERVISED`, `${job.name} runs only under its service supervisor, from the configured ${job.commandConfigKey} argv`,
+				`Install it with omp-kit service install ${job.name} --apply --yes and read omp-kit service status ${job.name}; no process was started.`);
+		}
 		// SVC1 run gates, in order: off switch, single-flight, load gate. The
 		// time cap applies where the job body runs below. Daemons take a
 		// separate path: one-instance flock for the process lifetime, with
