@@ -65,7 +65,7 @@ tracks every command and doctor scope.
 | Know a rule fires | `omp-kit test` runs every authored case through the installed OMP matcher (G1 registration, G2 payload, G3 prefixes); `--full` adds the isolated live stage (G4) |
 | Change profiles safely | `apply rules\|policy\|extensions\|plugin\|mcp` print a plan; `--apply --yes` writes, records a receipt, and reads each changed key back |
 | Reverse a change | `omp-kit undo RUN_ID --yes` restores one receipt and refuses if a file changed since |
-| See what is broken | `omp-kit doctor --scope NAME` covers 38 components, from OMP identity to leaked secrets |
+| See what is broken | `omp-kit doctor --scope NAME` covers 37 scopes, from OMP identity to leaked secrets |
 | Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-agent-mail-guard`, `kit-guard-optin`, `kit-callback` extensions |
 | Stay current | The `kit-update` service installs each published release and relinks the plugin |
 | Script it | Every command takes `--json` and returns one envelope; `omp-kit schema --json` describes it |
@@ -236,9 +236,9 @@ omp-kit ci status --json                     # cached CI, never calls GitHub
 omp-kit heavy --label cli-tests -- bun test tests/cli   # load-admitted, nice 10
 ```
 
-`send` wraps `ntm`, polls for a marker, retries once, and drops undelivered
-messages into the state root; the exit code reports delivery (`OK`,
-`PENDING_SUBMIT`, `NOT_DELIVERED`), not whether the send call ran. Fleet Watch
+`send` proves delivery (tmux via `ntm`; `tern:<block>` natively, given
+`--window-key EP`) and drops undelivered messages into
+the state root; the exit code is delivery (`OK`, `PENDING_SUBMIT`, `NOT_DELIVERED`). Fleet Watch
 is an opt-in service that nudges idle workers and escalates to the coordinator;
 see [docs/fleet-watch.md](docs/fleet-watch.md).
 
@@ -254,10 +254,11 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-`omp-kit service` manages nine launchd (macOS) or systemd (Linux) jobs, labeled
-`com.omp-kit.<name>`: `omp-watch`, `scratch-reaper` (every 6 h), `kit-update`
-(every 300 s), `fleet-watch` (120 s), `fleet-lessons` (6 h), `load-watch`
-(60 s), `ci-poller` (60 s), `claude-save` (1 h), and `fleet-flush` (60 s).
+`omp-kit service` manages twelve launchd (macOS) or systemd (Linux) jobs, labeled
+`com.omp-kit.<name>`: `omp-watch`, `scratch-reaper` (6 h), `scratch-pressure` (60 s),
+`kit-update` (300 s), `fleet-watch` (120 s), `fleet-lessons` (6 h), `load-watch`
+(60 s), `ci-poller` (60 s), `claude-save` (1 h), `fleet-flush` (60 s), and the
+daemons `cc` and `loop-sentinel`.
 Install previews a diff first and keeps a backup.
 
 ```sh
