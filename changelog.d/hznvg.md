@@ -1,0 +1,3 @@
+### Added
+
+- `extensions/kit-composer-state.ts` (COMPOSERTRUTH1): each fleet seat now publishes whether its own composer holds a draft, from omp's live `ctx.ui.getEditorText()`, to `~/.local/state/omp-kit/composer/<sha1 of the session file>.json` (`empty`, `idle`, `pid`, `at`; never the draft text). It rewrites the record at session start, at each turn boundary and every 5 s, and removes it at shutdown. The fleet's reload and arm gate reads this record before scraping the screen, so seats whose screen ends on a goal banner, an Advisor panel or a login flow are no longer held as if they had a draft (on 2026-10-22 five goal-mode seats with empty composers never reloaded onto 0.2.69 to 0.2.71). Inert unless the repo opted into the fleet, and outside the interactive TUI.
