@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { lessonRecordId, type LessonEntry } from "../../src/lessons.ts";
 import { buildFleetLessonsReport, differentBlockerTrigger, gradeFailureRunIds, lowThroughputTriggers, parseLessonsConfig, readLessonsConfig, runClefShadow, runFleetLessonsOnce, scoreChanges, targetStageSurvey, type ClefClassifierConfig, type FleetHourlySample } from "../../src/fleet-lessons.ts";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
@@ -7,6 +7,24 @@ import { bunCapExec, runWithCap } from "../../src/service-run.ts";
 import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
+const envStack: { key: string; value: string | undefined }[][] = [];
+afterEach(() => {
+	const frame = envStack.pop();
+	if (!frame) return;
+	for (const { key, value } of frame) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+});
+/** Pin process env for the rest of the test; restored by afterEach even on failure. */
+function withEnv(vars: Record<string, string | undefined>) {
+	envStack.push(Object.entries(vars).map(([key, value]) => {
+		const prev = process.env[key];
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+		return { key, value: prev };
+	}));
+}
 function lesson(repo: string, what: string, lessonClass: LessonEntry["class"] = "SCOPE_GAP"): LessonEntry {
 	return {
 		ts: "2026-10-05T11:00:00.000Z", repo, agent: "OliveCedar", pane: "%42", model: "codex-test",
@@ -315,6 +333,18 @@ test("A11 scheduled learning writes a real fleet report instead of accepting mat
 		.replace('mode = "shadow"', 'mode = "off"');
 	writeFileSync(join(kitRoot, "config", "lessons.toml"), fixtureConfig);
 	writeFileSync(join(kitRoot, "config", "planning-score.toml"), readFileSync(join(repoRoot, "config", "planning-score.toml")));
+	// oq1h.7: shipped fleet lists are empty; the fixture fleet arrives via the
+	// operator overlay, exactly like production. Pin XDG so no ambient overlay leaks in.
+	withEnv({ XDG_CONFIG_HOME: join(home, "build-config"), OMP_KIT_FLEET_CONFIG: undefined });
+	const overlayPath = join(home, "build-config", "omp-kit", "fleet.toml");
+	const intakeDir = join(home, "intake");
+	function writeOverlay(intake: string, repoOneTracker = intake) {
+		mkdirSync(join(home, "build-config", "omp-kit"), { recursive: true });
+		writeFileSync(overlayPath, `[fleet]\nintake_tracker = ${JSON.stringify(intake)}\nrepos = [\n` +
+			`  { name = "a11-one", path = ${JSON.stringify(join(home, "a11-one"))}, tracker = ${JSON.stringify(repoOneTracker)} },\n` +
+			`  { name = "a11-two", path = ${JSON.stringify(join(home, "a11-two"))}, tracker = ${JSON.stringify(join(home, "tracker-two"))} },\n]\n`);
+	}
+	writeOverlay(intakeDir);
 	const config = readLessonsConfig(kitRoot, home);
 	for (const repo of config.repos) {
 		mkdirSync(join(repo.path, ".omp"), { recursive: true });
@@ -416,8 +446,7 @@ test("A11 scheduled learning writes a real fleet report instead of accepting mat
 	});
 	expect(initializedOutside.exitCode, initializedOutside.stderr.toString()).toBe(0);
 	const beforeOutside = readFileSync(reportPath, "utf8");
-	writeFileSync(join(kitRoot, "config", "lessons.toml"), fixtureConfig.replace(
-		'intake_tracker = "~/Developer/omp-kit"', "intake_tracker = " + JSON.stringify(unregisteredRoot)));
+	writeOverlay(unregisteredRoot, intakeDir);
 	const refusedOutside = await runService();
 	expect(refusedOutside.code).toBe(1);
 	expect(refusedOutside.envelope.data.receipt.status).toBe("FAILED");
@@ -429,7 +458,7 @@ test("A11 scheduled learning writes a real fleet report instead of accepting mat
 	expect(outsideInventory.exitCode, outsideInventory.stderr.toString()).toBe(0);
 	expect(JSON.parse(outsideInventory.stdout.toString()).issues).toEqual([]);
 	expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "fleet-lessons.lock"))).toBe(false);
-	writeFileSync(join(kitRoot, "config", "lessons.toml"), fixtureConfig);
+	writeOverlay(intakeDir);
 
 	const beforeRefusal = readFileSync(reportPath, "utf8");
 	const refused = await runService({ OMP_KIT_FLEET_LESSONS_CLAIM: "not-a-current-keeper" });
@@ -461,6 +490,7 @@ test("fleet producer refuses an intake tracker outside its registered repositori
 	const scratchRoot = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
 	const home = mkdtempSync(join(scratchRoot, `a11-intake.${process.pid}.`));
+	withEnv({ XDG_CONFIG_HOME: join(home, "xdg"), OMP_KIT_FLEET_CONFIG: undefined });
 	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-intake\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
 	const kitRoot = join(home, "kit");
 	mkdirSync(join(kitRoot, "config"), { recursive: true });
@@ -538,6 +568,7 @@ test.each([
 	const scratchRoot = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
 	const home = mkdtempSync(join(scratchRoot, `a11-inventory.${process.pid}.`));
+	withEnv({ XDG_CONFIG_HOME: join(home, "xdg"), OMP_KIT_FLEET_CONFIG: undefined });
 	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=a11-inventory\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
 	const kitRoot = join(home, "kit");
 	mkdirSync(join(kitRoot, "config"), { recursive: true });
