@@ -1,0 +1,3 @@
+### Fixed
+
+- Claiming a bead through `br update <id> --claim` works again on trackers that never declared a `rework` status. To check that the worker holds no other bead, the guard ran `br list --status in_progress --status rework`. br 0.7.x rejects an undeclared status (`VALIDATION_FAILED`), so on any stock tracker every claim was refused as `CLAIM_REFUSED tool_read_failure`, and three PULLADMIT1 tests failed on `main`. The guard now lists the assignee's open beads without a status filter and keeps the in-progress and rework rows itself. A claim while holding another active bead is still refused.

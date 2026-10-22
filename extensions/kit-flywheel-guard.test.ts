@@ -1200,8 +1200,7 @@ test("REREADSCOPE1: an empty list in A does not clear while a touched tracker B 
 		const { h, cwd, agents } = await touchedB(respond, b);
 		expect(await scopedEdit(h, cwd, agents, { command: "br list --status in_progress --assignee TestWorker --json" }, native("[]"))).toBe(true);
 		const probe = h.execs.find(call => call.args[0] === "list" && call.options?.cwd === b);
-		expect(probe?.args).toEqual(["list", "--status", "in_progress", "--status", "rework", "--assignee", "TestWorker", "--limit", "0",
-			"--json", "--no-auto-import", "--no-auto-flush"]);
+		expect(probe?.args).toEqual(["list", "--assignee", "TestWorker", "--limit", "0", "--json", "--no-auto-import", "--no-auto-flush"]);
 		expect(probe?.options?.timeout).toBe(FLYWHEEL_EXEC_TIMEOUT_MS);
 	}
 	// The guard's read of B failing keeps blocking (fail closed).

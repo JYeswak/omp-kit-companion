@@ -502,10 +502,18 @@ function listAssignees(call: BrInvocation): string[] {
 	return assignees;
 }
 
+/**
+ * The guard's `br list` of every non-closed bead assigned to `name`; callers keep the owned (in_progress/rework) rows
+ * client-side. Naming `--status rework` fails VALIDATION_FAILED on a tracker that never declared that custom status
+ * (stock br 0.7.x), which turned every claim on such a tracker into CLAIM_REFUSED tool_read_failure (ompkit-lxo83).
+ */
+function ownedListArgs(tracker: TrackerRef, name: string): string[] {
+	return ["list", "--assignee", name, "--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", ...(tracker.db ? ["--db", tracker.db] : [])];
+}
+
 /** Owned (in_progress/rework) bead ids assigned to `name` in one tracker, by the guard's own bounded read; null when the read fails. */
 export async function ownedBeadIds(exec: FlywheelExec, tracker: TrackerRef, name: string): Promise<string[] | null> {
-	const args = ["list", ...Object.keys(BEAD_OWNED_STATUSES).flatMap(status => ["--status", status]), "--assignee", name,
-		"--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", ...(tracker.db ? ["--db", tracker.db] : [])];
+	const args = ownedListArgs(tracker, name);
 	let result: FlywheelExecResult;
 	try {
 		result = await exec(tracker.bin, args, { cwd: tracker.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
@@ -534,8 +542,7 @@ export async function ownedBeadIds(exec: FlywheelExec, tracker: TrackerRef, name
 
  /** Owned (in_progress/rework) beads assigned to `name` in one tracker, by the guard's own bounded read; null when the read fails. */
  async function ownedBeadsIn(exec: FlywheelExec, tracker: TrackerRef, name: string, owns: (assignee: string) => boolean): Promise<number | null> {
-	const args = ["list", ...Object.keys(BEAD_OWNED_STATUSES).flatMap(status => ["--status", status]), "--assignee", name,
-		"--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", ...(tracker.db ? ["--db", tracker.db] : [])];
+	const args = ownedListArgs(tracker, name);
 	let result: FlywheelExecResult;
 	try {
 		result = await exec(tracker.bin, args, { cwd: tracker.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });

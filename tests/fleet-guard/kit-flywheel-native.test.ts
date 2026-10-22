@@ -153,13 +153,15 @@ test("PULLADMIT1: concurrent native awards have one winner and name it to the lo
 });
 
 test("PULLADMIT1: ownership whitespace follows native same-holder claim semantics", async () => {
-	const fixture = nativeClaimFixture();
 	for (const { assignee, actor, explicit } of [
 		{ assignee: "Worker ", actor: "Worker", explicit: true },
 		{ assignee: "   ", actor: "Worker", explicit: true },
 		{ assignee: "Worker", actor: "Worker ", explicit: true },
 		{ assignee: "Worker", actor: " Worker ", explicit: false },
 	]) {
+		// One tracker per case: a claim that succeeded in an earlier case would otherwise make Worker the holder of an
+		// active bead, and the one-bead-per-worker rule rightly refuses the next claim (ompkit-lxo83).
+		const fixture = nativeClaimFixture();
 		const id = fixture.create();
 		const updated = fixture.run(["update", id, "--assignee", assignee], "Worker");
 		if (updated.code !== 0) throw new Error(updated.stdout + updated.stderr);
