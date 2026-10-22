@@ -7,10 +7,10 @@ import { authorizeSourceAct } from "./source-authority.ts";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository, type ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
+import { parseReservationRead } from "./fleet-guard/git.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean };
-type Reservation = { agent: unknown; path: string; exclusive: boolean; remaining_seconds: number };
 
 function gitEnvironment(reflogAction?: string): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = {};
@@ -488,28 +488,6 @@ function refused(code: string, message: string, remediation: string): CliResult 
 	return { code: 1, data: { overall: "REFUSED", check: pushCheckResult("UNRUN", "not_started") }, errors: [{ code, message, remediation }], verification: "NOT_RUN" };
 }
 
-function parseReservations(stdout: string): Reservation[] | null {
-	try {
-		const parsed: unknown = JSON.parse(stdout);
-		if (typeof parsed !== "object" || parsed === null || !("my_reservations" in parsed) || !("reservation_read_attestation" in parsed)) return null;
-		const attestation = parsed.reservation_read_attestation;
-		if (typeof attestation !== "object" || attestation === null || !("state" in attestation) || attestation.state !== "current" ||
-			!("database_matches_server" in attestation) || attestation.database_matches_server !== true ||
-			!("storage_root_matches_server" in attestation) || attestation.storage_root_matches_server !== true ||
-			!Array.isArray(parsed.my_reservations)) return null;
-		const rows: Reservation[] = [];
-		for (const row of parsed.my_reservations) {
-			if (typeof row !== "object" || row === null || !("agent" in row) || !("path" in row) || !("exclusive" in row) ||
-				!("remaining_seconds" in row) || typeof row.path !== "string" || typeof row.exclusive !== "boolean" ||
-				typeof row.remaining_seconds !== "number") return null;
-			rows.push({ agent: row.agent, path: row.path, exclusive: row.exclusive, remaining_seconds: row.remaining_seconds });
-		}
-		return rows;
-	} catch {
-		return null;
-	}
-}
-
 type PaneKey = { key: string } | { refusal: CliResult };
 
 // Owner seam (ompkit-kdbz.1.2.1): the tern:<id> mapping below resolves a DECLARED
@@ -558,11 +536,11 @@ function authorizedOwner(repo: string, paths: string[]): { owner: string } | { e
 	if (owner !== claimed) return { error: refused("OWNER_MISMATCH", "AGENT_NAME does not match the live pane owner", "Use the identity registered for this pane; no files were changed.") };
 	const active = spawnSync("am", ["robot", "reservations", "--project", repo, "--agent", owner, "--json"], { cwd: repo, encoding: "utf8", timeout: 10_000, maxBuffer: 2 * 1024 * 1024 });
 	if (active.status !== 0) return { error: refused("RESERVATION_UNAVAILABLE", "Active file reservations could not be read", "Restore the Agent Mail reservation service; no files were changed.") };
-	const rows = parseReservations(String(active.stdout));
-	if (rows === null) return { error: refused("RESERVATION_UNREADABLE", "The current reservation read could not be verified", "Repair the Agent Mail response and retry; no files were changed.") };
+	const read = parseReservationRead(String(active.stdout));
+	if ("why" in read) return { error: refused("RESERVATION_UNREADABLE", `The current reservation read could not be verified: ${read.why}`, "Repair the Agent Mail response and retry; no files were changed.") };
 	const held = new Set<string>();
-	for (const row of rows) {
-		if (row.agent === owner && row.exclusive === true && row.remaining_seconds > 0 && typeof row.path === "string") held.add(row.path);
+	for (const row of read.rows) {
+		if (row.agent === owner && row.exclusive === true && row.remaining_seconds > 0) held.add(row.path);
 	}
 	const missing = paths.filter((path) => !held.has(path));
 	if (missing.length) return { error: refused("RESERVATION_REQUIRED", `The owner lacks an active exclusive reservation for: ${missing.join(", ")}`, "Reserve every exact repository-relative path exclusively before landing.") };

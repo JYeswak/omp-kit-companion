@@ -1,0 +1,4 @@
+### Fixed
+
+- fleet-guard now checks a `git commit --only` against the repository it actually runs in. A bash call that sets its own working directory used to be checked against the session's repository, so on 2026-10-22 a worker's commit in `mcp_agent_mail_rust` was refused 15 times over seven hours: the guard looked for its reservations in `omp-kit`. The same mix-up could also let through a commit whose path was reserved only in the other repository.
+- When an agent holds no reservations in a repository, fleet-guard and `omp-kit land` now say the path is unreserved instead of "reservation lookup failed". Agent Mail leaves out the `my_reservations` field when that list is empty, and both read the missing field as a broken lookup. A lookup that really fails now names the cause: `am` not found, no answer within 10 seconds, the exit code with the first line of its error output, or a read that is not current.

@@ -574,8 +574,9 @@ function analyzeCommit(words: readonly string[]): CommitScope | null {
 
 const ONLY_IDENTITY_REASON =
 	"fleet-guard history: git commit --only needs an identified caller with exclusive reservations; set AGENT_NAME and reserve every named path first; no files were changed.";
-const ONLY_UNAVAILABLE_REASON =
-	"fleet-guard history: the reservation lookup for git commit --only failed; restore Agent Mail reservation reads before landing; no files were changed.";
+function onlyUnavailableReason(why: string): string {
+	return `fleet-guard history: the reservation lookup for git commit --only failed: ${why}; restore Agent Mail reservation reads before landing; no files were changed.`;
+}
 const ONLY_FOREIGN_REASON =
 	"fleet-guard history: git commit --only names a path outside the repository; no files were changed.";
 const ONLY_UNCOVERED_REASON =
@@ -585,37 +586,66 @@ interface ReservationHold {
 	pattern: string;
 }
 
-function readReservationHolds(repoRoot: string, agent: string): ReservationHold[] | null {
-	let output: string;
-	try {
-		const run = spawnSync("am", ["robot", "reservations", "--project", repoRoot, "--agent", agent, "--json"], { encoding: "utf8", timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
-		if (run.status !== 0) return null;
-		output = String(run.stdout);
-	} catch {
-		return null;
-	}
+export interface AttestedReservation {
+	agent: unknown;
+	path: string;
+	exclusive: boolean;
+	remaining_seconds: number;
+}
+
+/**
+ * The one parser of `am robot reservations --json`, for fleet-guard admissions and `omp-kit land`. Only an
+ * attested-current read yields rows. am omits `my_reservations` when the agent holds nothing in that project
+ * (am 0.3.36, measured 2026-10-22), so a current read without the key is zero holds, never a failed read: that
+ * case used to refuse as "lookup unavailable" and sent workers to repair a healthy Agent Mail (ompkit-rz5.158).
+ * Every failure names its cause.
+ */
+export function parseReservationRead(stdout: string): { rows: AttestedReservation[] } | { why: string } {
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(output);
+		parsed = JSON.parse(stdout);
 	} catch {
-		return null;
+		return { why: "am output is not JSON" };
 	}
-	if (!parsed || typeof parsed !== "object") return null;
+	if (!parsed || typeof parsed !== "object") return { why: "am output is not a JSON object" };
 	const record = parsed as Record<string, unknown>;
 	const attestation = record.reservation_read_attestation;
-	if (!attestation || typeof attestation !== "object") return null;
+	if (!attestation || typeof attestation !== "object") return { why: "am output has no reservation_read_attestation" };
 	const attested = attestation as Record<string, unknown>;
-	if (attested.state !== "current" || attested.database_matches_server !== true || attested.storage_root_matches_server !== true) return null;
-	const rows = record.my_reservations;
-	if (!Array.isArray(rows)) return null;
-	const holds: ReservationHold[] = [];
-	for (const row of rows) {
-		if (!row || typeof row !== "object") return null;
-		const entry = row as Record<string, unknown>;
-		if (entry.agent !== agent || entry.exclusive !== true || typeof entry.remaining_seconds !== "number" || entry.remaining_seconds <= 0 || typeof entry.path !== "string" || !entry.path) return null;
-		holds.push({ pattern: entry.path });
+	if (attested.state !== "current" || attested.database_matches_server !== true || attested.storage_root_matches_server !== true) {
+		return { why: `the read is not attested current (state=${String(attested.state)}, database_matches_server=${String(attested.database_matches_server)}, storage_root_matches_server=${String(attested.storage_root_matches_server)})` };
 	}
-	return holds;
+	if (!("my_reservations" in record)) return { rows: [] };
+	const rows = record.my_reservations;
+	if (!Array.isArray(rows)) return { why: "my_reservations is not a list" };
+	const out: AttestedReservation[] = [];
+	for (const row of rows) {
+		if (!row || typeof row !== "object") return { why: "a my_reservations row is not an object" };
+		const entry = row as Record<string, unknown>;
+		if (!("agent" in entry) || typeof entry.path !== "string" || !entry.path || typeof entry.exclusive !== "boolean" || typeof entry.remaining_seconds !== "number") {
+			return { why: "a my_reservations row lacks agent, path, exclusive or remaining_seconds" };
+		}
+		out.push({ agent: entry.agent, path: entry.path, exclusive: entry.exclusive, remaining_seconds: entry.remaining_seconds });
+	}
+	return { rows: out };
+}
+
+function firstLine(text: unknown): string {
+	const line = String(text ?? "").trim().split("\n")[0]?.trim() ?? "";
+	return line ? `: ${line.slice(0, 200)}` : "";
+}
+
+/** The caller's live exclusive holds; a row that is shared, expired or another agent's covers nothing. */
+function readReservationHolds(repoRoot: string, agent: string): { holds: ReservationHold[] } | { why: string } {
+	const run = spawnSync("am", ["robot", "reservations", "--project", repoRoot, "--agent", agent, "--json"], { encoding: "utf8", timeout: 10_000, maxBuffer: 4 * 1024 * 1024 });
+	if (run.error) {
+		const code = (run.error as NodeJS.ErrnoException).code;
+		return { why: code === "ETIMEDOUT" ? "am did not answer within 10 s" : code === "ENOENT" ? "am is not on PATH" : `am could not run (${code ?? run.error.message})` };
+	}
+	if (run.status !== 0) return { why: `am exited ${run.status === null ? `on signal ${run.signal}` : run.status}${firstLine(run.stderr)}` };
+	const read = parseReservationRead(String(run.stdout));
+	if ("why" in read) return read;
+	return { holds: read.rows.filter((row) => row.agent === agent && row.exclusive && row.remaining_seconds > 0).map((row) => ({ pattern: row.path })) };
 }
 
 // Index just past the `]` closing a fnmatch class opened at `open`; -1 when `[` is a literal (no closing `]`).
@@ -680,19 +710,19 @@ export function holdCovers(pattern: string, path: string): boolean {
 
 export type ReservationGaps =
 	| { kind: "identity" }
-	| { kind: "unavailable"; agent: string }
+	| { kind: "unavailable"; agent: string; why: string }
 	| { kind: "checked"; agent: string; uncovered: string[] };
 
 /**
  * The one reservation lookup for fleet-guard admissions (`git commit --only`, write ownership): the caller's
  * AGENT_NAME and its live exclusive holds from an attested-current `am robot reservations` read. A failed or
- * unattested read is `unavailable`, never an empty hold list.
+ * unattested read is `unavailable` with its named cause, never an empty hold list.
  */
 export function reservationGaps(root: string, paths: readonly string[], agent = asString(process.env.AGENT_NAME)): ReservationGaps {
 	if (!agent) return { kind: "identity" };
-	const holds = readReservationHolds(root, agent);
-	if (!holds) return { kind: "unavailable", agent };
-	return { kind: "checked", agent, uncovered: paths.filter((path) => !holds.some((hold) => holdCovers(hold.pattern, path))) };
+	const read = readReservationHolds(root, agent);
+	if ("why" in read) return { kind: "unavailable", agent, why: read.why };
+	return { kind: "checked", agent, uncovered: paths.filter((path) => !read.holds.some((hold) => holdCovers(hold.pattern, path))) };
 }
 
 function relativeRepoPath(root: string, base: string, value: string): string | null {
@@ -706,7 +736,7 @@ function checkOnlyCoverage(paths: string[], root: string, base: string): FleetGu
 	const relativePaths = paths.map((value) => relativeRepoPath(root, base, value));
 	const gaps = reservationGaps(root, relativePaths.filter((path): path is string => path !== null));
 	if (gaps.kind === "identity") return { block: true, reason: ONLY_IDENTITY_REASON };
-	if (gaps.kind === "unavailable") return { block: true, reason: ONLY_UNAVAILABLE_REASON };
+	if (gaps.kind === "unavailable") return { block: true, reason: onlyUnavailableReason(gaps.why) };
 	if (relativePaths.includes(null)) return { block: true, reason: ONLY_FOREIGN_REASON };
 	if (gaps.uncovered.length > 0) return { block: true, reason: ONLY_UNCOVERED_REASON };
 	return undefined;
@@ -767,6 +797,16 @@ function branchesOptedOut(root: string): boolean {
 	}
 }
 
+/** The bash call's own working directory (the `cwd` beside `command`), when it names one. */
+function eventWorkingDirectory(event: FleetGuardEvent): string | undefined {
+	for (const holder of [event.arguments, event.input, event.params]) {
+		if (!holder || typeof holder !== "object") continue;
+		const value = asString((holder as Record<string, unknown>).cwd);
+		if (value) return value;
+	}
+	return undefined;
+}
+
 export function check(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
 	const command = commandFromEvent(event);
 	if (!command) return undefined;
@@ -774,10 +814,16 @@ export function check(event: FleetGuardEvent, context: FleetGuardContext): Fleet
 	if ("refusal" in inspection) return { block: true, reason: inspection.refusal };
 	const bypass = bypassVariable(inspection);
 	if (bypass) return { block: true, reason: bypassReason(bypass) };
+	const session = context.cwd ?? process.cwd();
+	// ompkit-rz5.158: a call that names its own cwd runs there, so its commit is judged in that repository, never
+	// the session's. 2026-10-22 05:51-12:40Z: CopperTrout's commits in mcp_agent_mail_rust were judged against
+	// omp-kit's reservations (refused 15 times); the same mix-up could admit a commit covered only in the other repo.
+	const callCwd = eventWorkingDirectory(event);
+	const callBase = callCwd ? resolve(session, callCwd) : undefined;
 	for (const { words: effective } of inspection.commands) {
 		if (commandName(effective[0]!) !== "git") continue;
 		const commandCwd = optionValue(effective, "-C");
-		const pathBase = commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd();
+		const pathBase = commandCwd ? resolve(callBase ?? session, commandCwd) : callBase ?? context.repoRoot ?? context.projectRoot ?? session;
 		const root = repositoryRoot(pathBase);
 		if (!root) continue;
 		if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };

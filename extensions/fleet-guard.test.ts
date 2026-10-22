@@ -220,13 +220,18 @@ test("canonical edits follow the caller's attested reservation read; a failed re
 	writeFileSync(target, "x\n");
 	const bin = join(dir, "bin");
 	mkdirSync(bin);
-	writeFileSync(join(bin, "am"), "#!/bin/sh\nif [ \"$AM_FIXTURE_MODE\" = fail ]; then exit 1; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n", { mode: 0o755 });
+	writeFileSync(join(bin, "am"), "#!/bin/sh\nif [ \"$AM_FIXTURE_MODE\" = fail ]; then echo 'database is locked' >&2; exit 1; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n", { mode: 0o755 });
 	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_RESPONSE: process.env.AM_FIXTURE_RESPONSE };
 	const answer = (mode: "ok" | "fail", ...paths: string[]): void => {
 		process.env.AM_FIXTURE_MODE = mode;
 		process.env.AM_FIXTURE_RESPONSE = JSON.stringify({
 			reservation_read_attestation: { state: "current", database_matches_server: true, storage_root_matches_server: true },
 			my_reservations: paths.map(path => ({ agent: "tester", path, exclusive: true, remaining_seconds: 600 })) });
+	};
+	const current = { state: "current", database_matches_server: true, storage_root_matches_server: true };
+	const raw = (response: Record<string, unknown>): void => {
+		process.env.AM_FIXTURE_MODE = "ok";
+		process.env.AM_FIXTURE_RESPONSE = JSON.stringify(response);
 	};
 	process.env.PATH = `${bin}:${saved.PATH ?? ""}`;
 	process.env.AGENT_NAME = "tester";
@@ -239,7 +244,25 @@ test("canonical edits follow the caller's attested reservation read; a failed re
 		answer("ok");
 		expect((await handleToolCall(event, context))?.reason).toContain("WRITE_OWN_UNRESERVED");
 		answer("fail", "tracked.md");
-		expect((await handleToolCall(event, context))?.reason).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
+		const failed = (await handleToolCall(event, context))?.reason ?? "";
+		expect(failed).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
+		expect(failed).toContain("am exited 1: database is locked");
+		// ompkit-rz5.158: am omits my_reservations when the agent holds nothing in the project. A current read without
+		// the key is zero holds (reserve it first), never a failed lookup (2026-10-22: RusticPine sent to repair a healthy Agent Mail).
+		raw({ reservation_read_attestation: current, all_active: [] });
+		const none = (await handleToolCall(event, context))?.reason ?? "";
+		expect(none).toContain("WRITE_OWN_UNRESERVED");
+		expect(none).not.toContain("LOOKUP_UNAVAILABLE");
+		// A shared or expired own row covers nothing: refused as unreserved, not as a failed read.
+		raw({ reservation_read_attestation: current, my_reservations: [
+			{ agent: "tester", path: "tracked.md", exclusive: false, remaining_seconds: 600 },
+			{ agent: "tester", path: "tracked.md", exclusive: true, remaining_seconds: 0 }] });
+		expect((await handleToolCall(event, context))?.reason).toContain("WRITE_OWN_UNRESERVED");
+		// Planted: a stale read still fails closed, and the refusal names the attestation it saw.
+		raw({ reservation_read_attestation: { ...current, state: "stale" }, my_reservations: [{ agent: "tester", path: "tracked.md", exclusive: true, remaining_seconds: 600 }] });
+		const stale = (await handleToolCall(event, context))?.reason ?? "";
+		expect(stale).toContain("WRITE_OWN_LOOKUP_UNAVAILABLE");
+		expect(stale).toContain("state=stale");
 	} finally {
 		for (const [key, value] of Object.entries(saved)) {
 			if (value === undefined) delete process.env[key];

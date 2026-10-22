@@ -313,7 +313,7 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 			return refuse("WRITE_OWN_NO_IDENTITY", `writing ${first.candidate.spelled} (${shown(first)} in the canonical checkout ${root}) needs an identified caller holding an exclusive reservation; set AGENT_NAME to your Agent Mail identity and reserve it: \`am file_reservations reserve ${quote(root)} <AGENT_NAME> ${quote(shown(first))} --exclusive --reason <bead>\`, ${EXPORT_ROUTE}`);
 		}
 		if (gaps.kind === "unavailable") {
-			return refuse("WRITE_OWN_LOOKUP_UNAVAILABLE", `the reservation lookup \`am robot reservations --project ${quote(root)} --agent ${quote(gaps.agent)} --json\` failed or was not attested current, so ${shown(first)} in the canonical checkout ${root} cannot be proven reserved; restore Agent Mail reservation reads before writing`);
+			return refuse("WRITE_OWN_LOOKUP_UNAVAILABLE", `the reservation lookup \`am robot reservations --project ${quote(root)} --agent ${quote(gaps.agent)} --json\` failed: ${gaps.why}; so ${shown(first)} in the canonical checkout ${root} cannot be proven reserved; restore Agent Mail reservation reads before writing`);
 		}
 		const missing = judged.find((entry) => gaps.uncovered.includes(entry.probe));
 		if (missing) {

@@ -44,7 +44,9 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const fixtureBin = join(scratch, "bin");
 mkdirSync(fixtureBin, { recursive: true });
-writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then exit 1; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
+// AM_FIXTURE_PROJECT: answer holds only for that --project; any other project gets a current read with no
+// my_reservations key, which is how am answers for an agent holding nothing there (am 0.3.36).
+writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then exit 1; fi\nif [ -n \"$AM_FIXTURE_PROJECT\" ] && [ \"$4\" != \"$AM_FIXTURE_PROJECT\" ]; then printf '%s' '{\"reservation_read_attestation\":{\"state\":\"current\",\"database_matches_server\":true,\"storage_root_matches_server\":true},\"all_active\":[]}'; exit 0; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
 chmodSync(join(fixtureBin, "am"), 0o755);
 function withOnlyFixture(response: unknown, mode: string, agent: string | undefined, run: () => void): void {
 	const savedPath = process.env.PATH;
@@ -187,6 +189,31 @@ describe("fleet guard main-only git checks", () => {
 		});
 		expect(snapshotTree(repo)).toEqual(before);
 		expect(gitState()).toBe(gitBefore);
+	});
+
+	test("ompkit-rz5.158: a call's own cwd picks the repository its commit is judged in", () => {
+		const other = join(scratch, "other");
+		mkdirSync(other, { recursive: true });
+		execSync("git init -b main", { cwd: other, env: gitEnv });
+		const callIn = (cwd: string) => ({ toolName: "bash", input: { command: "git commit --only -m m -- some/path", cwd } });
+		const saved = process.env.AM_FIXTURE_PROJECT;
+		try {
+			withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
+				// Holds live in the repository the call runs in: admitted, by absolute or session-relative cwd.
+				process.env.AM_FIXTURE_PROJECT = other;
+				expect(check(callIn(other), context)).toBeUndefined();
+				expect(check(callIn("../other"), context)).toBeUndefined();
+				// Planted: holds live only in the session's repository; the commit runs in the other one and is refused
+				// as unreserved there (it was judged against the session's holds before, and admitted).
+				process.env.AM_FIXTURE_PROJECT = repo;
+				const verdict = check(callIn(other), context);
+				expect(verdict?.block).toBe(true);
+				expect(verdict?.reason).toContain("without an active exclusive reservation");
+			});
+		} finally {
+			if (saved === undefined) delete process.env.AM_FIXTURE_PROJECT;
+			else process.env.AM_FIXTURE_PROJECT = saved;
+		}
 	});
 
 	test("redirections are not pathspecs: a redirected --only commit of reserved paths is admitted (ompkit-xa5s.27)", () => {
