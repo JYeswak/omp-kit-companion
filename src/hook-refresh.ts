@@ -38,6 +38,8 @@ export const HOOK_MEMBER_PAIRS: ReadonlyArray<readonly [string, string]> = [
 	["hooks.d/pre-commit/45-omp-kit-staged-imports", "scripts/check-staged-imports.sh"],
 	["hooks.d/pre-commit/check-commit-imports.sh", "scripts/check-commit-imports.sh"],
 	["hooks.d/commit-msg/46-omp-kit-commit-notes", "scripts/check-commit-notes.sh"],
+	["hooks.d/commit-msg/release-notes.ts", "scripts/release-notes.ts"],
+	["hooks.d/commit-msg/limit-process-tree.sh", "scripts/limit-process-tree.sh"],
 	["hooks.d/pre-commit/47-omp-kit-staged-fragments", "scripts/check-staged-fragments.sh"],
 	["hooks.d/commit-msg/49-omp-kit-stale-worktree", "scripts/check-stale-worktree.sh"],
 	["hooks.d/pre-commit/48-omp-kit-staged-regexploit", "scripts/check-staged-regexploit.sh"],

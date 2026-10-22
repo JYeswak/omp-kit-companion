@@ -12,7 +12,8 @@ type Options =
 	| { mode: "fold"; write: boolean }
 	| { mode: "promote"; version: string; date: string; write: boolean }
 	| { mode: "source"; baseTag: string; head: string; version: string; output: string }
-	| { mode: "notes"; version: string; floor?: string; ref?: string; output?: string };
+	| { mode: "notes"; version: string; floor?: string; ref?: string; output?: string }
+	| { mode: "fragment-for"; bead?: string; message?: string; base?: string };
 type Fragment = { path: string; content: string; pr?: string };
 type UnreleasedLine = { lineNumber: number; text: string; pr?: string };
 type UnreleasedSection = {
@@ -32,6 +33,12 @@ type ReleaseHistory = {
 type DirectCommitCoverage =
 	| { hash: string; bead: string; fragment: Fragment }
 	| { hash: string; noChangelogReason: string };
+/** One direct commit judged by the notes rule (release check/source and the commit-msg member). */
+type CommitVerdict =
+	| { verdict: "exempt" }
+	| { verdict: "waived"; reason: string }
+	| { verdict: "covered"; bead: string; fragment: Fragment }
+	| { verdict: "refused"; reason: string };
 type Git = (args: string[]) => string;
 /** One changelog entry: a `- ` line plus its indented continuation lines. */
 type Entry = string[];
@@ -44,6 +51,13 @@ const VERSION_HEADING = /^## \[?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))
 const CATEGORY_HEADING = /^### (\S.*?)[ \t]*$/;
 const FRAGMENT_NAME = /^[a-z0-9]+(?:[.-][a-z0-9]+)*\.md$/;
 const FRAGMENT_PATH = /^changelog\.d\/[a-z0-9]+(?:[.-][a-z0-9]+)*\.md$/;
+const SHIPPED_PATH = /^(?:src|rules|scripts|extensions|installer)\//;
+const STABLE_TAG = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+const BEAD_SLUG = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+/** `git commit --verbose` appends the diff below this line; git drops it from the message. */
+const SCISSORS = "# ------------------------ >8 ------------------------";
+/** The commit-msg member prints this refusal; bound it (git error text can be long). */
+const FRAGMENT_FOR_MESSAGE_BYTES = 4096;
 const POINTER = "<!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->";
 
 /** A refusal is a verdict, not a crash: exit 4, the release train's fail-closed convention. */
@@ -55,7 +69,9 @@ try {
 	run();
 } catch (error) {
 	const message = error instanceof Error ? error.message : String(error);
-	console.error(`release-notes: ${error instanceof Refusal ? "REFUSED: " : ""}${message}`);
+	const bounded = process.argv[2] === "fragment-for" && message.length > FRAGMENT_FOR_MESSAGE_BYTES
+		? `${message.slice(0, FRAGMENT_FOR_MESSAGE_BYTES)} [truncated]` : message;
+	console.error(`release-notes: ${error instanceof Refusal ? "REFUSED: " : ""}${bounded}`);
 	process.exitCode = error instanceof Refusal ? 4 : 1;
 }
 
@@ -80,6 +96,7 @@ function run(): void {
 	if (options.mode === "promote") return runPromote(root, options);
 	if (options.mode === "notes") return runNotes(root, options, gitRaw);
 	if (options.mode === "source") return runSourceNotes(root, options, git, gitRaw, gitOk);
+	if (options.mode === "fragment-for") return runFragmentFor(options, git, gitRaw, gitOk);
 
 	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseRef}^{commit}`]);
 	const head = git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
@@ -107,7 +124,7 @@ function run(): void {
 }
 
 function parseArguments(args: string[]): Options {
-	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH]";
+	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH] | fragment-for (--bead ID | --message FILE) [--base REF]";
 	const mode = args[0];
 	if (mode === "check") {
 		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--base-ref": "value", "--head": "value" }, usage);
@@ -155,6 +172,18 @@ function parseArguments(args: string[]): Options {
 		if (typeof ref === "string") options.ref = ref;
 		const output = values.get("--output");
 		if (typeof output === "string") options.output = output;
+		return options;
+	}
+	if (mode === "fragment-for") {
+		const values = parseFlags(args.slice(1), { "--bead": "value", "--message": "value", "--base": "value" }, usage);
+		const bead = values.get("--bead");
+		const message = values.get("--message");
+		if ((typeof bead === "string") === (typeof message === "string")) fail(usage);
+		const options: Extract<Options, { mode: "fragment-for" }> = { mode };
+		if (typeof bead === "string") options.bead = bead;
+		if (typeof message === "string") options.message = message;
+		const base = values.get("--base");
+		if (typeof base === "string") options.base = base;
 		return options;
 	}
 	return fail(usage);
@@ -213,27 +242,12 @@ function collectHistory(git: Git, gitRaw: Git, gitOk: (args: string[]) => boolea
 		mergedPrs.push(pr);
 	}
 
-	const changedPaths = git(["diff", "--name-only", "--diff-filter=AMR", base, head, "--", "changelog.d"])
-		.split(/\r?\n/).filter(Boolean);
-	const invalidPath = changedPaths.find(path => !FRAGMENT_PATH.test(path));
-	if (invalidPath) fail(`fragment path must be changelog.d/<bead>.md: ${invalidPath}`);
-	const fragments: Fragment[] = changedPaths.sort().map(path => toFragment(path, git(["show", `${head}:${path}`])));
+	const { fragments, folded } = rangeFragments(git, gitOk, base, base, head, head);
 	const byPr = new Map<string, Fragment>();
 	for (const fragment of fragments) {
 		if (!fragment.pr) continue;
 		if (byPr.has(fragment.pr)) fail(`multiple changelog fragments name PR #${fragment.pr}`);
 		byPr.set(fragment.pr, fragment);
-	}
-	// A fragment added in this range and then folded into CHANGELOG.md (deleted by `fold` or the
-	// release bump commit) still covers its direct commit; read it from just before its deletion.
-	const folded: Fragment[] = [];
-	const deletedPaths = new Set(git(["log", "--diff-filter=D", "--name-only", "--format=", `${base}..${head}`, "--", "changelog.d"])
-		.split(/\r?\n/).filter(Boolean));
-	for (const path of [...deletedPaths].sort()) {
-		if (!FRAGMENT_PATH.test(path) || changedPaths.includes(path)) continue;
-		if (gitOk(["cat-file", "-e", `${base}:${path}`]) || gitOk(["cat-file", "-e", `${head}:${path}`])) continue;
-		const deletion = git(["log", "-1", "--diff-filter=D", "--format=%H", `${base}..${head}`, "--", path]);
-		folded.push(toFragment(path, git(["show", `${deletion}^:${path}`])));
 	}
 
 	const unreleased = readUnreleasedSection(gitRaw(["show", `${head}:CHANGELOG.md`]));
@@ -268,10 +282,7 @@ function collectHistory(git: Git, gitRaw: Git, gitOk: (args: string[]) => boolea
 			fail(`merged PR #${pr} has no changelog.d fragment or tagged line in CHANGELOG.md ## [Unreleased]`);
 	}
 	// Allow cleanup of fragments whose PRs are recorded in the base tag; unknown references still fail.
-	const baseReleasedPrs = new Set<string>();
-	for (const line of baseReleaseSection.lines.slice(baseReleaseSection.unreleasedIndex + 1)) {
-		for (const match of line.matchAll(/\(PR #(\d+)\)/g)) baseReleasedPrs.add(match[1]!);
-	}
+	const baseReleasedPrs = prsReleasedIn(baseReleaseSection);
 
 	for (const fragment of fragments) {
 		if (fragment.pr && !seenPrs.has(fragment.pr) && !baseReleasedPrs.has(fragment.pr))
@@ -308,6 +319,97 @@ function toFragment(path: string, content: string): Fragment {
 	return fragment;
 }
 
+/**
+ * Fragments that can cover a direct commit judged against `base` (a commit, or the empty tree
+ * when no release floor exists): every changelog.d fragment added or modified between base and
+ * `head` (null: the index, the commit being made), plus fragments added after `baseCommit` in
+ * `history` and later folded into CHANGELOG.md. A fragment that merely exists, because it
+ * shipped at the floor, covers nothing (KITLIB-FRAG, ompkit-m21ru).
+ */
+function rangeFragments(
+	git: Git,
+	gitOk: (args: string[]) => boolean,
+	base: string,
+	baseCommit: string | null,
+	head: string | null,
+	history: string | null,
+): { fragments: Fragment[]; folded: Fragment[] } {
+	const changedPaths = git(head === null
+		? ["diff", "--cached", "--name-only", "--diff-filter=AMR", base, "--", "changelog.d"]
+		: ["diff", "--name-only", "--diff-filter=AMR", base, head, "--", "changelog.d"])
+		.split(/\r?\n/).filter(Boolean);
+	const invalidPath = changedPaths.find(path => !FRAGMENT_PATH.test(path));
+	if (invalidPath) fail(`fragment path must be changelog.d/<bead>.md: ${invalidPath}`);
+	// `:path` is the index entry (GIT_INDEX_FILE is respected, so `commit --only` is judged as committed).
+	const at = head ?? "";
+	const fragments = changedPaths.sort().map(path => toFragment(path, git(["show", `${at}:${path}`])));
+	// A fragment added in this range and then folded into CHANGELOG.md (deleted by `fold` or the
+	// release bump commit) still covers its direct commit; read it from just before its deletion.
+	const folded: Fragment[] = [];
+	if (history === null) return { fragments, folded };
+	const range = baseCommit ? `${baseCommit}..${history}` : history;
+	const deletedPaths = new Set(git(["log", "--diff-filter=D", "--name-only", "--format=", range, "--", "changelog.d"])
+		.split(/\r?\n/).filter(Boolean));
+	for (const path of [...deletedPaths].sort()) {
+		if (!FRAGMENT_PATH.test(path) || changedPaths.includes(path)) continue;
+		if (gitOk(["cat-file", "-e", `${base}:${path}`]) || gitOk(["cat-file", "-e", `${at}:${path}`])) continue;
+		const deletion = git(["log", "-1", "--diff-filter=D", "--format=%H", range, "--", path]);
+		folded.push(toFragment(path, git(["show", `${deletion}^:${path}`])));
+	}
+	return { fragments, folded };
+}
+
+/** PRs named anywhere below `## [Unreleased]`: their notes already shipped at that floor. */
+function prsReleasedIn(section: UnreleasedSection): Set<string> {
+	const prs = new Set<string>();
+	for (const line of section.lines.slice(section.unreleasedIndex + 1)) {
+		for (const match of line.matchAll(/\(PR #(\d+)\)/g)) prs.add(match[1]!);
+	}
+	return prs;
+}
+
+/** changelog.d/<slug>.md or changelog.d/<bead>.md among `fragments`; null when the bead id is unusable. */
+function resolveBeadFragment(bead: string, fragments: Fragment[]): { expected: string[]; fragment: Fragment | undefined } | null {
+	const slug = bead.split("-").at(-1)!;
+	if (!BEAD_SLUG.test(slug)) return null;
+	const expected = [`changelog.d/${slug}.md`, `changelog.d/${bead}.md`];
+	return { expected, fragment: fragments.find(candidate => expected.includes(candidate.path)) };
+}
+
+/**
+ * The one notes rule for a direct commit: release check/source apply it to every first-parent
+ * commit, and the commit-msg member (scripts/check-commit-notes.sh, via `fragment-for --message`)
+ * applies it to the commit being made, so the two gates cannot drift (KITLIB-FRAG, ompkit-m21ru).
+ * `shortHash` is absent at commit time, when no fragment can name the commit yet.
+ */
+function judgeDirectCommit(label: string, shortHash: string | undefined, body: string, changedPaths: string[], fragments: Fragment[]): CommitVerdict {
+	const subject = body.split("\n", 1)[0]?.trimEnd() ?? "";
+	const squashPr = subject.match(/\(#(\d+)\)$/)?.[1];
+	if (squashPr && fragments.some(fragment => fragment.pr === squashPr)) return { verdict: "exempt" };
+	if (!changedPaths.some(path => SHIPPED_PATH.test(path))) return { verdict: "exempt" };
+
+	const waivers = [...body.matchAll(/^[ \t]*\[no-changelog\][ \t]*(.*)$/gm)];
+	if (waivers.length > 1) return { verdict: "refused", reason: `${label} has multiple [no-changelog] reasons` };
+	if (waivers.length === 1) {
+		const reason = waivers[0]![1]!.trim();
+		if (!reason) return { verdict: "refused", reason: `${label} has an empty [no-changelog] reason` };
+		return { verdict: "waived", reason };
+	}
+
+	const beads = [...body.matchAll(/^[ \t]*Bead:[ \t]*(\S+)[ \t]*$/gm)].map(match => match[1]!);
+	const referenced = shortHash ? fragments.find(candidate => candidate.content.includes(`(commit ${shortHash})`)) : undefined;
+	if (referenced) return { verdict: "covered", bead: beads[0] ?? "-", fragment: referenced };
+	if (beads.length !== 1) {
+		const naming = shortHash ? `, or a fragment naming (commit ${shortHash})` : "";
+		return { verdict: "refused", reason: `${label} touches shipped paths but must have one Bead: trailer, a [no-changelog] reason${naming}` };
+	}
+	const bead = beads[0]!;
+	const resolved = resolveBeadFragment(bead, fragments);
+	if (!resolved) return { verdict: "refused", reason: `${label} has an invalid Bead: trailer: ${bead}` };
+	if (!resolved.fragment) return { verdict: "refused", reason: `${label} (Bead: ${bead}) has no changelog fragment: ${resolved.expected[0]}` };
+	return { verdict: "covered", bead, fragment: resolved.fragment };
+}
+
 function collectDirectCommitCoverage(
 	git: Git,
 	gitRaw: Git,
@@ -325,56 +427,71 @@ function collectDirectCommitCoverage(
 		const parents = fields[index + 1]!.trim().split(/\s+/).filter(Boolean);
 		const body = fields[index + 2]!;
 		if (!hash || parents.length !== 1) continue;
-		const subject = body.split("\n", 1)[0]?.trimEnd() ?? "";
-		const squashPr = subject.match(/\(#(\d+)\)$/)?.[1];
-		if (squashPr && fragments.some(fragment => fragment.pr === squashPr)) continue;
 		const changedPaths = git([
 			"diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", hash,
 		]).split(/\r?\n/).filter(Boolean);
-		if (!changedPaths.some(path => /^(?:src|rules|scripts|extensions|installer)\//.test(path))) continue;
-
 		const shortHash = hash.slice(0, 7);
-		const waivers = [...body.matchAll(/^[ \t]*\[no-changelog\][ \t]*(.*)$/gm)];
-		if (waivers.length > 1) {
-			errors.push(`direct commit ${shortHash} has multiple [no-changelog] reasons`);
-			continue;
-		}
-		if (waivers.length === 1) {
-			const reason = waivers[0]![1]!.trim();
-			if (!reason) {
-				errors.push(`direct commit ${shortHash} has an empty [no-changelog] reason`);
-				continue;
-			}
-			coverages.push({ hash: shortHash, noChangelogReason: reason });
-			continue;
-		}
-
-		const referenced = fragments.find(candidate => candidate.content.includes(`(commit ${shortHash})`));
-		const beads = [...body.matchAll(/^[ \t]*Bead:[ \t]*(\S+)[ \t]*$/gm)].map(match => match[1]!);
-		if (referenced) {
-			coverages.push({ hash: shortHash, bead: beads[0] ?? "-", fragment: referenced });
-			continue;
-		}
-		if (beads.length !== 1) {
-			errors.push(`direct commit ${shortHash} touches shipped paths but must have one Bead: trailer, a [no-changelog] reason, or a fragment naming (commit ${shortHash})`);
-			continue;
-		}
-		const bead = beads[0]!;
-		const slug = bead.split("-").at(-1)!;
-		if (!/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(slug)) {
-			errors.push(`direct commit ${shortHash} has an invalid Bead: trailer: ${bead}`);
-			continue;
-		}
-		const paths = [`changelog.d/${slug}.md`, `changelog.d/${bead}.md`];
-		const fragment = fragments.find(candidate => paths.includes(candidate.path));
-		if (!fragment) {
-			errors.push(`direct commit ${shortHash} (Bead: ${bead}) has no changelog fragment: ${paths[0]}`);
-			continue;
-		}
-		coverages.push({ hash: shortHash, bead, fragment });
+		const judged = judgeDirectCommit(`direct commit ${shortHash}`, shortHash, body, changedPaths, fragments);
+		if (judged.verdict === "refused") errors.push(judged.reason);
+		else if (judged.verdict === "waived") coverages.push({ hash: shortHash, noChangelogReason: judged.reason });
+		else if (judged.verdict === "covered") coverages.push({ hash: shortHash, bead: judged.bead, fragment: judged.fragment });
 	}
 	if (errors.length) fail(errors.join("\n"));
 	return coverages;
+}
+
+/** The latest stable `vX.Y.Z` tag reachable from `head`: the floor the next release is judged from. */
+function latestReleaseTag(git: Git, head: string): string | undefined {
+	const tags = git(["tag", "--merged", head, "--list", "v*"]).split(/\r?\n/).filter(tag => STABLE_TAG.test(tag));
+	return tags.reduce<string | undefined>((max, tag) => !max || compareVersions(tag.slice(1), max.slice(1)) > 0 ? tag : max, undefined);
+}
+
+/** A commit-msg file as git will record it: no `#` comment lines, nothing below the scissors line. */
+function messageBody(text: string): string {
+	const lines = text.replace(/\r\n/g, "\n").split("\n");
+	const scissors = lines.indexOf(SCISSORS);
+	return (scissors < 0 ? lines : lines.slice(0, scissors)).filter(line => !line.startsWith("#")).join("\n");
+}
+
+/**
+ * `fragment-for`: the release rule for the commit being made. The floor is `--base` or the latest
+ * stable release tag reachable from HEAD; a fragment counts only if the staged tree adds or
+ * modifies it since that floor (or it was added after the floor and folded). `--bead` resolves one
+ * bead; `--message` judges the whole staged commit (shipped paths, waiver, one Bead: trailer).
+ * Prints one JSON verdict; a refusal exits 4.
+ */
+function runFragmentFor(options: Extract<Options, { mode: "fragment-for" }>, git: Git, gitRaw: Git, gitOk: (args: string[]) => boolean): void {
+	const head = gitOk(["rev-parse", "--verify", "-q", "HEAD^{commit}"]) ? git(["rev-parse", "--verify", "HEAD^{commit}"]) : null;
+	const floor = options.base ?? (head ? latestReleaseTag(git, head) : undefined);
+	const baseCommit = floor ? git(["rev-parse", "--verify", "--end-of-options", `${floor}^{commit}`]) : null;
+	if (baseCommit && !(head && gitOk(["merge-base", "--is-ancestor", baseCommit, head]))) fail(`release floor ${floor} is not an ancestor of HEAD`);
+	const base = baseCommit ?? git(["hash-object", "-t", "tree", "/dev/null"]);
+	const range = rangeFragments(git, gitOk, base, baseCommit, null, head);
+	let fragments = [...range.fragments, ...range.folded];
+	if (baseCommit && gitOk(["cat-file", "-e", `${baseCommit}:CHANGELOG.md`])) {
+		const released = prsReleasedIn(readUnreleasedSection(gitRaw(["show", `${baseCommit}:CHANGELOG.md`])));
+		fragments = fragments.filter(fragment => !fragment.pr || !released.has(fragment.pr));
+	}
+	const where = { base: floor ?? null, base_sha: baseCommit };
+	if (options.bead !== undefined) {
+		const resolved = resolveBeadFragment(options.bead, fragments);
+		const reason = !resolved
+			? `invalid bead id: ${options.bead}`
+			: !resolved.fragment ? `Bead: ${options.bead} has no changelog fragment: ${resolved.expected[0]}` : undefined;
+		console.log(JSON.stringify({
+			verdict: reason ? "refused" : "covered", bead: options.bead, ...where,
+			expected: resolved?.expected ?? [], fragment: resolved?.fragment?.path ?? null, ...(reason ? { reason } : {}),
+		}));
+		if (reason) refuse(reason);
+		return;
+	}
+	const body = messageBody(readFileSync(options.message!, "utf8"));
+	const changedPaths = git(["diff", "--cached", "--no-renames", "--name-only"]).split(/\r?\n/).filter(Boolean);
+	const judged = judgeDirectCommit("this commit", undefined, body, changedPaths, fragments);
+	console.log(JSON.stringify(judged.verdict === "covered"
+		? { verdict: judged.verdict, bead: judged.bead, fragment: judged.fragment.path, ...where }
+		: { ...judged, ...where }));
+	if (judged.verdict === "refused") refuse(judged.reason);
 }
 
 function readUnreleasedSection(changelog: string): UnreleasedSection {

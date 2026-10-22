@@ -577,3 +577,97 @@ test("release range refuses competing floor selectors", () => {
 	const ambiguous = release("check", "--base-tag", "v0.2.2", "--base-ref", releaseHead, "--head", "HEAD");
 	expect(ambiguous.exitCode).toBe(1);
 });
+
+// KITLIB-FRAG (ompkit-m21ru): the commit gate asks this resolver, so a commit is judged by the
+// release rule (fragment added or modified since the latest stable release tag), never by mere
+// existence. 00828a5/bcf52aa/33f0c61 passed the old existence check and blocked release 0.2.65.
+function resolveIn(dir: string, ...args: string[]): { exitCode: number | null; stdout: string; stderr: string } {
+	const child = Bun.spawnSync(["sh", join(repo, "scripts", "release-notes.sh"), "fragment-for", ...args], {
+		cwd: dir, stdout: "pipe", stderr: "pipe", env: { ...process.env, TMPDIR: scratch },
+	});
+	return { exitCode: child.exitCode, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
+}
+
+function gitIn(dir: string, ...args: string[]): string {
+	const child = Bun.spawnSync(["git", "-C", dir, "-c", "user.name=Fragment Fixture", "-c", "user.email=fragment@example.invalid",
+		"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], {
+		stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" },
+	});
+	if (child.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${child.stderr.toString()}`);
+	return child.stdout.toString().trim();
+}
+
+test("fragment-for applies the release rule: a fragment shipped at the base tag does not cover a new commit", () => {
+	const dir = changelogFixture("fragment-for", releasedChangelog, { "x1.md": "### Fixed\n\n- Shipped at the tag.\n" });
+	gitIn(dir, "add", "-A");
+	gitIn(dir, "commit", "-q", "-m", "release v0.2.2 [test]");
+	gitIn(dir, "tag", "v0.2.1");
+	gitIn(dir, "tag", "v0.2.2");
+	// Only stable vX.Y.Z tags are release floors: a prerelease or foreign tag at HEAD is ignored.
+	gitIn(dir, "tag", "v9.9.9-rc.1");
+	gitIn(dir, "tag", "x9.9.9");
+
+	const shipped = resolveIn(dir, "--bead", "ompkit-x1");
+	expect(shipped.exitCode, shipped.stderr).toBe(4);
+	const refused = JSON.parse(shipped.stdout);
+	expect(refused).toMatchObject({ verdict: "refused", bead: "ompkit-x1", base: "v0.2.2", fragment: null });
+	expect(refused.expected).toEqual(["changelog.d/x1.md", "changelog.d/ompkit-x1.md"]);
+	expect(shipped.stderr).toContain("release-notes: REFUSED: Bead: ompkit-x1 has no changelog fragment: changelog.d/x1.md");
+
+	writeFileSync(join(dir, "changelog.d", "x1.md"), "### Fixed\n\n- Edited after the tag.\n");
+	const unstaged = resolveIn(dir, "--bead", "ompkit-x1");
+	expect(unstaged.exitCode, "a worktree edit is not part of the commit").toBe(4);
+	gitIn(dir, "add", "changelog.d/x1.md");
+	const staged = resolveIn(dir, "--bead", "ompkit-x1");
+	expect(staged.exitCode, staged.stderr).toBe(0);
+	expect(JSON.parse(staged.stdout)).toMatchObject({ verdict: "covered", fragment: "changelog.d/x1.md", base: "v0.2.2" });
+
+	gitIn(dir, "commit", "-q", "-m", "edit fragment [test]");
+	const committed = resolveIn(dir, "--bead", "ompkit-x1");
+	expect(committed.exitCode, committed.stderr).toBe(0);
+	expect(JSON.parse(committed.stdout)).toMatchObject({ verdict: "covered", fragment: "changelog.d/x1.md" });
+	// An explicit floor at the edit commit makes the same fragment shipped again.
+	const floor = resolveIn(dir, "--bead", "ompkit-x1", "--base", "HEAD");
+	expect(floor.exitCode).toBe(4);
+});
+
+test("fragment-for --message judges the staged commit with the release trailer and waiver rules", () => {
+	const dir = changelogFixture("fragment-for-message", releasedChangelog, { "x2.md": "### Fixed\n\n- Shipped at the tag.\n" });
+	gitIn(dir, "add", "-A");
+	gitIn(dir, "commit", "-q", "-m", "release v0.2.2 [test]");
+	gitIn(dir, "tag", "v0.2.2");
+	const message = join(dir, ".git", "fixture-msg");
+	const judge = (text: string) => { writeFileSync(message, text); return resolveIn(dir, "--message", message); };
+
+	mkdirSync(join(dir, "docs"));
+	writeFileSync(join(dir, "docs", "a.md"), "docs\n");
+	gitIn(dir, "add", "docs/a.md");
+	const docs = judge("docs only [test]\n");
+	expect(docs.exitCode, docs.stderr).toBe(0);
+	expect(JSON.parse(docs.stdout)).toMatchObject({ verdict: "exempt" });
+
+	mkdirSync(join(dir, "src"));
+	writeFileSync(join(dir, "src", "a.ts"), "export {};\n");
+	gitIn(dir, "add", "src/a.ts");
+	const shipped = judge("fix a [test]\n\nBead: ompkit-x2\n# Please enter the commit message\n");
+	expect(shipped.exitCode).toBe(4);
+	expect(shipped.stderr).toContain("this commit (Bead: ompkit-x2) has no changelog fragment: changelog.d/x2.md");
+	const twoBeads = judge("fix a [test]\n\nBead: ompkit-x2\nBead: ompkit-x3\n");
+	expect(twoBeads.exitCode).toBe(4);
+	expect(twoBeads.stderr).toContain("this commit touches shipped paths but must have one Bead: trailer");
+	const emptyWaiver = judge("fix a [test]\n\n[no-changelog]\n");
+	expect(emptyWaiver.exitCode).toBe(4);
+	expect(emptyWaiver.stderr).toContain("this commit has an empty [no-changelog] reason");
+	const waived = judge("fix a [test]\n\n[no-changelog] fixture-only source\n");
+	expect(waived.exitCode, waived.stderr).toBe(0);
+	expect(JSON.parse(waived.stdout)).toMatchObject({ verdict: "waived", reason: "fixture-only source" });
+	// A scissors-cut verbose diff is not part of the message: its context lines never count.
+	const scissors = judge("fix a [test]\n\n[no-changelog] fixture-only source\n# ------------------------ >8 ------------------------\n[no-changelog] diff context\n");
+	expect(scissors.exitCode, scissors.stderr).toBe(0);
+
+	writeFileSync(join(dir, "changelog.d", "x2.md"), "### Fixed\n\n- Edited in this commit.\n");
+	gitIn(dir, "add", "changelog.d/x2.md");
+	const covered = judge("fix a [test]\n\nBead: ompkit-x2\n");
+	expect(covered.exitCode, covered.stderr).toBe(0);
+	expect(JSON.parse(covered.stdout)).toMatchObject({ verdict: "covered", bead: "ompkit-x2", fragment: "changelog.d/x2.md" });
+});

@@ -18,7 +18,7 @@ import {
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 
-/** Fixture kit root with all 18 source members plus one stale-target source. */
+/** Fixture kit root with all 20 source members plus one stale-target source. */
 function fixtureKit(): string {
 	const kit = mkdtempSync(join(tmpdir(), "hookrefresh-kit-"));
 	for (const [, sourceRel] of HOOK_MEMBER_PAIRS) {

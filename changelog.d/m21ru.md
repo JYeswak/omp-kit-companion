@@ -1,0 +1,3 @@
+### Fixed
+
+- The commit-msg notes member (`hooks.d/commit-msg/46-omp-kit-commit-notes`) now asks `release-notes.ts fragment-for` instead of checking that a fragment file exists, so it applies the release rule: a `Bead:` fragment counts only if it was added or modified since the latest stable `vX.Y.Z` tag (staged in this commit or committed after the tag). A fragment that already shipped in the last release no longer lets a commit through that `release-local.sh` then refuses (00828a5, bcf52aa and 33f0c61 blocked 0.2.65). The waiver and single-`Bead:` rules now live only in `release-notes.ts`; the installer copies the resolver and its deadline wrapper beside the member, and the member fails closed after 60 seconds.

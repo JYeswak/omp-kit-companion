@@ -219,6 +219,8 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/45-omp-kit-staged-imports scripts/check-staged-imports.sh" \
 		"hooks.d/pre-commit/check-commit-imports.sh scripts/check-commit-imports.sh" \
 		"hooks.d/commit-msg/46-omp-kit-commit-notes scripts/check-commit-notes.sh" \
+		"hooks.d/commit-msg/release-notes.ts scripts/release-notes.ts" \
+		"hooks.d/commit-msg/limit-process-tree.sh scripts/limit-process-tree.sh" \
 		"hooks.d/pre-commit/47-omp-kit-staged-fragments scripts/check-staged-fragments.sh" \
 		"hooks.d/commit-msg/49-omp-kit-stale-worktree scripts/check-stale-worktree.sh" \
 		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh" \
@@ -488,10 +490,15 @@ install_staged_readme() {
 	printf 'installed staged-readme member: %s\n' "$member"
 }
 
-# install_commit_notes: the commit-msg member applies the push notes gate's
-# trailer+fragment rule to the staged tree; it runs after the bead-id member.
+# install_commit_notes: the commit-msg member asks release-notes.ts (the code
+# the release train runs) whether the staged commit has notes coverage; it runs
+# after the bead-id member. The resolver and its deadline wrapper sit beside
+# the member, non-executable, so the chain runner never runs them arg-less.
 install_commit_notes() {
-	member="$(chain_dir commit-msg)/46-omp-kit-commit-notes"
+	dir=$(chain_dir commit-msg)
+	member="$dir/46-omp-kit-commit-notes"
+	place "$KITROOT/scripts/release-notes.ts" "$dir/release-notes.ts" -x
+	place "$KITROOT/scripts/limit-process-tree.sh" "$dir/limit-process-tree.sh" -x
 	place "$KITROOT/scripts/check-commit-notes.sh" "$member" +x
 	printf 'installed commit-notes member: %s\n' "$member"
 }

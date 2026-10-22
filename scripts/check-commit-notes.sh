@@ -1,46 +1,42 @@
 #!/bin/sh
 # check-commit-notes.sh MSGFILE — commit-msg member (SHIFTLEFT1, ompkit-1wgy).
-# The push notes gate (scripts/check-pushed-notes.sh) refuses a commit that
-# touches shipped paths unless it carries one `Bead: <id>` trailer with a
-# changelog.d/<slug>.md or changelog.d/<id>.md fragment, or one
-# `[no-changelog] <reason>` line. This applies the same rule to the staged
-# tree at commit time (GIT_INDEX_FILE is respected, so `--only` is judged as
-# committed). A fragment naming the commit hash cannot exist yet; that form
-# stays a push-time remedy.
+# The release train and the push notes gate refuse a direct commit that touches
+# shipped paths unless it carries one `[no-changelog] <reason>` line or one
+# `Bead: <id>` trailer whose changelog.d/<slug>.md or changelog.d/<id>.md
+# fragment was added or modified since the last release tag. This member asks
+# the same code (release-notes.ts `fragment-for --message`, KITLIB-FRAG
+# ompkit-m21ru) about the staged tree, so the two gates cannot disagree: a
+# fragment that merely exists because it shipped in the last release covers
+# nothing. GIT_INDEX_FILE is respected, so `--only` is judged as committed. A
+# fragment naming the commit hash cannot exist yet; that form stays a
+# push-time remedy.
+#
+# The installer copies release-notes.ts and limit-process-tree.sh beside this
+# member; in the kit checkout they are its siblings in scripts/. The resolver
+# runs in its own session under a fixed deadline; on expiry the whole group is
+# terminated and reaped, and the commit is refused (fail closed).
 set -u
 msg=${1:?usage: check-commit-notes.sh MSGFILE}
-# Only a repo that keeps changelog fragments runs the pushed-notes gate; elsewhere (jev,
+DEADLINE_SECONDS=60
+# Only a repo that keeps changelog fragments runs the notes gates; elsewhere (jev,
 # localbench, uds, zestroku, cfsios have no changelog.d) this member must never refuse.
 git cat-file -e HEAD:changelog.d 2>/dev/null || exit 0
 
-first=""
-for path in $(git diff --cached --no-renames --name-only); do
-	case "$path" in
-		src/*|rules/*|scripts/*|extensions/*|installer/*) first=$path; break ;;
-	esac
-done
-[ -n "$first" ] || exit 0
-
-body=$(grep -v '^#' "$msg" || true)
-waivers=$(printf '%s\n' "$body" | grep -c -E '^[[:space:]]*\[no-changelog\][[:space:]]*.+[^[:space:]]' || true)
-if [ "$waivers" -gt 1 ]; then
-	echo "commit-notes: REFUSED: this commit has multiple [no-changelog] reasons; the push gate will refuse it" >&2
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+refuse() {
+	printf 'commit-notes: REFUSED: %s; the push gate will refuse it\n' "$1" >&2
 	exit 1
-fi
-[ "$waivers" -eq 0 ] || exit 0
-
-trailer='^[[:space:]]*Bead:[[:space:]]*[^[:space:]]+[[:space:]]*$'
-beads=$(printf '%s\n' "$body" | grep -c -E "$trailer" || true)
-if [ "$beads" -ne 1 ]; then
-	echo "commit-notes: REFUSED: this commit touches shipped paths ($first) but has no single 'Bead: <id>' trailer or '[no-changelog] <reason>' line; the push gate will refuse it" >&2
-	exit 1
-fi
-bead=$(printf '%s\n' "$body" | grep -E "$trailer" | head -n 1 | sed -e 's/^[[:space:]]*Bead:[[:space:]]*//' -e 's/[[:space:]]*$//')
-slug=$(printf '%s' "$bead" | sed 's/.*-//')
-for name in "$slug.md" "$bead.md"; do
-	if git cat-file -e ":changelog.d/$name" 2>/dev/null || git cat-file -e "HEAD:changelog.d/$name" 2>/dev/null; then
-		exit 0
-	fi
+}
+for helper in release-notes.ts limit-process-tree.sh; do
+	[ -f "$here/$helper" ] || refuse "installed resolver $helper missing beside $(basename -- "$0"); rerun scripts/install-commit-msg-bead.sh"
 done
-echo "commit-notes: REFUSED: Bead: $bead has no changelog fragment staged or committed: changelog.d/$slug.md; the push gate will refuse it" >&2
-exit 1
+command -v bun >/dev/null 2>&1 || refuse "bun is unavailable, so release-notes.ts cannot judge this commit"
+
+# The verdict JSON (stdout) is not needed here; the refusal reason is on stderr,
+# which the resolver bounds to one short message.
+if out=$(sh "$here/limit-process-tree.sh" "$DEADLINE_SECONDS" \
+	bun run --no-env-file --config=/dev/null "$here/release-notes.ts" fragment-for --message "$msg" \
+	</dev/null 2>&1 >/dev/null); then
+	exit 0
+fi
+refuse "$(printf '%s\n' "$out" | sed -e 's/^release-notes: REFUSED: //' -e 's/^release-notes: //')"
