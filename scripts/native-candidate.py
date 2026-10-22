@@ -9,12 +9,14 @@ import os
 import shutil
 from pathlib import Path
 import re
-import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import kitlib_run  # noqa: E402  (bounded runs: process-group deadline, reap, output cap)
 
 PLATFORMS = ("darwin-arm64-none", "darwin-x64-none", "linux-arm64-gnu", "linux-x64-gnu")
 # Intel macOS remains a CI-only probe; release candidates ship these three targets.
@@ -34,50 +36,28 @@ def load(path):
         return json.load(source)
 
 
-def kill_group(pgid):
-    """TERM a process group, grace, then KILL; silent when the group is gone.
-    The sig-0 existence probe may raise PermissionError on a dying group
-    (observed on macOS); that escalates to the next signal instead of
-    failing, since only ESRCH proves the group is gone."""
-    for sig, grace in ((signal.SIGTERM, 2.0), (signal.SIGKILL, 1.0)):
-        try:
-            os.killpg(pgid, sig)
-        except (ProcessLookupError, PermissionError):
-            return
-        deadline = time.monotonic() + grace
-        while time.monotonic() < deadline:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
-                return
-            except PermissionError:
-                break
-            time.sleep(0.05)
+# Per-stream capture bound for certification children; the full ladder's JSON report is far smaller.
+SCOPED_OUTPUT_CAP_BYTES = 64 << 20
 
 
 def run_scoped(argv, *, cwd, env, timeout):
-    """Run a certification child as a session leader and reap the whole tree.
+    """Run a certification child through kitlib run and reap its whole group.
     subprocess.run kills only the direct child on timeout, so an e2e-live
     group (shell, omp session, mock) survives and keeps writing into the
     tree; the TemporaryDirectory teardown then fails with Errno 66 and masks
-    the real error. Here the child leads a fresh session: on timeout the
-    group gets TERM, a grace period, then KILL before TimeoutExpired is
-    re-raised. Survivors after a clean exit get the same treatment, since a
-    finished check owns no orphans. Returns CompletedProcess like run()."""
-    child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-    try:
-        stdout, stderr = child.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        kill_group(child.pid)
-        child.kill()
-        try:
-            stdout, stderr = child.communicate(timeout=30)
-        except subprocess.TimeoutExpired as expired:
-            stdout, stderr = expired.output or b"", expired.stderr or b""
-        raise subprocess.TimeoutExpired(child.args, timeout, output=stdout, stderr=stderr)
-    kill_group(child.pid)
-    return subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
+    the real error. kitlib run gives the child its own process group: at the
+    deadline the group gets TERM, a grace period, then KILL, and
+    TimeoutExpired is raised with the partial output. Survivors after a clean
+    exit are killed too, since a finished check owns no orphans. Output past
+    SCOPED_OUTPUT_CAP_BYTES per stream raises ValueError rather than handing a
+    truncated report to a parser. Returns CompletedProcess like run()."""
+    result = kitlib_run.run(argv, deadline_s=timeout, cwd=cwd, env=env, max_output_bytes=SCOPED_OUTPUT_CAP_BYTES)
+    if result.timed_out:
+        raise subprocess.TimeoutExpired(argv, timeout, output=result.stdout, stderr=result.stderr)
+    if result.truncated:
+        raise ValueError(f"certification child output exceeded {SCOPED_OUTPUT_CAP_BYTES} bytes per stream: {argv[0]}")
+    return subprocess.CompletedProcess(argv, result.rc, result.stdout, result.stderr)
+
 
 def case_counts(release_root):
     manifest = load(release_root / "release-manifest.json")

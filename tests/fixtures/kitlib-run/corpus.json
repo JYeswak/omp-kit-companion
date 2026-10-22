@@ -1,0 +1,78 @@
+{
+	"schema": "kitlib-run-corpus.v1",
+	"about": "One conformance corpus for kitlib run (ompkit-hsfyp), read by tests/cli/kitlib-run.test.ts (src/kitlib/run.ts) and tests/scripts/kitlib_run_test.py (scripts/kitlib_run.py). Placeholders: {MARKER} is a shell-safe token unique to one case run; {TMP} is the realpath of a scratch directory the test creates. options are passed to run() verbatim (stdin text is UTF-8 encoded). expect keys: rc, rc_signal (the child died of this signal: rc == -signum), timed_out, killed, truncated, stdout/stderr (exact UTF-8 text), stdout_bytes, max_elapsed_s, no_survivor (no process whose command line holds {MARKER} remains after run() returns), max_parent_rss_growth_bytes (the parent's peak RSS grows by less than this across the run), throws (run() raises instead of returning).",
+	"cases": [
+		{
+			"id": "fast-child",
+			"argv": ["/bin/sh", "-c", "printf 'out-%s\\n' \"$1\"; printf 'err\\n' >&2; exit 3", "kitlib-fast", "{MARKER}"],
+			"options": { "deadline_s": 20 },
+			"expect": { "rc": 3, "timed_out": false, "killed": false, "truncated": false, "stdout": "out-{MARKER}\n", "stderr": "err\n", "max_elapsed_s": 10 }
+		},
+		{
+			"id": "grandchild-past-deadline",
+			"argv": ["/bin/sh", "-c", "/bin/sh -c 'sleep 30; : {MARKER}' & sleep 30; : {MARKER}"],
+			"options": { "deadline_s": 1, "grace_s": 0.5 },
+			"expect": { "timed_out": true, "killed": true, "no_survivor": true, "max_elapsed_s": 8 }
+		},
+		{
+			"id": "term-ignoring-group-escalates-to-kill",
+			"argv": ["/bin/sh", "-c", "trap '' TERM; /bin/sh -c 'sleep 30; : {MARKER}' & sleep 30; : {MARKER}"],
+			"options": { "deadline_s": 1, "grace_s": 0.5 },
+			"expect": { "timed_out": true, "killed": true, "no_survivor": true, "max_elapsed_s": 8 }
+		},
+		{
+			"id": "writer-50mb-capped",
+			"argv": ["/bin/sh", "-c", "head -c 52428800 /dev/zero; printf 'tail-err\\n' >&2"],
+			"options": { "deadline_s": 60, "max_output_bytes": 65536 },
+			"expect": { "rc": 0, "timed_out": false, "killed": false, "truncated": true, "stdout_bytes": 65536, "stderr": "tail-err\n", "max_parent_rss_growth_bytes": 33554432 }
+		},
+		{
+			"id": "stdin-defaults-to-devnull",
+			"argv": ["/bin/sh", "-c", "cat; printf 'eof\\n'"],
+			"options": { "deadline_s": 10 },
+			"expect": { "rc": 0, "timed_out": false, "stdout": "eof\n" }
+		},
+		{
+			"id": "stdin-bytes-supplied",
+			"argv": ["/bin/sh", "-c", "cat; printf 'eof\\n'"],
+			"options": { "deadline_s": 10, "stdin": "abc\n" },
+			"expect": { "rc": 0, "timed_out": false, "stdout": "abc\neof\n" }
+		},
+		{
+			"id": "cwd-and-env-replace",
+			"argv": ["/bin/sh", "-c", "pwd -P; printf '%s\\n' \"$KITLIB_PROBE\""],
+			"options": { "deadline_s": 10, "cwd": "{TMP}", "env": { "KITLIB_PROBE": "{MARKER}", "PATH": "/usr/bin:/bin" } },
+			"expect": { "rc": 0, "timed_out": false, "stdout": "{TMP}\n{MARKER}\n" }
+		},
+		{
+			"id": "leader-exits-detached-descendant-swept",
+			"argv": ["/bin/sh", "-c", "/bin/sh -c 'sleep 30; : {MARKER}' </dev/null >/dev/null 2>&1 & printf 'done\\n'"],
+			"options": { "deadline_s": 20, "grace_s": 0.5 },
+			"expect": { "rc": 0, "timed_out": false, "stdout": "done\n", "no_survivor": true, "max_elapsed_s": 8 }
+		},
+		{
+			"id": "leader-exits-descendant-holds-pipe",
+			"argv": ["/bin/sh", "-c", "/bin/sh -c 'sleep 30; : {MARKER}' & printf 'done\\n'"],
+			"options": { "deadline_s": 20, "grace_s": 0.5 },
+			"expect": { "rc": 0, "timed_out": false, "killed": true, "stdout": "done\n", "no_survivor": true, "max_elapsed_s": 8 }
+		},
+		{
+			"id": "rlimit-cpu-applied",
+			"argv": ["/bin/sh", "-c", "while :; do :; done; : {MARKER}"],
+			"options": { "deadline_s": 30, "rlimit_cpu_s": 1 },
+			"expect": { "rc_signal": "SIGXCPU", "timed_out": false, "no_survivor": true, "max_elapsed_s": 15 }
+		},
+		{
+			"id": "missing-executable-throws",
+			"argv": ["/nonexistent/kitlib-run-{MARKER}"],
+			"options": { "deadline_s": 5 },
+			"expect": { "throws": true }
+		},
+		{
+			"id": "non-positive-deadline-throws",
+			"argv": ["/bin/sh", "-c", "exit 0"],
+			"options": { "deadline_s": 0 },
+			"expect": { "throws": true }
+		}
+	]
+}

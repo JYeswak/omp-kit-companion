@@ -466,6 +466,13 @@ class ScopedRunTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn(b"ok", result.stdout)
 
+    def test_output_past_cap_is_refused_not_parsed_truncated(self) -> None:
+        with unittest.mock.patch.object(native_candidate, "SCOPED_OUTPUT_CAP_BYTES", 16):
+            with self.assertRaisesRegex(ValueError, "exceeded 16 bytes per stream"):
+                native_candidate.run_scoped(
+                    [sys.executable, "-c", "print('x' * 64)"],
+                    cwd=str(ROOT), env=os.environ.copy(), timeout=60)
+
     def test_timeout_receipt_names_interrupted_ladder_stage_and_elapsed_ms(self) -> None:
         with self.assertRaises(subprocess.TimeoutExpired) as timeout:
             native_candidate.run_scoped(

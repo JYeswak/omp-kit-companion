@@ -78,3 +78,15 @@ test("pysafe runner, checker and pre-commit member ship byte-identical and run f
 	expect(judged.exitCode, judged.stderr.toString()).toBe(1);
 	expect(judged.stdout.toString()).toContain("planted.py:2:1: subprocess-no-timeout");
 });
+
+test("kitlib run ships byte-identical beside pysafe and runs from the extracted release archive", () => {
+	const name = "scripts/kitlib_run.py";
+	const shipped = join(archiveRoot, name);
+	expect(existsSync(shipped), name).toBe(true);
+	expect(hash(readFileSync(shipped)), name).toBe(hash(readFileSync(join(repo, name))));
+	const imported = Bun.spawnSync(["python3", "-B", "-c",
+		"import sys; sys.path.insert(0, sys.argv[1]); import kitlib_run; r = kitlib_run.run(['sh', '-c', 'echo ok'], deadline_s=10); print(r.rc, r.timed_out, r.stdout.decode().strip())",
+		join(archiveRoot, "scripts")], { cwd: output, env: { ...process.env, TMPDIR: output }, stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+	expect(imported.exitCode, imported.stderr.toString()).toBe(0);
+	expect(imported.stdout.toString().trim()).toBe("0 False ok");
+});

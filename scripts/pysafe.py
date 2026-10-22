@@ -305,7 +305,9 @@ def run_bounded(
     deadline, or when the caller is cancelled, the group gets SIGTERM, ``grace``
     seconds, then SIGKILL; pipes are drained for at most one more second and
     closed. If the leader exits but group members keep the pipes open past
-    ``grace``, they are killed (``orphans_killed``). Returns a ``RunResult``;
+    ``grace``, they are killed (``orphans_killed``); any member left once the
+    leader has exited (one that closed or redirected its pipes) is swept with
+    SIGKILL, so no descendant in the group outlives the call. Returns a ``RunResult``;
     ``outcome`` is TIMEOUT rather than an exception. ``OSError`` from spawning
     (missing executable) propagates.
     """
@@ -355,7 +357,12 @@ def run_bounded(
                     pump.drain(_DRAIN_S)
                     break
             pump.step(min(deadline - now, 0.1))
-        if outcome == TIMEOUT:
+        if outcome == OK:
+            # The leader exited; a descendant that redirected its pipes away is
+            # still in the group and must not outlive the call. On Linux the
+            # leader zombie is still unreaped here, so the group id is not reusable.
+            _signal_group(pgid, signal.SIGKILL)
+        else:
             _signal_group(pgid, signal.SIGTERM)
             end = time.monotonic() + grace
             while time.monotonic() < end and not _leader_exited(proc):
