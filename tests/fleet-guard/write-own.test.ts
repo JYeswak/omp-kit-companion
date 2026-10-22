@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
-import { writeScratchOwner } from "../../src/fleet-guard/scratch.ts";
+import { resolveFilesystemWriteTarget, writeScratchOwner } from "../../src/fleet-guard/scratch.ts";
 
 // WRITEOWN1 (ompkit-vf33j): in an opted-in canonical checkout every write outside var/agent-tmp needs the caller's
 // live exclusive Agent Mail reservation, read through the same `am robot reservations` lookup `git commit --only` uses.
@@ -101,6 +101,30 @@ describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused a
 				expect(result?.reason, command).toMatch(/WRITE_OWN_(?:BLANKET_ADD|UNRESERVED|UNRESOLVED_PATHSPEC)/);
 			}
 		});
+	});
+
+	// TILDEPATH1 (2026-10-22): CopperTrout, seated in omp-kit, edited `~/Developer/omp-kit-companion/src/cc-spool.ts`;
+	// the guard resolved `~` against the cwd and refused against omp-kit. A `~/` tool path is the file under $HOME.
+	test("a ~/ edit or write path is the file under $HOME, judged in the repo that holds it", async () => {
+		const savedHome = process.env.HOME;
+		process.env.HOME = scratch;
+		try {
+			expect(resolveFilesystemWriteTarget("/elsewhere/cwd", "~/repo/scripts/x.py", {})).toBe(join(scratch, "repo", "scripts", "x.py"));
+			expect(resolveFilesystemWriteTarget("/elsewhere/cwd", "~", {})).toBe(scratch);
+			expect(resolveFilesystemWriteTarget("/elsewhere/cwd", "~other/x", {})).toBe("/elsewhere/cwd/~other/x");
+		} finally {
+			if (savedHome === undefined) delete process.env.HOME;
+			else process.env.HOME = savedHome;
+		}
+		// The real $HOME: `~/<path to repo>/scripts/x.py`, which normalizes even when the checkout sits outside $HOME.
+		const viaHome = `~/${relative(process.env.HOME ?? "/", repo)}/scripts/x.py`;
+		await withAm(holds("Holder", "scripts/x.py"), "ok", "Holder", async () => {
+			for (const result of [await edit(viaHome), await write(viaHome)]) expect(result?.reason ?? "").toBe("");
+		});
+		await withAm(holds("Intruder"), "ok", "Intruder", async () => {
+			expect((await edit(viaHome))?.reason).toContain(`am file_reservations reserve ${repo} Intruder scripts/x.py --exclusive`);
+		});
+		expect(readFileSync(join(repo, "scripts", "x.py"), "utf8")).toBe("print('canonical')\n");
 	});
 
 	test("bash write targets (redirects, cp/mv/install/tee/sed -i) outside var/agent-tmp are refused", async () => {

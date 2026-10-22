@@ -150,9 +150,19 @@ function resolveWriteCandidate(cwd: string, candidate: string, context: FleetGua
 			target = resolve(context.localRoot, relative);
 		}
 	}
-	const absolute = resolveCandidate(cwd, target);
+	const absolute = resolveCandidate(cwd, expandToolHome(target));
 	if (absolute === null) throw new Error("invalid filesystem path");
 	return absolute;
+}
+
+/** omp's file tools expand a leading `~` or `~/` to $HOME (they display paths that way), so the guard judges the
+ * same file: without this, `~/Developer/omp-kit-companion/x.ts` from a seat in omp-kit resolved to
+ * `omp-kit/~/Developer/...` and was refused against the wrong repo, and from a seat outside any repo it found no Git
+ * root and skipped the ownership check (TILDEPATH1, 2026-10-22). `~user` forms are not tool syntax and stay literal. */
+function expandToolHome(target: string): string {
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home)) return target;
+	return target === "~" ? home : target.startsWith("~/") ? home + target.slice(1) : target;
 }
 
 /** Shared URI projection for lexical checks and local repository-fact admission. */
