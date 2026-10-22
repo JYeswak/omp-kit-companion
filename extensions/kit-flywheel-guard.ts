@@ -5,6 +5,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
+import { HOLDER_LIVE_WINDOW_MS, holderVerdict, readLivenessSourcesAsync, type HolderVerdict } from "../src/holder-liveness.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -750,6 +751,8 @@ export interface TrackerRequest {
 	assignee: string | null;
 	/** `--if-unchanged` expected revision: null when the write is unguarded. */
 	ifUnchanged: string | null;
+	/** `--transition-comment` text bound atomically to the status change; null when omitted. */
+	transitionComment: string | null;
 	/** Requested `--status` value, lowercased; null when no status flag. */
 	status: string | null;
 	/** `--reason` text; null when omitted. Receipt evidence ids are parsed from it. */
@@ -855,6 +858,7 @@ export function trackerRequests(command: string, cwd: string, home: string): Tra
 		let force = false;
 		let readOnly = false;
 		let ifUnchanged: string | null = null;
+		let transitionComment: string | null = null;
 		const ids: string[] = [];
 		let optionsDone = false;
 		for (let index = 1; index < argv.length; index += 1) {
@@ -876,6 +880,7 @@ export function trackerRequests(command: string, cwd: string, home: string): Tra
 				if (flag === "--actor") actor = value;
 				if (flag === "--assignee") assignee = value;
 				if (flag === "--if-unchanged") ifUnchanged = value;
+				if (flag === "--transition-comment") transitionComment = value;
 				if (flag === "--status" || flag === "-s") status = value;
 				if (flag === "--reason") reason = value;
 				if (flag === "--add-label" || flag === "--set-labels" || flag === "--labels") addLabels.push(...value.split(",").map(label => label.trim()).filter(label => label !== ""));
@@ -895,7 +900,7 @@ export function trackerRequests(command: string, cwd: string, home: string): Tra
 							: subcommand === "update" && nativeStatus === "open" ? "release"
 								: subcommand === "update" && assignee !== null ? "custody" : null;
 		if (operation === null) continue;
-		requests.push({ bin: argv[0]!, ids, cwd: line.cwd, db, identities, operation, actor: actor ?? inlineActor, assignee, ifUnchanged, status: nativeStatus ?? null, reason, argv, force, addLabels });
+		requests.push({ bin: argv[0]!, ids, cwd: line.cwd, db, identities, operation, actor: actor ?? inlineActor, assignee, ifUnchanged, transitionComment, status: nativeStatus ?? null, reason, argv, force, addLabels });
 	}
 	return requests;
 }
@@ -1369,6 +1374,26 @@ export interface TrackerMutationDeps {
 	env: Record<string, string | undefined>;
 	home: string;
 	sessionCwd: string;
+	/** STALEDEF1: holder liveness read at the act; absent means a third-party reclaim is never proven safe. */
+	holderLiveness?: (holder: string, nowMs: number) => Promise<HolderVerdict>;
+}
+
+/** Production liveness: the same seat, Agent Mail and reservation sources `drain stale-claims` reads. */
+export function execHolderLiveness(exec: FlywheelExec, env: Record<string, string | undefined>, home: string): (holder: string, nowMs: number) => Promise<HolderVerdict> {
+	return async (holder, nowMs) => {
+		const sources = await readLivenessSourcesAsync({
+			home, env,
+			run: async argv => {
+				try {
+					const result = await exec(argv[0]!, argv.slice(1), { timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+					return { code: result.killed ? null : result.code, stdout: result.stdout, stderr: result.stderr ?? "" };
+				} catch (error) {
+					return { code: null, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
+				}
+			},
+		}, nowMs);
+		return holderVerdict(holder, sources, nowMs);
+	};
 }
 
 function refuseClaim(refusal: PullRefusal): FlywheelToolCallResult {
@@ -1598,7 +1623,9 @@ async function checkRelease(request: TrackerRequest, deps: TrackerMutationDeps):
 		if (!live) continue;
 		const before = `${found.id} is ${found.status}/${found.assignee} at revision ${found.updatedAt ?? "unknown"}`;
 		if (actor === null || actor.toLowerCase() !== found.assignee.toLowerCase()) {
-			return refuseRelease(request, `${before}: only the holder parks a live claim; a third-party half-park is refused, route the transfer through ${found.assignee}.`);
+			const blocker = await deadHolderReclaimBlocker(request, found.assignee, found.updatedAt, deps);
+			if (blocker === null) continue;
+			return refuseRelease(request, `${before}: only the holder parks a live claim; a third-party half-park is refused, route the transfer through ${found.assignee}. A third-party reclaim passes only for a dead holder: ${blocker}`);
 		}
 		if (request.assignee !== "") {
 			return refuseRelease(request, `${before}: parking must clear the assignee atomically (--assignee ""); omitting it preserves a stale owner on an open bead.`);
@@ -1608,6 +1635,29 @@ async function checkRelease(request: TrackerRequest, deps: TrackerMutationDeps):
 		}
 	}
 	return undefined;
+}
+
+/**
+ * STALEDEF1 (ompkit-f9dun, AGENTS rule): a third party may return a claim to open
+ * when it is untouched 24 h and its holder is not live (no live seat, no Agent Mail
+ * activity in 24 h, no live reservation), in the one atomic shape drain prints:
+ * cleared assignee, the seen revision and a transition comment in a single write.
+ * Returns null when allowed, else why not. UNKNOWN liveness never passes.
+ */
+async function deadHolderReclaimBlocker(request: TrackerRequest, holder: string, updatedAt: string | null, deps: TrackerMutationDeps): Promise<string | null> {
+	if (request.assignee !== "") return 'the reclaim must clear the assignee (--assignee "").';
+	if (request.ifUnchanged === null) return `the reclaim must name the seen revision (--if-unchanged ${updatedAt ?? "<updated_at>"}).`;
+	if (request.transitionComment === null || request.transitionComment.trim() === "") return "the reclaim must record why in the same write (--transition-comment).";
+	const nowMs = Date.now();
+	const touchedMs = updatedAt === null ? Number.NaN : Date.parse(updatedAt);
+	if (!Number.isFinite(touchedMs)) return "the claim's revision is unreadable, so untouched 24 h is unproven.";
+	if (nowMs - touchedMs < HOLDER_LIVE_WINDOW_MS) return `the claim was touched at ${updatedAt}, not untouched 24 h.`;
+	if (deps.holderLiveness === undefined) return `${holder}'s liveness was not checked.`;
+	let verdict: HolderVerdict;
+	try { verdict = await deps.holderLiveness(holder, nowMs); }
+	catch (error) { return `${holder}'s liveness could not be read (${error instanceof Error ? error.message : String(error)}).`; }
+	if (verdict.liveness === "DEAD") return null;
+	return `${holder} is ${verdict.liveness} (${verdict.evidence.join("; ")}).`;
 }
 
 /**
@@ -2190,7 +2240,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (lint?.additionalContext) ctx.ui?.notify(lint.additionalContext, "warning");
 			const started = Date.now();
 			const attempts: CloseAttempt[] = [];
-			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd }, attempts);
+			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd, holderLiveness: execHolderLiveness(pi.exec, env, home) }, attempts);
 			if (typeof event.toolCallId === "string" && attempts.length > 0) {
 				if (result?.block === true) {
 					if (typeof result.reason === "string" && result.reason.includes(SELF_CLOSE_REFUSED)) {

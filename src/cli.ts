@@ -73,6 +73,7 @@ import { runPlanningScore } from "./planning-score.ts";
 import { runPlanningConvert } from "./planning-convert.ts";
 import { missionAnchorStatus, validateMissionRecord } from "./mission.ts";
 import { closeQueue, landingCommits, readDrainStore, resolveProjectDb, staleClaims } from "./drain.ts";
+import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
 import { proveSend } from "./send.ts";
@@ -3907,8 +3908,11 @@ function drainStaleClaimsCommand(request: ParsedCommand): CliResult {
 	let store;
 	try { store = readDrainStore(resolve(db)); }
 	catch { return refusal("UNREADABLE_DB", `cannot read tracker database at ${db}`, "Point --db at a readable beads.db."); }
-	const rows = staleClaims(store.issues, store.comments, Date.now());
-	return { code: 0, data: { overall: "OK", rows }, verification: "PERFORMED" };
+	const now = Date.now();
+	const sources = readLivenessSources(defaultLivenessProbe(), now);
+	const rows = staleClaims(store.issues, store.comments, now, holder => holderVerdict(holder, sources, now));
+	const liveness_sources = Object.fromEntries(Object.entries(sources).map(([name, source]) => [name, source.ok ? "READ" : `UNREADABLE: ${source.why}`]));
+	return { code: 0, data: { overall: "OK", rows, liveness_sources }, verification: "PERFORMED" };
 }
 registerCommandHandler("drain stale-claims", drainStaleClaimsCommand);
 

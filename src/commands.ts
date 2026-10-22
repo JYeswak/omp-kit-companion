@@ -538,7 +538,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--repo", value: "DIR", description: "Git checkout holding the landing commits" },
 			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db, landing repo is DIR; refused with --db" },
 		], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false, dataSchema: drainData },
-		{ name: "stale-claims", description: "In-progress beads with no worker or no recent evidence, with reclaim commands", usage: "drain stale-claims --db PATH [--json]", flags: [
+		{ name: "stale-claims", description: "In-progress/rework beads untouched 24 h whose holder is not live (seat, Agent Mail activity, live reservation), each with one atomic reclaim; unreadable liveness lists the row UNKNOWN", usage: "drain stale-claims --db PATH [--json]", flags: [
 			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
 			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db; refused with --db" },
 		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },

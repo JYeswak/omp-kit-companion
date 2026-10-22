@@ -7,6 +7,7 @@ import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:pa
 import { YAML } from "bun";
 import { observeOmpLauncherVersion, observeOmpManagers, resolveOmpIdentity } from "./paths.ts";
 import { readDrainStore, staleClaims } from "./drain.ts";
+import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
 import { scoreFlywheel, type Grade } from "./flywheel-score.ts";
 import { scanDerivedText, shouldScanFile } from "./derived-check.ts";
 import { inspectStateRoot } from "./state-root.ts";
@@ -1520,13 +1521,15 @@ function inspectDrainStaleClaims(project: string): Finding {
 	let rows;
 	try {
 		const store = readDrainStore(beadsDb);
-		rows = staleClaims(store.issues, store.comments, Date.now());
+		const now = Date.now();
+		const sources = readLivenessSources(defaultLivenessProbe(), now);
+		rows = staleClaims(store.issues, store.comments, now, holder => holderVerdict(holder, sources, now));
 	} catch {
 		return finding("beads", "UNVERIFIED", "Tracker database cannot be read; stale claims were not checked",
 			"Repair read-only access to the tracker's beads.db, then rerun.", { project: dir });
 	}
 	return rows.length
-		? finding("beads", "FAIL", `${rows.length} in-progress claim(s) look stale (no worker or no recent evidence)`, "Reclaim each with its listed command, or record the owner and route on the bead.", { project: dir, stale_claims: rows })
+		? finding("beads", "FAIL", `${rows.length} in-progress claim(s) untouched 24 h with no live holder (or holder liveness unreadable)`, "Reclaim each NO_HOLDER/DEAD row with its listed command; for UNKNOWN rows restore the named liveness source, then rerun.", { project: dir, stale_claims: rows })
 		: finding("beads", "OK", "No stale in-progress claims", "No action required.", { project: dir, stale_claims: rows });
 }
 
