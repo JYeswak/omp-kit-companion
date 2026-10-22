@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, lstatSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
 
@@ -61,6 +62,12 @@ import { ccSpool } from "../src/cc-spool.ts";
  * CLAIM_REFUSED: native claim/start prechecks name the current holder or
  * unreadable prerequisite. br --claim remains the atomic award; an actor
  * flag selects that native actor, never grants authority or transfers custody.
+ *
+ * BEAD_LINT_REFUSED (LINTEVERY1, ompkit-nskhp): `br create` and `br update`
+ * bash calls run the release-shipped bead-lint helpers (scripts/br-create-lint.py,
+ * scripts/br-update-lint.py) before the command executes; exit 4 refuses with
+ * the failing check names and the WHAT:/WHY: template. A helper that cannot
+ * run warns BEAD_LINT_UNVERIFIED and allows (the helpers' fail-open contract).
  */
 
 export interface FlywheelExecResult {
@@ -126,6 +133,8 @@ export interface FlywheelGuardApi {
 export interface FlywheelGuardDeps {
 	env?: Record<string, string | undefined>;
 	home?: string;
+	/** Directory of the bead-lint helpers; defaults to the loaded release's scripts/ (BEAD_LINT_SCRIPTS_DIR). */
+	lintScriptsDir?: string;
 }
 
 /** Per-command ceiling for `br show` and the tmux pane-key lookup. */
@@ -777,9 +786,19 @@ function shellScript(argv: string[]): string | undefined {
 	return flag > 0 ? argv[flag + 1] : undefined;
 }
 
-/** Supported close/claim/start/block/release/review mutations, plus bare custody writes (`update --assignee` without a classified status), with the cwd selected by leading cd commands; `sh -c` strings are followed. */
-export function trackerRequests(command: string, cwd: string, home: string, depth = 0): TrackerRequest[] {
-	const requests: TrackerRequest[] = [];
+/** One `br`/`bd` argv a bash command runs, with its cwd and the identities its own words claim. */
+interface BrCommandLine {
+	argv: string[];
+	cwd: string;
+	/** Identities from inline env assignments (IDENTITY_ENV), outer `sh -c` wrappers first. */
+	identities: string[];
+	/** Inline `BR_ACTOR=` assignment, innermost wins. */
+	inlineActor: string | null;
+}
+
+/** Every `br`/`bd` argv a command runs, with the cwd selected by leading cd commands; `sh -c` strings are followed. */
+function brCommandLines(command: string, cwd: string, home: string, depth = 0): BrCommandLine[] {
+	const lines: BrCommandLine[] = [];
 	let current = cwd;
 	for (const raw of shellCommands(command)) {
 		const identities: string[] = [];
@@ -808,13 +827,23 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 		if (SHELL_WRAPPERS[name] === true && depth < MAX_SHELL_DEPTH) {
 			const script = shellScript(argv);
 			if (script !== undefined) {
-				for (const nested of trackerRequests(script, current, home, depth + 1)) {
-					requests.push({ ...nested, identities: [...identities, ...nested.identities], actor: nested.actor ?? inlineActor });
+				for (const nested of brCommandLines(script, current, home, depth + 1)) {
+					lines.push({ ...nested, identities: [...identities, ...nested.identities], inlineActor: nested.inlineActor ?? inlineActor });
 				}
 			}
 			continue;
 		}
-		if (name !== "br" && name !== "bd") continue;
+		if (name === "br" || name === "bd") lines.push({ argv, cwd: current, identities, inlineActor });
+	}
+	return lines;
+}
+
+/** Supported close/claim/start/block/release/review mutations, plus bare custody writes (`update --assignee` without a classified status), with the cwd selected by leading cd commands; `sh -c` strings are followed. */
+export function trackerRequests(command: string, cwd: string, home: string): TrackerRequest[] {
+	const requests: TrackerRequest[] = [];
+	for (const line of brCommandLines(command, cwd, home)) {
+		const { argv, inlineActor } = line;
+		const identities = [...line.identities];
 		let db: string | undefined;
 		let subcommand: string | undefined;
 		let actor: string | null = null;
@@ -866,7 +895,7 @@ export function trackerRequests(command: string, cwd: string, home: string, dept
 							: subcommand === "update" && nativeStatus === "open" ? "release"
 								: subcommand === "update" && assignee !== null ? "custody" : null;
 		if (operation === null) continue;
-		requests.push({ bin: argv[0]!, ids, cwd: current, db, identities, operation, actor: actor ?? inlineActor, assignee, ifUnchanged, status: nativeStatus ?? null, reason, argv, force, addLabels });
+		requests.push({ bin: argv[0]!, ids, cwd: line.cwd, db, identities, operation, actor: actor ?? inlineActor, assignee, ifUnchanged, status: nativeStatus ?? null, reason, argv, force, addLabels });
 	}
 	return requests;
 }
@@ -1785,6 +1814,221 @@ export async function emitRefusedCloseRecords(env: CloseGuardEmit, attempts: rea
 	return written;
 }
 
+export const BEAD_LINT_REFUSED = "BEAD_LINT_REFUSED";
+export const BEAD_LINT_UNVERIFIED = "BEAD_LINT_UNVERIFIED";
+export const BEAD_LINT_UNEVALUABLE = "BEAD_LINT_UNEVALUABLE";
+/** The loaded release's scripts/: this module ships at <release>/extensions/, the lint at <release>/scripts/. */
+export const BEAD_LINT_SCRIPTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
+/** One lint run reads the whole tracker once (0.3 s measured on a 3k-bead tracker); the ceiling only bounds a hung read. */
+export const BEAD_LINT_TIMEOUT_MS = 20_000;
+/** Gated br verbs: the shipped helper and its env prefix (`<prefix>_REAL/_PROJECT/_DB`). */
+const BEAD_LINT_GATES: Record<string, { script: string; env: string }> = {
+	create: { script: "br-create-lint.py", env: "BR_CREATE" },
+	update: { script: "br-update-lint.py", env: "BR_UPDATE" },
+};
+const BEAD_LINT_HINT = "Fix the named checks: the description carries `WHAT:` and `WHY:` lines (a bug also needs `## Steps to Reproduce`, an epic `## Success Criteria`); "
+	+ "acceptance is `- [ ]` checkboxes with at least one planted negative (plant/refuse/reject/mutant); at least one label. "
+	+ "Template: write a file whose text has a `WHAT: <the change>` line and a `WHY: <the measured reason>` line, then "
+	+ "br create \"<title>\" -t task -l <label> --description-file <that file> "
+	+ "--acceptance \"- [ ] AC1: <positive behavior>; planted negative: <bad input> is refused\".";
+
+export interface BeadLintDeps {
+	exec: FlywheelExec;
+	home: string;
+	sessionCwd: string;
+	/** Directory holding br-create-lint.py / br-update-lint.py; defaults to the loaded release's scripts/. */
+	scriptsDir?: string;
+}
+
+/** The `--db` a br argv selects, or null for br's own discovery. */
+function brDbArg(args: string[], home: string): string | null {
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index]!;
+		if (word === "--db" && index + 1 < args.length) return expandHome(args[index + 1]!, home);
+		if (word.startsWith("--db=")) return expandHome(word.slice("--db=".length), home);
+	}
+	return null;
+}
+
+/** br-update-lint.py's content flags (its has_content_flags, plus `--status in_review`); matching a superset only spawns the helper, which decides. */
+const BEAD_LINT_UPDATE_FLAGS: Record<string, true> = {
+	"--title": true, "-d": true, "--description": true, "--body": true, "--description-file": true,
+	"--acceptance-criteria": true, "--acceptance": true, "--add-acceptance": true, "--set-labels": true,
+	"--add-label": true, "--remove-label": true, "-t": true, "--type": true,
+};
+
+/** Flags whose values `br create` lint reads: the update content flags plus labels and dependency edges. */
+const BEAD_LINT_CREATE_FLAGS: Record<string, true> = { ...BEAD_LINT_UPDATE_FLAGS, "-l": true, "--labels": true, "--deps": true, "--parent": true };
+
+/** True when bash would rewrite `text` at run time: a backtick, or `$` opening a parameter, `${`, `$(`, `$'` or `$"`. */
+function shellExpands(text: string): boolean {
+	if (text.includes("`")) return true;
+	for (let at = text.indexOf("$"); at >= 0; at = text.indexOf("$", at + 1)) {
+		const next = text.charCodeAt(at + 1);
+		const letter = (next >= 65 && next <= 90) || (next >= 97 && next <= 122) || next === 95;
+		if (letter || next === 123 || next === 40 || next === 39 || next === 34) return true;
+	}
+	return false;
+}
+
+const HEREDOC_OPENER = "$(cat <<";
+
+/**
+ * The literal text bash passes for one tokenized word: the word itself when
+ * nothing in it expands, the body of a `$(cat <<'EOF' ... EOF)` substitution
+ * (any delimiter; an unquoted delimiter only when the body has no `$`, backtick
+ * or backslash), else null: the guard cannot know the value before it runs.
+ */
+function staticShellValue(word: string): string | null {
+	if (!word.startsWith(HEREDOC_OPENER) || !word.endsWith(")")) return shellExpands(word) ? null : word;
+	const text = word.slice(HEREDOC_OPENER.length, -1);
+	const firstBreak = text.indexOf("\n");
+	if (firstBreak < 0) return null;
+	const head = text.slice(0, firstBreak).trim();
+	const quoted = head.length >= 2 && (head[0] === "'" || head[0] === "\"") && head.at(-1) === head[0];
+	const delimiter = quoted ? head.slice(1, -1) : head;
+	if (delimiter === "") return null;
+	for (let at = 0; at < delimiter.length; at += 1) {
+		const code = delimiter.charCodeAt(at);
+		if (!((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95)) return null;
+	}
+	const lines = text.slice(firstBreak + 1).split("\n");
+	while (lines.length > 0 && lines.at(-1) === "") lines.pop();
+	if (lines.at(-1) !== delimiter || lines.indexOf(delimiter) !== lines.length - 1) return null;
+	let body = lines.slice(0, -1).join("\n");
+	while (body.endsWith("\n")) body = body.slice(0, -1);
+	if (!quoted && (shellExpands(body) || body.includes("\\"))) return null;
+	return body;
+}
+
+/** `args` with every lint-read flag value replaced by the literal bash would pass, or the first value the guard cannot evaluate. */
+function staticLintArgs(args: string[], lintFlags: Record<string, true>): { args: string[] } | { problem: string } {
+	const out = [...args];
+	for (let index = 0; index < out.length; index += 1) {
+		const word = out[index]!;
+		if (!word.startsWith("-") || word === "-") continue;
+		const eq = word.indexOf("=");
+		const name = eq > 0 ? word.slice(0, eq) : word;
+		const short = !word.startsWith("--") && eq < 0 && word.length > 2 ? word.slice(0, 2) : null;
+		if (lintFlags[name] !== true && (short === null || lintFlags[short] !== true)) {
+			if (eq < 0 && BR_VALUE_FLAGS[name] === true) index += 1;
+			continue;
+		}
+		const [at, prefix, value] = eq > 0 ? [index, `${name}=`, word.slice(eq + 1)]
+			: short !== null && lintFlags[name] !== true ? [index, short, word.slice(2)]
+				: [index + 1, "", out[index + 1]];
+		if (value === undefined) return { problem: `passes ${name} with no value (a backtick substitution ends the word)` };
+		const literal = staticShellValue(value);
+		if (literal === null) return { problem: `passes ${short ?? name} a value the shell expands at run time ($VAR, $(...), backticks, $'...')` };
+		if (name === "--description-file" && literal === "-") return { problem: "reads --description-file from stdin" };
+		out[at] = prefix + literal;
+		index = at;
+	}
+	return { args: out };
+}
+
+/**
+ * The argv br-update-lint.py gets: positionals first, so its argparse binds
+ * `update <id>` wherever global flags sit (`br --actor A update ...`); `--db`
+ * travels via env. Null when no content flag is present: nothing to lint, no
+ * helper spawned (claims and status moves stay as cheap as before).
+ */
+function updateLintArgv(args: string[]): string[] | null {
+	const positional: string[] = [];
+	const flags: string[] = [];
+	let content = false;
+	for (let index = 0; index < args.length; index += 1) {
+		const word = args[index]!;
+		if (!word.startsWith("-") || word === "-") {
+			positional.push(word);
+			continue;
+		}
+		const eq = word.indexOf("=");
+		const name = eq > 0 ? word.slice(0, eq) : word;
+		const value = eq > 0 ? word.slice(eq + 1) : BR_VALUE_FLAGS[name] === true ? args[++index] : undefined;
+		if (BEAD_LINT_UPDATE_FLAGS[name] === true || (!word.startsWith("--") && BEAD_LINT_UPDATE_FLAGS[word.slice(0, 2)] === true)) content = true;
+		if (name === "--status" && value === "in_review") content = true;
+		if (name === "--db") continue;
+		flags.push(word);
+		if (eq < 0 && value !== undefined) flags.push(value);
+	}
+	return content ? [...positional, ...flags] : null;
+}
+
+/**
+ * LINTEVERY1 (ompkit-nskhp): a bash call running `br create` or `br update`
+ * is evaluated by the release-shipped bead-lint helper before it runs, in
+ * every session that loads this extension (no PATH shim needed). Exit 4
+ * refuses naming the failing checks; any other outcome (helper missing,
+ * python missing, tracker unreadable, timeout) warns BEAD_LINT_UNVERIFIED
+ * and allows, the helpers' own fail-open contract. A lint-read value the shell
+ * would rewrite at run time ($VAR, $(...), backticks) cannot be linted before
+ * it runs and is refused BEAD_LINT_UNEVALUABLE, so expansion is no bypass;
+ * `$(cat <<'EOF' ... EOF)` bodies are read literally.
+ */
+export async function checkBeadLint(event: FlywheelToolCallEvent, deps: BeadLintDeps): Promise<FlywheelToolCallResult | undefined> {
+	if (event.toolName !== "bash") return undefined;
+	const command = field(event.input, "command");
+	if (typeof command !== "string") return undefined;
+	const cwd = field(event.input, "cwd");
+	const callCwd = typeof cwd === "string" && cwd.trim()
+		? resolve(deps.sessionCwd, expandHome(cwd.trim(), deps.home))
+		: deps.sessionCwd;
+	const scriptsDir = deps.scriptsDir ?? BEAD_LINT_SCRIPTS_DIR;
+	const warnings: string[] = [];
+	for (const line of brCommandLines(command, callCwd, deps.home)) {
+		if (basename(line.argv[0]!) !== "br") continue;
+		const args = line.argv.slice(1);
+		if (args.some(word => word === "--help" || word === "-h")) continue;
+		const verb = firstVerb(args, BR_VALUE_FLAGS);
+		const gate = verb === null ? undefined : BEAD_LINT_GATES[verb];
+		if (gate === undefined) continue;
+		const statics = staticLintArgs(args, verb === "update" ? BEAD_LINT_UPDATE_FLAGS : BEAD_LINT_CREATE_FLAGS);
+		if ("problem" in statics) {
+			return {
+				block: true,
+				reason: `kit-flywheel-guard ${BEAD_LINT_UNEVALUABLE}: \`br ${verb}\` ${statics.problem}, so bead-lint cannot read it before the command runs. `
+					+ "Write the text with the write tool and pass --description-file <literal path>, or use a quoted literal or $(cat <<'EOF' ... EOF). Nothing was changed.",
+			};
+		}
+		const helperArgs = verb === "update" ? updateLintArgv(statics.args) : statics.args;
+		if (helperArgs === null) continue;
+		const script = join(scriptsDir, gate.script);
+		if (!existsSync(script)) {
+			warnings.push(`br ${verb} lint helper missing at ${script}`);
+			continue;
+		}
+		const db = brDbArg(args, deps.home);
+		const env = [`${gate.env}_REAL=${line.argv[0]!}`, `${gate.env}_PROJECT=${line.cwd}`, ...(db === null ? [] : [`${gate.env}_DB=${db}`])];
+		let result: FlywheelExecResult;
+		try {
+			result = await deps.exec("env", [...env, "python3", script, ...helperArgs], { cwd: line.cwd, timeout: BEAD_LINT_TIMEOUT_MS });
+		} catch (error) {
+			warnings.push(`br ${verb} lint could not run (${error instanceof Error ? error.message : String(error)})`);
+			continue;
+		}
+		const detail = (result.stderr ?? "").trim() || result.stdout.trim();
+		if (result.killed === true) {
+			warnings.push(`br ${verb} lint timed out after ${BEAD_LINT_TIMEOUT_MS} ms`);
+			continue;
+		}
+		if (result.code === 0) continue;
+		if (result.code === 4) {
+			const from = detail.indexOf("LINT_REFUSED ");
+			const to = from < 0 ? -1 : detail.indexOf(": this ", from);
+			const checks = from >= 0 && to > from ? detail.slice(from + "LINT_REFUSED ".length, to) : "unnamed";
+			return {
+				block: true,
+				reason: `kit-flywheel-guard ${BEAD_LINT_REFUSED}: \`br ${verb}\` would leave a bead failing bead-lint checks ${checks}. `
+					+ `${detail} ${BEAD_LINT_HINT} Nothing was changed.`,
+			};
+		}
+		warnings.push(`br ${verb} lint rc=${result.code}: ${detail.slice(0, 300)}`);
+	}
+	return warnings.length === 0 ? undefined
+		: { additionalContext: `kit-flywheel-guard ${BEAD_LINT_UNVERIFIED}: ${warnings.join("; ")}. The command was allowed without the bead-lint gate.` };
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps, attempts: CloseAttempt[] = []): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -1941,6 +2185,9 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
+			const lint = await checkBeadLint(event, { exec: pi.exec, home, sessionCwd: ctx.cwd, scriptsDir: deps.lintScriptsDir });
+			if (lint?.block === true) return lint;
+			if (lint?.additionalContext) ctx.ui?.notify(lint.additionalContext, "warning");
 			const started = Date.now();
 			const attempts: CloseAttempt[] = [];
 			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd }, attempts);

@@ -164,6 +164,11 @@ def parse_create_args(argv: list[str]) -> dict:
         "title": title or "",
         "priority": priority,
         "status": status,
+        "issue_type": parsed.type,
+        "labels": parsed.labels,
+        "acceptance": parsed.acceptance_criteria,
+        "deps": parsed.deps,
+        "parent": parsed.parent,
         "description": parsed.description,
         "description_file": parsed.description_file,
         "custom": custom,
@@ -172,6 +177,70 @@ def parse_create_args(argv: list[str]) -> dict:
         "quiet": parsed.quiet or "--quiet" in prefix or "-q" in prefix,
         "dry_run": dry_run,
     }
+
+
+def read_prospective_description(
+    parsed: dict, project: str
+) -> str:
+    """Description the create would store (LINTGATE1 prospective read)."""
+    if not parsed["description_file"]:
+        return parsed["description"] or ""
+    path = Path(parsed["description_file"])
+    if not path.is_absolute():
+        path = Path(project) / path
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise AdmissionError(
+            f"cannot read lint-gated description file: {error}") from error
+    if len(content.encode("utf-8")) > 1_000_000:
+        raise AdmissionError("description file exceeds the 1 MB limit")
+    return content
+
+
+def prospective_bead(parsed: dict, project: str) -> dict:
+    """The bead record this create would store, JSONL-shaped for lint."""
+    labels = [token.strip() for token in (parsed["labels"] or "").split(",")
+              if token.strip()]
+    deps: list[dict] = []
+    if parsed["parent"]:
+        deps.append({"depends_on_id": parsed["parent"],
+                     "type": "parent-child"})
+    for item in (parsed["deps"] or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        dtype, sep, did = item.partition(":")
+        if not sep or not dtype.strip() or not did.strip():
+            raise AdmissionError(
+                f"malformed --deps entry for lint gate: {item!r}")
+        deps.append({"depends_on_id": did.strip(),
+                     "type": dtype.strip()})
+    return {
+        "id": "<new>",
+        "title": parsed["title"],
+        "status": parsed["status"],
+        "priority": parsed["priority"],
+        "issue_type": parsed["issue_type"] or "task",
+        "labels": labels,
+        "description": read_prospective_description(parsed, project),
+        "acceptance_criteria": parsed["acceptance"] or "",
+        "dependencies": deps,
+    }
+
+
+def lint_prospective(
+    parsed: dict, issues: list[dict], project: str
+) -> list[str]:
+    """Failing LINTGATE1 check names for this create (empty = admit)."""
+    import sys as _sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in _sys.path:
+        _sys.path.insert(0, here)
+    from bead_lint import lint_bead_failures
+    bead = prospective_bead(parsed, project)
+    byid = {row["id"] for row in issues} | {"<new>"}
+    return lint_bead_failures(bead, byid)
 
 
 def normalize_tokens(value: str) -> set[str]:

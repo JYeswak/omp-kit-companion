@@ -32,6 +32,8 @@ function bead(id: string, assignee: string | null): FlywheelExecResult {
 function brTable(table: Record<string, FlywheelExecResult>): Responder {
 	return call => {
 		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		// LINTEVERY1: the bead-lint helper (`env ... python3 br-*-lint.py`) answers lint-clean here.
+		if (call.command === "env") return { stdout: "", stderr: "", code: 0 };
 		const id = call.args[1] ?? "";
 		return table[id] ?? {
 			stdout: JSON.stringify({ error: { code: "ISSUE_NOT_FOUND", message: `Issue not found: ${id}` } }),
