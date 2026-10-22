@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { check, commandSegments } from "../../src/fleet-guard/git.ts";
+import { check, executedShellCommands } from "../../src/fleet-guard/git.ts";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 
 const scratchRoot = join(import.meta.dir, "../../var/agent-tmp");
@@ -227,15 +227,30 @@ describe("fleet guard main-only git checks", () => {
 		});
 	});
 
-	test("commandSegments splits on ; & | && but not on the & of a redirection", () => {
-		expect(commandSegments("a && b")).toEqual(["a ", " b"]);
-		expect(commandSegments("a & b")).toEqual(["a ", " b"]);
-		expect(commandSegments("a ; b | c")).toEqual(["a ", " b ", " c"]);
-		expect(commandSegments("a > f 2>&1")).toEqual(["a > f 2>&1"]);
-		expect(commandSegments("a &> f")).toEqual(["a &> f"]);
-		expect(commandSegments("a >& f")).toEqual(["a >& f"]);
-		expect(commandSegments("a 2>&1 && b")).toEqual(["a 2>&1 ", " b"]);
-		expect(commandSegments("a '2>&1' & b")).toEqual(["a '2>&1' ", " b"]);
+	test("the shared traversal splits on ; & | && and newlines but not on the & of a redirection", () => {
+		const words = (command: string) => {
+			const inspection = executedShellCommands(command);
+			if ("refusal" in inspection) throw new Error(inspection.refusal);
+			return inspection.commands.map((executed) => executed.words);
+		};
+		expect(words("a && b")).toEqual([["a"], ["b"]]);
+		expect(words("a & b")).toEqual([["a"], ["b"]]);
+		expect(words("a ; b | c")).toEqual([["a"], ["b"], ["c"]]);
+		expect(words("a > f 2>&1")).toEqual([["a"]]);
+		expect(words("a &> f")).toEqual([["a"]]);
+		expect(words("a >& f")).toEqual([["a"]]);
+		expect(words("a 2>&1 && b")).toEqual([["a"], ["b"]]);
+		expect(words("a '2>&1' & b")).toEqual([["a", "2>&1"], ["b"]]);
+		expect(words("a x2>f")).toEqual([["a", "x2"]]);
+		expect(words("a\nb # c; d\n# e\nf")).toEqual([["a"], ["b"], ["f"]]);
+		expect(words("cat <<'EOF' | g\nx; y\nEOF\nz")).toEqual([["cat"], ["g"], ["z"]]);
+		expect(words("FOO=1 env -u BAR nice -n 5 timeout 9 git status")).toEqual([["git", "status"]]);
+		expect(words("command -v git")).toEqual([]);
+	});
+
+	test("a newline-separated command cannot hide amend behind an allowed one", () => {
+		for (const command of ["git status\ngit commit --amend", "if true; then git commit --amend; fi", "git status # ok\ngit commit --amend"])
+			expect(check(event(command), context)?.reason, command).toContain("amend");
 	});
 
 	test("native entry path blocks unscoped amend through the chained checks", async () => {

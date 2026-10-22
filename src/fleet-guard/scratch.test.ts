@@ -185,6 +185,99 @@ test("check routes bash git blankets to the shared-tree rule", () => {
 	expect(check({ toolName: "bash", command: "git add file.txt" }, ctx(dir))).toBeUndefined();
 });
 
+// TMPALLOC1 (ompkit-fp72.120.16.36). Admission only: no command below is executed and nothing is allocated.
+const FRESHPI1 = "root=$(mktemp -d /tmp/pi1-installed-real.XXXXXX); mkdir -p \"$root/home/.omp\"; cp -R \"$HOME/.omp/profiles\" \"$root/home/.omp/\"";
+
+test("TMPALLOC1: an executed mktemp outside repo-local var/agent-tmp is refused before anything runs", () => {
+	// The caller's cwd is a work tree below HOME, as in the incident; HOME itself has its own direct-child rule.
+	const work = join(home(), "work");
+	const bash = (command: string) => check({ toolName: "bash", input: { command } }, ctx(work));
+	expect(bash(FRESHPI1)?.reason).toContain("fleet-guard scratch-alloc");
+	expect(bash(FRESHPI1)?.reason).toContain("/tmp/pi1-installed-real.XXXXXX");
+	for (const command of [
+		"root=$(mktemp -d)\ncp -R \"$HOME/.omp/profiles\" \"$root/home/.omp/\"",
+		"root=`mktemp -d /tmp/pi1.XXXXXX` && cp -R a \"$root\"",
+		"printf '%s' \"$(mktemp -d)\"",
+		"echo start\nmktemp -d /tmp/x.XXXXXX",
+		"echo start # comment\nmktemp -d /private/tmp/x.XXXXXX",
+		"mktemp",
+		"mktemp -q",
+		"mktemp -d -t ompXXXXXX",
+		"mktemp -dt omp",
+		"mktemp -u /tmp/omp.XXXXXX",
+		"mktemp --dry-run /tmp/omp.XXXXXX",
+		"mktemp --tmpdir x.XXXXXX",
+		"mktemp -p /tmp x.XXXXXX",
+		"mktemp var/agent-tmp/owned/a.XXXXXX /tmp/b.XXXXXX",
+		"mktemp -d -- /tmp/x.XXXXXX",
+		"mktemp -Z /tmp/x.XXXXXX",
+		"mktemp -d \"$TMPDIR/x.XXXXXX\"",
+		"mktemp -d ~/x.XXXXXX",
+		"mktemp -d /opt/elsewhere.XXXXXX",
+		"/usr/bin/mktemp -d /tmp/x.XXXXXX",
+		"TMPDIR=/tmp mktemp -d",
+		"env -i FOO=1 mktemp -d /tmp/x.XXXXXX",
+		"if mktemp -d /tmp/x.XXXXXX; then :; fi",
+		"{ mktemp -d /tmp/x.XXXXXX; }",
+		"(cd sub && mktemp -d /tmp/x.XXXXXX)",
+		"nice -n 10 mktemp -d /tmp/x.XXXXXX",
+		"sh -c 'root=$(mktemp -d); : \"$root\"'",
+		"bash -lc \"mktemp -d /tmp/x.XXXXXX\"",
+		"bash <<'EOF'\nmktemp -d /tmp/x.XXXXXX\nEOF",
+		"bash <<< 'mktemp -d /tmp/x.XXXXXX'",
+		"eval 'mktemp -d /tmp/x.XXXXXX'",
+		"cat <<EOF\n$(mktemp -d /tmp/x.XXXXXX)\nEOF",
+		"echo ok > \"$(mktemp /tmp/x.XXXXXX)\"",
+		"diff a <(mktemp /tmp/x.XXXXXX)",
+		"x=\"${HOME:-$(mktemp -d /tmp/x.XXXXXX)}\"",
+	])
+		expect(bash(command)?.reason, command).toContain("fleet-guard scratch-alloc");
+	// The literal sink refusal is unchanged.
+	expect(bash("cp -R profiles /tmp/oq16-dirty")?.reason).toContain("fleet-guard scratch-write");
+});
+
+test("TMPALLOC1: inert text naming mktemp and explicit repo-local templates stay allowed", () => {
+	const dir = home();
+	const bash = (command: string, cwd = dir) => check({ toolName: "bash", input: { command } }, ctx(cwd));
+	for (const command of [
+		"echo \"mktemp /tmp/x\"",
+		"echo 'mktemp -d /tmp/x'",
+		"printf '%s\\n' 'mktemp -d /tmp/not-real'",
+		"grep mktemp file",
+		"grep -rn \"mktemp -d /tmp\" src",
+		"man mktemp",
+		"command -v mktemp",
+		"echo hi # mktemp -d /tmp/x.XXXXXX",
+		"# mktemp -d /tmp/x.XXXXXX\necho hi",
+		"echo \"\\$(mktemp -d /tmp/x.XXXXXX)\"",
+		"echo \\$\\(mktemp -d /tmp/x.XXXXXX\\)",
+		"echo '`mktemp /tmp/x.XXXXXX`'",
+		"cat <<'EOF'\nmktemp -d /tmp/not-real\nroot=$(mktemp -d /tmp/x.XXXXXX)\nEOF",
+		"cat <<EOF\nmktemp -d /tmp/not-real\nEOF",
+		"cat <<-\"EOF\"\n\t$(mktemp -d /tmp/x.XXXXXX)\n\tEOF\necho after",
+		"mktemp -d var/agent-tmp/owned/x.XXXX",
+		"mktemp -d ./var/agent-tmp/owned/probe.XXXXXX",
+		"mktemp var/agent-tmp/owned/a.XXXXXX var/agent-tmp/owned/b.XXXXXX",
+		"root=$(mktemp -d var/agent-tmp/owned/pi1.XXXXXX); mkdir -p \"$root/home\"; cp -R profiles \"$root/home/\"",
+		"root=$(mktemp -d 'var/agent-tmp/owned/quoted.XXXXXX') && echo \"$root\"",
+	])
+		expect(bash(command), command).toBeUndefined();
+	expect(bash("mktemp -d ../var/agent-tmp/owned/x.XXXXXX", join(dir, "sub"))).toBeUndefined();
+	// -p DIR is a Darwin mktemp option; the pinned portable dialect refuses it rather than guess.
+	const viaTmpdir = bash("mktemp -d -p var/agent-tmp/owned x.XXXXXX");
+	if (process.platform === "darwin") expect(viaTmpdir).toBeUndefined();
+	else expect(viaTmpdir?.reason).toContain("fleet-guard scratch-alloc");
+});
+
+test("TMPALLOC1: shell text the guard cannot inspect is refused, never allowed", () => {
+	const dir = home();
+	const bash = (command: string) => check({ toolName: "bash", input: { command } }, ctx(dir));
+	for (const command of ["root=$(mktemp -d /tmp/x.XXXXXX", "echo 'unterminated", "echo \"$(echo hi\"", "x=`mktemp /tmp/x.XXXXXX"])
+		expect(bash(command)?.reason, command).toContain("could not be inspected");
+	const deep = "echo " + "$(".repeat(40) + "mktemp -d var/agent-tmp/owned/x.XXXXXX" + ")".repeat(40);
+	expect(bash(deep)?.reason).toContain("budget");
+});
+
 test("session scratch dir matches the S2 owner-name contract", () => {
 	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fleet-repo-"));
 	roots.push(repo);

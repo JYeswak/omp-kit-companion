@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { commandFromEvent, commandSegments, stripEnvWrappers, shellWords } from "./git";
+import { commandFromEvent, commandName, executedShellCommands, type ShellWord } from "./git";
 
 /**
  * Fleet guard behaviours 1 (session scratch), 2 (block writes outside scratch)
@@ -351,21 +351,94 @@ function checkBashTargets(event: FleetGuardEvent, context: FleetGuardContext): F
 	return undefined;
 }
 
-function checkBlanketGit(event: FleetGuardEvent): FleetGuardBlock | undefined {
+// TMPALLOC1: mktemp option grammar is pinned per dialect, never inferred from argument shape. Darwin's BSD mktemp
+// (mktemp(1), macOS 26) takes -d -q -u -p DIR -t PREFIX and their long forms; anywhere else, and for GNU gmktemp,
+// only the options both share (-d -q -u) are admitted, so a dialect-specific destination option is refused.
+const HOST_MKTEMP: "darwin" | "portable" = process.platform === "darwin" ? "darwin" : "portable";
+
+/** Under the var/agent-tmp of cwd or one of its ancestors (never the filesystem root's), and not a forbidden root. */
+function repoLocalScratch(target: string, cwd: string, home: string): boolean {
+	if (forbiddenTarget(target, home) !== null) return false;
+	for (let dir = cwd; dirname(dir) !== dir; dir = dirname(dir)) {
+		if (target.startsWith(`${join(dir, "var", "agent-tmp")}/`)) return true;
+	}
+	return false;
+}
+
+// Every path an executed mktemp creates (or, with -u, names) must be proven repo-local from literal operands:
+// the default and -t destinations, TMPDIR, computed operands and unknown options are refusals, not guesses.
+function checkTempAllocation(argv: readonly ShellWord[], cwd: string, home: string): FleetGuardBlock | undefined {
+	const name = commandName(argv[0]!.text);
+	if (name !== "mktemp" && name !== "gmktemp") return undefined;
+	const dialect = name === "mktemp" ? HOST_MKTEMP : "portable";
+	const refuse = (detail: string): FleetGuardBlock => ({ block: true,
+		reason: `fleet-guard scratch-alloc: '${argv.map((word) => word.text).join(" ").slice(0, 240)}' ${detail}. Pass a literal template under repo-local var/agent-tmp, e.g. mktemp -d var/agent-tmp/<label>.XXXXXX. ${AGENTS_STORING}` });
+	// undefined: no -p/--tmpdir; null: --tmpdir without a directory (TMPDIR decides).
+	let tmpdir: ShellWord | null | undefined;
+	let prefix = false;
+	let options = true;
+	const templates: ShellWord[] = [];
+	for (let index = 1; index < argv.length; index++) {
+		const word = argv[index]!;
+		if (!options || word.text === "-" || !word.text.startsWith("-")) { templates.push(word); continue; }
+		if (word.expanded) return refuse(`passes the computed option ${word.text}`);
+		if (word.text === "--") { options = false; continue; }
+		if (word.text.startsWith("--")) {
+			const equals = word.text.indexOf("=");
+			const option = equals < 0 ? word.text : word.text.slice(0, equals);
+			if (equals < 0 && (option === "--directory" || option === "--quiet" || option === "--dry-run")) continue;
+			if (dialect === "darwin" && option === "--tmpdir") {
+				tmpdir = equals < 0 ? null : { text: word.text.slice(equals + 1), expanded: false };
+				continue;
+			}
+			return refuse(`uses ${option}, which the guard does not admit for the pinned ${dialect} mktemp dialect`);
+		}
+		for (let at = 1; at < word.text.length; at++) {
+			const flag = word.text[at]!;
+			if (flag === "d" || flag === "q" || flag === "u") continue;
+			if (dialect !== "darwin" || (flag !== "p" && flag !== "t")) return refuse(`uses -${flag}, which the guard does not admit for the pinned ${dialect} mktemp dialect`);
+			const attached = word.text.slice(at + 1);
+			const value = attached !== "" ? { text: attached, expanded: false } : argv[++index];
+			if (value === undefined) return refuse(`gives -${flag} no operand`);
+			if (flag === "p") tmpdir = value;
+			else prefix = true;
+			break;
+		}
+	}
+	if (prefix) return refuse("uses -t, which allocates under the per-user system temp directory");
+	if (templates.length === 0) return refuse("names no template, so it allocates under the system temp directory");
+	if (tmpdir === null || tmpdir?.text === "") return refuse("takes its directory from TMPDIR, which the guard does not resolve");
+	if (tmpdir?.expanded) return refuse(`takes its directory from the computed value ${tmpdir.text}`);
+	const base = tmpdir ? resolve(cwd, tmpdir.text) : cwd;
+	for (const template of templates) {
+		if (template.expanded) return refuse(`allocates from the computed template ${template.text}`);
+		if (tmpdir && isAbsolute(template.text)) return refuse(`combines -p with the absolute template ${template.text}`);
+		if (!repoLocalScratch(resolve(base, template.text), cwd, home)) return refuse(`targets ${template.text} outside repo-local var/agent-tmp`);
+	}
+	return undefined;
+}
+
+// Every simple command the call would run (substitutions, eval and nested shells included), through the lexical
+// traversal git.ts shares: temp allocations and blanket staging. Uninspectable text is refused, never allowed.
+function checkShellCommands(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
 	const tool = typeof event.toolName === "string" ? event.toolName : "";
 	const command = commandFromEvent(event) ?? (typeof event.input === "string" ? event.input : undefined);
 	if (tool !== "bash" || !command) return undefined;
-	for (const segment of commandSegments(command)) {
-		const argv = stripEnvWrappers(shellWords(segment));
-		if (!argv || !gitBlanketArgs(argv)) continue;
-		return { block: true,
-			reason: `fleet-guard blanket-git: '${argv.slice(0, 4).join(" ")}' stages the shared tree. ${AGENTS_SHARED_TREE}` };
+	const inspection = executedShellCommands(command);
+	if ("refusal" in inspection) return { block: true, reason: inspection.refusal };
+	const cwd = resolve(eventCwd(event, context));
+	const home = homeDir();
+	for (const { argv, words } of inspection.commands) {
+		const allocation = checkTempAllocation(argv, cwd, home);
+		if (allocation) return allocation;
+		if (gitBlanketArgs(words)) return { block: true,
+			reason: `fleet-guard blanket-git: '${words.slice(0, 4).join(" ")}' stages the shared tree. ${AGENTS_SHARED_TREE}` };
 	}
 	return undefined;
 }
 
 export function check(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
-	return checkWritePaths(event, context) ?? checkBashTargets(event, context) ?? checkBlanketGit(event);
+	return checkWritePaths(event, context) ?? checkBashTargets(event, context) ?? checkShellCommands(event, context);
 }
 
 export default check;

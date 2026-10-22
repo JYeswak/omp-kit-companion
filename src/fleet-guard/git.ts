@@ -48,144 +48,289 @@ export function commandFromEvent(event: FleetGuardEvent): string | undefined {
 	return undefined;
 }
 
-// Decode words within an execution segment, not a complete shell grammar.
-// Keep group punctuation out of words; nested interpreters/substitutions are handled by check().
-export function shellWords(segment: string): string[] {
-	const words: string[] = [];
-	let word = "";
-	let quote: "'" | "\"" | undefined;
-	let escaped = false;
-	for (const character of segment) {
-		if (escaped) {
-			word += character;
-			escaped = false;
-			continue;
-		}
-		if (character === "\\" && quote !== "'") {
-			escaped = true;
-			continue;
-		}
-		if (quote) {
-			if (character === quote) quote = undefined;
-			else word += character;
-			continue;
-		}
-		if (character === "'" || character === "\"") {
-			quote = character;
-			continue;
-		}
-		if (/\s/.test(character) || character === "(" || character === ")") {
-			if (word) words.push(word);
-			word = "";
-			continue;
-		}
-		word += character;
-	}
-	if (escaped) word += "\\";
-	if (word) words.push(word);
-	return words;
+/**
+ * One word of a simple command. `expanded` marks a word with an unquoted or double-quoted parameter/command
+ * expansion, tilde or glob: its `text` is the source spelling, not the literal argument the program receives.
+ */
+export interface ShellWord { text: string; expanded: boolean }
+
+/** A simple command the shell would run, after reserved words, NAME=value prefixes and exec wrappers. */
+export interface ExecutedCommand {
+	argv: readonly ShellWord[];
+	/** `argv` texts. */
+	words: readonly string[];
 }
 
-// The `&` of a redirection (`2>&1`, `>&f`, `<&0`, `&>f`) is part of that redirection, never a command separator.
-function redirectionAmpersand(command: string, index: number): boolean {
-	const before = command[index - 1];
-	return before === ">" || before === "<" || command[index + 1] === ">";
+interface LexedCommand { words: ShellWord[]; stdin: string[] }
+type Lexed = { commands: LexedCommand[]; substitutions: string[] } | { error: string };
+
+// Longest operator first. `<(`/`>(` process substitutions are matched before these.
+const REDIRECTIONS = ["<<<", "<<-", "&>>", "<<", ">>", ">&", ">|", "<&", "<>", "&>", ">", "<"] as const;
+const FD_NUMBER = /^\d+$/;
+
+function closingBacktick(text: string, open: number): number {
+	for (let index = open + 1; index < text.length; index++) {
+		if (text[index] === "\\") { index++; continue; }
+		if (text[index] === "`") return index;
+	}
+	return -1;
 }
 
-export function commandSegments(command: string): string[] {
-	const segments: string[] = [];
-	let segment = "";
-	let quote: "'" | "\"" | undefined;
-	for (let index = 0; index < command.length; index++) {
-		const character = command[index]!;
-		if (quote) {
-			segment += character;
-			if (character === quote) quote = undefined;
-			continue;
-		}
-		if (character === "'" || character === "\"") {
-			quote = character;
-			segment += character;
-			continue;
-		}
-		if (character === "&" && redirectionAmpersand(command, index)) {
-			segment += character;
-			continue;
-		}
-		if (character === ";" || character === "&" || character === "|") {
-			if (segment.trim()) segments.push(segment);
-			segment = "";
-			continue;
-		}
-		segment += character;
-	}
-	if (segment.trim()) segments.push(segment);
-	return segments;
+// Inside backquotes, \` \\ and \$ escape the nested command text.
+function backtickBody(raw: string): string {
+	return raw.replace(/\\([`\\$])/g, "$1");
 }
 
-const REDIRECTION_OPERATORS = ["<<<", "<<-", ">>", ">&", ">|", "<<", "<&", ">", "<"];
+// Index of the `)` closing the `(` at `open`; quote-, escape- and nesting-aware, iterative. -1 when unterminated.
+function closingParen(text: string, open: number): number {
+	const stack: ("(" | "\"")[] = ["("];
+	for (let index = open + 1; index < text.length; index++) {
+		const character = text[index]!;
+		if (character === "\\") { index++; continue; }
+		if (stack.at(-1) === "\"") {
+			if (character === "\"") stack.pop();
+			else if (character === "$" && text[index + 1] === "(") { stack.push("("); index++; }
+			else if (character === "`" && (index = closingBacktick(text, index)) < 0) return -1;
+			continue;
+		}
+		if (character === "'") {
+			index = text.indexOf("'", index + 1);
+			if (index < 0) return -1;
+		} else if (character === "\"") stack.push("\"");
+		else if (character === "`") {
+			index = closingBacktick(text, index);
+			if (index < 0) return -1;
+		} else if (character === "(") stack.push("(");
+		else if (character === ")") {
+			stack.pop();
+			if (stack.length === 0) return index;
+		}
+	}
+	return -1;
+}
 
-// Length of the redirection operator that begins at `index` (optional leading file descriptor digits included),
-// or undefined. Digits only count at the start of a word: `x2>f` redirects to f and keeps the word `x2`.
-function redirectionOperatorLength(text: string, index: number): number | undefined {
-	let cursor = index;
-	if (index === 0 || /\s/.test(text[index - 1]!)) {
-		while (cursor < text.length && text[cursor]! >= "0" && text[cursor]! <= "9") cursor++;
-	}
-	for (const operator of ["&>>", "&>"]) {
-		if (cursor === index && text.startsWith(operator, cursor)) return operator.length;
-	}
-	for (const operator of REDIRECTION_OPERATORS) {
-		if (text.startsWith(operator, cursor)) return cursor - index + operator.length;
+// Command substitutions an unquoted-delimiter here-document body executes. Quotes are literal there.
+function heredocSubstitutions(body: string, into: string[]): string | undefined {
+	for (let index = 0; index < body.length; index++) {
+		const character = body[index]!;
+		if (character === "\\") { index++; continue; }
+		if (character === "$" && body[index + 1] === "(") {
+			const close = closingParen(body, index + 1);
+			if (close < 0) return "unterminated $( in a here-document";
+			into.push(body.slice(index + 2, close));
+			index = close;
+		} else if (character === "`") {
+			const close = closingBacktick(body, index);
+			if (close < 0) return "unterminated backquote in a here-document";
+			into.push(backtickBody(body.slice(index + 1, close)));
+			index = close;
+		}
 	}
 	return undefined;
 }
 
-// End of the single word that follows a redirection operator (quote- and escape-aware).
-function redirectionTargetEnd(text: string, from: number): number {
-	let index = from;
-	let quote: "'" | "\"" | undefined;
+/**
+ * One lexical pass over shell text, not a shell grammar: simple commands split at `;` `&` `|` `(` `)` and newlines,
+ * comments and redirections (with their targets) removed, here-document bodies attached as the command's stdin,
+ * and the bodies of executed `$(…)`, backquote and `<(…)`/`>(…)` substitutions returned for the caller to inspect.
+ * Single-quoted, escaped, commented and quoted-delimiter here-document text is inert. Text this pass cannot
+ * delimit (unterminated quotes or substitutions) is an error, never a guess.
+ */
+function lexShell(text: string): Lexed {
+	const commands: LexedCommand[] = [];
+	const substitutions: string[] = [];
+	const heredocs: { into: string[]; delimiter: string; strip: boolean; expands: boolean }[] = [];
+	let current: LexedCommand = { words: [], stdin: [] };
+	let word = "";
+	let inWord = false;
+	let expanded = false;
+	let quoted = false;
+	let redirect: "file" | "herestring" | "heredoc" | "heredoc-strip" | undefined;
+	let braces = 0;
+	const endWord = (): void => {
+		if (!inWord) return;
+		if (redirect === undefined) current.words.push({ text: word, expanded });
+		else if (redirect === "herestring") current.stdin.push(word);
+		else if (redirect !== "file") heredocs.push({ into: current.stdin, delimiter: word, strip: redirect === "heredoc-strip", expands: !quoted });
+		redirect = undefined;
+		word = "";
+		inWord = false;
+		expanded = false;
+		quoted = false;
+	};
+	const endCommand = (): void => {
+		endWord();
+		redirect = undefined;
+		if (current.words.length) commands.push(current);
+		current = { words: [], stdin: [] };
+	};
+	const substitution = (open: number): number | undefined => {
+		const close = closingParen(text, open);
+		if (close < 0) return undefined;
+		substitutions.push(text.slice(open + 1, close));
+		word += text.slice(open - 1, close + 1);
+		inWord = true;
+		expanded = true;
+		return close + 1;
+	};
+	let index = 0;
 	while (index < text.length) {
 		const character = text[index]!;
-		if (quote) {
-			if (character === quote) quote = undefined;
+		const next = text[index + 1];
+		if (character === "\\") {
+			if (next !== "\n") { word += next ?? "\\"; inWord = true; quoted = true; }
+			index += 2;
+			continue;
+		}
+		if (character === "'") {
+			const close = text.indexOf("'", index + 1);
+			if (close < 0) return { error: "unterminated single quote" };
+			word += text.slice(index + 1, close);
+			inWord = true;
+			quoted = true;
+			index = close + 1;
+			continue;
+		}
+		if (character === "$" && next === "'") {
+			let close = index + 2;
+			while (close < text.length && text[close] !== "'") close += text[close] === "\\" ? 2 : 1;
+			if (close >= text.length) return { error: "unterminated $'...' quote" };
+			const raw = text.slice(index + 2, close);
+			word += raw;
+			inWord = true;
+			quoted = true;
+			if (raw.includes("\\")) expanded = true;
+			index = close + 1;
+			continue;
+		}
+		if (character === "\"") {
+			let close = index + 1;
+			for (; close < text.length && text[close] !== "\""; close++) {
+				const inner = text[close]!;
+				if (inner === "\\") {
+					const escaped = text[close + 1];
+					if (escaped === undefined) break;
+					if ("$`\"\\\n".includes(escaped)) {
+						if (escaped !== "\n") word += escaped;
+						close++;
+					} else word += "\\";
+					continue;
+				}
+				if (inner === "$" && text[close + 1] === "(") {
+					const end = closingParen(text, close + 1);
+					if (end < 0) return { error: "unterminated $( substitution" };
+					substitutions.push(text.slice(close + 2, end));
+					word += text.slice(close, end + 1);
+					expanded = true;
+					close = end;
+					continue;
+				}
+				if (inner === "`") {
+					const end = closingBacktick(text, close);
+					if (end < 0) return { error: "unterminated backquote" };
+					substitutions.push(backtickBody(text.slice(close + 1, end)));
+					word += text.slice(close, end + 1);
+					expanded = true;
+					close = end;
+					continue;
+				}
+				if (inner === "$") expanded = true;
+				word += inner;
+			}
+			if (close >= text.length) return { error: "unterminated double quote" };
+			inWord = true;
+			quoted = true;
+			index = close + 1;
+			continue;
+		}
+		if (character === "`") {
+			const close = closingBacktick(text, index);
+			if (close < 0) return { error: "unterminated backquote" };
+			substitutions.push(backtickBody(text.slice(index + 1, close)));
+			word += text.slice(index, close + 1);
+			inWord = true;
+			expanded = true;
+			index = close + 1;
+			continue;
+		}
+		if (character === "$" && next === "(") {
+			const resumed = substitution(index + 1);
+			if (resumed === undefined) return { error: "unterminated $( substitution" };
+			index = resumed;
+			continue;
+		}
+		if (character === "$") {
+			word += "$";
+			if (next === "{") { braces++; word += "{"; index++; }
+			inWord = true;
+			expanded = true;
 			index++;
 			continue;
 		}
-		if (character === "\\") { index += 2; continue; }
-		if (character === "'" || character === "\"") { quote = character; index++; continue; }
-		if (/\s/.test(character) || ";|&()<>".includes(character)) break;
+		// Inside ${...} only the quotes, escapes and substitutions above are special.
+		if (braces > 0) {
+			if (character === "}") braces--;
+			word += character;
+			index++;
+			continue;
+		}
+		if (character === "\n") {
+			endCommand();
+			index++;
+			for (const doc of heredocs.splice(0)) {
+				const lines: string[] = [];
+				while (index < text.length) {
+					const end = text.indexOf("\n", index);
+					const line = text.slice(index, end < 0 ? text.length : end);
+					index = end < 0 ? text.length : end + 1;
+					let start = 0;
+					if (doc.strip) while (line[start] === "\t") start++;
+					if (line.slice(start) === doc.delimiter) break;
+					lines.push(line);
+				}
+				const body = lines.join("\n");
+				if (doc.expands) {
+					const error = heredocSubstitutions(body, substitutions);
+					if (error) return { error };
+				}
+				doc.into.push(body);
+			}
+			continue;
+		}
+		if (character === " " || character === "\t" || character === "\r") { endWord(); index++; continue; }
+		if (character === "#" && !inWord) {
+			while (index < text.length && text[index] !== "\n") index++;
+			continue;
+		}
+		if ((character === "<" || character === ">") && next === "(") {
+			endWord();
+			const resumed = substitution(index + 1);
+			if (resumed === undefined) return { error: "unterminated process substitution" };
+			index = resumed;
+			continue;
+		}
+		const operator = REDIRECTIONS.find((candidate) => text.startsWith(candidate, index));
+		if (operator) {
+			// A leading unquoted number is the redirected file descriptor (`2>f`), not a word; `x2>f` keeps `x2`.
+			if (inWord && !quoted && !expanded && FD_NUMBER.test(word)) { word = ""; inWord = false; }
+			else endWord();
+			redirect = operator === "<<<" ? "herestring" : operator === "<<-" ? "heredoc-strip" : operator === "<<" ? "heredoc" : "file";
+			index += operator.length;
+			continue;
+		}
+		if (character === ";" || character === "&" || character === "|" || character === "(" || character === ")") {
+			endCommand();
+			index++;
+			continue;
+		}
+		if ((character === "~" && !inWord) || character === "*" || character === "?" || character === "[") expanded = true;
+		word += character;
+		inWord = true;
 		index++;
 	}
-	return Math.min(index, text.length);
-}
-
-// A redirection is not a pathspec or an argument: drop each `[N]>`, `>>`, `>&`, `&>`, `<`, `<<`, `<&` operator and
-// its one target word before words are decoded. Quoted text is untouched. `<(`/`>(` process substitutions are left
-// for substitutionBodies().
-export function stripRedirections(segment: string): string {
-	let out = "";
-	let quote: "'" | "\"" | undefined;
-	let index = 0;
-	while (index < segment.length) {
-		const character = segment[index]!;
-		if (quote) {
-			out += character;
-			if (character === quote) quote = undefined;
-			index++;
-			continue;
-		}
-		if (character === "\\") { out += segment.slice(index, index + 2); index += 2; continue; }
-		if (character === "'" || character === "\"") { quote = character; out += character; index++; continue; }
-		const length = redirectionOperatorLength(segment, index);
-		if (length === undefined) { out += character; index++; continue; }
-		let target = index + length;
-		while (target < segment.length && /\s/.test(segment[target]!)) target++;
-		if (segment[target] === "(") { out += segment.slice(index, index + length); index += length; continue; }
-		out += " ";
-		index = redirectionTargetEnd(segment, target);
-	}
-	return out;
+	if (braces > 0) return { error: "unterminated ${ expansion" };
+	endCommand();
+	return { commands, substitutions };
 }
 
 function repositoryRoot(start: string): string | undefined {
@@ -206,90 +351,127 @@ const AMEND_REASON =
 
 // Shell NAME=value assignment (env wrapper), never a git flag or subcommand.
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const NICE_ADJUSTMENT = /^-n?-?\d+$/;
+const SHORT_OPTIONS = /^[A-Za-z]+$/;
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+// Words that open a compound command or a negated pipeline ahead of the command it runs.
+const RESERVED_PREFIXES = new Set(["!", "{", "if", "then", "elif", "else", "do", "while", "until"]);
 
-export function stripEnvWrappers(words: readonly string[]): readonly string[] | undefined {
-	let index = 0;
-	if (words[index] === "env") {
-		index++;
-		while (index < words.length) {
-			const word = words[index]!;
-			if (word === "-i" || word === "--ignore-environment") { index++; continue; }
-			if (word === "-u" || word === "--unset") { index += 2; continue; }
-			if (ENV_ASSIGNMENT.test(word)) { index++; continue; }
-			break;
+/** Basename of an executable word: `/usr/bin/git` runs git. */
+export function commandName(executable: string): string {
+	return executable.slice(executable.lastIndexOf("/") + 1);
+}
+
+// Index of the command a wrapper runs after its own options; null when the wrapper only looks a name up
+// (`command -v`), undefined when words[index] is not a wrapper this guard knows.
+function wrappedCommandStart(words: readonly ShellWord[], index: number): number | null | undefined {
+	let cursor = index + 1;
+	const option = (): string | undefined => {
+		const word = words[cursor]?.text;
+		return word !== undefined && word.startsWith("-") && word !== "-" ? word : undefined;
+	};
+	switch (words[index]!.text) {
+		case "env":
+			for (let word = words[cursor]?.text; word !== undefined; word = words[cursor]?.text) {
+				if (word === "-i" || word === "--ignore-environment" || word === "-") cursor++;
+				else if (word === "-u" || word === "--unset") cursor += 2;
+				else if (ENV_ASSIGNMENT.test(word)) cursor++;
+				else break;
+			}
+			return cursor;
+		case "command":
+			for (let word = option(); word !== undefined; word = option()) {
+				cursor++;
+				if (word === "--") break;
+				if (word !== "-p") return null;
+			}
+			return cursor;
+		case "exec":
+			for (let word = option(); word !== undefined; word = option()) {
+				cursor += word === "-a" ? 2 : 1;
+				if (word === "--") break;
+			}
+			return cursor;
+		case "time":
+			while (words[cursor]?.text === "-p") cursor++;
+			return cursor;
+		case "nohup":
+			return words[cursor]?.text === "--" ? cursor + 1 : cursor;
+		case "nice": {
+			const word = words[cursor]?.text;
+			if (word === "-n") cursor += 2;
+			else if (word !== undefined && (NICE_ADJUSTMENT.test(word) || word.startsWith("--adjustment="))) cursor++;
+			return cursor;
 		}
-	} else {
-		while (index < words.length && ENV_ASSIGNMENT.test(words[index]!)) index++;
+		case "timeout":
+			for (let word = option(); word !== undefined; word = option()) {
+				cursor += word === "-s" || word === "-k" || word === "--signal" || word === "--kill-after" ? 2 : 1;
+				if (word === "--") break;
+			}
+			return cursor + 1;
+		default:
+			return undefined;
 	}
-	if (index >= words.length) return undefined;
-	return words.slice(index);
+}
+
+// The command a simple command actually runs: reserved words, NAME=value prefixes and known wrappers skipped.
+function executedArgv(words: readonly ShellWord[]): readonly ShellWord[] | undefined {
+	let index = 0;
+	while (index < words.length) {
+		const word = words[index]!;
+		if (RESERVED_PREFIXES.has(word.text) || ENV_ASSIGNMENT.test(word.text)) { index++; continue; }
+		if (word.expanded) return words.slice(index);
+		const start = wrappedCommandStart(words, index);
+		if (start === null) return undefined;
+		if (start === undefined) return words.slice(index);
+		index = start;
+	}
+	return undefined;
+}
+
+// Shell text a command executes in-process: `eval` operands, a shell's -c script and its stdin (here-documents,
+// here-strings). A script-file operand is not read.
+function nestedShellTexts(argv: readonly ShellWord[], stdin: readonly string[]): string[] {
+	const name = commandName(argv[0]!.text);
+	if (name === "eval") return [argv.slice(1).map((word) => word.text).join(" ")];
+	if (!SHELLS.has(name)) return [];
+	const texts = [...stdin];
+	let script = false;
+	for (let index = 1; index < argv.length; index++) {
+		const text = argv[index]!.text;
+		if (script) { texts.push(text); break; }
+		if (text === "--" || (!text.startsWith("-") && !text.startsWith("+"))) break;
+		if (text === "-o" || text === "+o" || text === "-O" || text === "+O") { index++; continue; }
+		if (text[0] === "-" && SHORT_OPTIONS.test(text.slice(1)) && text.includes("c")) script = true;
+	}
+	return texts;
 }
 
 const SUBSTITUTION_BUDGET = 32;
+const SUBSTITUTION_REASON =
+	"fleet-guard refusal: nested shell substitution exceeds the bounded inspection budget; no files were changed.";
 
-function substitutionAt(text: string, index: number): { inner: string; next: number } | null {
-	const character = text[index]!;
-	if (character === "`") {
-		let end = index + 1;
-		while (end < text.length && !(text[end] === "`" && text[end - 1] !== "\\")) end++;
-		const close = end < text.length ? end : text.length;
-		return { inner: text.slice(index + 1, close), next: close + 1 };
-	}
-	if (character === "$" && text[index + 1] === "(") {
-		let depth = 0;
-		let end = index + 1;
-		let quote: "'" | "\"" | undefined;
-		while (end < text.length) {
-			const current = text[end]!;
-			if (quote) {
-				if (current === "\\" && quote === "\"") { end += 2; continue; }
-				if (current === quote) quote = undefined;
-				end++;
-				continue;
-			}
-			if (current === "'" || current === "\"") { quote = current; end++; continue; }
-			if (current === "(") depth++;
-			else if (current === ")") {
-				depth--;
-				if (depth === 0) break;
-			}
-			end++;
+/**
+ * Every simple command a shell call would run: top-level commands, executed substitutions, `eval` and nested shell
+ * text, each costing one unit of a budget shared across the whole call. Text the lexer cannot delimit, or more units
+ * than the budget, is a refusal. The git and scratch guards share this traversal.
+ */
+export function executedShellCommands(command: string): { commands: ExecutedCommand[] } | { refusal: string } {
+	const pending = [command];
+	const commands: ExecutedCommand[] = [];
+	for (let unit = 0; unit < pending.length; unit++) {
+		if (unit >= SUBSTITUTION_BUDGET) return { refusal: SUBSTITUTION_REASON };
+		const lexed = lexShell(pending[unit]!);
+		if ("error" in lexed) return { refusal: `fleet-guard refusal: shell text could not be inspected (${lexed.error}); no files were changed.` };
+		pending.push(...lexed.substitutions);
+		for (const { words, stdin } of lexed.commands) {
+			const argv = executedArgv(words);
+			if (!argv) continue;
+			commands.push({ argv, words: argv.map((word) => word.text) });
+			pending.push(...nestedShellTexts(argv, stdin));
 		}
-		const close = end < text.length ? end : text.length;
-		return { inner: text.slice(index + 2, close), next: close + 1 };
 	}
-	return null;
-}
-
-function substitutionBodies(text: string): string[] {
-	const bodies: string[] = [];
-	const emit = (inner: string): void => {
-		bodies.push(inner);
-		for (const nested of substitutionBodies(inner)) bodies.push(nested);
-	};
-	let index = 0;
-	let quote: "'" | "\"" | undefined;
-	while (index < text.length) {
-		const character = text[index]!;
-		if (quote === "'") {
-			if (character === "'") quote = undefined;
-			index++;
-			continue;
-		}
-		if (quote === "\"") {
-			if (character === "\"") { quote = undefined; index++; continue; }
-			if (character === "\\") { index += 2; continue; }
-			const found = substitutionAt(text, index);
-			if (found) { emit(found.inner); index = found.next; continue; }
-			index++;
-			continue;
-		}
-		if (character === "'" || character === "\"") { quote = character; index++; continue; }
-		const found = substitutionAt(text, index);
-		if (found) { emit(found.inner); index = found.next; continue; }
-		index++;
-	}
-	return bodies;
+	return { commands };
 }
 
 interface CommitScope {
@@ -460,112 +642,24 @@ function branchesOptedOut(root: string): boolean {
 	}
 }
 
-const SUBSTITUTION_REASON =
-	"fleet-guard refusal: nested shell substitution exceeds the bounded inspection budget; no files were changed.";
-
-function heredocStart(line: string): { dash: boolean; delimiter: string; at: number } | { herestring: true; at: number } | null {
-	let quote: "'" | "\"" | undefined;
-	for (let i = 0; i < line.length; i++) {
-		const c = line[i]!;
-		if (quote) {
-			if (c === "\\" && quote === "\"") { i++; continue; }
-			if (c === quote) quote = undefined;
-			continue;
-		}
-		if (c === "'" || c === "\"") { quote = c; continue; }
-		if (c !== "<" || line[i + 1] !== "<") continue;
-		if (line[i + 2] === "<") return { herestring: true, at: i };
-		let j = i + 2;
-		let dash = false;
-		if (line[j] === "-") { dash = true; j++; }
-		while (line[j] === " " || line[j] === "\t") j++;
-		let delimiter: string;
-		if (line[j] === "'" || line[j] === "\"") {
-			const q = line[j]!;
-			const end = line.indexOf(q, j + 1);
-			if (end < 0) return null;
-			delimiter = line.slice(j + 1, end);
-		} else {
-			let end = j;
-			while (end < line.length && line[end] !== " " && line[end] !== "\t") end++;
-			delimiter = line.slice(j, end);
-		}
-		if (!delimiter) return null;
-		return { dash, delimiter, at: i };
-	}
-	return null;
-}
-
-function shellNestedTexts(words: readonly string[], segment: string): string[] {
-	const first = words[0] ?? "";
-	const base = first.slice(first.lastIndexOf("/") + 1);
-	if (base !== "sh" && base !== "bash" && base !== "zsh" && base !== "dash" && base !== "ksh") return [];
-	const texts: string[] = [];
-	for (let index = 1; index < words.length; index++) {
-		if (words[index] === "-c" && index + 1 < words.length) texts.push(words[index + 1]!);
-	}
-	const lines = segment.split("\n");
-	for (let n = 0; n < lines.length; n++) {
-		const found = heredocStart(lines[n]!);
-		if (!found) continue;
-		if ("herestring" in found) {
-			const rest = lines[n]!.slice(found.at + 3).trim();
-			const first = rest[0];
-			if ((first === "\"" || first === "'") && rest.length > 1 && rest.endsWith(first)) texts.push(rest.slice(1, -1));
-			else texts.push(rest);
-			continue;
-		}
-		const body: string[] = [];
-		n++;
-		while (n < lines.length) {
-			let line = lines[n]!;
-			if (found.dash) {
-				let k = 0;
-				while (line[k] === "\t") k++;
-				line = line.slice(k);
-			}
-			if (line === found.delimiter) break;
-			body.push(lines[n]!);
-			n++;
-		}
-		if (body.length) texts.push(body.join("\n"));
-	}
-	return texts;
-}
-
 export function check(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
 	const command = commandFromEvent(event);
 	if (!command) return undefined;
-	const pending: string[] = [command];
-	let units = 0;
-	while (pending.length) {
-		if (++units > SUBSTITUTION_BUDGET) return { block: true, reason: SUBSTITUTION_REASON };
-		const text = pending.pop()!;
-		for (const segment of commandSegments(text)) {
-			const words = shellWords(stripRedirections(segment));
-			for (const body of substitutionBodies(segment)) pending.push(body);
-			const effective = stripEnvWrappers(words);
-			if (!effective) continue;
-			const executable = effective[0]!;
-			const base = executable.slice(executable.lastIndexOf("/") + 1);
-			if (base !== "git") {
-				if (base === "sh" || base === "bash" || base === "zsh" || base === "dash" || base === "ksh") {
-					for (const nested of shellNestedTexts(effective, segment)) pending.push(nested);
-				}
-				continue;
-			}
-			const commandCwd = optionValue(effective, "-C");
-			const pathBase = commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd();
-			const root = repositoryRoot(pathBase);
-			if (!root) continue;
-			if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };
-			if (rawPush(effective)) return { block: true, reason: PUSH_REASON };
-			const scope = analyzeCommit(effective);
-			if (scope && scope.amend) return { block: true, reason: AMEND_REASON };
-			if (scope && scope.only) {
-				const verdict = checkOnlyCoverage(scope.paths, root, pathBase);
-				if (verdict) return verdict;
-			}
+	const inspection = executedShellCommands(command);
+	if ("refusal" in inspection) return { block: true, reason: inspection.refusal };
+	for (const { words: effective } of inspection.commands) {
+		if (commandName(effective[0]!) !== "git") continue;
+		const commandCwd = optionValue(effective, "-C");
+		const pathBase = commandCwd ? resolve(context.cwd ?? process.cwd(), commandCwd) : context.repoRoot ?? context.projectRoot ?? context.cwd ?? process.cwd();
+		const root = repositoryRoot(pathBase);
+		if (!root) continue;
+		if (branchCreation(effective) && !branchesOptedOut(root)) return { block: true, reason: MAIN_ONLY_REASON };
+		if (rawPush(effective)) return { block: true, reason: PUSH_REASON };
+		const scope = analyzeCommit(effective);
+		if (scope && scope.amend) return { block: true, reason: AMEND_REASON };
+		if (scope && scope.only) {
+			const verdict = checkOnlyCoverage(scope.paths, root, pathBase);
+			if (verdict) return verdict;
 		}
 	}
 	return undefined;
