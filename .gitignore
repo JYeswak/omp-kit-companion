@@ -22,3 +22,10 @@ tests/var/
 # COMPDIRT1 planted negative: suite writes scratch state under literal
 # `undefined/` when HOME is bogus in test env (stateRoot(home) join)
 /undefined/
+# COMPDIRT1 round 2 (ompkit-m2ww.1): a br call with an unexpanded `$DB`/`${DB}`
+# path creates a tracker database and lock files in the repo root; PAUSESAVE1
+# 95be5cf760 committed them. Never tracked.
+/$DB*
+/${DB}*
+/.br-db-*.lock
+.hypothesis/
