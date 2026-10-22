@@ -51,7 +51,13 @@ export interface RespawnDeps {
 	exclusiveHolds(agent: string): string[];
 }
 
-const OMP_ARGV = /(?:^|[\s/])omp(?:\s|$)/;
+// Matches the omp agent argv: a path segment that is exactly `omp`, or `omp`
+// plus a version-like suffix (the versioned Tern install path, e.g.
+// `.../omp-0.2.37`). The suffix MUST start with a digit (after an optional
+// `v`) so nearby helpers such as `omp-helper` never count as the agent, and
+// dotted names such as `omp.json` never match either (RedMaple 2026-10-13:
+// every fleet pane read SKIP-FROZEN on 0.2.37).
+const OMP_ARGV = /(?:^|[\s/])omp([-_@.]v?\d[^/\s]*)?(?=[\s]|$)/;
 const PANE_FORMAT = "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_pid}\t#{pane_id}\t#{pane_current_path}";
 
 interface Pane {
@@ -244,8 +250,14 @@ function buildRow(
 	if (!settled.stale) {
 		return { ...settled, verdict: "SKIP-FRESH", reason: `omp started at ${settled.ompStartedAt}, after the relink; nothing to do` };
 	}
-	const files = io.openSessionFiles([target.pid]);
-	const sessionFile = files.get(target.pid)?.find((path) => path.endsWith(".jsonl")) ?? null;
+	const byPpid = new Map<number, number[]>();
+	for (const process of processes) byPpid.set(process.ppid, [...(byPpid.get(process.ppid) ?? []), process.pid]);
+	const subtree = [pane.pid];
+	for (let index = 0; index < subtree.length; index += 1) subtree.push(...(byPpid.get(subtree[index]!) ?? []));
+	const files = io.openSessionFiles(subtree);
+	const own = files.get(target.pid)?.find((path) => path.endsWith(".jsonl")) ?? null;
+	const fallback = subtree.flatMap((pid) => files.get(pid) ?? []).find((path) => path.endsWith(".jsonl")) ?? null;
+	const sessionFile = own ?? fallback;
 	if (!sessionFile) {
 		return { ...settled, verdict: "SKIP-NOSESSION", reason: `no open session transcript for omp pid ${target.pid}; refusing a fresh respawn` };
 	}
