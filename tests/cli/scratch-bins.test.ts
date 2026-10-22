@@ -132,19 +132,30 @@ test("release --bin throwaway records the bin with no reference, and the release
 	expect(inspectOne(dir, root, deps())).toMatchObject({ action: "QUARANTINE", reason: "owner-released-would-quarantine" });
 });
 
-test("release --bin evidence or promote needs a reference that exists: a tracked file in the owner's repo or a bead br finds", () => {
+// TRANSFER1 (ompkit-jbiwx, Joshua's lifecycle review J-2026-10-22-02): an existing bead or an unrelated tracked file
+// proved nothing, yet the release marker (the reaper) and --now retired the dir on it. The destination must carry the
+// content: a bead comment or a committed and pushed file citing scratch-sha256:<digest>, or a pushed byte-identical copy.
+test("release --bin evidence or promote needs a destination that proves the content arrived", () => {
 	const projectDir = mkdtempSync(join(scratchParent, "bins-repo-"));
-	cleanup.push(projectDir);
-	const git = (...args: string[]) => Bun.spawnSync(["git", "-C", projectDir, ...args], { stdout: "pipe", stderr: "pipe" });
-	expect(git("init", "-q").exitCode).toBe(0);
+	const remoteDir = mkdtempSync(join(scratchParent, "bins-remote-"));
+	cleanup.push(projectDir, remoteDir);
+	const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+	const git = (...args: string[]) => Bun.spawnSync(["git", "-C", projectDir, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], { stdout: "pipe", stderr: "pipe", env: gitEnv });
+	expect(Bun.spawnSync(["git", "init", "-q", "--bare", remoteDir], { env: gitEnv }).exitCode).toBe(0);
+	expect(git("init", "-q", "-b", "main").exitCode).toBe(0);
 	mkdirSync(join(projectDir, "docs"));
 	writeFileSync(join(projectDir, "docs", "tracked.md"), "evidence\n");
 	writeFileSync(join(projectDir, "docs", "untracked.md"), "loose\n");
 	expect(git("add", "docs/tracked.md").exitCode).toBe(0);
-	const real = deps({ run: (args) => { const r = Bun.spawnSync([...args], { stdout: "pipe", stderr: "pipe" }); return { code: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() }; } });
+	expect(git("commit", "-q", "-m", "init").exitCode).toBe(0);
+	expect(git("remote", "add", "origin", remoteDir).exitCode).toBe(0);
+	expect(git("push", "-q", "-u", "origin", "main").exitCode).toBe(0);
+	const realRun = (args: readonly string[]) => { const r = Bun.spawnSync([...args], { stdout: "pipe", stderr: "pipe" }); return { code: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() }; };
+	const real = deps({ run: realRun });
 	const owner = `pid=${process.pid}\nlabel=work\nrepo=${projectDir}\ncreated=${CREATED}\n`;
-	const attempt = (opts: Parameters<typeof releaseScratch>[3], run: Partial<InspectDeps> = {}) => {
-		const f = fixture(owner);
+	const scratchWith = (text: string) => { const f = fixture(owner); writeFileSync(join(f.dir, "run.out"), text); return f; };
+	const attempt = (opts: Parameters<typeof releaseScratch>[3], run: Partial<InspectDeps> = {}, text = "measured\n") => {
+		const f = scratchWith(text);
 		return { f, result: releaseScratch(f.dir, f.home, { ...real, ...run }, opts) };
 	};
 	const refused: [string, Parameters<typeof releaseScratch>[3], string][] = [
@@ -154,6 +165,7 @@ test("release --bin evidence or promote needs a reference that exists: a tracked
 		["a file outside the repo", { bin: "evidence", ref: "file:../../etc/hosts" }, "ref-outside-repo"],
 		["a missing file", { bin: "evidence", ref: "file:docs/nope.md" }, "ref-missing"],
 		["an untracked file", { bin: "evidence", ref: "file:docs/untracked.md" }, "ref-not-tracked"],
+		["planted: a pushed file unrelated to the content", { bin: "evidence", ref: "file:docs/tracked.md" }, "ref-transfer-unproven"],
 		["a reference on a throwaway", { bin: "throwaway", ref: "file:docs/tracked.md" }, "throwaway-takes-no-ref"],
 		["a hold at release", { bin: "hold", ref: "bead:ompkit-1" }, "hold-is-declared-at-creation"],
 		["a reference with no bin", { ref: "file:docs/tracked.md" }, "ref-without-bin"],
@@ -163,11 +175,38 @@ test("release --bin evidence or promote needs a reference that exists: a tracked
 		expect({ name, ...result }).toMatchObject({ name, ok: false, changed: false, reason });
 		expect(existsSync(join(f.dir, ".omp-kit-release"))).toBe(false);
 	}
-	const tracked = attempt({ bin: "evidence", ref: "file:docs/tracked.md" });
-	expect(tracked.result).toMatchObject({ ok: true, changed: true });
-	expect(readFileSync(join(tracked.f.dir, ".omp-kit-release"), "utf8")).toContain("bin=evidence\nref=file:docs/tracked.md\n");
-	expect(attempt({ bin: "promote", ref: `file:${join(projectDir, "docs", "tracked.md")}` }).result).toMatchObject({ ok: true });
-	const beadOk = attempt({ bin: "evidence", ref: "bead:ompkit-774u.15" }, { run: () => ({ code: 0, stdout: "[{\"id\":\"ompkit-774u.15\"}]", stderr: "" }) });
+	// The refusal names the token to cite; different content has a different token.
+	const first = attempt({ bin: "evidence", ref: "file:docs/tracked.md" }, {}, "measured run A\n");
+	const token = /scratch-sha256:[0-9a-f]{64}/.exec(first.result.detail ?? "")?.[0];
+	expect(token).toBeDefined();
+	expect(attempt({ bin: "evidence", ref: "file:docs/tracked.md" }, {}, "measured run B\n").result.detail).not.toContain(token!);
+	// Citing the token: untracked, then staged, then committed but unpushed each refuse; pushed is admitted.
+	writeFileSync(join(projectDir, "docs", "receipt.md"), `run A summary\n${token}\n`);
+	const cite = () => {
+		process.env.OMP_KIT_SCRATCH_ROOTS = first.f.root;
+		return releaseScratch(first.f.dir, first.f.home, real, { bin: "evidence", ref: "file:docs/receipt.md" });
+	};
+	expect(cite()).toMatchObject({ ok: false, reason: "ref-not-tracked" });
+	expect(git("add", "docs/receipt.md").exitCode).toBe(0);
+	expect(cite()).toMatchObject({ ok: false, reason: "ref-uncommitted" });
+	expect(git("commit", "-q", "-m", "receipt").exitCode).toBe(0);
+	expect(cite()).toMatchObject({ ok: false, reason: "ref-unpushed" });
+	expect(existsSync(join(first.f.dir, ".omp-kit-release"))).toBe(false);
+	expect(git("push", "-q").exitCode).toBe(0);
+	expect(cite()).toMatchObject({ ok: true, changed: true });
+	expect(readFileSync(join(first.f.dir, ".omp-kit-release"), "utf8")).toContain("bin=evidence\nref=file:docs/receipt.md\n");
+	// Near miss: a pushed byte-identical copy of a scratch file proves the content too (absolute paths resolve the same).
+	writeFileSync(join(projectDir, "docs", "probe.ts"), "export const probe = 1;\n");
+	expect(git("add", "docs/probe.ts").exitCode).toBe(0);
+	expect(git("commit", "-q", "-m", "probe").exitCode).toBe(0);
+	expect(git("push", "-q").exitCode).toBe(0);
+	expect(attempt({ bin: "promote", ref: `file:${join(projectDir, "docs", "probe.ts")}` }, {}, "export const probe = 1;\n").result).toMatchObject({ ok: true });
+	// Bead references: an existing bead with no citing comment is the planted negative; a comment citing the token passes.
+	const bead = (comments: string[]) => ({ run: (args: readonly string[]) => args[0] === "br"
+		? { code: 0, stdout: JSON.stringify([{ id: "ompkit-774u.15", comments: comments.map((text) => ({ text })) }]), stderr: "" } : realRun(args) });
+	expect(attempt({ bin: "evidence", ref: "bead:ompkit-774u.15" }, bead(["unrelated note"]), "measured run A\n").result)
+		.toMatchObject({ ok: false, reason: "ref-transfer-unproven" });
+	const beadOk = attempt({ bin: "evidence", ref: "bead:ompkit-774u.15" }, bead([`run A results: ${token}`]), "measured run A\n");
 	expect(beadOk.result).toMatchObject({ ok: true });
 	expect(readFileSync(join(beadOk.f.dir, ".omp-kit-release"), "utf8")).toContain("ref=bead:ompkit-774u.15\n");
 	expect(attempt({ bin: "evidence", ref: "bead:ompkit-nope" }, { run: () => ({ code: 1, stdout: "", stderr: "not found" }) }).result)

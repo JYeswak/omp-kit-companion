@@ -44,7 +44,14 @@ omp-kit scratch release DIR --bin promote  --ref file:scripts/probe.ts --now
 omp-kit scratch release DIR --bin evidence --ref bead:ompkit-774u.15 --now
 ```
 
-The release is the owner's act: the caller must be the owner (its process, a child of it, or the seat that holds the recorded session). The release marker records the bin and the reference next to the owner text, device and inode it already pins. Refusals name the reason without moving anything: `ref-required`, `ref-invalid`, `ref-outside-repo`, `ref-missing`, `ref-not-tracked`, `ref-bead-unverified`, `throwaway-takes-no-ref`, `ref-without-bin`, `hold-is-declared-at-creation`, `bin-needs-structured-owner` (a free-form legacy owner cannot be binned) and `now-needs-bin`.
+The release is the owner's act: the caller must be the owner (its process, a child of it, or the seat that holds the recorded session). The release marker records the bin and the reference next to the owner text, device and inode it already pins.
+
+An evidence or promote reference must prove the content arrived, not merely name a place (TRANSFER1). The directory's content has one token, `scratch-sha256:<digest>`. The digest covers every file below the directory (path and bytes) except the owner record and the release marker. The reference is accepted when:
+
+- `bead:ID`: a comment on the bead contains the token, for example a comment that summarizes the results and cites it;
+- `file:PATH`: the file is tracked in the owner's repo, has no staged or unstaged changes, matches the content on the upstream branch (it is pushed), and either contains the token or is a byte-identical copy of one of the directory's files.
+
+An existing bead or an unrelated tracked file proves nothing. A refused release names the token, so the producer cites it and releases again. Refusals name the reason without moving anything: `ref-required`, `ref-invalid`, `ref-outside-repo`, `ref-missing`, `ref-not-tracked`, `ref-uncommitted`, `ref-unpushed`, `ref-transfer-unproven`, `ref-bead-unverified`, `ref-git-unverified`, `ref-content-unreadable`, `throwaway-takes-no-ref`, `ref-without-bin`, `hold-is-declared-at-creation`, `bin-needs-structured-owner` (a free-form legacy owner cannot be binned) and `now-needs-bin`.
 
 `--now` retires the directory in the same turn, which is how a finished task disposes of its scratch (SCRATCHRETIRE1): a throwaway at once, evidence and promote only after their reference has been verified. It rechecks what the reaper's final delete checks: the same device and inode, the unchanged owner text, the owner inside the scratch root, and no open file. When any recheck fails, the directory and its marker stay, the command exits `SCRATCH_RELEASE_HELD` with the reason (`now-held-open-fds`, `now-held-lsof-unavailable`, `now-held-owner-changed`, ...), and the directory remains yours to retire: clear the cause and run the same release with `--now` again. The reaper is only a backstop. Without `--now` the release only marks the directory.
 

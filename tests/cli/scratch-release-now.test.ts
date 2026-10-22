@@ -6,7 +6,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { createScratch, releaseScratch, reapLogPath,
+import { createScratch, releaseScratch, reapLogPath, scratchContent,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 
 const repo = resolve(import.meta.dir, "../..");
@@ -67,13 +67,18 @@ test("now without a bin is refused and the dir stays unmarked", () => {
 	expect(existsSync(join(plain.dir, ".omp-kit-release"))).toBe(false);
 });
 
-const gitTracked: ScratchRunner = (args) => args[0] === "git" ? { code: 0, stdout: "package.json\n", stderr: "" } : clearRun(args);
+/** `br show` of a bead whose comment cites the dir's content token (TRANSFER1): the proven-transfer reference. */
+const beadCiting = (dir: string): ScratchRunner => {
+	const token = `scratch-sha256:${scratchContent(dir)!.digest}`;
+	return (args) => args[0] === "br"
+		? { code: 0, stdout: JSON.stringify([{ id: "ompkit-774u.15", comments: [{ text: `run results ${token}` }] }]), stderr: "" } : clearRun(args);
+};
 const gitUntracked: ScratchRunner = (args) => args[0] === "git" ? { code: 1, stdout: "", stderr: "error: pathspec" } : clearRun(args);
 
-test("SCRATCHRETIRE1 AC2: evidence with a verified reference retires its source at once", () => {
+test("SCRATCHRETIRE1 AC2: evidence whose reference proves the transfer retires its source at once", () => {
 	const evidenced = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
 	writeFileSync(join(evidenced.dir, "run.out"), "measured");
-	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json", now: true }))
+	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: beadCiting(evidenced.dir) }), { bin: "evidence", ref: "bead:ompkit-774u.15", now: true }))
 		.toMatchObject({ ok: true, changed: true, reason: "owner-released-deleted" });
 	expect(existsSync(evidenced.dir)).toBe(false);
 	expect(logEvents(evidenced.home).filter((e) => e.event === "release-deleted" && e.bin === "evidence")).toHaveLength(1);
@@ -167,20 +172,24 @@ test("control: a re-release without now, or under a different bin or ref, keeps 
 	expect(releaseScratch(marked.dir, marked.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: false, reason: "already-released" });
 	expect(existsSync(marked.dir)).toBe(true);
 	const evidenced = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
-	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json" }))
+	writeFileSync(join(evidenced.dir, "run.out"), "measured");
+	const citing = beadCiting(evidenced.dir);
+	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: citing }), { bin: "evidence", ref: "bead:ompkit-774u.15" }))
 		.toMatchObject({ ok: true, reason: "owner-released" });
-	const asThrowaway = releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "throwaway", now: true });
+	const asThrowaway = releaseScratch(evidenced.dir, evidenced.home, deps({ run: citing }), { bin: "throwaway", now: true });
 	expect(asThrowaway.reason).not.toBe("owner-released-deleted");
-	const otherRef = releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:README.md", now: true });
+	const otherRef = releaseScratch(evidenced.dir, evidenced.home, deps({ run: citing }), { bin: "evidence", ref: "bead:ompkit-other", now: true });
 	expect(otherRef.reason).not.toBe("owner-released-deleted");
 	expect(existsSync(evidenced.dir)).toBe(true);
 });
 
 test("planted: evidence released without now is retired by the owner's later same-ref release with now", () => {
 	const evidenced = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
-	releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json" });
+	writeFileSync(join(evidenced.dir, "run.out"), "measured");
+	const citing = beadCiting(evidenced.dir);
+	releaseScratch(evidenced.dir, evidenced.home, deps({ run: citing }), { bin: "evidence", ref: "bead:ompkit-774u.15" });
 	expect(existsSync(evidenced.dir)).toBe(true);
-	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json", now: true }))
+	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: citing }), { bin: "evidence", ref: "bead:ompkit-774u.15", now: true }))
 		.toMatchObject({ ok: true, changed: true, reason: "owner-released-deleted" });
 	expect(existsSync(evidenced.dir)).toBe(false);
 });

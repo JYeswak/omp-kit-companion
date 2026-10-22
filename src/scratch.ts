@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 
@@ -1353,29 +1353,112 @@ export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: stri
 
 export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string; bin?: ScratchBin; ref?: string; now?: boolean }
 
+/** TRANSFER1 (ompkit-jbiwx): the token a destination carries to prove it holds a released dir's content. */
+export const TRANSFER_TOKEN_PREFIX = "scratch-sha256:";
+
 /**
- * The destination an owner names when it releases its dir (ompkit-774u.15). Null when acceptable, else the refusal reason.
- * A throwaway needs no reference; evidence and promote must point at where the content went: `file:<path>` that git
- * tracks in the owner's repo, or `bead:<id>` that `br show` finds. A hold is declared when the dir is made, not released.
+ * What an evidence or promote release must prove it transferred: one digest over every entry below the dir (relative
+ * path, kind, content hash; the top-level owner record and release marker excluded, so the digest is the same before
+ * and after release) and the sha256 of each regular file, so a byte-identical copy also counts. Symlinks hash their
+ * target text and are never followed. Null when any entry cannot be read: unreadable content is never proven.
  */
-function releaseBinRefusal(owner: ScratchOwner, opts: ScratchReleaseOptions, deps: InspectDeps): string | null {
-	if (opts.bin === undefined) return opts.ref === undefined ? null : "ref-without-bin";
-	if (!RELEASE_BINS.includes(opts.bin)) return opts.bin === "hold" ? "hold-is-declared-at-creation" : "bin-unknown";
-	if (opts.bin === "throwaway") return opts.ref === undefined ? null : "throwaway-takes-no-ref";
-	if (opts.ref === undefined) return "ref-required";
-	if (!REF_PATTERN.test(opts.ref)) return "ref-invalid";
+export function scratchContent(dir: string): { digest: string; files: Set<string> } | null {
+	const lines: string[] = [];
+	const files = new Set<string>();
+	const chunk = Buffer.allocUnsafe(1 << 20);
+	const pending = [""];
+	try {
+		while (pending.length > 0) {
+			const rel = pending.pop()!;
+			for (const name of readdirSync(join(dir, rel))) {
+				if (rel === "" && (name === ".owner" || name === RELEASE_FILE)) continue;
+				const child = rel === "" ? name : `${rel}/${name}`;
+				const path = join(dir, child);
+				const stat = lstatSync(path);
+				if (stat.isDirectory()) {
+					pending.push(child);
+					lines.push(`${child}\0dir\0`);
+				} else if (stat.isSymbolicLink()) {
+					lines.push(`${child}\0link\0${createHash("sha256").update(readlinkSync(path)).digest("hex")}`);
+				} else if (stat.isFile()) {
+					const hash = createHash("sha256");
+					const fd = openSync(path, "r");
+					try {
+						for (let read = readSync(fd, chunk); read > 0; read = readSync(fd, chunk)) hash.update(chunk.subarray(0, read));
+					} finally {
+						closeSync(fd);
+					}
+					const hex = hash.digest("hex");
+					files.add(hex);
+					lines.push(`${child}\0file\0${hex}`);
+				} else {
+					lines.push(`${child}\0special\0`);
+				}
+			}
+		}
+	} catch {
+		return null;
+	}
+	lines.sort();
+	return { digest: createHash("sha256").update(lines.join("\n")).digest("hex"), files };
+}
+
+/**
+ * The destination an owner names when it releases its dir (ompkit-774u.15). Null when acceptable, else the refusal.
+ * A throwaway needs no reference. Evidence and promote must prove the content arrived (TRANSFER1, Joshua's lifecycle
+ * review J-2026-10-22-02): `bead:<id>` whose comments cite `scratch-sha256:<digest>`, or `file:<path>` in the owner's
+ * repo that is tracked, identical to HEAD, identical on the upstream branch, and that cites the digest or is a
+ * byte-identical copy of one of the dir's files. An existing bead or an unrelated tracked file proves nothing. A hold
+ * is declared when the dir is made, not released.
+ */
+function releaseBinRefusal(dir: string, owner: ScratchOwner, opts: ScratchReleaseOptions, deps: InspectDeps): { reason: string; detail?: string } | null {
+	if (opts.bin === undefined) return opts.ref === undefined ? null : { reason: "ref-without-bin" };
+	if (!RELEASE_BINS.includes(opts.bin)) return { reason: opts.bin === "hold" ? "hold-is-declared-at-creation" : "bin-unknown" };
+	if (opts.bin === "throwaway") return opts.ref === undefined ? null : { reason: "throwaway-takes-no-ref" };
+	if (opts.ref === undefined) return { reason: "ref-required" };
+	if (!REF_PATTERN.test(opts.ref)) return { reason: "ref-invalid" };
+	const content = scratchContent(dir);
+	if (content === null) return { reason: "ref-content-unreadable" };
+	const token = `${TRANSFER_TOKEN_PREFIX}${content.digest}`;
+	const unproven = (reason: string, what: string) => ({ reason, detail: `${what}; this directory's content is ${token}: `
+		+ "cite that token in a comment on the bead, or in a committed and pushed file (a committed and pushed byte-identical copy of one of its files also counts), then release again" });
 	if (opts.ref.startsWith("bead:")) {
-		const shown = deps.run(["br", "show", opts.ref.slice("bead:".length), "--json"], { timeoutMs: 15_000 });
-		return shown.code === 0 && shown.stdout.trim().startsWith("[") ? null : "ref-bead-unverified";
+		const bead = opts.ref.slice("bead:".length);
+		const shown = deps.run(["br", "show", bead, "--json"], { timeoutMs: 15_000 });
+		if (shown.code !== 0) return { reason: "ref-bead-unverified" };
+		let comments: unknown;
+		try {
+			const parsed: unknown = JSON.parse(shown.stdout);
+			comments = (Array.isArray(parsed) ? parsed[0] : parsed as Record<string, unknown>)?.comments ?? [];
+		} catch {
+			return { reason: "ref-bead-unverified" };
+		}
+		if (!Array.isArray(comments)) return { reason: "ref-bead-unverified" };
+		return comments.some((comment) => typeof comment?.text === "string" && comment.text.includes(token))
+			? null : unproven("ref-transfer-unproven", `bead ${bead} has no comment citing this content`);
 	}
 	const repo = resolve(owner.repo);
 	const target = resolve(repo, opts.ref.slice("file:".length));
-	if (target !== repo && !target.startsWith(`${repo}/`)) return "ref-outside-repo";
+	if (target !== repo && !target.startsWith(`${repo}/`)) return { reason: "ref-outside-repo" };
 	let regular = false;
 	try { regular = lstatSync(target).isFile(); } catch { /* absent */ }
-	if (!regular) return "ref-missing";
-	const tracked = deps.run(["git", "-C", repo, "ls-files", "--error-unmatch", "--", relative(repo, target)], { timeoutMs: 15_000 });
-	return tracked.code === 0 ? null : "ref-not-tracked";
+	if (!regular) return { reason: "ref-missing" };
+	const rel = relative(repo, target);
+	const git = (...args: string[]) => deps.run(["git", "-C", repo, ...args], { timeoutMs: 15_000 });
+	if (git("ls-files", "--error-unmatch", "--", rel).code !== 0) return { reason: "ref-not-tracked" };
+	const diff = git("diff", "--quiet", "HEAD", "--", rel);
+	if (diff.code === 1) return unproven("ref-uncommitted", `${rel} has staged or unstaged changes against HEAD`);
+	if (diff.code !== 0) return { reason: "ref-git-unverified" };
+	const head = git("rev-parse", "--verify", "--quiet", `HEAD:${rel}`);
+	if (head.code !== 0 || head.stdout.trim() === "") return { reason: "ref-git-unverified" };
+	const upstream = git("rev-parse", "--verify", "--quiet", `@{upstream}:${rel}`);
+	if (upstream.code !== 0 || upstream.stdout.trim() !== head.stdout.trim()) {
+		return unproven("ref-unpushed", `${rel} at HEAD is not the content on the upstream branch (unpushed, or no upstream)`);
+	}
+	let bytes: Buffer;
+	try { bytes = readFileSync(target); } catch { return { reason: "ref-missing" }; }
+	return content.files.has(createHash("sha256").update(bytes).digest("hex")) || bytes.includes(token)
+		? null : unproven("ref-transfer-unproven", `${rel} neither cites nor copies this content`);
 }
 
 /**
@@ -1458,10 +1541,10 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	const seatOwned = callerHoldsSeat(owner, deps);
 	if (!seatOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run))
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
-	const binRefusal = releaseBinRefusal(owner, opts, deps);
-	if (binRefusal !== null) return { ok: false, changed: false, dir, reason: binRefusal, ownerPid: owner.pid };
+	const binRefusal = releaseBinRefusal(dir, owner, opts, deps);
+	if (binRefusal !== null) return { ok: false, changed: false, dir, reason: binRefusal.reason, ownerPid: owner.pid, ...(binRefusal.detail ? { detail: binRefusal.detail } : {}) };
 	// Delete-at-once (ompkit-774u.15, Joshua J-102): a finished task retires its own scratch. Evidence and promote may
-	// retire too, because releaseBinRefusal above verified where their content went (SCRATCHRETIRE1 AC2); a bin-less
+	// retire too, because releaseBinRefusal above proved their content arrived at the destination (TRANSFER1); a bin-less
 	// release names no destination, and a hold is never released here.
 	if (opts.now === true && opts.bin === undefined)
 		return { ok: false, changed: false, dir, reason: "now-needs-bin", ownerPid: owner.pid };
