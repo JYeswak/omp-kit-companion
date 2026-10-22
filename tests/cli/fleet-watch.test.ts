@@ -211,8 +211,8 @@ test("pane ids target the server-unique pane; other selectors stay scoped to the
 
 const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
 test.skipIf(!tmuxAvailable)("real tmux: a configured %id pane is captured, where session:%id is refused", () => {
-	const dir = mkdtempSync(join(tmpdir(), "fleet-watch-tmux-"));
-	const socket = join(dir, "sock");
+	const socket = join(tmpdir(), `f${process.pid.toString(36)}`);
+	expect(Buffer.byteLength(socket)).toBeLessThan(104);
 	const tmux = (...args: string[]) => spawnSync("tmux", ["-S", socket, ...args], { encoding: "utf8" });
 	try {
 		expect(tmux("new-session", "-d", "-s", "workers", "-x", "80", "-y", "24").status).toBe(0);
@@ -226,7 +226,8 @@ test.skipIf(!tmuxAvailable)("real tmux: a configured %id pane is captured, where
 		}
 	} finally {
 		tmux("kill-server");
-		rmSync(dir, { recursive: true, force: true });
+		rmSync(socket, { force: true });
+		rmSync(`${socket}.lock`, { force: true });
 	}
 });
 
