@@ -86,16 +86,47 @@ test("an open file holds the marked dir for the reaper; missing lsof evidence ho
 	expect(existsSync(join(blind.dir, ".omp-kit-release"))).toBe(true);
 });
 
-test("a hold is never deleted by now; an already-released dir stays the reaper's job", () => {
+test("a hold is never deleted by now", () => {
 	const hold = fixture(ownerText(process.pid, "bin=hold\nbead=ompkit-774u.15\nexpires=2026-10-27\n"));
 	expect(releaseScratch(hold.dir, hold.home, deps(), { bin: "hold", now: true })).toMatchObject({ ok: false });
 	expect(existsSync(hold.dir)).toBe(true);
 	expect(releaseScratch(hold.dir, hold.home, deps(), { bin: "hold" })).toMatchObject({ ok: false, reason: "hold-is-declared-at-creation" });
+});
+
+// SCRATCHRETIRE1 (ompkit-fp72.120.16.37): disposal follows job completion, not the reaper (Joshua). A throwaway its owner
+// released marker-only stayed on disk for the paused reaper: on 2026-10-22 one such dir held 64 GB of an 83 GB-free disk.
+test("planted: a throwaway released without now is retired by the owner's later release with now", () => {
 	const marked = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
+	writeFileSync(join(marked.dir, "residue.bin"), "x".repeat(4096));
 	expect(releaseScratch(marked.dir, marked.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, reason: "owner-released" });
-	expect(releaseScratch(marked.dir, marked.home, deps(), { bin: "throwaway", now: true }))
-		.toMatchObject({ ok: true, reason: "already-released" });
 	expect(existsSync(marked.dir)).toBe(true);
+	expect(releaseScratch(marked.dir, marked.home, deps(), { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: true, changed: true, reason: "owner-released-deleted" });
+	expect(existsSync(marked.dir)).toBe(false);
+	expect(logEvents(marked.home).filter((e) => e.event === "release-deleted" && e.dir === marked.dir)).toHaveLength(1);
+});
+
+test("control: a re-release without now, or of a dir released as evidence, keeps the dir", () => {
+	const marked = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
+	releaseScratch(marked.dir, marked.home, deps(), { bin: "throwaway" });
+	expect(releaseScratch(marked.dir, marked.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: false, reason: "already-released" });
+	expect(existsSync(marked.dir)).toBe(true);
+	const evidenced = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
+	const gitTracked: ScratchRunner = (args) => args[0] === "git" ? { code: 0, stdout: "package.json\n", stderr: "" } : clearRun(args);
+	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "evidence", ref: "file:package.json" }))
+		.toMatchObject({ ok: true, reason: "owner-released" });
+	const again = releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitTracked }), { bin: "throwaway", now: true });
+	expect(again.reason).not.toBe("owner-released-deleted");
+	expect(existsSync(evidenced.dir)).toBe(true);
+});
+
+test("retiring a marker-only throwaway with an open file holds the dir and keeps its marker", () => {
+	const busy = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
+	writeFileSync(join(busy.dir, "open.txt"), "held");
+	releaseScratch(busy.dir, busy.home, deps(), { bin: "throwaway" });
+	const held = releaseScratch(busy.dir, busy.home, deps({ lsofSnapshot: new Set([join(busy.dir, "open.txt")]) }), { bin: "throwaway", now: true });
+	expect(held.reason).toBe("now-held-open-fds");
+	expect(existsSync(join(busy.dir, ".omp-kit-release"))).toBe(true);
 });
 
 test("now on a free-prose owner is refused: structured ownership first (79c377fe42 still applies)", () => {

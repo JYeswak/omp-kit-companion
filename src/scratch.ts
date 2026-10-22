@@ -1455,7 +1455,18 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	const markerPath = join(dir, RELEASE_FILE);
 	if (existsSync(markerPath)) {
 		const prior = readReleaseRecord(dir);
-		if (prior && prior.ownerText === ownerText) return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
+		if (prior && prior.ownerText === ownerText) {
+			// SCRATCHRETIRE1 (ompkit-fp72.120.16.37): disposal follows job completion, not the reaper. A throwaway its
+			// owner released marker-only (without --now) is retired by that owner's later `--bin throwaway --now` through
+			// the same rechecks, provided the marker still pins this very inode.
+			if (opts.now === true && opts.bin === "throwaway" && prior.bin === "throwaway") {
+				const pinned = parseReleaseMarker(prior.markerText);
+				if (!pinned || pinned.device !== String(stat.dev) || pinned.inode !== String(stat.ino))
+					return { ok: false, changed: false, dir, reason: "release-marker-inode-mismatch", ownerPid: owner.pid };
+				return deleteReleasedNow(dir, root, home, deps, owner, ownerText, stat.dev, stat.ino, new Date(deps.now ?? Date.now()).toISOString());
+			}
+			return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
+		}
 		return { ok: false, changed: false, dir, reason: "release-marker-already-present", ownerPid: owner.pid };
 	}
 	const releasedAt = new Date(deps.now ?? Date.now()).toISOString();
