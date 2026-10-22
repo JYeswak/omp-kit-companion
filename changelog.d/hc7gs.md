@@ -1,0 +1,3 @@
+### Fixed
+
+- Unattended kit updates now relink the plugin into every profile instead of activating only the `omp-kit` binary. The plugin relink ran `omp plugin list` from the service's working directory, `$HOME`; omp started in `$HOME` moves to `/tmp`, and omp-trust-guard refuses to start there whenever `/tmp` holds an untrusted project file (on 2026-10-22 a stray `bunfig.toml` with a test preload). Every profile row was then `REFUSED PLUGIN_LIST_UNAVAILABLE` and the relink `NOT_RUN`, so seats kept the previous release's extensions after each update. Plugin commands now run from the kit-owned directory `~/.local/state/omp-kit/plugin-invoke`, whatever the caller's working directory.

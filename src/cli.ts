@@ -1133,10 +1133,15 @@ function pluginProfiles(home: string): PluginProfile[] {
 	return profiles;
 }
 
-function nativePluginInvoke(omp: string, home: string, profile: string, args: readonly string[]): { code: number; stdout: string; stderr: string } {
+export function nativePluginInvoke(omp: string, home: string, profile: string, args: readonly string[]): { code: number; stdout: string; stderr: string } {
 	const env = { ...process.env, HOME: home };
 	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
-	const result = Bun.spawnSync([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	// PLUGINCWD1 (ompkit-hc7gs): never inherit the caller's cwd. Under launchd it is $HOME, and omp started in $HOME
+	// without --cwd moves to /tmp, where any stray untrusted project file makes omp-trust-guard refuse to start
+	// (2026-10-22: every auto-relink since 0.2.6x was REFUSED PLUGIN_LIST_UNAVAILABLE by /private/tmp/bunfig.toml).
+	const cwd = join(home, ".local", "state", "omp-kit", "plugin-invoke");
+	mkdirSync(cwd, { recursive: true, mode: 0o700 });
+	const result = Bun.spawnSync([omp, ...(profile === "default" ? [] : ["--profile", profile]), ...args], { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 	return { code: result.exitCode ?? 1, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 }
 
