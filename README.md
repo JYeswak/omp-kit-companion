@@ -16,8 +16,8 @@
 Current release: v0.2.63
 <!-- kit-release:end -->
 
-A tested rule pack, ten guard extensions, five skills, and a guarded CLI for
-an existing OMP install.
+A tested rule pack, 11 guard extensions, five skills, and a guarded CLI with
+44 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -53,8 +53,10 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Around that core sit diagnostics for 38 named scopes, opt-in guard extensions
-for multi-agent fleets, service jobs, and a self-updating release channel.
+Around that core sit diagnostics for 37 named scopes, opt-in guard extensions
+for multi-agent fleets, service jobs, and a self-updating release channel. The
+command registry exposes 44 top-level commands; the command reference below
+tracks every command and doctor scope.
 
 ### Why use omp-kit
 
@@ -82,7 +84,7 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack has 27 rules: 13 `reminder`, 10 `tripwire`, 1 `always`
+The pack has 25 rules: 12 `reminder`, 10 `tripwire`, 1 `always`
 (`kit-standing-law`), 1 `router` (`rs-unsafe-added-router`), and 1 `canary`
 (`zz-canary-scope-probe`). The router loads unsafe-code skills for Rust `unsafe`;
 the canary tests discovery. Tripwires cover unverified "done", unevidenced closes,
@@ -131,7 +133,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 38 diagnostic scopes
+### Doctor: 37 diagnostic scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
@@ -163,7 +165,7 @@ command it runs.
 
 ### Guard extensions
 
-The repo is an OMP plugin. `package.json` declares ten extensions:
+The repo is an OMP plugin. `package.json` declares 11 extensions:
 
 | Extension | Hooks | Behavior |
 |---|---|---|
