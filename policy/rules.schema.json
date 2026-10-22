@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "omp-kit RULEPATH1 operative rule registry row",
+  "type": "object",
+  "required": ["id", "statement", "predicate", "cases", "control_level", "gate_refs", "status", "said_log_ids", "repeat_count", "owner", "metrics"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^R-[A-Z0-9-]+$"},
+    "title": {"type": "string"},
+    "statement": {"type": "string", "minLength": 1},
+    "predicate": {"type": "string", "minLength": 1},
+    "cases": {"type": "array", "minItems": 2, "items": {"type": "object", "required": ["name", "event"], "properties": {"name": {"type": "string", "enum": ["comply", "violate"]}, "event": {"type": "string", "minLength": 1}}, "additionalProperties": true}},
+    "control_level": {"type": "string", "pattern": "^L[1-6]$"},
+    "gate_refs": {"type": "array", "items": {"type": "string"}},
+    "status": {"type": "string", "enum": ["proposed", "specified", "building", "live", "retired"]},
+    "said_log_ids": {"type": "array", "items": {"type": "string"}},
+    "repeat_count": {"type": "integer", "minimum": 0},
+    "owner": {"type": "string", "minLength": 1},
+    "metrics": {"type": "object"},
+    "s6_receipt": {"type": "object", "required": ["stage", "window", "violation_rate", "joshua_repeats"], "properties": {"stage": {"const": "S6"}, "window": {"type": "string", "minLength": 1}, "violation_rate": {"type": "number", "minimum": 0}, "joshua_repeats": {"const": 0}}, "additionalProperties": true}
+  },
+  "additionalProperties": true
+}
