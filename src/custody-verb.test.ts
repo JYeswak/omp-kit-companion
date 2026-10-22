@@ -8,10 +8,10 @@
  */
 import { expect, test } from "bun:test";
 import { afterAll } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { readdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ccActionOutcome, runCli, type ParsedCommand } from "./cli.ts";
+import { ownedTmp, type OwnedTmp } from "./kitlib/tmp.ts";
 import {
 	resolveCustodyScript,
 	runCustodyCheck,
@@ -22,15 +22,15 @@ const repoRoot = join(import.meta.dir, "..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
 
-const scratchPrefix = `custody-verb-test.${process.pid}.`;
+const owned: OwnedTmp[] = [];
 afterAll(() => {
-	for (const name of readdirSync(scratchRoot)) {
-		if (name.startsWith(scratchPrefix)) { try { rmSync(join(scratchRoot, name), { recursive: true, force: true }); } catch { /* best effort */ } }
-	}
+	for (const t of owned) t.cleanup();
 });
 
 function freshDir(prefix: string): string {
-	return mkdtempSync(join(scratchRoot, `custody-verb-test.${process.pid}.${prefix}.`));
+	const t = ownedTmp(`custody-verb-test-${prefix}`, { root: scratchRoot });
+	owned.push(t);
+	return t.path;
 }
 
 /** Fixture fleet root: scripts/cc/custody.py with the given body, owned by the caller. */

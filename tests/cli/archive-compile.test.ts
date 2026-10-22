@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "../..");
 const gate = join(root, "scripts/fresh-gate.sh");
 
 function fixture(): string {
-	const dir = mkdtempSync(join(resolve(root, "var/agent-tmp"), "archive-compile-test-"));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=archive-compile-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
+	const dir = ownedTmp("archive-compile-test", { root: resolve(root, "var/agent-tmp") }).path;
 	for (const name of ["src", "scripts", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers"]) {
 		cpSync(join(root, name), join(dir, name), { recursive: true });
 	}

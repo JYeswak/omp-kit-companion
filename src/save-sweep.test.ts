@@ -125,15 +125,15 @@ test("push withheld without remote or upstream; secrets, oversize and generated 
 
 test("fleet overlay names one committer per repo and pins the sweep to 1-2h", () => {
 	assert.deepEqual(
-		sweepCommittersByName([{ name: "companion", path: "/tmp/x", committer: "sweep-committer" }]),
+		sweepCommittersByName([{ name: "companion", path: "/tmp/x", committer: "sweep-committer" }]), // tempsafe: fake config path, never touched on disk
 		{ companion: "sweep-committer" },
 	);
 	assert.deepEqual(
-		sweepCommittersByName([{ name: "companion", path: "/tmp/x" }]),
+		sweepCommittersByName([{ name: "companion", path: "/tmp/x" }]), // tempsafe: fake config path, never touched on disk
 		{},
 	);
 	assert.throws(
-		() => sweepCommittersByName([{ name: "companion", path: "/tmp/x", committer: "two words" }]),
+		() => sweepCommittersByName([{ name: "companion", path: "/tmp/x", committer: "two words" }]), // tempsafe: fake config path, never touched on disk
 		/SAVE_SWEEP_REPO_0_COMMITTER_INVALID/,
 	);
 	assert.throws(() => sweepCommittersByName("nope"), /SAVE_SWEEP_REPOS_INVALID/);

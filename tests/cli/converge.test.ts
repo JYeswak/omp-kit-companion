@@ -1,13 +1,14 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { convergeCommand, convergeRepository, type ConvergeOptions, type ConvergeResult } from "../../src/converge.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const root = resolve(import.meta.dir, "../.."), scratchRoot = join(root, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, `converge.${process.pid}.`));
-writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=converge\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
+const owned = ownedTmp("converge", { root: scratchRoot });
+const scratch = owned.path;
 const realGit = Bun.which("git");
 if (!realGit) throw new Error("Git is required for converge integration tests");
 const cleanEnv: NodeJS.ProcessEnv = {};
@@ -75,7 +76,7 @@ process.stdout.write(p.stdout??'');process.stderr.write(p.stderr??'');process.ex
 	if (p.status !== 0) throw new Error(`converge child failed: ${p.stdout}\n${p.stderr}`);
 	return JSON.parse(p.stdout) as ConvergeResult;
 }
-afterAll(() => { for (let i = 0; i < number; i++) rmSync(join(scratch, String(i)), { recursive: true, force: true }); });
+afterAll(() => owned.cleanup());
 
 test("T1 ahead-only publishes shared main", () => { const w = world(); local(w.a, "f1", "local\n"); const r = apply(w, { push: true }); expect(r.state).toBe("AHEAD"); expect(r.pushed).toBe(true); expect(git(w.bare, "rev-parse", "main")).toBe(git(w.a, "rev-parse", "main")); });
 for (const check of ["two parents", "origin index and worktree", "peer staging", "peer dirty", "local history"] as const) test(`T2 diverged merge preserves ${check}`, () => {

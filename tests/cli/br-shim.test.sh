@@ -8,8 +8,9 @@ set -u
 SHIM=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/br-shim.sh
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$SHIM")/.." && pwd)
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/br-shim-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+. "$REPO_ROOT/scripts/kitlib-tmp.sh"
+printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
+kitlib_tmp TMP br-shim-test || exit 1
 
 mkdir -p "$TMP/realbin" "$TMP/shimbindir" "$TMP/sendbin"
 cat > "$TMP/realbin/br" <<'EOF'

@@ -1,12 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join, resolve } from "node:path";
 import { writeProfileConfig } from "./profile-fixture.ts";
 import { applyExtensions, inspectExtensionGuard, planExtensions } from "../../src/apply-extensions.ts";
 const fixtures: string[] = [];
 function fixture() {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
-	const workspace = mkdtempSync(join(base, "p13-extension-"));
+	const workspace = ownedTmp("p13-extension", { root: base }).path;
 	fixtures.push(workspace);
 	const release = join(workspace, "release"), home = join(workspace, "home"), stateRoot = join(workspace, "state");
 	const destination = join(home, ".omp", "omp-extensions", "kit-guard-optin.ts");
@@ -90,7 +91,7 @@ test("missing explicit named profile refuses before installing bytes or changing
 	expect(() => planExtensions({ ...f.input, profiles: ["gone"] })).toThrow(/MISSING_PROFILE/);
 	expect(existsSync(f.destination)).toBe(false);
 	expect(readFileSync(config, "utf8")).toContain("extensions: []");
-	expect(readdirSync(f.workspace).sort()).toEqual(["home", "release"]);
+	expect(readdirSync(f.workspace).filter(name => name !== ".owner").sort()).toEqual(["home", "release"]);
 });
 
 test("skipProfiles wins even when the skipped named profile was explicitly selected", () => {

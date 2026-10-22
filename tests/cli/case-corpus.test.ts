@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join } from "node:path";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
@@ -8,7 +9,8 @@ const ROOT = join(import.meta.dir, "../..");
 
 test("native harness rejects malformed corpus shape without discarding shifted facts", () => {
 	const omp = resolveOmpIdentity(process.env);
-	const root = mkdtempSync(join(ROOT, "var/agent-tmp/case-corpus-"));
+	const owned = ownedTmp("case-corpus", { root: join(ROOT, "var/agent-tmp") });
+	const root = owned.path;
 	try {
 		const rules = join(root, "rules");
 		const cases = join(root, "cases.tsv");
@@ -32,6 +34,6 @@ test("native harness rejects malformed corpus shape without discarding shifted f
 		expect(shifted.code).not.toBe(0);
 		expect(shifted.output).toContain("9 columns, need exactly 8");
 	} finally {
-		rmSync(root, { recursive: true, force: true });
+		owned.cleanup();
 	}
 }, 120_000);

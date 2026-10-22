@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 // DEVID-SIGN-V1 (docs/release-signing.md): CI attests the locally signed darwin archive only after
 // scripts/devid_release.py proves it is the qualified archive plus a code signature. These fixtures are a
@@ -13,8 +13,9 @@ const TOOL = join(ROOT, "scripts", "devid_release.py");
 const VERSION = "1.2.3";
 const PLATFORM = "darwin-arm64-none";
 const FILENAME = `omp-kit-v${VERSION}-${PLATFORM}.tar`;
-const work = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "devid-release-"));
-afterAll(() => rmSync(work, { recursive: true, force: true }));
+const owned = ownedTmp("devid-release");
+const work = owned.path;
+afterAll(() => owned.cleanup());
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 

@@ -7,8 +7,9 @@ set -u
 
 CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/dispatch-check.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/dispatch-check-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+. "$(dirname -- "$CHECK")/kitlib-tmp.sh"
+[ -n "$(printenv TMPDIR)" ] || KITLIB_TMP_ROOT=$REPO_TMP
+kitlib_tmp TMP dispatch-check-test || exit 1
 
 pass=0
 fail=0

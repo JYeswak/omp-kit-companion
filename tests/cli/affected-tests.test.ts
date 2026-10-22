@@ -1,15 +1,22 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 
 // CIGATE1 (ompkit-v66l.27.1): the selector the pre-push gate uses to pick the tests a diff affects.
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = root.includes("/fresh-gate.") ? resolve(root, "..") : resolve(root, "var/agent-tmp");
 const selector = join(root, "scripts/affected-tests.ts");
 
+const owned: OwnedTmp[] = [];
+afterAll(() => {
+	for (const t of owned) t.cleanup();
+});
+
 function tree(files: Record<string, string>): string {
-	const dir = mkdtempSync(join(scratchRoot, "affected-tests-"));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=affected-tests-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
+	const t = ownedTmp("affected-tests", { root: scratchRoot });
+	owned.push(t);
+	const dir = t.path;
 	for (const [path, body] of Object.entries(files)) {
 		mkdirSync(dirname(join(dir, path)), { recursive: true });
 		writeFileSync(join(dir, path), body);

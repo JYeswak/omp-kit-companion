@@ -1,16 +1,17 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { YAML } from "bun";
 
 const repoRoot = resolve(import.meta.dir, "../..");
-const scratch = mkdtempSync(join(tmpdir(), "omp-kit-beads-policy."));
+const owned = ownedTmp("omp-kit-beads-policy");
+const scratch = owned.path;
 let retired = false;
 const cleanup = () => {
 	if (retired) return;
-	rmSync(scratch, { recursive: true, force: true });
+	owned.cleanup();
 	retired = true;
 };
 const interrupt = () => {

@@ -1,12 +1,21 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp, type OwnedTmp } from "../kitlib/tmp.ts";
 import { check, gitBlanketArgs, hostAgentName, shellTokens, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
 
-const roots: string[] = [];
+const agentTmp = join(import.meta.dir, "../../var/agent-tmp");
+mkdirSync(agentTmp, { recursive: true });
+const owned: OwnedTmp[] = [];
 afterEach(() => {
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+	for (const t of owned.splice(0)) t.cleanup();
 });
+
+function ownedRoot(label: string): string {
+	const t = ownedTmp(label, { root: agentTmp });
+	owned.push(t);
+	return t.path;
+}
 
 const savedHome = process.env.HOME;
 const savedTmp = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
@@ -20,8 +29,7 @@ afterEach(() => {
 });
 
 function home(): string {
-	const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fleet-home-"));
-	roots.push(dir);
+	const dir = ownedRoot("fleet-home");
 	process.env.HOME = dir;
 	return dir;
 }
@@ -32,7 +40,7 @@ function ctx(cwd: string) {
 
 test("write tool to tmp roots is blocked and names the rule", () => {
 	const dir = home();
-	for (const target of ["/tmp/x", "/private/tmp/x", "/var/tmp/x", "/private/var/folders/a/b"]) {
+	for (const target of ["/tmp/x", "/private/tmp/x", "/var/tmp/x", "/private/var/folders/a/b"]) { // tempsafe: fake guard input path, never touched on disk
 		const blocked = check({ toolName: "write", input: { path: target } }, ctx(dir));
 		expect(blocked?.block).toBe(true);
 		expect(blocked?.reason).toContain("fleet-guard scratch-write");
@@ -41,18 +49,18 @@ test("write tool to tmp roots is blocked and names the rule", () => {
 
 test("reads stay allowed and repo scratch stays writable", () => {
 	const dir = home();
-	expect(check({ toolName: "read", input: { path: "/tmp/x" } }, ctx(dir))).toBeUndefined();
+	expect(check({ toolName: "read", input: { path: "/tmp/x" } }, ctx(dir))).toBeUndefined(); // tempsafe: fake guard input path, never touched on disk
 	expect(check({ toolName: "write", input: { path: join(dir, "var", "agent-tmp", "w.1", "out.txt") } }, ctx(dir))).toBeUndefined();
 	expect(check({ toolName: "write", input: { path: join(dir, "proj", "file.txt") } }, ctx(dir))).toBeUndefined();
-	expect(check({ toolName: "grep", input: { path: "/tmp/x" } }, ctx(dir))).toBeUndefined();
-	expect(check({ toolName: "unknown-tool", input: { path: "/tmp/x" } }, ctx(dir))).toBeUndefined();
+	expect(check({ toolName: "grep", input: { path: "/tmp/x" } }, ctx(dir))).toBeUndefined(); // tempsafe: fake guard input path, never touched on disk
+	expect(check({ toolName: "unknown-tool", input: { path: "/tmp/x" } }, ctx(dir))).toBeUndefined(); // tempsafe: fake guard input path, never touched on disk
 });
 
 test("writes directly under HOME root are blocked, nested writes allowed", () => {
 	const dir = home();
 	expect(check({ toolName: "write", input: { path: join(dir, "notes.md") } }, ctx(dir))?.block).toBe(true);
 	expect(check({ toolName: "edit", input: { path: join(dir, "sub", "notes.md") } }, ctx(dir))).toBeUndefined();
-	expect(check({ toolName: "edit", input: { paths: [join(dir, "ok.md"), "/tmp/bad"] } }, ctx(dir))?.block).toBe(true);
+	expect(check({ toolName: "edit", input: { paths: [join(dir, "ok.md"), "/tmp/bad"] } }, ctx(dir))?.block).toBe(true); // tempsafe: fake guard input path, never touched on disk
 });
 
 test("logical write routes do not inherit a forbidden filesystem cwd", () => {
@@ -68,9 +76,9 @@ test("logical write routes do not inherit a forbidden filesystem cwd", () => {
 
 test("a logical route never exempts another filesystem target or a shell filename", () => {
 	for (const input of [
-		{ path: "proc://owned-job/kill", file: "/tmp/out" },
+		{ path: "proc://owned-job/kill", file: "/tmp/out" }, // tempsafe: fake guard input path, never touched on disk
 		{ paths: ["agent://coordinator", "/private/tmp/out", "xd://report_issue"] },
-		{ path: "/tmp/proc://owned-job/kill" },
+		{ path: "/tmp/proc://owned-job/kill" }, // tempsafe: fake guard input path, never touched on disk
 		{ path: "./proc://owned-job/kill" },
 		{ path: "proc:/owned-job/kill" },
 		{ path: "%70roc://owned-job/kill" },
@@ -155,9 +163,9 @@ test("native Bash input objects retain redirection and compound blanket-staging 
 });
 
 test("shellWriteTargets covers every sink in a compound command", () => {
-	expect(shellWriteTargets("echo ok; echo hi > /tmp/x")).toEqual(["/tmp/x"]);
+	expect(shellWriteTargets("echo ok; echo hi > /tmp/x")).toEqual(["/tmp/x"]); // tempsafe: parsed command text only, nothing executed
 	expect(shellWriteTargets("tee a b | cat")).toEqual(["a", "b"]);
-	expect(shellWriteTargets("cp -t /tmp/d f1")).toEqual(["/tmp/d"]);
+	expect(shellWriteTargets("cp -t /tmp/d f1")).toEqual(["/tmp/d"]); // tempsafe: parsed command text only, nothing executed
 	expect(shellWriteTargets("echo x > a > b")).toEqual(["a", "b"]);
 	expect(shellTokens("echo 'a > b'")[1]).toMatchObject({ text: "a > b", quoted: true });
 });
@@ -193,7 +201,7 @@ test("TMPALLOC1: an executed mktemp outside repo-local var/agent-tmp is refused 
 	const work = join(home(), "work");
 	const bash = (command: string) => check({ toolName: "bash", input: { command } }, ctx(work));
 	expect(bash(FRESHPI1)?.reason).toContain("fleet-guard scratch-alloc");
-	expect(bash(FRESHPI1)?.reason).toContain("/tmp/pi1-installed-real.XXXXXX");
+	expect(bash(FRESHPI1)?.reason).toContain("/tmp/pi1-installed-real.XXXXXX"); // tempsafe: expected reason text, nothing created
 	for (const command of [
 		"root=$(mktemp -d)\ncp -R \"$HOME/.omp/profiles\" \"$root/home/.omp/\"",
 		"root=`mktemp -d /tmp/pi1.XXXXXX` && cp -R a \"$root\"",
@@ -279,8 +287,7 @@ test("TMPALLOC1: shell text the guard cannot inspect is refused, never allowed",
 });
 
 test("session scratch dir matches the S2 owner-name contract", () => {
-	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fleet-repo-"));
-	roots.push(repo);
+	const repo = ownedRoot("fleet-repo");
 	mkdirSync(join(repo, ".git"), { recursive: true });
 	const dir = scratchDirFor(join(repo, "sub"), 4242);
 	expect(dir).toBe(join(repo, "var", "agent-tmp", "omp.4242"));
@@ -292,8 +299,7 @@ test("session scratch dir matches the S2 owner-name contract", () => {
 });
 
 test("OWNERKEY1: a seat owner carries agent and session together, and only when both are well formed", () => {
-	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fleet-seat-owner-"));
-	roots.push(repo);
+	const repo = ownedRoot("fleet-seat-owner");
 	const dir = join(repo, "var", "agent-tmp", "omp.4242");
 	const base = { pid: 4242, label: "omp", repo, created: "2026-10-02T00:00:00.000Z" };
 	const session = "01a15012-af9e-7628-bee6-496084668412";
@@ -306,8 +312,7 @@ test("OWNERKEY1: a seat owner carries agent and session together, and only when 
 });
 
 test("SCRATCHBIN1: a seat owner may name its throwaway bin, and no other bin is writable here", () => {
-	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fleet-seat-bin-"));
-	roots.push(repo);
+	const repo = ownedRoot("fleet-seat-bin");
 	const dir = join(repo, "var", "agent-tmp", "omp.4242");
 	const base = { pid: 4242, label: "omp", repo, created: "2026-10-02T00:00:00.000Z" };
 	writeScratchOwner(dir, { ...base, bin: "throwaway" });
@@ -326,10 +331,10 @@ test("OWNERKEY1: the host agent name is AGENT_NAME, else BR_ACTOR, else BR_AGENT
 });
 
 test("applyScratchEnv points child tools at the session dir", () => {
-	applyScratchEnv("/tmp/should-not-persist");
-	expect(process.env.TMPDIR).toBe("/tmp/should-not-persist");
-	expect(process.env.TMP).toBe("/tmp/should-not-persist");
-	expect(process.env.TEMP).toBe("/tmp/should-not-persist");
+	applyScratchEnv("/tmp/should-not-persist"); // tempsafe: env value only, restored afterEach and never created
+	expect(process.env.TMPDIR).toBe("/tmp/should-not-persist"); // tempsafe: expected env value, nothing created
+	expect(process.env.TMP).toBe("/tmp/should-not-persist"); // tempsafe: expected env value, nothing created
+	expect(process.env.TEMP).toBe("/tmp/should-not-persist"); // tempsafe: expected env value, nothing created
 });
 
 test("five hundred checks settle well inside budget without I/O", () => {

@@ -1,23 +1,25 @@
 import { expect, test } from "bun:test";
 import { afterAll } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ccActionOutcome, ccActionTarget, registerCommandHandler, runCli } from "../src/cli.ts";
+import { ownedTmp, type OwnedTmp } from "../src/kitlib/tmp.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
 
-const scratchDirs: string[] = [];
+const owned: OwnedTmp[] = [];
 afterAll(() => {
-	for (const dir of scratchDirs) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+	for (const t of owned) t.cleanup();
 }, 120000);
 
 function freshState(): string {
-	const dir = mkdtempSync(join(scratchRoot, "cli-actions-test." + process.pid + "."));
+	const t = ownedTmp("cli-actions-test", { root: scratchRoot });
+	owned.push(t);
+	const dir = t.path;
 	mkdirSync(join(dir, "spool"), { recursive: true });
-	scratchDirs.push(dir);
 	return dir;
 }
 

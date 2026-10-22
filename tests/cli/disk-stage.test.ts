@@ -1,22 +1,23 @@
 import { afterEach, expect, test } from "bun:test";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { admitDiskWork, diskStage, runDiskStageTick, WRITER_WINDOW_MS } from "../../src/disk-stage.ts";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratch = join(root, "var", "agent-tmp");
 mkdirSync(scratch, { recursive: true, mode: 0o700 });
-const created: string[] = [];
+const created: OwnedTmp[] = [];
 
 afterEach(() => {
-	for (const path of created.splice(0)) rmSync(path, { recursive: true, force: true });
+	for (const owned of created.splice(0)) owned.cleanup();
 });
 
 function fixture(label: string): string {
-	const path = mkdtempSync(join(scratch, `diskstage-${label}.`));
-	created.push(path);
-	return path;
+	const owned = ownedTmp(`diskstage-${label}`, { root: scratch });
+	created.push(owned);
+	return owned.path;
 }
 
 function reaperResult(args: readonly string[]) {

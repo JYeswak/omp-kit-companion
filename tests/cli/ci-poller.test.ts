@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { CACHE_NAME, STALE_AFTER_MS, pollRepos, readStatus, type CiCacheFile, type CiFetchResponse } from "../../src/ci-cache.ts";
 
 const roots: string[] = [];
@@ -158,7 +159,7 @@ test("planted: ci status is wired through the documented grammar", () => {
 });
 
 function runCiStatus(cache: CiCacheFile, json: boolean) {
-	const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "ci-status-"));
+	const home = ownedTmp("ci-status", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(home);
 	const state = join(home, "state", "omp-kit");
 	mkdirSync(state, { recursive: true });
@@ -228,7 +229,7 @@ test("mixed fresh and stale ci status names the stale repo in JSON and human out
 });
 
 test("planted: two seats share one poller cache with zero network (two watchers collapse to one)", () => {
-	const shared = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "ci-shared-"));
+	const shared = ownedTmp("ci-shared", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(shared);
 	const state = join(shared, "state", "omp-kit");
 	mkdirSync(state, { recursive: true });

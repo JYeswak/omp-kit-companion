@@ -4,9 +4,9 @@
 // fails N times is reported, not looped; upgrade notices never reach a
 // registered agent; results arrive as an inbox/aside event, never via polling.
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp } from "./kitlib/tmp.ts";
 import {
 	applyOnExit,
 	decideOnExit,
@@ -33,7 +33,7 @@ function row(overrides: Partial<BgAgentRow> = {}): BgAgentRow {
 		parentSeat: "TurquoiseSummit",
 		bead: "ompkit-fp72.19.1.27",
 		taskDigest: DIGEST,
-		checkpoint: "/tmp/bg-checkpoints/8601.json",
+		checkpoint: "/tmp/bg-checkpoints/8601.json", // tempsafe: fake registry field, never touched on disk
 		deadline: "2026-10-20T00:00:00Z",
 		restartPolicy: "restart",
 		release: "0.2.58",
@@ -59,12 +59,13 @@ test("registry records pid, parent seat, bead, task digest, checkpoint, deadline
 	const reg = registerAgent({ agents: [] }, row());
 	expect(reg.agents.length).toBe(1);
 	expect(reg.agents[0]).toEqual(row());
-	expect(findAgent(reg, 8601)?.checkpoint).toBe("/tmp/bg-checkpoints/8601.json");
+	expect(findAgent(reg, 8601)?.checkpoint).toBe("/tmp/bg-checkpoints/8601.json"); // tempsafe: expected fake field value, nothing created
 	expect(findAgent(reg, 9999)).toBeNull();
 });
 
 test("registry round-trips through the state file with every field intact", () => {
-	const dir = mkdtempSync(join(tmpdir(), "bgsup-reg-"));
+	const t = ownedTmp("bgsup-reg");
+	const dir = t.path;
 	try {
 		const path = join(dir, "state", "bg-agents.json");
 		saveRegistry(path, { agents: [row(), row({ pid: 8602, restartPolicy: "reassign" })] });
@@ -75,12 +76,13 @@ test("registry round-trips through the state file with every field intact", () =
 		const raw = JSON.parse(readFileSync(path, "utf8")) as { agents: BgAgentRow[] };
 		expect(raw.agents[0].taskDigest).toBe(DIGEST);
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		t.cleanup();
 	}
 });
 
 test("missing registry file loads empty; malformed files refuse", () => {
-	const dir = mkdtempSync(join(tmpdir(), "bgsup-missing-"));
+	const t = ownedTmp("bgsup-missing");
+	const dir = t.path;
 	try {
 		expect(loadRegistry(join(dir, "nope.json"))).toEqual({ agents: [] });
 		const bad = join(dir, "bad.json");
@@ -91,7 +93,7 @@ test("missing registry file loads empty; malformed files refuse", () => {
 		writeFileSync(bad, JSON.stringify({ agents: [row(), row()] }), "utf8");
 		expect(() => loadRegistry(bad)).toThrow("duplicate pid 8601");
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		t.cleanup();
 	}
 });
 
@@ -102,7 +104,7 @@ test("planted: killed agent without result restarts from its checkpoint", () => 
 	expect(outcome.effectRan).toBe(true);
 	expect(seen.calls.length).toBe(1);
 	expect(seen.calls[0].kind).toBe("restart");
-	expect(seen.calls[0].row.checkpoint).toBe("/tmp/bg-checkpoints/8601.json");
+	expect(seen.calls[0].row.checkpoint).toBe("/tmp/bg-checkpoints/8601.json"); // tempsafe: expected fake field value, nothing created
 	expect(seen.calls[0].row.taskDigest).toBe(DIGEST);
 	expect(findAgent(outcome.registry, 8601)?.attempts).toBe(1);
 });
@@ -182,7 +184,7 @@ test("result arrives as an aside event to the parent seat (no wait, no poll)", (
 	expect(event.deliverAs).toBe("aside");
 	expect(event.subject).toContain("ompkit-fp72.19.1.27");
 	expect(event.body).toContain("round 4 of 4 complete");
-	expect(event.body).toContain("/tmp/bg-checkpoints/8601.json");
+	expect(event.body).toContain("/tmp/bg-checkpoints/8601.json"); // tempsafe: expected fake field value, nothing created
 	expect(() => resultEvent(row(), "  ")).toThrow("refused");
 });
 

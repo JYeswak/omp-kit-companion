@@ -4,11 +4,11 @@ import { applyBrowserReap, collectBrowserProcesses, inspectBrowserProcesses, par
 test("orphan headless Chrome is found through the OMP broker and reaped by recorded PID", () => {
 	const chrome = parseBrowserCommand(20, 10, "/Applications/Google Chrome --headless --user-data-dir=/tmp/chrome /tmp/code_sign_clone/a", Date.now() - 86_400_000);
 	const broker = { pid: 10, ppid: 1, command: "__omp_worker_daemon_broker", startedAt: Date.now() - 90_000, userDataDir: null, codeSignClones: [] };
-	const report = inspectBrowserProcesses([broker, chrome], [{ pid: 10, alive: false }], Date.now(), ["/tmp/code_sign_clone/a"]);
+	const report = inspectBrowserProcesses([broker, chrome], [{ pid: 10, alive: false }], Date.now(), ["/tmp/code_sign_clone/a"]); // tempsafe: fake process-table path, never touched on disk
 	expect(report.orphaned.map(browser => browser.pid)).toEqual([20]);
 	const plan = planBrowserReap(report);
-	const applied = applyBrowserReap(plan, { kill: pid => pid === 20, quarantine: path => path === "/tmp/code_sign_clone/a" });
-	expect(applied).toEqual({ killed: [20], quarantined: ["/tmp/code_sign_clone/a"] });
+	const applied = applyBrowserReap(plan, { kill: pid => pid === 20, quarantine: path => path === "/tmp/code_sign_clone/a" }); // tempsafe: fake quarantine stub path, never touched on disk
+	expect(applied).toEqual({ killed: [20], quarantined: ["/tmp/code_sign_clone/a"] }); // tempsafe: expected fake path, nothing created
 });
 
 test("a Chrome whose owning OMP session is live is not flagged", () => {
@@ -31,7 +31,7 @@ test("process-table collector follows broker parent chain and records age", () =
 });
 
 test("orphan browser sharing a live Chrome clone is killed without quarantining the clone", () => {
-	const clone = "/tmp/code_sign_clone/shared";
+	const clone = "/tmp/code_sign_clone/shared"; // tempsafe: fake process-table path, never touched on disk
 	const orphanBroker = { pid: 10, ppid: 1, command: "__omp_worker_daemon_broker", startedAt: 0, userDataDir: null, codeSignClones: [] };
 	const liveBroker = { pid: 30, ppid: 1, command: "__omp_worker_daemon_broker", startedAt: 0, userDataDir: null, codeSignClones: [] };
 	const orphan = parseBrowserCommand(20, 10, `/Applications/Google Chrome --headless --user-data-dir=/tmp/orphan ${clone}`, 0);

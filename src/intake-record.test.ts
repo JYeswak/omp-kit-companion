@@ -1,10 +1,10 @@
 // intake-record.test.ts — INTAKE1 record slice (ompkit-fp72.19.1.19): the
 // record path appends one exact JSONL row per request, never dedupes, and
 // refuses malformed repo paths before any write.
-import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp, type OwnedTmp } from "./kitlib/tmp.ts";
 import {
 	beadArgsFor,
 	formatRouteLine,
@@ -14,8 +14,15 @@ import {
 	type BrRunner,
 } from "./intake-record.ts";
 
+const owned: OwnedTmp[] = [];
+afterAll(() => {
+	for (const t of owned) t.cleanup();
+});
+
 function fixtureRepo(): string {
-	return mkdtempSync(join(tmpdir(), "intakerecord-repo-"));
+	const t = ownedTmp("intakerecord-repo");
+	owned.push(t);
+	return t.path;
 }
 
 function readRows(repo: string): string[] {
@@ -152,7 +159,9 @@ test("malformed repo paths throw and never write", () => {
 		).toThrow();
 	}
 	// A path that exists but is a file, not a directory, also refuses.
-	const file = join(mkdtempSync(join(tmpdir(), "intakerecord-file-")), "notadir");
+	const fileDir = ownedTmp("intakerecord-file");
+	owned.push(fileDir);
+	const file = join(fileDir.path, "notadir");
 	writeFileSync(file, "x\n");
 	try {
 		expect(() => resolveDecisionsPath(file)).toThrow();

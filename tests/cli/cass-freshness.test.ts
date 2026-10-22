@@ -1,7 +1,11 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { assessCassFreshness, type SessionFreshness } from "../../src/cass-freshness.ts";
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
+
+const owned: OwnedTmp[] = [];
+afterAll(() => { for (const t of owned) t.cleanup(); });
 
 const now = new Date("2026-10-17T12:00:00Z");
 const sessions: SessionFreshness = {
@@ -79,8 +83,9 @@ test("a session arriving during status cannot be hidden by the earlier source sc
 	const root = resolve(import.meta.dir, "../..");
 	const scratch = join(root, "var", "agent-tmp");
 	mkdirSync(scratch, { recursive: true });
-	const home = mkdtempSync(join(scratch, `cass-race.${process.pid}.`));
-	writeFileSync(join(home, ".owner"), `pid=${process.pid}\nlabel=cass-race\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
+	const tmp = ownedTmp("cass-race", { root: scratch });
+	owned.push(tmp);
+	const home = tmp.path;
 	const bin = join(home, "bin"), source = join(home, ".omp", "agent", "sessions");
 	mkdirSync(bin, { recursive: true });
 	mkdirSync(source, { recursive: true });

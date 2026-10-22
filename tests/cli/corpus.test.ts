@@ -1,17 +1,18 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
-import { tmpdir } from "node:os";
 import process from "node:process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { sanitizedEnv } from "../../src/runtime.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
+let owned: OwnedTmp | undefined;
 let base = "";
 let binary = "";
 let home = "";
@@ -31,7 +32,8 @@ function assistantText(id: string, text: string): string {
 
 beforeAll(() => {
 	const omp = resolveOmpIdentity(process.env);
-	base = mkdtempSync(join(tmpdir(), "omp-kit-corpus-"));
+	owned = ownedTmp("omp-kit-corpus");
+	base = owned.path;
 	release = join(base, "relocated", "release");
 	binary = join(release, "bin", "omp-kit");
 	home = join(base, "home");
@@ -82,7 +84,7 @@ beforeAll(() => {
 }, 120_000);
 
 afterAll(() => {
-	if (base) rmSync(base, { recursive: true, force: true });
+	owned?.cleanup();
 });
 
 type CorpusRule = { rule?: string; kind?: string; scanned?: number; fires?: number; rate?: number;
@@ -368,7 +370,8 @@ test("CORPUS_EGRESS_PLANT: a direct-dial control through the same child runtime 
 	].join("\n"));
 	try {
 		const omp = resolveOmpIdentity(process.env);
-		const privateRoot = mkdtempSync(join(base, "egress-child-"));
+		const privateRoot = join(base, "egress-child");
+		mkdirSync(privateRoot);
 		const childEnv: Record<string, string> = {
 			...sanitizedEnv(omp, process.env, privateRoot),
 			BUN_BE_BUN: "1",

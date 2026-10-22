@@ -3,18 +3,27 @@
 // registry under HOME) and the Agent Mail store (AGENT_MAIL_STORAGE_ROOT). Planted:
 // a 25 h claim by a dead agent is listed DEAD; the same age by a reservation holder
 // is not; an unreadable store lists both as UNKNOWN instead of dropping them.
-import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const HOUR = 3600_000;
-const home = mkdtempSync(join(tmpdir(), "drain-liveness-home-"));
+const owned = ownedTmp("drain-liveness-home");
+const home = owned.path;
+afterAll(() => owned.cleanup());
+let fixtureCount = 0;
+
+function fixtureDir(prefix: string): string {
+	const dir = join(home, `${prefix}-${fixtureCount++}`);
+	mkdirSync(dir);
+	return dir;
+}
 
 function shims(): string {
-	const dir = mkdtempSync(join(home, "bin-"));
+	const dir = fixtureDir("bin");
 	writeFileSync(join(dir, "tern"), "#!/bin/sh\nprintf '%s' '{\"panes\":[],\"sessions\":[]}'\n");
 	writeFileSync(join(dir, "tmux"), "#!/bin/sh\necho 'no server running on /x/default' >&2\nexit 1\n");
 	chmodSync(join(dir, "tern"), 0o755);
@@ -23,7 +32,7 @@ function shims(): string {
 }
 
 function project(now: number): string {
-	const dir = mkdtempSync(join(home, "proj-"));
+	const dir = fixtureDir("proj");
 	mkdirSync(join(dir, ".beads"), { recursive: true });
 	const db = new Database(join(dir, ".beads", "beads.db"));
 	db.exec("CREATE TABLE issues(id TEXT PRIMARY KEY, title TEXT, status TEXT, assignee TEXT, updated_at TEXT)");
@@ -36,7 +45,7 @@ function project(now: number): string {
 }
 
 function store(now: number): string {
-	const dir = mkdtempSync(join(home, "mail-"));
+	const dir = fixtureDir("mail");
 	const db = new Database(join(dir, "storage.sqlite3"));
 	db.exec("CREATE TABLE agents(id INTEGER PRIMARY KEY, project_id INTEGER, name TEXT)");
 	db.exec("CREATE TABLE messages(id INTEGER PRIMARY KEY, project_id INTEGER, sender_id INTEGER, created_ts INTEGER)");

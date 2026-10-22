@@ -12,8 +12,9 @@ SCRIPTS=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)
 HOOK=$SCRIPTS/agent-trailer-hook.sh
 INSTALLER=$SCRIPTS/install-agent-trailer-hook.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/agent-trailer-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+. "$SCRIPTS/kitlib-tmp.sh"
+printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
+kitlib_tmp TMP agent-trailer-test || exit 1
 
 pass=0
 fail=0

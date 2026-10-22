@@ -1,13 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp, type OwnedTmp } from "../kitlib/tmp.ts";
 import type { ScratchReleaseResult } from "../scratch.ts";
 import { endSeat, respawnIntentActive, respawnIntentPath, type SeatEndDeps } from "./seat-end.ts";
 
-mkdirSync(join(import.meta.dir, "../../var/agent-tmp"), { recursive: true });
-const roots: string[] = [];
+const agentTmp = join(import.meta.dir, "../../var/agent-tmp");
+mkdirSync(agentTmp, { recursive: true });
+const owned: OwnedTmp[] = [];
 afterEach(() => {
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+	for (const t of owned.splice(0)) t.cleanup();
 });
 
 const START = "Mon Oct 19 01:00:00 2026";
@@ -17,9 +19,9 @@ const PID = 4242;
 const RECORDED = { dir: "/seat/omp.4242", agent: "TurquoiseSummit", session: "S1" };
 
 function stateRoot(): string {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "seat-end-"));
-	roots.push(root);
-	return root;
+	const t = ownedTmp("seat-end", { root: agentTmp });
+	owned.push(t);
+	return t.path;
 }
 
 function plant(root: string, row: Record<string, unknown>): string {

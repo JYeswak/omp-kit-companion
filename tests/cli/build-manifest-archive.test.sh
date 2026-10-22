@@ -3,10 +3,10 @@
 # A clean source export has src/ but no .git or embedded bin/omp-kit. Its manifest
 # producer must use the direct Bun path, while a stale manifest must still refuse.
 set -eu
-: "${TMPDIR:?set a private test scratch directory}"
+printenv TMPDIR >/dev/null || { printf 'TMPDIR: set a private test scratch directory\n' >&2; exit 1; }
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
-WORK=$(mktemp -d "$TMPDIR/build-manifest-archive-test.XXXXXXXX")
-trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+. "$ROOT/scripts/kitlib-tmp.sh"
+kitlib_tmp WORK build-manifest-archive-test || exit 1
 
 SOURCE="$WORK/logical-source"
 PHYSICAL="$WORK/physical-source"
@@ -16,6 +16,7 @@ mkdir "$PHYSICAL/src" "$PHYSICAL/scripts"
 cp -R "$ROOT/rules" "$PHYSICAL/rules"
 cp -R "$ROOT/rules-fleet" "$PHYSICAL/rules-fleet"
 cp "$ROOT/scripts/build-manifest.sh" "$PHYSICAL/scripts/build-manifest.sh"
+cp "$ROOT/scripts/kitlib-tmp.sh" "$PHYSICAL/scripts/kitlib-tmp.sh"
 cp "$ROOT/scripts/runtime-adapter.sh" "$PHYSICAL/scripts/runtime-adapter.sh"
 cp "$ROOT/scripts/rule-class.ts" "$PHYSICAL/scripts/rule-class.ts"
 cp "$ROOT/scripts/install.sh" "$PHYSICAL/scripts/install.sh"

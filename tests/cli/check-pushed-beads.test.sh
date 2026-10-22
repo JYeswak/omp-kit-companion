@@ -9,8 +9,9 @@ set -u
 
 CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/check-pushed-beads.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/check-pushed-beads-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+if ! printenv TMPDIR >/dev/null; then KITLIB_TMP_ROOT=$REPO_TMP; fi
+. "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
+kitlib_tmp TMP check-pushed-beads-test || exit 1
 
 pass=0
 fail=0

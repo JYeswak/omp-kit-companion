@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join, resolve } from "node:path";
 import { applyRulePlan, planRules } from "../../src/apply-rules.ts";
 import { audit, undo, why } from "../../src/audit.ts";
@@ -8,7 +9,8 @@ import { applyMutation, planMutation, recoverMutation } from "../../src/mutation
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 function fixture(run: (f: { home: string; source: string; state: string; rules: string; directory: string }) => void): void {
-	const directory = mkdtempSync(join(scratch, "audit-"));
+	const owned = ownedTmp("audit", { root: scratch });
+	const directory = owned.path;
 	const home = join(directory, "home"), source = join(directory, "source"), rules = join(home, ".agents", "rules");
 	const state = join(home, ".local", "state", "omp-kit");
 	mkdirSync(join(source, "rules"), { recursive: true });
@@ -17,7 +19,7 @@ function fixture(run: (f: { home: string; source: string; state: string; rules: 
 	const text = "kit original\n";
 	writeFileSync(join(source, "rules", "alpha.md"), text);
 	writeFileSync(join(source, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nalpha\t${createHash("sha256").update(text).digest("hex")}\treminder\tabcdef0\n`);
-	try { run({ home, source, state, rules, directory }); } finally { rmSync(directory, { recursive: true, force: true }); }
+	try { run({ home, source, state, rules, directory }); } finally { owned.cleanup(); }
 }
 function install(f: { home: string; source: string }) {
 	return applyRulePlan(planRules({ root: f.source, home: f.home }), { confirmed: true });

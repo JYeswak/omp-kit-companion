@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const fixtures: string[] = [];
@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 function workspace(): string {
-	const root = mkdtempSync(join(tmpdir(), "omp-kit-cli-"));
+	const root = ownedTmp("omp-kit-cli").path;
 	fixtures.push(root);
 	return root;
 }

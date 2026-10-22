@@ -1,19 +1,24 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
-import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, readRchSocketBaseline, writeRchSocketBaseline, type Finding, type RchConfigRead, type RchDaemonWorker, type RchProbeWorker, type RchReachabilityDeps, type RchSocketBaseline, type RchWorkerHealthDeps } from "../../src/diagnostics.ts";
 // Separate additive import: the shared import above stays byte-identical (fp72.96).
 import { attributeAckSender, type IdentityAck, type PaneBinding, type ReservationHolder, type SeatBindingRow } from "../../src/diagnostics.ts";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { snapshotWatched } from "../../src/operator-snapshot.ts";
 
-const fixtures: string[] = [];
+const fixtures: OwnedTmp[] = [];
 interface Fixture { base: string; root: string; home: string; project: string; bunRoot: string; bytes: string; ompPath: string }
-afterEach(() => { for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { for (const owned of fixtures.splice(0)) owned.cleanup(); });
+function ownedFixture(label: string): string {
+	const owned = ownedTmp(label);
+	fixtures.push(owned);
+	return owned.path;
+}
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 const environmentKeys = ["PATH", "HOME", "BUN_INSTALL", "OMP_KIT_OMP_SRC_CACHE", "OMP_KIT_OMP_SRC_FETCH", "OMP_PATH", "OMP_BIN", "OMP", "OMP_SRC"] as const;
 async function withEnvironment<T>(environment: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
@@ -47,8 +52,7 @@ async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 }
 
 function fixture(): Fixture {
-	const base = mkdtempSync(join(tmpdir(), "omp-kit-diagnostics-"));
-	fixtures.push(base);
+	const base = ownedFixture("omp-kit-diagnostics");
 	const root = join(base, "release");
 	const home = join(base, "home");
 	const project = join(base, "project");
@@ -851,7 +855,8 @@ test("omp_drift tracks the OMP of the last recorded test and clears only after a
 test("agent_mail_guard flags an unset or dangling storage root and passes a live one", async () => {
 	const f = fixture(); installOmp(f);
 	const saved = process.env.AGENT_MAIL_STORAGE_ROOT;
-	const live = mkdtempSync(join(tmpdir(), "omp-kit-am1-"));
+	const liveTmp = ownedTmp("omp-kit-am1");
+	const live = liveTmp.path;
 	try {
 		delete process.env.AGENT_MAIL_STORAGE_ROOT;
 		let rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
@@ -866,12 +871,13 @@ test("agent_mail_guard flags an unset or dangling storage root and passes a live
 		expect(finding(rows, "agent_mail_guard").evidence?.storage_root).toBe(live);
 	} finally {
 		if (saved === undefined) delete process.env.AGENT_MAIL_STORAGE_ROOT; else process.env.AGENT_MAIL_STORAGE_ROOT = saved;
-		rmSync(live, { recursive: true, force: true });
+		liveTmp.cleanup();
 	}
 });
 
 test("dicklesworthstone scope reports installed vs latest with one source per tool", async () => {
-	const bindir = mkdtempSync(join(tmpdir(), "omp-kit-js1-"));
+	const bindirTmp = ownedTmp("omp-kit-js1");
+	const bindir = bindirTmp.path;
 	const bin = (name: string, version: string) => {
 		writeFileSync(join(bindir, name), `#!/bin/sh\necho '${version}'\n`);
 		chmodSync(join(bindir, name), 0o755);
@@ -900,7 +906,7 @@ test("dicklesworthstone scope reports installed vs latest with one source per to
 		expect(found.evidence?.behind).toEqual(["br"]);
 	} finally {
 		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
-		rmSync(bindir, { recursive: true, force: true });
+		bindirTmp.cleanup();
 	}
 });
 
@@ -960,8 +966,7 @@ test("regex tools finder names the install command per missing tool", () => {
 });
 
 test("planted missing grex is reported with its install command", () => {
-	const dir = mkdtempSync(join(tmpdir(), "regex-tools-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("regex-tools");
 	for (const bin of ["pomsky", "regexploit", "regexploit-js", "regexploit-py", "rgx"]) {
 		const path = join(dir, bin);
 		writeFileSync(path, "#!/bin/sh\n");
@@ -974,8 +979,7 @@ test("planted missing grex is reported with its install command", () => {
 });
 
 test("all regex tools present reports OK", () => {
-	const dir = mkdtempSync(join(tmpdir(), "regex-tools-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("regex-tools");
 	for (const bin of ["grex", "pomsky", "regexploit", "regexploit-js", "regexploit-py", "rgx"]) {
 		const path = join(dir, bin);
 		writeFileSync(path, "#!/bin/sh\n");
@@ -1137,8 +1141,7 @@ test("effective-rules probe leaves the inspected HOME byte- and mtime-identical"
 	// under $HOME on startup, so probing with the inspected HOME mutated it.
 	// The probe runs OMP against an isolated copy carrying only small configs.
 	const omp = resolveOmpIdentity(process.env).launcher;
-	const home = mkdtempSync(join(tmpdir(), "omp-kit-probe-home-"));
-	fixtures.push(home);
+	const home = ownedFixture("omp-kit-probe-home");
 	mkdirSync(join(home, ".omp", "agent"), { recursive: true });
 	writeFileSync(join(home, ".omp", "agent", "config.yml"), "memory:\n  backend: off\n");
 	mkdirSync(join(home, ".omp", "profiles", "native-fixture", "agent"), { recursive: true });
@@ -1217,8 +1220,7 @@ function noCapacity(row: Finding): void {
 }
 
 test("rch: live listener on a present socket is RUNNING", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-run-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-run");
 	const sock = join(dir, "rch.sock");
 	const server = await unixListener(sock);
 	try {
@@ -1233,8 +1235,7 @@ test("rch: live listener on a present socket is RUNNING", async () => {
 });
 
 test("rch: unlinked path under a live holder is SOCKET_UNLINKED, never capacity", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-unlink-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-unlink");
 	const sock = join(dir, "rch.sock");
 	const server = await unixListener(sock);
 	try {
@@ -1251,8 +1252,7 @@ test("rch: unlinked path under a live holder is SOCKET_UNLINKED, never capacity"
 });
 
 test("rch: path replaced by a regular file is SOCKET_UNLINKED", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-replaced-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-replaced");
 	const sock = join(dir, "rch.sock");
 	writeFileSync(sock, "not a socket\n");
 	const row = inspectRchReachability(rchDeps(sock, { statSocket: () => ({ kind: "other", ino: null }) }));
@@ -1275,8 +1275,7 @@ function rchInoDeps(sockPath: string, initial: RchSocketBaseline | null, over: P
 }
 
 test("rch: path replaced by a different socket (same path, new ino) is SOCKET_UNLINKED", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-replaced-sock-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-replaced-sock");
 	const sock = join(dir, "rch.sock");
 	const server = await unixListener(sock);
 	try {
@@ -1295,8 +1294,7 @@ test("rch: path replaced by a different socket (same path, new ino) is SOCKET_UN
 });
 
 test("rch: same path and same ino stays RUNNING; a stale or moved baseline is refreshed, not failed", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-ino-match-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-ino-match");
 	const sock = join(dir, "rch.sock");
 	const server = await unixListener(sock);
 	try {
@@ -1329,8 +1327,7 @@ test("rch: same path and same ino stays RUNNING; a stale or moved baseline is re
 });
 
 test("rch: missing path after a healthy baseline is SOCKET_UNLINKED", () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-ino-missing-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-ino-missing");
 	const sock = join(dir, "rch.sock");
 	const { deps, written } = rchInoDeps(sock,
 		{ path: sock, ino: 7, at: new Date().toISOString() });
@@ -1343,8 +1340,7 @@ test("rch: missing path after a healthy baseline is SOCKET_UNLINKED", () => {
 });
 
 test("rch: first healthy sight records the baseline and never fails; the next read compares", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-ino-first-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-ino-first");
 	const sock = join(dir, "rch.sock");
 	const server = await unixListener(sock);
 	try {
@@ -1369,8 +1365,7 @@ test("rch: first healthy sight records the baseline and never fails; the next re
 });
 
 test("rch: socket ino baseline round-trips through the state root file; corrupt reads as absent", () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-ino-state-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-ino-state");
 	const root = join(dir, "state");
 	expect(readRchSocketBaseline(root)).toBeNull();
 	const baseline: RchSocketBaseline = { path: join(dir, "rch.sock"), ino: 42, at: new Date().toISOString() };
@@ -1382,7 +1377,7 @@ test("rch: socket ino baseline round-trips through the state root file; corrupt 
 });
 
 test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERIFIED", async () => {
-	const sock = join(tmpdir(), "rch-absent.sock");
+	const sock = join(ownedFixture("rch-absent"), "rch-absent.sock");
 	const stopped = inspectRchReachability(rchDeps(sock, { daemon: () => ({ running: false, socketPath: sock }) }));
 	expect(stopped.status).toBe("OK");
 	expect(stopped.evidence?.state).toBe("NOT_RUNNING");
@@ -1400,8 +1395,7 @@ test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERI
 });
 
 test("rch: default statSocket reads real fixture socket state", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-default-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-default");
 	const sock = join(dir, "rch.sock");
 	const server = await unixListener(sock);
 	try {
@@ -1487,8 +1481,7 @@ test("oq1h.5: on Linux the rchd pid is the single rchd process of this uid, neve
 });
 
 test("oq1h.5: a live rchd on Linux reaches RUNNING through the same checks, and an ambiguous pid stays UNVERIFIED", async () => {
-	const dir = mkdtempSync(join(tmpdir(), "rch-linux-"));
-	fixtures.push(dir);
+	const dir = ownedFixture("rch-linux");
 	const sock = join(dir, "rch.sock");
 	const server = await unixListener(sock);
 	try {
@@ -1670,8 +1663,7 @@ test("5vph: an absent config file is missing roots; an unreadable or invalid one
 });
 
 test("5vph: the default reader selects rch's own config dir and reads config.toml from it", () => {
-	const base = mkdtempSync(join(tmpdir(), "rch-gc-"));
-	fixtures.push(base);
+	const base = ownedFixture("rch-gc");
 	const home = join(base, "home");
 	const dir = join(base, "cfg");
 	mkdirSync(home);

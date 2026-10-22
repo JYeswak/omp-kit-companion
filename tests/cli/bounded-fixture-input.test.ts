@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join, resolve } from "node:path";
 import { readBoundedFile } from "../../src/external-pack.ts";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 
 test("bounded fixture reader handles regular data and refuses a FIFO without waiting for a writer", () => {
-	const root = mkdtempSync(join(runtimeTempRoot(), "omp-kit-fixture-input-"));
+	const owned = ownedTmp("omp-kit-fixture-input", { root: runtimeTempRoot() });
+	const root = owned.path;
 
 	try {
 		const regular = join(root, "fixture.json");
@@ -29,6 +31,6 @@ test("bounded fixture reader handles regular data and refuses a FIFO without wai
 		expect(result.stderr.toString()).toBe("");
 		expect(JSON.parse(result.stdout.toString())).toEqual({ code: "UNSAFE_EXTERNAL_FILE" });
 	} finally {
-		rmSync(root, { recursive: true, force: true });
+		owned.cleanup();
 	}
 }, 20_000);

@@ -3,8 +3,8 @@
 set -u
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/check-tap-owner.sh
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/check-tap-owner-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+. "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
+kitlib_tmp TMP check-tap-owner-test || exit 1
 pass=0
 fail=0
 check() { # name expected_rc actual_rc output [pattern...]

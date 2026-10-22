@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 // scripts/agent-fix-beads.sh routes every open `agent-fix` issue to exactly one bead (ompkit-issue-pr-autopilot-w159).
 // The real script runs against stub gh and br executables whose state lives in JSON files, so a rerun observes what
@@ -9,8 +9,9 @@ import { join } from "node:path";
 const SCRIPT = join(import.meta.dir, "..", "..", "scripts", "agent-fix-beads.sh");
 const REPO = "JYeswak/omp-kit-companion";
 const ISSUE_URL = `https://github.com/${REPO}/issues/91`;
-const root = mkdtempSync(join(tmpdir(), "omp-kit-agent-fix-beads-"));
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+const owned = ownedTmp("omp-kit-agent-fix-beads");
+const root = owned.path;
+afterAll(() => owned.cleanup());
 
 interface State { issues: { number: number; title: string; url: string; state: string }[]; beads: { id: string; title: string; status: string; labels: string[]; external_ref?: string; comments: string[] }[]; issueComments: { number: string; body: string }[] }
 

@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { checkSkillLibrary, claudeSaveJobEnabled, readClaudeSaveUserBaselines, runClaudeSaveJob, runGitleaksScan, type ClaudeSaveConfig, type ClaudeSaveGit, type GitleaksScanRequest, type GitleaksScanResult, type GitleaksScanner } from "../../src/claude-save-job.ts";
 
 const dirs: string[] = [];
@@ -13,7 +14,7 @@ function sh(repo: string, ...args: string[]): ClaudeSaveGit {
 
 /** Scratch repo on main with a file:// origin; never ~/.claude itself. */
 function fixtureRepo(): { repo: string; origin: string } {
-	const base = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "save1-"));
+	const base = ownedTmp("save1", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path;
 	dirs.push(base);
 	const repo = join(base, "work");
 	const origin = join(base, "origin.git");
@@ -354,7 +355,7 @@ test("oq1h.7 default-empty baselines refuse even a main-only tree (fail-closed s
 });
 
 test("oq1h.7 user baselines are read from the operator config, default empty", () => {
-	const base = mkdtempSync(join(process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"), "save1-user-"));
+	const base = ownedTmp("save1-user", { root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp") }).path;
 	dirs.push(base);
 	const home = join(base, "home");
 	const savedXdg = process.env.XDG_CONFIG_HOME, savedOverride = process.env.OMP_KIT_CLAUDE_SAVE_CONFIG;

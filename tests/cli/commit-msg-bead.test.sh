@@ -6,8 +6,9 @@ set -u
 
 HOOK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/commit-msg-bead.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP=$(mktemp -d "${TMPDIR:-$REPO_TMP}/commit-msg-bead-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+if ! printenv TMPDIR >/dev/null; then KITLIB_TMP_ROOT=$REPO_TMP; fi
+. "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
+kitlib_tmp TMP commit-msg-bead-test || exit 1
 
 pass=0
 fail=0

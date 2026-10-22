@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fileURLToPath } from "node:url";
 
 const harness = join(fileURLToPath(new URL("../..", import.meta.url)), "scripts", "ttsr-harness.ts");
@@ -15,7 +15,8 @@ const harness = join(fileURLToPath(new URL("../..", import.meta.url)), "scripts"
 // bun's fake timers cannot reach; a concurrent harness passes it within milliseconds, and
 // the 1 s bound only decides how fast a serial harness fails.
 test("the gate and the selftest build their admission fixtures concurrently, with unchanged verdicts", async () => {
-	const temp = mkdtempSync(join(tmpdir(), "omp-kit-admission-overlap-"));
+	const owned = ownedTmp("omp-kit-admission-overlap");
+	const temp = owned.path;
 	const realGit = Bun.which("git");
 	if (!realGit) throw new Error("the overlap proof needs git on the suite PATH");
 	try {
@@ -59,6 +60,6 @@ test("the gate and the selftest build their admission fixtures concurrently, wit
 		expect(selftest!.stdout).toContain("plant (flip) RED as intended");
 		expect(selftest!.inits).toBeGreaterThan(1);
 	} finally {
-		rmSync(temp, { recursive: true, force: true });
+		owned.cleanup();
 	}
 });

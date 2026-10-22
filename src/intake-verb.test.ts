@@ -1,9 +1,10 @@
 // intake-verb tests: INTAKE1 AC1-AC3 for `omp-kit intake` (bead ompkit-fp72.19.1.19).
 // AC4 (prompt citations) is out of scope and has no tests here.
 import { strict as assert } from "node:assert";
-import { test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ownedTmp, type OwnedTmp } from "./kitlib/tmp.ts";
 import { runIntakeVerb, type IntakeVerbOptions } from "./intake-verb.ts";
 import { markerFor } from "./intake-deliver.ts";
 import { intakeDigestLine } from "./report-inject-job.ts";
@@ -15,11 +16,16 @@ const ROSTER = {
 	roster: { chief: "lead-chief", director: "director", w1: "worker" },
 };
 
+const owned: OwnedTmp[] = [];
+afterAll(() => {
+	for (const t of owned) t.cleanup();
+});
+
 function repo(label: string): string {
 	mkdirSync(scratchRoot, { recursive: true });
-	const root = mkdtempSync(join(scratchRoot, `intakeverb-${label}-${process.pid}-`));
-	writeFileSync(join(root, ".owner"), `pid=${process.pid}\nlabel=intakeverb-${label}\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`);
-	return root;
+	const t = ownedTmp(`intakeverb-${label}`, { root: scratchRoot });
+	owned.push(t);
+	return t.path;
 }
 
 function rowsOf(root: string): Record<string, unknown>[] {

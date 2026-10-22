@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join, resolve } from "node:path";
 import { diagnose } from "../../src/diagnostics.ts";
 import { applyRulePlan, planRules } from "../../src/apply-rules.ts";
@@ -8,14 +9,15 @@ import { applyRulePlan, planRules } from "../../src/apply-rules.ts";
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 function fixture(run: (f: { root: string; home: string; rules: string; state: string; installed: string }) => void): void {
-	const dir = mkdtempSync(join(scratch, "apply-rules-"));
+	const owned = ownedTmp("apply-rules", { root: scratch });
+	const dir = owned.path;
 	const root = join(dir, "release"), home = join(dir, "home"), rules = join(root, "rules"), installed = join(home, ".agents", "rules"), state = join(home, ".local", "state", "omp-kit");
 	mkdirSync(rules, { recursive: true });
 	mkdirSync(join(root, "retired"));
 	mkdirSync(home);
 	writeFileSync(join(rules, "alpha.md"), "kit original\n");
 	writeFileSync(join(root, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nalpha\t${hash("kit original\n")}\treminder\tabcdef0\n`);
-	try { run({ root, home, rules, state, installed }); } finally { rmSync(dir, { recursive: true, force: true }); }
+	try { run({ root, home, rules, state, installed }); } finally { owned.cleanup(); }
 }
 function retireAlpha(f: { root: string; rules: string }): void {
 	rmSync(join(f.rules, "alpha.md"));
@@ -266,7 +268,8 @@ test("compiled rules plan and consented apply establish verifiable ownership wit
 }));
 
 test("doctor distinguishes kit-owned postimage from identical unowned bytes and drift", async () => {
-	const dir = mkdtempSync(join(scratch, "doctor-rules-"));
+	const owned = ownedTmp("doctor-rules", { root: scratch });
+	const dir = owned.path;
 	const root = join(dir, "release"), home = join(dir, "home"), rules = join(root, "rules");
 	const installed = join(home, ".agents", "rules"), ownership = join(home, ".agents", "omp-kit-ownership.json");
 	mkdirSync(rules, { recursive: true });
@@ -306,5 +309,5 @@ test("doctor distinguishes kit-owned postimage from identical unowned bytes and 
 		expect(linked.status).toBe("DEGRADED");
 		expect(linked.evidence?.ownership).toBe("UNSAFE_RECORD");
 		expect(readFileSync(outside, "utf8")).toBe("leave intact");
-	} finally { rmSync(dir, { recursive: true, force: true }); }
+	} finally { owned.cleanup(); }
 });

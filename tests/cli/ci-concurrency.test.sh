@@ -12,8 +12,8 @@
 set -u
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$HERE/../.." && pwd)
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/ci-concurrency-test.XXXXXX") || exit 1
-trap 'rm -rf "$TMP"' EXIT INT TERM
+. "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
+kitlib_tmp TMP ci-concurrency-test || exit 1
 pass=0
 fail=0
 check() { # name expected_rc actual_rc output [pattern...]

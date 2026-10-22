@@ -10,17 +10,9 @@ set -u
 
 INSTALLER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/install-commit-msg-bead.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
-TMP="${TMPDIR:-$REPO_TMP}/staged-imports-test.$$"
-(umask 077; mkdir "$TMP") || exit 1
-python3 - "$TMP" "$REPO_TMP" "$$" <<'PY' || exit 1
-import datetime, json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-record = {"pid": int(sys.argv[3]), "label": "staged-imports-test",
-          "repo": str(pathlib.Path(sys.argv[2]).parents[1]),
-          "created": datetime.datetime.now(datetime.timezone.utc).isoformat()}
-(root / ".owner").write_text(json.dumps(record) + "\n")
-PY
-trap 'printf "retained owned staged import fixtures: %s\n" "$TMP" >&2' EXIT
+if ! printenv TMPDIR >/dev/null; then KITLIB_TMP_ROOT=$REPO_TMP; fi
+. "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
+kitlib_tmp TMP staged-imports-test || exit 1
 
 pass=0
 fail=0

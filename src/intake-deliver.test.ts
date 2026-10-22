@@ -3,10 +3,10 @@
 // marker proof (one retry, then the drop-folder fallback), deterministic
 // markers for idempotent redelivery, and hourly fleet_report counts from
 // the record slice's ledger. All externals are fakes; no subprocess runs.
-import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { ownedTmp, type OwnedTmp } from "./kitlib/tmp.ts";
 import {
 	INTAKE_DELIVER_HOUR_MS,
 	deliverRoute,
@@ -26,8 +26,15 @@ const PANE = "1";
 const WINDOW = "fleet-window";
 const HOUR = Date.parse("2026-10-19T05:00:00.000Z");
 
+const owned: OwnedTmp[] = [];
+afterAll(() => {
+	for (const t of owned) t.cleanup();
+});
+
 function fixtureRepo(): string {
-	return mkdtempSync(join(tmpdir(), "intakedeliver-repo-"));
+	const t = ownedTmp("intakedeliver-repo");
+	owned.push(t);
+	return t.path;
 }
 
 function baseInput(repo: string, dropDir: string, sessionFile: string) {

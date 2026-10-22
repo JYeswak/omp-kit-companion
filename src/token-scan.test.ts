@@ -15,13 +15,13 @@ describe("TOKENSCAN1", () => {
   });
   test("generated gzip and HMAC screen are exercised; absent screen is unknown", () => {
     const token = "known-secret";
-    const result = scanTokenFiles([{ path: "/tmp/tokenscan-missing", area: "gzip", gzip: true }], null, Buffer.from("registry"));
+    const result = scanTokenFiles([{ path: "/tmp/tokenscan-missing", area: "gzip", gzip: true }], null, Buffer.from("registry")); // tempsafe: deliberately missing path, only read attempted
     expect(result.overall).toBe("UNKNOWN");
     expect(result.registry_sha256).toHaveLength(64);
     expect(scanTokenBytes("api", "api", gzipSync(Buffer.from(token)), screen)).toBeNull();
   });
   test("unreadable store is unknown rather than clean", () => {
-    const result = scanTokenFiles([{ path: "/tmp/tokenscan-missing", area: "db" }], screen);
+    const result = scanTokenFiles([{ path: "/tmp/tokenscan-missing", area: "db" }], screen); // tempsafe: deliberately missing path, only read attempted
     expect(result.overall).toBe("UNKNOWN");
     expect(result.files).toBe(0);
   });

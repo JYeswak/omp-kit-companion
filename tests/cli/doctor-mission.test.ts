@@ -1,14 +1,15 @@
 // ompkit-5vph "Every rch repo": doctor --scope mission lists each repo that builds through rch and whether its gate
 // calls the kit lease; a repo-local lease script (planted copy of the old uds one) is a finding naming the file.
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { censusMissionRch, inspectMissionRch, type MissionRchIo } from "../../src/mission-rch.ts";
 
-const scratch = mkdtempSync(join(tmpdir(), "doctor-mission-"));
+const owned = ownedTmp("doctor-mission");
+const scratch = owned.path;
 const repoRoot = resolve(import.meta.dir, "../..");
-process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
+afterAll(() => owned.cleanup());
 
 function mem(repos: { repo: string; source: string }[], files: Record<string, string>): MissionRchIo {
 	return {
@@ -72,7 +73,8 @@ test("the same repo listed twice is counted once", () => {
 });
 
 test("doctor --scope mission through the CLI accepts the scope and reports the planted repo", () => {
-	const base = mkdtempSync(join(tmpdir(), "mission-cli-"));
+	const ownedBase = ownedTmp("mission-cli");
+	const base = ownedBase.path;
 	try {
 		const home = join(base, "home");
 		const repo = join(base, "repo");
@@ -87,7 +89,7 @@ test("doctor --scope mission through the CLI accepts the scope and reports the p
 		const body = JSON.parse(child.stdout.toString()) as { data: { findings: { component: string; status: string }[] } };
 		expect(body.data.findings.map((row) => row.component)).toEqual(["mission_rch", "mission_rch:repo"]);
 		expect(body.data.findings[0]!.status).toBe("DEGRADED");
-	} finally { rmSync(base, { recursive: true, force: true }); }
+	} finally { ownedBase.cleanup(); }
 }, 120_000);
 
 test("a repo dir that cannot be read is UNREADABLE, never a finding; no repos is UNVERIFIED", () => {

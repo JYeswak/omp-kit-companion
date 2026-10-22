@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, pluginReceiptPaths, pluginRowErrors, undoPlugin, type PluginReceipt, type PluginRunner, type PluginSnapshot } from "../../src/apply-plugin.ts";
 
 const store = "/fixture/releases/0.2.5";
@@ -10,8 +11,7 @@ const scratchRoot = join(process.cwd(), "var", "agent-tmp");
 
 function makeStateRoot(label: string): string {
 	mkdirSync(scratchRoot, { recursive: true });
-	const dir = mkdtempSync(join(scratchRoot, `prof1-${label}-`));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=prof1-${label}\nrepo=${process.cwd()}\ncreated=${new Date().toISOString()}\n`);
+	const dir = ownedTmp(`prof1-${label}`, { root: scratchRoot }).path;
 	return dir;
 }
 function filesystemKind(path: string): "ABSENT" | "FILE" | "DIRECTORY" | "SYMLINK" | "OTHER" {
@@ -104,8 +104,7 @@ test("names a profile when postcheck loses its plugin rules", () => {
 test("plugin profile hashes cover the OMP link and registry files, not unrelated cache entries", () => {
 	const scratchRoot = join(process.cwd(), "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true });
-	const dir = mkdtempSync(join(scratchRoot, "plugin-hash-test-"));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=plugin-hash-test\nrepo=${process.cwd()}\ncreated=${new Date().toISOString()}\n`);
+	const dir = ownedTmp("plugin-hash-test", { root: scratchRoot }).path;
 	const plugins = join(dir, "plugins");
 	mkdirSync(plugins);
 	const linkPath = join(plugins, "node_modules", "omp-kit-companion");

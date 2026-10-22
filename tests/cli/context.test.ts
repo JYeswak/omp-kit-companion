@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { dirname, join, resolve } from "node:path";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { ensureOmpSource } from "../../src/omp-source-cache.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
@@ -17,6 +17,7 @@ function certifiedOmpVersion(): string {
 }
 const OMP_VERSION = certifiedOmpVersion();
 
+let owned: OwnedTmp | undefined;
 let base = "";
 let binary = "";
 let home = "";
@@ -36,7 +37,8 @@ function writeSkill(root: string, dir: string, name: string, body: string): void
 }
 
 beforeAll(() => {
-	base = mkdtempSync(join(tmpdir(), "omp-kit-context-"));
+	owned = ownedTmp("omp-kit-context");
+	base = owned.path;
 	home = join(base, "home");
 	mkdirSync(home, { recursive: true });
 	mkdirSync(join(base, "tmp"), { recursive: true });
@@ -46,7 +48,7 @@ beforeAll(() => {
 	const tsServer = join(toolBin, "typescript-language-server");
 	writeFileSync(tsServer, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'typescript-language-server 0.0.0-test\\n'; exit 0; fi\nexit 64\n");
 	chmodSync(tsServer, 0o755);
-	const sourceCache = join(tmpdir(), `omp-kit-context-omp-source-${process.pid}`);
+	const sourceCache = join(base, "omp-source");
 	const ompPackage = ensureOmpSource(OMP_VERSION, {
 		HOME: home, TMPDIR: join(base, "tmp"), PATH: `${toolBin}:/usr/bin:/bin`,
 		OMP_KIT_OMP_SRC_CACHE: sourceCache,
@@ -101,7 +103,7 @@ beforeAll(() => {
 }, 120_000);
 
 afterAll(() => {
-	if (base) rmSync(base, { recursive: true, force: true });
+	owned?.cleanup();
 });
 
 type Envelope = {

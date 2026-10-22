@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join, resolve } from "node:path";
 import { expect, test } from "bun:test";
 import { applyRulePlan, planRules } from "../../src/apply-rules.ts";
@@ -8,7 +9,8 @@ const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const hash = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 type F = { root: string; home: string; installed: string };
 function fixture(run: (f: F) => void): void {
-	const dir = mkdtempSync(join(scratch, "apply-rules-fleet-"));
+	const owned = ownedTmp("apply-rules-fleet", { root: scratch });
+	const dir = owned.path;
 	const root = join(dir, "release"), home = join(dir, "home");
 	mkdirSync(join(root, "rules"), { recursive: true });
 	mkdirSync(join(root, "rules-fleet"), { recursive: true });
@@ -18,7 +20,7 @@ function fixture(run: (f: F) => void): void {
 	writeFileSync(join(root, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nalpha\t${hash("kit original\n")}\treminder\tabcdef0\n`);
 	writeFileSync(join(root, "rules-fleet", "fleet.md"), "fleet protocol\n");
 	writeFileSync(join(root, "MANIFEST.fleet.tsv"), `name\tsha256\tclass\tpack\nfleet\t${hash("fleet protocol\n")}\treminder\tabcdef0\n`);
-	try { run({ root, home, installed: join(home, ".agents", "rules") }); } finally { rmSync(dir, { recursive: true, force: true }); }
+	try { run({ root, home, installed: join(home, ".agents", "rules") }); } finally { owned.cleanup(); }
 }
 
 test("default plan installs only the default pack and never reads the fleet pack", () => fixture(f => {

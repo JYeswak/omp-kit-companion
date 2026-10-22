@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { applyPolicyPlan, planPolicy } from "../../src/apply-policy.ts";
@@ -51,7 +52,7 @@ function seedProfile(home: string, name: string, values: Record<string, unknown>
 const policyValues = { enabled: true, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] };
 function fixture(options: { legacyRules?: boolean } = {}) {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
-	const workspace = mkdtempSync(join(base, "p12-policy-native-"));
+	const workspace = ownedTmp("p12-policy-native", { root: base }).path;
 	fixtures.push(workspace);
 	const root = join(workspace, "release"), home = join(workspace, "home"), project = join(workspace, "project");
 	const body = "# Managed\nDo not leak secrets.\n";

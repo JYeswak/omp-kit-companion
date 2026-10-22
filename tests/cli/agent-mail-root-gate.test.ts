@@ -1,12 +1,14 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const kitRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(kitRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, `am1-root-gate.${process.pid}.`));
-writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=am1-root-gate\nrepo=${kitRoot}\ncreated=${new Date().toISOString()}\n`);
+const owned = ownedTmp("am1-root-gate", { root: scratchRoot });
+afterAll(() => owned.cleanup());
+const scratch = owned.path;
 const fixture = join(scratch, "repo");
 const isolatedHome = join(scratch, "home");
 const globalGitConfig = join(scratch, "gitconfig");
