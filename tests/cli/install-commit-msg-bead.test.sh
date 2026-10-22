@@ -10,18 +10,11 @@ set -u
 
 INSTALLER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/install-commit-msg-bead.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd -P)
-TMP="${TMPDIR:-$REPO_TMP}/install-bead-test.$$"
-(umask 077 && mkdir "$TMP") || exit 1
+# Owned fixture root, removed on exit and on HUP/INT/TERM (kitlib, J-2026-10-22-06).
+# shellcheck source=scripts/kitlib-tmp.sh
+. "$(dirname -- "$INSTALLER")/kitlib-tmp.sh"
+KITLIB_TMP_ROOT="${TMPDIR:-$REPO_TMP}" kitlib_tmp TMP install-bead-test || exit 1
 TMP=$(CDPATH='' cd -- "$TMP" && pwd -P) || exit 1
-python3 - "$TMP" "$REPO_TMP" "$$" <<'PY' || exit 1
-import datetime, json, pathlib, sys
-root = pathlib.Path(sys.argv[1])
-record = {"pid": int(sys.argv[3]), "label": root.name.rsplit(".", 1)[0],
-          "repo": str(pathlib.Path(sys.argv[2]).parents[1]),
-          "created": datetime.datetime.now(datetime.timezone.utc).isoformat()}
-(root / ".owner").write_text(json.dumps(record) + "\n")
-PY
-trap 'printf "retained owned installer fixtures: %s\n" "$TMP" >&2' EXIT
 
 pass=0
 fail=0
@@ -202,6 +195,24 @@ ok "$?" "0" "check-missing-pysafe-reinstall-rc"
 modes=1
 [ -x "$A/.git/hooks/hooks.d/pre-commit/49-omp-kit-staged-pysafe" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/pysafe_check.py" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/pysafe.py" ] && modes=0
 ok "$modes" "0" "pysafe-helpers-not-executable"
+kitlib_copies() {
+	modes=1
+	for chain in pre-commit pre-push reference-transaction; do
+		cmp -s "$(dirname -- "$INSTALLER")/kitlib-tmp.sh" "$A/.git/hooks/hooks.d/$chain/kitlib-tmp.sh" && [ ! -x "$A/.git/hooks/hooks.d/$chain/kitlib-tmp.sh" ] || modes=0
+	done
+	printf '%s' "$modes"
+}
+ok "$(kitlib_copies)" "1" "kitlib-tmp-in-three-chains-not-executable"
+rm -f "$A/.git/hooks/hooks.d/pre-push/kitlib-tmp.sh" "$A/.git/hooks/hooks.d/reference-transaction/kitlib-tmp.sh"
+sh "$INSTALLER" --check "$A" > "$TMP/o-missing-kitlib" 2>&1
+ok "$?" "3" "check-missing-kitlib-tmp-rc"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/pre-push/kitlib-tmp.sh" "$TMP/o-missing-kitlib"
+ok "$?" "0" "check-missing-kitlib-tmp-named"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/reference-transaction/kitlib-tmp.sh" "$TMP/o-missing-kitlib"
+ok "$?" "0" "check-missing-ref-txn-kitlib-tmp-named"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "check-missing-kitlib-tmp-reinstall-rc"
+ok "$(kitlib_copies)" "1" "kitlib-tmp-reinstall-restored"
 
 # 6. rollback restores a member it overwrote, byte-for-byte, and leaves no
 #    backup behind (planted: the old installer deleted it, localbench 2026-10-16)
@@ -306,7 +317,7 @@ ok "$(git -C "$TMP/pushreal-origin.git" rev-parse main)" "$JB" "pushreal-origin-
 # 11. an inert shared-main member (passes an off-main commit) is caught by the
 #     live probe: the install rolls back and leaves no member behind
 mkdir -p "$TMP/inertkit/scripts"
-for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh check-staged-readme.sh pysafe.py pysafe_check.py readme-check.ts; do
+for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-readme.sh pysafe.py pysafe_check.py tempsafe_check.py readme-check.ts kitlib-tmp.sh; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
 cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"

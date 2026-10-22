@@ -272,6 +272,8 @@ jobs:
           python3 tests/scripts/kitlib_run_test.py
           python3 tests/scripts/kitlib_tmp_test.py
           python3 tests/scripts/pysafe_check_test.py
+          python3 tests/scripts/tempsafe_check_test.py
+          sh tests/cli/check-staged-tempsafe.test.sh
       - name: Fetch reviewed OMP memory source fixture (18.4.9)
         shell: bash
         run: |

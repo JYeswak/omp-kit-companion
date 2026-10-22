@@ -46,6 +46,11 @@ export const HOOK_MEMBER_PAIRS: ReadonlyArray<readonly [string, string]> = [
 	["hooks.d/pre-commit/49-omp-kit-staged-pysafe", "scripts/check-staged-pysafe.sh"],
 	["hooks.d/pre-commit/pysafe.py", "scripts/pysafe.py"],
 	["hooks.d/pre-commit/pysafe_check.py", "scripts/pysafe_check.py"],
+	["hooks.d/pre-commit/50-omp-kit-staged-tempsafe", "scripts/check-staged-tempsafe.sh"],
+	["hooks.d/pre-commit/tempsafe_check.py", "scripts/tempsafe_check.py"],
+	["hooks.d/pre-commit/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
+	["hooks.d/pre-push/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
+	["hooks.d/reference-transaction/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
 	["hooks.d/pre-commit/46-omp-kit-staged-readme", "scripts/check-staged-readme.sh"],
 	["hooks.d/pre-commit/readme-check.ts", "scripts/readme-check.ts"],
 

@@ -2,7 +2,7 @@
 # Install the bead-id commit-msg hook, the reference-transaction ref guard,
 # the shared-main pre-push member and the pushed-beads pre-push member into a
 # repo's hook chains, plus the staged-imports, staged-fragments,
-# staged-regexploit and staged-pysafe pre-commit members.
+# staged-regexploit, staged-pysafe and staged-tempsafe pre-commit members.
 # Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout).
 # The shared-main member (scripts/check-pushed-on-main.sh) is always installed:
 # it judges only where a push moves the remote main, never old messages.
@@ -22,6 +22,11 @@
 # pysafe_check.py beside it) is always installed: it refuses a commit whose
 # staged .py files add a hang-prone call (no timeout, inherited stdin,
 # unbounded wait, read or loop) that HEAD does not already have.
+# The staged-tempsafe member (scripts/check-staged-tempsafe.sh, with
+# tempsafe_check.py and the pysafe.py it imports beside it) is
+# always installed: it refuses a commit whose staged files add temp creation
+# outside kitlib (mkdtemp, tmpdir(), tempfile, mktemp, $TMPDIR, /tmp) that
+# HEAD does not already have.
 # --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
 # shared-main member): new id-less commits are refused, existing history is not
 # judged. A full install refuses (exit 5) when the unpublished range already
@@ -227,6 +232,11 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh" \
 		"hooks.d/pre-commit/pysafe.py scripts/pysafe.py" \
 		"hooks.d/pre-commit/pysafe_check.py scripts/pysafe_check.py" \
+		"hooks.d/pre-commit/50-omp-kit-staged-tempsafe scripts/check-staged-tempsafe.sh" \
+		"hooks.d/pre-commit/tempsafe_check.py scripts/tempsafe_check.py" \
+		"hooks.d/pre-commit/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
+		"hooks.d/pre-push/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
+		"hooks.d/reference-transaction/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/pre-commit/46-omp-kit-staged-readme scripts/check-staged-readme.sh" \
 		"hooks.d/pre-commit/readme-check.ts scripts/readme-check.ts"; do
 		# shellcheck disable=SC2086
@@ -479,6 +489,27 @@ install_staged_pysafe() {
 	printf 'installed staged-pysafe member: %s\n' "$member"
 }
 
+# install_staged_tempsafe: the checker sits beside the member, non-executable,
+# next to the pysafe.py copy install_staged_pysafe (always run first) placed
+# there; tempsafe_check.py imports only pysafe.py. Numbered after pysafe.
+install_staged_tempsafe() {
+	dir=$(chain_dir pre-commit)
+	member="$dir/50-omp-kit-staged-tempsafe"
+	place "$KITROOT/scripts/tempsafe_check.py" "$dir/tempsafe_check.py" -x
+	place "$KITROOT/scripts/check-staged-tempsafe.sh" "$member" +x
+	printf 'installed staged-tempsafe member: %s\n' "$member"
+}
+
+# install_kitlib_tmp: members in the pre-commit, pre-push and reference-transaction
+# chains source "<own dir>/kitlib-tmp.sh" for owned temp dirs (KITLIB-TMP v1), so
+# each chain gets a non-executable copy the runner never executes arg-less.
+install_kitlib_tmp() {
+	for chain in pre-commit pre-push reference-transaction; do
+		place "$KITROOT/scripts/kitlib-tmp.sh" "$(chain_dir "$chain")/kitlib-tmp.sh" -x
+	done
+	printf 'installed kitlib-tmp.sh into the pre-commit, pre-push and reference-transaction chains\n'
+}
+
 # install_staged_readme: the checker copy sits beside the member,
 # non-executable, so the chain runner never runs it arg-less. The member
 # judges the staged tree (READMESIZE1, ompkit-readme-changelog-currency-vrrn.1).
@@ -524,7 +555,8 @@ install_native_preservation() {
 
 PROBE=$(mktemp "${TMPDIR:-/tmp}/bead-probe.XXXXXX") || exit 2
 PROBE_DB=$(mktemp "${TMPDIR:-/tmp}/bead-probe-db.XXXXXX") || exit 2
-trap 'rm -f "$PROBE" "$PROBE_DB"' EXIT INT TERM
+# The probe tracker writes sidecars beside PROBE_DB (-wal, -shm, .fsqlite-*); remove them too.
+trap 'rm -f "$PROBE" "$PROBE_DB" "$PROBE_DB"-* "$PROBE_DB".*' EXIT INT TERM
 printf '[test] fix widgets probe baseline\n' > "$PROBE"
 
 # Pre-flight: record how any bespoke entry treats a well-formed message
@@ -559,10 +591,12 @@ install_pushed_vlevel
 ensure_chain reference-transaction
 install_ref_txn
 ensure_chain pre-commit
+install_kitlib_tmp
 install_staged_imports
 install_staged_fragments
 install_staged_regexploit
 install_staged_pysafe
+install_staged_tempsafe
 install_staged_readme
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 

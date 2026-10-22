@@ -252,6 +252,21 @@ if [ -n "${base_ref:-}" ]; then
 		fi
 	fi
 fi
+# TEMPGATE1 (ompkit-dhmzg): the pushed range adds no temp creation outside kitlib (range ratchet:
+# untouched sites never block, new ones always do). Bounded by pysafe.py run; the checker comes
+# from the base archive like regexploit below. Skipped until the base archive carries it (first landing).
+if [ ! -f "$gate_scripts/scripts/tempsafe_check.py" ]; then
+	printf 'SKIP tempsafe-range: checker absent from base archive\n' >&2
+else
+	printf '== tempsafe-range\n'
+	if python3 -B "$gate_scripts/scripts/pysafe.py" run --timeout 300 -- python3 -B "$gate_scripts/scripts/tempsafe_check.py" --repo "$ROOT" ${base_ref:+--base "$base_ref"} --head "$local_sha"; then
+		printf 'GREEN tempsafe-range\n'
+	else
+		rc=$?
+		printf 'RED tempsafe-range producer_rc=%s: the range creates temp dirs outside kitlib (use ownedTmp from src/kitlib/tmp.ts, owned_tmp from scripts/kitlib_tmp.py, or kitlib_tmp from scripts/kitlib-tmp.sh; or justify the line inline with "tempsafe: <reason>")\n' "$rc" >&2
+		exit "$rc"
+	fi
+fi
 if [ -n "${base_ref:-}" ]; then
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --base "$base_ref" --head "$local_sha"
 else
