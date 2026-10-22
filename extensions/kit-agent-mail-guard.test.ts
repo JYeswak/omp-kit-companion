@@ -547,6 +547,29 @@ test("phantom capped roster: exact membership retains cross-project ambiguity wa
 	expect(verdict?.additionalContext).toContain(LOCALBENCH);
 });
 
+test("warnings: project ambiguity cannot bypass security, authentication or wake admission", async () => {
+	const respond = fleetRespond({
+		[OMPKIT]: [mailRow("PlumRaven"), mailRow("IcyBarn", { last_active_ts: "2026-10-06T22:07:55.466462Z" })],
+		[LOCALBENCH]: [mailRow("PlumRaven"), mailRow("IcyBarn", { last_active_ts: "2026-10-19T09:00:00.000000Z" })],
+	});
+	const env = { AGENT_NAME: "PlumRaven", AGENT_MAIL_SENDER_TOKEN: SEAT_TOKEN };
+	const host = await createHost({ env }, respond);
+	const cwd = fleetRepo();
+	const target = { project_key: OMPKIT, to: ["IcyBarn"], cc: [] };
+	expect(code(await host.mail(cwd, "send_message", send({ ...target, subject: "untyped update" })))).toBe("AM_SUBJECT_VOCAB");
+	const secret = await host.mail(cwd, "send_message", send({ ...target, body_md: `run: export ${secretName}=${secretValue}` }));
+	expect(code(secret)).toBe("AM_BODY_SECRET");
+	expect(JSON.stringify(secret)).not.toContain(secretValue);
+	const admitted = await host.mail(cwd, "send_message", send(target));
+	expect(admitted?.block).not.toBe(true);
+	expect(admitted?.additionalContext).toContain("AM_PROJECT_AMBIGUOUS");
+	expect(stampedArgs(admitted)?.sender_token).toBe(SEAT_TOKEN);
+	const noWake = await createHost({ env, mailWake: recordingWake("NO_WAKE_PATH: required recipient is unavailable") }, respond);
+	const denied = await noWake.mail(cwd, "send_message", send(target));
+	expect(denied?.block).toBe(true);
+	expect(denied?.reason).toStartWith("NO_WAKE_PATH");
+});
+
 test("phantom capped roster: authoritative absence refuses; malformed, unavailable and wrong-name exact results remain unknown", async () => {
 	const rows = Array.from({ length: 250 }, (_, index) => mailRow(`Recent${index}`));
 	rows[0] = mailRow("PlumRaven");

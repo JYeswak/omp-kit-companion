@@ -510,9 +510,10 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		if (typeof sender !== "string" || !names.some(name => name.toLowerCase() === sender.trim().toLowerCase())) {
 			return refuse("AM_IDENTITY_MISMATCH", `sender_name ${typeof sender === "string" ? `"${sender}"` : "is missing"} is not this seat (${names.join(", ")}). Send as yourself; never as another agent.`);
 		}
+		let notice: FlywheelToolCallResult | undefined;
 		if (tool === "send_message") {
-			const recipients = await checkRecipients(sender, value, ctx);
-			if (recipients !== undefined) return recipients;
+			notice = await checkRecipients(sender, value, ctx);
+			if (notice?.block === true) return notice;
 		}
 		const ack = prop(value, "ack_required");
 		const ackOn = ack === true || (typeof ack === "string" && ack.trim().toLowerCase() === "true");
@@ -545,7 +546,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		if (patterns.some(pattern => pattern.test(body))) {
 			return refuse("AM_BODY_SECRET", "the body holds what the secret scanner flags as a literal credential. Never mail a secret: name where it lives (Infisical key name) instead.");
 		}
-		return undefined;
+		return notice;
 	}
 	/**
 	 * The seat's sender_token, injected into a send the seat already passed every check on.
@@ -611,14 +612,15 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			const names = await seatNames(ctx, prop(call.args.value, "project_key"));
 			const tool = call.tool === "send_message" ? "send_message" : "reply_message";
 			const verdict = await checkMessage(tool, call.args.value, ctx, names);
-			if (verdict !== undefined) return verdict;
+			if (verdict?.block === true) return verdict;
 			// MAILWAKE1 (ompkit-uk9wn): plan the recipients' wake only once every check passed; an ask with no
 			// wake path is refused here (NO_WAKE_PATH) before anything is sent.
 			const projectKey = prop(call.args.value, "project_key");
 			const wakeVerdict = await wake.beforeSend(event.toolCallId, tool, call.args.value,
 				typeof projectKey === "string" && projectKey !== "" ? projectKey : ctx.cwd);
 			if (wakeVerdict !== undefined) return wakeVerdict;
-			return injectSenderToken(call, event, names);
+			const tokenPatch = injectSenderToken(call, event, names);
+			return tokenPatch === undefined ? verdict : { ...verdict, ...tokenPatch };
 		} catch (error) {
 			return refuse("AM_GUARD_FAILED", `the check failed (${error instanceof Error ? error.message : String(error)}).`);
 		}
