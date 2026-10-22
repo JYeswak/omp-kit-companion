@@ -2,20 +2,20 @@ import { expect, test } from "bun:test";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { lintCondition } from "../../scripts/regex-budget.ts";
 import { loadRuleFile } from "../../scripts/rule-class.ts";
 
 const root = resolve(import.meta.dir, "../..");
-const scratchRoot = join(root, "var/agent-tmp");
 const ruleNames = [
-	"bash-pipe-exit",
-	"kit-close-reason-no-evidence",
-	"kit-no-force-push",
-	"kit-no-pattern-kill",
-	"kit-no-verify",
-	"kit-scratch-tmp",
-	"kit-settings-mutation",
-];
+	["rules", "bash-pipe-exit"],
+	["rules", "kit-close-reason-no-evidence"],
+	["rules-fleet", "kit-no-force-push"],
+	["rules-fleet", "kit-no-pattern-kill"],
+	["rules", "kit-no-verify"],
+	["rules-fleet", "kit-scratch-tmp"],
+	["rules", "kit-settings-mutation"],
+] as const;
 
 const cases: [string, "fire" | "quiet", string, string][] = [
 	["kit-scratch-tmp", "fire", "tool", "pwd\\n\\tcat >/tmp/rx2-scratch"],
@@ -35,25 +35,28 @@ const cases: [string, "fire" | "quiet", string, string][] = [
 ];
 
 function makeFixture(): string {
-	mkdirSync(scratchRoot, { recursive: true });
-	const dir = mkdtempSync(join(scratchRoot, "rx2-rules-test-"));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=rx2-rules-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
-	const rulesDir = join(dir, "rules");
-	mkdirSync(rulesDir);
-	for (const name of ruleNames) copyFileSync(join(root, "rules", `${name}.md`), join(rulesDir, `${name}.md`));
-	const rows = [CASE_HEADER];
-	for (const [rule, expected, source, snippet] of cases) {
-		rows.push([rule, expected, source, "bash", "-", snippet, "RX2 escaped boundary", ""].join("\t"));
+	const dir = mkdtempSync(join(tmpdir(), "rx2-rules-test-"));
+	try {
+		const rulesDir = join(dir, "rules");
+		mkdirSync(rulesDir);
+		for (const [pack, name] of ruleNames) copyFileSync(join(root, pack, `${name}.md`), join(rulesDir, `${name}.md`));
+		const rows = [CASE_HEADER];
+		for (const [rule, expected, source, snippet] of cases) {
+			rows.push([rule, expected, source, "bash", "-", snippet, "RX2 escaped boundary", ""].join("\t"));
+		}
+		writeFileSync(join(dir, "cases.tsv"), `${rows.join("\n")}\n`);
+		return dir;
+	} catch (error) {
+		rmSync(dir, { recursive: true, force: true });
+		throw error;
 	}
-	writeFileSync(join(dir, "cases.tsv"), `${rows.join("\n")}\n`);
-	return dir;
 }
 
 const cleanup = (dir: string) => { if (dir) rmSync(dir, { recursive: true, force: true }); };
 
 test("RX2 bash conditions are literal-first without unsafe leading assertions", () => {
-	const violations = ruleNames.flatMap(name => {
-		const loaded = loadRuleFile(join(root, "rules", `${name}.md`));
+	const violations = ruleNames.flatMap(([pack, name]) => {
+		const loaded = loadRuleFile(join(root, pack, `${name}.md`));
 		return (loaded.rule.condition ?? []).flatMap((pattern, conditionIndex) =>
 			lintCondition(pattern).map(code => `${name}#${conditionIndex}: ${code}`),
 		);

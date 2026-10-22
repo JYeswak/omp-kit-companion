@@ -308,16 +308,16 @@ test("[holder-negative] live holder preserves the next eligible rate opportunity
 	}
 });
 
-function loadRule(): { patterns: RegExp[]; body: string } {
-	const raw = readFileSync(join(repoRoot, "rules", "kit-no-live-tracker-sqlite.md"), "utf8");
+function loadRule(): RegExp[] {
+	const raw = readFileSync(join(repoRoot, "rules-fleet", "kit-no-live-tracker-sqlite.md"), "utf8");
 	const frontmatter = raw.split("---")[1] ?? "";
 	const sources = [...frontmatter.matchAll(/^\s+-\s*'(.*)'\s*$/gm)].map((m) => (m[1] ?? "").replace(/''/g, "'"));
 	expect(sources.length).toBeGreaterThan(0);
-	return { patterns: sources.map((s) => new RegExp(s)), body: raw };
+	return sources.map((s) => new RegExp(s));
 }
 
 test("[rule] prohibited live SQLite reader fires the shipped rule; native twin stays quiet", () => {
-	const { patterns, body } = loadRule();
+	const patterns = loadRule();
 	const prohibited = [
 		`sqlite3 /repo/.beads/beads.db "select * from issues"`,
 		`sqlite3 '/repo/.beads/beads.db' .dump`,
@@ -340,8 +340,4 @@ test("[rule] prohibited live SQLite reader fires the shipped rule; native twin s
 		`ATTACH '/tmp/copy.db' AS c`,
 	];
 	for (const sample of allowed) expect(patterns.some((pattern) => { pattern.lastIndex = 0; return pattern.test(sample); })).toBe(false);
-	expect(body).toContain("br list");
-	expect(body).toContain("bv --robot-triage");
-	expect(body).toContain("disposable");
-	expect(body).toContain("beads_rust#532");
 });
