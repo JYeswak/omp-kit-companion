@@ -1,15 +1,18 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 import { exportCommitToScratch, parseFreeOwner, parseTextOwner, releaseBudgetEntry, repoOfRoot } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
 import { acquireRunLock } from "../../src/service-run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const roots: string[] = [];
 const fixtureRepo = resolve(import.meta.dir, "../..");
+const AGENT_TMP = join(fixtureRepo, "var", "agent-tmp");
+/** A fresh owned dir (src/kitlib/tmp.ts) under the repo's var/agent-tmp; callers still push it to `roots`. */
+const agentTmp = (label: string): string => ownedTmp(label, { root: AGENT_TMP }).path;
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
 const savedState = process.env.XDG_STATE_HOME;
 const savedTmp = process.env.TMPDIR;
@@ -28,7 +31,7 @@ afterEach(() => {
 
 /** Isolated state dir for in-process apply tests (which append JSONL to XDG state). */
 function useState(): string {
-  const state = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-xdg-"));
+  const state = agentTmp("scratch-xdg");
   roots.push(state);
   process.env.XDG_STATE_HOME = state;
   return state;
@@ -106,7 +109,7 @@ test("modern and fleet-guard owner files parse strictly", () => {
 
 test("releaseScratch refuses a reused owner PID before marking release", () => {
   const { home } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-reused-pid-"));
+  const root = agentTmp("scratch-reused-pid");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const dir = sessionDir(root, "omp", process.pid);
@@ -164,7 +167,7 @@ test("quarantine entry names round-trip their timestamp", () => {
 });
 
 test("inspect keeps live owners, reaps dead ones, and skips missing or legacy owners", () => {
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const live = sessionDir(root, "live", process.pid);
   writeFileSync(join(live, ".owner"), ownerText(liveFields("live")));
@@ -182,7 +185,7 @@ test("inspect keeps live owners, reaps dead ones, and skips missing or legacy ow
   expect(inspectSession(legacy, root, deps).reason).toBe("malformed-owner-file");
 });
 test("one-line owner files: dead owner reaps with real size, live owner stays live", () => {
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const gone = deadPid();
   const dead = sessionDir(root, "suite-snap", gone);
@@ -201,7 +204,7 @@ test("one-line owner files: dead owner reaps with real size, live owner stays li
 });
 test("nested integrations work dirs reap on dead pid and stay live on live pid", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const session = join(root, "session-1");
@@ -224,7 +227,7 @@ test("nested integrations work dirs reap on dead pid and stay live on live pid",
 });
 test("runtime omp-kit-work dirs with dead owners are reaped from system temp", () => {
 	const home = useState();
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "runtime-work-root-"));
+	const root = agentTmp("runtime-work-root");
 	roots.push(root);
 	delete process.env.OMP_KIT_SCRATCH_ROOTS;
 	process.env.TMPDIR = root;
@@ -242,7 +245,7 @@ test("runtime omp-kit-work dirs with dead owners are reaped from system temp", (
 });
 
 test("runtime adapter TERM leaves its workdir for no later reaper", async () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "runtime-term-root-"));
+	const root = agentTmp("runtime-term-root");
 	roots.push(root);
 	const adapter = resolve(import.meta.dir, "../../scripts/runtime-adapter.sh");
 	const child = Bun.spawn(["sh", "-c", "work=$(TMPDIR=\"$1\" \"$2\" --workdir) || exit 1; trap 'rm -rf \"$work\"; exit 143' TERM INT EXIT; printf '%s' \"$work\" > \"$1/workdir\"; kill -TERM $$", "runtime-term", root, adapter], { stdout: "ignore", stderr: "ignore" });
@@ -253,7 +256,7 @@ test("runtime adapter TERM leaves its workdir for no later reaper", async () => 
 	expect(existsSync(workdir)).toBe(false);
 }, 30_000);
 test("inspect refuses a dead owner with open descriptors and a name that mismatches", () => {
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const open = sessionDir(root, "open", deadPid());
   writeFileSync(join(open, ".owner"), ownerText(deadFields("open", Number(open.split(".").at(-1)))));
@@ -268,7 +271,7 @@ test("inspect refuses a dead owner with open descriptors and a name that mismatc
 
 test("a mismatched name with a dead idle owner quarantines; a live owner stays SKIP; a fresh malformed owner stays LIVE", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const dead = deadPid();
@@ -306,7 +309,7 @@ test("a mismatched name with a dead idle owner quarantines; a live owner stays S
 
 test("idle malformed-owner dirs are quarantined without deletion", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const malformed = join(root, "malformed.3");
@@ -325,7 +328,7 @@ test("idle malformed-owner dirs are quarantined without deletion", () => {
 });
 test("idle dead mismatched owners are quarantined while live mismatches stay put", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const wrongDead = join(root, "renamed.3");
@@ -346,7 +349,7 @@ test("idle dead mismatched owners are quarantined while live mismatches stay put
 
 
 test.skipIf(!HAVE_LSOF)("a real open descriptor blocks a real lsof reap", () => {
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const open = sessionDir(root, "realopen", deadPid());
   writeFileSync(join(open, ".owner"), ownerText(deadFields("realopen", Number(open.split(".").at(-1)))));
@@ -362,7 +365,7 @@ test.skipIf(!HAVE_LSOF)("a real open descriptor blocks a real lsof reap", () => 
 
 test("apply removes a proven-dead session after quarantine and restores on an owner race", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const deps: ApplyDeps = { ...depsFor(), home };
   const dead = sessionDir(root, "gone", deadPid());
@@ -393,7 +396,7 @@ test("apply removes a proven-dead session after quarantine and restores on an ow
 
 test("apply records an owner race as a refused skip without failing the run", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-final-recheck-"));
+  const root = agentTmp("scratch-final-recheck");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const dir = sessionDir(root, "appeared", deadPid());
@@ -425,7 +428,7 @@ test("apply records an owner race as a refused skip without failing the run", ()
 
 test("apply quarantines idle unowned dirs and deletes expired quarantine after rechecks", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const deps: ApplyDeps = { ...depsFor(), home, now };
@@ -455,7 +458,7 @@ test("apply quarantines idle unowned dirs and deletes expired quarantine after r
 
 test("quarantine expiry honors the 24-hour default and configured TTL", () => {
   const home = useState();
-  const configHome = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-config-"));
+  const configHome = agentTmp("scratch-config");
   roots.push(configHome);
   process.env.XDG_CONFIG_HOME = configHome;
   const now = Date.now();
@@ -589,7 +592,7 @@ test("killOrphan reaps a real sleeper and reports a missing pid as gone", () => 
 });
 test("apply kills only selected harness orphans and logs JSONL", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   try {
@@ -619,7 +622,7 @@ function cli(args: string[], home: string, extraEnv: Record<string, string> = {}
 }
 
 function cliHome(): { home: string; state: string } {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-cli-"));
+  const home = agentTmp("scratch-cli");
   roots.push(home);
   const state = join(home, "state");
   mkdirSync(state, { recursive: true });
@@ -643,7 +646,7 @@ Bun.spawnSync = ((command, options) => {
 }
 
 function fakeLsof(options: { openPath?: string; unknown?: boolean } = {}): { dir: string } {
-  const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fakebin-"));
+  const dir = agentTmp("fakebin");
   roots.push(dir);
   const script = options.openPath !== undefined
     ? `#!/bin/sh\nprintf '%s\\n' 'n${options.openPath}'\nexit 0\n`
@@ -656,7 +659,7 @@ function fakeLsof(options: { openPath?: string; unknown?: boolean } = {}): { dir
 }
 
 function fakePs(): { dir: string } {
-  const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fakebin-"));
+  const dir = agentTmp("fakebin");
   roots.push(dir);
   writeFileSync(join(dir, "ps"),
     "#!/bin/sh\nif [ \"$1\" = \"-axo\" ] && [ \"$2\" = \"pid=,ppid=,etime=,command=\" ]; then exit 1; fi\nexec /bin/ps \"$@\"\n",
@@ -667,7 +670,7 @@ function fakePs(): { dir: string } {
 
 test("scratch release quarantines its live owner while leaving unreleased live scratch", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const released = sessionDir(root, "omp", process.pid);
   writeFileSync(join(released, ".owner"),
@@ -709,7 +712,7 @@ test("scratch release quarantines its live owner while leaving unreleased live s
 
 test("scratch release refuses a live directory owned by a different process", async () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const owner = Bun.spawn(["sleep", "60"], { stdout: "ignore", stderr: "ignore" });
   try {
@@ -730,7 +733,7 @@ test("scratch release refuses a live directory owned by a different process", as
 
 test("scratch plan reports planted sessions and apply refuses without consent", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const dead = sessionDir(root, "gone", deadPid());
   writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
@@ -750,7 +753,7 @@ test("scratch plan reports planted sessions and apply refuses without consent", 
 
 test("scratch plan public JSON exposes byte totals, malformed counts, sized skips, and the active rule", () => {
 	const { home, state } = cliHome();
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-plan-json-"));
+	const root = agentTmp("scratch-plan-json");
 	roots.push(root);
 	const oneGb = 1024 * 1024 * 1024;
 	const writeSparse = (dir: string, name: string, bytes: number): void => {
@@ -808,7 +811,7 @@ test("scratch plan public JSON exposes byte totals, malformed counts, sized skip
 
 test("scratch apply removes dead sessions, quarantines idle unowned, and logs JSONL", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const dead = sessionDir(root, "gone", deadPid());
   writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
@@ -845,7 +848,7 @@ test("scratch apply preserves 73-hour unowned dirs on open-fd and unknown lsof e
 		{ open: false, reason: "lsof-evidence-unavailable" },
 	]) {
 		const { home, state } = cliHome();
-		const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-lsof-plan-"));
+		const root = agentTmp("scratch-lsof-plan");
 		roots.push(root);
 		const stale = join(root, "stale.9");
 		mkdirSync(stale, { recursive: true });
@@ -870,7 +873,7 @@ test("scratch plan keeps 60-hour idle unowned dirs LIVE (mid-boundary literals)"
 	// 72h rule, so this passes on current source and MUST fail (QUARANTINE, not LIVE)
 	// against a 48h QUARANTINE_IDLE_MS mutant. No UNOWNED_ACTIVE_RULE import.
 	const { home, state } = cliHome();
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-midbound-"));
+	const root = agentTmp("scratch-midbound");
 	roots.push(root);
 	const mid = join(root, "mid.9");
 	mkdirSync(mid, { recursive: true });
@@ -891,7 +894,7 @@ test("scratch plan keeps 60-hour idle unowned dirs LIVE (mid-boundary literals)"
 
 test("service run applies scratch reaping and writes a receipt", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const dead = sessionDir(root, "gone", deadPid());
   writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
@@ -908,7 +911,7 @@ test("service run applies scratch reaping and writes a receipt", () => {
 });
 test("manual scratch apply returns BUSY with the scheduled reaper holder PID", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const jobsDir = join(state, "omp-kit", "jobs");
   mkdirSync(jobsDir, { recursive: true });
@@ -927,8 +930,8 @@ test("manual scratch apply returns BUSY with the scheduled reaper holder PID", (
 
 test("scratch-reaper reports invalid quarantine TTL configuration", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
-  const configHome = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-config-"));
+  const root = agentTmp("scratch");
+  const configHome = agentTmp("scratch-config");
   roots.push(root, configHome);
   mkdirSync(join(configHome, "omp-kit"), { recursive: true });
   writeFileSync(join(configHome, "omp-kit", "scratch-reaper.json"), JSON.stringify({ quarantine_ttl_hours: 0 }));
@@ -943,9 +946,9 @@ test("scratch-reaper reports invalid quarantine TTL configuration", () => {
 
 
 test("resolveScratchRoots honors the override and skips symlinked components", () => {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-home-"));
+  const home = agentTmp("scratch-home");
   roots.push(home);
-  const emptyTmp = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-tmp-"));
+  const emptyTmp = agentTmp("scratch-tmp");
   roots.push(emptyTmp);
   process.env.OMP_KIT_SCRATCH_ROOTS = `/a${delimiter}/b`;
   try {
@@ -957,7 +960,7 @@ test("resolveScratchRoots honors the override and skips symlinked components", (
   delete process.env.OMP_KIT_SCRATCH_ROOTS;
   process.env.TMPDIR = emptyTmp;
   try {
-    const linkTarget = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-real-"));
+    const linkTarget = agentTmp("scratch-real");
     roots.push(linkTarget);
     mkdirSync(join(home, "Developer"), { recursive: true });
     Bun.spawnSync(["ln", "-s", linkTarget, join(home, "Developer", "linkproj")], { stdout: "ignore", stderr: "ignore" });
@@ -992,7 +995,7 @@ test("defaultRunner honors the timeout and reports the kill", () => {
 });
 
 test("plan reports progress per directory as verdicts complete", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	const root = agentTmp("scratch");
 	roots.push(root);
 	const live = sessionDir(root, "live", process.pid);
 	writeFileSync(join(live, ".owner"), ownerText(liveFields("live")));
@@ -1006,7 +1009,7 @@ test("plan reports progress per directory as verdicts complete", () => {
 });
 
 test("a timed-out lsof keeps the directory instead of reaping it", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	const root = agentTmp("scratch");
 	roots.push(root);
 	const dead = sessionDir(root, "gone", deadPid());
 	writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
@@ -1066,7 +1069,7 @@ test("reuseAfterCreated proves PID reuse from the created timestamp", () => {
 });
 
 test("legacy owner with reused pid reaps instead of staying LIVE", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	const root = agentTmp("scratch");
 	roots.push(root);
 	const pid = deadPid();
 	const dir = sessionDir(root, "2nb8-head-ffea66a0", pid);
@@ -1100,7 +1103,7 @@ test("a coarse created timestamp proves reuse only after its whole precision win
 });
 
 test("planted: a date-only owner of a live process started that day stays LIVE, not REAP", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	const root = agentTmp("scratch");
 	roots.push(root);
 	const pid = deadPid();
 	const dir = sessionDir(root, "grzn1-review", pid);
@@ -1112,7 +1115,7 @@ test("planted: a date-only owner of a live process started that day stays LIVE, 
 });
 
 test("every verdict carries its size, including mismatches", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	const root = agentTmp("scratch");
 	roots.push(root);
 	const pid = deadPid();
 	const dir = join(root, "wrong-name.99999");
@@ -1125,7 +1128,7 @@ test("every verdict carries its size, including mismatches", () => {
 });
 
 test("owner pid as a whole middle dot segment is accepted; looser matches stay mismatched", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	const root = agentTmp("scratch");
 	roots.push(root);
 	const plant = (name: string, fields: Record<string, string>) => {
 		const dir = join(root, name);
@@ -1147,7 +1150,7 @@ test("owner pid as a whole middle dot segment is accepted; looser matches stay m
 });
 
 test("plan totals count a planted gigabyte dir whatever its verdict", () => {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+	const root = agentTmp("scratch");
 	roots.push(root);
 	const pid = deadPid();
 	const dir = sessionDir(root, "plant", pid);
@@ -1166,7 +1169,7 @@ test("plan totals count a planted gigabyte dir whatever its verdict", () => {
 test("legacy release quarantines while the session lives; unreleased stays LIVE", () => {
 	const { home } = cliHome();
 	mkdirSync(join(home, "Developer", "proj", "var"), { recursive: true });
-	const root = mkdtempSync(join(home, "Developer", "proj", "var", "agent-tmp"));
+	const root = ownedTmp("agent-tmp", { root: join(home, "Developer", "proj", "var") }).path;
 	const run = (args: readonly string[]) => {
 		if (args[0] === "ps") return { code: 1, stdout: "", stderr: "" };
 		return { code: 1, stdout: "", stderr: "" };
@@ -1196,7 +1199,7 @@ test("legacy release quarantines while the session lives; unreleased stays LIVE"
 });
 
 test("createScratch makes a dir with a valid owner and an export line", () => {
-	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-repo-"));
+	const repo = agentTmp("scratch-repo");
 	roots.push(repo);
 	const created = createScratch("mylabel", repo, depsFor(), {}, false, join(repo, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);
@@ -1234,7 +1237,7 @@ test("lsof snapshot prefix match does not confuse sibling names", () => {
 });
 test("scratch pressure thresholds gate plan classification", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-pressure-"));
+  const root = agentTmp("scratch-pressure");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const now = Date.now();
@@ -1250,7 +1253,7 @@ test("scratch pressure thresholds gate plan classification", () => {
   expect(classify(null)).toBe("UNKNOWN");
 });
 test("pressure reclaims at 20 percent but does not apply above the threshold", () => {
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-pressure-trigger-"));
+  const root = agentTmp("scratch-pressure-trigger");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
 
@@ -1302,7 +1305,7 @@ test("scratch-pressure chief route accepts configured destinations and refuses m
 
 test("scratch root report includes statfs free percent and usage GB", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-metrics-"));
+  const root = agentTmp("scratch-metrics");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const dir = sessionDir(root, "metrics", deadPid());
@@ -1316,11 +1319,11 @@ test("scratch root report includes statfs free percent and usage GB", () => {
 
 test("quarantine report separates young, expired-held, and delete-failed bytes", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-buckets-"));
+  const root = agentTmp("scratch-buckets");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   // The buckets assume the default 24 h TTL: read it from an empty config dir, never the operator's.
-  process.env.XDG_CONFIG_HOME = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-config-"));
+  process.env.XDG_CONFIG_HOME = agentTmp("scratch-config");
   roots.push(process.env.XDG_CONFIG_HOME);
   const now = Date.parse("2026-10-13T07:00:00.000Z");
   const qt = quarantineDir(home);
@@ -1349,7 +1352,7 @@ test("quarantine report separates young, expired-held, and delete-failed bytes",
 
 test("scratch apply progress reports the exact row total", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-progress-"));
+  const root = agentTmp("scratch-progress");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const first = sessionDir(root, "first", process.pid);
@@ -1366,7 +1369,7 @@ test("scratch apply progress reports the exact row total", () => {
 
 test("scratch reaper removes stale bun-build files and keeps the open control", () => {
   const home = useState();
-  const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "bun-build-repo-"));
+  const repo = agentTmp("bun-build-repo");
   roots.push(repo);
   const scratch = join(repo, "var", "agent-tmp");
   mkdirSync(scratch, { recursive: true });
@@ -1405,7 +1408,7 @@ test("scratch reaper removes stale bun-build files and keeps the open control", 
 
 test("scratch apply writes one metrics receipt and rotates logs at one MiB", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-receipt-"));
+  const root = agentTmp("scratch-receipt");
   roots.push(root);
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   const logPath = reapLogPath(home);
@@ -1521,8 +1524,8 @@ const SUN_PATH_MAX = 103;
  * negative from its first non-author replay.
  */
 function socketFixtureRoot(): string {
-	for (const [base, prefix] of [[join(import.meta.dir, "../../var/agent-tmp"), "rs-"], [tmpdir(), "omp-rs-"]] as const) {
-		const root = realpathSync(mkdtempSync(join(base, prefix)));
+	for (const [base, label] of [[AGENT_TMP, "rs"], [undefined, "omp-rs"]] as const) {
+		const root = realpathSync((base === undefined ? ownedTmp(label) : ownedTmp(label, { root: base })).path);
 		roots.push(root);
 		if (join(root, "stale.9", "s").length <= SUN_PATH_MAX) return root;
 	}
@@ -1591,7 +1594,7 @@ test("scratch apply over a dir holding a live unix socket skips it, and quaranti
 // dir whose owner is dead, fd-clear and 73 h idle quarantines; a live one stays SKIP.
 test("an invalid owner label still reaches quarantine once its owner is dead and idle", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const dead = deadPid();
@@ -1619,7 +1622,7 @@ test("an invalid owner label still reaches quarantine once its owner is dead and
 // touched dir stays LIVE under pressure, and open fds still stop the move.
 test("an unowned dir idle 12 h is quarantined only while its disk is at RECLAIM pressure", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const leftover = join(root, "export-leftover");
@@ -1651,7 +1654,7 @@ test("an unowned dir idle 12 h is quarantined only while its disk is at RECLAIM 
 // malformed owner that rode the unowned path is named malformed, not unowned.
 test("an idle malformed owner quarantines under a malformed reason", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const malformed = join(root, "malformed.3");
@@ -1672,7 +1675,7 @@ test("an idle malformed owner quarantines under a malformed reason", () => {
 // path, action and OS error on the verdict and fails the run instead of vanishing.
 test("a blocked quarantine dir fails the action with its OS error recorded", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const dead = join(root, "stranded");
@@ -1701,7 +1704,7 @@ test("a blocked quarantine dir fails the action with its OS error recorded", () 
 // the OS error instead of an empty refusal.
 test("a file blocking the quarantine dir fails creation with its OS error recorded", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const now = Date.now();
   const dead = sessionDir(root, "gone", deadPid());
@@ -1727,7 +1730,7 @@ test("a file blocking the quarantine dir fails creation with its OS error record
 // plants a file where the dir stood (failing the rollback rename).
 test("a failed quarantine rollback is a failure with its OS error, not a refusal", () => {
   const home = useState();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const qt = quarantineDir(home);
   const dead = sessionDir(root, "gone", deadPid());
@@ -1757,7 +1760,7 @@ test("a failed quarantine rollback is a failure with its OS error, not a refusal
 // by permissions exits nonzero with the path, action and OS error on stderr and the receipt.
 test("scratch apply names a permission failure on stderr and the receipt and exits nonzero", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const dead = sessionDir(root, "gone", deadPid());
   writeFileSync(join(dead, ".owner"), ownerText(deadFields("gone", Number(dead.split(".").at(-1)))));
@@ -1787,7 +1790,7 @@ test("scratch apply names a permission failure on stderr and the receipt and exi
 // refused quarantine expiry (owner provably alive) exits 0 with correct counts.
 test("scratch apply with only a correctly refused expiry exits 0 with refused counts", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const qt = join(state, "omp-kit", "scratch-quarantine");
   mkdirSync(qt, { recursive: true });
@@ -1809,7 +1812,7 @@ test("scratch apply with only a correctly refused expiry exits 0 with refused co
 // counts; a run with only correctly refused SKIPs exits 0 and leaves the dir.
 test("service run reports applied/refused/failed counts and exits 0 on refusals only", () => {
   const { home, state } = cliHome();
-  const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-"));
+  const root = agentTmp("scratch");
   roots.push(root);
   const live = join(root, "mismatch-live");
   mkdirSync(live, { recursive: true });
@@ -1838,7 +1841,7 @@ test("SCRATCHLEAK1: legacy colon text owners parse; bare prose does not", () => 
 });
 
 function textFixture(owner: string): { dir: string; root: string } {
-	const root = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "text-owner-"));
+	const root = agentTmp("text-owner");
 	roots.push(root);
 	const dir = join(root, `case.${process.pid}`);
 	mkdirSync(dir);
@@ -1876,7 +1879,7 @@ test("SCRATCHLEAK1: text owner with no bead field reaps when clear; open bead st
 });
 
 test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", () => {
-	const repo = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "newrepo-"));
+	const repo = agentTmp("newrepo");
 	roots.push(repo);
 	const made = createScratch("probe", repo, depsFor(), { bead: "ompkit-fp72.19.1.43" }, true, join(repo, "scratch-budgets.json"));
 	expect(made.ok).toBe(true);
@@ -1887,7 +1890,7 @@ test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", ()
 });
 
 test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (planted)", () => {
-	const repo = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "newrepo-"));
+	const repo = agentTmp("newrepo");
 	roots.push(repo);
 	const made = createScratch("exp", repo, depsFor(), {}, true, join(repo, "scratch-budgets.json"));
 	expect(made.ok).toBe(true);
@@ -1911,7 +1914,7 @@ test("SCRATCHLEAK1: text owner with gone repo reaps when clear", () => {
 });
 
 function quotaRepo(): { repo: string; ledger: string } {
-	const repo = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "quotarepo-"));
+	const repo = agentTmp("quotarepo");
 	roots.push(repo);
 	return { repo, ledger: join(repo, "budgets.json") };
 }
@@ -1983,7 +1986,7 @@ test("SCRATCHQUOTA1: corrupt ledger fails closed; unbudgeted dirs count the defa
 
 function ttlFixture(owner: string, run: (args: readonly string[]) => { code: number | null; stdout: string; stderr: string }): { dir: string; root: string; deps: ApplyDeps } {
 	const home = useState();
-	const root = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "ttl-"));
+	const root = agentTmp("ttl");
 	roots.push(root);
 	const dir = join(root, `ttl.${process.pid}`);
 	mkdirSync(dir);
@@ -2003,7 +2006,7 @@ function ttlRun(beadStatus: string | null) {
 }
 
 test("BEADTTL1: closed-bead text owner deletes promptly without quarantine wait", () => {
-	const root0 = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "ttl-"));
+	const root0 = agentTmp("ttl");
 	roots.push(root0);
 	const owner = `agent: X\nlabel: t\nrepo: ${root0}\nbead: ompkit-closed\ncreated: 2026-10-18\n`;
 	const { dir, root, deps } = ttlFixture(owner, ttlRun("closed"));
@@ -2015,7 +2018,7 @@ test("BEADTTL1: closed-bead text owner deletes promptly without quarantine wait"
 });
 
 test("BEADTTL1: open bead at apply time rolls back and keeps the dir", () => {
-	const root0 = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "ttl-"));
+	const root0 = agentTmp("ttl");
 	roots.push(root0);
 	const owner = `agent: X\nlabel: t\nrepo: ${root0}\nbead: ompkit-open\ncreated: 2026-10-18\n`;
 	const { dir, root, deps } = ttlFixture(owner, ttlRun("closed"));

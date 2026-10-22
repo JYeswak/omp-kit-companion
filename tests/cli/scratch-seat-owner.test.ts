@@ -2,10 +2,11 @@
 // (same agent and session, new pid) and a tool shell whose $$ exited both keep their scratch LIVE while the seat
 // lives; the pid rule is unchanged for pid-only owners.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { applyReap, callerSeat, createScratch, defaultLiveness, defaultRunner, inspectSession, parseOwnerFile, planScratch, releaseScratch,
 	type InspectDeps, type LivenessDeps, type SeatIdentity } from "../../src/scratch.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -25,8 +26,8 @@ afterEach(() => {
 	}
 });
 
-function tempDir(prefix: string): string {
-	const dir = mkdtempSync(join(scratchParent, prefix));
+function tempDir(label: string): string {
+	const dir = ownedTmp(label, { root: scratchParent }).path;
 	cleanup.push(dir);
 	return dir;
 }
@@ -74,7 +75,7 @@ test("owner file field patterns accept the boundary lengths, refuse one past the
 });
 
 test("respawned seat: the same agent and session under a new pid keeps its scratch LIVE; without the seat proof it is REAP", () => {
-	const root = tempDir("seat-owner-");
+	const root = tempDir("seat-owner");
 	const oldPid = 59001;
 	const dir = seatDir(root, oldPid);
 	const live = inspectSession(dir, root, deps({ ...noPid, seatLive: (agent, session) => agent === AGENT && session === SESSION }));
@@ -96,9 +97,9 @@ test("respawned seat: the same agent and session under a new pid keeps its scrat
 });
 
 test("scratch plan reports the respawned seat dir as LIVE and counts it as reapable only when the seat is gone", () => {
-	const root = tempDir("seat-plan-");
+	const root = tempDir("seat-plan");
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
-	const home = tempDir("seat-home-");
+	const home = tempDir("seat-home");
 	const dir = seatDir(root, 59011);
 	const verdictOf = (seatLive: LivenessDeps["seatLive"]) => planScratch(home, deps({ ...noPid, seatLive })).sessions.find((session) => session.dir === dir);
 	expect(verdictOf(() => true)).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
@@ -106,8 +107,8 @@ test("scratch plan reports the respawned seat dir as LIVE and counts it as reapa
 });
 
 test("apply re-checks the seat: a seat that came back after the plan stops the reap and the directory stays", () => {
-	const root = tempDir("seat-apply-");
-	const home = tempDir("seat-apply-home-");
+	const root = tempDir("seat-apply");
+	const home = tempDir("seat-apply-home");
 	process.env.XDG_STATE_HOME = join(home, "state");
 	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
 	const dir = seatDir(root, 59021);
@@ -123,8 +124,8 @@ test("apply re-checks the seat: a seat that came back after the plan stops the r
 
 test("apply refuses when the owner's agent or session changed after the plan, even though no seat is live", () => {
 	for (const [field, replacement] of [["session", `session=${OTHER_SESSION}`], ["agent", "agent=CrimsonHorizon"]] as const) {
-		const root = tempDir("seat-apply-owner-");
-		const home = tempDir("seat-apply-owner-home-");
+		const root = tempDir("seat-apply-owner");
+		const home = tempDir("seat-apply-owner-home");
 		process.env.XDG_STATE_HOME = join(home, "state");
 		mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
 		const dir = seatDir(root, 59026);
@@ -139,12 +140,12 @@ test("apply refuses when the owner's agent or session changed after the plan, ev
 });
 
 test.skipIf(!HAVE_LSOF)("real seat process: a scratch dir written by a tool shell whose $$ exited stays LIVE while the seat holds its session, and is REAP once it is gone", async () => {
-	const owners = join(tempDir("seat-real-"), "session-owners");
+	const owners = join(tempDir("seat-real"), "session-owners");
 	mkdirSync(owners, { recursive: true });
 	process.env.OMP_KIT_SESSION_OWNERS_DIR = owners;
 	const lock = join(owners, `${SESSION}.lock`);
 	writeFileSync(lock, "");
-	const root = tempDir("seat-real-root-");
+	const root = tempDir("seat-real-root");
 	const seat = Bun.spawn(["sh", "-c", `exec 9<>"$LOCK"; echo ready; exec sleep 120`], { env: { ...process.env, LOCK: lock }, stdout: "pipe", stderr: "ignore" });
 	try {
 		await seat.stdout.getReader().read();
@@ -167,13 +168,13 @@ test.skipIf(!HAVE_LSOF)("real seat process: a scratch dir written by a tool shel
 }, 60_000);
 
 test.skipIf(!HAVE_LSOF)("a chain of two respawns keeps the dir LIVE and releasable by the last seat; with no seat left it is REAP (SCRATCHCARRY1 AC3)", async () => {
-	const owners = join(tempDir("seat-chain-"), "session-owners");
+	const owners = join(tempDir("seat-chain"), "session-owners");
 	mkdirSync(owners, { recursive: true });
 	process.env.OMP_KIT_SESSION_OWNERS_DIR = owners;
 	const lock = join(owners, `${SESSION}.lock`);
 	writeFileSync(lock, "");
-	const root = tempDir("seat-chain-root-");
-	const home = tempDir("seat-chain-home-");
+	const root = tempDir("seat-chain-root");
+	const home = tempDir("seat-chain-home");
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");
 	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
@@ -245,11 +246,11 @@ test("callerSeat reads the agent and the session leases held by the caller's anc
 test.skipIf(!HAVE_LSOF)("callerSeat against a real seat process finds the session lease its own process holds", async () => {
 	// A lease id no real seat holds, so an omp host further up this test's own ancestry cannot be mistaken for it.
 	const probeSession = "0f0f0f0f-aaaa-7bbb-8ccc-ddddeeeeffff";
-	const owners = join(tempDir("seat-caller-"), "session-owners");
+	const owners = join(tempDir("seat-caller"), "session-owners");
 	mkdirSync(owners, { recursive: true });
 	const lock = join(owners, `${probeSession}.lock`);
 	writeFileSync(lock, "");
-	const script = join(tempDir("seat-caller-script-"), "probe.ts");
+	const script = join(tempDir("seat-caller-script"), "probe.ts");
 	writeFileSync(script, [
 		`import { callerSeat, defaultRunner } from ${JSON.stringify(join(repo, "src", "scratch.ts"))};`,
 		"console.log(JSON.stringify(callerSeat(defaultRunner)));",
@@ -263,8 +264,8 @@ test.skipIf(!HAVE_LSOF)("callerSeat against a real seat process finds the sessio
 }, 60_000);
 
 function releaseFixture(owner: string, pid = 59031): { dir: string; home: string; root: string } {
-	const root = tempDir("seat-release-");
-	const home = tempDir("seat-release-home-");
+	const root = tempDir("seat-release");
+	const home = tempDir("seat-release-home");
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");
 	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
@@ -307,7 +308,7 @@ test("release: a complete owner with a recorded process start is released by the
 
 test("createScratch records the caller's agent and main session in the owner; an unidentified or ambiguous caller records neither", () => {
 	const make = (seat: SeatIdentity | undefined, label: string) => {
-		const root = tempDir("seat-create-");
+		const root = tempDir("seat-create");
 		const result = createScratch(label, root, deps(defaultLiveness(), seat ? { callerSeat: () => seat } : {}), {}, false, join(root, "scratch-budgets.json"));
 		expect(result.ok).toBe(true);
 		return parseOwnerFile(readFileSync(join(result.dir, ".owner"), "utf8"));

@@ -1,21 +1,23 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "send-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=send-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratchTmp = ownedTmp("send-test", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 const testEnv = { ...process.env, TMUX_TMPDIR: join(scratchRoot, "managed") };
 delete testEnv.TMUX;
 
-const socketFixtureRoot = join("var", "agent-tmp", "tw9q" + process.pid);
-mkdirSync(socketFixtureRoot, { recursive: true });
-writeFileSync(join(socketFixtureRoot, ".owner"), `pid=${process.pid} label=tw9q repo=${repoRoot} created=${new Date().toISOString()}\n`);
+const socketFixtureTmp = ownedTmp("tw9q", { root: join("var", "agent-tmp") });
+const socketFixtureRoot = socketFixtureTmp.path;
+afterAll(() => socketFixtureTmp.cleanup());
 
 const noWait = async (_ms: number) => {};
 
@@ -334,8 +336,7 @@ const MARKER_SHAPE = /kit-send-[0-9a-f]{12}/;
 
 /** A fresh parent per test: the envelope keeps tern-pending/ and send-locks/ beside the drop dir. */
 function ternDropDir(): string {
-	const parent = mkdtempSync(join(scratch, "tern-"));
-	const dir = join(parent, "drop");
+	const dir = join(scratch, "tern-" + Math.random().toString(36).slice(2), "drop");
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }

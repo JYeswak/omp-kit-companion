@@ -1,12 +1,15 @@
-import { expect, test, vi } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync } from "node:fs";
+import { afterAll, expect, test, vi } from "bun:test";
+import { mkdirSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { proveSend, type SendExec } from "../../src/send.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "send-target-" + process.pid + "."));
+const scratchTmp = ownedTmp("send-target", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 const testEnv = { ...process.env, TMUX_TMPDIR: join(scratchRoot, "managed") };
 delete testEnv.TMUX;
 const SPIN = "⠋";

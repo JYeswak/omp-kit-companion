@@ -2,9 +2,10 @@
 // directory name. The owner (the successor) must still be able to release that dir, the release must stand at plan and
 // apply time, and a caller that is not the owner must not. The dir name is not release authority.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { applyScratch, inspectOne, releaseScratch, type InspectDeps, type LivenessDeps } from "../../src/scratch.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -27,8 +28,8 @@ const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, 
 const deps = (extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness: noPid, run: clearRun, ...extra });
 
 function fixture(ownerPid: number): { dir: string; root: string; home: string } {
-	const root = mkdtempSync(join(scratchParent, "rehomed-"));
-	const home = mkdtempSync(join(scratchParent, "rehomed-home-"));
+	const root = ownedTmp("rehomed", { root: scratchParent }).path;
+	const home = ownedTmp("rehomed-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");

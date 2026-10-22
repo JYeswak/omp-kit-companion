@@ -1,7 +1,8 @@
-import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { proveSend, type SendExec } from "../../src/send.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 // Planted RED (G24a, Agent Mail 48369): a marker sitting UNSUBMITTED in omp's
 // input box is not a delivery. Claude frame excerpts are OMP 18.8.6 --profile claude captures.
@@ -9,8 +10,9 @@ const repoRoot = resolve(import.meta.dir, "../..");
 const fixtures = join(repoRoot, "tests", "fixtures", "send");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "send-consumed-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=send-consumed-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratchTmp = ownedTmp("send-consumed-test", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 
 // Hermetic tmux selection: without this, proveSend reads the runner's env, and a CI
 // runner outside tmux probes every candidate socket through the fake exec (all "live")

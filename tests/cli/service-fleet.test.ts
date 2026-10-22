@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { KNOWN_JOBS } from "../../src/service.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 // SVC1 box 2: the fleet view. `service status --all` and `service list` must
 // report loaded state, last exit, last run age and run count per job.
@@ -21,7 +22,7 @@ function namespace(): string {
 }
 
 function fixtureHome(): string {
-	const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-fleet-"));
+	const home = ownedTmp("service-fleet", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(home);
 	const bin = join(home, ".local", "bin");
 	mkdirSync(bin, { recursive: true });

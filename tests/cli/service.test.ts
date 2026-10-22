@@ -1,11 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { checkService, checkServiceLinux, ciPollerEnvironment, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 import { superviseScratchJob } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
-// Fresh clones have no var/agent-tmp; mkdtemp below requires its parent to exist.
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+// Fresh clones have no var/agent-tmp; ownedTmp below requires its root to exist.
+const AGENT_TMP = join(import.meta.dir, "../../var/agent-tmp");
 
 // Every CLI spawn below inherits this namespace, so even real launchctl calls address
 // test-only labels: an isolated HOME does not isolate the per-uid launchd domain.
@@ -52,7 +54,7 @@ afterEach(() => {
 });
 
 function fixture(): { home: string; launcher: string; watch: string } {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-"));
+  const home = ownedTmp("service", { root: AGENT_TMP }).path;
   roots.push(home);
   process.env.XDG_STATE_HOME = join(home, ".local", "state");
   const launcher = join(home, ".local", "bin", "omp-kit");
@@ -751,7 +753,7 @@ function cli(args: string[], home: string, extraEnv: Record<string, string> = {}
 }
 
 test("service run executes the stable launcher and writes a job receipt", () => {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  const home = ownedTmp("service-run", { root: AGENT_TMP }).path;
   roots.push(home);
   const bin = join(home, ".local", "bin");
   mkdirSync(bin, { recursive: true });
@@ -769,7 +771,7 @@ test("service run executes the stable launcher and writes a job receipt", () => 
 });
 
 test("service run maps a failing launcher to FINDINGS without losing the receipt", () => {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  const home = ownedTmp("service-run", { root: AGENT_TMP }).path;
   roots.push(home);
   const bin = join(home, ".local", "bin");
   mkdirSync(bin, { recursive: true });
@@ -795,7 +797,7 @@ function kitUpdateLauncher(home: string): void {
 }
 
 test("planted: service run kit-update with no tuple and no poll refuses KIT_UPDATE_JOB_CONFIG", () => {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  const home = ownedTmp("service-run", { root: AGENT_TMP }).path;
   roots.push(home);
   kitUpdateLauncher(home);
   const result = cli(["service", "run", "kit-update"], home, { OMP_KIT_LOAD_OVERRIDE: "0/1" });
@@ -806,7 +808,7 @@ test("planted: service run kit-update with no tuple and no poll refuses KIT_UPDA
 }, 60000);
 
 test("service run kit-update with poll-only config reaches the job instead of refusing", () => {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  const home = ownedTmp("service-run", { root: AGENT_TMP }).path;
   roots.push(home);
   kitUpdateLauncher(home);
   const result = cli(["service", "run", "kit-update"], home,
@@ -876,7 +878,7 @@ test("REAP1 supervisor caps synchronous browser work and kills its owned process
 });
 
 test("service status reports HOME-scoped install state from source", () => {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  const home = ownedTmp("service-run", { root: AGENT_TMP }).path;
   roots.push(home);
   const status = cli(["service", "status", "omp-watch"], home);
   expect(status.envelope.data.job).toBe("omp-watch");
@@ -1137,7 +1139,7 @@ test("notify posts osascript on darwin failure, notify-send on linux, and nothin
 });
 
 function fakebin(): { dir: string; log: string } {
-  const dir = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "fakebin-"));
+  const dir = ownedTmp("fakebin", { root: AGENT_TMP }).path;
   roots.push(dir);
   const log = join(dir, "notify.log");
   const shim = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$NOTIFY_LOG\"\nexit 0\n";
@@ -1149,7 +1151,7 @@ function fakebin(): { dir: string; log: string } {
 }
 
 function runHome(exitCode: number): string {
-  const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-run-"));
+  const home = ownedTmp("service-run", { root: AGENT_TMP }).path;
   roots.push(home);
   const bin = join(home, ".local", "bin");
   mkdirSync(bin, { recursive: true });

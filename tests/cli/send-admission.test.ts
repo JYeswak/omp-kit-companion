@@ -1,16 +1,18 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { proveSend, type SendExec } from "../../src/send.ts";
 import type { AdmissionInput } from "../../src/actuator-admission.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 // ompkit-bj08.5: pause/custody negatives through the real send branch.
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "send-admission." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=send-admission-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratchTmp = ownedTmp("send-admission", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 const testEnv = { ...process.env, TMUX_TMPDIR: join(scratch, "managed") };
 delete testEnv.TMUX;
 

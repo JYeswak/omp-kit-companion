@@ -1,14 +1,16 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { paneRunsShell, refuseShellPayload } from "../../src/send-payload-guard.ts";
 import { proveSend, type SendExec } from "../../src/send.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "send-payload-guard-test." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=send-payload-guard-test repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratchTmp = ownedTmp("send-payload-guard-test", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 
 const testEnv: NodeJS.ProcessEnv = { ...process.env, TMUX_TMPDIR: join(scratch, "managed") };
 delete testEnv.TMUX;

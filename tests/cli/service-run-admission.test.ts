@@ -1,20 +1,26 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { admitActuator, type AdmissionInput } from "../../src/actuator-admission.ts";
 import { acquireRunLock, claimIncarnation, observeServiceLaunchers, readRunClaim } from "../../src/service-run.ts";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 
 // ompkit-bj08.5: lock-claim incarnation binding for the service-run branch.
 // The cli run handler double-reads the claim (gate time vs pre-body) and
 // refuses when the holder changed hands in between.
 
 const repoRoot = resolve(import.meta.dir, "../..");
+const owned: OwnedTmp[] = [];
+afterAll(() => {
+	for (const tmp of owned.splice(0)) tmp.cleanup();
+});
 
 function jobsDir(): string {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const dir = mkdtempSync(join(parent, "service-run-admission."));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=service-run-admission-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const tmp = ownedTmp("service-run-admission", { root: parent });
+	owned.push(tmp);
+	const dir = tmp.path;
 	const jobs = join(dir, "jobs");
 	mkdirSync(jobs, { recursive: true });
 	return jobs;

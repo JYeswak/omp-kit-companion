@@ -1,14 +1,16 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { proveTernCliSend, routeSendTarget } from "../../src/send.ts";
 import type { TernObserverIo } from "../../src/plane-tern.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, "send-tern-route." + process.pid + "."));
-writeFileSync(join(scratch, ".owner"), "pid=" + process.pid + " label=send-tern-route repo=" + repoRoot + " created=" + new Date().toISOString() + "\n");
+const scratchTmp = ownedTmp("send-tern-route", { root: scratchRoot });
+const scratch = scratchTmp.path;
+afterAll(() => scratchTmp.cleanup());
 
 const noWait = async (_ms: number) => {};
 const EMPTY_PREFIXES: ReadonlySet<string> = new Set<string>();
@@ -17,6 +19,12 @@ const WINDOW = "/run/tern-fixture.sock";
 
 function dropDir(): string {
 	const dir = join(scratch, "drop-" + Math.random().toString(36).slice(2));
+	mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+function repoDir(): string {
+	const dir = join(scratch, "repo-" + Math.random().toString(36).slice(2));
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }
@@ -62,7 +70,7 @@ interface TernFixtureOpts {
 function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: { runs: string[][]; luaDispatches: number }; repo: string } {
 	const session = opts.session ?? "omp-test";
 	const paneId = opts.paneId ?? 5;
-	const repo = opts.repo ?? mkdtempSync(join(scratch, "repo-"));
+	const repo = opts.repo ?? repoDir();
 	const uuid = opts.sessionUuid ?? "sess-uuid-1";
 	const working = opts.working ?? false;
 	const listSession = opts.listSession ?? true;

@@ -1,8 +1,9 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, readRunClaim, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -13,8 +14,7 @@ afterEach(() => {
 });
 
 function jobsDir(): string {
-	const dir = mkdtempSync(join(scratchRoot, "service-run-"));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=service-run-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const dir = ownedTmp("service-run", { root: scratchRoot }).path;
 	roots.push(dir);
 	return dir;
 }

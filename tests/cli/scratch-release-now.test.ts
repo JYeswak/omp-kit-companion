@@ -4,10 +4,11 @@
 // marked dir and is NOT success (ok false, now-held-*); --now is refused without a bin, on free-prose owners, and never
 // touches a hold.
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createScratch, releaseScratch, reapLogPath, scratchContent,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -31,8 +32,8 @@ const deps = (extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness: noP
 const ownerText = (pid: number, extra = "", created = CREATED) => `pid=${pid}\nlabel=work\nrepo=${repo}\ncreated=${created}\n${extra}`;
 
 function fixture(owner: string, label = "work"): { dir: string; home: string } {
-	const root = mkdtempSync(join(scratchParent, "now-"));
-	const home = mkdtempSync(join(scratchParent, "now-home-"));
+	const root = ownedTmp("now", { root: scratchParent }).path;
+	const home = ownedTmp("now-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");
@@ -242,7 +243,7 @@ test("now on a free-prose owner is refused: structured ownership first (79c377fe
 test("createScratch dirs release with now through the same path", () => {
 	const live: LivenessDeps = { ...noPid, signalAlive: () => true, processStart: () => "Mon Oct 20 06:00:00 2026" };
 	process.env.OMP_KIT_SCRATCH_ROOTS = scratchParent;
-	const home = mkdtempSync(join(scratchParent, "now-home-"));
+	const home = ownedTmp("now-home", { root: scratchParent }).path;
 	cleanup.push(home);
 	const created = createScratch("nowproof", repo, deps({ liveness: live }), { bin: "throwaway", purpose: "probe" }, false, join(home, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);

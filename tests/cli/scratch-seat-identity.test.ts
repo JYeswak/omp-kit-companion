@@ -4,11 +4,11 @@
 // seated or pid-only — attributes to its seat, and dead holders attribute to
 // no live seat, which is what makes them reclaimable.
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { attributeOwnerSeat, createScratch, defaultLiveness, inspectSession, parseOwnerFile, seatSessionsOfPid } from "../../src/scratch.ts";
 import type { InspectDeps, LivenessDeps, ScratchOwner } from "../../src/scratch.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const AGENT = "TurquoiseSummit";
@@ -24,8 +24,8 @@ afterEach(() => {
 	else process.env.AGENT_NAME = savedAgent;
 });
 
-function tempDir(prefix: string): string {
-	const dir = mkdtempSync(join(tmpdir(), prefix));
+function tempDir(label: string): string {
+	const dir = ownedTmp(label).path;
 	cleanup.push(dir);
 	return dir;
 }
@@ -57,7 +57,7 @@ test("a seated owner attributes to its named seat while the lease is held", () =
 test("planted negative: a seated owner whose lease is gone attributes to no live seat, and the reaper reclaims it", () => {
 	const got = attributeOwnerSeat(seatedOwner(), { run: clearRun, seatLive: () => false });
 	expect(got).toEqual({ agent: AGENT, sessions: [SESSION], seatLive: false });
-	const home = tempDir("seat-id-dead-");
+	const home = tempDir("seat-id-dead");
 	mkdirSync(join(home, "var", "agent-tmp"), { recursive: true });
 	const root = join(home, "var", "agent-tmp");
 	const dir = join(root, "omp.59001");
@@ -109,8 +109,8 @@ test("creation without an injected seat still stamps it when the caller holds on
 		return { code: 1, stdout: "", stderr: "" };
 	};
 	process.env.AGENT_NAME = AGENT;
-	const home = tempDir("seat-id-create-");
-	const ledger = join(tempDir("seat-id-ledger-"), "ledger.json");
+	const home = tempDir("seat-id-create");
+	const ledger = join(tempDir("seat-id-ledger"), "ledger.json");
 	const deps: InspectDeps = { liveness: { ...defaultLiveness(), seatLive: () => true }, run };
 	const created = createScratch("seatidn", home, deps, {}, false, ledger);
 	expect(created.ok).toBe(true);
@@ -121,8 +121,8 @@ test("creation without an injected seat still stamps it when the caller holds on
 
 test("planted negative: creation by a seatless caller keeps a pid owner and still succeeds", () => {
 	delete process.env.AGENT_NAME;
-	const home = tempDir("seat-id-noseat-");
-	const ledger = join(tempDir("seat-id-ledger2-"), "ledger.json");
+	const home = tempDir("seat-id-noseat");
+	const ledger = join(tempDir("seat-id-ledger2"), "ledger.json");
 	const deps: InspectDeps = { liveness: defaultLiveness(), run: clearRun };
 	const created = createScratch("seatless", home, deps, {}, false, ledger);
 	expect(created.ok).toBe(true);

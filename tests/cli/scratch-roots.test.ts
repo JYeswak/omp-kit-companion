@@ -2,9 +2,10 @@
 // fleet-watch.json names outside ~/Developer is inspected, its source is recorded, a symlink alias and its target
 // are one root, and a stock user without fleet-watch.json gets exactly the earlier roots.
 import { afterEach, expect, test } from "bun:test";
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { defaultLiveness, fleetTestTmpBase, planScratch, resolveScratchRootEntries, resolveScratchRoots } from "../../src/scratch.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchParent = join(repoRoot, "var", "agent-tmp");
@@ -19,11 +20,14 @@ afterEach(() => {
 	}
 });
 
+/** A fresh owned dir under the repo's scratch parent, by real path; callers push it (or its child's parent) to cleanup. */
+const fixtureDir = (label: string): string => realpathSync(ownedTmp(label, { root: scratchParent }).path);
+
 /** A fixture HOME and an empty TMPDIR so only fixture roots, the fleet test base and the real /tmp omp-* dirs can appear. */
 function fixtureHome(): string {
-	const home = realpathSync(mkdtempSync(join(scratchParent, "roots-home-")));
+	const home = fixtureDir("roots-home");
 	cleanup.push(home);
-	const tmp = realpathSync(mkdtempSync(join(scratchParent, "roots-tmp-")));
+	const tmp = fixtureDir("roots-tmp");
 	cleanup.push(tmp);
 	delete process.env.OMP_KIT_SCRATCH_ROOTS;
 	delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
@@ -72,7 +76,7 @@ function earlierRoots(home: string): string[] {
 
 test("a fleet-watch repo outside ~/Developer is a scratch root, with its source recorded", () => {
 	const home = fixtureHome();
-	const outside = repoWithScratch(realpathSync(mkdtempSync(join(scratchParent, "roots-outside-"))), "claude-config");
+	const outside = repoWithScratch(fixtureDir("roots-outside"), "claude-config");
 	cleanup.push(join(outside, ".."));
 	const root = join(outside, "var", "agent-tmp");
 	// Without the fleet source the repo is invisible.
@@ -90,7 +94,7 @@ test("scratch plan reports the fleet-watch root with its source in rootMetrics",
 	const home = fixtureHome();
 	process.env.XDG_STATE_HOME = join(home, "state");
 	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
-	const outside = repoWithScratch(realpathSync(mkdtempSync(join(scratchParent, "roots-plan-"))), "elsewhere");
+	const outside = repoWithScratch(fixtureDir("roots-plan"), "elsewhere");
 	cleanup.push(join(outside, ".."));
 	const root = join(outside, "var", "agent-tmp");
 	writeWatch(home, { sessions: [{ session: "omp-test", repo: outside }] });
@@ -103,7 +107,7 @@ test("scratch plan reports the fleet-watch root with its source in rootMetrics",
 
 test("the real CLI scratch plan lists the fleet-watch root and its source", () => {
 	const home = fixtureHome();
-	const outside = repoWithScratch(realpathSync(mkdtempSync(join(scratchParent, "roots-cli-"))), "elsewhere");
+	const outside = repoWithScratch(fixtureDir("roots-cli"), "elsewhere");
 	cleanup.push(join(outside, ".."));
 	const root = join(outside, "var", "agent-tmp");
 	writeWatch(home, { sessions: [{ session: "omp-test", repo: outside }] });
@@ -120,7 +124,7 @@ test("the real CLI scratch plan lists the fleet-watch root and its source", () =
 test("a symlink alias and its real path are one root, whichever way each is named", () => {
 	const home = fixtureHome();
 	const real = repoWithScratch(join(home, "Developer"), "real-repo");
-	const aliasParent = realpathSync(mkdtempSync(join(scratchParent, "roots-alias-")));
+	const aliasParent = fixtureDir("roots-alias");
 	cleanup.push(aliasParent);
 	const alias = join(aliasParent, "alias-repo");
 	symlinkSync(real, alias);
@@ -131,7 +135,7 @@ test("a symlink alias and its real path are one root, whichever way each is name
 	expect(matches).toEqual([{ root, sources: ["developer", "fleet-watch:a", "fleet-watch:b"] }]);
 	// An alias alone, outside ~/Developer, resolves to the target's root.
 	const only = fixtureHome();
-	const target = repoWithScratch(realpathSync(mkdtempSync(join(scratchParent, "roots-target-"))), "target");
+	const target = repoWithScratch(fixtureDir("roots-target"), "target");
 	cleanup.push(join(target, ".."));
 	const link = join(aliasParent, "only-alias");
 	symlinkSync(target, link);
@@ -143,7 +147,7 @@ test("without fleet-watch.json the roots equal the earlier list exactly, in orde
 	const home = fixtureHome();
 	repoWithScratch(join(home, "Developer"), "alpha");
 	repoWithScratch(join(home, "Developer"), "beta");
-	const linkTarget = repoWithScratch(realpathSync(mkdtempSync(join(scratchParent, "roots-link-"))), "linked");
+	const linkTarget = repoWithScratch(fixtureDir("roots-link"), "linked");
 	cleanup.push(join(linkTarget, ".."));
 	symlinkSync(linkTarget, join(home, "Developer", "linkproj"));
 	mkdirSync(join(process.env.TMPDIR!, "omp-work-1"));
@@ -155,7 +159,7 @@ test("without fleet-watch.json the roots equal the earlier list exactly, in orde
 test("an unusable fleet-watch.json, a relative repo, a missing or symlinked scratch dir and the override change nothing", () => {
 	const home = fixtureHome();
 	const baseline = resolveScratchRoots(home);
-	const parent = realpathSync(mkdtempSync(join(scratchParent, "roots-bad-")));
+	const parent = fixtureDir("roots-bad");
 	cleanup.push(parent);
 	const noScratch = join(parent, "no-scratch");
 	mkdirSync(noScratch);
@@ -165,7 +169,7 @@ test("an unusable fleet-watch.json, a relative repo, a missing or symlinked scra
 	mkdirSync(join(parent, "elsewhere", "agent-tmp"), { recursive: true });
 	symlinkSync(join(parent, "elsewhere"), join(linked, "var"));
 	// A relative repo that resolves against the working directory (the repository root) must still be refused.
-	const relativeRepo = repoWithScratch(realpathSync(mkdtempSync(join(scratchParent, "roots-relative-"))), "rel");
+	const relativeRepo = repoWithScratch(fixtureDir("roots-relative"), "rel");
 	cleanup.push(join(relativeRepo, ".."));
 	const relative = relativeRepo.slice(repoRoot.length + 1);
 	for (const config of ["not json", "[]", "null", { sessions: "x" }, { sessions: [{ session: "s", repo: relative }, { session: "s", repo: noScratch }, { session: "s", repo: linked }, { session: "s" }, 7, null] }]) {
@@ -181,7 +185,7 @@ test("an unusable fleet-watch.json, a relative repo, a missing or symlinked scra
 test("roots are de-duplicated by real path even when the home directory is named through an alias", () => {
 	const home = fixtureHome();
 	const real = repoWithScratch(join(home, "Developer"), "project");
-	const aliasHome = join(realpathSync(mkdtempSync(join(scratchParent, "roots-home-alias-"))), "home-link");
+	const aliasHome = join(fixtureDir("roots-home-alias"), "home-link");
 	cleanup.push(join(aliasHome, ".."));
 	symlinkSync(home, aliasHome);
 	writeWatch(aliasHome, { sessions: [{ session: "s", repo: real }] });
@@ -192,7 +196,7 @@ test("roots are de-duplicated by real path even when the home directory is named
 
 test("OMP_KIT_FLEET_WATCH_CONFIG selects the config file", () => {
 	const home = fixtureHome();
-	const repo = repoWithScratch(realpathSync(mkdtempSync(join(scratchParent, "roots-env-"))), "envrepo");
+	const repo = repoWithScratch(fixtureDir("roots-env"), "envrepo");
 	cleanup.push(join(repo, ".."));
 	const path = join(home, "custom-watch.json");
 	writeFileSync(path, JSON.stringify({ sessions: [{ session: "custom", repo }] }));

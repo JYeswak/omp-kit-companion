@@ -1,10 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { daemonLiveness, KNOWN_JOBS, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveOperatorCommand, serviceLabel, type ServiceJobDef } from "../../src/service.ts";
 import { CC_SERVICE_HOST, CC_SERVICE_PORT, ccServiceCommand } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { acquireDaemonLock, DAEMON_HELD_EXIT } from "../../src/service-run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+
+const AGENT_TMP = join(import.meta.dir, "../../var/agent-tmp");
 
 // CC14 (.18.1): kit supervisor gains a long-running `daemon` job kind.
 // Fixture HOME is synthetic so renders are byte-stable; every CLI spawn gets
@@ -38,7 +41,7 @@ function namespace(): string {
 }
 
 function fixtureHome(): string {
-	const home = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-daemon-"));
+	const home = ownedTmp("service-daemon", { root: AGENT_TMP }).path;
 	roots.push(home);
 	const bin = join(home, ".local", "bin");
 	mkdirSync(bin, { recursive: true });
@@ -48,7 +51,7 @@ function fixtureHome(): string {
 }
 
 function fixtureFleetRoot(): string {
-	const root = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-daemon-fleet-"));
+	const root = ownedTmp("service-daemon-fleet", { root: AGENT_TMP }).path;
 	roots.push(root);
 	mkdirSync(join(root, "scripts", "cc"), { recursive: true });
 	writeFileSync(join(root, "scripts", "cc", "cc.py"), "#!/usr/bin/env python3\n", { mode: 0o755 });
@@ -235,7 +238,7 @@ test("install_refuses_without_fleet", () => {
 	const result = cli(["service", "install", "cc", "--plan"], home, namespace());
 	expect(result.code).toBe(2);
 	expect(result.envelope.errors[0].code).toBe("FLEET_ADAPTER_ABSENT");
-	const emptyRoot = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "service-daemon-empty-"));
+	const emptyRoot = ownedTmp("service-daemon-empty", { root: AGENT_TMP }).path;
 	roots.push(emptyRoot);
 	const rooted = cli(["service", "install", "cc", "--plan"], home, namespace(), { OMP_KIT_FLEET_ROOT: emptyRoot });
 	expect(rooted.envelope.errors[0].code).toBe("FLEET_ADAPTER_ABSENT");
