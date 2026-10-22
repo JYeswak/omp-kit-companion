@@ -110,7 +110,7 @@ test("createScratch dirs release with now through the same path", () => {
 	process.env.OMP_KIT_SCRATCH_ROOTS = scratchParent;
 	const home = mkdtempSync(join(scratchParent, "now-home-"));
 	cleanup.push(home);
-	const created = createScratch("nowproof", repo, deps({ liveness: live }), { bin: "throwaway", purpose: "probe" });
+	const created = createScratch("nowproof", repo, deps({ liveness: live }), { bin: "throwaway", purpose: "probe" }, false, join(home, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);
 	cleanup.push(created.dir);
 	const released = releaseScratch(created.dir, home, deps({ liveness: live }), { bin: "throwaway", now: true });

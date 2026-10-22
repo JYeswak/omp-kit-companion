@@ -99,10 +99,10 @@ test("createScratch records the bin group and refuses an invalid one before crea
 	const root = mkdtempSync(join(scratchParent, "bins-create-"));
 	cleanup.push(root);
 	const live: LivenessDeps = { ...noPid, processStart: () => "Mon Oct 18 17:32:44 2026" };
-	const ok = createScratch("probe", root, deps({ liveness: live }), { bin: "hold", purpose: "probe", bead: "ompkit-774u.15", expires: "2026-10-25" });
+	const ok = createScratch("probe", root, deps({ liveness: live }), { bin: "hold", purpose: "probe", bead: "ompkit-774u.15", expires: "2026-10-25" }, false, join(root, "scratch-budgets.json"));
 	expect(ok).toMatchObject({ ok: true, reason: "created" });
 	expect(parseOwnerFile(readFileSync(join(ok.dir, ".owner"), "utf8"))).toMatchObject({ bin: "hold", purpose: "probe", bead: "ompkit-774u.15", expires: "2026-10-25" });
-	const bad = createScratch("other", root, deps({ liveness: live }), { bin: "hold", purpose: "probe" });
+	const bad = createScratch("other", root, deps({ liveness: live }), { bin: "hold", purpose: "probe" }, false, join(root, "scratch-budgets.json"));
 	expect(bad).toMatchObject({ ok: false, reason: "bin-invalid" });
 	expect(existsSync(join(root, "var", "agent-tmp", `other.${process.pid}`))).toBe(false);
 });
@@ -111,11 +111,11 @@ test("createScratch records a declared byte budget and refuses zero, negative an
 	const root = mkdtempSync(join(scratchParent, "bins-budget-"));
 	cleanup.push(root);
 	const live: LivenessDeps = { ...noPid, processStart: () => "Mon Oct 18 17:32:44 2026" };
-	const ok = createScratch("probe", root, deps({ liveness: live }), { budgetBytes: 1000 });
+	const ok = createScratch("probe", root, deps({ liveness: live }), { budgetBytes: 1000 }, false, join(root, "scratch-budgets.json"));
 	expect(ok).toMatchObject({ ok: true, reason: "created" });
 	expect(parseOwnerFile(readFileSync(join(ok.dir, ".owner"), "utf8"))).toMatchObject({ budget: 1000 });
 	for (const [name, budgetBytes] of [["zero", 0], ["negative", -5], ["fraction", 10.5], ["nan", Number.NaN]] as const) {
-		const bad = createScratch(`bad-${name}`, root, deps({ liveness: live }), { budgetBytes });
+		const bad = createScratch(`bad-${name}`, root, deps({ liveness: live }), { budgetBytes }, false, join(root, "scratch-budgets.json"));
 		expect(bad, name).toMatchObject({ ok: false, reason: "budget-invalid" });
 		expect(existsSync(join(root, "var", "agent-tmp", `bad-${name}.${process.pid}`))).toBe(false);
 	}

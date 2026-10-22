@@ -1175,14 +1175,14 @@ test("legacy release quarantines while the session lives; unreleased stays LIVE"
 test("createScratch makes a dir with a valid owner and an export line", () => {
 	const repo = mkdtempSync(join(import.meta.dir, "../../var/agent-tmp", "scratch-repo-"));
 	roots.push(repo);
-	const created = createScratch("mylabel", repo, depsFor());
+	const created = createScratch("mylabel", repo, depsFor(), {}, false, join(repo, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);
 	expect(created.dir).toBe(join(repo, "var", "agent-tmp", `mylabel.${process.pid}`));
 	expect(created.exportLine).toBe(`export TMPDIR=${created.dir}`);
 	const owner = parseOwnerFile(readFileSync(join(created.dir, ".owner"), "utf8"));
 	expect(owner).toMatchObject({ pid: process.pid, label: "mylabel", repo });
-	expect(createScratch("../evil", repo, depsFor()).ok).toBe(false);
-	expect(createScratch("", repo, depsFor()).ok).toBe(false);
+	expect(createScratch("../evil", repo, depsFor(), {}, false, join(repo, "scratch-budgets.json")).ok).toBe(false);
+	expect(createScratch("", repo, depsFor(), {}, false, join(repo, "scratch-budgets.json")).ok).toBe(false);
 });
 
 test("fleet test tmp base lives outside git trees and home", () => {
@@ -1811,7 +1811,7 @@ test("SCRATCHLEAK1: text owner with no bead field reaps when clear; open bead st
 test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", () => {
 	const repo = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "newrepo-"));
 	roots.push(repo);
-	const made = createScratch("probe", repo, depsFor(), { bead: "ompkit-fp72.19.1.43" }, true);
+	const made = createScratch("probe", repo, depsFor(), { bead: "ompkit-fp72.19.1.43" }, true, join(repo, "scratch-budgets.json"));
 	expect(made.ok).toBe(true);
 	const raw = readFileSync(join(made.dir, ".owner"), "utf8");
 	expect(JSON.parse(raw)).toMatchObject({ label: "probe", bead: "ompkit-fp72.19.1.43" });
@@ -1822,7 +1822,7 @@ test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", ()
 test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (planted)", () => {
 	const repo = mkdtempSync(join(fixtureRepo, "var", "agent-tmp", "newrepo-"));
 	roots.push(repo);
-	const made = createScratch("exp", repo, depsFor(), {}, true);
+	const made = createScratch("exp", repo, depsFor(), {}, true, join(repo, "scratch-budgets.json"));
 	expect(made.ok).toBe(true);
 	const head = defaultRunner(["git", "-C", fixtureRepo, "rev-parse", "HEAD"], { timeoutMs: 15_000 });
 	expect(head.code).toBe(0);
@@ -1868,6 +1868,34 @@ test("SCRATCHQUOTA1: seat at cap is refused; release re-admits (planted)", () =>
 		else process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES = saved;
 	}
 });
+test("SCRATCHQUOTA1: missing scratch roots release stale reservations without freeing live dirs", () => {
+	const saved = process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES;
+	process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES = "250";
+	try {
+		const { repo, ledger } = quotaRepo();
+		const missing = join(repo, "var", "agent-tmp", "removed.1");
+		writeFileSync(ledger, JSON.stringify({ version: 1, dirs: {
+			[missing]: { budget: 250, agent: "TurquoiseSummit", bead: null, released: false },
+		} }));
+		const deps = depsFor({ callerSeat: () => ({ agent: "TurquoiseSummit", sessions: ["scratch-ledger-test"], main: "scratch-ledger-test" }) });
+		const admitted = createScratch("fresh", repo, deps, { budgetBytes: 1 }, true, ledger);
+		expect(admitted.ok).toBe(true);
+		expect(JSON.parse(readFileSync(ledger, "utf8")).dirs[missing]).toMatchObject({ released: true });
+
+		const liveRepo = quotaRepo();
+		const live = join(liveRepo.repo, "var", "agent-tmp", "still-live.1");
+		mkdirSync(live, { recursive: true });
+		writeFileSync(liveRepo.ledger, JSON.stringify({ version: 1, dirs: {
+			[live]: { budget: 250, agent: "TurquoiseSummit", bead: null, released: false },
+		} }));
+		const refused = createScratch("blocked", liveRepo.repo, deps, { budgetBytes: 1 }, true, liveRepo.ledger);
+		expect(refused).toMatchObject({ ok: false, reason: "seat-budget-exceeded" });
+	} finally {
+		if (saved === undefined) delete process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES;
+		else process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES = saved;
+	}
+});
+
 
 test("SCRATCHQUOTA1: corrupt ledger fails closed; unbudgeted dirs count the default", () => {
 	const saved = process.env.OMP_KIT_SCRATCH_SEAT_CAP_BYTES;

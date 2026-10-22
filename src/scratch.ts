@@ -1645,6 +1645,18 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	const ledger = readBudgetLedger(ledgerFile);
 	if (ledger === null) return { ok: false, dir: "", exportLine: "", reason: "ledger-unavailable",
 		detail: `budget ledger ${ledgerFile} is unreadable; refusing rather than exceeding the seat cap blind` };
+	// Remove reservations whose scratch directory is gone before admitting a new one.
+	// Test fixtures and interrupted cleanup can remove the directory without reaching releaseBudgetEntry.
+	for (const path in ledger.dirs) {
+		const entry = ledger.dirs[path];
+		if (!entry || entry.released) continue;
+		try {
+			lstatSync(path);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT" || code === "ENOTDIR") entry.released = true;
+		}
+	}
 	const cap = seatBudgetCap();
 	const reserved = seatReservedBytes(ledger, seatKey);
 	if (reserved + reservation > cap)
