@@ -35,6 +35,23 @@ test("a complete map whose every mechanism and proof exists passes", () => {
 	expect(result.failures).toEqual([]);
 	expect(result.status).toBe("PASS");
 });
+test("fleet-pack TTSR mechanisms use their own rule and fire/quiet corpus", () => {
+	const root = tree();
+	mkdirSync(join(root, "rules-fleet"));
+	writeFileSync(join(root, "rules-fleet/kit-demo.md"), "---\ncondition: 'x'\n---\nbody\n");
+	writeFileSync(join(root, "cases/cases-fleet.tsv"), CASE_HEADER + "\nkit-demo\tfire\ttext\t-\t-\tx\tn\t\nkit-demo\tquiet\ttext\t-\t-\ty\tn\t\n");
+	const fleetRow = `F1\t${K("6")}\tttsr-fleet\tkit-demo\tcases/cases-fleet.tsv::kit-demo::fire\tcases/cases-fleet.tsv::kit-demo::quiet`;
+	const text = fullMap([fleetRow]);
+	expect(check(root, text).failures).toEqual([]);
+	expect(check(root, text, true).failures).toEqual([]);
+});
+
+test("fleet-pack TTSR proof cannot borrow a default-pack rule", () => {
+	const root = tree();
+	const fleetRow = `F1\t${K("6")}\tttsr-fleet\tkit-demo\tcases/cases.tsv::kit-demo::fire\tcases/cases.tsv::kit-demo::quiet`;
+	const result = check(root, fullMap([fleetRow]));
+	expect(result.failures.some(failure => failure.startsWith("F1 ") && failure.includes("MECHANISM_MISSING ttsr-fleet:kit-demo"))).toBe(true);
+});
 
 test("planted: an unmapped kernel invariant and an unmapped anti-pattern each fail by name", () => {
 	expect(check(tree(), fullMap([], K("6"))).failures).toContain("kernel invariant 6: UNMAPPED");

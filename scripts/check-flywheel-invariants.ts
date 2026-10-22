@@ -10,7 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const KINDS = ["ttsr", "extension", "send", "doctor", "cli", "gate"] as const;
+export const KINDS = ["ttsr", "ttsr-fleet", "extension", "send", "doctor", "cli", "gate"] as const;
 export const REQUIRED_KERNEL = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 export const REQUIRED_ANTI = [
 	"Single-pass beads",
@@ -38,8 +38,8 @@ export function parseMap(text: string): Row[] {
 	});
 }
 
-function corpusRows(root: string): Set<string> {
-	const path = join(root, "cases/cases.tsv");
+function corpusRows(root: string, file = "cases/cases.tsv"): Set<string> {
+	const path = join(root, file);
 	const out = new Set<string>();
 	if (!existsSync(path)) return out;
 	for (const line of readFileSync(path, "utf8").split("\n").slice(1)) {
@@ -61,25 +61,33 @@ function symbolExists(root: string, file: string, symbol: string): boolean {
 	return existsSync(path) && readFileSync(path, "utf8").includes(symbol);
 }
 
-/** Directories a release archive ships; `--packaged` checks only proofs that live in them. */
-export const SHIPPED_ROOTS = ["rules/", "cases/", "extensions/", "scripts/", "docs/"];
+/** Directories the release archive ships; opt-in fleet rules are shipped separately from defaults. */
+export const SHIPPED_ROOTS = ["rules/", "rules-fleet/", "cases/", "extensions/", "scripts/", "docs/"];
 
-/** A proof cell is `file::test name`, `file::SYMBOL`, or `cases/cases.tsv::rule::fire|quiet`. */
-function proofExists(root: string, cell: string, corpus: Set<string>, packaged: boolean): boolean {
+/** A proof cell is `file::test name`, `file::SYMBOL`, or a named rule fire/quiet case row. */
+function proofExists(root: string, cell: string, corpora: Record<string, ReadonlySet<string>>, packaged: boolean): boolean {
 	const parts = cell.split("::");
 	if (parts.length < 2) return false;
 	const [file, ...rest] = parts as [string, ...string[]];
 	if (packaged && !SHIPPED_ROOTS.some(prefix => file.startsWith(prefix))) return true;
-	if (file === "cases/cases.tsv") return rest.length === 2 && corpus.has(`${rest[0]}::${rest[1]}`);
+	if (file === "cases/cases.tsv" || file === "cases/cases-fleet.tsv")
+		return rest.length === 2 && (corpora[file]?.has(`${rest[0]}::${rest[1]}`) ?? false);
 	const target = rest.join("::");
 	if (/\.test\.[cm]?[jt]s$/.test(file)) return testExists(root, file, target);
 	return symbolExists(root, file, target);
 }
 
-function mechanismExists(root: string, row: Row, corpus: Set<string>, packaged: boolean): boolean {
+function mechanismExists(root: string, row: Row, corpora: Record<string, ReadonlySet<string>>, packaged: boolean): boolean {
 	switch (row.kind) {
 		case "ttsr":
-			return existsSync(join(root, "rules", `${row.mechanism}.md`)) && corpus.has(`${row.mechanism}::fire`) && corpus.has(`${row.mechanism}::quiet`);
+		case "ttsr-fleet": {
+			const fleet = row.kind === "ttsr-fleet";
+			const rules = fleet ? "rules-fleet" : "rules";
+			const cases = fleet ? "cases/cases-fleet.tsv" : "cases/cases.tsv";
+			return existsSync(join(root, rules, `${row.mechanism}.md`)) &&
+				(corpora[cases]?.has(`${row.mechanism}::fire`) ?? false) &&
+				(corpora[cases]?.has(`${row.mechanism}::quiet`) ?? false);
+		}
 		case "extension":
 			return existsSync(join(root, "extensions", `${row.mechanism}.ts`)) && existsSync(join(root, "extensions", `${row.mechanism}.test.ts`));
 		case "send":
@@ -93,12 +101,16 @@ function mechanismExists(root: string, row: Row, corpus: Set<string>, packaged: 
 	}
 }
 
-/** `packaged`: the root is an installed release, which ships rules/cases/extensions but not src/ or tests/. */
+
+/** `packaged`: the release archive ships default and opt-in fleet rule packs, cases and extensions. */
 export function check(root: string, text: string, packaged = false): Result {
 	const failures: string[] = [];
 	let rows: Row[];
 	try { rows = parseMap(text); } catch (error) { return { status: "FAIL", rows: 0, failures: [(error as Error).message] }; }
-	const corpus = corpusRows(root);
+	const corpora: Record<string, ReadonlySet<string>> = {
+		"cases/cases.tsv": corpusRows(root),
+		"cases/cases-fleet.tsv": corpusRows(root, "cases/cases-fleet.tsv"),
+	};
 	const ids = new Set<string>();
 	for (const row of rows) {
 		const where = `${row.id} (line ${row.line})`;
@@ -106,9 +118,9 @@ export function check(root: string, text: string, packaged = false): Result {
 		ids.add(row.id);
 		if (!(KINDS as readonly string[]).includes(row.kind)) failures.push(`${where}: KIND_NOT_A_MECHANISM ${row.kind}`);
 		if (PROSE.test(row.mechanism) || PROSE.test(row.kind)) failures.push(`${where}: PROSE_IS_NOT_A_MECHANISM ${row.mechanism}`);
-		if (!mechanismExists(root, row, corpus, packaged)) failures.push(`${where}: MECHANISM_MISSING ${row.kind}:${row.mechanism}`);
-		if (!proofExists(root, row.fire, corpus, packaged)) failures.push(`${where}: FIRE_PROOF_MISSING ${row.fire}`);
-		if (!proofExists(root, row.quiet, corpus, packaged)) failures.push(`${where}: QUIET_PROOF_MISSING ${row.quiet}`);
+		if (!mechanismExists(root, row, corpora, packaged)) failures.push(`${where}: MECHANISM_MISSING ${row.kind}:${row.mechanism}`);
+		if (!proofExists(root, row.fire, corpora, packaged)) failures.push(`${where}: FIRE_PROOF_MISSING ${row.fire}`);
+		if (!proofExists(root, row.quiet, corpora, packaged)) failures.push(`${where}: QUIET_PROOF_MISSING ${row.quiet}`);
 	}
 	for (const n of REQUIRED_KERNEL) {
 		if (!rows.some(row => row.guide.includes("The Kernel: 9 Invariants >") && row.guide.split("> ").pop()!.startsWith(`${n} `)))
