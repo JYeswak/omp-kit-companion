@@ -511,6 +511,10 @@ export function inventoryServices(input: ServicesInput, deps: InventoryDeps): Se
 		if (systemUnverified) parts.push("system domain loaded state is UNVERIFIED without elevated privileges");
 		return { status: "DEGRADED", rows, duplicates, required, admission: servicesAdmission(rows), reason: parts.join("; ") };
 	}
+	if (!queryOk) {
+		return { status: "UNVERIFIED", rows, duplicates, required, admission: servicesAdmission(rows),
+			reason: `User-domain loaded state is UNVERIFIED: ${queryError}` };
+	}
 	if (systemUnverified) {
 		return { status: "UNVERIFIED", rows, duplicates, required, admission: servicesAdmission(rows),
 			reason: "System domain loaded state is UNVERIFIED without elevated privileges; user-domain rows are exact" };

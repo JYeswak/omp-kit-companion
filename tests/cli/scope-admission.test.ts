@@ -38,3 +38,13 @@ test("[a] services scope names the authority gap even when launchd is unavailabl
 	expect(report.admission.authority).toMatchObject({ state: "UNKNOWN", confirmed: false, generation: null });
 	expect(typeof report.admission.authority.reason).toBe("string");
 });
+
+test("an unavailable launchctl is not a verified empty inventory", () => {
+	const input = { home: "/fixture/home" };
+	const missing = inventoryServices(input, { ...stubDeps, listAll: () => ({ code: 127, stdout: "" }) });
+	expect(missing.status).toBe("UNVERIFIED");
+	expect(missing.reason).toContain("LAUNCHCTL_NOT_FOUND");
+	const empty = inventoryServices(input, { ...stubDeps, listAll: () => ({ code: 0, stdout: "" }) });
+	expect(empty.status).toBe("OK");
+	expect(empty.rows).toEqual([]);
+});
