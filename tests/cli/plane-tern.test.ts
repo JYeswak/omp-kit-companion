@@ -430,6 +430,82 @@ test("unknown record types still refuse the whole journal", () => {
 	expect(result).toMatchObject({ status: "UNKNOWN" });
 });
 
+// ---- OMP v3 context records (ompkit-fixjo TERNADDR1): live seats journal custom_message,
+// ttsr_injection and compaction; each once refused the whole journal as INVALID_OR_DUPLICATE_ENTRY ----
+const asyncResult = (id: string, parentId: string, n: number, jobs: unknown = [{ jobId: "Other", type: "task", status: "completed" }]): string =>
+	JSON.stringify({ type: "custom_message", id, parentId, timestamp: stamp(n), customType: "async-result",
+		content: "[redacted]", display: true, details: { meta: { source: { type: "report" } }, jobs }, attribution: "agent" });
+const ttsrInjection = JSON.stringify({ type: "ttsr_injection", id: "ttsr-1", parentId: "custom-message-1",
+	timestamp: stamp(3), injectedRules: ["rule-a"] });
+const compaction = JSON.stringify({ type: "compaction", id: "compaction-1", parentId: "ttsr-1", timestamp: stamp(3),
+	summary: "[redacted]", firstKeptEntryId: "assistant-1", tokensBefore: 1000, method: "remote" });
+
+test("interior custom_message, ttsr_injection and compaction keep a terminal stop idle", () => {
+	const toolDone = nativeMessage("tool-result-1", "compaction-1", 4,
+		{ role: "toolResult", toolCallId: "tool-1", toolName: "read", isError: false, content: [], details: {} });
+	const final = nativeMessage("assistant-2", "tool-result-1", 5,
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "assistant-2",
+		timestamp: stamp(6), activeLeafId: "assistant-2" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, asyncResult("custom-message-1", "assistant-1", 3),
+		ttsrInjection, compaction, toolDone, final, usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", leafId: "assistant-2", terminalAssistantStop: true, oracleBusy: false });
+});
+
+test("a custom_message after a terminal stop leaves the oracle without a verdict, never idle", () => {
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "custom-message-1",
+		timestamp: stamp(6), activeLeafId: "custom-message-1" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, nativeToolDone, nativeFinal,
+		asyncResult("custom-message-1", "assistant-2", 5), usage].join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", leafId: "custom-message-1", lastMessageRole: "custom_message", oracleBusy: null });
+});
+
+test("a compaction ending the branch leaves the oracle without a verdict, never idle", () => {
+	const trailing = JSON.stringify({ type: "compaction", id: "compaction-1", parentId: "assistant-2", timestamp: stamp(5),
+		summary: "[redacted]", firstKeptEntryId: "assistant-2", tokensBefore: 1000 });
+	const usage = JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "compaction-1",
+		timestamp: stamp(6), activeLeafId: "compaction-1" });
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, nativeToolDone, nativeFinal, trailing, usage]
+		.join("\n") + "\n");
+	expect(result).toMatchObject({ status: "KNOWN", lastMessageRole: "compaction", oracleBusy: null });
+});
+
+test("a genuinely duplicated entry id still refuses the journal", () => {
+	const result = parseSessionJournal([header, nativeUser, nativeAssistantTools, asyncResult("custom-message-1", "assistant-1", 3),
+		asyncResult("custom-message-1", "assistant-1", 4), nativeUsage].join("\n") + "\n");
+	expect(result).toEqual({ status: "UNKNOWN", reason: "INVALID_OR_DUPLICATE_ENTRY" });
+	const duplicateMessage = parseSessionJournal([header, nativeUser, nativeUser, nativeUsage].join("\n") + "\n");
+	expect(duplicateMessage).toEqual({ status: "UNKNOWN", reason: "INVALID_OR_DUPLICATE_ENTRY" });
+});
+
+// A background task's tool result stays "running" forever; OMP settles it only through an async-result delivery.
+const runningTask = nativeMessage("tool-result-1", "assistant-1", 3, { role: "toolResult", toolCallId: "tool-1",
+	toolName: "task", isError: false, content: [], details: { async: { state: "running", jobId: "Worker", type: "task" } } });
+function deliveredJournal(jobs: unknown): string {
+	const final = nativeMessage("assistant-2", "custom-message-1", 5,
+		{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] });
+	return [header, nativeUser, nativeAssistantTools, runningTask, asyncResult("custom-message-1", "tool-result-1", 4, jobs), final,
+		nativeUsage].join("\n") + "\n";
+}
+
+test("an async-result delivery for the running job settles its tool", () => {
+	for (const status of ["completed", "failed", "cancelled"]) {
+		const result = parseSessionJournal(deliveredJournal([{ jobId: "Worker", type: "task", status }]));
+		expect(result).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: false, oracleBusy: false });
+	}
+});
+
+test("an async-result delivery for another job leaves the running tool unresolved", () => {
+	const result = parseSessionJournal(deliveredJournal([{ jobId: "Elsewhere", type: "task", status: "completed" }]));
+	expect(result).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
+});
+
+test("an async-result delivery with an unknown or missing job status stays unknown, never idle", () => {
+	for (const jobs of [[{ jobId: "Worker", status: "running" }], [{ jobId: "Worker" }], "not-a-list"]) {
+		expect(parseSessionJournal(deliveredJournal(jobs))).toEqual({ status: "UNKNOWN", reason: "UNSUPPORTED_ASYNC_STATE" });
+	}
+});
+
 // ---- window resolution (ompkit-kdbz.2.16 TERNWINKEY1) ----
 const resolutionIo = (runs: string[][], snapshot: unknown, code = 0) => ({
 	run(argv: string[], _env?: Record<string, string>) {

@@ -130,11 +130,20 @@ export interface TernObserverIo {
 /** Real OMP v3 metadata records: chain topology only, never verdicts. Unknown types still refuse. */
 const METADATA_TYPES: Record<string, true> = {
 	model_change: true, custom: true, thinking_level_change: true, credential_pin: true, title_change: true,
+	ttsr_injection: true, label: true, service_tier_change: true, session_init: true,
 };
+/** OMP v3 records that change model context without a role message (an extension message can start a turn,
+ * a compaction can precede an auto-retry); one ending the branch leaves the oracle with no verdict. */
+const CONTEXT_TYPES: Record<string, true> = {
+	custom_message: true, compaction: true, branch_summary: true, reset_boundary: true,
+};
+/** OMP async job outcomes; a running tool result is settled only by an `async-result` delivery naming its job. */
+const TERMINAL_JOB_STATES: Record<string, true> = { completed: true, failed: true, cancelled: true };
+interface DeliveredJob { jobId: string; status: string }
 interface JournalEntry {
 	id: string;
 	parentId: string | null;
-	type: "message" | "tool_result" | "mode_change" | "model_usage" | "metadata";
+	type: "message" | "tool_result" | "mode_change" | "model_usage" | "metadata" | "context";
 	role: string | null;
 	stopReason: string | null;
 	toolCallIds: string[];
@@ -142,6 +151,10 @@ interface JournalEntry {
 	asyncState: string | null;
 	activeLeafId: string | null;
 	offset: number;
+	/** Job id a running async tool result waits on. */
+	asyncJobId?: string | undefined;
+	/** Jobs an `async-result` custom_message delivers; "malformed" when its details do not name them. */
+	deliveredJobs?: readonly DeliveredJob[] | "malformed" | undefined;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -406,7 +419,7 @@ function parseJournalEntry(raw: Record<string, unknown>, offset: number): Journa
 			const async = details ? objectValue(details.async) : null;
 			return { id: raw.id, parentId, type: "tool_result", role: "toolResult", stopReason: null,
 				toolCallIds: [], toolCallId, asyncState: async && typeof async.state === "string" ? async.state : null,
-				activeLeafId: null, offset };
+				activeLeafId: null, offset, asyncJobId: async && typeof async.jobId === "string" && async.jobId ? async.jobId : undefined };
 		}
 		return { id: raw.id, parentId, type, role: message.role,
 			stopReason: typeof message.stopReason === "string" ? message.stopReason : null,
@@ -420,7 +433,7 @@ function parseJournalEntry(raw: Record<string, unknown>, offset: number): Journa
 		const async = details ? objectValue(details.async) : null;
 		return { id: raw.id, parentId, type: "tool_result", role: "toolResult", stopReason: null,
 			toolCallIds: [], toolCallId, asyncState: async && typeof async.state === "string" ? async.state : null,
-			activeLeafId: null, offset };
+			activeLeafId: null, offset, asyncJobId: async && typeof async.jobId === "string" && async.jobId ? async.jobId : undefined };
 	}
 	if (type === "mode_change") {
 		return { id: raw.id, parentId, type, role: null, stopReason: null, toolCallIds: [], toolCallId: null,
@@ -430,7 +443,24 @@ function parseJournalEntry(raw: Record<string, unknown>, offset: number): Journa
 		return { id: raw.id, parentId, type: "metadata", role: null, stopReason: null, toolCallIds: [],
 			toolCallId: null, asyncState: null, activeLeafId: null, offset };
 	}
+	if (typeof type === "string" && CONTEXT_TYPES[type] === true) {
+		return { id: raw.id, parentId, type: "context", role: type, stopReason: null, toolCallIds: [],
+			toolCallId: null, asyncState: null, activeLeafId: null, offset,
+			deliveredJobs: type === "custom_message" && raw.customType === "async-result" ? deliveredJobs(raw.details) : undefined };
+	}
 	return null;
+}
+
+function deliveredJobs(rawDetails: unknown): readonly DeliveredJob[] | "malformed" {
+	const jobs = objectValue(rawDetails)?.jobs;
+	if (!Array.isArray(jobs)) return "malformed";
+	const delivered: DeliveredJob[] = [];
+	for (const rawJob of jobs) {
+		const job = objectValue(rawJob);
+		if (!job || typeof job.jobId !== "string" || !job.jobId || typeof job.status !== "string") return "malformed";
+		delivered.push({ jobId: job.jobId, status: job.status });
+	}
+	return delivered;
 }
 
 function activeLeaf(entries: readonly JournalEntry[], byId: ReadonlyMap<string, JournalEntry>): string | null {
@@ -503,10 +533,11 @@ export function parseSessionJournal(text: string): SessionJournalResult {
 	let lastMessageRole: string | null = null;
 	let latestAssistant: JournalEntry | undefined;
 	const pendingTools = new Set<string>();
+	const runningJobs = new Map<string, string>();
 	let unresolvedAsyncWithoutId = false;
 	let unsupportedAsyncState = false;
 	for (const entry of branch) {
-		if (entry.type === "message") {
+		if (entry.type === "message" || entry.type === "context") {
 			lastMessageRole = entry.role;
 			if (entry.role === "assistant") latestAssistant = entry;
 		}
@@ -515,11 +546,23 @@ export function parseSessionJournal(text: string): SessionJournalResult {
 		}
 		if (entry.type === "tool_result") {
 			if (entry.asyncState === "running" || entry.asyncState === "pending") {
-				if (entry.toolCallId !== null) pendingTools.add(entry.toolCallId);
-				else unresolvedAsyncWithoutId = true;
+				if (entry.toolCallId !== null) {
+					pendingTools.add(entry.toolCallId);
+					if (entry.asyncJobId !== undefined) runningJobs.set(entry.asyncJobId, entry.toolCallId);
+				} else unresolvedAsyncWithoutId = true;
 			} else if (entry.asyncState === null || entry.asyncState === "completed" || entry.asyncState === "cancelled") {
 				if (entry.toolCallId !== null) pendingTools.delete(entry.toolCallId);
 			} else unsupportedAsyncState = true;
+		}
+		if (entry.deliveredJobs === "malformed") unsupportedAsyncState = true;
+		else if (entry.deliveredJobs !== undefined) {
+			for (const job of entry.deliveredJobs) {
+				if (TERMINAL_JOB_STATES[job.status] !== true) { unsupportedAsyncState = true; continue; }
+				const toolCallId = runningJobs.get(job.jobId);
+				if (toolCallId === undefined) continue;
+				pendingTools.delete(toolCallId);
+				runningJobs.delete(job.jobId);
+			}
 		}
 	}
 	if (unsupportedAsyncState) return { status: "UNKNOWN", reason: "UNSUPPORTED_ASYNC_STATE" };
