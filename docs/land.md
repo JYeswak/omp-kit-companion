@@ -62,6 +62,9 @@ changed runtime never reuses. Missing, corrupt, timed-out or incomplete suite ev
 non-pass and is never cached GREEN: only a finished run with complete counts is recorded as
 `PASS` or `FAIL`. Anything else refuses without writing, so a retry reruns.
 
+Each cache entry records the SHA-256 of its paired `.log`. A missing or altered log invalidates
+the entry and forces a complete rerun; no verdict is reused without matching raw suite evidence.
+
 The cache lives in the pushing checkout's git dir
 (`<git-dir>/omp-kit/full-suite-verdicts/<tree>.json` beside `<tree>.log`, the suite evidence),
 overridden by `FULL_SUITE_VERDICT_CACHE_DIR`; it is never committed. Pruning entries only costs

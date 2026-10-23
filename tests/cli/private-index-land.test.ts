@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { run as kitlibRun } from "../../src/kitlib/run.ts";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
@@ -323,6 +324,45 @@ test("contradictory cached PASS evidence is a cache miss and cannot publish", ()
 	expect(missing.status, missing.stdout + missing.stderr).toBe(1);
 	expect(`${missing.stdout}${missing.stderr}`).toContain("cache miss");
 });
+test("missing or corrupt suite logs are not reused as cached PASS", async () => {
+	const { work } = fixture();
+	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
+	const script = join(work, "scripts", "full-suite-verdict.sh");
+	// Use the candidate judge so this fixture exercises the implementation under test.
+	writeFileSync(script, readFileSync(join(repoRoot, "scripts", "full-suite-verdict.sh")), { mode: 0o755 });
+	const cache = join(work, ".git", "omp-kit", "full-suite-verdicts");
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined) env[key] = value;
+	}
+	env.OMP_KIT_OMP_SRC_FETCH = "0";
+	const runOnce = async () => {
+		const result = await kitlibRun(["sh", script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
+			cwd: work, env, deadline_s: 30,
+		});
+		const decoder = new TextDecoder();
+		return { status: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
+	};
+	const first = await runOnce();
+	expect(first.status, first.stdout + first.stderr).toBe(0);
+	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
+	const logPath = join(cache, `${tree}.log`);
+	const originalLog = readFileSync(logPath, "utf8");
+	expect(originalLog).toContain("GREEN script-suite tests/cli/land-suite.test.sh");
+	const initialEntry = JSON.parse(readFileSync(join(cache, `${tree}.json`), "utf8")) as { evidence: { log_sha256?: string } };
+	expect(initialEntry.evidence.log_sha256).toBe(createHash("sha256").update(originalLog).digest("hex"));
+
+	for (const damage of ["corrupt", "missing"] as const) {
+		if (damage === "corrupt") writeFileSync(logPath, "corrupted suite evidence\n");
+		else unlinkSync(logPath);
+		const replay = await runOnce();
+		const output = `${replay.stdout}${replay.stderr}`;
+		expect(replay.status, output).toBe(0);
+		expect(output).toContain("FULL-SUITE: cache miss");
+		expect(output).not.toContain("FULL-SUITE: VERDICT REUSED PASS");
+		expect(readFileSync(logPath, "utf8")).toBe(originalLog);
+	}
+}, 35_000);
 test("refuses a candidate whose exact full suite is red before origin advances", () => {
 	const { work, fakeBin } = fixture();
 	const base = remoteHead(work);

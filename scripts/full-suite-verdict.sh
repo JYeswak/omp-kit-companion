@@ -98,12 +98,13 @@ if [ -z "$CACHE_DIR" ]; then
 fi
 mkdir -p "$CACHE_DIR" || { fail "verdict cache dir is not writable: $CACHE_DIR"; exit 1; }
 entry="$CACHE_DIR/$tree.json"
+log_entry="$CACHE_DIR/$tree.log"
 
 # A recorded verdict is reused only on an exact identity match with complete evidence. The
 # comparison is exact-string on tree, checks and runtime; verdict must be PASS or FAIL.
 if [ -f "$entry" ] && [ "$(wc -c <"$entry" 2>/dev/null | tr -d ' ')" -le 1048576 ]; then
-	cached=$(TREE=$tree CHECKS=$checks RUNTIME=$runtime ENTRY=$entry python3 - <<'PYEOF' 2>/dev/null
-import json, os
+	cached=$(TREE=$tree CHECKS=$checks RUNTIME=$runtime ENTRY=$entry LOG=$log_entry python3 - <<'PYEOF' 2>/dev/null
+import hashlib, json, os
 try:
     with open(os.environ["ENTRY"], encoding="utf-8") as f:
         e = json.load(f)
@@ -114,6 +115,11 @@ try:
     assert e.get("verdict") in ("PASS", "FAIL")
     evidence = e.get("evidence")
     assert isinstance(evidence, dict) and evidence.get("complete") is True
+    digest = hashlib.sha256()
+    with open(os.environ["LOG"], "rb") as log:
+        for chunk in iter(lambda: log.read(1024 * 1024), b""):
+            digest.update(chunk)
+    assert evidence.get("log_sha256") == digest.hexdigest()
     assert isinstance(e.get("exit_code"), int)
     count_names = ("bun_files", "bun_ran", "bun_fail", "shell_suites", "shell_fail", "py_suites", "py_fail")
     counts = [evidence.get(name) for name in count_names]
@@ -339,8 +345,12 @@ fi
 
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
 mv "$SUITE_OUT" "$CACHE_DIR/$tree.log"
-TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" ENTRY=$entry python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
-import json, os
+TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
+import hashlib, json, os
+log_digest = hashlib.sha256()
+with open(os.environ["LOG"], "rb") as log:
+    for chunk in iter(lambda: log.read(1024 * 1024), b""):
+        log_digest.update(chunk)
 from datetime import datetime, timezone
 entry = {
     "version": 1,
@@ -350,6 +360,7 @@ entry = {
     "verdict": os.environ["VERDICT"],
     "exit_code": int(os.environ["CODE"]),
     "evidence": {
+        "log_sha256": log_digest.hexdigest(),
         "complete": True,
         "bun_files": int(os.environ["BUNF"]),
         "bun_ran": int(os.environ["BUNRAN"]),
