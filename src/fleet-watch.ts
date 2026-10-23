@@ -3,14 +3,14 @@ import type { WorkRepoReport } from "./work-doctor.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { checkTrackerRecoveryCutover, defaultPostRecoverReadback, recoverBusyTracker, recoveryFlagDirs, retainTrackerQuarantine, type TrackerQuarantineReceipt, type TrackerRecoveryCutoverInput, type TrackerRecoveryResult, type TrackerRetentionOutcome, type TrackerRetentionReceipt } from "./tracker-recovery.ts";
 import { YAML } from "bun";
-import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, lstatSync, readFileSync, renameSync, unlinkSync, type Stats } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { fsyncDirectory, writePrivate } from "./mutations.ts";
+import { appendFileSync, existsSync, lstatSync, readFileSync, type Stats } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { appendReapReceipt, defaultGitLockLedgerPath, reapRepoGitLocks, type RepoReapResult, type ReapReceipt } from "./index-lock.ts";
 import { defaultRunner, type ScratchRunner } from "./scratch.ts";
-import { homedir } from "node:os";
+import { ccSpool, type CcSpool } from "./cc-spool.ts";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 
 const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]/;
 /** Reserved uncommitted edits must exceed the work audit's 30-minute limit. */
@@ -277,11 +277,11 @@ function leafVerdict(sessionName: string, rows: ReadyRow[] | null, skipLabels: r
 		refusals: refusals ?? [{ class: "unsafe_custody", bead: null, actor: coordinator, next: "director supplies an eligible native product leaf; absence of supply is not permission to take protected work" }] };
 }
 type FleetWatchPaneState = { checks?: number; lastDecision?: number; lastSteeringCount?: number; parked?: true };
-type FleetWatchState = { version: 1; panes: Record<string, FleetWatchPaneState>; preassign?: Record<string, { kind: string; atMs: number }> };
+type FleetWatchState = { version: 1; panes: Record<string, FleetWatchPaneState>; eventSeq?: number; pendingEmitFailures?: number; preassign?: Record<string, { kind: string; atMs: number }> };
 
 function parseFleetWatchState(value: unknown): FleetWatchState {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("FLEET_WATCH_STATE_INVALID");
-	const state = value as { version?: unknown; panes?: unknown; preassign?: unknown };
+	const state = value as { version?: unknown; panes?: unknown; eventSeq?: unknown; pendingEmitFailures?: unknown; preassign?: unknown };
 	const rawPanes = state.panes;
 	if (state.version !== 1 || typeof rawPanes !== "object" || rawPanes === null || Array.isArray(rawPanes)) throw new Error("FLEET_WATCH_STATE_INVALID");
 	const panes = Object.create(null) as Record<string, FleetWatchPaneState>;
@@ -311,6 +311,14 @@ function parseFleetWatchState(value: unknown): FleetWatchState {
 		panes[key] = pane;
 	}
 	const parsed: FleetWatchState = { version: 1, panes };
+	if (state.eventSeq !== undefined) {
+		if (typeof state.eventSeq !== "number" || !Number.isSafeInteger(state.eventSeq) || state.eventSeq < 0) throw new Error("FLEET_WATCH_STATE_INVALID");
+		parsed.eventSeq = state.eventSeq;
+	}
+	if (state.pendingEmitFailures !== undefined) {
+		if (typeof state.pendingEmitFailures !== "number" || !Number.isSafeInteger(state.pendingEmitFailures) || state.pendingEmitFailures < 0) throw new Error("FLEET_WATCH_STATE_INVALID");
+		parsed.pendingEmitFailures = state.pendingEmitFailures;
+	}
 	if (state.preassign !== undefined) {
 		if (typeof state.preassign !== "object" || state.preassign === null || Array.isArray(state.preassign)) throw new Error("FLEET_WATCH_STATE_INVALID");
 		parsed.preassign = Object.create(null) as Record<string, { kind: string; atMs: number }>;
@@ -336,15 +344,7 @@ function loadFleetWatchState(path: string): FleetWatchState | undefined {
 }
 
 function saveFleetWatchState(path: string, state: FleetWatchState): void {
-	const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	try {
-		writePrivate(temporaryPath, `${JSON.stringify(state)}\n`);
-		renameSync(temporaryPath, path);
-		fsyncDirectory(dirname(path));
-	} catch (error) {
-		try { unlinkSync(temporaryPath); } catch {}
-		throw error;
-	}
+	atomicReplaceBytes(resolve(path), Buffer.from(`${JSON.stringify(state)}\n`, "utf8"), { mode: 0o600, durability: "full" });
 }
 
 export function paneIsBusy(paneText: string): boolean {
@@ -418,6 +418,7 @@ export type PullPick =
 	| { kind: "READY"; id: string; reason: string; epic: string | null };
 export type PullChoice = { ready: true; pick: PullPick; refusals?: readonly PullRefusal[] } | Extract<PreassignVerdict, { ready: false }>;
 
+export type PullWorkerIdentity = { agent: string; binding: string | null };
 export interface PullProbes {
 	/** `.beads/policy.yaml`; the empty policy when absent, null when unparsable. */
 	readPolicy: (repo: string) => TrackerPolicy | null;
@@ -429,8 +430,11 @@ export interface PullProbes {
 	triage: (repo: string) => TriageResult;
 	/** Agent Mail identity of a pane id (`am agents resolve-pane`), or null. */
 	resolveWorker: (repo: string, pane: string) => string | null;
+	/** CC binding_id when known; Agent Mail's binding status is not a CC binding id. */
+	resolveWorkerIdentity?: (repo: string, pane: string) => PullWorkerIdentity | null;
 	/** Current blockers/owners from the same native namespace as readiness; never export authority. */
 	readNativeState: (repo: string, ids: readonly string[], coordinator: string | null, readyCommand?: string) => NativePullState;
+
 }
 
 const EMPTY_POLICY: TrackerPolicy = { statuses: [], transitions: {}, ready: ["open"] };
@@ -853,7 +857,11 @@ export class FleetWatcher {
 	private readonly preassignReports = new Map<string, { kind: string; atMs: number }>();
 	/** NO-WORK seats: no repeated empty-queue nudge, but every idle tick re-checks the queues. */
 	private readonly parked = new Set<string>();
+	private eventSeq = 0;
+	private pendingEmitFailures = 0;
 	constructor(private readonly config: FleetWatchConfig, private readonly now: () => number = Date.now, state?: FleetWatchState) {
+		this.eventSeq = state?.eventSeq ?? 0;
+		this.pendingEmitFailures = state?.pendingEmitFailures ?? 0;
 		for (const [key, pane] of Object.entries(state?.panes ?? {})) {
 			if (pane.checks) this.checks.set(key, pane.checks);
 			if (pane.lastDecision !== undefined) this.lastDecision.set(key, pane.lastDecision);
@@ -869,6 +877,19 @@ export class FleetWatcher {
 			this.preassignReports.set(key, { kind, atMs });
 		}
 	}
+	nextEventSequence(): number | null {
+		if (this.eventSeq === Number.MAX_SAFE_INTEGER) return null;
+		this.eventSeq += 1;
+		return this.eventSeq;
+	}
+	takePendingEmitFailures(): number {
+		const pending = this.pendingEmitFailures;
+		this.pendingEmitFailures = 0;
+		return pending;
+	}
+	addPendingEmitFailures(count: number): void {
+		if (Number.isSafeInteger(count) && count > 0) this.pendingEmitFailures = Math.min(Number.MAX_SAFE_INTEGER, this.pendingEmitFailures + count);
+	}
 	snapshot(): FleetWatchState {
 		const panes = Object.create(null) as Record<string, FleetWatchPaneState>;
 		for (const [key, checks] of this.checks) if (checks > 0) (panes[key] ??= {}).checks = checks;
@@ -876,6 +897,8 @@ export class FleetWatcher {
 		for (const [key, lastSteeringCount] of this.lastSteeringCount) (panes[key] ??= {}).lastSteeringCount = lastSteeringCount;
 		for (const key of this.parked) (panes[key] ??= {}).parked = true;
 		const state: FleetWatchState = { version: 1, panes };
+		if (this.eventSeq > 0) state.eventSeq = this.eventSeq;
+		if (this.pendingEmitFailures > 0) state.pendingEmitFailures = this.pendingEmitFailures;
 		if (this.preassignReports.size > 0) {
 			state.preassign = Object.create(null) as Record<string, { kind: string; atMs: number }>;
 			for (const [key, report] of this.preassignReports) state.preassign[key] = { ...report };
@@ -1038,6 +1061,16 @@ function readNativePullState(repo: string, ids: readonly string[], coordinator: 
 	return { ok: true, blockers, ...issues };
 }
 
+function resolvePullWorkerIdentity(repo: string, pane: string): PullWorkerIdentity | null {
+	if (pane.trim() === "") return null;
+	const outcome = runJson(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], undefined);
+	if (!outcome.ok || !outcome.value || typeof outcome.value !== "object" || Array.isArray(outcome.value)) return null;
+	const row = outcome.value as Record<string, unknown>;
+	const agent = row.agent_name;
+	if (typeof agent !== "string" || agent === "") return null;
+	return { agent, binding: null };
+}
+
 export const defaultPullProbes: PullProbes = {
 	readPolicy: (repo) => {
 		const path = join(repo, ".beads", "policy.yaml");
@@ -1065,14 +1098,8 @@ export const defaultPullProbes: PullProbes = {
 		try { return parseTriage(JSON.parse(child.stdout)); } catch { return { usable: false, reason: `bv --robot-triage printed non-JSON (status ${String(child.status)}, ${elapsed()} ms)` }; }
 	},
 	readNativeState: readNativePullState,
-	resolveWorker: (repo, pane) => {
-		if (pane.trim() === "") return null;
-		// am.agents.resolve-pane.v1 prints {schema_version, agent_name, pane_id, project_key, source, binding}.
-		const outcome = runJson(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], undefined);
-		if (!outcome.ok) return null;
-		const name: unknown = outcome.value && typeof outcome.value === "object" ? (outcome.value as Record<string, unknown>).agent_name : undefined;
-		return typeof name === "string" && name !== "" ? name : null;
-	},
+	resolveWorkerIdentity: resolvePullWorkerIdentity,
+	resolveWorker: (repo, pane) => resolvePullWorkerIdentity(repo, pane)?.agent ?? null,
 };
 
 export type FleetWatchOnceDeps = {
@@ -1109,6 +1136,9 @@ export type FleetWatchOnceDeps = {
 	 * Absent, the native defaults run (recovery-flag scan plus br ready).
 	 */
 	preassignProbes?: PreassignProbes;
+	/** Optional command-center spool state; inert when absent or no fleet state exists. */
+	ccStateDir?: string;
+	ccProducer?: string;
 	/** ompkit-364w pull probes (policy, review/rework rows, issues.jsonl, bv triage, seat identity). Absent, the native defaults run. */
 	pullProbes?: PullProbes;
 	/** Latest work-doctor rows; reuse its reservation and uncommitted ages. */
@@ -1131,10 +1161,24 @@ function nativeInspectionTargets(rows: readonly ReadyRow[] | null, triage: Triag
 	return [...targets];
 }
 
+type PullAttemptRecorder = (session: string, repo: string, pane: string, outcome: string, refusalClass: string | null, pickedBead: string | null, atMs: number) => void;
+type AdmissionRefusalRecord = { session: string; pane: string; checks?: number; repo?: string; text: string };
+function recordAdmissionRefusal(
+	deps: FleetWatchOnceDeps,
+	recordAttempt: PullAttemptRecorder | undefined,
+	identityRepo: string,
+	record: AdmissionRefusalRecord,
+	pickedBead: string | null = null,
+): void {
+	const atMs = (deps.now ?? Date.now)();
+	appendFileSync(deps.logPath, JSON.stringify({ at: new Date(atMs).toISOString(), kind: "ADMISSION_REFUSED", ...record }) + "\n");
+	recordAttempt?.(record.session, identityRepo, record.pane, "ADMISSION_REFUSED", "ADMISSION_REFUSED", pickedBead, atMs);
+}
 /** Persist a routing observation and attempt its admitted pointer; never claim delivery. */
 function recordPullNotice(
 	session: FleetWatchSession, action: FleetWatchPaneAction, choice: PullChoice,
 	deps: FleetWatchOnceDeps, watcher: FleetWatcher, actions: FleetWatchAction[],
+	recordAttempt?: PullAttemptRecorder,
 ): boolean {
 	const refusals = choice.refusals;
 	const episode = refusals === undefined || refusals.length === 0 ? null : JSON.stringify(refusals);
@@ -1149,10 +1193,12 @@ function recordPullNotice(
 		text: choice.ready ? `Fleet watch: withheld native candidates for ${session.session}; eligible work continues.` : choice.text,
 		refusals,
 	};
-	appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...notice }) + "\n");
+	const noticeAtMs = (deps.now ?? Date.now)();
+	appendFileSync(deps.logPath, JSON.stringify({ at: new Date(noticeAtMs).toISOString(), ...notice }) + "\n");
 	actions.push(notice);
+	if (!choice.ready) recordAttempt?.(session.session, session.repo, action.pane, choice.kind, choice.kind, null, noticeAtMs);
 	if (!admittedEffect(deps.admission, "send")) {
-		appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: session.session, pane: action.pane, text: "admission refused coordinator notice; no notice was sent" }) + "\n");
+		recordAdmissionRefusal(deps, recordAttempt, session.repo, { session: session.session, pane: action.pane, text: "admission refused coordinator notice; no notice was sent" });
 		return true;
 	}
 	try {
@@ -1168,7 +1214,7 @@ function recordPullNotice(
 }
 
 /** Route the work audit as one tick phase; return whether persisted episodes changed. */
-function recordStrandedAudit(config: FleetWatchConfig, deps: FleetWatchOnceDeps, activeWatcher: FleetWatcher, actions: FleetWatchAction[]): boolean {
+function recordStrandedAudit(config: FleetWatchConfig, deps: FleetWatchOnceDeps, activeWatcher: FleetWatcher, actions: FleetWatchAction[], recordAttempt?: PullAttemptRecorder): boolean {
 	let stateDirty = false;
 	// ompkit-rhy9.24: route aged owned work through the configured director,
 	// never infer ownership from dirty files or choose an unrelated queue.
@@ -1203,7 +1249,7 @@ function recordStrandedAudit(config: FleetWatchConfig, deps: FleetWatchOnceDeps,
 			}
 			for (const edit of overLimit) {
 				if (!admittedEffect(deps.admission, "send")) {
-					appendFileSync(deps.logPath, JSON.stringify({ at: stamp(), kind: "ADMISSION_REFUSED", session: owner.coordinatorSession, pane: owner.coordinatorPane, checks: 0, repo: row.path, text: "admission refused stranded escalation; nothing was sent" }) + "\n");
+					recordAdmissionRefusal(deps, recordAttempt, owner.repo, { session: owner.coordinatorSession, pane: owner.coordinatorPane, checks: 0, repo: row.path, text: "admission refused stranded escalation; nothing was sent" });
 					continue;
 				}
 				if (!activeWatcher.claimStrandedEpisode(`${row.path}\0${edit.bead}\0${edit.path}`)) continue;
@@ -1218,9 +1264,114 @@ function recordStrandedAudit(config: FleetWatchConfig, deps: FleetWatchOnceDeps,
 	}
 	return stateDirty;
 }
+function watcherSpool(deps: FleetWatchOnceDeps, now: () => number): CcSpool | null {
+	try {
+		return ccSpool(deps.ccProducer ?? "watcher", { stateDir: deps.ccStateDir, clock: now });
+	} catch {
+		return null;
+	}
+}
+
+function emitWatcherEnvelope(
+	spool: CcSpool | null, type: string, data: Record<string, unknown>, key: string, timeMs: number,
+	ctx?: Record<string, unknown>,
+): number {
+	if (!spool) return 0;
+	try {
+		const env = spool.envelope(type, data, { key, timeMs, observedMs: timeMs, ctx });
+		return spool.append([env]) === 1 ? 1 : 0;
+	} catch {
+		spool.failures += 1;
+		return 0;
+	}
+}
+class WatcherEventRecorder {
+	private recordsSeen = 0;
+	private recordsEmitted = 0;
+	private recordsQuarantined = 0;
+	private readonly outcomeCounts = new Map<string, number>();
+	private dirty = false;
+
+	constructor(
+		private readonly spool: CcSpool | null,
+		private readonly watcher: FleetWatcher,
+		private readonly now: () => number,
+		private readonly identityFor: (repo: string, pane: string) => PullWorkerIdentity | null,
+	) {
+		if (!spool) return;
+		const pending = watcher.takePendingEmitFailures();
+		this.recordsSeen = pending;
+		this.recordsQuarantined = pending;
+		this.dirty = pending > 0;
+	}
+
+	readonly recordAttempt: PullAttemptRecorder = (sessionName, repo, pane, outcome, refusalClass, pickedBead, atMs) => {
+		const spool = this.spool;
+		if (!spool) return;
+		this.recordsSeen += 1;
+		const sequence = this.watcher.nextEventSequence();
+		const eventTime = atMs;
+		const identity = this.identityFor(repo, pane);
+		const emitted = sequence === null ? 0 : emitWatcherEnvelope(spool, "pull.attempt", {
+			outcome,
+			refusal_class: refusalClass,
+			picked_bead: pickedBead,
+		}, `fw:${pane}:${eventTime}:${sequence}`, eventTime, {
+			seat: `${sessionName}/${pane}`,
+			binding: identity?.binding ?? null,
+			agent: identity?.agent ?? null,
+			session: sessionName,
+		});
+		if (emitted === 1) {
+			this.recordsEmitted += 1;
+			this.outcomeCounts.set(outcome, (this.outcomeCounts.get(outcome) ?? 0) + 1);
+		} else {
+			this.recordsQuarantined += 1;
+		}
+	};
+
+	finish(): boolean {
+		const spool = this.spool;
+		if (!spool) return false;
+		const tickAt = this.now();
+		const tickSequence = this.watcher.nextEventSequence();
+		this.dirty = true;
+		const coverage: Array<Record<string, unknown>> = [...this.outcomeCounts].map(([outcome, count]) => ({
+			record_type: `record:${outcome}`,
+			runtime_version: "1",
+			disposition: "emitted",
+			reason: null,
+			count,
+		}));
+		if (this.recordsQuarantined > 0) coverage.push({
+			record_type: "record:emit_failed",
+			runtime_version: "1",
+			disposition: "unknown",
+			reason: "SPOOL_APPEND_FAILED",
+			count: this.recordsQuarantined,
+		});
+		const tick = tickSequence === null ? 0 : emitWatcherEnvelope(spool, "source.tick", {
+			instance: "fleet-watch",
+			records_seen: this.recordsSeen,
+			records_emitted: this.recordsEmitted,
+			records_ignored: 0,
+			records_quarantined: this.recordsQuarantined,
+			complete_through_ms: tickAt,
+			position: tickSequence,
+			event_count: this.recordsEmitted,
+			coverage,
+		}, `fw:tick:${tickAt}:${tickSequence}`, tickAt);
+		if (tick === 0) this.watcher.addPendingEmitFailures(this.recordsQuarantined + 1);
+		return this.dirty;
+	}
+}
+
+
 
 export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnceDeps, watcher?: FleetWatcher): FleetWatchAction[] {
 	if (!config.enabled) return [];
+	const now = deps.now ?? Date.now;
+	const spool = watcherSpool(deps, now);
 	const statePath = deps.statePath === undefined
 		? watcher === undefined ? join(dirname(deps.logPath), "fleet-watch-state.json") : null
 		: deps.statePath;
@@ -1236,13 +1387,21 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 	const statusCache = new Map<string, ReadyRow[] | null>();
 	const issuesCache = new Map<string, TrackerIssue[] | null>();
 	const triageCache = new Map<string, TriageResult>();
-	const seatCache = new Map<string, string | null>();
+	const seatCache = new Map<string, PullWorkerIdentity | null>();
 	const nativeStateCache = new Map<string, NativePullState>();
 	const takenBySession = new Map<string, Set<string>>();
 	function cached<T>(cache: Map<string, T>, key: string, load: () => T): T {
 		if (!cache.has(key)) cache.set(key, load());
 		return cache.get(key) as T;
 	}
+	const identityFor = (repo: string, pane: string): PullWorkerIdentity | null =>
+		cached(seatCache, `${repo}\0${pane}`, () => {
+			if (pull.resolveWorkerIdentity !== undefined) return pull.resolveWorkerIdentity(repo, pane);
+			const agent = pull.resolveWorker(repo, pane);
+			return agent === null ? null : { agent, binding: null };
+		});
+	const eventRecorder = new WatcherEventRecorder(spool, activeWatcher, now, identityFor);
+	const seat = (session: FleetWatchSession, pane: string): string | null => identityFor(session.repo, pane)?.agent ?? null;
 	const recoverTracker = deps.recoverTracker ?? ((repo: string, session: string) =>
 		recoverBusyTracker(repo, session, { postRecoverReadback: defaultPostRecoverReadback }));
 	const configuredRecoverySessions = new Set(config.sessions.map((session) => session.session));
@@ -1260,7 +1419,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		}
 		recoveredRepos.add(session.repo);
 		if (!admittedEffect(deps.admission, "tracker-recovery")) {
-			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: session.session, pane: "tracker", checks: 0, text: "admission refused tracker recovery; no recovery ran" }) + "\n");
+			recordAdmissionRefusal(deps, eventRecorder.recordAttempt, session.repo, { session: session.session, pane: "tracker", checks: 0, text: "admission refused tracker recovery; no recovery ran" });
 			recoveryKinds.set(session.repo, null);
 			continue;
 		}
@@ -1288,7 +1447,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		}
 		recoveredRepos.add(tracker.repo);
 		if (!admittedEffect(deps.admission, "tracker-recovery")) {
-			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: tracker.session, pane: "tracker", checks: 0, repo: tracker.repo, text: "admission refused tracker recovery; no recovery ran" }) + "\n");
+			recordAdmissionRefusal(deps, eventRecorder.recordAttempt, tracker.repo, { session: tracker.session, pane: "tracker", checks: 0, repo: tracker.repo, text: "admission refused tracker recovery; no recovery ran" });
 			recoveryKinds.set(tracker.repo, null);
 			continue;
 		}
@@ -1310,7 +1469,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 	if (retainOne !== null) {
 		for (const [repo, sessionName] of retentionRepos) {
 			if (!admittedEffect(deps.admission, "tracker-quarantine-retention")) {
-				appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: sessionName, pane: "tracker", checks: 0, repo, text: "admission refused tracker quarantine retention; no artifact was moved" }) + "\n");
+				recordAdmissionRefusal(deps, eventRecorder.recordAttempt, repo, { session: sessionName, pane: "tracker", checks: 0, repo, text: "admission refused tracker quarantine retention; no artifact was moved" });
 				continue;
 			}
 			const retention = retainOne(repo);
@@ -1330,7 +1489,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		});
 		for (const [repo, sessionName] of retentionRepos) {
 			if (!admittedEffect(deps.admission, "git-lock-reap")) {
-				appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: sessionName, pane: "git", checks: 0, repo, text: "admission refused the git lock reap; no lock was moved" }) + "\n");
+				recordAdmissionRefusal(deps, eventRecorder.recordAttempt, repo, { session: sessionName, pane: "git", checks: 0, repo, text: "admission refused the git lock reap; no lock was moved" });
 				continue;
 			}
 			for (const result of reapOne(repo)) {
@@ -1345,7 +1504,7 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			}
 		}
 	}
-	let stateDirty = recordStrandedAudit(config, deps, activeWatcher, actions);
+	let stateDirty = recordStrandedAudit(config, deps, activeWatcher, actions, eventRecorder.recordAttempt);
 	const pullFor = (session: FleetWatchSession, pane: string): PullChoice => {
 		const gate = writeGate(session.session, cached(flagCache, session.repo, () => probes.findRecoveryFlags(session.repo)), recoveryKinds.get(session.repo) ?? null);
 		if (!gate.ready) return gate;
@@ -1357,11 +1516,10 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		const issues = cached(issuesCache, session.repo, () => pull.readIssues(session.repo));
 		const grading = gradingQueue(statusRows, issues, review);
 		const rework = reworkQueue(statusRows, readyRows, issues);
-		const seat = (seatPane: string) => cached(seatCache, `${session.repo}\0${seatPane}`, () => pull.resolveWorker(session.repo, seatPane));
 		const triage = cached(triageCache, session.repo, () => pull.triage(session.repo));
 		const targets = nativeInspectionTargets(readyRows, triage, session.skipLabels ?? []);
 		const coordinator: PullCoordinator = {
-			actor: targets.length === 0 ? null : seat(session.coordinatorPane),
+			actor: targets.length === 0 ? null : seat(session, session.coordinatorPane),
 			session: session.coordinatorSession, pane: session.coordinatorPane,
 		};
 		const nativeState = targets.length === 0 ? undefined : cached(nativeStateCache,
@@ -1369,8 +1527,8 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			() => pull.readNativeState(session.repo, targets, coordinator.actor, session.readyCommand));
 		return choosePull({
 			sessionName: session.session,
-			worker: grading.length > 0 || rework.length > 0 ? seat(pane) : null,
-			liveWorkers: new Set(rework.length > 0 ? session.workerPanes.flatMap((seatPane) => seat(seatPane) ?? []) : []),
+			worker: grading.length > 0 || rework.length > 0 ? seat(session, pane) : null,
+			liveWorkers: new Set(rework.length > 0 ? session.workerPanes.flatMap((seatPane) => seat(session, seatPane) ?? []) : []),
 			grading,
 			rework,
 			triage,
@@ -1399,15 +1557,15 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		}
 		for (const decision of decisions) {
 			let action = decision;
+			let pickedBead: string | null = null;
 			if (action.kind === "NUDGED" || action.kind === "ESCALATED") {
 				const choice = pullFor(session, pane);
-				if (recordPullNotice(session, action, choice, deps, activeWatcher, actions)) stateDirty = true;
+				if (recordPullNotice(session, action, choice, deps, activeWatcher, actions, eventRecorder.recordAttempt)) stateDirty = true;
 				if (!choice.ready) {
-					// NO-WORK: park the seat; it stays silent but is re-checked every idle tick.
 					if (choice.kind === "NO_FREE_LEAF" || choice.kind === "NO_TRIAGE_PICK") activeWatcher.setParked(session, pane, true);
-					stateDirty = true;
 					continue;
 				}
+				pickedBead = choice.pick.id;
 				activeWatcher.setParked(session, pane, false);
 				stateDirty = true;
 				if (action.kind === "NUDGED") {
@@ -1419,15 +1577,18 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			}
 			const effect = action.kind === "STEERING_SUBMITTED" ? "send-keys" : "send";
 			if (!admittedEffect(deps.admission, effect)) {
-				appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), kind: "ADMISSION_REFUSED", session: session.session, pane, checks: action.checks, text: `admission refused ${action.kind}; nothing was sent` }) + "\n");
+				recordAdmissionRefusal(deps, eventRecorder.recordAttempt, session.repo, { session: session.session, pane, checks: action.checks, text: `admission refused ${action.kind}; nothing was sent` }, pickedBead);
 				continue;
 			}
 			if (action.kind === "STEERING_SUBMITTED") deps.sendKeys(session.session, pane, ["M-Up", "Enter"]);
 			else deps.send(action.kind === "NUDGED" ? session.session : session.coordinatorSession, action.kind === "NUDGED" ? pane : session.coordinatorPane, action.text);
-			appendFileSync(deps.logPath, JSON.stringify({ at: new Date((deps.now ?? Date.now)()).toISOString(), ...action }) + "\n");
+			const actionAtMs = now();
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date(actionAtMs).toISOString(), ...action }) + "\n");
+			eventRecorder.recordAttempt(session.session, session.repo, pane, action.kind, null, pickedBead, actionAtMs);
 			actions.push(action);
 		}
 	}
+	if (eventRecorder.finish()) stateDirty = true;
 	if (statePath !== null && stateDirty) saveFleetWatchState(statePath, activeWatcher.snapshot());
 	return actions;
 }

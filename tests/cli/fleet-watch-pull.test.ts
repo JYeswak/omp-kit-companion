@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { YAML } from "bun";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import {
 	WORKER_REPLIES,
 	choosePull,
@@ -18,6 +19,7 @@ import {
 	runFleetWatchOnce,
 	runJson,
 	type FleetWatchConfig,
+	type FleetWatchOnceDeps,
 	type FleetWatchSession,
 	type PullPick,
 	type PullProbes,
@@ -34,6 +36,7 @@ const fixtures = join(repoRoot, "tests", "fixtures", "fleet-watch");
 const policyOf = (name: string): TrackerPolicy => parsePolicy(YAML.parse(readFileSync(join(fixtures, name), "utf8")))!;
 const OMP_KIT_POLICY = policyOf("policy.omp-kit.yaml");
 const UDS_POLICY = policyOf("policy.uds.yaml");
+const C8_NOW = 1_792_598_400_000;
 
 const session: FleetWatchSession = {
 	session: "work",
@@ -68,14 +71,32 @@ function world(overrides: Partial<World> = {}): World {
 function scratchDir(): string {
 	const parent = join(repoRoot, "var", "agent-tmp");
 	mkdirSync(parent, { recursive: true });
-	const dir = mkdtempSync(join(parent, "fleet-watch-pull."));
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fleet-watch-pull-test\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
-	return dir;
+	return ownedTmp("fleet-watch-pull", { root: parent, bead: "ompkit-fp72.120.16.10.11" }).path;
 }
 
+type HarnessOptions = {
+	cc?: boolean;
+	now?: () => number;
+	capture?: (session: string, pane: string) => { code: number; stdout: string; stderr: string };
+	admission?: FleetWatchOnceDeps["admission"];
+	send?: (session: string, pane: string, text: string) => void;
+	workAudit?: FleetWatchOnceDeps["workAudit"];
+};
+
 /** Idle panes, injected probes; `state` persists idle counts and parks across fresh invocations like the service. */
-function harness(config: FleetWatchConfig, current: { world: World }, busy: string[] = [], policy: TrackerPolicy = OMP_KIT_POLICY) {
+function harness(
+	config: FleetWatchConfig,
+	current: { world: World },
+	busy: string[] = [],
+	policy: TrackerPolicy = OMP_KIT_POLICY,
+	options: HarnessOptions = {},
+) {
 	const dir = scratchDir();
+	const ccStateDir = options.cc ? join(dir, "cc-state") : undefined;
+	if (ccStateDir !== undefined) {
+		mkdirSync(ccStateDir);
+		mkdirSync(join(ccStateDir, "spool"));
+	}
 	const sends: { pane: string; text: string }[] = [];
 	const pullProbes: PullProbes = {
 		readPolicy: () => policy,
@@ -83,18 +104,28 @@ function harness(config: FleetWatchConfig, current: { world: World }, busy: stri
 		readIssues: () => current.world.issues,
 		triage: () => current.world.triage,
 		resolveWorker: (_repo, pane) => current.world.seats[pane] ?? null,
+		resolveWorkerIdentity: (_repo, pane) => {
+			const agent = current.world.seats[pane];
+			return agent === undefined ? null : { agent, binding: null };
+		},
 		readNativeState: () => ({ ok: false, reason: "synthetic selection fixture supplies no native custody observation" }),
 	};
 	const deps = {
-		capture: (_session: string, pane: string) => ({ code: 0, stdout: busy.includes(pane) ? "⠋ working" : "idle", stderr: "" }),
-		send: (_session: string, pane: string, text: string) => { sends.push({ pane, text }); },
+		capture: options.capture ?? ((_session: string, pane: string) => ({ code: 0, stdout: busy.includes(pane) ? "⠋ working" : "idle", stderr: "" })),
+		send: (session: string, pane: string, text: string) => {
+			sends.push({ pane, text });
+			options.send?.(session, pane, text);
+		},
 		sendKeys: () => {},
 		logPath: join(dir, "fleet-watch.jsonl"),
 		statePath: join(dir, "fleet-watch-state.json"),
-		now: () => 0,
+		now: options.now ?? (() => 0),
 		recoverTracker: () => null,
 		preassignProbes: { findRecoveryFlags: () => [], listReadyRows: () => ({ rows: current.world.readyRows, failure: current.world.readyFailure ?? null }) },
 		pullProbes,
+		...(ccStateDir === undefined ? {} : { ccStateDir }),
+		...(options.admission === undefined ? {} : { admission: options.admission }),
+		...(options.workAudit === undefined ? {} : { workAudit: options.workAudit }),
 	};
 	return {
 		sends,
@@ -102,6 +133,9 @@ function harness(config: FleetWatchConfig, current: { world: World }, busy: stri
 		worker: (pane: string) => sends.filter((send) => send.pane === pane).map((send) => send.text),
 		coordinator: () => sends.filter((send) => send.pane === "%54").map((send) => send.text),
 		state: () => JSON.parse(readFileSync(deps.statePath, "utf8")),
+		statePath: deps.statePath,
+		logPath: deps.logPath,
+		ccStateDir,
 	};
 }
 
@@ -283,6 +317,229 @@ test("[tick] two idle seats in one tick get different items", () => {
 	const run = nudgeOnce(configOf(), world({ statusRows: [review("x-8", "Third"), review("x-9", "Third")] }), []);
 	expect(run.worker("%1")[0]).toContain("Grade x-8 first");
 	expect(run.worker("%2")[0]).toContain("Grade x-9 first");
+});
+test("[C8] pull.attempt mirrors watcher outcomes with stable identity and per-pass coverage", () => {
+	const current = world({
+		readyRows: [leaf("ompkit-c8")],
+		issues: [issue("ompkit-c8", { parents: ["x-epic"] })],
+		triage: { usable: true, ids: ["ompkit-c8"] },
+	});
+	let nowMs = C8_NOW;
+	const run = harness(configOf({ workerPanes: ["%1"] }), { world: current }, [], OMP_KIT_POLICY, {
+		cc: true,
+		now: () => nowMs++,
+	});
+	for (let i = 0; i < 5; i++) run.tick();
+
+	const spool = join(run.ccStateDir!, "spool", "watcher", `${new Date(C8_NOW).toISOString().slice(0, 10)}.jsonl`);
+	const events = readFileSync(spool, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	const pulls = events.filter((event) => event.type === "pull.attempt");
+	const ticks = events.filter((event) => event.type === "source.tick");
+	expect(pulls.map((event) => event.data.outcome)).toEqual(["NUDGED", "ESCALATED"]);
+	expect(pulls[0]).toMatchObject({
+		seat: "work/%1",
+		session: "work",
+		binding: null,
+		agent: "GreenWorker",
+		data: { outcome: "NUDGED", refusal_class: null, picked_bead: "ompkit-c8" },
+	});
+	expect(Object.keys(pulls[0]!.data).sort()).toEqual(["outcome", "picked_bead", "refusal_class"]);
+	expect(ticks).toHaveLength(5);
+	expect(ticks[1]!.data).toMatchObject({
+		records_seen: 1,
+		records_emitted: 1,
+		records_ignored: 0,
+		records_quarantined: 0,
+		coverage: [{ record_type: "record:NUDGED", runtime_version: "1", disposition: "emitted", reason: null, count: 1 }],
+	});
+	const positions = [...pulls, ...ticks].map((event) => event.position);
+	expect(new Set(positions).size).toBe(positions.length);
+	const logRows = readFileSync(run.logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	const loggedKinds = logRows.map((row) => row.kind);
+	expect(loggedKinds.filter((kind) => kind === "NUDGED" || kind === "ESCALATED")).toEqual(["NUDGED", "ESCALATED"]);
+	expect(pulls.map((event) => event.time)).toEqual(logRows.filter((row) => row.kind === "NUDGED" || row.kind === "ESCALATED").map((row) => row.at));
+});
+
+test("[C8] all pane action classes use typed outcomes and never copy capture text", () => {
+	const token = `ghp_${"abcdefghijklmnopqrstuvwxyz0123456789".slice(0, 36)}`;
+	const failedCapture = harness(configOf({ workerPanes: ["%1"] }), { world: world() }, [], OMP_KIT_POLICY, {
+		cc: true,
+		now: () => C8_NOW,
+		capture: () => ({ code: 1, stdout: "", stderr: `capture failed ${token}` }),
+	});
+	failedCapture.tick();
+	const day = new Date(C8_NOW).toISOString().slice(0, 10);
+	const failedPath = join(failedCapture.ccStateDir!, "spool", "watcher", `${day}.jsonl`);
+	const failedText = readFileSync(failedPath, "utf8");
+	const failedEvents = failedText.trim().split("\n").map((line) => JSON.parse(line));
+	const failedPull = failedEvents.find((event) => event.type === "pull.attempt");
+	expect(failedPull!.data).toEqual({ outcome: "NO_DECISION", refusal_class: null, picked_bead: null });
+	expect(failedText).not.toContain(token);
+
+	const steering = harness(configOf({ workerPanes: ["%1"] }), { world: world() }, [], OMP_KIT_POLICY, {
+		cc: true,
+		now: () => C8_NOW,
+		capture: () => ({ code: 0, stdout: "Steering · 1\n⌥↑ to edit", stderr: "" }),
+	});
+	steering.tick();
+	const steeringPath = join(steering.ccStateDir!, "spool", "watcher", `${day}.jsonl`);
+	const steeringEvents = readFileSync(steeringPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	expect(steeringEvents.find((event) => event.type === "pull.attempt")!.data).toEqual({
+		outcome: "STEERING_SUBMITTED",
+		refusal_class: null,
+		picked_bead: null,
+	});
+});
+
+test("[C8] denied watcher sends produce an ADMISSION_REFUSED event with the selected bead", () => {
+	const run = harness(configOf({ workerPanes: ["%1"] }), {
+		world: world({
+			readyRows: [leaf("ompkit-c8")],
+			issues: [issue("ompkit-c8", { parents: ["x-epic"] })],
+			triage: { usable: true, ids: ["ompkit-c8"] },
+		}),
+	}, [], OMP_KIT_POLICY, {
+		cc: true,
+		now: () => C8_NOW,
+		admission: {
+			launcherBinding: "none",
+			authority: "OFF",
+			authorityConfirmed: true,
+			authorityGeneration: null,
+			launchers: [],
+			keeper: null,
+			packet: { action: "send", ownedAction: "send", generation: null },
+			governedActions: ["send"],
+		},
+	});
+	run.tick();
+	run.tick();
+	const spool = join(run.ccStateDir!, "spool", "watcher", `${new Date(C8_NOW).toISOString().slice(0, 10)}.jsonl`);
+	const events = readFileSync(spool, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	const pull = events.find((event) => event.type === "pull.attempt");
+	expect(pull!.data).toEqual({
+		outcome: "ADMISSION_REFUSED",
+		refusal_class: "ADMISSION_REFUSED",
+		picked_bead: "ompkit-c8",
+	});
+	expect(readFileSync(run.logPath, "utf8").includes('"kind":"ADMISSION_REFUSED"')).toBe(true);
+});
+
+test("[C8] append failure is quarantined and reported with record:emit_failed on the next source tick", () => {
+	let producerDir = "";
+	const run = harness(configOf({ workerPanes: ["%1"] }), {
+		world: world({
+			readyRows: [leaf("ompkit-c8")],
+			issues: [issue("ompkit-c8", { parents: ["x-epic"] })],
+			triage: { usable: true, ids: ["ompkit-c8"] },
+		}),
+	}, [], OMP_KIT_POLICY, {
+		cc: true,
+		now: () => C8_NOW,
+		send: () => chmodSync(producerDir, 0o555),
+	});
+	producerDir = join(run.ccStateDir!, "spool", "watcher");
+	writeFileSync(run.statePath, JSON.stringify({ version: 1, panes: { "work:%1": { checks: 1 } } }), { mode: 0o600 });
+	mkdirSync(producerDir);
+	run.tick();
+	chmodSync(producerDir, 0o755);
+	run.tick();
+	const spool = join(producerDir, `${new Date(C8_NOW).toISOString().slice(0, 10)}.jsonl`);
+	const events = readFileSync(spool, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	const ticks = events.filter((event) => event.type === "source.tick");
+	expect(events.some((event) => event.type === "pull.attempt")).toBe(false);
+	expect(ticks).toHaveLength(1);
+	expect(ticks[0]!.data).toMatchObject({
+		records_seen: 2,
+		records_emitted: 0,
+		records_ignored: 0,
+		records_quarantined: 2,
+		coverage: [{ record_type: "record:emit_failed", runtime_version: "1", disposition: "unknown", reason: "SPOOL_APPEND_FAILED", count: 2 }],
+	});
+});
+test("[C8] administrative ADMISSION_REFUSED rows have typed events with exact timestamps", () => {
+	let nowMs = C8_NOW;
+	const config: FleetWatchConfig = {
+		...configOf({ workerPanes: [] }),
+		registeredTrackers: [{ repo: "/registered", session: "work" }],
+	};
+	const workAudit: NonNullable<FleetWatchOnceDeps["workAudit"]> = {
+		repos: [{
+			name: "repo",
+			path: "/repo",
+			status: "WARN",
+			dirty_file_count: 1,
+			tracked_dirty_file_count: 1,
+			untracked_file_count: 0,
+			untracked_file_cap: 1000,
+			untracked_scan_status: "OK",
+			commits_ahead: 0,
+			commits_behind: 0,
+			unpushed_commits: 0,
+			has_upstream: true,
+			has_remote: true,
+			no_upstream: false,
+			no_remote: false,
+			stash_count: 0,
+			detached: false,
+			branch: "main",
+			last_commit_epoch: 0,
+			last_commit_age_days: 0,
+			active_worktrees: 0,
+			worktree_paths: [],
+			reservation_scan_status: "OK",
+			stale_uncommitted_edits: [{
+				path: "src/main.ts",
+				path_pattern: "src/main.ts",
+				agent_name: "GreenWorker",
+				bead: "ompkit-c8",
+				age_minutes: 10000,
+			}],
+			risk_score: 1,
+			findings: [],
+			stranded: true,
+			conditions: [],
+		}],
+	};
+	const run = harness(config, { world: world() }, [], OMP_KIT_POLICY, {
+		cc: true,
+		now: () => nowMs++,
+		admission: {
+			launcherBinding: "none",
+			authority: "OFF",
+			authorityConfirmed: true,
+			authorityGeneration: null,
+			launchers: [],
+			keeper: null,
+			packet: { action: "send", ownedAction: "send", generation: null },
+			governedActions: ["send", "tracker-recovery", "tracker-quarantine-retention", "git-lock-reap"],
+		},
+		workAudit,
+	});
+	run.tick();
+	const refused = readFileSync(run.logPath, "utf8").trim().split("\n")
+		.map((line) => JSON.parse(line))
+		.filter((row) => row.kind === "ADMISSION_REFUSED");
+	const day = new Date(C8_NOW).toISOString().slice(0, 10);
+	const spool = join(run.ccStateDir!, "spool", "watcher", `${day}.jsonl`);
+	const events = readFileSync(spool, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+	const attempts = events.filter((event) => event.type === "pull.attempt" && event.data.outcome === "ADMISSION_REFUSED");
+	expect(refused).toHaveLength(7);
+	expect(attempts).toHaveLength(refused.length);
+	expect(attempts.map((event) => [event.session, event.seat, event.time, event.data.outcome])).toEqual(
+		refused.map((row) => [row.session, `${row.session}/${row.pane}`, row.at, row.kind]),
+	);
+	for (const event of attempts) {
+		expect(event.data.refusal_class).toBe("ADMISSION_REFUSED");
+		expect(event.data.picked_bead).toBeNull();
+		expect(event.data).not.toHaveProperty("text");
+	}
+	expect(events.find((event) => event.type === "source.tick")?.data).toMatchObject({
+		records_seen: refused.length,
+		records_emitted: refused.length,
+		records_quarantined: 0,
+		coverage: [{ record_type: "record:ADMISSION_REFUSED", count: refused.length }],
+	});
 });
 
 const REPLY_CASES: Record<string, { match: string; miss: string }> = {

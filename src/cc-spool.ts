@@ -11,9 +11,9 @@
  * replaced by a `cc.unknown` U-redaction envelope, identical in shape to cclib's.
  *
  * The TS side never loads the registry: producers, owners, and the emitted type shapes
- * (`action.attempt`, `action.result`, `source.tick`, `cc.unknown`) are hard-coded below from
- * `docs/command-center/schema/events.v1.json` (`omp-kit.cc.events.v1`); the ingester remains
- * the validator (anything drifting goes to dead letter + U-invalid).
+ * (`action.attempt`, `action.result`, `pull.attempt`, `source.tick`, `cc.view`, `cc.unknown`)
+ * are hard-coded below from `docs/command-center/schema/events.v1.json` (`omp-kit.cc.events.v1`);
+ * the ingester remains the validator (anything drifting goes to dead letter + U-invalid).
  *
  * Inert without the fleet: `ccSpool` returns null unless the state dir exists AND contains
  * `spool/` AND `OMP_KIT_CC != '0'`. The state root itself is never created.
@@ -24,7 +24,6 @@
  */
 import { createHash } from "node:crypto";
 import {
-	appendFileSync,
 	closeSync,
 	existsSync,
 	fsyncSync,
@@ -36,7 +35,7 @@ import {
 	statSync,
 	writeSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { looksSecret } from "./mcp-sources.ts";
 
@@ -71,6 +70,7 @@ const TYPE_VERSIONS: Record<string, number> = {
 	"action.attempt": 1,
 	"action.result": 1,
 	"bead.status": 1,
+	"pull.attempt": 1,
 	"source.tick": 1,
 	"cc.view": 1,
 	"cc.unknown": 1,
@@ -155,13 +155,21 @@ export interface CcSpoolOptions {
 export function defaultStateDir(): string {
 	const fromEnv = process.env.CC_STATE;
 	if (fromEnv) return fromEnv;
-	return join(process.env.HOME ?? tmpdir(), ".local/state/omp-kit/cc");
+	return join(process.env.HOME ?? homedir(), ".local/state/omp-kit/cc");
 }
 
 function checkNoSymlink(...paths: string[]): void {
 	for (const p of paths) {
 		if (lstatSync(p).isSymbolicLink()) throw new Error(`refusing symlink: ${p}`);
 	}
+}
+
+function hasOnlyPullAttemptFields(row: Record<string, unknown>): boolean {
+	for (const key in row) {
+		if (!Object.prototype.hasOwnProperty.call(row, key)) continue;
+		if (key !== "outcome" && key !== "refusal_class" && key !== "picked_bead") return false;
+	}
+	return true;
 }
 
 function checkDataShape(type: string, data: Record<string, unknown>): void {
@@ -176,9 +184,17 @@ function checkDataShape(type: string, data: Record<string, unknown>): void {
 		"bead.status": (d) =>
 			typeof (d as Record<string, unknown>).to_status === "string" &&
 			typeof (d as Record<string, unknown>).observation === "string",
-		"source.tick": (d) =>
-			typeof (d as Record<string, unknown>).instance === "string" &&
-			typeof (d as Record<string, unknown>).records_seen === "number",
+		"source.tick": (d) => {
+			const row = d as Record<string, unknown>;
+			return typeof row.instance === "string" &&
+				Number.isSafeInteger(row.records_seen) &&
+				Number.isSafeInteger(row.records_emitted) &&
+				Number.isSafeInteger(row.records_ignored) &&
+				Number.isSafeInteger(row.records_quarantined) &&
+				Number.isSafeInteger(row.complete_through_ms) &&
+				Number.isSafeInteger(row.position) &&
+				Array.isArray(row.coverage);
+		},
 		"cc.view": (d) =>
 			typeof (d as Record<string, unknown>).panel === "string" &&
 			typeof (d as Record<string, unknown>).route_id === "string" &&
@@ -187,6 +203,13 @@ function checkDataShape(type: string, data: Record<string, unknown>): void {
 		"cc.unknown": (d) =>
 			typeof (d as Record<string, unknown>).class === "string" &&
 			typeof (d as Record<string, unknown>).scope === "string",
+		"pull.attempt": (d) => {
+			const row = d as Record<string, unknown>;
+			if (!hasOnlyPullAttemptFields(row)) return false;
+			return typeof row.outcome === "string" && row.outcome.length > 0 &&
+				(typeof row.refusal_class === "string" || row.refusal_class === null) &&
+				(typeof row.picked_bead === "string" || row.picked_bead === null);
+		},
 	};
 	const check = need[type];
 	if (check && !check(data)) throw new Error(`bad data shape for ${type}`);
@@ -235,7 +258,7 @@ export function ccSpool(producer: string, opts: CcSpoolOptions = {}): CcSpool | 
 			};
 			if (envOpts.ctx) {
 				for (const [k, v] of Object.entries(envOpts.ctx)) {
-					if (v !== null && v !== undefined) env[k] = v;
+					if (v !== undefined) env[k] = v;
 				}
 			}
 			canonical(env);

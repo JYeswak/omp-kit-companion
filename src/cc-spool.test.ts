@@ -1,9 +1,10 @@
 /** Unit tests for the byte-compatible spool writer (bead ompkit-fp72.120.16.11.3). */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { canonical, ccSpool, isoMs, makeId } from "./cc-spool.ts";
+import { ownedTmp } from "./kitlib/tmp.ts";
+import { canonical, ccSpool, defaultStateDir, isoMs, makeId } from "./cc-spool.ts";
 
 const FIXTURES = "tests/fixtures/cc-spool-golden.jsonl";
 
@@ -22,11 +23,26 @@ function goldens(): Array<{
 		.map((l) => JSON.parse(l));
 }
 
-function ownedState(clock: () => number = Date.now): string {
-	const st = mkdtempSync(join(tmpdir(), "ccspool-"));
+function ownedState(): string {
+	const st = ownedTmp("ccspool-test").path;
 	mkdirSync(join(st, "spool"), { recursive: true });
 	return st;
 }
+
+test("defaultStateDir keeps persistent state in the OS home when HOME is unset", () => {
+	const oldHome = process.env.HOME;
+	const oldState = process.env.CC_STATE;
+	delete process.env.HOME;
+	delete process.env.CC_STATE;
+	try {
+		expect(defaultStateDir()).toBe(join(homedir(), ".local/state/omp-kit/cc"));
+	} finally {
+		if (oldHome === undefined) delete process.env.HOME;
+		else process.env.HOME = oldHome;
+		if (oldState === undefined) delete process.env.CC_STATE;
+		else process.env.CC_STATE = oldState;
+	}
+});
 
 describe("cc-spool", () => {
 	test("make_id matches cclib (sha256 producer\\x1fposition\\xtype, 32 hex)", () => {
@@ -55,7 +71,7 @@ describe("cc-spool", () => {
 	});
 
 	test("inert_without_state: no state dir returns null and creates nothing", () => {
-		const home = mkdtempSync(join(tmpdir(), "ccspool-home-"));
+		const home = ownedTmp("ccspool-home").path;
 		const before = readdirSync(home).sort();
 		const prevHome = process.env.HOME;
 		const prevCc = process.env.CC_STATE;
@@ -71,9 +87,10 @@ describe("cc-spool", () => {
 	});
 
 	test("inert_without_state: state dir without spool/ returns null", () => {
-		const st = mkdtempSync(join(tmpdir(), "ccspool-nofleet-"));
+		const st = ownedTmp("ccspool-nofleet").path;
 		expect(ccSpool("kit", { stateDir: st })).toBeNull();
-		expect(readdirSync(st)).toEqual([]);
+		expect(readdirSync(st).sort()).toEqual([".owner"]);
+		expect(existsSync(join(st, "spool"))).toBe(false);
 	});
 
 	test("inert_without_state: OMP_KIT_CC=0 returns null even with state", () => {
@@ -88,7 +105,7 @@ describe("cc-spool", () => {
 
 	test("redaction_replaces_line: planted ghp_ token becomes cc.unknown, token never on disk", () => {
 		const token = `ghp_${"abcdefghijklmnopqrstuvwxyz0123456789".slice(0, 36)}`;
-		const st = ownedState(() => 1_769_000_005_000);
+		const st = ownedState();
 		const a = ccSpool("kit", { stateDir: st, clock: () => 1_769_000_005_000 })!;
 		const env = a.envelope(
 			"action.attempt",
@@ -112,7 +129,7 @@ describe("cc-spool", () => {
 
 	test("redaction_replaces_line: planted AKIA-shaped string is refused with a U-redaction line", () => {
 		const key = `AKIA${"IOSFODNN7EXAMPLE0000".slice(0, 16)}`;
-		const st = ownedState(() => 1_769_000_006_000);
+		const st = ownedState();
 		const a = ccSpool("hooks", { stateDir: st, clock: () => 1_769_000_006_000 })!;
 		const env = a.envelope(
 			"action.result",
@@ -128,7 +145,7 @@ describe("cc-spool", () => {
 
 	test("tail_fragment_terminated: unterminated tail stands alone, next append starts on a new line", () => {
 		const now = 1_769_000_007_000;
-		const st = ownedState(() => now);
+		const st = ownedState();
 		const a = ccSpool("kit", { stateDir: st, clock: () => now })!;
 		const day = isoMs(now).slice(0, 10);
 		mkdirSync(join(st, "spool", "kit"), { recursive: true });
@@ -147,7 +164,7 @@ describe("cc-spool", () => {
 	test("newest_day_not_regressed: clock planted to an earlier day still appends to the newest file", () => {
 		const late = Date.parse("2026-10-25T00:00:00.000Z");
 		const early = Date.parse("2026-10-19T00:00:00.000Z");
-		const st = ownedState(() => late);
+		const st = ownedState();
 		const aLate = ccSpool("kit", { stateDir: st, clock: () => late })!;
 		const envLate = aLate.envelope(
 			"action.attempt",
@@ -173,7 +190,7 @@ describe("cc-spool", () => {
 
 	test("readonly_dir_never_throws: verb exit unchanged, adapter.failures==1", () => {
 		const now = 1_769_000_008_000;
-		const st = ownedState(() => now);
+		const st = ownedState();
 		const a = ccSpool("kit", { stateDir: st, clock: () => now })!;
 		mkdirSync(join(st, "spool", "kit"), { recursive: true });
 		chmodSync(join(st, "spool", "kit"), 0o555);
@@ -194,7 +211,7 @@ describe("cc-spool", () => {
 
 	test("nan_refused: non-finite data never throws and writes nothing", () => {
 		const now = 1_769_000_009_000;
-		const st = ownedState(() => now);
+		const st = ownedState();
 		const a = ccSpool("kit", { stateDir: st, clock: () => now })!;
 		const env = a.envelope(
 			"action.attempt",
@@ -227,6 +244,62 @@ describe("cc-spool", () => {
 			{ panel: "Q1", route_id: "dashboard", client: "public" },
 			{ key: "cc:view:0002", timeMs: 1_769_000_000_000 },
 		)).toThrow("bad data shape");
+	});
+	test("pull.attempt uses the typed event columns and envelope identity context", () => {
+		const now = 1_792_598_400_000;
+		const st = ownedState();
+		const spool = ccSpool("watcher", { stateDir: st, clock: () => now })!;
+		const data = {
+			outcome: "NUDGED",
+			refusal_class: null,
+			picked_bead: "ompkit-demo",
+		};
+		const env = spool.envelope("pull.attempt", data, {
+			key: "fw:%1:1792598400000:1",
+			timeMs: now,
+			ctx: { seat: "omp-test/%1", session: "omp-test", binding: null, agent: "CopperTrout" },
+		});
+		expect(env.dataschema).toBe("pull.attempt@1");
+		expect(env.seat).toBe("omp-test/%1");
+		expect(env.session).toBe("omp-test");
+		expect(env.binding).toBe(null);
+		expect(env.agent).toBe("CopperTrout");
+		expect(spool.append([env])).toBe(1);
+		const day = isoMs(now).slice(0, 10);
+		const saved = JSON.parse(readFileSync(join(st, "spool", "watcher", `${day}.jsonl`), "utf8").trim());
+		expect(saved.data).toEqual(data);
+		expect(() => spool.envelope("pull.attempt", {
+			outcome: "NUDGED",
+			picked_bead: null,
+		}, { key: "fw:%1:1792598400000:2", timeMs: now })).toThrow("bad data shape");
+		expect(() => spool.envelope("pull.attempt", {
+			...data,
+			text: `credential ghp_${"a".repeat(36)}`,
+		}, { key: "fw:%1:1792598400000:3", timeMs: now })).toThrow("bad data shape");
+	});
+
+	test("source.tick requires complete counts and per-record coverage", () => {
+		const now = 1_792_598_400_000;
+		const st = ownedState();
+		const spool = ccSpool("watcher", { stateDir: st, clock: () => now })!;
+		const data = {
+			instance: "fleet-watch",
+			records_seen: 1,
+			records_emitted: 1,
+			records_ignored: 0,
+			records_quarantined: 0,
+			complete_through_ms: now,
+			position: 1,
+			event_count: 1,
+			coverage: [{ record_type: "record:NUDGED", runtime_version: "1", disposition: "emitted", reason: null, count: 1 }],
+		};
+		const env = spool.envelope("source.tick", data, { key: "fw:tick:1792598400000:2", timeMs: now });
+		expect(env.dataschema).toBe("source.tick@1");
+		expect(spool.append([env])).toBe(1);
+		expect(() => spool.envelope("source.tick", { instance: "fleet-watch", records_seen: 0 }, {
+			key: "fw:tick:1792598400000:3",
+			timeMs: now,
+		})).toThrow("bad data shape");
 	});
 
 	test("undeclared type refused at envelope time", () => {
