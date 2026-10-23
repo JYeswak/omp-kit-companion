@@ -468,6 +468,103 @@ if [ "$base_push_rc" = "0" ] && [ "$head" != "$base" ] && [ "$push_rc" = "1" ] \
 else
 	fail=$((fail + 1)); printf 'FAIL real-git-regexploit-refused: base_push_rc=%s push_rc=%s before=%s after=%s out<<<%s>>>\n' "$base_push_rc" "$push_rc" "$origin_before" "$origin_after" "$out"
 fi
+# SAVEFIRST1 (ompkit-774u.16): a local Git push crosses the real pre-push adapter and the production
+# fresh-gate disk-pressure/heavy-step functions. Unrelated checker contracts are fixture controls;
+# the heavy command and statfs admission come from KITREPO.
+save_repo="$TMP/real-savefirst-push"
+save_remote="$TMP/real-savefirst-origin.git"
+save_bin="$TMP/real-savefirst-bin"
+mkdir -p "$save_repo/scripts" "$save_repo/src" "$save_repo/var/agent-tmp/savefirst-top-owner.1" "$save_repo/config/omp-kit" "$save_bin"
+git -C "$save_repo" init -q --initial-branch=main
+git -C "$save_repo" config user.email "test@example.invalid"
+git -C "$save_repo" config user.name "worker-1"
+git -C "$save_repo" config core.hooksPath "$save_repo/.git/hooks"
+cp "$ADAPTER" "$save_repo/scripts/pre-push-gate.sh"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$save_repo/scripts/regexploit-gate.py"
+create_checker_test_stubs "$save_repo"
+cat > "$save_bin/sbh" <<'SBH'
+#!/bin/sh
+if [ "$1 $2 $3" = "check --need 10G" ]; then
+	printf '{"command":"check","exit_code":1,"free_pct":11.7}\n'
+	exit 1
+fi
+exit 0
+SBH
+chmod +x "$save_bin/sbh"
+printf 'label=savefirst-top-owner\npid=%s\nrepo=%s\ncreated=%s\n' "$$" "$save_repo" "$(date -u +%FT%TZ)" > "$save_repo/var/agent-tmp/savefirst-top-owner.1/.owner"
+dd if=/dev/zero of="$save_repo/var/agent-tmp/savefirst-top-owner.1/blob" bs=1024 count=4096 2>/dev/null
+extract_fresh_function() {
+	awk -v opener="$1() {" '
+		index($0, opener) > 0 { copying = 1 }
+		copying { print }
+		copying && $0 == "}" { exit }
+	' "$KITREPO/scripts/fresh-gate.sh"
+}
+{
+	cat <<'SAVEFIRST_HEAD'
+#!/bin/sh
+set -eu
+ROOT="${SAVEFIRST_TEST_ROOT:?}"
+WORK="$ROOT/var/agent-tmp/savefirst-work"
+mkdir -p "$WORK"
+SAVEFIRST_HEAD
+	extract_fresh_function disk_pressure_flag
+	extract_fresh_function heavy_step
+	cat <<'SAVEFIRST_RUN'
+cd "$SAVEFIRST_TEST_KITROOT"
+control="$SAVEFIRST_TEST_ROOT/default-observer.marker"
+control_rc=0
+bun run --no-env-file --config=/dev/null src/cli.ts heavy --no-wait --label savefirst-control -- sh -c 'touch "$1"' sh "$control" || control_rc=$?
+[ "$control_rc" -eq 75 ] && [ ! -e "$control" ]
+ROOT="$SAVEFIRST_TEST_ROOT"
+disk_pressure_flag
+marker="$SAVEFIRST_TEST_ROOT/saved.marker"
+heavy_step cli-compile touch "$marker"
+[ -e "$marker" ]
+SAVEFIRST_RUN
+} > "$save_repo/scripts/fresh-gate.sh"
+chmod +x "$save_repo/scripts/fresh-gate.sh"
+printf '{"slots":8,"max_wait_s":1,"disk_observer":"auto"}\n' > "$save_repo/config/omp-kit/load.json"
+printf 'export const baseline = true;\n' > "$save_repo/src/base.ts"
+git -C "$save_repo" add -- scripts src tests/cli config/omp-kit/load.json
+git -C "$save_repo" commit -qm "[test] SAVEFIRST1 pre-push baseline"
+git init -q --bare --initial-branch=main "$save_remote"
+git -C "$save_repo" remote add origin "$save_remote"
+save_base_push_rc=0
+git -C "$save_repo" push -q origin main >"$TMP/real-savefirst-baseline.out" 2>&1 || save_base_push_rc=$?
+save_base=$(git -C "$save_repo" rev-parse HEAD)
+save_origin_before=$(git --git-dir="$save_remote" rev-parse --verify refs/heads/main 2>/dev/null) || save_origin_before=
+cat > "$save_repo/.git/hooks/pre-push" <<'SAVEFIRST_HOOK'
+#!/bin/sh
+exec sh "$SAVEFIRST_TEST_ROOT/scripts/pre-push-gate.sh"
+SAVEFIRST_HOOK
+chmod +x "$save_repo/.git/hooks/pre-push"
+printf 'export const candidate = true;\n' > "$save_repo/src/trigger.ts"
+git -C "$save_repo" add -- src/trigger.ts
+git -C "$save_repo" commit -qm "[test] SAVEFIRST1 candidate [test]" -m "Bead: ompkit-774u.16"
+save_head=$(git -C "$save_repo" rev-parse HEAD)
+save_push_rc=0
+SAVEFIRST_TEST_ROOT="$save_repo" SAVEFIRST_TEST_KITROOT="$KITREPO" \
+	HOME="$save_repo/home" XDG_CONFIG_HOME="$save_repo/config" XDG_STATE_HOME="$save_repo/state" \
+	XDG_DATA_HOME="$save_repo/data" XDG_CACHE_HOME="$save_repo/cache" TMPDIR="$TMP" \
+	OMP_KIT_DISK_OBSERVER="" OMP_KIT_HEAVY_FAKE_LOAD1=0.5 AGENT_NAME=SaveFirstProbe TMUX_PANE="" \
+	PATH="$save_bin:$PATH" git -C "$save_repo" push origin main >"$TMP/real-savefirst-push.out" 2>&1 || save_push_rc=$?
+save_origin_after=$(git --git-dir="$save_remote" rev-parse --verify refs/heads/main 2>/dev/null) || save_origin_after=
+save_out=$(cat "$TMP/real-savefirst-push.out")
+printf 'SAVEFIRST1 local push rc=%s base=%s head=%s remote_after=%s\n%s\n' "$save_push_rc" "$save_base" "$save_head" "$save_origin_after" "$save_out"
+case "$save_out" in
+	*'WARN disk-pressure: sbh reports 11.7% free'*'top_scratch=savefirst-top-owner:'*) save_pressure_named=1 ;;
+	*) save_pressure_named=0 ;;
+esac
+if [ "$save_base_push_rc" = "0" ] && [ "$save_origin_before" = "$save_base" ] && [ "$save_push_rc" = "0" ] && [ "$save_origin_after" = "$save_head" ] \
+	&& [ -e "$save_repo/saved.marker" ] && [ "$save_pressure_named" = "1" ]; then
+	pass=$((pass + 1))
+	printf 'PASS real-git-savefirst: pressure flagged with owner; default sbh control refused; statfs save step admitted; local origin advanced\n'
+else
+	fail=$((fail + 1)); printf 'FAIL real-git-savefirst: base_push_rc=%s push_rc=%s before=%s base=%s after=%s head=%s marker=%s pressure_named=%s\n' \
+		"$save_base_push_rc" "$save_push_rc" "$save_origin_before" "$save_base" "$save_origin_after" "$save_head" "$([ -e "$save_repo/saved.marker" ] && echo yes || echo no)" "$save_pressure_named"
+fi
+
 
 # GATESCR1 (ompkit-fp72.40): every per-push extract is removed on every exit path, now, not later.
 # An extract is a gate dir holding anything besides .owner and gate.log (the red record a refused or
