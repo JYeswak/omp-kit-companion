@@ -209,7 +209,8 @@ if [ -n "$low_root" ] && [ -d "$low_root" ]; then
 		low_out="$TMP/savefirst-lowfs.out"
 		push_fixture lowfs "$sf_repo" "$sf_remote" "$low_out"
 		if [ "$sf_base_push_rc" = 0 ] && [ "$sf_before" = "$sf_base" ] && [ "$sf_rc" -ne 0 ] && [ "$sf_after" = "$sf_base" ] \
-			&& grep -Fq 'FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=10G' "$low_out" \
+			&& grep -Fq 'heavy: REFUSED reason=DISK_BELOW_FLOOR need=10G' "$low_out" \
+			&& grep -Fq 'FRESH-GATE: RED: heavy refused admission for cli-compile' "$low_out" \
 			&& grep -Fq 'free at least 10 GiB' "$low_out" && ! grep -Fq 'SAVEFIRST-BOUNDARY-TEST PASS' "$low_out"; then
 			printf 'PASS SAVEFIRST1 actual pre-push low-space negative: typed refusal, no child, origin unchanged\n'
 		else

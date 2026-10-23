@@ -346,7 +346,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 	if (precheck.kind === "unavailable") return prerequisiteMissing(precheck.observer, precheck.text);
 	// SAVEFIRST1: explicit statfs pressure is the physical floor, not retryable queue contention.
 	if (precheck.kind === "pressure" && observerOverride === "statfs") {
-		process.stderr.write(`FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=${HEAVY_DISK_NEED} need_bytes=${HEAVY_DISK_NEED_BYTES} observer=statfs path=${cwd}: ${precheck.text}; free at least 10 GiB and retry; no command was run\n`);
+		process.stderr.write(`heavy: REFUSED reason=DISK_BELOW_FLOOR need=${HEAVY_DISK_NEED} need_bytes=${HEAVY_DISK_NEED_BYTES} observer=statfs path=${cwd}: ${precheck.text}; free at least 10 GiB and retry; no command was run\n`);
 		return 1;
 	}
 

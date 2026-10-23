@@ -690,7 +690,7 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1: explicit statfs returns typed floor 
 		const marker = join(root, "savefirst-floor-marker");
 		const result = await invoke(root, ["heavy", "--disk-observer", "statfs", "--", "touch", marker], QUIET_LOAD, { cwd, preload: null });
 		expect(result.code).toBe(1);
-		expect(result.stderr).toContain("FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=10G");
+		expect(result.stderr).toContain("heavy: REFUSED reason=DISK_BELOW_FLOOR need=10G");
 		expect(result.stderr).toContain("free at least 10 GiB");
 		expect(existsSync(marker)).toBe(false);
 	});
@@ -834,7 +834,7 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted: --disk-observer statfs still
 		const result = await invoke(root, ["heavy", "--no-wait", "--disk-observer", "statfs", "--label", "lowfs-save", "--", "sh", "-c", `printf ran > '${marker}'`],
 			{ PATH: `${fakeSbh(root, 0, "native-bin")}:${NO_SBH_PATH}` }, { cwd, preload: null });
 		expect(result.code).toBe(1);
-		expect(result.stderr).toContain("FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=10G");
+		expect(result.stderr).toContain("heavy: REFUSED reason=DISK_BELOW_FLOOR need=10G");
 		expect(result.stderr).toContain("free at least 10 GiB");
 		expect(existsSync(marker)).toBe(false);
 	});
