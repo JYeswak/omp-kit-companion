@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { normalizeStart, probeIncarnationSync, type Incarnation, type Probe, type ProbeState } from "./kitlib/proc.ts";
+import { runSync } from "./kitlib/run.ts";
 
 /**
  * Scratch reaper (S2): plan/apply over operator scratch, ported from
@@ -239,9 +241,17 @@ function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { proc
 export type OwnerState = "live" | "reused" | "dead" | "live-unreachable" | "unknown";
 
 export interface LivenessDeps {
+	/** Pid-only liveness for owners that record no start (kill -0; EPERM counts alive). */
 	signalAlive: (pid: number) => boolean;
+	/** Pid-only liveness for owners that record no start: ps lists the pid. */
 	psVisible: (pid: number) => boolean;
+	/** Start string of a pid as `ps -o lstart=` prints it (trimmed, not whitespace-collapsed); null when unreadable. */
 	processStart: (pid: number) => string | null;
+	/**
+	 * Liveness of a recorded incarnation (ompkit-5m6ej, KL09): kitlib proc's `probeIncarnationSync` unless a test plants
+	 * one. Liveness evidence only, never ownership: dead, reused and zombie read dead; unknown is never dead.
+	 */
+	probe?: (owner: Incarnation) => Probe;
 	/**
 	 * True when the omp session of a named seat is held by a live process, false when nothing holds it,
 	 * null when that cannot be told. The session id is the unique key; the agent name is the owner's claim.
@@ -266,22 +276,23 @@ export function defaultLiveness(): LivenessDeps {
 		},
 		psVisible: (pid: number): boolean => {
 			try {
-				const out = Bun.spawnSync(["ps", "-p", String(pid), "-o", "pid="], { stdout: "pipe", stderr: "ignore" });
-				return out.exitCode === 0 && out.stdout.toString().trim() !== "";
+				const out = runSync(["ps", "-p", String(pid), "-o", "pid="], { deadline_s: 10, max_output_bytes: 4096 });
+				return out.rc === 0 && new TextDecoder().decode(out.stdout).trim() !== "";
 			} catch {
 				return false;
 			}
 		},
 		processStart: (pid: number): string | null => {
 			try {
-				const out = Bun.spawnSync(["ps", "-p", String(pid), "-o", "lstart="], { stdout: "pipe", stderr: "ignore" });
-				if (out.exitCode !== 0) return null;
-				const start = out.stdout.toString().trim();
+				const out = runSync(["ps", "-p", String(pid), "-o", "lstart="], { deadline_s: 10, max_output_bytes: 4096 });
+				if (out.rc !== 0) return null;
+				const start = new TextDecoder().decode(out.stdout).trim();
 				return start === "" ? null : start;
 			} catch {
 				return null;
 			}
 		},
+		probe: (owner: Incarnation): Probe => probeIncarnationSync(owner),
 		seatLive: (_agent: string, session: string): boolean | null => {
 			if (!SESSION_PATTERN.test(session)) return null;
 			const lock = join(sessionOwnersDir(), `${session}.lock`);
@@ -297,6 +308,7 @@ export function defaultLiveness(): LivenessDeps {
 	};
 }
 
+/** The pre-5m6ej pid probe, kept for tracker-recovery (src/tracker-recovery.ts) until it moves to kitlib proc; scratch owners use ownerIncarnationState. */
 export function probeOwner(pid: number, expectedStart: string, deps: LivenessDeps): OwnerState {
 	if (deps.signalAlive(pid)) {
 		const current = deps.processStart(pid);
@@ -307,6 +319,16 @@ export function probeOwner(pid: number, expectedStart: string, deps: LivenessDep
 	// so recheck with ps; a visible PID is never treated as dead.
 	if (deps.psVisible(pid)) return "live-unreachable";
 	return "dead";
+}
+
+/**
+ * The liveness state of a recorded owner incarnation through kitlib proc (`deps.probe`, else `probeIncarnationSync`).
+ * Raw multi-space lstart records written before 5m6ej compare equal: the probe collapses whitespace on both sides.
+ * A blank recorded start proves nothing, so it is unknown, never dead.
+ */
+export function ownerIncarnationState(pid: number, start: string, liveness: Pick<LivenessDeps, "probe">): ProbeState {
+	if (normalizeStart(start) === "") return "unknown";
+	return (liveness.probe ?? probeIncarnationSync)({ pid, start }).state;
 }
 
 /** The calling process and its ancestors, nearest first; null when the process table cannot be read. */
@@ -847,8 +869,8 @@ function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired
 		}
 		return sized("LIVE", "owner-alive-start-unverified", owner);
 	}
-	const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
-	if (state === "live" || state === "live-unreachable") return sized("LIVE", state === "live" ? "owner-alive" : "owner-visible-but-signal-denied", owner);
+	const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
+	if (state === "live") return sized("LIVE", "owner-alive", owner);
 	if (state === "unknown") return sized("SKIP", "owner-liveness-unproven", owner);
 	const clear = lsofClearDir(deps, dir);
 	if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
@@ -1660,7 +1682,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	if (opts.now === true && opts.bin === undefined)
 		return { ok: false, changed: false, dir, reason: "now-needs-bin", ownerPid: owner.pid };
 	if (owner.processStart !== null && !seatOwned) {
-		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
+		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "live") {
 			return { ok: false, changed: false, dir,
 				reason: state === "reused" ? "owner-process-reused" : "owner-process-identity-unverified", ownerPid: owner.pid };
@@ -1848,7 +1870,7 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	// (as release and owned-scratch do) so every dir a seated caller makes
 	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Unseated callers keep pid owners.
 	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
-	const fields: Record<string, string | number> = { pid: process.pid, process_start: start, label, repo, created_at: createdAt, argv0: argv };
+	const fields: Record<string, string | number> = { pid: process.pid, process_start: normalizeStart(start), label, repo, created_at: createdAt, argv0: argv };
 	if (seat?.agent && seat.main) {
 		if (!AGENT_PATTERN.test(seat.agent) || !SESSION_PATTERN.test(seat.main)) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
 		fields.agent = seat.agent;
@@ -2263,8 +2285,8 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 			done.push(removeExpiredEntry(path, entry, owner, "quarantine-expired", home, deps, at));
 			continue;
 		}
-		const state = probeOwner(owner.pid, owner.processStart, deps.liveness);
-		if (state !== "dead" && state !== "reused") {
+		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
+		if (state === "live" || state === "unknown") {
 			done.push({ dir: path, action: "SKIP", reason: state === "unknown" ? "owner-liveness-unproven" : "quarantine-owner-active", owner, sizeBytes: dirSize(path) });
 			continue;
 		}
@@ -2484,8 +2506,8 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 				dead = reuseAfterCreated(labeled, deps.liveness) === true;
 			} else dead = true;
 		} else {
-			const state = probeOwner(labeled.pid, labeled.processStart, deps.liveness);
-			if (state !== "dead" && state !== "reused") return verdict;
+			const state = ownerIncarnationState(labeled.pid, labeled.processStart, deps.liveness);
+			if (state === "live" || state === "unknown") return verdict;
 			dead = true;
 		}
 		if (dead && lsofClearDir(deps, dir) === true) {
@@ -3008,7 +3030,7 @@ function disposalOwnerMatches(owner: ScratchOwner, deps: InspectDeps): boolean {
 }
 
 function ownerIsLive(owner: ScratchOwner, deps: InspectDeps): boolean {
-	return owner.processStart !== null && probeOwner(owner.pid, owner.processStart, deps.liveness) === "live";
+	return owner.processStart !== null && ownerIncarnationState(owner.pid, owner.processStart, deps.liveness) === "live";
 }
 
 export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[] {

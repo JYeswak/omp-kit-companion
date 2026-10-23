@@ -19,6 +19,7 @@ import {
   type SeatIdentity,
 } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { normalizeStart } from "../../src/kitlib/proc.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
@@ -38,7 +39,9 @@ afterEach(() => {
   }
 });
 
-const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null };
+// No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
+const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+  probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const seat = (agent: string | null, sessions: string[]) => (): SeatIdentity => ({ agent, sessions, main: sessions[0] ?? null });
 const inspect = (caller: () => SeatIdentity): InspectDeps =>
   ({ liveness: noPid, run: () => ({ code: 1, stdout: "", stderr: "" }), now: NOW, callerSeat: caller });
@@ -99,6 +102,9 @@ test("disposalGate charges only exact caller ownership and excludes live owners"
     signalAlive: (pid) => pid !== process.pid,
     psVisible: (pid) => pid !== process.pid,
     processStart: (pid) => pid === process.pid ? "Thu Jan  1 00:00:00 1970" : "Mon Oct  5 13:27:00 2026",
+    // The same world as an incarnation probe (ompkit-5m6ej): every other pid runs with the planted start.
+    probe: (owner) => ({ state: owner.pid === process.pid ? "dead" : normalizeStart(owner.start) === "Mon Oct 5 13:27:00 2026" ? "live" : "reused",
+      evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: null, reason: "planted" } }),
   };
   const caller: InspectDeps = { ...inspect(seat("ChildSeat", [SESSION])), liveness: live };
   const childClean = disposalGate(home, "review", caller, NOW);

@@ -13,11 +13,14 @@
  *   unknown nothing could be read reliably (ps failed, timed out, or disagrees with signal 0): never dead
  * `isDead()` is true only for dead, reused and zombie.
  *
+ * `incarnationSync()` and `probeIncarnationSync()` are the same decisions for synchronous callers: one classifier,
+ * differing only in reading ps through `runSync` (a leaf command) instead of `run`.
+ *
  * Observation only: it grants no authority and has no side effects; the only signal ever sent is signal 0.
  * POSIX only (macOS, Linux); other platforms are refused. `scripts/kitlib_proc.py` is the Python twin; both pass
  * `tests/fixtures/kitlib-proc/corpus.json`.
  */
-import { run } from "./run";
+import { run, runSync, type RunResult } from "./run";
 
 export type ProbeState = "live" | "zombie" | "reused" | "dead" | "unknown";
 
@@ -59,6 +62,9 @@ export interface ProbeSeam {
 	detectReuse?: boolean;
 }
 
+/** The synchronous twin's seam: the same switches, with a synchronous ps read. */
+export type ProbeSeamSync = Omit<ProbeSeam, "ps"> & { ps?: (pid: number) => PsRead };
+
 /** Largest pid either platform issues (Linux pid_max ceiling 2^22; macOS 99999); bound generously at int32. */
 const PID_MAX = 0x7fffffff;
 const PS_ENV = { LC_ALL: "C", PATH: "/usr/bin:/bin" };
@@ -78,10 +84,21 @@ export function normalizeStart(start: string): string {
 	return start.split(/\s+/).filter(part => part !== "").join(" ");
 }
 
+const PS_ARGV = (pid: number): string[] => ["ps", "-o", "stat=", "-o", "lstart=", "-p", String(pid)];
+const PS_OPTIONS = { deadline_s: 10, max_output_bytes: 4096, env: PS_ENV };
+const psRead = (result: RunResult): PsRead => ({ rc: result.rc, timed_out: result.timed_out, stdout: decoder.decode(result.stdout) });
+
 async function defaultPs(pid: number): Promise<PsRead> {
 	try {
-		const result = await run(["ps", "-o", "stat=", "-o", "lstart=", "-p", String(pid)], { deadline_s: 10, max_output_bytes: 4096, env: PS_ENV });
-		return { rc: result.rc, timed_out: result.timed_out, stdout: decoder.decode(result.stdout) };
+		return psRead(await run(PS_ARGV(pid), PS_OPTIONS));
+	} catch {
+		return { rc: null, timed_out: false, stdout: "" };
+	}
+}
+
+function defaultPsSync(pid: number): PsRead {
+	try {
+		return psRead(runSync(PS_ARGV(pid), PS_OPTIONS));
 	} catch {
 		return { rc: null, timed_out: false, stdout: "" };
 	}
@@ -119,17 +136,45 @@ function signal0(pid: number): "alive" | "eperm" | "esrch" | "error" {
 export async function incarnation(pid: number, seam: ProbeSeam = {}): Promise<Incarnation | null> {
 	posixOnly();
 	checkPid(pid);
-	const read = parsePs(await (seam.ps ?? defaultPs)(pid));
+	return incarnationOf(pid, await (seam.ps ?? defaultPs)(pid));
+}
+
+/** `incarnation()` for synchronous callers. */
+export function incarnationSync(pid: number, seam: ProbeSeamSync = {}): Incarnation | null {
+	posixOnly();
+	checkPid(pid);
+	return incarnationOf(pid, (seam.ps ?? defaultPsSync)(pid));
+}
+
+function incarnationOf(pid: number, ps: PsRead): Incarnation | null {
+	const read = parsePs(ps);
 	return read.kind === "listed" ? { pid, start: read.row.start } : null;
 }
 
-export async function probeIncarnation(recorded: Incarnation, seam: ProbeSeam = {}): Promise<Probe> {
+/** Validates a recorded incarnation before any ps read; returns it with its start normalized. */
+function checkRecorded(recorded: Incarnation): Incarnation {
 	posixOnly();
 	if (recorded === null || typeof recorded !== "object") throw new TypeError("probeIncarnation takes {pid, start}");
 	const pid = checkPid(recorded.pid);
 	if (typeof recorded.start !== "string" || normalizeStart(recorded.start) === "") throw new TypeError("start must be a non-empty process start string");
-	const recordedStart = normalizeStart(recorded.start);
-	const read = parsePs(await (seam.ps ?? defaultPs)(pid));
+	return { pid, start: normalizeStart(recorded.start) };
+}
+
+export async function probeIncarnation(recorded: Incarnation, seam: ProbeSeam = {}): Promise<Probe> {
+	const checked = checkRecorded(recorded);
+	return classify(checked, await (seam.ps ?? defaultPs)(checked.pid), seam);
+}
+
+/** `probeIncarnation()` for synchronous callers: the same classifier over a `runSync` ps read. */
+export function probeIncarnationSync(recorded: Incarnation, seam: ProbeSeamSync = {}): Probe {
+	const checked = checkRecorded(recorded);
+	return classify(checked, (seam.ps ?? defaultPsSync)(checked.pid), seam);
+}
+
+/** The one decision both probes share; `recorded` is already checked and normalized. */
+function classify(recorded: Incarnation, ps: PsRead, seam: Omit<ProbeSeam, "ps">): Probe {
+	const { pid, start: recordedStart } = recorded;
+	const read = parsePs(ps);
 	const evidence: ProbeEvidence = { pid, recorded_start: recordedStart, observed_start: null, stat: null, signal0: null, reason: "" };
 	const decide = (state: ProbeState, reason: string): Probe => ({ state, evidence: { ...evidence, reason } });
 	if (read.kind === "unreadable") return decide("unknown", read.why);

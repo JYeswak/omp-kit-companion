@@ -32,7 +32,9 @@ function tempDir(label: string): string {
 	return dir;
 }
 const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
-const noPid: Pick<LivenessDeps, "signalAlive" | "psVisible" | "processStart"> = { signalAlive: () => false, psVisible: () => false, processStart: () => null };
+// No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
+const noPid: Pick<LivenessDeps, "signalAlive" | "psVisible" | "processStart" | "probe"> = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const deps = (liveness: LivenessDeps, extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness, run: clearRun, ...extra });
 const seatOwner = (pid: number, seat = `agent=${AGENT}\nsession=${SESSION}\n`): string =>
 	`pid=${pid}\nlabel=omp\nrepo=${repo}\ncreated=2026-10-18T17:32:44.000Z\n${seat}`;
@@ -302,7 +304,10 @@ test("release: a complete owner with a recorded process start is released by the
 	const fixture = releaseFixture(complete, 59051);
 	expect(releaseScratch(fixture.dir, fixture.home, deps({ ...noPid }, { callerSeat: asSeat(AGENT, [SESSION]) }))).toMatchObject({ ok: true, changed: true });
 	const pidOnly = releaseFixture(complete.replace(/agent=.*\nsession=.*\n/, ""), 59052);
-	expect(releaseScratch(pidOnly.dir, pidOnly.home, deps({ ...noPid, signalAlive: () => true, processStart: () => "Mon Oct 18 17:50:00 2026" }, { callerSeat: asSeat(AGENT, [SESSION]) })))
+	// The pid runs with another start: the incarnation probe is planted reused to match (ompkit-5m6ej).
+	expect(releaseScratch(pidOnly.dir, pidOnly.home, deps({ ...noPid, signalAlive: () => true, processStart: () => "Mon Oct 18 17:50:00 2026",
+		probe: (owner) => ({ state: "reused", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: "Mon Oct 18 17:50:00 2026", stat: "S", signal0: null, reason: "planted" } }) },
+		{ callerSeat: asSeat(AGENT, [SESSION]) })))
 		.toMatchObject({ ok: false });
 });
 

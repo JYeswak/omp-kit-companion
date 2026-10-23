@@ -3,6 +3,8 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync,
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { incarnation, probeIncarnation } from "../../src/kitlib/proc";
+import { run } from "../../src/kitlib/run";
 import { type DiskCapacity, decideDiskPressure, type DiskVerdict, diskVerdict, HEAVY_DISK_NEED_BYTES, HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
@@ -40,7 +42,7 @@ async function invoke(root: string, args: string[], extraEnv: Record<string, str
 	return { code, stdout, stderr };
 }
 
-async function seedJob(root: string, input: { id: string; process_start?: string; pane?: string; state?: "queued" | "running" }): Promise<string> {
+async function seedJob(root: string, input: { id: string; pid?: number; process_start?: string; pane?: string; state?: "queued" | "running" }): Promise<string> {
 	const stateRoot = join(root, "state", "omp-kit", "load");
 	const directory = join(stateRoot, "jobs");
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -52,7 +54,7 @@ async function seedJob(root: string, input: { id: string; process_start?: string
 	}
 	if (!processStart) throw new Error("test process start is unavailable");
 	writeFileSync(join(directory, `${input.id}.json`), JSON.stringify({
-		id: input.id, pid: process.pid, process_start: processStart, label: "existing", repo: root, cwd: root,
+		id: input.id, pid: input.pid ?? process.pid, process_start: processStart, label: "existing", repo: root, cwd: root,
 		agent: "seed", tmux_pane: input.pane ?? "", argv: ["held-job"], state: input.state ?? "running",
 		queued_at: new Date(0).toISOString(), started_at: new Date(0).toISOString(),
 	}), { mode: 0o600 });
@@ -143,6 +145,52 @@ test("process-reused ledger entries are reaped before admission", async () => {
 	expect(result.stdout).toBe("fresh");
 	expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual([]);
 });
+
+/**
+ * ompkit-5m6ej subjects, through kitlib run: /bin/sh forks two sleeps, writes their pids, then exec's into sleep, which
+ * never reaps. The first sleep is killed and stays a zombie; the second stays live. `stop` aborts the run's whole group.
+ */
+async function subjects(root: string): Promise<{ live: { pid: number; start: string }; zombie: { pid: number; start: string }; stop: () => Promise<void> }> {
+	const out = join(root, "subject-pids");
+	const controller = new AbortController();
+	const tree = run(["/bin/sh", "-c", 'sleep 30 & z=$!; sleep 30 & l=$!; echo "$z $l" > "$1.tmp" && mv "$1.tmp" "$1"; exec sleep 30', "subjects", out],
+		{ deadline_s: 60, signal: controller.signal }).catch(() => { /* aborted by stop */ });
+	const stop = async () => { controller.abort(new Error("subjects done")); await tree; };
+	// Real-clock poll for a file a real child writes; no fake timer reaches another process.
+	for (let tries = 0; !existsSync(out) && tries < 200; tries++) await Bun.sleep(25);
+	if (!existsSync(out)) { await stop(); throw new Error("subject tree did not start"); }
+	const [zombiePid, livePid] = readFileSync(out, "utf8").trim().split(" ").map(Number) as [number, number];
+	const [zombieSeen, liveSeen] = [await incarnation(zombiePid), await incarnation(livePid)];
+	if (zombieSeen === null || liveSeen === null) { await stop(); throw new Error("no incarnation for a subject"); }
+	process.kill(zombiePid, "SIGKILL");
+	// Real-clock poll: the OS marks the killed child Z on its own schedule, which no fake timer drives.
+	for (let tries = 0; tries < 60 && (await probeIncarnation(zombieSeen)).state !== "zombie"; tries++) await Bun.sleep(50);
+	return { live: liveSeen, zombie: zombieSeen, stop };
+}
+
+test("5m6ej planted: a zombie ledger row is reaped before admission; control: a live row with a raw multi-space lstart holds its slot", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 1 });
+	const { live, zombie, stop } = await subjects(root);
+	try {
+		expect((await probeIncarnation(zombie)).state).toBe("zombie");
+		// The pre-5m6ej probe (kill -0, then compare the start) read this row alive: kill -0 succeeds on a zombie.
+		expect(() => process.kill(zombie.pid, 0)).not.toThrow();
+		const jobs = await seedJob(root, { id: "zombie-owner", pid: zombie.pid, process_start: zombie.start });
+		const reaped = await invoke(root, ["heavy", "--no-wait", "--", "sh", "-c", "printf fresh"], QUIET_LOAD);
+		expect(reaped.code).toBe(0);
+		expect(reaped.stdout).toBe("fresh");
+		expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual([]);
+		// Control: a live owner recorded with the raw pre-5m6ej lstart (a run of spaces) still holds the only slot.
+		await seedJob(root, { id: "live-owner", pid: live.pid, process_start: live.start.replace(" ", "   ") });
+		const held = await invoke(root, ["heavy", "--no-wait", "--", "sh", "-c", "printf fresh"], QUIET_LOAD);
+		expect(held.code).toBe(75);
+		expect(held.stderr).toContain("deferred: all 1 heavy-work slot is occupied");
+		expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual(["live-owner.json"]);
+	} finally {
+		await stop();
+	}
+}, 60_000);
 
 test("a zero wait budget returns 75 when admission remains blocked", async () => {
 	const root = fixture();

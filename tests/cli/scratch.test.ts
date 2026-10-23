@@ -117,9 +117,8 @@ test("releaseScratch refuses a reused owner PID before marking release", () => {
     pid: String(process.pid), process_start: "stale-process-start", label: "omp", repo: fixtureRepo,
     created_at: new Date().toISOString(), argv0: "test",
   }));
-  const result = releaseScratch(dir, home, depsFor({
-    liveness: { signalAlive: () => true, psVisible: () => true, processStart: () => "current-process-start" },
-  }));
+  // The real kitlib proc probe (ompkit-5m6ej): this process runs with a start other than the recorded one.
+  const result = releaseScratch(dir, home, depsFor());
   expect(result).toMatchObject({ ok: false, changed: false, reason: "owner-process-reused", ownerPid: process.pid });
   expect(existsSync(join(dir, ".omp-kit-release"))).toBe(false);
 });

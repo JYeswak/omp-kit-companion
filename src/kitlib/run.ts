@@ -206,3 +206,48 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		elapsed_s: (performance.now() - started) / 1000,
 	};
 }
+
+export interface RunSyncOptions {
+	/** Wall-clock bound in seconds; required and positive. */
+	deadline_s: number;
+	/** Bytes kept per stream. A child that writes more is stopped (`killed`, `truncated`, rc null). */
+	max_output_bytes?: number;
+	cwd?: string;
+	/** Replaces the child's environment when given. */
+	env?: Record<string, string>;
+}
+
+/**
+ * Synchronous bounded run for SHORT LEAF commands only (a `ps -p`, an `lsof -t`), for callers that cannot await.
+ * stdin is `/dev/null`. At the deadline the child gets SIGKILL and the result is `timed_out: true, rc: null`.
+ * Output past `max_output_bytes` on either stream also stops it with SIGKILL (`killed`, `truncated`, rc null):
+ * a synchronous call cannot keep draining a pipe it discards, so the cap bounds memory by stopping the writer.
+ * There is NO process-group ownership: only the leader is signalled, so a descendant can outlive the call.
+ * A command that can fork descendants must use async `run()`.
+ */
+export function runSync(argv: readonly string[], options: RunSyncOptions): RunResult {
+	if (!Array.isArray(argv)) throw new TypeError("kitlib runSync takes an argv array, never a shell string");
+	if (argv.length === 0 || argv.some(item => typeof item !== "string")) throw new TypeError("kitlib runSync needs a non-empty argv of strings");
+	if (options === null || typeof options !== "object") throw new TypeError("kitlib runSync needs options with deadline_s");
+	if (process.platform !== "darwin" && process.platform !== "linux") throw new Error(`kitlib runSync needs POSIX; ${process.platform} is unsupported`);
+	const deadlineMs = Math.max(1, Math.ceil(positive("deadline_s", options.deadline_s) * 1000));
+	const cap = options.max_output_bytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+	if (!Number.isSafeInteger(cap) || cap < 0) throw new RangeError(`max_output_bytes must be a non-negative integer, got ${cap}`);
+	const started = performance.now();
+	const child = Bun.spawnSync([...argv], {
+		cwd: options.cwd, env: options.env, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+		// maxBuffer 0 would mean unbounded, so a zero cap still stops at the first byte.
+		timeout: deadlineMs, killSignal: "SIGKILL", maxBuffer: Math.max(cap, 1),
+	});
+	const timedOut = child.exitedDueToTimeout === true;
+	const overflowed = child.exitedDueToMaxBuffer === true;
+	const stdout = child.stdout ?? Buffer.alloc(0), stderr = child.stderr ?? Buffer.alloc(0);
+	const signalCode = child.signalCode as keyof typeof constants.signals | null;
+	const rc = timedOut || overflowed ? null : child.exitCode ?? (signalCode ? -constants.signals[signalCode] : null);
+	return {
+		rc, timed_out: timedOut, killed: timedOut || overflowed,
+		stdout: new Uint8Array(stdout.subarray(0, cap)), stderr: new Uint8Array(stderr.subarray(0, cap)),
+		truncated: overflowed || stdout.byteLength > cap || stderr.byteLength > cap,
+		elapsed_s: (performance.now() - started) / 1000,
+	};
+}

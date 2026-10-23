@@ -3,12 +3,14 @@
 // the doctor changes nothing.
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { censusOwnership, inspectOwnership, liveOwnershipIo, type OwnershipIo, type OwnershipRow } from "../../src/ownership-doctor.ts";
 import { OWNERSHIP_REGISTRY } from "../../src/ownership-registry.ts";
-import { quarantineEntryFor } from "../../src/scratch.ts";
+import { ownerIncarnationState, quarantineEntryFor } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { incarnation, type Probe } from "../../src/kitlib/proc.ts";
+import { run } from "../../src/kitlib/run.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
@@ -41,6 +43,7 @@ function fixtureHome(): string {
 /** Real files, injected process facts: a pid is alive only if it is LIVE_PID, a seat only if it holds SESSION. */
 function io(home: string, over: Partial<OwnershipIo> = {}): OwnershipIo {
 	return { ...liveOwnershipIo({ HOME: home }), home, nowMs: () => NOW, pidAlive: (pid) => pid === LIVE_PID,
+		incarnationState: (pid) => (pid === LIVE_PID ? "live" : "dead"),
 		seatLive: (_agent, session) => session === SESSION, scratchRoots: () => [], harnessOrphans: () => [], quarantineTtlMs: () => DAY, ...over };
 }
 const rowOf = (rows: OwnershipRow[], id: string): OwnershipRow => rows.find((row) => row.id === id)!;
@@ -220,4 +223,91 @@ test("the doctor is read-only: a full census over disposable state changes no fi
 	expect(before.split("\n").length).toBeGreaterThan(8);
 	inspectOwnership(io(home, { scratchRoots: () => [root] }));
 	expect(snapshot(home)).toBe(before);
+});
+
+// ompkit-5m6ej: owners that record a start are probed as incarnations through kitlib proc. Real processes; each
+// planted case has a passing control, and the old bare-pid check (pidAlive) is shown reading the same subject alive.
+const STARTED = (pid: number, start: string) => `pid=${pid}\nprocess_start=${start}\nlabel=omp\nrepo=${repo}\ncreated_at=2026-10-16T20:00:00.000Z\nargv0=omp\n`;
+
+type Subjects = { live: { pid: number; start: string }; zombie: { pid: number; start: string }; stop: () => Promise<void> };
+
+/**
+ * One kitlib-run tree: /bin/sh forks two sleeps, writes their pids, then exec's into sleep, which never reaps. The first
+ * sleep is killed and stays a zombie; the second stays live. `stop` aborts the run, which kills the whole group.
+ */
+async function subjects(): Promise<Subjects> {
+	const dir = ownedTmp("proc-subjects", { root: join(repo, "var", "agent-tmp") }).path;
+	cleanup.push(dir);
+	const out = join(dir, "pids");
+	const controller = new AbortController();
+	const tree = run(["/bin/sh", "-c", 'sleep 30 & z=$!; sleep 30 & l=$!; echo "$z $l" > "$1.tmp" && mv "$1.tmp" "$1"; exec sleep 30', "subjects", out],
+		{ deadline_s: 60, signal: controller.signal }).catch(() => { /* aborted by stop */ });
+	const stop = async () => { controller.abort(new Error("subjects done")); await tree; };
+	// Real-clock poll for a file a real child writes; no fake timer reaches another process.
+	for (let tries = 0; !existsSync(out) && tries < 200; tries++) await Bun.sleep(25);
+	if (!existsSync(out)) { await stop(); throw new Error("subject tree did not start"); }
+	const [zombiePid, livePid] = readFileSync(out, "utf8").trim().split(" ").map(Number) as [number, number];
+	const [zombieSeen, liveSeen] = [await incarnation(zombiePid), await incarnation(livePid)];
+	if (zombieSeen === null || liveSeen === null) { await stop(); throw new Error("no incarnation for a subject"); }
+	process.kill(zombiePid, "SIGKILL");
+	// Real-clock poll: the OS marks the killed child Z on its own schedule, which no fake timer drives.
+	for (let tries = 0; tries < 60 && ownerIncarnationState(zombiePid, zombieSeen.start, {}) !== "zombie"; tries++) await Bun.sleep(50);
+	return { live: liveSeen, zombie: zombieSeen, stop };
+}
+
+function scratchCensus(home: string, owners: Record<string, string>, over: Partial<OwnershipIo> = {}) {
+	const root = join(home, "Developer", "proj", "var", "agent-tmp");
+	for (const [name, owner] of Object.entries(owners)) put(join(root, name, ".owner"), owner);
+	const live = liveOwnershipIo({ HOME: home });
+	return rowOf(censusOwnership(io(home, { scratchRoots: () => [root], pidAlive: live.pidAlive, incarnationState: live.incarnationState, ...over })), "scratch-seat-dir").census!;
+}
+
+test("5m6ej planted: a zombie owner has no live owner (the bare-pid check read it alive); control: a live owner with its start is live", async () => {
+	const { live, zombie, stop } = await subjects();
+	try {
+		expect(ownerIncarnationState(zombie.pid, zombie.start, {})).toBe("zombie");
+		// Before 5m6ej the census asked pidAlive (kill -0 || ps lists it): the zombie reads alive there.
+		expect(liveOwnershipIo().pidAlive(zombie.pid)).toBe(true);
+		expect(scratchCensus(fixtureHome(), { [`zombie.${zombie.pid}`]: STARTED(zombie.pid, zombie.start) })).toMatchObject({ records: 1, untracked: 1, unproven: 0 });
+		expect(scratchCensus(fixtureHome(), { [`live.${live.pid}`]: STARTED(live.pid, live.start) })).toMatchObject({ records: 1, untracked: 0, unproven: 0 });
+	} finally {
+		await stop();
+	}
+}, 30_000);
+
+test("5m6ej planted: a reused pid (same pid, other start) has no live owner; control: the recorded raw multi-space lstart still reads live", async () => {
+	const { live: subject, stop } = await subjects();
+	try {
+		const other = "Thu Jan  1 00:00:00 2015";
+		expect(liveOwnershipIo().pidAlive(subject.pid)).toBe(true);
+		expect(scratchCensus(fixtureHome(), { [`reused.${subject.pid}`]: STARTED(subject.pid, other) })).toMatchObject({ records: 1, untracked: 1 });
+		// Records written before 5m6ej hold the raw lstart, with a run of spaces: the probe collapses both sides.
+		const raw = subject.start.replace(" ", "   ");
+		expect(scratchCensus(fixtureHome(), { [`raw.${subject.pid}`]: STARTED(subject.pid, raw) })).toMatchObject({ records: 1, untracked: 0 });
+		// The heavy queue records `process_start` the same way.
+		const home = fixtureHome();
+		const jobs = join(home, ".local", "state", "omp-kit", "load", "jobs");
+		put(join(jobs, "reused.json"), JSON.stringify({ id: "r", pid: subject.pid, process_start: other, queued_at: "2026-10-18T19:00:00.000Z" }));
+		put(join(jobs, "raw.json"), JSON.stringify({ id: "w", pid: subject.pid, process_start: raw, queued_at: "2026-10-18T19:00:00.000Z" }));
+		const live = liveOwnershipIo({ HOME: home });
+		const heavy = rowOf(censusOwnership(io(home, { incarnationState: live.incarnationState })), "heavy-queue").census!;
+		expect(heavy).toMatchObject({ records: 2, untracked: 1, unproven: 0 });
+		expect(heavy.examples).toEqual([join(jobs, "reused.json")]);
+	} finally {
+		await stop();
+	}
+}, 30_000);
+
+test("5m6ej planted: an unknown probe (ps unreadable) is unproven, never a dead owner; control: a dead probe is untracked", () => {
+	const unknown: Probe = { state: "unknown", evidence: { pid: DEAD_PID, recorded_start: "x", observed_start: null, stat: null, signal0: null, reason: "ps timed out" } };
+	const unreadable = (pid: number, start: string) => ownerIncarnationState(pid, start, { probe: () => unknown });
+	const owners = { [`unread.${DEAD_PID}`]: STARTED(DEAD_PID, "Mon Oct  5 13:27:00 2026") };
+	expect(scratchCensus(fixtureHome(), owners, { incarnationState: unreadable })).toMatchObject({ records: 1, untracked: 0, no_live_owner: 0, unproven: 1 });
+	expect(scratchCensus(fixtureHome(), owners, { incarnationState: () => "dead" })).toMatchObject({ records: 1, untracked: 1, unproven: 0 });
+	const home = fixtureHome();
+	put(join(home, ".local", "state", "omp-kit", "load", "mutex", "owner.json"), JSON.stringify({ pid: DEAD_PID, process_start: "Mon Oct  5 13:27:00 2026" }));
+	expect(rowOf(censusOwnership(io(home, { incarnationState: unreadable })), "heavy-queue").census).toMatchObject({ records: 1, untracked: 0, unproven: 1 });
+	expect(rowOf(censusOwnership(io(home)), "heavy-queue").census).toMatchObject({ records: 1, untracked: 1, unproven: 0 });
+	const findings = inspectOwnership(io(home, { incarnationState: unreadable }));
+	expect(findings.find((finding) => finding.component === "OWNERSHIP:heavy-queue")!.reason).toContain("1 owner(s) or seat lease(s) unprobed");
 });

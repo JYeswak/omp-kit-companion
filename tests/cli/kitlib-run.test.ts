@@ -9,7 +9,7 @@ import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
-import { run, type RunOptions, type RunResult } from "../../src/kitlib/run";
+import { run, runSync, type RunOptions, type RunResult, type RunSyncOptions } from "../../src/kitlib/run";
 
 type Expect = {
 	rc?: number; rc_signal?: string; timed_out?: boolean; killed?: boolean; truncated?: boolean;
@@ -148,6 +148,47 @@ process.exit(existsSync(${JSON.stringify(ready)}) ? 0 : 9);`;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	}, 30_000);
+});
+
+// runSync: the synchronous leaf-command twin (ompkit-5m6ej). No group ownership, so the corpus's descendant cases do not apply.
+describe("kitlib runSync", () => {
+	test("planted: the deadline kills a sleep 5 at 0.5 s; control: a fast command is not timed out", () => {
+		const slow = runSync(["sleep", "5"], { deadline_s: 0.5 });
+		expect(slow.timed_out).toBe(true);
+		expect(slow.killed).toBe(true);
+		expect(slow.rc).toBeNull();
+		expect(slow.elapsed_s).toBeLessThan(3);
+		const fast = runSync(["/bin/sh", "-c", "exit 4"], { deadline_s: 5 });
+		expect(fast.timed_out).toBe(false);
+		expect(fast.killed).toBe(false);
+		expect(fast.rc).toBe(4);
+	});
+	test("output past the cap is cut and stops the writer; control: output under the cap is whole", () => {
+		const flood = runSync(["/bin/sh", "-c", "yes"], { deadline_s: 10, max_output_bytes: 100 });
+		expect(flood.truncated).toBe(true);
+		expect(flood.killed).toBe(true);
+		expect(flood.timed_out).toBe(false);
+		expect(flood.rc).toBeNull();
+		expect(flood.stdout.byteLength).toBe(100);
+		const errFlood = runSync(["/bin/sh", "-c", "yes >&2"], { deadline_s: 10, max_output_bytes: 64 });
+		expect(errFlood.truncated).toBe(true);
+		expect(errFlood.stderr.byteLength).toBe(64);
+		const small = runSync(["/bin/sh", "-c", "printf abc; printf def >&2"], { deadline_s: 5, max_output_bytes: 100 });
+		expect(small.truncated).toBe(false);
+		expect(small.rc).toBe(0);
+		expect(decoder.decode(small.stdout)).toBe("abc");
+		expect(decoder.decode(small.stderr)).toBe("def");
+	});
+	test("argv and options are validated like run()", () => {
+		expect(() => runSync("echo hi" as unknown as string[], { deadline_s: 5 })).toThrow(TypeError);
+		expect(() => runSync([], { deadline_s: 5 })).toThrow(TypeError);
+		expect(() => runSync(["echo", 1 as unknown as string], { deadline_s: 5 })).toThrow(TypeError);
+		expect(() => runSync(["/bin/sh", "-c", "exit 0"], {} as RunSyncOptions)).toThrow(TypeError);
+		expect(() => runSync(["/bin/sh", "-c", "exit 0"], null as unknown as RunSyncOptions)).toThrow(TypeError);
+		expect(() => runSync(["/bin/sh", "-c", "exit 0"], { deadline_s: 0 })).toThrow(RangeError);
+		expect(() => runSync(["/bin/sh", "-c", "exit 0"], { deadline_s: -1 })).toThrow(RangeError);
+		expect(() => runSync(["/bin/sh", "-c", "exit 0"], { deadline_s: 5, max_output_bytes: -1 })).toThrow(RangeError);
+	});
 });
 
 afterAll(() => cleanupAllOwnedTmp());

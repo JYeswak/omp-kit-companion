@@ -1,10 +1,11 @@
 // Conformance tests for src/kitlib/proc.ts (ompkit-5m6ej, KL09). Every case comes from
 // tests/fixtures/kitlib-proc/corpus.json, the same corpus tests/scripts/kitlib_proc_test.py runs against
-// scripts/kitlib_proc.py. Subjects are real processes this test creates and tears down.
+// scripts/kitlib_proc.py. Subjects are real processes this test creates and tears down. Every case and
+// negative runs through BOTH the async and the sync API against the same subject, and the two must agree.
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { incarnation, isDead, probeIncarnation, type Probe, type ProbeSeam } from "../../src/kitlib/proc";
+import { incarnation, incarnationSync, isDead, probeIncarnation, probeIncarnationSync, type Probe, type ProbeSeam, type ProbeSeamSync } from "../../src/kitlib/proc";
 import { run } from "../../src/kitlib/run";
 
 type Case = { id: string; subject: "live" | "dead" | "zombie" | "unreadable"; recorded: "observed" | "wrong" | "any"; expect: { state: string; is_dead: boolean } };
@@ -60,15 +61,28 @@ async function zombieSubject(): Promise<Subject> {
 }
 
 const unreadable: ProbeSeam["ps"] = async () => ({ rc: null, timed_out: true, stdout: "" });
+const unreadableSync: ProbeSeamSync["ps"] = () => ({ rc: null, timed_out: true, stdout: "" });
+type Switches = Omit<ProbeSeam, "ps">;
 
-async function probeCase(item: Case, seam: ProbeSeam): Promise<Probe> {
-	if (item.subject === "unreadable") return probeIncarnation({ pid: process.pid, start: corpus.wrong_start }, { ...seam, ps: unreadable });
+/** The case through both APIs against one subject: [async, sync]. */
+async function probeCase(item: Case, seam: Switches): Promise<[Probe, Probe]> {
+	if (item.subject === "unreadable") {
+		const recorded = { pid: process.pid, start: corpus.wrong_start };
+		return [await probeIncarnation(recorded, { ...seam, ps: unreadable }), probeIncarnationSync(recorded, { ...seam, ps: unreadableSync })];
+	}
 	const subject = await (item.subject === "live" ? liveSubject() : item.subject === "dead" ? deadSubject() : zombieSubject());
 	try {
-		return await probeIncarnation({ pid: subject.pid, start: item.recorded === "observed" ? subject.start : corpus.wrong_start }, seam);
+		const recorded = { pid: subject.pid, start: item.recorded === "observed" ? subject.start : corpus.wrong_start };
+		return [await probeIncarnation(recorded, seam), probeIncarnationSync(recorded, seam)];
 	} finally {
 		await subject.teardown();
 	}
+}
+
+/** Both APIs decide alike; `stat` is compared by state letter, since a sleeping process may gain or lose a modifier between reads. */
+function expectAgree(asyncProbe: Probe, syncProbe: Probe): void {
+	const comparable = (probe: Probe) => ({ state: probe.state, dead: isDead(probe), ...probe.evidence, stat: probe.evidence.stat?.[0] ?? null });
+	expect(comparable(syncProbe), JSON.stringify([asyncProbe, syncProbe])).toEqual(comparable(asyncProbe));
 }
 
 const passes = (item: Case, probe: Probe) => probe.state === item.expect.state && isDead(probe) === item.expect.is_dead;
@@ -80,30 +94,48 @@ describe("kitlib proc conformance corpus", () => {
 	});
 	for (const item of corpus.cases) {
 		test(item.id, async () => {
-			const probe = await probeCase(item, {});
+			const [probe, syncProbe] = await probeCase(item, {});
 			expect(probe.state, JSON.stringify(probe)).toBe(item.expect.state as Probe["state"]);
 			expect(isDead(probe)).toBe(item.expect.is_dead);
+			expectAgree(probe, syncProbe);
 		}, 30_000);
 	}
 	for (const negative of corpus.negatives) {
-		test(`planted negative ${negative.id}: the case flips, the control holds`, async () => {
-			const seam: ProbeSeam = negative.disable === "zombie" ? { detectZombie: false } : { detectReuse: false };
+		test(`planted negative ${negative.id}: the case flips, the control holds (async and sync)`, async () => {
+			const seam: Switches = negative.disable === "zombie" ? { detectZombie: false } : { detectReuse: false };
 			const flipped = await probeCase(byId.get(negative.flips)!, seam);
-			expect(passes(byId.get(negative.flips)!, flipped), JSON.stringify(flipped)).toBe(false);
-			expect(isDead(flipped)).toBe(false);
+			for (const probe of flipped) {
+				expect(passes(byId.get(negative.flips)!, probe), JSON.stringify(probe)).toBe(false);
+				expect(isDead(probe)).toBe(false);
+			}
+			expectAgree(...flipped);
 			const control = await probeCase(byId.get(negative.control)!, seam);
-			expect(passes(byId.get(negative.control)!, control), JSON.stringify(control)).toBe(true);
+			for (const probe of control) expect(passes(byId.get(negative.control)!, probe), JSON.stringify(probe)).toBe(true);
+			expectAgree(...control);
 		}, 30_000);
 	}
 	test("malformed probe input is refused", async () => {
 		for (const input of corpus.malformed) {
 			await expect(probeIncarnation(input as never), JSON.stringify(input)).rejects.toThrow(TypeError);
+			expect(() => probeIncarnationSync(input as never), JSON.stringify(input)).toThrow(TypeError);
 		}
 		await expect(probeIncarnation(null as never)).rejects.toThrow(TypeError);
+		expect(() => probeIncarnationSync(null as never)).toThrow(TypeError);
 	});
 	test("malformed incarnation pid is refused", async () => {
-		for (const pid of corpus.malformed_pids) await expect(incarnation(pid as never), JSON.stringify(pid)).rejects.toThrow(TypeError);
+		for (const pid of corpus.malformed_pids) {
+			await expect(incarnation(pid as never), JSON.stringify(pid)).rejects.toThrow(TypeError);
+			expect(() => incarnationSync(pid as never), JSON.stringify(pid)).toThrow(TypeError);
+		}
 	});
+	test("incarnation and incarnationSync read the same start", async () => {
+		const subject = await liveSubject();
+		try {
+			expect(incarnationSync(subject.pid)).toEqual(await incarnation(subject.pid));
+		} finally {
+			await subject.teardown();
+		}
+	}, 30_000);
 	test("TypeScript and Python read the same incarnation", async () => {
 		const subject = await liveSubject();
 		try {
@@ -120,6 +152,7 @@ describe("kitlib proc conformance corpus", () => {
 		try {
 			const padded = subject.start.replace(" ", "   ");
 			expect((await probeIncarnation({ pid: subject.pid, start: padded })).state).toBe("live");
+			expect(probeIncarnationSync({ pid: subject.pid, start: padded }).state).toBe("live");
 		} finally {
 			await subject.teardown();
 		}

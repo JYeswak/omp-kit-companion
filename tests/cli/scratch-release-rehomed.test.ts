@@ -24,7 +24,9 @@ afterEach(() => {
 });
 
 const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
-const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null };
+// No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
+const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const deps = (extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness: noPid, run: clearRun, ...extra });
 
 function fixture(ownerPid: number): { dir: string; root: string; home: string } {

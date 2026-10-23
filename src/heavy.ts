@@ -5,7 +5,7 @@ import { basename, delimiter, join, resolve } from "node:path";
 import process from "node:process";
 import { inspectStateRoot } from "./state-root.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
-import { defaultLiveness, probeOwner, type LivenessDeps } from "./scratch.ts";
+import { incarnation, incarnationSync, isDead, normalizeStart, probeIncarnation } from "./kitlib/proc.ts";
 import { admitDiskWork } from "./disk-stage.ts";
 import type { LoadJob } from "./load-doctor.ts";
 
@@ -187,15 +187,15 @@ function currentRepo(cwd: string): string {
 
 function validJob(value: unknown): value is HeavyJob {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	return "id" in value && typeof value.id === "string" && "pid" in value && typeof value.pid === "number" && Number.isInteger(value.pid) &&
-		"process_start" in value && typeof value.process_start === "string" && "label" in value && typeof value.label === "string" &&
+	return "id" in value && typeof value.id === "string" && "pid" in value && typeof value.pid === "number" && Number.isInteger(value.pid) && value.pid > 0 &&
+		"process_start" in value && typeof value.process_start === "string" && normalizeStart(value.process_start) !== "" && "label" in value && typeof value.label === "string" &&
 		"repo" in value && typeof value.repo === "string" && "cwd" in value && typeof value.cwd === "string" &&
 		"agent" in value && typeof value.agent === "string" && "tmux_pane" in value && typeof value.tmux_pane === "string" &&
 		"state" in value && (value.state === "queued" || value.state === "running") && "argv" in value && Array.isArray(value.argv) &&
 		value.argv.every((item: unknown) => typeof item === "string") && "queued_at" in value && typeof value.queued_at === "string";
 }
 
-function readJobs(directory: string, liveness: LivenessDeps): HeavyJob[] {
+async function readJobs(directory: string): Promise<HeavyJob[]> {
 	const jobs: HeavyJob[] = [];
 	for (const name of readdirSync(directory).filter((item) => item.endsWith(".json")).sort()) {
 		const path = join(directory, name);
@@ -203,8 +203,8 @@ function readJobs(directory: string, liveness: LivenessDeps): HeavyJob[] {
 		try { value = JSON.parse(readFileSync(path, "utf8")); }
 		catch (error) { throw new Error(`cannot read heavy-work ledger ${name}: ${error instanceof Error ? error.message : String(error)}`); }
 		if (!validJob(value)) throw new Error(`invalid heavy-work ledger ${name}; refusing admission`);
-		const owner = probeOwner(value.pid, value.process_start, liveness);
-		if (owner === "dead" || owner === "reused") {
+		// Reclaimable only when kitlib proc proves the incarnation dead, reused or a zombie; unknown is kept.
+		if (isDead(await probeIncarnation({ pid: value.pid, start: value.process_start }))) {
 			unlinkSync(path);
 			continue;
 		}
@@ -217,25 +217,24 @@ function readLockOwner(path: string): { pid: number; process_start: string } | n
 	try {
 		const value: unknown = JSON.parse(readFileSync(path, "utf8"));
 		if (typeof value !== "object" || value === null || Array.isArray(value) || !("pid" in value) || !("process_start" in value)) return null;
-		return typeof value.pid === "number" && Number.isInteger(value.pid) && typeof value.process_start === "string"
+		return typeof value.pid === "number" && Number.isInteger(value.pid) && value.pid > 0 && typeof value.process_start === "string" && normalizeStart(value.process_start) !== ""
 			? { pid: value.pid, process_start: value.process_start }
 			: null;
 	} catch { return null; }
 }
 
-function reclaimStaleLock(path: string, liveness: LivenessDeps): boolean {
+async function reclaimStaleLock(path: string): Promise<boolean> {
 	const ownerPath = join(path, "owner.json");
 	const before = readLockOwner(ownerPath);
 	if (!before) return false;
-	const state = probeOwner(before.pid, before.process_start, liveness);
-	if (state !== "dead" && state !== "reused") return false;
+	if (!isDead(await probeIncarnation({ pid: before.pid, start: before.process_start }))) return false;
 	const current = readLockOwner(ownerPath);
-	if (!current || current.pid !== before.pid || current.process_start !== before.process_start) return false;
+	if (!current || current.pid !== before.pid || normalizeStart(current.process_start) !== normalizeStart(before.process_start)) return false;
 	try { unlinkSync(ownerPath); rmdirSync(path); return true; }
 	catch { return false; }
 }
 
-async function acquireLock(path: string, owner: { pid: number; process_start: string }, deadline: number, noWait: boolean, liveness: LivenessDeps): Promise<boolean> {
+async function acquireLock(path: string, owner: { pid: number; process_start: string }, deadline: number, noWait: boolean): Promise<boolean> {
 	while (true) {
 		try {
 			mkdirSync(path, { mode: 0o700 });
@@ -243,7 +242,7 @@ async function acquireLock(path: string, owner: { pid: number; process_start: st
 			return true;
 		} catch (error) {
 			if (errorCode(error) !== "EEXIST") throw error;
-			if (reclaimStaleLock(path, liveness)) continue;
+			if (await reclaimStaleLock(path)) continue;
 			if (noWait || Date.now() >= deadline) return false;
 			await Bun.sleep(Math.min(LOCK_POLL_MS, Math.max(1, deadline - Date.now())));
 		}
@@ -253,7 +252,7 @@ async function acquireLock(path: string, owner: { pid: number; process_start: st
 function releaseLock(path: string, owner: { pid: number; process_start: string }): void {
 	const ownerPath = join(path, "owner.json");
 	const current = readLockOwner(ownerPath);
-	if (!current || current.pid !== owner.pid || current.process_start !== owner.process_start) return;
+	if (!current || current.pid !== owner.pid || normalizeStart(current.process_start) !== normalizeStart(owner.process_start)) return;
 	try { unlinkSync(ownerPath); rmdirSync(path); } catch { /* A stale lock is reclaimed by the next bounded admission attempt. */ }
 }
 
@@ -324,8 +323,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		process.stderr.write(`heavy: ${error instanceof Error ? error.message : String(error)}\n`);
 		return 2;
 	}
-	const liveness = defaultLiveness();
-	const ownStart = liveness.processStart(process.pid);
+	const ownStart = (await incarnation(process.pid))?.start;
 	if (!ownStart) {
 		process.stderr.write("heavy: cannot establish this process start identity; no command was run\n");
 		return 2;
@@ -364,13 +362,13 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 	try {
 		while (true) {
 			if (rowCreated && Date.now() >= deadline) {
-				await removeQueuedJob(storage, job.id, owner, liveness);
+				await removeQueuedJob(storage, job.id, owner);
 				process.stderr.write("RESOURCE_DEFERRED: queue timeout\n");
 				process.stderr.write("deferred: queue timeout\n");
 				return 75;
 			}
 			if (signal) {
-				if (rowCreated) await removeQueuedJob(storage, job.id, owner, liveness);
+				if (rowCreated) await removeQueuedJob(storage, job.id, owner);
 				return SIGNAL_EXIT_CODES[signal] ?? 1;
 			}
 			if (rowCreated) {
@@ -380,7 +378,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 				const fresh = loadConfig(observerOverride);
 				config = { ...config, disk_observer: fresh.disk_observer, disk_floor_pct: fresh.disk_floor_pct };
 			}
-			const acquired = await acquireLock(storage.lock, owner, deadline, options.noWait, liveness);
+			const acquired = await acquireLock(storage.lock, owner, deadline, options.noWait);
 			if (!acquired) {
 				const reason = options.noWait ? "state lock is busy" : "timed out waiting for the state lock";
 				process.stderr.write(`RESOURCE_DEFERRED: ${reason}\n`);
@@ -391,7 +389,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			let reason: string | null = null;
 			let missing: { observer: "sbh" | "statfs"; text: string } | null = null;
 			try {
-				waitingJobs = readJobs(storage.jobs, liveness);
+				waitingJobs = await readJobs(storage.jobs);
 				if (!waitingJobs.some((entry) => entry.id === id)) {
 					writeJob(storage.jobs, job);
 					rowCreated = true;
@@ -411,7 +409,9 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 					writeJob(storage.jobs, running);
 					rowCreated = true;
 					child = Bun.spawn(["nice", "-n", "10", ...argv], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-					const childStart = liveness.processStart(child.pid);
+					// Synchronous on purpose: an await here let a SIGINT kill the child mid-probe, so the probe found no
+					// process and heavy exited 1 ("cannot establish ... identity") instead of 130 with the slot released.
+					const childStart = incarnationSync(child.pid)?.start;
 					if (!childStart) {
 						child.kill("SIGTERM");
 						await child.exited;
@@ -436,16 +436,16 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 				if (result === "deadline") {
 					try { child.kill("SIGTERM"); } catch { /* child may have exited at the boundary */ }
 					await child.exited;
-					await removeQueuedJob(storage, id, owner, liveness);
+					await removeQueuedJob(storage, id, owner);
 					process.stderr.write("RESOURCE_DEFERRED: child exceeded heavy admission deadline\n");
 					process.stderr.write("deferred: child exceeded heavy admission deadline\n");
 					return 75;
 				}
-				await removeQueuedJob(storage, id, owner, liveness);
+				await removeQueuedJob(storage, id, owner);
 				return signal ? SIGNAL_EXIT_CODES[signal] : result;
 			}
 			if (options.noWait || Date.now() >= deadline) {
-				await removeQueuedJob(storage, id, owner, liveness);
+				await removeQueuedJob(storage, id, owner);
 				process.stderr.write(`RESOURCE_DEFERRED: ${reason ?? "admission unavailable"}${options.noWait ? " (--no-wait)" : " (queue timeout)"}\n`);
 				process.stderr.write(`deferred: ${reason ?? "admission unavailable"}${options.noWait ? " (--no-wait)" : " (queue timeout)"}\n`);
 				return 75;
@@ -458,7 +458,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			await Bun.sleep(Math.min(QUEUE_POLL_MS, Math.max(1, deadline - Date.now())));
 		}
 	} catch (error) {
-		if (rowCreated) await removeQueuedJob(storage, id, owner, liveness);
+		if (rowCreated) await removeQueuedJob(storage, id, owner);
 		process.stderr.write(`heavy: ${error instanceof Error ? error.message : String(error)}\n`);
 		return 1;
 	} finally {
@@ -467,9 +467,9 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 	}
 }
 
-async function removeQueuedJob(storage: { jobs: string; lock: string }, id: string, owner: { pid: number; process_start: string }, liveness: LivenessDeps): Promise<void> {
+async function removeQueuedJob(storage: { jobs: string; lock: string }, id: string, owner: { pid: number; process_start: string }): Promise<void> {
 	const deadline = Date.now() + 5_000;
-	if (!await acquireLock(storage.lock, owner, deadline, false, liveness)) return;
+	if (!await acquireLock(storage.lock, owner, deadline, false)) return;
 	try { removeJob(storage.jobs, id); }
 	finally { releaseLock(storage.lock, owner); }
 }

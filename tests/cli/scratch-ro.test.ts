@@ -22,7 +22,9 @@ afterEach(() => {
 });
 
 const clearRun: ScratchRunner = () => ({ code: 1, stdout: "", stderr: "" });
-const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null };
+// No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
+const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 
 /** An owned scratch dir holding `releases/1.0` (0555, with a file) and a symlink to a 0555 dir outside it. */
 function world(ownerPid: number): { dir: string; home: string; outside: string } {

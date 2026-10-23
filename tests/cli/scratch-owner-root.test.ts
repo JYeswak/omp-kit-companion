@@ -37,7 +37,9 @@ function fixture(repoKind: "matching" | "foreign" | "relative", runtime = false)
 	writeFileSync(join(dir, ".owner"), JSON.stringify(owner), { mode: 0o600 });
 	writeFileSync(join(dir, "payload"), "preserve foreign and unresolved owners\n");
 	const deps: InspectDeps = {
-		liveness: { signalAlive: () => false, psVisible: () => false, processStart: () => null },
+		// No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
+		liveness: { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+			probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) },
 		run: () => ({ code: 1, stdout: "", stderr: "" }),
 	};
 	return { base, root, dir, owner, deps };

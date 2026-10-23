@@ -25,7 +25,9 @@ afterEach(() => {
 	}
 });
 
-const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null };
+// No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
+const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const seat = (agent: string | null, sessions: string[]) => (): SeatIdentity => ({ agent, sessions, main: sessions[0] ?? null });
 const deps = (callerSeat: () => SeatIdentity): InspectDeps => ({ liveness: noPid, run: () => ({ code: 1, stdout: "", stderr: "" }), now: NOW, callerSeat });
 const owner = (pid: number, label: string, extra = "") => `pid=${pid}\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-18T17:00:00Z\n${extra}`;

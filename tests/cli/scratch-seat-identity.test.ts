@@ -30,8 +30,10 @@ function tempDir(label: string): string {
 	return dir;
 }
 
-const noPid: Pick<LivenessDeps, "signalAlive" | "psVisible" | "processStart"> =
-	{ signalAlive: () => false, psVisible: () => false, processStart: () => null };
+// No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
+const noPid: Pick<LivenessDeps, "signalAlive" | "psVisible" | "processStart" | "probe"> =
+	{ signalAlive: () => false, psVisible: () => false, processStart: () => null,
+		probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
 
 function seatedOwner(): ScratchOwner {

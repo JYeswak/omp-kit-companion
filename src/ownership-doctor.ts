@@ -1,14 +1,17 @@
 // doctor --scope ownership (ompkit-774u.12 OWNERREG1): for every entry of the ownership registry, count the
 // persisted records, the ones with no live owner, and the ones with no tracked terminal outcome. Read-only:
-// every observation goes through OwnershipIo, which only lists, reads, stats, signals pid 0 and reads `ps`.
+// every observation goes through OwnershipIo, which only lists, reads, stats, signals pid 0 and reads `ps`. A record
+// that names its owner's start is probed as an incarnation through kitlib proc (ompkit-5m6ej): a zombie or reused pid
+// is not alive, and an unreadable probe is unproven, never dead. Records with a bare pid keep the kill -0 / ps check.
 // "Tracked" means the class's producer left an outcome on disk; each census states its own rule.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Finding } from "./diagnostics.ts";
 import { OWNERSHIP_REGISTRY, type CensusId, type OwnershipEntry } from "./ownership-registry.ts";
+import type { ProbeState } from "./kitlib/proc.ts";
 import {
-	defaultLiveness, defaultRunner, listProcesses, parseOwnerFile, quarantineDir, quarantineTimeOf, quarantineTtlMs,
+	defaultLiveness, defaultRunner, listProcesses, ownerIncarnationState, parseOwnerFile, quarantineDir, quarantineTimeOf, quarantineTtlMs,
 	resolveScratchRootEntries, selectHarnessOrphans, stateRoot, type OrphanProcess,
 } from "./scratch.ts";
 
@@ -19,8 +22,10 @@ export interface OwnershipIo {
 	listDir(path: string): string[] | null;
 	readText(path: string): string | null;
 	mtimeMs(path: string): number | null;
-	/** kill -0: false only for ESRCH. */
+	/** Bare-pid liveness for records with no start: kill -0 or ps lists it (counts zombies and reused pids alive). */
 	pidAlive(pid: number): boolean;
+	/** Liveness of a recorded `{pid, start}` incarnation through kitlib proc: dead, reused and zombie are not alive; unknown is unproven. */
+	incarnationState(pid: number, start: string): ProbeState;
 	/** True when the omp session of a seat is leased by a live process, false when not, null when it cannot be told. */
 	seatLive(agent: string, session: string): boolean | null;
 	/** Scratch roots of repositories (override, ~/Developer, fleet repos); not temp bases. */
@@ -33,7 +38,7 @@ export interface OwnershipCensus {
 	records: number;
 	no_live_owner: number;
 	untracked: number;
-	/** Seat leases that could not be probed; these are counted as live, never as untracked. */
+	/** Owners or seat leases that could not be probed; these are counted as live, never as untracked. */
 	unproven: number;
 	/** Age in seconds of the oldest untracked record. */
 	oldest_age_s: number | null;
@@ -100,7 +105,13 @@ function scratchDirs(io: OwnershipIo): CensusOutcome {
 			const text = io.readText(join(dir, ".owner"));
 			const owner = text === null ? null : parseOwnerFile(text);
 			if (owner !== null) {
-				if (io.pidAlive(owner.pid)) continue;
+				if (owner.processStart === null) {
+					if (io.pidAlive(owner.pid)) continue;
+				} else {
+					const state = io.incarnationState(owner.pid, owner.processStart);
+					if (state === "live") continue;
+					if (state === "unknown") { tally.unproven++; continue; }
+				}
 				if (owner.agent !== null && owner.session !== null) {
 					const seat = io.seatLive(owner.agent, owner.session);
 					if (seat === true) continue;
@@ -173,7 +184,16 @@ function heavyQueue(io: OwnershipIo): CensusOutcome {
 		if (record === null) return;
 		tally.records++;
 		const pid = pidOf(record.pid);
-		if (pid !== null && io.pidAlive(pid)) return;
+		if (pid !== null) {
+			const start = record.process_start;
+			if (typeof start !== "string") {
+				if (io.pidAlive(pid)) return;
+			} else {
+				const state = io.incarnationState(pid, start);
+				if (state === "live") return;
+				if (state === "unknown") { tally.unproven++; return; }
+			}
+		}
 		tally.untrackedRecord(path, since(record) ?? io.mtimeMs(path));
 	};
 	check(join(root, "mutex", "owner.json"), () => null);
@@ -302,7 +322,7 @@ export function inspectOwnership(io: OwnershipIo, entries: readonly OwnershipEnt
 		const orphan = census.untracked > 0;
 		return { component: `OWNERSHIP:${row.id}`, status: orphan ? "DEGRADED" : "OK",
 			reason: `${census.records} record(s), ${census.no_live_owner} with no live owner, ${census.untracked} of them untracked`
-				+ (census.oldest_age_s === null ? "" : `, oldest ${census.oldest_age_s} s`) + (census.unproven > 0 ? `, ${census.unproven} seat lease(s) unprobed` : ""),
+				+ (census.oldest_age_s === null ? "" : `, oldest ${census.oldest_age_s} s`) + (census.unproven > 0 ? `, ${census.unproven} owner(s) or seat lease(s) unprobed` : ""),
 			recommended_action: orphan ? (row.owner_bead === null ? "File an owning bead under ompkit-774u.12 for this class." : `Owner bead ${row.owner_bead}.`) : "No action required.",
 			evidence: { ...row } };
 	});
@@ -319,6 +339,7 @@ export function liveOwnershipIo(env: NodeJS.ProcessEnv = process.env): Ownership
 		readText: (path) => { try { return readFileSync(path, "utf8"); } catch { return null; } },
 		mtimeMs: (path) => { try { return statSync(path).mtimeMs; } catch { return null; } },
 		pidAlive: (pid) => liveness.signalAlive(pid) || liveness.psVisible(pid),
+		incarnationState: (pid, start) => ownerIncarnationState(pid, start, liveness),
 		seatLive: (agent, session) => liveness.seatLive?.(agent, session) ?? null,
 		scratchRoots: () => resolveScratchRootEntries(home)
 			.filter((entry) => entry.sources.some((source) => source === "override" || source === "developer" || source.startsWith("fleet-watch:") || source.startsWith("herdr:") || source === "chief"))
