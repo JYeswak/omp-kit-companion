@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pollUntil } from "../../src/kitlib/poll.ts";
 import { run, runSync } from "../../src/kitlib/run.ts";
@@ -69,3 +69,14 @@ test("planted: a second live launcher in the fixture's own tree still refuses SK
 		await sleeper.catch(error => { if (error !== stopped) throw error; });
 	}
 }, 120000);
+
+test("MAINRED1: after another file's afterAll cleanupAllOwnedTmp, the next file's call gets a live shim", () => {
+	// What a previous test file's afterAll does in a shared `bun test` process (REL75 full suite: ps ENOENT x2) ...
+	cleanupAllOwnedTmp();
+	// ... then what the next file's module-level `fixtureLauncherTableBin()` returns.
+	const next = fixtureLauncherTableBin();
+	const shim = join(next, "ps");
+	const after = runSync([shim, "-o", "pid=", "-p", String(process.pid)], { deadline_s: 30 });
+	expect({ exists: existsSync(shim), rc: after.rc, pid: decode(after.stdout).trim() })
+		.toEqual({ exists: true, rc: 0, pid: String(process.pid) });
+});

@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runSync } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -26,6 +26,12 @@ function owned(pid,    hops) {
 
 let tableBin: string | undefined;
 
+// MAINRED1 (ompkit-kl9p3), REL75 full suite: `tableBin` is cached per test process, and every test file ends with
+// `afterAll(() => cleanupAllOwnedTmp())`, which removes this registered dir too, so the next file in the same
+// `bun test` process got the cached path of a deleted shim (ps ENOENT x2). A cached path whose shim is gone is now
+// rebuilt. The dir stays in the per-file cleanup set on purpose: under bun 1.4.3's test runner process "exit" never
+// fires (measured), so a dir kept out of that set would leak once per test process.
+
 /**
  * Fixture-owned process table for tests that spawn a real `service run <job>`.
  * The run's launcher admission (ompkit-bj08.5 [d], src/service-run.ts
@@ -44,7 +50,7 @@ let tableBin: string | undefined;
  * land inside a timed run. Call it at module load, outside any test.
  */
 export function fixtureLauncherTableBin(): string {
-	if (tableBin !== undefined) return tableBin;
+	if (tableBin !== undefined && existsSync(join(tableBin, "ps"))) return tableBin;
 	const awk = Bun.which("awk");
 	if (awk === null) throw new Error("fixture launcher table needs awk on the test PATH");
 	const root = join(import.meta.dir, "../../var/agent-tmp");
