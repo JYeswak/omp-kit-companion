@@ -18,10 +18,13 @@ const LOCK = `/owners/session-owners/${SESSION}.lock`;
 
 const cleanup: string[] = [];
 const savedAgent = process.env.AGENT_NAME;
+const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
 afterEach(() => {
 	for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true });
 	if (savedAgent === undefined) delete process.env.AGENT_NAME;
 	else process.env.AGENT_NAME = savedAgent;
+	if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
+	else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
 });
 
 function tempDir(label: string): string {
@@ -114,6 +117,7 @@ test("creation without an injected seat still stamps it when the caller holds on
 	const home = tempDir("seat-id-create");
 	const ledger = join(tempDir("seat-id-ledger"), "ledger.json");
 	const deps: InspectDeps = { liveness: { ...defaultLiveness(), seatLive: () => true }, run };
+	process.env.OMP_KIT_SCRATCH_ROOTS = join(home, "var", "agent-tmp");
 	const created = createScratch("seatidn", home, deps, {}, false, ledger);
 	expect(created.ok).toBe(true);
 	const owner = parseOwnerFile(readFileSync(join(created.dir, ".owner"), "utf8"));
@@ -126,6 +130,7 @@ test("planted negative: creation by a seatless caller keeps a pid owner and stil
 	const home = tempDir("seat-id-noseat");
 	const ledger = join(tempDir("seat-id-ledger2"), "ledger.json");
 	const deps: InspectDeps = { liveness: defaultLiveness(), run: clearRun };
+	process.env.OMP_KIT_SCRATCH_ROOTS = join(home, "var", "agent-tmp");
 	const created = createScratch("seatless", home, deps, {}, false, ledger);
 	expect(created.ok).toBe(true);
 	expect(parseOwnerFile(readFileSync(join(created.dir, ".owner"), "utf8"))).toMatchObject({ agent: null, session: null });

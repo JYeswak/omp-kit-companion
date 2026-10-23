@@ -314,6 +314,7 @@ test("release: a complete owner with a recorded process start is released by the
 test("createScratch records the caller's agent and main session in the owner; an unidentified or ambiguous caller records neither", () => {
 	const make = (seat: SeatIdentity | undefined, label: string) => {
 		const root = tempDir("seat-create");
+		process.env.OMP_KIT_SCRATCH_ROOTS = join(root, "var", "agent-tmp");
 		const result = createScratch(label, root, deps(defaultLiveness(), seat ? { callerSeat: () => seat } : {}), {}, false, join(root, "scratch-budgets.json"));
 		expect(result.ok).toBe(true);
 		return parseOwnerFile(readFileSync(join(result.dir, ".owner"), "utf8"));

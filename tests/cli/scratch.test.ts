@@ -14,6 +14,11 @@ const fixtureRepo = resolve(import.meta.dir, "../..");
 const AGENT_TMP = join(fixtureRepo, "var", "agent-tmp");
 /** A fresh owned dir (src/kitlib/tmp.ts) under the repo's var/agent-tmp; callers still push it to `roots`. */
 const agentTmp = (label: string): string => ownedTmp(label, { root: AGENT_TMP }).path;
+// Exact-commit gate tests run from a nested archive; register their fixture root so consumer tests
+// reach their owner/budget assertions. Root-discovery refusal is covered by scratch-release-now.test.ts.
+function registerRepoScratchRoot(repo: string): void {
+	process.env.OMP_KIT_SCRATCH_ROOTS = join(repo, "var", "agent-tmp");
+}
 // `service run scratch-reaper` below sees only this file's own launchers in the host process table.
 const LAUNCHER_TABLE = fixtureLauncherTableBin();
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -1230,6 +1235,7 @@ test("legacy release quarantines while the session lives; unreleased stays LIVE"
 test("createScratch makes a dir with a valid owner and an export line", () => {
 	const repo = agentTmp("scratch-repo");
 	roots.push(repo);
+	registerRepoScratchRoot(repo);
 	const created = createScratch("mylabel", repo, depsFor(), {}, false, join(repo, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);
 	expect(created.dir).toBe(join(repo, "var", "agent-tmp", `mylabel.${process.pid}`));
@@ -1934,6 +1940,7 @@ test("SCRATCHLEAK1: text owner with no bead field reaps when clear; open bead st
 test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", () => {
 	const repo = agentTmp("newrepo");
 	roots.push(repo);
+	registerRepoScratchRoot(repo);
 	const made = createScratch("probe", repo, depsFor(), { bead: "ompkit-fp72.19.1.43" }, true, join(repo, "scratch-budgets.json"));
 	expect(made.ok).toBe(true);
 	const raw = readFileSync(join(made.dir, ".owner"), "utf8");
@@ -1971,6 +1978,7 @@ test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (p
 	const { source, head } = commitFixture();
 	const repo = agentTmp("newrepo");
 	roots.push(repo);
+	registerRepoScratchRoot(repo);
 	const made = createScratch("exp", repo, depsFor(), {}, true, join(repo, "scratch-budgets.json"));
 	expect(made.ok).toBe(true);
 	expect(exportCommitToScratch(source, head, made.dir, defaultRunner)).toBeNull();
@@ -1988,6 +1996,7 @@ test("SCRATCHLEAK1: export asked from a subdirectory still materializes the whol
 	for (const from of ["sub", "loose"]) {
 		const repo = agentTmp("newrepo");
 		roots.push(repo);
+		registerRepoScratchRoot(repo);
 		const made = createScratch("exp", repo, depsFor(), {}, true, join(repo, "scratch-budgets.json"));
 		expect(made.ok).toBe(true);
 		expect(exportCommitToScratch(join(source, from), head, made.dir, defaultRunner), from).toBeNull();
@@ -2011,6 +2020,7 @@ test("SCRATCHLEAK1: text owner with gone repo reaps when clear", () => {
 function quotaRepo(): { repo: string; ledger: string } {
 	const repo = agentTmp("quotarepo");
 	roots.push(repo);
+	registerRepoScratchRoot(repo);
 	return { repo, ledger: join(repo, "budgets.json") };
 }
 

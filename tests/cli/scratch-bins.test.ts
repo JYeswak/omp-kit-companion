@@ -102,6 +102,7 @@ test("a hold outlives its dead owner until it expires, then it is flagged and ne
 test("createScratch records the bin group and refuses an invalid one before creating anything", () => {
 	const root = ownedTmp("bins-create", { root: scratchParent }).path;
 	cleanup.push(root);
+	process.env.OMP_KIT_SCRATCH_ROOTS = join(root, "var", "agent-tmp");
 	const live: LivenessDeps = { ...noPid, processStart: () => "Mon Oct 18 17:32:44 2026" };
 	const ok = createScratch("probe", root, deps({ liveness: live }), { bin: "hold", purpose: "probe", bead: "ompkit-774u.15", expires: "2026-10-25" }, false, join(root, "scratch-budgets.json"));
 	expect(ok).toMatchObject({ ok: true, reason: "created" });
@@ -114,6 +115,7 @@ test("createScratch records the bin group and refuses an invalid one before crea
 test("createScratch records a declared byte budget and refuses zero, negative and non-integer budgets", () => {
 	const root = ownedTmp("bins-budget", { root: scratchParent }).path;
 	cleanup.push(root);
+	process.env.OMP_KIT_SCRATCH_ROOTS = join(root, "var", "agent-tmp");
 	const live: LivenessDeps = { ...noPid, processStart: () => "Mon Oct 18 17:32:44 2026" };
 	const ok = createScratch("probe", root, deps({ liveness: live }), { budgetBytes: 1000 }, false, join(root, "scratch-budgets.json"));
 	expect(ok).toMatchObject({ ok: true, reason: "created" });

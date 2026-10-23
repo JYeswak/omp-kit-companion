@@ -142,6 +142,7 @@ test("planted: an unknown probe never releases; control: a live probe releases t
 
 test("createScratch records the start whitespace-collapsed, as kitlib proc compares it", () => {
 	const root = tempDir("incarnation-create");
+	process.env.OMP_KIT_SCRATCH_ROOTS = join(root, "var", "agent-tmp");
 	const created = createScratch("collapsed", root, { liveness: { ...planted("live"), processStart: () => "Mon Oct  5 13:27:00 2026" }, run: clearRun },
 		{}, false, join(root, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);
