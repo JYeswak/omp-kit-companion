@@ -99,7 +99,11 @@ function installTernOmp(f: Fixture, version: string, stateVersion = version, sou
 	chmodSync(binary, 0o755);
 	symlinkSync(join("..", "versions", version), launcher);
 	writeFileSync(join(app, "state.json"), JSON.stringify({ installed: { version: stateVersion } }));
-	writeOmpPackage(join(cache, version, "node_modules", "@oh-my-pi", "pi-coding-agent"), sourceVersion, join(f.base, "tern-source-omp-argv.txt"));
+	const versionDir = join(cache, version);
+	writeOmpPackage(join(versionDir, "node_modules", "@oh-my-pi", "pi-coding-agent"), sourceVersion, join(f.base, "tern-source-omp-argv.txt"));
+	// The source cache serves a version only with its OTel runtime entry (hasRequiredOmpSourceFiles, 78af6e905e).
+	mkdirSync(join(versionDir, "node_modules", "@opentelemetry", "api", "dist"), { recursive: true });
+	writeFileSync(join(versionDir, "node_modules", "@opentelemetry", "api", "dist", "index.mjs"), "export const context = {};\n");
 	return { app, bin, launcher, cache };
 }
 function installUnmanagedOmp(f: Fixture, version: string): string {

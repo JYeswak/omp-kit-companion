@@ -698,6 +698,10 @@ describe("OMP installation identity", () => {
 					const pkg = join(versionRoot, "node_modules", "@oh-my-pi", "pi-coding-agent");
 					mkdirSync(dirname(pkg), { recursive: true });
 					symlinkSync(dirname(source), pkg);
+					// The cache serves a version only with its OTel runtime entry (hasRequiredOmpSourceFiles, 78af6e905e).
+					const otel = join(versionRoot, "node_modules", "@opentelemetry", "api", "dist");
+					mkdirSync(otel, { recursive: true });
+					writeFileSync(join(otel, "index.mjs"), "export const context = {};\n");
 					const integrity = "sha512-R7BaZ9wxsrQhxfYxt8bXczwmfDctUPklqSLAeDulbl716WxnVCSBe6MYIscyJ+oRq7bqsq+s+tDNEf1HWG/R6A==";
 					writeFileSync(join(versionRoot, "bun.lock"), JSON.stringify({ packages: {
 						"@oh-my-pi/pi-coding-agent": [`@oh-my-pi/pi-coding-agent@${version}`, "", {}, integrity],
