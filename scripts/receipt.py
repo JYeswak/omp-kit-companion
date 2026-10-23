@@ -30,6 +30,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -38,6 +39,7 @@ CONFIDENCES = ("observed", "derived", "inferred")
 AUTHORITIES = ("test", "selftest", "live", "pending")
 MAX_INT = 2**53 - 1
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+MAX_RECEIPT_BYTES = 1 << 20
 
 # Float spellings outside the canonical plain-decimal form.
 PLAIN_FLOAT = re.compile(r"^-?(0|[1-9]\d*)(\.\d*[1-9])?$")
@@ -152,9 +154,16 @@ def sign(args) -> int:
 
 
 def verify(path: str) -> int:
+    # kitlib_artifact ships beside this file. A bare json.loads accepts NaN and keeps the LAST of duplicate keys, so a
+    # receipt could show one confidence to a reader and hash another; strict_json refuses both (KL10, ompkit-gvp4j).
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import kitlib_artifact
     try:
-        record = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        real = os.path.realpath(path)
+        art = kitlib_artifact.read_local_artifact(real, allowed_root=os.path.dirname(real), max_bytes=MAX_RECEIPT_BYTES,
+                                                  file_policy={"symlinks": "refuse", "hardlinks": "allow"})
+        record = kitlib_artifact.strict_json(art["bytes"], path=path)
+    except kitlib_artifact.ArtifactError as exc:
         print(f"verify REFUSE: unreadable receipt ({exc})", file=sys.stderr)
         return 1
     if not isinstance(record, dict) or "evidence_id" not in record:
@@ -275,11 +284,28 @@ def selftest() -> int:
         if _verify_quiet(str(good)) != 0:
             failures.append("R7d: clean in-domain payload failed verify")
 
+        # R8 duplicate key: the file shows confidence "observed" first, the parsed (last-wins) record says "inferred"
+        # and carries a self-consistent id. A reader and the verifier would disagree, so verify must refuse.
+        dup = tmp / "dup-key.json"
+        rec = {"producer": "t", "operation": "op", "parameters": {}, "result_ref": {"sha256": "a" * 64, "bytes": 1},
+               "confidence": "inferred", "authority": "test", "limitations": []}
+        rec["evidence_id"] = compute_id(rec)
+        body = json.dumps(rec, indent=1, sort_keys=True)
+        dup.write_text(body.replace('"confidence": "inferred"', '"confidence": "observed",\n "confidence": "inferred"', 1))
+        if _verify_quiet(str(dup)) != 1:
+            failures.append("R8: a duplicate-key receipt (shown and hashed values differ) verified OK")
+
+        # R9 non-finite number: NaN is not JSON; a receipt carrying it is refused at read, not coerced.
+        nan = tmp / "nan.json"
+        nan.write_text(good.read_text().replace('"timeout_ms": 30', '"timeout_ms": NaN', 1))
+        if _verify_quiet(str(nan)) != 1:
+            failures.append("R9: a NaN receipt verified OK")
+
     if failures:
         for f in failures:
             print(f"selftest FAIL: {f}", file=sys.stderr)
         return 1
-    print("selftest PASS: R1-R7 all green (negatives fired, determinism held)")
+    print("selftest PASS: R1-R9 all green (negatives fired, determinism held)")
     return 0
 
 
