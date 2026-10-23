@@ -9,6 +9,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { RELEASE_DATA } from "./release-assets.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
+import { runtimeTempRoot } from "./runtime.ts";
 import { audit, undo, why } from "./audit.ts";
 import { LAND_GUARD_PUBLIC_IDENTITY, inspectLandGuard, landCommand } from "./land.ts";
 import { convergeCommand } from "./converge.ts";
@@ -1986,9 +1987,21 @@ async function integrationsCommand(request: ParsedCommand): Promise<CliResult> {
 		return refusal("INVALID_INTEGRATIONS_SELECTION", "integrations --out needs an absolute file path",
 			"Pass an absolute --out path or omit it; the matrix still returns on stdout.");
 	}
+	// xa5s.5: a set OMP_KIT_TEST_WORK_ROOT must name a validated caller-owned scratch root (runtimeTempRoot); the work
+	// dir goes under it, and an unowned or foreign-workspace root fails closed before any profile is read.
+	let workRoot: string | undefined;
+	if (process.env.OMP_KIT_TEST_WORK_ROOT !== undefined) {
+		try { workRoot = runtimeTempRoot(); } catch (error) {
+			return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+				code: "INTEGRATIONS_UNAVAILABLE",
+				message: `${error instanceof Error ? error.message : String(error)}: ${process.env.OMP_KIT_TEST_WORK_ROOT}`,
+				remediation: "Set OMP_KIT_TEST_WORK_ROOT to an owned dir under OMP_KIT_CASE_CWD/var/agent-tmp whose .owner names that workspace, or unset it; no profile was read.",
+			}], verification: "UNVERIFIED" };
+		}
+	}
 	// kitlib owned dir (ompkit-b3zgu): its .owner keys the reaper on dead runs; auto-cleanup is off because --keep
 	// keeps it past exit, so removal stays the finally below.
-	const workDir = ownedTmp("omp-kit-integrations", { autoCleanup: false }).path;
+	const workDir = ownedTmp("omp-kit-integrations", { autoCleanup: false, ...(workRoot === undefined ? {} : { root: workRoot }) }).path;
 	// Per-case fake HOMEs inherit XDG_CACHE_HOME inside the work dir; uv would
 	// otherwise grow a gigabyte cache per case home. Share one per-run cache.
 	const uvCache = join(workDir, "uv-cache");

@@ -1,7 +1,7 @@
 /** oq1h.7 portability: stock runners report NOT_CONFIGURED/NO_REPOS; the fleet lives in the user overlay. */
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FLEET_LESSONS_NOT_CONFIGURED, readLessonsConfig, runFleetLessonsOnce } from "../../src/fleet-lessons.ts";
 import { readUserFleetRepos } from "../../src/fleet-user-config.ts";
@@ -112,24 +112,31 @@ test("planning score --fleet reads a user-config temp repo instead of reporting 
 	writeEmptyShipped(kitRoot);
 	const repo = join(home, "temp-repo");
 	mkdirSync(repo, { recursive: true });
+	// Hermetic repo (ompkit-kl9p3): without its own .git, git walks up from the scratch and scores the
+	// enclosing checkout's history, reaching gh when that history holds plan(...) commits.
+	expect(Bun.spawnSync(["git", "init", "-q", repo]).exitCode).toBe(0);
+	expect(Bun.spawnSync(["git", "-C", repo, "rev-parse", "--show-toplevel"]).stdout.toString().trim()).toBe(realpathSync(repo));
 	withEnv({ XDG_CONFIG_HOME: join(home, "xdg"), OMP_KIT_FLEET_CONFIG: undefined });
 	mkdirSync(join(home, "xdg", "omp-kit"), { recursive: true });
 	writeFileSync(join(home, "xdg", "omp-kit", "fleet.toml"),
 		`[fleet]\nrepos = [\n  { name = "temp-repo", path = ${JSON.stringify(repo)} },\n]\n`);
 	const result = runPlanningScore({ kitRoot, home, fleet: true });
-	expect(result.code).not.toBe(3);
-	expect(JSON.stringify(result.jsonl)).toContain("temp-repo");
+	// The overlay repo is scored: an unscorable repo is UNKNOWN, which shares exit 3 with NOT_CONFIGURED,
+	// so the scored path (no errors, PERFORMED, a mission row for the overlay path) tells them apart.
+	expect(result.errors).toBeUndefined();
+	expect(result.verification).toBe("PERFORMED");
+	expect((result.jsonl ?? []).filter(row => row.kind === "mission").map(row => row.repo)).toEqual([repo]);
 });
 
 test("ci-poller defaults to no repos; empty poll makes no network call", async () => {
-	const saved = process.env.OMP_KIT_CI_REPOS;
-	delete process.env.OMP_KIT_CI_REPOS;
-	try {
-		expect(defaultTrackedRepos()).toEqual([]);
-	} finally {
-		if (saved === undefined) delete process.env.OMP_KIT_CI_REPOS;
-		else process.env.OMP_KIT_CI_REPOS = saved;
-	}
+	const { base, home } = scratch();
+	// Planted decoy (ompkit-kl9p3): an ambient fleet-watch config, like an operator's real
+	// ~/.config/omp-kit/fleet-watch.json, which the stock default under a fresh HOME must never see.
+	const decoy = join(base, "ambient-fleet-watch.json");
+	writeFileSync(decoy, JSON.stringify({ sessions: [{ repo: join(base, "ambient-repo") }] }));
+	withEnv({ OMP_KIT_CI_REPOS: undefined, OMP_KIT_FLEET_WATCH_CONFIG: decoy });
+	expect(defaultTrackedRepos().length).toBe(1);
+	expect(defaultTrackedRepos({ HOME: home })).toEqual([]);
 	const cache: CiCacheFile = { version: 1, repos: {} };
 	const result = await pollRepos({ fetch: () => { throw new Error("network must not be touched"); } }, cache, []);
 	expect(result.requestsMade).toBe(0);
