@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 
+/** Whole-file parse cap; a larger session file is decided from a bounded tail (ompkit-774u.1.3). */
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
+/** Tail window for an over-cap session file: the decision reads at most this plus SESSION_HEAD_BYTES. */
+export const SESSION_TAIL_WINDOW_BYTES = 8 * 1024 * 1024;
+/** Head read for the session header (one record cap; live headers end within 653 bytes). */
+export const SESSION_HEAD_BYTES = 64 * 1024;
 const MAX_SESSION_RECORDS = 200_000;
 const OBSERVE_RETRIES = 3;
 const OBSERVE_RETRY_MS = 2_000;
@@ -78,14 +83,46 @@ export type SessionJournalResult =
 		sessionId: string;
 		cwd: string;
 		leafId: string;
+		/** File size the decision read up to. */
 		cursorBytes: number;
+		/** Whole-file parse: sha256 of the file. Tail decision: the view fingerprint (inode, size, head, window). */
 		sessionSha256: string;
 		terminalAssistantStop: boolean;
 		lastMessageRole: string;
 		unresolvedAsyncTool: boolean;
 		oracleBusy: boolean | null;
+		/** Null for a whole-file parse; how a bounded tail decided otherwise. */
+		window: SessionWindowInfo | null;
 	}
 	| { status: "UNKNOWN"; reason: string };
+
+/** How a tail decision was read. Unless the state is anchored and the leaf proven, the result only ever reports
+ * a not-idle verdict (oracleBusy null): tool calls and async jobs before the cut are unseen, so
+ * `unresolvedAsyncTool` and `terminalAssistantStop` are then lower bounds read from the window alone. */
+export interface SessionWindowInfo {
+	/** File offset of the first complete record parsed after the cut. */
+	startBytes: number;
+	/** Bytes the view holds: head plus tail window. */
+	bytesRead: number;
+	/** The active branch reached its root or an omp process-exit checkpoint inside the window. */
+	anchored: boolean;
+	/** The window holds the whole body or the last `model_usage.activeLeafId` pin. */
+	leafProven: boolean;
+}
+
+/** A session file as read: whole (tailStart 0, from text) or a bounded tail of one inode. */
+export interface SessionJournalView {
+	/** Bytes [0, head.length), at most SESSION_HEAD_BYTES: the leading title and session header. */
+	head: Buffer;
+	/** Bytes [tailStart, fileSize). */
+	tail: Buffer;
+	tailStart: number;
+	fileSize: number;
+	/** `dev:ino` of the file read; null for a text read that does not report it. */
+	identity: string | null;
+	/** Change fingerprint: sha256 of the text for a whole read, else of identity, size, head and tail. */
+	sha256: string;
+}
 
 export type TernObservation = {
 	state: "BUSY" | "IDLE" | "DEAD" | "UNKNOWN";
@@ -120,10 +157,12 @@ export type TernIdentityResult =
 	}
 	| { status: "UNKNOWN"; reason: string; agent: null; binding: null; cwdOk: false; runtimeBinding: null };
 
-/** Test seam at the external command and session-file read boundaries. */
+/** Test seam at the external command and session-file read boundaries. `readSessionFile` returns the whole
+ * file within the parse cap; `readSessionTail`, when present, is the bounded fallback for a larger file. */
 export interface TernObserverIo {
 	run(argv: string[], env?: Record<string, string>): { code: number; out: string };
 	readSessionFile(path: string): string | null;
+	readSessionTail?(path: string): SessionJournalView | null;
 	wait(ms: number): Promise<void>;
 }
 
@@ -155,7 +194,10 @@ interface JournalEntry {
 	asyncJobId?: string | undefined;
 	/** Jobs an `async-result` custom_message delivers; "malformed" when its details do not name them. */
 	deliveredJobs?: readonly DeliveredJob[] | "malformed" | undefined;
+	/** A process-exit checkpoint: the tool calls omp recorded pending when it disposed the session. */
+	checkpoint?: ExitCheckpoint | undefined;
 }
+interface ExitCheckpoint { pending: readonly string[]; idless: boolean }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -441,7 +483,8 @@ function parseJournalEntry(raw: Record<string, unknown>, offset: number): Journa
 	}
 	if (typeof type === "string" && METADATA_TYPES[type] === true) {
 		return { id: raw.id, parentId, type: "metadata", role: null, stopReason: null, toolCallIds: [],
-			toolCallId: null, asyncState: null, activeLeafId: null, offset };
+			toolCallId: null, asyncState: null, activeLeafId: null, offset,
+			checkpoint: type === "custom" && raw.customType === "session_exit" ? exitCheckpoint(raw.data) : undefined };
 	}
 	if (typeof type === "string" && CONTEXT_TYPES[type] === true) {
 		return { id: raw.id, parentId, type: "context", role: type, stopReason: null, toolCallIds: [],
@@ -461,6 +504,29 @@ function deliveredJobs(rawDetails: unknown): readonly DeliveredJob[] | "malforme
 		delivered.push({ jobId: job.jobId, status: job.status });
 	}
 	return delivered;
+}
+
+/** A process-exit checkpoint, or undefined when the record is not one. omp writes `session_exit` with reason
+ * "dispose" (kind "normal") only from AgentSession#doDispose, which then cancels every async job the process owns
+ * (pi-coding-agent session/agent-session.ts #disposeOwnedAsyncJobs), and its `pendingToolCalls` is omp's own
+ * pending set for the branch at that moment. Signal exits ("sigint", "sigterm") come from a postmortem hook that
+ * need not end the process (live: a job started before a sigint exit was delivered after it), so they never settle
+ * a job; neither does a dispose record whose pending list is malformed. */
+function exitCheckpoint(rawData: unknown): ExitCheckpoint | undefined {
+	const data = objectValue(rawData);
+	if (!data || data.reason !== "dispose" || data.kind !== "normal") return undefined;
+	if (data.pendingToolCalls === undefined) return { pending: [], idless: false };
+	if (!Array.isArray(data.pendingToolCalls)) return undefined;
+	const pending: string[] = [];
+	let idless = false;
+	for (const rawCall of data.pendingToolCalls) {
+		const call = objectValue(rawCall);
+		if (!call || typeof call.toolName !== "string") return undefined;
+		if (call.toolCallId === undefined) idless = true;
+		else if (typeof call.toolCallId === "string" && call.toolCallId) pending.push(call.toolCallId);
+		else return undefined;
+	}
+	return { pending, idless };
 }
 
 function activeLeaf(entries: readonly JournalEntry[], byId: ReadonlyMap<string, JournalEntry>): string | null {
@@ -488,15 +554,19 @@ function activeBranch(leafId: string, byId: ReadonlyMap<string, JournalEntry>): 
 	return branch;
 }
 
-/** Parse OMP journal metadata only; message bodies and tool arguments never leave this parser. */
-export function parseSessionJournal(text: string): SessionJournalResult {
-	if (!text.endsWith("\n")) return { status: "UNKNOWN", reason: "PARTIAL_RECORD" };
-	if (Buffer.byteLength(text, "utf8") > MAX_SESSION_BYTES) return { status: "UNKNOWN", reason: "SESSION_FILE_TOO_LARGE" };
-	const entries: JournalEntry[] = [];
-	const byId = new Map<string, JournalEntry>();
-	let sessionId: string | null = null;
-	let cwd: string | null = null;
-	let offset = 0;
+interface JournalScan { sessionId: string | null; cwd: string | null; entries: JournalEntry[]; byId: Map<string, JournalEntry> }
+
+/** The identity of a valid OMP v3 session header record, else null. */
+function sessionHeader(raw: Record<string, unknown>): { id: string; cwd: string } | null {
+	if (typeof raw.id !== "string" || !raw.id || typeof raw.cwd !== "string" || !isAbsolute(raw.cwd)
+		|| (raw.version !== undefined && raw.version !== 3)) return null;
+	return { id: raw.id, cwd: raw.cwd };
+}
+
+/** Decode the newline-terminated records of `text` (starting at file offset `base`) into `scan`; null on
+ * success, else the refusal reason. */
+function scanRecords(text: string, base: number, scan: JournalScan): string | null {
+	let offset = base;
 	const lines = text.split("\n");
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index]!;
@@ -505,79 +575,292 @@ export function parseSessionJournal(text: string): SessionJournalResult {
 		if (!line) continue;
 		let decoded: unknown;
 		try { decoded = JSON.parse(line) as unknown; }
-		catch { return { status: "UNKNOWN", reason: "MALFORMED_RECORD" }; }
+		catch { return "MALFORMED_RECORD"; }
 		const raw = objectValue(decoded);
-		if (!raw || typeof raw.type !== "string") return { status: "UNKNOWN", reason: "INVALID_RECORD" };
+		if (!raw || typeof raw.type !== "string") return "INVALID_RECORD";
 		if (raw.type === "title") continue;
 		if (raw.type === "session") {
-			if (sessionId !== null || entries.length !== 0 || typeof raw.id !== "string" || !raw.id
-				|| typeof raw.cwd !== "string" || !isAbsolute(raw.cwd) || (raw.version !== undefined && raw.version !== 3)) {
-				return { status: "UNKNOWN", reason: "INVALID_SESSION_HEADER" };
-			}
-			sessionId = raw.id;
-			cwd = raw.cwd;
+			const header = scan.sessionId === null && scan.entries.length === 0 ? sessionHeader(raw) : null;
+			if (header === null) return "INVALID_SESSION_HEADER";
+			scan.sessionId = header.id;
+			scan.cwd = header.cwd;
 			continue;
 		}
-		if (sessionId === null) return { status: "UNKNOWN", reason: "SESSION_HEADER_MISSING" };
+		if (scan.sessionId === null) return "SESSION_HEADER_MISSING";
 		const entry = parseJournalEntry(raw, start);
-		if (!entry || byId.has(entry.id)) return { status: "UNKNOWN", reason: "INVALID_OR_DUPLICATE_ENTRY" };
-		entries.push(entry);
-		byId.set(entry.id, entry);
-		if (entries.length > MAX_SESSION_RECORDS) return { status: "UNKNOWN", reason: "SESSION_RECORD_LIMIT" };
+		if (!entry || scan.byId.has(entry.id)) return "INVALID_OR_DUPLICATE_ENTRY";
+		scan.entries.push(entry);
+		scan.byId.set(entry.id, entry);
+		if (scan.entries.length > MAX_SESSION_RECORDS) return "SESSION_RECORD_LIMIT";
 	}
-	if (sessionId === null || cwd === null) return { status: "UNKNOWN", reason: "SESSION_IDENTITY_MISSING" };
-	const leafId = activeLeaf(entries, byId);
-	if (leafId === null) return { status: "UNKNOWN", reason: "ACTIVE_BRANCH_UNAVAILABLE" };
-	const branch = activeBranch(leafId, byId);
-	if (branch === null) return { status: "UNKNOWN", reason: "ACTIVE_BRANCH_INCOMPLETE" };
-	let lastMessageRole: string | null = null;
-	let latestAssistant: JournalEntry | undefined;
-	const pendingTools = new Set<string>();
+	return null;
+}
+
+interface BranchState {
+	lastMessageRole: string | null;
+	latestAssistant: JournalEntry | undefined;
+	pendingTools: Set<string>;
+	unresolvedAsyncWithoutId: boolean;
+	unsupportedAsyncState: boolean;
+	/** A root or a process-exit checkpoint fixed every earlier tool call and async job. */
+	anchored: boolean;
+}
+
+/** Replay a branch, or the in-window suffix of one, in order. */
+function evaluateBranch(branch: readonly JournalEntry[], rooted: boolean): BranchState {
+	const state: BranchState = { lastMessageRole: null, latestAssistant: undefined, pendingTools: new Set(),
+		unresolvedAsyncWithoutId: false, unsupportedAsyncState: false, anchored: rooted };
 	const runningJobs = new Map<string, string>();
-	let unresolvedAsyncWithoutId = false;
-	let unsupportedAsyncState = false;
 	for (const entry of branch) {
+		if (entry.checkpoint !== undefined) {
+			// Dead-by-restart: the exiting process cancelled every async job it owned, and a job id reused after
+			// it names a new job. omp's own pending list at exit replaces the replayed one.
+			state.pendingTools = new Set(entry.checkpoint.pending);
+			runningJobs.clear();
+			state.unresolvedAsyncWithoutId = entry.checkpoint.idless;
+			state.unsupportedAsyncState = false;
+			state.anchored = true;
+		}
 		if (entry.type === "message" || entry.type === "context") {
-			lastMessageRole = entry.role;
-			if (entry.role === "assistant") latestAssistant = entry;
+			state.lastMessageRole = entry.role;
+			if (entry.role === "assistant") state.latestAssistant = entry;
 		}
 		if (entry.type === "message" && entry.role === "assistant") {
-			for (const id of entry.toolCallIds) pendingTools.add(id);
+			for (const id of entry.toolCallIds) state.pendingTools.add(id);
 		}
 		if (entry.type === "tool_result") {
 			if (entry.asyncState === "running" || entry.asyncState === "pending") {
 				if (entry.toolCallId !== null) {
-					pendingTools.add(entry.toolCallId);
+					state.pendingTools.add(entry.toolCallId);
 					if (entry.asyncJobId !== undefined) runningJobs.set(entry.asyncJobId, entry.toolCallId);
-				} else unresolvedAsyncWithoutId = true;
+				} else state.unresolvedAsyncWithoutId = true;
 			} else if (entry.asyncState === null || entry.asyncState === "completed" || entry.asyncState === "cancelled") {
-				if (entry.toolCallId !== null) pendingTools.delete(entry.toolCallId);
-			} else unsupportedAsyncState = true;
+				if (entry.toolCallId !== null) state.pendingTools.delete(entry.toolCallId);
+			} else state.unsupportedAsyncState = true;
 		}
-		if (entry.deliveredJobs === "malformed") unsupportedAsyncState = true;
+		if (entry.deliveredJobs === "malformed") state.unsupportedAsyncState = true;
 		else if (entry.deliveredJobs !== undefined) {
 			for (const job of entry.deliveredJobs) {
-				if (TERMINAL_JOB_STATES[job.status] !== true) { unsupportedAsyncState = true; continue; }
+				if (TERMINAL_JOB_STATES[job.status] !== true) { state.unsupportedAsyncState = true; continue; }
 				const toolCallId = runningJobs.get(job.jobId);
 				if (toolCallId === undefined) continue;
-				pendingTools.delete(toolCallId);
+				state.pendingTools.delete(toolCallId);
 				runningJobs.delete(job.jobId);
 			}
 		}
 	}
-	if (unsupportedAsyncState) return { status: "UNKNOWN", reason: "UNSUPPORTED_ASYNC_STATE" };
-	const terminalAssistantStop = latestAssistant !== undefined
-		&& TERMINAL_STOP_REASONS[latestAssistant.stopReason ?? ""] === true;
-	const unresolvedAsyncTool = unresolvedAsyncWithoutId || pendingTools.size > 0;
+	return state;
+}
+
+interface JournalIdentity {
+	sessionId: string;
+	cwd: string;
+	leafId: string;
+	cursorBytes: number;
+	sessionSha256: string;
+	window: SessionWindowInfo | null;
+}
+
+function journalVerdict(state: BranchState, identity: JournalIdentity): SessionJournalResult {
+	if (state.unsupportedAsyncState) return { status: "UNKNOWN", reason: "UNSUPPORTED_ASYNC_STATE" };
+	const lastMessageRole = state.lastMessageRole;
 	if (!lastMessageRole) return { status: "UNKNOWN", reason: "ACTIVE_BRANCH_HAS_NO_MESSAGE" };
+	const terminalAssistantStop = state.latestAssistant !== undefined
+		&& TERMINAL_STOP_REASONS[state.latestAssistant.stopReason ?? ""] === true;
+	const unresolvedAsyncTool = state.unresolvedAsyncWithoutId || state.pendingTools.size > 0;
 	const oracleBusy = unresolvedAsyncTool ? null
 		: lastMessageRole === "assistant" && terminalAssistantStop ? false
 		: lastMessageRole === "user" ? true : null;
-	return {
-		status: "KNOWN", sessionId, cwd, leafId, cursorBytes: Buffer.byteLength(text, "utf8"),
-		sessionSha256: createHash("sha256").update(text, "utf8").digest("hex"), terminalAssistantStop,
-		lastMessageRole, unresolvedAsyncTool, oracleBusy,
-	};
+	return { status: "KNOWN", sessionId: identity.sessionId, cwd: identity.cwd, leafId: identity.leafId,
+		cursorBytes: identity.cursorBytes, sessionSha256: identity.sessionSha256, terminalAssistantStop, lastMessageRole,
+		unresolvedAsyncTool, oracleBusy, window: identity.window };
+}
+
+/** Parse OMP journal metadata only; message bodies and tool arguments never leave this parser. */
+export function parseSessionJournal(text: string): SessionJournalResult {
+	return parseWholeJournal(text, Buffer.byteLength(text, "utf8"), createHash("sha256").update(text, "utf8").digest("hex"));
+}
+
+function parseWholeJournal(text: string, cursorBytes: number, sessionSha256: string): SessionJournalResult {
+	if (!text.endsWith("\n")) return { status: "UNKNOWN", reason: "PARTIAL_RECORD" };
+	if (cursorBytes > MAX_SESSION_BYTES) return { status: "UNKNOWN", reason: "SESSION_FILE_TOO_LARGE" };
+	const scan: JournalScan = { sessionId: null, cwd: null, entries: [], byId: new Map() };
+	const refused = scanRecords(text, 0, scan);
+	if (refused !== null) return { status: "UNKNOWN", reason: refused };
+	if (scan.sessionId === null || scan.cwd === null) return { status: "UNKNOWN", reason: "SESSION_IDENTITY_MISSING" };
+	const leafId = activeLeaf(scan.entries, scan.byId);
+	if (leafId === null) return { status: "UNKNOWN", reason: "ACTIVE_BRANCH_UNAVAILABLE" };
+	const branch = activeBranch(leafId, scan.byId);
+	if (branch === null) return { status: "UNKNOWN", reason: "ACTIVE_BRANCH_INCOMPLETE" };
+	return journalVerdict(evaluateBranch(branch, true),
+		{ sessionId: scan.sessionId, cwd: scan.cwd, leafId, cursorBytes, sessionSha256, window: null });
+}
+
+/** The session header from a view's head: leading titles, then the session record, each newline-terminated. */
+function headSessionHeader(head: Buffer): { id: string; cwd: string; bodyStart: number } | { reason: string } {
+	let position = 0;
+	for (;;) {
+		const newline = head.indexOf(0x0a, position);
+		if (newline < 0) return { reason: "SESSION_HEADER_BEYOND_HEAD" };
+		const line = head.toString("utf8", position, newline);
+		position = newline + 1;
+		if (!line) continue;
+		let raw: Record<string, unknown> | null;
+		try { raw = objectValue(JSON.parse(line) as unknown); }
+		catch { return { reason: "MALFORMED_RECORD" }; }
+		if (!raw || typeof raw.type !== "string") return { reason: "INVALID_RECORD" };
+		if (raw.type === "title") continue;
+		if (raw.type !== "session") return { reason: "SESSION_HEADER_MISSING" };
+		const header = sessionHeader(raw);
+		return header === null ? { reason: "INVALID_SESSION_HEADER" } : { ...header, bodyStart: position };
+	}
+}
+
+/**
+ * Decide from a bounded tail (ompkit-774u.1.3): the header comes from the head; records start at the first
+ * complete one after the cut (the record after the window's first newline). The answer equals the whole-file
+ * parse only when the window proves both halves of it:
+ * - the state: the active branch reaches its root, or a process-exit checkpoint that fixes every earlier tool
+ *   call and async job, with the branch's last message after the cut;
+ * - the leaf: the window holds the whole body, or the last `model_usage.activeLeafId` pin. Without a pin the
+ *   window's only leaf is the file's last entry, but a dead-end branch before the cut (omp leaves them: retried
+ *   or aborted assistant turns, side `model_usage` and `session_exit` records) makes the whole parse refuse as
+ *   ACTIVE_BRANCH_UNAVAILABLE, and the cut hides it.
+ * Otherwise the result is never IDLE: a verdict the prefix cannot turn idle (mid-turn, visible pending work) is
+ * KNOWN with oracleBusy null, and a settled-looking tail is UNKNOWN (TAIL_STATE_BEYOND_WINDOW, or
+ * TAIL_ACTIVE_LEAF_UNPROVEN when only the leaf is missing).
+ */
+export function parseSessionJournalTail(view: SessionJournalView): SessionJournalResult {
+	const { head, tail, tailStart, fileSize } = view;
+	if (tailStart < 0 || tailStart + tail.length !== fileSize || head.length > fileSize) {
+		return { status: "UNKNOWN", reason: "TAIL_READ_INCONSISTENT" };
+	}
+	if (tail.length === 0 || tail[tail.length - 1] !== 0x0a) return { status: "UNKNOWN", reason: "PARTIAL_RECORD" };
+	const header = headSessionHeader(head);
+	if ("reason" in header) return { status: "UNKNOWN", reason: header.reason };
+	const firstRecord = tailStart === 0 ? 0 : tailStart + tail.indexOf(0x0a) + 1;
+	const coversBody = firstRecord <= header.bodyStart;
+	const from = Math.max(firstRecord, header.bodyStart);
+	const scan: JournalScan = { sessionId: header.id, cwd: header.cwd, entries: [], byId: new Map() };
+	const refused = scanRecords(tail.toString("utf8", from - tailStart), from, scan);
+	if (refused !== null) return { status: "UNKNOWN", reason: refused };
+	if (scan.entries.length === 0) {
+		return { status: "UNKNOWN", reason: coversBody ? "ACTIVE_BRANCH_UNAVAILABLE" : "TAIL_WINDOW_HAS_NO_ENTRY" };
+	}
+	let pinned: string | null = null;
+	for (const entry of scan.entries) if (entry.type === "model_usage" && entry.activeLeafId !== null) pinned = entry.activeLeafId;
+	if (pinned !== null && !scan.byId.has(pinned) && !coversBody) {
+		return { status: "UNKNOWN", reason: "TAIL_ACTIVE_LEAF_BEYOND_WINDOW" };
+	}
+	const leafId = activeLeaf(scan.entries, scan.byId);
+	if (leafId === null) return { status: "UNKNOWN", reason: "ACTIVE_BRANCH_UNAVAILABLE" };
+	const suffix: JournalEntry[] = [];
+	const seen = new Set<string>();
+	let rooted = false;
+	for (let current: string | null = leafId; current !== null;) {
+		if (seen.has(current)) return { status: "UNKNOWN", reason: "ACTIVE_BRANCH_INCOMPLETE" };
+		seen.add(current);
+		const entry = scan.byId.get(current);
+		if (!entry) {
+			if (coversBody) return { status: "UNKNOWN", reason: "ACTIVE_BRANCH_INCOMPLETE" };
+			break;
+		}
+		suffix.push(entry);
+		current = entry.parentId;
+		rooted = current === null;
+	}
+	suffix.reverse();
+	const state = evaluateBranch(suffix, rooted);
+	const identity: JournalIdentity = { sessionId: header.id, cwd: header.cwd, leafId, cursorBytes: fileSize,
+		sessionSha256: view.sha256, window: { startBytes: from, bytesRead: head.length + tail.length, anchored: state.anchored,
+			leafProven: coversBody || pinned !== null } };
+	// A checkpoint fixes tools and jobs, but the branch's last message must still be in the window.
+	const stateExact = state.anchored && (rooted || state.lastMessageRole !== null);
+	if (stateExact && (coversBody || pinned !== null)) return journalVerdict(state, identity);
+	if (state.unsupportedAsyncState) return { status: "UNKNOWN", reason: "UNSUPPORTED_ASYNC_STATE" };
+	const verdict = journalVerdict(state, identity);
+	if (verdict.status !== "KNOWN" || verdict.oracleBusy === false) {
+		return { status: "UNKNOWN", reason: stateExact ? "TAIL_ACTIVE_LEAF_UNPROVEN" : "TAIL_STATE_BEYOND_WINDOW" };
+	}
+	return { ...verdict, oracleBusy: null };
+}
+
+export type SessionDecision = "IDLE" | "BUSY" | "UNKNOWN";
+
+/** The journal's own verdict. IDLE: a terminal assistant stop with nothing pending. BUSY: the branch ends
+ * mid-turn (a user message, or an assistant message without a terminal stop, e.g. awaiting its tools).
+ * Everything else, including a finished turn with an unsettled async job, is UNKNOWN. */
+export function sessionJournalDecision(journal: SessionJournalResult): SessionDecision {
+	if (journal.status !== "KNOWN") return "UNKNOWN";
+	if (journal.oracleBusy === false) return "IDLE";
+	if (journal.lastMessageRole === "user" || (journal.lastMessageRole === "assistant" && !journal.terminalAssistantStop)) {
+		return "BUSY";
+	}
+	return "UNKNOWN";
+}
+
+/** A whole-file view of session text (a readSessionFile result). */
+export function sessionViewOfText(text: string): SessionJournalView {
+	const tail = Buffer.from(text, "utf8");
+	return { head: tail.subarray(0, Math.min(SESSION_HEAD_BYTES, tail.length)), tail, tailStart: 0,
+		fileSize: tail.length, identity: null, sha256: createHash("sha256").update(tail).digest("hex") };
+}
+
+/** Decide a view: a whole file parses in full, a bounded tail through parseSessionJournalTail. */
+export function parseSessionView(view: SessionJournalView): SessionJournalResult {
+	if (view.tailStart !== 0) return parseSessionJournalTail(view);
+	return parseWholeJournal(view.tail.toString("utf8"), view.fileSize, view.sha256);
+}
+
+function readExactly(fd: number, position: number, length: number): Buffer | null {
+	const buffer = Buffer.allocUnsafe(length);
+	let filled = 0;
+	while (filled < length) {
+		const count = readSync(fd, buffer, filled, length - filled, position + filled);
+		if (count === 0) return null;
+		filled += count;
+	}
+	return buffer;
+}
+
+/**
+ * Bounded positioned read of a session file: its head (SESSION_HEAD_BYTES) and its last `windowBytes`, both
+ * from one open inode that must not change size, mtime or ctime while read; null on any failure. Not kitlib
+ * readLocalArtifact: that reads from offset 0 and refuses any file larger than its bound, which is exactly the
+ * file this exists for.
+ */
+export function readSessionTail(path: string, windowBytes: number = SESSION_TAIL_WINDOW_BYTES): SessionJournalView | null {
+	let fd: number | null = null;
+	try {
+		fd = openSync(path, "r");
+		const before = fstatSync(fd);
+		if (!before.isFile()) return null;
+		const fileSize = before.size;
+		const tailStart = Math.max(0, fileSize - windowBytes);
+		const head = readExactly(fd, 0, Math.min(SESSION_HEAD_BYTES, fileSize));
+		const tail = readExactly(fd, tailStart, fileSize - tailStart);
+		const after = fstatSync(fd);
+		if (head === null || tail === null || after.size !== before.size || after.mtimeMs !== before.mtimeMs
+			|| after.ctimeMs !== before.ctimeMs || after.ino !== before.ino || after.dev !== before.dev) return null;
+		const identity = `${before.dev}:${before.ino}`;
+		const sha256 = createHash("sha256").update(`${identity}:${fileSize}:${head.length}\n`).update(head).update(tail).digest("hex");
+		return { head, tail, tailStart, fileSize, identity, sha256 };
+	} catch {
+		return null;
+	} finally {
+		if (fd !== null) try { closeSync(fd); } catch { /* already closed */ }
+	}
+}
+
+/** The seat's session file: whole within the parse cap, else the io's bounded tail; null when unreadable. */
+export function readSessionView(io: TernObserverIo, path: string): SessionJournalView | null {
+	try {
+		const text = io.readSessionFile(path);
+		if (text !== null) return sessionViewOfText(text);
+		return io.readSessionTail ? io.readSessionTail(path) : null;
+	} catch {
+		return null;
+	}
 }
 
 function unknownObservation(reason: string): TernObservation {
@@ -604,7 +887,8 @@ export function classifyTernObservation(
 		return { state: "UNKNOWN", working: inspection.working, oracleBusy: null, sessionFile: inspection.sessionFile,
 			sessionSha: journal.sessionSha256, sessionCursorBytes: journal.cursorBytes, sessionLeafId: journal.leafId,
 			fg: process.foreground, runtimeBinding: null,
-			evidence: ["tern-inspect", "tern-process", "session-file"], reason: "SESSION_ORACLE_STATE_UNKNOWN" };
+			evidence: ["tern-inspect", "tern-process", "session-file"],
+			reason: sessionJournalDecision(journal) === "BUSY" ? "SESSION_TURN_IN_FLIGHT" : "SESSION_ORACLE_STATE_UNKNOWN" };
 	}
 	if (inspection.working !== journal.oracleBusy) {
 		return { state: "UNKNOWN", working: inspection.working, oracleBusy: journal.oracleBusy,
@@ -716,6 +1000,10 @@ export function defaultTernIo(): TernObserverIo {
 				return text;
 			} catch { return null; }
 		},
+		readSessionTail(path) {
+			const view = readSessionTail(path);
+			return view !== null && view.fileSize > MAX_SESSION_BYTES ? view : null;
+		},
 		wait(ms) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); },
 	};
 }
@@ -748,11 +1036,9 @@ function observationFromReads(
 	if ("error" in processJson) return unknownObservation(processJson.error);
 	const process = addProcessStart(io, parseTernProcess(processJson.value, seat.cwd, inspection.paneId));
 	if (process.status !== "FOUND") return unknownObservation(process.reason);
-	let journalText: string | null;
-	try { journalText = io.readSessionFile(inspection.sessionFile); }
-	catch { return unknownObservation("SESSION_FILE_UNAVAILABLE"); }
-	if (journalText === null) return unknownObservation("SESSION_FILE_UNAVAILABLE");
-	const journal = parseSessionJournal(journalText);
+	const view = readSessionView(io, inspection.sessionFile);
+	if (view === null) return unknownObservation("SESSION_FILE_UNAVAILABLE");
+	const journal = parseSessionView(view);
 	const observation = classifyTernObservation(inspection, process, journal);
 	if (observation.state === "UNKNOWN" && observation.reason === "WORKING_ORACLE_DISAGREEMENT") return observation;
 	if (observation.state !== "IDLE" && observation.state !== "BUSY") return observation;
@@ -765,11 +1051,9 @@ function observationFromReads(
 	const processAfter = addProcessStart(io, parseTernProcess(processAfterJson.value, seat.cwd, inspectionAfter.paneId));
 	if (processAfter.status !== "FOUND") return unknownObservation(processAfter.reason);
 	if (processAfter.foreground.started === null) return unknownObservation("FOREGROUND_INCARNATION_UNAVAILABLE");
-	let journalAfterText: string | null;
-	try { journalAfterText = io.readSessionFile(inspectionAfter.sessionFile); }
-	catch { return unknownObservation("SESSION_FILE_UNAVAILABLE"); }
-	if (journalAfterText === null) return unknownObservation("SESSION_FILE_UNAVAILABLE");
-	const journalAfter = parseSessionJournal(journalAfterText);
+	const viewAfter = readSessionView(io, inspectionAfter.sessionFile);
+	if (viewAfter === null) return unknownObservation("SESSION_FILE_UNAVAILABLE");
+	const journalAfter = parseSessionView(viewAfter);
 	if (journal.status !== "KNOWN" || journalAfter.status !== "KNOWN" || journalAfter.sessionId !== journal.sessionId
 		|| journalAfter.cursorBytes !== journal.cursorBytes || journalAfter.sessionSha256 !== journal.sessionSha256) {
 		return unknownObservation("SESSION_CHANGED_DURING_READ");

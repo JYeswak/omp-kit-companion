@@ -1,17 +1,36 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
 	classifyTernObservation,
+	defaultTernIo,
 	identifyTernSeat,
 	observeTernSeat,
-	parseSessionJournal,
+	parseSessionJournal as parseSessionJournalImpl,
+	parseSessionJournalTail,
+	parseSessionView,
 	parseTernInspection,
 	parseTernProcess,
+	readSessionTail,
+	readSessionView,
 	resolveDaemonSocket,
 	resolveTernWindow,
+	SESSION_HEAD_BYTES,
+	SESSION_TAIL_WINDOW_BYTES,
+	sessionJournalDecision,
 	ternWindowArgv,
 	ternWindowEnv,
+	type SessionJournalResult,
 } from "../../src/plane-tern.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+
+/** Every journal fixture this file parses; the bounded-tail equivalence test at the end replays them all. */
+const journalCorpus = new Set<string>();
+function parseSessionJournal(text: string): SessionJournalResult {
+	journalCorpus.add(text);
+	return parseSessionJournalImpl(text);
+}
 
 
 const seat = { session: "Default", pane: "123", windowKey: "window-1", cwd: "/repo" };
@@ -263,7 +282,7 @@ test("Tern observation stays unknown when inspect and session oracle disagree", 
 		argv: ["omp"], started: null } };
 	const oracle = { status: "KNOWN", sessionId: "session-1", cwd: "/repo", leafId: "assistant-1", cursorBytes: 20,
 		sessionSha256: "a".repeat(64), terminalAssistantStop: false, lastMessageRole: "user",
-		unresolvedAsyncTool: false, oracleBusy: true } as const;
+		unresolvedAsyncTool: false, oracleBusy: true, window: null } as const;
 	const result = classifyTernObservation(inspection, process, oracle);
 	expect(result).toMatchObject({ state: "UNKNOWN", working: false, oracleBusy: true });
 });
@@ -584,5 +603,229 @@ test("observer serves a default-resolved seat from the first-window snapshot", a
 test("resolveDaemonSocket prefers the explicit override and otherwise stays null without a live socket", () => {
 	expect(resolveDaemonSocket({ ...noDaemonEnv, TERN_DAEMON_SOCKET: "/x/daemon.sock" })).toBe("/x/daemon.sock");
 	expect(resolveDaemonSocket(noDaemonEnv)).toBeNull();
+});
+
+// ---- SESSIONCAP1 (ompkit-774u.1.3): a session file of any size is decided from a bounded tail ----
+const tailRoot = join(import.meta.dir, "..", "..", "var", "agent-tmp");
+mkdirSync(tailRoot, { recursive: true });
+const tailTmp = ownedTmp("plane-tern-tail", { root: tailRoot });
+afterAll(() => tailTmp.cleanup());
+
+const PAD_RECORD_BYTES = 64 * 1024;
+const PAD_RECORDS = 1_120;
+const OVER_CAP = 64 * 1024 * 1024;
+const userText = (text: string) => ({ role: "user", content: [{ type: "text", text }] });
+const stopped = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] };
+const callsTool = (id: string) => ({ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id }] });
+const runningWorker = (toolCallId: string) => ({ role: "toolResult", toolCallId, toolName: "task", isError: false, content: [],
+	details: { async: { state: "running", jobId: "Worker", type: "task" } } });
+/** The record omp's AgentSession#doDispose writes before cancelling every async job the process owns. */
+const disposeExit = (id: string, parentId: string, pendingToolCalls?: unknown[]): string => JSON.stringify({ type: "custom", id,
+	parentId, timestamp: stamp(7), customType: "session_exit",
+	data: { reason: "dispose", kind: "normal", recordedAt: stamp(7), ...(pendingToolCalls ? { pendingToolCalls } : {}) } });
+/** ~70 MiB before any tail: a turn whose async Worker job never reports back, then a chain of metadata records. */
+const capHistory: string = (() => {
+	const lines = [JSON.stringify({ type: "session", version: 3, id: "big-1", timestamp: stamp(0), cwd: "/repo" }),
+		nativeMessage("user-0", null, 1, userText("start")), nativeMessage("assistant-0", "user-0", 2, callsTool("tool-0")),
+		nativeMessage("tool-result-0", "assistant-0", 3, runningWorker("tool-0"))];
+	const filler = "x".repeat(PAD_RECORD_BYTES);
+	let parent = "tool-result-0";
+	for (let n = 1; n <= PAD_RECORDS; n++) {
+		lines.push(JSON.stringify({ type: "custom", id: `pad-${n}`, parentId: parent, timestamp: stamp(4), customType: "memory_recall", data: filler }));
+		parent = `pad-${n}`;
+	}
+	return lines.join("\n") + "\n";
+})();
+const LAST_PAD = `pad-${PAD_RECORDS}`;
+const capPath = join(tailTmp.path, "session-over-cap.jsonl");
+function capSession(tail: string[], history: string = capHistory): string {
+	writeFileSync(capPath, history + tail.join("\n") + "\n");
+	return capPath;
+}
+function decideFile(path: string, windowBytes?: number): SessionJournalResult {
+	const view = readSessionTail(path, windowBytes);
+	expect(view).not.toBeNull();
+	return parseSessionView(view!);
+}
+const endedTurn = [nativeMessage("user-1", LAST_PAD, 5, userText("next")), nativeMessage("assistant-1", "user-1", 6, stopped)];
+/** The leaf proof a tail needs to claim IDLE. omp 18.10.3 never writes it (its ModelUsageEntry has no activeLeafId),
+ * so a live over-cap tail can only reach BUSY or UNKNOWN; this stands for leaf proof in the synthetics. */
+const leafPin = (leafId: string): string => JSON.stringify({ type: "model_usage", id: `usage-${leafId}`, parentId: leafId,
+	timestamp: stamp(13), activeLeafId: leafId });
+const endedTurnThenExit = [...endedTurn, disposeExit("exit-1", "assistant-1"), leafPin("exit-1")];
+const pendingToolTail = [nativeMessage("user-1", LAST_PAD, 5, userText("next")), nativeMessage("assistant-1", "user-1", 6, callsTool("tool-1"))];
+
+test("job lifecycle: a dispose exit settles earlier jobs dead-by-restart; without it, or after a signal exit, they stay unsettled", () => {
+	const ended = nativeMessage("assistant-2", "tool-result-1", 4, stopped);
+	const turn = [header, nativeUser, nativeAssistantTools, runningTask, ended];
+	const withExit = parseSessionJournal([...turn, disposeExit("exit-1", "assistant-2")].join("\n") + "\n");
+	expect(withExit).toMatchObject({ status: "KNOWN", leafId: "exit-1", unresolvedAsyncTool: false, oracleBusy: false });
+	expect(sessionJournalDecision(withExit)).toBe("IDLE");
+	const without = parseSessionJournal(turn.join("\n") + "\n");
+	expect(without).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
+	expect(sessionJournalDecision(without)).toBe("UNKNOWN");
+	// A signal exit is a postmortem hook that need not end the process (live: a job started before one was
+	// delivered after it), so it settles nothing.
+	const sigint = JSON.stringify({ type: "custom", id: "exit-1", parentId: "assistant-2", timestamp: stamp(7),
+		customType: "session_exit", data: { reason: "sigint", kind: "signal", recordedAt: stamp(7) } });
+	expect(sessionJournalDecision(parseSessionJournal([...turn, sigint].join("\n") + "\n"))).toBe("UNKNOWN");
+	// omp's own pending list at the exit stays pending; an id-less entry can never be matched.
+	for (const pending of [[{ toolCallId: "tool-9", toolName: "bash" }], [{ toolName: "bash" }]]) {
+		expect(parseSessionJournal([...turn, disposeExit("exit-1", "assistant-2", pending)].join("\n") + "\n"))
+			.toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null });
+	}
+	// A malformed pending list is not a checkpoint at all.
+	expect(sessionJournalDecision(parseSessionJournal([...turn, disposeExit("exit-1", "assistant-2", [{ toolCallId: 7 }])]
+		.join("\n") + "\n"))).toBe("UNKNOWN");
+});
+
+test("planted: a 70 MiB session whose job died at a dispose exit and whose turn ended reads IDLE from the tail", () => {
+	const path = capSession(endedTurnThenExit);
+	// Control: the whole-file reader refuses it, as it always did.
+	expect(defaultTernIo().readSessionFile(path)).toBeNull();
+	const result = decideFile(path);
+	expect(result).toMatchObject({ status: "KNOWN", sessionId: "big-1", leafId: "exit-1", lastMessageRole: "assistant",
+		terminalAssistantStop: true, unresolvedAsyncTool: false, oracleBusy: false, window: { anchored: true } });
+	// The cut is real: the decision started within the last window, ~62 MiB past the async job's start.
+	if (result.status === "KNOWN") {
+		expect(result.window!.startBytes).toBeGreaterThanOrEqual(result.cursorBytes - SESSION_TAIL_WINDOW_BYTES);
+		expect(result.cursorBytes).toBeGreaterThan(OVER_CAP);
+	}
+	expect(sessionJournalDecision(result)).toBe("IDLE");
+});
+
+test("planted: the same session with the restart record removed (its job started before the cut) is UNKNOWN, never IDLE", () => {
+	expect(decideFile(capSession([...endedTurn, leafPin("assistant-1")]))).toEqual({ status: "UNKNOWN", reason: "TAIL_STATE_BEYOND_WINDOW" });
+});
+
+test("planted: an anchored tail without leaf proof is UNKNOWN, since a dead-end branch before the cut makes the whole parse refuse", () => {
+	expect(decideFile(capSession([...endedTurn, disposeExit("exit-1", "assistant-1")])))
+		.toEqual({ status: "UNKNOWN", reason: "TAIL_ACTIVE_LEAF_UNPROVEN" });
+	// Why: omp leaves dead ends (here an aborted assistant turn that was retried); the whole parse refuses them.
+	const aborted = nativeMessage("assistant-x", "user-1", 2, { role: "assistant", stopReason: "aborted", content: [] });
+	const retried = nativeMessage("assistant-1", "user-1", 3, stopped);
+	expect(parseSessionJournal([header, nativeUser, aborted, retried, disposeExit("exit-1", "assistant-1")].join("\n") + "\n"))
+		.toEqual({ status: "UNKNOWN", reason: "ACTIVE_BRANCH_UNAVAILABLE" });
+});
+
+test("planted: a job id reused after the restart is a new job: running it reads BUSY, its own delivery settles it", () => {
+	const reused = [...endedTurnThenExit, nativeMessage("user-2", "exit-1", 8, userText("again")),
+		nativeMessage("assistant-2", "user-2", 9, callsTool("tool-2")), nativeMessage("tool-result-2", "assistant-2", 10, runningWorker("tool-2"))];
+	const running = decideFile(capSession([...reused, leafPin("tool-result-2")]));
+	expect(running).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true, oracleBusy: null, window: { anchored: true } });
+	expect(sessionJournalDecision(running)).toBe("BUSY");
+	const settled = decideFile(capSession([...reused,
+		asyncResult("custom-message-2", "tool-result-2", 11, [{ jobId: "Worker", type: "task", status: "completed" }]),
+		nativeMessage("assistant-3", "custom-message-2", 12, stopped), leafPin("assistant-3")]));
+	expect(sessionJournalDecision(settled)).toBe("IDLE");
+});
+
+test("planted: a 70 MiB session whose tail has a pending tool reads BUSY; its settled control is UNKNOWN without an anchor", () => {
+	const busy = decideFile(capSession(pendingToolTail));
+	expect(busy).toMatchObject({ status: "KNOWN", lastMessageRole: "assistant", terminalAssistantStop: false,
+		unresolvedAsyncTool: true, oracleBusy: null, window: { anchored: false } });
+	expect(sessionJournalDecision(busy)).toBe("BUSY");
+	const settled = decideFile(capSession([...pendingToolTail,
+		nativeMessage("tool-result-1", "assistant-1", 7, { role: "toolResult", toolCallId: "tool-1", toolName: "read", isError: false, content: [], details: {} }),
+		nativeMessage("assistant-2", "tool-result-1", 8, stopped)]));
+	expect(settled).toEqual({ status: "UNKNOWN", reason: "TAIL_STATE_BEYOND_WINDOW" });
+});
+
+test("planted: a cut inside a record parses from the first complete record after it, never the fragment", () => {
+	const path = capSession(endedTurnThenExit);
+	const tailBytes = Buffer.byteLength(endedTurnThenExit.join("\n") + "\n");
+	const windowBytes = tailBytes + PAD_RECORD_BYTES / 2;
+	const result = decideFile(path, windowBytes);
+	expect(result).toMatchObject({ status: "KNOWN", oracleBusy: false,
+		window: { startBytes: Buffer.byteLength(capHistory), bytesRead: SESSION_HEAD_BYTES + windowBytes, anchored: true } });
+	// Control: the first complete record after the cut is decoded strictly; corrupt it and the read refuses.
+	const corrupt = ["{not json", ...endedTurnThenExit.slice(1)];
+	capSession(corrupt);
+	expect(decideFile(path, Buffer.byteLength(corrupt.join("\n") + "\n") + PAD_RECORD_BYTES / 2))
+		.toEqual({ status: "UNKNOWN", reason: "MALFORMED_RECORD" });
+	// A tail with no newline after the cut has no complete record to read.
+	expect(decideFile(path, PAD_RECORD_BYTES / 2 + 1)).toMatchObject({ status: "UNKNOWN" });
+	// An unterminated last record stays a partial read.
+	appendFileSync(path, "{\"type\":\"message\"");
+	expect(decideFile(path)).toEqual({ status: "UNKNOWN", reason: "PARTIAL_RECORD" });
+});
+
+test("bounded: a 70 MiB decision reads at most the window plus one head record cap, well inside a few seconds", () => {
+	const path = capSession(endedTurnThenExit);
+	const started = performance.now();
+	const view = readSessionView(defaultTernIo(), path)!;
+	const result = parseSessionView(view);
+	const elapsedMs = performance.now() - started;
+	expect(view.fileSize).toBeGreaterThan(OVER_CAP);
+	expect(view.head.length + view.tail.length).toBeLessThanOrEqual(SESSION_TAIL_WINDOW_BYTES + SESSION_HEAD_BYTES);
+	expect(result).toMatchObject({ status: "KNOWN", oracleBusy: false, cursorBytes: view.fileSize,
+		window: { bytesRead: view.head.length + view.tail.length } });
+	expect(elapsedMs).toBeLessThan(3_000);
+	// Control: a file within the cap is still read and parsed whole; the tail reader declines it.
+	const small = join(tailTmp.path, "session-small.jsonl");
+	writeFileSync(small, terminalJournal);
+	expect(defaultTernIo().readSessionTail!(small)).toBeNull();
+	const whole = readSessionView(defaultTernIo(), small)!;
+	expect(whole.tailStart).toBe(0);
+	expect(parseSessionView(whole)).toEqual(parseSessionJournalImpl(terminalJournal));
+});
+
+function capIo(working: boolean, sessionFile: string) {
+	const real = defaultTernIo();
+	return {
+		run(argv: string[]) {
+			if (argv.includes("inspect")) {
+				return { code: 0, out: JSON.stringify({ ...inspectFixture, panes: [{ ...inspectFixture.panes[0], working, omp_session_file: sessionFile }] }) };
+			}
+			if (argv.includes("process")) return { code: 0, out: JSON.stringify(processFixture) };
+			if (argv[0] === "/bin/ps") return { code: 0, out: "Wed Oct 14 19:39:32 2026 omp --profile codex\n" };
+			return { code: 2, out: "" };
+		},
+		readSessionFile: real.readSessionFile,
+		readSessionTail: real.readSessionTail,
+		wait: async () => {},
+	};
+}
+
+test("observer decides an over-cap seat from its tail: IDLE when settled, never IDLE mid-turn", async () => {
+	const path = capSession(endedTurnThenExit);
+	expect(await observeTernSeat(seat, capIo(false, path))).toMatchObject({ state: "IDLE", working: false, oracleBusy: false,
+		sessionFile: path, sessionCursorBytes: Buffer.byteLength(capHistory + endedTurnThenExit.join("\n") + "\n"), sessionLeafId: "exit-1" });
+	capSession(pendingToolTail);
+	expect(await observeTernSeat(seat, capIo(true, path))).toMatchObject({ state: "UNKNOWN", reason: "SESSION_TURN_IN_FLIGHT" });
+	// Control: an io without the bounded reader still cannot read the file at all.
+	const { readSessionTail: _dropped, ...wholeOnly } = capIo(false, path);
+	expect(await observeTernSeat(seat, wholeOnly)).toMatchObject({ state: "UNKNOWN", reason: "SESSION_FILE_UNAVAILABLE" });
+});
+
+// Runs last: replays every journal fixture this file parsed.
+test("equivalence: on every fixture above, a tail covering the body equals the whole parse, and no cut is less safe", () => {
+	expect(journalCorpus.size).toBeGreaterThan(20);
+	const comparable = (result: SessionJournalResult) =>
+		result.status === "KNOWN" ? { ...result, sessionSha256: "", window: null } : result;
+	let cuts = 0;
+	let covered = 0;
+	for (const text of journalCorpus) {
+		const bytes = Buffer.from(text, "utf8");
+		const whole = parseSessionJournalImpl(text);
+		const wholeDecision = sessionJournalDecision(whole);
+		const head = bytes.subarray(0, Math.min(SESSION_HEAD_BYTES, bytes.length));
+		const tailFrom = (cut: number) => parseSessionJournalTail({ head, tail: bytes.subarray(cut), tailStart: cut,
+			fileSize: bytes.length, identity: null, sha256: "fixture" });
+		for (let cut = 0; cut < bytes.length; cut++) {
+			const decision = sessionJournalDecision(tailFrom(cut));
+			cuts++;
+			if (decision !== "UNKNOWN") expect([text.length, cut, decision]).toEqual([text.length, cut, wholeDecision]);
+		}
+		// The smallest window that still covers the decision starts at the newline ending the session header.
+		const headerLine = text.split("\n").findIndex((line) => line.includes(`"type":"session"`));
+		if (headerLine < 0) continue;
+		const bodyStart = Buffer.byteLength(text.split("\n").slice(0, headerLine + 1).join("\n") + "\n");
+		expect(comparable(tailFrom(bodyStart - 1))).toEqual(comparable(whole));
+		expect(comparable(tailFrom(0))).toEqual(comparable(whole));
+		covered++;
+	}
+	expect(cuts).toBeGreaterThan(10_000);
+	expect(covered).toBe(journalCorpus.size);
 });
 

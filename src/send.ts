@@ -7,8 +7,9 @@ import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
-import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionJournal, resolveDaemonSocket } from "./plane-tern.ts";
-import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
+import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView, resolveDaemonSocket,
+	sessionViewOfText } from "./plane-tern.ts";
+import type { SessionJournalView, TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
@@ -910,8 +911,15 @@ export interface TernProofKey {
 	cursorBytes: number;
 	/** Where the journal body starts: OMP rewrites a leading title record in place. */
 	bodyStart: number;
-	/** sha256 of journal bytes [bodyStart, cursorBytes): the pre-send prefix. */
+	/** Start of the pinned pre-send bytes: bodyStart for a whole read, else the last TERN_PROOF_ANCHOR_BYTES
+	 * before the cursor (ompkit-774u.1.3: an over-cap journal is read as a bounded tail). */
+	prefixStart: number;
+	/** sha256 of journal bytes [prefixStart, cursorBytes): the pinned pre-send prefix. */
 	prefixSha256: string;
+	/** `dev:ino` of the pre-send file when the read reported it; a proof read of another inode never proves. */
+	fileIdentity: string | null;
+	/** goal-set: priorGoalIds came from the whole body; false for a tail read, so only a goal's creation record proves. */
+	priorGoalIdsComplete: boolean;
 }
 export type TernProof =
 	| { status: "PROVEN"; offset: number; entryId: string; steering: boolean }
@@ -964,6 +972,9 @@ function entryProves(record: Record<string, unknown>, key: TernProofKey): { stee
 	const goal = goalOf(record);
 	if (!goal || goal.status !== "active" || goal.objective !== key.objective
 		|| typeof goal.id !== "string" || key.priorGoalIds.includes(goal.id)) return null;
+	// An older goal outside a tail read is not in priorGoalIds; a goal this send created is first journaled
+	// with createdAt === updatedAt, while an older goal's later progress record has moved updatedAt on.
+	if (!key.priorGoalIdsComplete && (goal.createdAt === undefined || goal.createdAt !== goal.updatedAt)) return null;
 	return { steering: false };
 }
 
@@ -978,26 +989,36 @@ function descendsFromLeaf(parentId: string | null, leafId: string, parents: Read
 	return false;
 }
 
+/** Bytes a tail-read proof key pins just before its cursor, beside the file's inode. */
+const TERN_PROOF_ANCHOR_BYTES = 64 * 1024;
+
 /**
  * F4 proof: only complete, newline-terminated, typed entries strictly past
- * the cursor count, and only when the pre-cursor prefix is byte-identical
- * (same session header, nothing rotated, truncated or rewritten). The entry
- * must descend from the pre-send leaf through post-cursor entries, so a
- * marker on another branch never proves. Transcript admission is not model
- * consumption or an ACK.
+ * the cursor count, and only when the pinned pre-cursor bytes are identical
+ * (same session header, nothing rotated, truncated or rewritten; same inode
+ * when both reads report it). The entry must descend from the pre-send leaf
+ * through post-cursor entries, so a marker on another branch never proves.
+ * Transcript admission is not model consumption or an ACK. A bounded view
+ * whose tail no longer holds the pinned bytes stays UNCERTAIN.
  */
-export function proveTernEntry(journalText: string, key: TernProofKey): TernProof {
-	const bytes = Buffer.from(journalText, "utf8");
-	if (bytes.length < key.cursorBytes) return { status: "UNCERTAIN", reason: "JOURNAL_SHRANK" };
-	if (ternJournalBodyStart(bytes) !== key.bodyStart
-		|| sha256Hex(bytes.subarray(key.bodyStart, key.cursorBytes)) !== key.prefixSha256) {
+export function proveTernEntry(journal: string | SessionJournalView, key: TernProofKey): TernProof {
+	const view = typeof journal === "string" ? sessionViewOfText(journal) : journal;
+	if (view.fileSize < key.cursorBytes) return { status: "UNCERTAIN", reason: "JOURNAL_SHRANK" };
+	if (key.fileIdentity !== null && view.identity !== null && view.identity !== key.fileIdentity) {
+		return { status: "UNCERTAIN", reason: "JOURNAL_REPLACED" };
+	}
+	if (key.prefixStart < view.tailStart) return { status: "UNCERTAIN", reason: "JOURNAL_PREFIX_BEYOND_WINDOW" };
+	const bytes = view.tail;
+	const base = view.tailStart;
+	if (ternJournalBodyStart(view.head) !== key.bodyStart
+		|| sha256Hex(bytes.subarray(key.prefixStart - base, key.cursorBytes - base)) !== key.prefixSha256) {
 		return { status: "UNCERTAIN", reason: "JOURNAL_PREFIX_CHANGED" };
 	}
 	const parents = new Map<string, string | null>();
 	const hits: { offset: number; parentId: string | null; id: string; steering: boolean }[] = [];
 	let partial = false;
 	let malformed = false;
-	let position = key.cursorBytes;
+	let position = key.cursorBytes - base;
 	while (position < bytes.length) {
 		const newline = bytes.indexOf(0x0a, position);
 		if (newline < 0) {
@@ -1025,7 +1046,7 @@ export function proveTernEntry(journalText: string, key: TernProofKey): TernProo
 		const parentId = typeof record.parentId === "string" ? record.parentId : null;
 		parents.set(record.id, parentId);
 		const match = entryProves(record, key);
-		if (match) hits.push({ offset: start, parentId, id: record.id, steering: match.steering });
+		if (match) hits.push({ offset: base + start, parentId, id: record.id, steering: match.steering });
 	}
 	for (const hit of hits) {
 		if (descendsFromLeaf(hit.parentId, key.leafId, parents)) {
@@ -1037,14 +1058,17 @@ export function proveTernEntry(journalText: string, key: TernProofKey): TernProo
 	return { status: "ABSENT", reason: "NO_MATCHING_ENTRY" };
 }
 
-/** Build the proof key for an attempt from the exact pre-send journal snapshot. */
-export function buildTernProofKey(journalText: string, journal: { sessionId: string; leafId: string },
+/** Build the proof key for an attempt from the exact pre-send journal snapshot (whole text or bounded view). */
+export function buildTernProofKey(journalRead: string | SessionJournalView, journal: { sessionId: string; leafId: string },
 	sent: { kind: "message" | "goal-set"; payload: string; marker: string; objective: string }): TernProofKey {
-	const bytes = Buffer.from(journalText, "utf8");
-	const bodyStart = ternJournalBodyStart(bytes);
+	const view = typeof journalRead === "string" ? sessionViewOfText(journalRead) : journalRead;
+	const bodyStart = ternJournalBodyStart(view.head);
+	const cursorBytes = view.fileSize;
+	const prefixStart = view.tailStart === 0 ? bodyStart
+		: Math.max(bodyStart, view.tailStart, cursorBytes - TERN_PROOF_ANCHOR_BYTES);
 	const priorGoalIds: string[] = [];
 	if (sent.kind === "goal-set") {
-		for (const line of journalText.split("\n")) {
+		for (const line of view.tail.toString("utf8").split("\n")) {
 			if (!line.includes(`"mode_change"`)) continue;
 			try {
 				const goal = goalOf(recordOf(JSON.parse(line)) ?? {});
@@ -1054,8 +1078,9 @@ export function buildTernProofKey(journalText: string, journal: { sessionId: str
 	}
 	return {
 		kind: sent.kind, marker: sent.marker, payloadSha256: sha256Hex(sent.payload.trim()), objective: sent.objective,
-		priorGoalIds, sessionId: journal.sessionId, leafId: journal.leafId, cursorBytes: bytes.length, bodyStart,
-		prefixSha256: sha256Hex(bytes.subarray(bodyStart)),
+		priorGoalIds, sessionId: journal.sessionId, leafId: journal.leafId, cursorBytes, bodyStart, prefixStart,
+		prefixSha256: sha256Hex(view.tail.subarray(prefixStart - view.tailStart)), fileIdentity: view.identity,
+		priorGoalIdsComplete: view.tailStart <= bodyStart,
 	};
 }
 
@@ -1083,7 +1108,15 @@ function readTernPending(path: string): TernPendingRecord | null {
 	}
 	if (rec.kind !== "message" && rec.kind !== "goal-set") return null;
 	if (!Array.isArray(rec.priorGoalIds) || !rec.priorGoalIds.every((id) => typeof id === "string")) return null;
-	return rec as unknown as TernPendingRecord;
+	// Records written before bounded reads pinned the whole body and carry no inode.
+	const prefixStart = rec.prefixStart === undefined ? rec.bodyStart : rec.prefixStart;
+	if (typeof prefixStart !== "number" || !Number.isSafeInteger(prefixStart) || prefixStart < (rec.bodyStart as number)
+		|| prefixStart > (rec.cursorBytes as number)) return null;
+	const fileIdentity = rec.fileIdentity === undefined ? null : rec.fileIdentity;
+	if (fileIdentity !== null && typeof fileIdentity !== "string") return null;
+	const priorGoalIdsComplete = rec.priorGoalIdsComplete === undefined ? true : rec.priorGoalIdsComplete;
+	if (typeof priorGoalIdsComplete !== "boolean") return null;
+	return { ...rec, prefixStart, fileIdentity, priorGoalIdsComplete } as unknown as TernPendingRecord;
 }
 
 /** F5: the attempt is durable (file and directory fsynced) before any effect; false means nothing was persisted. */
@@ -1243,13 +1276,15 @@ export async function deliverToTernSeat(input: {
 		return fail("SEAT_REBOUND", `observed pane ${ob.paneId} is not configured pane ${paneId}; zero sends`);
 	}
 	const sessionFile = ob.sessionFile;
-	const journalText = input.io.readSessionFile(sessionFile);
-	if (journalText === null) return fail("ELIGIBILITY_UNKNOWN", "session file unreadable; zero sends");
-	if (sha256Hex(journalText) !== observation.sessionSha) {
+	// ompkit-774u.1.3: the same bounded view the observer decided from (whole within the cap, else head plus
+	// tail of one inode); its fingerprint covers inode, size and every byte read.
+	const journalView = readSessionView(input.io, sessionFile);
+	if (journalView === null) return fail("ELIGIBILITY_UNKNOWN", "session file unreadable; zero sends");
+	if (journalView.sha256 !== observation.sessionSha) {
 		return fail("SEAT_REBOUND", "session file changed since observation; zero sends");
 	}
-	const journal = parseSessionJournal(journalText);
-	if (journal.status !== "KNOWN" || !journal.terminalAssistantStop || journal.unresolvedAsyncTool
+	const journal = parseSessionView(journalView);
+	if (journal.status !== "KNOWN" || journal.oracleBusy !== false || !journal.terminalAssistantStop || journal.unresolvedAsyncTool
 		|| journal.lastMessageRole !== "assistant") {
 		return fail("ELIGIBILITY_UNSETTLED", "turn not settled (parse, stop, pending tools or live user turn); zero sends");
 	}
@@ -1277,7 +1312,7 @@ export async function deliverToTernSeat(input: {
 			settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
 			continue;
 		}
-		const proof = proveTernEntry(journalText, rec);
+		const proof = proveTernEntry(journalView, rec);
 		if (proof.status === "PROVEN") settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", proof.offset);
 	}
 	const pendingPath = resolve(join(pendingDir, `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.json`));
@@ -1288,7 +1323,7 @@ export async function deliverToTernSeat(input: {
 	}
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
 	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${input.text}\n[${marker}]`;
-	const key = buildTernProofKey(journalText, journal, { kind: payloadKind.kind, payload, marker,
+	const key = buildTernProofKey(journalView, journal, { kind: payloadKind.kind, payload, marker,
 		objective: payloadKind.kind === "goal-set" ? payloadKind.objective : "" });
 	const attempt: TernPendingRecord = { ...key, seatKey, sessionSha: observation.sessionSha ?? "",
 		textSha256: sha256Hex(input.text), createdAt: new Date().toISOString() };
@@ -1304,8 +1339,8 @@ export async function deliverToTernSeat(input: {
 	try {
 		// F1: this re-read is a cheap incarnation pre-filter, NOT atomicity;
 		// on the ctl path the admission checks live inside the one native turn.
-		const fresh = input.io.readSessionFile(sessionFile);
-		if (fresh === null || sha256Hex(fresh) !== observation.sessionSha) {
+		const fresh = readSessionView(input.io, sessionFile);
+		if (fresh === null || fresh.sha256 !== observation.sessionSha) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
 			return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
 				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND" };
@@ -1352,7 +1387,7 @@ export async function deliverToTernSeat(input: {
 		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
 		const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
 		for (let poll = 0; ; poll++) {
-			const current = input.io.readSessionFile(sessionFile);
+			const current = readSessionView(input.io, sessionFile);
 			last = current === null ? { status: "UNCERTAIN", reason: "SESSION_FILE_UNREADABLE" } : proveTernEntry(current, key);
 			if (last.status === "PROVEN") {
 				try { rmSync(pendingPath, { force: true }); } catch {}

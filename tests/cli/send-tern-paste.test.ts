@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { proveTernCliSend, readComposerRecord, routeSendTarget, COMPOSER_RECORD_MAX_AGE_MS } from "../../src/send.ts";
+import { buildTernProofKey, proveTernCliSend, proveTernEntry, readComposerRecord, routeSendTarget, COMPOSER_RECORD_MAX_AGE_MS } from "../../src/send.ts";
 import type { ComposerVerdict } from "../../src/send.ts";
-import type { TernObserverIo } from "../../src/plane-tern.ts";
+import { parseSessionView, readSessionTail, SESSION_HEAD_BYTES, SESSION_TAIL_WINDOW_BYTES } from "../../src/plane-tern.ts";
+import type { SessionJournalView, TernObserverIo } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 /** TERNADDR1 (ompkit-fixjo): a Tern seat with no window key admits by `tern send BLOCK paste` + `keys Enter`. */
@@ -47,20 +48,44 @@ interface Taken { runs: string[][]; luaDispatches: number; pastes: number; enter
  * Owned Tern surface: canned inspect/process/ps/am answers. `send N paste T` holds T in a fake composer and
  * `send N keys Enter` journals it as a USER entry, as OMP does; `ctl carly lua` journals its decoded payload.
  */
-interface TernFixture { io: TernObserverIo; taken: Taken; repo: string; sessionFile: string }
+interface TernFixture { io: TernObserverIo; taken: Taken; repo: string; sessionFile: string; tailReads: number[] }
 
-function ternFixture(opts: { pasteCode?: number } = {}): TernFixture {
+const OVER_CAP = 64 * 1024 * 1024;
+
+/** ~70 MiB of history, then a settled turn, the dispose exit omp writes before cancelling its jobs, and a leaf
+ * pin (omp 18.10.3 writes none), so the bounded tail is anchored with a proven leaf (ompkit-774u.1.3). */
+function overCapJournal(repo: string, uuid: string): string {
+	const filler = "x".repeat(64 * 1024);
+	const lines = [JSON.stringify({ type: "session", id: uuid, cwd: repo, version: 3 }),
+		JSON.stringify({ type: "message", id: "m0", parentId: null, message: { role: "user", content: "first" } })];
+	let parent = "m0";
+	for (let n = 1; n <= 1_120; n++) {
+		lines.push(JSON.stringify({ type: "custom", id: `pad-${n}`, parentId: parent, customType: "memory_recall", data: filler }));
+		parent = `pad-${n}`;
+	}
+	lines.push(JSON.stringify({ type: "message", id: "m1", parentId: parent, message: { role: "user", content: "prior" } }),
+		JSON.stringify({ type: "message", id: "m2", parentId: "m1", message: { role: "assistant", content: "done", stopReason: "stop" } }),
+		JSON.stringify({ type: "custom", id: "exit-1", parentId: "m2", customType: "session_exit",
+			data: { reason: "dispose", kind: "normal", recordedAt: "2026-10-20T02:00:00.000Z" } }),
+		JSON.stringify({ type: "model_usage", id: "usage-1", parentId: "exit-1", activeLeafId: "exit-1" }));
+	return lines.join("\n") + "\n";
+}
+
+function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReader?: boolean } = {}): TernFixture {
 	const paneId = 5;
 	const repo = freshDir("repo");
 	const uuid = `sess-${Math.random().toString(36).slice(2)}`;
 	const sessionFile = join(scratch, `session-${Math.random().toString(36).slice(2)}.jsonl`);
-	let journal = idleJournal(repo, uuid);
+	let journal = opts.overCap ? overCapJournal(repo, uuid) : idleJournal(repo, uuid);
+	const leafId = opts.overCap ? "exit-1" : "m2";
 	writeFileSync(sessionFile, journal);
 	const taken: Taken = { runs: [], luaDispatches: 0, pastes: 0, enters: 0 };
+	const tailReads: number[] = [];
 	let composer = "";
 	const userEntry = (content: string) => {
-		journal += JSON.stringify({ type: "message", id: `m-live-${taken.runs.length}`, parentId: "m2", message: { role: "user", content } }) + "\n";
-		writeFileSync(sessionFile, journal);
+		const entry = JSON.stringify({ type: "message", id: `m-live-${taken.runs.length}`, parentId: leafId, message: { role: "user", content } }) + "\n";
+		journal += entry;
+		appendFileSync(sessionFile, entry);
 	};
 	const inspect = JSON.stringify({ sessions: [{ id: 7, name: "omp-test", tabs: [{ blocks: [{ id: paneId }] }] }],
 		panes: [{ pane: paneId, cwd: repo, working: false, exited: null, omp_session_file: sessionFile }] });
@@ -94,10 +119,19 @@ function ternFixture(opts: { pasteCode?: number } = {}): TernFixture {
 			if (argv.includes("capture")) return { code: 0, out: "" };
 			return { code: 1, out: "" };
 		},
-		readSessionFile(path) { return path === sessionFile ? journal : null; },
+		// Whole reads stop at the 64 MiB parse cap, as defaultTernIo's do; past it only the bounded reader sees the file.
+		readSessionFile(path) { return path === sessionFile && Buffer.byteLength(journal) <= OVER_CAP ? journal : null; },
+		...(opts.boundedReader === false ? {} : {
+			readSessionTail(path: string): SessionJournalView | null {
+				const view = path === sessionFile ? readSessionTail(path) : null;
+				if (view === null || view.fileSize <= OVER_CAP) return null;
+				tailReads.push(view.head.length + view.tail.length);
+				return view;
+			},
+		}),
 		wait: noWait,
 	};
-	return { io, taken, repo, sessionFile };
+	return { io, taken, repo, sessionFile, tailReads };
 }
 
 /** Plant the seat's kit-composer-state record exactly as extensions/kit-composer-state.ts writes it. */
@@ -201,4 +235,62 @@ test("planted: a failed paste never presses Enter (an empty submit aborts a stre
 	expect(got.status).toBe("PENDING_CONSUME");
 	expect(got.code).toBe("SEND_AMBIGUOUS");
 	expect(got.drop_path).not.toBeNull();
+});
+
+test("SESSIONCAP1: a 70 MiB seat is observed, admitted and proven from bounded tail reads only", async () => {
+	const fx = ternFixture({ overCap: true });
+	const composerDir = plantComposer(fx.sessionFile);
+	const dir = dropDir();
+	const got = await send(fx, dir, { composer: (sf) => readComposerRecord(sf, { dir: composerDir }) });
+	expect(got.status).toBe("OK");
+	expect(got.code).toBe("PROVEN");
+	expect(got.sends).toBe(1);
+	expect(got.offset).toBeGreaterThan(OVER_CAP);
+	expect(fx.taken.pastes).toBe(1);
+	expect(fx.taken.enters).toBe(1);
+	// Observe (bracketed), eligibility, pre-effect re-read and proof: every read is bounded.
+	expect(fx.tailReads.length).toBeGreaterThanOrEqual(4);
+	for (const bytes of fx.tailReads) expect(bytes).toBeLessThanOrEqual(SESSION_TAIL_WINDOW_BYTES + SESSION_HEAD_BYTES);
+	expect(readdirSync(dir)).toEqual([]);
+});
+
+test("control: the same 70 MiB seat without the bounded reader is never typed into", async () => {
+	const fx = ternFixture({ overCap: true, boundedReader: false });
+	const composerDir = plantComposer(fx.sessionFile);
+	const got = await send(fx, dropDir(), { composer: (sf) => readComposerRecord(sf, { dir: composerDir }) });
+	expect(got.sends).toBe(0);
+	expect(effects(fx.taken)).toBe(0);
+	expect(got.detail).toContain("SESSION_FILE_UNAVAILABLE");
+});
+
+test("SESSIONCAP1 proof: past the cap the pre-send pin is the cursor's last bytes plus the inode, so a replaced file never proves", () => {
+	const repo = freshDir("repo");
+	const path = join(scratch, `session-pin-${Math.random().toString(36).slice(2)}.jsonl`);
+	const before = overCapJournal(repo, "sess-pin");
+	writeFileSync(path, before);
+	const view = readSessionTail(path)!;
+	const journal = parseSessionView(view);
+	expect(journal).toMatchObject({ status: "KNOWN", leafId: "exit-1", oracleBusy: false });
+	if (journal.status !== "KNOWN") return;
+	const key = buildTernProofKey(view, journal, { kind: "message", payload: "hi\n[kit-send-pin]", marker: "kit-send-pin", objective: "" });
+	expect(key.prefixStart).toBe(key.cursorBytes - 64 * 1024);
+	expect(key.fileIdentity).toBe(view.identity);
+	const entry = JSON.stringify({ type: "message", id: "m-live", parentId: "exit-1", message: { role: "user", content: "hi\n[kit-send-pin]" } }) + "\n";
+	// Rotated: byte-identical content plus the entry, renamed over the path as a new inode.
+	const rotated = `${path}.rotated`;
+	writeFileSync(rotated, before + entry);
+	renameSync(rotated, path);
+	expect(proveTernEntry(readSessionTail(path)!, key)).toEqual({ status: "UNCERTAIN", reason: "JOURNAL_REPLACED" });
+	// Control: the same entry appended to the pinned inode proves at its offset.
+	writeFileSync(path, before);
+	const pinned = readSessionTail(path)!;
+	const inPlace = buildTernProofKey(pinned, journal, { kind: "message", payload: "hi\n[kit-send-pin]", marker: "kit-send-pin", objective: "" });
+	appendFileSync(path, entry);
+	expect(proveTernEntry(readSessionTail(path)!, inPlace)).toEqual({ status: "PROVEN", offset: Buffer.byteLength(before),
+		entryId: "m-live", steering: false });
+	// A rewrite inside the pinned bytes on the same inode is a changed prefix.
+	const tampered = Buffer.from(before + entry);
+	tampered[Buffer.byteLength(before) - 10] = 0x20;
+	writeFileSync(path, tampered);
+	expect(proveTernEntry(readSessionTail(path)!, inPlace)).toMatchObject({ status: "UNCERTAIN" });
 });
