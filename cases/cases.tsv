@@ -435,3 +435,12 @@ fleet-guard-plutil-in-place	quiet	tool	bash	-	plutil -extract ProgramArguments j
 fleet-guard-plutil-in-place	quiet	tool	bash	-	plutil -convert json -o out.json a.plist	-o names a separate output file	
 fleet-guard-plutil-in-place	quiet	tool	bash	-	plutil -lint a.plist	lint only reads	
 fleet-guard-plutil-in-place	quiet	tool	bash	-	plutil -extract Label raw a.plist	-extract raw prints to stdout	
+kit-close-needs-evidence	quiet	tool	bash	-	am mail send --project /repo --from Worker --to Director --subject "QUESTION ompkit-demo" --body 'Use br close ompkit-demo only after checking evidence.'	gbkj.3: quoted mail content must not be treated as an executed close	
+kit-close-needs-evidence	quiet	tool	bash	-	br --db /repo/.beads/beads.db update ompkit-demo --check-acceptance 2 --actor Worker	gbkj.3: acceptance update is not a close	
+kit-close-needs-evidence	fire	tool	bash	-	am mail send --body 'The text br close ompkit-demo is data'; br close ompkit-other	gbkj.3: the actual trailing close still needs evidence	
+kit-close-needs-evidence	fire	tool	bash	-	am mail send --body "result $(br close ompkit-demo)"	gbkj.3: a command substitution is active, not literal mail data	
+kit-close-needs-evidence	quiet	tool	bash	-	am mail send --body 'Example br close ompkit-demo; still quoted data'	gbkj.3: a semicolon inside a quoted body is not a command terminator	
+kit-close-needs-evidence	quiet	tool	bash	-	am mail send --body "Literal $HOME metadata mentioning br close ompkit-demo"	gbkj.3: variable expansion does not execute the remaining literal words	
+kit-close-needs-evidence	quiet	tool	bash	-	am mail reply 123 --body 'Please do not run br close ompkit-demo without evidence.'	gbkj.3: reply payload has the same data semantics as send	
+kit-close-needs-evidence	quiet	tool	bash	-	am mail send --body 'Literal $(br close ompkit-demo) is not executed in single quotes.'	gbkj.3: single quotes keep substitution syntax inert	
+kit-close-needs-evidence	quiet	tool	bash	-	am mail send --body "result $(br close ompkit-demo --reason 'native acceptance -> PASS; commit abc1234')"	gbkj.3: an evidenced active substitution remains admissible	
