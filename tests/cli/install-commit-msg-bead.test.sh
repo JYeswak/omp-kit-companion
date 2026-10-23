@@ -213,6 +213,21 @@ ok "$?" "0" "check-missing-ref-txn-kitlib-tmp-named"
 sh "$INSTALLER" "$A" > /dev/null 2>&1
 ok "$?" "0" "check-missing-kitlib-tmp-reinstall-rc"
 ok "$(kitlib_copies)" "1" "kitlib-tmp-reinstall-restored"
+# 5f. --check names a missing staged-kitlib member and a stale ratchet engine
+#     copy; a reinstall restores them, helpers non-executable (ompkit-qwqh1)
+rm -f "$A/.git/hooks/hooks.d/pre-commit/51-omp-kit-staged-kitlib"
+printf '# drift\n' >> "$A/.git/hooks/hooks.d/pre-commit/kitlib_ratchet_core.py"
+sh "$INSTALLER" --check "$A" > "$TMP/o-missing-kitlib-ratchet" 2>&1
+ok "$?" "3" "check-missing-staged-kitlib-rc"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/pre-commit/51-omp-kit-staged-kitlib" "$TMP/o-missing-kitlib-ratchet"
+ok "$?" "0" "check-missing-staged-kitlib-named"
+grep -q "STALE installed member: $A/.git/hooks/hooks.d/pre-commit/kitlib_ratchet_core.py" "$TMP/o-missing-kitlib-ratchet"
+ok "$?" "0" "check-stale-ratchet-core-named"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "check-missing-kitlib-ratchet-reinstall-rc"
+modes=1
+[ -x "$A/.git/hooks/hooks.d/pre-commit/51-omp-kit-staged-kitlib" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/kitlib_ratchet.py" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/kitlib_ratchet_core.py" ] && modes=0
+ok "$modes" "0" "kitlib-ratchet-helpers-not-executable"
 
 # 6. rollback restores a member it overwrote, byte-for-byte, and leaves no
 #    backup behind (planted: the old installer deleted it, localbench 2026-10-16)
@@ -317,7 +332,7 @@ ok "$(git -C "$TMP/pushreal-origin.git" rev-parse main)" "$JB" "pushreal-origin-
 # 11. an inert shared-main member (passes an off-main commit) is caught by the
 #     live probe: the install rolls back and leaves no member behind
 mkdir -p "$TMP/inertkit/scripts"
-for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-readme.sh pysafe.py pysafe_check.py tempsafe_check.py readme-check.ts kitlib-tmp.sh; do
+for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-kitlib.sh check-staged-readme.sh pysafe.py pysafe_check.py kitlib_ratchet_core.py tempsafe_check.py kitlib_ratchet.py readme-check.ts kitlib-tmp.sh; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
 cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"

@@ -11,8 +11,9 @@
 # new when its (rule, line text) occurs more often than in HEAD, so untouched
 # pre-existing sites never block and new ones always do. The checker runs
 # under `pysafe.py run` with a process-group deadline, so this member cannot
-# hang a commit. tempsafe_check.py and pysafe.py (the bounded-run library it
-# imports; it never imports pysafe_check.py) sit beside
+# hang a commit. tempsafe_check.py, kitlib_ratchet_core.py (the engine it
+# shares with kitlib_ratchet.py) and pysafe.py (the bounded-run library the
+# engine imports; it never imports pysafe_check.py) sit beside
 # this file (the installer copies them; in the companion and in a kit release
 # they are its siblings in scripts/); if any is missing, or python3 is older
 # than 3.9, the commit is refused rather than passed unjudged. Exit 1 refuses.
@@ -29,7 +30,7 @@ printf '%s\n' "$staged" | grep -Eq '\.(py|ts|tsx|js|mjs|cjs|sh|bash)$|(^|/)\.?[^
 py=$(command -v python3) || { printf 'staged-tempsafe: REFUSED: judged files are staged and python3 is absent\n' >&2; exit 1; }
 "$py" -c 'import sys; sys.exit(sys.version_info < (3, 9))' < /dev/null ||
 	{ printf 'staged-tempsafe: REFUSED: python3 >= 3.9 is required to judge staged files\n' >&2; exit 1; }
-for helper in pysafe.py tempsafe_check.py; do
+for helper in pysafe.py kitlib_ratchet_core.py tempsafe_check.py; do
 	[ -f "$here/$helper" ] || { printf 'staged-tempsafe: REFUSED: %s is missing beside %s; rerun the kit hook installer\n' "$helper" "$0" >&2; exit 1; }
 done
 out=$("$py" -B "$here/pysafe.py" run --timeout "$budget" -- "$py" -B "$here/tempsafe_check.py" --staged --repo "$root" < /dev/null 2>&1)

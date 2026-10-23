@@ -213,3 +213,32 @@ this primitive. POSIX only.
 
     import kitlib_jsonl
     kitlib_jsonl.append_jsonl(path, lambda state: record, deadline_s=5, durable=True)
+
+## Adoption ratchet (KITLIB-RATCHET, ompkit-qwqh1)
+
+A primitive kitlib settles must not be hand-rolled again. One ratchet covers all kitlib primitives; each primitive is
+one rule in `scripts/kitlib_ratchet.py` (pragma `kitlib:`). TEMPSAFE (`scripts/tempsafe_check.py`, pragma
+`tempsafe:`) runs on the same engine, `scripts/kitlib_ratchet_core.py`.
+
+| Rule | Refuses | Use instead |
+|---|---|---|
+| `raw-spawn` | Python `subprocess.run/call/check_call/check_output/Popen/getoutput/getstatusoutput`, `os.system/popen/spawn*/posix_spawn*/exec*`, `asyncio.create_subprocess_*`; TS/JS `Bun.spawn/spawnSync`, `child_process` `spawn/spawnSync/exec/execSync/execFile/execFileSync/fork`; sh call-site `timeout N cmd` | `kitlib_run.run` (Python), `run()` from `src/kitlib/run.ts` (TS), `pysafe.py run --timeout N --` (sh) |
+
+Semantics, shared with TEMPSAFE: a finding is new when its (rule, line text without comments) fingerprint occurs more
+often than in the baseline (HEAD for a commit, the base for a push range). Untouched existing sites never block; new
+ones always do. A line can be justified with `kitlib: <reason>` (two or more words, 10+ characters); a reasonless
+pragma is refused and an unused one is reported. Exempt: `src/kitlib/`, `scripts/kitlib_*.py`, `scripts/kitlib-tmp.sh`,
+`scripts/pysafe.py`, and the ratchet's own tests and fixtures.
+
+Enforced by the pre-commit member `51-omp-kit-staged-kitlib` (`scripts/check-staged-kitlib.sh`, installed by
+`install-commit-msg-bead.sh` with `kitlib_ratchet.py`, `kitlib_ratchet_core.py` and `pysafe.py` beside it), the
+`kitlib-range` step of `pre-push-gate.sh`, and CI (`tests/scripts/kitlib_ratchet_test.py`,
+`tests/cli/check-staged-kitlib.test.sh`).
+
+```sh
+python3 -B scripts/kitlib_ratchet.py --tree src src --format json   # inventory
+python3 -B scripts/kitlib_ratchet.py --staged                       # what the member judges
+```
+
+Adding a primitive's rule: add the rule id to `RULES`, its hints to `HINT`, and its scanner functions to `PY_RULES`,
+`JS_RULES`, `SH_CODE_RULES` or `SH_HEREDOC_RULES`.

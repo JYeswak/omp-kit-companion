@@ -2,7 +2,8 @@
 # Install the bead-id commit-msg hook, the reference-transaction ref guard,
 # the shared-main pre-push member and the pushed-beads pre-push member into a
 # repo's hook chains, plus the staged-imports, staged-fragments,
-# staged-regexploit, staged-pysafe and staged-tempsafe pre-commit members.
+# staged-regexploit, staged-pysafe, staged-tempsafe and staged-kitlib
+# pre-commit members.
 # Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout).
 # The shared-main member (scripts/check-pushed-on-main.sh) is always installed:
 # it judges only where a push moves the remote main, never old messages.
@@ -23,10 +24,16 @@
 # staged .py files add a hang-prone call (no timeout, inherited stdin,
 # unbounded wait, read or loop) that HEAD does not already have.
 # The staged-tempsafe member (scripts/check-staged-tempsafe.sh, with
-# tempsafe_check.py and the pysafe.py it imports beside it) is
+# tempsafe_check.py, the kitlib_ratchet_core.py engine it is built on and the
+# pysafe.py the engine imports beside it) is
 # always installed: it refuses a commit whose staged files add temp creation
 # outside kitlib (mkdtemp, tmpdir(), tempfile, mktemp, $TMPDIR, /tmp) that
 # HEAD does not already have.
+# The staged-kitlib member (scripts/check-staged-kitlib.sh, with
+# kitlib_ratchet.py beside the same engine and pysafe.py) is always installed:
+# it refuses a commit whose staged files add a hand-rolled copy of a kitlib
+# primitive (raw-spawn: subprocess/os/asyncio spawns, Bun.spawn,
+# child_process, a call-site `timeout N`) that HEAD does not already have.
 # --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
 # shared-main member): new id-less commits are refused, existing history is not
 # judged. A full install refuses (exit 5) when the unpublished range already
@@ -234,6 +241,9 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/pysafe_check.py scripts/pysafe_check.py" \
 		"hooks.d/pre-commit/50-omp-kit-staged-tempsafe scripts/check-staged-tempsafe.sh" \
 		"hooks.d/pre-commit/tempsafe_check.py scripts/tempsafe_check.py" \
+		"hooks.d/pre-commit/kitlib_ratchet_core.py scripts/kitlib_ratchet_core.py" \
+		"hooks.d/pre-commit/51-omp-kit-staged-kitlib scripts/check-staged-kitlib.sh" \
+		"hooks.d/pre-commit/kitlib_ratchet.py scripts/kitlib_ratchet.py" \
 		"hooks.d/pre-commit/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/pre-push/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/reference-transaction/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
@@ -489,15 +499,28 @@ install_staged_pysafe() {
 	printf 'installed staged-pysafe member: %s\n' "$member"
 }
 
-# install_staged_tempsafe: the checker sits beside the member, non-executable,
-# next to the pysafe.py copy install_staged_pysafe (always run first) placed
-# there; tempsafe_check.py imports only pysafe.py. Numbered after pysafe.
+# install_staged_tempsafe: the checker and the ratchet engine it is built on
+# (kitlib_ratchet_core.py) sit beside the member, non-executable, next to the
+# pysafe.py copy install_staged_pysafe (always run first) placed there; the
+# engine imports only pysafe.py. Numbered after pysafe.
 install_staged_tempsafe() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/50-omp-kit-staged-tempsafe"
+	place "$KITROOT/scripts/kitlib_ratchet_core.py" "$dir/kitlib_ratchet_core.py" -x
 	place "$KITROOT/scripts/tempsafe_check.py" "$dir/tempsafe_check.py" -x
 	place "$KITROOT/scripts/check-staged-tempsafe.sh" "$member" +x
 	printf 'installed staged-tempsafe member: %s\n' "$member"
+}
+
+# install_staged_kitlib: the kitlib ratchet sits beside the member,
+# non-executable, next to the engine and pysafe.py copies install_staged_tempsafe
+# and install_staged_pysafe (always run first) placed there. Numbered after tempsafe.
+install_staged_kitlib() {
+	dir=$(chain_dir pre-commit)
+	member="$dir/51-omp-kit-staged-kitlib"
+	place "$KITROOT/scripts/kitlib_ratchet.py" "$dir/kitlib_ratchet.py" -x
+	place "$KITROOT/scripts/check-staged-kitlib.sh" "$member" +x
+	printf 'installed staged-kitlib member: %s\n' "$member"
 }
 
 # install_kitlib_tmp: members in the pre-commit, pre-push and reference-transaction
@@ -597,6 +620,7 @@ install_staged_fragments
 install_staged_regexploit
 install_staged_pysafe
 install_staged_tempsafe
+install_staged_kitlib
 install_staged_readme
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 

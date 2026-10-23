@@ -121,7 +121,7 @@ mkdir -p "$P/scripts" "$P/var/agent-tmp"
 git -C "$P" init -q 2>/dev/null
 git -C "$P" config user.email "test@invalid.example"
 git -C "$P" config user.name "Test"
-for helper in pysafe.py tempsafe_check.py; do cp "$SCRIPTS/$helper" "$P/scripts/$helper"; done
+for helper in pysafe.py kitlib_ratchet_core.py tempsafe_check.py; do cp "$SCRIPTS/$helper" "$P/scripts/$helper"; done
 printf 'var/\n' > "$P/.gitignore"
 git -C "$P" add .
 git -C "$P" commit -q -m "[test] base"

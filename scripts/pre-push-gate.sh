@@ -267,6 +267,21 @@ else
 		exit "$rc"
 	fi
 fi
+# KITLIB-RATCHET (ompkit-qwqh1): the pushed range adds no hand-rolled copy of a kitlib primitive
+# (raw-spawn: a spawn outside kitlib_run.run / run(), a call-site `timeout N`). Same range ratchet,
+# bound and base-archive source as tempsafe-range; skipped until the base archive carries it.
+if [ ! -f "$gate_scripts/scripts/kitlib_ratchet.py" ]; then
+	printf 'SKIP kitlib-range: checker absent from base archive\n' >&2
+else
+	printf '== kitlib-range\n'
+	if python3 -B "$gate_scripts/scripts/pysafe.py" run --timeout 300 -- python3 -B "$gate_scripts/scripts/kitlib_ratchet.py" --repo "$ROOT" ${base_ref:+--base "$base_ref"} --head "$local_sha"; then
+		printf 'GREEN kitlib-range\n'
+	else
+		rc=$?
+		printf 'RED kitlib-range producer_rc=%s: the range hand-rolls a kitlib primitive (spawn through kitlib_run.run from scripts/kitlib_run.py or run() from src/kitlib/run.ts; or justify the line inline with "kitlib: <reason>")\n' "$rc" >&2
+		exit "$rc"
+	fi
+fi
 if [ -n "${base_ref:-}" ]; then
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --base "$base_ref" --head "$local_sha"
 else
