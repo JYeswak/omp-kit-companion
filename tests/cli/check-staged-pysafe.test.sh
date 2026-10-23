@@ -59,7 +59,10 @@ printf '%s  # pysafe:\n' "$BAD" > "$R/tool.py"
 git -C "$R" add tool.py
 out=$(commit "$R" -m "[test] reasonless suppression")
 check "$?" "1" "reasonless-refused" "$out" "suppression-no-reason"
-printf '%s  # pysafe: fixture wrapper, the caller bounds it\n' "$BAD" > "$R/tool.py"
+# The installer also adds the kitlib ratchet member (51-omp-kit-staged-kitlib), which refuses any new raw spawn
+# regardless of a pysafe reason, and a Python line carries one comment, so it cannot hold both pragmas. The reasoned
+# case therefore uses a pysafe finding that is not a spawn (wait-no-timeout), which only this member judges.
+printf 'import os\nos.waitpid(-1, 0)  # pysafe: fixture reaper, the caller bounds it\n' > "$R/tool.py"
 git -C "$R" add tool.py
 out=$(commit "$R" -m "[test] reasoned suppression")
 check "$?" "0" "reasoned-pass" "x" "x"
