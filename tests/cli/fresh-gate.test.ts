@@ -354,6 +354,31 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted (b): below the 10 GiB physica
 	}
 }, 30_000);
 
+test.skipIf(!AMPLE)("planted: a heavy step runs on the gate's own PATH, never bun run's ancestor node_modules/.bin (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 1 });
+	try {
+		// The fixture's fake bun drops `run`, and `run` is the PATH injection under test: use the real bun.
+		rmSync(join(fx.dir, "bin", "bun"));
+		symlinkSync(process.execPath, join(fx.dir, "bin", "bun"));
+		mkdirSync(join(fx.dir, "node_modules", ".bin"), { recursive: true });
+		const archive = join(fx.dir, "archive");
+		mkdirSync(archive);
+		symlinkSync(join(root, "src"), join(archive, "src"));
+		const marker = join(fx.dir, "step-path");
+		const body = `heavy_step tests sh -c 'printf %s "$PATH" > "$1"' sh '${marker}'`;
+		expect(runProbe(fx, source, body, archive).code).toBe(0);
+		expect(readFileSync(marker, "utf8")).toBe(fx.env.PATH);
+		// Plant: without the pin, the same step sees the archive's ancestor node_modules/.bin first.
+		const mutant = source.replace(`env PATH="$PATH" sh -c 'date`, `sh -c 'date`);
+		expect(mutant).not.toBe(source);
+		expect(runProbe(fx, mutant, body, archive).code).toBe(0);
+		expect(readFileSync(marker, "utf8").split(":")).toContain(join(fx.dir, "node_modules", ".bin"));
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 30_000);
+
 // A peer's running heavy job: an orphaned sleep (re-parented, so its exit is reaped while this test
 // blocks in spawnSync and heavy's liveness probe sees it end) recorded as the slot holder.
 function holdSlot(fx: SaveFixture, seconds: number): void {

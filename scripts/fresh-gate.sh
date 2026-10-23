@@ -115,10 +115,12 @@ heavy_step() {
 	rm -f "$admitted"
 	queued_at=$(date +%s)
 	rc=0
-	# The child script expands $0/$@ itself, so the single quotes are intended.
+	# The child script expands $0/$@ itself, so the single quotes are intended. `bun run` prepends
+	# every ancestor node_modules/.bin to its children's PATH, so a step would run whatever `omp`
+	# sits above wherever the archive was extracted; `env PATH="$PATH"` gives the step the gate's own PATH.
 	# shellcheck disable=SC2016
 	bun run --no-env-file --config=/dev/null src/cli.ts heavy --label "fresh-gate-$step" --disk-observer statfs -- \
-		sh -c 'date +%s >"$0"; exec "$@"' "$admitted" "$@" || rc=$?
+		env PATH="$PATH" sh -c 'date +%s >"$0"; exec "$@"' "$admitted" "$@" || rc=$?
 	if [ -s "$admitted" ]; then
 		wait_s=$(($(cat "$admitted") - queued_at))
 	else

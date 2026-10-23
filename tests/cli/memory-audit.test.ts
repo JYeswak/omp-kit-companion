@@ -233,8 +233,10 @@ supportedTest("compiled private audit requires separate consent and exposes only
 	mkdirSync(join(release, "bin"), { recursive: true });
 	const binary = join(release, "bin", "omp-kit");
 	const entry = resolve(import.meta.dir, "../../src/cli.ts");
+	// Bun 1.4.3 on macOS clones itself into the build cwd and then creates the same name in TMPDIR,
+	// so a cwd equal to TMPDIR fails with EEXIST; build from release/ and keep TMPDIR in the fixture.
 	const build = Bun.spawnSync([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", entry, "--outfile", binary], {
-		cwd: f.root, env: { ...process.env, TMPDIR: f.root }, stdout: "pipe", stderr: "pipe",
+		cwd: release, env: { ...process.env, TMPDIR: f.root }, stdout: "pipe", stderr: "pipe",
 	});
 	expect(build.exitCode).toBe(0);
 	const before = snapshot(f.root);
