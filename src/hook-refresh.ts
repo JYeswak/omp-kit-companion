@@ -52,6 +52,7 @@ export const HOOK_MEMBER_PAIRS: ReadonlyArray<readonly [string, string]> = [
 	["hooks.d/pre-commit/51-omp-kit-staged-kitlib", "scripts/check-staged-kitlib.sh"],
 	["hooks.d/pre-commit/kitlib_ratchet.py", "scripts/kitlib_ratchet.py"],
 	["hooks.d/pre-commit/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
+	["hooks.d/commit-msg/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
 	["hooks.d/pre-push/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
 	["hooks.d/reference-transaction/kitlib-tmp.sh", "scripts/kitlib-tmp.sh"],
 	["hooks.d/pre-commit/46-omp-kit-staged-readme", "scripts/check-staged-readme.sh"],
@@ -67,6 +68,7 @@ const OPTIONAL_MEMBERS: Record<string, true> = {
 	"hooks.d/pre-push/check-pushed-beads.sh": true,
 	"hooks.d/pre-push/commit-msg-bead.sh": true,
 };
+type HookMemberStatus = "FRESH" | "MISSING" | "STALE" | "SOURCE_MISSING";
 export interface HookMemberRow {
 	member: string;
 	installed_sha256: string | null;

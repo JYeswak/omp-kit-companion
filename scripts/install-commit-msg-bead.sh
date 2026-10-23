@@ -245,6 +245,7 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/51-omp-kit-staged-kitlib scripts/check-staged-kitlib.sh" \
 		"hooks.d/pre-commit/kitlib_ratchet.py scripts/kitlib_ratchet.py" \
 		"hooks.d/pre-commit/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
+		"hooks.d/commit-msg/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/pre-push/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/reference-transaction/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/pre-commit/46-omp-kit-staged-readme scripts/check-staged-readme.sh" \
@@ -523,14 +524,14 @@ install_staged_kitlib() {
 	printf 'installed staged-kitlib member: %s\n' "$member"
 }
 
-# install_kitlib_tmp: members in the pre-commit, pre-push and reference-transaction
-# chains source "<own dir>/kitlib-tmp.sh" for owned temp dirs (KITLIB-TMP v1), so
-# each chain gets a non-executable copy the runner never executes arg-less.
+# install_kitlib_tmp: all four hook chains source "<own dir>/kitlib-tmp.sh"
+# for owned temp dirs (KITLIB-TMP v1). Each gets a non-executable helper
+# that the chain runner never executes arg-less.
 install_kitlib_tmp() {
-	for chain in pre-commit pre-push reference-transaction; do
+	for chain in pre-commit commit-msg pre-push reference-transaction; do
 		place "$KITROOT/scripts/kitlib-tmp.sh" "$(chain_dir "$chain")/kitlib-tmp.sh" -x
 	done
-	printf 'installed kitlib-tmp.sh into the pre-commit, pre-push and reference-transaction chains\n'
+	printf 'installed kitlib-tmp.sh into all four hook chains\n'
 }
 
 # install_staged_readme: the checker copy sits beside the member,

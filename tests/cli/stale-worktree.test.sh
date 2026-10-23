@@ -18,7 +18,7 @@ kitlib_tmp TMP stale-worktree-test || exit 1
 pass=0
 fail=0
 check() {
-	if [ "$1" = "$2" ] && printf '%s' "$4" | grep -q -- "$5"; then pass=$((pass + 1));
+	if [ "$1" = "$2" ] && { [ -z "$5" ] || printf '%s' "$4" | grep -q -- "$5"; }; then pass=$((pass + 1));
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
 }
 
@@ -283,6 +283,47 @@ backdate "$R/pkg/f.txt"
 git -C "$R" add pkg/f.txt
 out=$(git -C "$R" commit --message "[test] drop L on a stale file, no bead trailer" 2>&1)
 check "$?" "1" "beadless-stale-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $A"
+
+# 19. equal subjects are not metadata identity: facts belong to the full SHA.
+# The first path's own-bead facts must not admit the second path's foreign removal.
+R=$(new_repo facts-sha-identity)
+A=$(git -C "$R" rev-parse HEAD)
+printf 'peer one\npeer two\n' > "$R/pkg/g.txt"
+git -C "$R" add pkg/g.txt
+git -C "$R" commit -q --message "[test] land L" --message "Bead: t-peer"
+B=$(git -C "$R" rev-parse HEAD)
+printf 'base line\n' > "$R/pkg/f.txt"
+: > "$R/pkg/g.txt"
+git -C "$R" add pkg/f.txt pkg/g.txt
+out=$(git -C "$R" commit --message "[test] mixed equal-subject facts" --message "Bead: t-land" 2>&1)
+check "$?" "1" "facts-full-sha-identity" "$out" "STALE_WORKTREE pkg/g.txt reverts $B"
+check "$(git -C "$R" rev-parse HEAD)" "$B" "facts-refusal-head-unmoved" "$out" "from bead t-peer"
+
+# 20. a successful absent bead is an empty fact, not an unreadable cache entry.
+R=$(new_repo facts-empty-bead)
+printf 'anonymous one\nanonymous two\n' > "$R/pkg/anonymous.txt"
+git -C "$R" add pkg/anonymous.txt
+git -C "$R" commit -q --message "[test] anonymous landing"
+: > "$R/pkg/anonymous.txt"
+git -C "$R" add pkg/anonymous.txt
+out=$(git -C "$R" commit --message "[test] anonymous rewrite" --message "Bead: t-other" 2>&1)
+check "$?" "0" "facts-successful-empty-bead" "$out" ""
+
+# 21. invocation-private facts cannot inherit an enclosing task's retention.
+R=$(new_repo facts-cleanup)
+printf 'base line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+cache_root="$TMP/facts-cleanup-root"
+mkdir "$cache_root"
+printf '[test] private facts\n\nBead: t-land\n' > "$TMP/facts-cleanup.msg"
+out=$(cd "$R" && KITLIB_TMP_ROOT="$cache_root" KITLIB_TMP_AUTO_CLEANUP=0 sh .git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree "$TMP/facts-cleanup.msg" 2>&1)
+check "$?" "0" "facts-retention-control-passes" "$out" ""
+left=""
+for entry in "$cache_root"/* "$cache_root"/.[!.]* "$cache_root"/..?*; do
+	[ -e "$entry" ] || [ -L "$entry" ] || continue
+	left="$entry"
+done
+check "$left" "" "facts-invocation-cache-disposed" "$out" ""
 
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

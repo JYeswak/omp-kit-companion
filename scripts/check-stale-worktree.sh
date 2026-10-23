@@ -34,6 +34,16 @@ git diff --cached --name-only -z HEAD -- >/dev/null 2>&1 || { printf 'stale-work
  test -n "$(git diff --cached --name-only HEAD --)" || exit 0
  tree=$(git write-tree) || { printf 'stale-worktree: cannot write the effective tree\n' >&2; exit 1; }
 
+# The invocation owner, not the piped path-loop subshell, owns cache cleanup
+# and signal handlers. Retention is never appropriate for these private facts.
+facts_here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+[ -f "$facts_here/kitlib-tmp.sh" ] || { printf 'stale-worktree: kitlib-tmp.sh missing beside gate\n' >&2; exit 1; }
+# shellcheck source=scripts/kitlib-tmp.sh
+. "$facts_here/kitlib-tmp.sh"
+KITLIB_TMP_AUTO_CLEANUP=1
+metadata_dir=""
+kitlib_tmp metadata_dir stale-worktree-facts || exit 1
+
 mtime_of() {
 	# $1 = worktree path; prints epoch mtime, or nothing when absent.
 	[ -e "$1" ] || return 0
@@ -74,6 +84,33 @@ blame_lines() {
 	bpath=$1
 	shift
 	git blame --porcelain "$@" "$HEAD" -- "$bpath" 2>/dev/null | awk '/^[0-9a-f]{40} [0-9]+ [0-9]+/ { print $3, $1 }'
+}
+
+# Commit facts are immutable within this pinned invocation, not per removed
+# line (ompkit-axz7m.9). The cache survives the path-loop subshell and is owned
+# by the existing temp primitive; unsuccessful Git observations are not cached.
+commit_facts() {
+	facts_prefix="$metadata_dir/$1"
+	if [ -f "$facts_prefix.ready" ]; then
+		IFS= read -r subject < "$facts_prefix.subject" || return 1
+		IFS= read -r cdate < "$facts_prefix.date" || return 1
+		IFS= read -r cbead < "$facts_prefix.bead" || return 1
+		return 0
+	fi
+	subject=$(git log -1 --format=%s "$1" 2>/dev/null)
+	facts_subject_rc=$?
+	cdate=$(git log -1 --format=%ct "$1" 2>/dev/null)
+	facts_date_rc=$?
+	facts_body=$(git log -1 --format=%B "$1" 2>/dev/null)
+	facts_body_rc=$?
+	cbead=$(printf '%s\n' "$facts_body" | grep -E -m1 '^[[:space:]]*[Bb]ead:[[:space:]]*[A-Za-z0-9._-]+' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//')
+	if [ "$facts_subject_rc" -eq 0 ] && [ "$facts_date_rc" -eq 0 ] && [ "$facts_body_rc" -eq 0 ]; then
+		printf '%s\n' "$subject" > "$facts_prefix.subject" || return 1
+		printf '%s\n' "$cdate" > "$facts_prefix.date" || return 1
+		printf '%s\n' "$cbead" > "$facts_prefix.bead" || return 1
+		: > "$facts_prefix.ready" || return 1
+	fi
+	return 0
 }
 
 moved_lines() {
@@ -155,9 +192,11 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	for ln in $(removed_lines "$path"); do
 		sha=$(printf '%s\n' "$blamed" | awk -v want="$ln" '$1 == want { print $2; exit }')
 		[ -n "$sha" ] || continue
-		subject=$(git log -1 --format=%s "$sha" 2>/dev/null)
-		cdate=$(git log -1 --format=%ct "$sha" 2>/dev/null)
-		cbead=$(git log -1 --format=%B "$sha" 2>/dev/null | grep -E -m1 '^[[:space:]]*[Bb]ead:[[:space:]]*[A-Za-z0-9._-]+' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//')
+		if ! commit_facts "$sha"; then
+			printf 'UNREADABLE_COMMIT_FACTS %s %s\n' "$path" "$sha" >> "$root/.git/stale-worktree-report.$$"
+			printf '1\n' >> "$root/.git/stale-worktree-refused.$$"
+			continue
+		fi
 		declared=0
 		for r in $reverts; do
 			case "$sha" in "$r"*) declared=1 ;; esac

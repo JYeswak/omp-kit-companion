@@ -1,0 +1,19 @@
+{
+  "authority": "test",
+  "confidence": "observed",
+  "evidence_id": "ev_fb71395997063ec7c4a87d78f979b6bd8272088de0daa32383e6fefc482efaba",
+  "limitations": [
+    "Bounded8/32linepairedfixturesonly; no83kruntimeclaim. Existingreadablepolicyoutputsbyte-identical. Installedcutovernotperformed; unknownhistorylimitationsremain."
+  ],
+  "operation": "stale-gate-invocation-facts-cache",
+  "parameters": {
+    "bead": "ompkit-axz7m.9",
+    "candidate_sha256": "300f4c2c7717c041938b22ad1f5618c29debefaf80d62a58f9c3b192d316a8a5",
+    "incumbent_sha256": "ee99faa775c69863ff6436d30e4de560b8836b693a1e05e1ec9af679bc50d8b0"
+  },
+  "producer": "QuietBadger",
+  "result_ref": {
+    "bytes": 886103,
+    "sha256": "3388a809603782b1070f759c44dd1a694a49832724da26f52099b3bb72d63682"
+  }
+}

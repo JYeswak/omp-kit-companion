@@ -195,24 +195,27 @@ ok "$?" "0" "check-missing-pysafe-reinstall-rc"
 modes=1
 [ -x "$A/.git/hooks/hooks.d/pre-commit/49-omp-kit-staged-pysafe" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/pysafe_check.py" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/pysafe.py" ] && modes=0
 ok "$modes" "0" "pysafe-helpers-not-executable"
-kitlib_copies() {
-	modes=1
-	for chain in pre-commit pre-push reference-transaction; do
-		cmp -s "$(dirname -- "$INSTALLER")/kitlib-tmp.sh" "$A/.git/hooks/hooks.d/$chain/kitlib-tmp.sh" && [ ! -x "$A/.git/hooks/hooks.d/$chain/kitlib-tmp.sh" ] || modes=0
-	done
-	printf '%s' "$modes"
-}
-ok "$(kitlib_copies)" "1" "kitlib-tmp-in-three-chains-not-executable"
-rm -f "$A/.git/hooks/hooks.d/pre-push/kitlib-tmp.sh" "$A/.git/hooks/hooks.d/reference-transaction/kitlib-tmp.sh"
+rm -f "$A/.git/hooks/hooks.d/pre-push/kitlib-tmp.sh" "$A/.git/hooks/hooks.d/reference-transaction/kitlib-tmp.sh" "$A/.git/hooks/hooks.d/commit-msg/kitlib-tmp.sh"
 sh "$INSTALLER" --check "$A" > "$TMP/o-missing-kitlib" 2>&1
 ok "$?" "3" "check-missing-kitlib-tmp-rc"
 grep -q "MISSING installed member: $A/.git/hooks/hooks.d/pre-push/kitlib-tmp.sh" "$TMP/o-missing-kitlib"
 ok "$?" "0" "check-missing-kitlib-tmp-named"
 grep -q "MISSING installed member: $A/.git/hooks/hooks.d/reference-transaction/kitlib-tmp.sh" "$TMP/o-missing-kitlib"
 ok "$?" "0" "check-missing-ref-txn-kitlib-tmp-named"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/commit-msg/kitlib-tmp.sh" "$TMP/o-missing-kitlib"
+ok "$?" "0" "check-missing-commit-msg-kitlib-tmp-named"
 sh "$INSTALLER" "$A" > /dev/null 2>&1
 ok "$?" "0" "check-missing-kitlib-tmp-reinstall-rc"
-ok "$(kitlib_copies)" "1" "kitlib-tmp-reinstall-restored"
+sh "$INSTALLER" --check "$A" > "$TMP/o-kitlib-restored" 2>&1
+ok "$?" "0" "check-kitlib-tmp-reinstall-healthy"
+printf '# drift\n' >> "$A/.git/hooks/hooks.d/commit-msg/kitlib-tmp.sh"
+sh "$INSTALLER" --check "$A" > "$TMP/o-stale-commit-msg-kitlib" 2>&1
+ok "$?" "3" "check-stale-commit-msg-kitlib-tmp-rc"
+grep -q "STALE installed member: $A/.git/hooks/hooks.d/commit-msg/kitlib-tmp.sh" "$TMP/o-stale-commit-msg-kitlib"
+ok "$?" "0" "check-stale-commit-msg-kitlib-tmp-named"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+sh "$INSTALLER" --check "$A" > "$TMP/o-commit-msg-kitlib-restored" 2>&1
+ok "$?" "0" "check-stale-commit-msg-kitlib-tmp-repaired"
 # 5f. --check names a missing staged-kitlib member and a stale ratchet engine
 #     copy; a reinstall restores them, helpers non-executable (ompkit-qwqh1)
 rm -f "$A/.git/hooks/hooks.d/pre-commit/51-omp-kit-staged-kitlib"
