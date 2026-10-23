@@ -1,0 +1,144 @@
+{
+	"schema": "kitlib-poll-corpus.v1",
+	"about": "One conformance corpus for kitlib poll (ompkit-u6k6t, KL13), read by tests/cli/kitlib-poll.test.ts (src/kitlib/poll.ts) and tests/scripts/kitlib_poll_test.py (scripts/kitlib_poll.py). cases drive pollUntil on a fake clock: the probe advances monotonic and wall time by cost_s (or by the attempt timeout when cost_s exceeds it, observing {\"timed_out\":true}), the sleep seam advances both by its argument, wall_jump_s moves only the wall clock after that attempt, and cancel_in_interval_of aborts the signal inside the interval sleep that follows that attempt. script[i] is attempt i+1; past its end the last step repeats. success/terminal are predicate lists {key, eq} fed to whenAll/when_all. The driver also asserts every attempt_timeout_s <= remaining_s and <= options.attempt_timeout_s, and that result.attempts equals probe calls. bypass names one detector (PollDetector) to disable through the test seam: the case runs once with it on (expect) and once with it bypassed (expect_bypassed); a planted negative is proven when the two differ. expect keys: outcome, attempts, min_attempts, elapsed_s (exact on the fake clock, 1e-6), observation, observation_truncated, observation_max_bytes, throws (an error code, the probe never runs). cli_cases run python3 -B scripts/kitlib_poll.py with real probes through kitlib run; {TMP} is a scratch dir from ownedTmp/owned_tmp, {POLL} the CLI path.",
+	"cases": [
+		{
+			"id": "fast-valid-observation",
+			"options": { "deadline_s": 10, "interval_s": 1 },
+			"success": [{ "key": "ready", "eq": true }],
+			"script": [{ "cost_s": 0.25, "obs": { "ready": true } }],
+			"expect": { "outcome": "success", "attempts": 1, "elapsed_s": 0.25, "observation": { "ready": true }, "observation_truncated": false }
+		},
+		{
+			"id": "slow-valid-observations-inside-one-budget",
+			"options": { "deadline_s": 20, "interval_s": 1, "attempt_timeout_s": 5 },
+			"success": [{ "key": "ready", "eq": true }],
+			"script": [{ "cost_s": 2, "obs": { "ready": false } }, { "cost_s": 2, "obs": { "ready": false } }, { "cost_s": 2, "obs": { "ready": true } }],
+			"expect": { "outcome": "success", "attempts": 3, "elapsed_s": 8 }
+		},
+		{
+			"id": "conjunction-of-two-endpoints",
+			"options": { "deadline_s": 10, "interval_s": 1 },
+			"success": [{ "key": "api", "eq": 200 }, { "key": "worker", "eq": 200 }],
+			"script": [{ "cost_s": 0.1, "obs": { "api": 200, "worker": 503 } }, { "cost_s": 0.1, "obs": { "api": 503, "worker": 200 } }, { "cost_s": 0.1, "obs": { "api": 200, "worker": 200 } }],
+			"bypass": "conjunction",
+			"expect": { "outcome": "success", "attempts": 3 },
+			"expect_bypassed": { "outcome": "success", "attempts": 1 }
+		},
+		{
+			"id": "explicit-terminal-failure-stays-terminal",
+			"options": { "deadline_s": 10, "interval_s": 1 },
+			"success": [{ "key": "state", "eq": "done" }],
+			"terminal": [{ "key": "state", "eq": "failed" }],
+			"script": [{ "cost_s": 0.1, "obs": { "state": "running" } }, { "cost_s": 0.1, "obs": { "state": "failed" } }, { "cost_s": 0.1, "obs": { "state": "done" } }],
+			"bypass": "stop_on_settle",
+			"expect": { "outcome": "terminal", "attempts": 2, "observation": { "state": "failed" } },
+			"expect_bypassed": { "outcome": "deadline", "min_attempts": 3 }
+		},
+		{
+			"id": "negative-slow-probes-overrun-global-budget",
+			"options": { "deadline_s": 10, "interval_s": 0.5, "attempt_timeout_s": 5 },
+			"success": [{ "key": "ready", "eq": true }],
+			"script": [{ "cost_s": 4, "obs": { "ready": false } }, { "cost_s": 4, "obs": { "ready": false } }, { "cost_s": 4, "obs": { "ready": true } }],
+			"bypass": "probe_time_counts",
+			"expect": { "outcome": "deadline", "attempts": 3, "elapsed_s": 10, "observation": { "timed_out": true } },
+			"expect_bypassed": { "outcome": "success", "attempts": 3 }
+		},
+		{
+			"id": "negative-wall-clock-jump-forward-does-not-shorten",
+			"options": { "deadline_s": 10, "interval_s": 1 },
+			"success": [{ "key": "ready", "eq": true }],
+			"script": [{ "cost_s": 0.1, "obs": { "ready": false }, "wall_jump_s": 3600 }, { "cost_s": 0.1, "obs": { "ready": false } }, { "cost_s": 0.1, "obs": { "ready": true } }],
+			"bypass": "monotonic_clock",
+			"expect": { "outcome": "success", "attempts": 3 },
+			"expect_bypassed": { "outcome": "deadline", "attempts": 1 }
+		},
+		{
+			"id": "negative-wall-clock-jump-backward-does-not-extend",
+			"options": { "deadline_s": 3, "interval_s": 1 },
+			"success": [{ "key": "ready", "eq": true }],
+			"script": [{ "cost_s": 0.1, "obs": { "ready": false }, "wall_jump_s": -3600 }, { "cost_s": 0.1, "obs": { "ready": false } }],
+			"bypass": "monotonic_clock",
+			"expect": { "outcome": "deadline", "attempts": 3, "elapsed_s": 3 },
+			"expect_bypassed": { "outcome": "deadline", "min_attempts": 100 }
+		},
+		{
+			"id": "negative-empty-condition-set-refused",
+			"options": { "deadline_s": 5, "interval_s": 1 },
+			"success": [],
+			"script": [{ "cost_s": 0.1, "obs": { "anything": 1 } }],
+			"bypass": "empty_conditions",
+			"expect": { "throws": "INVALID_ARGUMENT" },
+			"expect_bypassed": { "outcome": "success", "attempts": 1 }
+		},
+		{
+			"id": "negative-http-200-wrong-body-is-not-success",
+			"options": { "deadline_s": 5, "interval_s": 1 },
+			"success": [{ "key": "status", "eq": 200 }, { "key": "body", "eq": "ready" }],
+			"script": [{ "cost_s": 0.1, "obs": { "status": 200, "body": "starting" } }],
+			"bypass": "conjunction",
+			"expect": { "outcome": "deadline", "min_attempts": 4, "observation": { "status": 200, "body": "starting" } },
+			"expect_bypassed": { "outcome": "success", "attempts": 1 }
+		},
+		{
+			"id": "negative-cancel-during-interval-no-extra-probe",
+			"options": { "deadline_s": 30, "interval_s": 2 },
+			"success": [{ "key": "ready", "eq": true }],
+			"script": [{ "cost_s": 0.1, "obs": { "n": 1 } }, { "cost_s": 0.1, "obs": { "n": 2 } }, { "cost_s": 0.1, "obs": { "n": 3 } }],
+			"cancel_in_interval_of": 2,
+			"bypass": "cancel_check",
+			"expect": { "outcome": "cancelled", "attempts": 2, "observation": { "n": 2 } },
+			"expect_bypassed": { "outcome": "cancelled", "attempts": 3 }
+		},
+		{
+			"id": "negative-no-probe-after-success",
+			"options": { "deadline_s": 3, "interval_s": 1 },
+			"success": [{ "key": "accepted", "eq": true }],
+			"script": [{ "cost_s": 0.1, "obs": { "accepted": true } }],
+			"bypass": "stop_on_settle",
+			"expect": { "outcome": "success", "attempts": 1 },
+			"expect_bypassed": { "outcome": "deadline", "min_attempts": 2 }
+		},
+		{
+			"id": "last-observation-is-bounded",
+			"options": { "deadline_s": 5, "interval_s": 1, "max_observation_bytes": 64 },
+			"success": [{ "key": "ready", "eq": true }],
+			"script": [{ "cost_s": 0.1, "obs": { "ready": true, "body": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé" } }],
+			"expect": { "outcome": "success", "attempts": 1, "observation_truncated": true, "observation_max_bytes": 64 }
+		},
+		{
+			"id": "zero-deadline-refused",
+			"options": { "deadline_s": 0, "interval_s": 1 },
+			"success": [{ "key": "ready", "eq": true }],
+			"script": [{ "cost_s": 0.1, "obs": { "ready": true } }],
+			"expect": { "throws": "INVALID_ARGUMENT" }
+		}
+	],
+	"cli_cases": [
+		{
+			"id": "cli-success-on-third-attempt",
+			"args": ["--deadline-s", "20", "--interval-s", "0.05", "--", "/bin/sh", "-c", "n=$(cat {TMP}/n 2>/dev/null || echo 0); n=$((n+1)); echo $n > {TMP}/n; echo attempt-$n; [ $n -ge 3 ]"],
+			"expect": { "exit": 0, "outcome": "success", "attempts": 3, "stdout": "attempt-3\n" }
+		},
+		{
+			"id": "cli-terminal-code-is-not-retried",
+			"args": ["--deadline-s", "20", "--interval-s", "0.05", "--terminal-codes", "3,4", "--", "/bin/sh", "-c", "exit 3"],
+			"expect": { "exit": 1, "outcome": "terminal", "attempts": 1 }
+		},
+		{
+			"id": "cli-slow-probe-bounded-by-global-deadline",
+			"args": ["--deadline-s", "1", "--interval-s", "0.05", "--attempt-timeout-s", "5", "--", "/bin/sh", "-c", "sleep 5"],
+			"expect": { "exit": 124, "outcome": "deadline", "attempts": 1, "max_elapsed_s": 4 }
+		},
+		{
+			"id": "cli-sigterm-cancels-without-extra-probe",
+			"args": ["--deadline-s", "20", "--interval-s", "0.05", "--", "/bin/sh", "-c", "kill -TERM $PPID; exit 1"],
+			"expect": { "exit": 130, "outcome": "cancelled", "attempts": 1 }
+		},
+		{
+			"id": "cli-empty-success-codes-refused",
+			"args": ["--deadline-s", "5", "--interval-s", "1", "--success-codes", "", "--", "/bin/sh", "-c", "exit 0"],
+			"expect": { "exit": 2, "outcome": "error", "code": "INVALID_ARGUMENT" }
+		}
+	]
+}

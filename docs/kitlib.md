@@ -12,6 +12,7 @@ re-implement it at the call site.
 | Atomic byte replace | `atomicReplaceBytes()` in `src/kitlib/io.ts` | `atomic_replace_bytes()` in `scripts/kitlib_io.py` | — | `tests/fixtures/kitlib-io/corpus.json` |
 | Process incarnation | `incarnation()` / `probeIncarnation()` / `isDead()` in `src/kitlib/proc.ts` | `incarnation()` / `probe_incarnation()` / `is_dead()` in `scripts/kitlib_proc.py` | — | `tests/fixtures/kitlib-proc/corpus.json` |
 | Locked JSONL append | `appendJsonl()` / `readJsonl()` in `src/kitlib/jsonl.ts` | `append_jsonl()` / `read_jsonl()` in `scripts/kitlib_jsonl.py` | — | `tests/fixtures/kitlib-jsonl/corpus.json` |
+| Bounded polling | `pollUntil()` / `whenAll()` in `src/kitlib/poll.ts` | `poll_until()` / `when_all()` in `scripts/kitlib_poll.py` | `python3 -B scripts/kitlib_poll.py … -- <probe argv>` | `tests/fixtures/kitlib-poll/corpus.json` |
 
 ## Bounded run (KITLIB-RUN, ompkit-hsfyp)
 
@@ -28,6 +29,12 @@ const result = await run(["git", "status", "--porcelain"], { deadline_s: 30 });
 import kitlib_run
 result = kitlib_run.run(["git", "status", "--porcelain"], deadline_s=30)
 ```
+
+`runSync(argv, {deadline_s, max_output_bytes?, cwd?, env?})` is for short leaf commands in callers that cannot
+await. stdin is `/dev/null`. At the deadline the child gets SIGKILL and the result is `timed_out: true, rc: null`.
+Output past `max_output_bytes` on either stream also stops the child (`killed`, `truncated`, `rc: null`). The result
+has the same shape as `run()`. It owns no process group: only the leader is signalled, so a command that can fork
+descendants must use async `run()`. A missing `deadline_s` throws TypeError; a non-positive one throws RangeError.
 
 ## Owned temp dir (KITLIB-TMP v1, ompkit-41l85)
 
@@ -182,6 +189,11 @@ owner = kitlib_proc.incarnation(os.getpid())
 if kitlib_proc.is_dead(kitlib_proc.probe_incarnation(owner)): ...
 ```
 
+`incarnationSync(pid)` and `probeIncarnationSync({pid, start})` make the same decisions as the async pair; they share
+one classifier and differ only in reading ps through `runSync`. `tests/cli/kitlib-proc.test.ts` runs every corpus
+case through both APIs and requires them to agree. Use the sync form where an `await` would open a window, e.g. between
+spawning a child and recording its incarnation, where a signal could otherwise land mid-probe.
+
 ## Locked JSONL append (KL11, ompkit-ibgvg)
 
 Appends one record as one complete line, serialized across processes and languages by the KL08 lock on
@@ -213,6 +225,31 @@ this primitive. POSIX only.
 
     import kitlib_jsonl
     kitlib_jsonl.append_jsonl(path, lambda state: record, deadline_s=5, durable=True)
+
+## Bounded polling (KL13, ompkit-u6k6t)
+
+`pollUntil` repeats an owner-supplied probe until the owner's `classify` returns `success` or `terminal`, one
+monotonic budget (`deadline_s`) runs out, or the signal aborts. It returns `success`, `terminal`, `deadline` or
+`cancelled` with the attempt count, elapsed seconds and the last observation, capped at `max_observation_bytes`
+(default 4096) of UTF-8 JSON. A larger observation comes back as truncated JSON text with `observation_truncated`.
+
+Probe time counts against the budget, and each attempt's timeout is at most the remaining budget. A wall-clock jump
+does not move the deadline. An observation that arrives late yields `deadline`, never `success`. No sleep follows
+expiry, and no probe follows cancellation, success or terminal.
+
+The probe is an explicit observation that its owner controls. Never use it to replay a mutation: no job resubmit,
+no mail resend. `classify` owns the verdict: HTTP 200 with the wrong body is `retry` or `terminal`.
+`whenAll(success, terminal)` builds a conjunction and refuses an empty set (`INVALID_ARGUMENT`).
+
+    const r = await pollUntil(ctx => probeHealth(ctx.attempt_timeout_s), { deadline_s: 30, interval_s: 1,
+      classify: whenAll([o => o.status === 200, o => o.body === "ok"]) });
+
+    python3 -B scripts/kitlib_poll.py --deadline-s 30 --interval-s 1 [--attempt-timeout-s 5] \
+      [--success-codes 0] [--terminal-codes 3,4] -- curl -fsS http://127.0.0.1:8080/health
+
+Each probe in the shell form runs through kitlib run. It exits 0 success, 1 terminal, 124 deadline, 130 cancelled
+(SIGINT/SIGTERM) or 2 INVALID_ARGUMENT, and prints one final JSON line. The three forms share the meaning of the
+deadline, not the sleep implementation.
 
 ## Adoption ratchet (KITLIB-RATCHET, ompkit-qwqh1)
 
