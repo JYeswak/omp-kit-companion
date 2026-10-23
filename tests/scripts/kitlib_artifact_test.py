@@ -6,10 +6,16 @@ tests/cli/kitlib-artifact.test.ts runs against src/kitlib/artifact.ts, so the tw
 languages cannot drift. Each planted negative runs with its detector on and
 bypassed through the test seam (its result flips); each control also runs with
 every detector bypassed and still passes.
+
+DepthAndReceipt is Python-only: the nesting bound must hold without the Python stack
+(RecursionError), and scripts/receipt.py, its consumer, must refuse typed at sign and verify.
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import inspect
+import io
 import json
 import os
 import re
@@ -174,6 +180,134 @@ def _install_cases() -> None:
 
 
 _install_cases()
+
+receipt = _load("receipt", ROOT / "scripts" / "receipt.py")
+
+
+def nested(depth: int, kind: str = "[") -> str:
+    if kind == "[":
+        return "[" * depth + "]" * depth
+    return '{"k":' * (depth - 1) + "{}" + "}" * (depth - 1)
+
+
+def run_receipt(argv: list) -> dict:
+    """Run receipt.py's CLI entry in-process; an escaping exception is what a user would see as a traceback."""
+    out, err = io.StringIO(), io.StringIO()
+    saved = sys.argv
+    sys.argv = ["receipt.py"] + argv
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code, escaped = receipt.main(), None
+    except SystemExit as exit_:
+        code, escaped = exit_.code, None
+    except BaseException as error:  # noqa: BLE001 - any escape is the defect under test
+        code, escaped = None, f"{type(error).__name__}: {error}"
+    finally:
+        sys.argv = saved
+    return {"code": code, "stdout": out.getvalue(), "stderr": err.getvalue(), "escaped": escaped}
+
+
+def sign_argv(result_ref_json: str, out: Path) -> list:
+    return ["sign", "--producer", "t", "--operation", "op", "--result-ref-json", result_ref_json, "--out", str(out)]
+
+
+class DepthAndReceipt(unittest.TestCase):
+    def depth_error(self, text: str, max_depth: int = kitlib_artifact.DEFAULT_MAX_DEPTH) -> dict:
+        try:
+            kitlib_artifact.strict_json(text.encode("utf-8"), path="<depth>", max_depth=max_depth)
+        except kitlib_artifact.ArtifactError as error:
+            return error.evidence
+        self.fail("expected an ArtifactError")
+
+    def test_depth_511_and_512_parse(self) -> None:
+        for depth in (511, 512):
+            for kind in "[{":
+                text = nested(depth, kind)
+                self.assertEqual(kitlib_artifact.strict_json(text.encode(), path="<depth>"), json.loads(text),
+                                 f"{kind} depth {depth}")
+
+    def test_depth_513_refused_typed(self) -> None:
+        for kind, width in (("[", 1), ("{", 5)):
+            evidence = self.depth_error(nested(513, kind))
+            self.assertEqual((evidence["code"], evidence["reason"], evidence["offset"]), ("CORRUPT", "DEPTH", 512 * width),
+                             kind)
+
+    def test_depth_bound_is_exact_for_any_max_depth(self) -> None:
+        for max_depth in (1, 2, 40, 2000):
+            kitlib_artifact.strict_json(nested(max_depth).encode(), path="<depth>", max_depth=max_depth)
+            self.assertEqual(self.depth_error(nested(max_depth + 1), max_depth)["reason"], "DEPTH", max_depth)
+
+    def test_depth_2000_refused_typed_even_from_a_deep_caller(self) -> None:
+        self.assertEqual(self.depth_error(nested(2000))["reason"], "DEPTH")
+        # The guard must not depend on the caller's free stack: parse from within ~100 frames of the recursion limit.
+
+        def at_depth(frames: int):
+            return at_depth(frames - 1) if frames > 0 else self.depth_error(nested(2000))
+
+        self.assertEqual(at_depth(sys.getrecursionlimit() - 100 - len(inspect.stack()))["reason"], "DEPTH")
+
+    def test_receipt_verify_2000_deep_refuses_typed(self) -> None:
+        with owned_tmp("kitlib-artifact-depth") as tmp:
+            path = Path(tmp) / "deep.receipt.json"
+            path.write_text('{"evidence_id": "ev_x", "result_ref": ' + nested(2000) + "}\n", encoding="utf-8")
+            got = run_receipt(["verify", str(path)])
+        self.assertIsNone(got["escaped"], got["escaped"])
+        self.assertEqual(got["code"], 1)
+        self.assertIn("verify REFUSE: unreadable receipt", got["stderr"])
+        self.assertIn("(DEPTH)", got["stderr"])
+        self.assertNotIn("Traceback", got["stderr"])
+
+    def test_receipt_deepest_signable_receipt_verifies(self) -> None:
+        # Control: result_ref 511 deep makes a 512-deep receipt, the deepest verify reads; it signs and verifies.
+        with owned_tmp("kitlib-artifact-depth") as tmp:
+            out = Path(tmp) / "deep.receipt.json"
+            signed = run_receipt(sign_argv(nested(511), out))
+            verified = run_receipt(["verify", str(out)])
+        self.assertEqual((signed["escaped"], signed["code"]), (None, 0), signed)
+        self.assertEqual((verified["escaped"], verified["code"]), (None, 0), verified["escaped"] or verified["stderr"])
+        self.assertTrue(verified["stdout"].startswith("verify OK ev_"), verified)
+
+    def test_receipt_sign_refuses_what_verify_would_refuse_on_depth(self) -> None:
+        for depth in (512, 2000):  # 512 makes a 513-deep receipt; 2000 broke json.loads itself
+            with owned_tmp("kitlib-artifact-depth") as tmp:
+                out = Path(tmp) / "deep.receipt.json"
+                got = run_receipt(sign_argv(nested(depth), out))
+                written = out.exists()
+            self.assertIsNone(got["escaped"], f"{depth}: {got['escaped']}")
+            self.assertEqual(got["code"], 2, depth)
+            self.assertIn("sign refused:", got["stderr"], depth)
+            self.assertIn("(DEPTH)", got["stderr"], depth)
+            self.assertFalse(written, f"{depth}: sign wrote a receipt verify refuses")
+
+    def test_receipt_sign_refuses_oversized_before_writing(self) -> None:
+        big = json.dumps({"sha256": "a" * 64, "bytes": 1, "pad": "x" * 1_100_000})
+        with owned_tmp("kitlib-artifact-size") as tmp:
+            out = Path(tmp) / "big.receipt.json"
+            got = run_receipt(sign_argv(big, out))
+            written = out.exists()
+        self.assertIsNone(got["escaped"], got["escaped"])
+        self.assertEqual(got["code"], 2, got["stderr"])
+        self.assertIn(f"verify reads at most {receipt.MAX_RECEIPT_BYTES}", got["stderr"])
+        self.assertFalse(written, "sign wrote a receipt verify refuses as TOO_LARGE")
+
+    def test_receipt_small_sign_then_verify_ok(self) -> None:
+        with owned_tmp("kitlib-artifact-size") as tmp:
+            out = Path(tmp) / "small.receipt.json"
+            signed = run_receipt(sign_argv(json.dumps({"sha256": "a" * 64, "bytes": 1}), out))
+            verified = run_receipt(["verify", str(out)])
+        self.assertEqual((signed["escaped"], signed["code"]), (None, 0), signed)
+        self.assertEqual((verified["escaped"], verified["code"]), (None, 0), verified)
+        self.assertTrue(verified["stdout"].startswith("verify OK ev_"), verified)
+
+    def test_receipt_sign_refuses_duplicate_key_and_nan(self) -> None:
+        for bad in ('{"sha256": "' + "a" * 64 + '", "bytes": 1, "bytes": 2}', '{"sha256": "' + "a" * 64 + '", "bytes": NaN}'):
+            with owned_tmp("kitlib-artifact-strict") as tmp:
+                out = Path(tmp) / "bad.receipt.json"
+                got = run_receipt(sign_argv(bad, out))
+                written = out.exists()
+            self.assertEqual((got["escaped"], got["code"], written), (None, 2, False), got)
+            self.assertIn("is not strict JSON", got["stderr"])
+
 
 
 if __name__ == "__main__":

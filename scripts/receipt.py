@@ -108,7 +108,16 @@ def compute_id(record: dict) -> str:
     return "ev_" + hashlib.sha256(canonical_bytes(projection)).hexdigest()
 
 
+def _artifact():
+    # kitlib_artifact ships beside this file. A bare json.loads accepts NaN and keeps the LAST of duplicate keys, so a
+    # receipt could show one confidence to a reader and hash another; strict_json refuses both (KL10, ompkit-gvp4j).
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import kitlib_artifact
+    return kitlib_artifact
+
+
 def sign(args) -> int:
+    kitlib_artifact = _artifact()
     params = {}
     for kv in args.param or []:
         if "=" not in kv:
@@ -125,7 +134,12 @@ def sign(args) -> int:
             return 2
         result_ref = {"sha256": args.result_sha256, "bytes": args.result_bytes}
     elif args.result_ref_json:
-        result_ref = json.loads(args.result_ref_json)
+        try:
+            result_ref = kitlib_artifact.strict_json(args.result_ref_json.encode("utf-8", "surrogatepass"),
+                                                     path="--result-ref-json")
+        except kitlib_artifact.ArtifactError as exc:
+            print(f"sign refused: --result-ref-json is not strict JSON ({exc})", file=sys.stderr)
+            return 2
     else:
         print("sign refused: --result-sha256/--result-bytes or --result-ref-json required", file=sys.stderr)
         return 2
@@ -146,6 +160,17 @@ def sign(args) -> int:
         return 2
     record["evidence_id"] = compute_id(record)
     text = json.dumps(record, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
+    # Refuse, before writing anything, a receipt verify would refuse: verify reads at most MAX_RECEIPT_BYTES and
+    # parses strictly (nesting depth included), so check those exact bytes the same way.
+    data = text.encode("utf-8")
+    if len(data) > MAX_RECEIPT_BYTES:
+        print(f"sign refused: receipt is {len(data)} bytes; verify reads at most {MAX_RECEIPT_BYTES}", file=sys.stderr)
+        return 2
+    try:
+        kitlib_artifact.strict_json(data, path=args.out or "<stdout>")
+    except kitlib_artifact.ArtifactError as exc:
+        print(f"sign refused: verify could not read this receipt ({exc})", file=sys.stderr)
+        return 2
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
     else:
@@ -154,10 +179,7 @@ def sign(args) -> int:
 
 
 def verify(path: str) -> int:
-    # kitlib_artifact ships beside this file. A bare json.loads accepts NaN and keeps the LAST of duplicate keys, so a
-    # receipt could show one confidence to a reader and hash another; strict_json refuses both (KL10, ompkit-gvp4j).
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import kitlib_artifact
+    kitlib_artifact = _artifact()
     try:
         real = os.path.realpath(path)
         art = kitlib_artifact.read_local_artifact(real, allowed_root=os.path.dirname(real), max_bytes=MAX_RECEIPT_BYTES,

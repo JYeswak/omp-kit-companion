@@ -211,21 +211,81 @@ class _Parser:
 
     def document(self) -> Any:
         self.ws()
-        value = self.value(0)
+        value = self.value()
         self.ws()
         if self.i < len(self.text) and _on("trailing"):
             self.fail("TRAILING_GARBAGE", "data after the JSON value")
         return value
 
-    def value(self, depth: int) -> Any:
+    def value(self) -> Any:
+        """One JSON value. Nesting lives on an explicit stack, never the Python stack, so no input depth can raise
+        RecursionError: the max_depth guard is exact (``max_depth`` nested containers parse, one more is DEPTH)."""
         text = self.text
-        if self.i >= len(text):
-            self.fail("SYNTAX", "unexpected end of input")
-        char = text[self.i]
-        if char in "{[":
-            if depth >= self.max_depth:
-                self.fail("DEPTH", f"nesting deeper than {self.max_depth}")
-            return self.object(depth + 1) if char == "{" else self.array(depth + 1)
+        # Each frame is [container, closer, pending key]; the key is None for arrays.
+        stack: List[List[Any]] = []
+        while self.i < len(text):  # every pass consumes an opener or a scalar, or fails, so input length bounds it
+            char = text[self.i]
+            if char in "{[":
+                if len(stack) >= self.max_depth:
+                    self.fail("DEPTH", f"nesting deeper than {self.max_depth}")
+                self.i += 1
+                self.ws()
+                closer = "}" if char == "{" else "]"
+                if self.peek() == closer:
+                    self.i += 1
+                    result: Any = {} if char == "{" else []
+                else:
+                    frame: List[Any] = [{} if char == "{" else [], closer, None]
+                    stack.append(frame)
+                    self.member_start(frame)
+                    continue
+            else:
+                result = self.scalar(char)
+            # Attach the finished value to its parent, closing every container that ends here.
+            while stack:  # every pass pops a container or breaks after a ','
+                frame = stack[-1]
+                container, closer = frame[0], frame[1]
+                if closer == "}":
+                    container[frame[2]] = result
+                else:
+                    container.append(result)
+                self.ws()
+                char = self.peek()
+                if char == ",":
+                    self.i += 1
+                    self.member_start(frame)
+                    break
+                if char == closer:
+                    self.i += 1
+                    result = stack.pop()[0]
+                    continue
+                self.fail("SYNTAX", f"expected ',' or '{closer}'")
+            else:
+                return result
+        self.fail("SYNTAX", "unexpected end of input")
+
+    def member_start(self, frame: List[Any]) -> None:
+        """Advance to the next member's value: past whitespace, and for an object past its key and ':'."""
+        if self.i >= len(self.text):
+            self.fail("SYNTAX", "unterminated object" if frame[1] == "}" else "unterminated array")
+        self.ws()
+        if frame[1] != "}":
+            return
+        if self.peek() != '"':
+            self.fail("SYNTAX", "expected a string key")
+        key_at = self.i
+        key = self.string()
+        if key in frame[0] and _on("duplicate-key"):
+            self.fail("DUPLICATE_KEY", f"duplicate key {key!r}", key_at)
+        self.ws()
+        if self.peek() != ":":
+            self.fail("SYNTAX", "expected ':'")
+        self.i += 1
+        self.ws()
+        frame[2] = key
+
+    def scalar(self, char: str) -> Any:
+        text = self.text
         if char == '"':
             return self.string()
         for token, value in (("NaN", math.nan), ("Infinity", math.inf), ("-Infinity", -math.inf)):
@@ -241,59 +301,6 @@ class _Parser:
                 self.i += len(token)
                 return value
         self.fail("SYNTAX", f"unexpected character {char!r}")
-
-    def object(self, depth: int) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
-        self.i += 1
-        self.ws()
-        if self.peek() == "}":
-            self.i += 1
-            return out
-        while self.i < len(self.text):  # every pass consumes input or fails, so the input length bounds it
-            self.ws()
-            if self.peek() != '"':
-                self.fail("SYNTAX", "expected a string key")
-            key_at = self.i
-            key = self.string()
-            if key in out and _on("duplicate-key"):
-                self.fail("DUPLICATE_KEY", f"duplicate key {key!r}", key_at)
-            self.ws()
-            if self.peek() != ":":
-                self.fail("SYNTAX", "expected ':'")
-            self.i += 1
-            self.ws()
-            out[key] = self.value(depth)
-            self.ws()
-            char = self.peek()
-            if char == ",":
-                self.i += 1
-                continue
-            if char == "}":
-                self.i += 1
-                return out
-            self.fail("SYNTAX", "expected ',' or '}'")
-        self.fail("SYNTAX", "unterminated object")
-
-    def array(self, depth: int) -> List[Any]:
-        out: List[Any] = []
-        self.i += 1
-        self.ws()
-        if self.peek() == "]":
-            self.i += 1
-            return out
-        while self.i < len(self.text):  # every pass consumes input or fails, so the input length bounds it
-            self.ws()
-            out.append(self.value(depth))
-            self.ws()
-            char = self.peek()
-            if char == ",":
-                self.i += 1
-                continue
-            if char == "]":
-                self.i += 1
-                return out
-            self.fail("SYNTAX", "expected ',' or ']'")
-        self.fail("SYNTAX", "unterminated array")
 
     def string(self) -> str:
         text = self.text
