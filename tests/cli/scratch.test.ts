@@ -32,10 +32,16 @@ afterEach(() => {
   else process.env.XDG_CONFIG_HOME = savedConfig;
 });
 
+/** Production state dirs are 0700; the scratch-users lock refuses group/other bits (PERMISSIVE_MODE). */
+function privateKitState(state: string): void {
+  mkdirSync(join(state, "omp-kit"), { recursive: true, mode: 0o700 });
+}
+
 /** Isolated state dir for in-process apply tests (which append JSONL to XDG state). */
 function useState(): string {
   const state = agentTmp("scratch-xdg");
   roots.push(state);
+  privateKitState(state);
   process.env.XDG_STATE_HOME = state;
   return state;
 }
@@ -517,6 +523,25 @@ test("6knq2: an owner-less quarantine entry past its TTL but touched within 72h 
   expect(existsSync(idle)).toBe(false);
 });
 
+test("5fn07: a group/other-accessible kit state dir refuses the users lock, so expiry keeps the entry", () => {
+  const home = useState();
+  const now = Date.now();
+  const qt = quarantineDir(home);
+  mkdirSync(qt, { recursive: true });
+  const entry = join(qt, quarantineEntryFor("permissive-state", new Date(now - 25 * 3600 * 1000)));
+  mkdirSync(entry, { recursive: true });
+  writeFileSync(join(entry, "data"), "expired");
+  backdateTree(entry, 80 * 3600 * 1000, now);
+  chmodSync(join(home, "omp-kit"), 0o755);
+  const refused = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+  expect(refused).toContainEqual(expect.objectContaining({ dir: entry, action: "SKIP", reason: "users-lock-busy" }));
+  expect(existsSync(entry)).toBe(true);
+  chmodSync(join(home, "omp-kit"), 0o700);
+  const deleted = applyQuarantineExpiry(home, { ...depsFor(), home, now });
+  expect(deleted.some(row => row.dir === entry && row.action === "DELETE")).toBe(true);
+  expect(existsSync(entry)).toBe(false);
+});
+
 test("expired delete markers log their cause and are retried", () => {
   const home = useState();
   const now = Date.now();
@@ -629,6 +654,7 @@ function cliHome(): { home: string; state: string } {
   roots.push(home);
   const state = join(home, "state");
   mkdirSync(state, { recursive: true });
+  privateKitState(state);
   const bin = join(home, ".local", "bin");
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
