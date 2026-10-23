@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
@@ -30,7 +30,13 @@ export interface ScratchOwner { pid: number; processStart: string | null; label:
 	/** Where the dir goes when its work ends (ompkit-774u.15): absent means unbinned. A hold carries the bead that justifies it and an expiry within 14 days of creation. */
 	bin: ScratchBin | null; purpose: string | null; bead: string | null; expires: string | null;
 	/** Declared byte budget (ompkit-774u.15 P0): absent means unbounded. An over-budget live dir is flagged, never reaped for size alone. */
-	budget: number | null }
+	budget: number | null;
+	/**
+	 * PIDIDENT1 (ompkit-a0vy1): sha256 (hex) of the capability token `scratch new` minted and returned once. Whoever
+	 * presents the token may release the dir, whatever its seat or pid; the token itself is never stored. Null on dirs
+	 * made before the capability, which keep today's seat-or-process rule.
+	 */
+	capabilitySha256: string | null }
 
 const OWNER_FIELDS = ["pid", "process_start", "label", "repo", "created_at", "argv0"] as const;
 const LEGACY_OWNER_FIELDS = ["pid", "label", "repo", "created"] as const;
@@ -38,7 +44,9 @@ const SEAT_FIELDS = ["agent", "session"] as const;
 const BIN_FIELDS = ["bin", "purpose", "bead", "expires"] as const;
 const BUDGET_FIELDS = ["budget"] as const;
 const BUDGET_PATTERN = /^[1-9][0-9]{0,14}$/;
-const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS, ...BIN_FIELDS, ...BUDGET_FIELDS];
+const CAPABILITY_FIELDS = ["capability_sha256"] as const;
+const CAPABILITY_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS, ...BIN_FIELDS, ...BUDGET_FIELDS, ...CAPABILITY_FIELDS];
 const AGENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SESSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
 const PURPOSE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
@@ -185,8 +193,9 @@ function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 		return { failure: { field: seat[0]!, problem: "needs both 'agent' and 'session' to name the owning seat" } };
 	const binned = BIN_FIELDS.filter(field => seen[field] !== undefined);
 	const budgeted = BUDGET_FIELDS.filter(field => seen[field] !== undefined);
+	const capable = CAPABILITY_FIELDS.filter(field => seen[field] !== undefined);
 	const base = (fields: readonly string[]): boolean => fields.every(field => seen[field] !== undefined) &&
-		Object.keys(seen).length === fields.length + seat.length + binned.length + budgeted.length;
+		Object.keys(seen).length === fields.length + seat.length + binned.length + budgeted.length + capable.length;
 	const complete = base(OWNER_FIELDS);
 	const legacy = base(LEGACY_OWNER_FIELDS);
 	if (!complete && !legacy) {
@@ -215,11 +224,14 @@ function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 	}
 	if (budgeted.length === 1 && !BUDGET_PATTERN.test(seen.budget!))
 		return { failure: { field: "budget", problem: `is '${seen.budget}', want a positive integer byte count` } };
+	if (capable.length === 1 && !CAPABILITY_SHA256_PATTERN.test(seen.capability_sha256!))
+		return { failure: { field: "capability_sha256", problem: "want 64 lowercase hex digits (the sha256 of the capability token)" } };
 	return { owner: { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
 		repo: seen.repo!, createdAt, argv0: seen.argv0 ?? null,
 		agent: seen.agent ?? null, session: seen.session ?? null, ...final,
 		bead: final.bead ?? (loneBead ? seen.bead! : null),
-		budget: budgeted.length === 1 ? Number(seen.budget) : null } };
+		budget: budgeted.length === 1 ? Number(seen.budget) : null,
+		capabilitySha256: capable.length === 1 ? seen.capability_sha256! : null } };
 }
 
 const OWNER_FIELD_SETS = "pid,process_start,label,repo,created_at,argv0 or pid,label,repo,created";
@@ -1437,7 +1449,7 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	const parsed = parseOwnerFile(ownerText);
 	const suffixPid = /\.(\d+)$/.exec(marker.legacyName);
 	const owner: ScratchOwner = parsed ?? { pid: suffixPid ? Number(suffixPid[1]) : 0, processStart: null,
-		label: marker.legacyName, repo: "", createdAt: "", argv0: null, agent: null, session: null, bin: null, purpose: null, bead: null, expires: null, budget: null };
+		label: marker.legacyName, repo: "", createdAt: "", argv0: null, agent: null, session: null, bin: null, purpose: null, bead: null, expires: null, budget: null, capabilitySha256: null };
 	return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: true, legacyName: marker.legacyName, bin: null, ref: null };
 }
 
@@ -1454,6 +1466,23 @@ function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
 	if (owner.agent === null || owner.session === null) return false;
 	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
 	return seat.agent === owner.agent && seat.sessions.includes(owner.session);
+}
+
+/** PIDIDENT1 (ompkit-a0vy1): the token `scratch new` returns once; 256 random bits, hex. Only its sha256 reaches `.owner`. */
+function mintScratchCapability(): { token: string; sha256: string } {
+	const token = randomBytes(32).toString("hex");
+	return { token, sha256: createHash("sha256").update(token, "utf8").digest("hex") };
+}
+
+/**
+ * True when `token` is the capability whose sha256 the owner record names. Constant-time over the digests; a record
+ * without a capability (made before PIDIDENT1) is never authorized this way.
+ */
+export function capabilityAuthorizes(owner: ScratchOwner, token: string | undefined): boolean {
+	if (owner.capabilitySha256 === null || token === undefined || token === "") return false;
+	const presented = createHash("sha256").update(token, "utf8").digest();
+	const recorded = Buffer.from(owner.capabilitySha256, "hex");
+	return recorded.length === presented.length && timingSafeEqual(presented, recorded);
 }
 
 /**
@@ -1484,7 +1513,9 @@ export interface ScratchReleaseResult { ok: boolean; changed: boolean; dir: stri
 	/** Refusal detail naming the first failing owner field plus the accepted field sets (ompkit-774u.15.1). */
 	detail?: string }
 
-export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string; bin?: ScratchBin; ref?: string; now?: boolean }
+export interface ScratchReleaseOptions { legacyOwner?: boolean; reason?: string; bin?: ScratchBin; ref?: string; now?: boolean;
+	/** PIDIDENT1: the capability token `scratch new` returned; authorizes release when its sha256 matches the record. */
+	capability?: string }
 
 /** TRANSFER1 (ompkit-jbiwx): the token a destination carries to prove it holds a released dir's content. */
 export const TRANSFER_TOKEN_PREFIX = "scratch-sha256:";
@@ -1671,9 +1702,16 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	// release to its owner, and the marker pins the owner text and inode.
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith("."))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
+	// Authority is the seat (agent + session lease) or the creation-time capability (PIDIDENT1 ompkit-a0vy1). The
+	// process rule below is kept only for records and callers that have neither.
 	const seatOwned = callerHoldsSeat(owner, deps);
-	if (!seatOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run))
-		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
+	const capabilityOwned = !seatOwned && capabilityAuthorizes(owner, opts.capability);
+	if (!seatOwned && !capabilityOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run)) {
+		const detail = owner.capabilitySha256 === null ? undefined : opts.capability === undefined || opts.capability === ""
+			? "no capability was presented; pass the one `scratch new` returned with --capability TOKEN (or OMP_KIT_SCRATCH_CAPABILITY)"
+			: "the presented capability does not match this directory's";
+		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid, ...(detail ? { detail } : {}) };
+	}
 	const binRefusal = releaseBinRefusal(dir, owner, opts, deps);
 	if (binRefusal !== null) return { ok: false, changed: false, dir, reason: binRefusal.reason, ownerPid: owner.pid, ...(binRefusal.detail ? { detail: binRefusal.detail } : {}) };
 	// Delete-at-once (ompkit-774u.15, Joshua J-102): a finished task retires its own scratch. Evidence and promote may
@@ -1681,7 +1719,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	// release names no destination, and a hold is never released here.
 	if (opts.now === true && opts.bin === undefined)
 		return { ok: false, changed: false, dir, reason: "now-needs-bin", ownerPid: owner.pid };
-	if (owner.processStart !== null && !seatOwned) {
+	if (owner.processStart !== null && !seatOwned && !capabilityOwned) {
 		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "live") {
 			return { ok: false, changed: false, dir,
@@ -1765,7 +1803,12 @@ function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number
 	appendLog(home, { event: "release", dir, at: releasedAt, owner: released.owner.pid, legacy: true, reason });
 	return { ok: true, changed: true, dir, reason: "owner-released-legacy", ownerPid: released.owner.pid };
 }
-export interface ScratchCreateResult { ok: boolean; dir: string; exportLine: string; reason: string; detail?: string }
+export interface ScratchCreateResult { ok: boolean; dir: string; exportLine: string; reason: string; detail?: string;
+	/**
+	 * PIDIDENT1 (ompkit-a0vy1): the release capability, returned only here and only on success. `.owner` keeps its
+	 * sha256; `scratch release DIR --capability TOKEN` from any process releases the dir.
+	 */
+	capability?: string }
 
 export interface ScratchCreateBin { bin?: ScratchBin; purpose?: string; bead?: string; expires?: string; budgetBytes?: number }
 
@@ -1868,7 +1911,8 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	const argv = process.argv[1] ?? process.argv[0] ?? "unknown";
 	// No injected seat on the programmatic path: fall back to the live lookup
 	// (as release and owned-scratch do) so every dir a seated caller makes
-	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Unseated callers keep pid owners.
+	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Every dir, seated or not, also gets a release capability (PIDIDENT1
+	// ompkit-a0vy1): an unseated caller's pid is liveness evidence only, so the capability is how it releases later.
 	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
 	const fields: Record<string, string | number> = { pid: process.pid, process_start: normalizeStart(start), label, repo, created_at: createdAt, argv0: argv };
 	if (seat?.agent && seat.main) {
@@ -1884,6 +1928,8 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 		if (!Number.isInteger(bins.budgetBytes) || !BUDGET_PATTERN.test(String(bins.budgetBytes))) return { ok: false, dir: "", exportLine: "", reason: "budget-invalid" };
 		fields.budget = bins.budgetBytes;
 	}
+	const capability = mintScratchCapability();
+	fields.capability_sha256 = capability.sha256;
 	const ownerText = jsonOwner ? JSON.stringify(fields) : Object.entries(fields).map(([key, value]) => `${key}=${value}\n`).join("");
 	if (parseOwnerFile(ownerText) === null) return { ok: false, dir: "", exportLine: "", reason: "bin-invalid" };
 	const seatKey = seat?.agent && seat.main ? seat.agent : `pid:${process.pid}`;
@@ -1934,7 +1980,7 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 		} catch { /* best effort */ }
 		return { ok: false, dir: "", exportLine: "", reason: "ledger-write-failed" };
 	}
-	return { ok: true, dir, exportLine: `export TMPDIR=${dir}`, reason: "created" };
+	return { ok: true, dir, exportLine: `export TMPDIR=${dir}`, reason: "created", capability: capability.token };
 }
 
 /**

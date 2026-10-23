@@ -44,7 +44,13 @@ omp-kit scratch release DIR --bin promote  --ref file:scripts/probe.ts --now
 omp-kit scratch release DIR --bin evidence --ref bead:ompkit-774u.15 --now
 ```
 
-The release is the owner's act: the caller must be the owner (its process, a child of it, or the seat that holds the recorded session). The release marker records the bin and the reference next to the owner text, device and inode it already pins.
+The release is the owner's act. The caller must hold one of these:
+
+- the seat that holds the recorded session (agent and omp session id);
+- the capability that `scratch new` returned for the directory;
+- the owner process itself, or a child of it.
+
+The release marker records the bin and the reference next to the owner text, device and inode it already pins.
 
 An evidence or promote reference must prove the content arrived, not merely name a place (TRANSFER1). The directory's content has one token, `scratch-sha256:<digest>`. The digest covers every file below the directory (path and bytes) except the owner record and the release marker. The reference is accepted when:
 
@@ -56,6 +62,23 @@ An existing bead or an unrelated tracked file proves nothing. A refused release 
 `--now` retires the directory in the same turn, which is how a finished task disposes of its scratch (SCRATCHRETIRE1): a throwaway at once, evidence and promote only after their reference has been verified. It rechecks what the reaper's final delete checks: the same device and inode, the unchanged owner text, the owner inside the scratch root, and no open file. When any recheck fails, the directory and its marker stay, the command exits `SCRATCH_RELEASE_HELD` with the reason (`now-held-open-fds`, `now-held-lsof-unavailable`, `now-held-owner-changed`, ...), and the directory remains yours to retire: clear the cause and run the same release with `--now` again. The reaper is only a backstop. Without `--now` the release only marks the directory.
 
 A release without `--bin` still works and is counted as unbinned; it cannot take `--now`.
+
+### The release capability
+
+`omp-kit scratch new --label X --json` returns `data.capability`. This is a random 256-bit token (64 hex characters). The kit returns it once, in that result (text mode prints the same fields), and never writes the token to disk. `.owner` keeps only its sha256, as `capability_sha256`.
+
+Pass the token to a release from any later process:
+
+```
+omp-kit scratch release DIR --bin throwaway --now --capability TOKEN
+OMP_KIT_SCRATCH_CAPABILITY=TOKEN omp-kit scratch release DIR --bin throwaway --now
+```
+
+- The flag wins over the environment variable.
+- The token authorizes the release whatever the caller's seat or pid. This covers a dir made by a short-lived `scratch new` subprocess from an eval kernel or tool shell with no `AGENT_NAME`, whose recorded pid is gone by release time.
+- The comparison is constant-time over the digests.
+- A wrong or missing token, with no seat match, is refused with `SCRATCH_RELEASE_REFUSED: caller-not-owner`. The detail says whether no token was presented or the token did not match, and the remediation names `--capability`.
+- A dir whose record has no `capability_sha256` (made before the capability existed) is released exactly as before.
 
 ## A reap is a gap report
 
@@ -99,4 +122,4 @@ Every omp session in a fleet repo makes `var/agent-tmp/omp.<pid>` and its `.owne
 
 ## Scope of what exists today
 
-The owner keys (with byte budget), the hold rule, `scratch release --bin/--ref`, the reap gap report (printed by `scratch apply`),
+The owner keys (with byte budget and the release capability's `capability_sha256`), the hold rule, `scratch release --bin/--ref/--capability`, the reap gap report (printed by `scratch apply`),

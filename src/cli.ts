@@ -3507,7 +3507,11 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		// Delete-at-once (ompkit-774u.15, SCRATCHRETIRE1): --now retires the released dir in the same turn after the
 		// reaper-grade rechecks; a failed recheck keeps the marked dir and is not success.
 		const now = request.flags.has("--now");
-		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}), ...(now ? { now: true as const } : {}) });
+		// PIDIDENT1 (ompkit-a0vy1): the capability `scratch new` returned authorizes the release from any process. The
+		// flag wins over the environment variable; neither is ever logged or echoed.
+		const capabilityFlag = request.flags.get("--capability");
+		const capability = typeof capabilityFlag === "string" ? capabilityFlag : process.env.OMP_KIT_SCRATCH_CAPABILITY?.trim() || undefined;
+		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}), ...(now ? { now: true as const } : {}), ...(capability ? { capability } : {}) });
 		if (!released.ok && released.changed) {
 			releaseBudgetEntry(defaultBudgetLedgerPath(), released.dir);
 			return refusal("SCRATCH_RELEASE_HELD",
@@ -3516,7 +3520,9 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED",
 			`Scratch release refused: ${released.reason}${released.detail ? ` — ${released.detail}` : ""}`,
-			"Use the exact owned task directory from its owner process; no directory was quarantined.");
+			released.reason === "caller-not-owner"
+				? "Pass the capability `scratch new` returned for this directory: --capability TOKEN (or OMP_KIT_SCRATCH_CAPABILITY=TOKEN), or release from the owning seat; no directory was quarantined."
+				: "Use the exact owned task directory from its owner process; no directory was quarantined.");
 		releaseBudgetEntry(defaultBudgetLedgerPath(), released.dir);
 		return { code: 0, data: { overall: released.changed ? "CHANGED" : "OK", action: "RELEASED",
 			dir: released.dir, changed: released.changed, bin: bin ?? null, ref: typeof refFlag === "string" ? refFlag : null,
@@ -3591,9 +3597,10 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			"Use a fresh label; run from the repo that will own the scratch.");
 		if (typeof exportFlag === "string") {
 			const err = exportCommitToScratch(repo, exportFlag, created.dir, deps.run);
-			if (err !== null) return { code: 1, data: { overall: "FINDINGS", dir: created.dir, reason: err }, verification: "UNVERIFIED" };
+			// The dir exists either way, so its capability is returned either way: it is the only way to release it later.
+			if (err !== null) return { code: 1, data: { overall: "FINDINGS", dir: created.dir, reason: err, capability: created.capability }, verification: "UNVERIFIED" };
 		}
-		return { code: 0, data: { overall: "OK", dir: created.dir, exportLine: created.exportLine }, verification: "UNVERIFIED" };
+		return { code: 0, data: { overall: "OK", dir: created.dir, exportLine: created.exportLine, capability: created.capability }, verification: "UNVERIFIED" };
 	}
 	if (sub === "mine") {
 		const atFlag = request.flags.get("--at");
