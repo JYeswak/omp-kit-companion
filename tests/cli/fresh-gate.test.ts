@@ -661,6 +661,7 @@ test("CIGATE1: the disk floor reads statfs and refuses unreadable space with a t
 test.skipIf(LOW_BASE === null)("CIGATE1 planted: below the 10 GiB physical floor the gate refuses naming the space needed, and no test runs", () => {
 	const source = readFileSync(gate, "utf8");
 	const fx = saveFixture(0, { slots: 8, max_wait_s: 1 });
+	fx.env.FRESH_GATE_TEST_REAL_STATFS = "1";
 	const low = ownedTmp("fresh-gate-lowfs", { root: LOW_BASE as string }).path;
 	try {
 		writeFileSync(join(low, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-lowfs\ncreated=${new Date().toISOString()}\n`);
