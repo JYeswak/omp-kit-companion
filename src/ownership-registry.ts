@@ -272,6 +272,16 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		terminal: { outcome: "reaped", producer: "kitlib cleanup at exit/signal, else the scratch reaper's kitlib branch (ompkit-army3)" },
 		census: null, noCensus: "one dir per live creator, removed by its creator; only SIGKILL leftovers persist and the reaper's plan lists them", ownerBead: "ompkit-41l85",
 	},
+	{
+		id: "kitlib-io-temp", title: "kitlib atomic replace temp files .<name>.<pid>.<12 hex>.tmp beside the target",
+		rows: [], class: "REAP", ownerKey: "pid", scope: "cli-run", survivesRespawn: false,
+		writers: ["src/kitlib/io.ts"],
+		cancel: "atomicReplaceBytes renames the temp onto the target in the same call, or removes it (only while its name still names that file) on any failure before the rename",
+		crash: "a crash between create and rename leaves a .<name>.<pid>.<hex>.tmp orphan beside the target; owners that sweep stale tmps (report-inject-job) remove it, others leave it to the repo's scratch hygiene",
+		respawn: "the pid names only a unique temp file, never the owner",
+		terminal: { outcome: "reaped", producer: "atomicReplaceBytes rename or failure cleanup" },
+		census: null, noCensus: "transient temp name: gone after rename except for crash orphans", ownerBead: "ompkit-67i70",
+	},
 ];
 
 /** Entries that account for an inventory row, for the coverage test and the doctor's row lookup. */
