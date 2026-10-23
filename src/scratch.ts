@@ -179,9 +179,8 @@ function validateOwnerFields(seen: Record<string, string>): ScratchOwner | null 
 
 function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 	const seat = SEAT_FIELDS.filter(field => seen[field] !== undefined);
-	// A session alone names no owner; an agent alone is the shell-made record (no single omp session to name), SCRATCHOWNER1.
-	if (seat.length === 1 && seen.session !== undefined)
-		return { failure: { field: "session", problem: "needs 'agent' to name the owning seat" } };
+	if (seat.length === 1)
+		return { failure: { field: seat[0]!, problem: "needs both 'agent' and 'session' to name the owning seat" } };
 	const binned = BIN_FIELDS.filter(field => seen[field] !== undefined);
 	const budgeted = BUDGET_FIELDS.filter(field => seen[field] !== undefined);
 	const base = (fields: readonly string[]): boolean => fields.every(field => seen[field] !== undefined) &&
@@ -196,8 +195,8 @@ function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 	}
 	if (!/^[1-9][0-9]{0,5}$/.test(seen.pid!))
 		return { failure: { field: "pid", problem: `is '${seen.pid}', want 1-6 digits with no leading zero` } };
-	if ((seen.agent !== undefined && !AGENT_PATTERN.test(seen.agent)) || (seen.session !== undefined && !SESSION_PATTERN.test(seen.session))) {
-		const bad = seen.agent !== undefined && !AGENT_PATTERN.test(seen.agent) ? "agent" : "session";
+	if (seat.length === 2 && (!AGENT_PATTERN.test(seen.agent!) || !SESSION_PATTERN.test(seen.session!))) {
+		const bad = !AGENT_PATTERN.test(seen.agent!) ? "agent" : "session";
 		return { failure: { field: bad, problem: `is '${seen[bad]}', want 1-64 chars of A-Za-z0-9._-` } };
 	}
 	const createdAt = seen.created_at ?? seen.created!;
@@ -1436,20 +1435,6 @@ function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
 }
 
 /**
- * SCRATCHOWNER1 (ompkit-ngq78): the creator was a short-lived shell (`export TMPDIR=$(omp-kit scratch new ...)`), so no
- * later caller descends from it. The same agent may release once that creator is provably dead, and only from the
- * session the record names when it names one. A live (or unprovable) creator still binds release to its own tree.
- */
-function callerIsSuccessorAgent(owner: ScratchOwner, deps: InspectDeps): boolean {
-	if (owner.agent === null) return false;
-	const state = owner.processStart !== null ? probeOwner(owner.pid, owner.processStart, deps.liveness)
-		: deps.liveness.signalAlive(owner.pid) || deps.liveness.psVisible(owner.pid) ? "live" : "dead";
-	if (state !== "dead") return false;
-	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
-	return seat.agent === owner.agent && (owner.session === null || seat.sessions.includes(owner.session));
-}
-
-/**
  * REAPRO1 (ompkit-nuvvw): give every real dir under `root` (root included) owner rwx so a read-only install tree
  * (`releases/<v>` 0555) can be emptied. lstat only: symlinks are never followed, nothing outside `root` is touched.
  */
@@ -1664,7 +1649,7 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	// release to its owner, and the marker pins the owner text and inode.
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith("."))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
-	const seatOwned = callerHoldsSeat(owner, deps) || callerIsSuccessorAgent(owner, deps);
+	const seatOwned = callerHoldsSeat(owner, deps);
 	if (!seatOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run))
 		return { ok: false, changed: false, dir, reason: "caller-not-owner", ownerPid: owner.pid };
 	const binRefusal = releaseBinRefusal(dir, owner, opts, deps);
@@ -1864,10 +1849,10 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Unseated callers keep pid owners.
 	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
 	const fields: Record<string, string | number> = { pid: process.pid, process_start: start, label, repo, created_at: createdAt, argv0: argv };
-	if (seat?.agent) {
-		if (!AGENT_PATTERN.test(seat.agent) || (seat.main && !SESSION_PATTERN.test(seat.main))) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
+	if (seat?.agent && seat.main) {
+		if (!AGENT_PATTERN.test(seat.agent) || !SESSION_PATTERN.test(seat.main)) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
 		fields.agent = seat.agent;
-		if (seat.main) fields.session = seat.main;
+		fields.session = seat.main;
 	}
 	for (const [key, value] of [["bin", bins.bin], ["purpose", bins.purpose], ["bead", bins.bead], ["expires", bins.expires]] as const) {
 		if (value === undefined) continue;
