@@ -1,0 +1,12 @@
+{
+  "archived_at": "2026-10-22T15:52:05Z",
+  "bead": "ompkit-fp72.19.1.11",
+  "bytes": 10702,
+  "dest": "docs/evidence/cleanup-2026-10-22/tests__cli__fleet-watch-pull.test.ts.diff",
+  "git_head": "eac3201945221e687891814df2eaaddfa05dc96d",
+  "path": "tests/cli/fleet-watch-pull.test.ts",
+  "route": "archive then restore/remove",
+  "secrets": false,
+  "sha256": "dea96a11fc3e2632a48599bf6adbad9355d31f21ea64827b8fc97374db737c35",
+  "truncated": false
+}
