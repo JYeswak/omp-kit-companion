@@ -6,6 +6,7 @@ import { launchdLoaded, superviseScratchJob } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { runSync } from "../../src/kitlib/run.ts";
 // Fresh clones have no var/agent-tmp; ownedTmp below requires its root to exist.
 const AGENT_TMP = join(import.meta.dir, "../../var/agent-tmp");
 
@@ -856,7 +857,14 @@ test("REAP1 whole scheduled scratch job preempts a synchronous owner read and re
   const fifo = Bun.spawnSync(["mkfifo", join(blocked, ".owner")], { stdout: "pipe", stderr: "pipe" });
   expect(fifo.exitCode).toBe(0);
   const bin = join(home, ".local", "bin");
-  writeFileSync(join(bin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const lsof = join(bin, "lsof");
+  writeFileSync(lsof, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  // The worker execs this stub (its lsof snapshot) before its first INSPECT, and macOS assesses a newly
+  // written executable on its first exec (0.18-0.55 s measured in this worker, 1.3 s under load; ~20 ms
+  // after, from any process). Finish that one-time exec before the 600 ms cap, which must time the
+  // worker's owner read, not the stub's first launch.
+  const warm = runSync([lsof], { deadline_s: 5 });
+  expect({ rc: warm.rc, timedOut: warm.timed_out }).toEqual({ rc: 1, timedOut: false });
   const started = Date.now();
   const result = cli(["service", "run", "scratch-reaper"], home, {
     OMP_KIT_SCRATCH_ROOTS: root, TMPDIR: home, OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "600",
