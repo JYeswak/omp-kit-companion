@@ -469,8 +469,8 @@ else
 	fail=$((fail + 1)); printf 'FAIL real-git-regexploit-refused: base_push_rc=%s push_rc=%s before=%s after=%s out<<<%s>>>\n' "$base_push_rc" "$push_rc" "$origin_before" "$origin_after" "$out"
 fi
 # SAVEFIRST1 (ompkit-774u.16): a local Git push crosses the real pre-push adapter and the production
-# fresh-gate disk-pressure/heavy-step functions. Unrelated checker contracts are fixture controls;
-# the heavy command and statfs admission come from KITREPO.
+# fresh-gate disk-pressure/heavy-step functions from the exact archive. Its owner exists only in
+# the pushing checkout; only OMP_KIT_CASE_CWD may find it. Other checker contracts are fixture controls.
 save_repo="$TMP/real-savefirst-push"
 save_remote="$TMP/real-savefirst-origin.git"
 save_bin="$TMP/real-savefirst-bin"
@@ -504,7 +504,8 @@ extract_fresh_function() {
 	cat <<'SAVEFIRST_HEAD'
 #!/bin/sh
 set -eu
-ROOT="${SAVEFIRST_TEST_ROOT:?}"
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
 WORK="$ROOT/var/agent-tmp/savefirst-work"
 mkdir -p "$WORK"
 SAVEFIRST_HEAD
@@ -516,7 +517,6 @@ control="$SAVEFIRST_TEST_ROOT/default-observer.marker"
 control_rc=0
 bun run --no-env-file --config=/dev/null src/cli.ts heavy --no-wait --label savefirst-control -- sh -c 'touch "$1"' sh "$control" || control_rc=$?
 [ "$control_rc" -eq 75 ] && [ ! -e "$control" ]
-ROOT="$SAVEFIRST_TEST_ROOT"
 disk_pressure_flag
 marker="$SAVEFIRST_TEST_ROOT/saved.marker"
 heavy_step cli-compile touch "$marker"

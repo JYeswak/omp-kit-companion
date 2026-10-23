@@ -151,9 +151,11 @@ disk_pressure_flag() {
 		pct="an unparsed"
 	fi
 	owners=
-	if [ -n "${ROOT:-}" ] && [ -d "$ROOT/var/agent-tmp" ]; then
+	# The pre-push caller supplies its checkout; ROOT is the isolated archive.
+	scratch_root=${OMP_KIT_CASE_CWD:-${ROOT:-}}
+	if [ -n "$scratch_root" ] && [ -d "$scratch_root/var/agent-tmp" ]; then
 		owners=$(scanned=0
-			for entry in "$ROOT/var/agent-tmp"/*; do
+			for entry in "$scratch_root/var/agent-tmp"/*; do
 				[ -d "$entry" ] || continue
 				scanned=$((scanned + 1))
 				[ "$scanned" -le 200 ] || break
