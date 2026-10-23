@@ -273,7 +273,7 @@ exec "${process.execPath}" "$@"
 	mkdirSync(join(dir, "work"));
 	const env = {
 		PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin`, HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), XDG_STATE_HOME: join(dir, "state"),
-		TMUX_PANE: "", AGENT_NAME: "fresh-gate-save-test", GITHUB_ACTIONS: "", OMP_KIT_DISK_OBSERVER: "", OMP_KIT_HEAVY_FAKE_LOAD1: "0.5", WORK: join(dir, "work"), COMMIT: "HEAD",
+		TMUX_PANE: "", AGENT_NAME: "fresh-gate-save-test", GITHUB_ACTIONS: "", OMP_KIT_DISK_OBSERVER: "", OMP_KIT_CASE_CWD: "", OMP_KIT_HEAVY_FAKE_LOAD1: "0.5", WORK: join(dir, "work"), COMMIT: "HEAD",
 	};
 	return { dir, env };
 }

@@ -47,7 +47,7 @@ function diskFixture(sbhCode: number): DiskFixture {
 	writeFileSync(join(dir, "config", "omp-kit", "load.json"), JSON.stringify({ slots: 8, max_wait_s: 1 }), { mode: 0o600 });
 	const env = {
 		PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin`, HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), XDG_STATE_HOME: join(dir, "state"),
-		TMUX_PANE: "", AGENT_NAME: "ladder-disk-test", OMP_KIT_DISK_OBSERVER: "", OMP_KIT_HEAVY_FAKE_LOAD1: "0.5",
+		TMUX_PANE: "", AGENT_NAME: "ladder-disk-test", OMP_KIT_DISK_OBSERVER: "", OMP_KIT_CASE_CWD: "", OMP_KIT_HEAVY_FAKE_LOAD1: "0.5",
 	};
 	return { dir, env };
 }
@@ -108,6 +108,7 @@ test("SAVEFIRST1 planted: the pressure flag names the largest scratch owners, bi
 	const source = readFileSync(gate, "utf8");
 	const fx = diskFixture(1);
 	const fakeRoot = join(fx.dir, "root");
+	fx.env.OMP_KIT_CASE_CWD = fakeRoot;
 	try {
 		mkdirSync(join(fakeRoot, "var", "agent-tmp", "big-probe.1"), { recursive: true });
 		mkdirSync(join(fakeRoot, "var", "agent-tmp", "tiny-probe.2"), { recursive: true });
