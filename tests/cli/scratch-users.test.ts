@@ -3,11 +3,13 @@
 // `release --now` refuses USER_LIVE and apply keeps it, while the user probes live or unknown. Dead, reused and zombie
 // users do not block. Each refusal has a passing control on the same dir.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { applyScratch, blockingScratchUser, inspectOne, releaseScratch, SCRATCH_USERS_FILE, updateScratchUsers,
-	type InspectDeps, type LivenessDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyScratch, blockingScratchUser, defaultRunner, inspectOne, quarantineDir, quarantineEntryFor,
+	reapLogPath, releaseScratch, SCRATCH_USERS_FILE, scratchContent, updateScratchUsers, type InspectDeps, type LivenessDeps } from "../../src/scratch.ts";
 import type { Incarnation, ProbeState } from "../../src/kitlib/proc.ts";
+import { privateLock } from "../../src/kitlib/lock.ts";
+import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const repo = resolve(import.meta.dir, "../..");
@@ -158,4 +160,131 @@ test("use refuses a pid that is not running and a dir without an owner record; r
 	writeFileSync(join(dir, ".owner"), `pid=${USER_PID + 50}\nlabel=grade\nrepo=${repo}\ncreated=2026-10-22T06:00:00.000Z\n`);
 	await register(dir, world);
 	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "caller-not-owner" });
+});
+
+// Review 4 finding #1: `.users` is bookkeeping, not content. It must not move the transfer digest, and its bytes must not
+// count as a byte-identical copy of the dir's content.
+test("use then unuse leaves the transfer digest unchanged", async () => {
+	const { dir } = fixture();
+	const world: World = { table: new Map([[USER_PID, { start: USER_START }]]) };
+	const before = scratchContent(dir)?.digest;
+	expect(before).toBeDefined();
+	await register(dir, world);
+	expect(await updateScratchUsers(dir, USER_PID, "unuse", { liveness: liveness(world) })).toMatchObject({ ok: true });
+	expect(existsSync(join(dir, SCRATCH_USERS_FILE))).toBe(true);
+	expect(scratchContent(dir)?.digest).toBe(before);
+});
+
+test("a pushed copy of the empty .users file proves nothing; a pushed copy of result.json proves the transfer", async () => {
+	const { home } = fixture();
+	const projectDir = ownedTmp("users-repo", { root: scratchParent }).path;
+	const remoteDir = ownedTmp("users-remote", { root: scratchParent }).path;
+	cleanup.push(projectDir, remoteDir);
+	const isolate = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+	const gitEnv: Record<string, string> = { ...Object.fromEntries(Object.entries(process.env).filter((kv): kv is [string, string] => kv[1] !== undefined)), ...isolate };
+	const git = (...args: string[]) => run(["git", "-C", projectDir, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], { deadline_s: 60, env: gitEnv });
+	expect((await run(["git", "init", "-q", "--bare", remoteDir], { deadline_s: 60, env: gitEnv })).rc).toBe(0);
+	expect((await git("init", "-q", "-b", "main")).rc).toBe(0);
+	const emptyUsers = `${JSON.stringify({ version: 1, users: [] })}\n`;
+	expect(emptyUsers.length).toBe(25);
+	writeFileSync(join(projectDir, "users-copy.json"), emptyUsers);
+	writeFileSync(join(projectDir, "result-copy.json"), "{\"score\":0.93}\n");
+	expect((await git("add", ".")).rc).toBe(0);
+	expect((await git("commit", "-q", "-m", "init")).rc).toBe(0);
+	expect((await git("remote", "add", "origin", remoteDir)).rc).toBe(0);
+	expect((await git("push", "-q", "-u", "origin", "main")).rc).toBe(0);
+	// The owner's repo holds the scratch root, as release --now requires.
+	const root = join(projectDir, "var", "agent-tmp");
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	const dir = join(root, `grade.${process.pid}`);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=grade\nrepo=${projectDir}\ncreated=2026-10-22T06:00:00.000Z\n`);
+	writeFileSync(join(dir, "result.json"), "{\"score\":0.93}\n");
+	writeFileSync(join(dir, SCRATCH_USERS_FILE), emptyUsers);
+	// The transfer check runs through the production runner; its git reads see the isolated config via the environment.
+	const savedGit = { GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM };
+	Object.assign(process.env, isolate);
+	try {
+		const world: World = { table: new Map() };
+		const real: InspectDeps = { ...deps(world), run: defaultRunner };
+		expect(releaseScratch(dir, home, real, { bin: "evidence", ref: "file:users-copy.json", now: true }))
+			.toMatchObject({ ok: false, reason: "ref-transfer-unproven" });
+		expect(existsSync(join(dir, "result.json"))).toBe(true);
+		// Control: a byte-identical pushed copy of result.json proves and releases.
+		expect(releaseScratch(dir, home, real, { bin: "evidence", ref: "file:result-copy.json", now: true }))
+			.toMatchObject({ ok: true, reason: "owner-released-deleted" });
+		expect(existsSync(dir)).toBe(false);
+	} finally {
+		for (const [key, value] of Object.entries(savedGit)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+});
+
+// Review 4 finding #5a: the quarantine expiry delete rechecks registered users like every other deleter.
+test("an expired quarantine entry with a live registered user is kept; a dead user's is deleted", () => {
+	const { home } = fixture();
+	delete process.env.XDG_CONFIG_HOME;
+	const qt = quarantineDir(home);
+	mkdirSync(qt, { recursive: true, mode: 0o700 });
+	const old = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+	const plant = (label: string): string => {
+		const path = join(qt, quarantineEntryFor(label, old));
+		mkdirSync(path);
+		writeFileSync(join(path, "item.json"), "{}");
+		writeFileSync(join(path, SCRATCH_USERS_FILE), `${JSON.stringify({ version: 1, users: [{ pid: USER_PID, start: USER_START }] })}\n`);
+		for (const p of [join(path, "item.json"), join(path, SCRATCH_USERS_FILE), path]) utimesSync(p, old, old);
+		return path;
+	};
+	const kept = plant("kept.1");
+	const world: World = { table: new Map([[USER_PID, { start: USER_START }]]) };
+	const rows = applyQuarantineExpiry(home, { ...deps(world), home });
+	expect(rows.find(row => row.dir === kept)).toMatchObject({ action: "LIVE", reason: "user-live" });
+	expect(existsSync(join(kept, "item.json"))).toBe(true);
+	expect(readFileSync(reapLogPath(home), "utf8")).toContain(`pid ${USER_PID}`);
+	// Control: the user exits; the same entry expires.
+	world.table.delete(USER_PID);
+	const after = applyQuarantineExpiry(home, { ...deps(world), home });
+	expect(after.find(row => row.dir === kept)).toMatchObject({ reason: "quarantine-expired" });
+	expect(existsSync(kept)).toBe(false);
+});
+
+// Review 4 finding #5b: registration and deletion serialize on one lock, so a user is never left registered in a
+// deleted dir: a `use` in flight makes the deleter refuse; a `use` that waits behind the deleter finds the dir gone.
+test("a use holding the users lock makes release --now refuse; a use that waits behind the delete is refused", async () => {
+	const { dir, home } = fixture();
+	const world: World = { table: new Map([[USER_PID, { start: USER_START }]]) };
+	const inFlight = await privateLock({ namespace: "scratch-users", path: dir }, { deadline_s: 1 });
+	const busy = releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true });
+	inFlight.release();
+	expect(busy).toMatchObject({ ok: false, reason: "now-held-users-lock-busy" });
+	expect(existsSync(join(dir, "item.json"))).toBe(true);
+	await register(dir, world);
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "user-live" });
+	expect(await updateScratchUsers(dir, USER_PID, "unuse", { liveness: liveness(world) })).toMatchObject({ ok: true });
+	// The deleter holds the lock across its delete; a use started mid-delete waits, then finds no dir.
+	let late: Promise<Awaited<ReturnType<typeof updateScratchUsers>>> | null = null;
+	const remove = (path: string) => {
+		late ??= updateScratchUsers(dir, USER_PID, "use", { liveness: liveness(world), incarnation: incarnationOf(world) });
+		rmSync(path, { recursive: true, force: true });
+	};
+	expect(releaseScratch(dir, home, { ...deps(world), removeTree: remove }, { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(late).not.toBeNull();
+	expect(await late!).toMatchObject({ ok: false, reason: "directory-unavailable" });
+	expect(existsSync(dir)).toBe(false);
+});
+
+// Review 4 finding #5c: use only registers inside a scratch root.
+test("use refuses a dir outside the scratch roots; inside a root it registers", async () => {
+	const { dir, home } = fixture();
+	const world: World = { table: new Map([[USER_PID, { start: USER_START }]]) };
+	const outside = join(home, "elsewhere");
+	mkdirSync(outside);
+	writeFileSync(join(outside, ".owner"), `pid=${process.pid}\nlabel=grade\nrepo=${repo}\ncreated=2026-10-22T06:00:00.000Z\n`);
+	expect(await updateScratchUsers(outside, USER_PID, "use", { liveness: liveness(world), incarnation: incarnationOf(world) }))
+		.toMatchObject({ ok: false, reason: "outside-scratch-root" });
+	expect(existsSync(join(outside, SCRATCH_USERS_FILE))).toBe(false);
+	await register(dir, world);
 });

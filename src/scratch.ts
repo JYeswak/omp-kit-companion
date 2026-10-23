@@ -412,19 +412,39 @@ export function describeUserBlock(user: ScratchUserBlock): string {
 	return `registered user ${who} is ${user.state} (${user.reason}); the user must finish, or run \`scratch unuse\``;
 }
 
+/**
+ * RELEASELIVE1 (ompkit-5fn07): every deleter and mover holds the same `scratch-users` lock `scratch use` takes, across
+ * its user check and its rename or delete, so a registration lands either before (the deleter sees the user and
+ * refuses) or after (the dir is gone and `use` refuses). The deleters are synchronous, so this is a non-blocking try:
+ * a busy or unavailable lock returns null and the caller refuses. A zero-deadline privateLock never reaches its
+ * await, so its promise is settled on return and Bun.peek reads it synchronously.
+ */
+function withScratchUsersLock<T>(dir: string, busy: () => T, body: () => T): T {
+	const pending = privateLock({ namespace: "scratch-users", path: dir }, { deadline_s: 0 });
+	pending.catch(() => undefined);
+	if (Bun.peek.status(pending) !== "fulfilled") return busy();
+	const lock = Bun.peek(pending) as Awaited<typeof pending>;
+	try {
+		return body();
+	} finally {
+		lock.release();
+	}
+}
+
 export interface ScratchUseResult { ok: boolean; dir: string; reason: string; user: ScratchUser | null; users: ScratchUser[]; pruned: ScratchUser[] }
 export interface ScratchUseDeps {
 	liveness: Pick<LivenessDeps, "probe">;
 	/** Test seam for the registering incarnation read; defaults to kitlib `incarnationSync`. */
 	incarnation?: (pid: number) => Incarnation | null;
-	/** kitlib privateLock state root; defaults to `$XDG_STATE_HOME/omp-kit`. */
-	lockStateDir?: string;
+	/** Home whose scratch roots bound the dir; defaults to `$HOME`. */
+	home?: string;
 }
 
 /**
  * `scratch use DIR [--pid PID]` (register) and `scratch unuse DIR [--pid PID]` (remove every record of PID). The
- * rewrite runs under a kitlib privateLock keyed on the dir and publishes with atomicReplaceBytes; dead, reused and
- * zombie records are pruned on every rewrite.
+ * rewrite runs under a kitlib privateLock keyed on the dir (the lock every deleter holds) and publishes with
+ * atomicReplaceBytes; dead, reused and zombie records are pruned on every rewrite. Only a dir directly inside a scratch
+ * root is accepted: a dir elsewhere (a quarantine entry, a repo dir) has no deleter that reads its users.
  */
 export async function updateScratchUsers(path: string, pid: number, mode: "use" | "unuse", deps: ScratchUseDeps): Promise<ScratchUseResult> {
 	let dir: string;
@@ -435,6 +455,10 @@ export async function updateScratchUsers(path: string, pid: number, mode: "use" 
 	}
 	const refuse = (reason: string): ScratchUseResult => ({ ok: false, dir, reason, user: null, users: [], pruned: [] });
 	if (!Number.isSafeInteger(pid) || pid < 1) return refuse("pid-invalid");
+	const roots = resolveScratchRoots(deps.home ?? process.env.HOME ?? homedir()).flatMap(root => {
+		try { return [realpathSync(root)]; } catch { return []; }
+	});
+	if (!roots.includes(dirname(dir))) return refuse("outside-scratch-root");
 	try {
 		if (!lstatSync(dir).isDirectory() || !lstatSync(join(dir, ".owner")).isFile()) return refuse("not-a-scratch-dir");
 	} catch {
@@ -453,11 +477,17 @@ export async function updateScratchUsers(path: string, pid: number, mode: "use" 
 	}
 	let lock;
 	try {
-		lock = await privateLock({ namespace: "scratch-users", path: dir }, { deadline_s: 10, ...(deps.lockStateDir ? { state_dir: deps.lockStateDir } : {}) });
+		lock = await privateLock({ namespace: "scratch-users", path: dir }, { deadline_s: 10 });
 	} catch {
 		return refuse("users-lock-unavailable");
 	}
 	try {
+		// A deleter that held the lock while this call waited has removed or moved the dir: nothing to register in.
+		try {
+			if (!lstatSync(dir).isDirectory() || !lstatSync(join(dir, ".owner")).isFile()) return refuse("directory-unavailable");
+		} catch {
+			return refuse("directory-unavailable");
+		}
 		const current = readScratchUsers(dir);
 		if (current === null) return refuse("users-file-invalid");
 		const kept: ScratchUser[] = [];
@@ -1660,7 +1690,7 @@ export const TRANSFER_TOKEN_PREFIX = "scratch-sha256:";
 
 /**
  * What an evidence or promote release must prove it transferred: one digest over every entry below the dir (relative
- * path, kind, content hash; the top-level owner record and release marker excluded, so the digest is the same before
+ * path, kind, content hash; the top-level owner record, release marker and `.users` registry excluded, so the digest is the same before
  * and after release) and the sha256 of each regular file, so a byte-identical copy also counts. Symlinks hash their
  * target text and are never followed. Null when any entry cannot be read: unreadable content is never proven.
  */
@@ -1673,7 +1703,7 @@ export function scratchContent(dir: string): { digest: string; files: Set<string
 		while (pending.length > 0) {
 			const rel = pending.pop()!;
 			for (const name of readdirSync(join(dir, rel))) {
-				if (rel === "" && (name === ".owner" || name === RELEASE_FILE)) continue;
+				if (rel === "" && (name === ".owner" || name === RELEASE_FILE || name === SCRATCH_USERS_FILE)) continue;
 				const child = rel === "" ? name : `${rel}/${name}`;
 				const path = join(dir, child);
 				const stat = lstatSync(path);
@@ -1772,6 +1802,13 @@ function releaseBinRefusal(dir: string, owner: ScratchOwner, opts: ScratchReleas
  * never deletes on a refusal.
  */
 function deleteReleasedNow(dir: string, root: string, home: string, deps: InspectDeps, owner: ScratchOwner,
+ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin): ScratchReleaseResult {
+	return withScratchUsersLock(dir, () => ({ ok: false, changed: true, dir, reason: "now-held-users-lock-busy", ownerPid: owner.pid,
+		detail: "released (marker kept) but not retired: a `scratch use` holds the dir's users lock; retire it with --now once it finishes" }),
+	() => deleteReleasedNowLocked(dir, root, home, deps, owner, ownerText, dev, ino, releasedAt, bin));
+}
+
+function deleteReleasedNowLocked(dir: string, root: string, home: string, deps: InspectDeps, owner: ScratchOwner,
 ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin): ScratchReleaseResult {
 	const held = (reason: string): ScratchReleaseResult => ({ ok: false, changed: true, dir, reason, ownerPid: owner.pid,
 		detail: "released (marker kept) but not retired; it is still yours to retire with --now once the cause clears" });
@@ -2153,8 +2190,13 @@ export function exportCommitToScratch(repo: string, commit: string, dir: string,
 	return null;
 }
 
-/** Move an owner-released session to quarantine without requiring its process to exit. */
+/** Move an owner-released session to quarantine without requiring its process to exit (under the dir's users lock). */
 function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
+	return withScratchUsersLock(dir, () => ({ ...verdict, action: "SKIP" as const, reason: "users-lock-busy" }),
+		() => applyReleasedLocked(dir, root, verdict, deps));
+}
+
+function applyReleasedLocked(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
 	const at = new Date(deps.now ?? Date.now()).toISOString();
 	const fail = (reason: string, error?: unknown, dirOverride?: string): ScratchVerdict => {
 		const failed = { ...verdict, action: "SKIP" as const, reason,
@@ -2207,8 +2249,13 @@ function ownerSnapshot(owner: ScratchOwner): string {
 	return [owner.pid, owner.processStart ?? "", owner.label, owner.repo, owner.createdAt, owner.argv0 ?? "", owner.agent ?? "", owner.session ?? ""].join("\n");
 }
 
-/** Atomic quarantine + full recheck, then delete. Returns the terminal action. */
+/** Atomic quarantine + full recheck, then delete, under the dir's users lock. Returns the terminal action. */
 export function applyReap(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
+	return withScratchUsersLock(dir, () => ({ ...verdict, action: "SKIP" as const, reason: "users-lock-busy" }),
+		() => applyReapLocked(dir, root, verdict, deps));
+}
+
+function applyReapLocked(dir: string, root: string, verdict: ScratchVerdict, deps: ApplyDeps): ScratchVerdict {
 	const now = deps.now ?? Date.now();
 	const at = new Date(now).toISOString();
 	const fail = (reason: string, error?: unknown, dirOverride?: string): ScratchVerdict => {
@@ -2312,6 +2359,12 @@ function quarantineTerminalReason(plannedReason: string | undefined, ownerBefore
 }
 /** Unowned entry lifecycle: idle past unownedIdleMs (72h, or 12h at RECLAIM pressure) -> quarantine, configured TTL -> delete (with rechecks). */
 export function applyUnowned(dir: string, root: string, deps: ApplyDeps, planned?: ScratchVerdict): ScratchVerdict {
+	return withScratchUsersLock(dir,
+		() => ({ dir, action: "SKIP" as const, reason: "users-lock-busy", owner: planned?.owner ?? null, sizeBytes: 0 }),
+		() => applyUnownedLocked(dir, root, deps, planned));
+}
+
+function applyUnownedLocked(dir: string, root: string, deps: ApplyDeps, planned?: ScratchVerdict): ScratchVerdict {
 	const now = deps.now ?? Date.now();
 	const at = new Date(now).toISOString();
 	const base: ScratchVerdict = { dir, action: "SKIP", reason: "unknown", owner: planned?.owner ?? null, sizeBytes: 0 };
@@ -2374,6 +2427,21 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps, planned
 		reason: quarantineTerminalReason(planned?.reason, ownerBefore, currentOwner) });
 	return { ...base, dir: moved, action: "QUARANTINE",
 		reason: quarantineTerminalReason(planned?.reason, ownerBefore, currentOwner), sizeBytes: dirSize(moved) };
+}
+
+/**
+ * RELEASELIVE1: the expiry delete rechecks registered users as every other deleter does, under the dir's users lock
+ * held across the check and the delete. A live or unknown user (or an unreadable `.users`) keeps the entry, logged
+ * with who and why; dead, reused and zombie users do not block.
+ */
+function expireEntryUnlessUsed(path: string, entry: string, owner: ScratchOwner | null, reason: string,
+	home: string, deps: ApplyDeps, at: string): ScratchVerdict {
+	return withScratchUsersLock(path, () => ({ dir: path, action: "SKIP" as const, reason: "users-lock-busy", owner, sizeBytes: dirSize(path) }), () => {
+		const user = blockingScratchUser(path, deps.liveness);
+		if (user === null) return removeExpiredEntry(path, entry, owner, reason, home, deps, at);
+		appendLog(home, { event: "skip", dir: path, at, action: "LIVE", reason: "user-live", detail: describeUserBlock(user) });
+		return { dir: path, action: "LIVE", reason: "user-live", owner, sizeBytes: dirSize(path) };
+	});
 }
 
 /** Expired quarantine entries are deleted after owner-release or lsof rechecks. */
@@ -2453,7 +2521,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 				done.push({ dir: path, action: "SKIP", reason: "final-recheck-refused", owner: released.owner, sizeBytes: dirSize(path) });
 				continue;
 			}
-			done.push(removeExpiredEntry(path, entry, released.owner, "quarantine-expired-owner-released", home, deps, at));
+			done.push(expireEntryUnlessUsed(path, entry, released.owner, "quarantine-expired-owner-released", home, deps, at));
 			continue;
 		}
 		const { owner, malformed } = readOwner(path);
@@ -2477,7 +2545,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 					owner, sizeBytes: dirSize(path), ...(clear === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) });
 				continue;
 			}
-			done.push(removeExpiredEntry(path, entry, owner, "quarantine-expired", home, deps, at));
+			done.push(expireEntryUnlessUsed(path, entry, owner, "quarantine-expired", home, deps, at));
 			continue;
 		}
 		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
@@ -2491,7 +2559,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 				owner, sizeBytes: dirSize(path), ...(clear === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) });
 			continue;
 		}
-		done.push(removeExpiredEntry(path, entry, owner, `quarantine-expired-owner-${state}`, home, deps, at));
+		done.push(expireEntryUnlessUsed(path, entry, owner, `quarantine-expired-owner-${state}`, home, deps, at));
 	}
 	return done;
 }

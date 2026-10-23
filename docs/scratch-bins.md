@@ -92,8 +92,11 @@ omp-kit scratch unuse DIR [--pid PID]
 - `use` records the process's incarnation (pid and process start, read by kitlib `incarnationSync`) in `DIR/.users`. Without `--pid`, the user is the process that ran `omp-kit`, which is its parent: normally the shell or runner that keeps working in the dir. A runner that launches a separate worker passes the worker's pid.
 - `unuse` removes every record of that pid.
 - Both rewrite `.users` under a kitlib private lock with an atomic replace. Each rewrite also prunes records that probe dead, reused or zombie.
+- `use` and `unuse` refuse a dir that is not directly inside a scratch root (`outside-scratch-root`).
+- Every deleter and mover (`release --now`, `apply`'s quarantine moves and deletes, quarantine expiry) holds that same lock across its user check and its delete or move. A `use` therefore lands either before (the deleter sees the user and keeps the dir) or after (the dir is gone and `use` refuses). A deleter that finds the lock held keeps the dir: `release --now` reports `now-held-users-lock-busy`, `apply` skips with `users-lock-busy`.
+- `.users` is not content: it is left out of the transfer digest and of the byte-identical-copy set, like `.owner` and the release marker.
 - While any record probes `live`, `release --now` refuses with `USER_LIVE`. The refusal names the pid, its start and its state, and says that the user must finish or run `scratch unuse`. Nothing is marked or deleted.
-- `scratch apply` keeps such a dir as `LIVE user-live`, whether it was released or not. It rechecks the users again before every quarantine move.
+- `scratch apply` keeps such a dir as `LIVE user-live`, whether it was released or not. It rechecks the users again before every quarantine move, and quarantine expiry rechecks them before every delete.
 - A record that probes `unknown` blocks too, because unknown never means dead. A `.users` file that is unreadable or malformed also blocks, with state `unknown`.
 - Records that probe dead, reused (same pid, different start) or zombie don't block.
 - Registration is liveness evidence only. It grants no authority: who may release stays the seat, the capability and the owning process.

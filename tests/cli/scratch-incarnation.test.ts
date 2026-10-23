@@ -115,7 +115,7 @@ test("planted: an unknown probe never deletes a quarantined dir; control: a dead
 	process.env.XDG_STATE_HOME = join(home, "state");
 	process.env.XDG_CONFIG_HOME = join(home, "config");
 	const qt = quarantineDir(home);
-	mkdirSync(qt, { recursive: true });
+	mkdirSync(qt, { recursive: true, mode: 0o700 }); // production state dirs are 0700; the users lock refuses group/other bits
 	const now = Date.parse("2026-10-22T00:00:00.000Z");
 	const entry = join(qt, quarantineEntryFor("held.424242", new Date(now - 30 * 86_400_000)));
 	mkdirSync(entry);
