@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { dirname, join, resolve } from "node:path";
 import { proveSend, type ProvenSend } from "./send.ts";
 import { isRecord } from "./type-guards.ts";
@@ -217,18 +217,7 @@ function atomicReplace(path: string, body: string): void {
 			if (name.endsWith(".tmp")) { try { unlinkSync(join(dirname(path), name)); } catch { /* best effort */ } }
 		}
 	} catch { /* best effort: a stale crash orphan is never fatal */ }
-	const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-	let created = false;
-	try {
-		writeFileSync(temporary, body, { encoding: "utf8", flag: "wx", mode: 0o600 });
-		created = true;
-		renameSync(temporary, path);
-	} catch (error) {
-		if (created) {
-			try { unlinkSync(temporary); } catch { /* cleanup only this run's temporary file */ }
-		}
-		throw error;
-	}
+	atomicReplaceBytes(path, Buffer.from(body, "utf8"), { mode: 0o600, durability: "none" });
 }
 
 

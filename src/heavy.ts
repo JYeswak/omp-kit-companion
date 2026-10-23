@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, statfsSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmdirSync, statSync, statfsSync, unlinkSync } from "node:fs";
 import { homedir, cpus, loadavg } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
 import process from "node:process";
 import { inspectStateRoot } from "./state-root.ts";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { defaultLiveness, probeOwner, type LivenessDeps } from "./scratch.ts";
 import { admitDiskWork } from "./disk-stage.ts";
 import type { LoadJob } from "./load-doctor.ts";
@@ -184,12 +185,6 @@ function currentRepo(cwd: string): string {
 	return cwd;
 }
 
-function writeJsonAtomic(path: string, value: unknown): void {
-	const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	writeFileSync(temporary, `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
-	renameSync(temporary, path);
-}
-
 function validJob(value: unknown): value is HeavyJob {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	return "id" in value && typeof value.id === "string" && "pid" in value && typeof value.pid === "number" && Number.isInteger(value.pid) &&
@@ -244,7 +239,7 @@ async function acquireLock(path: string, owner: { pid: number; process_start: st
 	while (true) {
 		try {
 			mkdirSync(path, { mode: 0o700 });
-			writeJsonAtomic(join(path, "owner.json"), owner);
+			atomicReplaceBytes(join(path, "owner.json"), Buffer.from(`${JSON.stringify(owner)}\n`), { mode: 0o600, durability: "none" });
 			return true;
 		} catch (error) {
 			if (errorCode(error) !== "EEXIST") throw error;
@@ -263,7 +258,7 @@ function releaseLock(path: string, owner: { pid: number; process_start: string }
 }
 
 function writeJob(directory: string, job: HeavyJob): void {
-	writeJsonAtomic(join(directory, `${job.id}.json`), job);
+	atomicReplaceBytes(join(directory, `${job.id}.json`), Buffer.from(`${JSON.stringify(job)}\n`), { mode: 0o600, durability: "none" });
 }
 
 function removeJob(directory: string, id: string): void {

@@ -9,6 +9,7 @@ re-implement it at the call site.
 | Bounded run | `run()` in `src/kitlib/run.ts` | `run()` in `scripts/kitlib_run.py` | — | `tests/fixtures/kitlib-run/corpus.json` |
 | Owned temp dir | `ownedTmp()` in `src/kitlib/tmp.ts` | `owned_tmp()` in `scripts/kitlib_tmp.py` | `kitlib_tmp` in `scripts/kitlib-tmp.sh` | `tests/fixtures/kitlib-tmp/corpus.json` |
 | Private resource lock | `privateLock()` in `src/kitlib/lock.ts` | `private_lock()` in `scripts/kitlib_lock.py` | — | `tests/fixtures/kitlib-lock/corpus.json` |
+| Atomic byte replace | `atomicReplaceBytes()` in `src/kitlib/io.ts` | `atomic_replace_bytes()` in `scripts/kitlib_io.py` | — | `tests/fixtures/kitlib-io/corpus.json` |
 
 ## Bounded run (KITLIB-RUN, ompkit-hsfyp)
 
@@ -104,3 +105,48 @@ with kitlib_lock.private_lock({"namespace": "create-admission", "path": database
 
 SQLite connection locks (`service-run`), mkdir admission (`heavy`), Git index locks (`index-lock`), pane locks and
 distributed append leases are separate protocols; do not route them through this primitive.
+
+## Atomic byte replace (KL06, ompkit-67i70)
+
+Replaces or creates a file with exactly the given bytes, all at once: a reader sees the old bytes or the new ones,
+never a mix. The bytes go to a fresh temp `.<name>.<pid>.<12 hex>.tmp`, created with O_EXCL|O_NOFOLLOW at mode 0600.
+The temp must have one link and be owned by this user. It is then set to the requested `mode` (a subset of 0o755),
+so the umask never decides the result. Every byte is written and the size is checked, then the temp is renamed
+over the target.
+
+Callers name the durability; there is no default:
+- `none`: rename only;
+- `file`: fsync the bytes before the rename;
+- `full`: also fsync the directory after it.
+
+The result reports publication and durability separately: `fileSynced`, `directorySynced`, and `durable`, which is
+true only for `full` with both syncs done.
+
+An optional `validate(tempPath)` runs on the complete temp before the rename; if it throws, nothing is published.
+
+Each refusal is an `AtomicReplaceError` with a `code`:
+- `UNSAFE_PATH`: the path is relative or not normalized, or the target is a symlink, directory or other non-file.
+- `TEMP_EXISTS`, `TEMP_SYMLINK`, `TEMP_HARDLINKED`, `TEMP_REPLACED`: the temp already existed, is a symlink, gained
+  a second link, or no longer names our file.
+- `EXDEV`: the stage dir is on another filesystem, or the rename crossed filesystems. There is never a copy fallback.
+- `STAGE_IN_PUBLIC_TREE`: `publicRoot` was given and the stage lies inside it. A stage outside a public tree must
+  be passed as an explicit, same-filesystem `stageDir`.
+- `WRITE_FAILED`, `PARTIAL_WRITE`, `SIZE_MISMATCH`, `FILE_SYNC_FAILED`, `VALIDATION_FAILED`, `RENAME_FAILED`,
+  `CANCELLED`: the step that failed.
+
+Before the rename, any failure removes the temp (only while its name still names our file) and leaves the target
+untouched, with `published: false`. After the rename the new bytes are visible:
+- a failed directory fsync throws `DIR_SYNC_FAILED` with `published: true`, so never assume the old bytes remain;
+- a cancel (TS `signal`, Python `cancel` event) arriving after the rename does not undo it. The requested
+  durability still runs, and the result says `cancelledAfterPublish`.
+
+Serialization stays with the caller (bytes in, bytes out). Atomic replace is not a transaction: a read-modify-write
+needs the KL08 lock around both the read and this call, or a concurrent update is lost. The primitive installs no
+exit or signal handlers and never changes the umask. It runs on POSIX only; elsewhere it refuses with
+`UNSUPPORTED_PLATFORM`.
+
+    import { atomicReplaceBytes } from "../src/kitlib/io";
+    const r = atomicReplaceBytes(path, Buffer.from(json), { mode: 0o600, durability: "full" });
+
+    import kitlib_io
+    r = kitlib_io.atomic_replace_bytes(path, data, mode=0o600, durability="full")

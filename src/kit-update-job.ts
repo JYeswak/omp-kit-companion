@@ -1,4 +1,5 @@
-import { lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { spawnSync } from "node:child_process";
 import { basename, dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -206,9 +207,7 @@ export async function pollPublishedRelease(prefix: string, stateRoot: string, pl
 	if (bundle.exit !== 0 || !bundle.stdout.trim() || Buffer.byteLength(bundle.stdout) > 16 * 1024 * 1024)
 		throw new Error("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: " + bundle.stderr.trim().slice(0, 1000));
 	// Replace atomically: a bundle left by an interrupted cycle must neither block nor be half-read.
-	const bundlePath = `${archivePath}.sigstore.json`, staged = `${bundlePath}.${randomUUID()}.tmp`;
-	writeFileSync(staged, bundle.stdout, { mode: 0o600, flag: "wx" });
-	renameSync(staged, bundlePath);
+	atomicReplaceBytes(`${archivePath}.sigstore.json`, Buffer.from(bundle.stdout), { mode: 0o600, durability: "none" });
 	return { indexPath, archivePath, version, sourceTag: `v${version}` };
 }
 

@@ -19,6 +19,9 @@ import zipfile
 import tempfile
 from datetime import datetime
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import kitlib_io  # noqa: E402  (atomic replacement; one implementation)
+
 SHIPPING_PLATFORMS = (
     "darwin-arm64-none",
     "linux-arm64-gnu",
@@ -1032,12 +1035,9 @@ def _dispatch_allocation(args: argparse.Namespace) -> int:
                      "qualification_run_id": str(run_id), "qualification_minimum_attempt": 1}
     directory = Path(args.plan).parent / "release-qualification"
     directory.mkdir(parents=True, exist_ok=True)
-    pending_path = directory / "qualification.json.pending"
-    with pending_path.open("w", encoding="utf-8") as output:
-        output.write(json.dumps(qualification, sort_keys=True) + "\n")
-        output.flush()
-        os.fsync(output.fileno())
-    os.replace(pending_path, directory / "qualification.json")
+    kitlib_io.atomic_replace_bytes(os.path.abspath(directory / "qualification.json"),
+                                   (json.dumps(qualification, sort_keys=True) + "\n").encode("utf-8"),
+                                   mode=0o644, durability="file")
     plan["qualification_run_id"] = str(run_id)
     return _store_plan(args, plan)
 
@@ -1843,9 +1843,8 @@ def _dispatch_devid_sign(args: argparse.Namespace) -> int:
         output.flush()
         os.fsync(output.fileno())
     run_id = _native_dispatch(args.repository, "release.yml", f"v{version}", inputs)
-    pending = receipt.with_suffix(".json.pending")
-    pending.write_text(json.dumps(dict(record, run_id=run_id), sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(pending, receipt)
+    kitlib_io.atomic_replace_bytes(os.path.abspath(receipt), (json.dumps(dict(record, run_id=run_id), sort_keys=True) + "\n").encode("utf-8"),
+                                   mode=0o644, durability="none")
     print(f"DEVID_SIGN=dispatched sign_run_id={run_id} version={version} darwin_sha256={args.darwin_sha256}")
     return 0
 

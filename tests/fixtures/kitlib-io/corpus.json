@@ -1,0 +1,249 @@
+{
+	"schema": "kitlib-io-corpus.v1",
+	"about": "One conformance corpus for kitlib io (ompkit-67i70, KL06), read by tests/cli/kitlib-io.test.ts (src/kitlib/io.ts atomicReplaceBytes) and tests/scripts/kitlib_io_test.py (scripts/kitlib_io.py atomic_replace_bytes). Each case runs in a fresh case dir DIR (realpath) inside a kitlib owned temp dir. setup entries, in order: {file, text, mode?} writes a file, {dir} makes a directory, {symlink, to} makes a symlink to the absolute path of the DIR-relative name `to`. call: path (DIR-relative; path_literal is passed verbatim), text or hex bytes, mode (integer), durability (null passes none), stage_dir and public_root (DIR-relative), umask (set around the call, restored after), validate ('accept-exact': the validator checks the temp holds exactly the bytes at the requested mode inside the stage; 'refuse': it raises). fault, through the test seam (atomicReplaceBytesWith / atomic_replace_bytes_with): temp_name (forced temp basename), write_fail {after, errno} (the first write writes `after` bytes, the next raises errno), write_stall {after} (the first write writes `after` bytes, then writes return 0), write_lie (each write writes half its bytes, rounded up, but reports all), fsync_errno, rename_errno, dir_fsync_errno (raise that errno), stage_other_device (stat of the stage reports another st_dev), hardlink_temp (right after the temp is opened, a hard link with this DIR-relative name is made to it), at {boundary, do} with do 'swap-temp' (unlink the temp and put a file holding 'attacker' at its name) or 'cancel' (set the cancellation). kind: absent for a plain call; 'concurrent-readers' (the writer publishes `size` bytes of 'a', starts reader_argv as a child, waits for the child's ready file, replaces the target `writes` times alternating `size` bytes of 'b' and 'a', then creates the stop file; the child reads the target in a loop until stop and prints `reads=N torn=M`, torn counting reads that are neither payload complete; N must be positive); 'rmw-race' (two read-modify-write increments of a decimal counter interleave: the second runs completely at the first one's temp-created boundary, with no lock). expect: ok, code (error code), published (result or error), file_synced, directory_synced, durable, cancelled_after_publish, errno (error errno name), temp_left (the error reports a temp it could not remove), files {name: text}, files_hex {name: hex}, symlinks {name: DIR-relative target}, modes {name: permission bits}, entries {dir: exact sorted names, '.' is DIR}, reader_torn, final_counter. Every case also requires the process umask and its exit/signal handlers unchanged by the call. planted_negatives: running `case` with the named detectors in `bypass` disabled must NOT meet the case's expect, while `control` with the same bypass still meets its own expect.",
+	"cases": [
+		{
+			"id": "create-absent-full",
+			"setup": [],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"expect": { "ok": true, "published": true, "file_synced": true, "directory_synced": true, "durable": true, "cancelled_after_publish": false, "files": { "target": "new" }, "modes": { "target": 384 }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "replace-existing-full",
+			"setup": [{ "file": "target", "text": "old", "mode": 420 }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"expect": { "ok": true, "published": true, "file_synced": true, "directory_synced": true, "durable": true, "files": { "target": "new" }, "modes": { "target": 384 }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "replace-durability-none",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "none" },
+			"expect": { "ok": true, "published": true, "file_synced": false, "directory_synced": false, "durable": false, "files": { "target": "new" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "replace-durability-file",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "file" },
+			"expect": { "ok": true, "published": true, "file_synced": true, "directory_synced": false, "durable": false, "files": { "target": "new" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "binary-bytes-exact",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "hex": "00ff0a00c328", "mode": 384, "durability": "full" },
+			"expect": { "ok": true, "published": true, "files_hex": { "target": "00ff0a00c328" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "empty-bytes",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "", "mode": 384, "durability": "full" },
+			"expect": { "ok": true, "published": true, "files": { "target": "" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "mode-explicit-under-umask-0",
+			"setup": [],
+			"call": { "path": "target", "text": "new", "mode": 420, "durability": "none", "umask": 0 },
+			"expect": { "ok": true, "published": true, "modes": { "target": 420 } }
+		},
+		{
+			"id": "mode-explicit-under-umask-077",
+			"setup": [],
+			"call": { "path": "target", "text": "new", "mode": 420, "durability": "none", "umask": 63 },
+			"expect": { "ok": true, "published": true, "modes": { "target": 420 } }
+		},
+		{
+			"id": "authorized-stage-outside-public-tree",
+			"setup": [{ "dir": "stage" }, { "dir": "pub" }, { "file": "pub/index.html", "text": "old" }],
+			"call": { "path": "pub/index.html", "text": "new", "mode": 420, "durability": "full", "stage_dir": "stage", "public_root": "pub" },
+			"expect": { "ok": true, "published": true, "durable": true, "files": { "pub/index.html": "new" }, "entries": { ".": ["pub", "stage"], "pub": ["index.html"], "stage": [] } }
+		},
+		{
+			"id": "validate-sees-complete-temp",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new-validated", "mode": 384, "durability": "file", "validate": "accept-exact" },
+			"expect": { "ok": true, "published": true, "files": { "target": "new-validated" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "concurrent-readers-see-old-or-new",
+			"kind": "concurrent-readers",
+			"setup": [],
+			"call": { "path": "target", "mode": 384, "durability": "none" },
+			"writes": 200,
+			"size": 262144,
+			"reader_argv": ["python3", "-c", "import os,sys\np,stop,ready=sys.argv[1],sys.argv[2],sys.argv[3]\na,b=b'a'*int(sys.argv[4]),b'b'*int(sys.argv[4])\nopen(ready,'wb').close()\nn=t=0\nwhile not os.path.exists(stop):\n    with open(p,'rb') as f:\n        d=f.read(len(a)+1)\n    n+=1\n    t+=d!=a and d!=b\nprint('reads=%d torn=%d'%(n,t))", "{DIR}/target", "{DIR}/stop", "{DIR}/ready", "262144"],
+			"expect": { "reader_torn": 0, "entries": { ".": ["ready", "stop", "target"] } }
+		},
+		{
+			"id": "preexisting-temp-refused",
+			"setup": [{ "file": "target", "text": "old" }, { "file": ".fixed.tmp", "text": "someone" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "temp_name": ".fixed.tmp" },
+			"expect": { "ok": false, "code": "TEMP_EXISTS", "published": false, "files": { "target": "old", ".fixed.tmp": "someone" }, "entries": { ".": [".fixed.tmp", "target"] } }
+		},
+		{
+			"id": "symlink-temp-refused",
+			"setup": [{ "file": "target", "text": "old" }, { "file": "victim", "text": "victim" }, { "symlink": ".fixed.tmp", "to": "victim" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "temp_name": ".fixed.tmp" },
+			"expect": { "ok": false, "code": "TEMP_SYMLINK", "published": false, "files": { "target": "old", "victim": "victim" }, "symlinks": { ".fixed.tmp": "victim" } }
+		},
+		{
+			"id": "hardlinked-temp-refused",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "hardlink_temp": "other" },
+			"expect": { "ok": false, "code": "TEMP_HARDLINKED", "published": false, "temp_left": false, "files": { "target": "old", "other": "" }, "entries": { ".": ["other", "target"] } }
+		},
+		{
+			"id": "swapped-temp-refused",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "temp_name": ".fixed.tmp", "at": { "boundary": "validated", "do": "swap-temp" } },
+			"expect": { "ok": false, "code": "TEMP_REPLACED", "published": false, "temp_left": true, "files": { "target": "old", ".fixed.tmp": "attacker" } }
+		},
+		{
+			"id": "enospc-mid-write",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new-bytes-that-do-not-fit", "mode": 384, "durability": "full" },
+			"fault": { "write_fail": { "after": 3, "errno": "ENOSPC" } },
+			"expect": { "ok": false, "code": "WRITE_FAILED", "errno": "ENOSPC", "published": false, "temp_left": false, "files": { "target": "old" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "partial-write-stall",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new-bytes", "mode": 384, "durability": "full" },
+			"fault": { "write_stall": { "after": 3 } },
+			"expect": { "ok": false, "code": "PARTIAL_WRITE", "published": false, "files": { "target": "old" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "lying-write-short-file",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new-bytes!", "mode": 384, "durability": "full" },
+			"fault": { "write_lie": true },
+			"expect": { "ok": false, "code": "SIZE_MISMATCH", "published": false, "files": { "target": "old" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "file-fsync-failure",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "file" },
+			"fault": { "fsync_errno": "EIO" },
+			"expect": { "ok": false, "code": "FILE_SYNC_FAILED", "errno": "EIO", "published": false, "files": { "target": "old" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "rename-failure",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "rename_errno": "EACCES" },
+			"expect": { "ok": false, "code": "RENAME_FAILED", "errno": "EACCES", "published": false, "files": { "target": "old" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "rename-exdev-no-copy-fallback",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "rename_errno": "EXDEV" },
+			"expect": { "ok": false, "code": "EXDEV", "published": false, "files": { "target": "old" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "stage-on-other-filesystem",
+			"setup": [{ "file": "target", "text": "old" }, { "dir": "stage" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full", "stage_dir": "stage" },
+			"fault": { "stage_other_device": true },
+			"expect": { "ok": false, "code": "EXDEV", "published": false, "files": { "target": "old" }, "entries": { ".": ["stage", "target"], "stage": [] } }
+		},
+		{
+			"id": "stage-under-public-tree",
+			"setup": [{ "dir": "pub" }, { "dir": "pub/.staging" }, { "file": "pub/index.html", "text": "old" }],
+			"call": { "path": "pub/index.html", "text": "new", "mode": 420, "durability": "full", "stage_dir": "pub/.staging", "public_root": "pub" },
+			"expect": { "ok": false, "code": "STAGE_IN_PUBLIC_TREE", "published": false, "files": { "pub/index.html": "old" }, "entries": { "pub": [".staging", "index.html"], "pub/.staging": [] } }
+		},
+		{
+			"id": "default-stage-under-public-tree",
+			"setup": [{ "dir": "pub" }, { "file": "pub/index.html", "text": "old" }],
+			"call": { "path": "pub/index.html", "text": "new", "mode": 420, "durability": "full", "public_root": "pub" },
+			"expect": { "ok": false, "code": "STAGE_IN_PUBLIC_TREE", "published": false, "files": { "pub/index.html": "old" }, "entries": { "pub": ["index.html"] } }
+		},
+		{
+			"id": "cancel-before-rename",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "at": { "boundary": "written", "do": "cancel" } },
+			"expect": { "ok": false, "code": "CANCELLED", "published": false, "files": { "target": "old" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "cancel-between-rename-and-fsync",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "at": { "boundary": "renamed", "do": "cancel" } },
+			"expect": { "ok": true, "published": true, "file_synced": true, "directory_synced": true, "durable": true, "cancelled_after_publish": true, "files": { "target": "new" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "dir-fsync-failure-after-publish",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"fault": { "dir_fsync_errno": "EIO" },
+			"expect": { "ok": false, "code": "DIR_SYNC_FAILED", "errno": "EIO", "published": true, "files": { "target": "new" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "validation-refuses-before-publish",
+			"setup": [{ "file": "target", "text": "old" }],
+			"call": { "path": "target", "text": "invalid", "mode": 384, "durability": "full", "validate": "refuse" },
+			"expect": { "ok": false, "code": "VALIDATION_FAILED", "published": false, "files": { "target": "old" }, "entries": { ".": ["target"] } }
+		},
+		{
+			"id": "target-symlink-refused",
+			"setup": [{ "file": "victim", "text": "victim" }, { "symlink": "target", "to": "victim" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"expect": { "ok": false, "code": "UNSAFE_PATH", "published": false, "files": { "victim": "victim" }, "symlinks": { "target": "victim" }, "entries": { ".": ["target", "victim"] } }
+		},
+		{
+			"id": "target-directory-refused",
+			"setup": [{ "dir": "target" }],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": "full" },
+			"expect": { "ok": false, "code": "UNSAFE_PATH", "published": false, "entries": { ".": ["target"], "target": [] } }
+		},
+		{
+			"id": "relative-path-refused",
+			"setup": [],
+			"call": { "path_literal": "relative/target", "text": "new", "mode": 384, "durability": "full" },
+			"expect": { "ok": false, "code": "UNSAFE_PATH", "published": false, "entries": { ".": [] } }
+		},
+		{
+			"id": "group-writable-mode-refused",
+			"setup": [],
+			"call": { "path": "target", "text": "new", "mode": 438, "durability": "full" },
+			"expect": { "ok": false, "code": "INVALID_ARGUMENT", "published": false, "entries": { ".": [] } }
+		},
+		{
+			"id": "missing-durability-refused",
+			"setup": [],
+			"call": { "path": "target", "text": "new", "mode": 384, "durability": null },
+			"expect": { "ok": false, "code": "INVALID_ARGUMENT", "published": false, "entries": { ".": [] } }
+		},
+		{
+			"id": "rmw-without-lock-loses-update",
+			"kind": "rmw-race",
+			"setup": [{ "file": "counter", "text": "0" }],
+			"call": { "path": "counter", "mode": 384, "durability": "full" },
+			"expect": { "final_counter": 1, "entries": { ".": ["counter"] } }
+		}
+	],
+	"planted_negatives": [
+		{ "id": "preexisting-temp-overwritten", "case": "preexisting-temp-refused", "bypass": ["temp-fresh"], "control": "replace-existing-full" },
+		{ "id": "symlink-temp-followed", "case": "symlink-temp-refused", "bypass": ["temp-fresh"], "control": "replace-existing-full" },
+		{ "id": "hardlinked-temp-published", "case": "hardlinked-temp-refused", "bypass": ["temp-nlink"], "control": "replace-existing-full" },
+		{ "id": "swapped-temp-published", "case": "swapped-temp-refused", "bypass": ["temp-identity"], "control": "replace-existing-full" },
+		{ "id": "enospc-swallowed", "case": "enospc-mid-write", "bypass": ["write-error"], "control": "replace-existing-full" },
+		{ "id": "stalled-write-accepted", "case": "partial-write-stall", "bypass": ["write-progress"], "control": "replace-existing-full" },
+		{ "id": "short-file-published", "case": "lying-write-short-file", "bypass": ["size-check"], "control": "replace-existing-full" },
+		{ "id": "fsync-failure-ignored", "case": "file-fsync-failure", "bypass": ["file-sync-error"], "control": "replace-durability-file" },
+		{ "id": "rename-failure-reports-published", "case": "rename-failure", "bypass": ["publish-flag"], "control": "replace-existing-full" },
+		{ "id": "exdev-reports-published", "case": "rename-exdev-no-copy-fallback", "bypass": ["publish-flag"], "control": "replace-existing-full" },
+		{ "id": "cross-device-stage-accepted", "case": "stage-on-other-filesystem", "bypass": ["stage-device"], "control": "authorized-stage-outside-public-tree" },
+		{ "id": "public-stage-accepted", "case": "stage-under-public-tree", "bypass": ["stage-public"], "control": "authorized-stage-outside-public-tree" },
+		{ "id": "public-default-stage-accepted", "case": "default-stage-under-public-tree", "bypass": ["stage-public"], "control": "authorized-stage-outside-public-tree" },
+		{ "id": "cancel-before-rename-ignored", "case": "cancel-before-rename", "bypass": ["cancel-check"], "control": "replace-existing-full" },
+		{ "id": "cancel-after-rename-abandons-durability", "case": "cancel-between-rename-and-fsync", "bypass": ["post-publish-cancel"], "control": "replace-existing-full" },
+		{ "id": "dir-fsync-failure-hidden", "case": "dir-fsync-failure-after-publish", "bypass": ["dir-sync-error"], "control": "replace-existing-full" },
+		{ "id": "publish-before-validation", "case": "validation-refuses-before-publish", "bypass": ["validate"], "control": "validate-sees-complete-temp" },
+		{ "id": "symlink-target-replaced", "case": "target-symlink-refused", "bypass": ["target-check"], "control": "replace-existing-full" }
+	]
+}

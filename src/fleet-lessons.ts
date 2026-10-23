@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
-import { existsSync, mkdirSync, lstatSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, lstatSync } from "node:fs";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { appendLesson, collectCheckinActivity, lessonDocumentAnchors, lessonIdentity, readLessonsLog, resolveLessonCurrency, type LessonCurrency } from "./lessons.ts";
 import { runPlanningScore } from "./planning-score.ts";
 import { parseUserFleetRepos, readUserFleetFile, userFleetConfigPath } from "./fleet-user-config.ts";
@@ -658,9 +659,7 @@ function verifiedBead(database: string, actor: string, externalRef: string, titl
 }
 
 function writeFleetJson(path: string, value: unknown): void {
-	const temporary = path + ".tmp-" + process.pid;
-	writeFileSync(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-	renameSync(temporary, path);
+	atomicReplaceBytes(path, Buffer.from(JSON.stringify(value, null, 2) + "\n"), { mode: 0o600, durability: "none" });
 }
 
 export function runFleetLessonsOnce(options: { kitRoot: string; home: string; stateRoot: string; now?: Date }, dependencies: FleetLessonsRunDependencies = {}): FleetLessonsRunResult {

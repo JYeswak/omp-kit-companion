@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { join } from "node:path";
 import type { OmpIdentity } from "./paths.ts";
 import { inspectStateRoot } from "./state-root.ts";
@@ -31,10 +32,7 @@ export function ompFingerprint(identity: Pick<OmpIdentity, "launcher" | "package
 export function recordTestReceipt(stateRoot: string, receipt: TestReceipt): boolean {
 	try { mkdirSync(stateRoot, { recursive: true, mode: 0o700 }); } catch { return false; }
 	if (inspectStateRoot(stateRoot)) return false;
-	const path = join(stateRoot, RECEIPT_FILE), temp = `${path}.${process.pid}.tmp`;
-	writeFileSync(temp, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
-	chmodSync(temp, 0o600);
-	renameSync(temp, path);
+	atomicReplaceBytes(join(stateRoot, RECEIPT_FILE), Buffer.from(`${JSON.stringify(receipt)}\n`), { mode: 0o600, durability: "none" });
 	return true;
 }
 

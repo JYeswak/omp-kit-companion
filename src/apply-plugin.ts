@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, cpSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { snapshotWatched } from "./operator-snapshot.ts";
 
@@ -634,10 +635,7 @@ export function applyPlugin(plan: PluginPlan, runner: PluginRunner, stateRoot: s
 	const receipt: PluginReceipt = { schema_version: 1, id, store: plan.store, created_at: new Date().toISOString(),
 		...(budgetReceipt ?? {}), rows };
 	mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
-	const path = join(stateRoot, `plugin-${receipt.id}.json`);
-	const tmp = `${path}.tmp`;
-	writeFileSync(tmp, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
-	renameSync(tmp, path);
+	atomicReplaceBytes(join(stateRoot, `plugin-${receipt.id}.json`), Buffer.from(`${JSON.stringify(receipt)}\n`), { mode: 0o600, durability: "none" });
 	return receipt;
 }
 

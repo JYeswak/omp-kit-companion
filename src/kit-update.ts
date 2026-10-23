@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform, type StagedKitRelease } from "./kit-release.ts";
@@ -193,20 +194,7 @@ function syncDirectory(path: string): void {
  try { fsyncSync(fd); } finally { closeSync(fd); }
 }
 function writeReceipt(stateRoot: string, receipt: ActivationReceipt): void {
- const path = join(stateRoot, `kit-activation-${receipt.id}.json`);
- const temp = join(stateRoot, `.kit-activation-${randomUUID()}.tmp`);
- const fd = openSync(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
- try {
-  const bytes = Buffer.from(JSON.stringify(receipt));
-  for (let offset = 0; offset < bytes.length;) {
-   const written = writeSync(fd, bytes, offset, bytes.length - offset);
-   if (written <= 0) throw new Error("KIT_RECEIPT_WRITE_FAILED");
-   offset += written;
-  }
-  fsyncSync(fd);
- } finally { closeSync(fd); }
- renameSync(temp, path);
- syncDirectory(stateRoot);
+ atomicReplaceBytes(join(stateRoot, `kit-activation-${receipt.id}.json`), Buffer.from(JSON.stringify(receipt)), { mode: 0o600, durability: "full" });
 }
 function readReceipt(stateRoot: string, id: string): ActivationReceipt {
  if (!RECEIPT_ID.test(id)) throw new Error("KIT_RECEIPT_INVALID");
