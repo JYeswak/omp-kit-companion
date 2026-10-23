@@ -338,7 +338,20 @@ function whatLetters(value: string): string[] {
 }
 
 /** Plan tags: ASCII a-z, separated by comma/semicolon and optional space/tab. Bodies remain uninterpreted text. */
-type AcceptanceBox = { letter: string; text: string; scopeMask: number; checked: boolean };
+type AcceptanceBox = { letter: string; text: string; scopeMask: number; checked: boolean; phase: string };
+
+/** ACPHASE1 (ompkit-9e9w6) phase-shaped token text: build, landed, live, or after with any window (bead-lint validates the window). */
+function isPhaseToken(token: string): boolean {
+	return token === "build" || token === "landed" || token === "live" || token === "after" || token.startsWith("after ");
+}
+
+/** A leading `[phase]` token of `text`, split off, or null. */
+function takePhase(text: string): { phase: string; rest: string } | null {
+	if (!text.startsWith("[")) return null;
+	const close = text.indexOf("]");
+	if (close < 0 || !isPhaseToken(text.slice(1, close))) return null;
+	return { phase: text.slice(1, close), rest: text.slice(close + 1).trim() };
+}
 
 function scopeMask(label: string): number {
 	let mask = 0;
@@ -371,7 +384,19 @@ function acceptanceLine(line: string): AcceptanceBox | null {
 		letter = scopeEnd > 1 ? text.slice(1, scopeEnd).trim() : "";
 		if (scopeEnd > 1) text = text.slice(scopeEnd + 1).trim();
 	}
-	return { letter, text, scopeMask: scopeMask(letter), checked };
+	let phase = "";
+	if (scopeMask(letter) === 0 && isPhaseToken(letter)) {
+		phase = letter;
+		letter = "";
+		const scopeEnd = text.startsWith("[") ? text.indexOf("]") : -1;
+		if (scopeEnd > 1 && scopeMask(text.slice(1, scopeEnd).trim())) {
+			letter = text.slice(1, scopeEnd).trim();
+			text = text.slice(scopeEnd + 1).trim();
+		}
+	}
+	const taken = phase ? null : takePhase(text);
+	if (taken) ({ phase, rest: text } = taken);
+	return { letter, text, scopeMask: scopeMask(letter), checked, phase };
 }
 
 function acceptanceBoxes(value: string): AcceptanceBox[] {
@@ -384,12 +409,17 @@ function acceptanceBoxes(value: string): AcceptanceBox[] {
 	return boxes;
 }
 
-/** Logical identity ignores checkbox progress and equivalent scope-tag spelling. */
+/**
+ * Logical identity ignores checkbox progress and equivalent scope-tag spelling. Every criterion carries one
+ * ACPHASE1 phase tag after its scope letter: the plan's own tag when it has one, else `[build]`. That default is
+ * a known weakness: ACREADY1 (ompkit-t8m3r) is where a model flags live or time items mislabeled build.
+ */
 function criterionText(box: AcceptanceBox): string {
 	let label = "";
 	for (let index = 0; index < 26; index++) if (box.scopeMask & (1 << index))
 		label += (label ? "," : "") + String.fromCharCode(97 + index);
-	return label ? "[" + label + "] " + box.text : box.text;
+	const tagged = "[" + (box.phase || "build") + "] " + box.text;
+	return label ? "[" + label + "] " + tagged : tagged;
 }
 
 function canonicalAcceptance(value: string): string {
@@ -1212,7 +1242,7 @@ function runPlanningConvertApply(
 	if (newItems.some((item) => !item.parent) && !parentId) {
 		const result = runApplyBr(["create", "--title", data.mission + " applied plan", "--type", "epic", "--priority", "0",
 			"--labels", "plan:" + data.mission + ",mission:" + data.mission, "--external-ref", data.mission, "--description-file", "-",
-			"--acceptance-criteria", "- [ ] [a] Every local item without an explicit parent belongs to this epic.\n- [ ] [a] Planted negative: an unrelated or foreign tracker item is never reparented by this plan."],
+			"--acceptance-criteria", "- [ ] [a] [build] Every local item without an explicit parent belongs to this epic.\n- [ ] [a] [build] Planted negative: an unrelated or foreign tracker item is never reparented by this plan."],
 		tracker.database, tracker.commandCwd,
 		"WHAT: (a) Own the locally applied plan items that have no explicit parent.\nWHY: Parentage must be explicit without moving unrelated or foreign work.\n\n## Success Criteria\nEvery eligible local item has this parent; foreign targets remain untouched.");
 		const id = createdId(result.stdout);
@@ -1482,7 +1512,7 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 		const parentDescription = "WHAT: (a) Own the isolated projection of this plan without changing the live tracker.\nWHY: Native conversion must be safely gradeable before publication.\n\n## Success Criteria\nAll parsed items belong to this isolated epic; live parent IDs remain source metadata.";
 		const parent = runBr(["create", "--title", mission + " isolated plan conversion", "--type", "epic", "--priority", "0",
 			"--labels", "plan:" + mission + ",mission:" + mission, "--external-ref", mission, "--description-file", "-", "--acceptance-criteria",
-			"- [ ] [a] Every parsed item is parented under this isolated epic.\n- [ ] [a] Planted negative: conversion that changes the real tracker fails isolation; its unchanged live-tracker control passes."],
+			"- [ ] [a] [build] Every parsed item is parented under this isolated epic.\n- [ ] [a] [build] Planted negative: conversion that changes the real tracker fails isolation; its unchanged live-tracker control passes."],
 		database.database, database.directory, parentDescription);
 		const parentIssueId = createdId(parent.stdout);
 		if (parent.exit_code === 0 && parentIssueId) parentId = parentIssueId;

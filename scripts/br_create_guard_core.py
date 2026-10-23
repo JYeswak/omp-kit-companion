@@ -196,8 +196,16 @@ def read_prospective_description(
     return content
 
 
-def prospective_bead(parsed: dict, project: str) -> dict:
-    """The bead record this create would store, JSONL-shaped for lint."""
+def prospective_bead(
+    parsed: dict, project: str, now: dt.datetime | None = None
+) -> dict:
+    """The bead record this create would store, JSONL-shaped for lint.
+
+    created_at is the admission clock, so a create at or after the ACPHASE1
+    cutover is an ENFORCED bead: an untagged acceptance item is refused
+    l-ac-phase:AC_PHASE_UNTAGGED naming the line (bead_lint check l).
+    """
+    created = (now or dt.datetime.now(dt.timezone.utc)).astimezone(dt.timezone.utc)
     labels = [token.strip() for token in (parsed["labels"] or "").split(",")
               if token.strip()]
     deps: list[dict] = []
@@ -223,20 +231,25 @@ def prospective_bead(parsed: dict, project: str) -> dict:
         "labels": labels,
         "description": read_prospective_description(parsed, project),
         "acceptance_criteria": parsed["acceptance"] or "",
+        "created_at": created.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "dependencies": deps,
     }
 
 
 def lint_prospective(
-    parsed: dict, issues: list[dict], project: str
+    parsed: dict, issues: list[dict], project: str,
+    now: dt.datetime | None = None,
 ) -> list[str]:
-    """Failing LINTGATE1 check names for this create (empty = admit)."""
+    """Failing LINTGATE1 check names for this create (empty = admit).
+
+    `now` defaults to the wall clock; tests pin it across the cutover.
+    """
     import sys as _sys
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in _sys.path:
         _sys.path.insert(0, here)
     from bead_lint import lint_bead_failures
-    bead = prospective_bead(parsed, project)
+    bead = prospective_bead(parsed, project, now)
     byid = {row["id"] for row in issues} | {"<new>"}
     return lint_bead_failures(bead, byid)
 

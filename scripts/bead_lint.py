@@ -18,7 +18,15 @@ growth gate fires identically here: same code objects, proven by both
 Check catalog (all trace to the beads-north-star standard):
   a-label  b-what-why-acc  c-lettered-scope  d-negative-specimen
   e-typed-edges  f-fanout-depth  g-eco-plan-cite  h-placeholders
-  i-mention-edges  j-stale-blocked (warning)
+  i-mention-edges  j-stale-blocked (warning)  k-close-receipt
+  l-ac-phase  l-ac-phase-legacy (warning)
+l-ac-phase (ACPHASE1 ompkit-9e9w6): every acceptance item of a bead created
+at or after ac_phase.AC_PHASE_CUTOVER carries exactly one phase tag
+([build] | [landed] | [live] | [after <window>]) in the leading run of
+bracketed tokens after its checkbox (scope letters may share the run; zero
+tags is AC_PHASE_UNTAGGED, two or more AC_PHASE_MULTI); beads created before it
+are reported under l-ac-phase-legacy and never refused. Grammar, cutover and
+digest live in ac_phase.py, shared with the create and in_review gates.
 Pagerank block: build_pagerank_fixture + run_pagerank_cert (replay via
 bv-readiness-probe.sh pagerank-cert; bv --robot-next is a composite
 scheduler score and is never the centrality sink).
@@ -36,6 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import kitlib_tmp  # noqa: E402  (owned temp dirs: removed on exit and HUP/INT/TERM)
+import ac_phase  # noqa: E402  (ACPHASE1 phase grammar and cutover; sibling in every release)
 
 KIT_BEAD_LINT_VERSION = "bead-lint.kit/v1"
 DAMPING = 0.85
@@ -314,6 +323,34 @@ def check_j(
             bad.append(b["id"])
     return bad
 
+
+def ac_phase_failure(bead: dict) -> list[str]:
+    """Named l-ac-phase failure for an ENFORCED bead.
+
+    Detail carries AC_PHASE_UNTAGGED and/or AC_PHASE_MULTI with each
+    offending item quoted, so the create and update gates name the line.
+    """
+    if not ac_phase.is_enforced(bead.get("created_at")):
+        return []
+    refusals = ac_phase.tag_refusals(bead.get("acceptance_criteria"))
+    if not refusals:
+        return []
+    return ["l-ac-phase:" + " ; ".join(f"{code} {detail}" for code, detail in refusals)]
+
+
+def check_l(beads: list[dict]) -> list[str]:
+    """l-ac-phase: enforced beads with an untagged or multi-tagged item."""
+    return [b["id"] for b in beads if ac_phase_failure(b)]
+
+
+def check_l_legacy(beads: list[dict]) -> list[str]:
+    """l-ac-phase-legacy (warning): pre-cutover beads with the same finding."""
+    return [
+        b["id"] for b in beads
+        if not ac_phase.is_enforced(b.get("created_at"))
+        and ac_phase.tag_refusals(b.get("acceptance_criteria"))
+    ]
+
 EDGE_EVIDENCE = (
     "br dep add --help states '<issue> depends on <depends-on>'; "
     "bv --robot-graph adjacency emits {from: dependent, to: dependency}, "
@@ -412,6 +449,7 @@ def mkbead(
     deps: list[dict] | None = None,
     comments: list[dict] | None = None,
     close_reason: str | None = None,
+    created_at: str = BASE_TS,
 ) -> dict:
     out = {
         "id": bid,
@@ -419,7 +457,7 @@ def mkbead(
         "status": status,
         "priority": 2,
         "issue_type": "task",
-        "created_at": BASE_TS,
+        "created_at": created_at,
         "created_by": "bead-lint-selftest",
         "updated_at": BASE_TS,
         "source_repo": "selftest",
@@ -464,12 +502,17 @@ CLEAN_DESC = (
     "Selftest anchor bead st-base over a related edge, non-blocking. "
     "WHY: the widget line is down without it."
 )
+# Every fixture item carries a phase tag (ACPHASE1) so only the planted
+# l-ac-phase beads are l offenders; letters share the tag's leading run.
 CLEAN_ACC = (
-    "- [ ] [a] widget builds; planted negative: with the guard removed the "
+    "- [ ] [a] [build] widget builds; planted negative: with the guard removed the "
     "build-fixture test goes RED (known-bad specimen fixtures/bad-input).\n"
-    "- [ ] [b] widget docs render; planted negative: docs job fails on the "
+    "- [ ] [b] [landed] widget docs render; planted negative: docs job fails on the "
     "bad-markdown specimen.\n"
 )
+# The cutover instant itself is enforced; one microsecond earlier is legacy.
+L_ENFORCED_TS = "2026-10-24T00:00:00Z"
+L_LEGACY_TS = "2026-10-23T23:59:59.999999Z"
 
 
 def clean_bead(bid: str, **kw) -> dict:
@@ -482,7 +525,7 @@ def clean_bead(bid: str, **kw) -> dict:
 def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
     beads = [mkbead(
         "st-base", desc="WHAT: anchor. WHY: referenced by edges.",
-        acc="- [ ] anchor present; planted negative: anchor-missing "
+        acc="- [ ] [build] anchor present; planted negative: anchor-missing "
         "fixture goes RED.\n",
     )]
     expected: dict[str, list[str]] = {}
@@ -496,14 +539,14 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
     expected["b-what-why-acc"] = ["st-v-b"]
     beads.append(clean_bead(
         "st-v-c",
-        acc="- [ ] widget builds, no cites at all.\n"
-        "- [ ] [b] docs render; planted negative bad-markdown RED.\n",
+        acc="- [ ] [build] widget builds, no cites at all.\n"
+        "- [ ] [b] [build] docs render; planted negative bad-markdown RED.\n",
     ))
     expected["c-lettered-scope"] = ["st-v-c"]
     beads.append(clean_bead(
         "st-v-d",
-        acc="- [ ] [a] widget builds with no adversarial specimen.\n"
-        "- [ ] [b] docs render, again no adversarial specimen.\n",
+        acc="- [ ] [a] [build] widget builds with no adversarial specimen.\n"
+        "- [ ] [b] [build] docs render, again no adversarial specimen.\n",
     ))
     expected["d-negative-specimen"] = ["st-v-d"]
     beads.append(clean_bead(
@@ -515,7 +558,7 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
             f"st-v-f-kid-{n:02d}",
             desc="WHAT: (a) kid slice of the fanout parent. "
             "WHY: proves the epic splits.",
-            acc="- [ ] [a] kid slice lands; planted negative: kid-missing "
+            acc="- [ ] [a] [build] kid slice lands; planted negative: kid-missing "
             "fixture goes RED.\n",
             deps=[dep_to(f"st-v-f-kid-{n:02d}", "st-v-f")],
         ))
@@ -524,7 +567,7 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
         "st-v-g",
         labels=["selftest", "eco"],
         desc="WHAT: (a) eco thing. WHY: cited plan work.",
-        acc="- [ ] [a] eco thing done; planted negative bad specimen RED.\n",
+        acc="- [ ] [a] [build] eco thing done; planted negative bad specimen RED.\n",
     ))
     expected["g-eco-plan-cite"] = ["st-v-g"]
     beads.append(clean_bead(
@@ -549,9 +592,25 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
     expected["elapsed-time-mix"] = ["st-v-time"]
     beads.append(clean_bead(
         "st-v-time",
-        acc=CLEAN_ACC + "- [ ] [c] measured over 7 days; planted negative: "
+        acc=CLEAN_ACC + "- [ ] [c] [after 7d] measured over 7 days; planted negative: "
         "a one-day fixture must be rejected.\n",
     ))
+    # l-ac-phase (ACPHASE1): enforced untagged and enforced multi-tagged
+    # beads are offenders; the same untagged text one microsecond before
+    # the cutover is a legacy warning only. Controls: enforced fully
+    # tagged, and enforced AC-KITLIB lines (implicitly build).
+    untagged_acc = CLEAN_ACC + "- [ ] [b] docs link checked; planted negative: dead link RED.\n"
+    beads.append(clean_bead("st-v-l", acc=untagged_acc, created_at=L_ENFORCED_TS))
+    beads.append(clean_bead(
+        "st-v-l-multi", created_at=L_ENFORCED_TS,
+        acc=CLEAN_ACC + "- [ ] [b] [build] [live] docs live; planted negative: stale page RED.\n"))
+    expected["l-ac-phase"] = ["st-v-l", "st-v-l-multi"]
+    beads.append(clean_bead("st-v-l-legacy", acc=untagged_acc, created_at=L_LEGACY_TS))
+    expected["l-ac-phase-legacy"] = ["st-v-l-legacy"]
+    beads.append(clean_bead("st-clean-l", created_at=L_ENFORCED_TS))
+    beads.append(clean_bead(
+        "st-clean-l-kitlib", created_at=L_ENFORCED_TS,
+        acc=CLEAN_ACC + "- [ ] AC-KITLIB-2 [b] ratchet holds; planted negative: regression RED.\n"))
     beads.append(clean_bead("st-v-k1", status="closed",
                             close_reason="done at commit abc1234"))
     beads.append(clean_bead(
@@ -578,7 +637,7 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
 def build_clean_beads() -> list[dict]:
     beads = [mkbead(
         "st-base", desc="WHAT: anchor. WHY: referenced by edges.",
-        acc="- [ ] anchor present; planted negative: anchor-missing "
+        acc="- [ ] [build] anchor present; planted negative: anchor-missing "
         "fixture goes RED.\n",
     )]
     beads.append(clean_bead("st-clean-a"))
@@ -608,6 +667,7 @@ LETTERED_IDS = [
     "a-label", "b-what-why-acc", "c-lettered-scope", "d-negative-specimen",
     "e-typed-edges", "f-fanout-depth", "g-eco-plan-cite", "h-placeholders",
     "i-mention-edges", "j-stale-blocked", "k-close-receipt",
+    "l-ac-phase", "l-ac-phase-legacy",
 ]
 
 # V2Adv-5: the warning→error tier is a DATE, encoded here. Before this date
@@ -765,6 +825,9 @@ def run_lettered(
         "j-stale-blocked": check_j(scoped, now),
         # ADV-4: closes live outside scope_beads — check_k sees ALL beads.
         "k-close-receipt": check_k(beads, now),
+        "l-ac-phase": check_l(scoped),
+        # Warning row (like j): pre-cutover beads are reported, never refused.
+        "l-ac-phase-legacy": check_l_legacy(scoped),
     }
 
 # ---- LINTGATE1 (ompkit-fp72.19.1.28): create-time per-bead gate ----
@@ -783,6 +846,7 @@ GATE_CHECKS = (
     "h-placeholders",
     "i-mention-edges",
     "elapsed-time-mix",
+    "l-ac-phase",
 )
 
 # TIMEAC1: elapsed acceptance is evidence that cannot be graded during the
@@ -889,6 +953,7 @@ def lint_bead(bead: dict, byid: set[str] | None = None) -> dict[str, list[str]]:
         "h-placeholders": check_h(single),
         "i-mention-edges": check_i(single, ids),
         "elapsed-time-mix": [bead["id"]] if elapsed_time_mix_failure(bead) else [],
+        "l-ac-phase": [bead["id"]] if ac_phase_failure(bead) else [],
     }
 
 
@@ -905,10 +970,10 @@ def lint_bead_failures(
     failures = [
         check_id
         for check_id, offenders in lint_bead(bead, byid).items()
-        if offenders and check_id != "elapsed-time-mix"
+        if offenders and check_id not in ("elapsed-time-mix", "l-ac-phase")
     ]
-    if elapsed_time_mix_failure(bead):
-        failures.extend(elapsed_time_mix_failure(bead))
+    failures.extend(elapsed_time_mix_failure(bead))
+    failures.extend(ac_phase_failure(bead))
     if template_missing(
         bead.get("issue_type") or bead.get("type"),
         bead.get("description"),
@@ -1062,7 +1127,10 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
                 if not any(item == cid or item.startswith(cid + ":")
                            for item in actual):
                     fails.append(f"gate: {cid} misses planted {vid}")
-        for cid in ("st-clean-a", "st-clean-b"):
+        # Controls include the ACPHASE1 legacy bead (reported, never refused)
+        # and the enforced tagged / AC-KITLIB beads.
+        for cid in ("st-clean-a", "st-clean-b", "st-clean-l",
+                    "st-clean-l-kitlib", "st-v-l-legacy"):
             bead = next(b for b in loaded if b["id"] == cid)
             got_gate = lint_bead_failures(bead, gate_ids)
             if got_gate:

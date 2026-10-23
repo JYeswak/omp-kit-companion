@@ -18,6 +18,24 @@ Workflow flags (--status/--priority/--assignee/--owner/--claim) and edge
 flags (--parent) never newly fail the gated checks and pass through, so
 claiming a failing bead for repair is never deadlocked by this gate.
 
+`--status in_review` (ACPHASE1 ompkit-9e9w6 + PREGRADE1 ompkit-3s6d2): for
+a bead created at or after ac_phase.AC_PHASE_CUTOVER the move is also
+refused (exit 4) unless every [build]/[landed] item is ticked
+(ac_phase.in_review_admission). When the tracker repo opts in with
+`.omp/pregrade.json` = {"required": true}, it also needs a non-author
+pregrade record matching the bead, its current AC digest, verdict PASS or
+WAITING, within 24 h; an invalid opt-in file fails closed. The tracker repo
+is the directory holding the `.beads` of the `--db` in use (BR_UPDATE_DB,
+else BEADS_DB), else the nearest ancestor of the project dir holding a
+`.beads` directory, else the project dir. The refusal codes
+(AC_PHASE_UNTAGGED, AC_PHASE_MULTI, AC_UNTICKED_BUILD_LANDED,
+PREGRADE_CONFIG_INVALID, PREGRADE_MISSING, PREGRADE_STALE,
+PREGRADE_AC_CHANGED, PREGRADE_NOT_PASSING, PREGRADE_SELF) ride the
+LINT_REFUSED line, each detailed on its own line; after any PREGRADE_*
+refusal the opt-in file's optional "hint" (control characters stripped,
+500 chars max) follows on a `PREGRADE_HINT` line. Legacy beads are admitted
+with a one-line AC_PHASE_LEGACY notice.
+
 Reads are live (`br show`, `br list`); no JSONL flush is involved, so a
 fixed bead passes immediately (LINTGATE1 acceptance 2).
 """
@@ -126,6 +144,8 @@ def prospective(
         "title": live.get("title") or "",
         "status": live.get("status") or "open",
         "priority": live.get("priority", 2),
+        "created_at": live.get("created_at"),
+        "assignee": live.get("assignee"),
         "issue_type": args.type or live.get("issue_type") or "task",
         "labels": list(live.get("labels") or []),
         "description": live.get("description") or "",
@@ -167,6 +187,20 @@ def prospective(
     return bead
 
 
+def tracker_repo(project: str, db: str) -> str:
+    """The repo whose tracker this update writes (see module docstring)."""
+    if db:
+        beads_dir = os.path.dirname(os.path.realpath(db))
+        if os.path.basename(beads_dir) == ".beads":
+            return os.path.dirname(beads_dir)
+    here = os.path.realpath(project)
+    for _ in range(here.count(os.sep) + 1):  # one step per path component
+        if os.path.isdir(os.path.join(here, ".beads")):
+            return here
+        here = os.path.dirname(here)
+    return os.path.realpath(project)
+
+
 def main(argv: list[str]) -> int:
     real = os.environ.get("BR_UPDATE_REAL", "br")
     project = os.environ.get("BR_UPDATE_PROJECT", os.getcwd())
@@ -181,17 +215,37 @@ def main(argv: list[str]) -> int:
         sys.path.insert(0, here)
     try:
         from bead_lint import lint_bead_failures
+        import ac_phase
         live = show_bead(real, project, db, args.bead_id)
         bead = prospective(live, args, project)
         byid = tracker_ids(real, project, db) | {bead["id"]}
         failures = lint_bead_failures(bead, byid)
+        admission = (ac_phase.in_review_admission(
+            bead, repo=tracker_repo(project, db or os.environ.get("BEADS_DB", "")))
+            if args.status == "in_review" else None)
     except Exception as exc:  # fail OPEN on probe failure, never refuse blind
         print(f"br-shim: LINT_GATE_UNVERIFIED {exc}", file=sys.stderr)
         return 3
+    details: list[str] = []
+    if admission is not None:
+        if admission["notice"]:
+            print(f"br-shim: {admission['notice']}", file=sys.stderr)
+        lint_tagged = any(f.startswith("l-ac-phase:") for f in failures)
+        for code, detail in admission["refusals"]:
+            # check l already names untagged/multi items for enforced beads.
+            if lint_tagged and code in ("AC_PHASE_UNTAGGED", "AC_PHASE_MULTI"):
+                continue
+            failures.append(code)
+            details.append(f"br-shim: {code} {detail}")
+        if admission["hint"]:
+            # The repo's own instructions for producing a pregrade (.omp/pregrade.json "hint").
+            details.append(f"br-shim: PREGRADE_HINT {admission['hint']}")
     if failures:
         print(f"br-shim: LINT_REFUSED {','.join(failures)}: this edit "
-              f"would leave {bead['id']} failing bead-lint; fix the named "
-              f"checks and retry", file=sys.stderr)
+              f"would leave {bead['id']} failing bead-lint or in_review "
+              f"admission; fix the named checks and retry", file=sys.stderr)
+        for line in details:
+            print(line, file=sys.stderr)
         return 4
     return 0
 

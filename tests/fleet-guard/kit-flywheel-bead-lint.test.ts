@@ -13,7 +13,8 @@ afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 const PLANTED = `br create "x" -t task --acceptance "- [ ] AC1: x"`;
 const CLEAN_DESCRIPTION = "WHAT: refuse an unlinted create.\n\nWHY: ungradeable beads were created unchecked.";
-const CLEAN_ACCEPTANCE = "- [ ] AC1: planted negative: an unlinted create is refused";
+/** Phase-tagged (ACPHASE1): beads created at or after the cutover must tag every item. */
+const CLEAN_ACCEPTANCE = "- [ ] [build] AC1: planted negative: an unlinted create is refused";
 /** The heredoc form agents use for multi-line descriptions; the guard reads its body literally. */
 const clean = (title: string) => `br create '${title}' -t task -l admission --description "$(cat <<'EOF'\n${CLEAN_DESCRIPTION}\nEOF\n)" --acceptance '${CLEAN_ACCEPTANCE}'`;
 

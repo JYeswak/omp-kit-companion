@@ -1,0 +1,142 @@
+[
+  {
+    "name": "tagged-mix-all-four-phases",
+    "ac_text": "- [ ] [build] parser handles tags; planted untagged line refused\n- [x] [landed] on origin/main\n- [ ] [live] release 0.2.49 installed\n- [ ] [after 7d] reworks per submission vs baseline",
+    "expect": [
+      {"index": 0, "checked": false, "phase": "build", "window": null, "multi": false, "text": "parser handles tags; planted untagged line refused"},
+      {"index": 1, "checked": true, "phase": "landed", "window": null, "multi": false, "text": "on origin/main"},
+      {"index": 2, "checked": false, "phase": "live", "window": null, "multi": false, "text": "release 0.2.49 installed"},
+      {"index": 3, "checked": false, "phase": "after", "window": "7d", "multi": false, "text": "reworks per submission vs baseline"}
+    ]
+  },
+  {
+    "name": "after-window-forms",
+    "ac_text": "- [ ] [after 30m] queue drained\n- [ ] [after 12h] no alert fired\n- [ ] [after >=2026-10-30T00:00Z] weekly report present",
+    "expect": [
+      {"index": 0, "checked": false, "phase": "after", "window": "30m", "multi": false, "text": "queue drained"},
+      {"index": 1, "checked": false, "phase": "after", "window": "12h", "multi": false, "text": "no alert fired"},
+      {"index": 2, "checked": false, "phase": "after", "window": ">=2026-10-30T00:00Z", "multi": false, "text": "weekly report present"}
+    ]
+  },
+  {
+    "name": "after-invalid-windows-are-untagged",
+    "ac_text": "- [ ] [after 7w] weeks are not a unit\n- [ ] [after soon] words are not a window\n- [ ] [after >=2026-10-30] date without time\n- [ ] [after] no window at all",
+    "expect": [
+      {"index": 0, "checked": false, "phase": null, "window": null, "multi": false, "text": "[after 7w] weeks are not a unit"},
+      {"index": 1, "checked": false, "phase": null, "window": null, "multi": false, "text": "[after soon] words are not a window"},
+      {"index": 2, "checked": false, "phase": null, "window": null, "multi": false, "text": "[after >=2026-10-30] date without time"},
+      {"index": 3, "checked": false, "phase": null, "window": null, "multi": false, "text": "[after] no window at all"}
+    ]
+  },
+  {
+    "name": "ac-kitlib-untagged-is-build",
+    "ac_text": "- [ ] AC-KITLIB-2: kitlib ratchet holds\n- [x] AC-KITLIB-7 parity",
+    "expect": [
+      {"index": 0, "checked": false, "phase": "build", "window": null, "multi": false, "text": "AC-KITLIB-2: kitlib ratchet holds"},
+      {"index": 1, "checked": true, "phase": "build", "window": null, "multi": false, "text": "AC-KITLIB-7 parity"}
+    ]
+  },
+  {
+    "name": "ac-kitlib-explicit-tag-wins",
+    "ac_text": "- [ ] [live] AC-KITLIB-3 installed release passes",
+    "expect": [
+      {"index": 0, "checked": false, "phase": "live", "window": null, "multi": false, "text": "AC-KITLIB-3 installed release passes"}
+    ]
+  },
+  {
+    "name": "ac-kitlib-not-at-start-is-untagged",
+    "ac_text": "- [ ] see AC-KITLIB-2 for the ratchet",
+    "expect": [
+      {"index": 0, "checked": false, "phase": null, "window": null, "multi": false, "text": "see AC-KITLIB-2 for the ratchet"}
+    ]
+  },
+  {
+    "name": "scope-letters-share-the-run",
+    "ac_text": "- [ ] [a] [build] x\n- [ ] [build] [a,b] x\n- [x] [a]   [landed]   spaced run\n- [ ] [a] [b] [after 1d] two letters then a timed tag",
+    "expect": [
+      {"index": 0, "checked": false, "phase": "build", "window": null, "multi": false, "text": "[a] x"},
+      {"index": 1, "checked": false, "phase": "build", "window": null, "multi": false, "text": "[a,b] x"},
+      {"index": 2, "checked": true, "phase": "landed", "window": null, "multi": false, "text": "[a] spaced run"},
+      {"index": 3, "checked": false, "phase": "after", "window": "1d", "multi": false, "text": "[a] [b] two letters then a timed tag"}
+    ]
+  },
+  {
+    "name": "untagged-plain-lettered-and-trailing-tag",
+    "ac_text": "- [ ] AC1: widget builds\n- [ ] [a] x\n- [ ] x [build]\n- [ ] [a] text then [build] later does not count",
+    "expect": [
+      {"index": 0, "checked": false, "phase": null, "window": null, "multi": false, "text": "AC1: widget builds"},
+      {"index": 1, "checked": false, "phase": null, "window": null, "multi": false, "text": "[a] x"},
+      {"index": 2, "checked": false, "phase": null, "window": null, "multi": false, "text": "x [build]"},
+      {"index": 3, "checked": false, "phase": null, "window": null, "multi": false, "text": "[a] text then [build] later does not count"}
+    ]
+  },
+  {
+    "name": "two-tags-are-multi",
+    "ac_text": "- [ ] [build] [live] x\n- [ ] [live] [a] [after 7d] two timed tags around a letter\n- [ ] [landed] [after soon] a malformed second tag still counts\n- [ ] [build] [build] duplicate tag",
+    "expect": [
+      {"index": 0, "checked": false, "phase": null, "window": null, "multi": true, "text": "[build] [live] x"},
+      {"index": 1, "checked": false, "phase": null, "window": null, "multi": true, "text": "[live] [a] [after 7d] two timed tags around a letter"},
+      {"index": 2, "checked": false, "phase": null, "window": null, "multi": true, "text": "[landed] [after soon] a malformed second tag still counts"},
+      {"index": 3, "checked": false, "phase": null, "window": null, "multi": true, "text": "[build] [build] duplicate tag"}
+    ]
+  },
+  {
+    "name": "checked-lower-and-upper",
+    "ac_text": "- [x] [build] lower x\n- [X] [landed] upper X\n- [ ] [build] unchecked",
+    "expect": [
+      {"index": 0, "checked": true, "phase": "build", "window": null, "multi": false, "text": "lower x"},
+      {"index": 1, "checked": true, "phase": "landed", "window": null, "multi": false, "text": "upper X"},
+      {"index": 2, "checked": false, "phase": "build", "window": null, "multi": false, "text": "unchecked"}
+    ]
+  },
+  {
+    "name": "non-item-lines-ignored",
+    "ac_text": "Acceptance:\n* [ ] [build] star bullet is not an item\n1. [ ] [build] numbered is not an item\n- [-] [build] dash box is not an item\n- [] [build] empty box is not an item\n  - [ ] [landed] indented item counts\n-[ ] [live] no space after dash counts\n\nTrailing prose with [build] inside.",
+    "expect": [
+      {"index": 0, "checked": false, "phase": "landed", "window": null, "multi": false, "text": "indented item counts"},
+      {"index": 1, "checked": false, "phase": "live", "window": null, "multi": false, "text": "no space after dash counts"}
+    ]
+  },
+  {
+    "name": "uppercase-tags-rejected",
+    "ac_text": "- [ ] [BUILD] shouty\n- [ ] [Build] title case\n- [ ] [Live] title case live\n- [ ] [AFTER 7d] shouty after\n- [ ] [after 7D] uppercase unit\n- [ ] [BUILD] [live] uppercase is not a second tag",
+    "expect": [
+      {"index": 0, "checked": false, "phase": null, "window": null, "multi": false, "text": "[BUILD] shouty"},
+      {"index": 1, "checked": false, "phase": null, "window": null, "multi": false, "text": "[Build] title case"},
+      {"index": 2, "checked": false, "phase": null, "window": null, "multi": false, "text": "[Live] title case live"},
+      {"index": 3, "checked": false, "phase": null, "window": null, "multi": false, "text": "[AFTER 7d] shouty after"},
+      {"index": 4, "checked": false, "phase": null, "window": null, "multi": false, "text": "[after 7D] uppercase unit"},
+      {"index": 5, "checked": false, "phase": "live", "window": null, "multi": false, "text": "[BUILD] uppercase is not a second tag"}
+    ]
+  },
+  {
+    "name": "separator-forms",
+    "ac_text": "- [ ][build] no space before tag\n- [ ] [live]no space after tag\n- [ ]   [landed]   extra spaces",
+    "expect": [
+      {"index": 0, "checked": false, "phase": "build", "window": null, "multi": false, "text": "no space before tag"},
+      {"index": 1, "checked": false, "phase": "live", "window": null, "multi": false, "text": "no space after tag"},
+      {"index": 2, "checked": false, "phase": "landed", "window": null, "multi": false, "text": "extra spaces"}
+    ]
+  },
+  {
+    "name": "crlf-line-endings",
+    "ac_text": "- [ ] [build] first\r\n- [x] [after 1d] second\r\n",
+    "expect": [
+      {"index": 0, "checked": false, "phase": "build", "window": null, "multi": false, "text": "first"},
+      {"index": 1, "checked": true, "phase": "after", "window": "1d", "multi": false, "text": "second"}
+    ]
+  },
+  {
+    "name": "empty-text",
+    "ac_text": "",
+    "expect": []
+  },
+  {
+    "name": "item-with-empty-body",
+    "ac_text": "- [ ]\n- [ ] [build]",
+    "expect": [
+      {"index": 0, "checked": false, "phase": null, "window": null, "multi": false, "text": ""},
+      {"index": 1, "checked": false, "phase": "build", "window": null, "multi": false, "text": ""}
+    ]
+  }
+]

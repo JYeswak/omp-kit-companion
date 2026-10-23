@@ -26,7 +26,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/package-release.sh", "scripts/receipt.py", "scripts/pysafe.py", "scripts/kitlib_run.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh",
 	"scripts/kitlib_tmp.py", "scripts/kitlib-tmp.sh", "scripts/kitlib_lock.py", "scripts/kitlib_io.py", "scripts/kitlib_proc.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_poll.py", "scripts/kitlib_artifact.py", "scripts/tempsafe_check.py", "scripts/check-staged-tempsafe.sh",
 	"scripts/kitlib_ratchet_core.py", "scripts/kitlib_ratchet.py", "scripts/check-staged-kitlib.sh",
-	"scripts/bead_lint.py", "scripts/br_create_guard_core.py", "scripts/br-create-lint.py", "scripts/br-update-lint.py",
+	"scripts/bead_lint.py", "scripts/ac_phase.py", "scripts/br_create_guard_core.py", "scripts/br-create-lint.py", "scripts/br-update-lint.py",
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",

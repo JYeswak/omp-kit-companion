@@ -861,15 +861,18 @@ test("native durable creation followed by failure is reconciled, never reported 
 
 async function requireCanonicalAdmission(dbDir: string): Promise<void> {
 	const rows = issueRows(dbDir);
+	// ACPHASE1: each row is also linted as if created at the cutover, so the
+	// phase-tag gate (check l) binds today and not only from 2026-10-24 on.
 	const script = [
 		"import json, sys",
 		"sys.path.insert(0, sys.argv[1])",
-		"import bead_lint",
+		"import ac_phase, bead_lint",
 		"rows = json.load(sys.stdin)",
 		"ids = {row['id'] for row in rows}",
 		"bad = {row['id']: failures for row in rows if (failures := bead_lint.lint_bead_failures(row, ids))}",
-		"print(json.dumps(bad))",
-		"sys.exit(bool(bad))",
+		"late = {row['id']: failures for row in rows if (failures := bead_lint.lint_bead_failures({**row, 'created_at': ac_phase.AC_PHASE_CUTOVER}, ids))}",
+		"print(json.dumps({'stored': bad, 'enforced': late}))",
+		"sys.exit(bool(bad or late))",
 	].join("\n");
 	const result = await runBounded(["python3", "-B", "-c", script, join(repoRoot, "scripts")], {
 		deadline_s: 20, max_output_bytes: 1 << 20, stdin: JSON.stringify(rows), cwd: repoRoot, env: childEnv,
@@ -940,6 +943,6 @@ test("canonical scope sets preserve explicit progress while legacy scope x remai
 	const scopes = rows.find((row) => row.external_ref === "core8:scope-sets");
 	const legacy = rows.find((row) => row.external_ref === "core8:legacy-scope-x");
 	if (!scopes || !legacy) throw new Error("scope fixture rows are missing");
-	expect(scopes.acceptance_criteria.includes("- [x] [a,b] Planted negative:")).toBe(true);
-	expect(legacy.acceptance_criteria.includes("- [ ] [x] legacy-scope-x contributes")).toBe(true);
+	expect(scopes.acceptance_criteria.includes("- [x] [a,b] [build] Planted negative:")).toBe(true);
+	expect(legacy.acceptance_criteria.includes("- [ ] [x] [build] legacy-scope-x contributes")).toBe(true);
 });
