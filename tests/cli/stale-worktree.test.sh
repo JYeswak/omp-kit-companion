@@ -343,5 +343,69 @@ for target in removed hit; do
 	check "$fault_rc" "1" "join-io-$target-refuses" "$out" "$expected"
 done
 
+# 23. failed or incomplete Git observations cannot erase a removed-site check.
+R=$(new_repo history-errors)
+A=$(git -C "$R" rev-parse HEAD)
+printf 'base line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+printf '[test] history control\n\nBead: t-land\n' > "$TMP/history-good.msg"
+member="$R/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree"
+out=$(cd "$R" && sh "$member" "$TMP/history-good.msg" 2>&1)
+check "$?" "0" "history-readable-passing-control" "$out" ""
+real_git=$(command -v git)
+fault_bin="$TMP/history-fault-bin"
+mkdir "$fault_bin"
+cat > "$fault_bin/git" <<'SH'
+#!/bin/sh
+case "$GATE_GIT_FAULT:$1:${2-}:${3-}" in
+	head-fail:rev-parse:-q:--verify) exit 7 ;;
+	ref-unavailable:show-ref:--exists:*) exit 129 ;;
+	blame-fail:blame:*) exit 7 ;;
+	blame-empty:blame:*) exit 0 ;;
+	metadata-fail:log:-1:*) exit 7 ;;
+	date-invalid:log:-1:--format=%ct) printf 'not-an-epoch\n'; exit 0 ;;
+	diff-fail:diff:-U0:*) exit 7 ;;
+	ancestor-partial:log:--format=%ct:*) printf '0\n'; exit 7 ;;
+esac
+exec "$GATE_REAL_GIT" "$@"
+SH
+chmod +x "$fault_bin/git"
+for fault in head-fail blame-fail blame-empty metadata-fail date-invalid diff-fail; do
+	out=$(cd "$R" && PATH="$fault_bin:$PATH" GATE_REAL_GIT="$real_git" GATE_GIT_FAULT="$fault" sh "$member" "$TMP/history-good.msg" 2>&1)
+	fault_rc=$?
+	case "$fault" in
+		head-fail) expected="stale-worktree: unreadable HEAD" ;;
+		blame-*) expected="stale-worktree: unreadable attribution" ;;
+		metadata-fail | date-invalid) expected="UNREADABLE_COMMIT_FACTS" ;;
+		diff-fail) expected="stale-worktree: cannot read staged diff" ;;
+	esac
+	check "$fault_rc" "1" "history-$fault-refuses" "$out" "$expected"
+done
+
+# A failed ancestor query's partial stdout is not a complete maximum. Keep
+# attribution; a genuine stale removal refuses, while its declared revert passes.
+backdate "$R/pkg/f.txt"
+printf '[test] stale history\n' > "$TMP/history-stale.msg"
+out=$(cd "$R" && PATH="$fault_bin:$PATH" GATE_REAL_GIT="$real_git" GATE_GIT_FAULT=ancestor-partial sh "$member" "$TMP/history-stale.msg" 2>&1)
+check "$?" "1" "history-partial-maximum-cannot-skip" "$out" "STALE_WORKTREE pkg/f.txt reverts $A"
+printf '[test] declared history\n\nRevert: %s\n' "$A" > "$TMP/history-declared.msg"
+out=$(cd "$R" && PATH="$fault_bin:$PATH" GATE_REAL_GIT="$real_git" GATE_GIT_FAULT=ancestor-partial sh "$member" "$TMP/history-declared.msg" 2>&1)
+check "$?" "0" "history-partial-maximum-declared-control" "$out" ""
+
+# An actually unborn symbolic branch remains a permitted first commit.
+R=$(new_export_repo history-unborn)
+out=$(cd "$R" && sh .git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree "$TMP/history-good.msg" 2>&1)
+check "$?" "0" "history-proven-unborn-control" "$out" ""
+out=$(cd "$R" && PATH="$fault_bin:$PATH" GATE_REAL_GIT="$real_git" GATE_GIT_FAULT=ref-unavailable sh .git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree "$TMP/history-good.msg" 2>&1)
+check "$?" "1" "history-unborn-query-unavailable-refuses" "$out" "stale-worktree: unreadable HEAD"
+
+# An existing malformed branch is not a missing branch, even when quiet
+# verification returns the same status used by an actually absent reference.
+R=$(new_repo history-malformed-ref)
+branch=$(git -C "$R" symbolic-ref HEAD)
+printf 'not-an-object-id\n' > "$R/.git/$branch"
+out=$(cd "$R" && sh .git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree "$TMP/history-good.msg" 2>&1)
+check "$?" "1" "history-malformed-ref-refuses" "$out" "stale-worktree: unreadable HEAD"
+
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

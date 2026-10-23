@@ -1,0 +1,59 @@
+{
+  "schema_version": "omp-kit.stale-gate-history-safety.v1",
+  "bead": "ompkit-axz7m.9",
+  "baseline_commit": "7366275484",
+  "candidate_sha256": "ba14ee56fec76d63750395c33797acdeccbf9d74ee767411e63d94883bc2f109",
+  "classification": "Separatecorrectnessfix,notanoptimizationorunqualifiedisomorphismclaim.",
+  "observed_before": {
+    "git_error_cases": {
+      "rc": 1,
+      "stdout": "On branch main\nnothing to commit, working tree clean\nOn branch main\nnothing to commit, working tree clean\nOn branch main\nnothing to commit, working tree clean\nFAIL history-blame-fail-refuses: rc=0 want 1 out<<<>>>\nFAIL history-blame-empty-refuses: rc=0 want 1 out<<<>>>\nFAIL history-metadata-fail-refuses: rc=0 want 1 out<<<>>>\nFAIL history-date-invalid-refuses: rc=0 want 1 out<<</Users/josh/Developer/omp-kit/var/agent-tmp/kitlib-publish.78877/stale-worktree-test.47338.a6uivi/history-errors/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree: line 222: [: not-an-epoch: integer expression expected>>>\nFAIL history-diff-fail-refuses: rc=0 want 1 out<<<>>>\nFAIL history-partial-maximum-cannot-skip: rc=0 want 1 out<<<>>>\nstale-worktree: 49 pass 6 fail\n",
+      "stderr": "",
+      "actual_false_passes": 6
+    },
+    "existing_head_error": {
+      "rc": 1,
+      "stdout": "On branch main\nnothing to commit, working tree clean\nOn branch main\nnothing to commit, working tree clean\nOn branch main\nnothing to commit, working tree clean\nFAIL history-head-fail-refuses: rc=0 want 1 out<<<>>>\nstale-worktree: 56 pass 1 fail\n",
+      "stderr": "",
+      "actual_false_passes": 1
+    },
+    "typed_unborn_query_case": {
+      "rc": 1,
+      "stdout": "On branch main\nnothing to commit, working tree clean\nOn branch main\nnothing to commit, working tree clean\nOn branch main\nnothing to commit, working tree clean\nFAIL history-unborn-query-unavailable-refuses: rc=0 want 1 out<<<>>>\nstale-worktree: 58 pass 1 fail\n",
+      "stderr": "",
+      "interpretation": "Unsupporteddistinction-bearingqueryisnewcapabilitycase; malformedreffixturealreadyrefusedunderintermediateCBD7, notcountedasobservedfalsepass."
+    }
+  },
+  "observed_after": {
+    "rc": 0,
+    "stdout": "On branch main\nnothing to commit, working tree clean\nOn branch main\nnothing to commit, working tree clean\nOn branch main\nnothing to commit, working tree clean\nstale-worktree: 59 pass 0 fail\n",
+    "stderr": "",
+    "checks": 59
+  },
+  "changes": [
+    "Producerstatuscapturebeforediff/blameinterpretation",
+    "Completeorderedremoved-sitecoverage",
+    "Onlysuccessfulvalidintegermetadatapublishedintoinvocationcache",
+    "Failed/partialmaximumretainsactualattribution,neverestablishesfreshness",
+    "FailedHEADverifyrequiresindependentvalidsymbolicbranchplusGit--existsmissingstatus2;errorsandunsupportedrefuse",
+    "Verifiedexportdiffreusedandstagedexportreadstatuschecked",
+    "Writablemarkerfailurescannotturnrefusalintoapass"
+  ],
+  "compatibility": {
+    "readable_history": "Originalpolicy/controloraclesretained; previousvalidmoves,declarations,ownbeadandexportdecisionscontinuepassing.",
+    "error_domain": "Intentionalstricterrefusal,notclaimedidenticaltolegacyfalsepasses.",
+    "unborn_capability": "Git2.46+ show-ref--exists requiredONLYwhenprovingunborn; normalreadableHEADpathunchanged; unsupportedrefusesactionably.",
+    "primary_contract": "https://raw.githubusercontent.com/git/git/v2.46.0/Documentation/git-show-ref.txt"
+  },
+  "independent_review": "PlanStaleGateReuse reviewedproducerstatustreatment,orderedsemanticsandcorrectedtypedunbornbranch; nofurtherblockingfindingintargetedreview. Source/contextreview,notindependentrun.",
+  "source_files": {
+    "scripts/check-stale-worktree.sh": "ba14ee56fec76d63750395c33797acdeccbf9d74ee767411e63d94883bc2f109",
+    "tests/cli/stale-worktree.test.sh": "4fccae91d375e12e693c8a7a194a97d45922f6f0af58d58f8c497fc8945ee795"
+  },
+  "not_claimed": [
+    "Installedcutover",
+    "Wholeprojecttypecheck",
+    "AllruntimeproviderfaultsoradversarialOSbehaviorscertified",
+    "Largeactualcommitcompletion"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "authority": "test",
+  "confidence": "observed",
+  "evidence_id": "ev_5eddf2960bfe67fc6d083d64bbecfbf7c1e4c7083505aaceb0d84e906e2f4310",
+  "limitations": [
+    "Specific7observedlegacyfalsepassesand59afterchecks; readablepolicycontrolsretained. UnbornrequiresdeclaredGit2.46+typedlookup. NotallOS/providerfaultscertified; noinstalledcutoverorlargecommitclaim."
+  ],
+  "operation": "stale-gate-history-error-refusal",
+  "parameters": {
+    "baseline_commit": "7366275484",
+    "bead": "ompkit-axz7m.9",
+    "candidate_sha256": "ba14ee56fec76d63750395c33797acdeccbf9d74ee767411e63d94883bc2f109"
+  },
+  "producer": "QuietBadger",
+  "result_ref": {
+    "bytes": 4062,
+    "sha256": "3f100eda20e616a085cb333b2f5f40c839699e9c5bcb475ec1f5c69e61a04e08"
+  }
+}

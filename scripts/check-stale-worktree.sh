@@ -19,7 +19,18 @@
 set -u
 msg=${1:?usage: check-stale-worktree.sh MSGFILE}
 root=$(git rev-parse --show-toplevel) || { printf 'stale-worktree: not inside a work tree\n' >&2; exit 1; }
-git rev-parse -q --verify 'HEAD^{commit}' > /dev/null || exit 0
+if ! git rev-parse -q --verify 'HEAD^{commit}' > /dev/null; then
+	# Failure is not an unborn verdict. Git 2.46+ --exists distinguishes
+	# absence (2) from lookup failure (1); quiet --verify does not.
+	unborn_ref=$(git symbolic-ref --quiet HEAD 2>/dev/null) || { printf 'stale-worktree: unreadable HEAD\n' >&2; exit 1; }
+	case "$unborn_ref" in refs/heads/*) ;; *) printf 'stale-worktree: unreadable HEAD\n' >&2; exit 1 ;; esac
+	git check-ref-format "$unborn_ref" >/dev/null 2>&1 || { printf 'stale-worktree: unreadable HEAD\n' >&2; exit 1; }
+	git show-ref --exists "$unborn_ref" >/dev/null 2>&1
+	unborn_status=$?
+	[ "$unborn_status" -eq 2 ] && exit 0
+	printf 'stale-worktree: unreadable HEAD (proving unborn requires Git 2.46+ show-ref --exists)\n' >&2
+	exit 1
+fi
 
 # Current message bead and declared reverts (empty when absent). A
 # `Supersedes: <sha>` trailer declares an intended rewrite with the same
@@ -28,10 +39,10 @@ bead=$(grep -E -m1 '^[[:space:]]*[Bb]ead:[[:space:]]*[A-Za-z0-9._-]+' "$msg" 2>/
 reverts=$(grep -E -o '^[[:space:]]*[Rr]evert:[[:space:]]*[0-9a-fA-F]{7,64}|^[[:space:]]*[Ss]upersedes:[[:space:]]*[0-9a-fA-F]{7,64}' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//')
 [ -f "$msg" ] || { printf 'stale-worktree: cannot read %s\n' "$msg" >&2; exit 1; }
 
-# Effective committed paths, NUL-separated straight into the loop (a shell
-# variable cannot hold NULs; temp index included, so --only is judged).
-git diff --cached --name-only -z HEAD -- >/dev/null 2>&1 || { printf 'stale-worktree: cannot list committed paths\n' >&2; exit 1; }
- test -n "$(git diff --cached --name-only HEAD --)" || exit 0
+# Check the producer before using empty output as "nothing committed".
+# Actual path data is materialized NUL-separated below; --only stays judged.
+changed_paths=$(git diff --cached --name-only HEAD -- 2>/dev/null) || { printf 'stale-worktree: cannot list committed paths\n' >&2; exit 1; }
+[ -n "$changed_paths" ] || exit 0
  tree=$(git write-tree) || { printf 'stale-worktree: cannot write the effective tree\n' >&2; exit 1; }
 
 # The invocation owner, not the piped path-loop subshell, owns cache cleanup
@@ -50,12 +61,19 @@ mtime_of() {
 	stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || return 0
 }
 
+# Capture the producer status before interpreting its output. A partial diff
+# cannot be used as an authoritative removal or move inventory.
+capture_diff() {
+	git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$@" > "$metadata_dir/diff.raw" 2>/dev/null
+}
+
 removed_lines() {
 	# $1 = path; prints removed HEAD line numbers, one per line, by
 	# walking each zero-context hunk body (- lines consume old numbers).
 	# Only hunks count: a removed "-- x" line renders as "--- x" and must
 	# not be eaten as the file header, or every later number shifts.
-	git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$1" 2>/dev/null | awk '
+	capture_diff "$1" || return 1
+	awk '
 		/^diff --git / { inat = 0; next }
 		/^@@ / {
 			old = substr($2, 2);
@@ -68,7 +86,7 @@ removed_lines() {
 		/^-/ { print old; old++; next }
 		/^\+/ { next }
 		/^ / { old++; next }
-		/^\\/ { next }'
+		/^\\/ { next }' "$metadata_dir/diff.raw"
 }
 blame_lines() {
 	# $1 = path; reads its removed HEAD line numbers (ascending) on stdin and
@@ -83,7 +101,8 @@ blame_lines() {
 	[ "$#" -gt 1 ] || return 0
 	bpath=$1
 	shift
-	git blame --porcelain "$@" "$HEAD" -- "$bpath" 2>/dev/null | awk '/^[0-9a-f]{40} [0-9]+ [0-9]+/ { print $3, $1 }'
+	git blame --porcelain "$@" "$HEAD" -- "$bpath" > "$metadata_dir/blame.raw" 2>/dev/null || return 1
+	awk '/^[0-9a-f]{40} [0-9]+ [0-9]+/ { print $3, $1 }' "$metadata_dir/blame.raw"
 }
 
 # Commit facts are immutable within this pinned invocation, not per removed
@@ -104,12 +123,14 @@ commit_facts() {
 	facts_body=$(git log -1 --format=%B "$1" 2>/dev/null)
 	facts_body_rc=$?
 	cbead=$(printf '%s\n' "$facts_body" | grep -E -m1 '^[[:space:]]*[Bb]ead:[[:space:]]*[A-Za-z0-9._-]+' | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//')
-	if [ "$facts_subject_rc" -eq 0 ] && [ "$facts_date_rc" -eq 0 ] && [ "$facts_body_rc" -eq 0 ]; then
-		printf '%s\n' "$subject" > "$facts_prefix.subject" || return 1
-		printf '%s\n' "$cdate" > "$facts_prefix.date" || return 1
-		printf '%s\n' "$cbead" > "$facts_prefix.bead" || return 1
-		: > "$facts_prefix.ready" || return 1
-	fi
+	[ "$facts_subject_rc" -eq 0 ] && [ "$facts_date_rc" -eq 0 ] && [ "$facts_body_rc" -eq 0 ] || return 1
+	# Git emits an integer epoch. Reject malformed/out-of-range observations
+	# without inventing a default date; successful empty bead/subject is valid.
+	[ "$cdate" -eq "$cdate" ] 2>/dev/null || return 1
+	printf '%s\n' "$subject" > "$facts_prefix.subject" || return 1
+	printf '%s\n' "$cdate" > "$facts_prefix.date" || return 1
+	printf '%s\n' "$cbead" > "$facts_prefix.bead" || return 1
+	: > "$facts_prefix.ready" || return 1
 	return 0
 }
 
@@ -120,18 +141,19 @@ moved_lines() {
 	# across paths: one add excuses exactly one removal, wherever they sit.
 	# Appends each consumed text to $mvused and re-sorts it.
 	[ -s "$mvavail" ] || return 0
-	git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$1" 2>/dev/null | awk '
+	capture_diff "$1" || return 1
+	awk '
 		/^diff --git / { inat = 0; next }
 		/^@@ / { old = substr($2, 2); split(old, r, ","); old = r[1] + 0; inat = 1; next }
 		!inat { next }
-		/^-/ { print old "\t" substr($0, 2); old++ }' > "$mvrm"
-	awk -F'\t' 'NR == FNR { add[$0]++; next } { text = substr($0, index($0, "\t") + 1); if (add[text] > 0) { print; add[text]-- } }' "$mvavail" "$mvrm" > "$mvhit"
-	cut -f2- "$mvhit" >> "$mvused"
-	sort -o "$mvused" "$mvused"
+		/^-/ { print old "\t" substr($0, 2); old++ }' "$metadata_dir/diff.raw" > "$mvrm" || return 1
+	awk -F'\t' 'NR == FNR { add[$0]++; next } { text = substr($0, index($0, "\t") + 1); if (add[text] > 0) { print; add[text]-- } }' "$mvavail" "$mvrm" > "$mvhit" || return 1
+	cut -f2- "$mvhit" >> "$mvused" || return 1
+	sort -o "$mvused" "$mvused" || return 1
 	cut -f1 "$mvhit"
 }
 
-HEAD=$(git rev-parse --verify 'HEAD^{commit}')
+HEAD=$(git rev-parse --verify 'HEAD^{commit}') || exit 1
 nl=$(printf '\nX'); nl=${nl%X}
 # Moved-text multiset over the whole staged diff: every added line's exact
 # text, one per line. A removed line whose text is re-added at least as many
@@ -145,15 +167,21 @@ mvhit="$root/.git/stale-worktree-hit.$$"
 # The same invocation owner cleans these existing files on every exit.
 # Join I/O failures propagate in pipeline status, not a disk error marker.
 kitlib_tmp_atexit 'rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd_sorted" "$mvused" "$mvavail" "$mvrm" "$mvhit"'
-git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" 2>/dev/null | awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' | sort > "$mvadd_sorted"
-: > "$mvused"
+capture_diff || { printf 'stale-worktree: cannot read staged diff\n' >&2; exit 1; }
+awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' "$metadata_dir/diff.raw" > "$metadata_dir/additions.raw" || exit 1
+sort "$metadata_dir/additions.raw" > "$mvadd_sorted" || exit 1
+: > "$mvused" || exit 1
 newest=""
-git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r path; do
+git diff --cached --name-only -z HEAD -- > "$metadata_dir/paths.raw" || exit 1
+tr '\0' '\n' < "$metadata_dir/paths.raw" > "$metadata_dir/paths.lines" || exit 1
+while IFS= read -r path; do
 	[ -n "$path" ] || continue
 	case "$path" in */*..*|..*|*"$nl"*) continue ;; esac
-	diffout=$(git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$path" 2>/dev/null) || continue
+	capture_diff "$path" || { printf 'stale-worktree: cannot read staged diff: %s\n' "$path" >&2; exit 1; }
+	diffout=$(cat "$metadata_dir/diff.raw") || exit 1
 	case "$diffout" in *Binary\ files\ *differ*) continue ;; esac
-	[ -n "$(removed_lines "$path")" ] || continue
+	removed=$(removed_lines "$path") || { printf 'stale-worktree: cannot read removed sites: %s\n' "$path" >&2; exit 1; }
+	[ -n "$removed" ] || continue
 	# Tracker export records belong to beads, not to the serializing commit.
 	# A regeneration that loses no issue row is not a revert: when every
 	# removed row's issue id still has a row in the staged file, rule (b)
@@ -161,9 +189,10 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	# normal rules (fail closed). Rule (a) always still applies to it.
 	export_ok=0
 	case "$path" in .beads/issues.jsonl|*/.beads/issues.jsonl)
-		removed_ids=$(git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" -- "$path" 2>/dev/null | awk '/^@@ /{inat=1;next} !inat{next} /^-/{print substr($0,2)}' | grep -o '"id":"[^"]*"' | sort -u)
+		removed_ids=$(printf '%s\n' "$diffout" | awk '/^@@ /{inat=1;next} !inat{next} /^-/{print substr($0,2)}' | grep -o '"id":"[^"]*"' | sort -u)
 		if [ -n "$removed_ids" ]; then
-			new_ids=$(git show "$tree:$path" 2>/dev/null | grep -o '"id":"[^"]*"' | sort -u)
+			export_rows=$(git show "$tree:$path" 2>/dev/null) || { printf 'stale-worktree: unreadable staged export: %s\n' "$path" >&2; exit 1; }
+			new_ids=$(printf '%s\n' "$export_rows" | grep -o '"id":"[^"]*"' | sort -u)
 			lost=0
 			for id in $removed_ids; do
 				printf '%s\n' "$new_ids" | grep -qxF -- "$id" || lost=1
@@ -176,8 +205,9 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	# skip rule (b) only. Rule (a) judges them on mtime: a stale deletion
 	# re-added elsewhere still refuses, so no text-bag launders a real
 	# stale revert.
-	comm -23 "$mvadd_sorted" "$mvused" > "$mvavail"
-	moved=" $(moved_lines "$path" | tr '\n' ' ')"
+	comm -23 "$mvadd_sorted" "$mvused" > "$mvavail" || exit 1
+	moved_numbers=$(moved_lines "$path") || { printf 'stale-worktree: cannot read moved sites: %s\n' "$path" >&2; exit 1; }
+	moved=" $(printf '%s\n' "$moved_numbers" | tr '\n' ' ')"
 	mt=$(mtime_of "$root/$path")
 	# No blame when no rule can refuse this path (ompkit-xa5s.30: closing an
 	# old tracker row cost one 32 s blame). Rule (b) needs a message bead and
@@ -187,14 +217,25 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	# An unreadable history keeps the blame (fail closed).
 	if [ "$export_ok" -eq 1 ] || [ -z "$bead" ]; then
 		[ -n "$mt" ] || continue
-		[ -n "$newest" ] || newest=$(git log --format=%ct "$HEAD" 2>/dev/null | sort -n | tail -n 1)
-		case "$newest" in '' | *[!0-9]*) ;; *) [ "$newest" -gt "$mt" ] || continue ;; esac
+		if [ -z "$newest" ] && git log --format=%ct "$HEAD" > "$metadata_dir/epochs.raw" 2>/dev/null; then
+			epochs_valid=1
+			while IFS= read -r epoch; do
+				case "$epoch" in '' | *[!0-9]*) epochs_valid=0 ;; esac
+			done < "$metadata_dir/epochs.raw" || epochs_valid=0
+			if [ "$epochs_valid" -eq 1 ] && [ -s "$metadata_dir/epochs.raw" ] &&
+				sort -n "$metadata_dir/epochs.raw" > "$metadata_dir/epochs.sorted"; then
+				newest=$(tail -n 1 "$metadata_dir/epochs.sorted") || newest=""
+			fi
+		fi
+		# Only a proven comparison can skip attribution. Unknown/overflow keeps it.
+		case "$newest" in '' | *[!0-9]*) ;; *) [ "$newest" -le "$mt" ] 2>/dev/null && continue ;; esac
 	fi
 	seen=""
-	blamed=$(removed_lines "$path" | blame_lines "$path")
+	blamed=$(printf '%s\n' "$removed" | blame_lines "$path") || { printf 'stale-worktree: unreadable attribution: %s\n' "$path" >&2; exit 1; }
+	[ -n "$blamed" ] || { printf 'stale-worktree: unreadable attribution: %s\n' "$path" >&2; exit 1; }
 	# Join once, retaining removed-site order and the incumbent's first-match
 	# semantics. Move allocation has consumed these two scratch files already.
-	if ! removed_lines "$path" > "$mvrm"; then
+	if ! printf '%s\n' "$removed" > "$mvrm"; then
 		printf 'stale-worktree: cannot materialize removed sites: %s\n' "$path" >&2
 		exit 1
 	fi
@@ -204,6 +245,8 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 		END {
 			for (i = 1; i <= n; i++)
 				if (order[i] in sha) print order[i], sha[order[i]]
+				else missing = 1
+			exit missing
 		}' "$mvrm" - > "$mvhit"; then
 		printf 'stale-worktree: cannot join removed sites: %s\n' "$path" >&2
 		exit 1
@@ -220,9 +263,9 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 		done
 		# Rule (a): worktree predates the landing (absent file skips: no mtime).
 		if [ -n "$mt" ] && [ -n "$cdate" ] && [ "$cdate" -gt "$mt" ] && [ "$declared" -eq 0 ]; then
-			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s)\n' "$path" "$sha" "$subject" >> "$root/.git/stale-worktree-report.$$" ;; esac
+			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s)\n' "$path" "$sha" "$subject" >> "$root/.git/stale-worktree-report.$$" || exit 1 ;; esac
 			seen="$seen $sha"
-			printf '1\n' >> "$root/.git/stale-worktree-refused.$$"
+			printf '1\n' >> "$root/.git/stale-worktree-refused.$$" || exit 1
 			continue
 		fi
 		# Rule (b): foreign bead reverted without declaration. Skipped for
@@ -234,12 +277,12 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 		[ "$export_ok" -eq 1 ] && skip_b=1
 		case "$moved" in *" $ln "*) skip_b=1 ;; esac
 		if [ "$skip_b" -eq 0 ] && [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
-			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$root/.git/stale-worktree-report.$$" ;; esac
+			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$root/.git/stale-worktree-report.$$" || exit 1 ;; esac
 			seen="$seen $sha"
-			printf '1\n' >> "$root/.git/stale-worktree-refused.$$"
+			printf '1\n' >> "$root/.git/stale-worktree-refused.$$" || exit 1
 		fi
 	done < "$mvhit" || exit 1
- done || { printf 'stale-worktree: cannot evaluate removed sites\n' >&2; exit 1; }
+ done < "$metadata_dir/paths.lines" || { printf 'stale-worktree: cannot evaluate removed sites\n' >&2; exit 1; }
  if [ -s "$root/.git/stale-worktree-refused.$$" ]; then
  	report=$(cat "$root/.git/stale-worktree-report.$$" 2>/dev/null)
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
