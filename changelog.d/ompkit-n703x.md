@@ -1,0 +1,3 @@
+### Fixed
+
+- The fleet watcher's `source.tick` now carries `error_code: null` and `skew_ms: null` (ompkit-n703x, WATCHTICK1). Both fields are required (nullable) for `source.tick` in the command-center registry `events.v1.json`. Without them, the cc ingester dead-lettered every watcher tick as `FIELD_MISSING data.error_code`, so `source:watcher` never ticked. The `SPOOL_APPEND_FAILED` quarantine stays reported in the tick's coverage, and `error_code` stays null because the registry declares no code for it. `tests/cli/fleet-watch-pull.test.ts` now asserts the exact registry field set on every harness-produced tick.

@@ -350,8 +350,20 @@ test("[C8] pull.attempt mirrors watcher outcomes with stable identity and per-pa
 		records_emitted: 1,
 		records_ignored: 0,
 		records_quarantined: 0,
+		error_code: null,
+		skew_ms: null,
 		coverage: [{ record_type: "record:NUDGED", runtime_version: "1", disposition: "emitted", reason: null, count: 1 }],
 	});
+	// ompkit-n703x: events.v1.json source.tick requires every field below (event_count is the only optional one);
+	// a missing nullable field is dead-lettered FIELD_MISSING by the ingester, so every tick must carry the full set.
+	for (const tick of ticks) {
+		expect(Object.keys(tick.data).sort()).toEqual([
+			"complete_through_ms", "coverage", "error_code", "event_count", "instance", "position",
+			"records_emitted", "records_ignored", "records_quarantined", "records_seen", "skew_ms",
+		]);
+		expect(tick.data.error_code).toBeNull();
+		expect(tick.data.skew_ms).toBeNull();
+	}
 	const positions = [...pulls, ...ticks].map((event) => event.position);
 	expect(new Set(positions).size).toBe(positions.length);
 	const logRows = readFileSync(run.logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -454,6 +466,8 @@ test("[C8] append failure is quarantined and reported with record:emit_failed on
 		records_emitted: 0,
 		records_ignored: 0,
 		records_quarantined: 2,
+		error_code: null,
+		skew_ms: null,
 		coverage: [{ record_type: "record:emit_failed", runtime_version: "1", disposition: "unknown", reason: "SPOOL_APPEND_FAILED", count: 2 }],
 	});
 });

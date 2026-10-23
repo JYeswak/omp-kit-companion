@@ -1359,6 +1359,8 @@ class WatcherEventRecorder {
 			complete_through_ms: tickAt,
 			position: tickSequence,
 			event_count: this.recordsEmitted,
+			error_code: null,
+			skew_ms: null,
 			coverage,
 		}, `fw:tick:${tickAt}:${tickSequence}`, tickAt);
 		if (tick === 0) this.watcher.addPendingEmitFailures(this.recordsQuarantined + 1);
