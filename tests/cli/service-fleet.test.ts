@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, s
 import { join, resolve } from "node:path";
 import { KNOWN_JOBS } from "../../src/service.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 
 // SVC1 box 2: the fleet view. `service status --all` and `service list` must
 // report loaded state, last exit, last run age and run count per job.
@@ -11,6 +12,9 @@ import { ownedTmp } from "../../src/kitlib/tmp.ts";
 // Launchd-domain safety: every CLI spawn below gets its own
 // OMP_KIT_TEST_LABEL_NAMESPACE via extraEnv (never process.env, so this file
 // cannot clobber service.test.ts's namespace when bun shares one process).
+// The host process table is fixture-owned the same way: every `service run`
+// below sees only this file's own launchers.
+const LAUNCHER_TABLE = fixtureLauncherTableBin();
 
 const roots: string[] = [];
 afterEach(() => {
@@ -46,7 +50,7 @@ function fixtureHome(): string {
 function cli(args: string[], home: string, ns: string, extraEnv: Record<string, string> = {}) {
 	const env: Record<string, string | undefined> = {
 		...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: ns, ...extraEnv,
-		PATH: `${join(home, "fixture-omp", "bin")}:${process.env.PATH ?? ""}`,
+		PATH: `${LAUNCHER_TABLE}:${join(home, "fixture-omp", "bin")}:${process.env.PATH ?? ""}`,
 	};
 	for (const key of ["OMP", "OMP_BIN", "OMP_PATH", "OMP_SRC"]) delete env[key];
 	const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {

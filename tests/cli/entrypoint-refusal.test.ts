@@ -2,6 +2,7 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 
 // ompkit-bj08.5 round 2: pause and missing-source refusals through the real
 // CLI entrypoints. Each case runs `omp-kit service run` in a child process
@@ -11,6 +12,10 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 // NOTE: these suites spawn src/cli.ts, so they need a consistent checkout;
 // they run green on clean trees (pre-push FRESH-GATE runs them on the
 // candidate archive) and fail in checkouts with unrelated breakage.
+
+// The host process table is fixture-owned: launcher admission sees only this
+// file's own `service run` processes, never a parallel test's or a live job's.
+const LAUNCHER_TABLE = fixtureLauncherTableBin();
 
 const roots: string[] = [];
 afterEach(() => {
@@ -34,7 +39,8 @@ function fixtureHome(): string {
 function cli(args: string[], home: string, ns: string, extraEnv: Record<string, string> = {}) {
 	const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
 		cwd: home,
-		env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: ns, ...extraEnv },
+		env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: ns, ...extraEnv,
+			PATH: `${LAUNCHER_TABLE}:${extraEnv.PATH ?? process.env.PATH ?? ""}` },
 		stdout: "pipe", stderr: "pipe",
 	});
 	return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };

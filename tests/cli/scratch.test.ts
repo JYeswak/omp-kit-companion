@@ -7,12 +7,15 @@ import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
 import { acquireRunLock } from "../../src/service-run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 
 const roots: string[] = [];
 const fixtureRepo = resolve(import.meta.dir, "../..");
 const AGENT_TMP = join(fixtureRepo, "var", "agent-tmp");
 /** A fresh owned dir (src/kitlib/tmp.ts) under the repo's var/agent-tmp; callers still push it to `roots`. */
 const agentTmp = (label: string): string => ownedTmp(label, { root: AGENT_TMP }).path;
+// `service run scratch-reaper` below sees only this file's own launchers in the host process table.
+const LAUNCHER_TABLE = fixtureLauncherTableBin();
 const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
 const savedState = process.env.XDG_STATE_HOME;
 const savedTmp = process.env.TMPDIR;
@@ -615,7 +618,8 @@ test("apply kills only selected harness orphans and logs JSONL", () => {
 
 function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {
   const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
-    cwd: home, env: { ...process.env, HOME: home, ...extraEnv, BUN_OPTIONS: `--preload=${join(home, "browser-inventory.ts")}` }, stdout: "pipe", stderr: "pipe",
+    cwd: home, env: { ...process.env, HOME: home, ...extraEnv, PATH: `${LAUNCHER_TABLE}:${extraEnv.PATH ?? process.env.PATH ?? ""}`,
+      BUN_OPTIONS: `--preload=${join(home, "browser-inventory.ts")}` }, stdout: "pipe", stderr: "pipe",
   });
   return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
 }

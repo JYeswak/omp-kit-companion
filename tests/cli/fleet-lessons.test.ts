@@ -5,8 +5,12 @@ import { cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync
 import { delimiter, dirname, join, resolve } from "node:path";
 import { bunCapExec, runWithCap } from "../../src/service-run.ts";
 import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
+import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+
+// Every `service run` below sees only this file's own launchers in the host process table.
+const LAUNCHER_TABLE = fixtureLauncherTableBin();
 
 const envStack: { key: string; value: string | undefined }[][] = [];
 afterEach(() => {
@@ -385,6 +389,7 @@ test("A11 scheduled learning writes a real fleet report instead of accepting mat
 	async function runService(extra: Record<string, string> = {}) {
 		const child = Bun.spawn([executable, "service", "run", "fleet-lessons", "--json"], {
 			cwd: home, env: { ...fixtureEnv, XDG_STATE_HOME: join(home, ".local", "state"),
+				PATH: LAUNCHER_TABLE + delimiter + fixtureEnv.PATH,
 				OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "10000", AGENT_NAME: "A11Fixture", ...extra },
 			stdout: "pipe", stderr: "pipe",
 		});
@@ -519,6 +524,7 @@ test("a fleet lessons OFF transition before child execution is no-run, not a suc
 		+ "\nexec " + JSON.stringify(process.execPath) + " " + JSON.stringify(join(kitRoot, "src", "cli.ts")) + " \"$@\"\n", { mode: 0o755 });
 	const child = Bun.spawn([process.execPath, join(kitRoot, "src", "cli.ts"), "service", "run", "fleet-lessons", "--json"], {
 		cwd: home, env: { ...process.env, HOME: home, TMPDIR: home, XDG_STATE_HOME: join(home, ".local", "state"),
+			PATH: LAUNCHER_TABLE + delimiter + (process.env.PATH ?? "/usr/bin:/bin"),
 			OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "10000", AGENT_NAME: "A11OffFixture" },
 		stdout: "pipe", stderr: "pipe",
 	});
@@ -662,7 +668,7 @@ test("service bodies refuse unsupported jobs while omp-watch still executes the 
 		+ "\nchild_rc=$?\ncat " + JSON.stringify(matcherOutput) + "\nexit \"$child_rc\"\n", { mode: 0o755 });
 	async function runJob(job: string) {
 		const child = Bun.spawn([process.execPath, "--preload", preload, join(repoRoot, "src", "cli.ts"), "service", "run", job, "--json"], {
-			cwd: home, env: { ...env,
+			cwd: home, env: { ...env, PATH: LAUNCHER_TABLE + delimiter + fixturePath,
 				OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "60000", AGENT_NAME: "A11BodyFixture" },
 			stdout: "pipe", stderr: "pipe",
 		});

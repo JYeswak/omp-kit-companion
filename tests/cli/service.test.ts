@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 import { checkService, checkServiceLinux, ciPollerEnvironment, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
 import { launchdLoaded, superviseScratchJob } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
@@ -15,6 +16,8 @@ const AGENT_TMP = join(import.meta.dir, "../../var/agent-tmp");
 const testNamespace = `com.omp-kit.test.s1${Math.random().toString(36).slice(2, 10)}`;
 process.env.OMP_KIT_TEST_LABEL_NAMESPACE = testNamespace;
 const testLabel = `${testNamespace}.omp-watch`;
+// Same for the host process table: every `service run` below sees only this file's own launchers.
+const LAUNCHER_TABLE = fixtureLauncherTableBin();
 
 const job: ServiceJobDef = { name: "omp-watch", label: "com.omp-kit.omp-watch", kind: "watch", intervalSeconds: 0 };
 const intervalJob = KNOWN_JOBS["scratch-reaper"]!;
@@ -754,9 +757,9 @@ function cliOmpBin(home: string): string {
 function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {
   const env: Record<string, string | undefined> = {
     ...process.env, HOME: home, XDG_STATE_HOME: extraEnv.XDG_STATE_HOME ?? join(home, ".local", "state"),
-    // Fixture-owned admission and OMP metadata; production observers remain independently tested.
+    // Fixture-owned admission (load, launcher table) and OMP metadata; production observers remain independently tested.
     OMP_KIT_LOAD_OVERRIDE: "0/1", ...extraEnv,
-    PATH: `${cliOmpBin(home)}:${extraEnv.PATH ?? process.env.PATH ?? ""}`,
+    PATH: `${LAUNCHER_TABLE}:${cliOmpBin(home)}:${extraEnv.PATH ?? process.env.PATH ?? ""}`,
   };
   for (const key of ["OMP", "OMP_BIN", "OMP_PATH", "OMP_SRC"]) delete env[key];
   const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
@@ -1364,7 +1367,7 @@ test("REAP1 concurrent actual service invocation cannot enter a blocked scratch 
   expect(Bun.spawnSync(["mkfifo", join(blocked, ".owner")]).exitCode).toBe(0);
   const bin = join(home, ".local", "bin");
   writeFileSync(join(bin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-  const extraEnv = { OMP_KIT_SCRATCH_ROOTS: root, TMPDIR: home, OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "1200", PATH: `${bin}:${process.env.PATH ?? ""}` };
+  const extraEnv = { OMP_KIT_SCRATCH_ROOTS: root, TMPDIR: home, OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "1200", PATH: `${LAUNCHER_TABLE}:${bin}:${process.env.PATH ?? ""}` };
   // A separate CLI process exercises the real platform deadline; parent fake timers cannot drive it.
   const jobs = join(home, ".local", "state", "omp-kit", "jobs");
   mkdirSync(jobs, { recursive: true, mode: 0o700 });

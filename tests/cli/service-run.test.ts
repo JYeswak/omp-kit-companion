@@ -5,10 +5,13 @@ import { join, resolve } from "node:path";
 import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, readRunClaim, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
+import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
+// The source runner below sees only this file's own `service run` launchers.
+const LAUNCHER_TABLE = fixtureLauncherTableBin();
 const roots: string[] = [];
 afterEach(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -444,7 +447,7 @@ test("CANCELP0: actual source service runner cleans a non-fleet-lessons timeout"
 		// OMP version discovery has its own 15s native deadline and is not
 		// under test here. Omit OMP from this isolated PATH (truthful null),
 		// rather than supplying an echo-version stub or timing that probe.
-		cwd: root, env: { ...fixtureEnv(), HOME: root, TMPDIR: root, PATH: `${bin}:/usr/bin:/bin`, XDG_STATE_HOME: join(root, ".local", "state"),
+		cwd: root, env: { ...fixtureEnv(), HOME: root, TMPDIR: root, PATH: `${LAUNCHER_TABLE}:${bin}:/usr/bin:/bin`, XDG_STATE_HOME: join(root, ".local", "state"),
 			OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "1000", AGENT_NAME: "CancelP0Fixture" },
 		stdout: "pipe", stderr: "pipe",
 	});
