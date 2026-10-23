@@ -24,11 +24,32 @@
  * `rlimit_as_bytes` (RLIMIT_AS, rounded up to KiB). A limit the platform
  * refuses (macOS cannot lower RLIMIT_AS) fails closed: exit 126 with
  * `kitlib-run: cannot apply ...` on stderr, and argv never runs.
+ *
+ * Process adoption (ompkit-t8dfi, KL02), all off by default:
+ * - `inherit_fds`: an explicit allowlist of open parent descriptors (each >= 3)
+ *   the child holds at the same number. Bun maps `stdio[n]` onto child fd n with
+ *   dup2, so parent fd F goes in slot F and every other slot above 2 is
+ *   `"ignore"` (closed); no descriptor outside the allowlist reaches the child.
+ * - `on_output(stream, chunk)`: live raw stdout/stderr bytes while the child
+ *   runs, beside the bounded capture. The drain hands each chunk to a queue of at
+ *   most `max_sink_queue_bytes` and never awaits the sink; a chunk that does not
+ *   fit is dropped and counted (`stream_dropped_bytes`), so a stalled sink can
+ *   neither stall the drain nor grow memory. The first sink exception stops
+ *   delivery and is reported (`sink_error`); the child is still run and reaped
+ *   under the same deadline and group rules. After the reap the queue flushes for
+ *   at most `grace_s`; anything undelivered then counts as dropped.
+ * - `max_total_bytes`: the combined capture budget across both streams, beside
+ *   the per-stream `max_output_bytes` (`total_truncated`). Bytes are never
+ *   decoded; strict UTF-8 is caller policy.
  */
+import { fstatSync } from "node:fs";
 import { constants } from "node:os";
 
 export const DEFAULT_GRACE_S = 2;
 export const DEFAULT_MAX_OUTPUT_BYTES = 1 << 20;
+export const DEFAULT_MAX_SINK_QUEUE_BYTES = 1 << 20;
+/** Highest descriptor `inherit_fds` accepts (Bun allocates one stdio slot per number). */
+const MAX_INHERIT_FD = 1023;
 /** Bound on reading the pipes once the group has been SIGKILLed (pysafe `_DRAIN_S`). */
 const DRAIN_MS = 1000;
 
@@ -53,7 +74,17 @@ export interface RunOptions {
 	rlimit_cpu_s?: number;
 	rlimit_as_bytes?: number;
 	signal?: AbortSignal;
+	/** Open parent descriptors (each >= 3) the child inherits at the same number; none by default. */
+	inherit_fds?: readonly number[];
+	/** Live raw chunks while the child runs; may return a promise (backpressure). Never awaited by the drain. */
+	on_output?: (stream: OutputStream, chunk: Uint8Array) => unknown;
+	/** Combined bytes kept across stdout and stderr; unbounded beyond the per-stream cap by default. */
+	max_total_bytes?: number;
+	/** Bytes the sink queue may hold before chunks are dropped and counted. */
+	max_sink_queue_bytes?: number;
 }
+
+export type OutputStream = "stdout" | "stderr";
 
 export interface RunResult {
 	/** Exit status, `-signum` when a signal ended the leader, null if it was not reaped. */
@@ -63,9 +94,19 @@ export interface RunResult {
 	killed: boolean;
 	stdout: Uint8Array;
 	stderr: Uint8Array;
-	/** Either stream exceeded `max_output_bytes`. */
+	/** A stream lost bytes to `max_output_bytes` (per stream) or `max_total_bytes`. */
 	truncated: boolean;
 	elapsed_s: number;
+	/** The per-stream captures together exceeded `max_total_bytes`. */
+	total_truncated: boolean;
+	/** Bytes kept in `stdout` + `stderr`. */
+	captured_bytes: number;
+	/** Bytes `on_output` accepted. */
+	streamed_bytes: number;
+	/** Bytes read but never delivered to `on_output` (queue overflow, sink failure, flush bound). */
+	stream_dropped_bytes: number;
+	/** The first error `on_output` threw or rejected with, else null. */
+	sink_error: string | null;
 }
 
 const liveGroups = new Set<number>();
@@ -97,18 +138,79 @@ async function within(promise: Promise<unknown>, ms: number): Promise<boolean> {
 	}
 }
 
-/** Reads a pipe to EOF keeping at most `cap` bytes; a partial chunk is copied so the rest is not retained. */
-function capture(stream: ReadableStream<Uint8Array>, cap: number) {
+/** Bounded hand-off from the drain to `on_output`: `offer` never blocks or awaits. */
+class Sink {
+	private readonly queue: [OutputStream, Uint8Array][] = [];
+	private queued = 0;
+	private closed = false;
+	private abandoned = false;
+	private wake: (() => void) | null = null;
+	private readonly done: Promise<void>;
+	streamed = 0;
+	dropped = 0;
+	error: string | null = null;
+	constructor(private readonly deliver: (stream: OutputStream, chunk: Uint8Array) => unknown, private readonly limit: number) {
+		this.done = this.loop();
+	}
+	offer(stream: OutputStream, chunk: Uint8Array): void {
+		if (this.error !== null || this.closed || this.queued + chunk.byteLength > this.limit) { this.dropped += chunk.byteLength; return; }
+		this.queue.push([stream, chunk]);
+		this.queued += chunk.byteLength;
+		this.wake?.();
+	}
+	private async loop(): Promise<void> {
+		for (;;) {
+			while (this.queue.length === 0 && !this.closed) await new Promise<void>(resolve => { this.wake = resolve; });
+			this.wake = null;
+			const next = this.queue.shift();
+			if (next === undefined || this.abandoned) return;
+			const [stream, chunk] = next;
+			try {
+				await this.deliver(stream, chunk);
+			} catch (error) {
+				if (!this.abandoned) {
+					this.error = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+					this.queued -= chunk.byteLength;
+					this.dropped += chunk.byteLength + this.queued;
+					this.queue.length = 0;
+					this.queued = 0;
+				}
+				return;
+			}
+			if (this.abandoned) return; // finish() already counted this chunk as dropped
+			this.queued -= chunk.byteLength;
+			this.streamed += chunk.byteLength;
+		}
+	}
+	/** Flush for at most `ms`; whatever is undelivered then (a chunk inside a stalled sink too) counts as dropped. */
+	async finish(ms: number): Promise<void> {
+		this.closed = true;
+		this.wake?.();
+		await within(this.done, ms);
+		this.abandoned = true;
+		this.dropped += this.queued;
+		this.queue.length = 0;
+		this.queued = 0;
+	}
+}
+
+/** Combined capture budget shared by both streams of one run. */
+type Budget = { total: number; kept: number };
+
+/** Reads a pipe to EOF keeping at most `cap` bytes (and at most the shared budget); a partial chunk is copied so the rest is not retained. */
+function capture(stream: ReadableStream<Uint8Array>, cap: number, name: OutputStream, budget: Budget, sink: Sink | null) {
 	const reader = stream.getReader();
 	const chunks: Uint8Array[] = [];
-	let kept = 0, truncated = false;
+	let kept = 0, read = 0, truncated = false;
 	const done = (async () => {
 		for (;;) {
 			const { done: eof, value } = await reader.read();
 			if (eof) return;
-			const room = cap - kept;
-			if (value.byteLength <= room) { chunks.push(value); kept += value.byteLength; continue; }
-			if (room > 0) { chunks.push(value.slice(0, room)); kept = cap; }
+			read += value.byteLength;
+			sink?.offer(name, value);
+			const room = Math.min(cap - kept, budget.total - budget.kept);
+			if (value.byteLength <= room) { chunks.push(value); kept += value.byteLength; budget.kept += value.byteLength; continue; }
+			if (room > 0) { chunks.push(value.slice(0, room)); kept += room; budget.kept += room; }
 			truncated = true;
 		}
 	})().catch(() => { /* the reader was cancelled after the drain bound */ });
@@ -117,6 +219,8 @@ function capture(stream: ReadableStream<Uint8Array>, cap: number) {
 		cancel: () => reader.cancel().catch(() => { /* already closed */ }),
 		bytes: () => Buffer.concat(chunks, kept),
 		get truncated() { return truncated; },
+		/** Bytes this stream would have kept under the per-stream cap alone. */
+		get perStream() { return Math.min(read, cap); },
 	};
 }
 
@@ -134,12 +238,26 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 	const args = cpu === "-" && addressKib === "-" ? [...argv] : ["/bin/sh", "-c", RLIMIT_PROLOGUE, "kitlib-run", cpu, addressKib, ...argv];
 	const stdin = typeof options.stdin === "string" ? Buffer.from(options.stdin, "utf8") : options.stdin;
 	const abort = options.signal;
+	const totalCap = options.max_total_bytes ?? Infinity;
+	if (options.max_total_bytes !== undefined && (!Number.isSafeInteger(totalCap) || totalCap < 0)) throw new RangeError(`max_total_bytes must be a non-negative integer, got ${totalCap}`);
+	const queueCap = options.max_sink_queue_bytes ?? DEFAULT_MAX_SINK_QUEUE_BYTES;
+	if (!Number.isSafeInteger(queueCap) || queueCap < 0) throw new RangeError(`max_sink_queue_bytes must be a non-negative integer, got ${queueCap}`);
+	if (options.on_output !== undefined && typeof options.on_output !== "function") throw new TypeError("on_output must be a function");
+	const inherit = options.inherit_fds ?? [];
+	if (!Array.isArray(inherit)) throw new TypeError("inherit_fds must be an array of descriptor numbers");
+	for (const fd of inherit) {
+		if (!Number.isInteger(fd) || fd < 3 || fd > MAX_INHERIT_FD) throw new RangeError(`inherit_fds entries must be integers in 3..${MAX_INHERIT_FD}, got ${fd}`);
+		fstatSync(fd); // a closed descriptor is refused here, never silently skipped
+	}
+	if (new Set(inherit).size !== inherit.length) throw new RangeError(`inherit_fds has duplicates: ${inherit.join(",")}`);
 	abort?.throwIfAborted();
 
 	const started = performance.now();
-	const child = Bun.spawn(args, {
-		cwd: options.cwd, env: options.env, stdin: stdin ?? "ignore", stdout: "pipe", stderr: "pipe", detached: true,
-	});
+	const stdinSpec = stdin ?? "ignore";
+	const io = inherit.length === 0
+		? { stdin: stdinSpec, stdout: "pipe" as const, stderr: "pipe" as const }
+		: { stdio: inheritedStdio(stdinSpec, inherit) };
+	const child = Bun.spawn(args, { cwd: options.cwd, env: options.env, ...io, detached: true });
 	const pgid = child.pid;
 	liveGroups.add(pgid);
 	if (!exitSweepInstalled) {
@@ -150,7 +268,10 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 	const signalGroup = (name: "SIGTERM" | "SIGKILL"): boolean => {
 		try { process.kill(-pgid, name); return true; } catch { return false; }
 	};
-	const out = capture(child.stdout, cap), err = capture(child.stderr, cap);
+	const sink = options.on_output ? new Sink(options.on_output, queueCap) : null;
+	const budget: Budget = { total: totalCap, kept: 0 };
+	const out = capture(child.stdout as ReadableStream<Uint8Array>, cap, "stdout", budget, sink);
+	const err = capture(child.stderr as ReadableStream<Uint8Array>, cap, "stderr", budget, sink);
 	const pipesClosed = Promise.all([out.done, err.done]);
 	const { promise: aborted, resolve: onAbort } = Promise.withResolvers<void>();
 	const abortListener = () => onAbort();
@@ -197,6 +318,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		await Promise.all([out.cancel(), err.cancel()]);
 		await pipesClosed;
 		liveGroups.delete(pgid);
+		await sink?.finish(graceMs);
 	}
 	const signalCode = child.signalCode as keyof typeof constants.signals | null;
 	const rc = child.exitCode ?? (signalCode ? -constants.signals[signalCode] : null);
@@ -204,7 +326,17 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		rc, timed_out: timedOut, killed,
 		stdout: out.bytes(), stderr: err.bytes(), truncated: out.truncated || err.truncated,
 		elapsed_s: (performance.now() - started) / 1000,
+		total_truncated: out.perStream + err.perStream > totalCap,
+		captured_bytes: budget.kept,
+		streamed_bytes: sink?.streamed ?? 0, stream_dropped_bytes: sink?.dropped ?? 0, sink_error: sink?.error ?? null,
 	};
+}
+
+/** stdio for `inherit_fds`: slot n becomes child fd n, so parent fd F sits in slot F; every other slot above 2 is closed. */
+function inheritedStdio(stdin: Uint8Array | "ignore", fds: readonly number[]): (Uint8Array | number | "ignore" | "pipe")[] {
+	const stdio: (Uint8Array | number | "ignore" | "pipe")[] = [stdin, "pipe", "pipe"];
+	for (let slot = 3; slot <= Math.max(...fds); slot++) stdio.push(fds.includes(slot) ? slot : "ignore");
+	return stdio;
 }
 
 export interface RunSyncOptions {
@@ -249,5 +381,7 @@ export function runSync(argv: readonly string[], options: RunSyncOptions): RunRe
 		stdout: new Uint8Array(stdout.subarray(0, cap)), stderr: new Uint8Array(stderr.subarray(0, cap)),
 		truncated: overflowed || stdout.byteLength > cap || stderr.byteLength > cap,
 		elapsed_s: (performance.now() - started) / 1000,
+		total_truncated: false, captured_bytes: Math.min(stdout.byteLength, cap) + Math.min(stderr.byteLength, cap),
+		streamed_bytes: 0, stream_dropped_bytes: 0, sink_error: null,
 	};
 }

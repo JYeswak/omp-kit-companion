@@ -191,11 +191,21 @@ def _reap(proc: subprocess.Popen, budget: float) -> Optional[int]:
 
 
 class _Pump:
-    """Reads stdout/stderr and writes stdin under one selector with per-stream caps."""
+    """Reads stdout/stderr and writes stdin under one selector with per-stream caps.
 
-    def __init__(self, proc: subprocess.Popen, data: Optional[bytes], cap: int) -> None:
+    ``total_cap`` (optional) also bounds the bytes kept across both streams;
+    ``on_chunk(index, chunk)`` (optional) sees every chunk read, index 0 for
+    stdout and 1 for stderr, inline in this one drain. It must not block: a
+    caller with a slow consumer queues the chunk and returns."""
+
+    def __init__(self, proc: subprocess.Popen, data: Optional[bytes], cap: int,
+                 on_chunk: Optional[Callable[[int, bytes], None]] = None,
+                 total_cap: Optional[int] = None) -> None:
         self.sel = selectors.DefaultSelector()
         self.cap = cap
+        self.on_chunk = on_chunk
+        self.total_cap = total_cap
+        self.kept = 0
         self.bufs = {}
         self.truncated = {}
         self.order: List[int] = []
@@ -261,10 +271,15 @@ class _Pump:
                 continue
             buf = self.bufs[fd]
             room = self.cap - len(buf)
+            if self.total_cap is not None:
+                room = min(room, self.total_cap - self.kept)
             if room > 0:
                 buf += chunk[:room]
+                self.kept += min(room, len(chunk))
             if len(chunk) > room:
                 self.truncated[fd] = True
+            if self.on_chunk is not None:
+                self.on_chunk(self.order.index(fd), chunk)
 
     def drain(self, budget: float) -> None:
         end = time.monotonic() + budget
@@ -295,6 +310,9 @@ def run_bounded(
     env: Optional[dict] = None,
     grace: float = DEFAULT_GRACE_S,
     merge_stderr: bool = False,
+    pass_fds: Sequence[int] = (),
+    on_chunk: Optional[Callable[[int, bytes], None]] = None,
+    total_cap: Optional[int] = None,
 ) -> RunResult:
     """Run ``argv`` with a hard wall-clock bound and capped capture.
 
@@ -310,6 +328,15 @@ def run_bounded(
     SIGKILL, so no descendant in the group outlives the call. Returns a ``RunResult``;
     ``outcome`` is TIMEOUT rather than an exception. ``OSError`` from spawning
     (missing executable) propagates.
+
+    Optional, all off by default: ``pass_fds`` is an explicit allowlist of
+    open descriptors (each >= 3) the child inherits at the same number; every
+    other descriptor stays closed (``close_fds``). ``total_cap`` bounds the
+    bytes kept across both streams beside the per-stream ``cap_bytes``; a
+    stream that loses bytes to it reports truncated. ``on_chunk(index, chunk)``
+    sees every chunk read (0 stdout, 1 stderr) inside the one drain loop and
+    must not block; an exception from it unwinds like a cancellation (the group
+    is killed and reaped first).
     """
     if isinstance(argv, (str, bytes)):
         raise TypeError("run_bounded takes an argv sequence, never a shell string")
@@ -322,6 +349,20 @@ def run_bounded(
         raise ValueError(f"cap_bytes must be a non-negative int, got {cap_bytes!r}")
     if input is not None and not isinstance(input, (bytes, bytearray, memoryview)):
         raise TypeError("input must be bytes")
+    if isinstance(pass_fds, (str, bytes)):
+        raise TypeError("pass_fds must be a sequence of descriptor numbers")
+    fds = tuple(pass_fds)
+    for fd in fds:
+        if isinstance(fd, bool) or not isinstance(fd, int) or fd < 3:
+            raise ValueError(f"pass_fds entries must be ints >= 3, got {fd!r}")
+        os.fstat(fd)  # a closed descriptor is refused here (OSError), never silently skipped
+    if len(set(fds)) != len(fds):
+        raise ValueError(f"pass_fds has duplicates: {fds!r}")
+    if total_cap is not None and (isinstance(total_cap, bool) or not isinstance(total_cap, int) or total_cap < 0):
+        raise ValueError(f"total_cap must be a non-negative int, got {total_cap!r}")
+    if on_chunk is not None and not callable(on_chunk):
+        raise TypeError("on_chunk must be callable")
+    extra = {"pass_fds": fds} if fds else {}
     start = time.monotonic()
     deadline = start + budget
     proc = subprocess.Popen(
@@ -333,10 +374,11 @@ def run_bounded(
         env=env,
         start_new_session=True,
         close_fds=True,
+        **extra,
     )
     pgid = proc.pid
     _register(pgid)
-    pump = _Pump(proc, bytes(input) if input is not None else None, cap_bytes)
+    pump = _Pump(proc, bytes(input) if input is not None else None, cap_bytes, on_chunk, total_cap)
     outcome = OK
     orphans = False
     settled = False

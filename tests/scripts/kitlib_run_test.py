@@ -15,6 +15,7 @@ import resource
 import secrets
 import signal
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -48,6 +49,16 @@ def substitute(value, marker: str, tmp: str):
     return value
 
 
+def substitute_token(value, token: str, text: str):
+    if isinstance(value, str):
+        return value.replace(token, text)
+    if isinstance(value, list):
+        return [substitute_token(item, token, text) for item in value]
+    if isinstance(value, dict):
+        return {key: substitute_token(item, token, text) for key, item in value.items()}
+    return value
+
+
 def marker_pids(marker: str) -> list:
     listing = pysafe.run_bounded(["ps", "-A", "-o", "pid=", "-o", "command="], 10, cap_bytes=8 << 20)
     if listing.outcome != pysafe.OK or listing.returncode != 0:
@@ -75,26 +86,70 @@ def peak_rss_bytes() -> int:
     return peak if sys.platform == "darwin" else peak * 1024
 
 
+class Recorder:
+    """The corpus ``sink`` directives as an ``on_output``: record, stall or throw."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.chunks: list = []
+        self.release = threading.Event()
+
+    def __call__(self, stream: str, chunk: bytes) -> None:
+        if self.mode == "stall":
+            self.release.wait(120)  # set only after run() returns: the delivery never completes during the run
+            return
+        if self.mode == "throw":
+            raise RuntimeError("planted sink failure")
+        self.chunks.append((time.monotonic(), stream, bytes(chunk)))
+
+    def joined(self, stream: str) -> bytes:
+        return b"".join(chunk for _, name, chunk in self.chunks if name == stream)
+
+
 class Corpus(unittest.TestCase):
     def _run_case(self, case: dict) -> None:
         marker = f"kitlib-run-py-{os.getpid()}-{secrets.token_hex(6)}"
+        opened: list = []
+        recorder = Recorder(case["sink"]) if "sink" in case else None
         with owned_tmp("kitlib-run") as scratch:
             tmp = os.path.realpath(scratch)
-            argv = substitute(case["argv"], marker, tmp)
-            options = substitute(case["options"], marker, tmp)
-            expect = substitute(case["expect"], marker, tmp)
-            if isinstance(options.get("stdin"), str):
-                options["stdin"] = options["stdin"].encode("utf-8")
             try:
+                names = {}
+                for name in case.get("fds", []):
+                    fd = os.open(os.path.join(tmp, name), os.O_RDWR | os.O_CREAT, 0o600)
+                    opened.append(fd)
+                    names[name] = fd
+
+                def sub(value):
+                    value = substitute(value, marker, tmp)
+                    for name, fd in names.items():
+                        value = substitute_token(value, "{" + f"{name.upper()}FD" + "}", str(fd))
+                    return value
+
+                argv = sub(case["argv"])
+                options = sub(case["options"])
+                expect = sub(case["expect"])
+                if isinstance(options.get("stdin"), str):
+                    options["stdin"] = options["stdin"].encode("utf-8")
+                if "inherit_fds" in options:
+                    options["inherit_fds"] = [int(fd) for fd in options["inherit_fds"]]
+                if recorder is not None:
+                    options["on_output"] = recorder
                 if expect.get("throws"):
                     with self.assertRaises((OSError, ValueError, TypeError)):
                         kitlib_run.run(argv, **options)
                     return
                 rss_before = peak_rss_bytes()
                 result = kitlib_run.run(argv, **options)
+                returned_at = time.monotonic()
                 rss_growth = peak_rss_bytes() - rss_before
                 self._judge(result, expect, rss_growth, marker)
+                self._judge_kl02(result, expect, rss_growth, recorder, returned_at)
             finally:
+                if recorder is not None:
+                    recorder.release.set()
+                for fd in opened:
+                    os.close(fd)
                 for pid in marker_pids(marker):
                     try:
                         os.kill(pid, signal.SIGKILL)  # test hygiene: this case's own marker holders only
@@ -118,6 +173,31 @@ class Corpus(unittest.TestCase):
             self.assertLess(rss_growth, expect["max_parent_rss_growth_bytes"], f"parent peak RSS grew {rss_growth} bytes")
         if expect.get("no_survivor"):
             self.assertEqual(survivors(marker), [], f"process-group members outlived run(): marker {marker}")
+
+    def _judge_kl02(self, result, expect: dict, rss_growth: int, recorder, returned_at: float) -> None:
+        for key in ("total_truncated", "captured_bytes", "streamed_bytes", "stream_dropped_bytes"):
+            if key in expect:
+                self.assertEqual(getattr(result, key), expect[key], f"{key}: {result!r}"[:2000])
+        if "sink_error" in expect:
+            self.assertEqual(result.sink_error, expect["sink_error"])
+        if "sink_error_contains" in expect:
+            self.assertIn(expect["sink_error_contains"], result.sink_error or "")
+        if "min_stream_dropped_bytes" in expect:
+            self.assertGreaterEqual(result.stream_dropped_bytes, expect["min_stream_dropped_bytes"])
+        if "min_parent_rss_growth_bytes" in expect:
+            self.assertGreaterEqual(rss_growth, expect["min_parent_rss_growth_bytes"])
+        if "stdout_hex" in expect:
+            self.assertEqual(result.stdout.hex(), expect["stdout_hex"])
+        if "stdout_sorted_lines" in expect:
+            self.assertEqual(sorted(result.stdout.decode("utf-8").splitlines()), sorted(expect["stdout_sorted_lines"]))
+        for stream in ("stdout", "stderr"):
+            if f"streamed_{stream}" in expect:
+                self.assertEqual(recorder.joined(stream).decode("utf-8"), expect[f"streamed_{stream}"])
+        if "streamed_stdout_hex" in expect:
+            self.assertEqual(recorder.joined("stdout").hex(), expect["streamed_stdout_hex"])
+        if "first_chunk_lead_s" in expect:
+            self.assertTrue(recorder.chunks, "no chunk was streamed")
+            self.assertGreaterEqual(returned_at - recorder.chunks[0][0], expect["first_chunk_lead_s"])
 
 
 def _install_cases() -> None:

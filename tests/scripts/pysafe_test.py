@@ -251,6 +251,38 @@ class Output(Scratch):
         self.assertEqual(pysafe.read_capped(io.BytesIO(b"abcdef"), 4), (b"abcd", True))
         self.assertEqual(pysafe.read_capped(io.BytesIO(b"abc"), 4), (b"abc", False))
 
+    def test_total_cap_bounds_both_streams_and_on_chunk_sees_every_byte(self) -> None:
+        argv = ["sh", "-c", "head -c 3000 /dev/zero; head -c 3000 /dev/zero >&2"]
+        seen = [0, 0]
+
+        def count(index: int, chunk: bytes) -> None:
+            seen[index] += len(chunk)
+
+        capped = pysafe.run_bounded(argv, 10.0, cap_bytes=4096, total_cap=4096, on_chunk=count)
+        self.assertEqual(len(capped.stdout) + len(capped.stderr), 4096)
+        self.assertTrue(capped.stdout_truncated or capped.stderr_truncated)
+        self.assertEqual(seen, [3000, 3000])
+        whole = pysafe.run_bounded(argv, 10.0, cap_bytes=4096)  # control: no total_cap
+        self.assertEqual((len(whole.stdout), len(whole.stderr), whole.stdout_truncated, whole.stderr_truncated), (3000, 3000, False, False))
+
+    def test_pass_fds_allowlist_and_closed_fd_refused(self) -> None:
+        held = os.open(self.tmp / "held", os.O_RDWR | os.O_CREAT, 0o600)
+        stray = os.open(self.tmp / "stray", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            probe = ["sh", "-c", f"for fd in {held} {stray}; do if (: <&$fd) 2>/dev/null; then echo open-$fd; fi; done"]
+            passed = pysafe.run_bounded(probe, 10.0, pass_fds=(held,))
+            self.assertEqual(passed.stdout, f"open-{held}\n".encode())
+            default = pysafe.run_bounded(probe, 10.0)  # control: default closes everything
+            self.assertEqual(default.stdout, b"")
+        finally:
+            os.close(stray)
+        with self.assertRaises(OSError):
+            pysafe.run_bounded(["true"], 5.0, pass_fds=(stray,))  # closed above: refused, never skipped
+        for bad in ((1,), (True,), (held, held)):
+            with self.assertRaises(ValueError):
+                pysafe.run_bounded(["true"], 5.0, pass_fds=bad)
+        os.close(held)
+
 
 class Cancellation(Scratch):
     def test_sigterm_kills_children_runs_cleanups_and_exits_143(self) -> None:

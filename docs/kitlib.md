@@ -37,6 +37,24 @@ Output past `max_output_bytes` on either stream also stops the child (`killed`, 
 has the same shape as `run()`. It owns no process group: only the leader is signalled, so a command that can fork
 descendants must use async `run()`. A missing `deadline_s` throws TypeError; a non-positive one throws RangeError.
 
+### Process adoption: inherited descriptors and live output (KL02, ompkit-t8dfi)
+
+`run()` takes three optional adoption options; with none given its behaviour is unchanged.
+- `inherit_fds: [fd, …]`: an explicit allowlist, default closed. Each entry is an open descriptor ≥ 3 that the child
+  holds at the same number; a closed or duplicate entry is refused. Python passes it as
+  `pysafe.run_bounded(pass_fds=…)` beside `close_fds=True`; Bun maps `stdio[n]` to child fd n, so parent fd F sits in
+  slot F and every other slot above 2 is closed. Use it for a lock the child must keep holding (br-create-guard).
+- `on_output(stream, chunk)`: raw stdout/stderr bytes while the child runs, beside the bounded capture. The drain hands
+  each chunk to a queue of at most `max_sink_queue_bytes` (1 MiB) and never waits on the sink; a chunk that does not fit
+  is dropped and counted (`stream_dropped_bytes`). The first sink error stops delivery and is reported (`sink_error`);
+  the child is still reaped under the same deadline and group rules, and the queue flushes for at most `grace_s` after
+  the reap. `streamed_bytes` and `captured_bytes` are reported separately. A TS sink that blocks synchronously blocks
+  the event loop; only asynchronous stalls are bounded.
+- `max_total_bytes`: the combined capture budget across both streams, beside the per-stream `max_output_bytes`; going
+  over sets `total_truncated` (and `truncated`). A caller that needs complete output refuses on it.
+
+Bytes are never decoded; strict UTF-8, transcript paths and redaction stay caller policy. `runSync` stays leaf-only.
+
 ## Owned temp dir (KITLIB-TMP v1, ompkit-41l85)
 
 The primitive creates `<root>/<label>.<pid>.<6 random [a-z0-9]>` with mode 0700. The root is the TMPDIR-honouring

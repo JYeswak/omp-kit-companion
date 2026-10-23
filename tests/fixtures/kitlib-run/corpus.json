@@ -1,6 +1,6 @@
 {
 	"schema": "kitlib-run-corpus.v1",
-	"about": "One conformance corpus for kitlib run (ompkit-hsfyp), read by tests/cli/kitlib-run.test.ts (src/kitlib/run.ts) and tests/scripts/kitlib_run_test.py (scripts/kitlib_run.py). Placeholders: {MARKER} is a shell-safe token unique to one case run; {TMP} is the realpath of a scratch directory the test creates. options are passed to run() verbatim (stdin text is UTF-8 encoded). expect keys: rc, rc_signal (the child died of this signal: rc == -signum), timed_out, killed, truncated, stdout/stderr (exact UTF-8 text), stdout_bytes, max_elapsed_s, no_survivor (no process whose command line holds {MARKER} remains after run() returns), max_parent_rss_growth_bytes (the parent's peak RSS grows by less than this across the run), throws (run() raises instead of returning).",
+	"about": "One conformance corpus for kitlib run (ompkit-hsfyp), read by tests/cli/kitlib-run.test.ts (src/kitlib/run.ts) and tests/scripts/kitlib_run_test.py (scripts/kitlib_run.py). Placeholders: {MARKER} is a shell-safe token unique to one case run; {TMP} is the realpath of a scratch directory the test creates. options are passed to run() verbatim (stdin text is UTF-8 encoded). expect keys: rc, rc_signal (the child died of this signal: rc == -signum), timed_out, killed, truncated, stdout/stderr (exact UTF-8 text), stdout_bytes, max_elapsed_s, no_survivor (no process whose command line holds {MARKER} remains after run() returns), max_parent_rss_growth_bytes (the parent's peak RSS grows by less than this across the run), throws (run() raises instead of returning). KL02 (ompkit-t8dfi) case keys: fds (descriptors the driver opens before the run and closes after: \"lock\" opens {TMP}/lock as {LOCKFD}, \"plant\" opens {TMP}/plant as {PLANTFD}; inherit_fds string entries become integers), sink (the on_output the driver passes: \"record\" keeps every chunk with its arrival time, \"stall\" never completes a delivery, \"throw\" fails with 'planted sink failure'). KL02 expect keys: total_truncated, captured_bytes, streamed_bytes, stream_dropped_bytes, min_stream_dropped_bytes, sink_error (null), sink_error_contains, streamed_stdout/streamed_stderr (recorded chunks joined, UTF-8 text), streamed_stdout_hex, stdout_hex, stdout_sorted_lines, first_chunk_lead_s (the first recorded chunk arrived at least this long before run() returned), min_parent_rss_growth_bytes (the parent's peak RSS grows by at least this: the planted unbounded-queue case runs last so earlier cases cannot hide it).",
 	"cases": [
 		{
 			"id": "fast-child",
@@ -73,6 +73,115 @@
 			"argv": ["/bin/sh", "-c", "exit 0"],
 			"options": { "deadline_s": 0 },
 			"expect": { "throws": true }
+		},
+		{
+			"id": "inherited-lock-fd-held-by-child",
+			"fds": ["lock"],
+			"argv": ["python3", "-c", "import fcntl, os\ntry:\n    fcntl.flock({LOCKFD}, fcntl.LOCK_EX | fcntl.LOCK_NB); print('held')\nexcept OSError as error:\n    print('no-fd' if error.errno == 9 else 'busy')\nrival = os.open('{TMP}/lock', os.O_RDWR)\ntry:\n    fcntl.flock(rival, fcntl.LOCK_EX | fcntl.LOCK_NB); print('admitted')\nexcept BlockingIOError:\n    print('blocked')\n"],
+			"options": {"deadline_s": 20, "inherit_fds": ["{LOCKFD}"]},
+			"expect": {"rc": 0, "timed_out": false, "stdout": "held\nblocked\n"}
+		},
+		{
+			"id": "planted-omitted-lock-fd-reopens-admission-race",
+			"fds": ["lock"],
+			"argv": ["python3", "-c", "import fcntl, os\ntry:\n    fcntl.flock({LOCKFD}, fcntl.LOCK_EX | fcntl.LOCK_NB); print('held')\nexcept OSError as error:\n    print('no-fd' if error.errno == 9 else 'busy')\nrival = os.open('{TMP}/lock', os.O_RDWR)\ntry:\n    fcntl.flock(rival, fcntl.LOCK_EX | fcntl.LOCK_NB); print('admitted')\nexcept BlockingIOError:\n    print('blocked')\n"],
+			"options": {"deadline_s": 20},
+			"expect": {"rc": 0, "timed_out": false, "stdout": "no-fd\nadmitted\n"}
+		},
+		{
+			"id": "only-allowlisted-fd-reaches-child",
+			"fds": ["lock", "plant"],
+			"argv": ["/bin/sh", "-c", "lsof -nP -a -p $$ -d 3-9999 -Ff | grep '^f'; :"],
+			"options": {"deadline_s": 20, "inherit_fds": ["{LOCKFD}"]},
+			"expect": {"rc": 0, "timed_out": false, "stdout": "f{LOCKFD}\n"}
+		},
+		{
+			"id": "planted-widened-allowlist-leaks-fd",
+			"fds": ["lock", "plant"],
+			"argv": ["/bin/sh", "-c", "lsof -nP -a -p $$ -d 3-9999 -Ff | grep '^f'; :"],
+			"options": {"deadline_s": 20, "inherit_fds": ["{LOCKFD}", "{PLANTFD}"]},
+			"expect": {"rc": 0, "timed_out": false, "stdout_sorted_lines": ["f{LOCKFD}", "f{PLANTFD}"]}
+		},
+		{
+			"id": "no-inherit-default-closed",
+			"fds": ["lock", "plant"],
+			"argv": ["/bin/sh", "-c", "lsof -nP -a -p $$ -d 3-9999 -Ff | grep '^f'; :"],
+			"options": {"deadline_s": 20},
+			"expect": {"rc": 0, "timed_out": false, "stdout": ""}
+		},
+		{
+			"id": "live-chunk-before-exit",
+			"sink": "record",
+			"argv": ["/bin/sh", "-c", "printf 'early\\n'; sleep 1.5; printf 'late\\n'; printf 'e\\n' >&2"],
+			"options": {"deadline_s": 20},
+			"expect": {"rc": 0, "stdout": "early\nlate\n", "streamed_stdout": "early\nlate\n", "streamed_stderr": "e\n", "streamed_bytes": 13, "stream_dropped_bytes": 0, "captured_bytes": 13, "sink_error": null, "first_chunk_lead_s": 1.0}
+		},
+		{
+			"id": "stalled-sink-does-not-stall-drain",
+			"sink": "stall",
+			"argv": ["/bin/sh", "-c", "head -c 5242880 /dev/zero; printf 'tail-err\\n' >&2"],
+			"options": {"deadline_s": 30, "grace_s": 0.5, "max_output_bytes": 65536, "max_sink_queue_bytes": 65536},
+			"expect": {"rc": 0, "timed_out": false, "truncated": true, "stdout_bytes": 65536, "stderr": "tail-err\n", "streamed_bytes": 0, "min_stream_dropped_bytes": 5000000, "max_elapsed_s": 15}
+		},
+		{
+			"id": "sink-failure-reported-group-still-reaped",
+			"sink": "throw",
+			"argv": ["/bin/sh", "-c", "printf 'a\\n'; /bin/sh -c 'sleep 30; : {MARKER}' & sleep 30; : {MARKER}"],
+			"options": {"deadline_s": 1.5, "grace_s": 0.5},
+			"expect": {"timed_out": true, "killed": true, "stdout": "a\n", "streamed_bytes": 0, "sink_error_contains": "planted sink failure", "no_survivor": true, "max_elapsed_s": 10}
+		},
+		{
+			"id": "sink-control-no-error",
+			"sink": "record",
+			"argv": ["/bin/sh", "-c", "printf 'a\\n'"],
+			"options": {"deadline_s": 10},
+			"expect": {"rc": 0, "stdout": "a\n", "streamed_stdout": "a\n", "sink_error": null}
+		},
+		{
+			"id": "leader-exits-child-alive-with-sink",
+			"sink": "record",
+			"argv": ["/bin/sh", "-c", "/bin/sh -c 'sleep 30; : {MARKER}' & printf 'done\\n'"],
+			"options": {"deadline_s": 20, "grace_s": 0.5},
+			"expect": {"rc": 0, "timed_out": false, "killed": true, "stdout": "done\n", "streamed_stdout": "done\n", "no_survivor": true, "max_elapsed_s": 8}
+		},
+		{
+			"id": "combined-over-total-budget-refuses",
+			"argv": ["/bin/sh", "-c", "head -c 3000 /dev/zero; head -c 3000 /dev/zero >&2"],
+			"options": {"deadline_s": 10, "max_output_bytes": 4096, "max_total_bytes": 4096},
+			"expect": {"rc": 0, "truncated": true, "total_truncated": true, "captured_bytes": 4096}
+		},
+		{
+			"id": "combined-under-total-budget-control",
+			"argv": ["/bin/sh", "-c", "head -c 3000 /dev/zero; head -c 3000 /dev/zero >&2"],
+			"options": {"deadline_s": 10, "max_output_bytes": 4096, "max_total_bytes": 8192},
+			"expect": {"rc": 0, "truncated": false, "total_truncated": false, "captured_bytes": 6000}
+		},
+		{
+			"id": "planted-no-total-budget-accepts",
+			"argv": ["/bin/sh", "-c", "head -c 3000 /dev/zero; head -c 3000 /dev/zero >&2"],
+			"options": {"deadline_s": 10, "max_output_bytes": 4096},
+			"expect": {"rc": 0, "truncated": false, "total_truncated": false, "captured_bytes": 6000}
+		},
+		{
+			"id": "malformed-utf8-passes-through-as-bytes",
+			"sink": "record",
+			"argv": ["/bin/sh", "-c", "printf '\\377\\376ok\\300'"],
+			"options": {"deadline_s": 10},
+			"expect": {"rc": 0, "stdout_hex": "fffe6f6bc0", "streamed_stdout_hex": "fffe6f6bc0"}
+		},
+		{
+			"id": "flood-while-sink-backpressures-bounded",
+			"sink": "stall",
+			"argv": ["/bin/sh", "-c", "head -c 52428800 /dev/zero"],
+			"options": {"deadline_s": 60, "grace_s": 0.5, "max_output_bytes": 65536, "max_sink_queue_bytes": 65536},
+			"expect": {"rc": 0, "timed_out": false, "stdout_bytes": 65536, "streamed_bytes": 0, "min_stream_dropped_bytes": 52000000, "max_parent_rss_growth_bytes": 33554432}
+		},
+		{
+			"id": "planted-unbounded-sink-queue-grows-memory",
+			"sink": "stall",
+			"argv": ["/bin/sh", "-c", "head -c 104857600 /dev/zero"],
+			"options": {"deadline_s": 60, "grace_s": 0.5, "max_output_bytes": 65536, "max_sink_queue_bytes": 1099511627776},
+			"expect": {"rc": 0, "timed_out": false, "stdout_bytes": 65536, "min_parent_rss_growth_bytes": 33554432}
 		}
 	]
 }

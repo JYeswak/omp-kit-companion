@@ -5,7 +5,7 @@
 // a marker unique to the case run in their command lines.
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -15,8 +15,47 @@ type Expect = {
 	rc?: number; rc_signal?: string; timed_out?: boolean; killed?: boolean; truncated?: boolean;
 	stdout?: string; stderr?: string; stdout_bytes?: number; max_elapsed_s?: number;
 	no_survivor?: boolean; max_parent_rss_growth_bytes?: number; throws?: boolean;
+	// KL02 (ompkit-t8dfi)
+	total_truncated?: boolean; captured_bytes?: number; streamed_bytes?: number; stream_dropped_bytes?: number;
+	min_stream_dropped_bytes?: number; sink_error?: null; sink_error_contains?: string; streamed_stdout?: string;
+	streamed_stderr?: string; streamed_stdout_hex?: string; stdout_hex?: string; stdout_sorted_lines?: string[];
+	first_chunk_lead_s?: number; min_parent_rss_growth_bytes?: number;
 };
-type Case = { id: string; argv: string[]; options: Record<string, unknown>; expect: Expect };
+type Case = { id: string; argv: string[]; options: Record<string, unknown>; expect: Expect; fds?: string[]; sink?: "record" | "stall" | "throw" };
+
+/** The corpus `sink` directives as an `on_output`: record, stall or throw. */
+class Recorder {
+	readonly chunks: { at: number; stream: string; chunk: Uint8Array }[] = [];
+	constructor(private readonly mode: "record" | "stall" | "throw") {}
+	readonly sink = (stream: string, chunk: Uint8Array): unknown => {
+		if (this.mode === "stall") return new Promise(() => { /* never settles: the delivery never completes */ });
+		if (this.mode === "throw") throw new Error("planted sink failure");
+		this.chunks.push({ at: performance.now(), stream, chunk: new Uint8Array(chunk) });
+		return undefined;
+	};
+	joined(stream: string): Buffer {
+		return Buffer.concat(this.chunks.filter(item => item.stream === stream).map(item => item.chunk));
+	}
+}
+
+function judgeKl02(result: RunResult, want: Expect, rssGrowth: number, recorder: Recorder | null, returnedAt: number): void {
+	for (const key of ["total_truncated", "captured_bytes", "streamed_bytes", "stream_dropped_bytes"] as const) {
+		if (want[key] !== undefined) expect(result[key], key).toBe(want[key]!);
+	}
+	if (want.sink_error !== undefined) expect(result.sink_error).toBeNull();
+	if (want.sink_error_contains !== undefined) expect(result.sink_error ?? "").toContain(want.sink_error_contains);
+	if (want.min_stream_dropped_bytes !== undefined) expect(result.stream_dropped_bytes).toBeGreaterThanOrEqual(want.min_stream_dropped_bytes);
+	if (want.min_parent_rss_growth_bytes !== undefined) expect(rssGrowth).toBeGreaterThanOrEqual(want.min_parent_rss_growth_bytes);
+	if (want.stdout_hex !== undefined) expect(Buffer.from(result.stdout).toString("hex")).toBe(want.stdout_hex);
+	if (want.stdout_sorted_lines !== undefined) expect(decoder.decode(result.stdout).split("\n").filter(Boolean).sort()).toEqual([...want.stdout_sorted_lines].sort());
+	if (want.streamed_stdout !== undefined) expect(decoder.decode(recorder!.joined("stdout"))).toBe(want.streamed_stdout);
+	if (want.streamed_stderr !== undefined) expect(decoder.decode(recorder!.joined("stderr"))).toBe(want.streamed_stderr);
+	if (want.streamed_stdout_hex !== undefined) expect(recorder!.joined("stdout").toString("hex")).toBe(want.streamed_stdout_hex);
+	if (want.first_chunk_lead_s !== undefined) {
+		expect(recorder!.chunks.length, "no chunk was streamed").toBeGreaterThan(0);
+		expect((returnedAt - recorder!.chunks[0]!.at) / 1000).toBeGreaterThanOrEqual(want.first_chunk_lead_s);
+	}
+}
 
 const corpus = JSON.parse(readFileSync(join(import.meta.dir, "../fixtures/kitlib-run/corpus.json"), "utf8")) as { schema: string; cases: Case[] };
 const decoder = new TextDecoder();
@@ -80,21 +119,39 @@ describe("kitlib run conformance corpus", () => {
 			const marker = `kitlib-run-ts-${process.pid}-${randomBytes(6).toString("hex")}`;
 			const scratch = ownedTmp("kitlib-run").path;
 			const tmp = realpathSync(scratch);
+			const opened: number[] = [];
+			const recorder = testCase.sink ? new Recorder(testCase.sink) : null;
 			try {
-				const argv = substitute(testCase.argv, marker, tmp);
-				const options = substitute(testCase.options, marker, tmp) as RunOptions;
-				const want = substitute(testCase.expect, marker, tmp);
+				const tokens: [string, string][] = [];
+				for (const name of testCase.fds ?? []) {
+					const fd = openSync(join(tmp, name), "w+", 0o600);
+					opened.push(fd);
+					tokens.push([`{${name.toUpperCase()}FD}`, String(fd)]);
+				}
+				function sub<T>(value: T): T {
+					let text = JSON.stringify(substitute(value, marker, tmp));
+					for (const [token, fd] of tokens) text = text.replaceAll(token, fd);
+					return JSON.parse(text) as T;
+				}
+				const argv = sub(testCase.argv);
+				const options = sub(testCase.options) as RunOptions & { inherit_fds?: (number | string)[] };
+				const want = sub(testCase.expect);
+				if (options.inherit_fds) options.inherit_fds = options.inherit_fds.map(Number);
+				if (recorder) options.on_output = recorder.sink;
 				if (want.throws) {
 					await expect(run(argv, options)).rejects.toThrow();
 					return;
 				}
 				const before = peakRssBytes();
 				const result = await run(argv, options);
+				const returnedAt = performance.now();
 				judge(result, want, peakRssBytes() - before);
+				judgeKl02(result, want, peakRssBytes() - before, recorder, returnedAt);
 				if (want.no_survivor) expect(await survivors(marker), `process-group members outlived run(): marker ${marker}`).toEqual([]);
 			} finally {
 				// Test hygiene: this case's own marker holders only.
 				for (const pid of await markerPids(marker)) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+				for (const fd of opened) closeSync(fd);
 				rmSync(scratch, { recursive: true, force: true });
 			}
 		}, 60_000);
