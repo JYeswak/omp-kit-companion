@@ -24,7 +24,6 @@
    "extensions/zeststream-cast-spawn-cap.ts": 2,
    "installer/install.py": 4,
    "scripts/bead_lint.py": 1,
-   "scripts/br-create-guard.py": 4,
    "scripts/br-create-lint.py": 1,
    "scripts/br-update-lint.py": 1,
    "scripts/br_create_guard_core.py": 2,
@@ -103,7 +102,7 @@
    "src/plugin-release.ts": 2,
    "src/report-inject-job.ts": 1,
    "src/runtime.ts": 2,
-   "src/scratch.ts": 4,
+   "src/scratch.ts": 2,
    "src/secrets-doctor.ts": 7,
    "src/send.ts": 1,
    "src/service-run.ts": 1,
@@ -280,6 +279,6 @@
  },
  "schema": 1,
  "totals": {
-  "raw-spawn": 774
+  "raw-spawn": 768
  }
 }

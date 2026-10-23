@@ -6,9 +6,9 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 
+import kitlib_run  # sibling in scripts/ and in every release (KL02 process adoption)
 from br_create_guard_core import (
     AdmissionError,
     SWEEP_THRESHOLD,
@@ -26,18 +26,53 @@ def run_shim(args: list[str], shim: str, real: str, project: str) -> int:
     command = [shim, *args]
     environment = dict(os.environ, BR_REAL=real)
     try:
-        result = subprocess.run(command, cwd=project, env=environment, capture_output=True,  # pysafe: leaf shim exec to native br; timeout bounds the wait, DEVNULL stdin
-                                text=True, timeout=30, stdin=subprocess.DEVNULL)
-        if result.returncode:
-            if result.stdout:
-                sys.stdout.write(result.stdout)
-            if result.stderr:
-                sys.stderr.write(result.stderr)
-            print(f"br-shim: BR_CREATE_DISPLACEMENT_WRITE_FAILED rc={result.returncode}", file=sys.stderr)
-        return result.returncode
-    except (OSError, subprocess.SubprocessError) as error:
+        result = kitlib_run.run(command, deadline_s=30, cwd=project, env=environment)
+    except (OSError, ValueError) as error:
         print(f"br-shim: BR_CREATE_DISPLACEMENT_WRITE_FAILED {error}", file=sys.stderr)
         return 4
+    if result.timed_out:
+        print(f"br-shim: BR_CREATE_DISPLACEMENT_WRITE_FAILED {timeout_text(command, 30)}", file=sys.stderr)
+        return 4
+    rc = exit_code(result)
+    if rc:
+        write_captured(result)
+        print(f"br-shim: BR_CREATE_DISPLACEMENT_WRITE_FAILED rc={rc}", file=sys.stderr)
+    return rc
+
+
+def timeout_text(command: list[str], seconds: int) -> str:
+    # The wording subprocess.TimeoutExpired carried before KL02, so the guard's messages are unchanged.
+    return f"Command '{command}' timed out after {seconds} seconds"
+
+
+def exit_code(result: kitlib_run.RunResult) -> int:
+    # None: the child was never reaped; report the generic failure an uncaught error used to give.
+    return 1 if result.rc is None else result.rc
+
+
+def write_captured(result: kitlib_run.RunResult) -> None:
+    for stream, data in ((sys.stdout, result.stdout), (sys.stderr, result.stderr)):
+        if data:
+            stream.flush()
+            stream.buffer.write(data)
+            stream.buffer.flush()
+
+
+def passthrough(command: list[str], project: str, inherit_fds: list[int]) -> int:
+    """Native br with its output streamed live to the guard's own stdout/stderr, as the uncaptured
+    subprocess.run did. A deadline exits 1 with the TimeoutExpired wording that used to escape here."""
+    def forward(stream: str, chunk: bytes) -> None:
+        target = sys.stdout if stream == "stdout" else sys.stderr
+        target.buffer.write(chunk)
+        target.buffer.flush()
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    result = kitlib_run.run(command, deadline_s=120, cwd=project, inherit_fds=inherit_fds, on_output=forward)
+    if result.timed_out:
+        print(f"subprocess.TimeoutExpired: {timeout_text(command, 120)}", file=sys.stderr)
+        return 1
+    return exit_code(result)
 
 
 
@@ -95,16 +130,15 @@ def execute_displacement(parsed: dict, issues: list[dict], real: str, shim: str,
     create_args.append("--json")
     create_command = [real, *parsed["prefix"], "create", *create_args]
     try:
-        created = subprocess.run(create_command, cwd=project, capture_output=True, text=True,  # pysafe: leaf native br create; timeout bounds the wait, DEVNULL stdin
-                                 timeout=120, stdin=subprocess.DEVNULL, pass_fds=(lock_fd,))
-    except (OSError, subprocess.SubprocessError) as error:
+        created = kitlib_run.run(create_command, deadline_s=120, cwd=project, inherit_fds=[lock_fd])
+    except (OSError, ValueError) as error:
         return fail(f"P0 displacement create failed before changing the named P0: {error}")
-    if created.returncode:
-        if created.stdout:
-            sys.stdout.write(created.stdout)
-        if created.stderr:
-            sys.stderr.write(created.stderr)
-        return created.returncode
+    if created.timed_out:
+        return fail("P0 displacement create failed before changing the named P0: "
+                    f"{timeout_text(create_command, 120)}")
+    if exit_code(created):
+        write_captured(created)
+        return exit_code(created)
     try:
         record = json.loads(created.stdout)
     except json.JSONDecodeError:
@@ -159,8 +193,7 @@ def main(argv: list[str]) -> int:
     try:
         parsed = parse_create_args(argv)
         if parsed["dry_run"]:
-            return subprocess.run([real, *parsed["prefix"], "create", *parsed["forwarded"]],  # pysafe: leaf native br dry-run passthrough; timeout bounds the wait, DEVNULL stdin fails fast instead of hanging
-                                  cwd=project, timeout=120, stdin=subprocess.DEVNULL).returncode
+            return passthrough([real, *parsed["prefix"], "create", *parsed["forwarded"]], project, [])
         lock = acquire_tracker_lock(database)
         lock_fd = lock.fd
         try:
@@ -213,10 +246,9 @@ def main(argv: list[str]) -> int:
             now = dt.datetime.now(dt.timezone.utc)
             sweep_crossing = len(recent_creations(issues, actor, now)) == SWEEP_THRESHOLD
             command = [real, *parsed["prefix"], "create", *parsed["forwarded"]]
-            result = subprocess.run(command, cwd=project, timeout=120, stdin=subprocess.DEVNULL,  # pysafe: leaf native br create; timeout bounds the wait, DEVNULL stdin
-                                    pass_fds=(lock_fd,))
-            if result.returncode:
-                return result.returncode
+            create_rc = passthrough(command, project, [lock_fd])
+            if create_rc:
+                return create_rc
             if sweep_crossing:
                 try:
                     after = tracker_rows(real, project, database, lock_fd)
