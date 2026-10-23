@@ -2,7 +2,8 @@ import { appendFileSync, lstatSync, readFileSync, writeFileSync } from "node:fs"
 import { isAbsolute, join } from "node:path";
 
 export const LADDER_CASE_SCOPES = ["harness-gate", "harness-selftest", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
-export const LADDER_NONCASE_SCOPES = ["manifest", "flywheel-invariants", "regex-budget"] as const;
+// Stages that emit a gate verdict, not case outcomes: ladder.sh gives them no OMP_KIT_TEST_CASE_REPORT.
+export const LADDER_NONCASE_SCOPES = ["manifest", "flywheel-invariants", "regex-budget", "shipped-config-selftest"] as const;
 export interface TestCaseReporter {
  record(name: string, outcome: "PASS" | "FAIL" | "SKIP"): void;
  finish(): void;

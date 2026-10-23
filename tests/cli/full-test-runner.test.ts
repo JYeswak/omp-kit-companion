@@ -5,7 +5,7 @@ import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BundledRunInterruptedError } from "../../src/runtime.ts";
 import { classifyLadder, currentStageReport, describeFullTestProducer, fullTestVerdict, recoverInterruptedRun, redactFullTestCause, retainProducerOutput } from "../../src/full-test-runner.ts";
-import { readTestCaseReports, summarizeTestCaseReports } from "../../src/test-case-report.ts";
+import { LADDER_CASE_SCOPES, LADDER_NONCASE_SCOPES, readTestCaseReports, summarizeTestCaseReports } from "../../src/test-case-report.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 const names = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"];
@@ -565,6 +565,23 @@ test("real checker case records reject missing, duplicated, corrupt and unfinish
   }
   expect(summarizeTestCaseReports({ ...capture, expected_scopes: ["claim-selftest", "readiness-selftest"] }).counts).toBe(null);
   expect(summarizeTestCaseReports({ ...capture, errors: ["interrupted case file"] }).counts).toBe(null);
+ } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("every ladder stage has exactly one case domain, so a new stage cannot void the case report", () => {
+ // shipped-config-selftest joined the ladder without a domain; every GREEN full test then lost its
+ // counts to "Unknown stage case domain".
+ const ladder = readFileSync(fileURLToPath(new URL("../../scripts/ladder.sh", import.meta.url)), "utf8");
+ const stages = [...ladder.matchAll(/^step (\S+) /gm)].map(match => match[1]!);
+ expect(stages).toContain("shipped-config-selftest");
+ for (const stage of stages) {
+  const domains = [LADDER_CASE_SCOPES, LADDER_NONCASE_SCOPES].filter(list => (list as readonly string[]).includes(stage));
+  expect(domains.length, stage).toBe(1);
+ }
+ const root = realpathSync(ownedTmp("omp-kit-stage-domains").path);
+ try {
+  expect(readTestCaseReports(root, ["shipped-config-selftest"])).toEqual({ expected_scopes: [], reports: [], errors: [] });
+  expect(readTestCaseReports(root, ["planted-unknown-stage"]).errors).toEqual(["Unknown stage case domain: planted-unknown-stage"]);
  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
