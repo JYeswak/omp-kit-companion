@@ -35,8 +35,11 @@ for name in os.listdir("/dev/fd"):
 with open(out, "w", encoding="utf-8") as handle:
     handle.write("HELD\n" if held else "NOT-HELD\n")
 PY
+	printf '%s\n' "$$" > "$LOCKFD_DIR/probe.pid"
 	: > "$LOCKFD_DIR/entered"
-	while [ ! -f "$LOCKFD_DIR/release" ]; do sleep 0.01; done
+	# Bounded: the test reaps this orphan after `release`; a lost release still ends here in 30 s.
+	n=0
+	while [ ! -f "$LOCKFD_DIR/release" ] && [ "$n" -lt 3000 ]; do sleep 0.01; n=$((n + 1)); done
 	printf 'created lockfd-1\n'
 fi
 exit 0
@@ -90,6 +93,18 @@ else
 	printf 'FAIL lockfd-race: %s\n' "$(cat "$TMP/race.out")"
 fi
 : > "$TMP/release"
+# The orphaned native create must exit on release before the test's temp dir goes away; otherwise it
+# polls a deleted dir forever (ten such shells, ~3% CPU each, were found live on 2026-10-23).
+probe=$(cat "$TMP/probe.pid" 2>/dev/null)
+n=0
+while [ -n "$probe" ] && kill -0 "$probe" 2>/dev/null && [ "$n" -lt 500 ]; do sleep 0.01; n=$((n + 1)); done
+if [ -n "$probe" ] && ! kill -0 "$probe" 2>/dev/null; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL lockfd-reap: probe pid=%s still running after release\n' "${probe:-unknown}"
+	[ -n "$probe" ] && kill "$probe" 2>/dev/null
+fi
 
 printf 'br-create-guard-lockfd: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
