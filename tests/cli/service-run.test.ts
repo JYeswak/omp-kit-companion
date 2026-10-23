@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, wr
 import { join, resolve } from "node:path";
 import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, readRunClaim, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { run } from "../../src/kitlib/run.ts";
 
 mkdirSync(join(resolve(import.meta.dir, "../.."), "var", "agent-tmp"), { recursive: true });
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -432,7 +433,13 @@ test("CANCELP0: actual source service runner cleans a non-fleet-lessons timeout"
 	const root = jobsDir();
 	const bin = join(root, ".local", "bin");
 	mkdirSync(bin, { recursive: true });
-	writeFileSync(join(bin, "omp-kit"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(treeFixture)} tree ${JSON.stringify(root)}\n`, { mode: 0o755 });
+	const launcher = join(bin, "omp-kit");
+	writeFileSync(launcher, `#!/bin/sh\n[ "$1" = --ready ] && exit 0\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(treeFixture)} tree ${JSON.stringify(root)}\n`, { mode: 0o755 });
+	// macOS assesses a newly written executable on its first exec (measured
+	// 0.2-2.5 s under load, ~7 ms after). Finish that one-time exec before
+	// the runner starts its 1000 ms cap, which must time the owned tree.
+	const ready = await run([launcher, "--ready"], { deadline_s: 5 });
+	expect({ rc: ready.rc, timedOut: ready.timed_out }).toEqual({ rc: 0, timedOut: false });
 	const parent = Bun.spawn([process.execPath, join(repoRoot, "src", "cli.ts"), "service", "run", "omp-watch", "--json"], {
 		// OMP version discovery has its own 15s native deadline and is not
 		// under test here. Omit OMP from this isolated PATH (truthful null),
@@ -444,16 +451,20 @@ test("CANCELP0: actual source service runner cleans a non-fleet-lessons timeout"
 	const stdout = new Response(parent.stdout).text();
 	const stderr = new Response(parent.stderr).text();
 	try {
-		await until(() => recordedPids(root).length === 2);
+		// The exit event, bounded so a hung runner still reaches cleanup below.
+		const hung = Promise.withResolvers<never>();
+		const timer = setTimeout(() => hung.reject(new Error(`service runner did not exit after its cap; active PIDs: ${recordedPids(root).filter(activePid)}`)), 5000);
+		const exit = await Promise.race([parent.exited, hung.promise]).finally(() => clearTimeout(timer));
+		const result = { exit, stdout: await stdout, stderr: await stderr };
 		const pids = recordedPids(root);
-		await until(() => parent.exitCode !== null, 5000);
-		const result = { exit: await parent.exited, stdout: await stdout, stderr: await stderr };
 		console.log("CANCELP0 actual source runner smoke", JSON.stringify({ platform: process.platform, arch: process.arch, pids, ...result }));
 		expect(result.exit).toBe(1);
 		expect(result.stderr).toBe("");
 		expect(JSON.parse(result.stdout).data.status).toBe("TIMEOUT");
 		const receipt = JSON.parse(readFileSync(join(root, ".local", "state", "omp-kit", "jobs", "omp-watch.json"), "utf8"));
 		expect(receipt.status).toBe("TIMEOUT");
+		// Both PIDs prove the tree existed before the cap fired; cleanup is judged on them.
+		expect(pids).toHaveLength(2);
 		await until(() => pids.every(pid => !activePid(pid)));
 		expect(existsSync(join(root, ".local", "state", "omp-kit", "jobs", "omp-watch.lock"))).toBe(false);
 	} finally {

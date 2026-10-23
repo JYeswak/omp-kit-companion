@@ -1,5 +1,5 @@
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { atomicReplaceBytes } from "../../src/kitlib/io.ts";
 import { runWithCap } from "../../src/service-run.ts";
 
 const [mode, root, cap = "10000"] = process.argv.slice(2);
@@ -12,7 +12,9 @@ if (mode === "runner") {
 } else if (mode === "tree" || mode === "orphan") {
 	process.on("SIGTERM", () => {});
 	process.on("SIGINT", () => {});
-	writeFileSync(join(root, "child.pid"), String(process.pid));
+	// Pollers read the PID files while the tree starts; a rename publishes
+	// them whole, never as the empty file a truncating write first creates.
+	atomicReplaceBytes(join(root, "child.pid"), Buffer.from(String(process.pid)), { mode: 0o600, durability: "none" });
 	Bun.spawn([process.execPath, import.meta.path, "grandchild", root], { stdout: "inherit", stderr: "inherit" });
 	if (mode === "orphan") {
 		// Real-process readiness: let the grandchild establish its signal
@@ -28,7 +30,7 @@ if (mode === "runner") {
 } else if (mode === "grandchild") {
 	process.on("SIGTERM", () => {});
 	process.on("SIGINT", () => {});
-	writeFileSync(join(root, "grandchild.pid"), String(process.pid));
+	atomicReplaceBytes(join(root, "grandchild.pid"), Buffer.from(String(process.pid)), { mode: 0o600, durability: "none" });
 	console.log("grandchild-ready");
 	console.error("grandchild-stderr");
 	setInterval(() => {}, 1000);
