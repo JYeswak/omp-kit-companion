@@ -2,7 +2,9 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { normalizeStart, probeIncarnationSync, type Incarnation, type Probe, type ProbeState } from "./kitlib/proc.ts";
+import { incarnationSync, isDead, normalizeStart, probeIncarnationSync, type Incarnation, type Probe, type ProbeState } from "./kitlib/proc.ts";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
+import { privateLock } from "./kitlib/lock.ts";
 import { runSync } from "./kitlib/run.ts";
 
 /**
@@ -341,6 +343,142 @@ export function probeOwner(pid: number, expectedStart: string, deps: LivenessDep
 export function ownerIncarnationState(pid: number, start: string, liveness: Pick<LivenessDeps, "probe">): ProbeState {
 	if (normalizeStart(start) === "") return "unknown";
 	return (liveness.probe ?? probeIncarnationSync)({ pid, start }).state;
+}
+
+/**
+ * RELEASELIVE1 (ompkit-5fn07): the user registry of one scratch dir. A process that works in a dir (its TMPDIR, its
+ * item storage) without always holding a file open registers its incarnation in `<dir>/.users`, so release --now and
+ * the reaper see it between writes, where lsof cannot. Registration is liveness evidence only, never authority to
+ * release: who may release stays the seat, the capability and the owning process.
+ */
+export const SCRATCH_USERS_FILE = ".users";
+export interface ScratchUser { pid: number; start: string }
+/** The user that keeps a dir: pid and start null when the `.users` file itself is unreadable or malformed. */
+export interface ScratchUserBlock { pid: number | null; start: string | null; state: ProbeState; reason: string }
+
+/** Users recorded in the dir; [] when there is no `.users` file; null when it is a symlink, unreadable or malformed. */
+export function readScratchUsers(dir: string): ScratchUser[] | null {
+	const path = join(dir, SCRATCH_USERS_FILE);
+	if (!existsSync(path) && !isSymlink(path)) return [];
+	try {
+		if (!lstatSync(path).isFile()) return null;
+	} catch {
+		return null;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return null;
+	}
+	if (parsed === null || typeof parsed !== "object" || !("version" in parsed) || parsed.version !== 1
+		|| !("users" in parsed) || !Array.isArray(parsed.users)) return null;
+	const out: ScratchUser[] = [];
+	for (const user of parsed.users as unknown[]) {
+		if (user === null || typeof user !== "object" || !("pid" in user) || !("start" in user)) return null;
+		const { pid, start } = user;
+		if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid < 1 || typeof start !== "string" || normalizeStart(start) === "") return null;
+		out.push({ pid, start });
+	}
+	return out;
+}
+
+function probeUser(user: ScratchUser, liveness: Pick<LivenessDeps, "probe">): Probe | null {
+	try {
+		return (liveness.probe ?? probeIncarnationSync)(user);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The first registered user that keeps the dir: one whose incarnation probes live, or unknown (unknown is never dead).
+ * Dead, reused and zombie users are ignored here and pruned from the file by the next `scratch use`/`unuse`. A
+ * malformed or unreadable `.users` file keeps the dir too (state unknown): evidence that cannot be read is not absence.
+ */
+export function blockingScratchUser(dir: string, liveness: Pick<LivenessDeps, "probe">): ScratchUserBlock | null {
+	const users = readScratchUsers(dir);
+	if (users === null) return { pid: null, start: null, state: "unknown", reason: `${SCRATCH_USERS_FILE} is unreadable or malformed` };
+	for (const user of users) {
+		const probe = probeUser(user, liveness);
+		if (probe === null) return { pid: user.pid, start: user.start, state: "unknown", reason: "the probe refused the record" };
+		if (!isDead(probe)) return { pid: user.pid, start: user.start, state: probe.state, reason: probe.evidence.reason };
+	}
+	return null;
+}
+
+export function describeUserBlock(user: ScratchUserBlock): string {
+	const who = user.pid === null ? SCRATCH_USERS_FILE : `pid ${user.pid} start '${normalizeStart(user.start ?? "")}'`;
+	return `registered user ${who} is ${user.state} (${user.reason}); the user must finish, or run \`scratch unuse\``;
+}
+
+export interface ScratchUseResult { ok: boolean; dir: string; reason: string; user: ScratchUser | null; users: ScratchUser[]; pruned: ScratchUser[] }
+export interface ScratchUseDeps {
+	liveness: Pick<LivenessDeps, "probe">;
+	/** Test seam for the registering incarnation read; defaults to kitlib `incarnationSync`. */
+	incarnation?: (pid: number) => Incarnation | null;
+	/** kitlib privateLock state root; defaults to `$XDG_STATE_HOME/omp-kit`. */
+	lockStateDir?: string;
+}
+
+/**
+ * `scratch use DIR [--pid PID]` (register) and `scratch unuse DIR [--pid PID]` (remove every record of PID). The
+ * rewrite runs under a kitlib privateLock keyed on the dir and publishes with atomicReplaceBytes; dead, reused and
+ * zombie records are pruned on every rewrite.
+ */
+export async function updateScratchUsers(path: string, pid: number, mode: "use" | "unuse", deps: ScratchUseDeps): Promise<ScratchUseResult> {
+	let dir: string;
+	try {
+		dir = realpathSync(resolve(path));
+	} catch {
+		return { ok: false, dir: path, reason: "directory-unavailable", user: null, users: [], pruned: [] };
+	}
+	const refuse = (reason: string): ScratchUseResult => ({ ok: false, dir, reason, user: null, users: [], pruned: [] });
+	if (!Number.isSafeInteger(pid) || pid < 1) return refuse("pid-invalid");
+	try {
+		if (!lstatSync(dir).isDirectory() || !lstatSync(join(dir, ".owner")).isFile()) return refuse("not-a-scratch-dir");
+	} catch {
+		return refuse("not-a-scratch-dir");
+	}
+	let user: ScratchUser | null = null;
+	if (mode === "use") {
+		let found: Incarnation | null;
+		try {
+			found = (deps.incarnation ?? incarnationSync)(pid);
+		} catch {
+			found = null;
+		}
+		if (found === null) return refuse("user-pid-not-running");
+		user = { pid: found.pid, start: normalizeStart(found.start) };
+	}
+	let lock;
+	try {
+		lock = await privateLock({ namespace: "scratch-users", path: dir }, { deadline_s: 10, ...(deps.lockStateDir ? { state_dir: deps.lockStateDir } : {}) });
+	} catch {
+		return refuse("users-lock-unavailable");
+	}
+	try {
+		const current = readScratchUsers(dir);
+		if (current === null) return refuse("users-file-invalid");
+		const kept: ScratchUser[] = [];
+		const pruned: ScratchUser[] = [];
+		for (const entry of current) {
+			if (entry.pid === pid && mode === "unuse") continue;
+			if (user !== null && entry.pid === user.pid && normalizeStart(entry.start) === user.start) continue;
+			const probe = probeUser(entry, deps.liveness);
+			if (probe !== null && isDead(probe)) pruned.push(entry);
+			else kept.push(entry);
+		}
+		if (user !== null) kept.push(user);
+		try {
+			atomicReplaceBytes(join(dir, SCRATCH_USERS_FILE), Buffer.from(`${JSON.stringify({ version: 1, users: kept })}\n`), { mode: 0o600, durability: "none" });
+		} catch {
+			return refuse("users-write-failed");
+		}
+		return { ok: true, dir, reason: mode === "use" ? "user-registered" : "user-removed", user, users: kept, pruned };
+	} finally {
+		lock.release();
+	}
 }
 
 /** The calling process and its ancestors, nearest first; null when the process table cannot be read. */
@@ -1656,6 +1794,8 @@ ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin
 		: { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
 	const clear = lsofClearDir(evidence, dir);
 	if (clear !== true) return held(clear === null ? "now-held-lsof-unavailable" : "now-held-open-fds");
+	// RELEASELIVE1: a user that registered between the release check and here still keeps the dir.
+	if (blockingScratchUser(dir, deps.liveness) !== null) return held("now-held-user-live");
 	// SCRATCHRETIRE1 AC5: the owner record and the release marker go last. A delete that fails partway (a nested dir the
 	// owner cannot write) used to take both with the first files and leave an unowned remnant nobody could re-release.
 	const remove = deps.removeTree ?? removeTreeRetrying;
@@ -1719,6 +1859,12 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	// release names no destination, and a hold is never released here.
 	if (opts.now === true && opts.bin === undefined)
 		return { ok: false, changed: false, dir, reason: "now-needs-bin", ownerPid: owner.pid };
+	// RELEASELIVE1 (ompkit-5fn07): a registered user (`scratch use`) whose incarnation is live, or unprovable, keeps the
+	// dir. Registration is liveness evidence only; who may release was decided above and is unchanged.
+	if (opts.now === true) {
+		const user = blockingScratchUser(dir, deps.liveness);
+		if (user !== null) return { ok: false, changed: false, dir, reason: "user-live", ownerPid: owner.pid, detail: describeUserBlock(user) };
+	}
 	if (owner.processStart !== null && !seatOwned && !capabilityOwned) {
 		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
 		if (state !== "live") {
@@ -2024,6 +2170,7 @@ function applyReleased(dir: string, root: string, verdict: ScratchVerdict, deps:
 	if (!released.legacy && !ownerMatchesScratchRoot(released.owner, root, dir, deps)) return fail("owner-repo-outside-scratch-root");
 	const identity = inodeOf(dir);
 	if (identity === null) return fail("inode-proof-unavailable");
+	if (blockingScratchUser(dir, deps.liveness) !== null) return fail("user-live");
 	const clearBefore = lsofClearDir(deps, dir);
 	if (clearBefore !== true) return fail(clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present");
 	const entry = quarantineEntryFor(basename(dir), new Date(deps.now ?? Date.now()));
@@ -2085,6 +2232,7 @@ export function applyReap(dir: string, root: string, verdict: ScratchVerdict, de
 	}
 	const identity = inodeOf(dir);
 	if (identity === null) return fail("inode-proof-unavailable");
+	if (blockingScratchUser(dir, deps.liveness) !== null) return fail("user-live");
 	const entry = quarantineEntryFor(dir.slice(root.length + 1));
 	const qt = quarantineDir(deps.home);
 	try {
@@ -2199,6 +2347,7 @@ export function applyUnowned(dir: string, root: string, deps: ApplyDeps, planned
 	}
 	const identity = inodeOf(dir);
 	if (identity === null) return stop("inode-proof-unavailable");
+	if (blockingScratchUser(dir, deps.liveness) !== null) return stop("user-live", undefined, undefined, { action: "LIVE" });
 	const clearBefore = lsofClearDir(deps, dir);
 	if (clearBefore !== true) return stop(
 		clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
@@ -2522,6 +2671,9 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps, nameReq
 	} catch {
 		return null;
 	}
+	// RELEASELIVE1: a dir a registered user still runs in is never quarantined or reaped, released or not.
+	const user = blockingScratchUser(dir, deps.liveness);
+	if (user !== null) return { dir, action: "LIVE", reason: "user-live", owner: readReleaseRecord(dir)?.owner ?? null, sizeBytes: dirSize(dir) };
 	const released = readReleaseRecord(dir);
 	// A verified owner release (marker bound to the owner text, device and inode) stands whatever the directory's name,
 	// since a respawn rehomes .owner to the successor and keeps the creator's pid in the name.

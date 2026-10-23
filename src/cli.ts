@@ -67,7 +67,7 @@ import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from 
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
-import { defaultBudgetLedgerPath, releaseBudgetEntry } from "./scratch.ts";
+import { defaultBudgetLedgerPath, releaseBudgetEntry, updateScratchUsers } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -3496,6 +3496,21 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		onProgress: (verdict: { dir: string; action: string; reason: string; error?: string }) => {
 			process.stderr.write(`scratch ${sub}: ${verdict.action} ${verdict.dir} (${verdict.reason})${verdict.error ? ` ${verdict.error}` : ""}\n`);
 		} };
+	if (sub === "use" || sub === "unuse") {
+		if (!request.argument) return refusal("SCRATCH_USE_PATH_REQUIRED", `scratch ${sub} needs a directory path`,
+			`Run omp-kit scratch ${sub} ABSOLUTE_DIR [--pid PID]; nothing was recorded.`);
+		// RELEASELIVE1 (ompkit-5fn07): the user is --pid, else the process that ran omp-kit (its parent: the shell or
+		// runner that will keep working in the dir after this command exits).
+		const pidFlag = request.flags.get("--pid");
+		const pid = pidFlag === undefined ? process.ppid : typeof pidFlag === "string" && String(Number(pidFlag)) === pidFlag && Number.isSafeInteger(Number(pidFlag)) && Number(pidFlag) > 0 ? Number(pidFlag) : 0;
+		if (pid === 0) return refusal("SCRATCH_USE_PID_INVALID", "--pid needs a positive integer pid", "Pass --pid PID of the process that works in the dir; nothing was recorded.");
+		const used = await updateScratchUsers(request.argument, pid, sub, { liveness: deps.liveness });
+		if (!used.ok) return refusal("SCRATCH_USE_REFUSED", `scratch ${sub} refused: ${used.reason}`,
+			sub === "use" ? "Pass an owned scratch dir (one with .owner) and the pid of a running process; nothing was recorded."
+				: "Pass an owned scratch dir with a readable .users file; nothing was removed.");
+		return { code: 0, data: { overall: "CHANGED", action: sub === "use" ? "USER_REGISTERED" : "USER_REMOVED", dir: used.dir,
+			user: used.user, users: used.users, pruned: used.pruned }, verification: "UNVERIFIED" };
+	}
 	if (sub === "release") {
 		if (!request.argument) return refusal("SCRATCH_RELEASE_PATH_REQUIRED", "scratch release needs a directory path",
 			"Run omp-kit scratch release ABSOLUTE_DIR from the owning session or one of its child processes.");
@@ -3518,6 +3533,9 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 				`Scratch released but not retired: ${released.reason}${released.detail ? ` — ${released.detail}` : ""}`,
 				"Clear the cause (close open files, restore the owner record), then rerun the same release with --now.");
 		}
+		if (!released.ok && released.reason === "user-live") return refusal("USER_LIVE",
+			`Scratch release refused: ${released.detail ?? "a registered user is live"}`,
+			"The user must finish, or run `omp-kit scratch unuse DIR --pid PID`; no directory was marked or deleted.");
 		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED",
 			`Scratch release refused: ${released.reason}${released.detail ? ` — ${released.detail}` : ""}`,
 			released.reason === "caller-not-owner"
@@ -3640,7 +3658,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	return refusal("UNKNOWN_SCRATCH_COMMAND", `Unknown scratch subcommand: ${sub}`, "Run omp-kit help scratch for exact grammar.");
 }
-for (const subcommand of ["plan", "release", "apply", "mine", "new", "gate"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
+for (const subcommand of ["plan", "release", "apply", "mine", "new", "gate", "use", "unuse"]) registerCommandHandler(`scratch ${subcommand}`, scratchCommand);
 
 async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResult> {
 	const repoFlag = request.flags.get("--repo");

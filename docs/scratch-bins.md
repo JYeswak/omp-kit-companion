@@ -80,6 +80,24 @@ OMP_KIT_SCRATCH_CAPABILITY=TOKEN omp-kit scratch release DIR --bin throwaway --n
 - A wrong or missing token, with no seat match, is refused with `SCRATCH_RELEASE_REFUSED: caller-not-owner`. The detail says whether no token was presented or the token did not match, and the remediation names `--capability`.
 - A dir whose record has no `capability_sha256` (made before the capability existed) is released exactly as before.
 
+### Registered users
+
+A process can work in a dir (its `TMPDIR`, its item and result files) and still hold no file open at the moment someone releases it. The `lsof` check cannot see such a process. Register it instead:
+
+```
+omp-kit scratch use DIR [--pid PID]
+omp-kit scratch unuse DIR [--pid PID]
+```
+
+- `use` records the process's incarnation (pid and process start, read by kitlib `incarnationSync`) in `DIR/.users`. Without `--pid`, the user is the process that ran `omp-kit`, which is its parent: normally the shell or runner that keeps working in the dir. A runner that launches a separate worker passes the worker's pid.
+- `unuse` removes every record of that pid.
+- Both rewrite `.users` under a kitlib private lock with an atomic replace. Each rewrite also prunes records that probe dead, reused or zombie.
+- While any record probes `live`, `release --now` refuses with `USER_LIVE`. The refusal names the pid, its start and its state, and says that the user must finish or run `scratch unuse`. Nothing is marked or deleted.
+- `scratch apply` keeps such a dir as `LIVE user-live`, whether it was released or not. It rechecks the users again before every quarantine move.
+- A record that probes `unknown` blocks too, because unknown never means dead. A `.users` file that is unreadable or malformed also blocks, with state `unknown`.
+- Records that probe dead, reused (same pid, different start) or zombie don't block.
+- Registration is liveness evidence only. It grants no authority: who may release stays the seat, the capability and the owning process.
+
 ## A reap is a gap report
 
 `omp-kit scratch apply` (and the scheduled scratch-reaper) is the emergency path. Every dir it reaps or quarantines that its owner did not bin becomes one row, returned as `gapReport` and written to the reap log as a `gap` event:
