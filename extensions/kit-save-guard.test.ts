@@ -62,6 +62,9 @@ interface FakeSaveGuard {
 }
 
 
+const mineAnswer = (unreleased: number, labels: string[]) => JSON.stringify({ data: { overall: unreleased > 0 ? "FINDINGS" : "OK",
+	unreleased, dirs: labels.map((label) => ({ dir: `/x/${label}.1`, label, state: "unreleased", bin: "unbinned", bytes: 10, budget: null, overBudget: false })) } });
+
 function fakePi(cwd: string): FakeSaveGuard {
 	const handlers = new Map<string, Handler[]>();
 	const notices: { message: string; type?: string }[] = [];
@@ -78,6 +81,10 @@ function fakePi(cwd: string): FakeSaveGuard {
 			// Native authority is unavailable unless a test supplies an explicit native-response fixture.
 			// Git remains real; this bus is not evidence of an installed/native stop consumer.
 			if (command === "am") return { code: 127, stdout: "" };
+			// The real census answers for the runner's seat (AGENT_NAME plus the omp session lease in its
+			// ancestry), so an inherited seat's undisposed dirs would block every stop. Clean unless
+			// a test supplies its own answer (scratchFake).
+			if (command === "omp-kit" && args[0] === "scratch") return { code: 0, stdout: mineAnswer(0, []) };
 			const child = Bun.spawnSync([command, ...args],
 				{ cwd: options?.cwd, stdout: "pipe", stderr: "pipe" });
 			return { stdout: child.stdout.toString(), code: child.exitCode ?? 127 };
@@ -1258,9 +1265,6 @@ test("offered per-bead recipe saves a new own file without restaging tracked or 
 });
 
 // ompkit-774u.15 P0: the save path refuses to complete while the session holds an undisposed dir.
-const mineAnswer = (unreleased: number, labels: string[]) => JSON.stringify({ data: { overall: unreleased > 0 ? "FINDINGS" : "OK",
-	unreleased, dirs: labels.map((label) => ({ dir: `/x/${label}.1`, label, state: "unreleased", bin: "unbinned", bytes: 10, budget: null, overBudget: false })) } });
-
 function scratchFake(root: string, answer: { code: number; stdout: string } | Error): FakeSaveGuard {
 	const fake = fakePi(root);
 	const realExec = fake.pi.exec.bind(fake.pi);
