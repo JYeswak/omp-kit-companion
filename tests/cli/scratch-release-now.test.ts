@@ -5,10 +5,12 @@
 // touches a hold.
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createScratch, releaseScratch, reapLogPath, scratchContent,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { run } from "../../src/kitlib/run.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -32,6 +34,14 @@ const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, 
 	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const deps = (extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness: noPid, run: clearRun, now: NOW, ...extra });
 const ownerText = (pid: number, extra = "", created = CREATED) => `pid=${pid}\nlabel=work\nrepo=${repo}\ncreated=${created}\n${extra}`;
+function isolatedCliEnv(home: string): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+	env.HOME = home;
+	env.XDG_STATE_HOME = join(home, "state");
+	delete env.OMP_KIT_SCRATCH_ROOTS;
+	return env;
+}
 
 function fixture(owner: string, label = "work"): { dir: string; home: string } {
 	const root = ownedTmp("now", { root: scratchParent }).path;
@@ -222,6 +232,58 @@ test("the CLI accepts --now and retires the directory", () => {
 	expect(out.ok).toBe(true);
 	expect(existsSync(dir)).toBe(false);
 });
+
+test("scratch new refuses an unregistered hidden repository before creating a scratch directory", async () => {
+	const home = ownedTmp("hidden-home", { root: scratchParent }).path;
+	cleanup.push(home);
+	const hiddenRepo = join(home, ".claude");
+	mkdirSync(join(hiddenRepo, ".git"), { recursive: true });
+	const result = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", "new",
+		"--label", "hidden-root", "--json"], { deadline_s: 15, cwd: hiddenRepo, env: isolatedCliEnv(home) });
+	const out = JSON.parse(new TextDecoder().decode(result.stdout)) as {
+		errors?: { code: string; message: string; remediation: string }[];
+	};
+	expect(result.rc).toBe(2);
+	expect(result.timed_out).toBe(false);
+	expect(out.errors?.[0]?.code).toBe("SCRATCH_NEW_REFUSED");
+	expect(out.errors?.[0]?.message).toContain("scratch-root-unrecognized");
+	expect(out.errors?.[0]?.remediation).toContain("OMP_KIT_SCRATCH_ROOTS");
+	const root = join(hiddenRepo, "var", "agent-tmp");
+	const leafDirs = existsSync(root) ? readdirSync(root).filter(name => name.startsWith("hidden-root.")) : [];
+	expect(leafDirs).toEqual([]);
+});
+
+test("scratch new and release roundtrip under a registered Developer root", async () => {
+	const home = ownedTmp("developer-home", { root: scratchParent }).path;
+	cleanup.push(home);
+	const project = join(home, "Developer", "project");
+	mkdirSync(join(project, ".git"), { recursive: true });
+	const env = isolatedCliEnv(home);
+	const created = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", "new",
+		"--label", "registered-root", "--json"], { deadline_s: 15, cwd: project, env });
+	const createdOutput = JSON.parse(new TextDecoder().decode(created.stdout)) as {
+		data?: { overall?: string; dir?: string; capability?: string };
+	};
+	expect(created.rc).toBe(0);
+	expect(created.timed_out).toBe(false);
+	expect(createdOutput.data?.overall).toBe("OK");
+	const dir = createdOutput.data?.dir;
+	const capability = createdOutput.data?.capability;
+	if (!dir || !capability) throw new Error("scratch new returned no directory or capability");
+	expect(dir.startsWith(join(project, "var", "agent-tmp", "registered-root."))).toBe(true);
+	const released = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir,
+		"--bin", "throwaway", "--now", "--capability", capability, "--json"],
+	{ deadline_s: 15, cwd: project, env });
+	const releasedOutput = JSON.parse(new TextDecoder().decode(released.stdout)) as {
+		data?: { overall?: string; deleted?: boolean };
+	};
+	expect(released.rc).toBe(0);
+	expect(released.timed_out).toBe(false);
+	expect(releasedOutput.data?.overall).toBe("CHANGED");
+	expect(releasedOutput.data?.deleted).toBe(true);
+	expect(existsSync(dir)).toBe(false);
+});
+
 
 test("--now without an injected snapshot takes one system-wide lsof snapshot, never the per-dir walk", () => {
 	const { dir, home } = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));

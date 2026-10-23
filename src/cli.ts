@@ -3611,8 +3611,11 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		const created = createScratch(labelFlag, repo, { ...deps, callerSeat: () => callerSeat(deps.run) },
 			{ ...(typeof beadFlag === "string" ? { bead: beadFlag } : {}) }, true);
-		if (!created.ok) return refusal("SCRATCH_NEW_REFUSED", `scratch new refused: ${created.reason}`,
-			"Use a fresh label; run from the repo that will own the scratch.");
+		if (!created.ok) {
+			const detail = created.detail ?? "Use a fresh label; run from the repo that will own the scratch.";
+			return refusal("SCRATCH_NEW_REFUSED",
+				`scratch new refused: ${created.reason}${created.detail ? ` — ${created.detail}` : ""}`, detail);
+		}
 		if (typeof exportFlag === "string") {
 			const err = exportCommitToScratch(repo, exportFlag, created.dir, deps.run);
 			// The dir exists either way, so its capability is returned either way: it is the only way to release it later.

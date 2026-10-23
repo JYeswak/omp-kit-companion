@@ -35,6 +35,12 @@ expires=2026-10-25
 
 A hold outlives its dead owner until it expires, and shows as `LIVE held-by-bead` in `omp-kit scratch plan`. Once it expires it shows as `SKIP hold-expired-unbinned`, is flagged, and is never reaped: only a renewal on the bead can extend it.
 
+## Scratch roots
+
+`scratch new`, `release`, `use`, `unuse` and `plan` share the same root set. By default it includes existing `~/Developer/*/var/agent-tmp` roots, roots for repositories named by the fleet-watch configuration, the fleet-test root, and `omp-*` directories under `TMPDIR` or `/tmp`. `OMP_KIT_SCRATCH_ROOTS` replaces that default set; it is a path-delimited list, not an additive root.
+
+`scratch new` creates a task directory only when its `<repo>/var/agent-tmp` root is discoverable by `scratch release`. If it is not, the command returns `SCRATCH_NEW_REFUSED` with `scratch-root-unrecognized` and the root to add to the complete `OMP_KIT_SCRATCH_ROOTS` list. It may create the empty `var/agent-tmp` parent, but not the task directory or `.owner`. Use the same root configuration for creation and later release, or run from a registered root. `scratch plan --json` reports the active roots.
+
 ## Disposing of a directory
 
 ```

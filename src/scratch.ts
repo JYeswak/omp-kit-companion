@@ -1362,6 +1362,14 @@ export function resolveScratchRootEntries(home: string): ScratchRootEntry[] {
 export function resolveScratchRoots(home: string): string[] {
 	return resolveScratchRootEntries(home).map(entry => entry.root);
 }
+function scratchRootForDirectory(dir: string, home: string): string | null {
+	const resolvedDir = resolve(dir);
+	for (const root of resolveScratchRoots(home)) {
+		const candidate = resolve(root);
+		if (dirname(resolvedDir) === candidate && !isSymlink(candidate)) return candidate;
+	}
+	return null;
+}
 
 export interface OrphanProcess { pid: number; ppid: number; ageSeconds: number; command: string }
 
@@ -1859,9 +1867,8 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	} catch {
 		return { ok: false, changed: false, dir: path, reason: "path-invalid", ownerPid: null };
 	}
-	const roots = resolveScratchRoots(home).map(root => resolve(root));
-	const root = roots.find(candidate => dirname(dir) === candidate);
-	if (!root || isSymlink(root)) return { ok: false, changed: false, dir, reason: "outside-scratch-root", ownerPid: null };
+	const root = scratchRootForDirectory(dir, home);
+	if (!root) return { ok: false, changed: false, dir, reason: "outside-scratch-root", ownerPid: null };
 	let stat;
 	try {
 		stat = lstatSync(dir);
@@ -2142,6 +2149,11 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 		mkdirSync(root, { recursive: true, mode: 0o700 });
 	} catch {
 		return { ok: false, dir: "", exportLine: "", reason: "root-create-failed" };
+	}
+	const home = process.env.HOME ?? homedir();
+	if (!scratchRootForDirectory(dir, home)) {
+		return { ok: false, dir: "", exportLine: "", reason: "scratch-root-unrecognized",
+			detail: `Root ${root} is not in the release root set. Configure OMP_KIT_SCRATCH_ROOTS with this and the other roots you need for both create and release, or use a registered scratch root; no scratch directory was created.` };
 	}
 	try {
 		mkdirSync(dir, { mode: 0o700 });
