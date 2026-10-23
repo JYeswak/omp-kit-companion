@@ -166,7 +166,8 @@ mvrm="$root/.git/stale-worktree-removed.$$"
 mvhit="$root/.git/stale-worktree-hit.$$"
 # The same invocation owner cleans these existing files on every exit.
 # Join I/O failures propagate in pipeline status, not a disk error marker.
-kitlib_tmp_atexit 'rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd_sorted" "$mvused" "$mvavail" "$mvrm" "$mvhit"'
+# Escape variable references for exit-time expansion by the cleanup owner.
+kitlib_tmp_atexit "rm -f \"\$root/.git/stale-worktree-refused.\$\$\" \"\$root/.git/stale-worktree-report.\$\$\" \"\$mvadd_sorted\" \"\$mvused\" \"\$mvavail\" \"\$mvrm\" \"\$mvhit\""
 capture_diff || { printf 'stale-worktree: cannot read staged diff\n' >&2; exit 1; }
 awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' "$metadata_dir/diff.raw" > "$metadata_dir/additions.raw" || exit 1
 sort "$metadata_dir/additions.raw" > "$mvadd_sorted" || exit 1

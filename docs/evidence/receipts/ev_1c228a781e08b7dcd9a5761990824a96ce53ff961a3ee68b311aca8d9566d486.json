@@ -1,0 +1,17 @@
+{
+  "authority": "test",
+  "confidence": "observed",
+  "evidence_id": "ev_1c228a781e08b7dcd9a5761990824a96ce53ff961a3ee68b311aca8d9566d486",
+  "limitations": [
+    "ScopedShellCheckand59runtimeoraclesonly; noallprepush/remoteclaim, no lintdisable."
+  ],
+  "operation": "deferred-cleanup-lint-compatibility",
+  "parameters": {
+    "decisive_json": "{\"after_source_sha256\":\"2a5d4eff3f00c86c8755f9d26798712ebb9bfb3526e5c1e6f979ec01a2f1adf3\",\"bead\":\"ompkit-axz7m.1\",\"before_commit\":\"be213623af\",\"before_gate_log_sha256\":\"98d0893068b6cb69466777c5e22906efe85af52a046c8343736bbb5bae3ab54a\",\"before_gate_rc\":1,\"before_push_rc\":3,\"diagnostic\":\"ShellCheckSC2016deferredsinglequote; namedindirectcallbackalsoflaggedSC2317andwasnotretained.\",\"file\":\"scripts/check-stale-worktree.sh\",\"fix\":\"Double-quotedcallbackliteralwithescapedvariablespreservesexit-timeexpansion; no lintdisables, thresholdchange, dummycall or unreachablefunction.\",\"limits\":\"Notanewperformanceclaim,norcompleteprepushorremote-publicationproof.\",\"schema_version\":\"omp-kit.deferred-cleanup-lint.v1\",\"verification\":{\"oracle_tool_wall_seconds\":92.12,\"pinned_shellcheck\":\"dockerkoalaman/shellcheck:v0.9.0 -x scripts/check-stale-worktree.sh\",\"real_stale_oracle\":\"59pass0fail,exit0; observedbg12complete\",\"shellcheck_rc\":0}}"
+  },
+  "producer": "QuietBadger",
+  "result_ref": {
+    "bytes": 928,
+    "sha256": "2a5e138b58833841127b0715096e74cc95aec2fa2d2e6bb806ecb60f108fa411"
+  }
+}
