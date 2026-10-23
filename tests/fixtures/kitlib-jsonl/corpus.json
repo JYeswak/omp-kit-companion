@@ -1,0 +1,897 @@
+{
+ "schema": "kitlib-jsonl-corpus.v1",
+ "detectors": [
+  "torn-tail",
+  "progress",
+  "build",
+  "lock",
+  "inode",
+  "sync"
+ ],
+ "lock_detectors": {
+  "lock": "flock"
+ },
+ "writers": {
+  "ts": [
+   "{BUN}",
+   "-e",
+   "const [mod, file, state, id, count, pad] = process.argv.slice(-6); const { appendJsonl } = await import(mod); for (let i = 0; i < Number(count); i++) { await appendJsonl(file, () => ({ w: id, i, pad: 'x'.repeat(Number(pad)) }), { deadline_s: 60, state_dir: state }); } process.exit(0);",
+   "{MODULE_TS}",
+   "{FILE}",
+   "{STATE}",
+   "{ID}",
+   "{COUNT}",
+   "{PAD}"
+  ],
+  "py": [
+   "{PYTHON}",
+   "-c",
+   "import sys\nsys.path.insert(0, sys.argv[1])\nimport kitlib_jsonl\nfile, state, wid, count, pad = sys.argv[2:7]\nfor i in range(int(count)):\n    kitlib_jsonl.append_jsonl(file, lambda s, i=i: {'w': wid, 'i': i, 'pad': 'x' * int(pad)}, deadline_s=60, state_dir=state)\n",
+   "{SCRIPTS_DIR}",
+   "{FILE}",
+   "{STATE}",
+   "{ID}",
+   "{COUNT}",
+   "{PAD}"
+  ]
+ },
+ "readers": {
+  "ts": [
+   "{BUN}",
+   "-e",
+   "const [mod, file] = process.argv.slice(-2); const { readJsonl } = await import(mod); console.log(JSON.stringify(readJsonl(file).rows));",
+   "{MODULE_TS}",
+   "{FILE}"
+  ],
+  "py": [
+   "{PYTHON}",
+   "-c",
+   "import json, sys\nsys.path.insert(0, sys.argv[1])\nimport kitlib_jsonl\nprint(json.dumps(kitlib_jsonl.read_jsonl(sys.argv[2])['rows']))\n",
+   "{SCRIPTS_DIR}",
+   "{FILE}"
+  ]
+ },
+ "cases": [
+  {
+   "id": "append-control-new-file-mode-and-rows",
+   "steps": [
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "a": 1
+     },
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "offset": 0,
+       "bytes": 8,
+       "created": true,
+       "torn_prefixed": false,
+       "durable": false
+      }
+     }
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "b": "x"
+     },
+     "options": {
+      "deadline_s": 5,
+      "durable": true
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "offset": 8,
+       "created": false,
+       "durable": true
+      }
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n{\"b\":\"x\"}\n",
+     "mode": "0600"
+    },
+    {
+     "op": "read",
+     "expect": {
+      "rows": [
+       {
+        "a": 1
+       },
+       {
+        "b": "x"
+       }
+      ],
+      "errors": [],
+      "reset": null,
+      "more": false,
+      "pending_tail_bytes": 0,
+      "cursor": {
+       "offset": 18,
+       "line": 2
+      }
+     }
+    }
+   ],
+   "control": true
+  },
+  {
+   "id": "torn-tail-refused-with-evidence",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n{\"b\":"
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "c": 2
+     },
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "code": "TORN_TAIL",
+      "evidence": {
+       "size": 13,
+       "tail": "{\"a\":1}\n{\"b\":",
+       "tail_bytes": 13
+      }
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n{\"b\":",
+     "when": "normal"
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n{\"b\":{\"c\":2}\n",
+     "when": "bypassed"
+    }
+   ],
+   "detector": "torn-tail"
+  },
+  {
+   "id": "torn-tail-newline-policy-keeps-evidence",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n{\"b\":"
+    },
+    {
+     "op": "append",
+     "build": "state",
+     "options": {
+      "deadline_s": 5,
+      "torn_tail": "newline"
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "torn_prefixed": true,
+       "offset": 13,
+       "bytes": 41
+      }
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n{\"b\":\n{\"size\":13,\"created\":false,\"torn\":true}\n"
+    },
+    {
+     "op": "read",
+     "expect": {
+      "rows": [
+       {
+        "a": 1
+       },
+       {
+        "size": 13,
+        "created": false,
+        "torn": true
+       }
+      ],
+      "errors": [
+       {
+        "line": 2,
+        "reason": "INVALID_JSON"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "short-writes-complete",
+   "steps": [
+    {
+     "op": "hook",
+     "write": "max3"
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "long": "abcdefghij"
+     },
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "bytes": 22
+      }
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"long\":\"abcdefghij\"}\n"
+    }
+   ]
+  },
+  {
+   "id": "zero-progress-write-refused",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n"
+    },
+    {
+     "op": "hook",
+     "write": "zero"
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "b": 2
+     },
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "code": "NO_PROGRESS",
+      "evidence": {
+       "written": 0,
+       "bytes": 8
+      }
+     },
+     "expect_bypassed": {
+      "ok": true,
+      "result": {
+       "bytes": 0
+      }
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n"
+    }
+   ],
+   "detector": "progress"
+  },
+  {
+   "id": "build-runs-under-the-lock",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n"
+    },
+    {
+     "op": "append",
+     "build": "probe-lock",
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "ok": true
+     }
+    },
+    {
+     "op": "read",
+     "expect": {
+      "rows": [
+       {
+        "a": 1
+       },
+       {
+        "locked": true,
+        "size": 8,
+        "torn": false
+       }
+      ],
+      "errors": []
+     }
+    }
+   ]
+  },
+  {
+   "id": "build-throws-writes-nothing",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n"
+    },
+    {
+     "op": "append",
+     "build": "throw",
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "code": "BUILD_FAILED",
+      "evidence": {
+       "message": "domain validation refused"
+      }
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n",
+     "when": "normal"
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\nnull\n",
+     "when": "bypassed"
+    }
+   ],
+   "detector": "build"
+  },
+  {
+   "id": "lock-timeout-is-kl08-deadline",
+   "steps": [
+    {
+     "op": "hold-lock"
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "a": 1
+     },
+     "options": {
+      "deadline_s": 0.2
+     },
+     "expect": {
+      "code": "DEADLINE",
+      "evidence": {
+       "namespace": "kitlib-jsonl",
+       "deadline_s": 0.2
+      }
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "release-lock"
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "absent": true,
+     "when": "normal"
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n",
+     "when": "bypassed"
+    }
+   ],
+   "detector": "lock"
+  },
+  {
+   "id": "inode-replaced-between-lock-and-write",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n"
+    },
+    {
+     "op": "hook",
+     "before_write": "replace-target"
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "b": 2
+     },
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "code": "INODE_REPLACED"
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": ""
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}.old",
+     "text": "{\"a\":1}\n",
+     "when": "normal"
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}.old",
+     "text": "{\"a\":1}\n{\"b\":2}\n",
+     "when": "bypassed"
+    }
+   ],
+   "detector": "inode"
+  },
+  {
+   "id": "fsync-error-never-reports-durable",
+   "steps": [
+    {
+     "op": "hook",
+     "fsync": "fail"
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "a": 1
+     },
+     "options": {
+      "deadline_s": 5,
+      "durable": true
+     },
+     "expect": {
+      "code": "SYNC_FAILED",
+      "evidence": {
+       "durable": false,
+       "written": 8,
+       "errno": "EIO"
+      }
+     },
+     "expect_bypassed": {
+      "ok": true,
+      "result": {
+       "durable": true
+      }
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{FILE}",
+     "text": "{\"a\":1}\n"
+    }
+   ],
+   "detector": "sync"
+  },
+  {
+   "id": "durable-append-survives-reopen",
+   "steps": [
+    {
+     "op": "hook",
+     "fsync": "count"
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "a": 1
+     },
+     "options": {
+      "deadline_s": 5,
+      "durable": true
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "durable": true
+      }
+     }
+    },
+    {
+     "op": "expect-fsyncs",
+     "count": 1
+    },
+    {
+     "op": "reader-child",
+     "expect_rows": [
+      {
+       "a": 1
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "unsafe-paths-refused",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{TMP}/real.jsonl",
+     "text": ""
+    },
+    {
+     "op": "symlink",
+     "target": "{TMP}/real.jsonl",
+     "path": "{FILE}"
+    },
+    {
+     "op": "append",
+     "build": "record",
+     "record": {
+      "a": 1
+     },
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "code": "UNSAFE_PATH",
+      "evidence": {
+       "reason": "symlink"
+      }
+     }
+    },
+    {
+     "op": "append",
+     "path": "relative/x.jsonl",
+     "build": "record",
+     "record": {
+      "a": 1
+     },
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "code": "UNSAFE_PATH"
+     }
+    },
+    {
+     "op": "append",
+     "path": "{TMP}/a/../x.jsonl",
+     "build": "record",
+     "record": {
+      "a": 1
+     },
+     "options": {
+      "deadline_s": 5
+     },
+     "expect": {
+      "code": "UNSAFE_PATH"
+     }
+    },
+    {
+     "op": "expect-file",
+     "path": "{TMP}/real.jsonl",
+     "text": ""
+    }
+   ]
+  },
+  {
+   "id": "reader-surfaces-every-invalid-line",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "hex": "7b2261223a317d0a0a6e6f74206a736f6e0a7b2262223aff7d0a2020090a7b2263223a337d0a7b2264"
+    },
+    {
+     "op": "read",
+     "expect": {
+      "rows": [
+       {
+        "a": 1
+       },
+       {
+        "c": 3
+       }
+      ],
+      "errors": [
+       {
+        "line": 2,
+        "reason": "BLANK_LINE",
+        "offset": 8
+       },
+       {
+        "line": 3,
+        "reason": "INVALID_JSON",
+        "offset": 9
+       },
+       {
+        "line": 4,
+        "reason": "INVALID_UTF8",
+        "offset": 18
+       },
+       {
+        "line": 5,
+        "reason": "BLANK_LINE",
+        "offset": 26
+       }
+      ],
+      "pending_tail_bytes": 3,
+      "more": false,
+      "cursor": {
+       "line": 6,
+       "offset": 38
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "reader-bounded-window-and-cursor",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"i\":1}\n{\"i\":2}\n{\"i\":3}\n"
+    },
+    {
+     "op": "read",
+     "options": {
+      "max_bytes": 10
+     },
+     "save": "c1",
+     "expect": {
+      "rows": [
+       {
+        "i": 1
+       }
+      ],
+      "errors": [],
+      "more": true,
+      "pending_tail_bytes": 0,
+      "cursor": {
+       "offset": 8,
+       "line": 1
+      }
+     }
+    },
+    {
+     "op": "read",
+     "options": {
+      "cursor": "c1"
+     },
+     "save": "c2",
+     "expect": {
+      "rows": [
+       {
+        "i": 2
+       },
+       {
+        "i": 3
+       }
+      ],
+      "errors": [],
+      "more": false,
+      "reset": null,
+      "cursor": {
+       "offset": 24,
+       "line": 3
+      }
+     }
+    },
+    {
+     "op": "append-raw",
+     "path": "{FILE}",
+     "text": "{\"i\":4"
+    },
+    {
+     "op": "read",
+     "options": {
+      "cursor": "c2"
+     },
+     "expect": {
+      "rows": [],
+      "errors": [],
+      "pending_tail_bytes": 6,
+      "cursor": {
+       "offset": 24,
+       "line": 3
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "reader-line-longer-than-window",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"i\":12345}\n"
+    },
+    {
+     "op": "read",
+     "options": {
+      "max_bytes": 4
+     },
+     "expect": {
+      "rows": [],
+      "errors": [
+       {
+        "line": 1,
+        "reason": "LINE_EXCEEDS_MAX_BYTES",
+        "offset": 0
+       }
+      ],
+      "more": true,
+      "cursor": {
+       "offset": 0,
+       "line": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "reader-surfaces-truncation",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"i\":1}\n{\"i\":2}\n"
+    },
+    {
+     "op": "read",
+     "save": "c",
+     "expect": {
+      "rows": [
+       {
+        "i": 1
+       },
+       {
+        "i": 2
+       }
+      ]
+     }
+    },
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"i\":9}\n"
+    },
+    {
+     "op": "read",
+     "options": {
+      "cursor": "c"
+     },
+     "expect": {
+      "rows": [
+       {
+        "i": 9
+       }
+      ],
+      "reset": "truncated",
+      "cursor": {
+       "offset": 8,
+       "line": 1
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "reader-surfaces-rotation",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"i\":1}\n"
+    },
+    {
+     "op": "read",
+     "save": "c",
+     "expect": {
+      "rows": [
+       {
+        "i": 1
+       }
+      ]
+     }
+    },
+    {
+     "op": "rename",
+     "path": "{FILE}",
+     "target": "{FILE}.1"
+    },
+    {
+     "op": "read",
+     "options": {
+      "cursor": "c"
+     },
+     "expect": {
+      "rows": [],
+      "missing": true,
+      "reset": "rotated"
+     }
+    },
+    {
+     "op": "write",
+     "path": "{FILE}",
+     "text": "{\"i\":1}\n{\"i\":2}\n"
+    },
+    {
+     "op": "read",
+     "options": {
+      "cursor": "c"
+     },
+     "expect": {
+      "rows": [
+       {
+        "i": 1
+       },
+       {
+        "i": 2
+       }
+      ],
+      "reset": "rotated"
+     }
+    }
+   ]
+  },
+  {
+   "id": "concurrent-cross-language-writers-never-interleave",
+   "steps": [
+    {
+     "op": "writers",
+     "writers": [
+      {
+       "lang": "ts",
+       "id": "ts-a"
+      },
+      {
+       "lang": "ts",
+       "id": "ts-b"
+      },
+      {
+       "lang": "py",
+       "id": "py-a"
+      },
+      {
+       "lang": "py",
+       "id": "py-b"
+      }
+     ],
+     "count": 40,
+     "pad": 3000
+    }
+   ]
+  }
+ ]
+}

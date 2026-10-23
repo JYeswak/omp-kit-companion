@@ -11,6 +11,7 @@ re-implement it at the call site.
 | Private resource lock | `privateLock()` in `src/kitlib/lock.ts` | `private_lock()` in `scripts/kitlib_lock.py` | — | `tests/fixtures/kitlib-lock/corpus.json` |
 | Atomic byte replace | `atomicReplaceBytes()` in `src/kitlib/io.ts` | `atomic_replace_bytes()` in `scripts/kitlib_io.py` | — | `tests/fixtures/kitlib-io/corpus.json` |
 | Process incarnation | `incarnation()` / `probeIncarnation()` / `isDead()` in `src/kitlib/proc.ts` | `incarnation()` / `probe_incarnation()` / `is_dead()` in `scripts/kitlib_proc.py` | — | `tests/fixtures/kitlib-proc/corpus.json` |
+| Locked JSONL append | `appendJsonl()` / `readJsonl()` in `src/kitlib/jsonl.ts` | `append_jsonl()` / `read_jsonl()` in `scripts/kitlib_jsonl.py` | — | `tests/fixtures/kitlib-jsonl/corpus.json` |
 
 ## Bounded run (KITLIB-RUN, ompkit-hsfyp)
 
@@ -180,3 +181,35 @@ import kitlib_proc
 owner = kitlib_proc.incarnation(os.getpid())
 if kitlib_proc.is_dead(kitlib_proc.probe_incarnation(owner)): ...
 ```
+
+## Locked JSONL append (KL11, ompkit-ibgvg)
+
+Appends one record as one complete line, serialized across processes and languages by the KL08 lock on
+`{namespace: "kitlib-jsonl", path}`. Everything below happens while the lock is held:
+- the target (absolute, normalized) opens O_APPEND|O_NOFOLLOW; a new file is created O_EXCL with exactly `mode`
+  (a subset of 0o644, default 0600); a symlink or non-file is `UNSAFE_PATH`;
+- torn tail (last byte not "\n"): `tornTail: "refuse"` (default) refuses `TORN_TAIL` with size and tail bytes;
+  `"newline"` starts the record on a fresh line and keeps the torn bytes. Nothing is ever truncated or repaired;
+  repair policy belongs to the owning ledger;
+- `build(state)` (`{path, size, created, torn}`) returns the record. Domain validation and idempotency live there;
+  a throw is `BUILD_FAILED` and nothing is written; an unserializable value is `INVALID_RECORD`;
+- if the path no longer names the opened inode: `INODE_REPLACED`;
+- complete-write loop: zero progress is `NO_PROGRESS`, an errno `WRITE_FAILED` (`written` in evidence; a partial
+  line then shows as a torn tail to the next append);
+- `durable` fsyncs; failure is `SYNC_FAILED`, and `durable: true` is reported only after the sync returned.
+A lock timeout is KL08's `DEADLINE`. The result is `{path, offset, bytes, created, torn_prefixed, durable, waited_s}`.
+
+`readJsonl(path, {maxBytes, fromCursor})` / `read_jsonl(path, max_bytes, from_cursor)` reads complete lines only
+and returns `rows`, `errors` (`line`, `offset`, `reason` INVALID_JSON | INVALID_UTF8 | BLANK_LINE |
+LINE_EXCEEDS_MAX_BYTES, `excerpt`; never hidden), `cursor {dev, ino, offset, line}`, `more`,
+`pending_tail_bytes`, `missing` and `reset`: "rotated" (another inode) or "truncated" (cursor beyond EOF), both
+restarting at 0. Whether to tolerate errors is the caller's decision.
+
+Out of scope: multi-file atomicity, exactly-once, and append-safe-write's lease/readback protocol, which sits above
+this primitive. POSIX only.
+
+    import { appendJsonl } from "../src/kitlib/jsonl";
+    await appendJsonl(path, state => record, { deadline_s: 5, durable: true });
+
+    import kitlib_jsonl
+    kitlib_jsonl.append_jsonl(path, lambda state: record, deadline_s=5, durable=True)
