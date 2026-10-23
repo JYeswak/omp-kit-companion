@@ -154,6 +154,7 @@ test.skipIf(!tmuxAvailable)("planted: the old display-message =session form read
 	const socket = "s";
 	const tmux = (args: readonly string[]) => {
 		const result = runSync([args[0]!, "-S", socket, ...args.slice(1)], { cwd: dir, deadline_s: 10 });
+		expect(result.timed_out || result.truncated).toBe(false);
 		return { code: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
 	};
 	try {
@@ -161,6 +162,7 @@ test.skipIf(!tmuxAvailable)("planted: the old display-message =session form read
 		const live = tmux(["tmux", "display-message", "-p", "-t", "=omp-test", "#{session_id}"]);
 		const missing = tmux(["tmux", "display-message", "-p", "-t", "=no-such-session", "#{session_id}"]);
 		expect(live.code).toBe(0);
+		expect(missing.code).toBe(0);
 		expect(live.stdout.trim()).toBe("");
 		expect(missing.stdout.trim()).toBe("");
 	} finally {
@@ -174,6 +176,7 @@ test.skipIf(!tmuxAvailable)("the session probe returns a live tmux session id an
 	const socket = "s";
 	const tmux = (args: readonly string[]) => {
 		const result = runSync([args[0]!, "-S", socket, ...args.slice(1)], { cwd: dir, deadline_s: 10 });
+		expect(result.timed_out || result.truncated).toBe(false);
 		return { code: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
 	};
 	try {
