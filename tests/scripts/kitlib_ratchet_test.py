@@ -320,6 +320,30 @@ class Ratchet(unittest.TestCase):
             self.assertEqual(checker.main([os.path.join(self.repo, "missing")]), 2)
         self.assertIn("kitlib_ratchet: no such path", err.getvalue())
 
+    def test_tree_judges_regular_files_only(self) -> None:
+        # A socket made open() fail (OSError 102, 2026-10-23 --tree over var/agent-tmp) and a FIFO would block it forever.
+        import socket
+        os.mkfifo(os.path.join(self.repo, "p.fifo"))
+        sock = socket.socket(socket.AF_UNIX)
+        sock.settimeout(1.0)  # never accepts or reads; bounded anyway (pysafe net-no-timeout)
+        cwd = os.getcwd()
+        try:
+            os.chdir(self.repo)
+            sock.bind("s.sock")  # relative: owned temp paths can exceed the 104-byte sun_path limit
+        finally:
+            os.chdir(cwd)
+        try:
+            walked = sorted(os.path.basename(p) for p in core.iter_files(self.repo))
+            self.assertNotIn("p.fifo", walked)
+            self.assertNotIn("s.sock", walked)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = checker.main(["--tree", "fixture", self.repo, "--format", "json"])
+            self.assertEqual(rc, 1)
+            self.assertEqual(json.loads(out.getvalue())["groups"][0]["summary"]["files"], 1)
+        finally:
+            sock.close()
+
 
 PY_SPAWN = 'import subprocess\nsubprocess.run(["x"])\n'
 PY_KITLIB = 'import kitlib_run\nkitlib_run.run(["x"], deadline_s=5)\n'

@@ -713,7 +713,8 @@ def iter_files(path: str) -> Iterable[str]:
         dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS)
         for name in sorted(files):
             full = os.path.join(root, name)
-            if not os.path.islink(full):
+            # Regular files only: a socket fails open() (OSError 102) and a FIFO blocks it forever.
+            if not os.path.islink(full) and os.path.isfile(full):
                 yield full
 
 
