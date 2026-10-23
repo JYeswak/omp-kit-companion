@@ -146,8 +146,21 @@ test("rollback never unstages an entry a peer already committed", () => {
 	expect(r.restore_skipped).toContain("f2"); expect(r.applied).toBe(false); expect(git(w.a, "diff", "--cached", "HEAD", "--", "f2")).toBe(""); expect(git(w.a, "show", "HEAD:f2")).toBe("remote"); expect(read(w.a, "f2")).toBe("f2 v0\n");
 });
 test("push implies apply and rejected publication reports the real failure", () => {
-	const w = world(); local(w.a, "f1", "local\n"); const hooks = join(w.dir, "hooks"); mkdirSync(hooks); writeFileSync(join(hooks, "pre-push"), "#!/bin/sh\necho rejected >&2\nexit 1\n"); chmodSync(join(hooks, "pre-push"), 0o755); git(w.a, "config", "core.hooksPath", hooks);
+	const w = world(); local(w.a, "f1", "local\n"); local(w.a, "f2", "second\n");
+	const before = git(w.bare, "rev-parse", "main"), head = git(w.a, "rev-parse", "main");
+	const hooks = join(w.dir, "hooks"); mkdirSync(hooks); writeFileSync(join(hooks, "pre-push"), "#!/bin/sh\necho rejected >&2\nexit 7\n"); chmodSync(join(hooks, "pre-push"), 0o755); git(w.a, "config", "core.hooksPath", hooks);
 	const r = convergeRepository({ repo: w.a, push: true }); expect(r.applied).toBe(true); expect(r.pushed).toBe(false); expect(r.reason).toBe("PUSH_FAILED"); expect(r.push_error).toContain("rejected");
+	expect(r.published_commits ?? 0).toBe(0); expect(git(w.bare, "rev-parse", "main")).toBe(before);
+	unlinkSync(join(hooks, "pre-push"));
+	const success = convergeRepository({ repo: w.a, push: true });
+	expect(success.pushed).toBe(true); expect(success.published_commits).toBe(2); expect(success.remote_after).toBe(head); expect(git(w.bare, "rev-parse", "main")).toBe(head);
+});
+test("denied push admission does not report unpublished commits", () => {
+	const w = world(); local(w.a, "f1", "local\n");
+	const before = git(w.bare, "rev-parse", "main");
+	const r = convergeRepository({ repo: w.a, push: true, beforePush: () => ({ allow: false, reason: "TEST_DENIED" }) });
+	expect(r.pushed).toBe(false); expect(r.reason).toBe("TEST_DENIED"); expect(r.published_commits ?? 0).toBe(0);
+	expect(git(w.bare, "rev-parse", "main")).toBe(before);
 });
 test("unrelated deletion, executable mode and symlink survive convergence", () => {
 	const w = world(); remote(w, "f1", "remote\n"); unlinkSync(join(w.a, "gone")); chmodSync(join(w.a, "f3"), 0o755); unlinkSync(join(w.a, "f4")); symlinkSync("f3", join(w.a, "f4")); const before = git(w.a, "ls-files", "-s", "--", "gone", "f3", "f4"); expect(apply(w).applied).toBe(true); expect(read(w.a, "gone")).toBeNull(); expect(readlinkSync(join(w.a, "f4"))).toBe("f3"); expect(git(w.a, "ls-files", "-s", "--", "gone", "f3", "f4")).toBe(before); expect(git(w.a, "diff", "--summary")).toContain("100644 => 100755");

@@ -424,7 +424,7 @@ export function convergeRepository(options: ConvergeOptions): ConvergeResult {
 			catch (error) { if (!(error instanceof RefMoved)) throw error; if (error.restore_skipped.length) (result.restore_skipped ??= []).push(...error.restore_skipped); continue; }
 			if (!options.push) return done();
 			const head = out(repo, ["rev-parse", "refs/heads/main"]);
-			result.published_commits = Number(out(repo, ["rev-list", "--count", `${plan.up}..${head}`]));
+			const publishedCommits = Number(out(repo, ["rev-list", "--count", `${plan.up}..${head}`]));
 			if (options.beforePush) {
 				const admission = options.beforePush(head, plan.up);
 				if (!admission.allow) {
@@ -435,7 +435,7 @@ export function convergeRepository(options: ConvergeOptions): ConvergeResult {
 			}
 			const pushed = git(repo, ["push", "--porcelain", plan.remote, `${head}:refs/heads/main`]);
 			const remote = out(repo, ["ls-remote", plan.remote, "refs/heads/main"]).split("\t")[0];
-			if (remote === head) { result.pushed = true; result.remote_after = head; return done(); }
+			if (remote === head) { result.pushed = true; result.remote_after = head; result.published_commits = publishedCommits; return done(); }
 			if (remote === plan.up) {
 				result.reason = "PUSH_FAILED";
 				result.push_error = pushed.err.slice(-400);
