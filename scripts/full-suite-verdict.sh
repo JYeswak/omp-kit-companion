@@ -59,7 +59,10 @@ while [ "$#" -gt 0 ]; do
 		*) usage; exit 2 ;;
 	esac
 done
-[ -n "$ROOT" ] && [ -n "$COMMIT" ] || { usage; exit 2; }
+if [ -z "$ROOT" ] || [ -z "$COMMIT" ]; then
+	usage
+	exit 2
+fi
 case "$TIMEOUT_SECS" in ''|*[!0-9]*|0) fail "FULL_SUITE_TIMEOUT_SECS must be a positive integer" ; exit 1 ;; esac
 # No suite may block on stdin (pre-push hooks inherit a pipe whose writer never closes).
 exec </dev/null
@@ -324,7 +327,13 @@ shell_red=$(grep -c '^RED script-suite ' "$SUITE_OUT" 2>/dev/null || true)
 py_green=$(grep -c '^GREEN python-suite ' "$SUITE_OUT" 2>/dev/null || true)
 py_red=$(grep -c '^RED python-suite ' "$SUITE_OUT" 2>/dev/null || true)
 complete=1
-[ "$bun_count" -gt 0 ] && [ "$bun_ran" -gt 0 ] 2>/dev/null || { [ "$bun_count" -eq 0 ] || complete=0; }
+if [ "$bun_count" -eq 0 ] 2>/dev/null; then
+	:
+elif [ "$bun_count" -gt 0 ] 2>/dev/null && [ "$bun_ran" -gt 0 ] 2>/dev/null; then
+	:
+else
+	complete=0
+fi
 [ "$((shell_green + shell_red))" -eq "$shell_count" ] 2>/dev/null || complete=0
 [ "$((py_green + py_red))" -eq "$py_count" ] 2>/dev/null || complete=0
 if [ "$complete" -ne 1 ]; then
