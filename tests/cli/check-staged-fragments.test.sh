@@ -80,5 +80,23 @@ git -C "$R" add changelog.d/bad.md
 out=$(commit "$R" -m "[test] no validator")
 check "$?" "0" "no-validator-pass" "x" "x"
 
+# 5. a commit from a linked worktree (git exports GIT_DIR=<repo>/.git/worktrees/<name> to hooks; `omp-kit
+# land --patch` commits this way): the member still judges the fragment, and the repository stays non-bare
+# (ompkit-xa5s.41: its validation `git init` under that GIT_DIR flipped the companion to core.bare=true).
+R=$(new_repo worktree validator)
+W="$TMP/worktree-wt"
+git -C "$R" worktree add -q --detach "$W" HEAD
+mkdir -p "$W/changelog.d"
+printf '### Security\n\n- Hardened widgets.\n' > "$W/changelog.d/bad.md"
+git -C "$W" add changelog.d/bad.md
+out=$(commit "$W" -m "[test] worktree unknown category")
+check "$?" "1" "worktree-unknown-category-refused" "$out" 'unknown category "Security"'
+printf '### Fixed\n\n- Widgets no longer wobble.\n' > "$W/changelog.d/bad.md"
+git -C "$W" add changelog.d/bad.md
+out=$(commit "$W" -m "[test] worktree valid fragment")
+# Only this member is judged: other chain members may refuse a worktree commit for their own reasons.
+check "$(printf '%s' "$out" | grep -c 'staged-fragments:')" "0" "worktree-valid-fragment-member-passes" "x" "x"
+check "$(git -C "$R" config --get core.bare)" "false" "worktree-commit-keeps-repo-non-bare" "x" "x"
+
 printf 'check-staged-fragments: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

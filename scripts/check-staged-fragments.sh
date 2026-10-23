@@ -31,8 +31,15 @@ paths=changelog.d
 git cat-file -e "$probe:CHANGELOG.md" 2>/dev/null && paths="CHANGELOG.md changelog.d"
 # shellcheck disable=SC2086
 git archive "$probe" $paths | tar -x -C "$validation" || { printf 'staged-fragments: cannot extract the staged changelog\n' >&2; exit 1; }
-git -C "$validation" init -q || { printf 'staged-fragments: cannot init the validation dir\n' >&2; exit 1; }
-if err=$(cd "$validation" && sh "$root/scripts/release-notes.sh" fold 2>&1 >/dev/null); then
+# The validation dir is its own repository. Git exports GIT_DIR (and GIT_INDEX_FILE) to hooks; in a
+# linked worktree that GIT_DIR is <repo>/.git/worktrees/<name>, and `git init` under it re-initializes
+# the real repository as bare (core.bare=true in its shared config: ompkit-xa5s.41, the 2026-10-23
+# companion flips after `omp-kit land --patch`). So neither the init nor the fold sees the hook's git env.
+git_redirects='GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES'
+# shellcheck disable=SC2086
+(unset $git_redirects; git -C "$validation" init -q) || { printf 'staged-fragments: cannot init the validation dir\n' >&2; exit 1; }
+# shellcheck disable=SC2086
+if err=$(unset $git_redirects; cd "$validation" && sh "$root/scripts/release-notes.sh" fold 2>&1 >/dev/null); then
 	exit 0
 fi
 printf 'staged-fragments: REFUSED: staged changelog fragments are not promotable; the push notes gate will refuse them\n%s\n' "$err" >&2
