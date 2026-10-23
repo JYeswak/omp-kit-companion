@@ -6,10 +6,12 @@ import { runFleetWatchOnce, type FleetWatchConfig } from "../../src/fleet-watch.
 import { defaultSessionId, recoverBusyTracker, type TrackerRecoveryResult } from "../../src/tracker-recovery.ts";
 import { spawnSync } from "node:child_process";
 import type { LivenessDeps } from "../../src/scratch.ts";
+import { runSync } from "../../src/kitlib/run.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const fixtures = join(import.meta.dir, "../fixtures/tracker-recovery");
 const session = "omp-test";
+const decoder = new TextDecoder();
 
 function plantedTracker(name: "stale-proceeds" | "live-blocks" | "no-lease") {
 	const scratchParent = join(repoRoot, "var/agent-tmp");
@@ -148,11 +150,11 @@ test.skipIf(!tmuxAvailable)("planted: the old display-message =session form read
 	// this row pins the old form's brokenness so a tmux behavior change is
 	// noticed instead of silently reviving the form.
 	const dir = ownedTmp("o").path;
-	const socket = join(dir, "s");
-	expect(Buffer.byteLength(socket)).toBeLessThan(104);
+	// A relative socket address stays within sun_path even in a deeply nested exact-commit export.
+	const socket = "s";
 	const tmux = (args: readonly string[]) => {
-		const result = spawnSync(args[0]!, ["-S", socket, ...args.slice(1)], { encoding: "utf8" });
-		return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+		const result = runSync([args[0]!, "-S", socket, ...args.slice(1)], { cwd: dir, deadline_s: 10 });
+		return { code: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
 	};
 	try {
 		expect(tmux(["tmux", "new-session", "-d", "-s", "omp-test", "-x", "80", "-y", "24"]).code).toBe(0);
@@ -169,11 +171,10 @@ test.skipIf(!tmuxAvailable)("planted: the old display-message =session form read
 
 test.skipIf(!tmuxAvailable)("the session probe returns a live tmux session id and null for a missing session", () => {
 	const dir = ownedTmp("s").path;
-	const socket = join(dir, "s");
-	expect(Buffer.byteLength(socket)).toBeLessThan(104);
+	const socket = "s";
 	const tmux = (args: readonly string[]) => {
-		const result = spawnSync(args[0]!, ["-S", socket, ...args.slice(1)], { encoding: "utf8" });
-		return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+		const result = runSync([args[0]!, "-S", socket, ...args.slice(1)], { cwd: dir, deadline_s: 10 });
+		return { code: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
 	};
 	try {
 		expect(tmux(["tmux", "new-session", "-d", "-s", "omp-test", "-x", "80", "-y", "24"]).code).toBe(0);

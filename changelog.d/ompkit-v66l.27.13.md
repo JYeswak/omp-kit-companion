@@ -1,2 +1,3 @@
 - Fixed installed-receipt release checks to include the strict artifact reader and verify valid and forged out-of-domain receipts through both installation paths without ambient Python imports.
 - Report an unavailable launchd inventory as unverified instead of treating an empty failed query as healthy; a successful empty query remains healthy.
+- Keep real tmux recovery tests isolated with relative socket addresses so deeply nested exact-source exports do not exceed Unix socket path limits.
