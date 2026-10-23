@@ -1,0 +1,30 @@
+{
+	"schema": "kitlib-proc-corpus.v1",
+	"about": "One conformance corpus for kitlib proc (ompkit-5m6ej, KL09), read by tests/cli/kitlib-proc.test.ts (src/kitlib/proc.ts) and tests/scripts/kitlib_proc_test.py (scripts/kitlib_proc.py). subject: live (a running child of the test), dead (a child that exited and was reaped), zombie (a child that exited and is deliberately not reaped until teardown), unreadable (any pid; the ps seam reports a timeout). recorded: observed (the start incarnation() read while the subject ran, captured before it died), wrong (WRONG_START), any (WRONG_START; the seam decides). expect: state and is_dead. negatives: a planted detector disabled through the seam must flip case `flips` away from its expected state and failing it, while case `control` still passes with the same detector disabled. malformed: probe inputs refused with a TypeError; malformed_pids: incarnation() pids refused.",
+	"wrong_start": "Thu Jan  1 00:00:00 1970",
+	"cases": [
+		{ "id": "live-own-child", "subject": "live", "recorded": "observed", "expect": { "state": "live", "is_dead": false } },
+		{ "id": "dead-reaped-child", "subject": "dead", "recorded": "observed", "expect": { "state": "dead", "is_dead": true } },
+		{ "id": "zombie-unreaped-child", "subject": "zombie", "recorded": "observed", "expect": { "state": "zombie", "is_dead": true } },
+		{ "id": "reused-wrong-start", "subject": "live", "recorded": "wrong", "expect": { "state": "reused", "is_dead": true } },
+		{ "id": "unknown-unreadable-ps", "subject": "unreadable", "recorded": "any", "expect": { "state": "unknown", "is_dead": false } }
+	],
+	"negatives": [
+		{ "id": "ignore-state-z", "disable": "zombie", "flips": "zombie-unreaped-child", "control": "live-own-child" },
+		{ "id": "ignore-start", "disable": "reuse", "flips": "reused-wrong-start", "control": "dead-reaped-child" }
+	],
+	"malformed": [
+		{ "pid": 0, "start": "Thu Oct 22 07:50:28 2026" },
+		{ "pid": -1, "start": "Thu Oct 22 07:50:28 2026" },
+		{ "pid": 1.5, "start": "Thu Oct 22 07:50:28 2026" },
+		{ "pid": "123", "start": "Thu Oct 22 07:50:28 2026" },
+		{ "pid": 2147483648, "start": "Thu Oct 22 07:50:28 2026" },
+		{ "pid": true, "start": "Thu Oct 22 07:50:28 2026" },
+		{ "pid": 1, "start": "" },
+		{ "pid": 1, "start": "   " },
+		{ "pid": 1, "start": 5 },
+		{ "pid": 1, "start": null },
+		{ "pid": 1 }
+	],
+	"malformed_pids": [0, -1, 1.5, "1", 2147483648, true, null]
+}

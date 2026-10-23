@@ -10,6 +10,7 @@ re-implement it at the call site.
 | Owned temp dir | `ownedTmp()` in `src/kitlib/tmp.ts` | `owned_tmp()` in `scripts/kitlib_tmp.py` | `kitlib_tmp` in `scripts/kitlib-tmp.sh` | `tests/fixtures/kitlib-tmp/corpus.json` |
 | Private resource lock | `privateLock()` in `src/kitlib/lock.ts` | `private_lock()` in `scripts/kitlib_lock.py` | — | `tests/fixtures/kitlib-lock/corpus.json` |
 | Atomic byte replace | `atomicReplaceBytes()` in `src/kitlib/io.ts` | `atomic_replace_bytes()` in `scripts/kitlib_io.py` | — | `tests/fixtures/kitlib-io/corpus.json` |
+| Process incarnation | `incarnation()` / `probeIncarnation()` / `isDead()` in `src/kitlib/proc.ts` | `incarnation()` / `probe_incarnation()` / `is_dead()` in `scripts/kitlib_proc.py` | — | `tests/fixtures/kitlib-proc/corpus.json` |
 
 ## Bounded run (KITLIB-RUN, ompkit-hsfyp)
 
@@ -150,3 +151,32 @@ exit or signal handlers and never changes the umask. It runs on POSIX only; else
 
     import kitlib_io
     r = kitlib_io.atomic_replace_bytes(path, data, mode=0o600, durability="full")
+
+## Process incarnation (KL09, ompkit-5m6ej)
+
+A bare pid is not an owner: pids are reused, and `kill(pid, 0)` reports zombies alive. Record an incarnation
+`{pid, start}` instead. `start` is the process start time from `ps -o lstart=` (LC_ALL=C), whitespace-collapsed.
+
+`probeIncarnation({pid, start})` returns `{state, evidence}`. The states are:
+
+- `live`: the pid runs with the recorded start.
+- `zombie`: ps state Z.
+- `reused`: the pid runs with a different start.
+- `dead`: ps does not list it, and signal 0 says ESRCH.
+- `unknown`: ps could not be read, or it disagrees with signal 0.
+
+`isDead()` is true only for dead, reused and zombie; unknown is never dead. Evidence carries `observed_start`, `stat`,
+`signal0` and `reason`. The probe is observation only: it grants no authority and sends no signal except 0. It runs on
+POSIX (macOS, Linux) only.
+
+```ts
+import { incarnation, isDead, probeIncarnation } from "../src/kitlib/proc";
+const owner = await incarnation(process.pid);            // record this, never a bare pid
+if (isDead(await probeIncarnation(owner!))) { /* reclaim */ }
+```
+
+```python
+import kitlib_proc
+owner = kitlib_proc.incarnation(os.getpid())
+if kitlib_proc.is_dead(kitlib_proc.probe_incarnation(owner)): ...
+```

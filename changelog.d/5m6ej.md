@@ -1,0 +1,3 @@
+### Added
+
+- kitlib proc, process incarnation and typed liveness evidence (ompkit-5m6ej, KL09; the liveness half of PIDIDENT1 ompkit-a0vy1): `incarnation(pid)` returns `{pid, start}` from `ps -o lstart=` (LC_ALL=C, whitespace-collapsed), and `probeIncarnation({pid, start})` returns `live`, `zombie` (ps state Z), `reused` (same pid, different start), `dead` (not listed and signal 0 says ESRCH) or `unknown` (unreadable, never dead) with evidence; `isDead()` is true only for dead, reused and zombie. `src/kitlib/proc.ts` and `scripts/kitlib_proc.py` (ps through `kitlib_run`) pass one corpus, `tests/fixtures/kitlib-proc/corpus.json`, with planted negatives proving the zombie and reuse detectors. Observation only: no authority, no signal other than 0, POSIX only.
