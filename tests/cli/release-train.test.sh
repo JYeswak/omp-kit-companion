@@ -15,6 +15,9 @@ REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP release-train-test || exit 1
 
+# bump stamps the selected repo's README; the suite's own README must come through byte-identical.
+KIT_README_SUM=$(cksum < "$REPO_TMP/../../README.md")
+
 pass=0
 fail=0
 
@@ -101,13 +104,14 @@ cat > "$BUMP_FIXTURE/package.json" <<'JSON'
 	}
 }
 JSON
+printf '# Fixture\n\n<!-- kit-release:start -->\nCurrent release: v0.2.32\n<!-- kit-release:end -->\n' > "$BUMP_FIXTURE/README.md"
 printf '### Fixed\n- New train entry.\n' > "$BUMP_FIXTURE/changelog.d/ompkit-fp72.65.2.md"
 git -C "$BUMP_FIXTURE" init -q
 mkdir -p "$BUMP_FIXTURE/hooks"
 git -C "$BUMP_FIXTURE" config core.hooksPath "$BUMP_FIXTURE/hooks"
 git -C "$BUMP_FIXTURE" config user.name "Release Train Fixture"
 git -C "$BUMP_FIXTURE" config user.email "release-train@example.invalid"
-git -C "$BUMP_FIXTURE" add CHANGELOG.md package.json changelog.d/ompkit-fp72.65.2.md
+git -C "$BUMP_FIXTURE" add CHANGELOG.md README.md package.json changelog.d/ompkit-fp72.65.2.md
 git -C "$BUMP_FIXTURE" commit -qm "fixture baseline [test]"
 git -C "$BUMP_FIXTURE" tag v0.2.31
 printf 'v0.2.31\n' > "$TMP/orphan-tags.txt"
@@ -244,6 +248,7 @@ git -C "$R" config core.hooksPath /dev/null
 git -C "$R" config user.name "release-train-test"
 printf '# Changelog\n\n## [Unreleased]\n\n## [0.2.20] - 2026-10-10\n\n### Fixed\n\n- Old fix.\n' > "$R/CHANGELOG.md"
 printf '{\n\t"name": "omp-kit-companion",\n\t"version": "0.2.15",\n\t"omp": {\n\t\t"name": "omp-kit-companion",\n\t\t"version": "0.2.15"\n\t}\n}\n' > "$R/package.json"
+printf '# Fixture\n\n<!-- kit-release:start -->\nCurrent release: v0.2.15\n<!-- kit-release:end -->\n' > "$R/README.md"
 printf '### Added\n- A shipped feature.\n' > "$R/changelog.d/feat.md"
 printf 'code\n' > "$R/src/a.ts"
 git -C "$R" add -A && git -C "$R" commit -q -m "feat: a [test]"
@@ -252,6 +257,8 @@ green=$(git -C "$R" rev-parse HEAD)
 # 18. bump folds, promotes, sets package.json and commits on the green SHA
 out=$(sh "$TRAIN" bump --version 0.2.21 --date 2026-10-12 --repo "$R" 2>&1); rc=$?
 check "bump: commits the release" 0 "$rc" "$out" "BUMP=committed version=0.2.21" "PROMOTED version=0.2.21"
+check "bump: stamps the selected repo's README" 0 0 "$(cat "$R/README.md")" "^Current release: v0.2.21$"
+check "bump: the suite's own README is untouched" 0 0 "$(cksum < "$REPO_TMP/../../README.md")" "^$KIT_README_SUM$"
 bump=$(git -C "$R" rev-parse HEAD)
 meta="$(git -C "$R" log -1 --format=%s "$bump") parent=$(git -C "$R" rev-parse "$bump^") $(jq -r '.version + "/" + .omp.version' "$R/package.json") $(grep -c '^## \[0.2.21\] - 2026-10-12$' "$R/CHANGELOG.md") $(find "$R/changelog.d" -type f | wc -l | tr -d ' ')"
 check "bump: subject, parent, versions, section, drained inbox" 0 0 "$meta" "chore: bump version to 0.2.21" "parent=$green" "0.2.21/0.2.21" " 1 0"

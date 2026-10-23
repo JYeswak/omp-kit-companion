@@ -55,7 +55,8 @@ test("the train's release.yml dispatches pass mode=ci-pipeline", () => {
 
 test("release-local.sh dry run never reaches a remote write", () => {
 	const script = readFileSync(join(ROOT, "scripts/release-local.sh"), "utf8");
-	const dryExit = script.indexOf('if [ "$DRY_RUN" = 1 ]; then\n\tsay "dry run');
+	// The dry-run branch may open with comment lines (a shellcheck directive for its `ls`) before its say.
+	const dryExit = script.search(/if \[ "\$DRY_RUN" = 1 \]; then\n(?:\t#[^\n]*\n)*\tsay "dry run/);
 	expect(dryExit).toBeGreaterThan(0);
 	for (const write of ["push --porcelain origin", "gh release create", "gh workflow run release.yml"])
 		expect(script.indexOf(write)).toBeGreaterThan(dryExit);

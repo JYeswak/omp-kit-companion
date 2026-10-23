@@ -248,10 +248,10 @@ test("runtime adapter TERM leaves its workdir for no later reaper", async () => 
 	const root = agentTmp("runtime-term-root");
 	roots.push(root);
 	const adapter = resolve(import.meta.dir, "../../scripts/runtime-adapter.sh");
-	const child = Bun.spawn(["sh", "-c", "work=$(TMPDIR=\"$1\" \"$2\" --workdir) || exit 1; trap 'rm -rf \"$work\"; exit 143' TERM INT EXIT; printf '%s' \"$work\" > \"$1/workdir\"; kill -TERM $$", "runtime-term", root, adapter], { stdout: "ignore", stderr: "ignore" });
-	for (let attempt = 0; attempt < 100 && !existsSync(join(root, "workdir")); attempt++) await Bun.sleep(10);
-	expect(existsSync(join(root, "workdir"))).toBe(true);
-	await child.exited;
+	const child = Bun.spawn(["sh", "-c", "work=$(TMPDIR=\"$1\" \"$2\" --workdir) || exit 1; trap 'rm -rf \"$work\"; exit 143' TERM INT EXIT; printf '%s' \"$work\" > \"$1/workdir\"; kill -TERM $$", "runtime-term", root, adapter], { stdout: "ignore", stderr: "pipe" });
+	// The child records its workdir and then TERMs itself, so its exit orders the read: a wall-clock poll failed a loaded gate.
+	const exit = await child.exited;
+	expect(existsSync(join(root, "workdir")), `exit=${exit} ${await new Response(child.stderr).text()}`).toBe(true);
 	const workdir = readFileSync(join(root, "workdir"), "utf8");
 	expect(existsSync(workdir)).toBe(false);
 }, 30_000);

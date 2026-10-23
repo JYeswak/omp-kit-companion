@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { FleetWatcher, paneIsBusy, paneTarget, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -210,8 +211,25 @@ test("pane ids target the server-unique pane; other selectors stay scoped to the
 });
 
 const tmuxAvailable = spawnSync("tmux", ["-V"]).status === 0;
+/** sun_path caps a bound unix socket path at 103 bytes on macOS. */
+const SUN_PATH_MAX = 103;
+/** The platform temp root (Darwin `getconf DARWIN_USER_TEMP_DIR`, else /tmp), never `$TMPDIR`, which the fresh gate points into its deep archive. */
+function platformTempRoot(): string {
+	if (process.platform !== "darwin") return realpathSync("/tmp");
+	const located = spawnSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8", timeout: 5_000 });
+	if (located.status !== 0) throw new Error("cannot locate macOS private temp root");
+	return realpathSync(located.stdout.trim());
+}
+/** A socket `s` in a fresh owned dir under TMPDIR when it fits sun_path, else under the platform temp root; never a silent skip. */
+function tmuxSocketPath(): string {
+	for (const root of [tmpdir, platformTempRoot]) {
+		const socket = join(ownedTmp("fleet-watch-tmux", { root: root() }).path, "s");
+		if (Buffer.byteLength(socket) <= SUN_PATH_MAX) return socket;
+	}
+	throw new Error(`no owned temp root keeps the tmux socket within sun_path (${SUN_PATH_MAX} bytes)`);
+}
 test.skipIf(!tmuxAvailable)("real tmux: a configured %id pane is captured, where session:%id is refused", () => {
-	const socket = join(ownedTmp("fleet-watch-tmux").path, "s");
+	const socket = tmuxSocketPath();
 	expect(Buffer.byteLength(socket)).toBeLessThan(104);
 	const tmux = (...args: string[]) => spawnSync("tmux", ["-S", socket, ...args], { encoding: "utf8" });
 	try {
