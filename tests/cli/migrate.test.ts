@@ -1,16 +1,20 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { applyMigration, planMigration, planMigrationMutation, unifiedDiff } from "../../src/migrate.ts";
 import { ensureOmpSource } from "../../src/omp-source-cache.ts";
+import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 afterAll(cleanupAllOwnedTmp);
-const entry = resolve(import.meta.dir, "../../src/cli.ts");
-const repoRules = resolve(import.meta.dir, "../../rules");
+const repoRoot = resolve(import.meta.dir, "../..");
+const entry = join(repoRoot, "src/cli.ts");
+const repoRules = join(repoRoot, "rules");
 const fixtures: string[] = [];
 let OMP_BIN_DIR = "";
 let OMP_SOURCE_CACHE = "";
+let KIT_ROOT = "";
+let KIT_BIN = "";
 
 function certifiedOmpVersion(): string {
 	const value: unknown = JSON.parse(readFileSync(join(resolve(import.meta.dir, "../.."), "scripts/omp-compat.json"), "utf8"));
@@ -20,7 +24,50 @@ function certifiedOmpVersion(): string {
 	return value.certified;
 }
 
-beforeAll(() => {
+/**
+ * The release root migrate reads. MANIFEST.tsv is packaging output (untracked), so a gate archive with no
+ * commit builds pack `uncommitted-<date>`, which migrate correctly refuses as SOURCE_INVALID. The fixture
+ * therefore owns its provenance: the repo's rules committed to a fixture git repo, its MANIFEST.tsv written
+ * by the real build-manifest.sh (pack = that commit), and the CLI compiled into its bin/ so the release root
+ * is this fixture in a checkout and in a history-less archive alike.
+ */
+async function stageKitRelease(ompSrc: string): Promise<void> {
+	const base = ownedTmp("migrate-kit", { root: join(repoRoot, "var/agent-tmp") }).path;
+	KIT_ROOT = join(base, "releases", "vMigrateTest");
+	const tmp = join(base, "tmp");
+	mkdirSync(tmp, { mode: 0o700 });
+	mkdirSync(join(KIT_ROOT, "scripts"), { recursive: true });
+	cpSync(repoRules, join(KIT_ROOT, "rules"), { recursive: true });
+	for (const file of ["build-manifest.sh", "kitlib-tmp.sh", "runtime-adapter.sh", "rule-class.ts"]) {
+		cpSync(join(repoRoot, "scripts", file), join(KIT_ROOT, "scripts", file));
+	}
+	// Inherited GIT_* (a hook's GIT_DIR) must not redirect fixture git; the ceiling stops discovery at the fixture,
+	// so a missing fixture .git fails instead of reaching the enclosing checkout.
+	const env: Record<string, string> = Object.fromEntries(Object.entries(process.env)
+		.filter((kv): kv is [string, string] => kv[1] !== undefined && !kv[0].startsWith("GIT_")));
+	Object.assign(env, { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_CEILING_DIRECTORIES: base, OMP_SRC: ompSrc, TMPDIR: tmp });
+	const step = async (argv: string[], deadline_s = 120): Promise<string> => {
+		const result = await run(argv, { deadline_s, cwd: KIT_ROOT, env });
+		const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+		if (result.rc !== 0) throw new Error(`${argv.join(" ")} failed: rc=${result.rc} stdout=${text(result.stdout).slice(-500)} stderr=${text(result.stderr).slice(-800)}`);
+		return text(result.stdout);
+	};
+	const git = (...args: string[]) => step(["git", "-C", KIT_ROOT, "-c", "user.email=t@t", "-c", "user.name=t",
+		"-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args]);
+	await git("init", "-q");
+	await git("add", "rules", "scripts");
+	await git("commit", "-q", "-m", "migrate fixture release");
+	const head = (await git("rev-parse", "--short", "HEAD")).trim();
+	const manifest = await step(["sh", join(KIT_ROOT, "scripts", "build-manifest.sh"), "--stdout"]);
+	const packs = new Set(manifest.trimEnd().split("\n").slice(1).map(row => row.split("\t")[3]));
+	if (packs.size !== 1 || !packs.has(head)) throw new Error(`fixture manifest pack ${[...packs].join(",")} is not fixture commit ${head}`);
+	writeFileSync(join(KIT_ROOT, "MANIFEST.tsv"), manifest);
+	KIT_BIN = join(KIT_ROOT, "bin", "omp-kit");
+	await step([process.execPath, "build", entry, "--compile", "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig",
+		"--no-compile-autoload-tsconfig", `--outfile=${KIT_BIN}`], 300);
+}
+
+beforeAll(async () => {
 	const runtimeRoot = ownedTmp("omp-kit-migrate-omp").path;
 	OMP_SOURCE_CACHE = join(runtimeRoot, "source-cache");
 	const installerHome = join(runtimeRoot, "home");
@@ -33,7 +80,8 @@ beforeAll(() => {
 	});
 	OMP_BIN_DIR = join(dirname(dirname(packageRoot)), ".bin");
 	if (!existsSync(join(OMP_BIN_DIR, "omp"))) throw new Error("certified OMP package did not install its launcher");
-}, 120_000);
+	await stageKitRelease(join(packageRoot, "src"));
+}, 600_000);
 afterEach(() => {
 	for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true });
 });
@@ -90,6 +138,14 @@ function profileSpan<T>(span: string, run: () => T): T {
 	}
 }
 
+async function profileSpanAsync<T>(span: string, body: () => Promise<T>): Promise<T> {
+	const started = performance.now();
+	try { return await body(); } finally {
+		const path = process.env.OMP_KIT_TEST_PROFILE_OUT;
+		if (process.env.OMP_KIT_TEST_PROFILE === "1" && path) appendFileSync(path, JSON.stringify({ span, ms: performance.now() - started }) + "\n");
+	}
+}
+
 function omp(args: string[], home: string, ompDir: string) {
 	return profileSpan("omp:" + args.join(" "), () => {
 	const started = Date.now();
@@ -103,12 +159,13 @@ function omp(args: string[], home: string, ompDir: string) {
 	});
 }
 
-function cli(args: string[], home: string, ompDir: string) {
-	return profileSpan("cli:" + args.join(" "), () => {
-	const child = Bun.spawnSync([process.execPath, entry, ...args, "--json"], {
-		cwd: home, env: childEnv(home, ompDir), stdout: "pipe", stderr: "pipe",
-	});
-	return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
+// The compiled fixture CLI can start child processes, so it runs through kitlib run() (process group, deadline).
+async function cli(args: string[], home: string, ompDir: string) {
+	return profileSpanAsync("cli:" + args.join(" "), async () => {
+	const env = Object.fromEntries(Object.entries(childEnv(home, ompDir)).filter((entry): entry is [string, string] => entry[1] !== undefined));
+	const child = await run([KIT_BIN, ...args, "--json"], { cwd: home, env, deadline_s: 120 });
+	const decoder = new TextDecoder();
+	return { code: child.rc, envelope: JSON.parse(decoder.decode(child.stdout)), stderr: decoder.decode(child.stderr) };
 	});
 }
 
@@ -138,10 +195,10 @@ function rowByName(rows: { name: string }[], name: string) {
 	return row as { name: string; verdict: string; overlay: boolean; overlayPath: string | null; unlisted: boolean; manifestSha256: string | null; pluginSha256: string | null; pluginPath: string | null; firstDiffLine: number | null; diff: string | null };
 }
 
-test("migrate plan lists each legacy copy with its plugin equivalent and byte diff", () => {
+test("migrate plan lists each legacy copy with its plugin equivalent and byte diff", async () => {
 	const { home, kitNames } = pluginFixture(6);
 	writeFileSync(join(home, ".agents", "rules", "not-a-kit-rule.md"), "unknown\n");
-	const result = cli(["migrate", "--plan"], home, realOmpDir());
+	const result = await cli(["migrate", "--plan"], home, realOmpDir());
 	expect(result.code).toBe(0);
 	expect(result.envelope.data.pluginAbsent).toBe(false);
 	expect(result.envelope.data.pluginRules).toBeGreaterThan(0);
@@ -172,9 +229,9 @@ test("migrate plan lists each legacy copy with its plugin equivalent and byte di
 // Cold omp/CLI spawns run ~1s each; this test chains several (measured 5.4s locally). Bun's 5s default kills it on loaded runners.
 }, 30000);
 
-test("migrate apply removes identical copies, keeps edited and unknown, and verifies sources", () => {
+test("migrate apply removes identical copies, keeps edited and unknown, and verifies sources", async () => {
 	const { home } = pluginFixture(6);
-	const result = cli(["migrate", "--apply", "--yes"], home, realOmpDir());
+	const result = await cli(["migrate", "--apply", "--yes"], home, realOmpDir());
 	expect(result.code).toBe(0);
 	expect(result.envelope.data.action).toBe("APPLIED");
 	expect(typeof result.envelope.data.receipt_id).toBe("string");
@@ -195,17 +252,17 @@ test("migrate apply removes identical copies, keeps edited and unknown, and veri
 // Chains link, apply CLI, and per-row omp verify spawns; Bun's 5s default kills it on loaded runners.
 }, 30000);
 
-test("undo restores the removed legacy files byte-for-byte", () => {
+test("undo restores the removed legacy files byte-for-byte", async () => {
 	const { home } = pluginFixture(0);
 	const before: Record<string, string> = {};
 	for (const name of readdirSync(join(home, ".agents", "rules"))) {
 		before[name] = readFileSync(join(home, ".agents", "rules", name), "utf8");
 	}
-	const applied = cli(["migrate", "--apply", "--yes"], home, realOmpDir());
+	const applied = await cli(["migrate", "--apply", "--yes"], home, realOmpDir());
 	expect(applied.code).toBe(0);
 	const receipt = applied.envelope.data.receipt_id;
 	expect(typeof receipt).toBe("string");
-	const undone = cli(["undo", receipt, "--yes"], home, realOmpDir());
+	const undone = await cli(["undo", receipt, "--yes"], home, realOmpDir());
 	expect(undone.code).toBe(0);
 	for (const [name, bytes] of Object.entries(before)) {
 		expect(readFileSync(join(home, ".agents", "rules", name), "utf8")).toBe(bytes);
@@ -213,17 +270,15 @@ test("undo restores the removed legacy files byte-for-byte", () => {
 // Chains link, apply CLI, undo CLI, and fixture omp spawns; Bun's 5s default kills it on loaded runners.
 }, 30000);
 
-test("a file one byte off the release is never treated as identical", () => {
+test("a file one byte off the release is never treated as identical", async () => {
 	const { home, kitNames } = pluginFixture(0);
-	const target = kitNames.find(name => {
-		const plan = cli(["migrate", "--plan"], home, realOmpDir());
-		return rowByName(plan.envelope.data.rows, name).verdict === "identical-to-plugin";
-	});
+	const before = await cli(["migrate", "--plan"], home, realOmpDir());
+	const target = kitNames.find(name => rowByName(before.envelope.data.rows, name).verdict === "identical-to-plugin");
 	if (!target) throw new Error("fixture has no identical row to mutate");
 	const path = join(home, ".agents", "rules", `${target}.md`);
 	const bytes = readFileSync(path, "utf8");
 	writeFileSync(path, `${bytes.slice(0, -1)}${bytes.endsWith("\n") ? "" : "\n"}`);
-	const plan = cli(["migrate", "--plan"], home, realOmpDir());
+	const plan = await cli(["migrate", "--plan"], home, realOmpDir());
 	expect(rowByName(plan.envelope.data.rows, target).verdict).toBe("edited");
 // Chains link and two plan CLI spawns; Bun's 5s default kills it on loaded runners.
 }, 30000);
@@ -234,7 +289,7 @@ test("a released historical copy is stale-removable, but a one-byte edit stays o
 	writeFileSync(path, historical);
 	const pluginPath = join(pluginDir, "rules", "kit-test-skip.md");
 	const run = () => ({ code: 0, stdout: JSON.stringify({ rules: [{ name: "kit-test-skip", path: pluginPath, provider: "omp-plugins" }] }), stderr: "" });
-	const input = { root: resolve(import.meta.dir, "../.."), home, ompLauncher: "omp", run };
+	const input = { root: KIT_ROOT, home, ompLauncher: "omp", run };
 	const stale = planMigration(input);
 	const staleRow = rowByName(stale.rows as { name: string }[], "kit-test-skip");
 	expect(staleRow.verdict).toBe("stale-kit-version");
@@ -250,7 +305,7 @@ test("a released historical copy is stale-removable, but a one-byte edit stays o
 	expect(editedRow.overlay).toBe(true);
 }, 30000);
 
-test("a symlinked rules directory is refused without touching anything", () => {
+test("a symlinked rules directory is refused without touching anything", async () => {
 	const { home } = pluginFixture(0);
 	const linkFarm = `${home}-links`;
 	mkdirSync(linkFarm, { recursive: true });
@@ -258,14 +313,14 @@ test("a symlinked rules directory is refused without touching anything", () => {
 	const linkedHome = join(linkFarm, "home");
 	mkdirSync(linkedHome, { recursive: true });
 	symlinkSync(join(home, ".agents"), join(linkedHome, ".agents"));
-	const result = cli(["migrate", "--plan"], linkedHome, realOmpDir());
+	const result = await cli(["migrate", "--plan"], linkedHome, realOmpDir());
 	expect(result.code).toBe(2);
 	expect(result.envelope.errors[0].code).toBe("UNSAFE_PATH");
 });
 
-test("after migration, disabling the plugin reactivates no kit rule", () => {
+test("after migration, disabling the plugin reactivates no kit rule", async () => {
 	const { home, kitNames, pluginName } = pluginFixture(0);
-	const applied = cli(["migrate", "--apply", "--yes"], home, realOmpDir());
+	const applied = await cli(["migrate", "--apply", "--yes"], home, realOmpDir());
 	expect(applied.code).toBe(0);
 	// kit-standing-law is never plugin-listed, so it stays as an edited keep by design.
 	expect(applied.envelope.data.kept).toEqual(["kit-standing-law"]);
@@ -281,16 +336,16 @@ test("after migration, disabling the plugin reactivates no kit rule", () => {
 // Five cold omp/CLI spawns (link, apply, disable, ttsr list, enable) at ~1s each; measured 5.2s on CI. Bun's 5s default SIGTERMs the test mid-spawn, which surfaced as an empty-stderr enable failure.
 }, 60000);
 
-test("without an installed plugin the plan reports absence and apply refuses", () => {
+test("without an installed plugin the plan reports absence and apply refuses", async () => {
 	const base = workspace();
 	const home = join(base, "home");
 	mkdirSync(join(home, ".agents", "rules"), { recursive: true });
 	for (const dir of ["xdg-config", "xdg-state", "xdg-data", "xdg-cache", "tmp"]) mkdirSync(join(home, dir), { recursive: true });
 	writeFileSync(join(home, ".agents", "rules", "kit-test-skip.md"), readFileSync(join(repoRules, "kit-test-skip.md")));
-	const plan = cli(["migrate", "--plan"], home, realOmpDir());
+	const plan = await cli(["migrate", "--plan"], home, realOmpDir());
 	expect(plan.code).toBe(0);
 	expect(plan.envelope.data.pluginAbsent).toBe(true);
-	const applied = cli(["migrate", "--apply", "--yes"], home, realOmpDir());
+	const applied = await cli(["migrate", "--apply", "--yes"], home, realOmpDir());
 	expect(applied.code).toBe(2);
 	expect(applied.envelope.errors[0].code).toBe("PLUGIN_ABSENT");
 	expect(existsSync(join(home, ".agents", "rules", "kit-test-skip.md"))).toBe(true);
@@ -302,7 +357,7 @@ test("applyMigration refuses without a plugin even when called directly", () => 
 	const home = join(root, "home");
 	mkdirSync(join(home, ".agents", "rules"), { recursive: true });
 	writeFileSync(join(home, ".agents", "rules", "kit-test-skip.md"), readFileSync(join(repoRules, "kit-test-skip.md")));
-	const input = { root: resolve(import.meta.dir, "../.."), home, ompLauncher: "/fixture/omp",
+	const input = { root: KIT_ROOT, home, ompLauncher: "/fixture/omp",
 		run: (args: readonly string[]) => {
 			expect(args).toEqual(["/fixture/omp", "ttsr", "list", "--json"]);
 			return { code: 0, stdout: JSON.stringify({ rules: [] }), stderr: "" };
@@ -312,9 +367,25 @@ test("applyMigration refuses without a plugin even when called directly", () => 
 	expect(() => applyMigration(plan, input, { confirmed: true })).toThrow("PLUGIN_ABSENT");
 });
 
-test("overlay rows carry the unified diff and the native destination", () => {
+test("kl9p3: a manifest whose pack is uncommitted- stays SOURCE_INVALID; the same bytes with a commit pack plan", () => {
+	const base = workspace();
+	const root = join(base, "release");
+	const home = join(base, "home");
+	mkdirSync(join(home, ".agents", "rules"), { recursive: true });
+	cpSync(join(KIT_ROOT, "rules"), join(root, "rules"), { recursive: true });
+	const verified = readFileSync(join(KIT_ROOT, "MANIFEST.tsv"), "utf8");
+	// What build-manifest.sh writes in an archive with no commit: identical rows, provenance unverified.
+	const uncommitted = verified.split("\n").map((row, index) => index === 0 || row === "" ? row : [...row.split("\t").slice(0, 3), "uncommitted-2026-10-23"].join("\t")).join("\n");
+	const input = { root, home, ompLauncher: "/fixture/omp", run: () => ({ code: 0, stdout: JSON.stringify({ rules: [] }), stderr: "" }) };
+	writeFileSync(join(root, "MANIFEST.tsv"), uncommitted);
+	expect(() => planMigration(input)).toThrow("SOURCE_INVALID");
+	writeFileSync(join(root, "MANIFEST.tsv"), verified);
+	expect(planMigration(input).pluginAbsent).toBe(true);
+});
+
+test("overlay rows carry the unified diff and the native destination", async () => {
 	const { home } = pluginFixture(6);
-	const result = cli(["migrate", "--plan"], home, realOmpDir());
+	const result = await cli(["migrate", "--plan"], home, realOmpDir());
 	expect(result.code).toBe(0);
 	const edited = result.envelope.data.rows.filter((row: { verdict: string }) => row.verdict === "edited");
 	expect(edited.length).toBeGreaterThan(0);
@@ -346,7 +417,7 @@ test("an installed native overlay wins over the plugin in ttsr test", () => {
 	expect((shadowed.triggered ?? []).filter((entry: { name?: string }) => entry.name === "bash-pipe-exit")).toEqual([]);
 });
 
-test("kit-standing-law stays unlisted with and without a native overlay", () => {
+test("kit-standing-law stays unlisted with and without a native overlay", async () => {
 	const { home } = pluginFixture(0);
 	const namesOf = (json: string): Set<string> => {
 		const data = JSON.parse(json);
@@ -360,7 +431,7 @@ test("kit-standing-law stays unlisted with and without a native overlay", () => 
 	writeFileSync(join(nativeDir, "kit-standing-law.md"), readFileSync(join(repoRules, "kit-standing-law.md")));
 	const after = namesOf(omp(["ttsr", "list", "--json"], home, realOmpDir()));
 	expect(after.has("kit-standing-law")).toBe(false);
-	const plan = cli(["migrate", "--plan"], home, realOmpDir());
+	const plan = await cli(["migrate", "--plan"], home, realOmpDir());
 	expect(rowByName(plan.envelope.data.rows, "kit-standing-law").unlisted).toBe(true);
 });
 

@@ -1,0 +1,3 @@
+### Fixed
+
+- `tests/cli/migrate.test.ts` no longer depends on the checkout's own `MANIFEST.tsv` having a commit identity. Once MANIFEST.tsv became untracked packaging output (ompkit-kl9p3), a gate archive with no history built pack `uncommitted-<date>`, and 11 migrate tests failed `SOURCE_INVALID`. The suite now stages its own release root: the repo's rules are committed to a fixture git repo, `build-manifest.sh` writes the MANIFEST.tsv (its pack is that commit), and the CLI is compiled into the fixture's `bin/`. The suite passes in a git checkout and in a history-less archive. A new test pins the refusal: the same manifest with an `uncommitted-` pack is still `SOURCE_INVALID`. (ompkit-kl9p3)
