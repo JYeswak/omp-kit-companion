@@ -118,22 +118,37 @@ describe("kitlib run conformance corpus", () => {
 		test(testCase.id, async () => {
 			const measuresRss = testCase.expect.max_parent_rss_growth_bytes !== undefined ||
 				testCase.expect.min_parent_rss_growth_bytes !== undefined;
-			const rssChild = process.env.KITLIB_RUN_RSS_CASE === testCase.id;
+			let rssChild = false;
+			if (process.env.KITLIB_RUN_RSS_CASE === testCase.id) {
+				const nonce = process.env.KITLIB_RUN_RSS_NONCE;
+				const fd = Number(process.env.KITLIB_RUN_RSS_FD);
+				if (!nonce || !Number.isInteger(fd) || fd < 3) throw new Error("RSS child marker has no capability");
+				if (readFileSync(fd, "utf8") !== nonce) throw new Error("RSS child capability mismatch");
+				rssChild = true;
+			}
 			if (measuresRss && !rssChild) {
 				// maxRSS is process-global: an earlier test's peak must not hide this case's allocation.
 				const isolated = ownedTmp("run-rss");
 				const proof = join(isolated.path, "completed.json");
+				const nonce = randomBytes(24).toString("hex");
+				const ticket = `${proof}.ticket`;
+				let ticketFd: number | undefined;
 				try {
+					writeFileSync(ticket, nonce, { flag: "wx", mode: 0o600 });
+					ticketFd = openSync(ticket, "r");
 					const child = await run([process.execPath, "test", "--test-name-pattern", RegExp.escape(testCase.id), import.meta.path], {
-						deadline_s: 60,
-						env: { ...process.env, TMPDIR: isolated.path, KITLIB_RUN_RSS_CASE: testCase.id, KITLIB_RUN_RSS_PROOF: proof },
+						deadline_s: 60, inherit_fds: [ticketFd],
+						env: { ...process.env, TMPDIR: isolated.path, KITLIB_RUN_RSS_CASE: testCase.id,
+							KITLIB_RUN_RSS_PROOF: proof, KITLIB_RUN_RSS_NONCE: nonce, KITLIB_RUN_RSS_FD: String(ticketFd) },
 					});
 					if (child.rc !== 0 || child.timed_out || child.truncated) {
 						throw new Error(decoder.decode(child.stderr) || "isolated RSS case did not complete");
 					}
 					// Written only after the original case's assertions: zero selected tests cannot pass.
-					expect(JSON.parse(readFileSync(proof, "utf8")).id).toBe(testCase.id);
+					const completed = JSON.parse(readFileSync(proof, "utf8"));
+					expect({ id: completed.id, nonce: completed.nonce }).toEqual({ id: testCase.id, nonce });
 				} finally {
+					if (ticketFd !== undefined) closeSync(ticketFd);
 					isolated.cleanup();
 				}
 				return;
@@ -173,7 +188,9 @@ describe("kitlib run conformance corpus", () => {
 				if (measuresRss && rssChild) {
 					const proof = process.env.KITLIB_RUN_RSS_PROOF;
 					if (!proof) throw new Error("RSS child needs its completion proof path");
-					writeFileSync(proof, JSON.stringify({ id: testCase.id }), { flag: "wx" });
+					writeFileSync(proof, JSON.stringify({
+						id: testCase.id, nonce: process.env.KITLIB_RUN_RSS_NONCE,
+					}), { flag: "wx" });
 				}
 			} finally {
 				// Test hygiene: this case's own marker holders only.
