@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { KNOWN_JOBS } from "../../src/service.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -28,17 +28,43 @@ function fixtureHome(): string {
 	mkdirSync(bin, { recursive: true });
 	writeFileSync(join(bin, "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 	chmodSync(join(bin, "omp-kit"), 0o755);
+	// A fixture-owned OMP package: omp-watch's watch target must never resolve the machine's OMP,
+	// whose source a fresh HOME fetches over the network (~860 MB, 20-45 s per spawn).
+	const pkg = join(home, "fixture-omp", "package");
+	for (const dir of ["dist", "src/export", "src/capability", "src/discovery", "node_modules/@oh-my-pi/pi-natives"]) {
+		mkdirSync(join(pkg, dir), { recursive: true });
+	}
+	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "1.0.0" }));
+	writeFileSync(join(pkg, "dist", "cli.js"), "#!/bin/sh\nprintf 'omp/1.0.0\\n'\n", { mode: 0o755 });
+	writeFileSync(join(pkg, "node_modules", "@oh-my-pi", "pi-natives", "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
+	for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) writeFileSync(join(pkg, "src", file), "export {};\n");
+	mkdirSync(join(home, "fixture-omp", "bin"));
+	symlinkSync(join(pkg, "dist", "cli.js"), join(home, "fixture-omp", "bin", "omp"));
 	return home;
 }
 
 function cli(args: string[], home: string, ns: string, extraEnv: Record<string, string> = {}) {
+	const env: Record<string, string | undefined> = {
+		...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: ns, ...extraEnv,
+		PATH: `${join(home, "fixture-omp", "bin")}:${process.env.PATH ?? ""}`,
+	};
+	for (const key of ["OMP", "OMP_BIN", "OMP_PATH", "OMP_SRC"]) delete env[key];
 	const child = Bun.spawnSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), ...args, "--json"], {
-		cwd: home,
-		env: { ...process.env, HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: ns, ...extraEnv },
-		stdout: "pipe", stderr: "pipe",
+		cwd: home, env, stdout: "pipe", stderr: "pipe",
 	});
 	return { code: child.exitCode, envelope: JSON.parse(child.stdout.toString()), stderr: child.stderr.toString() };
 }
+
+// Hermeticity plant: spawns resolve the fixture OMP, never the machine's, and fetch no OMP source.
+// With the inherited PATH, every omp-watch spawn fetched the machine's OMP source into the fresh
+// HOME, outlived bun's 5 s default timeout and left an empty stdout (JSON Parse error: Unexpected EOF).
+test("planted: fleet spawns resolve the fixture OMP package and fetch no OMP source", () => {
+	const home = fixtureHome();
+	const result = cli(["service", "install", "omp-watch", "--dry-run"], home, namespace());
+	expect(result.code, JSON.stringify(result.envelope.errors)).toBe(0);
+	expect(result.envelope.data.plist).toContain(join(realpathSync(home), "fixture-omp", "package", "package.json"));
+	expect(existsSync(join(home, ".local", "opt", "omp-kit", "omp-src"))).toBe(false);
+});
 
 const JOB_NAMES = Object.keys(KNOWN_JOBS);
 

@@ -457,6 +457,8 @@ gate_focused() {
 				needs_actionlint=1 ;;
 			rules/*.md)
 				needs_regex=1; needs_live=1 ;;
+			rules-fleet/*.md)
+				needs_live=1 ;;
 			tests/live/*)
 				needs_live=1 ;;
 			tests/test-preload.ts)
@@ -557,14 +559,14 @@ fi
 	fi
 	if [ "$needs_live" = 1 ]; then
 		live_out="$WORK/live-coverage.log"
-		if (cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null tests/live/lib.mjs coverage rules/) >"$live_out" 2>&1; then
+		if (cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null tests/live/lib.mjs coverage rules/ rules-fleet/) >"$live_out" 2>&1; then
 			echo "live coverage: OK"
 		else
 			cat "$live_out"
 			live_bad=0
 			for file in $CHANGED; do
 				case "$file" in
-					rules/*.md)
+					rules/*.md|rules-fleet/*.md)
 						rule=$(basename "$file" .md)
 						if grep -q "^  $rule:" "$live_out"; then
 							echo "live coverage: $rule changed in range but has no scenario" >&2

@@ -1918,14 +1918,18 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 /**
  * Exact-commit read-only export into a scratch dir: `git archive` to a tarball
  * (file output, never a pipe, so binary stays intact), extract, remove the
- * tarball. The dir already exists and is owned by the caller; on failure the
+ * tarball. The archive runs from the work-tree root: below it `git archive`
+ * holds only that subtree, and an untracked one is an empty tar with exit 0.
+ * The dir already exists and is owned by the caller; on failure the
  * dir is left in place with nothing added. Null on success, else the reason.
  */
 export function exportCommitToScratch(repo: string, commit: string, dir: string, run: ScratchRunner): string | null {
 	const typed = run(["git", "-C", repo, "cat-file", "-t", commit], { timeoutMs: 15_000 });
 	if (typed.code !== 0 || typed.stdout.trim() !== "commit") return "export-commit-unknown";
+	const top = run(["git", "-C", repo, "rev-parse", "--show-toplevel"], { timeoutMs: 15_000 });
+	if (top.code !== 0 || top.stdout.trim() === "") return "export-archive-failed";
 	const tarball = join(dir, ".export.tar");
-	const archived = run(["git", "-C", repo, "archive", "--format=tar", `--output=${tarball}`, commit], { timeoutMs: 120_000 });
+	const archived = run(["git", "-C", top.stdout.trim(), "archive", "--format=tar", `--output=${tarball}`, commit], { timeoutMs: 120_000 });
 	if (archived.code !== 0) return "export-archive-failed";
 	const extracted = run(["tar", "-xf", tarball, "-C", dir], { timeoutMs: 120_000 });
 	try {

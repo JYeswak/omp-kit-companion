@@ -93,6 +93,8 @@ test("SIGTERM stops e2e-live within 10 s with no surviving children", async () =
 	const elapsedMs = Date.now() - termAt;
 	const stderr = err;
 	expect(code).toBe(143);
+	expect(elapsedMs).toBeLessThan(10_000);
+	expect(stderr).toContain("e2e-live: stopped on signal, exit 143");
 	for (let i = 0; i < 50 && observed.some(pid => true); i++) {
 		const states = await Promise.all(observed.map(pid => alive(pid)));
 		observed = observed.filter((_, index) => states[index]);

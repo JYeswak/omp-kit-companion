@@ -215,6 +215,15 @@ export function daemonLiveness(read: { loaded: boolean | null; pid: number | nul
 	return read.loaded && read.pid !== null && read.pid > 0 ? "LIVE" : "DEAD";
 }
 
+/**
+ * Loaded state for a fleet row. launchd answering that the label is not found is a definite
+ * false (an unloaded job, which `status` reports down); any other unanswered query stays null.
+ */
+export function launchdLoaded(print: LaunchctlPrint): boolean | null {
+	if (print.query_error === "LAUNCHCTL_NOT_FOUND_LABEL") return false;
+	return print.query_ok === false ? null : print.loaded;
+}
+
 const LABEL_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 function servicePath(home: string): string {

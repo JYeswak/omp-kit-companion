@@ -65,7 +65,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
+import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { defaultBudgetLedgerPath, releaseBudgetEntry } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
@@ -2442,7 +2442,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			const installed = platform === "darwin" ? readInstalledPlist(home, job.label) : null;
 			const print = platform === "darwin" ? queryPrint(job.label) : null;
 			const state = linux ? systemctlState(job, defaultRunner) : null;
-			const loaded = print !== null ? print.loaded : (state !== null && (state.enabled || state.active));
+			const loaded = print !== null ? launchdLoaded(print) : (state !== null && (state.enabled || state.active));
 			return { name, label: job.label, kind: job.kind, launcher, installed: installed !== null, loaded,
 				lastExit: print?.lastExit ?? null, runs: print?.runs ?? null, last_run_at: readJobFinishedAt(home, name) };
 		}) }, verification: "UNVERIFIED" };
@@ -2553,7 +2553,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			} else {
 				const installed = readInstalledPlist(home, job.label);
 				const print = queryPrint(job.label);
-				const loaded = print.query_ok ? print.loaded : null;
+				const loaded = launchdLoaded(print);
 				row = { name, label: job.label, installed: installed !== null, loaded,
 					query_ok: print.query_ok, query_error: print.query_error,
 					state: print.state, pid: print.pid, runs: print.runs, lastExit: print.lastExit, loaded_plist: print.path, last_run_at: readJobFinishedAt(home, name) };

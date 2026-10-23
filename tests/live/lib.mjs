@@ -1,6 +1,6 @@
 // JSON-side helpers for scripts/e2e-live.sh (G4). The shell owns processes; this owns parsing.
 //
-//   bun lib.mjs coverage <rulesDir>          every managed rule has the scenarios its class needs
+//   bun lib.mjs coverage <rulesDir>...       every managed rule (all packs) has the scenarios its class needs
 //   bun lib.mjs select full|plant            scenario indices to run, one per line
 //   bun lib.mjs name <i>                     scenario id
 //   bun lib.mjs prep <i> <outFile>           write the mock's {turns, chunk} file
@@ -30,7 +30,7 @@ function strings(v, out = []) {
 }
 const isSystem = m => m.role === "system" || m.role === "developer";
 
-async function coverage(rulesDir) {
+async function coverage(rulesDirs) {
 	// Loaded here, not at the top: rule-class.ts imports omp's parser (~0.3 s), and every other
 	// subcommand runs several times per scenario without needing it.
 	const { loadRules } = await import("../../scripts/rule-class.ts");
@@ -38,7 +38,7 @@ async function coverage(rulesDir) {
 	const rows = [];
 	const { guardName } = await import("./admission-extension.mjs");
 	const rules = [
-		...loadRules(rulesDir).map(rule => ({ ...rule, backend: "ttsr" })),
+		...rulesDirs.flatMap(dir => loadRules(dir)).map(rule => ({ ...rule, backend: "ttsr" })),
 		{ name: guardName, cls: "tripwire", backend: "admission" },
 	];
 	for (const { name, cls, backend } of rules) {
@@ -187,7 +187,7 @@ function verdict(i, log, proj, ompExit) {
 
 switch (cmd) {
 	case "coverage":
-		await coverage(args[0]);
+		await coverage(args);
 		break;
 	case "select":
 		scenarios.forEach((s, i) => {

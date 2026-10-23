@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { checkService, checkServiceLinux, ciPollerEnvironment, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
-import { superviseScratchJob } from "../../src/service.ts";
+import { launchdLoaded, superviseScratchJob } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -114,6 +114,18 @@ test("service launchctl query distinguishes a missing label from a failed query"
 test("service launchctl query reports parse failure instead of unloaded", () => {
   const result = queryPrint("com.omp-kit.omp-watch", () => ({ code: 0, stdout: "state = running\n", stderr: "" }));
   expect(result).toMatchObject({ loaded: null, query_ok: false, query_error: "LAUNCHCTL_PARSE_FAILED" });
+});
+
+// Planted: fleet rows (`service list`, `service status`) read launchd's not-found answer as an
+// unloaded job. Read as unknown (null), `loaded === false` was unreachable on macOS, so status never
+// reported an unloaded job down and every fleet row's loaded was null.
+test("fleet rows read a not-found label as unloaded and any other failed query as unknown (planted)", () => {
+  const rowLoaded = (code: number, stdout: string, stderr: string) => launchdLoaded(queryPrint("com.omp-kit.omp-watch", () => ({ code, stdout, stderr })));
+  expect(rowLoaded(0, healthyPrint("/Users/test/Library/LaunchAgents/com.omp-kit.omp-watch.plist"), "")).toBe(true);
+  expect(rowLoaded(113, "", "Could not find service")).toBe(false);
+  expect(rowLoaded(113, "", "launchd domain unavailable")).toBeNull();
+  expect(rowLoaded(5, "", "Input/output error")).toBeNull();
+  expect(rowLoaded(0, "state = running\n", "")).toBeNull();
 });
 
 function healthyInput(home: string, launcher: string, watch: string) {

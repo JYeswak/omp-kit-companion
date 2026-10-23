@@ -193,7 +193,9 @@ case "${OMP_KIT_RULES_VIA:-agents}" in
     fi ;;
   *) KEEP_WORK=1; echo "OMP_KIT_RULES_VIA must be agents or plugin" >&2; exit 2 ;;
 esac
-if [ -z "${PLUGIN_SOURCE:-}" ]; then cp "$HERE"/rules/*.md "$RULES_DIR/"; fi
+# The fleet pack (rules-fleet/) is opt-in for users, but its scenarios share this inventory: install both packs
+# so every scenario's rule is live, and coverage judges both.
+if [ -z "${PLUGIN_SOURCE:-}" ]; then cp "$HERE"/rules/*.md "$HERE"/rules-fleet/*.md "$RULES_DIR/"; fi
 if [ "$MODE" = plant ] && [ -n "${PLUGIN_SOURCE:-}" ]; then
   KEEP_WORK=1; echo "plant mode refuses a repo plugin source: it would mutate checked-out rules" >&2; exit 2
 fi
@@ -202,7 +204,7 @@ if [ "$MODE" = plant ]; then
   echo "plant: kit-close-needs-evidence condition ->"
   grep '^condition:' "$RULES_DIR/kit-close-needs-evidence.md"
 else
-  if [ -z "${OMP_KIT_TEST_NO_COVERAGE:-}" ]; then "$OMP_KIT_BUN" "$LIB" coverage "$HERE/rules" || { coverage_rc=$?; KEEP_WORK=1; echo "coverage producer_rc=$coverage_rc" >&2; exit "$coverage_rc"; }; else echo "coverage skipped by OMP_KIT_TEST_NO_COVERAGE (test-only)" >&2; fi
+  if [ -z "${OMP_KIT_TEST_NO_COVERAGE:-}" ]; then "$OMP_KIT_BUN" "$LIB" coverage "$HERE/rules" "$HERE/rules-fleet" || { coverage_rc=$?; KEEP_WORK=1; echo "coverage producer_rc=$coverage_rc" >&2; exit "$coverage_rc"; }; else echo "coverage skipped by OMP_KIT_TEST_NO_COVERAGE (test-only)" >&2; fi
 fi
 if [ -z "${OMP_KIT_DEFAULT_TTSR:-}" ]; then
   "$OMP_KIT_BUN" "$LIB" config "$HERE/policy/ttsr.json" "$H/.omp/agent/config.yml" || { config_rc=$?; KEEP_WORK=1; echo "config producer_rc=$config_rc" >&2; exit "$config_rc"; }
@@ -223,8 +225,9 @@ else
   echo "provider isolation skipped by OMP_KIT_TEST_NO_PROVIDER_PIN (test-only)" >&2
 fi
 printf '[user]\n\temail = e2e@example.invalid\n\tname = e2e\n[init]\n\tdefaultBranch = main\n' >"$H/.gitconfig"
-# br/bd stubs: a close that gets past the rules must not touch any real beads database.
-for b in br bd; do printf '#!/bin/sh\nexit 0\n' >"$T/bin/$b"; chmod +x "$T/bin/$b"; done
+# br/bd/ntm/lldb stubs: a scenario command that gets past the rules must not touch a real beads database,
+# send to a live pane, or attach a debugger.
+for b in br bd ntm lldb; do printf '#!/bin/sh\nexit 0\n' >"$T/bin/$b"; chmod +x "$T/bin/$b"; done
 
 # Everything that omp and git see runs with this environment. Call it inside a subshell.
 isolate() {

@@ -1518,19 +1518,43 @@ test("lsof snapshot: a socket open-path holds its dir", () => {
 const SUN_PATH_MAX = 103;
 
 /**
- * A fresh realpath'd dir under which `stale.9/s` still fits sun_path. A deep checkout (pre-push
- * gate nesting, an archive replay) falls back to an omp-* dir under the real $TMPDIR. It fails
- * loud when neither fits: a skipped live-socket half reads as a pass, which hid RCHSOCK1's
- * negative from its first non-author replay.
+ * The platform temp root (Darwin `getconf DARWIN_USER_TEMP_DIR`, else /tmp), never `$TMPDIR`:
+ * `omp-kit scratch new --export` and the full-suite gate point TMPDIR into the deep checkout itself.
  */
-function socketFixtureRoot(): string {
-	for (const [base, label] of [[AGENT_TMP, "rs"], [undefined, "omp-rs"]] as const) {
-		const root = realpathSync((base === undefined ? ownedTmp(label) : ownedTmp(label, { root: base })).path);
+function platformTempRoot(): string {
+	if (process.platform !== "darwin") return realpathSync("/tmp");
+	const located = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], { stdout: "pipe", stderr: "pipe", timeout: 5_000 });
+	if (located.exitCode !== 0) throw new Error("cannot locate macOS private temp root");
+	return realpathSync(located.stdout.toString().trim());
+}
+
+/**
+ * A fresh realpath'd dir under which `stale.9/s` still fits sun_path. A deep checkout (pre-push
+ * gate nesting, an archive replay, a scratch export) falls back to an omp-* dir under the platform
+ * temp root. It fails loud when neither fits: a skipped live-socket half reads as a pass, which hid
+ * RCHSOCK1's negative from its first non-author replay.
+ */
+function socketFixtureRoot(primary: string = AGENT_TMP): string {
+	for (const [base, label] of [[primary, "rs"], [platformTempRoot(), "omp-rs"]] as const) {
+		const root = realpathSync(ownedTmp(label, { root: base }).path);
 		roots.push(root);
 		if (join(root, "stale.9", "s").length <= SUN_PATH_MAX) return root;
 	}
 	throw new Error(`no fixture root keeps a socket path within sun_path (${SUN_PATH_MAX} bytes)`);
 }
+
+// RCHSOCK1 planted: the fallback ignores TMPDIR. A TMPDIR-following fallback fails both live-socket
+// tests in every gate archive and in every scratch export deeper than 73 bytes (5-digit pid).
+test("socket fixture root falls back to the platform temp root when the checkout and TMPDIR are both deep (planted)", () => {
+	const base = agentTmp("deep");
+	roots.push(base);
+	const deep = join(base, "d".repeat(SUN_PATH_MAX));
+	mkdirSync(deep);
+	process.env.TMPDIR = deep;
+	const root = socketFixtureRoot(deep);
+	expect(join(root, "stale.9", "s").length).toBeLessThanOrEqual(SUN_PATH_MAX);
+	expect(root.startsWith(`${platformTempRoot()}/`)).toBe(true);
+});
 
 async function connects(sock: string): Promise<boolean> {
 	try {
@@ -1889,16 +1913,58 @@ test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", ()
 	expect(made.exportLine).toBe(`export TMPDIR=${made.dir}`);
 });
 
+/**
+ * A one-commit git repo the test owns. Never the suite's own checkout: a scratch export has no .git
+ * and sits in the enclosing repo's ignored var/agent-tmp, and the full-suite gate archive is a
+ * commitless `git init`, so neither has a HEAD to export.
+ */
+function commitFixture(): { source: string; head: string } {
+	const source = agentTmp("export-src");
+	roots.push(source);
+	mkdirSync(join(source, "sub"));
+	writeFileSync(join(source, "package.json"), "{}\n");
+	writeFileSync(join(source, "sub", "inner.txt"), "inner\n");
+	const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+	for (const key of Object.keys(env)) if (key.startsWith("GIT_") && key !== "GIT_CONFIG_NOSYSTEM" && key !== "GIT_CONFIG_GLOBAL") delete env[key];
+	const git = (...args: string[]): string => {
+		const child = Bun.spawnSync(["git", "-C", source, "-c", "core.hooksPath=/dev/null", "-c", "user.name=Fixture", "-c", "user.email=f@example.invalid", ...args],
+			{ env, stdout: "pipe", stderr: "pipe" });
+		if (child.exitCode !== 0) throw new Error(child.stderr.toString());
+		return child.stdout.toString().trim();
+	};
+	git("init", "-q");
+	git("add", "package.json", "sub");
+	git("commit", "-q", "-m", "fixture");
+	return { source, head: git("rev-parse", "HEAD") };
+}
+
 test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (planted)", () => {
+	const { source, head } = commitFixture();
 	const repo = agentTmp("newrepo");
 	roots.push(repo);
 	const made = createScratch("exp", repo, depsFor(), {}, true, join(repo, "scratch-budgets.json"));
 	expect(made.ok).toBe(true);
-	const head = defaultRunner(["git", "-C", fixtureRepo, "rev-parse", "HEAD"], { timeoutMs: 15_000 });
-	expect(head.code).toBe(0);
-	expect(exportCommitToScratch(fixtureRepo, head.stdout.trim(), made.dir, defaultRunner)).toBeNull();
-	expect(existsSync(join(made.dir, "package.json"))).toBe(true);
-	expect(exportCommitToScratch(fixtureRepo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", made.dir, defaultRunner)).toBe("export-commit-unknown");
+	expect(exportCommitToScratch(source, head, made.dir, defaultRunner)).toBeNull();
+	expect(readFileSync(join(made.dir, "package.json"), "utf8")).toBe("{}\n");
+	expect(readFileSync(join(made.dir, "sub", "inner.txt"), "utf8")).toBe("inner\n");
+	expect(exportCommitToScratch(source, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", made.dir, defaultRunner)).toBe("export-commit-unknown");
+}, 60000);
+
+// SCRATCHLEAK1 planted: `scratch new --export` exports from its cwd. Below the work-tree root a bare
+// `git archive` holds only that subtree, and an untracked one (an export nested in its repo's
+// var/agent-tmp) is an empty tar with exit 0, so the export reported OK with nothing in it.
+test("SCRATCHLEAK1: export asked from a subdirectory still materializes the whole commit (planted)", () => {
+	const { source, head } = commitFixture();
+	mkdirSync(join(source, "loose"));
+	for (const from of ["sub", "loose"]) {
+		const repo = agentTmp("newrepo");
+		roots.push(repo);
+		const made = createScratch("exp", repo, depsFor(), {}, true, join(repo, "scratch-budgets.json"));
+		expect(made.ok).toBe(true);
+		expect(exportCommitToScratch(join(source, from), head, made.dir, defaultRunner), from).toBeNull();
+		expect(existsSync(join(made.dir, "package.json")), from).toBe(true);
+		expect(existsSync(join(made.dir, "sub", "inner.txt")), from).toBe(true);
+	}
 }, 60000);
 
 test("SCRATCHLEAK1: pipe-format single-line text owners parse", () => {
