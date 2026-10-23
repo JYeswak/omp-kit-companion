@@ -408,8 +408,8 @@ test("TERN2.4 gates: paused/custody/pullEnabled/unadmitted/INSIGHT seats get zer
 	}
 });
 
-test("TERN2.4 INV04: unbound seat (no window key, no exact pane) gives PLANE_SEAT_UNBOUND and zero Tern sends", async () => {
-	for (const seat of [{ ...ternSeat, windowKey: "" }, { ...ternSeat, session: " " }, { ...ternSeat, pane: "%7" }, { ...ternSeat, pane: "s/7" }]) {
+test("TERN2.4 INV04: unbound seat (no session, no exact pane) gives PLANE_SEAT_UNBOUND and zero Tern sends", async () => {
+	for (const seat of [{ ...ternSeat, session: " " }, { ...ternSeat, pane: "%7" }, { ...ternSeat, pane: "s/7" }]) {
 		const fake = ternFake();
 		let observed = 0;
 		const r = await deliverTern(fake, "hi", { seat, observe: async () => { observed++; return { ...ternIdle }; } });

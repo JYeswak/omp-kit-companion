@@ -213,19 +213,6 @@ test("SEND1 tern route planted: unresolvable agent identity refuses with zero na
 	expect(got.drop_path).toBeNull();
 });
 
-test("TERNADDR1 planted: no window control endpoint refuses TERN_WINDOW_UNBOUND with zero io and no drop file", async () => {
-	const dir = dropDir();
-	const { io, taken, repo } = ternFixture();
-	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dir, cwd: repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
-	expect(got.status).toBe("REFUSED");
-	expect(got.code).toBe("TERN_WINDOW_UNBOUND");
-	expect(got.detail).toContain("tern --control EP");
-	expect(taken.runs).toEqual([]);
-	expect(got.drop_path).toBeNull();
-	expect(readdirSync(dir)).toEqual([]);
-});
-
 test("TERNADDR1: the native admission turn addresses the configured control endpoint", async () => {
 	const { io, taken, repo } = ternFixture();
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",

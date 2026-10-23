@@ -1,12 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
-import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionJournal } from "./plane-tern.ts";
+import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionJournal, resolveDaemonSocket } from "./plane-tern.ts";
 import type { TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 
 export const SEND_POLL_MS = 1500;
@@ -576,7 +577,7 @@ export function routeSendTarget(pane: string): { route: "tern" } | { route: "tmu
 /** The Tern seat behind `omp-kit send SESSION tern:<block>`: --tern-session/--cwd/--window-key, else the fleet-watch.json
  * entry for SESSION (chief included: `ternSession`, `cwd` or `repo`, `windowKey`), else SESSION itself and the caller
  * cwd. Tern 0.9 `ctl` only reaches a window opened with `tern --control EP`, so the window key is that endpoint and is
- * never defaulted: absent, it stays "" and proveTernCliSend refuses TERN_WINDOW_UNBOUND (TERNADDR1, ompkit-fixjo). */
+ * never defaulted: absent, it stays "" and the send admits by paste + Enter instead (TERNADDR1, ompkit-fixjo). */
 export function ternSendSeat(config: unknown, session: string, pane: string,
 	flags: { cwd?: string; ternSession?: string; windowKey?: string }, callerCwd: string = process.cwd()): TernSeatBinding {
 	const root = config !== null && typeof config === "object" ? config as Record<string, unknown> : {};
@@ -587,9 +588,9 @@ export function ternSendSeat(config: unknown, session: string, pane: string,
 		windowKey: flags.windowKey?.trim() || text(entry?.windowKey), cwd: flags.cwd?.trim() || text(entry?.cwd) || text(entry?.repo) || callerCwd };
 }
 
-/** SEND1 Tern route (rz5.125) for the CLI: a malformed address, an uncited dispatch and a missing window endpoint each
- * refuse with zero io and no drop file; anything else is deliverToTernSeat (observe, identify, one native admission
- * turn, session-file proof). */
+/** SEND1 Tern route (rz5.125) for the CLI: a malformed address and an uncited dispatch each refuse with zero io and no
+ * drop file; anything else is deliverToTernSeat (observe, identify, one admission, session-file proof). A window key
+ * admits by one native ctl turn; no key admits by `tern send BLOCK paste` + `keys Enter` (TERNADDR1, ompkit-fixjo). */
 export async function proveTernCliSend(input: {
 	session: string;
 	pane: string;
@@ -605,6 +606,7 @@ export async function proveTernCliSend(input: {
 	deadlineMs?: number;
 	wait?: (ms: number) => Promise<void>;
 	io?: TernObserverIo;
+	composer?: (sessionFile: string) => ComposerVerdict;
 }): Promise<TernDeliverResult & { bead_ids: string[]; no_bead_reason: string | null }> {
 	const refuse = (code: string, detail: string, bead_ids: string[] = [], no_bead_reason: string | null = null) =>
 		({ status: "REFUSED" as const, code, marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, bead_ids, no_bead_reason });
@@ -615,23 +617,26 @@ export async function proveTernCliSend(input: {
 	const beads = beadAdmission(input.message, input.knownPrefixes, input.env ?? process.env, input.noBeadReason, () => [process.cwd(), cwd]);
 	if (beads.required) return refuse("BEAD_REQUIRED", beads.detail, beads.bead_ids, beads.no_bead_reason);
 	const windowKey = input.windowKey?.trim() ?? "";
-	if (!windowKey) {
-		return refuse("TERN_WINDOW_UNBOUND", `no control endpoint for the Tern window holding ${input.pane}: Tern 0.9 ctl reaches only a window opened with \`tern --control EP\`; pass --window-key EP or set windowKey in fleet-watch.json (ompkit-fixjo); zero sends`,
-			beads.bead_ids, beads.no_bead_reason);
-	}
 	const result = await deliverToTernSeat({ seat: { session: input.session, pane: input.pane, windowKey, cwd }, text: input.message,
 		dropDir: input.dropDir, io: input.io ?? defaultTernIo(), untilDeliveredMs: input.untilDeliveredMs ?? (beads.dispatch ? 300_000 : 0),
-		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait });
+		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer });
 	return { ...result, bead_ids: beads.bead_ids, no_bead_reason: beads.no_bead_reason };
 }
 
 /**
  * Tern verified delivery (ompkit-kdbz.2.4 TERNSEND). Observation and identity
  * come from plane-tern.ts (observeTernSeat/identifyTernSeat, imported, never
- * reimplemented); this file owns the send envelope: gating, one native
- * admission turn via `tern ctl carly lua` (never paste or keys), session-file
- * proof, pending persistence and drop files. tmux/herdr paths above are
- * untouched.
+ * reimplemented); this file owns the send envelope: gating, one admission,
+ * session-file proof, pending persistence and drop files. tmux/herdr paths
+ * above are untouched.
+ *
+ * Admission (TERNADDR1, ompkit-fixjo): a seat with a window key (a `tern
+ * --control EP` endpoint) gets one native turn via `tern ctl carly lua`, never
+ * paste or keys. A seat with no key gets `tern send BLOCK paste PAYLOAD` then
+ * `tern send BLOCK keys Enter` (the pane's own window, else the first), and
+ * only when the seat's own fresh kit-composer-state record says its composer
+ * is empty: a draft refuses TERN_COMPOSER_BUSY, a missing/stale record
+ * refuses TERN_COMPOSER_UNKNOWN, never a blind paste.
  *
  * Proof model (no screen parsing, no API receipt): a complete typed journal
  * entry strictly past the pre-send cursor, in the bound session file whose
@@ -641,6 +646,44 @@ export async function proveTernCliSend(input: {
  * BODY`. Stale, quoted, assistant/tool echo, wrong-session, rewritten,
  * partial and abandoned-branch entries never prove (F4).
  */
+
+/** Mirrors respawn_seat.COMPOSER_RECORD_MAX_AGE_S (COMPOSERTRUTH1): the writer refreshes every 5 s. */
+export const COMPOSER_RECORD_MAX_AGE_MS = 15_000;
+
+export type ComposerVerdict = { state: "EMPTY" } | { state: "DRAFT" } | { state: "UNKNOWN"; reason: string };
+
+/**
+ * The seat's own kit-composer-state record (extensions/kit-composer-state.ts), read with the same freshness rule as
+ * respawn_seat.composer_record: keyed by sha1(realpath(session file))[:16], schema 1, naming this session file, at
+ * most COMPOSER_RECORD_MAX_AGE_MS old, writer pid alive (EPERM counts as alive). Anything else is UNKNOWN.
+ */
+export function readComposerRecord(sessionFile: string, opts: { dir?: string; now?: number; pidAlive?: (pid: number) => boolean } = {}): ComposerVerdict {
+	let real = sessionFile;
+	try { real = realpathSync(sessionFile); } catch { /* not on disk: the raw path is what the writer keyed */ }
+	const dir = opts.dir ?? join(homedir(), ".local", "state", "omp-kit", "composer");
+	const path = join(dir, `${createHash("sha1").update(real).digest("hex").slice(0, 16)}.json`);
+	let rec: Record<string, unknown>;
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+		if (parsed === null || typeof parsed !== "object") return { state: "UNKNOWN", reason: "composer record is not an object" };
+		rec = parsed as Record<string, unknown>;
+	} catch {
+		return { state: "UNKNOWN", reason: `no readable composer record at ${path}` };
+	}
+	if (rec.schema !== 1 || rec.session_file !== real) return { state: "UNKNOWN", reason: "composer record names another session file or schema" };
+	if (typeof rec.at !== "number" || (opts.now ?? Date.now()) - rec.at > COMPOSER_RECORD_MAX_AGE_MS) {
+		return { state: "UNKNOWN", reason: "composer record is stale" };
+	}
+	const pidAlive = opts.pidAlive ?? ((pid: number) => {
+		try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+	});
+	if (typeof rec.pid !== "number" || !Number.isInteger(rec.pid) || rec.pid <= 0 || !pidAlive(rec.pid)) {
+		return { state: "UNKNOWN", reason: "composer record writer is not alive" };
+	}
+	if (rec.empty === true) return { state: "EMPTY" };
+	if (rec.empty === false) return { state: "DRAFT" };
+	return { state: "UNKNOWN", reason: "composer record has no empty flag" };
+}
 
 export const TERN_PROOF_POLL_MS = 1000;
 export const TERN_PROOF_DEADLINE_MS = 20_000;
@@ -1120,6 +1163,8 @@ export async function deliverToTernSeat(input: {
 	/** Overridable for tests; production uses plane-tern's functions. */
 	observe?: typeof observeTernSeat;
 	identify?: typeof identifyTernSeat;
+	/** Composer truth for paste admission (no window key); default reads the seat's kit-composer-state record. */
+	composer?: (sessionFile: string) => ComposerVerdict;
 }): Promise<TernDeliverResult> {
 	const observe = input.observe ?? observeTernSeat;
 	const identify = input.identify ?? identifyTernSeat;
@@ -1148,9 +1193,12 @@ export async function deliverToTernSeat(input: {
 	if (gate.insight === true) return fail("GATE_INSIGHT", "INSIGHT seat; zero sends");
 	const paneId = ternPaneId(input.seat.pane);
 	if (typeof input.seat.session !== "string" || !input.seat.session.trim()
-		|| typeof input.seat.windowKey !== "string" || !input.seat.windowKey.trim() || paneId === null) {
-		return fail("PLANE_SEAT_UNBOUND", "seat needs a configured session, explicit window key and exact pane id; zero sends");
+		|| typeof input.seat.windowKey !== "string" || paneId === null) {
+		return fail("PLANE_SEAT_UNBOUND", "seat needs a configured session and exact pane id; zero sends");
 	}
+	// TERNADDR1: no window key means no ctl endpoint; admit by paste + Enter into the pane's own window.
+	const windowKey = input.seat.windowKey.trim();
+	const pasteMode = windowKey === "";
 	const seatKey = `${input.seat.session}/${input.seat.pane}@${input.seat.windowKey}`.replace(/[^A-Za-z0-9]+/g, "_");
 	let observation = await observe(input.seat, input.io);
 	const busyRetries = Math.max(0, Math.ceil((input.untilDeliveredMs ?? 0) / pollMs));
@@ -1255,27 +1303,52 @@ export async function deliverToTernSeat(input: {
 	}
 	try {
 		// F1: this re-read is a cheap incarnation pre-filter, NOT atomicity;
-		// the admission checks live inside the one native turn.
+		// on the ctl path the admission checks live inside the one native turn.
 		const fresh = input.io.readSessionFile(sessionFile);
 		if (fresh === null || sha256Hex(fresh) !== observation.sessionSha) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
 			return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
 				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND" };
 		}
-		const lua = buildNativeSendTurn(String(paneId), payload);
-		if (lua === null) {
-			try { rmSync(pendingPath, { force: true }); } catch {}
-			return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
-				detail: `block not a bare decimal pane id; zero sends`, code: "BLOCK_UNWIREABLE" };
-		}
 		// F5: a failed or crashed dispatch does not prove zero native effects;
 		// the attempt stays pending and proof is still reconciled below.
-		let dispatched: boolean;
-		try {
-			dispatched = input.io.run([ternCtlBin(), "--window", input.seat.windowKey, "ctl", "carly", "lua", lua]).code === 0;
-		} catch {
-			dispatched = false;
+		let dispatched = false;
+		if (pasteMode) {
+			// Paste has no atomic admission, so the seat's own composer record must
+			// prove an empty composer first; a running agent is fine (omp queues the
+			// submit as a steer). Enter is never pressed after a failed paste: an
+			// empty submit aborts a streaming turn.
+			const composer = (input.composer ?? readComposerRecord)(sessionFile);
+			if (composer.state !== "EMPTY") {
+				try { rmSync(pendingPath, { force: true }); } catch {}
+				return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
+					detail: composer.state === "DRAFT" ? "seat composer holds unsent text; nothing pasted, zero sends"
+						: `seat composer state UNKNOWN (${composer.reason}); never paste blind, zero sends`,
+					code: composer.state === "DRAFT" ? "TERN_COMPOSER_BUSY" : "TERN_COMPOSER_UNKNOWN" };
+			}
+			const socket = resolveDaemonSocket();
+			const env = socket === null ? undefined : { TERN_DAEMON_SOCKET: socket };
+			try {
+				if (input.io.run([ternCtlBin(), "send", String(paneId), "paste", payload], env).code === 0) {
+					dispatched = input.io.run([ternCtlBin(), "send", String(paneId), "keys", "Enter"], env).code === 0;
+				}
+			} catch {
+				dispatched = false;
+			}
+		} else {
+			const lua = buildNativeSendTurn(String(paneId), payload);
+			if (lua === null) {
+				try { rmSync(pendingPath, { force: true }); } catch {}
+				return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
+					detail: `block not a bare decimal pane id; zero sends`, code: "BLOCK_UNWIREABLE" };
+			}
+			try {
+				dispatched = input.io.run([ternCtlBin(), "--window", windowKey, "ctl", "carly", "lua", lua]).code === 0;
+			} catch {
+				dispatched = false;
+			}
 		}
+		const via = pasteMode ? " via paste+Enter" : "";
 		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
 		const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
 		for (let poll = 0; ; poll++) {
@@ -1285,7 +1358,7 @@ export async function deliverToTernSeat(input: {
 				try { rmSync(pendingPath, { force: true }); } catch {}
 				const steered = last.steering ? " as a steering entry (program was busy at handle time)" : "";
 				return { status: "OK", marker, sends: 1, sessionFile, offset: last.offset, drop_path: null,
-					detail: `${payloadKind.kind === "goal-set" ? "goal adopted" : "USER entry"} proven at offset ${last.offset}${steered}`,
+					detail: `${payloadKind.kind === "goal-set" ? "goal adopted" : "USER entry"} proven at offset ${last.offset}${via}${steered}`,
 					code: last.steering ? "PROVEN_STEERED" : "PROVEN" };
 			}
 			if (poll + 1 >= polls) break;
@@ -1293,13 +1366,13 @@ export async function deliverToTernSeat(input: {
 		}
 		let note = "";
 		if (payloadKind.kind === "message") {
-			const cap = input.io.run([ternCtlBin(), "--window", input.seat.windowKey, "capture", `${input.seat.session}/${paneId}`, "--surfaces"]);
+			const cap = input.io.run([ternCtlBin(), ...(pasteMode ? [] : ["--window", windowKey]), "capture", `${input.seat.session}/${paneId}`, "--surfaces"]);
 			note = cap.code !== 0 ? `; capture failed (rc=${cap.code})`
 				: cap.out.includes(`[${marker}]`) ? "; composer holds marker" : "; composer shows no marker";
 		}
 		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-			detail: `${dispatched ? "sent" : "dispatch failed, effect unknown"}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,
+			detail: `${dispatched ? `sent${via}` : "dispatch failed, effect unknown"}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,
 			code: !dispatched ? "SEND_AMBIGUOUS" : payloadKind.kind === "goal-set" ? "GOAL_NOT_ADOPTED" : "PROOF_TIMEOUT" };
 	} finally {
 		releaseLock();
