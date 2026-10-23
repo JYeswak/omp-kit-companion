@@ -5,7 +5,7 @@
 // a marker unique to the case run in their command lines.
 import { afterAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -116,6 +116,28 @@ describe("kitlib run conformance corpus", () => {
 	});
 	for (const testCase of corpus.cases) {
 		test(testCase.id, async () => {
+			const measuresRss = testCase.expect.max_parent_rss_growth_bytes !== undefined ||
+				testCase.expect.min_parent_rss_growth_bytes !== undefined;
+			const rssChild = process.env.KITLIB_RUN_RSS_CASE === testCase.id;
+			if (measuresRss && !rssChild) {
+				// maxRSS is process-global: an earlier test's peak must not hide this case's allocation.
+				const isolated = ownedTmp("run-rss");
+				const proof = join(isolated.path, "completed.json");
+				try {
+					const child = await run([process.execPath, "test", "--test-name-pattern", RegExp.escape(testCase.id), import.meta.path], {
+						deadline_s: 60,
+						env: { ...process.env, TMPDIR: isolated.path, KITLIB_RUN_RSS_CASE: testCase.id, KITLIB_RUN_RSS_PROOF: proof },
+					});
+					if (child.rc !== 0 || child.timed_out || child.truncated) {
+						throw new Error(decoder.decode(child.stderr) || "isolated RSS case did not complete");
+					}
+					// Written only after the original case's assertions: zero selected tests cannot pass.
+					expect(JSON.parse(readFileSync(proof, "utf8")).id).toBe(testCase.id);
+				} finally {
+					isolated.cleanup();
+				}
+				return;
+			}
 			const marker = `kitlib-run-ts-${process.pid}-${randomBytes(6).toString("hex")}`;
 			const scratch = ownedTmp("kitlib-run").path;
 			const tmp = realpathSync(scratch);
@@ -148,6 +170,11 @@ describe("kitlib run conformance corpus", () => {
 				judge(result, want, peakRssBytes() - before);
 				judgeKl02(result, want, peakRssBytes() - before, recorder, returnedAt);
 				if (want.no_survivor) expect(await survivors(marker), `process-group members outlived run(): marker ${marker}`).toEqual([]);
+				if (measuresRss && rssChild) {
+					const proof = process.env.KITLIB_RUN_RSS_PROOF;
+					if (!proof) throw new Error("RSS child needs its completion proof path");
+					writeFileSync(proof, JSON.stringify({ id: testCase.id }), { flag: "wx" });
+				}
 			} finally {
 				// Test hygiene: this case's own marker holders only.
 				for (const pid of await markerPids(marker)) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
