@@ -67,7 +67,7 @@ test("machine admission blocks only above 2.5 times the core count", () => {
 	expect(machineLoadBlockReason(1, 4)).toBeNull();
 });
 
-test("SCANNERADMIT refuses above load threshold even in installed CI", async () => {
+test("SCANNERADMIT refuses a zero-budget start while GITHUB_ACTIONS bypasses LOAD1", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 0 });
 	const marker = join(root, "scanner-ran");
@@ -77,6 +77,8 @@ test("SCANNERADMIT refuses above load threshold even in installed CI", async () 
 	});
 	expect(result.code).toBe(75);
 	expect(result.stderr).toContain("RESOURCE_DEFERRED");
+	expect(result.stderr).toContain("admission deadline expired before child start");
+	expect(result.stderr).not.toContain("LOAD1");
 	expect(existsSync(marker)).toBe(false);
 });
 
@@ -88,15 +90,16 @@ test("SCANNERADMIT preserves genuine child exit 75 without refusal marker", asyn
 	expect(result.stderr).not.toContain("RESOURCE_DEFERRED");
 });
 
-test("SCANNERADMIT bounds a started child by the remaining deadline", async () => {
+// A separate Bun child is the real deadline consumer; parent fake timers cannot advance its clock.
+test("SCANNERADMIT terminates a started child when its admission deadline expires", async () => {
 	const root = fixture();
-	configure(root, { slots: 1, max_wait_s: 0 });
-	const marker = join(root, "late-child-ran");
-	const result = await invoke(root, ["heavy", "--", "sh", "-c", `sleep 1; printf ran > '${marker}'`]);
+	configure(root, { slots: 1, max_wait_s: 5 });
+	const child = `process.stdout.write("started"); setTimeout(() => process.stdout.write("finished"), 10000);`;
+	const result = await invoke(root, ["heavy", "--label", "deadline", "--", process.execPath, "-e", child]);
 	expect(result.code).toBe(75);
-	expect(result.stderr).toContain("RESOURCE_DEFERRED");
-	expect(existsSync(marker)).toBe(false);
-});
+	expect(result.stderr).toContain("child exceeded heavy admission deadline");
+	expect(result.stdout).toBe("started");
+}, 15000);
 
  // Slot-logic tests pin the heavy-specific load seam so the
  // slot behavior under test, not ambient runner load, decides the outcome.

@@ -410,6 +410,10 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 						missing = disk;
 					} else if (disk.kind === "pressure") reason = disk.text;
 				}
+				// The budget covers admission and child runtime; do not start work after it expires.
+				if (!reason && missing === null && Date.now() >= deadline) {
+					reason = "admission deadline expired before child start";
+				}
 				if (!reason && missing === null) {
 					const running: HeavyJob = { ...job, state: "running", started_at: new Date().toISOString() };
 					writeJob(storage.jobs, running);
