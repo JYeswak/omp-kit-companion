@@ -3,11 +3,11 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
  import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import process from "node:process";
-import { join, relative, resolve, sep } from "node:path";
+import { delimiter, join, relative, resolve, sep } from "node:path";
 import { optInState } from "../../extensions/kit-guard-optin.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { judgeFleet, readProfileWiring, resolveMockRuntime, runIntegrations, staticVerdict } from "../../src/integrations.ts";
-import type { LiveAttempt } from "../../src/integrations.ts";
+import { firstToolResultText, judgeFleet, readProfileWiring, resolveMockRuntime, runIntegrations, staticVerdict } from "../../src/integrations.ts";
+import type { IntegrationsReport, LiveAttempt } from "../../src/integrations.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
@@ -376,11 +376,27 @@ test("live slb reports its source hash and allows a quiet near-miss", async () =
 }, 300_000);
 
 test("RCH cargo check rewrite is visible and the quiet cargo version is allowed", async () => {
-	const report = await runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
-		integrations: ["rch"], workDir: join(base, "live-rch"), ompPath: ompLauncher, timeoutSecs: 120 });
+	// Fixture cargo (ompkit-kl9p3): live scenarios inherit the host PATH under a fake HOME, so a host cargo
+	// shim would answer the quiet `cargo --version` (this Mac's ~/.rch/shims/cargo prints "rch shim: no working
+	// real cargo" unless the login-shell-only RCH_SHIM_REAL_CARGO is set), and the judge reads "rch" as a refusal.
+	const fixtureBin = join(base, "fixture-cargo-bin");
+	mkdirSync(fixtureBin, { recursive: true });
+	writeFileSync(join(fixtureBin, "cargo"), '#!/bin/sh\necho "cargo 0.0.0-itg-fixture $*"\n', { mode: 0o755 });
+	const savedPath = process.env.PATH;
+	process.env.PATH = `${fixtureBin}${delimiter}${savedPath ?? ""}`;
+	let report: IntegrationsReport;
+	try {
+		report = await runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
+			integrations: ["rch"], workDir: join(base, "live-rch"), ompPath: ompLauncher, timeoutSecs: 120 });
+	} finally {
+		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+	}
 	const rch = report.matrix.find(cell => cell.integration === "rch");
 	expect(rch?.verdict).toBe("WIRED");
 	expect(rch?.quiet?.outcome).toBe("ALLOWED");
+	// The quiet call reached the fixture unrewritten, so ALLOWED is not a vacuous unmatched error.
+	const quietLog = rch?.evidence.find(path => path.endsWith("/mock.log") && path.includes("rch-quiet"));
+	expect(firstToolResultText(quietLog ? readFileSync(quietLog, "utf8") : "")).toContain("cargo 0.0.0-itg-fixture --version");
 	const mockPath = rch?.evidence.find(path => path.endsWith("/mock.log") && path.includes("rch-fire"));
 	expect(mockPath).toBeDefined();
 	if (!mockPath) throw new Error("RCH report omitted its model transcript");
