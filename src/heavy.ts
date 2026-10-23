@@ -344,6 +344,12 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 	// reading taken before a lock wait can be stale (QuietBadger AM57798).
 	const precheck = await diskVerdict({ config, cwd });
 	if (precheck.kind === "unavailable") return prerequisiteMissing(precheck.observer, precheck.text);
+	// SAVEFIRST1: explicit statfs pressure is the physical floor, not retryable queue contention.
+	if (precheck.kind === "pressure" && observerOverride === "statfs") {
+		process.stderr.write(`FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=${HEAVY_DISK_NEED} need_bytes=${HEAVY_DISK_NEED_BYTES} observer=statfs path=${cwd}: ${precheck.text}; free at least 10 GiB and retry; no command was run\n`);
+		return 1;
+	}
+
 	const deadline = Date.now() + config.max_wait_s * 1000;
 	let nextStatus = 0;
 	let signal: HeavySignal | null = null;

@@ -683,6 +683,19 @@ test.skipIf(LOW_BASE === null)("oq1h.1 planted: a forged-healthy statfs reading 
 	});
 });
 
+test.skipIf(LOW_BASE === null)("SAVEFIRST1: explicit statfs returns typed floor refusal", async () => {
+	await onLowFilesystem(async (cwd) => {
+		const root = fixture();
+		configure(root, { slots: 8, max_wait_s: 0 });
+		const marker = join(root, "savefirst-floor-marker");
+		const result = await invoke(root, ["heavy", "--disk-observer", "statfs", "--", "touch", marker], QUIET_LOAD, { cwd, preload: null });
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain("FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=10G");
+		expect(result.stderr).toContain("free at least 10 GiB");
+		expect(existsSync(marker)).toBe(false);
+	});
+});
+
 test.skipIf(LOW_BASE === null)("oq1h.1 native: auto lets a healthy sbh decide over real statfs pressure (sbh precedence)", async () => {
 	await onLowFilesystem(async (cwd) => {
 		const result = await nativeRun({ cwd, sbh: 0 });
@@ -820,8 +833,9 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted: --disk-observer statfs still
 		const marker = join(root, "lowfs-marker");
 		const result = await invoke(root, ["heavy", "--no-wait", "--disk-observer", "statfs", "--label", "lowfs-save", "--", "sh", "-c", `printf ran > '${marker}'`],
 			{ PATH: `${fakeSbh(root, 0, "native-bin")}:${NO_SBH_PATH}` }, { cwd, preload: null });
-		expect(result.code).toBe(75);
-		expect(result.stderr).toContain("deferred: disk low (statfs) (--no-wait)");
+		expect(result.code).toBe(1);
+		expect(result.stderr).toContain("FRESH-GATE: REFUSED reason=DISK_BELOW_FLOOR need=10G");
+		expect(result.stderr).toContain("free at least 10 GiB");
 		expect(existsSync(marker)).toBe(false);
 	});
 });
