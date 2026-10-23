@@ -1723,11 +1723,14 @@ function policyCommand(request: ParsedCommand): CliResult {
 		const fallback = refusal(safe.includes(code) ? code : "POLICY_PLAN_FAILED",
 			"Policy plan or apply refused without claiming a completed change",
 			"Inspect the declared TTSR policy, selected profile configs and disabled rules, then replan.");
-		const cause = (message.startsWith(`${code}:`) ? message.slice(code.length + 1) : message.slice(code.length)).trim().slice(0, 200);
+		// "CODE: detail" reports the detail; a bare safe code adds nothing beyond errors[].code,
+		// but any other colon-less message (e.g. "omp executable not found on PATH") is itself the cause.
+		const coded = message.startsWith(`${code}:`);
+		const cause = (coded ? message.slice(code.length + 1) : safe.includes(code) ? "" : message).trim().slice(0, 200);
 		if (!cause) return fallback;
 		return { ...fallback,
 			data: { ...fallback.data, cause_code: code, cause_message: cause },
-			errors: fallback.errors?.map(error => ({ ...error, message: `${code}: ${cause}` })),
+			errors: fallback.errors?.map(error => ({ ...error, message: coded ? `${code}: ${cause}` : cause })),
 		};
 	}
 }
