@@ -321,5 +321,150 @@ class Ratchet(unittest.TestCase):
         self.assertIn("kitlib_ratchet: no such path", err.getvalue())
 
 
+PY_SPAWN = 'import subprocess\nsubprocess.run(["x"])\n'
+PY_KITLIB = 'import kitlib_run\nkitlib_run.run(["x"], deadline_s=5)\n'
+
+
+class Allowlist(unittest.TestCase):
+    """The committed per-repo allowlist (scripts/kitlib-ratchet-baseline.json)."""
+
+    def setUp(self) -> None:
+        owned = kitlib_tmp.owned_tmp("kitlib-allowlist")
+        self.addCleanup(owned.cleanup)
+        self.repo = owned.path
+        _git(self.repo, "init", "-q")
+        self.write("old.ts", 'const p = Bun.spawn(["x"]);\nconst q = Bun.spawn(["y"]);\n')
+        _git(self.repo, "add", "old.ts")
+        (Path(self.repo) / "scripts").mkdir()
+        self.assertEqual(self.cli("--write-baseline", "--repo", self.repo)[0], 0)
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-q", "-m", "[test] base")
+
+    def write(self, name: str, text: str) -> None:
+        path = Path(self.repo) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def allow(self, counts: dict) -> None:
+        self.write(checker.BASELINE, checker.render_allowlist({"raw-spawn": counts}))
+
+    def cli(self, *argv: str) -> tuple:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = checker.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def staged(self) -> list:
+        _git(self.repo, "add", "-A")
+        return [(r.path, f.rule, f.detail, f.snippet) for r in checker.ratchet(self.repo, "HEAD", None)
+                for f in r.active()]
+
+    def test_baseline_counts_per_path(self) -> None:
+        data = json.loads((Path(self.repo) / checker.BASELINE).read_text())
+        self.assertEqual((data["counts"], data["totals"]), ({"raw-spawn": {"old.ts": 2}}, {"raw-spawn": 2}))
+
+    def test_planted_new_spawn_refused_naming_kitlib_run_and_kitlib_control_passes(self) -> None:
+        self.write("new.py", PY_SPAWN)
+        found = self.staged()
+        self.assertEqual([(p, rule) for p, rule, _, _ in found], [("new.py", "raw-spawn")])
+        self.assertIn("kitlib_run.run", found[0][2])
+        self.write("new.py", PY_KITLIB)
+        self.assertEqual(self.staged(), [])
+
+    def test_planted_allowlist_increase_refused(self) -> None:
+        self.allow({"old.ts": 3})
+        self.assertEqual([(p, rule, s) for p, rule, _, s in self.staged()],
+                         [(checker.BASELINE, "allowlist-raised", "raw-spawn old.ts: 2 -> 3")])
+
+    def test_planted_allowlist_addition_refused_even_with_its_site(self) -> None:
+        self.write("new.py", PY_SPAWN)
+        self.allow({"old.ts": 2, "new.py": 1})
+        self.assertEqual([(p, rule) for p, rule, _, _ in self.staged()],
+                         [("new.py", "raw-spawn"), (checker.BASELINE, "allowlist-raised")])
+
+    def test_planted_entry_removal_passes(self) -> None:
+        self.write("old.ts", "export const gone = 1;\n")
+        self.allow({})
+        self.assertEqual(self.staged(), [])
+
+    def test_planted_count_lowering_passes_only_when_sites_fell(self) -> None:
+        self.allow({"old.ts": 1})
+        found = self.staged()
+        self.assertEqual([(p, rule) for p, rule, _, _ in found], [("old.ts", "raw-spawn")])
+        self.assertIn("(2 sites, 1 allowlisted in scripts/kitlib-ratchet-baseline.json)", found[0][2])
+        self.write("old.ts", 'const p = Bun.spawn(["x"]);\n')
+        self.assertEqual(self.staged(), [])
+
+    def test_pragma_documents_an_allowlisted_site_but_admits_no_new_one(self) -> None:
+        self.write("old.ts", 'const p = Bun.spawn(["x"]); // kitlib: legacy probe, migrating to run()\n'
+                             'const q = Bun.spawn(["y"]);\n')
+        self.assertEqual(self.staged(), [])
+        self.write("new.ts", 'export const p = Bun.spawn(["x"]); // kitlib: fixture spawn, the point of it\n')
+        found = self.staged()
+        self.assertEqual([(p, rule) for p, rule, _, _ in found], [("new.ts", "raw-spawn")])
+        self.assertIn("pragma documents an allowlisted site and admits no new one", found[0][2])
+
+    def test_deleting_the_allowlist_with_sites_remaining_is_refused(self) -> None:
+        (Path(self.repo) / checker.BASELINE).unlink()
+        self.assertEqual([(p, rule) for p, rule, _, _ in self.staged()],
+                         [("old.ts", "raw-spawn"), ("old.ts", "raw-spawn"), (checker.BASELINE, "allowlist-deleted")])
+
+    def test_zero_sites_empty_allowlist_passes_and_deleting_it_is_refused(self) -> None:
+        self.write("old.ts", "export const gone = 1;\n")
+        self.assertEqual(self.cli("--write-baseline", "--repo", self.repo)[0], 0)
+        data = json.loads((Path(self.repo) / checker.BASELINE).read_text())
+        self.assertEqual((data["counts"], data["totals"]), ({"raw-spawn": {}}, {"raw-spawn": 0}))
+        self.assertEqual(self.staged(), [])
+        _git(self.repo, "commit", "-q", "-m", "[test] empty allowlist")
+        (Path(self.repo) / checker.BASELINE).unlink()
+        self.assertEqual([(p, rule) for p, rule, _, _ in self.staged()], [(checker.BASELINE, "allowlist-deleted")])
+
+    def test_after_an_empty_allowlist_a_new_pragmad_site_is_refused(self) -> None:
+        self.write("old.ts", "export const gone = 1;\n")
+        self.assertEqual(self.cli("--write-baseline", "--repo", self.repo)[0], 0)
+        self.staged()
+        _git(self.repo, "commit", "-q", "-m", "[test] empty allowlist")
+        self.write("new.py", PY_KITLIB)
+        self.assertEqual(self.staged(), [])
+        self.write("new.ts", 'export const p = Bun.spawn(["x"]); // kitlib: fixture spawn, the point of it\n')
+        found = self.staged()
+        self.assertEqual([(p, rule) for p, rule, _, _ in found], [("new.ts", "raw-spawn")])
+        self.assertIn("(1 sites, 0 allowlisted", found[0][2])
+
+    def test_rename_carries_its_count(self) -> None:
+        _git(self.repo, "mv", "old.ts", "moved.ts")
+        self.allow({"moved.ts": 2})
+        self.assertEqual(self.staged(), [])
+
+    def test_range_mode_refuses_a_raised_allowlist_and_passes_a_removal(self) -> None:
+        base = _git(self.repo, "rev-parse", "HEAD")
+        self.allow({"old.ts": 5})
+        _git(self.repo, "commit", "-qam", "[test] raise")
+        rc, out, _ = self.cli("--repo", self.repo, "--base", base, "--head", _git(self.repo, "rev-parse", "HEAD"))
+        self.assertEqual(rc, 1)
+        self.assertIn("allowlist-raised", out)
+        self.write("old.ts", "export const gone = 1;\n")
+        self.allow({})
+        _git(self.repo, "commit", "-qam", "[test] remove")
+        rc, out, _ = self.cli("--repo", self.repo, "--base", base, "--head", _git(self.repo, "rev-parse", "HEAD"))
+        self.assertEqual((rc, out), (0, ""))
+
+    def test_check_baseline_and_an_invalid_allowlist(self) -> None:
+        self.assertEqual(self.cli("--check-baseline", "--repo", self.repo)[0], 0)
+        self.write("new.py", PY_SPAWN)
+        _git(self.repo, "add", "new.py")
+        rc, out, _ = self.cli("--check-baseline", "--repo", self.repo)
+        self.assertEqual(rc, 1)
+        self.assertIn("new.py:2:1: raw-spawn:", out)
+        self.write(checker.BASELINE, '{"schema": 1, "counts": {"raw-spawn": {"old.ts": 0}}}\n')
+        self.assertEqual([(p, rule) for p, rule, _, _ in self.staged()][-1], (checker.BASELINE, "allowlist-invalid"))
+
+    def test_companion_tree_is_within_its_committed_allowlist(self) -> None:
+        """CI runs this file: the committed allowlist bounds the whole tracked tree."""
+        rc, out, err = self.cli("--check-baseline", "--repo", str(ROOT))
+        self.assertEqual(rc, 0, out + err)
+
+
+
 if __name__ == "__main__":
     unittest.main()

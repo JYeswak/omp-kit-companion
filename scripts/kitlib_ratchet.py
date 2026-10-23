@@ -34,9 +34,13 @@ Spawn through ``kitlib_run.run`` (scripts/kitlib_run.py) or ``run()``
           unquoted-delimiter heredoc body only $(timeout / `timeout count.
 
 Also: ``suppression-no-reason``, ``suppression-unused``, ``parse-error`` and
-``too-large``, as in every kitlib ratchet. Suppression: a comment (``#`` or
+``too-large``, as in every kitlib ratchet. Pragma: a comment (``#`` or
 ``//`` or ``/*``) whose text starts ``kitlib: <reason>`` on the flagged line,
-with a reason of two or more words and 10+ characters.
+with a reason of two or more words and 10+ characters. In a repo with the
+committed allowlist (scripts/kitlib-ratchet-baseline.json) a pragma only
+documents a site the allowlist already counts: it never admits a new one,
+so pre-commit and pre-push refuse the same new site whether pragma'd or not.
+In a repo without one, the git ratchet alone judges and a pragma suppresses.
 
 Limits (declared, not hidden): Python follows import aliases only, with no
 data flow: a bare reference such as ``r = subprocess.run`` is not judged, nor
@@ -58,19 +62,35 @@ Modes:
   kitlib_ratchet.py --staged [--repo DIR]    pre-commit ratchet: staged files
                                              against HEAD (GIT_INDEX_FILE honoured)
   kitlib_ratchet.py --head REV [--base REV]  range ratchet (pre-push, CI)
+  kitlib_ratchet.py --write-baseline [--repo DIR] [--output PATH|-]
+                                             write the allowlist from the tracked tree
+  kitlib_ratchet.py --check-baseline [--repo DIR]
+                                             tracked tree within the committed allowlist
 Ratchet: a finding is new when its (rule, line text without comments)
 fingerprint occurs more often in the new blob than in the old one (a rename
 keeps the old blob as baseline); only the surplus is reported, as the last
 occurrences. Untouched pre-existing sites do not block, new ones always do.
+Allowlist (scripts/kitlib-ratchet-baseline.json, schema 1: per site rule,
+path -> count, plus totals): on top of the git ratchet, a judged changed path
+with more sites of a rule (pragma'd ones counted) than allowlisted reports the
+surplus; an allowlist that raises a count or adds an entry against the base
+side is ``allowlist-raised`` (a rename may carry its old path's count);
+lowering or removing entries passes, and a lowered path is re-judged so the
+count must really have fallen. A base side with no allowlist seeds it; once
+the base side has one, deleting it is ``allowlist-deleted`` (the zero state
+is empty counts, which --write-baseline writes when no site remains).
 --format text|json. Exit 0 clean, 1 findings, 2 usage/infrastructure.
 """
 from __future__ import annotations
 
+import argparse
 import ast
+import json
 import os
 import re
 import sys
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -78,11 +98,22 @@ import kitlib_ratchet_core as core  # noqa: E402  (imports only pysafe, never py
 
 PRAGMA = "kitlib"
 RAW_SPAWN = "raw-spawn"
+ALLOWLIST_RAISED = "allowlist-raised"
+ALLOWLIST_INVALID = "allowlist-invalid"
+ALLOWLIST_DELETED = "allowlist-deleted"
+# The committed per-repo allowlist: site counts per rule per path.
+BASELINE = "scripts/kitlib-ratchet-baseline.json"
+BASELINE_SCHEMA = 1
 
 RULES = {
     RAW_SPAWN: "process spawned outside kitlib (no deadline, no process-group cancel, no output cap)",
+    ALLOWLIST_RAISED: f"{BASELINE} raises an allowlisted count or adds an entry; the allowlist only shrinks",
+    ALLOWLIST_INVALID: f"{BASELINE} is not a kitlib allowlist (schema {BASELINE_SCHEMA}, positive counts)",
+    ALLOWLIST_DELETED: f"{BASELINE} is deleted; once committed it stays, shrinking to empty counts",
     **core.meta_rules(PRAGMA),
 }
+# The rules whose sites the allowlist counts (one site per rule and line).
+SITE_RULES = (RAW_SPAWN,)
 # (rule, language) -> the kitlib replacement a finding names.
 HINT = {
     (RAW_SPAWN, "py"): "use kitlib_run.run(argv, deadline_s=...) from scripts/kitlib_run.py",
@@ -324,7 +355,230 @@ def _detail(rule: str, lang: str, constructs: List[str]) -> str:
     return f"{RULES[rule].split(' (', 1)[0]} ({', '.join(constructs)}); {HINT[(rule, lang)]}"
 
 
-RULESET = core.RuleSet(
+# --- the committed allowlist ----------------------------------------------
+Allowlist = Dict[str, Dict[str, int]]
+
+
+def parse_allowlist(raw: bytes) -> Allowlist:
+    """The counts of a committed allowlist; ValueError when it is not one."""
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict) or data.get("schema") != BASELINE_SCHEMA or not isinstance(data.get("counts"), dict):
+        raise ValueError(f"want an object with schema {BASELINE_SCHEMA} and counts")
+    counts: Allowlist = {}
+    for rule, paths in data["counts"].items():
+        if rule not in SITE_RULES or not isinstance(paths, dict):
+            raise ValueError(f"counts.{rule}: not a site rule mapping paths to counts")
+        for path, count in paths.items():
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError(f"counts.{rule}.{path}: want a positive integer")
+        counts[rule] = dict(paths)
+    if data.get("totals") != render_totals(counts):
+        raise ValueError("totals do not sum the counts")
+    return counts
+
+
+def render_totals(counts: Allowlist) -> Dict[str, int]:
+    return {rule: sum(counts.get(rule, {}).values()) for rule in SITE_RULES}
+
+
+def render_allowlist(counts: Allowlist) -> str:
+    payload = {
+        "schema": BASELINE_SCHEMA,
+        "about": "kitlib_ratchet allowlist (ompkit-qwqh1): pre-existing sites per rule per path. "
+                 "It only shrinks: a commit or push that raises a count or adds an entry is refused. "
+                 "Regenerate with: python3 scripts/kitlib_ratchet.py --write-baseline",
+        "totals": render_totals(counts),
+        "counts": {rule: dict(sorted(counts.get(rule, {}).items())) for rule in SITE_RULES},
+    }
+    return json.dumps(payload, indent=1, sort_keys=True) + "\n"
+
+
+def _spec(rev: Optional[str], path: str) -> str:
+    return (":" if rev is None else rev + ":") + path
+
+
+def _blob(repo: str, spec: str) -> Optional[bytes]:
+    """The blob at ``spec``, or None when it does not exist."""
+    probe = core.pysafe.run_bounded(["git", "-C", repo, "cat-file", "-e", spec], core.GIT_TIMEOUT_S, cap_bytes=4096)
+    if probe.outcome != core.pysafe.OK:
+        raise core.GitError(f"git cat-file -e {spec}: TIMEOUT after {core.GIT_TIMEOUT_S:g}s")
+    return core._git(repo, "cat-file", "blob", spec) if probe.returncode == 0 else None
+
+
+def _judged(path: str) -> bool:
+    ext = os.path.splitext(os.path.basename(path))[1]
+    return not ext or ext in core.EXTENSIONS
+
+
+def _sites(report: core.FileReport, rule: str) -> List[core.Finding]:
+    """Every site of ``rule``, a pragma'd one included: a pragma never removes a site from the count."""
+    return [f for f in report.findings if f.rule == rule]
+
+
+@dataclass(frozen=True)
+class KitlibRuleSet(core.RuleSet):
+    """The engine's git ratchet, then the committed allowlist (BASELINE) on top.
+
+    With an allowlist at the base or the new side: an allowlist that raises a
+    count or adds an entry (a rename may carry its old path's count) is
+    ``allowlist-raised``; deleting one the base side has is
+    ``allowlist-deleted`` (the zero state is an allowlist with empty counts);
+    a judged path with more sites of a rule than its allowlisted count reports
+    the surplus as that rule's finding, a ``kitlib:``-pragma'd site included.
+    A repo with no allowlist on either side keeps the git ratchet alone."""
+
+    def _diff(self, repo: str, base: Optional[str], head: Optional[str]) -> bytes:
+        if head is None:
+            if base is not None:
+                return core._git(repo, "diff", "--cached", "--name-status", "-z", "-M", "--diff-filter=AMRT", base)
+            return core._git(repo, "diff", "--cached", "--name-status", "-z", "--diff-filter=AMRT")
+        if base is not None:
+            return core._git(repo, "diff", "--name-status", "-z", "-M", "--diff-filter=AMRT", base, head)
+        return core._git(repo, "diff-tree", "--root", "-r", "--no-commit-id", "--name-status", "-z", "-M",
+                         "--diff-filter=AMRT", head)
+
+    def ratchet(self, repo: str, base: Optional[str], head: Optional[str]) -> List[core.FileReport]:
+        reports = super().ratchet(repo, base, head)
+        new_raw = _blob(repo, _spec(head, BASELINE))
+        old_raw = _blob(repo, _spec(base, BASELINE)) if base is not None else None
+        if new_raw is None and old_raw is None:
+            sys.stderr.write(f"{self.prog}: no {BASELINE}; judged against git history only\n")
+            return reports
+        listing = core.FileReport(BASELINE)
+        old: Optional[Allowlist] = None
+        if old_raw is not None:
+            try:
+                old = parse_allowlist(old_raw)
+            except ValueError:
+                old = None  # a broken base allowlist is replaced, never extended against
+        new: Allowlist = {}
+        if new_raw is None:
+            listing.findings.append(core.Finding(BASELINE, 1, 1, ALLOWLIST_DELETED, RULES[ALLOWLIST_DELETED],
+                                                 "deleted; write an empty one with --write-baseline"))
+        else:
+            try:
+                new = parse_allowlist(new_raw)
+            except ValueError as exc:
+                listing.findings.append(core.Finding(BASELINE, 1, 1, ALLOWLIST_INVALID, RULES[ALLOWLIST_INVALID],
+                                                     core.collapse(str(exc))))
+                new = old or {}
+        pairs = self.changed(self._diff(repo, base, head))
+        renamed = {path: old_path for old_path, path in pairs if old_path is not None and old_path != path}
+        if old is not None:
+            for rule in SITE_RULES:
+                before, after = old.get(rule, {}), new.get(rule, {})
+                for path, count in sorted(after.items()):
+                    prev = before.get(path)
+                    if prev is None and path in renamed and renamed[path] not in after:
+                        prev = before.get(renamed[path])
+                    if prev is None or count > prev:
+                        listing.findings.append(core.Finding(BASELINE, 1, 1, ALLOWLIST_RAISED,
+                                                             RULES[ALLOWLIST_RAISED],
+                                                             f"{rule} {path}: {prev or 0} -> {count}"))
+        targets = {path for _, path in pairs}
+        for rule, paths in (old or {}).items():
+            targets.update(path for path, count in paths.items()
+                           if new.get(rule, {}).get(path, 0) < count and not self.is_exempt(path))
+        by_path = {report.path: report for report in reports}
+        for path in sorted(targets):
+            if not _judged(path):
+                continue
+            source = _blob(repo, _spec(head, path))
+            lang = None if source is None else core.language(path, source[:256])
+            if source is None or lang is None:
+                continue
+            full = self.check_source(source, path, lang)
+            for rule in SITE_RULES:
+                sites = _sites(full, rule)
+                allowed = new.get(rule, {}).get(path, 0)
+                report = by_path.get(path)
+                reported = {f.line for f in report.active() if f.rule == rule} if report else set()
+                surplus = len(sites) - allowed - len(reported)
+                if surplus <= 0:
+                    continue
+                if report is None:
+                    report = by_path[path] = core.FileReport(path)
+                    reports.append(report)
+                for finding in [f for f in sites if f.line not in reported][-surplus:]:
+                    pragma = f"; its {self.pragma}: pragma documents an allowlisted site and admits no new one" \
+                        if finding.suppressed is not None else ""
+                    finding.detail += f" ({len(sites)} sites, {allowed} allowlisted in {BASELINE}{pragma})"
+                    finding.suppressed = None
+                    report.findings.append(finding)
+                report.findings.sort(key=lambda f: (f.line, f.col, f.rule))
+        if listing.findings:
+            reports.append(listing)
+        return reports
+
+    def tree_reports(self, repo: str) -> List[core.FileReport]:
+        """Every tracked, judged, non-exempt work-tree file of ``repo``, under its repo-relative path."""
+        reports: List[core.FileReport] = []
+        for raw in core._git(repo, "ls-files", "-z").split(b"\0"):
+            path = raw.decode()
+            full = os.path.join(repo, path)
+            if not path or self.is_exempt(path) or not _judged(path) or os.path.islink(full) \
+                    or not os.path.isfile(full):
+                continue
+            with open(full, "rb") as handle:
+                source = handle.read(core.MAX_FILE_BYTES + 1)
+            lang = core.language(path, source[:256])
+            if lang is not None:
+                reports.append(self.check_source(source, path, lang))
+        return reports
+
+    def tree_counts(self, repo: str) -> Allowlist:
+        counts: Allowlist = {rule: {} for rule in SITE_RULES}
+        for report in self.tree_reports(repo):
+            for rule in SITE_RULES:
+                found = len(_sites(report, rule))
+                if found:
+                    counts[rule][report.path] = found
+        return counts
+
+    def main(self, argv: Optional[Sequence[str]] = None) -> int:
+        argv = list(sys.argv[1:] if argv is None else argv)
+        if "--write-baseline" not in argv and "--check-baseline" not in argv:
+            return super().main(argv)
+        parser = argparse.ArgumentParser(prog=self.prog + ".py", description=self.description)
+        mode = parser.add_mutually_exclusive_group(required=True)
+        mode.add_argument("--write-baseline", action="store_true")
+        mode.add_argument("--check-baseline", action="store_true")
+        parser.add_argument("--repo", default=".")
+        parser.add_argument("--output", help=f"write the allowlist here ('-' for stdout), not REPO/{BASELINE}")
+        args = parser.parse_args(argv)
+        try:
+            if args.write_baseline:
+                text = render_allowlist(self.tree_counts(args.repo))
+                if args.output == "-":
+                    sys.stdout.write(text)
+                else:
+                    with open(args.output or os.path.join(args.repo, BASELINE), "w", encoding="utf-8") as handle:
+                        handle.write(text)
+                return 0
+            if args.output:
+                parser.error("--output goes with --write-baseline")
+            with open(os.path.join(args.repo, BASELINE), "rb") as handle:
+                allowed = parse_allowlist(handle.read())
+            reports = self.tree_reports(args.repo)
+        except (OSError, ValueError, core.GitError) as exc:
+            sys.stderr.write(f"{self.prog}: {exc}\n")
+            return 2
+        over = 0
+        for report in reports:
+            for rule in SITE_RULES:
+                sites = _sites(report, rule)
+                limit = allowed.get(rule, {}).get(report.path, 0)
+                for finding in sites[limit:]:
+                    over += 1
+                    sys.stdout.write(f"{finding.path}:{finding.line}:{finding.col}: {rule}: {finding.detail} "
+                                     f"({len(sites)} sites, {limit} allowlisted in {BASELINE}): {finding.snippet}\n")
+                if len(sites) < limit:
+                    sys.stderr.write(f"{self.prog}: {report.path}: {rule} allowlists {limit}, {len(sites)} remain; "
+                                     "lower it with --write-baseline\n")
+        return 1 if over else 0
+
+
+RULESET = KitlibRuleSet(
     prog="kitlib_ratchet",
     description=__doc__.split("\n\n")[0],
     pragma=PRAGMA,

@@ -155,5 +155,97 @@ out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$bad" "$clean" | (cd "$P
 check "$?" "1" "push-planted-refused" "$out" "RED kitlib-range producer_rc=1: the range hand-rolls a kitlib primitive"
 check "0" "0" "push-planted-named" "$out" "spawn.py:2:1: raw-spawn"
 
+# 6. a repo with the committed allowlist (scripts/kitlib-ratchet-baseline.json):
+#    a planted new spawn is refused naming kitlib_run.run and the kitlib
+#    control passes; a planted count increase or entry addition is refused;
+#    a new pragma'd site is refused (the pragma documents an allowlisted
+#    site, it admits no new one) while a pragma on an allowlisted site
+#    passes; deleting the allowlist is refused with sites remaining and with
+#    none; a planted entry removal with its site gone (the empty-counts
+#    allowlist --write-baseline writes) passes; after it a new pragma'd site
+#    is refused while the kitlib control passes
+ALLOW=scripts/kitlib-ratchet-baseline.json
+R=$(new_repo allow old.ts "$TS_BAD")
+mkdir -p "$R/scripts"
+python3 -B "$SCRIPTS/kitlib_ratchet.py" --write-baseline --repo "$R" < /dev/null
+check "$?" "0" "allow-written" "x" "x"
+check "0" "0" "allow-counts" "$(cat "$R/$ALLOW")" '"old.ts": 1'
+git -C "$R" add "$ALLOW"
+out=$(commit "$R" -m "[test] allowlist")
+check "$?" "0" "allow-seed-pass" "x" "x"
+printf 'import subprocess\nsubprocess.run(["x"])\n' > "$R/new.py"
+git -C "$R" add new.py
+out=$(commit "$R" -m "[test] planted new file")
+check "$?" "1" "allow-planted-refused" "$out" "new.py:2:1: raw-spawn: .*(subprocess.run); use kitlib_run.run"
+printf '%s\n' "$PY_GOOD" > "$R/new.py"
+git -C "$R" add new.py
+out=$(commit "$R" -m "[test] kitlib control")
+check "$?" "0" "allow-kitlib-control-pass" "x" "x"
+printf '{"schema": 1, "totals": {"raw-spawn": 2}, "counts": {"raw-spawn": {"old.ts": 2}}}\n' > "$R/$ALLOW"
+git -C "$R" add "$ALLOW"
+out=$(commit "$R" -m "[test] raise allowlist")
+check "$?" "1" "allow-increase-refused" "$out" "allowlist-raised: .*: raw-spawn old.ts: 1 -> 2"
+printf '{"schema": 1, "totals": {"raw-spawn": 2}, "counts": {"raw-spawn": {"old.ts": 1, "x.py": 1}}}\n' > "$R/$ALLOW"
+git -C "$R" add "$ALLOW"
+out=$(commit "$R" -m "[test] add allowlist entry")
+check "$?" "1" "allow-addition-refused" "$out" "allowlist-raised: .*: raw-spawn x.py: 0 -> 1"
+git -C "$R" checkout -q HEAD -- "$ALLOW"
+printf '%s // kitlib: legacy probe, migrating to run()\n' "$TS_BAD" > "$R/old.ts"
+git -C "$R" add old.ts
+out=$(commit "$R" -m "[test] pragma on an allowlisted site")
+check "$?" "0" "allow-pragma-documents-pass" "x" "x"
+printf '%s // kitlib: fixture spawn, the point of this file\n' "$TS_BAD" > "$R/tool.ts"
+git -C "$R" add tool.ts
+out=$(commit "$R" -m "[test] new pragma'd site")
+check "$?" "1" "allow-new-pragma-refused" "$out" "tool.ts:1:.*raw-spawn: .*pragma documents an allowlisted site and admits no new one"
+git -C "$R" rm -q --cached tool.ts
+git -C "$R" rm -q --cached "$ALLOW"
+out=$(commit "$R" -m "[test] delete the allowlist, site kept")
+check "$?" "1" "allow-deleted-site-kept-refused" "$out" "old.ts:1:.*raw-spawn: .*(1 sites, 0 allowlisted"
+printf 'export const ok = 1;\n' > "$R/old.ts"
+git -C "$R" add old.ts
+python3 -B "$SCRIPTS/kitlib_ratchet.py" --write-baseline --repo "$R" < /dev/null
+check "$?" "0" "allow-empty-written" "x" "x"
+check "0" "0" "allow-empty-counts" "$(cat "$R/$ALLOW")" '"raw-spawn": {}'
+git -C "$R" add "$ALLOW"
+out=$(commit "$R" -m "[test] remove allowlist entry, empty counts")
+check "$?" "0" "allow-removal-empty-pass" "x" "x"
+git -C "$R" rm -q --cached "$ALLOW"
+out=$(commit "$R" -m "[test] delete the empty allowlist")
+check "$?" "1" "allow-deleted-zero-sites-refused" "$out" "allowlist-deleted"
+git -C "$R" add "$ALLOW"
+git -C "$R" add tool.ts
+out=$(commit "$R" -m "[test] new pragma'd site after an empty allowlist")
+check "$?" "1" "allow-empty-new-pragma-refused" "$out" "tool.ts:1:.*raw-spawn: .*(1 sites, 0 allowlisted.*admits no new one"
+git -C "$R" rm -q --cached tool.ts
+printf '%s\n' "$PY_GOOD" > "$R/good.py"
+git -C "$R" add good.py
+out=$(commit "$R" -m "[test] kitlib control after an empty allowlist")
+check "$?" "0" "allow-empty-kitlib-control-pass" "x" "x"
+
+# 7. pre-push with the allowlist: a range raising it is refused, a range
+#    removing an entry (its site gone) passes, a range deleting it is refused
+python3 -B "$SCRIPTS/kitlib_ratchet.py" --write-baseline --repo "$P" < /dev/null
+git -C "$P" add "$ALLOW"
+git -C "$P" commit -q -m "[test] allowlist"
+seed=$(git -C "$P" rev-parse HEAD)
+printf '{"schema": 1, "totals": {"raw-spawn": 3}, "counts": {"raw-spawn": {"spawn.py": 3}}}\n' > "$P/$ALLOW"
+git -C "$P" commit -qam "[test] raise"
+raised=$(git -C "$P" rev-parse HEAD)
+out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$raised" "$seed" | (cd "$P" && sh "$SCRIPTS/pre-push-gate.sh") 2>&1)
+check "$?" "1" "push-allow-increase-refused" "$out" "allowlist-raised: .*: raw-spawn spawn.py: 1 -> 3"
+git -C "$P" checkout -q "$seed" 2>/dev/null
+git -C "$P" rm -q spawn.py
+printf '{"schema": 1, "totals": {"raw-spawn": 0}, "counts": {"raw-spawn": {}}}\n' > "$P/$ALLOW"
+git -C "$P" commit -qam "[test] remove"
+removed=$(git -C "$P" rev-parse HEAD)
+out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$removed" "$seed" | (cd "$P" && sh "$SCRIPTS/pre-push-gate.sh") 2>&1)
+check "0" "0" "push-allow-removal-green" "$out" "GREEN kitlib-range"
+git -C "$P" rm -q "$ALLOW"
+git -C "$P" commit -q -m "[test] delete allowlist"
+deleted=$(git -C "$P" rev-parse HEAD)
+out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$deleted" "$removed" | (cd "$P" && sh "$SCRIPTS/pre-push-gate.sh") 2>&1)
+check "$?" "1" "push-allow-deleted-refused" "$out" "allowlist-deleted"
+
 printf 'check-staged-kitlib: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

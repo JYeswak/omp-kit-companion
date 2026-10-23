@@ -278,7 +278,7 @@ else
 		printf 'GREEN kitlib-range\n'
 	else
 		rc=$?
-		printf 'RED kitlib-range producer_rc=%s: the range hand-rolls a kitlib primitive (spawn through kitlib_run.run from scripts/kitlib_run.py or run() from src/kitlib/run.ts; or justify the line inline with "kitlib: <reason>")\n' "$rc" >&2
+		printf 'RED kitlib-range producer_rc=%s: the range hand-rolls a kitlib primitive or raises scripts/kitlib-ratchet-baseline.json (spawn through kitlib_run.run from scripts/kitlib_run.py or run() from src/kitlib/run.ts; the allowlist only shrinks, and a "kitlib: <reason>" pragma admits no site it does not count)\n' "$rc" >&2
 		exit "$rc"
 	fi
 fi

@@ -224,11 +224,18 @@ one rule in `scripts/kitlib_ratchet.py` (pragma `kitlib:`). TEMPSAFE (`scripts/t
 |---|---|---|
 | `raw-spawn` | Python `subprocess.run/call/check_call/check_output/Popen/getoutput/getstatusoutput`, `os.system/popen/spawn*/posix_spawn*/exec*`, `asyncio.create_subprocess_*`; TS/JS `Bun.spawn/spawnSync`, `child_process` `spawn/spawnSync/exec/execSync/execFile/execFileSync/fork`; sh call-site `timeout N cmd` | `kitlib_run.run` (Python), `run()` from `src/kitlib/run.ts` (TS), `pysafe.py run --timeout N --` (sh) |
 
-Semantics, shared with TEMPSAFE: a finding is new when its (rule, line text without comments) fingerprint occurs more
-often than in the baseline (HEAD for a commit, the base for a push range). Untouched existing sites never block; new
-ones always do. A line can be justified with `kitlib: <reason>` (two or more words, 10+ characters); a reasonless
-pragma is refused and an unused one is reported. Exempt: `src/kitlib/`, `scripts/kitlib_*.py`, `scripts/kitlib-tmp.sh`,
-`scripts/pysafe.py`, and the ratchet's own tests and fixtures.
+Two checks run together. The git ratchet, shared with TEMPSAFE: a finding is new when its (rule, line text without
+comments) fingerprint occurs more often than in the baseline (HEAD for a commit, the base for a push range); untouched
+existing sites never block. The committed allowlist `scripts/kitlib-ratchet-baseline.json` (`schema: 1`, `totals`,
+`counts.<rule>.<path>`): a path's sites may not exceed its count; a commit or range that raises a count, adds an entry
+or deletes the file is refused (`allowlist-raised`, `allowlist-deleted`); lowering or removing entries passes once
+the sites are gone. With no sites left the allowlist stays, with empty counts. `--write-baseline` regenerates it
+and `--check-baseline` checks a tree against it.
+
+A `kitlib: <reason>` pragma (two or more words, 10+ characters) documents a site the allowlist already counts; it
+never admits a new one, since pragma'd sites still count. A reasonless pragma is refused and an unused one is
+reported. Exempt: `src/kitlib/`, `scripts/kitlib_*.py`, `scripts/kitlib-tmp.sh`, `scripts/pysafe.py`, and the
+ratchet's own tests and fixtures.
 
 Enforced by the pre-commit member `51-omp-kit-staged-kitlib` (`scripts/check-staged-kitlib.sh`, installed by
 `install-commit-msg-bead.sh` with `kitlib_ratchet.py`, `kitlib_ratchet_core.py` and `pysafe.py` beside it), the
