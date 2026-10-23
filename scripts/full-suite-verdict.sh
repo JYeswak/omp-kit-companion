@@ -253,6 +253,10 @@ SUITE_OUT="$CACHE_DIR/$tree.running.log"
 run_suite() {
 	(
 		cd "$ARCHIVE_DIR"
+		# SAVEFIRST1: this full-suite process is a sibling of fresh-gate, so its descendants do not inherit
+		# the fresh-gate process's save-only disk observer. Keep nested heavy calls on statfs; their physical
+		# 10 GiB floor still refuses when the suite cannot fit.
+		export OMP_KIT_DISK_OBSERVER=statfs
 		export TMPDIR="$ARCHIVE_DIR/var/agent-tmp"
 		mkdir -p "$ARCHIVE_DIR/var/agent-tmp"
 		if [ -f "$ARCHIVE_DIR/bunfig.toml" ]; then
