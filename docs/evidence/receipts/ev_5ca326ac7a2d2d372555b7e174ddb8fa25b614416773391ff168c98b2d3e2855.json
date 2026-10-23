@@ -1,0 +1,19 @@
+{
+  "authority": "test",
+  "confidence": "observed",
+  "evidence_id": "ev_5ca326ac7a2d2d372555b7e174ddb8fa25b614416773391ff168c98b2d3e2855",
+  "limitations": [
+    "Bounded128/512linepairedfixtures; no83kruntimeclaim. Readablepolicyoutputsbyte-identical; newjoinIOpathsrefuse. LegacyGitproducererrorsnotqualifiedfailclosed."
+  ],
+  "operation": "stale-gate-ordered-attribution-join",
+  "parameters": {
+    "bead": "ompkit-axz7m.9",
+    "candidate_sha256": "bb76e25c4db6d2e737703d1c31010df845c6a8d60065a918d30fbdb7e7ca5e5c",
+    "incumbent_commit": "8ef1a0d397"
+  },
+  "producer": "QuietBadger",
+  "result_ref": {
+    "bytes": 430258,
+    "sha256": "24b115ac016f04ddc0805ce3f5281b5318bb542e4b1a6dceb2d3ed501095f7a2"
+  }
+}

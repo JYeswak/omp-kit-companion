@@ -325,5 +325,23 @@ for entry in "$cache_root"/* "$cache_root"/.[!.]* "$cache_root"/..?*; do
 done
 check "$left" "" "facts-invocation-cache-disposed" "$out" ""
 
+# 22. unreadable join scratch cannot turn a removed-site judgement into a pass.
+R=$(new_repo facts-join-io)
+printf 'base line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+printf '[test] join I/O\n\nBead: t-land\n' > "$TMP/facts-join-io.msg"
+member="$R/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree"
+out=$(cd "$R" && sh "$member" "$TMP/facts-join-io.msg" 2>&1)
+check "$?" "0" "join-io-passing-control" "$out" ""
+for target in removed hit; do
+	out=$(cd "$R" && sh -c 'mkdir "$PWD/.git/stale-worktree-$3.$$" || exit 91; exec sh "$1" "$2"' join-fault "$member" "$TMP/facts-join-io.msg" "$target" 2>&1)
+	fault_rc=$?
+	case "$target" in
+		removed) expected="stale-worktree: cannot materialize removed sites" ;;
+		hit) expected="stale-worktree: cannot join removed sites" ;;
+	esac
+	check "$fault_rc" "1" "join-io-$target-refuses" "$out" "$expected"
+done
+
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

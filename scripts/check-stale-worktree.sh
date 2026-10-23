@@ -142,6 +142,9 @@ mvused="$root/.git/stale-worktree-used.$$"
 mvavail="$root/.git/stale-worktree-avail.$$"
 mvrm="$root/.git/stale-worktree-removed.$$"
 mvhit="$root/.git/stale-worktree-hit.$$"
+# The same invocation owner cleans these existing files on every exit.
+# Join I/O failures propagate in pipeline status, not a disk error marker.
+kitlib_tmp_atexit 'rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd_sorted" "$mvused" "$mvavail" "$mvrm" "$mvhit"'
 git diff -U0 --no-color --no-ext-diff "$HEAD" "$tree" 2>/dev/null | awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' | sort > "$mvadd_sorted"
 : > "$mvused"
 newest=""
@@ -189,13 +192,27 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 	fi
 	seen=""
 	blamed=$(removed_lines "$path" | blame_lines "$path")
-	for ln in $(removed_lines "$path"); do
-		sha=$(printf '%s\n' "$blamed" | awk -v want="$ln" '$1 == want { print $2; exit }')
+	# Join once, retaining removed-site order and the incumbent's first-match
+	# semantics. Move allocation has consumed these two scratch files already.
+	if ! removed_lines "$path" > "$mvrm"; then
+		printf 'stale-worktree: cannot materialize removed sites: %s\n' "$path" >&2
+		exit 1
+	fi
+	if ! printf '%s\n' "$blamed" | awk '
+		FILENAME != "-" { order[++n] = $1; next }
+		!($1 in sha) { sha[$1] = $2 }
+		END {
+			for (i = 1; i <= n; i++)
+				if (order[i] in sha) print order[i], sha[order[i]]
+		}' "$mvrm" - > "$mvhit"; then
+		printf 'stale-worktree: cannot join removed sites: %s\n' "$path" >&2
+		exit 1
+	fi
+	while IFS=' ' read -r ln sha; do
 		[ -n "$sha" ] || continue
 		if ! commit_facts "$sha"; then
-			printf 'UNREADABLE_COMMIT_FACTS %s %s\n' "$path" "$sha" >> "$root/.git/stale-worktree-report.$$"
-			printf '1\n' >> "$root/.git/stale-worktree-refused.$$"
-			continue
+			printf 'UNREADABLE_COMMIT_FACTS %s %s\n' "$path" "$sha" >&2
+			exit 1
 		fi
 		declared=0
 		for r in $reverts; do
@@ -221,14 +238,12 @@ git diff --cached --name-only -z HEAD -- | tr '\0' '\n' | while IFS= read -r pat
 			seen="$seen $sha"
 			printf '1\n' >> "$root/.git/stale-worktree-refused.$$"
 		fi
-	done
- done
+	done < "$mvhit" || exit 1
+ done || { printf 'stale-worktree: cannot evaluate removed sites\n' >&2; exit 1; }
  if [ -s "$root/.git/stale-worktree-refused.$$" ]; then
  	report=$(cat "$root/.git/stale-worktree-report.$$" 2>/dev/null)
-	rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd_sorted" "$mvused" "$mvavail" "$mvrm" "$mvhit"
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
  	printf 'stale-worktree: declare each intended revert with a "Revert: <sha>" trailer line (or "Supersedes: <sha>" for a rewrite), or rework on a fresh worktree\n' >&2
  	exit 1
  fi
- rm -f "$root/.git/stale-worktree-refused.$$" "$root/.git/stale-worktree-report.$$" "$mvadd_sorted" "$mvused" "$mvavail" "$mvrm" "$mvhit"
  exit 0
