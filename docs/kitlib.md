@@ -13,6 +13,7 @@ re-implement it at the call site.
 | Process incarnation | `incarnation()` / `probeIncarnation()` / `isDead()` in `src/kitlib/proc.ts` | `incarnation()` / `probe_incarnation()` / `is_dead()` in `scripts/kitlib_proc.py` | — | `tests/fixtures/kitlib-proc/corpus.json` |
 | Locked JSONL append | `appendJsonl()` / `readJsonl()` in `src/kitlib/jsonl.ts` | `append_jsonl()` / `read_jsonl()` in `scripts/kitlib_jsonl.py` | — | `tests/fixtures/kitlib-jsonl/corpus.json` |
 | Bounded polling | `pollUntil()` / `whenAll()` in `src/kitlib/poll.ts` | `poll_until()` / `when_all()` in `scripts/kitlib_poll.py` | `python3 -B scripts/kitlib_poll.py … -- <probe argv>` | `tests/fixtures/kitlib-poll/corpus.json` |
+| Strict local artifact reader | `readLocalArtifact()` / `strictJson()` / `strictJsonl()` / `rejectUnknownFields()` in `src/kitlib/artifact.ts` | `read_local_artifact()` / `strict_json()` / `strict_jsonl()` / `reject_unknown_fields()` in `scripts/kitlib_artifact.py` | — | `tests/fixtures/kitlib-artifact/corpus.json` |
 
 ## Bounded run (KITLIB-RUN, ompkit-hsfyp)
 
@@ -250,6 +251,33 @@ no mail resend. `classify` owns the verdict: HTTP 200 with the wrong body is `re
 Each probe in the shell form runs through kitlib run. It exits 0 success, 1 terminal, 124 deadline, 130 cancelled
 (SIGINT/SIGTERM) or 2 INVALID_ARGUMENT, and prints one final JSON line. The three forms share the meaning of the
 deadline, not the sleep implementation.
+
+## Strict local artifact reader (KL10, ompkit-gvp4j)
+
+`readLocalArtifact(path, {allowedRoot, maxBytes, filePolicy: {symlinks: "refuse"|"follow", hardlinks: "refuse"|"allow"},
+distinctFrom})` checks the path before returning any byte. In order:
+1. URL-like value: `NOT_A_PATH`.
+2. Not absolute and normalized, or lexically outside the root: `OUTSIDE_ROOT`.
+3. Absent, or a dangling link: `MISSING`.
+4. Symlink, unless the policy follows: `SYMLINK`.
+5. Realpath outside realpath(root): `OUTSIDE_ROOT`.
+6. Open `O_NOFOLLOW|O_NONBLOCK`; not a regular file: `NOT_REGULAR`.
+7. `nlink > 1`: `HARDLINK`.
+8. Same inode as a `distinctFrom` path, such as the caller's output: `COLLISION`.
+9. The read stops at `maxBytes + 1` bytes; more than `maxBytes` is `TOO_LARGE`.
+10. Zero bytes is `EMPTY`; a change during the read is `CORRUPT`.
+
+It returns `{bytes, path, realpath, dev, ino, size, sha256}`. `MISSING`, `EMPTY` and `CORRUPT` are separate outcomes.
+
+`strictJson(bytes, {path})` never uses `JSON.parse` or `json.loads` (one keeps the last duplicate key, the other accepts
+NaN). It refuses invalid UTF-8, duplicate keys at any depth, NaN, Infinity and overflowing numbers, trailing data, and
+nesting deeper than 512 (`maxDepth`), as `CORRUPT` with `{path, line, column, offset, reason}`; columns and offsets
+count UTF-8 bytes in both languages.
+
+`strictJsonl(bytes, {path, maxRows, maxRowBytes, validate})` returns rows with their line numbers and one error per
+refused row: blank, oversize, truncated last row, past `maxRows`, empty input, or the owner's `validate` findings. It
+never drops a row silently and never reports an empty success. Domain schemas stay with their owners;
+`rejectUnknownFields(row, allowed)` is the helper an owner's validator calls. Writers are out of scope.
 
 ## Adoption ratchet (KITLIB-RATCHET, ompkit-qwqh1)
 

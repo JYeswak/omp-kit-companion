@@ -1,0 +1,962 @@
+{
+ "schema": "kitlib-artifact-corpus.v1",
+ "detectors": [
+  "url",
+  "root",
+  "symlink",
+  "regular",
+  "hardlink",
+  "collision",
+  "bound",
+  "empty",
+  "utf8",
+  "duplicate-key",
+  "nonfinite",
+  "trailing",
+  "truncated-row",
+  "row-size",
+  "max-rows",
+  "unknown-field"
+ ],
+ "cases": [
+  {
+   "id": "positive-valid-artifact-preserves-bytes-provenance-and-rows",
+   "control": true,
+   "steps": [
+    {
+     "op": "write",
+     "path": "{ROOT}/ledger.jsonl",
+     "text": "{\"id\":1,\"kind\":\"finding\"}\n{\"id\":2,\"kind\":\"note\",\"tags\":[\"a\",\"é\"]}\n"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/ledger.jsonl",
+     "options": {
+      "max_bytes": 4096
+     },
+     "provenance": true,
+     "expect": {
+      "ok": true,
+      "result": {
+       "path": "{ROOT}/ledger.jsonl",
+       "realpath": "{ROOT}/ledger.jsonl",
+       "size": 67,
+       "sha256": "3ee2a83bc2baa243dd06ddc6ef4fcb89accca677ff4cba0e193712d858f7c693",
+       "text": "{\"id\":1,\"kind\":\"finding\"}\n{\"id\":2,\"kind\":\"note\",\"tags\":[\"a\",\"é\"]}\n"
+      }
+     }
+    },
+    {
+     "op": "jsonl",
+     "source": "artifact",
+     "path": "{ROOT}/ledger.jsonl",
+     "options": {
+      "max_rows": 10,
+      "max_row_bytes": 200,
+      "validator": {
+       "allowed": [
+        "id",
+        "kind",
+        "tags"
+       ],
+       "required": [
+        "id"
+       ]
+      }
+     },
+     "expect": {
+      "rows": [
+       {
+        "line": 1,
+        "value": {
+         "id": 1,
+         "kind": "finding"
+        }
+       },
+       {
+        "line": 2,
+        "value": {
+         "id": 2,
+         "kind": "note",
+         "tags": [
+          "a",
+          "é"
+         ]
+        }
+       }
+      ],
+      "errors": []
+     }
+    },
+    {
+     "op": "json",
+     "text": "{\"a\": [1, 2.5, -3, true, null, \"\\u00e9\\ud83d\\ude00\"]}",
+     "expect": {
+      "ok": true,
+      "value": {
+       "a": [
+        1,
+        2.5,
+        -3,
+        true,
+        null,
+        "é😀"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "owner-validator-findings-keep-path-and-line",
+   "detector": "unknown-field",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{ROOT}/f.jsonl",
+     "text": "{\"id\":1}\n{\"id\":2,\"x\":true}\n{\"kind\":\"k\"}\n"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/f.jsonl",
+     "options": {
+      "max_bytes": 4096
+     },
+     "expect": {
+      "ok": true
+     }
+    },
+    {
+     "op": "jsonl",
+     "source": "artifact",
+     "path": "{ROOT}/f.jsonl",
+     "options": {
+      "validator": {
+       "allowed": [
+        "id",
+        "kind"
+       ],
+       "required": [
+        "id"
+       ]
+      }
+     },
+     "expect": {
+      "rows": [
+       {
+        "line": 1,
+        "value": {
+         "id": 1
+        }
+       },
+       {
+        "line": 2,
+        "value": {
+         "id": 2,
+         "x": true
+        }
+       },
+       {
+        "line": 3,
+        "value": {
+         "kind": "k"
+        }
+       }
+      ],
+      "errors": [
+       {
+        "path": "{ROOT}/f.jsonl",
+        "line": 2,
+        "reason": "VALIDATION",
+        "message": "unknown field \"x\""
+       },
+       {
+        "path": "{ROOT}/f.jsonl",
+        "line": 3,
+        "reason": "VALIDATION",
+        "message": "missing field \"id\""
+       }
+      ]
+     },
+     "expect_bypassed": {
+      "errors": [
+       {
+        "line": 3,
+        "reason": "VALIDATION",
+        "message": "missing field \"id\""
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "duplicate-key-nested-refused-with-line-and-column",
+   "detector": "duplicate-key",
+   "steps": [
+    {
+     "op": "json",
+     "path": "{ROOT}/d.json",
+     "text": "{\"a\": {\"b\": 1,\n  \"b\": 2}}",
+     "expect": {
+      "ok": false,
+      "code": "CORRUPT",
+      "evidence": {
+       "path": "{ROOT}/d.json",
+       "reason": "DUPLICATE_KEY",
+       "line": 2,
+       "column": 3,
+       "offset": 17
+      }
+     },
+     "expect_bypassed": {
+      "ok": true,
+      "value": {
+       "a": {
+        "b": 2
+       }
+      }
+     }
+    },
+    {
+     "op": "jsonl",
+     "path": "{ROOT}/d.jsonl",
+     "text": "{\"a\":1}\n{\"k\":1,\"k\":2}\n",
+     "expect": {
+      "rows": [
+       {
+        "line": 1,
+        "value": {
+         "a": 1
+        }
+       }
+      ],
+      "errors": [
+       {
+        "path": "{ROOT}/d.jsonl",
+        "line": 2,
+        "column": 8,
+        "offset": 15,
+        "reason": "DUPLICATE_KEY"
+       }
+      ]
+     },
+     "expect_bypassed": {
+      "rows": [
+       {
+        "line": 1,
+        "value": {
+         "a": 1
+        }
+       },
+       {
+        "line": 2,
+        "value": {
+         "k": 2
+        }
+       }
+      ],
+      "errors": []
+     }
+    }
+   ]
+  },
+  {
+   "id": "nan-and-nonfinite-refused",
+   "detector": "nonfinite",
+   "steps": [
+    {
+     "op": "json",
+     "text": "{\"x\": NaN}",
+     "expect": {
+      "ok": false,
+      "code": "CORRUPT",
+      "evidence": {
+       "reason": "NONFINITE",
+       "line": 1,
+       "column": 7
+      }
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "json",
+     "text": "[1e400]",
+     "expect": {
+      "ok": false,
+      "code": "CORRUPT",
+      "evidence": {
+       "reason": "NONFINITE",
+       "column": 2
+      }
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "jsonl",
+     "text": "{\"v\":-Infinity}\n",
+     "expect": {
+      "rows": [],
+      "errors": [
+       {
+        "line": 1,
+        "column": 6,
+        "reason": "NONFINITE"
+       }
+      ]
+     },
+     "expect_bypassed": {
+      "row_count": 1,
+      "errors": []
+     }
+    }
+   ]
+  },
+  {
+   "id": "invalid-utf8-refused-at-first-bad-byte",
+   "detector": "utf8",
+   "steps": [
+    {
+     "op": "json",
+     "hex": "7b2261223a22ff227d",
+     "expect": {
+      "ok": false,
+      "code": "CORRUPT",
+      "evidence": {
+       "reason": "INVALID_UTF8",
+       "line": 1,
+       "column": 7,
+       "offset": 6
+      }
+     },
+     "expect_bypassed": {
+      "ok": true,
+      "value": {
+       "a": "�"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "trailing-garbage-refused",
+   "detector": "trailing",
+   "steps": [
+    {
+     "op": "json",
+     "text": "{\"a\":1}\n x",
+     "expect": {
+      "ok": false,
+      "code": "CORRUPT",
+      "evidence": {
+       "reason": "TRAILING_GARBAGE",
+       "line": 2,
+       "column": 2
+      }
+     },
+     "expect_bypassed": {
+      "ok": true,
+      "value": {
+       "a": 1
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "oversize-row-is-an-error-not-a-skip",
+   "detector": "row-size",
+   "steps": [
+    {
+     "op": "jsonl",
+     "text": "{\"a\":1}\n{\"a\":\"0123456789\"}\n{\"b\":2}\n",
+     "options": {
+      "max_row_bytes": 10
+     },
+     "expect": {
+      "rows": [
+       {
+        "line": 1,
+        "value": {
+         "a": 1
+        }
+       },
+       {
+        "line": 3,
+        "value": {
+         "b": 2
+        }
+       }
+      ],
+      "errors": [
+       {
+        "line": 2,
+        "reason": "ROW_TOO_LARGE",
+        "offset": 8
+       }
+      ]
+     },
+     "expect_bypassed": {
+      "row_count": 3,
+      "errors": []
+     }
+    }
+   ]
+  },
+  {
+   "id": "truncated-last-row-is-an-error",
+   "detector": "truncated-row",
+   "steps": [
+    {
+     "op": "jsonl",
+     "text": "{\"a\":1}\n{\"a\":2}",
+     "expect": {
+      "rows": [
+       {
+        "line": 1,
+        "value": {
+         "a": 1
+        }
+       }
+      ],
+      "errors": [
+       {
+        "line": 2,
+        "reason": "TRUNCATED_ROW",
+        "offset": 8
+       }
+      ]
+     },
+     "expect_bypassed": {
+      "row_count": 2,
+      "errors": []
+     }
+    }
+   ]
+  },
+  {
+   "id": "rows-past-max-rows-are-reported-not-dropped",
+   "detector": "max-rows",
+   "steps": [
+    {
+     "op": "jsonl",
+     "text": "{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n",
+     "options": {
+      "max_rows": 2
+     },
+     "expect": {
+      "row_count": 2,
+      "errors": [
+       {
+        "line": 3,
+        "reason": "TOO_MANY_ROWS"
+       }
+      ]
+     },
+     "expect_bypassed": {
+      "row_count": 2,
+      "errors": []
+     }
+    }
+   ]
+  },
+  {
+   "id": "empty-jsonl-is-not-empty-success",
+   "detector": "empty",
+   "steps": [
+    {
+     "op": "jsonl",
+     "text": "",
+     "expect": {
+      "rows": [],
+      "errors": [
+       {
+        "line": 1,
+        "reason": "EMPTY"
+       }
+      ]
+     },
+     "expect_bypassed": {
+      "rows": [],
+      "errors": []
+     }
+    },
+    {
+     "op": "write",
+     "path": "{ROOT}/empty.json",
+     "text": ""
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/empty.json",
+     "options": {
+      "max_bytes": 10
+     },
+     "expect": {
+      "ok": false,
+      "code": "EMPTY"
+     },
+     "expect_bypassed": {
+      "ok": true,
+      "result": {
+       "size": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "missing-empty-corrupt-stay-separate",
+   "steps": [
+    {
+     "op": "read",
+     "path": "{ROOT}/absent.json",
+     "options": {
+      "max_bytes": 10
+     },
+     "expect": {
+      "ok": false,
+      "code": "MISSING"
+     }
+    },
+    {
+     "op": "write",
+     "path": "{ROOT}/empty.json",
+     "text": ""
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/empty.json",
+     "options": {
+      "max_bytes": 10
+     },
+     "expect": {
+      "ok": false,
+      "code": "EMPTY"
+     }
+    },
+    {
+     "op": "write",
+     "path": "{ROOT}/bad.json",
+     "text": "{\"a\":"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/bad.json",
+     "options": {
+      "max_bytes": 10
+     },
+     "expect": {
+      "ok": true
+     }
+    },
+    {
+     "op": "json",
+     "source": "artifact",
+     "path": "{ROOT}/bad.json",
+     "expect": {
+      "ok": false,
+      "code": "CORRUPT",
+      "evidence": {
+       "reason": "SYNTAX",
+       "line": 1,
+       "column": 6
+      }
+     }
+    },
+    {
+     "op": "json",
+     "text": "[[[[1]]]]",
+     "options": {
+      "max_depth": 3
+     },
+     "expect": {
+      "ok": false,
+      "code": "CORRUPT",
+      "evidence": {
+       "reason": "DEPTH",
+       "column": 4
+      }
+     }
+    },
+    {
+     "op": "jsonl",
+     "text": "{\"a\":1}\n\n",
+     "expect": {
+      "row_count": 1,
+      "errors": [
+       {
+        "line": 2,
+        "reason": "BLANK_LINE"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "url-as-file-refused",
+   "detector": "url",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{ROOT}/a.json",
+     "text": "{}"
+    },
+    {
+     "op": "read",
+     "path": "file://{ROOT}/a.json",
+     "options": {
+      "max_bytes": 10
+     },
+     "expect": {
+      "ok": false,
+      "code": "NOT_A_PATH"
+     },
+     "expect_bypassed": {
+      "ok": false,
+      "code": "OUTSIDE_ROOT"
+     }
+    },
+    {
+     "op": "read",
+     "path": "https://example.invalid/a.json",
+     "options": {
+      "max_bytes": 10
+     },
+     "expect": {
+      "ok": false,
+      "code": "NOT_A_PATH"
+     },
+     "expect_bypassed": {
+      "ok": false,
+      "code": "OUTSIDE_ROOT"
+     }
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/a.json",
+     "options": {
+      "max_bytes": 10
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "text": "{}"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "symlink-escape-refused-by-default",
+   "detector": "symlink",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{OUT}/secret.json",
+     "text": "{\"s\":1}"
+    },
+    {
+     "op": "symlink",
+     "path": "{ROOT}/link.json",
+     "target": "{OUT}/secret.json"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/link.json",
+     "options": {
+      "max_bytes": 100
+     },
+     "expect": {
+      "ok": false,
+      "code": "SYMLINK"
+     },
+     "expect_bypassed": {
+      "ok": false,
+      "code": "OUTSIDE_ROOT"
+     }
+    }
+   ]
+  },
+  {
+   "id": "symlink-escape-refused-by-root-under-follow-policy",
+   "detector": "root",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{OUT}/secret.json",
+     "text": "{\"s\":1}"
+    },
+    {
+     "op": "write",
+     "path": "{ROOT}/inside.json",
+     "text": "{\"i\":1}"
+    },
+    {
+     "op": "symlink",
+     "path": "{ROOT}/link.json",
+     "target": "{OUT}/secret.json"
+    },
+    {
+     "op": "symlink",
+     "path": "{ROOT}/ok-link.json",
+     "target": "{ROOT}/inside.json"
+    },
+    {
+     "op": "symlink",
+     "path": "{ROOT}/dir",
+     "target": "{OUT}"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/link.json",
+     "options": {
+      "max_bytes": 100,
+      "symlinks": "follow"
+     },
+     "expect": {
+      "ok": false,
+      "code": "OUTSIDE_ROOT"
+     },
+     "expect_bypassed": {
+      "ok": true,
+      "result": {
+       "text": "{\"s\":1}",
+       "realpath": "{OUT}/secret.json"
+      }
+     }
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/dir/secret.json",
+     "options": {
+      "max_bytes": 100
+     },
+     "expect": {
+      "ok": false,
+      "code": "OUTSIDE_ROOT"
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "read",
+     "path": "{OUT}/secret.json",
+     "options": {
+      "max_bytes": 100
+     },
+     "expect": {
+      "ok": false,
+      "code": "OUTSIDE_ROOT"
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/ok-link.json",
+     "options": {
+      "max_bytes": 100,
+      "symlinks": "follow"
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "realpath": "{ROOT}/inside.json"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "hardlink-refused-by-default",
+   "detector": "hardlink",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{OUT}/secret.json",
+     "text": "{\"s\":1}"
+    },
+    {
+     "op": "hardlink",
+     "path": "{ROOT}/h.json",
+     "target": "{OUT}/secret.json"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/h.json",
+     "options": {
+      "max_bytes": 100
+     },
+     "expect": {
+      "ok": false,
+      "code": "HARDLINK",
+      "evidence": {
+       "nlink": 2
+      }
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/h.json",
+     "options": {
+      "max_bytes": 100,
+      "hardlinks": "allow"
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "text": "{\"s\":1}"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "not-regular-refused",
+   "detector": "regular",
+   "steps": [
+    {
+     "op": "mkdir",
+     "path": "{ROOT}/d.json"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/d.json",
+     "options": {
+      "max_bytes": 100
+     },
+     "expect": {
+      "ok": false,
+      "code": "NOT_REGULAR"
+     },
+     "expect_bypassed": {
+      "ok": false,
+      "code": "HARDLINK"
+     }
+    }
+   ]
+  },
+  {
+   "id": "oversize-artifact-bounded-on-the-read",
+   "detector": "bound",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{ROOT}/big.json",
+     "text": "[1,2,3,40]"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/big.json",
+     "options": {
+      "max_bytes": 4
+     },
+     "expect": {
+      "ok": false,
+      "code": "TOO_LARGE",
+      "evidence": {
+       "max_bytes": 4,
+       "read_bytes": 5
+      }
+     },
+     "expect_bypassed": {
+      "ok": true,
+      "result": {
+       "size": 10
+      }
+     }
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/big.json",
+     "options": {
+      "max_bytes": 10
+     },
+     "expect": {
+      "ok": true,
+      "result": {
+       "size": 10
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "output-collision-refused-reader-side",
+   "detector": "collision",
+   "steps": [
+    {
+     "op": "write",
+     "path": "{ROOT}/in.json",
+     "text": "{}"
+    },
+    {
+     "op": "symlink",
+     "path": "{ROOT}/out.json",
+     "target": "{ROOT}/in.json"
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/in.json",
+     "options": {
+      "max_bytes": 10,
+      "distinct_from": [
+       "{ROOT}/out.json"
+      ]
+     },
+     "expect": {
+      "ok": false,
+      "code": "COLLISION",
+      "evidence": {
+       "other": "{ROOT}/out.json"
+      }
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/in.json",
+     "options": {
+      "max_bytes": 10,
+      "distinct_from": [
+       "{ROOT}/in.json"
+      ]
+     },
+     "expect": {
+      "ok": false,
+      "code": "COLLISION"
+     },
+     "expect_bypassed": {
+      "ok": true
+     }
+    },
+    {
+     "op": "read",
+     "path": "{ROOT}/in.json",
+     "options": {
+      "max_bytes": 10,
+      "distinct_from": [
+       "{ROOT}/new-output.json"
+      ]
+     },
+     "expect": {
+      "ok": true
+     }
+    }
+   ]
+  }
+ ]
+}
