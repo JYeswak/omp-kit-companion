@@ -4,11 +4,13 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writ
 import { delimiter, join } from "node:path";
 import { validateReleaseIndex, validateReleaseManifest, previewKitRelease, verifyKitArchive, assertFreshKitPlan, stageKitRelease, type KitReleasePlan } from "../../src/kit-release";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { run } from "../../src/kitlib/run";
 
 const fixture = join(import.meta.dir, "..", "fixtures", "kit-release", "release-manifest.json");
 const manifestBytes = readFileSync(fixture);
 const binary = Buffer.from("#!/bin/sh\nprintf '{\"version\":\"1.2.3\",\"source_tag\":\"v1.2.3\",\"platform\":{\"os\":\"darwin\",\"arch\":\"arm64\"}}\\n'\n");
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const receiptOutput = new TextDecoder();
 
 // Minimal ustar fixture: independent of the reader's serialization logic.
 function tar(entries: { name: string; bytes: Buffer; type?: string }[]): Buffer {
@@ -146,6 +148,7 @@ describe("versioned release contract", () => {
      { name: "bin/omp-kit", bytes: Buffer.from(`#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({ data: probeData })}'\n`) },
      { name: "scripts/receipt.py", bytes: readFileSync(join(repo, "scripts/receipt.py")) },
      { name: "scripts/kitlib_tmp.py", bytes: readFileSync(join(repo, "scripts/kitlib_tmp.py")) },
+     { name: "scripts/kitlib_artifact.py", bytes: readFileSync(join(repo, "scripts/kitlib_artifact.py")) },
      { name: "scripts/ordinary.py", bytes: Buffer.from("print('ordinary data file')\n") },
     ].sort((left, right) => left.name.localeCompare(right.name));
     const releaseManifest = Buffer.from(JSON.stringify({
@@ -191,11 +194,31 @@ describe("versioned release contract", () => {
     const receipt = join(installed, "scripts/receipt.py");
     expect(statSync(receipt).mode & 0o111).toBe(0o111);
     expect(statSync(join(installed, "scripts/ordinary.py")).mode & 0o111).toBe(0);
-    const result = Bun.spawnSync([receipt, "selftest"], {
-     cwd: work, env: { ...process.env, TMPDIR: work, PYTHONDONTWRITEBYTECODE: "1" },
-     stdout: "pipe", stderr: "pipe",
+    expect(statSync(join(installed, "scripts/kitlib_artifact.py")).mode & 0o111).toBe(0);
+    const runReceipt = (...args: string[]) => run([receipt, ...args], {
+     deadline_s: 15, cwd: work,
+     env: { PATH: process.env.PATH ?? "/usr/bin:/bin", TMPDIR: work, PYTHONPATH: "", PYTHONHOME: "", PYTHONDONTWRITEBYTECODE: "1" },
     });
-    expect(result.exitCode, result.stdout.toString() + result.stderr.toString()).toBe(0);
+    const result = await runReceipt("selftest");
+    expect(result.rc, receiptOutput.decode(result.stdout) + receiptOutput.decode(result.stderr)).toBe(0);
+    // Exercise the installed CLI directly: selftest's quiet negatives also catch unexpected import errors.
+    const good = join(work, "good.receipt.json");
+    const signed = await runReceipt("sign", "--producer", "receipt-install", "--operation", "release.test",
+     "--param", "timeout_ms=30", "--param", "ratio=0.5", "--limitation", "3-case sample",
+     "--result-sha256", "a".repeat(64), "--result-bytes", "10", "--out", good);
+    expect(signed.rc, receiptOutput.decode(signed.stdout) + receiptOutput.decode(signed.stderr)).toBe(0);
+    const verified = await runReceipt("verify", good);
+    expect(verified.rc, receiptOutput.decode(verified.stdout) + receiptOutput.decode(verified.stderr)).toBe(0);
+    // sign emits recursively sorted keys; changing one value preserves canonical projection order.
+    // Rehash the invalid integer so refusal must come from the domain, not a stale evidence_id.
+    const forged = JSON.parse(readFileSync(good, "utf8"));
+    delete forged.evidence_id;
+    forged.parameters.timeout_ms = 2 ** 53;
+    const forgedId = "ev_" + digest(Buffer.from(JSON.stringify(forged)));
+    const bad = join(work, "bad.receipt.json");
+    writeFileSync(bad, JSON.stringify({ ...forged, evidence_id: forgedId }));
+    const refused = await runReceipt("verify", bad);
+    expect(refused.rc, receiptOutput.decode(refused.stdout) + receiptOutput.decode(refused.stderr)).toBe(1);
    } finally {
     rmSync(work, { recursive: true, force: true });
    }

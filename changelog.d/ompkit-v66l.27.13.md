@@ -1,0 +1,1 @@
+- Fixed installed-receipt release checks to include the strict artifact reader and verify valid and forged out-of-domain receipts through both installation paths without ambient Python imports.
