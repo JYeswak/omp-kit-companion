@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { run as runBounded } from "../../src/kitlib/run.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -856,4 +857,89 @@ test("native durable creation followed by failure is reconciled, never reported 
 	const child = issueRows(trackerRoot).find((row) => row.external_ref === "core8:durable-child")!;
 	expect(report.writes_landed).toContainEqual({ kind: "ITEM_CREATED", id: child.id, slug: "durable-child", external_ref: "core8:durable-child" });
 	expect(showNativeIssue(trackerRoot, child.id).created_by).toBe("PlanningWriter");
+});
+
+async function requireCanonicalAdmission(dbDir: string): Promise<void> {
+	const rows = issueRows(dbDir);
+	const script = [
+		"import json, sys",
+		"sys.path.insert(0, sys.argv[1])",
+		"import bead_lint",
+		"rows = json.load(sys.stdin)",
+		"ids = {row['id'] for row in rows}",
+		"bad = {row['id']: failures for row in rows if (failures := bead_lint.lint_bead_failures(row, ids))}",
+		"print(json.dumps(bad))",
+		"sys.exit(bool(bad))",
+	].join("\n");
+	const result = await runBounded(["python3", "-B", "-c", script, join(repoRoot, "scripts")], {
+		deadline_s: 20, max_output_bytes: 1 << 20, stdin: JSON.stringify(rows), cwd: repoRoot, env: childEnv,
+	});
+	const text = new TextDecoder();
+	expect(result.rc, text.decode(result.stdout) + text.decode(result.stderr)).toBe(0);
+}
+
+test("canonical checkbox plans retain scoped coverage and pass canonical admission", async () => {
+	const plan = writePlan("canonical-checkbox", [{ slug: "canonical-checkbox", existing: "(new)" }]);
+	writeFileSync(plan, readFileSync(plan, "utf8").replaceAll("- [a]", "- [ ] [a]"));
+	const dbDir = join(scratch, "canonical-checkbox-db");
+	const result = await runCli(["planning", "convert", "--plan", plan, "--mission", "core8", "--dry-run", "--db", dbDir, "--json"]);
+	expect(result.exitCode, result.stdout).toBe(0);
+	await requireCanonicalAdmission(dbDir);
+});
+
+test("legacy lettered plans are stored as gradeable canonical criteria including the generated parent", async () => {
+	const plan = writePlan("legacy-checkbox", [{ slug: "legacy-checkbox", existing: "(new)" }]);
+	const dbDir = join(scratch, "legacy-checkbox-db");
+	const result = await runCli(["planning", "convert", "--plan", plan, "--mission", "core8", "--dry-run", "--db", dbDir, "--json"]);
+	expect(result.exitCode, result.stdout).toBe(0);
+	await requireCanonicalAdmission(dbDir);
+});
+
+test("canonical acceptance amendment is idempotent and preserves checked progress", async () => {
+	const trackerRoot = join(scratch, "canonical-amend-tracker");
+	initializeTracker(trackerRoot);
+	const plan = writePlan("canonical-amend", [{ slug: "canonical-amend", existing: "(new)" }]);
+	writeFileSync(plan, readFileSync(plan, "utf8").replaceAll("- [a]", "- [ ] [a]"));
+	const first = await runCli(applyArgs(plan, trackerRoot));
+	expect(first.exitCode, first.stdout).toBe(0);
+	const item = issueRows(trackerRoot).find((row) => row.external_ref === "core8:canonical-amend");
+	if (!item) throw new Error("converted canonical item is missing");
+	const progressed = item.acceptance_criteria.replace("- [ ]", "- [x]");
+	nativeOutput(["update", item.id, "--acceptance-criteria", progressed], trackerRoot);
+	writeFileSync(plan, planSource([{ slug: "canonical-amend", existing: item.id }]).replaceAll("- [a]", "- [ ] [a]"));
+	const second = await runCli(applyArgs(plan, trackerRoot));
+	expect(second.exitCode, second.stdout).toBe(0);
+	const afterSecond = showNativeIssue(trackerRoot, item.id);
+	expect(afterSecond.acceptance_criteria).toBe(progressed);
+	const third = await runCli(applyArgs(plan, trackerRoot));
+	expect(third.exitCode, third.stdout).toBe(0);
+	const afterThird = showNativeIssue(trackerRoot, item.id);
+	expect(afterThird.acceptance_criteria).toBe(progressed);
+	expect(afterThird.notes).toEqual(afterSecond.notes);
+});
+
+test("canonical scope sets preserve explicit progress while legacy scope x remains a scope", async () => {
+	const plan = join(scratch, "canonical-scope-sets.md");
+	let source = planSource([
+		{ slug: "scope-sets", existing: "(new)" },
+		{ slug: "legacy-scope-x", existing: "(new)" },
+	]);
+	source = source
+		.replace("WHAT: (a) scope-sets is applied to the selected tracker.", "WHAT: (a) Keep the first scope; (b) keep the second scope.")
+		.replace("- [a] scope-sets contributes", "- [ ] [a,b] scope-sets contributes")
+		.replace("- [a] Planted negative: scope-sets", "- [x] [b; a] Planted negative: scope-sets")
+		.replace("WHAT: (a) legacy-scope-x is applied to the selected tracker.", "WHAT: (x) Keep the legacy x scope.")
+		.replace("- [a] legacy-scope-x contributes", "- [x] legacy-scope-x contributes")
+		.replace("- [a] Planted negative: legacy-scope-x", "- [x] Planted negative: legacy-scope-x");
+	writeFileSync(plan, source);
+	const dbDir = join(scratch, "canonical-scope-sets-db");
+	const result = await runCli(["planning", "convert", "--plan", plan, "--mission", "core8", "--dry-run", "--db", dbDir, "--json"]);
+	expect(result.exitCode, result.stdout).toBe(0);
+	await requireCanonicalAdmission(dbDir);
+	const rows = issueRows(dbDir);
+	const scopes = rows.find((row) => row.external_ref === "core8:scope-sets");
+	const legacy = rows.find((row) => row.external_ref === "core8:legacy-scope-x");
+	if (!scopes || !legacy) throw new Error("scope fixture rows are missing");
+	expect(scopes.acceptance_criteria.includes("- [x] [a,b] Planted negative:")).toBe(true);
+	expect(legacy.acceptance_criteria.includes("- [ ] [x] legacy-scope-x contributes")).toBe(true);
 });

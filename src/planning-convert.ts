@@ -337,16 +337,68 @@ function whatLetters(value: string): string[] {
 	return [...letters].sort();
 }
 
-function acceptanceBoxes(value: string): Array<{ letter: string; text: string }> {
-	const boxes: Array<{ letter: string; text: string }> = [];
+/** Plan tags: ASCII a-z, separated by comma/semicolon and optional space/tab. Bodies remain uninterpreted text. */
+type AcceptanceBox = { letter: string; text: string; scopeMask: number; checked: boolean };
+
+function scopeMask(label: string): number {
+	let mask = 0;
+	let needsLetter = true;
+	for (const character of label) {
+		if (character === " " || character === "\t") continue;
+		if (needsLetter) {
+			if (character < "a" || character > "z") return 0;
+			mask |= 1 << (character.charCodeAt(0) - 97);
+			needsLetter = false;
+		} else {
+			if (character !== "," && character !== ";") return 0;
+			needsLetter = true;
+		}
+	}
+	return needsLetter ? 0 : mask;
+}
+
+function acceptanceLine(line: string): AcceptanceBox | null {
+	const trimmed = line.trimStart();
+	if (!trimmed.startsWith("- [")) return null;
+	const close = trimmed.indexOf("]", 3);
+	if (close <= 3) return null;
+	let letter = trimmed.slice(3, close).trim();
+	let text = trimmed.slice(close + 1).trim();
+	let checked = false;
+	if (letter === "" || ((letter === "x" || letter === "X") && text.startsWith("["))) {
+		checked = letter === "x" || letter === "X";
+		const scopeEnd = text.startsWith("[") ? text.indexOf("]") : -1;
+		letter = scopeEnd > 1 ? text.slice(1, scopeEnd).trim() : "";
+		if (scopeEnd > 1) text = text.slice(scopeEnd + 1).trim();
+	}
+	return { letter, text, scopeMask: scopeMask(letter), checked };
+}
+
+function acceptanceBoxes(value: string): AcceptanceBox[] {
+	const boxes: AcceptanceBox[] = [];
 	for (const line of splitLines(value)) {
-		const trimmed = line.trimStart();
-		if (trimmed.startsWith("- [")) {
-			const close = trimmed.indexOf("]", 3);
-			if (close > 3) boxes.push({ letter: trimmed.slice(3, close).trim(), text: trimmed.slice(close + 1).trim() });
-		} else if (trimmed && boxes.length) boxes[boxes.length - 1]!.text += " " + trimmed;
+		const box = acceptanceLine(line);
+		if (box) boxes.push(box);
+		else if (line.trim() && boxes.length) boxes[boxes.length - 1]!.text += " " + line.trim();
 	}
 	return boxes;
+}
+
+/** Logical identity ignores checkbox progress and equivalent scope-tag spelling. */
+function criterionText(box: AcceptanceBox): string {
+	let label = "";
+	for (let index = 0; index < 26; index++) if (box.scopeMask & (1 << index))
+		label += (label ? "," : "") + String.fromCharCode(97 + index);
+	return label ? "[" + label + "] " + box.text : box.text;
+}
+
+function canonicalAcceptance(value: string): string {
+	const lines = splitLines(value);
+	for (let index = 0; index < lines.length; index++) {
+		const box = acceptanceLine(lines[index]!);
+		if (box) lines[index] = (box.checked ? "- [x] " : "- [ ] ") + criterionText(box);
+	}
+	return lines.join("\n");
 }
 function normalizeBoxText(value: string): string {
 	const words: string[] = [];
@@ -390,7 +442,7 @@ function coverageFindings(items: PlanItem[]): CoverageFinding[] {
 		}
 		const boxes = acceptanceBoxes(item.acceptance);
 		for (const letter of letters) {
-			const matching = boxes.filter((box) => box.letter === letter);
+			const matching = boxes.filter((box) => Boolean(box.scopeMask & (1 << (letter.charCodeAt(0) - 97))));
 			const hasNegative = matching.some((box) => box.text.toLowerCase().includes("planted negative"));
 			const hasPositive = matching.some((box) => !box.text.toLowerCase().includes("planted negative"));
 			if (!hasPositive || !hasNegative) findings.push({ slug: item.slug, line: item.line, letter, missing_positive: !hasPositive, missing_planted_negative: !hasNegative });
@@ -840,7 +892,7 @@ function createArgs(item: PlanItem, parentId: string, planPath: string, candidat
 	return {
 		args: ["create", "--title", item.title, "--type", item.type, "--priority", item.priority,
 			"--labels", item.labels.join(","), "--parent", parentId, "--external-ref", mission + ":" + item.slug,
-			"--description-file", "-", "--acceptance-criteria", item.acceptance],
+			"--description-file", "-", "--acceptance-criteria", canonicalAcceptance(item.acceptance)],
 		input: descriptionFor(item, planPath, textOnlyDependencies, mission),
 	};
 }
@@ -1160,9 +1212,9 @@ function runPlanningConvertApply(
 	if (newItems.some((item) => !item.parent) && !parentId) {
 		const result = runApplyBr(["create", "--title", data.mission + " applied plan", "--type", "epic", "--priority", "0",
 			"--labels", "plan:" + data.mission + ",mission:" + data.mission, "--external-ref", data.mission, "--description-file", "-",
-			"--acceptance-criteria", "- [ ] Every locally applied plan item without an explicit parent is parented under this epic."],
+			"--acceptance-criteria", "- [ ] [a] Every local item without an explicit parent belongs to this epic.\n- [ ] [a] Planted negative: an unrelated or foreign tracker item is never reparented by this plan."],
 		tracker.database, tracker.commandCwd,
-		"## Success Criteria\nLocally created " + data.mission + " plan items without explicit parents belong here; foreign targets remain untouched.");
+		"WHAT: (a) Own the locally applied plan items that have no explicit parent.\nWHY: Parentage must be explicit without moving unrelated or foreign work.\n\n## Success Criteria\nEvery eligible local item has this parent; foreign targets remain untouched.");
 		const id = createdId(result.stdout);
 		if (result.exit_code !== 0 || result.error || !id)
 			return writeFailure("create-mission-epic", result, "br create did not return a parent epic id", reconcileCreated(data.mission));
@@ -1198,7 +1250,7 @@ function runPlanningConvertApply(
 		const noteLines = splitLines(group.details.notes).map((line) => line.trim());
 		const acceptanceAdded: string[] = [];
 		const contributionsAdded: string[] = [];
-		const storedTexts = acceptanceBoxes(group.details.acceptance_criteria).map((box) => box.text);
+		const storedTexts = acceptanceBoxes(group.details.acceptance_criteria).map(criterionText);
 		const pendingTexts = [...storedTexts];
 		let staleSlug: string | null = null;
 		let staleMissing: string[] = [];
@@ -1206,13 +1258,14 @@ function runPlanningConvertApply(
 		for (const item of group.items) {
 			const token = data.mission + ":" + item.slug;
 			if (!noteLines.includes(token)) {
-				for (const box of acceptanceBoxes(item.acceptance))
-					acceptanceAdded.push("[" + box.letter + "] " + box.text);
+				const missing = missingBoxTexts(acceptanceBoxes(item.acceptance).map(criterionText), pendingTexts);
+				acceptanceAdded.push(...missing);
+				pendingTexts.push(...missing);
 				contributionsAdded.push(token);
 				continue;
 			}
 			const itemBoxes = acceptanceBoxes(item.acceptance);
-			const itemCriteria = itemBoxes.map((box) => "[" + box.letter + "] " + box.text);
+			const itemCriteria = itemBoxes.map(criterionText);
 			const missing = missingBoxTexts(itemCriteria, pendingTexts);
 			if (!missing.length) continue;
 			if (!amendAcceptance) {
@@ -1233,7 +1286,7 @@ function runPlanningConvertApply(
 			});
 			return refuse("target " + id + " has STALE_ACCEPTANCE under contribution " + data.mission + ":" + staleSlug + ": the plan changed acceptance boxes that are not stored; re-run with --amend-acceptance to append them under the native revision gate");
 		}
-		const itemCriteria = new Set(group.items.flatMap((item) => acceptanceBoxes(item.acceptance).map((box) => normalizeBoxText("[" + box.letter + "] " + box.text))));
+		const itemCriteria = new Set(group.items.flatMap((item) => acceptanceBoxes(item.acceptance).map((box) => normalizeBoxText(criterionText(box)))));
 		const superseded = storedTexts.filter((text) => !itemCriteria.has(normalizeBoxText(text)));
 		const amended: AmendedTarget = {
 			id, slugs: group.items.map((item) => item.slug), acceptance_added: acceptanceAdded,
@@ -1255,8 +1308,8 @@ function runPlanningConvertApply(
 					return { writes: [], error: check.error ?? (check.stderr.trim() || "br show reconciliation failed") };
 				const after = decodeNativeShow(check.stdout, id);
 				if (after.error || !after.issue) return { writes: [], error: after.error ?? "br show reconciliation returned no issue" };
-				const beforeTexts = acceptanceBoxes(group.details.acceptance_criteria).map((box) => box.text);
-				const afterTexts = acceptanceBoxes(after.issue.acceptance_criteria).map((box) => box.text);
+				const beforeTexts = acceptanceBoxes(group.details.acceptance_criteria).map(criterionText);
+				const afterTexts = acceptanceBoxes(after.issue.acceptance_criteria).map(criterionText);
 				const counts = new Map<string, number>();
 				for (const text of afterTexts) counts.set(text, (counts.get(text) ?? 0) + 1);
 				for (const text of beforeTexts) counts.set(text, (counts.get(text) ?? 0) - 1);
@@ -1341,7 +1394,7 @@ function runPlanningConvertApply(
 	}));
 	const score = scorePlanningSnapshot({
 		repoPath: cwd, trackerPath: tracker.trackerRoot, mission: data.mission, planPath: null,
-		planExists: null, repoCommits: null, trackerCommits: null, beads: scoreBeads, nowEpochSeconds: null, ci: {},
+		planExists: null, repoCommits: null, trackerCommits: null, beads: scoreBeads, ci: {},
 	}, { targets: {}, weights: {} });
 	const scoreMetrics = metricValue(score);
 	const missionRows = finalDecoded.issues.filter((issue) => issue.issue_type !== "epic" && issue.labels.includes("mission:" + data.mission));
@@ -1426,9 +1479,10 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 		createFailures.push({ slug: mission + "-database-init", line: null, exit_code: initialization.exit_code,
 			stdout: initialization.stdout, stderr: initialization.stderr, error: initializationError });
 	if (itemsToCreate.length && initializationError === null) {
-		const parentDescription = "## Success Criteria\nAll parsed " + mission + " plan items are children of this isolated dry-run epic; explicit live parent IDs remain source metadata and no real tracker is modified.";
+		const parentDescription = "WHAT: (a) Own the isolated projection of this plan without changing the live tracker.\nWHY: Native conversion must be safely gradeable before publication.\n\n## Success Criteria\nAll parsed items belong to this isolated epic; live parent IDs remain source metadata.";
 		const parent = runBr(["create", "--title", mission + " isolated plan conversion", "--type", "epic", "--priority", "0",
-			"--labels", "plan:" + mission + ",mission:" + mission, "--external-ref", mission, "--description-file", "-", "--acceptance-criteria", "- [ ] Every parsed plan item is parented under this isolated epic."],
+			"--labels", "plan:" + mission + ",mission:" + mission, "--external-ref", mission, "--description-file", "-", "--acceptance-criteria",
+			"- [ ] [a] Every parsed item is parented under this isolated epic.\n- [ ] [a] Planted negative: conversion that changes the real tracker fails isolation; its unchanged live-tracker control passes."],
 		database.database, database.directory, parentDescription);
 		const parentIssueId = createdId(parent.stdout);
 		if (parent.exit_code === 0 && parentIssueId) parentId = parentIssueId;
@@ -1482,7 +1536,7 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 	}));
 	const scoreSnapshot: PlanningScoreSnapshot = {
 		repoPath: cwd, trackerPath: database.directory, mission, planPath: null, planExists: null,
-		repoCommits: null, trackerCommits: null, beads: scoreBeads, nowEpochSeconds: null, ci: {},
+		repoCommits: null, trackerCommits: null, beads: scoreBeads, ci: {},
 	};
 	const score = scorePlanningSnapshot(scoreSnapshot, { targets: {}, weights: {} });
 	const scoreMetrics = metricValue(score);
