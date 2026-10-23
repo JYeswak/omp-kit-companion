@@ -829,3 +829,20 @@ test("equivalence: on every fixture above, a tail covering the body equals the w
 	expect(covered).toBe(journalCorpus.size);
 });
 
+
+test("planted: a root record starting exactly at the cut is in the window; a cut mid-record still skips to the next newline", () => {
+	const lines = [JSON.stringify({ type: "session", version: 3, id: "cut-1", timestamp: stamp(0), cwd: "/repo" }),
+		JSON.stringify({ type: "custom", id: "pad-0", parentId: null, timestamp: stamp(1), customType: "memory_recall", data: "x".repeat(4096) }),
+		nativeMessage("user-0", null, 2, userText("start")), nativeMessage("assistant-0", "user-0", 3, stopped), leafPin("assistant-0")];
+	const text = lines.join("\n") + "\n";
+	const rootAt = Buffer.byteLength(lines.slice(0, 2).join("\n") + "\n");
+	const path = join(tailTmp.path, "session-cut-at-root.jsonl");
+	writeFileSync(path, text);
+	const window = Buffer.byteLength(text) - rootAt;
+	const atCut = decideFile(path, window);
+	expect(atCut).toMatchObject({ status: "KNOWN", leafId: "assistant-0", window: { startBytes: rootAt, anchored: true } });
+	// Control: a cut 5 bytes inside the root record drops it and starts at the next record.
+	const mid = decideFile(path, window - 5);
+	expect(mid.status === "KNOWN" ? mid.window : mid).not.toMatchObject({ anchored: true });
+	if (mid.status === "KNOWN") expect(mid.window!.startBytes).toBe(rootAt + Buffer.byteLength(lines[2]!) + 1);
+});

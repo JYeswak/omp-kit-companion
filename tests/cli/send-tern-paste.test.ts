@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { buildTernProofKey, proveTernCliSend, proveTernEntry, readComposerRecord, routeSendTarget, COMPOSER_RECORD_MAX_AGE_MS } from "../../src/send.ts";
 import type { ComposerVerdict } from "../../src/send.ts";
 import { parseSessionView, readSessionTail, SESSION_HEAD_BYTES, SESSION_TAIL_WINDOW_BYTES } from "../../src/plane-tern.ts";
+import type { SessionProofRange } from "../../src/plane-tern.ts";
 import type { SessionJournalView, TernObserverIo } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
@@ -122,8 +123,8 @@ function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReade
 		// Whole reads stop at the 64 MiB parse cap, as defaultTernIo's do; past it only the bounded reader sees the file.
 		readSessionFile(path) { return path === sessionFile && Buffer.byteLength(journal) <= OVER_CAP ? journal : null; },
 		...(opts.boundedReader === false ? {} : {
-			readSessionTail(path: string): SessionJournalView | null {
-				const view = path === sessionFile ? readSessionTail(path) : null;
+			readSessionTail(path: string, proof?: SessionProofRange): SessionJournalView | null {
+				const view = path === sessionFile ? readSessionTail(path, undefined, proof) : null;
 				if (view === null || view.fileSize <= OVER_CAP) return null;
 				tailReads.push(view.head.length + view.tail.length);
 				return view;
@@ -293,4 +294,65 @@ test("SESSIONCAP1 proof: past the cap the pre-send pin is the cursor's last byte
 	tampered[Buffer.byteLength(before) - 10] = 0x20;
 	writeFileSync(path, tampered);
 	expect(proveTernEntry(readSessionTail(path)!, inPlace)).toMatchObject({ status: "UNCERTAIN" });
+});
+
+/** ~9 MiB of chained records after `parent`, enough to push a key's pinned range out of the 8 MiB tail. */
+function growth(parent: string, tag: string): string {
+	const filler = "y".repeat(64 * 1024);
+	const lines: string[] = [];
+	for (let n = 1; n <= 144; n++) {
+		lines.push(JSON.stringify({ type: "custom", id: `${tag}-${n}`, parentId: parent, customType: "memory_recall", data: filler }));
+		parent = `${tag}-${n}`;
+	}
+	return lines.join("\n") + "\n";
+}
+
+test("SESSIONCAP1 proof: a key whose pinned range left the 8 MiB tail still proves from a bounded range read", () => {
+	const repo = freshDir("repo");
+	const path = join(scratch, `session-grow-${Math.random().toString(36).slice(2)}.jsonl`);
+	const before = overCapJournal(repo, "sess-grow");
+	writeFileSync(path, before);
+	const view = readSessionTail(path)!;
+	const journal = parseSessionView(view);
+	if (journal.status !== "KNOWN") throw new Error("fixture not KNOWN");
+	const key = buildTernProofKey(view, journal, { kind: "message", payload: "hi\n[kit-send-grow]", marker: "kit-send-grow", objective: "" });
+	const range = { start: key.prefixStart, cursor: key.cursorBytes };
+	appendFileSync(path, JSON.stringify({ type: "message", id: "m-live", parentId: "exit-1", message: { role: "user", content: "hi\n[kit-send-grow]" } }) + "\n");
+	const proven = { status: "PROVEN", offset: Buffer.byteLength(before), entryId: "m-live", steering: false };
+	expect(proveTernEntry(readSessionTail(path, undefined, range)!, key)).toEqual(proven);
+	appendFileSync(path, growth("m-live", "late"));
+	const grown = readSessionTail(path, undefined, range)!;
+	expect(grown.tailStart).toBeGreaterThan(key.cursorBytes);
+	expect(proveTernEntry(grown, key)).toEqual(proven);
+	// The bytes read stay bounded: the key's range plus one window after its cursor.
+	expect(grown.proofRange!.bytes.length).toBeLessThanOrEqual(key.cursorBytes - key.prefixStart + SESSION_TAIL_WINDOW_BYTES);
+	// Control: a same-size rewrite inside the pinned range never proves.
+	const tampered = readFileSync(path);
+	tampered[key.cursorBytes - 10] = 0x20;
+	writeFileSync(path, tampered);
+	expect(proveTernEntry(readSessionTail(path, undefined, range)!, key)).toEqual({ status: "UNCERTAIN", reason: "JOURNAL_PREFIX_CHANGED" });
+	// Control: a replaced file (new inode, original bytes) is JOURNAL_REPLACED.
+	tampered[key.cursorBytes - 10] = Buffer.from(before)[key.cursorBytes - 10]!;
+	writeFileSync(`${path}.new`, tampered);
+	renameSync(`${path}.new`, path);
+	expect(proveTernEntry(readSessionTail(path, undefined, range)!, key)).toEqual({ status: "UNCERTAIN", reason: "JOURNAL_REPLACED" });
+});
+
+test("SESSIONCAP1 proof: a whole-read key of a small file still proves after the file grows past the cap", () => {
+	const repo = freshDir("repo");
+	const path = join(scratch, `session-small-${Math.random().toString(36).slice(2)}.jsonl`);
+	const small = [JSON.stringify({ type: "session", id: "sess-small", cwd: repo, version: 3 }),
+		JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "user", content: "prior" } }),
+		JSON.stringify({ type: "message", id: "m2", parentId: "m1", message: { role: "assistant", content: "done", stopReason: "stop" } })].join("\n") + "\n";
+	writeFileSync(path, small);
+	const key = buildTernProofKey(small, { sessionId: "sess-small", leafId: "m2" }, { kind: "message", payload: "hi\n[kit-send-small]", marker: "kit-send-small", objective: "" });
+	const range = { start: key.prefixStart, cursor: key.cursorBytes };
+	appendFileSync(path, JSON.stringify({ type: "message", id: "m-live", parentId: "m2", message: { role: "user", content: "hi\n[kit-send-small]" } }) + "\n");
+	appendFileSync(path, growth("m-live", "a") + growth("a-144", "b") + growth("b-144", "c") + growth("c-144", "d")
+		+ growth("d-144", "e") + growth("e-144", "f") + growth("f-144", "g") + growth("g-144", "h"));
+	const view = readSessionTail(path, undefined, range)!;
+	expect(view.fileSize).toBeGreaterThan(OVER_CAP);
+	expect(proveTernEntry(view, key)).toEqual({ status: "PROVEN", offset: Buffer.byteLength(small), entryId: "m-live", steering: false });
+	// Control: without the range the same view cannot prove and says so.
+	expect(proveTernEntry(readSessionTail(path)!, key)).toEqual({ status: "UNCERTAIN", reason: "JOURNAL_PREFIX_BEYOND_WINDOW" });
 });

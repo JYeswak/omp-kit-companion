@@ -999,7 +999,9 @@ const TERN_PROOF_ANCHOR_BYTES = 64 * 1024;
  * when both reads report it). The entry must descend from the pre-send leaf
  * through post-cursor entries, so a marker on another branch never proves.
  * Transcript admission is not model consumption or an ACK. A bounded view
- * whose tail no longer holds the pinned bytes stays UNCERTAIN.
+ * whose tail no longer holds the pinned bytes proves from its proofRange (the
+ * key's range read on the same fd and snapshot); without one it stays UNCERTAIN,
+ * and a range that stops before the file's end never reports ABSENT.
  */
 export function proveTernEntry(journal: string | SessionJournalView, key: TernProofKey): TernProof {
 	const view = typeof journal === "string" ? sessionViewOfText(journal) : journal;
@@ -1007,9 +1009,20 @@ export function proveTernEntry(journal: string | SessionJournalView, key: TernPr
 	if (key.fileIdentity !== null && view.identity !== null && view.identity !== key.fileIdentity) {
 		return { status: "UNCERTAIN", reason: "JOURNAL_REPLACED" };
 	}
-	if (key.prefixStart < view.tailStart) return { status: "UNCERTAIN", reason: "JOURNAL_PREFIX_BEYOND_WINDOW" };
-	const bytes = view.tail;
-	const base = view.tailStart;
+	let bytes = view.tail;
+	let base = view.tailStart;
+	let reachesEnd = true;
+	if (key.prefixStart < view.tailStart) {
+		const range = view.proofRange;
+		if (!range || range.start !== key.prefixStart || range.start + range.bytes.length < key.cursorBytes) {
+			return { status: "UNCERTAIN", reason: "JOURNAL_PREFIX_BEYOND_WINDOW" };
+		}
+		base = range.start;
+		const rangeEnd = range.start + range.bytes.length;
+		bytes = rangeEnd >= view.tailStart
+			? Buffer.concat([range.bytes.subarray(0, view.tailStart - range.start), view.tail]) : range.bytes;
+		reachesEnd = rangeEnd >= view.tailStart;
+	}
 	if (ternJournalBodyStart(view.head) !== key.bodyStart
 		|| sha256Hex(bytes.subarray(key.prefixStart - base, key.cursorBytes - base)) !== key.prefixSha256) {
 		return { status: "UNCERTAIN", reason: "JOURNAL_PREFIX_CHANGED" };
@@ -1054,6 +1067,7 @@ export function proveTernEntry(journal: string | SessionJournalView, key: TernPr
 		}
 	}
 	if (hits.length > 0) return { status: "UNCERTAIN", reason: "ENTRY_OFF_ACTIVE_BRANCH" };
+	if (!reachesEnd) return { status: "UNCERTAIN", reason: "JOURNAL_PROOF_RANGE_BEYOND_WINDOW" };
 	if (partial || malformed) return { status: "UNCERTAIN", reason: "PARTIAL_OR_MALFORMED_TAIL" };
 	return { status: "ABSENT", reason: "NO_MATCHING_ENTRY" };
 }
@@ -1312,8 +1326,11 @@ export async function deliverToTernSeat(input: {
 			settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
 			continue;
 		}
-		const proof = proveTernEntry(journalView, rec);
-		if (proof.status === "PROVEN") settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", proof.offset);
+		// A key pinned before this view's tail re-reads with its own range on one snapshot.
+		const proofView = rec.prefixStart < journalView.tailStart
+			? readSessionView(input.io, sessionFile, { start: rec.prefixStart, cursor: rec.cursorBytes }) : journalView;
+		const proof = proofView === null ? null : proveTernEntry(proofView, rec);
+		if (proof?.status === "PROVEN") settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", proof.offset);
 	}
 	const pendingPath = resolve(join(pendingDir, `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.json`));
 	const pending = readTernPending(pendingPath);
@@ -1387,7 +1404,7 @@ export async function deliverToTernSeat(input: {
 		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
 		const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
 		for (let poll = 0; ; poll++) {
-			const current = readSessionView(input.io, sessionFile);
+			const current = readSessionView(input.io, sessionFile, { start: key.prefixStart, cursor: key.cursorBytes });
 			last = current === null ? { status: "UNCERTAIN", reason: "SESSION_FILE_UNREADABLE" } : proveTernEntry(current, key);
 			if (last.status === "PROVEN") {
 				try { rmSync(pendingPath, { force: true }); } catch {}

@@ -122,6 +122,17 @@ export interface SessionJournalView {
 	identity: string | null;
 	/** Change fingerprint: sha256 of the text for a whole read, else of identity, size, head and tail. */
 	sha256: string;
+	/** Tail read only: the byte just before `tailStart` is a newline, so a record starts exactly at the cut. */
+	cutAtRecord?: boolean;
+	/** Tail read only, on request: bytes [start, start + bytes.length) of the same snapshot, for a proof key whose
+	 * pinned prefix lies before the tail (see readSessionTail's `proof`). */
+	proofRange?: { start: number; bytes: Buffer };
+}
+
+/** A proof key's pinned range: bytes [start, cursor) plus the entries just after the cursor. */
+export interface SessionProofRange {
+	start: number;
+	cursor: number;
 }
 
 export type TernObservation = {
@@ -162,7 +173,7 @@ export type TernIdentityResult =
 export interface TernObserverIo {
 	run(argv: string[], env?: Record<string, string>): { code: number; out: string };
 	readSessionFile(path: string): string | null;
-	readSessionTail?(path: string): SessionJournalView | null;
+	readSessionTail?(path: string, proof?: SessionProofRange): SessionJournalView | null;
 	wait(ms: number): Promise<void>;
 }
 
@@ -738,7 +749,8 @@ export function parseSessionJournalTail(view: SessionJournalView): SessionJourna
 	if (tail.length === 0 || tail[tail.length - 1] !== 0x0a) return { status: "UNKNOWN", reason: "PARTIAL_RECORD" };
 	const header = headSessionHeader(head);
 	if ("reason" in header) return { status: "UNKNOWN", reason: header.reason };
-	const firstRecord = tailStart === 0 ? 0 : tailStart + tail.indexOf(0x0a) + 1;
+	// A record starting exactly at the cut (the byte before it a newline) is complete and in the window.
+	const firstRecord = tailStart === 0 || view.cutAtRecord === true ? tailStart : tailStart + tail.indexOf(0x0a) + 1;
 	const coversBody = firstRecord <= header.bodyStart;
 	const from = Math.max(firstRecord, header.bodyStart);
 	const scan: JournalScan = { sessionId: header.id, cwd: header.cwd, entries: [], byId: new Map() };
@@ -828,8 +840,20 @@ function readExactly(fd: number, position: number, length: number): Buffer | nul
  * from one open inode that must not change size, mtime or ctime while read; null on any failure. Not kitlib
  * readLocalArtifact: that reads from offset 0 and refuses any file larger than its bound, which is exactly the
  * file this exists for.
+ *
+ * The window is only what follows the cut: a malformed or duplicate record, or a record-count overflow, before
+ * the cut is invisible here although it makes the whole-file parse refuse. IDLE still needs everything it rests
+ * on inside the window (the root or a dispose checkpoint on the branch, the branch's last message, and the leaf
+ * proven by a pin or full body coverage), and omp appends records, so damage before the cut cannot make any of
+ * that evidence false; it only means the two parses can disagree on a file the whole parse would refuse.
+ *
+ * `proof`, when its pinned prefix starts before the tail, adds one more positioned read on the same fd and under
+ * the same before/after fstat: bytes [proof.start, min(fileSize, proof.cursor + windowBytes)), i.e. the key's
+ * range plus at most a window of entries after its cursor. So a proof never depends on the cursor staying in the
+ * last `windowBytes`.
  */
-export function readSessionTail(path: string, windowBytes: number = SESSION_TAIL_WINDOW_BYTES): SessionJournalView | null {
+export function readSessionTail(path: string, windowBytes: number = SESSION_TAIL_WINDOW_BYTES,
+	proof?: SessionProofRange): SessionJournalView | null {
 	let fd: number | null = null;
 	try {
 		fd = openSync(path, "r");
@@ -839,12 +863,18 @@ export function readSessionTail(path: string, windowBytes: number = SESSION_TAIL
 		const tailStart = Math.max(0, fileSize - windowBytes);
 		const head = readExactly(fd, 0, Math.min(SESSION_HEAD_BYTES, fileSize));
 		const tail = readExactly(fd, tailStart, fileSize - tailStart);
+		const cut = tailStart === 0 ? null : readExactly(fd, tailStart - 1, 1);
+		const wantRange = proof !== undefined && Number.isSafeInteger(proof.start) && Number.isSafeInteger(proof.cursor)
+			&& proof.start >= 0 && proof.start < tailStart && proof.start <= proof.cursor && proof.cursor <= fileSize;
+		const range = wantRange ? readExactly(fd, proof.start, Math.min(fileSize, proof.cursor + windowBytes) - proof.start) : null;
 		const after = fstatSync(fd);
-		if (head === null || tail === null || after.size !== before.size || after.mtimeMs !== before.mtimeMs
+		if (head === null || tail === null || (tailStart !== 0 && cut === null) || (wantRange && range === null)
+			|| after.size !== before.size || after.mtimeMs !== before.mtimeMs
 			|| after.ctimeMs !== before.ctimeMs || after.ino !== before.ino || after.dev !== before.dev) return null;
 		const identity = `${before.dev}:${before.ino}`;
 		const sha256 = createHash("sha256").update(`${identity}:${fileSize}:${head.length}\n`).update(head).update(tail).digest("hex");
-		return { head, tail, tailStart, fileSize, identity, sha256 };
+		return { head, tail, tailStart, fileSize, identity, sha256, cutAtRecord: tailStart === 0 || cut?.[0] === 0x0a,
+			...(range !== null ? { proofRange: { start: proof!.start, bytes: range } } : {}) };
 	} catch {
 		return null;
 	} finally {
@@ -852,12 +882,13 @@ export function readSessionTail(path: string, windowBytes: number = SESSION_TAIL
 	}
 }
 
-/** The seat's session file: whole within the parse cap, else the io's bounded tail; null when unreadable. */
-export function readSessionView(io: TernObserverIo, path: string): SessionJournalView | null {
+/** The seat's session file: whole within the parse cap, else the io's bounded tail; null when unreadable.
+ * `proof` asks a bounded read to also carry a proof key's pinned range (readSessionTail). */
+export function readSessionView(io: TernObserverIo, path: string, proof?: SessionProofRange): SessionJournalView | null {
 	try {
 		const text = io.readSessionFile(path);
 		if (text !== null) return sessionViewOfText(text);
-		return io.readSessionTail ? io.readSessionTail(path) : null;
+		return io.readSessionTail ? io.readSessionTail(path, proof) : null;
 	} catch {
 		return null;
 	}
@@ -1000,8 +1031,8 @@ export function defaultTernIo(): TernObserverIo {
 				return text;
 			} catch { return null; }
 		},
-		readSessionTail(path) {
-			const view = readSessionTail(path);
+		readSessionTail(path, proof) {
+			const view = readSessionTail(path, SESSION_TAIL_WINDOW_BYTES, proof);
 			return view !== null && view.fileSize > MAX_SESSION_BYTES ? view : null;
 		},
 		wait(ms) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); },
