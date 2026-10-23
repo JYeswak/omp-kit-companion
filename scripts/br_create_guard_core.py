@@ -4,17 +4,15 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import fcntl
-import hashlib
 import json
 import os
 from pathlib import Path
-import stat
 import subprocess
 import sys
-import time
 from typing import NoReturn
 import unicodedata
+
+import kitlib_lock  # sibling in scripts/ and in every release (KL08 persistent private resource locks)
 
 SIMILARITY_THRESHOLD = 0.30
 MIN_SHARED_TOKENS = 3
@@ -367,45 +365,24 @@ def project_policy(project: str) -> tuple[int, tuple[str, str] | None]:
     return next(iter(caps)), next(iter(coordinators)) if coordinators else None
 
 
-def acquire_tracker_lock(database: str) -> int:
-    # Keep a separate persistent lock inode; flocking the DB deadlocks native br, and unlinking a lock would split waiters.
-    state_home = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
-    if not state_home.is_absolute():
-        raise AdmissionError("XDG_STATE_HOME must be absolute for create serialization")
-    state_root = state_home / "omp-kit"
-    lock_dir = state_root / "create-admission"
+def acquire_tracker_lock(database: str) -> kitlib_lock.PrivateLock:
+    # A separate persistent lock inode (kitlib KL08): flocking the DB deadlocks native br, and unlinking a lock
+    # would split waiters. The lock file is $XDG_STATE_HOME/omp-kit/create-admission/<sha256(realpath(db))>.lock.
     try:
-        state_home.mkdir(parents=True, exist_ok=True)
-        state_root.mkdir(mode=0o700, exist_ok=True)
-        lock_dir.mkdir(mode=0o700, exist_ok=True)
-        for directory in (state_root, lock_dir):
-            info = directory.lstat()
-            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
-                    or stat.S_IMODE(info.st_mode) & 0o077):
-                raise AdmissionError(f"unsafe create lock directory: {directory}")
-        key = hashlib.sha256(os.path.realpath(database).encode("utf-8")).hexdigest()
-        lock_path = lock_dir / f"{key}.lock"
-        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        info = os.fstat(descriptor)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) & 0o077):
-            os.close(descriptor)
-            raise AdmissionError("unsafe create admission lock file")
-    except OSError as error:
-        raise AdmissionError(f"cannot create private tracker admission lock: {error}") from error
-    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
-    while True:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return descriptor
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                os.close(descriptor)
-                raise AdmissionError("another guarded create holds the tracker admission lock")
-            time.sleep(0.05)
-        except OSError as error:
-            os.close(descriptor)
+        return kitlib_lock.private_lock({"namespace": "create-admission", "path": database},
+                                        deadline_s=LOCK_TIMEOUT_SECONDS)
+    except kitlib_lock.PrivateLockError as error:
+        if error.code == "INVALID_STATE_DIR":
+            raise AdmissionError("XDG_STATE_HOME must be absolute for create serialization") from error
+        if error.code == "DEADLINE":
+            raise AdmissionError("another guarded create holds the tracker admission lock") from error
+        if error.code == "NOT_DIRECTORY" or error.evidence.get("which") == "directory":
+            raise AdmissionError(f"unsafe create lock directory: {error.evidence['path']}") from error
+        if error.evidence.get("which") == "lock-file" or error.code in ("NOT_REGULAR", "LINKED", "INODE_REPLACED"):
+            raise AdmissionError(f"unsafe create admission lock file: {error.code}") from error
+        if error.evidence.get("step") == "flock":
             raise AdmissionError(f"cannot acquire tracker admission lock: {error}") from error
+        raise AdmissionError(f"cannot create private tracker admission lock: {error}") from error
 
 
 

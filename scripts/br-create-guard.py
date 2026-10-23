@@ -161,7 +161,8 @@ def main(argv: list[str]) -> int:
         if parsed["dry_run"]:
             return subprocess.run([real, *parsed["prefix"], "create", *parsed["forwarded"]],  # pysafe: leaf native br dry-run passthrough; timeout bounds the wait, DEVNULL stdin fails fast instead of hanging
                                   cwd=project, timeout=120, stdin=subprocess.DEVNULL).returncode
-        lock_fd = acquire_tracker_lock(database)
+        lock = acquire_tracker_lock(database)
+        lock_fd = lock.fd
         try:
             issues = tracker_rows(real, project, database, lock_fd)
             policy = project_policy(project)
@@ -225,7 +226,7 @@ def main(argv: list[str]) -> int:
                           file=sys.stderr)
             return 0
         finally:
-            os.close(lock_fd)
+            lock.release()
     except AdmissionError as error:
         return fail(f"BR_CREATE_ADMISSION_UNKNOWN {error}")
 

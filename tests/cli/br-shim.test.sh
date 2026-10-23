@@ -396,5 +396,25 @@ export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$PATH"
 # shellcheck source=tests/cli/lib/br-create-guard-tests.sh
 . "$REPO_ROOT/tests/cli/lib/br-create-guard-tests.sh"
 
+# 16. KL08: the kitlib admission lock is the persistent inode path the hand-rolled lock used:
+# $XDG_STATE_HOME/omp-kit/create-admission/<sha256(realpath(db))>.lock, private, one link, never unlinked.
+if python3 - "$XDG_STATE_HOME" "$BEADS_DB" > "$TMP/out" 2>&1 <<'PY'
+import hashlib, os, stat, sys
+state, db = sys.argv[1:]
+lock_dir = os.path.join(state, "omp-kit", "create-admission")
+want = hashlib.sha256(os.path.realpath(db).encode("utf-8")).hexdigest() + ".lock"
+assert sorted(os.listdir(lock_dir)) == [want], (os.listdir(lock_dir), want)
+info = os.lstat(os.path.join(lock_dir, want))
+assert stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1, oct(info.st_mode)
+for directory in (os.path.join(state, "omp-kit"), lock_dir):
+    assert stat.S_IMODE(os.lstat(directory).st_mode) == 0o700, directory
+PY
+then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL create-admission-lock-path: %s\n' "$(cat "$TMP/out")"
+fi
+
  printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"
  [ "$fail" = "0" ]

@@ -1,0 +1,321 @@
+{
+	"schema": "kitlib-lock-corpus.v1",
+	"about": "One conformance corpus for kitlib lock (ompkit-lsn3a, KL08), read by tests/cli/kitlib-lock.test.ts (src/kitlib/lock.ts privateLock) and tests/scripts/kitlib_lock_test.py (scripts/kitlib_lock.py private_lock). Each case runs its steps in order in a fresh scratch dir. Placeholders: {TMP} is the realpath of the scratch dir; {STATE} is {TMP}/state, passed as state_dir to every acquire and holder; {LOCKDIR} and {LOCKFILE} are the namespace dir and lock file of the case's resource. Steps: mkdir {path, mode}; write {path, text} (truncating, same inode); symlink {path, target}; hardlink {path, target}; chmod {path, mode}; utime-epoch {path} (atime and mtime 0); replace-lockfile (rename {LOCKFILE} to {LOCKFILE}.replaced and create a new 0600 file at {LOCKFILE}); record-inode {as, path}; expect-inode {path, same_as?, mtime_epoch?, text?, exists?}; keys-equal {resources} (every resource resolves to one key and one lock path); hook {expect_uid: 'other' (getuid()+1, a foreign-owner injection), skip_inherit (plant: the inheritable flag is never set), after_lock: 'replace-lockfile' (plant: the inode is replaced between flock and the recheck)}; holder {as, lang ts|py, resource?, mode stdin|exit|zombie} spawns holders.<lang> and waits for its ACQUIRED line (zombie: the holder exits at once under a parent that never reaps it); end-holder {as, how eof|kill} ends it and waits; expect-zombie {as} (ps shows state Z for the holder's pid); acquire {as?, resource?, options, expect, expect_bypassed?} where expect is {acquired: true} or {code, evidence?, min_waited_s?} or {throws: 'type'}; release {as, expect}; inheritor {as, from} starts inheritor_argv through the language's ordinary exec path that keeps every descriptor not marked close-on-exec (Python subprocess close_fds=False; TypeScript libc popen) and end-inheritor {as} ends it by EOF on its fifo. A case with detector D runs twice: as written, then with D disabled through the test-only seam, where steps use expect_bypassed when present and when: normal / when: bypassed select steps; the planted negative must refuse in the first run and flip in the second. A case with control: true also runs with every detector disabled and must pass with its ordinary expects, so a bypass never breaks a valid lock.",
+	"detectors": ["symlink", "type", "owner", "mode", "links", "inode", "inherit", "flock"],
+	"holders": {
+		"ts": ["{BUN}", "-e", "const [mod, res, state, mode] = process.argv.slice(-4); const { privateLock } = await import(mod); try { await privateLock(JSON.parse(res), { deadline_s: 10, state_dir: state }); } catch (error) { console.log(JSON.stringify({ status: 'REFUSED', code: error.code ?? String(error) })); process.exit(3); } console.log(JSON.stringify({ status: 'ACQUIRED', pid: process.pid })); if (mode === 'stdin') { for await (const _ of Bun.stdin.stream()) { /* hold until EOF */ } } process.exit(0);", "{MODULE_TS}", "{RESOURCE_JSON}", "{STATE}", "{MODE}"],
+		"py": ["{PYTHON}", "-c", "import json, os, sys\nsys.path.insert(0, sys.argv[1])\nimport kitlib_lock\ntry:\n    kitlib_lock.private_lock(json.loads(sys.argv[2]), deadline_s=10, state_dir=sys.argv[3])\nexcept kitlib_lock.PrivateLockError as error:\n    print(json.dumps({'status': 'REFUSED', 'code': error.code}), flush=True)\n    os._exit(3)\nprint(json.dumps({'status': 'ACQUIRED', 'pid': os.getpid()}), flush=True)\nif sys.argv[4] == 'stdin':\n    while sys.stdin.buffer.read(65536):\n        pass\nos._exit(0)\n", "{SCRIPTS_DIR}", "{RESOURCE_JSON}", "{STATE}", "{MODE}"]
+	},
+	"zombie_wrapper": ["/bin/sh", "-c", "\"$@\" </dev/null & exec cat >/dev/null", "sh"],
+	"inheritor_argv": ["/bin/sh", "-c", "exec cat \"$0\" >/dev/null", "{FIFO}"],
+	"cases": [
+		{
+			"id": "aliases-resolve-to-one-lock",
+			"resource": { "namespace": "kl08", "path": "{TMP}/res/db" },
+			"steps": [
+				{ "op": "mkdir", "path": "{TMP}/res", "mode": "0700" },
+				{ "op": "write", "path": "{TMP}/res/db", "text": "" },
+				{ "op": "symlink", "path": "{TMP}/alias", "target": "{TMP}/res" },
+				{ "op": "keys-equal", "resources": [
+					{ "namespace": "kl08", "path": "{TMP}/res/db" },
+					{ "namespace": "kl08", "path": "{TMP}/alias/db" },
+					{ "namespace": "kl08", "path": "{TMP}/alias/../res/./db" },
+					{ "namespace": "kl08", "path": "{TMP}//res/db" }
+				] }
+			]
+		},
+		{
+			"id": "uncontended-acquire-release",
+			"control": true,
+			"resource": { "namespace": "kl08", "name": "job:alpha" },
+			"steps": [
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "a", "expect": "RELEASED" },
+				{ "op": "release", "as": "a", "expect": "ALREADY_RELEASED" },
+				{ "op": "record-inode", "as": "first", "path": "{LOCKFILE}" },
+				{ "op": "acquire", "as": "b", "options": { "deadline_s": 0 }, "expect": { "acquired": true } },
+				{ "op": "expect-inode", "path": "{LOCKFILE}", "same_as": "first" },
+				{ "op": "release", "as": "b", "expect": "RELEASED" },
+				{ "op": "expect-inode", "path": "{LOCKFILE}", "same_as": "first" }
+			]
+		},
+		{
+			"id": "ts-holder-blocks-alias-waiter-until-exit",
+			"detector": "flock",
+			"resource": { "namespace": "kl08", "path": "{TMP}/res/db" },
+			"steps": [
+				{ "op": "mkdir", "path": "{TMP}/res", "mode": "0700" },
+				{ "op": "write", "path": "{TMP}/res/db", "text": "" },
+				{ "op": "symlink", "path": "{TMP}/alias", "target": "{TMP}/res" },
+				{ "op": "holder", "as": "h", "lang": "ts", "resource": { "namespace": "kl08", "path": "{TMP}/alias/db" }, "mode": "stdin" },
+				{ "op": "record-inode", "as": "held", "path": "{LOCKFILE}" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0.4 },
+					"expect": { "code": "DEADLINE", "min_waited_s": 0.4, "evidence": { "path": "{LOCKFILE}", "key": "{TMP}/res/db", "namespace": "kl08", "deadline_s": 0.4 } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "w", "expect": "RELEASED", "when": "bypassed" },
+				{ "op": "expect-inode", "path": "{LOCKFILE}", "same_as": "held" },
+				{ "op": "end-holder", "as": "h", "how": "eof" },
+				{ "op": "acquire", "as": "w2", "options": { "deadline_s": 10 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "w2", "expect": "RELEASED" }
+			]
+		},
+		{
+			"id": "py-holder-blocks-alias-waiter-until-exit",
+			"detector": "flock",
+			"resource": { "namespace": "kl08", "path": "{TMP}/alias/db" },
+			"steps": [
+				{ "op": "mkdir", "path": "{TMP}/res", "mode": "0700" },
+				{ "op": "write", "path": "{TMP}/res/db", "text": "" },
+				{ "op": "symlink", "path": "{TMP}/alias", "target": "{TMP}/res" },
+				{ "op": "holder", "as": "h", "lang": "py", "resource": { "namespace": "kl08", "path": "{TMP}/res/db" }, "mode": "stdin" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0.4 },
+					"expect": { "code": "DEADLINE", "min_waited_s": 0.4, "evidence": { "path": "{LOCKFILE}", "key": "{TMP}/res/db", "namespace": "kl08", "deadline_s": 0.4 } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "w", "expect": "RELEASED", "when": "bypassed" },
+				{ "op": "end-holder", "as": "h", "how": "eof" },
+				{ "op": "acquire", "as": "w2", "options": { "deadline_s": 10 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "w2", "expect": "RELEASED" }
+			]
+		},
+		{
+			"id": "named-resource-serializes-across-languages",
+			"resource": { "namespace": "kl08", "name": "job:beta" },
+			"steps": [
+				{ "op": "holder", "as": "t", "lang": "ts", "mode": "stdin" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0.2 }, "expect": { "code": "DEADLINE", "min_waited_s": 0.2 } },
+				{ "op": "end-holder", "as": "t", "how": "eof" },
+				{ "op": "holder", "as": "p", "lang": "py", "mode": "stdin" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0.2 }, "expect": { "code": "DEADLINE", "min_waited_s": 0.2 } },
+				{ "op": "end-holder", "as": "p", "how": "eof" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 10 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "w", "expect": "RELEASED" }
+			]
+		},
+		{
+			"id": "killed-holder-releases",
+			"resource": { "namespace": "kl08", "name": "job:gamma" },
+			"steps": [
+				{ "op": "holder", "as": "h", "lang": "py", "mode": "stdin" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0 }, "expect": { "code": "DEADLINE" } },
+				{ "op": "end-holder", "as": "h", "how": "kill" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 10 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "w", "expect": "RELEASED" }
+			]
+		},
+		{
+			"id": "zombie-holder-holds-nothing",
+			"resource": { "namespace": "kl08", "name": "job:delta" },
+			"steps": [
+				{ "op": "holder", "as": "z", "lang": "ts", "mode": "zombie" },
+				{ "op": "expect-zombie", "as": "z" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 5 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "w", "expect": "RELEASED" },
+				{ "op": "end-holder", "as": "z", "how": "eof" }
+			]
+		},
+		{
+			"id": "stale-age-and-reused-pid-never-break-a-live-holder",
+			"detector": "flock",
+			"resource": { "namespace": "kl08", "name": "job:epsilon" },
+			"steps": [
+				{ "op": "holder", "as": "h", "lang": "py", "mode": "stdin" },
+				{ "op": "write", "path": "{LOCKFILE}", "text": "pid=1\n" },
+				{ "op": "utime-epoch", "path": "{LOCKFILE}" },
+				{ "op": "record-inode", "as": "held", "path": "{LOCKFILE}" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0.3 }, "expect": { "code": "DEADLINE", "min_waited_s": 0.3 }, "expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "w", "expect": "RELEASED", "when": "bypassed" },
+				{ "op": "expect-inode", "path": "{LOCKFILE}", "same_as": "held", "mtime_epoch": true, "text": "pid=1\n" },
+				{ "op": "end-holder", "as": "h", "how": "eof" },
+				{ "op": "acquire", "as": "w2", "options": { "deadline_s": 10 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "w2", "expect": "RELEASED" },
+				{ "op": "expect-inode", "path": "{LOCKFILE}", "same_as": "held", "mtime_epoch": true, "text": "pid=1\n" }
+			]
+		},
+		{
+			"id": "intentional-inheritance-child-keeps-lock",
+			"resource": { "namespace": "kl08", "name": "job:zeta" },
+			"steps": [
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0, "inherit": true }, "expect": { "acquired": true } },
+				{ "op": "inheritor", "as": "c", "from": "a" },
+				{ "op": "release", "as": "a", "expect": "RELEASED" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0.3 }, "expect": { "code": "DEADLINE" } },
+				{ "op": "end-inheritor", "as": "c" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 10 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "w", "expect": "RELEASED" }
+			]
+		},
+		{
+			"id": "default-no-inheritance-child-holds-nothing",
+			"control": true,
+			"resource": { "namespace": "kl08", "name": "job:eta" },
+			"steps": [
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 }, "expect": { "acquired": true } },
+				{ "op": "inheritor", "as": "c", "from": "a" },
+				{ "op": "release", "as": "a", "expect": "RELEASED" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "w", "expect": "RELEASED" },
+				{ "op": "end-inheritor", "as": "c" }
+			]
+		},
+		{
+			"id": "planted-child-fd-loss-refused",
+			"detector": "inherit",
+			"resource": { "namespace": "kl08", "name": "job:theta" },
+			"steps": [
+				{ "op": "hook", "skip_inherit": true },
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0, "inherit": true },
+					"expect": { "code": "INHERIT_FAILED", "evidence": { "inherit": true, "cloexec": true } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "inheritor", "as": "c", "from": "a", "when": "bypassed" },
+				{ "op": "release", "as": "a", "expect": "RELEASED", "when": "bypassed" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0 }, "expect": { "acquired": true }, "when": "bypassed" },
+				{ "op": "release", "as": "w", "expect": "RELEASED", "when": "bypassed" },
+				{ "op": "end-inheritor", "as": "c", "when": "bypassed" },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0 }, "expect": { "acquired": true }, "when": "normal" },
+				{ "op": "release", "as": "w", "expect": "RELEASED", "when": "normal" }
+			]
+		},
+		{
+			"id": "foreign-uid-refused",
+			"detector": "owner",
+			"resource": { "namespace": "kl08", "name": "job:iota" },
+			"steps": [
+				{ "op": "hook", "expect_uid": "other" },
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 },
+					"expect": { "code": "FOREIGN_UID", "evidence": { "path": "{STATE}", "which": "directory" } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "a", "expect": "RELEASED", "when": "bypassed" }
+			]
+		},
+		{
+			"id": "permissive-namespace-dir-refused",
+			"detector": "mode",
+			"resource": { "namespace": "kl08", "name": "job:kappa" },
+			"steps": [
+				{ "op": "mkdir", "path": "{STATE}", "mode": "0700" },
+				{ "op": "mkdir", "path": "{LOCKDIR}", "mode": "0755" },
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 },
+					"expect": { "code": "PERMISSIVE_MODE", "evidence": { "path": "{LOCKDIR}", "which": "directory", "mode": "0755" } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "a", "expect": "RELEASED", "when": "bypassed" }
+			]
+		},
+		{
+			"id": "permissive-lock-file-refused",
+			"detector": "mode",
+			"resource": { "namespace": "kl08", "name": "job:lambda" },
+			"steps": [
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "a", "expect": "RELEASED" },
+				{ "op": "chmod", "path": "{LOCKFILE}", "mode": "0644" },
+				{ "op": "acquire", "as": "b", "options": { "deadline_s": 0 },
+					"expect": { "code": "PERMISSIVE_MODE", "evidence": { "path": "{LOCKFILE}", "which": "lock-file", "mode": "0644" } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "b", "expect": "RELEASED", "when": "bypassed" }
+			]
+		},
+		{
+			"id": "symlink-lock-file-refused",
+			"detector": "symlink",
+			"resource": { "namespace": "kl08", "name": "job:mu" },
+			"steps": [
+				{ "op": "mkdir", "path": "{STATE}", "mode": "0700" },
+				{ "op": "mkdir", "path": "{LOCKDIR}", "mode": "0700" },
+				{ "op": "write", "path": "{TMP}/elsewhere", "text": "" },
+				{ "op": "chmod", "path": "{TMP}/elsewhere", "mode": "0600" },
+				{ "op": "symlink", "path": "{LOCKFILE}", "target": "{TMP}/elsewhere" },
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 },
+					"expect": { "code": "SYMLINK", "evidence": { "path": "{LOCKFILE}", "which": "lock-file" } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "a", "expect": "RELEASED", "when": "bypassed" },
+				{ "op": "expect-inode", "path": "{TMP}/elsewhere", "exists": true }
+			]
+		},
+		{
+			"id": "symlink-namespace-dir-refused",
+			"detector": "symlink",
+			"resource": { "namespace": "kl08", "name": "job:nu" },
+			"steps": [
+				{ "op": "mkdir", "path": "{STATE}", "mode": "0700" },
+				{ "op": "mkdir", "path": "{TMP}/otherdir", "mode": "0700" },
+				{ "op": "symlink", "path": "{LOCKDIR}", "target": "{TMP}/otherdir" },
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 },
+					"expect": { "code": "SYMLINK", "evidence": { "path": "{LOCKDIR}", "which": "directory" } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "a", "expect": "RELEASED", "when": "bypassed" }
+			]
+		},
+		{
+			"id": "not-directory-state-refused",
+			"detector": "type",
+			"resource": { "namespace": "kl08", "name": "job:xi" },
+			"steps": [
+				{ "op": "write", "path": "{STATE}", "text": "" },
+				{ "op": "chmod", "path": "{STATE}", "mode": "0600" },
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 },
+					"expect": { "code": "NOT_DIRECTORY", "evidence": { "path": "{STATE}" } },
+					"expect_bypassed": { "code": "IO_ERROR" } }
+			]
+		},
+		{
+			"id": "hard-linked-lock-file-refused",
+			"detector": "links",
+			"resource": { "namespace": "kl08", "name": "job:omicron" },
+			"steps": [
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 }, "expect": { "acquired": true } },
+				{ "op": "release", "as": "a", "expect": "RELEASED" },
+				{ "op": "hardlink", "path": "{TMP}/second-name", "target": "{LOCKFILE}" },
+				{ "op": "acquire", "as": "b", "options": { "deadline_s": 0 },
+					"expect": { "code": "LINKED", "evidence": { "path": "{LOCKFILE}", "nlink": 2 } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "b", "expect": "RELEASED", "when": "bypassed" }
+			]
+		},
+		{
+			"id": "inode-replaced-while-locking-refused",
+			"detector": "inode",
+			"resource": { "namespace": "kl08", "name": "job:pi" },
+			"steps": [
+				{ "op": "hook", "after_lock": "replace-lockfile" },
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 },
+					"expect": { "code": "INODE_REPLACED", "evidence": { "path": "{LOCKFILE}", "step": "locked" } },
+					"expect_bypassed": { "acquired": true } },
+				{ "op": "release", "as": "a", "expect": "RELEASED", "when": "bypassed" },
+				{ "op": "expect-inode", "path": "{LOCKFILE}.replaced", "exists": true }
+			]
+		},
+		{
+			"id": "inode-replaced-before-release-reported-successor-untouched",
+			"detector": "inode",
+			"resource": { "namespace": "kl08", "name": "job:rho" },
+			"steps": [
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0 }, "expect": { "acquired": true } },
+				{ "op": "replace-lockfile" },
+				{ "op": "record-inode", "as": "successor", "path": "{LOCKFILE}" },
+				{ "op": "holder", "as": "s", "lang": "py", "mode": "stdin" },
+				{ "op": "release", "as": "a", "expect": "INODE_REPLACED", "expect_bypassed": "RELEASED" },
+				{ "op": "expect-inode", "path": "{LOCKFILE}", "same_as": "successor" },
+				{ "op": "expect-inode", "path": "{LOCKFILE}.replaced", "exists": true },
+				{ "op": "acquire", "as": "w", "options": { "deadline_s": 0 }, "expect": { "code": "DEADLINE" } },
+				{ "op": "end-holder", "as": "s", "how": "eof" }
+			]
+		},
+		{
+			"id": "relative-state-dir-refused",
+			"resource": { "namespace": "kl08", "name": "job:sigma" },
+			"steps": [
+				{ "op": "acquire", "as": "a", "options": { "deadline_s": 0, "state_dir": "relative/state" }, "expect": { "code": "INVALID_STATE_DIR" } }
+			]
+		},
+		{
+			"id": "bad-shapes-throw",
+			"resource": { "namespace": "kl08", "name": "job:tau" },
+			"steps": [
+				{ "op": "acquire", "resource": { "namespace": "Bad/NS", "name": "x" }, "options": { "deadline_s": 0 }, "expect": { "throws": "type" } },
+				{ "op": "acquire", "resource": { "namespace": "kl08", "name": "/abs" }, "options": { "deadline_s": 0 }, "expect": { "throws": "type" } },
+				{ "op": "acquire", "resource": { "namespace": "kl08", "name": "x", "path": "/x" }, "options": { "deadline_s": 0 }, "expect": { "throws": "type" } },
+				{ "op": "acquire", "options": { "deadline_s": -1 }, "expect": { "throws": "type" } }
+			]
+		}
+	]
+}

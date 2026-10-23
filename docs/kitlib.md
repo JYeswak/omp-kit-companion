@@ -8,6 +8,7 @@ re-implement it at the call site.
 |---|---|---|---|---|
 | Bounded run | `run()` in `src/kitlib/run.ts` | `run()` in `scripts/kitlib_run.py` | — | `tests/fixtures/kitlib-run/corpus.json` |
 | Owned temp dir | `ownedTmp()` in `src/kitlib/tmp.ts` | `owned_tmp()` in `scripts/kitlib_tmp.py` | `kitlib_tmp` in `scripts/kitlib-tmp.sh` | `tests/fixtures/kitlib-tmp/corpus.json` |
+| Private resource lock | `privateLock()` in `src/kitlib/lock.ts` | `private_lock()` in `scripts/kitlib_lock.py` | — | `tests/fixtures/kitlib-lock/corpus.json` |
 
 ## Bounded run (KITLIB-RUN, ompkit-hsfyp)
 
@@ -73,3 +74,33 @@ caller drains first. Turn auto-cleanup off for those: TS `ownedTmp(label, { auto
 `.owner` are the same, but no exit or signal hook removes it; `cleanup()` (`kitlib_tmp_cleanup`) still does on
 demand. If the process crashes, the scratch reaper reaps it from its `.owner` (dead pid, no open fds). Removal stays
 the caller's job.
+
+## Private resource lock (KL08, ompkit-lsn3a)
+
+The domain names a resource, never a lock path: `{namespace, path}` (canonicalised with realpath, so aliases of one
+file share one key) or `{namespace, name}`. The lock is the persistent file `<state>/<namespace>/<sha256(key)>.lock`,
+where `<state>` is `$XDG_STATE_HOME/omp-kit` (default `~/.local/state/omp-kit`). Both languages take the same
+`flock(2)` on the same inode, so a TypeScript holder blocks a Python waiter and the other way round.
+
+Every call validates the state dir, the namespace dir and the lock file. A symlink, another uid, any group/other mode
+bit, a second hard link or a replaced inode refuses with a typed `PrivateLockError` (`.code`, `.evidence`). The wait
+is monotonic and bounded; on timeout it refuses `DEADLINE` with path, key, deadline, waited and attempts. Nothing is
+ever unlinked, and neither file age nor a pid decides liveness: the kernel releases a flock when its last descriptor
+closes. Cancellation closes the owner descriptor. Inheritance is opt-in (`inherit`), and the flag is read back.
+`release()` closes the descriptor and returns `RELEASED`, or `INODE_REPLACED` when the path no longer names the held
+inode. macOS and Linux only; elsewhere the call refuses `UNSUPPORTED_PLATFORM`.
+
+```ts
+import { privateLock } from "../src/kitlib/lock";
+const lock = await privateLock({ namespace: "create-admission", path: database }, { deadline_s: 5 });
+try { /* critical section; pass lock.fd in a Bun.spawn stdio slot to hand it to a child */ } finally { lock.release(); }
+```
+
+```python
+import kitlib_lock
+with kitlib_lock.private_lock({"namespace": "create-admission", "path": database}, deadline_s=5) as lock:
+    ...  # lock.fd; pass_fds=(lock.fd,) hands it to one child
+```
+
+SQLite connection locks (`service-run`), mkdir admission (`heavy`), Git index locks (`index-lock`), pane locks and
+distributed append leases are separate protocols; do not route them through this primitive.
