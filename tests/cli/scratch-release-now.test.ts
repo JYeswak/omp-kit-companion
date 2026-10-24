@@ -311,10 +311,14 @@ test("createScratch dirs release with now through the same path", () => {
 	// The recorded start is this stub's; the owner's incarnation probe is planted live (ompkit-5m6ej) to match it.
 	const live: LivenessDeps = { ...noPid, signalAlive: () => true, processStart: () => "Mon Oct 20 06:00:00 2026",
 		probe: (owner) => ({ state: "live", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: owner.start, stat: "S", signal0: null, reason: "planted" } }) };
-	process.env.OMP_KIT_SCRATCH_ROOTS = scratchParent;
-	const home = ownedTmp("now-home", { root: scratchParent }).path;
-	cleanup.push(home);
-	const created = createScratch("nowproof", repo, deps({ liveness: live }), { bin: "throwaway", purpose: "probe" }, false, join(home, "scratch-budgets.json"));
+	const ownerRepo = ownedTmp("now-proof-repo", { root: scratchParent, autoCleanup: false }).path;
+	const ownerRoot = join(ownerRepo, "var", "agent-tmp");
+	mkdirSync(join(ownerRepo, ".git"), { recursive: true });
+	mkdirSync(ownerRoot, { recursive: true });
+	process.env.OMP_KIT_SCRATCH_ROOTS = ownerRoot;
+	const home = ownedTmp("now-home", { root: scratchParent, autoCleanup: false }).path;
+	cleanup.push(ownerRepo, home);
+	const created = createScratch("nowproof", ownerRepo, deps({ liveness: live }), { bin: "throwaway", purpose: "probe" }, false, join(home, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);
 	cleanup.push(created.dir);
 	const released = releaseScratch(created.dir, home, deps({ liveness: live }), { bin: "throwaway", now: true });
