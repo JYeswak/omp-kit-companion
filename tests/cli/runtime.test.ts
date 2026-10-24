@@ -17,7 +17,10 @@ afterEach(() => {
 });
 
 function fixtureRoot(): string {
-	const root = realpathSync(ownedTmp("omp-kit-runtime").path);
+	// Keep owner-mismatch fixtures under the caller tree, independent of ambient TMPDIR.
+	const scratchRoot = join(REPO_ROOT, "var", "agent-tmp");
+	mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
+	const root = realpathSync(ownedTmp("omp-kit-runtime", { root: scratchRoot }).path);
 	fixtures.push(root);
 	return root;
 }
