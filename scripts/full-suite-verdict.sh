@@ -164,15 +164,26 @@ OWN_ARCHIVE=0
 if [ -z "$ARCHIVE_DIR" ]; then
 	WORK_PARENT="$ROOT/var/agent-tmp"
 	mkdir -p "$WORK_PARENT" || { fail "cannot stage the candidate archive"; exit 1; }
-	ARCHIVE_DIR=$(mktemp -d "$WORK_PARENT/full-suite-verdict.XXXXXX") || { fail "cannot stage the candidate archive"; exit 1; }
+	export KITLIB_TMP_ROOT="$WORK_PARENT"
+	# shellcheck source=scripts/kitlib-tmp.sh
+	. "$SCRIPT_DIR/kitlib-tmp.sh"
+	kitlib_tmp ARCHIVE_DIR full-suite-verdict || { fail "cannot stage the candidate archive"; exit 1; }
 	OWN_ARCHIVE=1
-	git -C "$ROOT" archive "$COMMIT" | tar -xf - -C "$ARCHIVE_DIR" || { rm -rf "$ARCHIVE_DIR"; fail "cannot export candidate $COMMIT"; exit 1; }
 fi
-[ -d "$ARCHIVE_DIR/tests" ] || { [ "$OWN_ARCHIVE" = 1 ] && rm -rf "$ARCHIVE_DIR"; fail "candidate archive has no tests/ tree"; exit 1; }
 cleanup_archive() {
-	[ "$OWN_ARCHIVE" = 1 ] && rm -rf "$ARCHIVE_DIR" 2>/dev/null
+	if [ "$OWN_ARCHIVE" = 1 ]; then kitlib_tmp_cleanup "$ARCHIVE_DIR" 2>/dev/null || :; fi
 	return 0
 }
+if [ "$OWN_ARCHIVE" = 1 ] && ! git -C "$ROOT" archive "$COMMIT" | tar -xf - -C "$ARCHIVE_DIR"; then
+	cleanup_archive
+	fail "cannot export candidate $COMMIT"
+	exit 1
+fi
+if [ ! -d "$ARCHIVE_DIR/tests" ]; then
+	cleanup_archive
+	fail "candidate archive has no tests/ tree"
+	exit 1
+fi
 
 # Enumerate the complete declared suite from the archive. No focus selection, no wall-budget
 # planner: everything runnable runs.
@@ -257,8 +268,11 @@ run_suite() {
 		# the fresh-gate process's save-only disk observer. Keep nested heavy calls on statfs; their physical
 		# 10 GiB floor still refuses when the suite cannot fit.
 		export OMP_KIT_DISK_OBSERVER=statfs
-		export TMPDIR="$ARCHIVE_DIR/var/agent-tmp"
-		mkdir -p "$ARCHIVE_DIR/var/agent-tmp"
+		export KITLIB_TMP_ROOT="$ARCHIVE_DIR/var/agent-tmp"
+		mkdir -p "$KITLIB_TMP_ROOT"
+		. "$ARCHIVE_DIR/scripts/kitlib-tmp.sh"
+		export TMPDIR
+		export OMP_KIT_CASE_CWD="$ROOT"
 		if [ -f "$ARCHIVE_DIR/bunfig.toml" ]; then
 			export BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml"
 			bun_config="--config=$ARCHIVE_DIR/bunfig.toml"

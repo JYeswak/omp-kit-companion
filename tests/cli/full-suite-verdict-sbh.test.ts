@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -23,6 +23,8 @@ test("full-suite sibling inherits statfs while auto/sbh still refuses", async ()
 	const suiteDir = join(fixture, "tests", "cli");
 	const stateDir = join(fixture, "var", "agent-tmp");
 	mkdirSync(suiteDir, { recursive: true });
+	mkdirSync(join(fixture, "scripts"), { recursive: true });
+	copyFileSync(join(repoRoot, "scripts", "kitlib-tmp.sh"), join(fixture, "scripts", "kitlib-tmp.sh"));
 	mkdirSync(stateDir, { recursive: true });
 	await git(fixture, "init", "-q");
 	await git(fixture, "config", "user.name", "SAVEFIRST1 test");
@@ -71,7 +73,7 @@ fi
 rm -rf "$case_tmp"
 `, { mode: 0o755 });
 	chmodSync(suite, 0o755);
-	await git(fixture, "add", "tests/cli/savefirst-sibling-pressure.test.sh");
+	await git(fixture, "add", "--", "tests/cli/savefirst-sibling-pressure.test.sh", "scripts/kitlib-tmp.sh");
 	await git(fixture, "commit", "-q", "-m", "[test] SAVEFIRST1 sibling fixture");
 
 	const candidate = await git(fixture, "rev-parse", "HEAD");
@@ -80,17 +82,68 @@ rm -rf "$case_tmp"
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
 	env.KITROOT = repoRoot;
 	env.OMP_KIT_OMP_SRC_FETCH = "0";
-	const result = await run(["sh", fullSuiteVerdict, "--repo", fixture, "--commit", candidate, "--archive-dir", fixture, "--cache-dir", cache], {
+	const result = await run(["sh", fullSuiteVerdict, "--repo", fixture, "--commit", candidate, "--cache-dir", cache], {
 		cwd: fixture, deadline_s: 120, env,
 	});
 	const output = `${new TextDecoder().decode(result.stdout)}${new TextDecoder().decode(result.stderr)}`;
-	expect(result.rc, output).toBe(0);
-	expect(result.timed_out, output).toBe(false);
-	expect(output).toContain("FULL-SUITE: VERDICT PASS");
-
 	const tree = await git(fixture, "rev-parse", "HEAD^{tree}");
+	const log = readFileSync(join(cache, `${tree}.log`), "utf8");
+	const evidence = `${output}\n${log}`;
+	expect(result.rc, evidence).toBe(0);
+	expect(result.timed_out, evidence).toBe(false);
+	expect(output).toContain("FULL-SUITE: VERDICT PASS");
+	expect(readdirSync(join(fixture, "var", "agent-tmp"))).toEqual([]);
+
 	const verdictPath = join(cache, `${tree}.json`);
 	const verdict = JSON.parse(readFileSync(verdictPath, "utf8")) as { verdict: string; evidence: { complete: boolean; shell_suites: number; shell_fail: number } };
 	expect(verdict).toMatchObject({ verdict: "PASS", evidence: { complete: true, shell_suites: 1, shell_fail: 0 } });
 	expect(readFileSync(join(cache, `${tree}.log`), "utf8")).toContain("SAVEFIRST1 full-suite sibling pressure PASS");
+}, 30_000);
+test("full-suite supplies Git and private temp context to archived shell suites", async () => {
+	const fixture = join(scratch.path, "caller-context");
+	const suiteDir = join(fixture, "tests", "cli");
+	mkdirSync(suiteDir, { recursive: true });
+	mkdirSync(join(fixture, "scripts"), { recursive: true });
+	copyFileSync(join(repoRoot, "scripts", "kitlib-tmp.sh"), join(fixture, "scripts", "kitlib-tmp.sh"));
+	mkdirSync(join(fixture, "var", "agent-tmp"), { recursive: true });
+	await git(fixture, "init", "-q");
+	await git(fixture, "config", "user.name", "SAVEFIRST1 context test");
+	await git(fixture, "config", "user.email", "savefirst1-context@example.invalid");
+
+	const suite = join(suiteDir, "savefirst-caller-context.test.sh");
+	writeFileSync(suite, String.raw`#!/bin/sh
+set -eu
+: "$OMP_KIT_CASE_CWD"
+git -C "$OMP_KIT_CASE_CWD" rev-parse --show-toplevel >/dev/null
+: "$KITLIB_TMP_ROOT"
+. "$KITROOT/scripts/kitlib-tmp.sh"
+test -f "$TMPDIR/.owner"
+kitlib_tmp work full-suite-context
+test -d "$work"
+printf 'FULL-SUITE-CONTEXT PASS\n'
+`, { mode: 0o755 });
+	chmodSync(suite, 0o755);
+	await git(fixture, "add", "--", "tests/cli/savefirst-caller-context.test.sh", "scripts/kitlib-tmp.sh");
+	await git(fixture, "commit", "-q", "-m", "[test] SAVEFIRST1 caller context");
+
+	const candidate = await git(fixture, "rev-parse", "HEAD");
+	const cache = join(fixture, "cache");
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+	env.OMP_KIT_CASE_CWD = join(fixture, "stale-missing-caller-root");
+	env.KITLIB_TMP_ROOT = join(fixture, "stale-missing-kitlib-root");
+	env.KITROOT = fixture;
+	env.OMP_KIT_OMP_SRC_FETCH = "0";
+	const result = await run(["sh", fullSuiteVerdict, "--repo", fixture, "--commit", candidate, "--cache-dir", cache], {
+		cwd: fixture, deadline_s: 120, env,
+	});
+	const output = `${new TextDecoder().decode(result.stdout)}${new TextDecoder().decode(result.stderr)}`;
+	const tree = await git(fixture, "rev-parse", "HEAD^{tree}");
+	const log = readFileSync(join(cache, `${tree}.log`), "utf8");
+	const evidence = `${output}\n${log}`;
+	expect(result.rc, evidence).toBe(0);
+	expect(result.timed_out, evidence).toBe(false);
+	expect(output).toContain("FULL-SUITE: VERDICT PASS");
+	expect(log).toContain("FULL-SUITE-CONTEXT PASS");
+	expect(readdirSync(join(fixture, "var", "agent-tmp"))).toEqual([]);
 }, 30_000);
