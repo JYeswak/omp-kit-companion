@@ -349,21 +349,24 @@ timed_out=0
 suite_rc=0
 run_suite &
 suite_pid=$!
-waited=0
-while kill -0 "$suite_pid" 2>/dev/null; do
-	if [ "$waited" -ge "$TIMEOUT_SECS" ]; then
-		kill_tree "$suite_pid" TERM
-		sleep 5
-		kill_tree "$suite_pid" KILL
-		wait "$suite_pid" 2>/dev/null || true
-		timed_out=1
-		break
-	fi
+# Wait on the suite itself; a watchdog enforces the deadline. Polling every 5 s made even an
+# instant suite cost a full 5 s per verdict (every land call paid it).
+timeout_mark="$SUITE_OUT.timed-out"
+rm -f "$timeout_mark"
+(
+	sleep "$TIMEOUT_SECS"
+	: >"$timeout_mark"
+	kill_tree "$suite_pid" TERM
 	sleep 5
-	waited=$((waited + 5))
-done
-if [ "$timed_out" = 0 ]; then
-	wait "$suite_pid" 2>/dev/null || suite_rc=$?
+	kill_tree "$suite_pid" KILL
+) 2>/dev/null &
+watchdog_pid=$!
+wait "$suite_pid" 2>/dev/null || suite_rc=$?
+kill_tree "$watchdog_pid" TERM
+wait "$watchdog_pid" 2>/dev/null || true
+if [ -f "$timeout_mark" ]; then
+	rm -f "$timeout_mark"
+	timed_out=1
 fi
 if [ "$timed_out" = 1 ]; then
 	finish_logs "$CACHE_DIR/$tree.incomplete.log"
