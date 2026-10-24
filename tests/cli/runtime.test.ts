@@ -8,20 +8,19 @@ import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
 import { createScratch, type LivenessDeps } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
-afterAll(cleanupAllOwnedTmp);
-
-const fixtures: string[] = [];
-
-afterEach(() => {
-	for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true });
+const createdScratchDirs: string[] = [];
+afterAll(() => {
+	for (const dir of createdScratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	cleanupAllOwnedTmp();
 });
+
+
 
 function fixtureRoot(): string {
 	// Keep owner-mismatch fixtures under the caller tree, independent of ambient TMPDIR.
 	const scratchRoot = join(REPO_ROOT, "var", "agent-tmp");
 	mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
 	const root = realpathSync(ownedTmp("omp-kit-runtime", { root: scratchRoot }).path);
-	fixtures.push(root);
 	return root;
 }
 
@@ -77,7 +76,6 @@ function canonicalScratch(repo: string): string {
 	const scratch = join(repo, "var", "agent-tmp");
 	mkdirSync(scratch, { recursive: true, mode: 0o700 });
 	const ledger = ownedTmp("runtime-ledger", { root: scratch }).path;
-	fixtures.push(ledger);
 	const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
 	process.env.OMP_KIT_SCRATCH_ROOTS = scratch;
 	try {
@@ -87,7 +85,7 @@ function canonicalScratch(repo: string): string {
 			{ liveness, run: () => ({ code: 1, stdout: "", stderr: "" }), callerSeat: () => ({ agent: null, sessions: [], main: null }) },
 			{}, true, join(ledger, "scratch-budgets.json"));
 		if (!created.ok) throw new Error(`canonical scratch refused: ${created.reason} ${created.detail ?? ""}`);
-		fixtures.push(created.dir);
+		createdScratchDirs.push(created.dir);
 		return realpathSync(created.dir);
 	} finally {
 		if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -105,7 +103,6 @@ function ownedRuntimeFixture(): { base: string; admission: Record<"OMP_KIT_TEST_
 	}
 	// A kitlib name, omp-kit-runtime.<pid>.<6>, is the sandbox shape runtime-adapter.sh admits.
 	const base = ownedTmp("omp-kit-runtime", { root }).path;
-	fixtures.push(base);
 	return { base, admission: { OMP_KIT_TEST_WORK_ROOT: root, OMP_KIT_CASE_CWD: caller } };
 }
 

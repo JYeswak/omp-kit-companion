@@ -59,7 +59,7 @@ fi
 [ -n "$work_dir" ] || { echo "build-manifest: empty private workdir" >&2; exit 2; }
 tmp="$work_dir/manifest.tsv"
 cleanup() {
-  rm -f "$tmp" "$tmp.have" "$tmp.want"
+  rm -f "$tmp" "$tmp.have" "$tmp.want" "$work_dir/.owner"
   rmdir "$work_dir" 2>/dev/null || true
 }
 kitlib_tmp_atexit cleanup

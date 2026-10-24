@@ -9,14 +9,15 @@ import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 import { packageSourceRevision } from "../../scripts/package-release.ts";
 import { checkPackagedExtensionLoads } from "../../scripts/package-release.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
-afterAll(cleanupAllOwnedTmp);
+import { run as runBounded } from "../../src/kitlib/run.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
 const sourceCacheRoot = ompSourceCacheRoot(process.env);
 const nativeCacheEnv = sourceCacheRoot ? { OMP_KIT_OMP_SRC_CACHE: resolve(sourceCacheRoot) } : {};
 const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
-const output = ownedTmp("p21-release", { root: scratch }).path;
+const outputTmp = ownedTmp("p21-release", { root: scratch });
+const output = outputTmp.path;
 const stubBin = join(output, "stub-bin");
 mkdirSync(stubBin, { recursive: true });
 writeFileSync(join(stubBin, "omp"), "#!/bin/sh\nprintf 'omp stub\\n'\n");
@@ -83,9 +84,10 @@ beforeAll(() => {
 	expect(existsSync(join(archived, "MANIFEST.tsv"))).toBe(false);
 	const sourceBefore = sourceTree(archived, "freeze");
 	const built = Bun.spawnSync(["sh", join(archived, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], {
-		cwd: output, env: { ...process.env, TMPDIR: output }, stdout: "pipe", stderr: "pipe",
+		cwd: output, env: { ...process.env, OMP_KIT_TEST_WORK_ROOT: output, TMPDIR: output }, stdout: "pipe", stderr: "pipe",
 	});
 	expect(built.exitCode, built.stdout.toString() + built.stderr.toString()).toBe(0);
+	expect(readdirSync(output).filter(name => name.startsWith("omp-kit-work."))).toEqual([]);
 	expect(sourceTree(archived, "digest")).toBe(sourceBefore);
 	expect(existsSync(join(archived, "MANIFEST.tsv"))).toBe(false);
 	asset = JSON.parse(built.stdout.toString()) as ReleaseAsset;
@@ -97,8 +99,12 @@ beforeAll(() => {
 }, 30_000);
 afterAll(() => {
 	const archived = join(output, "archived-source");
-	if (existsSync(archived)) sourceTree(archived, "release");
-	rmSync(output, { recursive: true, force: true });
+	try {
+		if (existsSync(archived)) sourceTree(archived, "release");
+	} finally {
+		try { outputTmp.cleanup(); }
+		finally { cleanupAllOwnedTmp(); }
+	}
 });
 
 test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
@@ -168,8 +174,21 @@ test("packaging's manifest producer supersedes stale input and changed rule byte
  const oldHash = stale.split("\n").find(row => row.startsWith("fixture\t"))!.split("\t")[1];
  const changedHash = createHash("sha256").update(rule).digest("hex");
  expect(changedHash).not.toBe(oldHash);
- const generated = packageRuleManifest(selected, output).toString("utf8").split("\n").find(row => row.startsWith("fixture\t"))!;
- expect(generated.split("\t").slice(0, 3)).toEqual(["fixture", changedHash, "always"]);
+	const previousWorkRoot = process.env.OMP_KIT_TEST_WORK_ROOT;
+	const previousCaseCwd = process.env.OMP_KIT_CASE_CWD;
+	let generated: Buffer;
+	try {
+		process.env.OMP_KIT_TEST_WORK_ROOT = output;
+		process.env.OMP_KIT_CASE_CWD = repo;
+		generated = packageRuleManifest(selected, output);
+	} finally {
+		if (previousWorkRoot === undefined) delete process.env.OMP_KIT_TEST_WORK_ROOT;
+		else process.env.OMP_KIT_TEST_WORK_ROOT = previousWorkRoot;
+		if (previousCaseCwd === undefined) delete process.env.OMP_KIT_CASE_CWD;
+		else process.env.OMP_KIT_CASE_CWD = previousCaseCwd;
+	}
+	const generatedRow = generated.toString("utf8").split("\n").find(row => row.startsWith("fixture\t"))!;
+	expect(generatedRow.split("\t").slice(0, 3)).toEqual(["fixture", changedHash, "always"]);
  expect(readFileSync(join(selected, "MANIFEST.tsv"), "utf8")).toBe(stale);
 });
 
@@ -338,7 +357,7 @@ test("installer boundary excludes operator credentials and tool configuration fr
 	expect(existsSync(environment.HOME)).toBe(false);
 });
 
-test("installed integrations and invariant gate run from the package", () => {
+test("installed integrations and invariant gate run from the package", async () => {
 	const { home, installedBinary } = installCandidate("integrations-home");
 	const agentDir = join(home, ".omp", "profiles", "packaging-probe", "agent");
 	mkdirSync(agentDir, { recursive: true });
@@ -366,12 +385,22 @@ test("installed integrations and invariant gate run from the package", () => {
 	expect(matrix.every(row => row.profile === "packaging-probe" && row.verdict === "ABSENT")).toBe(true);
 	const ompIdentity = resolveOmpIdentity(process.env);
 	const ladderPath = [join(home, ".local", "opt", "omp-kit", "bin"), process.env.PATH ?? ""].join(delimiter);
+	const packageEnv = { ...process.env, ...nativeCacheEnv, HOME: home, TMPDIR: output, TMP: output, TEMP: output,
+		XDG_STATE_HOME: join(home, "xdg-state"), XDG_CACHE_HOME: join(home, "xdg-cache"),
+		OMP_KIT_CASE_CWD: caseCwd, OMP_KIT_TEST_WORK_ROOT: output, PATH: ladderPath };
+	const appliedEnv: Record<string, string> = {};
+	for (const [name, value] of Object.entries(packageEnv)) {
+		if (value !== undefined) appliedEnv[name] = value;
+	}
+	const appliedRules = await runBounded([installedBinary, "apply", "rules", "--apply", "--yes", "--json"], {
+		cwd: home, env: appliedEnv, deadline_s: 120,
+	});
+	const applyStdout = new TextDecoder().decode(appliedRules.stdout);
+	const applyStderr = new TextDecoder().decode(appliedRules.stderr);
+	expect(appliedRules.rc, `${applyStdout}\n${applyStderr}`).toBe(0);
 	const full = Bun.spawnSync([installedBinary, "test", "--full", "--json"], {
 		cwd: home,
-		env: { ...process.env, ...nativeCacheEnv, HOME: home, TMPDIR: output, TMP: output, TEMP: output,
-			XDG_STATE_HOME: join(home, "xdg-state"), XDG_CACHE_HOME: join(home, "xdg-cache"),
-			OMP_KIT_CASE_CWD: caseCwd, OMP_KIT_TEST_WORK_ROOT: output, PATH: ladderPath,
-			OMP: ompIdentity.launcher, OMP_BIN: ompIdentity.launcher,
+		env: { ...packageEnv, OMP: ompIdentity.launcher, OMP_BIN: ompIdentity.launcher,
 			OMP_PATH: ompIdentity.launcher, OMP_SRC: ompIdentity.source },
 		stdout: "pipe", stderr: "pipe",
 	});

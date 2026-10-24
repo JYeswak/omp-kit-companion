@@ -1,6 +1,6 @@
-import { afterAll, afterEach, expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { YAML } from "bun";
 import { auditMutations, undoMutation } from "../../src/mutations.ts";
@@ -20,11 +20,9 @@ function nativeConfigValue(home: string, key: string): unknown {
 	if (!result || typeof result !== "object" || !("key" in result) || result.key !== key || !("value" in result)) throw new Error("invalid OMP config get result for " + key);
 	return result.value;
 }
-const fixtures: string[] = [];
 function fixture() {
 	const scratch = join(import.meta.dir, "../../var/agent-tmp");
 	const workspace = ownedTmp("p15-repair", { root: scratch }).path;
-	fixtures.push(workspace);
 	const root = join(workspace, "release"), home = join(workspace, "home"), stateRoot = join(workspace, "state"), project = join(workspace, "project");
 	const rule = "Kit rule\n";
 	mkdirSync(join(root, "rules"), { recursive: true });
@@ -41,7 +39,6 @@ function fixture() {
 	const profile = writeProfileConfig(home, "default", YAML.stringify({ model: "user-model", extensions: [], ttsr: { enabled: false, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] } }), 0o644);
 	return { workspace, root, home, stateRoot, project, profile, rulePath: join(home, ".agents", "rules", "managed.md") };
 }
-afterEach(() => { for (const path of fixtures.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
 function snapshot(path: string): Record<string, string> {
 	if (!existsSync(path)) return {};
@@ -170,6 +167,7 @@ test("disabled rule of unknown provider blocks policy without altering any profi
 	expect(decision.refusal?.code).toMatch(/DISABLED|PROVIDER/);
 	expect(snapshot(f.home)).toEqual(before);
 }, 60_000);
+
 
 test("extension repair is named, and interrupted install exposes pending receipt instead of silent retry", async () => {
 	const f = fixture();

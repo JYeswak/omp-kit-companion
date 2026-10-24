@@ -1,0 +1,99 @@
+Bead: ompkit-8hpf4 (TEMPMIG-TESTS3)
+Acceptance covered: AC2 per-file replay; AC3 temporary-work cleanup.
+
+BATCH TEST RUN
+Command: nice -n 10 bun test --max-concurrency=1 --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' --reporter=junit --reporter-outfile="$TMPDIR/tempmig-65-junit.xml" <56 explicit TypeScript test paths from the bead file list>
+TMPDIR: /Users/josh/Developer/omp-kit-companion/var/agent-tmp/memreadiness-rework.27805 (owned by TurquoiseSummit; bead ompkit-8hpf4)
+JUnit SHA-256: 695c8d428808724a920781261b0d8abe7fc46824f9581ee17729458e87a3016d
+JUnit bytes: 113090
+Raw batch totals before final scope cleanup: 496 tests, 3658 expectations, 0 failures, 10 skipped. This included one temporary, out-of-scope repair behavior test (1/4) and the memory-audit skip. After removing that test and replacing the package-release and memory-audit rows with their final target runs, reconciled 56-file TypeScript totals are 495 tests, 3717 expectations, 0 failures, 0 skipped.
+
+Per-file TypeScript results (tests / expectations / failures / skipped):
+tests/cli/memory-audit.test.ts: 10 / 0 / 0 / 10 in batch; separately rerun 10 / 62 / 0 / 0 (see pinned-source run)
+tests/cli/memory-readiness.test.ts: 16 / 109 / 0 / 0
+tests/cli/metamorphic.test.ts: 4 / 21 / 0 / 0
+tests/cli/migrate-history.test.ts: 1 / 6 / 0 / 0
+tests/cli/migrate.test.ts: 16 / 275 / 0 / 0
+tests/cli/mission-anchor.test.ts: 11 / 37 / 0 / 0
+tests/cli/mission-doctor.test.ts: 1 / 1 / 0 / 0
+tests/cli/mission.test.ts: 5 / 20 / 0 / 0
+tests/cli/mutants.test.ts: 4 / 17 / 0 / 0
+tests/cli/mutations.test.ts: 21 / 94 / 0 / 0
+tests/cli/native-guide.test.ts: 3 / 28 / 0 / 0
+tests/cli/native-scenario-count.test.ts: 2 / 6 / 0 / 0
+tests/cli/observe-bindings.test.ts: 1 / 4 / 0 / 0
+tests/cli/omp-certify-branch.test.ts: 2 / 12 / 0 / 0
+tests/cli/omp-certify-changelog.test.ts: 9 / 73 / 0 / 0
+tests/cli/omp-certify.test.ts: 10 / 87 / 0 / 0
+tests/cli/omp-recert.test.ts: 18 / 42 / 0 / 0
+tests/cli/omp-source-cache.test.ts: 18 / 41 / 0 / 0
+tests/cli/operator-snapshot.test.ts: 11 / 22 / 0 / 0
+tests/cli/oracle-hermetic.test.ts: 7 / 71 / 0 / 0
+tests/cli/output-ids.test.ts: 1 / 2 / 0 / 0
+tests/cli/ownership-doctor.test.ts: 12 / 70 / 0 / 0
+tests/cli/ownership-registry.test.ts: 6 / 199 / 0 / 0
+tests/cli/ownership-scope.test.ts: 2 / 6 / 0 / 0
+tests/cli/package-release.test.ts: 17 / 638 / 0 / 0 (final kitlib.run-backed standalone JUnit below)
+tests/cli/planning-convert.test.ts: 52 / 470 / 0 / 0
+tests/cli/planning-score.test.ts: 34 / 234 / 0 / 0
+tests/cli/plugin-invoke-cwd.test.ts: 2 / 5 / 0 / 0
+tests/cli/plugin-release.test.ts: 21 / 56 / 0 / 0
+tests/cli/probe.test.ts: 3 / 7 / 0 / 0
+tests/cli/profile-recipes.test.ts: 5 / 25 / 0 / 0
+tests/cli/project-trust.test.ts: 7 / 30 / 0 / 0
+tests/cli/receipt-package.test.ts: 3 / 24 / 0 / 0
+tests/cli/reducer.test.ts: 9 / 58 / 0 / 0
+tests/cli/regex-budget.test.ts: 18 / 115 / 0 / 0
+tests/cli/release-local.test.ts: 7 / 44 / 0 / 0
+tests/cli/release-train-concurrency.test.ts: 2 / 16 / 0 / 0
+tests/cli/repair.test.ts: 17 / 124 / 0 / 0 (final scoped replay below)
+Exact-parent scope control: the exported parent 573bf44d ran this file as 17 tests / 124 expectations / 0 failures; the current temp-migrated file also passes 17 / 124. The temporary repair behavior change and extra test were out of scope and were removed.
+tests/cli/report-inject-job.test.ts: 7 / 19 / 0 / 0
+tests/cli/reservation-age.test.ts: 3 / 10 / 0 / 0
+tests/cli/rule-calibration.test.ts: 8 / 30 / 0 / 0
+tests/cli/rule-class-source.test.ts: 6 / 7 / 0 / 0
+tests/cli/rule-review-cli.test.ts: 3 / 22 / 0 / 0
+tests/cli/rule-review.test.ts: 18 / 86 / 0 / 0
+tests/cli/runtime.test.ts: 52 / 235 / 0 / 0
+tests/cli/rx2-rules.test.ts: 2 / 5 / 0 / 0
+tests/cli/scope-gate.test.ts: 1 / 4 / 0 / 0
+tests/cli/scratch-apply-report.test.ts: 5 / 30 / 0 / 0
+tests/cli/scratch-bins.test.ts: 12 / 118 / 0 / 0
+tests/cli/scratch-durability-facts.test.ts: 14 / 31 / 0 / 0
+tests/cli/scratch-durability.test.ts: 1 / 3 / 0 / 0
+tests/cli/scratch-gap.test.ts: 7 / 47 / 0 / 0
+tests/cli/scratch-gates.test.ts: 6 / 54 / 0 / 0
+tests/cli/scratch-mine.test.ts: 3 / 10 / 0 / 0
+tests/cli/scratch-nested.test.ts: 1 / 4 / 0 / 0
+tests/cli/scratch-owner-root.test.ts: 9 / 23 / 0 / 0
+
+Final package-release run:
+Command: `omp-kit heavy --no-wait --label 8hpf4-package-test-final -- bun test --max-concurrency=1 --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' --reporter=junit --reporter-outfile=\"$TMPDIR/tempmig-package-release-kitlib.xml\" tests/cli/package-release.test.ts`
+Result: 17 tests, 638 expectations, 0 failures, 0 skipped.
+JUnit SHA-256: 68864eae54dc7941dd259afa8f2fa9cbf4fc0224b7ee322a247dce8552448997
+JUnit bytes: 4014
+The packaged build now uses `kitlib.run` for the apply-rules command with a 120-second child deadline; its OMP_KIT_TEST_WORK_ROOT stays inside the owned output root, which the same test asserts contains no `omp-kit-work.*` directories after the producer exits.
+
+Pinned-source memory-audit run:
+The default Tern launcher is binary-only and the first source lookup selected incompatible 18.10.3 source; that attempt returned 8 failures and is not acceptance evidence. The accepted run used cached official @oh-my-pi/pi-coding-agent@18.11.3 and @oh-my-pi/pi-mnemopi@18.11.3 npm tarballs in owned TMPDIR, no network. The package's src/core/beam/schema.ts SHA-256 equals the test's reviewed pin 95490e3c2b7e4325cde97fadf3572d76f11e28491e24574b27ff885171058ed0. The compiled CLI test PATH selected this same source package; package identity and all reviewed source pins were checked by the real production path.
+Command: OMP_INSTALLED_PATH=<owned>/omp-18.11.3/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js PATH=<owned>/omp-18.11.3/bin:/Users/josh/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin nice -n 10 bun test --max-concurrency=1 --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' --reporter=junit --reporter-outfile="$TMPDIR/tempmig-memory-audit-reviewed.xml" tests/cli/memory-audit.test.ts
+Result: 10 tests, 62 expectations, 0 failures, 0 skipped.
+JUnit SHA-256: 57c9c59f8541cbac4e2d4f5dd81a7deeef10b666fc2acc6fbf47ee3810570351
+JUnit bytes: 2348
+
+Other original non-TypeScript test files in the 65-file batch (direct owned-TMPDIR/nice runs; concise tool outputs):
+tests/cli/native-br-preserve.test.py: 16 OK
+tests/cli/native_candidate_test.py: 25 tests OK
+tests/cli/real_home_journey_signed_test.py: 7 tests OK
+tests/cli/pre-push-gate.test.sh: 48/0
+tests/cli/public-files.test.sh: 4/0
+tests/cli/ref-txn-bead.test.sh: 22/0
+tests/cli/release-train.test.sh: 52/0
+tests/cli/repo-layout.test.sh: 4/0
+tests/cli/publishability.test.sh: 25/0
+Additional changed test: `nice -n 10 sh tests/cli/build-manifest-archive.test.sh` -> `build-manifest-archive: control and planted negative pass` (after variable rename).
+
+Other focused evidence: `python3 scripts/tempsafe_check.py --tree batch <65 files plus scripts/build-manifest.sh and tests/cli/build-manifest-archive.test.sh>` exited 0 with no raw-temp findings; inline `tempsafe:` exceptions remain only for fake /tmp path values. `sh scripts/build-manifest.sh` and `sh scripts/build-manifest.sh --check` both passed; shellcheck over scripts/*.sh, checkers/*.sh, installer/install.sh, tests/cli/installer.test.sh, and tests/cli/build-manifest-archive.test.sh passed. `git diff --check` passed before the final kitlib runner edit.
+An earlier direct full CLI attempt, before the final scope cleanup and kitlib.run change, ended with exit 75 after 983 s. It reported timeouts in fleet-watch-admission (5006.90 ms), gh-doctor (6690.31 ms), and apply (6151.37 ms), a 1000-ms service-run cap (1003 ms), then RESOURCE_DEFERRED in kit-update. This partial prior-tree run is not current-source full-suite evidence or publication qualification. A separate current `checkers/check-claim-discipline.sh --selftest` run printed `SELFTEST_PASS`.
+
+Temporary cleanup: package-release's owned output tmp is removed in afterAll; the post-fix package test asserts no runtime workdir under that output. The memory-audit fixtures clean per test. The owned scratch root is released after the evidence files are committed; it contains the JUnit files, temporary npm source pack, and two stale runtime-adapter workdirs created by the initial pre-fix package test attempts. Releasing this owned root removes those earlier workdirs without touching other agents' paths.

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -6,8 +6,8 @@ import { inspectMemoryReadiness } from "../../src/memory-readiness.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 afterAll(cleanupAllOwnedTmp);
+// Keep per-test owned roots until this isolated file's afterAll; a shared afterEach list races under Bun parallelism.
 
-const fixtures: string[] = [];
 const EXPLICIT_OMP_SOURCE = process.env.OMP_MEMORY_SOURCE_PATH ?? process.env.OMP_INSTALLED_PATH;
 const INSTALLED_OMP_PATH = EXPLICIT_OMP_SOURCE ?? Bun.which("omp");
 if (!INSTALLED_OMP_PATH) throw new Error("memory-readiness tests require an installed OMP on PATH");
@@ -21,10 +21,8 @@ const OMP_SOURCE_FILES = [
 	"src/memory-backend/resolve.ts",
 	"src/config/settings.ts",
 ] as const;
-afterEach(() => { for (const dir of fixtures.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function fixture(version: string = INSTALLED_OMP_VERSION) {
 	const root = ownedTmp("omp-kit-memory").path;
-	fixtures.push(root);
 	const home = join(root, "home"), project = join(root, "project"), agent = join(home, ".omp", "agent");
 	const pkg = join(root, "omp");
 	mkdirSync(agent, { recursive: true }); mkdirSync(project); mkdirSync(join(pkg, "dist"), { recursive: true });
@@ -48,7 +46,7 @@ function snapshot(dir: string, prefix = ""): string[] {
 	});
 }
 
-test(`reviewed OMP [1m${INSTALLED_OMP_VERSION}[0m source hashes report on-disk OFF and the redactor limitation`, async () => {
+test(`reviewed OMP ${INSTALLED_OMP_VERSION} source hashes report on-disk OFF and the redactor limitation`, async () => {
 	const f = fixture(INSTALLED_OMP_VERSION);
 	writeFileSync(f.config, "memory:\n  backend: off\n");
 	const report = await f.inspect();
@@ -217,7 +215,7 @@ test("synthetic redactor canaries report source-pinned limits without exposing c
 	expect(JSON.stringify(report)).not.toContain("syntheticbearerletters");
 	expect([snapshot(f.home), snapshot(f.project)]).toEqual(before);
 });
-test("maintenance-required CASS status stays unqualified and reports its static scheduler source", async () => {
+test.serial("maintenance-required CASS status stays unqualified and reports its static scheduler source", async () => {
 	const f = fixture();
 	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  noEmbeddings: true\n  llmMode: none\n");
 	const cassPath = join(f.root, "tools", "cass");
@@ -264,7 +262,7 @@ test("maintenance-required CASS status stays unqualified and reports its static 
 	expect(() => lstatSync(storePath)).toThrow();
 	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
 });
-test("successful CASS status metadata never qualifies actual retrieval", async () => {
+test.serial("successful CASS status metadata never qualifies actual retrieval", async () => {
 	const f = fixture();
 	const cassPath = join(f.root, "tools", "cass");
 	mkdirSync(dirname(cassPath), { recursive: true });
@@ -286,7 +284,7 @@ test("successful CASS status metadata never qualifies actual retrieval", async (
 	expect(report.status).not.toBe("OK");
 	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
 });
-test("malformed CASS and scheduler inputs remain unverified", async () => {
+test.serial("malformed CASS and scheduler inputs remain unverified", async () => {
 	const f = fixture();
 	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  noEmbeddings: true\n  llmMode: none\n");
 	const cassPath = join(f.root, "tools", "cass");
@@ -313,7 +311,7 @@ test("malformed CASS and scheduler inputs remain unverified", async () => {
 	expect(() => lstatSync(join(f.agent, "memories", "mnemopi", "mnemopi.db"))).toThrow();
 	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
 });
-test("CASS unhealthy metadata overrides a successful status exit", async () => {
+test.serial("CASS unhealthy metadata overrides a successful status exit", async () => {
 	const f = fixture();
 	const cassPath = join(f.root, "tools", "cass");
 	mkdirSync(dirname(cassPath), { recursive: true });

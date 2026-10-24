@@ -1,7 +1,7 @@
 // ompkit-774u.15 SCRATCHBIN1 C and D through the real CLI: `scratch mine` lists the caller's own dirs and what each still
 // owes, and `scratch apply` prints the gap report.
-import { afterAll, afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -10,8 +10,6 @@ afterAll(cleanupAllOwnedTmp);
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
 mkdirSync(scratchParent, { recursive: true });
-const cleanup: string[] = [];
-afterEach(() => { for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 interface Envelope { ok: boolean; data: Record<string, unknown>; errors?: { code: string }[] }
 
@@ -25,7 +23,6 @@ const SESSION = "0f0f0f0f-bbbb-7ccc-8ddd-eeeeffff0001";
 function world(): { root: string; home: string; env: Record<string, string> } {
 	const root = ownedTmp("cli-bins", { root: scratchParent }).path;
 	const home = ownedTmp("cli-bins-home", { root: scratchParent }).path;
-	cleanup.push(root, home);
 	mkdirSync(join(home, "state"), { recursive: true });
 	mkdirSync(join(home, "session-owners"));
 	const lock = join(home, "session-owners", `${SESSION}.lock`);
