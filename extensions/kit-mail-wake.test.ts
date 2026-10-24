@@ -21,7 +21,7 @@ const REPO = "/abs/fleet/omp-kit";
 interface Call { command: string; args: string[]; options?: FlywheelExecOptions }
 
 /** A fleet: omp-test tab with live blocks 5 (RusticPine, director) and 9 (JadeThrush); GreenRabbit is a background agent. */
-function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number } = {}) {
+function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number; blocks?: { id: number; cwd: string; live: boolean }[] } = {}) {
 	const home = freshDir(base, "home-");
 	const ident = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(REPO).digest("hex").slice(0, 12));
 	mkdirSync(ident, { recursive: true });
@@ -36,7 +36,7 @@ function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<Flywhe
 	const exec = async (command: string, args: string[], options?: FlywheelExecOptions): Promise<FlywheelExecResult> => {
 		const call = { command, args, options };
 		calls.push(call);
-		if (command === "tern") return { code: 0, stdout: JSON.stringify({ sessions: [{ name: "Default", tabs: [{ name: "omp-test", blocks: [{ id: 5, cwd: REPO, live: true }, { id: 9, cwd: REPO, live: true }] }] }] }) };
+		if (command === "tern") return { code: 0, stdout: JSON.stringify({ sessions: [{ name: "Default", tabs: [{ name: "omp-test", blocks: opts.blocks ?? [{ id: 5, cwd: REPO, live: true }, { id: 9, cwd: REPO, live: true }] }] }] }) };
 		if (command === "am") return { code: 0, stdout: JSON.stringify([{ name: "GreenRabbit", task_description: "MAILPROTO1 bead ompkit-fp72.134 (roster BuildMailProto)" }, { name: "StormyCove", task_description: "rhy9.16 cutover under CopperTrout" }]) };
 		if (command === "omp-kit") return opts.omp ? opts.omp(call) : { code: 0, stdout: JSON.stringify({ data: { status: "OK", detail: "landed" } }) };
 		return { code: 127, stdout: "", stderr: "unexpected" };
@@ -45,11 +45,57 @@ function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<Flywhe
 	const wake = createMailWake({ exec, home, env: {}, rosterPath, fleetWatchPath, ledgerPath, fastWaitMs: opts.fastWaitMs ?? 200, untilDeliveredS: 600 });
 	const ledger = () => existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
 	const wakes = () => calls.filter(call => call.command === "omp-kit");
-	return { wake, calls, ledger, wakes };
+	return { wake, calls, ledger, wakes, home, fleetWatchPath };
 }
 
 const sent = (id: number) => [{ type: "text", text: JSON.stringify({ deliveries: [{ project: REPO, payload: { id, subject: "s" } }], count: 1 }) }];
 const ask = (to: string) => ({ project_key: REPO, sender_name: "PeachLeopard", to: [to], subject: "QUESTION ompkit-uk9wn: who owns sitrep?", body_md: "b", ack_required: true });
+
+const CHIEF_CWD = "/abs/fleet";
+function chiefFleet(chief: Record<string, unknown> = {}, identity = "PeachLeopard") {
+	const f = fleet({
+		blocks: [{ id: 44, cwd: CHIEF_CWD, live: true }],
+		omp: call => {
+			const cwd = call.args[call.args.indexOf("--cwd") + 1];
+			return cwd === CHIEF_CWD
+				? { code: 0, stdout: JSON.stringify({ data: { status: "DELIVERED" } }) }
+				: { code: 2, stdout: JSON.stringify({ data: { status: "NOT_RUN" }, errors: [{ code: "SEAT_CWD_MISMATCH" }] }) };
+		},
+	});
+	const ident = join(f.home, ".config", "agent-mail", "identity", createHash("sha1").update(REPO).digest("hex").slice(0, 12));
+	writeFileSync(join(ident, "tern-44"), JSON.stringify({ name: identity }));
+	writeFileSync(f.fleetWatchPath, JSON.stringify({
+		chief: { agent: "PeachLeopard", session: "omp-test", pane: "tern:44", repo: REPO, cwd: CHIEF_CWD, ...chief },
+	}));
+	return f;
+}
+
+test("a configured chief uses canonical-project identity without changing its actual wake cwd", async () => {
+	const f = chiefFleet();
+	expect(await f.wake.beforeSend("chief", "send_message", { ...ask("PeachLeopard"), sender_name: "RusticPine" }, REPO)).toBeUndefined();
+	const patch = await f.wake.afterSend({ toolCallId: "chief", content: sent(66107), isError: false });
+	expect(JSON.stringify(patch)).toContain("WAKE_DELIVERED: mail 66107 -> PeachLeopard");
+	expect(f.ledger()).toMatchObject([{ status: "WAKE_DELIVERED", recipient: "PeachLeopard", repo: CHIEF_CWD }]);
+});
+
+test.each([
+	["different block", { pane: "tern:45" }],
+	["different tab", { session: "another-tab" }],
+	["different launch cwd", { cwd: "/abs/elsewhere" }],
+	["different canonical project", { repo: "/abs/another-project" }],
+	["different configured agent", { agent: "OtherAgent" }],
+] as const)("canonical-project identity does not authorize a chief with %s", async (_label, chief) => {
+	const f = chiefFleet(chief);
+	expect((await f.wake.beforeSend("wrong-chief", "send_message", { ...ask("PeachLeopard"), sender_name: "RusticPine" }, REPO))?.reason).toStartWith("NO_WAKE_PATH");
+	expect(await f.wake.afterSend({ toolCallId: "wrong-chief", content: sent(66108), isError: false })).toBeUndefined();
+	expect(f.wakes()).toHaveLength(0);
+});
+
+test("configured chief metadata cannot override a different identity-file name", async () => {
+	const f = chiefFleet({}, "OtherAgent");
+	expect((await f.wake.beforeSend("wrong-name", "send_message", { ...ask("PeachLeopard"), sender_name: "RusticPine" }, REPO))?.reason).toStartWith("NO_WAKE_PATH");
+	expect(f.wakes()).toHaveLength(0);
+});
 
 test("planted (a): an ack_required ask to a background agent is refused NO_WAKE_PATH naming its parent, and nothing is sent", async () => {
 	const f = fleet();

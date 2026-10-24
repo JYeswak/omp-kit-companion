@@ -227,8 +227,16 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		const live = blocks === undefined ? await liveBlocks() : blocks;
 		if (live === null) return { kind: "none", why: "Tern could not be read (`tern inspect --json` failed), so no live seat is proven", parent: await parentOf(name, projectKey, null) };
 		const matches: Seat[] = [];
+		const chief = prop(readJson(fleetWatchPath), "chief");
+		const chiefRepo = prop(chief, "repo");
+		const chiefName = prop(chief, "agent");
 		for (const block of live) {
-			const hash = createHash("sha1").update(block.cwd).digest("hex").slice(0, 12);
+			// A chief may launch above its repo; only its exact configured seat may use that repo's identity.
+			const identityRepo = typeof chiefRepo === "string" && chiefRepo === projectKey
+				&& typeof chiefName === "string" && chiefName.toLowerCase() === name.toLowerCase()
+				&& prop(chief, "session") === block.session && prop(chief, "pane") === `tern:${block.block}`
+				&& prop(chief, "cwd") === block.cwd ? chiefRepo : block.cwd;
+			const hash = createHash("sha1").update(identityRepo).digest("hex").slice(0, 12);
 			const bound = identityName(join(home, ".config", "agent-mail", "identity", hash, `tern-${block.block}`));
 			if (bound && bound.toLowerCase() === name.toLowerCase()) matches.push({ name: bound, session: block.session, block: block.block, repo: block.cwd });
 		}
