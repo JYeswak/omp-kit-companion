@@ -156,7 +156,7 @@ function fixture(): Fixture {
 	writeFileSync(join(work, "suite-contract.txt"), "PASS\n");
 	writeFileSync(join(work, "tests", "cli", "land-suite.test.sh"), "#!/bin/sh\nset -eu\nif grep -Fxq SLOW suite-contract.txt; then sleep 10; fi\ngrep -Fxq PASS suite-contract.txt\n", { mode: 0o755 });
 	mkdirSync(join(work, "scripts"), { recursive: true });
-	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh"];
+	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh"];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
 	for (const path of gateFiles)
 		writeFileSync(join(work, path), committedGateFile(path), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
@@ -278,6 +278,7 @@ test("checks the exact candidate with the base-registered push check before publ
 	const expectedChecks = createHash("sha256")
 		.update(git(work, ["show", `${data.commit}:scripts/full-suite-verdict.sh`]))
 		.update(git(work, ["show", `${data.commit}:scripts/fresh-gate.sh`]))
+		.update(git(work, ["show", `${data.commit}:scripts/kitlib-tmp.sh`]))
 		.update(git(work, ["show", `${data.commit}:scripts/gate-ci-only.tsv`]))
 		.digest("hex");
 	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({

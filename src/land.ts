@@ -252,7 +252,7 @@ type FullSuiteRun = {
 function archiveFullSuiteJudge(repo: string, base: string): FullSuiteJudge | null {
 	const manifest = git(repo, ["ls-tree", base, "--", "scripts/gate-ci-only.tsv"]);
 	if (manifest.code !== 0 || manifest.interrupted) return null;
-	const gatePaths = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh"];
+	const gatePaths = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh"];
 	if (manifest.out.trim()) gatePaths.push("scripts/gate-ci-only.tsv");
 	const archive = gitBytes(repo, ["archive", base, ...gatePaths]);
 	if (archive.code !== 0 || archive.interrupted) return null;

@@ -82,6 +82,11 @@ case "$tree" in *[!0-9a-f]*|???????????????????????????????????????) fail "candi
 [ -f "$SCRIPT_DIR/fresh-gate.sh" ] || { fail "scripts/fresh-gate.sh is absent beside the gate"; exit 1; }
 checks_src="$SCRIPT_DIR/full-suite-verdict.sh
 $SCRIPT_DIR/fresh-gate.sh"
+if [ -z "$ARCHIVE_DIR" ]; then
+	[ -f "$SCRIPT_DIR/kitlib-tmp.sh" ] || { fail "scripts/kitlib-tmp.sh is absent beside the gate"; exit 1; }
+	checks_src="$checks_src
+$SCRIPT_DIR/kitlib-tmp.sh"
+fi
 [ -f "$SCRIPT_DIR/gate-ci-only.tsv" ] && checks_src="$checks_src
 $SCRIPT_DIR/gate-ci-only.tsv"
 checks=$(cat $checks_src 2>/dev/null | shasum -a 256 | cut -d' ' -f1) || { fail "judging scripts are unreadable"; exit 1; }
