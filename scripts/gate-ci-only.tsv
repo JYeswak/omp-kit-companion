@@ -2,4 +2,3 @@ path	kind	bead	expires	reason
 tests/cli/kit-update.test.ts	ci-only	ompkit-v66l.27.1	-	runs the ladder against an installed kit under a 900 s bound (timed out at 900 s in the gate export, 2026-10-19); CI runs it as its own kit-update suite
 tests/cli/external-live.test.ts	ci-only	ompkit-v66l.27.1	-	drives a relocated release through real OMP native marker effects; the dev-Mac export reports a fast-tier diff where CI passes
 tests/cli/package-release.test.ts	hermeticity	ompkit-v66l.27.8	2026-11-01	reads the enclosing checkout's git history; the gate export has none (fatal: Needed a single revision)
-tests/cli/repair.test.ts	hermeticity	ompkit-v66l.27.9	2026-11-01	compiled named repair's HOME snapshot differs on a loaded dev Mac
