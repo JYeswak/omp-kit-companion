@@ -18,7 +18,7 @@ import {
 export interface OwnershipIo {
 	home: string;
 	nowMs(): number;
-	/** Entry names; null when the directory is absent or unreadable (also how a plain file is told from a directory). */
+	/** Entry names; null when the path is absent or a plain file (ENOENT, ENOTDIR). Any other read error (EACCES) throws, so the census is UNKNOWN, never an observed zero. */
 	listDir(path: string): string[] | null;
 	readText(path: string): string | null;
 	mtimeMs(path: string): number | null;
@@ -335,7 +335,15 @@ export function liveOwnershipIo(env: NodeJS.ProcessEnv = process.env): Ownership
 	return {
 		home,
 		nowMs: () => Date.now(),
-		listDir: (path) => { try { return readdirSync(path); } catch { return null; } },
+		listDir: (path) => {
+			try {
+				return readdirSync(path);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === "ENOENT" || code === "ENOTDIR") return null;
+				throw error;
+			}
+		},
 		readText: (path) => { try { return readFileSync(path, "utf8"); } catch { return null; } },
 		mtimeMs: (path) => { try { return statSync(path).mtimeMs; } catch { return null; } },
 		pidAlive: (pid) => liveness.signalAlive(pid) || liveness.psVisible(pid),

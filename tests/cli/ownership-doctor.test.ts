@@ -3,7 +3,7 @@
 // the doctor changes nothing.
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { censusOwnership, inspectOwnership, liveOwnershipIo, type OwnershipIo, type OwnershipRow } from "../../src/ownership-doctor.ts";
 import { OWNERSHIP_REGISTRY } from "../../src/ownership-registry.ts";
@@ -117,6 +117,26 @@ test("rch leases: AC3 planted negative — a recovery lock with a dead wrapper a
 	expect(rowOf(censusOwnership(io(home)), "rch-job-lease").census).toMatchObject({ untracked: 0, no_live_owner: 4 });
 	// A missing job-leases directory is an observed zero (rch never ran), not an unknown.
 	expect(rowOf(censusOwnership(io(fixtureHome())), "rch-job-lease")).toMatchObject({ status: "OBSERVED", census: { records: 0, untracked: 0 } });
+});
+
+test("uj4af planted: an unreadable (EACCES) job-leases directory is UNKNOWN and the summary is not OK; controls: a readable orphan is untracked 1, an absent directory is an observed zero", () => {
+	const home = fixtureHome();
+	const leases = join(home, ".local", "state", "rch", "job-leases");
+	put(join(leases, "rchw-orphan.recovery.lock"), "");
+	const rch = [OWNERSHIP_REGISTRY.find((entry) => entry.id === "rch-job-lease")!];
+	expect(rowOf(censusOwnership(io(home), rch), "rch-job-lease")).toMatchObject({ status: "OBSERVED", census: { records: 1, untracked: 1 } });
+	chmodSync(leases, 0o000);
+	try {
+		const row = rowOf(censusOwnership(io(home), rch), "rch-job-lease");
+		expect(row).toMatchObject({ status: "UNKNOWN", census: null });
+		expect(row.reason).toContain("EACCES");
+		const [summary] = inspectOwnership(io(home), rch);
+		expect(summary.status).not.toBe("OK");
+		expect(summary.evidence).toMatchObject({ census_failed: ["rch-job-lease"] });
+	} finally {
+		chmodSync(leases, 0o755);
+	}
+	expect(rowOf(censusOwnership(io(fixtureHome()), rch), "rch-job-lease")).toMatchObject({ status: "OBSERVED", census: { records: 0, untracked: 0 } });
 });
 
 test("pid-keyed locks: a dead holder is untracked, a live holder is not, for ntm watchers, send locks, service claims, heavy rows and converge locks", () => {
