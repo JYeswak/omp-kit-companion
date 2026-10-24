@@ -1,7 +1,7 @@
 #!/bin/sh
-# SAVEFIRST1: exercise the actual pre-push adapter and full fresh-gate disk path in a minimal local Git fixture.
-# The selected gate/disk source is an exact-commit archive; unrelated manifest, notes, README and harness
-# consumers are explicit fixture controls. This proves only the SaveFirst boundary, not those controls.
+# SAVEFIRST1 component control: exercise the pre-push pressure signal and the full-suite
+# guard's refusal on this intentionally incomplete local fixture. This is not AC1's actual
+# publication proof; the native publisher must establish that boundary.
 # shellcheck source=tests/cli/git-env-fixtures.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 set -eu
@@ -160,14 +160,14 @@ push_fixture() {
 		git -C "$sf_repo" push origin main > "$sf_outfile" 2>&1 || sf_rc=$?
 	sf_after=$(git --git-dir="$sf_remote" rev-parse --verify refs/heads/main 2>/dev/null) || sf_after=
 	sf_output=$(cat "$sf_outfile")
-	printf 'SAVEFIRST1 actual gate %s push_rc=%s base=%s head=%s origin_after=%s\n%s\n' \
+	printf 'SAVEFIRST1 fixture gate %s push_rc=%s base=%s head=%s origin_after=%s\n%s\n' \
 		"$sf_name" "$sf_rc" "$sf_base" "$sf_head" "$sf_after" "$sf_output"
 }
 
 sf_bin="$TMP/savefirst-sbh"
 make_sbh "$sf_bin"
 
-# Positive: sbh says pressure, but the real statfs floor is satisfied. The full, uncut pre-push
+# Component control: pressure warning and statfs admission must pass, while the full-suite verifier must refuse this incomplete fixture.
 high_repo=
 KITLIB_TMP_ROOT="$TMP"
 kitlib_tmp high_repo savefirst-positive || exit 1
@@ -176,18 +176,19 @@ sf_repo=$high_repo
 sf_remote="$TMP/savefirst-positive-origin.git"
 prepare_fixture "$sf_repo" "$sf_remote" 5
 high_out="$TMP/savefirst-positive.out"
-push_fixture positive "$sf_repo" "$sf_remote" "$high_out"
+push_fixture pressure-control "$sf_repo" "$sf_remote" "$high_out"
 sf_high_rc=$sf_rc
 sf_high_after=$sf_after
 sf_high_output=$sf_output
-if [ "$sf_base_push_rc" = 0 ] && [ "$sf_before" = "$sf_base" ] && [ "$sf_high_rc" = 0 ] && [ "$sf_high_after" = "$sf_head" ] \
+if [ "$sf_base_push_rc" = 0 ] && [ "$sf_before" = "$sf_base" ] && [ "$sf_high_rc" -ne 0 ] && [ "$sf_high_after" = "$sf_base" ] \
 	&& grep -Fq 'WARN disk-pressure: sbh reports 11.7% free' "$high_out" \
 	&& grep -Fq 'top_scratch=savefirst-top-owner:' "$high_out" \
-	&& grep -Fq 'FRESH-GATE: GREEN' "$high_out" && grep -Fq 'GREEN full-suite-verdict' "$high_out" \
-	&& grep -Fq 'SAVEFIRST-BOUNDARY-TEST PASS' "$high_out"; then
-	printf 'PASS SAVEFIRST1 actual pre-push positive: pressure flagged, owner named, full relevant gate ran, local origin advanced\n'
+	&& grep -Fq 'FRESH-GATE: GREEN' "$high_out" \
+	&& grep -Fq 'SAVEFIRST-BOUNDARY-TEST PASS' "$high_out" \
+	&& grep -Fq 'FULL-SUITE: RED: full suite ended without complete evidence' "$high_out"; then
+	printf 'PASS SAVEFIRST1 component control: pressure warned, statfs step ran, incomplete fixture refused, local origin unchanged\n'
 else
-	printf 'FAIL SAVEFIRST1 actual pre-push positive: base_rc=%s push_rc=%s before=%s base=%s after=%s head=%s\n%s\n' \
+	printf 'FAIL SAVEFIRST1 component control: base_rc=%s push_rc=%s before=%s base=%s after=%s head=%s\n%s\n' \
 		"$sf_base_push_rc" "$sf_high_rc" "$sf_before" "$sf_base" "$sf_high_after" "$sf_head" "$sf_high_output" >&2
 	exit 1
 fi
