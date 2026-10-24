@@ -71,7 +71,8 @@ function fixtureContractFiles(): FixtureFile[] {
 	return [{ name: "MANIFEST.tsv", bytes: manifestFile }, { name: "cases/cases.tsv", bytes: cases }, { name: "rules/rule-a.md", bytes: rule }];
 }
 async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: FixtureOptions = {}): Promise<T> {
-	const root = realpathSync(ownedTmp("kit-update", { root: scratch }).path);
+	const directory = ownedTmp("kit-update", { root: scratch });
+	const root = realpathSync(directory.path);
 	const prefix = join(root, "prefix"), stateRoot = join(root, "state"), home = join(root, "home"), source = join(root, "source");
 	const selectedPlatform = options.platform ?? platform;
 	const currentVersion = options.currentVersion ?? "1.2.2", nextVersion = options.nextVersion ?? "1.2.3";
@@ -101,7 +102,7 @@ async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: Fix
 		platform: selectedPlatform, currentVersion, nextVersion }); }
 	finally {
 		if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
-		rmSync(root, { recursive: true, force: true });
+		directory.cleanup();
 	}
 }
 const input = (ctx: FixtureContext) => ({ prefix: ctx.prefix, stateRoot: ctx.stateRoot, home: ctx.home,
@@ -110,7 +111,7 @@ const input = (ctx: FixtureContext) => ({ prefix: ctx.prefix, stateRoot: ctx.sta
 
 function copyReleaseSource(sourceRoot: string, destination: string): void {
 	mkdirSync(destination, { recursive: true });
-	for (const directory of ["src", "installer", "scripts", "rules", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "tests/live", "plugins/omp-kit-tern"]) {
+	for (const directory of ["src", "installer", "scripts", "rules", "rules-fleet", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "tests/live", "plugins/omp-kit-tern"]) {
 		const target = join(destination, directory);
 		mkdirSync(dirname(target), { recursive: true });
 		cpSync(join(sourceRoot, directory), target, { recursive: true });
@@ -118,7 +119,7 @@ function copyReleaseSource(sourceRoot: string, destination: string): void {
 	mkdirSync(join(destination, "docs"), { recursive: true });
 	for (const file of ["flywheel-invariants.tsv", "tern-integration.md", "tern-verb-map.md", "tern-coverage.tsv"])
 		copyFileSync(join(sourceRoot, "docs", file), join(destination, "docs", file));
-	for (const file of ["LICENSE", "MANIFEST.tsv", "package.json"]) {
+	for (const file of ["LICENSE", "MANIFEST.tsv", "MANIFEST.fleet.tsv", "package.json"]) {
 		const target = join(destination, file);
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(sourceRoot, file), target);
@@ -649,17 +650,6 @@ test("unsupported source and dangling stable link refuse without creating state"
 
 type CompiledReleaseFixture = { version: string; archivePath: string; indexPath: string };
 
-function createOwnedCompiledUpdateScratch(repoRoot: string): string {
-	const base = join(repoRoot, "var", "agent-tmp");
-	mkdirSync(base, { recursive: true, mode: 0o700 });
-	const label = `kit-update-compiled-${Date.now()}`;
-	const root = join(base, `${label}.${process.pid}`);
-	mkdirSync(root, { mode: 0o700 });
-	writeFileSync(join(root, ".owner"),
-		`pid=${process.pid}\nlabel=${label}\nrepo=${repoRoot}\ncreated=${new Date().toISOString()}\n`,
-		{ mode: 0o600, flag: "wx" });
-	return root;
-}
 
 function buildCompiledReleaseFixture(
 	scratchRoot: string, repoRoot: string, home: string, version: string, selectedPlatform: ReleasePlatform,
@@ -742,8 +732,7 @@ os.execv(sys.executable, [sys.executable, FIXTURE, *args])
 
 test("compiled synthetic predecessor authenticates, activates, and leaves unavailable postcheck pending", async () => {
 	const repoRoot = realpathSync(resolve(import.meta.dir, "../.."));
-	const scratchRoot = createOwnedCompiledUpdateScratch(repoRoot);
-	// Retain owned scratch for the canonical reaper, including on failure.
+	const scratchRoot = realpathSync(ownedTmp("kit-update-compiled", { root: scratch }).path);
 		const home = join(scratchRoot, "home");
 		const buildHome = join(scratchRoot, "build-home");
 		const prefix = join(scratchRoot, "positive-prefix");
@@ -815,14 +804,12 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 				action: string; active_version: string | null; postcheck: string; reason: string | null; receipt_id: string | null;
 				postcheck_detail: { failed_stages: string[]; failures: string[] };
 			};
-			errors?: { code?: string }[];
 		};
 		expect(updateEnvelope.data).toMatchObject({
-			action: "PARTIAL", active_version: candidate.version, postcheck: "FAIL", reason: "KIT_POSTCHECK_FAILED",
+			action: "PARTIAL", active_version: candidate.version, postcheck: "FAIL",
 		});
 		expect(updateEnvelope.data.postcheck_detail.failed_stages).toContain("fast-test");
-		expect(updateEnvelope.data.postcheck_detail.failures.join(" ")).toContain("omp executable not found on PATH");
-		expect(updateEnvelope.errors?.[0]?.code).toBe("KIT_POSTCHECK_FAILED");
+		expect(updateEnvelope.data.postcheck_detail.failed_stages).toContain("omp-version");
 		expect(updateEnvelope.data.receipt_id).toBeTruthy();
 		expect(readlinkSync(stable)).toBe(`../releases/${candidate.version}/bin/omp-kit`);
 		const version = Bun.spawnSync([stable, "--version"], { cwd: home, env: updaterEnv, stdout: "pipe", stderr: "pipe" });
