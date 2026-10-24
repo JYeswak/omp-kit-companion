@@ -151,6 +151,12 @@ describe("runtime-adapter --validate-work-root", () => {
 		// `\/` decodes to `/`, so the JSON names the caller, but the adapter reads only unescaped values exactly.
 		writeFileSync(join(escaped, ".owner"), JSON.stringify({ ...owner, repo: REPO_ROOT }).replace(`"repo":"/`, `"repo":"\\/`));
 		expect((await validateWorkRoot(escaped, REPO_ROOT)).stderr).toContain(mismatch);
+		// The only "repo" token sits in value position (malformed JSON): no real repo key, so it is refused.
+		const valueToken = canonicalScratch(REPO_ROOT);
+		writeFileSync(join(valueToken, ".owner"), `{"pid":${process.pid},"label":"repo":${JSON.stringify(REPO_ROOT)},"created_at":"2026-10-24T00:00:00.000Z"}`);
+		const valueTokenCase = await validateWorkRoot(valueToken, REPO_ROOT);
+		expect(valueTokenCase.code).not.toBe(0);
+		expect(valueTokenCase.stderr).toContain(mismatch);
 		const linked = canonicalScratch(REPO_ROOT);
 		const target = join(linked, "owner-target");
 		writeFileSync(target, readFileSync(join(linked, ".owner")));

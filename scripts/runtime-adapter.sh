@@ -91,6 +91,11 @@ validate_work_root() {
             case "$repo_rest" in *'"repo"'*) repo_count=$((repo_count + 1)); repo_rest=${repo_rest#*'"repo"'} ;; *) break ;; esac
           done
           if [ "$repo_count" = 1 ]; then
+            # The token must sit in key position: only `{` or `,` (then optional space) may precede it, so a
+            # malformed `"label":"repo":"/x"` (token as a value) is refused.
+            repo_key_prefix=${marker_body%%'"repo"'*}
+            repo_key_prefix=${repo_key_prefix%"${repo_key_prefix##*[![:space:]]}"}
+            case "$repo_key_prefix" in *'{'|*',') ;; *) repo_count=0 ;; esac
             repo_rest=${marker_body#*'"repo"'}
             repo_rest=${repo_rest#"${repo_rest%%[![:space:]]*}"}
             case "$repo_rest" in :*) repo_rest=${repo_rest#:} ;; *) repo_count=0 ;; esac
