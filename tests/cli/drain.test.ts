@@ -1,9 +1,7 @@
-// close drain (ompkit-kdbz.1 DRAIN1): landed-but-open beads and stale claims from
-// in-tree fixtures. Planted negatives: verdicts silence the queue, assigned fresh
-// beads stay quiet, and both stay scoped to the given tracker. STALEDEF1
-// (ompkit-f9dun): a claim is stale when untouched 24 h and its holder is not live.
+// close drain: landed-but-open beads and orphaned claims from in-tree fixtures.
+// Reclaim follows current holder evidence, not the age of a tracker touch.
 import { expect, test } from "bun:test";
-import { closeQueue, reclaimCommand, staleClaims, STALE_CLAIM_MS, trackerTimeMs, VERDICT_LINE } from "../../src/drain.ts";
+import { closeQueue, reclaimCommand, staleClaims, trackerTimeMs, VERDICT_LINE } from "../../src/drain.ts";
 import type { DrainComment, DrainIssue, Landing } from "../../src/drain.ts";
 import { holderVerdict } from "../../src/holder-liveness.ts";
 import type { LivenessSources } from "../../src/holder-liveness.ts";
@@ -60,7 +58,7 @@ const readable = (over: Partial<LivenessSources> = {}): LivenessSources => ({
 	seats: ok(new Set<string>()), mail: ok(new Map<string, number>()), reservations: ok(new Set<string>()), ...over,
 });
 const liveness = (sources: LivenessSources) => (holder: string) => holderVerdict(holder, sources, NOW);
-const UNTOUCHED = NOW - STALE_CLAIM_MS - HOUR;
+const UNTOUCHED = NOW - 25 * HOUR;
 
 test("AC1 planted: a bead held 25 h by a dead agent is listed DEAD with one atomic reclaim", () => {
 	const rows = staleClaims([issue("x-dead", { status: "in_progress", assignee: "DeadOne", updatedMs: UNTOUCHED })], [], NOW, liveness(readable()));
@@ -89,12 +87,16 @@ test("AC1 planted: unreadable liveness lists the row as UNKNOWN with no reclaim,
 	expect(rows[0]?.evidence.join(" ")).toContain("tern inspect exited 1");
 });
 
-test("24 h boundary: a dead holder's claim touched 23 h ago, or commented 2 h ago, stays out", () => {
-	const verdict = liveness(readable());
-	expect(staleClaims([issue("x-1", { status: "in_progress", assignee: "DeadOne", updatedMs: NOW - 23 * HOUR })], [], NOW, verdict)).toEqual([]);
-	expect(staleClaims([issue("x-1", { status: "in_progress", assignee: "DeadOne", updatedMs: UNTOUCHED })],
-		[comment("x-1", "still here", NOW - 2 * HOUR)], NOW, verdict)).toEqual([]);
-	expect(staleClaims([issue("x-1", { status: "in_progress", assignee: "DeadOne", updatedMs: NOW - STALE_CLAIM_MS })], [], NOW, verdict)).toHaveLength(1);
+test("a recent update or comment does not hide a proven dead holder", () => {
+	const rows = staleClaims([
+		issue("recent-update", { status: "in_progress", assignee: "DeadOne", updatedMs: NOW - HOUR }),
+		issue("recent-comment", { status: "rework", assignee: "DeadOne", updatedMs: UNTOUCHED }),
+	], [comment("recent-comment", "director records a finding", NOW - 2 * HOUR)], NOW, liveness(readable()));
+	expect(rows.map(row => [row.id, row.liveness, row.lastActivityMs])).toEqual([
+		["recent-comment", "DEAD", NOW - 2 * HOUR],
+		["recent-update", "DEAD", NOW - HOUR],
+	]);
+	expect(rows.every(row => row.reclaim !== null)).toBe(true);
 });
 
 test("holderless in_progress and rework untouched 24 h are listed NO_HOLDER with the reclaim", () => {
@@ -106,16 +108,16 @@ test("holderless in_progress and rework untouched 24 h are listed NO_HOLDER with
 	expect(rows[1]?.reclaim).toContain("br update x-rework --status open --assignee \"\"");
 });
 
-test("planted negative: fresh rework, open and closed controls stay out of stale claims", () => {
+test("live rework and open or closed rows are not reclaimed", () => {
 	const rows = staleClaims(
 		[
-			issue("fresh-rework", { status: "rework", updatedMs: NOW - HOUR }),
+			issue("fresh-rework", { status: "rework", assignee: "LiveOne", updatedMs: NOW - HOUR }),
 			issue("open-control", { status: "open", assignee: "DeadOne", updatedMs: NOW - 30 * 24 * HOUR }),
 			issue("closed-control", { status: "closed", assignee: "DeadOne", updatedMs: NOW - 30 * 24 * HOUR }),
 		],
 		[],
 		NOW,
-		liveness(readable()),
+		liveness(readable({ seats: ok(new Set(["liveone"])) })),
 	);
 	expect(rows).toEqual([]);
 });

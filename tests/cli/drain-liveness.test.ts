@@ -1,8 +1,8 @@
 // STALEDEF1 (ompkit-f9dun) CLI wiring: `drain stale-claims --project` reads holder
 // liveness from the seat inventory (tern/tmux on PATH + the Agent Mail identity
 // registry under HOME) and the Agent Mail store (AGENT_MAIL_STORAGE_ROOT). Planted:
-// a 25 h claim by a dead agent is listed DEAD; the same age by a reservation holder
-// is not; an unreadable store lists both as UNKNOWN instead of dropping them.
+// a recent claim by a dead agent is listed DEAD; a reservation holder is not;
+// an unreadable store lists both as UNKNOWN instead of authorizing a reclaim.
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -31,13 +31,13 @@ function shims(): string {
 	return dir;
 }
 
-function project(now: number): string {
+function project(now: number, touchedHours = 25): string {
 	const dir = fixtureDir("proj");
 	mkdirSync(join(dir, ".beads"), { recursive: true });
 	const db = new Database(join(dir, ".beads", "beads.db"));
 	db.exec("CREATE TABLE issues(id TEXT PRIMARY KEY, title TEXT, status TEXT, assignee TEXT, updated_at TEXT)");
 	db.exec("CREATE TABLE comments(issue_id TEXT, author TEXT, text TEXT, created_at TEXT)");
-	const stale = new Date(now - 25 * HOUR).toISOString();
+	const stale = new Date(now - touchedHours * HOUR).toISOString();
 	db.prepare("INSERT INTO issues VALUES (?,?,?,?,?)").run("fx-dead", "dead holder", "in_progress", "DeadAgent", stale);
 	db.prepare("INSERT INTO issues VALUES (?,?,?,?,?)").run("fx-live", "live holder", "in_progress", "LiveAgent", stale);
 	db.close();
@@ -77,6 +77,14 @@ test("AC1 CLI: a dead holder's 25 h claim is listed; a reservation holder's is n
 	expect(r.rc).toBe(0);
 	expect(r.rows.map(row => [row.id, row.liveness])).toEqual([["fx-dead", "DEAD"]]);
 	expect(r.rows[0]?.reclaim).toContain("br update fx-dead --status open --assignee \"\" --if-unchanged");
+});
+
+test("CLI: a recent orphan is reclaimable while a recent reservation holder stays protected", () => {
+	const now = Date.now();
+	const r = staleClaims(project(now, 2), store(now));
+	expect(r.rc).toBe(0);
+	expect(r.rows.map(row => [row.id, row.liveness])).toEqual([["fx-dead", "DEAD"]]);
+	expect(r.rows[0]?.reclaim).toContain('br update fx-dead --status open --assignee "" --if-unchanged');
 });
 
 test("AC1 CLI planted: an unreadable Agent Mail store lists both claims UNKNOWN, never drops them", () => {

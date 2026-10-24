@@ -2,11 +2,7 @@ import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { HOLDER_LIVE_WINDOW_MS } from "./holder-liveness.ts";
 import type { HolderVerdict } from "./holder-liveness.ts";
-
-/** AGENTS rule: an in_progress claim untouched this long with no live holder goes back to open. */
-export const STALE_CLAIM_MS = HOLDER_LIVE_WINDOW_MS;
 
 /** A grader verdict line: the close stays drained only with one of these after landing. */
 export const VERDICT_LINE = /^(CLOSED|REWORK|GRADE[SD]?|VERDICT|REVIEW(?:ED)?|PASS(?:ED)?|FAIL(?:ED)?)\b/i;
@@ -89,10 +85,9 @@ export function reclaimCommand(id: string, revision: string, nowMs: number): str
 	return `br update ${id} --status open --assignee "" --if-unchanged ${shellQuote(revision)} --transition-comment ${shellQuote(`reclaimed ${stamp}: no live holder`)}`;
 }
 
-/** Stale claims (STALEDEF1, ompkit-f9dun; AGENTS rule): in_progress/rework untouched for 24 h
- * (tracker update or comment) whose holder is not live. No holder or a DEAD holder lists the
- * row with its reclaim; an unreadable liveness source lists it UNKNOWN with no reclaim, never
- * drops it. A live holder keeps its claim. */
+/** Orphaned in_progress/rework claims, regardless of tracker touch age.
+ * A DEAD or absent holder gets an atomic reclaim; unreadable liveness remains
+ * UNKNOWN with no reclaim. Live seat, mail activity or reservation protects it. */
 export function staleClaims(
 	issues: readonly DrainIssue[],
 	comments: readonly DrainComment[],
@@ -104,7 +99,6 @@ export function staleClaims(
 	for (const issue of issues) {
 		if (issue.status !== "in_progress" && issue.status !== "rework") continue;
 		const latest = (byId.get(issue.id) ?? []).reduce((max, comment) => Math.max(max, comment.createdMs), issue.updatedMs);
-		if (nowMs - latest < STALE_CLAIM_MS) continue;
 		const verdict: HolderVerdict = issue.assignee === null
 			? { liveness: "DEAD", evidence: ["no assignee"] }
 			: liveness(issue.assignee);

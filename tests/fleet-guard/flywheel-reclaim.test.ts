@@ -3,7 +3,7 @@
 // The guard re-reads liveness at the act from the same sources drain reads: the seat
 // inventory (tern/tmux answered by the fake host + identity files under HOME) and the
 // Agent Mail store at AGENT_MAIL_STORAGE_ROOT. Planted: live seat, live reservation,
-// fresh touch, unreadable liveness and a non-atomic shape are each refused.
+// unreadable liveness and a non-atomic shape are each refused, even for a recent claim.
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -19,7 +19,7 @@ afterAll(() => rmSync(base, { recursive: true, force: true }));
 const NO_SEATS = JSON.stringify({ panes: [], sessions: [] });
 const SEAT_11 = JSON.stringify({ panes: [{ pane: 11, exited: null }], sessions: [{ name: "Default", tabs: [{ name: "t", blocks: [{ id: 11, live: true }] }] }] });
 
-type Plant = { holder: string; touchedMs: number; tern?: string | null; reservationFor?: string };
+type Plant = { holder: string; touchedMs: number; tern?: string | null; reservationFor?: string; activityFor?: string };
 
 function plantedHome(): string {
 	const home = ownedTmp("home", { root: base }).path;
@@ -29,7 +29,7 @@ function plantedHome(): string {
 	return home;
 }
 
-function plantedStore(now: number, reservationFor?: string): string {
+function plantedStore(now: number, reservationFor?: string, activityFor?: string): string {
 	const dir = ownedTmp("mail", { root: base }).path;
 	const db = new Database(join(dir, "storage.sqlite3"));
 	db.exec("CREATE TABLE agents(id INTEGER PRIMARY KEY, project_id INTEGER, name TEXT)");
@@ -41,6 +41,10 @@ function plantedStore(now: number, reservationFor?: string): string {
 	if (reservationFor !== undefined) {
 		db.prepare("INSERT INTO agents VALUES (?,?,?)").run(2, 1, reservationFor);
 		db.prepare("INSERT INTO file_reservations VALUES (?,?,?,?,?,?,?,?)").run(1, 1, 2, "src/a.ts", 1, (now - 30 * HOUR) * 1000, (now + HOUR) * 1000, null);
+	}
+	if (activityFor !== undefined) {
+		db.prepare("INSERT INTO agents VALUES (?,?,?)").run(3, 1, activityFor);
+		db.prepare("INSERT INTO messages VALUES (?,?,?,?)").run(2, 1, 3, (now - HOUR) * 1000);
 	}
 	db.close();
 	return dir;
@@ -56,7 +60,7 @@ async function reclaim(plant: Plant, command?: (revision: string, now: number) =
 		return { stdout: JSON.stringify([{ id: "k-1", title: "t", status: "in_progress", assignee: plant.holder, updated_at: revision }]), stderr: "", code: 0 };
 	};
 	const h = await createFlywheelHost(base, {
-		env: { BR_ACTOR: "Lead", AGENT_MAIL_STORAGE_ROOT: plantedStore(now, plant.reservationFor) },
+		env: { BR_ACTOR: "Lead", AGENT_MAIL_STORAGE_ROOT: plantedStore(now, plant.reservationFor, plant.activityFor) },
 		home: plantedHome(), respond,
 	});
 	const project = ownedTmp("proj", { root: base }).path;
@@ -82,16 +86,28 @@ test("AC3: the same reclaim is refused for a holder with a live reservation", as
 	expect(refused?.reason).toContain("holds a live reservation");
 });
 
-test("planted: a dead holder's claim touched 2 h ago is refused (24 h rule)", async () => {
-	const refused = await reclaim({ holder: "DeadHolder", touchedMs: Date.now() - 2 * HOUR });
-	expect(refused?.block).toBe(true);
-	expect(refused?.reason).toContain("untouched 24 h");
+test("a recently touched claim is reclaimable when the holder is proven dead", async () => {
+	expect(await reclaim({ holder: "DeadHolder", touchedMs: Date.now() - 2 * HOUR })).toBeUndefined();
 });
 
-test("planted: unreadable liveness refuses the reclaim instead of guessing DEAD", async () => {
-	const refused = await reclaim({ holder: "DeadHolder", touchedMs: STALE(), tern: null });
-	expect(refused?.block).toBe(true);
-	expect(refused?.reason).toContain("tern daemon unreachable");
+test("a recent claim remains protected by a live seat, mail activity or reservation", async () => {
+	for (const plant of [
+		{ holder: "SeatHolder", tern: SEAT_11 },
+		{ holder: "Keeper", reservationFor: "Keeper" },
+		{ holder: "Correspondent", activityFor: "Correspondent" },
+	]) {
+		const refused = await reclaim({ ...plant, touchedMs: Date.now() - 2 * HOUR });
+		expect(refused?.block).toBe(true);
+		expect(refused?.reason).toContain("PARTIAL_RELEASE_REFUSED");
+	}
+});
+
+test("unreadable liveness refuses both recent and old claims instead of guessing dead", async () => {
+	for (const touchedMs of [Date.now() - 2 * HOUR, STALE()]) {
+		const refused = await reclaim({ holder: "DeadHolder", touchedMs, tern: null });
+		expect(refused?.block).toBe(true);
+		expect(refused?.reason).toContain("tern inspect exited 1");
+	}
 });
 
 test("planted: a dead-holder reclaim without the revision or the transition comment is refused", async () => {

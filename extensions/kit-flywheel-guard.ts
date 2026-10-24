@@ -5,7 +5,7 @@ import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
-import { HOLDER_LIVE_WINDOW_MS, holderVerdict, readLivenessSourcesAsync, type HolderVerdict } from "../src/holder-liveness.ts";
+import { holderVerdict, readLivenessSourcesAsync, type HolderVerdict } from "../src/holder-liveness.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -1684,20 +1684,15 @@ async function checkRelease(request: TrackerRequest, deps: TrackerMutationDeps):
 }
 
 /**
- * STALEDEF1 (ompkit-f9dun, AGENTS rule): a third party may return a claim to open
- * when it is untouched 24 h and its holder is not live (no live seat, no Agent Mail
- * activity in 24 h, no live reservation), in the one atomic shape drain prints:
- * cleared assignee, the seen revision and a transition comment in a single write.
- * Returns null when allowed, else why not. UNKNOWN liveness never passes.
+ * Reclaim an orphan in one revision-guarded write. A recent tracker touch is not
+ * live-holder evidence: the current seat, mail activity and reservation sources
+ * decide. Missing or unreadable liveness never authorizes third-party custody.
  */
 async function deadHolderReclaimBlocker(request: TrackerRequest, holder: string, updatedAt: string | null, deps: TrackerMutationDeps): Promise<string | null> {
 	if (request.assignee !== "") return 'the reclaim must clear the assignee (--assignee "").';
 	if (request.ifUnchanged === null) return `the reclaim must name the seen revision (--if-unchanged ${updatedAt ?? "<updated_at>"}).`;
 	if (request.transitionComment === null || request.transitionComment.trim() === "") return "the reclaim must record why in the same write (--transition-comment).";
 	const nowMs = Date.now();
-	const touchedMs = updatedAt === null ? Number.NaN : Date.parse(updatedAt);
-	if (!Number.isFinite(touchedMs)) return "the claim's revision is unreadable, so untouched 24 h is unproven.";
-	if (nowMs - touchedMs < HOLDER_LIVE_WINDOW_MS) return `the claim was touched at ${updatedAt}, not untouched 24 h.`;
 	if (deps.holderLiveness === undefined) return `${holder}'s liveness was not checked.`;
 	let verdict: HolderVerdict;
 	try { verdict = await deps.holderLiveness(holder, nowMs); }
