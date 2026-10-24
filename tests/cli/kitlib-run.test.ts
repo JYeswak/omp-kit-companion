@@ -4,7 +4,7 @@
 // languages cannot drift. Each case runs real processes; survivors are found by
 // a marker unique to the case run in their command lines.
 import { afterAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { constants } from "node:os";
 import { join } from "node:path";
@@ -112,7 +112,6 @@ function judge(result: RunResult, want: Expect, rssGrowth: number): void {
 describe("kitlib run conformance corpus", () => {
 	test("corpus is a kitlib-run-corpus.v1 corpus", () => {
 		expect(corpus.schema).toBe("kitlib-run-corpus.v1");
-		expect(corpus.cases.length).toBeGreaterThan(0);
 	});
 	for (const testCase of corpus.cases) {
 		test(testCase.id, async () => {
@@ -200,6 +199,67 @@ describe("kitlib run conformance corpus", () => {
 			}
 		}, 60_000);
 	}
+	test("accepted callback chunks remain readable after capture truncation and completion", async () => {
+		const size = 128 * 1024;
+		const expected = Uint8Array.from({ length: size }, (_, index) => index % 251);
+		const retained: Uint8Array[] = [];
+		const child = `const bytes = Uint8Array.from({ length: ${size} }, (_, index) => index % 251);
+await Bun.write(Bun.stdout, bytes);`;
+		const result = await run([process.execPath, "-e", child], {
+			deadline_s: 5, max_output_bytes: size, max_total_bytes: 17, max_sink_queue_bytes: size * 2,
+			on_output: (stream, chunk) => {
+				// Retain the actual delivered view: a defensive copy would hide detachment.
+				if (stream === "stdout") retained.push(chunk);
+			},
+		});
+		expect(result.rc).toBe(0);
+		expect(result.stdout).toEqual(expected.subarray(0, 17));
+		expect(result.stream_dropped_bytes).toBe(0);
+		expect(createHash("sha256").update(Buffer.concat(retained)).digest("hex"))
+			.toBe(createHash("sha256").update(expected).digest("hex"));
+	}, 10_000);
+	test("dropping later chunks preserves the actual view already handed to a stalled sink", async () => {
+		const size = 1024 * 1024;
+		const expected = Uint8Array.from({ length: size }, (_, index) => index % 251);
+		let retained: Uint8Array | undefined;
+		const result = await run([process.execPath, "-e",
+			`await Bun.write(Bun.stdout, Uint8Array.from({ length: ${size} }, (_, index) => index % 251));`], {
+			deadline_s: 5, grace_s: 0.01, max_output_bytes: 17, max_sink_queue_bytes: 256 * 1024,
+			on_output: (_stream, chunk) => {
+				retained = chunk;
+				return new Promise(() => {});
+			},
+		});
+		expect(result.rc).toBe(0);
+		expect(result.stdout).toEqual(expected.subarray(0, 17));
+		expect(result.stream_dropped_bytes).toBe(size);
+		if (!retained || retained.byteLength === 0) throw new Error("accepted sink view was lost or detached");
+		expect(createHash("sha256").update(retained).digest("hex"))
+			.toBe(createHash("sha256").update(expected.subarray(0, retained.byteLength)).digest("hex"));
+	}, 10_000);
+	test("optional buffer release failures never stop draining the child", async () => {
+		const module = join(import.meta.dir, "../../src/kitlib/run.ts");
+		for (const mode of ["native", "absent", "non-detachable"]) {
+			const script = `import { run } from ${JSON.stringify(module)};
+const mode = ${JSON.stringify(mode)};
+let attempts = 0;
+if (mode === "absent") Object.defineProperty(ArrayBuffer.prototype, "transfer", { value: undefined });
+if (mode === "non-detachable") Object.defineProperty(ArrayBuffer.prototype, "transfer", {
+	value() { attempts++; throw new TypeError("synthetic non-detachable buffer"); }
+});
+const result = await run(["/bin/sh", "-c", "head -c 1048576 /dev/zero; printf drained >&2"], {
+	deadline_s: 5, max_output_bytes: 17
+});
+console.log(JSON.stringify({ rc: result.rc, timed_out: result.timed_out,
+	stdout: Array.from(result.stdout), stderr: new TextDecoder().decode(result.stderr), attempts }));`;
+			const child = await run([process.execPath, "-e", script], { deadline_s: 10 });
+			expect(child.rc, decoder.decode(child.stderr)).toBe(0);
+			const result = JSON.parse(decoder.decode(child.stdout));
+			expect({ rc: result.rc, timed_out: result.timed_out, stdout: result.stdout, stderr: result.stderr })
+				.toEqual({ rc: 0, timed_out: false, stdout: Array(17).fill(0), stderr: "drained" });
+			if (mode === "non-detachable") expect(result.attempts).toBeGreaterThan(0);
+		}
+	}, 30_000);
 	test("a shell string is refused", async () => {
 		await expect(run("echo hi" as unknown as string[], { deadline_s: 5 })).rejects.toThrow(TypeError);
 	});

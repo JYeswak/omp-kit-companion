@@ -152,11 +152,12 @@ class Sink {
 	constructor(private readonly deliver: (stream: OutputStream, chunk: Uint8Array) => unknown, private readonly limit: number) {
 		this.done = this.loop();
 	}
-	offer(stream: OutputStream, chunk: Uint8Array): void {
-		if (this.error !== null || this.closed || this.queued + chunk.byteLength > this.limit) { this.dropped += chunk.byteLength; return; }
+	offer(stream: OutputStream, chunk: Uint8Array): boolean {
+		if (this.error !== null || this.closed || this.queued + chunk.byteLength > this.limit) { this.dropped += chunk.byteLength; return false; }
 		this.queue.push([stream, chunk]);
 		this.queued += chunk.byteLength;
 		this.wake?.();
+		return true;
 	}
 	private async loop(): Promise<void> {
 		for (;;) {
@@ -207,11 +208,21 @@ function capture(stream: ReadableStream<Uint8Array>, cap: number, name: OutputSt
 			const { done: eof, value } = await reader.read();
 			if (eof) return;
 			read += value.byteLength;
-			sink?.offer(name, value);
+			const retainedBySink = sink?.offer(name, value) ?? false;
 			const room = Math.min(cap - kept, budget.total - budget.kept);
 			if (value.byteLength <= room) { chunks.push(value); kept += value.byteLength; budget.kept += value.byteLength; continue; }
 			if (room > 0) { chunks.push(value.slice(0, room)); kept += room; budget.kept += room; }
 			truncated = true;
+			const buffer = value.buffer;
+			// Accepted chunks may outlive run(); partial views may share backing storage.
+			if (!retainedBySink && buffer instanceof ArrayBuffer && value.byteOffset === 0 &&
+				value.byteLength === buffer.byteLength && typeof buffer.transfer === "function") {
+				try { buffer.transfer(0); }
+				catch (error) {
+					// Non-detachable backing stores keep their ordinary GC lifetime; draining must continue.
+					if (!(error instanceof TypeError)) throw error;
+				}
+			}
 		}
 	})().catch(() => { /* the reader was cancelled after the drain bound */ });
 	return {
