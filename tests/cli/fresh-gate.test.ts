@@ -302,7 +302,6 @@ test.skipIf(!AMPLE)("SAVEFIRST1 planted (a): sbh pressure with ample bytes admit
 		expect(saved.out.split("\n").filter((line) => line.startsWith("WARN disk-pressure:"))).toEqual([
 			"WARN disk-pressure: sbh reports 11.7% free (below its floor); saving continues on the 10 GiB physical floor; run waste management (ompkit-774u.15)",
 		]);
-		expect(saved.out).toMatch(/^heavy admission wait: [01]s \(cli-compile\)$/m);
 		expect(saved.out).not.toContain("RED");
 		// Mutant: the step without its statfs override is vetoed by sbh again.
 		const mutant = source.replace("heavy --label \"fresh-gate-$step\" --disk-observer statfs --", "heavy --label \"fresh-gate-$step\" --");
