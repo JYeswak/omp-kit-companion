@@ -1,7 +1,6 @@
 #!/bin/sh
 set -eu
 exec python3 - "$0" "$@" <<'PY'
-import datetime
 import hashlib
 import json
 import os
@@ -14,9 +13,12 @@ root = pathlib.Path(sys.argv[1]).resolve().parents[2]
 mutant = sys.argv[2] if len(sys.argv) == 3 else ""
 if len(sys.argv) > 3 or mutant not in ("", "drop-head-filter", "earliest-run"):
     raise SystemExit("Usage: planning-main-green.sh [drop-head-filter|earliest-run]")
-work = root / "var" / "agent-tmp" / ("planning-main-green." + str(os.getpid()))
-work.mkdir(parents=True)
-(work / ".owner").write_text(json.dumps({"pid": os.getpid(), "label": "planning-main-green", "repo": str(root), "created": datetime.datetime.now(datetime.timezone.utc).isoformat()}) + "\n")
+sys.path.insert(0, str(root / "scripts"))
+from kitlib_tmp import owned_tmp
+
+work_root = root / "var" / "agent-tmp"
+work_root.mkdir(parents=True, exist_ok=True)
+work = pathlib.Path(owned_tmp("planning-main-green", root=str(work_root), bead="ompkit-8hpf4").path)
 os.environ["TMPDIR"] = str(work)
 repo = work / "repo"
 repo.mkdir()
