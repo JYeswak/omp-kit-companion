@@ -1,0 +1,3 @@
+### Fixed
+
+- The fleet tripwire `kit-no-live-tracker-sqlite` now also watches eval cells, and it catches prefixed and double-quoted strings. All three measured tracker outages (2026-10-13, 10-22, 10-24) came from a persistent eval kernel holding a sqlite connection to `.beads/beads.db`, and the rule did not watch `eval`. Its connect condition also missed `sqlite3.connect(f"file:{repo}/.beads/beads.db?mode=ro", uri=True)` and every double-quoted path in bash and eval, because streamed arguments arrive JSON-escaped (`\"`). The advice is unchanged: use `br`/`bv`, or open a disposable copy under `var/agent-tmp/`. A path held in a variable is still not caught (ompkit-u335).
