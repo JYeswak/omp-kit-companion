@@ -563,7 +563,7 @@ explicit report rather than inventing zero activity.
 | `infra check` | Run the ladder with a candidate binary first on PATH: `PASS`, `FAIL`, `INCONCLUSIVE`; refuses above 1.5x cores unless `--wait` or `--force` | `omp-kit infra check --tool bun --candidate X.Y.Z --binary /abs/bun --json` |
 | `infra promote` | Certify a checked candidate into the pin file (`--human --apply --yes`) | `omp-kit infra promote --tool bun --candidate X.Y.Z --binary /abs/bun --human --apply --yes` |
 | `infra undo` | Restore the pin file from a promote backup | `omp-kit infra undo --receipt PATH --apply --yes` |
-| `scratch plan` / `release DIR` / `apply` | Report, mark one task directory finished, or quarantine and delete per plan | `omp-kit scratch release /repo/var/agent-tmp/omp.123 --json` |
+| `scratch plan` / `release DIR` / `apply` | Finish tasks; legacy: `--legacy-owner --reason TEXT --yes` | `omp-kit scratch release DIR --bin throwaway --now --json` |
 | `examples memory-off` / `mnemopi-manual` / `model-roles` / `mcp` / `omp-watch` / `skill-set` | Versioned, unverified recipes for manual use; `omp-watch` renders the service file without installing it | `omp-kit examples omp-watch --json` |
 | `planning convert` | Fenced Markdown plan to native beads: dry-run uses a fresh isolated DB; apply requires `--tracker-root DIR --actor ACTOR --yes`, always disables native auto-import/export | `omp-kit planning convert --plan PLAN.md --mission M --dry-run --db var/agent-tmp/plan-run --json` |
 | `review reduce` | Minimize a public-synthetic false fire without weakening its benign context | `omp-kit review reduce --rules /abs/rules --fixture /abs/fixture.json --json` |

@@ -647,8 +647,8 @@ export function lsofClear(dir: string, run: ScratchRunner, timeoutMs = 0): boole
 	} catch {
 		return null;
 	}
-	if (out.code === null) return null;
-	const text = `${out.stdout}\n${out.stderr}`;
+	if ((out.code !== 0 && out.code !== 1) || out.stderr !== "") return null;
+	const text = out.stdout;
 	if (text.includes("command not found") || /lsof:.*(not found|No such file)/i.test(text)) return null;
 	if (out.stdout.trim() === "") {
 		if (/^lsof:/m.test(text)) return null;
@@ -673,8 +673,8 @@ export function takeLsofSnapshot(run: ScratchRunner, timeoutMs = LSOF_TIMEOUT_MS
 	} catch {
 		return null;
 	}
-	if (out.code === null) return null;
-	const text = `${out.stdout}\n${out.stderr}`;
+	if ((out.code !== 0 && out.code !== 1) || out.stderr !== "") return null;
+	const text = out.stdout;
 	if (text.includes("command not found") || /lsof:.*(not found|No such file)/i.test(text)) return null;
 	if (/^lsof:/m.test(text)) return null;
 	const paths = new Set<string>();
@@ -1971,6 +1971,10 @@ function releaseLegacy(dir: string, home: string, deps: InspectDeps, dev: number
 	const clear = lsofClearDir(deps, dir);
 	if (clear !== true) return { ok: false, changed: false, dir,
 		reason: clear === null ? "lsof-evidence-unavailable" : "release-open-fds-present", ownerPid: null };
+	// The open-file probe may outlive this directory or its owner record. Never mark a replacement task.
+	const ownerPath = join(dir, ".owner");
+	if (isSymlink(ownerPath) || readText(ownerPath) !== ownerText || `${dev}:${ino}` !== inodeOf(dir))
+		return { ok: false, changed: false, dir, reason: "directory-changed-during-release", ownerPid: null };
 	const markerPath = join(dir, RELEASE_FILE);
 	if (existsSync(markerPath)) {
 		const prior = readReleaseRecord(dir);

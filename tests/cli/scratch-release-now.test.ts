@@ -4,10 +4,10 @@
 // marked dir and is NOT success (ok false, now-held-*); --now is refused without a bin, on free-prose owners, and never
 // touches a hold.
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { createScratch, releaseScratch, reapLogPath, scratchContent,
+import { createScratch, releaseScratch, reapLogPath, scratchContent, lsofClear, takeLsofSnapshot,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -320,4 +320,154 @@ test("createScratch dirs release with now through the same path", () => {
 	const released = releaseScratch(created.dir, home, deps({ liveness: live }), { bin: "throwaway", now: true });
 	expect(released).toMatchObject({ ok: true, changed: true, reason: "owner-released-deleted" });
 	expect(existsSync(created.dir)).toBe(false);
+});
+
+function legacyCliFixture(owner = "legacy task owner") {
+	const root = ownedTmp("legacy-cli", { root: scratchParent, autoCleanup: false }).path;
+	const home = ownedTmp("legacy-home", { root: scratchParent, autoCleanup: false }).path;
+	cleanup.push(root, home);
+	const dir = join(root, `legacy.${process.pid}`);
+	mkdirSync(dir);
+	writeFileSync(join(dir, ".owner"), owner);
+	writeFileSync(join(dir, "payload"), "preserve original task data");
+	const env = { ...isolatedCliEnv(home), OMP_KIT_SCRATCH_ROOTS: root };
+	const cli = async (args: string[], overrides: Record<string, string> = {}) => {
+		const result = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", ...args, "--json"],
+			{ cwd: repo, env: { ...env, ...overrides }, deadline_s: 20 });
+		const output = JSON.parse(new TextDecoder().decode(result.stdout));
+		expect(result.timed_out).toBe(false);
+		return { result, output };
+	};
+	return { root, home, dir, env, cli };
+}
+
+test("legacy release CLI records original owners and quarantines only released tasks while their session lives", async () => {
+	const f = legacyCliFixture();
+	const held = join(f.root, `held.${process.pid}`);
+	mkdirSync(held);
+	writeFileSync(join(held, ".owner"), "still working");
+	writeFileSync(join(held, "payload"), "live task data");
+	const reason = "completed isolated task; retain original ownership evidence";
+	for (const [index, owner] of ["bare task owner", "pid=42\nlabel=partial\n", '{"label":"partial-json"}'].entries()) {
+		const dir = index === 0 ? f.dir : join(f.root, `legacy-${index}.${process.pid}`);
+		if (index !== 0) mkdirSync(dir);
+		writeFileSync(join(dir, ".owner"), owner);
+		const { result, output } = await f.cli(["release", dir, "--legacy-owner", "--reason", reason, "--yes"]);
+		expect(result.rc).toBe(0);
+		expect(output.data.action).toBe("RELEASED");
+		const marker = readFileSync(join(dir, ".omp-kit-release"), "utf8");
+		expect(marker).toContain(`legacy_owner_b64=${Buffer.from(owner).toString("base64")}\n`);
+		expect(marker).toContain(`release_reason=${reason}\n`);
+		expect(Number(marker.split("\n").find(line => line.startsWith("release_actor="))?.split("=")[1])).toBeGreaterThan(0);
+		expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(owner);
+	}
+	const planned = await f.cli(["plan"]);
+	expect(planned.result.rc).toBe(0);
+	expect(planned.output.data.sessions.find((row: { dir: string }) => row.dir === held)?.action).toBe("LIVE");
+	const applied = await f.cli(["apply", "--apply", "--yes"]);
+	expect(applied.result.rc).toBe(0);
+	expect(existsSync(f.dir)).toBe(false);
+	expect(existsSync(held)).toBe(true);
+	expect(readFileSync(join(held, "payload"), "utf8")).toBe("live task data");
+	// Read the child's receipt from the same isolated state root, not the test runner's ambient state.
+	process.env.XDG_STATE_HOME = f.env.XDG_STATE_HOME;
+	expect(logEvents(f.home).filter(row => row.event === "release" && row.legacy === true)).toHaveLength(3);
+}, 120_000);
+
+test.each([
+	{ flags: ["--legacy-owner", "--reason", "completed"] },
+	{ flags: ["--legacy-owner", "--yes"] },
+	{ flags: ["--reason", "completed", "--yes"] },
+])("legacy CLI confirmation requires the complete explicit operator request: %j", async ({ flags }) => {
+	const f = legacyCliFixture();
+	const before = readFileSync(join(f.dir, ".owner"), "utf8");
+	const { result } = await f.cli(["release", f.dir, ...flags]);
+	expect(result.rc).not.toBe(0);
+	expect(existsSync(join(f.dir, ".omp-kit-release"))).toBe(false);
+	expect(readFileSync(join(f.dir, ".owner"), "utf8")).toBe(before);
+	expect(readFileSync(join(f.dir, "payload"), "utf8")).toBe("preserve original task data");
+}, 30_000);
+
+test("legacy CLI refuses a real open descriptor without marking or changing the task", async () => {
+	const f = legacyCliFixture();
+	const fd = openSync(join(f.dir, "payload"), "r");
+	try {
+		const { result, output } = await f.cli(["release", f.dir, "--legacy-owner", "--reason", "completed", "--yes"]);
+		expect(result.rc).not.toBe(0);
+		expect(output.errors[0].message).toContain("release-open-fds-present");
+		expect(existsSync(join(f.dir, ".omp-kit-release"))).toBe(false);
+		expect(readFileSync(join(f.dir, "payload"), "utf8")).toBe("preserve original task data");
+	} finally { closeSync(fd); }
+}, 30_000);
+
+test("legacy CLI keeps unknown lsof evidence and foreign roots unmodified", async () => {
+	const f = legacyCliFixture();
+	const bin = join(f.home, "bin");
+	mkdirSync(bin);
+	writeFileSync(join(bin, "lsof"), "#!/bin/sh\nprintf 'lsof unavailable\\n' >&2\nexit 1\n", { mode: 0o755 });
+	const flags = ["--legacy-owner", "--reason", "completed", "--yes"];
+	const unknown = await f.cli(["release", f.dir, ...flags], { PATH: `${bin}:${f.env.PATH ?? ""}` });
+	expect(unknown.result.rc).not.toBe(0);
+	expect(unknown.output.errors[0].message).toContain("lsof-evidence-unavailable");
+	expect(existsSync(join(f.dir, ".omp-kit-release"))).toBe(false);
+	const foreign = await f.cli(["release", f.dir, ...flags], { OMP_KIT_SCRATCH_ROOTS: f.home });
+	expect(foreign.result.rc).not.toBe(0);
+	expect(foreign.output.errors[0].message).toContain("outside-scratch-root");
+	expect(readFileSync(join(f.dir, ".owner"), "utf8")).toBe("legacy task owner");
+	expect(readFileSync(join(f.dir, "payload"), "utf8")).toBe("preserve original task data");
+	expect(existsSync(join(f.dir, ".omp-kit-release"))).toBe(false);
+}, 45_000);
+
+test.each(["owner", "directory"])("legacy release rechecks %s identity after its lsof probe, before creating a marker", (changed) => {
+	const f = fixture("original legacy task");
+	const run: ScratchRunner = (args) => {
+		if (args[0] === "lsof") {
+			if (changed === "owner") writeFileSync(join(f.dir, ".owner"), "different legacy task");
+			else {
+				renameSync(f.dir, `${f.dir}.original`);
+				mkdirSync(f.dir);
+				writeFileSync(join(f.dir, ".owner"), "original legacy task");
+			}
+		}
+		return clearRun(args);
+	};
+	const released = releaseScratch(f.dir, f.home, deps({ run }), { legacyOwner: true, reason: "completed isolated task" });
+	expect(released).toMatchObject({ ok: false, changed: false, reason: "directory-changed-during-release" });
+	expect(existsSync(join(f.dir, ".omp-kit-release"))).toBe(false);
+	expect(readFileSync(join(f.dir, ".owner"), "utf8")).toBe(changed === "owner" ? "different legacy task" : "original legacy task");
+});
+
+test.each(["owner", "directory"])("legacy CLI refuses a %s replacement made by the open-file probe without marking it", async (changed) => {
+	const f = legacyCliFixture();
+	const bin = join(f.home, "bin");
+	mkdirSync(bin);
+	const replacement = changed === "owner"
+		? 'writeFileSync(join(dir, ".owner"), "replacement task");'
+		: 'renameSync(dir, dir + ".original"); mkdirSync(dir); writeFileSync(join(dir, ".owner"), "legacy task owner");';
+	writeFileSync(join(bin, "lsof"), `#!${process.execPath}\n`
+		+ 'import { writeFileSync, renameSync, mkdirSync } from "node:fs";\n'
+		+ 'import { join } from "node:path";\n'
+		+ `const dir = ${JSON.stringify(f.dir)};\n${replacement}\nprocess.exit(1);\n`, { mode: 0o755 });
+	const { result, output } = await f.cli(["release", f.dir, "--legacy-owner", "--reason", "completed", "--yes"],
+		{ PATH: `${bin}:${f.env.PATH ?? ""}` });
+	expect(result.rc).not.toBe(0);
+	expect(output.errors[0].message).toContain("directory-changed-during-release");
+	expect(existsSync(join(f.dir, ".omp-kit-release"))).toBe(false);
+	expect(readFileSync(join(f.dir, ".owner"), "utf8")).toBe(changed === "owner" ? "replacement task" : "legacy task owner");
+	const original = changed === "owner" ? f.dir : `${f.dir}.original`;
+	expect(readFileSync(join(original, "payload"), "utf8")).toBe("preserve original task data");
+}, 45_000);
+
+test.each([
+	{ code: 1, stdout: "", stderr: "probe unavailable" },
+	{ code: 2, stdout: "", stderr: "" },
+])("open-file probe failures remain unknown for both directory and snapshot guards: %j", (failed) => {
+	const run: ScratchRunner = () => failed;
+	expect(lsofClear("/isolated/task", run)).toBeNull();
+	expect(takeLsofSnapshot(run)).toBeNull();
+});
+
+test("a quiet native no-match exit remains valid empty open-file evidence", () => {
+	expect(lsofClear("/isolated/task", clearRun)).toBe(true);
+	expect(takeLsofSnapshot(clearRun)).toEqual(new Set<string>());
 });

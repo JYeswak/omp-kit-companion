@@ -68,6 +68,7 @@ import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaul
 import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { defaultBudgetLedgerPath, releaseBudgetEntry, updateScratchUsers } from "./scratch.ts";
+import type { ScratchReleaseOptions } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
 import { runHeavy } from "./heavy.ts";
@@ -3514,6 +3515,12 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	if (sub === "release") {
 		if (!request.argument) return refusal("SCRATCH_RELEASE_PATH_REQUIRED", "scratch release needs a directory path",
 			"Run omp-kit scratch release ABSOLUTE_DIR from the owning session or one of its child processes.");
+		const legacyOwner = request.flags.has("--legacy-owner"), legacyReason = request.flags.get("--reason");
+		if ((legacyOwner || legacyReason !== undefined)
+			&& (!legacyOwner || typeof legacyReason !== "string" || legacyReason.trim() === "" || !request.flags.has("--yes")))
+			return refusal("SCRATCH_LEGACY_CONFIRMATION_REQUIRED",
+				"Legacy ownership release requires --legacy-owner --reason TEXT --yes",
+				"Supply all three only for a completed eligible legacy task; no directory was marked or changed.");
 		const binFlag = request.flags.get("--bin"), refFlag = request.flags.get("--ref");
 		const bin = SCRATCH_BINS.find((candidate) => candidate === binFlag);
 		if ((binFlag !== undefined && bin === undefined) || (refFlag !== undefined && typeof refFlag !== "string"))
@@ -3526,7 +3533,12 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		// flag wins over the environment variable; neither is ever logged or echoed.
 		const capabilityFlag = request.flags.get("--capability");
 		const capability = typeof capabilityFlag === "string" ? capabilityFlag : process.env.OMP_KIT_SCRATCH_CAPABILITY?.trim() || undefined;
-		const released = releaseScratch(request.argument, home, deps, { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}), ...(now ? { now: true as const } : {}), ...(capability ? { capability } : {}) });
+		const options: ScratchReleaseOptions = { ...(bin ? { bin } : {}), ...(typeof refFlag === "string" ? { ref: refFlag } : {}), ...(now ? { now: true as const } : {}), ...(capability ? { capability } : {}) };
+		if (legacyOwner && typeof legacyReason === "string") {
+			options.legacyOwner = true;
+			options.reason = legacyReason;
+		}
+		const released = releaseScratch(request.argument, home, deps, options);
 		if (!released.ok && released.changed) {
 			releaseBudgetEntry(defaultBudgetLedgerPath(), released.dir);
 			return refusal("SCRATCH_RELEASE_HELD",
