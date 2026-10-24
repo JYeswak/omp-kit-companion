@@ -110,11 +110,9 @@ const DAEMON_PLIST_GOLDEN = `<?xml version="1.0" encoding="UTF-8"?>
 \t<key>ThrottleInterval</key>
 \t<integer>60</integer>
 \t<key>ProcessType</key>
-\t<string>Background</string>
+\t<string>Standard</string>
 \t<key>Nice</key>
 \t<integer>10</integer>
-\t<key>LowPriorityIO</key>
-\t<true/>
 \t<key>WorkingDirectory</key>
 \t<string>/fixture/user-home/test-op</string>
 </dict>
@@ -188,7 +186,7 @@ test("interval_watch_goldens_unchanged", () => {
 
 test("daemon renderer output passes every contract check", () => {
 	sanitizedEnv();
-	const plistFails = checkPlistContract("cc", DAEMON_PLIST_GOLDEN).filter(check => check.status === "FAIL");
+	const plistFails = checkPlistContract("cc", DAEMON_PLIST_GOLDEN, "on-failure", "deadline").filter(check => check.status === "FAIL");
 	expect(plistFails).toEqual([]);
 	expect(statusOf(checkPlistContract("cc", DAEMON_PLIST_GOLDEN), "contract-daemon-keepalive")).toBe("PASS");
 	const unitFails = checkSystemdContract("cc", DAEMON_SERVICE_GOLDEN).filter(check => check.status === "FAIL");

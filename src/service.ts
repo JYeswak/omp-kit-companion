@@ -81,9 +81,15 @@ export interface OwnedStatePath { path: string; names?: (name: string) => boolea
  * `commandConfigKey` names the fleet-watch.json key holding `{argv, cwd}`; such a job
  * renders that argv as its program and is UNCONFIGURED while the key is absent.
  */
+export type ServiceQos = "background" | "deadline";
 export interface ServiceJobDef {
 	name: string; label: string; kind: "watch" | "interval" | "daemon"; intervalSeconds: number; runAtLoad?: boolean;
 	restart?: "always"; commandConfigKey?: string; program?: ServiceProgram;
+	/**
+	 * SVCQOS1: scheduling class. Absent = "background" (ProcessType Background, Nice 10, LowPriorityIO).
+	 * "deadline" = ProcessType Standard, Nice 10, no LowPriorityIO, for a job with freshness budgets.
+	 */
+	qos?: ServiceQos;
 	/**
 	 * State this job writes on its own schedule, beyond its own `jobs/<name>.*` records and the shared service
 	 * TMPDIR (see jobOwnedState). An isolated test excludes it only while the job is installed in that HOME.
@@ -112,7 +118,8 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// kind only; the serve exec and heartbeat land in .18.2, which extends
 	// this entry rather than duplicating it. Its store, cursors and spool (every
 	// kit command appends spool/kit while the store exists) are its CC_STATE.
-	"cc": { name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0, ownedState: home => [{ path: ccStateDir(home) }] },
+	// SVCQOS1: deadline QoS; its fast lane must finish in 10 s every 15 s.
+	"cc": { name: "cc", label: "com.omp-kit.cc", kind: "daemon", intervalSeconds: 0, qos: "deadline", ownedState: home => [{ path: ccStateDir(home) }] },
 	// SENTINELLIVE1 (ompkit-b4zip): the fleet loop sentinel, supervised so it outlives the seat
 	// that launched it. Its command is operator data (fleet-watch.json `loopSentinel`).
 	"loop-sentinel": { name: "loop-sentinel", label: "com.omp-kit.loop-sentinel", kind: "daemon", intervalSeconds: 0, restart: "always", commandConfigKey: "loopSentinel" },
@@ -607,11 +614,10 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		"\t<key>ThrottleInterval</key>",
 		"\t<integer>60</integer>",
 		"\t<key>ProcessType</key>",
-		"\t<string>Background</string>",
+		job.qos === "deadline" ? "\t<string>Standard</string>" : "\t<string>Background</string>",
 		"\t<key>Nice</key>",
 		"\t<integer>10</integer>",
-		"\t<key>LowPriorityIO</key>",
-		"\t<true/>",
+		...(job.qos === "deadline" ? [] : ["\t<key>LowPriorityIO</key>", "\t<true/>"]),
 		`\t<key>WorkingDirectory</key>`,
 		`\t<string>${xml(program?.cwd ?? home)}</string>`,
 		"</dict>",
@@ -971,7 +977,7 @@ export function checkService(input: DoctorInput): ServiceCheck[] {
 		checks.push({ id: "scope-sanity", status: "PASS", message: "User scope only", remediation: "None." });
 	}
 	// SVC1 contract checks over the installed (or freshly rendered) definition.
-	checks.push(...checkPlistContract(input.job.name, input.installed?.text ?? input.rendered, input.job.restart ?? "on-failure"));
+	checks.push(...checkPlistContract(input.job.name, input.installed?.text ?? input.rendered, input.job.restart ?? "on-failure", input.job.qos ?? "background"));
 	return checks;
 }
 export interface LinuxUnitInput {

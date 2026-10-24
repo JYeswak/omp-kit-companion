@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 import { looksSecret } from "./mcp-sources.ts";
-import type { ServiceCheck } from "./service.ts";
+import type { ServiceCheck, ServiceQos } from "./service.ts";
 
 /**
  * SVC1 contract checks over rendered/installed job definitions.
@@ -74,8 +74,9 @@ export type DaemonRestart = "on-failure" | "always";
  * Static contract checks for one launchd plist. The contract (SVC1 box 1):
  * RunAtLoad false, ProcessType Background, explicit absolute PATH/HOME,
  * no secrets or secret paths, out/err log paths, low-priority shape.
+ * SVCQOS1: a "deadline" job instead needs ProcessType Standard, Nice >= 10 and no LowPriorityIO.
  */
-export function checkPlistContract(jobName: string, text: string, restart: DaemonRestart = "on-failure"): ServiceCheck[] {
+export function checkPlistContract(jobName: string, text: string, restart: DaemonRestart = "on-failure", qos: ServiceQos = "background"): ServiceCheck[] {
 	const checks: ServiceCheck[] = [];
 	// Daemon shape: neither a StartInterval cadence nor a WatchPaths trigger.
 	// Only a daemon plist may run at load with KeepAlive; interval/watch jobs
@@ -112,11 +113,14 @@ export function checkPlistContract(jobName: string, text: string, restart: Daemo
 		checks.push(pass("contract-daemon-keepalive", "Interval/watch job; no KeepAlive required"));
 	}
 	const processType = plistString(text, "ProcessType");
-	checks.push(processType === "Background"
-		? pass("contract-processtype", "ProcessType is Background")
+	const wantedType = qos === "deadline" ? "Standard" : "Background";
+	checks.push(processType === wantedType
+		? pass("contract-processtype", `ProcessType is ${wantedType}`)
 		: fail("contract-processtype",
-			processType === null ? "ProcessType key is missing" : `ProcessType is ${processType}, not Background`,
-			`Render ${jobName} with ProcessType Background (SVC1 contract).`));
+			processType === null ? "ProcessType key is missing" : `ProcessType is ${processType}, not ${wantedType}`,
+			qos === "deadline"
+				? `Render ${jobName} with ProcessType Standard: it declares the deadline QoS class, which background QoS cannot meet (SVCQOS1).`
+				: `Render ${jobName} with ProcessType Background (SVC1 contract).`));
 	const env = plistEnvironment(text);
 	const home = env["HOME"] ?? "";
 	const path = env["PATH"] ?? "";
@@ -141,6 +145,12 @@ export function checkPlistContract(jobName: string, text: string, restart: Daemo
 			`Render ${jobName} with StandardOutPath/StandardErrorPath under Library/Logs/omp-kit.`));
 	const nice = text.match(/<key>Nice<\/key>\s*<integer>(-?\d+)<\/integer>/);
 	const lowIo = plistFlag(text, "LowPriorityIO");
+	if (qos === "deadline") {
+		checks.push(nice !== null && Number(nice[1]) >= 10 && lowIo !== true
+			? { id: "contract-low-priority", status: "PASS", message: "Deadline class: Nice 10 without LowPriorityIO; CPU still yields to interactive work", remediation: "None." }
+			: { id: "contract-low-priority", status: "WARN", message: "Deadline job is not shaped Nice 10 without LowPriorityIO", remediation: `Render ${jobName} with Nice 10 and no LowPriorityIO (deadline class).` });
+		return checks;
+	}
 	checks.push(nice !== null && Number(nice[1]) >= 10 && lowIo === true
 		? { id: "contract-low-priority", status: "PASS", message: "Nice 10 with LowPriorityIO; the job yields to interactive work", remediation: "None." }
 		: { id: "contract-low-priority", status: "WARN", message: "Job is not low-priority shaped (Nice 10 + LowPriorityIO)", remediation: `Render ${jobName} with Nice 10 and LowPriorityIO true.` });

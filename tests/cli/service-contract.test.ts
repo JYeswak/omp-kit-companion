@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { renderLaunchdPlist, renderSystemdUnits } from "../../src/service.ts";
+import { KNOWN_JOBS, renderLaunchdPlist, renderSystemdUnits } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 
 const HOME = "/fixture/user-home/test-op";
@@ -84,4 +84,27 @@ test("unit without TimeoutStartSec fails contract-systemd-timeout", () => {
 	const rendered = renderSystemdUnits(HOME, goodJobDef(), LAUNCHER, null).service
 		.split("\n").filter(line => !line.startsWith("TimeoutStartSec=")).join("\n");
 	expect(statusOf(checkSystemdContract("load-watch", rendered), "contract-systemd-timeout")).toBe("FAIL");
+});
+
+// SVCQOS1 (ompkit-fp72.120.16.50): per-job QoS class.
+test("cc renders the deadline shape; a non-cc daemon keeps background QoS", () => {
+	const cc = renderLaunchdPlist(HOME, { ...KNOWN_JOBS["cc"]! }, LAUNCHER, null).text;
+	expect(cc).toContain("<key>ProcessType</key>\n\t<string>Standard</string>\n\t<key>Nice</key>\n\t<integer>10</integer>");
+	expect(cc).not.toContain("LowPriorityIO");
+	expect(checkPlistContract("cc", cc, "on-failure", "deadline").filter(check => check.status !== "PASS")).toEqual([]);
+	const bg = renderLaunchdPlist(HOME, { name: "bg-daemon", label: "com.omp-kit.bg-daemon", kind: "daemon" as const, intervalSeconds: 0 }, LAUNCHER, null).text;
+	expect(bg).toContain("<key>ProcessType</key>\n\t<string>Background</string>");
+	expect(bg).toContain("<key>LowPriorityIO</key>\n\t<true/>");
+});
+
+test("planted: a deadline job rendered Background fails contract-processtype naming the class", () => {
+	const planted = renderLaunchdPlist(HOME, { ...KNOWN_JOBS["cc"]!, qos: "background" as const }, LAUNCHER, null).text;
+	const check = checkPlistContract("cc", planted, "on-failure", "deadline").find(row => row.id === "contract-processtype")!;
+	expect(check.status).toBe("FAIL");
+	expect(check.remediation).toContain("deadline QoS class");
+});
+
+test("planted: a background job rendered Standard still fails contract-processtype", () => {
+	const planted = renderLaunchdPlist(HOME, { ...goodJobDef(), qos: "deadline" as const }, LAUNCHER, null).text;
+	expect(statusOf(checkPlistContract("load-watch", planted), "contract-processtype")).toBe("FAIL");
 });

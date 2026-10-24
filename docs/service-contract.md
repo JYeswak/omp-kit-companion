@@ -155,6 +155,28 @@ timeout path. They do not establish an installed binary's source binding,
 authorize service activation or qualify production scratch reclamation.
 
 
+## QoS classes (SVCQOS1)
+
+Each job declares a scheduling class in `ServiceJobDef.qos`. `contract-processtype`
+and `contract-low-priority` check the rendered plist against that class.
+
+- `background` (the default; every job except cc): ProcessType Background, Nice 10,
+  LowPriorityIO true.
+- `deadline` (cc only): ProcessType Standard, Nice 10, no LowPriorityIO. A deadline
+  job rendered Background FAILs `contract-processtype`.
+
+Why cc is deadline-bound: its fast lane must finish in 10 s every 15 s, and its slow
+lane in 50 s every 60 s. At load ~16-18, one session-collector pass took a median of
+0.78 s under `nice -n 10` and 2.56 s under `taskpolicy -b nice -n 10`. collect_host
+took ~4.0 s against ~8.5 s. Under background QoS the fast lane overran its budget.
+
+What still bounds it: Nice 10 is kept, and its IO is never raised above the default
+class. It only loses the LowPriorityIO throttle. Interactive work runs at nice 0,
+so cc still yields the CPU to it under contention.
+
+systemd: `renderSystemdUnits` emits no Nice, IOSchedulingClass or CPUSchedulingPolicy
+keys for any job, so units are unchanged for both classes.
+
 ## Resolved: RunAtLoad
 
 The contract says RunAtLoad false. `KNOWN_JOBS` rendered `<true/>` for four jobs
