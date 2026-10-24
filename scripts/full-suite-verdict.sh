@@ -276,6 +276,9 @@ run_suite() {
 		export KITLIB_TMP_ROOT="$ARCHIVE_DIR/var/agent-tmp"
 		mkdir -p "$KITLIB_TMP_ROOT"
 		. "$ARCHIVE_DIR/scripts/kitlib-tmp.sh"
+		# The full suite is a sibling of the pre-push harness; its inherited TMPDIR may
+		# be the harness's plain bucket. Give every suite a private owned temp root.
+		kitlib_tmp TMPDIR full-suite-run || exit 1
 		export TMPDIR
 		export OMP_KIT_CASE_CWD="$ROOT"
 		if [ -f "$ARCHIVE_DIR/bunfig.toml" ]; then

@@ -132,6 +132,9 @@ printf 'FULL-SUITE-CONTEXT PASS\n'
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
 	env.OMP_KIT_CASE_CWD = join(fixture, "stale-missing-caller-root");
 	env.KITLIB_TMP_ROOT = join(fixture, "stale-missing-kitlib-root");
+	// The outer caller's TMPDIR is a plain bucket, not an owned private root.
+	env.TMPDIR = join(fixture, "stale-missing-tmpdir");
+	mkdirSync(env.TMPDIR, { recursive: true });
 	env.KITROOT = fixture;
 	env.OMP_KIT_OMP_SRC_FETCH = "0";
 	const result = await run(["sh", fullSuiteVerdict, "--repo", fixture, "--commit", candidate, "--cache-dir", cache], {
