@@ -788,6 +788,9 @@ mkverdictrepo() {
 	git -C "$repo" config user.email "test@example.invalid"
 	git -C "$repo" config user.name "worker-1"
 	cp "$KITREPO/scripts/full-suite-verdict.sh" "$repo/scripts/full-suite-verdict.sh"
+	# The suite runner sources the candidate archive's own scripts/kitlib-tmp.sh (62e5017451); a fixture
+	# candidate without it dies before any suite runs and reads as incomplete evidence.
+	cp "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
 	printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$repo/scripts/fresh-gate.sh"
 	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
 	create_checker_test_stubs "$repo"
@@ -862,6 +865,7 @@ git -C "$erepro" init -q
 git -C "$erepro" config user.email "test@example.invalid"
 git -C "$erepro" config user.name "worker-1"
 cp "$KITREPO/scripts/full-suite-verdict.sh" "$erepro/scripts/full-suite-verdict.sh"
+cp "$KITREPO/scripts/kitlib-tmp.sh" "$erepro/scripts/kitlib-tmp.sh"
 printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$erepro/scripts/fresh-gate.sh"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$erepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$erepro"
@@ -922,6 +926,7 @@ git -C "$hrepro" init -q
 git -C "$hrepro" config user.email "test@example.invalid"
 git -C "$hrepro" config user.name "worker-1"
 cp "$KITREPO/scripts/full-suite-verdict.sh" "$hrepro/scripts/full-suite-verdict.sh"
+cp "$KITREPO/scripts/kitlib-tmp.sh" "$hrepro/scripts/kitlib-tmp.sh"
 printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$hrepro/scripts/fresh-gate.sh"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$hrepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$hrepro"
