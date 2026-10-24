@@ -1,0 +1,2018 @@
+{
+  "schema_version": "omp-kit.cc.events.v1",
+  "cost_authorities": {
+    "provider_receipts": {},
+    "pricing": {}
+  },
+  "doc": "Typed event registry for the command center (PLAN.md §4, §7). The ingester validates every envelope against this file; anything that does not match is dead-lettered with a fixed code and raised as an unknown. Field spec keys (validated at load; any other key is a registry error): type (string, integer, number, boolean, array, object); required (default true); nullable (default false); enum or enum_ref; minimum and maximum (numbers); max_length (strings; default 256 for every string); code (true: 1-64 chars of A-Z, 0-9, _ . - only, for codes and identifiers, never free text); items (array element spec; object items declare fields). Undeclared fields are invalid. Envelope 'position' is the producer's immutable source position; the ingester verifies id == make_id(producer, position, type). 'seat_scoped' types must carry envelope 'seat' and are expected to carry 'agent' and 'binding' (missing ones raise U-identity). 'requires' lists envelope keys that must be non-null; 'requires_data' lists data keys that must be non-null and non-empty. Producers must be declared here (an undeclared producer is refused). max_tick_age_s: a producer whose last source.tick is older raises U-stale (I15); null means event-driven with no heartbeat bound. source.tick: position and complete_through_ms are required monotonic integers (byte offset or sequence; a time watermark); coverage is required and its counts must sum to records_emitted/ignored/quarantined by disposition (emitted, ignored, unknown); 'unavailable' marks a record type this host cannot read (an absent adapter): count 0, reason required, raises U-coverage adapter:<producer>/<runtime>/<record_type> until the type reports emitted or ignored. mail.sent@2 carries project_id (the Agent Mail project) and thread_root_id (nullable); with ack_required true it must carry request_id. request_id derivation (CC7:mail-contract; enforced by CC7:request-derivation, not by this registry): Agent Mail messages carry no request id, so every producer derives it deterministically as am-<project_id>-<thread_root_message_id>-<owner>, where thread_root_message_id is the message id of the first message of the thread and owner is the agent that owes the answer; equal inputs always give the same id (PLAN §8a requires an immutable id). mail.delivery@1 is one recipient's delivery receipt (envelope agent = data.recipient, else AGENT_RECIPIENT_MISMATCH). A message seen through several recipients' inboxes projects to one mail row (UNIQUE project_id, message_id) and one mail_deliveries row per recipient; a second mail.sent for the same message whose sender, recipients, importance, ack_required, request_id or thread_root_id differ raises U-conflict (same event key: SAME_KEY_DIFFERENT_PAYLOAD; different event key: MAIL_PAYLOAD_DRIFT). mail.ack@1 has no project_id, so mail_acks.project_id is resolved from the mail row when message_id names exactly one project, else NULL. service.state@1 is one kit job's status row; query_ok is required (a row without it is refused) so a failed service query is never mistaken for an unloaded job. service.health@2 adds generation (server run identity), dispatch_timeouts_total (nullable only when the server does not report it) and pool_utilization_pct (0..100, nullable). request.state follows opened -> answered|cancelled|moot. An integer is an I-JSON safe integer, -(2^53-1) to 2^53-1 inclusive (RFC 7493 §2.2): the range JavaScript holds exactly and a subset of SQLite's signed 64-bit range, so the TS spool (Number.isSafeInteger) and this ingester give one verdict on every integer (TICKNUM1). Envelope 'observed' is required: the future-time rule (U-clock) needs the producer's observation time.",
+  "envelope": {
+    "specversion": {
+      "type": "string",
+      "enum": [
+        "1.0"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "max_length": 256
+    },
+    "type": {
+      "type": "string",
+      "code": true
+    },
+    "time": {
+      "type": "string"
+    },
+    "producer": {
+      "type": "string",
+      "code": true
+    },
+    "dataschema": {
+      "type": "string",
+      "max_length": 80
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "exact",
+        "derived",
+        "inferred"
+      ]
+    },
+    "data": {
+      "type": "object"
+    },
+    "observed": {
+      "type": "string"
+    },
+    "subject": {
+      "type": "string",
+      "required": false,
+      "nullable": true
+    },
+    "session": {
+      "type": "string",
+      "required": false,
+      "nullable": true
+    },
+    "seat": {
+      "type": "string",
+      "required": false,
+      "nullable": true,
+      "max_length": 128
+    },
+    "agent": {
+      "type": "string",
+      "required": false,
+      "nullable": true,
+      "code": true
+    },
+    "role": {
+      "type": "string",
+      "required": false,
+      "nullable": true,
+      "enum": [
+        "chief",
+        "director",
+        "worker",
+        "human",
+        "service",
+        null
+      ]
+    },
+    "repo": {
+      "type": "string",
+      "required": false,
+      "nullable": true,
+      "max_length": 512
+    },
+    "bead": {
+      "type": "string",
+      "required": false,
+      "nullable": true,
+      "code": true
+    },
+    "binding": {
+      "type": "string",
+      "required": false,
+      "nullable": true,
+      "code": true
+    },
+    "seq": {
+      "type": "integer",
+      "required": false,
+      "nullable": true,
+      "minimum": 0
+    },
+    "position": {
+      "type": "string",
+      "max_length": 1024
+    }
+  },
+  "producers": {
+    "tern": {
+      "owner": "StormyKnoll",
+      "max_tick_age_s": 60
+    },
+    "session": {
+      "owner": "StormyKnoll",
+      "max_tick_age_s": 60
+    },
+    "tracker": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": 300
+    },
+    "git": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": 300
+    },
+    "ci": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": 900
+    },
+    "release": {
+      "owner": "RusticPine",
+      "max_tick_age_s": null
+    },
+    "host": {
+      "owner": "QuietBadger",
+      "max_tick_age_s": 60
+    },
+    "mail": {
+      "owner": "QuietBadger",
+      "max_tick_age_s": 120
+    },
+    "services": {
+      "owner": "QuietBadger",
+      "max_tick_age_s": 120
+    },
+    "watcher": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": 300
+    },
+    "config": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": 900
+    },
+    "annotations": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": null
+    },
+    "cc": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": 120
+    },
+    "selftest": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": null
+    },
+    "kit": {
+      "owner": "RusticPine",
+      "max_tick_age_s": null,
+      "push": true
+    },
+    "hooks": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": null,
+      "push": true
+    },
+    "jobs": {
+      "owner": "QuietBadger",
+      "max_tick_age_s": null,
+      "push": true
+    },
+    "closeguard": {
+      "owner": "PeachLeopard",
+      "max_tick_age_s": null
+    }
+  },
+  "tool_categories": [
+    "gate",
+    "wait",
+    "supply",
+    "claim",
+    "verify",
+    "implement",
+    "process",
+    "read",
+    "publish",
+    "guard_blocked",
+    "loop",
+    "unknown"
+  ],
+  "unknown_classes": [
+    "U-identity",
+    "U-category",
+    "U-bead",
+    "U-mission",
+    "U-type",
+    "U-source",
+    "U-state",
+    "U-stale",
+    "U-invalid",
+    "U-conflict",
+    "U-clock",
+    "U-gap",
+    "U-coverage",
+    "U-redaction"
+  ],
+  "types": {
+    "seat.state": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "BUSY",
+            "IDLE",
+            "UNKNOWN",
+            "DEAD"
+          ]
+        },
+        "working": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "oracle_busy": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "quiet_ms": {
+          "type": "integer",
+          "nullable": true
+        },
+        "pid": {
+          "type": "integer",
+          "required": false,
+          "nullable": true
+        },
+        "cwd": {
+          "type": "string",
+          "required": false,
+          "nullable": true
+        }
+      }
+    },
+    "seat.lifecycle": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "change": {
+          "type": "string",
+          "enum": [
+            "created",
+            "exited",
+            "moved",
+            "restarted",
+            "rebound"
+          ]
+        },
+        "previous_seat": {
+          "type": "string",
+          "required": false,
+          "nullable": true
+        }
+      }
+    },
+    "turn.input": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "input_source": {
+          "type": "string",
+          "enum": [
+            "human",
+            "chief",
+            "director",
+            "watcher",
+            "mail",
+            "hook",
+            "system",
+            "goal",
+            "subagent"
+          ]
+        },
+        "chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text_sha": {
+          "type": "string"
+        }
+      }
+    },
+    "turn.output": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "text_only": {
+          "type": "boolean"
+        },
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thinking_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stop_reason": {
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "tool.call": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "tool": {
+          "type": "string",
+          "code": true
+        },
+        "category": {
+          "type": "string",
+          "enum_ref": "tool_categories"
+        },
+        "verb": {
+          "type": "string",
+          "nullable": true,
+          "max_length": 64
+        },
+        "cmd_sha": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "start_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_ms": {
+          "type": "integer",
+          "nullable": true
+        },
+        "exit_code": {
+          "type": "integer",
+          "nullable": true
+        },
+        "is_error": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "guard_decision": {
+          "type": "string",
+          "nullable": true,
+          "enum": [
+            "pass",
+            "deny",
+            "warn",
+            null
+          ]
+        },
+        "guard_rule": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        }
+      }
+    },
+    "guard.decision": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "engine": {
+          "type": "string",
+          "enum": [
+            "dcg",
+            "guard-rule",
+            "harm-rule",
+            "rch-lane",
+            "ttsr",
+            "kit-flywheel-guard",
+            "observational-hook",
+            "other"
+          ]
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "pass",
+            "deny",
+            "warn",
+            "inject",
+            "capture",
+            "failure"
+          ]
+        },
+        "rule": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "tool_call_sha": {
+          "type": "string",
+          "nullable": true
+        }
+      }
+    },
+    "model.usage": {
+      "version": 2,
+      "seat_scoped": true,
+      "doc": "Append-only per-call fact. usage_key is stable across correction events and scoped by producer + binding. Numeric usage.cost.total and producer-provided SHA strings are NOT authority. Provider receipts and pricing must match content-addressed approved records in the trusted registry cost_authorities (empty by default: no billed/pricing evidence configured). Provider records bind producer/binding/call/provider/model/amount; catalog records bind provider/model/rates. v1 replay is conserved using legacy:<event_id>, an immutable event identity, NOT a claimed shared provider-call identity. Historical unproven costs/reasoning remain raw facts but are NULL/unknown in model_usage_current. Corrections never rewrite originals.",
+      "data": {
+        "usage_key": {
+          "type": "string",
+          "min_length": 1,
+          "max_length": 256
+        },
+        "cost_source": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "derived",
+            "unknown"
+          ]
+        },
+        "reasoning_source": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "unknown"
+          ]
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_billing_sha": {
+          "type": "string",
+          "required": false,
+          "nullable": true,
+          "max_length": 64
+        },
+        "pricing": {
+          "type": "object",
+          "required": false,
+          "nullable": true,
+          "fields": {
+            "pricing_sha": {
+              "type": "string",
+              "max_length": 64
+            },
+            "input_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "output_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cache_read_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cache_write_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "input_per_million": {
+              "type": "number",
+              "minimum": 0
+            },
+            "output_per_million": {
+              "type": "number",
+              "minimum": 0
+            },
+            "cache_read_per_million": {
+              "type": "number",
+              "minimum": 0
+            },
+            "cache_write_per_million": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "provider": {
+          "type": "string",
+          "nullable": true
+        },
+        "model": {
+          "type": "string",
+          "nullable": true
+        },
+        "purpose": {
+          "type": "string",
+          "nullable": true
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "type": "integer",
+          "nullable": true,
+          "minimum": 0
+        },
+        "cost_usd": {
+          "type": "number",
+          "nullable": true,
+          "minimum": 0
+        }
+      }
+    },
+    "model.usage.cost_resolution": {
+      "version": 1,
+      "seat_scoped": true,
+      "doc": "Append-only correction for producer + binding + usage_key. Stored in model_usage_cost_resolutions, overlaid by model_usage_current; never updates the original fact. Derived inputs must match the original call. Unknown or unmatched corrections cannot close its U-state.",
+      "data": {
+        "provider": {
+          "type": "string",
+          "nullable": true
+        },
+        "model": {
+          "type": "string",
+          "nullable": true
+        },
+        "usage_key": {
+          "type": "string",
+          "min_length": 1,
+          "max_length": 256
+        },
+        "cost_source": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "derived"
+          ]
+        },
+        "cost_usd": {
+          "type": "number",
+          "nullable": true,
+          "minimum": 0
+        },
+        "provider_billing_sha": {
+          "type": "string",
+          "required": false,
+          "nullable": true,
+          "max_length": 64
+        },
+        "pricing": {
+          "type": "object",
+          "required": false,
+          "nullable": true,
+          "fields": {
+            "pricing_sha": {
+              "type": "string",
+              "max_length": 64
+            },
+            "input_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "output_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cache_read_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cache_write_tokens": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "input_per_million": {
+              "type": "number",
+              "minimum": 0
+            },
+            "output_per_million": {
+              "type": "number",
+              "minimum": 0
+            },
+            "cache_read_per_million": {
+              "type": "number",
+              "minimum": 0
+            },
+            "cache_write_per_million": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "session.exit": {
+      "version": 1,
+      "seat_scoped": true,
+      "doc": "custom/session_exit: explicit source exit, stored in events only; not inferred seat death. Hash reason/kind, never retain free text. Existing goal.state/context.compaction/seat.lifecycle are unchanged.",
+      "data": {
+        "reason_sha": {
+          "type": "string",
+          "max_length": 64
+        },
+        "kind_sha": {
+          "type": "string",
+          "max_length": 64
+        },
+        "recorded_at_ms": {
+          "type": "integer",
+          "nullable": true,
+          "minimum": 0
+        }
+      }
+    },
+    "goal.state": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "mode": {
+          "type": "string",
+          "code": true
+        },
+        "objective_sha": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "prompt_sha": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "prompt_chars": {
+          "type": "integer",
+          "nullable": true,
+          "minimum": 0
+        }
+      }
+    },
+    "context.compaction": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "tokens_before": {
+          "type": "integer",
+          "nullable": true
+        },
+        "tokens_after": {
+          "type": "integer",
+          "nullable": true
+        }
+      }
+    },
+    "bead.created": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo",
+        "bead"
+      ],
+      "data": {
+        "status": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "nullable": true
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority": {
+          "type": "integer",
+          "nullable": true
+        },
+        "parent": {
+          "type": "string",
+          "nullable": true
+        },
+        "size_chars": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "bead.status": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo",
+        "bead"
+      ],
+      "data": {
+        "from_status": {
+          "type": "string",
+          "nullable": true
+        },
+        "to_status": {
+          "type": "string"
+        },
+        "assignee": {
+          "type": "string",
+          "nullable": true
+        },
+        "actor": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "verifier": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "evidence": {
+          "type": "array",
+          "nullable": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "observation": {
+          "type": "string",
+          "enum": [
+            "receipt",
+            "snapshot"
+          ]
+        }
+      }
+    },
+    "bead.dep": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo",
+        "bead"
+      ],
+      "data": {
+        "depends_on_id": {
+          "type": "string"
+        },
+        "dep_type": {
+          "type": "string",
+          "enum": [
+            "blocks",
+            "parent-child",
+            "related",
+            "discovered-from"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "present",
+            "removed"
+          ]
+        },
+        "observation": {
+          "type": "string",
+          "enum": [
+            "snapshot"
+          ]
+        }
+      }
+    },
+    "mission.declared": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo"
+      ],
+      "data": {
+        "mission": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "mission",
+            "process",
+            "maintenance",
+            "incident",
+            "external"
+          ]
+        },
+        "declared_at": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "milestone.child": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo",
+        "bead"
+      ],
+      "data": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "mission",
+            "process",
+            "maintenance",
+            "incident",
+            "external"
+          ]
+        },
+        "pillar": {
+          "type": "string",
+          "nullable": true
+        },
+        "milestone": {
+          "type": "string",
+          "nullable": true
+        },
+        "declared_at": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "config.changed": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo"
+      ],
+      "data": {
+        "path": {
+          "type": "string"
+        },
+        "path_class": {
+          "type": "string",
+          "enum": [
+            "decisions",
+            "prompts",
+            "dcg-packs",
+            "fleet-watch"
+          ]
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string",
+          "nullable": true
+        },
+        "keys": {
+          "type": "array",
+          "nullable": true,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "actuation.state": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo",
+        "bead"
+      ],
+      "data": {
+        "actuation_id": {
+          "type": "string",
+          "code": true
+        },
+        "work_bead": {
+          "type": "string",
+          "nullable": true,
+          "required": false,
+          "code": true
+        },
+        "idempotency_key": {
+          "type": "string",
+          "code": true
+        },
+        "gap_class": {
+          "type": "string",
+          "code": true
+        },
+        "route": {
+          "type": "string",
+          "code": true
+        },
+        "target_binding": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "precondition_watermark": {
+          "type": "string",
+          "nullable": true
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "requested",
+            "accepted",
+            "executed",
+            "verified",
+            "refused",
+            "failed"
+          ]
+        },
+        "failure_code": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "git.commit": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo"
+      ],
+      "data": {
+        "sha": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string",
+          "nullable": true
+        },
+        "tag": {
+          "type": "string",
+          "enum": [
+            "test",
+            "selftest",
+            "live",
+            "pending",
+            "none"
+          ]
+        },
+        "bead_trailer": {
+          "type": "string",
+          "nullable": true
+        },
+        "files": {
+          "type": "integer",
+          "nullable": true
+        }
+      }
+    },
+    "git.published": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo"
+      ],
+      "data": {
+        "sha": {
+          "type": "string"
+        }
+      }
+    },
+    "ci.run": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "run_id": {
+          "type": "integer"
+        },
+        "workflow": {
+          "type": "string"
+        },
+        "sha": {
+          "type": "string"
+        },
+        "event": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "conclusion": {
+          "type": "string",
+          "nullable": true
+        },
+        "minutes": {
+          "type": "number",
+          "nullable": true
+        }
+      }
+    },
+    "host.cpu": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "ncpu": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "load1": {
+          "type": "number",
+          "minimum": 0
+        },
+        "load5": {
+          "type": "number",
+          "minimum": 0
+        },
+        "load15": {
+          "type": "number",
+          "minimum": 0
+        },
+        "boot_id": {
+          "type": "string",
+          "code": true
+        }
+      }
+    },
+    "host.memory": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "ram_total_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "page_size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pages_free": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pages_active": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pages_inactive": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pages_wired": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pages_compressor_occupied": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pageouts_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "swapouts_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "swap_total_mb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "swap_used_mb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "pressure_free_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "boot_id": {
+          "type": "string",
+          "code": true
+        }
+      }
+    },
+    "host.gpu": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "device_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "renderer_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "tiler_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "in_use_system_memory_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "host.power": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "all_w": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cpu_w": {
+          "type": "number",
+          "minimum": 0
+        },
+        "gpu_w": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ane_w": {
+          "type": "number",
+          "minimum": 0
+        },
+        "ram_w": {
+          "type": "number",
+          "minimum": 0
+        },
+        "gpu_ram_w": {
+          "type": "number",
+          "minimum": 0
+        },
+        "sys_w": {
+          "type": "number",
+          "minimum": 0
+        },
+        "gpu_capacity_frac": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "cpu_capacity_frac": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "gpu_mhz": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sys_w_sentinel": {
+          "type": "boolean"
+        }
+      }
+    },
+    "host.disk": {
+      "version": 2,
+      "seat_scoped": false,
+      "data": {
+        "host_id": {
+          "type": "string",
+          "code": true
+        },
+        "boot_id": {
+          "type": "string",
+          "code": true
+        },
+        "container_id": {
+          "type": "string",
+          "min_length": 1,
+          "max_length": 512
+        },
+        "mount": {
+          "type": "string",
+          "min_length": 1,
+          "max_length": 512
+        },
+        "ballast_health": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "container_total_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "container_available_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "volume_total_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "volume_available_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ballast_releasable_bytes": {
+          "type": "integer",
+          "nullable": true,
+          "minimum": 0
+        },
+        "free_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "sbh_status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "warning",
+            "critical",
+            "unprotected"
+          ]
+        }
+      }
+    },
+    "host.net": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "iface": {
+          "type": "string",
+          "code": true
+        },
+        "boot_id": {
+          "type": "string",
+          "code": true
+        },
+        "ibytes_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "obytes_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ipkts_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "opkts_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ierrs_total": {
+          "type": "integer",
+          "minimum": 0,
+          "required": false
+        },
+        "oerrs_total": {
+          "type": "integer",
+          "minimum": 0,
+          "required": false
+        }
+      }
+    },
+    "proc.sample": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "pid": {
+          "type": "integer"
+        },
+        "cpu_pct": {
+          "type": "number",
+          "minimum": 0
+        },
+        "rss_mb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "procs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "seat.annotation": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "hypothesis",
+            "decision",
+            "note",
+            "outcome"
+          ]
+        },
+        "text_sha": {
+          "type": "string"
+        },
+        "chars": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cc.view": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "panel": {
+          "type": "string"
+        },
+        "route_id": {
+          "type": "string"
+        },
+        "client": {
+          "type": "string",
+          "enum": [
+            "loopback",
+            "tailnet"
+          ]
+        }
+      }
+    },
+    "cc.unknown": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "class": {
+          "type": "string",
+          "enum_ref": "unknown_classes"
+        },
+        "scope": {
+          "type": "string",
+          "max_length": 512
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "raise"
+          ]
+        },
+        "owner": {
+          "type": "string",
+          "code": true
+        },
+        "route": {
+          "type": "string",
+          "max_length": 256
+        },
+        "detail": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "cost_seat_ms": {
+          "type": "integer",
+          "nullable": true,
+          "minimum": 0
+        },
+        "cost_bound": {
+          "type": "string",
+          "nullable": true,
+          "enum": [
+            "exact",
+            "lower",
+            "upper",
+            null
+          ]
+        }
+      }
+    },
+    "seat.binding": {
+      "version": 2,
+      "seat_scoped": true,
+      "requires": [
+        "binding"
+      ],
+      "data": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "open",
+            "close"
+          ]
+        },
+        "block": {
+          "type": "string"
+        },
+        "session_file": {
+          "type": "string"
+        },
+        "incarnation": {
+          "type": "string",
+          "code": true
+        }
+      }
+    },
+    "source.tick": {
+      "version": 1,
+      "seat_scoped": false,
+      "doc": "Physical records_seen counts each complete source record once, partitioned into emitted/ignored/quarantined; coverage counts use the same denominator, never event fanout. Optional event_count counts semantic output events separately (0..N), not the tick itself; missing means unreported/SQL NULL, never invented zero. A quiet collector pass still emits source.tick with zero physical counts.",
+      "data": {
+        "event_count": {
+          "type": "integer",
+          "required": false,
+          "minimum": 0
+        },
+        "instance": {
+          "type": "string",
+          "code": true
+        },
+        "records_seen": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "records_emitted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "records_ignored": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "records_quarantined": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "complete_through_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "position": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error_code": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "skew_ms": {
+          "type": "integer",
+          "nullable": true
+        },
+        "coverage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "fields": {
+              "record_type": {
+                "type": "string",
+                "max_length": 128
+              },
+              "runtime_version": {
+                "type": "string",
+                "max_length": 64
+              },
+              "disposition": {
+                "type": "string",
+                "enum": [
+                  "emitted",
+                  "ignored",
+                  "unknown",
+                  "unavailable"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "fixture_hash": {
+                "type": "string",
+                "required": false,
+                "nullable": true,
+                "code": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "reconcile.result": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "repo"
+      ],
+      "data": {
+        "repo": {
+          "type": "string",
+          "max_length": 512
+        },
+        "window": {
+          "type": "string",
+          "enum": [
+            "24h",
+            "7d"
+          ]
+        },
+        "store_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "br_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "match",
+            "drift",
+            "unavailable"
+          ]
+        },
+        "br_snapshot_sha": {
+          "type": "string",
+          "code": true
+        }
+      }
+    },
+    "cc.self": {
+      "version": 1,
+      "seat_scoped": false,
+      "doc": "The command center measuring itself (CC11 bead ompkit-fp72.120.16.15.10): one envelope per committed ingest pass, emitted after run_once commits, never under --replay. Units, every field numeric: ingest_lag_ms (milliseconds, now minus min observed_ms over envelopes accepted this pass, 0 when none); spool_backlog_bytes (bytes beyond cursors); wal_bytes (bytes of cc.db-wal, 0 when absent); rss_peak_mb (mebibytes, ru_maxrss peak); pass_cpu_ms and pass_wall_ms (milliseconds of the committed pass); dead_letters_total and conflicts_total (row counts); open_unknowns_by_class (open unknown counts keyed by the 14 unknown classes).",
+      "data": {
+        "ingest_lag_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "spool_backlog_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "wal_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rss_peak_mb": {
+          "type": "number",
+          "minimum": 0
+        },
+        "pass_cpu_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "pass_wall_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "dead_letters_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conflicts_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "open_unknowns_by_class": {
+          "type": "object",
+          "fields": {
+            "U-identity": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-category": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-bead": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-mission": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-type": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-source": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-state": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-stale": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-invalid": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-conflict": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-clock": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-gap": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-coverage": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "U-redaction": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "cc.backup": {
+      "version": 1,
+      "seat_scoped": false,
+      "doc": "The nightly store backup reporting itself (CC11 bead ompkit-fp72.120.16.15.6): one envelope per completed backup pass, emitted after run_backup commits, never under --replay. backup_ok (1 when the copy verified, else 0); backup_bytes (bytes of the verified copy, 0 when skipped or corrupt); integrity ('ok' or a fixed code: CORRUPT, BACKUP_DISK_FLOOR). A separate type (not cc.self fields) so the cc.self all-fields-numeric gate (15.10) holds.",
+      "data": {
+        "backup_ok": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "backup_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "integrity": {
+          "type": "string",
+          "code": true
+        }
+      }
+    },
+    "mail.sent": {
+      "version": 2,
+      "seat_scoped": false,
+      "requires": [
+        "agent"
+      ],
+      "data": {
+        "message_id": {
+          "type": "string",
+          "code": true
+        },
+        "thread_id": {
+          "type": "string",
+          "nullable": true,
+          "max_length": 128
+        },
+        "project": {
+          "type": "string",
+          "max_length": 512
+        },
+        "recipients": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "code": true
+          }
+        },
+        "importance": {
+          "type": "string",
+          "enum": [
+            "low",
+            "normal",
+            "high",
+            "urgent"
+          ]
+        },
+        "ack_required": {
+          "type": "boolean"
+        },
+        "request_id": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "body_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "project_id": {
+          "type": "integer"
+        },
+        "thread_root_id": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        }
+      }
+    },
+    "mail.ack": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "agent"
+      ],
+      "data": {
+        "message_id": {
+          "type": "string",
+          "code": true
+        },
+        "request_id": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "ack_kind": {
+          "type": "string",
+          "enum": [
+            "read",
+            "ack",
+            "reply"
+          ]
+        },
+        "reply_message_id": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        }
+      }
+    },
+    "mail.delivery": {
+      "version": 1,
+      "seat_scoped": false,
+      "requires": [
+        "agent"
+      ],
+      "data": {
+        "message_id": {
+          "type": "string",
+          "code": true
+        },
+        "project_id": {
+          "type": "integer"
+        },
+        "recipient": {
+          "type": "string",
+          "code": true
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "to",
+            "cc",
+            "bcc",
+            "other"
+          ]
+        },
+        "importance": {
+          "type": "string",
+          "enum": [
+            "low",
+            "normal",
+            "high",
+            "urgent"
+          ]
+        },
+        "ack_required": {
+          "type": "boolean"
+        },
+        "delivered_ts_ms": {
+          "type": "integer"
+        },
+        "from_agent": {
+          "type": "string",
+          "code": true
+        },
+        "delivery_cursor": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "request.state": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "request_id": {
+          "type": "string",
+          "code": true
+        },
+        "requester": {
+          "type": "string",
+          "code": true
+        },
+        "owner": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "custody",
+            "question",
+            "review",
+            "decision",
+            "unblock",
+            "other"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "opened",
+            "answered",
+            "cancelled",
+            "moot"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "nullable": true,
+          "max_length": 512
+        }
+      }
+    },
+    "service.health": {
+      "version": 2,
+      "seat_scoped": false,
+      "data": {
+        "service": {
+          "type": "string",
+          "code": true
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "up",
+            "degraded",
+            "down"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "rss_mb": {
+          "type": "number",
+          "nullable": true,
+          "minimum": 0
+        },
+        "generation": {
+          "type": "string",
+          "code": true
+        },
+        "dispatch_timeouts_total": {
+          "type": "integer",
+          "nullable": true,
+          "minimum": 0
+        },
+        "pool_utilization_pct": {
+          "type": "number",
+          "nullable": true,
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "service.state": {
+      "version": 2,
+      "seat_scoped": false,
+      "data": {
+        "service": {
+          "type": "string",
+          "code": true
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "loaded": {
+          "type": "boolean",
+          "nullable": true
+        },
+        "state": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "pid": {
+          "type": "integer",
+          "nullable": true
+        },
+        "runs": {
+          "type": "integer",
+          "nullable": true,
+          "minimum": 0
+        },
+        "last_exit": {
+          "type": "integer",
+          "nullable": true
+        },
+        "last_run_ms": {
+          "type": "integer",
+          "nullable": true
+        },
+        "query_ok": {
+          "type": "boolean"
+        }
+      }
+    },
+    "pull.attempt": {
+      "version": 1,
+      "seat_scoped": true,
+      "data": {
+        "outcome": {
+          "type": "string",
+          "code": true
+        },
+        "refusal_class": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "picked_bead": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        }
+      }
+    },
+    "action.attempt": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "action_id": {
+          "type": "string",
+          "code": true
+        },
+        "surface": {
+          "type": "string",
+          "code": true
+        },
+        "target": {
+          "type": "string",
+          "nullable": true,
+          "max_length": 512
+        },
+        "idempotency_key": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        }
+      }
+    },
+    "action.result": {
+      "version": 1,
+      "seat_scoped": false,
+      "data": {
+        "action_id": {
+          "type": "string",
+          "code": true
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "refused",
+            "failed",
+            "timeout"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "nullable": true,
+          "code": true
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

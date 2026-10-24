@@ -10,10 +10,9 @@
  * Credential screen reuses the companion `looksSecret` (mcp-sources.ts): a matching line is
  * replaced by a `cc.unknown` U-redaction envelope, identical in shape to cclib's.
  *
- * The TS side never loads the registry: producers, owners, and the emitted type shapes
- * (`action.attempt`, `action.result`, `pull.attempt`, `source.tick`, `cc.view`, `cc.unknown`)
- * are hard-coded below from `docs/command-center/schema/events.v1.json` (`omp-kit.cc.events.v1`);
- * the ingester remains the validator (anything drifting goes to dead letter + U-invalid).
+ * The generated events.v1.json rule table supplies producers, versions and field constraints.
+ * Every envelope is checked at construction and again before an entire batch is appended.
+ * Registry drift is refused at the producer, not left for the ingester to dead-letter.
  *
  * Inert without the fleet: `ccSpool` returns null unless the state dir exists AND contains
  * `spool/` AND `OMP_KIT_CC != '0'`. The state root itself is never created.
@@ -38,43 +37,34 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { looksSecret } from "./mcp-sources.ts";
+import { ccEnvelopeError, ccProducerOwner, ccTypeVersion } from "./cc-registry.ts";
+import credentialCatalog from "./cc-credential-shapes.v1.json";
+import { createCcCredentialScreen, type CcCredentialScreen } from "./cc-credentials.ts";
 
 export const CC_SPOOL_SCHEMA = "omp-kit.cc.events.v1";
 
+/** Fixed refusal code and declared scope; messages and metadata never echo untrusted values. */
+export class CcSpoolValidationError extends Error {
+	readonly code: string;
+	readonly field: string | null;
+	constructor(code: string, field: string | null) {
+		super(code);
+		this.name = "CcSpoolValidationError";
+		this.code = code;
+		this.field = field;
+	}
+}
+
+let credentialShape: CcCredentialScreen | undefined;
+/** The append policy for bounded canonical spool lines; the differential judge uses this same boundary. */
+export function ccWouldRedact(line: string): boolean {
+	if (looksSecret(line)) return true;
+	credentialShape ??= createCcCredentialScreen(credentialCatalog);
+	return credentialShape(line) !== null;
+}
+
 const SPEC_VERSION = "1.0";
 
-/** Declared producers, copied from events.v1.json at CC_SPOOL_SCHEMA. Undeclared names are refused. */
-const PRODUCER_OWNERS: Record<string, string> = {
-	tern: "StormyKnoll",
-	session: "StormyKnoll",
-	tracker: "PeachLeopard",
-	git: "PeachLeopard",
-	ci: "PeachLeopard",
-	release: "RusticPine",
-	host: "QuietBadger",
-	mail: "QuietBadger",
-	services: "QuietBadger",
-	watcher: "PeachLeopard",
-	config: "PeachLeopard",
-	annotations: "PeachLeopard",
-	cc: "PeachLeopard",
-	selftest: "PeachLeopard",
-	kit: "RusticPine",
-	hooks: "PeachLeopard",
-	jobs: "QuietBadger",
-	closeguard: "PeachLeopard",
-};
-
-/** Emitted type versions, copied from events.v1.json at CC_SPOOL_SCHEMA. */
-const TYPE_VERSIONS: Record<string, number> = {
-	"action.attempt": 1,
-	"action.result": 1,
-	"bead.status": 1,
-	"pull.attempt": 1,
-	"source.tick": 1,
-	"cc.view": 1,
-	"cc.unknown": 1,
-};
 
 const REDACTION_ROUTE = "fix the producer's allowlist; send exposure metadata (never the value) to PeachLeopard";
 
@@ -91,22 +81,46 @@ export function canonical(value: unknown): string {
 	return canonicalValue(value);
 }
 
-function canonicalValue(value: unknown): string {
+function jsonString(value: string): string {
+	for (let i = 0; i < value.length; i++) {
+		const char = value.charCodeAt(i);
+		if (char >= 0xd800 && char <= 0xdbff) {
+			const next = value.charCodeAt(++i);
+			if (!(next >= 0xdc00 && next <= 0xdfff)) throw new CcSpoolValidationError("NOT_JSON", null);
+		} else if (char >= 0xdc00 && char <= 0xdfff) throw new CcSpoolValidationError("NOT_JSON", null);
+	}
+	return JSON.stringify(value);
+}
+
+function canonicalValue(value: unknown, depth = 0): string {
 	if (value === null) return "null";
 	if (value === true) return "true";
 	if (value === false) return "false";
 	if (typeof value === "number") {
-		if (!Number.isFinite(value)) throw new TypeError("non-finite JSON number");
+		if (!Number.isFinite(value)) throw new CcSpoolValidationError("NOT_JSON", null);
 		return JSON.stringify(value);
 	}
-	if (typeof value === "string") return JSON.stringify(value);
-	if (Array.isArray(value)) return `[${value.map(canonicalValue).join(",")}]`;
+	if (typeof value === "string") return jsonString(value);
 	if (typeof value === "object") {
+		if (depth >= 100) throw new CcSpoolValidationError("NOT_JSON", null);
+		if (Array.isArray(value)) {
+			const items: string[] = [];
+			for (const item of value) items.push(canonicalValue(item, depth + 1));
+			return `[${items.join(",")}]`;
+		}
 		const keys = codePointSort(Object.keys(value as Record<string, unknown>));
-		const out = keys.map((k) => `${JSON.stringify(k)}:${canonicalValue((value as Record<string, unknown>)[k])}`);
+		const out = keys.map((k) => `${jsonString(k)}:${canonicalValue((value as Record<string, unknown>)[k], depth + 1)}`);
 		return `{${out.join(",")}}`;
 	}
-	throw new TypeError(`not JSON-serializable: ${typeof value}`);
+	throw new CcSpoolValidationError("NOT_JSON", null);
+}
+
+function checkedLine(env: unknown): string {
+	const line = canonical(env);
+	if (Buffer.byteLength(line, "utf8") > 262144) throw new CcSpoolValidationError("LINE_TOO_LONG", null);
+	const error = ccEnvelopeError(env);
+	if (error) throw new CcSpoolValidationError(error.code, error.field);
+	return line;
 }
 
 /** Sort by Unicode code points, matching Python's `sorted()` on `str`. */
@@ -164,62 +178,12 @@ function checkNoSymlink(...paths: string[]): void {
 	}
 }
 
-function hasOnlyPullAttemptFields(row: Record<string, unknown>): boolean {
-	for (const key in row) {
-		if (!Object.prototype.hasOwnProperty.call(row, key)) continue;
-		if (key !== "outcome" && key !== "refusal_class" && key !== "picked_bead") return false;
-	}
-	return true;
-}
-
-function checkDataShape(type: string, data: Record<string, unknown>): void {
-	const need: Record<string, (v: unknown) => boolean> = {
-		"action.attempt": (d) =>
-			typeof (d as Record<string, unknown>).action_id === "string" &&
-			typeof (d as Record<string, unknown>).surface === "string",
-		"action.result": (d) =>
-			typeof (d as Record<string, unknown>).action_id === "string" &&
-			typeof (d as Record<string, unknown>).outcome === "string" &&
-			typeof (d as Record<string, unknown>).duration_ms === "number",
-		"bead.status": (d) =>
-			typeof (d as Record<string, unknown>).to_status === "string" &&
-			typeof (d as Record<string, unknown>).observation === "string",
-		"source.tick": (d) => {
-			const row = d as Record<string, unknown>;
-			return typeof row.instance === "string" &&
-				Number.isSafeInteger(row.records_seen) &&
-				Number.isSafeInteger(row.records_emitted) &&
-				Number.isSafeInteger(row.records_ignored) &&
-				Number.isSafeInteger(row.records_quarantined) &&
-				Number.isSafeInteger(row.complete_through_ms) &&
-				Number.isSafeInteger(row.position) &&
-				Array.isArray(row.coverage);
-		},
-		"cc.view": (d) =>
-			typeof (d as Record<string, unknown>).panel === "string" &&
-			typeof (d as Record<string, unknown>).route_id === "string" &&
-			((d as Record<string, unknown>).client === "loopback" ||
-				(d as Record<string, unknown>).client === "tailnet"),
-		"cc.unknown": (d) =>
-			typeof (d as Record<string, unknown>).class === "string" &&
-			typeof (d as Record<string, unknown>).scope === "string",
-		"pull.attempt": (d) => {
-			const row = d as Record<string, unknown>;
-			if (!hasOnlyPullAttemptFields(row)) return false;
-			return typeof row.outcome === "string" && row.outcome.length > 0 &&
-				(typeof row.refusal_class === "string" || row.refusal_class === null) &&
-				(typeof row.picked_bead === "string" || row.picked_bead === null);
-		},
-	};
-	const check = need[type];
-	if (check && !check(data)) throw new Error(`bad data shape for ${type}`);
-}
 
 /** Optional spool writer for one declared producer, or null when inert (no fleet state). */
 export function ccSpool(producer: string, opts: CcSpoolOptions = {}): CcSpool | null {
 	if (process.env.OMP_KIT_CC === "0") return null;
-	if (!(producer in PRODUCER_OWNERS) || producer.includes("/") || producer === "." || producer === "..") {
-		throw new Error("PRODUCER_UNDECLARED_OR_UNSAFE");
+	if (!ccProducerOwner(producer) || producer.includes("/") || producer === "." || producer === "..") {
+		throw new CcSpoolValidationError("PRODUCER_UNDECLARED_OR_UNSAFE", "envelope.producer");
 	}
 	const stateDir = opts.stateDir ?? defaultStateDir();
 	const clock = opts.clock ?? Date.now;
@@ -239,9 +203,9 @@ export function ccSpool(producer: string, opts: CcSpoolOptions = {}): CcSpool | 
 		producer,
 		failures: 0,
 		envelope(type: string, data: Record<string, unknown>, envOpts: EnvelopeOptions): Record<string, unknown> {
-			if (!(type in TYPE_VERSIONS)) throw new Error(`TYPE_UNDECLARED: ${type}`);
-			if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("DATA_NOT_OBJECT");
-			checkDataShape(type, data);
+			const version = ccTypeVersion(type);
+			if (version === undefined) throw new CcSpoolValidationError("TYPE_UNDECLARED", "envelope.type");
+			if (typeof data !== "object" || data === null || Array.isArray(data)) throw new CcSpoolValidationError("DATA_NOT_OBJECT", "envelope.data");
 			const observed = envOpts.observedMs ?? clock();
 			const env: Record<string, unknown> = {
 				specversion: SPEC_VERSION,
@@ -252,7 +216,7 @@ export function ccSpool(producer: string, opts: CcSpoolOptions = {}): CcSpool | 
 				time: isoMs(envOpts.timeMs),
 				observed: isoMs(observed),
 				producer,
-				dataschema: `${type}@${TYPE_VERSIONS[type]}`,
+				dataschema: `${type}@${version}`,
 				confidence: envOpts.confidence ?? "exact",
 				data,
 			};
@@ -261,7 +225,7 @@ export function ccSpool(producer: string, opts: CcSpoolOptions = {}): CcSpool | 
 					if (v !== undefined) env[k] = v;
 				}
 			}
-			canonical(env);
+			checkedLine(env);
 			return env;
 		},
 		append(envs: Array<Record<string, unknown>>): number {
@@ -269,11 +233,11 @@ export function ccSpool(producer: string, opts: CcSpoolOptions = {}): CcSpool | 
 				if (envs.length === 0) return 0;
 				const lines: string[] = [];
 				for (const env of envs) {
-					let line = canonical(env);
-					if (looksSecret(line)) {
+					let line = checkedLine(env);
+					if (ccWouldRedact(line)) {
 						const t = clock();
 						const position = `redaction:${String(env.id ?? "")}`;
-						line = canonical({
+						line = checkedLine({
 							specversion: SPEC_VERSION,
 							id: makeId(producer, position, "cc.unknown"),
 							position,
@@ -288,7 +252,7 @@ export function ccSpool(producer: string, opts: CcSpoolOptions = {}): CcSpool | 
 								class: "U-redaction",
 								scope: `producer:${producer}`,
 								action: "raise",
-								owner: PRODUCER_OWNERS[producer],
+								owner: ccProducerOwner(producer),
 								route: REDACTION_ROUTE,
 								detail: "CREDENTIAL_SHAPE_AT_PRODUCER",
 								cost_seat_ms: null,

@@ -229,7 +229,7 @@ describe("cc-spool", () => {
 		expect(() => ccSpool("kit/x", { stateDir: ownedState() })).toThrow("PRODUCER_UNDECLARED_OR_UNSAFE");
 	});
 
-	test("cc.view accepts declared panel view shape and rejects invalid client", () => {
+	test("cc.view appends its declared view shape", () => {
 		const st = ownedState();
 		const a = ccSpool("cc", { stateDir: st })!;
 		const env = a.envelope(
@@ -239,12 +239,82 @@ describe("cc-spool", () => {
 		);
 		expect(env.dataschema).toBe("cc.view@1");
 		expect(a.append([env])).toBe(1);
-		expect(() => a.envelope(
-			"cc.view",
-			{ panel: "Q1", route_id: "dashboard", client: "public" },
-			{ key: "cc:view:0002", timeMs: 1_769_000_000_000 },
-		)).toThrow("bad data shape");
 	});
+	test.each([
+		["undeclared data", { panel: "", route_id: "", client: "loopback", extra: true }, {}, "FIELD_UNDECLARED"],
+		["bounded string", { panel: "x".repeat(257), route_id: "", client: "loopback" }, {}, "FIELD_LENGTH"],
+		["invalid context", { panel: "", route_id: "", client: "loopback" }, { seq: true }, "FIELD_TYPE"],
+		["undeclared context", { panel: "", route_id: "", client: "loopback" }, { extra: true }, "FIELD_UNDECLARED"],
+		["identity override", { panel: "", route_id: "", client: "loopback" }, { id: "invalid" }, "ID_FORMAT"],
+		["invalid client", { panel: "", route_id: "", client: "public" }, {}, "FIELD_ENUM"],
+		["lone surrogate", { panel: "\ud800", route_id: "", client: "loopback" }, {}, "NOT_JSON"],
+	])("registry refusal before append: %s", (_name, data, ctx, code) => {
+		const st = ownedState();
+		const now = 1_769_000_000_000;
+		const spool = ccSpool("cc", { stateDir: st, clock: () => now })!;
+		expect(() => spool.envelope("cc.view", data, { key: "view:invalid", timeMs: now, ctx })).toThrow(code);
+		expect(existsSync(join(st, "spool", "cc"))).toBe(false);
+	});
+
+	test("refusal metadata exposes the fixed code and scope, never an untrusted key", () => {
+		const now = 1_769_000_000_000;
+		const spool = ccSpool("cc", { stateDir: ownedState(), clock: () => now })!;
+		let failure: unknown;
+		try {
+			spool.envelope("cc.view", { panel: "", route_id: "", client: "loopback" }, {
+				key: "view:private-key", timeMs: now, ctx: { "private-field-sentinel": true },
+			});
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toMatchObject({ code: "FIELD_UNDECLARED", field: "envelope.#" });
+		expect(JSON.stringify(failure)).not.toContain("private-field-sentinel");
+	});
+
+	test("string limits count Unicode code points, not UTF-16 units", () => {
+		const now = 1_769_000_000_000;
+		const spool = ccSpool("cc", { stateDir: ownedState(), clock: () => now })!;
+		const panel = "\u{10000}".repeat(256);
+		const env = spool.envelope("cc.view", { panel, route_id: "", client: "loopback" }, {
+			key: "view:unicode", timeMs: now,
+		});
+		expect(spool.append([env])).toBe(1);
+		expect(() => spool.envelope("cc.view", { panel: `${panel}x`, route_id: "", client: "loopback" }, {
+			key: "view:unicode-too-long", timeMs: now,
+		})).toThrow("FIELD_LENGTH");
+	});
+
+	test("unknown model cost accepts absent optional authority fields without inventing an approval", () => {
+		const now = 1_769_000_000_000;
+		const spool = ccSpool("cc", { stateDir: ownedState(), clock: () => now })!;
+		const data = {
+			usage_key: "0", provider: null, model: null, purpose: null, input_tokens: 0, output_tokens: 0,
+			cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: null, reasoning_source: "unknown",
+			cost_usd: null, cost_source: "unknown",
+		};
+		const env = spool.envelope("model.usage", data, { key: "model:unknown-cost", timeMs: now, ctx: { seat: "model-seat" } });
+		expect(spool.append([env])).toBe(1);
+		expect(() => spool.envelope("model.usage", { ...data, cost_source: "provider", cost_usd: 1 }, {
+			key: "model:unapproved-cost", timeMs: now, ctx: { seat: "model-seat" },
+		})).toThrow("COST_AUTHORITY_MISSING");
+	});
+
+	test("append revalidates mutated envelopes and refuses the entire batch before writing", () => {
+		const st = ownedState();
+		const now = 1_769_000_000_000;
+		const spool = ccSpool("cc", { stateDir: st, clock: () => now })!;
+		const valid = spool.envelope("cc.view", { panel: "", route_id: "", client: "loopback" }, {
+			key: "view:valid", timeMs: now,
+		});
+		const invalid = { ...valid, data: { panel: "", route_id: "", client: "loopback", extra: true } };
+		expect(spool.append([valid, invalid])).toBe(0);
+		expect(spool.failures).toBe(1);
+		expect(existsSync(join(st, "spool", "cc"))).toBe(false);
+		expect(spool.append([valid])).toBe(1);
+		const saved = readFileSync(join(st, "spool", "cc", `${isoMs(now).slice(0, 10)}.jsonl`), "utf8");
+		expect(saved).toBe(`${canonical(valid)}\n`);
+	});
+
 	test("pull.attempt uses the typed event columns and envelope identity context", () => {
 		const now = 1_792_598_400_000;
 		const st = ownedState();
@@ -268,14 +338,6 @@ describe("cc-spool", () => {
 		const day = isoMs(now).slice(0, 10);
 		const saved = JSON.parse(readFileSync(join(st, "spool", "watcher", `${day}.jsonl`), "utf8").trim());
 		expect(saved.data).toEqual(data);
-		expect(() => spool.envelope("pull.attempt", {
-			outcome: "NUDGED",
-			picked_bead: null,
-		}, { key: "fw:%1:1792598400000:2", timeMs: now })).toThrow("bad data shape");
-		expect(() => spool.envelope("pull.attempt", {
-			...data,
-			text: `credential ghp_${"a".repeat(36)}`,
-		}, { key: "fw:%1:1792598400000:3", timeMs: now })).toThrow("bad data shape");
 	});
 
 	test("source.tick requires complete counts and per-record coverage", () => {
@@ -291,15 +353,22 @@ describe("cc-spool", () => {
 			complete_through_ms: now,
 			position: 1,
 			event_count: 1,
+			error_code: null,
+			skew_ms: null,
 			coverage: [{ record_type: "record:NUDGED", runtime_version: "1", disposition: "emitted", reason: null, count: 1 }],
 		};
 		const env = spool.envelope("source.tick", data, { key: "fw:tick:1792598400000:2", timeMs: now });
 		expect(env.dataschema).toBe("source.tick@1");
 		expect(spool.append([env])).toBe(1);
-		expect(() => spool.envelope("source.tick", { instance: "fleet-watch", records_seen: 0 }, {
-			key: "fw:tick:1792598400000:3",
-			timeMs: now,
-		})).toThrow("bad data shape");
+		for (const [coverage, code] of [
+			[[data.coverage[0], data.coverage[0]], "COVERAGE_DUPLICATE_KEY"],
+			[[{ ...data.coverage[0], disposition: "unknown", reason: null }], "COVERAGE_REASON_MISSING"],
+			[[{ ...data.coverage[0], disposition: "unavailable", reason: "ADAPTER_UNAVAILABLE" }], "UNAVAILABLE_WITH_RECORDS"],
+		] as const) {
+			expect(() => spool.envelope("source.tick", { ...data, coverage }, {
+				key: `fw:invalid:${code}`, timeMs: now,
+			})).toThrow(code);
+		}
 	});
 
 	test("undeclared type refused at envelope time", () => {
