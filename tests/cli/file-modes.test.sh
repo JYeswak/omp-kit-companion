@@ -5,10 +5,35 @@
 # Reads the committed tree, never the worktree.
 set -u
 
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 1
+# shellcheck source=tests/cli/git-env-fixtures.sh
+. "$ROOT/tests/cli/git-env-fixtures.sh"
+# Reuse package-release.test.ts's archive provenance: export-subst records the
+# immutable revision, while CASE_CWD names its object store, never an ambient HEAD.
+revision=$(bun -e 'const p = await Bun.file(process.argv[1]).json(); if (typeof p.source_revision !== "string") process.exit(1); process.stdout.write(p.source_revision);' "$ROOT/package.json") || exit 1
+object_store=$ROOT
+selected=${OMP_KIT_CASE_SOURCE_SHA:-HEAD}
+if [ "$revision" != "\$Format:%H\$" ]; then
+	case "$revision" in ''|*[!0123456789abcdef]*) printf 'FAIL source: invalid archive revision\n' >&2; exit 1 ;; esac
+	[ "${#revision}" -eq 40 ] || { printf 'FAIL source: incomplete archive revision\n' >&2; exit 1; }
+	[ -z "${OMP_KIT_CASE_SOURCE_SHA:-}" ] || [ "$OMP_KIT_CASE_SOURCE_SHA" = "$revision" ] || {
+		printf 'FAIL source: selected revision differs from immutable archive\n' >&2; exit 1;
+	}
+	[ -n "${OMP_KIT_CASE_CWD:-}" ] || { printf 'FAIL source: archive object store is not explicit\n' >&2; exit 1; }
+	object_store=$OMP_KIT_CASE_CWD
+	selected=$revision
+else
+	top=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null) || exit 1
+	[ "$top" = "$ROOT" ] || { printf 'FAIL source: refusing enclosing Git worktree\n' >&2; exit 1; }
+fi
+subject=$(git -C "$object_store" rev-parse --verify --end-of-options "$selected^{commit}" 2>/dev/null) || {
+	printf 'FAIL source: committed subject unavailable\n' >&2; exit 1;
+}
+
 pass=0
 fail=0
 for file in scripts/br-shim.sh scripts/agent-spawn-env.sh scripts/agent-trailer-hook.sh scripts/close-guard.sh; do
-	mode=$(git ls-tree HEAD -- "$file" 2>/dev/null | awk '{ print $1 }')
+	mode=$(git -C "$object_store" ls-tree "$subject" -- "$file" 2>/dev/null | awk '{ print $1 }')
 	if [ "$mode" = "100755" ]; then
 		pass=$((pass + 1))
 	else
