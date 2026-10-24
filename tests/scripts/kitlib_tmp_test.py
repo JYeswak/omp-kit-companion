@@ -43,6 +43,8 @@ kitlib_tmp = _load("kitlib_tmp", ROOT / "scripts" / "kitlib_tmp.py")
 
 PY_CHILD = r'''
 import os, signal, sys, time
+# Background suite jobs inherit ignored SIGINT; this child tests default cancellation.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
 sys.path.insert(0, os.environ["KT_LIBDIR"])
 import kitlib_tmp
 root = os.environ["KT_ROOT"]

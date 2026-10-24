@@ -1,0 +1,1 @@
+- Make the Python temporary-directory cancellation fixture explicitly use default SIGINT in its child, preventing false conformance failures when the suite runner backgrounds it with SIGINT ignored; production signal policy and test deadlines are unchanged.
