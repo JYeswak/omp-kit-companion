@@ -446,3 +446,23 @@ kit-close-needs-evidence	quiet	tool	bash	-	am mail send --body 'Literal $(br clo
 kit-close-needs-evidence	quiet	tool	bash	-	am mail send --body "result $(br close ompkit-demo --reason 'native acceptance -> PASS; commit abc1234')"	gbkj.3: an evidenced active substitution remains admissible	
 kit-close-needs-evidence	quiet	tool	bash	-	br close ompkit-demo --db '/repo/work(tree)/.beads/beads.db' --reason 'native acceptance -> PASS; commit abc1234'	gbkj.3 independent review: a quoted parenthesis before evidence is data, not substitution termination	
 kit-close-needs-evidence	fire	tool	bash	-	br close ompkit-demo --db '/repo/work(tree)/.beads/beads.db'	gbkj.3 independent review: the same quoted path does not excuse a reasonless close	
+kit-probe-readable-facts	fire	tool	write	config/omp.json	omp_version = "18.6.1"	DERIVE1: current live omp --version value; persisting it in config is stale-prone.	
+kit-probe-readable-facts	quiet	tool	write	config/omp.json	# decision: compatibility pin; reason: release compatibility; who: owner; when: 2026-10-24; omp_version = "18.6.1"	DERIVE1: reasoned decision includes who and date	
+kit-probe-readable-facts	quiet	tool	bash	-	omp --version	DERIVE1: the real version probe itself is allowed; do not persist its output.	
+kit-probe-readable-facts	fire	tool	edit	registry/inventory.yaml	profiles: 17	DERIVE1: unqualified live profile count	
+kit-probe-readable-facts	fire	tool	write	config/paths.toml	install_root = "/Users/example/.local/opt/omp-kit"	DERIVE1: planted neutral absolute home path.	
+kit-probe-readable-facts	fire	tool	write	registry/runtime.yaml	owner_pid = 9289	DERIVE1: literal process identity	
+kit-probe-readable-facts	fire	tool	edit	policy/leases.toml	lease = 12345	DERIVE1: literal live lease	
+kit-probe-readable-facts	quiet	tool	write	runs/fault-matrix.json	omp_version = "18.6.1"	DERIVE1: generated run output is outside config scope	
+kit-probe-readable-facts	fire	tool	write	.omp/profiles/codex/agent/config.yml	profiles: 17	DERIVE1: profile config count	
+kit-probe-readable-facts	quiet	tool	write	.omp/mission.toml	binaries = ["/Users/example/.local/bin/omp-kit"]	DERIVE1: approved mission decision record is outside runtime config scope.	
+kit-probe-readable-facts	quiet	tool	write	registry/target.toml	# decision: target root; reason: explicit host checkout path; who: owner; when: 2026-10-01\ncanonical_root = "/home/operator/Developer/franken-harvest"	DERIVE1: preceding reason comment is quiet	
+kit-probe-readable-facts	fire	tool	write	config/omp.json	# decision: pin; reason: compatibility; omp_version = "18.6.1"	DERIVE1: missing who/date does not document a decision	
+kit-probe-readable-facts	quiet	tool	write	registries/upgrade_policy.toml	reason = "decision: keep Infisical pinned at 0.43.84; reason: newer CLIs speak /api/v4, which the self-hosted server does not serve; who: Josh (cfsios policy owner); when: 2026-10-04"	DERIVE1: actual UDS upgrade_policy.toml line 58; reasoned version decision stays quiet.	
+kit-probe-readable-facts	quiet	tool	write	config/uds.toml	scan = true	DERIVE1: actual UDS config.toml operator setting; boolean choice is not a derived fact.	
+kit-probe-readable-facts	quiet	tool	write	config/uds.toml	mirror_root = "/example/uds-mirror"	DERIVE1: actual UDS config key; private absolute value redacted to a neutral non-home path.	
+kit-probe-readable-facts	fire	tool	write	config/omp.json	omp_version = "18.6.0"	DERIVE1: actual tracker stale-version finding (ompkit...119); writing it into config would fossilize it.	
+kit-probe-readable-facts	fire	tool	write	registry/inventory.yaml	profiles: 15	DERIVE1: actual tracker finding 15 profiles vs 17 live (ompkit...119); copied count would fire.	
+kit-probe-readable-facts	fire	tool	write	registry/summary.yaml	12 identical/6 edited	DERIVE1: actual tracker moving split (ompkit...119); hard-coded split count would fire.	
+kit-probe-readable-facts	fire	tool	write	config/paths.toml	install_root = "/Users/example"	DERIVE1: bare user-home root is a probe-readable path literal.	
+kit-probe-readable-facts	fire	tool	write	config/paths.toml	cache_root = "/home/example"	DERIVE1: bare Linux home root is a probe-readable path literal.	

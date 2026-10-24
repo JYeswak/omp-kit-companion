@@ -21,11 +21,11 @@ test("a decision line with a reason stays quiet", () => {
 	expect(scanDerivedText("c.json", '{ "a": 1 }')).toEqual([]);
 });
 
-test("shouldScanFile covers config extensions and skips managed dirs", () => {
+test("shouldScanFile recognizes config extensions under config roots", () => {
 	expect(shouldScanFile("config/app.json")).toBe(true);
-	expect(shouldScanFile("a/b.toml")).toBe(true);
-	expect(shouldScanFile("a/b.yml")).toBe(true);
-	expect(shouldScanFile("a/b.yaml")).toBe(true);
+	expect(shouldScanFile("config/a/b.toml")).toBe(true);
+	expect(shouldScanFile("policy/a/b.yml")).toBe(true);
+	expect(shouldScanFile("registry/a/b.yaml")).toBe(true);
 	expect(shouldScanFile("src/a.ts")).toBe(false);
 	expect(shouldScanFile("var/agent-tmp/x.json")).toBe(false);
 	expect(shouldScanFile(".git/x.json")).toBe(false);
@@ -40,4 +40,42 @@ test("near-miss version soup stays linear", () => {
 	const elapsed = performance.now() - started;
 	expect(rows).toEqual([]);
 	expect(elapsed).toBeLessThan(1000);
+});
+test("doctor derived scans config and registry paths, not generated data", () => {
+	expect(shouldScanFile("config/omp.json")).toBe(true);
+	expect(shouldScanFile("registries/profiles.yaml")).toBe(true);
+	expect(shouldScanFile(".omp/mission.toml")).toBe(false);
+	expect(shouldScanFile(".omp/config.yml")).toBe(true);
+	expect(shouldScanFile(".omp/profiles/codex/agent/config.yml")).toBe(true);
+	expect(shouldScanFile(".beads/config.yaml")).toBe(true);
+	expect(shouldScanFile(".beads/recovery_20261013T050019Z/config.yaml")).toBe(false);
+	expect(shouldScanFile(".beads/.br-wal-index-tavhh1/prepared.json")).toBe(false);
+	expect(shouldScanFile(".github/workflows/release.yml")).toBe(true);
+	expect(shouldScanFile("runs/fault-matrix.json")).toBe(false);
+	expect(shouldScanFile("uds-check-selftest-matrix-6mpeab4f/closure-fixture/registries/target_gate_projections.toml")).toBe(false);
+	expect(shouldScanFile(".scratch-hsvg-chain-12345/closure-drift-chain/registries/beads_pointers.toml")).toBe(false);
+	expect(shouldScanFile("docs/evidence/receipt.json")).toBe(false);
+	expect(shouldScanFile(".omp/retired-20261013T021849Z/cfs-held-path-custody.json")).toBe(false);
+	expect(shouldScanFile("src/cc-credential-shapes.v1.json")).toBe(false);
+	expect(shouldScanFile("pnpm-lock.yaml")).toBe(false);
+});
+test("loopback address is not a version fact", () => {
+	expect(scanDerivedText("config/omp.json", '{"url":"http://127.0.0.1:8765/mcp/"}')).toEqual([]);
+});
+test("a preceding decision comment accounts for its config value", () => {
+	const config = [
+		"# decision: use the target root; reason: the reader requires a host-local path; who: owner; when: 2026-10-01",
+		'canonical_root = "/home/operator/Developer/franken-harvest"',
+	].join("\n");
+	expect(scanDerivedText("registries/target_gate_projections.toml", config)).toEqual([]);
+});
+test("external project and database paths remain visible to derived checks", () => {
+	const config = [
+		"issue_prefix: uds",
+		"external_projects:",
+		"  control-plane: /Users/example/Developer/control-plane",
+		"db: /Users/example/.beads/beads.db",
+	].join("\n");
+	expect(scanDerivedText(".beads/config.yaml", config).map(row => [row.line, row.kind]))
+		.toEqual([[3, "path"], [4, "path"]]);
 });

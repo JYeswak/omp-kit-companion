@@ -67,6 +67,12 @@ Never run regex or script rewrites across files to "fix" code. Make each change 
 
 No `*_v2`, `*_new`, or duplicate modules. One canonical implementation per concept; migrate every caller in the same change.
 
+## Decisions versus derived facts
+
+Config files and registries hold only irreducible human decisions. Any fact a probe can read live (versions, holds, leases, in-use state, paths, counts) is derived at run time and never copied into a file. A hand-copied fact goes stale and later needs a scrub.
+
+A decision line records `decision: ...; reason: ...; who: ...; when: YYYY-MM-DD`. Otherwise, read the fact from its named runtime probe at use time.
+
 ## Backwards Compatibility
 
 Clean cutover: when a command or format changes, migrate every caller, test and document in the same change and remove the old path. No compatibility aliases or shims. Record user-visible changes as a `changelog.d/<bead>.md` fragment (one-line, user-facing `- ` bullets; optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds fragments into `CHANGELOG.md` `## [Unreleased]` and promotes it to the release section (upstream oh-my-pi shape; released sections are immutable). A CLI command or doctor scope change also updates README.md's `## Command reference`: `bun scripts/readme-check.ts` (fresh-gate step `readme`, CI) refuses a README missing any registry command or scope, or pinning a release version.

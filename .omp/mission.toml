@@ -1,6 +1,8 @@
 # omp-kit mission record (Mission Protocol v0.1 P1). Human text: ROADMAP.md "Mission" (b1d50e7b7d).
 # One file, edited in place. Each pillar check is repo code; it runs only after canonical-path
 # and SHA256 registration. Validation never executes a check.
+# Config files and registries hold only irreducible human decisions. Any fact a probe can read live (versions, holds, leases, in-use state, paths, counts) is derived at run time and never copied into a file.
+# A hand-copied fact goes stale and later needs a scrub. A decision line records who and when; runtime facts come from their named probes.
 
 identity = "omp-kit is the guardrail and proficiency layer for OMP agent fleets. The maintainer's own fleet is the proving ground."
 stage = "1: the fleet runs the kit (every profile loaded, rules within budget, done enforced)"

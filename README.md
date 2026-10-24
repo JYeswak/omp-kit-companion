@@ -82,11 +82,11 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack has 25 rules: 12 `reminder`, 10 `tripwire`, 1 `always`
+The pack has 26 rules: 12 `reminder`, 11 `tripwire`, 1 `always`
 (`kit-standing-law`), 1 `router` (`rs-unsafe-added-router`), and 1 `canary`
 (`zz-canary-scope-probe`). The router loads unsafe-code skills for Rust `unsafe`;
 the canary tests discovery. Tripwires cover unverified "done", unevidenced closes,
-`--no-verify`, secrets, configuration mutation, test skips and Actions polling.
+`--no-verify`, secrets, configuration mutation, copied runtime facts, test skips and Actions polling.
 Reminders cover pipe exit status, force-push without `--force-with-lease`, pattern
 kills and unsupported embedded JS regex flags. Retired rules and reasons live in
 `retired/` and `retired/REASONS.tsv`.

@@ -391,9 +391,9 @@ function settleBounded<T, R>(items: readonly T[], jobs: number, run: (item: T) =
 }
 
 /**
- * G3: one character at a time. Returns every prefix length that fired (wire.length+1 = final
- * snapshot). astCondition rules are not swept: omp evaluates them only on the finished edit/write
- * call, so they can fire only at the final snapshot.
+ * G3 follows the native stream boundary: text and bash arguments are checked as they stream,
+ * decoded write/edit content is checked once as a complete toolcall_end snapshot, and AST
+ * conditions likewise run only against the completed write/edit content.
  */
 async function g3Fires(rule: PayloadTarget, c: Case, onUnavailable?: () => void): Promise<{ fired: number[]; length: number }> {
 	if (isAdmissionTarget(rule)) return admissionPrefixSweep(c);
@@ -407,10 +407,13 @@ async function g3Fires(rule: PayloadTarget, c: Case, onUnavailable?: () => void)
 	}
 	const ctx = contextFor(c);
 	const bash = c.source === "tool" && c.tool === "bash";
-	for (let i = 1; i <= wire.length; i++) {
-		const matches =
-			c.source === "tool" && !bash ? m.checkSnapshot(wire.slice(0, i), ctx) : m.checkDelta(wire[i - 1], ctx);
-		if (hit(matches, rule.name)) fired.push(i);
+	if (c.source === "tool" && !bash) {
+		if (hit(m.checkSnapshot(wire, ctx), rule.name)) fired.push(wire.length + 1);
+	} else {
+		for (let i = 1; i <= wire.length; i++) {
+			const matches = m.checkDelta(wire[i - 1], ctx);
+			if (hit(matches, rule.name)) fired.push(i);
+		}
 	}
 	if (bash && hit(m.checkSnapshot(wire, ctx), rule.name)) fired.push(wire.length + 1);
 	if (c.source === "tool" && !bash && hit(await m.checkAstSnapshot(wire, ctx), rule.name)) fired.push(wire.length + 1);

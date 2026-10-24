@@ -9,6 +9,12 @@ its approval, and the recorded identity wording. Any disagreement is `DRIFT` wit
 named reason. The anchor never launches checks, never writes approvals, and never
 creates `.flywheel` content.
 
+## Decisions vs. derived mission facts
+
+Config files and registries hold only irreducible human decisions. Any fact a probe can read live (versions, holds, leases, in-use state, paths, counts) is derived at run time and never copied into a file. A hand-copied fact goes stale and later needs a scrub.
+
+A file may hold a decision (a cap, a hold, a preference, an approval) with who and when; a fact is read live by a named probe. In the Mission Protocol, `.omp/mission.toml` records mission decisions and registered check identities; it is not a snapshot of current versions, paths, leases, counts, or other runtime state. Keep the live Mission text and its approval as the human source of truth, and query current facts from the named probe at use time.
+
 ## The single command
 
 `omp-kit mission anchor [--project PATH]... [--json]` — one repo per `--project`
