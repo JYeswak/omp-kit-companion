@@ -53,7 +53,16 @@ export async function planRepair(input: RepairInput): Promise<RepairDecision> {
 	const scope = input.scope as NamedScope;
 	try {
 		validateNamedApplyPaths({ root: input.root, home: input.home, stateRoot: input.stateRoot });
-		const diagnosed = await diagnose({ root: input.root, home: input.home, project: input.project });
+		// Keep diagnosis within the named repair scope; policy planning performs its native read in a private HOME clone.
+		const diagnosisScopes = scope === "policy" ? ["settings"] : scope === "extensions" ? ["kit", "extensions"] : ["rules"];
+		const diagnosed: Finding[] = [];
+		for (const diagnosisScope of diagnosisScopes) {
+			diagnosed.push(...await diagnose({ root: input.root, home: input.home, project: input.project, scope: diagnosisScope }));
+		}
+		if (input.project && scope !== "rules") {
+			const projectRules = await diagnose({ root: input.root, home: input.home, project: input.project, scope: "rules" });
+			diagnosed.push(...projectRules.filter(item => item.component === "project_rules"));
+		}
 		const blocked = findingRefusal(scope, diagnosed, input.project);
 		if (blocked) return blocked;
 		const plan = planNamedApply({ root: input.root, home: input.home, stateRoot: input.stateRoot, project: input.project, scope, profileConfigHome: input.profileConfigHome });

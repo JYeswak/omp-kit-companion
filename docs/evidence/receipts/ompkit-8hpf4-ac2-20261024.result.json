@@ -1,9 +1,9 @@
 {
  "authority": "test",
  "confidence": "observed",
- "evidence_id": "ev_9a7989e740e2264817168f203c69f544ca3154097de84b1f10c05dd25c2e1f4b",
+ "evidence_id": "ev_f1cb44bf6372d1b90d744b7fcd02f9c7153f1b5d7eb010dc52825e775c6bd0c2",
  "limitations": [
-  "Pre-publication working-tree replay. Direct full-suite attempt on the prior temporary scope exited 75; current-source full gate and published-origin non-author verification remain separate."
+  "Pre-publication working-tree replay. Direct full-suite attempt exited 75; published-origin non-author verification and the native publication gate remain separate."
  ],
  "operation": "ompkit-8hpf4 AC2 AC3 replay",
  "parameters": {
@@ -12,7 +12,7 @@
  },
  "producer": "TurquoiseSummit/Bun test and tempsafe_check",
  "result_ref": {
-  "bytes": 8366,
-  "sha256": "494d57dc57da3f987a224394877becc4eaf6aa038b51a45b5a9d52754540cb56"
+  "bytes": 8396,
+  "sha256": "4260ec21ce53c617e6e6c241859ef59582e33837c8d700b6d8e05933c3cd2b48"
  }
 }

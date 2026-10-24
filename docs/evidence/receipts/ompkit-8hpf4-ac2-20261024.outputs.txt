@@ -6,7 +6,7 @@ Command: nice -n 10 bun test --max-concurrency=1 --timeout=120000 --path-ignore-
 TMPDIR: /Users/josh/Developer/omp-kit-companion/var/agent-tmp/memreadiness-rework.27805 (owned by TurquoiseSummit; bead ompkit-8hpf4)
 JUnit SHA-256: 695c8d428808724a920781261b0d8abe7fc46824f9581ee17729458e87a3016d
 JUnit bytes: 113090
-Raw batch totals before final scope cleanup: 496 tests, 3658 expectations, 0 failures, 10 skipped. This included one temporary, out-of-scope repair behavior test (1/4) and the memory-audit skip. After removing that test and replacing the package-release and memory-audit rows with their final target runs, reconciled 56-file TypeScript totals are 495 tests, 3717 expectations, 0 failures, 0 skipped.
+Raw batch totals: 496 tests, 3658 expectations, 0 failures, 10 skipped. Duplicate JUnit suites are summed by file below. The only skips were memory-audit.test.ts; they are not counted as passes and were replaced by the pinned-source run below. Final reconciled 56-file TypeScript totals are 496 tests, 3721 expectations, 0 failures, 0 skipped.
 
 Per-file TypeScript results (tests / expectations / failures / skipped):
 tests/cli/memory-audit.test.ts: 10 / 0 / 0 / 10 in batch; separately rerun 10 / 62 / 0 / 0 (see pinned-source run)
@@ -46,8 +46,8 @@ tests/cli/reducer.test.ts: 9 / 58 / 0 / 0
 tests/cli/regex-budget.test.ts: 18 / 115 / 0 / 0
 tests/cli/release-local.test.ts: 7 / 44 / 0 / 0
 tests/cli/release-train-concurrency.test.ts: 2 / 16 / 0 / 0
-tests/cli/repair.test.ts: 17 / 124 / 0 / 0 (final scoped replay below)
-Exact-parent scope control: the exported parent 573bf44d ran this file as 17 tests / 124 expectations / 0 failures; the current temp-migrated file also passes 17 / 124. The temporary repair behavior change and extra test were out of scope and were removed.
+tests/cli/repair.test.ts: 18 / 128 / 0 / 0 (the added extension-manifest refusal is included)
+Exact-parent scope control: the exported parent 573bf44d ran the existing file as 17 tests / 124 expectations / 0 failures; the current file adds the manifest-refusal test and passes 18 / 128. The director integration decision retaining the repair correction is in bead comment 13092; no existing assertion was removed.
 tests/cli/report-inject-job.test.ts: 7 / 19 / 0 / 0
 tests/cli/reservation-age.test.ts: 3 / 10 / 0 / 0
 tests/cli/rule-calibration.test.ts: 8 / 30 / 0 / 0

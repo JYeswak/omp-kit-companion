@@ -168,6 +168,17 @@ test("disabled rule of unknown provider blocks policy without altering any profi
 	expect(snapshot(f.home)).toEqual(before);
 }, 60_000);
 
+test("extension repair refuses an invalid release manifest before any change", async () => {
+	const f = fixture();
+	writeFileSync(join(f.root, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\nmanaged\t" + "0".repeat(64) + "\talways\taaaaaaa\n");
+	const before = snapshot(f.home);
+	const decision = await planRepair({ root: f.root, home: f.home, stateRoot: f.stateRoot, scope: "extensions" });
+	expect(decision.status).toBe("REFUSED");
+	expect(decision.refusal?.code).toBe("INVALID_RELEASE");
+	expect(snapshot(f.home)).toEqual(before);
+	expect(existsSync(f.stateRoot)).toBe(false);
+});
+
 
 test("extension repair is named, and interrupted install exposes pending receipt instead of silent retry", async () => {
 	const f = fixture();
