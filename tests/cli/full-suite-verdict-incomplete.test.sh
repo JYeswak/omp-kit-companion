@@ -80,6 +80,20 @@ if [ -f "$cache/$tree.json" ] && grep -F '"verdict": "PASS"' "$cache/$tree.json"
 if grep -F 'FULLSUITELOG1-CONTROL ok' "$cache/$tree.log" >/dev/null 2>&1; then ok "complete run keeps <tree>.log"; else not_ok "complete run has no <tree>.log"; fi
 if [ ! -e "$cache/$tree.incomplete.log" ]; then ok "complete run writes no incomplete log"; else not_ok "complete run wrote an incomplete log"; fi
 
+# Suites start with SIGINT at its default, as in a foreground run. The runner launches them in a
+# background list, which a non-interactive shell starts with SIGINT ignored; kitlib_tmp_test's
+# SIGINT case failed only under this runner (ompkit-lrbd.3).
+mkrepo sigdfl 'import signal, sys
+handler = signal.getsignal(signal.SIGINT)
+print("FULLSUITE-SIGINT handler:", handler)
+sys.exit(0 if handler is signal.default_int_handler else 1)'
+run_verdict sigdfl
+if [ "$rc" -eq 0 ] && grep -F 'VERDICT PASS' "$out" >/dev/null; then
+	ok "suites start with the default SIGINT disposition"
+else
+	not_ok "a suite started with SIGINT not at its default (rc=$rc)"; cat "$out"
+fi
+
 # (a) Nested markers: a shell suite that itself prints the runner's marker lines (as a nested
 # fresh-gate or bun fixture inside a test does) and exits 0. They must not count: complete PASS.
 mkrepo_begin nested

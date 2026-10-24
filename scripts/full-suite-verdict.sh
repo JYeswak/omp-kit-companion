@@ -305,27 +305,37 @@ run_suite() {
 		else
 			bun_config=""
 		fi
+		# dfl CMD...: run CMD with SIGINT and SIGQUIT at their defaults, as in a foreground run. This
+		# subshell runs as `run_suite &`, and a non-interactive shell starts background lists with both
+		# ignored; a shell cannot un-ignore them, so suites inherited SIG_IGN and a test expecting death
+		# by SIGINT exited 0 here only (kitlib_tmp_test test_03_sigint, ompkit-lrbd.3). exec keeps the pid.
+		dfl() {
+			python3 -c 'import os, signal, sys
+for sig in (signal.SIGINT, signal.SIGQUIT):
+    signal.signal(sig, signal.SIG_DFL)
+os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+		}
 		failed=0
 		if [ "$bun_count" -gt 0 ]; then
 			bun_rc=0
 			if [ -n "$bun_config" ]; then
-				nice -n 10 bun "$bun_config" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun >"$BUN_OUT" 2>&1 || bun_rc=$?
+				dfl nice -n 10 bun "$bun_config" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun >"$BUN_OUT" 2>&1 || bun_rc=$?
 			else
-				nice -n 10 bun test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun >"$BUN_OUT" 2>&1 || bun_rc=$?
+				dfl nice -n 10 bun test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun >"$BUN_OUT" 2>&1 || bun_rc=$?
 			fi
 			cat "$BUN_OUT"
 			echo "BUN rc=$bun_rc" >>"$SUITE_STATUS"
 			[ "$bun_rc" -eq 0 ] || failed=1
 		fi
 		for suite in $kept_shell; do
-			if sh "$suite"; then
+			if dfl sh "$suite"; then
 				echo "GREEN script-suite $suite"; echo "GREEN script-suite $suite" >>"$SUITE_STATUS"
 			else
 				src=$?; echo "RED script-suite $suite rc=$src"; echo "RED script-suite $suite" >>"$SUITE_STATUS"; failed=1
 			fi
 		done
 		for suite in $kept_py; do
-			if python3 "$suite"; then
+			if dfl python3 "$suite"; then
 				echo "GREEN python-suite $suite"; echo "GREEN python-suite $suite" >>"$SUITE_STATUS"
 			else
 				src=$?; echo "RED python-suite $suite rc=$src"; echo "RED python-suite $suite" >>"$SUITE_STATUS"; failed=1
