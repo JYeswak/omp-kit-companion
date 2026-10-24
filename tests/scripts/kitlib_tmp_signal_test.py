@@ -77,5 +77,50 @@ class NativeShellSignal(unittest.TestCase):
                 self.assertTrue(path.is_dir())
 
 
+class NativeShellPipeAllocation(unittest.TestCase):
+    def test_allocation_preserves_inherited_pipe_policy(self) -> None:
+        for shell in SHELLS:
+            for ignored in (False, True):
+                with self.subTest(shell=shell, ignored=ignored), kitlib_tmp.owned_tmp("native-shell-pipe") as root:
+                    script = "trap '' PIPE; " if ignored else ""
+                    script += 'printf "probe-pid=%s\\n" "$$"; . ' + shlex.quote(str(ROOT / "scripts/kitlib-tmp.sh"))
+                    script += '; kitlib_tmp work pipe-inherit-probe || exit 90; printf "%s\\n" "$work"; cat "$work/.owner"; '
+                    script += '{ /bin/sh -c \'kill -s PIPE $$; :\'; } 2>/dev/null; printf "pipe-status=%s\\n" "$?"'
+                    result = kitlib_run.run(
+                        [sys.executable, "-c", PREAMBLE, shell, "-c", script], deadline_s=3, grace_s=2, stdin=b"",
+                        cwd=str(ROOT), env={**os.environ, "TMPDIR": root, "KITLIB_TMP_ROOT": root,
+                                           "KITLIB_TMP_AUTO_CLEANUP": "1", "KITLIB_TMP_BEAD": ""},
+                    )
+                    lines = result.stdout.decode().splitlines()
+                    marker, pid_text = lines[0].split("=", 1)
+                    self.assertEqual(marker, "probe-pid")
+                    pid = int(pid_text)
+                    try:
+                        self.assertFalse(result.timed_out, f"allocation timed out with ignored PIPE={ignored}")
+                        self.assertEqual(result.rc, 0, result.stderr.decode(errors="replace"))
+                        self.assertEqual(result.stderr, b"")
+                        path = Path(lines[1])
+                        owner = dict(line.split("=", 1) for line in lines[2:-1])
+                        self.assertEqual(set(owner), {"pid", "label", "repo", "created"})
+                        self.assertEqual(owner["pid"], pid_text)
+                        self.assertEqual(owner["label"], "pipe-inherit-probe")
+                        self.assertEqual(owner["repo"], str(ROOT))
+                        suffix = path.name.rsplit(".", 1)[1]
+                        self.assertEqual(len(suffix), 6)
+                        self.assertTrue(all(c in "abcdefghijklmnopqrstuvwxyz0123456789" for c in suffix))
+                        self.assertEqual(path.name, f"pipe-inherit-probe.{pid}.{suffix}")
+                        self.assertEqual(path.parent, Path(root))
+                        self.assertFalse(path.exists())
+                        self.assertEqual(lines[-1], f"pipe-status={0 if ignored else 128 + signal.SIGPIPE}")
+                        with self.assertRaises(ProcessLookupError):
+                            os.killpg(pid, 0)
+                    finally:
+                        # This PID came from our just-started group; also reap a failing-before counterfactual.
+                        try:
+                            os.killpg(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+
 if __name__ == "__main__":
     unittest.main()

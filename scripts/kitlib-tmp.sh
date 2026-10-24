@@ -110,8 +110,9 @@ kitlib__tmp_bad_label() {
 }
 
 kitlib__tmp_suffix() {
-	# tr dies of SIGPIPE once head has 6 bytes; judge the result, not the pipeline status (pipefail callers).
-	kitlib__tmp_out=$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6)
+	# Bound entropy before filtering: inherited ignored SIGPIPE must not keep tr running.
+	# Judge the six-character result, not the pipeline status (pipefail callers).
+	kitlib__tmp_out=$(head -c 128 /dev/urandom | LC_ALL=C tr -dc 'a-z0-9' 2>/dev/null | head -c 6)
 	case $kitlib__tmp_out in
 		*[!$KITLIB__TMP_LOWER]*) return 1 ;;
 	esac
