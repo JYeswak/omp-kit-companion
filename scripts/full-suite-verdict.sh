@@ -23,8 +23,9 @@
 # A repeated identical tree under unchanged check/runtime identity reuses the recorded verdict
 # without rerunning. A changed tree, changed check bytes or changed runtime never reuses.
 # Missing, corrupt, timed-out or incomplete suite evidence is non-pass and is never cached GREEN:
-# only a finished suite run (PASS or FAIL with complete counts) is recorded. Incomplete runs
-# refuse without writing, so a retry reruns instead of reusing.
+# only a finished suite run (PASS or FAIL with complete counts) is recorded. Incomplete or
+# timed-out runs record no verdict, so a retry reruns instead of reusing; their partial output is
+# kept as <tree>.incomplete.log for diagnosis, a name the verdict lookup never reads.
 #
 # Cache: <repo-git-dir>/omp-kit/full-suite-verdicts/<tree>.json plus <tree>.log (the suite output),
 # overridden by --cache-dir or FULL_SUITE_VERDICT_CACHE_DIR. The cache is local to the pushing
@@ -336,9 +337,9 @@ if [ "$timed_out" = 0 ]; then
 	wait "$suite_pid" 2>/dev/null || suite_rc=$?
 fi
 if [ "$timed_out" = 1 ]; then
-	rm -f "$SUITE_OUT"
+	mv -f "$SUITE_OUT" "$CACHE_DIR/$tree.incomplete.log"
 	cleanup_archive
-	fail "full suite timed out after ${TIMEOUT_SECS}s; incomplete evidence is non-pass and nothing was cached"
+	fail "full suite timed out after ${TIMEOUT_SECS}s; incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
 	exit 1
 fi
 
@@ -363,9 +364,9 @@ fi
 [ "$((shell_green + shell_red))" -eq "$shell_count" ] 2>/dev/null || complete=0
 [ "$((py_green + py_red))" -eq "$py_count" ] 2>/dev/null || complete=0
 if [ "$complete" -ne 1 ]; then
-	rm -f "$SUITE_OUT"
+	mv -f "$SUITE_OUT" "$CACHE_DIR/$tree.incomplete.log"
 	cleanup_archive
-	fail "full suite ended without complete evidence (rc=$suite_rc bun_ran=$bun_ran shell=$shell_green/$shell_count python=$py_green/$py_count); incomplete evidence is non-pass and nothing was cached"
+	fail "full suite ended without complete evidence (rc=$suite_rc bun_ran=$bun_ran shell=$shell_green/$shell_count python=$py_green/$py_count); incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
 	exit 1
 fi
 
