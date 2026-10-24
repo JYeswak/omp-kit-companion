@@ -589,7 +589,7 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 	const doctorScope = request.command.name === "doctor" && typeof request.flags.get("--scope") === "string" ? String(request.flags.get("--scope")) : undefined;
 	const projectFlag = request.flags.get("--project");
 	const diagnosticProject = typeof projectFlag === "string" && projectFlag ? resolve(projectFlag) : process.cwd();
-	const diagnosedFindings = await diagnose({ root, home, project: diagnosticProject, inventoryOnly: request.command.name === "status", ...(doctorScope ? { scope: doctorScope } : {}), ...(ompPath ? { ompPath } : {}) });
+	const diagnosedFindings = await diagnose({ root, home, project: diagnosticProject, inventoryOnly: request.command.name === "status", recordRchBaseline: request.command.name === "doctor", ...(doctorScope ? { scope: doctorScope } : {}), ...(ompPath ? { ompPath } : {}) });
 	const nativeSettings = request.command.name === "doctor" && (request.flags.get("--scope") === "settings" || request.flags.get("--scope") === "policy") ?
 		inspectPolicySettings({ root, home, profileConfigHome: process.env.XDG_CONFIG_HOME, ...(ompLauncher ? { ompPath: ompLauncher } : {}) }) : null;
 	const allFindings = nativeSettings ? [...diagnosedFindings.filter(item => item.component !== "policy"), nativeSettings] : diagnosedFindings;

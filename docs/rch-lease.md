@@ -63,5 +63,5 @@ launchctl kickstart -k gui/$(id -u)/com.rch.daemon
 rch status               # verify: Daemon Running, workers healthy, slots available
 ```
 
-The kickstart drops in-flight jobs, which is why it is never automated. A path replaced by a different socket IS detected: the doctor records the socket inode (`rch-socket-ino.json` in the kit state root) on a healthy read and compares later reads — a different inode is `SOCKET_UNLINKED`. `lsof` reports no inode for a unix socket, so the baseline comes from `stat`, not from lsof. A first healthy sighting only records the baseline (never FAIL); a record older than 7 days is refreshed.
+The kickstart drops in-flight jobs, which is why it is never automated. A path replaced by a different socket IS detected: the doctor records the socket inode (`rch-socket-ino.json` in the kit state root) on a healthy read and compares later reads — a different inode is `SOCKET_UNLINKED`. `lsof` reports no inode for a unix socket, so the baseline comes from `stat`, not from lsof. A first healthy sighting only records the baseline (never FAIL); a record older than 7 days is refreshed. Only `doctor` records the baseline: `status`, `test` and `repair --plan` read and compare it but never write it.
 The durable fix (moving the socket out of `~/Library/Caches`) is upstream rch work tracked on `ompkit-z7zj`.

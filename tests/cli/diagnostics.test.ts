@@ -1380,6 +1380,42 @@ test("rch: socket ino baseline round-trips through the state root file; corrupt 
 	expect(readRchSocketBaseline(join(root, "absent-dir"))).toBeNull();
 });
 
+test("rch: only a recording diagnose writes the socket baseline; a read-only one still compares it and never rewrites it", async () => {
+	const dir = ownedFixture("rch-ino-flag");
+	const sock = join(dir, "rch.sock"), bin = join(dir, "bin"), home = join(dir, "home"), state = join(dir, "state");
+	const baselineFile = join(state, "rch-socket-ino.json");
+	mkdirSync(bin);
+	mkdirSync(home);
+	// Fixture rch, daemon-pid lookups and lsof name a daemon holding the real socket below; the host rchd is never consulted.
+	const fakes: Record<string, string> = {
+		rch: `[ "$*" = "--json daemon status" ] || exit 1\nprintf '%s\\n' '${JSON.stringify({ data: { running: true, socket_path: sock } })}'`,
+		launchctl: "echo 'pid = 424242'",
+		pgrep: "echo 424242",
+		lsof: `printf 'p424242\\nn%s\\n' '${sock}'`,
+	};
+	for (const [name, body] of Object.entries(fakes)) {
+		writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
+		chmodSync(join(bin, name), 0o755);
+	}
+	const server = await unixListener(sock);
+	try {
+		const ino = lstatSync(sock).ino;
+		const rch = async (recordRchBaseline: boolean) => finding(await withEnvironment({ PATH: bin, HOME: home },
+			() => diagnoseNative({ root: dir, home, scope: "rch", stateRoot: state, recordRchBaseline })), "rch");
+		expect(await rch(false)).toMatchObject({ status: "OK", evidence: { state: "RUNNING", ino, baseline: "absent" } });
+		expect(readdirSync(dir)).not.toContain("state");
+		expect(await rch(true)).toMatchObject({ status: "OK", evidence: { state: "RUNNING", ino, baseline: "recorded" } });
+		expect(readRchSocketBaseline(state)).toMatchObject({ path: sock, ino });
+		const replaced: RchSocketBaseline = { path: sock, ino: ino + 1, at: new Date().toISOString() };
+		expect(writeRchSocketBaseline(state, replaced)).toBe(true);
+		const planted = readFileSync(baselineFile);
+		expect(await rch(false)).toMatchObject({ status: "FAIL", evidence: { state: "SOCKET_UNLINKED", ino, expected_ino: ino + 1 } });
+		expect(readFileSync(baselineFile)).toEqual(planted);
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
+});
+
 test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERIFIED", async () => {
 	const sock = join(ownedFixture("rch-absent"), "rch-absent.sock");
 	const stopped = inspectRchReachability(rchDeps(sock, { daemon: () => ({ running: false, socketPath: sock }) }));

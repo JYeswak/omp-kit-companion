@@ -44,6 +44,8 @@ export interface DiagnoseInput {
 	jsmPath?: string;
 	/** Private kit state root; defaults to $XDG_STATE_HOME/omp-kit or ~/.local/state/omp-kit. */
 	stateRoot?: string;
+	/** Doctor only: persist the rch socket inode baseline on a healthy read. Off, an existing baseline is still read and compared, never written. */
+	recordRchBaseline?: boolean;
 	/** GitHub billing probe; when present the actions-billing finding is included. */
 	actionsBilling?: ActionsBillingProbe | null;
 }
@@ -1593,7 +1595,7 @@ export interface RchReachabilityDeps {
 	statSocket(path: string): { kind: "socket" | "other" | "missing"; ino: number | null };
 	/** Baseline of the socket inode from the last healthy read; absent without a state-backed store (legacy path-existence checks apply). */
 	readSocketBaseline?: () => RchSocketBaseline | null;
-	/** Persist the baseline after a healthy read; write failures never fail the finding. */
+	/** Persist the baseline after a healthy read; write failures never fail the finding. Absent beside a reader, the baseline is compared but never written. */
 	recordSocketBaseline?: (baseline: RchSocketBaseline) => void;
 	/** Clock for baseline timestamps; defaults to Date.now. */
 	now?: () => number;
@@ -1666,7 +1668,7 @@ export function rchSocketBaselineStore(stateRoot: string, clock: () => number = 
 
 type RchSocketView = { kind: "socket" | "other" | "missing"; ino: number | null };
 
-function inspectRchSocketIno(input: { path: string; pid: number; bound: boolean; stat: RchSocketView; restore: string; baseline: RchSocketBaseline | null; record: (baseline: RchSocketBaseline) => void; now: () => number }): Finding {
+function inspectRchSocketIno(input: { path: string; pid: number; bound: boolean; stat: RchSocketView; restore: string; baseline: RchSocketBaseline | null; record: ((baseline: RchSocketBaseline) => void) | undefined; now: () => number }): Finding {
 	const base = { socket_path: input.path };
 	const fresh = input.baseline !== null && input.baseline.path === input.path &&
 		Number.isFinite(input.baseline.ino) && !Number.isNaN(Date.parse(input.baseline.at)) &&
@@ -1693,6 +1695,10 @@ function inspectRchSocketIno(input: { path: string; pid: number; bound: boolean;
 			input.restore, { ...base, state: "SOCKET_UNLINKED", pid: input.pid, ino: input.stat.ino });
 	}
 	if (baseline === null) {
+		if (!input.record) {
+			return finding("rch", "OK", `rchd pid ${input.pid} is reachable on ${input.path}; no current socket inode baseline (omp-kit doctor records one)`,
+				"No action required.", { ...base, state: "RUNNING", pid: input.pid, ino: input.stat.ino, baseline: "absent" });
+		}
 		input.record({ path: input.path, ino: input.stat.ino, at: new Date(input.now()).toISOString() });
 		return finding("rch", "OK", `rchd pid ${input.pid} is reachable on ${input.path}; socket inode baseline just taken (ino ${input.stat.ino})`,
 			"No action required.", { ...base, state: "RUNNING", pid: input.pid, ino: input.stat.ino, baseline: "recorded" });
@@ -1729,9 +1735,9 @@ export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
 	const bound = held.includes(path);
 	const stat = deps.statSocket(path);
 	const restore = rchRestoreAdvice(deps.platform, deps.uid);
-	const readBaseline = deps.readSocketBaseline, recordBaseline = deps.recordSocketBaseline;
-	if (readBaseline && recordBaseline) {
-		return inspectRchSocketIno({ path, pid, bound, stat, restore, baseline: readBaseline(), record: recordBaseline, now: deps.now ?? Date.now });
+	const readBaseline = deps.readSocketBaseline;
+	if (readBaseline) {
+		return inspectRchSocketIno({ path, pid, bound, stat, restore, baseline: readBaseline(), record: deps.recordSocketBaseline, now: deps.now ?? Date.now });
 	}
 	if (stat.kind === "missing" && bound) {
 		return finding("rch", "FAIL", `rchd pid ${pid} is alive and holds ${path}, but the path is missing: the socket was unlinked under the live daemon`,
@@ -2066,7 +2072,9 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	const scoped = Boolean(input.scope);
 	const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
 	if (wants("rch")) {
-		const rchDeps: RchReachabilityDeps = { ...defaultRchReachability(), ...rchSocketBaselineStore(stateRoot) };
+		// Only the doctor records the socket baseline (docs/rch-lease.md); status, repair plans and plain test compare against it without writing.
+		const { recordSocketBaseline, ...baselineReader } = rchSocketBaselineStore(stateRoot);
+		const rchDeps: RchReachabilityDeps = { ...defaultRchReachability(), ...baselineReader, ...(input.recordRchBaseline ? { recordSocketBaseline } : {}) };
 		const rch = inspectRchReachability(rchDeps);
 		// Fleet tools are judged only where they exist: an unscoped inventory omits an rch that is not installed, while an explicit rch scope still reports it.
 		if (scoped || rch.evidence?.state !== "RCH_UNAVAILABLE") rows.push(rch);

@@ -275,8 +275,9 @@ test("compiled named repair plans without consent, applies once, and undoes exac
 	});
 	expect(build.exitCode, build.stderr.toString()).toBe(0);
 	const run = (args: string[], extraEnv: Record<string, string> = {}) => {
+		// Host omp and rch stay off PATH: a compiled host omp would fetch its OMP source cache into the fixture HOME, and rules repair needs neither.
 		const result = Bun.spawnSync([binary, ...args, "--json"], {
-			cwd: f.workspace, env: { ...process.env, HOME: f.home, XDG_STATE_HOME: f.workspace, ...extraEnv },
+			cwd: f.workspace, env: { ...process.env, HOME: f.home, XDG_STATE_HOME: f.workspace, PATH: "/usr/bin:/bin", ...extraEnv },
 			stdout: "pipe", stderr: "pipe",
 		});
 		return { code: result.exitCode, envelope: JSON.parse(result.stdout.toString()) };
