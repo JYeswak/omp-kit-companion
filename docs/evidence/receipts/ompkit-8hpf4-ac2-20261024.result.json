@@ -1,7 +1,7 @@
 {
  "authority": "test",
  "confidence": "observed",
- "evidence_id": "ev_f1cb44bf6372d1b90d744b7fcd02f9c7153f1b5d7eb010dc52825e775c6bd0c2",
+ "evidence_id": "ev_e86356ef723f79177dea9df710776be965bcd66c156aec53254f60678e34bb81",
  "limitations": [
   "Pre-publication working-tree replay. Direct full-suite attempt exited 75; published-origin non-author verification and the native publication gate remain separate."
  ],
@@ -12,7 +12,7 @@
  },
  "producer": "TurquoiseSummit/Bun test and tempsafe_check",
  "result_ref": {
-  "bytes": 8396,
-  "sha256": "4260ec21ce53c617e6e6c241859ef59582e33837c8d700b6d8e05933c3cd2b48"
+  "bytes": 8467,
+  "sha256": "f599cac9b64c2aa8cc6ced5226f3911255b0d02bfaab966c3d88b583f058fbf2"
  }
 }
