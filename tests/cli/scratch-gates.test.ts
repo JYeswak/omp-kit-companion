@@ -9,6 +9,7 @@ import {
   applyQuarantineExpiry,
   defaultLiveness,
   disposalGate,
+  parseOwnerFileEx,
   quarantineDir,
   quarantineEntryFor,
   reapLogPath,
@@ -86,14 +87,18 @@ test("disposalGate charges only exact caller ownership and excludes live owners"
   process.env.OMP_KIT_SCRATCH_ROOTS = root;
   process.env.XDG_STATE_HOME = join(home, "state");
   mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+  // Real owner format (created_at with process_start and argv0). A `created=` key here made every record unparseable,
+  // so the live dirs were dropped as malformed and the case passed with the fix reverted (ompkit-6prv0).
   const liveOwner = (pid: number, label: string, agent: string) =>
-    `pid=${pid}\nprocess_start=Mon Oct  5 13:27:00 2026\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-20T05:00:00Z\nargv0=test\nagent=${agent}\nsession=${SESSION}\n`;
+    `pid=${pid}\nprocess_start=Mon Oct  5 13:27:00 2026\nlabel=${label}\nrepo=${repo}\ncreated_at=2026-10-20T05:00:00Z\nargv0=test\nagent=${agent}\nsession=${SESSION}\n`;
   for (const [name, text] of [
     ["parent.61002", liveOwner(61002, "parent", "ParentSeat")],
+    ["parent-live-2.61008", liveOwner(61008, "parent-live-2", "ParentSeat")],
+    ["parent-live-3.61007", liveOwner(61007, "parent-live-3", "ParentSeat")],
     ["sibling.61003", liveOwner(61003, "sibling", "SiblingSeat")],
     ["child-live.61006", liveOwner(61006, "child-live", "ChildSeat")],
-    ["parent-live-3.61007", liveOwner(61007, "parent-live-3", "ParentSeat")],
   ] as const) {
+    expect(parseOwnerFileEx(text).failure).toBeUndefined();
     const dir = join(root, name);
     mkdirSync(dir);
     writeFileSync(join(dir, ".owner"), text);
@@ -108,8 +113,8 @@ test("disposalGate charges only exact caller ownership and excludes live owners"
   };
   const caller: InspectDeps = { ...inspect(seat("ChildSeat", [SESSION])), liveness: live };
   const childClean = disposalGate(home, "review", caller, NOW);
+  expect(childClean.owed.map(row => row.label)).toEqual([]);   // first, so a failure names the dirs wrongly charged
   expect(childClean.decision).toBe("ok");
-  expect(childClean.owed).toEqual([]);
   const own = join(root, "own.61004");
   mkdirSync(own);
   writeFileSync(join(own, ".owner"), owner(process.pid, "own"));
@@ -122,6 +127,54 @@ test("disposalGate charges only exact caller ownership and excludes live owners"
   expect(parentGate.decision).toBe("refuse");
   expect(parentGate.owed.map(row => row.label)).toEqual(["own", "parent-own"]);
   expect(gate.owed.map(row => row.label)).toEqual(["own"]);
+});
+
+test("a parent seat's 3 live dirs, reached by pid ancestry, are never charged to the child; the child's own dir is", () => {
+  // SCRATCHGATE-PARALLEL1 AC1 (ompkit-z31zh). The defect it fixed: the gate charged every dir whose owner pid was an
+  // ancestor of the caller, so a child agent could not hand off while its parent seat ran live graders.
+  const root = ownedTmp("gates-ancestry", { root: scratchParent }).path;
+  const home = ownedTmp("gates-ancestry-home", { root: scratchParent }).path;
+  cleanup.push(root, home);
+  process.env.OMP_KIT_SCRATCH_ROOTS = root;
+  process.env.XDG_STATE_HOME = join(home, "state");
+  mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+  const START = "Mon Oct  5 13:27:00 2026";
+  const ownerAt = (pid: number, label: string, agent: string) =>
+    `pid=${pid}\nprocess_start=${START}\nlabel=${label}\nrepo=${repo}\ncreated_at=2026-10-20T05:00:00Z\nargv0=test\nagent=${agent}\nsession=${SESSION}\n`;
+  // The process table: this test process -> 71003 -> 71002 (the parent seat) -> 71001 -> 1.
+  const psTable = `${process.pid} 71003\n71003 71002\n71002 71001\n71001 1\n`;
+  for (const [name, text] of [
+    ["parent-live-1.71002", ownerAt(71002, "parent-live-1", "ParentSeat")],
+    ["parent-live-2.71002", ownerAt(71002, "parent-live-2", "ParentSeat")],
+    ["parent-live-3.71002", ownerAt(71002, "parent-live-3", "ParentSeat")],
+    ["sibling-live.71004", ownerAt(71004, "sibling-live", "SiblingSeat")],
+  ] as const) {
+    expect(parseOwnerFileEx(text).failure).toBeUndefined();
+    mkdirSync(join(root, name));
+    writeFileSync(join(root, name, ".owner"), text);
+  }
+  const live: LivenessDeps = {
+    signalAlive: (pid) => pid !== process.pid,
+    psVisible: (pid) => pid !== process.pid,
+    processStart: (pid) => pid === process.pid ? "Thu Jan  1 00:00:00 1970" : START,
+    probe: (owner) => ({ state: owner.pid === process.pid ? "dead" : "live",
+      evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: null, reason: "planted" } }),
+  };
+  const caller: InspectDeps = {
+    liveness: live, now: NOW, callerSeat: seat("ChildSeat", [SESSION]),
+    run: (args) => args[0] === "ps" ? { code: 0, stdout: psTable, stderr: "" } : { code: 1, stdout: "", stderr: "" },
+  };
+  const childClean = disposalGate(home, "review", caller, NOW);
+  expect(childClean.owed.map(row => row.label)).toEqual([]);   // first, so a failure names the dirs wrongly charged
+  expect(childClean.decision).toBe("ok");
+  // Control: the child's own finished dir (its pid, no live process) is still owed.
+  const own = join(root, "child-own.71005");
+  mkdirSync(own);
+  const ownText = owner(process.pid, "child-own", `agent=ChildSeat\nsession=${SESSION}\n`);
+  writeFileSync(join(own, ".owner"), ownText);
+  const gate = disposalGate(home, "review", caller, NOW);
+  expect(gate.decision).toBe("refuse");
+  expect(gate.owed.map(row => row.label)).toEqual(["child-own"]);
 });
 
 test("disposalGate is fail-open when the ownership census cannot be listed: never a block, nothing logged", () => {
