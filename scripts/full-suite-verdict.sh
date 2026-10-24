@@ -406,6 +406,9 @@ py_red=$(grep -c '^RED python-suite ' "$SUITE_STATUS" 2>/dev/null || true)
 suite_set() { awk -v k="$1" '($1 == "GREEN" || $1 == "RED") && $2 == k { print $3 }' "$SUITE_STATUS" 2>/dev/null | sort; }
 want_set() { for s in $1; do [ -n "$s" ] && echo "$s"; done | sort; }
 complete=1
+# The suite subshell exits only 0 or 1 ("$failed", or 1 when it cannot set up). Any other status means
+# it was killed, so its status lines may not cover every suite it would have run: incomplete.
+case "$suite_rc" in 0|1) ;; *) complete=0 ;; esac
 if [ "$bun_count" -eq 0 ] 2>/dev/null; then
 	[ "$bun_status" -eq 0 ] 2>/dev/null || complete=0
 elif [ "$bun_count" -gt 0 ] 2>/dev/null && [ "$bun_ran" -gt 0 ] 2>/dev/null && [ "$bun_status" -eq 1 ] 2>/dev/null; then

@@ -94,6 +94,28 @@ else
 	not_ok "a suite started with SIGINT not at its default (rc=$rc)"; cat "$out"
 fi
 
+# A runner killed mid-run is incomplete even when the status file happens to name every suite: here
+# the first suite writes status lines for both suites (FORGE_DIR models a suite that finds the cache)
+# and SIGKILLs the runner, so the second suite never runs (Lrbd7Verify's negative 2).
+mkrepo_begin forged
+# shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
+addfile tests/cli/a.test.sh 'for f in "$FORGE_DIR"/*.running.log.status; do
+	[ -f "$f" ] && printf "GREEN script-suite tests/cli/a.test.sh\nGREEN script-suite tests/cli/b.test.sh\n" >>"$f"
+done
+kill -9 "$PPID"'
+addfile tests/cli/b.test.sh 'echo "FULLSUITE-B ran"'
+mkrepo_commit
+mkdir -p "$repo.cache"
+FORGE_DIR="$repo.cache"; export FORGE_DIR
+run_verdict forged
+unset FORGE_DIR
+cache="$repo.cache"
+if [ "$rc" -ne 0 ] && grep -F 'without complete evidence' "$out" >/dev/null && [ ! -e "$cache/$tree.json" ]; then
+	ok "a killed runner is incomplete even when the status lines name every suite"
+else
+	not_ok "a killed runner's forged status lines were taken as complete (rc=$rc)"; cat "$out"
+fi
+
 # (a) Nested markers: a shell suite that itself prints the runner's marker lines (as a nested
 # fresh-gate or bun fixture inside a test does) and exits 0. They must not count: complete PASS.
 mkrepo_begin nested
