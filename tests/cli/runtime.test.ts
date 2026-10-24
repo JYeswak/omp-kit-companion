@@ -120,6 +120,14 @@ describe("runtime-adapter --validate-work-root", () => {
 		const root = canonicalScratch(REPO_ROOT);
 		expect(readFileSync(join(root, ".owner"), "utf8").trimStart().startsWith("{")).toBe(true);
 		expect(await validateWorkRoot(root, REPO_ROOT)).toEqual({ code: 0, stdout: `${root}\n`, stderr: "" });
+		// A value that spells "repo" is a value, not a key: `omp-kit scratch new --label repo` writes exactly this,
+		// and string values may hold JSON punctuation. Indented JSON reads the same.
+		for (const indent of [undefined, 2]) {
+			const labeled = canonicalScratch(REPO_ROOT);
+			const base = JSON.parse(readFileSync(join(labeled, ".owner"), "utf8")) as Record<string, unknown>;
+			writeFileSync(join(labeled, ".owner"), JSON.stringify({ ...base, label: "repo", note: "a,b}:c{" }, null, indent));
+			expect(await validateWorkRoot(labeled, REPO_ROOT)).toEqual({ code: 0, stdout: `${labeled}\n`, stderr: "" });
+		}
 	});
 
 	test("refuses a JSON owner naming another repo, two repo values, a symlinked owner, or a dir outside var/agent-tmp", async () => {
@@ -157,6 +165,19 @@ describe("runtime-adapter --validate-work-root", () => {
 		const valueTokenCase = await validateWorkRoot(valueToken, REPO_ROOT);
 		expect(valueTokenCase.code).not.toBe(0);
 		expect(valueTokenCase.stderr).toContain(mismatch);
+		// Shapes outside one flat object with a string repo value are refused: a nested repo object, text after
+		// the closing brace, and a repo key whose value is not a string.
+		for (const body of [
+			`{"pid":${process.pid},"repo":{"path":${JSON.stringify(REPO_ROOT)}}}`,
+			`${JSON.stringify({ ...owner, repo: REPO_ROOT })} trailing`,
+			`{"pid":${process.pid},"repo":1,"label":${JSON.stringify(REPO_ROOT)}}`,
+		]) {
+			const shaped = canonicalScratch(REPO_ROOT);
+			writeFileSync(join(shaped, ".owner"), body);
+			const shapedCase = await validateWorkRoot(shaped, REPO_ROOT);
+			expect(shapedCase.code).not.toBe(0);
+			expect(shapedCase.stderr).toContain(mismatch);
+		}
 		const linked = canonicalScratch(REPO_ROOT);
 		const target = join(linked, "owner-target");
 		writeFileSync(target, readFileSync(join(linked, ".owner")));

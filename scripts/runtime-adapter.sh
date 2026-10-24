@@ -59,6 +59,45 @@ same_uid() {
   [ "$file_uid" = "$(/usr/bin/id -u)" ]
 }
 
+# owner_json_repo BODY: scan a flat one-level JSON object, as `omp-kit scratch new` writes it, key by key.
+# Sets repo_count to the number of "repo" keys and marker_repo to the last one's string value; any shape
+# outside that grammar (nesting, a backslash escape, a value where a key belongs, trailing text) returns 1
+# so the caller refuses. Values are never mistaken for keys: `"label":"repo"` is a label.
+owner_json_repo() {
+  repo_count=0; marker_repo=
+  json_rest=${1#\{}
+  while :; do
+    json_rest=${json_rest#"${json_rest%%[![:space:]]*}"}
+    case "$json_rest" in '}'*) break ;; '"'*) json_rest=${json_rest#\"} ;; *) return 1 ;; esac
+    case "$json_rest" in *'"'*) ;; *) return 1 ;; esac
+    json_key=${json_rest%%\"*}; json_rest=${json_rest#*\"}
+    json_rest=${json_rest#"${json_rest%%[![:space:]]*}"}
+    case "$json_rest" in :*) json_rest=${json_rest#:} ;; *) return 1 ;; esac
+    json_rest=${json_rest#"${json_rest%%[![:space:]]*}"}
+    case "$json_rest" in
+      '"'*)
+        json_rest=${json_rest#\"}
+        case "$json_rest" in *'"'*) ;; *) return 1 ;; esac
+        json_value=${json_rest%%\"*}; json_rest=${json_rest#*\"}; json_string=1 ;;
+      *)
+        json_value=${json_rest%%[,\}]*}
+        json_rest=${json_rest#"$json_value"}
+        json_value=${json_value%"${json_value##*[![:space:]]}"}
+        [ -n "$json_value" ] || return 1
+        json_string=0 ;;
+    esac
+    if [ "$json_key" = repo ]; then
+      repo_count=$((repo_count + 1))
+      if [ "$json_string" = 1 ]; then marker_repo=$json_value; else marker_repo=; fi
+    fi
+    json_rest=${json_rest#"${json_rest%%[![:space:]]*}"}
+    case "$json_rest" in ,*) json_rest=${json_rest#,} ;; '}'*) ;; *) return 1 ;; esac
+  done
+  json_rest=${json_rest#\}}
+  json_rest=${json_rest#"${json_rest%%[![:space:]]*}"}
+  [ -z "$json_rest" ]
+}
+
 validate_work_root() {
   case "${OMP_KIT_TEST_WORK_ROOT:-}" in /*) ;; *) die "OMP_KIT_TEST_WORK_ROOT must be absolute" ;; esac
   case "${OMP_KIT_CASE_CWD:-}" in /*) ;; *) die "OMP_KIT_CASE_CWD must be an absolute caller workspace" ;; esac
@@ -81,28 +120,11 @@ validate_work_root() {
   marker_body=${marker_text#"${marker_text%%[![:space:]]*}"}
   case "$marker_body" in
     '{'*)
-      # JSON form, as `omp-kit scratch new` writes it: one flat object, one "repo" key, an absolute string value.
-      # A backslash, a second brace or a second "repo" token is refused rather than decoded (fail closed).
+      # JSON form, as `omp-kit scratch new` writes it: one flat object with exactly one "repo" key whose string
+      # value is the caller. Escapes are never decoded, so any backslash is refused (fail closed).
       case "$marker_body" in
-        *'\'*|'{'*'{'*|*'}'*'}'*) repo_count=0 ;;
-        *)
-          repo_rest=$marker_body
-          while :; do
-            case "$repo_rest" in *'"repo"'*) repo_count=$((repo_count + 1)); repo_rest=${repo_rest#*'"repo"'} ;; *) break ;; esac
-          done
-          if [ "$repo_count" = 1 ]; then
-            # The token must sit in key position: only `{` or `,` (then optional space) may precede it, so a
-            # malformed `"label":"repo":"/x"` (token as a value) is refused.
-            repo_key_prefix=${marker_body%%'"repo"'*}
-            repo_key_prefix=${repo_key_prefix%"${repo_key_prefix##*[![:space:]]}"}
-            case "$repo_key_prefix" in *'{'|*',') ;; *) repo_count=0 ;; esac
-            repo_rest=${marker_body#*'"repo"'}
-            repo_rest=${repo_rest#"${repo_rest%%[![:space:]]*}"}
-            case "$repo_rest" in :*) repo_rest=${repo_rest#:} ;; *) repo_count=0 ;; esac
-            repo_rest=${repo_rest#"${repo_rest%%[![:space:]]*}"}
-            case "$repo_rest" in '"/'*'"'*) repo_rest=${repo_rest#\"}; marker_repo=${repo_rest%%\"*} ;; *) repo_count=0 ;; esac
-          fi
-          ;;
+        *\\*) repo_count=0 ;;
+        *) owner_json_repo "$marker_body" || repo_count=0 ;;
       esac
       ;;
     *)
