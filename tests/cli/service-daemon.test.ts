@@ -2,9 +2,10 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { daemonLiveness, KNOWN_JOBS, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveOperatorCommand, serviceLabel, type ServiceJobDef } from "../../src/service.ts";
-import { CC_SERVICE_HOST, CC_SERVICE_PORT, ccServiceCommand } from "../../src/service.ts";
+import { CC_BOOT_SOURCE, CC_SERVICE_HOST, CC_SERVICE_PORT, ccServiceCommand } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { acquireDaemonLock, DAEMON_HELD_EXIT } from "../../src/service-run.ts";
+import { runSync } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const AGENT_TMP = join(import.meta.dir, "../../var/agent-tmp");
@@ -55,6 +56,12 @@ function fixtureFleetRoot(): string {
 	roots.push(root);
 	mkdirSync(join(root, "scripts", "cc"), { recursive: true });
 	writeFileSync(join(root, "scripts", "cc", "cc.py"), "#!/usr/bin/env python3\n", { mode: 0o755 });
+	// DEPLOYBOOT2: `service run cc` runs HEAD's committed cc.py, so the stub is committed.
+	const gitEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+	for (const args of [["init", "-q"], ["add", "scripts/cc/cc.py"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "stub"]]) {
+		const r = runSync(["git", ...args], { deadline_s: 30, cwd: root, env: gitEnv });
+		if (r.rc !== 0) throw new Error(`git ${args.join(" ")}: ${new TextDecoder().decode(r.stderr)}`);
+	}
 	return root;
 }
 function cli(args: string[], home: string, ns: string, extraEnv: Record<string, string> = {}) {
@@ -146,7 +153,7 @@ test("run_cc_resolves_fleet_root", () => {
 	const root = fixtureFleetRoot();
 	const adapter = join(root, "scripts", "cc", "cc.py");
 	const cmd = ccServiceCommand(home, adapter);
-	expect(cmd.argv).toEqual(["python3", adapter, "serve", "--host", "127.0.0.1", "--port", "7474", "--lanes"]);
+	expect(cmd.argv).toEqual(["python3", "-c", CC_BOOT_SOURCE, adapter, "serve", "--host", "127.0.0.1", "--port", "7474", "--lanes"]);
 	expect(CC_SERVICE_HOST).toBe("127.0.0.1");
 	expect(CC_SERVICE_PORT).toBe(7474);
 	expect(cmd.env.CC_STATE).toBe(join(home, ".local", "state", "omp-kit", "cc"));

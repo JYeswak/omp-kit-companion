@@ -317,9 +317,39 @@ export function resolveFleetAdapter(home: string, adapterRel: string = CC_SERVIC
 export const CC_SERVICE_HOST = "127.0.0.1";
 export const CC_SERVICE_PORT = 7474;
 export interface CcServiceCommand { argv: string[]; env: { CC_STATE: string } }
+/**
+ * DEPLOYBOOT2 (fp72.120.16.53): the cc job runs HEAD's committed
+ * scripts/cc/cc.py, never the working-tree file, so an uncommitted syntax
+ * error cannot stop the service start. Stdlib and git only: the checkout is
+ * parents[2] of the adapter and must be its own git top level, else exit 3.
+ */
+export const CC_BOOT_SOURCE = [
+	"import json, os, subprocess, sys, types",
+	"from pathlib import Path",
+	"adapter = sys.argv[1]",
+	"args = sys.argv[2:]",
+	"checkout = Path(adapter).parents[2]",
+	"def git(*a):",
+	"    return subprocess.run(['git', '-C', str(checkout), *a], capture_output=True, timeout=30, check=True).stdout",
+	"try:",
+	"    top = git('rev-parse', '--show-toplevel').decode().strip()",
+	"    if os.path.realpath(top) != os.path.realpath(str(checkout)):",
+	"        raise RuntimeError('checkout is not its own git top level')",
+	"    commit = git('rev-parse', '--verify', 'HEAD^{commit}').decode().strip()",
+	"    source = git('show', commit + ':scripts/cc/cc.py')",
+	"except Exception:",
+	"    print(json.dumps({'schema_version': 'omp-kit.cc.cli.v1', 'ok': False, 'error': 'DEPLOY_BOOT_GIT_FAILED'}))",
+	"    sys.exit(3)",
+	"sys.argv = [adapter, *args]",
+	"code = compile(source, 'git:' + commit + ':scripts/cc/cc.py', 'exec')",
+	"main = types.ModuleType('__main__')",
+	"main.__file__ = adapter",
+	"sys.modules['__main__'] = main",
+	"exec(code, main.__dict__)",
+].join("\n");
 export function ccServiceCommand(home: string, adapter: string): CcServiceCommand {
 	return {
-		argv: ["python3", adapter, "serve", "--host", CC_SERVICE_HOST, "--port", String(CC_SERVICE_PORT), "--lanes"],
+		argv: ["python3", "-c", CC_BOOT_SOURCE, adapter, "serve", "--host", CC_SERVICE_HOST, "--port", String(CC_SERVICE_PORT), "--lanes"],
 		env: { CC_STATE: ccStateDir(home) },
 	};
 }
