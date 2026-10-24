@@ -262,7 +262,24 @@ if [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ] && [ -f "$ARCHIVE_DIR/scripts/build-mani
 fi
 
 SUITE_OUT="$CACHE_DIR/$tree.running.log"
-: >"$SUITE_OUT" || { cleanup_archive; fail "cannot write suite evidence"; exit 1; }
+# The runner's own facts, written only by run_suite (never by a suite): one line per shell and
+# python suite plus the bun phase's exit code. Bun's output is kept apart so its summary is
+# parsed from the bun phase alone. Nested gate runs inside tests print the same marker lines
+# into the shared log; they must not count (FULLSUITECOUNT1, ompkit-lrbd.7).
+SUITE_STATUS="$SUITE_OUT.status"
+BUN_OUT="$SUITE_OUT.bun"
+rm -f "$SUITE_STATUS" "$BUN_OUT"
+if ! : >"$SUITE_OUT" || ! : >"$SUITE_STATUS"; then cleanup_archive; fail "cannot write suite evidence"; exit 1; fi
+# finish_logs DEST: move the log to DEST and drop the runner-private side files. A bun phase that
+# never finished (timeout, killed runner) has its partial output only in $BUN_OUT; append it first
+# so the kept log still shows how far bun got (lrbd.6 AC1).
+finish_logs() {
+	if [ -f "$BUN_OUT" ] && ! grep -q '^BUN rc=' "$SUITE_STATUS" 2>/dev/null; then
+		{ echo "full-suite: the bun phase did not finish; its partial output follows"; cat "$BUN_OUT"; } >>"$SUITE_OUT"
+	fi
+	mv -f "$SUITE_OUT" "$1"
+	rm -f "$SUITE_STATUS" "$BUN_OUT"
+}
 
 # One deadline for the whole suite: every phase runs to completion and appends to the evidence
 # log, so a failing suite yields a complete FAIL record (cached RED) instead of an incomplete run.
@@ -290,17 +307,29 @@ run_suite() {
 		fi
 		failed=0
 		if [ "$bun_count" -gt 0 ]; then
+			bun_rc=0
 			if [ -n "$bun_config" ]; then
-				nice -n 10 bun "$bun_config" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun || failed=1
+				nice -n 10 bun "$bun_config" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun >"$BUN_OUT" 2>&1 || bun_rc=$?
 			else
-				nice -n 10 bun test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun || failed=1
+				nice -n 10 bun test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun >"$BUN_OUT" 2>&1 || bun_rc=$?
 			fi
+			cat "$BUN_OUT"
+			echo "BUN rc=$bun_rc" >>"$SUITE_STATUS"
+			[ "$bun_rc" -eq 0 ] || failed=1
 		fi
 		for suite in $kept_shell; do
-			if sh "$suite"; then echo "GREEN script-suite $suite"; else echo "RED script-suite $suite rc=$?"; failed=1; fi
+			if sh "$suite"; then
+				echo "GREEN script-suite $suite"; echo "GREEN script-suite $suite" >>"$SUITE_STATUS"
+			else
+				src=$?; echo "RED script-suite $suite rc=$src"; echo "RED script-suite $suite" >>"$SUITE_STATUS"; failed=1
+			fi
 		done
 		for suite in $kept_py; do
-			if python3 "$suite"; then echo "GREEN python-suite $suite"; else echo "RED python-suite $suite rc=$?"; failed=1; fi
+			if python3 "$suite"; then
+				echo "GREEN python-suite $suite"; echo "GREEN python-suite $suite" >>"$SUITE_STATUS"
+			else
+				src=$?; echo "RED python-suite $suite rc=$src"; echo "RED python-suite $suite" >>"$SUITE_STATUS"; failed=1
+			fi
 		done
 		exit "$failed"
 	) >>"$SUITE_OUT" 2>&1
@@ -337,40 +366,52 @@ if [ "$timed_out" = 0 ]; then
 	wait "$suite_pid" 2>/dev/null || suite_rc=$?
 fi
 if [ "$timed_out" = 1 ]; then
-	mv -f "$SUITE_OUT" "$CACHE_DIR/$tree.incomplete.log"
+	finish_logs "$CACHE_DIR/$tree.incomplete.log"
 	cleanup_archive
 	fail "full suite timed out after ${TIMEOUT_SECS}s; incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
 	exit 1
 fi
 
-# Completeness: bun's summary lines must account for the run. A suite process that died without
-# them is incomplete evidence: refuse, cache nothing.
-bun_ran=$(awk '$1 == "Ran" && ($3 == "test" || $3 == "tests") && $4 == "across" { print $2 }' "$SUITE_OUT" | tail -n 1)
-bun_fail=$(awk 'NF == 2 && $2 == "fail" { print $1 }' "$SUITE_OUT" | tail -n 1)
+# Completeness comes from the runner's own status file and the bun phase's own output, never from
+# marker lines in the shared log (tests that run nested gates print those too). Bun prints its own
+# final summary last, so the last match within the bun-only output is the real one. A suite process
+# that died without accounting for every enumerated suite is incomplete evidence: refuse, cache nothing.
+bun_ran=""; bun_fail=""
+if [ -f "$BUN_OUT" ]; then
+	bun_ran=$(awk '$1 == "Ran" && ($3 == "test" || $3 == "tests") && $4 == "across" { print $2 }' "$BUN_OUT" | tail -n 1)
+	bun_fail=$(awk 'NF == 2 && $2 == "fail" { print $1 }' "$BUN_OUT" | tail -n 1)
+fi
 bun_ran=${bun_ran:-0}
 bun_fail=${bun_fail:-0}
-shell_green=$(grep -c '^GREEN script-suite ' "$SUITE_OUT" 2>/dev/null || true)
-shell_red=$(grep -c '^RED script-suite ' "$SUITE_OUT" 2>/dev/null || true)
-py_green=$(grep -c '^GREEN python-suite ' "$SUITE_OUT" 2>/dev/null || true)
-py_red=$(grep -c '^RED python-suite ' "$SUITE_OUT" 2>/dev/null || true)
+bun_status=$(grep -c '^BUN rc=' "$SUITE_STATUS" 2>/dev/null || true)
+bun_status_rc=$(sed -n 's/^BUN rc=//p' "$SUITE_STATUS" 2>/dev/null | tail -n 1)
+shell_green=$(grep -c '^GREEN script-suite ' "$SUITE_STATUS" 2>/dev/null || true)
+shell_red=$(grep -c '^RED script-suite ' "$SUITE_STATUS" 2>/dev/null || true)
+py_green=$(grep -c '^GREEN python-suite ' "$SUITE_STATUS" 2>/dev/null || true)
+py_red=$(grep -c '^RED python-suite ' "$SUITE_STATUS" 2>/dev/null || true)
+# suite_set KIND: sorted suite paths the status file accounts for, one per line, duplicates kept.
+suite_set() { awk -v k="$1" '($1 == "GREEN" || $1 == "RED") && $2 == k { print $3 }' "$SUITE_STATUS" 2>/dev/null | sort; }
+want_set() { for s in $1; do [ -n "$s" ] && echo "$s"; done | sort; }
 complete=1
 if [ "$bun_count" -eq 0 ] 2>/dev/null; then
-	:
-elif [ "$bun_count" -gt 0 ] 2>/dev/null && [ "$bun_ran" -gt 0 ] 2>/dev/null; then
+	[ "$bun_status" -eq 0 ] 2>/dev/null || complete=0
+elif [ "$bun_count" -gt 0 ] 2>/dev/null && [ "$bun_ran" -gt 0 ] 2>/dev/null && [ "$bun_status" -eq 1 ] 2>/dev/null; then
 	:
 else
 	complete=0
 fi
 [ "$((shell_green + shell_red))" -eq "$shell_count" ] 2>/dev/null || complete=0
 [ "$((py_green + py_red))" -eq "$py_count" ] 2>/dev/null || complete=0
+[ "$(suite_set script-suite)" = "$(want_set "$kept_shell")" ] || complete=0
+[ "$(suite_set python-suite)" = "$(want_set "$kept_py")" ] || complete=0
 if [ "$complete" -ne 1 ]; then
-	mv -f "$SUITE_OUT" "$CACHE_DIR/$tree.incomplete.log"
+	finish_logs "$CACHE_DIR/$tree.incomplete.log"
 	cleanup_archive
 	fail "full suite ended without complete evidence (rc=$suite_rc bun_ran=$bun_ran shell=$shell_green/$shell_count python=$py_green/$py_count); incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
 	exit 1
 fi
 
-if [ "$suite_rc" -eq 0 ] && [ "$bun_fail" -eq 0 ] && [ "$shell_red" -eq 0 ] && [ "$py_red" -eq 0 ]; then
+if [ "$suite_rc" -eq 0 ] && [ "${bun_status_rc:-0}" = 0 ] && [ "$bun_fail" -eq 0 ] && [ "$shell_red" -eq 0 ] && [ "$py_red" -eq 0 ]; then
 	verdict=PASS
 	code=0
 else
@@ -380,7 +421,7 @@ else
 fi
 
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
-mv "$SUITE_OUT" "$CACHE_DIR/$tree.log"
+finish_logs "$CACHE_DIR/$tree.log"
 TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
 import hashlib, json, os
 log_digest = hashlib.sha256()
