@@ -5,7 +5,9 @@ import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
 import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
+import { createScratch, type LivenessDeps } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { run } from "../../src/kitlib/run.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const fixtures: string[] = [];
@@ -65,24 +67,100 @@ function snapshotTree(root: string): string {
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
+let canonicalScratchCount = 0;
+
+/** A scratch dir made by the canonical writer `omp-kit scratch new --json` uses (createScratch, JSON .owner), owned by `repo`. */
+function canonicalScratch(repo: string): string {
+	const scratch = join(repo, "var", "agent-tmp");
+	mkdirSync(scratch, { recursive: true, mode: 0o700 });
+	const ledger = ownedTmp("runtime-ledger", { root: scratch }).path;
+	fixtures.push(ledger);
+	const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
+	process.env.OMP_KIT_SCRATCH_ROOTS = scratch;
+	try {
+		const liveness = { signalAlive: () => false, psVisible: () => false, processStart: () => "Mon Oct 18 17:32:44 2026",
+			probe: () => { throw new Error("canonicalScratch never probes"); } } as unknown as LivenessDeps;
+		const created = createScratch(`runtime-tests-${canonicalScratchCount++}`, repo,
+			{ liveness, run: () => ({ code: 1, stdout: "", stderr: "" }), callerSeat: () => ({ agent: null, sessions: [], main: null }) },
+			{}, true, join(ledger, "scratch-budgets.json"));
+		if (!created.ok) throw new Error(`canonical scratch refused: ${created.reason} ${created.detail ?? ""}`);
+		fixtures.push(created.dir);
+		return realpathSync(created.dir);
+	} finally {
+		if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
+		else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
+	}
+}
+
 function ownedRuntimeFixture(): { base: string; admission: Record<"OMP_KIT_TEST_WORK_ROOT" | "OMP_KIT_CASE_CWD", string> } {
 	let root = process.env.OMP_KIT_TEST_WORK_ROOT;
 	let caller = process.env.OMP_KIT_CASE_CWD ?? REPO_ROOT;
 	if (!root) {
-		const scratch = join(REPO_ROOT, "var", "agent-tmp");
-		mkdirSync(scratch, { recursive: true, mode: 0o700 });
-		root = ownedTmp("runtime-tests", { root: scratch }).path;
-		fixtures.push(root);
+		// The adapter admits this root only when its .owner repo is exactly the caller workspace.
+		root = canonicalScratch(REPO_ROOT);
 		caller = REPO_ROOT;
-		// The adapter admits this root only when its .owner repo= is exactly the caller workspace.
-		writeFileSync(join(root, ".owner"),
-			`pid=${process.pid}\nlabel=runtime-tests\nrepo=${caller}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
 	}
 	// A kitlib name, omp-kit-runtime.<pid>.<6>, is the sandbox shape runtime-adapter.sh admits.
 	const base = ownedTmp("omp-kit-runtime", { root }).path;
 	fixtures.push(base);
 	return { base, admission: { OMP_KIT_TEST_WORK_ROOT: root, OMP_KIT_CASE_CWD: caller } };
 }
+
+async function validateWorkRoot(root: string, caller: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+	const result = await run(["sh", join(REPO_ROOT, "scripts", "runtime-adapter.sh"), "--validate-work-root"],
+		{ deadline_s: 30, cwd: REPO_ROOT, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", OMP_KIT_TEST_WORK_ROOT: root, OMP_KIT_CASE_CWD: caller } });
+	return { code: result.rc, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
+}
+
+// ompkit-774u.39 WORKROOTJSON1: the adapter admits the JSON .owner `omp-kit scratch new` writes and refuses ambiguity.
+describe("runtime-adapter --validate-work-root", () => {
+	const mismatch = "OMP_KIT_TEST_WORK_ROOT .owner repo must match the caller workspace";
+
+	test("admits a canonical JSON-owner scratch dir owned by the caller", async () => {
+		const root = canonicalScratch(REPO_ROOT);
+		expect(readFileSync(join(root, ".owner"), "utf8").trimStart().startsWith("{")).toBe(true);
+		expect(await validateWorkRoot(root, REPO_ROOT)).toEqual({ code: 0, stdout: `${root}\n`, stderr: "" });
+	});
+
+	test("refuses a JSON owner naming another repo, two repo values, a symlinked owner, or a dir outside var/agent-tmp", async () => {
+		const other = fixtureRoot();
+		const foreign = canonicalScratch(other);
+		// A JSON owner naming another repo (its dir sits under that repo's var/agent-tmp, inside the caller's tree here).
+		const foreignCase = await validateWorkRoot(foreign, REPO_ROOT);
+		expect(foreignCase.code).not.toBe(0);
+		expect(foreignCase.stderr).toContain(mismatch);
+		// A dir outside the caller's var/agent-tmp, even with a well-formed owner.
+		const outsideCase = await validateWorkRoot(canonicalScratch(REPO_ROOT), other);
+		expect(outsideCase.code).not.toBe(0);
+		expect(outsideCase.stderr).toContain(`must resolve under ${other}/var/agent-tmp`);
+		// Foreign repo value inside the caller's own scratch tree.
+		const relabeled = canonicalScratch(REPO_ROOT);
+		const owner = JSON.parse(readFileSync(join(relabeled, ".owner"), "utf8")) as Record<string, unknown>;
+		writeFileSync(join(relabeled, ".owner"), JSON.stringify({ ...owner, repo: other }));
+		const relabeledCase = await validateWorkRoot(relabeled, REPO_ROOT);
+		expect(relabeledCase.code).not.toBe(0);
+		expect(relabeledCase.stdout).toBe("");
+		expect(relabeledCase.stderr).toContain(mismatch);
+		const doubled = canonicalScratch(REPO_ROOT);
+		const text = readFileSync(join(doubled, ".owner"), "utf8").trim();
+		writeFileSync(join(doubled, ".owner"), `${text.slice(0, -1)},"repo":${JSON.stringify(REPO_ROOT)}}`);
+		const doubledCase = await validateWorkRoot(doubled, REPO_ROOT);
+		expect(doubledCase.stderr).toContain(mismatch);
+		expect(doubledCase.code).not.toBe(0);
+		const escaped = canonicalScratch(REPO_ROOT);
+		// `\/` decodes to `/`, so the JSON names the caller, but the adapter reads only unescaped values exactly.
+		writeFileSync(join(escaped, ".owner"), JSON.stringify({ ...owner, repo: REPO_ROOT }).replace(`"repo":"/`, `"repo":"\\/`));
+		expect((await validateWorkRoot(escaped, REPO_ROOT)).stderr).toContain(mismatch);
+		const linked = canonicalScratch(REPO_ROOT);
+		const target = join(linked, "owner-target");
+		writeFileSync(target, readFileSync(join(linked, ".owner")));
+		rmSync(join(linked, ".owner"));
+		symlinkSync(target, join(linked, ".owner"));
+		const linkedCase = await validateWorkRoot(linked, REPO_ROOT);
+		expect(linkedCase.code).not.toBe(0);
+		expect(linkedCase.stderr).toContain("needs a regular nonsymlink .owner marker");
+	});
+});
 
 test("isolated children retain the logical workspace root for case path scopes", () => {
 	const identity = {

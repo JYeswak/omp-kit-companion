@@ -1,0 +1,3 @@
+### Fixed
+
+- `scripts/runtime-adapter.sh` now admits an `OMP_KIT_TEST_WORK_ROOT` made by `omp-kit scratch new` (ompkit-774u.39, WORKROOTJSON1). It used to accept only a line-form `.owner` (`repo=...`), so the JSON `.owner` every canonical scratch dir carries was refused. The adapter now reads the single `"repo"` value from a JSON `.owner` in plain POSIX sh and still refuses a foreign repo, two repo keys, a non-string or relative value, any backslash escape, a symlinked `.owner` and a dir outside `<repo>/var/agent-tmp`. The line form still works. `tests/cli/runtime.test.ts` makes its work roots with the canonical writer (`createScratch`, JSON owner) instead of a hand-written line `.owner`.

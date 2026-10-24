@@ -77,10 +77,36 @@ validate_work_root() {
   fi
   same_uid "$marker" || die "OMP_KIT_TEST_WORK_ROOT .owner must be owned by this user"
   marker_repo=; repo_count=0
-  while IFS= read -r owner_line || [ -n "$owner_line" ]; do
-    case "$owner_line" in repo=*) marker_repo=${owner_line#repo=}; repo_count=$((repo_count + 1)) ;; esac
-  done < "$marker"
-  if [ "$repo_count" != 1 ] || [ "$marker_repo" != "$caller_repo" ]; then
+  marker_text=$(/bin/cat -- "$marker") || die "OMP_KIT_TEST_WORK_ROOT .owner must be readable"
+  marker_body=${marker_text#"${marker_text%%[![:space:]]*}"}
+  case "$marker_body" in
+    '{'*)
+      # JSON form, as `omp-kit scratch new` writes it: one flat object, one "repo" key, an absolute string value.
+      # A backslash, a second brace or a second "repo" token is refused rather than decoded (fail closed).
+      case "$marker_body" in
+        *'\'*|'{'*'{'*|*'}'*'}'*) repo_count=0 ;;
+        *)
+          repo_rest=$marker_body
+          while :; do
+            case "$repo_rest" in *'"repo"'*) repo_count=$((repo_count + 1)); repo_rest=${repo_rest#*'"repo"'} ;; *) break ;; esac
+          done
+          if [ "$repo_count" = 1 ]; then
+            repo_rest=${marker_body#*'"repo"'}
+            repo_rest=${repo_rest#"${repo_rest%%[![:space:]]*}"}
+            case "$repo_rest" in :*) repo_rest=${repo_rest#:} ;; *) repo_count=0 ;; esac
+            repo_rest=${repo_rest#"${repo_rest%%[![:space:]]*}"}
+            case "$repo_rest" in '"/'*'"'*) repo_rest=${repo_rest#\"}; marker_repo=${repo_rest%%\"*} ;; *) repo_count=0 ;; esac
+          fi
+          ;;
+      esac
+      ;;
+    *)
+      while IFS= read -r owner_line || [ -n "$owner_line" ]; do
+        case "$owner_line" in repo=*) marker_repo=${owner_line#repo=}; repo_count=$((repo_count + 1)) ;; esac
+      done < "$marker"
+      ;;
+  esac
+  if [ "$repo_count" != 1 ] || [ -z "$marker_repo" ] || [ "$marker_repo" != "$caller_repo" ]; then
     die "OMP_KIT_TEST_WORK_ROOT .owner repo must match the caller workspace"
   fi
 }
