@@ -62,6 +62,12 @@ const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
 const scratch = mkdtempSync(join(scratchRoot, `private-index-land.${process.pid}.`));
 writeFileSync(join(scratch, ".owner"), `pid=${process.pid} label=private-index-land repo=${repoRoot} created=${new Date().toISOString()}\n`);
+// land's push-time scratch disposal gate scans the scratch roots for dirs the
+// caller owns. Every land run here reads this empty fixture root instead of the
+// real ~/Developer/*/var/agent-tmp roots, so a dir held by whoever runs the suite
+// (or a dead owner whose pid a land child reuses) cannot change a test's result.
+const landScratchRoot = join(scratch, "land-scratch-root");
+mkdirSync(landScratchRoot);
 let fixtureNumber = 0;
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -88,6 +94,7 @@ function command(cwd: string, args: string[], holds: unknown, options: {
 	delete env.GIT_INDEX_FILE;
 	Object.assign(env, options.gitEnv);
 	env.PATH = `${options.amDir}:${env.PATH ?? "/usr/bin:/bin"}`;
+	env.OMP_KIT_SCRATCH_ROOTS = landScratchRoot;
 
 	if (options.tmuxPane === null) delete env.TMUX_PANE;
 	else env.TMUX_PANE = options.tmuxPane ?? "%60";
