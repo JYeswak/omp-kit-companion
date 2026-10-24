@@ -83,7 +83,8 @@ owner_json_repo() {
         json_value=${json_rest%%[,\}]*}
         json_rest=${json_rest#"$json_value"}
         json_value=${json_value%"${json_value##*[![:space:]]}"}
-        [ -n "$json_value" ] || return 1
+        # A bare value is a scalar (number, true, false, null): a nested object or array is not this grammar.
+        case "$json_value" in ''|*[!0-9A-Za-z.+-]*) return 1 ;; esac
         json_string=0 ;;
     esac
     if [ "$json_key" = repo ]; then

@@ -166,11 +166,13 @@ describe("runtime-adapter --validate-work-root", () => {
 		expect(valueTokenCase.code).not.toBe(0);
 		expect(valueTokenCase.stderr).toContain(mismatch);
 		// Shapes outside one flat object with a string repo value are refused: a nested repo object, text after
-		// the closing brace, and a repo key whose value is not a string.
+		// the closing brace, a repo key whose value is not a string, and (Rt39Verify) an unclosed outer object
+		// whose only repo key sits in a nested object.
 		for (const body of [
 			`{"pid":${process.pid},"repo":{"path":${JSON.stringify(REPO_ROOT)}}}`,
 			`${JSON.stringify({ ...owner, repo: REPO_ROOT })} trailing`,
 			`{"pid":${process.pid},"repo":1,"label":${JSON.stringify(REPO_ROOT)}}`,
+			`{"a":{"b":1,"repo":${JSON.stringify(REPO_ROOT)}}`,
 		]) {
 			const shaped = canonicalScratch(REPO_ROOT);
 			writeFileSync(join(shaped, ".owner"), body);
