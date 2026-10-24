@@ -19,12 +19,29 @@ printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 kitlib_tmp TMP staged-readme-test || exit 1
+HOOK_TMP_ROOT="$TMP/readme-hook-tmp"
+mkdir -p "$HOOK_TMP_ROOT"
+KITLIB_TMP_ROOT=$HOOK_TMP_ROOT
+export KITLIB_TMP_ROOT
 
 pass=0
 fail=0
 check() {
 	if [ "$1" = "$2" ] && printf '%s' "$4" | grep -q -- "$5"; then pass=$((pass + 1));
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
+}
+
+readme_temp_gone() {
+	[ -f "$1/readme-temp-path" ] || return 1
+	readme_temp=$(cat "$1/readme-temp-path")
+	case "$readme_temp" in "$HOOK_TMP_ROOT"/staged-readme.*) ;; *) return 1 ;; esac
+	[ ! -e "$readme_temp" ]
+}
+
+check_readme_cleanup() {
+	if readme_temp_gone "$1"; then pass=$((pass + 1))
+	else fail=$((fail + 1)); printf 'FAIL %s: actual staged README temp survived or was not captured\n' "$2"
+	fi
 }
 
 # S1 stub gate: delegates to the real readme-update gate when installed,
@@ -35,6 +52,14 @@ write_gate_stub() {
 import os, subprocess, sys
 args = sys.argv[1:]
 target = args[-1]
+if os.environ.get("README_CAPTURE"):
+    with open(os.environ["README_CAPTURE"], "w", encoding="utf-8") as handle:
+        handle.write(os.path.dirname(target))
+if os.environ.get("README_SIGNAL_PID"):
+    import signal
+    if not os.path.isfile(os.path.join(os.path.dirname(target), ".owner")):
+        raise AssertionError("gate did not receive its actual owned INDEX directory")
+    os.kill(int(os.environ["README_SIGNAL_PID"]), signal.SIGTERM)
 real = os.environ.get("README_GATE_REAL",
                       os.path.expanduser("~/.claude/skills/readme-update/scripts/readme-gate.py"))
 if os.path.exists(real):
@@ -108,7 +133,7 @@ new_repo() {
 commit() {
 	repo=$1
 	shift
-	(CDPATH='' cd -- "$repo" && README_GATE="$repo/gate-stub.py" git commit -q "$@" 2>&1)
+	(CDPATH='' cd -- "$repo" && README_GATE="$repo/gate-stub.py" README_CAPTURE="$repo/readme-temp-path" git commit -q "$@" 2>&1)
 }
 
 # (a) new skill without the README count change: refused, naming the count.
@@ -119,6 +144,7 @@ git -C "$R" add skills/s3/SKILL.md
 out=$(commit "$R" -m "[test] third skill, stale readme")
 check "$?" "1" "skill-without-count-refused" "$out" 'claims "Two skills" but the tree ships 3 skills'
 check "$(git -C "$R" rev-list --count HEAD)" "1" "skill-refused-head-unmoved" "$out" "staged-readme: REFUSED"
+check_readme_cleanup "$R" "refused-index-cleanup"
 
 # (a) control: the same commit with the count fixed passes.
 python3 - "$R/README.md" <<'PY' || exit 1
@@ -130,6 +156,7 @@ PY
 git -C "$R" add README.md
 out=$(commit "$R" -m "[test] third skill with count")
 check "$?" "0" "skill-with-count-pass" "$out x" "x"
+check_readme_cleanup "$R" "passing-index-cleanup"
 
 # (b) control: README just under the p75 passes.
 R=$(new_repo size-bound)
@@ -179,6 +206,51 @@ mkdir -p "$TIP"
 git -C "$R" archive HEAD | tar -xf - -C "$TIP"
 out=$(CDPATH='' cd -- "$R" && README_GATE="$R/gate-stub.py" bun run --no-env-file --config=/dev/null .git/hooks/hooks.d/pre-commit/readme-check.ts --root "$TIP" 2>&1)
 check "$?" "0" "untouched-tip-archive-green" "$out" "README-CHECK: GREEN"
+
+# Signal the recorded owned hook PID only after its real INDEX gate is running.
+R=$(new_repo signal-cleanup)
+printf '\n' >> "$R/README.md"
+git -C "$R" add README.md
+out=$(python3 - "$R" "$(dirname "$INSTALLER")" <<'PY'
+import os, signal, sys
+from pathlib import Path
+repo = Path(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+import kitlib_run
+# Python starts with SIGPIPE ignored; qualify an ordinary shell before testing its traps.
+preamble = "import os,signal,sys; [signal.signal(s,signal.SIG_DFL) for s in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP,signal.SIGPIPE)]; os.execvp(sys.argv[1],sys.argv[1:])"
+result = kitlib_run.run(
+    [sys.executable, "-c", preamble, "/bin/sh", "-c",
+     'export README_SIGNAL_PID=$$; exec "$@"', "sh",
+     str(repo / ".git/hooks/hooks.d/pre-commit/46-omp-kit-staged-readme")],
+    cwd=str(repo), deadline_s=20, grace_s=2, stdin=b"",
+    env={**os.environ, "README_GATE": str(repo / "gate-stub.py"),
+         "README_CAPTURE": str(repo / "readme-temp-path")})
+if result.timed_out or result.rc != -signal.SIGTERM:
+    raise AssertionError("staged README cancellation was not SIGTERM: %r" % (result,))
+temp = Path((repo / "readme-temp-path").read_text())
+if temp.exists():
+    raise AssertionError("SIGTERM left actual owned INDEX directory: %s" % temp)
+print("actual-index-signal-cleanup")
+PY
+)
+check "$?" "0" "actual-index-signal-cleanup" "$out" "actual-index-signal-cleanup"
+
+# Disable only the existing native registration for one real valid INDEX invocation.
+# The same exact-path cleanup assertion must notice the resulting owned directory.
+R=$(new_repo missing-cleanup)
+printf '\n' >> "$R/README.md"
+git -C "$R" add README.md
+out=$(CDPATH='' cd -- "$R" && KITLIB_TMP_AUTO_CLEANUP=0 README_GATE="$R/gate-stub.py" README_CAPTURE="$R/readme-temp-path" git commit -q -m "[test] missing native cleanup" 2>&1)
+check "$?" "0" "missing-cleanup-valid-readme-control" "$out x" "x"
+if readme_temp_gone "$R"; then
+	fail=$((fail + 1)); printf 'FAIL missing-cleanup-negative: leftover assertion did not fire\n'
+else
+	readme_temp=$(cat "$R/readme-temp-path")
+	if [ -d "$readme_temp" ] && [ -f "$readme_temp/.owner" ]; then pass=$((pass + 1))
+	else fail=$((fail + 1)); printf 'FAIL missing-cleanup-negative: expected exact owned leftover\n'
+	fi
+fi
 
 printf 'staged-readme: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

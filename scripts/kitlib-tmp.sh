@@ -87,11 +87,9 @@ kitlib__tmp_on_exit() {
 }
 
 kitlib__tmp_on_signal() {
-	trap - EXIT HUP INT TERM
+	# Retain EXIT so EOF reaches Bash's deferred-signal checkpoint after this trap returns.
+	trap - HUP INT TERM
 	kitlib__tmp_run_registry
-	# bash runs a trap with its signal blocked, so this re-sent signal stays pending until the trap returns and then
-	# takes the default action; shells that do not block it die here. Do not `exit` after it: that would end with a
-	# plain status instead of the signal.
 	kill -s "$1" "$$"
 }
 

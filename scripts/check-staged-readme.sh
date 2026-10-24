@@ -40,13 +40,6 @@ tree=$(git write-tree) || { printf 'staged-readme: cannot write the staged tree\
 . "$here/kitlib-tmp.sh"
 tmp='' # assigned by kitlib_tmp via eval
 kitlib_tmp tmp staged-readme || { printf 'staged-readme: cannot stage the candidate tree\n' >&2; exit 1; }
-# shellcheck disable=SC2317 # invoked via kitlib_tmp_atexit
-cleanup() {
-	chmod -R u+w "$tmp" 2>/dev/null || true
-	find "$tmp" ! -type d -delete 2>/dev/null || true
-	find "$tmp" -depth -type d -empty -delete 2>/dev/null || true
-}
-kitlib_tmp_atexit cleanup
 git archive "$tree" | tar -xf - -C "$tmp" || { printf 'staged-readme: cannot extract the candidate tree\n' >&2; exit 1; }
 if out=$(CDPATH='' cd -- "$root" && bun run --no-env-file --config=/dev/null "$checker" --root "$tmp" 2>&1); then
 	exit 0
