@@ -1,0 +1,6 @@
+#!/bin/sh
+# Synthetic mandatory work: exceeds the former 120s transport cap, stays finite.
+set -eu
+printf 'HOOK_STARTED\n' >> "${R1_TAG_HOOK_LOG:?}"
+sleep 121
+printf 'HOOK_COMPLETED\n' >> "$R1_TAG_HOOK_LOG"

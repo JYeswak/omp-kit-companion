@@ -2,3 +2,4 @@
 - Report an unavailable launchd inventory as unverified instead of treating an empty failed query as healthy; a successful empty query remains healthy.
 - Keep real tmux recovery tests isolated with relative socket addresses so deeply nested exact-source exports do not exceed Unix socket path limits.
 - Measure process-runner memory conformance in fresh processes so an earlier suite allocation cannot conceal the bounded-output controls or the unbounded-queue negative.
+- Give local release tag pushes a finite budget that includes their mandatory validation hooks, and record the actual tag-push duration separately in the release receipt.

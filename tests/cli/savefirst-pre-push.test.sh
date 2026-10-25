@@ -159,9 +159,11 @@ push_fixture() {
 		FULL_SUITE_TIMEOUT_SECS=60 AGENT_NAME=SaveFirstProbe TMUX_PANE="" PATH="$sf_bin:$PATH" \
 		git -C "$sf_repo" push origin main > "$sf_outfile" 2>&1 || sf_rc=$?
 	sf_after=$(git --git-dir="$sf_remote" rev-parse --verify refs/heads/main 2>/dev/null) || sf_after=
-	sf_output=$(cat "$sf_outfile")
-	printf 'SAVEFIRST1 fixture gate %s push_rc=%s base=%s head=%s origin_after=%s\n%s\n' \
-		"$sf_name" "$sf_rc" "$sf_base" "$sf_head" "$sf_after" "$sf_output"
+	printf 'SAVEFIRST1 fixture gate %s push_rc=%s base=%s head=%s origin_after=%s\n' \
+		"$sf_name" "$sf_rc" "$sf_base" "$sf_head" "$sf_after"
+	while IFS= read -r sf_line || [ -n "$sf_line" ]; do
+		printf 'SAVEFIRST1 nested: %s\n' "$sf_line"
+	done < "$sf_outfile"
 }
 
 sf_bin="$TMP/savefirst-sbh"
@@ -179,7 +181,6 @@ high_out="$TMP/savefirst-positive.out"
 push_fixture pressure-control "$sf_repo" "$sf_remote" "$high_out"
 sf_high_rc=$sf_rc
 sf_high_after=$sf_after
-sf_high_output=$sf_output
 if [ "$sf_base_push_rc" = 0 ] && [ "$sf_before" = "$sf_base" ] && [ "$sf_high_rc" -ne 0 ] && [ "$sf_high_after" = "$sf_base" ] \
 	&& grep -Fq 'WARN disk-pressure: sbh reports 11.7% free' "$high_out" \
 	&& grep -Fq 'top_scratch=savefirst-top-owner:' "$high_out" \
@@ -188,8 +189,8 @@ if [ "$sf_base_push_rc" = 0 ] && [ "$sf_before" = "$sf_base" ] && [ "$sf_high_rc
 	&& grep -Fq 'FULL-SUITE: RED: full suite ended without complete evidence' "$high_out"; then
 	printf 'PASS SAVEFIRST1 component control: pressure warned, statfs step ran, incomplete fixture refused, local origin unchanged\n'
 else
-	printf 'FAIL SAVEFIRST1 component control: base_rc=%s push_rc=%s before=%s base=%s after=%s head=%s\n%s\n' \
-		"$sf_base_push_rc" "$sf_high_rc" "$sf_before" "$sf_base" "$sf_high_after" "$sf_head" "$sf_high_output" >&2
+	printf 'FAIL SAVEFIRST1 component control: base_rc=%s push_rc=%s before=%s base=%s after=%s head=%s\n' \
+		"$sf_base_push_rc" "$sf_high_rc" "$sf_before" "$sf_base" "$sf_high_after" "$sf_head" >&2
 	exit 1
 fi
 
@@ -215,8 +216,8 @@ if [ -n "$low_root" ] && [ -d "$low_root" ]; then
 			&& grep -Fq 'free at least 10 GiB' "$low_out" && ! grep -Fq 'SAVEFIRST-BOUNDARY-TEST PASS' "$low_out"; then
 			printf 'PASS SAVEFIRST1 actual pre-push low-space negative: typed refusal, no child, origin unchanged\n'
 		else
-			printf 'FAIL SAVEFIRST1 actual pre-push low-space negative: base_rc=%s push_rc=%s before=%s base=%s after=%s\n%s\n' \
-				"$sf_base_push_rc" "$sf_rc" "$sf_before" "$sf_base" "$sf_after" "$sf_output" >&2
+			printf 'FAIL SAVEFIRST1 actual pre-push low-space negative: base_rc=%s push_rc=%s before=%s base=%s after=%s\n' \
+				"$sf_base_push_rc" "$sf_rc" "$sf_before" "$sf_base" "$sf_after" >&2
 			exit 1
 		fi
 	else

@@ -57,6 +57,7 @@ say() { echo "== $*"; }
 DRY_RUN=0
 VERSION=''
 SOURCE=''
+TAG_PUSH_SECONDS=''
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--dry-run) DRY_RUN=1; shift ;;
@@ -282,14 +283,15 @@ receipt() {
 	local phase=$1 url=${2:-} run_id=${3:-}
 	stage ''
 	python3 - "$STAGE_LOG" "$DIST/SHA256SUMS" "$phase" "$VERSION" "$SOURCE" "$BASE_TAG" "$NOTARY_ID" "$url" "$run_id" \
-		"$(( $(date +%s) - STARTED ))" "$TMPDIR/release-local-v$VERSION-$phase.json" <<'PY' # tempsafe: receipt into the caller-owned scratch, kept past exit by contract
+		"$(( $(date +%s) - STARTED ))" "$TMPDIR/release-local-v$VERSION-$phase.json" "$TAG_PUSH_SECONDS" <<'PY' # tempsafe: receipt into the caller-owned scratch, kept past exit by contract
 import json, sys
-stages, sums, phase, version, source, base, notary, url, run_id, total, out = sys.argv[1:]
+stages, sums, phase, version, source, base, notary, url, run_id, total, out, tag_push_seconds = sys.argv[1:]
 doc = {"schema_version": 1, "phase": phase, "version": version, "source_sha": source, "base_tag": base,
        "notarization_submission": notary, "release_url": url or None, "attest_run_id": run_id or None,
        "sha256": {name: digest for digest, name in (line.split("  ", 1) for line in open(sums).read().splitlines())},
        "stage_seconds": {name: int(secs) for name, secs in (line.split() for line in open(stages).read().splitlines())},
-       "total_seconds": int(total)}
+       "total_seconds": int(total),
+       "tag_push_seconds": int(tag_push_seconds) if tag_push_seconds else None}
 text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
 open(out, "w", encoding="utf-8").write(text)
 print(text, end="")
@@ -311,7 +313,13 @@ sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$S
 stage tag
 remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$VERSION")" || die "tag lookup failed"
 [ -z "$remote_tags" ] || die "tag v$VERSION appeared during the build; never re-tagged"
-bounded 120 git -C "$ROOT" -c push.followTags=false push --porcelain origin "$SOURCE:refs/tags/v$VERSION" || die "tag push failed"
+# This transport includes every unchanged local pre-push hook, not just the network.
+# 360s focused selection + 180s machinery + 180s checker contracts + 60s cached
+# full-verdict readback + 120s margin = 900s. The selected pre-push fixture alone
+# took 119s, so the old 120s transport cap could not contain the mandatory work.
+tag_push_started=$(date +%s)
+bounded 900 git -C "$ROOT" -c push.followTags=false push --porcelain origin "$SOURCE:refs/tags/v$VERSION" || die "tag push failed"
+TAG_PUSH_SECONDS=$(( $(date +%s) - tag_push_started ))
 bounded 60 gh api "repos/$REPO/git/ref/tags/v$VERSION" >"$WORK/tag.json" || die "tag readback failed"
 { [ "$(jq -r .object.type "$WORK/tag.json")" = commit ] && [ "$(jq -r .object.sha "$WORK/tag.json")" = "$SOURCE" ]; } ||
 	die "remote v$VERSION does not name $SOURCE"
