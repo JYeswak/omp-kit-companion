@@ -31,6 +31,11 @@ for hook in pre-commit pre-push; do
 		exit 2
 	fi
 done
+# The fresh gate goes in first: `am guard uninstall` removes a chain runner that has no other member, and the
+# pre-push runner must survive to run this member and the kit's others.
+mkdir -p "$(dirname "$DEST")"
+cp "$ROOT/scripts/pre-push-gate.sh" "$DEST"
+chmod +x "$DEST"
 # am 0.3.39's `install --no-prepush` keeps a pre-push plugin an earlier --prepush install left, so remove our
 # plugins through its own uninstaller first (the chain runners stay while other members use them), then reinstall.
 am guard uninstall "$ROOT"
@@ -43,7 +48,17 @@ am guard install "$ROOT" "$ROOT" --no-prepush
 	echo "install-pre-push-gate: Agent Mail pre-push plugin still installed; publication would judge live leases" >&2
 	exit 2
 }
-mkdir -p "$(dirname "$DEST")"
-cp "$ROOT/scripts/pre-push-gate.sh" "$DEST"
-chmod +x "$DEST"
+[ -x "$CHAIN" ] || {
+	echo "install-pre-push-gate: the pre-push chain runner is gone; the kit's pre-push members would never run" >&2
+	exit 2
+}
+# `am guard install` rewrites the pre-commit chain runner, which drops omp-kit's storage-root bootstrap; the
+# 10-omp-kit-storage-root member then refuses every commit (GUARDROOT1, ompkit-2ayxn). Re-apply it through its own
+# installer whenever this repo uses that member (live 2026-10-25: the reinstall dropped it in the companion).
+if [ -e "$HOOKS/hooks.d/pre-commit/10-omp-kit-storage-root" ]; then
+	(cd "$ROOT" && sh "$ROOT/scripts/install-pre-commit-storage-root-gate.sh") || {
+		echo "install-pre-push-gate: storage-root bootstrap was not re-applied; commits would be refused" >&2
+		exit 2
+	}
+fi
 printf 'installed pre-push fresh gate: %s\n' "$DEST"
