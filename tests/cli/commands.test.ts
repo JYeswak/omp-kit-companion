@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { dirname, join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { MEMORY_FIXTURE_VERSION, writeReviewedMemorySources } from "./memory-source-fixture.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 const fixtures: string[] = [];
@@ -33,21 +34,6 @@ function installedOmp(root: string): string {
 	for (const file of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) writeFileSync(join(pkg, "src", file), "export {};\n");
 	symlinkSync(join(pkg, "dist", "cli.js"), join(bin, "omp"));
 	return bin;
-}
-const MEMORY_SOURCE_FILES = [
-	"src/memory-backend/redact.ts",
-	"src/memory-backend/settings.ts",
-	"src/memory-backend/resolve.ts",
-	"src/config/settings.ts",
-] as const;
-function copyReviewedMemorySources(ompPackage: string): void {
-	const explicit = process.env.OMP_MEMORY_SOURCE_PATH ?? process.env.OMP_INSTALLED_PATH;
-	const sourceRoot = explicit ? dirname(dirname(realpathSync(explicit))) : resolveOmpIdentity().packageRoot;
-	for (const relative of MEMORY_SOURCE_FILES) {
-		const target = join(ompPackage, relative);
-		mkdirSync(dirname(target), { recursive: true });
-		writeFileSync(target, readFileSync(join(sourceRoot, relative)));
-	}
 }
 
 function run(args: string[], root: string, path = "/usr/bin:/bin") {
@@ -569,8 +555,8 @@ describe("omp-kit CLI grammar and refusal", () => {
 	});
 	compiledTest("compiled memory doctor reports reviewed on-disk settings without reading rows or invoking OMP", () => {
 		const { home, ompPackage, invoke } = compiledDiagnosticFixture();
-		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.9" }));
-		copyReviewedMemorySources(ompPackage);
+		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: MEMORY_FIXTURE_VERSION }));
+		writeReviewedMemorySources(ompPackage);
 		mkdirSync(join(home, ".omp", "agent"), { recursive: true });
 		writeFileSync(join(home, ".omp", "agent", "config.yml"), "memory:\n  backend: off\n");
 		const off = invoke("doctor", "--scope", "memory");
@@ -579,7 +565,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(off.envelope.data.findings[0]).toEqual(expect.objectContaining({
 			component: "memory", status: "DEGRADED", evidence: expect.objectContaining({
 				backend: "off", store: "NOT_APPLICABLE", runtime: "NOT_PROBED",
-				redactor: expect.objectContaining({ status: "MISSES", version: "18.4.9", coverage: "SYNTHETIC_ONLY", missed: expect.arrayContaining(["pem_private_key"]) }),
+				redactor: expect.objectContaining({ status: "MISSES", version: MEMORY_FIXTURE_VERSION, coverage: "SYNTHETIC_ONLY", missed: expect.arrayContaining(["pem_private_key"]) }),
 				profile_observation: { selected: "default", source: "DEFAULT_ON_DISK", effective_active_profile: "UNVERIFIED" },
 			}),
 		}));
@@ -592,7 +578,7 @@ describe("omp-kit CLI grammar and refusal", () => {
 		expect(manual.envelope.data.findings[0].evidence).toEqual(expect.objectContaining({
 			backend: "mnemopi", configured: true, store: "NOT_CREATED", auto_retain: false, auto_recall: false,
 			scoping: "per-project", model: "DISABLED", embedding: "DISABLED_FTS_ONLY", runtime: "NOT_PROBED",
-			redactor: expect.objectContaining({ status: "MISSES", version: "18.4.9", missed: expect.arrayContaining(["pem_private_key"]) }),
+			redactor: expect.objectContaining({ status: "MISSES", version: MEMORY_FIXTURE_VERSION, missed: expect.arrayContaining(["pem_private_key"]) }),
 			profile_observation: { selected: "manual", source: "NAMED_ON_DISK", effective_active_profile: "UNVERIFIED" },
 		}));
 		expect(JSON.stringify(manual.envelope)).not.toContain(["ghp_", "SyntheticLettersAndDigits"].join(""));
@@ -603,8 +589,8 @@ describe("omp-kit CLI grammar and refusal", () => {
 
 	compiledTest("memory doctor leaves malformed config and changed source bytes unverified and missing OMP unavailable", () => {
 		const { home, ompPackage, otherProject, invoke, invokeWithEnv } = compiledDiagnosticFixture();
-		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.4.9" }));
-		copyReviewedMemorySources(ompPackage);
+		writeFileSync(join(ompPackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: MEMORY_FIXTURE_VERSION }));
+		writeReviewedMemorySources(ompPackage);
 		mkdirSync(join(home, ".omp", "agent"), { recursive: true });
 		writeFileSync(join(home, ".omp", "agent", "config.yml"), "memory: [\n");
 		const opaque = invoke("doctor", "--scope", "memory");

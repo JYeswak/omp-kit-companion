@@ -1,26 +1,13 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { inspectMemoryReadiness } from "../../src/memory-readiness.ts";
-import { resolveOmpIdentity } from "../../src/paths.ts";
+import { MEMORY_FIXTURE_VERSION as INSTALLED_OMP_VERSION, REVIEWED_MEMORY_SOURCE_FILES as OMP_SOURCE_FILES, writeReviewedMemorySources } from "./memory-source-fixture.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 afterAll(cleanupAllOwnedTmp);
 // Keep per-test owned roots until this isolated file's afterAll; a shared afterEach list races under Bun parallelism.
 
-const EXPLICIT_OMP_SOURCE = process.env.OMP_MEMORY_SOURCE_PATH ?? process.env.OMP_INSTALLED_PATH;
-const INSTALLED_OMP_PATH = EXPLICIT_OMP_SOURCE ?? Bun.which("omp");
-if (!INSTALLED_OMP_PATH) throw new Error("memory-readiness tests require an installed OMP on PATH");
-const INSTALLED_OMP_ROOT = EXPLICIT_OMP_SOURCE
-	? dirname(dirname(realpathSync(EXPLICIT_OMP_SOURCE)))
-	: resolveOmpIdentity().packageRoot;
-const INSTALLED_OMP_VERSION = JSON.parse(readFileSync(join(INSTALLED_OMP_ROOT, "package.json"), "utf8")).version as string;
-const OMP_SOURCE_FILES = [
-	"src/memory-backend/redact.ts",
-	"src/memory-backend/settings.ts",
-	"src/memory-backend/resolve.ts",
-	"src/config/settings.ts",
-] as const;
 function fixture(version: string = INSTALLED_OMP_VERSION) {
 	const root = ownedTmp("omp-kit-memory").path;
 	const home = join(root, "home"), project = join(root, "project"), agent = join(home, ".omp", "agent");
@@ -28,11 +15,7 @@ function fixture(version: string = INSTALLED_OMP_VERSION) {
 	mkdirSync(agent, { recursive: true }); mkdirSync(project); mkdirSync(join(pkg, "dist"), { recursive: true });
 	writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
 	const ompPath = join(pkg, "dist", "cli.js"); writeFileSync(ompPath, "#!/bin/sh\nexit 91\n");
-	for (const relativePath of OMP_SOURCE_FILES) {
-		const target = join(pkg, relativePath);
-		mkdirSync(dirname(target), { recursive: true });
-		writeFileSync(target, readFileSync(join(INSTALLED_OMP_ROOT, relativePath)));
-	}
+	writeReviewedMemorySources(pkg);
 	const config = join(agent, "config.yml");
 	const inspect = (installedPath = ompPath) => inspectMemoryReadiness({ home, project, ompPath: installedPath, cassPath: null });
 	return { root, home, project, agent, config, ompPath, ompRoot: pkg, inspect };
