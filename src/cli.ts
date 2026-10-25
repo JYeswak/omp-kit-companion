@@ -271,7 +271,9 @@ function parse(args: readonly string[]): ParseResult {
 			if (positional.length === 2 && command?.subcommands) { parent = command; command = findCommand(token, command.subcommands); }
 			continue;
 		}
-		const [rawName, attached] = token.split("=", 2);
+		const equals = token.indexOf("=");
+		const rawName = equals < 0 ? token : token.slice(0, equals);
+		const attached = equals < 0 ? undefined : token.slice(equals + 1);
 		const known = [...GLOBAL_FLAGS, ...COMMANDS.flatMap((item) => item.flags), ...COMMANDS.flatMap((item) => item.subcommands?.flatMap((child) => child.flags) ?? [])];
 		const matchesFlag = (candidate: Flag): boolean => candidate.name === rawName || candidate.aliases?.includes(rawName ?? "") === true;
 		const commandFlag = parent && command
