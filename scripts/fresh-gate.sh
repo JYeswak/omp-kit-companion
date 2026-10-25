@@ -20,7 +20,7 @@ WORK=
 OWN_WORK=0
 
 usage() {
-	echo "usage: fresh-gate.sh --selftest | --commit SHA [--base SHA] [--changed-file PATH ...] | --archive-dir DIR [--changed-file PATH ...]" >&2
+	echo "usage: fresh-gate.sh --selftest | --test-workers | --commit SHA [--base SHA] [--changed-file PATH ...] | --archive-dir DIR [--changed-file PATH ...]" >&2
 }
 
 fail() {
@@ -710,6 +710,12 @@ selftest() {
 	require_gate_functions
 	echo "FRESH-GATE SELFTEST: GREEN"
 }
+
+# Read-only query for sibling runners; never mix it with a gate invocation.
+if [ "$#" -eq 1 ] && [ "$1" = "--test-workers" ]; then
+	test_workers
+	exit 0
+fi
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in

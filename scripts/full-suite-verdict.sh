@@ -318,10 +318,20 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 		failed=0
 		if [ "$bun_count" -gt 0 ]; then
 			bun_rc=0
+			# Reuse the focused runner's core-derived worker policy, with at most
+			# four isolated files in flight and no changes to the selected suite.
+			workers=$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers) || exit 1
+			case "$workers" in ''|*[!0-9]*|0) exit 1 ;; esac
+			[ "$workers" -le "$bun_count" ] || workers=$bun_count
+			[ "$workers" -le 4 ] || workers=4
+			set -- --parallel="$workers" $kept_bun
+			if [ -f "$ARCHIVE_DIR/.github/core-test-timings.json" ]; then
+				set -- --timings="$ARCHIVE_DIR/.github/core-test-timings.json" "$@"
+			fi
 			if [ -n "$bun_config" ]; then
-				dfl nice -n 10 bun "$bun_config" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun >"$BUN_OUT" 2>&1 || bun_rc=$?
+				dfl nice -n 10 bun "$bun_config" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@" >"$BUN_OUT" 2>&1 || bun_rc=$?
 			else
-				dfl nice -n 10 bun test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' $kept_bun >"$BUN_OUT" 2>&1 || bun_rc=$?
+				dfl nice -n 10 bun test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@" >"$BUN_OUT" 2>&1 || bun_rc=$?
 			fi
 			cat "$BUN_OUT"
 			echo "BUN rc=$bun_rc" >>"$SUITE_STATUS"

@@ -141,6 +141,10 @@ if command -v bun >/dev/null 2>&1; then
 	mkrepo_begin masked
 	addfile tests/cli/real.test.ts 'import { expect, test } from "bun:test";
 test("FULLSUITELOG1 real failure", () => { expect(1).toBe(2); });'
+	addfile worker-control.txt 'ready'
+	addfile tests/cli/worker-control.test.ts 'import { readFileSync } from "node:fs";
+import { expect, test } from "bun:test";
+test("FULLSUITELOG1 passing worker reads the candidate", () => { expect(readFileSync("worker-control.txt", "utf8").trim()).toBe("ready"); });'
 	addfile tests/cli/later.test.sh 'echo " 1 pass"
 echo " 0 fail"
 echo "Ran 1 test across 1 file. [5.00ms]"
@@ -154,6 +158,38 @@ exit 0'
 		not_ok "nested bun summary masked the real failure (rc=$rc)"; cat "$out"
 	fi
 	if [ -f "$cache/$tree.json" ] && grep -F '"verdict": "FAIL"' "$cache/$tree.json" >/dev/null; then ok "masked run caches FAIL"; else not_ok "masked run cached no FAIL"; fi
+	if python3 - "$cache/$tree.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    verdict = json.load(source)
+evidence = verdict["evidence"]
+sys.exit(0 if verdict["verdict"] == "FAIL" and evidence["complete"] and
+         evidence["bun_files"] == 2 and evidence["bun_ran"] == 2 and evidence["bun_fail"] == 1 else 1)
+PY
+	then ok "the passing worker cannot hide the failing worker in the cached verdict"
+	else not_ok "parallel worker failure was not fully accounted for"; cat "$out"
+	fi
+
+	# The matched positive changes only the failing candidate, not the judge:
+	# its new tree must cache a complete PASS after the previous tree's FAIL.
+	addfile tests/cli/real.test.ts 'import { readFileSync } from "node:fs";
+import { expect, test } from "bun:test";
+test("FULLSUITELOG1 recovered worker reads the candidate", () => { expect(readFileSync("worker-control.txt", "utf8").trim()).toBe("ready"); });'
+	git -C "$repo" add -- tests/cli/real.test.ts
+	git -C "$repo" commit -q -m "[test] FULLSUITELOG1 recovered candidate"
+	run_verdict recovered
+	cache="$repo.cache"
+	if [ "$rc" -eq 0 ] && python3 - "$cache/$tree.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    verdict = json.load(source)
+evidence = verdict["evidence"]
+sys.exit(0 if verdict["verdict"] == "PASS" and evidence["complete"] and
+         evidence["bun_files"] == 2 and evidence["bun_ran"] == 2 and evidence["bun_fail"] == 0 else 1)
+PY
+	then ok "the recovered candidate caches a complete passing verdict"
+	else not_ok "the recovered candidate did not pass completely"; cat "$out"
+	fi
 
 	# (c) A bun phase cut off by the suite deadline still leaves its partial output in the kept
 	# incomplete log: the dying runner copies it, or finish_logs appends it when the runner was
