@@ -235,6 +235,67 @@ function withinRepo(repo: string, cwd: string): boolean {
 	return pathFromRepo === "" || (pathFromRepo !== ".." && !pathFromRepo.startsWith(`..${sep}`) && !isAbsolute(pathFromRepo));
 }
 
+/** Where a block lives, derived from the live `tern inspect --json` tree: the
+Tern session and tab that contain the block id. Nothing about tab or session
+names is configured or assumed; the configured fleet session name is only
+checked against what the tree says (it must equal the containing session's
+name or id, or the containing tab's name or id), so a block that moved
+elsewhere is SEAT_REBOUND and a block in no tab is absent (TERNADDR1,
+ompkit-fixjo). A schema break is UNKNOWN. */
+export type BlockLocation =
+	| { status: "ok"; sessionId: number; sessionName: string | null; tabId: number | null; tabName: string | null; tab: unknown }
+	| { status: "absent" }
+	| { status: "ambiguous" }
+	| { status: "rebound"; sessionName: string | null; tabName: string | null }
+	| { status: "schema"; reason: string };
+
+export function locateBlock(root: Record<string, unknown>, paneId: number, seatSession: string): BlockLocation {
+	if (!Array.isArray(root.sessions)) return { status: "schema", reason: "INSPECT_SCHEMA_UNKNOWN" };
+	const hits: Extract<BlockLocation, { status: "ok" }>[] = [];
+	for (const rawSession of root.sessions) {
+		const session = objectValue(rawSession);
+		if (!session || !Number.isSafeInteger(session.id) || (typeof session.name !== "string" && session.name !== null)
+			|| (session.tabs !== undefined && !Array.isArray(session.tabs))) {
+			return { status: "schema", reason: "INSPECT_SESSION_SCHEMA_UNKNOWN" };
+		}
+		const sessionId = session.id as number;
+		const sessionName = typeof session.name === "string" ? session.name : null;
+		for (const rawTab of Array.isArray(session.tabs) ? session.tabs : []) {
+			const tab = objectValue(rawTab);
+			if (!tab || !Array.isArray(tab.blocks)) return { status: "schema", reason: "INSPECT_TAB_SCHEMA_UNKNOWN" };
+			for (const rawBlock of tab.blocks) {
+				const block = objectValue(rawBlock);
+				if (!block || !Number.isSafeInteger(block.id)) return { status: "schema", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" };
+				if (block.id === paneId) {
+					hits.push({ status: "ok", sessionId, sessionName, tabId: Number.isSafeInteger(tab.id) ? tab.id as number : null,
+						tabName: typeof tab.name === "string" ? tab.name : null, tab: rawTab });
+				}
+			}
+		}
+	}
+	if (hits.length === 0) return { status: "absent" };
+	if (hits.length > 1) return { status: "ambiguous" };
+	const hit = hits[0]!;
+	const names = [hit.sessionName, String(hit.sessionId), hit.tabName, hit.tabId === null ? null : String(hit.tabId)];
+	if (!names.includes(seatSession)) return { status: "rebound", sessionName: hit.sessionName, tabName: hit.tabName };
+	return hit;
+}
+
+/** Does the inspected window host a session or tab whose name or id is `name`? Read from the tree, never assumed. */
+export function windowHostsName(root: Record<string, unknown>, name: string): boolean {
+	if (!Array.isArray(root.sessions)) return false;
+	for (const rawSession of root.sessions) {
+		const session = objectValue(rawSession);
+		if (!session) continue;
+		if (session.name === name || String(session.id) === name) return true;
+		for (const rawTab of Array.isArray(session.tabs) ? session.tabs : []) {
+			const tab = objectValue(rawTab);
+			if (tab && (tab.name === name || String(tab.id) === name)) return true;
+		}
+	}
+	return false;
+}
+
 type SeatValidation =
 	| { ok: true; paneId: number }
 	| { ok: false; code: "PLANE_SEAT_UNBOUND" | "TERN_WINDOW_UNBOUND"; reason: string };
@@ -243,8 +304,10 @@ function validateSeat(seat: TernSeatBinding): SeatValidation {
 	if (typeof seat.session !== "string" || !seat.session.trim() || typeof seat.cwd !== "string" || !isAbsolute(seat.cwd)) {
 		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern seat needs a configured session and absolute repository cwd" };
 	}
-	if (typeof seat.windowKey !== "string" || !seat.windowKey.trim()) {
-		return { ok: false, code: "TERN_WINDOW_UNBOUND", reason: "Tern seat needs an explicit window key" };
+	// TERNADDR1 AC2: an empty key is Tern's documented default window (plane-tern.ts header); only a
+	// non-string key is structurally unbound. Explicit keys verify in resolveTernWindow.
+	if (typeof seat.windowKey !== "string") {
+		return { ok: false, code: "TERN_WINDOW_UNBOUND", reason: "Tern seat window key must be a string (empty means the default window)" };
 	}
 	if (typeof seat.pane !== "string") {
 		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern pane must be an exact decimal block id or tern:<id>" };
@@ -308,14 +371,16 @@ export function resolveTernWindow(
 	}
 	const decoded = parseJson(raw.out);
 	const root = "error" in decoded ? null : objectValue(decoded.value);
-	const sessionListed = !!root && Array.isArray(root.sessions) && root.sessions.some((rawSession) => {
-		const candidate = objectValue(rawSession);
-		return !!candidate && (candidate.name === seat.session || String(candidate.id) === seat.session);
-	});
-	if (raw.code !== 0 || !sessionListed) {
-		return { ok: false, code: "PLANE_SEAT_UNBOUND",
-			reason: explicit ? "window key did not address a window hosting the configured session"
-				: "configured Tern session is absent from the default window" };
+	const paneId = paneNumber(seat) as number;
+	const where = root ? locateBlock(root, paneId, seat.session) : null;
+	// The window qualifies when it hosts the configured session or tab (by name or id, read from the tree);
+	// whether the block is in it is parseTernInspection's decision.
+	const hosts = root !== null && where !== null && where.status !== "schema" && (where.status === "ok" || windowHostsName(root, seat.session));
+	if (raw.code !== 0 || !hosts) {
+		const why = where === null || where.status === "schema" ? "inspect snapshot unreadable"
+			: where.status === "rebound" ? `block ${paneId} lives in session ${where.sessionName ?? "?"} tab ${where.tabName ?? "?"}, not the configured ${seat.session}`
+			: `no session or tab named ${seat.session} in this window`;
+		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: explicit ? `window key did not address a window where ${why}` : why };
 	}
 	return explicit ? { ok: true, kind: "key", windowKey: seat.windowKey, daemonSocket: socket }
 		: { ok: true, kind: "default", daemonSocket: socket };
@@ -351,37 +416,21 @@ export function parseTernInspection(snapshot: unknown, seat: TernSeatBinding): T
 	if (!root || !Array.isArray(root.sessions) || !Array.isArray(root.panes)) {
 		return { status: "UNKNOWN", reason: "INSPECT_SCHEMA_UNKNOWN" };
 	}
-	const matchingSessions: { id: number; name: string | null; tabs: unknown[] }[] = [];
-	for (const rawSession of root.sessions) {
-		const session = objectValue(rawSession);
-		if (!session || !Number.isSafeInteger(session.id) || (typeof session.name !== "string" && session.name !== null)
-			|| !Array.isArray(session.tabs)) {
-			return { status: "UNKNOWN", reason: "INSPECT_SESSION_SCHEMA_UNKNOWN" };
-		}
-		if (session.name === seat.session || String(session.id) === seat.session) {
-			matchingSessions.push({ id: session.id as number, name: typeof session.name === "string" ? session.name : null, tabs: session.tabs });
-		}
+	// TERNADDR1: the tab is derived from the block id; the configured session name is only checked against it.
+	const where = locateBlock(root, paneId, seat.session);
+	if (where.status === "schema") return { status: "UNKNOWN", reason: where.reason };
+	if (where.status === "ambiguous") return { status: "UNKNOWN", reason: "INSPECT_BLOCK_AMBIGUOUS" };
+	if (where.status === "rebound") {
+		return { status: "REFUSED", code: "SEAT_REBOUND",
+			reason: `block lives in session ${where.sessionName ?? "?"} tab ${where.tabName ?? "?"}, not the configured ${seat.session}` };
 	}
-	if (matchingSessions.length !== 1) {
-		return { status: "REFUSED", code: "SEAT_REBOUND", reason: matchingSessions.length === 0
-			? "configured Tern session is absent from the selected window" : "configured Tern session name is ambiguous" };
-	}
-	const selected = matchingSessions[0]!;
-	let blockCount = 0;
-	for (const rawTab of selected.tabs) {
-		const tab = objectValue(rawTab);
-		if (!tab || !Array.isArray(tab.blocks)) return { status: "UNKNOWN", reason: "INSPECT_TAB_SCHEMA_UNKNOWN" };
-		for (const rawBlock of tab.blocks) {
-			const block = objectValue(rawBlock);
-			if (!block || !Number.isSafeInteger(block.id)) return { status: "UNKNOWN", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" };
-			if (block.id === paneId) blockCount++;
-		}
-	}
-	if (blockCount === 0) {
-		return { status: "DEAD", sessionId: selected.id, sessionName: selected.name, paneId, cwd: null, working: false,
+	if (where.status === "absent") {
+		const own = Array.isArray(root.sessions) ? root.sessions.map(objectValue).find(s => s && (s.name === seat.session || String(s.id) === seat.session)) : null;
+		if (!own || !Number.isSafeInteger(own.id)) return { status: "REFUSED", code: "SEAT_REBOUND", reason: "block is in no tab and the configured session is absent from the selected window" };
+		return { status: "DEAD", sessionId: own.id as number, sessionName: typeof own.name === "string" ? own.name : null, paneId, cwd: null, working: false,
 			exited: null, sessionFile: null, reason: "PANE_MISSING_FROM_CONFIGURED_SESSION" };
 	}
-	if (blockCount !== 1) return { status: "UNKNOWN", reason: "INSPECT_BLOCK_AMBIGUOUS" };
+	const selected = { id: where.sessionId, name: where.sessionName };
 	const matchingPanes = root.panes.filter((rawPane) => objectValue(rawPane)?.pane === paneId);
 	if (matchingPanes.length !== 1) return { status: "UNKNOWN", reason: "INSPECT_PANE_ROW_MISSING_OR_DUPLICATE" };
 	const pane = objectValue(matchingPanes[0]);

@@ -21,6 +21,7 @@ import {
 	sessionJournalDecision,
 	ternWindowArgv,
 	ternWindowEnv,
+	type TernObserverIo,
 	type SessionJournalResult,
 } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -59,6 +60,49 @@ test("Tern inspect refuses a block that is not in the configured session", async
 	expect(result).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND" });
 });
 
+// TERNADDR1 (ompkit-fixjo): the tab a block lives in is DERIVED from `tern inspect --json`; the configured fleet
+// session name is only checked against the derived session/tab (name or id). Nothing about names is assumed in
+// code. The fixture mirrors the live tree shape (one session holding tabs); its names are arbitrary.
+const fleetInspect = {
+	sessions: [{ id: 4, name: "Default", shown: true, tabs: [
+		{ id: 55834574849, number: 1, name: "omp-chief", shown: true, zoomed: false,
+			blocks: [{ id: 1756641624081, cwd: "/repo", program: "/bin/zsh", title: "chief", exited: null }] },
+		{ id: 55834574850, number: 2, name: "omp-test", shown: true, zoomed: false,
+			blocks: [{ id: 5, cwd: "/repo", program: "/bin/zsh", title: "director", exited: null }] },
+	] }],
+	panes: [
+		{ pane: 1756641624081, cwd: "/repo", exited: null, working: false, omp_session_file: "/sessions/chief.jsonl", program: "/bin/zsh", args: ["-l"], title: "chief" },
+		{ pane: 5, cwd: "/repo", exited: null, working: true, omp_session_file: "/sessions/director.jsonl", program: "/bin/zsh", args: ["-l"], title: "director" },
+	],
+	clients: [],
+	detached: [],
+};
+
+test("TERNADDR1: the block's tab is derived and the configured name checks against it (planted: old code refused SEAT_REBOUND)", () => {
+	const result = parseTernInspection(fleetInspect, { session: "omp-chief", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" });
+	expect(result).toMatchObject({ status: "FOUND", sessionId: 4, sessionName: "Default", paneId: 1756641624081, sessionFile: "/sessions/chief.jsonl" });
+});
+
+test("TERNADDR1: a tab id checks too; a block that lives in another tab is SEAT_REBOUND naming where it is", () => {
+	expect(parseTernInspection(fleetInspect, { session: "55834574850", pane: "5", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", paneId: 5, working: true });
+	expect(parseTernInspection(fleetInspect, { session: "omp-test", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND", reason: expect.stringContaining("tab omp-chief") });
+});
+
+test("TERNADDR1: a block in no tab is DEAD only when its configured session exists; the same block appearing twice is UNKNOWN", () => {
+	expect(parseTernInspection(fleetInspect, { session: "Default", pane: "999", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "DEAD", reason: "PANE_MISSING_FROM_CONFIGURED_SESSION" });
+	expect(parseTernInspection(fleetInspect, { session: "omp-test", pane: "999", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND" });
+	const twice = { ...fleetInspect, sessions: [{ ...fleetInspect.sessions[0]!, tabs: [...fleetInspect.sessions[0]!.tabs, { ...fleetInspect.sessions[0]!.tabs[0]!, id: 99, number: 3 }] }] };
+	expect(parseTernInspection(twice, { session: "omp-chief", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "UNKNOWN", reason: "INSPECT_BLOCK_AMBIGUOUS" });
+	expect(parseTernInspection(fleetInspect, { session: "Default", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", sessionId: 4 });
+});
+
+test("TERNADDR1: resolveTernWindow admits the default window when the fleet session is a tab of it", () => {
+	const io = { ...defaultTernIo(), run: (argv: string[]) => argv[0] === "tern" && argv.includes("inspect")
+		? { code: 0, out: JSON.stringify(fleetInspect) } : { code: 1, out: "" } } as TernObserverIo;
+	expect(resolveTernWindow({ session: "omp-test", pane: "5", windowKey: "", cwd: "/repo" }, io, {})).toMatchObject({ ok: true, kind: "default" });
+	expect(resolveTernWindow({ session: "nowhere", pane: "5", windowKey: "", cwd: "/repo" }, io, {})).toMatchObject({ ok: false, code: "PLANE_SEAT_UNBOUND", reason: expect.stringContaining("lives in session Default tab omp-test") });
+});
+
 test("Tern inspect reports a missing block as DEAD", () => {
 	expect(parseTernInspection(inspectFixture, { ...seat, pane: "999" })).toMatchObject({ status: "DEAD" });
 });
@@ -68,9 +112,9 @@ test("Tern inspect rejects cwd outside the configured repository", () => {
 	expect(parseTernInspection(snapshot, seat)).toMatchObject({ status: "REFUSED", code: "SEAT_CWD_MISMATCH" });
 });
 
-test("Tern inspect requires an explicit window key", () => {
-	expect(parseTernInspection(inspectFixture, { ...seat, windowKey: "" }))
-		.toMatchObject({ status: "REFUSED", code: "TERN_WINDOW_UNBOUND" });
+test("TERNADDR1 AC2: an empty window key is Tern's documented default window and binds; a non-string key is still refused", () => {
+	expect(parseTernInspection(inspectFixture, { ...seat, windowKey: "" })).toMatchObject({ status: "FOUND", paneId: 123 });
+	expect(parseTernInspection(inspectFixture, { ...seat, windowKey: 7 as unknown as string })).toMatchObject({ status: "REFUSED", code: "TERN_WINDOW_UNBOUND" });
 });
 
 test("session oracle resolves the active leaf past late model usage metadata", async () => {
