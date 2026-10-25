@@ -350,6 +350,21 @@ export function isBareGoalDirective(text: string): boolean {
 	return verb !== "set" && verb !== "pause" && verb !== "resume" && verb !== "drop";
 }
 
+/** USERPROV1: a seat paste is agent-authored, never a human instruction. */
+function seatProvenance(text: string, env: NodeJS.ProcessEnv): { text: string; refused: false } | { refused: true; detail: string } {
+	const name = (env.AGENT_NAME || env.OMP_AGENT_NAME || "").trim();
+	const sender = name.toLowerCase();
+	const header = text.trimStart().toLowerCase();
+	const claimed = header.startsWith("[from agent ") ? header.slice(12).split(" via ", 1)[0].split("]", 1)[0] : "";
+	if (sender === "josh" || sender === "joshua" || claimed === "josh" || claimed === "joshua"
+		|| header.startsWith("[from joshua") || header.startsWith("[from user")
+		|| name.includes("\n") || name.includes("\r") || name.includes("]")) {
+		return { refused: true, detail: "SEND_PROVENANCE_FORGED: agent sends cannot claim human provenance; nothing was sent" };
+	}
+	if (text.trimStart().startsWith("/") || text.startsWith("[from ")) return { refused: false, text };
+	return { refused: false, text: `${name ? `[from agent ${name} via omp-kit send]` : "[from an unnamed agent or kit service via omp-kit send]"}\n${text}` };
+}
+
 /**
  * Send via ntm and prove the marker landed in the target pane's capture.
  * A work dispatch citing no bead is refused before anything reaches tmux
@@ -381,6 +396,11 @@ export async function proveSend(input: {
 	 */
 	admission?: AdmissionInput;
 }): Promise<ProvenSend> {
+	const provenance = seatProvenance(input.message, input.env ?? process.env);
+	if (provenance.refused) {
+		return { status: "ADMISSION_REFUSED", marker: "", sends: 0, drop_path: null, bead_ids: [], no_bead_reason: null, tmux_socket: null,
+			detail: provenance.detail };
+	}
 	if (input.admission !== undefined) {
 		const decision = admitActuator(input.admission);
 		if (decision.verdict === "REFUSE") {
@@ -442,7 +462,7 @@ export async function proveSend(input: {
 	// drop record); delivery is proved by the command effect below, never by
 	// marker text echoed in the composer. Never press Enter into a slash
 	// command: that would execute it twice.
-	const text = isSlash ? input.message : `${input.message}\n[${marker}]`;
+	const text = isSlash ? input.message : `${provenance.text}\n[${marker}]`;
 	// Per-destination serialization (ompkit-fp72.21 items 6-7): concurrent
 	// sends to this pane queue behind one lock for the whole attempt,
 	// including deferred completion. A lock that outlives the bound is never
@@ -620,7 +640,7 @@ export async function proveTernCliSend(input: {
 	const windowKey = input.windowKey?.trim() ?? "";
 	const result = await deliverToTernSeat({ seat: { session: input.session, pane: input.pane, windowKey, cwd }, text: input.message,
 		dropDir: input.dropDir, io: input.io ?? defaultTernIo(), untilDeliveredMs: input.untilDeliveredMs ?? (beads.dispatch ? 300_000 : 0),
-		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer });
+		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer, env: input.env });
 	return { ...result, bead_ids: beads.bead_ids, no_bead_reason: beads.no_bead_reason };
 }
 
@@ -1202,6 +1222,7 @@ export async function deliverToTernSeat(input: {
 	dropDir: string;
 	io: TernObserverIo;
 	gate?: TernSendGate;
+	env?: NodeJS.ProcessEnv;
 	pollMs?: number;
 	deadlineMs?: number;
 	/** BUSY seats are re-observed up to this bound (default 0: refuse at once); exhaustion is NOT_DELIVERED. */
@@ -1220,6 +1241,8 @@ export async function deliverToTernSeat(input: {
 	const deadlineMs = input.deadlineMs ?? TERN_PROOF_DEADLINE_MS;
 	const fail = (code: string, detail: string): TernDeliverResult =>
 		({ status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, code });
+	const provenance = seatProvenance(input.text, input.env ?? process.env);
+	if (provenance.refused) return fail("SEND_PROVENANCE_FORGED", provenance.detail);
 	const gate = input.gate ?? {};
 	// GOALSEND: bare /goal text is refused before any seat observation or
 	// send; goal delivery uses `/goal set BODY`.
@@ -1339,7 +1362,7 @@ export async function deliverToTernSeat(input: {
 			detail: `earlier attempt unproven on this runtime incarnation; new send suppressed`, code: "SUPPRESSED_PENDING" };
 	}
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
-	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${input.text}\n[${marker}]`;
+	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${provenance.text}\n[${marker}]`;
 	const key = buildTernProofKey(journalView, journal, { kind: payloadKind.kind, payload, marker,
 		objective: payloadKind.kind === "goal-set" ? payloadKind.objective : "" });
 	const attempt: TernPendingRecord = { ...key, seatKey, sessionSha: observation.sessionSha ?? "",

@@ -86,7 +86,7 @@ function paneFake(events: PaneEvent[], me: string, pane: SharedPane): PaneFake {
 			run(argv: string[]) {
 				if (argv[0] === "ntm") {
 					const body = argv[argv.length - 1] ?? "";
-					const word = ["alpha", "bravo", "charlie"].find((w) => body.startsWith(w)) ?? "?";
+					const word = ["alpha", "bravo", "charlie"].find((w) => body.split("\n").includes(w)) ?? "?";
 					const found = /\[kit-send-[0-9a-f]+\]/.exec(body);
 					if (found) pane.bodies.push(`${word} ${found[0]}`);
 					// Re-arm busy past every possible send-phase poll so the

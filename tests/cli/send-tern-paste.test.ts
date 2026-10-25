@@ -146,7 +146,7 @@ function plantComposer(sessionFile: string, rec: Partial<{ empty: boolean; at: n
 
 function send(fx: TernFixture, dir: string, extra: { windowKey?: string; composer?: (sessionFile: string) => ComposerVerdict } = {}) {
 	return proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update", dropDir: dir, cwd: fx.repo,
-		knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 20, wait: noWait, io: fx.io, ...extra });
+		knownPrefixes: EMPTY_PREFIXES, env: {}, pollMs: 1, deadlineMs: 20, wait: noWait, io: fx.io, ...extra });
 }
 
 const effects = (taken: Taken) => taken.luaDispatches + taken.pastes + taken.enters;
@@ -165,7 +165,7 @@ test("AC1 TERNADDR1: no window key delivers by paste + Enter, proven by the USER
 	expect(fx.taken.pastes).toBe(1);
 	expect(fx.taken.enters).toBe(1);
 	const paste = fx.taken.runs.find((argv) => argv.includes("paste"))!;
-	expect(paste.slice(1)).toEqual(["send", "5", "paste", `status update\n[${got.marker}]`]);
+	expect(paste.slice(1)).toEqual(["send", "5", "paste", `[from an unnamed agent or kit service via omp-kit send]\nstatus update\n[${got.marker}]`]);
 	expect(fx.taken.runs.some((argv) => argv.includes("--window") || argv.includes("ctl"))).toBe(false);
 	// Enter comes only after the paste.
 	expect(fx.taken.runs.findIndex((argv) => argv.includes("Enter"))).toBeGreaterThan(fx.taken.runs.indexOf(paste));
