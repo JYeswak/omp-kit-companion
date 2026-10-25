@@ -1844,6 +1844,9 @@ ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin
 	// SCRATCHRETIRE1 AC5: the owner record and the release marker go last. A delete that fails partway (a nested dir the
 	// owner cannot write) used to take both with the first files and leave an unowned remnant nobody could re-release.
 	const remove = deps.removeTree ?? removeTreeRetrying;
+	// MACHINEMEASURES1 (ompkit-774u.9.22): M-REAPED-BYTES sums every receipt's bytes; a release row without
+	// a byte count makes the measure UNKNOWN (1,196 such rows on 2026-10-25), so the size is taken before the delete.
+	const sizeBytes = dirSize(dir);
 	try {
 		for (const name of readdirSync(dir)) {
 			if (name === ".owner" || name === RELEASE_FILE) continue;
@@ -1856,7 +1859,7 @@ ownerText: string, dev: number, ino: number, releasedAt: string, bin: ScratchBin
 		return held("now-held-delete-failed");
 	}
 	if (existsSync(dir)) return held("now-held-delete-failed");
-	appendLog(home, { event: "release-deleted", dir, at: releasedAt, owner: owner.pid, bin });
+	appendLog(home, { event: "release-deleted", dir, at: releasedAt, owner: owner.pid, bin, sizeBytes });
 	return { ok: true, changed: true, dir, reason: "owner-released-deleted", ownerPid: owner.pid };
 }
 

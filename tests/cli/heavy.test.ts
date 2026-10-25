@@ -914,6 +914,8 @@ test.skipIf(!FIXTURE_AMPLE)("SAVEFIRST1 planted: --disk-observer statfs admits u
 	const refused = await invoke(root, ["heavy", "--no-wait", "--label", "sbh-veto", "--", "sh", "-c", `printf ran > '${control}'`], pressured);
 	expect(refused.code).toBe(75);
 	expect(refused.stderr).toContain("disk low: sbh check --need 10G reports pressure");
+	// MACHINEMEASURES1 (ompkit-774u.9.22): the OS reading sits beside the sbh verdict so a wedge is visible.
+	expect(refused.stderr).toMatch(/RESOURCE_DEFERRED: disk low: sbh check --need 10G reports pressure; statfs: \d+\.\d GB free \(\d+\.\d%\)/);
 	expect(existsSync(control)).toBe(false);
 	const marker = join(root, "saved-marker");
 	const admitted = await invoke(root, ["heavy", "--no-wait", "--disk-observer", "statfs", "--label", "save-path", "--", "sh", "-c", `printf ran > '${marker}'`], pressured);

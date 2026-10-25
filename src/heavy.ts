@@ -114,7 +114,13 @@ export const HEAVY_DISK_NEED_BYTES = 10 * 1024 ** 3;
 /** EX_UNAVAILABLE (sysexits.h): a required observer is missing; distinct from the 75 deferral. */
 export const HEAVY_PREREQ_MISSING = 69;
 export type DiskVerdict = { kind: "ok"; observer: DiskObserver } | { kind: "pressure"; text: string; observer: DiskObserver } | { kind: "unavailable"; text: string; observer: DiskObserver };
-async function sbhVerdict(sbhBin = "sbh"): Promise<DiskVerdict> {
+/** `statfs: 129.2 GB free (13.6%)` for the cwd, or the reason there is no reading; never throws. */
+export function statfsSummary(cwd: string): string {
+	const capacity = statfsCapacity(cwd);
+	if (capacity === null) return "statfs: no reading";
+	return `statfs: ${(capacity.freeBytes / 1024 ** 3).toFixed(1)} GB free (${capacity.freePct.toFixed(1)}%)`;
+}
+async function sbhVerdict(sbhBin = "sbh", cwd = process.cwd()): Promise<DiskVerdict> {
 	let code: number;
 	try {
 		const proc = Bun.spawn([sbhBin, "check", "--need", HEAVY_DISK_NEED], { stdout: "ignore", stderr: "ignore" });
@@ -123,7 +129,9 @@ async function sbhVerdict(sbhBin = "sbh"): Promise<DiskVerdict> {
 		return { kind: "unavailable", text: "sbh binary not runnable", observer: "sbh" };
 	}
 	if (code === 0) return { kind: "ok", observer: "sbh" };
-	if (code === 1) return { kind: "pressure", text: `disk low: sbh check --need ${HEAVY_DISK_NEED} reports pressure`, observer: "sbh" };
+	// MACHINEMEASURES1 (ompkit-774u.9.22): the sbh verdict and the OS reading side by side, so a wedge (sbh pressure
+	// while statfs shows free space, 2026-10-25: rc 75 all day at 129 GB free) is visible in the refusal itself.
+	if (code === 1) return { kind: "pressure", text: `disk low: sbh check --need ${HEAVY_DISK_NEED} reports pressure; ${statfsSummary(cwd)}`, observer: "sbh" };
 	return { kind: "unavailable", text: `sbh check exited ${code}`, observer: "sbh" };
 }
 export type DiskCapacity = { freeBytes: number; freePct: number };
@@ -164,10 +172,10 @@ export async function diskVerdict(input?: { config?: HeavyConfig; cwd?: string; 
 	const floor = input?.config?.disk_floor_pct ?? null;
 	const cwd = input?.cwd ?? process.cwd();
 	const sbhBin = input?.sbhBin ?? "sbh";
-	if (observer === "sbh") return sbhVerdict(sbhBin);
+	if (observer === "sbh") return sbhVerdict(sbhBin, cwd);
 	if (observer === "statfs") return decideDiskPressure(statfsCapacity(cwd), floor);
 	if (sbhResolvable()) {
-		const verdict = await sbhVerdict(sbhBin);
+		const verdict = await sbhVerdict(sbhBin, cwd);
 		if (verdict.kind === "unavailable")
 			return { kind: "unavailable", text: `${verdict.text} (set disk_observer to "statfs" for OS-native admission)`, observer: "sbh" };
 		return verdict;
