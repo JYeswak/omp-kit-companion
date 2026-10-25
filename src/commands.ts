@@ -198,6 +198,8 @@ export type Command = {
 	readonly usage: string;
 	readonly flags: readonly Flag[];
 	readonly dataSchema?: DataSchema;
+	/** Route-specific meanings override the global dictionary only on this route. */
+	readonly exit_contract?: Readonly<Record<string, unknown>>;
 	readonly subcommands?: readonly Command[];
 	/** Preserve a runnable parent route while exposing its named children. */
 	readonly subcommandOptional?: boolean;
@@ -470,7 +472,13 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },
 		{ name: "--max-runtime", value: "SECONDS", description: "Runtime budget separate from admission: flag > label table load.json runtime_budget_s.<label> > config/heavy-labels.json > none for undeclared labels. Expiry names the bound and source (flag | label table); SIGTERM, SIGKILL 10 s later, exit 124 RUNTIME_BUDGET_EXCEEDED" },
 		{ name: "--disk-observer", value: "statfs|sbh|auto", description: "Disk observer for this call, overriding load.json; statfs admits on physical bytes (10 GiB) and never consults sbh" },
-	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
+	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true, exit_contract: {
+		10: { meaning: "Disk stage refuses heavy work", retryable: false, remediation: "Restore disk capacity before retrying." },
+		69: { meaning: "Disk observer prerequisite unavailable", retryable: false, remediation: "Configure an available disk observer." },
+		75: { meaning: "Admission deferred or queue wait exhausted", retryable: true },
+		124: { meaning: "Admitted child runtime budget exceeded", retryable: false },
+		child: "Raw child exit code passthrough, unchanged; kit category and retryability meanings do not apply. Decide retry from the child's own contract.",
+	} },
 	{ name: "next", description: "Recommend one next loop action and the skills that apply to current changes, without changing anything", usage: "next --role worker|director [--repo PATH] [--agent NAME]", flags: [
 		{ name: "--role", value: "worker|director", description: "Required loop role: worker or director" },
 		{ name: "--repo", value: "PATH", description: "Repository to inspect (default: current directory)" },
@@ -797,7 +805,13 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--reserve", description: "Turn a GRANTED answer into an exclusive lease" },
 			{ name: "--ttl", value: "SECONDS", description: "Lease TTL with --reserve (default 3600)" },
 			{ name: "--reason", value: "TEXT", description: "Lease reason with --reserve (never a credential)" },
-		], example: "omp-kit custody check --repo /path/to/repo --json doc/README.md", runnable: false, mutation: true, dataSchema: custodyData },
+		], example: "omp-kit custody check --repo /path/to/repo --json doc/README.md", runnable: false, mutation: true, dataSchema: custodyData, exit_contract: {
+			0: { meaning: "GRANTED", retryable: false },
+			10: { meaning: "HELD by another owner", retryable: false, remediation: "Coordinate with the holder before retrying." },
+			11: { meaning: "DIRTY_UNOWNED", retryable: false, remediation: "Resolve ownership of the existing changes before retrying." },
+			2: { meaning: "Invalid request or NOT_RUN", retryable: false },
+			3: { meaning: "Custody authority UNAVAILABLE", retryable: false },
+		} },
 	], example: "omp-kit custody check --repo /path/to/repo --json doc/README.md", runnable: false, dataSchema: custodyData },
 	{ name: "intake", description: "Record one request from Joshua, resolve the receiving seat's role, print DO or ROUTE <bead> -> <seat>", usage: "intake --from joshua --text TEXT --seat SEAT [--kind rule|work]", flags: [
 		{ name: "--from", value: "NAME", description: "Request source; only joshua is recorded" },
