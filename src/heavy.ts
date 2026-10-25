@@ -8,20 +8,18 @@ import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { incarnation, incarnationSync, isDead, normalizeStart, probeIncarnation } from "./kitlib/proc.ts";
 import { admitDiskWork } from "./disk-stage.ts";
 import type { LoadJob } from "./load-doctor.ts";
+import labelBudgets from "../config/heavy-labels.json";
 
 const LOAD_PER_CORE_LIMIT = 2.5;
 const STATUS_INTERVAL_MS = 30_000;
 const LOCK_POLL_MS = 100;
 const QUEUE_POLL_MS = 1_000;
 const MAX_WAIT_SECONDS = 900;
-// HEAVYRUNTIME1: Bun alone took 499 s; the full suite took 40–60 min at
-// load 13–22 (ompkit-l3uka). Three hours gives 3× the observed upper duration.
-const DEFAULT_RUNTIME_SECONDS = 10800;
 
 type HeavyJob = LoadJob & { argv: string[]; process_start: string; queued_at: string; started_at?: string };
 type DiskObserver = "sbh" | "statfs" | "auto";
 const DISK_OBSERVERS: readonly DiskObserver[] = ["sbh", "statfs", "auto"];
-type HeavyConfig = { slots: number; max_wait_s: number; disk_observer: DiskObserver; disk_floor_pct: number | null; default_runtime_s?: number; runtime_budget_s?: Record<string, number> };
+type HeavyConfig = { slots: number; max_wait_s: number; disk_observer: DiskObserver; disk_floor_pct: number | null; runtime_budget_s?: Record<string, number> };
 type MachineLoad = { load1: number; ncpu: number };
 type HeavySignal = "SIGINT" | "SIGTERM";
 type HeavyChild = { exited: Promise<number>; kill(signal: HeavySignal | "SIGKILL"): void };
@@ -65,12 +63,10 @@ function loadConfig(override?: DiskObserver): HeavyConfig {
 	const maxWait = "max_wait_s" in value ? value.max_wait_s : MAX_WAIT_SECONDS;
 	const observer: unknown = "disk_observer" in value ? value.disk_observer : "auto";
 	const floor: unknown = "disk_floor_pct" in value ? value.disk_floor_pct : null;
-	const defaultRuntime: unknown = "default_runtime_s" in value ? value.default_runtime_s : DEFAULT_RUNTIME_SECONDS;
 	const runtimeBudgets: unknown = "runtime_budget_s" in value ? value.runtime_budget_s : {};
-	if (typeof defaultRuntime !== "number" || !Number.isSafeInteger(defaultRuntime) || defaultRuntime <= 0 ||
-		typeof runtimeBudgets !== "object" || runtimeBudgets === null || Array.isArray(runtimeBudgets) ||
+	if (typeof runtimeBudgets !== "object" || runtimeBudgets === null || Array.isArray(runtimeBudgets) ||
 		Object.values(runtimeBudgets).some(budget => typeof budget !== "number" || !Number.isSafeInteger(budget) || budget <= 0))
-		throw new Error("invalid heavy-work config for --max-runtime: default_runtime_s and runtime_budget_s values must be positive integer seconds");
+		throw new Error("invalid heavy-work config for --max-runtime: runtime_budget_s values must be positive integer seconds");
 	if (typeof slots !== "number" || !Number.isInteger(slots) || slots < 1 || slots > 64 ||
 		typeof maxWait !== "number" || !Number.isFinite(maxWait) || maxWait < 0 || maxWait > MAX_WAIT_SECONDS)
 		throw new Error(`invalid heavy-work config: slots must be 1..64 and max_wait_s must be 0..${MAX_WAIT_SECONDS}`);
@@ -78,7 +74,7 @@ function loadConfig(override?: DiskObserver): HeavyConfig {
 		throw new Error(`invalid heavy-work config: disk_observer must be "sbh", "statfs" or "auto": ${path}`);
 	if (floor !== null && (typeof floor !== "number" || !Number.isFinite(floor) || floor < 0 || floor > 50))
 		throw new Error(`invalid heavy-work config: disk_floor_pct must be 0..50: ${path}`);
-	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: override === "statfs" ? null : floor, default_runtime_s: defaultRuntime, runtime_budget_s: runtimeBudgets as Record<string, number> };
+	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: override === "statfs" ? null : floor, runtime_budget_s: runtimeBudgets as Record<string, number> };
 }
 
 export function machineLoadBlockReason(load1: number, ncpu: number): string | null {
@@ -352,9 +348,12 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		repo: currentRepo(cwd), cwd, agent: process.env.AGENT_NAME ?? process.env.OMP_AGENT_NAME ?? "unknown",
 		tmux_pane: process.env.TMUX_PANE ?? "", argv, state: "queued", queued_at: queuedAt,
 	};
-	const runtimeSeconds = flagRuntime ??
-		(Object.hasOwn(config.runtime_budget_s ?? {}, job.label) ? config.runtime_budget_s?.[job.label] : undefined) ??
-		config.default_runtime_s ?? DEFAULT_RUNTIME_SECONDS;
+	const declared = Object.hasOwn(labelBudgets, job.label) ? labelBudgets[job.label as keyof typeof labelBudgets] : undefined;
+	const configured = Object.hasOwn(config.runtime_budget_s ?? {}, job.label) ? config.runtime_budget_s?.[job.label] : undefined;
+	const runtimeSeconds = flagRuntime ?? configured ?? declared?.seconds;
+	const runtimeSource = flagRuntime !== undefined ? "flag --max-runtime" :
+		configured !== undefined ? `label table load.json runtime_budget_s.${job.label}` :
+		declared ? `label table config/heavy-labels.json (${declared.source})` : "none";
 	// HEAVYCI1: a missing observer fails now, before queueing or waiting on the
 	// state mutex, whatever load and slots say. This reading only decides that;
 	// admission below observes the disk again inside the mutex, because a
@@ -458,6 +457,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 				let timer: NodeJS.Timeout | undefined;
 				const timeout = Promise.withResolvers<"deadline">();
 				const checkRuntime = () => {
+					if (runtimeSeconds === undefined) return;
 					const remaining = runtimeSeconds * 1000 - (Date.now() - childStartedAt);
 					if (remaining <= 0) timeout.resolve("deadline");
 					// Native timers overflow above 2^31-1 ms; long declared budgets stay bounded.
@@ -483,7 +483,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 						clearTimeout(graceTimer);
 					}
 					await removeQueuedJob(storage, id, owner);
-					process.stderr.write(`RUNTIME_BUDGET_EXCEEDED: child ran ${((Date.now() - childStartedAt) / 1000).toFixed(2)}s > --max-runtime ${runtimeSeconds}s (label ${job.label}); raise --max-runtime or set runtime_budget_s.${job.label}\n`);
+					process.stderr.write(`RUNTIME_BUDGET_EXCEEDED: child ran ${((Date.now() - childStartedAt) / 1000).toFixed(2)}s > --max-runtime ${runtimeSeconds}s (label ${job.label}); source=${runtimeSource}; override with --max-runtime\n`);
 					return 124;
 				}
 				await removeQueuedJob(storage, id, owner);

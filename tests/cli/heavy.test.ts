@@ -117,7 +117,7 @@ test("HEAVYRUNTIME control: never admitted still defers at queue timeout", async
 
 test("HEAVYRUNTIME cuts runtime at flag budget and removes the job", async () => {
 	const root = fixture();
-	configure(root, { max_wait_s: 5, default_runtime_s: 4, runtime_budget_s: { runtime: 3 } });
+	configure(root, { max_wait_s: 5, runtime_budget_s: { runtime: 3 } });
 	const result = await invokeRuntime(root, "2");
 	expect(result.code).toBe(124);
 	expect(result.stderr).toContain("RUNTIME_BUDGET_EXCEEDED: child ran ");
@@ -125,15 +125,69 @@ test("HEAVYRUNTIME cuts runtime at flag budget and removes the job", async () =>
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs"))).toEqual([]);
 }, 15000);
 
-test("HEAVYRUNTIME per-label budget beats default; unmatched label uses default", async () => {
+test("HEAVYRUNTIME declared label table stops child; undeclared label has no global default", async () => {
 	const root = fixture();
-	configure(root, { max_wait_s: 5, default_runtime_s: 1, runtime_budget_s: { runtime: 2 } });
+	// The removed global fallback is scaled to one second; the child crosses it.
+	configure(root, { max_wait_s: 5, default_runtime_s: 1, runtime_budget_s: { runtime: 1 } });
 	const labeled = await invokeRuntime(root);
 	expect(labeled.code).toBe(124);
-	expect(labeled.stderr).toContain("> --max-runtime 2s (label runtime)");
-	const fallback = await invokeRuntime(root, undefined, "other");
-	expect(fallback.code).toBe(124);
-	expect(fallback.stderr).toContain("> --max-runtime 1s (label other)");
+	expect(labeled.stderr).toContain("1s (label runtime)");
+	expect(labeled.stderr).toContain("source=label table load.json runtime_budget_s.runtime");
+	const fallback = await invokeRuntime(root, undefined, "other", "setTimeout(() => process.exit(7), 2200)");
+	expect({ code: fallback.code, stderr: fallback.stderr }).toEqual({ code: 7, stderr: "" });
+}, 15000);
+
+test("HEAVYRUNTIME explicit flag overrides the label table", async () => {
+	const root = fixture();
+	configure(root, { max_wait_s: 5, runtime_budget_s: { runtime: 1 } });
+	const result = await invokeRuntime(root, "4", "runtime", "setTimeout(() => process.exit(7), 2200)");
+	expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 7, stderr: "" });
+}, 10000);
+
+test("HEAVYRUNTIME shipped label table and global-default mutant use the real CLI", async () => {
+	const root = fixture();
+	configure(root, { max_wait_s: 5 });
+	// The child uses a real process clock; parent fake timers cannot drive it.
+	// Scale only this shipped row to 1s, then restore the old global fallback in memory.
+	const preload = join(root, "runtime-probe.ts");
+	const probe = (mutant: boolean) => {
+		writeFileSync(preload, `
+			import ${JSON.stringify(forgeHealthyStatfs)};
+			import { plugin } from "bun";
+			import { readFileSync } from "node:fs";
+			plugin({ name: "runtime-budget-probe", setup(build) {
+				build.onLoad({ filter: /heavy[.]ts$/ }, ({ path }) => {
+					let contents = readFileSync(path, "utf8");
+					const original = "const runtimeSeconds = flagRuntime ?? configured ?? declared?.seconds;";
+					const replacement = ${JSON.stringify(mutant
+						? "const runtimeSeconds = flagRuntime ?? configured ?? (job.label === \"cli-tests\" && declared ? 1 : declared?.seconds) ?? 1;"
+						: "const runtimeSeconds = flagRuntime ?? configured ?? (job.label === \"cli-tests\" && declared ? 1 : declared?.seconds);")};
+					if (!contents.includes(original)) throw new Error("runtime probe target missing");
+					contents = contents.replace(original, replacement);
+					return { contents, loader: "ts" };
+				});
+			}});
+		`);
+	};
+	const args = (label: string) => ["heavy", "--label", label, "--", process.execPath, "-e",
+		'console.log("CHILD_START"); setTimeout(() => { console.log("CHILD_DONE"); process.exit(7) }, 2200)'];
+	probe(false);
+	const declared = await invoke(root, args("cli-tests"), {}, { preload });
+	expect(declared.code).toBe(124);
+	expect(declared.stdout).toContain("CHILD_START");
+	expect(declared.stdout).not.toContain("CHILD_DONE");
+	expect(declared.stderr).toContain("1s (label cli-tests)");
+	expect(declared.stderr).toContain("source=label table config/heavy-labels.json");
+	const control = await invoke(root, args("undeclared-runtime-probe"), {}, { preload });
+	expect(control.code).toBe(7);
+	expect(control.stdout).toContain("CHILD_DONE");
+	expect(control.stderr).toBe("");
+	probe(true);
+	const mutant = await invoke(root, args("undeclared-runtime-probe"), {}, { preload });
+	expect(mutant.stdout).toContain("CHILD_START");
+	expect(mutant.stdout).not.toContain("CHILD_DONE");
+	expect(mutant.code).toBe(124);
+	expect(mutant.stderr).toContain("source=none");
 }, 15000);
 
 test("HEAVYRUNTIME rejects nonpositive and noninteger flag budgets", async () => {

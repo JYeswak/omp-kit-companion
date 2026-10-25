@@ -702,7 +702,7 @@ Example files:
 ```jsonc
 // $XDG_CONFIG_HOME/omp-kit/load.json: slots 1..64, max_wait_s in seconds,
 // disk_observer "sbh"|"statfs"|"auto" (default "auto": sbh when on PATH else statfs),
-// disk_floor_pct 0..50 or absent; default_runtime_s, runtime_budget_s.<label>.
+// disk_floor_pct 0..50; runtime: flag > runtime_budget_s.<label> > label table
 { "slots": 2, "max_wait_s": 600, "disk_observer": "auto" }
 ```
 
