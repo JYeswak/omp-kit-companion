@@ -54,9 +54,22 @@ judge "$R" "(delete) $Z refs/heads/main $C2
 "
 ok "$?" "4" "deletion-refused"
 
+# SNAPSHOTPUB1 AC2 (ompkit-v66l.14): pre-fix this exited 0 (an off-main commit published to a topic branch).
 judge "$R" "refs/heads/cand $X refs/heads/feature $Z
 "
-ok "$?" "0" "other-remote-ref-passes"
+ok "$?" "4" "other-branch-push-refused"
+grep -q "only main is published" "$TMP/err"
+ok "$?" "0" "other-branch-push-named"
+judge "$R" "refs/heads/main $C2 refs/heads/feature $Z
+"
+ok "$?" "4" "main-sha-to-other-branch-refused"
+# Controls: tags and other non-branch refs pass; deleting a stray remote branch passes.
+judge "$R" "refs/tags/v1 $C2 refs/tags/v1 $Z
+"
+ok "$?" "0" "tag-passes"
+judge "$R" "(delete) $Z refs/heads/feature $C1
+"
+ok "$?" "0" "other-branch-deletion-passes"
 
 # A refused line is not cleared by a passing line after it, and only the
 # off-main sha is named.
