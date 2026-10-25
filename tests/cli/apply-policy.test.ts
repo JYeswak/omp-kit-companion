@@ -6,9 +6,14 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { applyPolicyPlan, planPolicy } from "../../src/apply-policy.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { cachedOmpPackage, ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 import { writeProfileConfig } from "./profile-fixture.ts";
 
-const nativeOmp = resolveOmpIdentity().launcher;
+const nativeIdentity = resolveOmpIdentity();
+const nativeOmp = nativeIdentity.launcher;
+const nativeVersion: unknown = JSON.parse(readFileSync(join(nativeIdentity.packageRoot, "package.json"), "utf8")).version;
+const nativeSourceCache = typeof nativeVersion === "string" && cachedOmpPackage(nativeVersion, process.env) === nativeIdentity.packageRoot
+	? ompSourceCacheRoot(process.env) : null;
 const fixtures: string[] = [];
 const nativeTest = (name: string, body: () => void) => test(name, body, 120_000);
 type NativeConfigResult = { code: number | null; stdout: string; stderr: string };
@@ -18,13 +23,18 @@ function nativeTestEnv(home: string): Record<string, string> {
 	mkdirSync(bin, { recursive: true, mode: 0o700 });
 	const launcher = join(bin, "omp");
 	if (!existsSync(launcher)) symlinkSync(nativeOmp, launcher);
-	return {
+	const env: Record<string, string> = {
 		HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
 		XDG_CONFIG_HOME: join(home, "xdg-config"), XDG_CACHE_HOME: join(home, "xdg-cache"),
 		XDG_DATA_HOME: join(home, "xdg-data"), XDG_STATE_HOME: join(home, "xdg-state"),
 		PATH: [bin, dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
 		GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: join(home, "gitconfig"), NO_COLOR: "1", TERM: "dumb",
 	};
+	if (nativeSourceCache) {
+		env.OMP_KIT_OMP_SRC_CACHE = nativeSourceCache;
+		env.OMP_KIT_OMP_SRC_FETCH = "0";
+	}
+	return env;
 }
 function runNativeConfig(home: string, project: string, profile: string, args: string[]): NativeConfigResult {
 	const selected = profile === "default" ? [] : ["--profile", profile];
