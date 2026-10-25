@@ -6,7 +6,13 @@ const MAX_MISSION_BYTES = 1024 * 1024;
 const MAX_CHECK_BYTES = 4 * 1024 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
 const PILLAR_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
-const CHECK_COMMAND = /^omp-kit heavy -- bun ([A-Za-z0-9._/-]+) --pillar ([a-z][a-z0-9-]*)$/;
+/** A registered pillar check: an optional `omp-kit heavy -- ` admission prefix, a `bun` or `python3`
+runner, the registered source path, `--pillar <id>`, and an optional `--json`. MEASUREREG1
+(ompkit-fp72.135.3.1): the fleet's checks are `python3 scripts/measure.py --pillar <id> --json`, one
+runner over the plan's measure registry; the `heavy` prefix is optional because an admission that
+defers (disk pressure, 2026-10-25: every pillar deferred 600 s) must not make the check unrunnable.
+Linear: each class is exclusive of what follows it (space, `--`). */
+const CHECK_COMMAND = /^(?:omp-kit heavy -- )?(?:bun|python3) ([A-Za-z0-9._/-]+) --pillar ([a-z][a-z0-9-]*)(?: --json)?$/;
 const NOFOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
 export type MissionCheckStatus = "REGISTERED" | "UNREGISTERED";
