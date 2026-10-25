@@ -333,8 +333,29 @@ printf '[test] join I/O\n\nBead: t-land\n' > "$TMP/facts-join-io.msg"
 member="$R/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree"
 out=$(cd "$R" && sh "$member" "$TMP/facts-join-io.msg" 2>&1)
 check "$?" "0" "join-io-passing-control" "$out" ""
+# Corrupt the real invocation's join destinations only after move allocation,
+# when blame runs. Git still produces the real attribution; no metadata or
+# decision is mocked, and the private directory remains kitlib-owned.
+join_real_git=$(command -v git)
+join_fault_bin="$TMP/join-fault-bin"
+join_fault_root="$TMP/join-fault-root"
+mkdir "$join_fault_bin" "$join_fault_root"
+cat > "$join_fault_bin/git" <<'SH'
+#!/bin/sh
+if [ "$1" = blame ]; then
+	found=0
+	for scope in "$GATE_JOIN_ROOT"/stale-worktree-facts.*; do
+		[ -d "$scope" ] || continue
+		mkdir "$scope/$GATE_JOIN_TARGET" || exit 91
+		found=1
+	done
+	[ "$found" -eq 1 ] || exit 91
+fi
+exec "$GATE_REAL_GIT" "$@"
+SH
+chmod +x "$join_fault_bin/git"
 for target in removed hit; do
-	out=$(cd "$R" && sh -c 'mkdir "$PWD/.git/stale-worktree-$3.$$" || exit 91; exec sh "$1" "$2"' join-fault "$member" "$TMP/facts-join-io.msg" "$target" 2>&1)
+	out=$(cd "$R" && PATH="$join_fault_bin:$PATH" KITLIB_TMP_ROOT="$join_fault_root" GATE_JOIN_ROOT="$join_fault_root" GATE_JOIN_TARGET="$target" GATE_REAL_GIT="$join_real_git" sh "$member" "$TMP/facts-join-io.msg" 2>&1)
 	fault_rc=$?
 	case "$target" in
 		removed) expected="stale-worktree: cannot materialize removed sites" ;;
@@ -406,6 +427,46 @@ branch=$(git -C "$R" symbolic-ref HEAD)
 printf 'not-an-object-id\n' > "$R/.git/$branch"
 out=$(cd "$R" && sh .git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree "$TMP/history-good.msg" 2>&1)
 check "$?" "1" "history-malformed-ref-refuses" "$out" "stale-worktree: unreadable HEAD"
+
+# 24. Native land --patch commits in a linked worktree: .git is a file,
+# while the installed commit-msg chain lives in the shared Git directory.
+# Exercise that real hook without a .git-shape bypass. The public compiled
+# land publication/isolation smoke is a separate original-acceptance replay.
+R=$(new_repo linked-worktree)
+A=$(git -C "$R" rev-parse HEAD)
+W="$TMP/linked-worktree-candidate"
+git -C "$R" worktree add --quiet --detach "$W" HEAD || exit 1
+check "$([ -f "$W/.git" ] && printf file)" "file" "linked-git-is-file" "" ""
+printf 'base line\nlanded line L\npeer uncommitted bytes\n' > "$R/pkg/f.txt"
+printf 'base line\nlanded line L\nselected line\n' > "$W/pkg/f.txt"
+out=$(git -C "$W" commit --only --message "[test] linked selected addition" --message "Bead: t-other" -- pkg/f.txt 2>&1)
+check "$?" "0" "linked-addition-passes" "$out" ""
+check "$(git -C "$W" show HEAD:pkg/f.txt)" "$(printf 'base line\nlanded line L\nselected line')" "linked-only-selected-bytes" "$out" ""
+check "$(cat "$R/pkg/f.txt")" "$(printf 'base line\nlanded line L\npeer uncommitted bytes')" "linked-peer-bytes-unchanged" "$out" ""
+check "$(git -C "$R" rev-parse HEAD)" "$A" "linked-canonical-head-unmoved" "$out" ""
+
+# A same-bead removal with an old mtime must still refuse through rule (a),
+# with the actual landing SHA and actionable guidance, not a scratch error.
+B=$(git -C "$W" rev-parse HEAD)
+printf 'base line\nselected line\n' > "$W/pkg/f.txt"
+backdate "$W/pkg/f.txt"
+out=$(git -C "$W" commit --only --message "[test] linked stale removal" --message "Bead: t-land" -- pkg/f.txt 2>&1)
+check "$?" "1" "linked-stale-refused" "$out" "STALE_WORKTREE pkg/f.txt reverts $A"
+check "$(git -C "$W" rev-parse HEAD)" "$B" "linked-stale-head-unmoved" "$out" "rework on a fresh worktree"
+
+# Freshness alone must not excuse a foreign-bead removal (rule (b)).
+touch "$W/pkg/f.txt"
+out=$(git -C "$W" commit --only --message "[test] linked foreign removal" --message "Bead: t-other" -- pkg/f.txt 2>&1)
+check "$?" "1" "linked-foreign-refused" "$out" "from bead t-land"
+check "$(git -C "$W" rev-parse HEAD)" "$B" "linked-foreign-head-unmoved" "$out" "Supersedes:"
+
+# Re-adding the removed text elsewhere remains an allowed move, including
+# in a linked worktree; the global moved-text scratch must be usable too.
+printf 'landed line L\n' > "$W/pkg/g.txt"
+git -C "$W" add pkg/g.txt
+out=$(git -C "$W" commit --only --message "[test] linked move" --message "Bead: t-other" -- pkg/f.txt pkg/g.txt 2>&1)
+check "$?" "0" "linked-move-passes" "$out" ""
+check "$(git -C "$W" show HEAD:pkg/g.txt)" "landed line L" "linked-move-retains-line" "$out" ""
 
 printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

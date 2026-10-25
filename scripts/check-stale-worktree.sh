@@ -159,15 +159,14 @@ nl=$(printf '\nX'); nl=${nl%X}
 # text, one per line. A removed line whose text is re-added at least as many
 # times is a move, not a revert (count-aware: each add cancels one removal,
 # globally across paths).
-mvadd_sorted="$root/.git/stale-worktree-added.$$"
-mvused="$root/.git/stale-worktree-used.$$"
-mvavail="$root/.git/stale-worktree-avail.$$"
-mvrm="$root/.git/stale-worktree-removed.$$"
-mvhit="$root/.git/stale-worktree-hit.$$"
-# The same invocation owner cleans these existing files on every exit.
+mvadd_sorted="$metadata_dir/added"
+mvused="$metadata_dir/used"
+mvavail="$metadata_dir/avail"
+mvrm="$metadata_dir/removed"
+mvhit="$metadata_dir/hit"
+# All invocation scratch shares the existing owner and cleanup, including
+# when a linked worktree's .git is a file rather than a directory.
 # Join I/O failures propagate in pipeline status, not a disk error marker.
-# Escape variable references for exit-time expansion by the cleanup owner.
-kitlib_tmp_atexit "rm -f \"\$root/.git/stale-worktree-refused.\$\$\" \"\$root/.git/stale-worktree-report.\$\$\" \"\$mvadd_sorted\" \"\$mvused\" \"\$mvavail\" \"\$mvrm\" \"\$mvhit\""
 capture_diff || { printf 'stale-worktree: cannot read staged diff\n' >&2; exit 1; }
 awk '/^diff --git /{inat=0;next} /^@@ /{inat=1;next} !inat{next} /^\+/{print substr($0,2)}' "$metadata_dir/diff.raw" > "$metadata_dir/additions.raw" || exit 1
 sort "$metadata_dir/additions.raw" > "$mvadd_sorted" || exit 1
@@ -264,9 +263,9 @@ while IFS= read -r path; do
 		done
 		# Rule (a): worktree predates the landing (absent file skips: no mtime).
 		if [ -n "$mt" ] && [ -n "$cdate" ] && [ "$cdate" -gt "$mt" ] && [ "$declared" -eq 0 ]; then
-			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s)\n' "$path" "$sha" "$subject" >> "$root/.git/stale-worktree-report.$$" || exit 1 ;; esac
+			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s)\n' "$path" "$sha" "$subject" >> "$metadata_dir/report" || exit 1 ;; esac
 			seen="$seen $sha"
-			printf '1\n' >> "$root/.git/stale-worktree-refused.$$" || exit 1
+			printf '1\n' >> "$metadata_dir/refused" || exit 1
 			continue
 		fi
 		# Rule (b): foreign bead reverted without declaration. Skipped for
@@ -278,14 +277,14 @@ while IFS= read -r path; do
 		[ "$export_ok" -eq 1 ] && skip_b=1
 		case "$moved" in *" $ln "*) skip_b=1 ;; esac
 		if [ "$skip_b" -eq 0 ] && [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
-			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$root/.git/stale-worktree-report.$$" || exit 1 ;; esac
+			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$metadata_dir/report" || exit 1 ;; esac
 			seen="$seen $sha"
-			printf '1\n' >> "$root/.git/stale-worktree-refused.$$" || exit 1
+			printf '1\n' >> "$metadata_dir/refused" || exit 1
 		fi
 	done < "$mvhit" || exit 1
  done < "$metadata_dir/paths.lines" || { printf 'stale-worktree: cannot evaluate removed sites\n' >&2; exit 1; }
- if [ -s "$root/.git/stale-worktree-refused.$$" ]; then
- 	report=$(cat "$root/.git/stale-worktree-report.$$" 2>/dev/null)
+ if [ -s "$metadata_dir/refused" ]; then
+ 	report=$(cat "$metadata_dir/report" 2>/dev/null)
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
  	printf 'stale-worktree: declare each intended revert with a "Revert: <sha>" trailer line (or "Supersedes: <sha>" for a rewrite), or rework on a fresh worktree\n' >&2
  	exit 1

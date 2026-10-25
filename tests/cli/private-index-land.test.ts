@@ -73,7 +73,7 @@ afterAll(() => ownedScratch.cleanup());
 type Fixture = { work: string; fakeBin: string };
 
 
-function command(cwd: string, args: string[], holds: unknown, options: {
+type CommandOptions = {
 	agent?: string;
 	claimed?: string;
 	amDir: string;
@@ -88,7 +88,9 @@ function command(cwd: string, args: string[], holds: unknown, options: {
 	herdrAgent?: string;
 	expectedAmProject?: string;
 	subcommand?: string;
-}) {
+};
+
+function commandEnvironment(cwd: string, holds: unknown, options: CommandOptions): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...process.env };
 	delete env.GIT_INDEX_FILE;
 	Object.assign(env, options.gitEnv);
@@ -112,6 +114,11 @@ function command(cwd: string, args: string[], holds: unknown, options: {
 	env.FAKE_HERDR_AGENT = options.herdrAgent ?? options.agent ?? "DarkFern";
 	env.FAKE_HOLDS_JSON = JSON.stringify(holds);
 	env.FAKE_AM_MODE = options.reservationMode ?? "ok";
+	return env;
+}
+
+function command(cwd: string, args: string[], holds: unknown, options: CommandOptions) {
+	const env = commandEnvironment(cwd, holds, options);
 	const run = spawnSync("bun", [cliPath, options.subcommand ?? "land", ...args, "--json"], { cwd, env, encoding: "utf8", timeout: 30_000 });
 	let body: Record<string, unknown>;
 	try {
@@ -1660,6 +1667,118 @@ test("reconstructs only caller-selected hunks onto fresh origin/main", () => {
 	expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(SERVICE_BASE);
 	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
 });
+
+test("compiled public land patch publishes only selected bytes through the linked-worktree stale hook and refuses a foreign removal", async () => {
+	const binary = join(scratch, "stale-worktree-land-cli");
+	const decoder = new TextDecoder();
+	const build = await kitlibRun([process.execPath, "build", "--compile", "--no-compile-autoload-dotenv",
+		"--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig", cliPath, "--outfile", binary], {
+		cwd: repoRoot, deadline_s: 120, max_output_bytes: 1024 * 1024, max_total_bytes: 2 * 1024 * 1024,
+	});
+	expect({ rc: build.rc, timed_out: build.timed_out, killed: build.killed, truncated: build.truncated },
+		`${decoder.decode(build.stdout)}\n${decoder.decode(build.stderr)}`).toEqual({
+		rc: 0, timed_out: false, killed: false, truncated: false,
+	});
+
+	for (const specimen of ["publish", "foreign"] as const) {
+		// Real Git origin, index, hooks and full-suite execution. Only AM identity
+		// and reservation authority use the existing isolated fixture adapter;
+		// this is not installed-hook or live-fleet identity evidence.
+		const { work, fakeBin } = fixture();
+		writeFileSync(join(work, "service.txt"), SERVICE_BASE);
+		git(work, ["add", "--", "service.txt"]);
+		git(work, ["commit", "-m", "service landing [test]", "-m", "Bead: t-land"]);
+		git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+		const base = remoteHead(work);
+
+		const common = resolve(work, git(work, ["rev-parse", "--git-common-dir"]).trim());
+		const members = join(common, "hooks", "hooks.d", "commit-msg");
+		mkdirSync(members, { recursive: true });
+		// Use the working source under test, not HEAD's pre-fix hook.
+		writeFileSync(join(members, "49-omp-kit-stale-worktree"),
+			readFileSync(join(repoRoot, "scripts", "check-stale-worktree.sh")), { mode: 0o755 });
+		writeFileSync(join(members, "kitlib-tmp.sh"),
+			readFileSync(join(repoRoot, "scripts", "kitlib-tmp.sh")), { mode: 0o644 });
+		const hookTrace = join(scratch, `stale-hook-${specimen}-${fixtureNumber}.trace`);
+		writeFileSync(join(common, "hooks", "commit-msg"), [
+			"#!/bin/sh",
+			"set -eu",
+			'if [ -f .git ]; then printf "git-file\\n"; else printf "git-directory\\n"; fi >> "$STALE_HOOK_TRACE"',
+			'here=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd -P)',
+			'exec "$here/hooks.d/commit-msg/49-omp-kit-stale-worktree" "$@"',
+		].join("\n") + "\n", { mode: 0o755 });
+
+		writeServiceLines(work, (lines) => {
+			if (specimen === "publish") lines.splice(10, 0, "selected owned addition");
+			else lines.splice(10, 1);
+		});
+		const selected = readFileSync(join(work, "service.txt"), "utf8");
+		const patch = join(scratch, `stale-hook-${specimen}-${fixtureNumber}.patch`);
+		writeFileSync(patch, git(work, ["diff", "--", "service.txt"]));
+		// Unselected bytes in the very same reserved file must not leak into
+		// the publication, nor may unrelated peer staging be rewritten.
+		writeServiceLines(work, (lines) => { lines[25] = "unselected peer hunk"; });
+		writeFileSync(join(work, "peer.txt"), "peer staged bytes\n");
+		git(work, ["add", "--", "peer.txt"]);
+		writeFileSync(join(work, "untouched.txt"), "peer unstaged bytes\n");
+		const serviceBefore = readFileSync(join(work, "service.txt"));
+		const statusBefore = git(work, ["status", "--porcelain"]);
+		const indexBefore = readFileSync(join(common, "index"));
+		const hold = [{ agent: "DarkFern", path: "service.txt", exclusive: true, remaining_seconds: 3600 }];
+		const env: Record<string, string> = {};
+		for (const [key, value] of Object.entries(commandEnvironment(work, hold, {
+			amDir: fakeBin, gitEnv: { STALE_HOOK_TRACE: hookTrace },
+		}))) {
+			if (value !== undefined) env[key] = value;
+		}
+		const native = await kitlibRun([binary, "land", "--patch", patch, "--message",
+			`feat(land): linked ${specimen} [test]\n\nBead: t-other`, "--apply", "--yes", "--json"], {
+			cwd: work, env, deadline_s: 30, max_output_bytes: 1024 * 1024, max_total_bytes: 2 * 1024 * 1024,
+		});
+		const stdout = decoder.decode(native.stdout);
+		const stderr = decoder.decode(native.stderr);
+		const nativeDetail = `rc=${native.rc} timed_out=${native.timed_out} killed=${native.killed} truncated=${native.truncated}\nstdout=${stdout}\nstderr=${stderr}`;
+		expect(native.timed_out || native.killed || native.truncated, nativeDetail).toBe(false);
+		let body: Record<string, unknown>;
+		try {
+			body = JSON.parse(stdout);
+		} catch {
+			throw new Error(`compiled land emitted invalid JSON: ${nativeDetail}`);
+		}
+		const run = { status: native.rc ?? 1, body };
+		expectLandSchema(run.body.data);
+		expect(readFileSync(hookTrace, "utf8")).toBe("git-file\n");
+		expect(JSON.stringify(run.body)).not.toContain("Not a directory");
+		if (specimen === "publish") {
+			expect(run.status, `${JSON.stringify(run.body)}\n${nativeDetail}`).toBe(0);
+			const data = run.body.data as { overall: string; commit: string; candidate_sha: string; pushed_sha: string };
+			expect(data.overall).toBe("PUSHED");
+			expect(data.candidate_sha).toBe(data.commit);
+			expect(data.pushed_sha).toBe(data.commit);
+			expect(remoteHead(work)).toBe(data.commit);
+			expect(git(work, ["show", "-s", "--format=%P", data.commit]).trim()).toBe(base);
+			expect(git(work, ["diff", "--name-only", base, data.commit]).trim()).toBe("service.txt");
+			expect(git(work, ["show", `${data.commit}:service.txt`])).toBe(selected);
+			expect(git(work, ["show", `${data.commit}:peer.txt`])).toBe("peer baseline\n");
+			expect(git(work, ["show", `${data.commit}:untouched.txt`])).toBe("untouched baseline\n");
+		} else {
+			expect(run.status, `${JSON.stringify(run.body)}\n${nativeDetail}`).toBe(1);
+			expect(responseCode(run.body)).toBe("COMMIT_CREATION_REFUSED");
+			expect(run.body.data).toMatchObject({ overall: "REFUSED", commit: null });
+			expect(JSON.stringify(run.body.errors)).toContain(`STALE_WORKTREE service.txt reverts ${base}`);
+			expect(JSON.stringify(run.body.errors)).toContain("from bead t-land");
+			expect(JSON.stringify(run.body.errors)).toContain("Supersedes:");
+			expect(JSON.stringify(run.body.errors)).toContain("rework on a fresh worktree");
+			expect(remoteHead(work)).toBe(base);
+		}
+		expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(base);
+		expect(readFileSync(join(work, "service.txt"))).toEqual(serviceBefore);
+		expect(readFileSync(join(work, "peer.txt"), "utf8")).toBe("peer staged bytes\n");
+		expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("peer unstaged bytes\n");
+		expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+		expect(readFileSync(join(common, "index"))).toEqual(indexBefore);
+	}
+}, 180_000);
 
 test("pins parsed caller hunks against patch-file replacement during fetch", () => {
 	const setup = hunkSetup("shift");
