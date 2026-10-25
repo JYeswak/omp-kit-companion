@@ -244,6 +244,11 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/kitlib_ratchet_core.py scripts/kitlib_ratchet_core.py" \
 		"hooks.d/pre-commit/51-omp-kit-staged-kitlib scripts/check-staged-kitlib.sh" \
 		"hooks.d/pre-commit/kitlib_ratchet.py scripts/kitlib_ratchet.py" \
+		"hooks.d/pre-commit/52-omp-kit-staged-sources scripts/check-staged-sources.sh" \
+		"hooks.d/pre-commit/sources.py scripts/sources.py" \
+		"hooks.d/pre-commit/kitlib_run.py scripts/kitlib_run.py" \
+		"hooks.d/pre-commit/kitlib_io.py scripts/kitlib_io.py" \
+		"hooks.d/pre-commit/kitlib_tmp.py scripts/kitlib_tmp.py" \
 		"hooks.d/pre-commit/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/commit-msg/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/pre-push/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
@@ -524,6 +529,15 @@ install_staged_kitlib() {
 	printf 'installed staged-kitlib member: %s\n' "$member"
 }
 
+install_staged_sources() {
+	dir=$(chain_dir pre-commit)
+	for helper in sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py; do
+		place "$KITROOT/scripts/$helper" "$dir/$helper" -x
+	done
+	place "$KITROOT/scripts/check-staged-sources.sh" "$dir/52-omp-kit-staged-sources" +x
+	printf 'installed staged-sources member: %s\n' "$dir/52-omp-kit-staged-sources"
+}
+
 # install_kitlib_tmp: all four hook chains source "<own dir>/kitlib-tmp.sh"
 # for owned temp dirs (KITLIB-TMP v1). Each gets a non-executable helper
 # that the chain runner never executes arg-less.
@@ -622,6 +636,7 @@ install_staged_regexploit
 install_staged_pysafe
 install_staged_tempsafe
 install_staged_kitlib
+install_staged_sources
 install_staged_readme
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 
