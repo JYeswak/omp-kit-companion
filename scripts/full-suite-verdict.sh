@@ -286,6 +286,9 @@ finish_logs() {
 # Timeout kills the suite's process tree, refuses, and records nothing, so a retry reruns.
 run_suite() {
 	(
+		# Publisher tracker selection must not redirect tests away from their own fixtures.
+		# Tests can still select an explicit tracker after the suite child starts.
+		unset BEADS_DB
 		cd "$ARCHIVE_DIR"
 		# SAVEFIRST1: this full-suite process is a sibling of fresh-gate, so its descendants do not inherit
 		# the fresh-gate process's save-only disk observer. Keep nested heavy calls on statfs; their physical

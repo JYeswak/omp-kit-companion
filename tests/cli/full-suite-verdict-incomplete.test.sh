@@ -214,5 +214,86 @@ else
 	not_ok "bun is unavailable; the masking case cannot run"
 fi
 
+# The native tracker adapter must not inherit the publisher database. Keep the sentinel
+# nonempty so an empty or failed inventory cannot masquerade as preservation.
+if command -v br >/dev/null 2>&1; then
+	actor=${AGENT_NAME:-full-suite-fixture}
+	sentinel="$TMP/native-sentinel"
+	sentinel_db="$sentinel/.beads/beads.db"
+	mkdir -p "$sentinel"
+	git -C "$sentinel" init -q
+	if (cd "$sentinel" && br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush init --prefix sentinel --json) >"$TMP/sentinel-init.out" 2>&1 \
+		&& br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush create "retained sentinel" --json >"$TMP/sentinel-seed.out" 2>&1 \
+		&& br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush list --limit 0 --json >"$TMP/sentinel-before.json" 2>"$TMP/sentinel-before.err"; then
+		mkrepo_begin native_tracker
+		cp "$KITROOT_DIR/scripts/kitlib_run.py" "$KITROOT_DIR/scripts/pysafe.py" "$repo/scripts/"
+		addfile tests/cli/tracker_test.py 'import json, os, sys
+from pathlib import Path
+sys.path.insert(0, "scripts")
+from kitlib_run import run
+
+actor = os.environ.get("AGENT_NAME", "full-suite-fixture")
+def br(*args, cwd=None):
+    result = run(["br", "--actor", actor, "--no-auto-import", "--no-auto-flush", *args],
+                 deadline_s=20, max_output_bytes=1048576, cwd=cwd)
+    sys.stdout.buffer.write(result.stdout)
+    sys.stderr.buffer.write(result.stderr)
+    assert result.rc == 0 and not result.truncated and not result.timed_out
+    return json.loads(result.stdout)
+
+result = run(["git", "init", "-q"], deadline_s=20)
+assert result.rc == 0, result.stderr.decode()
+db = Path.cwd() / ".beads" / "beads.db"
+br("--db", str(db), "init", "--prefix", "suite", "--json")
+created = br("create", "default suite database", "--json")
+assert created["id"].startswith("suite-"), created
+rows = br("--db", str(db), "list", "--limit", "0", "--json")
+rows = rows["issues"] if isinstance(rows, dict) else rows
+assert [row["id"] for row in rows] == [created["id"]]
+
+# A test may still deliberately choose a different owned tracker after launch.
+chosen_root = Path.cwd() / "chosen"
+chosen_root.mkdir()
+result = run(["git", "init", "-q", str(chosen_root)], deadline_s=20)
+assert result.rc == 0, result.stderr.decode()
+chosen = chosen_root / ".beads" / "beads.db"
+br("--db", str(chosen), "init", "--prefix", "chosen", "--json", cwd=chosen_root)
+os.environ["BEADS_DB"] = str(chosen)
+explicit = br("create", "explicit suite database", "--json")
+assert explicit["id"].startswith("chosen-"), explicit
+rows = br("--db", str(chosen), "list", "--limit", "0", "--json")
+rows = rows["issues"] if isinstance(rows, dict) else rows
+assert [row["id"] for row in rows] == [explicit["id"]]'
+		mkrepo_commit
+		inherited_db_set=${BEADS_DB+x}
+		inherited_db=${BEADS_DB-}
+		BEADS_DB=$sentinel_db; export BEADS_DB
+		run_verdict native_tracker
+		if [ "$inherited_db_set" = x ]; then BEADS_DB=$inherited_db; export BEADS_DB; else unset BEADS_DB; fi
+		if [ "$rc" -eq 0 ]; then ok "native suite creates only its default and explicitly selected tracker rows"
+		else not_ok "native suite selected the publisher tracker (rc=$rc)"; cat "$out"
+		fi
+		[ ! -f "$repo.cache/$tree.log" ] || cat "$repo.cache/$tree.log"
+		if br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush list --limit 0 --json >"$TMP/sentinel-after.json" 2>"$TMP/sentinel-after.err" \
+			&& python3 - "$TMP/sentinel-before.json" "$TMP/sentinel-after.json" <<'PY'
+import json, sys
+from pathlib import Path
+before, after = (json.loads(Path(path).read_text(encoding="utf-8")) for path in sys.argv[1:])
+before_rows = before["issues"] if isinstance(before, dict) else before
+assert len(before_rows) == 1
+assert after == before, (before, after)
+print("NATIVEFIXTUREDB1 retained native sentinel:", json.dumps(after, sort_keys=True))
+PY
+		then ok "the nonempty native sentinel is unchanged by the declared suite"
+		else not_ok "the declared suite mutated or could not inventory its native sentinel"
+		fi
+	else
+		not_ok "native tracker fixture initialization failed"
+		cat "$TMP/sentinel-init.out" "$TMP/sentinel-seed.out" "$TMP/sentinel-before.err" 2>/dev/null
+	fi
+else
+	echo "NATIVEFIXTUREDB1: optional native br adapter unavailable; native tracker case NOT_RUN"
+fi
+
 echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

@@ -1,0 +1,1 @@
+- Prevent full-suite tests from inheriting the publisher's tracker database while preserving each test's explicit database choices and the publisher's repository validation.
