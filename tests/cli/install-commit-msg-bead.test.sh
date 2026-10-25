@@ -357,7 +357,9 @@ git -C "$G" branch -M main
 sh "$INSTALLER" --no-pushed-beads "$G" > "$TMP/o-gatediag" 2>&1
 ok "$?" "0" "gatediag-install"
 D="$G/.git/hooks/hooks.d/commit-msg"
+# shellcheck disable=SC2016  # the fixture members are written verbatim; expansion happens when they run
 printf '%s\n' '#!/bin/sh' 'here=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd -P)' '. "$here/kitlib-findings.sh"' 'kitlib_finding fx A "first" "r1" git x' 'kitlib_finding fx B "second" "r2"' 'exit 0' > "$D/60-fx-complete"
+# shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' 'here=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd -P)' '. "$here/kitlib-findings.sh"' 'kitlib_finding stop A "first" "r1"' 'exit 1' 'kitlib_finding stop B "second" "r2"' > "$D/61-fx-stop"
 printf '%s\n' '#!/bin/sh' 'echo "legacy: REFUSED: old style" >&2' 'exit 7' > "$D/62-fx-legacy"
 chmod +x "$D/60-fx-complete" "$D/61-fx-stop" "$D/62-fx-legacy"
