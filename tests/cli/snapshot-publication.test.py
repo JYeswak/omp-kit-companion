@@ -219,11 +219,17 @@ def main() -> int:
         parser.error("real native am is required (or AM_BIN=/absolute/path/to/am)")
     tmp = Path(os.environ.get("TMPDIR", ""))
     agent_tmp = ROOT / "var/agent-tmp"
-    # Owned scratch (`omp-kit scratch new`), or, in an exact-commit archive (no .git), the archive's own var/agent-tmp:
-    # full-suite-verdict.sh exports exactly that for archived suites, and the archive is the checker's owned scratch.
-    # 2026-10-25: the base checker's run on 409b3f0e went RED here because that TMPDIR carries no .owner.
-    owned = tmp.is_dir() and (tmp / ".owner").is_file() and tmp.is_relative_to(agent_tmp)
-    archived = tmp == agent_tmp and tmp.is_dir() and not (ROOT / ".git").exists()
+    # Owned scratch (`omp-kit scratch new`), or an exact-commit archive's own var/agent-tmp: full-suite-verdict.sh
+    # exports exactly that for archived suites, and the archive is the checker's owned scratch.
+    # 2026-10-25: the base checker's run on 409b3f0e went RED here because that TMPDIR carries no .owner. The e7bba
+    # publish (06:34Z) went RED here again: inside the pre-push gate's archive an earlier suite leaves a .git, so
+    # "no .git" did not identify an archive. An archive lives inside some repo's var/agent-tmp; the shared live
+    # checkout never does, so it still needs an owned TMPDIR.
+    # A scratch dir is a child of var/agent-tmp, never var/agent-tmp itself: the live companion's var/agent-tmp carries a
+    # stray free-text .owner (2026-10-20), which made the bare root pass as "owned".
+    owned = tmp.is_dir() and tmp != agent_tmp and (tmp / ".owner").is_file() and tmp.is_relative_to(agent_tmp)
+    inside_scratch = any(p.name == "agent-tmp" and p.parent.name == "var" for p in ROOT.parents)
+    archived = tmp == agent_tmp and tmp.is_dir() and (inside_scratch or not (ROOT / ".git").exists())
     if not (owned or archived):
         parser.error("TMPDIR must be an owned directory under this repo's var/agent-tmp, or an archive's var/agent-tmp")
     print("generator", am, "sha256", hashlib.sha256(Path(am).read_bytes()).hexdigest(), flush=True)
