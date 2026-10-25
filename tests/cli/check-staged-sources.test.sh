@@ -43,6 +43,47 @@ for mode in opted plain; do
  git -C "$R" add plan.md
  out=$(cd "$R" && sh "$member" 2>&1)
  check "$?" 0 "$mode-clean-passes" "$out"
+ if [ "$mode" = opted ]; then
+  # HEAD's allowance names the old URL, not one interchangeable link.
+  printf '{"plan.md":{"UNREGISTERED_LINK":["https://old.example/a"]}}\n' > "$R/.omp/sources-baseline.json"
+  printf 'https://old.example/a\n' > "$R/plan.md"
+  git -C "$R" add .omp/sources-baseline.json plan.md
+  git -C "$R" -c core.hooksPath=/dev/null commit -qm '[test] baseline fixture'
+  printf 'https://old.example/a\n\n' > "$R/plan.md"
+  git -C "$R" add plan.md
+  out=$(cd "$R" && sh "$member" 2>&1)
+  check "$?" 0 baseline-exact-control "$out"
+  printf 'https://new.example/b\n' > "$R/plan.md"
+  git -C "$R" add plan.md
+  out=$(cd "$R" && sh "$member" 2>&1)
+  check "$?" 1 baseline-substitution-refused "$out"
+  printf '{"plan.md":{"UNREGISTERED_LINK":["https://new.example/b"]}}\n' > "$R/.omp/sources-baseline.json"
+  git -C "$R" add .omp/sources-baseline.json
+  out=$(cd "$R" && sh "$member" 2>&1)
+  check "$?" 1 baseline-identity-raise-refused "$out"
+  case "$out" in *BASELINE_RAISED*) check 0 0 baseline-raise-code "$out";; *) check 1 0 baseline-raise-code "$out";; esac
+  printf '{}\n' > "$R/.omp/sources-baseline.json"
+  printf 'clean\n' > "$R/plan.md"
+  git -C "$R" add .omp/sources-baseline.json plan.md
+  out=$(cd "$R" && sh "$member" 2>&1)
+  check "$?" 0 baseline-shrink-control "$out"
+  mkdir -p "$R/docs/research"
+  printf '%s\n' '{"schema":1,"id":"fixture","url":"https://example.org","final_url":"https://example.org","quotes":[]}' > "$R/docs/research/sources.jsonl"
+  printf '[src:fixture]\n' > "$R/plan.md"
+  git -C "$R" add docs/research/sources.jsonl plan.md
+  out=$(cd "$R" && sh "$member" 2>&1)
+  check "$?" 1 application-missing-refused "$out"
+  case "$out" in *APPLICATION_MISSING*) check 0 0 application-code "$out";; *) check 1 0 application-code "$out";; esac
+  printf '%s\n' '| Source | Decision | Artifact | Status | Gap bead |' '|---|---|---|---|---|' '| fixture | Use verified words | plan.md:1 | cited | ompkit-663q4 |' > "$R/docs/research/APPLICATION.md"
+  out=$(cd "$R" && sh "$member" 2>&1)
+  check "$?" 1 unstaged-application-still-refused "$out"
+  git -C "$R" add docs/research/APPLICATION.md
+  out=$(cd "$R" && sh "$member" 2>&1)
+  check "$?" 0 staged-application-control "$out"
+  printf '| broken working tree |\n' > "$R/docs/research/APPLICATION.md"
+  out=$(cd "$R" && sh "$member" 2>&1)
+  check "$?" 0 application-index-not-working-tree "$out"
+ fi
 done
 printf '%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

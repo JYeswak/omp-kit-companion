@@ -66,9 +66,45 @@ def main() -> None:
             assert add('The **unverified** `words`', 'markdown-absent')[0] == 1
             count += 2
             doc = repo / 'plan.md'
-            doc.write_text('[src:fixture] ' + url + '#section')
+            doc.write_text('[src:fixture]')
+            application = repo / sources.APPLICATION
+            header = '| Source | Decision | Artifact | Status | Gap bead |\n|---|---|---|---|---|\n'
+            valid_row = '| `fixture` | Use verified words | plan.md:1 | cited | ompkit-663q4 |\n'
+            def missing_application() -> None:
+                rc, out = cli('check', 'plan.md')
+                assert rc == 1 and 'APPLICATION_MISSING: fixture' in out, (rc, out)
+            missing_application()
+            count += 1
+            # Skipping application checking must kill the same refusal assertion.
+            with patch.object(sources, 'application_sources', return_value={'fixture'}):
+                try:
+                    missing_application()
+                except AssertionError:
+                    count += 1
+                else:
+                    raise AssertionError('application-check-skipped mutant survived')
+            application.write_text(header + valid_row)
             assert cli('check', 'plan.md')[0] == 0
             count += 1
+            for invalid in (valid_row.replace('Use verified words', ''),
+                            valid_row.replace('plan.md:1', 'plan.md'),
+                            valid_row.replace('cited', 'unknown'),
+                            valid_row.replace('ompkit-663q4', ''),
+                            valid_row.replace('fixture', 'other')):
+                application.write_text(header + invalid)
+                missing_application()
+                count += 1
+            for status in ('procedure', 'built-not-wired', 'applied', 'enforced'):
+                application.write_text(header + valid_row.replace('cited', status).replace('plan.md:1', 'ompkit-663q4'))
+                assert cli('check', 'plan.md')[0] == 0
+                count += 1
+            application.write_text(header + valid_row)
+            doc.write_text(url)
+            application.write_text(header)
+            missing_application()
+            application.write_text(header + valid_row + valid_row.replace('fixture', 'markdown'))
+            assert cli('check', 'plan.md')[0] == 0
+            count += 2
             for text, code in [('[StAnDaRd ReAdInG]', 'MEMORY_CITATION'),
                                ('cited from memory', 'MEMORY_CITATION'),
                                ('[src:missing]', 'UNRESOLVED_SRC'),
@@ -97,6 +133,37 @@ def main() -> None:
             count += 2
             bp = repo / sources.BASELINE
             baseline_before = bp.read_bytes()
+            # Verifier's counterexample: replacement, not an additional link.
+            doc.write_text('https://unregistered.example/new')
+            def replacement_refused() -> None:
+                rc, out = cli('check', 'plan.md')
+                assert rc == 1 and 'UNREGISTERED_LINK' in out, (rc, out)
+            replacement_refused()
+            rc, out = cli('check', 'plan.md', '--write-baseline')
+            assert rc == 1 and 'BASELINE_RAISED' in out and bp.read_bytes() == baseline_before
+            count += 2
+            original_judge = sources.judge
+            def count_only(files, rows, old, write=None, application=''):
+                found, rc = original_judge(files, rows, old, write, application)
+                if write is None:
+                    debt = sum(len(c.get('UNREGISTERED_LINK', [])) for c in old.values())
+                    rc = int(len(found) > debt or any(f['code'] != 'UNREGISTERED_LINK' for f in found))
+                return found, rc
+            with patch.object(sources, 'judge', side_effect=count_only):
+                try:
+                    replacement_refused()
+                except AssertionError:
+                    count += 1
+                else:
+                    raise AssertionError('per-class-baseline mutant survived')
+            bp.write_text(json.dumps({'plan.md': {'UNREGISTERED_LINK': 1}}))
+            rc, out = cli('check', 'plan.md')
+            assert rc == 1 and 'legacy count format' in out
+            bp.write_bytes(baseline_before)
+            # Equivalent URL spelling is the same finding, not fresh debt.
+            doc.write_text('http://UNREGISTERED.example/old/#section')
+            assert cli('check', 'plan.md')[0] == 0
+            count += 2
             doc.write_text('https://unregistered.example/old https://unregistered.example/new')
             assert cli('check', 'plan.md')[0] == 1
             rc, out = cli('check', 'plan.md', '--write-baseline')

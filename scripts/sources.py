@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-from collections import Counter
 from datetime import datetime, timezone
 import fnmatch
 import hashlib
@@ -27,6 +26,7 @@ from kitlib_tmp import owned_tmp
 LIMIT = 8 * 1024 * 1024
 REGISTRY = 'docs/research/sources.jsonl'
 BASELINE = '.omp/sources-baseline.json'
+APPLICATION = 'docs/research/APPLICATION.md'
 # Delimited, disjoint character classes; scans are bounded by LIMIT.
 SRC = re.compile(r'\[src:([^\]\s]+)\]')
 URL = re.compile(r'https?://[^\s<>\[\]()"\x27]+', re.IGNORECASE)
@@ -179,10 +179,49 @@ def canonical_url(url: str) -> str:
     return urlunsplit(('https', parts.netloc.lower(), parts.path.rstrip('/'), parts.query, ''))
 
 
-def findings(files: dict[str, str], rows: list[dict]) -> list[dict]:
+def application_sources(text: str) -> set[str]:
+    """Read the application table; only complete, actionable rows grant coverage."""
+    valid = set()
+    columns = {}
+    for line in text.splitlines():
+        if not line.strip().startswith('|'):
+            continue
+        cells = [cell.strip().replace('`', '') for cell in line.strip().strip('|').split('|')]
+        if cells and cells[0].casefold() == 'source':
+            aliases = {'decision it changed': 'decision', 'applied by (artifact)': 'artifact'}
+            columns = {aliases.get(cell.casefold(), cell.casefold()): i for i, cell in enumerate(cells)}
+            continue
+        if not all(key in columns for key in ('source', 'decision', 'artifact', 'status')):
+            continue
+        if len(cells) <= max(columns.values()):
+            continue
+        row = {key: cells[index] for key, index in columns.items()}
+        status = row['status']
+        if not row['decision'] or status not in ('cited', 'procedure', 'built-not-wired', 'applied', 'enforced'):
+            continue
+        def bead(value: str) -> bool:
+            prefix, separator, suffix = value.partition('-')
+            return bool(separator and prefix.isalnum() and suffix and
+                        all(char.isalnum() or char in '.-' for char in suffix))
+        def location(value: str) -> bool:
+            path, separator, number = value.rpartition(':')
+            return bool(separator and path and number.isdecimal() and int(number) > 0)
+        if not any(location(token) or bead(token) for token in row['artifact'].split()):
+            continue
+        if status == 'cited' and not any(bead(token.strip(',')) for token in row.get('gap bead', '').split()):
+            continue
+        for source in row['source'].split(','):
+            source = source.strip()
+            marker = SRC.fullmatch(source)
+            valid.add(marker[1] if marker else source)
+    return valid
+
+
+def findings(files: dict[str, str], rows: list[dict], application: str = '') -> list[dict]:
     result = []
     ids = {row['id'] for row in rows}
     urls = {canonical_url(row[key]) for row in rows for key in ('url', 'final_url')}
+    applied = application_sources(application)
     for row in rows:
         for quote in row['quotes']:
             excerpt = quote.get('excerpt', '')
@@ -197,51 +236,72 @@ def findings(files: dict[str, str], rows: list[dict]) -> list[dict]:
         for marker in ('[standard reading]', 'cited from memory'):
             for _ in range(lower.count(marker)):
                 result.append(dict(file=name, code='MEMORY_CITATION', detail=marker))
+        cited = set()
         for match in SRC.finditer(text):
             if match[1] not in ids:
                 result.append(dict(file=name, code='UNRESOLVED_SRC', detail=match[1]))
+            else:
+                cited.add(match[1])
         for match in URL.finditer(text):
             if canonical_url(match[0]) not in urls:
                 result.append(dict(file=name, code='UNREGISTERED_LINK', detail=match[0]))
+            else:
+                cited.update(row['id'] for row in rows if canonical_url(match[0]) in
+                             (canonical_url(row['url']), canonical_url(row['final_url'])))
+        for ident in sorted(cited - applied):
+            result.append(dict(file=name, code='APPLICATION_MISSING', detail=ident))
     return result
 
 
-def baseline(path: Path) -> dict:
-    data = json.loads(path.read_text()) if path.exists() else {}
+def baseline_data(data: dict) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError('INVALID_BASELINE: expected a file-to-finding map')
     for name, codes in data.items():
-        if not isinstance(name, str) or not isinstance(codes, dict) or any(
-                code != 'UNREGISTERED_LINK' or type(count) is not int or count < 0
-                for code, count in codes.items()):
-            raise ValueError('INVALID_BASELINE: only nonnegative UNREGISTERED_LINK counts allowed')
+        if not isinstance(name, str) or not isinstance(codes, dict):
+            raise ValueError('INVALID_BASELINE: expected a file-to-finding map')
+        for code, identities in codes.items():
+            if type(identities) is int:
+                raise ValueError('INVALID_BASELINE: legacy count format has no finding identities; '
+                                 'review original links and replace counts with normalized URL lists')
+            if (code != 'UNREGISTERED_LINK' or not isinstance(identities, list) or
+                    any(not isinstance(url, str) or not URL.fullmatch(url) or
+                        canonical_url(url) != url for url in identities) or
+                    len(set(identities)) != len(identities)):
+                raise ValueError('INVALID_BASELINE: only unique normalized UNREGISTERED_LINK URL lists allowed')
     return data
 
 
-def judge(files: dict[str, str], rows: list[dict], old: dict, write: Path | None = None) -> tuple[list, int]:
-    found = findings(files, rows)
-    counts = Counter(f['file'] for f in found if f['code'] == 'UNREGISTERED_LINK')
+def baseline(path: Path) -> dict:
+    return baseline_data(json.loads(path.read_text()) if path.exists() else {})
+
+
+def within_baseline(current: dict, ceiling: dict) -> bool:
+    return all(set(codes.get('UNREGISTERED_LINK', [])) <=
+               set(ceiling.get(name, {}).get('UNREGISTERED_LINK', []))
+               for name, codes in current.items())
+
+
+def judge(files: dict[str, str], rows: list[dict], old: dict, write: Path | None = None,
+          application: str = '') -> tuple[list, int]:
+    baseline_data(old)
+    found = findings(files, rows, application)
+    current = {name: dict(codes) for name, codes in old.items() if name not in files}
+    for name in files:
+        identities = sorted({canonical_url(f['detail']) for f in found
+                             if f['file'] == name and f['code'] == 'UNREGISTERED_LINK'})
+        if identities:
+            current[name] = {'UNREGISTERED_LINK': identities}
     if write is not None:
-        current = dict(old)
-        for name in files:
-            count = counts[name]
-            if write.exists() and count > old.get(name, {}).get('UNREGISTERED_LINK', 0):
-                raise ValueError(f'BASELINE_RAISED: {name}')
-            current.pop(name, None)
-            if count:
-                current[name] = {'UNREGISTERED_LINK': count}
+        if write.exists() and not within_baseline(current, old):
+            raise ValueError('BASELINE_RAISED: new finding identities are not allowed')
         if any(f['code'] != 'UNREGISTERED_LINK' for f in found):
             return found, 1
         publish(write, (json.dumps(current, indent=2, sort_keys=True) + '\n').encode())
         return found, 0
-    remaining = {name: codes.get('UNREGISTERED_LINK', 0) for name, codes in old.items()}
-    failed = False
     for item in found:
-        covered = item['code'] == 'UNREGISTERED_LINK' and remaining.get(item['file'], 0) > 0
-        item['covered'] = covered
-        if covered:
-            remaining[item['file']] -= 1
-        else:
-            failed = True
-    return found, int(failed)
+        item['covered'] = (item['code'] == 'UNREGISTERED_LINK' and canonical_url(item['detail']) in
+                           old.get(item['file'], {}).get('UNREGISTERED_LINK', []))
+    return found, int(any(not item['covered'] for item in found))
 
 
 def git(repo: Path, *args: str, missing: bool = False) -> bytes | None:
@@ -276,10 +336,11 @@ def staged(repo: Path) -> int:
     rows_blob = git(repo, 'show', ':' + REGISTRY, missing=True)
     base_blob = git(repo, 'show', ':' + BASELINE, missing=True)
     head_blob = git(repo, 'show', 'HEAD:' + BASELINE, missing=True)
-    old = json.loads(base_blob) if base_blob else {}
-    ceiling = json.loads(head_blob) if head_blob else {}
-    if head_blob and (base_blob is None or any(c.get('UNREGISTERED_LINK', 0) > ceiling.get(n, {}).get('UNREGISTERED_LINK', 0) for n, c in old.items())):
+    old = baseline_data(json.loads(base_blob) if base_blob else {})
+    ceiling = baseline_data(json.loads(head_blob) if head_blob else {})
+    if head_blob and not within_baseline(old, ceiling):
         raise ValueError('BASELINE_RAISED: staged baseline must only shrink')
+    application_blob = git(repo, 'show', ':' + APPLICATION, missing=True)
     root = repo / 'var/agent-tmp'
     root.mkdir(parents=True, exist_ok=True)
     os.environ['TMPDIR'] = str(root)
@@ -297,7 +358,8 @@ def staged(repo: Path) -> int:
             assert blob is not None
             target.write_bytes(blob)
             files[name] = target.read_text()
-        found, rc = judge(files, load_rows(registry), old)
+        found, rc = judge(files, load_rows(registry), old,
+                          application=(application_blob or b'').decode())
     for item in found:
         print(f"{item['file']}: {item['code']}: {item['detail']}")
     return rc
@@ -349,7 +411,9 @@ def main(argv: list[str] | None = None) -> int:
             if not bp.is_absolute():
                 bp = repo / bp
             files = {name: (repo / name).read_text() for name in args.files}
-            found, rc = judge(files, rows, baseline(bp), bp if args.write_baseline else None)
+            application = repo / APPLICATION
+            found, rc = judge(files, rows, baseline(bp), bp if args.write_baseline else None,
+                              application=application.read_text() if application.exists() else '')
             if args.json:
                 print(json.dumps(found))
             else:
