@@ -253,6 +253,9 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/commit-msg/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/pre-push/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
 		"hooks.d/reference-transaction/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
+		"hooks.d/commit-msg/gate-event.sh scripts/gate-event.sh" \
+		"hooks.d/commit-msg/kitlib_jsonl.py scripts/kitlib_jsonl.py" \
+		"hooks.d/commit-msg/kitlib_lock.py scripts/kitlib_lock.py" \
 		"hooks.d/pre-commit/46-omp-kit-staged-readme scripts/check-staged-readme.sh" \
 		"hooks.d/pre-commit/readme-check.ts scripts/readme-check.ts"; do
 		# shellcheck disable=SC2086
@@ -330,10 +333,22 @@ case "$kind" in
 		;;
 esac
 rc=0
+# GATEEVENTS1 runner v3 (ompkit-fp72.135.3.12): each member's verdict is one gate-events row (act = what the agent
+# is doing: commit, publish; gate = member name), so refusal chains per act are measured, not
+# remembered. The writer never fails a hook.
+ledger="$here/hooks.d/commit-msg/gate-event.sh"
+case "$kind" in pre-commit | commit-msg | prepare-commit-msg) act=commit ;; pre-push) act=publish ;; *) act=$kind ;; esac
+target=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '%s' '')
 for hook in "$here/hooks.d/$kind"/[0-9][0-9]-*; do
 	[ -e "$hook" ] || continue
 	[ -x "$hook" ] || continue
-	if [ -n "$input" ]; then sh "$hook" "$@" < "$input" || rc=$?; else sh "$hook" "$@" || rc=$?; fi
+	member_rc=0
+	if [ -n "$input" ]; then sh "$hook" "$@" < "$input" || member_rc=$?; else sh "$hook" "$@" || member_rc=$?; fi
+	[ "$member_rc" -eq 0 ] || rc=$member_rc
+	if [ -x "$ledger" ]; then
+		if [ "$member_rc" -eq 0 ]; then row=pass; else row=refuse; fi
+		sh "$ledger" "$act" "$target" "$(basename -- "$hook")" "$row" "git-$PPID" "rc=$member_rc" || :
+	fi
 done
 [ -z "$input" ] || rm -f "$input"
 exit $rc
@@ -354,9 +369,11 @@ ensure_chain() {
 		return 0
 	fi
 	if [ -x "$entry" ] && grep -q 'hooks\.d' "$entry" 2>/dev/null; then
-		if grep -q 'chain runner: run every executable' "$entry" && ! grep -q 'replay one buffered copy' "$entry"; then
+		# The marker names the runner generation: bump it (here and in write_runner) with every runner change,
+		# or installed repos keep the old runner while --check reports them fresh.
+		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v3' "$entry"; }; then
 			write_runner "$entry"
-			printf 'upgraded chain runner (stdin replay): %s\n' "$entry"
+			printf 'upgraded chain runner (stdin replay + gate-events ledger): %s\n' "$entry"
 		else
 			printf 'chain runner already present: %s\n' "$entry"
 		fi
@@ -548,6 +565,17 @@ install_kitlib_tmp() {
 	printf 'installed kitlib-tmp.sh into all four hook chains\n'
 }
 
+# install_gate_event: the gate-events ledger writer (GATEEVENTS1, plan section 23.4) and the two
+# kitlib modules it imports sit beside the commit-msg chain; every chain runner calls it by that
+# path for each member's verdict. Non-executable Python helpers are never run arg-less.
+install_gate_event() {
+	dir=$(chain_dir commit-msg)
+	place "$KITROOT/scripts/gate-event.sh" "$dir/gate-event.sh" +x
+	place "$KITROOT/scripts/kitlib_jsonl.py" "$dir/kitlib_jsonl.py" -x
+	place "$KITROOT/scripts/kitlib_lock.py" "$dir/kitlib_lock.py" -x
+	printf 'installed gate-event.sh (gate-events ledger) beside the commit-msg chain\n'
+}
+
 # install_staged_readme: the checker copy sits beside the member,
 # non-executable, so the chain runner never runs it arg-less. The member
 # judges the staged tree (READMESIZE1, ompkit-readme-changelog-currency-vrrn.1).
@@ -630,6 +658,7 @@ ensure_chain reference-transaction
 install_ref_txn
 ensure_chain pre-commit
 install_kitlib_tmp
+install_gate_event
 install_staged_imports
 install_staged_fragments
 install_staged_regexploit

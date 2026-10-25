@@ -216,6 +216,23 @@ test("SELF_CLOSE_REFUSED negative: a different closer is allowed silently", asyn
 	expect(h.notices).toEqual([]);
 });
 
+// GATEEVENTS1 (ompkit-fp72.135.3.12): the guard's verdict on a tracker act lands in the gate-events ledger under the
+// host's state dir, refusal and pass alike, so refusal chains and first-attempt success are measured.
+test("GATEEVENTS1: a refused close writes a refuse row and an allowed close writes a pass row; planted: a plain bash call writes nothing", async () => {
+	const project = freshDir(base, "proj-");
+	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");
+	const state = join(home, "state");
+	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77", XDG_STATE_HOME: state }, home, respond: brTable({ "kit-1": bead("kit-1", "BlueFox"), "kit-9": bead("kit-9", "Someone") }) });
+	expect((await toolCall(h, project, "cd tracker && br close kit-1 --reason \"x\""))?.block).toBe(true);
+	expect(await toolCall(h, project, "br close kit-9 --reason \"bun test x -> 3 passed\"")).toBeUndefined();
+	expect(await toolCall(h, project, "ls -la")).toBeUndefined();
+	const rows = readFileSync(join(state, "omp-kit", "gate-events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(rows.map(r => [r.act, r.target, r.gate, r.kind, r.seat])).toEqual([
+		["close", "kit-1", "SELF_CLOSE_REFUSED", "refuse", "BlueFox"],
+		["close", "kit-9", "kit-flywheel-guard", "pass", "BlueFox"],
+	]);
+});
+
 test("SELF_CLOSE_REFUSED negative: an unassigned bead is allowed with a warning", async () => {
 	const project = freshDir(base, "proj-");
 	const home = identityHome(project, "77", "{\"name\":\"BlueFox\"}");

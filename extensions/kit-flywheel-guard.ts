@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
 import { holderVerdict, readLivenessSourcesAsync, type HolderVerdict } from "../src/holder-liveness.ts";
+import { gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -2253,7 +2254,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			{ deliverAs: ctx.isIdle?.() === false ? "aside" : "nextTurn" },
 		);
 	});
-	pi.on("tool_call", async (event, ctx) => {
+	// GATEEVENTS1 (ompkit-fp72.135.3.12): every tracker act and every refusal this guard answers lands in the
+	// gate-events ledger, so refusal chains and first-attempt success are measured (plan section 23.4). The
+	// ledger never changes a verdict: a write failure is a warning.
+	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
 			if (typeof event.toolCallId === "string" && typeof event.toolName === "string") {
 				// The bash tool's own `cwd` input is where the command runs, not the session cwd.
@@ -2303,6 +2307,24 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			ctx.ui?.notify(warning, "warning");
 			return { block: true, reason: warning };
 		}
+	};
+	pi.on("tool_call", async (event, ctx) => {
+		const verdict = await guardVerdict(event, ctx);
+		const command = typeof event.toolName === "string" && event.toolName.toLowerCase() === "bash" ? field(event.input, "command") : undefined;
+		const act = typeof command === "string" ? trackerAct(command) : null;
+		if (act !== null || verdict?.block === true) {
+			const row = await recordGateEvent({
+				seat: admissionOwner(env) ?? selfDeclared ?? await paneIdentities(pi.exec, env, home, [ctx.cwd]).then(names => names[0] ?? null).catch(() => null),
+				act: act?.act ?? (typeof event.toolName === "string" ? event.toolName.toLowerCase() : "unknown"),
+				target: act?.target ?? null,
+				gate: verdict?.block === true ? gateFromReason(String(verdict.reason ?? "")) : "kit-flywheel-guard",
+				kind: verdict?.block === true ? "refuse" : "pass",
+				...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}),
+				...(verdict?.block === true ? { detail: String(verdict.reason ?? "").slice(0, 200) } : {}),
+			}, { env, home });
+			if (!row.ok) ctx.ui?.notify(`kit-flywheel-guard GATE_LEDGER_UNWRITTEN: ${row.why}; the verdict stands.`, "warning");
+		}
+		return verdict;
 	});
 	pi.on("tool_execution_end", async (_event, ctx) => {
 		try {

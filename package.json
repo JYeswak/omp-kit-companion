@@ -26,6 +26,7 @@
       "extensions/cass-search.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/dcg-tool-bridge.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/kit-mail-wake.ts": "library module with no extension entrypoint; imported by extensions/kit-agent-mail-guard.ts",
+      "extensions/gate-events.ts": "library module with no extension entrypoint; imported by extensions/kit-flywheel-guard.ts",
       "extensions/delete-effect-admission.ts": "library module with no extension entrypoint; imported by extensions/slb-guard-fail-closed.ts",
       "extensions/ee-ambient-session-start.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/ee-failure-journal.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",

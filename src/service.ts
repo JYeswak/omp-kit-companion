@@ -123,6 +123,10 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// SENTINELLIVE1 (ompkit-b4zip): the fleet loop sentinel, supervised so it outlives the seat
 	// that launched it. Its command is operator data (fleet-watch.json `loopSentinel`).
 	"loop-sentinel": { name: "loop-sentinel", label: "com.omp-kit.loop-sentinel", kind: "daemon", intervalSeconds: 0, restart: "always", commandConfigKey: "loopSentinel" },
+	// GATEEVENTS1 (ompkit-fp72.135.3.12): weekly gate rationalization over the live gate-events ledger. Its
+	// command is operator data (fleet-watch.json `gateRationalize`: python3 gate_registry.py rationalize --out ...),
+	// so the kit never hardcodes a repo path; UNCONFIGURED until the operator sets it.
+	"gate-rationalize": { name: "gate-rationalize", label: "com.omp-kit.gate-rationalize", kind: "interval", intervalSeconds: 604800, runAtLoad: false, commandConfigKey: "gateRationalize" },
 };
 
 /** A claude-save run receipt, `claude-save-<runId>.json`, directly in the kit state root. */

@@ -108,3 +108,15 @@ test("planted: a background job rendered Standard still fails contract-processty
 	const planted = renderLaunchdPlist(HOME, { ...goodJobDef(), qos: "deadline" as const }, LAUNCHER, null).text;
 	expect(statusOf(checkPlistContract("load-watch", planted), "contract-processtype")).toBe("FAIL");
 });
+
+// GATEEVENTS1 (ompkit-fp72.135.3.12): the weekly rationalize child runs the operator's argv on a 7-day interval.
+test("gate-rationalize renders the operator argv with a weekly StartInterval; planted: unconfigured it refuses to render", () => {
+	const job = KNOWN_JOBS["gate-rationalize"]!;
+	expect([job.kind, job.intervalSeconds, job.commandConfigKey]).toEqual(["interval", 604800, "gateRationalize"]);
+	const program = { argv: ["/usr/bin/python3", "/repo/scripts/gate_registry.py", "rationalize", "--out", "/state/gate-rationalize.json"], cwd: "/repo" };
+	const text = renderLaunchdPlist(HOME, { ...job, program }, LAUNCHER, null).text;
+	expect(text).toContain("<string>/repo/scripts/gate_registry.py</string>\n\t\t<string>rationalize</string>");
+	expect(text).toContain("<key>StartInterval</key>\n\t<integer>604800</integer>");
+	expect(text).not.toContain("service</string>\n\t\t<string>run</string>");
+	expect(() => renderLaunchdPlist(HOME, { ...job }, LAUNCHER, null)).toThrow("GATE_RATIONALIZE_UNCONFIGURED");
+});
