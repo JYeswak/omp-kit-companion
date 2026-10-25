@@ -244,6 +244,17 @@ test("opt-in: a stock repo is untouched, the same impersonating send in a fleet 
 	expect(code(await h.mail(fleetRepo(), "send_message", impersonation))).toBe("AM_IDENTITY_MISMATCH");
 });
 
+
+// MAILWAKE1.2 (ompkit-uk9wn.2): the chief tab runs in a directory with no fleet opt-in, so its sends bypassed every
+// check and the wake. A send is guarded by the RECIPIENT repo's policy (project_key) when the sender's cwd has none.
+test("opt-in: a send from a non-fleet cwd addressed to a fleet repo is guarded; planted: a non-fleet project_key stays inert", async () => {
+	const h = await createHost();
+	const impersonation = send({ sender_name: "BlueLake", project_key: fleetRepo() });
+	expect(code(await h.mail(stockRepo(), "send_message", impersonation))).toBe("AM_IDENTITY_MISMATCH");
+	expect(await h.mail(stockRepo(), "send_message", send({ sender_name: "BlueLake", project_key: stockRepo() }))).toBeUndefined();
+	// a bulk read from a non-fleet cwd is still inert: only sends and replies read the recipient's policy
+	expect(await h.mail(stockRepo(), "mark_all_read", { project_key: fleetRepo(), agent_name: "PlumRaven" })).toBeUndefined();
+});
 test("opt-in: fleet.json enabled:false is inert; an unreadable marker refuses", async () => {
 	const h = await createHost();
 	const impersonation = send({ sender_name: "BlueLake" });

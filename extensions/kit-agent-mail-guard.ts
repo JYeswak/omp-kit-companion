@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fleetPolicyState } from "./fleet-policy";
 import {
@@ -590,7 +590,17 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		const guarded = bulk || call.tool === "send_message" || call.tool === "reply_message" || call.tool === "fetch_inbox";
 		if (!guarded) return undefined;
 		try {
-			const policy = await fleetPolicyState(ctx.cwd);
+			// MAILWAKE1.2 (ompkit-uk9wn.2): a send names the RECIPIENT's repo in project_key. A seat whose own cwd
+			// carries no fleet opt-in (the chief tab runs in ~/Developer, 2026-10-25: every chief-tab send bypassed the
+			// wake and signaled nobody) is still a fleet sender when it addresses a fleet repo: read the policy there.
+			let policy = await fleetPolicyState(ctx.cwd);
+			if (policy.kind === "off" && (call.tool === "send_message" || call.tool === "reply_message")) {
+				const projectKey = prop(call.args.value, "project_key");
+				if (typeof projectKey === "string" && isAbsolute(projectKey)) {
+					const recipient = await fleetPolicyState(projectKey);
+					if (recipient.kind === "on") policy = recipient; // only a readable opt-in promotes; an absent or unreadable recipient repo keeps the sender's own policy
+				}
+			}
 			if (policy.kind === "off") return undefined;
 			if (policy.kind === "unavailable") return refuse("AM_FLEET_POLICY", `the repo's fleet opt-in is unreadable (${policy.reason}).`);
 			if (bulk) {
