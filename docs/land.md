@@ -19,9 +19,8 @@ The file needs an absolute interpreter shebang; the process receives
 `SKIP`, and other nonzero exits are `FAIL`. If the base has no registered check
 or the candidate changes its bytes, status is `SKIP`; unavailable registered
 execution is `UNRUN`.
-`PUSHED` is reported only after the exact candidate is published by no-force
-convergence. `REFUSED` means no publication; its candidate commit may remain
-saved on local shared `main`.
+`PUSHED` is reported only after the exact candidate is published by an ordinary, non-force push.
+`REFUSED` means no publication; a constructed candidate may remain locally for inspection.
 Failed admission does not publish, and an origin advance after checking
 is refused without force or retry. `UNRUN` means admission or publication could
 not be verified. `SKIP` does not prove that a full suite passed.
@@ -31,6 +30,29 @@ not be verified. `SKIP` does not prove that a full suite passed.
 | `PUSHED` | 0 | The exact candidate that was checked is now origin `main`. |
 | `REFUSED` | 1 | Nothing was published: a hook or check failed, or origin moved after the check. |
 | `UNRUN` | 77 | Admission or publication could not be verified. |
+
+## Selected-hunk patch mode
+
+`omp-kit land --patch FILE --message MSG --apply --yes` reconstructs the caller's
+selected hunks onto freshly fetched `origin/main`, rather than staging whole
+shared-worktree files. Supply a standard `a/` / `b/` unified diff whose paths
+are covered by the caller's current exclusive reservations. New files work;
+renames and copies are refused. `--patch` and `--paths` are mutually exclusive.
+
+The patch is limited to 4 MiB. The bytes read and parsed are the bytes applied:
+replacing the file during fetch cannot introduce an unselected hunk.
+Git's three-way application preserves newer, non-conflicting origin content.
+A non-applying patch or conflict names the affected files and hunks and creates
+no commit. An origin advance during construction refuses publication without
+retry or force; a constructed candidate can still exist locally.
+
+Patch mode leaves the caller's local `main`, shared index and worktree unchanged.
+`PUSHED` confirms the exact checked candidate on origin, not local catch-up;
+inspect `base`, `localMain`, `commit` and the phase evidence separately.
+Use path mode for ordinary shared-main saves. Patch mode supplies the selected-
+hunk construction requested by the UDS committer; it does not establish full
+UDS adoption or replace JEV's separately reviewed index/history publisher.
+Neither mode grants a history rewrite or force-push.
 
 ## Full-suite verdict (LAND1)
 

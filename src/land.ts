@@ -1,5 +1,6 @@
 import { lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
+import { run as kitlibRun, type RunResult } from "./kitlib/run.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -13,11 +14,11 @@ import { parseReservationRead } from "./fleet-guard/git.ts";
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean };
 
-function gitEnvironment(reflogAction?: string): NodeJS.ProcessEnv {
-	const env: NodeJS.ProcessEnv = {};
+function gitEnvironment(reflogAction?: string): Record<string, string> {
+	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) {
 		if (key.startsWith("GIT_") && key !== "GIT_TERMINAL_PROMPT") continue;
-		env[key] = value;
+		if (value !== undefined) env[key] = value;
 	}
 	env.GIT_TERMINAL_PROMPT = "0";
 	if (reflogAction) env.GIT_REFLOG_ACTION = reflogAction;
@@ -690,7 +691,7 @@ function patchConvergence(repo: string, state: "FAST_FORWARD" | "REFUSED", reaso
 }
 
 
-function landPatchCommand(repo: string, request: ParsedCommand): CliResult {
+async function landPatchCommand(repo: string, request: ParsedCommand): Promise<CliResult> {
 	const started = performance.now();
 	const elapsed = (): number => Math.round(performance.now() - started) / 1000;
 	const message = request.flags.get("--message");
@@ -762,10 +763,19 @@ function landPatchCommand(repo: string, request: ParsedCommand): CliResult {
 		cleanup();
 		return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", "Fresh origin/main could not be checked out for reconstruction", "Repair the local repository and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
 	}
-	const applied = git(scratch, ["apply", "--3way", patchPath]);
-	if (applied.code !== 0 || applied.interrupted) {
+	let applied: RunResult;
+	try {
+		applied = await kitlibRun(["git", "apply", "--3way", "-"], {
+			cwd: scratch, env: gitEnvironment(), stdin: patchBytes,
+			deadline_s: 30, max_output_bytes: 8 * 1024 * 1024,
+		});
+	} catch (error) {
 		cleanup();
-		const files = patchFailureFiles(applied.err);
+		return patchUnrun(repo, "LAND_CONSTRUCTION_UNAVAILABLE", `Git could not apply the caller patch: ${error instanceof Error ? error.message : String(error)}`, "Restore Git execution and retry; nothing was committed or published.", owner.owner, paths, base, checkPreflight.result.sha256);
+	}
+	if (applied.rc !== 0 || applied.timed_out || applied.killed || applied.truncated) {
+		cleanup();
+		const files = patchFailureFiles(new TextDecoder().decode(applied.stderr));
 		const named = files.length > 0 ? files : paths;
 		const hunks = named.flatMap((file) => selection.find((entry) => entry.path === file)?.hunks ?? []).slice(0, 6);
 		const check = checkPreflight.kind === "skip" ? checkPreflight.result : pushCheckResult("UNRUN", "patch_conflict", checkPreflight.result.sha256);
@@ -932,7 +942,7 @@ function landPatchCommand(repo: string, request: ParsedCommand): CliResult {
 	};
 }
 
-export function landCommand(request: ParsedCommand): CliResult {
+export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	if (!request.flags.has("--apply")) return refused("LAND_APPLY_REQUIRED", "land is a mutation and requires --apply", "Review the exact owner, paths, base and candidate, then pass --apply --yes.");
 	const root = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
 	if (root.code !== 0) return refused("LAND_REPOSITORY_REQUIRED", "The current directory is not inside a Git repository", "Run land from the repository to publish.");

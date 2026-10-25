@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { run as kitlibRun } from "../../src/kitlib/run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
@@ -58,10 +59,8 @@ test("the published grammar lists exit 77 as not_run", () => {
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const cliPath = join(repoRoot, "src", "cli.ts");
-const scratchRoot = join(repoRoot, "var", "agent-tmp");
-mkdirSync(scratchRoot, { recursive: true });
-const scratch = mkdtempSync(join(scratchRoot, `private-index-land.${process.pid}.`));
-writeFileSync(join(scratch, ".owner"), `pid=${process.pid} label=private-index-land repo=${repoRoot} created=${new Date().toISOString()}\n`);
+const ownedScratch = ownedTmp("private-index-land");
+const scratch = ownedScratch.path;
 // land's push-time scratch disposal gate scans the scratch roots for dirs the
 // caller owns. Every land run here reads this empty fixture root instead of the
 // real ~/Developer/*/var/agent-tmp roots, so a dir held by whoever runs the suite
@@ -69,7 +68,7 @@ writeFileSync(join(scratch, ".owner"), `pid=${process.pid} label=private-index-l
 const landScratchRoot = join(scratch, "land-scratch-root");
 mkdirSync(landScratchRoot);
 let fixtureNumber = 0;
-afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+afterAll(() => ownedScratch.cleanup());
 
 type Fixture = { work: string; fakeBin: string };
 
@@ -1536,7 +1535,7 @@ function writeServiceLines(work: string, mutate: (lines: string[]) => void): voi
 	writeFileSync(join(work, "service.txt"), lines.join("\n"));
 }
 
-type HunkSetup = { work: string; fakeBin: string; bare: string; base: string; patch: string; checkContent: string; checkAdded: string };
+type HunkSetup = { work: string; fakeBin: string; bare: string; base: string; caller: string; patch: string; checkContent: string; checkAdded: string };
 
 function hunkSetup(peer: "shift" | "conflict" | "none"): HunkSetup {
 	const { work, fakeBin } = fixture();
@@ -1586,7 +1585,7 @@ function hunkSetup(peer: "shift" | "conflict" | "none"): HunkSetup {
 	git(caller, ["commit", "-m", "caller selection [test]"]);
 	const patch = join(scratch, `caller-${fixtureNumber}.patch`);
 	writeFileSync(patch, git(caller, ["diff", base, "HEAD"]));
-	return { work, fakeBin, bare, base, patch, checkContent, checkAdded };
+	return { work, fakeBin, bare, base, caller, patch, checkContent, checkAdded };
 }
 
 function patchHold(): unknown[] {
@@ -1660,6 +1659,41 @@ test("reconstructs only caller-selected hunks onto fresh origin/main", () => {
 	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("unstaged worktree bytes\n");
 	expect(readFileSync(join(work, "service.txt"), "utf8")).toBe(SERVICE_BASE);
 	expect(git(work, ["status", "--porcelain"])).toBe(statusBefore);
+});
+
+test("pins parsed caller hunks against patch-file replacement during fetch", () => {
+	const setup = hunkSetup("shift");
+	const { work, fakeBin, base, caller, patch } = setup;
+	writeServiceLines(caller, (lines) => { lines[27] = "unselected foreign replacement"; });
+	const replacement = git(caller, ["diff", base]);
+	const replacementPath = join(scratch, `replacement-${fixtureNumber}.patch`);
+	writeFileSync(replacementPath, replacement);
+	const realGit = Bun.which("git");
+	if (realGit === null) throw new Error("the real Git executable is required");
+	const gitWrapper = join(fakeBin, "git");
+	writeFileSync(gitWrapper, [
+		"#!/bin/sh",
+		'if [ "$1" = fetch ] && [ "$2" = origin ] && [ "$3" = refs/heads/main ]; then',
+		'  cp "$TEST_PATCH_REPLACEMENT" "$TEST_PATCH_FILE" || exit "$?"',
+		"fi",
+		'exec "$TEST_REAL_GIT" "$@"',
+	].join("\n") + "\n");
+	chmodSync(gitWrapper, 0o755);
+	const run = command(work, ["--patch", patch, "--message", "feat(land): pin selected caller bytes [test]", "--apply", "--yes"], patchHold(), {
+		amDir: fakeBin,
+		gitEnv: {
+			TEST_REAL_GIT: realGit,
+			TEST_PATCH_REPLACEMENT: replacementPath,
+			TEST_PATCH_FILE: patch,
+			OMP_LAND_CHECK_CONTENT_FILE: setup.checkContent,
+			OMP_LAND_CHECK_ADDED_FILE: setup.checkAdded,
+		},
+	});
+	expect(run.status).toBe(0);
+	expect(readFileSync(patch, "utf8")).toBe(replacement);
+	const commit = remoteHead(work);
+	expect(git(work, ["show", `${commit}:service.txt`])).toBe(EXPECTED_SERVICE);
+	expect(git(work, ["show", `${commit}:feature/added.txt`])).toBe("caller added file\n");
 });
 
 test("refuses a patch whose exact full suite is red before origin advances", () => {
