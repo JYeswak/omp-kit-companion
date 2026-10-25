@@ -108,7 +108,9 @@ function commandEnvironment(cwd: string, holds: unknown, options: CommandOptions
 	if (options.herdrEnv !== undefined) env.HERDR_ENV = options.herdrEnv;
 	if (options.herdrPaneId !== undefined) env.HERDR_PANE_ID = options.herdrPaneId;
 	if (options.ternAgent !== undefined) env.FAKE_TERN_AGENT = options.ternAgent;
-	env.FAKE_AM_PROJECT = options.expectedAmProject ?? cwd;
+	// land passes `git rev-parse --show-toplevel`, which is a realpath: under a symlinked temp root (/tmp ->
+	// /private/tmp, the default when TMPDIR is unset) a plain cwd never matched and every land read OWNER_UNKNOWN.
+	env.FAKE_AM_PROJECT = options.expectedAmProject ?? realpathSync(cwd);
 	env.FAKE_TERN_PANE = options.ternPane ?? "";
 	env.FAKE_HERDR_PANE = options.registeredHerdrPane ?? options.herdrPaneId ?? "";
 	env.FAKE_HERDR_AGENT = options.herdrAgent ?? options.agent ?? "DarkFern";
