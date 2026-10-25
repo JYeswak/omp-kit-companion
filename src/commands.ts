@@ -461,9 +461,10 @@ export const COMMANDS: readonly Command[] = [
 			dataSchema: { type: "object", required: ["overall", "cycle", "text"], properties: { overall: { enum: ["PLAN", "REFUSED", "COMPLETE", "BUILD_FAILED", "CANCELLED", "UNREADY"] }, cycle: { type: "object" }, text: { type: "string" } } },
 		},
 	] },
-	{ name: "heavy", description: "Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 69 when no disk observer is available (load.json disk_observer sbh|statfs|auto, optional disk_floor_pct)", usage: "heavy [--label LABEL] [--no-wait] [--disk-observer statfs|sbh|auto] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
+	{ name: "heavy", description: "Run one load- and disk-admitted command at nice 10; exit 75 when admission is deferred (queue wait max_wait_s), 124 when the admitted child outruns its runtime budget, 69 when no disk observer is available (load.json disk_observer sbh|statfs|auto, optional disk_floor_pct)", usage: "heavy [--label LABEL] [--no-wait] [--max-runtime SECONDS] [--disk-observer statfs|sbh|auto] -- COMMAND [ARG ...]", argument: "COMMAND", flags: [
 		{ name: "--label", value: "LABEL", description: "Name the job in load census records" },
 		{ name: "--no-wait", description: "Return exit 75 instead of waiting when admission is unavailable" },
+		{ name: "--max-runtime", value: "SECONDS", description: "Runtime budget for the admitted child, separate from the admission wait. Precedence: this flag, then load.json runtime_budget_s.<label>, then default_runtime_s (10800). Past it the child gets SIGTERM, SIGKILL 10 s later, and heavy exits 124 with RUNTIME_BUDGET_EXCEEDED" },
 		{ name: "--disk-observer", value: "statfs|sbh|auto", description: "Disk observer for this call, overriding load.json; statfs admits on physical bytes (10 GiB) and never consults sbh" },
 	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
 	{ name: "converge", description: "Report or owner-resolve shared-main convergence without overwriting peer state", usage: "converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...", flags: [

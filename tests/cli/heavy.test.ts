@@ -17,7 +17,7 @@ function fixture(): string {
 	return dir;
 }
 
-function configure(root: string, values: { slots?: number; max_wait_s?: number; disk_observer?: "sbh" | "statfs" | "auto"; disk_floor_pct?: number | null }): void {
+function configure(root: string, values: { slots?: number; max_wait_s?: number; disk_observer?: "sbh" | "statfs" | "auto"; disk_floor_pct?: number | null; default_runtime_s?: number; runtime_budget_s?: Record<string, number> }): void {
 	const directory = join(root, "config", "omp-kit");
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
 	writeFileSync(join(directory, "load.json"), JSON.stringify(values), { mode: 0o600 });
@@ -90,16 +90,78 @@ test("SCANNERADMIT preserves genuine child exit 75 without refusal marker", asyn
 	expect(result.stderr).not.toContain("RESOURCE_DEFERRED");
 });
 
-// A separate Bun child is the real deadline consumer; parent fake timers cannot advance its clock.
-test("SCANNERADMIT terminates a started child when its admission deadline expires", async () => {
+// Separate processes own these platform-clock deadlines; parent fake timers cannot drive them. They run through the
+// real CLI entry (`omp-kit heavy --max-runtime`), the path users and gates take.
+async function invokeRuntime(root: string, maxRuntime?: string, label = "runtime", childCode = "setTimeout(() => process.exit(7), 30000)") {
+	return invoke(root, ["heavy", "--label", label, ...(maxRuntime === undefined ? [] : ["--max-runtime", maxRuntime]),
+		"--", process.execPath, "-e", childCode]);
+}
+
+test("HEAVYRUNTIME planted: admitted child outlives admission wait and preserves exit 7", async () => {
 	const root = fixture();
-	configure(root, { slots: 1, max_wait_s: 5 });
-	const child = `process.stdout.write("started"); setTimeout(() => process.stdout.write("finished"), 10000);`;
-	const result = await invoke(root, ["heavy", "--label", "deadline", "--", process.execPath, "-e", child]);
-	expect(result.code).toBe(75);
-	expect(result.stderr).toContain("child exceeded heavy admission deadline");
-	expect(result.stdout).toBe("started");
+	configure(root, { slots: 1, max_wait_s: 2 });
+	const result = await invokeRuntime(root, "30", "planted", "setTimeout(() => process.exit(7), 4000)");
+	expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 7, stderr: "" });
 }, 15000);
+
+test("HEAVYRUNTIME control: never admitted still defers at queue timeout", async () => {
+	const root = fixture();
+	configure(root, { slots: 1, max_wait_s: 1 });
+	const jobs = await seedJob(root, { id: "held" });
+	const result = await invoke(root, ["heavy", "--", process.execPath, "-e", "process.exit(7)"]);
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("RESOURCE_DEFERRED");
+	expect(result.stderr).toContain("queue timeout");
+	expect(readdirSync(jobs)).toEqual(["held.json"]);
+}, 10000);
+
+test("HEAVYRUNTIME cuts runtime at flag budget and removes the job", async () => {
+	const root = fixture();
+	configure(root, { max_wait_s: 5, default_runtime_s: 4, runtime_budget_s: { runtime: 3 } });
+	const result = await invokeRuntime(root, "2");
+	expect(result.code).toBe(124);
+	expect(result.stderr).toContain("RUNTIME_BUDGET_EXCEEDED: child ran ");
+	expect(result.stderr).toContain("> --max-runtime 2s (label runtime)");
+	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs"))).toEqual([]);
+}, 15000);
+
+test("HEAVYRUNTIME per-label budget beats default; unmatched label uses default", async () => {
+	const root = fixture();
+	configure(root, { max_wait_s: 5, default_runtime_s: 1, runtime_budget_s: { runtime: 2 } });
+	const labeled = await invokeRuntime(root);
+	expect(labeled.code).toBe(124);
+	expect(labeled.stderr).toContain("> --max-runtime 2s (label runtime)");
+	const fallback = await invokeRuntime(root, undefined, "other");
+	expect(fallback.code).toBe(124);
+	expect(fallback.stderr).toContain("> --max-runtime 1s (label other)");
+}, 15000);
+
+test("HEAVYRUNTIME rejects nonpositive and noninteger flag budgets", async () => {
+	const root = fixture();
+	for (const value of ["0", "abc", "1.5", "-1"]) {
+		const result = await invokeRuntime(root, value);
+		expect(result.code).toBe(2);
+		expect(result.stderr).toContain("--max-runtime");
+	}
+}, 15000);
+
+test("HEAVYRUNTIME escalates a SIGTERM-resistant child after the grace period", async () => {
+	const root = fixture();
+	configure(root, { max_wait_s: 5 });
+	const result = await invokeRuntime(root, "1", "resistant",
+		'process.on("SIGTERM", () => process.stdout.write("term-received")); setTimeout(() => process.exit(7), 30000)');
+	expect(result.code).toBe(124);
+	expect(result.stdout).toBe("term-received");
+	expect(result.stderr).toContain("> --max-runtime 1s (label resistant)");
+	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs"))).toEqual([]);
+}, 20000);
+
+test("HEAVYRUNTIME long positive budgets do not overflow native timers", async () => {
+	const root = fixture();
+	const result = await invokeRuntime(root, "2147484", "long", "setTimeout(() => process.exit(7), 100)");
+	expect(result.code).toBe(7);
+	expect(result.stderr).toBe("");
+}, 10000);
 
  // Slot-logic tests pin the heavy-specific load seam so the
  // slot behavior under test, not ambient runner load, decides the outcome.

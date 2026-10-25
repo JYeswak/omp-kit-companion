@@ -4464,9 +4464,11 @@ export async function runCli(args: readonly string[] = process.argv.slice(2)): P
 	if ("request" in parsed && parsed.request.command.name === "heavy" && !parsed.request.flags.has("--help")) {
 		const label = parsed.request.flags.get("--label");
 		const diskObserver = parsed.request.flags.get("--disk-observer");
+		const maxRuntime = parsed.request.flags.get("--max-runtime");
 		exitCode = await runHeavy(parsed.request.commandArgs ?? [], {
 			...(typeof label === "string" ? { label } : {}),
 			...(typeof diskObserver === "string" ? { diskObserver } : {}),
+			...(typeof maxRuntime === "string" ? { maxRuntime } : {}),
 			noWait: parsed.request.flags.has("--no-wait"),
 		});
 		outcome = ccActionOutcome(exitCode);
