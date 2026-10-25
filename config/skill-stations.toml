@@ -1,0 +1,600 @@
+schema_version = 1
+bead = "ompkit-sipew"
+status = "consumer-path-and-diff-subset"
+plan = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md"
+plan_sha256 = "3f38d069d8d3306c2676c0404bc067aa8fe4d80ac86325c28410372591f539d7"
+inventory_count = 1047
+# Inventory count/digest above describe the draft census; skills are checked live.
+detector_contract = "Specifications, not executable detector implementations. Base/candidate trees and repository-bound manifests/logs are read-only inputs. Missing adapters, unsupported syntax, partial traces, missing baseline or incomplete telemetry => UNKNOWN, never absent/safe/exempt. Filename matches route advisory review only. A mandatory row with UNKNOWN applicability must be surfaced for resolution, not silently skipped. Deduplicate repeated skill recommendations; preserve profiling before optimization. Proposed artifact records are not native skill outputs. No row authorizes running mutating workflows in a read-only assignment."
+source_gate_contract = "External citations use existing SOURCEGATE1 fetch/quote registry and sources.py staged; an advisory research skill row does not make the separate sources gate optional. No cited skill is made mandatory solely by its own internal imperative."
+consumer = "omp-kit next; path/diff matches nominate review, unsupported detectors stay UNKNOWN"
+retirement = "Owning gates consume this canonical map; no automatic stewardship actions"
+cli_extraction_contract = "Parse base/candidate package.json bin (string or object), pyproject.toml [project.scripts] and declared console entrypoints, Cargo [[bin]] plus default src/main.rs and src/bin targets. Go package main and shebang entries under bin/ are candidates. Binary targets can be GUI/daemons: confirm operator-facing argv/parser/dispatch or an existing captured help/capabilities contract before CLI classification. Join confirmed entrypoints to resolved parser/dispatch/output/error dependencies; missing parser, dynamic dispatch, unclassified executable or incomplete baseline is UNKNOWN. Never execute candidate binaries just to route this data. Applies in every CLI-related row; source: skill-read-evidence.md Shared extraction contract."
+consumer_contract = "next implements path predicates, changed literal regex declarations, and package.json bin changes. Bin declarations nominate mandatory CLI review without certifying operator-facing classification. Other CLI reachability, timing, intent and trace predicates remain UNKNOWN. No land gate or artifact verification is implemented here."
+
+[[station]]
+id = "G1"
+label = "Mission, users, jobs"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G2"
+label = "Prior art"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G3"
+label = "Nouns and data"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G4"
+label = "Verbs"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G5"
+label = "Shared mechanics"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G6"
+label = "Files and modules"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G7"
+label = "Build-right framework"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G8"
+label = "Measures"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G9"
+label = "Mining hooks"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "G10"
+label = "Graph registration"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.2"
+
+[[station]]
+id = "L1"
+label = "One object-centric log"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.3"
+
+[[station]]
+id = "L2"
+label = "Supply is rebuilt on every land"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.3"
+
+[[station]]
+id = "L3"
+label = "The join emits six gap kinds"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.3"
+
+[[station]]
+id = "L4"
+label = "One row, one sink, one vocabulary"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.3"
+
+[[station]]
+id = "L5"
+label = "Route by toil"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.3"
+
+[[station]]
+id = "L6"
+label = "Closure includes adoption"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.3"
+
+[[station]]
+id = "L7"
+label = "Procedures are hypotheses"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.3"
+
+[[station]]
+id = "L8"
+label = "No producer without a consumer that branches"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.3"
+
+[[station]]
+id = "Plan"
+label = "Plan"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.5"
+
+[[station]]
+id = "Convert"
+label = "Convert"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.5"
+
+[[station]]
+id = "Polish"
+label = "Polish"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.5"
+
+[[station]]
+id = "Execute"
+label = "Execute"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.5"
+
+[[station]]
+id = "Learn"
+label = "Learn"
+source = "COMPREHENSIVE_PLAN_FOR_OMP_KIT.md §18.5"
+
+[[row]]
+station = "G1"
+trigger = "mission-or-user-stories-changed"
+detector = "Changed path is .omp/mission.toml, MISSION.md, or under docs/stories/; compare base and candidate blobs, not mtime."
+skills = ["requirements-gathering"]
+artifact = "Proposed application record: actors, jobs, constraints, measurable outcomes and story-to-job coverage; plan artifact .omp/mission.toml plus story map."
+mandatory = false
+skill_source = "requirements-gathering/SKILL.md:1-33"
+
+[[row]]
+station = "G2"
+trigger = "architectural-choice-or-prior-art-record-changed"
+detector = "Changed path under docs/adr/ or docs/research/; broad path predicate, not proof that a choice was made."
+skills = ["research-software"]
+artifact = "Tool/version/date and pinned repository revision, commands/config/gotchas and Sources sections; fetched quoted registry entries in docs/research/sources.jsonl through the existing sources gate."
+mandatory = false
+skill_source = "research-software/SKILL.md:1-44"
+
+[[row]]
+station = "G3"
+trigger = "domain-model-changed"
+detector = "Changed basename CONTEXT.md or CONTEXT-MAP.md, or changed path under docs/adr/."
+skills = ["domain-modeling"]
+artifact = "Updated domain glossary; only warranted tradeoffs get ADRs; proposed noun/schema/owner/writers cross-reference for G3 exit."
+mandatory = false
+skill_source = "domain-modeling/SKILL.md:1-74"
+
+[[row]]
+station = "G4"
+trigger = "cli-verb-inventory-changed"
+detector = "First use top-level cli_extraction_contract to confirm an operator-facing CLI and bind its declared command inventory document. Parse Markdown headings outside code fences and tables below exact heading Verbs in that bound document; trigger if that table differs between base and candidate. An unbound non-CLI Verbs table is only a heuristic candidate, not a CLI match. Missing classification, inventory binding or Markdown parser returns UNKNOWN."
+skills = ["canonical-cli-scoping"]
+artifact = "Proposed scope record: verbs, options, adapter ownership, script-addressability and no monolithic cross-adapter operation."
+mandatory = false
+skill_source = "canonical-cli-scoping/SKILL.md:1-43,70-110"
+
+[[row]]
+station = "G5"
+trigger = "dependency-added"
+detector = "Compare parsed package.json dependency maps, Cargo.toml dependency tables and pyproject.toml project.dependencies by dependency identity; added identity triggers. Unsupported dependency carrier returns UNKNOWN."
+skills = ["ripwire-reuse-first"]
+artifact = "Saved role/signature retrieval and existing dependency usage; reuse decision or rejection rationale, not copied code."
+mandatory = false
+skill_source = "ripwire-reuse-first/SKILL.md:1-60"
+
+[[row]]
+station = "G6"
+trigger = "module-interface-or-module-layout-changed"
+detector = "Changed public module/package declarations reported by language AST adapters, or added source module file; absence of parser is UNKNOWN."
+skills = ["codebase-design"]
+artifact = "Proposed module map/interface design record: path, interface invariants, error modes, callers, test seam and portable adapter boundary."
+mandatory = false
+skill_source = "codebase-design/SKILL.md:1-65"
+
+[[row]]
+station = "G7"
+trigger = "build-right-framework-manifest-changed"
+detector = "Changed exact path docs/contracts/build_right_framework_contract.md; compare full blob."
+skills = ["verification-before-completion"]
+artifact = "Proposed manifest verification record: each key names executable check or gap bead, actual command/output/exit and evidence limits; no success from file presence alone."
+mandatory = false
+skill_source = "verification-before-completion/SKILL.md:1-24"
+
+[[row]]
+station = "G8"
+trigger = "slo-or-alert-rule-changed"
+detector = "Changed path under declared Prometheus rule_files or SLO config paths resolved from repo configuration; parse rules and compare expression/threshold/duration fields. Missing config resolution returns UNKNOWN."
+skills = ["observability-designer"]
+artifact = "SLI/SLO framework with user-facing indicator, objective, error budget and actionable burn-rate rule; proposed producer/consumer/countermetric links."
+mandatory = false
+skill_source = "observability-designer/SKILL.md:1-68"
+
+[[row]]
+station = "G9"
+trigger = "miner-registration-changed"
+detector = "Compare miner registry rows referenced by project build-right manifest; trigger on changed scope or sink fields. No registry declaration is UNKNOWN, not absent mining demand."
+skills = ["automating-your-automations"]
+artifact = "Proposed mining coverage record: declared log inputs, scope, sink, command-pattern baseline and frequency x time_saved x error_rate ranking."
+mandatory = false
+skill_source = "automating-your-automations/SKILL.md:1-90"
+
+[[row]]
+station = "G10"
+trigger = "genesis-graph-nodes-missing"
+detector = "Join G1-G9 manifest artifact paths to graph nodes by canonical repo-relative path; any missing node, dangling edge or orphan genesis node triggers. Missing graph or schema returns UNKNOWN."
+skills = ["graphify"]
+artifact = "graph.json and graph diagnostic output; proposed G1-G9 node coverage query with zero unmapped artifacts; no graph replacement merely to silence shrink refusal."
+mandatory = false
+skill_source = "graphify/SKILL.md:1-69"
+
+[[row]]
+station = "L1"
+trigger = "event-linkage-schema-changed"
+detector = "Diff JSON Schema properties/required for the event log named by repo producer registry; changed linkage keys or emitters in declared writer paths trigger. Missing registry/schema is UNKNOWN."
+skills = ["evidence-ledger-shape"]
+artifact = "Versioned evidence envelope, linkage-key/integrity check result and missing-field negative; retain cc seat/bead/object relations rather than substitute seven reference keys for OCEL."
+mandatory = false
+skill_source = "evidence-ledger-shape/SKILL.md:1-58"
+
+[[row]]
+station = "L2"
+trigger = "post-land-graph-revision-stale"
+detector = "Read main candidate revision and graph producer input revision; inequality triggers. Missing revision metadata returns UNKNOWN. Use post-land verification phase; never infer freshness from mtime."
+skills = ["verification-before-completion"]
+artifact = "Proposed fresh post-land command/output/exit record including incremental graph rebuild and revision equality; this skill does not itself implement graph rebuilding."
+mandatory = false
+skill_source = "verification-before-completion/SKILL.md:1-24"
+
+[[row]]
+station = "L3"
+trigger = "duplicate-skill-candidate-present"
+detector = "Read join output rows with kind=duplicate and both object kinds=skill, keyed by exact content hash or reviewed duplicate pair; absent join output returns UNKNOWN."
+skills = ["skill-library-stewardship"]
+artifact = "Reviewed MERGE/KEEP/UNRESOLVED candidate with ownership check and human approval; never auto-delete."
+mandatory = false
+skill_source = "skill-library-stewardship/SKILL.md:Procedure steps 1-7"
+
+[[row]]
+station = "L4"
+trigger = "command-pattern-candidate-entered-sink"
+detector = "Read candidate rows entering the declared miner sink with kind=command-pattern and no disposition; trigger once per stable candidate id. Missing sink/schema returns UNKNOWN."
+skills = ["automating-your-automations"]
+artifact = "Proposed candidate disposition from plan vocabulary, baseline window/count, skeleton hash and toil score; reuse before building."
+mandatory = false
+skill_source = "automating-your-automations/SKILL.md:1-90"
+
+[[row]]
+station = "L5"
+trigger = "gap-candidate-needs-bead"
+detector = "Read candidate sink row disposition=new-bead and no bead_id; exact enum comparison and required stable id. Missing data returns UNKNOWN; do not create a second sink."
+skills = ["beads-workflow"]
+artifact = "Deduplicated self-contained bead with parent/blocks, baseline and pattern hash, implementer/verifier and cycle-free DAG evidence."
+mandatory = false
+skill_source = "beads-workflow/SKILL.md:1-79"
+
+[[row]]
+station = "L6"
+trigger = "miner-adoption-window-due"
+detector = "Read miner-born bead adoption metadata and authoritative close event time; trigger at close_time+7 days when no measurement for that window exists. Missing close/baseline metadata is UNKNOWN."
+skills = ["verification-before-completion"]
+artifact = "Proposed adoption record: same producer/window definition, baseline and close+7d counts, command/output/exit, lower-count verdict or REWORK; non-author verifies."
+mandatory = false
+skill_source = "verification-before-completion/SKILL.md:1-24"
+
+[[row]]
+station = "L7"
+trigger = "skill-unused-for-thirty-days"
+detector = "Join canonical skill inventory to real successful read events over complete trailing 30 days; count=0 triggers only with proven collector continuity for entire window. Incomplete logs return UNKNOWN, never zero."
+skills = ["skill-library-stewardship"]
+artifact = "Human approval queue recommendation MERGE/ARCHIVE/give-it-a-trigger, ownership and evidence; no automatic retirement or deletion."
+mandatory = false
+skill_source = "skill-library-stewardship/SKILL.md:Procedure steps 1-7"
+
+[[row]]
+station = "L8"
+trigger = "producer-added-without-declared-consumer"
+detector = "Added producer node in build-right manifest/producer registry has no consumer edge whose declared branch/refusal reads that output; graph missing or dynamic consumer unresolved returns UNKNOWN."
+skills = ["just-say-no-to-process-porn-and-ceremony"]
+artifact = "Completed process-porn worksheet naming consumer, gate, observed defect and retirement condition, or do-not-create verdict; consumer claim needs live reachability proof."
+mandatory = false
+skill_source = "just-say-no-to-process-porn-and-ceremony/SKILL.md:1-66"
+
+[[row]]
+station = "Plan"
+trigger = "implementation-plan-changed"
+detector = "Changed Markdown path explicitly named as plan in .omp/mission.toml; if mission lacks a plan path, exact root basename beginning COMPREHENSIVE_PLAN and ending .md is a broad advisory fallback."
+skills = ["planning-workflow"]
+artifact = "Self-contained dependency-aware rationale-bearing plan, numbered reviews and steady-state evidence; first genesis inventory precedes review."
+mandatory = false
+skill_source = "planning-workflow/SKILL.md:1-40"
+
+[[row]]
+station = "Convert"
+trigger = "plan-nodes-without-beads"
+detector = "Join approved implementation plan task node ids to tracker exported references; nonempty difference triggers. Missing plan parser/export returns UNKNOWN. Read tracker export only."
+skills = ["beads-workflow"]
+artifact = "Converted bead DAG preserving graph-node references, dependency structure and original scope; no second conversion of existing nodes."
+mandatory = false
+skill_source = "beads-workflow/SKILL.md:1-58"
+
+[[row]]
+station = "Polish"
+trigger = "task-dag-cycle-or-missing-verifier"
+detector = "Run read-only DAG validation on exported active beads; trigger on cycle, absent parent/blocks relation, or absent named verifier for implementation work. Parse failure returns UNKNOWN."
+skills = ["beads-workflow"]
+artifact = "In-place polish dispositions and cycle-free validation; G1-G10 graph exit check results, no acceptance narrowing."
+mandatory = false
+skill_source = "beads-workflow/SKILL.md:61-79"
+
+[[row]]
+station = "Execute"
+trigger = "regex-pattern-or-regex-command-changed"
+detector = "Compare regex AST/call sites in base and candidate: JS/TS regex literals and RegExp constructors; Python re compiled/match/search/sub family; Rust regex constructors; shell grep/rg/sed/awk pattern operands; jq test/match/sub operands. Changed dynamic pattern producers also trigger. Unsupported syntax or unresolved command string is UNKNOWN, not a negative."
+skills = ["regex-engineering"]
+artifact = "Native-runtime semantics contract, positive/negative/boundary/adversarial conformance output with exit, actual caller integration and bounded resource findings (skill sections 1-4 and done bar); proposed application record binds these to change revision."
+mandatory = true
+rule = "/Users/josh/.agents/AGENTS.md §Regex (Joshua 2026-10-03): every regex, including command patterns, goes through regex-engineering."
+skill_source = "regex-engineering/SKILL.md:sections 1-4, Done bar"
+
+[[row]]
+station = "Execute"
+trigger = "test-gate-or-command-over-sixty-seconds"
+detector = "Read complete timing receipts for tests, gates and commands; duration_s > 60 or timed_out=true triggers. Sixty seconds is a routing threshold, NOT a waiver: any timeout or declared slow-path incident in the repo also triggers; missing timing is UNKNOWN."
+skills = ["profiling-software-performance", "extreme-software-optimization"]
+artifact = "tests/artifacts/perf/ or equivalent: scenario/fingerprint, repeated baseline, ranked hotspot table and hypothesis ledger FIRST; then scored Opportunity Matrix >=2.0, one-lever behavior/isomorphism proof, rollback and paired incumbent/candidate measurements. Measurement-only investigation stops before optimizer edits."
+mandatory = true
+rule = "/Users/josh/.agents/AGENTS.md §Slow paths (Joshua 2026-10-03): any timeout, slow test/command or make-this-faster request uses profiling-software-performance then extreme-software-optimization, in that order."
+skill_source = "profiling-software-performance/SKILL.md:1-47; extreme-software-optimization/SKILL.md:1-41,105-113"
+
+[[row]]
+station = "Execute"
+trigger = "release-version-or-release-workflow-changed"
+detector = "Compare package.json version, Cargo.toml package/workspace.package.version, pyproject project.version; also any changed workflow referenced as release by repo build-right manifest. Dynamic version source unresolved is UNKNOWN."
+skills = ["release-preparations"]
+artifact = "Proposed release record binds exact tree/tag, complete gate output and exits, artifacts/checksums, published asset readback and installer verification. Never claim skill scripts executed by this map."
+mandatory = false
+skill_source = "release-preparations/SKILL.md:1-52"
+
+[[row]]
+station = "Execute"
+trigger = "readme-created-or-structurally-rewritten"
+detector = "Changed basename README.md: added file or changed parsed heading sequence; Markdown fences excluded. Missing parser returns UNKNOWN."
+skills = ["readme-writing"]
+artifact = "README with tested install/quickstart examples, accurate command/config reference and limitations; proposed checklist/evidence record, not invented native scorecard."
+mandatory = false
+skill_source = "readme-writing/SKILL.md:1-98"
+
+[[row]]
+station = "Execute"
+trigger = "readme-existing-claims-changed"
+detector = "Existing README.md blob changed without structural rewrite; this path-level advisory predicate is broad and asks reviewer to identify any changed claims."
+skills = ["readme-update"]
+artifact = "Current-state README; validator result and claim relocation/currency decisions, not appended session worklog."
+mandatory = false
+skill_source = "readme-update/SKILL.md:1-56"
+
+[[row]]
+station = "Execute"
+trigger = "public-prose-changed"
+detector = "Added/modified .md/.mdx/.rst under docs/ or root README.md; filter code fences/code spans with format parser before human review. Trigger is text change, not a machine slop verdict."
+skills = ["de-slopify"]
+artifact = "Human line-by-line revision with concrete facts preserved; proposed changed-path/revision review record. No emdash regex or AI-style score can stand in for review."
+mandatory = false
+skill_source = "de-slopify/SKILL.md:1-54"
+
+[[row]]
+station = "Execute"
+trigger = "external-citation-added"
+detector = "Parse changed Markdown/MDX/reST outside code to identify added external HTTP links, source markers and citation footnotes; also parse changed docs/research/sources.jsonl ids. Unsupported citation grammar returns UNKNOWN."
+skills = ["research-software"]
+artifact = "Pinned source/code references plus fetched quote-verified docs/research/sources.jsonl records; run existing companion scripts/sources.py staged --repo <repo> (offline) against staged changes. This row recommends research skill; source-gate obligation is separate."
+mandatory = false
+skill_source = "research-software/SKILL.md:1-44; omp-kit-companion/scripts/sources.py:1-32,126-154; omp-kit-companion/scripts/sources.py:306-358"
+
+[[row]]
+station = "Execute"
+trigger = "skill-package-created-or-modified"
+detector = "Any added/modified path with basename SKILL.md or path beneath its parent scripts/, assets/, references/; associate canonical skill root from inventory."
+skills = ["skill-authoring-discipline"]
+artifact = "Failing pressure scenario first, check.sh mechanical result with planted negative, fresh-agent materialization on a new problem with paired no-skill baseline; approvals for retire/merge."
+mandatory = false
+skill_source = "skill-authoring-discipline/SKILL.md:sections 0-6"
+
+[[row]]
+station = "Execute"
+trigger = "completion-request-recorded"
+detector = "Read structured work-order transition request to in_review or release request; binds request to exact change revision. Missing transition stream is UNKNOWN."
+skills = ["verification-before-completion"]
+artifact = "Fresh command/output/exit and per-original-acceptance verdict on exact tree; independent verifier identity and limits. Proposed application record, not author self-certification."
+mandatory = false
+skill_source = "verification-before-completion/SKILL.md:1-24"
+
+[[row]]
+station = "Learn"
+trigger = "research-fragment-added"
+detector = "Added/modified suffix .fragment.json with nodes/edges and source provenance; parse JSON before dispatch. Malformed fragment triggers with invalid-input detail."
+skills = ["research-to-graph"]
+artifact = "Prose and typed provenance-bearing fragment, search-before-create merge and rtg-merge.py --doctor output; do not substitute this graph for the existing build_graph.py owner."
+mandatory = false
+skill_source = "research-to-graph/SKILL.md:1-40"
+
+[[row]]
+station = "Learn"
+trigger = "unmapped-skill-trigger-candidate-present"
+detector = "Candidate sink row kind=skill-trigger with no station/trigger key in this map triggers catalog lookup. No candidate sink is UNKNOWN."
+skills = ["skill-search-mcp"]
+artifact = "Ranked candidates with freshness/source stamps and explicit unavailable-projection result; proposed selection record includes read skill path and acceptance/rejection reason. Never mutate catalog from discovery."
+mandatory = false
+skill_source = "skill-search-mcp/SKILL.md:1-39"
+
+[[row]]
+station = "Execute"
+trigger = "A project has a confirmed operator-facing CLI; no ergonomics evidence is bound to the current relevant change set, or CLI-reachable source has changed."
+detector = "Phase detail: CLI implementation/completion. Extract declared entrypoints using top-level cli_extraction_contract (manifest keys, default Cargo targets, operator-facing classification and source/dependency join); join the current change set to entrypoint/parser/dispatch/output/error dependencies and compare the evidence revision binding. Entry declarations are exact; reachability is parser/trace-dependent. Missing classification or trace => UNKNOWN and review, not exemption. Apply to ANY confirmed CLI project, without a language, size, agent-majority, or doctor-presence exclusion."
+skills = ["agent-ergonomics-and-intuitiveness-maximization-for-cli-tools"]
+artifact = "{\"native\": [\"<target>/agent_ergonomics_audit/audit/manifest.json\", \"<target>/agent_ergonomics_audit/audit/surface_inventory.jsonl\", \"<target>/agent_ergonomics_audit/audit/agent_surfaces.jsonl\", \"<target>/agent_ergonomics_audit/audit/recommendations.jsonl\", \"<target>/agent_ergonomics_audit/audit/scorecard.md\"], \"evidence\": \"E:383-393,794-835\"}"
+mandatory = true
+rule = "Joshua J-2026-10-25-34, read in ompkit-cfwg2: any CLI project needs agent-ergonomics largely built into the gates; AC3 preflight and push coverage."
+skill_source = "agent-ergonomics-and-intuitiveness-maximization-for-cli-tools/SKILL.md:1-61,383-393,794-835"
+
+[[row]]
+station = "Plan"
+trigger = "A confirmed CLI's proposed command tree, argv/flag contract, adapter scopes, or operator command inventory is added or changed."
+detector = "Diff structured command inventories or parser-derived command/flag declarations. Route structural command/scoping design here; exclude an exclusively doctor-internal repair change and installer-only work. Raw source-name/help-token extraction is heuristic; missing parser or ambiguous dispatch => UNKNOWN. Do not assume a Python packaging check is applicable to every language."
+skills = ["canonical-cli-scoping"]
+artifact = "{\"native\": \"canonical-cli-scorecard.result/v1\", \"transport\": \"Scorer stdout; no native result filename asserted.\", \"proposed\": \"A planned command/scoping decision envelope until an executable candidate exists; not a native skill schema.\", \"evidence\": \"C:25-43,70-110\"}"
+mandatory = false
+skill_source = "canonical-cli-scoping/SKILL.md:1-43,70-110"
+
+[[row]]
+station = "Execute"
+trigger = "Structured workflow state enters CLI release-readiness review for an identified installable artifact/revision."
+detector = "Phase detail: release readiness. Match an explicit release-review event/task type to the CLI artifact and revision. Extract command count from a command inventory; derive durable-state and external-substrate facts only from declarations/traces. Agent-majority use requires recorded invocation/consumer evidence, not guesswork. Unknown tier inputs => UNKNOWN, not automatic Tier A. Use the tiered shipping verdict, not a second broad ergonomics audit."
+skills = ["shippable-cli-bar"]
+artifact = "{\"native_contract\": \"Tier-calibrated scorecard with SHIPPABLE/NEARLY/NOT YET/REBUILD verdict and P0-P4 gaps.\", \"proposed\": \"cli-shippability-result envelope containing revision, tier, item applicability, evidence and verdict. This name/schema is proposed, not native.\", \"evidence\": \"S:20-54\"}"
+mandatory = false
+skill_source = "shippable-cli-bar/SKILL.md:1-54,124-170"
+
+[[row]]
+station = "Execute"
+trigger = "A change adds or alters CLI diagnostic detectors, repair/fix handlers, undo/backup behavior, or mutation chokepoint dependencies."
+detector = "Phase detail: doctor/self-healing implementation. Resolve registered doctor/health/verify/repair/check/diagnose/fix command handlers and join the change set to detectors, fixers, mutation dispatch and backup/inverse dependencies. Command-name matching alone is heuristic: generic check/fix symbols are insufficient. Missing dispatch or writer trace => UNKNOWN; never certify that all writes pass through mutate() from a grep absence."
+skills = ["world-class-doctor-mode-for-cli-tools"]
+artifact = "{\"native\": [\".doctor/runs/<run-id>/report.json\", \".doctor/runs/<run-id>/scorecard.json\", \".doctor/runs/<run-id>/actions.jsonl\", \".doctor/runs/<run-id>/backups/\", \".doctor/runs/<run-id>/undo.sh\", \".doctor/scorecard_history.jsonl\"], \"evidence\": \"D:26-45,423-452\"}"
+mandatory = false
+skill_source = "world-class-doctor-mode-for-cli-tools/SKILL.md:1-45,363-452"
+
+[[row]]
+station = "Execute"
+trigger = "A CLI installer entrypoint or its acquisition, integrity-verification, destination, shell-integration, upgrade or uninstall dependencies are added or changed."
+detector = "Phase detail: installer implementation. Follow a manifest/docs-declared installer path and its sourced/called helpers; diff the resolved dependency set. install.sh naming or a curl-pipe-shell snippet produces a heuristic candidate only. Parse shell control flow where supported; dynamic source/eval or an unavailable shell parser => UNKNOWN. A README-only installer URL change is a distribution-contract candidate, not proof of installer semantics."
+skills = ["installer-workmanship"]
+artifact = "{\"native\": \"The target CLI's install.sh, with documented flags, post-install verification and uninstall/revert instructions.\", \"proposed\": \"Installer workmanship evidence envelope for platform, integrity, idempotence and consent results; not native.\", \"evidence\": \"I:1-80\"}"
+mandatory = false
+skill_source = "installer-workmanship/SKILL.md:1-80"
+
+[[row]]
+station = "Execute"
+trigger = "The change modifies a registered golden/snapshot fixture, a snapshot assertion, or a producer registered to an existing approved-output fixture."
+detector = "Phase detail: regression/output-contract review. Intersect D with the repository's registered fixture-to-producer/assertion mapping. Parse changed tests with the native language parser and resolve calls to the configured snapshot library. A *.snap/*.golden or golden*/snapshot* path match alone is HEURISTIC; an unregistered producer dependency is UNKNOWN, not unaffected."
+skills = ["testing-golden-artifacts"]
+artifact = "{\"native\": \"For the Rust insta example: snapshots/<module_path>__error_formatting.snap.new, followed by the accepted .snap; Golden Confidence Matrix classifying determinism/platform dependence/volatility/strategy.\", \"proposed_record\": \"golden-review record: fixture path, producer/assertion references, projection/scrubbing policy, changed fields, independent expected behavior, approval evidence. No native filename specified for this record.\"} Limit: A snapshot diff is not correctness proof. Do not auto-accept/regenerate goldens to obtain green; preserve error/span disagreements rather than scrub them away."
+mandatory = false
+skill_source = "testing-golden-artifacts/SKILL.md:1-83,85-115"
+
+[[row]]
+station = "G7"
+trigger = "An existing test-design contract explicitly records that arbitrary expected outputs cannot be computed, no trusted reference is available, and at least one transformation relation with preconditions is identified."
+detector = "Extract those three explicit assertions and their target-symbol references from the selected contract; require the target to be within change scope. Distinguish an absent field from an explicit negative assertion. Absence of expected-value assertions in source does NOT establish an oracle problem. Without the explicit contract, suitability is UNKNOWN."
+skills = ["testing-metamorphic"]
+artifact = "MR Strength Matrix with each surviving MR scored >=2.0; generated-input property tests; mutation evidence that EACH surviving MR catches at least one distinct planted bug class (no residual-mutant exception at this per-MR level). Separately, the whole suite kills >=80% of a representative mutation set OR provides a written argument that residual mutants are equivalent/unreachable. Compound MR chains where more sensitive, with justified chain length. Proposed application record links relations/preconditions, target, generator, strength, mutants and actual evidence; no mandatory native filename is named. Trusted expected-value/reference oracles displace this recommendation; a single known bug uses a targeted regression."
+mandatory = false
+skill_source = "testing-metamorphic/SKILL.md:1-100"
+
+[[row]]
+station = "G7"
+trigger = "The selected compiler/optimizer assurance contract specifically requires typed parser/IR/execution metamorphic relations, per-rewrite obligations, or a replayable self-oracle catalog."
+detector = "Read explicit assurance clauses and their symbol/catalog references; use the native parser to identify changes to the registered relation catalog, OracleKind/RelationSpec equivalents, rewrite obligations, or identified runner. Matching those names without resolving the actual registered implementation is HEURISTIC. Exclude the generic metamorphic row when this specialist contract applies, avoiding two default skill loads."
+skills = ["metamorphic-property-testing"]
+artifact = "{\"native\": \"JSON proof receipt with schema_version zeststream.spec_ops_math_receipt.v1; fields include skill, family, math_lever, seed_route_summary, proof_gate, fixture_refs, result and failure_class. Typed RelationSpec catalog and RunContext identity are named mechanisms; no universal catalog filename is prescribed.\", \"proposed_record\": \"Catalog-to-rewrite coverage and replay-evidence links where the native receipt needs station-specific linkage.\"} Limit: The body includes seed-refresh/publication/cron machinery that should not become an automatic requirement for ordinary metamorphic tests. Compiler self-oracles remain self-oracles, not independent reference implementations."
+mandatory = false
+skill_source = "metamorphic-property-testing/SKILL.md:1-42,104-145,184-315"
+
+[[row]]
+station = "Execute"
+trigger = "The change touches an existing registered fuzz target/corpus, or a resolved external-input parser/deserializer/protocol boundary identified by a repository boundary map or source trace."
+detector = "Phase detail: input-boundary robustness. Parse the existing fuzz configuration to map targets to resolved entry symbols; intersect D with those targets and their resolved dependency paths. For new boundaries require an explicit source-to-entry trace or declared boundary ownership. Byte/string parameter types, parser dependencies, parse/decode names and fuzz* filenames are HEURISTIC candidates only. Missing parser/trace/configuration yields UNKNOWN."
+skills = ["testing-fuzzing"]
+artifact = "{\"native\": \"Fuzz harness, seed/minimized corpus and minimized crash artifacts. Body examples name fuzz/corpus/my_target/minimal_valid, typical and boundary; fuzz/artifacts/my_target/crash-xxx; and a regression test reading crash-abc123.\", \"proposed_record\": \"fuzz-campaign record linking actual target/corpus paths, seed, limits, instrumentation, executions/coverage observations, crash stack fingerprint, minimized witness and regression.\"} Limit: No corpus, sanitizer, throughput or coverage result was exercised here. Fuzz success is finite evidence, not absence of vulnerabilities. Language/platform-specific instrumentation availability must remain explicit."
+mandatory = false
+skill_source = "testing-fuzzing/SKILL.md:1-108,282-342,434-494"
+
+[[row]]
+station = "Execute"
+trigger = "An explicit repository release/hardening/audit manifest requests a multi-pass audit-fix-rescan bug hunt for identified scope."
+detector = "Phase detail: explicitly authorized release/audit hardening. Parse the selected manifest's actual task/type/scope fields or cite its exact imperative clause, then bind the scope to the repository/change. A release filename, test execution, test changes, ordinary review request or scanner presence alone does NOT fire this row. Only complete examination of the selected authorization scope with no explicit request yields NO_MATCH(reason=NOT_REQUESTED); missing, unreadable or ambiguous manifest/scope yields UNKNOWN."
+skills = ["multi-pass-bug-hunting"]
+artifact = "{\"native\": \"pass1.jsonl, pass2.jsonl and findings.jsonl in the command examples; per-pass findings documentation; convergence evidence comprising clean final scan, passing tests, no new reread findings and no deferred items.\", \"proposed_record\": \"multi-pass-convergence record linking manifest scope, each pass's actual output, findings/dispositions, fixes, integration evidence and remaining gaps.\"} Limit: Do not trigger a whole-codebase hunt for every test run. The skill performs fixes; a read-only audit authorization does not authorize those fixes. Do not suppress uncertain findings merely to reach convergence."
+mandatory = false
+skill_source = "multi-pass-bug-hunting/SKILL.md:1-49,88-123,204-260"
+
+[[row]]
+station = "Execute"
+trigger = "A change alters a registered existing grammar/parser seam or AST consumer: grammar selection, recovery/EOF policy, budgets, source-span conversion, incremental invalidation, AST-grep rule or consumer outcome handling."
+detector = "Phase detail: parser/AST contract review. Resolve parse entry points and actual consumers using the native parser and symbol/reference map; intersect changed definitions/configuration with those registered seams. Inspect native grammar/config diffs for precedence, ordered alternatives, recovery, span units and cache policy. Filename terms such as parser/ast, a dependency name or a regex hit only nominate HEURISTIC candidates. Unsupported syntax, missing native runtime, incomplete mapping or consumer trace yields UNKNOWN."
+skills = ["ast-parsing-engineering"]
+artifact = "{\"native\": \"Minimal existing-seam change plus invariants/counterexamples, finite native conformance and real-consumer evidence. Bundled Python example accepts suite.json and emits a complete JSON response plus exit status; scripts/conformance.py and scripts/test_conformance.py are native tool/test names, not output files.\", \"proposed_record\": \"parser-contract record: parser/runtime/grammar/mode, source identity, complete/recovered outcome, consumed observables, span units, limits/enforcement points, witnesses, consumer result and unresolved prerequisites.\"} Limit: The bundled adapter covers finite Python AST conformance only, not arbitrary grammars, RustJSON, binding/dataflow, incremental implementation or safe execution. Recovered/budget-exhausted/unavailable analysis cannot become no-match or safe."
+mandatory = false
+skill_source = "ast-parsing-engineering/SKILL.md:1-72,98-168; ast-parsing-engineering/references/conformance.md:1-135"
+
+[[row]]
+station = "Execute"
+trigger = "An explicit transition contract changes persisted schema/data, API/protocol format, configuration or dependency compatibility and requires staged migration, preservation or rollback."
+detector = "Phase detail: transition implementation. Extract old/new versions, readers/writers, requested stage, compatibility window and rollback/preservation clauses from the selected contract; resolve linked changed implementations. A dependency-version bump or file named migrate alone is HEURISTIC and does not prove a staged migration is needed. Missing ownership/compatibility evidence yields UNKNOWN."
+skills = ["migration"]
+artifact = "{\"native\": \"Forward/rollback paths, reader/writer and data-shape mapping, mixed-version safety and old/new-stage verification; no output filename is named.\", \"proposed_record\": \"transition-preservation record containing requested stage, forward/rollback steps, compatibility window, retry/partial-failure behavior, preservation evidence and separate contraction authorization.\"} Limit: Do not automatically advance to destructive contraction. Use this minimal general workflow rather than loading all three migration skills for every transition."
+mandatory = false
+skill_source = "migration/SKILL.md:1-17"
+
+[[row]]
+station = "G3"
+trigger = "A database-engine-aware change contains schema DDL, a data backfill/transformation, index/constraint changes, or migration configuration targeting an identified database."
+detector = "Parse changed SQL with the declared engine/dialect and enumerate DDL and affected objects; parse ORM migration operations through their actual migration API, not text search. For application backfills require an explicit migration manifest or resolved write operation plus migration task binding. Compare before/after schema representations where available. Unsupported dynamic SQL, unresolved ORM semantics or missing engine is UNKNOWN; migrations/** path alone is HEURISTIC."
+skills = ["safe-migrations"]
+artifact = "{\"native\": \"Per-phase rollback SQL and validation queries; batch strategy, duration estimate and production-sized-clone validation. migration_planner.py --rollback and --json are named interfaces; the body prescribes no output filename.\", \"proposed_record\": \"database-transition record linking engine/version, objects, expand/migrate/switch/contract phase, real rollback SQL, validation SQL/results, row-volume assumptions and lock/lag considerations.\"} Limit: SQL parsing does not establish lock duration, production topology, data preservation or a tested rollback. The body's blanket rollback/zero-downtime claims are not evidence; contract explicitly says dropped data cannot be rolled back. Database-version-specific advice requires validation."
+mandatory = false
+skill_source = "safe-migrations/SKILL.md:1-65,117-155,174-217"
+
+[[row]]
+station = "G7"
+trigger = "An explicit migration design manifest declares multi-system cutover, service/infrastructure migration, CDC, dual writes, shadow/parallel operation or progressive traffic migration."
+detector = "Extract explicit source/target systems, selected mechanism and cutover/rollback obligations from the manifest, with references to changed deployment/routing/schema components. Mere presence of a feature flag, queue dependency or two databases is insufficient. Mechanism/source-target ownership absent or ambiguous yields UNKNOWN."
+skills = ["migration-architect"]
+artifact = "{\"native\": \"Migration plan, compatibility analysis and rollback procedures. The example CI artifact list explicitly names compatibility_report.json and migration_plan.json.\", \"proposed_record\": \"Cutover-to-evidence linkage and rollback-trigger record when not represented by those project-selected outputs.\"} Limit: The named JSON files occur in an example pipeline, not a verified universal writer contract. Do not claim bundled scripts emitted them. Avoid this broad planning workflow for a simple additive schema change."
+mandatory = false
+skill_source = "migration-architect/SKILL.md:1-42,185-285,411-464"
+
+[[row]]
+station = "Execute"
+trigger = "The change intersects a resolved authentication/authorization, sensitive-data/payment, privileged endpoint, upload/download, query-construction or outbound-fetch security boundary."
+detector = "Phase detail: focused security-sensitive change review. Start from an explicit boundary inventory or resolved framework registration/middleware/policy symbols; intersect changed definitions and resolved references with it. Native AST call/signature detection may nominate candidates, but source-to-sink facts require a real dataflow result or cited manual trace. auth/payment/api filenames alone are HEURISTIC. Incomplete parser/dataflow/trace yields UNKNOWN."
+skills = ["security-review"]
+artifact = "{\"native\": \"Applicable OWASP checklist decisions, documented mitigations and code-comment security decisions; security_scanner.py --json is a named output interface, not a guaranteed file.\", \"proposed_record\": \"focused-security-review record: boundary/principal/resource, applicable checks, source references, mitigation/evidence, scanner limits and unresolved deployment assumptions.\"} Limit: Checklist completion or lexical scanner silence is not taint proof, authorization proof or a clean bill of health. Prefer relevant checks rather than applying web-only requirements to every CLI/library."
+mandatory = false
+skill_source = "security-review/SKILL.md:1-56,184-224"
+
+[[row]]
+station = "Execute"
+trigger = "An explicit repository security-audit manifest requests a full/comprehensive/end-to-end codebase audit, pen test or the skill's report artifacts."
+detector = "Phase detail: full security audit. Read the selected audit manifest's actual authorization/scope/profile clauses; bind them to the target and source revision. An ordinary security-sensitive diff, generic release, focused question or test run does not authorize full mode. Ambiguous authorization remains UNKNOWN; default loading is guidance only."
+skills = ["security-audit"]
+artifact = "{\"native\": \"run-metadata.json, architecture.md, coverage-ledger.json, findings.json, REPORT.md, FINDINGS-DETAIL.md and NEEDS-VALIDATION.md; full findings/coverage validation and independent record verification are part of the workflow.\", \"proposed_record\": null} Limit: Execution requires the skill's OS-enforced sandbox controls; unavailable controls produce needs-validation, not host execution. Static boundary candidates are not confirmed findings. Source-external controls cannot be assumed present or absent."
+mandatory = false
+skill_source = "security-audit/SKILL.md:1-68,163-184"
+
+[[row]]
+station = "Execute"
+trigger = "An explicit adoption/activation manifest selects externally sourced skill markdown or MCP configuration for installation or activation."
+detector = "Phase detail: external capability adoption. Extract selected paths and external-origin evidence from the adoption manifest; match those exact bytes/digests to the candidate files. SKILL.md or .mcp.json filename alone does not establish external provenance or intended activation. Missing provenance/adoption intent yields UNKNOWN."
+skills = ["ripwire-security-scan"]
+artifact = "{\"native\": \"Skill scan stdout with severity, file:line, rule and offending text plus exit 0/1/2; per-MCP-server CLEAN/WARN/CRITICAL manual decision and offending stanza. No native report filename.\", \"proposed_record\": \"capability-adoption-review record linking source digest/origin, selected file/server entry, scanner/manual evidence, limitations and install decision.\"} Limit: The markdown scanner does not implement MCP semantic analysis. MCP command/args/env review remains manual; shell-like characters in an argv string are not by themselves proof that a shell executes them. Scanner-clean does not establish safety."
+mandatory = false
+skill_source = "ripwire-security-scan/SKILL.md:1-52,78-156"
+
+[[row]]
+station = "Execute"
+trigger = "A requested structural security triage targets a declared untrusted-input entry point or changed risky sink/buffer operation."
+detector = "Phase detail: structural triage, not vulnerability certification. Resolve the entry symbol and sink call sites; enumerate forward callees with a recorded hop bound, lint risky constructs in reach and inspect untested seams. Preserve grep-in=any, graph limits, counts_floor, root capped and per-rule shown_rows/rows_capped. Unresolved dynamic dispatch, missing native parser/index, capped results or absent source trace remains UNKNOWN/incomplete."
+skills = ["ripwire-security-scan"]
+artifact = "{\"native\": \"Ranked concerns listing sink call sites, entry-point forward reach, risky-construct hits and untested seams, explicitly labeled structural triage, not a taint proof.\", \"proposed_record\": \"structural-security-triage record preserving exact query scope, bounds, truncation/floor flags, locator evidence and required manual/dataflow follow-through.\"} Limit: Ripwire explicitly has no dataflow/taint engine. Call-graph reach does not show which values flow, sanitizer effectiveness or exploitability. Empty results from incomplete coverage cannot mean safe."
+mandatory = false
+skill_source = "ripwire-security-scan/SKILL.md:1-52,78-156"
+
+[[row]]
+station = "Execute"
+trigger = "migration-file-added"
+detector = "Added path beneath the migration directories declared by the repo migration tool config; default broad advisory candidates: migrations/, db/migrations/, supabase/migrations/ with .sql/.py/.ts suffix. This exact path fact does not prove DDL semantics; unresolved dialect/ORM analysis is UNKNOWN."
+skills = ["safe-migrations"]
+artifact = "Database transition plan and validation/rollback queries where applicable; explicitly disposition non-database migrations as not-applicable with reason. Proposed application record binds engine and touched objects."
+mandatory = false
+skill_source = "safe-migrations/SKILL.md:1-65,117-155,174-217"
+
+[[row]]
+station = "Execute"
+trigger = "performance-work-order-active"
+detector = "Read repo-bound work-order kind=performance/optimization, or recorded incident kind=slow-test/slow-command/timeout for a target inside the change. These enums are proposed normalization of existing work orders, not an existing shared schema; adapter must bind actual field/clauses and return UNKNOWN when unavailable."
+skills = ["profiling-software-performance", "extreme-software-optimization"]
+artifact = "Profile-first ranked hotspots/fingerprint/hypothesis ledger, then Opportunity Matrix >=2.0 and one-lever paired incumbent/candidate behavior and timing evidence; stop at profiling handoff if investigation only."
+mandatory = true
+rule = "/Users/josh/.agents/AGENTS.md §Slow paths (Joshua 2026-10-03): any slow path or make-this-faster request requires profiling-software-performance then extreme-software-optimization."
+skill_source = "profiling-software-performance/SKILL.md:1-47; extreme-software-optimization/SKILL.md:1-41,105-113"

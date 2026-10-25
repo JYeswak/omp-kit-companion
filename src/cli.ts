@@ -96,6 +96,7 @@ import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
 import { looksSecret } from "./mcp-sources.ts";
+import { formatNext, next } from "./next.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -4368,6 +4369,18 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 				remediation: "Reinstall a complete kit release; no profile was changed or activated.",
 			}], verification: "UNVERIFIED" };
 		}
+	}
+	if (command.name === "next") {
+		const role = request.flags.get("--role");
+		const repo = request.flags.get("--repo");
+		const agent = request.flags.get("--agent");
+		const result = await next({ role: typeof role === "string" ? role : "",
+			...(typeof repo === "string" ? { repo } : {}),
+			...(typeof agent === "string" ? { agent } : {}),
+		});
+		// Human output adds a text rendering; JSON data keeps exactly the schema's keys.
+		if (!request.json && !request.robot && result.code === 0) return { ...result, data: { ...result.data, text: formatNext(result.data) } };
+		return result;
 	}
 	if (command.name === "status" || command.name === "health" || command.name === "doctor") return diagnosticInventory(request);
 	if (command.name === "corpus") return corpusReport(request);

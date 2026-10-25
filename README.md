@@ -17,7 +17,7 @@ Current release: v0.2.75
 <!-- kit-release:end -->
 
 A tested rule pack, 11 guard extensions, five skills, and a guarded CLI with
-44 top-level commands for an existing OMP install.
+45 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -53,7 +53,7 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Diagnostics cover 38 scopes. The reference lists all 44 commands. Fleet
+Diagnostics cover 38 scopes. The reference lists all 45 commands. Fleet
 guards, services and the update channel are opt-in.
 
 ### Why use omp-kit
@@ -514,9 +514,10 @@ explicit report rather than inventing zero activity.
 | `omp-kit memory` | `memory audit --store-root PATH --yes` | Separately consented audit of a Mnemopi store | `omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json` |
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run into a fresh `--db`, or `--apply` to a tracker) | `omp-kit planning score --fleet --json` |
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes (`VALID`, `UNREGISTERED`, `INVALID`); `anchor` reports the live-doc Mission statement against the record per repo (`AGREE` or `DRIFT` with reasons) | `omp-kit mission anchor --project ~/Developer/omp-kit --json` |
-| `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned in-progress/rework claims. Reclaim requires no live seat, mail activity in 24 h or live reservation—not an old tracker touch. LIVE stays protected; UNKNOWN has no reclaim. The proposed write clears assignee with `--if-unchanged REV --transition-comment`. `--project DIR` selects `DIR/.beads/beads.db`; do not combine with `--db`. | `omp-kit drain stale-claims --project . --json` |
+| `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned in-progress/rework claims; reclaim only with no live holder (seat, mail in 24 h, reservation). LIVE protected; UNKNOWN never reclaimed | `omp-kit drain stale-claims --project . --json` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 124 over budget, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
+| `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME]` | Read-only next action and applicable skills ([docs/next.md](docs/next.md)) | `omp-kit next --role worker --json` |
 | `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or explicitly resolve shared-main convergence; preserves peer staged/worktree state, refuses unresolved owner conflicts, and publishes only with a non-force push | `omp-kit converge --repo . --json` |
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit reserved paths, admit via `commit-msg` and the [push check](docs/land.md), publish with no force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |

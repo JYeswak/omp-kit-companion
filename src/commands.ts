@@ -1,6 +1,7 @@
 import { UNOWNED_ACTIVE_RULE } from "./scratch.ts";
 import { PROFILE_RECIPE_KINDS } from "./profile-recipes.ts";
 import { TERN_COMMAND } from "./tern/registry.ts";
+import { NEXT_DATA_SCHEMA } from "./next.ts";
 
 export type Flag = {
 	readonly aliases?: readonly string[];
@@ -467,6 +468,11 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--max-runtime", value: "SECONDS", description: "Runtime budget for the admitted child, separate from the admission wait. Precedence: this flag, then load.json runtime_budget_s.<label>, then default_runtime_s (10800). Past it the child gets SIGTERM, SIGKILL 10 s later, and heavy exits 124 with RUNTIME_BUDGET_EXCEEDED" },
 		{ name: "--disk-observer", value: "statfs|sbh|auto", description: "Disk observer for this call, overriding load.json; statfs admits on physical bytes (10 GiB) and never consults sbh" },
 	], example: "omp-kit heavy --label cli-tests -- bun test tests/cli", runnable: true },
+	{ name: "next", description: "Recommend one next loop action and the skills that apply to current changes, without changing anything", usage: "next --role worker|director [--repo PATH] [--agent NAME]", flags: [
+		{ name: "--role", value: "worker|director", description: "Required loop role: worker or director" },
+		{ name: "--repo", value: "PATH", description: "Repository to inspect (default: current directory)" },
+		{ name: "--agent", value: "NAME", description: "Agent identity (default: AGENT_NAME)" },
+	], example: "omp-kit next --role worker --json", runnable: true, dataSchema: NEXT_DATA_SCHEMA },
 	{ name: "converge", description: "Report or owner-resolve shared-main convergence without overwriting peer state", usage: "converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...", flags: [
 		{ name: "--repo", value: "PATH", description: "Canonical Git repository to converge; required" },
 		{ name: "--apply", description: "Apply the reviewed path-scoped integration to shared main" },
