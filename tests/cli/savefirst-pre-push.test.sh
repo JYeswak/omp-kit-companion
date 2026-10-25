@@ -25,9 +25,10 @@ mkdir -p "$SOURCE"
 git -C "$SOURCE_ROOT" archive --format=tar "$SOURCE_SHA" \
 	scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh \
 	src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \
+	config/heavy-labels.json \
 	> "$TMP/exact-source.tar"
 tar -xf "$TMP/exact-source.tar" -C "$SOURCE"
-tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src
+tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.json
 
 make_checker_controls() {
 	repo=$1
@@ -102,7 +103,7 @@ CLI
 	git -C "$sf_repo" config user.email "test@example.invalid"
 	git -C "$sf_repo" config user.name "SaveFirstFixture"
 	git -C "$sf_repo" config core.hooksPath "$sf_repo/.git/hooks"
-	git -C "$sf_repo" add -- scripts src tests/cli rules MANIFEST.tsv config/omp-kit/load.json
+	git -C "$sf_repo" add -- scripts src tests/cli rules MANIFEST.tsv config/omp-kit/load.json config/heavy-labels.json
 	git -C "$sf_repo" commit -qm "[test] SaveFirst minimal gate base"
 	git init -q --bare --initial-branch=main "$sf_remote"
 	git -C "$sf_repo" remote add origin "$sf_remote"
