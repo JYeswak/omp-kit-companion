@@ -250,9 +250,13 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/kitlib_io.py scripts/kitlib_io.py" \
 		"hooks.d/pre-commit/kitlib_tmp.py scripts/kitlib_tmp.py" \
 		"hooks.d/pre-commit/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
+		"hooks.d/pre-commit/kitlib-findings.sh scripts/kitlib-findings.sh" \
 		"hooks.d/commit-msg/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
+		"hooks.d/commit-msg/kitlib-findings.sh scripts/kitlib-findings.sh" \
 		"hooks.d/pre-push/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
+		"hooks.d/pre-push/kitlib-findings.sh scripts/kitlib-findings.sh" \
 		"hooks.d/reference-transaction/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
+		"hooks.d/reference-transaction/kitlib-findings.sh scripts/kitlib-findings.sh" \
 		"hooks.d/commit-msg/gate-event.sh scripts/gate-event.sh" \
 		"hooks.d/commit-msg/kitlib_jsonl.py scripts/kitlib_jsonl.py" \
 		"hooks.d/commit-msg/kitlib_lock.py scripts/kitlib_lock.py" \
@@ -333,24 +337,52 @@ case "$kind" in
 		;;
 esac
 rc=0
-# GATEEVENTS1 runner v3 (ompkit-fp72.135.3.12): each member's verdict is one gate-events row (act = what the agent
-# is doing: commit, publish; gate = member name), so refusal chains per act are measured, not
-# remembered. The writer never fails a hook.
+# GATEEVENTS1 runner v4 (ompkit-fp72.135.3.12, GATEDIAG1 ompkit-fp72.135.3.16): every member runs to completion;
+# each verdict is one gate-events row (act = commit/publish, gate = member name); FINDING lines (kitlib-findings.sh
+# grammar) from every member are collected into ONE envelope printed once at the end, and the chain exits
+# non-zero once iff any member found something. A legacy member that exits non-zero without FINDING lines
+# contributes one finding carrying its last stderr line, so nothing is silenced during the conversion.
 ledger="$here/hooks.d/commit-msg/gate-event.sh"
 case "$kind" in pre-commit | commit-msg | prepare-commit-msg) act=commit ;; pre-push) act=publish ;; *) act=$kind ;; esac
 target=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '%s' '')
+findings=$(mktemp "${TMPDIR:-/tmp}/hook-findings.XXXXXX") || exit 1
 for hook in "$here/hooks.d/$kind"/[0-9][0-9]-*; do
 	[ -e "$hook" ] || continue
 	[ -x "$hook" ] || continue
+	member=$(basename -- "$hook")
 	member_rc=0
-	if [ -n "$input" ]; then sh "$hook" "$@" < "$input" || member_rc=$?; else sh "$hook" "$@" || member_rc=$?; fi
-	[ "$member_rc" -eq 0 ] || rc=$member_rc
+	errf=$(mktemp "${TMPDIR:-/tmp}/hook-stderr.XXXXXX") || exit 1
+	if [ -n "$input" ]; then out=$(sh "$hook" "$@" < "$input" 2> "$errf") || member_rc=$?; else out=$(sh "$hook" "$@" 2> "$errf") || member_rc=$?; fi
+	n=$(printf '%s\n' "$out" | grep -c '^FINDING	' || :)
+	printf '%s\n' "$out" | grep '^FINDING	' >> "$findings" || :
+	# Converted members speak only in FINDING lines; anything else on stdout is passed through unchanged.
+	printf '%s\n' "$out" | grep -v '^FINDING	' | grep -v '^$' || :
+	cat "$errf" >&2
+	if [ "$member_rc" -ne 0 ] && [ "$n" -eq 0 ]; then
+		last=$(grep -m 1 -E 'REFUSE|refused|FAIL|error' "$errf" | tr '\t' ' ')
+		[ -n "$last" ] || last=$(grep -v '^$' "$errf" | head -n 1 | tr '\t' ' ')
+		printf 'FINDING\t%s\tMEMBER_REFUSED\t%s\t%s\t-\n' "$member" "${last:-exit $member_rc with no message}" "read the member output above" >> "$findings"
+		n=1
+	fi
+	rm -f "$errf"
+	# Exit once, with the first refusing member's own code (installer probes and `--check` read it).
+	if [ "$n" -ne 0 ] && [ "$rc" -eq 0 ]; then if [ "$member_rc" -ne 0 ]; then rc=$member_rc; else rc=1; fi; fi
 	if [ -x "$ledger" ]; then
-		if [ "$member_rc" -eq 0 ]; then row=pass; else row=refuse; fi
-		sh "$ledger" "$act" "$target" "$(basename -- "$hook")" "$row" "git-$PPID" "rc=$member_rc" || :
+		if [ "$n" -eq 0 ]; then row=pass; else row=refuse; fi
+		sh "$ledger" "$act" "$target" "$member" "$row" "git-$PPID" "findings=$n rc=$member_rc" || :
 	fi
 done
 [ -z "$input" ] || rm -f "$input"
+if [ "$rc" -ne 0 ]; then
+	total=$(grep -c . "$findings" || :)
+	printf '%s REFUSED: %s finding(s); fix every one, then retry once:\n' "$act" "$total" >&2
+	while IFS='	' read -r _tag gate code detail remedy fix; do
+		printf '  %s %s: %s\n    remedy: %s\n' "$gate" "$code" "$detail" "$remedy" >&2
+		[ "$fix" = "-" ] || printf '    fix: %s\n' "$fix" >&2
+	done < "$findings"
+	[ -z "${OMP_KIT_FINDINGS_JSON:-}" ] || cat "$findings"
+fi
+rm -f "$findings"
 exit $rc
 EOF
 	chmod +x "$path"
@@ -371,7 +403,7 @@ ensure_chain() {
 	if [ -x "$entry" ] && grep -q 'hooks\.d' "$entry" 2>/dev/null; then
 		# The marker names the runner generation: bump it (here and in write_runner) with every runner change,
 		# or installed repos keep the old runner while --check reports them fresh.
-		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v3' "$entry"; }; then
+		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v4' "$entry"; }; then
 			write_runner "$entry"
 			printf 'upgraded chain runner (stdin replay + gate-events ledger): %s\n' "$entry"
 		else
@@ -561,8 +593,10 @@ install_staged_sources() {
 install_kitlib_tmp() {
 	for chain in pre-commit commit-msg pre-push reference-transaction; do
 		place "$KITROOT/scripts/kitlib-tmp.sh" "$(chain_dir "$chain")/kitlib-tmp.sh" -x
+		# GATEDIAG1: the FINDING grammar helper members source to report every defect at once.
+		place "$KITROOT/scripts/kitlib-findings.sh" "$(chain_dir "$chain")/kitlib-findings.sh" -x
 	done
-	printf 'installed kitlib-tmp.sh into all four hook chains\n'
+	printf 'installed kitlib-tmp.sh and kitlib-findings.sh into all four hook chains\n'
 }
 
 # install_gate_event: the gate-events ledger writer (GATEEVENTS1, plan section 23.4) and the two

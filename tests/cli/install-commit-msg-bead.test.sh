@@ -335,7 +335,7 @@ ok "$(git -C "$TMP/pushreal-origin.git" rev-parse main)" "$JB" "pushreal-origin-
 # 11. an inert shared-main member (passes an off-main commit) is caught by the
 #     live probe: the install rolls back and leaves no member behind
 mkdir -p "$TMP/inertkit/scripts"
-for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-kitlib.sh check-staged-readme.sh check-staged-sources.sh pysafe.py pysafe_check.py kitlib_ratchet_core.py tempsafe_check.py kitlib_ratchet.py sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py readme-check.ts kitlib-tmp.sh gate-event.sh kitlib_jsonl.py kitlib_lock.py; do
+for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-kitlib.sh check-staged-readme.sh check-staged-sources.sh pysafe.py pysafe_check.py kitlib_ratchet_core.py tempsafe_check.py kitlib_ratchet.py sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py readme-check.ts kitlib-tmp.sh kitlib-findings.sh gate-event.sh kitlib_jsonl.py kitlib_lock.py; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
 cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"
@@ -348,6 +348,29 @@ grep -q "shared-main member let an off-main commit move the remote main" "$TMP/o
 ok "$?" "0" "inert-member-named"
 [ ! -e "$K/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" ]
 ok "$?" "0" "inert-member-removed"
+
+# 12. GATEDIAG1 (ompkit-fp72.135.3.16): runner v4 collects every FINDING line from every member into one
+#     envelope and exits once; a legacy refusing member becomes one MEMBER_REFUSED finding; planted: a
+#     member that stops at its first finding reports one where two exist, and the selftest names it.
+G=$(new_repo gatediag)
+git -C "$G" branch -M main
+sh "$INSTALLER" --no-pushed-beads "$G" > "$TMP/o-gatediag" 2>&1
+ok "$?" "0" "gatediag-install"
+D="$G/.git/hooks/hooks.d/commit-msg"
+printf '%s\n' '#!/bin/sh' 'here=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd -P)' '. "$here/kitlib-findings.sh"' 'kitlib_finding fx A "first" "r1" git x' 'kitlib_finding fx B "second" "r2"' 'exit 0' > "$D/60-fx-complete"
+printf '%s\n' '#!/bin/sh' 'here=$(CDPATH="" cd -- "$(dirname -- "$0")" && pwd -P)' '. "$here/kitlib-findings.sh"' 'kitlib_finding stop A "first" "r1"' 'exit 1' 'kitlib_finding stop B "second" "r2"' > "$D/61-fx-stop"
+printf '%s\n' '#!/bin/sh' 'echo "legacy: REFUSED: old style" >&2' 'exit 7' > "$D/62-fx-legacy"
+chmod +x "$D/60-fx-complete" "$D/61-fx-stop" "$D/62-fx-legacy"
+git -C "$G" commit -q --allow-empty -m 'feat: no level' > "$TMP/o-gd-commit" 2>&1
+ok "$?" "1" "gatediag-one-exit"
+ok "$(grep -c 'REFUSED: [0-9]* finding' "$TMP/o-gd-commit")" "1" "gatediag-one-envelope"
+grep -q 'fx A: first' "$TMP/o-gd-commit" && grep -q 'fx B: second' "$TMP/o-gd-commit" && grep -q 'fix: git x' "$TMP/o-gd-commit"
+ok "$?" "0" "gatediag-every-finding-with-fix"
+grep -q '62-fx-legacy MEMBER_REFUSED: legacy: REFUSED: old style' "$TMP/o-gd-commit"
+ok "$?" "0" "gatediag-legacy-member-is-one-finding"
+# planted: the stop-at-first member reported only its first finding; a complete member reports both
+ok "$(grep -c 'stop [AB]:' "$TMP/o-gd-commit")" "1" "gatediag-planted-stop-at-first-reports-one"
+ok "$(grep -c 'fx [AB]:' "$TMP/o-gd-commit")" "2" "gatediag-complete-member-reports-two"
 
 printf 'install-commit-msg-bead: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
