@@ -104,7 +104,7 @@ test("stranded audit emits one correctly identified row per named condition thro
 	expect(envelope.data.stranded_only).toBe(true);
 	expect(envelope.data.roots[0]?.discovery?.max_depth).toBeGreaterThan(0);
 	const names = envelope.data.repos.map((entry: { name: string }) => entry.name);
-	expect(names).not.toContain("clean");
+	expect(names, JSON.stringify(envelope.data.repos)).not.toContain("clean");
 	for (const name of ["unpushed", "dirty", "stashed", "linked", "branch-absent", "no-remote", "unreadable"]) {
 		expect(names).toContain(name);
 	}
@@ -151,6 +151,25 @@ test("a clean pushed repo produces no stranded row but stays visible in the full
 	expect(clean.status).toBe("OK");
 	expect(clean.unpushed_commits).toBe(0);
 	expect(clean.dirty_file_count).toBe(0);
+}, 60_000);
+
+test("a bulk clean fleet stays measured at the default Git probe deadline", async () => {
+	const root = ownedTmp("omp-kit-work-bulk-clean", { root: runtimeTempRoot() }).path;
+	fixtures.push(root);
+	const names = Array.from({ length: 32 }, (_, index) => `clean-${index}`).sort();
+	for (const name of names) pushedRepo(root, name);
+	const result = cli(root, ["doctor", "--scope", "work", "--root", root, "--json"]);
+	expect(result.exitCode, result.stderr.toString()).toBe(0);
+	const envelope = JSON.parse(result.stdout.toString());
+	expect(envelope.data.roots[0]?.repo_count).toBe(32);
+	expect(envelope.data.repos.map((repo: { name: string }) => repo.name).sort()).toEqual(names);
+	for (const repo of envelope.data.repos) {
+		expect(repo.status, JSON.stringify(repo)).toBe("OK");
+		expect(repo.stranded).toBe(false);
+		expect(repo.conditions).toEqual([]);
+		expect(repo.unpushed_commits).toBe(0);
+		expect(repo.dirty_file_count).toBe(0);
+	}
 }, 60_000);
 
 test("doctor --scope work --fleet uses the canonical roots and refuses scoped combinations", async () => {

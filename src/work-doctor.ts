@@ -18,7 +18,7 @@ export interface WorkDoctorReport {
 	elapsed_ms: number; timed_out_repos: number; text: string;
 }
 interface GitResult { code: number | null; stdout: string; stderr: string; timed_out: boolean; }
-const DEFAULT_CONCURRENCY = 64;
+const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_REPO_TIMEOUT_MS = 2_000;
 const UNTRACKED_FILE_CAP = 1_000;
 const DISCOVERY_MAX_DEPTH = 10;
