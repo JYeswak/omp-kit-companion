@@ -209,6 +209,31 @@ function nearest(value: string, choices: readonly string[]): string | undefined 
 	return best;
 }
 
+// A correction is one insertion, deletion, substitution, or adjacent transposition.
+function singleEdit(value: string, candidate: string): boolean {
+	if (Math.abs(value.length - candidate.length) > 1) return false;
+	let i = 0;
+	while (i < value.length && value[i] === candidate[i]) i++;
+	if (i === value.length) return candidate.length === value.length + 1;
+	if (value.length === candidate.length)
+		return value.slice(i + 1) === candidate.slice(i + 1)
+			|| (value[i] === candidate[i + 1] && value[i + 1] === candidate[i]
+				&& value.slice(i + 2) === candidate.slice(i + 2));
+	return value.length > candidate.length
+		? value.slice(i + 1) === candidate.slice(i)
+		: value.slice(i) === candidate.slice(i + 1);
+}
+
+function flagCorrection(value: string, command?: Command, parent?: Command): string | undefined {
+	const scoped = [...(command?.flags ?? []), ...(parent?.flags ?? [])];
+	for (const flags of [scoped, GLOBAL_FLAGS]) {
+		const candidates = [...new Set(flags.flatMap((flag) => [flag.name, ...(flag.aliases ?? [])]))]
+			.filter((candidate) => singleEdit(value, candidate));
+		if (candidates.length) return candidates.length === 1 ? candidates[0] : undefined;
+	}
+	return undefined;
+}
+
 function refusal(code: string, message: string, remediation: string): CliResult {
 	return { code: 2, data: { overall: "NOT_RUN" }, errors: [{ code, message, remediation }], verification: "NOT_RUN" };
 }
@@ -244,7 +269,7 @@ function parse(args: readonly string[]): ParseResult {
 		const flag = commandFlag ?? GLOBAL_FLAGS.find(matchesFlag) ?? known.find(matchesFlag);
 		const name = flag?.name ?? rawName;
 		if (!flag) {
-			const hint = nearest(rawName ?? token, known.flatMap((entry) => [entry.name, ...(entry.aliases ?? [])]));
+			const hint = flagCorrection(rawName ?? token, command, parent);
 			return { failure: refusal("UNKNOWN_FLAG", `Unknown flag: ${name}`, hint ? `Use ${hint} exactly; run omp-kit --help for grammar.` : "Run omp-kit --help for valid flags."), json };
 		}
 		if (flag.value) {
