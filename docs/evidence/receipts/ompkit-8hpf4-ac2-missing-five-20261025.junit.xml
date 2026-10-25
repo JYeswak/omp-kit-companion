@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="bun test" tests="49" assertions="272" failures="0" skipped="0" time="23.511196">
+  <testsuite name="tests/cli/reducer.test.ts" file="tests/cli/reducer.test.ts" tests="9" assertions="58" failures="0" skipped="0" time="7.717395" hostname="Joshs-Mac-Studio.local">
+    <testcase name="real native payload becomes smaller while benign context and independent final fire are preserved" classname="" time="4.639129" file="tests/cli/reducer.test.ts" line="76" assertions="13" />
+    <testcase name="LOST_PREDICATE: false acceptance of a real quiet payload cannot survive independent native replay" classname="" time="2.659756" file="tests/cli/reducer.test.ts" line="100" assertions="7" />
+    <testcase name="unavailable native rule identity is never treated as a losing or quiet candidate" classname="" time="0.217779" file="tests/cli/reducer.test.ts" line="117" assertions="6" />
+    <testcase name="line search is deterministic and no-improvement does not claim a reduction" classname="" time="0.000258" file="tests/cli/reducer.test.ts" line="128" assertions="7" />
+    <testcase name="attempt budget reserves final replay and labels the searched subset incomplete" classname="" time="0.000075" file="tests/cli/reducer.test.ts" line="142" assertions="9" />
+    <testcase name="unavailable evaluation stops immediately instead of retrying or accepting prior unverified progress" classname="" time="0.00007" file="tests/cli/reducer.test.ts" line="156" assertions="5" />
+    <testcase name="changed evaluator identity during candidate invalidates the proposed result" classname="" time="0.000078" file="tests/cli/reducer.test.ts" line="170" assertions="3" />
+    <testcase name="changed evaluator identity during final_replay invalidates the proposed result" classname="" time="0.000044" file="tests/cli/reducer.test.ts" line="170" assertions="3" />
+    <testcase name="time budget signals cancellation and cannot publish a candidate from an unfinished evaluator" classname="" time="0.010351" file="tests/cli/reducer.test.ts" line="182" assertions="5" />
+  </testsuite>
+  <testsuite name="tests/cli/mutants.test.ts" file="tests/cli/mutants.test.ts" tests="4" assertions="17" failures="0" skipped="0" time="1.607873" hostname="Joshs-Mac-Studio.local">
+    <testcase name="mutants report the known survivor of an uncovered branch" classname="" time="0.993114" file="tests/cli/mutants.test.ts" line="104" assertions="8" />
+    <testcase name="adding the missing near-miss case kills the known survivor" classname="" time="0.14716" file="tests/cli/mutants.test.ts" line="119" assertions="4" />
+    <testcase name="uncompilable mutants are skipped and counted" classname="" time="0.145379" file="tests/cli/mutants.test.ts" line="132" assertions="2" />
+    <testcase name="the budget flag bounds the run and reports truncation" classname="" time="0.154001" file="tests/cli/mutants.test.ts" line="145" assertions="3" />
+  </testsuite>
+  <testsuite name="tests/cli/rule-review-cli.test.ts" file="tests/cli/rule-review-cli.test.ts" tests="3" assertions="22" failures="0" skipped="0" time="6.591449" hostname="Joshs-Mac-Studio.local">
+    <testcase name="ERASED_QUIET: relocated review retains the incumbent witness and native UTF-16 prefix" classname="" time="4.0297" file="tests/cli/rule-review-cli.test.ts" line="79" assertions="14" />
+    <testcase name="identical selected inputs report only no delta in the two exercised witnesses" classname="" time="2.378736" file="tests/cli/rule-review-cli.test.ts" line="100" assertions="4" />
+    <testcase name="missing native OMP cannot become a quiet no-delta comparison" classname="" time="0.052105" file="tests/cli/rule-review-cli.test.ts" line="108" assertions="4" />
+  </testsuite>
+  <testsuite name="tests/cli/metamorphic.test.ts" file="tests/cli/metamorphic.test.ts" tests="4" assertions="21" failures="0" skipped="0" time="1.577279" hostname="Joshs-Mac-Studio.local">
+    <testcase name="a rule that fires inside quotes reports the exact quoting breaks and exits 1" classname="" time="0.962386" file="tests/cli/metamorphic.test.ts" line="99" assertions="8" />
+    <testcase name="test --metamorphic refuses incompatible flags without measuring" classname="" time="0.136998" file="tests/cli/metamorphic.test.ts" line="115" assertions="6" />
+    <testcase name="strict zero-break gate fails on a planted fresh break" classname="" time="0.152871" file="tests/cli/metamorphic.test.ts" line="126" assertions="3" />
+    <testcase name="text-scope cases have no shell relations: prose in quotes still fires, nothing counted" classname="" time="0.15025" file="tests/cli/metamorphic.test.ts" line="136" assertions="4" />
+  </testsuite>
+  <testsuite name="tests/cli/runtime.test.ts" file="tests/cli/runtime.test.ts" tests="29" assertions="154" failures="0" skipped="0" time="5.945589" hostname="Joshs-Mac-Studio.local">
+    <testsuite name="runtime-adapter --validate-work-root" file="tests/cli/runtime.test.ts" line="116" tests="2" assertions="26" failures="0" skipped="0" time="0.609" hostname="Joshs-Mac-Studio.local">
+      <testcase name="admits a canonical JSON-owner scratch dir owned by the caller" classname="runtime-adapter --validate-work-root" time="0.139263" file="tests/cli/runtime.test.ts" line="119" assertions="4" />
+      <testcase name="refuses a JSON owner naming another repo, two repo values, a symlinked owner, or a dir outside var/agent-tmp" classname="runtime-adapter --validate-work-root" time="0.470983" file="tests/cli/runtime.test.ts" line="133" assertions="22" />
+    </testsuite>
+    <testcase name="isolated children retain the logical workspace root for case path scopes" classname="" time="0.000139" file="tests/cli/runtime.test.ts" line="194" assertions="3" />
+    <testcase name="native stage progress opt-in survives child environment sanitization" classname="" time="0.000034" file="tests/cli/runtime.test.ts" line="207" assertions="2" />
+    <testcase name="runtime shell nonzero reports executed argv, canonical cwd, real exit, and EOF capture identities" classname="" time="0.038325" file="tests/cli/runtime.test.ts" line="221" assertions="5" />
+    <testcase name="runtime shell signal reports executed argv, canonical cwd, real exit, and EOF capture identities" classname="" time="0.031877" file="tests/cli/runtime.test.ts" line="221" assertions="5" />
+    <testcase name="isolated stream-error drains real stage evidence and stops its owned descendants before scratch cleanup" classname="" time="0.162659" file="tests/cli/runtime.test.ts" line="285" assertions="16" />
+    <testcase name="isolated SIGTERM drains real stage evidence and stops its owned descendants before scratch cleanup" classname="" time="0.159823" file="tests/cli/runtime.test.ts" line="285" assertions="14" />
+    <testcase name="isolated leader-exit drains real stage evidence and stops its owned descendants before scratch cleanup" classname="" time="0.163964" file="tests/cli/runtime.test.ts" line="285" assertions="11" />
+    <testcase name="isolated child exit unconfirmed keeps the runner note out of the child stderr bytes and their identity" classname="" time="1.145344" file="tests/cli/runtime.test.ts" line="419" assertions="14" />
+    <testsuite name="release paths" file="tests/cli/runtime.test.ts" line="534" tests="4" assertions="17" failures="0" skipped="0" time="1.033" hostname="Joshs-Mac-Studio.local">
+      <testcase name="follows the stable launcher to the moved versioned release" classname="release paths" time="0.000782" file="tests/cli/runtime.test.ts" line="535" assertions="1" />
+      <testcase name="refuses dangling and prefix-escaping stable launcher symlinks" classname="release paths" time="0.000751" file="tests/cli/runtime.test.ts" line="548" assertions="2" />
+      <testcase name="accepts only a packaged harness script and rejects traversal" classname="release paths" time="0.000404" file="tests/cli/runtime.test.ts" line="565" assertions="3" />
+      <testcase name="runs the packaged rule classifier and refuses the retired local-model checker" classname="release paths" time="1.033877" file="tests/cli/runtime.test.ts" line="574" assertions="11" />
+    </testsuite>
+    <testcase name="terminating the packaged adapter closes its mock server and output streams" classname="" time="1.347471" file="tests/cli/runtime.test.ts" line="667" assertions="5" />
+    <testsuite name="OMP installation identity" file="tests/cli/runtime.test.ts" line="742" tests="8" assertions="20" failures="0" skipped="0" time="0.003" hostname="Joshs-Mac-Studio.local">
+      <testcase name="resolves launcher, source and native package from the same PATH install" classname="OMP installation identity" time="0.001686" file="tests/cli/runtime.test.ts" line="743" assertions="4" />
+      <testcase name="refuses conflicting launcher and source overrides instead of mixing installs" classname="OMP installation identity" time="0.002778" file="tests/cli/runtime.test.ts" line="754" assertions="5" />
+      <testcase name="rejects an OMP package without matcher source even when its launcher exists" classname="OMP installation identity" time="0.000754" file="tests/cli/runtime.test.ts" line="767" assertions="1" />
+      <testsuite name="a compiled standalone launcher outside any package" file="tests/cli/runtime.test.ts" line="781" tests="5" assertions="10" failures="0" skipped="0" time="1.172" hostname="Joshs-Mac-Studio.local">
+        <testcase name="isolated opaque OMP retains its default source cache across HOME changes" classname="a compiled standalone launcher outside any package &gt; OMP installation identity" time="0.27545" file="tests/cli/runtime.test.ts" line="795" assertions="2" />
+        <testcase name="isolated opaque OMP retains its explicit source cache across HOME changes" classname="a compiled standalone launcher outside any package &gt; OMP installation identity" time="0.178001" file="tests/cli/runtime.test.ts" line="795" assertions="2" />
+        <testcase name="takes the same version's package from a later omp on PATH and keeps the compiled launcher" classname="a compiled standalone launcher outside any package &gt; OMP installation identity" time="0.342275" file="tests/cli/runtime.test.ts" line="835" assertions="3" />
+        <testcase name="falls back to bun's global install of the same version" classname="a compiled standalone launcher outside any package &gt; OMP installation identity" time="0.167364" file="tests/cli/runtime.test.ts" line="847" assertions="1" />
+        <testcase name="refuses a package of another version, even when OMP_SRC names it" classname="a compiled standalone launcher outside any package &gt; OMP installation identity" time="0.210008" file="tests/cli/runtime.test.ts" line="858" assertions="2" />
+      </testsuite>
+    </testsuite>
+    <testcase name="caller-owned scratch root stays in its workspace and rejects missing or foreign ownership" classname="" time="0.001259" file="tests/cli/runtime.test.ts" line="870" assertions="3" />
+    <testsuite name="runtime temporary roots without caller admission" file="tests/cli/runtime.test.ts" line="902" tests="4" assertions="8" failures="0" skipped="0" time="0.007" hostname="Joshs-Mac-Studio.local">
+      <testcase name="runtime temp root rejects TMPDIR outside system temporary roots" classname="runtime temporary roots without caller admission" time="0.003208" file="tests/cli/runtime.test.ts" line="918" assertions="1" />
+      <testcase name="runtime temp root accepts the operating-system temporary root" classname="runtime temporary roots without caller admission" time="0.00434" file="tests/cli/runtime.test.ts" line="937" assertions="1" />
+      <testcase name="runtime temp root falls back when TMPDIR is not a directory" classname="runtime temporary roots without caller admission" time="0.000452" file="tests/cli/runtime.test.ts" line="952" assertions="3" />
+      <testcase name="runtime temp root avoids caller HOME when TMPDIR is nested there" classname="runtime temporary roots without caller admission" time="0.000361" file="tests/cli/runtime.test.ts" line="969" assertions="3" />
+    </testsuite>
+    <testcase name="isolated children inherit the CI judge signal through runIsolatedShell" classname="" time="0.000072" file="tests/cli/runtime.test.ts" line="992" assertions="5" />
+  </testsuite>
+</testsuites>
