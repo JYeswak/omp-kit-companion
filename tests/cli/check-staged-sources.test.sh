@@ -1,8 +1,10 @@
 #!/bin/sh
 # SOURCEGATE1: installed member judges the index, with paired controls.
 set -u
+# shellcheck source=tests/cli/git-env-fixtures.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 SCRIPTS=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)
+# shellcheck source=scripts/kitlib-tmp.sh
 . "$SCRIPTS/kitlib-tmp.sh"
 kitlib_tmp TMP staged-sources-test || exit 1
 pass=0
