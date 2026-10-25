@@ -43,12 +43,16 @@ kitlib_tmp scratch pushed-notes || exit 1
 validation="$scratch/validation"
 mkdir -p "$validation/changelog.d"
 cp "$ARCHIVE_DIR/CHANGELOG.md" "$validation/CHANGELOG.md"
-git -C "$validation" init -q
+# Validation owns a different repository; never let hook selectors redirect it.
+git_redirects='GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES'
+# shellcheck disable=SC2086
+(unset $git_redirects; git -C "$validation" init -q)
 for frag in "$ARCHIVE_DIR"/changelog.d/*.md; do
 	[ -f "$frag" ] || continue
 	cp "$frag" "$validation/changelog.d/"
 done
-if ! (cd "$validation" && sh "$SCRIPT_DIR/release-notes.sh" fold >/dev/null); then
+# shellcheck disable=SC2086
+if ! (unset $git_redirects; cd "$validation" && sh "$SCRIPT_DIR/release-notes.sh" fold >/dev/null); then
 	echo "notes validation: candidate changelog fragments are not promotable" >&2
 	exit 1
 fi
