@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fleetPolicyState } from "./fleet-policy";
 
 /**
@@ -51,14 +51,42 @@ export interface ComposerStateApi {
 
 export interface ComposerStateDeps {
 	home?: string;
+	env?: Readonly<Record<string, string | undefined>>;
 	now?: () => number;
 	pid?: number;
+}
+
+/** A registered seat's repo owns its opt-in, even when its process starts above that repo. */
+function policyCwd(cwd: string, home: string, env: Readonly<Record<string, string | undefined>>): string {
+	const pane = env.TERN_PANE;
+	if (!pane || !Number.isSafeInteger(Number(pane)) || Number(pane) < 0 || String(Number(pane)) !== pane) return cwd;
+	try {
+		const registry: unknown = JSON.parse(readFileSync(env.CC_SEATS || join(home, ".local", "state", "omp-kit", "cc", "seats.v1.json"), "utf8"));
+		if (typeof registry !== "object" || registry === null || !("schema_version" in registry) ||
+			registry.schema_version !== "omp-kit.cc.seats.v1" || !("sessions" in registry) || !Array.isArray(registry.sessions)) return cwd;
+		let registeredRepo: string | undefined;
+		for (const session of registry.sessions) {
+			if (typeof session !== "object" || session === null || typeof session.repo !== "string" ||
+				!isAbsolute(session.repo) || !Array.isArray(session.seats)) return cwd;
+			for (const seat of session.seats) {
+				if (typeof seat !== "object" || seat === null || typeof seat.pane !== "string") return cwd;
+				if (seat.pane === `tern:${pane}`) {
+					if (registeredRepo !== undefined && registeredRepo !== session.repo) return cwd;
+					registeredRepo = session.repo;
+				}
+			}
+		}
+		return registeredRepo ?? cwd;
+	} catch {
+		return cwd;
+	}
 }
 
 export default async function kitComposerState(pi: ComposerStateApi, deps: ComposerStateDeps = {}): Promise<void> {
 	const home = deps.home ?? homedir();
 	const now = deps.now ?? Date.now;
 	const pid = deps.pid ?? process.pid;
+	const env = deps.env ?? process.env;
 	let timer: unknown = null;
 	let written: string | null = null;
 
@@ -87,7 +115,7 @@ export default async function kitComposerState(pi: ComposerStateApi, deps: Compo
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		if ((await fleetPolicyState(ctx.cwd)).kind !== "on") return;
+		if ((await fleetPolicyState(policyCwd(ctx.cwd, home, env))).kind !== "on") return;
 		publish(ctx);
 		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => publish(ctx), COMPOSER_INTERVAL_MS);
 	});

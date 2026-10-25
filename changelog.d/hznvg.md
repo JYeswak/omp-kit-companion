@@ -1,3 +1,4 @@
 ### Fixed
 
 - The ownership registry now lists `extensions/kit-composer-state.ts`, the writer of `~/.local/state/omp-kit/composer/` records. The extension shipped in 0.2.72 without an entry, so the registry check `tests/cli/ownership-registry.test.ts` failed on `main` with `UNREGISTERED_PID_WRITER`. The new `composer-state` entry records that the state is keyed by the seat's session, survives a respawn, is removed at shutdown and self-heals after a crash.
+- A registered fleet seat now publishes its composer state even when its process started outside its repo. The chiefs run from `/Users/josh/Developer`, where fleet policy is off, so their record was never written and the reload/arm gate fell back to scraping the screen (HELD_DRAFT). Its Tern pane (`TERN_PANE`) is looked up in the seat registry, and the policy is read from that session's repo. Unregistered panes, stock repos and a missing or malformed registry keep the cwd rule.
