@@ -209,6 +209,13 @@ function nearest(value: string, choices: readonly string[]): string | undefined 
 	return best;
 }
 
+// Reviewed discovery intents; these are suggestions, never executable aliases.
+const COMMAND_INTENTS: Readonly<Record<string, string>> = {
+	inspect: "status",
+	diagnose: "doctor",
+	discover: "capabilities",
+};
+
 // A correction is one insertion, deletion, substitution, or adjacent transposition.
 function singleEdit(value: string, candidate: string): boolean {
 	if (Math.abs(value.length - candidate.length) > 1) return false;
@@ -287,7 +294,10 @@ function parse(args: readonly string[]): ParseResult {
 	if (!command) {
 		const candidates = parent?.subcommands ?? COMMANDS;
 		const bad = positional[parent ? 1 : 0] ?? "";
-		const hint = nearest(bad, candidates.map((item) => item.name));
+		const semantic = parent ? undefined : COMMAND_INTENTS[bad];
+		const hint = semantic && candidates.some((item) => item.name === semantic)
+			? semantic
+			: nearest(bad, candidates.map((item) => item.name));
 		return { failure: refusal(parent ? "UNKNOWN_SUBCOMMAND" : "UNKNOWN_COMMAND", `Unknown ${parent ? "subcommand" : "command"}: ${bad}`, hint ? `Try omp-kit ${parent ? `${parent.name} ` : ""}${hint} exactly; no command was run.` : "Run omp-kit --help; no command was run."), json };
 	}
 	const rchLease = parent?.name === "rch" && command.name === "lease";
