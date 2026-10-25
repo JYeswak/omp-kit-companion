@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, expect, test } from "bun:test";
-import { once } from "node:events";
-import { existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import process from "node:process";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { sanitizedEnv } from "../../src/runtime.ts";
+import { run as kitlibRun } from "../../src/kitlib/run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const fixtures: string[] = [];
@@ -36,22 +37,22 @@ function toolResults(log: string): string[] {
 }
 
 async function waitForPort(path: string, child: { readonly exited: Promise<number> }): Promise<string> {
-	const watcher = watch(dirname(path));
-	let changed = once(watcher, "change");
+	const { promise: ready, resolve: publishPort } = Promise.withResolvers<{ kind: "ready"; port: string }>();
+	const observe = () => {
+		const port = existsSync(path) ? readFileSync(path, "utf8").trim() : "";
+		if (port) publishPort({ kind: "ready", port });
+	};
 	const exited = child.exited.then(code => ({ kind: "exit" as const, code }));
+	// Directory notifications can be absent while the server is already listening.
+	// Observe the durable port state; the child's unchanged deadline remains the bound.
+	watchFile(path, { interval: 10, persistent: false }, observe);
 	try {
-		while (true) {
-			const port = existsSync(path) ? readFileSync(path, "utf8").trim() : "";
-			if (port) return port;
-			const event = await Promise.race([
-				changed.then(() => ({ kind: "change" as const })),
-				exited,
-			]);
-			if (event.kind === "exit") throw new Error(`mock model exited before readiness (${event.code})`);
-			changed = once(watcher, "change");
-		}
+		observe();
+		const event = await Promise.race([ready, exited]);
+		if (event.kind === "exit") throw new Error(`mock model exited before readiness (${event.code})`);
+		return event.port;
 	} finally {
-		watcher.close();
+		unwatchFile(path, observe);
 	}
 }
 async function runCommand(command: string[], cwd: string, env: Record<string, string>, timeout: number) {
@@ -63,6 +64,24 @@ async function runCommand(command: string[], cwd: string, env: Record<string, st
 	]);
 	return { exitCode, stdout, stderr };
 }
+test("mock readiness refuses an exited child that never published a port", async () => {
+	const scope = ownedTmp("mock-readiness-exit");
+	try {
+		const portPath = join(scope.path, "port");
+		const result = kitlibRun([process.execPath, "-e", "process.exit(7)"], {
+			cwd: scope.path, env: { BUN_BE_BUN: "1" }, deadline_s: 1,
+			max_output_bytes: 4096, max_total_bytes: 8192,
+		});
+		await expect(waitForPort(portPath, { exited: result.then(value => value.rc ?? 1) }))
+			.rejects.toThrow("mock model exited before readiness (7)");
+		const completed = await result;
+		expect({ rc: completed.rc, timed_out: completed.timed_out, killed: completed.killed, truncated: completed.truncated })
+			.toEqual({ rc: 7, timed_out: false, killed: false, truncated: false });
+		expect(existsSync(portPath)).toBe(false);
+	} finally {
+		scope.cleanup();
+	}
+});
 
 
 test("the linked OMP plugin refuses an async timeout-zero command before it runs", async () => {
