@@ -182,7 +182,7 @@ function help(command?: Command, parent?: Command): string {
 		...(command.flags.length ? [`  ${command.name}: ${command.flags.map((flag) => flag.name).join(" ")}`] : []),
 		...(command.subcommands?.filter((child) => child.flags.length).map((child) => `  ${command.name} ${child.name}: ${child.flags.map((flag) => flag.name).join(" ")}`) ?? []),
 	]);
-	return ["Usage: omp-kit [GLOBAL FLAGS] [COMMAND] [FLAGS]", "Bare invocation inspects kit and OMP presence; it never applies rules or modifies profiles.",
+	return ["Usage: omp-kit [GLOBAL FLAGS] [COMMAND] [FLAGS]", "Bare invocation shows help; use status to inspect kit and OMP presence without modifying profiles.",
 		"Commands:", ...COMMANDS.map((item) => `  ${item.usage} — ${item.description}${isRunnable(item, item.name) ? "" : " (not yet available)"}`),
 		`Global flags:\n${printableFlags(GLOBAL_FLAGS)}`, "Scoped flags:", ...scoped,
 		"Use omp-kit help TOPIC for flag details. Unavailable handlers refuse without mutation."].join("\n");
@@ -290,7 +290,7 @@ function parse(args: readonly string[]): ParseResult {
 	}
 	if (flags.has("--info") && positional.length === 0) return { request: { command: { name: "--info", usage: "--info", description: "Executable identity", flags: [], example: "omp-kit --info", runnable: true }, flags, json, robot: flags.has("--robot") } };
 	if (flags.has("--info")) return { failure: refusal("INVALID_FLAG", "--info is a standalone global request", "Run omp-kit --info."), json };
-	if (!positional.length) command = findCommand(flags.has("--help") ? "help" : "status");
+	if (!positional.length) command = findCommand(args.length === 0 || flags.has("--help") ? "help" : "status");
 	if (!command) {
 		const candidates = parent?.subcommands ?? COMMANDS;
 		const bad = positional[parent ? 1 : 0] ?? "";
