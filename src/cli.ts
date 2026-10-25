@@ -185,6 +185,10 @@ function help(command?: Command, parent?: Command): string {
 	return ["Usage: omp-kit [GLOBAL FLAGS] [COMMAND] [FLAGS]", "Bare invocation shows help; use status to inspect kit and OMP presence without modifying profiles.",
 		"Commands:", ...COMMANDS.map((item) => `  ${item.usage} — ${item.description}${isRunnable(item, item.name) ? "" : " (not yet available)"}`),
 		`Global flags:\n${printableFlags(GLOBAL_FLAGS)}`, "Scoped flags:", ...scoped,
+		"Automation: use --json or --robot for machine-readable output.",
+		"Discover: omp-kit capabilities --json; omp-kit schema --json; omp-kit robot-docs guide.",
+		"Presence: omp-kit status --json. Next action: omp-kit next --role worker|director.",
+		"Exit categories: see exit_codes in omp-kit schema --json.",
 		"Use omp-kit help TOPIC for flag details. Unavailable handlers refuse without mutation."].join("\n");
 }
 
