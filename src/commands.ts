@@ -840,7 +840,7 @@ export const COMMANDS: readonly Command[] = [
 		], example: "omp-kit infra promote --tool bun --candidate 1.5.0 --binary /tmp/bun-1.5.0/bun --human --apply --yes --json", runnable: false, mutation: true, dataSchema: infraData },
 		{ name: "undo", description: "Restore the pin file from a promote backup", usage: "infra undo --receipt PATH --apply --yes", flags: [
 			{ name: "--receipt", value: "PATH", description: "Promote receipt naming the backup to restore" },
-			{ name: "--apply", value: "PATH", description: "Request the guarded restore" },
+			{ name: "--apply", description: "Request the guarded restore" },
 			{ name: "--yes", description: "Confirm the restore in noninteractive mode" },
 		], example: "omp-kit infra undo --receipt PATH --apply --yes --json", runnable: false, mutation: true, dataSchema: infraData },
 	], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },
