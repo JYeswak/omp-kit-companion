@@ -10,6 +10,13 @@ act=$1 target=$2 gate=$3 kind=$4 attempt=${5:-} detail=${6:-}
 seat=${BR_ACTOR:-${BR_AGENT_NAME:-${AGENT_NAME:-}}}
 state=${XDG_STATE_HOME:-$HOME/.local/state}
 ledger=$state/omp-kit/gate-events.jsonl
+# A fixture repo (tests install the chain into owned scratch) never writes the LIVE ledger: the fresh
+# gate's installer selftests put 2,200 fixture rows there on 2026-10-25. With XDG_STATE_HOME set the
+# ledger is the caller's own, so isolated e2e replays still record.
+if [ -z "${XDG_STATE_HOME:-}" ]; then
+	case "$PWD" in */var/agent-tmp/*) exit 0 ;; esac
+	case "${TMPDIR:-}" in ?*) case "$PWD" in "${TMPDIR%/}"/*) exit 0 ;; esac ;; esac  # tempsafe: compares the cwd against TMPDIR, creates nothing
+fi
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 [ -f "$here/kitlib_jsonl.py" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
