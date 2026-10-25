@@ -218,8 +218,14 @@ def main() -> int:
     if am is None:
         parser.error("real native am is required (or AM_BIN=/absolute/path/to/am)")
     tmp = Path(os.environ.get("TMPDIR", ""))
-    if not tmp.is_dir() or not (tmp / ".owner").is_file() or not tmp.is_relative_to(ROOT / "var/agent-tmp"):
-        parser.error("TMPDIR must be an owned directory under this repo's var/agent-tmp")
+    agent_tmp = ROOT / "var/agent-tmp"
+    # Owned scratch (`omp-kit scratch new`), or, in an exact-commit archive (no .git), the archive's own var/agent-tmp:
+    # full-suite-verdict.sh exports exactly that for archived suites, and the archive is the checker's owned scratch.
+    # 2026-10-25: the base checker's run on 409b3f0e went RED here because that TMPDIR carries no .owner.
+    owned = tmp.is_dir() and (tmp / ".owner").is_file() and tmp.is_relative_to(agent_tmp)
+    archived = tmp == agent_tmp and tmp.is_dir() and not (ROOT / ".git").exists()
+    if not (owned or archived):
+        parser.error("TMPDIR must be an owned directory under this repo's var/agent-tmp, or an archive's var/agent-tmp")
     print("generator", am, "sha256", hashlib.sha256(Path(am).read_bytes()).hexdigest(), flush=True)
     failures = 0
     # Remove passing fixtures; keep failed fixtures and complete producer output for the scratch reaper.
