@@ -779,6 +779,17 @@ fi
 # archive carries the REAL scripts/full-suite-verdict.sh beside a stub fresh-gate, so every case
 # below runs the real judging code against a tiny real suite. Case B is the enforcement specimen:
 # removing the verdict step from the adapter lets the red tree through, so the case fails.
+create_verdict_gate_stub() {
+	cat > "$1/scripts/fresh-gate.sh" <<'GATE_STUB'
+#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = "--test-workers" ]; then
+	printf '1\n'
+	exit 0
+fi
+echo VERDICT-STUB-GATE
+GATE_STUB
+}
+
 mkverdictrepo() {
 	name=$1
 	repo="$TMP/$name"
@@ -791,7 +802,7 @@ mkverdictrepo() {
 	# The suite runner sources the candidate archive's own scripts/kitlib-tmp.sh (62e5017451); a fixture
 	# candidate without it dies before any suite runs and reads as incomplete evidence.
 	cp "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
-	printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$repo/scripts/fresh-gate.sh"
+	create_verdict_gate_stub "$repo"
 	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
 	create_checker_test_stubs "$repo"
 	printf 'import { test, expect } from "bun:test";\ntest("green", () => { expect(1 + 1).toBe(2); });\n' > "$repo/tests/cli/green.test.ts"
@@ -866,7 +877,7 @@ git -C "$erepro" config user.email "test@example.invalid"
 git -C "$erepro" config user.name "worker-1"
 cp "$KITREPO/scripts/full-suite-verdict.sh" "$erepro/scripts/full-suite-verdict.sh"
 cp "$KITREPO/scripts/kitlib-tmp.sh" "$erepro/scripts/kitlib-tmp.sh"
-printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$erepro/scripts/fresh-gate.sh"
+create_verdict_gate_stub "$erepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$erepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$erepro"
 printf 'import { test, expect } from "bun:test";\ntest("green", () => { expect(1 + 1).toBe(2); });\n' > "$erepro/tests/cli/green.test.ts"
@@ -927,7 +938,7 @@ git -C "$hrepro" config user.email "test@example.invalid"
 git -C "$hrepro" config user.name "worker-1"
 cp "$KITREPO/scripts/full-suite-verdict.sh" "$hrepro/scripts/full-suite-verdict.sh"
 cp "$KITREPO/scripts/kitlib-tmp.sh" "$hrepro/scripts/kitlib-tmp.sh"
-printf '#!/bin/sh\necho VERDICT-STUB-GATE\n' > "$hrepro/scripts/fresh-gate.sh"
+create_verdict_gate_stub "$hrepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$hrepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$hrepro"
 printf '#!/bin/sh\necho hanging-suite-start\nsleep 120\necho hanging-suite-end\n' > "$hrepro/tests/cli/hang.test.sh"
