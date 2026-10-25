@@ -10,8 +10,8 @@ const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
 const scratch = ownedTmp("mission-test", { root: scratchRoot }).path;
-const CHECK_PATH = "scripts/mission-check.ts";
-const CHECK_COMMAND = "omp-kit heavy -- bun scripts/mission-check.ts --pillar learning";
+const CHECK_PATH = "scripts/pillar-check.ts";
+const CHECK_COMMAND = "omp-kit heavy -- bun scripts/pillar-check.ts --pillar learning";
 
 function digest(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
@@ -33,8 +33,11 @@ test("a fully registered record validates without claiming check quality (the re
 	expect(report.overall).toBe("VALID");
 	expect(report.pillars.map(pillar => [pillar.id, pillar.status])).toEqual([["learning", "REGISTERED"]]);
 	expect(report.no_claim).toContain("measurement quality is not established");
-	// MEASUREREG1: this repo ships no .omp/mission.toml of its own; the mission record is a per-project file.
-	expect(validateMissionRecord(repoRoot).overall).not.toBe("VALID");
+	// MEASUREREG1: this repo ships no .omp/mission.toml of its own; the mission record is a per-project file,
+	// and its absence is a typed refusal naming the path, never a bare ENOENT (planted: this very repo).
+	const absent = validateMissionRecord(repoRoot);
+	expect(absent.overall).toBe("INVALID");
+	expect(absent.errors).toContain("MISSION_RECORD_MISSING:.omp/mission.toml");
 });
 
 // MEASUREREG1 (ompkit-fp72.135.3.1): the fleet's registered checks are `python3 scripts/measure.py --pillar <id> --json`;
@@ -50,14 +53,14 @@ function withCheck(label: string, command: string) {
 }
 
 test("MEASUREREG1: a python3 single-runner check with --json and no heavy prefix registers", () => {
-	expect(withCheck("py-runner", "python3 scripts/mission-check.ts --pillar learning --json").pillars[0]).toMatchObject({ status: "REGISTERED" });
-	expect(withCheck("py-runner-heavy", "omp-kit heavy -- python3 scripts/mission-check.ts --pillar learning").pillars[0]).toMatchObject({ status: "REGISTERED" });
+	expect(withCheck("py-runner", "python3 scripts/pillar-check.ts --pillar learning --json").pillars[0]).toMatchObject({ status: "REGISTERED" });
+	expect(withCheck("py-runner-heavy", "omp-kit heavy -- python3 scripts/pillar-check.ts --pillar learning").pillars[0]).toMatchObject({ status: "REGISTERED" });
 });
 
 test("MEASUREREG1 planted: a shell suffix, another runner, or a mismatched pillar stays UNREGISTERED", () => {
-	expect(withCheck("py-suffix", "python3 scripts/mission-check.ts --pillar learning --json; echo x").pillars[0]).toMatchObject({ status: "UNREGISTERED", reason: "CHECK_COMMAND_UNSUPPORTED" });
-	expect(withCheck("node-runner", "node scripts/mission-check.ts --pillar learning").pillars[0]).toMatchObject({ status: "UNREGISTERED", reason: "CHECK_COMMAND_UNSUPPORTED" });
-	expect(withCheck("py-wrong-pillar", "python3 scripts/mission-check.ts --pillar other --json").pillars[0]).toMatchObject({ status: "UNREGISTERED", reason: "CHECK_COMMAND_REGISTRATION_MISMATCH" });
+	expect(withCheck("py-suffix", "python3 scripts/pillar-check.ts --pillar learning --json; echo x").pillars[0]).toMatchObject({ status: "UNREGISTERED", reason: "CHECK_COMMAND_UNSUPPORTED" });
+	expect(withCheck("node-runner", "node scripts/pillar-check.ts --pillar learning").pillars[0]).toMatchObject({ status: "UNREGISTERED", reason: "CHECK_COMMAND_UNSUPPORTED" });
+	expect(withCheck("py-wrong-pillar", "python3 scripts/pillar-check.ts --pillar other --json").pillars[0]).toMatchObject({ status: "UNREGISTERED", reason: "CHECK_COMMAND_REGISTRATION_MISMATCH" });
 });
 
 test("a changed check command is unregistered and never launches its planted child", () => {
@@ -83,8 +86,8 @@ test("missing approval quote and unknown pillar IDs fail validation", () => {
 	const pillarPath = join(unknownPillar, ".omp/mission.toml");
 	let mission = readFileSync(pillarPath, "utf8");
 	mission = mission.replace('id = "learning"', 'id = "not-real"');
-	mission = mission.replace(CHECK_COMMAND, "omp-kit heavy -- bun scripts/mission-check.ts --pillar not-real");
-	mission = mission.replace(digest(CHECK_COMMAND), digest("omp-kit heavy -- bun scripts/mission-check.ts --pillar not-real"));
+	mission = mission.replace(CHECK_COMMAND, "omp-kit heavy -- bun scripts/pillar-check.ts --pillar not-real");
+	mission = mission.replace(digest(CHECK_COMMAND), digest("omp-kit heavy -- bun scripts/pillar-check.ts --pillar not-real"));
 	writeFileSync(pillarPath, mission);
 	const unknownReport = validateMissionRecord(unknownPillar);
 	expect(unknownReport.overall).toBe("INVALID");
@@ -117,8 +120,8 @@ test("mission validate CLI reports registration and rejects an unknown pillar wi
 	const missionPath = join(root, ".omp/mission.toml");
 	let mission = readFileSync(missionPath, "utf8");
 	mission = mission.replace('id = "learning"', 'id = "not-real"');
-	mission = mission.replace(CHECK_COMMAND, "omp-kit heavy -- bun scripts/mission-check.ts --pillar not-real");
-	mission = mission.replace(digest(CHECK_COMMAND), digest("omp-kit heavy -- bun scripts/mission-check.ts --pillar not-real"));
+	mission = mission.replace(CHECK_COMMAND, "omp-kit heavy -- bun scripts/pillar-check.ts --pillar not-real");
+	mission = mission.replace(digest(CHECK_COMMAND), digest("omp-kit heavy -- bun scripts/pillar-check.ts --pillar not-real"));
 	writeFileSync(missionPath, mission);
 	const invalid = runMissionCli(root);
 	expect(invalid.exitCode).toBe(1);

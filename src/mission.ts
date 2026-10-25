@@ -174,7 +174,11 @@ export function validateMissionRecord(projectRoot: string, options: { readonly m
 		path = missionFilePath(root, relativeMissionFile);
 		raw = Bun.TOML.parse(safeRead(path, MAX_MISSION_BYTES).toString("utf8"));
 	} catch (error) {
-		return report("INVALID", relativeMissionFile, null, null, [], [error instanceof Error ? error.message : "MISSION_UNAVAILABLE"]);
+		// MEASUREREG1 (ompkit-fp72.135.3.1): the mission record is a per-project file that lives with the project's
+		// tracker (this product repo ships none). An absent file is a typed refusal naming the path, never a bare ENOENT.
+		const code = (error as NodeJS.ErrnoException | null)?.code;
+		const message = code === "ENOENT" ? `MISSION_RECORD_MISSING:${relativeMissionFile}` : error instanceof Error ? error.message : "MISSION_UNAVAILABLE";
+		return report("INVALID", relativeMissionFile, null, null, [], [message]);
 	}
 	if (!record(raw)) return report("INVALID", relativeMissionFile, null, null, [], ["MISSION_ROOT_NOT_TABLE"]);
 	const errors: string[] = [];

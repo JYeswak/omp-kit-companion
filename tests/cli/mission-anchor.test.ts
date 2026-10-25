@@ -15,8 +15,8 @@ mkdirSync(scratchRoot, { recursive: true });
 const digest = (value: string): string => createHash("sha256").update(value).digest("hex");
 const scratch = ownedTmp("mission-anchor-test", { root: scratchRoot }).path;
 
-const CHECK_PATH = "scripts/mission-check.ts";
-const CHECK_COMMAND = "omp-kit heavy -- bun scripts/mission-check.ts --pillar learning";
+const CHECK_PATH = "scripts/pillar-check.ts";
+const CHECK_COMMAND = "omp-kit heavy -- bun scripts/pillar-check.ts --pillar learning";
 const IDENTITY = "Fixture mission guards the fleet with measured rules.";
 
 function fixture(label: string, doc: string | null, identity: string = IDENTITY): string {
