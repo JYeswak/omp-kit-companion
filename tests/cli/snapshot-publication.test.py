@@ -74,13 +74,20 @@ class Fixture:
         self.run("git", "add", "--", "leased.txt")
         self.run("git", "commit", "-qm", message + " [test]")
 
-    def install(self) -> None:
+    def install(self, mode: str = "fleet") -> None:
+        # Agent Mail's own setup installs both chain runners and both plugins (its default is --prepush). The fleet
+        # then keeps custody at pre-commit only, through the same am steps scripts/install-pre-push-gate.sh runs
+        # (ompkit-v66l.14, J-2026-10-25-12): uninstall our plugins, reinstall --no-prepush. The pre-push chain runner
+        # stays because the kit's own member below uses it.
         self.run(self.am, "guard", "install", str(self.repo), str(self.repo), "--prepush")
         hooks = self.repo / ".git/hooks/hooks.d"
         # The kit's existing history authority remains a real chain member.
         member = hooks / "pre-push/30-omp-kit-on-main"
         shutil.copyfile(ROOT / "scripts/check-pushed-on-main.sh", member)
         member.chmod(0o755)
+        if mode == "fleet":
+            self.run(self.am, "guard", "uninstall", str(self.repo))
+            self.run(self.am, "guard", "install", str(self.repo), str(self.repo), "--no-prepush")
         if self.mutant == "mutation-custody":
             plugin = hooks / "pre-commit/50-agent-mail.py"
             tree = ast.parse(plugin.read_text())
@@ -166,6 +173,26 @@ def installer_regenerates_custody(fixture: Fixture) -> None:
     mutation_refused(fixture)
 
 
+def installer_migrates_prepush_install(fixture: Fixture) -> None:
+    # Today's live repos carry Agent Mail's pre-push plugin. The supported installer must convert them: plugin gone,
+    # pre-push chain runner and the kit's members kept, custody still refused at commit. (No push here: the installer
+    # adds the real fresh gate as a pre-push member; publication without the plugin is the `publication` case.)
+    scripts = fixture.repo / "scripts"
+    scripts.mkdir(exist_ok=True)
+    for name in ("install-pre-push-gate.sh", "pre-push-gate.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    fixture.install("agent-mail-default")
+    hooks = fixture.repo / ".git/hooks"
+    plugin = hooks / "hooks.d/pre-push/50-agent-mail.py"
+    assert plugin.is_file(), "migration: the Agent Mail default install did not create the pre-push plugin"
+    fixture.run("sh", str(scripts / "install-pre-push-gate.sh"))
+    assert not plugin.exists(), "migration: the installer left Agent Mail's pre-push plugin installed"
+    assert os.access(hooks / "pre-push", os.X_OK), "migration: the pre-push chain runner was removed"
+    assert (hooks / "hooks.d/pre-push/30-omp-kit-on-main").is_file(), "migration: the kit's history member was removed"
+    assert (hooks / "hooks.d/pre-commit/50-agent-mail.py").is_file(), "migration: pre-commit custody plugin missing"
+    mutation_refused(fixture)
+
+
 def nonchain_hook_preserved(fixture: Fixture, hook_name: str = "pre-push") -> None:
     scripts = fixture.repo / "scripts"
     scripts.mkdir(exist_ok=True)
@@ -199,6 +226,7 @@ def main() -> int:
     for name, check in (("publication", publication), ("mutation-custody", mutation_refused),
                         ("unadmitted-history", unadmitted_history_refused),
                         ("installer-regeneration", installer_regenerates_custody),
+                        ("installer-migration", installer_migrates_prepush_install),
                         ("nonchain-custody", nonchain_hook_preserved),
                         ("nonchain-precommit-custody", lambda fixture: nonchain_hook_preserved(fixture, "pre-commit"))):
         for phase in ("installed", "regenerated"):
