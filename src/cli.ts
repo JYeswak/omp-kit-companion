@@ -157,6 +157,20 @@ function isRunnable(command: Command, path: string): boolean {
 	return (command.runnable || handlers.has(path)) && (TOOL_GATED_COMMANDS[path]?.every(toolPresent) ?? true);
 }
 
+function unavailableCommands(commands: readonly Command[] = COMMANDS, prefix = ""): { path: string; reason: string; missing_tools: string[]; remediation: string }[] {
+	return commands.flatMap((command) => {
+		const path = `${prefix}${command.name}`;
+		if (command.subcommands) return unavailableCommands(command.subcommands, `${path} `);
+		if (isRunnable(command, path)) return [];
+		const wired = command.runnable || handlers.has(path);
+		const missing_tools = wired ? (TOOL_GATED_COMMANDS[path] ?? []).filter(tool => !toolPresent(tool)) : [];
+		return [{ path, missing_tools,
+			reason: missing_tools.length ? `Missing required tools on PATH: ${missing_tools.join(", ")}.` : "Handler not yet available; no action will be taken.",
+			remediation: missing_tools.length ? `Install ${missing_tools.join(", ")} and make it available on PATH; presence does not prove health or authorization.` : "Use omp-kit capabilities --json to discover runnable handlers.",
+		}];
+	});
+}
+
 function availableCommands(commands: readonly Command[] = COMMANDS, prefix = ""): Command[] {
 	return commands.filter((command) => isRunnable(command, `${prefix}${command.name}`)).map((command) => ({
 		...command,
@@ -174,7 +188,7 @@ function help(command?: Command, parent?: Command): string {
 	if (command) {
 		const children = command.subcommands?.map((child) => `  ${child.usage} — ${child.description}${isRunnable(child, `${command.name} ${child.name}`) ? "" : " (not yet available)"}`).join("\n");
 		return [`Usage: omp-kit ${command.usage}`, command.description,
-			isRunnable(command, `${parent ? `${parent.name} ` : ""}${command.name}`) ? "" : "Handler not yet available; no action will be taken.",
+			unavailableCommands([command], parent ? `${parent.name} ` : "").map(item => `${item.reason} ${item.remediation}`).join("\n"),
 			children ? `Subcommands:\n${children}` : "", `Flags:\n${printableFlags(commandFlags(command))}`,
 			`Example: ${command.example}`].filter(Boolean).join("\n\n");
 	}
@@ -4426,7 +4440,7 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 	if (command.name === "status" || command.name === "health" || command.name === "doctor") return diagnosticInventory(request);
 	if (command.name === "corpus") return corpusReport(request);
 	if (command.name === "schema") return { code: 0, data: schema(version), verification: "PERFORMED" };
-	if (command.name === "capabilities") return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
+	if (command.name === "capabilities") return { code: 0, data: { schema_version: SCHEMA_VERSION, tool_version: version, commands: availableCommands(), unavailable_commands: unavailableCommands(), global_flags: GLOBAL_FLAGS, exit_codes: EXIT_CODES, proof_classes: PROOF_CLASSES }, verification: "PERFORMED" };
 	if (parent?.name === "completion") return { code: 0, data: { shell: command.name, text: completion(command.name) }, verification: "PERFORMED" };
 	if (command.name === "examples") return { code: 0, data: { text: COMMANDS.map((item) => `${item.example}${isRunnable(item, item.name) ? "" : " # not yet available"}`).join("\n") }, verification: "PERFORMED" };
 	if (command.name === "quickstart" || parent?.name === "robot-docs") return { code: 0, data: { text: `Run omp-kit status --json to inspect presence (not effective-profile proof).\nRun omp-kit capabilities --json to discover runnable handlers.\n${COMMANDS.filter((item) => isRunnable(item, item.name)).map((item) => item.example).join("\n")}\nMCP servers from other harnesses: omp-kit doctor --scope mcp --sources --json, then omp-kit apply mcp --from claude --servers NAMES --profiles all --plan --json (--apply --yes to write; omp-kit undo RUN_ID --yes restores; --env-command SERVER:KEY=!CMD, --enable NAMES, and --timeout-ms NAME=N edit servers already present), then omp-kit test --mcp --profiles all --servers NAMES --call SERVER:TOOL:JSON --expect SERVER:REGEX --json.\nMutation never follows from --robot; unavailable handlers refuse.` }, verification: "PERFORMED" };

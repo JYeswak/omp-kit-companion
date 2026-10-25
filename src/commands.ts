@@ -33,6 +33,9 @@ const completionData: DataSchema = { type: "object", required: ["text", "shell"]
 const grammarData: DataSchema = { type: "object", required: ["schema_version", "tool_version", "commands", "global_flags", "exit_codes", "proof_classes"], properties: {
 	schema_version: { type: "string" }, tool_version: { type: "string" }, commands: { type: "array" },
 	global_flags: { type: "array" }, exit_codes: { type: "object" }, proof_classes: { type: "array" },
+	unavailable_commands: { type: "array", items: { type: "object", required: ["path", "reason", "missing_tools", "remediation"], properties: {
+		path: { type: "string" }, reason: { type: "string" }, missing_tools: { type: "array", items: { type: "string" } }, remediation: { type: "string" },
+	} } },
 } };
 const schemaData: DataSchema = { ...grammarData, required: [...grammarData.required, "envelope", "command_data", "usage_error_data"], properties: {
 	...grammarData.properties, envelope: { type: "object" }, command_data: { type: "object" }, usage_error_data: { type: "object" },
