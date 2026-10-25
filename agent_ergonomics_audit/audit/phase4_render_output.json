@@ -1,0 +1,16 @@
+[
+  {
+    "script": "render_scorecard.sh",
+    "exit_code": 0,
+    "stderr": "",
+    "elapsed_s": 0.789,
+    "stdout_file": "scorecard.md"
+  },
+  {
+    "script": "render_heatmap.sh",
+    "exit_code": 0,
+    "stderr": "",
+    "elapsed_s": 238.306,
+    "stdout_file": "heatmap.svg"
+  }
+]

@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "source": "audit/fleet_usage_72h.json",
+  "denominator": {
+    "kind": "runs in returned candidate shapes containing literal omp-kit",
+    "runs": 321,
+    "shapes": 33
+  },
+  "limits": [
+    "Candidate mining is not exhaustive command frequency: 19036 eval calls skipped, 50 malformed records; shapes suppress actual verbs as <value>.",
+    "Runs are repeat executions, not unique people or physical fleet seats.",
+    "Workflow exposure is a proxy, not observed defect incidence or unknown-command frequency."
+  ],
+  "groups": {
+    "all_omp_shapes": {
+      "runs": 321,
+      "frequency": 1.0,
+      "shape_hashes": [
+        "781b322526e08da7",
+        "17e016be7900197a",
+        "f659d68f16806a5a",
+        "60c6bb9d741ff1ee",
+        "43491e10530671cc",
+        "8bc1570839771ea8",
+        "02ea3dc49d0cc3b8",
+        "635d81d44472960f",
+        "81d74110e9ebbe32",
+        "b8169231fc18c9b6",
+        "6e8191781d4d2024",
+        "d4e91173192b59f6",
+        "144fd0d676b5fc77",
+        "1f13e93d82c5540f",
+        "79ab9271474a8d3d",
+        "81ecdde69193d2d6",
+        "be554d5ec3b37ef5",
+        "1ce2a7048cfb24b1",
+        "8683e3134e969e0a",
+        "8fdd4a5ee8e26994",
+        "c7dba2d289b37aea",
+        "e77a7012e7c5b172",
+        "fd3c8cecb31eac4b",
+        "ff6fa4d9df18e036",
+        "2161cbd6b9fb3d42",
+        "21fa44f2449226ab",
+        "36fc844545f8af71",
+        "434f90e7cd911f3e",
+        "5db4912174621323",
+        "9c79a6d13f1bc0c6",
+        "b9aa33e0c0e98868",
+        "bf9aeb81293f72c3",
+        "e2661343e6c387ab"
+      ]
+    },
+    "tracker_workflow": {
+      "runs": 234,
+      "frequency": 0.7289719626168224,
+      "shape_hashes": [
+        "781b322526e08da7",
+        "f659d68f16806a5a",
+        "60c6bb9d741ff1ee",
+        "43491e10530671cc",
+        "8bc1570839771ea8",
+        "635d81d44472960f",
+        "b8169231fc18c9b6",
+        "6e8191781d4d2024",
+        "d4e91173192b59f6",
+        "144fd0d676b5fc77",
+        "1f13e93d82c5540f",
+        "be554d5ec3b37ef5",
+        "1ce2a7048cfb24b1",
+        "8fdd4a5ee8e26994",
+        "fd3c8cecb31eac4b",
+        "ff6fa4d9df18e036",
+        "2161cbd6b9fb3d42",
+        "21fa44f2449226ab",
+        "36fc844545f8af71",
+        "5db4912174621323",
+        "9c79a6d13f1bc0c6",
+        "e2661343e6c387ab"
+      ]
+    },
+    "json_workflow": {
+      "runs": 255,
+      "frequency": 0.794392523364486,
+      "shape_hashes": [
+        "781b322526e08da7",
+        "f659d68f16806a5a",
+        "60c6bb9d741ff1ee",
+        "43491e10530671cc",
+        "8bc1570839771ea8",
+        "635d81d44472960f",
+        "81d74110e9ebbe32",
+        "b8169231fc18c9b6",
+        "6e8191781d4d2024",
+        "d4e91173192b59f6",
+        "144fd0d676b5fc77",
+        "1f13e93d82c5540f",
+        "81ecdde69193d2d6",
+        "be554d5ec3b37ef5",
+        "1ce2a7048cfb24b1",
+        "8fdd4a5ee8e26994",
+        "e77a7012e7c5b172",
+        "fd3c8cecb31eac4b",
+        "ff6fa4d9df18e036",
+        "2161cbd6b9fb3d42",
+        "21fa44f2449226ab",
+        "36fc844545f8af71",
+        "5db4912174621323",
+        "9c79a6d13f1bc0c6",
+        "bf9aeb81293f72c3",
+        "e2661343e6c387ab"
+      ]
+    },
+    "opaque_command_shape": {
+      "runs": 19,
+      "frequency": 0.059190031152647975,
+      "shape_hashes": [
+        "79ab9271474a8d3d",
+        "81ecdde69193d2d6",
+        "e77a7012e7c5b172",
+        "bf9aeb81293f72c3"
+      ]
+    }
+  }
+}

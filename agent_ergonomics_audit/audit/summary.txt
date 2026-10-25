@@ -1,0 +1,12 @@
+ERGO1 requested audit artifacts produced; accepted rubric consensus remains HALTED.
+Inventory2506, original2504 IDs retained,555 help-verified,1951 unverified.
+Two independent555-surface runtime reviews; full aggregate2506; validator exit0.
+Preserved56 spreads>=500 and247 third-review requirements.
+Corpus2163:2154 executed,9 skipped with null exits; runner exit0.
+Raw labels2133 useful_hint,5 useless_error,16 inferred_and_acted,0 silent_fail,9 skipped.
+Naive2151 rows represent360 unique inputs; classifier labels are not recovery ground truth.
+Six parent probes include bare next->test rc2 and bare profile-drift rc1.
+16 recommendations retained/unapplied; rank R003,R001,R002,R008,R006,R009,R005,R004,R011,R012.
+Scorecard and heatmap render scripts exit0; median weighted554, no measured uplift.
+See phase4_summary.md, phase2_validator.md, skill_defects.md and phase1_4_status.json.
+No commits or src/tests edits. Full bead acceptance remains open.

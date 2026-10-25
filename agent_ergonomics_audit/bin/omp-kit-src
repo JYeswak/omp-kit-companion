@@ -1,0 +1,6 @@
+#!/bin/sh
+# Probe binary for the agent-ergonomics audit (ERGO1, ompkit-rc-epic-land-fix-release-dogfood-rz5.112):
+# runs the omp-kit CLI from this checkout's source, so scores describe the code under audit, not the
+# installed release. Resolves the repo from this file's location; no fleet paths.
+here=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || exit 2
+exec bun "$here/src/cli.ts" "$@"

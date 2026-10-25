@@ -1,0 +1,17 @@
+{
+  "argv": [
+    "nice",
+    "-n",
+    "10",
+    "python3",
+    "/Users/josh/Developer/omp-kit/scripts/verb_mine.py",
+    "scan",
+    "--hours",
+    "72",
+    "--json"
+  ],
+  "exit_code": 0,
+  "stderr": "",
+  "elapsed_seconds": 170.23643754100002,
+  "reason_for_second_capture": "Initial tool output was truncated and expired before complete persistence; this capture saves complete output, not a confirmation rerun."
+}

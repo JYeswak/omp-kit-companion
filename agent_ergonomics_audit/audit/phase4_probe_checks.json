@@ -1,0 +1,14 @@
+{
+  "executed": 5,
+  "bare_exit": 1,
+  "discovery_exits": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "json_discovery_one_document": true,
+  "json_discovery_stderr_empty": true,
+  "ansi_present": false,
+  "limits": "One combined non-TTY env configuration; not per-variable or TTY/consent proof."
+}

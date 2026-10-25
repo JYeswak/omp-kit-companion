@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "omp-kit-src",
+    "next"
+  ],
+  "exit_code": 2,
+  "stdout": "",
+  "stderr": "UNKNOWN_COMMAND: Unknown command: next\nTry omp-kit test exactly; no command was run.\n",
+  "purpose": "Reach unknown-command semantic suggestion independently of earlier unknown --role refusal."
+}

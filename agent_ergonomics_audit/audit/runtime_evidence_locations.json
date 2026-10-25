@@ -1,0 +1,7 @@
+{
+  "original": "var/agent-tmp/aergo-p1c.28881/runtime-inventory.jsonl",
+  "durable_copy": "audit/runtime_inventory_evidence.jsonl",
+  "sha256": "6fb835f4b2e2dd540e41bcbc1baf949dedfdf15defdfc619151c4ab434e135a4",
+  "original_copy_identical": true,
+  "resolution": "Any source-scratch runtime-inventory citation resolves to this exact durable copy; final validated score data is not rewritten solely to normalize citation spelling."
+}

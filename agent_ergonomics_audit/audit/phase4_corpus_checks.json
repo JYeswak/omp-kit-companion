@@ -1,0 +1,19 @@
+{
+  "corpus_rows": 2163,
+  "executed": 2154,
+  "skipped": 9,
+  "classifications": {
+    "useful_hint": 2133,
+    "skipped": 9,
+    "useless_error": 5,
+    "inferred_and_acted": 16
+  },
+  "exit_codes": {
+    "2": 2138,
+    "None": 9,
+    "0": 16
+  },
+  "unsafe_executed_argv": [],
+  "skips_all_null": true,
+  "all_surface_anchors_exist": true
+}

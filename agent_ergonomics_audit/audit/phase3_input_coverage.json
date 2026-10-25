@@ -1,0 +1,13 @@
+{
+  "naive_entries": 2151,
+  "unique_naive_argv_env_cwd": 360,
+  "duplicate_naive_entries": 1791,
+  "categories": {
+    "A": 2130,
+    "C": 2,
+    "D": 3,
+    "G": 16
+  },
+  "targeted_surface_ids": 899,
+  "interpretation": "Scoped flag inventory generates root-only mistakes; repeated argv under different surface IDs are not independent trials or scoped flag acceptance tests."
+}

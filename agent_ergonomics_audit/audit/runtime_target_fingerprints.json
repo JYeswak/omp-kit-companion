@@ -1,0 +1,11 @@
+{
+  "captured_at": "2026-10-25",
+  "scope": "live checkout, not exact original source-pass revision",
+  "sha256": {
+    "src/cli.ts": "af9adcc6ca0f626627f6225900ef08dc06d1a4069cc3f25bd25e678168b43c0c",
+    "src/commands.ts": "82de8a6505ce2400d45977a6270e024e6c1176111be05f11321e0289e75de539",
+    "agent_ergonomics_audit/bin/omp-kit-src": "ca99aedfd71df18d36edc0e2d65befed0b3a4cb5e5f075917f2ed2ccd8fb9f9f"
+  },
+  "historical_source_sha": "7c5d7b67c937837d0f2ee6285936dc16fdde593f",
+  "warning": "Shared checkout may change between inventory and corpus; these are file hashes at parent discovery probe time, not a release certification."
+}

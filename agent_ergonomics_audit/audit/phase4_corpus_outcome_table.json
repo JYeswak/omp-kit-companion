@@ -1,0 +1,22 @@
+[
+  {
+    "generator": "naive",
+    "rows": 2151,
+    "executed": 2149,
+    "silent_fail": 0,
+    "useless_error": 1,
+    "useful_hint": 2132,
+    "inferred_and_acted": 16,
+    "skipped": 2
+  },
+  {
+    "generator": "savvy",
+    "rows": 12,
+    "executed": 5,
+    "silent_fail": 0,
+    "useless_error": 4,
+    "useful_hint": 1,
+    "inferred_and_acted": 0,
+    "skipped": 7
+  }
+]

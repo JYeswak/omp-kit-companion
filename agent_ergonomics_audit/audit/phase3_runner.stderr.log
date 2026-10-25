@@ -1,0 +1,6 @@
+intent corpus run complete:     2163 total entries
+  silent_fail:        0
+  useless_error:        5
+  useful_hint:     2133
+  inferred_and_acted:       16
+  skipped:        9

@@ -1,0 +1,23 @@
+{
+  "required_files_present_nonempty": {
+    "surface_inventory.jsonl": true,
+    "agent_surfaces.jsonl": true,
+    "intent_inference_corpus.jsonl": true,
+    "recommendations.jsonl": true,
+    "playbook.md": true,
+    "scorecard.md": true,
+    "heatmap.svg": true,
+    "phase4_summary.md": true,
+    "phase2_validator.md": true,
+    "skill_defects.md": true
+  },
+  "inventory_count": 2506,
+  "score_count": 2506,
+  "validator_exit": 0,
+  "scores_unchanged_since_last_check": true,
+  "recommendations": 16,
+  "corpus_skips_null": true,
+  "no_executed_apply_yes": true,
+  "full_skill_consensus_accepted": false,
+  "scope": "Artifact completion only; no installed-release/full-bead certification"
+}

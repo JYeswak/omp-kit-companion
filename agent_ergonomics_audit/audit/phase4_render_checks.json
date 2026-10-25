@@ -1,0 +1,11 @@
+{
+  "svg_parse": true,
+  "svg_width": "1200",
+  "svg_height": "60324",
+  "rects": 27569,
+  "text_elements": 30087,
+  "expected_score_cells": 27566,
+  "scorecard_surface_rows": 2506,
+  "provisional_scorecard_label": true,
+  "provisional_svg_label": true
+}

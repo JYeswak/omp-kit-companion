@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Proposed additive data payload for omp-kit next --role worker|director --json",
+  "description": "Recommendation only, not an implemented or runtime-verified API. Retain the existing ok/tool_version/data/meta/warnings/commands/errors outer envelope. next is read-only and never claims, dispatches, commits, pushes or closes work.",
+  "type": "object",
+  "required": ["contract_version", "role", "station", "blockers", "adapters", "commands", "quick_ref", "recommendations", "provenance"],
+  "properties": {
+    "contract_version": {"const": "next/1"},
+    "role": {"enum": ["worker", "director"]},
+    "station": {"enum": ["genesis", "prior-art", "build", "preflight", "push", "verify", "adoption", "gap-to-bead", "UNKNOWN"]},
+    "quick_ref": {"type": "object", "required": ["summary"], "properties": {"summary": {"type": "string"}}},
+    "recommendations": {"type": "array", "items": {"type": "object", "required": ["reason", "command_ids"], "properties": {"reason": {"type": "string"}, "command_ids": {"type": "array", "items": {"type": "string"}}}}},
+    "blockers": {"type": "array", "items": {"type": "object", "required": ["code", "reason", "source", "command_ids"], "properties": {"code": {"type": "string"}, "reason": {"type": "string"}, "source": {"type": "string"}, "command_ids": {"type": "array", "items": {"type": "string"}}}}},
+    "adapters": {"type": "object", "required": ["br", "tern", "agent_mail", "cc"], "properties": {"br": {"$ref": "#/$defs/adapter"}, "tern": {"$ref": "#/$defs/adapter"}, "agent_mail": {"$ref": "#/$defs/adapter"}, "cc": {"$ref": "#/$defs/adapter"}}},
+    "commands": {"type": "array", "items": {"type": "object", "required": ["id", "argv", "display", "mutates", "requires_input"], "properties": {"id": {"type": "string"}, "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "display": {"type": "string"}, "mutates": {"type": "boolean"}, "requires_input": {"type": "array", "items": {"type": "string"}}}}},
+    "provenance": {"type": "object", "required": ["sources", "not_judged"], "properties": {"sources": {"type": "array", "items": {"type": "string"}}, "not_judged": {"type": "array", "items": {"type": "string"}}, "data_hash": {"type": ["string", "null"]}}}
+  },
+  "$defs": {
+    "adapter": {"type": "object", "required": ["status", "reason", "data"], "properties": {"status": {"enum": ["AVAILABLE", "UNKNOWN"]}, "reason": {"type": "string"}, "data": {"type": ["object", "null"]}}, "allOf": [{"if": {"properties": {"status": {"const": "UNKNOWN"}}}, "then": {"properties": {"data": {"type": "null"}}}}]}
+  },
+  "x-exit-contract": "0 = structurally valid recommendation response, including absent/failed optional adapters reported UNKNOWN; 2 = invalid role/arguments under existing usage contract; existing internal/unavailable errors retained for core failures. UNKNOWN is never proof of readiness.",
+  "x-station-selection": "Use evidence-backed ordered prerequisites per role. Missing adapter evidence cannot advance an agent past preflight, verify or adoption. Return UNKNOWN and explicit missing evidence rather than selecting a successful station from absent data. Emit exact argv only for executable commands; mark unresolved inputs explicitly, never fabricate bead IDs or paths.",
+  "x-portability": "Stock runner without br, Tern, Agent Mail or cc must return exit 0, all four adapters UNKNOWN, and safe native discovery commands. Optional adapters are bounded read-only observations, not runtime dependencies. Do not shell out to a mutating workflow while collecting next. No home-directory or fleet-host assumptions."
+}

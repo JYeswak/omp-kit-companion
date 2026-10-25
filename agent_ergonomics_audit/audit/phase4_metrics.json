@@ -1,0 +1,139 @@
+{
+  "denominator": "2506 surface records, not runnable tasks; A/B rubric medians, not consensus or measured uplift",
+  "surface_count": 2506,
+  "medians": {
+    "agent_intuitiveness": 550.0,
+    "agent_ergonomics": 525.0,
+    "agent_ease_of_use": 525.0,
+    "output_parseability": 600.0,
+    "error_pedagogy": 400.0,
+    "intent_inference": 375.0,
+    "safety_with_recovery": 1000.0,
+    "determinism_and_reproducibility": 550.0,
+    "self_documentation": 600.0,
+    "composability": 625.0,
+    "regression_resistance": 250.0
+  },
+  "weighted_median": 554.0,
+  "by_kind": {
+    "config": {
+      "count": 1245,
+      "weighted_median": 554,
+      "dimension_medians": {
+        "agent_intuitiveness": 550,
+        "agent_ergonomics": 575,
+        "agent_ease_of_use": 525,
+        "output_parseability": 600,
+        "error_pedagogy": 400,
+        "intent_inference": 375,
+        "safety_with_recovery": 1000,
+        "determinism_and_reproducibility": 550,
+        "self_documentation": 650,
+        "composability": 625,
+        "regression_resistance": 250
+      }
+    },
+    "env": {
+      "count": 37,
+      "weighted_median": 422,
+      "dimension_medians": {
+        "agent_intuitiveness": 600,
+        "agent_ergonomics": 525,
+        "agent_ease_of_use": 250,
+        "output_parseability": 600,
+        "error_pedagogy": 325,
+        "intent_inference": 175,
+        "safety_with_recovery": 750,
+        "determinism_and_reproducibility": 475,
+        "self_documentation": 250,
+        "composability": 500,
+        "regression_resistance": 200
+      }
+    },
+    "error": {
+      "count": 199,
+      "weighted_median": 502,
+      "dimension_medians": {
+        "agent_intuitiveness": 525,
+        "agent_ergonomics": 500,
+        "agent_ease_of_use": 475,
+        "output_parseability": 650,
+        "error_pedagogy": 575,
+        "intent_inference": 425,
+        "safety_with_recovery": 500,
+        "determinism_and_reproducibility": 550,
+        "self_documentation": 475,
+        "composability": 625,
+        "regression_resistance": 225
+      }
+    },
+    "exit": {
+      "count": 11,
+      "weighted_median": 579,
+      "dimension_medians": {
+        "agent_intuitiveness": 550,
+        "agent_ergonomics": 625,
+        "agent_ease_of_use": 425,
+        "output_parseability": 650,
+        "error_pedagogy": 600,
+        "intent_inference": 450,
+        "safety_with_recovery": 1000,
+        "determinism_and_reproducibility": 525,
+        "self_documentation": 650,
+        "composability": 625,
+        "regression_resistance": 275
+      }
+    },
+    "flag": {
+      "count": 902,
+      "weighted_median": 590.0,
+      "dimension_medians": {
+        "agent_intuitiveness": 650.0,
+        "agent_ergonomics": 525.0,
+        "agent_ease_of_use": 525.0,
+        "output_parseability": 650.0,
+        "error_pedagogy": 575.0,
+        "intent_inference": 600.0,
+        "safety_with_recovery": 1000.0,
+        "determinism_and_reproducibility": 500.0,
+        "self_documentation": 600.0,
+        "composability": 650.0,
+        "regression_resistance": 350.0
+      }
+    },
+    "prompt": {
+      "count": 1,
+      "weighted_median": 552,
+      "dimension_medians": {
+        "agent_intuitiveness": 550,
+        "agent_ergonomics": 350,
+        "agent_ease_of_use": 500,
+        "output_parseability": 575,
+        "error_pedagogy": 650,
+        "intent_inference": 400,
+        "safety_with_recovery": 650,
+        "determinism_and_reproducibility": 575,
+        "self_documentation": 600,
+        "composability": 700,
+        "regression_resistance": 525
+      }
+    },
+    "verb": {
+      "count": 111,
+      "weighted_median": 536,
+      "dimension_medians": {
+        "agent_intuitiveness": 625,
+        "agent_ergonomics": 550,
+        "agent_ease_of_use": 500,
+        "output_parseability": 650,
+        "error_pedagogy": 550,
+        "intent_inference": 600,
+        "safety_with_recovery": 650,
+        "determinism_and_reproducibility": 450,
+        "self_documentation": 500,
+        "composability": 650,
+        "regression_resistance": 250
+      }
+    }
+  }
+}

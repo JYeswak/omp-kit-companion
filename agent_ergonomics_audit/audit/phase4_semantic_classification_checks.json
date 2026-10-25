@@ -1,0 +1,7 @@
+{
+  "raw_useful_hint_generic_help_only": 679,
+  "raw_useful_hint_root_collision": 111,
+  "raw_inferred_all_version_probes": true,
+  "semantic_next_correction": "bare next -> Try omp-kit test exactly, exit2; unrelated intent",
+  "classification_policy": "Preserve stock labels, annotate false positives/negatives separately; not a corrected global accuracy estimate."
+}

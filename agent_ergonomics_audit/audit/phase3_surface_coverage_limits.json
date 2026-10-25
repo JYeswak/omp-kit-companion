@@ -1,0 +1,7 @@
+{
+  "low_intent_surface_records": 2506,
+  "with_at_least_three_entries": 226,
+  "with_one_or_two_entries": 682,
+  "with_no_entries": 1598,
+  "limit": "Many are schema/config/error/env records, not independently runnable tasks. Do not fabricate redundant entries or claim exhaustive skill coverage. User requested fixed naive generator plus preserved savvy corpus; that run completed."
+}

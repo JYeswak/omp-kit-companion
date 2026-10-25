@@ -1,0 +1,15 @@
+{
+  "target_path": "/Users/josh/Developer/omp-kit-companion",
+  "discovered_at": "2026-10-25T07:16:45Z",
+  "languages": [
+    "typescript_or_javascript"
+  ],
+  "binaries": [],
+  "env_var_prefix": "",
+  "existing_surfaces": {
+    "robot_mode": true,
+    "capabilities": true,
+    "robot_docs": true
+  },
+  "recommended_mode": "audit-only"
+}

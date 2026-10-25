@@ -1,0 +1,38 @@
+[
+  {
+    "surface_id": "verb__status",
+    "args": [
+      "verb",
+      "",
+      "status"
+    ],
+    "exit_code": 0,
+    "stdout": "verb__status\n",
+    "stderr": "",
+    "matches": true
+  },
+  {
+    "surface_id": "flag__status__json",
+    "args": [
+      "flag",
+      "status",
+      "--json"
+    ],
+    "exit_code": 0,
+    "stdout": "flag__status__json\n",
+    "stderr": "",
+    "matches": true
+  },
+  {
+    "surface_id": "env__NO_COLOR",
+    "args": [
+      "env",
+      "",
+      "NO_COLOR"
+    ],
+    "exit_code": 0,
+    "stdout": "env__NO_COLOR\n",
+    "stderr": "",
+    "matches": true
+  }
+]

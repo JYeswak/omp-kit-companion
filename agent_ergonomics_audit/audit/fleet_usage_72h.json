@@ -1,0 +1,2189 @@
+{
+  "schema_version": 1,
+  "since": "2026-10-22T07:27:39.489282+00:00",
+  "until": "2026-10-25T07:27:39.489282+00:00",
+  "seat_basis": "distinct transcript files (physical seats unavailable)",
+  "stats": {
+    "files": 18211,
+    "commands": 38454,
+    "eval_calls": 21189,
+    "eval_skipped": 19036,
+    "malformed_records": 50
+  },
+  "help_checked": [
+    {
+      "program": "omp-kit",
+      "available": true
+    },
+    {
+      "program": "cc.py",
+      "available": true
+    },
+    {
+      "program": "br",
+      "available": true
+    },
+    {
+      "program": "bv",
+      "available": true
+    }
+  ],
+  "eval_support": "literal Python subprocess.run argv lists only; other eval calls skipped and counted",
+  "candidates": [
+    {
+      "kind": "output inspect",
+      "skeleton": "python3 -c <quoted>",
+      "skeleton_hash": "5e6eede4a3620bc4",
+      "runs": 77,
+      "seats": 27,
+      "sessions": [
+        "0e0aa6dc955b",
+        "172cfe7ce02b",
+        "23201b8eedb9",
+        "246222e19ff4",
+        "258f30121697",
+        "2c169204b465",
+        "2fa8128f4807",
+        "35290d4f8135",
+        "3922d423a76b",
+        "40f99e172c5f",
+        "4676d2534e7b",
+        "5012a5772658",
+        "5a5acda2a079",
+        "774e9059842d",
+        "7949d920f8d6",
+        "7cdebf49bca8",
+        "7df3661f01c7",
+        "82093d1a3aec",
+        "a141df131c7f",
+        "a41be5dc9228",
+        "c9fab26bb340",
+        "d0a6fb6c7937",
+        "de7e8ea7eb52",
+        "e6464be47922",
+        "f0917703452d",
+        "f99013831996",
+        "fade1e43dabd"
+      ],
+      "first_time": "2026-10-22T07:28:37.332000+00:00",
+      "last_time": "2026-10-25T05:03:15.082000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json | jq -r <quoted>",
+      "skeleton_hash": "781b322526e08da7",
+      "runs": 58,
+      "seats": 6,
+      "sessions": [
+        "35290d4f8135",
+        "762d08d48c0f",
+        "81cddbcac7ae",
+        "95c38c455730",
+        "a26f571b17f5",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T20:52:04.399000+00:00",
+      "last_time": "2026-10-25T00:06:35.679000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/run_sidecar.py",
+      "skeleton_hash": "6fc136480cc672f7",
+      "runs": 42,
+      "seats": 7,
+      "sessions": [
+        "33e568d5fa5b",
+        "39c1d6e4a2dd",
+        "59faaeababdc",
+        "60d1be3fa5fc",
+        "6bceb7c13469",
+        "98402e69100a",
+        "d2adc4144d83"
+      ],
+      "first_time": "2026-10-24T14:24:54.671000+00:00",
+      "last_time": "2026-10-24T15:47:57.939000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "run_sidecar.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br --db <path> show <bead> --json | jq <quoted>",
+      "skeleton_hash": "955baa7f3818f718",
+      "runs": 42,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-23T03:54:25.688000+00:00",
+      "last_time": "2026-10-24T11:24:59.871000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && python3 -c <quoted>",
+      "skeleton_hash": "17e016be7900197a",
+      "runs": 32,
+      "seats": 21,
+      "sessions": [
+        "05e5b21e4905",
+        "0ad7901b63ad",
+        "3126bc84fd92",
+        "32fe50aac205",
+        "35290d4f8135",
+        "3f4cf8829ed6",
+        "422ce8c853ac",
+        "47b0bddb9cba",
+        "4c6d2691b4cc",
+        "52f8bcf9841c",
+        "5d435e288eb7",
+        "72b543fa4f8b",
+        "7b8c0e342987",
+        "7cdebf49bca8",
+        "7d81faa63e3c",
+        "967185ac39fe",
+        "978f226c49c8",
+        "a3888d1fac1f",
+        "a41be5dc9228",
+        "b9c842e3cd49",
+        "d031bc94bd05"
+      ],
+      "first_time": "2026-10-22T11:55:16.522000+00:00",
+      "last_time": "2026-10-25T05:54:00.366000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "python3 -B -c <quoted>",
+      "skeleton_hash": "3531b7be713a5262",
+      "runs": 31,
+      "seats": 7,
+      "sessions": [
+        "258f30121697",
+        "66c023629dd6",
+        "74d23899f6f9",
+        "82093d1a3aec",
+        "a84c0e3b311d",
+        "b5b116ab9856",
+        "ce8933cb2c66"
+      ],
+      "first_time": "2026-10-23T20:49:58.807000+00:00",
+      "last_time": "2026-10-25T01:22:16.895000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <scratch> && python3 -c <quoted>",
+      "skeleton_hash": "336a2c1b72a71254",
+      "runs": 30,
+      "seats": 10,
+      "sessions": [
+        "1977c7e86d6b",
+        "258f30121697",
+        "31023fcb5a0f",
+        "479d570a5e77",
+        "72b543fa4f8b",
+        "7b8c0e342987",
+        "b7114a7b02cb",
+        "d031bc94bd05",
+        "db4dd38787b6",
+        "f754912cdbd4"
+      ],
+      "first_time": "2026-10-23T02:26:43.683000+00:00",
+      "last_time": "2026-10-24T17:25:49.275000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json --no-auto-import --no-auto-flush | jq -r <quoted>",
+      "skeleton_hash": "f659d68f16806a5a",
+      "runs": 27,
+      "seats": 3,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228",
+        "fdd07533360a"
+      ],
+      "first_time": "2026-10-24T09:36:52.417000+00:00",
+      "last_time": "2026-10-25T04:03:46.484000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json | jq -r <quoted> | <value> -c <number>",
+      "skeleton_hash": "60c6bb9d741ff1ee",
+      "runs": 26,
+      "seats": 24,
+      "sessions": [
+        "14d1acdb1471",
+        "18d85446e822",
+        "29ee5e6abd44",
+        "35290d4f8135",
+        "378a6f877803",
+        "4e2a12ad0856",
+        "5845dc6585ef",
+        "5cab8a507f88",
+        "61e290939875",
+        "78dd4575b73c",
+        "8a248f8d3c92",
+        "926968eed566",
+        "92ac6b6d9c56",
+        "9c57e397c91b",
+        "9d85f5e9b9d8",
+        "a41be5dc9228",
+        "b01a419d1c06",
+        "b9c842e3cd49",
+        "bd0699e3c6a1",
+        "d2ebd1d3089a",
+        "dc9480d4c7df",
+        "e217237705bc",
+        "f8aae965a254",
+        "f9f9cdb74e05"
+      ],
+      "first_time": "2026-10-22T08:15:22.651000+00:00",
+      "last_time": "2026-10-24T02:13:42.447000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json | python3 -c <quoted>",
+      "skeleton_hash": "43491e10530671cc",
+      "runs": 23,
+      "seats": 16,
+      "sessions": [
+        "1bf7284c7516",
+        "3431fabfcfcd",
+        "35290d4f8135",
+        "4dad09502a0b",
+        "52f8bcf9841c",
+        "611c2c9fe0f9",
+        "6e1301c74e54",
+        "850d56e0ebfc",
+        "89d4594dc1fd",
+        "9ce9c54c9067",
+        "a4b31016cb39",
+        "c40490716c80",
+        "ccb58d193e0b",
+        "df303dcc14fa",
+        "f2ec77dddf00",
+        "ff01395c6db1"
+      ],
+      "first_time": "2026-10-22T16:02:12.530000+00:00",
+      "last_time": "2026-10-25T06:09:42.848000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br show <bead> --json | python3 -c <quoted>",
+      "skeleton_hash": "e93cf38a34a29604",
+      "runs": 23,
+      "seats": 12,
+      "sessions": [
+        "067cc46e991f",
+        "0e0aa6dc955b",
+        "172cfe7ce02b",
+        "1a45a96cdb94",
+        "1a9bfe7c8e2f",
+        "258f30121697",
+        "35290d4f8135",
+        "850d56e0ebfc",
+        "a41be5dc9228",
+        "b0d818491f39",
+        "db4b44e2ebfd",
+        "f37a1a7dcde2"
+      ],
+      "first_time": "2026-10-22T07:35:11.494000+00:00",
+      "last_time": "2026-10-24T06:11:24.504000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br --db <path> --no-auto-import --no-auto-flush show <bead> --json | jq <quoted>",
+      "skeleton_hash": "efe6abb07c6d9af7",
+      "runs": 21,
+      "seats": 3,
+      "sessions": [
+        "258f30121697",
+        "82093d1a3aec",
+        "f1ad68abb9d5"
+      ],
+      "first_time": "2026-10-23T07:46:18.463000+00:00",
+      "last_time": "2026-10-24T12:21:14.865000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br --no-auto-import --no-auto-flush --db <path> show <bead> --json | jq -r <quoted>",
+      "skeleton_hash": "5582413a36f0057b",
+      "runs": 16,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-24T23:26:06.059000+00:00",
+      "last_time": "2026-10-25T00:04:24.873000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json | jq -r <quoted> ; br show <bead> --json | jq -r <quoted>",
+      "skeleton_hash": "8bc1570839771ea8",
+      "runs": 16,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T00:08:53.130000+00:00",
+      "last_time": "2026-10-24T15:32:21.904000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/run_producers.py",
+      "skeleton_hash": "9ccdcfca7bfbe847",
+      "runs": 16,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T14:19:38.141000+00:00",
+      "last_time": "2026-10-24T23:46:53.230000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "run_producers.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( <value> br <value> <value> --json ); <value> ; <value> <quoted> <quoted> ; <value> <quoted> <quoted> | jq <quoted>",
+      "skeleton_hash": "0578dea6bad7d88d",
+      "runs": 15,
+      "seats": 1,
+      "sessions": [
+        "4ecdc2daf09f"
+      ],
+      "first_time": "2026-10-22T18:02:46.011000+00:00",
+      "last_time": "2026-10-22T21:34:09.702000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( br show <bead> --json ); <value> ; <value> <quoted> <quoted> ; <value> <quoted> <quoted> ; <value> <quoted> <quoted> | jq -c <quoted> ; <value> <quoted>",
+      "skeleton_hash": "a7a2c283d485c9b4",
+      "runs": 15,
+      "seats": 1,
+      "sessions": [
+        "258f30121697"
+      ],
+      "first_time": "2026-10-22T17:10:18.326000+00:00",
+      "last_time": "2026-10-22T18:00:21.145000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && <scratch> <value> -n <number> python3 -B -c <quoted>",
+      "skeleton_hash": "02ea3dc49d0cc3b8",
+      "runs": 14,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T14:22:09.995000+00:00",
+      "last_time": "2026-10-24T17:21:49.666000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/driver.py",
+      "skeleton_hash": "31d63ba08cb82dde",
+      "runs": 13,
+      "seats": 1,
+      "sessions": [
+        "291b4f6ebae7"
+      ],
+      "first_time": "2026-10-24T02:32:18.426000+00:00",
+      "last_time": "2026-10-24T02:36:59.406000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "driver.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br show <bead> --json | jq -r <quoted>",
+      "skeleton_hash": "b7dff72d3eb57137",
+      "runs": 13,
+      "seats": 10,
+      "sessions": [
+        "313ca8b58ebe",
+        "35290d4f8135",
+        "5986135ca20f",
+        "66b41f561c81",
+        "6ecf44d277fe",
+        "76fc2229ade8",
+        "a41be5dc9228",
+        "a7657198db21",
+        "b7068bec2626",
+        "cee3bf53e406"
+      ],
+      "first_time": "2026-10-22T20:37:39.926000+00:00",
+      "last_time": "2026-10-24T16:32:30.885000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br <value> list <bead> --json --no-auto-import --no-auto-flush | jq -r <quoted>",
+      "skeleton_hash": "976f0b8414ec9f44",
+      "runs": 12,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T09:15:48.182000+00:00",
+      "last_time": "2026-10-23T13:14:28.320000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/run_all.sh",
+      "skeleton_hash": "bc92f8389ddfa8f3",
+      "runs": 12,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T11:16:29.913000+00:00",
+      "last_time": "2026-10-24T14:50:10.150000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "run_all.sh"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<redacted> python3 -c <quoted>",
+      "skeleton_hash": "c9fa56d5b185e39a",
+      "runs": 12,
+      "seats": 2,
+      "sessions": [
+        "8000f7227a14",
+        "af8a264d31bd"
+      ],
+      "first_time": "2026-10-23T01:25:57.813000+00:00",
+      "last_time": "2026-10-24T02:33:34.815000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> br show <value> --json --no-auto-import --no-auto-flush | jq <quoted>",
+      "skeleton_hash": "cd5cd0a493fb0d8a",
+      "runs": 12,
+      "seats": 1,
+      "sessions": [
+        "1e794c7c8073"
+      ],
+      "first_time": "2026-10-22T21:11:39.986000+00:00",
+      "last_time": "2026-10-22T21:22:12.032000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( br show <bead> --json --no-auto-import --no-auto-flush ); <value> ; <value> <quoted> <quoted> | jq -r <quoted> ; <value> <quoted>",
+      "skeleton_hash": "df1247857d4e7ac9",
+      "runs": 12,
+      "seats": 1,
+      "sessions": [
+        "258f30121697"
+      ],
+      "first_time": "2026-10-25T04:27:14.248000+00:00",
+      "last_time": "2026-10-25T05:18:04.073000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( br --db <path> --no-auto-import --no-auto-flush show <bead> --json ); <value> ; <value> <quoted> <quoted> ; <value> <quoted> <quoted> | jq -r <quoted>",
+      "skeleton_hash": "5fc2d6eb48f16570",
+      "runs": 11,
+      "seats": 1,
+      "sessions": [
+        "258f30121697"
+      ],
+      "first_time": "2026-10-24T23:03:52.658000+00:00",
+      "last_time": "2026-10-24T23:57:37.446000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json > <path> ; python3 -c <quoted>",
+      "skeleton_hash": "635d81d44472960f",
+      "runs": 11,
+      "seats": 11,
+      "sessions": [
+        "0ad7901b63ad",
+        "1bf7284c7516",
+        "233d83d6e6f7",
+        "24c3d4e27ac5",
+        "2a5d89f5a2fe",
+        "422ce8c853ac",
+        "48f47e4f7536",
+        "7077ce873481",
+        "8b80a20dc1bb",
+        "967185ac39fe",
+        "dee6f1e37db7"
+      ],
+      "first_time": "2026-10-22T13:52:12.912000+00:00",
+      "last_time": "2026-10-24T01:00:33.094000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/wave_log.py",
+      "skeleton_hash": "740c32e472d001e9",
+      "runs": 11,
+      "seats": 1,
+      "sessions": [
+        "3634a7bd66ef"
+      ],
+      "first_time": "2026-10-24T00:25:27.758000+00:00",
+      "last_time": "2026-10-24T00:35:29.994000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "wave_log.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br show <bead> --json | jq -r <quoted> | <value> -c <number>",
+      "skeleton_hash": "9e570fdbb96ce1a0",
+      "runs": 11,
+      "seats": 11,
+      "sessions": [
+        "027a05551350",
+        "47145f6c1bce",
+        "539ba81444cb",
+        "69df60ac308d",
+        "6d0f065dfddc",
+        "7c3b2afd8a3b",
+        "817b8a42da7e",
+        "8d42f799032c",
+        "9e3a74ce864e",
+        "a7657198db21",
+        "f4d4c99a5a89"
+      ],
+      "first_time": "2026-10-22T12:39:20.939000+00:00",
+      "last_time": "2026-10-24T02:14:04.804000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( <value> br show <value> --json ); <value> ; <value> <quoted> <quoted> ; <value> <quoted> <quoted> | jq <quoted>",
+      "skeleton_hash": "5dd12a5c9e10de96",
+      "runs": 10,
+      "seats": 1,
+      "sessions": [
+        "4ecdc2daf09f"
+      ],
+      "first_time": "2026-10-22T17:00:46.382000+00:00",
+      "last_time": "2026-10-22T18:21:25.717000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<redacted> <redacted> python3 -c <quoted>",
+      "skeleton_hash": "627173b78c58e872",
+      "runs": 10,
+      "seats": 1,
+      "sessions": [
+        "af8a264d31bd"
+      ],
+      "first_time": "2026-10-24T02:33:58.423000+00:00",
+      "last_time": "2026-10-24T02:40:11.003000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br show <bead> --json --no-auto-import --no-auto-flush | jq -r <quoted>",
+      "skeleton_hash": "c1ba72b7f61fdd8a",
+      "runs": 10,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T07:26:43.942000+00:00",
+      "last_time": "2026-10-23T09:06:14.984000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <scratch> ; <path> python3 -c <quoted> <quoted>",
+      "skeleton_hash": "ed46a01242b37c27",
+      "runs": 10,
+      "seats": 1,
+      "sessions": [
+        "258f30121697"
+      ],
+      "first_time": "2026-10-22T19:44:17.225000+00:00",
+      "last_time": "2026-10-22T20:24:19.243000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<scratch> python3 -c <quoted>",
+      "skeleton_hash": "00d509a2b959d769",
+      "runs": 9,
+      "seats": 3,
+      "sessions": [
+        "025534149fb8",
+        "71a474d93ef6",
+        "d388d18a3813"
+      ],
+      "first_time": "2026-10-22T23:33:31.048000+00:00",
+      "last_time": "2026-10-24T00:23:42.325000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <path> && python3 -c <quoted>",
+      "skeleton_hash": "4eabe16fc5a7ca8f",
+      "runs": 9,
+      "seats": 6,
+      "sessions": [
+        "1bec5180a218",
+        "3922d423a76b",
+        "7104ec0fac1b",
+        "7cdebf49bca8",
+        "905fcca12c40",
+        "b6b4dd1cbebd"
+      ],
+      "first_time": "2026-10-23T03:41:36.618000+00:00",
+      "last_time": "2026-10-24T19:16:16.579000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<scratch> python3 -B -c <quoted>",
+      "skeleton_hash": "a3d185033f934ef4",
+      "runs": 9,
+      "seats": 1,
+      "sessions": [
+        "0db0ef289b0b"
+      ],
+      "first_time": "2026-10-23T02:06:32.104000+00:00",
+      "last_time": "2026-10-23T02:08:24.146000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<scratch> ; <value> python3 -B <scratch> <path> <value> | python3 -c <quoted> ; <value>",
+      "skeleton_hash": "198444877e584eba",
+      "runs": 8,
+      "seats": 1,
+      "sessions": [
+        "59faaeababdc"
+      ],
+      "first_time": "2026-10-24T15:46:52.742000+00:00",
+      "last_time": "2026-10-24T15:47:50.448000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && python3 <path> <value> --repo omp-kit --beads <bead> --agent <value> --json <number> >& <number> | <value> -c <number>",
+      "skeleton_hash": "81d74110e9ebbe32",
+      "runs": 8,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T22:28:01.650000+00:00",
+      "last_time": "2026-10-23T00:37:54.434000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( br --db <path> --no-auto-import --no-auto-flush show <bead> --json ); <value> ; <value> <quoted> <quoted> ; <value> <value> <quoted> -ne <number> <value> ; <value> <value> <quoted> <quoted> ; <value> <quoted> ; <value> ; <value> <quoted> <quoted> | jq -r <quoted>",
+      "skeleton_hash": "84a3ed6c58512da4",
+      "runs": 8,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-23T15:49:56.715000+00:00",
+      "last_time": "2026-10-23T16:28:56.219000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <redacted> && <value> <quoted> <quoted> && <value> -n <number> python3 -c <quoted>",
+      "skeleton_hash": "949f3b1750749bab",
+      "runs": 8,
+      "seats": 1,
+      "sessions": [
+        "9c58de4bf025"
+      ],
+      "first_time": "2026-10-23T22:50:05.031000+00:00",
+      "last_time": "2026-10-23T22:54:59.315000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json | jq -r <quoted> | <value> <value>",
+      "skeleton_hash": "b8169231fc18c9b6",
+      "runs": 8,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T00:07:43.471000+00:00",
+      "last_time": "2026-10-24T11:46:22.383000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br list --status <value> --assignee <value> --json --no-auto-import --no-auto-flush | jq -r <quoted>",
+      "skeleton_hash": "6e8191781d4d2024",
+      "runs": 7,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T10:47:11.450000+00:00",
+      "last_time": "2026-10-25T02:32:22.770000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<scratch> <value> -n <number> python3 -B -c <quoted>",
+      "skeleton_hash": "acddad543a1c0beb",
+      "runs": 7,
+      "seats": 2,
+      "sessions": [
+        "82093d1a3aec",
+        "ea8966abf454"
+      ],
+      "first_time": "2026-10-23T07:38:49.676000+00:00",
+      "last_time": "2026-10-23T13:50:00.724000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && for <value> in <bead> <bead> ; do br show <value> --json --no-auto-import --no-auto-flush | jq -r <quoted> ; done",
+      "skeleton_hash": "d4e91173192b59f6",
+      "runs": 7,
+      "seats": 1,
+      "sessions": [
+        "35290d4f8135"
+      ],
+      "first_time": "2026-10-24T23:37:03.506000+00:00",
+      "last_time": "2026-10-25T03:28:55.508000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br --db <path> --no-auto-import --no-auto-flush list --assignee <value> --limit <number> --json | jq -c <quoted>",
+      "skeleton_hash": "f0366505ca4d5f4e",
+      "runs": 7,
+      "seats": 1,
+      "sessions": [
+        "f01755aa5953"
+      ],
+      "first_time": "2026-10-23T21:50:28.865000+00:00",
+      "last_time": "2026-10-23T21:50:28.865000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "state inspect",
+      "skeleton": "<value> <value> <path> <number> > <path> | grep -E <quoted> | <value> <value> ; <value> -c <number> <path> ; <value> <path> ; <value> -u <value>",
+      "skeleton_hash": "0bc59048a7abf122",
+      "runs": 6,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T14:48:40.406000+00:00",
+      "last_time": "2026-10-24T15:13:02.057000+00:00",
+      "suggested_verb": "omp-kit state-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br list --status <value> --assignee <value> --json | jq -r <quoted>",
+      "skeleton_hash": "144fd0d676b5fc77",
+      "runs": 6,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T05:17:37.711000+00:00",
+      "last_time": "2026-10-24T13:44:28.769000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json --no-auto-import --no-auto-flush | jq -r <quoted> | <value> <value>",
+      "skeleton_hash": "1f13e93d82c5540f",
+      "runs": 6,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "e0c35a5bb462"
+      ],
+      "first_time": "2026-10-24T10:28:59.386000+00:00",
+      "last_time": "2026-10-25T01:31:20.746000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( br --db <path> show <bead> --json ); <value> ; <value> <quoted> <quoted> ; <value> <value> <quoted> -ne <number> <value> ; <value> <value> <quoted> <quoted> ; <value> <quoted> ; <value> ; <value> <quoted> <quoted> | jq -r <quoted>",
+      "skeleton_hash": "20c6d30125f357a5",
+      "runs": 6,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-23T15:08:25.659000+00:00",
+      "last_time": "2026-10-23T15:37:58.470000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( br list --status <value> --assignee <value> --json ); <value> ; <value> <quoted> <quoted> ; <value> <quoted> <quoted> ; <value> <quoted> <quoted> | jq -r <quoted> ; <value> <quoted>",
+      "skeleton_hash": "2a0ac5eeb0f3c238",
+      "runs": 6,
+      "seats": 1,
+      "sessions": [
+        "258f30121697"
+      ],
+      "first_time": "2026-10-22T17:11:10.015000+00:00",
+      "last_time": "2026-10-22T17:50:50.209000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && <scratch> python3 -B <path> omp-kit <value> > <path> <number> >& <number> ; echo <quoted> ; python3 -c <quoted>",
+      "skeleton_hash": "79ab9271474a8d3d",
+      "runs": 6,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T12:04:19.791000+00:00",
+      "last_time": "2026-10-24T12:25:21.262000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "omp-kit <value> <value> --at <value> --json | python3 -c <quoted>",
+      "skeleton_hash": "81ecdde69193d2d6",
+      "runs": 6,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-22T11:52:51.027000+00:00",
+      "last_time": "2026-10-22T14:29:30.234000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <path> && <scratch> <value> -n <number> python3 -B -c <quoted>",
+      "skeleton_hash": "881e4532f866f50a",
+      "runs": 6,
+      "seats": 1,
+      "sessions": [
+        "7e2f522d4b36"
+      ],
+      "first_time": "2026-10-24T13:34:37.490000+00:00",
+      "last_time": "2026-10-24T14:00:33.021000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/launch-cohort.py",
+      "skeleton_hash": "bd02097674efbbf4",
+      "runs": 6,
+      "seats": 1,
+      "sessions": [
+        "7366475b5a95"
+      ],
+      "first_time": "2026-10-25T06:18:06.191000+00:00",
+      "last_time": "2026-10-25T07:04:11.020000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "launch-cohort.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <scratch> <redacted> <scratch> ; python3 -c <quoted>",
+      "skeleton_hash": "c3c6c0bdf021a38d",
+      "runs": 6,
+      "seats": 2,
+      "sessions": [
+        "00cd7703034b",
+        "f0caeed9c517"
+      ],
+      "first_time": "2026-10-22T09:13:07.535000+00:00",
+      "last_time": "2026-10-22T10:20:55.738000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <scratch> <redacted> python3 -c <quoted>",
+      "skeleton_hash": "e7b3921f45dbf26a",
+      "runs": 6,
+      "seats": 1,
+      "sessions": [
+        "ce66be62f436"
+      ],
+      "first_time": "2026-10-22T08:28:49.346000+00:00",
+      "last_time": "2026-10-22T08:31:24.528000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br --db <path> show <bead> --json | jq -r <quoted>",
+      "skeleton_hash": "0445daaf23aa09a8",
+      "runs": 5,
+      "seats": 2,
+      "sessions": [
+        "82093d1a3aec",
+        "b9c842e3cd49"
+      ],
+      "first_time": "2026-10-23T22:14:39.962000+00:00",
+      "last_time": "2026-10-24T11:25:52.010000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> -i <scratch> <scratch> <scratch> <path> <scratch> python3 -c <quoted>",
+      "skeleton_hash": "2cd3dd989cc5ad55",
+      "runs": 5,
+      "seats": 1,
+      "sessions": [
+        "00d78b71870c"
+      ],
+      "first_time": "2026-10-25T07:24:50.417000+00:00",
+      "last_time": "2026-10-25T07:27:04.174000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( br --db <path> --no-auto-import --no-auto-flush list --status <value> --exclude-label <value> --exclude-label <value> --exclude-label <value> --limit <number> --json ); <value> ; <value> <quoted> <quoted> <quoted> ; <value> <value> <quoted> -ne <number> <value> ; <value> <value> <quoted> <quoted> ; <value> <quoted> ; <value> ; <value> <quoted> <quoted> | jq -c <quoted>",
+      "skeleton_hash": "49cb92ed6a509b8e",
+      "runs": 5,
+      "seats": 1,
+      "sessions": [
+        "258f30121697"
+      ],
+      "first_time": "2026-10-23T02:49:37.106000+00:00",
+      "last_time": "2026-10-23T07:09:23.745000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br list --status <value> --assignee <value> --json --no-auto-import --no-auto-flush ; echo <quoted> ; br show <value> --json --no-auto-import --no-auto-flush | jq -r <quoted> ; echo <quoted>",
+      "skeleton_hash": "963761f572b8447c",
+      "runs": 5,
+      "seats": 1,
+      "sessions": [
+        "6591666b7b9c"
+      ],
+      "first_time": "2026-10-22T11:57:02.634000+00:00",
+      "last_time": "2026-10-22T12:00:25.546000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && for <value> in <bead> <bead> <bead> ; do br show <value> --json --no-auto-import --no-auto-flush | jq -r <quoted> ; done",
+      "skeleton_hash": "be554d5ec3b37ef5",
+      "runs": 5,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T17:06:47.215000+00:00",
+      "last_time": "2026-10-25T03:29:00.634000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> ( br --db <path> <value> list --json <bead> ); <value> ; <value> <quoted> <quoted> ; <value> <value> <quoted> -ne <number> <value> ; <value> <value> <quoted> <quoted> ; <value> <quoted> ; <value> ; <value> <quoted> <quoted> | jq -r <quoted>",
+      "skeleton_hash": "dd555e7e28597f04",
+      "runs": 5,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-23T15:11:08.181000+00:00",
+      "last_time": "2026-10-23T15:39:52.387000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<scratch> ; <value> python3 -B <scratch> <path> <value> | python3 -c <quoted>",
+      "skeleton_hash": "ed220ffa29f5eee9",
+      "runs": 5,
+      "seats": 1,
+      "sessions": [
+        "59faaeababdc"
+      ],
+      "first_time": "2026-10-24T15:34:00.116000+00:00",
+      "last_time": "2026-10-24T15:46:41.212000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br list --status <value> --assignee <value> --json | jq -r <quoted>",
+      "skeleton_hash": "032c603c23e6f591",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T22:13:20.390000+00:00",
+      "last_time": "2026-10-23T00:53:10.410000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/probes.sh",
+      "skeleton_hash": "0dc107bf6ce27efb",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T09:46:21.420000+00:00",
+      "last_time": "2026-10-22T10:16:25.417000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "probes.sh"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br <value> <value> --json <number> > <path> | jq -r <quoted> | <value> <value>",
+      "skeleton_hash": "1c938d79e63a968c",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T01:08:33.525000+00:00",
+      "last_time": "2026-10-23T01:29:00.983000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && for <value> in <bead> <bead> ; do echo <quoted> ; br show <value> --json | jq -r <quoted> ; done",
+      "skeleton_hash": "1ce2a7048cfb24b1",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T11:32:06.308000+00:00",
+      "last_time": "2026-10-24T15:53:14.919000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <path> && python3 -c <quoted> ; grep -n -E <quoted> <value>",
+      "skeleton_hash": "2ac6ccb6fe03ff92",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T03:26:46.557000+00:00",
+      "last_time": "2026-10-24T03:26:56.936000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <scratch> && python3 -c <quoted> | <value> <value>",
+      "skeleton_hash": "4c08665220ca9e8d",
+      "runs": 4,
+      "seats": 4,
+      "sessions": [
+        "35290d4f8135",
+        "479d570a5e77",
+        "a41be5dc9228",
+        "d031bc94bd05"
+      ],
+      "first_time": "2026-10-22T23:22:31.582000+00:00",
+      "last_time": "2026-10-23T17:55:03.325000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br show <bead> --json --no-auto-import --no-auto-flush | jq -r <quoted> | grep -n -E <quoted> | <value> <value>",
+      "skeleton_hash": "5365813d5afba81d",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T09:00:56.409000+00:00",
+      "last_time": "2026-10-23T09:05:03.081000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br show <bead> --json <number> >& <number> | jq -r <quoted> ; echo <quoted>",
+      "skeleton_hash": "556c3ba1633da51c",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T17:19:38.365000+00:00",
+      "last_time": "2026-10-22T17:19:42.025000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <scratch> && python3 -c <quoted> ; <value> <value> <value>",
+      "skeleton_hash": "6493fb75cb1b7a51",
+      "runs": 4,
+      "seats": 4,
+      "sessions": [
+        "479d570a5e77",
+        "4d4c534a4e3d",
+        "72b543fa4f8b",
+        "d031bc94bd05"
+      ],
+      "first_time": "2026-10-23T03:46:05.257000+00:00",
+      "last_time": "2026-10-24T18:09:30.493000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/full-suite-verdict.sh",
+      "skeleton_hash": "77bcfc33f85e46f9",
+      "runs": 4,
+      "seats": 1,
+      "sessions": [
+        "5c3f8e1bd5eb"
+      ],
+      "first_time": "2026-10-24T22:16:36.048000+00:00",
+      "last_time": "2026-10-24T22:17:16.284000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "full-suite-verdict.sh"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && python3 -c <quoted> <number> >& <number> | <value> <value>",
+      "skeleton_hash": "8683e3134e969e0a",
+      "runs": 4,
+      "seats": 3,
+      "sessions": [
+        "35290d4f8135",
+        "3f4cf8829ed6",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T23:47:49.755000+00:00",
+      "last_time": "2026-10-23T22:11:45.096000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br <value> list <bead> --json --no-auto-import --no-auto-flush | jq -r <quoted>",
+      "skeleton_hash": "8fdd4a5ee8e26994",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T10:49:06.497000+00:00",
+      "last_time": "2026-10-23T10:49:13.203000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/inventory-beads.sh",
+      "skeleton_hash": "918b5aea0894cdcf",
+      "runs": 4,
+      "seats": 1,
+      "sessions": [
+        "3fb589133fb6"
+      ],
+      "first_time": "2026-10-24T20:00:53.153000+00:00",
+      "last_time": "2026-10-24T20:03:15.266000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "inventory-beads.sh"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "python3 <path> --session <value> --block <number> --version <number> --set --apply <number> >& <number> | <value> -c <number>",
+      "skeleton_hash": "9b1c9a446911daaa",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T18:00:59.190000+00:00",
+      "last_time": "2026-10-22T18:50:22.057000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "jq -c <quoted> <path>",
+      "skeleton_hash": "9beabd96cd548ada",
+      "runs": 4,
+      "seats": 3,
+      "sessions": [
+        "258f30121697",
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T17:03:31.334000+00:00",
+      "last_time": "2026-10-24T17:28:20.386000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/profile_ingest.py",
+      "skeleton_hash": "a2874a76b89bbef1",
+      "runs": 4,
+      "seats": 1,
+      "sessions": [
+        "35290d4f8135"
+      ],
+      "first_time": "2026-10-25T02:18:16.935000+00:00",
+      "last_time": "2026-10-25T02:22:10.242000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "profile_ingest.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "for <value> in <bead> <bead> ; do br show <value> --json --no-auto-import --no-auto-flush | jq -r <quoted> ; done",
+      "skeleton_hash": "aafe3aa0cfc75c78",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T07:49:47.565000+00:00",
+      "last_time": "2026-10-23T08:02:27.252000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && <value> <scratch> && <value> -n <number> python3 -B <path> --all > <scratch> <number> >& <number> ; echo <value> ; python3 -c <quoted>",
+      "skeleton_hash": "c7dba2d289b37aea",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T14:21:23.325000+00:00",
+      "last_time": "2026-10-24T14:21:48.196000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "br show <bead> --json | jq -c <quoted>",
+      "skeleton_hash": "e3a7b18d79c621ed",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T12:01:01.309000+00:00",
+      "last_time": "2026-10-22T12:01:45.393000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && omp-kit <value> <value> --json <number> >& <number> | python3 -c <quoted>",
+      "skeleton_hash": "e77a7012e7c5b172",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T10:01:01.004000+00:00",
+      "last_time": "2026-10-24T10:01:15.373000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "python3 <path> --session <value> --block <number> --version <number> --set <number> >& <number> | <value> -c <number>",
+      "skeleton_hash": "ee444b52b404022e",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T18:00:40.185000+00:00",
+      "last_time": "2026-10-22T18:50:08.735000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "python3 <path> --session <value> --block <number> --version <number> --sessions <quoted> --set <number> >& <number> | <value> -c <number>",
+      "skeleton_hash": "f0a561609c2643e2",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T21:04:47.188000+00:00",
+      "last_time": "2026-10-22T21:05:11.659000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json | jq -r <quoted> ; br <value> list <bead> --json <number> > <path> | jq -r <quoted> | <value>",
+      "skeleton_hash": "fd3c8cecb31eac4b",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T11:42:23.136000+00:00",
+      "last_time": "2026-10-24T11:46:43.479000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br ready --label <value> --limit <number> --json <number> > <path> | jq -r <quoted> | <value> <value>",
+      "skeleton_hash": "ff6fa4d9df18e036",
+      "runs": 4,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T11:46:56.704000+00:00",
+      "last_time": "2026-10-24T11:47:07.371000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/run.py",
+      "skeleton_hash": "0b990a76a5848607",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "23c9188b03d3"
+      ],
+      "first_time": "2026-10-24T12:56:32.784000+00:00",
+      "last_time": "2026-10-24T12:59:12.142000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "run.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/run_stub.sh",
+      "skeleton_hash": "1b044165540c4cd4",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "1d14b6b7226f"
+      ],
+      "first_time": "2026-10-24T00:10:30.641000+00:00",
+      "last_time": "2026-10-24T00:11:06.262000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "run_stub.sh"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json > <path> ; echo <value> ; python3 -c <quoted>",
+      "skeleton_hash": "2161cbd6b9fb3d42",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "6c734df3211a",
+        "790ec571b732",
+        "813453697ad5"
+      ],
+      "first_time": "2026-10-22T18:27:42.054000+00:00",
+      "last_time": "2026-10-24T00:40:59.969000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json --no-auto-import --no-auto-flush | python3 -c <quoted>",
+      "skeleton_hash": "21fa44f2449226ab",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "6b334fa75ae0",
+        "b7114a7b02cb",
+        "d0cd5758f0cd"
+      ],
+      "first_time": "2026-10-23T19:31:11.472000+00:00",
+      "last_time": "2026-10-24T10:35:53.987000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/full-suite-verdict.sh",
+      "skeleton_hash": "2bf1c1750bb23c09",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-23T03:00:08.838000+00:00",
+      "last_time": "2026-10-23T03:53:10.237000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "full-suite-verdict.sh"
+    },
+    {
+      "kind": "store query",
+      "skeleton": "sqlite3 -readonly <path> <quoted>",
+      "skeleton_hash": "32035f8285443bc8",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "2a007f19e2b3",
+        "35290d4f8135",
+        "59faaeababdc"
+      ],
+      "first_time": "2026-10-23T22:28:59.605000+00:00",
+      "last_time": "2026-10-25T05:28:14.827000+00:00",
+      "suggested_verb": "omp-kit store-query",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && for <value> in <bead> <bead> ; do br show <value> --json --no-auto-import --no-auto-flush | jq -r <quoted> ; br <value> list <value> --json --no-auto-import --no-auto-flush | jq -r <quoted> ; done",
+      "skeleton_hash": "36fc844545f8af71",
+      "runs": 3,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T16:24:46.095000+00:00",
+      "last_time": "2026-10-24T19:13:36.373000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/mkdiff.sh",
+      "skeleton_hash": "38a0fe2060ccf13e",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "3eef116a1341"
+      ],
+      "first_time": "2026-10-23T03:20:26.047000+00:00",
+      "last_time": "2026-10-23T03:21:00.069000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "mkdiff.sh"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && python3 -B -c <quoted>",
+      "skeleton_hash": "434f90e7cd911f3e",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "2f6a891bc563",
+        "7e2f522d4b36",
+        "aef6a51e0216"
+      ],
+      "first_time": "2026-10-23T06:55:37.315000+00:00",
+      "last_time": "2026-10-24T14:00:01.116000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/repo_clean.py",
+      "skeleton_hash": "4ef95f0ff2ab4e49",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "b656a64d2f9a"
+      ],
+      "first_time": "2026-10-24T23:29:52.362000+00:00",
+      "last_time": "2026-10-24T23:31:33.628000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "repo_clean.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <scratch> && <value> <value> ; python3 -c <quoted>",
+      "skeleton_hash": "575850c41fd620da",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228",
+        "d031bc94bd05"
+      ],
+      "first_time": "2026-10-23T18:16:59.747000+00:00",
+      "last_time": "2026-10-24T12:30:41.539000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json > <scratch> ; python3 -c <quoted>",
+      "skeleton_hash": "5db4912174621323",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "566b9987691a",
+        "7dec439c8bc4",
+        "886f3d222367"
+      ],
+      "first_time": "2026-10-22T18:28:26.286000+00:00",
+      "last_time": "2026-10-23T07:00:49.357000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/fleet_seat_audit.py",
+      "skeleton_hash": "5ef79bb3240d69be",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-25T06:16:41.954000+00:00",
+      "last_time": "2026-10-25T06:22:21.157000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "fleet_seat_audit.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <value> ; br show <bead> --json --no-auto-import --no-auto-flush | python3 -c <quoted>",
+      "skeleton_hash": "70c90043998e3f6c",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "05ae08df968a",
+        "6da1f260dcb9",
+        "dcd950d39f15"
+      ],
+      "first_time": "2026-10-23T17:14:17.624000+00:00",
+      "last_time": "2026-10-23T20:02:48.708000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "jq -r <quoted> <path>",
+      "skeleton_hash": "9a3d2891d6e7cee6",
+      "runs": 3,
+      "seats": 2,
+      "sessions": [
+        "22c7f764f06e",
+        "258f30121697"
+      ],
+      "first_time": "2026-10-22T17:03:52.259000+00:00",
+      "last_time": "2026-10-24T08:16:41.050000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br show <bead> --json | jq -r <quoted> ; echo <value> ; br show <bead> --json | jq -r <quoted>",
+      "skeleton_hash": "9c79a6d13f1bc0c6",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "35290d4f8135",
+        "64a8cf170a33",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T21:16:32.060000+00:00",
+      "last_time": "2026-10-23T22:15:53.935000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && jq -r <quoted> <path> | <value> <value>",
+      "skeleton_hash": "b9aa33e0c0e98868",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228",
+        "b0f1dfde3907"
+      ],
+      "first_time": "2026-10-24T00:41:07.493000+00:00",
+      "last_time": "2026-10-24T11:50:02.935000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && omp-kit <value> <value> --label <value> --bead <bead> --json | python3 -c <quoted>",
+      "skeleton_hash": "bf9aeb81293f72c3",
+      "runs": 3,
+      "seats": 3,
+      "sessions": [
+        "1977c7e86d6b",
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-23T23:21:49.322000+00:00",
+      "last_time": "2026-10-24T12:44:31+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/wave_log.py",
+      "skeleton_hash": "c16c782516fe3aa2",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "b656a64d2f9a"
+      ],
+      "first_time": "2026-10-24T23:30:21.582000+00:00",
+      "last_time": "2026-10-24T23:31:40.201000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "wave_log.py"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "jq <quoted> <scratch>",
+      "skeleton_hash": "c4332c5c53ba7357",
+      "runs": 3,
+      "seats": 2,
+      "sessions": [
+        "82093d1a3aec",
+        "8a6e09ca574b"
+      ],
+      "first_time": "2026-10-23T02:30:51.240000+00:00",
+      "last_time": "2026-10-25T07:21:24.273000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/concurrent.sh",
+      "skeleton_hash": "d9d98ce176607b75",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "3eef116a1341"
+      ],
+      "first_time": "2026-10-23T03:11:56.554000+00:00",
+      "last_time": "2026-10-23T03:13:51.505000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "concurrent.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/run.sh",
+      "skeleton_hash": "db205f6886c3d4ac",
+      "runs": 3,
+      "seats": 1,
+      "sessions": [
+        "22c7f764f06e"
+      ],
+      "first_time": "2026-10-24T08:15:11.487000+00:00",
+      "last_time": "2026-10-24T08:15:19.579000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "run.sh"
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> <path> && br show <value> --json | python3 -c <quoted> | <value> -c <number>",
+      "skeleton_hash": "e17abbfae2244be9",
+      "runs": 3,
+      "seats": 2,
+      "sessions": [
+        "315db326dc96",
+        "e321d55f5c4e"
+      ],
+      "first_time": "2026-10-22T09:47:15.329000+00:00",
+      "last_time": "2026-10-22T16:33:07.355000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "output inspect",
+      "skeleton": "<value> omp-kit && br list --status <value> --limit <number> --json --no-auto-import --no-auto-flush | jq -r <quoted> | <value> <value>",
+      "skeleton_hash": "e2661343e6c387ab",
+      "runs": 3,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T16:21:53.188000+00:00",
+      "last_time": "2026-10-24T18:51:15.358000+00:00",
+      "suggested_verb": "omp-kit output-inspect",
+      "existing_verb": null
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/probe.ts",
+      "skeleton_hash": "07a1db07cb543d73",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-24T10:37:26.890000+00:00",
+      "last_time": "2026-10-24T10:39:49.098000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "probe.ts"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/five.sh",
+      "skeleton_hash": "0a5afcafac758478",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "3eef116a1341"
+      ],
+      "first_time": "2026-10-23T03:14:29.274000+00:00",
+      "last_time": "2026-10-23T03:18:09.271000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "five.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/grade_wave.py",
+      "skeleton_hash": "233d52957ff94cd8",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "7d81faa63e3c"
+      ],
+      "first_time": "2026-10-24T00:44:12.801000+00:00",
+      "last_time": "2026-10-24T00:44:56.371000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "grade_wave.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/launch-sol.sh",
+      "skeleton_hash": "268605d1770c1a78",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "35290d4f8135"
+      ],
+      "first_time": "2026-10-25T03:03:47.961000+00:00",
+      "last_time": "2026-10-25T03:37:50.886000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "launch-sol.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/publish-after-verdict.sh",
+      "skeleton_hash": "26d0636e8e40d937",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "35290d4f8135"
+      ],
+      "first_time": "2026-10-25T04:18:50.480000+00:00",
+      "last_time": "2026-10-25T04:19:02.961000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "publish-after-verdict.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/smoke.py",
+      "skeleton_hash": "2f2d9050f971c1ea",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "c1364deccfbc"
+      ],
+      "first_time": "2026-10-23T20:30:58.280000+00:00",
+      "last_time": "2026-10-23T20:31:05.178000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "smoke.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/run.sh",
+      "skeleton_hash": "3ec0589105f2c149",
+      "runs": 2,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T12:34:48.017000+00:00",
+      "last_time": "2026-10-22T12:34:48.017000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "run.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/cli.ts",
+      "skeleton_hash": "4899fddd9945346a",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "0bfeee30440e"
+      ],
+      "first_time": "2026-10-24T23:05:47.598000+00:00",
+      "last_time": "2026-10-24T23:05:52.429000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "cli.ts"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/verify.sh",
+      "skeleton_hash": "4e2e3414d24a010b",
+      "runs": 2,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T09:36:13.314000+00:00",
+      "last_time": "2026-10-22T09:36:13.314000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "verify.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/vfy_parsers.py",
+      "skeleton_hash": "623c92c7ccb42914",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "291b4f6ebae7"
+      ],
+      "first_time": "2026-10-24T02:33:25.735000+00:00",
+      "last_time": "2026-10-24T02:34:14.245000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "vfy_parsers.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/time_children.py",
+      "skeleton_hash": "63ba8c79ba74c4ad",
+      "runs": 2,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T16:46:49.997000+00:00",
+      "last_time": "2026-10-24T16:46:49.997000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "time_children.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/observe.py",
+      "skeleton_hash": "675b4a65c7f2cd05",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "eccb13d9915d"
+      ],
+      "first_time": "2026-10-23T18:04:26.038000+00:00",
+      "last_time": "2026-10-23T18:04:43.199000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "observe.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/pse.sh",
+      "skeleton_hash": "6b50f162f80172ba",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "3eef116a1341"
+      ],
+      "first_time": "2026-10-23T02:51:59.633000+00:00",
+      "last_time": "2026-10-23T02:54:36.627000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "pse.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/intr_repro.py",
+      "skeleton_hash": "6f5eefbd55e37afd",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "35290d4f8135"
+      ],
+      "first_time": "2026-10-25T02:12:44.091000+00:00",
+      "last_time": "2026-10-25T02:14:00.905000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "intr_repro.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/supplement.py",
+      "skeleton_hash": "7025ace4e895157f",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "476e6f4f7de9"
+      ],
+      "first_time": "2026-10-23T13:18:18.357000+00:00",
+      "last_time": "2026-10-23T13:18:39.916000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "supplement.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/wide.sh",
+      "skeleton_hash": "74ce778da81c5df2",
+      "runs": 2,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T12:42:53.918000+00:00",
+      "last_time": "2026-10-22T12:42:53.918000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "wide.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/until_frozen.sh",
+      "skeleton_hash": "79ca00e92f57e41d",
+      "runs": 2,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-24T10:58:23.995000+00:00",
+      "last_time": "2026-10-24T10:58:23.995000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "until_frozen.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/probe.py",
+      "skeleton_hash": "7e573cfc0ae9999e",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "422655687d94"
+      ],
+      "first_time": "2026-10-23T16:32:06.113000+00:00",
+      "last_time": "2026-10-23T16:32:41.986000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "probe.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/runtime-adapter.sh",
+      "skeleton_hash": "9995e54c9ea72170",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-23T03:48:07.515000+00:00",
+      "last_time": "2026-10-23T03:53:02.096000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "runtime-adapter.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/run.sh",
+      "skeleton_hash": "9cbbf39279cf3d73",
+      "runs": 2,
+      "seats": 2,
+      "sessions": [
+        "35290d4f8135",
+        "a41be5dc9228"
+      ],
+      "first_time": "2026-10-22T11:40:38.386000+00:00",
+      "last_time": "2026-10-22T11:40:38.386000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "run.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/fleet_report.py",
+      "skeleton_hash": "d5e7674c6849aa78",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-25T06:21:33.629000+00:00",
+      "last_time": "2026-10-25T06:22:21.157000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "fleet_report.py"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/full-suite-verdict.sh",
+      "skeleton_hash": "f496cb3138f56d8d",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "82093d1a3aec"
+      ],
+      "first_time": "2026-10-22T20:34:46.179000+00:00",
+      "last_time": "2026-10-22T20:37:16.758000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "full-suite-verdict.sh"
+    },
+    {
+      "kind": "scratch rerun",
+      "skeleton": "run <scratch>/package-c-context.py",
+      "skeleton_hash": "feffe6b1dcfcf3bc",
+      "runs": 2,
+      "seats": 1,
+      "sessions": [
+        "937f10a5d175"
+      ],
+      "first_time": "2026-10-24T22:31:58.278000+00:00",
+      "last_time": "2026-10-24T22:34:05.851000+00:00",
+      "suggested_verb": "omp-kit scratch-rerun",
+      "existing_verb": null,
+      "basename": "package-c-context.py"
+    }
+  ]
+}

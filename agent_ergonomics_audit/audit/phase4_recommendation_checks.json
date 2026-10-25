@@ -1,0 +1,9 @@
+{
+  "rows": 16,
+  "unique_ids": 16,
+  "all_unapplied": true,
+  "required_ids_retained": true,
+  "products_exact": true,
+  "priority_descending": true,
+  "unknown_surface_ids": []
+}

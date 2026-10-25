@@ -1,0 +1,24 @@
+# Pass-local scratch
+audit/partial/
+audit/.archive/
+
+# Don't ignore other audit/ contents — they're the durable artifacts
+!audit/
+!audit/regression_tests/
+!audit/agent_simulations/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*.tmp
+
+# Bulk outputs over 1 MB: pinned by sha256 in audit/BULK.md, regenerable, not committed
+audit/phase3_generator_retry.stderr.log
+audit/agent_surfaces.jsonl
+audit/heatmap.svg
+audit/surface_inventory.jsonl
+audit/intent_inference_corpus.jsonl
+audit/phase3_runner_raw.jsonl
+
+# Lock files from pass runners
+*.lock

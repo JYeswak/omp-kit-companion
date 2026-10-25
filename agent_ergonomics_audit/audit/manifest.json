@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.1.0",
+  "tool_name": "omp-kit",
+  "tool_repo": "/Users/josh/Developer/omp-kit-companion",
+  "audit_workspace": "/Users/josh/Developer/omp-kit-companion/agent_ergonomics_audit",
+  "rubric_version": "1.0.0",
+  "passes": [
+    {
+      "pass": 1,
+      "started_at": "2026-10-25T07:16:45Z",
+      "completed_at": null,
+      "mode": "full",
+      "target_sha": "7c5d7b67c937837d0f2ee6285936dc16fdde593f",
+      "target_branch": "main",
+      "feature_branch": null,
+      "summary": {
+        "surfaces_inventoried": 2506,
+        "surfaces_scored": 2506,
+        "recommendations_total": 16,
+        "recommendations_applied": 0,
+        "substantive_commits": 0,
+        "dimensions_touched": 0,
+        "ambition_bar_met": false,
+        "ambition_bar_self_prompt_run": false,
+        "median_uplift_pts": null,
+        "regressions_count": 0,
+        "fresh_eyes_rounds": 0
+      },
+      "artifacts": {
+        "surface_inventory": "audit/surface_inventory.jsonl",
+        "agent_surfaces": "audit/agent_surfaces.jsonl",
+        "intent_corpus": "audit/intent_inference_corpus.jsonl",
+        "recommendations": "audit/recommendations.jsonl",
+        "playbook": "audit/playbook.md",
+        "applied_changes": "audit/applied_changes.jsonl",
+        "ambition_bar_check": "audit/ambition_bar_check.md",
+        "scorecard": "audit/scorecard.md",
+        "heatmap": "audit/heatmap.svg",
+        "uplift_diff": "audit/uplift_diff.md",
+        "regression_alerts": "audit/regression_alerts.md",
+        "handoff": "audit/HANDOFF.md",
+        "simulations_pre": "audit/agent_simulations/pre_pass_N/",
+        "simulations_post": "audit/agent_simulations/post_pass_N/"
+      }
+    }
+  ],
+  "current_pass": 1,
+  "pass_N+1_ready": false,
+  "next_pass_focus": "Resolve56 scorer spreads>=500 and247 required third-scorer reviews without weakening anchors; complete scope-aware intent coverage and canonical-task simulations before claiming a full accepted baseline.",
+  "mode": "full",
+  "target_branch": "main",
+  "audit_status": "RUNTIME_ARTIFACTS_VALIDATED_RUBRIC_HALT",
+  "runtime_target_executions": 2160,
+  "independent_source_scores_per_pass": 2504,
+  "consensus_scorecard": "HALTED_RUBRIC_DISAGREEMENT",
+  "scorecard_validator_exit": 0,
+  "target_sha": "7c5d7b67c937837d0f2ee6285936dc16fdde593f",
+  "current_run_scope": "User-authorized artifact-only Phases1-4; no implementation or commits",
+  "runtime_execution_count_scope": "2154 corpus subprocesses plus6 parent probes; excludes supplied lead help inventory whose process count was not independently captured"
+}

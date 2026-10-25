@@ -1,0 +1,11 @@
+# Scoring limits
+
+The resumed pass merges actual help evidence for555 unique surfaces and independently reviews changed evidence in scorer A/B partials. Unprobed source surfaces remain runtime UNVERIFIED. Help success is not flag-acceptance, canonical-task, byte-determinism or mutation-recovery proof. Captured typo outcomes and six parent discovery/semantic probes provide narrower runtime observations; two scorers do not turn source inference into runtime certification.
+
+The 2,506-record denominator includes 1,245 JSON schema/envelope output fields represented by config-kind records to fit the installed IO contract, plus902 scoped/inherited flag occurrences. These are not2,506 independent runnable tasks. Class-specific medians and command-only metrics accompany the headline aggregate. Intent inference on an output key is an applicability limitation, not evidence the CLI should guess or rename JSON keys. Schema-field recommendations improve discoverability and parent-route errors; no key aliases or regenerated goldens are proposed.
+
+The installed validator enforces numeric presence, IDs, evidence presence and duplicate pairs; it does not establish runtime truth, evidence quality, complete inventory coverage or recommendation completeness. Passing it is artifact validation only. Its required eleven integer dimensions prevent honest nulls for unavailable evidence; low provisional scores represent uncertainty and missing evidence as explicitly noted, not observed runtime failures. No measured uplift can be claimed.
+
+Manifest target_sha is the scaffold-recorded revision; current source byte hashes are captured in partial/surface_inventory_coverage.json and checked in partial/source_snapshot_validation.json. No claim is made that shared working-tree source was a clean exact-commit snapshot.
+
+The original56 disagreements ≥500 and247 disagreements300–499 remain visible in `partial/runtime_disagreement_review.json`. Mechanical validator success cannot discharge the rubric halt or substitute for required third-scorer review. Accepted consensus is NOT claimed. Current live checkout hashes are also recorded in `runtime_target_fingerprints.json`; historical target_sha is not a claim that all later observations ran at that revision.

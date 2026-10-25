@@ -1,0 +1,17 @@
+naive corpus generated: 2151 entries
+  A (typos):                  2130
+  C (spelling variants):         2
+  D (family confusion):          3
+  G (env-var typos):            16
+written: /Users/josh/Developer/omp-kit-companion/agent_ergonomics_audit/audit/partial/intent_naive.jsonl
+
+The naive categories above are deterministic — no LLM needed. To complete
+Phase 3, also spawn:
+
+  subagents/intent-stresser-savvy.md
+    Output: /Users/josh/Developer/omp-kit-companion/agent_ergonomics_audit/audit/partial/intent_savvy.jsonl
+
+The savvy generator covers boundary cases (categories H–M) that require
+source-level evidence (cited file:line). After both partials exist, run:
+
+  scripts/run_intent_corpus.sh /Users/josh/Developer/omp-kit-companion/agent_ergonomics_audit <tool-binary>

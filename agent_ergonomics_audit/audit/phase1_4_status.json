@@ -1,0 +1,96 @@
+{
+  "bead": "ompkit-rc-epic-land-fix-release-dogfood-rz5.112",
+  "requested_actions_complete": true,
+  "full_skill_phases_accepted": false,
+  "phase1": {
+    "status": "RUNTIME_HELP_MERGED",
+    "surfaces": 2506,
+    "old_ids_preserved": 2504,
+    "help_verified": 555,
+    "unverified": 1951,
+    "new_ids": [
+      "flag__heavy__max-runtime",
+      "flag__send__control"
+    ]
+  },
+  "phase2": {
+    "status": "AGGREGATED_VALIDATOR_OK_RUBRIC_HALT",
+    "scored": 2506,
+    "changed_surfaces_reviewed_per_scorer": 555,
+    "validator_exit": 0,
+    "validator_output": "audit/partial/phase2_validator_output.json",
+    "spread_ge500": 56,
+    "spread_300_499": 247,
+    "consensus": false
+  },
+  "phase3": {
+    "status": "REQUESTED_REPLAY_COMPLETE_EXHAUSTIVE_CRITERIA_UNMET",
+    "generator_retry_exit": 0,
+    "runner_exit": 0,
+    "rows": 2163,
+    "executed": 2154,
+    "skipped": 9,
+    "raw_labels": {
+      "useful_hint": 2133,
+      "skipped": 9,
+      "useless_error": 5,
+      "inferred_and_acted": 16
+    },
+    "low_intent_record_coverage": {
+      "low_intent_surface_records": 2506,
+      "with_at_least_three_entries": 226,
+      "with_one_or_two_entries": 682,
+      "with_no_entries": 1598,
+      "limit": "Many are schema/config/error/env records, not independently runnable tasks. Do not fabricate redundant entries or claim exhaustive skill coverage. User requested fixed naive generator plus preserved savvy corpus; that run completed."
+    },
+    "canonical_task_simulation": "NOT_RUN"
+  },
+  "phase4": {
+    "status": "RANKED_RUNTIME_ARTIFACTS_COMPLETE",
+    "recommendations": 16,
+    "applied": 0,
+    "required_ids_retained": [
+      "R-001",
+      "R-002",
+      "R-003",
+      "R-012"
+    ],
+    "ranked_top10": [
+      "R-003",
+      "R-001",
+      "R-002",
+      "R-008",
+      "R-006",
+      "R-009",
+      "R-005",
+      "R-004",
+      "R-011",
+      "R-012"
+    ],
+    "weighted_score_median": 554,
+    "median_per_dimension": {
+      "agent_intuitiveness": 550.0,
+      "agent_ergonomics": 525.0,
+      "agent_ease_of_use": 525.0,
+      "output_parseability": 600.0,
+      "error_pedagogy": 400.0,
+      "intent_inference": 375.0,
+      "safety_with_recovery": 1000.0,
+      "determinism_and_reproducibility": 550.0,
+      "self_documentation": 600.0,
+      "composability": 625.0,
+      "regression_resistance": 250.0
+    },
+    "render_exits": {
+      "scorecard": 0,
+      "heatmap": 0
+    },
+    "summary": "audit/phase4_summary.md"
+  },
+  "limits": [
+    "Source-wrapper observations, not installed release certification",
+    "Six parent probes plus corpus, no explicit mutation commands; automatic telemetry side effects not ruled out",
+    "Raw classifier labels overstate recovery; scorecard mechanical validation is not consensus",
+    "No commits or product source/tests changes; full ERGO1 acceptance remains open"
+  ]
+}
