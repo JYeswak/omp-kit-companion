@@ -263,7 +263,7 @@ while IFS= read -r path; do
 		done
 		# Rule (a): worktree predates the landing (absent file skips: no mtime).
 		if [ -n "$mt" ] && [ -n "$cdate" ] && [ "$cdate" -gt "$mt" ] && [ "$declared" -eq 0 ]; then
-			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s)\n' "$path" "$sha" "$subject" >> "$metadata_dir/report" || exit 1 ;; esac
+			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s)\n' "$path" "$sha" "$subject" >> "$metadata_dir/report" || exit 1; printf '%s\n' "$sha" >> "$metadata_dir/shas" || exit 1 ;; esac
 			seen="$seen $sha"
 			printf '1\n' >> "$metadata_dir/refused" || exit 1
 			continue
@@ -277,7 +277,7 @@ while IFS= read -r path; do
 		[ "$export_ok" -eq 1 ] && skip_b=1
 		case "$moved" in *" $ln "*) skip_b=1 ;; esac
 		if [ "$skip_b" -eq 0 ] && [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
-			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$metadata_dir/report" || exit 1 ;; esac
+			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$metadata_dir/report" || exit 1; printf '%s\n' "$sha" >> "$metadata_dir/shas" || exit 1 ;; esac
 			seen="$seen $sha"
 			printf '1\n' >> "$metadata_dir/refused" || exit 1
 		fi
@@ -287,6 +287,11 @@ while IFS= read -r path; do
  	report=$(cat "$metadata_dir/report" 2>/dev/null)
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
  	printf 'stale-worktree: declare each intended revert with a "Revert: <sha>" trailer line (or "Supersedes: <sha>" for a rewrite), or rework on a fresh worktree\n' >&2
+	# GATEDIAG1 (one complete diagnostic with its fix): every refused sha in one ready block, so declaring the
+	# whole set is one edit, never a round per sha. Rule (a) refusals on a stale worktree are still best fixed by
+	# reworking on fresh bytes; the block is for intended rewrites.
+	printf 'stale-worktree: if every revert above is intended, add this block to the commit message:\n' >&2
+	sort -u "$metadata_dir/shas" | sed 's/^/Supersedes: /' >&2
  	exit 1
  fi
  exit 0

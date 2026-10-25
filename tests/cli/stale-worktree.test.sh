@@ -208,6 +208,23 @@ out=$(git -C "$R" commit --message "[test] rewrite L" --message "Bead: t-other" 
 check "$?" "0" "supersede-passes" "$out" ""
 check "$(git -C "$R" log -1 --format=%B HEAD | grep -c "Supersedes: $A")" "1" "supersede-logged" "$out" ""
 
+# 12b. GATEDIAG1: two foreign landings refused in one run print one ready Supersedes block naming both, and that
+# block alone admits the rewrite (one edit, never a round per sha).
+R=$(new_repo supersede-block)
+A1=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nlanded line L\nsecond landing M\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+git -C "$R" commit -q --message "[test] land M" --message "Bead: t-land2"
+A2=$(git -C "$R" rev-parse HEAD)
+printf 'base line\nrewritten both\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+out=$(git -C "$R" commit --message "[test] rewrite L and M" --message "Bead: t-other" 2>&1)
+check "$?" "1" "block-refused" "$out" "add this block to the commit message"
+block=$(printf '%s\n' "$out" | grep '^Supersedes: ' | sort)
+check "$block" "$(printf 'Supersedes: %s\nSupersedes: %s\n' "$A1" "$A2" | sort)" "block-names-both-shas" "$out" ""
+out=$(git -C "$R" commit --message "[test] rewrite L and M" --message "Bead: t-other" --message "$block" 2>&1)
+check "$?" "0" "block-alone-admits" "$out" ""
+
 # 13. bad control: stale mtime deletion re-added elsewhere still refuses via (a)
 R=$(new_repo badcontrol)
 printf 'base line\nlanded line L\n' > "$R/pkg/f.txt"
