@@ -21,7 +21,7 @@ const REPO = "/abs/fleet/omp-kit";
 interface Call { command: string; args: string[]; options?: FlywheelExecOptions }
 
 /** A fleet: omp-test tab with live blocks 5 (RusticPine, director) and 9 (JadeThrush); GreenRabbit is a background agent. */
-function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number; blocks?: { id: number; cwd: string; live: boolean }[] } = {}) {
+function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number; blocks?: { id: number; cwd: string; live: boolean }[]; panes?: { pane: number; omp_session_file: string }[] } = {}) {
 	const home = freshDir(base, "home-");
 	const ident = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(REPO).digest("hex").slice(0, 12));
 	mkdirSync(ident, { recursive: true });
@@ -36,7 +36,7 @@ function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<Flywhe
 	const exec = async (command: string, args: string[], options?: FlywheelExecOptions): Promise<FlywheelExecResult> => {
 		const call = { command, args, options };
 		calls.push(call);
-		if (command === "tern") return { code: 0, stdout: JSON.stringify({ sessions: [{ name: "Default", tabs: [{ name: "omp-test", blocks: opts.blocks ?? [{ id: 5, cwd: REPO, live: true }, { id: 9, cwd: REPO, live: true }] }] }] }) };
+		if (command === "tern") return { code: 0, stdout: JSON.stringify({ sessions: [{ name: "Default", tabs: [{ name: "omp-test", blocks: opts.blocks ?? [{ id: 5, cwd: REPO, live: true }, { id: 9, cwd: REPO, live: true }] }] }], panes: opts.panes }) };
 		if (command === "am") return { code: 0, stdout: JSON.stringify([{ name: "GreenRabbit", task_description: "MAILPROTO1 bead ompkit-fp72.134 (roster BuildMailProto)" }, { name: "StormyCove", task_description: "rhy9.16 cutover under CopperTrout" }]) };
 		if (command === "omp-kit") return opts.omp ? opts.omp(call) : { code: 0, stdout: JSON.stringify({ data: { status: "OK", detail: "landed" } }) };
 		return { code: 127, stdout: "", stderr: "unexpected" };
@@ -98,10 +98,11 @@ test("configured chief metadata cannot override a different identity-file name",
 });
 
 // MAILWAKECWD1 (ompkit-774u.38): the three omp-chief blocks share cwd ~/Developer; each configured `chiefs[]` row
-// resolves under its canonical repo hash. A fourth live block with no row and no identity is NO_WAKE_PATH.
-test("every configured chief block resolves its canonical-project identity; planted: an unconfigured block under the same cwd does not", async () => {
+// resolves under its canonical repo hash. The fourth live OMP block is unconfigured; an earlier shell decoy must not steal its path.
+test("every configured chief block resolves its canonical-project identity; planted: an unconfigured OMP block under the same cwd does not", async () => {
 	const f = fleet({
-		blocks: [{ id: 44, cwd: CHIEF_CWD, live: true }, { id: 45, cwd: CHIEF_CWD, live: true }, { id: 46, cwd: CHIEF_CWD, live: true }, { id: 47, cwd: CHIEF_CWD, live: true }],
+		blocks: [{ id: 44, cwd: CHIEF_CWD, live: true }, { id: 45, cwd: CHIEF_CWD, live: true }, { id: 46, cwd: CHIEF_CWD, live: true }, { id: 48, cwd: CHIEF_CWD, live: true }, { id: 47, cwd: CHIEF_CWD, live: true }],
+		panes: [44, 45, 46, 47].map(id => ({ pane: id, omp_session_file: `/sessions/chief-${id}.jsonl` })),
 		omp: call => call.args[call.args.indexOf("--cwd") + 1] === CHIEF_CWD
 			? { code: 0, stdout: JSON.stringify({ data: { status: "DELIVERED" } }) }
 			: { code: 2, stdout: JSON.stringify({ data: { status: "NOT_RUN" }, errors: [{ code: "SEAT_CWD_MISMATCH" }] }) },
@@ -116,8 +117,11 @@ test("every configured chief block resolves its canonical-project identity; plan
 		expect(JSON.stringify(patch)).toContain(`WAKE_DELIVERED: mail ${66200 + i.charCodeAt(0)} -> ${name}`);
 	}
 	expect(f.ledger().map(r => [r.status, r.recipient])).toEqual([["WAKE_DELIVERED", "PeachLeopard"], ["WAKE_DELIVERED", "QuietBadger"], ["WAKE_DELIVERED", "ScarletPrairie"]]);
-	// planted: block 47 is live under the same cwd with no chiefs row and no identity file
-	expect((await f.wake.beforeSend("d", "send_message", { ...ask("GhostChief"), sender_name: "RusticPine" }, REPO))?.reason).toStartWith("NO_WAKE_PATH");
+	// planted: block 48 is an earlier shell; block 47 is live under the same cwd with no chiefs row.
+	const missingIdentityPath = join(ident, "tern-47");
+	const ghostRefusal = (await f.wake.beforeSend("d", "send_message", { ...ask("GhostChief"), sender_name: "RusticPine" }, REPO))?.reason ?? "";
+	expect(ghostRefusal).toStartWith("NO_WAKE_PATH");
+	expect(ghostRefusal).toContain(missingIdentityPath);
 	// planted: a chiefs row whose pane names a block another chief owns never borrows that identity
 	writeFileSync(f.fleetWatchPath, JSON.stringify({ chief: row("PeachLeopard", "tern:44"), chiefs: [row("QuietBadger", "tern:46")] }));
 	expect((await f.wake.beforeSend("e", "send_message", { ...ask("QuietBadger"), sender_name: "RusticPine" }, REPO))?.reason).toStartWith("NO_WAKE_PATH");

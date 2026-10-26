@@ -115,6 +115,22 @@ function identityName(path: string): string | null {
 	return /^\S+$/.test(raw) ? raw : null;
 }
 
+function identityPath(home: string, repo: string, block: string): string {
+	const hash = createHash("sha1").update(repo).digest("hex").slice(0, 12);
+	return join(home, ".config", "agent-mail", "identity", hash, `tern-${block}`);
+}
+
+function chiefContext(fleetWatchPath: string, block: LiveBlock, projectKey: string): boolean {
+	if (typeof block.sessionFile !== "string") return false;
+	const watch = readJson(fleetWatchPath);
+	const others = prop(watch, "chiefs");
+	const chiefs: unknown[] = [prop(watch, "chief"), ...(Array.isArray(others) ? others : [])];
+	return chiefs.some(chief => prop(chief, "repo") === projectKey
+		&& typeof prop(chief, "agent") === "string"
+		&& typeof prop(chief, "pane") === "string"
+		&& prop(chief, "session") === block.session && prop(chief, "cwd") === block.cwd);
+}
+
 /** The sent message id from an Agent Mail send/reply result payload. */
 export function messageIdOf(payload: unknown): number | null {
 	const id = (value: unknown): number | null => typeof value === "number" && Number.isInteger(value) && value > 0 ? value
@@ -240,8 +256,8 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 			&& prop(chief, "session") === block.session && prop(chief, "pane") === `tern:${block.block}`
 			&& prop(chief, "cwd") === block.cwd);
 		const identityRepo = row ? String(prop(row, "repo")) : block.cwd;
-		const hash = createHash("sha1").update(identityRepo).digest("hex").slice(0, 12);
-		const bound = identityName(join(home, ".config", "agent-mail", "identity", hash, `tern-${block.block}`));
+		const path = identityPath(home, identityRepo, block.block);
+		const bound = identityName(path);
 		return bound && (!row || bound.toLowerCase() === String(prop(row, "agent")).toLowerCase()) ? bound : null;
 	}
 
@@ -270,8 +286,19 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		const seat = matches.find(match => match.repo === projectKey) ?? matches[0];
 		if (seat) return { kind: "seat", seat };
 		const task = await taskOf(name, projectKey);
+		let missingIdentityPath: string | null = null;
+		if (task === null) {
+			for (const block of live) {
+				if (!chiefContext(fleetWatchPath, block, projectKey)) continue;
+				const path = identityPath(home, projectKey, block.block);
+				if (identityName(path) === null) {
+					missingIdentityPath = path;
+					break;
+				}
+			}
+		}
 		const why = task === null
-			? `no live Tern seat is bound to ${name}`
+			? `no live Tern seat is bound to ${name}${missingIdentityPath ? `; missing canonical identity path ${missingIdentityPath}` : ""}`
 			: `${name} is registered in Agent Mail ("${task.slice(0, 80)}") but holds no live Tern seat (a background/task agent cannot read mail)`;
 		return { kind: "none", why, parent: await parentOf(name, projectKey, task) };
 	}
