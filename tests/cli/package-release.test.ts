@@ -7,7 +7,7 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
 import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 import { packageSourceRevision } from "../../scripts/package-release.ts";
-import { checkPackagedExtensionLoads } from "../../scripts/package-release.ts";
+import { checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 
@@ -660,4 +660,47 @@ test("GUARDLOAD1: extension load gate fails a ../src/ escape naming file and mod
 	expect(brokenFailures.map(failure => failure.file)).toEqual(["extensions/kit-flywheel-guard.ts"]);
 	expect(brokenFailures[0]?.error ?? "").toContain("../src/cc-spool.ts");
 	expect(checkPackagedExtensionLoads(fixed)).toEqual([]);
+});
+
+test("SHIPSCRIPTS1: actual archive scanner consumer allows cited comments/mail and refuses missing runtime dependencies", async () => {
+	const stage = ownedTmp("shipped-script-consumers", { root: output }).path;
+	const extracted = await runBounded(["tar", "-xf", join(output, asset.filename), "-C", stage],
+		{ cwd: output, deadline_s: 30 });
+	expect(extracted.rc, new TextDecoder().decode(extracted.stderr)).toBe(0);
+	console.log(new Date().toISOString(), "SHIPSCRIPTS1 actual archive consumer positive and unfiled negatives");
+	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
+
+	const scanner = join(stage, "scripts/check-gap-mention.sh");
+	const scannerBytes = readFileSync(scanner);
+	rmSync(scanner);
+	console.log(new Date().toISOString(), "SHIPSCRIPTS1 omitted referenced scanner must name its dependency");
+	const missingScanner = await checkPackagedScriptDependencies(stage);
+	expect(missingScanner).toEqual([{
+		file: "extensions/kit-flywheel-guard.ts",
+		error: "MISSING_SCRIPT_DEPENDENCY scripts/check-gap-mention.sh",
+	}]);
+	writeFileSync(scanner, scannerBytes);
+
+	const library = join(stage, "scripts/kitlib-findings.sh");
+	const libraryBytes = readFileSync(library);
+	rmSync(library);
+	console.log(new Date().toISOString(), "SHIPSCRIPTS1 scanner alone is insufficient: missing findings library refuses");
+	const missingLibrary = await checkPackagedScriptDependencies(stage);
+	expect(missingLibrary.map(item => item.file)).toEqual(["extensions/kit-flywheel-guard.ts"]);
+	expect(missingLibrary[0]?.error).toContain("kitlib-findings.sh");
+	expect(missingLibrary[0]?.error).toContain("GAP_SCAN_UNVERIFIED");
+	writeFileSync(library, libraryBytes);
+	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
+
+	// An additional extension proves the check derives references, rather than
+	// special-casing the flywheel's scanner name.
+	writeFileSync(join(stage, "extensions/fixture-script-reference.ts"),
+		'export const helper = new URL("../scripts/fixture-helper.sh", import.meta.url);\n');
+	const missingOther = await checkPackagedScriptDependencies(stage);
+	expect(missingOther).toEqual([{
+		file: "extensions/fixture-script-reference.ts",
+		error: "MISSING_SCRIPT_DEPENDENCY scripts/fixture-helper.sh",
+	}]);
+	writeFileSync(join(stage, "scripts/fixture-helper.sh"), "#!/bin/sh\nexit 0\n");
+	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
 });

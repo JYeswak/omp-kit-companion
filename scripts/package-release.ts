@@ -2,6 +2,9 @@
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { run as runBounded } from "../src/kitlib/run.ts";
+import type { FlywheelExec } from "../extensions/kit-flywheel-guard.ts";
 import { RELEASE_BINARY_NAME, RELEASE_MANIFEST_NAME, validateReleaseManifest, type ReleaseAsset } from "../src/kit-release.ts";
 import { RELEASE_DATA_FILES } from "../src/release-assets.ts";
 import { authorizeSourceAct } from "../src/source-authority.ts";
@@ -24,6 +27,7 @@ for (const file of RELEASE_DATA_FILES) {
 }
 const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/package-release.sh", "scripts/receipt.py", "scripts/pysafe.py", "scripts/kitlib_run.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh",
+	"scripts/check-gap-mention.sh", "scripts/kitlib-findings.sh",
 	"scripts/kitlib_tmp.py", "scripts/kitlib-tmp.sh", "scripts/kitlib_lock.py", "scripts/kitlib_io.py", "scripts/kitlib_proc.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_poll.py", "scripts/kitlib_artifact.py", "scripts/tempsafe_check.py", "scripts/check-staged-tempsafe.sh",
 	"scripts/kitlib_ratchet_core.py", "scripts/kitlib_ratchet.py", "scripts/check-staged-kitlib.sh",
 	"scripts/sources.py", "scripts/check-staged-sources.sh", "docs/sources.md",
@@ -40,6 +44,7 @@ const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/commit-autocomplete.ts": "COMMIT_AUTOCOMPLETE_BUNDLE_FAILED",
 	"extensions/kit-flywheel-guard.ts": "FLYWHEEL_GUARD_BUNDLE_FAILED",
 	"extensions/kit-goal-keepalive.ts": "GOAL_KEEPALIVE_BUNDLE_FAILED",
+	"extensions/kit-inbox-wake.ts": "INBOX_WAKE_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
 	"tests/live/admission-extension.mjs": "ADMISSION_FIXTURE_BUNDLE_FAILED",
 };
@@ -225,6 +230,68 @@ export function checkPackagedExtensionLoads(stagedRoot: string): { file: string;
 	return failures;
 }
 
+/**
+ * SHIPSCRIPTS1: validate lazy filesystem dependencies against the staged package,
+ * not the checkout. Imports alone cannot exercise a tool callback's shell script.
+ */
+export async function checkPackagedScriptDependencies(stagedRoot: string): Promise<{ file: string; error: string }[]> {
+	const failures: { file: string; error: string }[] = [];
+	const extensionRoot = join(stagedRoot, "extensions");
+	for (const entry of readdirSync(extensionRoot).sort()) {
+		if (!entry.endsWith(".ts") || entry.endsWith(".test.ts")) continue;
+		const source = readFileSync(join(extensionRoot, entry), "utf8");
+		// Literal package-relative scripts; the repeated class excludes quotes and
+		// delimiters, so even a long near-miss has no backtracking ambiguity.
+		for (const match of source.matchAll(/["'`]\.\.\/(scripts\/[A-Za-z0-9_./-]+)["'`]/g)) {
+			const dependency = match[1]!;
+			const path = join(stagedRoot, dependency);
+			if (dependency.split("/").includes("..") || !existsSync(path)
+				|| !lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) {
+				failures.push({ file: `extensions/${entry}`, error: `MISSING_SCRIPT_DEPENDENCY ${dependency}` });
+			}
+		}
+	}
+	if (failures.length > 0) return failures;
+	const probe = await runBounded([process.execPath, "-e",
+		`import { probePackagedGapConsumer } from ${JSON.stringify(import.meta.url)}; await probePackagedGapConsumer(${JSON.stringify(stagedRoot)});`],
+		{ cwd: stagedRoot, deadline_s: 30 });
+	if (probe.rc !== 0 || probe.timed_out || probe.truncated) {
+		const decoder = new TextDecoder();
+		const detail = `${decoder.decode(probe.stdout)}${decoder.decode(probe.stderr)}`.trim();
+		failures.push({ file: "extensions/kit-flywheel-guard.ts",
+			error: detail.slice(0, 1000) || `CONSUMER_EXIT_${probe.rc}` });
+	}
+	return failures;
+}
+
+/** Runs in a fresh child so archive module identity/cache cannot fall back to the checkout. */
+export async function probePackagedGapConsumer(stagedRoot: string): Promise<void> {
+	// The module is genuinely runtime-selected from the candidate archive.
+	const { checkGapMentions } = await import(pathToFileURL(join(stagedRoot, "extensions/kit-flywheel-guard.ts")).href);
+	if (typeof checkGapMentions !== "function") throw new Error("GAP_CONSUMER_MISSING");
+	const decoder = new TextDecoder();
+	const exec: FlywheelExec = async (command, args, options) => {
+		const result = await runBounded([command, ...args], {
+			cwd: options?.cwd, deadline_s: (options?.timeout ?? 15000) / 1000,
+		});
+		if (result.truncated) throw new Error("CONSUMER_EXEC_OUTPUT_TRUNCATED");
+		return { code: result.rc ?? 1, killed: result.killed,
+			stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
+	};
+	for (const kind of ["comment", "mail"]) {
+		const event = (text: string) => kind === "comment"
+			? { toolName: "bash", input: { command: `br comments add ompkit-ab12c '${text}'` } }
+			: { toolName: "write", input: { path: "xd://mcp__mcp_agent_mail_send_message",
+				content: JSON.stringify({ subject: `DONE ${text}` }) } };
+		const valid = await checkGapMentions(event("the gate should say X for ompkit-ab12c"), exec, stagedRoot);
+		if (valid?.block) throw new Error(`CITED_${kind}_REFUSED: ${valid.reason}`);
+		const invalid = await checkGapMentions(event("the gate should say X"), exec, stagedRoot);
+		if (invalid?.block !== true || !invalid.reason.includes("GAP_UNFILED"))
+			throw new Error(`UNFILED_${kind}_NOT_REFUSED`);
+		console.log(JSON.stringify({ at: new Date().toISOString(), consumer: kind, cited: "allowed", unfiled: "refused" }));
+	}
+}
+
 async function run(): Promise<void> {
 	const { version, key, out, signKey } = argumentsOf(process.argv.slice(2));
 	try {
@@ -286,6 +353,8 @@ async function run(): Promise<void> {
 		}
 		const loadFailures = checkPackagedExtensionLoads(loadStage);
 		if (loadFailures.length > 0) fail(`EXTENSION_LOAD_FAILED: ${loadFailures.map(failure => `${failure.file} (${failure.error})`).join("; ")}`);
+		const scriptFailures = await checkPackagedScriptDependencies(loadStage);
+		if (scriptFailures.length > 0) fail(`EXTENSION_SCRIPT_DEPENDENCY_FAILED: ${scriptFailures.map(failure => `${failure.file} (${failure.error})`).join("; ")}`);
 		// Reobserve after compilation and resource reads. This detects an observed
 		// changed/dirty HEAD, not transient edit-and-revert or authenticated source binding.
 		const finalSourcePackage = safeSource("package.json");
