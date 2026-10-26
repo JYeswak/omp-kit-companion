@@ -15,8 +15,8 @@ fd 0. ``run_bounded`` starts the child in its own session, gives it
 ``/dev/null`` as stdin unless input is supplied, reads both pipes itself under
 one deadline with a byte cap, and on timeout or cancellation signals the whole
 process group (SIGTERM, grace, SIGKILL), then drains for a bounded time and
-closes its pipe ends, so members of that owned group cannot keep the caller
-waiting. Separately grouped descendants still need their own lifecycle owner.
+closes its pipe ends, so no descendant outlives the call or keeps the caller
+waiting.
 
 Portability: Python >= 3.9 standard library only; macOS and Linux (POSIX
 process groups, ``selectors``). No machine-local tool is required.
@@ -67,7 +67,6 @@ from __future__ import annotations
 import argparse
 import math
 import os
-import select
 import selectors
 import signal
 import socket
@@ -77,7 +76,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator, List, Optional, Sequence, Tuple, Union
 
@@ -91,7 +90,7 @@ _CHUNK = 65536
 _DRAIN_S = 1.0
 
 _groups_lock = threading.Lock()
-_live_groups: dict = {}
+_live_groups: set = set()
 
 
 class Cancelled(BaseException):
@@ -143,15 +142,14 @@ def _check_budget(name: str, value: float) -> float:
     return float(value)
 
 
-def _register(owner: "_ChildOwner") -> None:
+def _register(pgid: int) -> None:
     with _groups_lock:
-        _live_groups[owner.proc.pid] = owner
+        _live_groups.add(pgid)
 
 
-def _unregister(owner: "_ChildOwner") -> None:
+def _unregister(pgid: int) -> None:
     with _groups_lock:
-        if _live_groups.get(owner.proc.pid) is owner:
-            del _live_groups[owner.proc.pid]
+        _live_groups.discard(pgid)
 
 
 def _signal_group(pgid: int, signum: int) -> bool:
@@ -163,122 +161,33 @@ def _signal_group(pgid: int, signum: int) -> bool:
 
 
 def kill_live_groups() -> int:
-    """Signal only still-owned, unreaped child groups."""
+    """SIGKILL every process group ``run_bounded`` currently owns; returns how many were signalled."""
     with _groups_lock:
-        groups = list(_live_groups.values())
-    return sum(1 for owner in groups if owner.signal(signal.SIGKILL))
+        groups = list(_live_groups)
+    return sum(1 for pgid in groups if _signal_group(pgid, signal.SIGKILL))
 
 
-class _ChildOwner:
-    """Keep the child's PID reserved until the final group signal, then reap."""
-
-    def __init__(self, proc: subprocess.Popen) -> None:
-        self.proc = proc
-        self.unreaped = True
-        self._signalable = True
-        self._waitid = getattr(os, "waitid", None)
-        self._queue = None
-        self._watched = False
-        self._seen_exit = False
-        self.stopping = False
-        self._waited = False
-
-    def watch(self) -> None:
-        if self._waitid is None:
-            self._queue = select.kqueue()
-            try:
-                self._queue.control([select.kevent(
-                    self.proc.pid, filter=select.KQ_FILTER_PROC,
-                    flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-                    fflags=select.KQ_NOTE_EXIT)], 0, 0)
-            except ProcessLookupError:
-                # Darwin can reject an already-exited, still-unreaped child.
-                # It remains our reserved PID until reap(), not lost ownership.
-                self._seen_exit = True
-            self._watched = True
-
-    def exited(self) -> bool:
-        if self._seen_exit or not self.unreaped:
-            return True
-        if self._waitid is not None:
-            try:
-                self._seen_exit = self._waitid(
-                    os.P_PID, self.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-            except ChildProcessError:
-                self.unreaped = False
-                raise RuntimeError("owned child was reaped outside run_bounded") from None
-        elif self._watched:
-            self._seen_exit = bool(self._queue.control(None, 1, 0))
-        return self._seen_exit
-
-    def signal(self, signum: int) -> bool:
-        with _groups_lock:
-            return self._signalable and self.unreaped and _signal_group(self.proc.pid, signum)
-
-    def terminate(self, pump: Optional["_Pump"], grace: float) -> None:
-        self.stopping = True
-        self.signal(signal.SIGTERM)
-        end = time.monotonic() + grace
-        while time.monotonic() < end and not self.exited():
-            left = max(0.0, min(end - time.monotonic(), 0.1))
-            if pump is not None:
-                pump.step(left)
-            else:
-                time.sleep(max(0, left))
-        self.signal(signal.SIGKILL)
-        if pump is not None:
-            pump.drain(_DRAIN_S)
-
-    def reap(self, budget: float) -> Optional[int]:
-        if not self.unreaped or self._waited:
-            return self.proc.returncode
-        # Exclude registry cancellation before wait can release the PID. A
-        # concurrent signal either finishes while it is reserved, or refuses.
-        with _groups_lock:
-            self._signalable = False
+def _leader_exited(proc: subprocess.Popen) -> bool:
+    """True once the leader has exited. Where ``os.waitid`` exists (Linux) the
+    zombie is left unreaped, so its pid (and so the group id) cannot be reused
+    before the group is signalled; macOS Python lacks ``waitid`` and reaps."""
+    if proc.returncode is not None:
+        return True
+    waitid = getattr(os, "waitid", None)
+    if waitid is not None:
         try:
-            result = self.proc.wait(timeout=budget)
-        except subprocess.TimeoutExpired:
-            self._waited = True
-            return None
-        self._waited = True
-        self.unreaped = False
-        return result
-
-    def close(self) -> None:
-        if self._queue is not None:
-            self._queue.close()
+            info = waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return proc.poll() is not None
+        return info is not None
+    return proc.poll() is not None
 
 
-@contextmanager
-def _defer_handled_signals() -> Iterator[None]:
-    """Defer Python cancellation through acquisition without masking the child."""
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
-                if callable(signal.getsignal(sig))}
-    pending: dict = {}
-
-    def defer(signum: int, frame: object) -> None:
-        pending.setdefault(signum, frame)
-
+def _reap(proc: subprocess.Popen, budget: float) -> Optional[int]:
     try:
-        for sig in handlers:
-            signal.signal(sig, defer)
-        yield
-    finally:
-        # Mask only while restoring handlers, after the child has been spawned.
-        # A second cancellation cannot strand one temporary handler in place,
-        # and no child inherits a blocked TERM/INT mask.
-        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, handlers)
-        try:
-            for sig, handler in handlers.items():
-                signal.signal(sig, handler)
-        finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        for sig, frame in pending.items():
-            handlers[sig](sig, frame)
+        return proc.wait(timeout=budget)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 class _Pump:
@@ -300,29 +209,25 @@ class _Pump:
         self.bufs = {}
         self.truncated = {}
         self.order: List[int] = []
-        try:
-            for stream in (proc.stdout, proc.stderr):
-                if stream is None:
-                    continue
-                fd = stream.fileno()
-                os.set_blocking(fd, False)
-                self.bufs[fd] = bytearray()
-                self.truncated[fd] = False
-                self.order.append(fd)
-                self.sel.register(fd, selectors.EVENT_READ)
-            self.readers = len(self.order)
-            self.stdin = proc.stdin
-            self.data = memoryview(data) if data is not None else None
-            self.pos = 0
-            if self.stdin is not None:
-                os.set_blocking(self.stdin.fileno(), False)
-                if not self.data:
-                    self._close_stdin()
-                else:
-                    self.sel.register(self.stdin.fileno(), selectors.EVENT_WRITE)
-        except BaseException:
-            self.sel.close()
-            raise
+        for stream in (proc.stdout, proc.stderr):
+            if stream is None:
+                continue
+            fd = stream.fileno()
+            os.set_blocking(fd, False)
+            self.bufs[fd] = bytearray()
+            self.truncated[fd] = False
+            self.order.append(fd)
+            self.sel.register(fd, selectors.EVENT_READ)
+        self.readers = len(self.order)
+        self.stdin = proc.stdin
+        self.data = memoryview(data) if data is not None else None
+        self.pos = 0
+        if self.stdin is not None:
+            os.set_blocking(self.stdin.fileno(), False)
+            if not self.data:
+                self._close_stdin()
+            else:
+                self.sel.register(self.stdin.fileno(), selectors.EVENT_WRITE)
 
     def _close_stdin(self) -> None:
         if self.stdin is None:
@@ -395,50 +300,6 @@ class _Pump:
         return bytes(self.bufs[fd]), self.truncated[fd]
 
 
-@contextmanager
-def _process_run(
-    args: Sequence[Union[str, bytes, os.PathLike]], grace: float,
-    data: Optional[bytes], cap_bytes: int,
-    on_chunk: Optional[Callable[[int, bytes], None]], total_cap: Optional[int],
-    **options: object,
-) -> Iterator[Tuple[_ChildOwner, _Pump]]:
-    """Acquire and unwind one owned process; no policy or verdict lives here."""
-    proc = None
-    owner = None
-    pump = None
-    with ExitStack() as resources:
-        try:
-            with _defer_handled_signals():
-                proc = subprocess.Popen(args, **options)
-                for stream in (proc.stdin, proc.stdout, proc.stderr):
-                    if stream is not None:
-                        resources.callback(stream.close)
-                owner = _ChildOwner(proc)
-                resources.callback(owner.close)
-                _register(owner)
-                resources.callback(_unregister, owner)
-                owner.watch()
-                pump = _Pump(proc, data, cap_bytes, on_chunk, total_cap)
-                resources.callback(pump.close)
-            yield owner, pump
-        except BaseException:
-            if pump is not None:
-                pump.on_chunk = None
-            if owner is not None and not owner.stopping:
-                owner.terminate(pump, grace)
-            elif owner is None and proc is not None:
-                _signal_group(proc.pid, signal.SIGTERM)
-                time.sleep(grace)
-            raise
-        finally:
-            if owner is not None:
-                owner.signal(signal.SIGKILL)
-                owner.reap(grace)
-            elif proc is not None:
-                _signal_group(proc.pid, signal.SIGKILL)
-                proc.wait(timeout=grace)
-
-
 def run_bounded(
     argv: Sequence[Union[str, bytes, os.PathLike]],
     timeout: float,
@@ -504,37 +365,67 @@ def run_bounded(
     extra = {"pass_fds": fds} if fds else {}
     start = time.monotonic()
     deadline = start + budget
+    proc = subprocess.Popen(
+        args,
+        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+        close_fds=True,
+        **extra,
+    )
+    pgid = proc.pid
+    _register(pgid)
+    pump = _Pump(proc, bytes(input) if input is not None else None, cap_bytes, on_chunk, total_cap)
     outcome = OK
     orphans = False
-    with _process_run(
-        args, grace, bytes(input) if input is not None else None, cap_bytes, on_chunk, total_cap,
-        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
-        cwd=cwd, env=env, start_new_session=True, close_fds=True, **extra,
-    ) as (owner, pump):
+    settled = False
+    try:
         exited_at = None
         while True:
             now = time.monotonic()
             if now >= deadline:
                 outcome = TIMEOUT
                 break
-            if exited_at is None and owner.exited():
+            if exited_at is None and _leader_exited(proc):
                 exited_at = now
             if exited_at is not None:
                 if pump.readers == 0:
                     break
                 if now - exited_at >= grace:
-                    orphans = owner.signal(signal.SIGKILL)
+                    orphans = _signal_group(pgid, signal.SIGKILL)
                     pump.drain(_DRAIN_S)
                     break
             pump.step(min(deadline - now, 0.1))
         if outcome == OK:
-            # Even on Darwin the leader remains unreaped until this signal;
-            # neither its PID nor this owned group ID can have been reused.
-            owner.signal(signal.SIGKILL)
+            # The leader exited; a descendant that redirected its pipes away is
+            # still in the group and must not outlive the call. On Linux the
+            # leader zombie is still unreaped here, so the group id is not reusable.
+            _signal_group(pgid, signal.SIGKILL)
         else:
-            owner.terminate(pump, grace)
-        returncode = owner.reap(grace)
+            _signal_group(pgid, signal.SIGTERM)
+            end = time.monotonic() + grace
+            while time.monotonic() < end and not _leader_exited(proc):
+                pump.step(min(end - time.monotonic(), 0.1))
+            _signal_group(pgid, signal.SIGKILL)
+            pump.drain(_DRAIN_S)
+        returncode = _reap(proc, grace)
+        settled = True
+    finally:
+        if not settled:
+            # Cancelled (or any other exception) mid-run: the group dies first.
+            _signal_group(pgid, signal.SIGKILL)
+            _reap(proc, grace)
+        pump.close()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        _unregister(pgid)
     out, out_trunc = pump.result(0)
     err, err_trunc = pump.result(1)
     return RunResult(tuple(os.fsdecode(a) for a in args), outcome, returncode, out, err,

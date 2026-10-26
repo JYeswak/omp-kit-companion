@@ -22,15 +22,10 @@ git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || {
 SOURCE_SHA=$(git -C "$SOURCE_ROOT" rev-parse HEAD)
 SOURCE="$TMP/exact-source"
 mkdir -p "$SOURCE"
-source_helpers=$(git -C "$SOURCE_ROOT" ls-tree -r --name-only "$SOURCE_SHA" -- \
-	scripts/full-suite-worker.sh scripts/full-suite-supervise/package.json \
-	scripts/pysafe.py scripts/kitlib_run.py scripts/kitlib_proc.py)
-# Fixed, space-free helper paths; older source commits need only their own existing helpers.
-# shellcheck disable=SC2086
 git -C "$SOURCE_ROOT" archive --format=tar "$SOURCE_SHA" \
 	scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh \
 	src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \
-	config/heavy-labels.json $source_helpers \
+	config/heavy-labels.json \
 	> "$TMP/exact-source.tar"
 tar -xf "$TMP/exact-source.tar" -C "$SOURCE"
 tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.json
