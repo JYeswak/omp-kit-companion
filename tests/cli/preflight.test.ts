@@ -97,3 +97,12 @@ test("findings grammar: parse ignores noise and malformed lines; an empty list i
 	expect(parsed.map(f => [f.code, f.fix])).toEqual([["C", ["git", "x", "y"]], ["C2", null]]);
 	expect(envelope("commit", null, "tree:x", []).ok).toBe(true);
 });
+
+test("every preflight verb is registered at module load (GATEDIAG1 [b] as published was HANDLER_UNAVAILABLE: the registrations sat inside rchLeaseCommand)", async () => {
+	const cliPath = new URL("../../src/cli.ts", import.meta.url).pathname;
+	const r = await run(["bun", "run", "--silent", cliPath, "capabilities", "--json"], { deadline_s: 120, max_output_bytes: 8 * 1024 * 1024 });
+	const doc = JSON.parse(new TextDecoder().decode(r.stdout));
+	const unavailable = (doc.data ?? doc).unavailable_commands ?? [];
+	const names = unavailable.map((u: unknown) => (typeof u === "string" ? u : (u as { path?: string }).path ?? ""));
+	expect(names.filter((n: string) => n.startsWith("preflight") || n === "verify")).toEqual([]);
+});

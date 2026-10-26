@@ -4031,22 +4031,6 @@ function missionValidateCommand(request: ParsedCommand): CliResult {
 	return { code: report.overall === "VALID" ? 0 : 1, data: { ...report }, verification: "PERFORMED" };
 }
 registerCommandHandler("mission validate", missionValidateCommand);
-function missionAnchorCommand(request: ParsedCommand): CliResult {
-	const projectFlag = request.flags.get("--project");
-	if (projectFlag !== undefined && (typeof projectFlag !== "string" || !projectFlag.trim()))
-		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Use omp-kit mission anchor --project PATH (repeat per repo) or run from the project root.");
-	const roots = typeof projectFlag === "string" ? projectFlag.split("\n").map(root => root.trim()).filter(root => root.length > 0) : [process.cwd()];
-	if (roots.length === 0)
-		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Use omp-kit mission anchor --project PATH (repeat per repo) or run from the project root.");
-	const rows = roots.map(root => missionAnchorStatus(resolve(root)));
-	const drift = rows.filter(row => row.verdict !== "AGREE");
-	return { code: drift.length === 0 ? 0 : 1, data: { overall: drift.length === 0 ? "AGREE" : "DRIFT", repos: rows }, verification: "PERFORMED" };
-}
-registerCommandHandler("mission anchor", missionAnchorCommand);
-
-async function rchLeaseCommand(request: ParsedCommand): Promise<CliResult> {
-	const slotsFlag = request.flags.get("--slots");
-	const slots = typeof slotsFlag === "string" ? Number(slotsFlag) : NaN;
 // GATEDIAG1 (ompkit-fp72.135.3.16): one complete diagnostic before the act; nothing is changed.
 function preflightResult(env: Awaited<ReturnType<typeof preflightCommit>>): CliResult {
 	const blocking = env.findings.filter(f => f.blocking).length;
@@ -4088,6 +4072,22 @@ for (const act of ["claim", "in-review", "close"] as const) {
 	});
 }
 
+function missionAnchorCommand(request: ParsedCommand): CliResult {
+	const projectFlag = request.flags.get("--project");
+	if (projectFlag !== undefined && (typeof projectFlag !== "string" || !projectFlag.trim()))
+		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Use omp-kit mission anchor --project PATH (repeat per repo) or run from the project root.");
+	const roots = typeof projectFlag === "string" ? projectFlag.split("\n").map(root => root.trim()).filter(root => root.length > 0) : [process.cwd()];
+	if (roots.length === 0)
+		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Use omp-kit mission anchor --project PATH (repeat per repo) or run from the project root.");
+	const rows = roots.map(root => missionAnchorStatus(resolve(root)));
+	const drift = rows.filter(row => row.verdict !== "AGREE");
+	return { code: drift.length === 0 ? 0 : 1, data: { overall: drift.length === 0 ? "AGREE" : "DRIFT", repos: rows }, verification: "PERFORMED" };
+}
+registerCommandHandler("mission anchor", missionAnchorCommand);
+
+async function rchLeaseCommand(request: ParsedCommand): Promise<CliResult> {
+	const slotsFlag = request.flags.get("--slots");
+	const slots = typeof slotsFlag === "string" ? Number(slotsFlag) : NaN;
 	if (!Number.isSafeInteger(slots) || slots < 1) return refusal("INVALID_FLAG", "--slots requires the positive native slot demand for this command", "Pass --slots N; no remote command was submitted.");
 	const worker = request.flags.get("--worker"), project = request.flags.get("--project");
 	if ((worker !== undefined && (typeof worker !== "string" || !worker.trim())) || (project !== undefined && (typeof project !== "string" || !project.trim())))

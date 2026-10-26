@@ -6,6 +6,7 @@ import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const base = ownedTmp("verify-test").path;
+const cliPath = join(import.meta.dir, "..", "..", "src", "cli.ts");
 
 async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {
 	const r = await run(cmd, { cwd, deadline_s: 60, env: env ? { ...process.env, ...env } as Record<string, string> : undefined });
@@ -88,4 +89,11 @@ test("exit-only boxes are judged by rc and flagged in the close reason; --dry-ru
 	expect(res.replays[0]).toMatchObject({ letter: "a", pass: true, outcome: "exit-only" });
 	expect(res.acts[2]?.join(" ")).toContain("exit-only boxes: [a]");
 	expect(br.acts()).toEqual([]);
+});
+
+test("the verify handler is registered at module load (planted: a registration left inside another function is HANDLER_UNAVAILABLE)", async () => {
+	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--json"], { cwd: base, deadline_s: 120 });
+	const text = new TextDecoder().decode(r.stdout) + new TextDecoder().decode(r.stderr);
+	expect(text).not.toContain("HANDLER_UNAVAILABLE");
+	expect(text).toContain("--export");
 });
