@@ -550,5 +550,11 @@ if [ "$verdict" = "PASS" ]; then
 	exit 0
 else
 	echo "FULL-SUITE: VERDICT FAIL tree=$tree checks=$checks runtime=$runtime producer_rc=$code bun_fail=$bun_fail shell_red=$shell_red py_red=$py_red; the push is refused" >&2
+	# The failing names belong in the gate log, not only in the tree log (CI-SPEED, PeachLeopard 69007:
+	# three VERDICT FAILs tonight had to be diagnosed by hand from the cached log). Bun prints
+	# "(fail) <name> [ms]" under its file header; shell/python suites print RED lines in the log.
+	echo "FULL-SUITE: failing tests (full log: $CACHE_DIR/$tree.log):" >&2
+	awk '/^[A-Za-z0-9_.\/-]+\.test\.ts:$/ { file = $0 } /^\(fail\)/ { print "  " file " " $0 }' "$CACHE_DIR/$tree.log" | head -n 40 >&2
+	grep -E '^RED (script|python)-suite ' "$CACHE_DIR/$tree.log" | sed 's/^/  /' | head -n 20 >&2
 	exit "$code"
 fi

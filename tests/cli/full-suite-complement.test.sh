@@ -79,6 +79,7 @@ printf 'tree %s\ntests/cli/a.test.ts\ntests/cli/b.test.ts\ntests/cli/s.test.sh\n
 FAIL_C=1 run_verdict failc --focused-passed "$report"
 FAIL_C=
 if [ "$rc" -ne 0 ] && grep -q 'VERDICT FAIL .*bun_fail=1' "$out"; then ok "planted failing complement: verdict FAIL bun_fail=1"; else not_ok "planted failing complement (rc=$rc)"; grep VERDICT "$out"; fi
+if grep -q 'FULL-SUITE: failing tests' "$out" && grep -q 'tests/cli/c.test.ts: (fail) c' "$out"; then ok "planted failing complement: the failing test is named in the gate output"; else not_ok "failing test not named"; grep -A3 'failing tests' "$out"; fi
 
 FAIL_C=
 # 4. planted: a report naming a file the archive does not enumerate is reported and reduces nothing.
