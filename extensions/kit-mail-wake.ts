@@ -227,15 +227,18 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		const live = blocks === undefined ? await liveBlocks() : blocks;
 		if (live === null) return { kind: "none", why: "Tern could not be read (`tern inspect --json` failed), so no live seat is proven", parent: await parentOf(name, projectKey, null) };
 		const matches: Seat[] = [];
-		const chief = prop(readJson(fleetWatchPath), "chief");
-		const chiefRepo = prop(chief, "repo");
-		const chiefName = prop(chief, "agent");
+		// MAILWAKECWD1 (ompkit-774u.38): every configured chief seat, not only the single `chief` row. A chief
+		// launches above its repo (cwd ~/Developer), so its identity file sits under its canonical project's
+		// hash; only a block that matches a configured row exactly (name, tab, block, cwd) may use that hash.
+		const watch = readJson(fleetWatchPath);
+		const chiefRows = [prop(watch, "chief"), ...(Array.isArray(prop(watch, "chiefs")) ? (prop(watch, "chiefs") as unknown[]) : [])]
+			.filter(row => typeof row === "object" && row !== null);
 		for (const block of live) {
-			// A chief may launch above its repo; only its exact configured seat may use that repo's identity.
-			const identityRepo = typeof chiefRepo === "string" && chiefRepo === projectKey
-				&& typeof chiefName === "string" && chiefName.toLowerCase() === name.toLowerCase()
+			const row = chiefRows.find(chief => typeof prop(chief, "repo") === "string" && prop(chief, "repo") === projectKey
+				&& typeof prop(chief, "agent") === "string" && (prop(chief, "agent") as string).toLowerCase() === name.toLowerCase()
 				&& prop(chief, "session") === block.session && prop(chief, "pane") === `tern:${block.block}`
-				&& prop(chief, "cwd") === block.cwd ? chiefRepo : block.cwd;
+				&& prop(chief, "cwd") === block.cwd);
+			const identityRepo = row ? (prop(row, "repo") as string) : block.cwd;
 			const hash = createHash("sha1").update(identityRepo).digest("hex").slice(0, 12);
 			const bound = identityName(join(home, ".config", "agent-mail", "identity", hash, `tern-${block.block}`));
 			if (bound && bound.toLowerCase() === name.toLowerCase()) matches.push({ name: bound, session: block.session, block: block.block, repo: block.cwd });
