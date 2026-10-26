@@ -589,11 +589,42 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
     # well-formed; resolution depends on receipt files on disk, which the
     # selftest does not create — so K2 (missing receipt) is the expected
     # finding for st-v-k2. st-v-k1 cites no id (clean), st-v-k3 cites a
-    expected["elapsed-time-mix"] = ["st-v-time"]
+    expected["elapsed-time-mix"] = ["st-v-time", "st-v-time-sitreps", "st-v-time-daily"]
     beads.append(clean_bead(
         "st-v-time",
         acc=CLEAN_ACC + "- [ ] [c] [after 7d] measured over 7 days; planted negative: "
         "a one-day fixture must be rejected.\n",
+    ))
+    # ompkit-fp72.135.3.48: a runtime counter in code behavior is not an
+    # observation window (GOALKEEP1 AC2 text verbatim behind its phase tags),
+    # while counted reports or runs over time still are. These hang off
+    # st-v-time, not st-base, so st-base stays under the f-fanout limit.
+    def time_bead(bid: str, extra: str) -> dict:
+        return clean_bead(bid, desc=CLEAN_DESC.replace("st-base", "st-v-time"), acc=CLEAN_ACC + extra,
+                          deps=[dep_to(bid, "st-v-time", "related")])
+
+    beads.append(time_bead(
+        "st-v-time-counter",
+        "- [ ] [a] [build] Bounds: at most one wake per 10 min per seat; after 3 consecutive wakes "
+        "whose turns made no tool call, the extension stops waking and records GOAL_IDLE_ESCALATE "
+        "(custom entry) so the sentinel mails the director and logs a prompt review.\n",
+    ))
+    beads.append(time_bead(
+        "st-v-time-sitreps",
+        "- [ ] [c] [after 6h] control: the optimized helper over 6 consecutive hourly sitreps shows "
+        "no rc=124; planted negative: a stubbed helper still yields rc 124.\n",
+    ))
+    beads.append(time_bead(
+        "st-v-time-daily",
+        "- [ ] [c] [after 3d] 3 consecutive daily reports show the count; planted negative: a "
+        "missing report reads UNKNOWN.\n",
+    ))
+    # A ticked elapsed item cannot hold a close open (the harm TIMEAC1 targets),
+    # so beside open code items it is no mix; the unticked st-v-time above is.
+    beads.append(time_bead(
+        "st-v-time-ticked",
+        "- [x] [c] [after 7d] measured over 7 days; planted negative: a one-day fixture must be "
+        "rejected.\n",
     ))
     # l-ac-phase (ACPHASE1): enforced untagged and enforced multi-tagged
     # beads are offenders; the same untagged text one microsecond before
@@ -858,7 +889,11 @@ _ELAPSED_ACCEPTANCE_RE = re.compile(
     r"\bmeasur(?:e|ed|ement|ing)\b[^.\n]{0,100}\b(?:over|for|across)\b"
     r"|\b(?:over|for|across)\s+\d+\s*(?:hours?|hrs?|h|days?|d|weeks?|w|minutes?|mins?|m)\b"
     r"|\b\d+\s*(?:hours?|hrs?|h|days?|d|weeks?|w|minutes?|mins?|m)\s+downtrend\b"
-    r"|\b\d+\s+consecutive\b|\bconsecutive\s+(?:daily|weekly|reports?|runs?)\b"
+    # "N consecutive" is a window only when it counts reports, runs or time
+    # periods; "3 consecutive wakes" is a runtime counter in code behavior.
+    r"|\b\d+\s+consecutive\s+(?:(?:daily|hourly|weekly|nightly)\s+)?"
+    r"(?:reports?|runs?|sitreps?|days?|hours?|weeks?|ticks?|cycles?|windows?)\b"
+    r"|\bconsecutive\s+(?:daily|weekly|reports?|runs?)\b"
     r"|\bfirst\s+live\s+(?:run|report|measurement|proof)\b"
     r"|\blive\s+(?:run|ring|measurement)\s+(?:proof|evidence)\b"
     r")",
@@ -880,8 +915,11 @@ def classify_acceptance(bead: dict) -> dict[str, object]:
             continue
         if re.match(r"^\s*-\s*\[[ xX]\]", raw):
             elapsed = bool(_ELAPSED_ACCEPTANCE_RE.search(text))
-            items.append({"index": index, "text": text, "elapsed": elapsed})
-    elapsed_items = [item for item in items if item["elapsed"]]
+            ticked = bool(re.match(r"^\s*-\s*\[[xX]\]", raw))
+            items.append({"index": index, "text": text, "elapsed": elapsed, "ticked": ticked})
+    # A ticked time item cannot hold a close open, which is the harm TIMEAC1
+    # targets, so only open time items count; a ticked one is neither kind.
+    elapsed_items = [item for item in items if item["elapsed"] and not item["ticked"]]
     code_items = [item for item in items if not item["elapsed"]]
     return {
         "items": items,
@@ -1105,6 +1143,17 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
                                     "verdict_flips_to_fail": flips})
             if not flips:
                 fails.append(f"mutation: disabling {cid} changes nothing")
+        # elapsed-time-mix (TIMEAC1) is a per-bead admission check, not a
+        # runner row, so it gets its own strict comparison here: the planted
+        # violators must fail and every control (counter, ticked) must pass.
+        # Before ompkit-fp72.135.3.48 only the violators were checked.
+        got_time = sorted(b["id"] for b in scope_beads(loaded) if elapsed_time_mix_failure(b))
+        want_time = sorted(expected["elapsed-time-mix"])
+        if got_time != want_time:
+            fails.append(f"elapsed-time-mix: want {want_time} got {got_time}")
+        log["mutation"].append({"disabled": "elapsed-time-mix", "verdict_flips_to_fail": bool(want_time)})
+        if not want_time:
+            fails.append("mutation: disabling elapsed-time-mix changes nothing")
         clean = build_clean_beads()
         cjsonl = os.path.join(tmp, "clean.jsonl")
         write_jsonl(cjsonl, clean)
