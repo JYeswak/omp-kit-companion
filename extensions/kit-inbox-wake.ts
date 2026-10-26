@@ -153,6 +153,15 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	let project = "";
 	let path = "";
 	let cwd = "";
+	/** ESCREDELIVER (non-author review of 1d8af2d10b, 2026-10-26): an Esc runs clearQueue({forInterrupt}) and drops a
+	 *  queued follow-up, but the cursor already moved past its mail, so that mail never woke the seat again. Each wake
+	 *  stays pending until omp emits its message_end (the agent consumed it); a run that ends with a wake still pending
+	 *  re-sends it once. At most one duplicate per batch, if a client parks the wake past the run that would consume it. */
+	const pending = new Map<string, boolean>();
+
+	function wake(content: string): void {
+		pi.sendMessage({ customType: "kit-inbox-wake", content, display: true }, { deliverAs: "followUp", triggerTurn: true });
+	}
 
 	/** RESTARTRACE1 (J-2026-10-26-20): the registry naming this seat's project lists a Tern block only while omp runs
 	 *  in it, so a restarted seat can start before it is re-listed (lead 2026-10-26: omp up 17:26:51Z, block re-listed
@@ -180,8 +189,9 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			}
 			const fresh = got.events.filter(e => e.from !== agent && (e.kind === "to" || e.kind === "cc"));
 			if (fresh.length > 0) {
-				pi.sendMessage({ customType: "kit-inbox-wake", content: wakeText(agent!, fresh), display: true },
-					{ deliverAs: "followUp", triggerTurn: true });
+				const content = wakeText(agent!, fresh);
+				pending.set(content, false);
+				wake(content);
 				const ledger = join(home, ".local", "state", "omp-kit", "mail-wake.jsonl");
 				const ts = now().toISOString();
 				for (const e of fresh) {
@@ -199,6 +209,23 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 		}
 	}
 
+	pi.on("message_end", (event: { message?: { customType?: unknown; content?: unknown } }) => {
+		const m = event?.message;
+		if (m?.customType !== "kit-inbox-wake") return;
+		const text = typeof m.content === "string" ? m.content : Array.isArray(m.content)
+			? m.content.map((p: { text?: unknown }) => (typeof p?.text === "string" ? p.text : "")).join("") : "";
+		pending.delete(text);
+	});
+	pi.on("agent_end", () => {
+		for (const [content, resent] of pending) {
+			if (resent) {
+				pending.delete(content);
+				continue;
+			}
+			pending.set(content, true);
+			wake(content);
+		}
+	});
 	pi.on("session_start", async (_event, ctx) => {
 		cwd = ctx.cwd;
 		await tick();

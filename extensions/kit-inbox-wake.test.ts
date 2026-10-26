@@ -20,6 +20,7 @@ function harness(deps: InboxWakeDeps) {
 		sent, intervals,
 		start: async () => { await kitInboxWake(pi, deps); await (handlers.get("session_start") as (e: never, c: never) => Promise<void>)({} as never, ctx as never); },
 		tick: async () => { await intervals[0]!(); },
+		fire: (event: string, payload: unknown = {}) => (handlers.get(event) as (e: unknown, c: never) => unknown)(payload, ctx as never),
 	};
 }
 
@@ -136,5 +137,37 @@ describe("kit-inbox-wake", () => {
 		const text = wakeText("QuietBadger", [event(1, 1), event(2, 2)]);
 		expect(text.split("\n")[0]).toBe("MAIL WAKE for QuietBadger: 2 new Agent Mail message(s).");
 		expect(text).toContain("acknowledge each one after acting on it");
+	});
+
+	test("planted ESCREDELIVER: a wake an aborted run never consumed is sent once more, then dropped", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69720, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		await h.tick();
+		expect(h.sent.length).toBe(1);
+		h.fire("agent_end");
+		expect(h.sent.map(s => s.content)).toEqual([h.sent[0]!.content, h.sent[0]!.content]);
+		expect(h.sent[1]!.deliverAs).toBe("followUp");
+		h.fire("agent_end");
+		expect(h.sent.length).toBe(2);
+	});
+
+	test("control: a wake the agent consumed is never sent again", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69721, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		await h.tick();
+		h.fire("message_end", { message: { role: "custom", customType: "kit-inbox-wake", content: h.sent[0]!.content } });
+		h.fire("agent_end");
+		expect(h.sent.length).toBe(1);
+		h.fire("message_end", { message: { role: "custom", customType: "other", content: "x" } });
+		h.fire("agent_end");
+		expect(h.sent.length).toBe(1);
 	});
 });
