@@ -8,6 +8,7 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import {
 	chmodSync, closeSync, constants, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync,
 	readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
+    writeSync,
 } from "node:fs";
 import { join } from "node:path";
 import { __testing, canonicalPath, privateLock, PrivateLockError, resolveLock, type LockResource, type PrivateLock } from "../../src/kitlib/lock";
@@ -30,6 +31,7 @@ const decoder = new TextDecoder();
 const libc = dlopen(process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6", {
 	popen: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
 	pclose: { args: [FFIType.ptr], returns: FFIType.i32 },
+	waitid: { args: [FFIType.i32, FFIType.u32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
 });
 
 function substitute<T>(value: T, vars: Record<string, string>): T {
@@ -47,7 +49,74 @@ function replaceLockfile(lockfile: string): void {
 }
 
 type Holder = { proc: Bun.Subprocess<"pipe", "pipe", "inherit">; pid: number };
-type Inheritor = { file: number; fifo: string };
+type PopenChild = { file: number; pidPath: string; pid?: number; closed: boolean };
+type Inheritor = PopenChild & { fifo: string };
+// Real-process integration: fake timers cannot advance kernel child states or FIFO opens; polls use real time.
+
+function shellWord(word: string): string {
+	return `'${word.replaceAll("'", "'\\''")}'`;
+}
+
+function startPopen(argv: string[], pidPath: string): PopenChild {
+	// The shell records its own PID before exec, so the recorded child keeps that identity.
+	const command = Buffer.from(`printf '%s\\n' "$$" > ${shellWord(pidPath)} || exit 125; exec ${argv.map(shellWord).join(" ")}\0`);
+	const mode = Buffer.from("r\0");
+	const file = libc.symbols.popen(ptr(command), ptr(mode)) as number | null;
+	if (file === null) throw new Error("INHERITOR_POPEN_FAILED");
+	return { file, pidPath, closed: false };
+}
+
+async function finishPopen(child: PopenChild, timeoutMs = 10_000, terminate = false): Promise<number> {
+	if (child.closed) throw new Error("INHERITOR_ALREADY_CLOSED");
+	const pidDeadline = performance.now() + 10_000;
+	while (child.pid === undefined) {
+		try {
+			const recorded = readFileSync(child.pidPath, "utf8");
+			if (recorded.endsWith("\n")) {
+				const pid = Number(recorded.trim());
+				if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("INHERITOR_PID_INVALID");
+				child.pid = pid;
+			}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		if (child.pid !== undefined) break;
+		if (performance.now() >= pidDeadline) throw new Error("INHERITOR_PID_UNPROVED");
+		await Bun.sleep(10); // Poll the child's completed PID record, not an assumed startup delay.
+	}
+	const deadline = performance.now() + timeoutMs;
+	// POSIX waitid(P_PID, WEXITED|WNOHANG|WNOWAIT) observes only this child without reaping it.
+	// https://pubs.opengroup.org/onlinepubs/9699919799.2018edition/functions/waitid.html
+	// Darwin/Linux siginfo_t fit 128 bytes and begin with si_signo; WNOWAIT differs in their public wait.h.
+	const info = new Int32Array(32);
+	const flags = 1 | 4 | (process.platform === "darwin" ? 0x20 : 0x01000000);
+	const exited = (): boolean => {
+		info.fill(0);
+		if (libc.symbols.waitid(1, child.pid!, ptr(info), flags) !== 0) {
+			throw new Error(`INHERITOR_OWNERSHIP_UNPROVED pid=${child.pid}`);
+		}
+		return info[0] !== 0; // SIGCHLD is supplied only for a waitable exit.
+	};
+	if (terminate && !exited()) process.kill(child.pid, "SIGTERM");
+	let timedOut = false;
+	let drainDeadline = deadline;
+	while (!exited()) {
+		if (performance.now() >= drainDeadline) {
+			if (timedOut) throw new Error(`INHERITOR_DRAIN_UNPROVED pid=${child.pid}`);
+			process.kill(child.pid, "SIGKILL");
+			timedOut = true;
+			drainDeadline = performance.now() + 10_000;
+		}
+		await Bun.sleep(10); // The event loop and Bun's own test deadline remain live.
+	}
+	// No other code reaps this popen child. WNOWAIT left it waitable, so pclose cannot await a running child.
+	const status = libc.symbols.pclose(child.file as never);
+	child.closed = true;
+	if (status < 0) throw new Error(`INHERITOR_PCLOSE_FAILED pid=${child.pid}`);
+	console.log(`${new Date().toISOString()} INHERITOR_REAPED pid=${child.pid} status=${status}`);
+	if (timedOut) throw new Error(`INHERITOR_EXIT_TIMEOUT pid=${child.pid} deadline_ms=${timeoutMs}`);
+	return status;
+}
 
 async function firstLine(stream: ReadableStream<Uint8Array>, ms: number): Promise<string> {
 	const reader = stream.getReader();
@@ -150,7 +219,7 @@ class CaseRun {
 			break;
 		}
 		case "inheritor": await this.inheritor(step); break;
-		case "end-inheritor": this.endInheritor(step.as as string); break;
+		case "end-inheritor": await this.endInheritor(step.as as string); break;
 		default: throw new Error(`unknown corpus op ${step.op}`);
 		}
 	}
@@ -210,38 +279,36 @@ class CaseRun {
 		const made = await run(["mkfifo", "-m", "600", fifo], { deadline_s: 10 });
 		expect(made.rc).toBe(0);
 		const argv = substitute(corpus.inheritor_argv, { FIFO: fifo });
-		const command = Buffer.from(`${argv.map(word => `'${word.replaceAll("'", "'\\''")}'`).join(" ")}\0`);
-		const file = libc.symbols.popen(ptr(command), ptr(Buffer.from("r\0"))) as number | null;
-		expect(file, "popen").not.toBeNull();
-		this.inheritors.set(step.as as string, { file: file!, fifo });
+		this.inheritors.set(step.as as string, { ...startPopen(argv, `${fifo}.pid`), fifo });
 	}
 
-	endInheritor(name: string): void {
+	async endInheritor(name: string): Promise<void> {
 		const inheritor = this.inheritors.get(name);
 		if (inheritor === undefined) return;
-		this.inheritors.delete(name);
-		// Opening the write end without blocking succeeds once the child's cat has the read end; closing it is EOF.
-		const end = performance.now() + 10_000;
-		for (;;) {
-			try {
-				closeSync(openSync(inheritor.fifo, constants.O_WRONLY | constants.O_NONBLOCK));
-				break;
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENXIO" || performance.now() > end) throw error;
-				Bun.sleepSync(10);
-			}
+		try {
+			// A signal ends our child even while it is opening/reading the FIFO; EOF timing is not a handshake.
+			await finishPopen(inheritor, 10_000, true);
+		} finally {
+			if (inheritor.closed) this.inheritors.delete(name);
 		}
-		libc.symbols.pclose(inheritor.file as never);
 	}
 
 	async cleanup(): Promise<void> {
-		for (const lock of this.locks.values()) lock.release();
-		for (const name of [...this.inheritors.keys()]) this.endInheritor(name);
+		let failures: unknown[] | undefined;
+		const attempt = async (action: () => unknown | Promise<unknown>): Promise<void> => {
+			try { await action(); } catch (error) { (failures ??= []).push(error); }
+		};
+		for (const lock of this.locks.values()) await attempt(() => lock.release());
+		for (const name of [...this.inheritors.keys()]) await attempt(() => this.endInheritor(name));
 		for (const { proc } of this.holders.values()) {
-			proc.kill("SIGKILL");
-			try { proc.stdin.end(); } catch { /* already closed */ }
-			await proc.exited;
+			await attempt(async () => {
+				proc.kill("SIGKILL");
+				try { proc.stdin.end(); } catch { /* already closed */ }
+				await exitedWithin(proc, 15_000);
+				await proc.exited;
+			});
 		}
+		if (failures) throw new AggregateError(failures, "lock corpus cleanup failed");
 	}
 }
 
@@ -259,13 +326,25 @@ async function runCase(testCase: Case, disabled: string[]): Promise<void> {
 	const caseRun = new CaseRun(testCase, vars, testCase.detector !== undefined && disabled.includes(testCase.detector));
 	resetSeam();
 	__testing.disabled = new Set(disabled);
+	let failure: unknown;
+	let failed = false;
 	try {
 		for (const step of testCase.steps) await caseRun.step(step);
+	} catch (error) {
+		failure = error;
+		failed = true;
 	} finally {
 		resetSeam();
-		await caseRun.cleanup();
-		scratch.cleanup();
+		try {
+			await caseRun.cleanup();
+		} catch (error) {
+			if (failed) throw new AggregateError([failure, error], "lock corpus case and cleanup failed");
+			throw error;
+		} finally {
+			scratch.cleanup();
+		}
 	}
+	if (failed) throw failure;
 }
 
 describe("kitlib lock conformance corpus", () => {
@@ -281,6 +360,152 @@ describe("kitlib lock conformance corpus", () => {
 		}
 		if (testCase.control) test(`${testCase.id} [every detector bypassed: valid control still passes]`, () => runCase(testCase, corpus.detectors), 60_000);
 	}
+});
+
+describe("kitlib lock inheritor shutdown", () => {
+	async function delayedReader(tmp: string): Promise<PopenChild> {
+		const fifo = join(tmp, "reader.fifo");
+		const gate = join(tmp, "reader-gate.fifo");
+		const made = await run(["mkfifo", "-m", "600", fifo, gate], { deadline_s: 10 });
+		expect(made.rc).toBe(0);
+		const anchor = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+		let child: PopenChild | undefined;
+		try {
+			try {
+				child = startPopen(["sh", "-c", `read -r go < ${shellWord(gate)}; exec cat ${shellWord(fifo)}`], join(tmp, "reader.pid"));
+				// Force the old writer open-and-close to finish before the child can open the data FIFO.
+				closeSync(openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK));
+			} finally {
+				closeSync(anchor);
+			}
+			const deadline = performance.now() + 10_000;
+			for (;;) {
+				let fd: number;
+				try {
+					fd = openSync(gate, constants.O_WRONLY | constants.O_NONBLOCK);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENXIO" || performance.now() >= deadline) throw error;
+					await Bun.sleep(10);
+					continue;
+				}
+				try { writeSync(fd, "go\n"); } finally { closeSync(fd); }
+				return child;
+			}
+		} catch (error) {
+			if (child) {
+				try { await finishPopen(child, 10_000, true); } catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "delayed reader setup and cleanup failed");
+				}
+			}
+			throw error;
+		}
+	}
+
+	function expectReaped(child: PopenChild): void {
+		let code: string | undefined;
+		try { process.kill(child.pid!, 0); } catch (error) { code = (error as NodeJS.ErrnoException).code; }
+		expect(code, `child ${child.pid} still exists after pclose`).toBe("ESRCH");
+	}
+
+	test("a delayed reader is terminated even after the old writer handshake has already disappeared", async () => {
+		const scratch = ownedTmp("kitlib-lock-shutdown");
+		let child: PopenChild | undefined;
+		try {
+			child = await delayedReader(realpathSync(scratch.path));
+			await finishPopen(child, 10_000, true);
+			expectReaped(child);
+		} finally {
+			if (child && !child.closed) await finishPopen(child, 10_000, true);
+			scratch.cleanup();
+		}
+	}, 60_000);
+
+	test("the old open-and-close handshake leaves the same delayed reader waiting until a named deadline", async () => {
+		const scratch = ownedTmp("kitlib-lock-shutdown");
+		let child: PopenChild | undefined;
+		try {
+			child = await delayedReader(realpathSync(scratch.path));
+			// This child cannot exit naturally: its only writer closed before it could open the FIFO.
+			await expect(finishPopen(child, 100)).rejects.toThrow("INHERITOR_EXIT_TIMEOUT");
+			expectReaped(child);
+		} finally {
+			if (child && !child.closed) await finishPopen(child, 10_000, true);
+			scratch.cleanup();
+		}
+	}, 60_000);
+
+	test("a normal popen exit is reaped without waiting for a deadline", async () => {
+		const scratch = ownedTmp("kitlib-lock-shutdown");
+		const child = startPopen(["true"], join(realpathSync(scratch.path), "normal.pid"));
+		try {
+			expect(await finishPopen(child)).toBe(0);
+			expectReaped(child);
+		} finally {
+			if (!child.closed) await finishPopen(child, 10_000, true);
+			scratch.cleanup();
+		}
+	}, 60_000);
+
+	test("a nonexiting popen child is killed and reaped at its deadline without touching another child", async () => {
+		const scratch = ownedTmp("kitlib-lock-shutdown");
+		const tmp = realpathSync(scratch.path);
+		const fifo = join(tmp, "never.fifo");
+		const controlFifo = join(tmp, "control.fifo");
+		expect((await run(["mkfifo", "-m", "600", fifo, controlFifo], { deadline_s: 10 })).rc).toBe(0);
+		const child = startPopen(["sh", "-c", `trap '' TERM; exec cat ${shellWord(fifo)}`], join(tmp, "never.pid"));
+		const controlAbort = new AbortController();
+		const { promise: controlReady, resolve: ready } = Promise.withResolvers<void>();
+		let controlOutput = "";
+		const control = run(["sh", "-c", 'printf "READY\\n"; read -r probe < "$1" && [ "$probe" = probe ] && printf "ALIVE\\n"', "sh", controlFifo], {
+			deadline_s: 30,
+			signal: controlAbort.signal,
+			on_output: (stream, chunk) => {
+				if (stream === "stdout") {
+					controlOutput += decoder.decode(chunk);
+					if (controlOutput.includes("READY\n")) ready();
+				}
+			},
+		});
+		try {
+			await Promise.race([
+				controlReady,
+				control.then(result => {
+					throw new Error(result.timed_out ? "UNRELATED_CONTROL_START_TIMEOUT" : `UNRELATED_CONTROL_EXITED_EARLY rc=${result.rc}`);
+				}),
+			]);
+			await expect(finishPopen(child, 100)).rejects.toThrow("INHERITOR_EXIT_TIMEOUT");
+			expectReaped(child);
+			// A response to input supplied after the target's reap proves the unrelated child still works.
+			const deadline = performance.now() + 10_000;
+			for (;;) {
+				let fd: number;
+				try { fd = openSync(controlFifo, constants.O_WRONLY | constants.O_NONBLOCK); } catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENXIO" || performance.now() >= deadline) throw error;
+					await Bun.sleep(10); // Real FIFO-open readiness belongs to the OS, not a fake test clock.
+					continue;
+				}
+				try { writeSync(fd, "probe\n"); } finally { closeSync(fd); }
+				break;
+			}
+			const result = await control;
+			expect(result.rc).toBe(0);
+			expect(result.timed_out).toBe(false);
+			expect(result.killed).toBe(false);
+			expect(decoder.decode(result.stdout)).toBe("READY\nALIVE\n");
+		} finally {
+			try {
+				if (!child.closed) await finishPopen(child, 10_000, true);
+			} finally {
+				const teardown = new Error("UNRELATED_CONTROL_TEARDOWN");
+				controlAbort.abort(teardown);
+				try {
+					await control;
+				} catch (error) {
+					if (error !== teardown) throw error; // Ignore only the abort this cleanup requested.
+				} finally { scratch.cleanup(); }
+			}
+		}
+	}, 60_000);
 });
 
 /** Descriptors of this process open on the inode at `path` (the kernel's view, through /dev/fd). */

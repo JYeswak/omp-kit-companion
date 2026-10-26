@@ -1,0 +1,20 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_ea197601f095c26e5bde4486820251cf33ca5b2dfaab3e4dddd0bd7e00204e2f",
+ "limitations": [
+  "Author Darwin smoke only; original non-author published-export twenty-run AC5 remains unverified",
+  "Linux runtime and installed release not exercised"
+ ],
+ "operation": "author-smoke:kitlib-lock-bounded-inheritor",
+ "parameters": {
+  "bead": "ompkit-fp72.135.3.44",
+  "subject_sha256": "ce57a92d717c3016f1e5fa037de09f88c7982aac61c1d20d3013494d1487c882"
+ },
+ "producer": "ScarletPrairie/openai-codex/gpt-6.1-sol",
+ "result_ref": {
+  "bytes": 6405,
+  "path": "docs/evidence/receipts/ompkit-fp72.135.3.44-build-20261026.result.json",
+  "sha256": "3adee5118f23497c62dd00531959238078ca90df7fdcdfd624f0967c17057ece"
+ }
+}
