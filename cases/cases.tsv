@@ -466,3 +466,7 @@ kit-probe-readable-facts	fire	tool	write	registry/inventory.yaml	profiles: 15	DE
 kit-probe-readable-facts	fire	tool	write	registry/summary.yaml	12 identical/6 edited	DERIVE1: actual tracker moving split (ompkit...119); hard-coded split count would fire.	
 kit-probe-readable-facts	fire	tool	write	config/paths.toml	install_root = "/Users/example"	DERIVE1: bare user-home root is a probe-readable path literal.	
 kit-probe-readable-facts	fire	tool	write	config/paths.toml	cache_root = "/home/example"	DERIVE1: bare Linux home root is a probe-readable path literal.	
+kit-probe-readable-facts	quiet	tool	edit	fleet-watch.json	            "decision": "Stage 0 repair lane; pinned GATEDIAG1 ompkit-fp72.135.3.16 at chief request",	DERIVE1 / .3.16.2 (a): a dotted bead id beside the word pinned is not a version; this edit rewound director RusticPine 70+ times on 2026-10-26.	
+kit-probe-readable-facts	quiet	tool	edit	fleet-watch.json	            "pinned": ["ompkit-fp72.135.3.20", "ompkit-169hm"],	DERIVE1 / .3.16.2 (a): an inline pinned list of bead ids is a decision, not a hand-copied version.	
+kit-probe-readable-facts	fire	tool	edit	fleet-watch.json	            "pinned": "0.2.75",	DERIVE1 / .3.16.2 (a) planted negative: a real version literal beside pinned still fires.	
+kit-probe-readable-facts	fire	tool	write	config/omp.json	pinned_version = "omp 18.12.6"	DERIVE1 / .3.16.2 (a) planted negative: a version after a space still fires.	
