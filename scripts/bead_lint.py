@@ -1214,6 +1214,36 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
     return (not fails), {"failures": fails, "log": log}
 
 
+def live_ids(repo: str, timeout: int = 120) -> set[str]:
+    """Every tracker id, read live with `br list` (no flush, no tracker write)."""
+    rc, out, err = run(["br", "list", "--status", "all", "--deferred",
+                        "--limit", "0", "--json"], repo, timeout)
+    if rc != 0:
+        raise RuntimeError(f"br list failed rc={rc}: {(err or out)[:300]}")
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"br list unparsable: {exc}")
+    rows = data.get("issues", data) if isinstance(data, dict) else data
+    return {row["id"] for row in rows
+            if isinstance(row, dict) and row.get("id")}
+
+
+def lint_one(repo: str, bead_id: str) -> tuple[int, dict]:
+    """Per-bead verdict from the live tracker: the same checks the create and
+    update gates run (lint_bead_failures). Exit 0 PASS, 1 FAIL, 3 UNVERIFIED."""
+    try:
+        bead = live_bead(repo, bead_id)
+        byid = live_ids(repo) | {bead["id"]}
+    except (RuntimeError, OSError) as exc:
+        return 3, {"bead": bead_id, "verdict": "UNVERIFIED",
+                   "reason": str(exc)[:300]}
+    failures = lint_bead_failures(bead, byid)
+    return (1 if failures else 0), {
+        "bead": bead_id, "verdict": "FAIL" if failures else "PASS",
+        "failures": failures}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Upstream home: bead-lint north-star checks (a)-(j) + "
@@ -1227,7 +1257,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pretty", action="store_true",
                     help="indent the JSON")
     ap.add_argument("--out", default="", help="also write JSON to PATH")
+    ap.add_argument("--bead", default="",
+                    help="lint one bead from the live tracker (br show/list, "
+                    "no flush); exit 0 PASS, 1 FAIL, 3 UNVERIFIED")
+    ap.add_argument("--repo", default=".",
+                    help="tracker repo for --bead (the directory holding .beads)")
     args = ap.parse_args(argv)
+    if args.bead:
+        code, verdict = lint_one(os.path.abspath(args.repo), args.bead)
+        print(json.dumps(verdict, indent=2 if args.pretty else None,
+                         sort_keys=True))
+        return code
     if not args.selftest:
         ap.print_help()
         return 2
