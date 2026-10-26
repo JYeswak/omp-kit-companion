@@ -145,7 +145,10 @@ describe("kit-inbox-wake", () => {
 		expect(text).toContain("acknowledge each one after acting on it");
 	});
 
-	test("planted ESCREDELIVER: a wake an aborted run never consumed is sent once more, then dropped", async () => {
+	const aborted = { messages: [{ role: "assistant", stopReason: "aborted" }] };
+	const finished = { messages: [{ role: "assistant", stopReason: "stop" }] };
+
+	test("planted ESCREDELIVER: a wake an aborted (Esc) run dropped is sent once more, then dropped", async () => {
 		const f = fixture([
 			{ events: [], next_cursor: 100, tail_cursor: 100 },
 			{ events: [event(69720, 101)], next_cursor: 101, tail_cursor: 101 },
@@ -154,11 +157,44 @@ describe("kit-inbox-wake", () => {
 		await h.start();
 		await h.tick();
 		expect(h.sent.length).toBe(1);
-		h.fire("agent_end");
+		h.fire("agent_end", aborted);
 		expect(h.sent.map(s => s.content)).toEqual([h.sent[0]!.content, h.sent[0]!.content]);
 		expect(h.sent[1]!.deliverAs).toBe("followUp");
-		h.fire("agent_end");
+		h.fire("agent_end", aborted);
 		expect(h.sent.length).toBe(2);
+	});
+
+	test("planted DUPWAKE1: a wake queued mid-run is delivered after the run ends, so a normal run end never resends it", async () => {
+		// Lead seat, 2026-10-26: 69773 was consumed at 19:53:53Z and reached the seat again at 20:42Z, because every
+		// run end resent the follow-up omp had not delivered yet (it is delivered only after that run ends).
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69773, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		await h.tick();
+		h.fire("agent_end", finished);
+		expect(h.sent.length).toBe(1);
+		h.fire("message_end", { message: { role: "custom", customType: "kit-inbox-wake", content: h.sent[0]!.content } });
+		h.fire("agent_end", finished);
+		h.fire("agent_end", aborted);
+		expect(h.sent.length).toBe(1);
+		const rows = readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
+		expect(rows.map(r => [r.message_id, r.status])).toEqual([[69773, "WAKE_ENQUEUED"], [69773, "WAKE_CONSUMED"]]);
+	});
+
+	test("control: an agent_end with no messages (unknown stop reason) never resends", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69722, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		await h.tick();
+		h.fire("agent_end");
+		h.fire("agent_end", { messages: [] });
+		expect(h.sent.length).toBe(1);
 	});
 
 	test("control: a wake the agent consumed is never sent again", async () => {
@@ -170,10 +206,10 @@ describe("kit-inbox-wake", () => {
 		await h.start();
 		await h.tick();
 		h.fire("message_end", { message: { role: "custom", customType: "kit-inbox-wake", content: h.sent[0]!.content } });
-		h.fire("agent_end");
+		h.fire("agent_end", aborted);
 		expect(h.sent.length).toBe(1);
 		h.fire("message_end", { message: { role: "custom", customType: "other", content: "x" } });
-		h.fire("agent_end");
+		h.fire("agent_end", aborted);
 		expect(h.sent.length).toBe(1);
 	});
 });

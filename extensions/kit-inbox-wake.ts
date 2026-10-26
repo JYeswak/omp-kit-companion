@@ -156,8 +156,10 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	let cwd = "";
 	/** ESCREDELIVER (non-author review of 1d8af2d10b, 2026-10-26): an Esc runs clearQueue({forInterrupt}) and drops a
 	 *  queued follow-up, but the cursor already moved past its mail, so that mail never woke the seat again. Each wake
-	 *  stays pending until omp emits its message_end (the agent consumed it); a run that ends with a wake still pending
-	 *  re-sends it once. At most one duplicate per batch, if a client parks the wake past the run that would consume it. */
+	 *  stays pending until omp emits its message_end (the agent consumed it). Only a run that ended aborted re-sends
+	 *  a still-pending wake, once. DUPWAKE1 (lead seat 2026-10-26: 69773 consumed 19:53:53Z, delivered again 20:42Z):
+	 *  a follow-up queued during a run is delivered only after that run ends, so at a normal run end it is still
+	 *  pending by design; re-sending it there queued a duplicate of every mid-run wake. */
 	const pending = new Map<string, { resent: boolean; events: InboxEvent[] }>();
 	const ledger = join(home, ".local", "state", "omp-kit", "mail-wake.jsonl");
 
@@ -232,7 +234,10 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			// The wake reached the agent; a ledger write failure only loses the receipt row.
 		}
 	});
-	pi.on("agent_end", () => {
+	pi.on("agent_end", (event: { messages?: Array<{ role?: unknown; stopReason?: unknown }> }) => {
+		const messages = Array.isArray(event?.messages) ? event.messages : [];
+		const last = [...messages].reverse().find(m => m?.role === "assistant");
+		if (last?.stopReason !== "aborted") return;
 		for (const [content, hit] of pending) {
 			if (hit.resent) {
 				pending.delete(content);
