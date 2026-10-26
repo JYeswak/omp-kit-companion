@@ -17,7 +17,7 @@ Current release: v0.2.75
 <!-- kit-release:end -->
 
 A tested rule pack, 11 guard extensions, five skills, and a guarded CLI with
-46 top-level commands for an existing OMP install.
+48 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -53,7 +53,7 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Diagnostics cover 38 scopes. The reference lists all 46 commands. Fleet
+Diagnostics cover 38 scopes. The reference lists all 48 commands. Fleet
 guards, services and the update channel are opt-in.
 
 ### Why use omp-kit
@@ -495,7 +495,7 @@ explicit report rather than inventing zero activity.
 | Command | Usage | What it does | Example |
 |---|---|---|---|
 | `omp-kit status` | `status` | Kit and OMP presence; runtime `effective_rules` is `NOT_RUN` (use `doctor --scope rules --json`); changes nothing | `omp-kit status --json` |
-| `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append an evidence-backed lesson; optionally save its clean path on shared main and fast-forward publish | `omp-kit lessons add --class MISSING_EDGE --what 'Caller was unwired' --evidence 'native CLI exit 2' --json` |
+| `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append an evidence-backed lesson; optionally save its clean path on shared main and fast-forward publish | `omp-kit lessons add --class MISSING_EDGE --what w --evidence e` |
 | `omp-kit fleet-lessons` | `fleet-lessons [--project PATH]... [--json]` | Read current lesson advice, preserved history and unresolved references without intake, classification or service effects | `omp-kit fleet-lessons --project . --json` |
 | `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable automatic coverage | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |
@@ -514,8 +514,9 @@ explicit report rather than inventing zero activity.
 | `omp-kit memory` | `memory audit --store-root PATH --yes` | Separately consented audit of a Mnemopi store | `omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json` |
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run into a fresh `--db`, or `--apply` to a tracker) | `omp-kit planning score --fleet --json` |
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes; `anchor` compares the live-doc Mission statement with the record (`AGREE`/`DRIFT`) | `omp-kit mission anchor --json` |
-| `omp-kit preflight` | `preflight commit\|claim\|in-review\|close [BEAD]` | Every finding an act faces, with remedy and fix, at once, changing nothing | `omp-kit preflight` |
-| `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned in-progress/rework claims; reclaim only with no live holder (seat, mail in 24 h, reservation). LIVE protected; UNKNOWN never reclaimed | `omp-kit drain stale-claims --project . --json` |
+| `omp-kit preflight` | `preflight commit\|claim\|in-review\|close [BEAD]` | Every finding an act faces, with fix, at once; changes nothing | `omp-kit preflight close x` |
+| `omp-kit verify` | `verify BEAD --export SHA` | Non-author close: replay each box's command on the export, judge by named outcome, tick, gate, close | `omp-kit verify x` |
+| `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned claims; reclaim only with no live holder (seat, mail in 24 h, reservation); UNKNOWN never reclaimed | `omp-kit drain stale-claims --project .` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 124 over budget, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME]` | Read-only next action and applicable skills ([docs/next.md](docs/next.md)) | `omp-kit next --role worker --json` |
@@ -531,8 +532,8 @@ explicit report rather than inventing zero activity.
 | `omp-kit fleet` | `fleet respawn [--panes SESSION:W.P,...] [--apply --yes]` | Report panes whose omp predates the latest applied relink; `--apply` respawns named idle panes with `--resume`, strictly serially; busy, frozen, dirty, holding and sessionless panes never touched | `omp-kit fleet respawn --json` |
 | `omp-kit scratch` | `scratch plan\|release DIR\|apply [--apply --yes]` | Release, quarantine and delete scratch; idle 72 h goes to quarantine, quarantine expires after 7 days | `omp-kit scratch plan --json` |
 | `omp-kit scratch` | `scratch index-lock --repo DIR` | Dry-run report for a stale holder-less empty .git/index.lock; `--apply` is always refused and no lock is moved | `omp-kit scratch index-lock --repo /repo --json` |
-| `omp-kit tern` | `tern catalog\|doctor\|ctl\|script\|native\|api\|sdk\|coverage\|surface\|render` | [Native SDK/control integration](docs/tern-integration.md), context-bound Luau, independent declaration/docs drift and wire codecs; explicit targets and confirmation, not automatic fleet promotion | `omp-kit tern catalog --filter cx.agents --json` |
-| `omp-kit tern-ref` | `tern-ref build\|query\|validate\|drift [--root DIR]` | Version-pinned local Tern Plugin SDK reference: crawl docs, chunk `tern.d.luau` per member, index nomic+qwen, blind-label eval, isolated serve checks, drift re-index | `omp-kit tern-ref query --query 'how do I restyle without rebuilding' --json` |
+| `omp-kit tern` | `tern catalog\|doctor\|ctl\|script\|native\|api\|sdk\|coverage\|surface\|render` | [Native SDK/control integration](docs/tern-integration.md): context-bound Luau, drift, wire codecs; explicit targets | `omp-kit tern catalog --filter cx.agents` |
+| `omp-kit tern-ref` | `tern-ref build\|query\|validate\|drift [--root DIR]` | Version-pinned local Tern Plugin SDK reference: crawl docs, chunk `tern.d.luau` per member, index nomic+qwen, blind-label eval, isolated serve checks, drift re-index | `omp-kit tern-ref query --query 'restyle without rebuild'` |
 | `omp-kit infra` | `infra pin\|check\|promote\|undo` | Pin the gate toolchain, test a candidate binary, and let a human promote it | `omp-kit infra pin --json` |
 | `omp-kit ci` | `ci status` | Cached CI status per repo; `UNAVAILABLE` when the cache is older than 180 s | `omp-kit ci status --json` |
 | `omp-kit examples` | `examples [memory-off\|mnemopi-manual\|model-roles\|mcp\|omp-watch\|skill-set --from-history DAYS]` | Read-only profile recipes; never activates a profile | `omp-kit examples skill-set --from-history 7 --json` |

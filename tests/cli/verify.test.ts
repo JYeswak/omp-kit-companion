@@ -1,0 +1,91 @@
+import { expect, test } from "bun:test";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { verifyBead } from "../../src/verify.ts";
+import { run } from "../../src/kitlib/run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+
+const base = ownedTmp("verify-test").path;
+
+async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {
+	const r = await run(cmd, { cwd, deadline_s: 60, env: env ? { ...process.env, ...env } as Record<string, string> : undefined });
+	if (r.rc !== 0) throw new Error(`${cmd.join(" ")} -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);
+	return new TextDecoder().decode(r.stdout);
+}
+
+/** A repo whose HEAD carries scripts/t.sh (prints `16 pass 0 fail`, exit 0) and scripts/bad.sh (exit 1). */
+async function repo(name: string): Promise<{ dir: string; sha: string }> {
+	const dir = join(base, name);
+	mkdirSync(join(dir, "scripts"), { recursive: true });
+	writeFileSync(join(dir, "scripts", "t.sh"), "#!/bin/sh\necho ' 16 pass'\necho ' 0 fail'\n");
+	writeFileSync(join(dir, "scripts", "bad.sh"), "#!/bin/sh\necho 'selftest: FAIL'\nexit 1\n");
+	await sh(["git", "init", "-q"], dir);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], dir);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], dir);
+	return { dir, sha: (await sh(["git", "rev-parse", "HEAD"], dir)).trim() };
+}
+
+/** A fake br: `show` prints the bead; every other act appends its argv to a log file. */
+function fakeBr(dir: string, bead: Record<string, unknown>): { env: Record<string, string>; acts: () => string[] } {
+	const bin = join(dir, "bin");
+	mkdirSync(bin, { recursive: true });
+	const log = join(dir, "br-acts.log");
+	writeFileSync(join(bin, "br"), `#!/bin/sh\nif [ "$1" = show ]; then printf '%s' '${JSON.stringify([bead]).replace(/'/g, "'\\''")}'; exit 0; fi\nprintf '%s\\x1e' "$*" >> ${JSON.stringify(log)}\nexit 0\n`);
+	chmodSync(join(bin, "br"), 0o755);
+	return { env: { PATH: `${bin}:${process.env.PATH ?? ""}` }, acts: () => { try { return readFileSync(log, "utf8").split("\x1e").filter(Boolean); } catch { return []; } } };
+}
+
+const inReview = (ac: string) => ({ id: "kit-1", status: "in_review", assignee: "Author", updated_at: "2026-10-26T00:00:00Z", labels: [], acceptance_criteria: ac });
+
+test("verify closes a bead whose boxes name commands with expected outcomes: replays on the export, ticks, gate, close with the command log; family disclosed", async () => {
+	const { dir, sha } = await repo("good");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [landed] `sh scripts/t.sh` expect: prints 0 fail\n- [ ] [v] [live] Verification: a non-author replays."));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, family: "same (claude)" });
+	expect(res.code).toBe("CLOSED");
+	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"]]);
+	const acts = br.acts();
+	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2");
+	expect(acts[1]).toBe("gate report kit-1 --gate min_reviewers --provider reviewer:Peer --status pass --to closed");
+	expect(acts[2]).toStartWith("close kit-1 --reason verified by Peer (family: same (claude)) on export " + sha);
+	expect(acts[2]).toContain("[a] sh scripts/t.sh -> summary 16 pass 0 fail: found");
+});
+
+test("planted: the author's own seat is refused NON_AUTHOR_REQUIRED and nothing is run", async () => {
+	const { dir, sha } = await repo("self");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Author", env: br.env });
+	expect(res.code).toBe("NON_AUTHOR_REQUIRED");
+	expect(res.replays).toEqual([]);
+	expect(br.acts()).toEqual([]);
+});
+
+test("planted: a box naming no command is ACCEPTANCE_NOT_REPLAYABLE and the bead is sent back to intake, not closed", async () => {
+	const { dir, sha } = await repo("noreplay");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] the feature works and the UI looks right\n- [ ] [b] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
+	expect(res.log).toContain("[a] names no command");
+	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake"]]);
+	expect(br.acts()).toEqual([]);
+});
+
+test("planted: a box whose command fails sets REWORK naming the box; exit 0 with the wrong output also fails (named outcome beats exit code)", async () => {
+	const { dir, sha } = await repo("rework");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [landed] `sh scripts/bad.sh` -> prints PASS\n- [ ] [c] [landed] `sh scripts/t.sh` -> 99 pass"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("REWORK");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", false], ["c", false]]);
+	const acts = br.acts();
+	expect(acts).toHaveLength(1);
+	expect(acts[0]).toStartWith("update kit-1 --status rework --transition-comment REWORK kit-1: [b] output lacks \"PASS\"; [c] summary 99 pass: not found");
+});
+
+test("exit-only boxes are judged by rc and flagged in the close reason; --dry-run runs nothing against the tracker", async () => {
+	const { dir, sha } = await repo("exitonly");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh`; planted: nothing"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
+	expect(res.code).toBe("DRY_RUN");
+	expect(res.replays[0]).toMatchObject({ letter: "a", pass: true, outcome: "exit-only" });
+	expect(res.acts[2]?.join(" ")).toContain("exit-only boxes: [a]");
+	expect(br.acts()).toEqual([]);
+});

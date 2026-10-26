@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { preflightBead, preflightCommit } from "./preflight.ts";
+import { verifyBead, verifyProject } from "./verify.ts";
 import { renderEnvelope } from "./kitlib/findings.ts";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -4056,6 +4057,19 @@ function preflightProject(request: ParsedCommand): string | CliResult {
 	if (flag !== undefined && (typeof flag !== "string" || !flag.trim())) return refusal("INVALID_FLAG", "--project requires a non-empty path", "Pass --project PATH or run from the repository root.");
 	return resolve(typeof flag === "string" ? flag : process.cwd());
 }
+// AUTOCOMPLETE1 [b] (ompkit-fp72.135.3.17): the one non-author close verb.
+registerCommandHandler("verify", async request => {
+	if (!request.argument) return refusal("MISSING_ARGUMENT", "A bead id is required", "Use omp-kit verify BEAD --export SHA.");
+	const exportSha = request.flags.get("--export");
+	if (typeof exportSha !== "string" || !/^[0-9a-f]{7,40}$/.test(exportSha.trim())) return refusal("INVALID_FLAG", "--export requires a commit sha", "Pass --export <sha> of the exact commit to replay.");
+	const actorFlag = request.flags.get("--actor");
+	const actor = typeof actorFlag === "string" && actorFlag.trim() ? actorFlag.trim() : process.env.AGENT_NAME;
+	if (!actor) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
+	const family = request.flags.get("--family");
+	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo: verifyProject(request.flags.get("--project")), actor, family: typeof family === "string" ? family : undefined, dryRun: request.flags.get("--dry-run") === true });
+	const code = res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
+	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log }, verification: res.code === "DRY_RUN" ? "NOT_RUN" : "PERFORMED" };
+});
 registerCommandHandler("preflight commit", async request => {
 	const repo = preflightProject(request);
 	if (typeof repo !== "string") return repo;

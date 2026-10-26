@@ -567,6 +567,31 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db; refused with --db" },
 		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },
 	], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false },
+	{ name: "verify", description: "The one non-author close verb: export the exact commit, replay every acceptance command, judge each box by its named expected outcome, tick, report the reviewer gate under your identity, close with the command log; refuses the author, a box with no command, or a failing box (REWORK naming it)", usage: "verify BEAD --export SHA [--actor NAME] [--family TEXT] [--project PATH] [--dry-run] [--json]", argument: "BEAD", flags: [
+		{ name: "--export", value: "SHA", description: "The exact commit to replay against (git archive into owned scratch)" },
+		{ name: "--actor", value: "NAME", description: "The closing seat; defaults to AGENT_NAME" },
+		{ name: "--family", value: "TEXT", description: "Verifier model family, disclosed in the close reason (e.g. 'same (claude)')" },
+		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+		{ name: "--dry-run", description: "Replay and print the acts; change nothing in the tracker" },
+	] },
+	{ name: "preflight", description: "Run every check an act will face and print every finding with its remedy and fix in one envelope; changes nothing (GATEDIAG1)", usage: "preflight commit [--message FILE] | claim|in-review|close BEAD [--actor NAME] [--project PATH] [--json]", flags: [], subcommands: [
+		{ name: "commit", description: "Judge the staged index with the pre-commit and commit-msg chain members and run each staged script's --selftest; bound to the staged tree id", usage: "preflight commit [--message FILE] [--project PATH] [--json]", flags: [
+			{ name: "--message", value: "FILE", description: "Commit message file to judge; defaults to the repo's prepared COMMIT_EDITMSG" },
+			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+		] },
+		{ name: "claim", description: "Judge the tracker's claim predicates for one bead; bound to its updated_at", usage: "preflight claim BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
+			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
+			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+		] },
+		{ name: "in-review", description: "Judge the in_review transition predicates for one bead (phase tags, checklist, transition comment)", usage: "preflight in-review BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
+			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
+			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+		] },
+		{ name: "close", description: "Judge the close predicates for one bead (in_review, non-author, every box ticked, reviewer gate, reason)", usage: "preflight close BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
+			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
+			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+		] },
+	] },
 	{ name: "preflight", description: "Run every check an act will face and print every finding with its remedy and fix in one envelope; changes nothing (GATEDIAG1)", usage: "preflight commit [--message FILE] | claim|in-review|close BEAD [--actor NAME] [--project PATH] [--json]", flags: [], subcommands: [
 		{ name: "commit", description: "Judge the staged index with the pre-commit and commit-msg chain members and run each staged script's --selftest; bound to the staged tree id", usage: "preflight commit [--message FILE] [--project PATH] [--json]", flags: [
 			{ name: "--message", value: "FILE", description: "Commit message file to judge; defaults to the repo's prepared COMMIT_EDITMSG" },
