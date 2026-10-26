@@ -110,8 +110,26 @@ describe("kit-inbox-wake", () => {
 		const off = fixture([{ events: [], next_cursor: 1, tail_cursor: 1 }]);
 		const h2 = harness({ ...off.deps, policyOn: async () => false });
 		await h2.start();
+		await h2.tick();
 		expect(off.calls).toEqual([]);
-		expect(h2.intervals).toEqual([]);
+		expect(h2.sent).toEqual([]);
+	});
+
+	test("planted RESTARTRACE1: a seat whose project is not on at start begins reading once it is", async () => {
+		// 2026-10-26 17:26:51Z: the lead's new omp started before the seat registry re-listed its block (17:27:06Z).
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69641, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		let listed = false;
+		const h = harness({ ...f.deps, policyOn: async () => listed });
+		await h.start();
+		expect(f.calls).toEqual([]);
+		listed = true;
+		await h.tick();
+		await h.tick();
+		expect(f.calls).toEqual([null, 100]);
+		expect(h.sent.map(s => s.content.split("\n")[1])).toEqual(["#69641 from RusticPine: subject 69641"]);
 	});
 
 	test("wakeText names every message and the action", () => {

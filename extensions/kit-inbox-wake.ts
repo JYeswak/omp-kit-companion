@@ -152,6 +152,20 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	let busy = false;
 	let project = "";
 	let path = "";
+	let cwd = "";
+
+	/** RESTARTRACE1 (J-2026-10-26-20): the registry naming this seat's project lists a Tern block only while omp runs
+	 *  in it, so a restarted seat can start before it is re-listed (lead 2026-10-26: omp up 17:26:51Z, block re-listed
+	 *  17:27:06Z). The project and its fleet policy are resolved on every tick until on, then kept for this process. */
+	async function tick(): Promise<void> {
+		if (path === "") {
+			const candidate = env.AGENT_MAIL_PROJECT || registeredRepo(home, env) || cwd;
+			if (!(await policyOn(candidate).catch(() => false))) return;
+			project = candidate;
+			path = cursorPath(home, agent!, project);
+		}
+		await poll();
+	}
 
 	async function poll(): Promise<void> {
 		if (busy) return;
@@ -186,11 +200,9 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		project = env.AGENT_MAIL_PROJECT || registeredRepo(home, env) || ctx.cwd;
-		if (!(await policyOn(project))) return;
-		path = cursorPath(home, agent, project);
-		await poll();
-		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => poll(), INBOX_POLL_MS);
+		cwd = ctx.cwd;
+		await tick();
+		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => tick(), INBOX_POLL_MS);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (timer !== null) {
