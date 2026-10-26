@@ -12,8 +12,12 @@ import { run } from "../src/kitlib/run.ts";
  * 2026-10-26 (chief seats unbound to panes; a goal-mode seat is never idle, so a busy-gated paste never ran; a pane
  * paste into a busy seat strands a draft a person must submit, J-2026-10-26-14). So the recipient wakes itself, in
  * process: every INBOX_POLL_MS it reads its durable inbox delivery events (`am inbox-events --after <cursor>`), and
- * new messages addressed to it become one `deliverAs: "aside"` message. omp injects an aside at the next agent step
- * without interrupting the running tool batch, and starts a turn when the seat is idle.
+ * new messages addressed to it become one `deliverAs: "followUp"` message with `triggerTurn`. While the seat works,
+ * omp queues a follow-up until the run has no more tool calls or steering, so the wake never lands mid-turn; on an
+ * idle seat `triggerTurn` starts a turn at once. (Until 2026-10-26 this was an aside, which omp injects at the next
+ * step boundary inside a running turn: Joshua, J-2026-10-26-19, "the mail wake seems to interrupt your work instead
+ * of just queuing it".) An Esc interrupt drops queued non-user messages, so a wake queued at that moment is lost;
+ * the mail itself stays unread in the inbox.
  *
  * The cursor is kept per (agent, project) under ~/.local/state/omp-kit/inbox-wake/, so mail that arrives while the
  * seat is restarting is delivered on its next start; the first start ever takes the current tail (no backlog flood).
@@ -108,7 +112,7 @@ function writeCursor(path: string, agent: string, project: string, cursor: numbe
 	renameSync(tmp, path);
 }
 
-/** The one aside line a batch of new messages becomes. */
+/** The one follow-up line a batch of new messages becomes. */
 export function wakeText(agent: string, events: InboxEvent[]): string {
 	const lines = events.map(e => `#${e.message_id} from ${e.from}${e.ack_required ? " [ack required]" : ""}: ${e.subject}`);
 	return `MAIL WAKE for ${agent}: ${events.length} new Agent Mail message(s).\n${lines.join("\n")}\n` +
@@ -163,13 +167,13 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			const fresh = got.events.filter(e => e.from !== agent && (e.kind === "to" || e.kind === "cc"));
 			if (fresh.length > 0) {
 				pi.sendMessage({ customType: "kit-inbox-wake", content: wakeText(agent!, fresh), display: true },
-					{ deliverAs: "aside", triggerTurn: true });
+					{ deliverAs: "followUp", triggerTurn: true });
 				const ledger = join(home, ".local", "state", "omp-kit", "mail-wake.jsonl");
 				const ts = now().toISOString();
 				for (const e of fresh) {
 					appendFileSync(ledger, JSON.stringify({
 						ts, message_id: e.message_id, project_key: project, sender: e.from, recipient: agent,
-						subject: e.subject, status: "WOKEN_INPROCESS", detail: "kit-inbox-wake aside", cursor: e.cursor,
+						subject: e.subject, status: "WOKEN_INPROCESS", detail: "kit-inbox-wake followUp", cursor: e.cursor,
 					}) + "\n");
 				}
 			}

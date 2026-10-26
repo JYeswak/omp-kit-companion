@@ -41,7 +41,7 @@ function fixture(reads: Array<InboxRead | null>, env: Record<string, string> = {
 }
 
 describe("kit-inbox-wake", () => {
-	test("first start takes the tail, a later message wakes the seat once as an aside", async () => {
+	test("first start takes the tail, a later message wakes the seat once as a queued follow-up", async () => {
 		const f = fixture([
 			{ events: [], next_cursor: 100, tail_cursor: 100 },
 			{ events: [event(69601, 101), event(69602, 103)], next_cursor: 103, tail_cursor: 103 },
@@ -52,7 +52,9 @@ describe("kit-inbox-wake", () => {
 		await h.tick();
 		expect(f.calls).toEqual([null, 100]);
 		expect(h.sent.length).toBe(1);
-		expect(h.sent[0]!.deliverAs).toBe("aside");
+		// J-2026-10-26-19: an aside lands at the next step boundary inside a running turn (36 of 60 wakes on
+		// 2026-10-26); a follow-up waits for the run to end, and triggerTurn wakes an idle seat.
+		expect(h.sent[0]!.deliverAs).toBe("followUp");
 		expect(h.sent[0]!.triggerTurn).toBe(true);
 		expect(h.sent[0]!.content).toContain("#69601 from RusticPine: subject 69601");
 		expect(h.sent[0]!.content).toContain("#69602 from RusticPine [ack required]");
