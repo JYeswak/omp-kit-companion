@@ -1,0 +1,120 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ownedTmp } from "../src/kitlib/tmp.ts";
+import kitInboxWake, { cursorPath, type InboxEvent, type InboxRead, type InboxWakeDeps, wakeText } from "./kit-inbox-wake";
+
+type Sent = { content: string; deliverAs?: string; triggerTurn?: boolean };
+
+function harness(deps: InboxWakeDeps) {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const sent: Sent[] = [];
+	const intervals: Array<() => unknown> = [];
+	const pi = {
+		on: (event: string, handler: (event: never, ctx: never) => unknown) => handlers.set(event, handler),
+		sendMessage: (message: { content: string }, options?: { deliverAs?: string; triggerTurn?: boolean }) =>
+			sent.push({ content: message.content, deliverAs: options?.deliverAs, triggerTurn: options?.triggerTurn }),
+	};
+	const ctx = { cwd: "/repo", setInterval: (cb: () => unknown) => { intervals.push(cb); return intervals.length; }, clearTimer: () => {} };
+	return {
+		sent, intervals,
+		start: async () => { await kitInboxWake(pi, deps); await (handlers.get("session_start") as (e: never, c: never) => Promise<void>)({} as never, ctx as never); },
+		tick: async () => { await intervals[0]!(); },
+	};
+}
+
+const event = (id: number, cursor: number, from = "RusticPine", kind = "to"): InboxEvent =>
+	({ cursor, message_id: id, kind, subject: `subject ${id}`, from, ack_required: id % 2 === 0 });
+
+const dirs: Array<{ path: string; cleanup: () => void }> = [];
+afterEach(() => { for (const d of dirs.splice(0)) d.cleanup(); });
+
+function fixture(reads: Array<InboxRead | null>, env: Record<string, string> = { AGENT_NAME: "PeachLeopard" }) {
+	const dir = ownedTmp("inbox-wake-test");
+	dirs.push(dir);
+	const calls: Array<number | null> = [];
+	const deps: InboxWakeDeps = {
+		home: dir.path, env, now: () => new Date("2026-10-26T17:00:00Z"), policyOn: async () => true,
+		read: async (_agent, _project, after) => { calls.push(after); return reads.shift() ?? null; },
+	};
+	return { dir: dir.path, calls, deps };
+}
+
+describe("kit-inbox-wake", () => {
+	test("first start takes the tail, a later message wakes the seat once as an aside", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69601, 101), event(69602, 103)], next_cursor: 103, tail_cursor: 103 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		expect(h.sent).toEqual([]);
+		await h.tick();
+		expect(f.calls).toEqual([null, 100]);
+		expect(h.sent.length).toBe(1);
+		expect(h.sent[0]!.deliverAs).toBe("aside");
+		expect(h.sent[0]!.triggerTurn).toBe(true);
+		expect(h.sent[0]!.content).toContain("#69601 from RusticPine: subject 69601");
+		expect(h.sent[0]!.content).toContain("#69602 from RusticPine [ack required]");
+		const cursor = JSON.parse(readFileSync(cursorPath(f.dir, "PeachLeopard", "/repo"), "utf8"));
+		expect(cursor.cursor).toBe(103);
+		const ledger = readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
+		expect(ledger.map(r => [r.message_id, r.status, r.recipient])).toEqual([[69601, "WOKEN_INPROCESS", "PeachLeopard"], [69602, "WOKEN_INPROCESS", "PeachLeopard"]]);
+	});
+
+	test("planted: an unreadable inbox keeps the cursor, so the same mail is delivered on the next poll", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			null,
+			{ events: [event(69601, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		await h.tick();
+		expect(h.sent).toEqual([]);
+		await h.tick();
+		expect(f.calls).toEqual([null, 100, 100]);
+		expect(h.sent.length).toBe(1);
+	});
+
+	test("planted: the seat's own sends and bcc-free noise never wake it", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(69601, 101, "PeachLeopard"), event(69602, 102, "RusticPine", "bcc")], next_cursor: 102, tail_cursor: 102 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		await h.tick();
+		expect(h.sent).toEqual([]);
+		expect(existsSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"))).toBe(false);
+	});
+
+	test("a restarted seat resumes from its stored cursor and gets mail sent while it was down", async () => {
+		const f = fixture([{ events: [], next_cursor: 100, tail_cursor: 100 }]);
+		await harness(f.deps).start();
+		const reads: Array<InboxRead | null> = [{ events: [event(69605, 104)], next_cursor: 104, tail_cursor: 104 }];
+		const calls: Array<number | null> = [];
+		const h2 = harness({ ...f.deps, read: async (_a, _p, after) => { calls.push(after); return reads.shift() ?? null; } });
+		await h2.start();
+		expect(calls).toEqual([100]);
+		expect(h2.sent.length).toBe(1);
+	});
+
+	test("planted: no AGENT_NAME, or a project outside the fleet, registers nothing", async () => {
+		const noName = fixture([{ events: [], next_cursor: 1, tail_cursor: 1 }], {});
+		const h = harness(noName.deps);
+		await h.start().catch(() => { /* no handler registered */ });
+		expect(noName.calls).toEqual([]);
+		const off = fixture([{ events: [], next_cursor: 1, tail_cursor: 1 }]);
+		const h2 = harness({ ...off.deps, policyOn: async () => false });
+		await h2.start();
+		expect(off.calls).toEqual([]);
+		expect(h2.intervals).toEqual([]);
+	});
+
+	test("wakeText names every message and the action", () => {
+		const text = wakeText("QuietBadger", [event(1, 1), event(2, 2)]);
+		expect(text.split("\n")[0]).toBe("MAIL WAKE for QuietBadger: 2 new Agent Mail message(s).");
+		expect(text).toContain("acknowledge each one after acting on it");
+	});
+});

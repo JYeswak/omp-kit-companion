@@ -19,7 +19,8 @@
       "extensions/kit-goal-keepalive.ts",
       "extensions/kit-agent-mail-guard.ts",
       "extensions/secret-output-guard.ts",
-      "extensions/kit-composer-state.ts"
+      "extensions/kit-composer-state.ts",
+      "extensions/kit-inbox-wake.ts"
     ],
     "notLoadedExtensions": {
       "extensions/adapter.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
