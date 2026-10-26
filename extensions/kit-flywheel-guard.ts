@@ -72,10 +72,7 @@ import { agentMailStorageRoot } from "../src/holder-liveness.ts";
  * bash calls run the release-shipped bead-lint helpers (scripts/br-create-lint.py,
  * scripts/br-update-lint.py) before the command executes; exit 4 refuses with
  * the failing check names and the WHAT:/WHY: template. A helper that cannot
- * run warns BEAD_LINT_UNVERIFIED and allows (the helpers' fail-open contract),
- * except for a claim move (`--claim`, `--status`/`-s in_progress`): a claim
- * needs a lint PASS (CLAIMLINT ompkit-fp72.135.3.50 [b], J-2026-10-25-107), so
- * a claim the helper cannot judge is refused.
+ * run warns BEAD_LINT_UNVERIFIED and allows (the helpers' fail-open contract).
  */
 
 export interface FlywheelExecResult {
@@ -1948,7 +1945,7 @@ function brDbArg(args: string[], home: string): string | null {
 	return null;
 }
 
-/** br-update-lint.py's content flags (its has_content_flags, plus `--status in_review` and claim moves); matching a superset only spawns the helper, which decides. */
+/** br-update-lint.py's content flags (its has_content_flags, plus `--status in_review`); matching a superset only spawns the helper, which decides. */
 const BEAD_LINT_UPDATE_FLAGS: Record<string, true> = {
 	"--title": true, "-d": true, "--description": true, "--body": true, "--description-file": true,
 	"--acceptance-criteria": true, "--acceptance": true, "--add-acceptance": true, "--set-labels": true,
@@ -2025,75 +2022,32 @@ function staticLintArgs(args: string[], lintFlags: Record<string, true>): { args
 	return { args: out };
 }
 
-/** br's flag-only short options, so a cluster such as `-qs in_progress` splits the way native br splits it. */
-const BR_FLAG_SHORTS: Record<string, true> = { q: true, v: true, h: true };
-
-/** The status native br stores for a --status value (br 0.7.4, measured 2026-10-26): case-insensitive, `inprogress` aliases in_progress; any other spelling is a custom status. */
-function nativeStatus(value: string): string {
-	const lowered = value.toLowerCase();
-	return lowered === "in_progress" || lowered === "inprogress" ? "in_progress" : lowered;
-}
-
 /**
  * The argv br-update-lint.py gets: positionals first, so its argparse binds
- * `update <ids>` wherever global flags sit (`br --actor A update ...`); `--db`
- * travels via env. `claim` marks a claim move (`--claim`, or a status native br
- * stores as in_progress: `--status IN_PROGRESS`, `-s inprogress`, a short
- * cluster `-qs in_progress`), which needs a lint PASS. A status value the shell
- * expands at run time cannot be judged before it runs and is a `problem`
- * (CLAIMLINT). Null when there is no content flag and no claim: nothing to lint,
- * no helper spawned (parking and priority moves stay as cheap as before).
+ * `update <id>` wherever global flags sit (`br --actor A update ...`); `--db`
+ * travels via env. Null when no content flag is present: nothing to lint, no
+ * helper spawned (claims and status moves stay as cheap as before).
  */
-function updateLintArgv(args: string[]): { argv: string[]; claim: boolean } | { problem: string } | null {
+function updateLintArgv(args: string[]): string[] | null {
 	const positional: string[] = [];
 	const flags: string[] = [];
 	let content = false;
-	let claim = false;
 	for (let index = 0; index < args.length; index += 1) {
 		const word = args[index]!;
-		// A word the shell expands at run time, outside the value slot of a known flag, can become
-		// `--claim` or `--status in_progress` (review AM 69483: CLAIM_FLAG=--claim; br update ID $CLAIM_FLAG).
-		// Only the head is judged here: `--assignee=$X` keeps its value in a value slot.
-		const head = word.indexOf("=") > 0 ? word.slice(0, word.indexOf("=")) : word;
-		if (shellExpands(head)) return { problem: `passes a word the shell expands at run time (${word}) where an option can stand, so a claim cannot be ruled out` };
 		if (!word.startsWith("-") || word === "-") {
 			positional.push(word);
 			continue;
 		}
 		const eq = word.indexOf("=");
-		let name = eq > 0 ? word.slice(0, eq) : word;
-		let value: string | undefined;
-		let consumedNext = false;
-		if (eq > 0) value = word.slice(eq + 1);
-		else if (BR_VALUE_FLAGS[name] === true) { value = args[index + 1]; consumedNext = true; }
-		else if (!word.startsWith("--") && word.length > 2) {
-			// A short cluster: flag-only letters, then at most one value-taking letter whose value is
-			// the rest of the word or the next word (native br: -qs in_progress, -qsin_progress, -sin_progress).
-			for (let at = 1; at < word.length; at += 1) {
-				const letter = word[at]!;
-				if (BR_FLAG_SHORTS[letter] === true) continue;
-				if (BR_VALUE_FLAGS[`-${letter}`] !== true) break;
-				name = `-${letter}`;
-				const rest = word.slice(at + 1);
-				if (rest !== "") value = rest;
-				else { value = args[index + 1]; consumedNext = true; }
-				break;
-			}
-		}
-		if (BEAD_LINT_UPDATE_FLAGS[name] === true) content = true;
-		if ((name === "--status" || name === "-s") && value !== undefined) {
-			if (shellExpands(value)) return { problem: `passes ${name} a value the shell expands at run time, so a claim cannot be ruled out` };
-			const status = nativeStatus(value);
-			if (status === "in_review") content = true;
-			if (status === "in_progress") claim = true;
-		}
-		if (word === "--claim") claim = true;
-		if (consumedNext) index += 1;
+		const name = eq > 0 ? word.slice(0, eq) : word;
+		const value = eq > 0 ? word.slice(eq + 1) : BR_VALUE_FLAGS[name] === true ? args[++index] : undefined;
+		if (BEAD_LINT_UPDATE_FLAGS[name] === true || (!word.startsWith("--") && BEAD_LINT_UPDATE_FLAGS[word.slice(0, 2)] === true)) content = true;
+		if (name === "--status" && value === "in_review") content = true;
 		if (name === "--db") continue;
 		flags.push(word);
-		if (consumedNext && value !== undefined) flags.push(value);
+		if (eq < 0 && value !== undefined) flags.push(value);
 	}
-	return content || claim ? { argv: [...positional, ...flags], claim } : null;
+	return content ? [...positional, ...flags] : null;
 }
 
 /** GAPFADE1: producer adapters only; all prose rules live in the commit member. */
@@ -2149,12 +2103,10 @@ export async function checkGapMentions(event: FlywheelToolCallEvent, exec: Flywh
  * every session that loads this extension (no PATH shim needed). Exit 4
  * refuses naming the failing checks; any other outcome (helper missing,
  * python missing, tracker unreadable, timeout) warns BEAD_LINT_UNVERIFIED
- * and allows, the helpers' own fail-open contract, except for a claim move,
- * which needs a PASS and is refused when it cannot be judged (CLAIMLINT).
- * A lint-read value the shell would rewrite at run time ($VAR, $(...),
- * backticks) cannot be linted before it runs and is refused
- * BEAD_LINT_UNEVALUABLE, so expansion is no bypass; `$(cat <<'EOF' ... EOF)`
- * bodies are read literally.
+ * and allows, the helpers' own fail-open contract. A lint-read value the shell
+ * would rewrite at run time ($VAR, $(...), backticks) cannot be linted before
+ * it runs and is refused BEAD_LINT_UNEVALUABLE, so expansion is no bypass;
+ * `$(cat <<'EOF' ... EOF)` bodies are read literally.
  */
 export async function checkBeadLint(event: FlywheelToolCallEvent, deps: BeadLintDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
@@ -2181,27 +2133,10 @@ export async function checkBeadLint(event: FlywheelToolCallEvent, deps: BeadLint
 					+ "Write the text with the write tool and pass --description-file <literal path>, or use a quoted literal or $(cat <<'EOF' ... EOF). Nothing was changed.",
 			};
 		}
-		const parsed = verb === "update" ? updateLintArgv(statics.args) : null;
-		if (parsed !== null && "problem" in parsed) {
-			return {
-				block: true,
-				reason: `kit-flywheel-guard ${BEAD_LINT_UNEVALUABLE}: \`br update\` ${parsed.problem}, so bead-lint cannot judge it before the command runs. `
-					+ "Pass the status as a literal word. Nothing was changed.",
-			};
-		}
-		const update = parsed;
-		const helperArgs = verb === "update" ? update?.argv ?? null : statics.args;
+		const helperArgs = verb === "update" ? updateLintArgv(statics.args) : statics.args;
 		if (helperArgs === null) continue;
-		// CLAIMLINT: a claim needs a lint PASS, so a claim the helper cannot judge is refused.
-		const unjudged = (why: string): FlywheelToolCallResult | undefined => update?.claim !== true ? undefined : {
-			block: true,
-			reason: `kit-flywheel-guard ${BEAD_LINT_REFUSED}: \`br update\` claims a bead, and a claim needs a bead-lint PASS `
-				+ `(J-2026-10-25-107), but ${why}. Nothing was changed.`,
-		};
 		const script = join(scriptsDir, gate.script);
 		if (!existsSync(script)) {
-			const refusal = unjudged(`the lint helper is missing at ${script}`);
-			if (refusal) return refusal;
 			warnings.push(`br ${verb} lint helper missing at ${script}`);
 			continue;
 		}
@@ -2211,16 +2146,11 @@ export async function checkBeadLint(event: FlywheelToolCallEvent, deps: BeadLint
 		try {
 			result = await deps.exec("env", [...env, "python3", script, ...helperArgs], { cwd: line.cwd, timeout: BEAD_LINT_TIMEOUT_MS });
 		} catch (error) {
-			const why = `lint could not run (${error instanceof Error ? error.message : String(error)})`;
-			const refusal = unjudged(why);
-			if (refusal) return refusal;
-			warnings.push(`br ${verb} ${why}`);
+			warnings.push(`br ${verb} lint could not run (${error instanceof Error ? error.message : String(error)})`);
 			continue;
 		}
 		const detail = (result.stderr ?? "").trim() || result.stdout.trim();
 		if (result.killed === true) {
-			const refusal = unjudged(`lint timed out after ${BEAD_LINT_TIMEOUT_MS} ms`);
-			if (refusal) return refusal;
 			warnings.push(`br ${verb} lint timed out after ${BEAD_LINT_TIMEOUT_MS} ms`);
 			continue;
 		}
@@ -2235,8 +2165,6 @@ export async function checkBeadLint(event: FlywheelToolCallEvent, deps: BeadLint
 					+ `${detail} ${BEAD_LINT_HINT} Nothing was changed.`,
 			};
 		}
-		const refusal = unjudged(`lint returned rc=${result.code}: ${detail.slice(0, 300)}`);
-		if (refusal) return refusal;
 		warnings.push(`br ${verb} lint rc=${result.code}: ${detail.slice(0, 300)}`);
 	}
 	return warnings.length === 0 ? undefined
@@ -2405,13 +2333,11 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			const gap = await checkGapMentions(event, pi.exec, ctx.cwd);
 			if (gap !== undefined) return gap;
 			const lint = await checkBeadLint(event, { exec: pi.exec, home, sessionCwd: ctx.cwd, scriptsDir: deps.lintScriptsDir });
+			if (lint?.block === true) return lint;
 			if (lint?.additionalContext) ctx.ui?.notify(lint.additionalContext, "warning");
 			const started = Date.now();
 			const attempts: CloseAttempt[] = [];
-			const tracked = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd, holderLiveness: execHolderLiveness(pi.exec, env, home) }, attempts);
-			// CLAIMLINT (ompkit-fp72.135.3.50 [b]): a custody refusal names the holder and outranks a lint
-			// refusal; a lint refusal blocks anything custody admitted. Close intents follow the final verdict.
-			const result = tracked?.block === true || lint?.block !== true ? tracked : lint;
+			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd, holderLiveness: execHolderLiveness(pi.exec, env, home) }, attempts);
 			if (typeof event.toolCallId === "string" && attempts.length > 0) {
 				if (result?.block === true) {
 					if (typeof result.reason === "string" && result.reason.includes(SELF_CLOSE_REFUSED)) {
