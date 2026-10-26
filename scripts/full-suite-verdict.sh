@@ -250,8 +250,11 @@ echo "full-suite: bun=$bun_count shell=$shell_count python=$py_count excluded_ci
 # the complement. A report for another tree, or a name the archive does not enumerate, is printed
 # and ignored: nothing is subtracted on trust.
 covered_bun=""; covered_shell=""; covered_py=""; covered_ignored=""
+# The join decision is recorded in the verdict json (focused_join), not only on stdout a caller may drop.
+focused_join="no-report"
 if [ -n "$FOCUSED_PASSED" ]; then
 	if [ ! -f "$FOCUSED_PASSED" ]; then
+		focused_join="absent"
 		echo "full-suite: focused-passed report $FOCUSED_PASSED is absent; running the complete suite"
 	else
 		report_tree=$(sed -n '1s/^tree //p' "$FOCUSED_PASSED")
@@ -259,12 +262,16 @@ if [ -n "$FOCUSED_PASSED" ]; then
 		report_runtime=$(sed -n 's/^runtime //p' "$FOCUSED_PASSED" | head -n 1)
 		own_judge=$(shasum -a 256 "$SCRIPT_DIR/fresh-gate.sh" 2>/dev/null | cut -d' ' -f1)
 		if [ "$report_tree" != "$tree" ]; then
+			focused_join="tree-mismatch:${report_tree:-?}"
 			echo "full-suite: focused-passed report is for tree ${report_tree:-?}, not candidate $tree; ignored, running the complete suite"
 		elif [ "$report_judge" != "$own_judge" ] || [ -z "$report_judge" ]; then
+			focused_join="judge-mismatch:${report_judge:-?}"
 			echo "full-suite: focused-passed report was written by judge ${report_judge:-?}, not this gate's fresh-gate.sh ${own_judge:-?}; ignored, running the complete suite"
 		elif [ "$report_runtime" != "$runtime" ]; then
+			focused_join="runtime-mismatch:${report_runtime:-?}"
 			echo "full-suite: focused-passed report ran on runtime ${report_runtime:-?}, not $runtime; ignored, running the complete suite"
 		else
+			focused_join="joined"
 			rest_bun=""; rest_shell=""; rest_py=""
 			reported=$(grep -v -E '^(tree|judge|runtime) ' "$FOCUSED_PASSED" | awk 'NF && !seen[$0]++')
 			for candidate in $kept_bun; do
@@ -513,7 +520,7 @@ fi
 
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
 finish_logs "$CACHE_DIR/$tree.log"
-TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
+TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
 import hashlib, json, os
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
@@ -540,7 +547,7 @@ entry = {
         "excluded_ci_only": os.environ["EXCL"].split(),
         # NODOUBLEPASS1: files the focused pass judged GREEN on this same tree; this run paid only for the rest.
         "covered_by_focused": {"bun": os.environ["COVB"].split(), "shell": os.environ["COVS"].split(), "py": os.environ["COVP"].split(),
-                               "ignored": os.environ["COVI"].split()},
+                               "ignored": os.environ["COVI"].split(), "join": os.environ["FJOIN"]},
     },
     "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }

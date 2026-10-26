@@ -63,6 +63,7 @@ e = json.load(open(sys.argv[1]))["evidence"]
 c = e["covered_by_focused"]
 assert c["bun"] == ["tests/cli/a.test.ts", "tests/cli/b.test.ts"], c
 assert c["shell"] == ["tests/cli/s.test.sh"] and c["py"] == [] and c["ignored"] == [], c
+assert c["join"] == "joined", c
 assert e["bun_files"] == 1 and e["shell_suites"] == 0, e
 ' "$repo.cache/$tree.json"; then ok "same-tree: cached JSON lists the covered set and the complement counts"; else not_ok "same-tree: cached JSON"; fi
 
@@ -75,6 +76,9 @@ if [ "$rc" -eq 0 ] && grep -q 'focused-passed report is for tree 000000000000000
 else
 	not_ok "planted other-tree (rc=$rc)"; cat "$out"
 fi
+# The verdict json records WHY the report was not joined (attempt 10 of the companion publish left only an
+# empty covered set; the stdout line was dropped by the caller).
+if python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["evidence"]["covered_by_focused"]; assert c["join"] == "tree-mismatch:0000000000000000000000000000000000000000", c' "$repo.cache/$tree.json"; then ok "planted other-tree: json join names the mismatch"; else not_ok "planted other-tree: json join"; fi
 
 # 3. planted: a complement file that fails fails the verdict even though the report covers the rest.
 step "planted failing complement"
