@@ -359,8 +359,13 @@ run_affected_tests() {
 	if [ -n "${FRESH_GATE_PASSED_OUT:-}" ] && { [ "$bun_files" -eq 0 ] || [ "${bun_ran:-0}" -gt 0 ]; }; then
 		passed_tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}" 2>/dev/null) || passed_tree=
 		if [ -n "$passed_tree" ]; then
+			# Header: tree, the judge (this script's bytes as executed) and the runtime; the verdict accepts
+			# the report only when all three are its own (QuietBadger AM 69014: never tree+names alone).
+			judge_sha=$(shasum -a 256 "$SCRIPT_DIR/fresh-gate.sh" 2>/dev/null | cut -d' ' -f1)
 			{
 				echo "tree $passed_tree"
+				echo "judge ${judge_sha:-unknown}"
+				echo "runtime $(uname -s)/$(uname -m)/bun-$(bun --version 2>/dev/null)/$(python3 --version 2>&1)"
 				# shellcheck disable=SC2086
 				printf '%s\n' $focused_selection
 			} >"$FRESH_GATE_PASSED_OUT" 2>/dev/null || :

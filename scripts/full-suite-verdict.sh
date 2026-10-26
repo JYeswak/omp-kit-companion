@@ -255,11 +255,18 @@ if [ -n "$FOCUSED_PASSED" ]; then
 		echo "full-suite: focused-passed report $FOCUSED_PASSED is absent; running the complete suite"
 	else
 		report_tree=$(sed -n '1s/^tree //p' "$FOCUSED_PASSED")
+		report_judge=$(sed -n 's/^judge //p' "$FOCUSED_PASSED" | head -n 1)
+		report_runtime=$(sed -n 's/^runtime //p' "$FOCUSED_PASSED" | head -n 1)
+		own_judge=$(shasum -a 256 "$SCRIPT_DIR/fresh-gate.sh" 2>/dev/null | cut -d' ' -f1)
 		if [ "$report_tree" != "$tree" ]; then
 			echo "full-suite: focused-passed report is for tree ${report_tree:-?}, not candidate $tree; ignored, running the complete suite"
+		elif [ "$report_judge" != "$own_judge" ] || [ -z "$report_judge" ]; then
+			echo "full-suite: focused-passed report was written by judge ${report_judge:-?}, not this gate's fresh-gate.sh ${own_judge:-?}; ignored, running the complete suite"
+		elif [ "$report_runtime" != "$runtime" ]; then
+			echo "full-suite: focused-passed report ran on runtime ${report_runtime:-?}, not $runtime; ignored, running the complete suite"
 		else
 			rest_bun=""; rest_shell=""; rest_py=""
-			reported=$(sed '1d' "$FOCUSED_PASSED" | awk 'NF && !seen[$0]++')
+			reported=$(grep -v -E '^(tree|judge|runtime) ' "$FOCUSED_PASSED" | awk 'NF && !seen[$0]++')
 			for candidate in $kept_bun; do
 				case "
 $reported

@@ -34,6 +34,9 @@ git -C "$repo" config user.email "nodoublepass1@example.invalid"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m "[test] NODOUBLEPASS1 fixture"
 tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+judge=$(shasum -a 256 "$(dirname -- "$VERDICT")/fresh-gate.sh" | cut -d' ' -f1)
+runtime="$(uname -s)/$(uname -m)/bun-$(bun --version)/$(python3 --version 2>&1)"
+hdr() { printf 'tree %s\njudge %s\nruntime %s\n' "$1" "$judge" "$runtime"; }
 
 run_verdict() {
 	out="$TMP/$1.out"
@@ -48,7 +51,7 @@ run_verdict() {
 # 1. same-tree report covering a, b and the shell suite: only c runs; verdict PASS records the split.
 step "same-tree report"
 report="$TMP/passed.txt"
-printf 'tree %s\ntests/cli/a.test.ts\ntests/cli/b.test.ts\ntests/cli/s.test.sh\n' "$tree" >"$report"
+{ hdr "$tree"; printf 'tests/cli/a.test.ts\ntests/cli/b.test.ts\ntests/cli/s.test.sh\n'; } >"$report"
 run_verdict same --focused-passed "$report"
 if [ "$rc" -eq 0 ]; then ok "same-tree: verdict PASS"; else not_ok "same-tree rc=$rc"; cat "$out"; fi
 if grep -q 'full-suite: covered by the focused pass on the same tree: bun=2 shell=1 python=0; complement bun=1 shell=0 python=0' "$out"; then ok "same-tree: complement line names bun=1 shell=0"; else not_ok "same-tree: complement line"; grep 'full-suite' "$out"; fi
@@ -65,7 +68,7 @@ assert e["bun_files"] == 1 and e["shell_suites"] == 0, e
 
 # 2. planted: a report for another tree is ignored and everything runs.
 step "planted other-tree report"
-printf 'tree %s\ntests/cli/a.test.ts\ntests/cli/b.test.ts\ntests/cli/s.test.sh\n' "0000000000000000000000000000000000000000" >"$report"
+{ hdr 0000000000000000000000000000000000000000; printf 'tests/cli/a.test.ts\ntests/cli/b.test.ts\ntests/cli/s.test.sh\n'; } >"$report"
 run_verdict other --focused-passed "$report"
 if [ "$rc" -eq 0 ] && grep -q 'focused-passed report is for tree 0000000000000000000000000000000000000000, not candidate' "$out" && grep -q 'VERDICT PASS .*bun_ran=3 shell=1 python=0 .*covered_by_focused=0' "$out" && grep -q 'shell suite ran' "$repo.cache/$tree.log"; then
 	ok "planted other-tree: ignored, all three bun files and the shell suite ran"
@@ -75,7 +78,7 @@ fi
 
 # 3. planted: a complement file that fails fails the verdict even though the report covers the rest.
 step "planted failing complement"
-printf 'tree %s\ntests/cli/a.test.ts\ntests/cli/b.test.ts\ntests/cli/s.test.sh\n' "$tree" >"$report"
+{ hdr "$tree"; printf 'tests/cli/a.test.ts\ntests/cli/b.test.ts\ntests/cli/s.test.sh\n'; } >"$report"
 FAIL_C=1 run_verdict failc --focused-passed "$report"
 FAIL_C=
 if [ "$rc" -ne 0 ] && grep -q 'VERDICT FAIL .*bun_fail=1' "$out"; then ok "planted failing complement: verdict FAIL bun_fail=1"; else not_ok "planted failing complement (rc=$rc)"; grep VERDICT "$out"; fi
@@ -84,13 +87,22 @@ if grep -q 'FULL-SUITE: failing tests' "$out" && grep -q 'tests/cli/c.test.ts: (
 FAIL_C=
 # 4. planted: a report naming a file the archive does not enumerate is reported and reduces nothing.
 step "planted unknown name"
-printf 'tree %s\ntests/cli/zzz.test.ts\n' "$tree" >"$report"
+{ hdr "$tree"; printf 'tests/cli/zzz.test.ts\n'; } >"$report"
 run_verdict unknown --focused-passed "$report"
 if [ "$rc" -eq 0 ] && grep -q 'focused-passed names tests/cli/zzz.test.ts, not in the declared suite; ignored' "$out" && grep -q 'complement bun=3 shell=1 python=0' "$out"; then
 	ok "planted unknown name: reported, full suite ran"
 else
 	not_ok "planted unknown name (rc=$rc)"; grep 'full-suite' "$out"
 fi
+
+# 4b. planted: a report from another judge (different fresh-gate.sh bytes) or runtime is ignored.
+step "planted other judge"
+{ printf 'tree %s\njudge %s\nruntime %s\n' "$tree" "deadbeef" "$runtime"; printf 'tests/cli/a.test.ts\ntests/cli/b.test.ts\n'; } >"$report"
+run_verdict judge --focused-passed "$report"
+if [ "$rc" -eq 0 ] && grep -q 'written by judge deadbeef, not this gate' "$out" && grep -q 'VERDICT PASS .*bun_ran=3 .*covered_by_focused=0' "$out"; then ok "planted other judge: ignored, all files ran"; else not_ok "planted other judge (rc=$rc)"; grep -E 'full-suite|VERDICT' "$out"; fi
+{ printf 'tree %s\njudge %s\nruntime %s\n' "$tree" "$judge" "Other/arch/bun-0/Python 0"; printf 'tests/cli/a.test.ts\n'; } >"$report"
+run_verdict runtime --focused-passed "$report"
+if [ "$rc" -eq 0 ] && grep -q 'ran on runtime Other/arch/bun-0/Python 0, not' "$out" && grep -q 'covered_by_focused=0' "$out"; then ok "planted other runtime: ignored"; else not_ok "planted other runtime (rc=$rc)"; grep -E 'full-suite|VERDICT' "$out"; fi
 
 # 5. control: no report at all is the complete suite, no covered line.
 step "control without report"
