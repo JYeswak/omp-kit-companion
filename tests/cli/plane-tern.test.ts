@@ -377,6 +377,11 @@ test("identity refuses when the session file UUID changes across observations", 
 	const result = await identifyTernSeat(seat, testIo(false, [terminalJournal, changedJournal]));
 	expect(result).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND", agent: null, cwdOk: false });
 });
+test("identity refuses a session file whose project cwd differs from the target pane", async () => {
+	const otherAgentJournal = terminalJournal.replace('"/repo"', '"/another-agent-repo"');
+	const result = await identifyTernSeat(seat, testIo(false, otherAgentJournal));
+	expect(result).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", agent: null, cwdOk: false });
+});
 
 test("Tern identity refuses an Agent Mail row bound to another block", async () => {
 	const wrongAgent = { ...agentResolution, agent_name: "OtherAgent", pane_id: "tern:456" };

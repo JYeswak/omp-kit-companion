@@ -214,6 +214,18 @@ test("SENDANY1 planted: mismatched target AGENT_NAME refuses with zero sends", a
 	expect(fx.taken.luaDispatches).toBe(0);
 	expect(readdirSync(dir)).toEqual([]);
 });
+test("SENDANY1 planted: foreign session-file cwd refuses before sending", async () => {
+	const dir = dropDir();
+	const identityProject = "/agent-mail-project";
+	const fx = ternFixture({ session: "Default", identityProject, binding: "legacy-unverified",
+		journal: (_repo, uuid) => idleJournal("/another-agent-repo", uuid) });
+	const got = await proveTernCliSend({ session: "", pane: "tern:5", message: "status update",
+		dropDir: dir, cwd: fx.repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait,
+		io: fx.io, env: { AGENT_MAIL_PROJECT: identityProject } });
+	expect(got).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", sends: 0 });
+	expect(fx.taken.luaDispatches).toBe(0);
+	expect(readdirSync(dir)).toEqual([]);
+});
 
 test("SENDANY1: an inspected closed block reports BLOCK_GONE without sending", async () => {
 	const dir = dropDir();

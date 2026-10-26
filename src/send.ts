@@ -1341,10 +1341,11 @@ export async function deliverToTernSeat(input: {
 	}
 	if (observation.state === "DEAD") return fail("SEAT_DEAD", "seat pane is dead; zero sends");
 	if (observation.state !== "IDLE" || observation.runtimeBinding === null) {
-		const code = observation.reason === "PLANE_SEAT_UNBOUND" || observation.reason === "TERN_WINDOW_UNBOUND"
-			|| observation.reason === "SEAT_REBOUND" || observation.reason === "SEAT_CWD_MISMATCH"
-			? observation.reason
-			: "OBSERVATION_UNKNOWN";
+		const code = observation.reason === "SESSION_CWD_MISMATCH" ? "PLANE_SEAT_UNBOUND"
+			: observation.reason === "PLANE_SEAT_UNBOUND" || observation.reason === "TERN_WINDOW_UNBOUND"
+				|| observation.reason === "SEAT_REBOUND" || observation.reason === "SEAT_CWD_MISMATCH"
+				? observation.reason
+				: "OBSERVATION_UNKNOWN";
 		return fail(code, `seat not provably idle (${observation.reason ?? "unknown"}); zero sends`);
 	}
 	const identityProject = input.seat.identityProject ?? (input.env ?? process.env).AGENT_MAIL_PROJECT;

@@ -1234,6 +1234,10 @@ export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo
 			return { status: "REFUSED", code: "SEAT_REBOUND", reason, agent: null, binding: null,
 				cwdOk: false, runtimeBinding: observation.runtimeBinding };
 		}
+		if (reason === "SESSION_CWD_MISMATCH") {
+			return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason, agent: null, binding: null,
+				cwdOk: false, runtimeBinding: observation.runtimeBinding };
+		}
 		if (reason === "PLANE_SEAT_UNBOUND" || reason === "TERN_WINDOW_UNBOUND" || reason === "SEAT_REBOUND"
 			|| reason === "SEAT_CWD_MISMATCH" || reason === "FOREGROUND_OMP_MISSING"
 			|| reason === "FOREGROUND_OMP_AMBIGUOUS") {
