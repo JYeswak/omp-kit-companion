@@ -31,6 +31,16 @@ done <<EOF
 $staged
 EOF
 [ "$triggered" = 1 ] || exit 0
+# A foreign repo without a README or its own checker has no README obligation.
+# HEAD still declares it when a candidate deletes the README (or its checker).
+required=0
+for declared in README.md scripts/readme-check.ts; do
+	if git cat-file -e ":$declared" 2>/dev/null || git cat-file -e "HEAD:$declared" 2>/dev/null; then
+		required=1
+		break
+	fi
+done
+[ "$required" = 1 ] || exit 0
 checker="$here/readme-check.ts"
 [ -f "$checker" ] || { printf 'staged-readme: REFUSED: installed readme checker missing beside %s; rerun scripts/install-commit-msg-bead.sh\n' "$(basename -- "$0")" >&2; exit 1; }
 command -v bun >/dev/null 2>&1 || { printf 'staged-readme: REFUSED: bun is unavailable so readme-check cannot run on the candidate tree\n' >&2; exit 1; }

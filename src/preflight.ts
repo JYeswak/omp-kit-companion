@@ -32,9 +32,22 @@ function members(hooksDir: string, kind: string): string[] {
 		.filter(path => { try { return (statSync(path).mode & 0o111) !== 0; } catch { return false; } });
 }
 
+/** Match executable shebang dispatch; staged scripts need not have their executable bit set yet. */
+function scriptCommand(path: string, fallback: string): string[] {
+	const body = readFileSync(path, "utf8");
+	if (!body.startsWith("#!")) return [fallback, path];
+	if ((statSync(path).mode & 0o111) !== 0) return [path];
+	const shebang = body.slice(2).split("\n", 1)[0]!.trim();
+	let end = 0;
+	while (end < shebang.length && shebang[end] !== " " && shebang[end] !== "\t") end++;
+	const interpreter = shebang.slice(0, end);
+	const argument = shebang.slice(end).trim();
+	return argument ? [interpreter, argument, path] : [interpreter, path];
+}
+
 /** One member, run to completion: its FINDING lines, or one MEMBER_REFUSED/UNJUDGED finding when it exits non-zero without any. */
 async function judge(member: string, args: string[], cwd: string, env: Record<string, string>): Promise<Finding[]> {
-	const r = await run(["sh", member, ...args], { deadline_s: MEMBER_DEADLINE_S, cwd, env, max_output_bytes: 2 * 1024 * 1024 });
+	const r = await run([...scriptCommand(member, "sh"), ...args], { deadline_s: MEMBER_DEADLINE_S, cwd, env, max_output_bytes: 2 * 1024 * 1024 });
 	const found = parseFindingLines(text(r.stdout));
 	if (found.length > 0 || r.rc === 0) return found;
 	const err = text(r.stderr).split("\n").map(l => l.trim()).filter(Boolean);
@@ -53,7 +66,7 @@ async function stagedSelftests(repo: string, staged: string[], env: Record<strin
 		let body: string;
 		try { body = readFileSync(full, "utf8"); } catch { continue; }
 		if (!body.includes("--selftest")) continue;
-		const argv = path.endsWith(".py") ? ["python3", full, "--selftest"] : ["sh", full, "--selftest"];
+		const argv = [...scriptCommand(full, path.endsWith(".py") ? "python3" : "sh"), "--selftest"];
 		const r = await run(argv, { deadline_s: SELFTEST_DEADLINE_S, cwd: repo, env, max_output_bytes: 1024 * 1024 });
 		if (r.rc === 0) continue;
 		const tail = (text(r.stderr) + text(r.stdout)).trim().split("\n").filter(Boolean).slice(-1)[0] ?? "";

@@ -252,5 +252,24 @@ else
 	fi
 fi
 
+# Foreign repos with skills but no declared README obligation still commit.
+R="$TMP/no-readme"
+mkdir -p "$R/skills/example"
+git -C "$R" init -q
+git -C "$R" config user.email test@invalid.example
+git -C "$R" config user.name Test
+git -C "$R" commit -q --allow-empty -m "[test] root"
+out=$(sh "$INSTALLER" "$R" 2>&1) || { printf 'FAIL foreign install: %s\n' "$out"; exit 1; }
+printf '# Example\n' > "$R/skills/example/SKILL.md"
+git -C "$R" add skills/example/SKILL.md
+out=$(commit "$R" -m "[test] skill without README obligation")
+check "$?" "0" "foreign-no-readme-commit" "$out x" "x"
+
+# HEAD's README obligation survives its staged deletion.
+R=$(new_repo deleted-readme)
+git -C "$R" rm -q README.md
+out=$(commit "$R" -m "[test] required README deleted")
+check "$?" "1" "required-readme-deletion-refused" "$out" "staged-readme: REFUSED"
+
 printf 'staged-readme: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

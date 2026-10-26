@@ -56,8 +56,9 @@ ok "$?" "4" "absent-chain-refuses"
 B=$(new_repo plain)
 mkdir -p "$B/.git/hooks"
 cat > "$B/.git/hooks/commit-msg" <<'HOOK'
-#!/bin/sh
-printf MARKED >> "$1"
+#!/bin/bash
+read -r marker < <(printf 'MARKED\n')
+printf '%s' "$marker" >> "$1"
 HOOK
 chmod +x "$B/.git/hooks/commit-msg"
 sh "$INSTALLER" "$B" > /dev/null 2>&1
@@ -338,16 +339,24 @@ mkdir -p "$TMP/inertkit/scripts"
 for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-kitlib.sh check-staged-readme.sh check-staged-sources.sh pysafe.py pysafe_check.py kitlib_ratchet_core.py tempsafe_check.py kitlib_ratchet.py sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py readme-check.ts kitlib-tmp.sh kitlib-findings.sh gate-event.sh kitlib_jsonl.py kitlib_lock.py; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
+cp "$(dirname -- "$INSTALLER")/check-gap-mention.sh" "$TMP/inertkit/scripts/check-gap-mention.sh"
 cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"
 K=$(new_repo inert)
 git -C "$K" branch -M main
 sh "$TMP/inertkit/scripts/install-commit-msg-bead.sh" "$K" > "$TMP/o-inert" 2>&1
 ok "$?" "1" "inert-member-rollback-rc"
-grep -q "shared-main member let an off-main commit move the remote main" "$TMP/o-inert"
-ok "$?" "0" "inert-member-named"
-[ ! -e "$K/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" ]
-ok "$?" "0" "inert-member-removed"
+if grep -q "shared-main member let an off-main commit move the remote main" "$TMP/o-inert"; then
+	ok 0 0 "inert-member-named"
+else
+	ok 1 0 "inert-member-named"
+	cat "$TMP/o-inert"
+fi
+if [ ! -e "$K/.git/hooks/hooks.d/pre-push/30-omp-kit-on-main" ]; then
+	ok 0 0 "inert-member-removed"
+else
+	ok 1 0 "inert-member-removed"
+fi
 
 # 12. GATEDIAG1 (ompkit-fp72.135.3.16): runner v4 collects every FINDING line from every member into one
 #     envelope and exits once; a legacy refusing member becomes one MEMBER_REFUSED finding; planted: a
@@ -373,6 +382,65 @@ ok "$?" "0" "gatediag-legacy-member-is-one-finding"
 # planted: the stop-at-first member reported only its first finding; a complete member reports both
 ok "$(grep -c 'stop [AB]:' "$TMP/o-gd-commit")" "1" "gatediag-planted-stop-at-first-reports-one"
 ok "$(grep -c 'fx [AB]:' "$TMP/o-gd-commit")" "2" "gatediag-complete-member-reports-two"
+
+# Interpreter dispatch: a preserved bash member must reach its real refusal.
+cat > "$D/63-fx-bash" <<'HOOK'
+#!/bin/bash
+read -r value < <(printf 'bash-ready\n')
+[ "$value" = bash-ready ] || exit 9
+printf 'FINDING\tbash\tBASH_POLICY\tactual bash refusal\tfix the policy\t-\n'
+exit 6
+HOOK
+printf 'printf "plain-member-ran\\n"\n' > "$D/64-fx-plain"
+chmod +x "$D/63-fx-bash" "$D/64-fx-plain"
+(CDPATH='' cd -- "$G" && BEADS_DB="$TMP/absent.db" sh "$G/.git/hooks/commit-msg" "$TMP/msg-b") > "$TMP/o-interpreters" 2>&1
+ok "$?" "1" "interpreter-real-refusal-retained"
+grep -q 'bash BASH_POLICY: actual bash refusal' "$TMP/o-interpreters"
+ok "$?" "0" "bash-member-own-finding"
+grep -q 'plain-member-ran' "$TMP/o-interpreters"
+ok "$?" "0" "no-shebang-member-fallback"
+
+# Pause a real shell reader before its final read. Installing must replace,
+# never truncate, the managed member it is currently reading.
+python3 - "$TMP" "$INSTALLER" <<'PY'
+import concurrent.futures
+import pathlib
+import socket
+import sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[2]).parent))
+import kitlib_run
+root, installer = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+repo = root / "absent"
+member = repo / ".git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+original = member.read_bytes()
+with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+    for atomic in (True, False):
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+            server.settimeout(20)
+            port = server.getsockname()[1]
+            pause = 'import socket; s=socket.create_connection(("127.0.0.1", %d), timeout=20); s.recv(1); s.close()' % port
+            body = "#!/bin/sh\npython3 -c '%s'\n" % pause
+            body += "# padding forces a later shell read\n" * 8192
+            body += "printf 'OLD_BYTES_FINISHED\\n'\n"
+            member.write_text(body)
+            result = pool.submit(kitlib_run.run, ["sh", str(member)], cwd=str(repo), deadline_s=40)
+            with server.accept()[0] as conn:
+                if atomic:
+                    installed = kitlib_run.run(["sh", str(installer), str(repo)], deadline_s=30)
+                    assert installed.rc == 0, (installed.stdout, installed.stderr)
+                else:
+                    # The old copy-in-place operation, the required negative.
+                    member.write_bytes(original)
+                conn.sendall(b"x")
+            finished = result.result(timeout=45)
+            survived = finished.rc == 0 and b"OLD_BYTES_FINISHED" in finished.stdout
+            assert survived == atomic, (atomic, finished)
+            print("atomic-running-member" if atomic else "copy-in-place-negative")
+member.write_bytes(original)
+PY
+ok "$?" "0" "atomic-install-and-copy-negative"
 
 printf 'install-commit-msg-bead: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

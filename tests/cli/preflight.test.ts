@@ -56,6 +56,22 @@ test("preflight commit: four defects produce ONE envelope naming all four, each 
 	expect(await sh(["git", "status", "--porcelain"], repo)).toContain("A  f.txt");
 });
 
+test("preflight honors bash members and staged selftests, retaining real refusals and no-shebang scripts", async () => {
+	const repo = await repoWithChain("interpreters");
+	const member = join(repo, ".git", "hooks", "hooks.d", "pre-commit", "20-bash");
+	writeFileSync(member, "#!/bin/bash\nread -r value < <(printf 'ready\\n')\n[ \"$value\" = ready ] || exit 7\nprintf 'FINDING\\tbash\\tREAL_REFUSAL\\tpolicy violation\\tfix policy\\t-\\n'\nexit 3\n");
+	chmodSync(member, 0o755);
+	writeFileSync(join(repo, "bash.sh"), "#!/bin/bash\n# --selftest\nread -r value < <(printf 'ready\\n')\n[ \"$value\" = ready ]\n");
+	writeFileSync(join(repo, "plain.sh"), "# --selftest\nexit 0\n");
+	writeFileSync(join(repo, "quoted.py"), "#!/usr/bin/env -S python3 -c 'import sys; sys.exit(0)'\n# --selftest\n");
+	await sh(["git", "add", "bash.sh", "plain.sh", "quoted.py"], repo);
+	const msg = join(repo, "msg.txt");
+	writeFileSync(msg, "feat: interpreter regression [test]\n");
+	const result = await preflightCommit(repo, { message: msg });
+	expect(result.findings.map(f => f.code).sort()).toEqual(["BEAD_TRAILER", "FRAGMENT", "REAL_REFUSAL"]);
+	expect(result.ok).toBe(false);
+});
+
 test("preflight commit: an empty index is a finding; with no prepared message that is a finding too, never a pass", async () => {
 	const repo = await repoWithChain("empty");
 	const prepared = await preflightCommit(repo);
