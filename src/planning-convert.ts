@@ -63,7 +63,9 @@ type Priority = 0 | 1 | 2 | 3 | 4;
 type BeadScoreMetrics = { median_chars: number | null; acceptance_share: number | null; deps_per_bead: number | null; mission_beads: number | null };
 type PlanningBeadMetrics = { median_description_chars: number | null; planning_score_median_chars: number | null; acceptance_share: number | null; deps_per_bead: number | null; mission_beads: number | null };
 type CreateFailure = { slug: string; line: number | null; exit_code: number | null; stdout: string; stderr: string; error: string | null };
-type DependencyEdge = { slug: string; target: string; status: "ADDED" | "SKIPPED_CYCLE" | "ALREADY_PRESENT" | "SKIPPED_FOREIGN"; issue_id: string; depends_on_id: string };
+type DependencyEdge = { slug: string; target: string; status: "ADDED" | "SKIPPED_CYCLE" | "ALREADY_PRESENT" | "SKIPPED_FOREIGN" | "SKIPPED_TERMINAL"; issue_id: string; depends_on_id: string };
+/** A plan item whose target bead is closed or tombstoned and that would write nothing to it (ompkit-fp72.135.3.51). */
+type TerminalTarget = { slug: string; id: string; status: "SATISFIED_TERMINAL" };
 type DependencyFailure = { slug: string; target: string; message: string; exit_code?: number | null };
 type ConvertReport = {
 	kind: "planning-convert";
@@ -107,6 +109,7 @@ type ConvertReport = {
 	apply?: boolean;
 	tracker_root?: string;
 	reused_items?: CreatedItem[];
+	terminal_targets?: TerminalTarget[];
 	amended_targets?: AmendedTarget[];
 	foreign_targets?: ForeignTarget[];
 	writes_landed?: ApplyWrite[];
@@ -870,6 +873,7 @@ function reportText(data: ConvertReport): string {
 		lines.push("", "Apply writes landed: " + (data.writes_landed?.length ?? 0));
 		if (data.writes_landed?.length) for (const write of data.writes_landed) lines.push("- " + JSON.stringify(write));
 		if (data.reused_items?.length) for (const item of data.reused_items) lines.push("- REUSED " + item.id + " (" + item.slug + ")");
+		if (data.terminal_targets?.length) for (const item of data.terminal_targets) lines.push("- " + item.status + " " + item.id + " (" + item.slug + ")");
 		if (data.amended_targets?.length) for (const target of data.amended_targets) {
 			lines.push("- " + target.status + " " + target.id + " (" + target.slugs.join(", ") + ")");
 			if (target.status === "STALE_ACCEPTANCE") {
@@ -927,7 +931,8 @@ function createArgs(item: PlanItem, parentId: string, planPath: string, candidat
 	};
 }
 
-type ApplyTarget = { kind: "existing" | "new" | "foreign"; id: string | null; reused: boolean; details?: NativeIssueDetails };
+/** `terminal`: the target bead is closed or tombstoned; it is never written (no amendment, no edge from it). */
+type ApplyTarget = { kind: "existing" | "new" | "foreign"; id: string | null; reused: boolean; details?: NativeIssueDetails; terminal?: boolean };
 type ApplyDependency = { item: PlanItem; targetSlug: string; foreign: boolean };
 
 function mergedGraphCycles(adjacency: Map<string, string[]>): string[][] {
@@ -966,6 +971,7 @@ function runPlanningConvertApply(
 	data.writes_landed = [];
 	data.created_items = [];
 	data.reused_items = [];
+	data.terminal_targets = [];
 	data.amended_targets = [];
 	data.foreign_targets = [];
 	data.merged_dependency_cycles = [];
@@ -1029,8 +1035,20 @@ function runPlanningConvertApply(
 			}
 			const details = loadDetails(issue.id);
 			if (!details) return refuse("cannot preflight target " + issue.id + ": " + (detailsError ?? "br show failed"));
-			if (details.status === "closed" || details.status === "tombstone")
-				return refuse("target " + issue.id + " is terminal and cannot be amended");
+			if (details.status === "closed" || details.status === "tombstone") {
+				// A finished bead stays in the plan; it blocks nothing as long as the plan would not change it.
+				const contribution = data.mission + ":" + item.slug;
+				const recorded = splitLines(details.notes).some((line) => line.trim() === contribution);
+				const stored = acceptanceBoxes(details.acceptance_criteria).map(criterionText);
+				const missing = missingBoxTexts(acceptanceBoxes(item.acceptance).map(criterionText), stored);
+				if (!recorded || missing.length)
+					return refuse("target " + issue.id + " is " + details.status + " and the plan would amend it under " + contribution
+						+ (recorded ? " (acceptance boxes not stored: " + missing.join(" | ") + ")" : " (contribution not recorded)")
+						+ "; a terminal bead is never amended");
+				targetBySlug.set(item.slug, { kind: "existing", id: issue.id, reused: false, details, terminal: true });
+				data.terminal_targets!.push({ slug: item.slug, id: issue.id, status: "SATISFIED_TERMINAL" });
+				continue;
+			}
 			if (item.parent && item.parent !== details.parent)
 				return refuse("declared parent does not match existing target " + issue.id + "; historical parents are never moved");
 			const contribution = data.mission + ":" + item.slug;
@@ -1075,8 +1093,12 @@ function runPlanningConvertApply(
 		if (matched.issue_type !== item.type) return refuse("reused target " + matched.id + " has type " + matched.issue_type + ", expected " + item.type);
 		const details = loadDetails(matched.id);
 		if (!details) return refuse("cannot preflight reused target " + matched.id + ": " + (detailsError ?? "br show failed"));
-		if (details.status === "closed" || details.status === "tombstone")
-			return refuse("reused target " + matched.id + " is terminal");
+		if (details.status === "closed" || details.status === "tombstone") {
+			// A reused target is never amended, so a finished one is simply satisfied.
+			targetBySlug.set(item.slug, { kind: "existing", id: matched.id, reused: true, details, terminal: true });
+			data.terminal_targets!.push({ slug: item.slug, id: matched.id, status: "SATISFIED_TERMINAL" });
+			continue;
+		}
 		targetBySlug.set(item.slug, { kind: "existing", id: matched.id, reused: true, details });
 		data.reused_items.push({
 			slug: item.slug, title: item.title, id: matched.id, line: item.line,
@@ -1271,7 +1293,7 @@ function runPlanningConvertApply(
 	for (const item of items) {
 		if (item.existing === "(new)") continue;
 		const target = targetBySlug.get(item.slug);
-		if (!target || target.kind !== "existing" || !target.id || !target.details) continue;
+		if (!target || target.kind !== "existing" || !target.id || !target.details || target.terminal) continue;
 		const group = amendmentGroups.get(target.id) ?? { details: target.details, items: [] };
 		group.items.push(item);
 		amendmentGroups.set(target.id, group);
@@ -1382,6 +1404,11 @@ function runPlanningConvertApply(
 		const edgeKey = sourceId + "\u0000" + targetId;
 		if (existingBlockEdges.has(edgeKey)) {
 			data.dependency_edges.push({ slug: dependency.item.slug, target: dependency.targetSlug, status: "ALREADY_PRESENT", issue_id: sourceId, depends_on_id: targetId });
+			continue;
+		}
+		if (source.terminal) {
+			// Adding a dependency writes to its source; a terminal source is never written.
+			data.dependency_edges.push({ slug: dependency.item.slug, target: dependency.targetSlug, status: "SKIPPED_TERMINAL", issue_id: sourceId, depends_on_id: targetId });
 			continue;
 		}
 		const result = runApplyBr(["dep", "add", sourceId, targetId], tracker.database, tracker.commandCwd);

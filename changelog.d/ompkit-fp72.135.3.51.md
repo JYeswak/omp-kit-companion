@@ -1,0 +1,4 @@
+### Fixed
+
+- `omp-kit planning convert --apply` no longer refuses a whole plan because one item's bead is closed. A plan item whose bead is closed or deleted (tombstoned) is now reported as `SATISFIED_TERMINAL` and skipped, so the rest of the plan still applies, and new items that depend on it still get their blocks edge to the closed bead. Before, closing any bead the plan named stopped every later intake ("reused target … is terminal"). (ompkit-fp72.135.3.51)
+- A closed bead is still never written. If the plan would change it (an acceptance box the bead does not have, or a contribution it never recorded), the apply refuses before any write and names the plan item, the bead and the missing boxes. No dependency is added from a closed bead (`SKIPPED_TERMINAL`), and a deleted bead is never reopened. (ompkit-fp72.135.3.51)

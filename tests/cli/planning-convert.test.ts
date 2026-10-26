@@ -462,6 +462,120 @@ test("planning convert apply reports foreign targets without writing them", asyn
 	expect(issueRows(trackerRoot)).toHaveLength(0);
 });
 
+// ompkit-fp72.135.3.51: a finished bead stays in the plan; it must never block later intake,
+// and it is never written (no amendment, no reopen, no edge from it).
+function closeNative(trackerRoot: string, id: string): void {
+	nativeOutput(["close", id, "--reason", "fixture: finished before this plan was applied"], trackerRoot);
+}
+
+test("apply treats a closed reused target it would not change as satisfied and applies the rest", async () => {
+	const trackerRoot = join(scratch, "apply-terminal-reused");
+	initializeTracker(trackerRoot);
+	const epicId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
+	const doneId = createNativeIssue(trackerRoot, "Done target", { externalRef: "core8:done-item", parent: epicId });
+	closeNative(trackerRoot, doneId);
+	const plan = writePlan("apply-terminal-reused", [
+		{ slug: "done-item", existing: "(new)" },
+		{ slug: "next-item", existing: "(new)", dependsOn: ["done-item"] },
+	]);
+	const before = showNativeIssue(trackerRoot, doneId);
+
+	const result = await runCli(applyArgs(plan, trackerRoot));
+	expect(result.exitCode).toBe(0);
+	const report = applyResult(result);
+	expect(report.terminal_targets).toEqual([{ slug: "done-item", id: doneId, status: "SATISFIED_TERMINAL" }]);
+	const next = report.created_items.find((item: { slug: string }) => item.slug === "next-item");
+	expect(next).toBeDefined();
+	expect(report.dependency_edges).toContainEqual({ slug: "next-item", target: "done-item", status: "ADDED", issue_id: next.id, depends_on_id: doneId });
+	const after = showNativeIssue(trackerRoot, doneId);
+	for (const field of ["status", "acceptance_criteria", "notes", "description", "closed_at"]) expect(after[field]).toEqual(before[field]);
+});
+
+test("apply refuses to amend a closed existing target and writes nothing", async () => {
+	const trackerRoot = join(scratch, "apply-terminal-amend");
+	initializeTracker(trackerRoot);
+	const doneId = createNativeIssue(trackerRoot, "Closed existing target");
+	closeNative(trackerRoot, doneId);
+	const plan = writePlan("apply-terminal-amend", [
+		{ slug: "closed-existing", existing: doneId },
+		{ slug: "fresh-item", existing: "(new)" },
+	]);
+	const before = showNativeIssue(trackerRoot, doneId);
+
+	const result = await runCli(applyArgs(plan, trackerRoot));
+	expect(result.exitCode).not.toBe(0);
+	const report = applyResult(result);
+	expect(String(report.apply_preflight_error)).toContain(doneId);
+	expect(String(report.apply_preflight_error)).toContain("core8:closed-existing");
+	expect(report.writes_landed).toEqual([]);
+	expect(showNativeIssue(trackerRoot, doneId)).toEqual(before);
+	// issueRows lists open issues only: nothing was created (not even a mission epic), and the target stays closed.
+	expect(issueRows(trackerRoot)).toEqual([]);
+});
+
+test("apply skips a closed existing target whose plan contribution is already recorded", async () => {
+	const trackerRoot = join(scratch, "apply-terminal-satisfied");
+	initializeTracker(trackerRoot);
+	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this criterion." });
+	const plan = writePlan("apply-terminal-satisfied", [{ slug: "satisfied-item", existing: targetId }]);
+	const first = await runCli(applyArgs(plan, trackerRoot));
+	expect(first.exitCode).toBe(0);
+	closeNative(trackerRoot, targetId);
+	const before = showNativeIssue(trackerRoot, targetId);
+
+	const second = await runCli(applyArgs(plan, trackerRoot));
+	expect(second.exitCode).toBe(0);
+	const report = applyResult(second);
+	expect(report.terminal_targets).toEqual([{ slug: "satisfied-item", id: targetId, status: "SATISFIED_TERMINAL" }]);
+	expect(report.writes_landed).toEqual([]);
+	expect(showNativeIssue(trackerRoot, targetId)).toEqual(before);
+});
+
+test("apply refuses the same closed fixture once its plan acceptance is edited and writes nothing", async () => {
+	const trackerRoot = join(scratch, "apply-terminal-edited");
+	initializeTracker(trackerRoot);
+	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this criterion." });
+	const plan = writePlan("apply-terminal-edited", [
+		{ slug: "edited-item", existing: targetId },
+		{ slug: "fresh-after-edit", existing: "(new)" },
+	]);
+	const first = await runCli(applyArgs(plan, trackerRoot));
+	expect(first.exitCode).toBe(0);
+	closeNative(trackerRoot, targetId);
+	const source = readFileSync(plan, "utf8");
+	const edited = source.replace("- [a] Planted negative: edited-item is not applied twice.",
+		"- [a] Planted negative: edited-item is not applied twice.\n- [a] edited-item gains a criterion after it closed.");
+	expect(edited).not.toBe(source);
+	writeFileSync(plan, edited);
+	const before = showNativeIssue(trackerRoot, targetId);
+	const openBefore = issueRows(trackerRoot).map((row) => row.id).sort();
+
+	const second = await runCli(applyArgs(plan, trackerRoot));
+	expect(second.exitCode).not.toBe(0);
+	const report = applyResult(second);
+	expect(String(report.apply_preflight_error)).toContain(targetId);
+	expect(String(report.apply_preflight_error)).toContain("core8:edited-item");
+	expect(String(report.apply_preflight_error)).toContain("gains a criterion after it closed");
+	expect(report.writes_landed).toEqual([]);
+	expect(showNativeIssue(trackerRoot, targetId)).toEqual(before);
+	expect(issueRows(trackerRoot).map((row) => row.id).sort()).toEqual(openBefore);
+});
+
+test("apply never reopens or writes a tombstoned target", async () => {
+	const trackerRoot = join(scratch, "apply-terminal-tombstone");
+	initializeTracker(trackerRoot);
+	const epicId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
+	const goneId = createNativeIssue(trackerRoot, "Deleted target", { externalRef: "core8:gone-item", parent: epicId });
+	// --force: a child of an epic otherwise returns a preview and is NOT deleted (blocked_dependents).
+	nativeOutput(["delete", goneId, "--reason", "fixture: deleted before this plan was applied", "--force"], trackerRoot);
+	expect(showNativeIssue(trackerRoot, goneId).status).toBe("tombstone");
+	const plan = writePlan("apply-terminal-tombstone", [{ slug: "gone-item", existing: "(new)" }]);
+
+	await runCli(applyArgs(plan, trackerRoot));
+	// list --all omits tombstones, so read the deleted bead itself: still a tombstone, never reopened.
+	expect(showNativeIssue(trackerRoot, goneId).status).toBe("tombstone");
+});
+
 test("planning convert apply preflights every block before writing any target", async () => {
 	const trackerRoot = join(scratch, "apply-preflight-tracker");
 	initializeTracker(trackerRoot);
