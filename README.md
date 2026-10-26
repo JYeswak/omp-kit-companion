@@ -17,7 +17,7 @@ Current release: v0.2.75
 <!-- kit-release:end -->
 
 A tested rule pack, 11 guard extensions, five skills, and a guarded CLI with
-45 top-level commands for an existing OMP install.
+46 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -53,7 +53,7 @@ settings drift apart, and nothing records who changed what.
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
 Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
 and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Diagnostics cover 38 scopes. The reference lists all 45 commands. Fleet
+Diagnostics cover 38 scopes. The reference lists all 46 commands. Fleet
 guards, services and the update channel are opt-in.
 
 ### Why use omp-kit
@@ -168,7 +168,7 @@ The repo is an OMP plugin. `package.json` declares 11 extensions:
 | Extension | Hooks | Behavior |
 |---|---|---|
 | `kit-guard-optin.ts` | `tool_call` | Loads the guard from `KIT_GUARD_SRC` for repos with `.omp/kit-guard.json`; a missing guard blocks every tool call |
-| `fleet-guard.ts` | `tool_call` | Always on: refuses `plutil -extract`/`-convert`/`-replace`/`-insert`/`-remove` without `-o`, which rewrites the input plist (`PLUTIL_IN_PLACE`). Opt-in only: blocks forbidden scratch writes and source copies, new branches and worktrees, writes and `git add` outside `var/agent-tmp/` in a fleet repo's checkout without the caller's exclusive reservation (`WRITE_OWN_*`), calls that set `AGENT_MAIL_BYPASS`/`AGENT_MAIL_GUARD_MODE` (`BYPASS_ENV`), overlong hot-path reservations |
+| `fleet-guard.ts` | `tool_call` | Always on: refuses `plutil -extract|-convert|-replace|-insert|-remove` without `-o` (rewrites the input plist) (`PLUTIL_IN_PLACE`). Opt-in: forbidden scratch writes and source copies, branches and worktrees, writes outside `var/agent-tmp/` without the caller's exclusive reservation (`WRITE_OWN_*`), `AGENT_MAIL_BYPASS`/`AGENT_MAIL_GUARD_MODE` (`BYPASS_ENV`), overlong hot-path reservations |
 | `kit-save-guard.ts` | session and tool hooks | Opt-in only: tracks session writes, reprompts at most twice for unsaved work, then warns. Never commits, stashes or pushes |
 | `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | After compaction, re-reads `AGENTS.md` and the in-progress bead; refuses a self-close (`SELF_CLOSE_REFUSED`), `blocked` without an open fix (`BLOCK_REFUSED`) and a close that strands a blocked bead (`BLOCK_RELEASE_REQUIRED`) |
 | `kit-agent-mail-guard.ts` | `tool_call`, `tool_result` | Opt-in: refuses mail not sent as the seat, off-list subjects, untyped `ack_required`, long or secret bodies, bulk reads; a send that passes queues a one-line wake in each recipient's live seat (`NO_WAKE_PATH` refuses an ask nobody can receive) |
@@ -513,7 +513,8 @@ explicit report rather than inventing zero activity.
 | `omp-kit lsp` | `lsp setup --plan [--project PATH] [--file PATH]` | Language-server readiness; never installs or starts servers | `omp-kit lsp setup --plan --json` |
 | `omp-kit memory` | `memory audit --store-root PATH --yes` | Separately consented audit of a Mnemopi store | `omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json` |
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run into a fresh `--db`, or `--apply` to a tracker) | `omp-kit planning score --fleet --json` |
-| `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes (`VALID`, `UNREGISTERED`, `INVALID`); `anchor` reports the live-doc Mission statement against the record per repo (`AGREE` or `DRIFT` with reasons) | `omp-kit mission anchor --project ~/Developer/omp-kit --json` |
+| `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes; `anchor` compares the live-doc Mission statement with the record (`AGREE`/`DRIFT`) | `omp-kit mission anchor --json` |
+| `omp-kit preflight` | `preflight commit\|claim\|in-review\|close [BEAD]` | Every finding an act faces, with remedy and fix, at once, changing nothing | `omp-kit preflight` |
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned in-progress/rework claims; reclaim only with no live holder (seat, mail in 24 h, reservation). LIVE protected; UNKNOWN never reclaimed | `omp-kit drain stale-claims --project . --json` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 124 over budget, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |

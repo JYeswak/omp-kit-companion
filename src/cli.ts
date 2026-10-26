@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { preflightBead, preflightCommit } from "./preflight.ts";
+import { renderEnvelope } from "./kitlib/findings.ts";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { readFileSync, realpathSync, rmSync, statSync } from "node:fs";
@@ -4044,6 +4046,34 @@ registerCommandHandler("mission anchor", missionAnchorCommand);
 async function rchLeaseCommand(request: ParsedCommand): Promise<CliResult> {
 	const slotsFlag = request.flags.get("--slots");
 	const slots = typeof slotsFlag === "string" ? Number(slotsFlag) : NaN;
+// GATEDIAG1 (ompkit-fp72.135.3.16): one complete diagnostic before the act; nothing is changed.
+function preflightResult(env: Awaited<ReturnType<typeof preflightCommit>>): CliResult {
+	const blocking = env.findings.filter(f => f.blocking).length;
+	return { code: env.ok ? 0 : 1, data: { overall: env.ok ? "OK" : "FINDINGS", act: env.act, target: env.target, snapshot: env.snapshot, blocking, findings: env.findings, text: renderEnvelope(env) }, verification: "PERFORMED" };
+}
+function preflightProject(request: ParsedCommand): string | CliResult {
+	const flag = request.flags.get("--project");
+	if (flag !== undefined && (typeof flag !== "string" || !flag.trim())) return refusal("INVALID_FLAG", "--project requires a non-empty path", "Pass --project PATH or run from the repository root.");
+	return resolve(typeof flag === "string" ? flag : process.cwd());
+}
+registerCommandHandler("preflight commit", async request => {
+	const repo = preflightProject(request);
+	if (typeof repo !== "string") return repo;
+	const message = request.flags.get("--message");
+	if (message !== undefined && (typeof message !== "string" || !message.trim())) return refusal("INVALID_FLAG", "--message requires a file path", "Pass --message FILE.");
+	return preflightResult(await preflightCommit(repo, { message: typeof message === "string" ? resolve(message) : undefined }));
+});
+for (const act of ["claim", "in-review", "close"] as const) {
+	registerCommandHandler(`preflight ${act}`, async request => {
+		const repo = preflightProject(request);
+		if (typeof repo !== "string") return repo;
+		if (!request.argument) return refusal("MISSING_ARGUMENT", "A bead id is required", `Use omp-kit preflight ${act} BEAD.`);
+		const actor = request.flags.get("--actor");
+		if (actor !== undefined && (typeof actor !== "string" || !actor.trim())) return refusal("INVALID_FLAG", "--actor requires a name", "Pass --actor NAME.");
+		return preflightResult(await preflightBead(act, repo, request.argument, { actor: typeof actor === "string" ? actor : undefined }));
+	});
+}
+
 	if (!Number.isSafeInteger(slots) || slots < 1) return refusal("INVALID_FLAG", "--slots requires the positive native slot demand for this command", "Pass --slots N; no remote command was submitted.");
 	const worker = request.flags.get("--worker"), project = request.flags.get("--project");
 	if ((worker !== undefined && (typeof worker !== "string" || !worker.trim())) || (project !== undefined && (typeof project !== "string" || !project.trim())))
