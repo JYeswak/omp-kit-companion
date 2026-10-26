@@ -1107,6 +1107,7 @@ _ELAPSED_ACCEPTANCE_RE = re.compile(
     r"|\bon\s+or\s+after\s+\d{4}-\d{2}-\d{2}\b"
     r"|\blive\s+(?:run|ring|measurement)\s+(?:proof|evidence)\b"
     r"|\bafter\s+(?:the\s+)?kit\s+release\s+is\s+installed\b"
+    r"|\b\d+\s*(?:hours?|hrs?|h)\s+after\s+landing\b"
     r"|\bwithin\s+\d+\s+fast[- ]lane\s+cadences?\s+of\s+deploy\b"
     r"|\bnext\s+push[- ]run\b"
     r")",
@@ -1471,6 +1472,13 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
                 "next-push-run",
                 "- [ ] [a] [build] build code; planted negative: remove it and RED.\n"
                 "On the next push-run, [b] verify; planted negative: omit the check and RED.\n",
+                True,
+            ),
+            (
+                "hours-after-landing",
+                "- [ ] [a] [build] build code; planted negative: remove it and RED.\n"
+                "- [ ] [b] [live] 24 h after landing, cc.py unknowns shows rows "
+                "with last_seen before landing; planted negative: stale rows RED.\n",
                 True,
             ),
             (
