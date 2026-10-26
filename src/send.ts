@@ -1247,9 +1247,11 @@ export async function deliverToTernSeat(input: {
 	env?: NodeJS.ProcessEnv;
 	pollMs?: number;
 	deadlineMs?: number;
-	/** BUSY seats are re-observed up to this bound (default 0: refuse at once); exhaustion is NOT_DELIVERED. */
+	/** Wall-clock bound in ms for a working seat, including observation time; default 0 refuses immediately. */
 	untilDeliveredMs?: number;
 	wait?: (ms: number) => Promise<void>;
+	/** Monotonic clock seam for deterministic bound tests. */
+	now?: () => number;
 	/** Overridable for tests; production uses plane-tern's functions. */
 	observe?: typeof observeTernSeat;
 	identify?: typeof identifyTernSeat;
@@ -1259,6 +1261,7 @@ export async function deliverToTernSeat(input: {
 	const observe = input.observe ?? observeTernSeat;
 	const identify = input.identify ?? identifyTernSeat;
 	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
+	const now = input.now ?? (() => performance.now());
 	const pollMs = input.pollMs ?? TERN_PROOF_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? TERN_PROOF_DEADLINE_MS;
 	let queued = false;
@@ -1295,25 +1298,45 @@ export async function deliverToTernSeat(input: {
 	const pasteMode = windowKey === "";
 	const seatKey = `${input.seat.session}/${input.seat.pane}@${input.seat.windowKey}`.replace(/[^A-Za-z0-9]+/g, "_");
 	let observation = await observe(input.seat, input.io);
-	const busyRetries = Math.max(0, Math.ceil((input.untilDeliveredMs ?? 0) / pollMs));
+	const untilDeliveredMs = Math.max(0, input.untilDeliveredMs ?? 0);
+	const busyRetries = Math.ceil(untilDeliveredMs / pollMs);
+	const untilDeliveredDeadline = now() + untilDeliveredMs;
+	let deadlineExpired = false;
 	const waitsForTurnBoundary = () => observation.state === "BUSY"
 		|| (observation.state === "UNKNOWN" && observation.working === true
 			&& (observation.reason === "SESSION_TURN_IN_FLIGHT" || observation.reason === "ACTIVE_BRANCH_UNAVAILABLE"
 				|| observation.reason === "SESSION_FILE_UNAVAILABLE"));
 	queued = waitsForTurnBoundary() && busyRetries > 0;
 	for (let retry = 0; waitsForTurnBoundary() && retry < busyRetries; retry++) {
-		await wait(pollMs);
+		const remainingMs = untilDeliveredDeadline - now();
+		if (remainingMs <= 0) {
+			deadlineExpired = true;
+			break;
+		}
+		await wait(Math.min(pollMs, remainingMs));
+		if (now() >= untilDeliveredDeadline) {
+			deadlineExpired = true;
+			break;
+		}
 		observation = await observe(input.seat, input.io);
+		if (now() >= untilDeliveredDeadline) {
+			deadlineExpired = true;
+			break;
+		}
 	}
 	const shellRule = observation.fg === null ? refuseShellPayload(input.text) : null;
 	if (shellRule) return fail(shellRule.rule, "destructive payload to a pane not proven to run OMP; zero sends");
-	if (waitsForTurnBoundary()) {
-		const state = observation.state === "BUSY" ? "BUSY" : `working with unproven session state (${observation.reason ?? "unknown"})`;
+	if (deadlineExpired || waitsForTurnBoundary()) {
 		if (busyRetries === 0)
-			return fail(observation.state === "BUSY" ? "SEAT_BUSY" : "OBSERVATION_UNKNOWN", `seat is ${state}; zero sends`);
+			return fail(observation.state === "BUSY" ? "SEAT_BUSY" : "OBSERVATION_UNKNOWN",
+				`seat is working but not provably idle (${observation.reason ?? "unknown"}); zero sends`);
+		const detail = deadlineExpired && observation.state === "IDLE"
+			? `seat became idle only after the ${untilDeliveredMs} ms until-delivered bound`
+			: `seat remained ${observation.state === "BUSY" ? "BUSY" : `working with unproven session state (${observation.reason ?? "unknown"})`}`
+				+ ` through the ${untilDeliveredMs} ms until-delivered bound`;
 		return { status: "NOT_DELIVERED", marker: "", sends: 0, sessionFile: observation.sessionFile, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, "tern-busy", input.text),
-			detail: `seat remained ${state} for the ${input.untilDeliveredMs} ms until-delivered bound; nothing typed; recovery copy written`,
+			detail: `${detail}; nothing typed; recovery copy written`,
 			code: "UNTIL_DELIVERED_EXHAUSTED", queue_states: ["QUEUED", "EXPIRED"] };
 	}
 	if (observation.state === "DEAD") return fail("SEAT_DEAD", "seat pane is dead; zero sends");
