@@ -592,12 +592,14 @@ test("apply never reopens or writes a tombstoned target", async () => {
 	const goneId = createNativeIssue(trackerRoot, "Deleted target", { externalRef: "core8:gone-item", parent: epicId });
 	// --force: a child of an epic otherwise returns a preview and is NOT deleted (blocked_dependents).
 	nativeOutput(["delete", goneId, "--reason", "fixture: deleted before this plan was applied", "--force"], trackerRoot);
-	expect(showNativeIssue(trackerRoot, goneId).status).toBe("tombstone");
+	const before = showNativeIssue(trackerRoot, goneId);
+	expect(before.status).toBe("tombstone");
 	const plan = writePlan("apply-terminal-tombstone", [{ slug: "gone-item", existing: "(new)" }]);
 
 	await runCli(applyArgs(plan, trackerRoot));
-	// list --all omits tombstones, so read the deleted bead itself: still a tombstone, never reopened.
-	expect(showNativeIssue(trackerRoot, goneId).status).toBe("tombstone");
+	// list --all omits tombstones, so read the deleted bead itself: every field is unchanged
+	// (status, acceptance, notes, dependencies, updated_at), so it was neither reopened nor written.
+	expect(showNativeIssue(trackerRoot, goneId)).toEqual(before);
 });
 
 test("planning convert apply preflights every block before writing any target", async () => {
