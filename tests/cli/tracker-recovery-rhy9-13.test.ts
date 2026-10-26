@@ -10,6 +10,7 @@ import {
 	type TrackerRecoveryResult,
 } from "../../src/tracker-recovery.ts";
 import type { LivenessDeps } from "../../src/scratch.ts";
+import type { ProbeState } from "../../src/kitlib/proc.ts";
 
 // ompkit-rhy9.13: guarded native recovery at the registered tracker-health tick.
 // Positive, planted negatives, bypass controls, and registry coverage.
@@ -36,17 +37,23 @@ function plantLease(runDir: string, lease: Record<string, unknown>): void {
 }
 
 const LIVE_PID = 424242;
-const LIVE_START = "Mon Oct  5 12:00:00 2026";
+const LIVE_START = "Mon Oct 5 12:00:00 2026";
 const OWNER_PID = 700000;
 
-function livenessWith(livePids: ReadonlySet<number>): LivenessDeps {
+function livenessWith(livePids: ReadonlySet<number>, probeStates: ReadonlyMap<number, ProbeState> = new Map()): LivenessDeps {
+	const processStart = (pid: number) => pid === LIVE_PID ? LIVE_START : pid === OWNER_PID ? "current-process" : null;
 	return {
-		signalAlive: (pid) => livePids.has(pid),
-		psVisible: () => false,
-		processStart: (pid) => pid === LIVE_PID ? LIVE_START : pid === OWNER_PID ? "current-process" : null,
+		processStart,
+		probe: (owner) => {
+			const observedStart = processStart(owner.pid);
+			const state = probeStates.get(owner.pid) ?? (!livePids.has(owner.pid) ? "dead" :
+				observedStart === null ? "unknown" : observedStart === owner.start ? "live" : "reused");
+			return { state, evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: observedStart,
+				stat: state === "zombie" ? "Z" : livePids.has(owner.pid) ? "S" : null,
+				signal0: livePids.has(owner.pid) ? "alive" : "esrch", reason: `planted ${state}` } };
+		},
 	};
 }
-
 function stubRun(brCalls: string[][], lsof: { code: number; stdout: string; stderr: string }, recoverCode = 0) {
 	return (args: readonly string[], cwd: string): TrackerRecoveryCommandResult => {
 		if (args[0] === "lsof") return { ...lsof };
@@ -63,6 +70,7 @@ const CLEAR_LSOF = { code: 0, stdout: "", stderr: "" };
 
 function baseDeps(brCalls: string[][], options: {
 	livePids?: ReadonlySet<number>;
+	probeStates?: ReadonlyMap<number, ProbeState>;
 	lsof?: { code: number; stdout: string; stderr: string };
 	sessionId?: (session: string, cwd: string) => string | null | undefined;
 	nowMs?: number;
@@ -72,7 +80,7 @@ function baseDeps(brCalls: string[][], options: {
 	const run = stubRun(brCalls, options.lsof ?? CLEAR_LSOF);
 	return {
 		pid: OWNER_PID,
-		liveness: livenessWith(options.livePids ?? new Set()),
+		liveness: livenessWith(options.livePids ?? new Set(), options.probeStates),
 		sessionId: options.sessionId ?? (() => "$22" as string | null),
 		run,
 		now: () => options.nowMs ?? T1,
@@ -135,6 +143,21 @@ test("[a-negative] live lease holder: named block, zero recover commands, zero r
 		rmSync(planted.scratch, { recursive: true, force: true });
 	}
 });
+test("[a-negative] zombie lease owner is dead under the shared process-incarnation proof", () => {
+	const planted = plantedRepo();
+	plantLease(planted.runDir, { schema_version: 1, lease_id: "zombie", pid: LIVE_PID, process_start: LIVE_START,
+		session: SESSION, session_id: "$22", acquired_at: new Date(T1).toISOString() });
+	const brCalls: string[][] = [];
+	try {
+		const result = recoverBusyTracker(planted.repo, SESSION, baseDeps(brCalls, {
+			livePids: new Set([LIVE_PID]), probeStates: new Map([[LIVE_PID, "zombie"]]),
+		}));
+		expect(result?.kind).toBe("RECOVERY_PROCEEDED");
+		expect(brCalls).toHaveLength(1);
+	} finally {
+		rmSync(planted.scratch, { recursive: true, force: true });
+	}
+});
 
 test("[a-negative] live database holder: named latch, zero recover commands, zero rate receipt", () => {
 	const planted = plantedRepo();
@@ -149,6 +172,20 @@ test("[a-negative] live database holder: named latch, zero recover commands, zer
 		expect(result?.text).toContain(`database holder PID ${LIVE_PID} is live`);
 		expect(brCalls).toEqual([]);
 		expect(existsSync(rateReceiptPath(planted.repo))).toBe(false);
+	} finally {
+		rmSync(planted.scratch, { recursive: true, force: true });
+	}
+});
+test("[a-negative] zombie database holder is dead under the shared incarnation probe", () => {
+	const planted = plantedRepo();
+	const brCalls: string[][] = [];
+	try {
+		const result = recoverBusyTracker(planted.repo, SESSION, baseDeps(brCalls, {
+			livePids: new Set([LIVE_PID]), probeStates: new Map<number, ProbeState>([[LIVE_PID, "zombie"]]),
+			lsof: { code: 0, stdout: `${LIVE_PID}\n`, stderr: "" },
+		}));
+		expect(result?.kind).toBe("RECOVERY_PROCEEDED");
+		expect(brCalls).toHaveLength(1);
 	} finally {
 		rmSync(planted.scratch, { recursive: true, force: true });
 	}

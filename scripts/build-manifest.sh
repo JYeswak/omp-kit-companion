@@ -53,7 +53,7 @@ if [ "$source_export" = 1 ]; then
   kitlib_tmp work_dir omp-kit-manifest ||
     { echo "build-manifest: cannot create private source-export workdir" >&2; exit 2; }
 else
-  work_dir=$("$OMP_KIT_BUN" --workdir) ||
+  work_dir=$(OMP_KIT_WORK_OWNER_PID=$$ "$OMP_KIT_BUN" --workdir) ||
     { work_rc=$?; echo "build-manifest: private workdir producer_rc=$work_rc" >&2; exit "$work_rc"; }
 fi
 [ -n "$work_dir" ] || { echo "build-manifest: empty private workdir" >&2; exit 2; }

@@ -51,7 +51,7 @@ detail() { printf '      %s\n' "$*"; }
 sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 words() { printf '%s' "$1" | tr '\n' ' ' | sed 's/ *$//'; }
 
-WORK_ROOT=$("$OMP_KIT_BUN" --workdir) || { work_rc=$?; echo "doctor: private workdir producer_rc=$work_rc" >&2; exit "$work_rc"; }
+WORK_ROOT=$(OMP_KIT_WORK_OWNER_PID=$$ "$OMP_KIT_BUN" --workdir) || { work_rc=$?; echo "doctor: private workdir producer_rc=$work_rc" >&2; exit "$work_rc"; }
 neutral="$WORK_ROOT/neutral"
 cleanup() { rm -rf "$WORK_ROOT"; }
 trap cleanup EXIT

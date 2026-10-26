@@ -303,7 +303,9 @@ test("producer streams are retained in owned scratch and their paths are reporte
   expect(artifacts.directory.startsWith(join(repo, "var", "agent-tmp") + sep)).toBe(true);
   expect(readFileSync(artifacts.stdout_path, "utf8")).toBe(output.stdout);
   expect(readFileSync(artifacts.stderr_path, "utf8")).toBe(output.stderr);
-  expect(readFileSync(join(artifacts.directory, ".owner"), "utf8")).toContain(`repo=${repo}`);
+  const owner = readFileSync(join(artifacts.directory, ".owner"), "utf8");
+  expect(owner).toContain(`repo=${repo}`);
+  expect(owner).toContain("process_start=");
  } finally {
   rmSync(repo, { recursive: true, force: true });
  }

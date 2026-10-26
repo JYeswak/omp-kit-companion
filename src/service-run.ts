@@ -5,6 +5,8 @@ import { finished } from "node:stream/promises";
 import { loadGate } from "./infra.ts";
 import { randomUUID } from "node:crypto";
 import { Database } from "bun:sqlite";
+import { isDead, normalizeStart } from "./kitlib/proc.ts";
+import { ownerIdentity, ownerLiveness } from "./kitlib/owner.ts";
 
 /**
  * SVC1 single-flight: one running job per name. The second overlapping run
@@ -82,18 +84,9 @@ export type AcquireResult =
 
 export interface RunClaim {
 	pid: number;
+	process_start: string;
 	startedAt: number;
 	token: string;
-}
-
-/** Only ESRCH proves death. EPERM and every other failed probe are unknown. */
-function pidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		return !(error !== null && typeof error === "object" && "code" in error && error.code === "ESRCH");
-	}
 }
 
 function readClaim(dir: string): RunClaim | null {
@@ -102,9 +95,10 @@ function readClaim(dir: string): RunClaim | null {
 		const value: unknown = JSON.parse(readFileSync(join(dir, "pid"), "utf8"));
 		if (value === null || typeof value !== "object" || Array.isArray(value)
 			|| !("pid" in value) || typeof value.pid !== "number" || !Number.isSafeInteger(value.pid) || value.pid < 1
+			|| !("process_start" in value) || typeof value.process_start !== "string" || normalizeStart(value.process_start) === ""
 			|| !("startedAt" in value) || typeof value.startedAt !== "number" || !Number.isSafeInteger(value.startedAt)
 			|| !("token" in value) || typeof value.token !== "string" || value.token.length === 0) return null;
-		return { pid: value.pid, startedAt: value.startedAt, token: value.token };
+		return { pid: value.pid, process_start: normalizeStart(value.process_start), startedAt: value.startedAt, token: value.token };
 	} catch {
 		return null;
 	}
@@ -155,12 +149,14 @@ function removeLock(dir: string): void {
 }
 
 /**
- * Claim one job. Only a verified dead PID can be reclaimed; age is not death.
- * Missing, malformed and legacy claims remain OVERLAP until reconciled.
+ * Claim one job. Only a dead, reused or zombie process incarnation can be reclaimed; unknown and legacy claims stay
+ * overlapped. Age is metadata, not death.
  */
 export function acquireRunLock(jobsDir: string, job: string, nowMs: number = Date.now()): AcquireResult {
 	const unknown: AcquireResult = { status: "OVERLAP", holderPid: null, holderAgeMs: null };
 	if (!Number.isSafeInteger(nowMs)) return unknown;
+	const ownerIncarnation = ownerIdentity(process.pid);
+	if (ownerIncarnation === null) return unknown;
 	return mutateClaim(jobsDir, job, (): AcquireResult => {
 		const dir = join(jobsDir, `${job}.lock`);
 		try {
@@ -168,14 +164,13 @@ export function acquireRunLock(jobsDir: string, job: string, nowMs: number = Dat
 		} catch {
 			const holder = readClaim(dir);
 			if (holder === null) return unknown;
-			if (pidAlive(holder.pid)) {
-				return { status: "OVERLAP", holderPid: holder.pid, holderAgeMs: nowMs - holder.startedAt };
-			}
+			const dead = isDead(ownerLiveness({ pid: holder.pid, process_start: holder.process_start }));
+			if (!dead) return { status: "OVERLAP", holderPid: holder.pid, holderAgeMs: nowMs - holder.startedAt };
 			removeLock(dir);
 			try { mkdirSync(dir, { mode: 0o700 }); } catch { return unknown; }
 		}
 		const owner = lstatSync(dir);
-		const claim: RunClaim = { pid: process.pid, startedAt: nowMs, token: randomUUID() };
+		const claim: RunClaim = { pid: ownerIncarnation.pid, process_start: ownerIncarnation.process_start, startedAt: nowMs, token: randomUUID() };
 		try {
 			writeFileSync(join(dir, "pid"), JSON.stringify(claim), { mode: 0o600, flag: "wx" });
 		} catch {
@@ -204,9 +199,9 @@ export function readRunClaim(jobsDir: string, job: string): RunClaim | null {
 	return readClaim(join(jobsDir, `${job}.lock`));
 }
 
-/** Per-acquisition identity, not a wall-clock claim about kernel process birth. */
+/** Claim binding used by delegated consumers: token plus the exact process incarnation and admission timestamp. */
 export function claimIncarnation(claim: RunClaim): string {
-	return `${claim.pid}:${claim.startedAt}:${claim.token}`;
+	return `${claim.pid}:${claim.process_start}:${claim.startedAt}:${claim.token}`;
 }
 
 export interface ServiceLauncherMember {
@@ -311,11 +306,21 @@ export type CappedRun =
 	| { status: "FAILED"; exit: number | null; elapsedMs: number; out: string }
 	| { status: "TIMEOUT"; exit: null; elapsedMs: number; out: string };
 
+/** An owned child process-group cleanup probe; this transient group is not a persisted owner identity. */
+function processGroupAlive(group: number): boolean {
+	try {
+		process.kill(group, 0);
+		return true;
+	} catch (error) {
+		return !(error !== null && typeof error === "object" && "code" in error && error.code === "ESRCH");
+	}
+}
 /**
  * SVC1 finite-run cap: terminate the owned process group at capMs and bound
  * reaping/output cleanup. Injected executors retain deterministic clock tests;
  * the default executor owns all descendants which retain its POSIX group.
  */
+
 export async function runWithCap(input: {
 	argv: readonly string[];
 	cwd: string;
@@ -395,7 +400,7 @@ export function bunCapExec(options: CapOutputOptions = {}): CapExec {
 			process.once("SIGINT", kill);
 			const exited = child.exited.then(async code => {
 				// A reaped leader can still leave descendants holding its group.
-				if (ownsGroup && !cleanup && pidAlive(-child.pid)) await stop();
+				if (ownsGroup && !cleanup && processGroupAlive(-child.pid)) await stop();
 				return code;
 			});
 			const result = Promise.race([

@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { runScratchPressureTrigger, type ServiceRunner } from "./service.ts";
+import { ownerIdentityFromStart, ownerLiveness, type OwnerIdentity } from "./kitlib/owner.ts";
+import { parseOwnerFile } from "./scratch.ts";
 
 export const DISK_WARN_BELOW = 20;
 export const DISK_STOP_BELOW = 10;
@@ -25,6 +27,7 @@ export type WriterObservation = {
 	dir: string;
 	bytes: number;
 	pid: number | null;
+	process_start: string | null;
 	seat: string;
 	bead: string | null;
 	alive: boolean;
@@ -172,19 +175,24 @@ function readSnapshots(root: string): Snapshot[] {
 	} catch { return []; }
 }
 
-function owner(dir: string): { pid: number | null; seat: string; bead: string | null } {
+type ParsedOwner = { identity: OwnerIdentity | null; seat: string; bead: string | null };
+function owner(dir: string): ParsedOwner {
 	try {
-		const text = readFileSync(join(dir, ".owner"), "utf8").slice(0, 4096);
-		const pidMatch = /\bpid\s*[=:]\s*([0-9]{1,7})\b/.exec(text);
-		const seatMatch = /\b(?:seat|agent|owner|actor)\s*[=:]\s*([A-Za-z0-9_.-]+)/.exec(text);
-		const beadMatch = /\b(ompkit-[A-Za-z0-9_.-]+)\b/.exec(text);
-		return { pid: pidMatch ? Number(pidMatch[1]) : null, seat: seatMatch?.[1]?.slice(0, 64) ?? "", bead: beadMatch?.[1] ?? null };
-	} catch { return { pid: null, seat: "", bead: null }; }
+		const parsed = parseOwnerFile(readFileSync(join(dir, ".owner"), "utf8").slice(0, 4096));
+		if (parsed === null) return { identity: null, seat: "", bead: null };
+		return {
+			identity: ownerIdentityFromStart(parsed.pid, parsed.processStart),
+			seat: parsed.agent ?? "",
+			bead: parsed.bead,
+		};
+	} catch {
+		return { identity: null, seat: "", bead: null };
+	}
 }
 
-function processAlive(pid: number | null): boolean {
-	if (pid === null || pid <= 1 || pid === process.pid) return false;
-	try { process.kill(pid, 0); return true; } catch (error) { return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EPERM"; }
+function processAlive(identity: OwnerIdentity | null): boolean {
+	if (identity === null || identity.pid <= 1 || identity.pid === process.pid) return false;
+	try { return ownerLiveness(identity).state === "live"; } catch { return false; }
 }
 
 function topWriter(root: string, roots: readonly string[], nowMs: number): Omit<WriterObservation, "interrupted" | "notifyPath"> | null {
@@ -198,14 +206,17 @@ function topWriter(root: string, roots: readonly string[], nowMs: number): Omit<
 		if (growth > (selected?.bytes ?? 0)) selected = { dir, bytes: growth };
 	}
 	if (!selected) return null;
-	const identity = owner(selected.dir);
-	return { ...selected, ...identity, alive: processAlive(identity.pid) };
+	const ownerRecord = owner(selected.dir);
+	return { ...selected, pid: ownerRecord.identity?.pid ?? null, process_start: ownerRecord.identity?.process_start ?? null,
+		seat: ownerRecord.seat, bead: ownerRecord.bead, alive: processAlive(ownerRecord.identity) };
 }
 
-function interrupt(pid: number | null): boolean {
-	if (pid === null || pid <= 1 || pid === process.pid) return false;
-	try { process.kill(-pid, "SIGINT"); return true; } catch {
-		try { process.kill(pid, "SIGINT"); return true; } catch { return false; }
+function interrupt(pid: number | null, processStart: string | null): boolean {
+	const identity = pid === null ? null : ownerIdentityFromStart(pid, processStart);
+	if (identity === null || identity.pid <= 1 || identity.pid === process.pid || ownerLiveness(identity).state !== "live") return false;
+	try { process.kill(-identity.pid, "SIGINT"); return true; } catch {
+		if (ownerLiveness(identity).state !== "live") return false;
+		try { process.kill(identity.pid, "SIGINT"); return true; } catch { return false; }
 	}
 }
 
@@ -239,7 +250,7 @@ export function runDiskStageTick(options: DiskTickOptions = {}): DiskTickResult 
 	const candidate = stage === "critical" ? topWriter(root, roots, options.nowMs ?? Date.now()) : null;
 	let writer: WriterObservation | null = null;
 	if (candidate) {
-		const interrupted = interrupt(candidate.pid);
+		const interrupted = interrupt(candidate.pid, candidate.process_start);
 		const notifyPath = notify(root, candidate, freePct);
 		writer = { ...candidate, interrupted, notifyPath };
 	}

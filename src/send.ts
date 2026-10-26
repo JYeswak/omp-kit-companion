@@ -10,6 +10,7 @@ import { paneIsBusy } from "./fleet-watch.ts";
 import { defaultTernIo, discoverTernSeatFromInspection, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView,
 	resolveDaemonSocket, sessionViewOfText } from "./plane-tern.ts";
 import type { SessionJournalView, TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
+import { ownerIdentity, ownerIdentityFromStart, ownerLiveness, type OwnerIdentity } from "./kitlib/owner.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
@@ -199,28 +200,38 @@ export function paneLockPath(dropDir: string, session: string, pane: string): st
 	return resolve(join(dropDir, "..", "send-locks", `${safe}.lock`));
 }
 
-function lockHolderDead(lockPath: string): boolean {
-	let pid = NaN;
+let cachedProcessIdentity: OwnerIdentity | null = null;
+function currentProcessIdentity(): OwnerIdentity | null {
+	if (cachedProcessIdentity?.pid === process.pid) return cachedProcessIdentity;
+	const identity = ownerIdentity(process.pid);
+	if (identity !== null) cachedProcessIdentity = identity;
+	return identity;
+}
+
+function lockHolderDead(lockPath: string, current: OwnerIdentity): boolean {
+	let parsed: unknown;
 	try {
-		pid = Number(readFileSync(lockPath, "utf8").split(/\s/, 1)[0]);
+		parsed = JSON.parse(readFileSync(lockPath, "utf8"));
 	} catch {
-		return true;
-	}
-	if (!Number.isSafeInteger(pid) || pid <= 0) return true;
-	try {
-		process.kill(pid, 0);
-		return false;
-	} catch (error) {
-		if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") return true;
 		return false;
 	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
+		!("pid" in parsed) || typeof parsed.pid !== "number" ||
+		!("process_start" in parsed) || typeof parsed.process_start !== "string") return false;
+	const identity = ownerIdentityFromStart(parsed.pid, parsed.process_start);
+	if (identity === null) return false;
+	if (identity.pid === current.pid && identity.process_start === current.process_start) return false;
+	const state = ownerLiveness(identity).state;
+	return state === "dead" || state === "reused" || state === "zombie";
 }
 
 async function acquirePaneLock(lockPath: string, attempts: number, pollMs: number, wait: (ms: number) => Promise<void>): Promise<(() => void) | null> {
+	const owner = currentProcessIdentity();
+	if (owner === null) return null;
 	mkdirSync(dirname(lockPath), { recursive: true });
 	for (let attempt = 0; attempt < attempts; attempt++) {
 		try {
-			writeFileSync(lockPath, `${process.pid}\n`, { flag: "wx" });
+			writeFileSync(lockPath, `${JSON.stringify(owner)}\n`, { flag: "wx" });
 			let released = false;
 			return () => {
 				if (released) return;
@@ -229,7 +240,7 @@ async function acquirePaneLock(lockPath: string, attempts: number, pollMs: numbe
 			};
 		} catch (error) {
 			if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "EEXIST") throw error;
-			if (lockHolderDead(lockPath)) {
+			if (lockHolderDead(lockPath, owner)) {
 				try { rmSync(lockPath, { force: true }); } catch {}
 				continue;
 			}
@@ -238,6 +249,7 @@ async function acquirePaneLock(lockPath: string, attempts: number, pollMs: numbe
 	}
 	return null;
 }
+
 
 /**
  * Sweep pattern (regex-engineering §7: required `kit-send-<12hex>` matches;
@@ -695,10 +707,10 @@ export type ComposerVerdict = { state: "EMPTY" } | { state: "DRAFT" } | { state:
 
 /**
  * The seat's own kit-composer-state record (extensions/kit-composer-state.ts), read with the same freshness rule as
- * respawn_seat.composer_record: keyed by sha1(realpath(session file))[:16], schema 1, naming this session file, at
- * most COMPOSER_RECORD_MAX_AGE_MS old, writer pid alive (EPERM counts as alive). Anything else is UNKNOWN.
+ * respawn_seat.composer_record: keyed by sha1(realpath(session file))[:16], schema 1, names this session file,
+ * and records the writer's exact process incarnation. Anything else is UNKNOWN.
  */
-export function readComposerRecord(sessionFile: string, opts: { dir?: string; now?: number; pidAlive?: (pid: number) => boolean } = {}): ComposerVerdict {
+export function readComposerRecord(sessionFile: string, opts: { dir?: string; now?: number } = {}): ComposerVerdict {
 	let real = sessionFile;
 	try { real = realpathSync(sessionFile); } catch { /* not on disk: the raw path is what the writer keyed */ }
 	const dir = opts.dir ?? join(homedir(), ".local", "state", "omp-kit", "composer");
@@ -715,12 +727,12 @@ export function readComposerRecord(sessionFile: string, opts: { dir?: string; no
 	if (typeof rec.at !== "number" || (opts.now ?? Date.now()) - rec.at > COMPOSER_RECORD_MAX_AGE_MS) {
 		return { state: "UNKNOWN", reason: "composer record is stale" };
 	}
-	const pidAlive = opts.pidAlive ?? ((pid: number) => {
-		try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
-	});
-	if (typeof rec.pid !== "number" || !Number.isInteger(rec.pid) || rec.pid <= 0 || !pidAlive(rec.pid)) {
-		return { state: "UNKNOWN", reason: "composer record writer is not alive" };
-	}
+	if (typeof rec.pid !== "number" || !Number.isSafeInteger(rec.pid) || typeof rec.process_start !== "string")
+		return { state: "UNKNOWN", reason: "composer record writer identity is not verifiable" };
+	const identity = ownerIdentityFromStart(rec.pid, rec.process_start);
+	if (identity === null) return { state: "UNKNOWN", reason: "composer record writer identity is not verifiable" };
+	const liveness = ownerLiveness(identity).state;
+	if (liveness !== "live") return { state: "UNKNOWN", reason: `composer record writer is ${liveness}` };
 	if (rec.empty === true) return { state: "EMPTY" };
 	if (rec.empty === false) return { state: "DRAFT" };
 	return { state: "UNKNOWN", reason: "composer record has no empty flag" };

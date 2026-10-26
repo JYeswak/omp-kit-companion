@@ -22,9 +22,8 @@ const killed: Subprocess[] = [];
 const run: ScratchRunner = (args, opts) => args[0] === "lsof" ? defaultRunner(args, opts) : { code: 1, stdout: "", stderr: "" };
 const deps = (): ApplyDeps => ({ liveness: defaultLiveness(), run, home, systemTempBases: [temp] });
 
-function deadPid(not: number[] = []): number {
+function deadPid(): number {
 	for (let pid = 60000; pid > 1000; pid--) {
-		if (not.includes(pid)) continue;
 		try {
 			process.kill(pid, 0);
 			continue;
@@ -41,7 +40,9 @@ function deadPid(not: number[] = []): number {
 function plant(name: string, owner: { pid: number; label: string }, parent = temp, dirMode = 0o700): string {
 	const dir = join(parent, name);
 	mkdirSync(dir, { mode: 0o700 });
-	writeFileSync(join(dir, ".owner"), `pid=${owner.pid}\nlabel=${owner.label}\nrepo=/\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+	const processStart = owner.pid === process.pid ? defaultLiveness().processStart(owner.pid) : "Thu Jan  1 00:00:00 1970";
+	if (processStart === null) throw new Error("process incarnation unavailable for kitlib fixture");
+	writeFileSync(join(dir, ".owner"), `pid=${owner.pid}\nprocess_start=${processStart}\nlabel=${owner.label}\nrepo=/\ncreated_at=${new Date().toISOString()}\nargv0=test\n`, { mode: 0o600 });
 	chmodSync(join(dir, ".owner"), 0o600);
 	writeFileSync(join(dir, "payload"), "leftover\n");
 	chmodSync(dir, dirMode);
@@ -86,15 +87,14 @@ afterAll(async () => {
 	owned.cleanup();
 });
 
-test("AC1: a dead-pid kitlib leftover with no open files is planned REAP and removed; every control stays", async () => {
+test("AC1: a dead kitlib owner with no open files is reaped; mismatched directory suffix is not identity", async () => {
 	const dead = deadPid();
-	const other = deadPid([dead]);
 	const reaped = plant(`ac1-dead.${dead}.a1b2c3`, { pid: dead, label: "ac1-dead" });
 	const live = plant(`ctl-live.${process.pid}.l1v3aa`, { pid: process.pid, label: "ctl-live" });
 	const held = plant(`ctl-open.${dead}.h3ld00`, { pid: dead, label: "ctl-open" });
 	writeFileSync(join(held, "held"), "open\n");
 	sleeper = Bun.spawn(["sh", "-c", "exec 3<\"$1\"; exec sleep 600", "sh", join(held, "held")], { stdout: "ignore", stderr: "ignore" });
-	const pidMismatch = plant(`ctl-pid.${dead}.p1d000`, { pid: other, label: "ctl-pid" });
+	const renamed = plant(`ctl-pid.${dead}.p1d000`, { pid: process.pid, label: "ctl-pid" });
 	const labelMismatch = plant(`ctl-label.${dead}.lab000`, { pid: dead, label: "someone-else" });
 	const notKitlib = plant(`ctl-name.${dead}`, { pid: dead, label: "ctl-name" });
 	const target = plant(`ctl-link.${dead}.s1m000`, { pid: dead, label: "ctl-link" }, home);
@@ -110,9 +110,9 @@ test("AC1: a dead-pid kitlib leftover with no open files is planned REAP and rem
 		await Bun.sleep(20);
 	}
 
-	// Refused before any liveness rule: never visited, and the refusal names the kitlib rule that failed.
+	// Structural owner/path checks do not use the numeric suffix as identity.
 	expect(kitlibTmpProblem(reaped)).toBeNull();
-	expect(kitlibTmpProblem(pidMismatch)).toBe("kitlib-owner-pid-mismatch");
+	expect(kitlibTmpProblem(renamed)).toBeNull();
 	expect(kitlibTmpProblem(labelMismatch)).toBe("kitlib-owner-label-mismatch");
 	expect(kitlibTmpProblem(notKitlib)).toBe("kitlib-name-mismatch");
 	expect(kitlibTmpProblem(link)).toBe("kitlib-dir-is-symlink");
@@ -121,15 +121,16 @@ test("AC1: a dead-pid kitlib leftover with no open files is planned REAP and rem
 	const plan = planScratch(home, deps());
 	const row = (dir: string) => plan.sessions.find(session => session.dir === dir);
 	expect(row(reaped)).toMatchObject({ action: "REAP", reason: "kitlib-owner-dead-no-open-fds" });
-	expect(row(live)).toMatchObject({ action: "LIVE", reason: "kitlib-owner-alive-start-unverified" });
+	expect(row(live)).toMatchObject({ action: "LIVE", reason: "kitlib-owner-alive" });
+	expect(row(renamed)).toMatchObject({ action: "LIVE", reason: "kitlib-owner-alive" });
 	expect(row(held)).toMatchObject({ action: "LIVE", reason: "kitlib-owner-dead-but-open-fds-present" });
-	for (const refused of [pidMismatch, labelMismatch, notKitlib, link, loose]) expect(row(refused)).toBeUndefined();
+	for (const refused of [labelMismatch, notKitlib, link, loose]) expect(row(refused)).toBeUndefined();
 	expect(plan.sessions.every(session => session.dir.startsWith(`${temp}/`))).toBe(true);
 
 	const applied = applyScratch(home, deps());
 	expect(applied.applied.find(session => session.dir === reaped)).toMatchObject({ action: "REAP", reason: "kitlib-owner-dead-no-open-fds-applied" });
 	expect(existsSync(reaped)).toBe(false);
-	for (const kept of [live, held, pidMismatch, labelMismatch, notKitlib, loose, target]) expect(existsSync(join(kept, ".owner"))).toBe(true);
+	for (const kept of [live, held, renamed, labelMismatch, notKitlib, loose, target]) expect(existsSync(join(kept, ".owner"))).toBe(true);
 	expect(lstatSync(link).isSymbolicLink()).toBe(true);
 	expect(applied.applied.filter(session => session.action === "REAP").map(session => session.dir)).toEqual([reaped]);
 }, 120_000);

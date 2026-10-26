@@ -49,13 +49,16 @@ esac
 # and .owner records it, so a gate killed by SIGKILL (which skips the trap) leaves a dir the scratch
 # reaper takes once this pid is dead, instead of an ownerless tree held for 72 h.
 owned_dir() {
+	start=$(ps -p "$$" -o lstart= 2>/dev/null || true)
+	if [ -z "$start" ]; then
+		echo "pre-push-gate: cannot establish owner process start; refusing scratch" >&2
+		return 1
+	fi
 	dir=$(mktemp -d "$ROOT/var/agent-tmp/$1.$$.XXXXXX") || return 1
-	start=$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
 	created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-	if [ -n "$start" ]; then
-		printf 'pid=%s\nprocess_start=%s\nlabel=%s\nrepo=%s\ncreated_at=%s\nargv0=%s\n' "$$" "$start" "$1" "$ROOT" "$created" "$0" > "$dir/.owner"
-	else
-		printf 'pid=%s\nlabel=%s\nrepo=%s\ncreated=%s\n' "$$" "$1" "$ROOT" "$created" > "$dir/.owner"
+	if ! printf 'pid=%s\nprocess_start=%s\nlabel=%s\nrepo=%s\ncreated_at=%s\nargv0=%s\n' "$$" "$start" "$1" "$ROOT" "$created" "$0" > "$dir/.owner"; then
+		rm -rf "$dir"
+		return 1
 	fi
 	mkdir "$dir/tree"
 	printf '%s' "$dir"

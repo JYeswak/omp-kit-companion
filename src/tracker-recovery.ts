@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, type Dirent, type Stats } from "node:fs";
 import { join, resolve } from "node:path";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
-import { defaultLiveness, probeOwner, type LivenessDeps, type OwnerState } from "./scratch.ts";
+import { defaultLiveness, type LivenessDeps } from "./scratch.ts";
+import { ownerIdentity, ownerIdentityFromStart, ownerLiveness } from "./kitlib/owner.ts";
 const RECOVERY_ROOT = [".beads", ".br_recovery", "schema-migrations"] as const;
 const RECOVERY_MARKER = "recovery-failed.json";
 const LEASE_FILE = ".omp-kit-recovery-lease.json";
@@ -455,8 +456,11 @@ function readLease(path: string): RecoveryLease | null {
 
 function inspectLease(lease: RecoveryLease, repo: string, liveness: LivenessDeps,
 	sessionId: (session: string, cwd: string) => string | null | undefined): LeaseInspection {
-	const processState: OwnerState = probeOwner(lease.pid, lease.process_start, liveness);
-	if (processState === "dead" || processState === "reused") return { state: "stale", reason: `holder PID ${lease.pid} is ${processState}` };
+	const identity = ownerIdentityFromStart(lease.pid, lease.process_start);
+	if (identity === null) return { state: "unknown", reason: `holder PID ${lease.pid} identity cannot be checked` };
+	const processState = ownerLiveness(identity, { probe: liveness.probe }).state;
+	if (processState === "dead" || processState === "reused" || processState === "zombie")
+		return { state: "stale", reason: `holder PID ${lease.pid} is ${processState}` };
 	if (processState === "unknown") return { state: "unknown", reason: `holder PID ${lease.pid} identity cannot be checked` };
 	const currentSessionId = sessionId(lease.session, repo);
 	if (currentSessionId === undefined) return { state: "unknown", reason: `session ${lease.session} liveness cannot be checked` };
@@ -483,7 +487,11 @@ function databaseHolders(databasePath: string, repo: string,
 	if (pids.some(pid => pid === null)) return { state: "unknown", reason: "lsof returned an unparseable holder list" };
 	for (const match of pids) {
 		const pid = Number(match![1]);
-		if (liveness.signalAlive(pid) || liveness.psVisible(pid)) return { state: "held", pid };
+		const identity = ownerIdentityFromStart(pid, liveness.processStart(pid));
+		if (identity === null) return { state: "unknown", reason: `database holder PID ${pid} identity cannot be checked` };
+		const state = ownerLiveness(identity, { probe: liveness.probe }).state;
+		if (state === "live") return { state: "held", pid };
+		if (state === "unknown") return { state: "unknown", reason: `database holder PID ${pid} identity cannot be checked` };
 	}
 	return { state: "clear" };
 }
@@ -741,7 +749,12 @@ function defaultRetentionHolderOf(path: string, repo: string, run: (args: readon
 	for (const line of output.split(/\r?\n/)) {
 		const match = /^p?(\d+)$/.exec(line.trim());
 		if (!match) return { state: "unknown", reason: "lsof returned an unparseable holder list" };
-		return { state: "held", pid: Number(match[1]) };
+		const pid = Number(match[1]);
+		const identity = ownerIdentity(pid);
+		if (identity === null) return { state: "unknown", reason: `database holder PID ${pid} identity cannot be checked` };
+		const state = ownerLiveness(identity).state;
+		if (state === "live") return { state: "held", pid };
+		if (state === "unknown") return { state: "unknown", reason: `database holder PID ${pid} identity cannot be checked` };
 	}
 	return { state: "clear" };
 }
@@ -801,11 +814,12 @@ function classifyMigrationRunCandidate(dir: string, ctx: ClassifyContext): Track
 	const lease = readMarkerJson(dir, LEASE_FILE);
 	if (lease !== null && typeof lease === "object") {
 		const record = lease as Record<string, unknown>;
-		if (typeof record.pid === "number" && typeof record.process_start === "string") {
-			const state = probeOwner(record.pid, record.process_start, ctx.liveness);
-			if (state === "live" || state === "live-unreachable" || state === "unknown") {
-				return { ...base, bytes: tree.bytes, ageMs, verdict: "PROTECTED", reason: "HELD" };
-			}
+		const identity = typeof record.pid === "number" && typeof record.process_start === "string"
+			? ownerIdentityFromStart(record.pid, record.process_start) : null;
+		if (identity === null) return { ...base, bytes: tree.bytes, ageMs, verdict: "PROTECTED", reason: "OWNERSHIP_UNKNOWN" };
+		const state = ownerLiveness(identity, { probe: ctx.liveness.probe }).state;
+		if (state === "live" || state === "unknown") {
+			return { ...base, bytes: tree.bytes, ageMs, verdict: "PROTECTED", reason: "HELD" };
 		}
 	}
 	if (ageMs < TRACKER_QUARANTINE_RETENTION_MS) return { ...base, bytes: tree.bytes, ageMs, verdict: "PROTECTED", reason: "RECENT" };

@@ -3,6 +3,7 @@ import { performance } from "node:perf_hooks";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ownedTmp } from "./kitlib/tmp.ts";
+import { parseOwnerFile } from "./scratch.ts";
 import { compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { BundledRunInterruptedError, runIsolatedShell, type BundledRunResult } from "./runtime.ts";
@@ -122,13 +123,15 @@ export function retainProducerOutput(repoRoot: string, output: Pick<BundledRunRe
  const relativeScratch = relative(canonicalRepo, canonicalScratch);
  if (relativeScratch === ".." || relativeScratch.startsWith(`..${sep}`) || isAbsolute(relativeScratch))
   throw new Error("FULL_TEST_ARTIFACT_ROOT_ESCAPES_REPO");
- // kitlib owned dir (ompkit-b3zgu), returned to the caller, so auto-cleanup is off. Its .owner is rewritten with
- // repo= the canonical repo root (kitlib writes the cwd): the var/agent-tmp reaper binds the dir to that repo.
+ // kitlib owned dir (ompkit-b3zgu), returned to the caller, so auto-cleanup is off. Keep the canonical repo root
+ // while preserving the creator's process incarnation; the reaper accepts no PID-only owner records.
  const directory = ownedTmp("full-test", { root: canonicalScratch, autoCleanup: false }).path;
  const stdout_path = join(directory, "producer.stdout");
  const stderr_path = join(directory, "producer.stderr");
+ const owner = parseOwnerFile(readFileSync(join(directory, ".owner"), "utf8"));
+ if (owner === null || owner.processStart === null || owner.argv0 === null) throw new Error("FULL_TEST_OWNER_IDENTITY_UNAVAILABLE");
  writeFileSync(join(directory, ".owner"),
-  `pid=${process.pid}\nlabel=full-test\nrepo=${canonicalRepo}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
+  `pid=${owner.pid}\nprocess_start=${owner.processStart}\nlabel=full-test\nrepo=${canonicalRepo}\ncreated_at=${owner.createdAt}\nargv0=${owner.argv0}\n`, { mode: 0o600 });
  writeFileSync(stdout_path, output.stdout, { mode: 0o600 });
  writeFileSync(stderr_path, output.stderr, { mode: 0o600 });
  return { directory, stdout_path, stderr_path };

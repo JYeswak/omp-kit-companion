@@ -2,7 +2,7 @@
 // its owner did not bin is named with its agent, label, role, bin and the guard that should have stopped it; a dir the
 // owner released into a bin is not a gap.
 import { afterAll, afterEach, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { applyScratch, fileGapReports, filedGapDirs, reapLogPath, releaseScratch, scratchGapReport, type ApplyDeps, type LivenessDeps, type ScratchGap, type ScratchGapReport, type ScratchRunner } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -13,6 +13,7 @@ const scratchParent = join(repo, "var", "agent-tmp");
 mkdirSync(scratchParent, { recursive: true });
 const SESSION_A = "01a15012-af9e-7628-bee6-496084668412";
 const SESSION_B = "01a1502a-5647-76ba-89c5-949087f3e283";
+const RELEASE_AGENT = "CopperTrout";
 
 const cleanup: string[] = [];
 const saved = { roots: process.env.OMP_KIT_SCRATCH_ROOTS, state: process.env.XDG_STATE_HOME, fleet: process.env.OMP_KIT_FLEET_WATCH_CONFIG };
@@ -25,9 +26,10 @@ afterEach(() => {
 });
 
 // No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-const liveness: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null, seatLive: () => false,
+const liveness: LivenessDeps = { processStart: () => null, seatLive: () => false,
 	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const applyDeps = (home: string): ApplyDeps => ({ home, liveness, run: () => ({ code: 1, stdout: "", stderr: "" }) });
+const releaseDeps = (home: string): ApplyDeps => ({ ...applyDeps(home), callerSeat: () => ({ agent: RELEASE_AGENT, sessions: [SESSION_A], main: SESSION_A }) });
 
 function world(): { root: string; home: string; plant: (name: string, owner: string | null) => string } {
 	const root = ownedTmp("gap", { root: scratchParent }).path;
@@ -45,18 +47,19 @@ function world(): { root: string; home: string; plant: (name: string, owner: str
 	};
 	return { root, home, plant };
 }
-const owner = (pid: number, label: string, extra = "") => `pid=${pid}\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-10T10:00:00Z\n${extra}`;
+const owner = (pid: number, label: string, extra = "") => `pid=${pid}\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=${label}\nrepo=${repo}\ncreated_at=2026-10-10T10:00:00Z\nargv0=test\n${extra}`;
+const legacyPidOwner = (pid: number, label: string) => `pid=${pid}\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-10T10:00:00Z\n`;
 
 test("an emergency reap names, for each dir its owner left unbinned, the agent, role, bin and the guard; a binned release is not a gap", () => {
-	const { root, home, plant } = world();
+	const { home, plant } = world();
 	const fleet = join(home, "fleet-watch.json");
 	writeFileSync(fleet, JSON.stringify({ chief: { agent: "ChiefOne", session: "omp-chief" }, sessions: [] }));
 	process.env.OMP_KIT_FLEET_WATCH_CONFIG = fleet;
-	plant("pidonly.59011", owner(59011, "pidonly"));
+	const pidonly = plant("pidonly.59011", legacyPidOwner(59011, "pidonly"));
 	plant("chief.59012", owner(59012, "chief", `agent=ChiefOne\nsession=${SESSION_A}\n`));
 	plant("worker.59013", owner(59013, "worker", `agent=WorkerOne\nsession=${SESSION_B}\nbin=throwaway\n`));
-	const binned = plant("binned.1", owner(process.pid, "binned"));
-	const loose = plant("loose.2", owner(process.pid, "loose"));
+	const binned = plant("binned.1", owner(process.pid, "binned", `agent=${RELEASE_AGENT}\nsession=${SESSION_A}\n`));
+	const loose = plant("loose.2", owner(process.pid, "loose", `agent=${RELEASE_AGENT}\nsession=${SESSION_A}\n`));
 	const unowned = plant("unowned.3", null);
 	const old = new Date("2026-10-01T00:00:00Z");
 	utimesSync(unowned, old, old);
@@ -65,21 +68,22 @@ test("an emergency reap names, for each dir its owner left unbinned, the agent, 
 	utimesSync(mismatched, old, old);
 	utimesSync(join(mismatched, "work.txt"), old, old);
 	utimesSync(join(mismatched, ".owner"), old, old);
-	expect(releaseScratch(binned, home, applyDeps(home), { bin: "throwaway" }).ok).toBe(true);
-	expect(releaseScratch(loose, home, applyDeps(home)).ok).toBe(true);
+	expect(releaseScratch(binned, home, releaseDeps(home), { bin: "throwaway" }).ok).toBe(true);
+	expect(releaseScratch(loose, home, releaseDeps(home)).ok).toBe(true);
 
 	const result = applyScratch(home, applyDeps(home));
 	const byLabel = Object.fromEntries(result.gapReport.rows.map((row) => [row.label, row]));
-	expect(Object.keys(byLabel).sort()).toEqual(["chief", "loose", "mism", "pidonly", "unowned.3", "worker"]);
-	expect(byLabel.pidonly).toMatchObject({ class: "pid-keyed-owner-never-released", agent: null, role: "UNKNOWN", bin: "unbinned", guard: "ompkit-774u.9.3", action: "REAP" });
+	expect(Object.keys(byLabel).sort()).toEqual(["chief", "loose", "mism", "unowned.3", "worker"]);
+	expect(byLabel.pidonly).toBeUndefined();
+	expect(existsSync(pidonly)).toBe(true);
 	expect(byLabel.chief).toMatchObject({ class: "never-released", agent: "ChiefOne", session: SESSION_A, role: "chief", bin: "unbinned", guard: "ompkit-774u.15" });
 	expect(byLabel.worker).toMatchObject({ class: "never-released", agent: "WorkerOne", role: "UNKNOWN", bin: "throwaway" });
 	expect(byLabel.loose).toMatchObject({ class: "released-unbinned", action: "QUARANTINE", guard: "ompkit-774u.15" });
 	expect(byLabel["unowned.3"]).toMatchObject({ class: "unowned", agent: null, guard: "NO GUARD: file one", action: "QUARANTINE" });
-	expect(byLabel.mism).toMatchObject({ class: "mismatched-owner", action: "QUARANTINE", guard: "NO GUARD: file one" });
-	expect(byLabel.binned).toBeUndefined();
-	expect(result.gapReport.by_agent).toEqual({ UNKNOWN: 4, ChiefOne: 1, WorkerOne: 1 });
+	expect(byLabel.mism).toMatchObject({ class: "pid-keyed-owner-never-released", action: "REAP", guard: "ompkit-774u.9.3" });
+	expect(result.gapReport.by_agent).toEqual({ CopperTrout: 1, UNKNOWN: 2, ChiefOne: 1, WorkerOne: 1 });
 	expect(result.gapReport.by_class["never-released"]).toMatchObject({ count: 2, guard: "ompkit-774u.15" });
+	expect(result.gapReport.by_class["pid-keyed-owner-never-released"]).toMatchObject({ count: 1, guard: "ompkit-774u.9.3" });
 	expect(result.gapReport.by_class.unowned).toMatchObject({ count: 1, guard: "NO GUARD: file one" });
 	expect(result.gapReport.rows.every((row) => row.bytes > 0)).toBe(true);
 	// The same rows are in the reap log, one gap event per reclaimed dir.

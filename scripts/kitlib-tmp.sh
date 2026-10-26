@@ -20,11 +20,9 @@
 #
 # The dir is <root>/<label>.<pid>.<6 random [a-z0-9]>, mode 0700, where <root>
 # is KITLIB_TMP_ROOT if set, else ${TMPDIR:-/tmp}, and must already exist.
-# Labels match ^[a-z0-9][a-z0-9-]{0,47}$. The dir holds a .owner (mode 0600)
-# in the key=value owner-record form src/scratch.ts parseOwnerFile accepts:
-# pid, label, repo (the working directory), created (ISO time) and, when
-# KITLIB_TMP_BEAD is set, bead -- the identity-free field set (see
-# src/kitlib/tmp.ts). <pid> is $$, the sourcing shell.
+# in the modern key=value owner-record form src/scratch.ts parseOwnerFile accepts:
+# pid, process_start, label, repo, created_at, argv0 and, when KITLIB_TMP_BEAD is set, bead.
+# PID is liveness evidence only; process_start disambiguates reuse.
 #
 # kitlib owns the EXIT, HUP, INT and TERM traps: do not set them yourself,
 # register extra work with kitlib_tmp_atexit (it runs before the dirs go). On
@@ -38,8 +36,8 @@
 # after chmod -R u+rwx on the owned dir, which never follows symlinks inside.
 #
 # KITLIB_TMP_AUTO_CLEANUP=0 kitlib_tmp VAR LABEL (ompkit-b3zgu) is for a dir that must outlive the shell: the same
-# dir and .owner, but no trap is installed for it and it never enters the exit registry. kitlib_tmp_cleanup still
-# removes it on demand; after a crash the scratch reaper reads its .owner (dead pid, no open fds) like any other.
+# incarnation-bound dir and .owner, but no trap is installed for it and it never enters the exit registry.
+# kitlib_tmp_cleanup still removes it on demand; after a crash the scratch reaper checks pid and process_start.
 #
 # Shells: /bin/sh, dash, bash (POSIX function and trap semantics). zsh is refused: it scopes an EXIT trap set in
 # a function to that function. Names: public kitlib_tmp*, private kitlib__tmp_*; state lives in
@@ -164,6 +162,16 @@ kitlib_tmp() {
 		1) kitlib__tmp_auto=1 ;;
 		*) printf "kitlib tmp: KITLIB_TMP_AUTO_CLEANUP '%s' is invalid; want 0 or 1\n" "$KITLIB_TMP_AUTO_CLEANUP" >&2; return 2 ;;
 	esac
+	kitlib__tmp_process_start=$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | awk '{$1=$1; print}')
+	if [ -z "$kitlib__tmp_process_start" ]; then
+		printf "kitlib tmp: cannot establish this shell's process identity; no directory was created\n" >&2
+		return 1
+	fi
+	kitlib__tmp_argv0=$0
+	case $kitlib__tmp_argv0 in
+		*"$KITLIB__TMP_NL"*|*"$(printf '\t')"*|*"$(printf '\r')"*) kitlib__tmp_argv0=unknown ;;
+	esac
+	[ -n "$kitlib__tmp_argv0" ] || kitlib__tmp_argv0=unknown
 	if [ -n "$kitlib__tmp_auto" ]; then
 		kitlib__tmp_install_traps || return 2
 	fi
@@ -195,12 +203,12 @@ kitlib_tmp() {
 	case $kitlib__tmp_repo in
 		*"$KITLIB__TMP_NL"*|*"$(printf '\t')"*|*"$(printf '\r')"*) kitlib__tmp_repo=/ ;;
 	esac
-	kitlib__tmp_created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	kitlib__tmp_created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	if ! (
 		umask 077 &&
 		set -C &&
 		{
-			printf 'pid=%s\nlabel=%s\nrepo=%s\ncreated=%s\n' "$$" "$2" "$kitlib__tmp_repo" "$kitlib__tmp_created"
+			printf 'pid=%s\nprocess_start=%s\nlabel=%s\nrepo=%s\ncreated_at=%s\nargv0=%s\n' "$$" "$kitlib__tmp_process_start" "$2" "$kitlib__tmp_repo" "$kitlib__tmp_created_at" "$kitlib__tmp_argv0"
 			[ -z "${KITLIB_TMP_BEAD:-}" ] || printf 'bead=%s\n' "$KITLIB_TMP_BEAD"
 		} >"$kitlib__tmp_path/.owner"
 	); then

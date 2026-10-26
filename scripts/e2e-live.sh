@@ -81,7 +81,7 @@ if [ "${OMP_KIT_TEST_WORK_ROOT+x}" = x ]; then
   export OMP_KIT_TEST_WORK_ROOT
 fi
 # Mock data always lives in a private mode-700 child, even if caller scratch is 755.
-WORK_ROOT=$("$OMP_KIT_BUN" --workdir) || exit 2
+WORK_ROOT=$(OMP_KIT_WORK_OWNER_PID=$$ "$OMP_KIT_BUN" --workdir) || exit 2
 OWN_WORK_ROOT=1
 OMP_KIT_WORK_DIR="$WORK_ROOT"
 export OMP_KIT_WORK_DIR

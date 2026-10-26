@@ -2,11 +2,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { censusLoad, measureCpuMs, parseDiskIops, parseMemoryPressure, parsePsSnapshot, parseTmuxSnapshot, writeCensus } from "../../src/load-doctor.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 test("maps process ancestry to pane and ledger job", () => {
 	const processes = parsePsSnapshot(" 42 10 60.0 1000 Sun Oct  4 00:00:00 2026 bun worker\n 10 1 2.0 100 Sun Oct  4 00:00:00 2026 tmux\n 77 1 30.0 500 Sun Oct  4 00:00:00 2026 tsserver");
 	const panes = parseTmuxSnapshot("omp-test|0.1|10\n");
-	const report = censusLoad({ processes, panes, jobs: [{ id: "j1", pid: 42, label: "build", repo: "/repo", cwd: "/repo", agent: "worker", tmux_pane: "omp-test 0.1", state: "running" }], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60, memory_pressure: { level: "normal", free_pct: 92 }, disk_iops: 1676 }, now: new Date("2026-10-03T00:00:00Z") });
+	const report = censusLoad({ processes, panes, jobs: [{ id: "j1", pid: 42, process_start: "Sun Oct  4 00:00:00 2026", label: "build", repo: "/repo", cwd: "/repo", agent: "worker", tmux_pane: "omp-test 0.1", state: "running" }], machine: { load1: 1, load5: 1, load15: 1, ncpu: 4, cpu_idle_pct: 60, memory_pressure: { level: "normal", free_pct: 92 }, disk_iops: 1676 }, now: new Date("2026-10-03T00:00:00Z") });
 
 	expect(processes[0]?.start_time).toBe("Sun Oct  4 00:00:00 2026");
 	expect(report.verdict).toBe("OK");
@@ -62,6 +63,43 @@ test("reaps dead and process-reused ledger entries", () => {
 	expect(report.heavy_jobs).toEqual([]);
 	expect(existsSync(join(jobsRoot, "dead.json"))).toBe(false);
 	expect(existsSync(join(jobsRoot, "reused.json"))).toBe(false);
+});
+
+test("PIDIDENT1: a PID-only load job stays on disk but is reported unverified", () => {
+	const owned = ownedTmp("load-pid-only-job");
+	try {
+		const stateRoot = owned.path;
+		const jobsRoot = join(stateRoot, "jobs");
+		mkdirSync(jobsRoot, { recursive: true, mode: 0o700 });
+		const path = join(jobsRoot, "legacy.json");
+		writeFileSync(path, JSON.stringify({ id: "legacy", pid: process.pid, label: "legacy", repo: "/repo", cwd: "/repo",
+			agent: "worker", tmux_pane: "x", state: "running" }));
+		const report = censusLoad({ stateRoot, processes: parsePsSnapshot(` ${process.pid} 1 0.0 1 Sun Oct 4 00:00:00 2026 bun test`),
+			panes: [], machine: { load1: 0, load5: 0, load15: 0, ncpu: 4, cpu_idle_pct: 60 } });
+		expect(report.heavy_jobs).toEqual([]);
+		expect(report.unverified_jobs).toEqual(["legacy"]);
+		expect(report.stale_jobs_reaped).toEqual([]);
+		expect(existsSync(path)).toBe(true);
+	} finally {
+		owned.cleanup();
+	}
+});
+test("PIDIDENT1: a PID outside the shared process range remains unverified, not reaped", () => {
+	const owned = ownedTmp("load-out-of-range-pid");
+	try {
+		const jobsRoot = join(owned.path, "jobs");
+		mkdirSync(jobsRoot, { recursive: true, mode: 0o700 });
+		const path = join(jobsRoot, "out-of-range.json");
+		writeFileSync(path, JSON.stringify({ id: "out-of-range", pid: 0x80000000, process_start: "Mon Oct  5 13:27:00 2026",
+			label: "out-of-range", repo: "/repo", cwd: "/repo", agent: "worker", tmux_pane: "x", state: "running" }));
+		const report = censusLoad({ stateRoot: owned.path, processes: [], panes: [],
+			machine: { load1: 0, load5: 0, load15: 0, ncpu: 4, cpu_idle_pct: 60 } });
+		expect(report.unverified_jobs).toEqual(["out-of-range"]);
+		expect(report.stale_jobs_reaped).toEqual([]);
+		expect(existsSync(path)).toBe(true);
+	} finally {
+		owned.cleanup();
+	}
 });
 
 test("reports absent LOAD1 ledger and counts three contended samples", () => {

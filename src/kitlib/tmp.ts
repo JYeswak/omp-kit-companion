@@ -9,15 +9,10 @@
  * `tests/fixtures/kitlib-tmp/corpus.json` (`tests/cli/kitlib-tmp.test.ts`,
  * `tests/scripts/kitlib_tmp_test.py`).
  *
- * The dir is `<root>/<label>.<pid>.<6 random [a-z0-9]>`, mode 0700; `root`
- * defaults to `os.tmpdir()` (which honours TMPDIR) and must already exist.
- * Labels match `^[a-z0-9][a-z0-9-]{0,47}$`. The dir holds a `.owner` (mode
- * 0600) in the key=value owner-record form `src/scratch.ts` `parseOwnerFile`
- * accepts: `pid`, `label`, `repo` (the creating process's working directory),
- * `created` (ISO time) and, when given, `bead`. That is the identity-free
- * owner field set: `process_start` would cost a `ps` spawn per dir, and the
- * reaper already treats a dead pid with an identity-free owner as reapable
- * and a live one as live unless the pid was reused after `created`.
+ * The dir is `<root>/<label>.<pid>.<6 random [a-z0-9]>`, mode 0700; the `.owner` record is the same modern
+ * process-incarnation form consumed by `src/scratch.ts`: `pid`, `process_start`, `label`, `repo`, `created_at`,
+ * `argv0` and, when given, `bead`. PID is a liveness attribute only; `process_start` disambiguates reuse.
+ * If the creating process incarnation cannot be read, creation refuses before allocating a directory.
  *
  * `cleanup()` removes the tree and is a no-op the second time. If removal
  * fails (a 0555 dir inside, as installs make `releases/<v>`), every real dir
@@ -42,6 +37,7 @@ import { randomBytes } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ownerIdentity } from "./owner.ts";
 
 export interface OwnedTmp {
 	/** Absolute path of the owned directory. */
@@ -127,13 +123,15 @@ function ownerRepo(): string {
 export function ownedTmp(label: string, opts: { root?: string; bead?: string; autoCleanup?: boolean } = {}): OwnedTmp {
 	if (typeof label !== "string" || !LABEL_PATTERN.test(label)) throw new Error(`kitlib tmp: label '${String(label)}' is invalid; want ^[a-z0-9][a-z0-9-]{0,47}$`);
 	if (opts.bead !== undefined && !BEAD_PATTERN.test(opts.bead)) throw new Error(`kitlib tmp: bead '${opts.bead}' is invalid; want 1-64 chars of A-Za-z0-9._-`);
+	const identity = ownerIdentity(process.pid);
+	if (identity === null) throw new Error("kitlib tmp: process identity unavailable");
 	const root = opts.root ?? tmpdir();
 	if (!statSync(root).isDirectory()) throw new Error(`kitlib tmp: root '${root}' is not a directory`);
 	const autoCleanup = opts.autoCleanup !== false;
 	if (autoCleanup) installHooks();
 	let path = "";
 	for (let attempt = 0; path === ""; attempt++) {
-		const candidate = join(root, `${label}.${process.pid}.${suffix()}`);
+		const candidate = join(root, `${label}.${identity.pid}.${suffix()}`);
 		try {
 			mkdirSync(candidate, { mode: 0o700 });
 			path = candidate;
@@ -142,7 +140,9 @@ export function ownedTmp(label: string, opts: { root?: string; bead?: string; au
 		}
 	}
 	if (autoCleanup) liveDirs.add(path);
-	const lines = [`pid=${process.pid}`, `label=${label}`, `repo=${ownerRepo()}`, `created=${new Date().toISOString()}`];
+	const argv0 = process.argv[1] ?? process.argv[0] ?? "unknown";
+	const lines = [`pid=${identity.pid}`, `process_start=${identity.process_start}`, `label=${label}`, `repo=${ownerRepo()}`,
+		`created_at=${new Date().toISOString()}`, `argv0=${argv0}`];
 	if (opts.bead !== undefined) lines.push(`bead=${opts.bead}`);
 	try {
 		chmodSync(path, 0o700);

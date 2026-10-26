@@ -10,12 +10,10 @@ three pass the one conformance corpus ``tests/fixtures/kitlib-tmp/corpus.json``
 
 The dir is ``<root>/<label>.<pid>.<6 random [a-z0-9]>``, mode 0700; ``root``
 defaults to ``tempfile.gettempdir()`` (which honours TMPDIR) and must already
-exist. Labels match ``^[a-z0-9][a-z0-9-]{0,47}$``. The dir holds a ``.owner``
-(mode 0600) in the key=value owner-record form ``src/scratch.ts``
-``parseOwnerFile`` accepts: ``pid``, ``label``, ``repo`` (the working
-directory), ``created`` (ISO time) and, when given, ``bead`` -- the
-identity-free field set, so no ``ps`` spawn per dir (see src/kitlib/tmp.ts).
-
+exist. Labels match ``^[a-z0-9][a-z0-9-]{0,47}$``. The dir holds a modern
+``.owner`` record accepted by ``src/scratch.ts``: ``pid``, ``process_start``,
+``label``, ``repo``, ``created_at``, ``argv0`` and, when given, ``bead``.
+PID is liveness evidence only; process start disambiguates reuse.
 ``cleanup()`` removes the tree and is a no-op the second time. If removal
 fails (a 0555 dir inside, as installs make ``releases/<v>``), every real dir
 inside the owned dir is given owner rwx (symlinks are never followed) and
@@ -52,9 +50,12 @@ import secrets
 import shutil
 import signal
 import stat
+import sys
 import tempfile
 import threading
 from typing import Dict, Optional
+
+from kitlib_proc import incarnation
 
 LABEL_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,47}")
 # Same accept set as the owner parser's ``bead`` field (src/scratch.ts AGENT_PATTERN).
@@ -178,10 +179,12 @@ def owned_tmp(label: str, root: Optional[str] = None, bead: Optional[str] = None
     base = tempfile.gettempdir() if root is None else root
     if not os.path.isdir(base):
         raise NotADirectoryError(f"kitlib tmp: root {base!r} is not a directory")
+    identity = incarnation(os.getpid())
+    if identity is None:
+        raise RuntimeError("kitlib tmp: process identity unavailable")
+    pid = identity["pid"]
     if auto_cleanup:
         _install_hooks()
-    pid = os.getpid()
-    path = ""
     for attempt in range(_CREATE_ATTEMPTS):
         suffix = "".join(secrets.choice(_SUFFIX_ALPHABET) for _ in range(6))
         candidate = os.path.join(base, f"{label}.{pid}.{suffix}")
@@ -196,8 +199,10 @@ def owned_tmp(label: str, root: Optional[str] = None, bead: Optional[str] = None
     if auto_cleanup:
         with _lock:
             _live[path] = pid
-    created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-    lines = [f"pid={pid}", f"label={label}", f"repo={_owner_repo()}", f"created={created}"]
+    created_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    argv0 = sys.argv[0] if sys.argv and not any(ch in sys.argv[0] for ch in "\\t\\r\\n") else "unknown"
+    lines = [f"pid={pid}", f"process_start={identity['start']}", f"label={label}", f"repo={_owner_repo()}",
+             f"created_at={created_at}", f"argv0={argv0}"]
     if bead is not None:
         lines.append(f"bead={bead}")
     try:

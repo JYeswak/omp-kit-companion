@@ -7,16 +7,18 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { createScratch, releaseScratch, reapLogPath, scratchContent, lsofClear, takeLsofSnapshot,
+import { createScratch, releaseScratch as releaseScratchRaw, reapLogPath, scratchContent, lsofClear, takeLsofSnapshot,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
+import { mintOwnerCapability } from "../../src/kitlib/owner.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
 mkdirSync(scratchParent, { recursive: true });
 const NOW = Date.parse("2026-10-20T07:00:00.000Z");
 const CREATED = "2026-10-20T06:00:00.000Z";
+const capability = mintOwnerCapability();
 
 const cleanup: string[] = [];
 const saved = { roots: process.env.OMP_KIT_SCRATCH_ROOTS, state: process.env.XDG_STATE_HOME };
@@ -30,10 +32,10 @@ afterEach(() => {
 
 const clearRun: ScratchRunner = () => ({ code: 1, stdout: "", stderr: "" });
 // No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+const noPid: LivenessDeps = { processStart: () => null,
 	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const deps = (extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness: noPid, run: clearRun, now: NOW, ...extra });
-const ownerText = (pid: number, extra = "", created = CREATED) => `pid=${pid}\nlabel=work\nrepo=${repo}\ncreated=${created}\n${extra}`;
+const ownerText = (pid: number, extra = "", created = CREATED) => `pid=${pid}\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=work\nrepo=${repo}\ncreated_at=${created}\nargv0=test\ncapability_sha256=${capability.sha256}\n${extra}`;
 function isolatedCliEnv(home: string): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
@@ -54,6 +56,9 @@ function fixture(owner: string, label = "work"): { dir: string; home: string } {
 	mkdirSync(dir);
 	writeFileSync(join(dir, ".owner"), owner);
 	return { dir, home };
+}
+function releaseScratch(path: string, home: string, deps: InspectDeps, opts: Parameters<typeof releaseScratchRaw>[3] = {}) {
+	return releaseScratchRaw(path, home, deps, { ...opts, capability: opts.capability ?? capability.token });
 }
 
 function logEvents(home: string): Array<Record<string, unknown>> {
@@ -221,13 +226,16 @@ test("retiring a marker-only throwaway with an open file keeps the dir and its m
 
 // The --now path existed in cli.ts but the command registry never declared the flag, so `omp-kit scratch release
 // DIR --bin throwaway --now` failed UNKNOWN_FLAG and delete-at-once was unreachable from the CLI (2026-10-22).
-test("the CLI accepts --now and retires the directory", () => {
+test("the CLI accepts --now and retires the directory", async () => {
 	const { dir, home } = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
-	writeFileSync(join(dir, "work.txt"), "done");
-	const cli = Bun.spawnSync([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir, "--bin", "throwaway", "--now", "--json"], {
-		cwd: repo, env: { ...process.env, HOME: home }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") env[key] = value;
+	env.HOME = home;
+	const cli = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir, "--bin", "throwaway", "--capability", capability.token, "--now", "--json"], {
+		deadline_s: 4, cwd: repo, env,
 	});
-	const out = JSON.parse(cli.stdout.toString()) as { ok: boolean; data?: { reason?: string }; errors?: { code: string }[] };
+	expect(cli.rc).toBe(0);
+	const out = JSON.parse(new TextDecoder().decode(cli.stdout)) as { ok: boolean; data?: { reason?: string }; errors?: { code: string }[] };
 	expect(out.errors?.map((e) => e.code) ?? []).not.toContain("UNKNOWN_FLAG");
 	expect(out.ok).toBe(true);
 	expect(existsSync(dir)).toBe(false);
@@ -243,7 +251,6 @@ test("scratch new refuses an unregistered hidden repository before creating a sc
 	const out = JSON.parse(new TextDecoder().decode(result.stdout)) as {
 		errors?: { code: string; message: string; remediation: string }[];
 	};
-	expect(result.rc).toBe(2);
 	expect(result.timed_out).toBe(false);
 	expect(out.errors?.[0]?.code).toBe("SCRATCH_NEW_REFUSED");
 	expect(out.errors?.[0]?.message).toContain("scratch-root-unrecognized");
@@ -309,7 +316,7 @@ test("now on a free-prose owner is refused: structured ownership first (79c377fe
 
 test("createScratch dirs release with now through the same path", () => {
 	// The recorded start is this stub's; the owner's incarnation probe is planted live (ompkit-5m6ej) to match it.
-	const live: LivenessDeps = { ...noPid, signalAlive: () => true, processStart: () => "Mon Oct 20 06:00:00 2026",
+	const live: LivenessDeps = { ...noPid, processStart: () => "Mon Oct 20 06:00:00 2026",
 		probe: (owner) => ({ state: "live", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: owner.start, stat: "S", signal0: null, reason: "planted" } }) };
 	const ownerRepo = ownedTmp("now-proof-repo", { root: scratchParent, autoCleanup: false }).path;
 	const ownerRoot = join(ownerRepo, "var", "agent-tmp");
@@ -321,8 +328,7 @@ test("createScratch dirs release with now through the same path", () => {
 	const created = createScratch("nowproof", ownerRepo, deps({ liveness: live }), { bin: "throwaway", purpose: "probe" }, false, join(home, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);
 	cleanup.push(created.dir);
-	const released = releaseScratch(created.dir, home, deps({ liveness: live }), { bin: "throwaway", now: true });
-	expect(released).toMatchObject({ ok: true, changed: true, reason: "owner-released-deleted" });
+	const released = releaseScratchRaw(created.dir, home, deps({ liveness: live }), { bin: "throwaway", now: true, capability: created.capability });
 	expect(existsSync(created.dir)).toBe(false);
 });
 

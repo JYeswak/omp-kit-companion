@@ -8,13 +8,29 @@ import { join, relative } from "node:path";
 import { OWNERSHIP_REGISTRY, type OwnershipEntry } from "./ownership-registry.ts";
 
 export type OwnershipLintCode =
-	| "UNREGISTERED_PID_WRITER" | "SEAT_KEYED_BY_PID" | "WRITER_MISSING" | "DUPLICATE_ENTRY" | "CENSUS_SHAPE" | "ROW_UNCOVERED";
+	| "UNREGISTERED_PID_WRITER" | "BARE_PID_OWNER" | "SEAT_KEYED_BY_PID" | "WRITER_MISSING" | "DUPLICATE_ENTRY" | "CENSUS_SHAPE" | "ROW_UNCOVERED";
 export interface OwnershipLintViolation { code: OwnershipLintCode; message: string; file?: string; entry?: string; row?: number }
 
 // Assembled from parts so this file never contains the tokens it searches for.
 const PID_TOKENS = ["pid", "ppid"].map(field => ["process", field].join("."));
-const WRITE_TOKENS = ["writeFileSync(", "appendFileSync(", "writeFile(", "Bun.write(", "renameSync(", "mkdtempSync(", "mkdirSync("];
-const DEFAULT_SCAN_DIRS = ["src", "extensions"];
+const WRITE_TOKENS = ["writeFileSync(", "appendFileSync(", "writeFile(", "Bun.write(", "renameSync(", "mkdtempSync(", "mkdirSync(", "write_text(", "write_bytes(", "printf "];
+const DEFAULT_SCAN_DIRS = ["src", "extensions", "scripts"];
+const SOURCE_SUFFIXES = [".ts", ".js", ".mjs", ".cjs", ".py", ".sh"];
+const TEST_SUFFIXES = [".test.ts", ".test.js", ".test.mjs", ".test.cjs", ".test.py", ".test.sh", "_test.py", "_test.sh"];
+const OWNER_PID_TOKENS = [
+	["pid", ": ", "process", ".", "pid"].join(""),
+	["pid", ": ", "process", ".", "ppid"].join(""),
+	["pid=", "$", "{", "process", ".", "pid", "}"].join(""),
+	["pid=", "$", "{", "process", ".", "ppid", "}"].join(""),
+	["String(", "process", ".", "pid", ")"].join(""),
+	["String(", "process", ".", "ppid", ")"].join(""),
+	["pid=", "{", "os", ".", "getpid", "(", ")", "}"].join(""),
+	["\"", "pid", "\": ", "os", ".", "getpid", "(", ")"].join(""),
+	["pid=%s", "\\n"].join(""),
+];
+const PROCESS_START_FIELD = ["process", "_", "start"].join("");
+const OWNER_FIELD_CONTEXT_BYTES = 2048;
+const SHARED_OWNER_WRITERS: Readonly<Record<string, true>> = { "src/kitlib/owner.ts": true, "scripts/kitlib_tmp.py": true };
 
 function sourceFiles(dir: string, found: string[] = []): string[] {
 	let names: string[];
@@ -32,9 +48,25 @@ function sourceFiles(dir: string, found: string[] = []): string[] {
 			continue;
 		}
 		if (isDir) sourceFiles(path, found);
-		else if (name.endsWith(".ts") && !name.endsWith(".test.ts")) found.push(path);
+		else if (SOURCE_SUFFIXES.some(suffix => name.endsWith(suffix)) && !TEST_SUFFIXES.some(suffix => name.endsWith(suffix))) found.push(path);
 	}
 	return found;
+}
+
+/** A writer that embeds its own PID in an owner field without a nearby incarnation field. */
+function writesBarePidOwner(text: string): boolean {
+	if (!WRITE_TOKENS.some(token => text.includes(token))) return false;
+	for (const token of OWNER_PID_TOKENS) {
+		let from = 0;
+		while (from < text.length) {
+			const at = text.indexOf(token, from);
+			if (at < 0) break;
+			const context = text.slice(at, at + OWNER_FIELD_CONTEXT_BYTES);
+			if (!context.includes(PROCESS_START_FIELD)) return true;
+			from = at + token.length;
+		}
+	}
+	return false;
 }
 
 /** Whether a source text is a pid-keyed writer candidate. */
@@ -77,6 +109,8 @@ export function lintOwnership(input: OwnershipLintInput): OwnershipLintViolation
 			} catch {
 				continue;
 			}
+			if (writesBarePidOwner(text) && SHARED_OWNER_WRITERS[file] !== true)
+				violations.push({ code: "BARE_PID_OWNER", file, message: `${file} persists its own PID without process_start; use the shared owner identity or do not persist an owner record` });
 			if (persistsPid(text) && !registered.has(file))
 				violations.push({ code: "UNREGISTERED_PID_WRITER", file, message: `${file} writes files and reads its own pid but no ownership entry lists it as a writer; register its owner key, cancel and crash paths in src/ownership-registry.ts` });
 		}

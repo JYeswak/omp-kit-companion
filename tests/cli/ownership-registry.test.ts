@@ -56,7 +56,7 @@ function fixtureRepo(files: Record<string, string>): string {
 const PID_WRITER = [
 	'import { writeFileSync } from "node:fs";',
 	"export function claim(dir: string): void {",
-	"\twriteFileSync(`${dir}/.owner`, `pid=${process.pid}\\n`);",
+	"\twriteFileSync(`${dir}/.owner`, `pid=${process.pid}\\nprocess_start=fixture-start\\n`);",
 	"}",
 ].join("\n");
 const entryFor = (over: Partial<OwnershipEntry>): OwnershipEntry => ({
@@ -88,6 +88,56 @@ test("the lint also refuses a writer file that does not exist, a duplicate id, a
 test("files that only name a pid, or only write, are not pid-keyed writers; test files are not scanned", () => {
 	expect(persistsPid("const own = process.pid;\n")).toBe(false);
 	expect(persistsPid('writeFileSync(path, "x");\n')).toBe(false);
-	const root = fixtureRepo({ "src/claim.test.ts": PID_WRITER, "src/reader.ts": "export const own = process.pid;\n" });
+	const root = fixtureRepo({
+		"src/claim.test.ts": PID_WRITER,
+		"src/reader.ts": "export const own = process.pid;\n",
+		"scripts/claim_test.py": "(work / '.owner').write_text(f'pid={os.getpid()}\\nlabel=x\\n')",
+	});
 	expect(lintOwnership({ root, entries: [] })).toEqual([]);
+});
+test("planted: registering a writer does not permit a bare PID owner record", () => {
+	const root = fixtureRepo({ "src/claim.ts": [
+		'import { writeFileSync } from "node:fs";',
+		"export function claim(path: string): void {",
+		"\tconst owner = { pid: process.pid, label: \"build\" };",
+		"\twriteFileSync(path, JSON.stringify(owner));",
+		"}",
+	].join("\n") });
+	const violations = lintOwnership({ root, entries: [entryFor({})] });
+	expect(violations).toEqual([expect.objectContaining({ code: "BARE_PID_OWNER", file: "src/claim.ts" })]);
+});
+
+test("control: a registered owner record with process_start is accepted", () => {
+	const root = fixtureRepo({ "src/claim.ts": [
+		'import { writeFileSync } from "node:fs";',
+		"export function claim(path: string): void {",
+		"\tconst owner = { pid: process.pid, process_start: start, label: \"build\" };",
+		"\twriteFileSync(path, JSON.stringify(owner));",
+		"}",
+	].join("\n") });
+	expect(lintOwnership({ root, entries: [entryFor({})] })).toEqual([]);
+});
+
+test("planted: Python and shell owner records need process_start", () => {
+	const bare = fixtureRepo({
+		"scripts/claim.py": String.raw`from pathlib import Path
+Path(".owner").write_text(f"pid={os.getpid()}\nlabel=fixture\n")
+`,
+		"scripts/claim.sh": String.raw`printf 'pid=%s\nlabel=fixture\n' "$$" > "$work/.owner"
+`,
+	});
+	const violations = lintOwnership({ root: bare, entries: [], scanDirs: ["scripts"] });
+	expect(violations.map(violation => `${violation.file}:${violation.code}`).sort()).toEqual([
+		"scripts/claim.py:BARE_PID_OWNER",
+		"scripts/claim.sh:BARE_PID_OWNER",
+	]);
+
+	const modern = fixtureRepo({
+		"scripts/claim.py": String.raw`from pathlib import Path
+Path(".owner").write_text(f"pid={os.getpid()}\nprocess_start={start}\nlabel=fixture\n")
+`,
+		"scripts/claim.sh": String.raw`printf 'pid=%s\nprocess_start=%s\nlabel=fixture\n' "$$" "$start" > "$work/.owner"
+`,
+	});
+	expect(lintOwnership({ root: modern, entries: [], scanDirs: ["scripts"] })).toEqual([]);
 });

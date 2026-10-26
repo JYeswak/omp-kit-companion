@@ -56,7 +56,7 @@ cd "$HERE" || exit 1
 OMP_KIT_BUN="$HERE/scripts/runtime-adapter.sh"
 [ -x "$OMP_KIT_BUN" ] || { echo "ladder: runtime adapter missing" >&2; exit 2; }
 if [ -x "$HERE/bin/omp-kit" ]; then
-  WORK=$("$OMP_KIT_BUN" --workdir) || exit 2
+  WORK=$(OMP_KIT_WORK_OWNER_PID=$$ "$OMP_KIT_BUN" --workdir) || exit 2
   PRIVATE_WORK=1
 elif [ -e "$HERE/.git" ]; then
   mkdir -p "$HERE/reports" || exit 1

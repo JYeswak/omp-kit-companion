@@ -715,6 +715,11 @@ on_signal() {
 # The traps are set before WORK exists, and WORK's name carries this shell's pid (with .owner), so a
 # SIGKILLed gate leaves a dir the next pre-push gate's start-up sweep can attribute and remove.
 make_work() {
+	start=$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | awk '{$1=$1; print}')
+	if [ -z "$start" ]; then
+		echo "fresh-gate: cannot establish owner process start; refusing scratch" >&2
+		return 1
+	fi
 	WORK_PARENT="$ROOT/var/agent-tmp"
 	mkdir -p "$WORK_PARENT"
 	trap cleanup EXIT
@@ -722,9 +727,13 @@ make_work() {
 	trap 'on_signal 130' INT
 	trap 'on_signal 143' TERM
 	OWN_WORK=1
-	WORK=$(mktemp -d "$WORK_PARENT/fresh-gate.$$.XXXXXX") # tempsafe: own signal-drain handler removes this pid-named owned dir on EXIT/HUP/INT/TERM; kitlib cannot hold signals during the grace
-	start=$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')
-	printf 'pid=%s\nprocess_start=%s\nlabel=fresh-gate\nrepo=%s\ncreated=%s\n' "$$" "$start" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$WORK/.owner"
+	WORK=$(mktemp -d "$WORK_PARENT/fresh-gate.$$.XXXXXX") || return 1 # tempsafe: own signal-drain handler removes this pid-named owned dir on EXIT/HUP/INT/TERM; kitlib cannot hold signals during the grace
+	created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	if ! printf 'pid=%s\nprocess_start=%s\nlabel=fresh-gate\nrepo=%s\ncreated_at=%s\nargv0=%s\n' "$$" "$start" "$ROOT" "$created" "$0" >"$WORK/.owner"; then
+		rm -rf "$WORK"
+		WORK=
+		return 1
+	fi
 }
 
 selftest() {

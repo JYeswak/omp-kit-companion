@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync
 import { join, relative } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 import { resolveFilesystemWriteTarget, writeScratchOwner } from "../../src/fleet-guard/scratch.ts";
+import { ownerIdentity } from "../../src/kitlib/owner.ts";
 
 // WRITEOWN1 (ompkit-vf33j): in an opted-in canonical checkout every write outside var/agent-tmp needs the caller's
 // live exclusive Agent Mail reservation, read through the same `am robot reservations` lookup `git commit --only` uses.
@@ -30,7 +31,9 @@ function fleetRepo(name: string, enabled: boolean): string {
 const repo = fleetRepo("repo", true);
 const stock = fleetRepo("stock", false);
 const owned = join(repo, "var", "agent-tmp", "own.1");
-writeScratchOwner(owned, { pid: process.pid, label: "own", repo, created: new Date().toISOString() });
+const identity = ownerIdentity(process.pid);
+if (identity === null) throw new Error("test process incarnation is unavailable");
+writeScratchOwner(owned, { ...identity, label: "own", repo, created: new Date().toISOString(), argv0: process.argv[1] ?? process.argv[0] ?? "unknown" });
 
 // Test seam for the Agent Mail CLI only: the guard's real spawn, attestation and hold parsing run unchanged.
 const fixtureBin = join(scratch, "bin");

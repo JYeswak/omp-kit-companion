@@ -8,6 +8,7 @@ import { parseSessionView, readSessionTail, SESSION_HEAD_BYTES, SESSION_TAIL_WIN
 import type { SessionProofRange } from "../../src/plane-tern.ts";
 import type { SessionJournalView, TernObserverIo } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { ownerIdentity } from "../../src/kitlib/owner.ts";
 
 /** TERNADDR1 (ompkit-fixjo): a Tern seat with no window key admits by `tern send BLOCK paste` + `keys Enter`. */
 
@@ -113,7 +114,7 @@ function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReade
 				composer = "";
 				return { code: 0, out: "" };
 			}
-			if (argv[0] === "/bin/ps") return { code: 0, out: "Mon Oct 20 02:00:00 2026 omp" };
+			if (argv[0] === "/bin/ps") return { code: 0, out: "Mon Oct 20 02:00:00 2026 omp AGENT_NAME=FixtureSeat" };
 			if (argv[0] === "am") return { code: 0, out: JSON.stringify({ agent_name: "FixtureSeat", pane_id: `tern:${paneId}`, project_key: resolve(repo), binding: "verified-live" }) };
 			if (argv.includes("process")) return { code: 0, out: proc };
 			if (argv.includes("inspect")) return { code: 0, out: inspect };
@@ -136,17 +137,19 @@ function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReade
 }
 
 /** Plant the seat's kit-composer-state record exactly as extensions/kit-composer-state.ts writes it. */
-function plantComposer(sessionFile: string, rec: Partial<{ empty: boolean; at: number; pid: number; session_file: string; schema: number }> = {}): string {
+function plantComposer(sessionFile: string, rec: Partial<{ empty: boolean; at: number; pid: number; process_start: string; session_file: string; schema: number }> = {}): string {
 	const dir = freshDir("composer");
 	const real = realpathSync(sessionFile);
 	const key = createHash("sha1").update(real).digest("hex").slice(0, 16);
-	writeFileSync(join(dir, `${key}.json`), JSON.stringify({ schema: 1, session_file: real, pid: process.pid, at: Date.now(), empty: true, idle: true, ...rec }));
+	const identity = ownerIdentity(process.pid);
+	if (identity === null) throw new Error("test process incarnation is unavailable");
+	writeFileSync(join(dir, `${key}.json`), JSON.stringify({ schema: 1, session_file: real, pid: identity.pid, process_start: identity.process_start, at: Date.now(), empty: true, idle: true, ...rec }));
 	return dir;
 }
 
 function send(fx: TernFixture, dir: string, extra: { windowKey?: string; composer?: (sessionFile: string) => ComposerVerdict } = {}) {
 	return proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update", dropDir: dir, cwd: fx.repo,
-		knownPrefixes: EMPTY_PREFIXES, env: {}, pollMs: 1, deadlineMs: 20, wait: noWait, io: fx.io, ...extra });
+		knownPrefixes: EMPTY_PREFIXES, env: { AGENT_MAIL_PROJECT: fx.repo }, pollMs: 1, deadlineMs: 20, wait: noWait, io: fx.io, ...extra });
 }
 
 const effects = (taken: Taken) => taken.luaDispatches + taken.pastes + taken.enters;
@@ -225,6 +228,12 @@ test("planted: a missing, stale, dead-writer or foreign composer record is UNKNO
 		expect(effects(fx.taken)).toBe(0);
 		expect(got.drop_path).toBeNull();
 	}
+});
+
+test("planted: a reused composer writer PID is UNKNOWN", () => {
+	const fx = ternFixture();
+	const composerDir = plantComposer(fx.sessionFile, { process_start: "Mon Jan 1 00:00:00 2001" });
+	expect(readComposerRecord(fx.sessionFile, { dir: composerDir }).state).toBe("UNKNOWN");
 });
 
 test("planted: a failed paste never presses Enter (an empty submit aborts a streaming turn); unproven stays pending", async () => {

@@ -41,7 +41,7 @@ afterEach(() => {
 });
 
 // No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
+const noPid: LivenessDeps = { processStart: () => null,
   probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const seat = (agent: string | null, sessions: string[]) => (): SeatIdentity => ({ agent, sessions, main: sessions[0] ?? null });
 const inspect = (caller: () => SeatIdentity): InspectDeps =>
@@ -104,8 +104,6 @@ test("disposalGate charges only exact caller ownership and excludes live owners"
     writeFileSync(join(dir, ".owner"), text);
   }
   const live: LivenessDeps = {
-    signalAlive: (pid) => pid !== process.pid,
-    psVisible: (pid) => pid !== process.pid,
     processStart: (pid) => pid === process.pid ? "Thu Jan  1 00:00:00 1970" : "Mon Oct  5 13:27:00 2026",
     // The same world as an incarnation probe (ompkit-5m6ej): every other pid runs with the planted start.
     probe: (owner) => ({ state: owner.pid === process.pid ? "dead" : normalizeStart(owner.start) === "Mon Oct 5 13:27:00 2026" ? "live" : "reused",
@@ -117,7 +115,7 @@ test("disposalGate charges only exact caller ownership and excludes live owners"
   expect(childClean.decision).toBe("ok");
   const own = join(root, "own.61004");
   mkdirSync(own);
-  writeFileSync(join(own, ".owner"), owner(process.pid, "own"));
+  writeFileSync(join(own, ".owner"), owner(process.pid, "own", `agent=ChildSeat\nsession=${SESSION}\n`));
   const gate = disposalGate(home, "review", caller, NOW);
   expect(gate.decision).toBe("refuse");
   const parentOwn = join(root, "parent-own.61005");
@@ -125,7 +123,7 @@ test("disposalGate charges only exact caller ownership and excludes live owners"
   writeFileSync(join(parentOwn, ".owner"), owner(process.pid, "parent-own", `agent=ParentSeat\nsession=${SESSION}\n`));
   const parentGate = disposalGate(home, "review", { ...inspect(seat("ParentSeat", [SESSION])), liveness: live }, NOW);
   expect(parentGate.decision).toBe("refuse");
-  expect(parentGate.owed.map(row => row.label)).toEqual(["own", "parent-own"]);
+  expect(parentGate.owed.map(row => row.label)).toEqual(["parent-own"]);
   expect(gate.owed.map(row => row.label)).toEqual(["own"]);
 });
 
@@ -154,8 +152,6 @@ test("a parent seat's 3 live dirs, reached by pid ancestry, are never charged to
     writeFileSync(join(root, name, ".owner"), text);
   }
   const live: LivenessDeps = {
-    signalAlive: (pid) => pid !== process.pid,
-    psVisible: (pid) => pid !== process.pid,
     processStart: (pid) => pid === process.pid ? "Thu Jan  1 00:00:00 1970" : START,
     probe: (owner) => ({ state: owner.pid === process.pid ? "dead" : "live",
       evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: null, reason: "planted" } }),

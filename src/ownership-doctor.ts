@@ -1,17 +1,17 @@
 // doctor --scope ownership (ompkit-774u.12 OWNERREG1): for every entry of the ownership registry, count the
 // persisted records, the ones with no live owner, and the ones with no tracked terminal outcome. Read-only:
-// every observation goes through OwnershipIo, which only lists, reads, stats, signals pid 0 and reads `ps`. A record
-// that names its owner's start is probed as an incarnation through kitlib proc (ompkit-5m6ej): a zombie or reused pid
-// is not alive, and an unreadable probe is unproven, never dead. Records with a bare pid keep the kill -0 / ps check.
-// "Tracked" means the class's producer left an outcome on disk; each census states its own rule.
+// every observation goes through OwnershipIo, which only lists, reads and stats state or observes typed owner liveness.
+// A process owner is an incarnation (pid, process_start); zombie/reused/dead is not live, and unknown is never dead.
+// Records with no process start require a verified seat or remain unproven, never a bare-pid liveness decision.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Finding } from "./diagnostics.ts";
 import { OWNERSHIP_REGISTRY, type CensusId, type OwnershipEntry } from "./ownership-registry.ts";
 import type { ProbeState } from "./kitlib/proc.ts";
+import { ownerIdentityFromStart, ownerLiveness } from "./kitlib/owner.ts";
 import {
-	defaultLiveness, defaultRunner, listProcesses, ownerIncarnationState, parseOwnerFile, quarantineDir, quarantineTimeOf, quarantineTtlMs,
+	defaultLiveness, defaultRunner, listProcesses, parseOwnerFile, quarantineDir, quarantineTimeOf, quarantineTtlMs,
 	resolveScratchRootEntries, selectHarnessOrphans, stateRoot, type OrphanProcess,
 } from "./scratch.ts";
 
@@ -22,8 +22,6 @@ export interface OwnershipIo {
 	listDir(path: string): string[] | null;
 	readText(path: string): string | null;
 	mtimeMs(path: string): number | null;
-	/** Bare-pid liveness for records with no start: kill -0 or ps lists it (counts zombies and reused pids alive). */
-	pidAlive(pid: number): boolean;
 	/** Liveness of a recorded `{pid, start}` incarnation through kitlib proc: dead, reused and zombie are not alive; unknown is unproven. */
 	incarnationState(pid: number, start: string): ProbeState;
 	/** True when the omp session of a seat is leased by a live process, false when not, null when it cannot be told. */
@@ -106,7 +104,7 @@ function scratchDirs(io: OwnershipIo): CensusOutcome {
 			const owner = text === null ? null : parseOwnerFile(text);
 			if (owner !== null) {
 				if (owner.processStart === null) {
-					if (io.pidAlive(owner.pid)) continue;
+					if (owner.agent === null || owner.session === null) { tally.unproven++; continue; }
 				} else {
 					const state = io.incarnationState(owner.pid, owner.processStart);
 					if (state === "live") continue;
@@ -118,12 +116,139 @@ function scratchDirs(io: OwnershipIo): CensusOutcome {
 					if (seat === null) { tally.unproven++; continue; }
 				}
 			}
-			// Tracked outcome: the owner or the reaper wrote a release marker, so the quarantine path will take it.
 			if (inside.includes(".omp-kit-release")) { tally.noLive++; continue; }
 			tally.untrackedRecord(dir, (owner === null ? null : isoMs(owner.createdAt)) ?? io.mtimeMs(dir));
 		}
 	}
 	return { census: tally.result() };
+}
+/** Records with process-incarnation evidence; bare PIDs remain unproven rather than live or dead. */
+function pidRecords(io: OwnershipIo, dirs: { dir: string; suffix: string; read: (path: string) => { pid: number | null; processStart: string | null; sinceMs: number | null } }[]): CensusOutcome {
+	const tally = new Tally(io);
+	for (const spec of dirs) {
+		for (const name of io.listDir(spec.dir) ?? []) {
+			if (!name.endsWith(spec.suffix)) continue;
+			const path = join(spec.dir, name);
+			const { pid, processStart, sinceMs } = spec.read(path);
+			tally.records++;
+			if (pid !== null) {
+				if (processStart === null) { tally.unproven++; continue; }
+				const state = io.incarnationState(pid, processStart);
+				if (state === "live") continue;
+				if (state === "unknown") { tally.unproven++; continue; }
+			}
+			tally.untrackedRecord(path, sinceMs ?? io.mtimeMs(path));
+		}
+	}
+	return { census: tally.result() };
+}
+
+function serviceClaims(io: OwnershipIo): CensusOutcome {
+	return pidRecords(io, [{ dir: join(stateRoot(io.home), "omp-kit", "jobs"), suffix: ".lock", read: (lock) => {
+		const record = jsonRecord(io.readText(join(lock, "pid")));
+		const started = record === null ? null : record.startedAt;
+		return { pid: record === null ? null : pidOf(record.pid),
+			processStart: record !== null && typeof record.process_start === "string" ? record.process_start : null,
+			sinceMs: typeof started === "number" ? started : null };
+	} }]);
+}
+
+function heavyQueue(io: OwnershipIo): CensusOutcome {
+	const root = join(stateRoot(io.home), "omp-kit", "load");
+	const tally = new Tally(io);
+	const check = (path: string, since: (record: Record<string, unknown>) => number | null): void => {
+		const record = jsonRecord(io.readText(path));
+		if (record === null) return;
+		tally.records++;
+		const pid = pidOf(record.pid);
+		if (pid !== null) {
+			if (typeof record.process_start !== "string") { tally.unproven++; return; }
+			const state = io.incarnationState(pid, record.process_start);
+			if (state === "live") return;
+			if (state === "unknown") { tally.unproven++; return; }
+		}
+		tally.untrackedRecord(path, since(record) ?? io.mtimeMs(path));
+	};
+	check(join(root, "mutex", "owner.json"), () => null);
+	for (const name of io.listDir(join(root, "jobs")) ?? []) if (name.endsWith(".json")) check(join(root, "jobs", name), (record) => isoMs(record.queued_at));
+	return { census: tally.result() };
+}
+
+function sendLocks(io: OwnershipIo): CensusOutcome {
+	return pidRecords(io, [{ dir: join(stateRoot(io.home), "omp-kit", "send-locks"), suffix: ".lock", read: (lock) => {
+		const text = io.readText(lock);
+		const record = jsonRecord(text);
+		return { pid: record === null ? plainPid(text) : pidOf(record.pid),
+			processStart: record !== null && typeof record.process_start === "string" ? record.process_start : null, sinceMs: null };
+	} }]);
+}
+
+function convergeLocks(io: OwnershipIo): CensusOutcome {
+	const roots = io.scratchRoots();
+	if (roots.length === 0) return { unknown: "no scratch roots, so no fleet repositories to look in" };
+	const tally = new Tally(io);
+	for (const repo of new Set(roots.map((root) => dirname(dirname(root))))) {
+		const lock = join(repo, ".git", "git_converge.lock");
+		const text = io.readText(lock);
+		if (text === null) continue;
+		tally.records++;
+		const record = jsonRecord(text);
+		const pid = record === null ? plainPid(text) : pidOf(record.pid);
+		const processStart = record === null ? null : typeof record.process_start === "string" ? record.process_start
+			: typeof record.start_time === "string" ? record.start_time : null;
+		if (pid === null) { tally.untrackedRecord(lock, io.mtimeMs(lock)); continue; }
+		if (processStart === null) { tally.unproven++; continue; }
+		const state = io.incarnationState(pid, processStart);
+		if (state === "live") continue;
+		if (state === "unknown") { tally.unproven++; continue; }
+		tally.untrackedRecord(lock, io.mtimeMs(lock));
+	}
+	return { census: tally.result() };
+}
+
+function rchLeases(io: OwnershipIo): CensusOutcome {
+	const dir = join(io.home, ".local", "state", "rch", "job-leases");
+	const names = io.listDir(dir);
+	if (names === null) return { census: new Tally(io).result() };
+	const tally = new Tally(io);
+	const consumed = (id: string) => names.some((name) => name.startsWith(`${id}.recover-consumed`));
+	const leaseOf = (id: string) => jsonRecord(io.readText(join(dir, `${id}.json`)));
+	for (const name of names) {
+		const path = join(dir, name);
+		if (name.endsWith(".recovery.lock")) {
+			const id = name.slice(0, -".recovery.lock".length);
+			const lease = leaseOf(id);
+			tally.records++;
+			if (lease === null) {
+				if (consumed(id)) tally.noLive++;
+				else tally.untrackedRecord(path, io.mtimeMs(path));
+			}
+			continue;
+		}
+		if (!name.endsWith(".json") || !name.startsWith("rchw-")) continue;
+		const lease = jsonRecord(io.readText(path));
+		if (lease === null) continue;
+		tally.records++;
+		const wrapper = pidOf(lease.wrapper_pid);
+		if (wrapper !== null) {
+			const start = typeof lease.wrapper_process_start === "string" ? lease.wrapper_process_start : null;
+			if (start === null) { tally.unproven++; continue; }
+			const state = io.incarnationState(wrapper, start);
+			if (state === "live") continue;
+			if (state === "unknown") { tally.unproven++; continue; }
+		}
+		const id = name.slice(0, -".json".length);
+		if (lease.terminal_acknowledged === true || consumed(id)) { tally.noLive++; continue; }
+		const heartbeat = typeof lease.heartbeat_unix_ms === "number" ? lease.heartbeat_unix_ms : null;
+		tally.untrackedRecord(path, heartbeat ?? io.mtimeMs(path));
+	}
+	return { census: tally.result() };
+}
+
+function ntmWatcherLocks(io: OwnershipIo): CensusOutcome {
+	return pidRecords(io, [{ dir: join(io.home, ".local", "state", "ntm"), suffix: ".lock", read: (lock) => ({
+		pid: plainPid(io.readText(lock)), processStart: null, sinceMs: null,
+	}) }]);
 }
 
 function scratchQuarantine(io: OwnershipIo): CensusOutcome {
@@ -152,113 +277,6 @@ function harnessOrphans(io: OwnershipIo): CensusOutcome {
 	return { census: tally.result() };
 }
 
-/** Records whose pid is read back by a producer that removes the record once the pid is gone; a dead one still on disk is untracked. */
-function pidRecords(io: OwnershipIo, dirs: { dir: string; suffix: string; read: (path: string) => { pid: number | null; sinceMs: number | null } }[]): CensusOutcome {
-	const tally = new Tally(io);
-	for (const spec of dirs) {
-		for (const name of io.listDir(spec.dir) ?? []) {
-			if (!name.endsWith(spec.suffix)) continue;
-			const path = join(spec.dir, name);
-			const { pid, sinceMs } = spec.read(path);
-			tally.records++;
-			if (pid !== null && io.pidAlive(pid)) continue;
-			tally.untrackedRecord(path, sinceMs ?? io.mtimeMs(path));
-		}
-	}
-	return { census: tally.result() };
-}
-
-function serviceClaims(io: OwnershipIo): CensusOutcome {
-	return pidRecords(io, [{ dir: join(stateRoot(io.home), "omp-kit", "jobs"), suffix: ".lock", read: (lock) => {
-		const record = jsonRecord(io.readText(join(lock, "pid")));
-		const started = record === null ? null : record.startedAt;
-		return { pid: record === null ? null : pidOf(record.pid), sinceMs: typeof started === "number" ? started : null };
-	} }]);
-}
-
-function heavyQueue(io: OwnershipIo): CensusOutcome {
-	const root = join(stateRoot(io.home), "omp-kit", "load");
-	const tally = new Tally(io);
-	const check = (path: string, since: (record: Record<string, unknown>) => number | null): void => {
-		const record = jsonRecord(io.readText(path));
-		if (record === null) return;
-		tally.records++;
-		const pid = pidOf(record.pid);
-		if (pid !== null) {
-			const start = record.process_start;
-			if (typeof start !== "string") {
-				if (io.pidAlive(pid)) return;
-			} else {
-				const state = io.incarnationState(pid, start);
-				if (state === "live") return;
-				if (state === "unknown") { tally.unproven++; return; }
-			}
-		}
-		tally.untrackedRecord(path, since(record) ?? io.mtimeMs(path));
-	};
-	check(join(root, "mutex", "owner.json"), () => null);
-	for (const name of io.listDir(join(root, "jobs")) ?? []) if (name.endsWith(".json")) check(join(root, "jobs", name), (record) => isoMs(record.queued_at));
-	return { census: tally.result() };
-}
-
-function sendLocks(io: OwnershipIo): CensusOutcome {
-	return pidRecords(io, [{ dir: join(stateRoot(io.home), "omp-kit", "send-locks"), suffix: ".lock", read: (lock) => ({ pid: plainPid(io.readText(lock)), sinceMs: null }) }]);
-}
-
-function convergeLocks(io: OwnershipIo): CensusOutcome {
-	const roots = io.scratchRoots();
-	if (roots.length === 0) return { unknown: "no scratch roots, so no fleet repositories to look in" };
-	const tally = new Tally(io);
-	for (const repo of new Set(roots.map((root) => dirname(dirname(root))))) {
-		const lock = join(repo, ".git", "git_converge.lock");
-		const text = io.readText(lock);
-		if (text === null) continue;
-		tally.records++;
-		const pid = plainPid(text);
-		if (pid !== null && io.pidAlive(pid)) continue;
-		tally.untrackedRecord(lock, io.mtimeMs(lock));
-	}
-	return { census: tally.result() };
-}
-
-function rchLeases(io: OwnershipIo): CensusOutcome {
-	const dir = join(io.home, ".local", "state", "rch", "job-leases");
-	const names = io.listDir(dir);
-	if (names === null) return { census: new Tally(io).result() };
-	const tally = new Tally(io);
-	const consumed = (id: string) => names.some((name) => name.startsWith(`${id}.recover-consumed`));
-	const leaseOf = (id: string) => jsonRecord(io.readText(join(dir, `${id}.json`)));
-	for (const name of names) {
-		const path = join(dir, name);
-		if (name.endsWith(".recovery.lock")) {
-			const id = name.slice(0, -".recovery.lock".length);
-			const lease = leaseOf(id);
-			tally.records++;
-			if (lease === null) {
-				// A lock with no lease record has no owner and no recorded outcome unless recovery was consumed.
-				if (consumed(id)) tally.noLive++;
-				else tally.untrackedRecord(path, io.mtimeMs(path));
-			}
-			continue;
-		}
-		if (!name.endsWith(".json") || !name.startsWith("rchw-")) continue;
-		const lease = jsonRecord(io.readText(path));
-		if (lease === null) continue;
-		tally.records++;
-		const wrapper = pidOf(lease.wrapper_pid);
-		if (wrapper !== null && io.pidAlive(wrapper)) continue;
-		const id = name.slice(0, -".json".length);
-		// Tracked outcome: the wrapper acknowledged the terminal state, or recovery was consumed.
-		if (lease.terminal_acknowledged === true || consumed(id)) { tally.noLive++; continue; }
-		const heartbeat = typeof lease.heartbeat_unix_ms === "number" ? lease.heartbeat_unix_ms : null;
-		tally.untrackedRecord(path, heartbeat ?? io.mtimeMs(path));
-	}
-	return { census: tally.result() };
-}
-
-function ntmWatcherLocks(io: OwnershipIo): CensusOutcome {
-	return pidRecords(io, [{ dir: join(io.home, ".local", "state", "ntm"), suffix: ".lock", read: (lock) => ({ pid: plainPid(io.readText(lock)), sinceMs: null }) }]);
-}
 
 const CENSUSES: Record<CensusId, (io: OwnershipIo) => CensusOutcome> = {
 	"scratch-dirs": scratchDirs, "scratch-quarantine": scratchQuarantine, "harness-orphans": harnessOrphans,
@@ -346,8 +364,10 @@ export function liveOwnershipIo(env: NodeJS.ProcessEnv = process.env): Ownership
 		},
 		readText: (path) => { try { return readFileSync(path, "utf8"); } catch { return null; } },
 		mtimeMs: (path) => { try { return statSync(path).mtimeMs; } catch { return null; } },
-		pidAlive: (pid) => liveness.signalAlive(pid) || liveness.psVisible(pid),
-		incarnationState: (pid, start) => ownerIncarnationState(pid, start, liveness),
+		incarnationState: (pid, start) => {
+			const identity = ownerIdentityFromStart(pid, start);
+			return identity === null ? "unknown" : ownerLiveness(identity, { probe: liveness.probe }).state;
+		},
 		seatLive: (agent, session) => liveness.seatLive?.(agent, session) ?? null,
 		scratchRoots: () => resolveScratchRootEntries(home)
 			.filter((entry) => entry.sources.some((source) => source === "override" || source === "developer" || source.startsWith("fleet-watch:") || source.startsWith("herdr:") || source === "chief"))

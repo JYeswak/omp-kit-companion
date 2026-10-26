@@ -30,10 +30,15 @@ function recoveryDeps(options: { dbHolders?: string; lsof?: { code: number; stdo
 	const brCalls: string[][] = [];
 	const lsofCalls: string[][] = [];
 	const leaseSnapshots: Record<string, unknown>[] = [];
+	const LIVE_START = "Mon Oct 5 12:00:00 2026";
 	const liveness: LivenessDeps = {
-		signalAlive: pid => pid === 424242,
-		psVisible: () => false,
-		processStart: pid => pid === 424242 ? "Mon Oct  5 12:00:00 2026" : pid === 700000 ? "current-process" : null,
+		processStart: pid => pid === 424242 ? LIVE_START : pid === 700000 ? "current-process" : null,
+		probe: (owner) => {
+			const live = owner.pid === 424242 && owner.start === LIVE_START || owner.pid === 700000 && owner.start === "current-process";
+			return { state: live ? "live" : "dead",
+				evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: live ? owner.start : null,
+					stat: live ? "S" : null, signal0: live ? "alive" : "esrch", reason: "planted" } };
+		},
 	};
 	const recoverTracker = (repo: string, configuredSession: string) => recoverBusyTracker(repo, configuredSession, {
 		pid: 700000,

@@ -6,6 +6,7 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isSha256Hex, matchesBounded } from "./regex-guards.ts";
+import { ownerIdentity, ownerIdentityFromStart, ownerLiveness } from "./kitlib/owner.ts";
 /** This module only changes explicitly listed kit-owned files. It does not update OMP. */
 export type Image = { sha256: string; size: number; mode: number; uid: number; gid: number };
 export type FileMutation = {
@@ -230,19 +231,21 @@ export function planMutation(input: MutationInput): MutationPlan {
 
 function acquire(stateRoot: string, name: string): Lock {
 	safeState(stateRoot, true);
+	const identity = ownerIdentity(process.pid);
+	if (identity === null) fail("STATE_UNSAFE");
 	const path = join(stateRoot, name);
 	const reclaimDeadHolder = (): void => {
 		const file = openFile(path);
-		if (!file || file.image.uid !== process.getuid?.() || file.image.mode !== 0o600 ||
-			!/^[1-9]\d{0,9}\n$/.test(file.bytes.toString("ascii"))) fail("STATE_UNSAFE");
-		const pid = Number(file.bytes.toString("ascii").trim());
-		try { process.kill(pid, 0); fail("LOCK_BUSY"); }
-		catch (error) {
-			if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) {
-				if (error instanceof Error && error.message === "LOCK_BUSY") throw error;
-				fail("LOCK_BUSY");
-			}
-		}
+		if (!file || file.image.uid !== process.getuid?.() || file.image.mode !== 0o600) fail("STATE_UNSAFE");
+		let parsed: unknown;
+		try { parsed = JSON.parse(file.bytes.toString("utf8")); } catch { fail("STATE_UNSAFE"); }
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
+			!("pid" in parsed) || typeof parsed.pid !== "number" ||
+			!("process_start" in parsed) || typeof parsed.process_start !== "string") fail("STATE_UNSAFE");
+		const holder = ownerIdentityFromStart(parsed.pid, parsed.process_start);
+		if (holder === null) fail("STATE_UNSAFE");
+		const state = ownerLiveness(holder).state;
+		if (state === "live" || state === "unknown") fail("LOCK_BUSY");
 		const before = lstatSync(path);
 		if (!before.isFile() || before.isSymbolicLink() || before.uid !== file.image.uid ||
 			(before.mode & 0o7777) !== file.image.mode ||
@@ -253,13 +256,12 @@ function acquire(stateRoot: string, name: string): Lock {
 		unlinkSync(path);
 		fsyncDirectory(stateRoot);
 	};
-	// Publish a fully fsynced PID through an exclusive hard link: death before publication
-	// leaves no empty visible lock, while death afterward leaves a reclaimable holder.
+	// Publish a complete process incarnation through an exclusive hard link: a PID alone never owns this lock.
 	const candidate = `${path}.candidate-${randomUUID()}`;
 	const fd = openSync(candidate, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
 	let linked = false, published = false;
 	try {
-		writeAll(fd, `${process.pid}\n`);
+		writeAll(fd, `${JSON.stringify(identity)}\n`);
 		fsyncSync(fd);
 		try { linkSync(candidate, path); }
 		catch (error) {

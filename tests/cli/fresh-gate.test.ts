@@ -4,6 +4,7 @@ import { cpSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statfsS
 import { join, resolve } from "node:path";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { run as runBounded } from "../../src/kitlib/run.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = root.includes("/fresh-gate.") ? resolve(root, "..") : resolve(root, "var/agent-tmp");
@@ -11,7 +12,6 @@ const gate = join(root, "scripts/fresh-gate.sh");
 
 function fixture(): string {
 	const dir = ownedTmp("fresh-gate-test", { root: scratchRoot }).path;
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
 	mkdirSync(join(dir, "rules"));
 	mkdirSync(join(dir, "scripts"));
 	for (const name of ["rules/bash-glob-silenced.md", "scripts/build-manifest.sh", "scripts/rule-class.ts"]) {
@@ -214,6 +214,32 @@ test("fresh gate selftest refuses a deleted gate function", () => {
 	}
 });
 
+test("fresh gate refuses workdir creation without a process start identity", async () => {
+	const dir = fixture();
+	try {
+		const copiedGate = join(dir, "scripts/fresh-gate.sh");
+		writeFileSync(copiedGate, readFileSync(gate, "utf8"));
+		chmodSync(copiedGate, 0o755);
+		const fakeBin = join(dir, "no-ps");
+		mkdirSync(fakeBin);
+		writeFileSync(join(fakeBin, "ps"), "#!/bin/sh\nexit 1\n");
+		chmodSync(join(fakeBin, "ps"), 0o755);
+		const workParent = join(dir, "var", "agent-tmp");
+		const env: Record<string, string> = {};
+		for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") env[key] = value;
+		env.PATH = `${fakeBin}:${env.PATH ?? ""}`;
+		const result = await runBounded(["sh", copiedGate, "--archive-dir", dir], { deadline_s: 4, cwd: dir, env });
+		const decoder = new TextDecoder();
+		const output = decoder.decode(result.stdout) + decoder.decode(result.stderr);
+		expect(result.rc, output).not.toBeNull();
+		expect(result.rc, output).not.toBe(0);
+		expect(output).toContain("cannot establish owner process start; refusing scratch");
+		expect(existsSync(workParent)).toBe(false);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 // ---- SAVEFIRST1 (ompkit-774u.16): sbh pressure flags a save, physical bytes decide it ----------------
 // The gate's real functions run against the real `omp-kit heavy` with private config/state; only sbh
 // is a stand-in, and pressure below the physical floor comes from a real small filesystem.
@@ -247,7 +273,6 @@ function gateFunctions(source: string, names: readonly string[]): string {
 type SaveFixture = { dir: string; env: Record<string, string> };
 function saveFixture(sbhCode: number, config: Record<string, number>): SaveFixture {
 	const dir = ownedTmp("fresh-gate-save", { root: scratchRoot }).path;
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=fresh-gate-save-test\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
 	const bin = join(dir, "bin");
 	mkdirSync(bin);
 	writeFileSync(join(bin, "sbh"), `#!/bin/sh\nif [ "$1 $2 $3" = "check --need 10G" ]; then printf '{"command":"check","exit_code":${sbhCode},"free_pct":11.694169037987928}\\n'; exit ${sbhCode}; fi\nexit 0\n`);

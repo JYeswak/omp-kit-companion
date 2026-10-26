@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSyn
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fleetPolicyState } from "./fleet-policy";
+import { ownerIdentity } from "../src/kitlib/owner.ts";
 
 /**
  * kit-composer-state (COMPOSERTRUTH1, ompkit-hznvg): each fleet seat publishes whether its own composer holds a draft.
@@ -22,6 +23,7 @@ export interface ComposerStateRecord {
 	/** Realpath of the omp session file this seat writes, as `tern inspect` reports it. */
 	session_file: string;
 	pid: number;
+	process_start: string;
 	/** Epoch milliseconds of this observation. */
 	at: number;
 	empty: boolean;
@@ -53,7 +55,6 @@ export interface ComposerStateDeps {
 	home?: string;
 	env?: Readonly<Record<string, string | undefined>>;
 	now?: () => number;
-	pid?: number;
 }
 
 /** A registered seat's repo owns its opt-in, even when its process starts above that repo. */
@@ -85,10 +86,31 @@ function policyCwd(cwd: string, home: string, env: Readonly<Record<string, strin
 export default async function kitComposerState(pi: ComposerStateApi, deps: ComposerStateDeps = {}): Promise<void> {
 	const home = deps.home ?? homedir();
 	const now = deps.now ?? Date.now;
-	const pid = deps.pid ?? process.pid;
+	const identity = ownerIdentity(process.pid);
+	if (identity === null) return;
+	const processIdentity = identity;
 	const env = deps.env ?? process.env;
 	let timer: unknown = null;
 	let written: string | null = null;
+	let on = false;
+
+	/** RESTARTRACE1 (J-2026-10-26-20): the seat registry lists a Tern block only while omp runs in it, so a restarted
+	 *  seat's session_start can read a registry that dropped it during the restart (lead, 2026-10-26 17:26:51Z: omp
+	 *  up, registry re-listed the block at 17:27:06Z). Deciding once there left the seat with no record for its whole
+	 *  life, and respawn_seat could never prove the composer empty to resume the goal. The policy is read again on
+	 *  every tick until it is on; once on it stays on for this process. */
+	async function policyOn(ctx: ComposerStateContext): Promise<boolean> {
+		if (!on) on = (await fleetPolicyState(policyCwd(ctx.cwd, home, env))).kind === "on";
+		return on;
+	}
+
+	async function tick(ctx: ComposerStateContext): Promise<void> {
+		try {
+			if (await policyOn(ctx)) publish(ctx);
+		} catch {
+			// An unreadable policy is "not on" for this tick; the next tick reads it again.
+		}
+	}
 
 	function publish(ctx: ComposerStateContext): void {
 		try {
@@ -99,13 +121,13 @@ export default async function kitComposerState(pi: ComposerStateApi, deps: Compo
 			try { sessionFile = realpathSync(raw); } catch { /* not on disk yet: the raw path is what Tern will report */ }
 			const text = ctx.ui.getEditorText();
 			const record: ComposerStateRecord = {
-				schema: 1, session_file: sessionFile, pid, at: now(),
+				schema: 1, session_file: sessionFile, pid: processIdentity.pid, process_start: processIdentity.process_start, at: now(),
 				empty: typeof text === "string" && text.trim() === "",
 				idle: typeof ctx.isIdle === "function" ? ctx.isIdle() : null,
 			};
 			const path = composerRecordPath(home, sessionFile);
 			mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-			const tmp = `${path}.${pid}.tmp`;
+			const tmp = `${path}.${processIdentity.pid}.tmp`;
 			writeFileSync(tmp, JSON.stringify(record));
 			renameSync(tmp, path);
 			written = path;
@@ -115,13 +137,13 @@ export default async function kitComposerState(pi: ComposerStateApi, deps: Compo
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		if ((await fleetPolicyState(policyCwd(ctx.cwd, home, env))).kind !== "on") return;
-		publish(ctx);
-		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => publish(ctx), COMPOSER_INTERVAL_MS);
+		// publish() checks the mode and UI on every call, so a seat whose UI is not up at start still publishes later.
+		await tick(ctx);
+		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => tick(ctx), COMPOSER_INTERVAL_MS);
 	});
 	for (const event of ["agent_start", "agent_end", "session_switch"]) {
 		pi.on(event, (_event, ctx) => {
-			if (timer !== null) publish(ctx);
+			if (on) publish(ctx);
 		});
 	}
 	pi.on("session_shutdown", (_event, ctx) => {
@@ -130,7 +152,7 @@ export default async function kitComposerState(pi: ComposerStateApi, deps: Compo
 			timer = null;
 		}
 		if (written !== null) {
-			try { rmSync(written, { force: true }); } catch { /* a stale record is rejected by its dead pid */ }
+			try { rmSync(written, { force: true }); } catch { /* a stale or reused writer identity is rejected by the reader */ }
 			written = null;
 		}
 	});

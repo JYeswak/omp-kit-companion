@@ -10,6 +10,7 @@ import { pollUntil } from "../../src/kitlib/poll.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { parseOwnerFile } from "../../src/scratch.ts";
+import { incarnation } from "../../src/kitlib/proc.ts";
 
 const companion = resolve(import.meta.dir, "../..");
 const cliPath = join(companion, "src", "cli.ts");
@@ -99,15 +100,18 @@ function filesBelow(root: string): string[] {
 
 /** `scratch new` from a non-seat subprocess (no AGENT_NAME): the incident's creation. */
 async function unseatedNew(w: World, label: string): Promise<{ dir: string; capability: string }> {
+	const parentIdentity = await incarnation(process.pid);
+	if (parentIdentity === null) throw new Error("the caller process identity is unavailable");
 	const made = await cli(w, ["scratch", "new", "--label", label]);
 	expect(made.code, made.stdout).toBe(0);
 	const dir = made.envelope?.data?.dir as string;
 	const capability = made.envelope?.data?.capability as string;
 	expect(capability).toMatch(/^[0-9a-f]{64}$/);
 	const owner = ownerOf(dir);
-	// The incident's record: no seat, only the pid of the `scratch new` CLI that has already exited.
 	expect(owner.agent).toBeUndefined();
 	expect(owner.session).toBeUndefined();
+	expect(owner.pid).toBe(parentIdentity.pid);
+	expect(owner.process_start).toBe(parentIdentity.start);
 	expect(owner.capability_sha256).toBe(sha256(capability));
 	return { dir, capability };
 }

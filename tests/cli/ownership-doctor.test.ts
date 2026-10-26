@@ -7,7 +7,8 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, st
 import { join, resolve } from "node:path";
 import { censusOwnership, inspectOwnership, liveOwnershipIo, type OwnershipIo, type OwnershipRow } from "../../src/ownership-doctor.ts";
 import { OWNERSHIP_REGISTRY } from "../../src/ownership-registry.ts";
-import { ownerIncarnationState, quarantineEntryFor } from "../../src/scratch.ts";
+import { quarantineEntryFor } from "../../src/scratch.ts";
+import { ownerIdentityFromStart, ownerLiveness } from "../../src/kitlib/owner.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { incarnation, type Probe } from "../../src/kitlib/proc.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -40,15 +41,15 @@ function fixtureHome(): string {
 	return home;
 }
 
-/** Real files, injected process facts: a pid is alive only if it is LIVE_PID, a seat only if it holds SESSION. */
+/** Real files, injected process-incarnation facts: a liveness result requires the recorded start, and seats have their own lease. */
 function io(home: string, over: Partial<OwnershipIo> = {}): OwnershipIo {
-	return { ...liveOwnershipIo({ HOME: home }), home, nowMs: () => NOW, pidAlive: (pid) => pid === LIVE_PID,
-		incarnationState: (pid) => (pid === LIVE_PID ? "live" : "dead"),
+	return { ...liveOwnershipIo({ HOME: home }), home, nowMs: () => NOW,
+		incarnationState: (pid, start) => pid === LIVE_PID ? start === "live-start" ? "live" : "reused" : "dead",
 		seatLive: (_agent, session) => session === SESSION, scratchRoots: () => [], harnessOrphans: () => [], quarantineTtlMs: () => DAY, ...over };
 }
 const rowOf = (rows: OwnershipRow[], id: string): OwnershipRow => rows.find((row) => row.id === id)!;
 const put = (path: string, text: string): void => { mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, text); };
-const OWNER = (pid: number, extra = "") => `pid=${pid}\nlabel=omp\nrepo=${repo}\ncreated=2026-10-16T20:00:00.000Z\n${extra}`;
+const OWNER = (pid: number, extra = "") => `pid=${pid}\nprocess_start=${pid === LIVE_PID ? "live-start" : "dead-start"}\nlabel=omp\nrepo=${repo}\ncreated_at=2026-10-16T20:00:00.000Z\nargv0=omp\n${extra}`;
 
 test("scratch dirs: live, seat-held, released, unprobed, dead and unowned dirs are told apart and a plain file is not a record", () => {
 	const home = fixtureHome();
@@ -77,6 +78,15 @@ test("scratch dirs: live, seat-held, released, unprobed, dead and unowned dirs a
 	const gone = censusOwnership(io(home, { scratchRoots: () => [root], seatLive: () => false }));
 	expect(rowOf(gone, "scratch-seat-dir").census).toMatchObject({ no_live_owner: 6, untracked: 5, unproven: 0 });
 });
+test("scratch ownership with a bare PID is unproven even when that PID is live", () => {
+	const home = fixtureHome();
+	const root = join(home, "Developer", "proj", "var", "agent-tmp");
+	const dir = join(root, `pid-only.${LIVE_PID}`);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, ".owner"), `pid=${LIVE_PID}\nlabel=omp\nrepo=${repo}\ncreated=2026-10-16T20:00:00.000Z\n`);
+	const census = rowOf(censusOwnership(io(home, { scratchRoots: () => [root] })), "scratch-seat-dir").census!;
+	expect(census).toMatchObject({ records: 1, no_live_owner: 0, untracked: 0, unproven: 1 });
+});
 
 test("scratch quarantine: young entries wait for the TTL; expired or undated ones have no outcome coming", () => {
 	const home = fixtureHome();
@@ -97,7 +107,8 @@ test("rch leases: AC3 planted negative — a recovery lock with a dead wrapper a
 	const home = fixtureHome();
 	const leases = join(home, ".local", "state", "rch", "job-leases");
 	const lease = (id: string, wrapper: number, terminal: boolean) => put(join(leases, `rchw-${id}.json`),
-		JSON.stringify({ schema_version: 1, wrapper_pid: wrapper, state: terminal ? "finished" : "running", terminal_acknowledged: terminal, heartbeat_unix_ms: NOW - 2 * DAY }));
+		JSON.stringify({ schema_version: 1, wrapper_pid: wrapper, wrapper_process_start: wrapper === LIVE_PID ? "live-start" : "dead-start",
+			state: terminal ? "finished" : "running", terminal_acknowledged: terminal, heartbeat_unix_ms: NOW - 2 * DAY }));
 	const lock = (id: string) => put(join(leases, `rchw-${id}.recovery.lock`), "");
 	lease("alive", LIVE_PID, false);
 	lease("finished", DEAD_PID, true); lock("finished");
@@ -106,15 +117,15 @@ test("rch leases: AC3 planted negative — a recovery lock with a dead wrapper a
 	lock("consumed"); put(join(leases, "rchw-consumed.recover-consumed-9f1c"), "");
 	const rows = censusOwnership(io(home));
 	const census = rowOf(rows, "rch-job-lease").census!;
-	// records: 3 leases + 4 locks; no live owner: finished, abandoned, orphan, consumed (+ the locks of dead leases do not add owners)
-	expect(census).toMatchObject({ records: 7, no_live_owner: 4, untracked: 2 });
+	// Three leases + four locks; the dead wrappers and terminal outcomes are tracked, while orphan and abandoned records remain untracked.
+	expect(census).toMatchObject({ records: 7, no_live_owner: 4, untracked: 2, unproven: 0 });
 	expect(census.oldest_age_s).toBeGreaterThanOrEqual(2 * 86_400 - 1);
 	// Release the orphan through its producer: rch records the consumption, and the lock is no longer untracked.
 	put(join(leases, "rchw-orphan.recover-consumed-77aa"), "");
-	expect(rowOf(censusOwnership(io(home)), "rch-job-lease").census).toMatchObject({ untracked: 1 });
+	expect(rowOf(censusOwnership(io(home)), "rch-job-lease").census).toMatchObject({ untracked: 1, no_live_owner: 4 });
 	// Retire the abandoned build the same way (terminal acknowledged): nothing untracked remains.
 	lease("abandoned", DEAD_PID, true);
-	expect(rowOf(censusOwnership(io(home)), "rch-job-lease").census).toMatchObject({ untracked: 0, no_live_owner: 4 });
+	expect(rowOf(censusOwnership(io(home)), "rch-job-lease").census).toMatchObject({ untracked: 0, no_live_owner: 4, unproven: 0 });
 	// A missing job-leases directory is an observed zero (rch never ran), not an unknown.
 	expect(rowOf(censusOwnership(io(fixtureHome())), "rch-job-lease")).toMatchObject({ status: "OBSERVED", census: { records: 0, untracked: 0 } });
 });
@@ -139,31 +150,41 @@ test("uj4af planted: an unreadable (EACCES) job-leases directory is UNKNOWN and 
 	expect(rowOf(censusOwnership(io(fixtureHome()), rch), "rch-job-lease")).toMatchObject({ status: "OBSERVED", census: { records: 0, untracked: 0 } });
 });
 
-test("pid-keyed locks: a dead holder is untracked, a live holder is not, for ntm watchers, send locks, service claims, heavy rows and converge locks", () => {
+test("send-lock census uses process_start and keeps legacy or unverified owners unproven", () => {
 	const home = fixtureHome();
 	const kit = join(home, ".local", "state", "omp-kit");
-	put(join(home, ".local", "state", "ntm", "watcher-alive.lock"), `${LIVE_PID}\n`);
+	put(join(home, ".local", "state", "ntm", "watcher-live.lock"), `${LIVE_PID}\n`);
 	put(join(home, ".local", "state", "ntm", "watcher-dead.lock"), `${DEAD_PID}\n`);
 	put(join(home, ".local", "state", "ntm", "notes.txt"), "not a lock");
-	put(join(kit, "send-locks", "a_1.lock"), `${LIVE_PID}\n`);
-	put(join(kit, "send-locks", "b_2.lock"), `${DEAD_PID}\n`);
-	put(join(kit, "send-locks", "c_3.lock"), "garbage\n");
-	put(join(kit, "jobs", "fleet-watch.lock", "pid"), JSON.stringify({ pid: LIVE_PID, startedAt: NOW - 1000 }));
-	put(join(kit, "jobs", "ci-poller.lock", "pid"), JSON.stringify({ pid: DEAD_PID, startedAt: NOW - 5 * DAY }));
-	put(join(kit, "load", "mutex", "owner.json"), JSON.stringify({ pid: DEAD_PID, process_start: "x" }));
-	put(join(kit, "load", "jobs", "j1.json"), JSON.stringify({ id: "j1", pid: LIVE_PID, queued_at: "2026-10-18T19:00:00.000Z" }));
-	put(join(kit, "load", "jobs", "j2.json"), JSON.stringify({ id: "j2", pid: DEAD_PID, queued_at: "2026-10-17T19:00:00.000Z" }));
+	put(join(kit, "send-locks", "a_1.lock"), JSON.stringify({ pid: LIVE_PID, process_start: "live-start" }));
+	put(join(kit, "send-locks", "b_2.lock"), JSON.stringify({ pid: DEAD_PID, process_start: "dead-start" }));
+	put(join(kit, "send-locks", "legacy_3.lock"), `${LIVE_PID}\n`);
+	put(join(kit, "send-locks", "unknown_4.lock"), JSON.stringify({ pid: LIVE_PID, process_start: "unreadable-start" }));
+	put(join(kit, "send-locks", "c_5.lock"), "garbage\n");
+	put(join(kit, "jobs", "fleet-watch.lock", "pid"), JSON.stringify({ pid: LIVE_PID, process_start: "live-start", startedAt: NOW - 1000 }));
+	put(join(kit, "jobs", "ci-poller.lock", "pid"), JSON.stringify({ pid: DEAD_PID, process_start: "dead-start", startedAt: NOW - 5 * DAY }));
+	put(join(kit, "load", "mutex", "owner.json"), JSON.stringify({ pid: DEAD_PID, process_start: "dead-start" }));
+	put(join(kit, "load", "jobs", "j1.json"), JSON.stringify({ id: "j1", pid: LIVE_PID, process_start: "live-start", queued_at: "2026-10-18T19:00:00.000Z" }));
+	put(join(kit, "load", "jobs", "j2.json"), JSON.stringify({ id: "j2", pid: DEAD_PID, process_start: "dead-start", queued_at: "2026-10-17T19:00:00.000Z" }));
 	const project = join(home, "Developer", "proj");
-	put(join(project, ".git", "git_converge.lock"), String(DEAD_PID));
-	const root = join(project, "var", "agent-tmp");
-	mkdirSync(root, { recursive: true });
-	const rows = censusOwnership(io(home, { scratchRoots: () => [root] }));
+	put(join(project, ".git", "git_converge.lock"), JSON.stringify({ pid: DEAD_PID, start_time: "dead-start" }));
+	const legacyProject = join(home, "Developer", "legacy");
+	put(join(legacyProject, ".git", "git_converge.lock"), String(DEAD_PID));
+	const liveProject = join(home, "Developer", "live");
+	put(join(liveProject, ".git", "git_converge.lock"), JSON.stringify({ pid: LIVE_PID, process_start: "live-start" }));
+	const roots = [join(project, "var", "agent-tmp"), join(legacyProject, "var", "agent-tmp"), join(liveProject, "var", "agent-tmp")];
+	const rows = censusOwnership(io(home, { scratchRoots: () => roots,
+		incarnationState: (_pid, start) => start === "unreadable-start" ? "unknown"
+			: start === "live-start" ? "live" : "dead" }));
 	const counts = (id: string) => { const census = rowOf(rows, id).census!; return [census.records, census.no_live_owner, census.untracked]; };
-	expect(counts("ntm-watcher-lock")).toEqual([2, 1, 1]);
-	expect(counts("pane-send-lock")).toEqual([3, 2, 2]);
+	expect(counts("ntm-watcher-lock")).toEqual([2, 0, 0]);
+	expect(rowOf(rows, "ntm-watcher-lock").census?.unproven).toBe(2);
+	expect(counts("pane-send-lock")).toEqual([5, 2, 2]);
+	expect(rowOf(rows, "pane-send-lock").census?.unproven).toBe(2);
 	expect(counts("service-job-claim")).toEqual([2, 1, 1]);
 	expect(counts("heavy-queue")).toEqual([3, 2, 2]);
-	expect(counts("converge-lock")).toEqual([1, 1, 1]);
+	expect(counts("converge-lock")).toEqual([3, 1, 1]);
+	expect(rowOf(rows, "converge-lock").census?.unproven).toBe(1);
 	expect(rowOf(rows, "service-job-claim").census!.oldest_age_s).toBe(5 * 86_400);
 });
 
@@ -194,15 +215,15 @@ test("inspectOwnership: one summary row first, DEGRADED when anything is untrack
 	const findings = inspectOwnership(io(home));
 	expect(findings[0]!.component).toBe("OWNERSHIP");
 	expect(findings[0]!.status).toBe("DEGRADED");
-	expect(findings[0]!.evidence).toMatchObject({ entries: OWNERSHIP_REGISTRY.length, untracked_total: 2, classes_without_owner_bead: [] });
+	expect(findings[0]!.evidence).toMatchObject({ entries: OWNERSHIP_REGISTRY.length, untracked_total: 1, classes_without_owner_bead: [] });
 	expect(findings.slice(1).map((finding) => finding.component)).toEqual(OWNERSHIP_REGISTRY.map((entry) => `OWNERSHIP:${entry.id}`));
 	const rch = findings.find((finding) => finding.component === "OWNERSHIP:rch-job-lease")!;
 	expect(rch).toMatchObject({ status: "DEGRADED" });
 	expect(rch.recommended_action).toContain("ompkit-774u.12.3");
 	// A class with untracked records and no owning bead is named in the summary.
-	const stripped = inspectOwnership(io(home), OWNERSHIP_REGISTRY.map((entry) => (entry.id === "ntm-watcher-lock" ? { ...entry, ownerBead: null } : entry)));
-	expect(stripped[0]!.evidence).toMatchObject({ classes_without_owner_bead: ["ntm-watcher-lock"] });
-	expect(stripped[0]!.reason).toContain("no owning bead for: ntm-watcher-lock");
+	const stripped = inspectOwnership(io(home), OWNERSHIP_REGISTRY.map((entry) => (entry.id === "rch-job-lease" ? { ...entry, ownerBead: null } : entry)));
+	expect(stripped[0]!.evidence).toMatchObject({ classes_without_owner_bead: ["rch-job-lease"] });
+	expect(stripped[0]!.reason).toContain("no owning bead for: rch-job-lease");
 	// A machine with no scratch roots cannot run the scratch and converge censuses: UNVERIFIED, never OK, and the
 	// classes with no record to count are reported separately, none read as zero.
 	const blind = inspectOwnership(io(fixtureHome()));
@@ -245,8 +266,8 @@ test("the doctor is read-only: a full census over disposable state changes no fi
 	expect(snapshot(home)).toBe(before);
 });
 
-// ompkit-5m6ej: owners that record a start are probed as incarnations through kitlib proc. Real processes; each
-// planted case has a passing control, and the old bare-pid check (pidAlive) is shown reading the same subject alive.
+// PIDIDENT1: owners with a recorded start use the shared kitlib process-incarnation probe. Real processes; each
+// planted zombie or reused PID has a passing live-incarnation control.
 const STARTED = (pid: number, start: string) => `pid=${pid}\nprocess_start=${start}\nlabel=omp\nrepo=${repo}\ncreated_at=2026-10-16T20:00:00.000Z\nargv0=omp\n`;
 
 type Subjects = { live: { pid: number; start: string }; zombie: { pid: number; start: string }; stop: () => Promise<void> };
@@ -271,7 +292,7 @@ async function subjects(): Promise<Subjects> {
 	if (zombieSeen === null || liveSeen === null) { await stop(); throw new Error("no incarnation for a subject"); }
 	process.kill(zombiePid, "SIGKILL");
 	// Real-clock poll: the OS marks the killed child Z on its own schedule, which no fake timer drives.
-	for (let tries = 0; tries < 60 && ownerIncarnationState(zombiePid, zombieSeen.start, {}) !== "zombie"; tries++) await Bun.sleep(50);
+	for (let tries = 0; tries < 60 && ownerLiveness({ pid: zombiePid, process_start: zombieSeen.start }).state !== "zombie"; tries++) await Bun.sleep(50);
 	return { live: liveSeen, zombie: zombieSeen, stop };
 }
 
@@ -279,15 +300,13 @@ function scratchCensus(home: string, owners: Record<string, string>, over: Parti
 	const root = join(home, "Developer", "proj", "var", "agent-tmp");
 	for (const [name, owner] of Object.entries(owners)) put(join(root, name, ".owner"), owner);
 	const live = liveOwnershipIo({ HOME: home });
-	return rowOf(censusOwnership(io(home, { scratchRoots: () => [root], pidAlive: live.pidAlive, incarnationState: live.incarnationState, ...over })), "scratch-seat-dir").census!;
+	return rowOf(censusOwnership(io(home, { scratchRoots: () => [root], incarnationState: live.incarnationState, ...over })), "scratch-seat-dir").census!;
 }
 
-test("5m6ej planted: a zombie owner has no live owner (the bare-pid check read it alive); control: a live owner with its start is live", async () => {
+test("PIDIDENT1 planted: the shared probe marks zombies dead; control: an owner with a live start remains live", async () => {
 	const { live, zombie, stop } = await subjects();
 	try {
-		expect(ownerIncarnationState(zombie.pid, zombie.start, {})).toBe("zombie");
-		// Before 5m6ej the census asked pidAlive (kill -0 || ps lists it): the zombie reads alive there.
-		expect(liveOwnershipIo().pidAlive(zombie.pid)).toBe(true);
+		expect(ownerLiveness({ pid: zombie.pid, process_start: zombie.start }).state).toBe("zombie");
 		expect(scratchCensus(fixtureHome(), { [`zombie.${zombie.pid}`]: STARTED(zombie.pid, zombie.start) })).toMatchObject({ records: 1, untracked: 1, unproven: 0 });
 		expect(scratchCensus(fixtureHome(), { [`live.${live.pid}`]: STARTED(live.pid, live.start) })).toMatchObject({ records: 1, untracked: 0, unproven: 0 });
 	} finally {
@@ -295,11 +314,10 @@ test("5m6ej planted: a zombie owner has no live owner (the bare-pid check read i
 	}
 }, 30_000);
 
-test("5m6ej planted: a reused pid (same pid, other start) has no live owner; control: the recorded raw multi-space lstart still reads live", async () => {
+test("PIDIDENT1 planted: the shared probe marks a reused PID dead; control: raw multi-space lstart remains live", async () => {
 	const { live: subject, stop } = await subjects();
 	try {
 		const other = "Thu Jan  1 00:00:00 2015";
-		expect(liveOwnershipIo().pidAlive(subject.pid)).toBe(true);
 		expect(scratchCensus(fixtureHome(), { [`reused.${subject.pid}`]: STARTED(subject.pid, other) })).toMatchObject({ records: 1, untracked: 1 });
 		// Records written before 5m6ej hold the raw lstart, with a run of spaces: the probe collapses both sides.
 		const raw = subject.start.replace(" ", "   ");
@@ -320,7 +338,10 @@ test("5m6ej planted: a reused pid (same pid, other start) has no live owner; con
 
 test("5m6ej planted: an unknown probe (ps unreadable) is unproven, never a dead owner; control: a dead probe is untracked", () => {
 	const unknown: Probe = { state: "unknown", evidence: { pid: DEAD_PID, recorded_start: "x", observed_start: null, stat: null, signal0: null, reason: "ps timed out" } };
-	const unreadable = (pid: number, start: string) => ownerIncarnationState(pid, start, { probe: () => unknown });
+	const unreadable = (pid: number, start: string) => {
+		const identity = ownerIdentityFromStart(pid, start);
+		return identity === null ? "unknown" : ownerLiveness(identity, { probe: () => unknown }).state;
+	};
 	const owners = { [`unread.${DEAD_PID}`]: STARTED(DEAD_PID, "Mon Oct  5 13:27:00 2026") };
 	expect(scratchCensus(fixtureHome(), owners, { incarnationState: unreadable })).toMatchObject({ records: 1, untracked: 0, no_live_owner: 0, unproven: 1 });
 	expect(scratchCensus(fixtureHome(), owners, { incarnationState: () => "dead" })).toMatchObject({ records: 1, untracked: 1, unproven: 0 });
