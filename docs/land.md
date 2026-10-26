@@ -72,9 +72,11 @@ success.
 The verdict is cached by candidate tree hash with check/runtime identity bound to the entry:
 
 * `tree` — the git tree object of the exact candidate commit (exact source bytes).
-* `checks` — sha256 of `scripts/full-suite-verdict.sh`, `scripts/fresh-gate.sh` and
-  `scripts/gate-ci-only.tsv` as executed. A changed judge (including a manifest change) reruns
-  every tree.
+* `checks` — sha256 of the judging script, `fresh-gate.sh`, the phase worker,
+  private native-carrier manifest, `pysafe.py`, `kitlib_run.py`, `kitlib_proc.py`,
+  the gate manifest when present, and `kitlib-tmp.sh` when the judge creates its
+  own archive. Native land archives the helpers present in its selected base;
+  a missing helper required by that judge is non-pass, not a fallback.
 * `runtime` — os/arch plus `bun --version` plus `python3 --version` (plus `FULL_SUITE_RUNTIME_ID`
   when pinned). A changed runtime reruns every tree.
 
@@ -92,3 +94,15 @@ The cache lives in the pushing checkout's git dir
 overridden by `FULL_SUITE_VERDICT_CACHE_DIR`; it is never committed. Pruning entries only costs
 a rerun. The suite is bounded by `FULL_SUITE_TIMEOUT_SECS` (default 1800) and runs at nice 10
 inside the gate's own admission.
+
+The source gate uses Bun's native `--no-orphans --shell=system` package-script
+entry, not a JavaScript spawn wrapper. `pysafe` owns the unchanged deadline and
+allows its existing TERM grace before KILL/reap. Its direct child's PID remains
+reserved through the final group signal, using non-reaping exit observation.
+TERM/INT cancellation waits for the owned supervisor before preserving the
+incomplete log; it never turns partial phase output into a reusable verdict.
+
+This is lifecycle supervision, not a sandbox for arbitrary daemonizing code.
+Bun's [macOS tracker implementation](https://github.com/oven-sh/bun/blob/c6da4a4d3010e5553438c60f6bd76d981976867c/src/jsc/bindings/NoOrphansTracker.cpp)
+documents a fast-fork/exit tracking limit. Bounded cancellation fixtures do not
+prove universal process containment or an installed-release effect.

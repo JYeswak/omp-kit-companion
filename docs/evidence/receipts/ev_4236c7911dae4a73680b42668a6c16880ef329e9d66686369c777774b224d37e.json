@@ -1,0 +1,22 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_4236c7911dae4a73680b42668a6c16880ef329e9d66686369c777774b224d37e",
+ "limitations": [
+  "Pending source checkpoint, not source-ready, published, installed, or an acceptance close.",
+  "Callback failure during deadline TERM grace remains an independent P2; exact published non-author replay owed.",
+  "Pre-push/SAVEFIRST capture predates final small owner edits; whole private-index incomplete; no universal containment claim."
+ ],
+ "operation": "fullsuite-cancel-source-checkpoint",
+ "parameters": {
+  "bead_id": "ompkit-v66l.41",
+  "subject_sha256": "780e05011835e9183fa7f52ef97fe29a15397a8ac2a8e3b216141e5483c06157"
+ },
+ "producer": "QuietBadger",
+ "result_ref": {
+  "bytes": 71138,
+  "kind": "file",
+  "path": "docs/evidence/investigations/fullsuite-cancel-v66l41-20261026.json",
+  "sha256": "322ea26cdbc95f94a651f617c0fd79beadb79b3935888c33426ecabdedeeb18b"
+ }
+}

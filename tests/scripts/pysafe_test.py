@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts" / "pysafe.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
+from kitlib_poll import poll_until  # noqa: E402
 _spec = importlib.util.spec_from_file_location("pysafe", HELPER)
 if _spec is None or _spec.loader is None:
     raise ImportError("cannot load scripts/pysafe.py")
@@ -53,6 +55,53 @@ def read_pid(path: Path, budget: float = 3.0) -> int:
             return int(text.split()[0])
         time.sleep(0.02)
     raise AssertionError(f"no pid written to {path}")
+
+
+def _cleanup_carrier(marker: Path) -> list[str]:
+    code = (
+        "import os, pathlib, signal, sys\n"
+        "def cleanup(signum, frame):\n"
+        f"    pathlib.Path({str(marker)!r}).write_text('owned cleanup completed')\n"
+        "    print('cleanup output', flush=True)\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, cleanup)\n"
+        "signal.alarm(15)\n"
+        f"pathlib.Path({str(marker.with_suffix('.ready'))!r}).write_text(str(os.getpid()))\n"
+        "print('ready', flush=True)\n"
+        "signal.pause()\n"
+    )
+    return [sys.executable, "-c", code]
+
+
+def _cancel_carrier(marker: Path, *, during_launch: bool = False) -> pysafe.RunResult:
+    argv = _cleanup_carrier(marker)
+    code = f"import os, signal, sys; sys.path.insert(0, {str(HELPER.parent)!r}); import pysafe\n"
+    if during_launch:
+        code += (
+            "from pathlib import Path\nfrom kitlib_poll import poll_until\n"
+            "actual_spawn = pysafe.subprocess.Popen\n"
+            "def interrupt_spawn(*args, **kwargs):\n"
+            "    child = actual_spawn(*args, **kwargs)\n"
+            f"    ready = poll_until(lambda _: Path({str(marker.with_suffix('.ready'))!r}).exists(), deadline_s=3, interval_s=.02, classify=lambda x: 'success' if x else 'retry')\n"
+            "    assert ready.outcome == 'success'\n"
+            "    os.kill(os.getpid(), signal.SIGTERM)\n"
+            "    return child\n"
+            "pysafe.subprocess.Popen = interrupt_spawn\n"
+            "options = {}\n"
+        )
+    else:
+        code += (
+            "def cancel_on_ready(stream, chunk): os.kill(os.getpid(), signal.SIGTERM)\n"
+            "options = {'on_chunk': cancel_on_ready}\n"
+        )
+    code += f"pysafe.run_main(lambda: pysafe.run_bounded({argv!r}, 60, **options))\n"
+    result = pysafe.run_bounded([sys.executable, "-c", code], 10)
+    # A broken construction guard must not leave this negative fixture behind.
+    # Waiting for its self-alarm cannot manufacture the TERM cleanup marker.
+    ready = marker.with_suffix(".ready")
+    if ready.exists() and not marker.exists():
+        wait_dead(int(ready.read_text()), budget=16)
+    return result
 
 
 class Scratch(unittest.TestCase):
@@ -284,6 +333,40 @@ class Output(Scratch):
         os.close(held)
 
 
+class ChildOwnership(Scratch):
+    def test_child_exiting_before_watch_keeps_its_output_and_status(self) -> None:
+        original_watch = pysafe._ChildOwner.watch
+
+        def watch_after_exit(owner: pysafe._ChildOwner) -> None:
+            if hasattr(select, "kqueue"):
+                queue = select.kqueue()
+                try:
+                    try:
+                        queue.control([select.kevent(
+                            owner.proc.pid, filter=select.KQ_FILTER_PROC,
+                            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                            fflags=select.KQ_NOTE_EXIT)], 0, 0)
+                    except ProcessLookupError:
+                        pass  # The unreaped child has already exited.
+                    else:
+                        self.assertTrue(queue.control(None, 1, 3))
+                finally:
+                    queue.close()
+            else:
+                exited = poll_until(
+                    lambda _: os.waitid(os.P_PID, owner.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT),
+                    deadline_s=3, interval_s=.02, classify=lambda value: "success" if value else "retry")
+                self.assertEqual(exited.outcome, "success")
+            original_watch(owner)
+
+        pysafe._ChildOwner.watch = watch_after_exit
+        try:
+            result = pysafe.run_bounded(["sh", "-c", "printf finished; exit 7"], 5)
+        finally:
+            pysafe._ChildOwner.watch = original_watch
+        self.assertEqual((result.outcome, result.returncode, result.stdout), (pysafe.OK, 7, b"finished"))
+
+
 class Cancellation(Scratch):
     def test_sigterm_kills_children_runs_cleanups_and_exits_143(self) -> None:
         pidfile = self.tmp / "child.pid"
@@ -315,6 +398,33 @@ class Cancellation(Scratch):
         self.assertTrue(wait_dead(child), "child process group survived cancellation")
         if proc.stderr:
             proc.stderr.close()
+
+    def test_cancelled_carrier_finishes_its_owned_cleanup_before_return(self) -> None:
+        marker = self.tmp / "carrier-cleaned"
+        result = _cancel_carrier(marker)
+        self.assertEqual((result.outcome, result.returncode), (pysafe.OK, 143), result.text("stderr"))
+        self.assertEqual(marker.read_text(), "owned cleanup completed")
+
+    def test_signal_before_popen_returns_still_drains_the_owned_carrier(self) -> None:
+        marker = self.tmp / "launch-carrier-cleaned"
+        result = _cancel_carrier(marker, during_launch=True)
+        self.assertEqual((result.outcome, result.returncode), (pysafe.OK, 143), result.text("stderr"))
+        self.assertEqual(marker.read_text(), "owned cleanup completed")
+
+    def test_callback_failure_allows_cleanup_without_reentering_callback(self) -> None:
+        marker = self.tmp / "callback-carrier-cleaned"
+        failure = RuntimeError("consumer rejected the output")
+        calls = []
+
+        def reject(stream: int, chunk: bytes) -> None:
+            calls.append((stream, chunk))
+            raise failure
+
+        with self.assertRaises(RuntimeError) as caught:
+            pysafe.run_bounded(_cleanup_carrier(marker), 60, on_chunk=reject)
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(marker.read_text(), "owned cleanup completed")
 
     def test_handlers_restored_after_block(self) -> None:
         before = signal.getsignal(signal.SIGTERM)

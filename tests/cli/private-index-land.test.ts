@@ -144,16 +144,6 @@ function remoteHead(cwd: string): string {
 	if (!sha || ref !== "refs/heads/main") throw new Error(`unexpected origin/main response: ${output}`);
 	return sha;
 }
-function committedGateFile(path: string): Buffer {
-	const head = spawnSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: repoRoot, encoding: "utf8", timeout: 10_000 });
-	if (head.error) throw new Error(`cannot identify fixture source HEAD: ${head.error.message}`);
-	if (head.status === 0) {
-		const file = spawnSync("git", ["show", `HEAD:${path}`], { cwd: repoRoot, timeout: 10_000 });
-		if (file.error || file.status !== 0) throw new Error(`cannot read committed gate file ${path}: ${String(file.stderr ?? "")}`);
-		return Buffer.isBuffer(file.stdout) ? file.stdout : Buffer.from(String(file.stdout ?? ""));
-	}
-	return readFileSync(join(repoRoot, path));
-}
 
 function fixture(): Fixture {
 	const id = fixtureNumber++;
@@ -170,11 +160,13 @@ function fixture(): Fixture {
 	mkdirSync(join(work, "tests", "cli"), { recursive: true });
 	writeFileSync(join(work, "suite-contract.txt"), "PASS\n");
 	writeFileSync(join(work, "tests", "cli", "land-suite.test.sh"), "#!/bin/sh\nset -eu\nif grep -Fxq SLOW suite-contract.txt; then sleep 10; fi\ngrep -Fxq PASS suite-contract.txt\n", { mode: 0o755 });
-	mkdirSync(join(work, "scripts"), { recursive: true });
-	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh"];
+	mkdirSync(join(work, "scripts", "full-suite-supervise"), { recursive: true });
+	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh",
+		"scripts/full-suite-worker.sh", "scripts/full-suite-supervise/package.json",
+		"scripts/pysafe.py", "scripts/kitlib_run.py", "scripts/kitlib_proc.py"];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
 	for (const path of gateFiles)
-		writeFileSync(join(work, path), committedGateFile(path), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
+		writeFileSync(join(work, path), readFileSync(join(repoRoot, path)), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
 	git(work, ["add", "-A"]);
 	git(work, ["commit", "-m", "base [test]"]);
 	git(work, ["push", "-u", "origin", "HEAD:refs/heads/main"]);
@@ -293,6 +285,11 @@ test("checks the exact candidate with the base-registered push check before publ
 	const expectedChecks = createHash("sha256")
 		.update(git(work, ["show", `${data.commit}:scripts/full-suite-verdict.sh`]))
 		.update(git(work, ["show", `${data.commit}:scripts/fresh-gate.sh`]))
+		.update(git(work, ["show", `${data.commit}:scripts/full-suite-worker.sh`]))
+		.update(git(work, ["show", `${data.commit}:scripts/full-suite-supervise/package.json`]))
+		.update(git(work, ["show", `${data.commit}:scripts/pysafe.py`]))
+		.update(git(work, ["show", `${data.commit}:scripts/kitlib_run.py`]))
+		.update(git(work, ["show", `${data.commit}:scripts/kitlib_proc.py`]))
 		.update(git(work, ["show", `${data.commit}:scripts/kitlib-tmp.sh`]))
 		.update(git(work, ["show", `${data.commit}:scripts/gate-ci-only.tsv`]))
 		.digest("hex");
@@ -344,8 +341,6 @@ test("missing or corrupt suite logs are not reused as cached PASS", async () => 
 	const { work } = fixture();
 	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
 	const script = join(work, "scripts", "full-suite-verdict.sh");
-	// Use the candidate judge so this fixture exercises the implementation under test.
-	writeFileSync(script, readFileSync(join(repoRoot, "scripts", "full-suite-verdict.sh")), { mode: 0o755 });
 	const cache = join(work, ".git", "omp-kit", "full-suite-verdicts");
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) {
@@ -376,7 +371,9 @@ test("missing or corrupt suite logs are not reused as cached PASS", async () => 
 		expect(replay.status, output).toBe(0);
 		expect(output).toContain("FULL-SUITE: cache miss");
 		expect(output).not.toContain("FULL-SUITE: VERDICT REUSED PASS");
-		expect(readFileSync(logPath, "utf8")).toBe(originalLog);
+		const replacementLog = readFileSync(logPath);
+		const replacementEntry = JSON.parse(readFileSync(join(cache, `${tree}.json`), "utf8")) as { evidence: { log_sha256?: string } };
+		expect(replacementEntry.evidence.log_sha256).toBe(createHash("sha256").update(replacementLog).digest("hex"));
 	}
 }, 35_000);
 test("refuses a candidate whose exact full suite is red before origin advances", () => {

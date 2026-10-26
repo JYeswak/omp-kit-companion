@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {
+    "worker": "exec /bin/sh ../full-suite-worker.sh"
+  }
+}

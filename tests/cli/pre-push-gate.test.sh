@@ -790,6 +790,14 @@ echo VERDICT-STUB-GATE
 GATE_STUB
 }
 
+copy_verdict_judge() {
+	mkdir -p "$1/scripts/full-suite-supervise"
+	for helper in full-suite-verdict.sh full-suite-worker.sh full-suite-supervise/package.json \
+		pysafe.py kitlib_run.py kitlib_proc.py kitlib-tmp.sh; do
+		cp "$KITREPO/scripts/$helper" "$1/scripts/$helper"
+	done
+}
+
 mkverdictrepo() {
 	name=$1
 	repo="$TMP/$name"
@@ -798,10 +806,7 @@ mkverdictrepo() {
 	git -C "$repo" init -q
 	git -C "$repo" config user.email "test@example.invalid"
 	git -C "$repo" config user.name "worker-1"
-	cp "$KITREPO/scripts/full-suite-verdict.sh" "$repo/scripts/full-suite-verdict.sh"
-	# The suite runner sources the candidate archive's own scripts/kitlib-tmp.sh (62e5017451); a fixture
-	# candidate without it dies before any suite runs and reads as incomplete evidence.
-	cp "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
+	copy_verdict_judge "$repo"
 	create_verdict_gate_stub "$repo"
 	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
 	create_checker_test_stubs "$repo"
@@ -875,8 +880,7 @@ mkdir -p "$erepro/scripts" "$erepro/tests/cli" "$erepro/var/agent-tmp"
 git -C "$erepro" init -q
 git -C "$erepro" config user.email "test@example.invalid"
 git -C "$erepro" config user.name "worker-1"
-cp "$KITREPO/scripts/full-suite-verdict.sh" "$erepro/scripts/full-suite-verdict.sh"
-cp "$KITREPO/scripts/kitlib-tmp.sh" "$erepro/scripts/kitlib-tmp.sh"
+copy_verdict_judge "$erepro"
 create_verdict_gate_stub "$erepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$erepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$erepro"
@@ -936,8 +940,7 @@ mkdir -p "$hrepro/scripts" "$hrepro/tests/cli" "$hrepro/var/agent-tmp"
 git -C "$hrepro" init -q
 git -C "$hrepro" config user.email "test@example.invalid"
 git -C "$hrepro" config user.name "worker-1"
-cp "$KITREPO/scripts/full-suite-verdict.sh" "$hrepro/scripts/full-suite-verdict.sh"
-cp "$KITREPO/scripts/kitlib-tmp.sh" "$hrepro/scripts/kitlib-tmp.sh"
+copy_verdict_judge "$hrepro"
 create_verdict_gate_stub "$hrepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$hrepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$hrepro"

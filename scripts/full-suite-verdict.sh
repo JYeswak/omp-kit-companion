@@ -18,7 +18,7 @@
 #
 # The verdict is cached by candidate tree hash with check/runtime identity bound to the entry:
 #   tree    = git tree object of the exact candidate commit (exact source bytes)
-#   checks  = sha256 of this script + scripts/fresh-gate.sh + scripts/gate-ci-only.tsv as executed
+#   checks  = sha256 of the gate, phase worker, native carrier manifest and judging helpers below
 #   runtime = os/arch + bun version + python3 version (+ FULL_SUITE_RUNTIME_ID when pinned)
 # A repeated identical tree under unchanged check/runtime identity reuses the recorded verdict
 # without rerunning. A changed tree, changed check bytes or changed runtime never reuses.
@@ -83,8 +83,16 @@ case "$tree" in *[!0-9a-f]*|???????????????????????????????????????) fail "candi
 # against the candidate archive; a changed judge reruns every tree.
 [ -f "$SCRIPT_DIR/full-suite-verdict.sh" ] || { fail "judging script is absent beside the gate"; exit 1; }
 [ -f "$SCRIPT_DIR/fresh-gate.sh" ] || { fail "scripts/fresh-gate.sh is absent beside the gate"; exit 1; }
+for helper in full-suite-worker.sh full-suite-supervise/package.json pysafe.py kitlib_run.py kitlib_proc.py; do
+	[ -f "$SCRIPT_DIR/$helper" ] || { fail "scripts/$helper is absent beside the gate"; exit 1; }
+done
 checks_src="$SCRIPT_DIR/full-suite-verdict.sh
-$SCRIPT_DIR/fresh-gate.sh"
+$SCRIPT_DIR/fresh-gate.sh
+$SCRIPT_DIR/full-suite-worker.sh
+$SCRIPT_DIR/full-suite-supervise/package.json
+$SCRIPT_DIR/pysafe.py
+$SCRIPT_DIR/kitlib_run.py
+$SCRIPT_DIR/kitlib_proc.py"
 if [ -z "$ARCHIVE_DIR" ]; then
 	[ -f "$SCRIPT_DIR/kitlib-tmp.sh" ] || { fail "scripts/kitlib-tmp.sh is absent beside the gate"; exit 1; }
 	checks_src="$checks_src
@@ -331,7 +339,7 @@ if [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ] && [ -f "$ARCHIVE_DIR/scripts/build-mani
 fi
 
 SUITE_OUT="$CACHE_DIR/$tree.running.log"
-# The runner's own facts, written only by run_suite (never by a suite): one line per shell and
+# The phase worker's own facts (never a suite's): one line per shell and
 # python suite plus the bun phase's exit code. Bun's output is kept apart so its summary is
 # parsed from the bun phase alone. Nested gate runs inside tests print the same marker lines
 # into the shared log; they must not count (FULLSUITECOUNT1, ompkit-lrbd.7).
@@ -350,117 +358,73 @@ finish_logs() {
 	rm -f "$SUITE_STATUS" "$BUN_OUT"
 }
 
-# One deadline for the whole suite: every phase runs to completion and appends to the evidence
-# log, so a failing suite yields a complete FAIL record (cached RED) instead of an incomplete run.
-# Timeout kills the suite's process tree, refuses, and records nothing, so a retry reruns.
-run_suite() {
-	(
-		# Publisher tracker selection must not redirect tests away from their own fixtures.
-		# Tests can still select an explicit tracker after the suite child starts.
-		unset BEADS_DB
-		cd "$ARCHIVE_DIR"
-		# SAVEFIRST1: this full-suite process is a sibling of fresh-gate, so its descendants do not inherit
-		# the fresh-gate process's save-only disk observer. Keep nested heavy calls on statfs; their physical
-		# 10 GiB floor still refuses when the suite cannot fit.
-		export OMP_KIT_DISK_OBSERVER=statfs
-		export KITLIB_TMP_ROOT="$ARCHIVE_DIR/var/agent-tmp"
-		mkdir -p "$KITLIB_TMP_ROOT"
-		. "$ARCHIVE_DIR/scripts/kitlib-tmp.sh"
-		# The full suite is a sibling of the pre-push harness; its inherited TMPDIR may
-		# be the harness's plain bucket. Give every suite a private owned temp root.
-		kitlib_tmp TMPDIR full-suite-run || exit 1
-		export TMPDIR
-		export OMP_KIT_CASE_CWD="$ROOT"
-		if [ -f "$ARCHIVE_DIR/bunfig.toml" ]; then
-			export BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml"
-			bun_config="--config=$ARCHIVE_DIR/bunfig.toml"
-		else
-			bun_config=""
-		fi
-		# dfl CMD...: run CMD with SIGINT and SIGQUIT at their defaults, as in a foreground run. This
-		# subshell runs as `run_suite &`, and a non-interactive shell starts background lists with both
-		# ignored; a shell cannot un-ignore them, so suites inherited SIG_IGN and a test expecting death
-		# by SIGINT exited 0 here only (kitlib_tmp_test test_03_sigint, ompkit-lrbd.3). exec keeps the pid.
-		dfl() {
-			python3 -c 'import os, signal, sys
-for sig in (signal.SIGINT, signal.SIGQUIT):
-    signal.signal(sig, signal.SIG_DFL)
-os.execvp(sys.argv[1], sys.argv[1:])' "$@"
-		}
-		failed=0
-		if [ "$bun_count" -gt 0 ]; then
-			bun_rc=0
-			# Reuse the focused runner's core-derived worker policy, with at most
-			# four isolated files in flight and no changes to the selected suite.
-			workers=$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers) || exit 1
-			case "$workers" in ''|*[!0-9]*|0) exit 1 ;; esac
-			[ "$workers" -le "$bun_count" ] || workers=$bun_count
-			[ "$workers" -le 4 ] || workers=4
-			set -- --parallel="$workers" $kept_bun
-			if [ -f "$ARCHIVE_DIR/.github/core-test-timings.json" ]; then
-				set -- --timings="$ARCHIVE_DIR/.github/core-test-timings.json" "$@"
-			fi
-			if [ -n "$bun_config" ]; then
-				dfl nice -n 10 bun "$bun_config" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@" >"$BUN_OUT" 2>&1 || bun_rc=$?
-			else
-				dfl nice -n 10 bun test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@" >"$BUN_OUT" 2>&1 || bun_rc=$?
-			fi
-			cat "$BUN_OUT"
-			echo "BUN rc=$bun_rc" >>"$SUITE_STATUS"
-			[ "$bun_rc" -eq 0 ] || failed=1
-		fi
-		for suite in $kept_shell; do
-			if dfl sh "$suite"; then
-				echo "GREEN script-suite $suite"; echo "GREEN script-suite $suite" >>"$SUITE_STATUS"
-			else
-				src=$?; echo "RED script-suite $suite rc=$src"; echo "RED script-suite $suite" >>"$SUITE_STATUS"; failed=1
-			fi
-		done
-		for suite in $kept_py; do
-			if dfl python3 "$suite"; then
-				echo "GREEN python-suite $suite"; echo "GREEN python-suite $suite" >>"$SUITE_STATUS"
-			else
-				src=$?; echo "RED python-suite $suite rc=$src"; echo "RED python-suite $suite" >>"$SUITE_STATUS"; failed=1
-			fi
-		done
-		exit "$failed"
-	) >>"$SUITE_OUT" 2>&1
+# The native system-shell runner owns the descendant forest, including a suite
+# that leaves its process group. pysafe owns the unchanged deadline. Wait for
+# both before publishing a terminal or removing the archive; no extra watchdog.
+
+suite_pid=""
+suite_ref=null
+cancel_requested=""
+on_signal() {
+	code=$1
+	trap '' HUP INT TERM
+	if [ -n "$suite_pid" ]; then
+		# The PID is the child created below; the birth witness prevents a stale
+		# number from authorizing a signal to another process. Unknown refuses.
+		python3 -B - "$SCRIPT_DIR" "$suite_ref" <<'PY' || :
+import json, os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from kitlib_proc import probe_incarnation
+recorded = json.loads(sys.argv[2])
+if not isinstance(recorded, dict):
+    print("FULL-SUITE: cancellation ownership UNKNOWN; refusing an unproved signal", file=sys.stderr)
+    raise SystemExit(3)
+state = probe_incarnation(recorded)["state"]
+if state == "live":
+    try:
+        os.kill(recorded["pid"], signal.SIGTERM)  # pysafe: own child, fresh incarnation checked
+    except ProcessLookupError:
+        pass
+elif state == "unknown":
+    print("FULL-SUITE: cancellation ownership UNKNOWN; refusing an unproved signal", file=sys.stderr)
+    raise SystemExit(3)
+PY
+		wait "$suite_pid" 2>/dev/null || :
+		suite_pid=""
+	fi
+	finish_logs "$CACHE_DIR/$tree.incomplete.log"
+	cleanup_archive
+	fail "full suite cancelled by signal (exit=$code); incomplete evidence is non-pass; partial log: $CACHE_DIR/$tree.incomplete.log" || :
+	exit "$code"
 }
 
-# kill_tree PID SIG: post-order signal to the suite process tree. A plain kill of the subshell
-# leaves its bun grandchildren running; this walks parent links instead (same ps snapshot shape
-# as the gate's stop_descendants). Reparented strays are out of reach, like in the gate.
-kill_tree() {
-	root=$1; sig=$2
-	children=$(ps -A -o pid= -o ppid= 2>/dev/null | awk -v r="$root" '$2 == r { print $1 }')
-	for child in $children; do kill_tree "$child" "$sig"; done
-	kill "-$sig" "$root" 2>/dev/null || true
-}
-
-timed_out=0
-suite_rc=0
-run_suite &
+# Defer handling only while capturing the just-created supervisor's identity.
+# No terminal is published during this bounded initialization interval.
+trap 'cancel_requested=129' HUP
+trap 'cancel_requested=130' INT
+trap 'cancel_requested=143' TERM
+# shellcheck disable=SC2094 # worker appends phase output; supervisor appends only terminal diagnostics
+python3 -B "$SCRIPT_DIR/pysafe.py" run --timeout "$TIMEOUT_SECS" --cap 1048576 -- \
+	bun run --silent --no-env-file --config=/dev/null --cwd="$SCRIPT_DIR/full-suite-supervise" --no-orphans --shell=system worker \
+	"$ARCHIVE_DIR" "$ROOT" "$SCRIPT_DIR" \
+	"$BUN_OUT" "$SUITE_STATUS" "$SUITE_OUT" "$bun_count" "$kept_bun" "$kept_shell" "$kept_py" "$PATH" \
+	>>"$SUITE_OUT" 2>&1 &
 suite_pid=$!
-# Wait on the suite itself; a watchdog enforces the deadline. Polling every 5 s made even an
-# instant suite cost a full 5 s per verdict (every land call paid it).
-timeout_mark="$SUITE_OUT.timed-out"
-rm -f "$timeout_mark"
-(
-	sleep "$TIMEOUT_SECS"
-	: >"$timeout_mark"
-	kill_tree "$suite_pid" TERM
-	sleep 5
-	kill_tree "$suite_pid" KILL
-) 2>/dev/null &
-watchdog_pid=$!
+suite_ref=$(python3 -B - "$SCRIPT_DIR" "$suite_pid" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from kitlib_proc import incarnation
+print(json.dumps(incarnation(int(sys.argv[2]))))
+PY
+) || suite_ref=null
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+[ -z "$cancel_requested" ] || on_signal "$cancel_requested"
+suite_rc=0
 wait "$suite_pid" 2>/dev/null || suite_rc=$?
-kill_tree "$watchdog_pid" TERM
-wait "$watchdog_pid" 2>/dev/null || true
-if [ -f "$timeout_mark" ]; then
-	rm -f "$timeout_mark"
-	timed_out=1
-fi
-if [ "$timed_out" = 1 ]; then
+suite_pid=""
+if [ "$suite_rc" -eq 124 ]; then
 	finish_logs "$CACHE_DIR/$tree.incomplete.log"
 	cleanup_archive
 	fail "full suite timed out after ${TIMEOUT_SECS}s; incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
