@@ -76,7 +76,7 @@ class BeadCli(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.work.cleanup()
 
-    def run_cli(self, bead: dict, *, ids: list[str] | None = None, fail_br: bool = False) -> tuple[int, dict]:
+    def invoke(self, bead: dict, *, ids: list[str] | None, fail_br: bool, extra: list[str]) -> tuple[int, str]:
         state = self.root / f"state-{self.id().rsplit('.', 1)[-1]}.json"
         state.write_text(json.dumps({"bead": bead, "ids": ids or [bead["id"]]}), encoding="utf-8")
         env = {
@@ -86,11 +86,24 @@ class BeadCli(unittest.TestCase):
         }
         if fail_br:
             env["FAKE_BR_FAIL"] = "1"
-        result = run_bounded([sys.executable, BEAD_LINT, "--bead", bead["id"], "--repo", str(self.root)],
+        result = run_bounded([sys.executable, BEAD_LINT, "--bead", bead["id"], "--repo", str(self.root), *extra],
                              60, env=env, cwd=str(self.root))
         self.assertEqual(result.outcome, "OK")
-        out = result.stdout.decode("utf-8", "replace")
-        return result.returncode, json.loads(out)
+        return result.returncode, result.stdout.decode("utf-8", "replace")
+
+    def run_cli(self, bead: dict, *, ids: list[str] | None = None, fail_br: bool = False) -> tuple[int, dict]:
+        code, out = self.invoke(bead, ids=ids, fail_br=fail_br, extra=["--json"])
+        return code, json.loads(out)
+
+    def test_plain_output_names_verdict_and_failing_checks(self) -> None:
+        code, out = self.invoke(clean_bead(labels=[]), ids=None, fail_br=False, extra=[])
+        self.assertEqual(code, 1, out)
+        self.assertTrue(out.startswith("FAIL "), out)
+        self.assertIn("a-label", out)
+        code, out = self.invoke(clean_bead(), ids=None, fail_br=False, extra=[])
+        self.assertEqual((code, out.split()[0]), (0, "PASS"), out)
+        code, out = self.invoke(clean_bead(), ids=None, fail_br=True, extra=[])
+        self.assertEqual((code, out.split()[0]), (3, "UNVERIFIED"), out)
 
     def test_clean_bead_passes(self) -> None:
         code, verdict = self.run_cli(clean_bead())

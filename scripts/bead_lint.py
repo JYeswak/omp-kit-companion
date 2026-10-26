@@ -1259,14 +1259,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default="", help="also write JSON to PATH")
     ap.add_argument("--bead", default="",
                     help="lint one bead from the live tracker (br show/list, "
-                    "no flush); exit 0 PASS, 1 FAIL, 3 UNVERIFIED")
+                    "no flush); prints PASS, FAIL with the failing check "
+                    "names, or UNVERIFIED; exit 0 PASS, 1 FAIL, 3 UNVERIFIED")
     ap.add_argument("--repo", default=".",
                     help="tracker repo for --bead (the directory holding .beads)")
+    ap.add_argument("--json", action="store_true",
+                    help="with --bead, print the verdict as JSON")
     args = ap.parse_args(argv)
     if args.bead:
         code, verdict = lint_one(os.path.abspath(args.repo), args.bead)
-        print(json.dumps(verdict, indent=2 if args.pretty else None,
-                         sort_keys=True))
+        if args.json:
+            print(json.dumps(verdict, indent=2 if args.pretty else None,
+                             sort_keys=True))
+        elif verdict["verdict"] == "FAIL":
+            print(f"FAIL {args.bead}: {', '.join(verdict['failures'])}")
+        elif verdict["verdict"] == "UNVERIFIED":
+            print(f"UNVERIFIED {args.bead}: {verdict['reason']}")
+        else:
+            print(f"PASS {args.bead}")
         return code
     if not args.selftest:
         ap.print_help()
