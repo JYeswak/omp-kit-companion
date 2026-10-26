@@ -18,6 +18,13 @@ Workflow flags (--status/--priority/--assignee/--owner/--claim) and edge
 flags (--parent) never newly fail the gated checks and pass through, so
 claiming a failing bead for repair is never deadlocked by this gate.
 
+Repair admission (LINTREPAIR ompkit-fp72.135.3.50): a content edit to a bead
+that already fails is admitted when the checks it fails afterwards are a
+strict subset of the checks it fails now (it repairs something and breaks
+nothing), so a description repair is not frozen behind a failure only a
+different fix can clear. It never applies when the same command carries
+--claim or --status: those moves are judged exactly as before.
+
 `--status in_review` (ACPHASE1 ompkit-9e9w6 + PREGRADE1 ompkit-3s6d2): for
 a bead created at or after ac_phase.AC_PHASE_CUTOVER the move is also
 refused (exit 4) unless every [build]/[landed] item is ticked
@@ -72,6 +79,7 @@ def parse_update(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("subcommand", nargs="?")
     parser.add_argument("bead_id", nargs="?")
     parser.add_argument("--status")
+    parser.add_argument("--claim", action="store_true")
     parser.add_argument("--title")
     parser.add_argument("-d", "--description", "--body", dest="description")
     parser.add_argument("--description-file")
@@ -220,6 +228,10 @@ def main(argv: list[str]) -> int:
         bead = prospective(live, args, project)
         byid = tracker_ids(real, project, db) | {bead["id"]}
         failures = lint_bead_failures(bead, byid)
+        # LINTREPAIR: the live bead's own failures, judged the same way, are the
+        # baseline a repair is measured against (content edits only).
+        repair_base = (lint_bead_failures(prospective(live, parse_update([]), project), byid)
+                       if failures and args.status is None and not args.claim else None)
         admission = (ac_phase.in_review_admission(
             bead, repo=tracker_repo(project, db or os.environ.get("BEADS_DB", "")))
             if args.status == "in_review" else None)
@@ -240,6 +252,15 @@ def main(argv: list[str]) -> int:
         if admission["hint"]:
             # The repo's own instructions for producing a pregrade (.omp/pregrade.json "hint").
             details.append(f"br-shim: PREGRADE_HINT {admission['hint']}")
+    if failures and repair_base is not None:
+        after = {f.split(":", 1)[0] for f in failures}
+        before = {f.split(":", 1)[0] for f in repair_base}
+        if after < before:
+            print(f"br-shim: LINT_REPAIR_ADMITTED {bead['id']}: this edit clears "
+                  f"{','.join(sorted(before - after))} and adds no failure; still failing "
+                  f"{','.join(sorted(after))}, so a claim or review move stays refused until those pass",
+                  file=sys.stderr)
+            return 0
     if failures:
         print(f"br-shim: LINT_REFUSED {','.join(failures)}: this edit "
               f"would leave {bead['id']} failing bead-lint or in_review "
