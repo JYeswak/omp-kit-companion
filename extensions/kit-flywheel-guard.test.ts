@@ -307,7 +307,8 @@ test("SELF_CLOSE_REFUSED negative: close text that is not a br/bd close never co
 		"br update kit-1 --notes close",
 		"gh issue close 12",
 	]) expect(await toolCall(h, project, command)).toBeUndefined();
-	expect(h.execs).toEqual([]);
+	// AUTOCOMPLETE1 consults git on a `git commit` (toplevel, index); br is never consulted for these texts.
+	expect(h.execs.filter(e => e.command === "br" || e.command === "bd")).toEqual([]);
 	const write = await h.emit("tool_call", { toolName: "write", input: { path: "x", content: "br close kit-1" } }, h.ctx(project));
 	expect(write).toEqual([undefined]);
 });

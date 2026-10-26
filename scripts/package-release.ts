@@ -37,6 +37,7 @@ const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/fleet-guard.ts": "FLEET_GUARD_BUNDLE_FAILED",
 	// GATEEVENTS1: the ledger library imports src/kitlib; shipped raw it would resolve outside the package.
 	"extensions/gate-events.ts": "GATE_EVENTS_BUNDLE_FAILED",
+	"extensions/commit-autocomplete.ts": "COMMIT_AUTOCOMPLETE_BUNDLE_FAILED",
 	"extensions/kit-flywheel-guard.ts": "FLYWHEEL_GUARD_BUNDLE_FAILED",
 	"extensions/kit-goal-keepalive.ts": "GOAL_KEEPALIVE_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",

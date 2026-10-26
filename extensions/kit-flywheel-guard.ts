@@ -7,6 +7,9 @@ import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
 import { holderVerdict, readLivenessSourcesAsync, type HolderVerdict } from "../src/holder-liveness.ts";
 import { gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
+import { parseCommit, planAutocomplete } from "./commit-autocomplete";
+import { renderEnvelope } from "../src/kitlib/findings.ts";
+import { agentMailStorageRoot } from "../src/holder-liveness.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -2312,6 +2315,37 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		const verdict = await guardVerdict(event, ctx);
 		const command = typeof event.toolName === "string" && event.toolName.toLowerCase() === "bash" ? field(event.input, "command") : undefined;
 		const act = typeof command === "string" ? trackerAct(command) : null;
+		// AUTOCOMPLETE1 (ompkit-fp72.135.3.17): on an allowed `git commit`, complete what the kit already knows
+		// (Bead trailer from the live reservation, fragment scaffold, Supersedes from blame) by revising the raw
+		// command, and report each as AUTO_COMPLETED; what cannot be completed is one refusal listing every finding.
+		if (verdict === undefined && typeof command === "string" && parseCommit(command) !== null) {
+			const seat = admissionOwner(env) ?? selfDeclared ?? await paneIdentities(pi.exec, env, home, [ctx.cwd]).then(names => names[0] ?? null).catch(() => null);
+			const cwdField = field(event.input, "cwd");
+			const repo = resolve(typeof cwdField === "string" && cwdField.trim() !== "" ? cwdField : ctx.cwd);
+			const git = async (args: string[], cwd: string) => { try { const r = await pi.exec("git", args, { cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS }); return { code: r.code, stdout: r.stdout }; } catch { return { code: 1, stdout: "" }; } };
+			const top = await git(["rev-parse", "--show-toplevel"], repo);
+			if (top.code === 0) {
+				const root = agentMailStorageRoot(env, home);
+				const plan = await planAutocomplete({ command, repo: top.stdout.trim(), agent: seat, projectKey: top.stdout.trim(), storagePath: root ? join(root, "storage.sqlite3") : null, nowMs: Date.now(),
+					exec: (argv, cwd) => git(argv.slice(1), cwd) });
+				if (plan !== null) {
+					for (const done of plan.completed) {
+						await recordGateEvent({ seat, act: "commit", target: plan.bead, gate: "commit-autocomplete", kind: "auto_complete", detail: `${done.what}: ${done.detail}`.slice(0, 200), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
+						ctx.ui?.notify(`AUTO_COMPLETED:${done.what}: ${done.detail}`, "info");
+					}
+					if (plan.findings.length > 0) {
+						const envelope = renderEnvelope({ ok: false, act: "commit", target: plan.bead, snapshot: `tree:${(await git(["write-tree"], repo)).stdout.trim()}`, findings: plan.findings });
+						const reason = `kit-flywheel-guard COMMIT_INCOMPLETE: ${envelope}\nNothing was completed and nothing was run.`;
+						await recordGateEvent({ seat, act: "commit", target: plan.bead, gate: "COMMIT_INCOMPLETE", kind: "refuse", detail: plan.findings.map(f => f.code).join(","), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
+						return { block: true, reason };
+					}
+					if (plan.command !== command) {
+						const raw = event.input;
+						if (typeof raw === "object" && raw !== null) return { input: { ...(raw as Record<string, unknown>), command: plan.command } };
+					}
+				}
+			}
+		}
 		if (act !== null || verdict?.block === true) {
 			const row = await recordGateEvent({
 				seat: admissionOwner(env) ?? selfDeclared ?? await paneIdentities(pi.exec, env, home, [ctx.cwd]).then(names => names[0] ?? null).catch(() => null),
