@@ -21,8 +21,7 @@ import { run } from "../src/kitlib/run.ts";
  *
  * The cursor is kept per (agent, project) under ~/.local/state/omp-kit/inbox-wake/, so mail that arrives while the
  * seat is restarting is delivered on its next start; the first start ever takes the current tail (no backlog flood).
- * Each wake appends a WAKE_ENQUEUED row to mail-wake.jsonl (the ledger the sender side already writes) when omp queues
- * it, and a WAKE_CONSUMED row when omp's message_end shows the agent received it.
+ * Each delivery appends one WOKEN_INPROCESS row to mail-wake.jsonl, the ledger the sender side already writes.
  * Inert without AGENT_NAME, outside a fleet-opted-in project, or when `am` is unavailable.
  */
 
@@ -154,32 +153,6 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	let project = "";
 	let path = "";
 	let cwd = "";
-	/** ESCREDELIVER (non-author review of 1d8af2d10b, 2026-10-26): an Esc runs clearQueue({forInterrupt}) and drops a
-	 *  queued follow-up, but the cursor already moved past its mail, so that mail never woke the seat again. Each wake
-	 *  stays pending until omp emits its message_end (the agent consumed it). Only a run that ended aborted re-sends
-	 *  a still-pending wake, once. DUPWAKE1 (lead seat 2026-10-26: 69773 consumed 19:53:53Z, delivered again 20:42Z):
-	 *  a follow-up queued during a run is delivered only after that run ends, so at a normal run end it is still
-	 *  pending by design; re-sending it there queued a duplicate of every mid-run wake. */
-	const pending = new Map<string, { resent: boolean; events: InboxEvent[] }>();
-	const ledger = join(home, ".local", "state", "omp-kit", "mail-wake.jsonl");
-
-	function wake(content: string): void {
-		pi.sendMessage({ customType: "kit-inbox-wake", content, display: true }, { deliverAs: "followUp", triggerTurn: true });
-	}
-
-	/** WAKECONSUMED (J-2026-10-26-28, measures must be accurate): enqueue and consumption are separate rows. A wake
-	 *  omp queued is WAKE_ENQUEUED; only omp's message_end for it, meaning the agent received it, writes WAKE_CONSUMED,
-	 *  the row launch T5 counts. Before 2026-10-26 the enqueue row said WOKEN_INPROCESS, so T5 read GO on wakes an Esc
-	 *  had dropped. */
-	function record(events: InboxEvent[], status: string, detail: string): void {
-		const ts = now().toISOString();
-		for (const e of events) {
-			appendFileSync(ledger, JSON.stringify({
-				ts, message_id: e.message_id, project_key: project, sender: e.from, recipient: agent,
-				subject: e.subject, status, detail, cursor: e.cursor,
-			}) + "\n");
-		}
-	}
 
 	/** RESTARTRACE1 (J-2026-10-26-20): the registry naming this seat's project lists a Tern block only while omp runs
 	 *  in it, so a restarted seat can start before it is re-listed (lead 2026-10-26: omp up 17:26:51Z, block re-listed
@@ -207,10 +180,16 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			}
 			const fresh = got.events.filter(e => e.from !== agent && (e.kind === "to" || e.kind === "cc"));
 			if (fresh.length > 0) {
-				const content = wakeText(agent!, fresh);
-				pending.set(content, { resent: false, events: fresh });
-				wake(content);
-				record(fresh, "WAKE_ENQUEUED", "kit-inbox-wake followUp queued");
+				pi.sendMessage({ customType: "kit-inbox-wake", content: wakeText(agent!, fresh), display: true },
+					{ deliverAs: "followUp", triggerTurn: true });
+				const ledger = join(home, ".local", "state", "omp-kit", "mail-wake.jsonl");
+				const ts = now().toISOString();
+				for (const e of fresh) {
+					appendFileSync(ledger, JSON.stringify({
+						ts, message_id: e.message_id, project_key: project, sender: e.from, recipient: agent,
+						subject: e.subject, status: "WOKEN_INPROCESS", detail: "kit-inbox-wake followUp", cursor: e.cursor,
+					}) + "\n");
+				}
 			}
 			if (got.next_cursor !== after) writeCursor(path, agent!, project, got.next_cursor, now());
 		} catch {
@@ -220,33 +199,6 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 		}
 	}
 
-	pi.on("message_end", (event: { message?: { customType?: unknown; content?: unknown } }) => {
-		const m = event?.message;
-		if (m?.customType !== "kit-inbox-wake") return;
-		const text = typeof m.content === "string" ? m.content : Array.isArray(m.content)
-			? m.content.map((p: { text?: unknown }) => (typeof p?.text === "string" ? p.text : "")).join("") : "";
-		const hit = pending.get(text);
-		if (hit === undefined) return;
-		pending.delete(text);
-		try {
-			record(hit.events, "WAKE_CONSUMED", "kit-inbox-wake message_end");
-		} catch {
-			// The wake reached the agent; a ledger write failure only loses the receipt row.
-		}
-	});
-	pi.on("agent_end", (event: { messages?: Array<{ role?: unknown; stopReason?: unknown }> }) => {
-		const messages = Array.isArray(event?.messages) ? event.messages : [];
-		const last = [...messages].reverse().find(m => m?.role === "assistant");
-		if (last?.stopReason !== "aborted") return;
-		for (const [content, hit] of pending) {
-			if (hit.resent) {
-				pending.delete(content);
-				continue;
-			}
-			hit.resent = true;
-			wake(content);
-		}
-	});
 	pi.on("session_start", async (_event, ctx) => {
 		cwd = ctx.cwd;
 		await tick();
