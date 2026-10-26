@@ -1,0 +1,1 @@
+- Claims are not lint-gated in this release. The claim gate that refuses `br update --claim` on a bead failing bead-lint (J-2026-10-25-107) was committed (commit 4cbc1e8) and held out of this release (commit d7be7ee) until its source review completes; it ships in a later release. (ompkit-fp72.135.3.50)
