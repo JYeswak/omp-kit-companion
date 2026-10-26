@@ -331,7 +331,7 @@ test("identity refuses a stale-prior seat when target AGENT_NAME differs from Ag
 		foregroundArgv: ["omp", "--profile", "codex"], cwd: "/old-repo" };
 	const otherAgent = { ...agentResolution, agent_name: "OtherAgent", binding: "legacy-unverified" };
 	const result = await identifyTernSeat({ ...seat, previousBinding }, testIo(false, terminalJournal, otherAgent));
-	expect(result).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", binding: "legacy-unverified", agent: null });
+	expect(result).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND", binding: "legacy-unverified", agent: null });
 });
 
 test("Tern process parser refuses a result for another block", () => {

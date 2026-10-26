@@ -1259,13 +1259,19 @@ export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo
 	if ("error" in resolution) return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: "Agent Mail identity did not resolve",
 		agent: null, binding: null, cwdOk: false, runtimeBinding: observation.runtimeBinding };
 	const row = objectValue(resolution.value);
-	if (!row || typeof row.agent_name !== "string" || !row.agent_name || row.agent_name !== targetAgent
+	if (!row || typeof row.agent_name !== "string" || !row.agent_name
 		|| row.pane_id !== `tern:${paneId}` || row.project_key !== projectKey
 		|| (row.binding !== "verified-live" && row.binding !== "legacy-unverified")) {
 		return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND",
-			reason: "Agent Mail identity does not bind this exact Tern pane, project, and target AGENT_NAME",
+			reason: "Agent Mail identity does not bind this exact Tern pane and project",
 			agent: null, binding: typeof row?.binding === "string" ? row.binding : null, cwdOk: false,
 			runtimeBinding: observation.runtimeBinding };
+	}
+	// The exact pane and project resolved; a different target runtime name is a rebound, not an absent seat.
+	if (row.agent_name !== targetAgent) {
+		return { status: "REFUSED", code: "SEAT_REBOUND",
+			reason: "Target AGENT_NAME differs from the resolved Agent Mail identity", agent: null,
+			binding: row.binding, cwdOk: false, runtimeBinding: observation.runtimeBinding };
 	}
 	const binding = row.binding === "legacy-unverified" ? "runtime-verified" : row.binding;
 	return { status: "IDENTIFIED", agent: targetAgent, binding, cwdOk: true,

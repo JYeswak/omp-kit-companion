@@ -57,6 +57,8 @@ interface TernFixtureOpts {
 	repo?: string;
 	identityProject?: string;
 	agentName?: string;
+	agentNameSequence?: string[];
+	agentMailName?: string;
 	binding?: string;
 	sessionUuid?: string;
 	working?: boolean;
@@ -78,6 +80,9 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 	const repo = opts.repo ?? repoDir();
 	const identityProject = opts.identityProject ?? repo;
 	const agentName = opts.agentName ?? "FixtureSeat";
+	const agentNameSequence = opts.agentNameSequence ?? [agentName];
+	const agentMailName = opts.agentMailName ?? "FixtureSeat";
+	let psAgentNameReads = 0;
 	const binding = opts.binding ?? "verified-live";
 	const uuid = opts.sessionUuid ?? "sess-uuid-1";
 	let working = opts.working ?? false;
@@ -123,10 +128,15 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 				writeFileSync(sessionFile, journal);
 				return { code: 0, out: "" };
 			}
-			if (argv[0] === "/bin/ps") return { code: 0, out: `Mon Oct 20 02:00:00 2026 omp AGENT_NAME=${agentName}` };
+			if (argv[0] === "/bin/ps") {
+				const index = Math.min(psAgentNameReads, Math.max(0, agentNameSequence.length - 1));
+				const observedAgentName = agentNameSequence[index] ?? agentName;
+				psAgentNameReads++;
+				return { code: 0, out: `Mon Oct 20 02:00:00 2026 omp AGENT_NAME=${observedAgentName}` };
+			}
 			if (argv[0] === "am") {
 				return resolveAgent
-					? { code: 0, out: JSON.stringify({ agent_name: "FixtureSeat", pane_id: `tern:${paneId}`,
+					? { code: 0, out: JSON.stringify({ agent_name: agentMailName, pane_id: `tern:${paneId}`,
 						project_key: resolve(identityProject), binding }) }
 					: { code: 1, out: "" };
 			}
@@ -210,7 +220,19 @@ test("SENDANY1 planted: mismatched target AGENT_NAME refuses with zero sends", a
 	const got = await proveTernCliSend({ session: "", pane: "tern:5", message: "status update",
 		dropDir: dir, cwd: fx.repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait,
 		io: fx.io, env: { AGENT_MAIL_PROJECT: identityProject, AGENT_NAME: "FixtureSeat" } });
-	expect(got).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", sends: 0 });
+	expect(got).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND", sends: 0 });
+	expect(fx.taken.luaDispatches).toBe(0);
+	expect(readdirSync(dir)).toEqual([]);
+});
+test("SENDANY1 planted: target AGENT_NAME rebound after initial observation refuses with zero sends", async () => {
+	const dir = dropDir();
+	const identityProject = "/agent-mail-project";
+	const fx = ternFixture({ session: "Default", identityProject, binding: "legacy-unverified",
+		agentNameSequence: ["FixtureSeat", "FixtureSeat", "OtherAgent", "OtherAgent"], agentMailName: "OtherAgent" });
+	const got = await proveTernCliSend({ session: "", pane: "tern:5", message: "status update",
+		dropDir: dir, cwd: fx.repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait,
+		io: fx.io, env: { AGENT_MAIL_PROJECT: identityProject, AGENT_NAME: "CallerIsNotTheTarget" } });
+	expect(got).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND", sends: 0 });
 	expect(fx.taken.luaDispatches).toBe(0);
 	expect(readdirSync(dir)).toEqual([]);
 });
