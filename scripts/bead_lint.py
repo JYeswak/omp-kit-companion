@@ -589,7 +589,8 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
     # well-formed; resolution depends on receipt files on disk, which the
     # selftest does not create — so K2 (missing receipt) is the expected
     # finding for st-v-k2. st-v-k1 cites no id (clean), st-v-k3 cites a
-    expected["elapsed-time-mix"] = ["st-v-time", "st-v-time-sitreps", "st-v-time-daily"]
+    expected["elapsed-time-mix"] = ["st-v-time", "st-v-time-sitreps", "st-v-time-daily", "st-v-time-dated",
+                                    "st-v-time-armed"]
     beads.append(clean_bead(
         "st-v-time",
         acc=CLEAN_ACC + "- [ ] [c] [after 7d] measured over 7 days; planted negative: "
@@ -618,6 +619,20 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
         "st-v-time-daily",
         "- [ ] [c] [after 3d] 3 consecutive daily reports show the count; planted negative: a "
         "missing report reads UNKNOWN.\n",
+    ))
+    # The real TIMEAC1 time items, verbatim behind a phase tag: a dated window
+    # (SCRATCHBIN1-M ompkit-fp72.19.1.50) and a first-armed-run milestone
+    # (cfsios cfs-inbound-call-capture-0uyn2). Both escaped the classifier.
+    beads.append(time_bead(
+        "st-v-time-dated",
+        "- [ ] [c] [after 7d] On or after 2026-10-27, from the scratch ledger and reaper receipts: owner-released "
+        "share of dirs created 2026-10-20..27 vs the 18/~2.7k baseline, and reaped bytes for the same "
+        "week vs 242.3 GB; both numbers posted with their producer commands.\n",
+    ))
+    beads.append(time_bead(
+        "st-v-time-armed",
+        "- [ ] [c] [live] GATED REMAINDER: first armed run + live inbound call with ring proof (needs approved "
+        "test numbers + ring timing per director 9696)\n",
     ))
     # A ticked elapsed item cannot hold a close open (the harm TIMEAC1 targets),
     # so beside open code items it is no mix; the unticked st-v-time above is.
@@ -894,7 +909,10 @@ _ELAPSED_ACCEPTANCE_RE = re.compile(
     r"|\b\d+\s+consecutive\s+(?:(?:daily|hourly|weekly|nightly)\s+)?"
     r"(?:reports?|runs?|sitreps?|days?|hours?|weeks?|ticks?|cycles?|windows?)\b"
     r"|\bconsecutive\s+(?:daily|weekly|reports?|runs?)\b"
-    r"|\bfirst\s+live\s+(?:run|report|measurement|proof)\b"
+    # A first armed or live run is a milestone that cannot happen in review.
+    r"|\bfirst\s+(?:live|armed)\s+(?:run|report|measurement|proof)\b"
+    # An explicit dated window: "on or after 2026-10-27, ..." waits for a date.
+    r"|\bon\s+or\s+after\s+\d{4}-\d{2}-\d{2}\b"
     r"|\blive\s+(?:run|ring|measurement)\s+(?:proof|evidence)\b"
     r")",
     re.IGNORECASE,
