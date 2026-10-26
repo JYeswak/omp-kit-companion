@@ -62,7 +62,13 @@ describe("kit-inbox-wake", () => {
 		const cursor = JSON.parse(readFileSync(cursorPath(f.dir, "PeachLeopard", "/repo"), "utf8"));
 		expect(cursor.cursor).toBe(103);
 		const ledger = readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
-		expect(ledger.map(r => [r.message_id, r.status, r.recipient])).toEqual([[69601, "WOKEN_INPROCESS", "PeachLeopard"], [69602, "WOKEN_INPROCESS", "PeachLeopard"]]);
+		expect(ledger.map(r => [r.message_id, r.status, r.recipient])).toEqual([[69601, "WAKE_ENQUEUED", "PeachLeopard"], [69602, "WAKE_ENQUEUED", "PeachLeopard"]]);
+		// WAKECONSUMED: only the agent receiving the wake (omp's message_end) writes the row launch T5 counts.
+		h.fire("message_end", { message: { role: "custom", customType: "kit-inbox-wake", content: h.sent[0]!.content } });
+		const after = readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
+		expect(after.slice(2).map(r => [r.message_id, r.status])).toEqual([[69601, "WAKE_CONSUMED"], [69602, "WAKE_CONSUMED"]]);
+		h.fire("message_end", { message: { role: "custom", customType: "kit-inbox-wake", content: h.sent[0]!.content } });
+		expect(readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").length).toBe(4);
 	});
 
 	test("planted: an unreadable inbox keeps the cursor, so the same mail is delivered on the next poll", async () => {
