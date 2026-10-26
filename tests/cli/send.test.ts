@@ -350,10 +350,10 @@ test.skipIf(!tmuxAvailable)("TMUX1 unchanged: explicit TMUX_TMPDIR is honored an
 // Journal fixtures use the real OMP v3 record shapes (session header, typed
 // message entries with content blocks, goal mode_change), as observed in a
 // live omp 18.12.2 session file on 2026-10-19.
-const ternSeat: TernSeatBinding = { session: "s", pane: "7", windowKey: "W", cwd: "/repo" };
+const ternSeat: TernSeatBinding = { session: "s", pane: "7", windowKey: "W", cwd: "/repo", identityProject: "/repo" };
 const ternRuntimeBinding = { sessionId: 1, sessionFile: "/sf", sessionUuid: "s1", paneId: 7, foregroundPid: 11,
 	foregroundName: "omp", foregroundStarted: "22", foregroundArgv: ["omp"], cwd: "/repo" };
-const ompForeground = { pid: 11, name: "omp", cwd: "/repo", argv: ["omp"], started: "22" };
+const ompForeground = { pid: 11, name: "omp", cwd: "/repo", argv: ["omp"], started: "22", agentName: "A" };
 const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 const TITLE = `{"type":"title","v":1,"title":"probe","pad":"          "}\n`;
 const HEADER = `{"type":"session","version":3,"id":"s1","cwd":"/repo"}\n`;
@@ -500,6 +500,13 @@ test("TERN2.4 INV07: rebound identity refuses with zero sends", async () => {
 	const fake = ternFake();
 	const r = await deliverTern(fake, "hi", { identify: async () => ({ status: "REFUSED", code: "SEAT_REBOUND", reason: "moved",
 		agent: null, binding: null, cwdOk: false, runtimeBinding: null }) });
+	expect(r.status).toBe("REFUSED");
+	expect(r.code).toBe("SEAT_REBOUND");
+	expect(fake.runs.length).toBe(0);
+});
+test("SEND refuses when target AGENT_NAME differs from the identity proven for delivery", async () => {
+	const fake = ternFake({ respond: journalsUser() });
+	const r = await deliverTern(fake, "hello", { observe: idleOf(fake, { fg: { ...ompForeground, agentName: "OtherAgent" } }) });
 	expect(r.status).toBe("REFUSED");
 	expect(r.code).toBe("SEAT_REBOUND");
 	expect(fake.runs.length).toBe(0);

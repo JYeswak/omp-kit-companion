@@ -32,6 +32,9 @@ export interface TernSeatBinding {
 	pane: string;
 	windowKey: string;
 	cwd: string;
+	/** Caller Agent Mail project key; never inferred from the target pane cwd. */
+	identityProject?: string;
+	/** Older fleet-watch snapshot; fresh per-send runtime proof is authoritative. */
 	previousBinding?: TernRuntimeBinding | null;
 }
 
@@ -65,6 +68,8 @@ export interface TernForegroundProcess {
 	cwd: string;
 	argv: string[];
 	started: string | null;
+	/** Only the target process AGENT_NAME is retained from its environment. */
+	agentName?: string | null;
 }
 
 export type TernInspectionResult =
@@ -1069,24 +1074,35 @@ function runTextCommand(
 	}
 }
 
-function parseProcessStart(text: string, expectedArgv: readonly string[]): string | null {
+function parseProcessStart(text: string, expectedArgv: readonly string[]): { started: string; agentName: string | null } | null {
 	const fields: string[] = [];
 	for (const field of text.trim().split(" ")) if (field.length > 0) fields.push(field);
-	if (fields.length !== expectedArgv.length + 5) return null;
+	if (fields.length < expectedArgv.length + 5) return null;
 	for (let index = 0; index < expectedArgv.length; index++) {
 		if (fields[index + 5] !== expectedArgv[index]) return null;
 	}
-	return fields.slice(0, 5).join(" ");
+	const started = fields.slice(0, 5).join(" ");
+	let agentName: string | null = null;
+	let agentNameSeen = false;
+	for (let index = expectedArgv.length + 5; index < fields.length; index++) {
+		const field = fields[index]!;
+		if (!field.startsWith("AGENT_NAME=")) continue;
+		if (agentNameSeen) return { started, agentName: null };
+		agentNameSeen = true;
+		const value = field.slice("AGENT_NAME=".length);
+		agentName = value.length > 0 ? value : null;
+	}
+	return { started, agentName };
 }
 
 function addProcessStart(io: TernObserverIo, process: TernProcessResult): TernProcessResult {
 	if (process.status !== "FOUND") return process;
-	const result = runTextCommand(io, ["/bin/ps", "-p", String(process.foreground.pid), "-o", "lstart=", "-o", "command="],
+	const result = runTextCommand(io, ["/bin/ps", "eww", "-p", String(process.foreground.pid), "-o", "lstart=", "-o", "command="],
 		"process_start", { LC_ALL: "C" });
 	if ("error" in result) return { status: "UNKNOWN", reason: result.error };
-	const started = parseProcessStart(result.value, process.foreground.argv);
-	if (started === null) return { status: "UNKNOWN", reason: "FOREGROUND_INCARNATION_UNAVAILABLE" };
-	return { status: "FOUND", foreground: { ...process.foreground, started } };
+	const identity = parseProcessStart(result.value, process.foreground.argv);
+	if (identity === null) return { status: "UNKNOWN", reason: "FOREGROUND_INCARNATION_UNAVAILABLE" };
+	return { status: "FOUND", foreground: { ...process.foreground, started: identity.started, agentName: identity.agentName } };
 }
 
 
@@ -1182,6 +1198,7 @@ function observationFromReads(
 		foregroundName: processAfter.foreground.name, foregroundStarted: processAfter.foreground.started,
 		foregroundArgv: [...processAfter.foreground.argv], cwd: inspectionAfter.cwd,
 	};
+	if (observation.fg?.agentName !== processAfter.foreground.agentName) return unknownObservation("SEAT_REBOUND");
 	if (!sameRuntime(observation.runtimeBinding!, afterBinding) || observation.working !== inspectionAfter.working) {
 		return unknownObservation("OBSERVATION_CHANGED_DURING_READ");
 	}
@@ -1213,6 +1230,10 @@ export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo
 		agent: null, binding: null, cwdOk: false, runtimeBinding: null };
 	if (observation.state !== "IDLE" && observation.state !== "BUSY") {
 		const reason = observation.reason ?? "Tern identity observation unavailable";
+		if (reason === "OBSERVATION_CHANGED_DURING_READ" || reason === "SESSION_CHANGED_DURING_READ") {
+			return { status: "REFUSED", code: "SEAT_REBOUND", reason, agent: null, binding: null,
+				cwdOk: false, runtimeBinding: observation.runtimeBinding };
+		}
 		if (reason === "PLANE_SEAT_UNBOUND" || reason === "TERN_WINDOW_UNBOUND" || reason === "SEAT_REBOUND"
 			|| reason === "SEAT_CWD_MISMATCH" || reason === "FOREGROUND_OMP_MISSING"
 			|| reason === "FOREGROUND_OMP_AMBIGUOUS") {
@@ -1222,26 +1243,27 @@ export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo
 		return { status: "UNKNOWN", reason, agent: null, binding: null, cwdOk: false, runtimeBinding: null };
 	}
 	const paneId = paneNumber(seat)!;
-	const resolution = runCommand(io, ["am", "agents", "resolve-pane", "--project", seat.cwd,
+	const targetAgent = observation.fg?.agentName;
+	if (typeof seat.identityProject !== "string" || !isAbsolute(seat.identityProject) || !targetAgent) {
+		return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND",
+			reason: "Tern target AGENT_NAME or caller Agent Mail project is unavailable", agent: null, binding: null,
+			cwdOk: false, runtimeBinding: observation.runtimeBinding };
+	}
+	const projectKey = resolve(seat.identityProject);
+	const resolution = runCommand(io, ["am", "agents", "resolve-pane", "--project", projectKey,
 		"--pane", `tern:${paneId}`, "--json"], "agent_resolution");
 	if ("error" in resolution) return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: "Agent Mail identity did not resolve",
 		agent: null, binding: null, cwdOk: false, runtimeBinding: observation.runtimeBinding };
 	const row = objectValue(resolution.value);
-	if (!row || typeof row.agent_name !== "string" || !row.agent_name || row.pane_id !== `tern:${paneId}`
-		|| row.project_key !== resolve(seat.cwd) || typeof row.binding !== "string" || !row.binding) {
-		return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: "Agent Mail identity does not bind this exact Tern pane and project",
+	if (!row || typeof row.agent_name !== "string" || !row.agent_name || row.agent_name !== targetAgent
+		|| row.pane_id !== `tern:${paneId}` || row.project_key !== projectKey
+		|| (row.binding !== "verified-live" && row.binding !== "legacy-unverified")) {
+		return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND",
+			reason: "Agent Mail identity does not bind this exact Tern pane, project, and target AGENT_NAME",
 			agent: null, binding: typeof row?.binding === "string" ? row.binding : null, cwdOk: false,
 			runtimeBinding: observation.runtimeBinding };
 	}
-	const priorBindingMatches = seat.previousBinding ? sameRuntime(seat.previousBinding, observation.runtimeBinding!) : false;
-	if (seat.previousBinding && !priorBindingMatches) {
-		return { status: "REFUSED", code: "SEAT_REBOUND", reason: "Tern runtime incarnation changed since bind",
-			agent: null, binding: row.binding, cwdOk: false, runtimeBinding: observation.runtimeBinding };
-	}
-	if (row.binding !== "verified-live" && !(row.binding === "legacy-unverified" && priorBindingMatches)) {
-		return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: "Agent Mail pane binding is not verified against this runtime",
-			agent: null, binding: row.binding, cwdOk: false, runtimeBinding: observation.runtimeBinding };
-	}
-	return { status: "IDENTIFIED", agent: row.agent_name, binding: row.binding, cwdOk: true,
+	const binding = row.binding === "legacy-unverified" ? "runtime-verified" : row.binding;
+	return { status: "IDENTIFIED", agent: targetAgent, binding, cwdOk: true,
 		runtimeBinding: observation.runtimeBinding! };
 }

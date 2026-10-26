@@ -1347,12 +1347,16 @@ export async function deliverToTernSeat(input: {
 			: "OBSERVATION_UNKNOWN";
 		return fail(code, `seat not provably idle (${observation.reason ?? "unknown"}); zero sends`);
 	}
-	const identity = await identify(input.seat, input.io);
+	const identityProject = input.seat.identityProject ?? (input.env ?? process.env).AGENT_MAIL_PROJECT;
+	const identity = await identify({ ...input.seat, identityProject }, input.io);
 	if (identity.status !== "IDENTIFIED" || identity.runtimeBinding === null) {
 		const code = identity.status === "REFUSED" ? identity.code : "IDENTITY_UNKNOWN";
 		const reason = identity.reason;
 		return fail(code, `seat identity not bound (${reason}); zero sends`);
 	}
+	// The initially observed target process and the Agent Mail candidate must name the same agent.
+	if (observation.fg?.agentName !== identity.agent)
+		return fail("SEAT_REBOUND", "target AGENT_NAME changed since observation; zero sends");
 	// ACT58584 + SENDX1: the seat must not move between observe and identify,
 	// and both must be the configured pane, so the effect and its proof can
 	// only ever address the bound seat and its own session file.

@@ -35,7 +35,7 @@ function parseSessionJournal(text: string): SessionJournalResult {
 }
 
 
-const seat = { session: "Default", pane: "123", windowKey: "window-1", cwd: "/repo" };
+const seat = { session: "Default", pane: "123", windowKey: "window-1", cwd: "/repo", identityProject: "/repo" };
 const inspectFixture = {
 	sessions: [{ id: 41, name: "Default", shown: true, tabs: [{ id: 42, number: 1, name: "test", shown: true,
 		zoomed: false, blocks: [{ id: 123, cwd: "/repo", program: "/bin/zsh", title: "shell", exited: null }] }] }],
@@ -168,7 +168,7 @@ function testIo(
 	journal: string | string[],
 	agent: unknown = agentResolution,
 	waits: number[] = [],
-	processStart: string | string[] = "Wed Oct 14 19:39:32 2026 omp --profile codex\n",
+	processStart: string | string[] = "Wed Oct 14 19:39:32 2026 omp --profile codex AGENT_NAME=SilverCondor\n",
 ) {
 	const journalReads = typeof journal === "string" ? [journal] : journal;
 	const processStartReads = typeof processStart === "string" ? [processStart] : processStart;
@@ -197,6 +197,12 @@ test("observer reports IDLE only when inspect and the session oracle agree", asy
 		sessionFile: "/sessions/session-1.jsonl", sessionCursorBytes: new TextEncoder().encode(terminalJournal).length,
 		sessionLeafId: "assistant-1", fg: { pid: 13, name: "18.11.0", cwd: "/repo",
 			argv: ["omp", "--profile", "codex"], started: "Wed Oct 14 19:39:32 2026" } });
+});
+test("observer retains only the target AGENT_NAME from process environment", async () => {
+	const processWithOtherEnvironment = "Wed Oct 14 19:39:32 2026 omp --profile codex AGENT_NAME=SilverCondor API_TOKEN=fixture-only";
+	const result = await observeTernSeat(seat, testIo(false, terminalJournal, agentResolution, [], processWithOtherEnvironment));
+	expect(result).toMatchObject({ state: "IDLE", fg: { agentName: "SilverCondor" } });
+	expect(JSON.stringify(result)).not.toContain("fixture-only");
 });
 test("observer rejects process identity that changed across the bracket", async () => {
 	const processStarts = [
@@ -297,22 +303,35 @@ test("identity returns the registered Tern pane and runtime binding", async () =
 			foregroundArgv: ["omp", "--profile", "codex"], cwd: "/repo" },
 	});
 });
-test("identity refuses a legacy-unverified Agent Mail pane binding", async () => {
+test("identity upgrades a legacy Agent Mail candidate when target AGENT_NAME agrees", async () => {
 	const legacyAgent = { ...agentResolution, binding: "legacy-unverified" };
 	expect(await identifyTernSeat(seat, testIo(false, terminalJournal, legacyAgent)))
-		.toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", binding: "legacy-unverified", agent: null });
+		.toMatchObject({ status: "IDENTIFIED", binding: "runtime-verified", agent: "SilverCondor", cwdOk: true });
 });
 test("identity refuses an unregistered Agent Mail pane", async () => {
 	expect(await identifyTernSeat(seat, testIo(false, terminalJournal, null)))
 		.toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", agent: null });
 });
-test("identity accepts legacy binding only after the same runtime was bound", async () => {
-	const previousBinding = { sessionId: 41, sessionFile: "/sessions/session-1.jsonl", sessionUuid: "session-1",
-		paneId: 123, foregroundPid: 13, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 14 19:39:32 2026",
-		foregroundArgv: ["omp", "--profile", "codex"], cwd: "/repo" };
+test("identity requires a separate Agent Mail project", async () => {
+	const unscopedSeat = { session: seat.session, pane: seat.pane, windowKey: seat.windowKey, cwd: seat.cwd };
+	expect(await identifyTernSeat(unscopedSeat, testIo(false, terminalJournal)))
+		.toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", agent: null });
+});
+test("identity trusts matching runtime proof over a stale fleet-watch prior binding", async () => {
+	const previousBinding = { sessionId: 40, sessionFile: "/sessions/old-session.jsonl", sessionUuid: "old-session",
+		paneId: 123, foregroundPid: 99, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 13 19:39:32 2026",
+		foregroundArgv: ["omp", "--profile", "codex"], cwd: "/old-repo" };
 	const legacyAgent = { ...agentResolution, binding: "legacy-unverified" };
 	const result = await identifyTernSeat({ ...seat, previousBinding }, testIo(false, terminalJournal, legacyAgent));
-	expect(result).toMatchObject({ status: "IDENTIFIED", agent: "SilverCondor", binding: "legacy-unverified", cwdOk: true });
+	expect(result).toMatchObject({ status: "IDENTIFIED", agent: "SilverCondor", binding: "runtime-verified", cwdOk: true });
+});
+test("identity refuses a stale-prior seat when target AGENT_NAME differs from Agent Mail", async () => {
+	const previousBinding = { sessionId: 40, sessionFile: "/sessions/old-session.jsonl", sessionUuid: "old-session",
+		paneId: 123, foregroundPid: 99, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 13 19:39:32 2026",
+		foregroundArgv: ["omp", "--profile", "codex"], cwd: "/old-repo" };
+	const otherAgent = { ...agentResolution, agent_name: "OtherAgent", binding: "legacy-unverified" };
+	const result = await identifyTernSeat({ ...seat, previousBinding }, testIo(false, terminalJournal, otherAgent));
+	expect(result).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", binding: "legacy-unverified", agent: null });
 });
 
 test("Tern process parser refuses a result for another block", () => {
@@ -345,11 +364,17 @@ test("Tern observation stays unknown when inspect and session oracle disagree", 
 	expect(result).toMatchObject({ state: "UNKNOWN", working: false, oracleBusy: true });
 });
 
-test("Tern identity refuses a different runtime incarnation", async () => {
-	const previousBinding = { sessionId: 41, sessionFile: "/sessions/old-session.jsonl", sessionUuid: "session-1",
-		paneId: 123, foregroundPid: 13, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 14 19:39:32 2026",
-		foregroundArgv: ["omp", "--profile", "codex"], cwd: "/repo" };
-	const result = await identifyTernSeat({ ...seat, previousBinding }, testIo(false, terminalJournal));
+test("identity refuses when target AGENT_NAME changes across observations", async () => {
+	const processStarts = [
+		"Wed Oct 14 19:39:32 2026 omp --profile codex AGENT_NAME=SilverCondor\n",
+		"Wed Oct 14 19:39:32 2026 omp --profile codex AGENT_NAME=OtherAgent\n",
+	];
+	const result = await identifyTernSeat(seat, testIo(false, terminalJournal, agentResolution, [], processStarts));
+	expect(result).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND", agent: null, cwdOk: false });
+});
+test("identity refuses when the session file UUID changes across observations", async () => {
+	const changedJournal = terminalJournal.replace('"id":"session-1"', '"id":"session-2"');
+	const result = await identifyTernSeat(seat, testIo(false, [terminalJournal, changedJournal]));
 	expect(result).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND", agent: null, cwdOk: false });
 });
 

@@ -55,6 +55,9 @@ interface TernFixtureOpts {
 	session?: string;
 	paneId?: number;
 	repo?: string;
+	identityProject?: string;
+	agentName?: string;
+	binding?: string;
 	sessionUuid?: string;
 	working?: boolean;
 	exited?: number | null;
@@ -73,6 +76,9 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 	const session = opts.session ?? "omp-test";
 	const paneId = opts.paneId ?? 5;
 	const repo = opts.repo ?? repoDir();
+	const identityProject = opts.identityProject ?? repo;
+	const agentName = opts.agentName ?? "FixtureSeat";
+	const binding = opts.binding ?? "verified-live";
 	const uuid = opts.sessionUuid ?? "sess-uuid-1";
 	let working = opts.working ?? false;
 	const exited = opts.exited ?? null;
@@ -117,10 +123,11 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 				writeFileSync(sessionFile, journal);
 				return { code: 0, out: "" };
 			}
-			if (argv[0] === "/bin/ps") return { code: 0, out: "Mon Oct 20 02:00:00 2026 omp" };
+			if (argv[0] === "/bin/ps") return { code: 0, out: `Mon Oct 20 02:00:00 2026 omp AGENT_NAME=${agentName}` };
 			if (argv[0] === "am") {
 				return resolveAgent
-					? { code: 0, out: JSON.stringify({ agent_name: "FixtureSeat", pane_id: `tern:${paneId}`, project_key: resolve(repo), binding: "verified-live" }) }
+					? { code: 0, out: JSON.stringify({ agent_name: "FixtureSeat", pane_id: `tern:${paneId}`,
+						project_key: resolve(identityProject), binding }) }
 					: { code: 1, out: "" };
 			}
 			if (argv.includes("process")) return { code: 0, out: process };
@@ -168,7 +175,8 @@ test("SEND1 tern route: delivered message returns OK with the marker proven in t
 	const dir = dropDir();
 	const { io, taken, repo } = ternFixture();
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait,
+		io, env: { AGENT_MAIL_PROJECT: repo } });
 	expect(got).toMatchObject({ status: "OK", code: "PROVEN" });
 	expect(got.sends).toBe(1);
 	expect(taken.luaDispatches).toBe(1);
@@ -179,19 +187,32 @@ test("SEND1 tern route: delivered message returns OK with the marker proven in t
 	expect(readdirSync(dir)).toEqual([]);
 	expect(got.detail).toContain("USER entry proven at offset");
 });
-test("SENDANY1: any label resolves an unregistered Tern block from inspection and proves delivery", async () => {
+test("SENDANY1: matching target runtime identity proves a legacy-unverified seat from a separate identity project", async () => {
 	const dir = dropDir();
-	const { io, taken } = ternFixture({ session: "Default" });
+	const identityProject = "/agent-mail-project";
+	const { io, taken, repo } = ternFixture({ session: "Default", identityProject, binding: "legacy-unverified" });
 	const seat = ternSendSeat(null, "any-label", "tern:5", {}, "/caller");
 	const got = await proveTernCliSend({ session: seat.session, pane: seat.pane, message: "status update",
-		dropDir: dir, cwd: seat.cwd, windowKey: seat.windowKey, knownPrefixes: EMPTY_PREFIXES,
-		pollMs: 1, deadlineMs: 50, wait: noWait, io, composer: () => ({ state: "EMPTY" }) });
+		dropDir: dir, cwd: repo, windowKey: seat.windowKey, knownPrefixes: EMPTY_PREFIXES,
+		pollMs: 1, deadlineMs: 50, wait: noWait, io, composer: () => ({ state: "EMPTY" }),
+		env: { AGENT_MAIL_PROJECT: identityProject, AGENT_NAME: "CallerIsNotTheTarget" } });
 	expect(got).toMatchObject({ status: "OK", code: "PROVEN" });
 	expect(got.sends).toBe(1);
 	expect(got.offset).toBeGreaterThan(0);
 	expect(got.detail).toContain("via paste+Enter");
 	expect(taken.runs.some((argv) => argv.includes("send") && argv.includes("5") && argv.includes("paste"))).toBe(true);
 	expect(taken.runs.some((argv) => argv.includes("send") && argv.includes("5") && argv.includes("keys") && argv.includes("Enter"))).toBe(true);
+});
+test("SENDANY1 planted: mismatched target AGENT_NAME refuses with zero sends", async () => {
+	const dir = dropDir();
+	const identityProject = "/agent-mail-project";
+	const fx = ternFixture({ session: "Default", identityProject, agentName: "OtherAgent", binding: "legacy-unverified" });
+	const got = await proveTernCliSend({ session: "", pane: "tern:5", message: "status update",
+		dropDir: dir, cwd: fx.repo, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait,
+		io: fx.io, env: { AGENT_MAIL_PROJECT: identityProject, AGENT_NAME: "FixtureSeat" } });
+	expect(got).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", sends: 0 });
+	expect(fx.taken.luaDispatches).toBe(0);
+	expect(readdirSync(dir)).toEqual([]);
 });
 
 test("SENDANY1: an inspected closed block reports BLOCK_GONE without sending", async () => {
@@ -225,7 +246,7 @@ test("SENDANY1: a busy Tern seat queues by default and reports QUEUED then DELIV
 	const fx = ternFixture({ working: true, journal: busyJournal });
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
 		dropDir: dir, cwd: fx.repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50,
-		wait: async () => fx.finishTurn(), io: fx.io });
+		wait: async () => fx.finishTurn(), io: fx.io, env: { AGENT_MAIL_PROJECT: fx.repo } });
 	expect(got).toMatchObject({ status: "OK", queue_states: ["QUEUED", "DELIVERED"] });
 	expect(fx.taken.luaDispatches).toBe(1);
 });
@@ -272,7 +293,8 @@ test("SEND1 tern route planted: unresolvable agent identity refuses with zero na
 	const dir = dropDir();
 	const { io, taken, repo } = ternFixture({ resolveAgent: false });
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50,
+		wait: noWait, io, env: { AGENT_MAIL_PROJECT: repo } });
 	expect(got.status).toBe("REFUSED");
 	expect(got.code).toBe("PLANE_SEAT_UNBOUND");
 	expect(taken.luaDispatches).toBe(0);
@@ -282,7 +304,8 @@ test("SEND1 tern route planted: unresolvable agent identity refuses with zero na
 test("TERNADDR1: the native admission turn addresses the configured control endpoint", async () => {
 	const { io, taken, repo } = ternFixture();
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dropDir(), cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
+		dropDir: dropDir(), cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50,
+		wait: noWait, io, env: { AGENT_MAIL_PROJECT: repo } });
 	expect(got).toMatchObject({ status: "OK", code: "PROVEN" });
 	const turn = taken.runs.find((argv) => argv.includes("carly"))!;
 	expect(turn.slice(turn.indexOf("--window"), turn.indexOf("--window") + 2)).toEqual(["--window", WINDOW]);
