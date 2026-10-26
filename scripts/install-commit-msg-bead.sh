@@ -92,6 +92,8 @@ while [ $# -gt 0 ]; do
 		*) break ;;
 	esac
 done
+# NODOUBLEPASS1/GATEEVENTS1: every probe below runs the installed chain; none is an agent act.
+export OMP_KIT_GATE_EVENTS_SKIP=1
 TARGET=${1:-$KITROOT}
 TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P) || { echo "install-commit-msg-bead: cannot enter ${1:-$KITROOT}" >&2; exit 2; }
 HOOKS=$(git -C "$TARGET" rev-parse --git-path hooks) || { echo "install-commit-msg-bead: $TARGET is not a git repo" >&2; exit 2; }

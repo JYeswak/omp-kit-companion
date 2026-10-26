@@ -13,6 +13,9 @@ ledger=$state/omp-kit/gate-events.jsonl
 # A fixture repo (tests install the chain into owned scratch) never writes the LIVE ledger: the fresh
 # gate's installer selftests put 2,200 fixture rows there on 2026-10-25. With XDG_STATE_HOME set the
 # ledger is the caller's own, so isolated e2e replays still record.
+# The hook installer probes the chain it just installed (an install, not an agent act): it sets this
+# and no row is written (the probe wrote a real refuse row per install on 2026-10-25, PeachLeopard 68972).
+[ -z "${OMP_KIT_GATE_EVENTS_SKIP:-}" ] || exit 0
 if [ -z "${XDG_STATE_HOME:-}" ]; then
 	case "$PWD" in */var/agent-tmp/*) exit 0 ;; esac
 	case "${TMPDIR:-}" in ?*) case "$PWD" in "${TMPDIR%/}"/*) exit 0 ;; esac ;; esac  # tempsafe: compares the cwd against TMPDIR, creates nothing
