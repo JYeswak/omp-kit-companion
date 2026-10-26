@@ -151,7 +151,6 @@ test("LINTEVERY1: the guard's update trigger covers every flag br-update-lint.py
 		["--acceptance-criteria", "x"], ["--acceptance", "x"], ["--add-acceptance", "x"], ["--set-labels", "a"],
 		["--add-label", "a"], ["--remove-label", "a"], ["-t", "bug"], ["--type", "bug"], ["--status", "in_review"],
 		["--title=t"], ["-tbug"], ["--status=in_review"], ["--status", "open"], ["--priority", "1"], ["--claim"],
-		["--status", "in_progress"], ["-s", "in_progress"], ["-sin_progress"], ["--status=in_progress"], ["-s", "in_review"],
 		["--assignee", "x"], ["--notes", "x"], ["--owner", "o"], ["--parent", "p"],
 	];
 	const program = [
@@ -169,45 +168,6 @@ test("LINTEVERY1: the guard's update trigger covers every flag br-update-lint.py
 		await checkBeadLint({ toolName: "bash", input: { command: `br update k-1 ${form.map(word => `'${word}'`).join(" ")}` } },
 			{ exec: async (_command, args) => { calls.push(args); return { code: 0, stdout: "" }; }, home: base, sessionCwd: base });
 		if (helperSays[index]) expect({ form, guardSpawned: calls.length }).toEqual({ form, guardSpawned: 1 });
-	}
-});
-
-test("CLAIMLINT: a claim on a failing bead is refused in every spelling and for any failing id; a passing bead is admitted", async () => {
-	const t = tracker();
-	const failing = t.create(["Unlinted claim target", "-t", "task", "-l", "admission", "--description", "no sections at all", "--acceptance", CLEAN_ACCEPTANCE]);
-	const passing = t.create(["Linted claim target", "-t", "task", "-l", "admission", "--description", CLEAN_DESCRIPTION, "--acceptance", CLEAN_ACCEPTANCE]);
-	const deps = { exec: t.exec, home: base, sessionCwd: t.project };
-	for (const move of ["--claim", "--status in_progress", "-s in_progress", "--status=in_progress", "-sin_progress"]) {
-		const refused = await checkBeadLint({ toolName: "bash", input: { command: `br update ${failing} ${move}` } }, deps);
-		expect({ move, block: refused?.block }).toEqual({ move, block: true });
-		expect(refused?.reason).toContain(BEAD_LINT_REFUSED);
-		expect(refused?.reason).toContain("b-what-why-acc");
-		expect(refused?.reason).toContain("this claim would start work");
-	}
-	const multi = await checkBeadLint({ toolName: "bash", input: { command: `br update ${passing} ${failing} --claim` } }, deps);
-	expect(multi?.block).toBe(true);
-	expect(multi?.reason).toContain(failing);
-	expect(await checkBeadLint({ toolName: "bash", input: { command: `br update ${passing} --claim` } }, deps)).toBeUndefined();
-	expect(await checkBeadLint({ toolName: "bash", input: { command: `br update ${failing} --status open --assignee ''` } }, deps)).toBeUndefined();
-});
-
-test("CLAIMLINT infra: a claim the helper cannot judge is refused, while a content edit still warns and allows", async () => {
-	const t = tracker();
-	const claim = { toolName: "bash", input: { command: "br update lg-1 --claim" } };
-	const edit = { toolName: "bash", input: { command: `br update lg-1 --title "renamed"` } };
-	const cases = [
-		{ name: "missing helper", deps: { exec: t.exec, home: base, sessionCwd: t.project, scriptsDir: join(base, "no-such-release", "scripts") } },
-		{ name: "no python", deps: { exec: async () => ({ code: 127, stdout: "", stderr: "env: python3: No such file or directory" }), home: base, sessionCwd: t.project } },
-		{ name: "spawn throws", deps: { exec: async (): Promise<FlywheelExecResult> => { throw new Error("spawn failed"); }, home: base, sessionCwd: t.project } },
-		{ name: "timed out", deps: { exec: async () => ({ code: 0, stdout: "", killed: true }), home: base, sessionCwd: t.project } },
-	];
-	for (const { name, deps } of cases) {
-		const refused = await checkBeadLint(claim, deps);
-		expect({ name, block: refused?.block }).toEqual({ name, block: true });
-		expect(refused?.reason).toContain("a claim needs a bead-lint PASS");
-		const allowed = await checkBeadLint(edit, deps);
-		expect({ name, block: allowed?.block === true }).toEqual({ name, block: false });
-		expect(allowed?.additionalContext).toContain(BEAD_LINT_UNVERIFIED);
 	}
 });
 

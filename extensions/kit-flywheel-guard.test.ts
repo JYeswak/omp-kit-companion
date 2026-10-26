@@ -1347,9 +1347,6 @@ interface DrainRow { id?: string; status: string; assignee: string | null; updat
 function drainResponder(shows: Record<string, DrainRow>, lists: Record<string, DrainRow[]> = {}): Responder {
 	return call => {
 		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
-		// DRAIN1's subject is custody: a claim now also spawns the bead-lint helper (CLAIMLINT
-		// ompkit-fp72.135.3.50 [b]), modeled here as PASS. CLAIMLINT has its own real-helper tests.
-		if (call.command === "env" && call.args.some(arg => arg.endsWith("-lint.py"))) return { stdout: "", stderr: "", code: 0 };
 		if (call.args[0] === "list") {
 			const flag = call.args.indexOf("--assignee");
 			const name = flag >= 0 ? call.args[flag + 1] ?? "" : "";
