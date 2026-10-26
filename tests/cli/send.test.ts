@@ -906,6 +906,50 @@ test("TERN2.4 until-delivered: a seat BUSY past the bound is NOT_DELIVERED with 
 	expect(readFileSync(r.drop_path!, "utf8")).toContain("hello");
 	expect(fake.runs.length).toBe(0);
 });
+test("SENDANY1 unknown active branch queues a working seat until idle is proven", async () => {
+	const fake = ternFake({ respond: journalsUser() });
+	let observations = 0;
+	const result = await deliverTern(fake, "hello", { untilDeliveredMs: 5, observe: async (seat) => {
+		observations++;
+		if (observations === 1)
+			return { ...ternIdle, state: "UNKNOWN", working: true, runtimeBinding: null, reason: "ACTIVE_BRANCH_UNAVAILABLE" };
+		return idleOf(fake)(seat);
+	} });
+	expect(result.status).toBe("OK");
+	expect(result.queue_states).toEqual(["QUEUED", "DELIVERED"]);
+	expect(observations).toBe(2);
+	expect(carlyRuns(fake)).toBe(1);
+});
+test("SENDANY1 queues a working seat while its session file is temporarily unavailable", async () => {
+	const fake = ternFake({ respond: journalsUser() });
+	let observations = 0;
+	const result = await deliverTern(fake, "hello", { untilDeliveredMs: 5, observe: async (seat) => {
+		observations++;
+		if (observations === 1)
+			return { ...ternIdle, state: "UNKNOWN", working: true, sessionFile: null, runtimeBinding: null, reason: "SESSION_FILE_UNAVAILABLE" };
+		return idleOf(fake)(seat);
+	} });
+	expect(result.status).toBe("OK");
+	expect(result.queue_states).toEqual(["QUEUED", "DELIVERED"]);
+	expect(observations).toBe(2);
+	expect(carlyRuns(fake)).toBe(1);
+});
+
+test("SENDANY1 unknown active branch expires without sending while Tern still reports working", async () => {
+	const fake = ternFake();
+	let observations = 0;
+	const result = await deliverTern(fake, "hello", { untilDeliveredMs: 2, observe: async () => {
+		observations++;
+		return { ...ternIdle, state: "UNKNOWN", working: true, runtimeBinding: null, reason: "ACTIVE_BRANCH_UNAVAILABLE" };
+	} });
+	expect(result.status).toBe("NOT_DELIVERED");
+	expect(result.code).toBe("UNTIL_DELIVERED_EXHAUSTED");
+	expect(result.queue_states).toEqual(["QUEUED", "EXPIRED"]);
+	expect(result.sends).toBe(0);
+	expect(observations).toBe(3);
+	expect(carlyRuns(fake)).toBe(0);
+	expect(readFileSync(result.drop_path!, "utf8")).toContain("hello");
+});
 
 test("TERN2.4 until-delivered: a seat that turns IDLE within the bound is delivered once", async () => {
 	const fake = ternFake({ respond: journalsUser() });
@@ -1055,5 +1099,5 @@ test("TERNADDR1: ternSendSeat binds flags first, then the fleet-watch.json entry
 	expect(ternSendSeat(config, "omp-test", "tern:7", {}, "/caller")).toEqual({ session: "Default", pane: "tern:7", windowKey: "/run/fleet.sock", cwd: "/Users/x/Developer/omp-kit" });
 	expect(ternSendSeat(config, "omp-test", "tern:7", { cwd: "/other", ternSession: "4", windowKey: "/run/w.sock" }, "/caller"))
 		.toEqual({ session: "4", pane: "tern:7", windowKey: "/run/w.sock", cwd: "/other" });
-	expect(ternSendSeat(null, "omp-test", "tern:7", {}, "/caller")).toEqual({ session: "omp-test", pane: "tern:7", windowKey: "", cwd: "/caller" });
+	expect(ternSendSeat(null, "omp-test", "tern:7", {}, "/caller")).toEqual({ session: "", pane: "tern:7", windowKey: "", cwd: "" });
 });

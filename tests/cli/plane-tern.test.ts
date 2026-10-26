@@ -6,6 +6,7 @@ import {
 	classifyTernObservation,
 	defaultTernIo,
 	identifyTernSeat,
+	locateBlock,
 	observeTernSeat,
 	parseSessionJournal as parseSessionJournalImpl,
 	parseSessionJournalTail,
@@ -95,6 +96,10 @@ test("TERNADDR1: a block in no tab is DEAD only when its configured session exis
 	expect(parseTernInspection(twice, { session: "omp-chief", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "UNKNOWN", reason: "INSPECT_BLOCK_AMBIGUOUS" });
 	expect(parseTernInspection(fleetInspect, { session: "Default", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", sessionId: 4 });
 });
+test("SENDANY1: derive the block's Tern session when no fleet binding exists", () => {
+	const result = locateBlock(fleetInspect, 1756641624081, "");
+	expect(result).toMatchObject({ status: "ok", sessionId: 4, sessionName: "Default", tabId: 55834574849, tabName: "omp-chief" });
+});
 
 test("TERNADDR1: resolveTernWindow admits the default window when the fleet session is a tab of it", () => {
 	const io = { ...defaultTernIo(), run: (argv: string[]) => argv[0] === "tern" && argv.includes("inspect")
@@ -135,6 +140,15 @@ test("a terminal assistant stop with an unresolved async tool has unknown oracle
 	const inspection = parseTernInspection(inspectFixture, seat);
 	const process = parseTernProcess(processFixture, "/repo", 123);
 	expect(classifyTernObservation(inspection, process, result)).toMatchObject({ state: "UNKNOWN", oracleBusy: null });
+});
+test("a busy Tern inspection preserves working when the session branch is not yet provable", () => {
+	const inspection = { status: "FOUND" as const, sessionId: 41, sessionName: "Default", paneId: 123,
+		cwd: "/repo", working: true, exited: null, sessionFile: "/sessions/session-1.jsonl" };
+	const process = parseTernProcess(processFixture, "/repo", 123);
+	const journal = { status: "UNKNOWN", reason: "ACTIVE_BRANCH_UNAVAILABLE" } as const;
+	expect(classifyTernObservation(inspection, process, journal)).toMatchObject({
+		state: "UNKNOWN", working: true, reason: "ACTIVE_BRANCH_UNAVAILABLE",
+	});
 });
 
 test("a partial session record remains unknown, not idle", async () => {
@@ -830,6 +844,12 @@ function capIo(working: boolean, sessionFile: string) {
 		wait: async () => {},
 	};
 }
+test("observer preserves Tern working when its session file is temporarily unavailable", async () => {
+	const path = capSession(endedTurnThenExit);
+	const base = capIo(true, path);
+	const io = { ...base, readSessionFile: () => null, readSessionTail: () => null };
+	expect(await observeTernSeat(seat, io)).toMatchObject({ state: "UNKNOWN", working: true, reason: "SESSION_FILE_UNAVAILABLE" });
+});
 
 test("observer decides an over-cap seat from its tail: IDLE when settled, never IDLE mid-turn", async () => {
 	const path = capSession(endedTurnThenExit);

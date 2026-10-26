@@ -830,10 +830,10 @@ export const COMMANDS: readonly Command[] = [
 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
 		{ name: "run", description: "Execute one job now (what launchd runs); writes a receipt (omp-watch tests OMP, scratch-reaper applies scratch quarantine/deletion)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
-	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback; tern:<id> panes use native Tern delivery through the window's control endpoint)", usage: "send SESSION PANE MESSAGE", flags: [
+	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback; tern:<id> resolves a live Tern block from inspection at send time)", usage: "send SESSION PANE MESSAGE", flags: [
 		{ name: "--drop-dir", value: "PATH", description: "Drop folder for undelivered messages (default: state-root send-drop)" },
 		{ name: "--no-bead-reason", value: "TEXT", description: "Send a work dispatch that cites no bead id; the reason is recorded in the result" },
-		{ name: "--until-delivered", value: "SECONDS", description: "Bound in seconds for deferred completion of a busy-pane send (default 300 for dispatches, off otherwise; 0 disables)" },
+		{ name: "--until-delivered", value: "SECONDS", description: "Bound in seconds for a busy-seat send (default 300 for Tern sends and dispatches, off for other tmux sends; 0 refuses immediately)" },
 		{ name: "--cwd", value: "PATH", description: "Absolute repository cwd the tern:<id> seat is bound to (default: the session's cwd or repo in fleet-watch.json)" },
 		{ name: "--tern-session", value: "NAME", description: "Tern session name or id holding the tern:<id> block (default: the session's ternSession in fleet-watch.json)" },
 		{ name: "--window-key", value: "EP", description: "Control endpoint of the Tern window holding the block, as opened with `tern --control EP` (default: the session's windowKey in fleet-watch.json; none is TERN_WINDOW_UNBOUND)" },

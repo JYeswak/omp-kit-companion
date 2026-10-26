@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { proveTernCliSend, routeSendTarget } from "../../src/send.ts";
+import { proveTernCliSend, routeSendTarget, ternSendSeat } from "../../src/send.ts";
 import type { TernObserverIo } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
@@ -18,7 +18,8 @@ const EMPTY_PREFIXES: ReadonlySet<string> = new Set<string>();
 const WINDOW = "/run/tern-fixture.sock";
 
 function dropDir(): string {
-	const dir = join(scratch, "drop-" + Math.random().toString(36).slice(2));
+	const root = join(scratch, "drop-" + Math.random().toString(36).slice(2));
+	const dir = join(root, "send-drop");
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }
@@ -56,6 +57,7 @@ interface TernFixtureOpts {
 	repo?: string;
 	sessionUuid?: string;
 	working?: boolean;
+	exited?: number | null;
 	listSession?: boolean;
 	resolveAgent?: boolean;
 	journal?: (repo: string, uuid: string) => string;
@@ -67,21 +69,24 @@ interface TernFixtureOpts {
  * payload and journals it as a USER entry, exactly like the OMP composer.
  * `taken.luaDispatches` counts native effects: negatives must stay zero.
  */
-function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: { runs: string[][]; luaDispatches: number }; repo: string } {
+function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: { runs: string[][]; luaDispatches: number }; repo: string; finishTurn: () => void } {
 	const session = opts.session ?? "omp-test";
 	const paneId = opts.paneId ?? 5;
 	const repo = opts.repo ?? repoDir();
 	const uuid = opts.sessionUuid ?? "sess-uuid-1";
-	const working = opts.working ?? false;
+	let working = opts.working ?? false;
+	const exited = opts.exited ?? null;
 	const listSession = opts.listSession ?? true;
 	const resolveAgent = opts.resolveAgent ?? true;
 	const sessionFile = join(scratch, `session-${Math.random().toString(36).slice(2)}.jsonl`);
 	let journal = (opts.journal ?? idleJournal)(repo, uuid);
+	let activeParentId = opts.journal === busyJournal ? "m3" : "m2";
 	writeFileSync(sessionFile, journal);
 	const taken = { runs: [] as string[][], luaDispatches: 0 };
-	const inspect = JSON.stringify(listSession
-		? { sessions: [{ id: 7, name: session, tabs: [{ blocks: [{ id: paneId }] }] }],
-			panes: [{ pane: paneId, cwd: repo, working, exited: null, omp_session_file: sessionFile }] }
+	let pastedText: string | null = null;
+	const inspect = () => JSON.stringify(listSession
+		? { sessions: [{ id: 7, name: session, tabs: [{ blocks: [{ id: paneId, exited }] }] }],
+			panes: [{ pane: paneId, cwd: repo, working, exited, omp_session_file: sessionFile }] }
 		: { sessions: [], panes: [] });
 	const process = JSON.stringify({ pane: paneId, foreground: { argv: ["omp"], pid: 1234, cwd: repo, name: "omp" } });
 	const io: TernObserverIo = {
@@ -93,8 +98,22 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 				const groups = [...lua.matchAll(/string\.char\(([\d,]+)\)/g)].map((m) => m[1]!);
 				const payloadBytes = groups.length >= 2 ? groups[groups.length - 1]!.split(",").map(Number) : [];
 				const payload = Buffer.from(payloadBytes).toString("utf8");
-				journal += JSON.stringify({ type: "message", id: `m-live-${taken.luaDispatches}`, parentId: "m2",
+				journal += JSON.stringify({ type: "message", id: `m-live-${taken.luaDispatches}`, parentId: activeParentId,
 					message: { role: "user", content: payload } }) + "\n";
+				writeFileSync(sessionFile, journal);
+				return { code: 0, out: "" };
+			}
+			if (argv.includes("send") && argv.includes("paste")) {
+				const pasteIndex = argv.indexOf("paste");
+				pastedText = argv[pasteIndex + 1] ?? "";
+				return { code: 0, out: "" };
+			}
+			if (argv.includes("send") && argv.includes("keys") && argv.includes("Enter")) {
+				if (pastedText === null) return { code: 1, out: "" };
+				const payload = pastedText;
+				pastedText = null;
+				journal += JSON.stringify({ type: "message", id: `m-live-${taken.luaDispatches + 1}`,
+					parentId: activeParentId, message: { role: "user", content: payload } }) + "\n";
 				writeFileSync(sessionFile, journal);
 				return { code: 0, out: "" };
 			}
@@ -105,7 +124,7 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 					: { code: 1, out: "" };
 			}
 			if (argv.includes("process")) return { code: 0, out: process };
-			if (argv.includes("inspect")) return { code: 0, out: inspect };
+			if (argv.includes("inspect")) return { code: 0, out: inspect() };
 			return { code: 1, out: "" };
 		},
 		readSessionFile(path) {
@@ -113,7 +132,16 @@ function ternFixture(opts: TernFixtureOpts = {}): { io: TernObserverIo; taken: {
 		},
 		wait: noWait,
 	};
-	return { io, taken, repo };
+	const finishTurn = () => {
+		if (!working) return;
+		working = false;
+		const parentId = opts.journal === busyJournal ? "m3" : "m2";
+		journal += JSON.stringify({ type: "message", id: "m-finish", parentId,
+			message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } }) + "\n";
+		writeFileSync(sessionFile, journal);
+		activeParentId = "m-finish";
+	};
+	return { io, taken, repo, finishTurn };
 }
 
 test("router: explicit tern:<id> addresses route to the native Tern delivery", () => {
@@ -141,8 +169,7 @@ test("SEND1 tern route: delivered message returns OK with the marker proven in t
 	const { io, taken, repo } = ternFixture();
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
 		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
-	expect(got.status).toBe("OK");
-	expect(got.code).toBe("PROVEN");
+	expect(got).toMatchObject({ status: "OK", code: "PROVEN" });
 	expect(got.sends).toBe(1);
 	expect(taken.luaDispatches).toBe(1);
 	expect(got.marker).toMatch(/^kit-send-[0-9a-f]+$/);
@@ -151,6 +178,33 @@ test("SEND1 tern route: delivered message returns OK with the marker proven in t
 	expect(got.drop_path).toBeNull();
 	expect(readdirSync(dir)).toEqual([]);
 	expect(got.detail).toContain("USER entry proven at offset");
+});
+test("SENDANY1: any label resolves an unregistered Tern block from inspection and proves delivery", async () => {
+	const dir = dropDir();
+	const { io, taken } = ternFixture({ session: "Default" });
+	const seat = ternSendSeat(null, "any-label", "tern:5", {}, "/caller");
+	const got = await proveTernCliSend({ session: seat.session, pane: seat.pane, message: "status update",
+		dropDir: dir, cwd: seat.cwd, windowKey: seat.windowKey, knownPrefixes: EMPTY_PREFIXES,
+		pollMs: 1, deadlineMs: 50, wait: noWait, io, composer: () => ({ state: "EMPTY" }) });
+	expect(got).toMatchObject({ status: "OK", code: "PROVEN" });
+	expect(got.sends).toBe(1);
+	expect(got.offset).toBeGreaterThan(0);
+	expect(got.detail).toContain("via paste+Enter");
+	expect(taken.runs.some((argv) => argv.includes("send") && argv.includes("5") && argv.includes("paste"))).toBe(true);
+	expect(taken.runs.some((argv) => argv.includes("send") && argv.includes("5") && argv.includes("keys") && argv.includes("Enter"))).toBe(true);
+});
+
+test("SENDANY1: an inspected closed block reports BLOCK_GONE without sending", async () => {
+	const dir = dropDir();
+	const fx = ternFixture({ session: "Default", exited: 1 });
+	const seat = ternSendSeat(null, "any-label", "tern:5", {}, "/caller");
+	const got = await proveTernCliSend({ session: seat.session, pane: seat.pane, message: "status update",
+		dropDir: dir, cwd: seat.cwd, windowKey: seat.windowKey, knownPrefixes: EMPTY_PREFIXES,
+		pollMs: 1, deadlineMs: 50, wait: noWait, io: fx.io });
+	expect(got.status).toBe("REFUSED");
+	expect(got.code).toBe("BLOCK_GONE");
+	expect(got.sends).toBe(0);
+	expect(fx.taken.luaDispatches).toBe(0);
 });
 
 test("SEND1 tern route planted: session absent from the window refuses with zero native effects and no drop file", async () => {
@@ -166,16 +220,28 @@ test("SEND1 tern route planted: session absent from the window refuses with zero
 	expect(readdirSync(dir)).toEqual([]);
 });
 
-test("SEND1 tern route planted: busy seat with no until-delivered bound refuses SEAT_BUSY with zero native effects", async () => {
+test("SENDANY1: a busy Tern seat queues by default and reports QUEUED then DELIVERED", async () => {
 	const dir = dropDir();
-	const { io, taken, repo } = ternFixture({ working: true, journal: busyJournal });
+	const fx = ternFixture({ working: true, journal: busyJournal });
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
-		dropDir: dir, cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
-	expect(got.status).toBe("REFUSED");
-	expect(got.code).toBe("SEAT_BUSY");
+		dropDir: dir, cwd: fx.repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50,
+		wait: async () => fx.finishTurn(), io: fx.io });
+	expect(got).toMatchObject({ status: "OK", queue_states: ["QUEUED", "DELIVERED"] });
+	expect(fx.taken.luaDispatches).toBe(1);
+});
+
+test("SENDANY1: a busy Tern seat reports QUEUED then EXPIRED without sending after the bound", async () => {
+	const dir = dropDir();
+	const fx = ternFixture({ working: true, journal: busyJournal });
+	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
+		dropDir: dir, cwd: fx.repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, untilDeliveredMs: 3,
+		pollMs: 1, deadlineMs: 50, wait: noWait, io: fx.io });
+	expect(got.status).toBe("NOT_DELIVERED");
+	expect(got.code).toBe("UNTIL_DELIVERED_EXHAUSTED");
+	expect(got.queue_states).toEqual(["QUEUED", "EXPIRED"]);
 	expect(got.sends).toBe(0);
-	expect(taken.luaDispatches).toBe(0);
-	expect(got.drop_path).toBeNull();
+	expect(fx.taken.luaDispatches).toBe(0);
+	expect(readFileSync(got.drop_path!, "utf8")).toContain("status update");
 });
 
 test("SEND1 tern route planted: dispatch citing no bead refuses before any seat observation", async () => {
@@ -217,7 +283,7 @@ test("TERNADDR1: the native admission turn addresses the configured control endp
 	const { io, taken, repo } = ternFixture();
 	const got = await proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update",
 		dropDir: dropDir(), cwd: repo, windowKey: WINDOW, knownPrefixes: EMPTY_PREFIXES, pollMs: 1, deadlineMs: 50, wait: noWait, io });
-	expect(got.status).toBe("OK");
+	expect(got).toMatchObject({ status: "OK", code: "PROVEN" });
 	const turn = taken.runs.find((argv) => argv.includes("carly"))!;
 	expect(turn.slice(turn.indexOf("--window"), turn.indexOf("--window") + 2)).toEqual(["--window", WINDOW]);
 });

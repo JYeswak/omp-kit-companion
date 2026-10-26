@@ -7,8 +7,8 @@ import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
-import { defaultTernIo, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView, resolveDaemonSocket,
-	sessionViewOfText } from "./plane-tern.ts";
+import { defaultTernIo, discoverTernSeatFromInspection, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView,
+	resolveDaemonSocket, sessionViewOfText } from "./plane-tern.ts";
 import type { SessionJournalView, TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 
 export const SEND_POLL_MS = 1500;
@@ -595,18 +595,16 @@ export function routeSendTarget(pane: string): { route: "tern" } | { route: "tmu
 		: { route: "tern" };
 }
 
-/** The Tern seat behind `omp-kit send SESSION tern:<block>`: --tern-session/--cwd/--window-key, else the fleet-watch.json
- * entry for SESSION (chief included: `ternSession`, `cwd` or `repo`, `windowKey`), else SESSION itself and the caller
- * cwd. Tern 0.9 `ctl` only reaches a window opened with `tern --control EP`, so the window key is that endpoint and is
- * never defaulted: absent, it stays "" and the send admits by paste + Enter instead (TERNADDR1, ompkit-fixjo). */
+/** A fleet label without a configured Tern session is a discovery request, not a Tern address. */
 export function ternSendSeat(config: unknown, session: string, pane: string,
 	flags: { cwd?: string; ternSession?: string; windowKey?: string }, callerCwd: string = process.cwd()): TernSeatBinding {
 	const root = config !== null && typeof config === "object" ? config as Record<string, unknown> : {};
 	const entry = [root.chief, ...(Array.isArray(root.sessions) ? root.sessions : [])]
 		.find((item): item is Record<string, unknown> => item !== null && typeof item === "object" && (item as Record<string, unknown>).session === session);
 	const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
-	return { session: flags.ternSession?.trim() || text(entry?.ternSession) || session, pane,
-		windowKey: flags.windowKey?.trim() || text(entry?.windowKey), cwd: flags.cwd?.trim() || text(entry?.cwd) || text(entry?.repo) || callerCwd };
+	return { session: flags.ternSession?.trim() || text(entry?.ternSession) || (entry ? session : ""), pane,
+		windowKey: flags.windowKey?.trim() || text(entry?.windowKey),
+		cwd: flags.cwd?.trim() || text(entry?.cwd) || text(entry?.repo) || (entry ? callerCwd : "") };
 }
 
 /** SEND1 Tern route (rz5.125) for the CLI: a malformed address and an uncited dispatch each refuse with zero io and no
@@ -637,12 +635,34 @@ export async function proveTernCliSend(input: {
 	const cwd = input.cwd ?? process.cwd();
 	const beads = beadAdmission(input.message, input.knownPrefixes, input.env ?? process.env, input.noBeadReason, () => [process.cwd(), cwd]);
 	if (beads.required) return refuse("BEAD_REQUIRED", beads.detail, beads.bead_ids, beads.no_bead_reason);
+	const io = input.io ?? defaultTernIo();
+	const env = input.env ?? process.env;
 	const windowKey = input.windowKey?.trim() ?? "";
-	const result = await deliverToTernSeat({ seat: { session: input.session, pane: input.pane, windowKey, cwd }, text: input.message,
-		dropDir: input.dropDir, io: input.io ?? defaultTernIo(), untilDeliveredMs: input.untilDeliveredMs ?? (beads.dispatch ? 300_000 : 0),
-		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer, env: input.env });
+	let session = input.session.trim();
+	let targetCwd = cwd.trim();
+	if (!session || !targetCwd) {
+		const socket = resolveDaemonSocket(env);
+		const window = windowKey ? ["--window", windowKey] : [];
+		let inspection: { code: number; out: string };
+		try {
+			inspection = io.run(["tern", ...window, "inspect", "--json"], socket === null ? undefined : { TERN_DAEMON_SOCKET: socket });
+		} catch {
+			return refuse("OBSERVATION_UNKNOWN", "Tern inspect failed while resolving an unconfigured target; zero sends", beads.bead_ids, beads.no_bead_reason);
+		}
+		if (inspection.code !== 0)
+			return refuse("OBSERVATION_UNKNOWN", "Tern inspect failed while resolving an unconfigured target; zero sends", beads.bead_ids, beads.no_bead_reason);
+		const discovery = discoverTernSeatFromInspection(inspection.out, input.pane, { cwd: targetCwd, windowKey });
+		if (discovery.status !== "FOUND")
+			return refuse(discovery.status === "REFUSED" ? discovery.code : "OBSERVATION_UNKNOWN", discovery.reason, beads.bead_ids, beads.no_bead_reason);
+		session ||= discovery.seat.session;
+		targetCwd ||= discovery.seat.cwd;
+	}
+	const result = await deliverToTernSeat({ seat: { session, pane: input.pane, windowKey, cwd: targetCwd }, text: input.message,
+		dropDir: input.dropDir, io, untilDeliveredMs: input.untilDeliveredMs ?? 300_000,
+		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer, env });
 	return { ...result, bead_ids: beads.bead_ids, no_bead_reason: beads.no_bead_reason };
 }
+
 
 /**
  * Tern verified delivery (ompkit-kdbz.2.4 TERNSEND). Observation and identity
@@ -838,6 +858,7 @@ export function buildNativeSendTurn(block: string, payload: string): string | nu
 }
 
 export type TernDeliverStatus = "OK" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
+export type TernQueueState = "QUEUED" | "DELIVERED" | "EXPIRED" | "PENDING_CONSUME" | "REFUSED";
 /** Caller-declared seat posture; any stated bad value refuses with zero sends. */
 export interface TernSendGate {
 	paused?: boolean;
@@ -855,6 +876,7 @@ export interface TernDeliverResult {
 	drop_path: string | null;
 	detail: string;
 	code: string;
+	queue_states?: readonly TernQueueState[];
 }
 
 /** ASCII whitespace as String.prototype.trim and the OMP sigil checks see it (tab, LF, VT, FF, CR, space). */
@@ -1239,8 +1261,10 @@ export async function deliverToTernSeat(input: {
 	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
 	const pollMs = input.pollMs ?? TERN_PROOF_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? TERN_PROOF_DEADLINE_MS;
+	let queued = false;
 	const fail = (code: string, detail: string): TernDeliverResult =>
-		({ status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, code });
+		({ status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, code,
+			...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) });
 	const provenance = seatProvenance(input.text, input.env ?? process.env);
 	if (provenance.refused) return fail("SEND_PROVENANCE_FORGED", provenance.detail);
 	const gate = input.gate ?? {};
@@ -1272,18 +1296,25 @@ export async function deliverToTernSeat(input: {
 	const seatKey = `${input.seat.session}/${input.seat.pane}@${input.seat.windowKey}`.replace(/[^A-Za-z0-9]+/g, "_");
 	let observation = await observe(input.seat, input.io);
 	const busyRetries = Math.max(0, Math.ceil((input.untilDeliveredMs ?? 0) / pollMs));
-	for (let retry = 0; observation.state === "BUSY" && retry < busyRetries; retry++) {
+	const waitsForTurnBoundary = () => observation.state === "BUSY"
+		|| (observation.state === "UNKNOWN" && observation.working === true
+			&& (observation.reason === "SESSION_TURN_IN_FLIGHT" || observation.reason === "ACTIVE_BRANCH_UNAVAILABLE"
+				|| observation.reason === "SESSION_FILE_UNAVAILABLE"));
+	queued = waitsForTurnBoundary() && busyRetries > 0;
+	for (let retry = 0; waitsForTurnBoundary() && retry < busyRetries; retry++) {
 		await wait(pollMs);
 		observation = await observe(input.seat, input.io);
 	}
 	const shellRule = observation.fg === null ? refuseShellPayload(input.text) : null;
 	if (shellRule) return fail(shellRule.rule, "destructive payload to a pane not proven to run OMP; zero sends");
-	if (observation.state === "BUSY") {
-		if (busyRetries === 0) return fail("SEAT_BUSY", `seat is BUSY (${observation.reason ?? "working"}); zero sends`);
+	if (waitsForTurnBoundary()) {
+		const state = observation.state === "BUSY" ? "BUSY" : `working with unproven session state (${observation.reason ?? "unknown"})`;
+		if (busyRetries === 0)
+			return fail(observation.state === "BUSY" ? "SEAT_BUSY" : "OBSERVATION_UNKNOWN", `seat is ${state}; zero sends`);
 		return { status: "NOT_DELIVERED", marker: "", sends: 0, sessionFile: observation.sessionFile, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, "tern-busy", input.text),
-			detail: `seat stayed BUSY for the ${input.untilDeliveredMs} ms until-delivered bound; nothing typed; recovery copy written`,
-			code: "UNTIL_DELIVERED_EXHAUSTED" };
+			detail: `seat remained ${state} for the ${input.untilDeliveredMs} ms until-delivered bound; nothing typed; recovery copy written`,
+			code: "UNTIL_DELIVERED_EXHAUSTED", queue_states: ["QUEUED", "EXPIRED"] };
 	}
 	if (observation.state === "DEAD") return fail("SEAT_DEAD", "seat pane is dead; zero sends");
 	if (observation.state !== "IDLE" || observation.runtimeBinding === null) {
@@ -1296,7 +1327,7 @@ export async function deliverToTernSeat(input: {
 	const identity = await identify(input.seat, input.io);
 	if (identity.status !== "IDENTIFIED" || identity.runtimeBinding === null) {
 		const code = identity.status === "REFUSED" ? identity.code : "IDENTITY_UNKNOWN";
-		const reason = identity.status === "IDENTIFIED" ? "binding lost" : identity.reason;
+		const reason = identity.reason;
 		return fail(code, `seat identity not bound (${reason}); zero sends`);
 	}
 	// ACT58584 + SENDX1: the seat must not move between observe and identify,
@@ -1359,7 +1390,8 @@ export async function deliverToTernSeat(input: {
 	const pending = readTernPending(pendingPath);
 	if (pending !== null && pending.sessionId === journal.sessionId) {
 		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile, offset: null, drop_path: null,
-			detail: `earlier attempt unproven on this runtime incarnation; new send suppressed`, code: "SUPPRESSED_PENDING" };
+			detail: `earlier attempt unproven on this runtime incarnation; new send suppressed`, code: "SUPPRESSED_PENDING",
+			...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };
 	}
 	const marker = `kit-send-${randomBytes(6).toString("hex")}`;
 	const payload = payloadKind.kind === "goal-set" ? input.text.trim() : `${provenance.text}\n[${marker}]`;
@@ -1374,7 +1406,8 @@ export async function deliverToTernSeat(input: {
 		try { rmSync(pendingPath, { force: true }); } catch {}
 		return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile: null, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
-			detail: `destination locked by another send within the bound; nothing typed`, code: "LOCK_BUSY" };
+			detail: `destination locked by another send within the bound; nothing typed`, code: "LOCK_BUSY",
+			...(queued ? { queue_states: ["QUEUED", "EXPIRED"] as const } : {}) };
 	}
 	try {
 		// F1: this re-read is a cheap incarnation pre-filter, NOT atomicity;
@@ -1383,7 +1416,8 @@ export async function deliverToTernSeat(input: {
 		if (fresh === null || fresh.sha256 !== observation.sessionSha) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
 			return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
-				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND" };
+				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND",
+				...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) };
 		}
 		// F5: a failed or crashed dispatch does not prove zero native effects;
 		// the attempt stays pending and proof is still reconciled below.
@@ -1399,7 +1433,8 @@ export async function deliverToTernSeat(input: {
 				return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
 					detail: composer.state === "DRAFT" ? "seat composer holds unsent text; nothing pasted, zero sends"
 						: `seat composer state UNKNOWN (${composer.reason}); never paste blind, zero sends`,
-					code: composer.state === "DRAFT" ? "TERN_COMPOSER_BUSY" : "TERN_COMPOSER_UNKNOWN" };
+					code: composer.state === "DRAFT" ? "TERN_COMPOSER_BUSY" : "TERN_COMPOSER_UNKNOWN",
+					...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) };
 			}
 			const socket = resolveDaemonSocket();
 			const env = socket === null ? undefined : { TERN_DAEMON_SOCKET: socket };
@@ -1415,7 +1450,8 @@ export async function deliverToTernSeat(input: {
 			if (lua === null) {
 				try { rmSync(pendingPath, { force: true }); } catch {}
 				return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
-					detail: `block not a bare decimal pane id; zero sends`, code: "BLOCK_UNWIREABLE" };
+					detail: `block not a bare decimal pane id; zero sends`, code: "BLOCK_UNWIREABLE",
+					...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) };
 			}
 			try {
 				dispatched = input.io.run([ternCtlBin(), "--window", windowKey, "ctl", "carly", "lua", lua]).code === 0;
@@ -1434,7 +1470,8 @@ export async function deliverToTernSeat(input: {
 				const steered = last.steering ? " as a steering entry (program was busy at handle time)" : "";
 				return { status: "OK", marker, sends: 1, sessionFile, offset: last.offset, drop_path: null,
 					detail: `${payloadKind.kind === "goal-set" ? "goal adopted" : "USER entry"} proven at offset ${last.offset}${via}${steered}`,
-					code: last.steering ? "PROVEN_STEERED" : "PROVEN" };
+					code: last.steering ? "PROVEN_STEERED" : "PROVEN",
+					...(queued ? { queue_states: ["QUEUED", "DELIVERED"] as const } : {}) };
 			}
 			if (poll + 1 >= polls) break;
 			await wait(pollMs);
@@ -1448,7 +1485,8 @@ export async function deliverToTernSeat(input: {
 		return { status: "PENDING_CONSUME", marker, sends: 1, sessionFile, offset: null,
 			drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
 			detail: `${dispatched ? `sent${via}` : "dispatch failed, effect unknown"}; proof ${last.status} (${last.reason})${note}; pending retained, never auto-resent`,
-			code: !dispatched ? "SEND_AMBIGUOUS" : payloadKind.kind === "goal-set" ? "GOAL_NOT_ADOPTED" : "PROOF_TIMEOUT" };
+			code: !dispatched ? "SEND_AMBIGUOUS" : payloadKind.kind === "goal-set" ? "GOAL_NOT_ADOPTED" : "PROOF_TIMEOUT",
+			...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };
 	} finally {
 		releaseLock();
 	}

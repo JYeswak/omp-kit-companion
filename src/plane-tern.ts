@@ -235,13 +235,9 @@ function withinRepo(repo: string, cwd: string): boolean {
 	return pathFromRepo === "" || (pathFromRepo !== ".." && !pathFromRepo.startsWith(`..${sep}`) && !isAbsolute(pathFromRepo));
 }
 
-/** Where a block lives, derived from the live `tern inspect --json` tree: the
-Tern session and tab that contain the block id. Nothing about tab or session
-names is configured or assumed; the configured fleet session name is only
-checked against what the tree says (it must equal the containing session's
-name or id, or the containing tab's name or id), so a block that moved
-elsewhere is SEAT_REBOUND and a block in no tab is absent (TERNADDR1,
-ompkit-fixjo). A schema break is UNKNOWN. */
+/** Locate a unique block in the live `tern inspect --json` tree. A non-empty seatSession must match the
+ * containing session or tab; the empty string is discovery-only for CLI sends whose fleet label has no
+ * Tern binding. Subsequent observation and identity checks still bind the exact pane and cwd. */
 export type BlockLocation =
 	| { status: "ok"; sessionId: number; sessionName: string | null; tabId: number | null; tabName: string | null; tab: unknown }
 	| { status: "absent" }
@@ -277,9 +273,44 @@ export function locateBlock(root: Record<string, unknown>, paneId: number, seatS
 	if (hits.length > 1) return { status: "ambiguous" };
 	const hit = hits[0]!;
 	const names = [hit.sessionName, String(hit.sessionId), hit.tabName, hit.tabId === null ? null : String(hit.tabId)];
-	if (!names.includes(seatSession)) return { status: "rebound", sessionName: hit.sessionName, tabName: hit.tabName };
+	if (seatSession !== "" && !names.includes(seatSession)) return { status: "rebound", sessionName: hit.sessionName, tabName: hit.tabName };
 	return hit;
 }
+export type TernSeatDiscoveryResult =
+	| { status: "FOUND"; seat: TernSeatBinding }
+	| { status: "REFUSED"; code: "BLOCK_GONE" | "PLANE_SEAT_UNBOUND" | "SEAT_CWD_MISMATCH"; reason: string }
+	| { status: "UNKNOWN"; reason: string };
+
+/** Resolve an unconfigured Tern block by its exact id in one live inspect snapshot. */
+export function discoverTernSeatFromInspection(snapshot: unknown, pane: string,
+	options: { cwd?: string; windowKey?: string } = {}): TernSeatDiscoveryResult {
+	const paneId = paneNumber({ session: "", pane, windowKey: options.windowKey ?? "", cwd: "" });
+	if (paneId === null) return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: "Tern pane must be an exact decimal block id or tern:<id>" };
+	const decoded = parseJson(snapshot);
+	if ("error" in decoded) return { status: "UNKNOWN", reason: decoded.error };
+	const root = objectValue(decoded.value);
+	if (!root || !Array.isArray(root.sessions) || !Array.isArray(root.panes)) return { status: "UNKNOWN", reason: "INSPECT_SCHEMA_UNKNOWN" };
+	const location = locateBlock(root, paneId, "");
+	if (location.status === "schema") return { status: "UNKNOWN", reason: location.reason };
+	if (location.status === "ambiguous") return { status: "UNKNOWN", reason: "INSPECT_BLOCK_AMBIGUOUS" };
+	const rows = root.panes.map(objectValue).filter((row): row is Record<string, unknown> => row?.pane === paneId);
+	if (rows.length !== 1) return { status: "UNKNOWN", reason: "INSPECT_PANE_ROW_MISSING_OR_DUPLICATE" };
+	const record = rows[0]!;
+	if (record.exited !== null && (typeof record.exited !== "number" || !Number.isFinite(record.exited)))
+		return { status: "UNKNOWN", reason: "INSPECT_PANE_SCHEMA_UNKNOWN" };
+	if (typeof record.exited === "number")
+		return { status: "REFUSED", code: "BLOCK_GONE", reason: `Tern block ${paneId} has exited` };
+	if (location.status === "absent")
+		return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: `Tern block ${paneId} is not in an inspected tab` };
+	if (location.status !== "ok") return { status: "UNKNOWN", reason: "INSPECT_BLOCK_UNKNOWN" };
+	if (typeof record.cwd !== "string" || !isAbsolute(record.cwd)) return { status: "UNKNOWN", reason: "SESSION_FILE_OR_CWD_UNAVAILABLE" };
+	const cwd = options.cwd?.trim() || record.cwd;
+	if (!withinRepo(cwd, record.cwd))
+		return { status: "REFUSED", code: "SEAT_CWD_MISMATCH", reason: "Tern pane cwd is outside the configured repository" };
+	return { status: "FOUND", seat: { session: location.sessionName ?? String(location.sessionId), pane: `tern:${paneId}`,
+		windowKey: options.windowKey?.trim() ?? "", cwd } };
+}
+
 
 /** Does the inspected window host a session or tab whose name or id is `name`? Read from the tree, never assumed. */
 export function windowHostsName(root: Record<string, unknown>, name: string): boolean {
@@ -961,7 +992,11 @@ export function classifyTernObservation(
 	}
 	if (inspection.status !== "FOUND") return unknownObservation(inspection.status === "REFUSED" ? inspection.code : inspection.reason);
 	if (process.status !== "FOUND") return unknownObservation(process.reason);
-	if (journal.status !== "KNOWN") return unknownObservation(journal.reason);
+	if (journal.status !== "KNOWN") {
+		return { state: "UNKNOWN", working: inspection.working, oracleBusy: null, sessionFile: inspection.sessionFile,
+			sessionSha: null, sessionCursorBytes: null, sessionLeafId: null, fg: process.foreground, runtimeBinding: null,
+			evidence: ["tern-inspect", "tern-process", "session-file"], reason: journal.reason };
+	}
 	if (journal.cwd !== inspection.cwd) return unknownObservation("SESSION_CWD_MISMATCH");
 	if (journal.oracleBusy === null) {
 		return { state: "UNKNOWN", working: inspection.working, oracleBusy: null, sessionFile: inspection.sessionFile,
@@ -1117,7 +1152,10 @@ function observationFromReads(
 	const process = addProcessStart(io, parseTernProcess(processJson.value, seat.cwd, inspection.paneId));
 	if (process.status !== "FOUND") return unknownObservation(process.reason);
 	const view = readSessionView(io, inspection.sessionFile);
-	if (view === null) return unknownObservation("SESSION_FILE_UNAVAILABLE");
+	if (view === null) return { state: "UNKNOWN", working: inspection.working, oracleBusy: null,
+		sessionFile: inspection.sessionFile, sessionSha: null, sessionCursorBytes: null, sessionLeafId: null,
+		fg: process.foreground, runtimeBinding: null, evidence: ["tern-inspect", "tern-process"],
+		reason: "SESSION_FILE_UNAVAILABLE" };
 	const journal = parseSessionView(view);
 	const observation = classifyTernObservation(inspection, process, journal);
 	if (observation.state === "UNKNOWN" && observation.reason === "WORKING_ORACLE_DISAGREEMENT") return observation;

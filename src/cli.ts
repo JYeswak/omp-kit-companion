@@ -3146,8 +3146,9 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 		if (tern.status === "REFUSED") return refusal(tern.code, tern.detail, tern.code === "TERN_WINDOW_UNBOUND"
 			? "Open the fleet Tern window with `tern --control EP` and pass --window-key EP (or set windowKey in fleet-watch.json); nothing was sent."
 			: "Nothing was sent; fix the named cause and resend.");
-		const data = { session, pane, status: tern.status, tern_code: tern.code, marker: tern.marker, sends: tern.sends, drop_path: tern.drop_path,
-			detail: tern.detail, session_file: tern.sessionFile, offset: tern.offset, bead_ids: tern.bead_ids, no_bead_reason: tern.no_bead_reason };
+		const data = { session, pane, status: tern.status, tern_code: tern.code, queue_states: tern.queue_states,
+			marker: tern.marker, sends: tern.sends, drop_path: tern.drop_path, detail: tern.detail, session_file: tern.sessionFile,
+			offset: tern.offset, bead_ids: tern.bead_ids, no_bead_reason: tern.no_bead_reason };
 		if (tern.status === "OK") return { code: 0, data: { overall: "OK", ...data }, verification: "UNVERIFIED" };
 		return { code: 1, data: { overall: tern.status, ...data }, verification: "UNVERIFIED",
 			errors: [{ code: tern.status, message: tern.detail,
