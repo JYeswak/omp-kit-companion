@@ -280,6 +280,8 @@ test_workers() {
 run_affected_tests() {
 	(cd "$ARCHIVE_DIR" && bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/gate-disk-floor.ts" "$ARCHIVE_DIR") || return $?
 	files=$#
+	# NODOUBLEPASS1 (ompkit-bp50d): the exact selection, kept for the focused-passed report below.
+	focused_selection="$*"
 	tests_out="$WORK/tests.out"
 	scripts_out="$WORK/scripts.out"
 	: >"$tests_out"
@@ -349,6 +351,20 @@ run_affected_tests() {
 	if [ "$tests_rc" -ne 0 ]; then
 		echo "FRESH-GATE: RED: affected tests did not pass (exit $tests_rc); the push is refused" >&2
 		return "$tests_rc"
+	fi
+	# NODOUBLEPASS1 (ompkit-bp50d): on GREEN, name the tree and every file this pass judged, so the
+	# full-suite verdict on the same tree runs only the complement. Bun ran the whole selection in one
+	# invocation with 0 fail, and the script loop exits 0 only when every suite was GREEN, so each
+	# listed file passed. A later verdict trusts the report only when its tree is the candidate's.
+	if [ -n "${FRESH_GATE_PASSED_OUT:-}" ] && { [ "$bun_files" -eq 0 ] || [ "${bun_ran:-0}" -gt 0 ]; }; then
+		passed_tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}" 2>/dev/null) || passed_tree=
+		if [ -n "$passed_tree" ]; then
+			{
+				echo "tree $passed_tree"
+				# shellcheck disable=SC2086
+				printf '%s\n' $focused_selection
+			} >"$FRESH_GATE_PASSED_OUT" 2>/dev/null || :
+		fi
 	fi
 	if [ "$bun_files" -gt 0 ] && [ "${bun_ran:-0}" -eq 0 ]; then
 		echo "FRESH-GATE: RED: $bun_files affected bun test files were selected but bun reported no test run" >&2

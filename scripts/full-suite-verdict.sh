@@ -41,8 +41,9 @@ CACHE_DIR=
 TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
 RUNTIME_PIN=${FULL_SUITE_RUNTIME_ID:-}
 
+FOCUSED_PASSED=
 usage() {
-	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--archive-dir DIR] [--cache-dir DIR]" >&2
+	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE]" >&2
 }
 
 fail() {
@@ -56,6 +57,7 @@ while [ "$#" -gt 0 ]; do
 		--commit) [ "$#" -ge 2 ] || { usage; exit 2; }; COMMIT=$2; shift 2 ;;
 		--archive-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; ARCHIVE_DIR=$2; shift 2 ;;
 		--cache-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; CACHE_DIR=$2; shift 2 ;;
+		--focused-passed) [ "$#" -ge 2 ] || { usage; exit 2; }; FOCUSED_PASSED=$2; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage; exit 2 ;;
 	esac
@@ -242,10 +244,63 @@ set -- $kept_shell; shell_count=$#
 set -- $kept_py; py_count=$#
 set -- $excluded; excluded_count=$#
 echo "full-suite: bun=$bun_count shell=$shell_count python=$py_count excluded_ci_only=$excluded_count"
+# NODOUBLEPASS1 (ompkit-bp50d): the focused gate judged part of this same tree already. Its report
+# names the tree and every file it ran GREEN; those files are subtracted from the complete suite and
+# recorded as covered, so the verdict still spans the declared suite while this run pays only for
+# the complement. A report for another tree, or a name the archive does not enumerate, is printed
+# and ignored: nothing is subtracted on trust.
+covered_bun=""; covered_shell=""; covered_py=""; covered_ignored=""
+if [ -n "$FOCUSED_PASSED" ]; then
+	if [ ! -f "$FOCUSED_PASSED" ]; then
+		echo "full-suite: focused-passed report $FOCUSED_PASSED is absent; running the complete suite"
+	else
+		report_tree=$(sed -n '1s/^tree //p' "$FOCUSED_PASSED")
+		if [ "$report_tree" != "$tree" ]; then
+			echo "full-suite: focused-passed report is for tree ${report_tree:-?}, not candidate $tree; ignored, running the complete suite"
+		else
+			rest_bun=""; rest_shell=""; rest_py=""
+			reported=$(sed '1d' "$FOCUSED_PASSED" | awk 'NF && !seen[$0]++')
+			for candidate in $kept_bun; do
+				case "
+$reported
+" in *"
+$candidate
+"*) covered_bun="$covered_bun $candidate" ;; *) rest_bun="$rest_bun $candidate" ;; esac
+			done
+			for candidate in $kept_shell; do
+				case "
+$reported
+" in *"
+$candidate
+"*) covered_shell="$covered_shell $candidate" ;; *) rest_shell="$rest_shell $candidate" ;; esac
+			done
+			for candidate in $kept_py; do
+				case "
+$reported
+" in *"
+$candidate
+"*) covered_py="$covered_py $candidate" ;; *) rest_py="$rest_py $candidate" ;; esac
+			done
+			for name in $reported; do
+				case " $kept_bun $kept_shell $kept_py " in *" $name "*) ;; *) covered_ignored="$covered_ignored $name"; echo "full-suite: focused-passed names $name, not in the declared suite; ignored" ;; esac
+			done
+			kept_bun=$rest_bun; kept_shell=$rest_shell; kept_py=$rest_py
+			set -- $covered_bun; cb=$#; set -- $covered_shell; cs=$#; set -- $covered_py; cp=$#
+			set -- $kept_bun; bun_count=$#
+			set -- $kept_shell; shell_count=$#
+			set -- $kept_py; py_count=$#
+			echo "full-suite: covered by the focused pass on the same tree: bun=$cb shell=$cs python=$cp; complement bun=$bun_count shell=$shell_count python=$py_count"
+		fi
+	fi
+fi
 if [ "$bun_count" -eq 0 ] && [ "$shell_count" -eq 0 ] && [ "$py_count" -eq 0 ]; then
-	cleanup_archive
-	fail "candidate archive enumerates no runnable suite"
-	exit 1
+	if [ -n "$covered_bun$covered_shell$covered_py" ]; then
+		echo "full-suite: the focused pass covered the whole declared suite; nothing left to run"
+	else
+		cleanup_archive
+		fail "candidate archive enumerates no runnable suite"
+		exit 1
+	fi
 fi
 
 # Contributor-only paths (the Bun fallback in runtime-adapter.sh) require .git, so the archive
@@ -451,7 +506,7 @@ fi
 
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
 finish_logs "$CACHE_DIR/$tree.log"
-TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
+TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
 import hashlib, json, os
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
@@ -476,6 +531,9 @@ entry = {
         "py_suites": int(os.environ["PYC"]),
         "py_fail": int(os.environ["PYR"]),
         "excluded_ci_only": os.environ["EXCL"].split(),
+        # NODOUBLEPASS1: files the focused pass judged GREEN on this same tree; this run paid only for the rest.
+        "covered_by_focused": {"bun": os.environ["COVB"].split(), "shell": os.environ["COVS"].split(), "py": os.environ["COVP"].split(),
+                               "ignored": os.environ["COVI"].split()},
     },
     "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
@@ -487,7 +545,8 @@ os.replace(tmp, os.environ["ENTRY"])
 PYEOF
 cleanup_archive
 if [ "$verdict" = "PASS" ]; then
-	echo "FULL-SUITE: VERDICT PASS tree=$tree checks=$checks runtime=$runtime bun_ran=$bun_ran shell=$shell_count python=$py_count excluded_ci_only=$excluded_count"
+	set -- $covered_bun $covered_shell $covered_py; covered_count=$#
+	echo "FULL-SUITE: VERDICT PASS tree=$tree checks=$checks runtime=$runtime bun_ran=$bun_ran shell=$shell_count python=$py_count excluded_ci_only=$excluded_count covered_by_focused=$covered_count"
 	exit 0
 else
 	echo "FULL-SUITE: VERDICT FAIL tree=$tree checks=$checks runtime=$runtime producer_rc=$code bun_fail=$bun_fail shell_red=$shell_red py_red=$py_red; the push is refused" >&2

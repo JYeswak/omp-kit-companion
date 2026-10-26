@@ -384,13 +384,19 @@ fi
 # recorded verdict without rerunning. Skipped until the base archive carries the checker (first
 # landing), like pushed-bead-ids, commit-imports and doc-drift above.
 ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir) || { printf 'pre-push-gate: cannot resolve git dir for fresh-gate ledger\n' >&2; exit 1; }
-FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" \
+# NODOUBLEPASS1 (ompkit-bp50d): the focused gate reports what it ran GREEN on this tree; the verdict
+# below runs only the complement. The report lives beside the archive, inside this gate's owned dir.
+focused_passed="$archive_root/focused-passed.txt"
+rm -f "$focused_passed"
+FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" \
 	sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
 if [ ! -f "$gate_scripts/scripts/full-suite-verdict.sh" ]; then
 	printf 'SKIP full-suite-verdict: checker absent from base archive\n' >&2
 else
 	printf '== full-suite-verdict\n'
-	if sh "$gate_scripts/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$local_sha" --archive-dir "$archive"; then
+	set -- --repo "$ROOT" --commit "$local_sha" --archive-dir "$archive"
+	[ -f "$focused_passed" ] && set -- "$@" --focused-passed "$focused_passed"
+	if sh "$gate_scripts/scripts/full-suite-verdict.sh" "$@"; then
 		printf 'GREEN full-suite-verdict\n'
 	else
 		rc=$?
