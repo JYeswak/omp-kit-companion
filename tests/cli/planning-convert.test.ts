@@ -491,6 +491,30 @@ test("apply treats a closed reused target it would not change as satisfied and a
 	for (const field of ["status", "acceptance_criteria", "notes", "description", "closed_at"]) expect(after[field]).toEqual(before[field]);
 });
 
+test("apply never adds a dependency from a closed target and reports the edge SKIPPED_TERMINAL", async () => {
+	const trackerRoot = join(scratch, "apply-terminal-source-edge");
+	initializeTracker(trackerRoot);
+	const epicId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
+	const doneId = createNativeIssue(trackerRoot, "Done source", { externalRef: "core8:done-source", parent: epicId });
+	closeNative(trackerRoot, doneId);
+	const plan = writePlan("apply-terminal-source-edge", [
+		{ slug: "done-source", existing: "(new)", dependsOn: ["later-item"] },
+		{ slug: "later-item", existing: "(new)" },
+	]);
+	const before = showNativeIssue(trackerRoot, doneId);
+
+	const result = await runCli(applyArgs(plan, trackerRoot));
+	expect(result.exitCode).toBe(0);
+	const report = applyResult(result);
+	const later = report.created_items.find((item: { slug: string }) => item.slug === "later-item");
+	expect(later).toBeDefined();
+	expect(report.dependency_edges).toContainEqual({ slug: "done-source", target: "later-item", status: "SKIPPED_TERMINAL", issue_id: doneId, depends_on_id: later.id });
+	const after = showNativeIssue(trackerRoot, doneId);
+	expect(after.status).toBe("closed");
+	expect(after.dependency_count).toEqual(before.dependency_count);
+	expect(after.dependencies).toEqual(before.dependencies);
+});
+
 test("apply refuses to amend a closed existing target and writes nothing", async () => {
 	const trackerRoot = join(scratch, "apply-terminal-amend");
 	initializeTracker(trackerRoot);
