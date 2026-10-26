@@ -202,6 +202,14 @@ test("CLAIMLINT: a claim on a failing bead is refused in every spelling and for 
 	const expandedShort = await checkBeadLint({ toolName: "bash", input: { command: `br update ${failing} -qs"$S"` } }, deps);
 	expect(expandedShort?.block).toBe(true);
 	expect(expandedShort?.reason).toContain(BEAD_LINT_UNEVALUABLE);
+	// Review AM 69483: an option word the shell expands can become --claim, so it is refused too.
+	for (const command of [`CLAIM_FLAG=--claim; br update ${failing} $CLAIM_FLAG`, `br update ${failing} "$FLAGS"`, `br update "$ID" --priority 1`]) {
+		const dynamic = await checkBeadLint({ toolName: "bash", input: { command } }, deps);
+		expect({ command, block: dynamic?.block }).toEqual({ command, block: true });
+		expect(dynamic?.reason).toContain(BEAD_LINT_UNEVALUABLE);
+	}
+	// Control: an expanded value in a non-claim value slot (actor, assignee) cannot become a claim.
+	expect(await checkBeadLint({ toolName: "bash", input: { command: `br update ${failing} --priority 1 --actor "$AGENT_NAME" --assignee=$OWNER` } }, deps)).toBeUndefined();
 });
 
 test("CLAIMLINT infra: a claim the helper cannot judge is refused, while a content edit still warns and allows", async () => {

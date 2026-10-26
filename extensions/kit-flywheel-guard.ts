@@ -2051,6 +2051,11 @@ function updateLintArgv(args: string[]): { argv: string[]; claim: boolean } | { 
 	let claim = false;
 	for (let index = 0; index < args.length; index += 1) {
 		const word = args[index]!;
+		// A word the shell expands at run time, outside the value slot of a known flag, can become
+		// `--claim` or `--status in_progress` (review AM 69483: CLAIM_FLAG=--claim; br update ID $CLAIM_FLAG).
+		// Only the head is judged here: `--assignee=$X` keeps its value in a value slot.
+		const head = word.indexOf("=") > 0 ? word.slice(0, word.indexOf("=")) : word;
+		if (shellExpands(head)) return { problem: `passes a word the shell expands at run time (${word}) where an option can stand, so a claim cannot be ruled out` };
 		if (!word.startsWith("-") || word === "-") {
 			positional.push(word);
 			continue;
