@@ -44,18 +44,29 @@ GOOD_DESC = "WHAT: (a) gate parser tags; (b) measure the gate. WHY: early submis
 CLEAN_DESC = "WHAT: (a) gate parser tags. WHY: early submissions bounce."
 FAKE_BR = """#!/usr/bin/env python3
 import json, os, sys
-bead = json.load(open(os.environ["FAKE_BR_BEAD"], encoding="utf-8"))
+if os.environ.get("FAKE_BR_FAIL"):
+    sys.exit(5)
+beads = json.load(open(os.environ["FAKE_BR_BEAD"], encoding="utf-8"))
+beads = beads if isinstance(beads, list) else [beads]
 args = sys.argv[1:]
-if "show" in args or "list" in args:
-    print(json.dumps([bead]))
+if "list" in args:
+    print(json.dumps(beads))
+    sys.exit(0)
+if "show" in args:
+    print(json.dumps([bead for bead in beads if bead["id"] in args][:1]))
     sys.exit(0)
 sys.exit(2)
 """
+# Every spelling native br 0.7.4 stores as in_progress (CLAIMLINT ompkit-fp72.135.3.50 [b]; measured
+# 2026-10-26), including review AM 69481's counterexamples: uppercase and short clusters.
+CLAIM_MOVES = (("--claim",), ("--status", "in_progress"), ("-s", "in_progress"), ("--status=in_progress",),
+               ("--status", "IN_PROGRESS"), ("--status", "inprogress"), ("--status", "InProgress"),
+               ("-qs", "in_progress"), ("-qsin_progress",), ("-vqs", "in_progress"))
 
 
-def fixture(desc: str = BAD_DESC, acc: str = MIXED_ACC) -> dict:
+def fixture(desc: str = BAD_DESC, acc: str = MIXED_ACC, bead_id: str = "rpr-1") -> dict:
     return {
-        "id": "rpr-1", "title": "Repair admission fixture", "status": "open", "priority": 2,
+        "id": bead_id, "title": "Repair admission fixture", "status": "open", "priority": 2,
         "issue_type": "task", "labels": ["gate"], "description": desc, "acceptance_criteria": acc,
         "created_at": ENFORCED_AT, "assignee": None, "dependencies": [],
     }
@@ -78,12 +89,14 @@ class RepairAdmission(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.work.cleanup()
 
-    def run_update(self, bead: dict, *flags: str, new_desc: str | None = None) -> tuple[int, str]:
+    def run_update(self, bead: dict | list[dict], *flags: str, new_desc: str | None = None,
+                   fail: bool = False) -> tuple[int, str]:
+        beads = bead if isinstance(bead, list) else [bead]
         state = self.root / f"state-{self.id().rsplit('.', 1)[-1]}-{time.monotonic_ns()}"
         (state / ".beads").mkdir(parents=True)
         bead_file = state / "bead.json"
-        bead_file.write_text(json.dumps(bead), encoding="utf-8")
-        argv = ["update", bead["id"], *flags]
+        bead_file.write_text(json.dumps(beads), encoding="utf-8")
+        argv = ["update", *(item["id"] for item in beads), *flags]
         if new_desc is not None:
             desc_file = state / "desc.md"
             desc_file.write_text(new_desc, encoding="utf-8")
@@ -95,6 +108,7 @@ class RepairAdmission(unittest.TestCase):
             "BR_UPDATE_REAL": str(self.fake_br),
             "BR_UPDATE_PROJECT": str(state),
             "FAKE_BR_BEAD": str(bead_file),
+            **({"FAKE_BR_FAIL": "1"} if fail else {}),
         }
         result = run_bounded([sys.executable, UPDATE_LINT, *argv], 60, env=env, cwd=str(state))
         self.assertEqual(result.outcome, "OK")
@@ -106,7 +120,7 @@ class RepairAdmission(unittest.TestCase):
         matched against the checker's own list rather than split."""
         lines = [line for line in err.splitlines() if "LINT_REFUSED " in line]
         self.assertEqual(len(lines), 1, err)
-        listed = lines[0].split("LINT_REFUSED ", 1)[1].split(": this edit ", 1)[0]
+        listed = lines[0].split("LINT_REFUSED ", 1)[1].split(": this ", 1)[0]
         known = (*bead_lint.GATE_CHECKS, "br-lint-template")
         return sorted(name for name in known if listed.startswith(name) or f",{name}" in listed)
 
@@ -136,16 +150,56 @@ class RepairAdmission(unittest.TestCase):
 
     def test_claim_or_status_move_gets_no_repair_admission(self) -> None:
         # Planted negative: the improving edit combined with a claim or a status move
-        # is judged exactly as today (refused while any check fails).
+        # gets no repair admission: it is refused while any check fails.
         for flags in (("--claim",), ("--status", "in_progress"), ("--status", "in_review")):
             with self.subTest(flags=flags):
                 rc, err = self.run_update(fixture(), *flags, new_desc=GOOD_DESC)
                 self.assertEqual(rc, 4, err)
                 self.assertNotIn("LINT_REPAIR_ADMITTED", err)
 
-    def test_standalone_claim_keeps_todays_pass_through(self) -> None:
-        rc, err = self.run_update(fixture(), "--claim")
+    def test_claim_on_a_failing_bead_is_refused_naming_the_checks(self) -> None:
+        # CLAIMLINT planted negative: J-107, no worker picks up a bead that fails lint.
+        for flags in CLAIM_MOVES:
+            with self.subTest(flags=flags):
+                rc, err = self.run_update(fixture(), *flags)
+                self.assertEqual(rc, 4, err)
+                self.assertIn("this claim would start work on rpr-1", err)
+                self.assertEqual(self.refused_checks(err), ["b-what-why-acc", "elapsed-time-mix"])
+
+    def test_claim_on_a_passing_bead_is_admitted(self) -> None:
+        # Paired control: the same moves on a bead that passes every check.
+        for flags in CLAIM_MOVES:
+            with self.subTest(flags=flags):
+                rc, err = self.run_update(fixture(CLEAN_DESC, CODE_ACC), *flags)
+                self.assertEqual((rc, err), (0, ""))
+
+    def test_parking_and_priority_moves_on_a_failing_bead_pass_through(self) -> None:
+        # Releasing or reprioritising a failing bead is not a claim and is never blocked; nor is
+        # `in-progress`, which native br stores as a custom status, not in_progress.
+        for flags in (("--status", "open", "--assignee", ""), ("--priority", "1"), ("--status", "blocked"),
+                      ("--status", "in-progress"), ("-q", "--status", "open")):
+            with self.subTest(flags=flags):
+                rc, err = self.run_update(fixture(), *flags)
+                self.assertEqual((rc, err), (0, ""))
+
+    def test_multi_id_claim_judges_every_id(self) -> None:
+        # Planted negative: a passing first id cannot carry a failing second one through.
+        clean = fixture(CLEAN_DESC, CODE_ACC, "rpr-ok")
+        rc, err = self.run_update([clean, fixture(bead_id="rpr-bad")], "--claim")
+        self.assertEqual(rc, 4, err)
+        self.assertIn("rpr-bad", err)
+        rc, err = self.run_update([clean, fixture(CLEAN_DESC, CODE_ACC, "rpr-ok2")], "--claim")
         self.assertEqual((rc, err), (0, ""))
+
+    def test_claim_fails_closed_when_lint_cannot_run(self) -> None:
+        # A claim needs a PASS: an unreadable tracker refuses it, while a content edit
+        # keeps the fail-open contract (exit 3, the shim warns and allows).
+        rc, err = self.run_update(fixture(CLEAN_DESC, CODE_ACC), "--claim", fail=True)
+        self.assertEqual(rc, 4, err)
+        self.assertIn("LINT_UNAVAILABLE", err)
+        rc, err = self.run_update(fixture(CLEAN_DESC, CODE_ACC), "--title", "Renamed", fail=True)
+        self.assertEqual(rc, 3, err)
+        self.assertIn("LINT_GATE_UNVERIFIED", err)
 
     def test_clean_edit_is_still_admitted_without_a_repair_note(self) -> None:
         rc, err = self.run_update(fixture(CLEAN_DESC, CODE_ACC), "--title", "Renamed clean fixture")

@@ -9,21 +9,26 @@ Exit contract (shim honors it):
   0  admit (no content flags, or prospective bead passes)
   4  LINT_REFUSED (prospective bead fails; check names on stderr)
   3  UNVERIFIED (infra error reading the tracker; shim passes through
-     with a warning, never refusing on a broken probe)
+     with a warning, never refusing on a broken probe). A claim move is
+     the exception: it needs a PASS, so a probe that cannot judge it exits 4.
 
-Only lint-relevant content flags trigger evaluation: --title,
+Lint-relevant content flags trigger evaluation: --title,
 -d/--description/--body, --description-file, --acceptance-criteria,
 --add-acceptance, --set-labels/--add-label/--remove-label, -t/--type.
-Workflow flags (--status/--priority/--assignee/--owner/--claim) and edge
-flags (--parent) never newly fail the gated checks and pass through, so
-claiming a failing bead for repair is never deadlocked by this gate.
+So does a claim move (CLAIMLINT ompkit-fp72.135.3.50 [b], J-2026-10-25-107:
+no worker picks up a bead that does not pass bead lint): `--claim`, or
+`--status in_progress` / `-s in_progress`. A claim on a bead that fails any
+check is refused (exit 4), and so is a claim the gate cannot judge. Other
+workflow flags (--priority/--assignee/--owner, parking with --status open)
+and edge flags (--parent) never newly fail the gated checks and pass through.
+`br update` takes several ids; every id is judged, so a passing first id
+cannot carry a failing second one through.
 
-Repair admission (LINTREPAIR ompkit-fp72.135.3.50): a content edit to a bead
-that already fails is admitted when the checks it fails afterwards are a
+Repair admission (LINTREPAIR ompkit-fp72.135.3.50 [a]): a content edit to a
+bead that already fails is admitted when the checks it fails afterwards are a
 strict subset of the checks it fails now (it repairs something and breaks
-nothing), so a description repair is not frozen behind a failure only a
-different fix can clear. It never applies when the same command carries
---claim or --status: those moves are judged exactly as before.
+nothing), so a failing bead is repaired without claiming it. It never applies
+when the same command carries --claim or --status.
 
 `--status in_review` (ACPHASE1 ompkit-9e9w6 + PREGRADE1 ompkit-3s6d2): for
 a bead created at or after ac_phase.AC_PHASE_CUTOVER the move is also
@@ -74,30 +79,66 @@ def split_csv(values: list[str] | None) -> list[str]:
     return out
 
 
+# Every `br update` option that consumes a value (br 0.6), so intermixed
+# parsing never mistakes a value such as `--actor NAME` for a bead id.
+BR_UPDATE_VALUE_FLAGS = (
+    "--design", "--prerequisites", "--check-acceptance", "--uncheck-acceptance",
+    "--notes", "--append-notes", "--transition-comment", "-p", "--priority",
+    "--assignee", "--owner", "--if-unchanged", "--due", "--defer", "--estimate",
+    "--parent", "--external-ref", "--source-repo", "--source-repo-path",
+    "--agent-context", "--session", "--agent-name", "--harness", "--model",
+    "--db", "--actor", "--lock-timeout",
+)
+
+
+def native_status(value: str) -> str:
+    """The status native br stores for a --status value (br 0.7.4, measured 2026-10-26):
+    case-insensitive, with `inprogress` as an alias of in_progress. Any other spelling
+    (in-progress, inreview, wip) is stored as a custom status, not a known one."""
+    lowered = value.lower()
+    return "in_progress" if lowered in ("in_progress", "inprogress") else lowered
+
+
 def parse_update(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument("subcommand", nargs="?")
-    parser.add_argument("bead_id", nargs="?")
-    parser.add_argument("--status")
+    parser.add_argument("bead_ids", nargs="*")
+    parser.add_argument("-s", "--status")
     parser.add_argument("--claim", action="store_true")
+    # br's flag-only short options, declared so combined forms (-qs in_progress,
+    # -qsin_progress, -vqs ...) split the way native br splits them.
+    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument("--title")
     parser.add_argument("-d", "--description", "--body", dest="description")
     parser.add_argument("--description-file")
     parser.add_argument("--acceptance-criteria", "--acceptance",
                         dest="acceptance")
     parser.add_argument("--add-acceptance", action="append", default=[])
-    parser.add_argument("--set-labels")
+    parser.add_argument("--set-labels", "--labels")
     parser.add_argument("--add-label", action="append", default=[])
     parser.add_argument("--remove-label", action="append", default=[])
     parser.add_argument("-t", "--type")
-    args, _ = parser.parse_known_args(argv)
+    for flag in BR_UPDATE_VALUE_FLAGS:
+        parser.add_argument(flag, dest="ignored_" + flag.lstrip("-").replace("-", "_"))
+    args, _ = parser.parse_known_intermixed_args(argv)
+    if args.status is not None:
+        args.status = native_status(args.status)
+    args.bead_id = args.bead_ids[0] if args.bead_ids else None
     return args
+
+
+def is_claim_move(args: argparse.Namespace) -> bool:
+    """A move that starts work on the bead: J-107 requires a lint PASS first.
+    The status is already in native br's spelling (parse_update)."""
+    return bool(args.claim) or args.status == "in_progress"
 
 
 def has_content_flags(args: argparse.Namespace) -> bool:
     # TIMEAC1 is a lifecycle gate: review entry is linted even when the
-    # mutation contains workflow-only flags.
+    # mutation contains workflow-only flags. CLAIMLINT: so is a claim move.
     return any([
+        is_claim_move(args),
         args.status == "in_review",
         args.title is not None,
         args.description is not None,
@@ -214,19 +255,44 @@ def main(argv: list[str]) -> int:
     project = os.environ.get("BR_UPDATE_PROJECT", os.getcwd())
     db = os.environ.get("BR_UPDATE_DB", "")
     args = parse_update(argv)
-    if args.subcommand != "update" or not args.bead_id:
+    if args.subcommand != "update" or not args.bead_ids:
         return 0
     if not has_content_flags(args):
         return 0
+    claim = is_claim_move(args)
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
     try:
         from bead_lint import lint_bead_failures
         import ac_phase
-        live = show_bead(real, project, db, args.bead_id)
+        byid = tracker_ids(real, project, db) | set(args.bead_ids)
+    except Exception as exc:
+        return unverified(exc, claim, args.bead_ids)
+    # br update takes several ids: every one is judged, and the first refusal wins.
+    for bead_id in args.bead_ids:
+        rc = judge(bead_id, args, claim, real, project, db, byid, lint_bead_failures, ac_phase)
+        if rc != 0:
+            return rc
+    return 0
+
+
+def unverified(exc: Exception, claim: bool, bead_ids: list[str]) -> int:
+    if claim:
+        # CLAIMLINT: a claim needs a PASS, so a gate that cannot judge it refuses.
+        print(f"br-shim: LINT_REFUSED LINT_UNAVAILABLE: this claim on {','.join(bead_ids)} "
+              f"cannot be admitted because bead-lint could not run ({exc}); retry once the "
+              f"tracker is readable", file=sys.stderr)
+        return 4
+    print(f"br-shim: LINT_GATE_UNVERIFIED {exc}", file=sys.stderr)  # fail OPEN for content edits
+    return 3
+
+
+def judge(bead_id: str, args: argparse.Namespace, claim: bool, real: str, project: str,
+          db: str, byid: set[str], lint_bead_failures, ac_phase) -> int:
+    try:
+        live = show_bead(real, project, db, bead_id)
         bead = prospective(live, args, project)
-        byid = tracker_ids(real, project, db) | {bead["id"]}
         failures = lint_bead_failures(bead, byid)
         # LINTREPAIR: the live bead's own failures, judged the same way, are the
         # baseline a repair is measured against (content edits only).
@@ -235,9 +301,8 @@ def main(argv: list[str]) -> int:
         admission = (ac_phase.in_review_admission(
             bead, repo=tracker_repo(project, db or os.environ.get("BEADS_DB", "")))
             if args.status == "in_review" else None)
-    except Exception as exc:  # fail OPEN on probe failure, never refuse blind
-        print(f"br-shim: LINT_GATE_UNVERIFIED {exc}", file=sys.stderr)
-        return 3
+    except Exception as exc:
+        return unverified(exc, claim, [bead_id])
     details: list[str] = []
     if admission is not None:
         if admission["notice"]:
@@ -261,6 +326,14 @@ def main(argv: list[str]) -> int:
                   f"{','.join(sorted(after))}, so a claim or review move stays refused until those pass",
                   file=sys.stderr)
             return 0
+    if failures and claim:
+        print(f"br-shim: LINT_REFUSED {','.join(failures)}: this claim would start work on "
+              f"{bead['id']} while it fails bead-lint (J-2026-10-25-107); repair it first "
+              f"(a content-only edit that clears a failure and adds none is admitted), then claim",
+              file=sys.stderr)
+        for line in details:
+            print(line, file=sys.stderr)
+        return 4
     if failures:
         print(f"br-shim: LINT_REFUSED {','.join(failures)}: this edit "
               f"would leave {bead['id']} failing bead-lint or in_review "

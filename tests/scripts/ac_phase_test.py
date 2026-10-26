@@ -418,9 +418,13 @@ class InReviewCli(unittest.TestCase):
         self.assertIn("LINT_GATE_UNVERIFIED", err)
 
     def test_workflow_moves_stay_ungated(self) -> None:
+        # A non-claim workflow move never meets the review gate. A move to in_progress is a
+        # claim and needs a lint PASS (CLAIMLINT ompkit-fp72.135.3.50 [b], br_update_lint_repair_test).
         bead = base_bead(acceptance_criteria="- [ ] untagged")
-        rc, err = self.run_gate(bead, None, argv=["update", "acp-1", "--status", "in_progress"])
-        self.assertEqual((rc, err), (0, ""))
+        for flags in (["--status", "blocked"], ["--priority", "1"]):
+            with self.subTest(flags=flags):
+                rc, err = self.run_gate(bead, None, argv=["update", "acp-1", *flags])
+                self.assertEqual((rc, err), (0, ""))
 
 
 class CreateAdmission(unittest.TestCase):
