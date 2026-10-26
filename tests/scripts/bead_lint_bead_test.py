@@ -23,7 +23,9 @@ sys.path.insert(0, str(SCRIPTS))
 import kitlib_tmp  # noqa: E402  (owned temp dirs: removed on exit and HUP/INT/TERM)
 from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 
-BEAD_LINT = str(SCRIPTS / "bead_lint.py")
+# The literal repo path lets scripts/affected-tests.ts select this suite when bead_lint.py
+# changes; a pathlib join hides it from the focused gate (ompkit-fp72.135.3.52).
+BEAD_LINT = str(ROOT / "scripts/bead_lint.py")
 FAKE_BR = """#!/usr/bin/env python3
 import json, os, sys
 if os.environ.get("FAKE_BR_FAIL"):
