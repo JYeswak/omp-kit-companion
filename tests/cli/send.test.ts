@@ -929,6 +929,21 @@ test("SENDANY1 queues a working seat while its session file is temporarily unava
 	expect(result.queue_states).toEqual(["QUEUED", "DELIVERED"]);
 	expect(carlyRuns(fake)).toBe(1);
 });
+test("SENDANY1 queues when Tern is working but the session oracle state is unknown", async () => {
+	const fake = ternFake({ respond: journalsUser() });
+	let observations = 0;
+	const result = await deliverTern(fake, "hello", { untilDeliveredMs: 5, observe: async (seat) => {
+		observations++;
+		if (observations === 1)
+			return { ...ternIdle, state: "UNKNOWN", working: true, oracleBusy: null, runtimeBinding: null,
+				reason: "SESSION_ORACLE_STATE_UNKNOWN" };
+		return idleOf(fake)(seat);
+	} });
+	expect(result.status).toBe("OK");
+	expect(result.queue_states).toEqual(["QUEUED", "DELIVERED"]);
+	expect(carlyRuns(fake)).toBe(1);
+});
+
 
 test("SENDANY1 unknown active branch expires without sending while Tern still reports working", async () => {
 	const fake = ternFake();

@@ -1305,7 +1305,7 @@ export async function deliverToTernSeat(input: {
 	const waitsForTurnBoundary = () => observation.state === "BUSY"
 		|| (observation.state === "UNKNOWN" && observation.working === true
 			&& (observation.reason === "SESSION_TURN_IN_FLIGHT" || observation.reason === "ACTIVE_BRANCH_UNAVAILABLE"
-				|| observation.reason === "SESSION_FILE_UNAVAILABLE"));
+				|| observation.reason === "SESSION_FILE_UNAVAILABLE" || observation.reason === "SESSION_ORACLE_STATE_UNKNOWN"));
 	queued = waitsForTurnBoundary() && busyRetries > 0;
 	for (let retry = 0; waitsForTurnBoundary() && retry < busyRetries; retry++) {
 		const remainingMs = untilDeliveredDeadline - now();
