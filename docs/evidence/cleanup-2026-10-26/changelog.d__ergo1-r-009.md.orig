@@ -1,0 +1,2 @@
+### Changed
+- Discovery now declares each route's machine-output mode and schema reference; v1 discovery schemas validate nested command, flag and exit-code fields while accepting additive fields.

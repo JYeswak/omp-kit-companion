@@ -1,0 +1,116 @@
+/** R-009 passes when existing v1 discovery schemas validate real safe-route envelopes,
+ * reject missing/nested wrong-type/enum values, accept additive fields, and declare
+ * envelope versus JSONL versus raw output. Only discovery/completion/examples execute. */
+import { expect, test } from "bun:test";
+import { join, resolve } from "node:path";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+
+const entry = resolve(import.meta.dir, "../../src/cli.ts");
+type JsonObject = Record<string, unknown>;
+function object(value: unknown): JsonObject {
+	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected an object");
+	return value as JsonObject;
+}
+function run(args: string[], root: string): JsonObject {
+	const child = Bun.spawnSync([process.execPath, entry, ...args, "--json"], {
+		cwd: root, env: { ...process.env, HOME: root,
+			XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"),
+			XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache") },
+		stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 15_000,
+	});
+	expect(child.exitCode).toBe(0);
+	expect(child.stderr.toString()).toBe("");
+	return object(JSON.parse(child.stdout.toString()));
+}
+
+// The published schemas use this dependency-free JSON Schema subset. Unknown
+// annotation keywords remain additive; structural constraints are evaluated recursively.
+function valid(value: unknown, definition: unknown): boolean {
+	const schema = object(definition);
+	if (Array.isArray(schema.enum) && !schema.enum.some(item => JSON.stringify(item) === JSON.stringify(value))) return false;
+	if (Array.isArray(schema.anyOf) && !schema.anyOf.some(item => valid(value, item))) return false;
+	if (Array.isArray(schema.allOf) && !schema.allOf.every(item => valid(value, item))) return false;
+	if (schema.type) {
+		const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+		const actual = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+		if (!types.includes(actual) && !(types.includes("integer") && typeof value === "number" && Number.isInteger(value))) return false;
+	}
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		const record = object(value);
+		if (Array.isArray(schema.required) && !schema.required.every(key => typeof key === "string" && Object.hasOwn(record, key))) return false;
+		if (schema.properties) for (const [key, child] of Object.entries(object(schema.properties))) {
+			if (Object.hasOwn(record, key) && !valid(record[key], child)) return false;
+		}
+	}
+	if (Array.isArray(value) && schema.items && !value.every(item => valid(item, schema.items))) return false;
+	return true;
+}
+
+test("R-009 published schemas constrain real safe-route data and nested discovery fields", () => {
+	const tmp = ownedTmp("ergo1-r-009");
+	try {
+		const schemaEnvelope = run(["schema"], tmp.path);
+		const schema = object(schemaEnvelope.data);
+		const definitions = object(schema.command_data);
+		expect(schema.schema_version).toBe("1");
+		for (const [route, argv] of [
+			["schema", ["schema"]], ["capabilities", ["capabilities"]],
+			["completion bash", ["completion", "bash"]],
+			["examples memory-off", ["examples", "memory-off"]],
+		] as const) {
+			const envelope = run([...argv], tmp.path);
+			expect(valid(envelope, schema.envelope)).toBe(true);
+			expect(valid(envelope.data, definitions[route])).toBe(true);
+			const missing = { ...object(envelope.data) };
+			const required = object(definitions[route]).required;
+			expect(Array.isArray(required)).toBe(true);
+			for (const key of required as string[]) {
+				const negative = { ...missing }; delete negative[key];
+				expect(valid(negative, definitions[route])).toBe(false);
+			}
+			expect(valid({ ...missing, future_optional_field: { enabled: true } }, definitions[route])).toBe(true);
+			const badMeta = { ...envelope, meta: { ...object(envelope.meta), verification: "INVENTED" } };
+			expect(valid(badMeta, schema.envelope)).toBe(false);
+			expect(valid("raw child output", schema.envelope)).toBe(false);
+		}
+		const capabilities = object(run(["capabilities"], tmp.path).data);
+		const capabilitySchema = definitions.capabilities;
+		// Current schema says only array/object here: these negatives expose the
+		// actual missing nested contract rather than inventing new payload fields.
+		expect(valid({ ...capabilities, commands: [42] }, capabilitySchema)).toBe(false);
+		expect(valid({ ...capabilities, global_flags: [{ name: 42 }] }, capabilitySchema)).toBe(false);
+		expect(valid({ ...capabilities, exit_codes: { ...object(capabilities.exit_codes), success: "zero" } }, capabilitySchema)).toBe(false);
+		const completion = object(run(["completion", "bash"], tmp.path).data);
+		expect(valid({ ...completion, shell: "not-a-shell" }, definitions["completion bash"])).toBe(false);
+		expect(valid({ ...completion, text: 42 }, definitions["completion bash"])).toBe(false);
+	} finally { tmp.cleanup(); }
+}, 120_000);
+
+test("R-009 every discovered route declares its actual output mode", () => {
+	const tmp = ownedTmp("ergo1-r-009-modes");
+	try {
+		for (const surface of ["schema", "capabilities"]) {
+			const data = object(run([surface], tmp.path).data);
+			function check(commands: unknown, prefix = ""): void {
+				if (!Array.isArray(commands)) throw new Error("commands must be an array");
+				for (const value of commands) {
+					const row = object(value);
+					const path = `${prefix}${row.name}`;
+					const contract = object(row.output_contract);
+					expect(contract.mode).toBe(path === "heavy" ? "raw" : "envelope");
+					if (contract.mode === "envelope") expect(contract.schema_id).toBe(`#/command_data/${path}`);
+					expect(Array.isArray(contract.volatile_paths)).toBe(true);
+					if (row.subcommands) check(row.subcommands, `${path} `);
+				}
+			}
+			check(data.commands);
+			// Planted negatives mutate only the observed discovery response, in memory.
+			const missing = structuredClone(data.commands) as JsonObject[];
+			delete missing[0]!.output_contract;
+			expect(() => check(missing)).toThrow();
+			const wrong = structuredClone(data.commands) as JsonObject[];
+			object(wrong[0]!.output_contract).mode = "jsonl";
+			expect(() => check(wrong)).toThrow();
+		}
+	} finally { tmp.cleanup(); }
+}, 40_000);

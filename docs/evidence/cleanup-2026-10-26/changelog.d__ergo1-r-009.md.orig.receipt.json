@@ -1,0 +1,12 @@
+{
+  "archived_at": "2026-10-26T21:14:34Z",
+  "bead": "ompkit-fp72.19.1.11",
+  "bytes": 197,
+  "dest": "docs/evidence/cleanup-2026-10-26/changelog.d__ergo1-r-009.md.orig",
+  "git_head": "4e4c1c31809e3e3252396c862b5e7dd425c98829",
+  "path": "changelog.d/ergo1-r-009.md",
+  "route": "archive then restore/remove",
+  "secrets": false,
+  "sha256": "3a24eb4e3ddbdcdee76cef902e574c1bc06abcd6b09565826cba4953cdf7ee8a",
+  "truncated": false
+}

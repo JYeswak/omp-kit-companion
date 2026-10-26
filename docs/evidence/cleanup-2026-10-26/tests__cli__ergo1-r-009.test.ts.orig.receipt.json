@@ -1,0 +1,12 @@
+{
+  "archived_at": "2026-10-26T21:14:34Z",
+  "bead": "ompkit-fp72.19.1.11",
+  "bytes": 6263,
+  "dest": "docs/evidence/cleanup-2026-10-26/tests__cli__ergo1-r-009.test.ts.orig",
+  "git_head": "4e4c1c31809e3e3252396c862b5e7dd425c98829",
+  "path": "tests/cli/ergo1-r-009.test.ts",
+  "route": "archive then restore/remove",
+  "secrets": false,
+  "sha256": "0a3cdcc615992b907898f41b2369b4733f64e5c7342b2b6261c4b56d00b21da8",
+  "truncated": false
+}
