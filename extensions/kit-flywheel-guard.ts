@@ -2050,6 +2050,53 @@ function updateLintArgv(args: string[]): string[] | null {
 	return content ? [...positional, ...flags] : null;
 }
 
+/** GAPFADE1: producer adapters only; all prose rules live in the commit member. */
+export async function checkGapMentions(event: FlywheelToolCallEvent, exec: FlywheelExec, cwd: string): Promise<FlywheelToolCallResult | undefined> {
+	const texts: string[] = [];
+	if (event.toolName === "bash") {
+		const command = field(event.input, "command");
+		if (typeof command === "string") {
+			for (const line of brCommandLines(command, cwd, homedir())) {
+				const args = line.argv.slice(1);
+				const at = args.indexOf("comments");
+				if (at < 0 || args[at + 1] !== "add") continue;
+				const tail = args.slice(at + 3);
+				const positional: string[] = [];
+				let explicit: string | undefined;
+				for (let i = 0; i < tail.length; i += 1) {
+					const word = tail[i]!;
+					const eq = word.indexOf("=");
+					const key = eq < 0 ? word : word.slice(0, eq);
+					const value = () => eq < 0 ? tail[++i] : word.slice(eq + 1);
+					if (["--message", "--content", "-m"].includes(key)) explicit = value();
+					else if (["--file", "-f"].includes(key)) {
+						const path = value();
+						try { explicit = readFileSync(resolve(line.cwd, path ?? ""), "utf8"); }
+						catch { return { block: true, reason: "GAP_SCAN_UNVERIFIED: cannot read comment file before mutation" }; }
+					} else if (["--author", "--actor", "--db", "--lock-timeout"].includes(key)) value();
+					else if (!word.startsWith("-")) positional.push(word);
+				}
+				const text = explicit ?? positional.join(" ");
+				if (text) texts.push(text);
+			}
+		}
+	}
+	let mail: unknown = event.input;
+	if (event.toolName === "write" && String(field(event.input, "path")).includes("send_message")) {
+		try { mail = JSON.parse(String(field(event.input, "content"))); } catch { mail = null; }
+	}
+	const subject = field(mail, "subject");
+	if ((String(event.toolName).includes("send_message") || event.toolName === "write")
+		&& typeof subject === "string" && /\b(?:DONE|PROGRESS)\b/.test(subject)) texts.push(subject);
+	for (const text of texts) {
+		const scanner = fileURLToPath(new URL("../scripts/check-gap-mention.sh", import.meta.url));
+		const result = await exec("sh", [scanner, "--findings-text", text], { cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+		if (result.code !== 0 || result.killed) return { block: true, reason: "GAP_SCAN_UNVERIFIED: shared gap scanner could not judge producer text. " + (result.stderr ?? "") };
+		if (result.stdout.includes("GAP_UNFILED")) return { block: true, reason: result.stdout };
+	}
+	return undefined;
+}
+
 /**
  * LINTEVERY1 (ompkit-nskhp): a bash call running `br create` or `br update`
  * is evaluated by the release-shipped bead-lint helper before it runs, in
@@ -2283,6 +2330,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
+			const gap = await checkGapMentions(event, pi.exec, ctx.cwd);
+			if (gap !== undefined) return gap;
 			const lint = await checkBeadLint(event, { exec: pi.exec, home, sessionCwd: ctx.cwd, scriptsDir: deps.lintScriptsDir });
 			if (lint?.block === true) return lint;
 			if (lint?.additionalContext) ctx.ui?.notify(lint.additionalContext, "warning");
