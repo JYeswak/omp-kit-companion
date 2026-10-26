@@ -26,7 +26,10 @@ function nativeClaimFixture() {
 	const init = run(["init", "--prefix", "gc"]);
 	if (init.code !== 0) throw new Error(init.stdout + init.stderr);
 	const create = () => {
-		const result = run(["create", "--title", "Native claim consumer"]);
+		// A claim needs a bead-lint PASS (CLAIMLINT ompkit-fp72.135.3.50 [b]), so the claim target is lint-clean.
+		const result = run(["create", "--title", "Native claim consumer", "--type", "task", "--labels", "admission",
+			"--description", "WHAT: claim a native bead.\n\nWHY: claims must reach the native award.",
+			"--acceptance-criteria", "- [ ] [build] AC1: planted negative: a competing claim is refused"]);
 		if (result.code !== 0) throw new Error(result.stdout + result.stderr);
 		const value: unknown = JSON.parse(result.stdout);
 		if (typeof value !== "object" || value === null || !("id" in value) || typeof value.id !== "string") throw new Error("native create has no id");
