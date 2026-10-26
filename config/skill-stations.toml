@@ -323,7 +323,7 @@ detector = "Compare regex AST/call sites in base and candidate: JS/TS regex lite
 skills = ["regex-engineering"]
 artifact = "Native-runtime semantics contract, positive/negative/boundary/adversarial conformance output with exit, actual caller integration and bounded resource findings (skill sections 1-4 and done bar); proposed application record binds these to change revision."
 mandatory = true
-rule = "/Users/josh/.agents/AGENTS.md §Regex (Joshua 2026-10-03): every regex, including command patterns, goes through regex-engineering."
+rule = "~/.agents/AGENTS.md §Regex (Joshua 2026-10-03): every regex, including command patterns, goes through regex-engineering."
 skill_source = "regex-engineering/SKILL.md:sections 1-4, Done bar"
 
 [[row]]
@@ -333,7 +333,7 @@ detector = "Read complete timing receipts for tests, gates and commands; duratio
 skills = ["profiling-software-performance", "extreme-software-optimization"]
 artifact = "tests/artifacts/perf/ or equivalent: scenario/fingerprint, repeated baseline, ranked hotspot table and hypothesis ledger FIRST; then scored Opportunity Matrix >=2.0, one-lever behavior/isomorphism proof, rollback and paired incumbent/candidate measurements. Measurement-only investigation stops before optimizer edits."
 mandatory = true
-rule = "/Users/josh/.agents/AGENTS.md §Slow paths (Joshua 2026-10-03): any timeout, slow test/command or make-this-faster request uses profiling-software-performance then extreme-software-optimization, in that order."
+rule = "~/.agents/AGENTS.md §Slow paths (Joshua 2026-10-03): any timeout, slow test/command or make-this-faster request uses profiling-software-performance then extreme-software-optimization, in that order."
 skill_source = "profiling-software-performance/SKILL.md:1-47; extreme-software-optimization/SKILL.md:1-41,105-113"
 
 [[row]]
@@ -596,5 +596,5 @@ detector = "Read repo-bound work-order kind=performance/optimization, or recorde
 skills = ["profiling-software-performance", "extreme-software-optimization"]
 artifact = "Profile-first ranked hotspots/fingerprint/hypothesis ledger, then Opportunity Matrix >=2.0 and one-lever paired incumbent/candidate behavior and timing evidence; stop at profiling handoff if investigation only."
 mandatory = true
-rule = "/Users/josh/.agents/AGENTS.md §Slow paths (Joshua 2026-10-03): any slow path or make-this-faster request requires profiling-software-performance then extreme-software-optimization."
+rule = "~/.agents/AGENTS.md §Slow paths (Joshua 2026-10-03): any slow path or make-this-faster request requires profiling-software-performance then extreme-software-optimization."
 skill_source = "profiling-software-performance/SKILL.md:1-47; extreme-software-optimization/SKILL.md:1-41,105-113"
