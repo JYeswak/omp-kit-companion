@@ -417,6 +417,12 @@ wait "$!" || :
 gate_rc=$(cat "$archive_root/gate.rc" 2>/dev/null) || gate_rc=1
 case "$gate_rc" in ''|*[!0-9]*) gate_rc=1 ;; esac
 [ "$gate_rc" = 0 ] || gate_red=1
+# CI-SPEED (ompkit-bp50d): a green gate's log is the only record of its phase anatomy and of the
+# full-suite join decision; keep it beside the fresh-gate ledger, local to this checkout, never committed.
+log_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || log_git=""
+if [ -f "$archive_root/gate.log" ] && [ -n "$log_git" ] && mkdir -p "$log_git/omp-kit/gate-logs" 2>/dev/null; then
+	cp "$archive_root/gate.log" "$log_git/omp-kit/gate-logs/${local_sha:-unknown}.$(date -u +%Y%m%dT%H%M%SZ).log" 2>/dev/null || :
+fi
 trap - EXIT
 cleanup
 exit "$gate_rc"
