@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import kitAgentMailGuard, {
 	ACK_VOCABULARY,
@@ -128,7 +128,7 @@ function fleetRespond(rosters: Record<string, TestRosterRow[]>, ...ids: string[]
 	};
 }
 
-async function createHost(deps: AgentMailGuardDeps = {}, respond: Responder = brKnows(BEAD)): Promise<Host> {
+async function createHost(deps: AgentMailGuardDeps & { sessionFile?: string } = {}, respond: Responder = brKnows(BEAD)): Promise<Host> {
 	const handlers: ToolHandler[] = [];
 	const resultHandlers: ResultHandler[] = [];
 	const execs: ExecCall[] = [];
@@ -144,10 +144,17 @@ async function createHost(deps: AgentMailGuardDeps = {}, respond: Responder = br
 			return respond(call);
 		},
 	};
-	await kitAgentMailGuard(pi, { env: { AGENT_NAME: "PlumRaven" }, home: join(base, "no-home"), mailWake: recordingWake(), ...deps });
+	const env: Record<string, string | undefined> = { TMUX_PANE: "%9", ...(deps.env ?? { AGENT_NAME: "PlumRaven" }) };
+	const home = deps.home ?? freshDir(base, "bound-sender-");
+	await kitAgentMailGuard(pi, { mailWake: recordingWake(), ...deps, env, home });
 	const call: Host["call"] = async (event, cwd, toolCallId) => {
+		if (deps.home === undefined && env.AGENT_NAME && env.TMUX_PANE) {
+			const identity = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(cwd).digest("hex").slice(0, 12));
+			mkdirSync(identity, { recursive: true });
+			writeFileSync(join(identity, env.TMUX_PANE.slice(1)), JSON.stringify({ name: env.AGENT_NAME }));
+		}
 		const id = toolCallId === null ? undefined : toolCallId ?? `dispatch-${++dispatch}`;
-		const ctx: FlywheelContext = { cwd, isIdle: () => true };
+		const ctx = { cwd, isIdle: () => true, sessionManager: { getSessionFile: () => deps.sessionFile } };
 		let result: unknown;
 		for (const handler of handlers) result = (await handler({ type: "tool_call", ...event, toolCallId: id }, ctx)) ?? result;
 		return result as FlywheelToolCallResult | undefined;
@@ -296,10 +303,7 @@ test("identity: with no AGENT_NAME the Agent Mail pane identity names the seat; 
 	expect(await paned.mail(cwd, "send_message", send({ sender_name: "RedCat" }))).toBeUndefined();
 	expect(code(await paned.mail(cwd, "send_message", send({ sender_name: "PlumRaven" })))).toBe("AM_IDENTITY_MISMATCH");
 	const anonymous = await createHost({ env: {}, home });
-	expect(code(await anonymous.mail(cwd, "send_message", send({ sender_name: "RedCat" })))).toBe("AM_IDENTITY_UNKNOWN");
-	// An AGENT_NAME wins over a pane identity: the explicit launch name is the seat.
-	const both = await createHost({ env: { AGENT_NAME: "BlueLake", TMUX_PANE: "%7" }, home });
-	expect(code(await both.mail(cwd, "send_message", send({ sender_name: "RedCat" })))).toBe("AM_IDENTITY_MISMATCH");
+	expect(code(await anonymous.mail(cwd, "send_message", send({ sender_name: "RedCat" })))).toBe("IDENTITY_UNBOUND");
 });
 
 // --- subject vocabulary ------------------------------------------------------------------------
@@ -793,4 +797,86 @@ test("wake: control, a repo that did not opt into the fleet plans no wake", asyn
 	const h = await createHost({ mailWake: wake });
 	expect(await h.mail(fleetRepo(false), "send_message", send(), "send-4")).toBeUndefined();
 	expect(wake.before).toHaveLength(0);
+});
+
+test.each(["register_agent", "macro_start_session"])("MAILWAKE1.2 refuses unknown %s arguments before registration", async tool => {
+	const h = await createHost();
+	const cwd = fleetRepo();
+	const args = tool === "register_agent"
+		? { project_key: BACKEND, program: "omp", model: "test", name: "PlumRaven", unexpected_registration_key: true }
+		: { human_key: BACKEND, program: "omp", model: "test", agent_name: "PlumRaven", unexpected_registration_key: true };
+	expect(code(await h.mail(cwd, tool, args))).toBe("AM_REGISTRATION_SCHEMA");
+	expect(h.execs).toEqual([]);
+});
+
+test("MAILWAKE1.2 an environment name cannot replace a missing sender pane identity", async () => {
+	const home = freshDir(base, "unbound-sender-");
+	const h = await createHost({ home, env: { AGENT_NAME: "PlumRaven", TMUX_PANE: "%9" } });
+	const verdict = await h.mail(fleetRepo(), "send_message", send());
+	expect(code(verdict)).toBe("IDENTITY_UNBOUND");
+	expect(verdict?.reason).toContain("register_agent");
+});
+
+test("MAILWAKE1.2 macro registration binds the actual Tern session rather than another block", async () => {
+	const cwd = fleetRepo();
+	const home = freshDir(base, "macro-caller-");
+	const sessionFile = join(home, "current-session.jsonl");
+	const h = await createHost({
+		home, env: { AGENT_NAME: "PlumRaven" }, sessionFile, mailWake: undefined,
+	}, call => call.command === "tern"
+		? { code: 0, stdout: JSON.stringify({
+			sessions: [{ tabs: [{ name: "fixture", blocks: [{ id: 91, cwd, live: true }, { id: 92, cwd, live: true }] }] }],
+			panes: [{ pane: 91, cwd, omp_session_file: sessionFile }, { pane: 92, cwd, omp_session_file: join(home, "other.jsonl") }],
+		}) }
+		: { code: 127, stdout: "", stderr: "unexpected process" });
+	const args = { human_key: cwd, program: "omp", model: "test", agent_name: "PlumRaven" };
+	const patch = await h.mail(cwd, "macro_start_session", args);
+	const input = patch && "input" in patch ? patch.input : undefined;
+	const content = input && typeof input === "object" && "content" in input ? input.content : undefined;
+	const rewritten = JSON.parse(String(content));
+	expect(rewritten.pane_id).toBe("tern:91");
+	expect(rewritten.agent_name).toBe("PlumRaven");
+	const wrong = await h.mail(cwd, "macro_start_session", { ...args, pane_id: "tern:92" });
+	expect(code(wrong)).toBe("IDENTITY_UNBOUND");
+	const borrowed = await h.mail(cwd, "macro_start_session", { ...args, agent_name: "BlueLake" });
+	expect(code(borrowed)).toBe("AM_IDENTITY_MISMATCH");
+});
+
+test("MAILWAKE1.2 a persisted Tern send records its row, and removing its identity refuses the next send", async () => {
+	const cwd = fleetRepo();
+	const home = freshDir(base, "tern-sender-");
+	const sessionFile = join(home, "sender-session.jsonl");
+	const identityDir = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(cwd).digest("hex").slice(0, 12));
+	mkdirSync(identityDir, { recursive: true });
+	const identityFile = join(identityDir, "tern-91");
+	writeFileSync(identityFile, JSON.stringify({ name: "PlumRaven" }));
+	const respond = fleetRespond(defaultRosters());
+	const h = await createHost({ home, env: { AGENT_NAME: "PlumRaven" }, sessionFile, mailWake: undefined },
+		call => call.command === "tern" ? { code: 0, stdout: JSON.stringify({
+			sessions: [{ tabs: [{ name: "fixture", blocks: [{ id: 91, cwd, live: true }] }] }],
+			panes: [{ pane: 91, cwd, omp_session_file: sessionFile }],
+		}) } : respond(call));
+	expect(await h.mail(cwd, "send_message", send({ to: ["BlueLake"], cc: [] }), "tern-send")).toBeUndefined();
+	await h.result(cwd, "tern-send", [{ type: "text", text: JSON.stringify({
+		deliveries: [{ project: BACKEND, payload: { id: 8126, to: ["BlueLake"] } }],
+	}) }]);
+	const rows = readFileSync(join(home, ".local", "state", "omp-kit", "mail-wake.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(rows).toContainEqual(expect.objectContaining({ message_id: 8126, recipient: "BlueLake", status: "UNSIGNALED" }));
+	rmSync(identityFile);
+	expect(code(await h.mail(cwd, "send_message", send(), "unbound-after-delete"))).toBe("IDENTITY_UNBOUND");
+});
+
+test("MAILWAKE1.2 an uncorrelatable send is refused before persistence", async () => {
+	const h = await createHost();
+	expect(code(await h.mail(fleetRepo(), "send_message", send(), null))).toBe("AM_CALL_ID_REQUIRED");
+});
+
+test("MAILWAKE1.2 a real tmux identity remains valid with an OMP session outside Tern", async () => {
+	const cwd = fleetRepo();
+	const home = freshDir(base, "tmux-caller-");
+	const dir = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(cwd).digest("hex").slice(0, 12));
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "7"), JSON.stringify({ name: "RedCat" }));
+	const h = await createHost({ env: { TMUX_PANE: "%7" }, home, sessionFile: join(home, "tmux-session.jsonl") });
+	expect(await h.mail(cwd, "send_message", send({ sender_name: "RedCat" }))).toBeUndefined();
 });

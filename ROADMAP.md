@@ -100,6 +100,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 
 | Item | Tracking |
 |---|---|
+| Mail registration and sending use actual caller-pane identity, strict registration keys, and native send/wake correlation. Guard/waker source controls pass 64/0; the separate orchestration audit's worker and chief consumers pass 49 focused controls. Loaded-chief delivery, actual default-macro registration and independent published-original acceptance remain unverified; no release or live claim | ompkit-uk9wn.2 |
 | Native `omp-kit tern` SDK/control integration: command family wired, context-aware bindings and owned native plugin probes; compiled release assets and independent full acceptance remain pending | #102 / ompkit-kdbz.2.13 |
 | FULLRED slice 2: pinned OMP test fixtures and migration/context regressions | ompkit-lrbd.3 (BLOCKED: sbh disk floor; e2e-live file custody) |
 | Candidate CC producer validation consumes generated canonical event and credential rules before append, with typed refusal metadata and finite boundary checks. Required whole-CLI and shell gates remain non-pass; original acceptance, publication and the released live-hour check are not qualified | ompkit-hueaw (BLOCKED: required gates; unpublished candidate) |

@@ -54,6 +54,8 @@ export interface MailWakeDeps {
 }
 
 export interface Seat { name: string; session: string; block: string; repo: string }
+export interface MailCaller { session: string; block: string; repo: string; name: string | null }
+interface LiveBlock { session: string; block: string; cwd: string; sessionFile?: string }
 export interface Parent { name: string; basis: string }
 export type Resolution = { kind: "seat"; seat: Seat } | { kind: "none"; why: string; parent: Parent | null };
 
@@ -67,6 +69,8 @@ export interface MailToolResultPatch { content: unknown[] }
 
 /** The mail wake one guard instance drives: plan before a send, wake after its result. */
 export interface MailWake {
+	/** Current caller selected by its actual OMP session file, never by its claimed name or PID. */
+	caller(sessionFile: string, projectKey: string): Promise<MailCaller | null>;
 	/** One recipient to its live seat, or why there is none plus the parent to re-address to. */
 	resolve(name: string, projectKey: string, blocks?: { session: string; block: string; cwd: string }[] | null): Promise<Resolution>;
 	/** Plans the wake for a send that passed every guard check; an ask with no wake path is refused NO_WAKE_PATH. */
@@ -160,13 +164,15 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 	}
 
 	/** Live Tern blocks: tab name, block id, cwd. Null when Tern cannot be read. */
-	async function liveBlocks(): Promise<{ session: string; block: string; cwd: string }[] | null> {
+	async function liveBlocks(): Promise<LiveBlock[] | null> {
 		let result;
 		try { result = await deps.exec(ternBin, ["inspect", "--json"], { timeout: READ_TIMEOUT_MS }); } catch { return null; }
 		if (result.code !== 0) return null;
 		let parsed: unknown;
 		try { parsed = JSON.parse(result.stdout); } catch { return null; }
-		const out: { session: string; block: string; cwd: string }[] = [];
+		const out: LiveBlock[] = [];
+		const rawPanes = prop(parsed, "panes");
+		const panes: unknown[] = Array.isArray(rawPanes) ? rawPanes : [];
 		const sessions = prop(parsed, "sessions");
 		for (const session of Array.isArray(sessions) ? sessions : []) {
 			const tabs = prop(session, "tabs");
@@ -178,7 +184,9 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 					const id = prop(block, "id");
 					const cwd = prop(block, "cwd");
 					if (prop(block, "live") === false || (typeof id !== "number" && typeof id !== "string") || typeof cwd !== "string") continue;
-					out.push({ session: tabName, block: String(id), cwd });
+					const pane = panes.find(item => String(prop(item, "pane")) === String(id));
+					const sessionFile = prop(pane, "omp_session_file");
+					out.push({ session: tabName, block: String(id), cwd, ...(typeof sessionFile === "string" ? { sessionFile } : {}) });
 				}
 			}
 		}
@@ -222,25 +230,41 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		return null;
 	}
 
+	function identityFor(block: LiveBlock, projectKey: string, expectedName?: string): string | null {
+		const watch = readJson(fleetWatchPath);
+		const others = prop(watch, "chiefs");
+		const chiefs: unknown[] = [prop(watch, "chief"), ...(Array.isArray(others) ? others : [])];
+		const row = chiefs.find(chief => prop(chief, "repo") === projectKey
+			&& typeof prop(chief, "agent") === "string"
+			&& (expectedName === undefined || String(prop(chief, "agent")).toLowerCase() === expectedName.toLowerCase())
+			&& prop(chief, "session") === block.session && prop(chief, "pane") === `tern:${block.block}`
+			&& prop(chief, "cwd") === block.cwd);
+		const identityRepo = row ? String(prop(row, "repo")) : block.cwd;
+		const hash = createHash("sha1").update(identityRepo).digest("hex").slice(0, 12);
+		const bound = identityName(join(home, ".config", "agent-mail", "identity", hash, `tern-${block.block}`));
+		return bound && (!row || bound.toLowerCase() === String(prop(row, "agent")).toLowerCase()) ? bound : null;
+	}
+
+	async function caller(sessionFile: string, projectKey: string): Promise<MailCaller | null> {
+		const blocks = await liveBlocks();
+		if (blocks === null) return null;
+		let found: LiveBlock | null = null;
+		for (const block of blocks) {
+			if (block.sessionFile !== sessionFile) continue;
+			if (found !== null) return null;
+			found = block;
+		}
+		return found ? { session: found.session, block: found.block, repo: found.cwd, name: identityFor(found, projectKey) } : null;
+	}
+
 	/** One recipient to its live seat, or why there is none plus the parent to re-address to. */
 	async function resolve(name: string, projectKey: string, blocks?: { session: string; block: string; cwd: string }[] | null): Promise<Resolution> {
 		const live = blocks === undefined ? await liveBlocks() : blocks;
 		if (live === null) return { kind: "none", why: "Tern could not be read (`tern inspect --json` failed), so no live seat is proven", parent: await parentOf(name, projectKey, null) };
 		const matches: Seat[] = [];
-		// MAILWAKECWD1 (ompkit-774u.38): every configured chief seat, not only the single `chief` row. A chief
-		// launches above its repo (cwd ~/Developer), so its identity file sits under its canonical project's
-		// hash; only a block that matches a configured row exactly (name, tab, block, cwd) may use that hash.
-		const watch = readJson(fleetWatchPath);
-		const chiefRows = [prop(watch, "chief"), ...(Array.isArray(prop(watch, "chiefs")) ? (prop(watch, "chiefs") as unknown[]) : [])]
-			.filter(row => typeof row === "object" && row !== null);
+		// Configured chiefs use canonical-project identities while preserving their actual launch cwd.
 		for (const block of live) {
-			const row = chiefRows.find(chief => typeof prop(chief, "repo") === "string" && prop(chief, "repo") === projectKey
-				&& typeof prop(chief, "agent") === "string" && (prop(chief, "agent") as string).toLowerCase() === name.toLowerCase()
-				&& prop(chief, "session") === block.session && prop(chief, "pane") === `tern:${block.block}`
-				&& prop(chief, "cwd") === block.cwd);
-			const identityRepo = row ? (prop(row, "repo") as string) : block.cwd;
-			const hash = createHash("sha1").update(identityRepo).digest("hex").slice(0, 12);
-			const bound = identityName(join(home, ".config", "agent-mail", "identity", hash, `tern-${block.block}`));
+			const bound = identityFor(block, projectKey, name);
 			if (bound && bound.toLowerCase() === name.toLowerCase()) matches.push({ name: bound, session: block.session, block: block.block, repo: block.cwd });
 		}
 		const seat = matches.find(match => match.repo === projectKey) ?? matches[0];
@@ -357,5 +381,5 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		await Promise.all([...inFlight]);
 	}
 
-	return { resolve, beforeSend, afterSend, settled, ledgerPath };
+	return { caller, resolve, beforeSend, afterSend, settled, ledgerPath };
 }

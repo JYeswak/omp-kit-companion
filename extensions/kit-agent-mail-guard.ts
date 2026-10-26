@@ -76,6 +76,19 @@ const AM_ROSTER_TTL_MS = 60_000;
 const AM_SCAN_TTL_MS = 120_000;
 const SECRET_RULE_REL_PATH = "../rules-fleet/kit-no-plaintext-secret.md";
 
+// The native registration schemas: reject unknown keys before a server can silently discard them.
+const REGISTRATION_KEYS: Record<string, Readonly<Record<string, true>>> = {
+	register_agent: {
+		project_key: true, program: true, model: true, name: true, task_description: true,
+		registration_proof: true, pane_id: true, tmux_socket_path: true, attachments_policy: true, reaper_exempt: true,
+	},
+	macro_start_session: {
+		human_key: true, program: true, model: true, agent_name: true, task_description: true,
+		pane_id: true, registration_proof: true, tmux_socket_path: true, reaper_exempt: true,
+		file_reservation_paths: true, file_reservation_ttl_seconds: true, file_reservation_reason: true, inbox_limit: true,
+	},
+};
+
 /** Subjects that may carry ack_required: a real ask. */
 export const ACK_VOCABULARY: Record<string, true> = { QUESTION: true, BLOCKED: true, APPROVAL: true, DECISION: true, HANDOFF: true };
 /** Every subject starts with one of these (the callback vocabulary, plus the ack asks). */
@@ -93,7 +106,7 @@ export interface AgentMailGuardApi {
 }
 
 /** The two kit-mail-wake entry points the guard drives around one send. */
-export type MailWakeHooks = Pick<MailWake, "beforeSend" | "afterSend">;
+export type MailWakeHooks = Pick<MailWake, "beforeSend" | "afterSend"> & Partial<Pick<MailWake, "caller">>;
 
 export interface AgentMailGuardDeps {
 	env?: Record<string, string | undefined>;
@@ -238,6 +251,22 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	let lastInbox: number | null = null;
 	let lastInboxToolCallId: string | null = null;
 	const wake: MailWakeHooks = deps.mailWake ?? createMailWake({ exec: pi.exec, env, home });
+	let callerResolver = wake.caller;
+
+	function sessionFile(ctx: FlywheelContext): string | null {
+		const manager = prop(ctx, "sessionManager");
+		const getter = prop(manager, "getSessionFile");
+		const file = typeof getter === "function" ? getter.call(manager) : undefined;
+		return typeof file === "string" && file !== "" ? file : null;
+	}
+
+	async function caller(ctx: FlywheelContext, project: string) {
+		const file = sessionFile(ctx);
+		if (!file) return null;
+		callerResolver ??= createMailWake({ exec: pi.exec, env, home }).caller;
+		const seat = await callerResolver(file, project);
+		return seat?.repo === ctx.cwd ? seat : null;
+	}
 
 	function secretScanner(): RegExp[] {
 		scanner ??= ruleConditions(readFileSync(rulePath, "utf8")).map(source => new RegExp(source));
@@ -245,10 +274,15 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 	}
 
 	async function seatNames(ctx: FlywheelContext, projectKey: unknown): Promise<string[]> {
+		const project = typeof projectKey === "string" && projectKey !== "" ? projectKey : ctx.cwd;
+		if (sessionFile(ctx)) {
+			const seat = await caller(ctx, project);
+			if (seat) return seat.name ? [seat.name] : [];
+		}
+		const keys = [ctx.cwd, project];
+		const names = await paneIdentities(pi.exec, env, home, keys);
 		const named = env.AGENT_NAME?.trim();
-		if (named) return [named];
-		const keys = [ctx.cwd, ...(typeof projectKey === "string" && projectKey !== "" ? [projectKey] : [])];
-		return paneIdentities(pi.exec, env, home, keys);
+		return named ? names.filter(name => name.toLowerCase() === named.toLowerCase()) : names;
 	}
 
 	async function resolvesBead(subject: string, cwd: string): Promise<FlywheelToolCallResult | undefined> {
@@ -548,6 +582,17 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		}
 		return notice;
 	}
+	function rewriteArgs(event: FlywheelToolCallEvent, value: Record<string, unknown>): { input: Record<string, unknown> } | undefined {
+		const raw = event.input;
+		if (typeof raw !== "object" || raw === null) return undefined;
+		if (typeof event.toolName === "string" && event.toolName.trim().toLowerCase() === "write") {
+			const content = prop(raw, "content");
+			if (typeof content !== "string" && (typeof content !== "object" || content === null)) return undefined;
+			return { input: { ...raw, content: typeof content === "string" ? JSON.stringify(value) : value } };
+		}
+		return { input: value };
+	}
+
 	/**
 	 * The seat's sender_token, injected into a send the seat already passed every check on.
 	 * Source: AGENT_MAIL_SENDER_TOKEN (the token the seat's registration minted, exported at
@@ -565,37 +610,23 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		if (typeof sender !== "string" || !names.some(name => name.toLowerCase() === sender.trim().toLowerCase())) return undefined;
 		const existing = prop(value, "sender_token");
 		if (typeof existing === "string" && existing.trim() !== "") return undefined;
-		const raw = event.input;
-		if (typeof raw !== "object" || raw === null) return undefined;
-		if (typeof event.toolName === "string" && event.toolName.trim().toLowerCase() === "write") {
-			const content = prop(raw, "content");
-			if (typeof content === "string") {
-				let parsed: unknown;
-				try { parsed = JSON.parse(content); } catch { return undefined; }
-				if (typeof parsed !== "object" || parsed === null) return undefined;
-				return { input: { ...raw, content: JSON.stringify({ ...parsed, sender_token: token }) } };
-			}
-			if (typeof content === "object" && content !== null) {
-				return { input: { ...raw, content: { ...content, sender_token: token } } };
-			}
-			return undefined;
-		}
-		return { input: { ...raw, sender_token: token } };
+		return rewriteArgs(event, { ...value, sender_token: token });
 	}
 
 	pi.on("tool_call", async (event, ctx) => {
 		const call = mailCall(event);
 		if (call === null) return undefined;
 		const bulk = BULK_READ_TOOLS[call.tool] === true || BULK_READ_PATTERN.test(call.tool);
-		const guarded = bulk || call.tool === "send_message" || call.tool === "reply_message" || call.tool === "fetch_inbox";
+		const registration = Object.prototype.hasOwnProperty.call(REGISTRATION_KEYS, call.tool);
+		const guarded = bulk || registration || call.tool === "send_message" || call.tool === "reply_message" || call.tool === "fetch_inbox";
 		if (!guarded) return undefined;
 		try {
 			// MAILWAKE1.2 (ompkit-uk9wn.2): a send names the RECIPIENT's repo in project_key. A seat whose own cwd
 			// carries no fleet opt-in (the chief tab runs in ~/Developer, 2026-10-25: every chief-tab send bypassed the
 			// wake and signaled nobody) is still a fleet sender when it addresses a fleet repo: read the policy there.
 			let policy = await fleetPolicyState(ctx.cwd);
-			if (policy.kind === "off" && (call.tool === "send_message" || call.tool === "reply_message")) {
-				const projectKey = prop(call.args.value, "project_key");
+			if (policy.kind === "off" && (registration || call.tool === "send_message" || call.tool === "reply_message")) {
+				const projectKey = prop(call.args.ok ? call.args.value : undefined, call.tool === "macro_start_session" ? "human_key" : "project_key");
 				if (typeof projectKey === "string" && isAbsolute(projectKey)) {
 					const recipient = await fleetPolicyState(projectKey);
 					if (recipient.kind === "on") policy = recipient; // only a readable opt-in promotes; an absent or unreadable recipient repo keeps the sender's own policy
@@ -603,6 +634,33 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			}
 			if (policy.kind === "off") return undefined;
 			if (policy.kind === "unavailable") return refuse("AM_FLEET_POLICY", `the repo's fleet opt-in is unreadable (${policy.reason}).`);
+			if (registration) {
+				if (!call.args.ok || typeof call.args.value !== "object" || call.args.value === null || Array.isArray(call.args.value)) {
+					return refuse("AM_REGISTRATION_SCHEMA", `${call.tool}: schema requires an object with project, program and model strings.`);
+				}
+				const allowed = REGISTRATION_KEYS[call.tool]!;
+				for (const key in call.args.value) {
+					if (Object.prototype.hasOwnProperty.call(call.args.value, key) && !Object.prototype.hasOwnProperty.call(allowed, key)) {
+						return refuse("AM_REGISTRATION_SCHEMA", `${call.tool}: unknown argument '${key}'. Schema keys: ${Object.keys(allowed).join(", ")}.`);
+					}
+				}
+				const value = call.args.value;
+				const project = prop(value, call.tool === "macro_start_session" ? "human_key" : "project_key");
+				if (typeof project !== "string" || !isAbsolute(project)) return refuse("AM_REGISTRATION_SCHEMA", `${call.tool}: schema requires an absolute project key.`);
+				const seat = await caller(ctx, project);
+				const nameKey = call.tool === "macro_start_session" ? "agent_name" : "name";
+				const claimedName = prop(value, nameKey);
+				const ownName = seat?.name ?? env.AGENT_NAME?.trim();
+				if (ownName && typeof claimedName === "string" && claimedName.toLowerCase() !== ownName.toLowerCase()) {
+					return refuse("AM_IDENTITY_MISMATCH", `${call.tool}: registration must keep the current caller's identity, not another agent's name.`);
+				}
+				const pane = seat ? `tern:${seat.block}` : env.TMUX_PANE?.trim();
+				const requested = prop(value, "pane_id");
+				if (!pane || (requested !== undefined && requested !== null && requested !== pane)) {
+					return refuse("IDENTITY_UNBOUND", `${call.tool}: current caller pane is unproven or pane_id differs from the actual caller. Register only your own Tern session or TMUX_PANE.`);
+				}
+				return rewriteArgs(event, { ...value, ...(ownName ? { [nameKey]: ownName } : {}), pane_id: pane });
+			}
 			if (bulk) {
 				return refuse("AM_BULK_READ", `${call.tool} is a bulk read. Read one message at a time (fetch_inbox with a small limit, or fetch one id); read state is not obligation state.`);
 			}
@@ -619,7 +677,11 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				return undefined;
 			}
 			if (!call.args.ok) return refuse("AM_ARGS_UNREADABLE", `${call.tool}: ${call.args.why}.`);
+			if (typeof event.toolCallId !== "string" || event.toolCallId.trim() === "") {
+				return refuse("AM_CALL_ID_REQUIRED", "A send/reply needs its native tool-call ID so the persisted message can be joined to its wake row. Retry through the native mounted tool.");
+			}
 			const names = await seatNames(ctx, prop(call.args.value, "project_key"));
+			if (names.length === 0) return refuse("IDENTITY_UNBOUND", "No identity file binds this sender's actual pane. Run register_agent or macro_start_session for this pane before sending.");
 			const tool = call.tool === "send_message" ? "send_message" : "reply_message";
 			const verdict = await checkMessage(tool, call.args.value, ctx, names);
 			if (verdict?.block === true) return verdict;
