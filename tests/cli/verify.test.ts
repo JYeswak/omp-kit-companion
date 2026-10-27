@@ -27,11 +27,12 @@ async function repo(name: string): Promise<{ dir: string; sha: string }> {
 }
 
 /** A fake br: `show` prints the bead; every other act appends its argv to a log file. */
-function fakeBr(dir: string, bead: Record<string, unknown>): { env: Record<string, string>; acts: () => string[] } {
+function fakeBr(dir: string, bead: Record<string, unknown>, opts?: { failOn?: string }): { env: Record<string, string>; acts: () => string[] } {
 	const bin = join(dir, "bin");
 	mkdirSync(bin, { recursive: true });
 	const log = join(dir, "br-acts.log");
-	writeFileSync(join(bin, "br"), `#!/bin/sh\nif [ "$1" = show ]; then printf '%s' '${JSON.stringify([bead]).replace(/'/g, "'\\''")}'; exit 0; fi\nprintf '%s\\x1e' "$*" >> ${JSON.stringify(log)}\nexit 0\n`);
+	const guard = opts?.failOn ? `case " $* " in *" ${opts.failOn} "*) exit 1;; esac\n` : "";
+	writeFileSync(join(bin, "br"), `#!/bin/sh\nif [ "$1" = show ]; then printf '%s' '${JSON.stringify([bead]).replace(/'/g, "'\\''")}'; exit 0; fi\n${guard}printf '%s\\x1e' "$*" >> ${JSON.stringify(log)}\nexit 0\n`);
 	chmodSync(join(bin, "br"), 0o755);
 	return { env: { PATH: `${bin}:${process.env.PATH ?? ""}` }, acts: () => { try { return readFileSync(log, "utf8").split("\x1e").filter(Boolean); } catch { return []; } } };
 }
@@ -103,6 +104,12 @@ test("phase-only GATESET1 boxes parse with retained order, checked state and bui
 	expect(boxes.map(b => [b.index, b.letter, b.checked, b.phase])).toEqual([[1, null, true, "build"], [2, null, true, "build"]]);
 });
 
+test("planted: a mandatory-letter-only parser finds no phase-only boxes (would drop them)", () => {
+	const text = "- [x] [build] Planted: a prompt whose lint run exits non-zero yields a FAIL receipt naming 'lint did not run: <err>' and exit 1, never a traceback (test in prompt_gate.py --selftest).\n- [x] [build] Every gate's detail is JSON-serializable: the selftest dumps every receipt it builds with json.dumps.";
+	expect(text.split("\n").filter(l => /^- \[[ xX]\] \[[a-z]\]/.test(l.trim()))).toEqual([]);
+	expect(parseBoxes(text).map(b => [b.index, b.phase])).toEqual([[1, "build"], [2, "build"]]);
+});
+
 test("legacy lettered boxes keep their meaning and untagged prose stays out", () => {
 	const boxes = parseBoxes("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] prose without tags is not a box\n- [x] [b] body without phase");
 	expect(boxes.map(b => [b.index, b.letter, b.phase])).toEqual([[1, "a", "landed"], [2, "b", null]]);
@@ -125,6 +132,19 @@ test("planted: a commandless phase-only box is named and fails closed", async ()
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.log).toContain("[1] names no command");
+});
+
+test("planted: a refusal names the indexed box and leaves the tracker's bead and acceptance text untouched", async () => {
+	const ac = "- [ ] [build] prose names no command";
+	const bead = inReview(ac);
+	const { dir, sha } = await repo("untouched");
+	const br = fakeBr(dir, bead);
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
+	expect(res.log).toContain("[1] names no command");
+	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake"]]);
+	expect(br.acts()).toEqual([]);
+	expect(bead.acceptance_criteria).toBe(ac);
 });
 
 test("phase-only boxes replay their literal command and are judged by the named outcome", async () => {
@@ -163,4 +183,23 @@ test("[v] verification notes stay skipped even when they carry a phase", async (
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, "a", true]]);
+});
+
+test("planted: an unknown export sha fails closed as EXPORT_FAILED with no replays and no acts", async () => {
+	const { dir } = await repo("badexport");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: "deadbeef".repeat(5).slice(0, 40), repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("EXPORT_FAILED");
+	expect(res.replays).toEqual([]);
+	expect(res.acts).toEqual([]);
+	expect(br.acts()).toEqual([]);
+});
+
+test("planted: a failing reviewer-gate report fails the close as REWORK naming the act, never a silent pass", async () => {
+	const { dir, sha } = await repo("gaterefail");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"), { failOn: "gate" });
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("REWORK");
+	expect(res.log).toContain("act failed");
+	expect(res.log).toContain("gate report");
 });
