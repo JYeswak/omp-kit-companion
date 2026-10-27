@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { verifyBead } from "../../src/verify.ts";
+import { parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
@@ -96,4 +96,71 @@ test("the verify handler is registered at module load (planted: a registration l
 	const text = new TextDecoder().decode(r.stdout) + new TextDecoder().decode(r.stderr);
 	expect(text).not.toContain("HANDLER_UNAVAILABLE");
 	expect(text).toContain("--export");
+});
+
+test("phase-only GATESET1 boxes parse with retained order, checked state and build phase", () => {
+	const boxes = parseBoxes("- [x] [build] Planted: a prompt whose lint run exits non-zero yields a FAIL receipt naming 'lint did not run: <err>' and exit 1, never a traceback (test in prompt_gate.py --selftest).\n- [x] [build] Every gate's detail is JSON-serializable: the selftest dumps every receipt it builds with json.dumps.");
+	expect(boxes.map(b => [b.index, b.letter, b.checked, b.phase])).toEqual([[1, null, true, "build"], [2, null, true, "build"]]);
+});
+
+test("legacy lettered boxes keep their meaning and untagged prose stays out", () => {
+	const boxes = parseBoxes("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] prose without tags is not a box\n- [x] [b] body without phase");
+	expect(boxes.map(b => [b.index, b.letter, b.phase])).toEqual([[1, "a", "landed"], [2, "b", null]]);
+});
+
+test("planted: an unsupported tag is named and fails closed, never silently dropped", async () => {
+	const { dir, sha } = await repo("badphase");
+	const br = fakeBr(dir, inReview("- [ ] [zzz] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [build] [a] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
+	expect(res.log).toContain("[1] unsupported phase [zzz]");
+	expect(res.log).toContain("[2] unsupported phase [build a]");
+	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake"]]);
+	expect(br.acts()).toEqual([]);
+});
+
+test("planted: a commandless phase-only box is named and fails closed", async () => {
+	const { dir, sha } = await repo("nocommand");
+	const br = fakeBr(dir, inReview("- [ ] [build] prose names no command"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
+	expect(res.log).toContain("[1] names no command");
+});
+
+test("phase-only boxes replay their literal command and are judged by the named outcome", async () => {
+	const { dir, sha } = await repo("phaseonly");
+	const br = fakeBr(dir, inReview("- [ ] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [x] [build] `sh scripts/t.sh` expect: prints 0 fail"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("CLOSED");
+	expect(res.replays.map(r => [r.index, r.letter, r.pass, r.outcome])).toEqual([[1, null, true, "named"], [2, null, true, "named"]]);
+	const acts = br.acts();
+	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2");
+});
+
+test("live and after items are pending: not executed, never passed, no tracker mutation", async () => {
+	const { dir, sha } = await repo("pending");
+	const br = fakeBr(dir, inReview("- [ ] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [a] [live] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [after] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("PENDING");
+	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, null, true], [2, "a", null], [3, null, null]]);
+	expect(res.log).toContain("[a] PENDING live phase prerequisite unmet; not executed");
+	expect(res.log).toContain("[3] PENDING after phase prerequisite unmet; not executed");
+	expect(res.acts).toEqual([]);
+	expect(br.acts()).toEqual([]);
+});
+
+test("a failed phase-only expectation stays REWORK even when the command exits 0", async () => {
+	const { dir, sha } = await repo("phaseonlyrework");
+	const br = fakeBr(dir, inReview("- [ ] [build] `sh scripts/t.sh` -> 99 pass"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("REWORK");
+	expect(res.replays.map(r => [r.index, r.pass])).toEqual([[1, false]]);
+});
+
+test("[v] verification notes stay skipped even when they carry a phase", async () => {
+	const { dir, sha } = await repo("vskip");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [v] [live] Verification: a non-author replays the original command."));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("CLOSED");
+	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, "a", true]]);
 });

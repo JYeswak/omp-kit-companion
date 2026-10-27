@@ -10,10 +10,12 @@
  * does it tick the boxes, report the reviewer gate under the caller's identity (family disclosed), write the
  * transition comment from the command log and close. Transaction metadata is completed; the verdict is earned.
  *
- * Box grammar: `- [ ] [a] [landed] \`<command>\` -> <expected>` or `... ; expect: <expected>` or `...; planted: ...`.
- * `<expected>` forms: `rc 0` (exit code), `prints <text>` / `contains <text>` (stdout+stderr substring),
- * `N pass 0 fail` (bun/pytest summary), `exit N`. A box with only a command and no expected form is judged
- * by `rc 0` AND is flagged `outcome: exit-only` in the log, so the closer sees what was proven.
+ * Box grammar: `- [ ] [a] [phase] `command` -> <expected>` or `... ; expect: <expected>` or `...; planted: ...`.
+ * The letter is optional and the phase is one of build/landed/live/after (VERIFYBOX1
+ * ompkit-fp72.135.3.17.1: phase-only `[build]` boxes and the `after` phase parse; untagged
+ * prose checkboxes are not boxes and keep their original meaning). A tag that is neither a
+ * single letter nor a known phase makes the item unsupported: it is named and fails closed,
+ * never silently dropped. Letter `v` marks a verification-note box that is never replayed.
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -22,13 +24,17 @@ import { ownedTmp } from "./kitlib/tmp.ts";
 import { preflightBead } from "./preflight.ts";
 
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
-const BOX = /^- \[([ xX])\] \[([a-z])\] (?:\[(build|landed|live)\] )?(.*)$/;
 const CMD = /`([^`]+)`/;
+const TAG = /^\[([^\][\[]+)\]/;
+const LETTER = /^[a-z]$/;
+/** Phases the verifier understands. Anything else in a tag is unsupported, not a box to skip. */
+export const KNOWN_PHASES: Record<string, true> = { build: true, landed: true, live: true, after: true };
 
-export interface BoxReplay { index: number; letter: string; command: string | null; expected: string | null; outcome: "exit-only" | "named"; rc: number | null; pass: boolean | null; detail: string }
+export interface Box { index: number; letter: string | null; checked: boolean; phase: string | null; body: string }
+export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; outcome: "exit-only" | "named"; rc: number | null; pass: boolean | null; detail: string }
 export interface VerifyResult {
 	ok: boolean;
-	code: "CLOSED" | "REWORK" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "EXPORT_FAILED" | "DRY_RUN";
+	code: "CLOSED" | "REWORK" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING";
 	bead: string;
 	export: string;
 	replays: BoxReplay[];
@@ -36,12 +42,27 @@ export interface VerifyResult {
 	acts: string[][];
 }
 
-export function parseBoxes(acceptance: string): { index: number; letter: string; checked: boolean; phase: string | null; body: string }[] {
-	const out: { index: number; letter: string; checked: boolean; phase: string | null; body: string }[] = [];
-	for (const line of acceptance.split("\n")) {
-		const m = BOX.exec(line.trim());
-		if (!m) continue;
-		out.push({ index: out.length + 1, letter: m[2]!, checked: m[1] !== " ", phase: m[3] ?? null, body: m[4]! });
+export function parseBoxes(acceptance: string): Box[] {
+	const out: Box[] = [];
+	for (const raw of acceptance.split("\n")) {
+		const line = raw.trim();
+		const head = /^- \[([ xX])\] +(.+)$/.exec(line);
+		if (!head) continue;
+		let rest = head[2]!.trim();
+		const tags: string[] = [];
+		let tm: RegExpExecArray | null;
+		while ((tm = TAG.exec(rest)) !== null) { tags.push(tm[1]!); rest = rest.slice(tm[0].length).trimStart(); }
+		if (tags.length === 0) continue;
+		let letter: string | null = null;
+		let phase: string | null = null;
+		const [first, second, ...extra] = tags;
+		if (first !== undefined && LETTER.test(first) && extra.length === 0) {
+			letter = first;
+			if (second !== undefined) phase = second;
+		} else {
+			phase = [first, second, ...extra].filter((tag): tag is string => tag !== undefined).join(" ");
+		}
+		out.push({ index: out.length + 1, letter, checked: head[1] !== " ", phase, body: rest });
 	}
 	return out;
 }
@@ -84,9 +105,10 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	try { const doc = JSON.parse(text(show.stdout)); const row = Array.isArray(doc) ? doc[0] : doc; acceptance = typeof row?.acceptance_criteria === "string" ? row.acceptance_criteria : ""; } catch { /* handled below as not replayable */ }
 	const boxes = parseBoxes(acceptance);
 	const replayable = boxes.filter(b => b.letter !== "v");
-	const missing = replayable.filter(b => !CMD.test(b.body));
-	if (replayable.length === 0 || missing.length > 0) {
-		log.push(`not replayable: ${missing.length ? missing.map(b => `[${b.letter}] names no command`).join("; ") : "no boxes"}`);
+	const tag = (b: { letter: string | null; index: number }) => `[${b.letter ?? b.index}]`;
+	const bad = replayable.filter(b => (b.phase !== null && KNOWN_PHASES[b.phase] !== true) || !CMD.test(b.body));
+	if (replayable.length === 0 || bad.length > 0) {
+		log.push(`not replayable: ${bad.length ? bad.map(b => b.phase !== null && KNOWN_PHASES[b.phase] !== true ? `${tag(b)} unsupported phase [${b.phase}]` : `${tag(b)} names no command`).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake"]] };
 	}
 	const scratch = ownedTmp("verify-" + input.bead.replace(/[^a-z0-9.-]/gi, "_"), { bead: input.bead });
@@ -99,6 +121,11 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	log.push(`exported ${input.exportSha} to ${exportDir}`);
 	const replays: BoxReplay[] = [];
 	for (const box of replayable) {
+		if (box.phase === "live" || box.phase === "after") {
+			replays.push({ index: box.index, letter: box.letter, command: null, expected: null, outcome: "named", rc: null, pass: null, detail: `pending: ${box.phase} phase prerequisite unmet in export replay; not executed` });
+			log.push(`${tag(box)} PENDING ${box.phase} phase prerequisite unmet; not executed`);
+			continue;
+		}
 		const command = CMD.exec(box.body)![1]!;
 		const expected = expectedOf(box.body);
 		const started = Date.now();
@@ -106,19 +133,23 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const out = text(r.stdout) + text(r.stderr);
 		const v = judge(expected, r.rc, out);
 		replays.push({ index: box.index, letter: box.letter, command, expected, outcome: v.outcome, rc: r.rc, pass: v.pass, detail: v.detail });
-		log.push(`[${box.letter}] ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail} (${Date.now() - started} ms)${r.timed_out ? " TIMEOUT" : ""}`);
+		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail} (${Date.now() - started} ms)${r.timed_out ? " TIMEOUT" : ""}`);
 	}
-	const failed = replays.filter(r => !r.pass);
+	const failed = replays.filter(r => r.pass === false);
 	if (failed.length > 0) {
-		const comment = `REWORK ${input.bead}: ${failed.map(f => `[${f.letter}] ${f.detail}`).join("; ")}\n${log.join("\n")}`;
+		const comment = `REWORK ${input.bead}: ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`;
 		acts.push(["br", "update", input.bead, "--status", "rework", "--transition-comment", comment]);
 		if (!input.dryRun) for (const a of acts) await run(a, { cwd: input.repo, deadline_s: 60, env });
 		return { ok: false, code: input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
 	}
-	const exitOnly = replays.filter(r => r.outcome === "exit-only").map(r => `[${r.letter}]`);
+	const pending = replays.filter(r => r.pass === null);
+	if (pending.length > 0) {
+		return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${pending.map(p => `${tag(p)} ${p.detail}`).join("; ")}`).join("\n"), acts };
+	}
+	const exitOnly = replays.filter(r => r.outcome === "exit-only").map(r => tag(r));
 	const family = input.family ?? "unknown (set --family)";
-	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${replays.map(r => `[${r.letter}] ${r.command} -> ${r.detail}`).join("; ")}${exitOnly.length ? `; exit-only boxes: ${exitOnly.join(" ")}` : ""}`;
-	acts.push(["br", "update", input.bead, "--check-acceptance", replayable.map(b => String(b.index)).join(",")]);
+	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${replays.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${exitOnly.length ? `; exit-only boxes: ${exitOnly.join(" ")}` : ""}`;
+	acts.push(["br", "update", input.bead, "--check-acceptance", replays.filter(r => r.pass === true).map(r => String(r.index)).join(",")]);
 	acts.push(["br", "gate", "report", input.bead, "--gate", "min_reviewers", "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed"]);
 	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${log.join("\n")}`]);
 	if (!input.dryRun) {
