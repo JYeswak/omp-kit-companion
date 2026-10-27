@@ -54,12 +54,27 @@ commit() {
 # subprocess call): only the kitlib member judges it.
 PY_BAD='import subprocess
 subprocess.run(["x"], timeout=5, stdin=subprocess.DEVNULL)  # pysafe: fixture spawn, judged by the kitlib member'
+PY_BAD_OLD='import subprocess
+subprocess.run(["older"], timeout=5, stdin=subprocess.DEVNULL)  # pysafe: older fixture spawn, judged by kitlib member'
 PY_GOOD='import kitlib_run
 kitlib_run.run(["x"], deadline_s=5)'
 TS_BAD='export const p = Bun.spawn(["x"]);'
 TS_GOOD='import { run } from "./src/kitlib/run";
 export const p = run(["x"], { deadline_s: 5 });'
 SH_BAD='timeout 5 git fetch'
+origin_repo() {
+	dir=$(new_repo "$1" tool.py "$PY_BAD_OLD") || return 1
+	printf '%s\n' "$PY_BAD" > "$dir/tool.py"
+	git -C "$dir" add tool.py
+	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] published origin"
+	origin=$(git -C "$dir" rev-parse HEAD) || return 1
+	git -C "$dir" update-ref refs/remotes/origin/main "$origin" || return 1
+	printf '%s\n' "$PY_GOOD" > "$dir/tool.py"
+	git -C "$dir" add tool.py
+	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] ratchet reduction"
+	printf '%s\n' "$dir"
+}
+
 
 # 1. a fresh installed repo refuses a staged new raw spawn, naming kitlib;
 #    the same call through kitlib passes
@@ -246,6 +261,39 @@ git -C "$P" commit -q -m "[test] delete allowlist"
 deleted=$(git -C "$P" rev-parse HEAD)
 out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$deleted" "$removed" | (cd "$P" && sh "$SCRIPTS/pre-push-gate.sh") 2>&1)
 check "$?" "1" "push-allow-deleted-refused" "$out" "allowlist-deleted"
+
+# 8. a withdrawal to origin/main is admitted only for exact staged equality
+R=$(origin_repo origin-equal)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] withdraw to origin")
+check "$?" "0" "origin-equal-withdrawal-pass" "$out" "ADMITTED staged path byte-identical to origin/main@"
+check "0" "0" "origin-equal-withdrawal-names-path" "$out" "tool.py"
+check "$(printf '%s\n' "$out" | grep -c 'ADMITTED staged path byte-identical')" "1" "origin-equal-one-admission" "$out" "ADMITTED staged path byte-identical"
+
+R=$(origin_repo origin-extra)
+printf '%s\nsubprocess.check_output(["extra"], timeout=5, stdin=subprocess.DEVNULL)  # pysafe: additional fixture spawn, judged by kitlib\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] withdrawal plus new spawn")
+check "$?" "1" "origin-extra-spawn-refused" "$out" "tool.py:3:1: raw-spawn"
+if printf '%s\n' "$out" | grep -q "ADMITTED staged path byte-identical to origin/main@"; then
+	fail=$((fail + 1)); printf 'FAIL origin-extra-spawn-not-admitted\n'
+else
+	pass=$((pass + 1))
+fi
+
+R=$(origin_repo origin-older)
+older=$(git -C "$R" rev-parse HEAD~2)
+git -C "$R" show "$older:tool.py" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] restore older tree")
+check "$?" "1" "origin-older-tree-refused" "$out" "tool.py:2:1: raw-spawn"
+
+R=$(origin_repo origin-new)
+printf '%s\n' "$PY_BAD" > "$R/new.py"
+git -C "$R" add new.py
+out=$(commit "$R" -m "[test] ordinary new spawn with origin")
+check "$?" "1" "origin-new-spawn-refused" "$out" "new.py:2:1: raw-spawn"
 
 printf 'check-staged-kitlib: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

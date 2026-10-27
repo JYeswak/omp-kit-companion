@@ -43,6 +43,13 @@ for helper in pysafe.py kitlib_ratchet_core.py kitlib_ratchet.py; do
 done
 out=$("$py" -B "$here/pysafe.py" run --timeout "$budget" -- "$py" -B "$here/kitlib_ratchet.py" --staged --repo "$root" < /dev/null 2>&1)
 rc=$?
+if [ "$rc" = 0 ]; then
+	printf '%s\n' "$out" | while IFS= read -r line; do
+		case "$line" in
+			*"ADMITTED staged path byte-identical to origin/main@"*) printf '%s\n' "$line" ;;
+		esac
+	done
+fi
 case "$rc" in
 	0) exit 0 ;;
 	1) printf 'staged-kitlib: REFUSED: staged files hand-roll a kitlib primitive or raise scripts/kitlib-ratchet-baseline.json (spawn through kitlib_run.run from scripts/kitlib_run.py or run() from src/kitlib/run.ts; the allowlist only shrinks, and a "kitlib: <reason>" pragma admits no site it does not count)\n%s\n' "$out" >&2 ;;

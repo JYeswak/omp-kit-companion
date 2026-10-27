@@ -437,12 +437,68 @@ class KitlibRuleSet(core.RuleSet):
         return core._git(repo, "diff-tree", "--root", "-r", "--no-commit-id", "--name-status", "-z", "-M",
                          "--diff-filter=AMRT", head)
 
+    def _origin_equal_staged_paths(
+        self, repo: str, base: Optional[str], head: Optional[str]
+    ) -> Dict[str, str]:
+        """Find staged paths changed from HEAD but identical to pinned origin/main."""
+        if head is not None or base is None:
+            return {}
+        probe = core.pysafe.run_bounded(
+            ["git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+            core.GIT_TIMEOUT_S,
+            cap_bytes=4096,
+        )
+        if probe.outcome != core.pysafe.OK:
+            raise core.GitError(f"git show-ref origin/main: TIMEOUT after {core.GIT_TIMEOUT_S:g}s")
+        if probe.returncode == 1:
+            return {}
+        if probe.returncode != 0:
+            raise core.GitError(f"git show-ref origin/main: exit {probe.returncode}: "
+                                f"{probe.text('stderr').strip()}")
+        origin = core._git(repo, "rev-parse", "--verify", "origin/main^{commit}").decode("ascii").strip()
+        if not origin:
+            raise core.GitError("git rev-parse origin/main: empty commit id")
+        pairs = self.changed(self._diff(repo, base, head))
+        paths = {path for old, new in pairs for path in (old, new) if path is not None}
+        if not paths:
+            return {}
+        differs = {
+            path.decode("utf-8")
+            for path in core._git(
+                repo, "diff", "--cached", "--name-only", "-z", "--no-renames",
+                "--no-ext-diff", "--no-textconv", origin,
+            ).split(b"\0")
+            if path
+        }
+        return {path: origin for path in sorted(paths) if path not in differs}
+
+    @staticmethod
+    def _apply_origin_admissions(
+        reports: List[core.FileReport], origin_equal: Dict[str, str]
+    ) -> List[core.FileReport]:
+        if not origin_equal:
+            return reports
+        by_path = {report.path: report for report in reports}
+        for path, origin in sorted(origin_equal.items()):
+            report = by_path.get(path)
+            if report is None:
+                report = core.FileReport(path)
+                reports.append(report)
+                by_path[path] = report
+            report.findings.clear()
+            report.admissions.append(
+                f"staged path byte-identical to origin/main@{origin}: {path}"
+            )
+        return reports
+
     def ratchet(self, repo: str, base: Optional[str], head: Optional[str]) -> List[core.FileReport]:
+        origin_equal = self._origin_equal_staged_paths(repo, base, head)
         reports = super().ratchet(repo, base, head)
         new_raw = _blob(repo, _spec(head, BASELINE))
         old_raw = _blob(repo, _spec(base, BASELINE)) if base is not None else None
         if new_raw is None and old_raw is None:
             sys.stderr.write(f"{self.prog}: no {BASELINE}; judged against git history only\n")
+            reports = self._apply_origin_admissions(reports, origin_equal)
             return reports
         listing = core.FileReport(BASELINE)
         old: Optional[Allowlist] = None
@@ -508,6 +564,7 @@ class KitlibRuleSet(core.RuleSet):
                 report.findings.sort(key=lambda f: (f.line, f.col, f.rule))
         if listing.findings:
             reports.append(listing)
+        reports = self._apply_origin_admissions(reports, origin_equal)
         return reports
 
     def tree_reports(self, repo: str) -> List[core.FileReport]:

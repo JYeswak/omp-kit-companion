@@ -315,6 +315,11 @@ or deletes the file is refused (`allowlist-raised`, `allowlist-deleted`); loweri
 the sites are gone. With no sites left the allowlist stays, with empty counts. `--write-baseline` regenerates it
 and `--check-baseline` checks a tree against it.
 
+The staged pre-commit member has one narrow withdrawal exception: a changed index path is admitted only when
+`git diff --cached` shows it identical (mode and bytes) to the repository's pinned `origin/main` commit. The member
+prints the pinned commit and path. This exception does not apply to pre-push checks, an additional raw spawn, a path
+that differs from `origin/main`, or an absent `origin/main` ref; in those cases the existing ratchet still decides.
+
 A `kitlib: <reason>` pragma (two or more words, 10+ characters) documents a site the allowlist already counts; it
 never admits a new one, since pragma'd sites still count. A reasonless pragma is refused and an unused one is
 reported. Exempt: `src/kitlib/`, `scripts/kitlib_*.py`, `scripts/kitlib-tmp.sh`, `scripts/pysafe.py`, and the

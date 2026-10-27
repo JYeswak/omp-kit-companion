@@ -138,6 +138,7 @@ class Finding:
 class FileReport:
     path: str
     findings: List[Finding] = field(default_factory=list)
+    admissions: List[str] = field(default_factory=list)
 
     def active(self) -> List[Finding]:
         return [f for f in self.findings if f.suppressed is None]
@@ -657,6 +658,12 @@ class RuleSet:
                 "files": [{"path": display(r.path), "findings": [f.as_json() for f in r.findings]}
                           for r in reports],
             })
+            admissions = [
+                {"path": display(report.path), "messages": list(report.admissions)}
+                for report in reports if report.admissions
+            ]
+            if admissions:
+                payload["groups"][-1]["admissions"] = admissions
         json.dump(payload, out, indent=1, sort_keys=True)
         out.write("\n")
 
@@ -700,6 +707,8 @@ class RuleSet:
         else:
             for _, reports in groups:
                 for report in reports:
+                    for admission in report.admissions:
+                        sys.stdout.write(f"{self.prog}: ADMITTED {admission}\n")
                     for f in report.active():
                         sys.stdout.write(f"{display(f.path)}:{f.line}:{f.col}: {f.rule}: {f.detail}: {f.snippet}\n")
         return 1 if any(r.active() for _, reports in groups for r in reports) else 0
