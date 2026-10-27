@@ -2,7 +2,10 @@
 # check-commit-kitlib-reversal.sh MSGFILE — validate named Revert authority for exact published-origin admissions.
 set -u
 msg=${1:?usage: check-commit-kitlib-reversal.sh MSGFILE}
-[ -f "$msg" ] && [ -r "$msg" ] || { printf 'commit-kitlib-reversal: REFUSED: commit message is unreadable\n' >&2; exit 1; }
+if ! { [ -f "$msg" ] && [ -r "$msg" ]; }; then
+	printf 'commit-kitlib-reversal: REFUSED: commit message is unreadable\n' >&2
+	exit 1
+fi
 budget=${KITLIB_GATE_TIMEOUT:-60}
 case "$budget" in
 	'' | *[!0-9]* | 0) printf 'commit-kitlib-reversal: REFUSED: KITLIB_GATE_TIMEOUT must be a positive whole number of seconds\n' >&2; exit 1 ;;
