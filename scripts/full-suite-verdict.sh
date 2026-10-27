@@ -7,6 +7,7 @@
 #
 # Usage:
 #   scripts/full-suite-verdict.sh --repo ROOT --commit SHA [--archive-dir DIR] [--cache-dir DIR]
+#     [--focused-passed FILE] [--rerun-reason TEXT]
 #
 # The complete declared repo suite runs against the exact-commit archive: every bun test under
 # tests/cli and tests/fleet-guard, every shell suite tests/cli/*.test.sh, and every python suite
@@ -22,6 +23,10 @@
 #   runtime = os/arch + bun version + python3 version (+ FULL_SUITE_RUNTIME_ID when pinned)
 # A repeated identical tree under unchanged check/runtime identity reuses the recorded verdict
 # without rerunning. A changed tree, changed check bytes or changed runtime never reuses.
+# --rerun-reason TEXT reruns a cached FAIL for the same tree instead of reusing it: the old
+# entry is kept beside the cache as <tree>.superseded-<utc>.{json,log}, the suite runs again,
+# and the new entry records the reason, the actor (AGENT_NAME or USER) and the superseded
+# entry's digest. An empty reason is refused. A cached PASS is never rerun by this flag.
 # Missing, corrupt, timed-out or incomplete suite evidence is non-pass and is never cached GREEN:
 # only a finished suite run (PASS or FAIL with complete counts) is recorded. Incomplete or
 # timed-out runs record no verdict, so a retry reruns instead of reusing; their partial output is
@@ -38,12 +43,14 @@ ROOT=
 COMMIT=
 ARCHIVE_DIR=
 CACHE_DIR=
+RERUN_REASON=
+RERUN=0
 TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
 RUNTIME_PIN=${FULL_SUITE_RUNTIME_ID:-}
 
 FOCUSED_PASSED=
 usage() {
-	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE]" >&2
+	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]" >&2
 }
 
 fail() {
@@ -57,6 +64,7 @@ while [ "$#" -gt 0 ]; do
 		--commit) [ "$#" -ge 2 ] || { usage; exit 2; }; COMMIT=$2; shift 2 ;;
 		--archive-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; ARCHIVE_DIR=$2; shift 2 ;;
 		--cache-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; CACHE_DIR=$2; shift 2 ;;
+		--rerun-reason) [ "$#" -ge 2 ] || { usage; exit 2; }; RERUN=1; RERUN_REASON=$2; shift 2 ;;
 		--focused-passed) [ "$#" -ge 2 ] || { usage; exit 2; }; FOCUSED_PASSED=$2; shift 2 ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage; exit 2 ;;
@@ -65,6 +73,10 @@ done
 if [ -z "$ROOT" ] || [ -z "$COMMIT" ]; then
 	usage
 	exit 2
+fi
+if [ "$RERUN" = 1 ] && [ -z "$RERUN_REASON" ]; then
+	fail "--rerun-reason needs a non-empty reason; the cached verdict is kept and nothing reruns"
+	exit 1
 fi
 case "$TIMEOUT_SECS" in ''|*[!0-9]*|0) fail "FULL_SUITE_TIMEOUT_SECS must be a positive integer" ; exit 1 ;; esac
 # No suite may block on stdin (pre-push hooks inherit a pipe whose writer never closes).
@@ -154,11 +166,28 @@ PYEOF
 			echo "FULL-SUITE: VERDICT REUSED PASS tree=$tree checks=$checks runtime=$runtime"
 			exit 0 ;;
 		FAIL*)
-			code=$(printf '%s' "$cached" | cut -d' ' -f2)
-			case "$code" in ''|*[!0-9]*|0) code=1 ;; esac
-			[ "$code" -gt 125 ] && code=1
-			echo "FULL-SUITE: VERDICT REUSED FAIL tree=$tree checks=$checks runtime=$runtime producer_rc=$code; the push is refused without rerun" >&2
-			exit "$code" ;;
+			if [ "$RERUN" = 1 ]; then
+				# A recorded rerun: the cached FAIL is not reused. The old entry is kept
+				# beside the cache as <tree>.superseded-<utc>.{json,log}; the suite runs
+				# again below and the new entry records the reason, the actor and the
+				# superseded entry's digest. A cached PASS is never rerun by this flag.
+				superseded_digest=$(shasum -a 256 "$entry" | cut -d' ' -f1) || { fail "cached verdict is unreadable; the cached FAIL is kept and nothing reruns"; exit 1; }
+				[ -n "$superseded_digest" ] || { fail "cached verdict is unreadable; the cached FAIL is kept and nothing reruns"; exit 1; }
+				superseded_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || { fail "the clock is unreadable; the cached FAIL is kept and nothing reruns"; exit 1; }
+				SUPERSEDED_BASE="$CACHE_DIR/$tree.superseded-$superseded_stamp"
+				cp "$entry" "$SUPERSEDED_BASE.json" || { fail "cannot keep the superseded verdict; the cached FAIL is kept and nothing reruns"; exit 1; }
+				cp "$log_entry" "$SUPERSEDED_BASE.log" || { rm -f "$SUPERSEDED_BASE.json"; fail "cannot keep the superseded log; the cached FAIL is kept and nothing reruns"; exit 1; }
+				RERUN_ACTOR=${AGENT_NAME:-${USER:-unknown}}
+				[ -n "$RERUN_ACTOR" ] || RERUN_ACTOR=unknown
+				export SUPERSEDED_DIGEST="$superseded_digest" SUPERSEDED_FILE="$SUPERSEDED_BASE.json"
+				echo "FULL-SUITE: RERUN reason='$RERUN_REASON' actor='$RERUN_ACTOR' superseded=$SUPERSEDED_BASE.json; running the complete suite again"
+			else
+				code=$(printf '%s' "$cached" | cut -d' ' -f2)
+				case "$code" in ''|*[!0-9]*|0) code=1 ;; esac
+				[ "$code" -gt 125 ] && code=1
+				echo "FULL-SUITE: VERDICT REUSED FAIL tree=$tree checks=$checks runtime=$runtime producer_rc=$code; the push is refused without rerun" >&2
+				exit "$code"
+			fi ;;
 		*) echo "FULL-SUITE: cache miss for tree $tree (unreadable verdict); running the complete suite" ;;
 	esac
 else
@@ -520,7 +549,7 @@ fi
 
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
 finish_logs "$CACHE_DIR/$tree.log"
-TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
+RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
 import hashlib, json, os
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
@@ -551,6 +580,15 @@ entry = {
     },
     "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
+# FSRERUN1 (ompkit-t7cn7.4): a rerun of a cached FAIL records why, who and what it superseded.
+# A run without --rerun-reason records no rerun block, so the lookup above still matches.
+if os.environ.get("RERUN_FLAG") == "1":
+    entry["rerun"] = {
+        "reason": os.environ.get("RERUN_WHY", ""),
+        "actor": os.environ.get("RERUN_WHO", "") or "unknown",
+        "superseded_digest": os.environ.get("RERUN_SUP_DIGEST", ""),
+        "superseded_entry": os.environ.get("RERUN_SUP_FILE", ""),
+    }
 tmp = os.environ["ENTRY"] + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(entry, f, indent=2, sort_keys=True)
