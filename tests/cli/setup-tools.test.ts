@@ -49,10 +49,25 @@ export function missingTools(markdown: string, bins: readonly string[]): string[
 	return bins.filter(b => !have.has(b));
 }
 
+/** Table bins with no live doctor row: catches a registry entry the table documents but the doctor no longer probes. */
+export function extraTools(markdown: string, probed: readonly string[]): string[] {
+	const live = new Set(probed);
+	return tableTools(markdown).filter(b => !live.has(b));
+}
+
 const PROBED = Object.keys(STACK_SOURCE).sort();
 
 test("every probed tool has a setup-table row", () => {
 	expect(missingTools(SETUP_MD, PROBED)).toEqual([]);
+});
+
+/** Tools documented but not probed: required toolchain, docker, Tern. */
+const NON_PROBED = ["bun", "curl", "docker", "gh", "git", "omp", "python3", "tern"].sort();
+test("every table tool is probed live or explicitly non-probed", () => {
+	expect(extraTools(SETUP_MD, PROBED).sort()).toEqual(NON_PROBED);
+});
+test("planted: a dropped registry entry fails naming it", () => {
+	expect(extraTools(SETUP_MD, PROBED.filter(b => b !== "ntm"))).toContain("ntm");
 });
 
 test("planted: removing one row fails naming that tool", () => {

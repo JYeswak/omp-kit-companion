@@ -665,6 +665,7 @@ function inspectAgentMailGuard(): Finding {
 
 /** Dicklesworthstone stack currency: binary to release repo plus the one chosen install source (tap formula preferred). Exported so the setup-guide pin test reads the same probe list as the doctor. Formula names follow the JS1 bead inventory; anything without a tap formula is undecided until Josh approves a source. */
 export const STACK_SOURCE: Record<string, { repo: string; formula: string | null }> = {
+	ntm: { repo: "ntm", formula: "ntm" },
 	br: { repo: "beads_rust", formula: "br" },
 	bv: { repo: "beads_viewer", formula: "bv" },
 	am: { repo: "mcp_agent_mail_rust", formula: "mcp-agent-mail" },
