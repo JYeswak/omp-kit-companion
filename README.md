@@ -398,7 +398,7 @@ copies onto plugin layering.
 ```sh
 git clone https://github.com/JYeswak/omp-kit-companion.git
 cd omp-kit-companion
-bun install
+bun install --frozen-lockfile --ignore-scripts
 bun src/cli.ts --help
 omp plugin link "$PWD" && omp plugin list
 ```
