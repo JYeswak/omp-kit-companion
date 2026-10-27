@@ -263,6 +263,15 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		census: null, noCensus: "one small record per live seat session, rewritten in place every 5 s; nothing accumulates to count", ownerBead: "ompkit-hznvg",
 	},
 	{
+		id: "inbox-wake-cursor", title: "Seat mail-wake cursor ~/.local/state/omp-kit/inbox-wake/<agent>.<sha1(project)[:12]>.json (schema, agent, project, delivery-event cursor, at) and its <record>.<pid>.tmp, plus WOKEN_INPROCESS appends to ~/.local/state/omp-kit/mail-wake.jsonl",
+		rows: [], class: "REHOME", ownerKey: "agent+project", scope: "seat", survivesRespawn: true,
+		writers: ["extensions/kit-inbox-wake.ts"],
+		cancel: "session_shutdown clears the future poll timer only; it does not delete the durable cursor and does not cancel an in-flight poll or clean its temp file",
+		crash: "a crash between writeFileSync and renameSync leaves <record>.<pid>.tmp in HOME state; nothing reaps it, and the durable cursor keeps its last renamed value",
+		respawn: "the cursor is keyed by agent and project digest, not pid or session, so a successor resumes from it; the poll advances the cursor after enqueueing a followUp, before the seat consumes it, so a wake lost to an Esc or a crash before consumption is not resent (MAILWAKE1.2 Esc limit)",
+		terminal: { outcome: "self-heals", producer: "extensions/kit-inbox-wake.ts renames a fresh cursor on each poll that sees new delivery events" },
+		census: null, noCensus: "one small cursor per agent and project, rewritten in place; a ledger row records an enqueue (WOKEN_INPROCESS), not a delivery or consumption", ownerBead: "ompkit-uk9wn.2",	},
+	{
 		id: "kitlib-tmp", title: "kitlib owned temp dirs <root>/<label>.<pid>.<rand> with a key=value .owner (pid, label, repo, created, bead)",
 		rows: [], class: "REAP", ownerKey: "pid", scope: "cli-run", survivesRespawn: false,
 		writers: ["src/kitlib/tmp.ts"],
