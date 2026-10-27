@@ -38,44 +38,6 @@ esac
 case "${local_sha:-}" in
 	''|0000000000000000000000000000000000000000) exit 0 ;;
 esac
-# TAGPUSHGATE1 (ompkit-t7cn7.2): a brand-new tag whose target is already on
-# the pushed-to remote's main carries no new tree, so there is nothing for
-# fresh-gate or the full-suite verdict to judge. Admit it with a named reason.
-# Every other case falls through to the full gate: a branch push, a tag move
-# (remote sha set), or a tag whose target is not on the remote's main. The
-# remote is git's pre-push $1; when the chain runner drops argv ($1 empty)
-# the gate falls back to origin and says so. The fetch names the literal
-# refs/heads/main on that remote; a stale local ref is never trusted.
-# A fetch or peel failure fails closed into the gate below.
-ZERO40=0000000000000000000000000000000000000000
-case "${remote_ref:-}" in
-	refs/tags/*)
-		if [ "${remote_sha:-}" = "$ZERO40" ]; then
-			push_remote=${1:-}
-			if [ -z "$push_remote" ]; then
-				push_remote=origin
-				remote_note="admitted with remote unknown to the hook; judged against origin/main"
-			else
-				remote_note="an ancestor of $push_remote/main"
-			fi
-			tag_target=$(git -C "$ROOT" rev-parse "$local_sha^{commit}" 2>/dev/null) || tag_target=
-			if [ -n "$tag_target" ] && git -C "$ROOT" fetch -q "$push_remote" refs/heads/main 2>/dev/null; then
-				main_tip=$(git -C "$ROOT" rev-parse FETCH_HEAD 2>/dev/null) || main_tip=
-				if [ -n "$main_tip" ] && git -C "$ROOT" merge-base --is-ancestor "$tag_target" "$main_tip" 2>/dev/null; then
-					printf 'pre-push-gate: ADMIT new tag %s: %s is %s; skipping fresh-gate and full-suite-verdict\n' "${remote_ref#refs/tags/}" "$tag_target" "$remote_note"
-					exit 0
-				fi
-			fi
-		fi
-		;;
-esac
-case "${remote_sha:-}" in
-	0000000000000000000000000000000000000000|'')
-		base=$(git -C "$ROOT" rev-list --max-parents=0 "$local_sha" | tail -n 1)
-		if git -C "$ROOT" cat-file -e "$base^" 2>/dev/null; then base_ref=$base; else base_ref=; fi
-		;;
-	*) base_ref=$remote_sha ;;
-esac
 # Each extract lives inside a reaper-owned dir (ompkit-fp72.40): the name carries this shell's pid
 # and .owner records it, so a gate killed by SIGKILL (which skips the trap) leaves a dir the scratch
 # reaper takes once this pid is dead, instead of an ownerless tree held for 72 h.
@@ -93,13 +55,15 @@ owned_dir() {
 }
 archive_root=""
 base_root=""
+tag_root=""
+gate_red=0
 # Every non-directory goes (files, symlinks, sockets): a symlink left by a test fixture kept
 # its parents non-empty, so the whole extract survived (pre-push-gate.vx9qma, 2026-10-12).
 # A red gate keeps its log: archive_root/gate.log and .owner survive, everything else goes, so the
 # failure can be read after the push is refused and the reaper still owns the dir (ompkit-fp72.40).
-gate_red=0
+# The tag verdict dir holds no log: a refused tag prints its reason, then cleanup takes the whole dir.
 cleanup() {
-	for dir in ${archive_root:+"$archive_root"} ${base_root:+"$base_root"}; do
+	for dir in ${archive_root:+"$archive_root"} ${base_root:+"$base_root"} ${tag_root:+"$tag_root"}; do
 		[ -d "$dir" ] || continue
 		chmod -R u+w "$dir" 2>/dev/null || true
 		if [ "$gate_red" = 1 ] && [ "$dir" = "$archive_root" ]; then
@@ -110,6 +74,124 @@ cleanup() {
 		find "$dir" -depth -type d -empty -delete 2>/dev/null || true
 	done
 }
+# TAGPUSHGATE1 (ompkit-t7cn7.2): a brand-new tag whose target is already on the
+# pushed-to remote's main skips fresh-gate, but never the full-suite verdict.
+# The verdict for the exact target commit is read back from its cache (cheap;
+# no suite runs) and the tag is admitted only on VERDICT PASS. A cache miss is
+# a missing build artifact: the push is refused with the command that produces
+# the verdict, never a silent suite inside the push. Every other case runs the
+# full gate unchanged: a branch push, a tag move (remote sha set), or a tag
+# whose target is not on the remote's main. The remote is git's pre-push $1;
+# when the chain runner drops argv ($1 empty) the gate falls back to origin
+# and says so. The fetch names the literal refs/heads/main on that remote; a
+# stale local ref is never trusted. A fetch or peel failure fails closed into
+# the gate below.
+# tag_reusable_verdict TARGET WORKDIR: status 0 only when the verdict cache
+# holds a complete entry whose tree, checks and runtime match exactly what the
+# verdict script would compute for TARGET judged by WORKDIR's scripts. Any
+# doubt is a miss (refuse with the command), never a guess.
+tag_reusable_verdict() {
+	v_tree=$(git -C "$ROOT" rev-parse "$1^{tree}" 2>/dev/null) || return 1
+	[ -n "$v_tree" ] || return 1
+	v_scripts="$2/scripts"
+	if [ -f "$v_scripts/gate-ci-only.tsv" ]; then
+		v_checks=$(cat "$v_scripts/full-suite-verdict.sh" "$v_scripts/fresh-gate.sh" "$v_scripts/gate-ci-only.tsv" 2>/dev/null | shasum -a 256 | cut -d' ' -f1) || return 1
+	else
+		v_checks=$(cat "$v_scripts/full-suite-verdict.sh" "$v_scripts/fresh-gate.sh" 2>/dev/null | shasum -a 256 | cut -d' ' -f1) || return 1
+	fi
+	[ -n "$v_checks" ] || return 1
+	v_bun=$(bun --version 2>/dev/null) || return 1
+	v_py=$(python3 --version 2>&1) || return 1
+	v_runtime="$(uname -s)/$(uname -m)/bun-$v_bun/$v_py"
+	[ -n "${FULL_SUITE_RUNTIME_ID:-}" ] && v_runtime="$v_runtime/pin-$FULL_SUITE_RUNTIME_ID"
+	v_cache=${FULL_SUITE_VERDICT_CACHE_DIR:-}
+	if [ -z "$v_cache" ]; then
+		v_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+		v_cache="$v_git/omp-kit/full-suite-verdicts"
+	fi
+	[ -f "$v_cache/$v_tree.json" ] && [ -f "$v_cache/$v_tree.log" ] || return 1
+	V_TREE=$v_tree V_CHECKS=$v_checks V_RUNTIME=$v_runtime V_ENTRY="$v_cache/$v_tree.json" V_LOG="$v_cache/$v_tree.log" python3 - <<'PYEOF' 2>/dev/null
+import hashlib, json, os
+with open(os.environ["V_ENTRY"], encoding="utf-8") as f:
+    e = json.load(f)
+assert e.get("version") == 1
+assert e.get("tree") == os.environ["V_TREE"]
+assert e.get("checks") == os.environ["V_CHECKS"]
+assert e.get("runtime") == os.environ["V_RUNTIME"]
+assert e.get("verdict") in ("PASS", "FAIL")
+evidence = e.get("evidence")
+assert isinstance(evidence, dict) and evidence.get("complete") is True
+digest = hashlib.sha256()
+with open(os.environ["V_LOG"], "rb") as log:
+    for chunk in iter(lambda: log.read(1024 * 1024), b""):
+        digest.update(chunk)
+assert evidence.get("log_sha256") == digest.hexdigest()
+assert isinstance(e.get("exit_code"), int)
+names = ("bun_files", "bun_ran", "bun_fail", "shell_suites", "shell_fail", "py_suites", "py_fail")
+counts = [evidence.get(n) for n in names]
+assert all(isinstance(v, int) and v >= 0 for v in counts)
+bf, br, bfl, ss, sf, ps, pf = counts
+assert bf + ss + ps > 0
+assert (bf == 0 and br == 0) or (bf > 0 and br > 0)
+assert bfl <= br and sf <= ss and pf <= ps
+if e["verdict"] == "PASS":
+    assert e["exit_code"] == 0 and bfl == sf == pf == 0
+else:
+    assert e["exit_code"] != 0 and (bfl > 0 or sf > 0 or pf > 0)
+PYEOF
+}
+# tag_on_main_verdict NAME TARGET NOTE: admit or refuse the tag from the
+# verdict readback. Returns nonzero only when the target cannot be judged this
+# way (archive or checker missing); the caller then runs the full gate.
+tag_on_main_verdict() {
+	tag_root=$(owned_dir pre-push-gate-tag) || return 1
+	if ! git -C "$ROOT" archive "$2" | tar -xf - -C "$tag_root/tree" 2>/dev/null; then cleanup; tag_root=""; return 1; fi
+	if [ ! -f "$tag_root/tree/scripts/full-suite-verdict.sh" ] || [ ! -f "$tag_root/tree/scripts/fresh-gate.sh" ]; then cleanup; tag_root=""; return 1; fi
+	if ! tag_reusable_verdict "$2" "$tag_root/tree"; then
+		cleanup; tag_root=""
+		printf 'pre-push-gate: REFUSED new tag %s: no reusable full-suite verdict for %s; run sh scripts/full-suite-verdict.sh --repo %s --commit %s, then push the tag\n' "$1" "$2" "$ROOT" "$2" >&2
+		exit 1
+	fi
+	verdict_rc=0
+	verdict_out=$(sh "$tag_root/tree/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$2" --archive-dir "$tag_root/tree" 2>&1) || verdict_rc=$?
+	cleanup; tag_root=""
+	if [ "$verdict_rc" = 0 ] && printf '%s\n' "$verdict_out" | grep -qE 'VERDICT (REUSED )?PASS'; then
+		verdict_line=$(printf '%s\n' "$verdict_out" | grep -E 'VERDICT (REUSED )?PASS' | head -n 1)
+		printf 'pre-push-gate: ADMIT new tag %s: %s is %s; %s\n' "$1" "$2" "$3" "$verdict_line"
+		exit 0
+	fi
+	printf '%s\n' "$verdict_out" >&2
+	case "$verdict_rc" in ''|*[!0-9]*|0) verdict_rc=1 ;; esac
+	exit "$verdict_rc"
+}
+ZERO40=0000000000000000000000000000000000000000
+case "${remote_ref:-}" in
+	refs/tags/*)
+		if [ "${remote_sha:-}" = "$ZERO40" ]; then
+			push_remote=${1:-}
+			if [ -z "$push_remote" ]; then
+				push_remote=origin
+				remote_note="admitted with remote unknown to the hook; judged against origin/main"
+			else
+				remote_note="an ancestor of $push_remote/main"
+			fi
+			tag_target=$(git -C "$ROOT" rev-parse "$local_sha^{commit}" 2>/dev/null) || tag_target=
+			if [ -n "$tag_target" ] && git -C "$ROOT" fetch -q "$push_remote" refs/heads/main 2>/dev/null; then
+				main_tip=$(git -C "$ROOT" rev-parse FETCH_HEAD 2>/dev/null) || main_tip=
+				if [ -n "$main_tip" ] && git -C "$ROOT" merge-base --is-ancestor "$tag_target" "$main_tip" 2>/dev/null; then
+					tag_on_main_verdict "${remote_ref#refs/tags/}" "$tag_target" "$remote_note"
+				fi
+			fi
+		fi
+		;;
+esac
+case "${remote_sha:-}" in
+	0000000000000000000000000000000000000000|'')
+		base=$(git -C "$ROOT" rev-list --max-parents=0 "$local_sha" | tail -n 1)
+		if git -C "$ROOT" cat-file -e "$base^" 2>/dev/null; then base_ref=$base; else base_ref=; fi
+		;;
+	*) base_ref=$remote_sha ;;
+esac
 # GATESCR1 (ompkit-fp72.40): an interrupted run is red, not clean. The HUP/INT/TERM handler marks
 # the run red BEFORE cleanup, so the failed parent keeps exactly .owner + gate.log while the
 # extract tree is removed. Every descendant (fresh-gate, omp-kit heavy, bun and their children,

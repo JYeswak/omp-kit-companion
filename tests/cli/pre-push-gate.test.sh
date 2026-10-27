@@ -996,14 +996,6 @@ mktagrepo() {
 }
 trepo=$(mktagrepo tagpush)
 ttip=$(git -C "$trepo" rev-parse HEAD)
-# positive: new tag at origin/main tip is admitted, fresh-gate never runs
-rc=$(run_adapter_line "$trepo" "refs/tags/v1 $ttip refs/tags/v1 $ZERO40")
-out=$(cat "$TMP/out")
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "ADMIT new tag v1" && ! printf '%s' "$out" | grep -q "FRESH-GATE-RAN"; then
-	pass=$((pass + 1))
-else
-	fail=$((fail + 1)); printf 'FAIL tagpush-admit: rc=%s out<<<%s>>>\n' "$rc" "$out"
-fi
 # planted negative: new tag at a commit NOT on origin/main still runs the gate
 git -C "$trepo" checkout -q -b tagside
 printf 'side\n' > "$trepo/side.txt"
@@ -1037,14 +1029,15 @@ else
 fi
 # TAGPUSHGATE1 follow-up: the admit judgment uses git's pre-push $1 remote, not
 # always origin. Second remote "upstream" has main at the base commit only, so
-# the head tag is not on its main while it is on origin's main.
+# the head tag is not on its main while it is on origin's main. The lean
+# fixture carries no verdict checker, so the fall-through runs the fast gate.
 urepo=$(mktagrepo tagpushremote)
 utag=$(git -C "$urepo" rev-parse HEAD)
 ubase=$(git -C "$urepo" rev-parse HEAD~1)
 git init -q --bare --initial-branch=main "$urepo.upstream.git"
 git -C "$urepo" remote add upstream "$urepo.upstream.git"
 git -C "$urepo" push -q upstream "$ubase:refs/heads/main"
-# (a) pushed to upstream whose main lacks the target: gate runs, no admit
+# pushed to upstream whose main lacks the target: gate runs, no admit
 rc=$(run_adapter_line "$urepo" "refs/tags/v2 $utag refs/tags/v2 $ZERO40" upstream)
 out=$(cat "$TMP/out")
 if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "FRESH-GATE-RAN" && ! printf '%s' "$out" | grep -q "ADMIT new tag"; then
@@ -1052,22 +1045,105 @@ if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "FRESH-GATE-RAN" && ! printf 
 else
 	fail=$((fail + 1)); printf 'FAIL tagpush-remote-mismatch-runs-gate: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
-# (b) pushed to origin whose main has the target: admitted, remote named
-rc=$(run_adapter_line "$urepo" "refs/tags/v2 $utag refs/tags/v2 $ZERO40" origin)
-out=$(cat "$TMP/out")
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "ADMIT new tag v2: .* is an ancestor of origin/main" && ! printf '%s' "$out" | grep -q "FRESH-GATE-RAN"; then
+# TAGPUSHGATE1 rework: a new tag on main skips fresh-gate but never the
+# full-suite verdict. The verdict fixtures below carry the real judging script,
+# and each seeds its cache by running that script once (the suite runs at seed
+# time, never inside the tag push). The gate reads the entry back.
+mktagverdictrepo() {
+	name=$1
+	failing_suite=${2:-}
+	repo=$(mktagrepo "$name")
+	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
+	if [ -n "$failing_suite" ]; then
+		printf '#!/bin/sh\necho RED-FAIL; exit 1\n' > "$repo/tests/cli/$failing_suite"
+	fi
+	git -C "$repo" add scripts tests
+	git -C "$repo" commit -qm "[test] tag verdict judge"
+	git -C "$repo" push -q origin HEAD:refs/heads/main
+	printf '%s' "$repo"
+}
+seed_verdict() {
+	repo=$1
+	sha=$2
+	cache=$3
+	tag=$4
+	seed_arch="$TMP/seed-arch-$tag"
+	rm -rf "$seed_arch" "$cache"
+	mkdir -p "$seed_arch" "$cache"
+	git -C "$repo" archive "$sha" | tar -xf - -C "$seed_arch"
+	KITROOT="$KITREPO" OMP_KIT_OMP_SRC_FETCH=0 \
+		sh "$repo/scripts/full-suite-verdict.sh" --repo "$repo" --commit "$sha" --archive-dir "$seed_arch" --cache-dir "$cache" >"$TMP/seed-$tag.out" 2>&1
+	printf '%s' "$?"
+}
+# (a) a new tag at main with a cached PASS is admitted and names the verdict;
+# fresh-gate never runs and the suite never reruns (no "running the complete suite").
+vpass=$(mktagverdictrepo tagpushverdictpass)
+vptip=$(git -C "$vpass" rev-parse HEAD)
+vpcache="$TMP/tag-verdict-pass-cache"
+vseedrc=$(seed_verdict "$vpass" "$vptip" "$vpcache" vpass)
+vptree=$(git -C "$vpass" rev-parse "$vptip^{tree}")
+if [ "$vseedrc" = "0" ] && [ -f "$vpcache/$vptree.json" ]; then
 	pass=$((pass + 1))
 else
-	fail=$((fail + 1)); printf 'FAIL tagpush-remote-named-admit: rc=%s out<<<%s>>>\n' "$rc" "$out"
+	fail=$((fail + 1)); printf 'FAIL tagpush-verdict-seed-pass: rc=%s out<<<%s>>>\n' "$vseedrc" "$(cat "$TMP/seed-vpass.out")"
 fi
-# (c) $1 empty (chain runner drops argv): origin fallback with visible reason
-rc=$(run_adapter_line "$urepo" "refs/tags/v2 $utag refs/tags/v2 $ZERO40")
+export FULL_SUITE_VERDICT_CACHE_DIR="$vpcache"
+rc=$(run_adapter_line "$vpass" "refs/tags/v3 $vptip refs/tags/v3 $ZERO40" origin)
 out=$(cat "$TMP/out")
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "remote unknown to the hook; judged against origin/main" && ! printf '%s' "$out" | grep -q "FRESH-GATE-RAN"; then
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "ADMIT new tag v3: .* is an ancestor of origin/main; FULL-SUITE: VERDICT REUSED PASS" \
+	&& ! printf '%s' "$out" | grep -q "FRESH-GATE-RAN" && ! printf '%s' "$out" | grep -q "running the complete suite"; then
 	pass=$((pass + 1))
 else
-	fail=$((fail + 1)); printf 'FAIL tagpush-remote-fallback-admit: rc=%s out<<<%s>>>\n' "$rc" "$out"
+	fail=$((fail + 1)); printf 'FAIL tagpush-admit-verdict-pass: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
+# $1 empty (chain runner drops argv): origin fallback with visible reason, same verdict
+rc=$(run_adapter_line "$vpass" "refs/tags/v3 $vptip refs/tags/v3 $ZERO40")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "remote unknown to the hook; judged against origin/main; FULL-SUITE: VERDICT REUSED PASS" \
+	&& ! printf '%s' "$out" | grep -q "running the complete suite"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-admit-verdict-fallback: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+unset FULL_SUITE_VERDICT_CACHE_DIR
+# (b) the same with a cached FAIL is refused, naming the reused FAIL verdict
+vfail=$(mktagverdictrepo tagpushverdictfail fail.test.sh)
+vftip=$(git -C "$vfail" rev-parse HEAD)
+vfcache="$TMP/tag-verdict-fail-cache"
+vfseedrc=$(seed_verdict "$vfail" "$vftip" "$vfcache" vfail)
+vftree=$(git -C "$vfail" rev-parse "$vftip^{tree}")
+if [ "$vfseedrc" != "0" ] && [ -f "$vfcache/$vftree.json" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-verdict-seed-fail: rc=%s out<<<%s>>>\n' "$vfseedrc" "$(cat "$TMP/seed-vfail.out")"
+fi
+export FULL_SUITE_VERDICT_CACHE_DIR="$vfcache"
+rc=$(run_adapter_line "$vfail" "refs/tags/v4 $vftip refs/tags/v4 $ZERO40" origin)
+out=$(cat "$TMP/out")
+if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "VERDICT REUSED FAIL" \
+	&& ! printf '%s' "$out" | grep -q "ADMIT new tag" && ! printf '%s' "$out" | grep -q "running the complete suite"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-verdict-fail-refused: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+unset FULL_SUITE_VERDICT_CACHE_DIR
+# (c) the same with no cached verdict is refused, naming the command that
+# produces it; the suite never runs inside the push.
+vmiss=$(mktagverdictrepo tagpushverdictmiss)
+vmtip=$(git -C "$vmiss" rev-parse HEAD)
+vmcache="$TMP/tag-verdict-miss-cache"
+mkdir -p "$vmcache"
+export FULL_SUITE_VERDICT_CACHE_DIR="$vmcache"
+rc=$(run_adapter_line "$vmiss" "refs/tags/v5 $vmtip refs/tags/v5 $ZERO40" origin)
+out=$(cat "$TMP/out")
+if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "no reusable full-suite verdict for $vmtip" \
+	&& printf '%s' "$out" | grep -q "sh scripts/full-suite-verdict.sh --repo .* --commit $vmtip" \
+	&& ! printf '%s' "$out" | grep -q "ADMIT new tag" && ! printf '%s' "$out" | grep -q "running the complete suite"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-verdict-miss-refused: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+unset FULL_SUITE_VERDICT_CACHE_DIR
 
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
