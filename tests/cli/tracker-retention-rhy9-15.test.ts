@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { spawnSync } from "node:child_process";
+import { run } from "../../src/kitlib/run.ts";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runFleetWatchOnce } from "../../src/fleet-watch.ts";
@@ -34,10 +34,24 @@ function cleanup(scratch: string): void {
 	if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
 }
 
-function br(args: readonly string[], repo: string): string {
-	const out = spawnSync("br", [...args], { cwd: repo, encoding: "utf8" });
-	expect(out.status).toBe(0);
-	return out.stdout;
+async function br(args: readonly string[], repo: string): Promise<string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) {
+		if (value !== undefined) env[key] = value;
+	}
+	// Hermetic fixture tracker: never inherit a publisher/ambient tracker
+	// selector, and always address the fixture's own database explicitly, so
+	// every call resolves only to the test's own tracker whatever ancestors
+	// exist above the scratch repo and whatever tracker env the parent exports.
+	delete env.BEADS_DB;
+	delete env.BEADS_DIR;
+	delete env.BD_DB;
+	delete env.BD_DATABASE;
+	delete env.BEADS_JSONL;
+	delete env.BEADS_CACHE_DIR;
+	const { rc: status, stdout } = await run(["br", "--db", join(repo, ".beads", "beads.db"), ...args], { deadline_s: 30, cwd: repo, env });
+	expect(status).toBe(0);
+	return new TextDecoder().decode(stdout);
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -124,13 +138,13 @@ function plantMigrationRun(repo: string, name: string, options: { prepared?: boo
 	return dir;
 }
 
-test("owned dead completed artifacts beyond the bound are reaped with per-path receipt; rest remain; repeat is idempotent; native records unchanged", () => {
+test("owned dead completed artifacts beyond the bound are reaped with per-path receipt; rest remain; repeat is idempotent; native records unchanged", async () => {
 	const { scratch, repo } = scratchRepo("positive");
 	try {
-		br(["init", "--actor", "retention-test"], repo);
-		br(["create", "--title", "retention probe", "--actor", "retention-test"], repo);
-		const listBefore = br(["list", "--json"], repo);
-		const countBefore = br(["count"], repo);
+		await br(["init", "--actor", "retention-test"], repo);
+		await br(["create", "--title", "retention probe", "--actor", "retention-test"], repo);
+		const listBefore = await br(["list", "--json"], repo);
+		const countBefore = await br(["count"], repo);
 
 		const reapedWal = plantWalIndex(repo, "old", { old: true });
 		const reapedRun = plantMigrationRun(repo, "20260925T200953-old-0", { complete: true, old: true });
@@ -156,8 +170,8 @@ test("owned dead completed artifacts beyond the bound are reaped with per-path r
 		expect(reasons[recentWal]).toBe("RECENT");
 		expect(reasons[unresolvedRun]).toBe("UNRESOLVED");
 
-		expect(br(["list", "--json"], repo)).toBe(listBefore);
-		expect(br(["count"], repo)).toBe(countBefore);
+		expect(await br(["list", "--json"], repo)).toBe(listBefore);
+		expect(await br(["count"], repo)).toBe(countBefore);
 
 		expect(retainTrackerQuarantine(repo, { now: () => NOW, holderOf: clearHolder })).toBeNull();
 		expectSameSnapshot(recentSnap, recentWal);

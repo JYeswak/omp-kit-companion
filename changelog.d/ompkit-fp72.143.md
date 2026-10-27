@@ -1,1 +1,3 @@
-- Prevent full-suite tests from inheriting the publisher's tracker database while preserving each test's explicit database choices and the publisher's repository validation.
+### Fixed
+
+- The tracker-retention fixture test no longer resolves to an ambient tracker. Its `br` helper passes `--db <repo>/.beads/beads.db` on every call and scrubs `BEADS_DB`, `BEADS_DIR`, `BD_DB`, `BD_DATABASE`, `BEADS_JSONL` and `BEADS_CACHE_DIR` from the child environment, so `br init` can no longer reach the live tracker through an exported selector the way tonight's run did through `companion/.beads` (exit 2 on the held live DB). Replayed with an owned broken outer tracker and a hostile `BEADS_DB`: before, the unpinned call resolved to the outer tracker and failed; after, every call uses only its own fixture tracker and an owned sentinel stays byte-identical. (ompkit-fp72.143)
