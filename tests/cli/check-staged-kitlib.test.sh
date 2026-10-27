@@ -335,6 +335,36 @@ printf '%s\n# post-parent edit' "$PY_GOOD" > "$R/tool.py"
 git -C "$R" add tool.py
 out=$(commit "$R" -m "[test] parent mismatch without admission" -m "Revert: $X")
 check "$?" "0" "ordinary-parent-mismatch-without-admission-passes" "x" "x"
+# An admitted forward-withdrawal stages exactly X's paths: one path keeps X
+# parent's bytes (so the origin admission binds) while a second path's bytes
+# differ from X's parent. The parent-proof must refuse, naming the entry.
+# The origin is published by local clone only; no push or fetch leaves the fixture.
+R=$(new_repo origin-admitted-parent-proof tool.py "$PY_BAD_OLD")
+printf 'VALUE = 1\n' > "$R/data.py"
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add data.py tool.py
+git -C "$R" -c core.hooksPath=/dev/null commit -q -m "[test] published origin"
+origin=$(git -C "$R" rev-parse HEAD)
+git clone --bare -q "$R" "$R/published.git"
+git --git-dir="$R/published.git" update-ref refs/heads/main "$origin"
+git -C "$R" remote add origin "$R/published.git"
+git -C "$R" update-ref refs/remotes/origin/main "$origin"
+printf '%s\n' "$PY_GOOD" > "$R/tool.py"
+printf 'VALUE = 2\n' > "$R/data.py"
+git -C "$R" add data.py tool.py
+git -C "$R" -c core.hooksPath=/dev/null commit -q -m "[test] ratchet reduction"
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+printf 'VALUE = 3\n' > "$R/data.py"
+git -C "$R" add data.py tool.py
+out=$(commit "$R" -m "[test] admitted parent mismatch" -m "Revert: $X")
+check "$?" "1" "origin-admitted-parent-mismatch-refused" "$out" 'does not match X parent'
+# The same commit with that path's bytes equal to X's parent passes.
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+printf 'VALUE = 1\n' > "$R/data.py"
+git -C "$R" add data.py tool.py
+out=$(commit "$R" -m "[test] admitted parent exact" -m "Revert: $X")
+check "$?" "0" "origin-admitted-parent-exact-pass" "$out" '"verdict":"PASS"'
 
 R=$(origin_repo origin-stale)
 X=$(git -C "$R" rev-parse HEAD)
