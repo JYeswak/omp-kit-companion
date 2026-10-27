@@ -964,5 +964,110 @@ else
 	fail=$((fail + 1)); printf 'FAIL land1i-bootstrap-skip: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 
+# TAGPUSHGATE1 (ompkit-t7cn7.2): a new tag at a commit already on the pushed-to
+# remote's main is admitted with a named reason and never runs fresh-gate; a
+# tag off main, a tag move, and a branch push all still run the full gate.
+ZERO40=0000000000000000000000000000000000000000
+run_adapter_line() {
+	repo=$1
+	line=$2
+	shift 2
+	printf '%s\n' "$line" | (cd -- "$repo" && sh "$ADAPTER" "$@" > "$TMP/out" 2>&1)
+	printf '%s' "$?"
+}
+mktagrepo() {
+	name=$1
+	repo="$TMP/$name"
+	rm -rf "$repo" "$repo.origin.git"
+	mkdir -p "$repo/scripts" "$repo/var/agent-tmp"
+	git -C "$repo" init -q
+	git -C "$repo" config user.email "test@example.invalid"
+	git -C "$repo" config user.name "worker-1"
+	printf '#!/bin/sh\necho FRESH-GATE-RAN\n' > "$repo/scripts/fresh-gate.sh"
+	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
+	create_checker_test_stubs "$repo"
+	git -C "$repo" add scripts tests
+	git -C "$repo" commit -qm "[test] tag base"
+	git -C "$repo" commit -q --allow-empty -m "[test] tag head"
+	git init -q --bare --initial-branch=main "$repo.origin.git"
+	git -C "$repo" remote add origin "$repo.origin.git"
+	git -C "$repo" push -q origin HEAD:refs/heads/main
+	printf '%s' "$repo"
+}
+trepo=$(mktagrepo tagpush)
+ttip=$(git -C "$trepo" rev-parse HEAD)
+# positive: new tag at origin/main tip is admitted, fresh-gate never runs
+rc=$(run_adapter_line "$trepo" "refs/tags/v1 $ttip refs/tags/v1 $ZERO40")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "ADMIT new tag v1" && ! printf '%s' "$out" | grep -q "FRESH-GATE-RAN"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-admit: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+# planted negative: new tag at a commit NOT on origin/main still runs the gate
+git -C "$trepo" checkout -q -b tagside
+printf 'side\n' > "$trepo/side.txt"
+git -C "$trepo" add side.txt
+git -C "$trepo" commit -qm "[test] tag side"
+tside=$(git -C "$trepo" rev-parse HEAD)
+git -C "$trepo" checkout -q -
+rc=$(run_adapter_line "$trepo" "refs/tags/vOff $tside refs/tags/vOff $ZERO40")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "FRESH-GATE-RAN" && ! printf '%s' "$out" | grep -q "ADMIT new tag"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-offmain-runs-gate: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+# planted negative: a tag move (remote sha set) still runs the gate
+tbase=$(git -C "$trepo" rev-parse HEAD~1)
+rc=$(run_adapter_line "$trepo" "refs/tags/v1 $ttip refs/tags/v1 $tbase")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "FRESH-GATE-RAN" && ! printf '%s' "$out" | grep -q "ADMIT new tag"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-move-runs-gate: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+# planted negative: a branch push of the same commit still runs the gate
+rc=$(run_adapter_line "$trepo" "refs/heads/main $ttip refs/heads/main $tbase")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "FRESH-GATE-RAN" && ! printf '%s' "$out" | grep -q "ADMIT new tag"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-branch-runs-gate: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+# TAGPUSHGATE1 follow-up: the admit judgment uses git's pre-push $1 remote, not
+# always origin. Second remote "upstream" has main at the base commit only, so
+# the head tag is not on its main while it is on origin's main.
+urepo=$(mktagrepo tagpushremote)
+utag=$(git -C "$urepo" rev-parse HEAD)
+ubase=$(git -C "$urepo" rev-parse HEAD~1)
+git init -q --bare --initial-branch=main "$urepo.upstream.git"
+git -C "$urepo" remote add upstream "$urepo.upstream.git"
+git -C "$urepo" push -q upstream "$ubase:refs/heads/main"
+# (a) pushed to upstream whose main lacks the target: gate runs, no admit
+rc=$(run_adapter_line "$urepo" "refs/tags/v2 $utag refs/tags/v2 $ZERO40" upstream)
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "FRESH-GATE-RAN" && ! printf '%s' "$out" | grep -q "ADMIT new tag"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-remote-mismatch-runs-gate: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+# (b) pushed to origin whose main has the target: admitted, remote named
+rc=$(run_adapter_line "$urepo" "refs/tags/v2 $utag refs/tags/v2 $ZERO40" origin)
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "ADMIT new tag v2: .* is an ancestor of origin/main" && ! printf '%s' "$out" | grep -q "FRESH-GATE-RAN"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-remote-named-admit: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+# (c) $1 empty (chain runner drops argv): origin fallback with visible reason
+rc=$(run_adapter_line "$urepo" "refs/tags/v2 $utag refs/tags/v2 $ZERO40")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "remote unknown to the hook; judged against origin/main" && ! printf '%s' "$out" | grep -q "FRESH-GATE-RAN"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL tagpush-remote-fallback-admit: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

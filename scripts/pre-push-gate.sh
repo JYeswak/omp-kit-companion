@@ -38,6 +38,37 @@ esac
 case "${local_sha:-}" in
 	''|0000000000000000000000000000000000000000) exit 0 ;;
 esac
+# TAGPUSHGATE1 (ompkit-t7cn7.2): a brand-new tag whose target is already on
+# the pushed-to remote's main carries no new tree, so there is nothing for
+# fresh-gate or the full-suite verdict to judge. Admit it with a named reason.
+# Every other case falls through to the full gate: a branch push, a tag move
+# (remote sha set), or a tag whose target is not on the remote's main. The
+# remote is git's pre-push $1; when the chain runner drops argv ($1 empty)
+# the gate falls back to origin and says so. The fetch names the literal
+# refs/heads/main on that remote; a stale local ref is never trusted.
+# A fetch or peel failure fails closed into the gate below.
+ZERO40=0000000000000000000000000000000000000000
+case "${remote_ref:-}" in
+	refs/tags/*)
+		if [ "${remote_sha:-}" = "$ZERO40" ]; then
+			push_remote=${1:-}
+			if [ -z "$push_remote" ]; then
+				push_remote=origin
+				remote_note="admitted with remote unknown to the hook; judged against origin/main"
+			else
+				remote_note="an ancestor of $push_remote/main"
+			fi
+			tag_target=$(git -C "$ROOT" rev-parse "$local_sha^{commit}" 2>/dev/null) || tag_target=
+			if [ -n "$tag_target" ] && git -C "$ROOT" fetch -q "$push_remote" refs/heads/main 2>/dev/null; then
+				main_tip=$(git -C "$ROOT" rev-parse FETCH_HEAD 2>/dev/null) || main_tip=
+				if [ -n "$main_tip" ] && git -C "$ROOT" merge-base --is-ancestor "$tag_target" "$main_tip" 2>/dev/null; then
+					printf 'pre-push-gate: ADMIT new tag %s: %s is %s; skipping fresh-gate and full-suite-verdict\n' "${remote_ref#refs/tags/}" "$tag_target" "$remote_note"
+					exit 0
+				fi
+			fi
+		fi
+		;;
+esac
 case "${remote_sha:-}" in
 	0000000000000000000000000000000000000000|'')
 		base=$(git -C "$ROOT" rev-list --max-parents=0 "$local_sha" | tail -n 1)
