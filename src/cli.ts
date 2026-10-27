@@ -87,6 +87,7 @@ import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunn
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
+import { inspectActivation, liveActivationDeps } from "./activation.ts";
 import { inspectOwnership, liveOwnershipIo } from "./ownership-doctor.ts";
 import { inspectMissionRch, liveMissionRchIo } from "./mission-rch.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
@@ -1017,6 +1018,30 @@ async function servicesInventory(request: ParsedCommand): Promise<CliResult> {
 	return { code: 0, data: { overall: report.status, kit, omp, findings: [finding],
 		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
 		recommended_actions: [finding.recommended_action] }, verification: "UNVERIFIED" };
+}
+
+function activationDoctor(): CliResult {
+	const kit = kitIdentity();
+	const home = process.env.HOME;
+	if (!kit.release.root || !home || !isAbsolute(home)) {
+		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{
+			code: "INVENTORY_UNAVAILABLE", message: "Kit release root or absolute HOME is unavailable",
+			remediation: "Run an installed omp-kit executable with an absolute HOME; no safeguard was inspected.",
+		}], verification: "UNVERIFIED" };
+	}
+	const report = inspectActivation(kit.release.root, home, liveActivationDeps(kit.release.root, home));
+	const finding: Finding = { component: "activation", status: report.overall === "PASS" ? "OK" : "FAIL",
+		reason: report.manifest_issue ? `Activation manifest unreadable: ${report.manifest_issue}`
+			: report.overall === "PASS"
+				? `${report.items.length} safeguard(s) on${report.off_with_reason ? `; ${report.off_with_reason} off with a recorded reason` : ""}`
+				: `${report.off_no_reason} safeguard(s) off with no recorded reason`,
+		recommended_action: report.overall === "PASS" ? "No action required."
+			: "Turn each safeguard on with its apply verb, or record an opt-out reason; this command never applies or records.",
+		evidence: { ...report } };
+	return { code: report.overall === "PASS" ? 0 : 1, data: { overall: report.overall, kit, findings: [finding],
+		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
+		recommended_actions: [finding.recommended_action],
+		commands: ["omp-kit doctor --scope activation --json"] }, verification: "PERFORMED" };
 }
 
 async function privateMemoryAudit(request: ParsedCommand): Promise<CliResult> {
@@ -4337,6 +4362,10 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (command.name === "doctor" && flags.get("--scope") === "services") {
 		if (flags.has("--project") || flags.has("--file") || flags.has("--profile")) return refusal("INVALID_FLAG", "services scope inspects machine launchd state and cannot accept --project, --file or --profile", "Use omp-kit doctor --scope services [--services ABS_FILE].");
 		return servicesInventory(request);
+	}
+	if (command.name === "doctor" && flags.get("--scope") === "activation") {
+		if (flags.has("--project") || flags.has("--file") || flags.has("--profile")) return refusal("INVALID_FLAG", "activation scope inspects machine safeguard state and cannot accept --project, --file or --profile", "Use omp-kit doctor --scope activation --json.");
+		return activationDoctor();
 	}
 	if (command.name === "doctor" && flags.get("--scope") === "context") {
 		if (flags.has("--file")) return refusal("INVALID_FLAG", "--file is only valid for doctor --scope lsp", "Use omp-kit doctor --scope context [--profile NAME] [--project PATH].");

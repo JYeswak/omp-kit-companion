@@ -51,10 +51,7 @@ settings drift apart, and nothing records who changed what.
 
 **The solution.** omp-kit ships a rule pack where every rule has authored fire
 and near-miss cases, and a CLI that runs those cases through OMP's own matcher.
-Installation into OMP profiles goes through `--plan`, then `--apply --yes`,
-and every applied change leaves a receipt that `omp-kit undo` can reverse.
-Diagnostics cover 38 scopes. The reference lists all 48 commands. Fleet
-guards, services and the update channel are opt-in.
+Fleet guards, services and the update channel are opt-in.
 
 ### Why use omp-kit
 
@@ -63,7 +60,7 @@ guards, services and the update channel are opt-in.
 | Know a rule fires | `omp-kit test` runs every authored case through the installed OMP matcher (G1 registration, G2 payload, G3 prefixes); `--full` adds the isolated live stage (G4) |
 | Change profiles safely | `apply rules\|policy\|extensions\|plugin\|mcp` print a plan; `--apply --yes` writes, records a receipt, and reads each changed key back |
 | Reverse a change | `omp-kit undo RUN_ID --yes` restores one receipt and refuses if a file changed since |
-| See what is broken | `omp-kit doctor --scope NAME` covers 38 scopes, from OMP identity to leaked secrets |
+| See what is broken | `omp-kit doctor --scope NAME` covers 39 scopes, from OMP identity to leaked secrets |
 | Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-agent-mail-guard`, `kit-guard-optin`, `kit-callback` extensions |
 | Stay current | The `kit-update` service installs each published release and relinks the plugin |
 | Script it | Every command takes `--json` and returns one envelope; `omp-kit schema --json` describes it |
@@ -131,7 +128,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 38 diagnostic scopes
+### Doctor: 39 diagnostic scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
@@ -632,6 +629,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope hooks` | Stale hook members per fleet repo | `omp-kit doctor --scope hooks` |
 | `--scope rch` | Worker gc roots and health | `omp-kit doctor --scope rch` |
 | `--scope land` | Land guard identity: pane identity and reservations qualified against the publication parent | `omp-kit doctor --scope land --project PATH` |
+| `--scope activation` | ON, OFF-WITH-REASON, or OFF-NO-REASON for rule packs, extensions, profile links, kit services, and hook members; OFF-NO-REASON exits nonzero | `omp-kit doctor --scope activation` |
 | `--scope test-scope` | Test-only diagnostic scope used to verify scoped doctor dispatch | `omp-kit doctor --scope test-scope` |
 `doctor` also takes rules-calibration flags (`--corpus-report`, `--labels`,
 `--seed`, `--sample-size`, `--noisy-lower-bound`) for reading an F2 corpus
