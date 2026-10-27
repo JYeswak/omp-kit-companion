@@ -15,6 +15,12 @@
 #   4. checksum   SHA256SUMS over release-index.json and the archives.
 #   4b. rule-gate the postcheck's ttsr coverage gate (every rule needs fire+quiet
 #                 fixtures) on the exact-commit source; refusal exits 4, nothing remote written.
+#   4c. ci-only-local
+#                 package-release.test.ts and kit-update.test.ts against the
+#                 exact-commit export (gate-ci-only.tsv calls them "ci-only",
+#                 but CI is disabled); refusal exits 4, nothing remote written.
+#                 external-live.test.ts stays out: it needs the host's live OMP
+#                 launcher, so it is not hermetic.
 #   --dry-run stops here: no tag, no draft, no dispatch, no remote write.
 #   5. tag        push the lightweight tag v<version> -> source (never forced, never re-tagged).
 #   6. draft      create the draft release with the notes from release-notes.sh and require GitHub's recorded
@@ -278,6 +284,41 @@ say "rule gate PASS: $(jq -c '.counts' "$WORK/rule-gate.json")"
 bounded 600 bun "$SRC/scripts/ttsr-harness.ts" --selftest >"$WORK/rule-selftest.stdout" 2>"$WORK/rule-selftest.stderr" ||
 	die "ttsr-harness --selftest failed on the release source; refusing release (see $WORK/rule-selftest.stderr)"
 say "rule selftest PASS"
+
+# ----------------------------------------------------------------- 4c. ci-only-local
+# gate-ci-only.tsv lists package-release.test.ts and kit-update.test.ts as
+# "ci-only", but CI is disabled, so without this stage they run nowhere. Run
+# both files with cwd set to the exact-commit export: kit-update builds its
+# N+2 candidate from that tree (its MANIFEST.tsv is regenerated inside the
+# fixture), and package-release archives the exact commit and asserts the
+# export carries no MANIFEST.tsv. Refuse here, before the tag, in both
+# dry-run and real runs.
+# The export is made a throwaway git root first (a local --depth 1 fetch of
+# $SOURCE): the test's `git -C` archive only yields the full tree from a
+# repository root, and the runtime work-root check requires OMP_KIT_CASE_CWD
+# to be that same root.
+# Wall time on this Mac (2026-10-27, exact 0021cef export, load ~16 on 32 cores):
+# package-release.test.ts 353 s (18 pass, 0 fail), kit-update.test.ts 300 s
+# (24 tests: 20 pass; the other 4 are UpdateBundleIsolation's uncommitted-hunk
+# tests, which need their uncommitted src). Bounds below (900/2400) hold
+# 2.5x/8x margin over both.
+# tests/cli/external-live.test.ts stays out: it executes the host's real OMP
+# launcher (ambient OMP/OMP_BIN/OMP_PATH must all name the same absolute
+# binary, or the run fails closed BLOCKED/NATIVE_IDENTITY_UNAVAILABLE)
+# and binds a localhost mock-model server, so it is not hermetic.
+stage ci-only-local
+git -C "$SRC" -c init.defaultBranch=main init -q ||
+	die "ci-only-local git init failed; refusing release"
+bounded 120 git -C "$SRC" fetch -q --depth 1 "$ROOT" "$SOURCE" ||
+	die "ci-only-local fetch of $SOURCE failed; refusing release"
+SRC_REAL="$(cd "$SRC" && pwd -P)" || die "ci-only-local cannot resolve $SRC; refusing release"
+(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" bounded 900 bun test tests/cli/package-release.test.ts \
+	>"$WORK/ci-only-package-release.stdout" 2>"$WORK/ci-only-package-release.stderr") ||
+	die "package-release.test.ts FAIL on the release source; refusing release (see $WORK/ci-only-package-release.stderr)"
+(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" bounded 2400 bun test tests/cli/kit-update.test.ts \
+	>"$WORK/ci-only-kit-update.stdout" 2>"$WORK/ci-only-kit-update.stderr") ||
+	die "kit-update.test.ts FAIL on the release source; refusing release (see $WORK/ci-only-kit-update.stderr)"
+say "ci-only-local PASS"
 
 receipt() {
 	local phase=$1 url=${2:-} run_id=${3:-}

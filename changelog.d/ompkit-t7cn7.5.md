@@ -1,0 +1,3 @@
+### Fixed
+
+- The three test files the full-suite verdict leaves to CI (package-release, kit-update, external-live) ran nowhere while CI was off. `scripts/release-local.sh` now runs package-release.test.ts and kit-update.test.ts on the exact-commit export before tagging, and any failure stops the cut (exit 4) before a remote write, in dry runs too. external-live stays out because it needs the host's real OMP launcher and a local mock server. kit-update's N+2 test no longer copies the gitignored MANIFEST.tsv from the live tree; it regenerates it with the source's own `scripts/build-manifest.sh`, so it passes on an exact export. (ompkit-t7cn7.5)
