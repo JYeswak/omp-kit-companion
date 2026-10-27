@@ -37,7 +37,10 @@ new_repo() {
 	git -C "$dir" config user.email "test@invalid.example"
 	git -C "$dir" config user.name "Test"
 	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
-	if [ $# -ge 3 ]; then printf '%s\n' "$3" > "$dir/$2" && git -C "$dir" add "$2"; fi
+	if [ $# -ge 3 ]; then
+		mkdir -p "$dir/$(dirname "$2")"
+		printf '%s\n' "$3" > "$dir/$2" && git -C "$dir" add "$2"
+	fi
 	git -C "$dir" commit -q --allow-empty --message "[test] root"
 	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
 	[ -x "$dir/.git/hooks/hooks.d/pre-commit/$MEMBER" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
@@ -265,6 +268,29 @@ deleted=$(git -C "$P" rev-parse HEAD)
 out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$deleted" "$removed" | (cd "$P" && sh "$SCRIPTS/pre-push-gate.sh") 2>&1)
 check "$?" "1" "push-allow-deleted-refused" "$out" "allowlist-deleted"
 
+# An ordinary root/partial Revert has no published-origin admission. Its trailer
+# must not force the full-X parent proof or bypass the unchanged ratchet.
+R=$(new_repo ordinary-root-partial-revert pkg/f.txt "$(printf 'base line\nlanded line L')")
+X=$(git -C "$R" rev-parse HEAD)
+printf 'base line\n' > "$R/pkg/f.txt"
+git -C "$R" add pkg/f.txt
+msg="$TMP/ordinary-root-partial-revert.msg"
+printf '[test] ordinary root partial revert\n\nBead: ompkit-fp72.135.3.67\nRevert: %s\n' "$X" > "$msg"
+member="$R/.git/hooks/hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal"
+out=$(CDPATH='' cd -- "$R" && "$member" "$msg" 2>&1)
+check "$?" "0" "ordinary-root-partial-revert-pass" "x" "x"
+
+# The same path must still refuse an active ordinary ratchet finding.
+R=$(new_repo ordinary-active-revert)
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+msg="$TMP/ordinary-active-revert.msg"
+printf '[test] active ordinary finding with Revert\n\nBead: ompkit-fp72.135.3.67\nRevert: %s\n' "$X" > "$msg"
+member="$R/.git/hooks/hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal"
+out=$(CDPATH='' cd -- "$R" && "$member" "$msg" 2>&1)
+check "$?" "1" "ordinary-active-revert-still-refused" "$out" "native kitlib ratchet has staged findings"
+
 # 8. Only an exact, named reversal of X may admit the incumbent raw-spawn
 #    entry; commit-msg supplies native per-path proof and rejects fake intent.
 R=$(origin_repo origin-equal)
@@ -299,12 +325,16 @@ git -C "$R" add tool.py extra.txt
 out=$(commit "$R" -m "[test] reversal with unrelated path" -m "Revert: $X")
 check "$?" "1" "origin-equal-unrelated-staged-refused" "$out" 'staged paths do not equal'
 
-R=$(origin_repo origin-parent-mismatch)
+# A Revert trailer whose staged entry differs from X's parent but uses no published-origin admission
+# is an ordinary commit (RusticPine AM 70292, QuietBadger AM 70284): member 49 judges the declaration,
+# and the full-X proof stays reserved for admissions (origin-equal-wrong-x, -unrelated-staged, -older,
+# -near-match and -mixed below keep refusing those).
+R=$(origin_repo ordinary-parent-mismatch)
 X=$(git -C "$R" rev-parse HEAD)
 printf '%s\n# post-parent edit' "$PY_GOOD" > "$R/tool.py"
 git -C "$R" add tool.py
-out=$(commit "$R" -m "[test] parent mismatch" -m "Revert: $X")
-check "$?" "1" "origin-equal-parent-mismatch-refused" "$out" 'does not match X parent'
+out=$(commit "$R" -m "[test] parent mismatch without admission" -m "Revert: $X")
+check "$?" "0" "ordinary-parent-mismatch-without-admission-passes" "x" "x"
 
 R=$(origin_repo origin-stale)
 X=$(git -C "$R" rev-parse HEAD)

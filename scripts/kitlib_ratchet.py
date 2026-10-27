@@ -676,7 +676,10 @@ class KitlibRuleSet(core.RuleSet):
             if rules:
                 active[report.path] = rules
 
-        if not reverts:
+        # The exact named-X proof below authorizes only a published-origin raw-spawn admission.
+        # A Revert trailer on an ordinary commit (a root, partial or multi-commit rewrite that member 49
+        # judges) uses no admission, so it gets the ordinary verdict: refuse active findings, else pass.
+        if not reverts or not admitted:
             if admitted:
                 _reversal_verdict({
                     "verdict": "REFUSED",
