@@ -1,6 +1,13 @@
 #!/bin/sh
 # Install the Agent trailer prepare-commit-msg hook into the existing hooks chain.
+# Usage: install-agent-trailer-hook.sh (takes no arguments; installs into this kit checkout).
+# Unknown arguments are refused before anything is written.
 set -eu
+if [ $# -gt 0 ]; then
+	printf 'install-agent-trailer-hook: unknown argument: %s\n' "$1" >&2
+	echo "Usage: install-agent-trailer-hook.sh (takes no arguments; installs into this kit checkout)." >&2
+	exit 2
+fi
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 HOOKS=$(git -C "$ROOT" rev-parse --git-path hooks)
 CHAIN="$HOOKS/prepare-commit-msg"

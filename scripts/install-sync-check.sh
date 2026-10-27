@@ -3,14 +3,25 @@
 # Installs a self-contained sync-check.sh into a repo's scripts/ so the
 # start gate, fast-forward and post-push assertion run the same everywhere.
 # Usage: install-sync-check.sh [REPO] (default: this kit checkout).
+# Unknown arguments are refused before anything is written.
 # A foreign REPO gets a self-contained copy of the script body, never a
 # reference into this checkout, so the check survives the kit moving.
 # Prints the undo command. Exit nonzero when the installed copy cannot
 # prove itself (its probe must exit 0 synced or 4 behind, never 2 broken).
 set -eu
+usage() {
+	echo "Usage: install-sync-check.sh [REPO] (default: this kit checkout)." >&2
+}
 KITROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
-TARGET=${1:-$KITROOT}
-TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P) || { echo "install-sync-check: cannot enter ${1:-$KITROOT}" >&2; exit 2; }
+POS=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--*) printf 'install-sync-check: unknown argument: %s\n' "$1" >&2; usage; exit 2 ;;
+		*) if [ -n "$POS" ]; then printf 'install-sync-check: unexpected argument: %s\n' "$1" >&2; usage; exit 2; fi; POS=$1; shift ;;
+	esac
+done
+TARGET=${POS:-$KITROOT}
+TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P) || { echo "install-sync-check: cannot enter ${POS:-$KITROOT}" >&2; exit 2; }
 git -C "$TARGET" rev-parse --git-dir >/dev/null 2>&1 || { echo "install-sync-check: $TARGET is not a git repo" >&2; exit 2; }
 if [ "$TARGET" = "$KITROOT" ]; then
 	echo "install-sync-check: the kit's own scripts/sync-check.sh is the source; nothing to install" >&2

@@ -61,6 +61,10 @@ UNDO_RM=""
 UNDO_RESTORE=""
 KITROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 MODE=install
+POS=""
+usage() {
+	echo "Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout)." >&2
+}
 PUSHED_BEADS=1
 NATIVE_PRESERVATION=0
 NATIVE_BR=""
@@ -89,13 +93,14 @@ while [ $# -gt 0 ]; do
 				--native-guard-sha256) NATIVE_GUARD_SHA=$2 ;;
 			esac
 			shift 2 ;;
-		*) break ;;
+		--*) printf 'install-commit-msg-bead: unknown argument: %s\n' "$1" >&2; usage; exit 2 ;;
+		*) if [ -n "$POS" ]; then printf 'install-commit-msg-bead: unexpected argument: %s\n' "$1" >&2; usage; exit 2; fi; POS=$1; shift ;;
 	esac
 done
 # NODOUBLEPASS1/GATEEVENTS1: every probe below runs the installed chain; none is an agent act.
 export OMP_KIT_GATE_EVENTS_SKIP=1
-TARGET=${1:-$KITROOT}
-TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P) || { echo "install-commit-msg-bead: cannot enter ${1:-$KITROOT}" >&2; exit 2; }
+TARGET=${POS:-$KITROOT}
+TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P) || { echo "install-commit-msg-bead: cannot enter ${POS:-$KITROOT}" >&2; exit 2; }
 HOOKS=$(git -C "$TARGET" rev-parse --git-path hooks) || { echo "install-commit-msg-bead: $TARGET is not a git repo" >&2; exit 2; }
 case "$HOOKS" in
 	/*) ;;

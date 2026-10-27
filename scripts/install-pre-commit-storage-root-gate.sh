@@ -1,6 +1,13 @@
 #!/bin/sh
 # Install project-bound storage-root bootstraps in Agent Mail pre-commit and pre-push chains.
+# Usage: install-pre-commit-storage-root-gate.sh (takes no arguments; runs in a Git repository with Agent Mail hook chains).
+# Unknown arguments are refused before anything is read or written.
 set -eu
+if [ $# -gt 0 ]; then
+	printf 'install-pre-commit-storage-root-gate: unknown argument: %s\n' "$1" >&2
+	echo "Usage: install-pre-commit-storage-root-gate.sh (takes no arguments; runs in a Git repository with Agent Mail hook chains)." >&2
+	exit 2
+fi
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
 TARGET=$(git rev-parse --show-toplevel 2>/dev/null) || { echo 'install-pre-commit-storage-root-gate: run from a Git repository with Agent Mail hook chains' >&2; exit 2; }
 TARGET=$(CDPATH='' cd -- "$TARGET" && pwd -P)

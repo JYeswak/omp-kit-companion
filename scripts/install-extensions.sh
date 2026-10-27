@@ -1,5 +1,6 @@
 #!/bin/sh
 # install-extensions.sh [--dry-run]
+# Unknown arguments are refused before anything is read or written.
 #
 # For each extension named in policy/extensions.json: copy extensions/<name> to
 # ~/.omp/omp-extensions/<name> (a differing installed copy is backed up to
@@ -14,11 +15,15 @@ POLICY="$ROOT/policy/extensions.json"
 DEST="$HOME/.omp/omp-extensions"
 STATE="$HOME/.local/state/omp-kit"
 dry=0
-case "${1:-}" in
-  --dry-run) dry=1 ;;
-  "") ;;
-  *) echo "install-extensions: unknown argument: $1" >&2; exit 2 ;;
-esac
+usage() {
+	echo "Usage: install-extensions.sh [--dry-run]" >&2
+}
+for arg in "$@"; do
+	case "$arg" in
+		--dry-run) dry=1 ;;
+		*) printf 'install-extensions: unknown argument: %s\n' "$arg" >&2; usage; exit 2 ;;
+	esac
+done
 cd /tmp || exit 1
 
 run_omp() { p=$1; shift; if [ "$p" = default ]; then omp "$@" < /dev/null; else omp --profile "$p" "$@" < /dev/null; fi; }
