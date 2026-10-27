@@ -246,3 +246,38 @@ test("mutant: the former hand-listed exclusions fail the planted live cc writer"
 	expect(result.changed_paths).toEqual(expect.arrayContaining(["~/.local/state/omp-kit/cc/cc-self.pos", "~/.local/state/omp-kit/cc/cc.db",
 		"~/.local/state/omp-kit/cc/spool/cc/2026-10-22.jsonl", "~/.local/state/omp-kit/cc/spool/kit/2026-10-22.jsonl"]));
 }, 60_000);
+
+// ompkit-v66l.22 FLEETUPG1: on 2026-10-27 a long-running Chrome the kit did not start (pid 12023,
+// --user-data-dir under the kit state root) wrote HTTP cache entries during the isolated test and failed
+// the postcheck. Volatile browser caches churn on their own clock and the kit never writes them under a
+// watched root, so their subtrees are not operator state; everything beside them still counts.
+test("planted: a foreign browser cache churning under the watched state root is not an operator change", () => {
+	const { home, paths } = operatorHome();
+	const profile = join(home, ".local", "state", "omp-kit", "chrome-jfp", "Default");
+	const cache = join(profile, "Cache", "Cache_Data");
+	mkdirSync(cache, { recursive: true });
+	writeFileSync(join(cache, "seed_0"), "seed");
+	const before = snapshotWatched(paths);
+	// Tonight's exact shape: new entries land mid-run, plus a fresh volatile cache dir appears.
+	writeFileSync(join(cache, "2f139af954fbeb4a_0"), "entry");
+	mkdirSync(join(profile, "Code Cache", "js"), { recursive: true });
+	writeFileSync(join(profile, "Code Cache", "js", "index"), "code");
+	const result = compareWatched(before, snapshotWatched(paths), home);
+	expect(result, JSON.stringify(result)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
+}, 60_000);
+
+test("control: beside the browser cache, an operator write and a profile non-cache write still count", () => {
+	const { home, paths } = operatorHome();
+	const profile = join(home, ".local", "state", "omp-kit", "chrome-jfp", "Default");
+	const cache = join(profile, "Cache", "Cache_Data");
+	mkdirSync(cache, { recursive: true });
+	const before = snapshotWatched(paths);
+	writeFileSync(join(cache, "2f139af954fbeb4a_0"), "entry");
+	writeFileSync(join(profile, "Preferences"), "{\"theme\":1}\n");
+	writeFileSync(join(home, ".local", "state", "omp-kit", "kit-activation-planted.json"), "{}\n");
+	const result = compareWatched(before, snapshotWatched(paths), home);
+	expect(result.changed_paths).toEqual([
+		"~/.local/state/omp-kit/chrome-jfp/Default/Preferences",
+		"~/.local/state/omp-kit/kit-activation-planted.json",
+	]);
+}, 60_000);

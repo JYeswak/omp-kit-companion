@@ -1,12 +1,23 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import { installedJobOwnedState, type OwnedStatePath } from "./service.ts";
 
 /** Profile files the kit could write; agent.db, sessions and caches change under normal agent use and are not watched. */
 const PROFILE_FILES = ["config.yml", "config.yaml", "config.json", "settings.json"] as const;
 const MAX_ENTRIES_PER_ROOT = 20_000;
 const MAX_BYTES_PER_ROOT = 512 * 1024 * 1024;
+
+/**
+ * Volatile browser cache directory names: regenerable HTTP/GPU/code caches a browser rewrites on its own
+ * clock (tonight: a long-running Chrome's Cache/Cache_Data under the state root). The kit never writes these
+ * names under a watched root — its own caches live in the isolated run's private XDG dirs and release bytecode
+ * caches are pre-sealed read-only — so skipping the subtree cannot mask a kit write. Matching is exact and
+ * case-sensitive (Chromium's on-disk spellings); profile data beside the caches stays watched.
+ */
+const VOLATILE_CACHE_DIR_NAMES: Record<string, true> = {
+ Cache: true, Cache_Data: true, "Code Cache": true, GPUCache: true, DawnCache: true,
+};
 
 /** True when `path` is, or lies under, state an installed service job writes on its own clock. */
 export function isOwnedState(owned: readonly OwnedStatePath[], path: string): boolean {
@@ -28,7 +39,9 @@ export type WatchedComparison = { unchanged: boolean; complete: boolean; watched
  * must be byte-identical before and after; everything else in the operator HOME may change concurrently.
  * The one exception is state the kit's own service jobs write on their own clock (cc's store, ci-poller's
  * cache, the scratch quarantine...): each job declares it, and only the jobs installed in `home` are
- * excluded, so a write by anything else, including the run under test, still counts.
+ * excluded, so a write by anything else, including the run under test, still counts. The other is volatile
+ * third-party browser cache subtrees (VOLATILE_CACHE_DIR_NAMES), which the kit never writes under a watched
+ * root and which churn under long-running browsers the kit did not start.
  */
 export function operatorWatchedPaths(home: string, stateRoot: string | null, owned: readonly OwnedStatePath[] = installedJobOwnedState(home)): WatchedPaths {
 	const profileDirs = [join(home, ".omp", "agent")];
@@ -77,13 +90,17 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 				catch { incomplete.push(path); }
 				return;
 			}
-			if (stat.isDirectory()) {
-				entries.set(path, `dir:${mode}`);
-				let children: string[];
-				try { children = readdirSync(path).sort(); } catch { incomplete.push(path); return; }
-				for (const child of children) visit(join(path, child));
-				return;
-			}
+		if (stat.isDirectory()) {
+			// A volatile browser cache is never operator state the kit could corrupt: skip the subtree
+			// wholesale, so neither its churn nor its bulk counts toward changes, reads, or budgets.
+			// The watched root itself is by construction kit-relevant and is never skipped.
+			if (path !== root && VOLATILE_CACHE_DIR_NAMES[basename(path)] === true) return;
+			entries.set(path, `dir:${mode}`);
+			let children: string[];
+			try { children = readdirSync(path).sort(); } catch { incomplete.push(path); return; }
+			for (const child of children) visit(join(path, child));
+			return;
+		}
 			entries.set(path, `other:${mode}`);
 		};
 		visit(root);

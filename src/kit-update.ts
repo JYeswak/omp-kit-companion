@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
+import { run } from "./kitlib/run.ts";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform, type StagedKitRelease } from "./kit-release.ts";
 import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestInput, type FullTestReport } from "./full-test-runner.ts";
@@ -28,7 +29,8 @@ const RECEIPT_ID = /^[a-f0-9-]+$/;
 type KitInstallation = { version: string; sha256: string; target: string; binary: string };
 export type KitUpdateInput = {
  prefix: string; stateRoot: string; home: string; project?: string; platform: ReleasePlatform;
- /** Explicit local index/archive tuple; activation additionally requires its authentic sibling Sigstore bundle. */
+ /** Explicit local index/archive tuple; activation additionally requires its authentic Sigstore bundle,
+  * co-hosted as `<archive>.sigstore.json` or fetched from the attestation authority when absent. */
  indexPath: string; archivePath: string; version: string; sourceTag: string;
 };
 export type KitUpdatePlan = KitUpdateInput & {
@@ -252,40 +254,77 @@ function sameOmpSnapshot(before: OmpSnapshot | null, after: OmpSnapshot | null):
   before.launcherSha256 === after.launcherSha256 && before.manifestSha256 === after.manifestSha256 &&
   before.matcherSha256 === after.matcherSha256;
 }
+/** owner/repo slug for the attestation authority; mirrors kit-update-job.ts so the compiled updater never imports it. */
+const UPDATE_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const UPDATE_REPO_DEFAULT = "JYeswak/omp-kit-companion";
+const MAX_ATTESTATION_BYTES = 16 * 1024 * 1024;
+
+/** The attestation authority: OMP_KIT_UPDATE_REPO or the release default both release-local.sh and install.py assume. */
+function attestationRepo(): string {
+ const repo = process.env.OMP_KIT_UPDATE_REPO ?? UPDATE_REPO_DEFAULT;
+ if (!UPDATE_REPO_PATTERN.test(repo)) throw new Error("KIT_UPDATE_POLL_CONFIG: OMP_KIT_UPDATE_REPO must be owner/repo");
+ return repo;
+}
+
+/** Child environment for the authority calls: caller GitHub authentication without unrelated process secrets. */
+function attestationEnv(home: string, tmpdir: string): Record<string, string> {
+ const env: Record<string, string> = {
+  PATH: process.env.PATH ?? "/usr/bin:/bin",
+  HOME: home,
+  TMPDIR: tmpdir,
+  XDG_CACHE_HOME: join(tmpdir, "cache"),
+ };
+ for (const key of ["GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN"] as const) {
+  const value = process.env[key];
+  if (value) env[key] = value;
+ }
+ return env;
+}
+
+/**
+ * Fetch the Sigstore bundle the authority filed for this exact archive digest, exactly as
+ * scripts/release-local.sh:383 and kit-update-job.ts do. Anything short of usable bytes refuses with
+ * KIT_ATTESTATION_BUNDLE_UNAVAILABLE: the fetch, never the archive, is what failed.
+ */
+async function fetchAttestationBundle(archive: Buffer, home: string, tmpdir: string): Promise<Buffer> {
+ const digest = createHash("sha256").update(archive).digest("hex");
+ const fetched = await run(["gh", "api", "--hostname", "github.com", `repos/${attestationRepo()}/attestations/sha256:${digest}`,
+  "--jq", ".attestations[].bundle | tojson"], { deadline_s: 60, env: attestationEnv(home, tmpdir) });
+ // The lead's manual fetch of this exact endpoint completed in under 2 s; 60 s is a generous bound.
+ if (fetched.timed_out) throw new Error("KIT_ATTESTATION_BUNDLE_UNAVAILABLE: gh api timed out after 60 s");
+ const stderr = new TextDecoder().decode(fetched.stderr);
+ if (fetched.rc !== 0 || fetched.stdout.byteLength === 0 || fetched.stdout.byteLength > MAX_ATTESTATION_BYTES)
+  throw new Error(`KIT_ATTESTATION_BUNDLE_UNAVAILABLE: ${stderr.trim().slice(-1000)}`);
+ return Buffer.from(fetched.stdout);
+}
 
 /** Verify the exact in-memory archive subsequently staged, never a mutable source pathname. */
 async function authenticateUpdateArchive(plan: KitUpdatePlan, archive: Buffer): Promise<void> {
- const bundlePath = `${plan.archivePath}.sigstore.json`;
- const bundleStat = lstatSync(bundlePath, { throwIfNoEntry: false });
- if (!bundleStat?.isFile() || bundleStat.isSymbolicLink()) throw new Error("KIT_ATTESTATION_BUNDLE_MISSING");
- if (bundleStat.size > 16 * 1024 * 1024) throw new Error("KIT_ATTESTATION_BUNDLE_INVALID");
- const bundle = regular(bundlePath);
  const snapshot = ownedTmp("kit-attestation", { root: plan.stateRoot }).path;
  try {
+  // A co-hosted bundle still wins; only an absent sibling is fetched, never a present-but-unusable one.
+  const bundlePath = `${plan.archivePath}.sigstore.json`;
+  const bundleStat = lstatSync(bundlePath, { throwIfNoEntry: false });
+  let bundle: Buffer;
+  if (bundleStat === undefined) bundle = await fetchAttestationBundle(archive, plan.home, snapshot);
+  else {
+   if (!bundleStat.isFile() || bundleStat.isSymbolicLink()) throw new Error("KIT_ATTESTATION_BUNDLE_MISSING");
+   if (bundleStat.size > MAX_ATTESTATION_BYTES) throw new Error("KIT_ATTESTATION_BUNDLE_INVALID");
+   bundle = regular(bundlePath);
+  }
   const artifact = join(snapshot, basename(plan.archivePath));
   writeFileSync(artifact, archive, { mode: 0o600, flag: "wx" });
   writeFileSync(`${artifact}.sigstore.json`, bundle, { mode: 0o600, flag: "wx" });
   let child;
   try {
-   // Preserve caller GitHub authentication without forwarding unrelated process secrets.
-   const verifierEnv: Record<string, string> = {
-    PATH: process.env.PATH ?? "/usr/bin:/bin",
-    HOME: plan.home,
-    TMPDIR: snapshot,
-    XDG_CACHE_HOME: join(snapshot, "cache"),
-   };
-   for (const key of ["GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN"] as const) {
-    const value = process.env[key];
-    if (value) verifierEnv[key] = value;
-   }
    child = Bun.spawn(["python3", "-I", "-c", readFileSync(installerVerifierPath, "utf8"), "attestation", artifact, plan.version, "unused"], {
-    env: verifierEnv,
+    env: attestationEnv(plan.home, snapshot),
     stdout: "pipe", stderr: "pipe",
    });
   } catch { throw new Error("KIT_ATTESTATION_VERIFIER_UNAVAILABLE"); }
   const [code, , stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
   if (code !== 0) {
-   const reason = ["KIT_ATTESTATION_BUNDLE_MISSING", "KIT_ATTESTATION_BUNDLE_INVALID", "KIT_ATTESTATION_SOURCE_UNVERIFIED", "KIT_ATTESTATION_VERIFIER_UNAVAILABLE"]
+   const reason = ["KIT_ATTESTATION_BUNDLE_MISSING", "KIT_ATTESTATION_BUNDLE_INVALID", "KIT_ATTESTATION_BUNDLE_UNAVAILABLE", "KIT_ATTESTATION_SOURCE_UNVERIFIED", "KIT_ATTESTATION_VERIFIER_UNAVAILABLE"]
     .find(code => stderr.includes(code)) ?? "KIT_ATTESTATION_UNVERIFIED";
    throw new Error(`${reason}: ${stderr.trim().slice(-1200)}`);
   }

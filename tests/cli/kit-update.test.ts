@@ -12,6 +12,7 @@ import { kitUpdateJobOverall } from "../../src/kit-update-job.ts";
 import { serviceLabel } from "../../src/service.ts";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { run as runBounded } from "../../src/kitlib/run";
 
 test("unknown update failure preserves its code and original message", () => {
  expect(updateFailureCause(new Error("boom lower"))).toMatchObject({
@@ -109,7 +110,7 @@ const input = (ctx: FixtureContext) => ({ prefix: ctx.prefix, stateRoot: ctx.sta
 	indexPath: ctx.indexPath, archivePath: ctx.archivePath, platform: ctx.platform,
 	version: ctx.nextVersion, sourceTag: "v" + ctx.nextVersion });
 
-function copyReleaseSource(sourceRoot: string, destination: string): void {
+async function copyReleaseSource(sourceRoot: string, destination: string): Promise<void> {
 	mkdirSync(destination, { recursive: true });
 	for (const directory of ["src", "installer", "scripts", "rules", "rules-fleet", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "tests/live", "plugins/omp-kit-tern"]) {
 		const target = join(destination, directory);
@@ -117,21 +118,35 @@ function copyReleaseSource(sourceRoot: string, destination: string): void {
 		cpSync(join(sourceRoot, directory), target, { recursive: true });
 	}
 	mkdirSync(join(destination, "docs"), { recursive: true });
-	for (const file of ["flywheel-invariants.tsv", "tern-integration.md", "tern-verb-map.md", "tern-coverage.tsv"])
+	for (const file of ["flywheel-invariants.tsv", "tern-integration.md", "tern-verb-map.md", "tern-coverage.tsv", "sources.md"])
 		copyFileSync(join(sourceRoot, "docs", file), join(destination, "docs", file));
-	for (const file of ["LICENSE", "MANIFEST.tsv", "MANIFEST.fleet.tsv", "package.json"]) {
+	for (const file of ["LICENSE", "MANIFEST.fleet.tsv", "package.json"]) {
 		const target = join(destination, file);
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(sourceRoot, file), target);
 	}
+	// MANIFEST.tsv is generated and gitignored, so an exact-commit export has
+	// no copy to take. Regenerate it from the candidate's own rules with the
+	// same generator the release packaging uses (package-release.ts
+	// packageRuleManifest); a stale live-tree copy is never an input.
+	// Bounded through kitlib run, not a raw spawn: the generator measured
+	// 0.7-0.9 s wall on this Mac (2026-10-27); the 60 s deadline only bounds hangs.
+	const manifest = await runBounded(["sh", join(destination, "scripts", "build-manifest.sh"), "--stdout"], {
+		deadline_s: 60, cwd: destination, env: { ...process.env, TMPDIR: process.env.TMPDIR ?? dirname(destination) },
+	});
+	if (manifest.timed_out) throw new Error("candidate MANIFEST.tsv generation timed out");
+	if (manifest.rc !== 0)
+		throw new Error("candidate MANIFEST.tsv generation failed: " + new TextDecoder().decode(manifest.stdout) + new TextDecoder().decode(manifest.stderr));
+	if (manifest.stdout.length === 0) throw new Error("candidate MANIFEST.tsv generation produced no output");
+	writeFileSync(join(destination, "MANIFEST.tsv"), manifest.stdout);
 }
 
-function buildNPlusTwoCandidate(ctx: FixtureContext): {
+async function buildNPlusTwoCandidate(ctx: FixtureContext): Promise<{
 	root: string; executable: string; baseCases: number; baseQuiet: number;
 	targetCases: number; targetQuiet: number; packageBuildDurationMs: number;
-} {
+}> {
 	const sourceRoot = join(ctx.root, "candidate-source");
-	copyReleaseSource(resolve(import.meta.dir, "../.."), sourceRoot);
+	await copyReleaseSource(resolve(import.meta.dir, "../.."), sourceRoot);
 	const casesPath = join(sourceRoot, "cases", "cases.tsv");
 	const rawCases = readFileSync(casesPath, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "");
 	const caseLines = rawCases.split("\n");
@@ -177,11 +192,53 @@ function buildNPlusTwoCandidate(ctx: FixtureContext): {
 	return { root, executable: join(root, "bin", "omp-kit"), baseCases, baseQuiet, targetCases, targetQuiet, packageBuildDurationMs };
 }
 
-test("checksum-correct archive without its attestation refuses before extraction or activation", async () => fixture(async ctx => {
+// ompkit-v66l.22 FLEETUPG1: 0.2.77 refused KIT_ATTESTATION_BUNDLE_MISSING because release-local.sh fetches
+// the bundle only into its own verify step. The update verb now fetches it itself, exactly as
+// scripts/release-local.sh:383 and kit-update-job.ts do, then verifies it with the same verifier.
+test("a missing attestation bundle is fetched from the authority and verified before activation", async () => fixture(async ctx => {
  const plan = await planKitUpdate(input(ctx));
  if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
  rmSync(`${ctx.archivePath}.sigstore.json`);
- await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_BUNDLE_MISSING");
+ const result = await applyKitUpdate(plan);
+ expect(result.status).toBe("PARTIAL");
+ expect(result.receiptId).toBeTruthy();
+ expect(result.provenance).toBe("SIGSTORE_VERIFIED");
+ expect(result.postcheck.status).not.toBe("PASS");
+ // The fetch authenticates a private snapshot; the operator's source tuple is left untouched.
+ expect(existsSync(`${ctx.archivePath}.sigstore.json`)).toBe(false);
+ expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.3/bin/omp-kit");
+ expect(inspectPendingKitUpdate(ctx.stateRoot)?.id).toBe(result.receiptId);
+}));
+
+/** A gh double for the attestation authority: offline fetch, or a bundle filed for another archive. */
+function fakeAuthorityGh(dir: string, behavior: "offline" | "wrong"): void {
+ mkdirSync(dir, { recursive: true });
+ const real = join(import.meta.dir, "../fixtures/kit-release/gh");
+ const attestations = behavior === "offline"
+  ? `if printf '%s\\n' "$@" | grep -q "attestations/sha256:"; then echo "fake gh: attestation store offline" >&2; exit 1; fi`
+  : `if printf '%s\\n' "$@" | grep -q "attestations/sha256:"; then printf '{"fixture":false}'; exit 0; fi`;
+ writeFileSync(join(dir, "gh"), `#!/bin/sh\n${attestations}\nexec "${real}" "$@"\n`, { mode: 0o755 });
+ chmodSync(join(dir, "gh"), 0o755);
+ process.env.PATH = `${dir}:${process.env.PATH}`;
+}
+
+test("planted: an unreachable attestation authority refuses without extraction or activation", async () => fixture(async ctx => {
+ const plan = await planKitUpdate(input(ctx));
+ if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ rmSync(`${ctx.archivePath}.sigstore.json`);
+ fakeAuthorityGh(join(ctx.root, "gh-offline"), "offline");
+ await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_BUNDLE_UNAVAILABLE");
+ expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
+ expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe(`../releases/${ctx.currentVersion}/bin/omp-kit`);
+ expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
+}));
+
+test("planted: a fetched bundle filed for another archive refuses without extraction or activation", async () => fixture(async ctx => {
+ const plan = await planKitUpdate(input(ctx));
+ if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ rmSync(`${ctx.archivePath}.sigstore.json`);
+ fakeAuthorityGh(join(ctx.root, "gh-wrong"), "wrong");
+ await expect(applyKitUpdate(plan)).rejects.toThrow("KIT_ATTESTATION_UNVERIFIED");
  expect(existsSync(join(ctx.prefix, "releases", ctx.nextVersion))).toBe(false);
  expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe(`../releases/${ctx.currentVersion}/bin/omp-kit`);
  expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
@@ -366,6 +423,14 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
  expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.2/bin/omp-kit");
 }));
 
+/** One real concurrent process churns files and an operator-path control: the control proves it wrote inside the snapshot window. */
+function startLoopWriter(files: string[], operatorFile: string): { stop: () => Promise<void> } {
+	const appends = files.map(file => `printf '%s\\n' "$n" >> '${file}'`).join("; ");
+	const writer = Bun.spawn(["/bin/sh", "-c", `n=0; while :; do n=$((n+1)); ${appends}; printf '%s\\n' "$n" > '${operatorFile}'; sleep 0.01; done`],
+		{ stdout: "ignore", stderr: "inherit" });
+	return { stop: async () => { writer.kill("SIGKILL"); await writer.exited; } };
+}
+
 // ompkit-2pkp1: on a live host the cc service writes its store every 15 s and every kit command appends its spool,
 // so the postcheck's isolation guard must tell an installed job's own state from a write it should catch.
 test("planted: a live cc writer during the isolated test is not an operator change; a write to an operator path still is", async () => fixture(async ctx => {
@@ -379,9 +444,7 @@ test("planted: a live cc writer during the isolated test is not an operator chan
 	const ccFiles = [join(cc, "cc.db"), join(cc, "spool", "kit", "2026-10-22.jsonl")];
 	const operatorFile = join(ctx.home, ".agents", "rules", "planted.md");
 	// One real concurrent process writes both: the operator-path control proves it was writing inside the snapshot window.
-	const appends = ccFiles.map(file => `printf '%s\\n' "$n" >> '${file}'`).join("; ");
-	const writer = Bun.spawn(["/bin/sh", "-c", `n=0; while :; do n=$((n+1)); ${appends}; printf '%s\\n' "$n" > '${operatorFile}'; sleep 0.01; done`],
-		{ stdout: "ignore", stderr: "inherit" });
+	const loop = startLoopWriter(ccFiles, operatorFile);
 	const previousXdg = process.env.XDG_STATE_HOME;
 	process.env.XDG_STATE_HOME = stateHome;
 	try {
@@ -400,9 +463,42 @@ test("planted: a live cc writer during the isolated test is not an operator chan
 		expect(report.snapshots.home.changed_paths).toContain("~/.agents/rules/planted.md");
 		expect(report.snapshots.home.changed_paths.filter(path => path.includes("/omp-kit/cc"))).toEqual([]);
 	} finally {
-		writer.kill("SIGKILL");
-		await writer.exited;
+		await loop.stop();
 		if (previousXdg === undefined) delete process.env.XDG_STATE_HOME; else process.env.XDG_STATE_HOME = previousXdg;
+	}
+}));
+
+// ompkit-v66l.22 FLEETUPG1: on 2026-10-27 a long-running Chrome the kit did not start wrote its HTTP cache
+// under the watched state root during the isolated test and failed the postcheck. Volatile browser caches
+// are not operator state, so their churn must not fail it; a write the run should not make still must.
+test("planted: a foreign browser cache writer during the isolated test is not an operator change; an operator write still is", async () => fixture(async ctx => {
+	const kitState = join(ctx.home, ".local", "state", "omp-kit");
+	mkdirSync(kitState, { recursive: true });
+	chmodSync(kitState, 0o700);
+	const cacheDir = join(kitState, "chrome-jfp", "Default", "Cache", "Cache_Data");
+	mkdirSync(cacheDir, { recursive: true });
+	const cacheFiles = [join(cacheDir, "2f139af954fbeb4a_0"), join(cacheDir, "4e2f1001f03d45fd_0")];
+	for (const file of cacheFiles) writeFileSync(file, "seed\n");
+	mkdirSync(join(ctx.home, ".agents", "rules"), { recursive: true });
+	const operatorFile = join(ctx.home, ".agents", "rules", "planted-cache.md");
+	// One concurrent writer churns both: the operator-path control proves it was writing inside the snapshot window.
+	const loop = startLoopWriter(cacheFiles, operatorFile);
+	try {
+		// Poll for the writer's first iteration (a condition, not a guessed duration).
+		while (!existsSync(operatorFile)) await Bun.sleep(5);
+		const planned = await planKitUpdate({ ...input(ctx), stateRoot: kitState });
+		if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+		const result = await applyKitUpdate(planned);
+		const report = result.postcheck.report;
+		if (!report) throw new Error(`expected a full-test report, observed ${JSON.stringify(result.postcheck)}`);
+		const operatorFailures = report.failures.filter(failure => failure.startsWith("Operator file changed"));
+		// The stage prefix depends on whether the fast stage passed on this host; the operator path must not.
+		expect(operatorFailures.some(failure => failure.endsWith("~/.agents/rules/planted-cache.md")), JSON.stringify(report.failures)).toBe(true);
+		expect(operatorFailures.filter(failure => failure.includes("chrome-jfp")), JSON.stringify(report.failures)).toEqual([]);
+		expect(report.snapshots.home.changed_paths.filter(path => path.includes("chrome-jfp"))).toEqual([]);
+		expect(report.snapshots.home.incomplete_paths.filter(path => path.includes("chrome-jfp"))).toEqual([]);
+	} finally {
+		await loop.stop();
 	}
 }));
 
@@ -576,7 +672,7 @@ test("already-current version does not create a pending receipt or re-switch the
 // complete e2e-live suite in postcheck. Per-scenario timeouts bound hangs; the
 // 900 s budget fits the suite on slow disks.
 test("update derives the N+2 fast denominator from the manifest-bound case corpus", async () => fixture(async ctx => {
-	const candidate = buildNPlusTwoCandidate(ctx);
+	const candidate = await buildNPlusTwoCandidate(ctx);
 	const plan = await planKitUpdate(input(ctx));
 	if (plan.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
 
