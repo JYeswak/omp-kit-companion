@@ -17,7 +17,7 @@ Current release: v0.2.78
 <!-- kit-release:end -->
 
 A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-48 top-level commands for an existing OMP install.
+49 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -91,9 +91,6 @@ kills and unsupported embedded JS regex flags. Retired rules and reasons live in
 ```sh
 omp-kit test --json                       # bundled pack, G1-G3
 omp-kit test --full --json                # plus the isolated live stage
-omp-kit test --mutants --json             # mutation adequacy of rule conditions
-omp-kit test --metamorphic --json         # metamorphic relations over the cases
-omp-kit corpus --sessions /absolute/sessions --json   # real fire rates from local transcripts
 ```
 
 For installed live proofs in caller-owned scratch, set `OMP_KIT_CASE_CWD` to the
@@ -514,6 +511,7 @@ explicit report rather than inventing zero activity.
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes; `anchor` compares the live-doc Mission statement with the record (`AGREE`/`DRIFT`) | `omp-kit mission anchor --json` |
 | `omp-kit preflight` | `preflight commit\|claim\|in-review\|close [BEAD]` | Every finding an act faces, with fix, at once; changes nothing | `omp-kit preflight close x` |
 | `omp-kit verify` | `verify BEAD --export SHA` | Non-author close: replay each box's command on the export, judge by named outcome, tick, gate, close | `omp-kit verify x` |
+| `omp-kit slice-verify` | `slice-verify --overlay PATH [--test FILE...]` | Base-vs-overlay verdict on a clean export: per-file counts, failures classified pre-existing or introduced | `omp-kit slice-verify --overlay src/kit-update.ts --test tests/cli/kit-update.test.ts` |
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned claims; reclaim only with no live holder (seat, mail in 24 h, reservation); UNKNOWN never reclaimed | `omp-kit drain stale-claims --project .` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 124 over budget, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |

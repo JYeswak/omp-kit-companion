@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { preflightBead, preflightCommit } from "./preflight.ts";
+import { sliceVerify } from "./slice-verify.ts";
 import { verifyBead, verifyProject } from "./verify.ts";
 import { renderEnvelope } from "./kitlib/findings.ts";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
@@ -4079,6 +4080,16 @@ registerCommandHandler("verify", async request => {
 	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo: verifyProject(request.flags.get("--project")), actor, family: typeof family === "string" ? family : undefined, dryRun: request.flags.get("--dry-run") === true });
 	const code = res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
 	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log }, verification: res.code === "DRY_RUN" ? "NOT_RUN" : "PERFORMED" };
+});
+// SLICEVERIFY1 (ompkit-t7cn7.7): change-vs-export verdict for one overlay.
+registerCommandHandler("slice-verify", async request => {
+	const raw = (name: string): string[] => String(request.flags.get(name) ?? "").split("\n").map(s => s.trim()).filter(Boolean);
+	const overlays = raw("--overlay");
+	if (!overlays.length) return refusal("MISSING_FLAG", "--overlay needs at least one PATH", "Use omp-kit slice-verify --overlay PATH [--test FILE] [--changed-file F...] [--base SHA].");
+	const base = request.flags.get("--base");
+	if (base !== undefined && (typeof base !== "string" || !/^[0-9a-f]{4,40}$/i.test(base.trim()))) return refusal("INVALID_FLAG", "--base requires a commit sha", "Pass --base <sha> or omit it for HEAD.");
+	const res = await sliceVerify({ repo: verifyProject(request.flags.get("--project")), base: typeof base === "string" && base.trim() ? base.trim() : undefined, overlay: overlays, tests: raw("--test"), changedFiles: raw("--changed-file") });
+	return { code: res.exitCode, data: { overall: res.code, base: res.base, selection: res.selection, files: res.files, shellcheck: res.shellcheck, log: res.log, ...(res.error ? { error: res.error } : {}) }, verification: "PERFORMED" };
 });
 registerCommandHandler("preflight commit", async request => {
 	const repo = preflightProject(request);

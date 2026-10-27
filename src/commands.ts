@@ -574,6 +574,13 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
 		{ name: "--dry-run", description: "Replay and print the acts; change nothing in the tracker" },
 	] },
+	{ name: "slice-verify", description: "Test one overlay against a clean export of HEAD: base vs overlay counts per test file, failures classified pre-existing or introduced; foreign dirt never copied; setup failures are errors, never verdicts", usage: "slice-verify --overlay PATH [--overlay PATH...] [--test FILE...] [--changed-file F...] [--base SHA] [--project PATH] [--json]", flags: [
+		{ name: "--overlay", value: "PATH", repeatable: true, description: "Worktree path to overlay onto the export (repeatable, at least one)" },
+		{ name: "--test", value: "FILE", repeatable: true, description: "Test file to run; omit to select with the push-gate selector" },
+		{ name: "--changed-file", value: "PATH", repeatable: true, description: "Changed files for test selection; defaults to the overlay paths" },
+		{ name: "--base", value: "SHA", description: "Export this commit instead of HEAD" },
+		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+	] },
 	{ name: "preflight", description: "Run every check an act will face and print every finding with its remedy and fix in one envelope; changes nothing (GATEDIAG1)", usage: "preflight commit [--message FILE] | claim|in-review|close BEAD [--actor NAME] [--project PATH] [--json]", flags: [], subcommands: [
 		{ name: "commit", description: "Judge the staged index with the pre-commit and commit-msg chain members and run each staged script's --selftest; bound to the staged tree id", usage: "preflight commit [--message FILE] [--project PATH] [--json]", flags: [
 			{ name: "--message", value: "FILE", description: "Commit message file to judge; defaults to the repo's prepared COMMIT_EDITMSG" },
