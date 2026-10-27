@@ -6,10 +6,9 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-	applyQuarantineExpiry, createScratch, defaultLiveness, inspectSession, parseOwnerFile, quarantineDir,
+	applyQuarantineExpiry, createScratch, defaultLiveness, inspectSession, ownerIncarnationState, parseOwnerFile, probeOwner, quarantineDir,
 	quarantineEntryFor, releaseScratch, type ApplyDeps, type InspectDeps, type LivenessDeps,
 } from "../../src/scratch.ts";
-import { ownerIdentityFromStart, ownerLiveness } from "../../src/kitlib/owner.ts";
 import { incarnation, type Incarnation, type Probe, type ProbeState } from "../../src/kitlib/proc.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -70,14 +69,16 @@ async function subjects(): Promise<Subjects> {
 	if (zombie === null || live === null) { await stop(); throw new Error("no incarnation for a subject"); }
 	process.kill(zombiePid, "SIGKILL");
 	// Real-clock poll: the OS marks the killed child Z on its own schedule, which no fake timer drives.
-	for (let tries = 0; tries < 60 && ownerLiveness({ pid: zombiePid, process_start: zombie.start }).state !== "zombie"; tries++) await Bun.sleep(50);
+	for (let tries = 0; tries < 60 && ownerIncarnationState(zombiePid, zombie.start, {}) !== "zombie"; tries++) await Bun.sleep(50);
 	return { live, zombie, stop };
 }
 
-test("planted: a zombie owner reads dead; control: a live owner is LIVE", async () => {
+test("planted: a zombie owner reads dead and its dir is reapable, where the pre-5m6ej probe read it alive; control: a live owner is LIVE", async () => {
 	const { live, zombie, stop } = await subjects();
 	try {
-		expect(ownerLiveness({ pid: zombie.pid, process_start: zombie.start }).state).toBe("zombie");
+		expect(ownerIncarnationState(zombie.pid, zombie.start, {})).toBe("zombie");
+		// The pre-5m6ej probe: kill -0 succeeds on a zombie and ps still prints its start, so it read "live".
+		expect(probeOwner(zombie.pid, zombie.start, defaultLiveness())).toBe("live");
 		const dead = ownedDir(zombie.pid, zombie.start);
 		expect(inspectSession(dead.dir, dead.root, real())).toMatchObject({ action: "REAP", reason: "owner-zombie-no-open-fds" });
 		const alive = ownedDir(live.pid, live.start);
@@ -106,7 +107,7 @@ test("planted: an unknown probe (ps unreadable) never reaps; control: a dead pro
 	expect(inspectSession(dir, root, { liveness: planted("unknown"), run: clearRun })).toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
 	expect(inspectSession(dir, root, { liveness: planted("dead"), run: clearRun })).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
 	// A blank recorded start proves nothing: unknown, never dead.
-	expect(ownerIdentityFromStart(4_242_42, "   ")).toBeNull();
+	expect(ownerIncarnationState(4_242_42, "   ", { probe: () => { throw new Error("a blank start is never probed"); } })).toBe("unknown");
 });
 
 test("planted: an unknown probe never deletes a quarantined dir; control: a dead probe deletes it", () => {
@@ -125,26 +126,19 @@ test("planted: an unknown probe never deletes a quarantined dir; control: a dead
 	expect(applyQuarantineExpiry(home, deps("zombie")).find((row) => row.dir === entry)?.reason).toBe("quarantine-expired-owner-zombie");
 	expect(existsSync(entry)).toBe(false);
 });
-test("quarantine preserves a PID-only owner as unproven; control: an incarnation with proven death expires", () => {
-	const home = tempDir("legacy-quarantine-home");
+
+test("planted: an unknown probe never releases; control: a live probe releases the same dir", () => {
+	const home = tempDir("incarnation-release-home");
 	process.env.XDG_STATE_HOME = join(home, "state");
-	process.env.XDG_CONFIG_HOME = join(home, "config");
-	const qt = quarantineDir(home);
-	mkdirSync(qt, { recursive: true, mode: 0o700 });
-	const now = Date.parse("2026-10-22T00:00:00.000Z");
-	const entry = join(qt, quarantineEntryFor("legacy.999999", new Date(now - 30 * 86_400_000)));
-	mkdirSync(entry);
-	const ownerPath = join(entry, ".owner");
-	writeFileSync(ownerPath, `pid=999999\nlabel=legacy\nrepo=${repo}\ncreated=2026-10-01T00:00:00Z\n`);
-	const deps = (state: ProbeState): ApplyDeps => ({ liveness: planted(state), run: clearRun, home, now, lsofSnapshot: new Set() });
-	expect(applyQuarantineExpiry(home, deps("dead")).find((row) => row.dir === entry)).toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
-	expect(existsSync(entry)).toBe(true);
-	writeFileSync(ownerPath, ownerText(999999, "Mon Oct  5 13:27:00 2026"));
-	expect(applyQuarantineExpiry(home, deps("dead")).some((row) => row.dir === entry)).toBe(true);
-	expect(existsSync(entry)).toBe(false);
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+	const { root, dir } = ownedDir(process.pid, "Mon Oct  5 13:27:00 2026");
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	const unknown = releaseScratch(dir, home, { liveness: planted("unknown"), run: clearRun });
+	expect(unknown).toMatchObject({ ok: false, changed: false, reason: "owner-process-identity-unverified" });
+	expect(existsSync(join(dir, ".omp-kit-release"))).toBe(false);
+	expect(releaseScratch(dir, home, { liveness: planted("zombie"), run: clearRun })).toMatchObject({ ok: false, changed: false });
+	expect(releaseScratch(dir, home, { liveness: planted("live"), run: clearRun })).toMatchObject({ ok: true, changed: true, reason: "owner-released" });
 });
-
-
 
 test("createScratch records the start whitespace-collapsed, as kitlib proc compares it", () => {
 	const root = tempDir("incarnation-create");
@@ -153,14 +147,4 @@ test("createScratch records the start whitespace-collapsed, as kitlib proc compa
 		{}, false, join(root, "scratch-budgets.json"));
 	expect(created.ok).toBe(true);
 	expect(parseOwnerFile(readFileSync(join(created.dir, ".owner"), "utf8"))?.processStart).toBe("Mon Oct 5 13:27:00 2026");
-});
-test("an owner record without process_start is unproven and kept; control: a dead recorded incarnation is reapable", () => {
-	const pid = 999999;
-	const legacyRoot = tempDir("legacy-owner");
-	const legacyDir = join(legacyRoot, `legacy.${pid}`);
-	mkdirSync(legacyDir);
-	writeFileSync(join(legacyDir, ".owner"), `pid=${pid}\nlabel=legacy\nrepo=${repo}\ncreated=2026-10-01T00:00:00Z\n`);
-	expect(inspectSession(legacyDir, legacyRoot, real())).toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
-	const dead = ownedDir(pid, "Mon Oct  5 13:27:00 2026");
-	expect(inspectSession(dead.dir, dead.root, real())).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
 });

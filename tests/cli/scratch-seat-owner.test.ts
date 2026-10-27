@@ -33,7 +33,7 @@ function tempDir(label: string): string {
 }
 const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
 // No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-const noPid: Pick<LivenessDeps, "processStart" | "probe"> = { processStart: () => null,
+const noPid: Pick<LivenessDeps, "signalAlive" | "psVisible" | "processStart" | "probe"> = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
 	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const deps = (liveness: LivenessDeps, extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness, run: clearRun, ...extra });
 const seatOwner = (pid: number, seat = `agent=${AGENT}\nsession=${SESSION}\n`): string =>
@@ -76,24 +76,26 @@ test("owner file field patterns accept the boundary lengths, refuse one past the
 	expect(performance.now() - started).toBeLessThan(500);
 });
 
-test("respawned seat: the same agent and session under a new pid keeps scratch LIVE; legacy PID-only owners stay unproven", () => {
+test("respawned seat: the same agent and session under a new pid keeps its scratch LIVE; without the seat proof it is REAP", () => {
 	const root = tempDir("seat-owner");
 	const oldPid = 59001;
 	const dir = seatDir(root, oldPid);
 	const live = inspectSession(dir, root, deps({ ...noPid, seatLive: (agent, session) => agent === AGENT && session === SESSION }));
 	expect(live).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
-	expect(inspectSession(dir, root, deps({ ...noPid, seatLive: () => false })))
-		.toMatchObject({ action: "REAP", reason: "owner-seat-gone-no-open-fds" });
-	expect(inspectSession(dir, root, deps({ ...noPid, seatLive: () => null })))
-		.toMatchObject({ action: "SKIP", reason: "owner-seat-liveness-unproven" });
+	// Planted negatives: the same record with the agent+session liveness removed is REAP, or never reaped when unprovable.
+	expect(inspectSession(dir, root, deps({ ...noPid, seatLive: () => false }))).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
+	expect(inspectSession(dir, root, deps({ ...noPid, seatLive: () => null }))).toMatchObject({ action: "SKIP", reason: "owner-seat-liveness-unproven" });
 	expect(inspectSession(dir, root, deps({ ...noPid }))).toMatchObject({ action: "SKIP", reason: "owner-seat-liveness-unproven" });
 	// A seat for a different session never keeps this record alive.
-	expect(inspectSession(dir, root, deps({ ...noPid, seatLive: (_agent, session) => session === OTHER_SESSION })))
-		.toMatchObject({ action: "REAP", reason: "owner-seat-gone-no-open-fds" });
-
-	const legacy = seatDir(root, 59002, seatOwner(59002, ""));
-	expect(inspectSession(legacy, root, deps({ ...noPid, seatLive: () => true })))
-		.toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
+	expect(inspectSession(dir, root, deps({ ...noPid, seatLive: (_agent, session) => session === OTHER_SESSION }))).toMatchObject({ action: "REAP" });
+	// A pid-only owner keeps today's rule even when every seat is alive.
+	const legacyDir = seatDir(root, 59002, seatOwner(59002, ""));
+	expect(inspectSession(legacyDir, root, deps({ ...noPid, seatLive: () => true }))).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
+	// A live pid is LIVE with or without the seat.
+	const alive = seatDir(root, 59003);
+	// The live process started before the record was written, so it can be the writer.
+	expect(inspectSession(alive, root, deps({ signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Sep  1 00:00:00 2025", seatLive: () => false })))
+		.toMatchObject({ action: "LIVE" });
 });
 
 test("scratch plan reports the respawned seat dir as LIVE and counts it as reapable only when the seat is gone", () => {
@@ -161,7 +163,7 @@ test.skipIf(!HAVE_LSOF)("real seat process: a scratch dir written by a tool shel
 		seat.kill("SIGTERM");
 		await seat.exited;
 		expect(real.seatLive?.(AGENT, SESSION)).toBe(false);
-		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "REAP", reason: "owner-seat-gone-no-open-fds" });
+		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
 	} finally {
 		seat.kill("SIGKILL");
 	}
@@ -194,9 +196,11 @@ test.skipIf(!HAVE_LSOF)("a chain of two respawns keeps the dir LIVE and releasab
 		writeFileSync(join(dir, ".owner"), seatOwner(first.pid));
 		await stop(first);
 		const second = await start();
+		expect(real.signalAlive(first.pid)).toBe(false);
 		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
 		await stop(second);
 		const third = await start();
+		expect(real.signalAlive(first.pid)).toBe(false);
 		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
 		// The last seat releases a dir the first one created; an unrelated agent in the same session cannot.
 		const work = join(root, `work.${first.pid}`);
@@ -208,7 +212,7 @@ test.skipIf(!HAVE_LSOF)("a chain of two respawns keeps the dir LIVE and releasab
 		// With the last seat gone and no pid alive, the other dir is REAP as before.
 		await stop(third);
 		expect(real.seatLive?.(AGENT, SESSION)).toBe(false);
-		expect(inspectSession(dir, root, sibling)).toMatchObject({ action: "REAP", reason: "owner-seat-gone-no-open-fds" });
+		expect(inspectSession(dir, root, sibling)).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
 	} finally {
 		for (const seat of live) seat.kill("SIGKILL");
 	}
@@ -286,14 +290,13 @@ test("release: the successor seat (same agent, same session, new pid) can releas
 	}
 });
 
-test("release: a pid-only owner cannot be authorized by PID ancestry", () => {
+test("release: a pid-only owner is still releasable only by its pid or a descendant, whatever seat the caller holds", () => {
 	const legacy = releaseFixture(seatOwner(59041, ""), 59041);
 	expect(releaseScratch(legacy.dir, legacy.home, deps({ ...noPid }, { callerSeat: asSeat(AGENT, [SESSION]) })))
 		.toMatchObject({ ok: false, reason: "caller-not-owner" });
+	// Today's rule: the owner pid in the caller's ancestry still releases.
 	const ancestry = releaseFixture(seatOwner(process.pid, ""), process.pid);
-	expect(releaseScratch(ancestry.dir, ancestry.home, deps({ ...noPid })))
-		.toMatchObject({ ok: false, changed: false, reason: "caller-not-owner" });
-	expect(existsSync(join(ancestry.dir, ".omp-kit-release"))).toBe(false);
+	expect(releaseScratch(ancestry.dir, ancestry.home, deps({ ...noPid }))).toMatchObject({ ok: true, changed: true });
 });
 
 test("release: a complete owner with a recorded process start is released by the successor seat without probing the dead pid", () => {
@@ -302,7 +305,7 @@ test("release: a complete owner with a recorded process start is released by the
 	expect(releaseScratch(fixture.dir, fixture.home, deps({ ...noPid }, { callerSeat: asSeat(AGENT, [SESSION]) }))).toMatchObject({ ok: true, changed: true });
 	const pidOnly = releaseFixture(complete.replace(/agent=.*\nsession=.*\n/, ""), 59052);
 	// The pid runs with another start: the incarnation probe is planted reused to match (ompkit-5m6ej).
-	expect(releaseScratch(pidOnly.dir, pidOnly.home, deps({ ...noPid, processStart: () => "Mon Oct 18 17:50:00 2026",
+	expect(releaseScratch(pidOnly.dir, pidOnly.home, deps({ ...noPid, signalAlive: () => true, processStart: () => "Mon Oct 18 17:50:00 2026",
 		probe: (owner) => ({ state: "reused", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: "Mon Oct 18 17:50:00 2026", stat: "S", signal0: null, reason: "planted" } }) },
 		{ callerSeat: asSeat(AGENT, [SESSION]) })))
 		.toMatchObject({ ok: false });

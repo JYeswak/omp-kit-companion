@@ -37,14 +37,17 @@ function snapshot(authority: "ACTIVE" | "PAUSED"): AdmissionInput {
 	};
 }
 
-const LIVE_START = "Mon Oct  5 12:00:00 2026";
 const liveLiveness: LivenessDeps = {
-	processStart: (pid) => pid === 700000 ? LIVE_START : null,
-	probe: (owner) => ({ state: owner.pid === 700000 && owner.start === LIVE_START ? "live" : "dead",
-		evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: owner.pid === 700000 ? LIVE_START : null,
-			stat: owner.pid === 700000 ? "S" : null, signal0: owner.pid === 700000 ? "alive" : "esrch", reason: "planted" } }),
+	signalAlive: () => false,
+	psVisible: () => false,
+	processStart: (pid) => pid === 700000 ? "Mon Oct  5 12:00:00 2026" : null,
 };
-const deadLiveness: LivenessDeps = { processStart: () => null };
+
+const deadLiveness: LivenessDeps = {
+	signalAlive: () => false,
+	psVisible: () => false,
+	processStart: () => null,
+};
 
 test("[b] planted: dead-owner observation blocks recovery with zero commands", () => {
 	const planted = plantedRepo();

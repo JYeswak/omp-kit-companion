@@ -39,7 +39,6 @@ def _load(name: str, path: Path):
 
 
 pysafe = _load("pysafe", ROOT / "scripts" / "pysafe.py")
-sys.path.insert(0, str(ROOT / "scripts"))
 kitlib_tmp = _load("kitlib_tmp", ROOT / "scripts" / "kitlib_tmp.py")
 
 PY_CHILD = r'''
@@ -224,11 +223,11 @@ def judge(outcome: Outcome, want: dict, root: str) -> list:
                 failures.append(f"modes are not 0700/0600: {d}")
             with open(owner, encoding="utf-8") as handle:
                 fields = _owner_fields(handle.read(4096))
-            want_keys = {"pid", "process_start", "label", "repo", "created_at", "argv0"} | ({"bead"} if index == 1 else set())
-            if set(fields) != want_keys or fields.get("pid") != str(outcome.pid) or not fields.get("process_start"):
-                failures.append(f".owner fields {fields} lack the process incarnation for pid {outcome.pid}")
+            want_keys = {"pid", "label", "repo", "created"} | ({"bead"} if index == 1 else set())
+            if set(fields) != want_keys or fields.get("pid") != str(outcome.pid):
+                failures.append(f".owner fields {fields} are not the identity-free set naming pid {outcome.pid}")
             parsed = _parse_with_scratch(owner)
-            if parsed != "unavailable" and (not isinstance(parsed, dict) or parsed.get("pid") != outcome.pid or not parsed.get("processStart")):
+            if parsed != "unavailable" and (not isinstance(parsed, dict) or parsed.get("pid") != outcome.pid):
                 failures.append(f"src/scratch.ts parseOwnerFile rejects {owner}: {parsed}")
     if "stdout_has" in want and want["stdout_has"] not in outcome.stdout:
         failures.append(f"stdout lacks {want['stdout_has']}: {outcome.stdout!r}")

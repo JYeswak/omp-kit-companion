@@ -1,9 +1,8 @@
 import { plugin } from "bun";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { ownedTmp } from "../src/kitlib/tmp.ts";
 
 // .138 qualification: variants exist only in Bun's loader, never in a source copy.
 // BUN_OPTIONS --require propagates the loader into isolated race subprocesses.
@@ -81,7 +80,7 @@ if (process.env.OMP_KIT_CONVERGE_MUTANT_LOADER === "1") {
 				const source = readFileSync(sourcePath, "utf8"), originalSha = sha256(source);
 				if (originalSha !== process.env.OMP_KIT_CONVERGE_SOURCE_SHA256) throw new Error("Convergence source changed during mutation qualification");
 				const contents = mutation ? mutate(source, mutation.edits) : source;
-				console.error(marker + JSON.stringify({ id, source_sha256: originalSha, loaded_sha256: sha256(contents), edits: mutation?.edits.length ?? 0 }));
+				console.error(marker + JSON.stringify({ id, source_sha256: originalSha, loaded_sha256: sha256(contents), edits: mutation?.edits.length ?? 0, pid: process.pid }));
 				return { contents, loader: "ts" };
 			});
 		},
@@ -94,8 +93,8 @@ if (process.env.OMP_KIT_CONVERGE_MUTANT_LOADER === "1") {
 	if (scratchRoot === "" || !statSync(scratchRoot, { throwIfNoEntry: false })?.isDirectory()) {
 		throw new Error("converge-mutants: export TMPDIR to an owned scratch directory first");
 	}
-	process.chdir(root);
-	const scratch = ownedTmp("converge-mutants", { root: scratchRoot, autoCleanup: false }).path;
+	const scratch = mkdtempSync(join(scratchRoot, `converge-mutants.${process.pid}.`)); // tempsafe: evidence kept in the caller-owned scratch by contract; the caller releases it with --bin evidence
+	writeFileSync(join(scratch, ".owner"), `pid=${process.pid}\nlabel=converge-mutants\nrepo=${root}\ncreated=${new Date().toISOString()}\n`);
 	const run = (mutation: Mutation, id: string): RunEvidence => {
 		const env = { ...process.env, TMPDIR: scratch, NO_COLOR: "1", FORCE_COLOR: "0",
 			BUN_OPTIONS: `--require=${self}`,

@@ -66,7 +66,7 @@ export interface ProbeSeam {
 export type ProbeSeamSync = Omit<ProbeSeam, "ps"> & { ps?: (pid: number) => PsRead };
 
 /** Largest pid either platform issues (Linux pid_max ceiling 2^22; macOS 99999); bound generously at int32. */
-export const PID_MAX = 0x7fffffff;
+const PID_MAX = 0x7fffffff;
 const PS_ENV = { LC_ALL: "C", PATH: "/usr/bin:/bin" };
 const decoder = new TextDecoder();
 

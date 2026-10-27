@@ -3,8 +3,6 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp, type OwnedTmp } from "../kitlib/tmp.ts";
 import { check, gitBlanketArgs, hostAgentName, shellTokens, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
-import { ownerIdentity } from "../kitlib/owner.ts";
-import { parseOwnerFile } from "../scratch.ts";
 
 const agentTmp = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(agentTmp, { recursive: true });
@@ -288,15 +286,13 @@ test("TMPALLOC1: shell text the guard cannot inspect is refused, never allowed",
 	expect(bash(deep)?.reason).toContain("budget");
 });
 
-test("session scratch dir matches the S2 owner-name contract and records its process incarnation", () => {
+test("session scratch dir matches the S2 owner-name contract", () => {
 	const repo = ownedRoot("fleet-repo");
 	mkdirSync(join(repo, ".git"), { recursive: true });
-	const processStart = "Wed Oct 21 22:40:00 2026";
-	const argv0 = "fleet-guard-test";
 	const dir = scratchDirFor(join(repo, "sub"), 4242);
 	expect(dir).toBe(join(repo, "var", "agent-tmp", "omp.4242"));
-	writeScratchOwner(dir, { pid: 4242, process_start: processStart, label: "omp", repo, created: "2026-10-02T00:00:00.000Z", argv0 });
-	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nprocess_start=${processStart}\nlabel=omp\nrepo=${repo}\ncreated_at=2026-10-02T00:00:00.000Z\nargv0=${argv0}\n`);
+	writeScratchOwner(dir, { pid: 4242, label: "omp", repo, created: "2026-10-02T00:00:00.000Z" });
+	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe("pid=4242\nlabel=omp\nrepo=" + repo + "\ncreated=2026-10-02T00:00:00.000Z\n");
 	// Session TMPDIR may itself be repo scratch; use an unwritten nonrepo path.
 	const plainBase = "/nonexistent/ompkit-fleet-plain";
 	expect(scratchDirFor(plainBase, 7)).toBe(join(plainBase, "var", "agent-tmp", "omp.7"));
@@ -305,40 +301,25 @@ test("session scratch dir matches the S2 owner-name contract and records its pro
 test("OWNERKEY1: a seat owner carries agent and session together, and only when both are well formed", () => {
 	const repo = ownedRoot("fleet-seat-owner");
 	const dir = join(repo, "var", "agent-tmp", "omp.4242");
-	const processStart = "Wed Oct 21 22:40:00 2026";
-	const argv0 = "fleet-guard-test";
-	const base = { pid: 4242, process_start: processStart, label: "omp", repo, created: "2026-10-02T00:00:00.000Z", argv0 };
+	const base = { pid: 4242, label: "omp", repo, created: "2026-10-02T00:00:00.000Z" };
 	const session = "01a15012-af9e-7628-bee6-496084668412";
 	writeScratchOwner(dir, { ...base, agent: "TurquoiseSummit", session });
-	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nprocess_start=${processStart}\nlabel=omp\nrepo=${repo}\ncreated_at=2026-10-02T00:00:00.000Z\nargv0=${argv0}\nagent=TurquoiseSummit\nsession=${session}\n`);
+	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nlabel=omp\nrepo=${repo}\ncreated=2026-10-02T00:00:00.000Z\nagent=TurquoiseSummit\nsession=${session}\n`);
 	for (const partial of [{ agent: "TurquoiseSummit" }, { session }, { agent: "../evil", session }, { agent: "TurquoiseSummit", session: "short" }]) {
 		writeScratchOwner(dir, { ...base, ...partial });
-		expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nprocess_start=${processStart}\nlabel=omp\nrepo=${repo}\ncreated_at=2026-10-02T00:00:00.000Z\nargv0=${argv0}\n`);
+		expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nlabel=omp\nrepo=${repo}\ncreated=2026-10-02T00:00:00.000Z\n`);
 	}
 });
 
-test("SCRATCHBIN1: a session's own dir names its throwaway bin, and no other bin is writable here", () => {
+test("SCRATCHBIN1: a seat owner may name its throwaway bin, and no other bin is writable here", () => {
 	const repo = ownedRoot("fleet-seat-bin");
 	const dir = join(repo, "var", "agent-tmp", "omp.4242");
-	const processStart = "Wed Oct 21 22:40:00 2026";
-	const argv0 = "fleet-guard-test";
-	const base = { pid: 4242, process_start: processStart, label: "omp", repo, created: "2026-10-02T00:00:00.000Z", argv0 };
+	const base = { pid: 4242, label: "omp", repo, created: "2026-10-02T00:00:00.000Z" };
 	writeScratchOwner(dir, { ...base, bin: "throwaway" });
-	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nprocess_start=${processStart}\nlabel=omp\nrepo=${repo}\ncreated_at=2026-10-02T00:00:00.000Z\nargv0=${argv0}\nbin=throwaway\n`);
+	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nlabel=omp\nrepo=${repo}\ncreated=2026-10-02T00:00:00.000Z\nbin=throwaway\n`);
 	// Anything else is not written: the type allows only the one bin, and the writer ignores a smuggled value.
 	writeScratchOwner(dir, { ...base, bin: "hold" as never });
-	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nprocess_start=${processStart}\nlabel=omp\nrepo=${repo}\ncreated_at=2026-10-02T00:00:00.000Z\nargv0=${argv0}\n`);
-});
-
-test("PIDIDENT1: scratch owner records carry the creating process incarnation", () => {
-	const repo = ownedRoot("fleet-owner-incarnation");
-	const identity = ownerIdentity(process.pid);
-	if (identity === null) throw new Error("test process incarnation is unavailable");
-	const dir = join(repo, "var", "agent-tmp", "omp.4242");
-	writeScratchOwner(dir, { pid: identity.pid, process_start: identity.process_start, label: "omp", repo,
-		created: "2026-10-02T00:00:00.000Z", argv0: "fleet-guard-test" });
-	const owner = parseOwnerFile(readFileSync(join(dir, ".owner"), "utf8"));
-	expect(owner?.processStart).toBe(identity.process_start);
+	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(`pid=4242\nlabel=omp\nrepo=${repo}\ncreated=2026-10-02T00:00:00.000Z\n`);
 });
 
 test("OWNERKEY1: the host agent name is AGENT_NAME, else BR_ACTOR, else BR_AGENT_NAME, and never an unsafe value", () => {

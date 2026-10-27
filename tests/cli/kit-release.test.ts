@@ -148,9 +148,6 @@ describe("versioned release contract", () => {
      { name: "bin/omp-kit", bytes: Buffer.from(`#!/bin/sh\nprintf '%s\\n' '${JSON.stringify({ data: probeData })}'\n`) },
      { name: "scripts/receipt.py", bytes: readFileSync(join(repo, "scripts/receipt.py")) },
      { name: "scripts/kitlib_tmp.py", bytes: readFileSync(join(repo, "scripts/kitlib_tmp.py")) },
-     { name: "scripts/kitlib_proc.py", bytes: readFileSync(join(repo, "scripts/kitlib_proc.py")) },
-     { name: "scripts/kitlib_run.py", bytes: readFileSync(join(repo, "scripts/kitlib_run.py")) },
-     { name: "scripts/pysafe.py", bytes: readFileSync(join(repo, "scripts/pysafe.py")) },
      { name: "scripts/kitlib_artifact.py", bytes: readFileSync(join(repo, "scripts/kitlib_artifact.py")) },
      { name: "scripts/ordinary.py", bytes: Buffer.from("print('ordinary data file')\n") },
     ].sort((left, right) => left.name.localeCompare(right.name));

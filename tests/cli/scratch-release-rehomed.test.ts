@@ -12,8 +12,6 @@ const scratchParent = join(repo, "var", "agent-tmp");
 mkdirSync(scratchParent, { recursive: true });
 const CREATOR_PID = 59_901;
 const OTHER_PID = 59_902;
-const AGENT = "CopperTrout";
-const SESSION = "01a15012-af9e-7628-bee6-496084668412";
 
 const cleanup: string[] = [];
 const saved = { roots: process.env.OMP_KIT_SCRATCH_ROOTS, state: process.env.XDG_STATE_HOME };
@@ -27,11 +25,9 @@ afterEach(() => {
 
 const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
 // No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-const noPid: LivenessDeps = { processStart: () => null,
+const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
 	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const deps = (extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness: noPid, run: clearRun, ...extra });
-const seatLiveness: LivenessDeps = { ...noPid, seatLive: (agent, session) => agent === AGENT && session === SESSION };
-const seatOwnerText = (pid: number) => `pid=${pid}\nprocess_start=Mon Oct 18 17:32:44 2026\nlabel=work\nrepo=${repo}\ncreated_at=2026-10-18T17:32:44Z\nargv0=omp\nagent=${AGENT}\nsession=${SESSION}\n`;
 
 function fixture(ownerPid: number): { dir: string; root: string; home: string } {
 	const root = ownedTmp("rehomed", { root: scratchParent }).path;
@@ -48,42 +44,33 @@ function fixture(ownerPid: number): { dir: string; root: string; home: string } 
 	return { dir, root, home };
 }
 
-test("a respawned seat ignores the creator pid suffix and releases the rehomed directory", () => {
-	const { dir, root, home } = fixture(OTHER_PID);
-	writeFileSync(join(dir, ".owner"), seatOwnerText(OTHER_PID));
-	expect(inspectOne(dir, root, deps({ liveness: seatLiveness }))).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
-	expect(releaseScratch(dir, home, deps({ liveness: seatLiveness, callerSeat: () => ({ agent: AGENT, sessions: [SESSION], main: SESSION }) })))
-		.toMatchObject({ ok: true, changed: true, reason: "owner-released" });
+test("the successor that owns a rehomed dir releases it; the release stands at plan time as owner-released", () => {
+	const { dir, root, home } = fixture(process.pid);
+	const released = releaseScratch(dir, home, deps());
+	expect(released).toMatchObject({ ok: true, changed: true, reason: "owner-released", ownerPid: process.pid });
 	expect(existsSync(join(dir, ".omp-kit-release"))).toBe(true);
-	expect(inspectOne(dir, root, deps({ liveness: seatLiveness }))).toMatchObject({ action: "QUARANTINE", reason: "owner-released-would-quarantine" });
+	expect(inspectOne(dir, root, deps())).toMatchObject({ action: "QUARANTINE", reason: "owner-released-would-quarantine" });
 });
 
-
-test("a different seat cannot release a rehomed dir", () => {
+test("a caller that is not the owner, and not a descendant of it, cannot release a rehomed dir", () => {
 	const { dir, home } = fixture(OTHER_PID);
-	writeFileSync(join(dir, ".owner"), seatOwnerText(OTHER_PID));
-	expect(releaseScratch(dir, home, deps({ liveness: seatLiveness, callerSeat: () => ({ agent: "CrimsonHorizon", sessions: [SESSION], main: SESSION }) })))
-		.toMatchObject({ ok: false, changed: false, reason: "caller-not-owner", ownerPid: OTHER_PID });
+	expect(releaseScratch(dir, home, deps())).toMatchObject({ ok: false, changed: false, reason: "caller-not-owner", ownerPid: OTHER_PID });
 	expect(existsSync(join(dir, ".omp-kit-release"))).toBe(false);
 });
 
-test("a dead rehomed owner is reaped by process identity despite its stale creator-pid suffix", () => {
+test("an unreleased rehomed dir whose owner is gone is not reaped on sight: the name mismatch keeps its old, safe SKIP", () => {
 	const { dir, root } = fixture(OTHER_PID);
-	writeFileSync(join(dir, ".owner"), seatOwnerText(OTHER_PID));
-	const deadSeat = { ...noPid, seatLive: () => false };
-	expect(inspectOne(dir, root, deps({ liveness: deadSeat, lsofSnapshot: new Set() })))
-		.toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
+	expect(inspectOne(dir, root, deps())).toMatchObject({ action: "SKIP", reason: "session-name-owner-mismatch" });
 	expect(existsSync(dir)).toBe(true);
 });
 
 test("apply moves an owner-released rehomed dir into quarantine; an unreleased one beside it stays", () => {
-	const { dir, root, home } = fixture(OTHER_PID);
-	writeFileSync(join(dir, ".owner"), seatOwnerText(OTHER_PID));
+	const { dir, root, home } = fixture(process.pid);
 	const keep = join(root, `keep.${CREATOR_PID + 5}`);
 	mkdirSync(keep);
 	writeFileSync(join(keep, ".owner"), `pid=${OTHER_PID}\nlabel=keep\nrepo=${repo}\ncreated=2026-10-18T17:32:44.000Z\n`);
-	expect(releaseScratch(dir, home, deps({ liveness: seatLiveness, callerSeat: () => ({ agent: AGENT, sessions: [SESSION], main: SESSION }) })).ok).toBe(true);
-	const result = applyScratch(home, { ...deps({ liveness: seatLiveness }), home });
+	expect(releaseScratch(dir, home, deps()).ok).toBe(true);
+	const result = applyScratch(home, { ...deps(), home });
 	expect(existsSync(dir)).toBe(false);
 	expect(existsSync(keep)).toBe(true);
 	expect(result.applied.some((verdict) => verdict.reason === "owner-released-quarantined" && verdict.dir.includes(`work.${CREATOR_PID}`))).toBe(true);

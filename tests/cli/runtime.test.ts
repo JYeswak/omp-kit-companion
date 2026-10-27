@@ -79,7 +79,7 @@ function canonicalScratch(repo: string): string {
 	const savedRoots = process.env.OMP_KIT_SCRATCH_ROOTS;
 	process.env.OMP_KIT_SCRATCH_ROOTS = scratch;
 	try {
-		const liveness = { processStart: () => "Mon Oct 18 17:32:44 2026",
+		const liveness = { signalAlive: () => false, psVisible: () => false, processStart: () => "Mon Oct 18 17:32:44 2026",
 			probe: () => { throw new Error("canonicalScratch never probes"); } } as unknown as LivenessDeps;
 		const created = createScratch(`runtime-tests-${canonicalScratchCount++}`, repo,
 			{ liveness, run: () => ({ code: 1, stdout: "", stderr: "" }), callerSeat: () => ({ agent: null, sessions: [], main: null }) },

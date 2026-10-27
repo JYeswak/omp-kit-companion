@@ -36,19 +36,14 @@ function plantedRepo(): { scratch: string; repo: string; runDir: string } {
 }
 
 const LIVE_PID = 424242;
-const LIVE_START = "Mon Oct 5 12:00:00 2026";
+const LIVE_START = "Mon Oct  5 12:00:00 2026";
 const OWNER_PID = 700000;
 
 function livenessWith(livePids: ReadonlySet<number>): LivenessDeps {
-	const processStart = (pid: number) => pid === LIVE_PID ? LIVE_START : pid === OWNER_PID ? "current-process" : null;
 	return {
-		processStart,
-		probe: (owner) => {
-			const observedStart = processStart(owner.pid);
-			const state = !livePids.has(owner.pid) ? "dead" : observedStart === null ? "unknown" : observedStart === owner.start ? "live" : "reused";
-			return { state, evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: observedStart,
-				stat: livePids.has(owner.pid) ? "S" : null, signal0: livePids.has(owner.pid) ? "alive" : "esrch", reason: `planted ${state}` } };
-		},
+		signalAlive: (pid) => livePids.has(pid),
+		psVisible: () => false,
+		processStart: (pid) => pid === LIVE_PID ? LIVE_START : pid === OWNER_PID ? "current-process" : null,
 	};
 }
 

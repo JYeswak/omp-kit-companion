@@ -1,14 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { chmodSync, closeSync, existsSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, planScratch, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
+import { applyQuarantineExpiry, applyReap, applyScratch, applyScratchForPressure, applyUnowned, createScratch, defaultLiveness, defaultRunner, fleetTestTmpBase, inspectBunBuildFiles, inspectOne, inspectSession, isApplyFailure, isHarnessServer, killOrphan, lsofClear, parseEtime, parseOwnerFile, parsePsStart, planScratch, probeOwner, quarantineBuckets, quarantineDir, quarantineEntryFor, quarantineTimeOf, reapLogPath, releaseScratch, resolveScratchRoots, reuseAfterCreated, selectHarnessOrphans, snapshotClear, summarizeScratch, takeLsofSnapshot, UNOWNED_ACTIVE_RULE, type ApplyDeps, type InspectDeps } from "../../src/scratch.ts";
 import { exportCommitToScratch, parseFreeOwner, parseTextOwner, releaseBudgetEntry, repoOfRoot } from "../../src/scratch.ts";
 import type { ScratchVerdict } from "../../src/scratch.ts";
 import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRoute, systemdTimer } from "../../src/service.ts";
 import { acquireRunLock } from "../../src/service-run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { mintOwnerCapability } from "../../src/kitlib/owner.ts";
-import { run as runBounded } from "../../src/kitlib/run.ts";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 
 const roots: string[] = [];
@@ -123,7 +121,7 @@ test("modern and fleet-guard owner files parse strictly", () => {
   expect(parseOwnerFile(good.split("\n").slice(0, 5).join("\n"))).toBeNull();
 });
 
-test("a reused PID without a seat or capability cannot authorize scratch release", () => {
+test("releaseScratch refuses a reused owner PID before marking release", () => {
   const { home } = cliHome();
   const root = agentTmp("scratch-reused-pid");
   roots.push(root);
@@ -133,12 +131,21 @@ test("a reused PID without a seat or capability cannot authorize scratch release
     pid: String(process.pid), process_start: "stale-process-start", label: "omp", repo: fixtureRepo,
     created_at: new Date().toISOString(), argv0: "test",
   }));
-  // The numeric PID is reused, and only the stale start is in .owner; PID liveness never grants release authority.
+  // The real kitlib proc probe (ompkit-5m6ej): this process runs with a start other than the recorded one.
   const result = releaseScratch(dir, home, depsFor());
-  expect(result).toMatchObject({ ok: false, changed: false, reason: "caller-not-owner", ownerPid: process.pid });
+  expect(result).toMatchObject({ ok: false, changed: false, reason: "owner-process-reused", ownerPid: process.pid });
   expect(existsSync(join(dir, ".omp-kit-release"))).toBe(false);
 });
 
+test("probeOwner maps live, reused, dead, unreachable and unknown", () => {
+  const live = { signalAlive: () => true, psVisible: () => true, processStart: () => "S" };
+  expect(probeOwner(1, "S", live)).toBe("live");
+  expect(probeOwner(1, "other", live)).toBe("reused");
+  expect(probeOwner(1, "S", { ...live, processStart: () => null })).toBe("unknown");
+  const dead = { signalAlive: () => false, psVisible: () => false, processStart: () => "S" };
+  expect(probeOwner(1, "S", dead)).toBe("dead");
+  expect(probeOwner(1, "S", { ...dead, psVisible: () => true })).toBe("live-unreachable");
+});
 
 test("lsof maps empty to clear, output to open, diagnostics and missing binary to unavailable", () => {
   expect(lsofClear("/x", clearRun)).toBe(true);
@@ -190,34 +197,25 @@ test("inspect keeps live owners, reaps dead ones, and skips missing or legacy ow
   expect(inspectSession(naked, root, deps).reason).toBe("no-owner-file");
   expect(inspectSession(legacy, root, deps).reason).toBe("malformed-owner-file");
 });
-test("legacy one-line owner stays unproven; structured incarnations reap dead and retain live owners", () => {
+test("one-line owner files: dead owner reaps with real size, live owner stays live", () => {
   const root = agentTmp("scratch");
   roots.push(root);
   const gone = deadPid();
-  const legacy = sessionDir(root, "suite-snap", gone);
-  const legacyOwner = `pid=${gone} label=suite-snap repo=${fixtureRepo} created=2026-10-01T00:00:00Z\n`;
-  writeFileSync(join(legacy, ".owner"), legacyOwner);
-  const legacyPayload = "x".repeat(1024);
-  writeFileSync(join(legacy, "payload"), legacyPayload);
-  const deps = depsFor();
-  const legacyVerdict = inspectSession(legacy, root, deps);
-  expect(legacyVerdict).toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
-  expect(legacyVerdict.sizeBytes).toBe(Buffer.byteLength(legacyOwner) + Buffer.byteLength(legacyPayload));
-
-  const dead = sessionDir(root, "suite-snap-modern", gone);
-  const deadOwner = ownerText(deadFields("suite-snap-modern", gone));
+  const dead = sessionDir(root, "suite-snap", gone);
+  const deadOwner = `pid=${gone} label=suite-snap repo=${fixtureRepo} created=2026-10-01T00:00:00Z\n`;
   writeFileSync(join(dead, ".owner"), deadOwner);
-  const deadPayload = "dead owner payload\n";
-  writeFileSync(join(dead, "payload"), deadPayload);
-  const deadVerdict = inspectSession(dead, root, deps);
-  expect(deadVerdict).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
-  expect(deadVerdict.sizeBytes).toBe(Buffer.byteLength(deadOwner) + Buffer.byteLength(deadPayload));
-
+  const payload = "x".repeat(1024);
+  writeFileSync(join(dead, "payload"), payload);
   const live = sessionDir(root, "suite-snap", process.pid);
-  writeFileSync(join(live, ".owner"), ownerText(liveFields("suite-snap")));
+  writeFileSync(join(live, ".owner"), `pid=${process.pid} label=suite-snap repo=${fixtureRepo} created=${new Date().toISOString()}\n`);
+  const deps = depsFor();
+  const deadVerdict = inspectSession(dead, root, deps);
+  expect(deadVerdict.action).toBe("REAP");
+  expect(deadVerdict.reason).toBe("owner-dead-no-open-fds");
+  expect(deadVerdict.sizeBytes).toBe(payload.length + Buffer.byteLength(deadOwner));
   expect(inspectSession(live, root, deps).action).toBe("LIVE");
 });
-test("nested integrations work dirs use process-incarnation liveness", () => {
+test("nested integrations work dirs reap on dead pid and stay live on live pid", () => {
   const home = useState();
   const root = agentTmp("scratch");
   roots.push(root);
@@ -227,16 +225,16 @@ test("nested integrations work dirs use process-incarnation liveness", () => {
   const gone = deadPid();
   const dead = join(session, `omp-kit-integrations-${gone}-abc`);
   mkdirSync(dead, { recursive: true });
-  writeFileSync(join(dead, ".owner"), ownerText(deadFields("omp-kit-integrations", gone)));
+  writeFileSync(join(dead, ".owner"), `pid=${gone} label=omp-kit-integrations repo=${fixtureRepo} created=2026-10-01T00:00:00Z\n`);
   const live = join(session, `omp-kit-integrations-${process.pid}-def`);
   mkdirSync(live, { recursive: true });
-  writeFileSync(join(live, ".owner"), ownerText(liveFields("omp-kit-integrations")));
+  writeFileSync(join(live, ".owner"), `pid=${process.pid} label=omp-kit-integrations repo=${fixtureRepo} created=${new Date().toISOString()}\n`);
   const plan = planScratch(home, depsFor());
   expect(plan.sessions.find(session => session.dir === dead)?.action).toBe("REAP");
   expect(plan.sessions.find(session => session.dir === live)?.action).toBe("LIVE");
   const nestedWork = join(session, "omp-kit-work.xyz");
   mkdirSync(nestedWork, { recursive: true });
-  writeFileSync(join(nestedWork, ".owner"), ownerText(deadFields("omp-kit-work", gone)));
+  writeFileSync(join(nestedWork, ".owner"), `pid=${gone} label=omp-kit-work repo=${fixtureRepo} created=2026-10-01T00:00:00Z\n`);
   const plan2 = planScratch(home, depsFor());
   expect(plan2.sessions.find(session => session.dir === nestedWork)?.action).toBe("REAP");
 });
@@ -259,81 +257,68 @@ test("runtime omp-kit-work dirs with dead owners are reaped from system temp", (
 	expect(existsSync(work)).toBe(false);
 });
 
-
-test("runtime adapter requires a durable caller identity and records its incarnation", async () => {
-	const root = agentTmp("runtime-owner-root");
-	roots.push(root);
-	const adapter = resolve(import.meta.dir, "../../scripts/runtime-adapter.sh");
-	const before = readdirSync(root).sort();
-	const refused = await runBounded(["sh", "-c", 'OMP_KIT_TEST_WORK_ROOT="$1" OMP_KIT_CASE_CWD="$2" "$3" --workdir',
-		"runtime-no-owner", root, fixtureRepo, adapter], { deadline_s: 4 });
-	expect(refused.rc).toBe(2);
-	expect(new TextDecoder().decode(refused.stderr)).toContain("OMP_KIT_WORK_OWNER_PID");
-	expect(readdirSync(root).sort()).toEqual(before);
-
-	const created = await runBounded(["sh", "-c",
-		'owner=$$; work=$(OMP_KIT_TEST_WORK_ROOT="$1" OMP_KIT_CASE_CWD="$2" OMP_KIT_WORK_OWNER_PID="$owner" "$3" --workdir) || exit; printf "%s\\n" "$owner" >"$1/owner-pid"; printf "%s\\n" "$work" >"$1/workdir"; /bin/cat "$work/.owner" >"$1/owner-record"',
-		"runtime-owner", root, fixtureRepo, adapter], { deadline_s: 4 });
-	expect(created.rc, new TextDecoder().decode(created.stderr)).toBe(0);
-	const ownerPid = Number(readFileSync(join(root, "owner-pid"), "utf8"));
-	const owner = parseOwnerFile(readFileSync(join(root, "owner-record"), "utf8"));
-	expect(owner?.pid).toBe(ownerPid);
-	expect(owner?.processStart).not.toBeNull();
-	const workdir = readFileSync(join(root, "workdir"), "utf8").trim();
-	expect(workdir.startsWith(`${root}/`)).toBe(true);
-	expect(existsSync(join(workdir, ".owner"))).toBe(true);
-});
-
 test("runtime adapter TERM leaves its workdir for no later reaper", async () => {
 	const root = agentTmp("runtime-term-root");
 	roots.push(root);
 	const adapter = resolve(import.meta.dir, "../../scripts/runtime-adapter.sh");
-	const child = await runBounded(["sh", "-c", "owner=$$; work=$(OMP_KIT_WORK_OWNER_PID=$$ TMPDIR=\"$1\" \"$2\" --workdir) || exit 1; trap 'rm -rf \"$work\"; exit 143' TERM INT EXIT; printf '%s' \"$work\" > \"$1/workdir\"; kill -TERM $$", "runtime-term", root, adapter], {
-		deadline_s: 10,
-	});
-	expect(child.rc).toBe(143);
-	expect(existsSync(join(root, "workdir")), `exit=${child.rc} ${new TextDecoder().decode(child.stderr)}`).toBe(true);
+	const child = Bun.spawn(["sh", "-c", "work=$(TMPDIR=\"$1\" \"$2\" --workdir) || exit 1; trap 'rm -rf \"$work\"; exit 143' TERM INT EXIT; printf '%s' \"$work\" > \"$1/workdir\"; kill -TERM $$", "runtime-term", root, adapter], { stdout: "ignore", stderr: "pipe" });
+	// The child records its workdir and then TERMs itself, so its exit orders the read: a wall-clock poll failed a loaded gate.
+	const exit = await child.exited;
+	expect(existsSync(join(root, "workdir")), `exit=${exit} ${await new Response(child.stderr).text()}`).toBe(true);
 	const workdir = readFileSync(join(root, "workdir"), "utf8");
 	expect(existsSync(workdir)).toBe(false);
 }, 30_000);
-test("inspect uses process identity and open descriptors, not a directory suffix", () => {
-	const root = agentTmp("scratch");
-	roots.push(root);
-	const open = sessionDir(root, "open", deadPid());
-	writeFileSync(join(open, ".owner"), ownerText(deadFields("open", Number(open.split(".").at(-1)))));
-	writeFileSync(join(open, "held"), "x\n");
-	const openRun = () => ({ code: 0, stdout: `sh 999 ${join(open, "held")}`, stderr: "" });
-	expect(inspectSession(open, root, depsFor({ run: openRun })).reason).toBe("owner-dead-but-open-fds-present");
-	const wrong = join(root, "renamed.3");
-	mkdirSync(wrong, { recursive: true });
-	writeFileSync(join(wrong, ".owner"), ownerText(deadFields("else", deadPid())));
-	expect(inspectSession(wrong, root, depsFor())).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
-});
-test("dead and live owner incarnations control reaping independent of suffix; fresh malformed owner stays live", () => {
-	const root = agentTmp("scratch");
-	roots.push(root);
-	const dead = deadPid();
-	const rehomed = join(root, "tb14-restore");
-	mkdirSync(rehomed, { recursive: true });
-	writeFileSync(join(rehomed, ".owner"), ownerText(deadFields("tb14-restore", dead)));
-	writeFileSync(join(rehomed, "payload"), "keep until apply\n");
-	const deps = depsFor({ lsofSnapshot: new Set() });
-	expect(inspectOne(rehomed, root, deps)).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
-	expect(existsSync(rehomed)).toBe(true);
-
-	const live = join(root, "still-working");
-	mkdirSync(live, { recursive: true });
-	writeFileSync(join(live, ".owner"), ownerText(liveFields("still-working")));
-	writeFileSync(join(live, "notes"), "keep\n");
-	expect(inspectOne(live, root, deps)).toMatchObject({ action: "LIVE", reason: "owner-alive" });
-
-	const fresh = join(root, "malformed-fresh");
-	mkdirSync(fresh, { recursive: true });
-	writeFileSync(join(fresh, ".owner"), "pid=not-an-integer\n");
-	writeFileSync(join(fresh, "data"), "new\n");
-	expect(inspectOne(fresh, root, deps)).toMatchObject({ action: "LIVE", reason: "malformed-owner-file-but-active" });
+test("inspect refuses a dead owner with open descriptors and a name that mismatches", () => {
+  const root = agentTmp("scratch");
+  roots.push(root);
+  const open = sessionDir(root, "open", deadPid());
+  writeFileSync(join(open, ".owner"), ownerText(deadFields("open", Number(open.split(".").at(-1)))));
+  writeFileSync(join(open, "held"), "x\n");
+  const openRun = () => ({ code: 0, stdout: `sh 999 ${join(open, "held")}`, stderr: "" });
+  expect(inspectSession(open, root, depsFor({ run: openRun })).reason).toBe("owner-dead-but-open-fds-present");
+  const wrong = join(root, "renamed.3");
+  mkdirSync(wrong, { recursive: true });
+  writeFileSync(join(wrong, ".owner"), ownerText(deadFields("else", deadPid())));
+  expect(inspectSession(wrong, root, depsFor()).reason).toBe("session-name-owner-mismatch");
 });
 
+test("a mismatched name with a dead idle owner quarantines; a live owner stays SKIP; a fresh malformed owner stays LIVE", () => {
+  const home = useState();
+  const root = agentTmp("scratch");
+  roots.push(root);
+  const now = Date.now();
+  const dead = deadPid();
+  const stranded = join(root, "tb14-restore");
+  mkdirSync(stranded, { recursive: true });
+  writeFileSync(join(stranded, ".owner"), ownerText(deadFields("tb14-restore", dead)));
+  writeFileSync(join(stranded, "payload"), "lost\n");
+  backdateTree(stranded, 73 * 3600 * 1000, now);
+  const deps = { ...depsFor({ now }), home, now };
+  const planned = inspectOne(stranded, root, deps);
+  expect(planned?.action).toBe("QUARANTINE");
+  expect(planned?.reason).toBe("mismatched-owner-idle-72h-would-quarantine");
+  const applied = applyUnowned(stranded, root, deps, planned!);
+  expect(applied.action).toBe("QUARANTINE");
+  expect(applied.reason).toBe("mismatched-owner-idle-72h-quarantined");
+  expect(existsSync(stranded)).toBe(false);
+  expect(readFileSync(join(applied.dir, "payload"), "utf8")).toBe("lost\n");
+
+  const live = join(root, "still-working");
+  mkdirSync(live, { recursive: true });
+  writeFileSync(join(live, ".owner"), ownerText(liveFields("still-working")));
+  writeFileSync(join(live, "notes"), "keep\n");
+  const liveVerdict = inspectOne(live, root, deps);
+  expect(liveVerdict?.action).toBe("SKIP");
+  expect(liveVerdict?.reason).toBe("session-name-owner-mismatch");
+
+  const fresh = join(root, "malformed-fresh");
+  mkdirSync(fresh, { recursive: true });
+  writeFileSync(join(fresh, ".owner"), "pid=not-an-integer\n");
+  writeFileSync(join(fresh, "data"), "new\n");
+  const freshVerdict = inspectOne(fresh, root, deps);
+  expect(freshVerdict?.action).toBe("LIVE");
+  expect(freshVerdict?.reason).toBe("malformed-owner-file-but-active");
+});
 
 test("idle malformed-owner dirs are quarantined without deletion", () => {
   const home = useState();
@@ -354,17 +339,24 @@ test("idle malformed-owner dirs are quarantined without deletion", () => {
   expect(existsSync(applied.dir)).toBe(true);
   expect(readFileSync(join(applied.dir, "data"), "utf8")).toBe("retain\n");
 });
-test("a directory PID suffix never overrides the recorded owner incarnation", () => {
+test("idle dead mismatched owners are quarantined while live mismatches stay put", () => {
+  const home = useState();
   const root = agentTmp("scratch");
   roots.push(root);
+  const now = Date.now();
   const wrongDead = join(root, "renamed.3");
   mkdirSync(wrongDead, { recursive: true });
   const deadOwnerPid = deadPid();
   writeFileSync(join(wrongDead, ".owner"), ownerText(deadFields("else", deadOwnerPid)));
   writeFileSync(join(wrongDead, "data"), "preserve");
-  const planned = inspectOne(wrongDead, root, depsFor());
-  expect(planned).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
-  expect(planned?.owner?.pid).toBe(deadOwnerPid);
+  backdateTree(wrongDead, 73 * 3600 * 1000, now);
+  const deps = { ...depsFor({ now }), home, now };
+  const planned = inspectOne(wrongDead, root, deps);
+  expect(planned?.action).toBe("QUARANTINE");
+  const applied = applyUnowned(wrongDead, root, deps);
+  expect(applied.action).toBe("QUARANTINE");
+  expect(existsSync(wrongDead)).toBe(false);
+  expect(existsSync(applied.dir)).toBe(true);
 });
 
 
@@ -710,16 +702,17 @@ function fakePs(): { dir: string } {
   return { dir };
 }
 
-test("capability release quarantines a live owner while keeping unreleased live scratch", () => {
+test("scratch release quarantines its live owner while leaving unreleased live scratch", () => {
   const { home, state } = cliHome();
   const root = agentTmp("scratch");
   roots.push(root);
   const released = sessionDir(root, "omp", process.pid);
-  const capability = mintOwnerCapability();
-  writeFileSync(join(released, ".owner"), ownerText({ ...liveFields("omp"), capability_sha256: capability.sha256 }));
+  writeFileSync(join(released, ".owner"),
+    `pid=${process.pid}\nlabel=omp\nrepo=${fixtureRepo}\ncreated=${new Date().toISOString()}\n`);
   writeFileSync(join(released, "work"), "finished\n");
   const live = sessionDir(root, "live", process.pid);
-  writeFileSync(join(live, ".owner"), ownerText(liveFields("live")));
+  writeFileSync(join(live, ".owner"),
+    `pid=${process.pid}\nlabel=live\nrepo=${fixtureRepo}\ncreated=${new Date().toISOString()}\n`);
   backdateTree(live, 73 * 3600 * 1000, Date.now());
   const lsof = fakeLsof().dir;
   // Service runs gate on machine load; pin a quiet reading so the reaping
@@ -728,7 +721,7 @@ test("capability release quarantines a live owner while keeping unreleased live 
   const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_LOAD_OVERRIDE: "0.5/8",
     PATH: `${lsof}:${process.env.PATH ?? ""}` };
 
-  const marked = cli(["scratch", "release", released, "--capability", capability.token], home, env);
+  const marked = cli(["scratch", "release", released], home, env);
   expect(marked.code).toBe(0);
   expect(marked.envelope.data).toMatchObject({ overall: "CHANGED", action: "RELEASED", dir: released });
 
@@ -822,23 +815,25 @@ test("scratch plan public JSON exposes byte totals, malformed counts, sized skip
 	expect(plan.code).toBe(0);
 	const rows = plan.envelope.data.sessions as Array<{ dir: string; action: string; reason: string; sizeBytes?: number }>;
 	const liveRow = rows.find(row => row.dir === json);
-	const deadRow = rows.find(row => row.dir === mismatch);
+	const skipRow = rows.find(row => row.dir === mismatch);
 	expect(liveRow?.action).toBe("LIVE");
 	expect(liveRow?.sizeBytes).toBeGreaterThanOrEqual(oneGb);
-	expect(deadRow).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
-	expect(deadRow?.sizeBytes).toBeGreaterThanOrEqual(oneGb);
+	expect(skipRow?.action).toBe("SKIP");
+	expect(skipRow?.reason).toBe("session-name-owner-mismatch");
+	expect(skipRow?.sizeBytes).toBeGreaterThanOrEqual(oneGb);
 	const multilineRow = rows.find(row => row.dir === multiline);
 	const oneLineRow = rows.find(row => row.dir === oneLine);
 	expect(multilineRow?.action).toBe("LIVE");
 	expect(multilineRow?.sizeBytes).toBeGreaterThan(0);
-	expect(oneLineRow).toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
+	expect(oneLineRow?.action).toBe("LIVE");
+	expect(oneLineRow?.reason).toBe("owner-dead-pid-reused-but-open-fds-present");
 	expect(oneLineRow?.sizeBytes).toBeGreaterThan(0);
 	expect(rows.find(row => row.dir === malformed)?.sizeBytes).toBeGreaterThan(0);
 	expect(rows.filter(row => row.action === "LIVE" || row.action === "SKIP")
 		.every(row => typeof row.sizeBytes === "number" && Number.isFinite(row.sizeBytes))).toBe(true);
 	expect(plan.envelope.data.totals.sizeByRoot[root]).toBeGreaterThanOrEqual(oneGb * 2);
-	expect(plan.envelope.data.totals.sizeByVerdict["REAP:owner-dead-no-open-fds"]).toBe(deadRow?.sizeBytes);
-	expect(plan.envelope.data.totals.countByVerdict["REAP:owner-dead-no-open-fds"]).toBe(1);
+	expect(plan.envelope.data.totals.sizeByVerdict["SKIP:session-name-owner-mismatch"]).toBe(skipRow?.sizeBytes);
+	expect(plan.envelope.data.totals.countByVerdict["SKIP:session-name-owner-mismatch"]).toBe(1);
 	expect(plan.envelope.data.totals.sizeByVerdict[`LIVE:${liveRow?.reason}`]).toBeGreaterThanOrEqual(liveRow?.sizeBytes);
 	expect(plan.envelope.data.totals.malformedByRoot[root]).toBe(1);
 	expect(plan.envelope.data.unownedActiveRule).toBe(UNOWNED_ACTIVE_RULE);
@@ -1090,30 +1085,70 @@ test("one-line owner files parse like the multi-line form", () => {
 	expect(parseOwnerFile(`pid=${pid} label=x label=y repo=/r created=2026-10-01T00:00:00Z`)).toBeNull();
 });
 
-test("a PID-only owner stays unproven even when its live pid started after the creation date", () => {
+test("parsePsStart reads ctime lstart output", () => {
+	expect(parsePsStart("Mon Oct  5 13:27:00 2026")).toBe(Date.UTC(2026, 9, 5, 13, 27, 0));
+	expect(parsePsStart("Thu Jan  1 00:00:00 1970")).toBe(0);
+	expect(parsePsStart("garbage")).toBeNull();
+	expect(parsePsStart("")).toBeNull();
+});
+
+test("reuseAfterCreated proves PID reuse from the created timestamp", () => {
+	const owner = { pid: 1, processStart: null, label: "x", repo: "r", createdAt: "2026-10-01T00:00:00Z", argv0: null };
+	const after = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Oct  5 00:00:01 2026" };
+	const before = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Sep  1 00:00:00 2025" };
+	expect(reuseAfterCreated(owner, after)).toBe(true);
+	expect(reuseAfterCreated(owner, before)).toBe(false);
+	expect(reuseAfterCreated(owner, { signalAlive: () => true, psVisible: () => true, processStart: () => null })).toBeNull();
+	expect(reuseAfterCreated({ ...owner, createdAt: "not-a-date" }, after)).toBeNull();
+});
+
+test("legacy owner with reused pid reaps instead of staying LIVE", () => {
 	const root = agentTmp("scratch");
 	roots.push(root);
 	const pid = deadPid();
-	const dir = sessionDir(root, "legacy-owner", pid);
-	writeFileSync(join(dir, ".owner"), `pid=${pid}\nlabel=legacy-owner\nrepo=${fixtureRepo}\ncreated=2026-10-01T00:00:00Z\n`);
-	writeFileSync(join(dir, "bulk.bin"), "x".repeat(8192));
-	const live = { processStart: () => "Mon Oct  5 00:00:01 2026" };
-	const verdict = inspectSession(dir, root, depsFor({ liveness: live }));
-	expect(verdict).toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
-	expect(verdict.sizeBytes).toBe(Buffer.byteLength(readFileSync(join(dir, ".owner"), "utf8")) + 8192);
+	const dir = sessionDir(root, "2nb8-head-ffea66a0", pid);
+	writeFileSync(join(dir, ".owner"), `pid=${pid}\nlabel=other-label\nrepo=${fixtureRepo}\ncreated=2026-10-01T00:00:00Z\n`);
+	writeFileSync(join(dir, "bulk.bin"), "x".repeat(4096));
+	const reused = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Oct  5 00:00:01 2026" };
+	const verdict = inspectSession(dir, root, depsFor({ liveness: reused }));
+	expect(verdict.action).toBe("REAP");
+	expect(verdict.reason).toBe("owner-dead-pid-reused-no-open-fds");
+	expect(verdict.sizeBytes).toBeGreaterThanOrEqual(4096);
+	const alive = { signalAlive: () => true, psVisible: () => true, processStart: () => "Mon Sep  1 00:00:00 2025" };
+	const live = inspectSession(dir, root, depsFor({ liveness: alive }));
+	expect(live.action).toBe("LIVE");
+	expect(live.reason).toBe("owner-alive-start-unverified");
+	expect(live.sizeBytes).toBeGreaterThanOrEqual(4096);
 });
 
-test("a date-only JSON owner without process_start remains unproven", () => {
+test("a coarse created timestamp proves reuse only after its whole precision window", () => {
+	const at = (iso: string) => ({ signalAlive: () => true, psVisible: () => true, processStart: () => iso });
+	const owner = (createdAt: string) => ({ pid: 1, processStart: null, label: "x", repo: "r", createdAt, argv0: null });
+	// Field case 2026-10-16: a live eval kernel started 07:16:16Z wrote created=2026-10-15 at
+	// 07:16:16.4Z; reading the bare date as UTC midnight called its own pid reused.
+	expect(reuseAfterCreated(owner("2026-10-15"), at("2026-10-15T07:16:16Z"))).toBe(false);
+	expect(reuseAfterCreated(owner("2026-10-15"), at("2026-10-16T13:59:59Z"))).toBe(false);
+	expect(reuseAfterCreated(owner("2026-10-15"), at("2026-10-18T00:00:00Z"))).toBe(true);
+	expect(reuseAfterCreated(owner("2026-10-15T14:45Z"), at("2026-10-15T14:45:30Z"))).toBe(false);
+	expect(reuseAfterCreated(owner("2026-10-15T14:45Z"), at("2026-10-15T14:46:01Z"))).toBe(true);
+	expect(reuseAfterCreated(owner("2026-10-15T14:45:10Z"), at("2026-10-15T14:45:11Z"))).toBe(false);
+	expect(reuseAfterCreated(owner("2026-10-15T14:45:10Z"), at("2026-10-15T14:45:12Z"))).toBe(true);
+	expect(reuseAfterCreated(owner("1792138027.113903"), at("2026-10-18T00:00:00Z"))).toBeNull();
+});
+
+test("planted: a date-only owner of a live process started that day stays LIVE, not REAP", () => {
 	const root = agentTmp("scratch");
 	roots.push(root);
 	const pid = deadPid();
 	const dir = sessionDir(root, "grzn1-review", pid);
-	writeFileSync(join(dir, ".owner"), JSON.stringify({ pid, label: "grzn1-review", repo: fixtureRepo, created: "2026-10-15T07:16:16Z" }) + "\n");
-	const sameDay = { processStart: () => "2026-10-15T07:16:16Z" };
-	expect(inspectSession(dir, root, depsFor({ liveness: sameDay })))
-		.toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
+	writeFileSync(join(dir, ".owner"), JSON.stringify({ pid, label: "grzn1-review", repo: fixtureRepo, created: "2026-10-15" }));
+	const sameDay = { signalAlive: () => true, psVisible: () => true, processStart: () => "2026-10-15T07:16:16Z" };
+	const verdict = inspectSession(dir, root, depsFor({ liveness: sameDay }));
+	expect(verdict.action).toBe("LIVE");
+	expect(verdict.reason).toBe("owner-alive-start-unverified");
 });
-test("a PID-only owner remains unproven regardless of directory suffix and reports its size", () => {
+
+test("every verdict carries its size, including mismatches", () => {
 	const root = agentTmp("scratch");
 	roots.push(root);
 	const pid = deadPid();
@@ -1122,10 +1157,31 @@ test("a PID-only owner remains unproven regardless of directory suffix and repor
 	writeFileSync(join(dir, ".owner"), ownerText({ pid: String(pid), label: "right-label", repo: fixtureRepo, created: "2026-10-01T00:00:00Z" }));
 	writeFileSync(join(dir, "bulk.bin"), "x".repeat(8192));
 	const verdict = inspectSession(dir, root, depsFor());
-	expect(verdict).toMatchObject({ action: "SKIP", reason: "owner-liveness-unproven" });
+	expect(verdict.reason).toBe("session-name-owner-mismatch");
 	expect(verdict.sizeBytes).toBeGreaterThanOrEqual(8192);
 });
 
+test("owner pid as a whole middle dot segment is accepted; looser matches stay mismatched", () => {
+	const root = agentTmp("scratch");
+	roots.push(root);
+	const plant = (name: string, fields: Record<string, string>) => {
+		const dir = join(root, name);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, ".owner"), ownerText(fields));
+		return dir;
+	};
+	const pid = deadPid();
+	const deps = depsFor();
+	const dead = inspectSession(plant(`x.${pid}.2f08b213`, deadFields("x", pid)), root, deps);
+	expect(dead.action).toBe("REAP");
+	expect(dead.reason).toBe("owner-dead-no-open-fds");
+	expect(inspectSession(plant(`y.${process.pid}.suffix`, liveFields("y")), root, deps).action).toBe("LIVE");
+	for (const name of [`a.${pid}1.y`, `b-${pid}`, `${pid}.c`]) {
+		expect(inspectSession(plant(name, deadFields("n", pid)), root, deps).reason).toBe("session-name-owner-mismatch");
+	}
+	const other = plant("doctor-parser-16985", { pid: "25601", label: "doctor-parser", repo: fixtureRepo, created: "2026-10-01T00:00:00Z" });
+	expect(inspectSession(other, root, deps).reason).toBe("session-name-owner-mismatch");
+});
 
 test("plan totals count a planted gigabyte dir whatever its verdict", () => {
 	const root = agentTmp("scratch");
@@ -1683,7 +1739,7 @@ test("a blocked quarantine dir fails the action with its OS error recorded", () 
   const now = Date.now();
   const dead = join(root, "stranded");
   mkdirSync(dead, { recursive: true });
-  writeFileSync(join(dead, ".owner"), "pid=not-an-integer\n");
+  writeFileSync(join(dead, ".owner"), ownerText(deadFields("stranded", deadPid())));
   writeFileSync(join(dead, "data"), "dead\n");
   backdateTree(dead, 73 * 3600 * 1000, now);
   const qt = quarantineDir(home);
@@ -1692,7 +1748,7 @@ test("a blocked quarantine dir fails the action with its OS error recorded", () 
   try {
     const deps = { ...depsFor({ now }), home, now };
     const planned = inspectOne(dead, root, deps);
-    expect(planned?.reason).toBe("unowned-idle-72h-would-quarantine");
+    expect(planned?.reason).toBe("mismatched-owner-idle-72h-would-quarantine");
     const applied = applyUnowned(dead, root, deps, planned!);
     expect(applied).toMatchObject({ dir: dead, action: "SKIP", reason: "atomic-quarantine-failed" });
     expect(applied.error ?? "").toMatch(/EACCES/);
@@ -1811,23 +1867,27 @@ test("scratch apply with only a correctly refused expiry exits 0 with refused co
   expect(existsSync(join(held, "data"))).toBe(true);
 }, 30000);
 
-// PIDIDENT1: the scheduled scratch reaper honors owner incarnation, never the creator PID retained in the directory name.
-test("scratch-reaper recognizes a live process owner with a rehomed directory suffix", () => {
-	const { home, state } = cliHome();
-	const root = agentTmp("scratch");
-	roots.push(root);
-	const live = join(root, "mismatch-live");
-	mkdirSync(live, { recursive: true });
-	writeFileSync(join(live, ".owner"), ownerText(liveFields("mismatch-live")));
-	writeFileSync(join(live, "work"), "live\n");
-	const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_LOAD_OVERRIDE: "0.5/8",
-		PATH: `${fakeLsof().dir}:${process.env.PATH ?? ""}` };
-	const run = cli(["service", "run", "scratch-reaper"], home, env);
-	expect(run.code).toBe(0);
-	const sessions = run.envelope.data.sessions as { dir: string; action: string; reason: string }[];
-	expect(sessions.find(value => value.dir === live)).toMatchObject({ action: "LIVE", reason: "owner-alive" });
-	expect(existsSync(live)).toBe(true);
-}, 30_000);
+// REAPSKIP1 (ompkit-3tgm): the scheduled job reports applied/refused/failed
+// counts; a run with only correctly refused SKIPs exits 0 and leaves the dir.
+test("service run reports applied/refused/failed counts and exits 0 on refusals only", () => {
+  const { home, state } = cliHome();
+  const root = agentTmp("scratch");
+  roots.push(root);
+  const live = join(root, "mismatch-live");
+  mkdirSync(live, { recursive: true });
+  writeFileSync(join(live, ".owner"), ownerText(liveFields("mismatch-live")));
+  writeFileSync(join(live, "work"), "live\n");
+  const env = { OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_LOAD_OVERRIDE: "0.5/8",
+    PATH: `${fakePs().dir}:${fakeLsof().dir}:${process.env.PATH ?? ""}` };
+  const run = cli(["service", "run", "scratch-reaper"], home, env);
+  expect(run.code).toBe(0);
+  const sessions = run.envelope.data.sessions as { dir: string; action: string; reason: string }[];
+  expect(sessions.find(value => value.dir === live)).toMatchObject({ action: "SKIP", reason: "session-name-owner-mismatch" });
+  const refused = sessions.filter(value => value.action === "SKIP").length;
+  expect(refused).toBeGreaterThan(0);
+  expect(run.envelope.data.stats).toMatchObject({ applied: sessions.length, refused, failures: 0 });
+  expect(existsSync(live)).toBe(true);
+}, 30000);
 
 test("SCRATCHLEAK1: legacy colon text owners parse; bare prose does not", () => {
 	expect(parseTextOwner("agent: ReplayNOFIXKIT\nlabel: kg88-remeasure\nrepo: omp-kit\nbead: ompkit-kg88\ncreated: 2026-10-18\n"))
@@ -1990,7 +2050,7 @@ test("SCRATCHQUOTA1: missing scratch roots release stale reservations without fr
 		const { repo, ledger } = quotaRepo();
 		const missing = join(repo, "var", "agent-tmp", "removed.1");
 		writeFileSync(ledger, JSON.stringify({ version: 1, dirs: {
-			[missing]: { budget: 250, agent: "TurquoiseSummit:scratch-ledger-test", bead: null, released: false },
+			[missing]: { budget: 250, agent: "TurquoiseSummit", bead: null, released: false },
 		} }));
 		const deps = depsFor({ callerSeat: () => ({ agent: "TurquoiseSummit", sessions: ["scratch-ledger-test"], main: "scratch-ledger-test" }) });
 		const admitted = createScratch("fresh", repo, deps, { budgetBytes: 1 }, true, ledger);
@@ -2001,7 +2061,7 @@ test("SCRATCHQUOTA1: missing scratch roots release stale reservations without fr
 		const live = join(liveRepo.repo, "var", "agent-tmp", "still-live.1");
 		mkdirSync(live, { recursive: true });
 		writeFileSync(liveRepo.ledger, JSON.stringify({ version: 1, dirs: {
-			[live]: { budget: 250, agent: "TurquoiseSummit:scratch-ledger-test", bead: null, released: false },
+			[live]: { budget: 250, agent: "TurquoiseSummit", bead: null, released: false },
 		} }));
 		const refused = createScratch("blocked", liveRepo.repo, deps, { budgetBytes: 1 }, true, liveRepo.ledger);
 		expect(refused).toMatchObject({ ok: false, reason: "seat-budget-exceeded" });

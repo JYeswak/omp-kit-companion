@@ -43,8 +43,8 @@ const plant = (root: string, name: string, owner: string): string => {
 	writeFileSync(join(dir, ".owner"), owner);
 	return dir;
 };
-// An unseated process owner is reclaimable only when its recorded incarnation is known dead.
-const ownerOf = (pid: number, label: string, extra = "") => `pid=${pid}\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=${label}\nrepo=${repo}\ncreated_at=2026-10-18T17:00:00Z\nargv0=test\n${extra}`;
+// A pid-only owner: the caller's only when it names the caller's exact pid, which no planted record can know in advance.
+const ownerOf = (pid: number, label: string, extra = "") => `pid=${pid}\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-18T17:00:00Z\n${extra}`;
 // The caller's seat: its agent and the session lease it holds, whatever pid created the dir.
 const seatOf = (label: string, extra = "") => ownerOf(59310, label, `agent=${AGENT}\nsession=${SESSION}\n${extra}`);
 
@@ -64,7 +64,7 @@ test("scratch mine lists the caller's own dirs by seat with state and bin, repor
 	const second = await cli(env, "scratch", "mine");
 	expect(second.envelope.data).toMatchObject({ overall: "OK", unreleased: 0, dirs: [{ label: "mine", state: "released", bin: "throwaway" }] });
 	// A hold whose expiry has passed is owed again: it is flagged, never reaped.
-	plant(root, "lapsed.59303", seatOf("lapsed", "bin=hold\nbead=ompkit-774u.15\nexpires=2026-01-05\n").replace("created_at=2026-10-18T17:00:00Z", "created_at=2026-01-01T00:00:00Z"));
+	plant(root, "lapsed.59303", seatOf("lapsed", "bin=hold\nbead=ompkit-774u.15\nexpires=2026-01-05\n").replace("created=2026-10-18T17:00:00Z", "created=2026-01-01T00:00:00Z"));
 	const third = await cli(env, "scratch", "mine");
 	expect(third.envelope.data).toMatchObject({ overall: "FINDINGS", unreleased: 1 });
 	expect(third.envelope.data.dirs).toMatchObject([{ label: "lapsed", state: "hold-expired", bin: "hold" }, { label: "mine", state: "released" }]);

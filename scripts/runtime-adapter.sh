@@ -168,19 +168,20 @@ new_workdir() {
 			die "no usable temporary root (TMPDIR=${TMPDIR:-<unset>})" # tempsafe: refusal message, creates nothing
 		fi
 	fi
-	owner_pid="${OMP_KIT_WORK_OWNER_PID:-}"
-	case "$owner_pid" in ""|*[!0-9]*) die "OMP_KIT_WORK_OWNER_PID must be an explicit process id" ;; esac
-	[ "$owner_pid" -gt 1 ] || die "OMP_KIT_WORK_OWNER_PID must identify a live caller"
-	process_start=$(LC_ALL=C ps -o lstart= -p "$owner_pid" 2>/dev/null | awk '{$1=$1; print}')
-	argv0=$(LC_ALL=C ps -o comm= -p "$owner_pid" 2>/dev/null | awk '{$1=$1; print}')
-	[ -n "$process_start" ] || die "cannot establish the workdir owner's process start"
-	[ -n "$argv0" ] || die "cannot establish the workdir owner's command"
 	umask 077
 	work=$(/usr/bin/mktemp -d "$base/omp-kit-work.XXXXXXXX") || die "cannot create private work directory under $base" # tempsafe: --workdir hands this dir to the parent named in its .owner, which removes it; kitlib here would remove it at once
 	/bin/chmod 700 "$work" || die "cannot restrict private work directory $work"
 	work=$(CDPATH='' cd -- "$work" && pwd -P) || die "cannot resolve private work directory"
-	printf 'pid=%s\nprocess_start=%s\nlabel=omp-kit-work\nrepo=%s\ncreated_at=%s\nargv0=%s\n' \
-		"$owner_pid" "$process_start" "${caller_repo:-$ROOT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$argv0" >"$work/.owner"
+	owner_pid="${OMP_KIT_WORK_OWNER_PID:-$PPID}"
+	process_start=$(/usr/bin/ps -p "$owner_pid" -o lstart= 2>/dev/null || true)
+	argv0=$(/usr/bin/ps -p "$owner_pid" -o comm= 2>/dev/null || true)
+	if [ -n "$process_start" ] && [ -n "$argv0" ]; then
+		printf 'pid=%s\nprocess_start=%s\nlabel=omp-kit-work\nrepo=%s\ncreated_at=%s\nargv0=%s\n' \
+			"$owner_pid" "$process_start" "${caller_repo:-$ROOT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$argv0" >"$work/.owner"
+	else
+		printf 'pid=%s\nlabel=omp-kit-work\nrepo=%s\ncreated=%s\n' \
+			"$owner_pid" "${caller_repo:-$ROOT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$work/.owner"
+	fi
 	printf '%s\n' "$work"
 }
 

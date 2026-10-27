@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ownerIdentityFromStart } from "../kitlib/owner.ts";
 import { commandFromEvent, commandName, executedShellCommands, type ShellWord } from "./git";
 
 /**
@@ -63,18 +62,9 @@ export function scratchDirFor(cwd: string, pid: number = process.pid): string {
 }
 
 /** `agent` and `session` come together or not at all: the durable owner of the seat dir, so a respawn (new pid) keeps it. */
-export interface ScratchOwner {
-	pid: number;
-	process_start: string;
-	label: string;
-	repo: string;
-	created: string;
-	argv0?: string;
-	agent?: string;
-	session?: string;
+export interface ScratchOwner { pid: number; label: string; repo: string; created: string; agent?: string; session?: string;
 	/** Where this dir goes when its work ends (ompkit-774u.15). A session's own dir is throwaway by definition; absent means unbinned. */
-	bin?: "throwaway";
-}
+	bin?: "throwaway" }
 
 // Same shape src/scratch.ts accepts for the owner's agent and session fields.
 const AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -86,15 +76,12 @@ export function hostAgentName(env: Record<string, string | undefined> = process.
 }
 
 export function writeScratchOwner(dir: string, owner: ScratchOwner): void {
-	const identity = ownerIdentityFromStart(owner.pid, owner.process_start);
-	if (identity === null) throw new Error("scratch owner process identity unavailable");
-	const argv0 = owner.argv0 ?? process.argv[1] ?? process.argv[0] ?? "unknown";
 	mkdirSync(dir, { recursive: true, mode: 0o755 });
 	const temp = join(dir, `.owner.${process.pid}.tmp`);
 	const durable = owner.agent !== undefined && owner.session !== undefined && AGENT_NAME.test(owner.agent) && SESSION_ID.test(owner.session)
 		? `agent=${owner.agent}\nsession=${owner.session}\n` : "";
 	const binned = owner.bin === "throwaway" ? "bin=throwaway\n" : "";
-	writeFileSync(temp, `pid=${identity.pid}\nprocess_start=${identity.process_start}\nlabel=${owner.label}\nrepo=${owner.repo}\ncreated_at=${owner.created}\nargv0=${argv0}\n${durable}${binned}`, { mode: 0o644 });
+	writeFileSync(temp, `pid=${owner.pid}\nlabel=${owner.label}\nrepo=${owner.repo}\ncreated=${owner.created}\n${durable}${binned}`, { mode: 0o644 });
 	renameSync(temp, join(dir, ".owner"));
 }
 

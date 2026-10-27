@@ -202,21 +202,6 @@ test("simultaneous writers and nested update locks cannot bypass held owner", ()
 	const next = acquireKitUpdateLock(state);
 	next.release();
 }));
-test("PIDIDENT1: a reused mutation-lock PID is reclaimed only by process-start mismatch", () => fixture((_isolated, state) => {
-	mkdirSync(state, { mode: 0o700 });
-	const path = join(state, ".kit-update.lock");
-	writeFileSync(path, `${JSON.stringify({ pid: process.pid, process_start: "Mon Jan 1 00:00:00 2001" })}\n`, { mode: 0o600 });
-	const lock = acquireKitUpdateLock(state);
-	lock.release();
-}));
-
-test("PIDIDENT1 planted: a legacy dead-PID mutation lock is not reclaimed", () => fixture((_isolated, state) => {
-	mkdirSync(state, { mode: 0o700 });
-	const path = join(state, ".kit-update.lock");
-	writeFileSync(path, "999999999\n", { mode: 0o600 });
-	expect(() => acquireKitUpdateLock(state)).toThrow(/STATE_UNSAFE/);
-	expect(readFileSync(path, "utf8")).toBe("999999999\n");
-}));
 
 test("external updater must reconcile a fsynced pending record before retry after interruption", () => fixture((_isolated, state) => {
 	const initial = { scope: "omp" as const, identitySha256: "a".repeat(64), kitVersion: "1.0", ompVersion: "2.0", channel: "npm" };

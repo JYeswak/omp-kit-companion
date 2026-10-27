@@ -3681,7 +3681,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			return refusal("SCRATCH_NEW_REPO_UNAVAILABLE", "scratch new needs a resolvable working directory",
 				"Run from the repo that will own the scratch; nothing was created.");
 		}
-		const created = createScratch(labelFlag, repo, { ...deps, callerSeat: () => callerSeat(deps.run), ownerPid: process.ppid },
+		const created = createScratch(labelFlag, repo, { ...deps, callerSeat: () => callerSeat(deps.run) },
 			{ ...(typeof beadFlag === "string" ? { bead: beadFlag } : {}) }, true);
 		if (!created.ok) {
 			const detail = created.detail ?? "Use a fresh label; run from the repo that will own the scratch.";

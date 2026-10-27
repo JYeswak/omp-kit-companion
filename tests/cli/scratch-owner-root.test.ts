@@ -38,7 +38,7 @@ function fixture(repoKind: "matching" | "foreign" | "relative", runtime = false)
 	writeFileSync(join(dir, "payload"), "preserve foreign and unresolved owners\n");
 	const deps: InspectDeps = {
 		// No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-		liveness: { processStart: () => null,
+		liveness: { signalAlive: () => false, psVisible: () => false, processStart: () => null,
 			probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) },
 		run: () => ({ code: 1, stdout: "", stderr: "" }),
 	};
@@ -77,7 +77,6 @@ test("apply cannot delete a foreign owner even when handed a reap verdict", () =
 	const result = applyReap(f.dir, f.root, { dir: f.dir, sizeBytes: 0, action: "REAP", reason: "owner-dead-no-open-fds", owner: {
 		pid: f.owner.pid, processStart: f.owner.process_start, label: f.owner.label,
 		repo: f.owner.repo, createdAt: f.owner.created_at, argv0: f.owner.argv0,
-		agent: null, session: null, bin: null, purpose: null, bead: null, expires: null, budget: null, capabilitySha256: null,
 	} }, { ...f.deps, home: f.base });
 	expect(result.action).toBe("SKIP");
 	expect(existsSync(f.dir)).toBe(true);
@@ -88,10 +87,10 @@ test("apply cannot delete a foreign owner even when handed a reap verdict", () =
 test("private runtime work outside repository scratch needs the native caller's exact release root", () => {
 	const f = fixture("matching", true);
 	const deps = { ...f.deps, runtimeRepo: f.owner.repo };
-	expect(inspectOne(f.dir, f.root, deps)?.action).toBe("REAP");
-	expect(inspectOne(f.dir, f.root, f.deps)?.action).toBe("SKIP");
-	expect(inspectOne(f.dir, f.root, { ...deps, runtimeRepo: join(f.base, "other-project") })?.action).toBe("SKIP");
-	const verdict = inspectOne(f.dir, f.root, deps);
+	expect(inspectOne(f.dir, f.root, deps, false)?.action).toBe("REAP");
+	expect(inspectOne(f.dir, f.root, f.deps, false)?.action).toBe("SKIP");
+	expect(inspectOne(f.dir, f.root, { ...deps, runtimeRepo: join(f.base, "other-project") }, false)?.action).toBe("SKIP");
+	const verdict = inspectOne(f.dir, f.root, deps, false);
 	if (!verdict) throw new Error("runtime fixture was not inspected");
 	expect(applyReap(f.dir, f.root, verdict, { ...deps, home: f.base }).action).toBe("REAP");
 	expect(existsSync(f.dir)).toBe(false);
@@ -101,23 +100,22 @@ test("a runtime-shaped directory is not sufficient authority without private own
 	const f = fixture("matching", true);
 	const deps = { ...f.deps, runtimeRepo: f.owner.repo };
 	chmodSync(f.dir, 0o755);
-	expect(inspectOne(f.dir, f.root, deps)?.action).toBe("SKIP");
+	expect(inspectOne(f.dir, f.root, deps, false)?.action).toBe("SKIP");
 });
 
-test("a foreign owner substituted after a reap plan is not moved, regardless of its directory suffix", () => {
+test("a foreign owner substituted after quarantine planning is not moved", () => {
 	const f = fixture("matching");
 	const dir = join(f.root, "renamed-without-owner-pid");
 	renameSync(f.dir, dir);
 	const old = new Date(0);
 	for (const path of [join(dir, ".owner"), join(dir, "payload"), dir]) utimesSync(path, old, old);
 	const planned = inspectOne(dir, f.root, f.deps);
-	expect(planned?.action).toBe("REAP");
-	if (planned === null || planned.action !== "REAP") throw new Error("matching dead owner was not planned for reap");
+	expect(planned?.action).toBe("QUARANTINE");
 	f.owner.repo = join(f.base, "other-project");
 	const replacement = JSON.stringify(f.owner);
 	writeFileSync(join(dir, ".owner"), replacement);
 	for (const path of [join(dir, ".owner"), dir]) utimesSync(path, old, old);
-	const result = applyReap(dir, f.root, planned, { ...f.deps, home: f.base });
+	const result = applyUnowned(dir, f.root, { ...f.deps, home: f.base }, planned ?? undefined);
 	expect(result.action).toBe("SKIP");
 	expect(existsSync(dir)).toBe(true);
 	expect(readFileSync(join(dir, ".owner"), "utf8")).toBe(replacement);

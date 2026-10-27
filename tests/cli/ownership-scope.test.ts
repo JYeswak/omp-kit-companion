@@ -35,7 +35,7 @@ test("doctor --scope ownership reports untracked state from a disposable home an
 	mkdirSync(leases, { recursive: true });
 	mkdirSync(join(state, "ntm"), { recursive: true });
 	mkdirSync(join(home, ".config"), { recursive: true });
-	// The recovery lock has no record; a PID-only watcher lock remains unproven without incarnation evidence.
+	// A recovery lock with no record and a watcher lock whose holder is dead: both untracked.
 	writeFileSync(join(leases, "rchw-orphan.recovery.lock"), "");
 	writeFileSync(join(state, "ntm", "watcher-dead.lock"), "999999\n");
 	// Bun keeps its own transpiler cache under HOME/Library when HOME is the fixture: that is the runtime's, not the doctor's.
@@ -51,7 +51,7 @@ test("doctor --scope ownership reports untracked state from a disposable home an
 	expect(summary.status).toBe("DEGRADED");
 	const byId = (id: string) => rows.find((row) => row.component === `OWNERSHIP:${id}`)!;
 	expect(byId("rch-job-lease").evidence).toMatchObject({ census: { records: 1, untracked: 1 } });
-	expect(byId("ntm-watcher-lock").evidence).toMatchObject({ census: { records: 1, no_live_owner: 0, untracked: 0, unproven: 1 } });
+	expect(byId("ntm-watcher-lock").evidence).toMatchObject({ census: { records: 1, no_live_owner: 1, untracked: 1 } });
 	expect(treeListing(join(home, ".local"))).toEqual(before);
 }, 120_000);
 

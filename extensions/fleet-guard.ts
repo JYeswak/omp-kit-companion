@@ -7,7 +7,6 @@ import { check as checkDurability } from "../src/fleet-guard/durability.ts";
 import { check as checkWriteOwnership } from "../src/fleet-guard/write-own.ts";
 import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
 import { fleetPolicyState } from "./fleet-policy.ts";
-import { ownerIdentity } from "../src/kitlib/owner.ts";
 
 /**
  * fleet-guard: force the fleet rules inside the session instead of asking.
@@ -58,14 +57,12 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	// The seat dir is owned by the agent and its omp session, never by a bare pid. The session id is only known
 	// once the session manager is in a tool-call context, so the first call records it (once: later calls may
 	// belong to a subagent session).
-	let seat: { dir: string; repo: string; created: string; identity: { pid: number; process_start: string }; recorded: boolean; agent?: string; session?: string } | null = null;
+	let seat: { dir: string; repo: string; created: string; recorded: boolean; agent?: string; session?: string } | null = null;
 	if (initial.kind === "on") {
-		const identity = ownerIdentity(pid);
-		if (identity === null) throw new Error("fleet-guard: process identity unavailable; scratch was not created");
-		const dir = scratchDirFor(initial.root, identity.pid);
+		const dir = scratchDirFor(initial.root, pid);
 		const created = new Date().toISOString();
-		writeScratchOwner(dir, { ...identity, label: "omp", repo: initial.root, created, bin: "throwaway" });
-		seat = { dir, repo: initial.root, created, identity, recorded: false };
+		writeScratchOwner(dir, { pid, label: "omp", repo: initial.root, created, bin: "throwaway" });
+		seat = { dir, repo: initial.root, created, recorded: false };
 		applyScratchEnv(dir);
 		try { await exportAgentMailStorageRoot(); }
 		catch {
@@ -80,8 +77,8 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 			seat.recorded = true;
 			seat.agent = agent;
 			seat.session = session;
-			try { writeScratchOwner(seat.dir, { ...seat.identity, label: "omp", repo: seat.repo, created: seat.created, agent, session, bin: "throwaway" }); }
-			catch { /* the process-incarnation owner remains valid without seat binding */ }
+			try { writeScratchOwner(seat.dir, { pid, label: "omp", repo: seat.repo, created: seat.created, agent, session, bin: "throwaway" }); }
+			catch { /* the pid-only owner stays valid */ }
 		}
 		const inPlace = checkPlutilInPlace(event);
 		if (inPlace) return inPlace;

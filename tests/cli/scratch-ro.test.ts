@@ -6,12 +6,10 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync,
 import { join, resolve } from "node:path";
 import { applyScratch, releaseScratch, type ApplyDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
-import { mintOwnerCapability } from "../../src/kitlib/owner.ts";
 
 const companion = resolve(import.meta.dir, "../..");
 const scratchParent = join(companion, "var", "agent-tmp");
 mkdirSync(scratchParent, { recursive: true });
-const capability = mintOwnerCapability();
 
 const owned: OwnedTmp[] = [];
 const saved = { roots: process.env.OMP_KIT_SCRATCH_ROOTS, state: process.env.XDG_STATE_HOME };
@@ -25,7 +23,7 @@ afterEach(() => {
 
 const clearRun: ScratchRunner = () => ({ code: 1, stdout: "", stderr: "" });
 // No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-const noPid: LivenessDeps = { processStart: () => null,
+const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
 	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 
 /** An owned scratch dir holding `releases/1.0` (0555, with a file) and a symlink to a 0555 dir outside it. */
@@ -41,7 +39,7 @@ function world(ownerPid: number): { dir: string; home: string; outside: string }
 	process.env.XDG_STATE_HOME = join(home, "state");
 	const dir = join(root, `ro.${ownerPid}`);
 	mkdirSync(dir, { mode: 0o700 });
-	writeFileSync(join(dir, ".owner"), `pid=${ownerPid}\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=ro\nrepo=${repo}\ncreated_at=2026-10-01T00:00:00Z\nargv0=test\ncapability_sha256=${capability.sha256}\nbin=throwaway\npurpose=probe\n`);
+	writeFileSync(join(dir, ".owner"), `pid=${ownerPid}\nlabel=ro\nrepo=${repo}\ncreated=2026-10-01T00:00:00Z\nbin=throwaway\npurpose=probe\n`);
 	const release = join(dir, "releases", "1.0");
 	mkdirSync(release, { recursive: true });
 	writeFileSync(join(release, "bin"), "installed\n");
@@ -62,7 +60,7 @@ function outsideIntact(outside: string): void {
 
 test("release --now removes an owned dir holding a 0555 subdir, never touching a symlinked dir outside", () => {
 	const { dir, home, outside } = world(process.pid);
-	const released = releaseScratch(dir, home, { liveness: noPid, run: clearRun }, { bin: "throwaway", now: true, capability: capability.token });
+	const released = releaseScratch(dir, home, { liveness: noPid, run: clearRun }, { bin: "throwaway", now: true });
 	expect(released).toMatchObject({ ok: true, reason: "owner-released-deleted" });
 	expect(existsSync(dir)).toBe(false);
 	outsideIntact(outside);

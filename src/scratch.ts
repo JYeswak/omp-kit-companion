@@ -1,9 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { incarnationSync, isDead, normalizeStart, probeIncarnationSync, type Incarnation, type Probe, type ProbeState } from "./kitlib/proc.ts";
-import { mintOwnerCapability, ownerCapabilityAuthorizes, ownerIdentityFromStart, ownerLiveness } from "./kitlib/owner.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { privateLock } from "./kitlib/lock.ts";
 import { runSync } from "./kitlib/run.ts";
@@ -12,12 +11,12 @@ import { runSync } from "./kitlib/run.ts";
  * Scratch reaper (S2): plan/apply over operator scratch, ported from
  * zeststream-cast/scripts/lib/agent_tmp_reap.sh.
  *
- * A scratch owner is a verified seat (agent + session) or a process incarnation
- * (pid + process_start for liveness). Release authority is the seat or a
- * creation-time capability, never PID ancestry. Missing process identity is
- * unknown, not dead. Process-owned reap also requires no open file descriptors.
- * Legacy owners without a start stay unproven unless a verified seat or explicit
- * legacy-release path applies. Orphan kill targets ONLY kit harness servers
+ * A session directory is reapable ONLY when its six-field owner identity is gone
+ * (or its PID was demonstrably reused) AND lsof reports no open descriptor.
+ * Entries without that process identity (including the fleet guard's four-field
+ * marker and the legacy three-field format) use idle quarantine: past 72 h they
+ * move to quarantine, then the configured TTL (24 h by default) plus owner/lsof
+ * rechecks must pass before deletion. Orphan kill targets ONLY kit harness servers
  * (ppid 1, older than 1 h, mock-model.mjs / external-live.mjs argv).
  */
 
@@ -36,8 +35,8 @@ export interface ScratchOwner { pid: number; processStart: string | null; label:
 	budget: number | null;
 	/**
 	 * PIDIDENT1 (ompkit-a0vy1): sha256 (hex) of the capability token `scratch new` minted and returned once. Whoever
-	 * presents the token may release the dir, whatever its seat or pid; the token itself is never stored. Legacy
-	 * records have no PID-based release authority.
+	 * presents the token may release the dir, whatever its seat or pid; the token itself is never stored. Null on dirs
+	 * made before the capability, which keep today's seat-or-process rule.
 	 */
 	capabilitySha256: string | null }
 
@@ -253,8 +252,13 @@ function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { proc
 }
 
 
+export type OwnerState = "live" | "reused" | "dead" | "live-unreachable" | "unknown";
 
 export interface LivenessDeps {
+	/** Pid-only liveness for owners that record no start (kill -0; EPERM counts alive). */
+	signalAlive: (pid: number) => boolean;
+	/** Pid-only liveness for owners that record no start: ps lists the pid. */
+	psVisible: (pid: number) => boolean;
 	/** Start string of a pid as `ps -o lstart=` prints it (trimmed, not whitespace-collapsed); null when unreadable. */
 	processStart: (pid: number) => string | null;
 	/**
@@ -276,6 +280,22 @@ export function sessionOwnersDir(env: NodeJS.ProcessEnv = process.env): string {
 
 export function defaultLiveness(): LivenessDeps {
 	return {
+		signalAlive: (pid: number): boolean => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch (error) {
+				return (error as NodeJS.ErrnoException).code === "EPERM";
+			}
+		},
+		psVisible: (pid: number): boolean => {
+			try {
+				const out = runSync(["ps", "-p", String(pid), "-o", "pid="], { deadline_s: 10, max_output_bytes: 4096 });
+				return out.rc === 0 && new TextDecoder().decode(out.stdout).trim() !== "";
+			} catch {
+				return false;
+			}
+		},
 		processStart: (pid: number): string | null => {
 			try {
 				const out = runSync(["ps", "-p", String(pid), "-o", "lstart="], { deadline_s: 10, max_output_bytes: 4096 });
@@ -302,12 +322,28 @@ export function defaultLiveness(): LivenessDeps {
 	};
 }
 
-/** Adapt parsed scratch owner fields to the shared typed owner primitive; missing starts remain UNKNOWN. */
-function scratchOwnerState(owner: Pick<ScratchOwner, "pid" | "processStart">, liveness: Pick<LivenessDeps, "probe">): ProbeState {
-	const identity = ownerIdentityFromStart(owner.pid, owner.processStart);
-	return identity === null ? "unknown" : ownerLiveness(identity, { probe: liveness.probe }).state;
+/** The pre-5m6ej pid probe, kept for tracker-recovery (src/tracker-recovery.ts) until it moves to kitlib proc; scratch owners use ownerIncarnationState. */
+export function probeOwner(pid: number, expectedStart: string, deps: LivenessDeps): OwnerState {
+	if (deps.signalAlive(pid)) {
+		const current = deps.processStart(pid);
+		if (current === null) return "unknown";
+		return current === expectedStart ? "live" : "reused";
+	}
+	// kill -0 false is ambiguous: ESRCH means gone, EPERM already returned true above,
+	// so recheck with ps; a visible PID is never treated as dead.
+	if (deps.psVisible(pid)) return "live-unreachable";
+	return "dead";
 }
 
+/**
+ * The liveness state of a recorded owner incarnation through kitlib proc (`deps.probe`, else `probeIncarnationSync`).
+ * Raw multi-space lstart records written before 5m6ej compare equal: the probe collapses whitespace on both sides.
+ * A blank recorded start proves nothing, so it is unknown, never dead.
+ */
+export function ownerIncarnationState(pid: number, start: string, liveness: Pick<LivenessDeps, "probe">): ProbeState {
+	if (normalizeStart(start) === "") return "unknown";
+	return (liveness.probe ?? probeIncarnationSync)({ pid, start }).state;
+}
 
 /**
  * RELEASELIVE1 (ompkit-5fn07): the user registry of one scratch dir. A process that works in a dir (its TMPDIR, its
@@ -582,6 +618,18 @@ export function attributeOwnerSeat(owner: ScratchOwner, deps: Pick<LivenessDeps,
 	return { agent: null, sessions, seatLive: sessions.length > 0 };
 }
 
+const PS_MONTHS: Record<string, number> = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5,
+	Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
+
+/** Parse `ps -o lstart=` ctime output ("Mon Oct  5 13:27:00 2026") to epoch ms; null when unparseable. */
+export function parsePsStart(text: string): number | null {
+	const match = /^[A-Z][a-z]{2} ([A-Z][a-z]{2})\s+(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(text.trim());
+	if (!match) return null;
+	const month = PS_MONTHS[match[1]!];
+	if (month === undefined) return null;
+	const ms = Date.UTC(Number(match[6]), month, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5]));
+	return Number.isNaN(ms) ? null : ms;
+}
 
 function isSymlink(path: string): boolean {
 	try {
@@ -699,8 +747,8 @@ export function isApplyFailure(verdict: ScratchVerdict): boolean {
 }
 
 export interface DiskCapacity { bavail: number; blocks: number }
-export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; ownerPid?: number; now?: number; lsofTimeoutMs?: number; statfs?: (path: string) => DiskCapacity | null; onInspect?: (path: string) => void; onProgress?: (verdict: ScratchVerdict, progress?: { done: number; total: number }) => void; lsofSnapshot?: Set<string> | null; runtimeRepo?: string | null;
-	/** Who is calling (host agent and held omp sessions); defaults to the real ps/lsof lookup for release. */
+export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?: number; lsofTimeoutMs?: number; statfs?: (path: string) => DiskCapacity | null; onInspect?: (path: string) => void; onProgress?: (verdict: ScratchVerdict, progress?: { done: number; total: number }) => void; lsofSnapshot?: Set<string> | null; runtimeRepo?: string | null;
+	/** Who is calling (host agent and held omp sessions); defaults to the real ps/lsof lookup for release, and is absent for create. */
 	callerSeat?: () => SeatIdentity;
 	/** Removes one path under a released dir for `release --now`; defaults to a forced recursive rm. A test plants a
 	 * remover that does nothing (the old marker-only release) and the physical-absence check must report it held. */
@@ -786,9 +834,8 @@ const QUARANTINE_ENTRY_SUFFIX = /\.q-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2
 
 /**
  * Why a system-temp entry is not a reapable kitlib leftover, or null when it is (KITLIBREAP1): a kitlib name, the
- * private-dir shape, and an `.owner` whose label matches the name. The numeric suffix is uniqueness only; owner
- * liveness comes from the recorded (pid, process_start), never equality with the dir name.
- * `owner` is the record the caller already read; null reads and parses `.owner` here. `name` defaults to the dir's own name.
+ * private-dir shape, and a `.owner` whose label and pid are the name's. `owner` is the record the caller already
+ * read; null reads and parses `.owner` here. `name` defaults to the dir's own name.
  */
 export function kitlibTmpProblem(dir: string, owner: ScratchOwner | null = null, name: string = basename(dir)): string | null {
 	const match = KITLIB_TMP_NAME.exec(name);
@@ -803,6 +850,7 @@ export function kitlibTmpProblem(dir: string, owner: ScratchOwner | null = null,
 		record = parsed.owner;
 	}
 	if (record.label !== match[1]) return "kitlib-owner-label-mismatch";
+	if (String(record.pid) !== match[2]) return "kitlib-owner-pid-mismatch";
 	return null;
 }
 
@@ -937,7 +985,7 @@ function beadClosed(bead: string, repo: string | null, run: ScratchRunner): bool
 	}
 }
 
-function inspectByPid(dir: string, root: string, deps: InspectDeps, ownerRoot = root): ScratchVerdict {
+function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired = true, ownerRoot = root): ScratchVerdict {
 	const sized = (action: ScratchAction, reason: string, owner: ScratchOwner | null = null): ScratchVerdict =>
 		({ dir, action, reason, owner, sizeBytes: dirSize(dir) });
 	if (isSymlink(dir)) return { dir, action: "SKIP", reason: "session-is-symlink", owner: null, sizeBytes: 0 };
@@ -979,17 +1027,29 @@ function inspectByPid(dir: string, root: string, deps: InspectDeps, ownerRoot = 
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith(".")) {
 		return sized("SKIP", "owner-label-invalid", owner);
 	}
+	const name = dir.slice(root.length + 1);
+	// Owner pid must be one whole `.`-delimited segment after the label: `label.pid` or `label.pid.suffix`.
+	if (nameRequired && !name.split(".").slice(1).includes(String(owner.pid))) return sized("SKIP", "session-name-owner-mismatch", owner);
 	if (!hasProcessIdentity(owner)) {
-		const namedSeat = owner.agent !== null && owner.session !== null;
-		const seat = owner.agent !== null && owner.session !== null ? deps.liveness.seatLive?.(owner.agent, owner.session) ?? null : null;
-		if (seat === true) return sized("LIVE", "owner-seat-alive", owner);
-		if (seat === null) return sized("SKIP", namedSeat ? "owner-seat-liveness-unproven" : "owner-liveness-unproven", owner);
-		const clear = lsofClearDir(deps, dir);
-		if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
-		if (!clear) return sized("LIVE", "owner-seat-gone-but-open-fds-present", owner);
-		return sized("REAP", "owner-seat-gone-no-open-fds", owner);
+		if (!deps.liveness.signalAlive(owner.pid) && !deps.liveness.psVisible(owner.pid)) {
+			// Dead pid with an identity-free (one-line or legacy JSON) owner file:
+			// no pid reuse is possible, so lsof-clear means REAP. (Was: SKIP
+			// owner-identity-incomplete, which stranded dead-owner dirs as unowned.)
+			const clear = lsofClearDir(deps, dir);
+			if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
+			if (!clear) return sized("LIVE", "owner-dead-but-open-fds-present", owner);
+			return sized("REAP", "owner-dead-no-open-fds", owner);
+		}
+		const reuse = reuseAfterCreated(owner, deps.liveness);
+		if (reuse === true) {
+			const clear = lsofClearDir(deps, dir);
+			if (clear === null) return sized("SKIP", "lsof-evidence-unavailable", owner);
+			if (!clear) return sized("LIVE", "owner-dead-pid-reused-but-open-fds-present", owner);
+			return sized("REAP", "owner-dead-pid-reused-no-open-fds", owner);
+		}
+		return sized("LIVE", "owner-alive-start-unverified", owner);
 	}
-	const state = scratchOwnerState(owner, deps.liveness);
+	const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
 	if (state === "live") return sized("LIVE", "owner-alive", owner);
 	if (state === "unknown") return sized("SKIP", "owner-liveness-unproven", owner);
 	const clear = lsofClearDir(deps, dir);
@@ -999,12 +1059,12 @@ function inspectByPid(dir: string, root: string, deps: InspectDeps, ownerRoot = 
 }
 
 /**
- * Owner liveness requires the recorded (pid, process_start) incarnation or a live
- * agent/session lease. PID-only legacy owners and unreadable probes are unproven
- * and never authorize cleanup.
+ * Owner liveness is the pid proof OR a live seat: an owner that names an agent and an omp session stays LIVE
+ * while that session's lease is held, even after a respawn changed the pid or the tool shell that wrote the
+ * record exited. A pid-only owner keeps the pid rule. A seat that cannot be probed is never reaped.
  */
-export function inspectSession(dir: string, root: string, deps: InspectDeps, ownerRoot = root): ScratchVerdict {
-	const verdict = inspectByPid(dir, root, deps, ownerRoot);
+export function inspectSession(dir: string, root: string, deps: InspectDeps, nameRequired = true, ownerRoot = root): ScratchVerdict {
+	const verdict = inspectByPid(dir, root, deps, nameRequired, ownerRoot);
 	const owner = verdict.owner;
 	// A hold (bead plus an expiry within 14 days of creation) outlives its owner until it expires; an expired hold is
 	// flagged, never reaped: the owner process died, so only a renewal on the bead can extend it (ompkit-774u.15).
@@ -1018,6 +1078,41 @@ export function inspectSession(dir: string, root: string, deps: InspectDeps, own
 	return verdict;
 }
 
+/**
+ * PID-reuse proof for owners without process identity (legacy key=value or JSON):
+ * the pid is alive, but the live process started after the latest instant the owner
+ * could have been created, so it cannot be the process that wrote the owner file.
+ * Null when unprovable (fail closed: the caller keeps the LIVE verdict).
+ */
+export function reuseAfterCreated(owner: ScratchOwner, liveness: LivenessDeps): boolean | null {
+	const start = liveness.processStart(owner.pid);
+	if (start === null) return null;
+	const startMs = parsePsStart(start) ?? Date.parse(start);
+	const createdMs = createdLatestMs(owner.createdAt);
+	if (Number.isNaN(startMs) || createdMs === null) return null;
+	return startMs > createdMs;
+}
+
+const CREATED_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const CREATED_MINUTE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})?$/;
+const CREATED_SECOND = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})?$/;
+const CREATED_FRACTION = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}(?:Z|[+-]\d{2}:?\d{2})?$/;
+/**
+ * The latest instant a `created` value can denote, from its own precision. A bare
+ * date names a whole day in an unknown zone (Date.parse reads it as UTC midnight),
+ * so it covers 24 h plus the widest UTC offset; a date-only owner written at 07:16Z
+ * by a live process must not read as that process's PID reused. Other formats are
+ * not trusted to carry their precision: null.
+ */
+export function createdLatestMs(created: string): number | null {
+	const ms = Date.parse(created);
+	if (Number.isNaN(ms)) return null;
+	if (CREATED_DATE.test(created)) return ms + (24 + 14) * 3600 * 1000;
+	if (CREATED_MINUTE.test(created)) return ms + 60 * 1000;
+	if (CREATED_SECOND.test(created)) return ms + 1000;
+	if (CREATED_FRACTION.test(created)) return ms + 1;
+	return null;
+}
 
 /** Latest activity in a tree: dir mtime first (cheap), then a bounded walk for newer entries. */
 export function idleSince(dir: string, now: number = Date.now()): number | null {
@@ -1134,7 +1229,7 @@ export function resolveSystemWorkDirs(deps: Pick<InspectDeps, "systemTempBases">
 
 /** One system-temp work dir through the plan verdict; a kitlib leftover's reason names its rule (`kitlib-owner-dead-...`). A quarantine keeps its reason: apply dispatches on it. */
 function inspectSystemWorkDir(dir: string, deps: InspectDeps): ScratchVerdict | null {
-	const verdict = inspectOne(dir, dirname(dir), deps);
+	const verdict = inspectOne(dir, dirname(dir), deps, false);
 	const name = basename(dir);
 	if (verdict === null || verdict.action === "QUARANTINE" || name.startsWith("omp-kit-work.") || !KITLIB_TMP_NAME.test(name)) return verdict;
 	return { ...verdict, reason: `kitlib-${verdict.reason}` };
@@ -1534,6 +1629,13 @@ function readReleaseRecord(dir: string): ReleaseRecord | null {
 	return { owner, ownerText, markerText, releasedAt: marker.releasedAt, legacy: true, legacyName: marker.legacyName, bin: null, ref: null };
 }
 
+function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner): boolean {
+	if (ownerPid === callerPid) return true;
+	// pid 1 heads every ancestor chain, and dirs with `pid=1` (hand-made owners) are nobody's in particular.
+	if (ownerPid <= 1) return false;
+	const chain = ancestorPids(callerPid, run);
+	return chain !== null && chain.slice(1).includes(ownerPid);
+}
 
 /** A successor seat: the same agent holding the omp session the owner record names, whatever its pid. */
 function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
@@ -1542,6 +1644,22 @@ function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
 	return seat.agent === owner.agent && seat.sessions.includes(owner.session);
 }
 
+/** PIDIDENT1 (ompkit-a0vy1): the token `scratch new` returns once; 256 random bits, hex. Only its sha256 reaches `.owner`. */
+function mintScratchCapability(): { token: string; sha256: string } {
+	const token = randomBytes(32).toString("hex");
+	return { token, sha256: createHash("sha256").update(token, "utf8").digest("hex") };
+}
+
+/**
+ * True when `token` is the capability whose sha256 the owner record names. Constant-time over the digests; a record
+ * without a capability (made before PIDIDENT1) is never authorized this way.
+ */
+export function capabilityAuthorizes(owner: ScratchOwner, token: string | undefined): boolean {
+	if (owner.capabilitySha256 === null || token === undefined || token === "") return false;
+	const presented = createHash("sha256").update(token, "utf8").digest();
+	const recorded = Buffer.from(owner.capabilitySha256, "hex");
+	return recorded.length === presented.length && timingSafeEqual(presented, recorded);
+}
 
 /**
  * REAPRO1 (ompkit-nuvvw): give every real dir under `root` (root included) owner rwx so a read-only install tree
@@ -1766,12 +1884,16 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	const ownerText = readText(ownerPath);
 	const owner = ownerText === null ? null : parseOwnerFile(ownerText);
 	if (!owner) return releaseLegacy(dir, home, deps, stat.dev, stat.ino, ownerText, opts);
-	// The directory suffix is only a uniqueness key; release authority is a verified seat or creation-time capability.
+	// The directory name is not part of the release authority: a respawn rewrites .owner to the successor's pid and keeps
+	// the name (respawn_seat rehome), so the name suffix is the creator's pid. The caller check below is what binds the
+	// release to its owner, and the marker pins the owner text and inode.
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith("."))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
+	// Authority is the seat (agent + session lease) or the creation-time capability (PIDIDENT1 ompkit-a0vy1). The
+	// process rule below is kept only for records and callers that have neither.
 	const seatOwned = callerHoldsSeat(owner, deps);
-	const capabilityOwned = !seatOwned && ownerCapabilityAuthorizes(owner.capabilitySha256, opts.capability);
-	if (!seatOwned && !capabilityOwned) {
+	const capabilityOwned = !seatOwned && capabilityAuthorizes(owner, opts.capability);
+	if (!seatOwned && !capabilityOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run)) {
 		const detail = owner.capabilitySha256 === null ? undefined : opts.capability === undefined || opts.capability === ""
 			? "no capability was presented; pass the one `scratch new` returned with --capability TOKEN (or OMP_KIT_SCRATCH_CAPABILITY)"
 			: "the presented capability does not match this directory's";
@@ -1789,6 +1911,13 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	if (opts.now === true) {
 		const user = blockingScratchUser(dir, deps.liveness);
 		if (user !== null) return { ok: false, changed: false, dir, reason: "user-live", ownerPid: owner.pid, detail: describeUserBlock(user) };
+	}
+	if (owner.processStart !== null && !seatOwned && !capabilityOwned) {
+		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
+		if (state !== "live") {
+			return { ok: false, changed: false, dir,
+				reason: state === "reused" ? "owner-process-reused" : "owner-process-identity-unverified", ownerPid: owner.pid };
+		}
 	}
 	const markerPath = join(dir, RELEASE_FILE);
 	if (existsSync(markerPath)) {
@@ -1971,17 +2100,18 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	} catch {
 		return { ok: false, dir: "", exportLine: "", reason: "cwd-unavailable" };
 	}
-	const ownerPid = deps.ownerPid ?? process.pid;
-	const identity = ownerIdentityFromStart(ownerPid, deps.liveness.processStart(ownerPid));
-	if (identity === null) return { ok: false, dir: "", exportLine: "", reason: "process-identity-unavailable" };
+	const start = deps.liveness.processStart(process.pid);
+	if (start === null) return { ok: false, dir: "", exportLine: "", reason: "process-identity-unavailable" };
 	const root = join(repo, "var", "agent-tmp");
-	const dir = join(root, `${label}.${identity.pid}`);
+	const dir = join(root, `${label}.${process.pid}`);
 	const createdAt = new Date(deps.now ?? Date.now()).toISOString();
 	const argv = process.argv[1] ?? process.argv[0] ?? "unknown";
-	// In the CLI, ownerPid is the invoking parent process, not this short-lived command. A seat lease can
-	// preserve ownership across respawns; otherwise the recorded process incarnation is only liveness evidence.
+	// No injected seat on the programmatic path: fall back to the live lookup
+	// (as release and owned-scratch do) so every dir a seated caller makes
+	// names its seat (SCRATCHOWN1 ompkit-1dnwk). Every dir, seated or not, also gets a release capability (PIDIDENT1
+	// ompkit-a0vy1): an unseated caller's pid is liveness evidence only, so the capability is how it releases later.
 	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
-	const fields: Record<string, string | number> = { pid: identity.pid, process_start: identity.process_start, label, repo, created_at: createdAt, argv0: argv };
+	const fields: Record<string, string | number> = { pid: process.pid, process_start: normalizeStart(start), label, repo, created_at: createdAt, argv0: argv };
 	if (seat?.agent && seat.main) {
 		if (!AGENT_PATTERN.test(seat.agent) || !SESSION_PATTERN.test(seat.main)) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
 		fields.agent = seat.agent;
@@ -1995,11 +2125,11 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 		if (!Number.isInteger(bins.budgetBytes) || !BUDGET_PATTERN.test(String(bins.budgetBytes))) return { ok: false, dir: "", exportLine: "", reason: "budget-invalid" };
 		fields.budget = bins.budgetBytes;
 	}
-	const capability = mintOwnerCapability();
+	const capability = mintScratchCapability();
 	fields.capability_sha256 = capability.sha256;
 	const ownerText = jsonOwner ? JSON.stringify(fields) : Object.entries(fields).map(([key, value]) => `${key}=${value}\n`).join("");
 	if (parseOwnerFile(ownerText) === null) return { ok: false, dir: "", exportLine: "", reason: "bin-invalid" };
-	const seatKey = seat?.agent && seat.main ? `${seat.agent}:${seat.main}` : `process:${identity.pid}:${identity.process_start}`;
+	const seatKey = seat?.agent && seat.main ? seat.agent : `pid:${process.pid}`;
 	const reservation = bins.budgetBytes ?? DEFAULT_DIR_BUDGET_BYTES;
 	const ledgerFile = ledgerPath ?? defaultBudgetLedgerPath();
 	const ledger = readBudgetLedger(ledgerFile);
@@ -2043,7 +2173,7 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 		return { ok: false, dir: "", exportLine: "", reason: "owner-write-failed" };
 	}
 	const parsed = parseOwnerFile(ownerText);
-	if (!parsed || parsed.pid !== identity.pid) return { ok: false, dir, exportLine: "", reason: "owner-unreadable-after-create" };
+	if (!parsed || parsed.pid !== process.pid) return { ok: false, dir, exportLine: "", reason: "owner-unreadable-after-create" };
 	ledger.dirs[dir] = { budget: reservation, agent: seatKey, bead: bins.bead ?? null, released: false };
 	if (!writeBudgetLedger(ledgerFile, ledger)) {
 		try {
@@ -2184,7 +2314,7 @@ function applyReapLocked(dir: string, root: string, verdict: ScratchVerdict, dep
 	}
 	if (isSymlink(moved)) return { ...verdict, dir: moved, action: "SKIP", reason: "path-replaced-with-non-directory" };
 	if (inodeOf(moved) !== identity) return { ...verdict, dir: moved, action: "SKIP", reason: "inode-changed-before-delete" };
-	const recheck = inspectSession(moved, qt, deps, root);
+	const recheck = inspectSession(moved, qt, deps, false, root);
 	const recheckText = textVerdict ? readText(join(moved, ".owner")) : null;
 	if (recheck.action !== "REAP" || (textVerdict ? recheckText !== expected : (!recheck.owner || ownerSnapshot(recheck.owner) !== expected))) {
 		try {
@@ -2427,7 +2557,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 				continue;
 			}
 		}
-		if (!owner || malformed) {
+		if (!owner || malformed || !hasProcessIdentity(owner)) {
 			const clear = lsofClearDir(deps, path);
 			if (clear !== true) {
 				done.push({ dir: path, action: "SKIP", reason: clear === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
@@ -2437,24 +2567,7 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 			done.push(expireEntryUnlessUsed(path, entry, owner, "quarantine-expired", home, deps, at));
 			continue;
 		}
-		if (!hasProcessIdentity(owner)) {
-			const seat = owner.agent !== null && owner.session !== null
-				? deps.liveness.seatLive?.(owner.agent, owner.session) ?? null
-				: null;
-			if (seat !== false) {
-				done.push({ dir: path, action: "SKIP", reason: seat === true ? "quarantine-owner-active" : "owner-liveness-unproven", owner, sizeBytes: dirSize(path) });
-				continue;
-			}
-			const clear = lsofClearDir(deps, path);
-			if (clear !== true) {
-				done.push({ dir: path, action: "SKIP", reason: clear === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
-					owner, sizeBytes: dirSize(path), ...(clear === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) });
-				continue;
-			}
-			done.push(expireEntryUnlessUsed(path, entry, owner, "quarantine-expired-owner-seat-gone", home, deps, at));
-			continue;
-		}
-		const state = scratchOwnerState(owner, deps.liveness);
+		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
 		if (state === "live" || state === "unknown") {
 			done.push({ dir: path, action: "SKIP", reason: state === "unknown" ? "owner-liveness-unproven" : "quarantine-owner-active", owner, sizeBytes: dirSize(path) });
 			continue;
@@ -2638,7 +2751,7 @@ function pressureForRoots(metrics: ScratchRootMetric[]): ScratchPressure {
 }
 
 /** One directory through the full plan verdict (owner release, live/dead identity and unowned age). */
-export function inspectOne(dir: string, root: string, deps: InspectDeps): ScratchVerdict | null {
+export function inspectOne(dir: string, root: string, deps: InspectDeps, nameRequired = true): ScratchVerdict | null {
 	deps.onInspect?.(dir);
 	try {
 		if (!statSync(dir).isDirectory() || isSymlink(dir)) return null;
@@ -2659,22 +2772,30 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps): Scratc
 		return { dir, action: "QUARANTINE", reason: "owner-released-would-quarantine",
 			owner: released.owner, sizeBytes: dirSize(dir) };
 	}
-	const verdict = inspectSession(dir, root, deps);
+	const verdict = inspectSession(dir, root, deps, nameRequired);
+	const mismatch = verdict.action === "SKIP" && verdict.reason === "session-name-owner-mismatch";
+	let quarantineCandidate = verdict;
+	if (mismatch) {
+		const proof = inspectSession(dir, root, deps, false);
+		// A live or unproven owner stays SKIP. Only a dead, fd-clear owner can age into quarantine.
+		if (proof.action !== "REAP") return verdict;
+		quarantineCandidate = proof;
+	}
 	if (verdict.action === "SKIP" && verdict.reason === "owner-label-invalid" && verdict.owner !== null) {
 		// The label rule only guards the directory name; liveness decides the terminal path.
 		// A live or unproven owner stays SKIP. Only a dead, fd-clear, 72 h-idle owner ages into quarantine.
 		const labeled = verdict.owner;
-		const identity = ownerIdentityFromStart(labeled.pid, labeled.processStart);
-		if (identity !== null) {
-			const state = scratchOwnerState(labeled, deps.liveness);
-			if (state === "live" || state === "unknown") return verdict;
+		let dead: boolean;
+		if (!hasProcessIdentity(labeled)) {
+			if (deps.liveness.signalAlive(labeled.pid) || deps.liveness.psVisible(labeled.pid)) {
+				dead = reuseAfterCreated(labeled, deps.liveness) === true;
+			} else dead = true;
 		} else {
-			const seat = labeled.agent !== null && labeled.session !== null
-				? deps.liveness.seatLive?.(labeled.agent, labeled.session) ?? null
-				: null;
-			if (seat !== false) return verdict;
+			const state = ownerIncarnationState(labeled.pid, labeled.processStart, deps.liveness);
+			if (state === "live" || state === "unknown") return verdict;
+			dead = true;
 		}
-		if (lsofClearDir(deps, dir) === true) {
+		if (dead && lsofClearDir(deps, dir) === true) {
 			const nowMs = deps.now ?? Date.now();
 			const freshest = idleSince(dir, nowMs);
 			if (freshest !== null && freshest < nowMs - QUARANTINE_IDLE_MS) {
@@ -2684,26 +2805,26 @@ export function inspectOne(dir: string, root: string, deps: InspectDeps): Scratc
 		}
 		return verdict;
 	}
-	if (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" ||
-		verdict.reason === "malformed-owner-file" || verdict.reason === "owner-identity-incomplete")) {
+	if (mismatch || (verdict.action === "SKIP" && (verdict.reason === "no-owner-file" ||
+		verdict.reason === "malformed-owner-file" || verdict.reason === "owner-identity-incomplete"))) {
 		const freshest = idleSince(dir, deps.now ?? Date.now());
 		const idleMs = unownedIdleMs(dir, deps);
 		if (freshest !== null && freshest < (deps.now ?? Date.now()) - idleMs) {
-			return { ...verdict, action: "QUARANTINE",
-				reason: `unowned-${freshest < (deps.now ?? Date.now()) - QUARANTINE_IDLE_MS ? "idle-72h" : "idle-12h-reclaim"}-would-quarantine`,
+			return { ...quarantineCandidate, action: "QUARANTINE",
+				reason: `${mismatch ? "mismatched-owner" : "unowned"}-${freshest < (deps.now ?? Date.now()) - QUARANTINE_IDLE_MS ? "idle-72h" : "idle-12h-reclaim"}-would-quarantine`,
 				sizeBytes: dirSize(dir) };
 		}
-		return verdict.reason === "malformed-owner-file"
+		if (!mismatch) return verdict.reason === "malformed-owner-file"
 			? { ...verdict, action: "LIVE", reason: "malformed-owner-file-but-active" }
 			: { ...verdict, action: "LIVE", reason: "unowned-but-active" };
 	}
 	return verdict;
 }
 
-/** Test-run work dirs nested inside a session dir are visited separately; pid-less names fall through to the unowned lifecycle. */
+/** Test-run work dirs nested inside a session dir (omp-kit-integrations-*, kitlib omp-kit-integrations.<pid>.<6> and omp-kit-work.*): visited without the name-pid suffix rule so the dead-pid rule applies wherever TMPDIR put them. Pid-less names fall through to the unowned lifecycle. */
 const NESTED_WORKDIR = /^omp-kit-(integrations[-.]|work\.)/;
 
-function eachSessionDir(root: string, visit: (dir: string) => void): void {
+function eachSessionDir(root: string, visit: (dir: string) => void, visitNested: (dir: string) => void = visit): void {
 	let entries: string[];
 	try {
 		entries = readdirSync(root);
@@ -2723,7 +2844,7 @@ function eachSessionDir(root: string, visit: (dir: string) => void): void {
 			continue;
 		}
 		for (const child of children) {
-			if (NESTED_WORKDIR.test(child)) visit(join(root, entry, child));
+			if (NESTED_WORKDIR.test(child)) visitNested(join(root, entry, child));
 		}
 	}
 }
@@ -2830,8 +2951,8 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 		sessions.push(verdict);
 		deps.onProgress?.(verdict);
 	};
-	const visit = (dir: string, root: string) => record(inspectOne(dir, root, snapDeps));
-	for (const root of roots) eachSessionDir(root, dir => visit(dir, root));
+	const visit = (dir: string, root: string, nameRequired = true) => record(inspectOne(dir, root, snapDeps, nameRequired));
+	for (const root of roots) eachSessionDir(root, dir => visit(dir, root), dir => visit(dir, root, false));
 	for (const dir of systemWorkDirs) record(inspectSystemWorkDir(dir, snapDeps));
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
 	const orphans = selectHarnessOrphans(listProcesses(deps.run));
@@ -3040,11 +3161,11 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 	const planned: { verdict: ScratchVerdict; root: string }[] = [];
 	const snapDeps: ApplyDeps = { ...deps, lsofSnapshot: takeLsofSnapshot(deps.run, deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) };
 	const bunBuildPlan = inspectBunBuildFiles(entries, snapDeps);
-	const collect = (dir: string, root: string) => {
-		const verdict = inspectOne(dir, root, snapDeps);
+	const collect = (dir: string, root: string, nameRequired = true) => {
+		const verdict = inspectOne(dir, root, snapDeps, nameRequired);
 		if (verdict !== null) planned.push({ verdict, root });
 	};
-	for (const root of roots) eachSessionDir(root, dir => collect(dir, root));
+	for (const root of roots) eachSessionDir(root, dir => collect(dir, root), dir => collect(dir, root, false));
 	for (const dir of systemWorkDirs) {
 		const verdict = inspectSystemWorkDir(dir, snapDeps);
 		if (verdict !== null) planned.push({ verdict, root: dirname(dir) });
@@ -3183,15 +3304,19 @@ export interface OwnedScratchRow { dir: string; label: string; state: OwnedScrat
 
 /**
  * The caller's own scratch dirs across the scratch roots (ompkit-774u.15 C): those whose owner record names the caller's
- * agent and a session it holds, or the caller's exact process incarnation. Read-only; a dir the owner already released
- * is listed as released, a hold as held until its expiry. Dirs of other owners and ancestor/sibling seats never appear.
- */
+ * agent and a session it holds, or the caller's exact pid. Read-only; a dir
+ * the owner already released is listed as released, a hold as held until its
+ * expiry. Dirs of other owners and ancestor/sibling seats never appear.
+*/
 function disposalOwnerMatches(owner: ScratchOwner, deps: InspectDeps): boolean {
-	if (callerHoldsSeat(owner, deps)) return true;
-	const identity = ownerIdentityFromStart(process.pid, deps.liveness.processStart(process.pid));
-	return identity !== null && owner.pid === identity.pid && owner.processStart === identity.process_start;
+	// Disposal accounting is exact-seat ownership, not process ancestry. A child
+	// seat must never be charged for a parent or sibling's scratch.
+	return callerHoldsSeat(owner, deps) || owner.pid === process.pid;
 }
 
+function ownerIsLive(owner: ScratchOwner, deps: InspectDeps): boolean {
+	return owner.processStart !== null && ownerIncarnationState(owner.pid, owner.processStart, deps.liveness) === "live";
+}
 
 export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[] {
 	const now = deps.now ?? Date.now();
@@ -3222,7 +3347,7 @@ export function ownedScratch(home: string, deps: InspectDeps): OwnedScratchRow[]
 			if (isSymlink(dir) || isSymlink(join(dir, ".owner"))) continue;
 			const text = readText(join(dir, ".owner"));
 			const owner = text === null ? null : parseOwnerFile(text);
-			if (owner === null || !disposalOwnerMatches(owner, once) || (owner.processStart !== null && scratchOwnerState(owner, once.liveness) === "live")) continue;
+			if (owner === null || !disposalOwnerMatches(owner, once) || ownerIsLive(owner, once)) continue;
 			const released = readReleaseRecord(dir);
 			const bytes = dirSize(dir);
 			const budget = owner.budget;

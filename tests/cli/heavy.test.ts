@@ -13,6 +13,7 @@ function fixture(): string {
 	const root = join(process.cwd(), "var", "agent-tmp");
 	mkdirSync(root, { recursive: true, mode: 0o700 });
 	const dir = ownedTmp("heavy-test", { root }).path;
+	writeFileSync(join(dir, ".owner"), `pid=${process.pid} label=heavy-test repo=${process.cwd()} created=${new Date().toISOString()}\n`, { mode: 0o600 });
 	return dir;
 }
 

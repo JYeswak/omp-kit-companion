@@ -4,8 +4,6 @@ import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { admitDiskWork, diskStage, runDiskStageTick, WRITER_WINDOW_MS } from "../../src/disk-stage.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
-import { ownerIdentity, ownerLiveness } from "../../src/kitlib/owner.ts";
-import { run } from "../../src/kitlib/run.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scratch = join(root, "var", "agent-tmp");
@@ -160,11 +158,9 @@ test("DISKSTAGE-WIRE1 critical tick names and interrupts the top writer", () => 
 	const writer = Bun.spawn(["sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
 	try {
 		if (writer.pid === undefined) throw new Error("writer pid unavailable");
-		const identity = ownerIdentity(writer.pid);
-		if (identity === null) throw new Error("writer incarnation unavailable");
 		const writerDir = join(watch, "writer.1");
 		mkdirSync(writerDir, { mode: 0o700 });
-		writeFileSync(join(writerDir, ".owner"), `pid=${identity.pid}\nprocess_start=${identity.process_start}\nlabel=writer\nrepo=${root}\ncreated_at=2026-10-22T00:00:00.000Z\nargv0=/bin/sleep\nagent=writer-seat\nsession=01a15012-af9e-7628-bee6-496084668412\nbin=throwaway\nbead=ompkit-774u.9.8.1\n`, { mode: 0o600 });
+		writeFileSync(join(writerDir, ".owner"), `pid=${writer.pid}\nseat=writer-seat\nbead=ompkit-774u.9.8.1\n`, { mode: 0o600 });
 		writeFileSync(join(writerDir, "bytes"), "x", { mode: 0o600 });
 		runDiskStageTick({ stateDir: state, path: root, watchRoots: [watch], readFreePct: () => 21, nowMs: 1, platform: "linux", reaper: reaperResult });
 		appendFileSync(join(writerDir, "bytes"), "xxxxxxxx", { encoding: "utf8" });
@@ -180,44 +176,6 @@ test("DISKSTAGE-WIRE1 critical tick names and interrupts the top writer", () => 
 		writer.kill();
 	}
 });
-
-test("PIDIDENT1: a reused writer PID is never signalled as the recorded owner", async () => {
-	const state = fixture("reused-owner-state");
-	const watch = fixture("reused-owner-watch");
-	const controller = new AbortController();
-	const pidReady = Promise.withResolvers<number>();
-	let output = "";
-	const writer = run(["sh", "-c", "printf '%s\\n' \"$$\"; exec sleep 30"], {
-		deadline_s: 8,
-		signal: controller.signal,
-		on_output: (stream, chunk) => {
-			if (stream !== "stdout") return;
-			output += new TextDecoder().decode(chunk);
-			const pid = Number(output.split("\n", 1)[0]?.trim());
-			if (Number.isSafeInteger(pid) && pid > 0) pidReady.resolve(pid);
-		},
-	});
-	try {
-		const writerPid = await Promise.race([pidReady.promise, writer.then(result => {
-			throw new Error(`writer exited before identity inspection (rc=${result.rc})`);
-		})]);
-		const identity = ownerIdentity(writerPid);
-		if (identity === null) throw new Error("writer incarnation unavailable");
-		const writerDir = join(watch, "writer.1");
-		mkdirSync(writerDir, { mode: 0o700 });
-		writeFileSync(join(writerDir, ".owner"), `pid=${identity.pid}\nprocess_start=Mon Jan 1 00:00:00 2001\nlabel=writer\nrepo=${root}\ncreated_at=2026-10-22T00:00:00.000Z\nargv0=/bin/sleep\nagent=writer-seat\nsession=01a15012-af9e-7628-bee6-496084668412\nbin=throwaway\nbead=ompkit-774u.9.8.1\n`, { mode: 0o600 });
-		writeFileSync(join(writerDir, "bytes"), "x", { mode: 0o600 });
-		runDiskStageTick({ stateDir: state, path: root, watchRoots: [watch], readFreePct: () => 21, nowMs: 1, platform: "linux", reaper: reaperResult });
-		appendFileSync(join(writerDir, "bytes"), "xxxxxxxx", { encoding: "utf8" });
-		const result = runDiskStageTick({ stateDir: state, path: root, watchRoots: [watch], readFreePct: () => 4.7,
-			nowMs: 1 + WRITER_WINDOW_MS + 1, platform: "linux", reaper: reaperResult });
-		expect(result.writer?.interrupted).toBe(false);
-		expect(ownerLiveness(identity).state).toBe("live");
-	} finally {
-		controller.abort(new Error("disk-stage test complete"));
-		await writer.catch(() => undefined);
-	}
-}, 10_000);
 
 test("DISKSTAGE-WIRE1 real heavy and wave entrypoints admit on the control filesystem", () => {
 	const state = fixture("entrypoints");

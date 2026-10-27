@@ -54,12 +54,10 @@ function plantRecoveryArtifact(root: string, dir: string, atMs: number): void {
 	utimesSync(complete, new Date(atMs), new Date(atMs));
 }
 
-const HOLDER_START = "Mon Oct 5 12:00:00 2026";
 const liveness: LivenessDeps = {
-	processStart: (pid) => pid === 700000 || pid === 700001 ? HOLDER_START : null,
-	probe: (owner) => ({ state: (owner.pid === 700000 || owner.pid === 700001) && owner.start === HOLDER_START ? "live" : "dead",
-		evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: owner.pid === 700000 || owner.pid === 700001 ? HOLDER_START : null,
-			stat: owner.pid === 700000 || owner.pid === 700001 ? "S" : null, signal0: owner.pid === 700000 || owner.pid === 700001 ? "alive" : "esrch", reason: "planted" } }),
+	signalAlive: () => false,
+	psVisible: () => false,
+	processStart: (pid) => pid === 700000 ? "Mon Oct  5 12:00:00 2026" : null,
 };
 
 function stubRun(brCalls: string[][], code = 0, onRecover?: () => void) {
@@ -167,7 +165,7 @@ test("a live foreign database holder prevents the recovery command", () => {
 	const run = stubRun(brCalls);
 	const result = recoverBusyTracker(planted.repo, "omp-test", {
 		...deps(T1, brCalls),
-		liveness,
+		liveness: { ...liveness, signalAlive: (pid) => pid === 700001 },
 		run: (args, cwd) => args[0] === "lsof" ? { code: 0, stdout: "700001\n", stderr: "" } : run(args, cwd),
 	});
 	expect(result?.kind).toBe("RECOVERY_BLOCKED");

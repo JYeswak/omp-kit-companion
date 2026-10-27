@@ -26,13 +26,13 @@ afterEach(() => {
 });
 
 // No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-const noPid: LivenessDeps = { processStart: () => null,
+const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
 	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const seat = (agent: string | null, sessions: string[]) => (): SeatIdentity => ({ agent, sessions, main: sessions[0] ?? null });
 const deps = (callerSeat: () => SeatIdentity): InspectDeps => ({ liveness: noPid, run: () => ({ code: 1, stdout: "", stderr: "" }), now: NOW, callerSeat });
 const owner = (pid: number, label: string, extra = "") => `pid=${pid}\nlabel=${label}\nrepo=${repo}\ncreated=2026-10-18T17:00:00Z\n${extra}`;
 
-test("the caller sees its own dirs by seat, never by PID, and nobody else's", () => {
+test("the caller sees its own dirs by seat or by pid, with their state and bin, and nobody else's", () => {
 	const root = ownedTmp("mine", { root: scratchParent }).path;
 	const home = ownedTmp("mine-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
@@ -48,7 +48,7 @@ test("the caller sees its own dirs by seat, never by PID, and nobody else's", ()
 	plant("other-session.59106", owner(59106, "other-session", `agent=${AGENT}\nsession=${OTHER_SESSION}\n`));
 	plant("pid-elsewhere.59107", owner(59107, "pid-elsewhere"));
 	mkdirSync(join(root, "unowned.59108"));
-	const released = plant("released.59109", owner(process.pid, "released", `agent=${AGENT}\nsession=${SESSION}\nbin=throwaway\n`));
+	const released = plant("released.59109", owner(process.pid, "released"));
 	const caller = deps(seat(AGENT, [SESSION]));
 	expect(releaseScratch(released, home, caller, { bin: "throwaway" }).ok).toBe(true);
 
@@ -56,11 +56,12 @@ test("the caller sees its own dirs by seat, never by PID, and nobody else's", ()
 	expect(rows.map((row) => [row.label, row.state, row.bin])).toEqual([
 		["held", "held", "hold"],
 		["lapsed", "hold-expired", "hold"],
+		["pid", "unreleased", "unbinned"],
 		["released", "released", "throwaway"],
 		["seat", "unreleased", "throwaway"],
 	]);
-	expect(ownedScratch(home, deps(seat(null, []))).map((row) => row.label)).toEqual([]);
-	expect(ownedScratch(home, deps(seat("CrimsonHorizon", [SESSION]))).map((row) => row.label)).toEqual(["other-agent"]);
+	expect(ownedScratch(home, deps(seat(null, []))).map((row) => row.label)).toEqual(["pid", "released"]);
+	expect(ownedScratch(home, deps(seat("CrimsonHorizon", [SESSION]))).map((row) => row.label)).toEqual(["other-agent", "pid", "released"]);
 });
 
 test("ancestor and sibling owners are excluded from exact caller disposal accounting", () => {

@@ -157,5 +157,4 @@ describe("kitlib proc conformance corpus", () => {
 			await subject.teardown();
 		}
 	}, 30_000);
-
 });

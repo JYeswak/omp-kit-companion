@@ -11,14 +11,12 @@ import type { Incarnation, ProbeState } from "../../src/kitlib/proc.ts";
 import { privateLock } from "../../src/kitlib/lock.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { mintOwnerCapability } from "../../src/kitlib/owner.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
 mkdirSync(scratchParent, { recursive: true });
 const USER_PID = 77_001;
 const USER_START = "Mon Oct 20 06:00:00 2026";
-const ownerCapability = mintOwnerCapability();
 const OTHER_START = "Tue Oct 21 09:30:00 2026";
 
 const cleanup: string[] = [];
@@ -34,7 +32,7 @@ afterEach(() => {
 /** The process table seam: what each pid runs as now. A pid absent from the table is dead (ESRCH). */
 interface World { table: Map<number, { start: string; state?: ProbeState }> }
 function liveness(world: World): LivenessDeps {
-	return { processStart: () => null,
+	return { signalAlive: () => false, psVisible: () => false, processStart: () => null,
 		probe: (recorded) => {
 			const row = world.table.get(recorded.pid);
 			const evidence = { pid: recorded.pid, recorded_start: recorded.start, observed_start: row?.start ?? null, stat: null, signal0: null, reason: "planted" };
@@ -53,9 +51,6 @@ const clearRun = () => ({ code: 1, stdout: "", stderr: "" });
 function deps(world: World): InspectDeps {
 	return { liveness: liveness(world), run: clearRun, lsofSnapshot: new Set<string>() };
 }
-function releaseWithToken(dir: string, home: string, deps: InspectDeps, opts: Parameters<typeof releaseScratch>[3] = {}) {
-	return releaseScratch(dir, home, deps, { ...opts, capability: ownerCapability.token });
-}
 
 function fixture(): { dir: string; root: string; home: string } {
 	const root = ownedTmp("users", { root: scratchParent }).path;
@@ -66,7 +61,7 @@ function fixture(): { dir: string; root: string; home: string } {
 	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true, mode: 0o700 });
 	const dir = join(root, `grade.${process.pid}`);
 	mkdirSync(dir);
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=grade\nrepo=${repo}\ncreated=2026-10-22T06:00:00.000Z\ncapability_sha256=${ownerCapability.sha256}\nbin=throwaway\npurpose=grader-tmpdir\n`);
+	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=grade\nrepo=${repo}\ncreated=2026-10-22T06:00:00.000Z\nbin=throwaway\npurpose=grader-tmpdir\n`);
 	writeFileSync(join(dir, "item.json"), "{}");
 	return { dir, root, home };
 }
@@ -80,7 +75,7 @@ test("AC1: a live registered user with no open file refuses release --now USER_L
 	const { dir, root, home } = fixture();
 	const world: World = { table: new Map([[USER_PID, { start: USER_START }]]) };
 	await register(dir, world);
-	const refused = releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true });
+	const refused = releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true });
 	expect(refused).toMatchObject({ ok: false, changed: false, reason: "user-live" });
 	expect(refused.detail).toContain(`pid ${USER_PID}`);
 	expect(refused.detail).toContain(USER_START);
@@ -88,13 +83,13 @@ test("AC1: a live registered user with no open file refuses release --now USER_L
 	expect(refused.detail).toContain("scratch unuse");
 	expect(existsSync(join(dir, "item.json"))).toBe(true);
 	// Released marker-only (no --now), the dir is still kept by apply while its user runs.
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway" })).toMatchObject({ ok: true, reason: "owner-released" });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway" })).toMatchObject({ ok: true, reason: "owner-released" });
 	expect(inspectOne(dir, root, deps(world))).toMatchObject({ action: "LIVE", reason: "user-live" });
 	applyScratch(home, { ...deps(world), home });
 	expect(existsSync(join(dir, "item.json"))).toBe(true);
 	// Control: the user exits; the same release retires the dir.
 	world.table.delete(USER_PID);
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
 	expect(existsSync(dir)).toBe(false);
 });
 
@@ -102,7 +97,7 @@ test("control: apply moves the released dir once its user has exited", async () 
 	const { dir, home } = fixture();
 	const world: World = { table: new Map([[USER_PID, { start: USER_START }]]) };
 	await register(dir, world);
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway" })).toMatchObject({ ok: true });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway" })).toMatchObject({ ok: true });
 	world.table.delete(USER_PID);
 	applyScratch(home, { ...deps(world), home });
 	expect(existsSync(dir)).toBe(false);
@@ -116,7 +111,7 @@ test("a user whose pid was reused (same pid, different start) does not block, an
 	expect(blockingScratchUser(dir, liveness(world))).toBeNull();
 	const pruned = await updateScratchUsers(dir, USER_PID + 1, "unuse", { liveness: liveness(world) });
 	expect(pruned).toMatchObject({ ok: true, users: [], pruned: [{ pid: USER_PID, start: USER_START }] });
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
 });
 
 test("zombie and dead users do not block; an unknown probe blocks, because unknown is never dead", async () => {
@@ -127,7 +122,7 @@ test("zombie and dead users do not block; an unknown probe blocks, because unkno
 	expect(blockingScratchUser(dir, liveness(world))).toBeNull();
 	world.table.set(USER_PID, { start: USER_START, state: "unknown" });
 	expect(blockingScratchUser(dir, liveness(world))).toMatchObject({ pid: USER_PID, state: "unknown" });
-	const refused = releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true });
+	const refused = releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true });
 	expect(refused).toMatchObject({ ok: false, reason: "user-live" });
 	expect(refused.detail).toContain("is unknown");
 	expect(existsSync(dir)).toBe(true);
@@ -137,19 +132,19 @@ test("a malformed .users file blocks (unreadable evidence is not absence); a wel
 	const { dir, home } = fixture();
 	const world: World = { table: new Map() };
 	writeFileSync(join(dir, SCRATCH_USERS_FILE), "not json");
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "user-live" });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "user-live" });
 	writeFileSync(join(dir, SCRATCH_USERS_FILE), `${JSON.stringify({ version: 1, users: [] })}\n`);
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
 });
 
 test("unuse removes the block while the user still runs", async () => {
 	const { dir, home } = fixture();
 	const world: World = { table: new Map([[USER_PID, { start: USER_START }]]) };
 	await register(dir, world);
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "user-live" });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "user-live" });
 	expect(await updateScratchUsers(dir, USER_PID, "unuse", { liveness: liveness(world) })).toMatchObject({ ok: true, reason: "user-removed", users: [] });
 	expect(JSON.parse(readFileSync(join(dir, SCRATCH_USERS_FILE), "utf8"))).toEqual({ version: 1, users: [] });
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
 });
 
 test("use refuses a pid that is not running and a dir without an owner record; registration grants no release authority", async () => {
@@ -203,7 +198,7 @@ test("a pushed copy of the empty .users file proves nothing; a pushed copy of re
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	const dir = join(root, `grade.${process.pid}`);
 	mkdirSync(dir, { recursive: true });
-	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=grade\nrepo=${projectDir}\ncreated_at=2026-10-22T06:00:00.000Z\nargv0=test\ncapability_sha256=${ownerCapability.sha256}\n`);
+	writeFileSync(join(dir, ".owner"), `pid=${process.pid}\nlabel=grade\nrepo=${projectDir}\ncreated=2026-10-22T06:00:00.000Z\n`);
 	writeFileSync(join(dir, "result.json"), "{\"score\":0.93}\n");
 	writeFileSync(join(dir, SCRATCH_USERS_FILE), emptyUsers);
 	// The transfer check runs through the production runner; its git reads see the isolated config via the environment.
@@ -212,11 +207,11 @@ test("a pushed copy of the empty .users file proves nothing; a pushed copy of re
 	try {
 		const world: World = { table: new Map() };
 		const real: InspectDeps = { ...deps(world), run: defaultRunner };
-		expect(releaseWithToken(dir, home, real, { bin: "evidence", ref: "file:users-copy.json", now: true }))
+		expect(releaseScratch(dir, home, real, { bin: "evidence", ref: "file:users-copy.json", now: true }))
 			.toMatchObject({ ok: false, reason: "ref-transfer-unproven" });
 		expect(existsSync(join(dir, "result.json"))).toBe(true);
 		// Control: a byte-identical pushed copy of result.json proves and releases.
-		expect(releaseWithToken(dir, home, real, { bin: "evidence", ref: "file:result-copy.json", now: true }))
+		expect(releaseScratch(dir, home, real, { bin: "evidence", ref: "file:result-copy.json", now: true }))
 			.toMatchObject({ ok: true, reason: "owner-released-deleted" });
 		expect(existsSync(dir)).toBe(false);
 	} finally {
@@ -261,12 +256,12 @@ test("a use holding the users lock makes release --now refuse; a use that waits 
 	const { dir, home } = fixture();
 	const world: World = { table: new Map([[USER_PID, { start: USER_START }]]) };
 	const inFlight = await privateLock({ namespace: "scratch-users", path: dir }, { deadline_s: 1 });
-	const busy = releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true });
+	const busy = releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true });
 	inFlight.release();
 	expect(busy).toMatchObject({ ok: false, reason: "now-held-users-lock-busy" });
 	expect(existsSync(join(dir, "item.json"))).toBe(true);
 	await register(dir, world);
-	expect(releaseWithToken(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "user-live" });
+	expect(releaseScratch(dir, home, deps(world), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "user-live" });
 	expect(await updateScratchUsers(dir, USER_PID, "unuse", { liveness: liveness(world) })).toMatchObject({ ok: true });
 	// The deleter holds the lock across its delete; a use started mid-delete waits, then finds no dir.
 	let late: Promise<Awaited<ReturnType<typeof updateScratchUsers>>> | null = null;
@@ -274,7 +269,7 @@ test("a use holding the users lock makes release --now refuse; a use that waits 
 		late ??= updateScratchUsers(dir, USER_PID, "use", { liveness: liveness(world), incarnation: incarnationOf(world) });
 		rmSync(path, { recursive: true, force: true });
 	};
-	expect(releaseWithToken(dir, home, { ...deps(world), removeTree: remove }, { bin: "throwaway", now: true }))
+	expect(releaseScratch(dir, home, { ...deps(world), removeTree: remove }, { bin: "throwaway", now: true }))
 		.toMatchObject({ ok: true, reason: "owner-released-deleted" });
 	expect(late).not.toBeNull();
 	expect(await late!).toMatchObject({ ok: false, reason: "directory-unavailable" });

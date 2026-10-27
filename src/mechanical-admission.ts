@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { ownerIdentity } from "./kitlib/owner.ts";
 import * as path from "node:path";
 import type { CorpusCase } from "./case-corpus.ts";
 import { check as durabilityCheck } from "./fleet-guard/durability.ts";
@@ -40,11 +39,7 @@ interface Fixture {
  */
 async function withFixture<T>(c: MechanicalCase, kit: string, use: (fixture: Fixture) => Promise<T>): Promise<T> {
 	const root = fs.realpathSync(ownedTmp("mechanical-case").path);
-	const identity = ownerIdentity(process.pid);
-	if (identity === null) throw new Error("mechanical admission process identity unavailable");
-	const argv0 = process.argv[1] ?? process.argv[0] ?? "unknown";
-	writeScratchOwner(root, { pid: identity.pid, process_start: identity.process_start, argv0,
-		label: "mechanical-case", repo: kit, created: new Date().toISOString() });
+	writeScratchOwner(root, { pid: process.pid, label: "mechanical-case", repo: kit, created: new Date().toISOString() });
 	try {
 		const env: Record<string, string> = {};
 		for (const key of ["PATH", "LANG", "LC_ALL"]) if (process.env[key]) env[key] = process.env[key]!;
@@ -71,8 +66,7 @@ async function withFixture<T>(c: MechanicalCase, kit: string, use: (fixture: Fix
 		if (path.isAbsolute(target) || target.split("/").includes("..")) throw new Error("fixture target escapes isolated repository");
 		if (offset >= 0) {
 			const child = c.path.slice(offset + marker.length).split("/")[0]!;
-			writeScratchOwner(path.join(root, marker, child), { pid: identity.pid, process_start: identity.process_start, argv0,
-				label: child, repo: root, created: new Date().toISOString() });
+			writeScratchOwner(path.join(root, marker, child), { pid: process.pid, label: child, repo: root, created: new Date().toISOString() });
 		}
 		const absolute = path.join(root, target);
 		fs.mkdirSync(path.dirname(absolute), { recursive: true });

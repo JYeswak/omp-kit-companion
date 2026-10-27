@@ -4,7 +4,6 @@ import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, o
 import { dirname, join, resolve } from "node:path";
 import type { Stats } from "node:fs";
 import type { CliResult, ParsedCommand } from "./cli.ts";
-import { ownerIdentity, ownerIdentityFromStart, ownerLiveness, type OwnerIdentity } from "./kitlib/owner.ts";
 
 /** Native implementation based on git_converge.py (a58ef61, blob 9ffa2446cb6016132897059f4348028f468a98bb).
  * The .138 owner gate additionally covers every independently both-changed path, even equal results;
@@ -352,77 +351,57 @@ function applyConverge(repo: string, plan: Plan): { new_head: string; worktree_w
 	git(repo, ["update-index", "-q", "--refresh"]);
 	return { new_head: next, worktree_written: written, index_updated: updates.length, races };
 }
-type ConvergeOwnerRecord = OwnerIdentity & { nonce: string };
-type ConvergeLock = { path: string; ref: string; token: string; recordText: string };
-function unverifiedLock(): Refused {
-	return new Refused("CONVERGE_LOCK_UNVERIFIED", [{ path: "", kind: "CONVERGE_LOCK_UNVERIFIED", detail: "Lock owner process incarnation is not verifiable" }]);
-}
-function parseLockOwner(text: string): ConvergeOwnerRecord {
-	let parsed: unknown;
-	try { parsed = JSON.parse(text); } catch { throw unverifiedLock(); }
-	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
-		!("pid" in parsed) || typeof parsed.pid !== "number" || !Number.isSafeInteger(parsed.pid) ||
-		!("process_start" in parsed) || typeof parsed.process_start !== "string" ||
-		!("nonce" in parsed) || typeof parsed.nonce !== "string" || parsed.nonce.length === 0) throw unverifiedLock();
-	const identity = ownerIdentityFromStart(parsed.pid, parsed.process_start);
-	if (identity === null) throw unverifiedLock();
-	return { ...identity, nonce: parsed.nonce };
-}
-function ownerIsLive(owner: ConvergeOwnerRecord): boolean {
-	const state = ownerLiveness(owner).state;
-	if (state === "unknown") throw unverifiedLock();
-	return state === "live";
+type ConvergeLock = { path: string; ref: string; token: string };
+function liveOwner(text: string): number | null {
+	const pidText = text.split("\n")[0]?.trim() ?? "", pid = Number(pidText);
+	if (!pidText || !Number.isSafeInteger(pid) || pid < 0 || [...pidText].some(c => c < "0" || c > "9")) throw new Refused("CONVERGE_LOCK_UNVERIFIED", [{ path: "", kind: "CONVERGE_LOCK_UNVERIFIED", detail: "Lock owner PID is not verifiable" }]);
+	try { process.kill(pid, 0); return pid; }
+	catch (error) { if (errno(error, "ESRCH")) return null; if (errno(error, "EPERM")) return pid; throw error; }
 }
 function releaseLock(repo: string, lock: ConvergeLock): void {
-	// Keep the CAS authority until the exact process-incarnation record is released.
+	// Keep the CAS authority until the conventional PID file has been released.
+	// Another conforming acquirer cannot replace that file during this interval.
 	if (out(repo, ["rev-parse", "--verify", lock.ref]) !== lock.token) throw new Error("Converge lock authority changed before release");
 	try {
-		if (readFileSync(lock.path, "utf8") !== lock.recordText) throw new Error("Converge lock owner changed before release");
+		if (readFileSync(lock.path, "utf8") !== String(process.pid)) throw new Error("Converge PID file changed before release");
 		unlinkSync(lock.path);
 	} finally {
 		if (git(repo, ["update-ref", "-d", lock.ref, lock.token]).code !== 0) throw new Error("Converge lock authority changed before release");
 	}
 }
 function takeLock(repo: string): ConvergeLock {
-	const identity = ownerIdentity(process.pid);
-	if (identity === null) throw unverifiedLock();
 	const path = join(out(repo, ["rev-parse", "--absolute-git-dir"]), "git_converge.lock"), ref = "refs/omp-kit/converge-lock";
-	const record: ConvergeOwnerRecord = { ...identity, nonce: randomUUID() };
-	const recordText = `${JSON.stringify(record)}\n`;
-	const token = out(repo, ["hash-object", "-w", "--stdin"], recordText);
+	// Git serializes ref updates and compares the exact prior unique token. Unlike
+	// pathname check/unlink, stale takeover cannot delete a replacement owner's lock.
+	const token = out(repo, ["hash-object", "-w", "--stdin"], `${process.pid}\n${randomUUID()}\n`);
 	for (let attempt = 0; attempt < 20; attempt++) {
 		const observed = git(repo, ["rev-parse", "-q", "--verify", ref]);
 		if (observed.code !== 0 && observed.code !== 1) throw new Error(`git rev-parse lock authority: ${observed.err}`);
 		const previous = observed.code === 0 ? observed.out.toString().trim() : null;
-		let previousOwner: ConvergeOwnerRecord | null = null;
 		if (previous) {
 			const owner = git(repo, ["cat-file", "blob", previous]);
-			if (owner.code !== 0) throw unverifiedLock();
-			previousOwner = parseLockOwner(owner.out.toString());
-			if (ownerIsLive(previousOwner)) throw new Refused("CONVERGE_BUSY", [{ path: "", kind: "CONVERGE_BUSY", detail: `pid ${previousOwner.pid}` }]);
+			if (owner.code !== 0 || owner.out.toString().trim().split("\n").length !== 2) throw new Refused("CONVERGE_LOCK_UNVERIFIED", [{ path: "", kind: "CONVERGE_LOCK_UNVERIFIED", detail: "Lock authority token is not verifiable" }]);
+			const holder = liveOwner(owner.out.toString());
+			if (holder !== null) throw new Refused("CONVERGE_BUSY", [{ path: "", kind: "CONVERGE_BUSY", detail: `pid ${holder}` }]);
 		}
 		if (git(repo, ["update-ref", ref, token, previous ?? "0".repeat(token.length)]).code !== 0) { sleep(10); continue; }
 		let heldFile = false;
 		try {
+			// Admission for the incumbent PID-file protocol is serialized by our CAS
+			// authority. Never reclaim it on an unprotected read/check/unlink path.
 			try {
 				const text = readFileSync(path, "utf8");
-				if (!text.trim() && previousOwner !== null) {
-					// The validated stale CAS owner proves this interrupted empty-file write is reclaimable.
-					unlinkSync(path);
-				} else {
-					const fileOwner = parseLockOwner(text);
-					if (previousOwner !== null && (fileOwner.pid !== previousOwner.pid ||
-						fileOwner.process_start !== previousOwner.process_start || fileOwner.nonce !== previousOwner.nonce))
-						throw unverifiedLock();
-					if (ownerIsLive(fileOwner)) throw new Refused("CONVERGE_BUSY", [{ path: "", kind: "CONVERGE_BUSY", detail: `pid ${fileOwner.pid}` }]);
-					unlinkSync(path);
-				}
+				// A dead CAS token also proves ownership of an interrupted empty PID-file write.
+				// Without that prior authority an empty file is not safely reclaimable.
+				const holder = !text.trim() && previous ? null : liveOwner(text);
+				if (holder !== null) throw new Refused("CONVERGE_BUSY", [{ path: "", kind: "CONVERGE_BUSY", detail: `pid ${holder}` }]);
+				unlinkSync(path);
 			} catch (error) { if (!errno(error, "ENOENT")) throw error; }
 			const fd = openSync(path, "wx", 0o644);
-			try { writeFileSync(fd, recordText); heldFile = true; } finally { closeSync(fd); }
-			return { path, ref, token, recordText };
+			try { writeFileSync(fd, String(process.pid)); heldFile = true; } finally { closeSync(fd); }
+			return { path, ref, token };
 		} catch (error) {
-			if (heldFile && readFileSync(path, "utf8") === recordText) unlinkSync(path);
+			if (heldFile) unlinkSync(path);
 			if (git(repo, ["update-ref", "-d", ref, token]).code !== 0) throw new Error("Converge lock authority changed during failed admission", { cause: error });
 			throw error;
 		}

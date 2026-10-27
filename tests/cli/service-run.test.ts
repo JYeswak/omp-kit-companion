@@ -3,7 +3,6 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { acquireRunLock, bunCapExec, claimIncarnation, gateRunLoad, LOAD_GATE_FACTOR, OVERLAP_EXIT, readJobOff, readRunClaim, runWithCap, RUN_TIME_CAPS_MS, SKIPPED_LOAD_EXIT, type CapExec } from "../../src/service-run.ts";
-import { incarnationSync } from "../../src/kitlib/proc.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
@@ -24,46 +23,15 @@ function jobsDir(): string {
 	return dir;
 }
 
-function writeClaimFixture(dir: string, pid: number, startedAt: number, processStart?: string): void {
+function writeClaimFixture(dir: string, pid: number, startedAt: number): void {
 	const lock = join(dir, "load-watch.lock");
 	mkdirSync(lock, { mode: 0o700 });
-	const ownerStart = processStart ?? incarnationSync(pid)?.start ?? "Thu Jan 1 00:00:00 2015";
-	writeFileSync(join(lock, "pid"), JSON.stringify({ pid, process_start: ownerStart, startedAt, token: "fixture-claim" }), { mode: 0o600 });
+	writeFileSync(join(lock, "pid"), JSON.stringify({ pid, startedAt, token: "fixture-claim" }), { mode: 0o600 });
 }
 
-test("SVC1: a new claim records the current process incarnation", () => {
+test("SVC1: an unreadable liveness probe cannot authorize stealing a claim", () => {
 	const dir = jobsDir();
-	const claim = acquireRunLock(dir, "load-watch");
-	if (claim.status !== "ACQUIRED") throw new Error("expected ACQUIRED");
-	try {
-		const written = JSON.parse(readFileSync(join(dir, "load-watch.lock", "pid"), "utf8"));
-		const current = incarnationSync(process.pid);
-		expect(current).not.toBeNull();
-		expect(written).toMatchObject({ pid: process.pid, process_start: current?.start });
-	} finally {
-		claim.lock.release();
-	}
-});
-
-test("SVC1 planted: a reused PID with a different process_start is reclaimed; control: the current incarnation is retained", () => {
-	const dir = jobsDir();
-	writeClaimFixture(dir, process.pid, 1_000_000, "Thu Jan 1 00:00:00 2015");
-	const claim = acquireRunLock(dir, "load-watch", 1_001_000);
-	expect(claim.status).toBe("ACQUIRED");
-	if (claim.status === "ACQUIRED") {
-		try {
-			const written = JSON.parse(readFileSync(join(dir, "load-watch.lock", "pid"), "utf8"));
-			expect(written).toMatchObject({ pid: process.pid, process_start: incarnationSync(process.pid)?.start });
-			expect(acquireRunLock(dir, "load-watch", 1_002_000).status).toBe("OVERLAP");
-		} finally {
-			claim.lock.release();
-		}
-	}
-});
-
-test("SVC1: an unproven process incarnation cannot authorize stealing a claim", () => {
-	const dir = jobsDir();
-	writeClaimFixture(dir, 2147483647, 1_000_000);
+	writeClaimFixture(dir, process.pid, 1_000_000);
 	const before = readFileSync(join(dir, "load-watch.lock", "pid"), "utf8");
 	const probe = spyOn(process, "kill").mockImplementation(() => {
 		throw Object.assign(new Error("permission denied"), { code: "EPERM" });

@@ -4,8 +4,6 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSyn
 import { join, resolve } from "node:path";
 import { convergeCommand, convergeRepository, type ConvergeOptions, type ConvergeResult } from "../../src/converge.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { ownerIdentity } from "../../src/kitlib/owner.ts";
-import { runSync } from "../../src/kitlib/run.ts";
 
 const root = resolve(import.meta.dir, "../.."), scratchRoot = join(root, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
@@ -13,8 +11,8 @@ const owned = ownedTmp("converge", { root: scratchRoot });
 const scratch = owned.path;
 const realGit = Bun.which("git");
 if (!realGit) throw new Error("Git is required for converge integration tests");
-const cleanEnv: Record<string, string> = {};
-for (const [key, value] of Object.entries(process.env)) if (!key.startsWith("GIT_") && typeof value === "string") cleanEnv[key] = value;
+const cleanEnv: NodeJS.ProcessEnv = {};
+for (const [key, value] of Object.entries(process.env)) if (!key.startsWith("GIT_")) cleanEnv[key] = value;
 cleanEnv.GIT_TERMINAL_PROMPT = "0";
 cleanEnv.TMPDIR = scratch;
 let number = 0;
@@ -23,13 +21,6 @@ function git(repo: string, ...args: string[]): string {
 	const p = spawnSync(realGit, ["-C", repo, ...args], { env: cleanEnv, encoding: "utf8" });
 	if (p.status !== 0) throw new Error(`git ${args.join(" ")}: ${p.stderr}`);
 	return p.stdout.trim();
-}
-function hashObject(w: World, text: string): string {
-	const input = join(w.dir, "hash-object.input");
-	writeFileSync(input, text);
-	const result = runSync([realGit, "-C", w.a, "hash-object", "-w", input], { cwd: w.dir, env: cleanEnv, deadline_s: 10 });
-	if (result.rc !== 0) throw new Error(`git hash-object failed (${result.rc}): ${new TextDecoder().decode(result.stderr)}`);
-	return new TextDecoder().decode(result.stdout).trim();
 }
 function put(repo: string, path: string, value: string): void { writeFileSync(join(repo, path), value); }
 function read(repo: string, path: string): string | null { return existsSync(join(repo, path)) ? readFileSync(join(repo, path), "utf8") : null; }
@@ -178,28 +169,7 @@ test("remote executable and symlink additions update disk and index", () => {
 	const w = world(); put(w.b, "exec", "#!/bin/sh\nexit 0\n"); chmodSync(join(w.b, "exec"), 0o755); symlinkSync("exec", join(w.b, "link")); git(w.b, "add", "exec", "link"); git(w.b, "commit", "-q", "-m", "modes"); git(w.b, "push", "-q", "origin", "main"); expect(apply(w).applied).toBe(true); expect(readlinkSync(join(w.a, "link"))).toBe("exec"); expect(git(w.a, "diff", "HEAD", "--", "exec", "link")).toBe(""); expect(git(w.a, "ls-files", "-s", "--", "exec")).toStartWith("100755");
 });
 test("post-CAS dirty race preserves new peer bytes and reports races", () => { const w = world(); remote(w, "f1", "remote\n"); const r = raced(w, "before_ref", `put(a,'f1','peer dirty\\n');`); expect(r.applied).toBe(true); expect(r.races).toEqual(["f1"]); expect(read(w.a, "f1")).toBe("peer dirty\n"); expect(git(w.a, "show", ":f1")).toBe("remote"); });
-test("live converge lock refuses rather than overwriting it", () => {
-	const w = world();
-	const identity = ownerIdentity(process.pid);
-	if (identity === null) throw new Error("test process incarnation is unavailable");
-	const lock = join(w.a, ".git/git_converge.lock");
-	const record = `${JSON.stringify({ ...identity, nonce: "live-lock" })}\n`;
-	put(w.a, ".git/git_converge.lock", record);
-	expect(apply(w).reason).toBe("CONVERGE_BUSY");
-	expect(readFileSync(lock, "utf8")).toBe(record);
-});
-test("a reused PID converge lock is reclaimed only after its recorded start mismatches", () => {
-	const w = world();
-	remote(w, "f1", "remote\n");
-	const identity = ownerIdentity(process.pid);
-	if (identity === null) throw new Error("test process incarnation is unavailable");
-	const lock = join(w.a, ".git/git_converge.lock");
-	put(w.a, ".git/git_converge.lock", `${JSON.stringify({ ...identity, process_start: "Mon Jan 1 00:00:00 2001", nonce: "reused-lock" })}\n`);
-	const result = apply(w);
-	expect(result.applied).toBe(true);
-	expect(read(w.a, "f1")).toBe("remote\n");
-	expect(existsSync(lock)).toBe(false);
-});
+test("live converge lock refuses rather than overwriting it", () => { const w = world(); const lock = join(w.a, ".git/git_converge.lock"); put(w.a, ".git/git_converge.lock", String(process.pid)); expect(apply(w).reason).toBe("CONVERGE_BUSY"); expect(readFileSync(lock, "utf8")).toBe(String(process.pid)); });
 const command = { name: "converge", description: "converge", usage: "converge --repo PATH", flags: [], example: "converge --repo .", runnable: true };
 test("command reports usage, refused and successful exit classes", () => {
 	expect(convergeCommand({ command, flags: new Map(), json: true, robot: false }).code).toBe(2);
@@ -264,31 +234,19 @@ function exitedPid(): number {
 	if (child.status !== 0 || !child.pid) throw new Error("Unable to create an exited lock owner");
 	return child.pid;
 }
-function deadLockOwner(nonce: string) {
-	return { pid: exitedPid(), process_start: "Mon Oct 5 12:00:00 2026", nonce };
-}
-test("dead incarnation lock is reclaimed and convergence remains functional", () => {
-	const w = world(); remote(w, "f1", "remote\n");
-	const record = `${JSON.stringify(deadLockOwner("dead-conventional"))}\n`;
-	put(w.a, ".git/git_converge.lock", record);
+test("dead conventional lock is reclaimed and convergence remains functional", () => {
+	const w = world(); remote(w, "f1", "remote\n"); put(w.a, ".git/git_converge.lock", String(exitedPid()));
 	const r = apply(w); expect(r.applied).toBe(true); expect(read(w.a, "f1")).toBe("remote\n"); expect(existsSync(join(w.a, ".git/git_converge.lock"))).toBe(false);
 });
 test("dead CAS authority is replaced using its exact token, not its pathname", () => {
-	const w = world(), recordText = `${JSON.stringify(deadLockOwner("dead-cas"))}\n`;
-	const token = hashObject(w, recordText);
-	git(w.a, "update-ref", "refs/omp-kit/converge-lock", token);
-	put(w.a, ".git/git_converge.lock", recordText); remote(w, "f1", "remote\n");
+	const w = world(), pid = exitedPid();
+	const token = spawnSync(realGit, ["-C", w.a, "hash-object", "-w", "--stdin"], { env: cleanEnv, input: `${pid}\nabandoned-unique-token\n`, encoding: "utf8" });
+	if (token.status !== 0) throw new Error(token.stderr);
+	git(w.a, "update-ref", "refs/omp-kit/converge-lock", token.stdout.trim()); put(w.a, ".git/git_converge.lock", String(pid)); remote(w, "f1", "remote\n");
 	expect(apply(w).applied).toBe(true); expect(read(w.a, "f1")).toBe("remote\n"); expect(git(w.a, "for-each-ref", "--format=%(refname)", "refs/omp-kit/converge-lock")).toBe("");
 });
-test("a legacy PID-only lock is unverified and preserved", () => {
-	const w = world(), record = `${exitedPid()}\n`;
-	const path = join(w.a, ".git/git_converge.lock");
-	put(w.a, ".git/git_converge.lock", record);
-	expect(apply(w).reason).toBe("CONVERGE_LOCK_UNVERIFIED");
-	expect(readFileSync(path, "utf8")).toBe(record);
-});
 test("two simultaneous stale-lock reclaimers cannot delete the active replacement lock", async () => {
-	const w = world(); remote(w, "f1", "remote\n"); put(w.a, ".git/git_converge.lock", `${JSON.stringify(deadLockOwner("dead-contenders"))}\n`);
+	const w = world(); remote(w, "f1", "remote\n"); put(w.a, ".git/git_converge.lock", String(exitedPid()));
 	const bin = join(w.dir, "concurrent-bin"); mkdirSync(bin);
 	const wrapper = join(bin, "git");
 	writeFileSync(wrapper, `#!${process.execPath}
@@ -296,7 +254,7 @@ import {spawnSync} from 'node:child_process'; import {existsSync,readFileSync,wr
 const args=process.argv.slice(2), label=process.env.CONVERGE_CASE, other=label==='a'?'b':'a', dir=${JSON.stringify(w.dir)}, real=${JSON.stringify(realGit)};
 function waitFor(path){const deadline=Date.now()+10000;while(!existsSync(path)){if(Date.now()>deadline)throw new Error('concurrency rendezvous timed out: '+path);Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);}}
 if(args[2]==='update-ref'&&args[3]==='refs/omp-kit/converge-lock'){writeFileSync(join(dir,'ready-'+label),'ready');waitFor(join(dir,'ready-'+other));}
-if(args[2]==='symbolic-ref'){waitFor(join(dir,'finished-'+other));const lock=JSON.parse(readFileSync(join(${JSON.stringify(w.a)},'.git/git_converge.lock'),'utf8'));if(lock.pid!==process.ppid||typeof lock.process_start!=='string')throw new Error('active replacement incarnation record was removed');}
+if(args[2]==='symbolic-ref'){waitFor(join(dir,'finished-'+other));if(readFileSync(join(${JSON.stringify(w.a)},'.git/git_converge.lock'),'utf8')!==String(process.ppid))throw new Error('active replacement PID file was removed');}
 const p=spawnSync(real,args,{env:process.env,input:readFileSync(0)});process.stdout.write(p.stdout??'');process.stderr.write(p.stderr??'');process.exit(p.status??1);
 `);
 	chmodSync(wrapper, 0o755);
@@ -309,10 +267,10 @@ test("unverifiable stale-file ownership refuses instead of deleting an unknown l
 	const w = world(); put(w.a, ".git/git_converge.lock", "not-a-verifiable-owner");
 	expect(apply(w).reason).toBe("CONVERGE_LOCK_UNVERIFIED"); expect(readFileSync(join(w.a, ".git/git_converge.lock"), "utf8")).toBe("not-a-verifiable-owner"); expect(git(w.a, "for-each-ref", "--format=%(refname)", "refs/omp-kit/converge-lock")).toBe("");
 });
-test("a dead CAS owner permits recovery of its interrupted empty lock-file write", () => {
-	const w = world(), recordText = `${JSON.stringify(deadLockOwner("crashed-before-file-write"))}\n`;
-	const token = hashObject(w, recordText);
-	git(w.a, "update-ref", "refs/omp-kit/converge-lock", token); put(w.a, ".git/git_converge.lock", "");
+test("a dead CAS owner permits recovery of its interrupted empty PID-file write", () => {
+	const w = world(), pid = exitedPid(), token = spawnSync(realGit, ["-C", w.a, "hash-object", "-w", "--stdin"], { env: cleanEnv, input: `${pid}\ncrashed-before-pid-write\n`, encoding: "utf8" });
+	if (token.status !== 0) throw new Error(token.stderr);
+	git(w.a, "update-ref", "refs/omp-kit/converge-lock", token.stdout.trim()); put(w.a, ".git/git_converge.lock", "");
 	expect(apply(w).applied).toBe(true); expect(existsSync(join(w.a, ".git/git_converge.lock"))).toBe(false); expect(git(w.a, "for-each-ref", "--format=%(refname)", "refs/omp-kit/converge-lock")).toBe("");
 });
 test("report mode acquires no CAS authority or PID file and changes no refs or index", () => {

@@ -170,7 +170,6 @@ function judge(lang: Lang, outcome: Outcome, want: Expect, root: string): string
 			if ((statSync(ownerPath).mode & 0o777) !== 0o600) failures.push(`.owner mode is not 0600: ${dir}`);
 			const owner = parseOwnerFile(readFileSync(ownerPath, "utf8"));
 			if (owner === null) failures.push(`.owner does not parse: ${dir}`);
-			else if (owner.processStart === null) failures.push(`.owner has no process incarnation: ${dir}`);
 			else if (owner.pid !== outcome.pid) failures.push(`.owner pid ${owner.pid} is not the child's ${outcome.pid}`);
 		}
 		const ownerB = existsSync(join(dirs[1]!, ".owner")) ? parseOwnerFile(readFileSync(join(dirs[1]!, ".owner"), "utf8")) : null;
@@ -234,17 +233,6 @@ describe("kitlib tmp in-process surface", () => {
 		}
 		expect(ownedTmp("a".repeat(48)).path).toContain(`${"a".repeat(48)}.${process.pid}.`);
 		cleanupAllOwnedTmp();
-	});
-
-	test("owner metadata records the creating process incarnation", () => {
-		const owned = ownedTmp("kitlib-owner-identity");
-		try {
-			const owner = parseOwnerFile(readFileSync(join(owned.path, ".owner"), "utf8"));
-			expect(owner?.pid).toBe(process.pid);
-			expect(owner?.processStart).not.toBeNull();
-		} finally {
-			owned.cleanup();
-		}
 	});
 
 	test("root defaults to os.tmpdir() and cleanupAllOwnedTmp removes every live dir", () => {

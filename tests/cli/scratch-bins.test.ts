@@ -8,7 +8,6 @@ import { reapLogPath } from "../../src/scratch.ts";
 import { createScratch, diagnoseOwnerFailure, inspectOne, inspectSession, parseOwnerFile, parseOwnerFileEx, releaseScratch, SCRATCH_BINS,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
-import { mintOwnerCapability } from "../../src/kitlib/owner.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
@@ -16,7 +15,6 @@ const scratchParent = join(repo, "var", "agent-tmp");
 mkdirSync(scratchParent, { recursive: true });
 const NOW = Date.parse("2026-10-18T20:00:00.000Z");
 const CREATED = "2026-10-18T17:32:44.000Z";
-const capability = mintOwnerCapability();
 
 const cleanup: string[] = [];
 const saved = { roots: process.env.OMP_KIT_SCRATCH_ROOTS, state: process.env.XDG_STATE_HOME };
@@ -30,12 +28,10 @@ afterEach(() => {
 
 const clearRun: ScratchRunner = () => ({ code: 1, stdout: "", stderr: "" });
 // No such pid: the kitlib proc incarnation probe is planted dead to match (ompkit-5m6ej).
-const noPid: LivenessDeps = { processStart: () => null,
+const noPid: LivenessDeps = { signalAlive: () => false, psVisible: () => false, processStart: () => null,
 	probe: (owner) => ({ state: "dead", evidence: { pid: owner.pid, recorded_start: owner.start, observed_start: null, stat: null, signal0: "esrch", reason: "planted: no such pid" } }) };
 const deps = (extra: Partial<InspectDeps> = {}): InspectDeps => ({ liveness: noPid, run: clearRun, now: NOW, ...extra });
 const ownerText = (pid: number, extra = "", created = CREATED) => `pid=${pid}\nlabel=work\nrepo=${repo}\ncreated=${created}\n${extra}`;
-const modernOwnerText = (pid: number, extra = "", created = CREATED, ownerRepo = repo) =>
-	`pid=${pid}\nprocess_start=Thu Jan  1 00:00:00 1970\nlabel=work\nrepo=${ownerRepo}\ncreated_at=${created}\nargv0=test\ncapability_sha256=${capability.sha256}\n${extra}`;
 
 function fixture(owner: string, label = "work"): { dir: string; root: string; home: string } {
 	const root = ownedTmp("bins", { root: scratchParent }).path;
@@ -91,7 +87,7 @@ test("a hold outlives its dead owner until it expires, then it is flagged and ne
 	const plant = (name: string, extra: string): string => {
 		const dir = join(root, name);
 		mkdirSync(dir);
-		writeFileSync(join(dir, ".owner"), modernOwnerText(Number(name.split(".")[1]), extra));
+		writeFileSync(join(dir, ".owner"), ownerText(Number(name.split(".")[1]), extra));
 		return dir;
 	};
 	const held = plant("work.59801", "bin=hold\nbead=ompkit-1\nexpires=2026-10-25\n");
@@ -134,8 +130,8 @@ test("createScratch records a declared byte budget and refuses zero, negative an
 });
 
 test("release --bin throwaway records the bin with no reference, and the release still moves the dir to quarantine", () => {
-	const { dir, root, home } = fixture(modernOwnerText(process.pid));
-	expect(releaseScratch(dir, home, deps(), { bin: "throwaway", capability: capability.token })).toMatchObject({ ok: true, changed: true });
+	const { dir, root, home } = fixture(ownerText(process.pid));
+	expect(releaseScratch(dir, home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: true });
 	expect(readFileSync(join(dir, ".omp-kit-release"), "utf8")).toContain("bin=throwaway\n");
 	const logged = readFileSync(reapLogPath(home), "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as { event: string; bin?: string });
 	expect(logged.filter((event) => event.event === "release").map((event) => event.bin)).toEqual(["throwaway"]);
@@ -162,11 +158,11 @@ test("release --bin evidence or promote needs a destination that proves the cont
 	expect(git("push", "-q", "-u", "origin", "main").exitCode).toBe(0);
 	const realRun = (args: readonly string[]) => { const r = Bun.spawnSync([...args], { stdout: "pipe", stderr: "pipe" }); return { code: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() }; };
 	const real = deps({ run: realRun });
-	const owner = modernOwnerText(process.pid, "", CREATED, projectDir);
+	const owner = `pid=${process.pid}\nlabel=work\nrepo=${projectDir}\ncreated=${CREATED}\n`;
 	const scratchWith = (text: string) => { const f = fixture(owner); writeFileSync(join(f.dir, "run.out"), text); return f; };
 	const attempt = (opts: Parameters<typeof releaseScratch>[3], run: Partial<InspectDeps> = {}, text = "measured\n") => {
 		const f = scratchWith(text);
-		return { f, result: releaseScratch(f.dir, f.home, { ...real, ...run }, { ...opts, capability: capability.token }) };
+		return { f, result: releaseScratch(f.dir, f.home, { ...real, ...run }, opts) };
 	};
 	const refused: [string, Parameters<typeof releaseScratch>[3], string][] = [
 		["no reference", { bin: "evidence" }, "ref-required"],
@@ -194,7 +190,7 @@ test("release --bin evidence or promote needs a destination that proves the cont
 	writeFileSync(join(projectDir, "docs", "receipt.md"), `run A summary\n${token}\n`);
 	const cite = () => {
 		process.env.OMP_KIT_SCRATCH_ROOTS = first.f.root;
-		return releaseScratch(first.f.dir, first.f.home, real, { bin: "evidence", ref: "file:docs/receipt.md", capability: capability.token });
+		return releaseScratch(first.f.dir, first.f.home, real, { bin: "evidence", ref: "file:docs/receipt.md" });
 	};
 	expect(cite()).toMatchObject({ ok: false, reason: "ref-not-tracked" });
 	expect(git("add", "docs/receipt.md").exitCode).toBe(0);
@@ -223,14 +219,11 @@ test("release --bin evidence or promote needs a destination that proves the cont
 		.toMatchObject({ ok: false, reason: "ref-bead-unverified" });
 });
 
-test("a free-form or PID-only owner cannot be binned; a valid release marker must match its bin and reference", () => {
+test("a legacy free-form owner cannot be binned, and a marker whose bin and reference disagree is not a release", () => {
 	const legacy = fixture("work\n");
 	expect(releaseScratch(legacy.dir, legacy.home, deps(), { bin: "throwaway", legacyOwner: true, reason: "operator" })).toMatchObject({ ok: false, reason: "bin-needs-structured-owner" });
-	const pidOnly = fixture(ownerText(process.pid));
-	expect(releaseScratch(pidOnly.dir, pidOnly.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: false, reason: "caller-not-owner" });
-	expect(existsSync(join(pidOnly.dir, ".omp-kit-release"))).toBe(false);
-	const { dir, root, home } = fixture(modernOwnerText(process.pid));
-	expect(releaseScratch(dir, home, deps(), { bin: "throwaway", capability: capability.token })).toMatchObject({ ok: true, changed: true });
+	const { dir, root, home } = fixture(ownerText(process.pid));
+	expect(releaseScratch(dir, home, deps(), { bin: "throwaway" }).ok).toBe(true);
 	const marker = readFileSync(join(dir, ".omp-kit-release"), "utf8");
 	writeFileSync(join(dir, ".omp-kit-release"), marker.replace("bin=throwaway\n", "bin=evidence\n"));
 	expect(inspectOne(dir, root, deps())?.reason).not.toBe("owner-released-would-quarantine");
@@ -250,7 +243,7 @@ test("scratch release rejects an unknown --bin through the real CLI before touch
 	expect(child.exitCode).not.toBe(0);
 }, 120_000);
 
-test("OWNERMSG1: a binned release on a one-bad-field JSON owner names the field; valid PID-only legacy owner has no authority", () => {
+test("OWNERMSG1: a binned release on a one-bad-field JSON owner names the field and the accepted sets; valid legacy still releases", () => {
 	const SETS = "pid,process_start,label,repo,created_at,argv0 or pid,label,repo,created";
 	// Planted negative: the fleet-context form whose purpose contains a space.
 	const spaced = JSON.stringify({ pid: process.pid, label: "work", repo, created: CREATED,
@@ -270,8 +263,8 @@ test("OWNERMSG1: a binned release on a one-bad-field JSON owner names the field;
 	const invalid = releaseScratch(plain.dir, plain.home, deps());
 	expect(invalid).toMatchObject({ ok: false, reason: "owner-file-invalid" });
 	expect(invalid.detail).toContain("owner field 'purpose'");
-	// Legacy PID-only owner files parse for recovery, but never authorize release.
+	// A valid legacy owner still releases with a bin.
 	const legacy = fixture(ownerText(process.pid));
-	expect(releaseScratch(legacy.dir, legacy.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: false, reason: "caller-not-owner" });
+	expect(releaseScratch(legacy.dir, legacy.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: true });
 	expect(diagnoseOwnerFailure(ownerText(42))).toBeNull();
 });

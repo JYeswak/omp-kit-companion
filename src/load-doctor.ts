@@ -3,17 +3,16 @@ import { cpus, loadavg } from "node:os";
 import process from "node:process";
 import { join } from "node:path";
 
-import { ownerIdentityFromStart, ownerLiveness } from "./kitlib/owner.ts";
 export type LoadVerdict = "OK" | "CONTENDED";
 export type MemoryPressureLevel = "normal" | "warn" | "critical" | "unknown";
 export interface MemoryPressure { level: MemoryPressureLevel; free_pct: number | null }
 export interface LoadProcess { pid: number; ppid: number; cpu_pct: number; rss_bytes: number; command: string; cwd?: string; start_time?: string }
 export interface LoadPane { session: string; pane: string; pid: number; cwd?: string }
-export interface LoadJob { id: string; pid: number; process_start: string; label: string; repo: string; cwd: string; agent: string; tmux_pane: string; state: "queued" | "running"; queued_at?: string; started_at?: string }
+export interface LoadJob { id: string; pid: number; process_start?: string; label: string; repo: string; cwd: string; agent: string; tmux_pane: string; state: "queued" | "running"; queued_at?: string; started_at?: string }
 export interface LoadMachine { load1: number; load5: number; load15: number; ncpu: number; cpu_user_pct: number | null; cpu_sys_pct: number | null; cpu_idle_pct: number | null; memory_pressure: MemoryPressure; disk_iops: number | null }
 export interface LoadConsumer { session: string; pane: string; agent: string; repo: string; cpu_pct: number; rss_bytes: number; pids: number[] }
 export interface LoadSystemGroup { group: string; cpu_pct: number; rss_bytes: number; pids: number[] }
-export interface LoadCensus { schema_version: 1; sampled_at: string; verdict: LoadVerdict; reason: string; machine: LoadMachine; consumers: LoadConsumer[]; system_groups: LoadSystemGroup[]; lsp_counts: { total: number; by_session: Record<string, number> }; heavy_jobs: LoadJob[]; stale_jobs_reaped: string[]; unverified_jobs: string[]; contention_streak: number; sample_cost_ms: number; text: string }
+export interface LoadCensus { schema_version: 1; sampled_at: string; verdict: LoadVerdict; reason: string; machine: LoadMachine; consumers: LoadConsumer[]; system_groups: LoadSystemGroup[]; lsp_counts: { total: number; by_session: Record<string, number> }; heavy_jobs: LoadJob[]; stale_jobs_reaped: string[]; contention_streak: number; sample_cost_ms: number; text: string }
 export interface LoadDoctorInput { processes?: readonly LoadProcess[]; panes?: readonly LoadPane[]; jobs?: readonly LoadJob[]; stateRoot?: string; machine?: Partial<LoadMachine>; now?: Date }
 
 function runText(args: readonly string[]): string {
@@ -92,6 +91,14 @@ function isLsp(command: string): boolean {
 	return /typescript-language-server|tsserver|pyright|pylsp|rust-analyzer/i.test(command);
 }
 
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 function agentFromCommand(command: string): string | null {
 	const profile = command.match(/(?:--profile\s+|--profile=)([^\s]+)/i)?.[1];
@@ -140,38 +147,20 @@ function defaultStateRoot(): string {
 	return join(process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? "", ".local", "state"), "omp-kit", "load");
 }
 
-function readJobs(stateRoot: string): { jobs: LoadJob[]; stale: string[]; unverified: string[] } {
+function readJobs(stateRoot: string, processes: readonly LoadProcess[]): { jobs: LoadJob[]; stale: string[] } {
 	const dir = join(stateRoot, "jobs");
+	const processByPid = new Map(processes.map(item => [item.pid, item]));
 	const jobs: LoadJob[] = [];
 	const stale: string[] = [];
-	const unverified: string[] = [];
 	try {
 		for (const file of readdirSync(dir).filter(name => name.endsWith(".json")).sort()) {
 			const path = join(dir, file);
 			try {
-				const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-				if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) ||
-					!("id" in parsed) || typeof parsed.id !== "string" ||
-					!("pid" in parsed) || typeof parsed.pid !== "number") {
-					unverified.push(file);
-					continue;
-				}
-				if (!("process_start" in parsed) || typeof parsed.process_start !== "string") {
-					unverified.push(parsed.id);
-					continue;
-				}
-				const job = parsed as LoadJob;
-				const identity = ownerIdentityFromStart(job.pid, job.process_start);
-				if (identity === null) {
-					unverified.push(job.id);
-					continue;
-				}
-				const state = ownerLiveness(identity).state;
-				if (state === "dead" || state === "reused" || state === "zombie") {
+				const job = JSON.parse(readFileSync(path, "utf8")) as LoadJob;
+				const current = processByPid.get(job.pid);
+				if (!current || !alive(job.pid) || (job.process_start && current.start_time && job.process_start !== current.start_time)) {
 					stale.push(job.id);
 					try { unlinkSync(path); } catch {}
-				} else if (state === "unknown") {
-					unverified.push(job.id);
 				} else {
 					jobs.push(job);
 				}
@@ -181,14 +170,14 @@ function readJobs(stateRoot: string): { jobs: LoadJob[]; stale: string[]; unveri
 			}
 		}
 	} catch {}
-	return { jobs, stale, unverified };
+	return { jobs, stale };
 }
 
 export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	const startedCpu = process.cpuUsage();
 	const processes = [...(input.processes ?? parsePsSnapshot(runText(["ps", "-axo", "pid=,ppid=,%cpu=,rss=,lstart=,command="])))];
 	const panes = [...(input.panes ?? parseTmuxSnapshot(runText(["tmux", "list-panes", "-a", "-F", "#{session_name}|#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}"])))];
-	const ledger = input.jobs ? { jobs: [...input.jobs], stale: [] as string[], unverified: [] as string[] } : readJobs(input.stateRoot ?? defaultStateRoot());
+	const ledger = input.jobs ? { jobs: [...input.jobs], stale: [] as string[] } : readJobs(input.stateRoot ?? defaultStateRoot(), processes);
 	const parent = new Map(processes.map(item => [item.pid, item.ppid]));
 	const paneByPid = new Map(panes.map(item => [item.pid, item]));
 	const paneByCwd = new Map(panes.filter(item => item.cwd).map(item => [item.cwd!, item]));
@@ -240,12 +229,10 @@ export function censusLoad(input: LoadDoctorInput = {}): LoadCensus {
 	const systemGroups = [...system.values()].sort((a, b) => b.cpu_pct - a.cpu_pct);
 	const verdict: LoadVerdict = loadPerCore > 2.5 ? "CONTENDED" : "OK";
 	const heavyJobs = ledger.jobs.filter(job => job.state === "running" || job.state === "queued");
-	const heavyText = ledger.unverified.length > 0
-		? `heavy jobs: ${heavyJobs.length} verified; ${ledger.unverified.length} unverified`
-		: heavyJobs.length === 0 ? "heavy jobs: none registered (LOAD1 not installed)" : `heavy jobs: ${heavyJobs.length}`;
+	const heavyText = heavyJobs.length === 0 ? "heavy jobs: none registered (LOAD1 not installed)" : `heavy jobs: ${heavyJobs.length}`;
 	const sampleCostMs = cpuTimeMs(startedCpu);
 	const causes = [...ordered.map(item => `${item.pane} ${item.cpu_pct.toFixed(1)}%`), ...systemGroups.map(item => `${item.group} ${item.cpu_pct.toFixed(1)}%`)].slice(0, 3).join(", ");
-	return { schema_version: 1, sampled_at: (input.now ?? new Date()).toISOString(), verdict, reason, machine, consumers: ordered, system_groups: systemGroups, lsp_counts: { total: Object.values(lsp).reduce((a, b) => a + b, 0), by_session: lsp }, heavy_jobs: heavyJobs, stale_jobs_reaped: ledger.stale, unverified_jobs: ledger.unverified, contention_streak: verdict === "CONTENDED" ? 1 : 0, sample_cost_ms: sampleCostMs, text: `${verdict}: ${reason}; ${heavyText}; top=${causes}` };
+	return { schema_version: 1, sampled_at: (input.now ?? new Date()).toISOString(), verdict, reason, machine, consumers: ordered, system_groups: systemGroups, lsp_counts: { total: Object.values(lsp).reduce((a, b) => a + b, 0), by_session: lsp }, heavy_jobs: heavyJobs, stale_jobs_reaped: ledger.stale, contention_streak: verdict === "CONTENDED" ? 1 : 0, sample_cost_ms: sampleCostMs, text: `${verdict}: ${reason}; ${heavyText}; top=${causes}` };
 }
 
 export function writeCensus(stateRoot: string, census: LoadCensus): void {

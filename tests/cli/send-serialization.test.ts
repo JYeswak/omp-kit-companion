@@ -1,9 +1,8 @@
 import { afterAll, expect, test, vi } from "bun:test";
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { paneLockPath, proveSend, sweepUnsentMarkers, type ProvenSend, type SendExec } from "../../src/send.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { ownerIdentity } from "../../src/kitlib/owner.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
@@ -222,14 +221,11 @@ test("planted: a composer that never empties reports UNDELIVERED with no keys ty
 	}
 });
 
-test("planted: a lock left by a dead process incarnation is stolen", async () => {
+test("planted: a lock left by a dead pid is stolen", async () => {
 	vi.useFakeTimers();
 	try {
 		const dir = dropDir();
-		const path = paneLockPath(dir, "lk", "1");
-		mkdirSync(join(dir, "..", "send-locks"), { recursive: true });
-		const record = `${JSON.stringify({ pid: 999999999, process_start: "Mon Jan 1 00:00:00 2001" })}\n`;
-		writeFileSync(path, record);
+		writeFileSync(paneLockPath(dir, "lk", "1"), "999999999\n");
 		const events: PaneEvent[] = [];
 		const pane = sharedPane(null, 0);
 		const fake = paneFake(events, "alpha", pane);
@@ -240,50 +236,6 @@ test("planted: a lock left by a dead process incarnation is stolen", async () =>
 		vi.useRealTimers();
 	}
 });
-
-test("planted: a live process-incarnation pane lock is not stolen", async () => {
-	vi.useFakeTimers();
-	let path: string | null = null;
-	try {
-		const identity = ownerIdentity(process.pid);
-		if (identity === null) throw new Error("test process incarnation is unavailable");
-		const dir = dropDir();
-		path = paneLockPath(dir, "lk", "1");
-		mkdirSync(join(dir, "..", "send-locks"), { recursive: true });
-		const record = `${JSON.stringify(identity)}\n`;
-		writeFileSync(path, record);
-		const events: PaneEvent[] = [];
-		const fake = paneFake(events, "alpha", sharedPane(null, 0));
-		const result = await send("alpha", fake, dir, 100, 60);
-		expect(fake.taken.sends).toEqual([]);
-		expect(result.sends).toBe(0);
-		expect(readFileSync(path, "utf8")).toBe(record);
-	} finally {
-		if (path !== null) rmSync(path, { force: true });
-		vi.useRealTimers();
-	}
-});
-
-test("planted: a legacy PID-only lock remains unclaimed", async () => {
-	vi.useFakeTimers();
-	let path: string | null = null;
-	try {
-		const dir = dropDir();
-		path = paneLockPath(dir, "lk", "1");
-		mkdirSync(join(dir, "..", "send-locks"), { recursive: true });
-		const record = "999999999\n";
-		writeFileSync(path, record);
-		const fake = paneFake([], "alpha", sharedPane(null, 0));
-		const result = await send("alpha", fake, dir, 100, 60);
-		expect(result.sends).toBe(0);
-		expect(fake.taken.sends).toEqual([]);
-		expect(readFileSync(path, "utf8")).toBe(record);
-	} finally {
-		if (path !== null) rmSync(path, { force: true });
-		vi.useRealTimers();
-	}
-});
-
 
 test("planted: sweep reports composer markers, ignores scrollback, skips failed captures", async () => {
 	const stuck = ["scroll line", "╭──", "❯ waiting on [kit-send-aaaaaaaaaaaa]"].join("\n");
@@ -316,7 +268,7 @@ test("planted: under real timers the second send types only after the first subm
 		proveSend({ ...opts, message: "alpha", exec: fa.exec }),
 		proveSend({ ...opts, message: "bravo", exec: fb.exec }),
 	]);
-	expect(a.status, JSON.stringify({ a, b, events, aTaken: fa.taken, bTaken: fb.taken })).toBe("DELIVERED");
+	expect(a.status).toBe("DELIVERED");
 	expect(b.status).toBe("DELIVERED");
 	expect(fa.taken.enters).toBe(1);
 	expect(fb.taken.enters).toBe(1);

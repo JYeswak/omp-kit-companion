@@ -7,10 +7,7 @@ import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import type { FleetGuardBlock, FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 import { parseOwnerFile } from "../src/scratch.ts";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
-import { ownerIdentity } from "../src/kitlib/owner.ts";
 
-const processIdentity = ownerIdentity(process.pid);
-if (processIdentity === null) throw new Error("test process incarnation is unavailable");
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
 function freshDir(parent: string, prefix: string): string {
@@ -87,7 +84,7 @@ test("an opted-in repository gets owned scratch and filesystem refusals", async 
 	const repoRoot = cwd;
 	expect(process.env.TMPDIR).toBe(join(repoRoot, "var", "agent-tmp", `omp.${pid}`));
 	const owner = readFileSync(join(repoRoot, "var", "agent-tmp", `omp.${pid}`, ".owner"), "utf8");
-	expect(owner).toContain(`pid=${pid}\nprocess_start=${processIdentity.process_start}\nlabel=omp\n`);
+	expect(owner).toContain(`pid=${pid}\nlabel=omp\n`);
 	const handler = pi.handlers[0]!;
 	const blocked = await handler({ toolName: "write", input: { path: "/tmp/x" } } as never); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 	expect(blocked?.block).toBe(true);
@@ -103,25 +100,25 @@ test("OWNERKEY1: the first tool call records the agent and its omp session in th
 	const pi = fakePi();
 	const { cwd, pid } = fixture();
 	await fleetGuard(pi, { cwd, pid, env: { AGENT_NAME: "TurquoiseSummit" } });
-	// Before any call the seat is not named; its process incarnation is still recorded.
+	// Before any call the session is unknown: the owner is the pid-only record it always was.
 	expect(ownerOf(cwd, pid)).not.toContain("session=");
 	const handler = pi.handlers[0]!;
 	await handler({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	const first = ownerOf(cwd, pid);
-	expect(first).toContain(`pid=${pid}\nprocess_start=${processIdentity.process_start}\nlabel=omp\n`);
+	expect(first).toContain(`pid=${pid}\nlabel=omp\n`);
 	expect(first).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\n`);
 	// A later call from a subagent session must not replace the main session.
 	await handler({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => "01a1502a-5647-76ba-89c5-949087f3e283" } });
 	expect(ownerOf(cwd, pid)).toBe(first);
 });
 
-test("OWNERKEY1: without a host agent name, or without a session id, the owner remains process-incarnation scoped", async () => {
+test("OWNERKEY1: without a host agent name, or without a session id, the seat owner stays pid-only", async () => {
 	for (const [env, session] of [[{}, SESSION], [{ AGENT_NAME: "TurquoiseSummit" }, undefined], [{ AGENT_NAME: "../evil" }, SESSION]] as const) {
 		const pi = fakePi();
 		const { cwd, pid } = fixture();
 		await fleetGuard(pi, { cwd, pid, env });
 		await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => session } });
-		expect(ownerOf(cwd, pid).trim().split("\n").map((line) => line.split("=")[0])).toEqual(["pid", "process_start", "label", "repo", "created_at", "argv0", "bin"]);
+		expect(ownerOf(cwd, pid).trim().split("\n").map((line) => line.split("=")[0])).toEqual(["pid", "label", "repo", "created", "bin"]);
 	}
 });
 
@@ -133,7 +130,7 @@ test("SCRATCHBIN1: a session's own dir names its bin at creation and keeps it wh
 	await pi.handlers[0]!({ toolName: "read", input: { path: join(cwd, "x") } } as never, { cwd, sessionManager: { getSessionId: () => SESSION } });
 	const recorded = ownerOf(cwd, pid);
 	expect(recorded).toContain(`agent=TurquoiseSummit\nsession=${SESSION}\nbin=throwaway\n`);
-	expect(parseOwnerFile(recorded)).toMatchObject({ agent: "TurquoiseSummit", session: SESSION, bin: "throwaway", processStart: processIdentity.process_start });
+	expect(parseOwnerFile(recorded)).toMatchObject({ agent: "TurquoiseSummit", session: SESSION, bin: "throwaway" });
 });
 
 const STARTED = "Mon Oct 19 01:00:00 2026";
