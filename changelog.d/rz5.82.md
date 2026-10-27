@@ -1,0 +1,3 @@
+### Fixed
+
+- `doctor --scope rules` probes each OMP profile in an isolated HOME that now carries the profile's plugin scope (lock files, `node_modules` links, marketplaces) and its native overlay rules, and both probe commands share one isolated HOME per profile whose paths are mapped back before comparison. Profiles with a linked release again report 0 missing kit rules with `plugin_version` set, and `kit-standing-law` reports loaded through the always-apply method instead of missing. A profile with no plugin link reports every kit rule missing; a profile linked to an older release reports STALE. (ompkit-rc-epic-land-fix-release-dogfood-rz5.82)

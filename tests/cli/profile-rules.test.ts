@@ -1,7 +1,10 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
-import { inspectEffectiveRules, inspectEffectiveRulesAsync, runEffectiveRuleProbe, type EffectiveRulesInput } from "../../src/diagnostics.ts";
+import { afterEach, expect, test } from "bun:test";
+import { inspectEffectiveRules, inspectEffectiveRulesAsync, isolatedProbeHome, profilePluginRuleStatus, runEffectiveRuleProbe, type EffectiveRulesInput, type Finding } from "../../src/diagnostics.ts";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const home = "/fixture/home";
 const kitVersion = "0.2.5";
@@ -91,3 +94,160 @@ test("bounded async profile probes stay parallel", async () => {
 	expect(finding.evidence?.probe_concurrency).toBe(6);
 	expect(finding.evidence?.probe_elapsed_ms).toBeLessThan(2000);
 });
+
+const ownedScratch: OwnedTmp[] = [];
+afterEach(() => { for (const owned of ownedScratch.splice(0)) owned.cleanup(); });
+function scratch(label: string): string {
+	const owned = ownedTmp(label);
+	ownedScratch.push(owned);
+	return owned.path;
+}
+
+const fixRuleA = `---\ndescription: "fixture stream rule"\ncondition:\n  - 'fixture-token-xyz'\n---\nfixture stream body\n`;
+const fixStanding = `---\ndescription: "fixture standing law"\nalwaysApply: true\n---\nfixture standing body\n`;
+const fixASha = createHash("sha256").update(fixRuleA).digest("hex");
+const fixStandingSha = createHash("sha256").update(fixStanding).digest("hex");
+// DI seam: the manifest sha lookup the doctor wires from MANIFEST.tsv.
+const fixLookup = (name: string): string | null => name === "kit-a" ? fixASha : name === "kit-standing-law" ? fixStandingSha : null;
+
+function fixRelease(base: string, version: string, tag: string, stream = fixRuleA): string {
+	const dir = join(base, `release-${tag}`);
+	mkdirSync(join(dir, "rules"), { recursive: true });
+	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "omp-kit-companion", version, description: "fixture release", omp: { name: "omp-kit-companion", version, description: "fixture release", extensions: [] } }));
+	writeFileSync(join(dir, "rules", "kit-a.md"), stream);
+	writeFileSync(join(dir, "rules", "kit-standing-law.md"), fixStanding);
+	return dir;
+}
+
+function fixHome(base: string, name: string, release: string | null, version: string | null, overlay: boolean): string {
+	const dir = join(base, name);
+	mkdirSync(join(dir, ".omp", "agent"), { recursive: true });
+	writeFileSync(join(dir, ".omp", "agent", "config.yml"), "memory:\n  backend: off\n");
+	if (release !== null && version !== null) {
+		const plugins = join(dir, ".omp", "plugins");
+		mkdirSync(join(plugins, "node_modules"), { recursive: true });
+		symlinkSync(release, join(plugins, "node_modules", "omp-kit-companion"));
+		writeFileSync(join(plugins, "omp-plugins.lock.json"), JSON.stringify({ plugins: { "omp-kit-companion": { version, enabled: true } }, settings: {} }));
+		writeFileSync(join(plugins, "installed_plugins.json"), "{}");
+		writeFileSync(join(plugins, "package.json"), JSON.stringify({ name: "omp-plugins", private: true, dependencies: { "omp-kit-companion": `github:JYeswak/omp-kit-companion#v${version}` } }));
+		writeFileSync(join(dir, ".omp", "marketplaces.json"), "{}");
+	}
+	if (overlay) {
+		mkdirSync(join(dir, ".omp", "agent", "rules"), { recursive: true });
+		writeFileSync(join(dir, ".omp", "agent", "rules", "kit-a.md"), fixRuleA);
+	}
+	return dir;
+}
+
+// Boundary assert: the doctor's own finding shape, guaranteed by the code under test.
+type ProfileRow = { status: unknown; plugin_version: unknown; versionMismatch?: unknown; kit_rules: { plugin: unknown; overlays: unknown; legacy: unknown; missing: unknown; always_apply: { rules: unknown; missing: unknown } } };
+function rowOf(finding: Finding): ProfileRow {
+	const envelope = finding.evidence as { profiles: [ProfileRow] };
+	return envelope.profiles[0] as ProfileRow;
+}
+
+function stateFiles(dir: string): string[] {
+	const found: string[] = [];
+	const stack: string[] = [dir];
+	while (stack.length) {
+		const current = stack.pop() as string;
+		for (const entry of readdirSync(current)) {
+			const path = join(current, entry);
+			const stat = lstatSync(path);
+			if (stat.isDirectory() && !stat.isSymbolicLink()) stack.push(path);
+			else if (/\.db(-wal|-shm|-journal)?$/.test(entry)) found.push(path);
+		}
+	}
+	return found;
+}
+
+test("isolated probe HOME carries plugin scope and overlays but no state", () => {
+	const base = scratch("prof2-probehome");
+	const release = fixRelease(base, "7.7.7", "new");
+	const home = fixHome(base, "home", release, "7.7.7", true);
+	writeFileSync(join(home, ".omp", "agent", "agent.db"), "junk-state");
+	const isolated = isolatedProbeHome(home, "default");
+	try {
+		expect(readlinkSync(join(isolated.home, ".omp", "plugins", "node_modules", "omp-kit-companion"))).toBe(release);
+		expect(lstatSync(join(isolated.home, ".omp", "plugins", "omp-plugins.lock.json")).isFile()).toBe(true);
+		expect(lstatSync(join(isolated.home, ".omp", "plugins", "package.json")).isFile()).toBe(true);
+		expect(lstatSync(join(isolated.home, ".omp", "marketplaces.json")).isFile()).toBe(true);
+		expect(lstatSync(join(isolated.home, ".omp", "agent", "config.yml")).isFile()).toBe(true);
+		expect(lstatSync(join(isolated.home, ".omp", "agent", "rules", "kit-a.md")).isFile()).toBe(true);
+		expect(stateFiles(isolated.home)).toEqual([]);
+	} finally {
+		isolated.cleanup();
+	}
+	expect(() => lstatSync(isolated.home)).toThrow();
+});
+
+test("profilePluginRuleStatus grades ON, STALE, MISSING and UNVERIFIED", () => {
+	const base = scratch("prof2-rulestatus");
+	const release = fixRelease(base, "7.7.7", "new");
+	const home = fixHome(base, "home", release, "7.7.7", false);
+	const at = { version: "7.7.7", sha256: fixLookup };
+	expect(profilePluginRuleStatus(home, "default", "kit-a", at).status).toBe("ON");
+	expect(profilePluginRuleStatus(home, "default", "kit-standing-law", at).status).toBe("ON");
+	const stale = fixHome(base, "stale", release, "7.7.6", false);
+	expect(profilePluginRuleStatus(stale, "default", "kit-a", at)).toMatchObject({ status: "STALE", version: "7.7.6" });
+	const drifted = fixRelease(base, "7.7.7", "drift", `${fixRuleA}drift\n`);
+	const driftHome = fixHome(base, "drift", drifted, "7.7.7", false);
+	expect(profilePluginRuleStatus(driftHome, "default", "kit-a", at).status).toBe("STALE");
+	const bare = fixHome(base, "bare", null, null, false);
+	expect(profilePluginRuleStatus(bare, "default", "kit-a", at).status).toBe("MISSING");
+	expect(profilePluginRuleStatus(home, "default", "../x", at).status).toBe("UNVERIFIED");
+});
+
+async function liveFinding(home: string): Promise<Finding> {
+	return inspectEffectiveRulesAsync({
+		home, ompPath: resolveOmpIdentity(process.env).launcher, kitVersion: "7.7.7", ompVersion: null,
+		rules: ["kit-a", "kit-standing-law"], always_rules: ["kit-standing-law"], ruleSha256: fixLookup,
+		profiles: [{ name: "default" }],
+	});
+}
+
+test("fixture HOME with real omp: linked release reports OK with zero missing", async () => {
+	const base = scratch("prof2-live-ok");
+	const home = fixHome(base, "home", fixRelease(base, "7.7.7", "new"), "7.7.7", false);
+	const finding = await liveFinding(home);
+	const row = rowOf(finding);
+	expect(finding.status).toBe("OK");
+	expect(row.status).toBe("OK");
+	expect(row.plugin_version).toBe("7.7.7");
+	expect(row.kit_rules.plugin).toEqual(["kit-a"]);
+	expect(row.kit_rules.missing).toEqual([]);
+	expect(row.kit_rules.always_apply.missing).toEqual([]);
+	expect(stateFiles(home)).toEqual([]);
+}, 120_000);
+
+test("fixture HOME with real omp: no plugin link reports every kit rule missing", async () => {
+	const base = scratch("prof2-live-nolink");
+	const home = fixHome(base, "home", null, null, false);
+	const finding = await liveFinding(home);
+	const row = rowOf(finding);
+	expect(finding.status).toBe("DEGRADED");
+	expect(row.plugin_version).toBeNull();
+	expect(row.kit_rules.missing).toEqual(["kit-a"]);
+	expect(row.kit_rules.always_apply.missing).toEqual(["kit-standing-law"]);
+}, 120_000);
+
+test("fixture HOME with real omp: older linked release reports STALE", async () => {
+	const base = scratch("prof2-live-stale");
+	const home = fixHome(base, "home", fixRelease(base, "7.7.6", "old"), "7.7.6", false);
+	const finding = await liveFinding(home);
+	const row = rowOf(finding);
+	expect(finding.status).toBe("DEGRADED");
+	expect(row.versionMismatch).toBe("7.7.6 vs 7.7.7");
+	expect(row.kit_rules.always_apply.missing).toEqual(["kit-standing-law"]);
+}, 120_000);
+
+test("fixture HOME with real omp: native overlay keeps OK and is listed", async () => {
+	const base = scratch("prof2-live-overlay");
+	const home = fixHome(base, "home", fixRelease(base, "7.7.7", "new"), "7.7.7", true);
+	const finding = await liveFinding(home);
+	const row = rowOf(finding);
+	expect(finding.status).toBe("OK");
+	expect(row.kit_rules.overlays).toEqual(["kit-a"]);
+	expect(row.kit_rules.missing).toEqual([]);
+	expect(row.kit_rules.always_apply.missing).toEqual([]);
+}, 120_000);

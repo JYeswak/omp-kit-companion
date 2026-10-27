@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import type { Dirent, Stats } from "node:fs";
+import { accessSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { ownedTmp } from "./kitlib/tmp.ts";
+import { run, runSync } from "./kitlib/run.ts";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { YAML } from "bun";
 import { observeOmpLauncherVersion, observeOmpManagers, resolveOmpIdentity } from "./paths.ts";
@@ -64,6 +64,7 @@ export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly strin
 	"regex-tools": ["regex-tools"],
 	"test-scope": ["test-scope"],
 	rch: ["rch", "rch_gc_roots", "rch_workers"],
+	activation: ["activation"],
 };
 export type RuleClass = "always" | "tripwire" | "reminder" | "router" | "canary";
 export interface ManifestRule { name: string; sha256: string; ruleClass: RuleClass; pack: string }
@@ -1198,7 +1199,7 @@ export function inspectPublicFilesScope(project: string, kitRoot: string): Findi
 }
 /** Read-only inventory: equality is evidence about bytes, never authority to overwrite or retire. */
 type EffectiveRuleProbe = (profile: string, command: "ttsr" | "plugin") => unknown;
-export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; always_rules?: readonly string[]; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
+export interface EffectiveRulesInput { home: string; ompPath: string; kitVersion: string | null; ompVersion: string | null; rules: readonly string[]; always_rules?: readonly string[]; ruleSha256?: (ruleName: string) => string | null; profiles: readonly { name: string; issue?: string }[]; probe?: EffectiveRuleProbe }
 
 function nativeProfileArgs(ompPath: string, profile: string, command: "ttsr" | "plugin"): readonly string[] {
 	return [ompPath, ...(profile === "default" ? [] : ["--profile", profile]), command, "list", "--json"];
@@ -1237,13 +1238,71 @@ function copyProbeConfigs(fromDir: string, toDir: string): void {
 	}
 }
 
+/** Profile plugin scope: default resolves under ~/.omp, named profiles under ~/.omp/profiles/<name>. Both the probe copy and the link read below resolve through this so they can never disagree. */
+export function pluginScopeSegments(profile: string): readonly string[] {
+	return profile === "default" ? [".omp"] : [".omp", "profiles", profile];
+}
+
+/** Recreate a link tree (plugin node_modules): symlinks come back as symlinks so OMP resolves the same bytes; small files copy, directories recurse. */
+function replicateLinkTree(fromDir: string, toDir: string): void {
+	let entries: string[];
+	try {
+		entries = readdirSync(fromDir);
+	} catch {
+		return;
+	}
+	mkdirSync(toDir, { recursive: true });
+	for (const entry of entries) {
+		if (entry === "." || entry === "..") continue;
+		const source = join(fromDir, entry);
+		const dest = join(toDir, entry);
+		let stat;
+		try {
+			stat = lstatSync(source);
+		} catch {
+			continue;
+		}
+		try {
+			lstatSync(dest);
+			continue;
+		} catch {
+			// Absent: create below.
+		}
+		try {
+			if (stat.isSymbolicLink()) symlinkSync(readlinkSync(source), dest);
+			else if (stat.isFile()) {
+				if (stat.size <= PROBE_CONFIG_COPY_BYTES) writeFileSync(dest, readFileSync(source));
+			} else if (stat.isDirectory()) replicateLinkTree(source, dest);
+		} catch {
+			// Unreadable entry reads as absent; the probe reports it.
+		}
+	}
+}
+
+/** Copy one small file; missing, oversized or non-file sources stay absent. */
+function copyProbeFile(source: string, dest: string): void {
+	try {
+		const stat = lstatSync(source);
+		if (!stat.isFile() || stat.size > PROBE_CONFIG_COPY_BYTES) return;
+		mkdirSync(dirname(dest), { recursive: true });
+		writeFileSync(dest, readFileSync(source));
+	} catch {
+		// Unreadable file reads as absent; the probe reports it.
+	}
+}
+
 /**
  * Isolated HOME for OMP probes. OMP initializes SQLite state (agent.db-wal
  * and agent.db-shm) under $HOME on startup, so probing with the inspected
- * HOME mutates it. The isolated copy carries only the small config files OMP
- * needs to resolve the profile; rule and plugin paths in OMP output stay
- * absolute, so findings match a real-HOME run byte for byte. Cleanup removes
- * the whole tree; call it in a finally.
+ * HOME mutates it. The isolated copy carries the small config files OMP needs
+ * to resolve the profile, plus the profile's plugin scope (lock files,
+ * node_modules links, marketplaces) and its native overlay rules, so plugin
+ * and rule paths resolve exactly as they do under the inspected HOME.
+ * Without the scope's plugins tree the spawned OMP sees no plugin and every
+ * kit rule reads missing. Database, cache, session and state subtrees stay
+ * behind, and probes run only read-only list commands, so neither the
+ * inspected HOME nor the linked releases are written. Cleanup removes the
+ * whole tree; call it in a finally.
  */
 export function isolatedProbeHome(home: string, profile: string): { home: string; cleanup: () => void } {
 	// Owned: a killed probe used to leak omp-kit-probe-home-* (139 dirs, 11 GB).
@@ -1251,7 +1310,14 @@ export function isolatedProbeHome(home: string, profile: string): { home: string
 	const root = owned.path;
 	const tempHome = join(root, "home");
 	copyProbeConfigs(join(home, ".omp", "agent"), join(tempHome, ".omp", "agent"));
-	copyProbeConfigs(join(home, ".omp", "profiles", profile, "agent"), join(tempHome, ".omp", "profiles", profile, "agent"));
+	const agentDir = profile === "default" ? join(home, ".omp", "agent") : join(home, ".omp", "profiles", profile, "agent");
+	const tempAgentDir = profile === "default" ? join(tempHome, ".omp", "agent") : join(tempHome, ".omp", "profiles", profile, "agent");
+	if (profile !== "default") copyProbeConfigs(agentDir, tempAgentDir);
+	const scope = pluginScopeSegments(profile);
+	copyProbeConfigs(join(home, ...scope, "plugins"), join(tempHome, ...scope, "plugins"));
+	replicateLinkTree(join(home, ...scope, "plugins", "node_modules"), join(tempHome, ...scope, "plugins", "node_modules"));
+	copyProbeFile(join(home, ...scope, "marketplaces.json"), join(tempHome, ...scope, "marketplaces.json"));
+	copyProbeConfigs(join(agentDir, "rules"), join(tempAgentDir, "rules"));
 	return { home: tempHome, cleanup: () => {
 		try {
 			owned.cleanup();
@@ -1262,16 +1328,46 @@ export function isolatedProbeHome(home: string, profile: string): { home: string
 }
 
 
-export function runEffectiveRuleProbe(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): unknown {
-	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
-	const isolated = isolatedProbeHome(home, profile);
-	const env = { ...process.env, HOME: isolated.home };
+/**
+ * Rewrite isolated-HOME-rooted paths in probe output back to the inspected
+ * HOME. The isolated tree mirrors the inspected one, so every path OMP
+ * reports under it names the same file under the inspected HOME. Findings
+ * therefore match a real-HOME run path for path. JSON round-trip keeps the
+ * rewrite to plain strings; both probe commands already parse stdout as JSON.
+ */
+function rehomeProbeOutput(output: unknown, isolatedHome: string, home: string): unknown {
+	if (isolatedHome === home) return output;
+	return JSON.parse((JSON.stringify(output) ?? "null").split(isolatedHome).join(home));
+}
+
+function probeEnv(isolatedHome: string): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+	env.HOME = isolatedHome;
 	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
+	return env;
+}
+
+function spawnProbeSync(ompPath: string, home: string, isolatedHome: string, profile: string, command: "ttsr" | "plugin"): unknown {
+	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
+	const result = runSync([executable!, ...args], { deadline_s: 15, cwd: home, env: probeEnv(isolatedHome) });
+	if (result.truncated) throw new Error(`${command} output exceeded the capture cap`);
+	if (result.rc !== 0) throw new Error(`${command} exited ${result.rc ?? "unknown"}`);
+	return JSON.parse(Buffer.from(result.stdout).toString("utf8"));
+}
+
+async function spawnProbeAsync(ompPath: string, home: string, isolatedHome: string, profile: string, command: "ttsr" | "plugin"): Promise<unknown> {
+	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
+	const result = await run([executable!, ...args], { deadline_s: 15, cwd: home, env: probeEnv(isolatedHome) });
+	if (result.truncated) throw new Error(`${command} output exceeded the capture cap`);
+	if (result.rc !== 0) throw new Error(`${command} exited ${result.rc ?? "unknown"}`);
+	return JSON.parse(Buffer.from(result.stdout).toString("utf8"));
+}
+
+export function runEffectiveRuleProbe(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): unknown {
+	const isolated = isolatedProbeHome(home, profile);
 	try {
-		const result = spawnSync(executable!, args, { cwd: home, env, encoding: "utf8", timeout: 15000 });
-		if (result.error) throw result.error;
-		if (result.status !== 0) throw new Error(`${command} exited ${result.status ?? "unknown"}`);
-		return JSON.parse(result.stdout);
+		return rehomeProbeOutput(spawnProbeSync(ompPath, home, isolated.home, profile, command), isolated.home, home);
 	} finally {
 		isolated.cleanup();
 	}
@@ -1293,10 +1389,87 @@ function ruleSource(home: string, profile: string, item: Record<string, unknown>
 	return "absent";
 }
 
+/** Link-level activation of one plugin rule for one profile: ON only when the link resolves, its version matches the release, and the rule bytes match the manifest. */
+export type PluginRuleActivation = "ON" | "STALE" | "MISSING" | "UNVERIFIED";
+export interface PluginRuleStatus {
+	status: PluginRuleActivation;
+	profile: string;
+	rule: string;
+	link: string;
+	target: string | null;
+	version: string | null;
+	expected_version: string | null;
+	sha256: string | null;
+	expected_sha256: string | null;
+	reason: string;
+}
+export interface PluginRuleRelease {
+	version: string | null;
+	sha256: (rule: string) => string | null;
+}
+export function profilePluginRuleStatus(home: string, profile: string, rule: string, release: PluginRuleRelease): PluginRuleStatus {
+	const link = join(home, ...pluginScopeSegments(profile), "plugins", "node_modules", "omp-kit-companion");
+	const base = { profile, rule, link, target: null as string | null, version: null as string | null, expected_version: release.version, sha256: null as string | null, expected_sha256: null as string | null };
+	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(rule)) return { ...base, status: "UNVERIFIED", reason: `refused unsafe rule name: ${rule}` };
+	try {
+		const stat = lstatSync(link);
+		if (!stat.isSymbolicLink() && !stat.isDirectory()) return { ...base, status: "UNVERIFIED", reason: "plugin path is neither a directory nor a symlink" };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ...base, status: "MISSING", reason: "plugin link is absent" };
+		return { ...base, status: "UNVERIFIED", reason: `plugin link is unreadable: ${errorText(error)}` };
+	}
+	let target: string;
+	try {
+		target = realpathSync(link);
+	} catch {
+		return { ...base, status: "STALE", reason: "plugin symlink is broken" };
+	}
+	// Lock version first (a current link can pin a stale lock, STAMP1), then the linked package.
+	let version: string | null = null;
+	try {
+		const lock: unknown = JSON.parse(readFileSync(join(home, ...pluginScopeSegments(profile), "plugins", "omp-plugins.lock.json"), "utf8"));
+		const plugins = record(lock) ? (lock as Record<string, unknown>).plugins : undefined;
+		const entry = record(plugins) ? (plugins as Record<string, unknown>)["omp-kit-companion"] : undefined;
+		if (record(entry) && typeof entry.version === "string") version = entry.version;
+	} catch {
+		// Fall through to the linked package below.
+	}
+	if (version === null) {
+		try {
+			const pkg: unknown = JSON.parse(readFileSync(join(target, "package.json"), "utf8"));
+			if (record(pkg) && typeof pkg.version === "string") version = pkg.version;
+		} catch {
+			// Version stays null: currency is unproven below.
+		}
+	}
+	let sha: string | null = null;
+	try {
+		sha = digest(fileBytes(join(target, "rules", `${rule}.md`)));
+	} catch {
+		sha = null;
+	}
+	const expectedSha = release.sha256(rule);
+	if (sha === null) return { ...base, target, version, expected_sha256: expectedSha, status: "MISSING", reason: "rule file is absent from the linked plugin" };
+	if (version === null || release.version === null) return { ...base, target, version, sha256: sha, expected_sha256: expectedSha, status: "UNVERIFIED", reason: "plugin version is unreadable; link currency is unproven" };
+	if (version !== release.version) return { ...base, target, version, sha256: sha, expected_sha256: expectedSha, status: "STALE", reason: `plugin version ${version} differs from release ${release.version}` };
+	if (expectedSha === null || sha !== expectedSha) return { ...base, target, version, sha256: sha, expected_sha256: expectedSha, status: "STALE", reason: "linked rule bytes differ from the release manifest" };
+	return { ...base, target, version, sha256: sha, expected_sha256: expectedSha, status: "ON", reason: "linked plugin version and rule bytes match the release" };
+}
+
 export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
-	const probe = input.probe ?? ((profile, command) => runEffectiveRuleProbe(input.ompPath, input.home, profile, command));
+	// The ttsr and plugin outputs of one profile are compared path-by-path, so both commands observe a single isolated HOME per profile. Separate homes diverge (different temp roots) and every kit rule reads absent.
+	const sharedHomes = input.probe ? undefined : new Map<string, { home: string; cleanup: () => void }>();
+	const probe = input.probe ?? ((profile, command) => {
+		let isolated = sharedHomes?.get(profile);
+		if (!isolated) {
+			isolated = isolatedProbeHome(input.home, profile);
+			sharedHomes?.set(profile, isolated);
+		}
+		return rehomeProbeOutput(spawnProbeSync(input.ompPath, input.home, isolated.home, profile, command), isolated.home, input.home);
+	});
 	const profileRows: Record<string, unknown>[] = [];
 	let failed = false;
+	try {
 	for (const profile of input.profiles) {
 		if (profile.issue) { profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: profile.issue }); failed = true; continue; }
 		try {
@@ -1313,8 +1486,7 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			const legacy = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion, kitPackageDir) === "legacy");
 			const overlays = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion, kitPackageDir) === "native_overlay");
 			const pluginRules = conditionalRules.filter(name => byName.has(name) && ruleSource(input.home, profile.name, byName.get(name)!, pluginVersion, kitPackageDir) === "kit_plugin");
-			const pluginPath = kitPlugin && typeof kitPlugin.path === "string" ? kitPlugin.path : null;
-			const alwaysMissing = [...alwaysRules].filter(name => !pluginPath || !existsSync(join(pluginPath, "rules", `${name}.md`)));
+			const alwaysMissing = [...alwaysRules].filter(name => profilePluginRuleStatus(input.home, profile.name, name, { version: input.kitVersion, sha256: input.ruleSha256 ?? (() => null) }).status !== "ON");
 			const versionMismatch = pluginRules.length > 0 && input.kitVersion !== null && pluginVersion !== input.kitVersion;
 			const status = missing.length || legacy.length || versionMismatch || alwaysMissing.length || !pluginRules.length && !overlays.length ? "DEGRADED" : "OK";
 			if (status !== "OK") failed = true;
@@ -1324,36 +1496,47 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: errorText(error) });
 		}
 	}
+	} finally {
+		if (sharedHomes) for (const isolated of sharedHomes.values()) {
+			try {
+				isolated.cleanup();
+			} catch {
+				// Best effort; the exit/signal registry retries and the reaper reads .owner.
+			}
+		}
+	}
 	return finding("effective_rules", failed ? "DEGRADED" : "OK", failed ? "One or more OMP profiles do not load every kit rule from the matching plugin" : "Every covered OMP profile loads kit rules from the matching plugin or a declared native overlay", "Run omp-kit apply plugin --plan, then apply the approved per-profile plugin plan; legacy ~/.agents/rules copies are owned by migrate.", { profiles: profileRows, kit_version: input.kitVersion, omp_version: input.ompVersion, legacy_rules_not_considered_authority: true });
 }
-async function runEffectiveRuleProbeAsync(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): Promise<unknown> {
-	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
-	const isolated = isolatedProbeHome(home, profile);
-	const env = { ...process.env, HOME: isolated.home };
-	delete env.OMP_PROFILE; delete env.PI_PROFILE; delete env.PI_CODING_AGENT_DIR;
-	try {
-		const child = Bun.spawn([executable!, ...args], { cwd: home, env, stdout: "pipe", stderr: "pipe" });
-		const status = await child.exited;
-		if (status !== 0) throw new Error(`${command} exited ${status}`);
-		return JSON.parse(await new Response(child.stdout).text());
-	} finally {
-		isolated.cleanup();
-	}
-}
-
 export async function inspectEffectiveRulesAsync(input: EffectiveRulesInput, concurrency = 6): Promise<Finding> {
 	const started = performance.now();
 	const outputs = new Map<string, { ttsr: unknown; plugin: unknown } | Error>();
+	const sharedHomes = new Map<string, { home: string; cleanup: () => void }>();
 	let cursor = 0;
 	const workers = Array.from({ length: Math.min(concurrency, input.profiles.length) }, async () => {
 		while (cursor < input.profiles.length) {
 			const profile = input.profiles[cursor++]!;
 			if (profile.issue) continue;
-			try { const [ttsr, plugin] = await Promise.all([runEffectiveRuleProbeAsync(input.ompPath, input.home, profile.name, "ttsr"), runEffectiveRuleProbeAsync(input.ompPath, input.home, profile.name, "plugin")]); outputs.set(profile.name, { ttsr, plugin }); }
+			// One isolated HOME per profile: both commands must observe the same tree or their paths diverge.
+			let isolated = sharedHomes.get(profile.name);
+			if (!isolated) {
+				isolated = isolatedProbeHome(input.home, profile.name);
+				sharedHomes.set(profile.name, isolated);
+			}
+			try { const [ttsr, plugin] = await Promise.all([spawnProbeAsync(input.ompPath, input.home, isolated.home, profile.name, "ttsr"), spawnProbeAsync(input.ompPath, input.home, isolated.home, profile.name, "plugin")]); outputs.set(profile.name, { ttsr: rehomeProbeOutput(ttsr, isolated.home, input.home), plugin: rehomeProbeOutput(plugin, isolated.home, input.home) }); }
 			catch (error) { outputs.set(profile.name, error instanceof Error ? error : new Error(String(error))); }
 		}
 	});
-	await Promise.all(workers);
+	try {
+		await Promise.all(workers);
+	} finally {
+		for (const isolated of sharedHomes.values()) {
+			try {
+				isolated.cleanup();
+			} catch {
+				// Best effort; the exit/signal registry retries and the reaper reads .owner.
+			}
+		}
+	}
 	const finding = inspectEffectiveRules({ ...input, probe: (profile, command) => { const result = outputs.get(profile); if (result instanceof Error) throw result; if (!result) throw new Error("profile probe missing"); return result[command]; } });
 	return { ...finding, evidence: { ...(finding.evidence ?? {}), probe_method: "bounded_async_native_spawn", probe_concurrency: concurrency, probe_elapsed_ms: performance.now() - started } };
 }
@@ -2210,9 +2393,10 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		const packageValue = JSON.parse(fileBytes(join(root, "package.json")).toString("utf8"));
 		kitVersion = record(packageValue) && typeof packageValue.version === "string" ? packageValue.version : null;
 	} catch {}
-	const alwaysRules = manifest.rules.filter(rule => { try { return /^alwaysApply:\s*true/m.test(fileBytes(join(root, "rules", `${rule.name}.md`)).toString("utf8")); } catch { return false; } }).map(rule => rule.name);
-		const effectiveRules = !manifest.error
-			? await inspectEffectiveRulesAsync({ home, ompPath: input.ompPath, kitVersion, ompVersion: typeof effectiveOmpEvidence?.version === "string" ? effectiveOmpEvidence.version : null, rules: manifest.rules.map(rule => rule.name), always_rules: alwaysRules, profiles: profiles.profiles })
+const alwaysRules = manifest.rules.filter(rule => { try { return /^alwaysApply:\s*true/m.test(fileBytes(join(root, "rules", `${rule.name}.md`)).toString("utf8")); } catch { return false; } }).map(rule => rule.name);
+const ruleSha256 = new Map(manifest.rules.map(rule => [rule.name, rule.sha256] as const));
+	const effectiveRules = !manifest.error
+		? await inspectEffectiveRulesAsync({ home, ompPath: input.ompPath, kitVersion, ompVersion: typeof effectiveOmpEvidence?.version === "string" ? effectiveOmpEvidence.version : null, rules: manifest.rules.map(rule => rule.name), always_rules: alwaysRules, ruleSha256: (name) => ruleSha256.get(name) ?? null, profiles: profiles.profiles })
 			: finding("effective_rules", "UNVERIFIED", "Native OMP identity or release manifest is unavailable; effective per-profile rules were not inspected", "Install OMP and rerun omp-kit doctor --scope rules.");
 		rows.push(effectiveRules);
 	}
