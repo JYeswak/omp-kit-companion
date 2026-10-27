@@ -394,6 +394,8 @@ its retained release directory must not be deleted or overwritten to force retry
 
 ## 7. Release train (RELTRAIN1, automatic; manual cut is the fallback)
 
+**Current route.** The CI pipeline and this train are suspended. Their workflows are disabled. Releases are cut on the signing Mac with `scripts/release-local.sh` as soon as accepted work is on `main` (see [release-signing.md](release-signing.md) and the stages in [AGENTS.md](../AGENTS.md#landing-the-plane)). The train described below is kept for the day CI returns. It is not the authority for done while CI is suspended.
+
 Each CI main push completion wakes the existing controller. It reconciles
 the newest qualified source by main ancestry, not the event's order or current
 branch head. A red/running descendant does not invalidate an eligible green

@@ -113,7 +113,13 @@ The kit is an installable companion for an existing OMP: a tested rule pack, a p
 
 ## Landing the Plane
 
-A task is done when its change is on `main` with CI green and its acceptance re-run by someone other than the implementer, with the output cited at the exact commit. Any user-visible change on `main` ships in a release within 7 days. New research or decision-gate work needs a named user who asked for it. This project is built in public: a change that moves an item's status updates [ROADMAP.md](ROADMAP.md) in the same commit. Before ending a session: commit and push to `main`, release your reservations, and leave no finished work uncommitted.
+Work moves through three stages. Each is reported on its own and never folded into another:
+
+1. **Accepted.** The change is on `main`, its exact tree has a full-suite PASS (`scripts/full-suite-verdict.sh`, recorded by the pre-push gate), and someone other than the implementer re-ran its acceptance at that commit and cited the output.
+2. **Published.** A release containing the commit was cut with `scripts/release-local.sh`. That is the release route while the CI pipeline is suspended (see [docs/release-signing.md](docs/release-signing.md)), so a green CI run is not a requirement.
+3. **Running.** The intended consumer loads that release. Show it with a readback, for example a profile's plugin link resolving to the release and `omp-kit doctor --scope activation`, never with an install log alone.
+
+A task is done at the stage its acceptance names. Do not close early when acceptance requires rollout. Do not hold a source-only fix for an unrelated rollout either. Release as soon as accepted work is on `main`. Any user-visible change on `main` ships within 7 days at the latest. New research or decision-gate work needs a named user who asked for it. This project is built in public: a change that moves an item's status updates [ROADMAP.md](ROADMAP.md) in the same commit. Before ending a session: commit and push to `main`, release your reservations, and leave no finished work uncommitted.
 
 ## Note on Built-in TODO Functionality
 

@@ -34,7 +34,7 @@ The maintainer's long-term goal, recorded 2026-10-04 and not yet planned: every 
 - **Constraints.** The reward is the real outcome (independently reviewed, proven live, stayed closed), never speed of closing. Small samples are reported as such. Mining stays on the user's machine.
 - **When.** After the current projects wrap up, possibly as separate projects, each with its own planning. Existing beads feed it: F2, MT2, SM1, LR1, MP5, MP7.
 
-**Done** means merged to `main` with CI green, and the acceptance checks re-run by someone other than the author, with output cited. Evidence from a synthetic HOME never closes a real-machine check.
+**Done** happens in three stages: accepted, published and running (defined in [AGENTS.md](AGENTS.md#landing-the-plane)). An item is done at the stage its acceptance names: on `main` with an exact-tree full-suite PASS and a non-author re-run at that commit with output cited, then cut by `scripts/release-local.sh`, then loaded where it is meant to run, when the item's acceptance requires those stages. Evidence from a synthetic HOME never closes a real-machine check.
 
 ## Why this round exists (reality check, 2026-10-01)
 

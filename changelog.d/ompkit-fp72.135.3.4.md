@@ -1,0 +1,3 @@
+### Changed
+
+- The definition of done now has three separately reported stages that match the local release route. A change is **accepted** when it is on `main` with an exact-tree full-suite PASS and a non-author acceptance re-run at that commit. It is **published** when a `scripts/release-local.sh` cut contains it. It is **running** when the intended consumer is shown to load that release. Green CI is no longer a requirement while the CI pipeline is suspended. A task is done at the stage its acceptance names, and releases are cut as soon as accepted work is on `main` (AGENTS.md "Landing the Plane", ROADMAP.md, docs/release-procedure.md section 7). (ompkit-fp72.135.3.4)
