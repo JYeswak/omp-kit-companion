@@ -113,7 +113,7 @@ function ternFixture(opts: { pasteCode?: number; overCap?: boolean; boundedReade
 				composer = "";
 				return { code: 0, out: "" };
 			}
-			if (argv[0] === "/bin/ps") return { code: 0, out: "Mon Oct 20 02:00:00 2026 omp" };
+			if (argv[0] === "/bin/ps") return { code: 0, out: "Mon Oct 20 02:00:00 2026 omp AGENT_NAME=FixtureSeat" };
 			if (argv[0] === "am") return { code: 0, out: JSON.stringify({ agent_name: "FixtureSeat", pane_id: `tern:${paneId}`, project_key: resolve(repo), binding: "verified-live" }) };
 			if (argv.includes("process")) return { code: 0, out: proc };
 			if (argv.includes("inspect")) return { code: 0, out: inspect };
@@ -146,7 +146,7 @@ function plantComposer(sessionFile: string, rec: Partial<{ empty: boolean; at: n
 
 function send(fx: TernFixture, dir: string, extra: { windowKey?: string; composer?: (sessionFile: string) => ComposerVerdict } = {}) {
 	return proveTernCliSend({ session: "omp-test", pane: "tern:5", message: "status update", dropDir: dir, cwd: fx.repo,
-		knownPrefixes: EMPTY_PREFIXES, env: {}, pollMs: 1, deadlineMs: 20, wait: noWait, io: fx.io, ...extra });
+		knownPrefixes: EMPTY_PREFIXES, env: { AGENT_MAIL_PROJECT: fx.repo }, pollMs: 1, deadlineMs: 20, wait: noWait, io: fx.io, ...extra });
 }
 
 const effects = (taken: Taken) => taken.luaDispatches + taken.pastes + taken.enters;
