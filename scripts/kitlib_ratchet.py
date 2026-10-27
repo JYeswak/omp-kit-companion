@@ -66,6 +66,9 @@ Modes:
                                              write the allowlist from the tracked tree
   kitlib_ratchet.py --check-baseline [--repo DIR]
                                              tracked tree within the committed allowlist
+  kitlib_ratchet.py --verify-reversal-message MSGFILE [--repo DIR]
+                                             commit-msg gate: exact named-X
+                                             reversal and per-path verdicts
 Ratchet: a finding is new when its (rule, line text without comments)
 fingerprint occurs more often in the new blob than in the old one (a rename
 keeps the old blob as baseline); only the surplus is reported, as the last
@@ -104,6 +107,8 @@ ALLOWLIST_DELETED = "allowlist-deleted"
 # The committed per-repo allowlist: site counts per rule per path.
 BASELINE = "scripts/kitlib-ratchet-baseline.json"
 BASELINE_SCHEMA = 1
+ORIGIN_QUERY_TIMEOUT_S = 10.0
+
 
 RULES = {
     RAW_SPAWN: "process spawned outside kitlib (no deadline, no process-group cancel, no output cap)",
@@ -404,6 +409,89 @@ def _blob(repo: str, spec: str) -> Optional[bytes]:
         raise core.GitError(f"git cat-file -e {spec}: TIMEOUT after {core.GIT_TIMEOUT_S:g}s")
     return core._git(repo, "cat-file", "blob", spec) if probe.returncode == 0 else None
 
+def _valid_object_id(value: str, *, full: bool = False) -> bool:
+    lengths = (40, 64) if full else range(7, 65)
+    return len(value) in lengths and all(char in "0123456789abcdefABCDEF" for char in value)
+
+
+def fresh_published_origin_sha(repo: str) -> str:
+    """Bind origin/main to the server's current ref without changing local refs."""
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    result = core.pysafe.run_bounded(
+        ["git", "-C", repo, "ls-remote", "--heads", "--exit-code", "origin", "refs/heads/main"],
+        ORIGIN_QUERY_TIMEOUT_S,
+        cap_bytes=4096,
+        env=env,
+    )
+    if result.outcome != core.pysafe.OK:
+        raise core.GitError(f"git ls-remote origin/main: TIMEOUT after {ORIGIN_QUERY_TIMEOUT_S:g}s")
+    if result.stdout_truncated:
+        raise core.GitError("git ls-remote origin/main: response over 4096 bytes")
+    if result.returncode != 0:
+        raise core.GitError("git ls-remote origin/main: published ref unavailable")
+    rows = [line.split() for line in result.stdout.splitlines() if line]
+    if len(rows) != 1 or len(rows[0]) != 2 or rows[0][1] != b"refs/heads/main":
+        raise core.GitError("git ls-remote origin/main: expected exactly one published ref")
+    try:
+        published = rows[0][0].decode("ascii")
+        tracked = core._git(repo, "rev-parse", "--verify",
+                            "refs/remotes/origin/main^{commit}").decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise core.GitError("origin/main returned a non-ASCII object id") from exc
+    if not _valid_object_id(published, full=True) or not _valid_object_id(tracked, full=True):
+        raise core.GitError("origin/main did not resolve to a full commit id")
+    if published.lower() != tracked.lower():
+        raise core.GitError("origin/main tracking ref is stale: published and tracked commit ids differ")
+    return published.lower()
+
+
+def _nul_paths(raw: bytes) -> Set[str]:
+    try:
+        return {path.decode("utf-8") for path in raw.split(b"\0") if path}
+    except UnicodeDecodeError as exc:
+        raise core.GitError("Git path list contains a non-UTF-8 path") from exc
+
+
+def _index_entry_matches_tree(repo: str, tree: str, path: str) -> bool:
+    result = core.pysafe.run_bounded(
+        ["git", "-C", repo, "--literal-pathspecs", "diff", "--cached", "--quiet",
+         "--no-ext-diff", "--no-textconv", "--no-renames", tree, "--", path],
+        core.GIT_TIMEOUT_S,
+        cap_bytes=4096,
+    )
+    if result.outcome != core.pysafe.OK:
+        raise core.GitError(f"git diff --cached {tree} -- {path}: TIMEOUT after {core.GIT_TIMEOUT_S:g}s")
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise core.GitError(f"git diff --cached {tree} -- {path}: exit {result.returncode}")
+
+
+def _origin_sha_from_admission(admission: str) -> Optional[str]:
+    marker = "origin/main@"
+    _, found, remainder = admission.partition(marker)
+    if not found:
+        return None
+    oid, separator, _ = remainder.partition(":")
+    return oid if separator and _valid_object_id(oid, full=True) else None
+
+
+def _admitted_origin_by_path(reports: Sequence[core.FileReport]) -> Dict[str, str]:
+    admitted: Dict[str, str] = {}
+    for report in reports:
+        for message in report.admissions:
+            oid = _origin_sha_from_admission(message)
+            if oid is not None:
+                admitted[report.path] = oid
+    return admitted
+
+
+def _reversal_verdict(payload: dict) -> None:
+    sys.stdout.write("kitlib-reversal: " + json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+
+
 
 def _judged(path: str) -> bool:
     ext = os.path.splitext(os.path.basename(path))[1]
@@ -438,39 +526,28 @@ class KitlibRuleSet(core.RuleSet):
                          "--diff-filter=AMRT", head)
 
     def _origin_equal_staged_paths(
-        self, repo: str, base: Optional[str], head: Optional[str]
+        self, repo: str, base: Optional[str], head: Optional[str], candidate_paths: Set[str]
     ) -> Dict[str, str]:
-        """Find staged paths changed from HEAD but identical to pinned origin/main."""
-        if head is not None or base is None:
+        """Bind only incumbent raw-spawn paths whose complete index entry equals published origin/main."""
+        if head is not None or base is None or not candidate_paths:
             return {}
-        probe = core.pysafe.run_bounded(
-            ["git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+
+        remote = core.pysafe.run_bounded(
+            ["git", "-C", repo, "config", "--get", "remote.origin.url"],
             core.GIT_TIMEOUT_S,
             cap_bytes=4096,
         )
-        if probe.outcome != core.pysafe.OK:
-            raise core.GitError(f"git show-ref origin/main: TIMEOUT after {core.GIT_TIMEOUT_S:g}s")
-        if probe.returncode == 1:
+        if remote.outcome != core.pysafe.OK:
+            raise core.GitError(f"git config remote.origin.url: TIMEOUT after {core.GIT_TIMEOUT_S:g}s")
+        if remote.returncode == 1:
             return {}
-        if probe.returncode != 0:
-            raise core.GitError(f"git show-ref origin/main: exit {probe.returncode}: "
-                                f"{probe.text('stderr').strip()}")
-        origin = core._git(repo, "rev-parse", "--verify", "origin/main^{commit}").decode("ascii").strip()
-        if not origin:
-            raise core.GitError("git rev-parse origin/main: empty commit id")
-        pairs = self.changed(self._diff(repo, base, head))
-        paths = {path for old, new in pairs for path in (old, new) if path is not None}
-        if not paths:
-            return {}
-        differs = {
-            path.decode("utf-8")
-            for path in core._git(
-                repo, "diff", "--cached", "--name-only", "-z", "--no-renames",
-                "--no-ext-diff", "--no-textconv", origin,
-            ).split(b"\0")
-            if path
+        if remote.returncode != 0:
+            raise core.GitError(f"git config remote.origin.url: exit {remote.returncode}")
+        origin = fresh_published_origin_sha(repo)
+        return {
+            path: origin for path in sorted(candidate_paths)
+            if _index_entry_matches_tree(repo, origin, path)
         }
-        return {path: origin for path in sorted(paths) if path not in differs}
 
     @staticmethod
     def _apply_origin_admissions(
@@ -482,24 +559,36 @@ class KitlibRuleSet(core.RuleSet):
         for path, origin in sorted(origin_equal.items()):
             report = by_path.get(path)
             if report is None:
-                report = core.FileReport(path)
-                reports.append(report)
-                by_path[path] = report
-            report.findings.clear()
+                continue
+            eligible = any(f.rule == RAW_SPAWN and f.suppressed is None for f in report.findings)
+            if not eligible:
+                continue
+            report.findings = [
+                finding for finding in report.findings
+                if finding.rule != RAW_SPAWN or finding.suppressed is not None
+            ]
             report.admissions.append(
-                f"staged path byte-identical to origin/main@{origin}: {path}"
+                f"incumbent raw-spawn entry matches exact staged path at origin/main@{origin}: {path}"
             )
         return reports
 
+    def _apply_published_origin_admissions(
+        self, repo: str, base: Optional[str], head: Optional[str], reports: List[core.FileReport]
+    ) -> List[core.FileReport]:
+        candidates = {
+            report.path for report in reports
+            if any(f.rule == RAW_SPAWN and f.suppressed is None for f in report.findings)
+        }
+        origin_equal = self._origin_equal_staged_paths(repo, base, head, candidates)
+        return self._apply_origin_admissions(reports, origin_equal)
+
     def ratchet(self, repo: str, base: Optional[str], head: Optional[str]) -> List[core.FileReport]:
-        origin_equal = self._origin_equal_staged_paths(repo, base, head)
         reports = super().ratchet(repo, base, head)
         new_raw = _blob(repo, _spec(head, BASELINE))
         old_raw = _blob(repo, _spec(base, BASELINE)) if base is not None else None
         if new_raw is None and old_raw is None:
             sys.stderr.write(f"{self.prog}: no {BASELINE}; judged against git history only\n")
-            reports = self._apply_origin_admissions(reports, origin_equal)
-            return reports
+            return self._apply_published_origin_admissions(repo, base, head, reports)
         listing = core.FileReport(BASELINE)
         old: Optional[Allowlist] = None
         if old_raw is not None:
@@ -564,8 +653,167 @@ class KitlibRuleSet(core.RuleSet):
                 report.findings.sort(key=lambda f: (f.line, f.col, f.rule))
         if listing.findings:
             reports.append(listing)
-        reports = self._apply_origin_admissions(reports, origin_equal)
-        return reports
+        return self._apply_published_origin_admissions(repo, base, head, reports)
+
+    def verify_reversal_message(self, repo: str, message_path: str) -> int:
+        try:
+            trailer_lines = core._git(repo, "interpret-trailers", "--parse", message_path).decode("utf-8").splitlines()
+            reverts = []
+            for line in trailer_lines:
+                key, separator, value = line.partition(":")
+                if separator and key.strip().casefold() == "revert":
+                    reverts.append(value.strip())
+            base = core._base_rev(repo, argparse.Namespace(base=None, staged=True, head=None))
+            reports = self.ratchet(repo, base, None)
+        except (UnicodeDecodeError, OSError, ValueError, core.GitError) as exc:
+            _reversal_verdict({"verdict": "REFUSED", "reason": str(exc).replace("\n", " ")})
+            return 2
+
+        admitted = _admitted_origin_by_path(reports)
+        active: Dict[str, List[str]] = {}
+        for report in reports:
+            rules = sorted({finding.rule for finding in report.active()})
+            if rules:
+                active[report.path] = rules
+
+        if not reverts:
+            if admitted:
+                _reversal_verdict({
+                    "verdict": "REFUSED",
+                    "reason": "missing Revert trailer for published-origin raw-spawn admission",
+                    "paths": [
+                        {"path": path, "verdict": "REFUSED", "origin_main": origin,
+                         "reason": "missing Revert trailer"}
+                        for path, origin in sorted(admitted.items())
+                    ],
+                })
+                return 1
+            if active:
+                _reversal_verdict({
+                    "verdict": "REFUSED",
+                    "reason": "native kitlib ratchet has staged findings",
+                    "paths": [
+                        {"path": path, "verdict": "REFUSED", "rules": rules}
+                        for path, rules in sorted(active.items())
+                    ],
+                })
+                return 1
+            return 0
+
+        if len(reverts) != 1:
+            _reversal_verdict({"verdict": "REFUSED", "reason": "expected exactly one Revert trailer"})
+            return 1
+        token = reverts[0]
+        if not _valid_object_id(token):
+            _reversal_verdict({"verdict": "REFUSED", "reason": "Revert trailer does not name a hexadecimal commit id"})
+            return 1
+        try:
+            named_x = core._git(repo, "rev-parse", "--verify", f"{token}^{{commit}}").decode("ascii").strip()
+            if not _valid_object_id(named_x, full=True):
+                raise core.GitError("resolved Revert commit id is not a full object id")
+            parents = core._git(repo, "rev-list", "--parents", "-n", "1", named_x).decode("ascii").split()
+        except (UnicodeDecodeError, core.GitError) as exc:
+            _reversal_verdict({"verdict": "REFUSED", "reason": f"Revert trailer does not resolve to one commit: {exc}"})
+            return 1
+        if len(parents) != 2 or parents[0].lower() != named_x.lower():
+            _reversal_verdict({
+                "verdict": "REFUSED",
+                "reason": "named X must have exactly one parent",
+                "revert": named_x,
+                "parents": parents[1:],
+            })
+            return 1
+        parent = parents[1]
+        ancestor = core.pysafe.run_bounded(
+            ["git", "-C", repo, "merge-base", "--is-ancestor", named_x, "HEAD"],
+            core.GIT_TIMEOUT_S,
+            cap_bytes=4096,
+        )
+        if ancestor.outcome != core.pysafe.OK:
+            _reversal_verdict({"verdict": "REFUSED", "reason": "cannot verify named X is in HEAD history"})
+            return 2
+        if ancestor.returncode == 1:
+            _reversal_verdict({"verdict": "REFUSED", "reason": "named X is not in HEAD history", "revert": named_x})
+            return 1
+        if ancestor.returncode != 0:
+            _reversal_verdict({"verdict": "REFUSED", "reason": "cannot verify named X is in HEAD history"})
+            return 2
+        try:
+            expected = _nul_paths(core._git(
+                repo, "diff-tree", "--no-commit-id", "-r", "--name-only", "-z", "--no-renames", parent, named_x
+            ))
+            staged = _nul_paths(core._git(
+                repo, "diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"
+            ))
+        except core.GitError as exc:
+            _reversal_verdict({"verdict": "REFUSED", "reason": str(exc).replace("\n", " ")})
+            return 2
+        if not expected:
+            _reversal_verdict({"verdict": "REFUSED", "reason": "named X has no changed paths to reverse",
+                               "revert": named_x, "parent": parent})
+            return 1
+        if expected != staged:
+            _reversal_verdict({
+                "verdict": "REFUSED",
+                "reason": "staged paths do not equal X changed paths",
+                "revert": named_x,
+                "parent": parent,
+                "paths": [
+                    {"path": path, "verdict": "REFUSED", "in_x": path in expected, "staged": path in staged}
+                    for path in sorted(expected | staged)
+                ],
+            })
+            return 1
+        try:
+            parent_matches = {
+                path: _index_entry_matches_tree(repo, parent, path) for path in sorted(expected)
+            }
+        except core.GitError as exc:
+            _reversal_verdict({"verdict": "REFUSED", "reason": str(exc).replace("\n", " ")})
+            return 2
+        if not all(parent_matches.values()):
+            _reversal_verdict({
+                "verdict": "REFUSED",
+                "reason": "staged entry does not match X parent",
+                "revert": named_x,
+                "parent": parent,
+                "paths": [
+                    {"path": path, "verdict": "PASS" if matches else "REFUSED",
+                     "x_parent_entry": "PASS" if matches else "REFUSED"}
+                    for path, matches in sorted(parent_matches.items())
+                ],
+            })
+            return 1
+        if active:
+            _reversal_verdict({
+                "verdict": "REFUSED",
+                "reason": "native kitlib ratchet has staged findings",
+                "revert": named_x,
+                "parent": parent,
+                "paths": [
+                    {"path": path, "verdict": "REFUSED", "rules": active.get(path, [])}
+                    for path in sorted(expected)
+                ],
+            })
+            return 1
+        origin_shas = set(admitted.values())
+        if len(origin_shas) > 1:
+            _reversal_verdict({"verdict": "REFUSED", "reason": "origin admission has inconsistent commit bindings"})
+            return 2
+        origin = next(iter(origin_shas), None)
+        _reversal_verdict({
+            "verdict": "PASS",
+            "revert": named_x,
+            "parent": parent,
+            "origin_main": origin,
+            "paths": [
+                {"path": path, "verdict": "PASS", "x_parent_entry": "PASS",
+                 "raw_spawn_admitted": path in admitted, "origin_main": admitted.get(path)}
+                for path in sorted(expected)
+            ],
+        })
+        return 0
+
 
     def tree_reports(self, repo: str) -> List[core.FileReport]:
         """Every tracked, judged, non-exempt work-tree file of ``repo``, under its repo-relative path."""
@@ -594,6 +842,12 @@ class KitlibRuleSet(core.RuleSet):
 
     def main(self, argv: Optional[Sequence[str]] = None) -> int:
         argv = list(sys.argv[1:] if argv is None else argv)
+        if "--verify-reversal-message" in argv:
+            parser = argparse.ArgumentParser(prog=self.prog + ".py")
+            parser.add_argument("--verify-reversal-message", required=True, metavar="MSGFILE")
+            parser.add_argument("--repo", default=".")
+            args = parser.parse_args(argv)
+            return self.verify_reversal_message(args.repo, args.verify_reversal_message)
         if "--write-baseline" not in argv and "--check-baseline" not in argv:
             return super().main(argv)
         parser = argparse.ArgumentParser(prog=self.prog + ".py", description=self.description)

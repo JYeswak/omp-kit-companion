@@ -251,6 +251,62 @@ class Ratchet(unittest.TestCase):
         reports = checker.ratchet(self.repo, "HEAD", None)
         return [(r.path, f.line, f.rule, f.detail) for r in reports for f in r.active()]
 
+    def publish_head_to_origin(self) -> str:
+        remote = kitlib_tmp.owned_tmp("kitlib-ratchet-origin")
+        self.addCleanup(remote.cleanup)
+        self.origin_remote = remote.path
+        _git(self.repo, "init", "--bare", "-q", remote.path)
+        _git(self.repo, "remote", "add", "origin", remote.path)
+        _git(self.repo, "-c", "core.hooksPath=/dev/null", "push", "-q", "origin",
+             "HEAD:refs/heads/main")
+        head = _git(self.repo, "rev-parse", "HEAD")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", head)
+        return head
+
+    def fresh_origin_sha(self) -> str:
+        if not hasattr(checker, "fresh_published_origin_sha"):
+            self.fail("native fresh published-origin binding is missing")
+        return checker.fresh_published_origin_sha(self.repo)
+
+    def test_published_origin_binding_accepts_HEAD_when_published(self) -> None:
+        published = self.publish_head_to_origin()
+        self.assertEqual(_git(self.repo, "rev-parse", "HEAD"), published)
+        self.assertEqual(self.fresh_origin_sha(), published)
+
+    def test_published_origin_binding_rejects_stale_tracking_ref(self) -> None:
+        self.publish_head_to_origin()
+        self.write("notes.txt", "published update\n")
+        _git(self.repo, "add", "notes.txt")
+        _git(self.repo, "commit", "-q", "-m", "[test] move published origin")
+        new_published = _git(self.repo, "rev-parse", "HEAD")
+        _git(self.repo, "-c", "core.hooksPath=/dev/null", "push", "-q", "origin",
+             f"{new_published}:refs/heads/candidate")
+        _git(self.origin_remote, "update-ref", "refs/heads/main", new_published)
+        with self.assertRaises(core.GitError) as refused:
+            self.fresh_origin_sha()
+        self.assertIn("origin/main tracking ref is stale", str(refused.exception))
+
+    def test_unpublished_HEAD_falsely_claimed_as_origin_is_refused(self) -> None:
+        self.publish_head_to_origin()
+        self.write("notes.txt", "unpublished HEAD\n")
+        _git(self.repo, "add", "notes.txt")
+        _git(self.repo, "commit", "-q", "-m", "[test] unpublished")
+        unpublished = _git(self.repo, "rev-parse", "HEAD")
+        _git(self.repo, "update-ref", "refs/remotes/origin/main", unpublished)
+        self.assertEqual(_git(self.repo, "rev-parse", "HEAD"), unpublished)
+        with self.assertRaises(core.GitError) as refused:
+            self.fresh_origin_sha()
+        self.assertIn("origin/main tracking ref is stale", str(refused.exception))
+
+    def test_origin_admission_removes_raw_spawn_only(self) -> None:
+        reports = [core.FileReport("tool.py", [
+            core.Finding("tool.py", 2, 1, checker.RAW_SPAWN, "raw", "spawn"),
+            core.Finding("tool.py", 3, 1, "other-rule", "other", "other"),
+        ])]
+        admitted = checker.RULESET._apply_origin_admissions(reports, {"tool.py": "published-sha"})
+        self.assertEqual([(f.rule, f.line) for f in admitted[0].active()], [("other-rule", 3)])
+
+
     def test_untouched_site_does_not_block(self) -> None:
         self.write("old.ts", 'const p = Bun.spawn(["x"]);\nconst unrelated = 1;\n')
         _git(self.repo, "add", "old.ts")

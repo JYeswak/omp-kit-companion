@@ -68,6 +68,9 @@ origin_repo() {
 	git -C "$dir" add tool.py
 	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] published origin"
 	origin=$(git -C "$dir" rev-parse HEAD) || return 1
+	git -C "$dir" init --bare -q "$dir/published.git" || return 1
+	git -C "$dir" remote add origin "$dir/published.git" || return 1
+	git -C "$dir" -c core.hooksPath=/dev/null push -q origin "$origin:refs/heads/main" || return 1
 	git -C "$dir" update-ref refs/remotes/origin/main "$origin" || return 1
 	printf '%s\n' "$PY_GOOD" > "$dir/tool.py"
 	git -C "$dir" add tool.py
@@ -262,38 +265,138 @@ deleted=$(git -C "$P" rev-parse HEAD)
 out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$deleted" "$removed" | (cd "$P" && sh "$SCRIPTS/pre-push-gate.sh") 2>&1)
 check "$?" "1" "push-allow-deleted-refused" "$out" "allowlist-deleted"
 
-# 8. a withdrawal to origin/main is admitted only for exact staged equality
+# 8. Only an exact, named reversal of X may admit the incumbent raw-spawn
+#    entry; commit-msg supplies native per-path proof and rejects fake intent.
 R=$(origin_repo origin-equal)
+X=$(git -C "$R" rev-parse HEAD)
 printf '%s\n' "$PY_BAD" > "$R/tool.py"
 git -C "$R" add tool.py
-out=$(commit "$R" -m "[test] withdraw to origin")
-check "$?" "0" "origin-equal-withdrawal-pass" "$out" "ADMITTED staged path byte-identical to origin/main@"
-check "0" "0" "origin-equal-withdrawal-names-path" "$out" "tool.py"
-check "$(printf '%s\n' "$out" | grep -c 'ADMITTED staged path byte-identical')" "1" "origin-equal-one-admission" "$out" "ADMITTED staged path byte-identical"
+out=$(commit "$R" -m "[test] exact named reversal" -m "Revert: $X")
+check "$?" "0" "origin-equal-named-reversal-pass" "$out" '"verdict":"PASS"'
+check "0" "0" "origin-equal-per-path-verdict" "$out" '"path":"tool.py"'
+
+R=$(origin_repo origin-missing-revert)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] missing reversal authority")
+check "$?" "1" "origin-equal-without-revert-refused" "$out" 'missing Revert trailer'
+
+R=$(origin_repo origin-wrong-x)
+printf '%s\n' 'unrelated history' > "$R/unrelated.txt"
+git -C "$R" add unrelated.txt
+git -C "$R" -c core.hooksPath=/dev/null commit -q -m "[test] unrelated X"
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] false named reversal" -m "Revert: $X")
+check "$?" "1" "origin-equal-wrong-x-refused" "$out" 'staged paths do not equal'
+
+R=$(origin_repo origin-unrelated-staged)
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+printf '%s\n' 'unrelated staged code' > "$R/extra.txt"
+git -C "$R" add tool.py extra.txt
+out=$(commit "$R" -m "[test] reversal with unrelated path" -m "Revert: $X")
+check "$?" "1" "origin-equal-unrelated-staged-refused" "$out" 'staged paths do not equal'
+
+R=$(origin_repo origin-parent-mismatch)
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n# post-parent edit' "$PY_GOOD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] parent mismatch" -m "Revert: $X")
+check "$?" "1" "origin-equal-parent-mismatch-refused" "$out" 'does not match X parent'
+
+R=$(origin_repo origin-stale)
+X=$(git -C "$R" rev-parse HEAD)
+git -C "$R" -c core.hooksPath=/dev/null push -q origin "$X:refs/heads/candidate"
+git --git-dir="$R/published.git" update-ref refs/heads/main "$X"
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] stale origin" -m "Revert: $X")
+check "$?" "1" "origin-stale-binding-refused" "$out" 'origin/main tracking ref is stale'
+
+R=$(origin_repo origin-unpublished-head)
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+git -C "$R" -c core.hooksPath=/dev/null commit -q -m "[test] unpublished head"
+UNPUBLISHED=$(git -C "$R" rev-parse HEAD)
+git -C "$R" update-ref refs/remotes/origin/main "$UNPUBLISHED"
+printf '%s\n' "$PY_GOOD" > "$R/tool.py"
+git -C "$R" add tool.py
+git -C "$R" -c core.hooksPath=/dev/null commit -q -m "[test] return to kitlib"
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] falsely published head" -m "Revert: $X")
+check "$?" "1" "origin-unpublished-head-refused" "$out" 'origin/main tracking ref is stale'
+
+R=$(origin_repo origin-byte-near-match)
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n# one byte differs' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] near match" -m "Revert: $X")
+check "$?" "1" "origin-near-match-bytes-refused" "$out" "tool.py:.*raw-spawn"
+
+R=$(origin_repo origin-mode-near-match)
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+chmod +x "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] mode near match" -m "Revert: $X")
+check "$?" "1" "origin-near-match-mode-refused" "$out" "tool.py:.*raw-spawn"
 
 R=$(origin_repo origin-extra)
+X=$(git -C "$R" rev-parse HEAD)
 printf '%s\nsubprocess.check_output(["extra"], timeout=5, stdin=subprocess.DEVNULL)  # pysafe: additional fixture spawn, judged by kitlib\n' "$PY_BAD" > "$R/tool.py"
 git -C "$R" add tool.py
-out=$(commit "$R" -m "[test] withdrawal plus new spawn")
+out=$(commit "$R" -m "[test] withdrawal plus new spawn" -m "Revert: $X")
 check "$?" "1" "origin-extra-spawn-refused" "$out" "tool.py:3:1: raw-spawn"
-if printf '%s\n' "$out" | grep -q "ADMITTED staged path byte-identical to origin/main@"; then
-	fail=$((fail + 1)); printf 'FAIL origin-extra-spawn-not-admitted\n'
-else
-	pass=$((pass + 1))
-fi
+
+R=$(origin_repo origin-mixed)
+X=$(git -C "$R" rev-parse HEAD)
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+printf '%s\n' "$PY_BAD" > "$R/new.py"
+git -C "$R" add tool.py new.py
+out=$(commit "$R" -m "[test] exact origin plus new spawn" -m "Revert: $X")
+check "$?" "1" "origin-mixed-new-spawn-refused" "$out" "new.py:2:1: raw-spawn"
 
 R=$(origin_repo origin-older)
+X=$(git -C "$R" rev-parse HEAD)
 older=$(git -C "$R" rev-parse HEAD~2)
 git -C "$R" show "$older:tool.py" > "$R/tool.py"
 git -C "$R" add tool.py
-out=$(commit "$R" -m "[test] restore older tree")
+out=$(commit "$R" -m "[test] restore older tree" -m "Revert: $X")
 check "$?" "1" "origin-older-tree-refused" "$out" "tool.py:2:1: raw-spawn"
 
 R=$(origin_repo origin-new)
 printf '%s\n' "$PY_BAD" > "$R/new.py"
 git -C "$R" add new.py
-out=$(commit "$R" -m "[test] ordinary new spawn with origin")
+out=$(commit "$R" -m "[test] ordinary new spawn")
 check "$?" "1" "origin-new-spawn-refused" "$out" "new.py:2:1: raw-spawn"
+
+R=$(origin_repo origin-missing-msg-member)
+X=$(git -C "$R" rev-parse HEAD)
+member="$R/.git/hooks/hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal"
+mv "$member" "$TMP/reversal-member.keep"
+printf '%s\n' "$PY_BAD" > "$R/tool.py"
+git -C "$R" add tool.py
+out=$(commit "$R" -m "[test] missing commit-msg verifier" -m "Revert: $X")
+check "$?" "1" "origin-reversal-member-required" "$out" "commit-msg reversal validator is missing"
+mv "$TMP/reversal-member.keep" "$member"
+R=$(new_repo origin-no-reversal-member)
+member="$R/.git/hooks/hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal"
+mv "$member" "$TMP/reversal-member.ordinary.keep"
+printf 'export const ordinary = 1;\n' > "$R/ordinary.ts"
+git -C "$R" add ordinary.ts
+out=$(commit "$R" -m "[test] ordinary change without origin admission")
+rc=$?
+if [ "$rc" = "0" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL ordinary-change-without-reversal-member: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+mv "$TMP/reversal-member.ordinary.keep" "$member"
 
 printf 'check-staged-kitlib: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

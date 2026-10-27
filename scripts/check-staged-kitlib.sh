@@ -35,6 +35,7 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 root=$(git rev-parse --show-toplevel) || { printf 'staged-kitlib: not inside a work tree\n' >&2; exit 1; }
 staged=$(git diff --cached --name-only --diff-filter=AMRTD) || { printf 'staged-kitlib: cannot list staged paths\n' >&2; exit 1; }
 printf '%s\n' "$staged" | grep -Eq '\.(py|ts|tsx|js|mjs|cjs|sh|bash)$|(^|/)\.?[^/.]+$|^scripts/kitlib-ratchet-baseline\.json$' || exit 0
+reversal_member="$here/../commit-msg/50-omp-kit-staged-kitlib-reversal"
 py=$(command -v python3) || { printf 'staged-kitlib: REFUSED: judged files are staged and python3 is absent\n' >&2; exit 1; }
 "$py" -c 'import sys; sys.exit(sys.version_info < (3, 9))' < /dev/null ||
 	{ printf 'staged-kitlib: REFUSED: python3 >= 3.9 is required to judge staged files\n' >&2; exit 1; }
@@ -43,15 +44,23 @@ for helper in pysafe.py kitlib_ratchet_core.py kitlib_ratchet.py; do
 done
 out=$("$py" -B "$here/pysafe.py" run --timeout "$budget" -- "$py" -B "$here/kitlib_ratchet.py" --staged --repo "$root" < /dev/null 2>&1)
 rc=$?
-if [ "$rc" = 0 ]; then
-	printf '%s\n' "$out" | while IFS= read -r line; do
-		case "$line" in
-			*"ADMITTED staged path byte-identical to origin/main@"*) printf '%s\n' "$line" ;;
-		esac
-	done
-fi
+has_admission=0
+case "$out" in
+	*"ADMITTED incumbent raw-spawn entry matches exact staged path at origin/main@"*) has_admission=1 ;;
+esac
+printf '%s\n' "$out" | while IFS= read -r line; do
+	case "$line" in
+		*"ADMITTED incumbent raw-spawn entry matches exact staged path at origin/main@"*) printf '%s\n' "$line" ;;
+	esac
+done
 case "$rc" in
-	0) exit 0 ;;
+	0)
+		if [ "$has_admission" = 1 ] && [ ! -x "$reversal_member" ]; then
+			printf 'staged-kitlib: REFUSED: commit-msg reversal validator is missing at %s; reinstall the kit hooks\n' "$reversal_member" >&2
+			exit 1
+		fi
+		exit 0
+		;;
 	1) printf 'staged-kitlib: REFUSED: staged files hand-roll a kitlib primitive or raise scripts/kitlib-ratchet-baseline.json (spawn through kitlib_run.run from scripts/kitlib_run.py or run() from src/kitlib/run.ts; the allowlist only shrinks, and a "kitlib: <reason>" pragma admits no site it does not count)\n%s\n' "$out" >&2 ;;
 	124) printf 'staged-kitlib: REFUSED: the checker exceeded %s s and was killed\n%s\n' "$budget" "$out" >&2 ;;
 	*) printf 'staged-kitlib: REFUSED: the checker failed (exit %s)\n%s\n' "$rc" "$out" >&2 ;;

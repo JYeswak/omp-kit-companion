@@ -237,6 +237,7 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/commit-msg/limit-process-tree.sh scripts/limit-process-tree.sh" \
 		"hooks.d/pre-commit/47-omp-kit-staged-fragments scripts/check-staged-fragments.sh" \
 		"hooks.d/commit-msg/49-omp-kit-stale-worktree scripts/check-stale-worktree.sh" \
+		"hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal scripts/check-commit-kitlib-reversal.sh" \
 		"hooks.d/commit-msg/47-omp-kit-gap-mention scripts/check-gap-mention.sh" \
 		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh" \
 		"hooks.d/pre-commit/49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh" \
@@ -680,6 +681,15 @@ install_stale_worktree() {
 	printf 'installed stale-worktree member: %s\n' "$member"
 }
 
+# install_kitlib_reversal: validate the named Revert and exact staged parent
+# after stale-worktree (49); a trailer alone never grants the admission.
+install_kitlib_reversal() {
+	member="$(chain_dir commit-msg)/50-omp-kit-staged-kitlib-reversal"
+	place "$KITROOT/scripts/check-commit-kitlib-reversal.sh" "$member" +x
+	printf 'installed kitlib-reversal member: %s\n' "$member"
+}
+
+
 install_native_preservation() {
 	dir=$(chain_dir pre-commit)
 	place "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" -x
@@ -722,6 +732,7 @@ install_commit_msg
 install_commit_notes
 install_gap_mention
 install_stale_worktree
+install_kitlib_reversal
 ensure_chain pre-push
 install_on_main
 install_pushed_vlevel

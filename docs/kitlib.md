@@ -315,10 +315,17 @@ or deletes the file is refused (`allowlist-raised`, `allowlist-deleted`); loweri
 the sites are gone. With no sites left the allowlist stays, with empty counts. `--write-baseline` regenerates it
 and `--check-baseline` checks a tree against it.
 
-The staged pre-commit member has one narrow withdrawal exception: a changed index path is admitted only when
-`git diff --cached` shows it identical (mode and bytes) to the repository's pinned `origin/main` commit. The member
-prints the pinned commit and path. This exception does not apply to pre-push checks, an additional raw spawn, a path
-that differs from `origin/main`, or an absent `origin/main` ref; in those cases the existing ratchet still decides.
+The staged pre-commit member can waive only an active `raw-spawn` finding for its own changed path, and only when
+the complete staged Git entry (bytes and mode/type) equals that path in a freshly observed `origin/main`. It uses
+`git ls-remote` and requires the local `refs/remotes/origin/main` commit to match that published SHA; no configured,
+unavailable or stale origin means no exception. Only the matching raw-spawn findings are removed. Other findings
+on the same path, every finding on other paths, and pre-push ratchets keep their normal rules.
+
+The commit-msg member `50-omp-kit-staged-kitlib-reversal` validates a `Revert: X` as executable scope, not
+authority: exactly one `Revert` trailer must resolve to a single-parent commit in `HEAD` history; the staged path
+set must equal X's changed-path set; and each staged entry must equal X's parent entry, including bytes and
+mode/type. It rejects unrelated staged paths and emits a native per-path verdict. This proof is required for
+published-origin raw-spawn admissions; an ordinary clean commit needs no Revert trailer.
 
 A `kitlib: <reason>` pragma (two or more words, 10+ characters) documents a site the allowlist already counts; it
 never admits a new one, since pragma'd sites still count. A reasonless pragma is refused and an unused one is
@@ -329,6 +336,8 @@ Enforced by the pre-commit member `51-omp-kit-staged-kitlib` (`scripts/check-sta
 `install-commit-msg-bead.sh` with `kitlib_ratchet.py`, `kitlib_ratchet_core.py` and `pysafe.py` beside it), the
 `kitlib-range` step of `pre-push-gate.sh`, and CI (`tests/scripts/kitlib_ratchet_test.py`,
 `tests/cli/check-staged-kitlib.test.sh`).
+The commit-msg member invokes the same ratchet from the sibling pre-commit hook directory. It is installed and
+checked by `install-commit-msg-bead.sh`; `51-omp-kit-staged-kitlib` refuses to run unless the `50` member exists.
 
 ```sh
 python3 -B scripts/kitlib_ratchet.py --tree src src --format json   # inventory
