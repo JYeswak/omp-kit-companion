@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { compactionRereadMessage, FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
+import { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { checkNoWait } from "./kit-flywheel-guard";
 import { checkBgWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
@@ -69,7 +69,7 @@ function brPath(cwd: string): string {
 	return bin;
 }
 
-test("stock compaction: a git repo without AGENTS.md or br remains editable", async () => {
+test("stock compaction: a git repo without AGENTS.md or br remains editable and summarizes nothing held", async () => {
 	const cwd = stockRepo();
 	const h = await createFlywheelHost(base, { env: { PATH: join(cwd, "no-tools") } });
 	await h.emit("session_compact", {}, h.ctx(cwd));
@@ -80,58 +80,12 @@ test("stock compaction: a git repo without AGENTS.md or br remains editable", as
 	] as const) {
 		expect(await callAs(h, cwd, tool, tool, input)).toEqual([undefined]);
 	}
+	expect(h.sent).toHaveLength(1);
+	expect(h.sent[0]!.message.content).toContain("none found");
+	expect(h.sent[0]!.message.content).toContain("none held");
 });
 
-for (const prerequisites of ["no-br", "tracker-without-br"] as const) {
-	test(`stock compaction: AGENTS read clears the gate with ${prerequisites}`, async () => {
-		const cwd = stockRepo();
-		const agents = join(cwd, "AGENTS.md");
-		writeFileSync(agents, "repository rules\n");
-		if (prerequisites === "tracker-without-br") mkdirSync(join(cwd, ".beads"));
-		const h = await createFlywheelHost(base, { env: { PATH: join(cwd, "no-tools") } });
-		await h.emit("session_compact", {}, h.ctx(cwd));
-		const [blocked] = await callAs(h, cwd, "before", "edit", { path: "f.ts", diff: "+x" });
-		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-		await callAs(h, cwd, "read", "read", { path: agents });
-		await endAs(h, cwd, "read", "read", { content: readFileSync(agents, "utf8") }, true);
-		const [failedRead] = await callAs(h, cwd, "failed", "edit", { path: "f.ts", diff: "+x" });
-		expect((failedRead as FlywheelToolCallResult)?.block).toBe(true);
-		await callAs(h, cwd, "read-ok", "read", { path: agents });
-		await endAs(h, cwd, "read-ok", "read", { content: readFileSync(agents, "utf8") });
-		expect(await callAs(h, cwd, "after", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
-	});
-}
-
-test("stock compaction: a tracker-only repo still requires an owned bead result", async () => {
-	const cwd = stockRepo();
-	mkdirSync(join(cwd, ".beads"));
-	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
-	await h.emit("session_compact", {}, h.ctx(cwd));
-	const [blocked] = await callAs(h, cwd, "before", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-	await callAs(h, cwd, "show", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "show", "bash", { stdout: showStdout("k-1", "in_progress", "TestWorker") });
-	expect(await callAs(h, cwd, "after", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
-});
-
-test("stock compaction: an ancestor tracker remains applicable across a nested git boundary", async () => {
-	const parent = freshDir(base, "ancestor-tracker-");
-	mkdirSync(join(parent, ".beads"));
-	const cwd = stockRepo(parent);
-	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
-	await h.emit("session_compact", {}, h.ctx(cwd));
-	const [blocked] = await callAs(h, cwd, "before", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-	await callAs(h, cwd, "foreign", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "foreign", "bash", { stdout: showStdout("k-1", "in_progress", "SomebodyElse") });
-	const [foreign] = await callAs(h, cwd, "still-blocked", "edit", { path: "f.ts", diff: "+x" });
-	expect((foreign as FlywheelToolCallResult)?.block).toBe(true);
-	await callAs(h, cwd, "owned", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "owned", "bash", { stdout: showStdout("k-1", "in_progress", "TestWorker") });
-	expect(await callAs(h, cwd, "after", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
-});
-
-test("COMPACTION_REREAD: session_compact injects a reread of the nearest AGENTS.md and br show", async () => {
+test("COMPACTION_REREAD: session_compact summarizes the nearest AGENTS.md", async () => {
 	const root = freshDir(base, "proj-");
 	const repo = join(root, "repo");
 	const cwd = join(repo, "pkg", "deep");
@@ -143,9 +97,11 @@ test("COMPACTION_REREAD: session_compact injects a reread of the nearest AGENTS.
 	await h.emit("session_compact", { compactionEntry: { type: "compaction", id: "e1" }, fromExtension: false }, h.ctx(cwd));
 	expect(h.sent.length).toBe(1);
 	const { message, options } = h.sent[0]!;
-	expect(message.content).toContain(`read any line range of ${join(repo, "AGENTS.md")}`);
-	expect(message.content).not.toContain(join(root, "AGENTS.md") + " ");
-	expect(message.content).toContain("br show <id>");
+	expect(message.content).toContain(join(repo, "AGENTS.md"));
+	expect(message.content).not.toContain(join(root, "AGENTS.md"));
+	expect(message.content).toContain("none held");
+	expect(h.execs).toEqual([]);
+	expect(message.details).toEqual({ behavior: "COMPACTION_REREAD" });
 	expect(options?.deliverAs).toBe("nextTurn");
 });
 
@@ -158,7 +114,7 @@ test("COMPACTION_REREAD: mid-run compaction injects at the next step boundary an
 	await h.emit("session_compact", { compactionEntry: {}, fromExtension: false }, h.ctx(cwd, false));
 	expect(h.sent.length).toBe(1);
 	expect(h.sent[0]!.options?.deliverAs).toBe("aside");
-	expect(h.sent[0]!.message.content).toContain("--assignee AmberHeron");
+	expect(h.sent[0]!.message.content).toContain("AmberHeron");
 });
 
 test("COMPACTION_REREAD negative: an ordinary turn emits nothing", async () => {
@@ -555,273 +511,100 @@ test("shell -c flag pattern: matches -c and -lc, rejects --c and -cx, and stays 
 	expect(performance.now() - started).toBeLessThan(50);
 });
 
-async function endAs(h: FakeHost, cwd: string, id: string, toolName: string, result: unknown, isError = false): Promise<unknown[]> {
-	return h.emit("tool_execution_end", { toolCallId: id, toolName, result, isError }, h.ctx(cwd));
-}
-
-/** OMP's native tool_execution_end result envelope (pi-agent-core agent.ts). */
-function native(text: string, details: Record<string, unknown> = {}): unknown {
-	return { content: [{ type: "text", text }], details };
-}
-
-function showStdout(id: string, status: string, assignee: string | null): string {
-	return JSON.stringify([{ id, title: "t", status, assignee }]);
-}
-
-test("REREAD: compact then edit with no reread is blocked (planted negative)", async () => {
-	const { h, cwd } = await rereadHost();
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-	expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
-	const [push] = await callAs(h, cwd, "g1", "bash", { command: "git push origin master" });
-	expect((push as FlywheelToolCallResult)?.block).toBe(true);
-});
-
-test("REREAD: AGENTS read plus owned in_progress br show unblocks the edit", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	expect(await callAs(h, cwd, "r1", "read", { path: agents })).toEqual([undefined]);
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	expect(await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" })).toEqual([undefined]);
-	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
-	expect(await callAs(h, cwd, "g1", "bash", { command: "cd sub && git commit -m done" })).toEqual([undefined]);
-});
-test.each([":1-1", ":raw:1-1", ":1-1:raw"])("REREAD: bounded text selector %s satisfies the gate", async suffix => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: `${agents}${suffix}` });
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
-});
-
-test("REREAD: an unrecognized AGENTS.md selector remains blocked (planted negative)", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: `${agents}:not-a-selector` });
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-});
-
-test("REREAD: a conflict-summary result is not a reread of governing text", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: `${agents}:conflicts` });
-	await endAs(h, cwd, "r1", "read", native("No unresolved git merge conflicts in AGENTS.md."));
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-	expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
-});
-
-
-test("REREAD: a failed read never clears the flag", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", native("rules\n"), true);
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-});
-
-test("REREAD: reading the wrong AGENTS.md never clears the flag", async () => {
-	const outer = freshDir(base, "reread-outer-");
-	writeFileSync(join(outer, "AGENTS.md"), "outer\n");
-	const cwd = freshDir(base, "reread-inner-");
-	const agents = join(cwd, "AGENTS.md");
-	writeFileSync(agents, "inner\n");
-	mkdirSync(join(cwd, ".beads"));
-	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" } });
-	await h.emit("session_compact", {}, h.ctx(cwd));
-	await callAs(h, cwd, "r1", "read", { path: join(outer, "AGENTS.md") });
-	await endAs(h, cwd, "r1", "read", native("outer\n"));
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-	expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
-});
-
-test("REREAD: br show of a closed or foreign bead never clears the flag", async () => {
-	for (const [status, assignee] of [["closed", "TestWorker"], ["in_progress", "SomebodyElse"]] as const) {
-		const { h, cwd, agents } = await rereadHost();
-		await callAs(h, cwd, "r1", "read", { path: agents });
-		await endAs(h, cwd, "r1", "read", native("rules\n"));
-		await callAs(h, cwd, "s1", "bash", { command: "br show k-9 --json" });
-		await endAs(h, cwd, "s1", "bash", native(showStdout("k-9", status, assignee)));
-		const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-	}
-});
-
-test("REREAD: call arguments alone never clear the flag", async () => {
-	const { h, cwd } = await rereadHost();
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-});
-
-test("REREAD: an empty br list clears the bead flag", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	await callAs(h, cwd, "s1", "bash", { command: "br list --assignee TestWorker --json" });
-	await endAs(h, cwd, "s1", "bash", native("[]"));
-	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
-});
-
-test("REREAD: a truncated native read never clears the flag", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", native("rules\n", { truncation: { truncated: true } }));
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-});
-
-// --- ompkit-22kz5: whole-line pages and path forms (grader-19rm 2026-10-22: six ranged/paged AGENTS.md reads,
-// every write blocked, because omp marks any read shorter than the file `truncation.truncated`). ---
-
-/** omp's native read details for a page cut at a line boundary (shape observed in the grader-19rm session). */
-function linePage(extra: Record<string, unknown> = {}): Record<string, unknown> {
-	return { truncation: { truncated: true, truncatedBy: "lines", lastLinePartial: false, firstLineExceedsLimit: false, totalLines: 552, outputLines: 23, ...extra } };
-}
-
-async function readThenOwnedShow(h: FakeHost, cwd: string, path: string, result: unknown): Promise<unknown[]> {
-	await callAs(h, cwd, "r1", "read", { path });
-	await endAs(h, cwd, "r1", "read", result);
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	return callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-}
-
-test("REREAD 22kz5: a whole-line page clears by ranged, symlinked [a] and relative [b] paths", async () => {
-	for (const pathOf of [
-		(agents: string) => `${agents}:1-20`,
-		(agents: string) => {
-			const link = join(base, `link-${Math.random().toString(36).slice(2)}`);
-			symlinkSync(join(agents, ".."), link);
-			return join(link, "AGENTS.md");
-		},
-		() => "AGENTS.md:1-20",
-	]) {
-		const { h, cwd, agents } = await rereadHost();
-		expect(await readThenOwnedShow(h, cwd, pathOf(agents), native("1:rules\n", linePage()))).toEqual([undefined]);
-	}
-});
-
-test("REREAD 22kz5 planted negatives: a byte cut, a partial line, an over-long first line or a column cut never clears", async () => {
-	for (const details of [
-		linePage({ truncatedBy: "bytes" }),
-		linePage({ lastLinePartial: true }),
-		linePage({ firstLineExceedsLimit: true }),
-		{ ...linePage(), meta: { limits: { columnTruncated: { maxColumn: 768, unit: "bytes" } } } },
-	]) {
-		const { h, cwd, agents } = await rereadHost();
-		const [blocked] = await readThenOwnedShow(h, cwd, `${agents}:1-20`, native("1:rules\n", details));
-		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-		expect((blocked as FlywheelToolCallResult)?.reason).toContain("COMPACTION_REREAD");
-	}
-});
-
-test("REREAD 22kz5 planted negative: a whole-line page of a different file never clears", async () => {
-	const { h, cwd } = await rereadHost(["NOTES.md"]);
-	const [blocked] = await readThenOwnedShow(h, cwd, join(cwd, "NOTES.md:1-20"), native("1:x\n", linePage()));
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-});
-
-test("REREAD: native content with no text blocks never clears the flag", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", { content: [{ type: "image", data: "x", mimeType: "image/png" }], details: { content: "rules\n" } });
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s1", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-});
-
-test("REREAD: a native br list object holding an in_progress row is not empty", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	await callAs(h, cwd, "s1", "bash", { command: "br list --status in_progress --assignee TestWorker --json" });
-	await endAs(h, cwd, "s1", "bash", native(JSON.stringify({ issues: [{ id: "k-1", status: "in_progress", assignee: "SomebodyElse" }], total: 1, limit: 0, offset: 0, has_more: false })));
-	const [blocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-});
-
-test("REREAD: a native empty br list issues object clears the bead flag", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	await callAs(h, cwd, "s1", "bash", { command: "br list --status in_progress --assignee TestWorker --json" });
-	await endAs(h, cwd, "s1", "bash", native(JSON.stringify({ issues: [], total: 0, limit: 0, offset: 0, has_more: false })));
-	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
-});
-
-test("REREAD: the reminder names the --json commands that clear the gate", () => {
-	const text = compactionRereadMessage({ agentsPath: "/x/AGENTS.md", identities: ["TestWorker"], agentsOk: false, beadOk: false });
-	expect(text).toContain("br list --status in_progress --assignee TestWorker --json");
-	expect(text).toContain("br show <id> --json");
-});
-
-/** Native AGENTS read plus one native bash result, then the edit attempt's handler results. */
-async function rereadThenEdit(h: FakeHost, cwd: string, agents: string, tag: string, command: string, stdout: string): Promise<unknown[]> {
-	await callAs(h, cwd, `r-${tag}`, "read", { path: agents });
-	await endAs(h, cwd, `r-${tag}`, "read", native("rules\n"));
-	await callAs(h, cwd, `s-${tag}`, "bash", { command });
-	await endAs(h, cwd, `s-${tag}`, "bash", native(stdout));
-	return callAs(h, cwd, `e-${tag}`, "edit", { path: "f.ts", diff: "+x" });
-}
+// --- COMPACTION_REREAD summary (ompkit-j27dd): the guard rereads itself and never blocks ---
 
 const emptyList = JSON.stringify({ issues: [], total: 0, limit: 0, offset: 0, has_more: false });
+/** A `br list` responder: `list` answers per tracker cwd, everything else is benign. */
+function listResponder(lists: (call: Parameters<Responder>[0]) => FlywheelExecResult): Responder {
+	return call => {
+		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		if (call.command === "env") return { stdout: "", stderr: "", code: 0 };
+		if (call.command === "br" && call.args[0] === "list") return lists(call);
+		if (call.command === "br") return { stdout: "[]", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+}
 
-test("REREAD: an identity-less session clears after its own native br show", async () => {
-	const { h, cwd, agents } = await rereadHost([], null);
-	const [blocked] = await callAs(h, cwd, "e0", "edit", { path: "f.ts", diff: "+x" });
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-	expect(await rereadThenEdit(h, cwd, agents, "1", "br show k-1 --json", showStdout("k-1", "in_progress", "Selfie"))).toEqual([undefined]);
-});
-
-test("REREAD: an identity-less session clears after an empty native br list for its declared assignee", async () => {
-	const { h, cwd, agents } = await rereadHost([], null);
-	expect(await rereadThenEdit(h, cwd, agents, "1", "br list --status in_progress --assignee=Selfie --json", emptyList)).toEqual([undefined]);
-});
-
-test("REREAD: an empty br list for another assignee never clears a resolved identity", async () => {
+test("COMPACTION_REREAD: no tool call is blocked after compaction", async () => {
 	const { h, cwd, agents } = await rereadHost();
-	const [blocked] = await rereadThenEdit(h, cwd, agents, "1", "br list --status in_progress --assignee SomebodyElse --json", emptyList);
-	expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
-	expect(await rereadThenEdit(h, cwd, agents, "2", "br list --status in_progress --assignee testworker --json", emptyList)).toEqual([undefined]);
-});
-
-test("REREAD: an empty br list without --assignee never clears", async () => {
-	for (const identity of ["TestWorker", null]) {
-		const { h, cwd, agents } = await rereadHost([], identity);
-		const [blocked] = await rereadThenEdit(h, cwd, agents, "1", "br list --status in_progress --json", emptyList);
-		expect((blocked as FlywheelToolCallResult)?.block).toBe(true);
+	expect(h.sent).toHaveLength(1);
+	expect(h.sent[0]!.message.content).toContain(agents);
+	for (const [tool, input] of [
+		["edit", { path: "f.ts", diff: "+x" }],
+		["write", { path: "f.ts", content: "x" }],
+		["bash", { command: "git commit -m change" }],
+		["bash", { command: "git push origin master" }],
+	] as const) {
+		expect(await callAs(h, cwd, tool, tool, input)).toEqual([undefined]);
 	}
 });
 
-test("REREAD: a pinned self-declared identity rejects another assignee after the next compaction", async () => {
-	const { h, cwd, agents } = await rereadHost([], null);
-	expect(await rereadThenEdit(h, cwd, agents, "pin", "br show k-1 --json", showStdout("k-1", "in_progress", "Selfie"))).toEqual([undefined]);
-	await h.emit("session_compact", {}, h.ctx(cwd));
-	const [foreignShow] = await rereadThenEdit(h, cwd, agents, "show-b", "br show k-2 --json", showStdout("k-2", "in_progress", "SomebodyElse"));
-	expect((foreignShow as FlywheelToolCallResult)?.block).toBe(true);
-	const [foreignList] = await rereadThenEdit(h, cwd, agents, "list-b", "br list --assignee SomebodyElse --json", emptyList);
-	expect((foreignList as FlywheelToolCallResult)?.block).toBe(true);
-	expect(await rereadThenEdit(h, cwd, agents, "list-a", "br list --assignee Selfie --json", emptyList)).toEqual([undefined]);
+test("COMPACTION_REREAD: the reminder lists a held in_progress bead from a fixture tracker", async () => {
+	const rows = { stdout: JSON.stringify([{ id: "k-1", title: "t", status: "in_progress", assignee: "TestWorker" }]), stderr: "", code: 0 };
+	const { h, cwd } = await rereadHost([], "TestWorker", listResponder(() => rows));
+	expect(h.sent).toHaveLength(1);
+	const content = h.sent[0]!.message.content;
+	expect(content).toContain("k-1");
+	expect(content).toContain("in_progress");
+	expect(content).toContain("t");
+	const probe = h.execs.find(call => call.command === "br" && call.args[0] === "list");
+	expect(probe?.args).toEqual(["list", "--assignee", "TestWorker", "--limit", "0", "--json", "--no-auto-import", "--no-auto-flush"]);
+	expect(probe?.options?.timeout).toBe(FLYWHEEL_EXEC_TIMEOUT_MS);
+	expect(probe?.options?.cwd).toBe(cwd);
+	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
 });
 
-test("REREAD: read and grep stay allowed while pending", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	expect(await callAs(h, cwd, "r1", "read", { path: agents })).toEqual([undefined]);
-	expect(await callAs(h, cwd, "g1", "grep", { pattern: "COMPACTION", path: cwd })).toEqual([undefined]);
-	expect(await callAs(h, cwd, "b1", "bash", { command: "git status --short" })).toEqual([undefined]);
-	expect(await callAs(h, cwd, "b2", "bash", { command: "br show k-1 --json" })).toEqual([undefined]);
+test("COMPACTION_REREAD: the reminder says none held for an empty tracker", async () => {
+	const { h, cwd } = await rereadHost([], "TestWorker", listResponder(() => ({ stdout: emptyList, stderr: "", code: 0 })));
+	expect(h.sent).toHaveLength(1);
+	const content = h.sent[0]!.message.content;
+	expect(content).toContain("none held");
+	expect(content).not.toContain("Unreadable trackers");
+	expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+});
+
+/** A session that touched tracker B before compacting in A; B's `br list` fails the guard's own read. */
+async function touchedFailingTracker(failure: FlywheelExecResult): Promise<{ h: FakeHost; cwd: string; b: string }> {
+	const cwd = freshDir(base, "reread-a-");
+	writeFileSync(join(cwd, "AGENTS.md"), "rules\n");
+	mkdirSync(join(cwd, ".beads"));
+	const b = freshDir(base, "reread-b-");
+	mkdirSync(join(b, ".beads"));
+	const respond = listResponder(call => (call.options?.cwd === b ? failure : { stdout: emptyList, stderr: "", code: 0 }));
+	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" }, respond });
+	await callAs(h, cwd, "t1", "bash", { command: "br ready --json", cwd: b });
+	await h.emit("tool_execution_end", { toolCallId: "t1", toolName: "bash",
+		result: { content: [{ type: "text", text: "[]" }] } }, h.ctx(cwd));
+	await h.emit("session_compact", {}, h.ctx(cwd));
+	return { h, cwd, b };
+}
+
+test("COMPACTION_REREAD: a failing remembered tracker is named with its error and blocks nothing", async () => {
+	for (const [failure, error] of [
+		[{ stdout: "", stderr: "db locked", code: 5 }, "exit code 5"],
+		[{ stdout: "", stderr: "", code: 0, killed: true }, "timed out"],
+	] as const) {
+		const { h, cwd, b } = await touchedFailingTracker({ ...failure });
+		expect(h.sent).toHaveLength(1);
+		const content = h.sent[0]!.message.content;
+		expect(content).toContain(`root:${b}`);
+		expect(content).toContain(error);
+		expect(content).toContain("none held");
+		expect(await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
+	}
+});
+
+test("COMPACTION_REREAD planted negative: rows come only from the guard's own list query", async () => {
+	const { h } = await rereadHost([], "TestWorker", call => {
+		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		if (call.command === "br" && call.args[0] === "list") return { stdout: emptyList, stderr: "", code: 0 };
+		if (call.command === "br" && call.args[0] === "show") return bead("k-1", "TestWorker");
+		return { stdout: "", stderr: "", code: 0 };
+	});
+	const content = h.sent[0]!.message.content;
+	expect(content).toContain("none held");
+	expect(content).not.toContain("k-1");
+	expect(h.execs.some(call => call.command === "br" && call.args[0] === "show")).toBe(false);
 });
 
 test("REREAD: without compaction nothing is blocked", async () => {
@@ -1041,213 +824,6 @@ test("BLOCK_RELEASE_REQUIRED AC5: outside a tracker a close is never a stranding
 	} });
 	const result = await toolCall(h, project, "br close kit-x --reason done");
 	if (result?.block === true) expect(result.reason).not.toContain("BLOCK_RELEASE_REQUIRED");
-});
-
-// --- COMPACTION_REREAD wording and clearing envelopes (ompkit-xa5s.24 rework, chief ORDER AM63971) ---
-
-test("REREAD: the block reason names the --json commands that clear; plain br show text never clears", async () => {
-	const { h, cwd, agents } = await rereadHost();
-	const [blocked] = await callAs(h, cwd, "e0", "edit", { path: "f.ts", diff: "+x" });
-	const reason = (blocked as FlywheelToolCallResult)?.reason ?? "";
-	expect(reason).toContain("`br show <id> --json`");
-	expect(reason).toContain("br list --status in_progress --assignee <you> --json");
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	await callAs(h, cwd, "s1", "bash", { command: "br show k-1" });
-	await endAs(h, cwd, "s1", "bash", native("◐ k-1 · t   [● P0 · IN_PROGRESS]\nOwner: TestWorker\nAssignee: TestWorker\n"));
-	const [stillBlocked] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	expect((stillBlocked as FlywheelToolCallResult)?.block).toBe(true);
-	await callAs(h, cwd, "s2", "bash", { command: "br show k-1 --json" });
-	await endAs(h, cwd, "s2", "bash", native(showStdout("k-1", "in_progress", "TestWorker")));
-	expect(await callAs(h, cwd, "e2", "edit", { path: "f.ts", diff: "+x" })).toEqual([undefined]);
-});
-
-test("REREAD: br list --json clears with the empty array and with br's {issues: [], total: 0} envelope, not with rows", async () => {
-	for (const [stdout, clears] of [["[]", true], [JSON.stringify({ issues: [], total: 0, limit: 50, offset: 0, has_more: false }), true],
-		[JSON.stringify({ issues: [{ id: "k-1" }], total: 1 }), false]] as const) {
-		const { h, cwd, agents } = await rereadHost();
-		await callAs(h, cwd, "r1", "read", { path: agents });
-		await endAs(h, cwd, "r1", "read", native("rules\n"));
-		await callAs(h, cwd, "l1", "bash", { command: "br list --status in_progress --assignee TestWorker --json" });
-		await endAs(h, cwd, "l1", "bash", native(stdout));
-		const [after] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-		expect((after as FlywheelToolCallResult | undefined)?.block === true).toBe(!clears);
-	}
-});
-
-// --- COMPACTION_REREAD presentation truncation (ompkit-xa5s.24, live 0.2.49 seat 2026-10-19 01:15Z) ---
-
-/** One `br show --json` row over 768 bytes: a bead with a long description, like ompkit-v66l.22's 18.5 KB line. */
-function longRow(id: string, status: string, assignee: string | null): FlywheelExecResult {
-	const stdout = JSON.stringify([{ id, title: "long bead", status, assignee, description: "d".repeat(4000) }]);
-	return { stdout, stderr: "", code: 0 };
-}
-
-/** The two native display cuts: a line cut to 768 bytes (meta.limits.columnTruncated) and whole-output truncation. */
-function displayCuts(stdout: string): unknown[] {
-	return [
-		native(`${stdout.slice(0, 768)}…`, { meta: { limits: { columnTruncated: { maxColumn: 768, unit: "bytes" } } } }),
-		native(stdout.slice(0, 768), { truncation: { truncated: true } }),
-	];
-}
-
-async function showThenEdit(respond: Responder, command: string, shown: unknown): Promise<{ h: FakeHost; cwd: string; blocked: boolean }> {
-	const { h, cwd, agents } = await rereadHost([], "TestWorker", respond);
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	await callAs(h, cwd, "s1", "bash", { command });
-	await endAs(h, cwd, "s1", "bash", shown);
-	const [after] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	return { h, cwd, blocked: (after as FlywheelToolCallResult | undefined)?.block === true };
-}
-
-test("REREAD: an owned bead whose --json row arrives display-truncated clears through the guard's own br show", async () => {
-	const row = longRow("k-1", "in_progress", "TestWorker");
-	expect(row.stdout.length).toBeGreaterThan(768);
-	for (const shown of displayCuts(row.stdout)) {
-		const { h, cwd, blocked } = await showThenEdit(brTable({ "k-1": row }), "br show k-1 --json --no-auto-import --no-auto-flush", shown);
-		expect(blocked).toBe(false);
-		const confirm = h.execs.find(call => call.command === "br" && call.args[0] === "show");
-		expect(confirm?.args).toEqual(["show", "k-1", "--json", "--no-auto-import", "--no-auto-flush"]);
-		expect(confirm?.options?.cwd).toBe(cwd);
-		expect(confirm?.options?.timeout).toBe(FLYWHEEL_EXEC_TIMEOUT_MS);
-	}
-});
-
-test("REREAD: a display-truncated foreign or closed bead never clears, even confirmed (planted negative)", async () => {
-	for (const [status, assignee] of [["in_progress", "SomebodyElse"], ["closed", "TestWorker"], ["in_progress", null]] as const) {
-		const row = longRow("k-9", status, assignee);
-		for (const shown of displayCuts(row.stdout)) {
-			const { h, blocked } = await showThenEdit(brTable({ "k-9": row }), "br show k-9 --json", shown);
-			expect(blocked).toBe(true);
-			expect(h.execs.some(call => call.command === "br" && call.args[1] === "k-9")).toBe(true);
-		}
-	}
-});
-
-test("REREAD: the guard's own br show failing, timing out, throwing or unparseable keeps blocking", async () => {
-	const shown = displayCuts(longRow("k-1", "in_progress", "TestWorker").stdout)[0];
-	const failures: Responder[] = [
-		brTable({}),
-		() => ({ stdout: "", stderr: "", code: 0, killed: true }),
-		() => { throw new Error("spawn br ENOENT"); },
-		() => ({ stdout: "[{\"id\":\"k-1\",\"status\":", stderr: "", code: 0 }),
-	];
-	for (const respond of failures) {
-		const { blocked } = await showThenEdit(respond, "br show k-1 --json", shown);
-		expect(blocked).toBe(true);
-	}
-});
-
-test("REREAD: plain-text br show never asks the guard to confirm, so it never clears (planted negative)", async () => {
-	const row = longRow("k-1", "in_progress", "TestWorker");
-	const { h, blocked } = await showThenEdit(brTable({ "k-1": row }), "br show k-1",
-		native("◐ k-1 · long bead   [● P0 · IN_PROGRESS]\nAssignee: TestWorker\n"));
-	expect(blocked).toBe(true);
-	expect(h.execs.some(call => call.args[0] === "show")).toBe(false);
-});
-
-test("REREAD: a failed --json show is never confirmed, and a by-path br is confirmed by that same path with its --db", async () => {
-	const row = longRow("k-1", "in_progress", "TestWorker");
-	const failed = await showThenEdit(brTable({ "k-1": row }), "br show k-1 --json", { ...(displayCuts(row.stdout)[0] as object), details: { exitCode: 1 } });
-	expect(failed.blocked).toBe(true);
-	expect(failed.h.execs.some(call => call.args[0] === "show")).toBe(false);
-	const byPath = await showThenEdit(call => call.command === "/opt/x/br" ? row : { stdout: "", code: 127 },
-		"/opt/x/br --db /d/beads.db show k-1 --json", displayCuts(row.stdout)[0]);
-	expect(byPath.blocked).toBe(false);
-	expect(byPath.h.execs.find(call => call.command === "/opt/x/br")?.args).toEqual(["show", "k-1", "--json", "--no-auto-import", "--no-auto-flush", "--db", "/d/beads.db"]);
-});
-
-// --- COMPACTION_REREAD tracker scope (ompkit-xa5s.35 REREADSCOPE1, live 2026-10-19 04:50Z) ---
-// Session cwd A is a tracker where the seat holds nothing; its bead lives in repo B.
-
-/** Repo B (a tracker) and a responder: `br show` answers only in B (by cwd or B's --db); `br list` answers per tracker. */
-function repoB(show: FlywheelExecResult, listInB: FlywheelExecResult = { stdout: "[]", stderr: "", code: 0 }): { b: string; respond: Responder } {
-	const b = freshDir(base, "repo-b-");
-	mkdirSync(join(b, ".beads"));
-	const inB = (call: { args: string[]; options?: { cwd?: string } }) => call.options?.cwd === b || call.args.includes(join(b, ".beads", "beads.db"));
-	const respond: Responder = call => {
-		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
-		if (call.args[0] === "list") return inB(call) ? listInB : { stdout: "[]", stderr: "", code: 0 };
-		if (call.args[0] === "show" && inB(call)) return show;
-		return { stdout: JSON.stringify({ error: { message: `Issue not found: ${call.args[1]}` } }), stderr: "", code: 3 };
-	};
-	return { b, respond };
-}
-
-async function scopedEdit(h: FakeHost, cwd: string, agents: string, bash: Record<string, unknown>, shown: unknown): Promise<boolean> {
-	await callAs(h, cwd, "r1", "read", { path: agents });
-	await endAs(h, cwd, "r1", "read", native("rules\n"));
-	await callAs(h, cwd, "s1", "bash", bash);
-	await endAs(h, cwd, "s1", "bash", shown);
-	const [after] = await callAs(h, cwd, "e1", "edit", { path: "f.ts", diff: "+x" });
-	return (after as FlywheelToolCallResult | undefined)?.block === true;
-}
-
-test("REREADSCOPE1: a truncated --json show of the bead in repo B clears via the tool cwd, a cd prefix, or --db", async () => {
-	const row = longRow("k-1", "in_progress", "TestWorker");
-	const shown = displayCuts(row.stdout)[0];
-	for (const make of [
-		(b: string) => ({ command: "br show k-1 --json", cwd: b }),
-		(b: string) => ({ command: `cd ${b} && br show k-1 --json` }),
-		(b: string) => ({ command: `cd '${b}' && br show k-1 --json | head -5` }),
-		(b: string) => ({ command: `br --db ${join(b, ".beads", "beads.db")} show k-1 --json` }),
-	]) {
-		const { b, respond } = repoB(row);
-		const { h, cwd, agents } = await rereadHost([], "TestWorker", respond);
-		expect(await scopedEdit(h, cwd, agents, make(b), shown)).toBe(false);
-		const confirm = h.execs.find(call => call.args[0] === "show");
-		expect(confirm?.options?.cwd === b || confirm?.args.includes(join(b, ".beads", "beads.db"))).toBe(true);
-	}
-});
-
-test("REREADSCOPE1: an unresolvable cd and someone else's bead in repo B never clear (planted negative)", async () => {
-	const foreign = repoB(longRow("k-9", "in_progress", "SomebodyElse"));
-	const one = await rereadHost([], "TestWorker", foreign.respond);
-	expect(await scopedEdit(one.h, one.cwd, one.agents, { command: "br show k-9 --json", cwd: foreign.b },
-		displayCuts(longRow("k-9", "in_progress", "SomebodyElse").stdout)[0])).toBe(true);
-	const mine = repoB(longRow("k-1", "in_progress", "TestWorker"));
-	const two = await rereadHost([], "TestWorker", mine.respond);
-	expect(await scopedEdit(two.h, two.cwd, two.agents, { command: "cd \"$REPO\" && br show k-1 --json" },
-		displayCuts(longRow("k-1", "in_progress", "TestWorker").stdout)[0])).toBe(true);
-	expect(two.h.execs.some(call => call.args[0] === "show")).toBe(false);
-});
-
-/** A host whose session touched repo B (a successful br call there) before compacting in A. */
-async function touchedB(respond: Responder, b: string): Promise<{ h: FakeHost; cwd: string; agents: string }> {
-	const cwd = freshDir(base, "reread-a-");
-	const agents = join(cwd, "AGENTS.md");
-	writeFileSync(agents, "rules\n");
-	mkdirSync(join(cwd, ".beads"));
-	const h = await createFlywheelHost(base, { env: { PATH: brPath(cwd), BR_ACTOR: "TestWorker" }, respond });
-	await callAs(h, cwd, "t1", "bash", { command: "br ready --json", cwd: b });
-	await endAs(h, cwd, "t1", "bash", native("[]"));
-	await h.emit("session_compact", {}, h.ctx(cwd));
-	return { h, cwd, agents };
-}
-
-test("REREADSCOPE1: an empty list in A does not clear while a touched tracker B holds the agent's in-progress or rework bead (planted negative)", async () => {
-	for (const status of ["in_progress", "rework"]) {
-		const { b, respond } = repoB(bead("k-1", "TestWorker"), { stdout: JSON.stringify([{ id: "k-1", status, assignee: "TestWorker" }]), stderr: "", code: 0 });
-		const { h, cwd, agents } = await touchedB(respond, b);
-		expect(await scopedEdit(h, cwd, agents, { command: "br list --status in_progress --assignee TestWorker --json" }, native("[]"))).toBe(true);
-		const probe = h.execs.find(call => call.args[0] === "list" && call.options?.cwd === b);
-		expect(probe?.args).toEqual(["list", "--assignee", "TestWorker", "--limit", "0", "--json", "--no-auto-import", "--no-auto-flush"]);
-		expect(probe?.options?.timeout).toBe(FLYWHEEL_EXEC_TIMEOUT_MS);
-	}
-	// The guard's read of B failing keeps blocking (fail closed).
-	const { b, respond } = repoB(bead("k-1", "TestWorker"), { stdout: "", stderr: "db locked", code: 5 });
-	const failed = await touchedB(respond, b);
-	expect(await scopedEdit(failed.h, failed.cwd, failed.agents, { command: "br list --assignee TestWorker --json" }, native("[]"))).toBe(true);
-});
-
-test("REREADSCOPE1: an empty list in A clears when no touched tracker holds an owned bead, and with nothing touched at all", async () => {
-	const { b, respond } = repoB(bead("k-1", "TestWorker"), { stdout: JSON.stringify([{ id: "k-2", status: "in_progress", assignee: "SomebodyElse" }]), stderr: "", code: 0 });
-	const touched = await touchedB(respond, b);
-	expect(await scopedEdit(touched.h, touched.cwd, touched.agents, { command: "br list --assignee TestWorker --json" }, native("[]"))).toBe(false);
-	const bare = await rereadHost([], "TestWorker", repoB(bead("k-1", "TestWorker")).respond);
-	expect(await scopedEdit(bare.h, bare.cwd, bare.agents, { command: "br list --status in_progress --assignee TestWorker --json" }, native("[]"))).toBe(false);
-	expect(bare.h.execs.some(call => call.args[0] === "list")).toBe(false);
 });
 
 // --- SCRATCH_DISPOSAL_REFUSED (ompkit-774u.15 enforcement, Joshua scope 2026-10-20): refuse at in_review and close ---

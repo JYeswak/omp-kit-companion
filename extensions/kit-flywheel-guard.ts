@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,44 +16,28 @@ import { agentMailStorageRoot } from "../src/holder-liveness.ts";
  *
  * COMPACTION_REREAD (Anti-Pattern "not re-reading AGENTS.md after compaction";
  * Kernel invariant 7). OMP emits `session_compact` once a compaction entry is
- * committed; the guard injects a context message naming the AGENTS.md nearest
- * the session cwd and telling the agent to `br show` its in-progress bead
- * before it continues, and arms a pending-reread flag. While the flag is set,
- * the `tool_call` handler blocks mutating calls (edit, write, br
- * update/close/comments, git commit/push, classified by the exported pure
- * function `isMutatingCall`). Only observed successful `tool_execution_end`
- * results clear the flag: a read of exactly the named AGENTS.md with
- * non-empty content, and a `br show --json` of a bead that is in_progress (or
- * rework) and assigned to a session identity (or a `br list --assignee <a
- * session identity> --json` that returns no issues; a list without
- * `--assignee`, or for another name, never clears it). Call arguments,
- * echoes, failures, wrong paths and foreign/closed beads never clear it.
- * Nothing else in a turn makes it speak.
+ * committed; the guard does the reread itself in that handler, with its own
+ * bounded `br list` reads, and injects one context message naming the AGENTS.md
+ * nearest the session cwd (resolved now, via `nearestAgentsMd`), the seat's
+ * held beads (each as id and status, with the title when the row has one, from
+ * the existing owned-bead query on the session cwd's tracker and every tracker
+ * the session has touched; `none held` when the queries return nothing), and
+ * any tracker it could not read (by path, with the exit code or timeout). A
+ * failed tracker is reported, never fatal.
  *
- * Ownership does not depend on presentation: when a successful
- * `br show <id> --json` result cannot be parsed as shown (OMP cuts long lines
- * to 768 bytes, so a bead with a long description arrives as broken JSON),
- * the guard confirms it with its own bounded `br show <id> --json` in the
- * call's cwd and clears only for an owned bead in an owned status. That
- * confirmation failing, timing out or returning unparseable output keeps the
- * gate blocked. Plain-text `br show` never triggers it and never clears.
+ * The gate never blocks for COMPACTION_REREAD: every `tool_call` verdict is
+ * computed without it, so a seat is never halted after a compaction, whether
+ * or not it holds a bead (ompkit-j27dd: an unreadable remembered tracker used
+ * to veto an empty session list and stall a bead-less seat). `isMutatingCall`
+ * stays exported for its other consumers (kit-save-guard) and their tests.
  *
- * Self-declared identity: a session with no host identity (no BR_ACTOR /
- * BR_AGENT_NAME / AGENT_NAME and no Agent Mail pane identity) pins one from
- * its first successful, untainted ownership observation: the assignee of an
- * owned in_progress/rework `br show --json` row, or X of an empty
- * `br list --assignee X --json`. The pin persists for the session, so later
- * compactions compare against it. It is self-declared: a guard against
- * forgetting the reread, not a security boundary.
- *
- * Only applicable rereads are mandatory: AGENTS discovery ends at the nearest
- * Git boundary; tracker rereads require executable br and a local/ancestor
- * .beads or explicit BEADS_DB/BEADS_DIR. Absent prerequisites do not lock a
- * stock session. Unexpected discovery errors leave the conservative gate armed.
+ * Only applicable trackers are queried: AGENTS discovery ends at the nearest
+ * Git boundary; bead queries need executable br and a local/ancestor .beads
+ * or explicit BEADS_DB/BEADS_DIR. Absent prerequisites mean nothing to report.
  *
  * Fail-open stays only where it already is: the self-close check keeps its
- * fail-open behaviour, but the reread gate's own errors block — a crash in
- * the gate leaves the flag set, so a crash cannot silently bypass it.
+ * fail-open behaviour; the compaction summary's own errors land in the message
+ * as unreadable trackers, so a failure is visible but never fatal.
  *
  * SELF_CLOSE_REFUSED (Kernel invariant 9, no self-certification). A bash call
  * that runs `br close <id>` or `bd close <id>` is blocked when the bead's
@@ -212,19 +196,41 @@ function trackerRereadApplies(cwd: string, env: Record<string, string | undefine
 	}
 }
 
-export function compactionRereadMessage(pending: PendingReread): string {
-	const steps: string[] = [];
-	if (!pending.agentsOk) steps.push(`read any line range of ${pending.agentsPath}`);
-	const assignee = pending.identities.length > 0 ? pending.identities[0] : "<your agent name>";
-	if (!pending.beadOk) {
-		steps.push(`run \`br list --status in_progress --assignee ${assignee} --json\` and \`br show <id> --json\` for your in-progress bead`);
-	}
-	return [
+/** One compaction summary, delivered by the `session_compact` handler after it
+ * runs its own bounded `br list` reads. Held beads render as id and status
+ * (title when the row has one); unreadable trackers render by path with their
+ * exit code or timeout. Never fatal: failures are lines, not blocks. */
+function compactionSummaryMessage(summary: {
+	agentsPath: string | null;
+	cwd: string;
+	identities: string[];
+	held: ReadonlyMap<string, { status: string; title: string | null }>;
+	failures: readonly { path: string; why: string }[];
+}): string {
+	const lines = [
 		"<system-reminder>",
 		`kit-flywheel-guard ${COMPACTION_REREAD}: the context was just compacted and the summary does not carry the rules.`,
-		`Before continuing: ${steps.join(", then ")}.`,
-		"</system-reminder>",
-	].join("\n");
+		summary.agentsPath !== null
+			? `AGENTS.md: ${summary.agentsPath} (re-read it before continuing).`
+			: `AGENTS.md: none found above ${summary.cwd}.`,
+	];
+	if (summary.identities.length === 0) {
+		lines.push("Held beads: none held (seat identity unknown, so the guard ran no bead query).");
+	} else if (summary.held.size === 0) {
+		lines.push(`Held beads (${summary.identities.join(", ")}): none held.`);
+	} else {
+		lines.push(`Held beads (${summary.identities.join(", ")}):`);
+		for (const [id, bead] of summary.held) {
+			lines.push(`- ${id} (${bead.status}${bead.title !== null ? `; ${bead.title}` : ""})`);
+		}
+	}
+	if (summary.failures.length > 0) {
+		lines.push("Unreadable trackers:");
+		for (const failure of summary.failures) lines.push(`- ${failure.path} (${failure.why})`);
+	}
+	lines.push("Before continuing: read the AGENTS.md above and confirm each held bead with `br show <id> --json`.");
+	lines.push("</system-reminder>");
+	return lines.join("\n");
 }
 
 const BR_REREAD_MUTATING_VERBS: Record<string, true> = { update: true, close: true, comments: true };
@@ -277,56 +283,6 @@ export function isMutatingCall(event: FlywheelToolCallEvent): boolean {
 	return false;
 }
 
-/** Pending reread state armed by `session_compact`; null when satisfied. */
-export interface PendingReread {
-	agentsPath: string | null;
-	identities: string[];
-	agentsOk: boolean;
-	beadOk: boolean;
-	/** Which observation and tracker cleared the bead flag. */
-	satisfiedBy?: string;
-}
-
-/** Missing-read fragment for the block reason, built at the gate. */
-function rereadMissing(pending: PendingReread): string {
-	const missing: string[] = [];
-	if (!pending.agentsOk) missing.push(pending.agentsPath === null ? "AGENTS.md (none found)" : `read ${pending.agentsPath}`);
-	if (!pending.beadOk) missing.push("`br show <id> --json` of your in_progress bead (or an empty `br list --status in_progress --assignee <you> --json`)");
-	return missing.join(" and ");
-}
-
-/** Concatenated `type:"text"` blocks of a native content array; null when none. */
-function contentBlocksText(blocks: unknown): string | null {
-	if (!Array.isArray(blocks)) return null;
-	const parts: string[] = [];
-	for (const block of blocks) {
-		if (field(block, "type") !== "text") continue;
-		const text = field(block, "text");
-		if (typeof text === "string") parts.push(text);
-	}
-	return parts.length > 0 ? parts.join("") : null;
-}
-
-/**
- * Result text: OMP's native `tool_execution_end` envelope carries
- * `{content: [{type:"text", text}], details}`; older string shapes at the top
- * level or under `details` are still accepted.
- */
-function stringField(value: unknown, keys: readonly string[]): string | null {
-	if (typeof value === "string") return value;
-	if (value === null || typeof value !== "object") return null;
-	const record = value as Record<string, unknown>;
-	if (Array.isArray(record["content"])) return contentBlocksText(record["content"]);
-	for (const key of keys) {
-		const candidate = key in record ? record[key] : undefined;
-		if (typeof candidate === "string") return candidate;
-		const nested = field(record["details"], key);
-		if (typeof nested === "string") return nested;
-	}
-	return null;
-}
-
-
 /** A non-zero exit code anywhere in a result envelope: the command itself failed. */
 function resultFailed(result: unknown): boolean {
 	const record = typeof result === "object" && result !== null ? result as Record<string, unknown> : null;
@@ -337,65 +293,6 @@ function resultFailed(result: unknown): boolean {
 		}
 	}
 	return false;
-}
-
-/** Failure/truncation/refusal markers anywhere in a result envelope. */
-function resultTainted(result: unknown): boolean {
-	if (resultFailed(result)) return true;
-	const record = typeof result === "object" && result !== null ? result as Record<string, unknown> : null;
-	const details = record !== null && typeof record["details"] === "object" && record["details"] !== null
-		? record["details"] as Record<string, unknown> : null;
-	for (const source of [details, record]) {
-		if (source === null) continue;
-		for (const key of ["truncated", "isTruncated", "partial"]) {
-			if (source[key] === true) return true;
-		}
-	}
-	// Native read truncation arrives nested as `details.truncation.truncated`.
-	if (details !== null && field(details["truncation"], "truncated") === true) return true;
-	return false;
-}
-
-/**
- * A read whose shown text is whole lines of the file: untainted, or cut only at a line boundary by a page or a
- * requested range (`truncatedBy: "lines"`). omp marks every ranged read of a longer file truncated, so the
- * reminder's "read any line range" never cleared (ompkit-22kz5; grader-19rm 2026-10-22: six AGENTS.md reads, every
- * verdict.json write blocked). A byte cut, a partial last line, an over-long first line or a column cut is never
- * a complete page.
- */
-function readPageComplete(result: unknown): boolean {
-	if (resultFailed(result)) return false;
-	const record = typeof result === "object" && result !== null ? result as Record<string, unknown> : null;
-	const details = record !== null && typeof record["details"] === "object" && record["details"] !== null
-		? record["details"] as Record<string, unknown> : null;
-	for (const source of [details, record]) {
-		if (source === null) continue;
-		for (const key of ["truncated", "isTruncated", "partial"]) {
-			if (source[key] === true) return false;
-		}
-	}
-	const columnCut = field(field(field(details, "meta"), "limits"), "columnTruncated");
-	if (columnCut !== undefined && columnCut !== null) return false;
-	const truncation = details === null ? undefined : details["truncation"];
-	if (field(truncation, "truncated") !== true) return true;
-	return field(truncation, "truncatedBy") === "lines" && field(truncation, "lastLinePartial") !== true
-		&& field(truncation, "firstLineExceedsLimit") !== true;
-}
-
-function parseBeadRow(stdout: string, id: string): { status: string; assignee: string | null } | null {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stdout);
-	} catch {
-		return null;
-	}
-	const rows: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
-	const row = rows.find(item => field(item, "id") === id) ?? (rows.length === 1 ? rows[0] : undefined);
-	const status = field(row, "status");
-	if (typeof status !== "string") return null;
-	const assignee = field(row, "assignee");
-	const owner = typeof assignee === "string" ? assignee.trim() : "";
-	return { status, assignee: owner === "" ? null : owner };
 }
 
 /** One `br|bd` invocation in a bash command, with the directory it runs in (null: a `cd` the guard cannot resolve). */
@@ -465,45 +362,11 @@ export function commandTrackers(command: string, cwd: string, home: string, env:
 	return [...refs.values()];
 }
 
-/** One `br|bd show <id>`: the invocation and whether it asked for `--json`. */
-interface BrShowTarget extends BrInvocation {
-	id: string;
-	json: boolean;
-}
-
-function brShowTargets(calls: BrInvocation[]): BrShowTarget[] {
-	const targets: BrShowTarget[] = [];
-	for (const call of calls) {
-		const rest = call.rest;
-		let json = false;
-		let id: string | null = null;
-		let verb: string | null = null;
-		for (let at = 0; at < rest.length; at += 1) {
-			const word = rest[at]!;
-			if (word === "--json") json = true;
-			if (word.startsWith("-") && word !== "-") {
-				const name = word.split("=")[0]!;
-				if (BR_VALUE_FLAGS[name] === true && !word.includes("=")) at += 1;
-				continue;
-			}
-			if (verb === null) verb = word.toLowerCase();
-			else if (id === null && verb === "show" && word !== "-") id = word;
-		}
-		if (verb === "show" && id !== null) targets.push({ ...call, id, json });
-	}
-	return targets;
-}
-
-/** `--assignee` values of a `br|bd list` invocation; a list without one contributes nothing. */
-function listAssignees(call: BrInvocation): string[] {
-	if (firstVerb(call.rest, BR_VALUE_FLAGS) !== "list") return [];
-	const assignees: string[] = [];
-	for (let at = 0; at < call.rest.length; at += 1) {
-		const word = call.rest[at]!;
-		const value = word === "--assignee" ? call.rest[at + 1] : word.startsWith("--assignee=") ? word.slice("--assignee=".length) : undefined;
-		if (value !== undefined && value.trim() !== "") assignees.push(value.trim());
-	}
-	return assignees;
+/** The tracker the session cwd belongs to (the `--db` file or the nearest
+ * `.beads` root); null when no tracker applies, so there is nothing to query. */
+function trackerRefForCwd(cwd: string, env: Record<string, string | undefined>): TrackerRef | null {
+	if (!trackerRereadApplies(cwd, env)) return null;
+	return trackerOf({ bin: "br", rest: [], cwd }, env);
 }
 
 /**
@@ -544,142 +407,59 @@ export async function ownedBeadIds(exec: FlywheelExec, tracker: TrackerRef, name
 	}
 }
 
- /** Owned (in_progress/rework) beads assigned to `name` in one tracker, by the guard's own bounded read; null when the read fails. */
- async function ownedBeadsIn(exec: FlywheelExec, tracker: TrackerRef, name: string, owns: (assignee: string) => boolean): Promise<number | null> {
+/** One owned (in_progress/rework) bead row: id and status, title when the row has one. */
+export interface OwnedBeadRow {
+	id: string;
+	status: string;
+	title: string | null;
+}
+
+type OwnedBeadRows = { ok: true; rows: OwnedBeadRow[] } | { ok: false; why: string };
+
+/**
+ * Owned (in_progress/rework) bead rows assigned to `name` in one tracker, by
+ * the guard's own bounded read. A failed read reports its path-ready reason
+ * (exit code or timeout), never throws, so the compaction summary names it.
+ */
+async function readOwnedBeads(exec: FlywheelExec, tracker: TrackerRef, name: string): Promise<OwnedBeadRows> {
 	const args = ownedListArgs(tracker, name);
 	let result: FlywheelExecResult;
 	try {
 		result = await exec(tracker.bin, args, { cwd: tracker.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
-	} catch {
-		return null;
+	} catch (error) {
+		return { ok: false, why: `could not run (${error instanceof Error ? error.message : String(error)})` };
 	}
-	if (result.code !== 0 || result.killed) return null;
+	if (result.killed === true) return { ok: false, why: `timed out after ${FLYWHEEL_EXEC_TIMEOUT_MS} ms` };
+	if (result.code !== 0) {
+		const stderr = typeof result.stderr === "string" ? result.stderr.trim().split("\n", 1)[0]!.slice(0, 160) : "";
+		return { ok: false, why: `exit code ${result.code}${stderr !== "" ? `: ${stderr}` : ""}` };
+	}
+	let issues: unknown;
 	try {
 		const parsed: unknown = JSON.parse(result.stdout);
-		const issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
-		if (!Array.isArray(issues)) return null;
-		return issues.filter(row => {
-			const status = field(row, "status");
-			const assignee = field(row, "assignee");
-			return typeof status === "string" && BEAD_OWNED_STATUSES[status] === true && typeof assignee === "string" && owns(assignee.trim());
-		}).length;
+		issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
+		if (!Array.isArray(issues)) throw new Error("no issues array");
 	} catch {
-		return null;
+		return { ok: false, why: "unparseable output (exit code 0)" };
 	}
+	const rows: OwnedBeadRow[] = [];
+	for (const row of issues) {
+		const status = field(row, "status");
+		const assignee = field(row, "assignee");
+		const id = field(row, "id");
+		if (typeof status !== "string" || BEAD_OWNED_STATUSES[status] !== true) continue;
+		if (typeof assignee !== "string" || assignee.trim().toLowerCase() !== name.trim().toLowerCase()) continue;
+		if (typeof id !== "string" || id === "") continue;
+		const title = field(row, "title");
+		rows.push({ id, status, title: typeof title === "string" && title !== "" ? title : null });
+	}
+	return { ok: true, rows };
 }
 
 export interface RereadCall {
 	toolName: string;
 	input: unknown;
 	cwd: string;
-}
-
-// Only text reads count: line ranges and raw text, not image/conflict diagnostics.
-// The final assertion is a strict JS end anchor, including for line terminators.
-const READ_PATH_RANGE = /^(?:\d+(?:-\d*)?|-\d+|\d+\+\d+)(?:,(?:\d+(?:-\d*)?|-\d+|\d+\+\d+))*(?![\s\S])/;
-
-/** Same file: equal resolved paths, or equal real paths (a symlinked or aliased directory, ompkit-22kz5 [a]). */
-function samePath(candidate: string, expected: string): boolean {
-	if (candidate === expected) return true;
-	try {
-		return realpathSync(candidate) === realpathSync(expected);
-	} catch {
-		return false;
-	}
-}
-
-function readSelectorTargets(rawPath: string, cwd: string, expected: string, home: string): boolean {
-	const raw = rawPath.trim();
-	if (samePath(resolve(cwd, expandHome(raw, home)), expected)) return true;
-	for (let split = raw.lastIndexOf(":"); split > 0; split = raw.lastIndexOf(":", split - 1)) {
-		const selector = raw.slice(split + 1);
-		const range = selector.startsWith("raw:") ? selector.slice(4)
-			: selector.endsWith(":raw") ? selector.slice(0, -4) : selector;
-		if ((selector === "raw" || READ_PATH_RANGE.test(range))
-			&& samePath(resolve(cwd, expandHome(raw.slice(0, split), home)), expected)) return true;
-	}
-	return false;
-}
-
-/**
- * Observe one successful tool result against the pending reread. Only
- * observed results count: call arguments, echoes, failures, wrong paths and
- * foreign/closed beads never set a flag. A successful `br show <id> --json`
- * whose shown text does not parse (display truncation) is confirmed with the
- * guard's own bounded `br show <id> --json`; that read failing keeps the flag
- * unset. An identity-less pending pins the first owned assignee it observes
- * (see the header). Resolves true when both flags land.
- */
-export async function observeRereadResult(call: RereadCall, result: unknown, pending: PendingReread, home: string,
-	exec: FlywheelExec, sessionTrackers: ReadonlyMap<string, TrackerRef> = new Map(), env: Record<string, string | undefined> = {}): Promise<boolean> {
-	const tool = call.toolName.toLowerCase();
-	if (tool === "read") {
-		if (!readPageComplete(result)) return false;
-		const raw = field(call.input, "path");
-		if (typeof raw === "string" && pending.agentsPath !== null
-			&& readSelectorTargets(raw, call.cwd, pending.agentsPath, home)) {
-			const content = stringField(result, READ_CONTENT_KEYS);
-			if (content !== null && content.length > 0) pending.agentsOk = true;
-		}
-	} else if (tool === "bash") {
-		const command = field(call.input, "command");
-		if (typeof command !== "string" || resultFailed(result)) return pending.agentsOk && pending.beadOk;
-		// Presentation-truncated text is never parsed; a --json show is confirmed by the guard's own read instead.
-		const stdout = resultTainted(result) ? null : stringField(result, READ_CONTENT_KEYS);
-		const owns = (name: string): boolean => {
-			if (pending.identities.length === 0) pending.identities = [name];
-			return pending.identities.some(identity => identity.toLowerCase() === name.toLowerCase());
-		};
-		const calls = brInvocations(command, call.cwd, home);
-		for (const target of brShowTargets(calls)) {
-			if (pending.beadOk) break;
-			const shown = stdout === null ? null : parseBeadRow(stdout, target.id);
-			if (shown !== null) {
-				if (BEAD_OWNED_STATUSES[shown.status] === true && shown.assignee !== null && owns(shown.assignee)) {
-					pending.beadOk = true;
-					pending.satisfiedBy = `show ${target.id} @ ${trackerOf(target, env)?.key ?? target.cwd ?? "?"}`;
-				}
-				continue;
-			}
-			if (!target.json || target.cwd === null) continue;
-			const confirmed = await readBeadState(exec, { bin: target.bin, cwd: target.cwd, db: target.db }, target.id);
-			if (confirmed.ok && BEAD_OWNED_STATUSES[confirmed.status] === true && confirmed.assignee !== null && owns(confirmed.assignee)) {
-				pending.beadOk = true;
-				pending.satisfiedBy = `show ${target.id} @ ${trackerOf(target, env)?.key ?? target.cwd}`;
-			}
-		}
-		// One list per command: with several, the shown stdout cannot be attributed to one tracker.
-		const lists = pending.beadOk ? [] : calls.filter(item => listAssignees(item).length > 0);
-		if (stdout !== null && lists.length === 1) {
-			const list = lists[0]!;
-			const tracker = trackerOf(list, env);
-			let issues: unknown = null;
-			try {
-				const parsed: unknown = JSON.parse(stdout);
-				issues = Array.isArray(parsed) ? parsed : field(parsed, "issues");
-			} catch {
-				// Non-JSON list output proves nothing; the flag stays unset.
-			}
-			const name = listAssignees(list).find(owns);
-			if (tracker !== null && Array.isArray(issues) && issues.length === 0 && name !== undefined) {
-				// An empty list proves nothing about the other trackers this session used: each is read, failing closed.
-				let clear = true;
-				for (const other of sessionTrackers.values()) {
-					if (other.key === tracker.key) continue;
-					const held = await ownedBeadsIn(exec, other, name, owns);
-					if (held === null || held > 0) {
-						clear = false;
-						break;
-					}
-				}
-				if (clear) {
-					pending.beadOk = true;
-					pending.satisfiedBy = `empty list @ ${tracker.key}`;
-				}
-			}
-		}
-	}
-	return pending.agentsOk && pending.beadOk;
 }
 
 /** Split a shell command into simple-command word lists. Quotes are honoured; expansions are not evaluated. */
@@ -2272,8 +2052,7 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: FlywheelGuardDeps = {}): Promise<void> {
 	const env = deps.env ?? process.env;
 	const home = deps.home ?? homedir();
-	let pendingReread: PendingReread | null = null;
-	/** Identity pinned by an identity-less session's first owned observation (self-declared; see header). */
+	/** Seat-identity fallback for the commit-autocomplete lookup and the compaction summary. */
 	let selfDeclared: string | null = null;
 	const pendingCalls = new Map<string, RereadCall>();
 	/** Allowed closes awaiting their tool_execution_end, keyed by toolCallId for receipt emission. */
@@ -2281,24 +2060,52 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	/** Every tracker a successful br call reached this session, by key: an empty list in one never vouches for the others. */
 	const sessionTrackers = new Map<string, TrackerRef>();
 	pi.on("session_compact", async (_event, ctx) => {
-		// Arm conservatively before discovery: an I/O failure cannot bypass the gate.
 		pendingCalls.clear();
 		closeIntents.clear();
 		const envIdentities = IDENTITY_ENV.map(name => env[name]?.trim()).filter((value): value is string => Boolean(value));
-		pendingReread = { agentsPath: null, identities: envIdentities, agentsOk: false, beadOk: false };
+		let identities: string[];
 		try {
-			pendingReread.identities = [...new Set([...envIdentities, ...await paneIdentities(pi.exec, env, home, [ctx.cwd])])];
-		} catch { /* the reminder still goes out without a name */ }
-		if (pendingReread.identities.length === 0 && selfDeclared !== null) pendingReread.identities = [selfDeclared];
-		pendingReread.agentsPath = nearestAgentsMd(ctx.cwd);
-		pendingReread.beadOk = !trackerRereadApplies(ctx.cwd, env);
-		pendingReread.agentsOk = pendingReread.agentsPath === null;
-		if (pendingReread.agentsOk && pendingReread.beadOk) {
-			pendingReread = null;
-			return;
+			identities = [...new Set([...envIdentities, ...await paneIdentities(pi.exec, env, home, [ctx.cwd])])];
+		} catch {
+			// The summary still goes out without a name.
+			identities = [...envIdentities];
+		}
+		if (identities.length === 0 && selfDeclared !== null) identities = [selfDeclared];
+		// The guard does the reread itself: its own bounded `br list` on the
+		// session tracker's cwd and every tracker the session has touched.
+		// A failed tracker is reported in the summary, never fatal.
+		const trackers = new Map<string, TrackerRef>(sessionTrackers);
+		try {
+			const here = trackerRefForCwd(ctx.cwd, env);
+			if (here !== null && !trackers.has(here.key)) trackers.set(here.key, here);
+		} catch { /* the session tracker is simply not queried */ }
+		const held = new Map<string, { status: string; title: string | null }>();
+		const failures: { path: string; why: string }[] = [];
+		for (const tracker of trackers.values()) {
+			for (const name of identities) {
+				let rows: OwnedBeadRows;
+				try {
+					rows = await readOwnedBeads(pi.exec, tracker, name);
+				} catch (error) {
+					rows = { ok: false, why: `could not run (${error instanceof Error ? error.message : String(error)})` };
+				}
+				if (!rows.ok) {
+					failures.push({ path: tracker.key, why: rows.why });
+					break;
+				}
+				for (const row of rows.rows) {
+					if (!held.has(row.id)) held.set(row.id, { status: row.status, title: row.title });
+				}
+			}
+		}
+		let agentsPath: string | null;
+		try {
+			agentsPath = nearestAgentsMd(ctx.cwd);
+		} catch {
+			agentsPath = null;
 		}
 		pi.sendMessage(
-			{ customType: "kit-flywheel-guard", content: compactionRereadMessage(pendingReread), display: true,
+			{ customType: "kit-flywheel-guard", content: compactionSummaryMessage({ agentsPath, cwd: ctx.cwd, identities, held, failures }), display: true,
 				details: { behavior: COMPACTION_REREAD } },
 			// Idle: append to context now. Streaming (auto-compaction mid-run): inject at the next step boundary.
 			{ deliverAs: ctx.isIdle?.() === false ? "aside" : "nextTurn" },
@@ -2315,13 +2122,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				const cwd = typeof toolCwd === "string" && toolCwd.trim() !== "" ? resolve(ctx.cwd, expandHome(toolCwd.trim(), home)) : ctx.cwd;
 				pendingCalls.set(event.toolCallId, { toolName: event.toolName, input: event.input, cwd });
 			}
-			if (pendingReread !== null && isMutatingCall(event)) {
-				const tool = typeof event.toolName === "string" ? event.toolName : "this call";
-				return {
-					block: true,
-					reason: `kit-flywheel-guard ${COMPACTION_REREAD}: ${tool} blocked until ${rereadMissing(pendingReread)} return successful results. Reading is always allowed.`,
-				};
-			}
+			// COMPACTION_REREAD never blocks: a compaction delivers one summary
+			// message and every call stays allowed (ompkit-j27dd).
 			const goalEnd = checkGoalEnd(event, admissionOwner(env)) ?? checkGoalSend(event, admissionOwner(env));
 			if (goalEnd !== undefined) return goalEnd;
 			const noWait = checkNoWait(event, admissionOwner(env));
@@ -2430,17 +2232,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					ctx.ui?.notify(`kit-flywheel-guard ${SPOOL_WRITE_FAILED}: receipt emission failed (${error instanceof Error ? error.message : String(error)}); the close stands.`, "warning");
 				}
 			}
-			const pending = pendingReread;
-			if (pending === null) return;
-			const identityLess = pending.identities.length === 0;
-			const done = await observeRereadResult(call, _event.result, pending, home, pi.exec, sessionTrackers, env);
-			// A compaction during the guard's own read re-armed a fresh pending; this observation predates it.
-			if (pendingReread !== pending) return;
-			if (identityLess && pending.identities.length > 0) selfDeclared = pending.identities[0]!;
-			if (done && pending.agentsOk && pending.beadOk) pendingReread = null;
+			// COMPACTION_REREAD never blocks and needs no clearing: the summary
+			// is delivered once, by the session_compact handler itself.
 		} catch (error) {
-			// Fail closed: the flags stay unset, so the gate keeps blocking.
-			ctx.ui?.notify(`kit-flywheel-guard ${COMPACTION_REREAD}: reread observation failed (${error instanceof Error ? error.message : String(error)}); still blocked.`, "warning");
+			ctx.ui?.notify(`kit-flywheel-guard tool_execution_end failed (${error instanceof Error ? error.message : String(error)}).`, "warning");
 		}
 	});
 }
