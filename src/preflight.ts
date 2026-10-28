@@ -104,9 +104,17 @@ export async function preflightCommit(repo: string, options: { message?: string;
 
 interface BeadView { id: string; status: string; assignee: string | null; updated_at: string; acceptance: { index: number; checked: boolean; text: string }[]; labels: string[] }
 
+/** Name the unmet tracker prerequisite when `br show` cannot resolve the bead: the sought bead plus
+the bound tracker's own identity read from the tracker itself (never a hardcoded path; best effort). */
+async function missingBeadDetail(repo: string, env: Record<string, string>, id: string, rc: number, firstLine: string | undefined): Promise<string> {
+	const w = await run(["br", "where"], { deadline_s: 30, cwd: repo, env, max_output_bytes: 65536 });
+	const binding = text(w.stdout).split("\n").map(l => l.trim()).find(l => l.startsWith("database:")) ?? `tracker binding unresolved in ${repo}`;
+	return `br show ${id} failed (exit ${rc}): ${firstLine || "no message"}; unmet prerequisite: bead resolvable in bound tracker (${binding})`;
+}
+
 async function readBead(repo: string, id: string, env: Record<string, string>): Promise<BeadView | Finding> {
 	const r = await run(["br", "show", id, "--json"], { deadline_s: 60, cwd: repo, env, max_output_bytes: 4 * 1024 * 1024 });
-	if (r.rc !== 0) return unjudged("br", r.rc, text(r.stderr).trim().split("\n")[0] ?? "br show failed");
+	if (r.rc !== 0) return unjudged("br", r.rc, await missingBeadDetail(repo, env, id, r.rc, text(r.stderr).trim().split("\n")[0]));
 	let doc: unknown;
 	try { doc = JSON.parse(text(r.stdout)); } catch { return unjudged("br", r.rc, "br show printed no JSON"); }
 	const row = Array.isArray(doc) ? doc[0] : doc;

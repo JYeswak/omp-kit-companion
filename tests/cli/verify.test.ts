@@ -61,6 +61,20 @@ test("planted: a dotted bead id proceeds past scratch allocation with the exact 
 	expect(res.log).toContain("exported " + sha);
 });
 
+test("planted: an unresolvable bead names the unmet tracker prerequisite and writes nothing", async () => {
+	const { dir, sha } = await repo("missing");
+	const bin = join(dir, "bin-noshow");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "br"), "#!/bin/sh\nprintf 'ISSUE_NOT_FOUND' >&2\nexit 3\n");
+	chmodSync(join(bin, "br"), 0o755);
+	const res = await verifyBead({ bead: "kit-9.9", exportSha: sha, repo: dir, actor: "Peer", env: { PATH: `${bin}:${process.env.PATH ?? ""}` } });
+	expect(res.code).toBe("NOT_IN_REVIEW");
+	expect(res.replays).toEqual([]);
+	expect(res.acts).toEqual([]);
+	expect(res.log).toContain("kit-9.9");
+	expect(res.log).toContain("unmet prerequisite");
+});
+
 test("planted: the author's own seat is refused NON_AUTHOR_REQUIRED and nothing is run", async () => {
 	const { dir, sha } = await repo("self");
 	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
