@@ -20,7 +20,7 @@ async function run(args: string[], root: string) {
 	const result = await runCommand([process.execPath, entry, ...args], {
 		deadline_s: 60,
 		cwd: root,
-		env: { ...process.env, HOME: root, PATH: "/usr/bin:/bin" },
+		env: { ...process.env, HOME: root, PATH: "/usr/bin:/bin", XDG_CONFIG_HOME: join(root, "xdg-config"), XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data"), XDG_CACHE_HOME: join(root, "xdg-cache") },
 	});
 	return { code: result.rc, stdout: Buffer.from(result.stdout).toString(), stderr: Buffer.from(result.stderr).toString() };
 }
@@ -68,3 +68,28 @@ test("planted: a corrupt opt-out record fails closed and is never appended to", 
 	expect(out.code).toBe(2);
 	expect(readFileSync(optOutFile(root), "utf8")).toBe(before);
 });
+
+test("doctor --scope activation reports each manifest item with an apply verb and readback; recording an opt-out flips OFF_NO_REASON to OFF_WITH_REASON", async () => {
+	const root = home();
+	const first = await run(["doctor", "--scope", "activation", "--json"], root);
+	expect([0, 1]).toContain(first.code);
+	const report = JSON.parse(first.stdout);
+	expect(report.data.findings[0].component).toBe("activation");
+	const items = report.data.findings[0].evidence.items;
+	expect(items.length).toBeGreaterThan(0);
+	for (const item of items) {
+		expect(typeof item.apply).toBe("string");
+		expect(item.apply.length).toBeGreaterThan(0);
+		expect(typeof item.readback).toBe("string");
+		expect(["ON", "OFF_WITH_REASON", "OFF_NO_REASON"].includes(item.status)).toBe(true);
+	}
+	const off = items.filter((item: { status: string }) => item.status === "OFF_NO_REASON");
+	expect(off.length).toBeGreaterThan(0);
+	expect(first.code).toBe(off.length > 0 ? 1 : 0);
+	const target = off[0].item;
+	const rec = await run(["activation", "opt-out", "--item", target, "--reason", "test records a reason", "--json"], root);
+	expect(rec.code).toBe(0);
+	const second = await run(["doctor", "--scope", "activation", "--json"], root);
+	const after = JSON.parse(second.stdout).data.findings[0].evidence.items;
+	expect(after.find((entry: { item: string }) => entry.item === target).status).toBe("OFF_WITH_REASON");
+}, 120_000);
