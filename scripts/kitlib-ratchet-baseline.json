@@ -33,7 +33,6 @@
    "scripts/differential-oracle.ts": 2,
    "scripts/external-live.mjs": 6,
    "scripts/kit-commit.py": 1,
-   "scripts/mission-check.ts": 2,
    "scripts/native-candidate.py": 2,
    "scripts/omp-certify.ts": 1,
    "scripts/package-release.ts": 4,
@@ -67,7 +66,7 @@
    "src/cli.ts": 11,
    "src/converge.ts": 1,
    "src/custody.ts": 1,
-   "src/diagnostics.ts": 11,
+   "src/diagnostics.ts": 9,
    "src/disk-stage.ts": 1,
    "src/drain.ts": 1,
    "src/fleet-flywheel-doctor.ts": 2,
@@ -169,8 +168,8 @@
    "tests/cli/index-lock.test.ts": 4,
    "tests/cli/integrations.test.ts": 4,
    "tests/cli/kit-commit.test.ts": 6,
-   "tests/cli/kit-flywheel-guard-runtime.test.ts": 2,
-   "tests/cli/kit-release.test.ts": 7,
+   "tests/cli/kit-flywheel-guard-runtime.test.ts": 1,
+   "tests/cli/kit-release.test.ts": 6,
    "tests/cli/kit-update-job.test.ts": 1,
    "tests/cli/kit-update-reconcile.test.ts": 1,
    "tests/cli/kit-update.test.ts": 10,
@@ -189,7 +188,7 @@
    "tests/cli/mechanical-admission.test.ts": 3,
    "tests/cli/memory-audit.test.ts": 2,
    "tests/cli/metamorphic.test.ts": 2,
-   "tests/cli/migrate.test.ts": 2,
+   "tests/cli/migrate.test.ts": 1,
    "tests/cli/mission-doctor.test.ts": 1,
    "tests/cli/mission.test.ts": 1,
    "tests/cli/mutants.test.ts": 2,
@@ -210,7 +209,7 @@
    "tests/cli/planning-score.test.ts": 5,
    "tests/cli/plugin-invoke-cwd.test.ts": 1,
    "tests/cli/plugin-release.test.ts": 1,
-   "tests/cli/private-index-land.test.ts": 10,
+   "tests/cli/private-index-land.test.ts": 7,
    "tests/cli/probe.test.ts": 1,
    "tests/cli/readme-check.test.ts": 2,
    "tests/cli/receipt-package.test.ts": 9,
@@ -256,8 +255,7 @@
    "tests/cli/test-runner.test.ts": 19,
    "tests/cli/tool-gating.test.ts": 1,
    "tests/cli/toolcall-corpus.test.ts": 2,
-   "tests/cli/tracker-recovery.test.ts": 3,
-   "tests/cli/tracker-retention-rhy9-15.test.ts": 1,
+   "tests/cli/tracker-recovery.test.ts": 1,
    "tests/cli/ttsr-harness.test.ts": 1,
    "tests/cli/ubs-single-file-verdict.test.ts": 2,
    "tests/cli/work-doctor-stranded.test.ts": 2,
@@ -279,6 +277,6 @@
  },
  "schema": 1,
  "totals": {
-  "raw-spawn": 768
+  "raw-spawn": 755
  }
 }
