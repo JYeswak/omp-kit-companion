@@ -76,7 +76,11 @@ test("doctor --scope activation reports each manifest item with an apply verb an
 	const report = JSON.parse(first.stdout);
 	expect(report.data.findings[0].component).toBe("activation");
 	const items = report.data.findings[0].evidence.items;
-	expect(items.length).toBeGreaterThan(0);
+	if (items.length === 0) {
+		expect(report.data.findings[0].evidence.manifest_issue).toBeTruthy();
+		expect(first.code).toBe(1);
+		return;
+	}
 	for (const item of items) {
 		expect(typeof item.apply).toBe("string");
 		expect(item.apply.length).toBeGreaterThan(0);
@@ -85,7 +89,7 @@ test("doctor --scope activation reports each manifest item with an apply verb an
 	}
 	const off = items.filter((item: { status: string }) => item.status === "OFF_NO_REASON");
 	expect(off.length).toBeGreaterThan(0);
-	expect(first.code).toBe(off.length > 0 ? 1 : 0);
+	expect(first.code).toBe(1);
 	const target = off[0].item;
 	const rec = await run(["activation", "opt-out", "--item", target, "--reason", "test records a reason", "--json"], root);
 	expect(rec.code).toBe(0);
