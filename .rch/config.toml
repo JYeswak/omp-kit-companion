@@ -1,0 +1,23 @@
+# Optional development routing; stock builds and CI do not require RCH.
+# Preserve the existing compiler set and admit this repository's Bun commands.
+# Frozen-source validation still requires --require-tool bun@1.4.3 and
+# --base <commit> --clean-overlay --no-overlay; this list is not runtime attestation.
+[execution]
+allowlist = [
+    "cargo",
+    "rustc",
+    "nextest",
+    "gcc",
+    "g++",
+    "clang",
+    "clang++",
+    "cc",
+    "c++",
+    "make",
+    "cmake",
+    "ninja",
+    "meson",
+    "nix",
+    "go",
+    "bun",
+]
