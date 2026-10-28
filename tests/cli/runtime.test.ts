@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
@@ -1078,33 +1078,49 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		expect(strippedDeny.rc).toBe(77);
 		expect(strippedDeny.out).toContain("READONLY_TRACKER");
 		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
-		let ompBin: string | null = null;
-		for (const dir of (process.env.PATH ?? "").split(":")) {
-			try { accessSync(join(dir, "omp-kit"), constants.X_OK); ompBin = join(dir, "omp-kit"); break; } catch { /* next */ }
-		}
-		if (ompBin === null) throw new Error("no resolvable omp-kit on PATH; unmet prerequisite: official compiled verifier");
+		// Official exact-source HOST candidate: build the unmodified official recipe
+		// from an exact HEAD archive (never the dirty shared tree), then smoke it.
+		// The previous PATH-binary comparator is not this proof (old guardless release).
+		const headRev = await run(["git", "-C", REPO_ROOT, "rev-parse", "HEAD"], { cwd: root, deadline_s: 60 });
+		if (headRev.rc !== 0) throw new Error("no HEAD; unmet prerequisite: exact committed source");
+		const headSha = utf8(headRev.stdout).trim();
+		const srcExport = join(root, "official-src");
+		mkdirSync(srcExport, { recursive: true });
+		const archived = await run(["sh", "-c", `git -C ${JSON.stringify(REPO_ROOT)} archive ${JSON.stringify(headSha)} | tar -x -C ${JSON.stringify(srcExport)}`], { cwd: root, deadline_s: 300 });
+		if (archived.rc !== 0) throw new Error(`exact source export -> ${archived.rc}: ${utf8(archived.stderr).slice(0, 300)}`);
+		const pkgVer = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { version: string }).version;
+		const resultDir = join(root, "official-out");
+		mkdirSync(resultDir, { recursive: true });
+		const built = await run(["bun", join(srcExport, "scripts", "package-release.ts"), "--version", pkgVer, "--platform", "darwin-arm64-none", "--out", resultDir], { cwd: root, deadline_s: 600 });
+		if (built.rc !== 0) throw new Error(`official recipe -> ${built.rc}: ${utf8(built.stdout).slice(0, 300)} ${utf8(built.stderr).slice(0, 300)}`);
+		const tarball = join(resultDir, `omp-kit-v${pkgVer}-darwin-arm64-none.tar`);
+		const extractDir = join(root, "official-extract");
+		mkdirSync(extractDir, { recursive: true });
+		const extracted = await run(["tar", "-x", "-f", tarball, "-C", extractDir], { cwd: root, deadline_s: 300 });
+		if (extracted.rc !== 0) throw new Error(`artifact extract -> ${extracted.rc}`);
+		const ompBin = join(extractDir, "bin", "omp-kit");
 		const brHash = sha256hex(readFileSync(brBin));
 		const srcHash = sha256hex(readFileSync(resolve(import.meta.dir, "..", "..", "src", "verify.ts"), "utf8"));
 		const shimSrcHash = sha256hex(readFileSync(resolve(import.meta.dir, "..", "..", "src", "kitlib", "readonly-br.ts"), "utf8"));
 		const ompHash = sha256hex(readFileSync(ompBin));
 		const acHash = sha256hex(ac);
 		for (const h of [brHash, srcHash, shimSrcHash, ompHash, acHash]) expect(h).toMatch(/^[0-9a-f]{64}$/);
-		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} omp=${ompHash.slice(0, 12)} ac=${acHash.slice(0, 12)}`;
+		expect(headSha).toMatch(/^[0-9a-f]{40}$/);
+		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} omp=${ompHash.slice(0, 12)} ac=${acHash.slice(0, 12)} tree=${headSha.slice(0, 12)}`;
 		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: fam });
 		expect(res.code).toBe("DRY_RUN");
 		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
 		expect(res.log).toContain("owned fixture");
 		expect(res.acts[2]?.join(" ") ?? "").toContain(fam);
 		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
-		const oldEnv = { ...process.env, BEADS_DB: tdb } as Record<string, string>;
-		const old = await run([ompBin, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", "old-binary", "--dry-run", "--json"], { cwd: root, deadline_s: 600, env: oldEnv });
-		const oldDoc: unknown = JSON.parse(utf8(old.stdout));
-		const oldData: unknown = typeof oldDoc === "object" && oldDoc !== null && "data" in oldDoc ? oldDoc.data : null;
-		const oldReplays = typeof oldData === "object" && oldData !== null && "replays" in oldData && Array.isArray(oldData.replays) ? oldData.replays as Array<{ letter?: unknown; pass?: unknown }> : null;
-		if (oldReplays === null) throw new Error(`old verifier returned no replays: ${utf8(old.stdout).slice(0, 300)}`);
-		expect(oldReplays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", false]]);
-		const afterOld = await brOut(["show", id, "--json"], tdir);
-		expect(afterOld.out).toContain("guard-probe");
+		// Official candidate smoke through the existing verify consumer (dry-run: no mutation, no live claim).
+		const officialEnv = { ...process.env, BEADS_DB: tdb } as Record<string, string>;
+		const official = await run([ompBin, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", "official-binary", "--dry-run", "--json"], { cwd: root, deadline_s: 600, env: officialEnv });
+		const officialDoc: unknown = JSON.parse(utf8(official.stdout));
+		const officialData: unknown = typeof officialDoc === "object" && officialDoc !== null && "data" in officialDoc ? officialDoc.data : null;
+		const officialReplays = typeof officialData === "object" && officialData !== null && "replays" in officialData && Array.isArray(officialData.replays) ? officialData.replays as Array<{ letter?: unknown; pass?: unknown }> : null;
+		if (officialReplays === null) throw new Error(`official verifier returned no replays: ${utf8(official.stdout).slice(0, 300)}`);
+		expect(officialReplays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
 		// The close act requires the min_reviewers gate on in_review -> closed;
 		// replicate the production tracker's workflow policy into the fixture.
 		writeFileSync(join(tdir, ".beads", "policy.yaml"), "workflow:\n  strict: true\n  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]\n  transitions:\n    initial: [open]\n    open: [in_progress, blocked, deferred, closed]\n    in_progress: [in_review, open, blocked, deferred]\n    in_review: [closed, rework]\n    rework: [in_progress, in_review, open]\n    blocked: [open, in_progress]\n    deferred: [open]\n    closed: [open]\n  gates:\n    \"in_review -> closed\":\n      require_all:\n        - min_reviewers: 1\n");
@@ -1122,5 +1138,5 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const finalRow: unknown = Array.isArray(finalParsed) ? finalParsed[0] : finalParsed;
 		const finalStatus = typeof finalRow === "object" && finalRow !== null && "status" in finalRow && typeof finalRow.status === "string" ? finalRow.status : null;
 		expect(finalStatus).toBe("closed");
-	}, 60_000);
+	}, 600_000);
 });
