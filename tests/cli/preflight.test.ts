@@ -151,6 +151,16 @@ async function claimFixture(name: string, actor: string, root: string): Promise<
 	return { repo, gated, eligible };
 }
 
+function harnessScratchTmp(): string | null {
+	try {
+		const scratch = process.env.GRADE_WAVE_SCRATCH;
+		if (!scratch || !statSync(scratch).isDirectory()) return null;
+		const tmp = join(scratch, "tmp");
+		mkdirSync(tmp, { recursive: true });
+		return tmp;
+	} catch { return null; }
+}
+
 async function beadRow(repo: string, id: string): Promise<{ status: string; assignee: string | null; labels: string[] }> {
 	const row = JSON.parse(await sh(["br", "show", id, "--json"], repo))[0];
 	return { status: String(row.status), assignee: (typeof row.assignee === "string" && row.assignee) || null, labels: Array.isArray(row.labels) ? row.labels.map(String) : [] };
@@ -170,9 +180,19 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	const actor = "TestSeatNeedsDirector";
 	const savedDb = process.env.BEADS_DB;
 	delete process.env.BEADS_DB;
-	const root = await nativeFixtureRoot("needs-director");
+	const harnessTmp = harnessScratchTmp();
+	let dir: string;
+	let release: (() => Promise<void>) | null = null;
+	if (harnessTmp) {
+		dir = ownedTmp("needs-director", { root: harnessTmp }).path;
+		expect(dir === harnessTmp || dir.startsWith(harnessTmp + "/")).toBe(true);
+	} else {
+		const owned = await nativeFixtureRoot("needs-director");
+		dir = owned.dir;
+		release = () => releaseFixtureRoot(owned);
+	}
 	try {
-		const { repo, gated, eligible } = await claimFixture("needs-director", actor, root.dir);
+		const { repo, gated, eligible } = await claimFixture("needs-director", actor, dir);
 		process.env.BEADS_DB = join(repo, ".beads", "beads.db");
 	// unit: the refusal is the named NEEDS_DIRECTOR code, and it is the sole
 	// cause (open, unassigned, no other gated label, seat holds nothing)
@@ -189,7 +209,7 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	expect(new TextDecoder().decode(cli.stdout)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
 	// actual supported claim boundary: the fleet-pane `br` (candidate shim) refuses by name, nothing mutates
-	const mutation = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor, root.dir) });
+	const mutation = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor, dir) });
 	expect(mutation.rc).not.toBe(0);
 	expect(new TextDecoder().decode(mutation.stderr)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
@@ -197,7 +217,7 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	const controlActor = "TestSeatControl";
 	const okCtl = await preflightBead("claim", repo, eligible, { actor: controlActor });
 	expect(okCtl.findings.filter(f => f.blocking)).toEqual([]);
-	const okClaim = await run(["br", "update", eligible, "--claim", "--actor", controlActor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(controlActor, root.dir) });
+	const okClaim = await run(["br", "update", eligible, "--claim", "--actor", controlActor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(controlActor, dir) });
 	expect(okClaim.rc).toBe(0);
 	expect(await beadRow(repo, eligible)).toEqual({ status: "in_progress", assignee: controlActor, labels: [] });
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
@@ -206,12 +226,12 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	await sh(["br", "update", gated, "--remove-label", "needs-director", "--actor", "Director"], repo);
 	const re = await preflightBead("claim", repo, gated, { actor });
 	expect(re.findings.filter(f => f.blocking).map(f => f.code)).not.toContain("NEEDS_DIRECTOR");
-	const reClaim = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor, root.dir) });
+	const reClaim = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor, dir) });
 	expect(reClaim.rc).toBe(0);
 	expect(await beadRow(repo, gated)).toEqual({ status: "in_progress", assignee: actor, labels: [] });
 	} finally {
 		if (savedDb === undefined) delete process.env.BEADS_DB; else process.env.BEADS_DB = savedDb;
-		await releaseFixtureRoot(root);
+		if (release) await release();
 	}
 });
 test("neutralized fixture root (ownedTmp) carries no agent attribution for read-only guards", async () => {
