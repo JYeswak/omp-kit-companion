@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { envelope, parseFindingLines, renderEnvelope } from "../../src/kitlib/findings.ts";
 import { preflightBead, preflightCommit } from "../../src/preflight.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -122,19 +122,47 @@ async function nativeFixtureRoot(label: string): Promise<{ dir: string; capabili
 		scan = parent;
 	}
 	if (!repo) throw new Error("no enclosing repository found for owned fixture scratch");
-	const made = await run(["omp-kit", "scratch", "new", "--label", label, "--json"], { deadline_s: 60, cwd: repo, env: { ...process.env } });
-	const doc: unknown = JSON.parse(new TextDecoder().decode(made.stdout));
-	const data: unknown = doc && typeof doc === "object" && "data" in doc ? doc.data : null;
-	const dir = data && typeof data === "object" && "dir" in data && typeof data.dir === "string" ? data.dir : "";
-	const capability = data && typeof data === "object" && "capability" in data && typeof data.capability === "string" ? data.capability : "";
-	if (!dir || !capability) throw new Error("omp-kit scratch new printed no dir/capability");
+	// Publication runs the owned checkout outside the installed kit's recognized
+	// scratch roots (02a2 log822-833): `scratch new` then refuses with valid JSON
+	// that carries no dir, and the old generic throw discarded the child result.
+	// Declare this repo's own root through the documented override (resolved:
+	// /tmp-style spellings never match the release set).
+	const scratchRoots = join(realpathSync(repo), "var", "agent-tmp");
+	const childEnv = { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots };
+	const argv = ["omp-kit", "scratch", "new", "--label", label, "--json"];
+	const exe = Bun.which("omp-kit") ?? "omp-kit";
+	let made: { rc: number | null; stdout: Uint8Array; stderr: Uint8Array };
+	try {
+		made = await run(argv, { deadline_s: 60, cwd: repo, env: childEnv });
+	} catch (error) {
+		throw new Error(`omp-kit scratch new failed to spawn (argv=${JSON.stringify(argv)} exe=${exe} cwd=${repo}): ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const stdoutText = new TextDecoder().decode(made.stdout);
+	const stderrText = new TextDecoder().decode(made.stderr);
+	const childEnvelope = `argv=${JSON.stringify(argv)} exe=${exe} cwd=${repo} rc=${String(made.rc)} stdout=${stdoutText} stderr=${stderrText}`;
+	let doc: unknown;
+	try {
+		doc = JSON.parse(stdoutText);
+	} catch {
+		throw new Error(`omp-kit scratch new printed non-JSON (no dir/capability); child envelope: ${childEnvelope}`);
+	}
+	const data: unknown = doc !== null && typeof doc === "object" && "data" in doc ? doc.data : null;
+	const dir = data !== null && typeof data === "object" && "dir" in data && typeof data.dir === "string" ? data.dir : "";
+	const capability = data !== null && typeof data === "object" && "capability" in data && typeof data.capability === "string" ? data.capability : "";
+	if (!dir || !capability) throw new Error(`omp-kit scratch new printed no dir/capability; child envelope: ${childEnvelope}`);
 	const owner: unknown = JSON.parse(readFileSync(join(dir, ".owner"), "utf8"));
-	const agent: unknown = owner && typeof owner === "object" && "agent" in owner ? owner.agent : null;
+	const agent: unknown = owner !== null && typeof owner === "object" && "agent" in owner ? owner.agent : null;
 	if (typeof agent !== "string" || agent.length === 0) throw new Error(`fixture root ${dir} lacks agent-attributed ownership; read-only guards cannot admit it`);
 	return { dir, capability };
 }
 async function releaseFixtureRoot(root: { dir: string; capability: string }): Promise<void> {
-	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot, env: { ...process.env } });
+	let scratchRoots: string;
+	try {
+		scratchRoots = join(realpathSync(join(root.dir, "..", "..", "..")), "var", "agent-tmp");
+	} catch {
+		scratchRoots = join(resolve(root.dir, "..", "..", ".."), "var", "agent-tmp");
+	}
+	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot, env: { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots } });
 	if (r.rc !== 0) throw new Error(`scratch release failed: ${new TextDecoder().decode(r.stderr)}`);
 }
 async function claimFixture(name: string, actor: string, root: string, brBin: string): Promise<{ repo: string; gated: string; eligible: string }> {
