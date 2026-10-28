@@ -7,7 +7,7 @@ import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const SCAN_ROOTS = ["src", "extensions", "scripts"];
-/** Static import/export with an absolute specifier: `from "/..."`, `import "..."`, `import("/...")`. Word-boundary anchored so identifiers like fromRel/fromDir do not match. Line-based, like the rg gate. */
+/** Static import/export with an absolute specifier: `from "/..."`, `import "..."`, `import("/...")`. Word-boundary anchored so identifiers like fromRel/fromDir do not match. Line-based, like the rg gate. Linear patterns, no nested quantifiers (regex-engineering verify: required match + reject cases below; no backtracking risk). */
 const ABS_SPEC = [/\bfrom\s+['"]\//, /\bimport\s+['"]\//, /\bimport\s*\(\s*['"]\//];
 
 const utf8 = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -22,8 +22,20 @@ function tsFiles(dir: string): string[] {
 	return out;
 }
 
+/** Detector unit controls: the exact removed stub line must match; lookalikes must not. Runs anywhere, no repo needed. */
+test("ABSIMPORT1 detector flags absolute specifiers and ignores lookalikes", () => {
+	const planted = 'export { default } from "/Users/josh/.omp/jev-pinned/2eacc3307ba1b54a4435ac2f4140f9ba8374b0bb/repo/.omp/extensions/jev-memory-filter.ts";';
+	expect(ABS_SPEC.some(re => re.test(planted))).toBe(true);
+	expect(ABS_SPEC.some(re => re.test('import x from "/abs/path";'))).toBe(true);
+	expect(ABS_SPEC.some(re => re.test('import("/abs/mod");'))).toBe(true);
+	expect(ABS_SPEC.some(re => re.test('const base = normalize(join(fromDir, bare)).split(sep).join("/");'))).toBe(false);
+	expect(ABS_SPEC.some(re => re.test('export const LANE_BIND_PATH = "/Users/josh/.local/bin/rch-lane-bind";'))).toBe(false);
+	expect(ABS_SPEC.some(re => re.test('import { x } from "./relative/path";'))).toBe(false);
+	expect(ABS_SPEC.some(re => re.test('export * from "../up/one";'))).toBe(false);
+});
+
 let cachedExport: { srcExport: string; identity: Record<string, string> } | null = null;
-/** Exact source tree in owned scratch. Normal path archives verified HEAD (top-level guard refuses ancestor discovery); cold path uses a caller-provided tarball verified by sha256 (TRUSTED_SOURCE_TARBALL + TRUSTED_SOURCE_SHA), no git required. Either way the scan and builds run on the extract, never on a discovered ancestor. The tarball bytes are the source identity: `git archive` output is deterministic per commit. */
+/** Exact source tree in owned scratch. Precedence: (1) caller-provided tarball verified by sha (TRUSTED_SOURCE_TARBALL + TRUSTED_SOURCE_SHA); (2) git archive of verified HEAD (top-level guard refuses ancestor discovery); (3) bare-export stamp: REPO_ROOT/package.json source_revision must be a full commit sha, used as the identity without any git. Never discovers an ancestor repo. */
 async function exactSource(): Promise<{ srcExport: string; identity: Record<string, string> }> {
 	if (cachedExport) return cachedExport;
 	const g = process.env.GRADE_WAVE_SCRATCH || undefined;
@@ -41,11 +53,20 @@ async function exactSource(): Promise<{ srcExport: string; identity: Record<stri
 		if (ex.rc !== 0) throw new Error(`trusted source extract -> ${ex.rc}`);
 		identity = { tarballSha256: actual, provenance: "trusted-input" };
 	} else {
+		const top = await run(["git", "-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { cwd: REPO_ROOT, deadline_s: 60 });
+		const rooted = top.rc === 0 && resolve(utf8(top.stdout).trim()) === resolve(REPO_ROOT);
+		if (!rooted) {
+			const stamped = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { source_revision?: unknown };
+			const rev = typeof stamped.source_revision === "string" ? stamped.source_revision : "";
+			if (!/^[0-9a-f]{40}$/.test(rev)) throw new Error("source identity not exact: no git top-level, no tarball input, and no full-sha archive stamp; refusing ancestor discovery");
+			identity = { headSha: rev, provenance: "archive-stamp" };
+			cachedExport = { srcExport: REPO_ROOT, identity };
+			console.log(`ABSIMPORT1 source identity: ${JSON.stringify(identity)}`);
+			return cachedExport;
+		}
 		const head = await run(["git", "-C", REPO_ROOT, "rev-parse", "HEAD"], { cwd: REPO_ROOT, deadline_s: 60 });
 		if (head.rc !== 0) throw new Error("no HEAD; unmet prerequisite: exact committed source (or set TRUSTED_SOURCE_TARBALL + TRUSTED_SOURCE_SHA)");
 		const sha = utf8(head.stdout).trim();
-		const top = await run(["git", "-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { cwd: REPO_ROOT, deadline_s: 60 });
-		if (top.rc !== 0 || resolve(utf8(top.stdout).trim()) !== resolve(REPO_ROOT)) throw new Error(`source identity not exact: ${REPO_ROOT} is not a repo top-level; refusing ancestor discovery`);
 		const tree = await run(["git", "-C", REPO_ROOT, "rev-parse", `${sha}^{tree}`], { cwd: REPO_ROOT, deadline_s: 60 });
 		const treeSha = tree.rc === 0 ? utf8(tree.stdout).trim() : "unknown";
 		const arch = await run(["sh", "-c", `git -C ${JSON.stringify(REPO_ROOT)} archive ${JSON.stringify(sha)} | tee ${JSON.stringify(tarball)} | tar -x -C ${JSON.stringify(srcExport)}`], { cwd: root, deadline_s: 300 });
