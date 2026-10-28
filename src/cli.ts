@@ -88,7 +88,7 @@ import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunn
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
-import { inspectActivation, liveActivationDeps, recordOptOut } from "./activation.ts";
+import { applyActivationManifest, inspectActivation, liveActivationDeps, recordOptOut, updatePostApplyEnvelope } from "./activation.ts";
 import { inspectOwnership, liveOwnershipIo } from "./ownership-doctor.ts";
 import { inspectMissionRch, liveMissionRchIo } from "./mission-rch.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
@@ -3998,25 +3998,9 @@ async function updateCommand(request: ParsedCommand): Promise<CliResult> {
 		const link = store
 			? await relinkKitPlugin(binary, store)
 			: { ok: false as const, detail: "updated release version is missing or invalid" };
-		const plugin = {
-			plugin_relink: link.ok ? "APPLIED" : "FAILED",
-			plugin_receipt_id: link.receiptId ?? null,
-			plugin_undo_command: link.undoCommand ?? null,
-			plugin_relink_detail: link.detail,
-		};
-		return {
-			...envelope,
-			...(link.ok ? {} : { code: 1 as const }),
-			data: { ...envelope.data, ...(link.ok ? {} : { overall: "FAIL" }), ...plugin },
-			...(!link.ok ? { errors: [...(envelope.errors ?? []), {
-				code: "PLUGIN_RELINK_FAILED",
-				message: `Kit update to ${outcome.activeVersion ?? "unknown version"} succeeded, but plugin relinking did not complete: ${link.detail}`,
-				remediation: link.undoCommand
-					? `Undo partial profile changes with \`${link.undoCommand}\`, inspect the plugin receipt, then retry relinking.`
-					: `Inspect omp-kit apply plugin --plan --store ${store ?? "<release-root>"} --profiles all --include-default before retrying.`,
-			}] } : {}),
-			verification: "UNVERIFIED",
-		};
+	if (!link.ok) return updatePostApplyEnvelope(envelope, link, null, store);
+	const manifest = await applyActivationManifest({ root: store, home, stateRoot, binary });
+	return updatePostApplyEnvelope(envelope, link, manifest, store);
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope, action: "PARTIAL" },

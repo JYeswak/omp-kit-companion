@@ -54,7 +54,7 @@ function bytesOf(path: string, kind: "SOURCE_INVALID" | "STATE_UNSAFE" | "UNSAFE
 }
 function ownership(path: string): { value: Ownership; image: Image | null } {
 	const file = bytesOf(path, "STATE_UNSAFE");
-	if (!file) return { value: { version: 1, rules: {} }, image: null };
+	if (!file) return { value: { version: 1, rules: {}, fleetRules: {} }, image: null };
 	if (file.image.mode !== 0o600 || file.image.uid !== process.getuid?.()) fail("STATE_UNSAFE");
 	return { value: parseRuleOwnership(file.bytes), image: file.image };
 }
@@ -135,7 +135,8 @@ export function planRules(input: RuleInput): RulePlan {
 		safeDirectories(target);
 		const previous = ownership(recordPath);
 		const entries: RulePlanEntry[] = [];
-		const nextRules: Record<string, Image> = Object.assign(Object.create(null) as Record<string, Image>, previous.value.rules);
+		const scope = input.fleet ? "fleetRules" : "rules";
+		const nextRules: Record<string, Image> = Object.assign(Object.create(null) as Record<string, Image>, previous.value[scope] ?? {});
 		const mutations: FileMutation[] = [];
 		const images = new Map<string, Image | null>();
 		const candidates = new Map(pack.rules.map(rule => [rule.name, rule]));
@@ -181,7 +182,9 @@ export function planRules(input: RuleInput): RulePlan {
 		let mutation: MutationPlan | null = null;
 		if (!blocked && mutations.length) {
 			mutations.push({ root: "home", relativePath: ".agents/omp-kit-ownership.json", expectedBefore: previous.image,
-				after: { bytes: Buffer.from(JSON.stringify({ version: 1, rules: Object.fromEntries(Object.entries(nextRules).sort(([a], [b]) => a.localeCompare(b))) }) + "\n"), mode: 0o600 } });
+				after: { bytes: Buffer.from(JSON.stringify(input.fleet
+					? { version: 1, rules: previous.value.rules, fleetRules: Object.fromEntries(Object.entries(nextRules).sort(([a], [b]) => a.localeCompare(b))) }
+					: { version: 1, rules: Object.fromEntries(Object.entries(nextRules).sort(([a], [b]) => a.localeCompare(b))), ...(Object.keys(previous.value.fleetRules ?? {}).length > 0 ? { fleetRules: previous.value.fleetRules } : {}) } ) + "\n"), mode: 0o600 } });
 			mutation = planMutation({ stateRoot, roots: [{ id: "home", path: input.home }], files: mutations });
 		}
 		const plan: RulePlan = Object.freeze({ scope: "rules", entries: Object.freeze(entries), unknownMarkdown, changes: entries.filter(entry => entry.action === "install" || entry.action === "update" || entry.action === "retire").length, blocked });

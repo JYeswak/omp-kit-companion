@@ -22,12 +22,14 @@
 // without --fleet manages legacy ~/.agents copies ("legacy ... owned by
 // migrate" in doctor --scope rules), which is not activation and is not read
 // here.
+import { run } from "./kitlib/run.ts";
 import { lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { planRules } from "./apply-rules.ts";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { applyRulePlan, planRules } from "./apply-rules.ts";
+import { applyExtensions, planExtensions } from "./apply-extensions.ts";
 import { profilePluginRuleStatus, readManifest } from "./diagnostics.ts";
 import { extractImportSpecifiers } from "./extensions.ts";
-import { HOOK_MEMBER_PAIRS, censusHookFreshness, liveHookFreshnessIo, type HookRepoRow } from "./hook-refresh.ts";
+import { HOOK_MEMBER_PAIRS, censusHookFreshness, liveHookFreshnessIo, liveHookRefreshIo, refreshFleetHooks, type HookRefreshIo, type HookRepoRow } from "./hook-refresh.ts";
 import { KNOWN_JOBS } from "./service.ts";
 import { livePluginReleaseIo, type PluginLink } from "./plugin-release.ts";
 import { defaultInventoryDeps, inventoryServices, type ServiceRow } from "./services.ts";
@@ -384,4 +386,202 @@ export function inspectActivation(root: string, home: string, deps: ActivationDe
 	const off_no_reason = items.filter((entry) => entry.status === "OFF_NO_REASON").length;
 	const overall = manifest_issue !== null || optouts_issue !== null || off_no_reason > 0 ? "FAIL" : "PASS";
 	return { scope: "activation", overall, items, on, off_with_reason, off_no_reason, manifest_issue, optouts_issue };
+}
+/**
+ * update --apply manifest loop (ACTIVEDEFAULT1, ompkit-fp72.135.3.77 AC4).
+ * Applies the whole activation manifest after install using the existing
+ * planners and appliers: both rule packs, extensions, fleet hooks and
+ * services. Items with a recorded opt-out are never force-applied: a pack,
+ * repo or job whose planned changes would touch an opted-out item is skipped
+ * with the items named. Never throws; failures are recorded.
+ */
+export interface ManifestApplySkip { item: string; reason: string; }
+export interface ManifestApplyFailure { item: string; detail: string; }
+export interface ManifestApplyResult {
+	ok: boolean;
+	rulesApplied: number;
+	extensionsApplied: number;
+	hooksRefreshed: number;
+	hooksRepos: number;
+	hooksFailed: number;
+	hooksSkippedRepos: string[];
+	servicesApplied: string[];
+	skipped: ManifestApplySkip[];
+	failed: ManifestApplyFailure[];
+}
+export interface ManifestApplyDeps {
+	exec?: (argv: readonly string[]) => Promise<{ exit: number; stdout: string; stderr: string }>;
+	hookIo?: HookRefreshIo;
+}
+const MANIFEST_TOUCH_ACTIONS: Record<string, true> = { collision: true, install: true, retire: true, update: true };
+async function manifestExec(argv: readonly string[]): Promise<{ exit: number; stdout: string; stderr: string }> {
+	const ran = await run(argv, { deadline_s: 120 });
+	return { exit: ran.rc ?? 1, stdout: Buffer.from(ran.stdout).toString("utf8"), stderr: Buffer.from(ran.stderr).toString("utf8") };
+}
+function manifestErrorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+export async function applyActivationManifest(input: { root: string; home: string; stateRoot: string; binary: string } & ManifestApplyDeps): Promise<ManifestApplyResult> {
+	const { root, home, stateRoot, binary } = input;
+	const exec = input.exec ?? manifestExec;
+	const skipped: ManifestApplySkip[] = [];
+	const failed: ManifestApplyFailure[] = [];
+	let rulesApplied = 0, extensionsApplied = 0, hooksRefreshed = 0, hooksRepos = 0, hooksFailed = 0;
+	const hooksSkippedRepos: string[] = [];
+	const servicesApplied: string[] = [];
+	const done = (ok: boolean): ManifestApplyResult => ({ ok, rulesApplied, extensionsApplied, hooksRefreshed, hooksRepos, hooksFailed, hooksSkippedRepos, servicesApplied, skipped, failed });
+	const optoutRead = readOptOutFile(home);
+	if (optoutRead.issue !== null) {
+		failed.push({ item: "opt-outs", detail: optoutRead.issue });
+		return done(false);
+	}
+	const optedOut = new Set(optoutRead.optouts.map((entry) => entry.item));
+	for (const fleet of [false, true]) {
+		const packId = fleet ? "rules-fleet" : "rules";
+		try {
+			const plan = planRules({ root, home, stateRoot, fleet });
+			const touch = plan.entries.filter((entry) =>
+				optedOut.has(`rule:${packId}/${entry.name}`) && MANIFEST_TOUCH_ACTIONS[entry.action] === true);
+			if (touch.length > 0) {
+				skipped.push({ item: `rules:${packId}`, reason: `opted-out items would change: ${touch.map((entry) => `${entry.name}(${entry.action})`).join(", ")}` });
+				continue;
+			}
+			rulesApplied += applyRulePlan(plan, { confirmed: true }).files;
+		} catch (error) {
+			failed.push({ item: `rules:${packId}`, detail: manifestErrorText(error) });
+		}
+	}
+	try {
+		const plan = planExtensions({ root, home, stateRoot, project: process.cwd(), profiles: "all", includeDefault: true });
+		const destination = join(home, ".omp", "omp-extensions");
+		const manifestId = (stepPath: string): string => `extension:extensions/${relative(destination, stepPath)}`;
+		const touch = plan.steps.filter((step) =>
+			step.kind === "extension" && step.beforeSha256 !== step.afterSha256 &&
+			optedOut.has(manifestId(step.path)));
+		if (touch.length > 0) {
+			skipped.push({ item: "extensions", reason: `opted-out extensions would change: ${touch.map((step) => manifestId(step.path)).join(", ")}` });
+		} else {
+			extensionsApplied += applyExtensions(plan).files;
+		}
+	} catch (error) {
+		failed.push({ item: "extensions", detail: manifestErrorText(error) });
+	}
+	try {
+		const hookOptOuts = [...optedOut].filter((item) => item.startsWith("hook:"));
+		if (hookOptOuts.length === 0) {
+			const report = await refreshFleetHooks(input.hookIo ?? liveHookRefreshIo(home, root));
+			hooksRefreshed = report.refreshed; hooksRepos = report.repos; hooksFailed = report.failed;
+			if (report.failed > 0) failed.push({ item: "hooks", detail: `${report.failed} repo(s) failed` });
+		} else {
+			const io = input.hookIo ?? liveHookRefreshIo(home, root);
+			const census = censusHookFreshness(io);
+			const censusRepos = new Set(census.map((row) => resolve(row.repo)));
+			const staleRepos = new Set<string>();
+			for (const row of census) {
+				for (const member of row.members) {
+					const id = `hook:${row.repo}::${member.member}`;
+					if (optedOut.has(id) && member.status !== "FRESH") {
+						staleRepos.add(resolve(row.repo));
+						skipped.push({ item: id, reason: `opted out and ${member.status}; repo skipped` });
+					}
+				}
+			}
+			const filtered: HookRefreshIo = { ...io,
+				pullRepos: () => io.pullRepos().filter((entry) => {
+					const resolved = resolve(entry.repo);
+					if (staleRepos.has(resolved)) return false;
+					if (!censusRepos.has(resolved)) {
+						hooksSkippedRepos.push(resolved);
+						skipped.push({ item: `hook:${entry.repo}::*`, reason: "repo not in freshness census; skipped" });
+						return false;
+					}
+					return true;
+				}) };
+			const report = await refreshFleetHooks(filtered);
+			hooksRefreshed = report.refreshed; hooksRepos = report.repos; hooksFailed = report.failed;
+			if (report.failed > 0) failed.push({ item: "hooks", detail: `${report.failed} repo(s) failed` });
+		}
+	} catch (error) {
+		failed.push({ item: "hooks", detail: manifestErrorText(error) });
+	}
+	for (const name of Object.keys(KNOWN_JOBS)) {
+		const item = `service:${name}`;
+		if (optedOut.has(item)) {
+			skipped.push({ item, reason: "opted out" });
+			continue;
+		}
+		try {
+			const ran = await exec([binary, "service", "install", name, "--apply", "--yes", "--json"]);
+			let code = -1, detail = "";
+			try {
+				const parsed = JSON.parse(ran.stdout) as { code?: unknown; errors?: unknown };
+				if (typeof parsed.code === "number") code = parsed.code;
+				const firstError = Array.isArray(parsed.errors) ? parsed.errors[0] as { code?: unknown; message?: unknown } | undefined : undefined;
+				if (firstError && (typeof firstError.code === "string" || typeof firstError.message === "string")) {
+					detail = `${String(firstError.code ?? "ERROR")}: ${String(firstError.message ?? "")}`.trim();
+				}
+			} catch { detail = (ran.stdout + ran.stderr).slice(-300).trim(); }
+			if (ran.exit !== 0 || code !== 0) {
+				failed.push({ item, detail: detail || `exit ${ran.exit}: ${(ran.stdout + ran.stderr).slice(-300).trim()}` });
+			} else {
+				servicesApplied.push(name);
+			}
+		} catch (error) {
+			failed.push({ item, detail: manifestErrorText(error) });
+		}
+	}
+	return done(failed.length === 0);
+}
+/**
+ * Assemble the update --apply result after install: a failed plugin relink
+ * reports FINDINGS (never UPDATED) and skips the manifest loop; a failed
+ * manifest application reports FINDINGS; a clean loop reports UPDATED.
+ */
+export function updatePostApplyEnvelope(
+	envelope: { code: number; data: Record<string, unknown>; errors?: readonly { code: string; message: string; remediation: string }[] },
+	link: { ok: boolean; receiptId?: string; undoCommand?: string; detail: string },
+	manifest: ManifestApplyResult | null,
+	store: string | null,
+): { code: 0 | 1; data: Record<string, unknown>; errors?: { code: string; message: string; remediation: string }[]; verification: "UNVERIFIED" } {
+	const plugin = {
+		plugin_relink: link.ok ? "APPLIED" as const : "FAILED" as const,
+		plugin_receipt_id: link.receiptId ?? null,
+		plugin_undo_command: link.undoCommand ?? null,
+		plugin_relink_detail: link.detail,
+	};
+	if (!link.ok) {
+		return { code: 1,
+			data: { ...envelope.data, overall: "FINDINGS", manifest: null, ...plugin },
+			errors: [...(envelope.errors ?? []), {
+				code: "PLUGIN_RELINK_FAILED",
+				message: `Kit update succeeded, but plugin relinking did not complete: ${link.detail}`,
+				remediation: link.undoCommand
+					? `Undo partial profile changes with \`${link.undoCommand}\`, inspect the plugin receipt, then retry relinking.`
+					: `Inspect omp-kit apply plugin --plan --store ${store ?? "<release-root>"} --profiles all --include-default before retrying.`,
+			}],
+			verification: "UNVERIFIED" };
+	}
+	const section = manifest === null ? null : {
+		status: manifest.ok ? "APPLIED" as const : "FINDINGS" as const,
+		rules_applied: manifest.rulesApplied,
+		extensions_applied: manifest.extensionsApplied,
+		hooks_refreshed: manifest.hooksRefreshed,
+		hooks_repos: manifest.hooksRepos,
+		hooks_failed: manifest.hooksFailed,
+		hooks_skipped_repos: manifest.hooksSkippedRepos,
+		services_applied: manifest.servicesApplied,
+		skipped: manifest.skipped,
+		failed: manifest.failed,
+	};
+	if (manifest === null || !manifest.ok) {
+		return { code: 1,
+			data: { ...envelope.data, overall: "FINDINGS", ...plugin, manifest: section },
+			errors: [...(envelope.errors ?? []), ...(manifest?.failed ?? []).map((entry) => ({
+				code: "MANIFEST_APPLY_FAILED",
+				message: `${entry.item}: ${entry.detail}`,
+				remediation: "Inspect the manifest section; fix the cause or record an opt-out, then retry the update.",
+			}))],
+			verification: "UNVERIFIED" };
+	}
+	return { code: 0, data: { ...envelope.data, overall: "UPDATED", ...plugin, manifest: section }, verification: "UNVERIFIED" };
 }

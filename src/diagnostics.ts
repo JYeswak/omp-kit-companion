@@ -68,7 +68,7 @@ export const DIAGNOSTIC_SCOPE_COMPONENTS: Readonly<Record<string, readonly strin
 };
 export type RuleClass = "always" | "tripwire" | "reminder" | "router" | "canary";
 export interface ManifestRule { name: string; sha256: string; ruleClass: RuleClass; pack: string }
-export type RuleOwnershipRecord = { version: 1; rules: Record<string, Image> };
+export type RuleOwnershipRecord = { version: 1; rules: Record<string, Image>; fleetRules: Record<string, Image> };
 const HEADER = "name\tsha256\tclass\tpack";
 const RECORD_HEADER = "name\tsha256\tpack\tinstalled_utc";
 const CLASSES: Record<RuleClass, true> = { always: true, tripwire: true, reminder: true, router: true, canary: true };
@@ -92,9 +92,13 @@ export function parseRuleOwnership(bytes: Uint8Array): RuleOwnershipRecord {
 	catch { throw new Error("STATE_UNSAFE"); }
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("STATE_UNSAFE");
 	const row = parsed as Record<string, unknown>;
-	if (Object.keys(row).sort().join(",") !== "rules,version" || row.version !== 1 ||
-		!row.rules || typeof row.rules !== "object" || Array.isArray(row.rules)) throw new Error("STATE_UNSAFE");
-	for (const [name, value] of Object.entries(row.rules)) {
+	const keys = Object.keys(row).sort().join(",");
+	if ((keys !== "rules,version" && keys !== "fleetRules,rules,version") || row.version !== 1 ||
+		!row.rules || typeof row.rules !== "object" || Array.isArray(row.rules) ||
+		(row.fleetRules !== undefined && (typeof row.fleetRules !== "object" || Array.isArray(row.fleetRules)))) throw new Error("STATE_UNSAFE");
+	const owned: Array<[string, unknown]> = [...Object.entries(row.rules as Record<string, unknown>)];
+	if (row.fleetRules !== undefined) owned.push(...Object.entries(row.fleetRules as Record<string, unknown>));
+	for (const [name, value] of owned) {
 		if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || !value || typeof value !== "object" || Array.isArray(value)) throw new Error("STATE_UNSAFE");
 		const image = value as Record<string, unknown>;
 		if (Object.keys(image).sort().join(",") !== "gid,mode,sha256,size,uid" ||
@@ -102,7 +106,7 @@ export function parseRuleOwnership(bytes: Uint8Array): RuleOwnershipRecord {
 			![image.size, image.mode, image.uid, image.gid].every(item => typeof item === "number" && Number.isSafeInteger(item) && item >= 0) ||
 			(image.mode as number) > 0o7777) throw new Error("STATE_UNSAFE");
 	}
-	return row as RuleOwnershipRecord;
+	return { version: 1, rules: row.rules as Record<string, Image>, fleetRules: (row.fleetRules as Record<string, Image> | undefined) ?? {} };
 }
 
 function readImage(path: string): { bytes: Buffer; image: Image } {
@@ -132,7 +136,8 @@ function currentOwnership(home: string): { status: "MISSING" | "UNSAFE" | "PRESE
 	try {
 		const file = readImage(path);
 		if (file.image.mode !== 0o600 || file.image.uid !== process.getuid?.()) return { status: "UNSAFE" };
-		return { status: "PRESENT", rules: parseRuleOwnership(file.bytes).rules };
+		const record = parseRuleOwnership(file.bytes);
+		return { status: "PRESENT", rules: { ...record.rules, ...record.fleetRules } };
 	} catch { return { status: "UNSAFE" }; }
 }
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
