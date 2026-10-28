@@ -1010,7 +1010,8 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const utf8 = (b: Uint8Array) => new TextDecoder().decode(b);
 		const sha256hex = (b: Uint8Array | string) => createHash("sha256").update(typeof b === "string" ? b : Buffer.from(b)).digest("hex");
 
-		const root = ownedTmp("replaybr3", { bead: "ompkit-t7cn7.21" }).path;
+		const g = process.env.GRADE_WAVE_SCRATCH || undefined;
+		const root = ownedTmp("replaybr3", { bead: "ompkit-t7cn7.21", ...(g === undefined ? {} : { root: g }) }).path;
 		const cdir = join(root, "code");
 		mkdirSync(join(cdir, "scripts"), { recursive: true });
 		writeFileSync(join(cdir, "scripts", "t.sh"), "#!/bin/sh\necho ' 16 pass'\necho ' 0 fail'\n");

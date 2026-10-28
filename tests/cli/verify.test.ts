@@ -5,7 +5,14 @@ import { parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
-const base = ownedTmp("verify-test").path;
+/** Test bases live where the ambient br authority permits writes: a grading
+ * harness designates GRADE_WAVE_SCRATCH, otherwise the default TMPDIR root. */
+function testBase(label: string): string {
+	const g = process.env.GRADE_WAVE_SCRATCH || undefined;
+	return ownedTmp(label, g === undefined ? {} : { root: g }).path;
+}
+
+const base = testBase("verify-test");
 const cliPath = join(import.meta.dir, "..", "..", "src", "cli.ts");
 
 async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {

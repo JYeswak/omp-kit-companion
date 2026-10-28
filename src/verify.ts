@@ -112,7 +112,11 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		log.push(`not replayable: ${bad.length ? bad.map(b => b.phase !== null && KNOWN_PHASES[b.phase] !== true ? `${tag(b)} unsupported phase [${b.phase}]` : `${tag(b)} names no command`).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake"]] };
 	}
-	const scratch = ownedTmp("verify", { bead: input.bead });
+	// A grading harness designates its writable root (GRADE_WAVE_SCRATCH); the
+	// owned replay fixture is a real br init and must live where the ambient
+	// br authority permits writes. Otherwise the default TMPDIR root applies.
+	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
+	const scratch = ownedTmp("verify", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
 	const realBr = resolveRealBr(env.PATH);
 	if (realBr === null) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("UNJUDGED: no resolvable br on PATH; unmet prerequisite: real br binary").join("\n"), acts };
 	const replayBin = installReadonlyBr(scratch.path, realBr);

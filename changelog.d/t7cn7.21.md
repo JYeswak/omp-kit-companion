@@ -8,10 +8,12 @@
   replay `PATH`, and keeps trusted metadata reads and final acts on the
   real binding. Reads pass through; any other subcommand is refused with
   the `READONLY_TRACKER` marker (exit 77) unless its effective `--db`
-  (resolved across `--db`/`--db=`/nested, and the inherited `BEADS_DB`
-  fallback) names the explicitly admitted per-run owned fixture, which the
-  verifier creates with `br init` in owned scratch only when the acceptance
-  references `OWNED_TRACKER_DB`, and fails closed otherwise. Covered by
+  names the explicitly admitted per-run owned fixture, which the verifier
+  creates with `br init` in owned scratch only when the acceptance
+  references `OWNED_TRACKER_DB`, and fails closed otherwise. When a harness
+  designates `GRADE_WAVE_SCRATCH`, the per-run scratch (and the owned
+  fixture inside it) roots there, so replay fixtures live where the ambient
+  `br` authority permits writes. Covered by
   `tests/cli/verify.test.ts` (22 tests: admitted explicit/bound/same-repo
   reads on real trackers beside the exact code export; ordinary,
   env-stripped and implicit-inherited writes refused with `T`
