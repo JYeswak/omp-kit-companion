@@ -352,7 +352,12 @@ test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with th
    identity on every durable br mutation. The fixture tracker's default actor
    is forced away from the reviewer via USER, so the audit log distinguishes
    ambient acts from reviewer acts. These assert durable audit state, never
-   argv echoes. */
+   argv echoes. Platform limit (probe-proven, JadeThrush 71537/71542): br
+   records no audit event for --check-acceptance ticks (real or re-tick) or
+   gate reports, so tick binding is evidenced by acts argv plus resulting
+   state; close/status/comment/REWORK/intake/gate-provider carry durable
+   reviewer proof. Fixtures pre-tick because shim lint AC_UNTICKED_BUILD_LANDED
+   refuses unticked in_review entry. */
 
 const REVIEWER = "Peer";
 const AMBIENT = "AmbientDefault";
@@ -371,7 +376,7 @@ async function actorPolicy(t: { dir: string }): Promise<void> {
     initial: [open]
     open: [in_progress, closed]
     in_progress: [in_review, open]
-    in_review: [closed, rework]
+    in_review: [closed, rework, open]
     rework: [in_progress, open]
     closed: [open]
   required_fields:
@@ -430,6 +435,11 @@ test("VERIFYACTOR1 [a]: passing verify binds the reviewer on ticks, gate report 
 	for (const e of fresh) expect(e.actor).toBe(REVIEWER);
 	const kinds = fresh.map(e => e.event_type);
 	expect(kinds).toContain("closed");
+	// Durable reviewer-report proof: the gate result itself names the reviewer provider (audit log carries no gate-report event; probe-proven).
+	const gates = JSON.parse((await brun(["gate", "list", id, "--json"], t.dir, envT)).out) as unknown;
+	const gateText = JSON.stringify(gates);
+	expect(gateText).toContain(`reviewer:${REVIEWER}`);
+	expect(gateText).toContain("pass");
 	const shown = JSON.parse((await brun(["show", id, "--json"], t.dir, envT)).out) as { status: string; notes: string }[];
 	expect(shown[0]!.status).toBe("closed");
 	expect((await brun(["show", control, "--json"], t.dir, envT)).out).toBe(controlBefore);
@@ -471,4 +481,28 @@ test("VERIFYACTOR1 [a]: explicit-author refusal and dry-run leave fixture state 
 	expect(dry.acts.length).toBeGreaterThan(0);
 	expect(stateHash(t)).toBe(beforeHash);
 	expect(await auditActors(t, id)).toEqual(beforeEvents);
+});
+
+test("VERIFYACTOR1 [a]: intake refusal binds the reviewer on the open/needs-intake mutation (durable)", async () => {
+	const { dir: cdir, sha } = await repo("actorintake");
+	const t = await tracker("actorintake-t");
+	await actorPolicy(t);
+	const envT = ambientEnv(t.db);
+	const id = await createBead(t, "actor intake probe");
+	await shapeActorBead(t, id, "- [ ] [a] [build] prose names no command");
+	const beforeEvents = await auditActors(t, id);
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, family: "same (bun)" });
+	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
+	expect(res.acts).toEqual([["br", "update", id, "--status", "open", "--add-label", "needs-intake", "--actor", REVIEWER]]);
+	// verifyBead returns intake acts for the operator; execute them as the operator would, then prove durable reviewer binding.
+	for (const a of res.acts) {
+		const r = await run(a, { cwd: cdir, deadline_s: 60, env: envT });
+		if (r.rc !== 0) throw new Error(`intake act -> ${r.rc}`);
+	}
+	const afterEvents = await auditActors(t, id);
+	expect(afterEvents.length).toBeGreaterThan(beforeEvents.length);
+	for (const e of afterEvents.slice(0, afterEvents.length - beforeEvents.length)) expect(e.actor).toBe(REVIEWER);
+	const shown = JSON.parse((await brun(["show", id, "--json"], t.dir, envT)).out) as { status: string; labels: string[] }[];
+	expect(shown[0]!.status).toBe("open");
+	expect(shown[0]!.labels).toContain("needs-intake");
 });
