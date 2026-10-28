@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSyn
 import { dirname, join } from "node:path";
 import kitComposerState, { composerRecordPath, type ComposerStateContext, type ComposerStateRecord } from "./kit-composer-state";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
+import { fleetPolicyState } from "./fleet-policy";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -138,6 +139,30 @@ test("planted RESTARTRACE1: a seat unlisted at start publishes on the first tick
 	writeFileSync(registryPath, JSON.stringify(registeredSeat(policyRepo)));
 	await s.tick();
 	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true });
+});
+
+test("planted negative: the old session_start-only decision never publishes for a seat unlisted at start", async () => {
+	// Pre-RESTARTRACE1 decision: resolve opt-in once at session_start and arm the interval only if on
+	// then. A seat unlisted at start stays silent even after the registry lists it, so the admitted
+	// first-tick publish above FAILS under this decision and that test is not vacuous. Policy judgment
+	// stays in production code (fleetPolicyState); only the decide-once control flow is replicated.
+	const pane = "1756641624081";
+	const s = await seat({ cwd: chiefCwd, env: { TERN_PANE: pane },
+		registry: { schema_version: "omp-kit.cc.seats.v1", sessions: [] } });
+	const registryPath = join(dirname(s.sessionFile), ".local", "state", "omp-kit", "cc", "seats.v1.json");
+	// policyCwd mirror (pre-rewrite impl): the pane's registered repo, else the start cwd.
+	const registry = JSON.parse(readFileSync(registryPath, "utf8")) as
+		{ sessions?: Array<{ repo?: unknown; seats?: Array<{ pane?: unknown }> }> };
+	let resolved = chiefCwd;
+	for (const session of registry.sessions ?? []) for (const st of session.seats ?? []) {
+		if (st.pane === `tern:${pane}` && typeof session.repo === "string") resolved = session.repo;
+	}
+	const armed: Array<() => unknown> = [];
+	if ((await fleetPolicyState(resolved)).kind === "on") armed.push(() => {});
+	expect(armed).toHaveLength(0);
+	writeFileSync(registryPath, JSON.stringify(registeredSeat(repo(true))));
+	for (const cb of armed) await cb();
+	expect(s.record()).toBeNull();
 });
 
 test("malformed or missing registries fall back to cwd without opting in", async () => {
