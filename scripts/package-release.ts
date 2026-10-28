@@ -35,6 +35,10 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
+	"scripts/install-commit-msg-bead.sh", "scripts/install-pre-push-gate.sh", "scripts/install-pre-commit-storage-root-gate.sh", "scripts/pre-push-gate.sh",
+	"scripts/commit-msg-bead.sh", "scripts/check-pushed-on-main.sh", "scripts/pre-push-verification-level.sh", "scripts/check-pushed-beads.sh", "scripts/ref-txn-bead.sh",
+	"scripts/check-staged-imports.sh", "scripts/check-commit-imports.sh", "scripts/check-commit-notes.sh", "scripts/release-notes.ts", "scripts/check-staged-fragments.sh",
+	"scripts/check-stale-worktree.sh", "scripts/check-staged-regexploit.sh", "scripts/gate-event.sh", "scripts/check-staged-readme.sh", "scripts/readme-check.ts",
 	"scripts/ladder.sh", "scripts/test-case-report.sh", "scripts/limit-process-tree.sh", "scripts/rule_pipeline.py", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
 	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];
 const BUNDLE_ERRORS: Record<string, string | undefined> = {
@@ -45,6 +49,7 @@ const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/kit-flywheel-guard.ts": "FLYWHEEL_GUARD_BUNDLE_FAILED",
 	"extensions/kit-goal-keepalive.ts": "GOAL_KEEPALIVE_BUNDLE_FAILED",
 	"extensions/kit-inbox-wake.ts": "INBOX_WAKE_BUNDLE_FAILED",
+	"extensions/kit-composer-state.ts": "COMPOSER_STATE_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
 	"tests/live/admission-extension.mjs": "ADMISSION_FIXTURE_BUNDLE_FAILED",
 };

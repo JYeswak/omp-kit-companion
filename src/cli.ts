@@ -88,7 +88,7 @@ import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunn
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
 import { flushPending, inspectFleetScope, liveFleetIo, logFlushReport } from "./fleet-flywheel-doctor.ts";
-import { inspectActivation, liveActivationDeps } from "./activation.ts";
+import { inspectActivation, liveActivationDeps, recordOptOut } from "./activation.ts";
 import { inspectOwnership, liveOwnershipIo } from "./ownership-doctor.ts";
 import { inspectMissionRch, liveMissionRchIo } from "./mission-rch.ts";
 import { parsePsElapsed, reportStalePanes, respawnPanes, type RespawnDeps } from "./fleet-respawn.ts";
@@ -1037,13 +1037,40 @@ function activationDoctor(): CliResult {
 				? `${report.items.length} safeguard(s) on${report.off_with_reason ? `; ${report.off_with_reason} off with a recorded reason` : ""}`
 				: `${report.off_no_reason} safeguard(s) off with no recorded reason`,
 		recommended_action: report.overall === "PASS" ? "No action required."
-			: "Turn each safeguard on with its apply verb, or record an opt-out reason; this command never applies or records.",
+			: "Turn each safeguard on with its apply verb, or record an opt-out reason (`omp-kit activation opt-out --item ITEM --reason TEXT`); this command never applies or records.",
 		evidence: { ...report } };
 	return { code: report.overall === "PASS" ? 0 : 1, data: { overall: report.overall, kit, findings: [finding],
 		evidence: { effective_profile: "NOT_RUN", installed_rules: "NOT_RUN", matcher: "NOT_RUN" },
 		recommended_actions: [finding.recommended_action],
 		commands: ["omp-kit doctor --scope activation --json"] }, verification: "PERFORMED" };
 }
+
+function activationOptOutCommand(request: ParsedCommand): CliResult {
+	const home = process.env.HOME;
+	if (!home || !isAbsolute(home) || resolve(home) !== home)
+		return refusal("OPT_OUT_HOME_INVALID", "An absolute canonical HOME is required; no opt-out was recorded",
+			"Run with an absolute HOME; nothing was written.");
+	const item = request.flags.get("--item");
+	if (typeof item !== "string" || item.trim().length === 0)
+		return refusal("OPT_OUT_ITEM_REQUIRED", "An opt-out needs a manifest item id; nothing was recorded",
+			"Pass --item ITEM naming the safeguard from `omp-kit doctor --scope activation --json`.");
+	const reason = request.flags.get("--reason");
+	if (typeof reason !== "string" || reason.trim().length === 0)
+		return refusal("OPT_OUT_REASON_REQUIRED", "An opt-out needs a non-empty reason; nothing was recorded",
+			"Pass --reason TEXT; empty reasons are refused and nothing is written.");
+	const by = request.flags.get("--by");
+	try {
+		const record = recordOptOut(home, item, reason, typeof by === "string" ? { by } : undefined);
+		return { code: 0, data: { overall: "OK", optout: record },
+			commands: ["omp-kit doctor --scope activation --json"], verification: "PERFORMED" };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const code = message.split(":")[0] ?? "OPT_OUT_FAILED";
+		return refusal(/^[A-Z][A-Z0-9_]*$/.test(code) ? code : "OPT_OUT_FAILED",
+			`Opt-out refused (${message}); nothing was written`, "Fix the named input and retry; a corrupt record is never appended to.");
+	}
+}
+
 
 async function privateMemoryAudit(request: ParsedCommand): Promise<CliResult> {
 	if (!request.flags.has("--yes"))
@@ -1684,6 +1711,7 @@ async function applyMcpCommand(request: ParsedCommand): Promise<CliResult> {
 }
 
 registerCommandHandler("apply mcp", applyMcpCommand);
+registerCommandHandler("activation opt-out", activationOptOutCommand);
 
 function mcpSourcesInventory(): CliResult {
 	const home = process.env.HOME;

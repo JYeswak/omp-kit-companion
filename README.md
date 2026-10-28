@@ -17,7 +17,7 @@ Current release: v0.2.78
 <!-- kit-release:end -->
 
 A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-49 top-level commands for an existing OMP install.
+50 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -270,19 +270,7 @@ prevents a full postcheck. `postcheck_detail` keeps the original cause and any
 current stage; no report failures means an empty list, not a successful
 postcheck. Private paths and credential shapes are redacted before truncation.
 
-### OMP source cache
-
-OMP installed through Tern ships compiled code without the TypeScript the
-matcher needs. omp-kit fetches `@oh-my-pi/pi-coding-agent` at the exact
-installed OMP version into `$HOME/.local/opt/omp-kit/omp-src/<version>` (or
-`OMP_KIT_OMP_SRC_CACHE`) with `bun add --exact --ignore-scripts`, checks npm
-integrity, and keeps the two newest versions. An entry is used only with its
-`.verified.json` receipt and matching files. `OMP_KIT_OMP_SRC_FETCH=0` stops new
-fetches.
-
-```sh
-omp-kit --info     # shows the OMP launcher, its version proof and the source cache entry
-```
+OMP source cache details (fetch, verify, disable) live in [docs/omp-source-cache.md](docs/omp-source-cache.md).
 
 ## Quick example
 
@@ -498,6 +486,7 @@ explicit report rather than inventing zero activity.
 | `omp-kit doctor` | `doctor [--scope NAME] [--project PATH] [--profile NAME] [--staged] [--deep --yes]` | Read-only diagnosis of one scope (table below) | `omp-kit doctor --scope lsp --json` |
 | `omp-kit health` | `health` | Strict monitoring status | `omp-kit health --json` |
 | `omp-kit apply` | `apply rules\|policy\|extensions\|plugin\|mcp [--plan\|--apply]` | Plan or apply a kit component with a receipt | `omp-kit apply rules --plan --json` |
+| `omp-kit activation` | `activation opt-out --item ITEM --reason TEXT [--by NAME]` | Record a safeguard opt-out with a reason | `omp-kit activation opt-out --item service:kit-update --reason 'no launchd' --json` |
 | `omp-kit repair` | `repair --scope rules\|policy\|extensions\|state\|github [--plan\|--apply --yes]` | Reversible repair of one scope | `omp-kit repair --scope rules --plan --json` |
 | `omp-kit migrate` | `migrate [--plan\|--apply --yes]` | Move legacy `~/.agents/rules` copies to plugin layering; edited copies are kept and flagged | `omp-kit migrate --plan --json` |
 | `omp-kit undo` | `undo RUN_ID [--yes]` | Restore one verified receipt | `omp-kit undo RUN_ID --yes` |
@@ -550,6 +539,7 @@ explicit report rather than inventing zero activity.
 | `apply extensions` | Install `kit-guard-optin.ts` and `fleet-guard.ts` into selected profiles | `omp-kit apply extensions --plan --profiles all --json` |
 | `apply plugin` | Link the installed kit package into covered profiles; `--regex-budget-report` disables slow rules in named profiles only | `omp-kit apply plugin --plan --store /abs/kit-release --regex-budget-report /abs/regex-budget.out --profiles all --include-default --json` |
 | `apply mcp` | Import MCP servers from claude, cursor, codex, project or a file into profiles' `mcp.json`, or edit servers already there (`--env-command`, `--enable`) | `omp-kit apply mcp --from claude --servers z3-prover --profiles all --plan --json` |
+| `activation opt-out` | Record an opt-out with a reason; empty reasons are refused and nothing is written | `omp-kit activation opt-out --item service:kit-update --reason 'no launchd' --json` |
 | `repair --scope rules` / `policy` / `extensions` | Reversible repair of that component | `omp-kit repair --scope policy --plan --json` |
 | `repair --scope state` | Restore the private state root to mode 0700, nothing else | `omp-kit repair --scope state --plan --json` |
 | `repair --scope github` | Rewrite `hosts.yml` from the Infisical fine-grained token | `omp-kit repair --scope github --plan --json` |
