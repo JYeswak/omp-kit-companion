@@ -23,6 +23,7 @@
       "extensions/kit-inbox-wake.ts"
     ],
     "notLoadedExtensions": {
+      "extensions/kit-composer-state.session-start-only.ts": "committed history-free test input for bead ompkit-t7cn7.18; loaded only via dynamic import in extensions/kit-composer-state.test.ts, never as a plugin extension",
       "extensions/adapter.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/cass-search.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/dcg-tool-bridge.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",

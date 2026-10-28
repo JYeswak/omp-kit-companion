@@ -1,10 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import kitComposerState, { composerRecordPath, type ComposerStateContext, type ComposerStateRecord } from "./kit-composer-state";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
-import { run } from "../src/kitlib/run.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -145,15 +145,24 @@ test("planted RESTARTRACE1: a seat unlisted at start publishes on the first tick
 
 test("planted negative: the admitted first-tick publish FAILS under the old session_start-only decision", async () => {
 	// Box 2, second clause: run the SAME admitted scenario against the actual pre-rewrite production
-	// decision (blob 146f450e44, parent of the RESTARTRACE1 rewrite) with real policy helpers and real
-	// session_start wiring through the seat harness. Old logic checks opt-in once and arms the interval
-	// only if on then, so a seat unlisted at start never publishes even after the registry lists it.
+	// decision with real policy helpers and real session_start wiring through the seat harness.
+	// The old decision is a committed exported test input
+	// (extensions/kit-composer-state.session-start-only.ts): publication runs have no ancestor
+	// history, so materializing it via `git show` fails before the negative behavior (publication02a2
+	// log810-820). Provenance: git blob 146f450e441f3aea9833c70455999d2c6b9b1244, the pre-rewrite
+	// production decision (parent side of the RESTARTRACE1 rewrite 6fe186b1aa; re-verify with
+	// `git log --oneline --find-object=146f450e441f3aea9833c70455999d2c6b9b1244 --
+	// extensions/kit-composer-state.ts` and `git hash-object` on the fixture). The blob-sha1
+	// assertion below pins the fixture bytes to that exact production module. Old logic checks
+	// opt-in once and arms the interval only if on then, so a seat unlisted at start never
+	// publishes even after the registry lists it.
 	const repoRoot = join(import.meta.dir, "..");
-	const oldBlob = "146f450e441f3aea9833c70455999d2c6b9b1244";
-	const show = await run(["git", "-C", repoRoot, "show", oldBlob], { deadline_s: 30 });
-	if (show.rc !== 0) throw new Error("cannot materialize the old production decision");
+	const oldSource = readFileSync(join(repoRoot, "extensions", "kit-composer-state.session-start-only.ts"), "utf8");
+	const oldBytes = Buffer.from(oldSource, "utf8");
+	const blobId = createHash("sha1").update(`blob ${oldBytes.length}\0`).update(oldBytes).digest("hex");
+	expect(blobId).toBe("146f450e441f3aea9833c70455999d2c6b9b1244");
 	const oldDir = freshDir(base, "old-decision-");
-	writeFileSync(join(oldDir, "kit-composer-state.ts"), show.stdout);
+	writeFileSync(join(oldDir, "kit-composer-state.ts"), oldSource);
 	writeFileSync(join(oldDir, "fleet-policy.ts"), readFileSync(join(repoRoot, "extensions", "fleet-policy.ts")));
 	writeFileSync(join(oldDir, "kit-guard-optin.ts"), readFileSync(join(repoRoot, "extensions", "kit-guard-optin.ts")));
 	// Dynamic import: the old decision has no static path; its bytes are materialized into the
