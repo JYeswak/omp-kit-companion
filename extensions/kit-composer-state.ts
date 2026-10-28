@@ -114,15 +114,27 @@ export default async function kitComposerState(pi: ComposerStateApi, deps: Compo
 		}
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		if ((await fleetPolicyState(policyCwd(ctx.cwd, home, env))).kind !== "on") return;
+	/**
+	 * RESTARTRACE1 (J-2026-10-26-20): the seat registry lists a Tern block only while omp runs in it, so a
+	 * restarted seat can start before it is re-listed (lead 2026-10-26: omp up 17:26:51Z, block re-listed
+	 * 17:27:06Z). The fleet opt-in is resolved on every tick until on, then the record publishes; a pane
+	 * that is never listed stays silent tick after tick.
+	 */
+	async function tick(ctx: ComposerStateContext): Promise<void> {
+		try {
+			if ((await fleetPolicyState(policyCwd(ctx.cwd, home, env))).kind !== "on") return;
+		} catch {
+			return;
+		}
 		publish(ctx);
-		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => publish(ctx), COMPOSER_INTERVAL_MS);
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		await tick(ctx);
+		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => tick(ctx), COMPOSER_INTERVAL_MS);
 	});
 	for (const event of ["agent_start", "agent_end", "session_switch"]) {
-		pi.on(event, (_event, ctx) => {
-			if (timer !== null) publish(ctx);
-		});
+		pi.on(event, (_event, ctx) => tick(ctx));
 	}
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (timer !== null) {

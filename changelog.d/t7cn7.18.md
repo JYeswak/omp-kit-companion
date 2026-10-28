@@ -1,0 +1,3 @@
+### Fixed
+
+- `extensions/kit-composer-state.ts` resolves the late pane registration race (RESTARTRACE1): the seat registry lists a Tern block only while omp runs in it, so a restarted seat can start before it is re-listed. The fleet opt-in is now resolved on every tick until on, then the composer record publishes on that first tick; a pane that is never listed stays silent tick after tick. The old session_start-only decision is replaced by the per-tick decision. `extensions/kit-composer-state.test.ts` proves the first-tick publish, the never-listed silence control, and the old-decision planted negative. (ompkit-t7cn7.18)

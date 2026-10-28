@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import kitComposerState, { composerRecordPath, type ComposerStateContext, type ComposerStateRecord } from "./kit-composer-state";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 
@@ -38,19 +38,21 @@ async function seat(opts: { optedIn?: boolean; mode?: string; cwd?: string; env?
 	const sessionFile = join(home, "session.jsonl");
 	writeFileSync(sessionFile, "");
 	const state = { text: "", intervals: 0, cleared: 0 };
+	const ticks: Array<() => unknown> = [];
 	const ctx: ComposerStateContext = {
 		cwd: opts.cwd ?? repo(opts.optedIn ?? true), mode: opts.mode ?? "tui", hasUI: true, isIdle: () => true,
 		ui: { getEditorText: () => state.text },
 		sessionManager: { getSessionFile: () => sessionFile },
-		setInterval: () => ++state.intervals,
+		setInterval: (cb: () => unknown) => { ticks.push(cb); return ++state.intervals; },
 		clearTimer: () => void ++state.cleared,
 	};
 	await kitComposerState({ on: (event, handler) => void handlers.set(event, [...(handlers.get(event) ?? []), handler]) },
 		{ home, env: { ...opts.env, ...(opts.registryOverride ? { CC_SEATS: registryPath } : {}) }, now: () => 1_000, pid: 4242 });
 	const fire = async (event: string) => { for (const h of handlers.get(event) ?? []) await h(undefined as never, ctx); };
+	const tick = async () => { for (const cb of ticks) await cb(); };
 	const path = composerRecordPath(home, realpathSync(sessionFile));
 	const record = () => existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as ComposerStateRecord : null;
-	return { state, fire, record, path, sessionFile };
+	return { state, fire, tick, record, path, sessionFile };
 }
 
 test("planted: an empty composer is published as empty, keyed by the session file's realpath", async () => {
@@ -112,11 +114,30 @@ test("planted: a registered chief publishes from a cwd outside its policy repo",
 	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true });
 });
 
-test("control: an unregistered pane outside the policy repo stays off", async () => {
+test("control: an unregistered pane outside the policy repo stays silent tick after tick", async () => {
 	const s = await seat({ cwd: chiefCwd, env: { TERN_PANE: "99" }, registry: registeredSeat(repo(true)) });
 	await s.fire("session_start");
+	// RESTARTRACE1: the interval stays armed so a later listing is noticed; silence is no record, not no timer.
+	expect(s.state.intervals).toBe(1);
+	await s.tick();
+	await s.fire("agent_end");
+	await s.tick();
 	expect(s.record()).toBeNull();
-	expect(s.state.intervals).toBe(0);
+});
+
+test("planted RESTARTRACE1: a seat unlisted at start publishes on the first tick after the registry lists it", async () => {
+	// 2026-10-26 17:26:51Z: the lead's new omp started before the seat registry re-listed its block (17:27:06Z).
+	const policyRepo = repo(true);
+	const s = await seat({ cwd: chiefCwd, env: { TERN_PANE: "1756641624081" },
+		registry: { schema_version: "omp-kit.cc.seats.v1", sessions: [] } });
+	await s.fire("session_start");
+	expect(s.record()).toBeNull();
+	await s.tick();
+	expect(s.record()).toBeNull();
+	const registryPath = join(dirname(s.sessionFile), ".local", "state", "omp-kit", "cc", "seats.v1.json");
+	writeFileSync(registryPath, JSON.stringify(registeredSeat(policyRepo)));
+	await s.tick();
+	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true });
 });
 
 test("malformed or missing registries fall back to cwd without opting in", async () => {
