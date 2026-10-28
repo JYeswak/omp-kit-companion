@@ -176,15 +176,19 @@ function scanBakedShim(): { scratch: string; brBinDir: string } | null {
 	}
 	return null;
 }
-function resolveHarness(): { scratch: string; brBinDir: string } | null {
+function resolveHarness(): { scratch: string; brBinDir: string; setter: string } | null {
 	let envScratch = "";
 	try {
 		const env = process.env.GRADE_WAVE_SCRATCH;
 		if (env && statSync(env).isDirectory()) envScratch = env;
 	} catch { /* fall through to shim scan */ }
 	const shim = scanBakedShim();
-	if (envScratch) return { scratch: envScratch, brBinDir: shim && shim.scratch === envScratch ? shim.brBinDir : "" };
-	return shim;
+	if (envScratch) {
+		const brBinDir = shim && shim.scratch === envScratch ? shim.brBinDir : "";
+		return { scratch: envScratch, brBinDir, setter: "env:GRADE_WAVE_SCRATCH" };
+	}
+	if (shim) return { scratch: shim.scratch, brBinDir: shim.brBinDir, setter: `baked-shim:${shim.brBinDir}/br` };
+	return null;
 }
 
 async function beadRow(repo: string, id: string): Promise<{ status: string; assignee: string | null; labels: string[] }> {
@@ -222,7 +226,7 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	// Grader-visible record: which root the positive was initialized
 	// against. A local run records branch=local and proves only the
 	// control; the harness positive requires branch=harness.
-	console.log(`DEFY7_FIXTURE branch=${harness ? "harness" : "local"} scratch=${harness?.scratch ?? "none"} br=${harness && harness.brBinDir ? join(harness.brBinDir, "br") : "ambient"} dir=${dir}`);
+	console.log(`DEFY7_FIXTURE branch=${harness ? "harness" : "local"} setter=${harness?.setter ?? "none"} scratch=${harness?.scratch ?? "none"} br=${harness && harness.brBinDir ? join(harness.brBinDir, "br") : "ambient"} dir=${dir}`);
 	try {
 		const brBin = harness && harness.brBinDir ? join(harness.brBinDir, "br") : "br";
 		const { repo, gated, eligible } = await claimFixture("needs-director", actor, dir, brBin);
@@ -255,7 +259,9 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 		const { AGENT_NAME: _droppedAgent, BEADS_DB: _droppedDb, ...cleanEnv } = process.env;
 		const neg = await run([join(harness.brBinDir, "br"), "init"], { deadline_s: 60, cwd: outside, env: cleanEnv as Record<string, string> });
 		expect(neg.rc).toBe(77);
-		expect(new TextDecoder().decode(neg.stderr)).toContain(harness.scratch);
+		const negErr = new TextDecoder().decode(neg.stderr);
+		expect(negErr).toContain(harness.scratch);
+		console.log(`DEFY7_SCOPE_NEGATIVE outside=${outside} br=${join(harness.brBinDir, "br")} rc=${neg.rc} refusal=${JSON.stringify(negErr.split("\n")[0])}`);
 	} else {
 		console.log("DEFY7_SCOPE_NEGATIVE skipped: no harness shim resolved (local control run)");
 	}
