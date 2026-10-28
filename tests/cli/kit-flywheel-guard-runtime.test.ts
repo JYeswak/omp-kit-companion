@@ -56,13 +56,8 @@ async function waitForPort(path: string, child: { readonly exited: Promise<numbe
 	}
 }
 async function runCommand(command: string[], cwd: string, env: Record<string, string>, timeout: number) {
-	const child = Bun.spawn(command, { cwd, env, stdout: "pipe", stderr: "pipe", timeout });
-	const [exitCode, stdout, stderr] = await Promise.all([
-		child.exited,
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
-	]);
-	return { exitCode, stdout, stderr };
+	const result = await kitlibRun(command, { cwd, env, deadline_s: timeout / 1000 });
+	return { exitCode: result.rc, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
 }
 test("mock readiness refuses an exited child that never published a port", async () => {
 	const scope = ownedTmp("mock-readiness-exit");
