@@ -111,7 +111,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		log.push(`not replayable: ${bad.length ? bad.map(b => b.phase !== null && KNOWN_PHASES[b.phase] !== true ? `${tag(b)} unsupported phase [${b.phase}]` : `${tag(b)} names no command`).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake"]] };
 	}
-	const scratch = ownedTmp("verify-" + input.bead.replace(/[^a-z0-9.-]/gi, "_"), { bead: input.bead });
+	const scratch = ownedTmp("verify", { bead: input.bead });
 	const exportDir = join(scratch.path, "export");
 	mkdirSync(exportDir, { recursive: true });
 	const archive = await run(["sh", "-c", `git -C ${JSON.stringify(input.repo)} archive ${JSON.stringify(input.exportSha)} | tar -x -C ${JSON.stringify(exportDir)}`], { deadline_s: 300, env });

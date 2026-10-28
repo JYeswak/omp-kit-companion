@@ -52,6 +52,15 @@ test("verify closes a bead whose boxes name commands with expected outcomes: rep
 	expect(acts[2]).toContain("[a] sh scripts/t.sh -> summary 16 pass 0 fail: found");
 });
 
+test("planted: a dotted bead id proceeds past scratch allocation with the exact bead identity preserved (constant label, unchanged metadata)", async () => {
+	const { dir, sha } = await repo("dotted");
+	const br = fakeBr(dir, { ...inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"), id: "kit-1.2" });
+	const res = await verifyBead({ bead: "kit-1.2", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
+	expect(res.code).toBe("DRY_RUN");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true]]);
+	expect(res.log).toContain("exported " + sha);
+});
+
 test("planted: the author's own seat is refused NON_AUTHOR_REQUIRED and nothing is run", async () => {
 	const { dir, sha } = await repo("self");
 	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
