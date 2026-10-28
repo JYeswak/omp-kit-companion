@@ -9,7 +9,7 @@
  */
 import { expect, test } from "bun:test";
 import { afterAll } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { inspectDicklesworthstone, STACK_SOURCE } from "../../src/diagnostics.ts";
 import { proveTernCliSend } from "../../src/send.ts";
@@ -132,4 +132,26 @@ test("without a Tern host, a tern: send refuses gracefully with zero sends", asy
 	expect(result.status).toBe("REFUSED");
 	expect(result.code).toBe("OBSERVATION_UNKNOWN");
 	expect(result.sends).toBe(0);
+}, 120_000);
+
+test("planted: a present-but-erroring tool is not reported absent", async () => {
+	const shimDir = freshDir("error-bin");
+	mkdirSync(shimDir, { recursive: true });
+	const shim = join(shimDir, "br");
+	writeFileSync(shim, "#!/bin/sh\nexit 1\n");
+	chmodSync(shim, 0o755);
+	const savedPath = process.env.PATH;
+	process.env.PATH = shimDir;
+	try {
+		const finding = await inspectDicklesworthstone();
+		const tools = (finding.evidence as { tools?: { bin: string; state: string; source: string; installed: boolean; install_path: string | null }[] } | undefined)?.tools ?? [];
+		const br = tools.find((tool) => tool.bin === "br");
+		expect(br).toBeDefined();
+		expect(br!.installed).toBe(true);
+		expect(br!.install_path).toBe(shim);
+		expect(br!.state).toBe("unknown");
+		expect(finding.status).toBe("UNVERIFIED");
+	} finally {
+		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+	}
 }, 120_000);
