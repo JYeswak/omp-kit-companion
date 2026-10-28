@@ -1,7 +1,7 @@
 # Optional development routing; stock builds and CI do not require RCH.
 # Preserve the existing compiler set and admit this repository's Bun commands.
-# Frozen-source validation still requires --require-tool bun@1.4.3 and
-# --base <commit> --clean-overlay --no-overlay; this list is not runtime attestation.
+# Source validation must pin the runtime with --require-tool bun@1.4.3 and
+# retain an admitted exact-source receipt; routing alone is not attestation.
 [execution]
 allowlist = [
     "cargo",
