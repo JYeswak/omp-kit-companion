@@ -478,7 +478,7 @@ sync_tree() {
 	for p in $XPATHS; do
 		mkdir -p "$1/$(dirname "$p")"
 		if git -C "$SRCROOT" show "$2:$p" > "$1/$p" 2>/dev/null; then
-			if git -C "$SRCROOT" ls-tree "$2" -- "$p" | grep -q "100755"; then
+			if git -C "$SRCROOT" ls-tree --full-tree "$2" -- "$p" | grep -q "100755"; then
 				chmod +x "$1/$p"
 			else
 				chmod -x "$1/$p"
@@ -547,7 +547,7 @@ for p in $XPATHS; do
 		got=$(git -C "$R" rev-parse "HEAD:$p")
 		want=$(git -C "$SRCROOT" rev-parse "$PREAL:$p")
 		gotmode=$(git -C "$R" ls-files -s -- "$p" | cut -d' ' -f1)
-		wantmode=$(git -C "$SRCROOT" ls-tree "$PREAL" -- "$p" | cut -d' ' -f1)
+		wantmode=$(git -C "$SRCROOT" ls-tree --full-tree "$PREAL" -- "$p" | cut -d' ' -f1)
 		if [ "$got" != "$want" ] || [ "$gotmode" != "$wantmode" ]; then echo "MISMATCH:$p"; alleq=1; fi
 	fi
 done
