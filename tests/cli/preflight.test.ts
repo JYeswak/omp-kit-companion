@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+ import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { envelope, parseFindingLines, renderEnvelope } from "../../src/kitlib/findings.ts";
 import { preflightBead, preflightCommit } from "../../src/preflight.ts";
@@ -128,6 +128,16 @@ async function beadRow(repo: string, id: string): Promise<{ status: string; assi
 	const row = JSON.parse(await sh(["br", "show", id, "--json"], repo))[0];
 	return { status: String(row.status), assignee: (typeof row.assignee === "string" && row.assignee) || null, labels: Array.isArray(row.labels) ? row.labels.map(String) : [] };
 }
+ // Fleet-pane claim path: `br` resolves to the candidate shim, with a clear
+ // Agent Mail answer and the seat identity, exactly as an agent pane carries.
+ async function shimClaimEnv(actor: string): Promise<Record<string, string>> {
+ 	const shimBin = join(base, "shimbin");
+ 	mkdirSync(shimBin, { recursive: true });
+ 	try { symlinkSync(join(import.meta.dir, "../../scripts/br-shim.sh"), join(shimBin, "br")); } catch { /* already linked */ }
+ 	writeFileSync(join(shimBin, "am"), '#!/bin/sh\ncase "$1:$2" in agents:show) printf \'{"id":1,"name":"%s"}\\n\' "${AGENT_NAME:-unknown}"; exit 0 ;; file_reservations:conflicts) printf \'No conflicts detected.\\n\'; exit 0 ;; *) printf \'unexpected am call: %s\\n\' "$*" >&2; exit 99 ;; esac\n');
+ 	chmodSync(join(shimBin, "am"), 0o755);
+ 	return { ...process.env, PATH: `${shimBin}:${process.env.PATH ?? ""}`, AGENT_NAME: actor } as Record<string, string>;
+ }
 
 test.skipIf(!hasBr)("preflight claim: unresolved needs-director refuses NEEDS_DIRECTOR on the unit and the supported CLI path; recorded director resolution re-admits", async () => {
 	const actor = "TestSeatNeedsDirector";
@@ -146,11 +156,17 @@ test.skipIf(!hasBr)("preflight claim: unresolved needs-director refuses NEEDS_DI
 	expect(cli.rc).not.toBe(0);
 	expect(new TextDecoder().decode(cli.stdout)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
+	// actual supported claim boundary: the fleet-pane `br` (candidate shim) refuses by name, nothing mutates
+	const mutation = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor) });
+	expect(mutation.rc).not.toBe(0);
+	expect(new TextDecoder().decode(mutation.stderr)).toContain("NEEDS_DIRECTOR");
+	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
 	// eligible control, separate seat: preflight clean, and the real claim path mutates exactly the control bead
 	const controlActor = "TestSeatControl";
 	const okCtl = await preflightBead("claim", repo, eligible, { actor: controlActor });
 	expect(okCtl.findings.filter(f => f.blocking)).toEqual([]);
-	await sh(["br", "update", eligible, "--claim", "--actor", controlActor], repo);
+	const okClaim = await run(["br", "update", eligible, "--claim", "--actor", controlActor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(controlActor) });
+	expect(okClaim.rc).toBe(0);
 	expect(await beadRow(repo, eligible)).toEqual({ status: "in_progress", assignee: controlActor, labels: [] });
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
 	// recorded director disposition removes the label; the first bead becomes eligible and claims
@@ -158,7 +174,8 @@ test.skipIf(!hasBr)("preflight claim: unresolved needs-director refuses NEEDS_DI
 	await sh(["br", "update", gated, "--remove-label", "needs-director", "--actor", "Director"], repo);
 	const re = await preflightBead("claim", repo, gated, { actor });
 	expect(re.findings.filter(f => f.blocking).map(f => f.code)).not.toContain("NEEDS_DIRECTOR");
-	await sh(["br", "update", gated, "--claim", "--actor", actor], repo);
+	const reClaim = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor) });
+	expect(reClaim.rc).toBe(0);
 	expect(await beadRow(repo, gated)).toEqual({ status: "in_progress", assignee: actor, labels: [] });
 });
 

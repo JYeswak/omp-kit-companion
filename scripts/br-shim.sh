@@ -68,7 +68,7 @@ fi
 # --status in_review` and `br close ID` call close-guard.sh unchanged; its
 # FAIL refuses the transition before a grader spends time on self-review.
 # All other invocations pass through untouched.
- gate_sub=""; gate_id=""; gate_status=""; gate_db=""; gate_skip=0; gate_reason=""; gate_want_reason=0; gate_tcomment=""; gate_want_tcomment=0
+ gate_sub=""; gate_id=""; gate_status=""; gate_db=""; gate_claim=0; gate_skip=0; gate_reason=""; gate_want_reason=0; gate_tcomment=""; gate_want_tcomment=0
  for gate_arg in "$@"; do
  	if [ "$gate_skip" = 1 ]; then
  		if [ "$gate_want_reason" = 1 ]; then gate_reason="$gate_arg"; gate_want_reason=0; fi
@@ -93,6 +93,7 @@ fi
  				--transition-comment=*) gate_tcomment="${gate_arg#--transition-comment=}" ;;
  				-m*|--message=*|--comment=*|--reason=*) gate_reason="${gate_arg#*=}"; gate_reason="${gate_reason#-m}" ;;
  			esac ;;
+ 		--claim) gate_claim=1 ;;
 		-*) ;;
 		*)
 			if [ "$gate_status" = "next" ]; then gate_status="$gate_arg";
@@ -184,6 +185,34 @@ if [ "$gate_sub" = "create" ]; then
 			BR_SHIM_AGENT="$AGENT_NAME" BR_SHIM_ENTRY="$0" exec python3 "$create_guard" "$@" --actor "$AGENT_NAME"
 	fi
 fi
+
+ # NEEDSDIRCLAIM1 (ompkit-izpwd.1): a claim on a bead carrying an unresolved
+ # needs-director label is refused before the real br mutates. The single
+ # predicate lives in native claim preflight; the shim only relays its named
+ # verdict and adds no second policy, names or roster. The probe is skipped
+ # when the kit source, bun or python3 is absent, or when --db redirects the
+ # mutation off the probed project; an inconclusive probe passes through with
+ # a warning. Only a clean NEEDS_DIRECTOR blocking verdict refuses.
+ if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_claim" = 1 ] && [ -z "$gate_db" ]; then
+ 	claim_kit_root=""
+ 	if claim_self_dir=$(dirname -- "$self_path" 2>/dev/null); then
+ 		claim_kit_root=$(CDPATH='' cd -- "$claim_self_dir/.." && pwd 2>/dev/null) || claim_kit_root=""
+ 	fi
+ 	if [ -n "$claim_kit_root" ] && [ -f "$claim_kit_root/src/cli.ts" ] && command -v bun >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+ 		# A NEEDS_DIRECTOR verdict is CLI rc 1, so the output is parsed
+ 		# regardless of exit status; only an empty/unparseable probe passes
+ 		# through with a warning.
+ 		claim_probe=$(bun run --no-env-file --config=/dev/null "$claim_kit_root/src/cli.ts" preflight claim "$gate_id" --project "$tracker_project" --actor "$AGENT_NAME" --json 2>/dev/null)
+ 		# Single-line probe parser: findings live at .findings or .data.findings.
+ 		# A parse failure tracebacks into UNPARSEABLE via ||, same as before.
+ 		claim_verdict=$(printf '%s' "$claim_probe" | python3 -c 'import json,sys; d=json.load(sys.stdin); f=d.get("findings") if isinstance(d,dict) else None; e=d.get("data") if isinstance(d,dict) else None; g=(e.get("findings") if isinstance(e,dict) else None) if f is None else f; print("REFUSE" if any(isinstance(x,dict) and x.get("code")=="NEEDS_DIRECTOR" and x.get("blocking") for x in (g or [])) else "PASS")' 2>/dev/null) || claim_verdict="UNPARSEABLE"
+ 		case "$claim_verdict" in
+ 			REFUSE) fail "BR_SHIM_NEEDS_DIRECTOR refusing to claim $gate_id for $AGENT_NAME: unresolved director disposition (needs-director). Route it to the director; claim only after the label is resolved with a recorded disposition" ;;
+ 			PASS) ;;
+ 			*) echo "br-shim: claim eligibility probe unparseable, passing through" >&2 ;;
+ 		esac
+ 	fi
+ fi
 
 gate_fire=0
 if [ "$gate_sub" = "close" ] && [ -n "$gate_id" ]; then gate_fire=1; fi

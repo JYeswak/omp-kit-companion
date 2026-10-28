@@ -109,6 +109,7 @@ printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' 
 export BR_GUARD_JSON_FILE="$TMP/bead.json"
 pass=0
 fail=0
+ORIGINAL_PATH="$PATH"
 check() {
 	name=$1
 	want_rc=$2
@@ -415,6 +416,32 @@ else
 	fail=$((fail + 1))
 	printf 'FAIL create-admission-lock-path: %s\n' "$(cat "$TMP/out")"
 fi
+
+ # 17. NEEDSDIRCLAIM1 (ompkit-izpwd.1): a claim on a needs-director bead is
+ # refused before the real br runs; an eligible claim passes through. The shim
+ # relays the native claim-preflight verdict and adds no policy of its own.
+ AM_FAKE_MODE=clear
+AM_EXPECTED_PROJECT="$REPO_ROOT"
+export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
+ if command -v bun >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -f "$REPO_ROOT/src/cli.ts" ]; then
+ 	printf '{"id":"X","status":"open","assignee":null,"labels":["needs-director"]}' > "$TMP/bead.json"
+ 	: > "$TMP/argv"
+ 	br update X --claim > "$TMP/out" 2>&1
+ 	got_rc=$?
+ 	if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -q "BR_SHIM_NEEDS_DIRECTOR" "$TMP/out"; then
+ 		pass=$((pass + 1))
+ 	else
+ 		fail=$((fail + 1))
+ 		printf 'FAIL needs-director-claim-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
+ 	fi
+ 	printf '{"id":"X","status":"open","assignee":null,"labels":[]}' > "$TMP/bead.json"
+ 	: > "$TMP/argv"
+ 	br update X --claim > "$TMP/out" 2>&1
+ 	got_rc=$?
+ 	check "eligible-claim-passes" 0 "update X --claim --actor TestShim"
+ else
+ 	printf 'SKIP needs-director-claim: no bun/python3/candidate cli.ts in this environment\n'
+ fi
 
  printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"
  [ "$fail" = "0" ]

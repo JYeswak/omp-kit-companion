@@ -1,3 +1,3 @@
 ### Fixed
 
-- `omp-kit preflight claim` now refuses a bead carrying an unresolved `needs-director` label with a named NEEDS_DIRECTOR finding, on both the unit predicate path and the supported CLI claim path; an eligible bead still claims, and a recorded director disposition that removes the label re-admits the bead. The new `tests/cli/preflight.test.ts` case pins the refusal, the admitted control, and the resolution with a real fixture tracker. (ompkit-izpwd.1)
+- A `br update <id> --claim` on a bead carrying an unresolved `needs-director` label is now refused before the real tracker mutates. The `br` shim relays the native claim-preflight verdict (`BR_SHIM_NEEDS_DIRECTOR`) and adds no second policy, names, or roster; an inconclusive probe passes through with a warning, and an explicit `--db` redirection skips the probe. (ompkit-izpwd.1)
