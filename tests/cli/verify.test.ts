@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -300,9 +301,31 @@ function snap(t: { dir: string }): string {
 	return readFileSync(join(t.dir, ".beads", "issues.jsonl"), "utf8");
 }
 
-/** Whole-tracker state: journal plus the authoritative sqlite bytes (reads are side-effect-free, proven by probe). */
+/** Read-only journal mode of a tracker db; a hot-journal recovery would itself be a mutation, so clean fixtures only. */
+function journalMode(dbPath: string): string {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const row = db.query("PRAGMA journal_mode;").get() as Record<string, unknown> | null;
+		const value = row === null ? null : Object.values(row)[0];
+		if (typeof value !== "string" || value.length === 0) throw new Error(`no journal_mode for ${dbPath}`);
+		return value;
+	} finally {
+		db.close();
+	}
+}
+
+/** Whole-tracker state: journal plus the authoritative sqlite bytes plus live WAL content and journal mode, read synchronously. A mutation visible only in WAL is observed; br startup auto-import/recovery would show here too. SHM holds volatile lock state, so only its presence and size are witnessed, never its bytes. */
 function stateHash(t: { dir: string }): string {
-	return createHash("sha256").update(readFileSync(join(t.dir, ".beads", "issues.jsonl"))).update(readFileSync(join(t.dir, ".beads", "beads.db"))).digest("hex");
+	const beadsDir = join(t.dir, ".beads");
+	const h = createHash("sha256");
+	h.update(readFileSync(join(beadsDir, "issues.jsonl")));
+	h.update(readFileSync(join(beadsDir, "beads.db")));
+	const wal = join(beadsDir, "beads.db-wal");
+	h.update(existsSync(wal) ? readFileSync(wal) : "ABSENT:beads.db-wal");
+	const shm = join(beadsDir, "beads.db-shm");
+	h.update(existsSync(shm) ? `PRESENT:${readFileSync(shm).length}` : "ABSENT:beads.db-shm");
+	h.update(`journal_mode:${journalMode(join(beadsDir, "beads.db"))}`);
+	return h.digest("hex");
 }
 
 test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export replays its probe; bound and same-repo reads admitted", async () => {
