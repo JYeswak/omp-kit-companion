@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import process from "node:process";
@@ -6,24 +5,19 @@ import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { sanitizedEnv } from "../../src/runtime.ts";
 import { run as kitlibRun } from "../../src/kitlib/run.ts";
-import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
-const fixtures: string[] = [];
+const fixtures: OwnedTmp[] = [];
 
 afterEach(() => {
-	for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true });
+	for (const fixture of fixtures.splice(0)) fixture.cleanup();
 });
 
 function fixtureRoot(): string {
-	const scratch = join(REPO_ROOT, "var", "agent-tmp");
-	mkdirSync(scratch, { recursive: true, mode: 0o700 });
-	const label = `kit-flywheel-guard-runtime-${randomUUID()}`;
-	const root = join(scratch, `${label}.${process.pid}`);
-	mkdirSync(root, { mode: 0o700 });
-	fixtures.push(root);
-	writeFileSync(join(root, ".owner"), `pid=${process.pid}\nlabel=${label}\nrepo=${REPO_ROOT}\ncreated=${new Date().toISOString()}\n`, { mode: 0o600 });
-	return root;
+	const scope = ownedTmp("flywheel-guard-runtime", { root: join(REPO_ROOT, "var", "agent-tmp") });
+	fixtures.push(scope);
+	return scope.path;
 }
 
 type RequestLogRow = { body: { messages: Array<{ role: string; content?: unknown }> } };
