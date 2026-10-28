@@ -458,5 +458,149 @@ else
 fi
 mv "$TMP/reversal-member.ordinary.keep" "$member"
 
+# 9. Real 3cbef260b5 withdrawal replay: owned fixture, read-only exact-source export.
+#    The reversal stages all 78 X paths at P bytes; the native checker admits each
+#    incumbent entry against freshly bound published origin and the commit-msg
+#    member emits a per-path verdict. send.ts keeps its 75849fa67d bytes and the
+#    full 78-path equality preserves every hunk as history (no .41 qualification
+#    is claimed). The source repo is read with show/ls-tree/rev-parse only; every
+#    fixture repo is generated under $TMP. Revert names the fixture X, whose tree
+#    carries the real X bytes path for path.
+SRCROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+XREAL=3cbef260b55aa4d5d0dda0f7beae20723bb7cd85
+PREAL=75849fa67db466f11a222b7979133f69e482b5d5
+OLDCONVERGE=1c57cd8efdbb53dd514e82036bf527758e32eb78
+XPATHS=$(git -C "$SRCROOT" diff-tree --no-commit-id --name-only -r "$XREAL") || exit 1
+XCOUNT=$(printf '%s\n' "$XPATHS" | wc -l)
+# sync_tree DIR REV: check out exactly the 78 X paths at REV bytes and mode;
+# paths absent at REV (the two X-added files) are removed for the reversal.
+sync_tree() {
+	for p in $XPATHS; do
+		mkdir -p "$1/$(dirname "$p")"
+		if git -C "$SRCROOT" show "$2:$p" > "$1/$p" 2>/dev/null; then
+			if git -C "$SRCROOT" ls-tree "$2" -- "$p" | grep -q "100755"; then
+				chmod +x "$1/$p"
+			else
+				chmod -x "$1/$p"
+			fi
+		else
+			rm -f "$1/$p"
+		fi
+	done
+}
+# real_repo NAME: root, P-tree published as a local origin, X-tree on top.
+real_repo() {
+	dir="$TMP/$1"
+	mkdir -p "$dir"
+	git -C "$dir" init -q 2>/dev/null
+	git -C "$dir" config user.email "test@invalid.example"
+	git -C "$dir" config user.name "Test"
+	git -C "$dir" commit -q --allow-empty --message "[test] root"
+	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; return 1; }
+	# The replay judges the kitlib ratchet alone: the 78 real files trip sibling
+	# members (staged-imports, staged-regexploit) that the synthetic fixtures never
+	# touch, so only the staged-kitlib and reversal members stay installed. Helper
+	# files (pysafe, the ratchet engine) stay: the members refuse without them.
+	for member in "$dir/.git/hooks/hooks.d/pre-commit/"* "$dir/.git/hooks/hooks.d/commit-msg/"*; do
+		case "$(basename "$member")" in
+		51-omp-kit-staged-kitlib|50-omp-kit-staged-kitlib-reversal|*.*) ;;
+		*) rm -f "$member" ;;
+		esac
+	done
+	sync_tree "$dir" "$PREAL" || return 1
+	for p in $XPATHS; do [ -e "$dir/$p" ] && git -C "$dir" add -- "$p"; done
+	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] published origin"
+	origin=$(git -C "$dir" rev-parse HEAD) || return 1
+	git -C "$dir" init --bare -q "$dir/published.git" || return 1
+	git -C "$dir" remote add origin "$dir/published.git" || return 1
+	git -C "$dir" -c core.hooksPath=/dev/null push -q origin "$origin:refs/heads/main" || return 1
+	git -C "$dir" update-ref refs/remotes/origin/main "$origin" || return 1
+	sync_tree "$dir" "$XREAL" || return 1
+	for p in $XPATHS; do git -C "$dir" add -- "$p"; done
+	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] ratchet introduction"
+	X=$(git -C "$dir" rev-parse HEAD) || return 1
+	printf '%s' "$dir"
+}
+# The exact 78-path reversal of the real X passes with a per-path verdict each.
+R=$(real_repo real-pass)
+X=$(git -C "$R" rev-parse HEAD) || exit 1
+sync_tree "$R" "$PREAL"
+for p in $XPATHS; do git -C "$R" add -- "$p"; done
+out=$(commit "$R" -m "[test] real withdrawal" -m "Revert: $X")
+check "$?" "0" "real-withdrawal-pass" "$out" '"verdict":"PASS"'
+check "$(printf '%s' "$out" | grep -o '"x_parent_entry":"PASS"' | wc -l)" "$XCOUNT" "real-withdrawal-parent-entries" "x" "x"
+printf '%s' "$out" | grep -q '"path":"tests/cli/converge.test.ts","raw_spawn_admitted":true'
+check "$?" "0" "real-withdrawal-converge-admitted" "x" "x"
+printf '%s' "$out" | grep -q '"path":"tests/cli/scratch-release-now.test.ts","raw_spawn_admitted":true'
+check "$?" "0" "real-withdrawal-release-now-admitted" "x" "x"
+printf '%s' "$out" | grep -q '"path":"tests/cli/scratch.test.ts","raw_spawn_admitted":true'
+check "$?" "0" "real-withdrawal-scratch-admitted" "x" "x"
+send_got=$(git -C "$R" rev-parse "HEAD:src/send.ts")
+send_want=$(git -C "$SRCROOT" rev-parse "$PREAL:src/send.ts")
+check "$send_got" "$send_want" "real-withdrawal-send-kept" "x" "x"
+alleq=0
+for p in $XPATHS; do
+	if git -C "$R" rev-parse --verify --quiet "HEAD:$p" >/dev/null 2>&1; then in_head=1; else in_head=0; fi
+	if git -C "$SRCROOT" rev-parse --verify --quiet "$PREAL:$p" >/dev/null 2>&1; then in_p=1; else in_p=0; fi
+	if [ "$in_head" != "$in_p" ]; then echo "MISMATCH-PRESENCE:$p head=$in_head p=$in_p"; alleq=1
+	elif [ "$in_head" = 1 ]; then
+		got=$(git -C "$R" rev-parse "HEAD:$p")
+		want=$(git -C "$SRCROOT" rev-parse "$PREAL:$p")
+		gotmode=$(git -C "$R" ls-files -s -- "$p" | cut -d' ' -f1)
+		wantmode=$(git -C "$SRCROOT" ls-tree "$PREAL" -- "$p" | cut -d' ' -f1)
+		if [ "$got" != "$want" ] || [ "$gotmode" != "$wantmode" ]; then echo "MISMATCH:$p"; alleq=1; fi
+	fi
+done
+check "$alleq" "0" "real-withdrawal-all-bytes" "x" "x"
+# A mixed new spawn beside the exact reversal refuses naming the new file.
+R=$(real_repo real-mixed)
+X=$(git -C "$R" rev-parse HEAD) || exit 1
+sync_tree "$R" "$PREAL"
+printf '%s\n' "$PY_BAD" > "$R/new.py"
+for p in $XPATHS; do git -C "$R" add -- "$p"; done
+git -C "$R" add new.py
+out=$(commit "$R" -m "[test] real withdrawal plus new spawn" -m "Revert: $X")
+check "$?" "1" "real-mixed-new-refused" "$out" "new.py:2:1: raw-spawn"
+# A one-byte difference in one path refuses naming that path.
+R=$(real_repo real-near-match)
+X=$(git -C "$R" rev-parse HEAD) || exit 1
+sync_tree "$R" "$PREAL"
+printf '%s\n# one byte differs\n' "$(git -C "$SRCROOT" show "$PREAL:tests/cli/converge.test.ts")" > "$R/tests/cli/converge.test.ts"
+for p in $XPATHS; do git -C "$R" add -- "$p"; done
+out=$(commit "$R" -m "[test] real near match" -m "Revert: $X")
+check "$?" "1" "real-near-match-refused" "$out" "converge.test.ts:.*raw-spawn"
+# A mode-only difference refuses naming that path.
+R=$(real_repo real-mode)
+X=$(git -C "$R" rev-parse HEAD) || exit 1
+sync_tree "$R" "$PREAL"
+chmod +x "$R/tests/cli/scratch.test.ts"
+for p in $XPATHS; do git -C "$R" add -- "$p"; done
+out=$(commit "$R" -m "[test] real mode near match" -m "Revert: $X")
+check "$?" "1" "real-near-match-mode-refused" "$out" "scratch.test.ts:.*raw-spawn"
+# An older-tree entry refuses naming that path.
+R=$(real_repo real-older)
+X=$(git -C "$R" rev-parse HEAD) || exit 1
+sync_tree "$R" "$PREAL"
+git -C "$SRCROOT" show "$OLDCONVERGE:tests/cli/converge.test.ts" > "$R/tests/cli/converge.test.ts"
+for p in $XPATHS; do git -C "$R" add -- "$p"; done
+out=$(commit "$R" -m "[test] real older tree" -m "Revert: $X")
+check "$?" "1" "real-older-tree-refused" "$out" "converge.test.ts:.*raw-spawn"
+# A stale published binding refuses before any per-path proof.
+R=$(real_repo real-stale)
+XSTALE=$(git -C "$R" rev-parse HEAD)
+X=$(git -C "$R" rev-parse HEAD) || exit 1
+git -C "$R" -c core.hooksPath=/dev/null push -q origin "$XSTALE:refs/heads/candidate"
+git --git-dir="$R/published.git" update-ref refs/heads/main "$XSTALE"
+sync_tree "$R" "$PREAL"
+for p in $XPATHS; do git -C "$R" add -- "$p"; done
+out=$(commit "$R" -m "[test] real stale origin" -m "Revert: $X")
+check "$?" "1" "real-stale-binding-refused" "$out" "origin/main tracking ref is stale"
+# An ordinary new spawn with no reversal refuses as today.
+R=$(real_repo real-control)
+printf '%s\n' "$PY_BAD" > "$R/new.py"
+git -C "$R" add new.py
+out=$(commit "$R" -m "[test] ordinary new spawn")
+check "$?" "1" "real-ordinary-new-refused" "$out" "new.py:2:1: raw-spawn"
+
 printf 'check-staged-kitlib: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
