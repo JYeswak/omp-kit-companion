@@ -55,9 +55,10 @@ test("verify closes a bead whose boxes name commands with expected outcomes: rep
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"]]);
 	const acts = br.acts();
-	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2");
-	expect(acts[1]).toBe("gate report kit-1 --gate min_reviewers --provider reviewer:Peer --status pass --to closed");
+	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2 --actor Peer");
+	expect(acts[1]).toBe("gate report kit-1 --gate min_reviewers --provider reviewer:Peer --status pass --to closed --actor Peer");
 	expect(acts[2]).toStartWith("close kit-1 --reason verified by Peer (family: same (claude)) on export " + sha);
+	expect(acts[2]).toContain("--actor Peer");
 	expect(acts[2]).toContain("[a] sh scripts/t.sh -> summary 16 pass 0 fail: found");
 });
 
@@ -99,7 +100,7 @@ test("planted: a box naming no command is ACCEPTANCE_NOT_REPLAYABLE and the bead
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.log).toContain("[a] names no command");
-	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake"]]);
+	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake", "--actor", "Peer"]]);
 	expect(br.acts()).toEqual([]);
 });
 
@@ -154,7 +155,7 @@ test("planted: an unsupported tag is named and fails closed, never silently drop
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.log).toContain("[1] unsupported phase [zzz]");
 	expect(res.log).toContain("[2] unsupported phase [build a]");
-	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake"]]);
+	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake", "--actor", "Peer"]]);
 	expect(br.acts()).toEqual([]);
 });
 
@@ -174,7 +175,7 @@ test("planted: a refusal names the indexed box and leaves the tracker's bead and
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.log).toContain("[1] names no command");
-	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake"]]);
+	expect(res.acts).toEqual([["br", "update", "kit-1", "--status", "open", "--add-label", "needs-intake", "--actor", "Peer"]]);
 	expect(br.acts()).toEqual([]);
 	expect(bead.acceptance_criteria).toBe(ac);
 });
@@ -186,7 +187,7 @@ test("phase-only boxes replay their literal command and are judged by the named 
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.index, r.letter, r.pass, r.outcome])).toEqual([[1, null, true, "named"], [2, null, true, "named"]]);
 	const acts = br.acts();
-	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2");
+	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2 --actor Peer");
 });
 
 test("live and after items are pending: not executed, never passed, no tracker mutation", async () => {
@@ -345,4 +346,129 @@ test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with th
 	expect(causal.rc).toBe(0);
 	expect(causal.out).toContain("Updated");
 	expect((await brun(["show", id, "--json"], t.dir, causalEnv)).out).toContain("causal-proof");
+});
+
+/* VERIFYACTOR1 (ompkit-t7cn7.24): native verify binds the explicit reviewer
+   identity on every durable br mutation. The fixture tracker's default actor
+   is forced away from the reviewer via USER, so the audit log distinguishes
+   ambient acts from reviewer acts. These assert durable audit state, never
+   argv echoes. */
+
+const REVIEWER = "Peer";
+const AMBIENT = "AmbientDefault";
+
+/** Env whose br default actor is ambient, never the reviewer. */
+function ambientEnv(db: string): Record<string, string> {
+	return { ...process.env, USER: AMBIENT, BEADS_DB: db } as Record<string, string>;
+}
+
+/** Minimal strict workflow so the close path runs: open->in_progress->in_review->closed with min_reviewers on the final edge. */
+async function actorPolicy(t: { dir: string }): Promise<void> {
+	writeFileSync(join(t.dir, ".beads", "policy.yaml"), `workflow:
+  strict: true
+  statuses: [open, in_progress, in_review, rework, closed]
+  transitions:
+    initial: [open]
+    open: [in_progress, closed]
+    in_progress: [in_review, open]
+    in_review: [closed, rework]
+    rework: [in_progress, open]
+    closed: [open]
+  required_fields:
+    "open -> in_progress": [acceptance_criteria_present]
+    in_review: [acceptance_criteria_present, transition_comment]
+    closed: [acceptance_criteria, transition_comment]
+  gates:
+    "in_review -> closed":
+      require_all:
+        - min_reviewers: 1
+`);
+}
+
+/** Shape a fixture bead through the gated path as ambient/tester setup acts. */
+async function shapeActorBead(t: { dir: string; db: string }, id: string, ac: string): Promise<void> {
+	const env = ambientEnv(t.db);
+	const desc = "WHAT: verifyactor1 fixture.\n\nWHY: proves native verify binds the reviewer identity on durable mutations.";
+	const moves: string[][] = [
+		["update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix"],
+		["update", id, "--status", "in_progress", "--transition-comment", "fixture start"],
+		["update", id, "--check-acceptance", "1"],
+		["update", id, "--assignee", "Author"],
+		["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "tester"],
+	];
+	for (const m of moves) {
+		const r = await brun(m, t.dir, env);
+		if (r.rc !== 0) throw new Error(`${m.slice(0, 3).join(" ")} -> ${r.rc}: ${r.out.slice(0, 300)}`);
+	}
+}
+
+async function auditActors(t: { dir: string; db: string }, id: string): Promise<{ event_type: string; actor: string }[]> {
+	const r = await brun(["audit", "log", id, "--json"], t.dir, ambientEnv(t.db));
+	if (r.rc !== 0) throw new Error(`audit log -> ${r.rc}: ${r.out.slice(0, 300)}`);
+	const doc = JSON.parse(r.out) as { events: { event_type: string; actor: string }[] };
+	return doc.events.map(e => ({ event_type: e.event_type, actor: e.actor }));
+}
+
+test("VERIFYACTOR1 [a]: passing verify binds the reviewer on ticks, gate report and close; a same-tracker control bead is untouched", async () => {
+	const { dir: cdir, sha } = await repo("actorpass");
+	const t = await tracker("actorpass-t");
+	await actorPolicy(t);
+	const envT = ambientEnv(t.db);
+	const id = await createBead(t, "actor close probe");
+	const control = await createBead(t, "actor control probe");
+	const ac = "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass";
+	await shapeActorBead(t, id, ac);
+	await shapeActorBead(t, control, ac);
+	const beforeEvents = await auditActors(t, id);
+	const controlBefore = (await brun(["show", control, "--json"], t.dir, envT)).out;
+	const controlEventsBefore = await auditActors(t, control);
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, family: "same (bun)" });
+	expect(res.code).toBe("CLOSED");
+	const afterEvents = await auditActors(t, id);
+	expect(afterEvents.length).toBeGreaterThan(beforeEvents.length);
+	const fresh = afterEvents.slice(0, afterEvents.length - beforeEvents.length);
+	for (const e of fresh) expect(e.actor).toBe(REVIEWER);
+	const kinds = fresh.map(e => e.event_type);
+	expect(kinds).toContain("closed");
+	const shown = JSON.parse((await brun(["show", id, "--json"], t.dir, envT)).out) as { status: string; notes: string }[];
+	expect(shown[0]!.status).toBe("closed");
+	expect((await brun(["show", control, "--json"], t.dir, envT)).out).toBe(controlBefore);
+	expect(await auditActors(t, control)).toEqual(controlEventsBefore);
+});
+
+test("VERIFYACTOR1 [a]: failing probe REWORK carries the reviewer identity, never the ambient default", async () => {
+	const { dir: cdir, sha } = await repo("actorrework");
+	const t = await tracker("actorrework-t");
+	await actorPolicy(t);
+	const envT = ambientEnv(t.db);
+	const id = await createBead(t, "actor rework probe");
+	await shapeActorBead(t, id, "- [ ] [a] [build] `sh scripts/bad.sh` -> prints PASS");
+	const beforeEvents = await auditActors(t, id);
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, family: "same (bun)" });
+	expect(res.code).toBe("REWORK");
+	expect(res.acts[0]).toEqual(["br", "update", id, "--status", "rework", "--transition-comment", expect.stringContaining(`REWORK ${id}:`), "--actor", REVIEWER]);
+	const afterEvents = await auditActors(t, id);
+	expect(afterEvents.length).toBeGreaterThan(beforeEvents.length);
+	for (const e of afterEvents.slice(0, afterEvents.length - beforeEvents.length)) expect(e.actor).toBe(REVIEWER);
+});
+
+test("VERIFYACTOR1 [a]: explicit-author refusal and dry-run leave fixture state and audit untouched", async () => {
+	const { dir: cdir, sha } = await repo("actoruntouched");
+	const t = await tracker("actoruntouched-t");
+	await actorPolicy(t);
+	const envT = ambientEnv(t.db);
+	const id = await createBead(t, "actor untouched probe");
+	await shapeActorBead(t, id, "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass");
+	const beforeHash = stateHash(t);
+	const beforeEvents = await auditActors(t, id);
+	const refused = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Author", env: envT });
+	expect(refused.code).toBe("NON_AUTHOR_REQUIRED");
+	expect(refused.acts).toEqual([]);
+	expect(stateHash(t)).toBe(beforeHash);
+	expect(await auditActors(t, id)).toEqual(beforeEvents);
+	const dry = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, dryRun: true, family: "same (bun)" });
+	expect(dry.code).toBe("DRY_RUN");
+	expect(dry.acts.length).toBeGreaterThan(0);
+	expect(stateHash(t)).toBe(beforeHash);
+	expect(await auditActors(t, id)).toEqual(beforeEvents);
 });

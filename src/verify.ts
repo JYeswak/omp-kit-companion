@@ -110,7 +110,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const bad = replayable.filter(b => (b.phase !== null && KNOWN_PHASES[b.phase] !== true) || !CMD.test(b.body));
 	if (replayable.length === 0 || bad.length > 0) {
 		log.push(`not replayable: ${bad.length ? bad.map(b => b.phase !== null && KNOWN_PHASES[b.phase] !== true ? `${tag(b)} unsupported phase [${b.phase}]` : `${tag(b)} names no command`).join("; ") : "no boxes"}`);
-		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake"]] };
+		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
 	// A grading harness designates its writable root (GRADE_WAVE_SCRATCH); the
 	// owned replay fixture is a real br init and must live where the ambient
@@ -159,7 +159,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const failed = replays.filter(r => r.pass === false);
 	if (failed.length > 0) {
 		const comment = `REWORK ${input.bead}: ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`;
-		acts.push(["br", "update", input.bead, "--status", "rework", "--transition-comment", comment]);
+		acts.push(["br", "update", input.bead, "--status", "rework", "--transition-comment", comment, "--actor", input.actor]);
 		if (!input.dryRun) for (const a of acts) await run(a, { cwd: input.repo, deadline_s: 60, env });
 		return { ok: false, code: input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
 	}
@@ -170,9 +170,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const exitOnly = replays.filter(r => r.outcome === "exit-only").map(r => tag(r));
 	const family = input.family ?? "unknown (set --family)";
 	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${replays.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${exitOnly.length ? `; exit-only boxes: ${exitOnly.join(" ")}` : ""}`;
-	acts.push(["br", "update", input.bead, "--check-acceptance", replays.filter(r => r.pass === true).map(r => String(r.index)).join(",")]);
-	acts.push(["br", "gate", "report", input.bead, "--gate", "min_reviewers", "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed"]);
-	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${log.join("\n")}`]);
+	acts.push(["br", "update", input.bead, "--check-acceptance", replays.filter(r => r.pass === true).map(r => String(r.index)).join(","), "--actor", input.actor]);
+	acts.push(["br", "gate", "report", input.bead, "--gate", "min_reviewers", "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
+	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${log.join("\n")}`, "--actor", input.actor]);
 	if (!input.dryRun) {
 		for (const a of acts) {
 			const r = await run(a, { cwd: input.repo, deadline_s: 60, env });
