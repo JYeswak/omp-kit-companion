@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseBoxes, verifyBead } from "../../src/verify.ts";
@@ -27,6 +28,7 @@ async function repo(name: string): Promise<{ dir: string; sha: string }> {
 	mkdirSync(join(dir, "scripts"), { recursive: true });
 	writeFileSync(join(dir, "scripts", "t.sh"), "#!/bin/sh\necho ' 16 pass'\necho ' 0 fail'\n");
 	writeFileSync(join(dir, "scripts", "bad.sh"), "#!/bin/sh\necho 'selftest: FAIL'\nexit 1\n");
+	writeFileSync(join(dir, "scripts", "probe.sh"), "#!/bin/sh\ns=0\ni=1\nwhile [ $i -le 100 ]; do s=$((s + i)); i=$((i + 1)); done\nif [ $s -ne 5050 ]; then echo 'probe WRONG'; exit 1; fi\necho 'probe 5050 ok'\necho ' 0 fail'\n");
 	await sh(["git", "init", "-q"], dir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], dir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], dir);
@@ -297,6 +299,11 @@ function snap(t: { dir: string }): string {
 	return readFileSync(join(t.dir, ".beads", "issues.jsonl"), "utf8");
 }
 
+/** Whole-tracker state: journal plus the authoritative sqlite bytes (reads are side-effect-free, proven by probe). */
+function stateHash(t: { dir: string }): string {
+	return createHash("sha256").update(readFileSync(join(t.dir, ".beads", "issues.jsonl"))).update(readFileSync(join(t.dir, ".beads", "beads.db"))).digest("hex");
+}
+
 test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export replays its probe; bound and same-repo reads admitted", async () => {
 	const { dir: cdir, sha } = await repo("barrier-pos");
 	const t = await tracker("barrier-pos-t");
@@ -304,14 +311,16 @@ test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export rep
 	const id = await createBead(t, "barrier positive probe");
 	const tin = await trackerInRepo(cdir);
 	const idin = await createBead(tin, "same-repo probe");
-	const ac = `- [ ] [a] [build] \`sh scripts/t.sh\` -> 16 pass 0 fail\n- [ ] [b] [build] admitted explicit read: \`br --db "${t.db}" show ${id} --json\` -> ${id}\n- [ ] [c] [build] admitted bound read (never refused): \`br show ${id} --json\` -> ${id}\n- [ ] [d] [build] admitted same-repo read: \`br --db "${tin.db}" show ${idin} --json\` -> ${idin}`;
+	const ac = `- [ ] [a] [build] computed behavior probe: \`sh scripts/probe.sh\` -> probe 5050 ok\n- [ ] [b] [build] admitted explicit read: \`br --db "${t.db}" show ${id} --json\` -> ${id}\n- [ ] [c] [build] admitted bound read (never refused): \`br show ${id} --json\` -> ${id}\n- [ ] [d] [build] admitted same-repo read: \`br --db "${tin.db}" show ${idin} --json\` -> ${idin}`;
 	await shapeBead(t, id, ac);
 	const before = snap(t);
+	const beforeHash = stateHash(t);
 	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)" });
 	expect(res.code).toBe("DRY_RUN");
 	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"], ["c", true, "named"], ["d", true, "named"]]);
 	expect(res.log).toContain("exported " + sha);
 	expect(snap(t)).toBe(before);
+	expect(stateHash(t)).toBe(beforeHash);
 });
 
 test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with the marker; T unchanged; owned write admitted; neutralization makes it fail", async () => {
@@ -319,15 +328,17 @@ test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with th
 	const t = await tracker("barrier-neg-t");
 	const envT = trackerEnv(t);
 	const id = await createBead(t, "barrier negative probe");
-	const ac = `- [ ] [a] [build] ordinary explicit write refused: \`br --db "${t.db}" update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [b] [build] env-stripped write refused: \`env -u BEADS_DB br update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [c] [build] implicit inherited write refused: \`br update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [d] [build] admitted owned write: \`br --db "$OWNED_TRACKER_DB" create "owned probe"\` -> Created\n- [ ] [e] [build] owned readback: \`br --db "$OWNED_TRACKER_DB" list --json\` -> owned probe`;
+	const ac = `- [ ] [a] [build] ordinary explicit write refused: \`br --db "${t.db}" update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [b] [build] env-stripped write refused: \`env -u BEADS_DB br update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [c] [build] implicit inherited write refused: \`br update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [d] [build] admitted owned write: \`br --db "$OWNED_TRACKER_DB" create "owned probe"\` -> Created\n- [ ] [e] [build] owned readback: \`br --db "$OWNED_TRACKER_DB" list --json\` -> owned probe\n- [ ] [f] [build] export executes the computed behavior probe: \`sh scripts/probe.sh\` -> probe 5050 ok`;
 	await shapeBead(t, id, ac);
 	const before = snap(t);
+	const beforeHash = stateHash(t);
 	const beforeShow = (await brun(["show", id, "--json"], t.dir, envT)).out;
 	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)" });
 	expect(res.code).toBe("DRY_RUN");
-	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true], ["d", true], ["e", true]]);
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true], ["d", true], ["e", true], ["f", true]]);
 	expect(res.log).toContain("READONLY_TRACKER");
 	expect(snap(t)).toBe(before);
+	expect(stateHash(t)).toBe(beforeHash);
 	expect((await brun(["show", id, "--json"], t.dir, envT)).out).toBe(beforeShow);
 	const causalEnv = { ...process.env, BEADS_DB: t.db } as Record<string, string>;
 	const causal = await brun(["update", id, "--add-label", "causal-proof"], t.dir, causalEnv);

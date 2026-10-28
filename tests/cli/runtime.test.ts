@@ -1105,5 +1105,22 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		expect(oldReplays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", false]]);
 		const afterOld = await brOut(["show", id, "--json"], tdir);
 		expect(afterOld.out).toContain("guard-probe");
+		// The close act requires the min_reviewers gate on in_review -> closed;
+		// replicate the production tracker's workflow policy into the fixture.
+		writeFileSync(join(tdir, ".beads", "policy.yaml"), "workflow:\n  strict: true\n  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]\n  transitions:\n    initial: [open]\n    open: [in_progress, blocked, deferred, closed]\n    in_progress: [in_review, open, blocked, deferred]\n    in_review: [closed, rework]\n    rework: [in_progress, in_review, open]\n    blocked: [open, in_progress]\n    deferred: [open]\n    closed: [open]\n  gates:\n    \"in_review -> closed\":\n      require_all:\n        - min_reviewers: 1\n");
+		const cliPath = resolve(import.meta.dir, "..", "..", "src", "cli.ts");
+		const closed = await run([process.execPath, "run", "--silent", cliPath, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", fam, "--json"], { cwd: root, deadline_s: 600, env: envT });
+		if (closed.rc !== 0) throw new Error(`cli close -> ${closed.rc}: out=${utf8(closed.stdout).slice(0, 500)} err=${utf8(closed.stderr).slice(0, 300)}`);
+		const closedDoc: unknown = JSON.parse(utf8(closed.stdout));
+		const closedPayload: unknown = typeof closedDoc === "object" && closedDoc !== null && "data" in closedDoc ? closedDoc.data : closedDoc;
+		const closedCode = typeof closedPayload === "object" && closedPayload !== null && "overall" in closedPayload && typeof closedPayload.overall === "string" ? closedPayload.overall : null;
+		expect(closedCode).toBe("CLOSED");
+		const closedActs = typeof closedPayload === "object" && closedPayload !== null && "acts" in closedPayload && Array.isArray(closedPayload.acts) ? closedPayload.acts : [];
+		expect(JSON.stringify(closedActs)).toContain(fam);
+		const finalShow = await brOut(["show", id, "--json"], tdir);
+		const finalParsed: unknown = JSON.parse(finalShow.out);
+		const finalRow: unknown = Array.isArray(finalParsed) ? finalParsed[0] : finalParsed;
+		const finalStatus = typeof finalRow === "object" && finalRow !== null && "status" in finalRow && typeof finalRow.status === "string" ? finalRow.status : null;
+		expect(finalStatus).toBe("closed");
 	}, 60_000);
 });

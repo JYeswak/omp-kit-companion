@@ -14,12 +14,14 @@
   designates `GRADE_WAVE_SCRATCH`, the per-run scratch (and the owned
   fixture inside it) roots there, so replay fixtures live where the ambient
   `br` authority permits writes. Covered by
-  `tests/cli/verify.test.ts` (22 tests: admitted explicit/bound/same-repo
-  reads on real trackers beside the exact code export; ordinary,
-  env-stripped and implicit-inherited writes refused with `T`
-  byte-identical, the owned write admitted, and neutralization making the
-  fixture fail) and `tests/cli/runtime.test.ts` (native guard checks at
-  the `sh` seam; the exact source and the official compiled `omp-kit`
-  verifier both reach the guard on owned fixtures, with source/binary/input
-  digests recorded — the guardless binary executes the mutation and fails
-  the box while the new source refuses it — plus one `verifyBead` smoke).
+  `tests/cli/verify.test.ts` (22 tests: a computed behavior probe
+  (shell arithmetic verified at replay, not echoed text) plus
+  explicit/bound/same-repo reads on real trackers beside the exact code
+  export; ordinary, env-stripped and implicit-inherited writes refused
+  with the whole tracker state (journal plus sqlite bytes) byte-identical,
+  the owned write admitted, and neutralization making the fixture fail)
+  and `tests/cli/runtime.test.ts` (native guard checks at the `sh` seam;
+  the exact source and the official compiled `omp-kit` verifier both reach
+  the guard on owned fixtures, with source/binary/input digests recorded —
+  the guardless binary executes the mutation and fails the box while the
+  new source refuses it — plus `verifyBead` and CLI-driven close smokes).
