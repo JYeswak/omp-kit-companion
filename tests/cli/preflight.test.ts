@@ -8,8 +8,8 @@ import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const base = ownedTmp("preflight-test").path;
 
-async function sh(cmd: string[], cwd: string): Promise<string> {
-	const r = await run(cmd, { cwd, deadline_s: 60 });
+async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {
+	const r = await run(cmd, { cwd, deadline_s: 60, env: { ...process.env, ...env } });
 	const out = new TextDecoder().decode(r.stdout);
 	if (r.rc !== 0) throw new Error(`${cmd.join(" ")} -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);
 	return out;
@@ -122,7 +122,7 @@ async function nativeFixtureRoot(label: string): Promise<{ dir: string; capabili
 		scan = parent;
 	}
 	if (!repo) throw new Error("no enclosing repository found for owned fixture scratch");
-	const made = await run(["omp-kit", "scratch", "new", "--label", label, "--json"], { deadline_s: 60, cwd: repo });
+	const made = await run(["omp-kit", "scratch", "new", "--label", label, "--json"], { deadline_s: 60, cwd: repo, env: { ...process.env } });
 	const doc: unknown = JSON.parse(new TextDecoder().decode(made.stdout));
 	const data: unknown = doc && typeof doc === "object" && "data" in doc ? doc.data : null;
 	const dir = data && typeof data === "object" && "dir" in data && typeof data.dir === "string" ? data.dir : "";
@@ -134,7 +134,7 @@ async function nativeFixtureRoot(label: string): Promise<{ dir: string; capabili
 	return { dir, capability };
 }
 async function releaseFixtureRoot(root: { dir: string; capability: string }): Promise<void> {
-	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot });
+	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot, env: { ...process.env } });
 	if (r.rc !== 0) throw new Error(`scratch release failed: ${new TextDecoder().decode(r.stderr)}`);
 }
 async function claimFixture(name: string, actor: string, root: string): Promise<{ repo: string; gated: string; eligible: string }> {
@@ -168,9 +168,12 @@ async function shimClaimEnv(actor: string, root: string): Promise<Record<string,
 
 test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director refuses NEEDS_DIRECTOR on the unit and the supported CLI path; recorded director resolution re-admits", { timeout: 120000 }, async () => {
 	const actor = "TestSeatNeedsDirector";
+	const savedDb = process.env.BEADS_DB;
+	delete process.env.BEADS_DB;
 	const root = await nativeFixtureRoot("needs-director");
 	try {
 		const { repo, gated, eligible } = await claimFixture("needs-director", actor, root.dir);
+		process.env.BEADS_DB = join(repo, ".beads", "beads.db");
 	// unit: the refusal is the named NEEDS_DIRECTOR code, and it is the sole
 	// cause (open, unassigned, no other gated label, seat holds nothing)
 	const pre = await preflightBead("claim", repo, gated, { actor });
@@ -181,7 +184,7 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	expect(rev.findings.map(f => f.code)).not.toContain("NEEDS_DIRECTOR");
 	// supported actual claim path: the real CLI verb workers run refuses by name
 	const cliPath = join(import.meta.dir, "../../src/cli.ts");
-	const cli = await run([process.execPath, cliPath, "preflight", "claim", gated, "--project", repo, "--actor", actor, "--json"], { deadline_s: 120, cwd: repo });
+	const cli = await run([process.execPath, cliPath, "preflight", "claim", gated, "--project", repo, "--actor", actor, "--json"], { deadline_s: 120, cwd: repo, env: { ...process.env } });
 	expect(cli.rc).not.toBe(0);
 	expect(new TextDecoder().decode(cli.stdout)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
@@ -207,6 +210,7 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	expect(reClaim.rc).toBe(0);
 	expect(await beadRow(repo, gated)).toEqual({ status: "in_progress", assignee: actor, labels: [] });
 	} finally {
+		if (savedDb === undefined) delete process.env.BEADS_DB; else process.env.BEADS_DB = savedDb;
 		await releaseFixtureRoot(root);
 	}
 });
@@ -229,7 +233,7 @@ test("findings grammar: parse ignores noise and malformed lines; an empty list i
 
 test("every preflight verb is registered at module load (GATEDIAG1 [b] as published was HANDLER_UNAVAILABLE: the registrations sat inside rchLeaseCommand)", async () => {
 	const cliPath = new URL("../../src/cli.ts", import.meta.url).pathname;
-	const r = await run(["bun", "run", "--silent", cliPath, "capabilities", "--json"], { deadline_s: 120, max_output_bytes: 8 * 1024 * 1024 });
+	const r = await run(["bun", "run", "--silent", cliPath, "capabilities", "--json"], { deadline_s: 120, max_output_bytes: 8 * 1024 * 1024, env: { ...process.env } });
 	const doc = JSON.parse(new TextDecoder().decode(r.stdout));
 	const unavailable = (doc.data ?? doc).unavailable_commands ?? [];
 	const names = unavailable.map((u: unknown) => (typeof u === "string" ? u : (u as { path?: string }).path ?? ""));
