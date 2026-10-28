@@ -159,6 +159,13 @@ test("planted negative: the admitted first-tick publish FAILS under the old sess
 	// Dynamic import: the old decision has no static path; its bytes are materialized into the
 	// fixture tmp dir at test time, so no static import can name it.
 	const oldImpl: { default: typeof kitComposerState } = await import(pathToFileURL(join(oldDir, "kit-composer-state.ts")).href);
+	// Paired control: the old production module is live through this same wiring — a seat listed at
+	// start publishes on session_start. The late-listing silence below is the old session_start-only
+	// decision, not a dead module or an empty tick array.
+	const listedRepo = repo(true);
+	const live = await seat({ cwd: chiefCwd, env: { TERN_PANE: "1756641624081" }, registry: registeredSeat(listedRepo) }, oldImpl.default);
+	await live.fire("session_start");
+	expect(live.record()).toEqual({ schema: 1, session_file: realpathSync(live.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true });
 	const s = await seat({ cwd: chiefCwd, env: { TERN_PANE: "1756641624081" },
 		registry: { schema_version: "omp-kit.cc.seats.v1", sessions: [] } }, oldImpl.default);
 	await s.fire("session_start");
