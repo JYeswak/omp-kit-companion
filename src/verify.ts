@@ -22,6 +22,7 @@ import { join, resolve } from "node:path";
 import { run } from "./kitlib/run.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { preflightBead } from "./preflight.ts";
+import { installReadonlyBr, resolveRealBr } from "./kitlib/readonly-br.ts";
 
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
 const CMD = /`([^`]+)`/;
@@ -112,6 +113,22 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake"]] };
 	}
 	const scratch = ownedTmp("verify", { bead: input.bead });
+	const realBr = resolveRealBr(env.PATH);
+	if (realBr === null) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("UNJUDGED: no resolvable br on PATH; unmet prerequisite: real br binary").join("\n"), acts };
+	const replayBin = installReadonlyBr(scratch.path, realBr);
+	const wantsOwned = replayable.some(b => b.body.includes("OWNED_TRACKER_DB"));
+	let ownedDb = "";
+	if (wantsOwned) {
+		const fixtureDir = join(scratch.path, "fixture");
+		mkdirSync(fixtureDir, { recursive: true });
+		const unboundEnv: Record<string, string> = {};
+		for (const [k, v] of Object.entries(env)) if (k !== "BEADS_DB") unboundEnv[k] = v;
+		const fixtureInit = await run([realBr, "init"], { cwd: fixtureDir, deadline_s: 60, env: unboundEnv });
+		if (fixtureInit.rc !== 0) return { ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`owned fixture init failed rc ${fixtureInit.rc}: ${text(fixtureInit.stderr).slice(0, 200)}; unmet prerequisite: owned tracker binding`).join("\n"), acts };
+		ownedDb = join(fixtureDir, ".beads", "beads.db");
+	}
+	const replayEnv = { ...env, TMPDIR: scratch.path, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}:${env.PATH ?? process.env.PATH ?? "/usr/bin:/bin"}` };
+	if (wantsOwned) log.push(`owned fixture ${ownedDb} (per-run read-only replay)`);
 	const exportDir = join(scratch.path, "export");
 	mkdirSync(exportDir, { recursive: true });
 	const archive = await run(["sh", "-c", `git -C ${JSON.stringify(input.repo)} archive ${JSON.stringify(input.exportSha)} | tar -x -C ${JSON.stringify(exportDir)}`], { deadline_s: 300, env });
@@ -129,7 +146,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const command = CMD.exec(box.body)![1]!;
 		const expected = expectedOf(box.body);
 		const started = Date.now();
-		const r = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: { ...env, TMPDIR: scratch.path }, max_output_bytes: 4 * 1024 * 1024 });
+		const r = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
 		const out = text(r.stdout) + text(r.stderr);
 		const v = judge(expected, r.rc, out);
 		replays.push({ index: box.index, letter: box.letter, command, expected, outcome: v.outcome, rc: r.rc, pass: v.pass, detail: v.detail });

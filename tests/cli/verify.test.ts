@@ -226,3 +226,93 @@ test("planted: a failing reviewer-gate report fails the close as REWORK naming t
 	expect(res.log).toContain("act failed");
 	expect(res.log).toContain("gate report");
 });
+
+/* REPLAYBR1 (ompkit-t7cn7.21): real-tracker fixtures for the per-run read-only
+   replay barrier. These use the production br binary and real trackers in
+   owned scratch, never the fake br above and never the shared K tracker. */
+
+async function brun(args: string[], cwd: string, env?: Record<string, string>): Promise<{ rc: number | null; out: string }> {
+	const merged = { ...process.env, ...(env ?? {}) } as Record<string, string>;
+	const r = await run(["br", ...args], { cwd, deadline_s: 60, env: merged });
+	return { rc: r.rc, out: new TextDecoder().decode(r.stdout) + new TextDecoder().decode(r.stderr) };
+}
+
+/** A real tracker in owned scratch, initialized with no inherited binding. */
+async function tracker(name: string): Promise<{ dir: string; db: string }> {
+	const dir = join(base, name);
+	mkdirSync(dir, { recursive: true });
+	const env = { ...process.env } as Record<string, string>;
+	delete env.BEADS_DB;
+	const r = await run(["br", "init"], { cwd: dir, deadline_s: 60, env });
+	if (r.rc !== 0) throw new Error(`br init -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);
+	return { dir, db: join(dir, ".beads", "beads.db") };
+}
+
+function trackerEnv(t: { dir: string; db: string }): Record<string, string> {
+	return { ...process.env, BEADS_DB: t.db } as Record<string, string>;
+}
+
+async function createBead(t: { dir: string; db: string }, title: string): Promise<string> {
+	const created = await brun(["create", title, "--json"], t.dir, trackerEnv(t));
+	if (created.rc !== 0) throw new Error(`create -> ${created.rc}: ${created.out}`);
+	const parsed: unknown = JSON.parse(created.out);
+	const id = typeof parsed === "object" && parsed !== null && "id" in parsed && typeof parsed.id === "string" ? parsed.id : null;
+	if (id === null) throw new Error(`create returned no id: ${created.out.slice(0, 200)}`);
+	return id;
+}
+
+/** Description, acceptance, label, per-box ticks and the in_review transition. */
+async function shapeBead(t: { dir: string; db: string }, id: string, ac: string): Promise<void> {
+	const env = trackerEnv(t);
+	const desc = "WHAT: owned replay-barrier fixture.\n\nWHY: proves the per-run read-only dispatch admits intended reads and refuses production writes.";
+	const shaped = await brun(["update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix"], t.dir, env);
+	if (shaped.rc !== 0) throw new Error(`shape -> ${shaped.rc}: ${shaped.out}`);
+	const n = ac.split("\n").filter(l => l.trim().startsWith("- [")).length;
+	for (let i = 1; i <= n; i++) {
+		const ticked = await brun(["update", id, "--check-acceptance", String(i)], t.dir, env);
+		if (ticked.rc !== 0) throw new Error(`tick ${i} -> ${ticked.rc}: ${ticked.out}`);
+	}
+	const ready = await brun(["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "tester"], t.dir, env);
+	if (ready.rc !== 0) throw new Error(`in_review -> ${ready.rc}: ${ready.out}`);
+}
+
+function snap(t: { dir: string }): string {
+	return readFileSync(join(t.dir, ".beads", "issues.jsonl"), "utf8");
+}
+
+test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export replays its probe; bound read admitted", async () => {
+	const { dir: cdir, sha } = await repo("barrier-pos");
+	const t = await tracker("barrier-pos-t");
+	const envT = trackerEnv(t);
+	const id = await createBead(t, "barrier positive probe");
+	const ac = `- [ ] [a] [build] \`sh scripts/t.sh\` -> 16 pass 0 fail\n- [ ] [b] [build] admitted explicit read: \`br --db "${t.db}" show ${id} --json\` -> ${id}\n- [ ] [c] [build] admitted bound read (never refused): \`br show ${id} --json\` -> ${id}`;
+	await shapeBead(t, id, ac);
+	const before = snap(t);
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)" });
+	expect(res.code).toBe("DRY_RUN");
+	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"], ["c", true, "named"]]);
+	expect(res.log).toContain("exported " + sha);
+	expect(snap(t)).toBe(before);
+});
+
+test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with the marker; T unchanged; owned write admitted; neutralization makes it fail", async () => {
+	const { dir: cdir, sha } = await repo("barrier-neg");
+	const t = await tracker("barrier-neg-t");
+	const envT = trackerEnv(t);
+	const id = await createBead(t, "barrier negative probe");
+	const ac = `- [ ] [a] [build] ordinary explicit write refused: \`br --db "${t.db}" update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [b] [build] env-stripped write refused: \`env -u BEADS_DB br update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [c] [build] implicit inherited write refused: \`br update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [d] [build] admitted owned write: \`br --db "$OWNED_TRACKER_DB" create "owned probe"\` -> Created\n- [ ] [e] [build] owned readback: \`br --db "$OWNED_TRACKER_DB" list --json\` -> owned probe`;
+	await shapeBead(t, id, ac);
+	const before = snap(t);
+	const beforeShow = (await brun(["show", id, "--json"], t.dir, envT)).out;
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)" });
+	expect(res.code).toBe("DRY_RUN");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true], ["d", true], ["e", true]]);
+	expect(res.log).toContain("READONLY_TRACKER");
+	expect(snap(t)).toBe(before);
+	expect((await brun(["show", id, "--json"], t.dir, envT)).out).toBe(beforeShow);
+	const causalEnv = { ...process.env, BEADS_DB: t.db } as Record<string, string>;
+	const causal = await brun(["update", id, "--add-label", "causal-proof"], t.dir, causalEnv);
+	expect(causal.rc).toBe(0);
+	expect(causal.out).toContain("Updated");
+	expect((await brun(["show", id, "--json"], t.dir, causalEnv)).out).toContain("causal-proof");
+});

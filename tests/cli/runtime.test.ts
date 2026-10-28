@@ -7,7 +7,9 @@ import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src
 import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
 import { createScratch, type LivenessDeps } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { installReadonlyBr, resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { run } from "../../src/kitlib/run.ts";
+import { verifyBead } from "../../src/verify.ts";
 const createdScratchDirs: string[] = [];
 afterAll(() => {
 	for (const dir of createdScratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -1001,4 +1003,89 @@ test("isolated children inherit the CI judge signal through runIsolatedShell", (
 	const withoutSignal = sanitizedEnv(identity, { CI: "true", PATH: "/usr/bin:/bin" }, "/private");
 	expect("GITHUB_ACTIONS" in withoutSignal).toBe(false);
 	expect(withoutSignal.CI).toBe("true");
+});
+
+describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
+	test("exact source and official br binary reach the shim guard on owned fixtures; digests recorded; one smoke via verifyBead", async () => {
+		const utf8 = (b: Uint8Array) => new TextDecoder().decode(b);
+		const sha256hex = (b: Uint8Array | string) => createHash("sha256").update(typeof b === "string" ? b : Buffer.from(b)).digest("hex");
+
+		const root = ownedTmp("replaybr3", { bead: "ompkit-t7cn7.21" }).path;
+		const cdir = join(root, "code");
+		mkdirSync(join(cdir, "scripts"), { recursive: true });
+		writeFileSync(join(cdir, "scripts", "t.sh"), "#!/bin/sh\necho ' 16 pass'\necho ' 0 fail'\n");
+		const git = async (args: string[]) => {
+			const r = await run(["git", ...args], { cwd: cdir, deadline_s: 60 });
+			if (r.rc !== 0) throw new Error(`git ${args.join(" ")} -> ${r.rc}: ${utf8(r.stderr)}`);
+		};
+		await git(["init", "-q"]);
+		await git(["-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"]);
+		await git(["-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"]);
+		const rev = await run(["git", "rev-parse", "HEAD"], { cwd: cdir, deadline_s: 60 });
+		const sha = utf8(rev.stdout).trim();
+		const brBin = resolveRealBr(process.env.PATH);
+		if (brBin === null) throw new Error("no resolvable br on PATH; unmet prerequisite: real br binary");
+		const stripped = { ...process.env } as Record<string, string>;
+		delete stripped.BEADS_DB;
+		const tdir = join(root, "t");
+		mkdirSync(tdir, { recursive: true });
+		const tinit = await run(["br", "init"], { cwd: tdir, deadline_s: 60, env: stripped });
+		if (tinit.rc !== 0) throw new Error(`tracker init -> ${tinit.rc}: ${utf8(tinit.stderr)}`);
+		const tdb = join(tdir, ".beads", "beads.db");
+		const envT = { ...process.env, BEADS_DB: tdb } as Record<string, string>;
+		const brOut = async (args: string[], cwd: string, env?: Record<string, string>) => {
+			const r = await run(["br", ...args], { cwd, deadline_s: 60, env: env ?? envT });
+			return { rc: r.rc, out: utf8(r.stdout) + utf8(r.stderr) };
+		};
+		const created = await brOut(["create", "native guard probe", "--json"], tdir);
+		if (created.rc !== 0) throw new Error(`create -> ${created.rc}: ${created.out}`);
+		const raw: unknown = JSON.parse(created.out);
+		const id = typeof raw === "object" && raw !== null && "id" in raw && typeof raw.id === "string" ? raw.id : null;
+		if (id === null) throw new Error(`create returned no id: ${created.out.slice(0, 200)}`);
+		const ac = `- [ ] [a] [build] \`sh scripts/t.sh\` -> 16 pass 0 fail\n- [ ] [b] [build] admitted owned write: \`br --db "$OWNED_TRACKER_DB" create "owned probe"\` -> Created`;
+		const desc = "WHAT: owned native-guard fixture.\n\nWHY: proves the exact source and the official br binary reach the shim guard on owned fixtures.";
+		const checks: Array<[string[], string]> = [
+			[["update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix"], "shape"],
+			[["update", id, "--check-acceptance", "1"], "tick 1"],
+			[["update", id, "--check-acceptance", "2"], "tick 2"],
+			[["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "tester"], "in_review"],
+		];
+		for (const [args, what] of checks) {
+			const r = await brOut(args, tdir);
+			if (r.rc !== 0) throw new Error(`${what} -> ${r.rc}: ${r.out}`);
+		}
+		const shimBin = installReadonlyBr(join(root, "guard"), brBin);
+		const shim = join(shimBin, "br");
+		const odir = join(root, "guard", "owned");
+		mkdirSync(odir, { recursive: true });
+		const oinit = await run(["br", "init"], { cwd: odir, deadline_s: 60, env: stripped });
+		if (oinit.rc !== 0) throw new Error(`owned init -> ${oinit.rc}: ${utf8(oinit.stderr)}`);
+		const odb = join(odir, ".beads", "beads.db");
+		const before = readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8");
+		const shimRun = async (args: string[], env?: Record<string, string>) => {
+			const r = await run(["sh", shim, ...args], { cwd: cdir, deadline_s: 60, env: env ?? { ...process.env, BEADS_DB: tdb } as Record<string, string> });
+			return { rc: r.rc, out: utf8(r.stdout) + utf8(r.stderr) };
+		};
+		const allowed = await shimRun(["--db", odb, "create", "native probe"]);
+		expect(allowed.rc).toBe(0);
+		expect(allowed.out).toContain("Created");
+		const denied = await shimRun(["--db", tdb, "update", id, "--add-label", "nope"]);
+		expect(denied.rc).toBe(77);
+		expect(denied.out).toContain("READONLY_TRACKER");
+		const strippedDeny = await shimRun(["update", id, "--add-label", "nope"], { ...process.env, BEADS_DB: "" } as Record<string, string>);
+		expect(strippedDeny.rc).toBe(77);
+		expect(strippedDeny.out).toContain("READONLY_TRACKER");
+		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
+		const brHash = sha256hex(readFileSync(brBin));
+		const srcHash = sha256hex(readFileSync(resolve(import.meta.dir, "..", "..", "src", "verify.ts"), "utf8"));
+		const shimSrcHash = sha256hex(readFileSync(resolve(import.meta.dir, "..", "..", "src", "kitlib", "readonly-br.ts"), "utf8"));
+		const acHash = sha256hex(ac);
+		for (const h of [brHash, srcHash, shimSrcHash, acHash]) expect(h).toMatch(/^[0-9a-f]{64}$/);
+		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} ac=${acHash.slice(0, 12)}`;
+		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: fam });
+		expect(res.code).toBe("DRY_RUN");
+		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true]]);
+		expect(res.log).toContain("owned fixture");
+		expect(res.acts[2]?.join(" ") ?? "").toContain(fam);
+	}, 60_000);
 });
