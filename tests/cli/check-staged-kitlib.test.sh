@@ -466,19 +466,59 @@ mv "$TMP/reversal-member.ordinary.keep" "$member"
 #    is claimed). The source repo is read with show/ls-tree/rev-parse only; every
 #    fixture repo is generated under $TMP. Revert names the fixture X, whose tree
 #    carries the real X bytes path for path.
-SRCROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 XREAL=3cbef260b55aa4d5d0dda0f7beae20723bb7cd85
 PREAL=75849fa67db466f11a222b7979133f69e482b5d5
 OLDCONVERGE=1c57cd8efdbb53dd514e82036bf527758e32eb78
-XPATHS=$(git -C "$SRCROOT" diff-tree --no-commit-id --name-only -r "$XREAL") || exit 1
+# History-free inputs: no Git object is read from the enclosing checkout.
+# A committed hash-bound capsule hydrates an owned isolated fixture repo;
+# every read below goes through $OBJSRC only. Fixture identity is validated
+# against the committed manifest before any native replay.
+CAPSULE_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/../fixtures/ratchet-real-withdrawal" && pwd -P)"
+CAPSULE_PACK="$CAPSULE_DIR/history-inputs.pack"
+CAPSULE_MANIFEST="$CAPSULE_DIR/MANIFEST.txt"
+if command -v sha256sum >/dev/null 2>&1; then _capsum() { sha256sum "$1" | cut -d' ' -f1; }; else _capsum() { shasum -a 256 "$1" | cut -d' ' -f1; }; fi
+manifest_field() { grep "^$1: " "$CAPSULE_MANIFEST" | head -n 1 | cut -d' ' -f2; }
+# hydrate_capsule PACK MANIFEST DEST prints DEST on success; anything else
+# fails closed with a HYDRATE-REFUSED marker before any fixture repo exists.
+hydrate_capsule() {
+	_hp="$1"; _hm="$2"; _hd="$3"
+	if [ ! -f "$_hp" ] || [ ! -f "$_hm" ]; then echo "HYDRATE-REFUSED missing capsule or manifest" >&2; return 1; fi
+	[ "$(_capsum "$_hp")" = "$(manifest_field capsule_sha256)" ] || { echo "HYDRATE-REFUSED capsule sha256 mismatch" >&2; return 1; }
+	mkdir -p "$_hd" || return 1
+	git -C "$_hd" init -q 2>/dev/null || return 1
+	git -C "$_hd" unpack-objects < "$_hp" || { echo "HYDRATE-REFUSED unpack failed" >&2; return 1; }
+	sed -n '/^## OBJECTS/,/^## PATHS/p' "$_hm" | grep -v '^#' | grep -v '^$' | cut -d' ' -f1 > "$TMP/.hydrate-objs"
+	while read -r _oh; do
+		git -C "$_hd" cat-file -e "$_oh" 2>/dev/null || { echo "HYDRATE-REFUSED missing object $_oh" >&2; return 1; }
+	done < "$TMP/.hydrate-objs"
+	printf '%s\n' "$_hd"
+}
+OBJSRC=$(hydrate_capsule "$CAPSULE_PACK" "$CAPSULE_MANIFEST" "$TMP/ratchet-obj-src") || exit 1
+printf 'capsule sha256 %s\n' "$(manifest_field capsule_sha256)"
+printf 'input X=%s P=%s OLD=%s\n' "$XREAL" "$PREAL" "$OLDCONVERGE"
+[ "$(git -C "$OBJSRC" rev-list --parents -n 1 "$XREAL" | cut -d' ' -f2)" = "$PREAL" ] || { echo "HYDRATE-REFUSED X parent is not P" >&2; exit 1; }
+: > "$TMP/.hydrate-bad"
+sed -n '/^## PATHS/,$p' "$CAPSULE_MANIFEST" | grep -v '^#' | grep -v '^$' | while read -r _pp _mx _mp; do
+	_gx=$(git -C "$OBJSRC" ls-tree "$XREAL" -- "$_pp" 2>/dev/null | cut -d' ' -f1); [ -n "$_gx" ] || _gx=ABSENT
+	_gp=$(git -C "$OBJSRC" ls-tree "$PREAL" -- "$_pp" 2>/dev/null | cut -d' ' -f1); [ -n "$_gp" ] || _gp=ABSENT
+	[ "$_gx" = "$_mx" ] && [ "$_gp" = "$_mp" ] || echo "MISMATCH-path:$_pp" >> "$TMP/.hydrate-bad"
+done
+[ ! -s "$TMP/.hydrate-bad" ] || { echo "HYDRATE-REFUSED path identity mismatch"; cat "$TMP/.hydrate-bad"; exit 1; } >&2
+XPATHS=$(git -C "$OBJSRC" diff-tree --no-commit-id --name-only -r "$XREAL") || exit 1
 XCOUNT=$(printf '%s\n' "$XPATHS" | wc -l)
+# 9a. Planted negative: a missing or corrupted capsule fails closed before replay.
+out=$(hydrate_capsule "$TMP/does-not-exist.pack" "$CAPSULE_MANIFEST" "$TMP/nope-missing" 2>&1); rc=$?
+check "$rc" "1" "hydrate-missing-refused" "$out" "HYDRATE-REFUSED"
+head -c 1000 "$CAPSULE_PACK" > "$TMP/truncated.pack"
+out=$(hydrate_capsule "$TMP/truncated.pack" "$CAPSULE_MANIFEST" "$TMP/nope-truncated" 2>&1); rc=$?
+check "$rc" "1" "hydrate-truncated-refused" "$out" "HYDRATE-REFUSED"
 # sync_tree DIR REV: check out exactly the 78 X paths at REV bytes and mode;
 # paths absent at REV (the two X-added files) are removed for the reversal.
 sync_tree() {
 	for p in $XPATHS; do
 		mkdir -p "$1/$(dirname "$p")"
-		if git -C "$SRCROOT" show "$2:$p" > "$1/$p" 2>/dev/null; then
-			if git -C "$SRCROOT" ls-tree --full-tree "$2" -- "$p" | grep -q "100755"; then
+		if git -C "$OBJSRC" show "$2:$p" > "$1/$p" 2>/dev/null; then
+			if git -C "$OBJSRC" ls-tree --full-tree "$2" -- "$p" | grep -q "100755"; then
 				chmod +x "$1/$p"
 			else
 				chmod -x "$1/$p"
@@ -536,18 +576,18 @@ check "$?" "0" "real-withdrawal-release-now-admitted" "x" "x"
 printf '%s' "$out" | grep -q '"path":"tests/cli/scratch.test.ts","raw_spawn_admitted":true'
 check "$?" "0" "real-withdrawal-scratch-admitted" "x" "x"
 send_got=$(git -C "$R" rev-parse "HEAD:src/send.ts")
-send_want=$(git -C "$SRCROOT" rev-parse "$PREAL:src/send.ts")
+send_want=$(git -C "$OBJSRC" rev-parse "$PREAL:src/send.ts")
 check "$send_got" "$send_want" "real-withdrawal-send-kept" "x" "x"
 alleq=0
 for p in $XPATHS; do
 	if git -C "$R" rev-parse --verify --quiet "HEAD:$p" >/dev/null 2>&1; then in_head=1; else in_head=0; fi
-	if git -C "$SRCROOT" rev-parse --verify --quiet "$PREAL:$p" >/dev/null 2>&1; then in_p=1; else in_p=0; fi
+	if git -C "$OBJSRC" rev-parse --verify --quiet "$PREAL:$p" >/dev/null 2>&1; then in_p=1; else in_p=0; fi
 	if [ "$in_head" != "$in_p" ]; then echo "MISMATCH-PRESENCE:$p head=$in_head p=$in_p"; alleq=1
 	elif [ "$in_head" = 1 ]; then
 		got=$(git -C "$R" rev-parse "HEAD:$p")
-		want=$(git -C "$SRCROOT" rev-parse "$PREAL:$p")
+		want=$(git -C "$OBJSRC" rev-parse "$PREAL:$p")
 		gotmode=$(git -C "$R" ls-files -s -- "$p" | cut -d' ' -f1)
-		wantmode=$(git -C "$SRCROOT" ls-tree --full-tree "$PREAL" -- "$p" | cut -d' ' -f1)
+		wantmode=$(git -C "$OBJSRC" ls-tree --full-tree "$PREAL" -- "$p" | cut -d' ' -f1)
 		if [ "$got" != "$want" ] || [ "$gotmode" != "$wantmode" ]; then echo "MISMATCH:$p"; alleq=1; fi
 	fi
 done
@@ -565,7 +605,7 @@ check "$?" "1" "real-mixed-new-refused" "$out" "new.py:2:1: raw-spawn"
 R=$(real_repo real-near-match)
 X=$(git -C "$R" rev-parse HEAD) || exit 1
 sync_tree "$R" "$PREAL"
-printf '%s\n# one byte differs\n' "$(git -C "$SRCROOT" show "$PREAL:tests/cli/converge.test.ts")" > "$R/tests/cli/converge.test.ts"
+printf '%s\n# one byte differs\n' "$(git -C "$OBJSRC" show "$PREAL:tests/cli/converge.test.ts")" > "$R/tests/cli/converge.test.ts"
 for p in $XPATHS; do git -C "$R" add -- "$p"; done
 out=$(commit "$R" -m "[test] real near match" -m "Revert: $X")
 check "$?" "1" "real-near-match-refused" "$out" "converge.test.ts:.*raw-spawn"
@@ -581,7 +621,7 @@ check "$?" "1" "real-near-match-mode-refused" "$out" "scratch.test.ts:.*raw-spaw
 R=$(real_repo real-older)
 X=$(git -C "$R" rev-parse HEAD) || exit 1
 sync_tree "$R" "$PREAL"
-git -C "$SRCROOT" show "$OLDCONVERGE:tests/cli/converge.test.ts" > "$R/tests/cli/converge.test.ts"
+git -C "$OBJSRC" show "$OLDCONVERGE:tests/cli/converge.test.ts" > "$R/tests/cli/converge.test.ts"
 for p in $XPATHS; do git -C "$R" add -- "$p"; done
 out=$(commit "$R" -m "[test] real older tree" -m "Revert: $X")
 check "$?" "1" "real-older-tree-refused" "$out" "converge.test.ts:.*raw-spawn"
