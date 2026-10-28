@@ -137,28 +137,54 @@ async function releaseFixtureRoot(root: { dir: string; capability: string }): Pr
 	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot, env: { ...process.env } });
 	if (r.rc !== 0) throw new Error(`scratch release failed: ${new TextDecoder().decode(r.stderr)}`);
 }
-async function claimFixture(name: string, actor: string, root: string): Promise<{ repo: string; gated: string; eligible: string }> {
+async function claimFixture(name: string, actor: string, root: string, brBin: string): Promise<{ repo: string; gated: string; eligible: string }> {
 	const repo = join(root, name);
 	mkdirSync(repo, { recursive: true });
 	await sh(["git", "init", "-q"], repo);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty", "-m", "root [test]"], repo);
-	await sh(["br", "init"], repo);
+	// brBin is the resolved harness shim (absolute path, read-only outside
+	// its baked scratch) when a harness is present, else ambient `br`;
+	// never an accidentally shadowed binary for scope-bearing calls.
+	await sh([brBin, "init"], repo);
 	const ac = "- [ ] [a] [build] probe passes";
-	const gatedOut = await sh(["br", "create", "gated bead [test]", "-l", "needs-director", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo);
-	const eligibleOut = await sh(["br", "create", "eligible bead [test]", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo);
+	const gatedOut = await sh([brBin, "create", "gated bead [test]", "-l", "needs-director", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo);
+	const eligibleOut = await sh([brBin, "create", "eligible bead [test]", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo);
 	const gated = gatedOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;
 	const eligible = eligibleOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;
 	return { repo, gated, eligible };
 }
 
-function harnessScratchTmp(): string | null {
+const BAKED_SCRATCH_RE = /^BAKED_SCRATCH = '([^'\n]{1,4096})'$/;
+// The harness-provided explicit root, mirroring the grade_wave contract:
+// GRADE_WAVE_SCRATCH when the tool shell keeps it, else the scratch baked
+// into a grade_wave br shim anywhere on PATH (the shell keeps PATH when it
+// drops the variable, but may shadow the shim behind a real br, so every
+// PATH entry is scanned, not just the first `br`). Returns null when no
+// harness root is resolvable; callers record the branch explicitly.
+function scanBakedShim(): { scratch: string; brBinDir: string } | null {
+	const pathEnv = process.env.PATH ?? "";
+	for (const dir of pathEnv.split(":")) {
+		if (!dir) continue;
+		const cand = join(dir, "br");
+		try {
+			const st = statSync(cand);
+			if (!st.isFile() || st.size > 65536) continue;
+			const lines = readFileSync(cand, "utf8").split("\n");
+			const m = BAKED_SCRATCH_RE.exec(lines[1] ?? "");
+			if (m && statSync(m[1]).isDirectory()) return { scratch: m[1], brBinDir: dir };
+		} catch { /* next PATH entry */ }
+	}
+	return null;
+}
+function resolveHarness(): { scratch: string; brBinDir: string } | null {
+	let envScratch = "";
 	try {
-		const scratch = process.env.GRADE_WAVE_SCRATCH;
-		if (!scratch || !statSync(scratch).isDirectory()) return null;
-		const tmp = join(scratch, "tmp");
-		mkdirSync(tmp, { recursive: true });
-		return tmp;
-	} catch { return null; }
+		const env = process.env.GRADE_WAVE_SCRATCH;
+		if (env && statSync(env).isDirectory()) envScratch = env;
+	} catch { /* fall through to shim scan */ }
+	const shim = scanBakedShim();
+	if (envScratch) return { scratch: envScratch, brBinDir: shim && shim.scratch === envScratch ? shim.brBinDir : "" };
+	return shim;
 }
 
 async function beadRow(repo: string, id: string): Promise<{ status: string; assignee: string | null; labels: string[] }> {
@@ -180,10 +206,12 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	const actor = "TestSeatNeedsDirector";
 	const savedDb = process.env.BEADS_DB;
 	delete process.env.BEADS_DB;
-	const harnessTmp = harnessScratchTmp();
+	const harness = resolveHarness();
 	let dir: string;
 	let release: (() => Promise<void>) | null = null;
-	if (harnessTmp) {
+	if (harness) {
+		const harnessTmp = join(harness.scratch, "tmp");
+		mkdirSync(harnessTmp, { recursive: true });
 		dir = ownedTmp("needs-director", { root: harnessTmp }).path;
 		expect(dir === harnessTmp || dir.startsWith(harnessTmp + "/")).toBe(true);
 	} else {
@@ -191,8 +219,13 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 		dir = owned.dir;
 		release = () => releaseFixtureRoot(owned);
 	}
+	// Grader-visible record: which root the positive was initialized
+	// against. A local run records branch=local and proves only the
+	// control; the harness positive requires branch=harness.
+	console.log(`DEFY7_FIXTURE branch=${harness ? "harness" : "local"} scratch=${harness?.scratch ?? "none"} br=${harness && harness.brBinDir ? join(harness.brBinDir, "br") : "ambient"} dir=${dir}`);
 	try {
-		const { repo, gated, eligible } = await claimFixture("needs-director", actor, dir);
+		const brBin = harness && harness.brBinDir ? join(harness.brBinDir, "br") : "br";
+		const { repo, gated, eligible } = await claimFixture("needs-director", actor, dir, brBin);
 		process.env.BEADS_DB = join(repo, ".beads", "beads.db");
 	// unit: the refusal is the named NEEDS_DIRECTOR code, and it is the sole
 	// cause (open, unassigned, no other gated label, seat holds nothing)
@@ -213,6 +246,19 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	expect(mutation.rc).not.toBe(0);
 	expect(new TextDecoder().decode(mutation.stderr)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
+	// planted negative, harness scope only: an identity-free default root
+	// outside the same scratch is refused by the actual read-only shim,
+	// which names its scratch; paired with the admitted in-scope fixture.
+	if (harness && harness.brBinDir) {
+		const outside = ownedTmp("outside-scope").path;
+		expect(outside === harness.scratch || outside.startsWith(harness.scratch + "/")).toBe(false);
+		const { AGENT_NAME: _droppedAgent, BEADS_DB: _droppedDb, ...cleanEnv } = process.env;
+		const neg = await run([join(harness.brBinDir, "br"), "init"], { deadline_s: 60, cwd: outside, env: cleanEnv as Record<string, string> });
+		expect(neg.rc).toBe(77);
+		expect(new TextDecoder().decode(neg.stderr)).toContain(harness.scratch);
+	} else {
+		console.log("DEFY7_SCOPE_NEGATIVE skipped: no harness shim resolved (local control run)");
+	}
 	// eligible control, separate seat: preflight clean, and the real claim path mutates exactly the control bead
 	const controlActor = "TestSeatControl";
 	const okCtl = await preflightBead("claim", repo, eligible, { actor: controlActor });
