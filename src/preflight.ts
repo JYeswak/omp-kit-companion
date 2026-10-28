@@ -133,6 +133,7 @@ export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publi
 	if (act === "claim") {
 		if (bead.status !== "open") push("NOT_OPEN", `${id} is ${bead.status}`, "claim only an open bead");
 		if (bead.assignee) push("ASSIGNED", `${id} is assigned to ${bead.assignee}`, "pick another bead or ask the holder");
+		if (bead.labels.includes("needs-director")) push("NEEDS_DIRECTOR", `${id} carries an unresolved director disposition (needs-director)`, "route it to the director; claim only after the label is resolved with a recorded disposition");
 		if (gated.length) push("GATED_LABEL", `${id} carries ${gated.join(", ")}`, "route it; never claim a human-gate, owner-decision or kind:process bead");
 		if (actor) {
 			const mine = await run(["br", "list", "--assignee", actor, "--status", "in_progress", "--json"], { deadline_s: 60, cwd: repo, env, max_output_bytes: 4 * 1024 * 1024 });

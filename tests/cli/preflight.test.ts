@@ -108,6 +108,60 @@ test("preflight close|in-review|claim: every tracker predicate in one envelope, 
 	expect(gone.findings[0]?.code).toBe("UNJUDGED");
 });
 
+const hasBr = Bun.which("br") !== null;
+
+async function claimFixture(name: string, actor: string): Promise<{ repo: string; gated: string; eligible: string }> {
+	const repo = join(base, name);
+	mkdirSync(repo, { recursive: true });
+	await sh(["git", "init", "-q"], repo);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty", "-m", "root [test]"], repo);
+	await sh(["br", "init"], repo);
+	const ac = "- [ ] [a] [build] probe passes";
+	const gatedOut = await sh(["br", "create", "gated bead [test]", "-l", "needs-director", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo);
+	const eligibleOut = await sh(["br", "create", "eligible bead [test]", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo);
+	const gated = gatedOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;
+	const eligible = eligibleOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;
+	return { repo, gated, eligible };
+}
+
+async function beadRow(repo: string, id: string): Promise<{ status: string; assignee: string | null; labels: string[] }> {
+	const row = JSON.parse(await sh(["br", "show", id, "--json"], repo))[0];
+	return { status: String(row.status), assignee: (typeof row.assignee === "string" && row.assignee) || null, labels: Array.isArray(row.labels) ? row.labels.map(String) : [] };
+}
+
+test.skipIf(!hasBr)("preflight claim: unresolved needs-director refuses NEEDS_DIRECTOR on the unit and the supported CLI path; recorded director resolution re-admits", async () => {
+	const actor = "TestSeatNeedsDirector";
+	const { repo, gated, eligible } = await claimFixture("needs-director", actor);
+	// unit: the refusal is the named NEEDS_DIRECTOR code, and it is the sole
+	// cause (open, unassigned, no other gated label, seat holds nothing)
+	const pre = await preflightBead("claim", repo, gated, { actor });
+	expect(pre.findings.filter(f => f.blocking).map(f => f.code)).toEqual(["NEEDS_DIRECTOR"]);
+	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
+	// review eligibility is unchanged: in-review never mentions needs-director
+	const rev = await preflightBead("in-review", repo, gated, { actor });
+	expect(rev.findings.map(f => f.code)).not.toContain("NEEDS_DIRECTOR");
+	// supported actual claim path: the real CLI verb workers run refuses by name
+	const cliPath = join(import.meta.dir, "../../src/cli.ts");
+	const cli = await run([process.execPath, cliPath, "preflight", "claim", gated, "--project", repo, "--actor", actor, "--json"], { deadline_s: 120, cwd: repo });
+	expect(cli.rc).not.toBe(0);
+	expect(new TextDecoder().decode(cli.stdout)).toContain("NEEDS_DIRECTOR");
+	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
+	// eligible control, separate seat: preflight clean, and the real claim path mutates exactly the control bead
+	const controlActor = "TestSeatControl";
+	const okCtl = await preflightBead("claim", repo, eligible, { actor: controlActor });
+	expect(okCtl.findings.filter(f => f.blocking)).toEqual([]);
+	await sh(["br", "update", eligible, "--claim", "--actor", controlActor], repo);
+	expect(await beadRow(repo, eligible)).toEqual({ status: "in_progress", assignee: controlActor, labels: [] });
+	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
+	// recorded director disposition removes the label; the first bead becomes eligible and claims
+	await sh(["br", "comments", "add", gated, "-m", "director disposition: regrade hold released, eligible to claim", "--actor", "Director"], repo);
+	await sh(["br", "update", gated, "--remove-label", "needs-director", "--actor", "Director"], repo);
+	const re = await preflightBead("claim", repo, gated, { actor });
+	expect(re.findings.filter(f => f.blocking).map(f => f.code)).not.toContain("NEEDS_DIRECTOR");
+	await sh(["br", "update", gated, "--claim", "--actor", actor], repo);
+	expect(await beadRow(repo, gated)).toEqual({ status: "in_progress", assignee: actor, labels: [] });
+});
+
 test("findings grammar: parse ignores noise and malformed lines; an empty list is ok", () => {
 	const parsed = parseFindingLines("noise\nFINDING\tg\tC\td\tr\tgit x y\nFINDING\tshort\nFINDING\tg2\tC2\td2\tr2\t-\n");
 	expect(parsed.map(f => [f.code, f.fix])).toEqual([["C", ["git", "x", "y"]], ["C2", null]]);
