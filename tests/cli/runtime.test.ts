@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
@@ -1042,12 +1042,13 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const raw: unknown = JSON.parse(created.out);
 		const id = typeof raw === "object" && raw !== null && "id" in raw && typeof raw.id === "string" ? raw.id : null;
 		if (id === null) throw new Error(`create returned no id: ${created.out.slice(0, 200)}`);
-		const ac = `- [ ] [a] [build] \`sh scripts/t.sh\` -> 16 pass 0 fail\n- [ ] [b] [build] admitted owned write: \`br --db "$OWNED_TRACKER_DB" create "owned probe"\` -> Created`;
-		const desc = "WHAT: owned native-guard fixture.\n\nWHY: proves the exact source and the official br binary reach the shim guard on owned fixtures.";
+		const ac = `- [ ] [a] [build] \`sh scripts/t.sh\` -> 16 pass 0 fail\n- [ ] [b] [build] admitted owned write: \`br --db "\${OWNED_TRACKER_DB:-${tdb}}" create "owned probe"\` -> Created\n- [ ] [c] [build] differential guard box: \`br --db "${tdb}" update ${id} --add-label guard-probe\` -> READONLY_TRACKER`;
+		const desc = "WHAT: owned native-guard fixture.\n\nWHY: proves the exact source and the official compiled verifier reach the shim guard on owned fixtures; the old guardless binary is the refused differential.";
 		const checks: Array<[string[], string]> = [
 			[["update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix"], "shape"],
 			[["update", id, "--check-acceptance", "1"], "tick 1"],
 			[["update", id, "--check-acceptance", "2"], "tick 2"],
+			[["update", id, "--check-acceptance", "3"], "tick 3"],
 			[["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "tester"], "in_review"],
 		];
 		for (const [args, what] of checks) {
@@ -1076,16 +1077,32 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		expect(strippedDeny.rc).toBe(77);
 		expect(strippedDeny.out).toContain("READONLY_TRACKER");
 		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
+		let ompBin: string | null = null;
+		for (const dir of (process.env.PATH ?? "").split(":")) {
+			try { accessSync(join(dir, "omp-kit"), constants.X_OK); ompBin = join(dir, "omp-kit"); break; } catch { /* next */ }
+		}
+		if (ompBin === null) throw new Error("no resolvable omp-kit on PATH; unmet prerequisite: official compiled verifier");
 		const brHash = sha256hex(readFileSync(brBin));
 		const srcHash = sha256hex(readFileSync(resolve(import.meta.dir, "..", "..", "src", "verify.ts"), "utf8"));
 		const shimSrcHash = sha256hex(readFileSync(resolve(import.meta.dir, "..", "..", "src", "kitlib", "readonly-br.ts"), "utf8"));
+		const ompHash = sha256hex(readFileSync(ompBin));
 		const acHash = sha256hex(ac);
-		for (const h of [brHash, srcHash, shimSrcHash, acHash]) expect(h).toMatch(/^[0-9a-f]{64}$/);
-		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} ac=${acHash.slice(0, 12)}`;
+		for (const h of [brHash, srcHash, shimSrcHash, ompHash, acHash]) expect(h).toMatch(/^[0-9a-f]{64}$/);
+		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} omp=${ompHash.slice(0, 12)} ac=${acHash.slice(0, 12)}`;
 		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: fam });
 		expect(res.code).toBe("DRY_RUN");
-		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true]]);
+		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
 		expect(res.log).toContain("owned fixture");
 		expect(res.acts[2]?.join(" ") ?? "").toContain(fam);
+		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
+		const oldEnv = { ...process.env, BEADS_DB: tdb } as Record<string, string>;
+		const old = await run([ompBin, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", "old-binary", "--dry-run", "--json"], { cwd: root, deadline_s: 600, env: oldEnv });
+		const oldDoc: unknown = JSON.parse(utf8(old.stdout));
+		const oldData: unknown = typeof oldDoc === "object" && oldDoc !== null && "data" in oldDoc ? oldDoc.data : null;
+		const oldReplays = typeof oldData === "object" && oldData !== null && "replays" in oldData && Array.isArray(oldData.replays) ? oldData.replays as Array<{ letter?: unknown; pass?: unknown }> : null;
+		if (oldReplays === null) throw new Error(`old verifier returned no replays: ${utf8(old.stdout).slice(0, 300)}`);
+		expect(oldReplays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", false]]);
+		const afterOld = await brOut(["show", id, "--json"], tdir);
+		expect(afterOld.out).toContain("guard-probe");
 	}, 60_000);
 });

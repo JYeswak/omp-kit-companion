@@ -253,12 +253,22 @@ function trackerEnv(t: { dir: string; db: string }): Record<string, string> {
 }
 
 async function createBead(t: { dir: string; db: string }, title: string): Promise<string> {
-	const created = await brun(["create", title, "--json"], t.dir, trackerEnv(t));
+	const env = { ...process.env, BEADS_DB: t.db } as Record<string, string>;
+	const created = await brun(["create", title, "--json"], t.dir, env);
 	if (created.rc !== 0) throw new Error(`create -> ${created.rc}: ${created.out}`);
 	const parsed: unknown = JSON.parse(created.out);
 	const id = typeof parsed === "object" && parsed !== null && "id" in parsed && typeof parsed.id === "string" ? parsed.id : null;
 	if (id === null) throw new Error(`create returned no id: ${created.out.slice(0, 200)}`);
 	return id;
+}
+
+/** A second tracker bound inside the code repo itself (the same-repo control). */
+async function trackerInRepo(cdir: string): Promise<{ dir: string; db: string }> {
+	const env = { ...process.env } as Record<string, string>;
+	delete env.BEADS_DB;
+	const r = await brun(["init"], cdir, env);
+	if (r.rc !== 0) throw new Error(`in-repo init -> ${r.rc}: ${r.out}`);
+	return { dir: cdir, db: join(cdir, ".beads", "beads.db") };
 }
 
 /** Description, acceptance, label, per-box ticks and the in_review transition. */
@@ -280,17 +290,19 @@ function snap(t: { dir: string }): string {
 	return readFileSync(join(t.dir, ".beads", "issues.jsonl"), "utf8");
 }
 
-test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export replays its probe; bound read admitted", async () => {
+test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export replays its probe; bound and same-repo reads admitted", async () => {
 	const { dir: cdir, sha } = await repo("barrier-pos");
 	const t = await tracker("barrier-pos-t");
 	const envT = trackerEnv(t);
 	const id = await createBead(t, "barrier positive probe");
-	const ac = `- [ ] [a] [build] \`sh scripts/t.sh\` -> 16 pass 0 fail\n- [ ] [b] [build] admitted explicit read: \`br --db "${t.db}" show ${id} --json\` -> ${id}\n- [ ] [c] [build] admitted bound read (never refused): \`br show ${id} --json\` -> ${id}`;
+	const tin = await trackerInRepo(cdir);
+	const idin = await createBead(tin, "same-repo probe");
+	const ac = `- [ ] [a] [build] \`sh scripts/t.sh\` -> 16 pass 0 fail\n- [ ] [b] [build] admitted explicit read: \`br --db "${t.db}" show ${id} --json\` -> ${id}\n- [ ] [c] [build] admitted bound read (never refused): \`br show ${id} --json\` -> ${id}\n- [ ] [d] [build] admitted same-repo read: \`br --db "${tin.db}" show ${idin} --json\` -> ${idin}`;
 	await shapeBead(t, id, ac);
 	const before = snap(t);
 	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)" });
 	expect(res.code).toBe("DRY_RUN");
-	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"], ["c", true, "named"]]);
+	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"], ["c", true, "named"], ["d", true, "named"]]);
 	expect(res.log).toContain("exported " + sha);
 	expect(snap(t)).toBe(before);
 });

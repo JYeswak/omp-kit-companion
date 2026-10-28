@@ -12,9 +12,12 @@
   fallback) names the explicitly admitted per-run owned fixture, which the
   verifier creates with `br init` in owned scratch only when the acceptance
   references `OWNED_TRACKER_DB`, and fails closed otherwise. Covered by
-  `tests/cli/verify.test.ts` (22 tests: admitted explicit/bound reads on a
-  real tracker beside the exact code export; ordinary, env-stripped and
-  implicit-inherited writes refused with `T` byte-identical, the owned
-  write admitted, and neutralization making the fixture fail) and
-  `tests/cli/runtime.test.ts` (native guard checks at the `sh` seam with
-  recorded source/binary/input digests plus one `verifyBead` smoke).
+  `tests/cli/verify.test.ts` (22 tests: admitted explicit/bound/same-repo
+  reads on real trackers beside the exact code export; ordinary,
+  env-stripped and implicit-inherited writes refused with `T`
+  byte-identical, the owned write admitted, and neutralization making the
+  fixture fail) and `tests/cli/runtime.test.ts` (native guard checks at
+  the `sh` seam; the exact source and the official compiled `omp-kit`
+  verifier both reach the guard on owned fixtures, with source/binary/input
+  digests recorded — the guardless binary executes the mutation and fails
+  the box while the new source refuses it — plus one `verifyBead` smoke).
