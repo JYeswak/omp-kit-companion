@@ -185,7 +185,7 @@ test("scoped diagnostics retain the corresponding full findings and uncertainty"
 	expect(health(unknown)).toBe("UNVERIFIED");
 });
 
-test("scope filtering beats the real two-second bound and an eager negative breaches it", async () => {
+test("scope filtering proves launcher-only probing with no unscoped log while the eager negative breaches two seconds", async () => {
 	const f = fixture(); installOmp(f);
 	mkdirSync(join(f.home, ".omp", "agent"), { recursive: true });
 	writeFileSync(join(f.home, ".omp", "agent", "config.yml"), "{}\n");
@@ -194,12 +194,27 @@ test("scope filtering beats the real two-second bound and an eager negative brea
 	// fixture, never evidence about latency of the operator's installed OMP.
 	writeFileSync(f.ompPath, `#!/bin/sh\nif [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then printf 'omp/18.4.0\\n'; exit 0; fi\nprintf '%s\\n' "$*" >> '${calls}'\n/bin/sleep 2.1\nprintf '[]\\n'\n`);
 	const input = { root: f.root, home: f.home, project: f.project, ompPath: f.ompPath };
-	const began = performance.now();
+	// Scope latency is machine contention, not product behavior (profile: p50
+	// ~6ms in-tree, 264ms tails at load ~10, 4118ms under 16-way contention
+	// with zero non---version calls; publication 02a2 hit 3261ms the same
+	// way). The product property the 2000ms bound stood in for is
+	// structural: the scoped path can only invoke the launcher with
+	// --version, which the fake answers immediately. Prove that directly:
+	// the launcher probe must answer from a live execution, and the
+	// unscoped-probe log must stay absent. The unscoped control below keeps
+	// its deterministic >2000ms (two real 2.1s sleeps).
 	const scoped = await diagnose({ ...input, scope: "omp" });
-	expect(performance.now() - began).toBeLessThan(2000);
 	expect(scoped.map(row => row.component)).toEqual(["omp"]);
 	expect(finding(scoped, "omp").status).toBe("OK");
-	expect(() => readFileSync(calls)).toThrow();
+	expect(finding(scoped, "omp").evidence?.launcher_version).toBe("18.4.0");
+	expect(finding(scoped, "omp").evidence?.launcher_version_proof).toBe("OMP_LAUNCHER");
+	let unscopedCalls: string | null = null;
+	try {
+		unscopedCalls = readFileSync(calls, "utf8");
+	} catch {
+		unscopedCalls = null;
+	}
+	expect(unscopedCalls, `scoped diagnose must not invoke unscoped probes (fake=${f.ompPath} resolved=${realpathSync(f.ompPath)}): ${unscopedCalls}`).toBeNull();
 	const inventory = await diagnose({ ...input, inventoryOnly: true });
 	expect(finding(inventory, "effective_rules").status).toBe("NOT_RUN");
 	expect(finding(inventory, "effective_rules").recommended_action).toContain("omp-kit doctor --scope rules --json");
