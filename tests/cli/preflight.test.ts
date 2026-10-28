@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
- import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { envelope, parseFindingLines, renderEnvelope } from "../../src/kitlib/findings.ts";
 import { preflightBead, preflightCommit } from "../../src/preflight.ts";
@@ -109,9 +109,36 @@ test("preflight close|in-review|claim: every tracker predicate in one envelope, 
 });
 
 const hasBr = Bun.which("br") !== null;
+const hasOmpKit = Bun.which("omp-kit") !== null;
+const kitRoot = new URL("../../", import.meta.url).pathname;
 
-async function claimFixture(name: string, actor: string): Promise<{ repo: string; gated: string; eligible: string }> {
-	const repo = join(base, name);
+async function nativeFixtureRoot(label: string): Promise<{ dir: string; capability: string }> {
+	let repo: string | null = null;
+	let scan = new URL("../../", import.meta.url).pathname;
+	for (;;) {
+		try { if (statSync(join(scan, ".git"))) { repo = scan; break; } } catch { /* keep walking up */ }
+		const parent = join(scan, "..");
+		if (parent === scan) break;
+		scan = parent;
+	}
+	if (!repo) throw new Error("no enclosing repository found for owned fixture scratch");
+	const made = await run(["omp-kit", "scratch", "new", "--label", label, "--json"], { deadline_s: 60, cwd: repo });
+	const doc: unknown = JSON.parse(new TextDecoder().decode(made.stdout));
+	const data: unknown = doc && typeof doc === "object" && "data" in doc ? doc.data : null;
+	const dir = data && typeof data === "object" && "dir" in data && typeof data.dir === "string" ? data.dir : "";
+	const capability = data && typeof data === "object" && "capability" in data && typeof data.capability === "string" ? data.capability : "";
+	if (!dir || !capability) throw new Error("omp-kit scratch new printed no dir/capability");
+	const owner: unknown = JSON.parse(readFileSync(join(dir, ".owner"), "utf8"));
+	const agent: unknown = owner && typeof owner === "object" && "agent" in owner ? owner.agent : null;
+	if (typeof agent !== "string" || agent.length === 0) throw new Error(`fixture root ${dir} lacks agent-attributed ownership; read-only guards cannot admit it`);
+	return { dir, capability };
+}
+async function releaseFixtureRoot(root: { dir: string; capability: string }): Promise<void> {
+	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot });
+	if (r.rc !== 0) throw new Error(`scratch release failed: ${new TextDecoder().decode(r.stderr)}`);
+}
+async function claimFixture(name: string, actor: string, root: string): Promise<{ repo: string; gated: string; eligible: string }> {
+	const repo = join(root, name);
 	mkdirSync(repo, { recursive: true });
 	await sh(["git", "init", "-q"], repo);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty", "-m", "root [test]"], repo);
@@ -128,20 +155,22 @@ async function beadRow(repo: string, id: string): Promise<{ status: string; assi
 	const row = JSON.parse(await sh(["br", "show", id, "--json"], repo))[0];
 	return { status: String(row.status), assignee: (typeof row.assignee === "string" && row.assignee) || null, labels: Array.isArray(row.labels) ? row.labels.map(String) : [] };
 }
- // Fleet-pane claim path: `br` resolves to the candidate shim, with a clear
- // Agent Mail answer and the seat identity, exactly as an agent pane carries.
- async function shimClaimEnv(actor: string): Promise<Record<string, string>> {
- 	const shimBin = join(base, "shimbin");
- 	mkdirSync(shimBin, { recursive: true });
- 	try { symlinkSync(join(import.meta.dir, "../../scripts/br-shim.sh"), join(shimBin, "br")); } catch { /* already linked */ }
- 	writeFileSync(join(shimBin, "am"), '#!/bin/sh\ncase "$1:$2" in agents:show) printf \'{"id":1,"name":"%s"}\\n\' "${AGENT_NAME:-unknown}"; exit 0 ;; file_reservations:conflicts) printf \'No conflicts detected.\\n\'; exit 0 ;; *) printf \'unexpected am call: %s\\n\' "$*" >&2; exit 99 ;; esac\n');
- 	chmodSync(join(shimBin, "am"), 0o755);
- 	return { ...process.env, PATH: `${shimBin}:${process.env.PATH ?? ""}`, AGENT_NAME: actor } as Record<string, string>;
- }
+// Fleet-pane claim path: `br` resolves to the candidate shim, with a clear
+// Agent Mail answer and the seat identity, exactly as an agent pane carries.
+async function shimClaimEnv(actor: string, root: string): Promise<Record<string, string>> {
+	const shimBin = join(root, "shimbin");
+	mkdirSync(shimBin, { recursive: true });
+	try { symlinkSync(join(import.meta.dir, "../../scripts/br-shim.sh"), join(shimBin, "br")); } catch { /* already linked */ }
+	writeFileSync(join(shimBin, "am"), '#!/bin/sh\ncase "$1:$2" in agents:show) printf \'{"id":1,"name":"%s"}\\n\' "${AGENT_NAME:-unknown}"; exit 0 ;; file_reservations:conflicts) printf \'No conflicts detected.\\n\'; exit 0 ;; *) printf \'unexpected am call: %s\\n\' "$*" >&2; exit 99 ;; esac\n');
+	chmodSync(join(shimBin, "am"), 0o755);
+	return { ...process.env, PATH: `${shimBin}:${process.env.PATH ?? ""}`, AGENT_NAME: actor } as Record<string, string>;
+}
 
-test.skipIf(!hasBr)("preflight claim: unresolved needs-director refuses NEEDS_DIRECTOR on the unit and the supported CLI path; recorded director resolution re-admits", async () => {
+test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director refuses NEEDS_DIRECTOR on the unit and the supported CLI path; recorded director resolution re-admits", { timeout: 120000 }, async () => {
 	const actor = "TestSeatNeedsDirector";
-	const { repo, gated, eligible } = await claimFixture("needs-director", actor);
+	const root = await nativeFixtureRoot("needs-director");
+	try {
+		const { repo, gated, eligible } = await claimFixture("needs-director", actor, root.dir);
 	// unit: the refusal is the named NEEDS_DIRECTOR code, and it is the sole
 	// cause (open, unassigned, no other gated label, seat holds nothing)
 	const pre = await preflightBead("claim", repo, gated, { actor });
@@ -157,7 +186,7 @@ test.skipIf(!hasBr)("preflight claim: unresolved needs-director refuses NEEDS_DI
 	expect(new TextDecoder().decode(cli.stdout)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
 	// actual supported claim boundary: the fleet-pane `br` (candidate shim) refuses by name, nothing mutates
-	const mutation = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor) });
+	const mutation = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor, root.dir) });
 	expect(mutation.rc).not.toBe(0);
 	expect(new TextDecoder().decode(mutation.stderr)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
@@ -165,7 +194,7 @@ test.skipIf(!hasBr)("preflight claim: unresolved needs-director refuses NEEDS_DI
 	const controlActor = "TestSeatControl";
 	const okCtl = await preflightBead("claim", repo, eligible, { actor: controlActor });
 	expect(okCtl.findings.filter(f => f.blocking)).toEqual([]);
-	const okClaim = await run(["br", "update", eligible, "--claim", "--actor", controlActor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(controlActor) });
+	const okClaim = await run(["br", "update", eligible, "--claim", "--actor", controlActor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(controlActor, root.dir) });
 	expect(okClaim.rc).toBe(0);
 	expect(await beadRow(repo, eligible)).toEqual({ status: "in_progress", assignee: controlActor, labels: [] });
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
@@ -174,9 +203,22 @@ test.skipIf(!hasBr)("preflight claim: unresolved needs-director refuses NEEDS_DI
 	await sh(["br", "update", gated, "--remove-label", "needs-director", "--actor", "Director"], repo);
 	const re = await preflightBead("claim", repo, gated, { actor });
 	expect(re.findings.filter(f => f.blocking).map(f => f.code)).not.toContain("NEEDS_DIRECTOR");
-	const reClaim = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor) });
+	const reClaim = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor, root.dir) });
 	expect(reClaim.rc).toBe(0);
 	expect(await beadRow(repo, gated)).toEqual({ status: "in_progress", assignee: actor, labels: [] });
+	} finally {
+		await releaseFixtureRoot(root);
+	}
+});
+test("neutralized fixture root (ownedTmp) carries no agent attribution for read-only guards", async () => {
+	const dir = ownedTmp("neutralized").path;
+	const raw = readFileSync(join(dir, ".owner"), "utf8");
+	let agent: unknown = null;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (parsed && typeof parsed === "object" && "agent" in parsed) agent = parsed.agent;
+	} catch { agent = null; }
+	expect(typeof agent === "string" && agent.length > 0).toBe(false);
 });
 
 test("findings grammar: parse ignores noise and malformed lines; an empty list is ok", () => {
