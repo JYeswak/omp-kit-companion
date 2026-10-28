@@ -1084,6 +1084,9 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const headRev = await run(["git", "-C", REPO_ROOT, "rev-parse", "HEAD"], { cwd: root, deadline_s: 60 });
 		if (headRev.rc !== 0) throw new Error("no HEAD; unmet prerequisite: exact committed source");
 		const headSha = utf8(headRev.stdout).trim();
+		// Source-binding guard (TurquoiseSummit 71647): an exact archive has no .git, and rev-parse would silently discover an ancestor tracker repo. Refuse unless REPO_ROOT is itself the repo top-level.
+		const topRev = await run(["git", "-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { cwd: root, deadline_s: 60 });
+		if (topRev.rc !== 0 || resolve(utf8(topRev.stdout).trim()) !== resolve(REPO_ROOT)) throw new Error(`source identity not exact: ${REPO_ROOT} is not a repo top-level; refusing ancestor discovery`);
 		const srcExport = join(root, "official-src");
 		mkdirSync(srcExport, { recursive: true });
 		const archived = await run(["sh", "-c", `git -C ${JSON.stringify(REPO_ROOT)} archive ${JSON.stringify(headSha)} | tar -x -C ${JSON.stringify(srcExport)}`], { cwd: root, deadline_s: 300 });
