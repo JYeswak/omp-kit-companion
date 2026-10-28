@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { envelope, parseFindingLines, renderEnvelope } from "../../src/kitlib/findings.ts";
 import { preflightBead, preflightCommit } from "../../src/preflight.ts";
@@ -254,7 +254,13 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	// outside the same scratch is refused by the actual read-only shim,
 	// which names its scratch; paired with the admitted in-scope fixture.
 	if (harness && harness.brBinDir) {
-		const outside = ownedTmp("outside-scope").path;
+		// Genuinely outside by construction: a sibling of the harness
+		// scratch, independent of ambient TMPDIR (which the harness may
+		// point inside the scratch). Only this run's fixture is owned
+		// here and it is removed after its consumers exit.
+		const outsideRoot = join(harness.scratch, "..", "outside-scope");
+		mkdirSync(outsideRoot, { recursive: true });
+		const outside = ownedTmp("outside-scope", { root: outsideRoot }).path;
 		expect(outside === harness.scratch || outside.startsWith(harness.scratch + "/")).toBe(false);
 		const { AGENT_NAME: _droppedAgent, BEADS_DB: _droppedDb, ...cleanEnv } = process.env;
 		const neg = await run([join(harness.brBinDir, "br"), "init"], { deadline_s: 60, cwd: outside, env: cleanEnv as Record<string, string> });
@@ -262,6 +268,8 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 		const negErr = new TextDecoder().decode(neg.stderr);
 		expect(negErr).toContain(harness.scratch);
 		console.log(`DEFY7_SCOPE_NEGATIVE outside=${outside} br=${join(harness.brBinDir, "br")} rc=${neg.rc} refusal=${JSON.stringify(negErr.split("\n")[0])}`);
+		rmSync(outside, { recursive: true, force: true });
+		rmSync(outsideRoot, { recursive: true, force: true });
 	} else {
 		console.log("DEFY7_SCOPE_NEGATIVE skipped: no harness shim resolved (local control run)");
 	}
