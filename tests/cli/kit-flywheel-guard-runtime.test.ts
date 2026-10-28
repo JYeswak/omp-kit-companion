@@ -4,6 +4,7 @@ import process from "node:process";
 import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { sanitizedEnv } from "../../src/runtime.ts";
+import { parseOwnerFile } from "../../src/scratch.ts";
 import { run as kitlibRun } from "../../src/kitlib/run.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 
@@ -151,3 +152,54 @@ test("the linked OMP plugin refuses an async timeout-zero command before it runs
 		await mockStderr;
 	}
 }, 75_000);
+
+test("fixture creator lifetime binds the owned root: TERM after allocation removes it, manual residue survives", async () => {
+	const base = fixtureRoot();
+	const tmpApi = join(REPO_ROOT, "src/kitlib/tmp.ts");
+	const childEnv: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+	const child = (body: string) =>
+		`const { ownedTmp } = await import(${JSON.stringify(tmpApi)});\n` + body;
+const allocatedOf = (stdout: string) =>
+	(stdout.split("\n").map(line => line.trim()).find(line => line.startsWith("ALLOCATED ")) ?? "").slice("ALLOCATED ".length);
+const ownerOf = (stdout: string) =>
+	(stdout.split("\n").map(line => line.trim()).find(line => line.startsWith("OWNER ")) ?? "").slice("OWNER ".length).split(";").join("\n");
+
+	// Positive: the owned creator allocates, hangs, and is TERM'd at the deadline; the root must be gone.
+	const ownedProgram = child(`const scope = ownedTmp("lifetime-owned", { root: ${JSON.stringify(base)} });
+const { readFileSync: readOwner } = await import("node:fs");
+console.log("ALLOCATED " + scope.path);
+console.log("OWNER " + readOwner(scope.path + "/.owner", "utf8").trim().split("\\n").join(";"));
+await new Promise(() => {});`);
+	const owned = await runCommand([process.execPath, "--no-install", "-e", ownedProgram], base, childEnv, 10_000);
+	const ownedOut = `stdout:\n${owned.stdout}\nstderr:\n${owned.stderr}`;
+	const ownedPath = allocatedOf(owned.stdout);
+	expect(ownedPath.startsWith(base + "/"), ownedOut).toBe(true);
+	const ownedMarker = parseOwnerFile(ownerOf(owned.stdout));
+	expect(ownedMarker !== null && ownedMarker.label === "lifetime-owned", ownedOut).toBe(true);
+	expect(existsSync(ownedPath), ownedOut).toBe(false);
+
+	// Negative (isolated da37 manual constructor): the same kill leaves the residue behind.
+	const manualProgram = `const { mkdirSync, writeFileSync } = await import("node:fs");
+const { join: joinPath } = await import("node:path");
+const root = joinPath(${JSON.stringify(base)}, "manual-residue");
+mkdirSync(root, { recursive: true, mode: 0o700 });
+writeFileSync(joinPath(root, ".owner"), "pid=" + process.pid + "\\nlabel=manual-residue\\nrepo=" + ${JSON.stringify(base)} + "\\ncreated=" + new Date().toISOString() + "\\n", { mode: 0o600 });
+console.log("ALLOCATED " + root);
+await new Promise(() => {});`;
+	const manual = await runCommand([process.execPath, "--no-install", "-e", manualProgram], base, childEnv, 10_000);
+	const manualOut = `stdout:\n${manual.stdout}\nstderr:\n${manual.stderr}`;
+	const manualPath = allocatedOf(manual.stdout);
+	expect(manualPath, manualOut).toBe(join(base, "manual-residue"));
+	expect(existsSync(manualPath), manualOut).toBe(true);
+	// Residue retires with the parent-owned base at afterEach; the observed survival is the requirement failure.
+
+	// Mutant control: a registry-disabled creator survives the same kill, so the positive depends on lifetime cleanup.
+	const nocleanProgram = child(`const scope = ownedTmp("lifetime-noclean", { root: ${JSON.stringify(base)}, autoCleanup: false });
+console.log("ALLOCATED " + scope.path);
+await new Promise(() => {});`);
+	const noclean = await runCommand([process.execPath, "--no-install", "-e", nocleanProgram], base, childEnv, 10_000);
+	const nocleanOut = `stdout:\n${noclean.stdout}\nstderr:\n${noclean.stderr}`;
+	const nocleanPath = allocatedOf(noclean.stdout);
+	expect(nocleanPath.startsWith(base + "/"), nocleanOut).toBe(true);
+	expect(existsSync(nocleanPath), nocleanOut).toBe(true);
+}, 120_000);
