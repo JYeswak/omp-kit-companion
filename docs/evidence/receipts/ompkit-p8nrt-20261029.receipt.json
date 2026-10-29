@@ -1,0 +1,19 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_942b3505ac3b74f8e99fdd3366c88ade5ceaafadff3d28fe54cab11483426724",
+ "limitations": [
+  "Live acceptance AC2 remains unverified"
+ ],
+ "operation": "UPDATERELINK1-exact-commit-replay",
+ "parameters": {
+  "bead": "ompkit-p8nrt",
+  "commit": "89c5a27fe4e1ac2940e1d3d4cde8e8326a43f85b",
+  "result": "docs/evidence/receipts/ompkit-p8nrt-20261029.result.json"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 3191,
+  "sha256": "a9c30b7c2399ddec030dce8b6e4e61f636f8be1daf18c3bd80cc23183dabf028"
+ }
+}

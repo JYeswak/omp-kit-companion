@@ -1,0 +1,90 @@
+{
+  "schema_version": "omp-kit.author-smoke.v1",
+  "bead": "ompkit-p8nrt",
+  "authority": "test",
+  "status": "PASS",
+  "base_commit": "8404fb9ea5b5d53a3276fc24ee78e9c49876e428",
+  "base_tree": "8c9485035e737c73dc8f2fc35ef55e0e17bff459",
+  "tested_commit": "89c5a27fe4e1ac2940e1d3d4cde8e8326a43f85b",
+  "tested_tree": "4fe9b2d474f7ccece39f84ebcd2c7d75764d5c16",
+  "subject_path": "src/cli.ts",
+  "subject_sha256": "e489f1e0e20d9845905c786a26d96bdd024a944fa5c0c31cfbce6594b3d05707",
+  "test_paths": {
+    "tests/cli/kit-update.test.ts": "02b99fddb391912747fee7d969febe9cb6e1b4aaf915b61e4f2d56e56f5acf35",
+    "tests/cli/kit-update-reconcile.test.ts": "c83d1c7a267aae89a79337fa0e7e469deeb5b7131d0d85e8b1823c99043a7259"
+  },
+  "covered_paths": [
+    "src/cli.ts",
+    "tests/cli/kit-update.test.ts",
+    "tests/cli/kit-update-reconcile.test.ts",
+    "changelog.d/ompkit-p8nrt.md"
+  ],
+  "exact_commit_replay": {
+    "source": "read-only exact git archive of tested_commit; git init -q, no commit, no overlays",
+    "environment": {
+      "TMPDIR": "owned scratch directory",
+      "TRUSTED_SOURCE_*": "no matching variable names present in post-run environment audit"
+    },
+    "runs": [
+      {
+        "case": "UPDATERELINK1 positive and planted negative",
+        "argv": [
+          "bun",
+          "test",
+          "tests/cli/kit-update.test.ts",
+          "-t",
+          "UPDATERELINK1"
+        ],
+        "exit_code": 0,
+        "timed_out": false,
+        "stdout": "bun test v1.4.3 (26aa4e1a9)\n\n 2 pass\n 24 filtered out\n 0 fail\n 12 expect() calls\nRan 2 tests across 1 file. [2.04s]\n"
+      },
+      {
+        "case": "reconcile regression suite",
+        "argv": [
+          "bun",
+          "test",
+          "tests/cli/kit-update-reconcile.test.ts"
+        ],
+        "exit_code": 0,
+        "timed_out": false,
+        "stdout": "bun test v1.4.3 (26aa4e1a9)\n\n 8 pass\n 0 fail\n 29 expect() calls\nRan 8 tests across 1 file. [249.00ms]\n"
+      }
+    ]
+  },
+  "private_index_checks": {
+    "kitlib": 0,
+    "tempsafe": 0,
+    "pysafe": 0,
+    "readme": 0,
+    "imports": 0,
+    "fragments": 0,
+    "sources": 0,
+    "regexploit": 0
+  },
+  "prior_replay": {
+    "status": "historical; not the current commit replay",
+    "base_commit": "7969906c80b304ecb85f512b64baae3f2fb4b887",
+    "base_tree": "42a5b9e09b4f14e6e1063ba330b2800bc7628ff2",
+    "source": "exact archive of base_commit with covered_paths overlaid and git init -q; no current claim relies on this overlay run",
+    "baseline_failure_before_fix": {
+      "exit_code": 1,
+      "passed": 0,
+      "failed": 2,
+      "filtered": 24,
+      "expect_calls": 3,
+      "failures": [
+        "positive: expected every profile link to point at releases/1.2.3; received releases/1.2.2",
+        "planted negative: expected rc=1 when codex relink is skipped; received rc=0"
+      ]
+    }
+  },
+  "acceptance_state": {
+    "AC1_build": "PASS",
+    "AC2_live_G5_after_one_reload": "UNVERIFIED"
+  },
+  "limits": [
+    "The live acceptance item remains unchecked: no live PARTIAL update or seat reload was run.",
+    "This scoped author smoke records the build acceptance only; it is not a full-suite or live claim."
+  ]
+}
