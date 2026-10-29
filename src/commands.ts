@@ -567,12 +567,14 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db; refused with --db" },
 		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },
 	], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false },
-	{ name: "verify", description: "The one non-author close verb: export the exact commit, replay every acceptance command, judge each box by its named expected outcome, tick, report the reviewer gate under your identity, close with the command log; refuses the author, a box with no command, or a failing box (REWORK naming it)", usage: "verify BEAD --export SHA [--actor NAME] [--family TEXT] [--project PATH] [--dry-run] [--json]", argument: "BEAD", flags: [
+	{ name: "verify", description: "The one non-author close verb: export the exact commit, replay every acceptance command, judge each box by its named expected outcome, tick, report the reviewer gate under your identity, close with the command log; refuses the author, a box with no command, or a failing box (REWORK naming it). Unticked [live], [after] and [v] boxes move word for word into one open LIVEREADBACK bead (label live-readback) under the bead's active parent, related to it, so the bead closes; --live-readback reads that bead back on the installed kit", usage: "verify BEAD --export SHA [--actor NAME] [--family TEXT] [--project PATH] [--dry-run] [--json] | verify CHILD --live-readback [...] | verify --live-readback --all [...]", argument: "BEAD", flags: [
 		{ name: "--export", value: "SHA", description: "The exact commit to replay against (git archive into owned scratch)" },
 		{ name: "--actor", value: "NAME", description: "The closing seat; defaults to AGENT_NAME" },
 		{ name: "--family", value: "TEXT", description: "Verifier model family, disclosed in the close reason (e.g. 'same (claude)')" },
 		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
 		{ name: "--dry-run", description: "Replay and print the acts; change nothing in the tracker" },
+		{ name: "--live-readback", description: "Run an open LIVEREADBACK child's boxes on the installed kit, no export: a pass ticks them and closes the child, a failure reopens the parent with REWORK naming the box" },
+		{ name: "--all", description: "With --live-readback: every open live-readback child, in id order" },
 	] },
 	{ name: "slice-verify", description: "Test one overlay against a clean export of HEAD: base vs overlay counts per test file, failures classified pre-existing or introduced; foreign dirt never copied; setup failures are errors, never verdicts", usage: "slice-verify --overlay PATH [--overlay PATH...] [--test FILE...] [--changed-file F...] [--base SHA] [--project PATH] [--json]", flags: [
 		{ name: "--overlay", value: "PATH", repeatable: true, description: "Worktree path to overlay onto the export (repeatable, at least one)" },

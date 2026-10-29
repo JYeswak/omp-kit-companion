@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parseBoxes, verifyBead } from "../../src/verify.ts";
+import { LIVE_READBACK_LABEL, liveReadback, liveReadbackAll, parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
@@ -37,13 +37,13 @@ async function repo(name: string): Promise<{ dir: string; sha: string }> {
 	return { dir, sha: (await sh(["git", "rev-parse", "HEAD"], dir)).trim() };
 }
 
-/** A fake br: `show` prints the bead; every other act appends its argv to a log file. */
+/** A fake br: `show` prints the bead; every other act appends its argv to a log file; `create` prints child id kit-1.1. */
 function fakeBr(dir: string, bead: Record<string, unknown>, opts?: { failOn?: string }): { env: Record<string, string>; acts: () => string[] } {
 	const bin = join(dir, "bin");
 	mkdirSync(bin, { recursive: true });
 	const log = join(dir, "br-acts.log");
 	const guard = opts?.failOn ? `case " $* " in *" ${opts.failOn} "*) exit 1;; esac\n` : "";
-	writeFileSync(join(bin, "br"), `#!/bin/sh\nif [ "$1" = show ]; then printf '%s' '${JSON.stringify([bead]).replace(/'/g, "'\\''")}'; exit 0; fi\n${guard}printf '%s\\x1e' "$*" >> ${JSON.stringify(log)}\nexit 0\n`);
+	writeFileSync(join(bin, "br"), `#!/bin/sh\nif [ "$1" = show ]; then printf '%s' '${JSON.stringify([bead]).replace(/'/g, "'\\''")}'; exit 0; fi\n${guard}printf '%s\\x1e' "$*" >> ${JSON.stringify(log)}\nif [ "$1" = create ]; then printf '{"id":"kit-1.1"}'; fi\nexit 0\n`);
 	chmodSync(join(bin, "br"), 0o755);
 	return { env: { PATH: `${bin}:${process.env.PATH ?? ""}` }, acts: () => { try { return readFileSync(log, "utf8").split("\x1e").filter(Boolean); } catch { return []; } } };
 }
@@ -57,11 +57,19 @@ test("verify closes a bead whose boxes name commands with expected outcomes: rep
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"]]);
 	const acts = br.acts();
-	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2 --actor Peer");
-	expect(acts[1]).toBe("gate report kit-1 --gate min_reviewers --provider reviewer:Peer --status pass --to closed --actor Peer");
-	expect(acts[2]).toStartWith("close kit-1 --reason verified by Peer (family: same (claude)) on export " + sha);
-	expect(acts[2]).toContain("--actor Peer");
-	expect(acts[2]).toContain("[a] sh scripts/t.sh -> summary 16 pass 0 fail: found");
+	// CLOSEPASS1: the unticked [v] box moves into a LIVEREADBACK child so br's close policy admits the close.
+	expect(acts[0]).toStartWith("create LIVEREADBACK: kit-1 -t task -l live-readback --parent ompkit-kup44 --deps related:kit-1 --description WHAT: read back");
+	expect(acts[0]).toContain("--acceptance-criteria - [ ] [v] [live] Verification: a non-author replays. --json --actor Peer");
+	expect(acts[1]).toStartWith("update kit-1 --description \n\n## Original acceptance (before omp-kit verify moved [v] to kit-1.1)");
+	expect(acts[1]).toEndWith("--acceptance-criteria - [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [landed] `sh scripts/t.sh` expect: prints 0 fail --actor Peer");
+	expect(acts[2]).toBe("update kit-1 --check-acceptance 1,2 --actor Peer");
+	expect(acts[3]).toBe("gate report kit-1 --gate min_reviewers --provider reviewer:Peer --status pass --to closed --actor Peer");
+	expect(acts[4]).toStartWith("close kit-1 --reason verified by Peer (family: same (claude)) on export " + sha);
+	expect(acts[4]).toContain("--actor Peer");
+	expect(acts[4]).toContain("[a] sh scripts/t.sh -> summary 16 pass 0 fail: found");
+	expect(acts[4]).toContain("deferred [v] to kit-1.1 (LIVEREADBACK, child of lane parent ompkit-kup44, because kit-1 has no active parent, related to kit-1)");
+	expect(acts).toHaveLength(5);
+	expect(res.child).toBe("kit-1.1");
 });
 
 test("planted: a dotted bead id proceeds past scratch allocation with the exact bead identity preserved (constant label, unchanged metadata)", async () => {
@@ -192,16 +200,16 @@ test("phase-only boxes replay their literal command and are judged by the named 
 	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2 --actor Peer");
 });
 
-test("live and after items are pending: not executed, never passed, no tracker mutation", async () => {
+test("live and after items are not executed and never passed; with an executed box passing they defer to the LIVEREADBACK child (CLOSEPASS1)", async () => {
 	const { dir, sha } = await repo("pending");
 	const br = fakeBr(dir, inReview("- [ ] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [a] [live] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [after] `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
-	expect(res.code).toBe("PENDING");
+	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, null, true], [2, "a", null], [3, null, null]]);
 	expect(res.log).toContain("[a] PENDING live phase prerequisite unmet; not executed");
 	expect(res.log).toContain("[3] PENDING after phase prerequisite unmet; not executed");
-	expect(res.acts).toEqual([]);
-	expect(br.acts()).toEqual([]);
+	expect(br.acts()[0]).toContain("--acceptance-criteria - [ ] [a] [live] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [after] `sh scripts/t.sh` -> 16 pass 0 fail --json");
+	expect(br.acts()[2]).toBe("update kit-1 --check-acceptance 1 --actor Peer");
 });
 
 test("a failed phase-only expectation stays REWORK even when the command exits 0", async () => {
@@ -592,3 +600,152 @@ test("VERIFYSCRATCH1: a replay's fixture tracker under $GRADE_WAVE_SCRATCH is ad
 	expect(existsSync(join(outside, "direct", ".beads", "beads.db"))).toBe(false);
 	expect(stateHash(t)).toBe(beforeHash);
 });
+
+/** br's own close policy, as the omp-kit tracker runs it: a close needs every acceptance box ticked and one reviewer. */
+const CLOSE_POLICY = [
+	"workflow:", "  strict: true", "  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]", "  transitions:",
+	"    initial: [open]", "    open: [in_progress, blocked, deferred, closed]", "    in_progress: [in_review, open, blocked, deferred]",
+	"    in_review: [closed, rework]", "    rework: [in_progress, in_review, open]", "    blocked: [open, in_progress]", "    deferred: [open]", "    closed: [open]",
+	"  required_fields:", "    \"open -> in_progress\": [acceptance_criteria_present]", "    in_review: [acceptance_criteria_present, transition_comment]",
+	"    closed: [acceptance_criteria, transition_comment]", "  gates:", "    \"in_review -> closed\":", "      require_all:", "        - min_reviewers: 1",
+	"    \"open -> closed\":", "      require_all:", "        - min_reviewers: 1", "",
+].join("\n");
+
+async function policyTracker(name: string): Promise<{ dir: string; db: string }> {
+	const t = await tracker(name);
+	writeFileSync(join(t.dir, ".beads", "policy.yaml"), CLOSE_POLICY);
+	return t;
+}
+
+/** A bead Author built and moved to in_review under the policy, its boxes unticked, optionally under `parent`. */
+async function reviewBead(t: { dir: string; db: string }, title: string, ac: string, parent?: string): Promise<string> {
+	const env = trackerEnv(t);
+	const id = await createBead(t, title);
+	for (const args of [
+		["update", id, "--description", "WHAT: closepass fixture.\n\nWHY: proves verify closes done work under the real close policy.", "--acceptance", ac, "--assignee", "Author", ...(parent ? ["--parent", parent] : [])],
+		["update", id, "--status", "in_progress", "--actor", "Author"],
+		["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "Author"],
+	]) {
+		const r = await brun(args, t.dir, env);
+		if (r.rc !== 0) throw new Error(`${args.slice(0, 3).join(" ")} -> ${r.rc}: ${r.out}`);
+	}
+	return id;
+}
+
+async function row(t: { dir: string; db: string }, id: string): Promise<Record<string, unknown>> {
+	const shown = await brun(["show", id, "--json"], t.dir, trackerEnv(t));
+	return (JSON.parse(shown.out) as Record<string, unknown>[])[0]!;
+}
+
+const BUILD_BOXES = "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [build] `sh scripts/t.sh` -> prints 0 fail";
+
+/** A closed bead under `epic` and its open LIVEREADBACK child, through a real non-dry verify. */
+async function closedWithChild(t: { dir: string; db: string }, repoDir: { dir: string; sha: string }, title: string, live: string, epic: string): Promise<{ id: string; child: string }> {
+	const id = await reviewBead(t, title, `${BUILD_BOXES}\n${live}`, epic);
+	const res = await verifyBead({ bead: id, exportSha: repoDir.sha, repo: repoDir.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)" });
+	if (res.code !== "CLOSED" || res.child === undefined) throw new Error(`verify ${id} -> ${res.code}: ${res.log}`);
+	return { id, child: res.child };
+}
+
+test("CLOSEPASS1: two passing [build] boxes and an unticked [live] box close under br's real policy with no --force; box 3 moves word for word into one open live-readback child of the bead's active parent, related to it and named in the close reason; an all-[live] bead stays PENDING with no child", async () => {
+	const code = await repo("closepass");
+	const t = await policyTracker("closepass-t");
+	const env = trackerEnv(t);
+	const live = "- [ ] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass";
+	const ac = `${BUILD_BOXES}\n${live}`;
+	// Planted negative: closing the old way (tick the run boxes, leave box 3 in the parent) is refused by br itself.
+	const planted = await reviewBead(t, "closepass planted", ac);
+	expect((await brun(["update", planted, "--check-acceptance", "1,2", "--actor", "Peer"], t.dir, env)).rc).toBe(0);
+	expect((await brun(["gate", "report", planted, "--gate", "min_reviewers", "--provider", "reviewer:Peer", "--status", "pass", "--to", "closed", "--actor", "Peer"], t.dir, env)).rc).toBe(0);
+	const refused = await brun(["close", planted, "--reason", "r", "--transition-comment", "c", "--actor", "Peer"], t.dir, env);
+	expect(refused.rc).toBe(4);
+	expect(refused.out).toContain("unchecked item(s) remain");
+	const epic = await createBead(t, "closepass epic");
+	const id = await reviewBead(t, "closepass parent", ac, epic);
+	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)" });
+	expect(res.code).toBe("CLOSED");
+	expect(res.acts.flat()).not.toContain("--force");
+	const parent = await row(t, id);
+	const child = await row(t, res.child!);
+	expect(parent.status).toBe("closed");
+	expect(parent.acceptance_criteria).toBe(BUILD_BOXES.replaceAll("- [ ]", "- [x]"));
+	expect(parent.description).toContain(`## Original acceptance (before omp-kit verify moved [c] to ${res.child})\n${ac}`);
+	expect(JSON.stringify(parent)).toContain(`deferred [c] to ${res.child} (LIVEREADBACK, child of ${epic}, related to ${id})`);
+	expect(child).toMatchObject({ status: "open", title: "LIVEREADBACK: closepass parent", acceptance_criteria: live, parent: epic, labels: [LIVE_READBACK_LABEL] });
+	expect(child.dependencies).toContainEqual(expect.objectContaining({ id, dependency_type: "related" }));
+	expect((await row(t, epic)).status).toBe("open");
+	const allLive = await reviewBead(t, "closepass all live", live);
+	const pending = await verifyBead({ bead: allLive, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)" });
+	expect(pending.code).toBe("PENDING");
+	expect(pending.child).toBeUndefined();
+	expect(pending.acts).toEqual([]);
+	expect((await row(t, allLive)).status).toBe("in_review");
+	const children = JSON.parse((await brun(["list", "--status", "all", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json"], t.dir, env)).out) as { issues?: unknown[] } | unknown[];
+	expect((Array.isArray(children) ? children : children.issues ?? []).length).toBe(1);
+}, 120_000);
+
+test("CLOSEPASS1 no active parent: the child goes under the constraint lane's parent and the close reason says so; with no readable lane parent the bead stays PENDING and nothing is written", async () => {
+	const code = await repo("closepass-lane");
+	const t = await policyTracker("closepass-lane-t");
+	const env = trackerEnv(t);
+	const live = "- [ ] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass";
+	const lane = await createBead(t, "constraint lane parent");
+	const id = await reviewBead(t, "closepass orphan", `${BUILD_BOXES}\n${live}`);
+	const missing = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", laneParent: "cp-nosuch" });
+	expect(missing.code).toBe("PENDING");
+	expect(missing.acts).toEqual([]);
+	expect(missing.log).toContain(`${id} has no active parent and lane parent cp-nosuch is unreadable`);
+	expect((await row(t, id)).status).toBe("in_review");
+	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", laneParent: lane });
+	expect(res.code).toBe("CLOSED");
+	expect(await row(t, res.child!)).toMatchObject({ status: "open", parent: lane, labels: [LIVE_READBACK_LABEL] });
+	expect(JSON.stringify(await row(t, id))).toContain(`(LIVEREADBACK, child of lane parent ${lane}, because ${id} has no active parent, related to ${id})`);
+}, 120_000);
+
+test("CLOSEPASS1.live: --live-readback runs only the child's boxes on the installed tree; a pass ticks them and closes the child", async () => {
+	const code = await repo("closepass-live");
+	const t = await policyTracker("closepass-live-t");
+	const { id, child } = await closedWithChild(t, code, "closepass live pass", "- [ ] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass", await createBead(t, "closepass live epic"));
+	expect((await liveReadback({ bead: child, repo: code.dir, actor: "Author", env: trackerEnv(t) })).code).toBe("NON_AUTHOR_REQUIRED");
+	const res = await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)" });
+	expect(res.code).toBe("CLOSED");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["c", true]]);
+	expect(await row(t, child)).toMatchObject({ status: "closed", acceptance_criteria: "- [x] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass" });
+	expect((await row(t, id)).status).toBe("closed");
+	expect((await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t) })).code).toBe("NOT_LIVE_READBACK");
+}, 120_000);
+
+test("CLOSEPASS1.live planted: a failing live box reopens the parent with REWORK naming the box, and the child stays open", async () => {
+	const code = await repo("closepass-livefail");
+	const t = await policyTracker("closepass-livefail-t");
+	const epic = await createBead(t, "closepass livefail epic");
+	const { id, child } = await closedWithChild(t, code, "closepass live fail", "- [ ] [c] [live] on the installed kit `sh scripts/bad.sh` -> prints PASS", epic);
+	const res = await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)" });
+	expect(res.code).toBe("REWORK");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["c", false]]);
+	expect((await row(t, id)).status).toBe("open");
+	const comments = await brun(["comments", "list", id], t.dir, trackerEnv(t));
+	expect(comments.out).toContain(`REWORK ${id}: live readback ${child} failed [c] output lacks "PASS"`);
+	// The child hangs off the active epic, not the reopened bead, so the readback never holds the bead's next close.
+	expect(await row(t, child)).toMatchObject({ status: "open", parent: epic });
+	expect(JSON.stringify((await row(t, id)).dependents ?? [])).not.toContain("parent-child");
+}, 120_000);
+
+test("CLOSEPASS1.all: --live-readback --all visits exactly the open live-readback children, and no others", async () => {
+	const code = await repo("closepass-all");
+	const t = await policyTracker("closepass-all-t");
+	const env = trackerEnv(t);
+	const box = "- [ ] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass";
+	const epic = await createBead(t, "closepass all epic");
+	const open = await closedWithChild(t, code, "closepass all open", box, epic);
+	const done = await closedWithChild(t, code, "closepass all done", box, epic);
+	expect((await liveReadback({ bead: done.child, repo: code.dir, actor: "Peer", env })).code).toBe("CLOSED");
+	const other = await createBead(t, "closepass unlabelled open bead");
+	const labelled = await createBead(t, "closepass labelled but in progress");
+	for (const args of [["update", labelled, "--add-label", LIVE_READBACK_LABEL, "--acceptance", box], ["update", labelled, "--status", "in_progress"]]) expect((await brun(args, t.dir, env)).rc).toBe(0);
+	const res = await liveReadbackAll({ repo: code.dir, actor: "Peer", env, family: "same (bun)" });
+	expect(res.visited).toEqual([open.child]);
+	expect(res.visited).not.toContain(other);
+	expect(res.results.map(r => [r.bead, r.code])).toEqual([[open.child, "CLOSED"]]);
+	expect(res.ok).toBe(true);
+}, 180_000);

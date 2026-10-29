@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { preflightBead, preflightCommit } from "./preflight.ts";
 import { sliceVerify } from "./slice-verify.ts";
-import { verifyBead, verifyProject } from "./verify.ts";
+import { liveReadback, liveReadbackAll, verifyBead, verifyProject } from "./verify.ts";
 import { renderEnvelope } from "./kitlib/findings.ts";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -4090,18 +4090,33 @@ function preflightProject(request: ParsedCommand): string | CliResult {
 	if (flag !== undefined && (typeof flag !== "string" || !flag.trim())) return refusal("INVALID_FLAG", "--project requires a non-empty path", "Pass --project PATH or run from the repository root.");
 	return resolve(typeof flag === "string" ? flag : process.cwd());
 }
-// AUTOCOMPLETE1 [b] (ompkit-fp72.135.3.17): the one non-author close verb.
+// AUTOCOMPLETE1 [b] (ompkit-fp72.135.3.17): the one non-author close verb; CLOSEPASS1 (ompkit-774u.52) --live-readback [--all].
 registerCommandHandler("verify", async request => {
+	const actorFlag = request.flags.get("--actor");
+	const actor = typeof actorFlag === "string" && actorFlag.trim() ? actorFlag.trim() : process.env.AGENT_NAME;
+	const familyFlag = request.flags.get("--family");
+	const family = typeof familyFlag === "string" ? familyFlag : undefined;
+	const repo = verifyProject(request.flags.get("--project"));
+	const dryRun = request.flags.get("--dry-run") === true;
+	if (request.flags.get("--all") === true && request.flags.get("--live-readback") !== true) return refusal("INVALID_FLAG", "--all is only valid with --live-readback", "Use omp-kit verify --live-readback --all.");
+	if (request.flags.get("--live-readback") === true) {
+		if (!actor) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
+		if (request.flags.get("--all") === true) {
+			const all = await liveReadbackAll({ repo, actor, family, dryRun });
+			const unread = all.visited.length === 0 && !all.ok;
+			return { code: unread ? 2 : all.results.some(r => r.code === "REWORK") ? 1 : 0, data: { overall: unread ? "UNVERIFIED" : all.ok ? "OK" : "FINDINGS", visited: all.visited, results: all.results.map(r => ({ bead: r.bead, code: r.code, replays: r.replays, acts: r.acts, log: r.log })), log: all.log }, verification: dryRun ? "NOT_RUN" : "PERFORMED" };
+		}
+		if (!request.argument) return refusal("MISSING_ARGUMENT", "A LIVEREADBACK bead id is required", "Use omp-kit verify CHILD --live-readback, or --live-readback --all.");
+		const live = await liveReadback({ bead: request.argument, repo, actor, family, dryRun });
+		return { code: live.code === "CLOSED" || live.code === "DRY_RUN" ? 0 : live.code === "REWORK" ? 1 : 2, data: { overall: live.code, bead: live.bead, export: live.export, replays: live.replays, acts: live.acts, log: live.log }, verification: live.code === "DRY_RUN" ? "NOT_RUN" : "PERFORMED" };
+	}
 	if (!request.argument) return refusal("MISSING_ARGUMENT", "A bead id is required", "Use omp-kit verify BEAD --export SHA.");
 	const exportSha = request.flags.get("--export");
 	if (typeof exportSha !== "string" || !/^[0-9a-f]{7,40}$/.test(exportSha.trim())) return refusal("INVALID_FLAG", "--export requires a commit sha", "Pass --export <sha> of the exact commit to replay.");
-	const actorFlag = request.flags.get("--actor");
-	const actor = typeof actorFlag === "string" && actorFlag.trim() ? actorFlag.trim() : process.env.AGENT_NAME;
 	if (!actor) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
-	const family = request.flags.get("--family");
-	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo: verifyProject(request.flags.get("--project")), actor, family: typeof family === "string" ? family : undefined, dryRun: request.flags.get("--dry-run") === true });
+	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo, actor, family, dryRun });
 	const code = res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
-	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log }, verification: res.code === "DRY_RUN" ? "NOT_RUN" : "PERFORMED" };
+	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log, ...(res.child === undefined ? {} : { child: res.child }) }, verification: res.code === "DRY_RUN" ? "NOT_RUN" : "PERFORMED" };
 });
 // SLICEVERIFY1 (ompkit-t7cn7.7): change-vs-export verdict for one overlay.
 registerCommandHandler("slice-verify", async request => {
