@@ -1,0 +1,30 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_82aadfe3bcaf4a075b1c64e78b3320c969c7690df34799d1c4fbdf22af103b84",
+ "limitations": [
+  "Prior gate at 4599172 changed .beads history paths; cause unisolated; superseded for AC3.",
+  "The initial --archive-dir invocation stopped at the notes floor before tests; corrected --commit invocation passed."
+ ],
+ "operation": "non-author-gate:brinitpin1-ac3",
+ "parameters": {
+  "audit_rows": "141",
+  "audit_sha256": "9ab330a5702b4e7980f1fb522cc19ded12a3dd5ddb466c147e56635e7c0ecd19",
+  "bead": "ompkit-t7cn7.28",
+  "beads_files": "2017",
+  "beads_list_sha256": "db8af0918e3d0ca74b4a9671ae87bf970af8fac6f07dab2b824ec2c9d7b9fc30",
+  "expectations": "592",
+  "gate_files": "8",
+  "result": "FRESH-GATE-GREEN-108-0",
+  "subject_commit": "4e5c124c701f2b1f8dbd55b7e0678b709a44c0eb",
+  "subject_path": "src/verify.ts",
+  "subject_sha256": "11af9edab73b6d8df8fad97b12c866f0ac67077bcb1ef108675864617083a05c",
+  "subject_tree": "00cc42e11184632da9beb317b69fb4cd56480e1d",
+  "verifier": "T7cn7Ac3Verifier"
+ },
+ "producer": "LavenderPrairie/openai-codex/gpt-6-luna",
+ "result_ref": {
+  "bytes": 4839,
+  "sha256": "cb9b190e8efd3c591f81658cbe8ea53deb06bb246b6d96085db3007a66fc857f"
+ }
+}

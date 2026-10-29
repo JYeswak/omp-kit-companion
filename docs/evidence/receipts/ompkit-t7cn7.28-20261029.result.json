@@ -1,0 +1,121 @@
+{
+  "schema_version": "omp-kit.author-smoke.v1",
+  "bead": "ompkit-t7cn7.28",
+  "authority": "test",
+  "status": "PASS",
+  "subject_commit": "4e5c124c701f2b1f8dbd55b7e0678b709a44c0eb",
+  "subject_tree": "00cc42e11184632da9beb317b69fb4cd56480e1d",
+  "subject_path": "src/verify.ts",
+  "subject_sha256": "11af9edab73b6d8df8fad97b12c866f0ac67077bcb1ef108675864617083a05c",
+  "covered_paths": [
+    "scripts/br_init_check.py",
+    "src/verify.ts",
+    "tests/cli/check-staged-br-init.test.sh",
+    "tests/cli/runtime.test.ts",
+    "tests/cli/verify.test.ts",
+    "tests/scripts/br_init_check_test.py"
+  ],
+  "historical_checks": [
+    {
+      "commit": "4599172e24791b725dcb4c285d5501f23c376cae",
+      "argv": ["python3", "-B", "tests/scripts/br_init_check_test.py"],
+      "cwd": "omp-kit-companion",
+      "rc": 0,
+      "output": "Ran 16 tests in 0.006s\nOK"
+    },
+    {
+      "commit": "4599172e24791b725dcb4c285d5501f23c376cae",
+      "argv": ["sh", "tests/cli/check-staged-br-init.test.sh"],
+      "cwd": "omp-kit-companion",
+      "rc": 0,
+      "output": "check-staged-br-init: 18 pass 0 fail",
+      "covers": [
+        "staged unpinned inherited br call refused",
+        "fixture-local BEADS_DB control admitted",
+        "new pushed-range inherited br call refused",
+        "pre-push inherited br call negative"
+      ]
+    },
+    {
+      "commit": "4e5c124c701f2b1f8dbd55b7e0678b709a44c0eb",
+      "argv": ["bun", "test", "tests/cli/verify.test.ts", "-t", "REPLAYBR1 owned tracker init"],
+      "cwd": "omp-kit-companion",
+      "rc": 0,
+      "output": "1 pass\n0 fail\n3 expect() calls"
+    }
+  ],
+  "non_author_live_gate": {
+    "verifier": "T7cn7Ac3Verifier",
+    "model": "OpenAI Codex gpt-6-luna",
+    "commit": "4e5c124c701f2b1f8dbd55b7e0678b709a44c0eb",
+    "cwd": "/Users/josh/Developer/omp-kit-companion",
+    "argv": [
+      "sh",
+      "scripts/fresh-gate.sh",
+      "--commit",
+      "4e5c124c701f2b1f8dbd55b7e0678b709a44c0eb",
+      "--changed-file",
+      "src/verify.ts",
+      "--changed-file",
+      "tests/cli/verify.test.ts",
+      "--changed-file",
+      "tests/cli/runtime.test.ts"
+    ],
+    "tmpdir": "/Users/josh/Developer/omp-kit/var/agent-tmp/t7cn7-run.49953",
+    "result": "FRESH-GATE: GREEN commit=4e5c124c701f2b1f8dbd55b7e0678b709a44c0eb elapsed=136s tests=125s queued=0s judged=11s",
+    "tests": {
+      "files": 8,
+      "passed": 108,
+      "failed": 0,
+      "expectations": 592
+    },
+    "audit": {
+      "rows": 141,
+      "sha256": "9ab330a5702b4e7980f1fb522cc19ded12a3dd5ddb466c147e56635e7c0ecd19",
+      "live_tracker_target_exec": 0,
+      "explicit_fixture_init": 22,
+      "unpinned_negative_fixture_init": 2
+    },
+    "beads_file_set": {
+      "before_count": 2017,
+      "after_count": 2017,
+      "before_sha256": "db8af0918e3d0ca74b4a9671ae87bf970af8fac6f07dab2b824ec2c9d7b9fc30",
+      "after_sha256": "db8af0918e3d0ca74b4a9671ae87bf970af8fac6f07dab2b824ec2c9d7b9fc30",
+      "unchanged": true
+    }
+  },
+  "superseded_evidence": {
+    "prior_non_author_gate": {
+      "commit": "4599172e24791b725dcb4c285d5501f23c376cae",
+      "result": "FRESH-GATE: GREEN; 60 pass; 0 fail",
+      "beads_file_count_before_after": 1989,
+      "observed_file_changes": [
+        ".beads/.br_history/issues.20261029_070140_444724000.jsonl",
+        ".beads/.br_history/issues.20261029_070140_444724000.meta.json",
+        ".beads/.br_history/issues.20261029_070556_633179000.jsonl",
+        ".beads/.br_history/issues.20261029_070556_633179000.meta.json",
+        ".beads/.br_history/issues.20261029_085114_773551000.jsonl",
+        ".beads/.br_history/issues.20261029_085114_773551000.meta.json",
+        ".beads/.br_history/issues.20261029_085624_869823000.jsonl",
+        ".beads/.br_history/issues.20261029_085624_869823000.meta.json"
+      ],
+      "cause": "unisolated; not used as AC3 proof"
+    },
+    "archive_dir_attempt": {
+      "command": "fresh-gate.sh --archive-dir <exact commit archive> --changed-file src/verify.ts --changed-file tests/cli/verify.test.ts --changed-file tests/cli/runtime.test.ts",
+      "result": "REFUSED: no published ancestor notes floor exists for the selected source",
+      "tests_run": false,
+      "resolution": "reran without bypassing the notes gate, from the canonical checkout with --commit; exact-commit gate passed"
+    }
+  },
+  "acceptance_state": {
+    "fixture_binding_and_ratchet": "PASS",
+    "AC3_unchanged_beads_file_set": "PASS",
+    "bead_status": "in_progress",
+    "publication": "not pushed per lead decision"
+  },
+  "limits": [
+    "The exact-head fresh gate ran its selected affected suite (8 files), not the full repository suite.",
+    "The prior commit 4599172 non-author gate changed .beads history entries; its cause remains unisolated and it is superseded for AC3 by the unchanged exact-head file-set evidence above."
+  ]
+}
