@@ -187,14 +187,18 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	}
 	// VERIFYSCRATCH1 (ompkit-fp72.135.3.81): selftests that build fixture trackers under GRADE_WAVE_SCRATCH
 	// (grade_wave.py --selftest) then build them inside this run's root, where the read-only br admits them.
-	const replayEnv = { ...env, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}:${env.PATH ?? process.env.PATH ?? "/usr/bin:/bin"}` };
-	if (wantsOwned) log.push(`owned fixture ${ownedDb} (per-run read-only replay)`);
 	const exportDir = join(scratch.path, "export");
+	// VERIFYSCRATCH1 export root: var/agent-tmp is gitignored, so the export has none; kitlib scratch under the
+	// repo root needs it, as the gates provide it (fresh-gate.sh, full-suite-verdict.sh).
+	const exportTmp = join(exportDir, "var", "agent-tmp");
+	const replayEnv = { ...env, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, KITLIB_TMP_ROOT: exportTmp, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}:${env.PATH ?? process.env.PATH ?? "/usr/bin:/bin"}` };
+	if (wantsOwned) log.push(`owned fixture ${ownedDb} (per-run read-only replay)`);
 	mkdirSync(exportDir, { recursive: true });
 	const archive = await run(["sh", "-c", `git -C ${JSON.stringify(input.repo)} archive ${JSON.stringify(input.exportSha)} | tar -x -C ${JSON.stringify(exportDir)}`], { deadline_s: 300, env });
 	if (archive.rc !== 0 || !existsSync(join(exportDir, "scripts")) && !existsSync(join(exportDir, "src"))) {
 		return { ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`export failed rc ${archive.rc}: ${text(archive.stderr).slice(0, 200)}`).join("\n"), acts };
 	}
+	mkdirSync(exportTmp, { recursive: true });
 	log.push(`exported ${input.exportSha} to ${exportDir}`);
 	const replays: BoxReplay[] = [];
 	for (const box of replayable) {

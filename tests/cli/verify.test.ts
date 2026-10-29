@@ -749,3 +749,24 @@ test("CLOSEPASS1.all: --live-readback --all visits exactly the open live-readbac
 	expect(res.results.map(r => [r.bead, r.code])).toEqual([[open.child, "CLOSED"]]);
 	expect(res.ok).toBe(true);
 }, 180_000);
+
+test("VERIFYSCRATCH1.exportroot: the export carries var/agent-tmp (gitignored, so absent from git archive) and KITLIB_TMP_ROOT names it; planted: without the dir kitlib scratch under the repo root fails NotADirectoryError", async () => {
+	const dir = join(base, "exportroot");
+	mkdirSync(join(dir, "scripts"), { recursive: true });
+	writeFileSync(join(dir, "scripts", "kitlib_tmp.py"), readFileSync(join(import.meta.dir, "..", "..", "scripts", "kitlib_tmp.py")));
+	writeFileSync(join(dir, ".gitignore"), "var/\n");
+	await sh(["git", "init", "-q"], dir);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], dir);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], dir);
+	const sha = (await sh(["git", "rev-parse", "HEAD"], dir)).trim();
+	const scratch = "python3 -c 'import sys; sys.path.insert(0, \"scripts\"); import kitlib_tmp; print(\"scratch\", kitlib_tmp.owned_tmp(\"replay\", root=\"var/agent-tmp\").path)'";
+	const br = fakeBr(dir, inReview([
+		`- [ ] [a] [build] kitlib scratch under the export root: \`${scratch}\` -> prints var/agent-tmp/replay`,
+		"- [ ] [b] [build] KITLIB_TMP_ROOT names that dir: `python3 -c 'import os; print(os.path.isdir(os.environ[\"KITLIB_TMP_ROOT\"]), os.environ[\"KITLIB_TMP_ROOT\"].endswith(\"/export/var/agent-tmp\"))'` -> prints True True",
+		`- [ ] [c] [build] planted: without the dir the same call fails: \`rmdir var/agent-tmp && ${scratch}\` -> prints NotADirectoryError`,
+	].join("\n")));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
+	expect(res.code).toBe("DRY_RUN");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
+	expect(br.acts()).toEqual([]);
+});
