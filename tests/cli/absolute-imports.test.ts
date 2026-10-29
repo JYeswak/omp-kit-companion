@@ -4,6 +4,7 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { identifyExactSource } from "../../scripts/exact-source.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const SCAN_ROOTS = ["src", "extensions", "scripts"];
@@ -35,7 +36,7 @@ test("ABSIMPORT1 detector flags absolute specifiers and ignores lookalikes", () 
 });
 
 let cachedExport: { srcExport: string; identity: Record<string, string> } | null = null;
-/** Exact source tree in owned scratch. Precedence: (1) caller-provided tarball verified by sha (TRUSTED_SOURCE_TARBALL + TRUSTED_SOURCE_SHA); (2) git archive of verified HEAD (top-level guard refuses ancestor discovery); (3) bare-export stamp: REPO_ROOT/package.json source_revision must be a full commit sha, used as the identity without any git. Never discovers an ancestor repo. */
+/** Exact source tree in owned scratch. Precedence: (1) caller-provided tarball verified by sha (TRUSTED_SOURCE_TARBALL + TRUSTED_SOURCE_SHA); (2) shared exact-source helper: git archive of the seam-resolved HEAD, or the stamped tree in place when there is no .git. Never discovers an ancestor repo. */
 async function exactSource(): Promise<{ srcExport: string; identity: Record<string, string> }> {
 	if (cachedExport) return cachedExport;
 	const g = process.env.GRADE_WAVE_SCRATCH || undefined;
@@ -53,17 +54,16 @@ async function exactSource(): Promise<{ srcExport: string; identity: Record<stri
 		if (ex.rc !== 0) throw new Error(`trusted source extract -> ${ex.rc}`);
 		identity = { tarballSha256: actual, provenance: "trusted-input" };
 	} else {
-		const top = await run(["git", "-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { cwd: REPO_ROOT, deadline_s: 60 });
-		const rooted = top.rc === 0 && resolve(utf8(top.stdout).trim()) === resolve(REPO_ROOT);
-		if (!rooted) {
-			const stamped = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { source_revision?: unknown };
-			const rev = typeof stamped.source_revision === "string" ? stamped.source_revision : "";
-			if (!/^[0-9a-f]{40}$/.test(rev)) throw new Error("source identity not exact: no git top-level, no tarball input, and no full-sha archive stamp; refusing ancestor discovery");
-			identity = { headSha: rev, provenance: "archive-stamp" };
+		const identity0 = identifyExactSource(REPO_ROOT, readFileSync(join(REPO_ROOT, "package.json")));
+		if (identity0 === null) throw new Error("source identity not exact: no git checkout, no tarball input, and no full-sha archive stamp; refusing ancestor discovery");
+		if (identity0.kind === "stamped") {
+			identity = { headSha: identity0.revision, provenance: "archive-stamp" };
 			cachedExport = { srcExport: REPO_ROOT, identity };
 			console.log(`ABSIMPORT1 source identity: ${JSON.stringify(identity)}`);
 			return cachedExport;
 		}
+		const top = await run(["git", "-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { cwd: REPO_ROOT, deadline_s: 60 });
+		if (top.rc !== 0 || resolve(utf8(top.stdout).trim()) !== resolve(REPO_ROOT)) throw new Error(`source identity not exact: ${REPO_ROOT} is not a repo top-level; refusing ancestor discovery`);
 		const head = await run(["git", "-C", REPO_ROOT, "rev-parse", "HEAD"], { cwd: REPO_ROOT, deadline_s: 60 });
 		if (head.rc !== 0) throw new Error("no HEAD; unmet prerequisite: exact committed source (or set TRUSTED_SOURCE_TARBALL + TRUSTED_SOURCE_SHA)");
 		const sha = utf8(head.stdout).trim();
