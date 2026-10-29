@@ -34,6 +34,12 @@ class JavaScriptCalls(unittest.TestCase):
         self.assertEqual(active("ts", 'run(["br", "init"], { env: { ...process.env, BEADS_DB: join(dir, ".beads", "beads.db") } });'), [])
         self.assertEqual(active("ts", 'runBr(["init", "--prefix", prefix], database.database, database.directory);'), [])
 
+    def test_fixture_br_calls_cannot_inherit_the_callers_tracker(self) -> None:
+        self.assertEqual(active("ts", 'brun(["create", "probe"], dir);'), [(1, "inherited-br-call")])
+        self.assertEqual(active("ts", 'brun(["create", "probe"], dir, { BEADS_DB: join(dir, ".beads", "beads.db") });'), [])
+        self.assertEqual(active("ts", 'run(["br", "create"], { env: process.env });'), [(1, "inherited-br-call")])
+        self.assertEqual(active("ts", 'run(["br", "create"], { env: { BEADS_DB: join(dir, ".beads", "beads.db") } });'), [])
+
     def test_non_init_br_wrappers_are_not_init_sites(self) -> None:
         self.assertEqual(active("ts", 'spawnSync("br", [...args, "--db", database], { cwd });'), [])
 
@@ -63,6 +69,14 @@ class PythonCalls(unittest.TestCase):
         self.assertEqual(active("py", 'subprocess.run(["br", "init", "--db", str(root / ".beads" / "beads.db")])'), [])
         self.assertEqual(active("py", 'subprocess.run(["br", "init"], env={**os.environ, "BEADS_DB": str(root / ".beads" / "beads.db")})'), [])
         self.assertEqual(active("py", 'subprocess.run(["br", "init"], env=os.environ.copy())'), [(1, "unpinned-br-init")])
+
+    def test_fixture_br_calls_cannot_inherit_the_callers_tracker(self) -> None:
+        self.assertEqual(active("py", 'brun(["create"], root)'), [(1, "inherited-br-call")])
+        self.assertEqual(active("py", 'subprocess.run(["br", "create"], cwd=root)'), [(1, "inherited-br-call")])
+        self.assertEqual(active("py", 'subprocess.run(["br", "create"], env=os.environ.copy())'), [(1, "inherited-br-call")])
+        self.assertEqual(active("py", 'subprocess.run(["br", "create"], env={**os.environ, "BEADS_DB": str(root / ".beads" / "beads.db")})'), [])
+        self.assertEqual(active("py", 'brun(["create"], root, env=fixture_env)'), [])
+        self.assertEqual(active("py", 'brun(["create"], root, env=fixture.env)'), [])
 
     def test_database_options_are_not_mistaken_for_the_environment(self) -> None:
         source = 'subprocess.run(["br", "init"], {"BEADS_DB": str(root / ".beads" / "beads.db")})'
@@ -98,6 +112,11 @@ class ShellCalls(unittest.TestCase):
         self.assertEqual(active("sh", 'br init --db "$child/.beads/beads.db"\n'), [])
         self.assertEqual(active("sh", 'BEADS_DB="$child/.beads/beads.db" br init\n'), [])
         self.assertEqual(active("sh", 'br init --db "$db"\n'), [(1, "unpinned-br-init")])
+
+    def test_fixture_br_calls_cannot_inherit_the_callers_tracker(self) -> None:
+        self.assertEqual(active("sh", "br create probe\n"), [(1, "inherited-br-call")])
+        self.assertEqual(active("sh", 'BEADS_DB="$child/.beads/beads.db" br create probe\n'), [])
+        self.assertEqual(active("sh", 'br create probe --db "$child/.beads/beads.db"\n'), [])
 
     def test_only_the_planted_fixture_is_exempt(self) -> None:
         self.assertTrue(checker.RULESET.is_exempt("tests/fixtures/br-init/unpinned.sh"))

@@ -1,7 +1,7 @@
 #!/bin/sh
 # check-staged-br-init.test.sh — BRINITPIN1 staged and range ratchet contract.
-# An unpinned br init is refused in the staged index and in a new pushed range;
-# pinned --db paths pass, and unchanged legacy findings do not block unrelated edits.
+# An unpinned br init and a caller-inheriting fixture br call are refused in staged
+# and pushed ranges; local database bindings pass, unchanged legacy findings do not block.
 set -u
 SCRIPTS=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)
 # shellcheck source=scripts/kitlib-tmp.sh
@@ -49,6 +49,20 @@ git -C "$R" add pinned.ts
 out=$(CDPATH='' cd -- "$R" && sh "$SCRIPTS/check-staged-br-init.sh" 2>&1)
 rc=$?
 check "$rc" "0" "staged-pinned-admitted" "$out" ""
+printf 'brun(["create", "probe"], dir);\n' > "$R/inherited.ts"
+git -C "$R" add inherited.ts
+out=$(CDPATH='' cd -- "$R" && sh "$SCRIPTS/check-staged-br-init.sh" 2>&1)
+rc=$?
+check "$rc" "1" "staged-inherited-call-refused" "$out" "inherited.ts:1:"
+check "$rc" "1" "staged-inherited-call-rule-named" "$out" "inherited-br-call"
+git -C "$R" reset -q -- inherited.ts
+printf 'brun(["create", "probe"], dir, { BEADS_DB: join(dir, ".beads", "beads.db") });\n' > "$R/bound.ts"
+git -C "$R" add bound.ts
+out=$(CDPATH='' cd -- "$R" && sh "$SCRIPTS/check-staged-br-init.sh" 2>&1)
+rc=$?
+check "$rc" "0" "staged-bound-call-admitted" "$out" ""
+git -C "$R" reset -q -- bound.ts
+
 
 # Pushed range: an unchanged legacy call is allowed, a newly added call is refused,
 # and a pinned call is admitted after the unsafe site becomes baseline.
@@ -79,6 +93,22 @@ pinned=$(git -C "$P" rev-parse HEAD)
 out=$(range_check "$P" "$bad" "$pinned" 2>&1)
 rc=$?
 check "$rc" "0" "range-pinned-admitted" "$out" ""
+printf 'brun(["create", "probe"], dir);\n' > "$P/inherited.ts"
+git -C "$P" add inherited.ts
+git -C "$P" commit -q -m "[test] inherited fixture br call"
+inherited=$(git -C "$P" rev-parse HEAD)
+out=$(range_check "$P" "$pinned" "$inherited" 2>&1)
+rc=$?
+check "$rc" "1" "range-inherited-call-refused" "$out" "inherited.ts:1:"
+check "$rc" "1" "range-inherited-call-rule-named" "$out" "inherited-br-call"
+printf 'brun(["create", "probe"], dir, { BEADS_DB: join(dir, ".beads", "beads.db") });\n' > "$P/bound.ts"
+git -C "$P" add bound.ts
+git -C "$P" commit -q -m "[test] fixture br call with own database"
+bound=$(git -C "$P" rev-parse HEAD)
+out=$(range_check "$P" "$inherited" "$bound" 2>&1)
+rc=$?
+check "$rc" "0" "range-bound-call-admitted" "$out" ""
+
 
 # The real pre-push adapter must run the base-archive range checker and refuse
 # before later gates when the pushed range adds an unpinned call.
@@ -96,6 +126,16 @@ out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$bad" "$base" | (CDPATH=
 rc=$?
 check "$rc" "1" "prepush-unpinned-refused" "$out" "RED br-init-range producer_rc=1"
 check "$rc" "1" "prepush-unpinned-named" "$out" "unsafe.ts:1:"
+printf 'brun(["create", "probe"], dir);\n' > "$G/inherited.ts"
+git -C "$G" add inherited.ts
+git -C "$G" commit -q -m "[test] inherited fixture br call"
+bad_call=$(git -C "$G" rev-parse HEAD)
+out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$bad_call" "$bad" | (CDPATH='' cd -- "$G" && sh "$SCRIPTS/pre-push-gate.sh") 2>&1)
+rc=$?
+check "$rc" "1" "prepush-inherited-call-refused" "$out" "RED br-init-range producer_rc=1"
+check "$rc" "1" "prepush-inherited-call-named" "$out" "inherited.ts:1:"
+check "$rc" "1" "prepush-inherited-call-rule-named" "$out" "inherited-br-call"
+
 
 printf 'check-staged-br-init: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Refuse newly added unpinned ``br init`` call sites (BRINITPIN1).
+"""Refuse unpinned fixture ``br init`` and caller-inheriting ``br`` calls (BRINITPIN1).
 
 Python uses its native AST; TS/JS uses the shared kitlib lexer plus a balanced
 walk over literal process-call arguments; shell uses kitlib's comment/quote/
-heredoc scanner and shlex. Static values must show this fixture's
-``.beads/beads.db`` in ``--db`` or an inline ``BEADS_DB`` binding. Environment
-and argv variables are not followed. The one unpinned shell fixture proving
-the parent-lock regression is an exact-path exemption; source suppressions are
-disabled.
+heredoc scanner and shlex. Initialization requires the fixture's
+``.beads/beads.db`` in ``--db`` or an inline ``BEADS_DB`` binding. Other
+fixture commands must show a local database binding instead of inheriting the
+suite's caller-selected ``BEADS_DB``. Source suppressions are disabled.
 """
 from __future__ import annotations
 
@@ -22,9 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import kitlib_ratchet_core as core  # noqa: E402
 
 RULE = "unpinned-br-init"
+INHERITED_RULE = "inherited-br-call"
 PRAGMA = "brinit"
 RULES = {
     RULE: "br init must bind its fixture's own .beads/beads.db with --db or inline BEADS_DB",
+    INHERITED_RULE: "fixture br calls must bind their own tracker instead of inheriting caller BEADS_DB",
     **core.meta_rules(PRAGMA),
 }
 EXEMPT = ("tests/fixtures/br-init/unpinned.sh",)
@@ -37,6 +38,8 @@ WRAPPERS = {"brun", "brOut", "run_br", "runBr"}
 def _detail(rule: str, lang: str, constructs: List[str]) -> str:
     if rule == "parse-error":
         return f"shell analysis is incomplete: {', '.join(constructs)}"
+    if rule == INHERITED_RULE:
+        return "bind the fixture's br call with --db or an explicit fixture-local BEADS_DB"
     return "pass --db <fixture/.beads/beads.db> or inline BEADS_DB for that path"
 
 
@@ -69,6 +72,16 @@ def _ast_mapping_has_fixture_db(node: ast.AST, environment: bool = False) -> boo
         if _ast_string(key) == "env" and _ast_mapping_has_fixture_db(value, True):
             return True
     return False
+
+
+def _ast_inherits_caller_environment(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, ast.Attribute)
+        and child.attr in {"environ", "env"}
+        and isinstance(child.value, ast.Name)
+        and child.value.id in {"os", "process"}
+        for child in ast.walk(node)
+    )
 
 
 def _ast_db_parameter(node: ast.AST) -> bool:
@@ -153,6 +166,28 @@ def _python_calls(source: bytes, path: str) -> core.Scan:
         is_wrapper = False
         if argv and len(argv) >= 2 and _ast_string(argv[0]) == "br" and _ast_string(argv[1]) == "init":
             offset = 2
+        elif argv and len(argv) >= 2 and _ast_string(argv[0]) == "br":
+            subcommand = _ast_string(argv[1])
+            if subcommand not in {None, "--help", "--version"}:
+                own_db = _ast_db_flag(argv, 1)
+                own_env = any(_ast_mapping_has_fixture_db(keyword.value, True)
+                              for keyword in node.keywords if keyword.arg == "env")
+                if not (own_db or own_env):
+                    hits.add(INHERITED_RULE, node.lineno, node.col_offset + 1, "br call")
+            continue
+        elif name == "brun" and argv and _ast_string(argv[0]) not in {None, "init"}:
+            env_arg = (
+                node.args[2] if len(node.args) > 2
+                else next((keyword.value for keyword in node.keywords if keyword.arg == "env"), None)
+            )
+            env_is_unbound = (
+                env_arg is None
+                or _ast_inherits_caller_environment(env_arg)
+                or (isinstance(env_arg, ast.Dict) and not _ast_mapping_has_fixture_db(env_arg, True))
+            )
+            if env_is_unbound:
+                hits.add(INHERITED_RULE, node.lineno, node.col_offset + 1, "br call")
+            continue
         elif argv and _ast_string(argv[0]) == "br" and len(node.args) > 1:
             second = _ast_argv(node.args[1])
             if second and _ast_string(second[0]) == "init":
@@ -164,14 +199,21 @@ def _python_calls(source: bytes, path: str) -> core.Scan:
             if words is None:
                 continue
             command = _shell_command_index(words)
-            if command + 1 >= len(words) or words[command:command + 2] != ["br", "init"]:
+            if command + 1 >= len(words) or words[command].rsplit("/", 1)[-1] != "br":
                 continue
-            own_env = _word_env_is_fixture_db(words[:command])
-            own_db = _word_db_flag(words[command + 2:])
-            explicit_env = any(_ast_mapping_has_fixture_db(keyword.value, True)
-                               for keyword in node.keywords if keyword.arg == "env")
-            if not (own_env or own_db or explicit_env):
-                hits.add(RULE, node.lineno, node.col_offset + 1, "br init")
+            subcommand = words[command + 1]
+            if subcommand == "init":
+                own_env = _word_env_is_fixture_db(words[:command])
+                own_db = _word_db_flag(words[command + 2:])
+                explicit_env = any(_ast_mapping_has_fixture_db(keyword.value, True)
+                                   for keyword in node.keywords if keyword.arg == "env")
+                if not (own_env or own_db or explicit_env):
+                    hits.add(RULE, node.lineno, node.col_offset + 1, "br init")
+            elif subcommand not in {"--help", "--version"}:
+                own_env = _word_env_is_fixture_db(words[:command])
+                own_db = _word_db_flag(words[command + 1:])
+                if not (own_env or own_db):
+                    hits.add(INHERITED_RULE, node.lineno, node.col_offset + 1, "br call")
             continue
         if argv is None:
             continue
@@ -297,6 +339,21 @@ def _js_identifier(code: str, start: int) -> Tuple[str, int]:
     return code[start:index], index
 
 
+def _js_wrapper_environment_pinned(code: str, strings: Dict[int, Tuple[str, int, bool]],
+                                   pairs: Dict[int, int], arguments: Sequence[Tuple[int, int]],
+                                   argv_argument_index: int) -> bool:
+    environment = argv_argument_index + 2
+    if environment >= len(arguments):
+        return False
+    start, end = _trim(code, *arguments[environment])
+    if code[start:start + 1] == "{":
+        return _object_has_fixture_db(code, arguments[environment], pairs, strings, True)
+    expression = "".join(code[start:end].split())
+    if expression in {"process.env", "process.env.copy()", "os.environ", "os.environ.copy()", "undefined", "null"}:
+        return False
+    return True
+
+
 def _js_pinned(code: str, strings: Dict[int, Tuple[str, int, bool]], pairs: Dict[int, int],
                arguments: Sequence[Tuple[int, int]], argv: Sequence[Tuple[int, int]], offset: int,
                name: str, wrapper: bool, argv_argument_index: int) -> bool:
@@ -310,7 +367,10 @@ def _js_pinned(code: str, strings: Dict[int, Tuple[str, int, bool]], pairs: Dict
     if wrapper and name in {"runBr", "run_br"} and database_argument < len(arguments):
         if set(_identifiers(code, arguments[database_argument])) & {"db", "database", "db_path", "database_path"}:
             return True
+    if wrapper and name == "brun" and _js_wrapper_environment_pinned(code, strings, pairs, arguments, argv_argument_index):
+        return True
     return any(_object_has_fixture_db(code, extra, pairs, strings) for extra in arguments[argv_argument_index + 1:])
+
 
 
 def _js_calls(source: bytes, path: str) -> core.Scan:
@@ -343,10 +403,19 @@ def _js_calls(source: bytes, path: str) -> core.Scan:
         argv_argument_index = 0
         offset = 0
         wrapper = False
+        rule = RULE
         if first_is_array:
             argv = _parts(code, first_start + 1, first_end - 1, pairs)
             if len(argv) >= 2 and _literal(strings, argv[0]) == "br" and _literal(strings, argv[1]) == "init":
                 offset = 2
+            elif len(argv) >= 2 and _literal(strings, argv[0]) == "br":
+                subcommand = _literal(strings, argv[1])
+                if subcommand not in {None, "--help", "--version"}:
+                    offset, rule = 1, INHERITED_RULE
+                else:
+                    argv = []
+            elif name == "brun" and argv and _literal(strings, argv[0]) not in {None, "init"}:
+                wrapper, rule = True, INHERITED_RULE
             elif name in WRAPPERS and argv and _literal(strings, argv[0]) == "init":
                 offset, wrapper = 1, True
             else:
@@ -362,21 +431,31 @@ def _js_calls(source: bytes, path: str) -> core.Scan:
         if argv:
             if not _js_pinned(code, strings, pairs, arguments, argv, offset, name, wrapper, argv_argument_index):
                 line, column = where(start)
-                hits.add(RULE, line, column, "br init")
+                hits.add(rule, line, column, "br init" if rule == RULE else "br call")
             continue
         command = _literal(strings, arguments[0])
         words = _shell_words(command or "") if name in {"exec", "execSync"} else None
         if words is None:
             continue
         command_index = _shell_command_index(words)
-        if command_index + 1 < len(words) and words[command_index:command_index + 2] == ["br", "init"]:
-            explicit_env = any(_object_has_fixture_db(code, extra, pairs, strings) for extra in arguments[1:])
-            if not (_word_env_is_fixture_db(words[:command_index] or [])
-                    or _word_db_flag(words[command_index + 2:]) or explicit_env):
-                line, column = where(start)
-                hits.add(RULE, line, column, "br init")
+        if command_index + 1 >= len(words) or words[command_index].rsplit("/", 1)[-1] != "br":
+            continue
+        subcommand = words[command_index + 1]
+        if subcommand == "init":
+            rule = RULE
+            own_db = _word_db_flag(words[command_index + 2:])
+        elif subcommand not in {"--help", "--version"}:
+            rule = INHERITED_RULE
+            own_db = _word_db_flag(words[command_index + 1:])
+        else:
+            continue
+        explicit_env = any(_object_has_fixture_db(code, extra, pairs, strings, True) for extra in arguments[1:])
+        if not (_word_env_is_fixture_db(words[:command_index] or []) or own_db or explicit_env):
+            line, column = where(start)
+            hits.add(rule, line, column, "br init" if rule == RULE else "br call")
     scanned = core.js_scan(text, hits, bare, comments, where)
     return core.Scan(scanned.hits, scanned.texts, [])
+
 
 
 def _split_shell(line: str) -> Optional[List[List[str]]]:
@@ -664,11 +743,20 @@ def _scan_shell_line(line: str, number: int, hits: core.Hits) -> None:
         return
     for words in commands:
         command = _shell_command_index(words)
-        if command + 1 >= len(words) or words[command].rsplit("/", 1)[-1] != "br" or words[command + 1] != "init":
+        if command + 1 >= len(words) or words[command].rsplit("/", 1)[-1] != "br":
             continue
-        if _word_env_is_fixture_db(words[:command]) or _word_db_flag(words[command + 2:]):
+        subcommand = words[command + 1]
+        if subcommand == "init":
+            rule = RULE
+            own_db = _word_db_flag(words[command + 2:])
+        elif subcommand not in {"--help", "--version"}:
+            rule = INHERITED_RULE
+            own_db = _word_db_flag(words[command + 1:])
+        else:
             continue
-        hits.add(RULE, number, max(1, line.find(words[command]) + 1), "br init")
+        if _word_env_is_fixture_db(words[:command]) or own_db:
+            continue
+        hits.add(rule, number, max(1, line.find(words[command]) + 1), "br init" if rule == RULE else "br call")
 
 
 def _scan_shell_expansions(source: str, number: int, hits: core.Hits, initial_quote: str,
@@ -752,7 +840,7 @@ def _shell_calls(source: bytes, path: str) -> core.Scan:
 
 RULESET = core.RuleSet(
     prog="br_init_check",
-    description="Refuse newly added unpinned br init calls",
+    description="Refuse unpinned fixture br initialization and inherited calls",
     pragma=PRAGMA,
     rules=RULES,
     exempt=EXEMPT,

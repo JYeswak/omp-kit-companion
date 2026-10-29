@@ -460,7 +460,7 @@ function affectedArchive(fx: SaveFixture, answer: number, expected: number, base
 	writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
 	// A docs path in source text is a help pointer, not a dependency.
 	writeFileSync(join(dir, "lib/mod.ts"), `// see docs/notes.md\nexport const answer = (): number => ${answer};\n`);
-	writeFileSync(join(dir, "tests/cli/mod.test.ts"), `import { expect, test } from "bun:test";\nimport { answer } from "../../lib/mod.ts";\ntest("answer", () => { expect(answer()).toBe(${expected}); });\n`);
+	writeFileSync(join(dir, "tests/cli/mod.test.ts"), `import { expect, test } from "bun:test";\nimport { join } from "node:path";\nimport { answer } from "../../lib/mod.ts";\ntest("answer and gate-owned TMPDIR", () => { expect(answer()).toBe(${expected}); expect(process.env.TMPDIR).toBe(join(import.meta.dir, "../../var/agent-tmp")); });\n`);
 	writeFileSync(join(dir, "docs/notes.md"), "# notes\n");
 	return dir;
 }
@@ -469,7 +469,7 @@ function runFocused(fx: SaveFixture, source: string, archive: string, changed: s
 	writeFileSync(probe, `set -eu\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\ngate_focused || rc=$?\nexit "$rc"\n`);
 	const started = Date.now();
 	const result = Bun.spawnSync(["sh", probe], {
-		env: { ...process.env, ...fx.env, ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
+		env: { ...process.env, ...fx.env, TMPDIR: join(fx.dir, "caller-tmp"), ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
 		stdout: "pipe", stderr: "pipe",
 	});
 	return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString(), seconds: (Date.now() - started) / 1000 };

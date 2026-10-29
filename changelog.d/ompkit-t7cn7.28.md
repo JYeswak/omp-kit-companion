@@ -1,1 +1,1 @@
-- Fixed fixture tracker initialization to bind each fixture's own database; added staged and pushed-range refusal for unpinned `br init` calls.
+- Fixed fixture tracker initialization to bind each fixture's own database; staged and pushed-range ratchets now refuse unpinned `br init` and fixture calls inheriting caller `BEADS_DB`; fresh-gate Bun tests use an exact-tree-local `TMPDIR`.

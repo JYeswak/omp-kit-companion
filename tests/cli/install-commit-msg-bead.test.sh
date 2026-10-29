@@ -61,7 +61,20 @@ git -C "$A" add unsafe.ts
 out=$(CDPATH='' cd -- "$A" && sh "$A/.git/hooks/pre-commit" 2>&1)
 rc=$?
 ok "$rc" "0" "br-init-installed-chain-admits-pinned"
+printf 'brun(["create", "probe"], dir);\n' > "$A/unsafe.ts"
+git -C "$A" add unsafe.ts
+out=$(CDPATH='' cd -- "$A" && sh "$A/.git/hooks/pre-commit" 2>&1)
+rc=$?
+ok "$rc" "1" "inherited-br-call-installed-chain-refuses"
+if printf '%s' "$out" | grep -Fq "unsafe.ts:1:" && printf '%s' "$out" | grep -Fq "inherited-br-call"; then rc=0; else rc=1; fi
+ok "$rc" "0" "inherited-br-call-installed-chain-names-site"
+printf 'brun(["create", "probe"], dir, { BEADS_DB: join(dir, ".beads", "beads.db") });\n' > "$A/unsafe.ts"
+git -C "$A" add unsafe.ts
+out=$(CDPATH='' cd -- "$A" && sh "$A/.git/hooks/pre-commit" 2>&1)
+rc=$?
+ok "$rc" "0" "inherited-br-call-installed-chain-admits-bound"
 git -C "$A" reset -q -- unsafe.ts
+
 
 MSG="$TMP/msg-a"
 printf 'fix widgets with no identity\n' > "$MSG"

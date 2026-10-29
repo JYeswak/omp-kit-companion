@@ -302,6 +302,7 @@ run_affected_tests() {
 	[ -f "$WORK/queued.secs" ] && queued_before=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
 	tests_rc=0
 	if [ "$bun_files" -gt 0 ]; then
+		mkdir -p "$ARCHIVE_DIR/var/agent-tmp"
 		# Shards: bun's own --parallel workers, K from cores (a quarter, 2..4, as CI shards core four
 		# ways; 8 workers timed out compiled-CLI tests at 120 s on this Mac, measured 2026-10-19), never
 		# more than the selected files. --timings (CI's measured per-file durations) starts the slowest
@@ -313,8 +314,9 @@ run_affected_tests() {
 		echo "affected bun tests: files=$bun_files workers=$workers"
 		(
 			cd "$ARCHIVE_DIR"
-			export BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml"
-			heavy_step tests bun --config="$ARCHIVE_DIR/bunfig.toml" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@"
+			# Keep Bun test temp files in this exact-tree export, not the caller's live repo.
+			heavy_step tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml" \
+				bun --config="$ARCHIVE_DIR/bunfig.toml" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@"
 		) >"$tests_out" 2>&1 || tests_rc=$?
 		cat "$tests_out"
 	fi
