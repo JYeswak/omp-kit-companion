@@ -531,12 +531,12 @@ cp "$CAPSULE_MANIFEST" "$TMP/bad-blob.manifest"
 awk '$1 == "tests/cli/converge.test.ts" { $3 = "0000000000000000000000000000000000000000" } 1' "$TMP/bad-blob.manifest" > "$TMP/bad-blob.manifest.new" && mv "$TMP/bad-blob.manifest.new" "$TMP/bad-blob.manifest"
 out=$(CAPSULE_MANIFEST="$TMP/bad-blob.manifest" validate_inputs 2>&1); rc=$?
 check "$rc" "1" "precheck-corrupt-blob-refused" "$out" "MISMATCH-path:tests/cli/converge.test.ts"
-nogore=$(ls -d "$TMP"/real-* 2>/dev/null | wc -l | tr -d '[:space:]')
+nogore=$(find "$TMP" -maxdepth 1 -name 'real-*' | wc -l | tr -d '[:space:]')
 check "$nogore" "0" "precheck-corrupt-blob-no-replay" "x" "x"
 grep -v "^tests/cli/converge.test.ts " "$CAPSULE_MANIFEST" > "$TMP/bad-drop.manifest"
 out=$(CAPSULE_MANIFEST="$TMP/bad-drop.manifest" validate_inputs 2>&1); rc=$?
 check "$rc" "1" "precheck-dropped-path-refused" "$out" "PRECHECK-REFUSED"
-nogore=$(ls -d "$TMP"/real-* 2>/dev/null | wc -l | tr -d '[:space:]')
+nogore=$(find "$TMP" -maxdepth 1 -name 'real-*' | wc -l | tr -d '[:space:]')
 check "$nogore" "0" "precheck-dropped-path-no-replay" "x" "x"
 # sync_tree DIR REV: check out exactly the 78 X paths at REV bytes and mode;
 # paths absent at REV (the two X-added files) are removed for the reversal.
