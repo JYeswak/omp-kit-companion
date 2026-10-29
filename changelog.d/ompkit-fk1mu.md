@@ -1,0 +1,1 @@
+Fixed release packages omitting installer-placed commit hook helpers: ship check-commit-kitlib-reversal.sh and the opt-in native-br-preserve.py helper. A PKGMEMBER1 regression test derives required scripts from the installer's place calls, helper loop, and member table and checks the release ship list.

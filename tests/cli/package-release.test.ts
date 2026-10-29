@@ -12,6 +12,37 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 
 const repo = resolve(import.meta.dir, "../..");
+
+test("PKGMEMBER1: release ships every installer-placed script", () => {
+	const installer = readFileSync(join(repo, "scripts/install-commit-msg-bead.sh"), "utf8");
+	const packager = readFileSync(join(repo, "scripts/package-release.ts"), "utf8");
+	const shipList = packager.split("const files = [")[1]?.split("];")[0];
+	expect(shipList, "package-release.ts explicit shipped set").toBeDefined();
+	const shipped = new Set(shipList!.split('"').filter((_, index) => index % 2 === 1));
+	const placed = new Set<string>();
+	let helperLoop: { iterator: string; helpers: string[] } | undefined;
+	for (const raw of installer.split("\n")) {
+		const line = raw.trim();
+		if (line.startsWith("for ") && line.includes("; do")) {
+			const [iterator, helpers] = line.slice(4).split(" in ");
+			helperLoop = { iterator, helpers: helpers.split("; do")[0].split(" ").filter(Boolean) };
+		}
+		if (line === "done") helperLoop = undefined;
+		if (line.startsWith('place "$KITROOT/scripts/')) {
+			const source = line.split('"')[1].slice("$KITROOT/".length);
+			if (source.startsWith("scripts/$")) {
+				expect(helperLoop, "variable place source needs a literal helper loop").toBeDefined();
+				expect(source).toBe(`scripts/$${helperLoop!.iterator}`);
+				for (const helper of helperLoop!.helpers) placed.add(`scripts/${helper}`);
+			} else placed.add(source);
+		}
+		for (const quoted of line.split('"').filter((_, index) => index % 2 === 1)) {
+			if (quoted.startsWith("hooks.d/") && quoted.includes(" scripts/")) placed.add(quoted.split(" ")[1]);
+		}
+	}
+	expect(placed.size).toBeGreaterThan(0);
+	expect([...placed].filter(path => !shipped.has(path)).sort(), "installer sources absent from release ship list").toEqual([]);
+});
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
 const sourceCacheRoot = ompSourceCacheRoot(process.env);
 const nativeCacheEnv = sourceCacheRoot ? { OMP_KIT_OMP_SRC_CACHE: resolve(sourceCacheRoot) } : {};
