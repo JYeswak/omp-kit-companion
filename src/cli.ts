@@ -3944,8 +3944,14 @@ async function reconcileUpdateCommand(stateRoot: string, id: string, confirmed: 
 			prefix = prefixFlag;
 		}
 		const result = reconcilePendingUpdate({ stateRoot, prefix, id });
-		return { code: 0, data: { overall: "OK", scope: "kit", action: "RECONCILED", receipt_id: result.receiptId,
-			active_version: result.activeVersion, verified: result.verified }, verification: "UNVERIFIED" };
+		const store = dirname(dirname(result.verified.binary));
+		const binary = join(dirname(dirname(store)), "bin", "omp-kit");
+		const relink = await relinkKitPlugin(binary, store);
+		const envelope = { code: 0, data: { overall: "OK", scope: "kit", action: "RECONCILED", receipt_id: result.receiptId,
+			active_version: result.activeVersion, verified: result.verified } };
+		if (!relink.ok) return updatePostApplyEnvelope(envelope, relink, null, store);
+		return { code: 0, data: { ...envelope.data, plugin_relink: "APPLIED", plugin_receipt_id: relink.receiptId,
+			plugin_undo_command: relink.undoCommand, plugin_relink_detail: relink.detail }, verification: "UNVERIFIED" };
 	} catch (error) {
 		const code = error instanceof Error ? error.message : "";
 		if (code === "PENDING_RECOVERY") return { code: 1, data: { overall: "FAIL", scope: "kit", action: "REFUSED", receipt_id: id },

@@ -13,6 +13,8 @@ import { serviceLabel } from "../../src/service.ts";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run as runBounded } from "../../src/kitlib/run";
+const repoRoot = resolve(import.meta.dir, "../..");
+
 
 test("unknown update failure preserves its code and original message", () => {
  expect(updateFailureCause(new Error("boom lower"))).toMatchObject({
@@ -109,6 +111,160 @@ async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: Fix
 const input = (ctx: FixtureContext) => ({ prefix: ctx.prefix, stateRoot: ctx.stateRoot, home: ctx.home,
 	indexPath: ctx.indexPath, archivePath: ctx.archivePath, platform: ctx.platform,
 	version: ctx.nextVersion, sourceTag: "v" + ctx.nextVersion });
+const RECONCILE_PROFILES = ["default", "claude", "codex", "muse"] as const;
+
+function reconcilePluginLink(home: string, profile: string): string {
+	const profileRoot = profile === "default" ? join(home, ".omp", "plugins") : join(home, ".omp", "profiles", profile, "plugins");
+	return join(profileRoot, "node_modules", "omp-kit-companion");
+}
+
+function writeReconcilePluginStore(root: string, version: string): void {
+	mkdirSync(join(root, "rules"), { recursive: true });
+	mkdirSync(join(root, "extensions"), { recursive: true });
+	writeFileSync(join(root, "package.json"), JSON.stringify({ name: "omp-kit-companion", version }));
+	writeFileSync(join(root, "rules", "rule-a.md"), `# ${version}\n`);
+}
+
+type PreparedPartialReconcile = { receiptId: string; store: string; oldStore: string; env: Record<string, string> };
+
+function preparePartialReconcile(ctx: FixtureContext, skipLinkProfile = ""): PreparedPartialReconcile {
+	const stateRoot = join(ctx.root, "omp-kit");
+	mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+	chmodSync(stateRoot, 0o700);
+	const lock = acquireKitUpdateLock(stateRoot);
+	let receiptId: string;
+	try {
+		receiptId = beginKitUpdateReceipt(stateRoot, lock, {
+			scope: "kit", identitySha256: sha(ctx.oldBinary), kitVersion: ctx.currentVersion, ompVersion: null, channel: null,
+		}).id;
+	} finally { lock.release(); }
+
+	const oldStore = join(ctx.prefix, "releases", ctx.currentVersion);
+	const store = join(ctx.prefix, "releases", ctx.nextVersion);
+	writeReconcilePluginStore(oldStore, ctx.currentVersion);
+	writeReconcilePluginStore(store, ctx.nextVersion);
+	const cliPath = join(repoRoot, "src", "cli.ts");
+	const installedCli = Buffer.from(`#!/bin/sh\nexec '${process.execPath.split("'").join("'\\''")}' '${cliPath.split("'").join("'\\''")}' "$@"\n`);
+	mkdirSync(join(store, "bin"), { recursive: true });
+	writeFileSync(join(store, "bin", "omp-kit"), installedCli, { mode: 0o755 });
+	chmodSync(join(store, "bin", "omp-kit"), 0o755);
+	const stable = join(ctx.prefix, "bin", "omp-kit");
+	renameSync(stable, join(ctx.prefix, "bin", "omp-kit.previous"));
+	symlinkSync(`../releases/${ctx.nextVersion}/bin/omp-kit`, stable);
+
+	for (const profile of RECONCILE_PROFILES) {
+		const agent = profile === "default"
+			? join(ctx.home, ".omp", "agent")
+			: join(ctx.home, ".omp", "profiles", profile, "agent");
+		mkdirSync(agent, { recursive: true });
+		writeFileSync(join(agent, "config.yml"), "ttsr:\n  disabledRules: []\n");
+		const link = reconcilePluginLink(ctx.home, profile);
+		mkdirSync(dirname(link), { recursive: true });
+		symlinkSync(oldStore, link);
+	}
+
+	const activationPath = join(stateRoot, `kit-activation-${receiptId}.json`);
+	writeFileSync(activationPath, JSON.stringify({
+		schema_version: 1, id: receiptId,
+		before: { version: ctx.currentVersion, sha256: sha(ctx.oldBinary),
+			target: `../releases/${ctx.currentVersion}/bin/omp-kit`,
+			binary: join(ctx.prefix, "releases", ctx.currentVersion, "bin", "omp-kit") },
+		after: { version: ctx.nextVersion, sha256: sha(installedCli),
+			target: `../releases/${ctx.nextVersion}/bin/omp-kit`,
+			binary: join(ctx.prefix, "releases", ctx.nextVersion, "bin", "omp-kit") },
+		state: "READY",
+	}), { mode: 0o600 });
+	chmodSync(activationPath, 0o600);
+
+	const ompBin = join(ctx.root, "omp-bin");
+	mkdirSync(ompBin);
+	writeFileSync(join(ompBin, "omp"), String.raw`#!/bin/sh
+set -e
+profile=default
+if [ "$1" = "--profile" ]; then profile=$2; shift 2; fi
+if [ "$profile" = default ]; then plugin_dir="$HOME/.omp/plugins"; else plugin_dir="$HOME/.omp/profiles/$profile/plugins"; fi
+link="$plugin_dir/node_modules/omp-kit-companion"
+case "$1 $2" in
+  "plugin list")
+    if [ -L "$link" ]; then
+      printf '{"npm":[{"name":"omp-kit-companion","path":"%s"}]}\n' "$(readlink "$link")"
+    else
+      printf '{"npm":[]}\n'
+    fi
+    ;;
+  "plugin link")
+    if [ "$OMP_FAKE_SKIP_LINK" = "$profile" ]; then exit 0; fi
+    target=$3
+    rm -f "$link"
+    mkdir -p "$plugin_dir/node_modules"
+    ln -s "$target" "$link"
+    ;;
+  "plugin uninstall")
+    rm -f "$link"
+    ;;
+  "config get")
+    printf '{"key":"ttsr.disabledRules","value":[]}\n'
+    ;;
+  *)
+    printf 'unsupported OMP command\n' >&2
+    exit 2
+    ;;
+esac
+`, { mode: 0o755 });
+	writeFileSync(join(ompBin, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "1.2.3" }));
+	for (const relativePath of ["export/ttsr.ts", "capability/rule.ts", "discovery/helpers.ts"]) {
+		const sourcePath = join(ompBin, "src", relativePath);
+		mkdirSync(dirname(sourcePath), { recursive: true });
+		writeFileSync(sourcePath, "export {};\n");
+	}
+	const nativePackage = join(ompBin, "node_modules", "@oh-my-pi", "pi-natives");
+	mkdirSync(nativePackage, { recursive: true });
+	writeFileSync(join(nativePackage, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-natives" }));
+	return {
+		receiptId, store, oldStore,
+		env: {
+			...process.env,
+			HOME: ctx.home,
+			XDG_CONFIG_HOME: join(ctx.root, "xdg-config"),
+			XDG_STATE_HOME: ctx.root,
+			XDG_DATA_HOME: join(ctx.root, "xdg-data"),
+			XDG_CACHE_HOME: join(ctx.root, "xdg-cache"),
+			PATH: `${ompBin}:/usr/bin:/bin`,
+			OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", NO_COLOR: "1",
+			TMPDIR: process.env.TMPDIR ?? ctx.root,
+			OMP_FAKE_SKIP_LINK: skipLinkProfile,
+		},
+	};
+}
+
+async function runPartialReconcile(prepared: PreparedPartialReconcile) {
+	const result = await runBounded([
+		process.execPath, join(repoRoot, "src", "cli.ts"), "update", "--reconcile", prepared.receiptId, "--yes", "--json",
+	], { deadline_s: 60, cwd: repoRoot, env: prepared.env });
+	if (result.timed_out || result.rc === null)
+		throw new Error(`update --reconcile timed out or was not reaped: ${Buffer.from(result.stderr).toString("utf8")}`);
+	return { rc: result.rc, output: JSON.parse(Buffer.from(result.stdout).toString("utf8")) as { data: Record<string, unknown> } };
+}
+
+test("UPDATERELINK1: native reconcile relinks every covered profile to the verified release", async () => fixture(async ctx => {
+	const prepared = preparePartialReconcile(ctx);
+	const result = await runPartialReconcile(prepared);
+	expect(result.rc).toBe(0);
+	for (const profile of RECONCILE_PROFILES)
+		expect(readlinkSync(reconcilePluginLink(ctx.home, profile))).toBe(prepared.store);
+	expect(result.output.data).toMatchObject({ overall: "OK", action: "RECONCILED", plugin_relink: "APPLIED", active_version: ctx.nextVersion });
+}));
+
+test("UPDATERELINK1 planted negative: an incomplete profile relink cannot report OK", async () => fixture(async ctx => {
+	const prepared = preparePartialReconcile(ctx, "codex");
+	const result = await runPartialReconcile(prepared);
+	expect(result.rc).toBe(1);
+	expect(result.output.data).toMatchObject({ overall: "FINDINGS", action: "RECONCILED", plugin_relink: "FAILED", active_version: ctx.nextVersion });
+	expect(readlinkSync(reconcilePluginLink(ctx.home, "codex"))).toBe(prepared.oldStore);
+	for (const profile of RECONCILE_PROFILES.filter(profile => profile !== "codex"))
+		expect(readlinkSync(reconcilePluginLink(ctx.home, profile))).toBe(prepared.store);
+}));
+
 
 async function copyReleaseSource(sourceRoot: string, destination: string): Promise<void> {
 	mkdirSync(destination, { recursive: true });

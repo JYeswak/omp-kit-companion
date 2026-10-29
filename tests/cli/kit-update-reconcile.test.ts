@@ -73,7 +73,7 @@ test("[2] planted: differing active bytes refuse and stay pending", () => {
 	}
 });
 
-test("CLI without --prefix derives the receipt install and refuses tampered postimages", () => {
+test("CLI without --prefix reports relink failures and refuses tampered postimages", () => {
 	for (const tampered of [false, true]) {
 		const ctx = fixture({
 			liveBytes: Buffer.from("binary-0.2.17"),
@@ -91,14 +91,16 @@ test("CLI without --prefix derives the receipt install and refuses tampered post
 				stdout: "pipe", stderr: "pipe",
 			});
 			const output = JSON.parse(result.stdout.toString());
-			expect(result.exitCode).toBe(tampered ? 1 : 0);
+			expect(result.exitCode).toBe(1);
+			expect(existsSync(join(stateRoot, "kit-update.pending.json"))).toBe(tampered);
 			if (tampered) {
 				expect(output.errors[0].code).toBe("PENDING_RECOVERY");
-				expect(existsSync(join(stateRoot, "kit-update.pending.json"))).toBe(true);
 			} else {
 				expect(output.data.action).toBe("RECONCILED");
+				expect(output.data.overall).toBe("FINDINGS");
+				expect(output.data.plugin_relink).toBe("FAILED");
+				expect(output.errors[0].code).toBe("PLUGIN_RELINK_FAILED");
 				expect(output.data.verified.binary).toBe(join(ctx.prefix, "releases", "0.2.17", "bin", "omp-kit"));
-				expect(existsSync(join(stateRoot, "kit-update.pending.json"))).toBe(false);
 			}
 		} finally {
 			rmSync(ctx.root, { recursive: true, force: true });
