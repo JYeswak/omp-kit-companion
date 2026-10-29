@@ -392,6 +392,49 @@ printf '%s\n' "$PY_BAD" > "$R/tool.py"
 git -C "$R" add tool.py
 out=$(commit "$R" -m "[test] falsely published head" -m "Revert: $X")
 check "$?" "1" "origin-unpublished-head-refused" "$out" 'origin/main tracking ref is stale'
+# A legitimately published entry can also be the current HEAD entry. Use an
+# older explicit base so the staged raw-spawn entry is judged while HEAD and
+# origin/main both name the published commit.
+R=$(origin_repo origin-published-head) || exit 1
+origin=$(git -C "$R" rev-parse refs/remotes/origin/main) || exit 1
+git -C "$R" checkout -q "$origin" || exit 1
+head=$(git -C "$R" rev-parse HEAD) || exit 1
+parent=$(git -C "$R" rev-parse "$head^") || exit 1
+head_entry=$(git -C "$R" rev-parse "HEAD:tool.py") || exit 1
+index_entry=$(git -C "$R" rev-parse :tool.py) || exit 1
+published_entry=$(git -C "$R" rev-parse "$origin:tool.py") || exit 1
+if [ "$origin" = "$head" ] && [ "$index_entry" = "$head_entry" ] && [ "$index_entry" = "$published_entry" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL origin-published-head-fixture: origin=%s HEAD=%s index=%s published=%s\n' "$origin" "$head" "$index_entry" "$published_entry"
+fi
+out=$(python3 -B "$SCRIPTS/kitlib_ratchet.py" --staged --base "$parent" --repo "$R" 2>&1)
+check "$?" "0" "origin-published-head-entry-admitted" "$out" "ADMITTED incumbent raw-spawn entry matches exact staged path at origin/main@"
+
+# The same HEAD/index entry is refused once origin/main publishes different bytes.
+R=$(origin_repo origin-head-not-published) || exit 1
+origin=$(git -C "$R" rev-parse refs/remotes/origin/main) || exit 1
+published=$(git -C "$R" rev-parse HEAD) || exit 1
+git -C "$R" -c core.hooksPath=/dev/null push -q origin "$published:refs/heads/main" || exit 1
+git -C "$R" update-ref refs/remotes/origin/main "$published" || exit 1
+git -C "$R" checkout -q "$origin" || exit 1
+head=$(git -C "$R" rev-parse HEAD) || exit 1
+parent=$(git -C "$R" rev-parse "$head^") || exit 1
+head_entry=$(git -C "$R" rev-parse "HEAD:tool.py") || exit 1
+index_entry=$(git -C "$R" rev-parse :tool.py) || exit 1
+published_entry=$(git -C "$R" rev-parse refs/remotes/origin/main:tool.py) || exit 1
+if [ "$head" = "$origin" ] && [ "$index_entry" = "$head_entry" ] && [ "$index_entry" != "$published_entry" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL origin-not-published-head-fixture: HEAD=%s index=%s published=%s\n' "$head" "$index_entry" "$published_entry"
+fi
+out=$(python3 -B "$SCRIPTS/kitlib_ratchet.py" --staged --base "$parent" --repo "$R" 2>&1)
+rc=$?
+if [ "$rc" = "1" ] && printf '%s' "$out" | grep -Fq "raw-spawn" && ! printf '%s' "$out" | grep -Fq "ADMITTED incumbent raw-spawn"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL origin-head-entry-not-published-refused: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
 
 R=$(origin_repo origin-byte-near-match)
 X=$(git -C "$R" rev-parse HEAD)
@@ -618,6 +661,27 @@ for p in $XPATHS; do
 	fi
 done
 check "$alleq" "0" "real-withdrawal-all-bytes" "x" "x"
+# The prior .41 fixture change is this real X/P delta. Compare the complete
+# P-side blob as history, without claiming .41 qualification.
+prior41_path=tests/cli/pre-push-gate.test.sh
+prior41_got=$(git -C "$R" rev-parse "HEAD:$prior41_path") || exit 1
+prior41_want=$(git -C "$OBJSRC" rev-parse "$PREAL:$prior41_path") || exit 1
+check "$prior41_got" "$prior41_want" "real-withdrawal-prior-41-hunk-preserved" "x" "x"
+
+# Reusing X's hunk-less blob plus a marker keeps this path staged; parent
+# proof must reject the missing P-side .41 fixture history.
+R=$(real_repo real-prior-41-hunk-missing) || exit 1
+X=$(git -C "$R" rev-parse HEAD) || exit 1
+sync_tree "$R" "$PREAL" || exit 1
+git -C "$OBJSRC" show "$XREAL:$prior41_path" > "$R/$prior41_path" || exit 1
+printf '\n# planted marker: .41 fixture history is missing\n' >> "$R/$prior41_path"
+for p in $XPATHS; do git -C "$R" add -- "$p"; done
+out=$(commit "$R" -m "[test] real withdrawal drops .41 fixture hunk" -m "Revert: $X")
+rc=$?
+check "$rc" "1" "real-withdrawal-prior-41-hunk-refused" "$out" "does not match X parent"
+printf '%s' "$out" | grep -Fq "$prior41_path"
+check "$?" "0" "real-withdrawal-prior-41-hunk-refusal-names-path" "x" "x"
+
 # A mixed new spawn beside the exact reversal refuses naming the new file.
 R=$(real_repo real-mixed)
 X=$(git -C "$R" rev-parse HEAD) || exit 1
