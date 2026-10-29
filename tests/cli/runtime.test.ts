@@ -10,7 +10,7 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { installReadonlyBr, resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { verifyBead } from "../../src/verify.ts";
-import { packageSourceRevision } from "../../scripts/package-release.ts";
+import { identifyExactSource } from "../../scripts/exact-source.ts";
 const createdScratchDirs: string[] = [];
 afterAll(() => {
 	for (const dir of createdScratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -1082,19 +1082,29 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		// Official exact-source HOST candidate: build the unmodified official recipe
 		// from the exact source tree (never the dirty shared tree), then smoke it.
 		// The previous PATH-binary comparator is not this proof (old guardless release).
-		// Source identity via the packaged seam (packageSourceRevision): a clean git
-		// checkout yields its HEAD; a history-free archive yields its stamped
-		// source_revision; anything else (dirty, unstamped, ancestor) is an unmet
-		// prerequisite, never a silent pass. Fresh gates run this file from a git
-		// archive with no .git, where rev-parse HEAD cannot pass.
-		const revision = packageSourceRevision(REPO_ROOT, readFileSync(join(REPO_ROOT, "package.json")));
-		if (revision === null) throw new Error("no exact source identity; unmet prerequisite: clean checkout or stamped archive export");
-		const hasGit = existsSync(join(REPO_ROOT, ".git"));
-		const srcExport = hasGit ? join(root, "official-src") : REPO_ROOT;
-		if (hasGit) {
+		// Identity via the shared helper (scripts/exact-source.ts): a tree with
+		// its own .git keeps plain Git behavior (top-level guard, archive HEAD);
+		// a history-free archive resolves its stamped source_revision and builds
+		// from that tree. Anything else is an unmet prerequisite, never a
+		// silent pass. Fresh gates run this file from a git archive with no
+		// .git, where rev-parse HEAD cannot pass.
+		const identity = identifyExactSource(REPO_ROOT, readFileSync(join(REPO_ROOT, "package.json")));
+		if (identity === null) throw new Error("no exact source identity; unmet prerequisite: clean checkout or stamped archive export");
+		let revision: string;
+		let srcExport: string;
+		if (identity.kind === "git") {
+			const headRev = await run(["git", "-C", REPO_ROOT, "rev-parse", "HEAD"], { cwd: root, deadline_s: 60 });
+			if (headRev.rc !== 0) throw new Error("no HEAD; unmet prerequisite: exact committed source");
+			revision = utf8(headRev.stdout).trim();
+			const topRev = await run(["git", "-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { cwd: root, deadline_s: 60 });
+			if (topRev.rc !== 0 || resolve(utf8(topRev.stdout).trim()) !== resolve(REPO_ROOT)) throw new Error(`source identity not exact: ${REPO_ROOT} is not a repo top-level; refusing ancestor discovery`);
+			srcExport = join(root, "official-src");
 			mkdirSync(srcExport, { recursive: true });
 			const archived = await run(["sh", "-c", `git -C ${JSON.stringify(REPO_ROOT)} archive ${JSON.stringify(revision)} | tar -x -C ${JSON.stringify(srcExport)}`], { cwd: root, deadline_s: 300 });
 			if (archived.rc !== 0) throw new Error(`exact source export -> ${archived.rc}: ${utf8(archived.stderr).slice(0, 300)}`);
+		} else {
+			revision = identity.revision;
+			srcExport = REPO_ROOT;
 		}
 		const pkgVer = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { version: string }).version;
 		const resultDir = join(root, "official-out");
@@ -1169,12 +1179,18 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		await git(["-c", "user.name=t", "-c", "user.email=t@x", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "identity fixture [test]"]);
 		const head = await run(["git", "rev-parse", "HEAD"], { cwd: cdir, deadline_s: 60 });
 		const headSha = utf8(head.stdout).trim();
-		expect(packageSourceRevision(cdir, readFileSync(join(cdir, "package.json")))).toBe(headSha);
-		// Control 2: an unstamped history-free tree has no identity, so the
+		expect(identifyExactSource(cdir, readFileSync(join(cdir, "package.json")))).toEqual({ kind: "git" });
+		// Control 2: a stamped history-free tree resolves its stamp without git.
+		const stamped = join(root, "stamped");
+		mkdirSync(stamped, { recursive: true });
+		const stampedBytes = Buffer.from(JSON.stringify({ source_revision: headSha }));
+		writeFileSync(join(stamped, "package.json"), stampedBytes);
+		expect(identifyExactSource(stamped, readFileSync(join(stamped, "package.json")))).toEqual({ kind: "stamped", revision: headSha });
+		// Control 3: an unstamped history-free tree has no identity, so the
 		// official-candidate path must refuse it instead of building from it.
 		const bare = join(root, "bare");
 		mkdirSync(bare, { recursive: true });
 		writeFileSync(join(bare, "package.json"), unstamped);
-		expect(packageSourceRevision(bare, readFileSync(join(bare, "package.json")))).toBe(null);
+		expect(identifyExactSource(bare, readFileSync(join(bare, "package.json")))).toBe(null);
 	});
 });
