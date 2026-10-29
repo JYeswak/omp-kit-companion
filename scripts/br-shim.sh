@@ -214,6 +214,28 @@ fi
  	fi
  fi
 
+# REPLAYABLE1 claim gate (ompkit-fp72.135.3.71, J-2026-10-29-22 'Migrate at
+# claim, enforced'): `br update ID --claim` and the move to in_review are
+# refused REFUSED_NOT_REPLAYABLE when `omp-kit verify` cannot replay the
+# bead's acceptance. The verdict is br-update-lint.py's (the verify grammar
+# through box-lint.ts); the shim only relays exit 4. A helper that cannot run
+# passes through with a warning, the update lint's fail-open contract.
+if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && { [ "$gate_claim" = 1 ] || [ "$gate_status" = "in_review" ]; }; then
+	replay_lint="$(dirname -- "$self_path")/br-update-lint.py"
+	if [ -f "$replay_lint" ] && command -v python3 >/dev/null 2>&1; then
+		BR_UPDATE_REAL="$real" BR_UPDATE_PROJECT="$tracker_project" BR_UPDATE_DB="$tracker_db_path" BR_UPDATE_REPLAYABLE_ONLY=1 \
+			python3 "$replay_lint" update "$gate_id" "$@"
+		replay_rc=$?
+		case "$replay_rc" in
+			0) ;;
+			4) exit 4 ;;
+			*) echo "br-shim: REPLAYABLE_GATE_UNVERIFIED update lint rc=$replay_rc, passing through" >&2 ;;
+		esac
+	else
+		echo "br-shim: REPLAYABLE_GATE_UNVERIFIED update lint or python3 absent, passing through" >&2
+	fi
+fi
+
 gate_fire=0
 if [ "$gate_sub" = "close" ] && [ -n "$gate_id" ]; then gate_fire=1; fi
 if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_status" = "in_review" ]; then gate_fire=1; fi

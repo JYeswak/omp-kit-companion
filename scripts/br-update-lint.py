@@ -2,7 +2,8 @@
 """br-update-lint.py -- LINTGATE1 update path (ompkit-fp72.19.1.28).
 
 Gate content edits to a bead (`br update ID ...`) on the per-bead
-bead-lint subset before the write lands. Invoked by br-shim.sh; also
+bead-lint subset before the write lands. Invoked by the kit-flywheel-guard
+extension and, for the REPLAYABLE1 claim gate only, by br-shim.sh; also
 usable directly as a kit `bead update` verb.
 
 Exit contract (shim honors it):
@@ -16,7 +17,8 @@ Only lint-relevant content flags trigger evaluation: --title,
 --add-acceptance, --set-labels/--add-label/--remove-label, -t/--type.
 Workflow flags (--status/--priority/--assignee/--owner/--claim) and edge
 flags (--parent) never newly fail the gated checks and pass through, so
-claiming a failing bead for repair is never deadlocked by this gate.
+claiming a failing bead for repair is never deadlocked by them; only the
+REPLAYABLE1 claim gate below judges a claim.
 
 Repair admission (LINTREPAIR ompkit-fp72.135.3.50): a content edit to a bead
 that already fails is admitted when the checks it fails afterwards are a
@@ -42,6 +44,24 @@ LINT_REFUSED line, each detailed on its own line; after any PREGRADE_*
 refusal the opt-in file's optional "hint" (control characters stripped,
 500 chars max) follows on a `PREGRADE_HINT` line. Legacy beads are admitted
 with a one-line AC_PHASE_LEGACY notice.
+
+REPLAYABLE1 (ompkit-fp72.135.3.71): on an edit carrying --acceptance-criteria
+or --add-acceptance, a non-[v] box the edit adds or changes that `omp-kit
+verify` cannot replay (no backticked command, or a tag run other than one
+scope letter then one known phase) fails r-verify-replayable naming the box
+and its corrected shape. Boxes left as stored are reported on an
+ACCEPTANCE_NOT_REPLAYABLE_LEGACY line and never refused; REPLAYABLE_EXIT_ONLY
+names boxes with no expected outcome. The box grammar is src/verify.ts's, run
+through scripts/box-lint.ts.
+
+Claim gate (REPLAYABLE1 revision, J-2026-10-29-22 'Migrate at claim,
+enforced'): `--claim` and `--status in_review` are refused (exit 4,
+REFUSED_NOT_REPLAYABLE on the LINT_REFUSED line) unless `omp-kit verify` can
+replay the bead's acceptance as it would stand after the command: at least
+one non-[v] box, and every such box replayable. Each bad box is named on its
+own REFUSED_NOT_REPLAYABLE line with the corrected shape; once the boxes are
+rewritten the claim is admitted. With BR_UPDATE_REPLAYABLE_ONLY=1 (the
+shim's call) only this gate runs.
 
 Reads are live (`br show`, `br list`); no JSONL flush is involved, so a
 fixed bead passes immediately (LINTGATE1 acceptance 2).
@@ -216,29 +236,70 @@ def main(argv: list[str]) -> int:
     args = parse_update(argv)
     if args.subcommand != "update" or not args.bead_id:
         return 0
-    if not has_content_flags(args):
+    # REPLAYABLE1 claim gate (J-2026-10-29-22): a claim or an in_review move
+    # needs acceptance `omp-kit verify` can replay. br-shim.sh runs only this
+    # gate (BR_UPDATE_REPLAYABLE_ONLY=1); content edits get the full lint.
+    claim_gate = args.claim or args.status == "in_review"
+    replay_only = os.environ.get("BR_UPDATE_REPLAYABLE_ONLY") == "1"
+    full = not replay_only and has_content_flags(args)
+    if not (full or claim_gate):
         return 0
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
+    failures: list[str] = []
+    replay_notices: list[str] = []
+    claim_refusal: list[str] = []
+    repair_base = None
+    admission = None
     try:
-        from bead_lint import lint_bead_failures
+        from bead_lint import (BoxGrammarUnavailable, lint_bead_failures,
+                               replayable_claim_refusal, replayable_findings)
         import ac_phase
         live = show_bead(real, project, db, args.bead_id)
         bead = prospective(live, args, project)
-        byid = tracker_ids(real, project, db) | {bead["id"]}
-        failures = lint_bead_failures(bead, byid)
-        # LINTREPAIR: the live bead's own failures, judged the same way, are the
-        # baseline a repair is measured against (content edits only).
-        repair_base = (lint_bead_failures(prospective(live, parse_update([]), project), byid)
-                       if failures and args.status is None and not args.claim else None)
-        admission = (ac_phase.in_review_admission(
-            bead, repo=tracker_repo(project, db or os.environ.get("BEADS_DB", "")))
-            if args.status == "in_review" else None)
+        if claim_gate:
+            try:
+                claim_refusal = replayable_claim_refusal(bead)
+            except BoxGrammarUnavailable as exc:
+                replay_notices.append(f"REPLAYABLE_UNVERIFIED {exc}")
+        if full:
+            byid = tracker_ids(real, project, db) | {bead["id"]}
+            failures = lint_bead_failures(bead, byid)
+            # REPLAYABLE1: only a box this edit adds or changes can fail; boxes
+            # left as stored are reported, never refused. An edit that does not
+            # touch acceptance cannot add a box, so it is not judged here (the
+            # legacy backlog is bead_lint.py --replayable-report's to list).
+            replay_failures: list[str] = []
+            if args.acceptance is not None or args.add_acceptance:
+                try:
+                    replay_failures, notices = replayable_findings(
+                        bead, live.get("acceptance_criteria") or "")
+                    replay_notices.extend(notices)
+                except BoxGrammarUnavailable as exc:
+                    replay_notices.append(f"REPLAYABLE_UNVERIFIED {exc}")
+            failures = sorted(failures + replay_failures)
+            # LINTREPAIR: the live bead's own failures, judged the same way, are the
+            # baseline a repair is measured against (content edits only).
+            repair_base = (lint_bead_failures(prospective(live, parse_update([]), project), byid)
+                           if failures and args.status is None and not args.claim else None)
+            admission = (ac_phase.in_review_admission(
+                bead, repo=tracker_repo(project, db or os.environ.get("BEADS_DB", "")))
+                if args.status == "in_review" else None)
     except Exception as exc:  # fail OPEN on probe failure, never refuse blind
         print(f"br-shim: LINT_GATE_UNVERIFIED {exc}", file=sys.stderr)
         return 3
+    for notice in replay_notices:
+        print(f"br-shim: {notice}", file=sys.stderr)
     details: list[str] = []
+    if claim_refusal:
+        failures.insert(0, "REFUSED_NOT_REPLAYABLE")
+        move = "claimed" if args.claim else "moved to in_review"
+        details.append(
+            f"br-shim: REFUSED_NOT_REPLAYABLE {bead['id']}: omp-kit verify cannot replay this "
+            f"bead's acceptance, so it cannot be {move} until each box below is rewritten in the "
+            f"verify grammar (keep every obligation word for word; J-2026-10-29-22), then retry")
+        details.extend(f"br-shim: REFUSED_NOT_REPLAYABLE {line}" for line in claim_refusal)
     if admission is not None:
         if admission["notice"]:
             print(f"br-shim: {admission['notice']}", file=sys.stderr)

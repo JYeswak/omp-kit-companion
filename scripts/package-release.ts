@@ -33,7 +33,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/check-commit-kitlib-reversal.sh", "scripts/native-br-preserve.py",
 	"scripts/br_init_check.py", "scripts/check-staged-br-init.sh",
 	"scripts/sources.py", "scripts/check-staged-sources.sh", "docs/sources.md",
-	"scripts/bead_lint.py", "scripts/ac_phase.py", "scripts/br_create_guard_core.py", "scripts/br-create-lint.py", "scripts/br-update-lint.py",
+	"scripts/bead_lint.py", "scripts/ac_phase.py", "scripts/br_create_guard_core.py", "scripts/br-create-lint.py", "scripts/br-update-lint.py", "scripts/box-lint.ts",
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",
 	"scripts/context-inventory.ts", "scripts/doctor.sh", "scripts/regex-budget.ts", "scripts/e2e-live.sh", "scripts/install-extensions.sh", "scripts/install.sh",
@@ -53,6 +53,8 @@ const BUNDLE_ERRORS: Record<string, string | undefined> = {
 	"extensions/kit-inbox-wake.ts": "INBOX_WAKE_BUNDLE_FAILED",
 	"extensions/kit-composer-state.ts": "COMPOSER_STATE_BUNDLE_FAILED",
 	"scripts/ttsr-harness.ts": "HARNESS_BUNDLE_FAILED",
+	// REPLAYABLE1: bead_lint's box grammar is src/verify.ts's own; bundled, the installed lint needs no checkout src/.
+	"scripts/box-lint.ts": "BOX_LINT_BUNDLE_FAILED",
 	"tests/live/admission-extension.mjs": "ADMISSION_FIXTURE_BUNDLE_FAILED",
 };
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");

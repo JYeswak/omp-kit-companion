@@ -435,8 +435,11 @@ class CreateAdmission(unittest.TestCase):
         ])
         return br_create_guard_core.lint_prospective(parsed, [], str(ROOT), now=now)
 
+    # REPLAYABLE1 (ompkit-fp72.135.3.71): every create box must also be one
+    # `omp-kit verify` can replay, so these phase fixtures name a command; the
+    # replayability refusal itself is tested in tests/cli/bead-replayable.test.ts.
     def test_planted_untagged_create_refused_naming_the_line(self) -> None:
-        line = "- [ ] [a] widget builds; planted negative: bad input refused"
+        line = "- [ ] [a] widget builds `true` -> rc 0; planted negative: bad input refused"
         failures = self.lint(line, self.AFTER)
         self.assertEqual(len(failures), 1, failures)
         self.assertTrue(failures[0].startswith("l-ac-phase:AC_PHASE_UNTAGGED"), failures)
@@ -445,18 +448,20 @@ class CreateAdmission(unittest.TestCase):
             self.assertIn(tag, failures[0])
 
     def test_control_tagged_create_admitted(self) -> None:
-        self.assertEqual(self.lint("- [ ] [a] [build] widget builds; planted negative: bad input refused", self.AFTER), [])
+        self.assertEqual(self.lint("- [ ] [a] [build] widget builds `true` -> rc 0; planted negative: bad input refused", self.AFTER), [])
         self.assertEqual(self.lint("- [ ] AC-KITLIB-2 ratchet holds [a]; planted negative RED", self.AFTER), [])
         # A scope letter before AC-KITLIB hides it (locked grammar): untagged.
-        self.assertIn("AC_PHASE_UNTAGGED", "".join(self.lint("- [ ] [a] AC-KITLIB-2 ratchet; planted negative RED", self.AFTER)))
+        self.assertIn("AC_PHASE_UNTAGGED", "".join(self.lint("- [ ] [a] AC-KITLIB-2 ratchet `true` -> rc 0; planted negative RED", self.AFTER)))
 
     def test_planted_multi_create_refused(self) -> None:
-        failures = self.lint("- [ ] [a] [build] [live] widget; planted negative RED", self.AFTER)
-        self.assertEqual(len(failures), 1, failures)
+        failures = self.lint("- [ ] [a] [build] [live] widget `true` -> rc 0; planted negative RED", self.AFTER)
+        # Two phases are AC_PHASE_MULTI here and a tag run verify cannot replay.
+        self.assertEqual(len(failures), 2, failures)
         self.assertIn("AC_PHASE_MULTI", failures[0])
+        self.assertTrue(failures[1].startswith("r-verify-replayable:ACCEPTANCE_NOT_REPLAYABLE box 1"), failures)
 
     def test_pre_cutover_untagged_create_admitted(self) -> None:
-        self.assertEqual(self.lint("- [ ] [a] widget builds; planted negative: bad input refused", self.BEFORE), [])
+        self.assertEqual(self.lint("- [ ] [a] widget builds `true` -> rc 0; planted negative: bad input refused", self.BEFORE), [])
 
 
 class CheckL(unittest.TestCase):

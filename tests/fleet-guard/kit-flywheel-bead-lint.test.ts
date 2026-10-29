@@ -13,10 +13,12 @@ afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 const PLANTED = `br create "x" -t task --acceptance "- [ ] AC1: x"`;
 const CLEAN_DESCRIPTION = "WHAT: refuse an unlinted create.\n\nWHY: ungradeable beads were created unchecked.";
-/** Phase-tagged (ACPHASE1): beads created at or after the cutover must tag every item. */
-const CLEAN_ACCEPTANCE = "- [ ] [build] AC1: planted negative: an unlinted create is refused";
+/** Phase-tagged (ACPHASE1) and replayable by `omp-kit verify` (REPLAYABLE1): a backticked command and its expected outcome. */
+const CLEAN_ACCEPTANCE = "- [ ] [build] AC1: planted negative: an unlinted create is refused `true` -> rc 0";
+/** Backticks expand in a shell word, so acceptance travels in the quoted heredoc the guard reads literally. */
+const ACCEPTANCE_ARG = `--acceptance "$(cat <<'EOF'\n${CLEAN_ACCEPTANCE}\nEOF\n)"`;
 /** The heredoc form agents use for multi-line descriptions; the guard reads its body literally. */
-const clean = (title: string) => `br create '${title}' -t task -l admission --description "$(cat <<'EOF'\n${CLEAN_DESCRIPTION}\nEOF\n)" --acceptance '${CLEAN_ACCEPTANCE}'`;
+const clean = (title: string) => `br create '${title}' -t task -l admission --description "$(cat <<'EOF'\n${CLEAN_DESCRIPTION}\nEOF\n)" ${ACCEPTANCE_ARG}`;
 
 function tracker() {
 	const project = ownedTmp("tracker", { root: base }).path;
@@ -85,6 +87,18 @@ test("LINTEVERY1 AC1 control: a lint-clean br create is admitted, and natively c
 	expect(t.count()).toBe(1);
 });
 
+test("REPLAYABLE1 through the guard: a tagged create whose box names no command is refused naming the box and its corrected shape", async () => {
+	const t = tracker();
+	const h = await createFlywheelHost(base, { respond: t.respond });
+	const commandless = "- [ ] [build] AC1: planted negative: an unlinted create is refused";
+	const result = await toolCall(h, t.project, `br create 'Gate refuses unreplayable create' -t task -l admission --description "$(cat <<'EOF'\n${CLEAN_DESCRIPTION}\nEOF\n)" --acceptance '${commandless}'`);
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("r-verify-replayable:ACCEPTANCE_NOT_REPLAYABLE box 1");
+	expect(result?.reason).toContain(JSON.stringify(commandless));
+	expect(result?.reason).toContain("corrected shape: - [ ] [a] [build]");
+	expect(t.count()).toBe(0);
+});
+
 test("LINTEVERY1: wrapped, cd-prefixed and global-flag creates are refused too", async () => {
 	const t = tracker();
 	const h = await createFlywheelHost(base, { respond: t.respond });
@@ -104,13 +118,13 @@ test("LINTEVERY1: a lint-read value the shell expands at run time is refused UNE
 	const t = tracker();
 	const h = await createFlywheelHost(base, { respond: t.respond });
 	for (const command of [
-		`br create "x" -t task -l a --description "$DESC" --acceptance '${CLEAN_ACCEPTANCE}'`,
-		`br create "x" -t task -l a --description "$(cat desc.md)" --acceptance '${CLEAN_ACCEPTANCE}'`,
-		`br create "x" -t task -l a --description $'WHAT: a\\n\\nWHY: b' --acceptance '${CLEAN_ACCEPTANCE}'`,
+		`br create "x" -t task -l a --description "$DESC" ${ACCEPTANCE_ARG}`,
+		`br create "x" -t task -l a --description "$(cat desc.md)" ${ACCEPTANCE_ARG}`,
+		`br create "x" -t task -l a --description $'WHAT: a\\n\\nWHY: b' ${ACCEPTANCE_ARG}`,
 		"br create \"x\" -t task -l a --description `cat desc.md` --acceptance 'x'",
-		`br create "x" -t task -l "$LABEL" --description 'WHAT: a WHY: b' --acceptance '${CLEAN_ACCEPTANCE}'`,
-		`cat desc.md | br create "x" -t task -l a --description-file - --acceptance '${CLEAN_ACCEPTANCE}'`,
-		`br create "x" -t task -l a --description "$(cat <<EOF\nWHAT: $HOME\nEOF\n)" --acceptance '${CLEAN_ACCEPTANCE}'`,
+		`br create "x" -t task -l "$LABEL" --description 'WHAT: a WHY: b' ${ACCEPTANCE_ARG}`,
+		`cat desc.md | br create "x" -t task -l a --description-file - ${ACCEPTANCE_ARG}`,
+		`br create "x" -t task -l a --description "$(cat <<EOF\nWHAT: $HOME\nEOF\n)" ${ACCEPTANCE_ARG}`,
 		`br update lg-1 --description "\${D}"`,
 	]) {
 		const result = await toolCall(h, t.project, command);
@@ -119,7 +133,7 @@ test("LINTEVERY1: a lint-read value the shell expands at run time is refused UNE
 	expect(lintExecs(h.execs)).toEqual([]);
 	const literalElsewhere = await toolCall(h, t.project, `${clean("Gate admits literal content")} --actor "$AGENT_NAME"`);
 	expect(literalElsewhere?.block).not.toBe(true);
-	const dollarDigits = await toolCall(h, t.project, `br create "Fee gate" -t task -l a --description 'WHAT: charge $5. WHY: cost.' --acceptance '${CLEAN_ACCEPTANCE}'`);
+	const dollarDigits = await toolCall(h, t.project, `br create "Fee gate" -t task -l a --description 'WHAT: charge $5. WHY: cost.' ${ACCEPTANCE_ARG}`);
 	expect(dollarDigits?.block).not.toBe(true);
 	expect(t.count()).toBe(0);
 });

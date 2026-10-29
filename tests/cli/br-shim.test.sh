@@ -434,11 +434,33 @@ export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
  		fail=$((fail + 1))
  		printf 'FAIL needs-director-claim-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
  	fi
- 	printf '{"id":"X","status":"open","assignee":null,"labels":[]}' > "$TMP/bead.json"
- 	: > "$TMP/argv"
- 	br update X --claim > "$TMP/out" 2>&1
- 	got_rc=$?
- 	check "eligible-claim-passes" 0 "update X --claim --actor TestShim"
+	printf '{"id":"X","status":"open","assignee":null,"labels":[],"acceptance_criteria":"- [ ] [a] [build] claimable `true` -> rc 0"}' > "$TMP/bead.json"
+	: > "$TMP/argv"
+	br update X --claim > "$TMP/out" 2>&1
+	got_rc=$?
+	check "eligible-claim-passes" 0 "update X --claim --actor TestShim"
+	# 18. REPLAYABLE1 claim gate (J-2026-10-29-22): a claim or in_review move of
+	# a bead verify cannot replay is refused before the real br runs, naming the
+	# box; the same bead with the box rewritten is admitted.
+	for move in "--claim" "--status in_review"; do
+		printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works; planted negative refused"}' > "$TMP/bead.json"
+		: > "$TMP/argv"
+		# shellcheck disable=SC2086
+		br update X $move > "$TMP/out" 2>&1
+		got_rc=$?
+		if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -Fq 'REFUSED_NOT_REPLAYABLE box 1 "- [ ] [a] [build] the widget works; planted negative refused" names no backticked command; corrected shape:' "$TMP/out"; then
+			pass=$((pass + 1))
+		else
+			fail=$((fail + 1))
+			printf 'FAIL replayable-claim-refused [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$move" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+		fi
+		printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works `true` -> rc 0; planted negative refused"}' > "$TMP/bead.json"
+		: > "$TMP/argv"
+		# shellcheck disable=SC2086
+		br update X $move > "$TMP/out" 2>&1
+		got_rc=$?
+		check "replayable-claim-admitted [$move]" 0 "update X $move --actor TestShim"
+	done
  else
  	printf 'SKIP needs-director-claim: no bun/python3/candidate cli.ts in this environment\n'
  fi

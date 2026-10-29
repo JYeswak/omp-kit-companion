@@ -243,15 +243,26 @@ def lint_prospective(
     """Failing LINTGATE1 check names for this create (empty = admit).
 
     `now` defaults to the wall clock; tests pin it across the cutover.
+    REPLAYABLE1: every non-[v] acceptance box of a create is new, so one
+    `omp-kit verify` cannot replay fails r-verify-replayable naming it; an
+    exit-only box is a stderr notice. When box-lint.ts cannot run, the check is
+    reported unverified on stderr and the other checks still decide.
     """
     import sys as _sys
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in _sys.path:
         _sys.path.insert(0, here)
-    from bead_lint import lint_bead_failures
+    from bead_lint import BoxGrammarUnavailable, lint_bead_failures, replayable_findings
     bead = prospective_bead(parsed, project, now)
     byid = {row["id"] for row in issues} | {"<new>"}
-    return lint_bead_failures(bead, byid)
+    failures = lint_bead_failures(bead, byid)
+    try:
+        replay_failures, notices = replayable_findings(bead, None)
+    except BoxGrammarUnavailable as exc:
+        replay_failures, notices = [], [f"REPLAYABLE_UNVERIFIED {exc}"]
+    for notice in notices:
+        print(f"bead-lint: {notice}", file=_sys.stderr)
+    return sorted(failures + replay_failures)
 
 
 def normalize_tokens(value: str) -> set[str]:

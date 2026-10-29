@@ -19,7 +19,7 @@ Check catalog (all trace to the beads-north-star standard):
   a-label  b-what-why-acc  c-lettered-scope  d-negative-specimen
   e-typed-edges  f-fanout-depth  g-eco-plan-cite  h-placeholders
   i-mention-edges  j-stale-blocked (warning)  k-close-receipt
-  l-ac-phase  l-ac-phase-legacy (warning)
+  l-ac-phase  l-ac-phase-legacy (warning)  r-verify-replayable (admission only)
 l-ac-phase (ACPHASE1 ompkit-9e9w6): every acceptance item of a bead created
 at or after ac_phase.AC_PHASE_CUTOVER carries exactly one phase tag
 ([build] | [landed] | [live] | [after <window>]) in the leading run of
@@ -27,6 +27,15 @@ bracketed tokens after its checkbox (scope letters may share the run; zero
 tags is AC_PHASE_UNTAGGED, two or more AC_PHASE_MULTI); beads created before it
 are reported under l-ac-phase-legacy and never refused. Grammar, cutover and
 digest live in ac_phase.py, shared with the create and in_review gates.
+r-verify-replayable (REPLAYABLE1 ompkit-fp72.135.3.71): the create and update
+admission refuses a new or changed non-[v] acceptance box `omp-kit verify`
+cannot replay (no backticked command, or a tag run that is not one scope letter
+then one known phase), naming it with the corrected shape. The box grammar is
+src/verify.ts's own, run through scripts/box-lint.ts, never re-implemented
+here. Unchanged legacy boxes are reported by read-only lint and listing
+(replayable_report, --replayable-report); a claim or in_review move of a bead
+verify cannot replay is refused REFUSED_NOT_REPLAYABLE
+(replayable_claim_refusal, J-2026-10-29-22).
 Pagerank block: build_pagerank_fixture + run_pagerank_cert (replay via
 bv-readiness-probe.sh pagerank-cert; bv --robot-next is a composite
 scheduler score and is never the centrality sink).
@@ -37,6 +46,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -44,6 +54,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import kitlib_tmp  # noqa: E402  (owned temp dirs: removed on exit and HUP/INT/TERM)
+import kitlib_run  # noqa: E402  (bounded child runs; sibling in every release)
 import ac_phase  # noqa: E402  (ACPHASE1 phase grammar and cutover; sibling in every release)
 
 KIT_BEAD_LINT_VERSION = "bead-lint.kit/v1"
@@ -471,6 +482,128 @@ def check_l_legacy(beads: list[dict]) -> list[str]:
         if not ac_phase.is_enforced(b.get("created_at"))
         and ac_phase.tag_refusals(b.get("acceptance_criteria"))
     ]
+
+# REPLAYABLE1 (ompkit-fp72.135.3.71). The box grammar lives only in
+# src/verify.ts; box-lint.ts runs it and this module shapes the verdict, so the
+# admission lint and the verify verb cannot disagree about a box.
+BOX_LINT = Path(__file__).resolve().parent / "box-lint.ts"
+BOX_LINT_TIMEOUT_S = 15
+REPLAYABLE_CHECK = "r-verify-replayable"
+
+
+class BoxGrammarUnavailable(RuntimeError):
+    """box-lint.ts could not run or answered off-contract; callers warn, never refuse blind."""
+
+
+def box_grammar_argv() -> tuple[list[str], dict[str, str]]:
+    """The runner for box-lint.ts: a release's own binary (BUN_BE_BUN=1 runs the
+    shipped bundle with the embedded Bun) when scripts/ sits in a release, else
+    bun from OMP_KIT_BUN or PATH in a checkout."""
+    release_bin = BOX_LINT.parent.parent / "bin" / "omp-kit"
+    if release_bin.is_file() and os.access(release_bin, os.X_OK):
+        return [str(release_bin), str(BOX_LINT)], {"BUN_BE_BUN": "1"}
+    bun = os.environ.get("OMP_KIT_BUN") or shutil.which("bun")
+    if not bun:
+        raise BoxGrammarUnavailable(
+            "no release bin/omp-kit beside scripts/ and no bun on PATH")
+    return [bun, str(BOX_LINT)], {}
+
+
+def box_verdicts(items: list[dict]) -> list[dict]:
+    """One box-lint.ts run over items ({id, acceptance, baseline}); rows in order."""
+    argv, extra = box_grammar_argv()
+    try:
+        result = kitlib_run.run(
+            argv, deadline_s=BOX_LINT_TIMEOUT_S,
+            stdin=json.dumps({"items": items}).encode("utf-8"),
+            env={**os.environ, **extra}, max_output_bytes=64 << 20)
+    except OSError as exc:
+        raise BoxGrammarUnavailable(f"box-lint.ts did not start: {exc}")
+    if result.rc != 0 or result.timed_out or result.truncated:
+        raise BoxGrammarUnavailable(
+            f"box-lint.ts rc={result.rc} timed_out={result.timed_out} "
+            f"truncated={result.truncated}: "
+            f"{result.stderr.decode('utf-8', 'replace')[:300]}")
+    try:
+        doc = json.loads(result.stdout)
+    except ValueError as exc:
+        raise BoxGrammarUnavailable(f"box-lint.ts output unparsable: {exc}")
+    rows = doc.get("items") if isinstance(doc, dict) and doc.get("schema") == "box-lint/v1" else None
+    if not isinstance(rows, list) or len(rows) != len(items):
+        raise BoxGrammarUnavailable("box-lint.ts answered off-contract")
+    return rows
+
+
+def replayable_findings(
+    bead: dict, baseline: str | None
+) -> tuple[list[str], list[str]]:
+    """(failures, notices) for one prospective bead at admission.
+
+    `baseline` is the stored acceptance an update replaces (None for a
+    create). Only new or changed boxes can fail; unchanged ones are notices.
+    """
+    row = box_verdicts([{"id": bead.get("id") or "<new>",
+                         "acceptance": bead.get("acceptance_criteria") or "",
+                         "baseline": baseline}])[0]
+    failures = []
+    if row["refused"]:
+        failures.append(
+            f"{REPLAYABLE_CHECK}:ACCEPTANCE_NOT_REPLAYABLE "
+            + " ; ".join(f["detail"] for f in row["refused"]))
+    notices = []
+    if row["legacy"]:
+        notices.append(
+            f"ACCEPTANCE_NOT_REPLAYABLE_LEGACY {row['id']}: unchanged boxes omp-kit "
+            f"verify cannot replay (reported, not refused): "
+            + " ; ".join(f["detail"] for f in row["legacy"]))
+    if row["exit_only"]:
+        notices.append(
+            f"REPLAYABLE_EXIT_ONLY {row['id']}: box "
+            f"{', '.join(str(i) for i in row['exit_only'])} names a command but no "
+            f"expected outcome, so verify judges it by exit code alone; add "
+            f"-> rc N, -> N pass 0 fail or -> prints <text>")
+    return failures, notices
+
+
+def replayable_claim_refusal(bead: dict) -> list[str]:
+    """REPLAYABLE1 claim gate (J-2026-10-29-22): one line per reason `omp-kit
+    verify` would refuse this bead ACCEPTANCE_NOT_REPLAYABLE, [] when it can
+    replay it. Old and new boxes alike count: claiming is where legacy beads
+    migrate."""
+    row = box_verdicts([{"id": bead.get("id") or "<new>",
+                         "acceptance": bead.get("acceptance_criteria") or "",
+                         "baseline": None}])[0]
+    if row["replayable"]:
+        return []
+    if row["boxes"] == 0:
+        return ["no acceptance box verify can replay (a `- [ ] [<letter>] [<phase>]` "
+                "box other than [v]); corrected shape: - [ ] [a] [build] <what it proves> "
+                "`<one bounded command>` -> rc 0 (or: N pass 0 fail, prints <text>)"]
+    return [finding["detail"] for finding in row["refused"]]
+
+
+def replayable_report(beads: list[dict]) -> list[dict]:
+    """Legacy report: one row per in-scope bead (not closed, not parked, not a
+    tombstone) whose stored acceptance `omp-kit verify` cannot replay. Each bead
+    is judged against its own unchanged text, so the report refuses nothing."""
+    cut = [b for b in scope_beads(beads) if b.get("status") != "tombstone"]
+    rows = box_verdicts([{"id": b["id"], "acceptance": b.get("acceptance_criteria") or "",
+                          "baseline": b.get("acceptance_criteria") or ""} for b in cut])
+    report = []
+    for bead, row in zip(cut, rows):
+        if row["replayable"]:
+            continue
+        report.append({
+            "id": bead["id"],
+            "status": bead.get("status") or "",
+            "owner": bead.get("assignee") or bead.get("created_by") or "",
+            "boxes": row["boxes"],
+            "refused": len(row["refused"]),
+            "not_replayable": [{"index": f["index"], "reason": f["reason"], "line": f["line"]}
+                               for f in row["legacy"] + row["refused"]],
+            "title": bead.get("title") or "",
+        })
+    return sorted(report, key=lambda r: r["id"])
 
 EDGE_EVIDENCE = (
     "br dep add --help states '<issue> depends on <depends-on>'; "
@@ -1470,6 +1603,36 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
         log["mutation"].append({"disabled": "elapsed-time-mix", "verdict_flips_to_fail": bool(want_time)})
         if not want_time:
             fails.append("mutation: disabling elapsed-time-mix changes nothing")
+        # REPLAYABLE1 (ompkit-fp72.135.3.71): the legacy report over a fixture
+        # cut names exactly the in-scope beads verify cannot replay and refuses
+        # nothing in it; the same commandless text as a new create is refused,
+        # naming the box (planted negative), and a replayable create is admitted.
+        rp_cut = [
+            mkbead("rp-ok", acc="- [ ] [a] [build] tags parse `sh t.sh` -> rc 0\n"),
+            mkbead("rp-nocmd", acc="- [ ] [a] [build] tags parse; planted negative RED.\n"),
+            mkbead("rp-multi", acc="- [ ] [a,b] [build] `sh t.sh` -> rc 0\n"),
+            mkbead("rp-untagged", acc="- [ ] AC1: tags parse\n"),
+            mkbead("rp-closed", status="closed", acc="- [ ] [a] [build] no command\n"),
+            mkbead("rp-parked", labels=["parked"], acc="- [ ] [a] [build] no command\n"),
+        ]
+        try:
+            rp_rows = replayable_report(rp_cut)
+            rp_refused = sum(row["refused"] for row in rp_rows)
+            rp_plant, _ = replayable_findings(rp_cut[1], None)
+            rp_control, _ = replayable_findings(rp_cut[0], None)
+        except BoxGrammarUnavailable as exc:
+            rp_rows, rp_refused, rp_plant, rp_control = [], -1, [], [f"unavailable: {exc}"]
+        rp_ids = [row["id"] for row in rp_rows]
+        if rp_ids != ["rp-multi", "rp-nocmd", "rp-untagged"]:
+            fails.append(f"replayable-report: want rp-multi, rp-nocmd, rp-untagged got {rp_ids}")
+        if rp_refused != 0:
+            fails.append(f"replayable-report: refused {rp_refused} legacy boxes, want 0")
+        if not (rp_plant and "box 1" in rp_plant[0] and "corrected shape" in rp_plant[0]):
+            fails.append(f"replayable: commandless create not refused naming box 1: {rp_plant}")
+        if rp_control:
+            fails.append(f"replayable: replayable create refused: {rp_control}")
+        log["replayable_report"] = {"rows": rp_rows, "refused": rp_refused,
+                                    "planted_create": rp_plant}
         elapsed_forms = [
             (
                 "hours-after-landing",
@@ -1671,8 +1834,8 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
     return (not fails), {"failures": fails, "log": log}
 
 
-def live_ids(repo: str, timeout: int = 120) -> set[str]:
-    """Every tracker id, read live with `br list` (no flush, no tracker write)."""
+def live_rows(repo: str, timeout: int = 120) -> list[dict]:
+    """Every tracker row, read live with `br list` (no flush, no tracker write)."""
     rc, out, err = run(["br", "list", "--status", "all", "--deferred",
                         "--limit", "0", "--json"], repo, timeout)
     if rc != 0:
@@ -1682,8 +1845,25 @@ def live_ids(repo: str, timeout: int = 120) -> set[str]:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"br list unparsable: {exc}")
     rows = data.get("issues", data) if isinstance(data, dict) else data
-    return {row["id"] for row in rows
-            if isinstance(row, dict) and row.get("id")}
+    return [row for row in rows if isinstance(row, dict) and row.get("id")]
+
+
+def live_ids(repo: str, timeout: int = 120) -> set[str]:
+    """Every tracker id, read live with `br list` (no flush, no tracker write)."""
+    return {row["id"] for row in live_rows(repo, timeout)}
+
+
+def replayable_report_live(repo: str) -> tuple[int, dict]:
+    """--replayable-report: the legacy report over the live tracker's cut.
+    Exit 0 with the report (it never refuses), 3 UNVERIFIED."""
+    try:
+        beads = live_rows(repo)
+        rows = replayable_report(beads)
+    except (RuntimeError, OSError) as exc:
+        return 3, {"verdict": "UNVERIFIED", "reason": str(exc)[:300]}
+    cut = len([b for b in scope_beads(beads) if b.get("status") != "tombstone"])
+    return 0, {"verdict": "REPORT", "cut": cut, "not_replayable": len(rows),
+               "replayable": cut - len(rows), "rows": rows}
 
 
 def lint_one(repo: str, bead_id: str) -> tuple[int, dict]:
@@ -1719,10 +1899,22 @@ def main(argv: list[str] | None = None) -> int:
                     "no flush); prints PASS, FAIL with the failing check "
                     "names, or UNVERIFIED; exit 0 PASS, 1 FAIL, 3 UNVERIFIED")
     ap.add_argument("--repo", default=".",
-                    help="tracker repo for --bead (the directory holding .beads)")
+                    help="tracker repo for --bead or --replayable-report "
+                    "(the directory holding .beads)")
     ap.add_argument("--json", action="store_true",
                     help="with --bead, print the verdict as JSON")
+    ap.add_argument("--replayable-report", action="store_true",
+                    help="REPLAYABLE1: list the live tracker's in-scope beads "
+                    "whose acceptance omp-kit verify cannot replay, as JSON; "
+                    "reports only, never refuses; exit 0, 3 UNVERIFIED")
     args = ap.parse_args(argv)
+    if args.replayable_report:
+        code, report = replayable_report_live(os.path.abspath(args.repo))
+        print(json.dumps({"schema_version": KIT_BEAD_LINT_VERSION,
+                          "mode": "replayable-report",
+                          "generated_at": utcnow_iso(), **report},
+                         indent=2 if args.pretty else None, sort_keys=True))
+        return code
     if args.bead:
         code, verdict = lint_one(os.path.abspath(args.repo), args.bead)
         if args.json:

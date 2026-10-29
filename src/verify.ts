@@ -16,6 +16,8 @@
  * prose checkboxes are not boxes and keep their original meaning). A tag that is neither a
  * single letter nor a known phase makes the item unsupported: it is named and fails closed,
  * never silently dropped. Letter `v` marks a verification-note box that is never replayed.
+ * This grammar is defined only here: scripts/box-lint.ts runs parseBoxes, commandOf, expectedOf and
+ * unreplayableReason for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -31,7 +33,8 @@ const LETTER = /^[a-z]$/;
 /** Phases the verifier understands. Anything else in a tag is unsupported, not a box to skip. */
 export const KNOWN_PHASES: Record<string, true> = { build: true, landed: true, live: true, after: true };
 
-export interface Box { index: number; letter: string | null; checked: boolean; phase: string | null; body: string }
+/** One acceptance box; `line` is the trimmed source line, so a lint can name it and tell a new box from an unchanged one. */
+export interface Box { index: number; letter: string | null; checked: boolean; phase: string | null; body: string; line: string }
 export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; outcome: "exit-only" | "named"; rc: number | null; pass: boolean | null; detail: string }
 export interface VerifyResult {
 	ok: boolean;
@@ -63,9 +66,24 @@ export function parseBoxes(acceptance: string): Box[] {
 		} else {
 			phase = [first, second, ...extra].filter((tag): tag is string => tag !== undefined).join(" ");
 		}
-		out.push({ index: out.length + 1, letter, checked: head[1] !== " ", phase, body: rest });
+		out.push({ index: out.length + 1, letter, checked: head[1] !== " ", phase, body: rest, line });
 	}
 	return out;
+}
+
+/** The command a box names: its FIRST backticked span, or null when it names none. */
+export function commandOf(body: string): string | null {
+	return CMD.exec(body)?.[1] ?? null;
+}
+
+/**
+ * Why this verb cannot replay one box, or null when it can (REPLAYABLE1 ompkit-fp72.135.3.71).
+ * The one judgment verifyBead refuses ACCEPTANCE_NOT_REPLAYABLE by and scripts/box-lint.ts
+ * (bead_lint's create and update admission) refuses new boxes by. `[v]` boxes are the caller's to skip.
+ */
+export function unreplayableReason(box: Box): "unsupported-phase" | "no-command" | null {
+	if (box.phase !== null && KNOWN_PHASES[box.phase] !== true) return "unsupported-phase";
+	return commandOf(box.body) === null ? "no-command" : null;
 }
 
 /** The expected-outcome clause of a box: text after `->` or after `expect:`; null when the box names none. */
@@ -118,9 +136,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const boxes = parseBoxes(acceptance);
 	const replayable = boxes.filter(b => b.letter !== "v");
 	const tag = (b: { letter: string | null; index: number }) => `[${b.letter ?? b.index}]`;
-	const bad = replayable.filter(b => (b.phase !== null && KNOWN_PHASES[b.phase] !== true) || !CMD.test(b.body));
+	const bad = replayable.filter(b => unreplayableReason(b) !== null);
 	if (replayable.length === 0 || bad.length > 0) {
-		log.push(`not replayable: ${bad.length ? bad.map(b => b.phase !== null && KNOWN_PHASES[b.phase] !== true ? `${tag(b)} unsupported phase [${b.phase}]` : `${tag(b)} names no command`).join("; ") : "no boxes"}`);
+		log.push(`not replayable: ${bad.length ? bad.map(b => unreplayableReason(b) === "unsupported-phase" ? `${tag(b)} unsupported phase [${b.phase}]` : `${tag(b)} names no command`).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
 	// The owned replay fixture uses an explicit database path under its per-run
@@ -157,7 +175,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 			log.push(`${tag(box)} PENDING ${box.phase} phase prerequisite unmet; not executed`);
 			continue;
 		}
-		const command = CMD.exec(box.body)![1]!;
+		const command = commandOf(box.body)!;
 		const expected = expectedOf(box.body);
 		const started = Date.now();
 		const r = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
