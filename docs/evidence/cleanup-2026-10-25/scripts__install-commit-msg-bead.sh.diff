@@ -1,0 +1,148 @@
+diff --git a/scripts/install-commit-msg-bead.sh b/scripts/install-commit-msg-bead.sh
+index 8972b3832f..9a53eeaf2e 100755
+--- a/scripts/install-commit-msg-bead.sh
++++ b/scripts/install-commit-msg-bead.sh
+@@ -237,6 +237,7 @@ if [ "$MODE" = "check" ]; then
+ 		"hooks.d/commit-msg/limit-process-tree.sh scripts/limit-process-tree.sh" \
+ 		"hooks.d/pre-commit/47-omp-kit-staged-fragments scripts/check-staged-fragments.sh" \
+ 		"hooks.d/commit-msg/49-omp-kit-stale-worktree scripts/check-stale-worktree.sh" \
++		"hooks.d/commit-msg/47-omp-kit-gap-mention scripts/check-gap-mention.sh" \
+ 		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh" \
+ 		"hooks.d/pre-commit/49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh" \
+ 		"hooks.d/pre-commit/pysafe.py scripts/pysafe.py" \
+@@ -302,6 +303,15 @@ chain_dir() {
+ 	printf '%s/hooks.d/%s' "$HOOKS" "$1"
+ }
+ 
++# Use the same interpreter contract while probing a pre-existing bespoke hook.
++execute_hook() (
++	hook=$1
++	shift
++	first=''
++	IFS= read -r first < "$hook" || :
++	case "$first" in '#!'*) "$hook" "$@" ;; *) sh "$hook" "$@" ;; esac
++)
++
+ # backup <path>: keep a pre-existing file so rollback restores it, never
+ # deletes it. The dot prefix keeps the copy out of the runner's NN-* glob.
+ backup() {
+@@ -312,8 +322,12 @@ backup() {
+ # place <src> <dest> <mode>: install a file, recording how to undo it.
+ place() {
+ 	if [ -e "$2" ]; then backup "$2"; else UNDO_RM="$UNDO_RM $2"; fi
+-	cp "$1" "$2"
+-	chmod "$3" "$2"
++	# Same-directory publication staging preserves running readers' inode.
++	staged="$2.install.$$"
++	if ! cp "$1" "$staged" || ! chmod "$3" "$staged" || ! mv -f "$staged" "$2"; then
++		rm -f "$staged"
++		return 1
++	fi
+ }
+ 
+ # write_runner <path>: the chain runner. Hook types fed on stdin (pre-push,
+@@ -322,7 +336,9 @@ place() {
+ write_runner() {
+ 	path=$1
+ 	if [ -e "$path" ]; then backup "$path"; else UNDO_RM="$UNDO_RM $path"; fi
+-	cat > "$path" <<'EOF'
++	# Stage beside the hook; rename publishes it without truncating running readers.
++	staged="$path.install.$$"
++	cat > "$staged" <<'EOF'
+ #!/bin/sh
+ # chain runner: run every executable NN-<name> member in hooks.d/<type> in
+ # sort order. Only numeric-prefixed entries run: helper libraries shipped
+@@ -339,7 +355,7 @@ case "$kind" in
+ 		;;
+ esac
+ rc=0
+-# GATEEVENTS1 runner v4 (ompkit-fp72.135.3.12, GATEDIAG1 ompkit-fp72.135.3.16): every member runs to completion;
++# GATEEVENTS1 runner v5 (ompkit-fp72.135.3.16.1): every member runs with its own interpreter;
+ # each verdict is one gate-events row (act = commit/publish, gate = member name); FINDING lines (kitlib-findings.sh
+ # grammar) from every member are collected into ONE envelope printed once at the end, and the chain exits
+ # non-zero once iff any member found something. A legacy member that exits non-zero without FINDING lines
+@@ -348,13 +364,21 @@ ledger="$here/hooks.d/commit-msg/gate-event.sh"
+ case "$kind" in pre-commit | commit-msg | prepare-commit-msg) act=commit ;; pre-push) act=publish ;; *) act=$kind ;; esac
+ target=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '%s' '')
+ findings=$(mktemp "${TMPDIR:-/tmp}/hook-findings.XXXXXX") || exit 1
++run_member() {
++	first=''
++	IFS= read -r first < "$hook" || :
++	case "$first" in
++		'#!'*) "$hook" "$@" ;;
++		*) sh "$hook" "$@" ;;
++	esac
++}
+ for hook in "$here/hooks.d/$kind"/[0-9][0-9]-*; do
+ 	[ -e "$hook" ] || continue
+ 	[ -x "$hook" ] || continue
+ 	member=$(basename -- "$hook")
+ 	member_rc=0
+ 	errf=$(mktemp "${TMPDIR:-/tmp}/hook-stderr.XXXXXX") || exit 1
+-	if [ -n "$input" ]; then out=$(sh "$hook" "$@" < "$input" 2> "$errf") || member_rc=$?; else out=$(sh "$hook" "$@" 2> "$errf") || member_rc=$?; fi
++	if [ -n "$input" ]; then out=$(run_member "$@" < "$input" 2> "$errf") || member_rc=$?; else out=$(run_member "$@" 2> "$errf") || member_rc=$?; fi
+ 	n=$(printf '%s\n' "$out" | grep -c '^FINDING	' || :)
+ 	printf '%s\n' "$out" | grep '^FINDING	' >> "$findings" || :
+ 	# Converted members speak only in FINDING lines; anything else on stdout is passed through unchanged.
+@@ -387,7 +411,10 @@ fi
+ rm -f "$findings"
+ exit $rc
+ EOF
+-	chmod +x "$path"
++	if ! chmod +x "$staged" || ! mv -f "$staged" "$path"; then
++		rm -f "$staged"
++		return 1
++	fi
+ }
+ 
+ # ensure_chain <type>: make $HOOKS/<type> a chain runner, preserving any
+@@ -405,7 +432,7 @@ ensure_chain() {
+ 	if [ -x "$entry" ] && grep -q 'hooks\.d' "$entry" 2>/dev/null; then
+ 		# The marker names the runner generation: bump it (here and in write_runner) with every runner change,
+ 		# or installed repos keep the old runner while --check reports them fresh.
+-		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v4' "$entry"; }; then
++		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v5' "$entry"; }; then
+ 			write_runner "$entry"
+ 			printf 'upgraded chain runner (stdin replay + gate-events ledger): %s\n' "$entry"
+ 		else
+@@ -636,6 +663,14 @@ install_commit_notes() {
+ 	printf 'installed commit-notes member: %s\n' "$member"
+ }
+ 
++# install_gap_mention: the commit-msg member that refuses, once, a body naming a gap without a bead id
++# (GAPFADE1, ompkit-3waa2); it runs after the notes member and reads kitlib-findings.sh beside it.
++install_gap_mention() {
++	member="$(chain_dir commit-msg)/47-omp-kit-gap-mention"
++	place "$KITROOT/scripts/check-gap-mention.sh" "$member" +x
++	printf 'installed gap-mention member: %s\n' "$member"
++}
++
+ # install_stale_worktree: the commit-msg member refuses commits that would
+ # revert lines landed in HEAD (STALEWT1, ompkit-fp72.120.10); it runs after
+ # the notes member.
+@@ -667,7 +702,7 @@ printf '[test] fix widgets probe baseline\n' > "$PROBE"
+ PREFLIGHT_RC=""
+ if [ -e "$HOOKS/commit-msg" ]; then
+ 	if [ ! -x "$HOOKS/commit-msg" ] || ! grep -q 'hooks\.d' "$HOOKS/commit-msg" 2>/dev/null; then
+-		if sh "$HOOKS/commit-msg" "$PROBE" >/dev/null 2>&1; then PREFLIGHT_RC=0; else PREFLIGHT_RC=$?; fi
++		if execute_hook "$HOOKS/commit-msg" "$PROBE" >/dev/null 2>&1; then PREFLIGHT_RC=0; else PREFLIGHT_RC=$?; fi
+ 	fi
+ fi
+ 
+@@ -685,6 +720,7 @@ fi
+ ensure_chain commit-msg
+ install_commit_msg
+ install_commit_notes
++install_gap_mention
+ install_stale_worktree
+ ensure_chain pre-push
+ install_on_main
+@@ -709,7 +745,7 @@ install_staged_readme
+ # Leg 1: the moved bespoke must behave exactly as pre-flight. A pass that
+ # turns refusal means the move broke it (sibling impl left behind).
+ if [ -n "$PREFLIGHT_RC" ]; then
+-	if sh "$HOOKS/hooks.d/commit-msg/10-commit-msg" "$PROBE" >/dev/null 2>&1; then POST_RC=0; else POST_RC=$?; fi
++	if execute_hook "$HOOKS/hooks.d/commit-msg/10-commit-msg" "$PROBE" >/dev/null 2>&1; then POST_RC=0; else POST_RC=$?; fi
+ 	if [ "$POST_RC" != "$PREFLIGHT_RC" ]; then
+ 		rollback "bespoke behaved rc=$PREFLIGHT_RC before the move but rc=$POST_RC after (sibling impl left behind?)"
+ 	fi

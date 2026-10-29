@@ -1,0 +1,12 @@
+{
+  "archived_at": "2026-10-26T05:03:01Z",
+  "bead": "ompkit-fp72.19.1.11",
+  "bytes": 1482,
+  "dest": "docs/evidence/cleanup-2026-10-25/changelog.d__ompkit-cdll7.md-2.orig",
+  "git_head": "5ca27b53a5a7cfcdfc9192bee53fd74e111dd0e8",
+  "path": "changelog.d/ompkit-cdll7.md",
+  "route": "archive then restore/remove",
+  "secrets": false,
+  "sha256": "5d09f09099d9c34ef357fb89c6e7d61b85504576d7e49781265341b865767edd",
+  "truncated": false
+}

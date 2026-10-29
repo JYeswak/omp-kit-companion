@@ -1,0 +1,12 @@
+{
+  "archived_at": "2026-10-26T05:03:01Z",
+  "bead": "ompkit-fp72.19.1.11",
+  "bytes": 51455,
+  "dest": "docs/evidence/cleanup-2026-10-25/tests__scripts__scratch_lifecycle_model_test.py-2.orig",
+  "git_head": "5ca27b53a5a7cfcdfc9192bee53fd74e111dd0e8",
+  "path": "tests/scripts/scratch_lifecycle_model_test.py",
+  "route": "archive then restore/remove",
+  "secrets": false,
+  "sha256": "914f3afd2fec8fcb9443f52383b0ad3ba96452a4e714ce872bc9a452995c3972",
+  "truncated": false
+}

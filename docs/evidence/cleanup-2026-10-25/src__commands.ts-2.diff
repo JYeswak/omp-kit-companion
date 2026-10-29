@@ -1,0 +1,105 @@
+diff --git a/src/commands.ts b/src/commands.ts
+index c3dc3d60f7..2b1b2df176 100644
+--- a/src/commands.ts
++++ b/src/commands.ts
+@@ -30,9 +30,28 @@ const profileRecipeData: DataSchema = { type: "object", required: ["kind", "vers
+ const completionData: DataSchema = { type: "object", required: ["text", "shell"], properties: {
+ 	text: { type: "string" }, shell: { enum: ["bash", "zsh", "fish"] },
+ } };
++const flagData = { type: "object", required: ["name", "description"], properties: {
++	name: { type: "string" }, description: { type: "string" }, value: { type: "string" },
++} };
++const outputContractData = { type: "object", required: ["mode", "schema_id", "volatile_paths"], properties: {
++	mode: { enum: ["envelope", "jsonl", "raw"] }, schema_id: { type: ["string", "null"] },
++	volatile_paths: { type: "array", items: { type: "string" } },
++} };
++const commandRowData = { type: "object", required: ["name", "description", "usage", "flags", "output_contract"], properties: {
++	name: { type: "string" }, description: { type: "string" }, usage: { type: "string" },
++	flags: { type: "array", items: flagData }, output_contract: outputContractData,
++} };
++const commandDiscoveryData = { ...commandRowData, properties: {
++	...commandRowData.properties, subcommands: { type: "array", items: commandRowData },
++} };
+ const grammarData: DataSchema = { type: "object", required: ["schema_version", "tool_version", "commands", "global_flags", "exit_codes", "proof_classes"], properties: {
+-	schema_version: { type: "string" }, tool_version: { type: "string" }, commands: { type: "array" },
+-	global_flags: { type: "array" }, exit_codes: { type: "object" }, proof_classes: { type: "array" },
++	schema_version: { enum: ["1"] }, tool_version: { type: "string" },
++	commands: { type: "array", items: commandDiscoveryData },
++	global_flags: { type: "array", items: flagData },
++	exit_codes: { type: "object", required: ["success", "finding", "usage_or_blocked", "unavailable", "retryable", "not_run"], properties: {
++		success: { enum: [0] }, finding: { enum: [1] }, usage_or_blocked: { enum: [2] },
++		unavailable: { enum: [3] }, retryable: { enum: [4] }, not_run: { enum: [77] },
++	} }, proof_classes: { type: "array", items: { type: "string" } },
+ 	unavailable_commands: { type: "array", items: { type: "object", required: ["path", "reason", "missing_tools", "remediation"], properties: {
+ 		path: { type: "string" }, reason: { type: "string" }, missing_tools: { type: "array", items: { type: "string" } }, remediation: { type: "string" },
+ 	} } },
+@@ -548,25 +567,6 @@ export const COMMANDS: readonly Command[] = [
+ 			{ name: "--amend-acceptance", description: "With --apply: append changed acceptance boxes under the native revision gate instead of refusing STALE_ACCEPTANCE; valid only with --apply" },
+ 		], example: "omp-kit planning convert --plan PLAN.md --mission core8 --dry-run --db var/agent-tmp/plan-run --json", runnable: false, mutation: true, dataSchema: planningConvertData },
+ 	], runnable: false },
+-	{ name: "mission", description: "Validate the local Mission Protocol record without running its checks", usage: "mission validate|anchor [--project PATH] [--json]", flags: [], subcommands: [
+-		{ name: "validate", description: "Check required mission fields and registered check hashes", usage: "mission validate [--project PATH] [--json]", flags: [
+-			{ name: "--project", value: "PATH", description: "Project root to validate; defaults to the current directory" },
+-		], example: "omp-kit mission validate --json", runnable: false, dataSchema: missionData },
+-		{ name: "anchor", description: "Report per-repo mission-anchor status: live-doc Mission statement against the .omp/mission.toml record, flagging disagreement", usage: "mission anchor [--project PATH]... [--json]", flags: [
+-			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
+-		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
+-	], example: "omp-kit mission validate --json", runnable: false },
+-	{ name: "drain", description: "List landed-but-open beads and stale in-progress claims from a tracker", usage: "drain close-queue|stale-claims --db PATH [--repo DIR] [--json]", flags: [], subcommands: [
+-		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
+-			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
+-			{ name: "--repo", value: "DIR", description: "Git checkout holding the landing commits" },
+-			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db, landing repo is DIR; refused with --db" },
+-		], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false, dataSchema: drainData },
+-		{ name: "stale-claims", description: "In-progress/rework beads untouched 24 h whose holder is not live (seat, Agent Mail activity, live reservation), each with one atomic reclaim; unreadable liveness lists the row UNKNOWN", usage: "drain stale-claims --db PATH [--json]", flags: [
+-			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
+-			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db; refused with --db" },
+-		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },
+-	], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false },
+ 	{ name: "verify", description: "The one non-author close verb: export the exact commit, replay every acceptance command, judge each box by its named expected outcome, tick, report the reviewer gate under your identity, close with the command log; refuses the author, a box with no command, or a failing box (REWORK naming it)", usage: "verify BEAD --export SHA [--actor NAME] [--family TEXT] [--project PATH] [--dry-run] [--json]", argument: "BEAD", flags: [
+ 		{ name: "--export", value: "SHA", description: "The exact commit to replay against (git archive into owned scratch)" },
+ 		{ name: "--actor", value: "NAME", description: "The closing seat; defaults to AGENT_NAME" },
+@@ -592,24 +592,25 @@ export const COMMANDS: readonly Command[] = [
+ 			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+ 		] },
+ 	] },
+-	{ name: "preflight", description: "Run every check an act will face and print every finding with its remedy and fix in one envelope; changes nothing (GATEDIAG1)", usage: "preflight commit [--message FILE] | claim|in-review|close BEAD [--actor NAME] [--project PATH] [--json]", flags: [], subcommands: [
+-		{ name: "commit", description: "Judge the staged index with the pre-commit and commit-msg chain members and run each staged script's --selftest; bound to the staged tree id", usage: "preflight commit [--message FILE] [--project PATH] [--json]", flags: [
+-			{ name: "--message", value: "FILE", description: "Commit message file to judge; defaults to the repo's prepared COMMIT_EDITMSG" },
+-			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+-		] },
+-		{ name: "claim", description: "Judge the tracker's claim predicates for one bead; bound to its updated_at", usage: "preflight claim BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
+-			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
+-			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+-		] },
+-		{ name: "in-review", description: "Judge the in_review transition predicates for one bead (phase tags, checklist, transition comment)", usage: "preflight in-review BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
+-			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
+-			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+-		] },
+-		{ name: "close", description: "Judge the close predicates for one bead (in_review, non-author, every box ticked, reviewer gate, reason)", usage: "preflight close BEAD [--actor NAME] [--project PATH] [--json]", argument: "BEAD", flags: [
+-			{ name: "--actor", value: "NAME", description: "The acting seat; defaults to AGENT_NAME" },
+-			{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
+-		] },
+-	] },
++	{ name: "mission", description: "Validate the local Mission Protocol record without running its checks", usage: "mission validate|anchor [--project PATH] [--json]", flags: [], subcommands: [
++		{ name: "validate", description: "Check required mission fields and registered check hashes", usage: "mission validate [--project PATH] [--json]", flags: [
++			{ name: "--project", value: "PATH", description: "Project root to validate; defaults to the current directory" },
++		], example: "omp-kit mission validate --json", runnable: false, dataSchema: missionData },
++		{ name: "anchor", description: "Report per-repo mission-anchor status: live-doc Mission statement against the .omp/mission.toml record, flagging disagreement", usage: "mission anchor [--project PATH]... [--json]", flags: [
++			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
++		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
++	], example: "omp-kit mission validate --json", runnable: false },
++	{ name: "drain", description: "List landed-but-open beads and stale in-progress claims from a tracker", usage: "drain close-queue|stale-claims --db PATH [--repo DIR] [--json]", flags: [], subcommands: [
++		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
++			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
++			{ name: "--repo", value: "DIR", description: "Git checkout holding the landing commits" },
++			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db, landing repo is DIR; refused with --db" },
++		], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false, dataSchema: drainData },
++		{ name: "stale-claims", description: "In-progress/rework beads untouched 24 h whose holder is not live (seat, Agent Mail activity, live reservation), each with one atomic reclaim; unreadable liveness lists the row UNKNOWN", usage: "drain stale-claims --db PATH [--json]", flags: [
++			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },
++			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db; refused with --db" },
++		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },
++	], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false },
+ 	{ name: "load", description: "Inspect machine load attribution or run the opt-in census watcher", usage: "load watch", flags: [], subcommands: [{ name: "watch", description: "Write one load census sample to the state-root census files", usage: "load watch", flags: [], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData }], example: "omp-kit load watch --json", runnable: false, dataSchema: loadData },
+ 	{ name: "doctor", description: "Diagnose installed components (deeper probe needs separate consent)", usage: "doctor [--scope COMPONENT] [--project PATH --file PATH] [--profile NAME] [--sources] [--services PATH] [--staged] [--deep --yes]", flags: [
+ 			{ name: "--scope", value: "kit|omp|rules|policy|settings|extensions|router|profile|lsp|project-loading|work|sessions|load|memory|mcp|context|browsers|services|regex-tools|test-scope|dicklesworthstone|beads|reservations|identity|flywheel|fleet|derived|layout|public-files|github|secrets|stale-worktree|ownership|plugin_release|hooks|mission|rch|land", description: "Restrict diagnosis to a named component; test-scope checks configured test runners for scratch exclusions; beads checks that acceptance is kept in its dedicated field; reservations reports exclusive holds past the age limit; identity checks pane identities for missing, shared and stale names; flywheel grades fleet practices from git and the tracker (set BEADS_DB to the tracker beads.db when --project is a code repo); fleet reads live tmux panes and Agent Mail for DIRECTOR_DOING_WORK and COMMUNICATION_PURGATORY; derived lists literal probe-readable facts in config files; layout reports standard repo layout deviations; public-files lists missing standard public files; github probes read-only GitHub capability rows; secrets compares file tokens against sha256 digests of every readable Infisical value (UNVERIFIED when Infisical is unreachable); ownership counts, per fleet integration point, the persisted records with no live owner and no tracked outcome (read-only; a class it cannot count is UNKNOWN, never zero); plugin_release reports the linked kit plugin version against the latest published release; hooks reports per-fleet-repo installed hook members whose digest differs from this active kit release; mission lists each repo that builds through rch and whether its gate calls omp-kit rch lease (a repo-local lease script is a finding naming the file); rch reports gc_extra_roots and worker health; land reports the land actual-parent publication guard identity (guard, publication ref, owner and actual-parent capability, decision)" },

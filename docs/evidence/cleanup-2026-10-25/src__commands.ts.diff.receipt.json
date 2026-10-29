@@ -1,0 +1,12 @@
+{
+  "archived_at": "2026-10-26T04:34:50Z",
+  "bead": "ompkit-fp72.19.1.11",
+  "bytes": 14237,
+  "dest": "docs/evidence/cleanup-2026-10-25/src__commands.ts.diff",
+  "git_head": "77f10c155a17bb5800d1efd245a1f91e082c9104",
+  "path": "src/commands.ts",
+  "route": "archive then restore/remove",
+  "secrets": false,
+  "sha256": "af7a5965d65c239090a68f97ffacd7b1c0bc1f78d7b7163b163aed71579ead44",
+  "truncated": false
+}

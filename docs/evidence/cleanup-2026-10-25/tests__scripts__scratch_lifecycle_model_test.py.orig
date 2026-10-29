@@ -1,0 +1,919 @@
+#!/usr/bin/env python3
+"""VFY-SCRATCH1 (ompkit-cdll7): explicit-state model of the scratch lifecycle in src/scratch.ts.
+
+Every transition below copies its guard from the TypeScript source and cites the lines it rests on. A breadth-first
+search from every creatable initial state enumerates the reachable states; three backward searches then decide, per
+state, whether the directory can still leave the disk:
+
+  owner route   only the owner's own commands and hygiene (release, cite the digest, close files, unuse, kitlib
+                cleanup). This is job-completion disposal (SCRATCHRETIRE1 ompkit-fp72.120.16.37): no reaper, no clock.
+                Target: RETIRED (the dir is physically gone through an owner action).
+  live backstop owner route plus every reaper pass and clock step and every environment event except the owner
+                ending. Target: the dir is physically gone by any path.
+  absolute      every action, the owner ending included. Target: the dir is physically gone by any path.
+
+A reachable non-terminal state with no owner route to RETIRED is a DEAD END. The report groups dead ends by class and
+by core state (transient bits folded) with the shortest trace from an initial state, the owner-route outcome of every
+release form at the class's first state, and the backstop verdicts; --all also lists every state with its own trace.
+
+State tuple (State below): owner kind, owner liveness, capability, release marker, place, proven refs, open files,
+registered user, rehomed. `place` carries what the bead calls dir presence and the quarantined marker: a dir is at its
+scratch root, renamed into the reaper's quarantine, or absent (retired by its owner, or reaped).
+
+NOT MODELED, each a refusal that leaves the state unchanged and that a retry or the owner clears, or a fact the model
+fixes on purpose:
+  - the users lock being busy (withScratchUsersLock 422-432): held, retried;
+  - partial deletes ARE modeled (`perm`, marker=ownerless; removal_succeeds, partial). Which top-level entries a
+    throwing recursive rmSync took first is the runtime's visit order, not read from source: the model uses the order
+    observed on installed 0.2.74 (80791: records gone, read-only subtree left). Other uid-owned content behaves as uchg;
+    `Config(delete_impl="v0.2.74")` swaps in only the tagged release's delete primitive, `Config(immutable=True)` lets a
+    job set uchg;
+  - another writer replacing the dir inode or editing .owner (1830-1833, 1928, 2245), except respawn_seat's rehome;
+  - ownerMatchesScratchRoot false (858-886): every modeled dir sits in its own repo's var/agent-tmp (2098, 2154);
+  - lsof evidence unavailable: it refuses exactly where open files refuse, so `fds` stands for both;
+  - seatLive unproven (null): SKIP owner-seat-liveness-unproven (1077, 2508-2510) changes nothing;
+  - path aliases and symlinked roots (1365-1372): outside-scratch-root for that spelling, the canonical path works;
+  - bin=hold: `scratch new` passes only --bead (cli.ts:3612-3613), so no CLI-made dir is a hold; release refuses it (1756);
+  - malformed and text owners (releaseLegacy 1960-1995, parseTextOwner 932-951): the CLI never sets legacyOwner
+    (cli.ts:3529), so their release is owner-file-invalid and only the unowned reaper path applies; no modeled kind;
+  - pid-only-seated liveness is one bit for seat and pid: respawn keeps the seat and rehome moves the pid;
+  - the clock: the quarantine TTL (1179-1203, 2488) and the 72 h idle bound (2794, 2805) are reaper actions that are
+    enabled at any time; the 12 h RECLAIM bound (62-67) only shortens the same step;
+  - `foreign` is another agent's seated `scratch new` dir: its reaper path is the structured one.
+
+Run: python3 tests/scripts/scratch_lifecycle_model_test.py [--all]   (prints the HEAD report, the D4 class of the
+v0.2.74-delete and immutable variants, then runs the assertions)
+"""
+from __future__ import annotations
+
+import hashlib
+import sys
+import time
+import unittest
+from collections import deque
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+
+# ---------------------------------------------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------------------------------------------
+
+STRUCTURED = "structured"  # `scratch new` from a seated caller: agent+session, process_start, capability (2106-2122)
+UNSEATED = "structured-unseated"  # `scratch new` from an unseated caller: process_start + capability, no seat
+PID_ONLY = "pid-only"  # kitlib owned temp made directly in a scratch root: pid,label,repo,created (kitlib/tmp.ts:145)
+PID_SEATED = "pid-only-seated"  # fleet-guard seat dir omp.<pid> with a seat: pid,label,repo,created,agent,session,bin
+SEAT_DIR = "seat-dir"  # fleet-guard seat dir omp.<pid> written without agent/session (as omp.17177 is): pid only
+FOREIGN = "foreign"  # another agent's `scratch new` dir: the caller holds neither its seat nor its capability
+NESTED = "nested-kitlib"  # kitlib owned temp under TMPDIR=<scratch dir>: not a direct child of a scratch root
+
+STRUCTURED_KINDS = (STRUCTURED, UNSEATED, FOREIGN)  # owner records with process_start + argv0 (hasProcessIdentity 250)
+SEATED_KINDS = (STRUCTURED, PID_SEATED, FOREIGN)  # owner records naming agent + session
+PID_KINDS = (PID_ONLY, PID_SEATED, SEAT_DIR, NESTED)  # owner pid is a long-lived process the caller can descend from
+SEAT_DIR_KINDS = (PID_SEATED, SEAT_DIR)  # dirs fleet-guard writes for the omp process (fleet-guard/scratch.ts:78-85)
+
+RELEASE_BINS = ("throwaway", "evidence", "promote")  # scratch.ts:1567
+REFS = ("R1", "R2")  # two well-formed references (REF_PATTERN 1566): enough to expose any prior.ref === opts.ref mismatch
+
+ROOT, QUARANTINE, RETIRED, REAPED = "root", "quarantine", "retired", "reaped"
+ABSENT = (RETIRED, REAPED)
+
+NONE = ("none",)
+UNBINNED = ("unbinned",)
+STALE = ("stale",)  # a marker whose owner_sha256 no longer matches .owner: readReleaseRecord returns null (1618-1619)
+# A partial delete took the top-level records (.owner, .omp-kit-release, .users) and left content: parseOwnerFile has
+# nothing to read (1881-1883), readReleaseRecord returns null (1606-1608).
+OWNERLESS = ("ownerless",)
+
+# Content permissions (the `ro` field). 0: writable. 1: read-only mode bits on the owner's own files (a git-archive
+# export, `chmod -R a-w src`): grantOwnerWrite (1668-1676) can chmod them. 2: an immutable flag (chflags uchg):
+# chmod does not clear it, and immutableFlagPresent (1487-1507) only names it as the cause.
+RO_NAMES = ("rw", "ro", "uchg")
+
+
+class State(NamedTuple):
+    kind: str
+    live: str  # "live" | "dead": the seat lease for seated kinds, the owner process for pid kinds
+    cap: str  # "cap" | "nocap": whether the caller still holds the capability `scratch new` returned (structured kinds)
+    marker: tuple  # NONE | UNBINNED | ("binned", bin, ref) | STALE
+    place: str  # ROOT | QUARANTINE | RETIRED | REAPED
+    refs: tuple  # sorted refs whose destination currently proves this content (scratch-sha256 cited, 1760-1801)
+    fds: int  # 1 when lsof is not clear (open files, or lsof evidence unavailable): both refuse identically
+    user: int  # 1 when a live user is registered in .users (RELEASELIVE1, 399-408)
+    rehomed: int  # 1 when respawn_seat rewrote .owner's pid away from the dir-name pid (pid-only-seated only)
+    ro: int  # content permissions, see RO_NAMES
+
+
+def absent(s: State, how: str) -> State:
+    """Terminal states keep only the owner kind and how the dir left the disk."""
+    return State(s.kind, "-", "-", NONE, how, (), 0, 0, 0, 0)
+
+
+def fmt_marker(m: tuple) -> str:
+    if m[0] == "binned":
+        return f"binned({m[1]}{',' + m[2] if m[2] else ''})"
+    return m[0]
+
+
+def fmt_state(s: State) -> str:
+    if s.place in ABSENT:
+        return f"{s.kind} {s.place.upper()}"
+    return (f"{s.kind} owner={s.live} cap={s.cap} marker={fmt_marker(s.marker)} place={s.place} "
+            f"refs={','.join(s.refs) or '-'} fds={s.fds} user={s.user} rehomed={s.rehomed} perm={RO_NAMES[s.ro]}")
+
+
+class Config(NamedTuple):
+    # The planted transition: `release --now --bin X` also retires a dir whose prior marker is unbinned.
+    planted_unbinned_now: bool = False
+    # Which tree-removal code the delete paths run: "head" is this checkout (records last in --now, chmod-then-retry
+    # everywhere); "v0.2.74" replays only the tagged release's plain `rmSync(recursive, force)` (v0.2.74 src/scratch.ts
+    # 1409-1414 --now, 1222 expiry, 1868 reap) on top of the HEAD guards. Nothing else of v0.2.74 is replayed.
+    delete_impl: str = "head"
+    # Whether a job can set an immutable flag on its content (ro=2). Off by default: the default model covers mode bits.
+    immutable: bool = False
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Authority and guards (src/scratch.ts)
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def authority(s: State) -> Tuple[bool, bool, bool]:
+    """(seatOwned, capabilityOwned, pidOwned) for the modeled caller, the owner's own seat/process tree.
+
+    seatOwned  scratch.ts:1641-1645 callerHoldsSeat: owner.agent/session non-null and the caller holds that session's
+               lease. A dead seat is held by nobody.
+    capOwned   scratch.ts:1657-1662,1892 capabilityAuthorizes: the caller presents the token `scratch new` returned.
+    pidOwned   scratch.ts:1632-1638 callerIsOwnedBy: the owner pid is the caller or one of its ancestors. For the
+               structured kinds the recorded pid is the `omp-kit scratch new` CLI process itself (cli.ts:3612,
+               scratch.ts:2099,2107), which has exited before any later command runs, so it is never an ancestor.
+    """
+    seat = s.kind in (STRUCTURED, PID_SEATED) and s.live == "live"
+    cap = not seat and s.kind in (STRUCTURED, UNSEATED) and s.cap == "cap"
+    pid = s.kind in PID_KINDS and s.live == "live"
+    return seat, cap, pid
+
+
+def authorized(s: State) -> bool:
+    return any(authority(s))
+
+
+def bin_refusal(s: State, bin_: Optional[str], ref: Optional[str]) -> Optional[str]:
+    """scratch.ts:1754-1802 releaseBinRefusal, guards in source order."""
+    if bin_ is None:  # 1755
+        return None if ref is None else "ref-without-bin"
+    if bin_ not in RELEASE_BINS:  # 1756
+        return "hold-is-declared-at-creation" if bin_ == "hold" else "bin-unknown"
+    if bin_ == "throwaway":  # 1757
+        return None if ref is None else "throwaway-takes-no-ref"
+    if ref is None:  # 1758
+        return "ref-required"
+    # 1759 REF_PATTERN: both modeled refs are well-formed. 1760-1801: the destination must cite this content's digest
+    # (bead comment, or a committed+pushed file that cites it or copies one of its files); else ref-transfer-unproven.
+    return None if ref in s.refs else "ref-transfer-unproven"
+
+
+def removal_succeeds(s: State, cfg: Config) -> bool:
+    """Whether one tree removal empties the content.
+
+    head     removeTreeRetrying 1679-1686: rmSync(recursive, force); on failure grantOwnerWrite (1668-1676: lstat, chmod
+             mode|0700 on every real dir, never follows symlinks) and one retry. Mode bits clear; an immutable flag does
+             not (chmod leaves uchg set), so the retry throws again.
+    v0.2.74  plain rmSync(recursive, force) with no retry (v0.2.74 src/scratch.ts:1410, 1222, 1868): a read-only
+             subtree throws EACCES.
+    """
+    if s.ro == 0:
+        return True
+    return cfg.delete_impl == "head" and s.ro == 1
+
+
+def partial(s: State, place: str) -> State:
+    """A whole-tree rmSync that throws partway. Which entries go first is the order the runtime's recursive remove
+    visits them; that order is NOT read from source here. The model takes the order observed on installed 0.2.74
+    (QuietBadger on ompkit-fp72.120.16.37, 2026-10-23T19:24Z, grade-native-retire.80791): .owner and every hidden
+    record were gone and only the read-only subtree stayed. Content went too, so no earlier citation proves it."""
+    return s._replace(marker=OWNERLESS, place=place, refs=(), user=0)
+
+
+def delete_now(s: State, cfg: Config) -> Tuple[State, str]:
+    """scratch.ts:1812-1861 deleteReleasedNow(Locked). The inode/owner-text/inside-root rechecks (1825-1834) hold in
+    the model (see NOT MODELED); a refusal keeps the marked dir: changed=true, ok=false (SCRATCH_RELEASE_HELD)."""
+    if s.fds:  # 1838-1841 one lsof snapshot; open files or unavailable evidence both hold
+        return s, "now-held-open-fds"
+    if s.user:  # 1843
+        return s, "now-held-user-live"
+    if removal_succeeds(s, cfg):
+        return absent(s, RETIRED), "owner-released-deleted"  # 1846-1860 records last, then the dir
+    if cfg.delete_impl == "head":
+        # 1844-1856: every entry except .owner and the marker goes through removeTreeRetrying first; the throw lands
+        # in the catch with both records still on disk. Some content may be gone, so earlier citations prove nothing.
+        return s._replace(refs=()), "now-held-delete-failed"
+    # v0.2.74 src/scratch.ts:1409-1412: rmSync(dir) throws after taking the records; the CLI still says "marker kept".
+    return partial(s, ROOT), "now-held-delete-failed"
+
+
+def release(s: State, bin_: Optional[str], ref: Optional[str], now: bool, cfg: Config) -> Tuple[State, str]:
+    """`omp-kit scratch release DIR [--bin B] [--ref R] [--now]`: cli.ts:3514-3547 -> scratch.ts:1863-1953."""
+    if s.place != ROOT:
+        # 1865-1876: the owner's path no longer exists after the quarantine rename (2239); the quarantine dir is not a
+        # scratch root (1365-1372), so its new path is refused outside-scratch-root.
+        return s, "directory-unavailable"
+    if s.kind == NESTED:
+        # 1870-1871: scratchRootForDirectory needs dirname(dir) to be a root (1369); a nested dir never is.
+        return s, "outside-scratch-root"
+    if s.marker == OWNERLESS:
+        # 1881-1883: no .owner text, so releaseLegacy (1960-1995) runs: --now refuses first (1964), then any --bin or
+        # --ref (1965), then the missing legacyOwner flag (1966-1967). The CLI never sets legacyOwner (cli.ts:3529).
+        if now:
+            return s, "now-needs-structured-owner"
+        if bin_ is not None or ref is not None:
+            return s, "bin-needs-structured-owner"
+        return s, "owner-file-invalid"
+    # 1879-1883: every other modeled owner record parses (structured JSON, legacy key=value); 1887-1888: labels valid.
+    seat, cap, pid = authority(s)
+    if not (seat or cap or pid):  # 1891-1898
+        return s, "caller-not-owner"
+    refusal = bin_refusal(s, bin_, ref)  # 1899-1900
+    if refusal is not None:
+        return s, refusal
+    if now and bin_ is None:  # 1904-1905
+        return s, "now-needs-bin"
+    if now and s.user:  # 1908-1911
+        return s, "user-live"
+    if s.kind in STRUCTURED_KINDS and not seat and not cap:  # 1912-1918: unreachable, pid authority is impossible here
+        return s, "owner-process-identity-unverified"
+    if s.marker != NONE:  # 1920
+        if s.marker != STALE:  # 1921-1922: readReleaseRecord verifies owner_sha256/device/inode (1600-1630)
+            prior_bin = None if s.marker == UNBINNED else s.marker[1]
+            prior_ref = None if s.marker == UNBINNED else s.marker[2]
+            # 1926: if (opts.now === true && opts.bin !== undefined && prior.bin === opts.bin && (prior.ref ?? undefined) === opts.ref)
+            match = now and bin_ is not None and prior_bin == bin_ and prior_ref == ref
+            if cfg.planted_unbinned_now and now and bin_ is not None and prior_bin is None:
+                match = True  # PLANTED: an unbinned prior marker accepts the bin given with --now
+            if match:
+                return delete_now(s, cfg)  # 1927-1930 (the marker still pins this inode in the model)
+            return s, "already-released"  # 1932: ok:true changed:false, the CLI prints RELEASED deleted:false
+        return s, "release-marker-already-present"  # 1934
+    marked = s._replace(marker=UNBINNED if bin_ is None else ("binned", bin_, ref))  # 1936-1950
+    if now and bin_ is not None:  # 1951
+        return delete_now(marked, cfg)
+    return marked, "owner-released"  # 1952
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Reaper (scratch apply --apply): plan verdict, then apply
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def inspect_session(s: State) -> str:
+    """scratch.ts:1066-1079 inspectSession over 988-1059 inspectByPid, for an owner that matches its root (1026)."""
+    if s.kind in STRUCTURED_KINDS:
+        # 1052-1058: hasProcessIdentity; the recorded incarnation is the exited CLI process: dead (or reused).
+        if s.fds:
+            return "LIVE owner-dead-but-open-fds-present"
+        if s.kind in SEATED_KINDS and s.live == "live":  # 1074-1076 seatLive
+            return "LIVE owner-seat-alive"
+        return "REAP"
+    # 1033-1050: identity-free owner record: a live pid is LIVE (no reuse proof); a dead pid with clear lsof is REAP.
+    if s.live == "live":
+        return "LIVE owner-alive-start-unverified"
+    if s.fds:
+        return "LIVE owner-dead-but-open-fds-present"
+    return "REAP"  # 1074-1078: a pid-only-seated owner is dead only once its seat is dead too
+
+
+def sweep(s: State, idle: bool, cfg: Config) -> Tuple[State, str]:
+    """One `scratch apply --apply` pass over this dir: applyScratch 3146-3192 -> inspectOne 2747-2815 -> apply*."""
+    if s.place != ROOT or s.kind == NESTED:
+        # eachSessionDir 2820-2843 visits root entries and NESTED_WORKDIR children only; quarantine is not a root.
+        return s, "not-visited"
+    if s.user:  # 2755-2756
+        return s, "LIVE user-live"
+    if s.marker == OWNERLESS:
+        # 2757 no release record; inspectByPid 1000-1024: no .owner text -> SKIP no-owner-file; inspectOne 2801-2812:
+        # idle past unownedIdleMs -> QUARANTINE unowned-idle-*-would-quarantine, else LIVE unowned-but-active.
+        if not idle:
+            return s, "LIVE unowned-but-active"
+        if s.fds:  # applyUnowned 2416-2420
+            return s, "SKIP owner-released-but-open-fds-present"
+        return s._replace(place=QUARANTINE), "QUARANTINE unowned-idle-72h-quarantined"  # 2421-2441
+    if s.marker not in (NONE, STALE):  # 2757-2767: a verified owner release -> owner-released-would-quarantine
+        # applyReleased 2206-2257: users (2227), lsof (2228-2229), then the atomic rename into quarantine (2239).
+        if s.fds:
+            return s, "SKIP owner-released-but-open-fds-present"
+        return s._replace(place=QUARANTINE), "QUARANTINE owner-released-quarantined"
+    verdict = inspect_session(s)
+    if s.kind in SEAT_DIR_KINDS and s.rehomed:
+        # 1032: the owner pid is no longer a segment of the dir name -> SKIP session-name-owner-mismatch; inspectOne
+        # 2769-2776 retries without the name rule and only a REAP proof may age into quarantine (2801-2809).
+        if verdict != "REAP" or not idle:
+            return s, "SKIP session-name-owner-mismatch"
+        # applyUnowned 2379-2442: idle past 72 h, owner unchanged, inspectOne still QUARANTINE, rename (2423).
+        return s._replace(place=QUARANTINE), "QUARANTINE mismatched-owner-idle-72h-quarantined"
+    if verdict == "REAP":
+        # applyReap 2270-2359: rename into quarantine, inspectSession recheck sees the same state (2310-2312), then
+        # removeTreeRetrying(deleting) 2352-2357 (v0.2.74: rmSync 1868). A throw leaves `<entry>.delete-<pid>` in
+        # quarantine, SKIP delete-failed; quarantineTimeOf (1172) still parses that name for expiry.
+        if removal_succeeds(s, cfg):
+            return absent(s, REAPED), "REAP owner-dead-applied"
+        return partial(s, QUARANTINE), "SKIP delete-failed"
+    return s, verdict
+
+
+def expired_delete(s: State, cfg: Config, reason: str) -> Tuple[State, str]:
+    """expireEntryUnlessUsed 2449-2457 -> removeExpiredEntry 1509-1559: removeTreeRetrying (1522; v0.2.74: rmSync
+    1222). A failure renames the entry to `.delete-<pid>` (1537-1545) and stays in quarantine for the next pass."""
+    if s.user:  # 2452-2455
+        return s, "LIVE user-live"
+    if removal_succeeds(s, cfg):
+        return absent(s, REAPED), f"DELETE {reason}"
+    return partial(s, QUARANTINE), "SKIP delete-failed"
+
+
+def expire(s: State, cfg: Config) -> Tuple[State, str]:
+    """applyQuarantineExpiry 2460-2577 for an entry past the quarantine TTL (24 h default, 1179-1203)."""
+    if s.place != QUARANTINE:
+        return s, "not-quarantined"
+    if s.marker == OWNERLESS:
+        # 2490-2501: no owner; the 72 h mtime bound is part of this clock step. 2517 no record; 2553-2561 lsof, delete.
+        if s.fds:
+            return s, "SKIP owner-released-but-open-fds-present"
+        return expired_delete(s, cfg, "quarantine-expired")
+    if s.kind in SEATED_KINDS and s.live == "live":  # 2502-2507 (bin is never hold: hold is not creatable here)
+        return s, "LIVE owner-seat-alive"
+    if s.marker not in (NONE, STALE):  # 2517-2537 verified release
+        if s.fds:
+            return s, "SKIP owner-released-but-open-fds-present"
+        return expired_delete(s, cfg, "quarantine-expired-owner-released")
+    # 2539-2574: an identity-free owner deletes on clear lsof; a structured one once its incarnation is not live.
+    if s.fds:
+        return s, "SKIP owner-released-but-open-fds-present"
+    return expired_delete(s, cfg, "quarantine-expired")
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------------------------------------------
+
+OWNER, ENV, REAPER = "owner", "env", "reaper"
+
+
+class Action(NamedTuple):
+    label: str
+    cls: str
+    fn: Callable[[State, Config], Tuple[State, str]]
+
+
+def release_label(bin_: Optional[str], ref: Optional[str], now: bool) -> str:
+    return "release" + (f" --bin {bin_}" if bin_ else "") + (f" --ref {ref}" if ref else "") + (" --now" if now else "")
+
+
+def _release_action(bin_: Optional[str], ref: Optional[str], now: bool) -> Action:
+    return Action(release_label(bin_, ref, now), OWNER, lambda s, cfg: release(s, bin_, ref, now, cfg))
+
+
+RELEASE_ACTIONS: List[Action] = [
+    _release_action(b, r, n) for b in (None, "throwaway", "evidence", "promote", "hold") for r in (None,) + REFS
+    for n in (False, True)
+]
+
+
+def cite(ref: str) -> Callable[[State, Config], Tuple[State, str]]:
+    # The refusal detail at 1763-1764 tells the producer to cite scratch-sha256:<digest> on the bead or in a committed
+    # and pushed file; once that is true releaseBinRefusal admits the ref (1777, 1800).
+    def fn(s: State, cfg: Config) -> Tuple[State, str]:
+        if s.place != ROOT or ref in s.refs or s.marker == OWNERLESS:
+            return s, "no-op"
+        return s._replace(refs=tuple(sorted(s.refs + (ref,)))), "cited"
+    return fn
+
+
+def close_fds(s: State, cfg: Config) -> Tuple[State, str]:
+    return (s._replace(fds=0), "closed") if s.place not in ABSENT and s.fds else (s, "no-op")
+
+
+def unuse(s: State, cfg: Config) -> Tuple[State, str]:
+    # cli.ts:3499-3512 -> scratch.ts:449-512: needs the dir directly under a scratch root (461) with an .owner (463).
+    if s.place != ROOT or s.kind == NESTED or not s.user:
+        return s, "no-op"
+    return s._replace(user=0), "user-removed"
+
+
+def kitlib_removed(s: State) -> bool:
+    # src/kitlib/tmp.ts:75-82 removeTree: rmSync, then makeDirsWritable (64-71, chmod |0700) and one retry. Mode bits
+    # clear; chmod on an immutable entry throws EPERM out of makeDirsWritable, so the retry never runs.
+    return s.ro < 2
+
+
+def kitlib_cleanup(s: State, cfg: Config) -> Tuple[State, str]:
+    # src/kitlib/tmp.ts:158-161 cleanup() removes the tree on demand from the owning process; no marker check.
+    if s.kind not in (PID_ONLY, NESTED) or s.live != "live" or s.place != ROOT:
+        return s, "no-op"
+    if kitlib_removed(s):
+        return absent(s, RETIRED), "kitlib-cleanup"
+    return partial(s, ROOT), "kitlib-cleanup-threw"  # 159 removeTree throws; the dir stays registered (160 not reached)
+
+
+def owner_ends(s: State, cfg: Config) -> Tuple[State, str]:
+    if s.live != "live" or s.place in ABSENT:
+        return s, "no-op"
+    if s.kind in SEAT_DIR_KINDS and s.place == ROOT:
+        # fleet-guard/seat-end.ts:62-69,76-77: the ending session releases its own dir as --bin throwaway (no --now)
+        # under its seat identity (or, for a pid-only record, as the owner pid itself: 1633), then it exits.
+        s, _ = release(s, "throwaway", None, False, cfg)
+    return s._replace(live="dead"), "owner-ended"
+
+
+def owner_exit_hook(s: State, cfg: Config) -> Tuple[State, str]:
+    # src/kitlib/tmp.ts:104,85-91: a normal exit (or HUP/INT/TERM) of an autoCleanup owner removes its dirs.
+    if s.kind not in (PID_ONLY, NESTED) or s.live != "live" or s.place in ABSENT:
+        return s, "no-op"
+    if s.place != ROOT:
+        return s._replace(live="dead"), "owner-ended"  # rmSync(force) on the old path; the quarantined tree stays
+    if kitlib_removed(s):
+        return absent(s, RETIRED), "kitlib-exit-hook"
+    return partial(s, ROOT)._replace(live="dead"), "kitlib-exit-hook-threw"  # 87-90: the throw is swallowed
+
+
+def make_read_only(s: State, cfg: Config) -> Tuple[State, str]:
+    # The job's own chmod -R a-w on a subtree (QuietBadger 80791), or a git-archive export of 0555 dirs.
+    return (s._replace(ro=1), "read-only") if s.place == ROOT and s.ro == 0 else (s, "no-op")
+
+
+def make_immutable(s: State, cfg: Config) -> Tuple[State, str]:
+    # The job's own chflags uchg on a file. Only in Config(immutable=True).
+    return (s._replace(ro=2), "immutable") if cfg.immutable and s.place == ROOT and s.ro < 2 else (s, "no-op")
+
+
+def restore_write(s: State, cfg: Config) -> Tuple[State, str]:
+    # The live owner job undoes its own permissions on its own files (chmod -R u+w, chflags nouchg). It cannot find a
+    # tree the reaper moved into quarantine, and it writes no owner record back.
+    return (s._replace(ro=0), "writable") if s.place == ROOT and s.ro and s.live == "live" else (s, "no-op")
+
+
+def respawn(s: State, cfg: Config) -> Tuple[State, str]:
+    # respawn_seat.py:525-569 rehome_scratch rewrites `pid` (416, 420-425) in every root's */.owner naming the old pid,
+    # with no check for a release marker, so the marker's owner_sha256 (1938) stops matching (1618). No .owner: skipped.
+    if s.kind not in SEAT_DIR_KINDS or s.live != "live" or s.place != ROOT or s.marker == OWNERLESS:
+        return s, "no-op"
+    return s._replace(rehomed=1, marker=STALE if s.marker != NONE else NONE), "rehomed"
+
+
+
+def lose_token(s: State, cfg: Config) -> Tuple[State, str]:
+    return (s._replace(cap="nocap"), "token-lost") if s.cap == "cap" and s.place not in ABSENT else (s, "no-op")
+
+
+def drift(s: State, cfg: Config) -> Tuple[State, str]:
+    # Writing to the dir changes scratchContent's digest (1705-1744): earlier citations prove nothing any more.
+    return (s._replace(refs=()), "content-changed") if s.place == ROOT and s.refs else (s, "no-op")
+
+
+def open_fds(s: State, cfg: Config) -> Tuple[State, str]:
+    return (s._replace(fds=1), "opened") if s.place == ROOT and not s.fds else (s, "no-op")
+
+
+def use(s: State, cfg: Config) -> Tuple[State, str]:
+    # scratch.ts:449-512: any running pid may register; no ownership check.
+    if s.place != ROOT or s.kind == NESTED or s.user or s.marker == OWNERLESS:  # 463: needs a regular .owner
+        return s, "no-op"
+    return s._replace(user=1), "user-registered"
+
+
+def user_exits(s: State, cfg: Config) -> Tuple[State, str]:
+    # blockingScratchUser 399-408 ignores dead users.
+    return (s._replace(user=0), "user-dead") if s.user and s.place not in ABSENT else (s, "no-op")
+
+
+def parent_retired(s: State, cfg: Config) -> Tuple[State, str]:
+    # A nested dir goes with the scratch dir that holds it (deleteReleasedNow 1848-1854 / applyReap 2353 remove trees);
+    # content those removers cannot clear keeps the parent, and this dir, on disk.
+    if s.kind != NESTED or s.place != ROOT or not removal_succeeds(s, cfg):
+        return s, "no-op"
+    return absent(s, REAPED), "parent-removed"
+
+
+DEATH_LABELS = ("owner ends", "owner exits (kitlib exit hook)")
+
+ACTIONS: List[Action] = RELEASE_ACTIONS + [
+    Action("cite R1", OWNER, cite("R1")),
+    Action("cite R2", OWNER, cite("R2")),
+    Action("close open files", OWNER, close_fds),
+    Action("scratch unuse", OWNER, unuse),
+    Action("kitlib cleanup()", OWNER, kitlib_cleanup),
+    Action("owner restores write (chmod -R u+w, chflags nouchg)", OWNER, restore_write),
+    Action("content made read-only (chmod -R a-w subtree)", ENV, make_read_only),
+    Action("content made immutable (chflags uchg)", ENV, make_immutable),
+    Action("owner ends", ENV, owner_ends),
+    Action("owner exits (kitlib exit hook)", ENV, owner_exit_hook),
+    Action("respawn (rehome)", ENV, respawn),
+    Action("capability token lost", ENV, lose_token),
+    Action("content changes", ENV, drift),
+    Action("files opened", ENV, open_fds),
+    Action("scratch use", ENV, use),
+    Action("user exits", ENV, user_exits),
+    Action("parent dir removed", ENV, parent_retired),
+    Action("scratch apply --apply", REAPER, lambda s, cfg: sweep(s, False, cfg)),
+    Action("scratch apply --apply (idle >= 72h)", REAPER, lambda s, cfg: sweep(s, True, cfg)),
+    Action("scratch apply --apply (quarantine TTL passed)", REAPER, expire),
+]
+
+
+def initial_states() -> List[Tuple[str, State]]:
+    base = dict(marker=NONE, place=ROOT, refs=(), fds=0, user=0, rehomed=0, ro=0)
+    return [
+        ("scratch new (seated caller)", State(STRUCTURED, "live", "cap", **base)),  # cli.ts:3612, scratch.ts:2077-2178
+        ("scratch new (unseated caller)", State(UNSEATED, "live", "cap", **base)),
+        ("kitlib owned temp in a scratch root", State(PID_ONLY, "live", "-", **base)),  # kitlib/tmp.ts:127-155
+        ("fleet-guard seat dir with agent/session", State(PID_SEATED, "live", "-", **base)),  # fleet-guard/scratch.ts:78-85
+        ("fleet-guard seat dir, pid only", State(SEAT_DIR, "live", "-", **base)),
+        ("another agent's scratch new", State(FOREIGN, "live", "nocap", **base)),
+        ("kitlib owned temp under TMPDIR=<scratch dir>", State(NESTED, "live", "-", **base)),
+    ]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Exploration and analysis
+# ---------------------------------------------------------------------------------------------------------------
+
+
+class Model(NamedTuple):
+    states: List[State]
+    parent: Dict[State, Optional[Tuple[State, str]]]
+    origin: Dict[State, str]
+    edges: Dict[State, List[Tuple[str, str, State]]]
+    outcomes: Dict[State, List[Tuple[str, str]]]  # owner release outcomes, self-loops included
+
+
+def explore(cfg: Config) -> Model:
+    parent: Dict[State, Optional[Tuple[State, str]]] = {}
+    origin: Dict[State, str] = {}
+    edges: Dict[State, List[Tuple[str, str, State]]] = {}
+    outcomes: Dict[State, List[Tuple[str, str]]] = {}
+    queue: deque = deque()
+    for label, s in initial_states():
+        if s not in parent:
+            parent[s] = None
+            origin[s] = label
+            queue.append(s)
+    while queue:
+        s = queue.popleft()
+        out: List[Tuple[str, str, State]] = []
+        rel: List[Tuple[str, str]] = []
+        if s.place not in ABSENT:
+            for action in ACTIONS:
+                t, reason = action.fn(s, cfg)
+                if action in RELEASE_ACTIONS:
+                    rel.append((action.label, reason))
+                if t == s:
+                    continue
+                out.append((action.label, action.cls, t))
+                if t not in parent:
+                    parent[t] = (s, action.label)
+                    origin[t] = origin[s]
+                    queue.append(t)
+        edges[s] = out
+        outcomes[s] = rel
+    states = sorted(parent, key=fmt_state)
+    return Model(states, parent, origin, edges, outcomes)
+
+
+def trace(m: Model, s: State) -> str:
+    steps: List[str] = []
+    cur: Optional[State] = s
+    while cur is not None and m.parent[cur] is not None:
+        prev, label = m.parent[cur]  # type: ignore[misc]
+        steps.append(label)
+        cur = prev
+    return f"[{m.origin[s]}]" + "".join(f" ; {step}" for step in reversed(steps))
+
+
+def can_reach(m: Model, target: Callable[[State], bool], allowed: Callable[[str, str], bool]) -> set:
+    reverse: Dict[State, List[State]] = {s: [] for s in m.states}
+    for s in m.states:
+        for label, cls, t in m.edges[s]:
+            if allowed(label, cls):
+                reverse[t].append(s)
+    seen = {s for s in m.states if target(s)}
+    queue = deque(sorted(seen, key=fmt_state))
+    while queue:
+        t = queue.popleft()
+        for s in reverse[t]:
+            if s not in seen:
+                seen.add(s)
+                queue.append(s)
+    return seen
+
+
+class DeadEnd(NamedTuple):
+    state: State
+    cls: str
+    mapping: str
+    live_backstop: bool
+    absolute: bool
+    trace: str
+
+
+def classify(s: State, cfg: Config) -> Tuple[str, str]:
+    """(class, bead mapping with the source lines it rests on)."""
+    if s.marker == OWNERLESS:
+        if cfg.delete_impl == "v0.2.74":
+            return ("D4 owner record and release marker lost to a partial delete",
+                    ".37 SCRATCHRETIRE1 AC5 (QuietBadger 2026-10-23T19:24Z, grade-native-retire.80791): v0.2.74 "
+                    "src/scratch.ts:1409-1414 rmSync(dir) with no chmod retry takes the records; then release has no "
+                    "owner (1881-1883 -> releaseLegacy 1964-1967) and the reaper sees no-owner-file (1024, 2801-2812); "
+                    "HEAD records-last (1844-1853, 208cad1782) plus chmod-then-retry (1668-1686) removes it for mode bits")
+        return ("D4 owner record and release marker lost to a partial delete",
+                "unmapped at HEAD: only deleteReleasedNow keeps the records last (1844-1853); applyReap "
+                "removeTreeRetrying(deleting) (2353), removeExpiredEntry (1522) and kitlib removeTree (kitlib/tmp.ts:75-82) "
+                "remove the whole tree, and chmod (1668-1676) cannot clear an immutable flag")
+    if authorized(s):
+        if s.place == QUARANTINE:
+            return ("D2 owner-authorized, marker-only release swept into quarantine",
+                    ".37 SCRATCHRETIRE1 (finished bytes wait on apply/quarantine/age): release refuses the moved dir "
+                    "(scratch.ts:1865-1876); expiry waits on the seat (2502-2507) and the TTL (2488)")
+        if s.marker == UNBINNED:
+            return ("D1 owner-authorized, unbinned marker",
+                    ".37 SCRATCHRETIRE1 (QuietBadger AM67479): --now needs a bin (scratch.ts:1904-1905) and a bin "
+                    "never equals the unbinned prior (1926), so every release is already-released (1932)")
+        if s.marker == STALE:
+            return ("D3 owner-authorized, release marker orphaned by respawn rehome",
+                    "unmapped: respawn_seat.py:525-569 rewrites .owner under a marker; readReleaseRecord rejects the "
+                    "owner_sha256 (scratch.ts:1618-1619) and every release is release-marker-already-present (1934)")
+        return ("D9 owner-authorized, other", "unmapped")
+    if s.kind == FOREIGN:
+        return ("B1 no authority: foreign owner",
+                "by design (.37 AC4 foreign owner preserved, caller-not-owner scratch.ts:1891-1898)")
+    if s.kind == NESTED:
+        return ("B2 no release route: nested dir",
+                "cdll7 description (outside-scratch-root): scratch.ts:1870-1871,1365-1372; kitlib cleanup or the "
+                "parent's retirement are its only routes")
+    if s.kind in PID_KINDS:
+        return ("B3 no authority: pid-only owner process gone",
+                "cdll7 description (pid-only owners cannot release): callerIsOwnedBy needs a live ancestor "
+                "(scratch.ts:1632-1638)")
+    return ("B4 no authority: seat gone and capability lost",
+            "by design (PIDIDENT1 a0vy1): capabilityAuthorizes (scratch.ts:1657-1662) needs the token")
+
+
+class Analysis(NamedTuple):
+    model: Model
+    dead_ends: List[DeadEnd]
+    premature_reaps: List[Tuple[State, str]]
+    unproven_deletes: List[Tuple[State, str, str]]
+    report: str
+
+
+def core(s: State) -> str:
+    """A state without its transient owner-controlled bits (proven refs, open files, registered user) and with the
+    marker's ref folded to R (the model is symmetric in R1/R2). Dead ends are reported per core; --all lists each state."""
+    marker = s.marker if s.marker[0] != "binned" or s.marker[2] is None else ("binned", s.marker[1], "R")
+    return (f"{s.kind} owner={s.live} cap={s.cap} marker={fmt_marker(marker)} place={s.place} rehomed={s.rehomed} "
+            f"perm={RO_NAMES[s.ro]}")
+
+
+def verdict(flags: List[bool]) -> str:
+    yes = sum(flags)
+    return "yes" if yes == len(flags) else "NO" if yes == 0 else f"mixed({yes}yes/{len(flags) - yes}NO)"
+
+
+def analyse(cfg: Config, full: bool = False) -> Analysis:
+    m = explore(cfg)
+    owner_ok = can_reach(m, lambda s: s.place == RETIRED, lambda label, cls: cls == OWNER)
+    live_ok = can_reach(m, lambda s: s.place in ABSENT, lambda label, cls: label not in DEATH_LABELS)
+    abs_ok = can_reach(m, lambda s: s.place in ABSENT, lambda label, cls: True)
+    dead: List[DeadEnd] = []
+    for s in m.states:
+        if s.place in ABSENT or s in owner_ok:
+            continue
+        cls, mapping = classify(s, cfg)
+        dead.append(DeadEnd(s, cls, mapping, s in live_ok, s in abs_ok, trace(m, s)))
+    dead.sort(key=lambda d: (d.cls, core(d.state), fmt_state(d.state)))
+    # Safety: the reaper deletes a dir whose owner is live and never released it.
+    premature: List[Tuple[State, str]] = []
+    # Safety: the reaper deletes a dir released to evidence/promote whose current content no destination proves
+    # (content written after the release). Owner deletions are excluded: release re-proves (1899), kitlib cleanup is
+    # the owner's own explicit removal.
+    unproven: List[Tuple[State, str, str]] = []
+    for s in m.states:
+        for label, cls, t in m.edges[s]:
+            if t.place not in ABSENT or cls != REAPER:
+                continue
+            if s.live == "live" and s.marker == NONE and s.kind != FOREIGN:
+                premature.append((s, label))
+            if s.marker[0] == "binned" and s.marker[1] in ("evidence", "promote") and s.marker[2] not in s.refs:
+                unproven.append((s, label, cls))
+    lines: List[str] = []
+    lines.append(f"SCRATCH LIFECYCLE MODEL src/scratch.ts planted_unbinned_now={cfg.planted_unbinned_now} "
+                 f"delete_impl={cfg.delete_impl} immutable={cfg.immutable}")
+    terminal = sum(1 for s in m.states if s.place in ABSENT)
+    lines.append(f"states={len(m.states)} terminal={terminal} edges={sum(len(v) for v in m.edges.values())} "
+                 f"owner_route_dead_ends={len(dead)} premature_reaps={len(premature)} unproven_deletes={len(unproven)}")
+    lines.append("INITIAL")
+    for label, s in initial_states():
+        lines.append(f"  {label}: {fmt_state(s)}")
+    lines.append("DEAD ENDS (no owner-route path to RETIRED)")
+    for cls in sorted({d.cls for d in dead}):
+        members = [d for d in dead if d.cls == cls]
+        lines.append(f"  CLASS {cls} states={len(members)}")
+        lines.append(f"    maps-to: {members[0].mapping}")
+        rep = min(members, key=lambda x: (x.trace.count(";"), fmt_state(x.state)))
+        reasons: Dict[str, List[str]] = {}
+        for label, reason in m.outcomes[rep.state]:
+            reasons.setdefault(reason, []).append(label)
+        lines.append(f"    owner commands at {fmt_state(rep.state)}:")
+        for reason in sorted(reasons):
+            lines.append(f"      {reason}: {len(reasons[reason])} forms, e.g. `{reasons[reason][0]}`")
+        for key in sorted({core(d.state) for d in members}):
+            group = [d for d in members if core(d.state) == key]
+            best = min(group, key=lambda x: (x.trace.count(";"), fmt_state(x.state)))
+            lines.append(f"    DEADEND {key} members={len(group)} | live_backstop={verdict([d.live_backstop for d in group])} "
+                         f"absolute={verdict([d.absolute for d in group])} | trace: {best.trace}")
+            if full:
+                for d in group:
+                    lines.append(f"      STATE {fmt_state(d.state)} | live_backstop={'yes' if d.live_backstop else 'NO'} "
+                                 f"absolute={'yes' if d.absolute else 'NO'} | trace: {d.trace}")
+    for title, tag, rows in (("SAFETY: reaper deletes a live owner's unreleased dir", "PREMATURE",
+                              [(s, label) for s, label in premature]),
+                             ("SAFETY: reaper deletes an evidence/promote dir whose current content no destination proves",
+                              "UNPROVEN", [(s, label) for s, label, _ in unproven])):
+        lines.append(title)
+        for key in sorted({(core(s), label) for s, label in rows}):
+            group = [s for s, label in rows if (core(s), label) == key]
+            best = min(group, key=lambda s: (trace(m, s).count(";"), fmt_state(s)))
+            lines.append(f"  {tag} {key[0]} members={len(group)} --[{key[1]}]--> gone | trace: {trace(m, best)}")
+    body = "\n".join(lines)
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    return Analysis(m, dead, premature, unproven, f"{body}\nreport-sha256 {digest}\n")
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Assertions
+# ---------------------------------------------------------------------------------------------------------------
+
+def line_shape(line: str) -> str:
+    """The report line kind, or "" for a line no kind accepts. Plain string checks over the model's own output."""
+    if line.startswith("SCRATCH LIFECYCLE MODEL src/scratch.ts planted_unbinned_now="):
+        return "header"
+    if line.startswith("states=") and " owner_route_dead_ends=" in line and " unproven_deletes=" in line:
+        return "counts"
+    if line in ("INITIAL", "DEAD ENDS (no owner-route path to RETIRED)") or line.startswith("SAFETY: "):
+        return "section"
+    if line.startswith("  CLASS ") and line.rsplit(" ", 1)[-1].startswith("states="):
+        return "class"
+    if line.startswith("    maps-to: "):
+        return "maps-to"
+    if line.startswith("    owner commands at ") and line.endswith(":"):
+        return "outcomes"
+    if line.startswith("      ") and " forms, e.g. `release" in line and line.endswith("`"):
+        return "outcome"
+    if line.startswith("    DEADEND ") and " | live_backstop=" in line and " absolute=" in line and " | trace: [" in line:
+        return "deadend"
+    if line.startswith("      STATE ") and " | live_backstop=" in line and " | trace: [" in line:
+        return "state"
+    if line.startswith(("  PREMATURE ", "  UNPROVEN ")) and " | trace: [" in line:
+        return "safety"
+    if line.startswith("report-sha256 ") and len(line) == len("report-sha256 ") + 64:
+        return "digest"
+    if line.startswith("  ") and not line.startswith("   ") and ": " in line:
+        return "initial"
+    return ""
+
+
+def shape_of(report: str) -> List[str]:
+    return [line_shape(line) for line in report.splitlines()]
+
+
+def unbinned_authorized(d: DeadEnd) -> bool:
+    return d.state.marker == UNBINNED and d.state.place == ROOT and authorized(d.state)
+
+
+D4 = "D4 owner record and release marker lost to a partial delete"
+READ_ONLY = "content made read-only (chmod -R a-w subtree)"
+IMMUTABLE = "content made immutable (chflags uchg)"
+
+
+def class_section(report: str, cls: str) -> List[str]:
+    """The header, counts, one class block and the digest of a report, for the variant runs."""
+    lines = report.splitlines()
+    out = lines[:2]
+    inside = False
+    for line in lines:
+        if line.startswith("  CLASS "):
+            inside = line.startswith(f"  CLASS {cls} ")
+        elif not line.startswith("    "):
+            inside = False
+        if inside:
+            out.append(line)
+    return out + [lines[-1]]
+
+
+class ScratchLifecycleModelTest(unittest.TestCase):
+    real: Analysis
+    planted: Analysis
+    replay: Analysis
+    immutable: Analysis
+    seconds: float
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        started = time.monotonic()
+        cls.real = analyse(Config())
+        cls.planted = analyse(Config(planted_unbinned_now=True))
+        cls.replay = analyse(Config(delete_impl="v0.2.74"))
+        cls.immutable = analyse(Config(immutable=True))
+        cls.seconds = time.monotonic() - started
+        sys.stdout.write(analyse(Config(), full=FULL).report if FULL else cls.real.report)
+        for variant in (cls.replay, cls.immutable):
+            sys.stdout.write("VARIANT\n" + "\n".join(class_section(variant.report, "D4")) + "\n")
+        sys.stdout.write(f"wall_seconds_all_runs {cls.seconds:.2f}\n")
+
+    def test_positive_control_unbinned_dead_end_is_found(self) -> None:
+        hits = [d for d in self.real.dead_ends if unbinned_authorized(d) and d.state.kind == STRUCTURED
+                and d.state.live == "live"]
+        self.assertTrue(hits, "the known unbinned dead end (release without a bin, then --now) must be found")
+        shortest = min(hits, key=lambda d: d.trace.count(";"))
+        self.assertEqual(shortest.trace, "[scratch new (seated caller)] ; release")
+        outcomes = dict(self.real.model.outcomes[shortest.state])
+        self.assertEqual(outcomes["release --bin throwaway --now"], "already-released")
+        self.assertEqual(outcomes["release --now"], "now-needs-bin")
+        self.assertEqual(outcomes["release --bin evidence --ref R1 --now"], "ref-transfer-unproven")
+        # The seat holds quarantine expiry (2502-2507): without the owner ending, nothing removes these bytes.
+        self.assertFalse(shortest.live_backstop)
+        self.assertTrue(shortest.absolute)
+
+    def test_planted_transition_removes_the_unbinned_dead_end(self) -> None:
+        before = [d for d in self.real.dead_ends if unbinned_authorized(d)]
+        after = [d for d in self.planted.dead_ends if unbinned_authorized(d)]
+        self.assertTrue(before)
+        self.assertEqual(after, [], "release --now --bin X on an unbinned marker must retire it")
+        self.assertLess(len(self.planted.dead_ends), len(self.real.dead_ends))
+        # The plant is targeted: every other dead-end class survives it.
+        other = lambda a: sorted({d.cls for d in a.dead_ends if not unbinned_authorized(d)})
+        self.assertEqual(other(self.planted), other(self.real))
+        self.assertNotIn("D1 owner-authorized, unbinned marker", {d.cls for d in self.planted.dead_ends})
+
+    def test_trace_format_is_stable_across_the_plant(self) -> None:
+        for report in (self.real.report, self.planted.report):
+            unmatched = [line for line, shape in zip(report.splitlines(), shape_of(report)) if shape == ""]
+            self.assertEqual(unmatched, [])
+        self.assertEqual(set(shape_of(self.planted.report)) - set(shape_of(self.real.report)), set())
+
+    def test_output_is_deterministic(self) -> None:
+        self.assertEqual(analyse(Config()).report, self.real.report)
+        self.assertEqual(analyse(Config(planted_unbinned_now=True)).report, self.planted.report)
+        self.assertEqual(analyse(Config(delete_impl="v0.2.74")).report, self.replay.report)
+        self.assertEqual(analyse(Config(immutable=True)).report, self.immutable.report)
+
+    def d4(self, analysis: Analysis) -> List[DeadEnd]:
+        return [d for d in analysis.dead_ends if d.cls == D4]
+
+    def test_installed_v0274_partial_delete_dead_end_is_found(self) -> None:
+        found = self.d4(self.replay)
+        self.assertTrue(found, "the 80791 recurrence (records lost to a partial --now delete) must be found")
+        seated = [d for d in found if d.state.kind == STRUCTURED and d.state.place == ROOT and d.state.live == "live"]
+        shortest = min(seated, key=lambda d: (d.trace.count(";"), d.trace))
+        self.assertEqual(shortest.trace, f"[scratch new (seated caller)] ; {READ_ONLY} ; release --bin throwaway --now")
+        before = shortest.state._replace(marker=NONE, refs=(), ro=1)
+        self.assertEqual(dict(self.replay.model.outcomes[before])["release --bin throwaway --now"], "now-held-delete-failed")
+        self.assertEqual(sorted(set(r for _, r in self.replay.model.outcomes[shortest.state])),
+                         ["bin-needs-structured-owner", "now-needs-structured-owner", "owner-file-invalid"])
+        # Once the owner is gone, a read-only remnant has no route at all under 0.2.74: the reaper's rmSync fails forever.
+        self.assertTrue([d for d in found if d.state.live == "dead" and d.state.ro == 1 and not d.absolute])
+
+    def test_head_retires_read_only_content(self) -> None:
+        self.assertEqual(self.d4(self.real), [], "HEAD's records-last delete and chmod retry leave no ownerless remnant")
+        start = State(STRUCTURED, "live", "cap", NONE, ROOT, (), 0, 0, 0, 1)
+        self.assertEqual(dict(self.real.model.outcomes[start])["release --bin throwaway --now"], "owner-released-deleted")
+
+    def test_immutable_content_leaves_a_residual_d4_at_head(self) -> None:
+        found = self.d4(self.immutable)
+        self.assertTrue(found)
+        self.assertTrue(all(IMMUTABLE in d.trace for d in found))
+        # deleteReleasedNow keeps both records on a failed delete (1844-1856): --now holds, it never orphans the dir.
+        start = State(STRUCTURED, "live", "cap", NONE, ROOT, (), 0, 0, 0, 2)
+        after, reason = release(start, "throwaway", None, True, Config(immutable=True))
+        self.assertEqual((reason, after.marker), ("now-held-delete-failed", ("binned", "throwaway", None)))
+        self.assertTrue([d for d in found if not d.absolute], "an immutable remnant in quarantine is never deleted")
+
+    def test_owner_release_never_skips_the_transfer_proof(self) -> None:
+        m = self.real.model
+        for s in m.states:
+            for label, cls, t in m.edges[s]:
+                if not label.startswith("release") or t.place != RETIRED:
+                    continue
+                if s.marker[0] == "binned" and s.marker[1] != "throwaway":
+                    self.assertIn(s.marker[2], s.refs, (fmt_state(s), label))
+                if s.marker == NONE and "--ref" in label:
+                    self.assertIn(label.split("--ref ")[1].split()[0], s.refs, (fmt_state(s), label))
+
+    def test_every_state_reaches_absence_when_the_owner_may_end(self) -> None:
+        stuck = [d for d in self.real.dead_ends if not d.absolute]
+        self.assertEqual(stuck, [], [fmt_state(d.state) for d in stuck])
+
+    def test_under_ten_seconds(self) -> None:
+        self.assertLess(self.seconds, 10.0)
+
+
+FULL = "--all" in sys.argv  # list every dead-end state with its own trace, not only one trace per core
+
+if __name__ == "__main__":
+    unittest.main(argv=[arg for arg in sys.argv if arg != "--all"])

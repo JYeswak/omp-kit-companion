@@ -1,0 +1,12 @@
+{
+  "archived_at": "2026-10-26T04:34:50Z",
+  "bead": "ompkit-fp72.19.1.11",
+  "bytes": 6993,
+  "dest": "docs/evidence/cleanup-2026-10-25/scripts__install-commit-msg-bead.sh.diff",
+  "git_head": "77f10c155a17bb5800d1efd245a1f91e082c9104",
+  "path": "scripts/install-commit-msg-bead.sh",
+  "route": "archive then restore/remove",
+  "secrets": false,
+  "sha256": "b5bdbc33b149e89cd417a66b6c5bea47bc757ca5ba7e9cc2f9790ba481936a48",
+  "truncated": false
+}
