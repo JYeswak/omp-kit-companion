@@ -58,6 +58,10 @@ prepare_fixture() {
 	sf_max_wait=$3
 	mkdir -p "$sf_repo/scripts" "$sf_repo/src" "$sf_repo/tests/cli" "$sf_repo/rules" "$sf_repo/config/omp-kit" "$sf_repo/var/agent-tmp/savefirst-top-owner.1" "$sf_repo/home" "$sf_bin"
 	tar -xf "$TMP/source-subset.tar" -C "$sf_repo"
+	if [ -n "${OMP_KIT_TEST_GATE_OVERRIDE:-}" ]; then
+		cp "$OMP_KIT_TEST_GATE_OVERRIDE" "$sf_repo/scripts/pre-push-gate.sh"
+		chmod +x "$sf_repo/scripts/pre-push-gate.sh"
+	fi
 
 	# Explicit reaper control: explicit statfs admission must not invoke the sbh percentage reaper.
 	cat > "$sf_repo/src/service.ts" <<'SERVICE'
@@ -207,6 +211,10 @@ else
 	printf 'FAIL SAVEFIRST1 component control: base_rc=%s push_rc=%s before=%s base=%s after=%s head=%s\n' \
 		"$sf_base_push_rc" "$sf_high_rc" "$sf_before" "$sf_base" "$sf_high_after" "$sf_head" >&2
 	exit 1
+fi
+if [ "${OMP_KIT_CHECKER_CONTRACT_DRIFT_PROBE:-0}" = 1 ]; then
+	printf 'checker-contract fixture control PASS\n'
+	exit 0
 fi
 
 # Negative: use a genuine <10 GiB statfs root (APFS supplied by the test runner on macOS, /dev/shm on Linux).

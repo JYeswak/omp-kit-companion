@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { envelope, parseFindingLines, renderEnvelope } from "../../src/kitlib/findings.ts";
 import { preflightBead, preflightCommit } from "../../src/preflight.ts";
@@ -165,6 +165,14 @@ async function releaseFixtureRoot(root: { dir: string; capability: string }): Pr
 	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot, env: { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots } });
 	if (r.rc !== 0) throw new Error(`scratch release failed: ${new TextDecoder().decode(r.stderr)}`);
 }
+
+async function brun(args: string[], cwd: string, env: Record<string, string>, brBin: string): Promise<string> {
+	return sh([brBin, ...args], cwd, env);
+}
+
+function beadsSnapshot(beadsDir: string): string[] {
+	return readdirSync(beadsDir).sort().map(name => `${name}\t${statSync(join(beadsDir, name), { bigint: true }).mtimeNs}`);
+}
 async function claimFixture(name: string, actor: string, root: string, brBin: string): Promise<{ repo: string; gated: string; eligible: string }> {
 	const repo = join(root, name);
 	mkdirSync(repo, { recursive: true });
@@ -173,15 +181,72 @@ async function claimFixture(name: string, actor: string, root: string, brBin: st
 	// brBin is the resolved harness shim (absolute path, read-only outside
 	// its baked scratch) when a harness is present, else ambient `br`;
 	// never an accidentally shadowed binary for scope-bearing calls.
-	await sh([brBin, "init"], repo);
+	mkdirSync(join(repo, ".beads"), { recursive: true });
+	await brun(["init", "--db", join(repo, ".beads", "beads.db")], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const ac = "- [ ] [a] [build] probe passes";
-	const gatedOut = await sh([brBin, "create", "gated bead [test]", "-l", "needs-director", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo);
-	const eligibleOut = await sh([brBin, "create", "eligible bead [test]", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo);
+	const gatedOut = await brun(["create", "gated bead [test]", "-l", "needs-director", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
+	const eligibleOut = await brun(["create", "eligible bead [test]", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const gated = gatedOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;
 	const eligible = eligibleOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;
 	return { repo, gated, eligible };
 }
 
+test.skipIf(!hasBr || !hasOmpKit)("preflight fixtures keep inherited tracker writes inside the child database", { timeout: 120000 }, async () => {
+	const harness = resolveHarness();
+	const scratchRoot = harness ? join(harness.scratch, "tmp") : base;
+	mkdirSync(scratchRoot, { recursive: true });
+	const owned = ownedTmp("preflight-br-init-pin", { root: scratchRoot });
+	const parent = owned.path;
+	const beadsDir = join(parent, ".beads");
+	mkdirSync(beadsDir, { recursive: true });
+	const parentDb = join(beadsDir, "beads.db");
+	const brBin = harness && harness.brBinDir ? join(harness.brBinDir, "br") : "br";
+	const savedDb = process.env.BEADS_DB;
+
+	try {
+		delete process.env.BEADS_DB;
+		await brun(["init", "--db", join(parent, ".beads", "beads.db")], parent, { BEADS_DB: join(parent, ".beads", "beads.db") }, brBin);
+		const before = beadsSnapshot(beadsDir);
+
+		process.env.BEADS_DB = parentDb;
+		const childRoot = join(parent, "children");
+		mkdirSync(childRoot);
+		const fixture = await claimFixture("pinned", "TestSeatNeedsDirector", childRoot, brBin);
+		expect(statSync(join(fixture.repo, ".beads", "beads.db")).isFile()).toBe(true);
+		expect(beadsSnapshot(beadsDir)).toEqual(before);
+
+		delete process.env.BEADS_DB;
+		const negative = join(parent, "unpinned");
+		mkdirSync(negative);
+		const negativeEnv = { ...process.env };
+		delete negativeEnv.BEADS_DB;
+		if (harness?.brBinDir) negativeEnv.PATH = `${harness.brBinDir}:${negativeEnv.PATH ?? ""}`;
+		const negativeResult = await run(["sh", join(kitRoot, "tests/fixtures/br-init/unpinned.sh")], {
+			deadline_s: 60,
+			cwd: negative,
+			env: negativeEnv,
+		});
+		if (negativeResult.rc !== 0) {
+			throw new Error(`unpinned fixture failed: rc=${negativeResult.rc} stdout=${new TextDecoder().decode(negativeResult.stdout)} stderr=${new TextDecoder().decode(negativeResult.stderr)}`);
+		}
+		const negativeBead = new TextDecoder().decode(negativeResult.stdout).trim().split("\n").at(-1) ?? "";
+		if (!negativeBead) throw new Error("unpinned fixture emitted no created bead id");
+		const parentReadback = await brun(
+			["show", negativeBead, "--json"],
+			parent,
+			{ BEADS_DB: join(parent, ".beads", "beads.db") },
+			brBin,
+		);
+		expect(parentReadback).toContain("unpinned fixture mutation probe");
+		const afterNegative = beadsSnapshot(beadsDir);
+		expect(afterNegative).not.toEqual(before);
+		expect(afterNegative.some(entry => entry.startsWith(".write.lock\t") || entry.startsWith(".br-db-write-"))).toBe(true);
+	} finally {
+		if (savedDb === undefined) delete process.env.BEADS_DB;
+		else process.env.BEADS_DB = savedDb;
+		owned.cleanup();
+	}
+});
 const BAKED_SCRATCH_RE = /^BAKED_SCRATCH = '([^'\n]{1,4096})'$/;
 // The harness-provided explicit root, mirroring the grade_wave contract:
 // GRADE_WAVE_SCRATCH when the tool shell keeps it, else the scratch baked
@@ -220,7 +285,7 @@ function resolveHarness(): { scratch: string; brBinDir: string; setter: string }
 }
 
 async function beadRow(repo: string, id: string): Promise<{ status: string; assignee: string | null; labels: string[] }> {
-	const row = JSON.parse(await sh(["br", "show", id, "--json"], repo))[0];
+	const row = JSON.parse(await brun(["show", id, "--json"], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, "br"))[0];
 	return { status: String(row.status), assignee: (typeof row.assignee === "string" && row.assignee) || null, labels: Array.isArray(row.labels) ? row.labels.map(String) : [] };
 }
 // Fleet-pane claim path: `br` resolves to the candidate shim, with a clear
@@ -274,7 +339,7 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	expect(new TextDecoder().decode(cli.stdout)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
 	// actual supported claim boundary: the fleet-pane `br` (candidate shim) refuses by name, nothing mutates
-	const mutation = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor, dir) });
+	const mutation = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: { ...(await shimClaimEnv(actor, dir)), BEADS_DB: join(repo, ".beads", "beads.db") } });
 	expect(mutation.rc).not.toBe(0);
 	expect(new TextDecoder().decode(mutation.stderr)).toContain("NEEDS_DIRECTOR");
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
@@ -305,16 +370,16 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	const controlActor = "TestSeatControl";
 	const okCtl = await preflightBead("claim", repo, eligible, { actor: controlActor });
 	expect(okCtl.findings.filter(f => f.blocking)).toEqual([]);
-	const okClaim = await run(["br", "update", eligible, "--claim", "--actor", controlActor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(controlActor, dir) });
+	const okClaim = await run(["br", "update", eligible, "--claim", "--actor", controlActor], { deadline_s: 120, cwd: repo, env: { ...(await shimClaimEnv(controlActor, dir)), BEADS_DB: join(repo, ".beads", "beads.db") } });
 	expect(okClaim.rc).toBe(0);
 	expect(await beadRow(repo, eligible)).toEqual({ status: "in_progress", assignee: controlActor, labels: [] });
 	expect(await beadRow(repo, gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
 	// recorded director disposition removes the label; the first bead becomes eligible and claims
-	await sh(["br", "comments", "add", gated, "-m", "director disposition: regrade hold released, eligible to claim", "--actor", "Director"], repo);
-	await sh(["br", "update", gated, "--remove-label", "needs-director", "--actor", "Director"], repo);
+	await brun(["comments", "add", gated, "-m", "director disposition: regrade hold released, eligible to claim", "--actor", "Director"], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, "br");
+	await brun(["update", gated, "--remove-label", "needs-director", "--actor", "Director"], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, "br");
 	const re = await preflightBead("claim", repo, gated, { actor });
 	expect(re.findings.filter(f => f.blocking).map(f => f.code)).not.toContain("NEEDS_DIRECTOR");
-	const reClaim = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: await shimClaimEnv(actor, dir) });
+	const reClaim = await run(["br", "update", gated, "--claim", "--actor", actor], { deadline_s: 120, cwd: repo, env: { ...(await shimClaimEnv(actor, dir)), BEADS_DB: join(repo, ".beads", "beads.db") } });
 	expect(reClaim.rc).toBe(0);
 	expect(await beadRow(repo, gated)).toEqual({ status: "in_progress", assignee: actor, labels: [] });
 	} finally {

@@ -10,6 +10,7 @@
 set -u
 
 ADAPTER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/pre-push-gate.sh
+ADAPTER=${OMP_KIT_PRE_PUSH_ADAPTER:-$ADAPTER}
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)/var/agent-tmp
 mkdir -p "$REPO_TMP"
 # shellcheck source=scripts/kitlib-tmp.sh
@@ -63,6 +64,17 @@ run_adapter() {
 	printf 'refs/heads/main %s refs/heads/main %s\n' "$head" "$base" | (cd -- "$repo" && GIT_DIR="$repo/.git" GIT_WORK_TREE="$repo" sh "$ADAPTER" > "$TMP/out" 2>&1)
 	printf '%s' "$?"
 }
+if [ "${OMP_KIT_CHECKER_CONTRACT_DRIFT_PROBE:-0}" = 1 ]; then
+	repo=$(mkrepo checker-contract 'echo BASE-GATE' 'echo HEAD-GATE')
+	rc=$(run_adapter "$repo")
+	out=$(cat "$TMP/out")
+	if [ "$rc" = "0" ] && printf '%s' "$out" | grep -Fq 'GREEN checker-contract check-staged-br-init.test.sh'; then
+		printf 'checker-contract fixture control PASS\n'
+		exit 0
+	fi
+	printf '%s\n' "$out"
+	exit 1
+fi
 
 # 1. planted: HEAD deletes the gate step; the BASE gate still judges
 repo=$(mkrepo weakened 'echo BASE-GATE' 'echo HEAD-GATE; exit 1')
