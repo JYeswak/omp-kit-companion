@@ -46,6 +46,23 @@ EMPTY_DB="$TMP/empty.db"
 A=$(new_repo absent)
 sh "$INSTALLER" "$A" > /dev/null 2>&1
 ok "$?" "0" "absent-install-rc"
+
+# 1a. The installed pre-commit chain refuses an unpinned init and admits a
+#     fixture-local database path through the same staged member.
+printf 'run(["br", "init"]);\n' > "$A/unsafe.ts"
+git -C "$A" add unsafe.ts
+out=$(CDPATH='' cd -- "$A" && sh "$A/.git/hooks/pre-commit" 2>&1)
+rc=$?
+ok "$rc" "1" "br-init-installed-chain-refuses"
+if printf '%s' "$out" | grep -Fq "unsafe.ts:1:" && printf '%s' "$out" | grep -Fq "unpinned-br-init"; then rc=0; else rc=1; fi
+ok "$rc" "0" "br-init-installed-chain-names-site"
+printf 'run(["br", "init", "--db", join(dir, ".beads", "beads.db")]);\n' > "$A/unsafe.ts"
+git -C "$A" add unsafe.ts
+out=$(CDPATH='' cd -- "$A" && sh "$A/.git/hooks/pre-commit" 2>&1)
+rc=$?
+ok "$rc" "0" "br-init-installed-chain-admits-pinned"
+git -C "$A" reset -q -- unsafe.ts
+
 MSG="$TMP/msg-a"
 printf 'fix widgets with no identity\n' > "$MSG"
 # Git invokes hooks from the target repo; do not inspect the caller's shared index.
@@ -232,7 +249,23 @@ ok "$?" "0" "check-missing-kitlib-ratchet-reinstall-rc"
 modes=1
 [ -x "$A/.git/hooks/hooks.d/pre-commit/51-omp-kit-staged-kitlib" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/kitlib_ratchet.py" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/kitlib_ratchet_core.py" ] && modes=0
 ok "$modes" "0" "kitlib-ratchet-helpers-not-executable"
-# 5g. The exact-reversal commit-msg member is part of the installed contract.
+# 5h. The exact-reversal commit-msg member is part of the installed contract.
+# 5g. --check names a missing staged-br-init member and stale checker copy;
+# reinstall restores the member and keeps its Python helper non-executable.
+rm -f "$A/.git/hooks/hooks.d/pre-commit/53-omp-kit-staged-br-init"
+printf '# drift\n' >> "$A/.git/hooks/hooks.d/pre-commit/br_init_check.py"
+sh "$INSTALLER" --check "$A" > "$TMP/o-missing-br-init" 2>&1
+ok "$?" "3" "check-missing-br-init-rc"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/pre-commit/53-omp-kit-staged-br-init" "$TMP/o-missing-br-init"
+ok "$?" "0" "check-missing-br-init-named"
+grep -q "STALE installed member: $A/.git/hooks/hooks.d/pre-commit/br_init_check.py" "$TMP/o-missing-br-init"
+ok "$?" "0" "check-stale-br-init-checker-named"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "check-missing-br-init-reinstall-rc"
+modes=1
+[ -x "$A/.git/hooks/hooks.d/pre-commit/53-omp-kit-staged-br-init" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/br_init_check.py" ] && modes=0
+ok "$modes" "0" "br-init-checker-helper-not-executable"
+# 5h. The exact-reversal commit-msg member is part of the installed contract.
 rm -f "$A/.git/hooks/hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal"
 sh "$INSTALLER" --check "$A" > "$TMP/o-missing-kitlib-reversal" 2>&1
 ok "$?" "3" "check-missing-kitlib-reversal-rc"
@@ -345,7 +378,7 @@ ok "$(git -C "$TMP/pushreal-origin.git" rev-parse main)" "$JB" "pushreal-origin-
 # 11. an inert shared-main member (passes an off-main commit) is caught by the
 #     live probe: the install rolls back and leaves no member behind
 mkdir -p "$TMP/inertkit/scripts"
-for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-commit-kitlib-reversal.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-kitlib.sh check-staged-readme.sh check-staged-sources.sh pysafe.py pysafe_check.py kitlib_ratchet_core.py tempsafe_check.py kitlib_ratchet.py sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py readme-check.ts kitlib-tmp.sh kitlib-findings.sh gate-event.sh kitlib_jsonl.py kitlib_lock.py; do
+for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-commit-kitlib-reversal.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-kitlib.sh check-staged-br-init.sh check-staged-readme.sh check-staged-sources.sh pysafe.py pysafe_check.py kitlib_ratchet_core.py tempsafe_check.py kitlib_ratchet.py br_init_check.py sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py readme-check.ts kitlib-tmp.sh kitlib-findings.sh gate-event.sh kitlib_jsonl.py kitlib_lock.py; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
 cp "$(dirname -- "$INSTALLER")/check-gap-mention.sh" "$TMP/inertkit/scripts/check-gap-mention.sh"

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
 
 /** Test bases live where the ambient br authority permits writes: a grading
  * harness designates GRADE_WAVE_SCRATCH, otherwise the default TMPDIR root. */
@@ -254,7 +255,7 @@ async function tracker(name: string): Promise<{ dir: string; db: string }> {
 	mkdirSync(dir, { recursive: true });
 	const env = { ...process.env } as Record<string, string>;
 	delete env.BEADS_DB;
-	const r = await run(["br", "init"], { cwd: dir, deadline_s: 60, env });
+	const r = await run(["br", "init", "--db", join(dir, ".beads", "beads.db")], { cwd: dir, deadline_s: 60, env });
 	if (r.rc !== 0) throw new Error(`br init -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);
 	return { dir, db: join(dir, ".beads", "beads.db") };
 }
@@ -277,10 +278,21 @@ async function createBead(t: { dir: string; db: string }, title: string): Promis
 async function trackerInRepo(cdir: string): Promise<{ dir: string; db: string }> {
 	const env = { ...process.env } as Record<string, string>;
 	delete env.BEADS_DB;
-	const r = await brun(["init"], cdir, env);
+	const r = await brun(["init", "--db", join(cdir, ".beads", "beads.db")], cdir, env);
 	if (r.rc !== 0) throw new Error(`in-repo init -> ${r.rc}: ${r.out}`);
 	return { dir: cdir, db: join(cdir, ".beads", "beads.db") };
 }
+
+test("BRINITPIN1 verify tracker init leaves ancestor tracker unchanged; unpinned control changes it", async () => {
+	const parent = await createParentTracker(base, "br-init-parent");
+	const before = parent.snapshot();
+	await tracker(join("br-init-parent", "nested", "child"));
+	expect(parent.snapshot()).toEqual(before);
+	const negative = await runUnpinnedInitControl(base, "verify-negative");
+	expect(negative.rc).toBe(0);
+	expect(negative.parentChanged).toBe(true);
+	expect(negative.newLocks.length).toBeGreaterThan(0);
+});
 
 /** Description, acceptance, label, per-box ticks and the in_review transition. */
 async function shapeBead(t: { dir: string; db: string }, id: string, ac: string): Promise<void> {

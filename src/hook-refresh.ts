@@ -53,6 +53,8 @@ export const HOOK_MEMBER_PAIRS: ReadonlyArray<readonly [string, string]> = [
 	["hooks.d/pre-commit/kitlib_ratchet.py", "scripts/kitlib_ratchet.py"],
 	["hooks.d/pre-commit/52-omp-kit-staged-sources", "scripts/check-staged-sources.sh"],
 	["hooks.d/pre-commit/sources.py", "scripts/sources.py"],
+	["hooks.d/pre-commit/br_init_check.py", "scripts/br_init_check.py"],
+	["hooks.d/pre-commit/53-omp-kit-staged-br-init", "scripts/check-staged-br-init.sh"],
 	["hooks.d/pre-commit/kitlib_run.py", "scripts/kitlib_run.py"],
 	["hooks.d/pre-commit/kitlib_io.py", "scripts/kitlib_io.py"],
 	["hooks.d/commit-msg/gate-event.sh", "scripts/gate-event.sh"],

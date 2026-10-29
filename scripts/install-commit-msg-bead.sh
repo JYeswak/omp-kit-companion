@@ -2,8 +2,8 @@
 # Install the bead-id commit-msg hook, the reference-transaction ref guard,
 # the shared-main pre-push member and the pushed-beads pre-push member into a
 # repo's hook chains, plus the staged-imports, staged-fragments,
-# staged-regexploit, staged-pysafe, staged-tempsafe and staged-kitlib
-# pre-commit members.
+# staged-regexploit, staged-pysafe, staged-tempsafe, staged-kitlib and
+# staged-br-init pre-commit members.
 # Usage: install-commit-msg-bead.sh [--check] [--no-pushed-beads] [REPO] (default: this kit checkout).
 # The shared-main member (scripts/check-pushed-on-main.sh) is always installed:
 # it judges only where a push moves the remote main, never old messages.
@@ -34,6 +34,10 @@
 # it refuses a commit whose staged files add a hand-rolled copy of a kitlib
 # primitive (raw-spawn: subprocess/os/asyncio spawns, Bun.spawn,
 # child_process, a call-site `timeout N`) that HEAD does not already have.
+# The staged-br-init member (scripts/check-staged-br-init.sh, with
+# br_init_check.py beside the same kitlib ratchet engine and pysafe.py) is
+# always installed: it refuses a commit whose staged sources add an unpinned
+# br init that could lock an ancestor tracker.
 # --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
 # shared-main member): new id-less commits are refused, existing history is not
 # judged. A full install refuses (exit 5) when the unpublished range already
@@ -253,6 +257,8 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/kitlib_ratchet_core.py scripts/kitlib_ratchet_core.py" \
 		"hooks.d/pre-commit/51-omp-kit-staged-kitlib scripts/check-staged-kitlib.sh" \
 		"hooks.d/pre-commit/kitlib_ratchet.py scripts/kitlib_ratchet.py" \
+		"hooks.d/pre-commit/br_init_check.py scripts/br_init_check.py" \
+		"hooks.d/pre-commit/53-omp-kit-staged-br-init scripts/check-staged-br-init.sh" \
 		"hooks.d/pre-commit/52-omp-kit-staged-sources scripts/check-staged-sources.sh" \
 		"hooks.d/pre-commit/sources.py scripts/sources.py" \
 		"hooks.d/pre-commit/kitlib_run.py scripts/kitlib_run.py" \
@@ -613,6 +619,17 @@ install_staged_kitlib() {
 	printf 'installed staged-kitlib member: %s\n' "$member"
 }
 
+# install_staged_br_init: reuse the shared ratchet engine and bounded runner
+# installed by staged-tempsafe/staged-pysafe. The checker and member follow
+# staged sources.
+install_staged_br_init() {
+	dir=$(chain_dir pre-commit)
+	member="$dir/53-omp-kit-staged-br-init"
+	place "$KITROOT/scripts/br_init_check.py" "$dir/br_init_check.py" -x
+	place "$KITROOT/scripts/check-staged-br-init.sh" "$member" +x
+	printf 'installed staged-br-init member: %s\n' "$member"
+}
+
 install_staged_sources() {
 	dir=$(chain_dir pre-commit)
 	for helper in sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py; do
@@ -754,6 +771,7 @@ install_staged_pysafe
 install_staged_tempsafe
 install_staged_kitlib
 install_staged_sources
+install_staged_br_init
 install_staged_readme
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 

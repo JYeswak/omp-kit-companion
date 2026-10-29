@@ -30,6 +30,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/check-gap-mention.sh", "scripts/kitlib-findings.sh",
 	"scripts/kitlib_tmp.py", "scripts/kitlib-tmp.sh", "scripts/kitlib_lock.py", "scripts/kitlib_io.py", "scripts/kitlib_proc.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_poll.py", "scripts/kitlib_artifact.py", "scripts/tempsafe_check.py", "scripts/check-staged-tempsafe.sh",
 	"scripts/kitlib_ratchet_core.py", "scripts/kitlib_ratchet.py", "scripts/check-staged-kitlib.sh",
+	"scripts/br_init_check.py", "scripts/check-staged-br-init.sh",
 	"scripts/sources.py", "scripts/check-staged-sources.sh", "docs/sources.md",
 	"scripts/bead_lint.py", "scripts/ac_phase.py", "scripts/br_create_guard_core.py", "scripts/br-create-lint.py", "scripts/br-update-lint.py",
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",

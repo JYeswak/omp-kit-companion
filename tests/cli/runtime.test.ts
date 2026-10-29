@@ -11,6 +11,7 @@ import { installReadonlyBr, resolveRealBr } from "../../src/kitlib/readonly-br.t
 import { run } from "../../src/kitlib/run.ts";
 import { verifyBead } from "../../src/verify.ts";
 import { identifyExactSource } from "../../scripts/exact-source.ts";
+import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
 const createdScratchDirs: string[] = [];
 afterAll(() => {
 	for (const dir of createdScratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -1021,6 +1022,23 @@ test("isolated children inherit the CI judge signal through runIsolatedShell", (
 	expect(withoutSignal.CI).toBe("true");
 });
 
+test("BRINITPIN1 runtime fixture init leaves ancestor tracker unchanged; unpinned control changes it", async () => {
+	const root = fixtureRoot();
+	const parent = await createParentTracker(root, "br-init-parent");
+	const before = parent.snapshot();
+	const child = join(parent.dir, "nested", "child");
+	mkdirSync(child, { recursive: true });
+	const environment = { ...process.env } as Record<string, string>;
+	delete environment.BEADS_DB;
+	const initialized = await run(["br", "init", "--db", join(child, ".beads", "beads.db")], { cwd: child, deadline_s: 60, env: environment });
+	expect(initialized.rc).toBe(0);
+	expect(parent.snapshot()).toEqual(before);
+	const negative = await runUnpinnedInitControl(root, "runtime-negative");
+	expect(negative.rc).toBe(0);
+	expect(negative.parentChanged).toBe(true);
+	expect(negative.newLocks.length).toBeGreaterThan(0);
+});
+
 describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 	test("exact source and official br binary reach the shim guard on owned fixtures; digests recorded; one smoke via verifyBead", async () => {
 		const utf8 = (b: Uint8Array) => new TextDecoder().decode(b);
@@ -1046,7 +1064,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		delete stripped.BEADS_DB;
 		const tdir = join(root, "t");
 		mkdirSync(tdir, { recursive: true });
-		const tinit = await run(["br", "init"], { cwd: tdir, deadline_s: 60, env: stripped });
+		const tinit = await run(["br", "init", "--db", join(tdir, ".beads", "beads.db")], { cwd: tdir, deadline_s: 60, env: stripped });
 		if (tinit.rc !== 0) throw new Error(`tracker init -> ${tinit.rc}: ${utf8(tinit.stderr)}`);
 		const tdb = join(tdir, ".beads", "beads.db");
 		const envT = { ...process.env, BEADS_DB: tdb } as Record<string, string>;
@@ -1076,7 +1094,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const shim = join(shimBin, "br");
 		const odir = join(root, "guard", "owned");
 		mkdirSync(odir, { recursive: true });
-		const oinit = await run(["br", "init"], { cwd: odir, deadline_s: 60, env: stripped });
+		const oinit = await run(["br", "init", "--db", join(odir, ".beads", "beads.db")], { cwd: odir, deadline_s: 60, env: stripped });
 		if (oinit.rc !== 0) throw new Error(`owned init -> ${oinit.rc}: ${utf8(oinit.stderr)}`);
 		const odb = join(odir, ".beads", "beads.db");
 		const before = readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8");

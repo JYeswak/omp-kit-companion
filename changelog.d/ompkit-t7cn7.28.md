@@ -1,0 +1,1 @@
+- Fixed fixture tracker initialization to bind each fixture's own database; added staged and pushed-range refusal for unpinned `br init` calls.

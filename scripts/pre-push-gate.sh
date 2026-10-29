@@ -395,6 +395,21 @@ else
 		exit "$rc"
 	fi
 fi
+# BRINITPIN1: new pushed-range br init sites must bind to the fixture's own
+# tracker, because an unpinned init walks upward and locks an ancestor database.
+# Run the base-archive checker so its policy cannot be changed by the candidate.
+if [ ! -f "$gate_scripts/scripts/br_init_check.py" ]; then
+	printf 'SKIP br-init-range: checker absent from base archive\n' >&2
+else
+	printf '== br-init-range\n'
+	if python3 -B "$gate_scripts/scripts/pysafe.py" run --timeout 300 -- python3 -B "$gate_scripts/scripts/br_init_check.py" --repo "$ROOT" ${base_ref:+--base "$base_ref"} --head "$local_sha"; then
+		printf 'GREEN br-init-range\n'
+	else
+		rc=$?
+		printf 'RED br-init-range producer_rc=%s: the range adds an unpinned br init (pass --db <fixture/.beads/beads.db> or inline BEADS_DB for that path)\n' "$rc" >&2
+		exit "$rc"
+	fi
+fi
 if [ -n "${base_ref:-}" ]; then
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --base "$base_ref" --head "$local_sha"
 else
@@ -411,7 +426,8 @@ for checker_test in \
 	public-files.test.sh \
 	commit-msg-bead.test.sh \
 	check-pushed-beads.test.sh \
-	release-train.test.sh
+	release-train.test.sh \
+	check-staged-br-init.test.sh
 do
 	test_path="$gate_scripts/tests/cli/$checker_test"
 	if [ ! -f "$test_path" ]; then
