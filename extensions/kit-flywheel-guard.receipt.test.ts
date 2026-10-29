@@ -36,8 +36,11 @@ function stockRepo(): string {
 	return cwd;
 }
 
+// FILERCLOSE1 (ompkit-l5746): a close reads created_by and comments to refuse filer and DONE-author
+// self-closes, and refuses fail-closed when either is missing. The fixture carries both, filed by the
+// implementer, so a non-author Verifier close is admitted and a BlueFox close is refused.
 function bead(id: string, status: string, assignee: string | null): FlywheelExecResult {
-	return { stdout: JSON.stringify([{ id, title: "t", status, assignee }]), stderr: "", code: 0 };
+	return { stdout: JSON.stringify([{ id, title: "t", status, assignee, created_by: assignee, comments: [] }]), stderr: "", code: 0 };
 }
 
 /** br show answers from a table; git toplevel resolves to the real repo; tmux is absent. */
