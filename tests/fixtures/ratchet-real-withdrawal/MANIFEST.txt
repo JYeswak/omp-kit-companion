@@ -7,7 +7,7 @@ source_commit_OLD: 1c57cd8efdbb53dd514e82036bf527758e32eb78
 old_blob: f5be8c60a07af290cd119e7688c276c3a30b24e8 # OBSERVED-AT-OLD:tests/cli/converge.test.ts
 generated: 2026-10-28 by SilverCondor via: git pack-objects --stdout (273 exact objects, no history)
 sensitive_scan: 2 hits both synthetic fixture text; no real secrets
-counts: commits=3 trees=113 blobs=155 paths_declared=78
+counts: commits=3 trees=115 blobs=155 paths_declared=78
 ## OBJECTS (sha type size)
 00440ba7068b5435dd5c85fe86ea64434ff27988 blob 6875
 0113b857e3a032908878bca27517320811cda19b blob 14607
@@ -282,82 +282,82 @@ fa64ea427468332be18f98fab9238991e4f53070 blob 10153
 fba57ef209acbdca992382197681410222dc7347 tree 70
 fd4e8707a98b7c5490493ee99910f3061431bbc7 tree 131
 fd7e37bed5164adcfde469a5caa3377ce1c32c73 tree 76
-## PATHS78 (path mode_at_X mode_at_P; ABSENT if missing)
-changelog.d/ompkit-a0vy1.md 100644 ABSENT
-extensions/fleet-guard.test.ts 100644 100644
-extensions/fleet-guard.ts 100644 100644
-extensions/kit-composer-state.test.ts 100644 100644
-extensions/kit-composer-state.ts 100644 100644
-scripts/build-manifest.sh 100755 100755
-scripts/converge-mutants.ts 100644 100644
-scripts/doctor.sh 100755 100755
-scripts/e2e-live.sh 100755 100755
-scripts/fresh-gate.sh 100755 100755
-scripts/kitlib-tmp.sh 100644 100644
-scripts/kitlib_tmp.py 100755 100755
-scripts/ladder.sh 100755 100755
-scripts/pre-push-gate.sh 100644 100644
-scripts/regexploit-gate.py 100755 100755
-scripts/runtime-adapter.sh 100755 100755
-src/cli.ts 100644 100644
-src/converge.ts 100644 100644
-src/disk-stage.ts 100644 100644
-src/fleet-guard/scratch.test.ts 100644 100644
-src/fleet-guard/scratch.ts 100644 100644
-src/full-test-runner.ts 100644 100644
-src/kitlib/owner.ts 100644 ABSENT
-src/kitlib/proc.ts 100644 100644
-src/kitlib/tmp.ts 100644 100644
-src/load-doctor.ts 100644 100644
-src/mechanical-admission.ts 100644 100644
-src/mutations.ts 100644 100644
-src/ownership-doctor.ts 100644 100644
-src/ownership-lint.ts 100644 100644
-src/ownership-registry.ts 100644 100644
-src/scratch.ts 100644 100644
-src/send.ts 100644 100644
-src/service-run.ts 100644 100644
-src/tracker-recovery.ts 100644 100644
-tests/cli/check-staged-regexploit.test.sh 100755 100755
-tests/cli/converge.test.ts 100644 100644
-tests/cli/disk-stage.test.ts 100644 100644
-tests/cli/fresh-gate.test.ts 100644 100644
-tests/cli/full-test-runner.test.ts 100644 100644
-tests/cli/heavy.test.ts 100644 100644
-tests/cli/kit-release.test.ts 100644 100644
-tests/cli/kitlib-proc.test.ts 100644 100644
-tests/cli/kitlib-tmp.test.ts 100644 100644
-tests/cli/load-doctor.test.ts 100644 100644
-tests/cli/mutations.test.ts 100644 100644
-tests/cli/ownership-doctor.test.ts 100644 100644
-tests/cli/ownership-registry.test.ts 100644 100644
-tests/cli/ownership-scope.test.ts 100644 100644
-tests/cli/pre-push-gate.test.sh 100755 100755
-tests/cli/runtime.test.ts 100644 100644
-tests/cli/scratch-apply-report.test.ts 100644 100644
-tests/cli/scratch-bins.test.ts 100644 100644
-tests/cli/scratch-capability.test.ts 100644 100644
-tests/cli/scratch-gap.test.ts 100644 100644
-tests/cli/scratch-gates.test.ts 100644 100644
-tests/cli/scratch-incarnation.test.ts 100644 100644
-tests/cli/scratch-kitlib.test.ts 100644 100644
-tests/cli/scratch-mine.test.ts 100644 100644
-tests/cli/scratch-owner-root.test.ts 100644 100644
-tests/cli/scratch-release-now.test.ts 100644 100644
-tests/cli/scratch-release-rehomed.test.ts 100644 100644
-tests/cli/scratch-ro.test.ts 100644 100644
-tests/cli/scratch-seat-identity.test.ts 100644 100644
-tests/cli/scratch-seat-owner.test.ts 100644 100644
-tests/cli/scratch-users.test.ts 100644 100644
-tests/cli/scratch.test.ts 100644 100644
-tests/cli/send-serialization.test.ts 100644 100644
-tests/cli/send-tern-paste.test.ts 100644 100644
-tests/cli/service-run.test.ts 100644 100644
-tests/cli/tracker-recovery-admission.test.ts 100644 100644
-tests/cli/tracker-recovery-rate.test.ts 100644 100644
-tests/cli/tracker-recovery-rhy9-13.test.ts 100644 100644
-tests/cli/tracker-recovery-rhy9-16.test.ts 100644 100644
-tests/cli/tracker-recovery.test.ts 100644 100644
-tests/fleet-guard/write-own.test.ts 100644 100644
-tests/scripts/kitlib_tmp_test.py 100755 100755
-tests/scripts/regexploit-gate_test.py 100755 100755
+## PATHS78 (path mode_at_X blob_at_X mode_at_P blob_at_P; ABSENT ABSENT when missing at a side)
+changelog.d/ompkit-a0vy1.md 100644 f5e9e89109103f050ac9cc0d9d9de3afe6a66b25 ABSENT ABSENT
+extensions/fleet-guard.test.ts 100644 126b9b54d5f8c0af952d8972aceb8cb19924f8d1 100644 a7f81fc170ee25d327ce2a0ec60fdfc27608d351
+extensions/fleet-guard.ts 100644 8646101335b959073124ce51a0031c2126e780a7 100644 e92f6ea8dcbb29ff44a9890fa11c538d5cb39a91
+extensions/kit-composer-state.test.ts 100644 72554230d819611c48e0bbeb1537d6bea8089da8 100644 08cdc56a07d4972e73d0705ba8e9b607fda6315b
+extensions/kit-composer-state.ts 100644 674224834a7b4635e84c6bbb84f28a63231a2f54 100644 146f450e441f3aea9833c70455999d2c6b9b1244
+scripts/build-manifest.sh 100755 6dec0c8a5c2621a6bb0bc5e11116b9e733c61d9c 100755 33e9d12477b5baf3f604a5cb2812ba93b12e7a1d
+scripts/converge-mutants.ts 100644 2605c1a6d663c9eda6128cc1997b3cab6081ed60 100644 1fcdd4cf82cbb55ffd85d31d4acb85c4635ecfc6
+scripts/doctor.sh 100755 221217e4eb60b829104a4ee6341642681177997b 100755 a7250334245869e4b9d97f9d5f88f75b1b58a9c3
+scripts/e2e-live.sh 100755 01c8adf49031d1f32b9a255ce743a78a5da74c98 100755 dd8b3d084a07c0836dc58f235e8723f655950627
+scripts/fresh-gate.sh 100755 b11549af55ea84c75b483cdd1312699e3249b975 100755 ea6b0c97508764a2193e95ad6a2a9fd1185d2760
+scripts/kitlib-tmp.sh 100644 f54a41c1b39a019bd32e7b3c82ce053f29f776e3 100644 3c18c26274ed3178b4e3757951f74a82f8e2685f
+scripts/kitlib_tmp.py 100755 1abd4a2ea520d49d91ed69313c8bef1de255d80c 100755 510999917d309439fd219eb86c1911ed9df8a230
+scripts/ladder.sh 100755 0d4656ca50bff83d42fdd4c006fd3b8e486919c9 100755 41e20d33a8f1ce2612c3d8ffd39fa6838bf5528c
+scripts/pre-push-gate.sh 100644 9a7dd1ce27dd3ac966ef40385e6368f2dc572df5 100644 6e30aaecc405b265930ff0d88b39b9e336c4421c
+scripts/regexploit-gate.py 100755 a7b04c90dc67b9e5074de5200f5ecb00dd221c7c 100755 39e832ac40805bdab5cfdb8c2dc8f2f2033ef9b1
+scripts/runtime-adapter.sh 100755 db5adbdcb800482afce5725b18c62673e3e1f5b8 100755 32b7687898486645ddc9551a88ab8da5be00731e
+src/cli.ts 100644 54e58d13b743e74c9ca767a6e196df3e93888aa1 100644 aeafd6c173b36e986f4206e24b3d4e780bb48e86
+src/converge.ts 100644 29ee1603607151dd6062e49bc76361436605c6f6 100644 5824ea00603e2abfb25872adc2bd1167f1cc5a14
+src/disk-stage.ts 100644 a26f22f2774e219fafdb17bd7b061ccd3c18525e 100644 052080865c727e8b79ed47233a4ac59e9eae7da0
+src/fleet-guard/scratch.test.ts 100644 a7abdadfd82fff009c2b522a23b67387b97fb735 100644 2405303ed01d3ef4c9f092627bce35b40218d031
+src/fleet-guard/scratch.ts 100644 b9cd5f922fe8c4894e827eea23081990876e146f 100644 9648b8c31d760fba4d03d2ed70b7dfc404c68978
+src/full-test-runner.ts 100644 ddce9bb6cb2c5d7c5ac77ddbf16e58d5e0d0d2ce 100644 abe276f7f57b9c5e1d3c76e4a3f9ce395ae40189
+src/kitlib/owner.ts 100644 1e2fd70630f3783fa7e4b88e3ec1574f43898b2f ABSENT ABSENT
+src/kitlib/proc.ts 100644 cdae235c396b136035458a0fd647014b14327734 100644 a434ae022d2a9e5dbc84578ba0b9aff8985eae8c
+src/kitlib/tmp.ts 100644 1d10fdc0cd939fd12046966ee09a7605582e1693 100644 3baf3c0c3273b25439205e91b3469464d03e778a
+src/load-doctor.ts 100644 be8020504f60f8b98fc292b243013bc985ace48b 100644 77309456d1895a7549371de1483b5ae209954129
+src/mechanical-admission.ts 100644 24c11de459c79992d3a268bdaf17927bde12a7f7 100644 8d3c77191b8bb91c5557907bb3fe94a3c6e40041
+src/mutations.ts 100644 b9862e4834e28d5cfbb6c5ad388da9bb534e23fb 100644 240ea79866f07918733cf55220d3889b3fd76097
+src/ownership-doctor.ts 100644 26dd0203e12e69afb15d0e653c562c72fc3d059e 100644 183b87d75ecfe6101a3bf7918eb45a10f58df031
+src/ownership-lint.ts 100644 3b64152cf1c39859b3b3b20deea77b373b7a18e8 100644 91dba6cc62d830144035e45aeaa364fb0bd1d571
+src/ownership-registry.ts 100644 41553917d7ce89dcf15fd7ce3c863edba34abe50 100644 c63c358aaa716eb232dd7d4f6c89fe5bd2dbf91a
+src/scratch.ts 100644 111861588f5084bccc4572d86dfcbac99e925a2f 100644 e1f63f5c5c51d3d26789a234c1941ff354441a50
+src/send.ts 100644 b7382631cb0a03a16b021809b80551bb7ad73cb3 100644 10d8b2f3128ce1d8334cff8d308b3edce2dcd328
+src/service-run.ts 100644 469b58a45acbbea0706700a5f37c6e54d99bcf33 100644 240229b814a4bf5eb99dad69f5f3da48ae254064
+src/tracker-recovery.ts 100644 4db3de368d6a9db02188eb08486a511d4ff87a9d 100644 e3d662df4f47fa055552ac6f36eeda60444b4cb3
+tests/cli/check-staged-regexploit.test.sh 100755 44fde7c26a2969a38636f9384573d1c147f6f36c 100755 8a963a8b34320838e040d10d56600831494b73a2
+tests/cli/converge.test.ts 100644 da264fd34a6fb3f25b9a72d2582d67a6547a35b8 100644 399b6c7c5f2123af17a177dda3d7d8dfb61af974
+tests/cli/disk-stage.test.ts 100644 3df6147e43932dda977b0b205fe699506d9b230b 100644 6ef8f137a607077bc59cb01c9e369998a8de6170
+tests/cli/fresh-gate.test.ts 100644 6d128680c94116edae7ec71fc456d4f3ba6a079a 100644 8533334ed6abdf05d9990b18d410ec64aef6508c
+tests/cli/full-test-runner.test.ts 100644 54910be6b2e031d5534e9e92a9eb53243120f754 100644 877396c7cd0f2e894874ee4ebf407ba48ca28bf7
+tests/cli/heavy.test.ts 100644 8a337eb2befc4759f741859dfbb5c193f25bdb92 100644 eec171310da8518dbef0686b902ca3cc709fd26e
+tests/cli/kit-release.test.ts 100644 df657d4580f79c129991e3bf84716dd1131669ae 100644 203b95e3fe359589669e33730e028cba2a6ef6f3
+tests/cli/kitlib-proc.test.ts 100644 a2294f0d8faac3bbec84dea1d60560815d82b3d0 100644 d679d32bc38d90f5d2ad94f17d532984b08886a3
+tests/cli/kitlib-tmp.test.ts 100644 99afe0cd01803215834089e3c7555ca1409ff583 100644 0113b857e3a032908878bca27517320811cda19b
+tests/cli/load-doctor.test.ts 100644 d8f33f07aac59ab13f01a2708d1c609a7ad993c2 100644 cdda6cabaaf8ab3190f6e9ea67970cfd65191030
+tests/cli/mutations.test.ts 100644 f7e1f5560b692579d81a4d871316a17cec41bf6d 100644 4c8651f7d08d5282b7c5c2ed72b68b29b13e011f
+tests/cli/ownership-doctor.test.ts 100644 18295f23e9831f59c1881f4dabdf00af36cc1e1c 100644 56ee23dd7ad727877b53bb69d12f624f5c404803
+tests/cli/ownership-registry.test.ts 100644 938d91aa8c4e81bf4824dca096434fbc1cc75878 100644 d85f4edbd7e4663548ac51bdf230352083faf9ab
+tests/cli/ownership-scope.test.ts 100644 b3057c35fd1a9a65bef75fb08cd4da4f827ea09b 100644 bdccfa6616c3b675230800d57eb8858691a6efaf
+tests/cli/pre-push-gate.test.sh 100755 c3739e31723e8a8bca3e7771bc95ae31002a1710 100755 544d7f784afd2de716efda3aa14f1197ebefa42c
+tests/cli/runtime.test.ts 100644 2561f98d7fb9cbbdf8dd835b11653707d590d0e4 100644 77092e76032a938ce2767010c2c8c25985bc570f
+tests/cli/scratch-apply-report.test.ts 100644 7d14e5bd5f9eafeecc29c3a31b44a37d785a32ac 100644 9f732a9742a7d86e95adc22560d037e07d986b2f
+tests/cli/scratch-bins.test.ts 100644 c5cb022768bb31969ad28fb03d2d4cfc88a307b0 100644 f3183272ca9d854376f2407f8f4fa3684633fd56
+tests/cli/scratch-capability.test.ts 100644 42f3c4124e71535f013230db257ccb544ffbc464 100644 378c6615f40a450f60706905decee6a48a209773
+tests/cli/scratch-gap.test.ts 100644 d70ff273150f7eb752067546e58b02b53c42d6b3 100644 371aacf30075ca3a5f3b2e3afef4eb654095c6c4
+tests/cli/scratch-gates.test.ts 100644 c379dde5d2e6484256ad0a264489b3a5b47714c0 100644 b059ee19057052f3bb69ca088e05d98cff003749
+tests/cli/scratch-incarnation.test.ts 100644 96b47b7f75d7b6b1e048f45bf8ee5b2c0d7d9e58 100644 4081c0af8d97edfde9de97802507b8dc9017b862
+tests/cli/scratch-kitlib.test.ts 100644 db8001a6705ced4ea766ede19f2bb55de20ffd0f 100644 37d83f9ec9baebe9ef235b7f46b5692d55b5397a
+tests/cli/scratch-mine.test.ts 100644 8471bf4928caa9564ec62f04006de761502a4098 100644 11234b8999005f557154409fc73ff8b417113ce0
+tests/cli/scratch-owner-root.test.ts 100644 e9ec582c4bf14d0c09e801ad7f13e4282ac23981 100644 00440ba7068b5435dd5c85fe86ea64434ff27988
+tests/cli/scratch-release-now.test.ts 100644 5d182ce7f4618a790df5e350f1352ee83cd166a1 100644 ddc09c4cd386e5f812c434569a9ed8bf34d1ce2a
+tests/cli/scratch-release-rehomed.test.ts 100644 ab1af9110b09ac2ed5150ae4a6a250a5c97454d4 100644 781bfadc98a7535330968700e211d03c572c3cdf
+tests/cli/scratch-ro.test.ts 100644 0eaeb5dd3c34eeeb2348179cf740b09a36bb2098 100644 4ff34359ea7182a671ab344cb635db4f603cd387
+tests/cli/scratch-seat-identity.test.ts 100644 8ca25d7b1125de10b18c66a356c60b06c39cd37f 100644 455d032a30735658e724725c68690cc50831edd1
+tests/cli/scratch-seat-owner.test.ts 100644 9ee9ac2b557b31017e6a3a581447cf63682dcd59 100644 88332e20ce8d688c6d22c2c0760dd407101b0d26
+tests/cli/scratch-users.test.ts 100644 b82c32111a54dca49ebbbc6854dec3148a0a5a91 100644 09acb797c2285d356f6ad7869ada70d5592ded6d
+tests/cli/scratch.test.ts 100644 63e3bb7178824e1f56ca84e3904afe595d4d7aef 100644 ca740fc6a4ca2bba2ec8eefb026dcd8779547b84
+tests/cli/send-serialization.test.ts 100644 804afd12d72ebd4d75250c20b23747971ba309b0 100644 998d38d58a2bb7e69664047e7fec2949d45ae643
+tests/cli/send-tern-paste.test.ts 100644 7471d988d396bbfbd5ddc4247c742ed103deab6d 100644 24dd87fd387e7ca0d1d1e2ac7061cb8fa1de8bd7
+tests/cli/service-run.test.ts 100644 44b3b5d7940f1e23251040aff2496ee3267c663c 100644 f7fe3b0265c0694a5f736d0b954b0f7e8499b7df
+tests/cli/tracker-recovery-admission.test.ts 100644 769d94849a171418b8d9f52dc72323ce0c16eff7 100644 7d2db97c933feb64e8a624a7a3cbbe3d02c37579
+tests/cli/tracker-recovery-rate.test.ts 100644 2baa192de34b218e0fbf55def41d34a10831a12c 100644 56dbfc2b8c46153a41bb5984f011a065ded96cf2
+tests/cli/tracker-recovery-rhy9-13.test.ts 100644 454e6b3e72626f3d12d387c56d3bdbe3b1675f25 100644 b147248d825a764867036b1f611a37b87b8b242a
+tests/cli/tracker-recovery-rhy9-16.test.ts 100644 834ccb7e78ba11454e411d5eb54a596fe965759d 100644 7f49febaf0f1db663c7a4977189fd9011386c7b1
+tests/cli/tracker-recovery.test.ts 100644 fa64ea427468332be18f98fab9238991e4f53070 100644 125694433ff1be37beecfa9e2d2a84c7f99670a0
+tests/fleet-guard/write-own.test.ts 100644 5561bb9db003bc96bf745f3e75b41b298437d38d 100644 f7aba9c87ee8ef0af3bf3dce37bea960e3b6e0b0
+tests/scripts/kitlib_tmp_test.py 100755 f16a14fb92fee388d35363802c5c437ba85a7e79 100755 1171d7f6b8ba0e9a5852ec11ce52f3aaa0dfc857
+tests/scripts/regexploit-gate_test.py 100755 47d1973ece91ab44a6788bdfa5c3543765ec4542 100755 93910a418b6d7a05c5d63e9238ed00671b3d2564

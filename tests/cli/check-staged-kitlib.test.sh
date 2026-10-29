@@ -20,6 +20,9 @@ MEMBER=51-omp-kit-staged-kitlib
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$SCRIPTS/kitlib-tmp.sh"
 kitlib_tmp TMP staged-kitlib-test || exit 1
+# Enclosing-checkout lookups are forbidden inside fixtures: the ceiling
+# confines every git discovery to the owned temp tree (fixtures preserve it).
+export GIT_CEILING_DIRECTORIES="$TMP"
 
 pass=0
 fail=0
@@ -497,13 +500,23 @@ OBJSRC=$(hydrate_capsule "$CAPSULE_PACK" "$CAPSULE_MANIFEST" "$TMP/ratchet-obj-s
 printf 'capsule sha256 %s\n' "$(manifest_field capsule_sha256)"
 printf 'input X=%s P=%s OLD=%s\n' "$XREAL" "$PREAL" "$OLDCONVERGE"
 [ "$(git -C "$OBJSRC" rev-list --parents -n 1 "$XREAL" | cut -d' ' -f2)" = "$PREAL" ] || { echo "HYDRATE-REFUSED X parent is not P" >&2; exit 1; }
-: > "$TMP/.hydrate-bad"
-sed -n '/^## PATHS/,$p' "$CAPSULE_MANIFEST" | grep -v '^#' | grep -v '^$' | while read -r _pp _mx _mp; do
-	_gx=$(git -C "$OBJSRC" ls-tree "$XREAL" -- "$_pp" 2>/dev/null | cut -d' ' -f1); [ -n "$_gx" ] || _gx=ABSENT
-	_gp=$(git -C "$OBJSRC" ls-tree "$PREAL" -- "$_pp" 2>/dev/null | cut -d' ' -f1); [ -n "$_gp" ] || _gp=ABSENT
-	[ "$_gx" = "$_mx" ] && [ "$_gp" = "$_mp" ] || echo "MISMATCH-path:$_pp" >> "$TMP/.hydrate-bad"
-done
-[ ! -s "$TMP/.hydrate-bad" ] || { echo "HYDRATE-REFUSED path identity mismatch"; cat "$TMP/.hydrate-bad"; exit 1; } >&2
+# validate_inputs: full pre-replay identity of the declared 78-path set.
+# Fails closed with PRECHECK-REFUSED before any fixture repo exists:
+# the X diff set must equal the manifest set, and every path's mode and
+# blob at X and at P must equal the manifest (ABSENT where missing).
+validate_inputs() {
+	: > "$TMP/.hydrate-bad"
+	git -C "$OBJSRC" diff-tree --no-commit-id --name-only -r "$XREAL" 2>/dev/null | LC_ALL=C sort > "$TMP/.diffset" || return 1
+	sed -n '/^## PATHS78/,$p' "$CAPSULE_MANIFEST" | grep -v '^#' | grep -v '^$' | cut -d' ' -f1 | LC_ALL=C sort > "$TMP/.manifestset" || return 1
+	cmp -s "$TMP/.diffset" "$TMP/.manifestset" || { echo "PRECHECK-REFUSED X path set differs from manifest" >&2; return 1; }
+	sed -n '/^## PATHS78/,$p' "$CAPSULE_MANIFEST" | grep -v '^#' | grep -v '^$' | while read -r _pp _mx _bx _mp _bp; do
+		_gx=$(git -C "$OBJSRC" ls-tree "$XREAL" -- "$_pp" 2>/dev/null); _gxm=${_gx%% *}; _gxb=$(printf '%s' "$_gx" | cut -d' ' -f3 | cut -f1); [ -n "$_gx" ] || { _gxm=ABSENT; _gxb=ABSENT; }
+		_gp=$(git -C "$OBJSRC" ls-tree "$PREAL" -- "$_pp" 2>/dev/null); _gpm=${_gp%% *}; _gpb=$(printf '%s' "$_gp" | cut -d' ' -f3 | cut -f1); [ -n "$_gp" ] || { _gpm=ABSENT; _gpb=ABSENT; }
+		if [ "$_gxm" != "$_mx" ] || [ "$_gxb" != "$_bx" ] || [ "$_gpm" != "$_mp" ] || [ "$_gpb" != "$_bp" ]; then echo "MISMATCH-path:$_pp" >> "$TMP/.hydrate-bad"; fi
+	done
+	[ ! -s "$TMP/.hydrate-bad" ] || { echo "PRECHECK-REFUSED path identity mismatch"; cat "$TMP/.hydrate-bad"; return 1; } >&2
+}
+validate_inputs || exit 1
 XPATHS=$(git -C "$OBJSRC" diff-tree --no-commit-id --name-only -r "$XREAL") || exit 1
 XCOUNT=$(printf '%s\n' "$XPATHS" | wc -l)
 # 9a. Planted negative: a missing or corrupted capsule fails closed before replay.
@@ -512,6 +525,19 @@ check "$rc" "1" "hydrate-missing-refused" "$out" "HYDRATE-REFUSED"
 head -c 1000 "$CAPSULE_PACK" > "$TMP/truncated.pack"
 out=$(hydrate_capsule "$TMP/truncated.pack" "$CAPSULE_MANIFEST" "$TMP/nope-truncated" 2>&1); rc=$?
 check "$rc" "1" "hydrate-truncated-refused" "$out" "HYDRATE-REFUSED"
+# 9b. Planted negative: a corrupted blob or a dropped path fails the
+# pre-replay identity check before any replay runs (no real-* fixture dir).
+cp "$CAPSULE_MANIFEST" "$TMP/bad-blob.manifest"
+awk '$1 == "tests/cli/converge.test.ts" { $3 = "0000000000000000000000000000000000000000" } 1' "$TMP/bad-blob.manifest" > "$TMP/bad-blob.manifest.new" && mv "$TMP/bad-blob.manifest.new" "$TMP/bad-blob.manifest"
+out=$(CAPSULE_MANIFEST="$TMP/bad-blob.manifest" validate_inputs 2>&1); rc=$?
+check "$rc" "1" "precheck-corrupt-blob-refused" "$out" "MISMATCH-path:tests/cli/converge.test.ts"
+nogore=$(ls -d "$TMP"/real-* 2>/dev/null | wc -l | tr -d '[:space:]')
+check "$nogore" "0" "precheck-corrupt-blob-no-replay" "x" "x"
+grep -v "^tests/cli/converge.test.ts " "$CAPSULE_MANIFEST" > "$TMP/bad-drop.manifest"
+out=$(CAPSULE_MANIFEST="$TMP/bad-drop.manifest" validate_inputs 2>&1); rc=$?
+check "$rc" "1" "precheck-dropped-path-refused" "$out" "PRECHECK-REFUSED"
+nogore=$(ls -d "$TMP"/real-* 2>/dev/null | wc -l | tr -d '[:space:]')
+check "$nogore" "0" "precheck-dropped-path-no-replay" "x" "x"
 # sync_tree DIR REV: check out exactly the 78 X paths at REV bytes and mode;
 # paths absent at REV (the two X-added files) are removed for the reversal.
 sync_tree() {
