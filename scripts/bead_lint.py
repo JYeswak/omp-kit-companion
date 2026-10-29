@@ -72,7 +72,20 @@ NEGATIVE_RE = re.compile(
     r"plant|known-?bad|negativ|mutant|fire|refus|reject", re.I
 )
 PLACEHOLDER_RE = re.compile(r"TODO|TBD|<\.\.\.>|<…>|\?\?\?")
-BEAD_MENTION_RE = re.compile(r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+){2,})\b")
+BEAD_MENTION_RE = re.compile(
+    r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+(?:\.[0-9]+(?:\.[0-9]+)*)?)\b"
+)
+# Gap words between a causal verb and the bead id it governs. Punctuation
+# ends the clause, so a causal word about another subject on the same
+# physical line cannot leak across to the mention (the a0vy1 case: a
+# "blocked"-about-another-wave must not demand a blocks edge to the
+# historical id). At most two plain words may intervene
+# ("blocks edge to <id>", "depend on <id>").
+_REL_GAP = r"(?:\s+[^\s.,;:!?()\"']+){0,2}\s+"
+_BLOCK_VERBS = (
+    r"(?:block(?:s|ed|ing)?|depend(?:s|ed|ing)?|require(?:s|d)?|prerequisite)"
+)
+BEAD_RELATION_WORD_RE = re.compile(r"[a-z]+")
 ECO_SECTION_RE = re.compile(r"(?i)\bsection\b|\bsec\.\s*\d|§")
 
 
@@ -281,25 +294,134 @@ def check_h(beads: list[dict]) -> list[str]:
     return bad
 
 
-def check_i(beads: list[dict], byid: set[str]) -> list[str]:
+def check_i(
+    beads: list[dict],
+    byid: set[str],
+    graph_beads: list[dict] | None = None,
+) -> list[str]:
+    edge_types: dict[tuple[str, str], set[str]] = {}
+
+    def add_edge(source: object, target: object, edge_type: object) -> None:
+        if not isinstance(source, str) or not isinstance(target, str):
+            return
+        if not isinstance(edge_type, str):
+            return
+        edge_types.setdefault((source, target), set()).add(edge_type)
+        if edge_type in {"related", "parent-child"}:
+            edge_types.setdefault((target, source), set()).add(edge_type)
+
+    for record in beads if graph_beads is None else graph_beads:
+        source_id = record.get("id")
+        if not isinstance(source_id, str):
+            continue
+        for edge in record.get("dependencies") or []:
+            if not isinstance(edge, dict):
+                continue
+            target_id = edge.get("depends_on_id") or edge.get("id")
+            edge_type = edge.get("type") or edge.get("dependency_type")
+            add_edge(source_id, target_id, edge_type)
+        for edge in record.get("dependents") or []:
+            if not isinstance(edge, dict):
+                continue
+            dependent_id = (
+                edge.get("id")
+                or edge.get("issue_id")
+                or edge.get("depends_on_id")
+            )
+            edge_type = edge.get("type") or edge.get("dependency_type")
+            add_edge(dependent_id, source_id, edge_type)
+
+    causal_words = {
+        "block", "blocked", "blocks", "depend", "depends", "dependency",
+        "dependencies", "require", "requires", "required", "prerequisite",
+    }
     bad = []
-    for b in beads:
+    for bead in beads:
+        bead_id = bead.get("id")
+        if not isinstance(bead_id, str):
+            continue
         text = (
-            (b.get("description") or "")
+            (bead.get("description") or "")
             + "\n"
-            + (b.get("acceptance_criteria") or "")
+            + (bead.get("acceptance_criteria") or "")
         ).lower()
-        mentions = {
-            m
-            for m in BEAD_MENTION_RE.findall(text)
-            if m in byid and m != b["id"]
-        }
-        edges = {
-            d.get("depends_on_id") for d in (b.get("dependencies") or [])
-        }
-        if mentions - edges:
-            bad.append(b["id"])
+        contexts: dict[str, set[str]] = {}
+        for match in BEAD_MENTION_RE.finditer(text):
+            mention = match.group(1)
+            if mention not in byid or mention == bead_id:
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(text)
+            words = set(
+                BEAD_RELATION_WORD_RE.findall(text[line_start:line_end])
+            )
+            mention_fixture = (
+                bool(words & {"mention", "mentions", "mentioned", "mentioning"})
+                and "edge" in words
+                and bool(words & {"fail", "fails", "failed", "pass", "passes", "passed"})
+            )
+            regex_fixture = (
+                bool(words & {"regex", "pattern", "matcher"})
+                and bool(words & {"match", "matches", "matched", "matching"})
+                and not (words & causal_words)
+                and not (words & {"parent", "child", "children", "related"})
+            )
+            # These clauses describe matcher fixtures, not references by the
+            # bead that contains them.
+            if mention_fixture or regex_fixture:
+                continue
+            relation = _mention_relation(text, mention)
+            contexts.setdefault(mention, set()).add(relation)
+
+        for mention, relations in contexts.items():
+            outgoing = edge_types.get((bead_id, mention), set())
+            incoming = edge_types.get((mention, bead_id), set())
+            connected = outgoing | incoming
+            valid = True
+            if "blocks" in relations and "blocks" not in outgoing:
+                valid = False
+            if (
+                "parent-child" in relations
+                and "parent-child" not in connected
+            ):
+                valid = False
+            if "related" in relations and not (
+                {"related", "discovered-from"} & connected
+            ):
+                valid = False
+            if "generic" in relations and not connected:
+                valid = False
+            if not valid:
+                bad.append(bead_id)
+                break
     return bad
+
+
+def _mention_relation(text: str, mention: str) -> str:
+    """Name the typed edge the text asserts for one mentioned bead id.
+
+    Only a causal assertion adjacent to the mention (at most two plain
+    words away, never across clause punctuation) names a typed edge.
+    A causal word about another subject elsewhere on the line does not
+    leak across: historical evidence stays generic, satisfied by any
+    real edge, and an edgeless mention still fails.
+    """
+    esc = re.escape(mention)
+    if re.search(_BLOCK_VERBS + _REL_GAP + esc + r"\b", text) or re.search(
+        esc + r"\b" + _REL_GAP + r"(?:blocks?|blocked|blocking)\b", text
+    ):
+        return "blocks"
+    if re.search(r"(?:parent|child)\s+of\s*" + esc + r"\b", text):
+        return "parent-child"
+    if re.search(r"related\s+(?:edge\s+)?to\s*" + esc + r"\b", text) or re.search(
+        r"discovered[-\s]?from\s*:?\s*" + esc + r"\b", text
+    ) or re.search(
+        esc + r"\b" + _REL_GAP + r"related\s+edge\b", text
+    ):
+        return "related"
+    return "generic"
 
 
 def latest_comment_ts(bead: dict) -> datetime | None:
@@ -309,7 +431,6 @@ def latest_comment_ts(bead: dict) -> datetime | None:
         if ts and (best is None or ts > best):
             best = ts
     return best
-
 
 def check_j(
     beads: list[dict], now: datetime, stale_days: int = STALE_DAYS
@@ -576,10 +697,121 @@ def build_selftest_beads() -> tuple[list[dict], dict[str, list[str]]]:
     ))
     expected["h-placeholders"] = ["st-v-h"]
     beads.append(mkbead(
-        "st-v-i", desc=CLEAN_DESC + " See st-base and st-clean-a.",
+        "st-v-i", desc=CLEAN_DESC + " See st-clean-a.",
         acc=CLEAN_ACC, deps=[dep_to("st-v-i", "st-base", "related")],
     ))
-    expected["i-mention-edges"] = ["st-v-i"]
+    id_test_desc = (
+        "WHAT: (a) resolve the tracker reference; (b) preserve the control. "
+        "WHY: references require a typed edge."
+    )
+    dotted_id = "ompkit-rc-epic-land-fix-release-dogfood-rz5.119"
+    for target in ("ompkit-axz7m", dotted_id, "bd-abc123"):
+        beads.append(mkbead(target, desc=id_test_desc, acc=CLEAN_ACC))
+    beads.append(mkbead(
+        "st-v-i-single",
+        desc=id_test_desc + "\nSee ompkit-axz7m.",
+        acc=CLEAN_ACC,
+    ))
+    beads.append(mkbead(
+        "st-v-i-legacy",
+        desc=id_test_desc + "\nSee bd-abc123.",
+        acc=CLEAN_ACC,
+    ))
+    beads.append(mkbead(
+        "st-v-i-dotted-missing",
+        desc=id_test_desc + f"\nDepends on {dotted_id}.",
+        acc=CLEAN_ACC,
+    ))
+    beads.append(mkbead(
+        "st-v-i-dotted-blocks",
+        desc=id_test_desc + f"\nDepends on {dotted_id}.",
+        acc=CLEAN_ACC,
+        deps=[dep_to("st-v-i-dotted-blocks", dotted_id, "blocks")],
+    ))
+    beads.append(mkbead(
+        "st-v-i-related-only",
+        desc=id_test_desc + "\nRequires ompkit-axz7m.",
+        acc=CLEAN_ACC,
+        deps=[dep_to("st-v-i-related-only", "ompkit-axz7m", "related")],
+    ))
+    beads.append(mkbead(
+        "st-v-i-related-control",
+        desc=id_test_desc + "\nThis is related to ompkit-axz7m.",
+        acc=CLEAN_ACC,
+        deps=[dep_to("st-v-i-related-control", "ompkit-axz7m", "related")],
+    ))
+    beads.append(mkbead(
+        "st-v-i-discovered",
+        desc=id_test_desc + f"\ndiscovered-from: {dotted_id}.",
+        acc=CLEAN_ACC,
+        deps=[dep_to("st-v-i-discovered", dotted_id, "related")],
+    ))
+    beads.append(mkbead(
+        "st-v-i-prose",
+        desc=id_test_desc + "\nnon-author and pre-push are ordinary prose.",
+        acc=CLEAN_ACC,
+    ))
+    beads.append(mkbead(
+        "st-v-i-meta",
+        desc="WHAT: preserve literal examples. WHY: this tests metalinguistic references.",
+        acc=CLEAN_ACC
+        + "- [ ] [a] [build] a description mentioning ompkit-axz7m with no "
+        "edge fails i-mention-edges, and one mentioning ...rz5.119 with a "
+        "blocks edge to ...rz5.119 passes; planted negative: the no-edge "
+        "fixture is RED.\n",
+    ))
+    beads.append(mkbead(
+        "st-v-i-regex-example",
+        desc=id_test_desc
+        + "\nThe rework miner found check_i's regex never matched ompkit-axz7m.",
+        acc=CLEAN_ACC,
+    ))
+    beads.append(mkbead(
+        "st-v-i-steps-example",
+        desc=id_test_desc
+        + "\nLint a bead whose description mentions ompkit-axz7m with no edge: "
+        "check_i passes it.",
+        acc=CLEAN_ACC,
+    ))
+    beads.append(mkbead(
+        "st-v-i-historical",
+        desc=id_test_desc
+        + f"\nNames {dotted_id} as historical evidence for the 54-path hold.",
+        acc=CLEAN_ACC,
+        deps=[dep_to("st-v-i-historical", dotted_id, "discovered-from")],
+    ))
+    beads.append(mkbead(
+        "st-v-i-blocked-elsewhere",
+        desc=id_test_desc
+        + f"\nUnreserved paths blocked the wave; history names {dotted_id} "
+        "as evidence.",
+        acc=CLEAN_ACC,
+    ))
+    parent_id, child_id = "st-v-i-parent", "st-v-i-child"
+    parent = mkbead(
+        parent_id,
+        desc=id_test_desc + f"\nParent of {child_id}.",
+        acc=CLEAN_ACC,
+    )
+    child = mkbead(
+        child_id,
+        desc=id_test_desc + f"\nChild of {parent_id}.",
+        acc=CLEAN_ACC,
+        deps=[dep_to(child_id, parent_id, "parent-child")],
+    )
+    parent["dependents"] = [
+        {"id": child_id, "dependency_type": "parent-child"}
+    ]
+    beads.extend([parent, child])
+    expected["i-mention-edges"] = [
+        "st-v-e",
+        "st-v-i",
+        "st-v-i-single",
+        "st-v-i-legacy",
+        "st-v-i-dotted-missing",
+        "st-v-i-related-only",
+        "st-v-i-blocked-elsewhere",
+    ]
     beads.append(clean_bead(
         "st-v-j", status="blocked", comments=[],
     ))
@@ -867,7 +1099,7 @@ def run_lettered(
         "f-fanout-depth": check_f(scoped)[0],
         "g-eco-plan-cite": check_g(scoped),
         "h-placeholders": check_h(scoped),
-        "i-mention-edges": check_i(scoped, byid),
+        "i-mention-edges": check_i(scoped, byid, graph_beads=beads),
         "j-stale-blocked": check_j(scoped, now),
         # ADV-4: closes live outside scope_beads — check_k sees ALL beads.
         "k-close-receipt": check_k(beads, now),
@@ -914,27 +1146,93 @@ _ELAPSED_ACCEPTANCE_RE = re.compile(
     # An explicit dated window: "on or after 2026-10-27, ..." waits for a date.
     r"|\bon\s+or\s+after\s+\d{4}-\d{2}-\d{2}\b"
     r"|\blive\s+(?:run|ring|measurement)\s+(?:proof|evidence)\b"
+    r"|\b\d+\s*(?:hours?|hrs?|h|days?|d|weeks?|w|minutes?|mins?)\s+(?:window|period|deadline)\b"
+    r"|\b\d+\s*-\s*(?:minutes?|mins?)\b"
+    r"|\bafter\s+(?:the\s+)?kit\s+release\s+is\s+installed\b"
+    r"|\bwithin\s+\d+\s+fast[- ]lane\s+cadences?\s+of\s+deploy\b"
+    r"|\bnext\s+push[- ]run\b"
+    r"|\b\d+\s*(?:hours?|hrs?|h)\s+after\s+landing\b"
     r")",
     re.IGNORECASE,
 )
 
 
-def classify_acceptance(bead: dict) -> dict[str, object]:
-    """Classify checkbox ACs into code and elapsed-time work.
+_AC_CHECKBOX_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s*)?\[([ xX])\]\s*")
+_AC_NUMBERED_ITEM_RE = re.compile(r"^\s*\d+[.)]\s+")
+_AC_BULLET_ITEM_RE = re.compile(r"^\s*[-*+]\s+")
+_AC_SECTION_HEADERS = {
+    "acceptance", "acceptance criteria", "requirements", "verification",
+}
 
-    The result is intentionally descriptive so callers can name the exact
-    time item in a refusal.  Non-checkbox prose is not an acceptance item.
-    """
+
+def classify_acceptance(bead: dict) -> dict[str, object]:
+    """Classify checkbox, numbered, bullet and prose AC items."""
     acceptance = bead.get("acceptance_criteria") or ""
     items: list[dict[str, object]] = []
+    current_index = 0
+    current_lines: list[str] = []
+    current_kind: str | None = None
+    current_ticked = False
+
+    def flush() -> None:
+        nonlocal current_lines, current_kind
+        text = " ".join(current_lines).strip()
+        if text:
+            folded = text.casefold()
+            is_classifier_example = (
+                "classified elapsed" in folded
+                or "classified as elapsed" in folded
+            )
+            items.append({
+                "index": current_index,
+                "text": text,
+                "elapsed": (
+                    bool(_ELAPSED_ACCEPTANCE_RE.search(text))
+                    and not is_classifier_example
+                ),
+                "ticked": current_ticked,
+            })
+        current_lines = []
+        current_kind = None
+
     for index, raw in enumerate(acceptance.splitlines(), 1):
-        text = re.sub(r"^\s*-\s*\[[ xX]\]\s*", "", raw).strip()
-        if not text:
+        stripped = raw.strip()
+        if not stripped:
+            flush()
             continue
-        if re.match(r"^\s*-\s*\[[ xX]\]", raw):
-            elapsed = bool(_ELAPSED_ACCEPTANCE_RE.search(text))
-            ticked = bool(re.match(r"^\s*-\s*\[[xX]\]", raw))
-            items.append({"index": index, "text": text, "elapsed": elapsed, "ticked": ticked})
+        if (
+            stripped.startswith("#")
+            or stripped.casefold().rstrip(":") in _AC_SECTION_HEADERS
+        ):
+            flush()
+            continue
+        checkbox = _AC_CHECKBOX_ITEM_RE.match(raw)
+        marker = (
+            checkbox
+            or _AC_NUMBERED_ITEM_RE.match(raw)
+            or _AC_BULLET_ITEM_RE.match(raw)
+        )
+        if marker is not None:
+            flush()
+            current_index = index
+            current_lines = [raw[marker.end():].strip()]
+            current_kind = "list"
+            current_ticked = bool(
+                checkbox and checkbox.group(1).casefold() == "x"
+            )
+            continue
+        if current_kind == "list" and raw[:1].isspace():
+            current_lines.append(stripped)
+            continue
+        if current_kind == "list":
+            flush()
+        if current_kind is None:
+            current_index = index
+            current_ticked = False
+            current_kind = "prose"
+        current_lines.append(stripped)
+    flush()
+
     # A ticked time item cannot hold a close open, which is the harm TIMEAC1
     # targets, so only open time items count; a ticked one is neither kind.
     elapsed_items = [item for item in items if item["elapsed"] and not item["ticked"]]
@@ -1172,6 +1470,98 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
         log["mutation"].append({"disabled": "elapsed-time-mix", "verdict_flips_to_fail": bool(want_time)})
         if not want_time:
             fails.append("mutation: disabling elapsed-time-mix changes nothing")
+        elapsed_forms = [
+            (
+                "hours-after-landing",
+                "- [ ] [a] [build] build code; planted negative: remove it and RED.\n"
+                "- [ ] [b] [live] 24 h after landing, cc.py unknowns shows rows "
+                "with last_seen before landing; planted negative: stale rows RED.\n",
+                True,
+            ),
+            (
+                "numbered-24h",
+                "1. [a] [build] build code; planted negative: remove it and RED.\n"
+                "2. [b] [after 24h] observe a 24 h window; planted negative: "
+                "omit the window and RED.\n",
+                True,
+            ),
+            (
+                "no-dash-checkbox",
+                "[ ] [a] [build] build code; planted negative: remove it and RED.\n"
+                "[ ] [b] [after 24h] observe over 24 h; planted negative: "
+                "omit the window and RED.\n",
+                True,
+            ),
+            (
+                "plain-prose",
+                "Build [a] code; planted negative: remove it and RED.\n\n"
+                "Observe [b] over 24 h; planted negative: omit it and RED.\n",
+                True,
+            ),
+            (
+                "after-release-installed",
+                "- [ ] [a] [build] build code; planted negative: remove it and RED.\n\n"
+                "After the kit release is installed, [b] verify; planted negative: "
+                "use the stale release and RED.\n",
+                True,
+            ),
+            (
+                "fast-lane-cadence",
+                "- [ ] [a] [build] build code; planted negative: remove it and RED.\n"
+                "Within 2 fast-lane cadences of deploy, [b] verify; planted negative: "
+                "omit verification and RED.\n",
+                True,
+            ),
+            (
+                "minute-task",
+                "- [ ] [a] [build] build code; planted negative: remove it and RED.\n"
+                "A 30-min task [b] must finish; planted negative: omit the task and RED.\n",
+                True,
+            ),
+            (
+                "next-push-run",
+                "- [ ] [a] [build] build code; planted negative: remove it and RED.\n"
+                "On the next push-run, [b] verify; planted negative: omit verification and RED.\n",
+                True,
+            ),
+            (
+                "classifier-self-reference",
+                "- [ ] [a] [build] build code; planted negative: remove it and RED.\n"
+                "- [ ] [b] [build] numbered acceptance naming a 24 h window "
+                "is classified elapsed; planted negative: classifier fixtures "
+                "must not require a wait.\n",
+                False,
+            ),
+            (
+                "ordinary-today-control",
+                "- [ ] [a] [build] build code; planted negative: remove it and RED.\n\n"
+                "The [b] result is reviewed today; planted negative: omit review and RED.\n",
+                False,
+            ),
+        ]
+        elapsed_probe_results = {}
+        for name, acceptance, expected_elapsed in elapsed_forms:
+            time_probe = clean_bead(
+                f"st-v-time-probe-{name}",
+                acc=acceptance,
+            )
+            time_probe_id = str(time_probe["id"])
+            direct = bool(elapsed_time_mix_failure(time_probe))
+            gate = any(
+                item.startswith("elapsed-time-mix:")
+                for item in lint_bead_failures(time_probe, {time_probe_id})
+            )
+            elapsed_probe_results[name] = {
+                "expected": expected_elapsed,
+                "direct": direct,
+                "gate": gate,
+            }
+            if direct != expected_elapsed or gate != expected_elapsed:
+                fails.append(
+                    f"elapsed-format {name}: expected {expected_elapsed}, "
+                    f"direct={direct}, gate={gate}"
+                )
+        log["elapsed_format_probes"] = elapsed_probe_results
         clean = build_clean_beads()
         cjsonl = os.path.join(tmp, "clean.jsonl")
         write_jsonl(cjsonl, clean)
