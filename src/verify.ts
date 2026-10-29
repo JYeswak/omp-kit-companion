@@ -90,6 +90,17 @@ export function judge(expected: string | null, rc: number | null, out: string): 
 	// Any other wording: the literal text must appear in the output; rc is not consulted (the box said what it expects).
 	return { pass: out.includes(e), outcome: "named", detail: `output ${out.includes(e) ? "contains" : "lacks"} ${JSON.stringify(e)}` };
 }
+/** Bounded child-output excerpt for a failed replay, so a future failure carries its own evidence. Passes keep the detail byte-identical. */
+const CHILD_HEAD = 1000;
+const CHILD_TAIL = 3000;
+function childExcerpt(rc: number | null, timedOut: boolean, out: string): string {
+	const total = out.length;
+	if (total === 0) return `; child rc ${rc}${timedOut ? " TIMEOUT" : ""}: no stdout/stderr captured`;
+	const head = out.slice(0, CHILD_HEAD);
+	const tail = total > CHILD_HEAD + CHILD_TAIL ? out.slice(-CHILD_TAIL) : out.slice(CHILD_HEAD);
+	const omitted = total - head.length - tail.length;
+	return `; child rc ${rc}${timedOut ? " TIMEOUT" : ""} ${total} chars: ${head}${omitted > 0 ? `...[${omitted} chars omitted]...${tail}` : tail}`;
+}
 
 export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string }
 
@@ -153,8 +164,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const r = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
 		const out = text(r.stdout) + text(r.stderr);
 		const v = judge(expected, r.rc, out);
-		replays.push({ index: box.index, letter: box.letter, command, expected, outcome: v.outcome, rc: r.rc, pass: v.pass, detail: v.detail });
-		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail} (${Date.now() - started} ms)${r.timed_out ? " TIMEOUT" : ""}`);
+		const excerpt = v.pass ? "" : childExcerpt(r.rc, r.timed_out, out);
+		replays.push({ index: box.index, letter: box.letter, command, expected, outcome: v.outcome, rc: r.rc, pass: v.pass, detail: v.detail + excerpt });
+		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail}${excerpt} (${Date.now() - started} ms)${r.timed_out ? " TIMEOUT" : ""}`);
 	}
 	const failed = replays.filter(r => r.pass === false);
 	if (failed.length > 0) {
