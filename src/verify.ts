@@ -123,9 +123,8 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		log.push(`not replayable: ${bad.length ? bad.map(b => b.phase !== null && KNOWN_PHASES[b.phase] !== true ? `${tag(b)} unsupported phase [${b.phase}]` : `${tag(b)} names no command`).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
-	// A grading harness designates its writable root (GRADE_WAVE_SCRATCH); the
-	// owned replay fixture is a real br init and must live where the ambient
-	// br authority permits writes. Otherwise the default TMPDIR root applies.
+	// The owned replay fixture uses an explicit database path under its per-run
+	// scratch; deleting BEADS_DB alone would still discover an ancestor tracker.
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
 	const scratch = ownedTmp("verify", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
 	const realBr = resolveRealBr(env.PATH);
@@ -138,9 +137,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		mkdirSync(fixtureDir, { recursive: true });
 		const unboundEnv: Record<string, string> = {};
 		for (const [k, v] of Object.entries(env)) if (k !== "BEADS_DB") unboundEnv[k] = v;
-		const fixtureInit = await run([realBr, "init"], { cwd: fixtureDir, deadline_s: 60, env: unboundEnv });
-		if (fixtureInit.rc !== 0) return { ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`owned fixture init failed rc ${fixtureInit.rc}: ${text(fixtureInit.stderr).slice(0, 200)}; unmet prerequisite: owned tracker binding`).join("\n"), acts };
 		ownedDb = join(fixtureDir, ".beads", "beads.db");
+		const fixtureInit = await run(["br", "init", "--db", ownedDb], { cwd: fixtureDir, deadline_s: 60, env: unboundEnv });
+		if (fixtureInit.rc !== 0) return { ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`owned fixture init failed rc ${fixtureInit.rc}: ${text(fixtureInit.stderr).slice(0, 200)}; unmet prerequisite: owned tracker binding`).join("\n"), acts };
 	}
 	const replayEnv = { ...env, TMPDIR: scratch.path, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}:${env.PATH ?? process.env.PATH ?? "/usr/bin:/bin"}` };
 	if (wantsOwned) log.push(`owned fixture ${ownedDb} (per-run read-only replay)`);

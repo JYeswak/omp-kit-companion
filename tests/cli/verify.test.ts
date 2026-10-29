@@ -383,6 +383,27 @@ test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with th
 	expect((await brun(["show", id, "--json"], t.dir, causalEnv)).out).toContain("causal-proof");
 });
 
+test("REPLAYBR1 owned tracker init leaves its nearest ancestor tracker unchanged", async () => {
+	const { dir: cdir, sha } = await repo("owned-init-project");
+	const t = await tracker("owned-init-source");
+	const id = await createBead(t, "owned replay init");
+	const ac = `- [ ] [a] [build] admitted owned write: \`br --db "$OWNED_TRACKER_DB" create "owned probe"\` -> Created`;
+	await shapeBead(t, id, ac);
+	const parent = await createParentTracker(base, "owned-init-parent");
+	const before = parent.snapshot();
+	const previous = process.env.GRADE_WAVE_SCRATCH;
+	process.env.GRADE_WAVE_SCRATCH = parent.dir;
+	try {
+		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: trackerEnv(t), dryRun: true, family: "same (bun)" });
+		expect(res.code).toBe("DRY_RUN");
+		expect(res.replays.map(replay => [replay.letter, replay.pass])).toEqual([["a", true]]);
+		expect(parent.snapshot()).toEqual(before);
+	} finally {
+		if (previous === undefined) delete process.env.GRADE_WAVE_SCRATCH;
+		else process.env.GRADE_WAVE_SCRATCH = previous;
+	}
+});
+
 /* VERIFYACTOR1 (ompkit-t7cn7.24): native verify binds the explicit reviewer
    identity on every durable br mutation. The fixture tracker's default actor
    is forced away from the reviewer via USER, so the audit log distinguishes
