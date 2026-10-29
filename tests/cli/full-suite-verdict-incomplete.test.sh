@@ -5,7 +5,8 @@
 # full-suite-verdict-incomplete.test.sh — FULLSUITELOG1 (ompkit-lrbd.6).
 # A suite run that ends without complete evidence is non-pass, caches no verdict, and keeps its
 # output at the printed <tree>.incomplete.log path. A complete run still records <tree>.log plus
-# the <tree>.json verdict.
+# the <tree>.json verdict. FULLSUITEPAR1 (ompkit-9t6f2): parallel shell suites give the serial
+# GREEN/RED lines and counts, and a hung parallel suite is killed by the deadline and named.
 set -u
 
 KITROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -50,6 +51,13 @@ run_verdict() {
 	KITROOT=$KITROOT_DIR OMP_KIT_OMP_SRC_FETCH=0 sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
 	rc=$?
 	tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+}
+# side_files_gone: no runner-private file or dir is left beside the cache entry.
+side_files_gone() {
+	for side in status bun shell runner timed-out; do
+		if [ -e "$cache/$tree.running.log.$side" ]; then return 1; fi
+	done
+	[ ! -e "$cache/$tree.running.log" ]
 }
 
 # Incomplete: the python suite prints a marker, then SIGKILLs the runner loop that would print
@@ -133,7 +141,7 @@ else
 	not_ok "nested markers corrupted the verdict (rc=$rc)"; cat "$out"
 fi
 if [ -f "$cache/$tree.json" ] && grep -F '"verdict": "PASS"' "$cache/$tree.json" >/dev/null; then ok "nested-marker run caches PASS"; else not_ok "nested-marker run cached no PASS"; fi
-if [ ! -e "$cache/$tree.running.log.status" ] && [ ! -e "$cache/$tree.running.log.bun" ]; then ok "runner side files removed"; else not_ok "runner side files left in cache"; fi
+if side_files_gone; then ok "runner side files removed"; else not_ok "runner side files left in cache"; ls -la "$cache"; fi
 
 # (b) Masking: the bun phase has a real failing test; a later shell suite prints a nested bun
 # summary claiming ' 0 fail'. The verdict must be FAIL, taken from the bun phase's own output.
@@ -209,7 +217,7 @@ test("FULLSUITELOG1 slow", async () => { console.log("FULLSUITELOG1-BUNPARTIAL")
 	else
 		not_ok "timed-out bun partial output missing from the incomplete log (rc=$rc)"; cat "$out"; [ -f "$inc" ] && cat "$inc"
 	fi
-	if [ ! -e "$cache/$tree.running.log.status" ] && [ ! -e "$cache/$tree.running.log.bun" ]; then ok "timed-out run removes runner side files"; else not_ok "timed-out run left runner side files"; fi
+	if side_files_gone; then ok "timed-out run removes runner side files"; else not_ok "timed-out run left runner side files"; ls -la "$cache"; fi
 else
 	not_ok "bun is unavailable; the masking case cannot run"
 fi
@@ -294,6 +302,127 @@ PY
 else
 	echo "NATIVEFIXTUREDB1: optional native br adapter unavailable; native tracker case NOT_RUN"
 fi
+
+# FULLSUITEPAR1 (ompkit-9t6f2): shell suites run FULL_SUITE_SHELL_JOBS at a time. Five probe suites
+# record their TMPDIR, how many suites were running at once, and (p1/p2 when FSPAR_PAIR=1) whether
+# their partner ran at the same time; p3 fails with rc 3, and finishing order is not the sorted order.
+# shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
+fspar_body='name=$(basename "$0" .test.sh)
+d=$FSPAR_DIR
+mkdir "$d/run/$name"
+echo "FSPAR-OUT $name begin"
+suite_tmp=$(printenv TMPDIR) || suite_tmp=
+printf "%s\n" "$suite_tmp" >"$d/tmp.$name"
+if [ -n "$suite_tmp" ] && [ -f "$suite_tmp/.owner" ]; then : >"$d/owned.$name"; fi
+peer=
+case "$name" in p1) peer=p2 ;; p2) peer=p1 ;; esac
+if [ -n "$peer" ] && [ "${FSPAR_PAIR:-0}" = 1 ]; then
+	k=0
+	while [ ! -d "$d/run/$peer" ] && [ "$k" -lt 200 ]; do sleep 0.1; k=$((k + 1)); done
+	if [ -d "$d/run/$peer" ]; then : >"$d/overlap.$name"; fi
+fi
+sleep 0.5
+ls "$d/run" | wc -l | tr -d " " >"$d/peak.$name"
+case "$name" in p1) sleep 1 ;; p3) sleep 0.4 ;; p4) sleep 0.2 ;; esac
+rmdir "$d/run/$name"
+echo "FSPAR-OUT $name end"
+[ "$name" != p3 ] || exit 3'
+mkrepo_begin par
+for n in p1 p2 p3 p4 p5; do addfile "tests/cli/$n.test.sh" "$fspar_body"; done
+mkrepo_commit
+# fspar_run LABEL JOBS PAIR: one verdict on the par tree; its cache and probe records move aside.
+fspar_run() {
+	rm -rf "$TMP/fspar" "$repo.cache"
+	mkdir -p "$TMP/fspar/run"
+	FSPAR_DIR="$TMP/fspar" FSPAR_PAIR=$3 FULL_SUITE_SHELL_JOBS=$2
+	export FSPAR_DIR FSPAR_PAIR FULL_SUITE_SHELL_JOBS
+	run_verdict "$1"
+	unset FSPAR_DIR FSPAR_PAIR FULL_SUITE_SHELL_JOBS
+	rm -rf "$repo.cache.$1" "$TMP/fspar.$1"
+	mv "$repo.cache" "$repo.cache.$1"
+	mv "$TMP/fspar" "$TMP/fspar.$1"
+}
+fspar_lines() { grep -E '^(GREEN|RED) script-suite ' "$repo.cache.$1/$tree.log"; }
+fspar_order() { grep -E '^(FSPAR-OUT |GREEN script-suite |RED script-suite )' "$repo.cache.$1/$tree.log"; }
+fspar_counts() { python3 -c 'import json, sys; e = json.load(open(sys.argv[1]))["evidence"]; print(e["shell_suites"], e["shell_fail"])' "$repo.cache.$1/$tree.json"; }
+fspar_peak() { cat "$TMP/fspar.$1"/peak.* | sort -n | tail -n 1; }
+fspar_run serial 1 0
+serial_out=$out; serial_rc=$rc
+fspar_run parallel 3 1
+if [ "$serial_rc" -ne 0 ] && [ "$rc" -ne 0 ] && grep -F 'VERDICT FAIL' "$out" >/dev/null && grep -F 'shell_red=1' "$out" >/dev/null; then
+	ok "FULLSUITEPAR1 planted failing suite makes the parallel run FAIL (serial rc=$serial_rc, parallel rc=$rc)"
+else
+	not_ok "FULLSUITEPAR1 planted failing suite did not fail both runs (serial rc=$serial_rc, parallel rc=$rc)"; cat "$serial_out" "$out"
+fi
+if grep -F '  RED script-suite tests/cli/p3.test.sh rc=3' "$out" >/dev/null; then ok "FULLSUITEPAR1 the parallel FAIL names the failing suite"; else not_ok "FULLSUITEPAR1 the failing suite is not named"; cat "$out"; fi
+if [ -n "$(fspar_lines serial)" ] && [ "$(fspar_lines serial | sort)" = "$(fspar_lines parallel | sort)" ]; then
+	ok "FULLSUITEPAR1 serial and parallel GREEN/RED line sets are equal"
+else
+	not_ok "FULLSUITEPAR1 GREEN/RED line sets differ"; fspar_lines serial; fspar_lines parallel
+fi
+if [ "$(fspar_counts serial)" = "5 1" ] && [ "$(fspar_counts parallel)" = "5 1" ]; then ok "FULLSUITEPAR1 verdict JSON shell_suites/shell_fail match (5 1)"; else not_ok "FULLSUITEPAR1 verdict JSON counts serial='$(fspar_counts serial)' parallel='$(fspar_counts parallel)'"; fi
+want_order=$(for n in p1 p2 p3 p4 p5; do
+	printf 'FSPAR-OUT %s begin\nFSPAR-OUT %s end\n' "$n" "$n"
+	if [ "$n" = p3 ]; then echo "RED script-suite tests/cli/p3.test.sh rc=3"; else echo "GREEN script-suite tests/cli/$n.test.sh"; fi
+done)
+if [ "$(fspar_order serial)" = "$want_order" ] && [ "$(fspar_order parallel)" = "$want_order" ]; then
+	ok "FULLSUITEPAR1 both logs hold each suite's output then its line, in sorted suite order"
+else
+	not_ok "FULLSUITEPAR1 log order depends on the run"; fspar_order serial; fspar_order parallel
+fi
+if [ -e "$TMP/fspar.parallel/overlap.p1" ] && [ -e "$TMP/fspar.parallel/overlap.p2" ] && [ "$(fspar_peak parallel)" -ge 2 ] && [ "$(fspar_peak parallel)" -le 3 ]; then
+	ok "FULLSUITEPAR1 shell suites ran concurrently, at most 3 at a time (peak $(fspar_peak parallel))"
+else
+	not_ok "FULLSUITEPAR1 shell suites did not run concurrently within the bound (peak $(fspar_peak parallel))"; ls "$TMP/fspar.parallel"
+fi
+if [ "$(fspar_peak serial)" = 1 ]; then ok "FULLSUITEPAR1 FULL_SUITE_SHELL_JOBS=1 runs one suite at a time"; else not_ok "FULLSUITEPAR1 jobs=1 peak $(fspar_peak serial)"; fi
+set -- "$TMP/fspar.parallel"/owned.*
+if [ "$#" -eq 5 ] && [ -e "$1" ] && [ "$(cat "$TMP/fspar.parallel"/tmp.* | sort -u | grep -c .)" -eq 5 ]; then
+	ok "FULLSUITEPAR1 every parallel suite ran under its own owned TMPDIR"
+else
+	not_ok "FULLSUITEPAR1 parallel suites shared or lacked an owned TMPDIR"; cat "$TMP/fspar.parallel"/tmp.*
+fi
+if grep -F 'shell stage: 5 suites, 3 at a time' "$repo.cache.parallel/$tree.log" >/dev/null; then ok "FULLSUITEPAR1 the log records the shell stage width and time"; else not_ok "FULLSUITEPAR1 no shell stage line in the log"; fi
+
+# Planted hang: h2 loops on short sleeps, so killing only a leaf would let it run on. With three
+# workers the deadline must kill the hung suite's whole tree, report it by name and stay incomplete.
+mkrepo_begin parhang
+addfile tests/cli/h1.test.sh 'echo "FSPAR-HANG-QUICK"'
+# shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
+addfile tests/cli/h2.test.sh 'echo "FSPAR-HANG-PARTIAL"
+echo "$$" >"$FSPAR_DIR/hang.pid"
+n=0
+while [ "$n" -lt 40 ]; do sleep 1; n=$((n + 1)); done
+echo "FSPAR-HANG-SURVIVED"'
+addfile tests/cli/h3.test.sh 'echo "FSPAR-HANG-QUICK-3"'
+mkrepo_commit
+rm -rf "$TMP/fspar"
+mkdir -p "$TMP/fspar"
+FSPAR_DIR="$TMP/fspar" FULL_SUITE_SHELL_JOBS=3 FULL_SUITE_TIMEOUT_SECS=6
+export FSPAR_DIR FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
+hang_t0=$(date +%s)
+run_verdict parhang
+hang_wall=$(($(date +%s) - hang_t0))
+unset FSPAR_DIR FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
+cache="$repo.cache"
+inc="$cache/$tree.incomplete.log"
+if [ "$rc" -ne 0 ] && grep -F 'timed out after 6s; unfinished script suites: tests/cli/h2.test.sh;' "$out" >/dev/null && [ ! -e "$cache/$tree.json" ] && [ ! -e "$cache/$tree.log" ]; then
+	ok "FULLSUITEPAR1 a hung parallel suite times the run out, named, nothing cached (rc=$rc)"
+else
+	not_ok "FULLSUITEPAR1 hung suite not reported as an unfinished timeout (rc=$rc)"; cat "$out"
+fi
+if [ "$hang_wall" -le 25 ]; then ok "FULLSUITEPAR1 the deadline ended the run (${hang_wall}s for a 6s bound)"; else not_ok "FULLSUITEPAR1 the run went on ${hang_wall}s past a 6s bound"; fi
+if [ -f "$inc" ] && grep -F 'FSPAR-HANG-PARTIAL' "$inc" >/dev/null && grep -F 'script-suite tests/cli/h2.test.sh did not finish' "$inc" >/dev/null \
+	&& grep -F 'FSPAR-HANG-QUICK' "$inc" >/dev/null && ! grep -F 'FSPAR-HANG-SURVIVED' "$inc" >/dev/null; then
+	ok "FULLSUITEPAR1 the incomplete log keeps every suite's output and the hung suite's partial output"
+else
+	not_ok "FULLSUITEPAR1 incomplete log lacks parallel outputs or the hung suite survived"; [ -f "$inc" ] && cat "$inc"
+fi
+hang_pid=$(cat "$TMP/fspar/hang.pid" 2>/dev/null) || hang_pid=
+k=0
+while [ -n "$hang_pid" ] && kill -0 "$hang_pid" 2>/dev/null && [ "$k" -lt 50 ]; do sleep 0.1; k=$((k + 1)); done
+if [ -n "$hang_pid" ] && ! kill -0 "$hang_pid" 2>/dev/null; then ok "FULLSUITEPAR1 the hung suite process is gone"; else not_ok "FULLSUITEPAR1 hung suite pid ${hang_pid:-?} still runs"; fi
+if side_files_gone; then ok "FULLSUITEPAR1 timed-out parallel run removes runner side files"; else not_ok "FULLSUITEPAR1 timed-out parallel run left side files"; ls -la "$cache"; fi
 
 echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

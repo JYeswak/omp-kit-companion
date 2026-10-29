@@ -37,6 +37,13 @@
 # checkout and never committed. Pruning entries only costs a rerun.
 # Suite bound: FULL_SUITE_TIMEOUT_SECS (default 1800). The suite runs at nice 10 inside the gate's
 # own admission; it takes no heavy slot.
+# Shell suites: FULL_SUITE_SHELL_JOBS at a time (default 5, never more than the online cores or
+# the suite count; FULLSUITEPAR1, ompkit-9t6f2). Each suite runs under its own owned TMPDIR with
+# its output kept apart; outputs and GREEN/RED lines join the log in sorted suite order, so the log
+# and the verdict do not depend on the worker count or on which suite finishes first. The default
+# is measured: the 54 suites took 1415 s one after another (2026-10-29, load 13-21 on 32 cores),
+# no worker count can beat the longest suite (404 s), and 5 is the fewest workers whose predicted
+# stage, claimed in sorted order, is within 5% of that floor (4: 460 s, 5: 411 s, 8: 405 s).
 set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 ROOT=
@@ -46,6 +53,7 @@ CACHE_DIR=
 RERUN_REASON=
 RERUN=0
 TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
+SHELL_JOBS=${FULL_SUITE_SHELL_JOBS:-5}
 RUNTIME_PIN=${FULL_SUITE_RUNTIME_ID:-}
 
 FOCUSED_PASSED=
@@ -79,6 +87,7 @@ if [ "$RERUN" = 1 ] && [ -z "$RERUN_REASON" ]; then
 	exit 1
 fi
 case "$TIMEOUT_SECS" in ''|*[!0-9]*|0) fail "FULL_SUITE_TIMEOUT_SECS must be a positive integer" ; exit 1 ;; esac
+case "$SHELL_JOBS" in ''|*[!0-9]*|0) fail "FULL_SUITE_SHELL_JOBS must be a positive integer" ; exit 1 ;; esac
 # No suite may block on stdin (pre-push hooks inherit a pipe whose writer never closes).
 exec </dev/null
 
@@ -359,6 +368,15 @@ if [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ] && [ -f "$ARCHIVE_DIR/scripts/build-mani
 	fi
 fi
 
+# FULLSUITEPAR1: never more shell workers than online cores or shell suites left to run.
+ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || ncpu=
+case "$ncpu" in ''|*[!0-9]*|0) ncpu=1 ;; esac
+[ "$SHELL_JOBS" -le "$ncpu" ] || SHELL_JOBS=$ncpu
+if [ "$shell_count" -gt 0 ]; then
+	[ "$SHELL_JOBS" -le "$shell_count" ] || SHELL_JOBS=$shell_count
+	echo "full-suite: shell suites run $SHELL_JOBS at a time (FULL_SUITE_SHELL_JOBS; $ncpu online cores)"
+fi
+
 SUITE_OUT="$CACHE_DIR/$tree.running.log"
 # The runner's own facts, written only by run_suite (never by a suite): one line per shell and
 # python suite plus the bun phase's exit code. Bun's output is kept apart so its summary is
@@ -366,17 +384,48 @@ SUITE_OUT="$CACHE_DIR/$tree.running.log"
 # into the shared log; they must not count (FULLSUITECOUNT1, ompkit-lrbd.7).
 SUITE_STATUS="$SUITE_OUT.status"
 BUN_OUT="$SUITE_OUT.bun"
-rm -f "$SUITE_STATUS" "$BUN_OUT"
-if ! : >"$SUITE_OUT" || ! : >"$SUITE_STATUS"; then cleanup_archive; fail "cannot write suite evidence"; exit 1; fi
+# Runner-private shell stage state: per suite N (sorted order) a claim dir N.claim, its output N.out
+# and its exit code N.rc. The deadline watchdog touches the timed-out mark before it kills anything
+# and reads the runner subshell's own pid from RUNNER_PID.
+SHELL_DIR="$SUITE_OUT.shell"
+RUNNER_PID="$SUITE_OUT.runner"
+timeout_mark="$SUITE_OUT.timed-out"
+rm -f "$SUITE_STATUS" "$BUN_OUT" "$RUNNER_PID" "$timeout_mark"
+rm -rf "$SHELL_DIR"
+if ! : >"$SUITE_OUT" || ! : >"$SUITE_STATUS" || ! mkdir "$SHELL_DIR"; then cleanup_archive; fail "cannot write suite evidence"; exit 1; fi
 # finish_logs DEST: move the log to DEST and drop the runner-private side files. A bun phase that
 # never finished (timeout, killed runner) has its partial output only in $BUN_OUT; append it first
-# so the kept log still shows how far bun got (lrbd.6 AC1).
+# so the kept log still shows how far bun got (lrbd.6 AC1). Shell suite outputs the runner never
+# merged (it was killed in the shell stage) follow in sorted suite order, each naming its suite.
 finish_logs() {
 	if [ -f "$BUN_OUT" ] && ! grep -q '^BUN rc=' "$SUITE_STATUS" 2>/dev/null; then
 		{ echo "full-suite: the bun phase did not finish; its partial output follows"; cat "$BUN_OUT"; } >>"$SUITE_OUT"
 	fi
+	if [ -d "$SHELL_DIR" ]; then
+		fl_i=0
+		for fl_suite in $kept_shell; do
+			fl_i=$((fl_i + 1))
+			if [ ! -f "$SHELL_DIR/$fl_i.out" ]; then continue; fi
+			if [ -f "$SHELL_DIR/$fl_i.rc" ]; then
+				echo "full-suite: script-suite $fl_suite exited rc=$(cat "$SHELL_DIR/$fl_i.rc") but the run ended before recording it; its output follows"
+			else
+				echo "full-suite: script-suite $fl_suite did not finish; its partial output follows"
+			fi
+			cat "$SHELL_DIR/$fl_i.out"
+		done >>"$SUITE_OUT"
+		rm -rf "$SHELL_DIR"
+	fi
 	mv -f "$SUITE_OUT" "$1"
-	rm -f "$SUITE_STATUS" "$BUN_OUT"
+	rm -f "$SUITE_STATUS" "$BUN_OUT" "$RUNNER_PID"
+}
+# shell_unfinished: the shell suites a worker started but never recorded an exit code for. The
+# runner keeps the claim of every such suite it merged, so the names survive its merge.
+shell_unfinished() {
+	su_i=0
+	for su_suite in $kept_shell; do
+		su_i=$((su_i + 1))
+		if [ -d "$SHELL_DIR/$su_i.claim" ] && [ ! -f "$SHELL_DIR/$su_i.rc" ]; then printf ' %s' "$su_suite"; fi
+	done
 }
 
 # One deadline for the whole suite: every phase runs to completion and appends to the evidence
@@ -388,6 +437,10 @@ run_suite() {
 		# Tests can still select an explicit tracker after the suite child starts.
 		unset BEADS_DB
 		cd "$ARCHIVE_DIR"
+		# This subshell's own pid ($$ names the verdict process here). The deadline's TERM round spares
+		# it: the kitlib trap installed below re-raises a caught TERM at $$, which would kill the verdict
+		# process before it reports. Its children get TERM; it ends on its own or gets KILL 5 s later.
+		sh -c 'echo "$PPID"' >"$RUNNER_PID" || exit 1
 		# SAVEFIRST1: this full-suite process is a sibling of fresh-gate, so its descendants do not inherit
 		# the fresh-gate process's save-only disk observer. Keep nested heavy calls on statfs; their physical
 		# 10 GiB floor still refuses when the suite cannot fit.
@@ -438,13 +491,77 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 			echo "BUN rc=$bun_rc" >>"$SUITE_STATUS"
 			[ "$bun_rc" -eq 0 ] || failed=1
 		fi
-		for suite in $kept_shell; do
-			if dfl sh "$suite"; then
-				echo "GREEN script-suite $suite"; echo "GREEN script-suite $suite" >>"$SUITE_STATUS"
-			else
-				src=$?; echo "RED script-suite $suite rc=$src"; echo "RED script-suite $suite" >>"$SUITE_STATUS"; failed=1
-			fi
-		done
+		# FULLSUITEPAR1 (ompkit-9t6f2): SHELL_JOBS workers share the shell suites. A worker claims the
+		# next unclaimed suite in sorted order (mkdir is atomic), runs it under that suite's own owned
+		# TMPDIR with its output kept apart, records its exit code, and claims nothing once the
+		# deadline has marked the run. Workers are children of this subshell, so the watchdog's
+		# kill_tree reaches every running suite. When all workers are done, each suite's output and its
+		# GREEN/RED line join the log in sorted order, as the serial loop wrote them.
+		if [ "$shell_count" -gt 0 ]; then
+			if [ -e "$timeout_mark" ]; then exit 2; fi
+			shell_t0=$(date +%s)
+			i=0
+			for suite in $kept_shell; do
+				i=$((i + 1))
+				kitlib_tmp suite_tmp full-suite-shell || exit 1
+				eval "suite_tmp_$i=\$suite_tmp"
+			done
+			shell_worker() {
+				w_i=0
+				for w_suite in $kept_shell; do
+					w_i=$((w_i + 1))
+					if [ -e "$timeout_mark" ]; then return 0; fi
+					if mkdir "$SHELL_DIR/$w_i.claim" 2>/dev/null; then
+						eval "TMPDIR=\$suite_tmp_$w_i"
+						export TMPDIR
+						w_rc=0
+						dfl sh "$w_suite" >"$SHELL_DIR/$w_i.out" 2>&1 || w_rc=$?
+						echo "$w_rc" >"$SHELL_DIR/$w_i.rc"
+					fi
+				done
+			}
+			workers=""
+			w=0
+			while [ "$w" -lt "$SHELL_JOBS" ]; do
+				w=$((w + 1))
+				shell_worker &
+				workers="$workers $!"
+			done
+			lost=0
+			for worker in $workers; do
+				wait "$worker" || lost=1
+			done
+			# A recorded suite drops its files as it is merged, so a runner killed mid-merge never makes
+			# finish_logs repeat it. An unrecorded suite keeps its claim for shell_unfinished.
+			i=0
+			for suite in $kept_shell; do
+				i=$((i + 1))
+				src=$(cat "$SHELL_DIR/$i.rc" 2>/dev/null) || src=
+				case "$src" in
+					''|*[!0-9]*)
+						lost=1
+						if [ -f "$SHELL_DIR/$i.out" ]; then
+							echo "full-suite: script-suite $suite did not finish; its partial output follows"
+							cat "$SHELL_DIR/$i.out"
+						fi
+						rm -f "$SHELL_DIR/$i.out" "$SHELL_DIR/$i.rc" ;;
+					*)
+						cat "$SHELL_DIR/$i.out"
+						if [ "$src" -eq 0 ]; then
+							echo "GREEN script-suite $suite"; echo "GREEN script-suite $suite" >>"$SUITE_STATUS"
+						else
+							echo "RED script-suite $suite rc=$src"; echo "RED script-suite $suite" >>"$SUITE_STATUS"; failed=1
+						fi
+						rm -f "$SHELL_DIR/$i.out" "$SHELL_DIR/$i.rc"
+						rmdir "$SHELL_DIR/$i.claim" ;;
+				esac
+			done
+			echo "full-suite: shell stage: $shell_count suites, $SHELL_JOBS at a time, $(($(date +%s) - shell_t0))s"
+			# Suites without an exit code (a worker died, or the deadline passed) leave the run
+			# incomplete: exit outside 0|1 so the verdict process refuses it.
+			if [ "$lost" -ne 0 ]; then exit 2; fi
+			rm -rf "$SHELL_DIR"
+		fi
 		for suite in $kept_py; do
 			if dfl python3 "$suite"; then
 				echo "GREEN python-suite $suite"; echo "GREEN python-suite $suite" >>"$SUITE_STATUS"
@@ -456,14 +573,19 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 	) >>"$SUITE_OUT" 2>&1
 }
 
-# kill_tree PID SIG: post-order signal to the suite process tree. A plain kill of the subshell
-# leaves its bun grandchildren running; this walks parent links instead (same ps snapshot shape
-# as the gate's stop_descendants). Reparented strays are out of reach, like in the gate.
+# kill_tree PID SIG [SPARE]: post-order signal to the suite process tree, skipping the pids listed in
+# SPARE (their children are still signalled). A plain kill of the subshell leaves its bun
+# grandchildren running; this walks parent links instead (same ps snapshot shape as the gate's
+# stop_descendants). Reparented strays are out of reach, like in the gate. PID stays in $1, the only
+# function-local state in POSIX sh: with PID in a global the recursion overwrote it and only the last
+# leaf was signalled, so a hung suite's shell and the runner went on past the deadline (FULLSUITEPAR1).
 kill_tree() {
-	root=$1; sig=$2
-	children=$(ps -A -o pid= -o ppid= 2>/dev/null | awk -v r="$root" '$2 == r { print $1 }')
-	for child in $children; do kill_tree "$child" "$sig"; done
-	kill "-$sig" "$root" 2>/dev/null || true
+	kt_children=$(ps -A -o pid= -o ppid= 2>/dev/null | awk -v r="$1" '$2 == r { print $1 }')
+	for kt_child in $kt_children; do kill_tree "$kt_child" "$2" "${3:-}"; done
+	case " ${3:-} " in
+		*" $1 "*) ;;
+		*) kill "-$2" "$1" 2>/dev/null || true ;;
+	esac
 }
 
 timed_out=0
@@ -471,13 +593,13 @@ suite_rc=0
 run_suite &
 suite_pid=$!
 # Wait on the suite itself; a watchdog enforces the deadline. Polling every 5 s made even an
-# instant suite cost a full 5 s per verdict (every land call paid it).
-timeout_mark="$SUITE_OUT.timed-out"
-rm -f "$timeout_mark"
+# instant suite cost a full 5 s per verdict (every land call paid it). The TERM round spares the
+# runner subshell and its parent (RUNNER_PID): they end once their children are gone, and the KILL
+# round ends them otherwise.
 (
 	sleep "$TIMEOUT_SECS"
 	: >"$timeout_mark"
-	kill_tree "$suite_pid" TERM
+	kill_tree "$suite_pid" TERM "$suite_pid $(cat "$RUNNER_PID" 2>/dev/null || :)"
 	sleep 5
 	kill_tree "$suite_pid" KILL
 ) 2>/dev/null &
@@ -490,9 +612,10 @@ if [ -f "$timeout_mark" ]; then
 	timed_out=1
 fi
 if [ "$timed_out" = 1 ]; then
+	unfinished=$(shell_unfinished)
 	finish_logs "$CACHE_DIR/$tree.incomplete.log"
 	cleanup_archive
-	fail "full suite timed out after ${TIMEOUT_SECS}s; incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
+	fail "full suite timed out after ${TIMEOUT_SECS}s${unfinished:+; unfinished script suites:$unfinished}; incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
 	exit 1
 fi
 
@@ -517,8 +640,9 @@ py_red=$(grep -c '^RED python-suite ' "$SUITE_STATUS" 2>/dev/null || true)
 suite_set() { awk -v k="$1" '($1 == "GREEN" || $1 == "RED") && $2 == k { print $3 }' "$SUITE_STATUS" 2>/dev/null | sort; }
 want_set() { for s in $1; do [ -n "$s" ] && echo "$s"; done | sort; }
 complete=1
-# The suite subshell exits only 0 or 1 ("$failed", or 1 when it cannot set up). Any other status means
-# it was killed, so its status lines may not cover every suite it would have run: incomplete.
+# The suite subshell exits 0 or 1 ("$failed", or 1 when it cannot set up), or 2 when shell suites went
+# unrecorded (a worker died, or the deadline passed). Any other status means it was killed, so its
+# status lines may not cover every suite it would have run: incomplete.
 case "$suite_rc" in 0|1) ;; *) complete=0 ;; esac
 if [ "$bun_count" -eq 0 ] 2>/dev/null; then
 	[ "$bun_status" -eq 0 ] 2>/dev/null || complete=0
@@ -532,9 +656,10 @@ fi
 [ "$(suite_set script-suite)" = "$(want_set "$kept_shell")" ] || complete=0
 [ "$(suite_set python-suite)" = "$(want_set "$kept_py")" ] || complete=0
 if [ "$complete" -ne 1 ]; then
+	unfinished=$(shell_unfinished)
 	finish_logs "$CACHE_DIR/$tree.incomplete.log"
 	cleanup_archive
-	fail "full suite ended without complete evidence (rc=$suite_rc bun_ran=$bun_ran shell=$shell_green/$shell_count python=$py_green/$py_count); incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
+	fail "full suite ended without complete evidence (rc=$suite_rc bun_ran=$bun_ran shell=$shell_green/$shell_count python=$py_green/$py_count)${unfinished:+; unfinished script suites:$unfinished}; incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
 	exit 1
 fi
 

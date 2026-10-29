@@ -113,5 +113,55 @@ step "control without report"
 run_verdict none
 if [ "$rc" -eq 0 ] && ! grep -q 'covered by the focused pass' "$out" && grep -q 'VERDICT PASS .* covered_by_focused=0' "$out"; then ok "control: complete suite, 0 covered"; else not_ok "control (rc=$rc)"; grep -E 'full-suite|VERDICT' "$out"; fi
 
+# 6. FULLSUITEPAR1 (ompkit-9t6f2): the shell complement runs two at a time and a failing complement
+# suite still fails the verdict. The report covers s1; s2 and s3 (the first two complement suites,
+# claimed together) each wait for the other, so their overlap proves the complement ran in parallel.
+step "parallel shell complement"
+repo="$TMP/par"
+mkdir -p "$repo/scripts" "$repo/tests/cli" "$TMP/par-probe"
+cp "$KITROOT_DIR/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
+# shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
+par_body='name=$(basename "$0" .test.sh)
+echo "complement suite $name ran"
+: >"$PAR_PROBE/up.$name"
+peer=
+case "$name" in s2) peer=s3 ;; s3) peer=s2 ;; esac
+if [ -n "$peer" ]; then
+	k=0
+	while [ ! -e "$PAR_PROBE/up.$peer" ] && [ "$k" -lt 200 ]; do sleep 0.1; k=$((k + 1)); done
+	if [ -e "$PAR_PROBE/up.$peer" ]; then : >"$PAR_PROBE/overlap.$name"; fi
+	sleep 0.3
+fi
+rm -f "$PAR_PROBE/up.$name"
+[ "$name" != s3 ] || exit 4'
+for n in s1 s2 s3 s4; do printf '%s\n' "$par_body" >"$repo/tests/cli/$n.test.sh"; done
+git -C "$repo" init -q
+git -C "$repo" config user.name "FULLSUITEPAR1 test"
+git -C "$repo" config user.email "fullsuitepar1@example.invalid"
+git -C "$repo" add -A
+git -C "$repo" commit -q -m "[test] FULLSUITEPAR1 complement fixture"
+tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+{ hdr "$tree"; printf 'tests/cli/s1.test.sh\n'; } >"$report"
+PAR_PROBE="$TMP/par-probe" FULL_SUITE_SHELL_JOBS=2
+export PAR_PROBE FULL_SUITE_SHELL_JOBS
+run_verdict par --focused-passed "$report"
+unset PAR_PROBE FULL_SUITE_SHELL_JOBS
+if [ "$rc" -ne 0 ] && grep -q 'complement bun=0 shell=3 python=0' "$out" && grep -q 'VERDICT FAIL .*shell_red=1' "$out" && grep -q '  RED script-suite tests/cli/s3.test.sh rc=4' "$out"; then
+	ok "parallel complement: a failing complement suite fails the verdict and is named"
+else
+	not_ok "parallel complement (rc=$rc)"; grep -E 'full-suite|VERDICT|RED' "$out"
+fi
+if [ -e "$TMP/par-probe/overlap.s2" ] && [ -e "$TMP/par-probe/overlap.s3" ] && grep -q 'shell stage: 3 suites, 2 at a time' "$repo.cache/$tree.log"; then
+	ok "parallel complement: the complement suites ran two at a time"
+else
+	not_ok "parallel complement: no overlap between complement suites"; ls "$TMP/par-probe"
+fi
+if ! grep -q 'complement suite s1 ran' "$repo.cache/$tree.log" && python3 -c '
+import json, sys
+e = json.load(open(sys.argv[1]))["evidence"]
+assert (e["shell_suites"], e["shell_fail"]) == (3, 1), e
+assert e["covered_by_focused"]["shell"] == ["tests/cli/s1.test.sh"], e
+' "$repo.cache/$tree.json"; then ok "parallel complement: the covered suite did not run; JSON counts 3 suites, 1 failed"; else not_ok "parallel complement: covered suite ran or JSON counts"; fi
+
 printf 'full-suite-complement: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = 0 ]
