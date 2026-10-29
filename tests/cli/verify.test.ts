@@ -562,3 +562,33 @@ test("VERIFYACTOR1 [a]: intake refusal binds the reviewer on the open/needs-inta
 	expect(shown[0]!.status).toBe("open");
 	expect(shown[0]!.labels).toContain("needs-intake");
 });
+
+test("VERIFYSCRATCH1: a replay's fixture tracker under $GRADE_WAVE_SCRATCH is admitted by the read-only br; outside the verify root it is still refused; planted: without the variable the same fixture is refused", async () => {
+	const outside = testBase("verifyscratch-outside");
+	const cdir = join(base, "verifyscratch");
+	mkdirSync(join(cdir, "scripts"), { recursive: true });
+	// grade_wave.py --selftest's shape: fixtures under GRADE_WAVE_SCRATCH when set, else a sibling dir of its own.
+	writeFileSync(join(cdir, "scripts", "fx.sh"), "#!/bin/sh\nroot=\"${GRADE_WAVE_SCRATCH:-$1}\"\nd=\"$root/grade_wave_selftest.fx.$$\"\nmkdir -p \"$d\" && cd \"$d\" && br init --db \"$d/.beads/beads.db\"\n");
+	await sh(["git", "init", "-q"], cdir);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], cdir);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], cdir);
+	const sha = (await sh(["git", "rev-parse", "HEAD"], cdir)).trim();
+	const t = await tracker("verifyscratch-t");
+	const id = await createBead(t, "verify scratch probe");
+	const ac = [
+		`- [ ] [a] [build] selftest fixture under the verify scratch is admitted: \`sh scripts/fx.sh ${outside}\` -> prints Initialized`,
+		`- [ ] [b] [build] the same fixture outside the verify root is refused: \`mkdir -p ${outside}/direct && cd ${outside}/direct && br init --db ${outside}/direct/.beads/beads.db\` -> prints READONLY_TRACKER`,
+		`- [ ] [c] [build] planted: with GRADE_WAVE_SCRATCH removed the first fixture is refused: \`env -u GRADE_WAVE_SCRATCH sh scripts/fx.sh ${outside}\` -> prints READONLY_TRACKER`,
+	].join("\n");
+	await shapeBead(t, id, ac);
+	const beforeHash = stateHash(t);
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: trackerEnv(t), dryRun: true, family: "same (bun)" });
+	expect(res.code).toBe("DRY_RUN");
+	expect(res.replays.map(r => [r.letter, r.pass, r.detail.split(";")[0]])).toEqual([
+		["a", true, "output contains \"Initialized\""],
+		["b", true, "output contains \"READONLY_TRACKER\""],
+		["c", true, "output contains \"READONLY_TRACKER\""],
+	]);
+	expect(existsSync(join(outside, "direct", ".beads", "beads.db"))).toBe(false);
+	expect(stateHash(t)).toBe(beforeHash);
+});
