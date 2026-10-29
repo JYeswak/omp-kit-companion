@@ -15,13 +15,18 @@ printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP savefirst-pre-push || exit 1
 
 SOURCE_ROOT=${OMP_KIT_CASE_CWD:-$KITREPO}
-SOURCE_SHA=$(bun "$KITREPO/scripts/exact-source.ts" --root "$SOURCE_ROOT") || {
+SOURCE_IDENTITY=$(bun "$KITREPO/scripts/exact-source.ts" --root "$SOURCE_ROOT") || {
 	printf 'FAIL SAVEFIRST1 fixture: no exact source identity at %s (clean checkout or stamped archive export)\n' "$SOURCE_ROOT" >&2
 	exit 1
 }
 SOURCE="$TMP/exact-source"
 mkdir -p "$SOURCE"
-if [ -d "$SOURCE_ROOT/.git" ]; then
+if [ "$SOURCE_IDENTITY" = "GIT" ]; then
+	git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || {
+		printf 'FAIL SAVEFIRST1 fixture: no Git source checkout at %s\n' "$SOURCE_ROOT" >&2
+		exit 1
+	}
+	SOURCE_SHA=$(git -C "$SOURCE_ROOT" rev-parse HEAD) || exit 1
 	git -C "$SOURCE_ROOT" archive --format=tar "$SOURCE_SHA" \
 		scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh \
 		src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \

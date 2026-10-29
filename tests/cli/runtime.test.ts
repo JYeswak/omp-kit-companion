@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
@@ -1103,8 +1103,21 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 			const archived = await run(["sh", "-c", `git -C ${JSON.stringify(REPO_ROOT)} archive ${JSON.stringify(revision)} | tar -x -C ${JSON.stringify(srcExport)}`], { cwd: root, deadline_s: 300 });
 			if (archived.rc !== 0) throw new Error(`exact source export -> ${archived.rc}: ${utf8(archived.stderr).slice(0, 300)}`);
 		} else {
+			// History-free tree: build from a .git-free copy so an empty `git init`
+			// left by the harness cannot shadow the archive stamp.
 			revision = identity.revision;
-			srcExport = REPO_ROOT;
+			srcExport = join(root, "official-src");
+			const copyTreeExceptGit = (from: string, to: string): void => {
+				mkdirSync(to, { recursive: true });
+				for (const entry of readdirSync(from, { withFileTypes: true })) {
+					if (entry.name === ".git") continue;
+					const src = join(from, entry.name);
+					const dst = join(to, entry.name);
+					if (entry.isDirectory()) copyTreeExceptGit(src, dst);
+					else if (entry.isFile()) copyFileSync(src, dst);
+				}
+			};
+			copyTreeExceptGit(REPO_ROOT, srcExport);
 		}
 		const pkgVer = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { version: string }).version;
 		const resultDir = join(root, "official-out");
@@ -1161,7 +1174,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const finalStatus = typeof finalRow === "object" && finalRow !== null && "status" in finalRow && typeof finalRow.status === "string" ? finalRow.status : null;
 		expect(finalStatus).toBe("closed");
 	}, 600_000);
-	test("official-candidate source identity resolves a git checkout and refuses an unstamped tree", async () => {
+	test("official-candidate source identity resolves a git checkout and a stamped export, refuses empty repos and unstamped trees", async () => {
 		const utf8 = (b: Uint8Array) => new TextDecoder().decode(b);
 		const g = process.env.GRADE_WAVE_SCRATCH || undefined;
 		const root = ownedTmp("replaybr3-identity", { bead: "ompkit-t7cn7.21", ...(g === undefined ? {} : { root: g }) }).path;
@@ -1186,7 +1199,15 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const stampedBytes = Buffer.from(JSON.stringify({ source_revision: headSha }));
 		writeFileSync(join(stamped, "package.json"), stampedBytes);
 		expect(identifyExactSource(stamped, readFileSync(join(stamped, "package.json")))).toEqual({ kind: "stamped", revision: headSha });
-		// Control 3: an unstamped history-free tree has no identity, so the
+		// Control 3: a bare `git init` with no commits is not a checkout even
+		// with a stamped manifest; the fresh-gate archive looks exactly like this.
+		const empty = join(root, "emptyrepo");
+		mkdirSync(empty, { recursive: true });
+		const emptyInit = await run(["git", "init", "-q"], { cwd: empty, deadline_s: 60 });
+		if (emptyInit.rc !== 0) throw new Error(`git init -> ${emptyInit.rc}`);
+		writeFileSync(join(empty, "package.json"), stampedBytes);
+		expect(identifyExactSource(empty, readFileSync(join(empty, "package.json")))).toEqual({ kind: "stamped", revision: headSha });
+		// Control 4: an unstamped history-free tree has no identity, so the
 		// official-candidate path must refuse it instead of building from it.
 		const bare = join(root, "bare");
 		mkdirSync(bare, { recursive: true });
