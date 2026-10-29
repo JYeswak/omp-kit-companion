@@ -71,6 +71,21 @@ function snapshotTree(root: string): string {
 }
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
+/** Copy a source tree minus version control and runtime scratch. */
+/** The top-level var/agent-tmp is runtime scratch, not source: sibling test files in a full gate create and delete their scratch there while this walk runs, so listing it races their deletes (ENOENT scandir). Skipping the subtree removes the race structurally. Never catch ENOENT instead: a copy that won the race would bake foreign scratch into the destination and change its digests. */
+function copyTreeExceptGit(from: string, to: string, repoRoot: string, onVisit?: (srcPath: string) => void): void {
+	mkdirSync(to, { recursive: true });
+	for (const entry of readdirSync(from, { withFileTypes: true })) {
+		if (entry.name === ".git") continue;
+		const src = join(from, entry.name);
+		const dst = join(to, entry.name);
+		onVisit?.(src);
+		const rel = relative(repoRoot, src);
+		if (rel === "var/agent-tmp" || rel.startsWith("var/agent-tmp/")) continue;
+		if (entry.isDirectory()) copyTreeExceptGit(src, dst, repoRoot, onVisit);
+		else if (entry.isFile()) copyFileSync(src, dst);
+	}
+}
 
 let canonicalScratchCount = 0;
 
@@ -1107,17 +1122,23 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 			// left by the harness cannot shadow the archive stamp.
 			revision = identity.revision;
 			srcExport = join(root, "official-src");
-			const copyTreeExceptGit = (from: string, to: string): void => {
-				mkdirSync(to, { recursive: true });
-				for (const entry of readdirSync(from, { withFileTypes: true })) {
-					if (entry.name === ".git") continue;
-					const src = join(from, entry.name);
-					const dst = join(to, entry.name);
-					if (entry.isDirectory()) copyTreeExceptGit(src, dst);
-					else if (entry.isFile()) copyFileSync(src, dst);
-				}
-			};
-			copyTreeExceptGit(REPO_ROOT, srcExport);
+			// Planted negative for the 72171 race: churn a directory created and
+			// removed under REPO_ROOT/var/agent-tmp DURING the copy. The shared
+			// helper skips that subtree, so the copy still passes and official-src
+			// contains no var/agent-tmp, while a normal source dir (scripts/) is
+			// still copied. Churn every 64th visit; each churn dir is removed
+			// synchronously, so no residue escapes into the shared checkout.
+			let churn = 0;
+			const churnScope = join(REPO_ROOT, "var", "agent-tmp");
+			copyTreeExceptGit(REPO_ROOT, srcExport, REPO_ROOT, () => {
+				churn += 1;
+				if (churn % 64 !== 0) return;
+				const d = join(churnScope, `replaybr1-churn-${process.pid}-${churn}`);
+				mkdirSync(d, { recursive: true });
+				rmSync(d, { recursive: true, force: true });
+			});
+			expect(existsSync(join(srcExport, "var", "agent-tmp"))).toBe(false);
+			expect(existsSync(join(srcExport, "scripts", "package-release.ts"))).toBe(true);
 		}
 		const pkgVer = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { version: string }).version;
 		const resultDir = join(root, "official-out");
@@ -1174,6 +1195,34 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const finalStatus = typeof finalRow === "object" && finalRow !== null && "status" in finalRow && typeof finalRow.status === "string" ? finalRow.status : null;
 		expect(finalStatus).toBe("closed");
 	}, 600_000);
+	test("copyTreeExceptGit skips a var/agent-tmp subtree deleted mid-walk; scripts/ still copied", async () => {
+		const root = ownedTmp("replaybr1-copy-race", { bead: "ompkit-t7cn7.21" }).path;
+		const tree = join(root, "tree");
+		const dest = join(root, "dest");
+		mkdirSync(join(tree, "scripts"), { recursive: true });
+		writeFileSync(join(tree, "scripts", "ok.txt"), "source\n");
+		const agentTmp = join(tree, "var", "agent-tmp");
+		mkdirSync(join(agentTmp, "doomed-a", "sub"), { recursive: true });
+		writeFileSync(join(agentTmp, "doomed-a", "sub", "f.txt"), "scratch\n");
+		mkdirSync(join(agentTmp, "doomed-b"), { recursive: true });
+		// Deterministic stand-in for the 72171 gate race: the first visit to a
+		// listed var/agent-tmp child deletes every pre-created child, exactly as
+		// a sibling gate test deleting its scratch between the walk's listing and
+		// recursion. The pre-fix helper (HEAD) throws ENOENT here; the fixed
+		// helper never enters the subtree.
+		let sprung = false;
+		copyTreeExceptGit(tree, dest, tree, (p) => {
+			if (!sprung && (p === join(agentTmp, "doomed-a") || p === join(agentTmp, "doomed-b"))) {
+				sprung = true;
+				rmSync(join(agentTmp, "doomed-a"), { recursive: true, force: true });
+				rmSync(join(agentTmp, "doomed-b"), { recursive: true, force: true });
+			}
+		});
+		expect(sprung).toBe(false);
+		expect(readFileSync(join(dest, "scripts", "ok.txt"), "utf8")).toBe("source\n");
+		expect(existsSync(join(dest, "var", "agent-tmp"))).toBe(false);
+	});
+
 	test("official-candidate source identity resolves a git checkout and a stamped export, refuses empty repos and unstamped trees", async () => {
 		const utf8 = (b: Uint8Array) => new TextDecoder().decode(b);
 		const g = process.env.GRADE_WAVE_SCRATCH || undefined;
