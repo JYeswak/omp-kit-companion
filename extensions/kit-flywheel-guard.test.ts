@@ -288,6 +288,58 @@ test("FILERCLOSE1: incomplete author metadata refuses a close", async () => {
 	expect(result?.reason).toContain("authorship");
 });
 
+// --- NARROWCLOSE1 --------------------------------------------------------
+
+for (const reason of [
+	"LIMITS: AC1's literal 900 s case was not run",
+	"box 2 UNVERIFIED",
+	"AC1 PASS; LIMITS: original boundary case not run",
+	"Acceptance case 3 was not tested",
+	"The original live test was skipped",
+	"AC2 is carried as a limit",
+	"no UNVERIFIED boxes, but AC2 was not run",
+]) {
+	test(`NARROWCLOSE1: incomplete evidence refuses close: ${reason}`, async () => {
+		const project = freshDir(base, "proj-");
+		const h = await createFlywheelHost(base, { respond: brTable({ "kit-narrow": bead("kit-narrow", "Builder", "Filer") }) });
+		const result = await toolCall(h, project, `br --actor Verifier close kit-narrow --reason ${JSON.stringify(reason)}`);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("NARROW_CLOSE_REFUSED");
+		expect(result?.reason).toContain("kit-narrow");
+		expect(result?.reason).toContain(reason.slice(reason.lastIndexOf(";") + 1).trim());
+	});
+}
+
+test("NARROWCLOSE1: closing through update --status closed cannot bypass the evidence refusal", async () => {
+	const project = freshDir(base, "proj-");
+	const h = await createFlywheelHost(base, { respond: brTable({ "kit-narrow": bead("kit-narrow", "Builder", "Filer") }) });
+	const result = await toolCall(h, project, "br --actor Verifier update kit-narrow --status closed --reason=\"box 2 UNVERIFIED\"");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("NARROW_CLOSE_REFUSED");
+	expect(result?.reason).toContain("box 2 UNVERIFIED");
+});
+
+test("NARROWCLOSE1: a wrapped incomplete-check clause cannot bypass refusal", async () => {
+	const project = freshDir(base, "proj-");
+	const h = await createFlywheelHost(base, { respond: brTable({ "kit-narrow": bead("kit-narrow", "Builder", "Filer") }) });
+	const result = await toolCall(h, project, "br --actor Verifier close kit-narrow --reason 'AC1 was not\nrun'");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("NARROW_CLOSE_REFUSED");
+	expect(result?.reason).toContain("AC1 was not\nrun");
+});
+
+for (const reason of [
+	"AC1 PASS; box 2 PASS; all original acceptance cases ran",
+	"All acceptance cases PASS; no UNVERIFIED boxes and zero tests skipped",
+	"AC1 PASS; every original case executed; 0 skipped",
+]) {
+	test(`NARROWCLOSE1 control: completed evidence permits independent close: ${reason}`, async () => {
+		const project = freshDir(base, "proj-");
+		const h = await createFlywheelHost(base, { respond: brTable({ "kit-complete": bead("kit-complete", "Builder", "Filer") }) });
+		expect(await toolCall(h, project, `br --actor Verifier close kit-complete --reason ${JSON.stringify(reason)}`)).toBeUndefined();
+	});
+}
+
 // GATEEVENTS1 (ompkit-fp72.135.3.12): the guard's verdict on a tracker act lands in the gate-events ledger under the
 // host's state dir, refusal and pass alike, so refusal chains and first-attempt success are measured.
 test("GATEEVENTS1: a refused close writes a refuse row and an allowed close writes a pass row; planted: a plain bash call writes nothing", async () => {

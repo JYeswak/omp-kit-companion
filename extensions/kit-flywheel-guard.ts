@@ -2025,6 +2025,21 @@ function closeAuthorRefusal(found: BeadStateWithAuthorship, identities: readonly
 	};
 }
 
+// NARROWCLOSE1: explicit incomplete-check clauses cannot qualify a close.
+// The optional negation consumes "no UNVERIFIED boxes" / "zero tests skipped"
+// as a unit, so absence of incomplete evidence is not itself a refusal.
+const INCOMPLETE_CLOSE_STATUS = /\b(?:(no|zero|0|without)\s+(?:(?:acceptance\s+)?(?:boxes|cases|tests)\s+)?)?(?:unverified|skipped|untested|unrun|not\s+(?:run|tested|executed)|carried\s+as\s+(?:a\s+)?limit)\b/gi;
+
+function incompleteCloseClause(reason: string | null): string | null {
+	if (reason === null) return null;
+	for (const clause of reason.split(";")) {
+		for (const status of clause.matchAll(INCOMPLETE_CLOSE_STATUS)) {
+			if (status[1] === undefined) return clause.trim();
+		}
+	}
+	return null;
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps, attempts: CloseAttempt[] = []): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -2061,6 +2076,14 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			const refusal = await checkNativeClaim(request, deps);
 			if (refusal !== undefined) return refusal;
 			continue;
+		}
+		const incomplete = incompleteCloseClause(request.reason);
+		if (incomplete !== null) {
+			return {
+				block: true,
+				reason: `kit-flywheel-guard NARROW_CLOSE_REFUSED: ${request.ids.join(", ") || "last-touched bead"}: ${incomplete}. `
+					+ "Replay every original acceptance case before closing; no close was executed.",
+			};
 		}
 		const identities = [...new Set([...request.identities, ...envIdentities, ...pane])];
 		if (request.ids.length === 0) {
