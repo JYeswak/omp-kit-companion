@@ -255,7 +255,7 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 	{
 		id: "composer-state", title: "Seat composer state ~/.local/state/omp-kit/composer/<sha1(session file)>.json (writer pid, empty, idle) and its <record>.<pid>.tmp",
 		rows: [], class: "REHOME", ownerKey: "agent+session", scope: "seat", survivesRespawn: true,
-		writers: ["extensions/kit-composer-state.ts"],
+		writers: ["extensions/kit-composer-state.ts", "extensions/kit-composer-state.session-start-only.ts"],
 		cancel: "the extension clears its timer and removes its record at session_shutdown",
 		crash: "a crashed seat leaves its record; respawn_seat.composer_record uses a record only when it is fresh (COMPOSER_RECORD_MAX_AGE_S) and its writer pid is alive, else falls back to the fail-closed screen check",
 		respawn: "keyed by the seat's session file, so the successor that resumes the session rewrites the same record with its own pid at session start",
