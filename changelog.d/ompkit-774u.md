@@ -1,0 +1,3 @@
+### Changed
+
+- Set CLI and OMP plugin version metadata to 0.2.80, release train 4, cut by the lead under Joshua's release floor (J-2026-10-29-13). Reaches the installed kit: the full suite runs its shell suites five at a time, and a hung suite now ends at its deadline instead of running on (FULLSUITEPAR1); the release ships its installer members (PKGMEMBER1); a reconciled update relinks profile plugins before it reports OK (UPDATERELINK1); the close guard counts a bead's filer and DONE authors as authors (FILERCLOSE1); fixture trackers no longer lock the live parent tracker (BRINITPIN1); and the generated fleet-pack provenance is kept (10 commits). (ompkit-774u)
