@@ -1,6 +1,6 @@
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { afterEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 
@@ -25,17 +25,48 @@ function seed(cwd: string, name: string): void {
 	git(cwd, "commit", "--quiet", "-m", `initial ${name} [test]`);
 }
 
-function pushedRepo(root: string, name: string): { path: string; remote: string } {
-	const path = join(root, name);
+// GATEFLAKE1 (ompkit-ll72v): every pushed repo is a directory copy of one Git-built template, so a
+// fixture's setup no longer costs eight serial git spawns per repo (plus the commit hook the global
+// init.templatedir installs). The 32-repo fleet below was 256 spawns, measured at 22.0-28.7 s of
+// setup at load 16-18 on 32 cores; on the loaded full suite of tree 421d0864 the 60 s cap fired
+// while seeding clean-8, the 31st of 32 in sorted order. The template costs 8 spawns once (0.7-1.2 s
+// at the same load), and the eight-repo fixture() below drops from 65 spawns to 17. Each copy is
+// still a distinct real repository with its own bare remote, upstream and remote-tracking ref; the
+// doctor sees the same state (the copied index needs a stat refresh, which is more probe work, not
+// less).
+let template: { root: string; path: string; remote: string } | null = null;
+afterAll(() => {
+	if (template) rmSync(template.root, { recursive: true, force: true });
+	template = null;
+});
+
+function pushedTemplate(): { path: string; remote: string } {
+	if (template) return template;
+	const root = ownedTmp("omp-kit-work-template", { root: runtimeTempRoot() }).path;
+	const path = join(root, "template");
 	mkdirSync(path, { recursive: true });
 	git(path, "init", "--quiet", "-b", "main");
 	git(path, "config", "user.email", "fixture@example.invalid");
 	git(path, "config", "user.name", "fixture");
-	seed(path, name);
-	const remote = join(root, `${name}.remote.git`);
+	seed(path, "template");
+	const remote = join(root, "template.remote.git");
 	git(root, "init", "--bare", "--quiet", remote);
 	git(path, "remote", "add", "origin", remote);
 	git(path, "push", "--quiet", "--set-upstream", "origin", "main");
+	template = { root, path, remote };
+	return template;
+}
+
+function pushedRepo(root: string, name: string): { path: string; remote: string } {
+	const source = pushedTemplate();
+	const path = join(root, name);
+	const remote = join(root, `${name}.remote.git`);
+	cpSync(source.remote, remote, { recursive: true });
+	cpSync(source.path, path, { recursive: true });
+	const configPath = join(path, ".git", "config");
+	const config = readFileSync(configPath, "utf8");
+	if (!config.includes(source.remote)) throw new Error(`template config does not name its remote ${source.remote}`);
+	writeFileSync(configPath, config.replaceAll(source.remote, remote));
 	return { path, remote };
 }
 
@@ -153,6 +184,13 @@ test("a clean pushed repo produces no stranded row but stays visible in the full
 	expect(clean.dirty_file_count).toBe(0);
 }, 60_000);
 
+// Deadline derivation: the doctor run is bounded by the product, not the machine. Every Git probe
+// is SIGKILLed at the default 2000 ms, a clean repo makes two sequential probe rounds (status, log
+// and ls-files together, then rev-list), and the default fan-out is 4, so 32 repos finish within
+// ceil(32/4) x 2 x 2000 = 32 s even if every probe times out (measured 0.6 s at load 18). Setup is
+// at most the template's 8 git spawns plus 64 directory copies: 0.7-1.2 s measured at load 16-18,
+// and 2 s at the 0.25 s per spawn of the refused 421d0864 suite (245 spawns started in 60.1 s).
+// 32 s + 2 s leaves the 60 s cap 26 s for the CLI start; it no longer depends on a quiet machine.
 test("a bulk clean fleet stays measured at the default Git probe deadline", async () => {
 	const root = ownedTmp("omp-kit-work-bulk-clean", { root: runtimeTempRoot() }).path;
 	fixtures.push(root);
