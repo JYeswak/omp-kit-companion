@@ -19,11 +19,12 @@ kitlib_tmp TMP pre-push-gate-test || exit 1
 
 pass=0
 fail=0
+
 create_checker_test_stubs() {
 	repo=$1
 	failing_test=${2:-}
 	mkdir -p "$repo/tests/cli"
-	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh; do
+	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh check-staged-br-init.test.sh; do
 		test_path="$repo/tests/cli/$checker_test"
 		if [ "$checker_test" = "$failing_test" ]; then
 			printf '#!/bin/sh\nprintf "CHECKER-FAIL: %s\\n" >&2\nexit 7\n' "$checker_test" > "$test_path"
