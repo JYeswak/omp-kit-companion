@@ -1,0 +1,20 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_d1726d5477f54f9e9b56a2c173465f611fa9fefaef44cfe601aabde351e431a4",
+ "limitations": [
+  "AC2 live update/reconcile/seat reload and G5 readback remain unchecked",
+  "The full suite result on the earlier base export was not collected and is not claimed"
+ ],
+ "operation": "ompkit-p8nrt.rework.build",
+ "parameters": {
+  "base_commit": "5be3ace39c742935314b5f0118fabaed7f09495e",
+  "bead": "ompkit-p8nrt",
+  "source_commit": "969cd92f55a742f3c35adbd4352ee62bc336e922"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 2131,
+  "sha256": "3cad44a85b251baaba3ed0b79adeb3428ff53f8264ede1ad442c5c653aab44bd"
+ }
+}

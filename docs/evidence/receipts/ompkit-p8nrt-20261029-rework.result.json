@@ -1,0 +1,56 @@
+{
+  "bead": "ompkit-p8nrt",
+  "source_commit": "969cd92f55a742f3c35adbd4352ee62bc336e922",
+  "base_commit": "5be3ace39c742935314b5f0118fabaed7f09495e",
+  "changed_paths": [
+    "src/cli.ts",
+    "tests/cli/kit-update.test.ts",
+    "tests/cli/kit-update-reconcile.test.ts",
+    "changelog.d/ompkit-p8nrt.md"
+  ],
+  "acceptance": {
+    "AC1_build": {
+      "status": "PASS",
+      "clean_export_base": "5be3ace39c742935314b5f0118fabaed7f09495e",
+      "overlay": "the four changed_paths only",
+      "git_init_without_commit": true,
+      "environment": "env -i PATH HOME TMPDIR; TRUSTED_SOURCE_* unset",
+      "commands": [
+        {
+          "command": "bun test tests/cli/kit-update.test.ts -t UPDATERELINK1",
+          "exit_code": 0,
+          "result": "2 pass, 24 filtered, 0 fail, 12 expect() calls"
+        },
+        {
+          "command": "bun test tests/cli/kit-update-reconcile.test.ts",
+          "exit_code": 0,
+          "result": "8 pass, 0 fail, 29 expect() calls"
+        }
+      ],
+      "negative": "incomplete codex relink leaves codex on old store; CLI reports FINDINGS and plugin_relink NOT_RUN; all other covered profiles point to the new store"
+    },
+    "AC2_live": {
+      "status": "NOT_RUN",
+      "reason": "No actual PARTIAL update/reconcile or seat reload was performed; live G5 readback remains unchecked."
+    }
+  },
+  "private_index_selfcheck": {
+    "status": "PASS",
+    "invocation": "private GIT_INDEX_FILE idx.SnowyFrog; add exactly changed_paths; absolute paths used because the session cwd differs from code repo",
+    "members": {
+      "kitlib": 0,
+      "tempsafe": 0,
+      "pysafe": 0,
+      "readme": 0,
+      "imports": 0,
+      "fragments": 0,
+      "sources": 0,
+      "regexploit": 0
+    }
+  },
+  "limitations": [
+    "Clean export reused the existing node_modules directory by symlink; no source files beyond the four changed_paths were overlaid.",
+    "A full tests/cli suite was started on an earlier base export; its result was not collected and is not claimed here.",
+    "No live installed-plane update, reconcile, seat reload, or launch_check G5 readback was run."
+  ]
+}
