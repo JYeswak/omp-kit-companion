@@ -35,6 +35,7 @@
       "extensions/ee-failure-journal.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/fleet-policy.ts": "library module with no extension entrypoint; imported by extensions/fleet-guard.ts",
       "extensions/kit-write-ledger.ts": "library module with no extension entrypoint; imported by extensions/kit-save-guard.ts",
+      "extensions/jev-memory-filter.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/observational-tool-result.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/rch-lane-bind-bridge.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",
       "extensions/rch-mutator.ts": "profile-installed via policy/extensions.json, not loaded through the plugin manifest",

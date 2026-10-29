@@ -5,7 +5,8 @@
   by a self-contained local-Clef client (plain fetch to an explicit loopback
   gateway, exact committed calibration plus model fingerprint match, fail-open
   KEEP on every closed outcome). Policy entry restored in
-  `policy/extensions.json`; the stale `package.json` map line stays removed.
+  `policy/extensions.json`; `package.json` records it as profile-installed via
+  that policy, not loaded through the plugin manifest.
   Covered by `tests/cli/absolute-imports.test.ts` (ABSIMPORT1: no absolute
   import/export specifiers; every production entrypoint bundles in an exact
   export with an empty HOME) and `tests/cli/jev-memory-filter.test.ts`
