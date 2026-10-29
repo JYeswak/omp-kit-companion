@@ -1,0 +1,23 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_95f08fe766e7559a1ab65fbde9edc716102ca53b7f2f54685af87825c422bc61",
+ "limitations": [
+  "uninstalled build; no version stamp/sign/upload/install; POSITIVE 3-box dry-run is TQ non-author verification, not this receipt; replaces expired resource only on promotion"
+ ],
+ "operation": "verify20-cli-bootstrap",
+ "parameters": {
+  "artifact": "/Users/josh/Developer/omp-kit/var/agent-tmp/verify20-build.33859/out/omp-kit-f04b630a",
+  "artifact_gz": "/Users/josh/Developer/omp-kit/var/agent-tmp/verify20-build.33859/out/omp-kit-f04b630a.gz",
+  "gz_bytes": "28697770",
+  "gz_sha256": "9c3ffb96da10b9e6b9c8b55924c7404ef1f9da8cb2563d12ce9828c5f38f8bec",
+  "recipe": "bun build --compile --target=bun-darwin-arm64 src/cli.ts --outfile out/omp-kit-f04b630a",
+  "runtime": "Bun-1.4.3-darwin-arm64",
+  "source": "f04b630a412089f1b3230858a19fe0ed00943071"
+ },
+ "producer": "LavenderPrairie",
+ "result_ref": {
+  "bytes": 71579186,
+  "sha256": "ca8c28fb3e45a0bab2d178cad5c39a2688fee3bb5aa40f599961d06dd7fcffef"
+ }
+}
