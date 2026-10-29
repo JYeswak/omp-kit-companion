@@ -1,0 +1,3 @@
+### Changed
+
+- Set CLI and OMP plugin version metadata to 0.2.79, release train 3, cut by the lead under Joshua's release floor (J-2026-10-29-13). Reaches the installed kit: worker seats can no longer open a blocking ask dialog (ASKBLOCK1), native verify surfaces the failing child's output and binds reviewer identity, replay pins its own tracker, fixture trackers and databases are pinned so tests stop writing the live tracker, history-free ratchet inputs, the activation manifest applied in full by update, doctor activation opt-outs recorded with reasons, and the compaction and composer fixes since 0.2.78 (79 commits). (ompkit-t7cn7.17)
