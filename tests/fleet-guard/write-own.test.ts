@@ -29,13 +29,14 @@ function fleetRepo(name: string, enabled: boolean): string {
 }
 const repo = fleetRepo("repo", true);
 const stock = fleetRepo("stock", false);
+const peer = fleetRepo("peer", true);
 const owned = join(repo, "var", "agent-tmp", "own.1");
 writeScratchOwner(owned, { pid: process.pid, label: "own", repo, created: new Date().toISOString() });
 
 // Test seam for the Agent Mail CLI only: the guard's real spawn, attestation and hold parsing run unchanged.
 const fixtureBin = join(scratch, "bin");
 mkdirSync(fixtureBin, { recursive: true });
-writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AM_FIXTURE_CALLS\"\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then echo 'connection refused' >&2; exit 1; fi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
+writeFileSync(join(fixtureBin, "am"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AM_FIXTURE_CALLS\"\nif [ \"$AM_FIXTURE_MODE\" = \"fail\" ]; then echo 'connection refused' >&2; exit 1; fi\nif [ -n \"$AM_FIXTURE_PROJECT\" ]; then\n  project=\"\"\n  while [ \"$#\" -gt 0 ]; do\n    if [ \"$1\" = \"--project\" ]; then project=\"$2\"; break; fi\n    shift\n  done\n  if [ \"$project\" != \"$AM_FIXTURE_PROJECT\" ]; then printf '%s' \"$AM_FIXTURE_OTHER_RESPONSE\"; exit 0; fi\nfi\nprintf '%s' \"$AM_FIXTURE_RESPONSE\"\n");
 chmodSync(join(fixtureBin, "am"), 0o755);
 const callLog = join(scratch, "am-calls.log");
 
@@ -45,15 +46,24 @@ const holds = (agent: string, ...paths: string[]) => ({
 	my_reservations: paths.map((path) => ({ agent, path, exclusive: true, remaining_seconds: 3600 })),
 });
 
-async function withAm<T>(response: unknown, mode: "ok" | "fail", agent: string | undefined, run: () => Promise<T>): Promise<T> {
+async function withAm<T>(response: unknown, mode: "ok" | "fail", agent: string | undefined, run: () => Promise<T>,
+	projectRoute?: { project: string; otherResponse: unknown }): Promise<T> {
 	const saved = { PATH: process.env.PATH, AGENT_NAME: process.env.AGENT_NAME, AM_FIXTURE_RESPONSE: process.env.AM_FIXTURE_RESPONSE,
-		AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_CALLS: process.env.AM_FIXTURE_CALLS };
+		AM_FIXTURE_MODE: process.env.AM_FIXTURE_MODE, AM_FIXTURE_CALLS: process.env.AM_FIXTURE_CALLS,
+		AM_FIXTURE_PROJECT: process.env.AM_FIXTURE_PROJECT, AM_FIXTURE_OTHER_RESPONSE: process.env.AM_FIXTURE_OTHER_RESPONSE };
 	process.env.PATH = `${fixtureBin}:${saved.PATH ?? ""}`;
 	if (agent === undefined) delete process.env.AGENT_NAME;
 	else process.env.AGENT_NAME = agent;
 	process.env.AM_FIXTURE_RESPONSE = JSON.stringify(response);
 	process.env.AM_FIXTURE_MODE = mode;
 	process.env.AM_FIXTURE_CALLS = callLog;
+	if (projectRoute === undefined) {
+		delete process.env.AM_FIXTURE_PROJECT;
+		delete process.env.AM_FIXTURE_OTHER_RESPONSE;
+	} else {
+		process.env.AM_FIXTURE_PROJECT = projectRoute.project;
+		process.env.AM_FIXTURE_OTHER_RESPONSE = JSON.stringify(projectRoute.otherResponse);
+	}
 	writeFileSync(callLog, "");
 	try { return await run(); }
 	finally {
@@ -68,6 +78,9 @@ const lookups = (): string[] => readFileSync(callLog, "utf8").split("\n").filter
 // The later HTTP reservation layer (reservations.ts) is held neutral so every verdict is the write-ownership read's.
 const neutral = async () => ({ covered: true, conflicts: [] as readonly unknown[] });
 const bash = (command: string, cwd = repo) => handleToolCall({ toolName: "bash", input: { command }, cwd }, { cwd, lookupReservations: neutral });
+const bashAt = (command: string, inputCwd: string, sessionCwd = repo) =>
+	handleToolCall({ toolName: "bash", input: { command, cwd: inputCwd }, cwd: sessionCwd },
+		{ cwd: sessionCwd, lookupReservations: neutral });
 const write = (path: string, content = "planted\n", cwd = repo) =>
 	handleToolCall({ toolName: "write", input: { path, content }, cwd }, { cwd, lookupReservations: neutral });
 const edit = (path: string, cwd = repo) =>
@@ -156,6 +169,21 @@ describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused a
 				expect(result?.reason, command).toContain(`reserve ${repo} Intruder ${path} --exclusive`);
 			}
 		});
+	});
+	test("bash reservations follow the invoked checkout when its cwd differs from the session", async () => {
+		await withAm(holds("Holder", "README.md"), "ok", "Holder", async () => {
+			expect(await bashAt("echo x > README.md", peer, repo)).toBeUndefined();
+		}, { project: peer, otherResponse: holds("Holder") });
+		expect(lookups()).toContain(`robot reservations --project ${peer} --agent Holder --json`);
+	});
+
+	test("a same-path lease in the session checkout does not authorize another bash checkout", async () => {
+		await withAm(holds("Holder", "README.md"), "ok", "Holder", async () => {
+			const result = await bashAt("echo x > README.md", peer, repo);
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toContain("WRITE_OWN_UNRESERVED");
+			expect(result?.reason).toContain(`canonical checkout ${peer}`);
+		}, { project: repo, otherResponse: holds("Holder") });
 	});
 
 	test("controls: the holder's writes, git add and commit --only are admitted; reads and scratch writes need no reservation", async () => {

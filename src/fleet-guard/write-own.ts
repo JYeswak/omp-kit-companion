@@ -326,7 +326,11 @@ async function judge(candidates: readonly Candidate[], context: WriteOwnContext)
 
 export async function check(event: FleetGuardEvent, context: WriteOwnContext): Promise<FleetGuardBlock | undefined> {
 	const tool = typeof event.toolName === "string" ? event.toolName : "";
-	const cwd = resolve(context.cwd ?? (typeof event.cwd === "string" && event.cwd ? event.cwd : process.cwd()));
+	const inputCwd = tool === "bash" && event.input && typeof event.input === "object"
+		? (event.input as Record<string, unknown>).cwd : undefined;
+	const cwd = resolve(typeof inputCwd === "string" && inputCwd
+		? resolve(context.cwd ?? process.cwd(), inputCwd)
+		: context.cwd ?? (typeof event.cwd === "string" && event.cwd ? event.cwd : process.cwd()));
 	const candidates: Candidate[] = [];
 	if (tool === "write" || tool === "edit") {
 		try {

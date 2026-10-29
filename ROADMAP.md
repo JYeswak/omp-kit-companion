@@ -100,6 +100,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 
 | Item | Tracking |
 |---|---|
+| Bash write-ownership checks resolve reservation scope from the invoked checkout rather than the session checkout; focused regression and live held-lease positive/negative smoke pass. Full CLI suite timed out; independent review and publication remain pending | ompkit-rz5.168 (IN PROGRESS) |
 | Mail registration and sending use actual caller-pane identity, strict registration keys, and native send/wake correlation. Guard/waker source controls pass 64/0; the separate orchestration audit's worker and chief consumers pass 49 focused controls. Loaded-chief delivery, actual default-macro registration and independent published-original acceptance remain unverified; no release or live claim | ompkit-uk9wn.2 |
 | Saved archive runtime closure `08857bde4b` ships the gap scanner/findings library and validates real packaged comment/mail callbacks plus missing-dependency refusals. The complete package-release file passes 18/0 with its unchanged original test budgets. Independent published-original acceptance and the installed/relinked fleet check remain pending; no release or live claim | ompkit-fp72.135.3.57 (SOURCE/BUILD REVIEW; author handoff) |
 | Native `omp-kit tern` SDK/control integration: command family wired, context-aware bindings and owned native plugin probes; compiled release assets and independent full acceptance remain pending | #102 / ompkit-kdbz.2.13 |
