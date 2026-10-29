@@ -10,6 +10,7 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { installReadonlyBr, resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { verifyBead } from "../../src/verify.ts";
+import { packageSourceRevision } from "../../scripts/package-release.ts";
 const createdScratchDirs: string[] = [];
 afterAll(() => {
 	for (const dir of createdScratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -1079,18 +1080,22 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		expect(strippedDeny.out).toContain("READONLY_TRACKER");
 		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
 		// Official exact-source HOST candidate: build the unmodified official recipe
-		// from an exact HEAD archive (never the dirty shared tree), then smoke it.
+		// from the exact source tree (never the dirty shared tree), then smoke it.
 		// The previous PATH-binary comparator is not this proof (old guardless release).
-		const headRev = await run(["git", "-C", REPO_ROOT, "rev-parse", "HEAD"], { cwd: root, deadline_s: 60 });
-		if (headRev.rc !== 0) throw new Error("no HEAD; unmet prerequisite: exact committed source");
-		const headSha = utf8(headRev.stdout).trim();
-		// Source-binding guard (TurquoiseSummit 71647): an exact archive has no .git, and rev-parse would silently discover an ancestor tracker repo. Refuse unless REPO_ROOT is itself the repo top-level.
-		const topRev = await run(["git", "-C", REPO_ROOT, "rev-parse", "--show-toplevel"], { cwd: root, deadline_s: 60 });
-		if (topRev.rc !== 0 || resolve(utf8(topRev.stdout).trim()) !== resolve(REPO_ROOT)) throw new Error(`source identity not exact: ${REPO_ROOT} is not a repo top-level; refusing ancestor discovery`);
-		const srcExport = join(root, "official-src");
-		mkdirSync(srcExport, { recursive: true });
-		const archived = await run(["sh", "-c", `git -C ${JSON.stringify(REPO_ROOT)} archive ${JSON.stringify(headSha)} | tar -x -C ${JSON.stringify(srcExport)}`], { cwd: root, deadline_s: 300 });
-		if (archived.rc !== 0) throw new Error(`exact source export -> ${archived.rc}: ${utf8(archived.stderr).slice(0, 300)}`);
+		// Source identity via the packaged seam (packageSourceRevision): a clean git
+		// checkout yields its HEAD; a history-free archive yields its stamped
+		// source_revision; anything else (dirty, unstamped, ancestor) is an unmet
+		// prerequisite, never a silent pass. Fresh gates run this file from a git
+		// archive with no .git, where rev-parse HEAD cannot pass.
+		const revision = packageSourceRevision(REPO_ROOT, readFileSync(join(REPO_ROOT, "package.json")));
+		if (revision === null) throw new Error("no exact source identity; unmet prerequisite: clean checkout or stamped archive export");
+		const hasGit = existsSync(join(REPO_ROOT, ".git"));
+		const srcExport = hasGit ? join(root, "official-src") : REPO_ROOT;
+		if (hasGit) {
+			mkdirSync(srcExport, { recursive: true });
+			const archived = await run(["sh", "-c", `git -C ${JSON.stringify(REPO_ROOT)} archive ${JSON.stringify(revision)} | tar -x -C ${JSON.stringify(srcExport)}`], { cwd: root, deadline_s: 300 });
+			if (archived.rc !== 0) throw new Error(`exact source export -> ${archived.rc}: ${utf8(archived.stderr).slice(0, 300)}`);
+		}
 		const pkgVer = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { version: string }).version;
 		const resultDir = join(root, "official-out");
 		mkdirSync(resultDir, { recursive: true });
@@ -1101,15 +1106,19 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		mkdirSync(extractDir, { recursive: true });
 		const extracted = await run(["tar", "-x", "-f", tarball, "-C", extractDir], { cwd: root, deadline_s: 300 });
 		if (extracted.rc !== 0) throw new Error(`artifact extract -> ${extracted.rc}`);
+		// The sealed artifact must carry the exact source revision it was built from.
+		const artifactDoc: unknown = JSON.parse(readFileSync(join(extractDir, "package.json"), "utf8"));
+		const artifactRevision = typeof artifactDoc === "object" && artifactDoc !== null && "source_revision" in artifactDoc ? artifactDoc.source_revision : undefined;
+		expect(artifactRevision).toBe(revision);
 		const ompBin = join(extractDir, "bin", "omp-kit");
 		const brHash = sha256hex(readFileSync(brBin));
-		const srcHash = sha256hex(readFileSync(resolve(import.meta.dir, "..", "..", "src", "verify.ts"), "utf8"));
-		const shimSrcHash = sha256hex(readFileSync(resolve(import.meta.dir, "..", "..", "src", "kitlib", "readonly-br.ts"), "utf8"));
+		const srcHash = sha256hex(readFileSync(join(srcExport, "src", "verify.ts"), "utf8"));
+		const shimSrcHash = sha256hex(readFileSync(join(srcExport, "src", "kitlib", "readonly-br.ts"), "utf8"));
 		const ompHash = sha256hex(readFileSync(ompBin));
 		const acHash = sha256hex(ac);
 		for (const h of [brHash, srcHash, shimSrcHash, ompHash, acHash]) expect(h).toMatch(/^[0-9a-f]{64}$/);
-		expect(headSha).toMatch(/^[0-9a-f]{40}$/);
-		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} omp=${ompHash.slice(0, 12)} ac=${acHash.slice(0, 12)} tree=${headSha.slice(0, 12)}`;
+		expect(revision).toMatch(/^[0-9a-f]{40}$/);
+		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} omp=${ompHash.slice(0, 12)} ac=${acHash.slice(0, 12)} tree=${revision.slice(0, 12)}`;
 		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: fam });
 		expect(res.code).toBe("DRY_RUN");
 		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
@@ -1142,4 +1151,30 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const finalStatus = typeof finalRow === "object" && finalRow !== null && "status" in finalRow && typeof finalRow.status === "string" ? finalRow.status : null;
 		expect(finalStatus).toBe("closed");
 	}, 600_000);
+	test("official-candidate source identity resolves a git checkout and refuses an unstamped tree", async () => {
+		const utf8 = (b: Uint8Array) => new TextDecoder().decode(b);
+		const g = process.env.GRADE_WAVE_SCRATCH || undefined;
+		const root = ownedTmp("replaybr3-identity", { bead: "ompkit-t7cn7.21", ...(g === undefined ? {} : { root: g }) }).path;
+		// Control 1: a git checkout resolves its HEAD through the same seam the AC3 test uses.
+		const cdir = join(root, "code");
+		mkdirSync(cdir, { recursive: true });
+		const unstamped = JSON.stringify({ source_revision: "$Format:%H$" });
+		writeFileSync(join(cdir, "package.json"), unstamped);
+		const git = async (args: string[]) => {
+			const r = await run(["git", ...args], { cwd: cdir, deadline_s: 60 });
+			if (r.rc !== 0) throw new Error(`git ${args.join(" ")} -> ${r.rc}: ${utf8(r.stderr)}`);
+		};
+		await git(["init", "-q"]);
+		await git(["add", "package.json"]);
+		await git(["-c", "user.name=t", "-c", "user.email=t@x", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "identity fixture [test]"]);
+		const head = await run(["git", "rev-parse", "HEAD"], { cwd: cdir, deadline_s: 60 });
+		const headSha = utf8(head.stdout).trim();
+		expect(packageSourceRevision(cdir, readFileSync(join(cdir, "package.json")))).toBe(headSha);
+		// Control 2: an unstamped history-free tree has no identity, so the
+		// official-candidate path must refuse it instead of building from it.
+		const bare = join(root, "bare");
+		mkdirSync(bare, { recursive: true });
+		writeFileSync(join(bare, "package.json"), unstamped);
+		expect(packageSourceRevision(bare, readFileSync(join(bare, "package.json")))).toBe(null);
+	});
 });
