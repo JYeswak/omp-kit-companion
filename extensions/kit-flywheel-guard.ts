@@ -57,6 +57,10 @@ import { agentMailStorageRoot } from "../src/holder-liveness.ts";
  * scripts/br-update-lint.py) before the command executes; exit 4 refuses with
  * the failing check names and the WHAT:/WHY: template. A helper that cannot
  * run warns BEAD_LINT_UNVERIFIED and allows (the helpers' fail-open contract).
+ *
+ * ASKBLOCK1: roster builder/grader seats cannot open `ask` dialogs. They send
+ * QUESTION mail naming their held bead instead. Directors and unbound sessions
+ * may ask; an unreadable roster explicitly warns and allows asking.
  */
 
 export interface FlywheelExecResult {
@@ -122,6 +126,8 @@ export interface FlywheelGuardApi {
 export interface FlywheelGuardDeps {
 	env?: Record<string, string | undefined>;
 	home?: string;
+	/** Same roster contract and default as kit-mail-wake. */
+	rosterPath?: string;
 	/** Directory of the bead-lint helpers; defaults to the loaded release's scripts/ (BEAD_LINT_SCRIPTS_DIR). */
 	lintScriptsDir?: string;
 }
@@ -2116,6 +2122,40 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	// ledger never changes a verdict: a write failure is a warning.
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
+			if (event.toolName === "ask") {
+				// AGENT_NAME is set by the fleet launcher; older tmux seats use the
+				// same Agent Mail pane-identity binding as the other guard checks.
+				const name = env.AGENT_NAME?.trim() || (await paneIdentities(pi.exec, env, home, [ctx.cwd]))[0];
+				const rosterPath = deps.rosterPath ?? join(home, ".claude", "skills", "omp-kit-orchestration", "fleet-roster.json");
+				let sessions: Record<string, unknown>;
+				try {
+					const parsed: unknown = JSON.parse(readFileSync(rosterPath, "utf8"));
+					const rows = field(parsed, "sessions");
+					if (rows === null || typeof rows !== "object" || Array.isArray(rows)) throw new Error("sessions is not an object");
+					sessions = rows as Record<string, unknown>;
+				} catch (error) {
+					const warning = `kit-flywheel-guard ASKBLOCK1: roster unreadable (${rosterPath}: ${error instanceof Error ? error.message : String(error)}); ask allowed (fail-open).`;
+					ctx.ui?.notify(warning, "warning");
+					return { additionalContext: warning };
+				}
+				if (!name) return undefined;
+				for (const session of Object.values(sessions)) {
+					const seats = field(session, "seats");
+					if (seats === null || typeof seats !== "object" || Array.isArray(seats)) continue;
+					const seat = Object.entries(seats).find(([seatName]) => seatName.toLowerCase() === name.toLowerCase())?.[1];
+					const role = field(seat, "role");
+					if (role !== "builder" && role !== "grader") continue;
+					let bead = "the bead you hold";
+					try {
+						const tracker = trackerOf({ bin: "br", rest: [], cwd: ctx.cwd }, env);
+						const owned = tracker ? await readOwnedBeads(pi.exec, tracker, name) : null;
+						const held = owned?.ok ? owned.rows.filter(row => row.status === "in_progress").map(row => row.id) : [];
+						if (held.length > 0) bead = held.join(", ");
+					} catch { /* Missing tracker information never permits a worker modal. */ }
+					return { block: true, reason: `kit-flywheel-guard ASKBLOCK1: ask refused for ${role} seat ${name}; no dialog opened. Send QUESTION mail to your director naming ${bead}; questions never block work.` };
+				}
+				return undefined;
+			}
 			if (typeof event.toolCallId === "string" && typeof event.toolName === "string") {
 				// The bash tool's own `cwd` input is where the command runs, not the session cwd.
 				const toolCwd = event.toolName.toLowerCase() === "bash" ? field(event.input, "cwd") : undefined;

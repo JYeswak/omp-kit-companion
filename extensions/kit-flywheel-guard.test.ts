@@ -52,6 +52,60 @@ function brTable(table: Record<string, FlywheelExecResult>): Responder {
 }
 
 
+// --- ASKBLOCK1 -----------------------------------------------------------
+
+async function askSeat(name?: string, roster: unknown = {
+	sessions: { "omp-test": { seats: {
+		SilverCondor: { role: "builder" }, JadeThrush: { role: "grader" }, RusticPine: { role: "director" },
+	} } },
+}, held = true) {
+	const home = freshDir(base, "ask-home-");
+	const dir = join(home, ".claude", "skills", "omp-kit-orchestration");
+	mkdirSync(dir, { recursive: true });
+	if (roster !== null) writeFileSync(join(dir, "fleet-roster.json"), typeof roster === "string" ? roster : JSON.stringify(roster));
+	const h = await createFlywheelHost(base, { home, env: name ? { AGENT_NAME: name } : {}, respond: () => ({
+		code: 0, stdout: JSON.stringify(held ? [{ id: "ompkit-worker-task", status: "in_progress", assignee: name }] : []),
+	}) });
+	const [result] = await h.emit("tool_call", { toolCallId: "ask-1", toolName: "ask", input: { question: "Which option?" } }, h.ctx(base));
+	return { h, result: result as FlywheelToolCallResult | undefined };
+}
+
+for (const name of ["SilverCondor", "JadeThrush"]) {
+	test(`ASKBLOCK1: ${name} worker ask is refused before the host opens a dialog`, async () => {
+		const { h, result } = await askSeat(name);
+		let dialogs = 0;
+		if (result?.block !== true) dialogs++;
+		expect(dialogs).toBe(0);
+		expect(result?.reason).toContain("QUESTION mail");
+		expect(result?.reason).toContain("ompkit-worker-task");
+		expect(h.sent).toEqual([]);
+	});
+}
+
+test("ASKBLOCK1: unknown held bead still refuses and names the bead you hold", async () => {
+	const { result } = await askSeat("SilverCondor", undefined, false);
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("the bead you hold");
+	expect(result?.reason).toContain("QUESTION mail");
+});
+
+for (const name of ["RusticPine", "PeachLeopard", undefined]) {
+	test(`ASKBLOCK1 control: ${name ?? "unbound session"} ask is allowed`, async () => {
+		const { result } = await askSeat(name);
+		expect(result?.block).not.toBe(true);
+	});
+}
+
+for (const roster of [null, "{broken", { sessions: null }]) {
+	test(`ASKBLOCK1 control: unreadable roster ${JSON.stringify(roster)} allows and says so`, async () => {
+		const { h, result } = await askSeat("SilverCondor", roster);
+		expect(result?.block).not.toBe(true);
+		expect(result?.additionalContext).toContain("roster");
+		expect(result?.additionalContext).toContain("allowed");
+		expect(h.notices.join("\n")).toContain("allowed");
+	});
+}
+
 // --- COMPACTION_REREAD ---------------------------------------------------
 
 function stockRepo(parent = base): string {

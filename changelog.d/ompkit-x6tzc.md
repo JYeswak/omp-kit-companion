@@ -1,0 +1,1 @@
+Refuse `ask` dialogs for fleet-roster builder and grader seats, directing them to QUESTION mail with their in-progress bead (or “the bead you hold”). Director and unbound sessions may ask; unreadable rosters explicitly warn and fail open. The guard uses the fleet launcher's AGENT_NAME or existing Agent Mail pane identity, with an injectable roster path.
