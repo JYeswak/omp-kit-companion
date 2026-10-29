@@ -794,8 +794,16 @@ export async function paneIdentities(exec: FlywheelExec, env: Record<string, str
 }
 
 export type BeadState = { ok: true; id: string; status: string; assignee: string | null; updatedAt: string | null } | { ok: false; why: string };
+type BeadStateWithAuthorship = BeadState & { authorship?: { known: boolean; createdBy: string | null; doneAuthors: string[] } };
 
-export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerRequest, "bin" | "cwd" | "db">, id: string): Promise<BeadState> {
+function isDoneFirstComment(text: string): boolean {
+	const first = text.trimStart();
+	if (first.slice(0, 4).toUpperCase() !== "DONE") return false;
+	const boundary = first[4];
+	return boundary === undefined || boundary === ":" || boundary.trim() === "";
+}
+
+export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerRequest, "bin" | "cwd" | "db" | "operation">, id: string): Promise<BeadStateWithAuthorship> {
 	const args = ["show", id, "--json", "--no-auto-import", "--no-auto-flush", ...(request.db ? ["--db", request.db] : [])];
 	let result: FlywheelExecResult;
 	try {
@@ -825,7 +833,38 @@ export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerReq
 			return { ok: false, why: `${id} returned no qualified native issue/owner record` };
 		}
 		const owner = typeof assignee === "string" ? assignee.trim() : "";
+		let authorship: { known: boolean; createdBy: string | null; doneAuthors: string[] } | undefined;
+		if (request.operation === "close") {
+			const rawCreator = field(row, "created_by");
+			const rawComments = field(row, "comments");
+			const createdBy = typeof rawCreator === "string" && rawCreator.trim() !== "" ? rawCreator.trim() : null;
+			const doneAuthors: string[] = [];
+			let known = (rawCreator === null || (typeof rawCreator === "string" && rawCreator.trim() !== ""))
+				&& Array.isArray(rawComments);
+			if (Array.isArray(rawComments)) {
+				for (const comment of rawComments) {
+					const author = field(comment, "author");
+					const text = field(comment, "text");
+					if (typeof author !== "string" || author.trim() === "" || typeof text !== "string") {
+						known = false;
+						continue;
+					}
+					if (isDoneFirstComment(text)) doneAuthors.push(author.trim());
+				}
+			}
+			authorship = { known, createdBy, doneAuthors };
+		}
 		const revised = field(row, "updated_at");
+		if (authorship !== undefined) {
+			return {
+				ok: true,
+				id: canonical,
+				status,
+				assignee: owner === "" ? null : owner,
+				authorship,
+				updatedAt: typeof revised === "string" ? revised : null,
+			};
+		}
 		return { ok: true, id: canonical, status, assignee: owner === "" ? null : owner, updatedAt: typeof revised === "string" ? revised : null };
 	} catch {
 		return { ok: false, why: `\`${request.bin} show ${id} --json\` returned unparseable output` };
@@ -1957,6 +1996,35 @@ export async function checkBeadLint(event: FlywheelToolCallEvent, deps: BeadLint
 		: { additionalContext: `kit-flywheel-guard ${BEAD_LINT_UNVERIFIED}: ${warnings.join("; ")}. The command was allowed without the bead-lint gate.` };
 }
 
+function closeAuthorRefusal(found: BeadStateWithAuthorship, identities: readonly string[]): FlywheelToolCallResult | undefined {
+	if (!found.ok || identities.length === 0) return undefined;
+	const authorship = found.authorship;
+	if (authorship === undefined || !authorship.known) {
+		return {
+			block: true,
+			reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: cannot verify authorship of ${found.id}: creator or comments data is missing or malformed. `
+				+ "No self-certification on an unverified close (Flywheel Kernel invariant 9): resolve the native lookup "
+				+ "and let an independent verifier run the close; no close was executed.",
+		};
+	}
+	const selfAuthor = identities.find(name => {
+		const normalized = name.toLowerCase();
+		return authorship.createdBy?.toLowerCase() === normalized
+			|| authorship.doneAuthors.some(author => author.toLowerCase() === normalized);
+	});
+	if (selfAuthor === undefined) return undefined;
+	const normalized = selfAuthor.toLowerCase();
+	const roles: string[] = [];
+	if (authorship.createdBy?.toLowerCase() === normalized) roles.push("the bead filer");
+	if (authorship.doneAuthors.some(author => author.toLowerCase() === normalized)) roles.push("a DONE-first comment author");
+	return {
+		block: true,
+		reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: ${found.id} ${selfAuthor} is ${roles.join(" and ")}, which is you. `
+			+ "No self-certification (Flywheel Kernel invariant 9): report DONE with evidence (commit sha, exact commands, exit codes) "
+			+ "and let the director or an independent verifier run the close.",
+	};
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps, attempts: CloseAttempt[] = []): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -2019,7 +2087,12 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			const orphaned = await checkCloseOrphansDependents(request, id, released, deps);
 			if (orphaned !== undefined) return orphaned;
 			const assignee = found.assignee?.trim();
+			const authorRefusal = closeAuthorRefusal(found, identities);
 			if (!assignee) {
+				if (authorRefusal !== undefined) {
+					attempts.push({ id: found.id, fromStatus: found.status, assignee: null, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
+					return authorRefusal;
+				}
 				warnings.push(`self-close check skipped: ${id} has no assignee`);
 				attempts.push({ id: found.id, fromStatus: found.status, assignee: null, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 				continue;
@@ -2038,6 +2111,10 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 						+ "No self-certification (Flywheel Kernel invariant 9): report DONE with evidence (commit sha, exact commands, exit codes) "
 						+ "and let the director or an independent verifier run the close.",
 				};
+			}
+			if (authorRefusal !== undefined) {
+				attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
+				return authorRefusal;
 			}
 			attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 		}

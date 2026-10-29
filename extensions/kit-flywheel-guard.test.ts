@@ -32,8 +32,14 @@ function identityHome(project: string, paneKey: string, content: string): string
 	return home;
 }
 
-function bead(id: string, assignee: string | null): FlywheelExecResult {
-	return { stdout: JSON.stringify([{ id, title: "t", status: "in_progress", assignee }]), stderr: "", code: 0 };
+type BeadComment = { author: string; text: string };
+
+function bead(id: string, assignee: string | null, createdBy: string | null = null, comments: BeadComment[] = []): FlywheelExecResult {
+	return {
+		stdout: JSON.stringify([{ id, title: "t", status: "in_progress", assignee, created_by: createdBy, comments }]),
+		stderr: "",
+		code: 0,
+	};
 }
 
 /** tmux has no composite key; `br show` answers from a table, misses shaped like br 0.7.4 (JSON error on stdout, tracing on stderr). */
@@ -224,6 +230,62 @@ test("SELF_CLOSE_REFUSED negative: a different closer is allowed silently", asyn
 	const h = await createFlywheelHost(base, { env: { TMUX_PANE: "%77" }, home, respond: brTable({ "kit-1": bead("kit-1", "BlueFox") }) });
 	expect(await toolCall(h, project, "br close kit-1 --reason \"bun test extensions/kit-flywheel-guard.test.ts -> 26 passed\"")).toBeUndefined();
 	expect(h.notices).toEqual([]);
+});
+
+// --- FILERCLOSE1 ---------------------------------------------------------
+
+test("FILERCLOSE1: the bead filer cannot close their own bead", async () => {
+	const project = freshDir(base, "proj-");
+	const h = await createFlywheelHost(base, { respond: brTable({ "kit-filer": bead("kit-filer", "Builder", "Filer") }) });
+	const result = await toolCall(h, project, "br --actor Filer close kit-filer --reason \"ev_filerclose1\"");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
+	expect(result?.reason).toContain("Filer");
+});
+
+test("FILERCLOSE1: every DONE-first commenter is treated as an author", async () => {
+	const comments = [
+		{ author: "FirstDone", text: "DONE first evidence" },
+		{ author: "SecondDone", text: "  DONE second evidence" },
+	];
+	for (const actor of ["FirstDone", "SecondDone"]) {
+		const project = freshDir(base, "proj-");
+		const h = await createFlywheelHost(base, { respond: brTable({ "kit-done": bead("kit-done", "Builder", "Filer", comments) }) });
+		const result = await toolCall(h, project, `br --actor ${actor} close kit-done --reason "ev_filerclose1"`);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
+		expect(result?.reason).toContain(actor);
+	}
+});
+
+test("FILERCLOSE1 control: a non-author can close with evidence", async () => {
+	const project = freshDir(base, "proj-");
+	const h = await createFlywheelHost(base, { respond: brTable({ "kit-independent": bead("kit-independent", "Builder", "Filer", [
+		{ author: "DoneAuthor", text: "DONE validated" },
+	]) }) });
+	expect(await toolCall(h, project, "br --actor Verifier close kit-independent --reason \"ev_filerclose1\"")).toBeUndefined();
+});
+
+test("FILERCLOSE1 control: an ordinary commenter is not a DONE author", async () => {
+	const project = freshDir(base, "proj-");
+	const h = await createFlywheelHost(base, { respond: brTable({ "kit-comment": bead("kit-comment", "Builder", "Filer", [
+		{ author: "Commenter", text: "Progress update" },
+	]) }) });
+	expect(await toolCall(h, project, "br --actor Commenter close kit-comment --reason \"ev_filerclose1\"")).toBeUndefined();
+});
+
+test("FILERCLOSE1: incomplete author metadata refuses a close", async () => {
+	const project = freshDir(base, "proj-");
+	const incomplete: FlywheelExecResult = {
+		stdout: JSON.stringify([{ id: "kit-incomplete", title: "t", status: "in_progress", assignee: "Builder" }]),
+		stderr: "",
+		code: 0,
+	};
+	const h = await createFlywheelHost(base, { respond: brTable({ "kit-incomplete": incomplete }) });
+	const result = await toolCall(h, project, "br --actor Verifier close kit-incomplete --reason \"ev_filerclose1\"");
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
+	expect(result?.reason).toContain("authorship");
 });
 
 // GATEEVENTS1 (ompkit-fp72.135.3.12): the guard's verdict on a tracker act lands in the gate-events ledger under the
