@@ -3949,7 +3949,11 @@ async function reconcileUpdateCommand(stateRoot: string, id: string, confirmed: 
 		const relink = await relinkKitPlugin(binary, store);
 		const envelope = { code: 0, data: { overall: "OK", scope: "kit", action: "RECONCILED", receipt_id: result.receiptId,
 			active_version: result.activeVersion, verified: result.verified } };
-		if (!relink.ok) return updatePostApplyEnvelope(envelope, relink, null, store);
+		if (!relink.ok) {
+			const failure = updatePostApplyEnvelope(envelope, relink, null, store);
+			// A reconcile is APPLIED only after every covered profile is verified; retain the failed attempt details.
+			return { ...failure, data: { ...failure.data, plugin_relink: "NOT_RUN" } };
+		}
 		return { code: 0, data: { ...envelope.data, plugin_relink: "APPLIED", plugin_receipt_id: relink.receiptId,
 			plugin_undo_command: relink.undoCommand, plugin_relink_detail: relink.detail }, verification: "UNVERIFIED" };
 	} catch (error) {

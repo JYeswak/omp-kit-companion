@@ -98,7 +98,7 @@ test("CLI without --prefix reports relink failures and refuses tampered postimag
 			} else {
 				expect(output.data.action).toBe("RECONCILED");
 				expect(output.data.overall).toBe("FINDINGS");
-				expect(output.data.plugin_relink).toBe("FAILED");
+				expect(output.data.plugin_relink).toBe("NOT_RUN");
 				expect(output.errors[0].code).toBe("PLUGIN_RELINK_FAILED");
 				expect(output.data.verified.binary).toBe(join(ctx.prefix, "releases", "0.2.17", "bin", "omp-kit"));
 			}

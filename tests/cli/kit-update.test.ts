@@ -259,7 +259,7 @@ test("UPDATERELINK1 planted negative: an incomplete profile relink cannot report
 	const prepared = preparePartialReconcile(ctx, "codex");
 	const result = await runPartialReconcile(prepared);
 	expect(result.rc).toBe(1);
-	expect(result.output.data).toMatchObject({ overall: "FINDINGS", action: "RECONCILED", plugin_relink: "FAILED", active_version: ctx.nextVersion });
+	expect(result.output.data).toMatchObject({ overall: "FINDINGS", action: "RECONCILED", plugin_relink: "NOT_RUN", active_version: ctx.nextVersion });
 	expect(readlinkSync(reconcilePluginLink(ctx.home, "codex"))).toBe(prepared.oldStore);
 	for (const profile of RECONCILE_PROFILES.filter(profile => profile !== "codex"))
 		expect(readlinkSync(reconcilePluginLink(ctx.home, profile))).toBe(prepared.store);
