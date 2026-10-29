@@ -113,7 +113,7 @@ test("planted: a box whose command fails sets REWORK naming the box; exit 0 with
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", false], ["c", false]]);
 	const acts = br.acts();
 	expect(acts).toHaveLength(1);
-	expect(acts[0]).toStartWith("update kit-1 --status rework --transition-comment REWORK kit-1: [b] output lacks \"PASS\"; [c] summary 99 pass: not found");
+	expect(acts[0]).toStartWith("update kit-1 --status rework --transition-comment REWORK kit-1: [b] output lacks \"PASS\"; child rc 1 15 chars: selftest: FAIL\n; [c] summary 99 pass: not found; child rc 0 17 chars:  16 pass\n 0 fail\n");
 });
 
 test("exit-only boxes are judged by rc and flagged in the close reason; --dry-run runs nothing against the tracker", async () => {
