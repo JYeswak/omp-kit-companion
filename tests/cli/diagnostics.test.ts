@@ -6,6 +6,7 @@ import { delimiter, dirname, join } from "node:path";
 import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, readRchSocketBaseline, writeRchSocketBaseline, type Finding, type RchConfigRead, type RchDaemonWorker, type RchProbeWorker, type RchReachabilityDeps, type RchSocketBaseline, type RchWorkerHealthDeps } from "../../src/diagnostics.ts";
 // Separate additive import: the shared import above stays byte-identical (fp72.96).
 import { attributeAckSender, type IdentityAck, type PaneBinding, type ReservationHolder, type SeatBindingRow } from "../../src/diagnostics.ts";
+import { STACK_SOURCE } from "../../src/diagnostics.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
@@ -914,6 +915,14 @@ test("dicklesworthstone scope reports installed vs latest with one source per to
 		expect(found.component).toBe("dicklesworthstone");
 		expect(found.status).toBe("DEGRADED");
 		const tools = found.evidence?.tools as { bin: string; source: string; installed_version: string | null; latest_release: string | null; state: string }[];
+		const requiredBins = Object.keys(STACK_SOURCE).sort();
+		const assertCompleteBins = (reports: typeof tools) => {
+			expect(reports.map((tool) => tool.bin).sort()).toEqual(requiredBins);
+		};
+		expect(requiredBins).toContain("ntm");
+		assertCompleteBins(tools);
+		expect(() => assertCompleteBins(tools.filter((tool) => tool.bin !== "ntm"))).toThrow();
+		assertCompleteBins(tools);
 		const byBin = Object.fromEntries(tools.map((tool) => [tool.bin, tool]));
 		expect(byBin.br?.state).toBe("behind");
 		expect(byBin.ntm?.state).toBe("current");

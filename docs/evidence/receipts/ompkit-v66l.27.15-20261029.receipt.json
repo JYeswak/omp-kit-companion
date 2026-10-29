@@ -1,0 +1,24 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_ab2c259bde157608b6c39678cdd3e84ab1cad47612c1d239734b2c3127ff384e",
+ "limitations": [
+  "Clean-copy full-file run retains the pre-existing RCHRO1 failure also recorded on pristine HEAD in bead comment 14949; the final-source targeted regression passes.",
+  "No performance improvement is claimed; original profile/equivalence evidence is in bead comment 14949."
+ ],
+ "operation": "diagnostics-output-completeness",
+ "parameters": {
+  "base_commit": "55207e767365d3ab701c6dec7106d88fdf5e1314",
+  "bead": "ompkit-v66l.27.15",
+  "focused_test": "95-pass-0-fail-525-expect",
+  "result_file": "docs/evidence/receipts/ompkit-v66l.27.15-20261029.result.json",
+  "scoped_cli": "doctor-omp-exit-0",
+  "subject_path": "tests/cli/diagnostics.test.ts",
+  "subject_sha256": "24443491668ec523be296da0ae9dd59799e15a280c803dcb138d982fc926e0ad"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 5058,
+  "sha256": "ee62e623fd1448a164831735347443ca3f4c9108f9726c58df67a6c7b1365add"
+ }
+}

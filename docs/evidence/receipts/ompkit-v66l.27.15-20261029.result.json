@@ -1,0 +1,134 @@
+{
+  "schema_version": "omp-kit.diagnostics-result.v1",
+  "bead": "ompkit-v66l.27.15",
+  "authority": "test",
+  "base_commit": "55207e767365d3ab701c6dec7106d88fdf5e1314",
+  "subject_path": "tests/cli/diagnostics.test.ts",
+  "subject_sha256": "24443491668ec523be296da0ae9dd59799e15a280c803dcb138d982fc926e0ad",
+  "checks": [
+    {
+      "name": "focused_shared_tree",
+      "command": "bun test tests/cli/diagnostics.test.ts",
+      "exit": 0,
+      "stdout": "bun test v1.4.3 (26aa4e1a9)\n\n 95 pass\n 0 fail\n 525 expect() calls\nRan 95 tests across 1 file. [16.14s]\n"
+    },
+    {
+      "name": "scoped_cli",
+      "command": "bun src/cli.ts doctor --scope omp --json",
+      "exit": 0,
+      "stdout": {
+        "ok": true,
+        "tool_version": "unreleased",
+        "data": {
+          "evidence": {
+            "effective_profile": "NOT_RUN",
+            "installed_rules": "NOT_RUN",
+            "matcher": "NOT_RUN"
+          },
+          "findings": [
+            {
+              "component": "omp",
+              "evidence": {
+                "availability": "PRESENT",
+                "launcher_version": "18.13.3",
+                "launcher_version_proof": "OMP_LAUNCHER",
+                "location": "/Users/josh/Library/Application Support/Tern/omp/versions/18.13.3",
+                "manager_source": "tern",
+                "manager_source_provenance": "TERN_PATH_LAYOUT",
+                "manager_version": "18.13.3",
+                "manager_version_provenance": "TERN_STATE",
+                "manager_versions": {
+                  "bun": {
+                    "provenance": "BUN_PACKAGE_METADATA",
+                    "status": "PRESENT",
+                    "version": "18.10.3"
+                  },
+                  "tern": {
+                    "provenance": "TERN_STATE",
+                    "status": "PRESENT",
+                    "version": "18.13.3"
+                  }
+                },
+                "package_root": "/Users/josh/.local/opt/omp-kit/omp-src/18.13.3/node_modules/@oh-my-pi/pi-coding-agent",
+                "version": "18.13.3",
+                "version_proof": "PACKAGE_METADATA"
+              },
+              "reason": "PATH-selected OMP manager, launcher and package versions agree",
+              "recommended_action": "No action required.",
+              "status": "OK"
+            }
+          ],
+          "kit": {
+            "data_paths": {
+              "data": "/Users/josh/.local/share",
+              "state": "/Users/josh/.local/state"
+            },
+            "platform": {
+              "arch": "arm64",
+              "os": "darwin"
+            },
+            "release": {
+              "entrypoint": "/Users/josh/Developer/omp-kit-companion/src/cli.ts",
+              "executable": "/opt/homebrew/Cellar/bun/1.4.3/bin/bun",
+              "identity": "UNVERIFIED",
+              "root": "/Users/josh/Developer/omp-kit-companion",
+              "source_tag": null
+            },
+            "version": "unreleased"
+          },
+          "omp": {
+            "location": "/Users/josh/Library/Application Support/Tern/omp/versions/18.13.3",
+            "reason": "PATH-selected OMP manager, launcher and package versions agree",
+            "status": "PRESENT",
+            "version": "18.13.3",
+            "version_proof": "PACKAGE_METADATA"
+          },
+          "overall": "OK",
+          "recommended_actions": []
+        },
+        "meta": {
+          "schema_version": "1",
+          "verification": "PERFORMED"
+        },
+        "warnings": [],
+        "commands": [
+          "omp-kit capabilities --json",
+          "omp-kit doctor --json"
+        ],
+        "errors": []
+      }
+    },
+    {
+      "name": "private_index_self_check",
+      "exit": 0,
+      "members": {
+        "kitlib": 0,
+        "tempsafe": 0,
+        "pysafe": 0,
+        "readme": 0,
+        "imports": 0,
+        "fragments": 0,
+        "sources": 0,
+        "regexploit": 0
+      }
+    },
+    {
+      "name": "clean_copy_full_file",
+      "archive_base": "55207e767365d3ab701c6dec7106d88fdf5e1314",
+      "exit": 1,
+      "summary": "94 pass, 1 fail, 523 expect() calls; the unrelated RCHRO1 unscoped-doctor HOME/XDG test failed at line 1628.",
+      "prior_pristine_head_evidence": "ompkit-v66l.27.15 comment 14949 records the same RCHRO1 failure on the pristine HEAD export."
+    },
+    {
+      "name": "clean_copy_targeted_regression_final_source",
+      "archive_base": "55207e767365d3ab701c6dec7106d88fdf5e1314",
+      "command": "bun test tests/cli/diagnostics.test.ts --test-name-pattern 'dicklesworthstone scope reports installed vs latest with one source per tool'",
+      "exit": 0,
+      "stdout": "1 pass, 94 filtered out, 0 fail, 15 expect() calls; 1 test across 1 file."
+    }
+  ],
+  "limitations": [
+    "The full clean-copy run retains the pre-existing RCHRO1 failure recorded on pristine HEAD in comment 14949; the final-source targeted regression passes.",
+    "No performance improvement is claimed; the original profile and scope-equivalence decision are in bead comment 14949."
+  ]
+}
