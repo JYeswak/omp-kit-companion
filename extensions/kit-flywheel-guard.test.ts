@@ -1197,7 +1197,7 @@ function drainResponder(shows: Record<string, DrainRow>, lists: Record<string, D
 		if (row === undefined) {
 			return { stdout: JSON.stringify({ error: { code: "ISSUE_NOT_FOUND", message: `Issue not found: ${id}` } }), stderr: "", code: 3 };
 		}
-		return { stdout: JSON.stringify([{ id, title: "t", status: row.status, assignee: row.assignee, updated_at: row.updatedAt ?? "2026-10-19T19:00:00Z" }]), stderr: "", code: 0 };
+		return { stdout: JSON.stringify([{ id, title: "t", status: row.status, assignee: row.assignee, labels: ["pillar:proven"], updated_at: row.updatedAt ?? "2026-10-19T19:00:00Z" }]), stderr: "", code: 0 };
 	};
 }
 
@@ -1343,4 +1343,183 @@ test("WAIT_REFUSED seam: the pure check refuses each planted form and passes wit
 	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "python3 -c \"import time; time.sleep(30)\"" } }, "CopperTrout")?.block).toBe(true);
 	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "sleep 2" } }, "CopperTrout")).toBeUndefined();
 	expect(checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, null)).toBeUndefined();
+});
+
+// --- CUTCLAIM1: exercise the registered tool_call handler, never a helper-only admission ---
+type CutBead = { id: string; status: string; assignee: string | null; labels?: string[] | null };
+type CutEdge = { issue_id: string; depends_on_id: string; type: string; status: string };
+
+async function cutFixture() {
+	const repo = freshDir(base, "cutclaim-");
+	const config = join(repo, "fleet-watch.json");
+	const milestone = { epic: "cut", due: "2026-11-01", declaredAt: "2026-10-30T00:00:00Z", pinned: ["k-1"] };
+	writeFileSync(config, JSON.stringify({ sessions: [{ session: "fixture", repo, milestone }] }));
+	const rows: Record<string, CutBead> = {};
+	for (const id of ["k-1", "k-2", "k-3"]) rows[id] = { id, status: "open", assignee: null, labels: [] };
+	const graph: Record<string, CutEdge[]> = { "k-1": [], "k-2": [], "k-3": [] };
+	const respond: Responder = call => {
+		if (call.command === "tmux") return { code: 1, stdout: "", stderr: "no server" };
+		if (call.command === "env") return { code: 0, stdout: "", stderr: "" };
+		if (call.args[0] === "show") {
+			const row = rows[call.args[1] ?? ""];
+			return row ? { code: 0, stdout: JSON.stringify([row]) } : { code: 3, stdout: "", stderr: "missing fixture bead" };
+		}
+		if (call.args[0] === "list") return { code: 0, stdout: JSON.stringify({ issues: [], total: 0 }) };
+		if (call.args[0] === "dep" && call.args[1] === "list") {
+			const edges = graph[call.args[2] ?? ""];
+			return edges ? { code: 0, stdout: JSON.stringify(edges) } : { code: 3, stdout: "", stderr: "missing fixture graph" };
+		}
+		return { code: 99, stdout: "", stderr: "unexpected fixture read" };
+	};
+	const env = { BR_ACTOR: "Holder", OMP_KIT_FLEET_WATCH_CONFIG: config, BEADS_DB: join(repo, ".beads", "beads.db"), BEADS_DIR: "" };
+	const h = await createFlywheelHost(base, { env, home: repo, respond });
+	return { repo, config, milestone, rows, graph, h, respond };
+}
+
+test("CUTCLAIM1 [a]: real guarded k-2 claim refuses the cut and names eligible k-1; k-1 passes", async () => {
+	const f = await cutFixture();
+	const refused = await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim");
+	expect(refused?.block).toBe(true);
+	expect(JSON.parse(refused?.reason ?? "{}")).toMatchObject({
+		code: "CLAIM_OUT_OF_CUT", bead: "k-2", cut: "cut", alternative: "k-1",
+	});
+	expect(refused?.reason).toContain("nearest eligible pinned alternative: k-1");
+	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim")).toBeUndefined();
+});
+
+test("CUTCLAIM1 [b]: open transitive blocks prerequisites pass from active pins, never closed or parent/related-only", async () => {
+	const f = await cutFixture();
+	f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status: "open" }];
+	f.graph["k-3"] = [{ issue_id: "k-3", depends_on_id: "k-2", type: "blocks", status: "open" }];
+	f.rows["k-1"]!.status = "in_review";
+	f.rows["k-1"]!.assignee = "Builder";
+	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
+	f.rows["k-1"]!.status = "in_progress";
+	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
+	for (const status of ["in_progress", "rework", "blocked", "in_review"]) {
+		f.rows["k-3"]!.status = status;
+		f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status }];
+		expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
+	}
+	f.rows["k-1"]!.status = "closed";
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_OUT_OF_CUT");
+	f.rows["k-1"]!.status = "open";
+	for (const type of ["parent-child", "related", "blocks"]) {
+		f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-2", type, status: type === "blocks" ? "closed" : "open" }];
+		expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_OUT_OF_CUT");
+	}
+	// An open-looking edge cannot resurrect a closed intermediate prerequisite.
+	f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status: "open" }];
+	f.rows["k-3"]!.status = "closed";
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_OUT_OF_CUT");
+});
+
+test("CUTCLAIM1 [c]: no milestone requires pillar metadata, including stock HOME with no config", async () => {
+	const f = await cutFixture();
+	writeFileSync(f.config, JSON.stringify({ sessions: [{ session: "fixture", repo: f.repo }] }));
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_PILLAR_REQUIRED");
+	f.rows["k-2"]!.labels = ["pillar:proven"];
+	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
+	rmSync(f.config);
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
+	const stock = await createFlywheelHost(base, { env: { BR_ACTOR: "Holder", BEADS_DB: join(f.repo, ".beads", "beads.db"), BEADS_DIR: "" }, home: f.repo, respond: f.respond });
+	f.rows["k-2"]!.labels = [];
+	expect((await toolCall(stock, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_PILLAR_REQUIRED");
+	f.rows["k-2"]!.labels = ["pillar:proven"];
+	expect(await toolCall(stock, f.repo, "br --actor Holder update k-2 --claim")).toBeUndefined();
+});
+
+test("CUTCLAIM1: malformed declarations and graph reads fail closed, never pillar fallback", async () => {
+	const f = await cutFixture();
+	f.rows["k-2"]!.labels = ["pillar:proven"];
+	for (const body of ["{", JSON.stringify({ sessions: {} }), JSON.stringify({ sessions: [{ repo: f.repo, milestone: { ...f.milestone, pinned: "k-1" } }] })]) {
+		writeFileSync(f.config, body);
+		expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
+	}
+	writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: f.milestone }] }));
+	delete f.graph["k-1"];
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
+	f.graph["k-1"] = [{ issue_id: "another-bead", depends_on_id: "k-2", type: "blocks", status: "open" }];
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
+});
+
+test("CUTCLAIM1: canonical explicit tracker binding wins over a first unrelated session", async () => {
+	const f = await cutFixture();
+	const caller = freshDir(base, "cutclaim-caller-");
+	const alias = join(caller, "tracker-alias");
+	symlinkSync(f.repo, alias);
+	writeFileSync(f.config, JSON.stringify({ sessions: [
+		{ session: "unrelated", repo: caller, milestone: { ...f.milestone, pinned: ["k-2"] } },
+		{ session: "tracker", repo: alias, milestone: f.milestone },
+	] }));
+	const command = `br --db ${JSON.stringify(join(alias, ".beads", "beads.db"))} --actor Holder update k-2 --claim`;
+	expect((await toolCall(f.h, caller, command))?.reason).toContain("CLAIM_OUT_OF_CUT");
+	expect(f.h.execs.filter(call => call.args[0] === "dep").every(call => call.args.includes(join(alias, ".beads", "beads.db")))).toBe(true);
+});
+
+test("CUTCLAIM1 planted negative: removing admission refusal from the actual guard makes the original assertion fail", async () => {
+	const f = await cutFixture();
+	const hostUrl = new URL("../tests/fleet-guard/kit-flywheel-host.ts", import.meta.url).href;
+	const script = `
+		import { plugin } from "bun";
+		import assert from "node:assert/strict";
+		let applied = false;
+		plugin({ name: "cutclaim1-mutant", setup(build) {
+			build.onLoad({ filter: /kit-flywheel-guard[.]ts$/ }, async ({ path }) => {
+				const source = await Bun.file(path).text();
+				const site = "if (cut.blocking) return {";
+				if (source.split(site).length !== 2) throw new Error("MUTATION_SITE_NOT_UNIQUE");
+				applied = true;
+				return { contents: source.replace(site, "if (false) return {"), loader: "ts" };
+			});
+		}});
+		// The mutation plugin must be registered before this loading-boundary import.
+		const { createFlywheelHost, toolCall } = await import(${JSON.stringify(hostUrl)});
+		const h = await createFlywheelHost(${JSON.stringify(base)}, {
+			env: { BR_ACTOR: "Holder", OMP_KIT_FLEET_WATCH_CONFIG: ${JSON.stringify(f.config)},
+				BEADS_DB: ${JSON.stringify(join(f.repo, ".beads", "beads.db"))}, BEADS_DIR: "" },
+			home: ${JSON.stringify(f.repo)},
+			respond: call => ({ code: 0, stderr: "", stdout: JSON.stringify(
+				call.args[0] === "list" ? { issues: [], total: 0 } : call.args[0] === "dep" ? [] :
+				[{ id: call.args[1], status: "open", assignee: null, labels: [] }]
+			) }),
+		});
+		const pin = await toolCall(h, ${JSON.stringify(f.repo)}, "br --actor Holder update k-1 --claim");
+		assert.equal(pin, undefined, "pin control must pass");
+		const refused = await toolCall(h, ${JSON.stringify(f.repo)}, "br --actor Holder update k-2 --claim");
+		assert.equal(applied, true, "mutation must load");
+		console.log(JSON.stringify({ applied, pinPassed: pin === undefined, outOfCutBlocked: refused?.block === true }));
+		assert.equal(refused?.block, true, "CUTCLAIM1_OFF_CUT_ASSERTION");
+	`;
+	const result = await run([process.execPath, "--eval", script], { cwd: f.repo, deadline_s: 60, max_output_bytes: 65536 });
+	expect(result.rc).not.toBe(0);
+	expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({ applied: true, pinPassed: true, outOfCutBlocked: false });
+	expect(new TextDecoder().decode(result.stderr)).toContain("CUTCLAIM1_OFF_CUT_ASSERTION");
+});
+
+test("CUTCLAIM1: pin order, explicit membership, omitted labels, empty cuts and strict config bytes", async () => {
+	const f = await cutFixture();
+	writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "cut", pinned: ["k-3", "k-1"] } }] }));
+	expect(JSON.parse((await toolCall(f.h, f.repo, "br --actor Holder update k-2 --claim"))?.reason ?? "{}").alternative).toBe("k-3");
+	delete f.rows["k-3"];
+	delete f.rows["k-1"]!.labels;
+	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim")).toBeUndefined();
+	f.rows["k-1"]!.labels = null;
+	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim")).toBeUndefined();
+	writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo }] }));
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim"))?.reason).toContain("CLAIM_PILLAR_REQUIRED");
+	f.rows["k-1"]!.labels = ["pillar:proven"];
+	writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "empty-cut", pinned: [] } }] }));
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim"))?.reason).toContain("CLAIM_OUT_OF_CUT");
+	const config = JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "cut", pinned: ["k-1"] } }], note: "BYTE" });
+	const marker = config.indexOf("BYTE");
+	writeFileSync(f.config, Buffer.concat([Buffer.from(config.slice(0, marker)), Buffer.from([0xff]), Buffer.from(config.slice(marker + 4))]));
+	expect((await toolCall(f.h, f.repo, "br --actor Holder update k-1 --claim"))?.reason).toContain("CLAIM_CUT_UNKNOWN");
+});
+
+test("CUTCLAIM1 owned rework resumes without a second claim", async () => {
+	const f = await cutFixture();
+	f.rows["k-1"]!.status = "rework";
+	f.rows["k-1"]!.assignee = "Holder";
+	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --status in_progress")).toBeUndefined();
 });

@@ -134,8 +134,13 @@ br_create_valid() {
 	br create "$@" -t task -l gate --description "$CREATE_DESCRIPTION" --acceptance "$CREATE_ACCEPTANCE"
 }
 printf '{"issues":[],"total":0,"offset":0,"has_more":false}\n' > "$BR_CREATE_FIXTURE"
+BUN_BIN=$(command -v bun || true)
+export BUN_BIN REPO_ROOT
 cat > "$TMP/sendbin/omp-kit" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = "preflight" ]; then
+	exec "$BUN_BIN" --no-env-file --config=/dev/null "$REPO_ROOT/src/cli.ts" "$@"
+fi
 printf '%s\n' "$@" >> "$OMP_KIT_SEND_LOG"
 printf '{"status":"OK","overall":"OK"}\n'
 EOF
@@ -462,6 +467,8 @@ fi
  AM_FAKE_MODE=clear
 AM_EXPECTED_PROJECT="$REPO_ROOT"
 export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
+# This scenario has no active claim; prior creation fixtures are unrelated inventory.
+printf '{"issues":[],"total":0,"offset":0,"has_more":false}\n' > "$BR_CREATE_FIXTURE"
  if command -v bun >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -f "$REPO_ROOT/src/cli.ts" ]; then
  	printf '{"id":"X","status":"open","assignee":null,"labels":["needs-director"]}' > "$TMP/bead.json"
  	: > "$TMP/argv"
@@ -474,7 +481,7 @@ export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
  		printf 'FAIL needs-director-claim-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
  	fi
 	# shellcheck disable=SC2016 # literal backticks: fixture acceptance text, not a substitution
-	printf '{"id":"X","status":"open","assignee":null,"labels":[],"acceptance_criteria":"- [ ] [a] [build] claimable `true` -> rc 0"}' > "$TMP/bead.json"
+	printf '{"id":"X","status":"open","assignee":null,"labels":["pillar:proven"],"acceptance_criteria":"- [ ] [a] [build] claimable `true` -> rc 0"}' > "$TMP/bead.json"
 	: > "$TMP/argv"
 	br update X --claim > "$TMP/out" 2>&1
 	got_rc=$?
@@ -485,7 +492,7 @@ export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
 	export AM_EXPECTED_PROJECT="$TMP/review-project"
 	for move in "--claim" "--status in_review"; do
 		if [ "$move" = "--claim" ]; then
-			printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works; planted negative refused"}' > "$TMP/bead.json"
+			printf '{"id":"X","status":"open","assignee":null,"labels":["pillar:proven"],"acceptance_criteria":"- [ ] [a] [build] the widget works; planted negative refused"}' > "$TMP/bead.json"
 			export BR_GUARD_JSON_FILE="$TMP/bead.json"
 			: > "$TMP/argv"
 			br --db "$REVIEW_DB" update X --claim > "$TMP/out" 2>&1
@@ -510,7 +517,7 @@ EOF
 			printf 'FAIL replayable-claim-refused [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$move" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 		fi
 		if [ "$move" = "--claim" ]; then
-			printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works \u0060true\u0060 -> rc 0; planted negative refused"}' > "$TMP/bead.json"
+			printf '{"id":"X","status":"open","assignee":null,"labels":["pillar:proven"],"acceptance_criteria":"- [ ] [a] [build] the widget works \u0060true\u0060 -> rc 0; planted negative refused"}' > "$TMP/bead.json"
 			export BR_GUARD_JSON_FILE="$TMP/bead.json"
 			: > "$TMP/argv"
 			br --db "$REVIEW_DB" update X --claim > "$TMP/out" 2>&1

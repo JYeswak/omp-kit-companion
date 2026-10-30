@@ -70,6 +70,7 @@ fi
 # All other invocations pass through untouched.
  gate_sub=""; gate_id=""; gate_status=""; gate_db=""; gate_claim=0; gate_skip=0; gate_reason=""; gate_want_reason=0; gate_tcomment=""; gate_want_tcomment=0
 gate_comment_id=""; gate_pos_comment=""; gate_literal=0
+gate_extra_ids=0
 gate_index=0; gate_file=0; gate_want_file=0; gate_file_index=0; gate_file_form=""; gate_file_path=""
  for gate_arg in "$@"; do
 	gate_index=$((gate_index + 1))
@@ -89,6 +90,9 @@ gate_index=0; gate_file=0; gate_want_file=0; gate_file_index=0; gate_file_form="
  				--status) gate_status="next" ;;
  				--db) gate_db="next" ;;
  			esac ;;
+		-s) gate_status="next" ;;
+		-d|--description|--body|--description-file|--design|--acceptance-criteria|--acceptance|--prerequisites|--check-acceptance|--uncheck-acceptance|--add-acceptance|--append-notes|-p|--priority|-t|--type|--assignee|--owner|--if-unchanged|--due|--defer|--estimate|--add-label|--remove-label|--set-labels|--labels|--parent|--external-ref|--source-repo|--source-repo-path|--agent-context|--session|--agent-name|--harness|--model)
+			gate_skip=1 ;;
 		--actor|--author|--lock-timeout|-m|--message|--content|--comment|--reason|-r|--transition-comment|--notes|--title|-f|--file)
  			gate_skip=1
  			case "$gate_arg" in
@@ -119,6 +123,7 @@ gate_index=0; gate_file=0; gate_want_file=0; gate_file_index=0; gate_file_form="
 			elif [ "$gate_sub" = comments ] && [ "$gate_id" = add ]; then
 				if [ -z "$gate_comment_id" ]; then gate_comment_id=$gate_arg;
 				else gate_pos_comment="${gate_pos_comment:+$gate_pos_comment }$gate_arg"; fi
+			elif [ "$gate_sub" = update ]; then gate_extra_ids=1
 			fi ;;
 	esac
 done
@@ -206,33 +211,68 @@ if [ "$gate_sub" = "create" ]; then
 	fi
 fi
 
- # NEEDSDIRCLAIM1 (ompkit-izpwd.1): a claim on a bead carrying an unresolved
- # needs-director label is refused before the real br mutates. The single
- # predicate lives in native claim preflight; the shim only relays its named
- # verdict and adds no second policy, names or roster. The probe is skipped
- # when the kit source, bun or python3 is absent, or when --db redirects the
- # mutation off the probed project; an inconclusive probe passes through with
- # a warning. Only a clean NEEDS_DIRECTOR blocking verdict refuses.
- if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_claim" = 1 ] && [ -z "$gate_db" ]; then
- 	claim_kit_root=""
- 	if claim_self_dir=$(dirname -- "$self_path" 2>/dev/null); then
- 		claim_kit_root=$(CDPATH='' cd -- "$claim_self_dir/.." && pwd 2>/dev/null) || claim_kit_root=""
- 	fi
- 	if [ -n "$claim_kit_root" ] && [ -f "$claim_kit_root/src/cli.ts" ] && command -v bun >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
- 		# A NEEDS_DIRECTOR verdict is CLI rc 1, so the output is parsed
- 		# regardless of exit status; only an empty/unparseable probe passes
- 		# through with a warning.
- 		claim_probe=$(bun run --no-env-file --config=/dev/null "$claim_kit_root/src/cli.ts" preflight claim "$gate_id" --project "$tracker_project" --actor "$AGENT_NAME" --json 2>/dev/null)
- 		# Single-line probe parser: findings live at .findings or .data.findings.
- 		# A parse failure tracebacks into UNPARSEABLE via ||, same as before.
- 		claim_verdict=$(printf '%s' "$claim_probe" | python3 -c 'import json,sys; d=json.load(sys.stdin); f=d.get("findings") if isinstance(d,dict) else None; e=d.get("data") if isinstance(d,dict) else None; g=(e.get("findings") if isinstance(e,dict) else None) if f is None else f; print("REFUSE" if any(isinstance(x,dict) and x.get("code")=="NEEDS_DIRECTOR" and x.get("blocking") for x in (g or [])) else "PASS")' 2>/dev/null) || claim_verdict="UNPARSEABLE"
- 		case "$claim_verdict" in
- 			REFUSE) fail "BR_SHIM_NEEDS_DIRECTOR refusing to claim $gate_id for $AGENT_NAME: unresolved director disposition (needs-director). Route it to the director; claim only after the label is resolved with a recorded disposition" ;;
- 			PASS) ;;
- 			*) echo "br-shim: claim eligibility probe unparseable, passing through" >&2 ;;
- 		esac
- 	fi
- fi
+# NEEDSDIRCLAIM1 / CUTCLAIM1: native preflight owns claim admission. Prefer
+# the installed runtime; only a source checkout with Bun may use the fallback.
+# Require an adjudicated cut finding so an older CLI cannot silently admit.
+if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_claim" = 1 ]; then
+	[ "$gate_extra_ids" = 0 ] || fail "CLAIM_CUT_UNKNOWN multi-ID claims are unsupported; claim one bead per invocation"
+	claim_self_dir=$(dirname -- "$self_path") || fail "CLAIM_CUT_UNKNOWN cannot resolve claim authority"
+	claim_kit_root=$(CDPATH='' cd -- "$claim_self_dir/.." && pwd) || fail "CLAIM_CUT_UNKNOWN cannot resolve claim authority"
+	command -v python3 >/dev/null 2>&1 || fail "CLAIM_CUT_UNKNOWN python3 is required to read native claim authority"
+	claim_preflight() {
+		python3 -c '
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from kitlib_run import run
+result = run(sys.argv[3:], deadline_s=60, cwd=sys.argv[2], env=dict(os.environ), max_output_bytes=4 * 1024 * 1024)
+sys.stderr.buffer.write(result.stderr)
+if result.timed_out or result.truncated or result.rc is None:
+    sys.stderr.write("CLAIM_CUT_UNKNOWN native claim authority exceeded its execution bounds\n")
+    sys.exit(2)
+sys.stdout.buffer.write(result.stdout)
+sys.exit(result.rc if result.rc >= 0 else 2)
+' "$claim_self_dir" "$tracker_project" "$@"
+	}
+	claim_cli=""
+	if [ -x "$claim_kit_root/bin/omp-kit" ]; then
+		claim_cli="$claim_kit_root/bin/omp-kit"
+	elif command -v omp-kit >/dev/null 2>&1; then
+		claim_cli=$(command -v omp-kit)
+	fi
+	if [ -n "$claim_cli" ]; then
+		claim_probe=$(BEADS_DB="$tracker_db_path" BR_REAL="$real" claim_preflight "$claim_cli" preflight claim "$gate_id" --project "$tracker_project" --actor "$AGENT_NAME" --json)
+		claim_rc=$?
+	elif [ -f "$claim_kit_root/src/cli.ts" ] && command -v bun >/dev/null 2>&1; then
+		claim_probe=$(BEADS_DB="$tracker_db_path" BR_REAL="$real" claim_preflight bun run --no-env-file --config=/dev/null "$claim_kit_root/src/cli.ts" preflight claim "$gate_id" --project "$tracker_project" --actor "$AGENT_NAME" --json)
+		claim_rc=$?
+	else
+		fail "CLAIM_CUT_UNKNOWN native claim authority unavailable; install omp-kit or provide the source checkout's existing Bun runtime"
+	fi
+	claim_verdict=$(printf '%s' "$claim_probe" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+data = doc.get("data", doc) if isinstance(doc, dict) else None
+if not isinstance(data, dict) or data.get("act") != "claim" or data.get("target") != sys.argv[1]:
+    raise ValueError("claim authority returned the wrong target")
+findings = data.get("findings")
+if not isinstance(findings, list) or not all(isinstance(f, dict) and isinstance(f.get("code"), str) and isinstance(f.get("blocking"), bool) and isinstance(f.get("detail"), str) and isinstance(f.get("remedy"), str) for f in findings):
+    raise ValueError("claim authority returned incomplete findings")
+cut_codes = {"CLAIM_CUT_ADMITTED", "CLAIM_OUT_OF_CUT", "CLAIM_PILLAR_REQUIRED", "CLAIM_CUT_UNKNOWN"}
+cut = [f for f in findings if f["code"] in cut_codes]
+if len(cut) != 1 or cut[0]["blocking"] != (cut[0]["code"] != "CLAIM_CUT_ADMITTED"):
+    raise ValueError("claim authority did not return one consistent cut adjudication")
+blocked = [f for f in findings if f["blocking"]]
+if blocked:
+    for f in blocked:
+        code = "BR_SHIM_NEEDS_DIRECTOR" if f["code"] == "NEEDS_DIRECTOR" else f["code"]
+        print(code + ": " + f["detail"] + "; remedy: " + f["remedy"])
+elif int(sys.argv[2]) != 0 or doc.get("ok") is not True:
+    raise ValueError("claim authority failed without a refusal")
+else:
+    print("PASS")
+' "$gate_id" "$claim_rc") || fail "CLAIM_CUT_UNKNOWN native claim authority failed or returned an incomplete verdict (rc=$claim_rc)"
+	[ "$claim_verdict" = "PASS" ] || fail "$claim_verdict"
+fi
 
 # REPLAYABLE1 claim/review gate (ompkit-fp72.135.3.71, J-2026-10-29-22):
 # `br update ID --claim` and the move to in_review are refused when the
