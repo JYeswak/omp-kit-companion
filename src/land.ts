@@ -260,7 +260,7 @@ function archiveFullSuiteJudge(repo: string, base: string): FullSuiteJudge | nul
 		"scripts/suite-metrics.py", "scripts/kitlib_run.py", "scripts/pysafe.py",
 		"scripts/test-budget.ts", ".github/test-budget.json",
 	);
-	// HERMETIC1 (50bdf7c3bb): suite-metrics.py imports kitlib_tmp and runs every file through
+	// MAINRED3 (ompkit-kup44.4.1), after HERMETIC1 50bdf7c3bb: suite-metrics.py imports kitlib_tmp and runs every file through
 	// suite-hermetic-env.sh; a judge archive without them can never produce PASS evidence. Older
 	// bases carry neither, so only the ones the base tree has are archived.
 	const hermetic = git(repo, ["ls-tree", "--name-only", base, "--", "scripts/suite-hermetic-env.sh", "scripts/kitlib_tmp.py"]);

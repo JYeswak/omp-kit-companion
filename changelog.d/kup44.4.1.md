@@ -1,0 +1,1 @@
+`omp-kit land` archives the hermetic suite runner files (scripts/suite-hermetic-env.sh, scripts/kitlib_tmp.py) with its full-suite judge when the base tree has them, so landing no longer ends LAND_FULL_SUITE_UNRUN (exit 77) on bases that carry the HERMETIC1 suite runner; older bases keep the old judge set.
