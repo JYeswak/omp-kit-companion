@@ -57,7 +57,6 @@ for name in options.allow_env:
     if name in reserved:
         refuse("allowlist cannot override wrapper variable " + name)
 
-os.umask(0o077)
 archive_input = Path(options.archive)
 scratch_input = Path(options.scratch)
 if not archive_input.is_absolute() or not scratch_input.is_absolute():
@@ -71,6 +70,22 @@ except OSError as error:
     refuse("archive or scratch path is unavailable: " + str(error))
 if not archive.is_dir() or not scratch.is_dir() or archive == Path("/") or scratch == Path("/"):
     refuse("archive and scratch must be non-root directories")
+if "\n" in options.suite or "\r" in options.suite:
+    refuse("suite identifier must be one line")
+
+# The environment scrub and the write/network fence are opt-in (OMP_KIT_SUITE_HERMETIC_ENABLE=1) until
+# ompkit-kup44.4's own control, "the full declared suite on one tree is GREEN" under them, passes. Measured
+# 2026-10-30 on published 32ad93461e: the main-role full suite under the scrub failed 100 bun tests and 10 script
+# or python suites. A scratch HOME hides the linked omp install and the flywheel probe, and the scratch git link
+# makes git look for its templates and helpers in scratch. tests/cli/profile-rules.test.ts passes 14 of 14 run
+# directly and fails 4 under this helper, and its 077 umask fails the mode-preserving audit, migrate, repair and
+# operator-snapshot tests. Without the opt-in a suite runs with the caller's environment and umask, as in 0.2.80;
+# full-suite-verdict-incomplete.test.sh enables the scrub and the fence and keeps proving both.
+if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") != "1":
+    print("SUITE-HERMETIC suite=" + options.suite + " env=inherited fence=off-optin", flush=True)
+    os.execvp(command[0], command)
+
+os.umask(0o077)
 
 home = scratch / "home"
 xdg_config = home / ".config"
@@ -221,11 +236,10 @@ policy = "\n".join((
     "(deny network*)",
 ))
 policy_digest = hashlib.sha256(policy.encode("utf-8")).hexdigest()
-# The macOS write/network fence is opt-in (OMP_KIT_SUITE_FENCE_ENABLE=1) until ompkit-kup44.4's own control,
-# "the full declared suite on one tree is GREEN under the fence", passes. Measured 2026-10-30 in exact exports:
-# a fenced suite cannot exec setuid /bin/ps, a nested sandbox-exec fails rc 71, and loopback/unix-socket binds,
-# test-runner.test.ts and kitlib_ratchet_test.py break under it. The environment scrub above always applies;
-# full-suite-verdict-incomplete.test.sh enables the fence and keeps proving its write and network denials.
+# With the scrub enabled, the macOS write/network fence is a second opt-in (OMP_KIT_SUITE_FENCE_ENABLE=1).
+# Measured 2026-10-30 in exact exports: a fenced suite cannot exec setuid /bin/ps, a nested sandbox-exec fails
+# rc 71, and loopback/unix-socket binds, test-runner.test.ts and kitlib_ratchet_test.py break under it.
+# full-suite-verdict-incomplete.test.sh enables both and keeps proving the fence's write and network denials.
 if sys.platform == "darwin" and os.environ.get("OMP_KIT_SUITE_FENCE_ENABLE") == "1":
     sandbox = "/usr/bin/sandbox-exec"
     if not Path(sandbox).is_file():
@@ -236,8 +250,6 @@ else:
     executable = command
     fence = "darwin-off-optin" if sys.platform == "darwin" else "platform-default"
 
-if "\n" in options.suite or "\r" in options.suite:
-    refuse("suite identifier must be one line")
 print("SUITE-HERMETIC suite=" + options.suite
       + " allow=" + ",".join(allow_names)
       + " home=" + json.dumps(str(home))

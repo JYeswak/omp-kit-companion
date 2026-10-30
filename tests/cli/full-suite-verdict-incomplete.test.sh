@@ -8,10 +8,12 @@
 # FULLSUITEPAR1 (ompkit-9t6f2): parallel shell suites give the serial
 # GREEN/RED lines and counts, and a hung parallel suite is killed by the deadline and named.
 set -u
-# HERMETIC1 (ompkit-kup44.4): the macOS fence is opt-in for every other suite until its full-suite control passes;
-# this suite turns it on so its write and network denials stay proven on every run.
+# HERMETIC1 (ompkit-kup44.4): the environment scrub and the macOS fence are opt-in for every other suite until
+# their full-suite control passes; this suite turns both on so the scrub and the fence's write and network denials
+# stay proven on every run.
+OMP_KIT_SUITE_HERMETIC_ENABLE=1
 OMP_KIT_SUITE_FENCE_ENABLE=1
-export OMP_KIT_SUITE_FENCE_ENABLE
+export OMP_KIT_SUITE_HERMETIC_ENABLE OMP_KIT_SUITE_FENCE_ENABLE
 
 KITROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 # FULL_SUITE_VERDICT_UNDER_TEST lets a planted-negative run point at a scratch copy of the judge.
@@ -579,6 +581,7 @@ for mode, allow in (("scrubbed", False), ("control", True)):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "TMPDIR": os.environ["TMPDIR"],
         "LANG": os.environ.get("LANG", "C"),
+        "OMP_KIT_SUITE_HERMETIC_ENABLE": "1",
         "FLEET_GUARD_LIVE": "1",
         "AGENT_MAIL_TOKEN": token,
         "HERMETIC_SENTINEL_PORT": str(port),
