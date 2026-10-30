@@ -1,0 +1,111 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_f6184711b37be42a0f399df1a7d639538c199db551074d4c3895e89418018d00",
+ "limitations": [
+  "Named build acceptance and actual fixture-local native writes only. Full CLI run RED; 13 failures reproduced on unmodified earlier HEAD, seven unattributed. No full-suite PASS, publication, installed activation or self-close."
+ ],
+ "operation": "lanesplit-source-handoff-build",
+ "parameters": {
+  "bead": "ompkit-kup44.7.2",
+  "source_commit": "b30569e1b5aa21b7c677888749037294a9351e38"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "bead": "ompkit-kup44.7.2",
+  "before": {
+   "file_stdin_failures": 2,
+   "file_stdin_regressions_rc": 1,
+   "original_boundary_rc": 1,
+   "original_boundary_stdout": "br-shim: 63 pass 0 fail\nLANESPLIT1b observed missing_rc=0 missing_forwarded=1 wrong_sha_rc=0 wrong_forwarded=1 exact_green_rc=0 exact_forwarded=1\n",
+   "permanent_regressions_rc": 1,
+   "review_counterexamples_rc": 1,
+   "review_failures": 4
+  },
+  "broader_cli": {
+   "base": "e0d2829a09c380ca46bdbed2799ac542ab18e618",
+   "fail": 20,
+   "full_stream_bytes": 360060,
+   "full_stream_sha256": "e5cfe58e46cd16183027855cd48249d320091332c6b76b6c72ef82346e459a4d",
+   "limitation": "Earlier precommit overlay, before final tty and fixture-root normalization; not a verdict on the saved source commit. No complete suite PASS claimed.",
+   "overlay_sha256": {
+    "changelog.d/ompkit-kup44.7.2.md": "b97a74f5b53f57bb31c1cafb352747a97dc902e124f2157cebe47936541a4a6f",
+    "scripts/br-shim.sh": "536aea6b0c7ac4f270b9de02b5f4cb540ac6a22eb45fbee164124e10e111882b",
+    "scripts/br-update-lint.py": "952fbe4d48d2e6d14208ed8c1b11c5d225192dcbc6024136786f649569d9ce63",
+    "scripts/kitlib-ratchet-baseline.json": "ff273b3d83e2151c26092f91418e5774cfc1229880ea043edc0f25e6c6299f9f",
+    "tests/cli/br-shim.test.sh": "9ed8c07f1b8ab3ace9c382674fe29e2163218b6f0e61bc8878c9c0fdd12d64aa"
+   },
+   "pass": 3270,
+   "rc": 1,
+   "skip": 21
+  },
+  "code_repo": "/Users/josh/Developer/omp-kit-companion",
+  "consumer": "non-author build grader and lead publisher for this source bead",
+  "final_exact_export": {
+   "base": "85cdb5edde530e052e85cdcb5e33a1fd9647e70b",
+   "legacy_helper_rc": 0,
+   "legacy_helper_stderr": ".......\n----------------------------------------------------------------------\nRan 7 tests in 3.747s\n\nOK\n",
+   "manifest_check_rc": 0,
+   "manifest_rc": 0,
+   "native_smoke_rc": 0,
+   "stderr": "",
+   "stdout": "br-shim: 89 pass 0 fail\nnative persisted readback: absent-GREEN refused=4 zero-comments; exact-GREEN file+stdin admitted=2 body-and-author exact\n"
+  },
+  "non_author_pregrade": {
+   "ac_sha256": "b616b1ba2718902bc63dbcbac2493afc7427c070dbb7cac8fe4c4066980e7fb8",
+   "at": "2026-10-30T07:16:02Z",
+   "author": "CopperTrout",
+   "bead": "ompkit-kup44.7.2",
+   "candidate_commit": "b30569e1b5aa21b7c677888749037294a9351e38",
+   "grader": "grader-kup44_7_2",
+   "grader_family": "openai-codex",
+   "grader_model": "openai-codex/gpt-6-luna",
+   "items": [
+    {
+     "ac": "AC1",
+     "phase": "build",
+     "status": "PASS"
+    }
+   ],
+   "landing_ref": "origin/main",
+   "landing_sha": "0c179d3799a5de390e89641a78bcad9c9f631ddd",
+   "repo": "/Users/josh/Developer/omp-kit",
+   "schema": "omp-kit.pregrade.v1",
+   "verdict": "PASS",
+   "wave": "W-pregrade-kup44_7_2-20261030T071410Z"
+  },
+  "packet": {
+   "fragments": 0,
+   "imports": 0,
+   "kitlib": 0,
+   "pysafe": 0,
+   "readme": 0,
+   "regexploit": 0,
+   "sources": 0,
+   "tempsafe": 0
+  },
+  "retention": "minimal signed integrity record retained with the source history; disposable runtime captures retired after handoff",
+  "scope": "source build acceptance, not a full-suite PASS, publication or installed activation",
+  "shellcheck": {
+   "all_required_shell_files_rc": 0,
+   "changed_files_rc": 0,
+   "version": "0.9.0"
+  },
+  "source_commit": "b30569e1b5aa21b7c677888749037294a9351e38",
+  "unmodified_head_control": {
+   "commit": "e0d2829a09c380ca46bdbed2799ac542ab18e618",
+   "fail": 13,
+   "files": [
+    "tests/cli/fresh-gate.test.ts",
+    "tests/cli/ergo1-r-015.test.ts",
+    "tests/cli/package-release.test.ts",
+    "tests/cli/full-suite-verdict-sbh.test.ts"
+   ],
+   "limitation": "Thirteen of the broader failures reproduced without this feature; remaining seven were not attributed.",
+   "pass": 20,
+   "rc": 1,
+   "skip": 3,
+   "stream_sha256": "71390b2006061fb6c780026a7f59918173a6376e96f422698379187241775495"
+  }
+ }
+}
