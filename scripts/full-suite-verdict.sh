@@ -553,9 +553,11 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 			set -- $b_counts
 			b_tests=$1; b_failed=$2
 			cat "$BUN_OUT"
-			echo "BUN rc=$bun_rc" >>"$SUITE_STATUS"
-			echo "BUN_RAN $b_tests" >>"$SUITE_STATUS"
-			echo "BUN_FAIL $b_failed" >>"$SUITE_STATUS"
+			{
+				echo "BUN rc=$bun_rc"
+				echo "BUN_RAN $b_tests"
+				echo "BUN_FAIL $b_failed"
+			} >>"$SUITE_STATUS"
 			[ "$bun_rc" -eq 0 ] || failed=1
 		fi
 		# FULLSUITEPAR1 (ompkit-9t6f2): SHELL_JOBS workers share the shell suites. A worker claims the
