@@ -221,7 +221,12 @@ policy = "\n".join((
     "(deny network*)",
 ))
 policy_digest = hashlib.sha256(policy.encode("utf-8")).hexdigest()
-if sys.platform == "darwin":
+# The macOS write/network fence is opt-in (OMP_KIT_SUITE_FENCE_ENABLE=1) until ompkit-kup44.4's own control,
+# "the full declared suite on one tree is GREEN under the fence", passes. Measured 2026-10-30 in exact exports:
+# a fenced suite cannot exec setuid /bin/ps, a nested sandbox-exec fails rc 71, and loopback/unix-socket binds,
+# test-runner.test.ts and kitlib_ratchet_test.py break under it. The environment scrub above always applies;
+# full-suite-verdict-incomplete.test.sh enables the fence and keeps proving its write and network denials.
+if sys.platform == "darwin" and os.environ.get("OMP_KIT_SUITE_FENCE_ENABLE") == "1":
     sandbox = "/usr/bin/sandbox-exec"
     if not Path(sandbox).is_file():
         refuse("macOS sandbox-exec is unavailable")
@@ -229,7 +234,7 @@ if sys.platform == "darwin":
     fence = "darwin-write-network"
 else:
     executable = command
-    fence = "platform-default"
+    fence = "darwin-off-optin" if sys.platform == "darwin" else "platform-default"
 
 if "\n" in options.suite or "\r" in options.suite:
     refuse("suite identifier must be one line")

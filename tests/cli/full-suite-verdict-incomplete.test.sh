@@ -8,6 +8,10 @@
 # FULLSUITEPAR1 (ompkit-9t6f2): parallel shell suites give the serial
 # GREEN/RED lines and counts, and a hung parallel suite is killed by the deadline and named.
 set -u
+# HERMETIC1 (ompkit-kup44.4): the macOS fence is opt-in for every other suite until its full-suite control passes;
+# this suite turns it on so its write and network denials stay proven on every run.
+OMP_KIT_SUITE_FENCE_ENABLE=1
+export OMP_KIT_SUITE_FENCE_ENABLE
 
 KITROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 # FULL_SUITE_VERDICT_UNDER_TEST lets a planted-negative run point at a scratch copy of the judge.

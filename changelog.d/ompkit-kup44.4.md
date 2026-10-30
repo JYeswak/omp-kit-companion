@@ -1,1 +1,1 @@
-Test runners now scrub suite environments, isolate HOME/XDG/Git config, set a Git ceiling, and fence writes/network on macOS; unsafe inherited Git/tracker authority fails before tests.
+Test runners now scrub suite environments, isolate HOME/XDG/Git config and set a Git ceiling; unsafe inherited Git/tracker authority fails before tests. The macOS write/network fence for suites is opt-in (OMP_KIT_SUITE_FENCE_ENABLE=1) until the full suite passes under it; its denials stay tested on every run.

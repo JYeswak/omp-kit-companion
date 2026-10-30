@@ -1,0 +1,625 @@
+diff --git a/scripts/suite-hermetic-env.sh b/scripts/suite-hermetic-env.sh
+index c8f36ede25..b86b7f4675
+--- a/scripts/suite-hermetic-env.sh
++++ b/scripts/suite-hermetic-env.sh
+@@ -1,12 +1,16 @@
+ #!/bin/sh
+ # Execute one measured suite with isolated environment and filesystem/network authority.
+ # The suite-metrics producer supplies an owned scratch directory and its exact archive root.
++# A suite started inside an enclosing suite fence (OMP_KIT_SUITE_FENCE, set only by this helper)
++# inherits that sandbox: macOS refuses a second sandbox_apply, and the enclosing policy keeps
++# applying to every descendant, so the nested suite runs as fence=inherited, never unfenced.
+ exec python3 - "$@" <<'PY'
+ import argparse
+ import hashlib
+ import json
+ import os
+ from pathlib import Path
++import shlex
+ import shutil
+ import socket
+ import subprocess
+@@ -19,6 +23,16 @@ def refuse(message: str) -> None:
+     raise SystemExit(125)
+ 
+ 
++def sandboxed() -> bool:
++    import ctypes
++    try:
++        check = ctypes.CDLL("/usr/lib/libSystem.dylib").sandbox_check
++    except (OSError, AttributeError):
++        return False
++    check.restype = ctypes.c_int
++    return check(os.getpid(), None, 0) == 1
++
++
+ for protected in ("GIT_DIR", "GIT_WORK_TREE", "BEADS_DB"):
+     if protected in os.environ:
+         refuse("caller " + protected + " is set")
+@@ -42,13 +56,20 @@ command = sys.argv[separator + 1:]
+ if not command:
+     refuse("missing suite command")
+ 
++inherited_fence = os.environ.get("OMP_KIT_SUITE_FENCE", "")
++if inherited_fence and (len(inherited_fence) != 64
++                        or any(c not in "0123456789abcdef" for c in inherited_fence)
++                        or sys.platform != "darwin" or not sandboxed()):
++    refuse("caller OMP_KIT_SUITE_FENCE is set outside a suite fence")
++
+ reserved = {
+     "PATH", "TMPDIR", "TMP", "TEMP", "LANG", "HOME", "XDG_CONFIG_HOME",
+     "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "GIT_CONFIG_GLOBAL",
+     "GIT_CONFIG_NOSYSTEM", "GIT_CEILING_DIRECTORIES", "GIT_TERMINAL_PROMPT",
+     "BUN_INSTALL", "BUN_CONFIG_FILE", "KITLIB_TMP_ROOT", "KITROOT",
+     "OMP_KIT_CASE_CWD", "OMP_KIT_TEST_WORK_ROOT", "OMP_KIT_OMP_SRC_FETCH",
+-    "OMP_KIT_DISK_OBSERVER", "KIT_TEST_LOOPBACK_PORT", "GIT_DIR", "GIT_WORK_TREE", "BEADS_DB",
++    "OMP_KIT_DISK_OBSERVER", "KIT_TEST_LOOPBACK_PORT", "OMP_KIT_SUITE_FENCE",
++    "GIT_DIR", "GIT_WORK_TREE", "BEADS_DB",
+ }
+ for name in options.allow_env:
+     if (not name or not name.isascii() or not (name[0].isalpha() or name[0] == "_")
+@@ -107,6 +128,10 @@ if loopback_port_option is not None:
+     if not 1024 <= loopback_port_option <= 65535 or loopback_port_option == 8765:
+         refuse("invalid suite loopback port " + str(loopback_port_option))
+     loopback_port = loopback_port_option
++    # Inside an enclosing fence only that fence's loopback port is reachable.
++    if inherited_fence and str(loopback_port) != os.environ.get("KIT_TEST_LOOPBACK_PORT", ""):
++        refuse("the enclosing suite fence owns loopback port "
++               + (os.environ.get("KIT_TEST_LOOPBACK_PORT") or "none") + ", not " + str(loopback_port))
+ else:
+     try:
+         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+@@ -164,14 +189,19 @@ if sys.platform == "darwin":
+                 break
+         if developer_git is None:
+             refuse("system git is an xcrun shim and no developer Git executable was found")
+-        git_link = python_tools / "git"
+-        if git_link.is_symlink():
+-            if git_link.resolve() != developer_git:
+-                refuse("suite scratch git link points elsewhere")
+-        elif git_link.exists():
+-            refuse("suite scratch git path is not a symlink")
++        # A wrapper, not a symlink: Git derives its exec-path and templates from the path it was
++        # started by, so a scratch symlink lost the hooks template and fell back to the /usr/bin
++        # xcrun helper shims (git-receive-pack), whose cache writes the fence denies.
++        git_shim = python_tools / "git"
++        shim_body = "#!/bin/sh\nexec " + shlex.quote(str(developer_git)) + ' "$@"\n'
++        if git_shim.is_symlink():
++            refuse("suite scratch git path is a symlink")
++        elif git_shim.exists():
++            if git_shim.read_text(encoding="utf-8") != shim_body:
++                refuse("suite scratch git shim points elsewhere")
+         else:
+-            git_link.symlink_to(developer_git)
++            git_shim.write_text(shim_body, encoding="utf-8")
++            os.chmod(git_shim, 0o700)
+     path_prefix = str(python_tools) + os.pathsep
+ 
+ path_value = path_prefix + original_path
+@@ -207,7 +237,6 @@ for name in options.allow_env:
+     if name in os.environ:
+         env[name] = os.environ[name]
+ 
+-allow_names = sorted(env)
+ policy = "\n".join((
+     "(version 1)",
+     "(allow default)",
+@@ -217,11 +246,16 @@ policy = "\n".join((
+     '(allow network-bind (local tcp "localhost:' + str(loopback_port) + '"))',
+     '(allow network-inbound (local tcp "localhost:' + str(loopback_port) + '"))',
+     '(allow network-outbound (remote tcp "localhost:' + str(loopback_port) + '"))',
++    '(allow process-exec (literal "/bin/ps") (with no-sandbox))',
+     "(deny file-write*)",
+     "(deny network*)",
+ ))
+ policy_digest = hashlib.sha256(policy.encode("utf-8")).hexdigest()
+-if sys.platform == "darwin":
++if inherited_fence:
++    executable = command
++    fence = "inherited"
++    policy_digest = inherited_fence
++elif sys.platform == "darwin":
+     sandbox = "/usr/bin/sandbox-exec"
+     if not Path(sandbox).is_file():
+         refuse("macOS sandbox-exec is unavailable")
+@@ -230,6 +264,9 @@ if sys.platform == "darwin":
+ else:
+     executable = command
+     fence = "platform-default"
++if fence != "platform-default":
++    env["OMP_KIT_SUITE_FENCE"] = policy_digest
++allow_names = sorted(env)
+ 
+ if "\n" in options.suite or "\r" in options.suite:
+     refuse("suite identifier must be one line")
+diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
+index 2a345919a9..bd878f201b
+--- a/scripts/suite-metrics.py
++++ b/scripts/suite-metrics.py
+@@ -54,6 +54,32 @@ def judge_identity(root: Path | str, scope: str) -> str:
+     return digest.hexdigest()
+ 
+ 
++def _resolved(command: list[str]) -> str:
++    result = run(command, deadline_s=10)
++    if result.rc != 0 or result.timed_out or result.truncated:
++        return ""
++    return result.stdout.decode("utf-8", errors="replace").strip()
++
++
++def kit_omp_source_cache() -> str:
++    """The OMP source cache the kit's own resolver names for this caller, or "" when unknown."""
++    resolver = Path(__file__).resolve().parent.parent / "src" / "omp-source-cache.ts"
++    if not resolver.is_file():
++        return ""
++    code = ("const m = await import(" + json.dumps(str(resolver)) + ");"
++            " console.log(m.ompSourceCacheRoot(process.env) ?? '');")
++    return _resolved(["bun", "--no-env-file", "--config=/dev/null", "-e", code])
++
++
++def kit_bv_readiness_probe() -> str:
++    """The bv readiness probe bead_lint's own resolver names for this caller, or "" when unknown."""
++    scripts = Path(__file__).resolve().parent
++    if not (scripts / "bead_lint.py").is_file():
++        return ""
++    return _resolved([sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
++                      "import bead_lint; print(bead_lint.PROBE_DEFAULT)", str(scripts)])
++
++
+ def runtime_identity() -> str:
+     """Bind executable versions and the environment inputs admitted to the full-suite runner."""
+     bun = run(["bun", "--version"], deadline_s=10)
+@@ -180,10 +206,19 @@ def execute(args: argparse.Namespace) -> int:
+             "sh", helper, "--archive", os.path.abspath(args.cwd),
+             "--scratch", scratch, "--suite", args.path,
+         ]
+-        # Tern-backed tests need their OMP source cache despite the isolated suite HOME.
+-        # The suite fence still denies writes outside its scratch and archive.
+-        if os.environ.get("OMP_KIT_OMP_SRC_CACHE"):
+-            wrapped.extend(["--allow-env", "OMP_KIT_OMP_SRC_CACHE"])
++        # Suites run with a scratch HOME. A read-only caller input reaches them when explicitly
++        # set, else when the kit's own resolver names one that exists; the suite fence still
++        # denies writes outside its scratch and archive.
++        for name, resolve, present in (
++            ("OMP_KIT_OMP_SRC_CACHE", kit_omp_source_cache, os.path.isdir),
++            ("BV_READINESS_PROBE", kit_bv_readiness_probe, os.path.isfile),
++        ):
++            if not os.environ.get(name):
++                resolved = resolve()
++                if resolved and present(resolved):
++                    os.environ[name] = resolved
++            if os.environ.get(name):
++                wrapped.extend(["--allow-env", name])
+         if args.loopback_port is not None:
+             wrapped.extend(["--loopback-port", str(args.loopback_port)])
+         wrapped.extend(["--", *command])
+diff --git a/scripts/pre-push-gate.sh b/scripts/pre-push-gate.sh
+index 5bce17d4c4..b5efb84cd8 100644
+--- a/scripts/pre-push-gate.sh
++++ b/scripts/pre-push-gate.sh
+@@ -370,6 +370,8 @@ else
+ 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --head "$local_sha"
+ fi
+ # Exercise the committed checker contracts before running the candidate tree's gate.
++# This loop runs unfenced: full-suite-verdict-incomplete's HERMETIC1 fresh-fence negatives are
++# NOT_RUN inside the suite fence (macOS cannot nest sandboxes), so they are proven here.
+ mkdir -p "$gate_scripts/var/agent-tmp"
+ for checker_test in \
+ 	publishability.test.sh \
+@@ -381,6 +383,7 @@ for checker_test in \
+ 	commit-msg-bead.test.sh \
+ 	check-pushed-beads.test.sh \
+ 	release-train.test.sh \
++	full-suite-verdict-incomplete.test.sh \
+ 	check-staged-br-init.test.sh
+ do
+ 	test_path="$gate_scripts/tests/cli/$checker_test"
+diff --git a/tests/cli/full-suite-verdict-rerun.test.sh b/tests/cli/full-suite-verdict-rerun.test.sh
+index 6f2913e43f..544696e93b
+--- a/tests/cli/full-suite-verdict-rerun.test.sh
++++ b/tests/cli/full-suite-verdict-rerun.test.sh
+@@ -4,7 +4,7 @@
+ . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
+ # full-suite-verdict-rerun.test.sh — FSRERUN1 (ompkit-t7cn7.4).
+ # --rerun-reason TEXT reruns a cached FAIL with a recorded reason instead of a hand file move:
+-# the old entry is kept as <tree>.superseded-<utc>.{json,log}, the suite runs again, and the
++# the old record is kept as <record>.superseded-<utc>.{json,log}, the suite runs again, and the
+ # new entry records the reason, the actor and the superseded entry's digest. Without the flag
+ # a cached FAIL is still reused (nothing runs). A cached PASS is never rerun by the flag.
+ set -u
+@@ -24,16 +24,21 @@ fail=0
+ ok() { pass=$((pass + 1)); echo "ok - $1"; }
+ not_ok() { fail=$((fail + 1)); echo "not ok - $1"; }
+ 
+-# Fixture repo: one python suite that FAILs only when FSRERUN1_RED=1, printing the run marker
+-# so a rerun is distinguishable from a reuse in the cached log.
++# Fixture repo: one python suite that FAILs only when its out-of-tree control file says RED=1,
++# printing the run marker so a rerun is distinguishable from a reuse in the cached log. The
++# control is a file, not an environment variable: the judge runs suites in a scrubbed
++# environment (HERMETIC1), and reads outside the archive stay allowed.
++control="$TMP/fsrerun1-control"
+ repo="$TMP/repo"
+ rm -rf "$repo" "$repo.cache"
+ mkdir -p "$repo/scripts" "$repo/tests/cli" "$repo.cache"
+ cp "$KITROOT_DIR/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
+-cat >"$repo/tests/cli/fixture_test.py" <<'PYEOF'
+-import os, sys
+-print("FSRERUN1-RUN marker=" + os.environ.get("FSRERUN1_RUN", "none"), flush=True)
+-sys.exit(1 if os.environ.get("FSRERUN1_RED") == "1" else 0)
++cat >"$repo/tests/cli/fixture_test.py" <<PYEOF
++import sys
++from pathlib import Path
++red, run = Path("$control").read_text(encoding="utf-8").split()
++print("FSRERUN1-RUN marker=" + run, flush=True)
++sys.exit(1 if red == "1" else 0)
+ PYEOF
+ git -C "$repo" init -q
+ git -C "$repo" config user.name "FSRERUN1 test"
+@@ -42,6 +47,17 @@ git -C "$repo" add -A
+ git -C "$repo" commit -q -m "[test] FSRERUN1 fixture"
+ tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+ cache="$repo.cache"
++# The judge keys records by tree, role, judging code and runtime; resolve the same record path.
++judge_dir=$(CDPATH='' cd -- "$(dirname -- "$VERDICT")" && pwd -P) || exit 1
++judge_root=$(CDPATH='' cd -- "$judge_dir/.." && pwd -P) || exit 1
++checks=$(python3 "$judge_dir/suite-metrics.py" identity --root "$judge_root" --scope full) || exit 1
++runtime=$(python3 "$judge_dir/suite-metrics.py" runtime) || exit 1
++entry=$(python3 "$judge_dir/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree" \
++	--role base --checks "$checks" --runtime "$runtime" --judge-root "$judge_root" \
++	--cache-dir "$cache") || { echo "test harness: cannot resolve the verdict record path"; exit 1; }
++record=${entry%.json}
++# fault RED RUN: the environment the next suite run observes (RED=1 makes it FAIL).
++fault() { printf '%s %s\n' "$1" "$2" >"$control"; }
+ 
+ run_verdict() {
+ 	out="$TMP/$1.out"
+@@ -54,32 +70,31 @@ run_verdict() {
+ VERDICT_ENV=""
+ 
+ # 1. Seed a cached FAIL: the suite runs and the verdict is recorded.
+-VERDICT_ENV="FSRERUN1_RED=1 FSRERUN1_RUN=first"
++fault 1 first
+ run_verdict seed
+-VERDICT_ENV=""
+ if [ "$rc" -ne 0 ]; then ok "seed FAIL exits non-pass (rc=$rc)"; else not_ok "seed FAIL exited 0"; cat "$out"; fi
+-if grep -F '"verdict": "FAIL"' "$cache/$tree.json" >/dev/null 2>&1; then ok "seed caches FAIL verdict"; else not_ok "seed cached no FAIL verdict"; cat "$out"; fi
++if grep -F '"verdict": "FAIL"' "$record.json" >/dev/null 2>&1; then ok "seed caches FAIL verdict"; else not_ok "seed cached no FAIL verdict"; cat "$out"; fi
+ 
+ # 2. Replay: without the flag the cached FAIL is reused and nothing runs, even though the
+ # environment fault is gone (the rerun would pass if it ran).
+-VERDICT_ENV="FSRERUN1_RUN=second"
++fault 0 second
+ run_verdict replay
+-VERDICT_ENV=""
+ if [ "$rc" -ne 0 ] && grep -F 'VERDICT REUSED FAIL' "$out" >/dev/null; then
+ 	ok "replay without flag reuses FAIL (rc=$rc)"
+ else
+ 	not_ok "replay without flag (rc=$rc)"; cat "$out"
+ fi
+-if grep -F 'marker=first' "$cache/$tree.log" >/dev/null && ! grep -F 'marker=second' "$cache/$tree.log" >/dev/null; then
++if grep -F 'marker=first' "$record.log" >/dev/null && ! grep -F 'marker=second' "$record.log" >/dev/null; then
+ 	ok "replay without flag executed nothing (log still shows the first run)"
+ else
+-	not_ok "replay without flag ran the suite"; grep -F 'FSRERUN1-RUN' "$cache/$tree.log"
++	not_ok "replay without flag ran the suite"; grep -F 'FSRERUN1-RUN' "$record.log"
+ fi
+ 
+ # 3. Rerun: with the flag the suite runs again, the old entry is kept as superseded, and the
+ # new entry records reason, actor and the old digest.
+-old_digest=$(shasum -a 256 "$cache/$tree.json" | cut -d' ' -f1)
+-VERDICT_ENV="FSRERUN1_RUN=second AGENT_NAME=FSRERUN1-probe"
++old_digest=$(shasum -a 256 "$record.json" | cut -d' ' -f1)
++fault 0 second
++VERDICT_ENV="AGENT_NAME=FSRERUN1-probe"
+ run_verdict rerun --rerun-reason 'env fault'
+ VERDICT_ENV=""
+ if [ "$rc" -eq 0 ] && grep -F 'VERDICT PASS' "$out" >/dev/null; then
+@@ -87,7 +102,7 @@ if [ "$rc" -eq 0 ] && grep -F 'VERDICT PASS' "$out" >/dev/null; then
+ else
+ 	not_ok "rerun with reason (rc=$rc)"; cat "$out"
+ fi
+-sup_json=$(find "$cache" -maxdepth 1 -name "$tree.superseded-*.json" | sort | head -n 1)
++sup_json=$(find "$cache" -maxdepth 1 -name "${record##*/}.superseded-*.json" | sort | head -n 1)
+ sup_log=$sup_json
+ case "$sup_json" in *.json) sup_log=${sup_json%.json}.log ;; esac
+ if [ -n "$sup_json" ] && [ -f "$sup_json" ] && [ -f "$sup_log" ]; then
+@@ -100,10 +115,10 @@ if [ -n "$sup_json" ] && [ "$(shasum -a 256 "$sup_json" | cut -d' ' -f1)" = "$ol
+ else
+ 	not_ok "superseded entry digest mismatch"
+ fi
+-if grep -F 'marker=second' "$cache/$tree.log" >/dev/null; then
++if grep -F 'marker=second' "$record.log" >/dev/null; then
+ 	ok "rerun log shows the second run"
+ else
+-	not_ok "rerun log shows no second run"; grep -F 'FSRERUN1-RUN' "$cache/$tree.log"
++	not_ok "rerun log shows no second run"; grep -F 'FSRERUN1-RUN' "$record.log"
+ fi
+ if python3 -c '
+ import json, sys
+@@ -115,24 +130,23 @@ assert r.get("actor") == "FSRERUN1-probe", r
+ assert r.get("superseded_digest") == sys.argv[2], r
+ assert r.get("superseded_entry", "").endswith(".json"), r
+ assert e.get("verdict") == "PASS", e.get("verdict")
+-' "$cache/$tree.json" "$old_digest"; then
++' "$record.json" "$old_digest"; then
+ 	ok "new entry records reason, actor and old digest"
+ else
+-	not_ok "new entry rerun block"; cat "$cache/$tree.json"
++	not_ok "new entry rerun block"; cat "$record.json"
+ fi
+ 
+ # 4. Planted negative: an empty reason is refused and the cache is untouched.
+ before=$(find "$cache" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | shasum -a 256 | cut -d' ' -f1)
+-VERDICT_ENV="FSRERUN1_RUN=third"
++fault 0 third
+ run_verdict empty --rerun-reason ''
+-VERDICT_ENV=""
+ if [ "$rc" -ne 0 ] && grep -Fq 'non-empty reason' "$out"; then
+ 	ok "empty reason is refused (rc=$rc)"
+ else
+ 	not_ok "empty reason (rc=$rc)"; cat "$out"
+ fi
+ after=$(find "$cache" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | shasum -a 256 | cut -d' ' -f1)
+-if [ "$before" = "$after" ] && ! grep -F 'marker=third' "$cache/$tree.log" >/dev/null; then
++if [ "$before" = "$after" ] && ! grep -F 'marker=third' "$record.log" >/dev/null; then
+ 	ok "refused rerun touches nothing cached"
+ else
+ 	not_ok "refused rerun changed the cache"; ls "$cache"
+@@ -140,18 +154,17 @@ fi
+ 
+ # 5. Paired control: a cached PASS with the flag is reused, not rerun, even though the
+ # suite would now FAIL if it ran.
+-VERDICT_ENV="FSRERUN1_RED=1 FSRERUN1_RUN=third"
++fault 1 third
+ run_verdict passflag --rerun-reason 'env fault'
+-VERDICT_ENV=""
+ if [ "$rc" -eq 0 ] && grep -F 'VERDICT REUSED PASS' "$out" >/dev/null; then
+ 	ok "cached PASS with flag is reused (rc=$rc)"
+ else
+ 	not_ok "cached PASS with flag (rc=$rc)"; cat "$out"
+ fi
+-if ! grep -F 'marker=third' "$cache/$tree.log" >/dev/null; then
++if ! grep -F 'marker=third' "$record.log" >/dev/null; then
+ 	ok "reused PASS executed nothing"
+ else
+-	not_ok "flag reran a cached PASS"; grep -F 'FSRERUN1-RUN' "$cache/$tree.log"
++	not_ok "flag reran a cached PASS"; grep -F 'FSRERUN1-RUN' "$record.log"
+ fi
+ 
+ echo "full-suite-verdict-rerun: pass=$pass fail=$fail"
+diff --git a/tests/cli/full-suite-verdict-incomplete.test.sh b/tests/cli/full-suite-verdict-incomplete.test.sh
+index 7d3475a941..b40f76255a
+--- a/tests/cli/full-suite-verdict-incomplete.test.sh
++++ b/tests/cli/full-suite-verdict-incomplete.test.sh
+@@ -21,8 +21,14 @@ kitlib_tmp TMP full-suite-verdict-incomplete-test || exit 1
+ 
+ pass=0
+ fail=0
++not_run_count=0
+ ok() { pass=$((pass + 1)); echo "ok - $1"; }
+ not_ok() { fail=$((fail + 1)); echo "not ok - $1"; }
++# not_run LABEL: a fresh-fence negative skipped under a verified enclosing fence. Never a pass.
++not_run() {
++	not_run_count=$((not_run_count + 1))
++	echo "NOT_RUN - $1 (enclosing suite fence $enclosing_fence: macOS cannot nest sandboxes; pre-push-gate.sh's unfenced checker-contract loop proves it)"
++}
+ 
+ # mkrepo_begin NAME: empty fixture tree; addfile REL BODY adds files; mkrepo_commit commits them.
+ mkrepo_begin() {
+@@ -238,6 +244,10 @@ expect_runner_denial() {
+ 	row=$2
+ 	needle=$3
+ 	cache="$repo.cache"
++	if [ -n "$enclosing_fence" ]; then
++		not_run "$label is RED in the real runner with the denied path named"
++		return 0
++	fi
+ 	if [ "$rc" -ne 0 ] && grep -F 'VERDICT FAIL' "$out" >/dev/null \
+ 		&& grep -F "$row" "$cache/$tree.log" >/dev/null 2>&1 \
+ 		&& grep -F "$needle" "$cache/$tree.log" >/dev/null 2>&1 \
+@@ -250,6 +260,35 @@ expect_runner_denial() {
+ 		[ ! -f "$cache/$tree.log" ] || cat "$cache/$tree.log"
+ 	fi
+ }
++# HERMETIC1 under an enclosing suite fence: macOS cannot apply a second sandbox, so a suite
++# started inside the fenced runner inherits the enclosing policy (fence=inherited). The
++# fresh-fence write negatives below plant their targets in this suite's own scratch, which
++# the enclosing fence permits, so there they are NOT_RUN, never counted as a pass; the unfenced
++# checker-contract loop in pre-push-gate.sh proves them. NOT_RUN needs the helper itself to
++# verify the marker (a spoofed or malformed one is refused rc=125), and the enclosing fence
++# must still deny a write outside it.
++enclosing_fence=
++if [ -n "${OMP_KIT_SUITE_FENCE-}" ]; then
++	fence_probe="$TMP/enclosing-fence-probe"
++	fence_escape="$(dirname "$KITROOT_DIR")/hermetic-enclosing-escape.$$"
++	mkdir -p "$fence_probe/archive" "$fence_probe/scratch"
++	if (
++		cd "$fence_probe/archive" &&
++			sh "$KITROOT_DIR/scripts/suite-hermetic-env.sh" --archive "$fence_probe/archive" \
++				--scratch "$fence_probe/scratch" --suite tests/cli/fixture_test.py -- \
++				python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text("escaped")' "$fence_escape"
++	) >"$fence_probe.out" 2>&1; then fence_rc=0; else fence_rc=$?; fi
++	if [ "$fence_rc" -ne 0 ] && [ "$fence_rc" -ne 125 ] \
++		&& grep -F "fence=inherited policy_sha256=$OMP_KIT_SUITE_FENCE " "$fence_probe.out" >/dev/null \
++		&& grep -F "$fence_escape" "$fence_probe.out" >/dev/null && [ ! -e "$fence_escape" ]; then
++		enclosing_fence=$OMP_KIT_SUITE_FENCE
++		ok "HERMETIC1 the verified enclosing fence is inherited and denies a write outside it"
++	else
++		not_ok "HERMETIC1 the enclosing fence marker did not verify or did not deny (rc=$fence_rc)"
++		cat "$fence_probe.out"
++		rm -f "$fence_escape"
++	fi
++fi
+ if [ "$(uname -s)" = Darwin ]; then
+ 	mkrepo_begin hermetic-git-ref
+ 	addfile tests/cli/fixture_test.py "from pathlib import Path
+@@ -264,7 +303,9 @@ target.write_text('changed')"
+ 	ref_after=$(file_state "$ref_target")
+ 	expect_runner_denial 'HERMETIC1 protected Git ref' \
+ 		'RED python-suite tests/cli/fixture_test.py' "$ref_target"
+-	if [ "$ref_before" = "$ref_after" ]; then
++	if [ -n "$enclosing_fence" ]; then
++		not_run "HERMETIC1 protected Git ref bytes remain unchanged"
++	elif [ "$ref_before" = "$ref_after" ]; then
+ 		ok "HERMETIC1 protected Git ref bytes remain unchanged"
+ 	else
+ 		not_ok "HERMETIC1 protected Git ref changed ($ref_before -> $ref_after)"
+@@ -293,7 +334,9 @@ subprocess.run(['br', '--no-daemon', '--no-auto-import', '--no-auto-flush',
+ 			br_after=$(file_state "$br_db")
+ 			expect_runner_denial 'HERMETIC1 br create without --db' \
+ 				'RED python-suite tests/cli/fixture_test.py' "$br_db"
+-			if [ "$br_before" = "$br_after" ]; then
++			if [ -n "$enclosing_fence" ]; then
++				not_run "HERMETIC1 implicit br create leaves the synthetic tracker bytes unchanged"
++			elif [ "$br_before" = "$br_after" ]; then
+ 				ok "HERMETIC1 implicit br create leaves the synthetic tracker bytes unchanged"
+ 			else
+ 				not_ok "HERMETIC1 implicit br create changed the tracker ($br_before -> $br_after)"
+@@ -319,7 +362,9 @@ Path('$home_target').write_text('changed')"
+ 	home_after=$(file_state "$home_target")
+ 	expect_runner_denial 'HERMETIC1 absolute HOME write' \
+ 		'RED python-suite tests/cli/fixture_test.py' "$home_target"
+-	if [ "$home_before" = "$home_after" ]; then
++	if [ -n "$enclosing_fence" ]; then
++		not_run "HERMETIC1 protected HOME bytes remain unchanged"
++	elif [ "$home_before" = "$home_after" ]; then
+ 		ok "HERMETIC1 protected HOME bytes remain unchanged"
+ 	else
+ 		not_ok "HERMETIC1 protected HOME changed ($home_before -> $home_after)"
+@@ -352,7 +397,9 @@ subprocess.run(['git', 'config', '--file', '$external_config',
+ 	else
+ 		not_ok "git config --global did not prove its scratch-config control"
+ 	fi
+-	if [ "$config_before" = "$config_after" ] \
++	if [ -n "$enclosing_fence" ]; then
++		not_run "HERMETIC1 protected global-config bytes remain unchanged"
++	elif [ "$config_before" = "$config_after" ] \
+ 		&& [ "$outer_global_before" = "$outer_global_after" ]; then
+ 		ok "HERMETIC1 protected global-config bytes remain unchanged"
+ 	else
+@@ -370,7 +417,9 @@ bun build \"\$KITROOT/fixture.ts\" --outdir '$compiled_dir'"
+ 	compiled_after=$(file_state "$compiled_dir")
+ 	expect_runner_denial 'HERMETIC1 compiled output outside scratch' \
+ 		'RED script-suite tests/cli/compiled.test.sh' "$compiled_dir"
+-	if [ "$compiled_before" = "$compiled_after" ]; then
++	if [ -n "$enclosing_fence" ]; then
++		not_run "HERMETIC1 compiled output target remains absent"
++	elif [ "$compiled_before" = "$compiled_after" ]; then
+ 		ok "HERMETIC1 compiled output target remains absent"
+ 	else
+ 		not_ok "HERMETIC1 compiled output target changed ($compiled_before -> $compiled_after)"
+@@ -392,7 +441,9 @@ link.write_text('changed')"
+ 	symlink_after=$(file_state "$symlink_target")
+ 	expect_runner_denial 'HERMETIC1 symlink escape from suite scratch' \
+ 		'RED python-suite tests/cli/fixture_test.py' "$symlink_target"
+-	if [ "$symlink_before" = "$symlink_after" ]; then
++	if [ -n "$enclosing_fence" ]; then
++		not_run "HERMETIC1 symlink target bytes remain unchanged"
++	elif [ "$symlink_before" = "$symlink_after" ]; then
+ 		ok "HERMETIC1 symlink target bytes remain unchanged"
+ 	else
+ 		not_ok "HERMETIC1 symlink target changed ($symlink_before -> $symlink_after)"
+@@ -580,6 +631,9 @@ for mode, allow in (("scrubbed", False), ("control", True)):
+         "HERMETIC_SENTINEL_PORT": str(port),
+         "KIT_TEST_LOOPBACK_PORT": str(port),
+     }
++    # Inside an enclosing suite fence the helper must see its marker: macOS cannot nest sandboxes.
++    if "OMP_KIT_SUITE_FENCE" in os.environ:
++        env["OMP_KIT_SUITE_FENCE"] = os.environ["OMP_KIT_SUITE_FENCE"]
+     command = [
+         "sh", helper, "--archive", archive, "--scratch", scratch,
+         "--suite", "tests/cli/fixture_test.py",
+@@ -652,7 +706,9 @@ if [ "$(uname -s)" = Darwin ]; then
+ 			--suite tests/cli/fixture_test.py -- \
+ 			python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text("changed")' "$protected"
+ 	) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+-	if [ "$helper_rc" -ne 0 ] && grep -F "$protected" "$helper_out" >/dev/null \
++	if [ -n "$enclosing_fence" ]; then
++		not_run "the macOS write fence names and blocks an outside-scratch path without changing its bytes"
++	elif [ "$helper_rc" -ne 0 ] && grep -F "$protected" "$helper_out" >/dev/null \
+ 		&& cmp -s "$protected.before" "$protected"; then
+ 		ok "the macOS write fence names and blocks an outside-scratch path without changing its bytes"
+ 	else
+@@ -668,7 +724,9 @@ link = pathlib.Path(os.environ["TMPDIR"], "escape")
+ link.symlink_to(sys.argv[1])
+ link.write_text("changed")' "$protected"
+ 	) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+-	if [ "$helper_rc" -ne 0 ] && grep -F "$helper_scratch/escape" "$helper_out" >/dev/null \
++	if [ -n "$enclosing_fence" ]; then
++		not_run "the macOS write fence blocks a symlink escape from suite scratch"
++	elif [ "$helper_rc" -ne 0 ] && grep -F "$helper_scratch/escape" "$helper_out" >/dev/null \
+ 		&& cmp -s "$protected.before" "$protected"; then
+ 		ok "the macOS write fence blocks a symlink escape from suite scratch"
+ 	else
+@@ -682,6 +740,7 @@ link.write_text("changed")' "$protected"
+ 			python3 -c 'import os, socket, threading
+ port = int(os.environ["KIT_TEST_LOOPBACK_PORT"])
+ server = socket.socket()
++server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+ server.bind(("127.0.0.1", port))
+ server.listen()
+ server.settimeout(2)
+@@ -1120,5 +1179,5 @@ while [ -n "$hang_pid" ] && kill -0 "$hang_pid" 2>/dev/null && [ "$k" -lt 50 ];
+ if [ -n "$hang_pid" ] && ! kill -0 "$hang_pid" 2>/dev/null; then ok "FULLSUITEPAR1 the hung suite process is gone"; else not_ok "FULLSUITEPAR1 hung suite pid ${hang_pid:-?} still runs"; fi
+ if side_files_gone; then ok "FULLSUITEPAR1 timed-out parallel run removes runner side files"; else not_ok "FULLSUITEPAR1 timed-out parallel run left side files"; ls -la "$cache"; fi
+ 
+-echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
++echo "full-suite-verdict-incomplete: pass=$pass fail=$fail not_run=$not_run_count"
+ [ "$fail" -eq 0 ]
+diff --git a/tests/cli/build-manifest-archive.test.sh b/tests/cli/build-manifest-archive.test.sh
+index 583eb8756e..2e2df54a0c
+--- a/tests/cli/build-manifest-archive.test.sh
++++ b/tests/cli/build-manifest-archive.test.sh
+@@ -24,7 +24,12 @@ cp "$ROOT/scripts/install.sh" "$PHYSICAL/scripts/install.sh"
+ chmod 755 "$PHYSICAL/scripts/build-manifest.sh" "$PHYSICAL/scripts/runtime-adapter.sh" "$PHYSICAL/scripts/install.sh" "$PHYSICAL/scripts/rule-class.ts"
+ printf 'fixture source\n' | tee "$PHYSICAL/src/marker.ts" >/dev/null
+ if [ -z "${OMP_SRC:-}" ]; then
+-  OMP_SRC=$(bun --no-env-file --config=/dev/null -e 'const p = await import("./src/paths.ts"); console.log(p.resolveOmpIdentity().source)')
++  # An unresolvable OMP source (no source cache, fetch off) is a named refusal, never a silent pass.
++  if ! OMP_SRC=$(bun --no-env-file --config=/dev/null -e 'const p = await import("./src/paths.ts"); console.log(p.resolveOmpIdentity().source)' 2>"$work/omp-src.err"); then
++    reason=$(grep -m 1 '^error:' "$work/omp-src.err" || tail -n 1 "$work/omp-src.err")
++    printf 'build-manifest-archive: REFUSED: OMP source unresolvable (set OMP_SRC or OMP_KIT_OMP_SRC_CACHE): %s\n' "$reason" >&2
++    exit 1
++  fi
+ fi
+ export OMP_SRC
+ 
+diff --git a/tests/cli/pre-push-gate.test.sh b/tests/cli/pre-push-gate.test.sh
+index 0f04a8a5b7..2042731a99
+--- a/tests/cli/pre-push-gate.test.sh
++++ b/tests/cli/pre-push-gate.test.sh
+@@ -28,7 +28,7 @@ create_checker_test_stubs() {
+ 	repo=$1
+ 	failing_test=${2:-}
+ 	mkdir -p "$repo/tests/cli"
+-	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh check-staged-br-init.test.sh; do
++	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh full-suite-verdict-incomplete.test.sh check-staged-br-init.test.sh; do
+ 		test_path="$repo/tests/cli/$checker_test"
+ 		if [ "$checker_test" = "$failing_test" ]; then
+ 			printf '#!/bin/sh\nprintf "CHECKER-FAIL: %s\\n" >&2\nexit 7\n' "$checker_test" > "$test_path"
+diff --git a/tests/cli/savefirst-pre-push.test.sh b/tests/cli/savefirst-pre-push.test.sh
+index c1782a55e2..cbd6cac7b2
+--- a/tests/cli/savefirst-pre-push.test.sh
++++ b/tests/cli/savefirst-pre-push.test.sh
+@@ -48,7 +48,7 @@ tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.js
+ 
+ make_checker_controls() {
+ 	repo=$1
+-	for name in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh check-staged-br-init.test.sh; do
++	for name in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh full-suite-verdict-incomplete.test.sh check-staged-br-init.test.sh; do
+ 		printf '#!/bin/sh\nprintf "CHECKER-PASS: %s\\n"\n' "$name" > "$repo/tests/cli/$name"
+ 		chmod +x "$repo/tests/cli/$name"
+ 	done
+diff --git a/tests/cli/private-index-land.test.ts b/tests/cli/private-index-land.test.ts
+index e1b31a4917..82bf808d87 100644
+--- a/tests/cli/private-index-land.test.ts
++++ b/tests/cli/private-index-land.test.ts
+@@ -340,6 +340,8 @@ test("checks the exact candidate with the base-registered push check before publ
+ 	mkdirSync(join(work, "src"), { recursive: true });
+ 	for (const path of prePushFixtureFiles) cpSync(join(repoRoot, path), join(work, path));
+ 	writeFileSync(join(work, "scripts", "fresh-gate.sh"), "#!/bin/sh\nif [ \"${1-}\" = \"--test-workers\" ]; then printf '1\\n'; fi\nexit 0\n", { mode: 0o755 });
++	// The fence-contract checker is proven by the repo's own pre-push loop; this fixture proves land order.
++	writeFileSync(join(work, "tests", "cli", "full-suite-verdict-incomplete.test.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+ 	writeFileSync(join(fakeBin, "br"), "#!/bin/sh\nfor arg do\n\t[ \"$arg\" = \"ompkit-kup44.5\" ] && exit 0\ndone\nexit 3\n", { mode: 0o755 });
+ 	mkdirSync(join(work, ".omp"), { recursive: true });
+ 	const checkBody = [
