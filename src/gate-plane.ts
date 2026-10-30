@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { run } from "./kitlib/run.ts";
 import { ownedTmp, type OwnedTmp } from "./kitlib/tmp.ts";
@@ -98,6 +98,7 @@ export async function inspectGatePlane(input: { root: string; home: string; env?
 		const state = join(scratch.path, "state");
 		const database = join(beads, "beads.db");
 		const marker = join(scratch.path, "mutations.log");
+		const fleetConfig = join(scratch.path, "fleet-watch.json");
 		const fakeBr = join(fakebin, "br");
 		const fakeAm = join(fakebin, "am");
 		const replayable = "- [ ] [a] [build] fixture remains readable `true` -> rc 0; planted negative: broken fixture is refused";
@@ -113,22 +114,36 @@ export async function inspectGatePlane(input: { root: string; home: string; env?
 		mkdirSync(state, { recursive: true });
 		writeFileSync(database, "");
 		writeFileSync(marker, "");
+		writeFileSync(fleetConfig, JSON.stringify({ sessions: [] }));
 		const cases = Object.entries(rows).map(([id, row]) => `\t\t${id}) printf '%s\\n' '${JSON.stringify(row)}' ;;`).join("\n");
 		writeFileSync(fakeBr, `#!/bin/sh\nset -eu\ncase "\${1:-}" in\n\tshow)\n\t\tcase "\${2:-}" in\n${cases}\n\t\t*) exit 2 ;;\n\t\tesac\n\t\t;;\n\tlist) printf '%s\\n' '{"issues":[]}' ;;\n\tupdate) printf '%s\\n' "$*" >> "$BR_GATEPLANE_MARKER" ;;\n\tcreate) printf '%s\\n' "$*" >> "$BR_GATEPLANE_MARKER"; printf '%s\\n' '{"id":"created"}' ;;\n\t*) exit 2 ;;\nesac\n`);
 		chmodSync(fakeBr, 0o755);
 		writeFileSync(fakeAm, "#!/bin/sh\ncase \"${1:-}:${2:-}\" in\n\tagents:show) printf '{}\\n' ;;\n\tfile_reservations:conflicts) printf 'No conflicts detected.\\n' ;;\n\t*) exit 2 ;;\nesac\n");
 		chmodSync(fakeAm, 0o755);
+		// The probe must consult this candidate's real claim policy. A compiled
+		// release is already executable; only source mode uses Bun as an interpreter.
+		const candidateCli = join(fakebin, "omp-kit");
+		if (import.meta.url.startsWith("file:///$bunfs/")) {
+			symlinkSync(process.execPath, candidateCli);
+		} else {
+			writeFileSync(candidateCli, `#!${process.execPath}
+import { runCli } from ${JSON.stringify(join(input.root, "src/cli.ts"))};
+process.exitCode = await runCli(process.argv.slice(2));
+`, { mode: 0o755 });
+		}
 
 		const pathEntries = env.PATH?.split(delimiter) ?? [];
 		const probeEnv: Record<string, string | undefined> = {
 			...env,
 			AGENT_NAME: identity,
 			BR_REAL: fakeBr,
+			BEADS_DB: database,
+			BEADS_DIR: beads,
 			BR_GATEPLANE_MARKER: marker,
 			BR_GATEPLANE_SCRIPTS: scriptsDir,
 			BR_SHIM_PROJECT: project,
 			HOME: input.home,
-			OMP_KIT_FLEET_WATCH_CONFIG: "",
+			OMP_KIT_FLEET_WATCH_CONFIG: fleetConfig,
 			PATH: [path.bindir, fakebin, ...pathEntries.filter((entry) => entry !== path.bindir && entry !== fakebin)].join(delimiter),
 			XDG_STATE_HOME: state
 		};

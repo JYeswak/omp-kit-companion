@@ -43,6 +43,7 @@ test("GATEPLANE1: session-start PATH makes Python br enforce review, claim, and 
 		const state = join(base, "state");
 		const database = join(beads, "beads.db");
 		const marker = join(base, "mutations.log");
+		const fleetConfig = join(base, "fleet-watch.json");
 		const agent = "GateProbe";
 		const description = "WHAT: exercise the gate. WHY: catch Python path bypass.";
 		const replayable = "- [ ] [a] [build] fixture is readable `true` -> rc 0; planted negative: broken fixture is refused";
@@ -58,12 +59,18 @@ test("GATEPLANE1: session-start PATH makes Python br enforce review, claim, and 
 		mkdirSync(state, { recursive: true });
 		writeFileSync(database, "");
 		writeFileSync(marker, "");
+		writeFileSync(fleetConfig, JSON.stringify({ sessions: [] }));
 		const fakeBr = join(fakebin, "br");
 		const fakeAm = join(fakebin, "am");
 		writeFileSync(fakeBr, fixtureBr(rows));
 		chmodSync(fakeBr, 0o755);
 		writeFileSync(fakeAm, "#!/bin/sh\ncase \"${1:-}:${2:-}\" in\n\tagents:show) printf '{}\\n' ;;\n\tfile_reservations:conflicts) printf 'No conflicts detected.\\n' ;;\n\t*) exit 2 ;;\nesac\n");
 		chmodSync(fakeAm, 0o755);
+		// Keep native claim admission on this candidate, not an older installed CLI.
+		writeFileSync(join(fakebin, "omp-kit"), `#!${process.execPath}
+import { runCli } from ${JSON.stringify(join(kitRoot, "src/cli.ts"))};
+process.exitCode = await runCli(process.argv.slice(2));
+`, { mode: 0o755 });
 		symlinkSync(join(scripts, "br-shim.sh"), join(bindir, "br"));
 
 		const originalPath = process.env.PATH ?? "";
@@ -72,10 +79,12 @@ test("GATEPLANE1: session-start PATH makes Python br enforce review, claim, and 
 			HOME: home,
 			AGENT_NAME: agent,
 			BR_REAL: fakeBr,
+			BEADS_DB: database,
+			BEADS_DIR: beads,
 			BR_GATEPLANE_MARKER: marker,
 			BR_GATEPLANE_SCRIPTS: scripts,
 			BR_SHIM_PROJECT: project,
-			OMP_KIT_FLEET_WATCH_CONFIG: "",
+			OMP_KIT_FLEET_WATCH_CONFIG: fleetConfig,
 			PYTHONPATH: scripts,
 			XDG_STATE_HOME: state,
 			TMPDIR: base,

@@ -1,0 +1,164 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_b7cc6a73e970bad6c6c5dde8c90cc03efe91a82110fbb5c6ca52210a23172709",
+ "limitations": [
+  "Source-boundary proof only; full published verdict and independent pregrade pending; installed-worker AC[e] remains unticked"
+ ],
+ "operation": "CUTCLAIM1-published-runner-rework-source-boundaries",
+ "parameters": {
+  "base_commit": "7cc6f55a47ec687597b63455009ededb693f57ee",
+  "bead": "ompkit-774u.55"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "bytes": 27217,
+  "evidence": {
+   "base_commit": "7cc6f55a47ec687597b63455009ededb693f57ee",
+   "bead": "ompkit-774u.55",
+   "before": {
+    "published_log": "/Users/josh/.local/state/omp-kit/full-suite-verdicts/ed4dde1d7826f80bd92e12c4ac2cf44e699bc62e897d32d810cda6c96985b091/238dc7f35a3562196a2c76e7aa8f56504c48f813.base.da44b012c4c8102e6cee5506718854f84b37da00a1bf3df08c75f36e80972322.log",
+    "published_runner_failures": [
+     "GATEPLANE1 CLAIM_CUT_UNKNOWN",
+     "malformed nonblocking refusal mutant rc-15 at15s",
+     "REPLAYABLE1 verifier refusal count3 versus original>=5"
+    ]
+   },
+   "code_repo": "/Users/josh/Developer/omp-kit-companion",
+   "cold_launch_diagnostic": {
+    "deadline_s": 3,
+    "fresh_copies": {
+     "matching_rows": 16,
+     "timed_out": 5,
+     "total": 21
+    },
+    "shared_code_aliases": {
+     "matching_rows": 21,
+     "timed_out": 0,
+     "total": 21
+    }
+   },
+   "compiled_smoke": {
+    "bundle_modules": 149,
+    "command": "bin/omp-kit doctor --scope gates --json",
+    "compile_rc": 0,
+    "findings": [
+     {
+      "component": "gates",
+      "evidence": {
+       "fixture": "/Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-compile.37019/gateplane1.83254.u1z79a/fixture-project",
+       "live_tracker_mutated": false,
+       "mutation_count": 1,
+       "probes": {
+        "claim": {
+         "rc": 4,
+         "refused": true
+        },
+        "control": {
+         "admitted": true,
+         "rc": 0
+        },
+        "create": {
+         "rc": 4,
+         "refused": true
+        },
+        "in_review": {
+         "rc": 4,
+         "refused": true
+        }
+       }
+      },
+      "reason": "GATEPLANE1 ok: fixture in_review refused AC_UNTICKED_BUILD_LANDED; claim refused REFUSED_NOT_REPLAYABLE; create refused r-verify-replayable; valid control reached native br.",
+      "recommended_action": "No action required.",
+      "status": "OK"
+     }
+    ],
+    "outcome": "OK",
+    "rc": 0,
+    "release_layout": "isolated owned archive, matching agent-bin first on PATH, synthetic HOME/XDG roots; not installed or activated"
+   },
+   "limits": [
+    "Full published verdict not yet run for the eventual committed tree",
+    "Fresh non-author pregrade pending",
+    "AC[e] installed-worker session refusal remains untested and unticked",
+    "Parity checks grammar admission, not semantic success of every descriptive expected-output fixture; original counts and divergence assertions retained",
+    "Preflight DEFY7 harness-only scope negative reports skipped in this local control; CUTCLAIM1 native cases all ran"
+   ],
+   "rejected_changes": [
+    "In-process CLI capture was slower and reverted",
+    "Shared JavaScript tracker executable worsened p95 and was reverted",
+    "Serial parity scheduling still timed out and was reverted"
+   ],
+   "runner_environment": "inherited worker environment; owned TMPDIR; umask022; nice10; no TRUSTED_SOURCE variables",
+   "shellcheck": {
+    "command": "shellcheck -x -P /archive /archive/scripts/br-shim.sh",
+    "image": "koalaman/shellcheck:v0.9.0",
+    "rc": 0,
+    "stderr": "",
+    "stdout": ""
+   },
+   "source_checks": [
+    {
+     "command": "bun test extensions/kit-flywheel-guard.test.ts",
+     "elapsed_ms": 298,
+     "rc": 0,
+     "stderr": "\nextensions/kit-flywheel-guard.test.ts:\n(pass) ASKDEFAULT1: goal-mode RusticPine ask naming a recommended option is refused with take-record-report [7.65ms]\n(pass) ASKDEFAULT1 control: goal-mode RusticPine ask with no recommended option is allowed [0.38ms]\n(pass) ASKDEFAULT1 control: RusticPine with no active goal (no mode entry) may ask with a recommended option [0.28ms]\n(pass) ASKDEFAULT1 control: RusticPine with no active goal (goal_paused) may ask with a recommended option [0.29ms]\n(pass) ASKDEFAULT1 control: RusticPine with no active goal (none) may ask with a recommended option [0.29ms]\n(pass) ASKDEFAULT1: goal-mode PeachLeopard ask naming a recommended option is refused with take-record-report [0.63ms]\n(pass) ASKDEFAULT1 control: goal-mode PeachLeopard ask with no recommended option is allowed [0.23ms]\n(pass) ASKDEFAULT1 control: PeachLeopard with no active goal (no mode entry) may ask with a recommended option [0.24ms]\n(pass) ASKDEFAULT1 control: PeachLeopard with no active goal (goal_paused) may ask with a recommended option [0.23ms]\n(pass) ASKDEFAULT1 control: PeachLeopard with no active goal (none) may ask with a recommended option [0.24ms]\n(pass) ASKDEFAULT1: goal-mode QuietBadger ask naming a recommended option is refused with take-record-report [0.60ms]\n(pass) ASKDEFAULT1 control: goal-mode QuietBadger ask with no recommended option is allowed [0.27ms]\n(pass) ASKDEFAULT1 control: QuietBadger with no active goal (no mode entry) may ask with a recommended option [0.24ms]\n(pass) ASKDEFAULT1 control: QuietBadger with no active goal (goal_paused) may ask with a recommended option [0.31ms]\n(pass) ASKDEFAULT1 control: QuietBadger with no active goal (none) may ask with a recommended option [0.46ms]\n(pass) ASKDEFAULT1 control: goal-mode SilverCondor worker stays refused as ASKBLOCK1 [1.68ms]\n(pass) ASKDEFAULT1 control: goal-mode JadeThrush worker stays refused as ASKBLOCK1 [0.75ms]\n(pass) ASKDEFAULT1 control: goal-mode unbound session with a recommended option is allowed [0.48ms]\n(pass) ASKBLOCK1: SilverCondor worker ask is refused before the host opens a dialog [0.76ms]\n(pass) ASKBLOCK1: JadeThrush worker ask is refused before the host opens a dialog [0.60ms]\n(pass) ASKBLOCK1: unknown held bead still refuses and names the bead you hold [0.65ms]\n(pass) ASKBLOCK1 control: RusticPine ask is allowed [0.32ms]\n(pass) ASKBLOCK1 control: PeachLeopard ask is allowed [0.30ms]\n(pass) ASKBLOCK1 control: unbound session ask is allowed [0.30ms]\n(pass) ASKBLOCK1 control: unreadable roster null allows and says so [0.50ms]\n(pass) ASKBLOCK1 control: unreadable roster \"{broken\" allows and says so [4.41ms]\n(pass) ASKBLOCK1 control: unreadable roster {\"sessions\":null} allows and says so [0.29ms]\n(pass) stock compaction: a git repo without AGENTS.md or br remains editable and summarizes nothing held [37.83ms]\n(pass) COMPACTION_REREAD: session_compact summarizes the nearest AGENTS.md [0.75ms]\n(pass) COMPACTION_REREAD: mid-run compaction injects at the next step boundary and names the pane identity [0.69ms]\n(pass) COMPACTION_REREAD negative: an ordinary turn emits nothing [0.27ms]\n(pass) SELF_CLOSE_REFUSED: closing a bead assigned to the caller's pane identity is blocked [5.00ms]\n(pass) SELF_CLOSE_REFUSED: bd close, composite pane key and plain-text identity file are honoured [5.60ms]\n(pass) SELF_CLOSE_REFUSED: --actor, BR_ACTOR and BR_AGENT_NAME identify the caller [3.60ms]\n(pass) SELF_CLOSE_REFUSED negative: a different closer is allowed silently [1.19ms]\n(pass) FILERCLOSE1: the bead filer cannot close their own bead [0.74ms]\n(pass) FILERCLOSE1: every DONE-first commenter is treated as an author [1.58ms]\n(pass) FILERCLOSE1 control: a non-author can close with evidence [0.39ms]\n(pass) FILERCLOSE1 control: an ordinary commenter is not a DONE author [0.30ms]\n(pass) FILERCLOSE1: incomplete author metadata refuses a close [0.77ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: LIMITS: AC1's literal 900 s case was not run [0.39ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: box 2 UNVERIFIED [0.34ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: AC1 PASS; LIMITS: original boundary case not run [0.40ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: Acceptance case 3 was not tested [0.23ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: The original live test was skipped [0.25ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: AC2 is carried as a limit [0.21ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: no UNVERIFIED boxes, but AC2 was not run [0.23ms]\n(pass) NARROWCLOSE1: closing through update --status closed cannot bypass the evidence refusal [0.46ms]\n(pass) NARROWCLOSE1: a wrapped incomplete-check clause cannot bypass refusal [0.30ms]\n(pass) NARROWCLOSE1 control: completed evidence permits independent close: AC1 PASS; box 2 PASS; all original acceptance cases ran [0.29ms]\n(pass) NARROWCLOSE1 control: completed evidence permits independent close: All acceptance cases PASS; no UNVERIFIED boxes and zero tests skipped [0.23ms]\n(pass) NARROWCLOSE1 control: completed evidence permits independent close: AC1 PASS; every original case executed; 0 skipped [0.38ms]\n(pass) NARROWCLOSE1: matcher removal permits the original incomplete closes [26.75ms]\n(pass) GATEEVENTS1: a refused close writes a refuse row and an allowed close writes a pass row; planted: a plain bash call writes nothing [2.36ms]\n(pass) SELF_CLOSE_REFUSED negative: an unassigned bead is allowed with a warning [1.40ms]\n(pass) SELF_CLOSE_REFUSED: a close whose authorship probe fails is refused, never skipped (ompkit-xa5s.13) [2.36ms]\n(pass) SELF_CLOSE_REFUSED: garbled-probe close is refused with the s49q shape, exit 3 Issue not found (ompkit-xa5s.13) [1.83ms]\n(pass) SELF_CLOSE_REFUSED negative: legit non-author close of s49q by CobaltCoyote still passes (ompkit-xa5s.13) [1.23ms]\n(pass) SELF_CLOSE_REFUSED negative: unknown caller identity is allowed with a warning [0.34ms]\n(pass) SELF_CLOSE_REFUSED negative: close text that is not a br/bd close never consults br [0.47ms]\n(pass) REDIRECTION_IDS: shell redirections never become bead ids (ompkit-xa5s.8) [0.19ms]\n(pass) SELF_CLOSE_REFUSED with redirection: assignee match still blocks, lookup uses the clean id [1.36ms]\n(pass) BGDEADLINE1: finite async bash jobs reject timeout zero and accept native bounded defaults [0.77ms]\n(pass) BGDEADLINE1: named services need readiness and cannot disguise a finite suite [0.46ms]\n(pass) BGDEADLINE1: timeout-zero refusal attributes job, owner, command, deadline, and owner-session cancel [0.19ms]\n(pass) BGDEADLINE1: tool input cannot spoof the refusal owner [0.31ms]\n(pass) BGDEADLINE1: unknown and service refusals carry job and deadline [0.73ms]\n(pass) GOAL_END_REFUSED: a fleet seat cannot drop or complete its own goal (J-2026-10-18-44) [0.79ms]\n(pass) GOAL_END_REFUSED negatives: get, create and resume pass; a session with no fleet identity may drop [0.20ms]\n(pass) GOAL_SEND_REFUSED: a fleet seat cannot type a /goal line into any pane, bare or wrapped (J-2026-10-18-45) [1.23ms]\n(pass) GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identity-less sessions pass [0.27ms]\n(pass) NO_WAIT_REFUSED: a fleet seat's idle_wait.py and sleep >= 30 s are refused, bare chained wrapped or sh -c (J-2026-10-18-43) [1.97ms]\n(pass) NO_WAIT_REFUSED negatives: short sleeps, mere mentions and identity-less sessions pass [0.29ms]\n(pass) NO_WAIT_REFUSED seam: the pure check refuses the planted wait and passes without identity [0.02ms]\n(pass) shell -c flag pattern: matches -c and -lc, rejects --c and -cx, and stays linear on a long near-miss [0.34ms]\n(pass) COMPACTION_REREAD: no tool call is blocked after compaction [1.06ms]\n(pass) COMPACTION_REREAD: the reminder lists a held in_progress bead from a fixture tracker [0.64ms]\n(pass) COMPACTION_REREAD: the reminder says none held for an empty tracker [0.38ms]\n(pass) COMPACTION_REREAD: a failing remembered tracker is named with its error and blocks nothing [1.43ms]\n(pass) COMPACTION_REREAD planted negative: rows come only from the guard's own list query [0.62ms]\n(pass) REREAD: without compaction nothing is blocked [0.82ms]\n(pass) isMutatingCall: edit/write, br mutations and git commit/push; never reads or queries [0.12ms]\n(pass) BLOCK_REFUSED: blocked with no blocks edge is refused, with an open blocks edge it is allowed [1.68ms]\n(pass) BLOCK_REFUSED: a closed blocker, a parent-child edge or a related edge is not a fix [0.96ms]\n(pass) BLOCK_REFUSED: human-gate needs a comment naming the effect only Joshua can perform [1.21ms]\n(pass) BLOCK_REFUSED: other status updates, other verbs and unreadable beads [0.90ms]\n(pass) BLOCK_REFUSED AC5: no br binary or no tracker stands the check down; a live tracker that cannot answer stays refused [0.63ms]\n(pass) BLOCK_REFUSED: a br update wrapped in sh -c, bash -lc or nested shells is checked like the bare command [1.50ms]\n(pass) BLOCK_REFUSED: shell words that only mention br, plain sh, and over-deep or odd -c flags are not parsed as mutations [2.59ms]\n(pass) trackerRequests: wrapped close and claim keep the caller's inline identity [0.07ms]\n(pass) BLOCK_RELEASE_REQUIRED: closing the only open blocker of a blocked bead is refused until it is released [0.90ms]\n(pass) BLOCK_RELEASE_REQUIRED: another open blocker, a non-blocked dependent or a non-blocks edge allow the close [0.93ms]\n(pass) BLOCK_RELEASE_REQUIRED AC5: outside a tracker a close is never a stranding refusal [0.68ms]\n(pass) SCRATCH_DISPOSAL_REFUSED: moving a bead to in_review with unreleased dirs is refused, naming each dir [0.73ms]\n(pass) SCRATCH_DISPOSAL_REFUSED: a verifier's close of another seat's bead is refused while the verifier owes dirs, logged as close [0.46ms]\n(pass) SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unusable answer yields no advice [1.48ms]\n(pass) SCRATCH_DISPOSAL_REFUSED: a thrown exec never blocks (fail-open) and a long list is refused with a count [0.71ms]\n(pass) SCRATCH_OWED: other tracker commands and refused closes never ask omp-kit [2.57ms]\n(pass) trackerRequests: update --status in_review is a review request, in either spelling [0.05ms]\n(pass) DRAIN1: bare release of a live held claim is refused until it clears assignee under revision [0.99ms]\n(pass) DRAIN1: third-party park of a live claim is refused; holder atomic release passes [0.92ms]\n(pass) DRAIN1: repair releases of ownerless or already-open beads pass untouched [0.49ms]\n(pass) DRAIN1: second active claim is refused naming the held id; re-claim of the held bead passes [1.51ms]\n(pass) DRAIN1: claim on a stale-held bead stays refused; nonauthor review still passes [0.52ms]\n(pass) DRAIN1: ownerless start still refuses with the atomic claim route [0.28ms]\n(pass) DRAIN1 custody: bare assignee clear on a live held claim is refused (fp72.95 shape) [1.06ms]\n(pass) DRAIN1 custody: repairs on ownerless or open beads pass [0.60ms]\n(pass) WAIT_REFUSED: a fleet seat's wait tool call is refused and names the next action (BGWAIT1) [0.51ms]\n(pass) WAIT_REFUSED: a fleet seat's sleep-poll loops, chained sleeps and time.sleep idles are refused (BGWAIT1) [1.50ms]\n(pass) WAIT_REFUSED negatives: async jobs, short single sleeps and identity-less sessions pass (BGWAIT1) [0.28ms]\n(pass) WAIT_REFUSED seam: the pure check refuses each planted form and passes without identity [0.04ms]\n(pass) CUTCLAIM1 [a]: real guarded k-2 claim refuses the cut and names eligible k-1; k-1 passes [1.67ms]\n(pass) CUTCLAIM1 [b]: open transitive blocks prerequisites pass from active pins, never closed or parent/related-only [4.24ms]\n(pass) CUTCLAIM1 [c]: every no-cut shape admits pillar-less claims without cut graph reads [8.32ms]\n(pass) CUTCLAIM1: malformed declarations and graph reads fail closed, never pillar fallback [1.92ms]\n(pass) CUTCLAIM1: canonical explicit tracker binding wins over a first unrelated session [1.27ms]\n(pass) CUTCLAIM1 planted negative: removing admission refusal from the actual guard makes the original assertion fail [36.81ms]\n(pass) CUTCLAIM1: pin order, explicit membership, omitted labels, empty cuts and strict config bytes [3.61ms]\n(pass) CUTCLAIM1 owned rework resumes without a second claim [0.89ms]\n\n 119 pass\n 0 fail\n 654 expect() calls\nRan 119 tests across 1 file. [281.00ms]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+    },
+    {
+     "command": "bun test tests/cli/preflight.test.ts",
+     "elapsed_ms": 11396,
+     "rc": 0,
+     "stderr": "\ntests/cli/preflight.test.ts:\n(pass) preflight commit: four defects produce ONE envelope naming all four, each with a remedy; the staged --selftest runs [898.52ms]\n(pass) preflight honors bash members and staged selftests, retaining real refusals and no-shebang scripts [1095.18ms]\n(pass) preflight commit: an empty index is a finding; with no prepared message that is a finding too, never a pass [1306.34ms]\n(pass) preflight close|in-review|claim: every tracker predicate in one envelope, bound to updated_at; a fake br answers [416.59ms]\n(pass) preflight fixtures keep inherited tracker writes inside the child database [1355.99ms]\n(pass) preflight claim: unresolved needs-director refuses NEEDS_DIRECTOR on the unit and the supported CLI path; recorded director resolution re-admits [5914.92ms]\n(pass) neutralized fixture root (ownedTmp) carries no agent attribution for read-only guards [0.55ms]\n(pass) findings grammar: parse ignores noise and malformed lines; an empty list is ok [0.10ms]\n(pass) every preflight verb is registered at module load (GATEDIAG1 [b] as published was HANDLER_UNAVAILABLE: the registrations sat inside rchLeaseCommand) [71.01ms]\n(pass) CUTCLAIM1 native [a]: k-2 is refused outside cut[k-1], pin passes with explicit adjudication marker [1.82ms]\n(pass) CUTCLAIM1 native [b]: transitive open blocks admitted; closed, related, parent-only and reversed edges denied [1.70ms]\n(pass) CUTCLAIM1 native [c]: no milestone and foreign sessions admit pillar-less claims; invalid authority stays unknown [1.96ms]\n(pass) CUTCLAIM1 native [c]: stock HOME and XDG callers without config admit claims without pillar metadata [32.69ms]\n(pass) CUTCLAIM1 native [c]: no-cut adjudication never needs a bead read or a stock caller's custom DB binding [1.06ms]\n(pass) CUTCLAIM1 native [c]: custom DB locations admit no-cut callers but cannot escape a managed checkout's cut [3.50ms]\n(pass) CUTCLAIM1 native [c] planted negative: restored pillar refusal breaks the same stock-claim assertion [44.14ms]\n(pass) CUTCLAIM1 native: canonical repo selection, conflicting rows, malformed edges and graph failures are bounded [2.81ms]\n(pass) CUTCLAIM1 native: portable BR_REAL reader binds every show and graph read to BEADS_DB [197.89ms]\n(pass) CUTCLAIM1 native: legacy repo-only rows and minimal epic/pinned cuts do not require unused fleet metadata [1.20ms]\n(pass) CUTCLAIM1 native: explicit pin bypasses unrelated missing pins, preserves order and accepts absent/null labels [1.29ms]\n(pass) CUTCLAIM1 native: active blocks intermediates connect an open target; empty cut and malformed UTF8 never admit [1.45ms]\n(pass) CUTCLAIM1 native: invalid JSON refusal does not echo operator config contents [0.65ms]\n(pass) CUTCLAIM1 native: a DB-file symlink selects the actual tracker cut, while a dangling link stays unknown [1.57ms]\n\n 23 pass\n 0 fail\n 139 expect() calls\nRan 23 tests across 1 file. [11.38s]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\nDEFY7_FIXTURE branch=local setter=none scratch=none br=ambient dir=/Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-final.11226/var/agent-tmp/needs-director.29727\nDEFY7_SCOPE_NEGATIVE skipped: no harness shim resolved (local control run)\n"
+    },
+    {
+     "command": "bun test tests/cli/br-shim.test.ts",
+     "elapsed_ms": 19458,
+     "rc": 0,
+     "stderr": "\ntests/cli/br-shim.test.ts:\n(pass) CUTCLAIM1 actual shim admits k-1 and refuses k-2 on cut[k-1] [2176.04ms]\n(pass) CUTCLAIM1 explicit --db binds the actual tracker rather than cwd or the first session [2314.67ms]\n(pass) CUTCLAIM1 disabled-check mutant admits the same forbidden claim [1462.61ms]\n(pass) CUTCLAIM1 missing native authority cannot silently bypass admission [168.98ms]\n(pass) CUTCLAIM1 failed native authority cannot silently bypass admission [782.53ms]\n(pass) CUTCLAIM1 stale native authority cannot silently bypass admission [1040.51ms]\n(pass) CUTCLAIM1 malformed nonblocking refusal is rejected and disabling consistency exposes the bypass [2072.29ms]\n(pass) CUTCLAIM1 blocking-admitted cut verdict is malformed and cannot admit [1131.37ms]\n(pass) CUTCLAIM1 duplicate cut verdict is malformed and cannot admit [1067.18ms]\n(pass) CUTCLAIM1 multi-ID claim cannot forward an off-cut second target [194.75ms]\n(pass) CUTCLAIM1 missing configured cut input fails closed through actual shim [1016.27ms]\n(pass) CUTCLAIM1 malformed configured cut input fails closed through actual shim [1128.00ms]\n(pass) CUTCLAIM1 default-missing admits an outsider without a pillar through the actual shim [1490.98ms]\n(pass) CUTCLAIM1 unlisted admits an outsider without a pillar through the actual shim [1032.46ms]\n(pass) CUTCLAIM1 no-milestone admits an outsider without a pillar through the actual shim [1047.24ms]\n(pass) CUTCLAIM1 value flags do not become extra claim targets [1297.44ms]\n\n 16 pass\n 0 fail\n 58 expect() calls\nRan 16 tests across 1 file. [19.44s]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+    },
+    {
+     "command": "bun test tests/cli/gate-plane.test.ts",
+     "elapsed_ms": 43432,
+     "rc": 0,
+     "stderr": "\ntests/cli/gate-plane.test.ts:\n(pass) GATEPLANE1: session-start PATH makes Python br enforce review, claim, and create on owned fixtures [43385.81ms]\n\n 1 pass\n 0 fail\n 20 expect() calls\nRan 1 test across 1 file. [43.41s]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+    },
+    {
+     "command": "bun test tests/cli/bead-replayable.test.ts",
+     "elapsed_ms": 9097,
+     "rc": 0,
+     "stderr": "\ntests/cli/bead-replayable.test.ts:\n(pass) REPLAYABLE1 planted negative: a create whose non-[v] box names no backticked command is refused, naming the box and the corrected shape [391.92ms]\n(pass) REPLAYABLE1 planted negative: a multi-letter tag [a,b] is refused as a tag run verify cannot replay [135.24ms]\n(pass) REPLAYABLE1 control: the same create with a backticked command and an arrow expected outcome is admitted [132.93ms]\n(pass) REPLAYABLE1 planted: a box whose first backticked span is quoted obligation text (not followed by -> or expect:) is refused with the fix; the correct shape is admitted [992.28ms]\n(pass) REPLAYABLE1 planted: a box with -> in its obligation text before the first backticked span is refused with the fix; the quoted-arrow and Replay-first shapes are admitted [516.11ms]\n(pass) REPLAYABLE1 legacy: an update that leaves a non-replayable box unchanged is admitted and reports it; a new commandless box is refused [542.18ms]\n(pass) REPLAYABLE1.claim planted (shim, --claim): a legacy bead with a commandless box is refused REFUSED_NOT_REPLAYABLE naming the box and the fix; rewritten, it is admitted [258.12ms]\n(pass) REPLAYABLE1.claim planted (shim, --status in_review): a legacy bead with a commandless box is refused REFUSED_NOT_REPLAYABLE naming the box and the fix; rewritten, it is admitted [317.21ms]\n(pass) REPLAYABLE1.claim planted (extension, --claim): a legacy bead with a commandless box is refused REFUSED_NOT_REPLAYABLE naming the box and the fix; rewritten, it is admitted [321.93ms]\n(pass) REPLAYABLE1.claim planted (extension, --status in_review): a legacy bead with a commandless box is refused REFUSED_NOT_REPLAYABLE naming the box and the fix; rewritten, it is admitted [281.10ms]\n(pass) REPLAYABLE1.claim planted: a bead with no box in the verify grammar is refused at claim; a claim that rewrites the boxes in the same command is judged on the new text [377.78ms]\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNINGverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNINGverify progress [1] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNINGverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=PENDING\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=17ms final_verdict=PASS\n; completed_elapsed=16ms final_verdict=PASS\n; completed_elapsed=19ms final_verdict=FAIL\n; completed_elapsed=18ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNINGverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNINGverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=16ms final_verdict=PASS\n; completed_elapsed=14ms final_verdict=PASS\n; completed_elapsed=19ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=8ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=FAIL\nverify progress [1] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=PENDING\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=8ms final_verdict=FAIL\nverify progress [1] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=PENDING\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\nverify progress [a] command=\"sh scripts/ok.sh\" elapsed=0ms verdict=RUNNING; completed_elapsed=9ms final_verdict=PASS\n(pass) REPLAYABLE1 parity: on every fixture box the create lint refuses exactly what omp-kit verify refuses ACCEPTANCE_NOT_REPLAYABLE [4688.66ms]\n\n 12 pass\n 0 fail\n 63 expect() calls\nRan 12 tests across 1 file. [9.03s]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+    },
+    {
+     "command": "sh tests/cli/br-shim.test.sh",
+     "elapsed_ms": 21681,
+     "rc": 0,
+     "stderr": "",
+     "stdout": "br-shim: 89 pass 0 fail\n"
+    }
+   ],
+   "source_sha256": {
+    "changelog.d/774u.55.md": "4fd0efdcc0da6cdf7f9515d7f80ab3c1fdf49d9835a4f01940e2f5e2c0fb7577",
+    "changelog.d/ompkit-774u.55.md": "603045040dc576657873c2cd02216f75c70e4c4aa6a901581c5e494822524e28",
+    "docs/evidence/receipts/ompkit-774u.55-20261030.json": "3e6ceb142fa7cc0f2d2a972bc2376798b8d1132cc8bcd86f1d89ecf661f17250",
+    "docs/evidence/receipts/ompkit-774u.55-portability-20261030.json": "05892a50ef0ab25780ed2e9686e161298cfd3342365662b8099e7dabc0e38677",
+    "extensions/kit-flywheel-guard.test.ts": "4c4483538eda0c0f3c92da9c313b38f9020d0cde6b404455d3480c56b19b62e2",
+    "extensions/kit-flywheel-guard.ts": "dba2534b11c242efadf8835e4673e7df67cb8e761fae4b3eb1a031baec7bbac7",
+    "scripts/br-shim.sh": "1af6bcb72472553202754e61e41b569430dc37eae56c09bde3d94bf780d2804e",
+    "src/claim-cut.ts": "861cab80f7c0a9b35aab423b4be706571d1f3668a84f2621802d0c99772eb62b",
+    "src/gate-plane.ts": "ab6629717e2f5d9d3a094e6d1e1131e05b5730c9d56374415e20eead6459b5fa",
+    "src/preflight.ts": "290d05722a4e9704ab63bc24e9f70b840043c3ed549bad6c0a78b208cb145fab",
+    "tests/cli/bead-replayable.test.ts": "61fea4e4f6062a06997ef2674dd8513cd9928b303cb336f17589c7aa5fc11da7",
+    "tests/cli/br-shim.test.sh": "2377043d3586d30b6af48ba2162404813779f46a78bd7c87dcc58da029c386ad",
+    "tests/cli/br-shim.test.ts": "bce8bc0c23965f247aba6f0016b99ccef7e277112f2846c229b598bd5b5b3223",
+    "tests/cli/gate-plane.test.ts": "c6b5d36627228e89965440ee15ba5a643fc00774e56dceaa77a53fea473fb2e9",
+    "tests/cli/preflight.test.ts": "e4f9c10f33437099a8c948b31cf1308804130c6430b171df17e7c04dfbd4d7f2"
+   }
+  },
+  "sha256": "fbfcf17c378c2d1dd2c260b9c04d738d1ed0f698c46107d6eb19d32c0cfe02f1"
+ }
+}

@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, 
 import { join, resolve } from "node:path";
 import { envelope, parseFindingLines, renderEnvelope } from "../../src/kitlib/findings.ts";
 import { preflightBead, preflightCommit } from "../../src/preflight.ts";
+import { admitClaimCut } from "../../src/claim-cut.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
@@ -89,7 +90,9 @@ test("preflight close|in-review|claim: every tracker predicate in one envelope, 
 		acceptance_criteria: "- [x] [a] [landed] one\n- [ ] [b] [landed] two\n- [ ] three untagged\n" };
 	writeFileSync(join(bin, "br"), `#!/bin/sh\ncase "$1" in show) printf '%s' '${JSON.stringify([bead])}' ;; list) printf '[{"id":"kit-9"}]' ;; esac\n`);
 	chmodSync(join(bin, "br"), 0o755);
-	const env = { PATH: `${bin}:${process.env.PATH ?? ""}` };
+	const config = join(base, "empty-fleet-watch.json");
+	writeFileSync(config, JSON.stringify({ sessions: [] }));
+	const env = { PATH: `${bin}:${process.env.PATH ?? ""}`, BEADS_DB: "", BEADS_DIR: "", OMP_KIT_FLEET_WATCH_CONFIG: config };
 	const close = await preflightBead("close", base, "kit-1", { actor: "Author", env });
 	expect(close.snapshot).toBe("bead:2026-10-25T00:00:00Z");
 	expect(close.findings.filter(f => f.blocking).map(f => f.code).sort()).toEqual(["AC_UNTICKED", "SELF_CLOSE"]);
@@ -100,7 +103,8 @@ test("preflight close|in-review|claim: every tracker predicate in one envelope, 
 	const review = await preflightBead("in-review", base, "kit-1", { env });
 	expect(review.findings.map(f => f.code)).toEqual(expect.arrayContaining(["NOT_IN_PROGRESS", "AC_PHASE_MISSING"]));
 	const claim = await preflightBead("claim", base, "kit-1", { actor: "Peer", env });
-	expect(claim.findings.map(f => f.code).sort()).toEqual(["ASSIGNED", "GATED_LABEL", "NOT_OPEN", "SEAT_BUSY"]);
+	expect(claim.findings.filter(f => f.blocking).map(f => f.code).sort()).toEqual(["ASSIGNED", "GATED_LABEL", "NOT_OPEN", "SEAT_BUSY"]);
+	expect(claim.findings.map(f => f.code)).toContain("CLAIM_CUT_ADMITTED");
 	// planted: a br that cannot answer is UNJUDGED, never ok
 	writeFileSync(join(bin, "br"), "#!/bin/sh\necho 'Error: Issue not found' >&2\nexit 3\n");
 	const gone = await preflightBead("claim", base, "kit-404", { env });
@@ -298,6 +302,12 @@ async function shimClaimEnv(actor: string, root: string): Promise<Record<string,
 	try { symlinkSync(join(import.meta.dir, "../../scripts/br-shim.sh"), join(shimBin, "br")); } catch { /* already linked */ }
 	writeFileSync(join(shimBin, "am"), '#!/bin/sh\ncase "$1:$2" in agents:show) printf \'{"id":1,"name":"%s"}\\n\' "${AGENT_NAME:-unknown}"; exit 0 ;; file_reservations:conflicts) printf \'No conflicts detected.\\n\'; exit 0 ;; *) printf \'unexpected am call: %s\\n\' "$*" >&2; exit 99 ;; esac\n');
 	chmodSync(join(shimBin, "am"), 0o755);
+	// The actual shim must consult this candidate, not an older installed native policy.
+	writeFileSync(join(shimBin, "omp-kit"), `#!${process.execPath}
+import { runCli } from ${JSON.stringify(new URL("../../src/cli.ts", import.meta.url).pathname)};
+process.exitCode = await runCli(process.argv.slice(2));
+`);
+	chmodSync(join(shimBin, "omp-kit"), 0o755);
 	return { ...process.env, PATH: `${shimBin}:${process.env.PATH ?? ""}`, AGENT_NAME: actor } as Record<string, string>;
 }
 
@@ -413,4 +423,382 @@ test("every preflight verb is registered at module load (GATEDIAG1 [b] as publis
 	const unavailable = (doc.data ?? doc).unavailable_commands ?? [];
 	const names = unavailable.map((u: unknown) => (typeof u === "string" ? u : (u as { path?: string }).path ?? ""));
 	expect(names.filter((n: string) => n.startsWith("preflight") || n === "verify")).toEqual([]);
+});
+
+function preflightCutFixture() {
+	const owned = ownedTmp("preflight-cutclaim1", { root: base });
+	const repo = owned.path;
+	const config = join(repo, "fleet-watch.json");
+	const milestone = { epic: "cut", due: "2026-11-01", declaredAt: "2026-10-30T00:00:00Z", pinned: ["k-1"] };
+	writeFileSync(config, JSON.stringify({ sessions: [{ session: "fixture", repo, milestone }] }));
+	const rows: Record<string, { id: string; status: string; assignee: string | null; labels?: string[] | null; updated_at: string }> = {};
+	const graph: Record<string, unknown> = {};
+	for (const id of ["k-1", "k-2", "k-3"]) {
+		rows[id] = { id, status: "open", assignee: null, labels: [], updated_at: "2026-10-30T00:00:00Z" };
+		graph[id] = [];
+	}
+	const env = { HOME: repo, XDG_CONFIG_HOME: join(repo, "config"), OMP_KIT_FLEET_WATCH_CONFIG: config,
+		BEADS_DB: join(repo, ".beads", "beads.db"), BEADS_DIR: "" };
+	const read = async (args: string[]): Promise<unknown> => {
+		if (args[0] === "show") {
+			const row = rows[args[1] ?? ""];
+			if (!row) throw new Error("missing fixture bead");
+			return [row];
+		}
+		if (args[0] === "list") return { issues: [], total: 0 };
+		if (args[0] === "dep" && args[1] === "list") {
+			const id = args[2] ?? "";
+			if (!(id in graph)) throw new Error("missing fixture graph");
+			return graph[id];
+		}
+		throw new Error("unexpected fixture tracker read");
+	};
+	return { repo, config, milestone, rows, graph, env, read, cleanup: owned.cleanup };
+}
+
+test("CUTCLAIM1 native [a]: k-2 is refused outside cut[k-1], pin passes with explicit adjudication marker", async () => {
+	const f = preflightCutFixture();
+	try {
+		const outside = await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read });
+		expect(outside.ok).toBe(false);
+		expect(outside.findings.filter(finding => finding.blocking).map(finding => finding.code)).toEqual(["CLAIM_OUT_OF_CUT"]);
+		expect(outside.findings[0]?.detail).toContain("cut");
+		expect(outside.findings[0]?.detail).toContain("nearest eligible pinned alternative: k-1");
+		const pin = await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read });
+		expect(pin.ok).toBe(true);
+		expect(pin.findings).toEqual([expect.objectContaining({ code: "CLAIM_CUT_ADMITTED", blocking: false })]);
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native [b]: transitive open blocks admitted; closed, related, parent-only and reversed edges denied", async () => {
+	const f = preflightCutFixture();
+	try {
+		f.rows["k-1"]!.status = "in_progress";
+		f.rows["k-1"]!.assignee = "Builder";
+		f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status: "open" }];
+		f.graph["k-3"] = [{ issue_id: "k-3", depends_on_id: "k-2", type: "blocks", status: "open" }];
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).ok).toBe(true);
+		f.rows["k-1"]!.status = "in_review";
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).ok).toBe(true);
+		for (const type of ["parent-child", "related", "blocks"]) {
+			f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-2", type, status: type === "blocks" ? "closed" : "open" }];
+			const refused = await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read });
+			expect(refused.findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
+		}
+		f.graph["k-1"] = [];
+		f.graph["k-2"] = [{ issue_id: "k-2", depends_on_id: "k-1", type: "blocks", status: "open" }];
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).ok).toBe(false);
+		f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status: "open" }];
+		f.rows["k-3"]!.status = "closed";
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
+		f.rows["k-1"]!.status = "closed";
+		expect((await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toEqual(expect.arrayContaining(["NOT_OPEN", "CLAIM_OUT_OF_CUT"]));
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native [c]: no milestone and foreign sessions admit pillar-less claims; invalid authority stays unknown", async () => {
+	const f = preflightCutFixture();
+	try {
+		const foreign = join(f.repo, "foreign");
+		mkdirSync(foreign);
+		for (const sessions of [
+			[{ session: "fixture", repo: f.repo }],
+			[{ session: "foreign", repo: foreign, milestone: f.milestone }],
+			[],
+		]) {
+			writeFileSync(f.config, JSON.stringify({ sessions }));
+			const claim = await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read });
+			expect(claim.ok).toBe(true);
+			expect(claim.findings).toEqual([expect.objectContaining({ code: "CLAIM_CUT_ADMITTED", blocking: false })]);
+		}
+		for (const body of ["{", JSON.stringify({ sessions: {} }), JSON.stringify({ sessions: [{ repo: f.repo, milestone: { ...f.milestone, pinned: null } }] })]) {
+			writeFileSync(f.config, body);
+			expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+		}
+		rmSync(f.config);
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native [c]: stock HOME and XDG callers without config admit claims without pillar metadata", async () => {
+	const f = preflightCutFixture();
+	try {
+		const script = `
+			import { preflightBead } from ${JSON.stringify(new URL("../../src/preflight.ts", import.meta.url).href)};
+			const rows = ${JSON.stringify(f.rows)};
+			const results = [];
+			for (const labels of [[], ["domain:outside"], ["pillar:proven"]]) {
+				rows["k-2"].labels = labels;
+				const result = await preflightBead("claim", process.cwd(), "k-2", {
+					read: async args => args[0] === "show" ? [rows[args[1]]] : { issues: [], total: 0 },
+				});
+				results.push({ ok: result.ok, codes: result.findings.map(f => f.code) });
+			}
+			console.log(JSON.stringify(results));
+		`;
+		for (const useXdg of [false, true]) {
+			const childEnv = { ...process.env, ...f.env } as Record<string, string>;
+			delete childEnv.OMP_KIT_FLEET_WATCH_CONFIG;
+			if (!useXdg) delete childEnv.XDG_CONFIG_HOME;
+			const result = await run([process.execPath, "--eval", script], { cwd: f.repo, env: childEnv, deadline_s: 60, max_output_bytes: 65536 });
+			expect(result.rc).toBe(0);
+			expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual([
+				{ ok: true, codes: ["CLAIM_CUT_ADMITTED"] },
+				{ ok: true, codes: ["CLAIM_CUT_ADMITTED"] },
+				{ ok: true, codes: ["CLAIM_CUT_ADMITTED"] },
+			]);
+		}
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native [c]: no-cut adjudication never needs a bead read or a stock caller's custom DB binding", async () => {
+	const f = preflightCutFixture();
+	try {
+		const { OMP_KIT_FLEET_WATCH_CONFIG: _ignored, ...stockEnv } = f.env;
+		for (const env of [stockEnv, { ...stockEnv, BEADS_DB: join(f.repo, "custom.sqlite") }]) {
+			let reads = 0;
+			const result = await admitClaimCut({ repo: f.repo, id: "plain-task", env, read: async () => {
+				reads += 1;
+				throw new Error("an unrelated tracker is unavailable");
+			} });
+			expect(result).toMatchObject({ code: "CLAIM_CUT_ADMITTED", blocking: false, cut: null });
+			expect(reads).toBe(0);
+		}
+		writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo }] }));
+		const result = await admitClaimCut({ repo: f.repo, id: "plain-task", env: f.env,
+			read: async () => { throw new Error("an undeclared cut cannot need this reader"); } });
+		expect(result).toMatchObject({ code: "CLAIM_CUT_ADMITTED", blocking: false, cut: null });
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native [c]: custom DB locations admit no-cut callers but cannot escape a managed checkout's cut", async () => {
+	const f = preflightCutFixture();
+	try {
+		const foreign = join(f.repo, "foreign");
+		const custom = join(f.repo, "native-state");
+		mkdirSync(foreign);
+		mkdirSync(custom);
+		for (const env of [
+			{ ...f.env, BEADS_DB: join(f.repo, "custom.sqlite") },
+			{ ...f.env, BEADS_DB: join(custom, "data.sqlite") },
+			{ ...f.env, BEADS_DB: "", BEADS_DIR: custom },
+		]) {
+			for (const sessions of [
+				[{ repo: foreign, milestone: f.milestone }],
+				[{ repo: f.repo }],
+			]) {
+				writeFileSync(f.config, JSON.stringify({ sessions }));
+				const allowed = await preflightBead("claim", f.repo, "k-2", { env, read: f.read });
+				expect(allowed.ok).toBe(true);
+				expect(allowed.findings).toEqual([expect.objectContaining({ code: "CLAIM_CUT_ADMITTED", blocking: false })]);
+			}
+			writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: f.milestone }] }));
+			const refused = await preflightBead("claim", f.repo, "k-2", { env, read: f.read });
+			expect(refused.findings.filter(finding => finding.blocking).map(finding => finding.code)).toEqual(["CLAIM_OUT_OF_CUT"]);
+			expect((await preflightBead("claim", f.repo, "k-1", { env, read: f.read })).ok).toBe(true);
+		}
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native [c] planted negative: restored pillar refusal breaks the same stock-claim assertion", { timeout: 40000 }, async () => {
+	const f = preflightCutFixture();
+	try {
+		const wrapper = `
+export async function admitClaimCut(input) {
+	const admitted = await originalCutAdmission(input);
+	if (!admitted.blocking && admitted.cut === null) {
+		const raw = input.bead ?? await input.read(["show", input.id, "--json"]);
+		const row = Array.isArray(raw) ? raw[0] : raw;
+		if (!Array.isArray(row.labels) || !row.labels.some(label => typeof label === "string" && label.startsWith("pillar:") && label.length > 7)) {
+			return { ...admitted, code: "CLAIM_PILLAR_REQUIRED", blocking: true, detail: "restored no-cut pillar refusal" };
+		}
+	}
+	return admitted;
+}
+`;
+		const script = (mutant: boolean) => `
+			import assert from "node:assert/strict";
+			let applied = 0;
+			${mutant ? `Bun.plugin({ name: "restore-no-cut-pillar-refusal", setup(builder) {
+				builder.onLoad({ filter: /claim-cut[.]ts$/ }, async args => {
+					const source = await Bun.file(args.path).text();
+					const entry = "export async function admitClaimCut";
+					if (!source.includes(entry)) throw new Error("CUTCLAIM1_MUTATOR_ENTRY_MISSING");
+					applied += 1;
+					return { contents: source.replace(entry, "async function originalCutAdmission") + ${JSON.stringify(wrapper)}, loader: "ts" };
+				});
+			} });` : ""}
+			// The loader mutation must register before import; static imports would bypass this boundary.
+			const { preflightBead } = await import(${JSON.stringify(new URL("../../src/preflight.ts", import.meta.url).href)});
+			const rows = ${JSON.stringify(f.rows)};
+			const result = await preflightBead("claim", process.cwd(), "k-2", {
+				read: async args => args[0] === "show" ? [rows[args[1]]] : { issues: [], total: 0 },
+			});
+			console.log(JSON.stringify({ applied, ok: result.ok, codes: result.findings.map(f => f.code) }));
+			assert.equal(applied, ${mutant ? 1 : 0}, "CUTCLAIM1_MUTATOR_APPLIED");
+			assert.equal(result.ok, true, "CUTCLAIM1_PORTABILITY_ASSERTION");
+		`;
+		const childEnv = { ...process.env, ...f.env } as Record<string, string>;
+		delete childEnv.OMP_KIT_FLEET_WATCH_CONFIG;
+		const control = await run([process.execPath, "--eval", script(false)], { cwd: f.repo, env: childEnv, deadline_s: 15, max_output_bytes: 65536 });
+		expect(control.rc).toBe(0);
+		expect(JSON.parse(new TextDecoder().decode(control.stdout))).toEqual({ applied: 0, ok: true, codes: ["CLAIM_CUT_ADMITTED"] });
+		const mutant = await run([process.execPath, "--eval", script(true)], { cwd: f.repo, env: childEnv, deadline_s: 15, max_output_bytes: 65536 });
+		expect(mutant.rc).not.toBe(0);
+		expect(JSON.parse(new TextDecoder().decode(mutant.stdout))).toEqual({ applied: 1, ok: false, codes: ["CLAIM_PILLAR_REQUIRED"] });
+		expect(new TextDecoder().decode(mutant.stderr)).toContain("CUTCLAIM1_PORTABILITY_ASSERTION");
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native: canonical repo selection, conflicting rows, malformed edges and graph failures are bounded", async () => {
+	const f = preflightCutFixture();
+	try {
+		const caller = join(f.repo, "caller");
+		mkdirSync(caller);
+		const alias = join(caller, "tracker");
+		symlinkSync(f.repo, alias);
+		writeFileSync(f.config, JSON.stringify({ sessions: [
+			{ session: "unrelated", repo: caller, milestone: { ...f.milestone, pinned: ["k-2"] } },
+			{ session: "tracker", repo: alias, milestone: f.milestone },
+		] }));
+		expect((await preflightBead("claim", caller, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
+		writeFileSync(f.config, JSON.stringify({ sessions: [
+			{ repo: f.repo, milestone: f.milestone }, { repo: alias, milestone: { ...f.milestone, pinned: ["k-2"] } },
+		] }));
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+		writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: f.milestone }] }));
+		for (const edges of [null, [{ issue_id: "k-1", depends_on_id: "k-2", type: "blocks" }], [{ issue_id: "wrong", depends_on_id: "k-2", type: "blocks", status: "open" }]]) {
+			f.graph["k-1"] = edges;
+			expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+		}
+		delete f.graph["k-1"];
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+		f.graph["k-1"] = Array.from({ length: 4097 }, () => ({ issue_id: "k-1", depends_on_id: "k-2", type: "blocks", status: "open" }));
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native: portable BR_REAL reader binds every show and graph read to BEADS_DB", async () => {
+	const f = preflightCutFixture();
+	try {
+		const real = join(f.repo, "br-real");
+		writeFileSync(real, `#!/bin/sh
+verb=$1
+id=$2
+shift 2
+bound=
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = --db ]; then shift; bound=$1; fi
+	shift
+done
+[ "$bound" = "$BEADS_DB" ] || { echo 'unbound fixture tracker' >&2; exit 97; }
+case "$verb:$id" in
+	show:k-1) printf '%s' '${JSON.stringify([f.rows["k-1"]])}' ;;
+	show:k-2) printf '%s' '${JSON.stringify([f.rows["k-2"]])}' ;;
+	dep:list) printf '[]' ;;
+	list:*) printf '{"issues":[],"total":0}' ;;
+	*) echo 'unexpected fixture read' >&2; exit 98 ;;
+esac
+`);
+		chmodSync(real, 0o755);
+		const env = { ...f.env, BR_REAL: real };
+		expect((await preflightBead("claim", f.repo, "k-2", { actor: "Holder", env })).findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
+		expect((await preflightBead("claim", f.repo, "k-1", { actor: "Holder", env })).ok).toBe(true);
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native: legacy repo-only rows and minimal epic/pinned cuts do not require unused fleet metadata", async () => {
+	const f = preflightCutFixture();
+	try {
+		writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, p0Cap: 2, coordinatorPane: "%1" }] }));
+		const stock = await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read });
+		expect(stock.ok).toBe(true);
+		expect(stock.findings).toEqual([expect.objectContaining({ code: "CLAIM_CUT_ADMITTED", blocking: false })]);
+		writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "cut", pinned: ["k-1"] } }] }));
+		expect((await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read })).ok).toBe(true);
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native: explicit pin bypasses unrelated missing pins, preserves order and accepts absent/null labels", async () => {
+	const f = preflightCutFixture();
+	try {
+		writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "cut", pinned: ["k-3", "k-1"] } }] }));
+		const refused = await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read });
+		expect(refused.findings[0]?.detail).toContain("nearest eligible pinned alternative: k-3");
+		delete f.rows["k-3"];
+		delete f.rows["k-1"]!.labels;
+		const reads: string[][] = [];
+		const read = async (args: string[]) => { reads.push(args); return f.read(args); };
+		expect((await preflightBead("claim", f.repo, "k-1", { actor: "", env: f.env, read })).ok).toBe(true);
+		expect(reads).toEqual([["show", "k-1", "--json"]]);
+		f.rows["k-1"]!.labels = null;
+		expect((await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read })).ok).toBe(true);
+		writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo }] }));
+		expect((await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read })).ok).toBe(true);
+		writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: f.milestone }] }));
+		const malformedLabels = await preflightBead("claim", f.repo, "k-1", { env: f.env,
+			read: async args => args[0] === "show" ? [{ ...f.rows["k-1"], labels: "pillar:proven" }] : f.read(args),
+		});
+		expect(malformedLabels.findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native: active blocks intermediates connect an open target; empty cut and malformed UTF8 never admit", async () => {
+	const f = preflightCutFixture();
+	try {
+		for (const status of ["in_progress", "rework", "blocked", "in_review"]) {
+			f.rows["k-3"]!.status = status;
+			f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "k-3", type: "blocks", status }];
+			f.graph["k-3"] = [{ issue_id: "k-3", depends_on_id: "k-2", type: "blocks", status: "open" }];
+			expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).ok).toBe(true);
+		}
+		f.rows["k-2"]!.status = "rework";
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toEqual(expect.arrayContaining(["NOT_OPEN", "CLAIM_OUT_OF_CUT"]));
+		f.rows["k-2"]!.status = "open";
+		writeFileSync(f.config, JSON.stringify({ sessions: [{ repo: f.repo, milestone: { epic: "empty-cut", pinned: [] } }] }));
+		expect((await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toEqual(["CLAIM_OUT_OF_CUT"]);
+		const config = JSON.stringify({ sessions: [{ repo: f.repo, milestone: f.milestone }], note: "BYTE" });
+		const marker = config.indexOf("BYTE");
+		writeFileSync(f.config, Buffer.concat([Buffer.from(config.slice(0, marker)), Buffer.from([0xff]), Buffer.from(config.slice(marker + 4))]));
+		expect((await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read })).findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native: invalid JSON refusal does not echo operator config contents", async () => {
+	const f = preflightCutFixture();
+	try {
+		writeFileSync(f.config, '{"note":"PRIVATE_CONFIG_VALUE", unexpected}');
+		const result = await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read });
+		expect(result.findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+		expect(JSON.stringify(result)).toContain("fleet-watch config is not valid JSON");
+		expect(JSON.stringify(result)).not.toContain("PRIVATE_CONFIG_VALUE");
+		expect(JSON.stringify(result)).not.toContain("unexpected");
+	} finally { f.cleanup(); }
+});
+
+test("CUTCLAIM1 native: a DB-file symlink selects the actual tracker cut, while a dangling link stays unknown", async () => {
+	const f = preflightCutFixture();
+	try {
+		const actualDb = join(f.repo, ".beads", "beads.db");
+		mkdirSync(join(f.repo, ".beads"));
+		writeFileSync(actualDb, "");
+		const caller = join(f.repo, "other");
+		mkdirSync(join(caller, ".beads"), { recursive: true });
+		const linkedDb = join(caller, ".beads", "beads.db");
+		symlinkSync(actualDb, linkedDb);
+		writeFileSync(f.config, JSON.stringify({ sessions: [
+			{ repo: caller, milestone: { epic: "decoy-cut", pinned: ["k-2"] } },
+			{ repo: f.repo, milestone: { epic: "actual-cut", pinned: ["k-1"] } },
+		] }));
+		const linked = await preflightBead("claim", caller, "k-2", { env: { ...f.env, BEADS_DB: linkedDb }, read: f.read });
+		expect(linked.findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
+		expect(linked.findings[0]?.detail).toContain("actual-cut");
+		const danglingDb = join(caller, ".beads", "dangling.db");
+		symlinkSync(join(f.repo, ".beads", "absent.db"), danglingDb);
+		const dangling = await preflightBead("claim", caller, "k-2", { env: { ...f.env, BEADS_DB: danglingDb }, read: f.read });
+		expect(dangling.findings.map(finding => finding.code)).toContain("CLAIM_CUT_UNKNOWN");
+		const virtual = await preflightBead("claim", caller, "k-2", { env: { ...f.env, BEADS_DB: join(caller, ".beads", "virtual.db") }, read: f.read });
+		expect(virtual.ok).toBe(true);
+	} finally { f.cleanup(); }
 });

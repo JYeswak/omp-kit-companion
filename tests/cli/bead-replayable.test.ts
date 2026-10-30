@@ -5,7 +5,7 @@
  * serving fixture rows; every verify verdict comes from src/verify.ts verifyBead on a fixture repo.
  */
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -19,14 +19,19 @@ const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 const DESCRIPTION = "WHAT: (a) a widget. WHY: needed.";
 let serial = 0;
 
+// Reuse one executable inode: cold launches of many new scripts can consume
+// the real reader's deadline before the fixture runs. Each alias still reads
+// its own immutable rows; no tracker result or grammar verdict is shared.
+const trackerScript = join(base, "fixture-br");
+writeFileSync(trackerScript, '#!/bin/sh\ncase " $* " in *" show "*|*" list "*) cat "${0%/*}/rows.json"; exit 0;; esac\nexit 2\n', { mode: 0o755 });
+
 /** A fake `br` whose `show` and `list` print the rows in bead.json; anything else exits 2. */
 function fakeBr(rows: unknown[]): { dir: string; br: string } {
 	const dir = join(base, `t${++serial}`);
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, "rows.json"), JSON.stringify(rows));
 	const br = join(dir, "br");
-	writeFileSync(br, `#!/bin/sh\ncase " $* " in *" show "*|*" list "*) cat ${JSON.stringify(join(dir, "rows.json"))}; exit 0;; esac\nexit 2\n`);
-	chmodSync(br, 0o755);
+	symlinkSync(trackerScript, br);
 	return { dir, br };
 }
 
@@ -159,8 +164,20 @@ async function exportRepo(): Promise<{ dir: string; sha: string }> {
 
 /** Does `omp-kit verify` refuse this acceptance ACCEPTANCE_NOT_REPLAYABLE? (dry run against a fake tracker). */
 async function verifyRefuses(acceptance: string, repo: { dir: string; sha: string }): Promise<boolean> {
-	const { dir } = fakeBr([{ id: "kit-1", status: "in_review", assignee: "Author", updated_at: "2026-10-26T00:00:00Z", labels: [], acceptance_criteria: acceptance }]);
-	const res = await verifyBead({ bead: "kit-1", exportSha: repo.sha, repo: repo.dir, actor: "Peer", env: { PATH: `${dir}:${process.env.PATH ?? ""}` }, dryRun: true });
+	const { dir, br } = fakeBr([{ id: "kit-1", status: "in_review", assignee: "Author", updated_at: "2026-10-26T00:00:00Z", labels: [], acceptance_criteria: acceptance }]);
+	const beads = join(dir, ".beads");
+	mkdirSync(beads);
+	const database = join(beads, "beads.db");
+	writeFileSync(database, "");
+	// Native preflight prefers BR_REAL; verify's later show uses PATH. Bind both
+	// readers to this same fixture without discarding runtime identity or trust.
+	const res = await verifyBead({
+		bead: "kit-1", exportSha: repo.sha, repo: repo.dir, actor: "Peer", dryRun: true,
+		env: { PATH: `${dir}:${process.env.PATH ?? ""}`, BR_REAL: br, BEADS_DB: database, BEADS_DIR: beads },
+	});
+	if (!["ACCEPTANCE_NOT_REPLAYABLE", "DRY_RUN", "PENDING"].includes(res.code)) {
+		throw new Error(`fixture verify returned ${res.code} for ${JSON.stringify(acceptance)}:\n${res.log}`);
+	}
 	return res.code === "ACCEPTANCE_NOT_REPLAYABLE";
 }
 
