@@ -141,6 +141,10 @@ def execute(args: argparse.Namespace) -> int:
             "sh", helper, "--archive", os.path.abspath(args.cwd),
             "--scratch", scratch, "--suite", args.path,
         ]
+        # Tern-backed tests need their OMP source cache despite the isolated suite HOME.
+        # The suite fence still denies writes outside its scratch and archive.
+        if os.environ.get("OMP_KIT_OMP_SRC_CACHE"):
+            wrapped.extend(["--allow-env", "OMP_KIT_OMP_SRC_CACHE"])
         if args.loopback_port is not None:
             wrapped.extend(["--loopback-port", str(args.loopback_port)])
         wrapped.extend(["--", *command])
