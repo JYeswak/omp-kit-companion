@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec } from "../../src/send.ts";
 import { classifyTernObservation, parseSessionJournal } from "../../src/plane-tern.ts";
@@ -1226,3 +1226,50 @@ test("SENDFAST1 control: a keyless /goal set to a BUSY seat keeps its turn-bound
 	expect(fake.pastes + fake.enters).toBe(0);
 	expect(fake.observes).toBeGreaterThan(1);
 });
+
+/**
+ * An idle keyless seat whose OMP journals the pasted entry `delayMs` after Enter, as a live seat does. The delay is
+ * real wall-clock time on purpose: the property under test is how soon the production proof read (no injected
+ * wait) sees an entry that lands between polls.
+ */
+async function proveLateEntry(sessionFile: string, onDisk: boolean, delayMs: number) {
+	let journal = settledJournal;
+	if (onDisk) writeFileSync(sessionFile, journal);
+	let composer = "";
+	const io: TernObserverIo = {
+		run: (argv: string[]) => {
+			const send = argv.indexOf("send");
+			if (send >= 0 && argv[send + 2] === "paste") composer += argv[send + 3] ?? "";
+			if (send >= 0 && argv[send + 2] === "keys") {
+				const entry = userEntry("live", "m1", composer.trim());
+				composer = "";
+				setTimeout(() => {
+					journal += entry;
+					if (onDisk) appendFileSync(sessionFile, entry);
+				}, delayMs);
+			}
+			return { code: 0, out: "" };
+		},
+		readSessionFile: () => journal,
+		wait: noWait,
+	};
+	const binding = { ...ternRuntimeBinding, sessionFile };
+	const started = performance.now();
+	const r = await deliverToTernSeat({ seat: keylessSeat, text: "status update", dropDir: ternDropDir(), io,
+		observe: async () => ({ ...ternIdle, sessionFile, sessionSha: sha(journal), runtimeBinding: binding }),
+		identify: async (): Promise<TernIdentityResult> => ({ status: "IDENTIFIED", agent: "A", binding: "b", cwdOk: true,
+			runtimeBinding: binding }), composer: () => ({ state: "EMPTY" }) });
+	return { r, ms: performance.now() - started };
+}
+
+test("SENDFAST1.proof: an entry journaled 50 ms after Enter is proven by the stat-gated 50 ms read in under 300 ms", async () => {
+	const { r, ms } = await proveLateEntry(join(scratch, `sendfast-${Math.random().toString(36).slice(2)}.jsonl`), true, 50);
+	expect(r).toMatchObject({ status: "OK", code: "PROVEN", sends: 1 });
+	expect(ms).toBeLessThan(300);
+}, 2_000);
+
+test("SENDFAST1.proof: a session path that cannot be stat'ed is re-read every tick and still proven in under 300 ms", async () => {
+	const { r, ms } = await proveLateEntry(join(scratch, "never-on-disk", "session.jsonl"), false, 50);
+	expect(r).toMatchObject({ status: "OK", code: "PROVEN", sends: 1 });
+	expect(ms).toBeLessThan(300);
+}, 2_000);

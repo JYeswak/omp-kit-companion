@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -730,7 +730,14 @@ export function readComposerRecord(sessionFile: string, opts: { dir?: string; no
 	return { state: "UNKNOWN", reason: "composer record has no empty flag" };
 }
 
-export const TERN_PROOF_POLL_MS = 1000;
+/** Observation and pane-lock retry cadence; each observation round spawns `tern inspect` and `tern process`. */
+export const TERN_OBSERVE_POLL_MS = 1000;
+/**
+ * SENDFAST1: proof-read cadence, so a journaled entry is seen within 50 ms, never on a 1 s grid. Each tick stats
+ * the session file and re-reads it only when it grew (a journal that has not grown holds no new entry). A file
+ * watch was measured and rejected: Bun 1.4.3's fs.watch delivered no event on this macOS host while node's did.
+ */
+export const TERN_PROOF_POLL_MS = 50;
 export const TERN_PROOF_DEADLINE_MS = 20_000;
 /**
  * The CLI's default until-delivered bound. Only sends that need a turn boundary use it: a keyed seat's one ctl
@@ -1279,7 +1286,8 @@ export async function deliverToTernSeat(input: {
 	const identify = input.identify ?? identifyTernSeat;
 	const wait = input.wait ?? (async (ms: number) => { await new Promise<void>((resolve) => setTimeout(resolve, ms)); });
 	const now = input.now ?? (() => performance.now());
-	const pollMs = input.pollMs ?? TERN_PROOF_POLL_MS;
+	const pollMs = input.pollMs ?? TERN_OBSERVE_POLL_MS;
+	const proofPollMs = input.pollMs ?? TERN_PROOF_POLL_MS;
 	const deadlineMs = input.deadlineMs ?? TERN_PROOF_DEADLINE_MS;
 	let queued = false;
 	const fail = (code: string, detail: string): TernDeliverResult =>
@@ -1532,8 +1540,18 @@ export async function deliverToTernSeat(input: {
 		}
 		const via = pasteMode ? " via paste+Enter" : "";
 		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
-		const polls = Math.max(1, Math.ceil(deadlineMs / pollMs));
+		const polls = Math.max(1, Math.ceil(deadlineMs / proofPollMs));
+		let readSize: number | null = null;
 		for (let poll = 0; ; poll++) {
+			// A journal that has not grown since the last read holds no new entry; a failed stat always re-reads.
+			let size: number | null = null;
+			try { size = statSync(sessionFile).size; } catch {}
+			if (poll > 0 && size !== null && size === readSize) {
+				if (poll + 1 >= polls) break;
+				await wait(proofPollMs);
+				continue;
+			}
+			readSize = size;
 			const current = readSessionView(input.io, sessionFile, { start: key.prefixStart, cursor: key.cursorBytes });
 			last = current === null ? { status: "UNCERTAIN", reason: "SESSION_FILE_UNREADABLE" } : proveTernEntry(current, key);
 			if (last.status === "PROVEN") {
@@ -1545,7 +1563,7 @@ export async function deliverToTernSeat(input: {
 					...(queued ? { queue_states: ["QUEUED", "DELIVERED"] as const } : {}) };
 			}
 			if (poll + 1 >= polls) break;
-			await wait(pollMs);
+			await wait(proofPollMs);
 		}
 		let note = "";
 		if (payloadKind.kind === "message") {
