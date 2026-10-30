@@ -638,10 +638,32 @@ function exitCheckpoint(rawData: unknown): ExitCheckpoint | undefined {
 	return { pending, idless };
 }
 
+/**
+ * The active leaf. OMP's latest `model_usage.activeLeafId` hint names the leaf when it was written, but the branch
+ * keeps growing below it (SENDFAST1, ompkit-fp72.135.3.84: a hint written beside a forked usage entry stayed the
+ * "leaf" for the rest of the session). From the hint the walk follows the unique child chain to its tip and stops
+ * at the first fork: a fork never resolves to either branch. Hint-carrying usage entries are metadata about the
+ * leaf, never part of the chain.
+ */
 function activeLeaf(entries: readonly JournalEntry[], byId: ReadonlyMap<string, JournalEntry>): string | null {
 	let selected: string | null = null;
 	for (const entry of entries) if (entry.type === "model_usage" && entry.activeLeafId !== null) selected = entry.activeLeafId;
-	if (selected !== null) return byId.has(selected) ? selected : null;
+	if (selected !== null) {
+		if (!byId.has(selected)) return null;
+		const children = new Map<string, string[]>();
+		for (const entry of entries) {
+			if (entry.parentId === null || (entry.type === "model_usage" && entry.activeLeafId !== null)) continue;
+			const siblings = children.get(entry.parentId);
+			if (siblings) siblings.push(entry.id);
+			else children.set(entry.parentId, [entry.id]);
+		}
+		const seen = new Set<string>([selected]);
+		for (let next = children.get(selected); next !== undefined && next.length === 1 && !seen.has(next[0]!); next = children.get(selected)) {
+			selected = next[0]!;
+			seen.add(selected);
+		}
+		return selected;
+	}
 	const parents = new Set(entries.map((entry) => entry.parentId).filter((id): id is string => id !== null));
 	const leaves = entries.filter((entry) => !parents.has(entry.id)).map((entry) => entry.id);
 	return leaves.length === 1 ? leaves[0]! : null;

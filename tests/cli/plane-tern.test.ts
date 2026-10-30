@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -26,6 +26,7 @@ import {
 	type SessionJournalResult,
 } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { buildTernProofKey, proveTernEntry } from "../../src/send.ts";
 
 /** Every journal fixture this file parses; the bounded-tail equivalence test at the end replays them all. */
 const journalCorpus = new Set<string>();
@@ -422,6 +423,65 @@ test("SENDFAST1.context: a working seat whose branch ends in injected context re
 	expect(asyncWait).toMatchObject({ status: "KNOWN", oracleBusy: null, terminalAssistantStop: true });
 	expect(classifyTernObservation(inspection, process, asyncWait, { turnInFlightIsBusy: true }))
 		.toMatchObject({ state: "UNKNOWN", reason: "SESSION_ORACLE_STATE_UNKNOWN", runtimeBinding: null });
+});
+
+// SENDFAST1.leaf (ompkit-fp72.135.3.84): live 2026-10-30, OMP wrote activeLeafId b4e742ec on two auto-thinking usage
+// entries forked beside a `memory` usage; the branch then grew below b4e742ec, and the stale hint made every later
+// idle send prove UNCERTAIN ENTRY_OFF_ACTIVE_BRANCH (then SUPPRESSED_PENDING). Shape replayed from that journal.
+describe("SENDFAST1.leaf", () => {
+	const entry = (fields: Record<string, unknown>) => JSON.stringify(fields);
+	const msg = (id: string, parentId: string, role: string, content: string, stop?: string) =>
+		entry({ type: "message", id, parentId, message: { role, content: [{ type: "text", text: content }], ...(stop ? { stopReason: stop } : {}) } });
+	const usage = (id: string, parentId: string, activeLeafId?: string) =>
+		entry({ type: "model_usage", id, parentId, ...(activeLeafId ? { activeLeafId } : {}) });
+	// a1 settles; m1 (memory usage) and h1/h2 (auto-thinking usages hinting m1) fork below a1; the branch then grows
+	// under m1: u2, a2, x1 (no hint).
+	const hinted = [header, msg("u1", "user-1", "user", "go"), msg("a1", "u1", "assistant", "ok", "stop"),
+		usage("m1", "a1"), usage("h1", "a1", "m1"), usage("h2", "h1", "m1"),
+		msg("u2", "m1", "user", "next"), msg("a2", "u2", "assistant", "done", "stop"), usage("x1", "a2")];
+	const seedUser = entry({ type: "message", id: "user-1", parentId: null, message: { role: "user", content: "seed" } });
+	const journalOf = (lines: string[]) => [lines[0], seedUser, ...lines.slice(1)].join("\n") + "\n";
+	// The sibling and fork fixtures end on a branch that is not active. A bounded tail cut so narrow that it has lost
+	// the hint sees only that branch's last message and decides BUSY, so they are parsed outside the tail-equivalence
+	// corpus (parseSessionJournalImpl); the linear fixture stays in it.
+	const keyFor = (text: string, marker: string, parse: (t: string) => SessionJournalResult = parseSessionJournal) => {
+		const j = parse(text);
+		if (j.status !== "KNOWN") throw new Error(`fixture not KNOWN: ${JSON.stringify(j)}`);
+		return { leaf: j.leafId, key: buildTernProofKey(text, j, { kind: "message", payload: `hi\n[${marker}]`, marker, objective: "" }) };
+	};
+	const marked = (id: string, parentId: string, marker: string) =>
+		entry({ type: "message", id, parentId, message: { role: "user", content: `hi\n[${marker}]` } }) + "\n";
+
+	test("SENDFAST1.leaf: a stale hint followed by a linear chain resolves to its tip, so the next USER entry is PROVEN", () => {
+		const before = journalOf(hinted);
+		const { leaf, key } = keyFor(before, "kit-send-leaf1");
+		// Planted: the hint taken as the leaf (the old code) leaves this entry UNCERTAIN ENTRY_OFF_ACTIVE_BRANCH.
+		expect(proveTernEntry(before + marked("live", "x1", "kit-send-leaf1"), key))
+			.toEqual({ status: "PROVEN", offset: Buffer.byteLength(before), entryId: "live", steering: false });
+		expect(leaf).toBe("x1");
+	});
+
+	test("SENDFAST1.leaf: a marker on a genuine sibling branch stays UNCERTAIN ENTRY_OFF_ACTIVE_BRANCH", () => {
+		// s1 is a real message forked below a1 after the main chain: not the active branch.
+		const before = journalOf([...hinted, msg("s1", "a1", "user", "aside")]);
+		const { leaf, key } = keyFor(before, "kit-send-leaf2", parseSessionJournalImpl);
+		// Planted: a leaf taken as the newest entry (s1) would turn this off-branch entry into PROVEN.
+		expect(proveTernEntry(before + marked("live", "s1", "kit-send-leaf2"), key))
+			.toEqual({ status: "UNCERTAIN", reason: "ENTRY_OFF_ACTIVE_BRANCH" });
+		expect(leaf).toBe("x1");
+	});
+
+	test("SENDFAST1.leaf: a fork after the hint stops the walk at the fork, resolving to neither branch", () => {
+		const before = journalOf([header, msg("u1", "user-1", "user", "go"), msg("a1", "u1", "assistant", "ok", "stop"),
+			usage("m1", "a1"), usage("h1", "a1", "m1"), msg("u2", "m1", "user", "left"), msg("u3", "m1", "user", "right")]);
+		const j = parseSessionJournalImpl(before);
+		// Planted: taking either child of the fork (u2 or u3) as the leaf fails here.
+		expect(j).toMatchObject({ leafId: "m1" });
+		if (j.status !== "KNOWN") return;
+		const key = buildTernProofKey(before, j, { kind: "message", payload: "hi\n[kit-send-leaf3]", marker: "kit-send-leaf3", objective: "" });
+		expect(proveTernEntry(before + marked("live", "u3", "kit-send-leaf3"), key))
+			.toEqual({ status: "UNCERTAIN", reason: "ENTRY_OFF_ACTIVE_BRANCH" });
+	});
 });
 
 test("Tern process parser extracts the actual foreground OMP record", () => {
