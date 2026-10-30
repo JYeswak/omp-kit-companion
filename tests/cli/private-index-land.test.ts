@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, loadavg } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -151,6 +151,12 @@ function spawnLoad(): { load1: number; ncpu: number; factor: number } {
 	const ncpu = availableParallelism();
 	return { load1, ncpu, factor: Math.max(1, Math.min(4, (load1 / ncpu) * 4)) };
 }
+
+// The same rule bounds a whole test: bun's 5 s per-test default is the quiet-machine figure, and a
+// test making two or three land runs (each a bun CLI plus a full-suite judge, 1.8-2.3 s at load 19)
+// ran 5.0-6.5 s at load 22 on 32 cores and was cut off with no assertion failed. The default is scaled
+// by the load factor at module load; tests carrying their own explicit cap keep it.
+setDefaultTimeout(Math.round(5_000 * spawnLoad().factor));
 
 function git(cwd: string, args: string[], planted = false): string {
 	const { load1, ncpu, factor } = spawnLoad();
