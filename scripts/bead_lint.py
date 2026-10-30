@@ -83,8 +83,15 @@ NEGATIVE_RE = re.compile(
     r"plant|known-?bad|negativ|mutant|fire|refus|reject", re.I
 )
 PLACEHOLDER_RE = re.compile(r"TODO|TBD|<\.\.\.>|<…>|\?\?\?")
+# A bead id is matched only whole (LINTIDBOUND1 ompkit-fp72.135.3.83). \b fell between the 7
+# and the dot of ompkit-t7cn7.19, so the parent id ompkit-t7cn7 matched inside its child's id.
+# An id starts where no id character ([\w.-]) precedes it and ends where neither an id
+# character ([\w-]) nor a dotted child segment (.digit) follows; a sentence-final period
+# ("see ompkit-x.") still ends the id.
+_ID_START = r"(?<![\w.-])"
+_ID_END = r"(?![\w-])(?!\.[0-9])"
 BEAD_MENTION_RE = re.compile(
-    r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+(?:\.[0-9]+(?:\.[0-9]+)*)?)\b"
+    _ID_START + r"([a-z][a-z0-9]*(?:-[a-z0-9]+)+(?:\.[0-9]+(?:\.[0-9]+)*)?)" + _ID_END
 )
 # Gap words between a causal verb and the bead id it governs. Punctuation
 # ends the clause, so a causal word about another subject on the same
@@ -419,20 +426,60 @@ def _mention_relation(text: str, mention: str) -> str:
     leak across: historical evidence stays generic, satisfied by any
     real edge, and an edgeless mention still fails.
     """
-    esc = re.escape(mention)
-    if re.search(_BLOCK_VERBS + _REL_GAP + esc + r"\b", text) or re.search(
-        esc + r"\b" + _REL_GAP + r"(?:blocks?|blocked|blocking)\b", text
+    esc = _ID_START + re.escape(mention) + _ID_END
+    if re.search(_BLOCK_VERBS + _REL_GAP + esc, text) or re.search(
+        esc + _REL_GAP + r"(?:blocks?|blocked|blocking)\b", text
     ):
         return "blocks"
-    if re.search(r"(?:parent|child)\s+of\s*" + esc + r"\b", text):
+    if re.search(r"(?:parent|child)\s+of\s*" + esc, text):
         return "parent-child"
-    if re.search(r"related\s+(?:edge\s+)?to\s*" + esc + r"\b", text) or re.search(
-        r"discovered[-\s]?from\s*:?\s*" + esc + r"\b", text
+    if re.search(r"related\s+(?:edge\s+)?to\s*" + esc, text) or re.search(
+        r"discovered[-\s]?from\s*:?\s*" + esc, text
     ) or re.search(
-        esc + r"\b" + _REL_GAP + r"related\s+edge\b", text
+        esc + _REL_GAP + r"related\s+edge\b", text
     ):
         return "related"
     return "generic"
+
+
+# LINTIDBOUND1 boundary cases: (name, bead id, text, edges, flagged by check_i). The first four
+# are children of ompkit-x whose text names the child id ompkit-x.19; the parent id must never be
+# read inside it (the ompkit-t7cn7.21 shape). The sentence-final control proves "ompkit-x." still
+# names ompkit-x and demands its edge.
+_PC_X = {"depends_on_id": "ompkit-x", "type": "parent-child"}
+MENTION_BOUNDARY_CASES = (
+    ("child-id-discovered-from", "ompkit-x.1", "parent: ompkit-x\ndiscovered-from: ompkit-x.19",
+     [_PC_X, {"depends_on_id": "ompkit-x.19", "type": "discovered-from"}], False),
+    ("child-id-related-to", "ompkit-x.1", "parent: ompkit-x\nrelated to ompkit-x.19",
+     [_PC_X, {"depends_on_id": "ompkit-x.19", "type": "related"}], False),
+    ("child-id-blocks", "ompkit-x.1", "child of ompkit-x; ompkit-x.19 blocks it",
+     [_PC_X, {"depends_on_id": "ompkit-x.19", "type": "blocks"}], False),
+    ("child-id-only", "ompkit-x.1", "ompkit-x.19 found it",
+     [_PC_X, {"depends_on_id": "ompkit-x.19", "type": "discovered-from"}], False),
+    ("sentence-final-needs-edge", "other-1", "builds on ompkit-x.", [], True),
+)
+# finditer over the whole text: every whole id, in order (dotted ids stay whole).
+MENTION_SCAN_CASES = (
+    ("see ompkit-x.", ["ompkit-x"]),
+    ("ompkit-x.19. then ompkit-x.19.2, not ompkit-x.19a or v1.ompkit-x", ["ompkit-x.19", "ompkit-x.19.2"]),
+    ("discovered-from: ompkit-t7cn7.19 (parent ompkit-t7cn7)", ["discovered-from", "ompkit-t7cn7.19", "ompkit-t7cn7"]),
+)
+
+
+def mention_boundary_failures() -> list[str]:
+    """One line per LINTIDBOUND1 boundary case the current matcher gets wrong (empty = all right)."""
+    out = []
+    byid = {"ompkit-x", "ompkit-x.1", "ompkit-x.19", "other-1"}
+    for name, bid, text, deps, want in MENTION_BOUNDARY_CASES:
+        got = bool(check_i([{"id": bid, "description": text, "dependencies": deps}], byid))
+        if got != want:
+            out.append(f"{name}: check_i flagged={got}, want {want}")
+    for text, want in MENTION_SCAN_CASES:
+        got = [m.group(1) for m in BEAD_MENTION_RE.finditer(text)]
+        if got != want:
+            out.append(f"scan {text!r}: got {got}, want {want}")
+    return out
+
 
 
 def latest_comment_ts(bead: dict) -> datetime | None:
@@ -1627,6 +1674,20 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
             fails.append(f"replayable: replayable create refused: {rp_control}")
         log["replayable_report"] = {"rows": rp_rows, "refused": rp_refused,
                                     "planted_create": rp_plant}
+        # LINTIDBOUND1 (ompkit-fp72.135.3.83): every boundary case is right with the whole-id
+        # matcher; with the old \b pattern restored (planted negative) the child-id cases fail.
+        mb_fails = mention_boundary_failures()
+        fails.extend(f"mention-boundary: {line}" for line in mb_fails)
+        real = (_ID_START, _ID_END, BEAD_MENTION_RE)
+        globals().update(_ID_START=r"\b", _ID_END=r"\b", BEAD_MENTION_RE=re.compile(
+            r"\b([a-z][a-z0-9]*(?:-[a-z0-9]+)+(?:\.[0-9]+(?:\.[0-9]+)*)?)\b"))
+        try:
+            mb_planted = mention_boundary_failures()
+        finally:
+            globals().update(_ID_START=real[0], _ID_END=real[1], BEAD_MENTION_RE=real[2])
+        if not any(line.startswith("child-id-discovered-from:") for line in mb_planted):
+            fails.append(f"mention-boundary: old \\b pattern restored, child-id case not caught: {mb_planted}")
+        log["mention_boundary"] = {"failures": mb_fails, "planted_old_pattern": mb_planted}
         elapsed_forms = [
             (
                 "hours-after-landing",
