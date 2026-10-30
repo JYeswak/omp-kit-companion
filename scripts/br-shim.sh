@@ -248,29 +248,7 @@ sys.exit(result.rc if result.rc >= 0 else 2)
 	else
 		fail "CLAIM_CUT_UNKNOWN native claim authority unavailable; install omp-kit or provide the source checkout's existing Bun runtime"
 	fi
-	claim_verdict=$(printf '%s' "$claim_probe" | python3 -c '
-import json, sys
-doc = json.load(sys.stdin)
-data = doc.get("data", doc) if isinstance(doc, dict) else None
-if not isinstance(data, dict) or data.get("act") != "claim" or data.get("target") != sys.argv[1]:
-    raise ValueError("claim authority returned the wrong target")
-findings = data.get("findings")
-if not isinstance(findings, list) or not all(isinstance(f, dict) and isinstance(f.get("code"), str) and isinstance(f.get("blocking"), bool) and isinstance(f.get("detail"), str) and isinstance(f.get("remedy"), str) for f in findings):
-    raise ValueError("claim authority returned incomplete findings")
-cut_codes = {"CLAIM_CUT_ADMITTED", "CLAIM_OUT_OF_CUT", "CLAIM_CUT_UNKNOWN"}
-cut = [f for f in findings if f["code"] in cut_codes]
-if len(cut) != 1 or cut[0]["blocking"] != (cut[0]["code"] != "CLAIM_CUT_ADMITTED"):
-    raise ValueError("claim authority did not return one consistent cut adjudication")
-blocked = [f for f in findings if f["blocking"]]
-if blocked:
-    for f in blocked:
-        code = "BR_SHIM_NEEDS_DIRECTOR" if f["code"] == "NEEDS_DIRECTOR" else f["code"]
-        print(code + ": " + f["detail"] + "; remedy: " + f["remedy"])
-elif int(sys.argv[2]) != 0 or doc.get("ok") is not True:
-    raise ValueError("claim authority failed without a refusal")
-else:
-    print("PASS")
-' "$gate_id" "$claim_rc") || fail "CLAIM_CUT_UNKNOWN native claim authority failed or returned an incomplete verdict (rc=$claim_rc)"
+	claim_verdict=$(printf '%s' "$claim_probe" | python3 "$claim_self_dir/claim_verdict.py" "$gate_id" "$claim_rc") || fail "CLAIM_CUT_UNKNOWN native claim authority failed or returned an incomplete verdict (rc=$claim_rc)"
 	[ "$claim_verdict" = "PASS" ] || fail "$claim_verdict"
 fi
 

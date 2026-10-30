@@ -27,6 +27,7 @@ for (const file of RELEASE_DATA_FILES) {
 }
 const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/package-release.sh", "scripts/receipt.py", "scripts/pysafe.py", "scripts/kitlib_run.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh",
+	"scripts/br-shim.sh", "scripts/claim_verdict.py",
 	"scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh",
 	"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh",
 	"scripts/check-gap-mention.sh", "scripts/kitlib-findings.sh",

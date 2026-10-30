@@ -35,7 +35,7 @@ async function claim(options: Scenario = {}) {
 		for (const path of [home, join(project, ".beads"), join(decoy, ".beads"), join(release, "scripts"), join(release, "bin"), bin]) {
 			mkdirSync(path, { recursive: true });
 		}
-		for (const module of ["kitlib_run.py", "pysafe.py"]) {
+		for (const module of ["kitlib_run.py", "pysafe.py", "claim_verdict.py"]) {
 			copyFileSync(join(root, "scripts", module), join(release, "scripts", module));
 		}
 		// Closed PATH prevents a standalone-Bun fallback; this fixture's authority loads the real source CLI.
@@ -52,9 +52,11 @@ async function claim(options: Scenario = {}) {
 			source = source.slice(0, start) + source.slice(end);
 		}
 		if (options.disableConsistency) {
-			const check = 'if len(cut) != 1 or cut[0]["blocking"] != (cut[0]["code"] != "CLAIM_CUT_ADMITTED"):\n    raise ValueError("claim authority did not return one consistent cut adjudication")';
-			if (!source.includes(check)) throw new Error("CUTCLAIM1 consistency mutation did not match");
-			source = source.replace(check, "");
+			const verifier = join(release, "scripts/claim_verdict.py");
+			const verdictSource = readFileSync(verifier, "utf8");
+			const check = '    if len(cut) != 1 or cut[0]["blocking"] != (cut[0]["code"] != "CLAIM_CUT_ADMITTED"):\n        raise ValueError("claim authority did not return one consistent cut adjudication")';
+			if (!verdictSource.includes(check)) throw new Error("CUTCLAIM1 consistency mutation did not match");
+			writeFileSync(verifier, verdictSource.replace(check, ""));
 		}
 		const shim = join(release, "scripts/br-shim.sh");
 		writeFileSync(shim, source);
