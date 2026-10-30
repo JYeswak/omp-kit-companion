@@ -20,6 +20,13 @@ Check catalog (all trace to the beads-north-star standard):
   e-typed-edges  f-fanout-depth  g-eco-plan-cite  h-placeholders
   i-mention-edges  j-stale-blocked (warning)  k-close-receipt
   l-ac-phase  l-ac-phase-legacy (warning)  r-verify-replayable (admission only)
+  m-goal-path (admission + goal_path_report; legacy rows are warnings)
+m-goal-path (CUTGRAPH1 ompkit-774u.61): a bead in scope that is neither
+kind:goal nor kind:intake needs a blocks path into an open kind:goal (the
+goal or a bead on its path depends on it); the create and update gates refuse
+it naming the open goals and the `br dep add` remedy. A create declares its
+target with the label goal-path:<target>. Trackers with no open goal are not
+judged; scripts/beads_place.py recommends the goal and target.
 l-ac-phase (ACPHASE1 ompkit-9e9w6): every acceptance item of a bead created
 at or after ac_phase.AC_PHASE_CUTOVER carries exactly one phase tag
 ([build] | [landed] | [live] | [after <window>]) in the leading run of
@@ -240,7 +247,13 @@ def dep_targets_in_scope(
 
 
 def check_f(beads: list[dict]) -> tuple[list[str], dict[str, str]]:
+    """f-fanout-depth. A kind:goal bead is exempt from the fanout cap (a
+    release goal gathers every bead it ships), and chain depth counts from a
+    work bead down to the first goal only: an edge into a goal is never
+    followed, so goal-to-goal links (train 6 on train 5) add no depth. A work
+    chain deeper than 4 below a goal is still refused (CUTGRAPH1 box f)."""
     scope_ids = {b["id"] for b in beads}
+    goal_ids = {b["id"] for b in beads if is_goal(b)}
     targets = dep_targets_in_scope(beads, scope_ids)
     children: dict[str, list[str]] = {bid: [] for bid in scope_ids}
     for src, tgts in targets.items():
@@ -249,7 +262,7 @@ def check_f(beads: list[dict]) -> tuple[list[str], dict[str, str]]:
     bad: set[str] = set()
     detail: dict[str, str] = {}
     for bid, ch in children.items():
-        if len(ch) > 20:
+        if len(ch) > 20 and bid not in goal_ids:
             bad.add(bid)
             detail[bid] = f"fanout {len(ch)} > 20"
     sys.setrecursionlimit(max(10000, len(beads) * 4 + 100))
@@ -263,6 +276,8 @@ def check_f(beads: list[dict]) -> tuple[list[str], dict[str, str]]:
             return None
         ds = []
         for t in targets.get(bid, []):
+            if t in goal_ids:
+                continue
             d = depth(t, stack | {bid})
             if d is None:
                 memo[bid] = None
@@ -529,6 +544,236 @@ def check_l_legacy(beads: list[dict]) -> list[str]:
         if not ac_phase.is_enforced(b.get("created_at"))
         and ac_phase.tag_refusals(b.get("acceptance_criteria"))
     ]
+
+# ---- CUTGRAPH1 box d (ompkit-774u.61): m-goal-path ----
+# Every bead in scope names an open kind:goal through a BLOCKS path: the goal,
+# or a bead already on the goal's path, depends on it (`br dep add <target>
+# <id>`). parent-child is grouping only and never counts. kind:intake is the
+# declared holding pen; a kind:goal bead is its own root. A tracker with no
+# open goal is not goal-structured and is not judged. A create cannot add an
+# edge pointing at itself, so it declares its target with the label
+# goal-path:<target>; the create is admitted only when that target is an open
+# goal or on an open goal's blocks path, and the follow-up `br dep add` makes
+# the edge real (the update gate and the report judge the edge, not the label).
+GOAL_LABEL = "kind:goal"
+INTAKE_LABEL = "kind:intake"
+GOAL_PATH_LABEL = "goal-path:"
+GOAL_PATH_CHECK = "m-goal-path"
+# Beads created before this instant are reported as warnings only.
+GOAL_PATH_CUTOVER = "2026-10-31T00:00:00Z"
+GOAL_PATH_VISIT_CAP = 20000
+
+
+def encode_goal_path_id(bead_id: str) -> str:
+    """br labels allow only [A-Za-z0-9_:-]; a dotted child id's numeric
+    suffix rides as underscores: ompkit-774u.60 -> ompkit-774u_60."""
+    base, _, rest = bead_id.partition(".")
+    return base + ("_" + rest.replace(".", "_") if rest else "")
+
+
+def decode_goal_path_id(token: str) -> str:
+    """Inverse of encode_goal_path_id: only the trailing all-digit `_N`
+    segments become `.N`; underscores elsewhere are kept."""
+    parts = token.split("_")
+    k = len(parts)
+    while k > 1 and parts[k - 1].isascii() and parts[k - 1].isdigit():
+        k -= 1
+    if k == len(parts):
+        return token
+    return "_".join(parts[:k]) + "." + ".".join(parts[k:])
+
+
+def is_goal(bead: dict) -> bool:
+    return GOAL_LABEL in (bead.get("labels") or [])
+
+
+def is_open_row(bead: dict) -> bool:
+    return (bead.get("status") or "open") not in ("closed", "tombstone")
+
+
+def open_goal_rows(rows: list[dict]) -> list[dict]:
+    return sorted((r for r in rows if is_goal(r) and is_open_row(r)),
+                  key=lambda r: r["id"])
+
+
+def rows_dependents(rows: list[dict]):
+    """dependents(id) from JSONL-shaped rows: ids whose blocks edge waits on id."""
+    index: dict[str, list[str]] = {}
+    for row in rows:
+        for dep in row.get("dependencies") or []:
+            if dep.get("type") == "blocks" and dep.get("depends_on_id"):
+                index.setdefault(dep["depends_on_id"], []).append(row["id"])
+    return lambda bid: index.get(bid, [])
+
+
+def live_dependents(real: str, db: str, cwd: str, timeout: int = 30):
+    """dependents(id) read live: `br dep list ID --direction up --type blocks`."""
+    def dependents(bid: str) -> list[str]:
+        cmd = [real, "dep", "list", bid, "--direction", "up", "--type", "blocks", "--json"]
+        if db:
+            cmd.extend(["--db", db, "--no-auto-import", "--no-auto-flush"])
+        rc, out, err = run(cmd, cwd, timeout)
+        if rc != 0:
+            raise RuntimeError(f"br dep list {bid} failed rc={rc}: {(err or out)[:300]}")
+        try:
+            data = json.loads(out or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"br dep list {bid} unparsable: {exc}")
+        return [d["issue_id"] for d in data if isinstance(d, dict)
+                and d.get("depends_on_id") == bid and d.get("type") == "blocks"
+                and d.get("issue_id")]
+    return dependents
+
+
+def goal_path_target(starts: list[str], goal_ids: set[str], dependents) -> str | None:
+    """The first open goal reached from `starts` along blocks edges (a start
+    that is itself an open goal counts), else None."""
+    seen: set[str] = set()
+    queue = list(starts)
+    while queue:
+        bid = queue.pop(0)
+        if bid in seen:
+            continue
+        seen.add(bid)
+        if len(seen) > GOAL_PATH_VISIT_CAP:
+            raise RuntimeError(f"goal path walk exceeded {GOAL_PATH_VISIT_CAP} beads")
+        if bid in goal_ids:
+            return bid
+        queue.extend(dependents(bid))
+    return None
+
+
+def goal_path_finding(bead: dict, rows: list[dict], dependents=None) -> list[str]:
+    """m-goal-path finding for one bead against the tracker rows, whatever its age."""
+    labels = bead.get("labels") or []
+    if not is_open_row(bead) or "parked" in labels:
+        return []
+    if GOAL_LABEL in labels or INTAKE_LABEL in labels:
+        return []
+    bid = bead.get("id") or "<new>"
+    goals = [g for g in open_goal_rows(rows) if g["id"] != bid]
+    if not goals:
+        return []
+    goal_ids = {g["id"] for g in goals}
+    if dependents is None:
+        dependents = rows_dependents(rows)
+    if bid == "<new>":
+        known = {r["id"] for r in rows}
+        starts = []
+        for lab in labels:
+            if lab.startswith(GOAL_PATH_LABEL) and len(lab) > len(GOAL_PATH_LABEL):
+                raw = lab[len(GOAL_PATH_LABEL):]
+                starts.extend(c for c in dict.fromkeys([decode_goal_path_id(raw), raw])
+                              if c in known)
+    else:
+        starts = [bid]
+    if starts and goal_path_target(starts, goal_ids, dependents):
+        return []
+    named = "; ".join(f"{g['id']} ({(g.get('title') or '')[:80]})" for g in goals)
+    first = goals[0]["id"]
+    if bid == "<new>":
+        fix = (f"create with --labels {GOAL_PATH_LABEL}{encode_goal_path_id(goals[0]['id'])} "
+               f"(a goal or a bead on its path; dots in the id written as _) and then run "
+               f"`br dep add {first} <NEW_ID>` (the target waits on the new bead), or label it "
+               f"{INTAKE_LABEL}; scripts/beads_place.py --title TEXT --json picks the target")
+    else:
+        fix = (f"run `br dep add {first} {bid}` (or a bead on that goal's path in place of "
+               f"{first}), or label it {INTAKE_LABEL}; scripts/beads_place.py --title TEXT "
+               f"--json picks the target")
+    return [f"{GOAL_PATH_CHECK}:GOAL_PATH_MISSING {bid} has no blocks path into an open "
+            f"{GOAL_LABEL} bead; open goals: {named}; fix: {fix}"]
+
+
+def goal_path_enforced(created_at: str | None) -> bool:
+    ts = parse_iso(created_at or "")
+    cut = parse_iso(GOAL_PATH_CUTOVER)
+    return ts is None or ts >= cut
+
+
+def goal_path_failure(bead: dict, rows: list[dict], dependents=None) -> list[str]:
+    """Refusing m-goal-path failure: creates and beads created at or after
+    GOAL_PATH_CUTOVER only (like l-ac-phase); older beads get goal_path_legacy."""
+    if bead.get("id", "<new>") != "<new>" and not goal_path_enforced(bead.get("created_at")):
+        return []
+    return goal_path_finding(bead, rows, dependents)
+
+
+def goal_path_legacy(bead: dict, rows: list[dict], dependents=None) -> list[str]:
+    """GOAL_PATH_LEGACY warning lines for a pre-cutover unplaced bead (never refused)."""
+    if bead.get("id", "<new>") == "<new>" or goal_path_enforced(bead.get("created_at")):
+        return []
+    return [line.replace(f"{GOAL_PATH_CHECK}:GOAL_PATH_MISSING", "GOAL_PATH_LEGACY", 1)
+            for line in goal_path_finding(bead, rows, dependents)]
+
+
+def goal_path_report(rows: list[dict], dependents=None) -> dict[str, list[str]]:
+    """m-goal-path over the in-scope cut: post-cutover offenders are
+    `enforced` (refused on any create/update), earlier ones `legacy` (warning)."""
+    if dependents is None:
+        dependents = rows_dependents(rows)
+    out: dict[str, list[str]] = {"enforced": [], "legacy": []}
+    for bead in scope_beads(rows):
+        if goal_path_finding(bead, rows, dependents):
+            key = "enforced" if goal_path_enforced(bead.get("created_at")) else "legacy"
+            out[key].append(bead["id"])
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def goal_path_selftest() -> tuple[list[str], dict]:
+    """Planted negatives and paired controls for m-goal-path and the check-f
+    goal exemption. Returns (failures, log)."""
+    post, pre = GOAL_PATH_CUTOVER, "2026-10-30T23:59:59.999999Z"
+    rows = [
+        mkbead("gp-goal", labels=["kind:goal"], deps=[dep_to("gp-goal", "gp-w1")]),
+        mkbead("gp-shut", status="closed", labels=["kind:goal"],
+               deps=[dep_to("gp-shut", "gp-under-shut")]),
+        mkbead("gp-w1", deps=[dep_to("gp-w1", "gp-w2")], created_at=post),
+        mkbead("gp-w2", created_at=post),
+        mkbead("gp-under-shut", created_at=post),
+        mkbead("gp-unplaced", created_at=post),
+        mkbead("gp-parent-only", created_at=post,
+               deps=[dep_to("gp-parent-only", "gp-goal", "parent-child")]),
+        mkbead("gp-legacy", created_at=pre),
+        mkbead("gp-intake", labels=["kind:intake"], created_at=post),
+    ]
+    fails: list[str] = []
+    report = goal_path_report(rows)
+    want = {"enforced": ["gp-parent-only", "gp-under-shut", "gp-unplaced"],
+            "legacy": ["gp-legacy"]}
+    if report != want:
+        fails.append(f"report: want {want} got {report}")
+    planted = goal_path_failure(rows[5], rows)
+    if not (planted and "gp-goal" in planted[0] and "br dep add gp-goal gp-unplaced" in planted[0]):
+        fails.append(f"unplaced bead not refused naming the goal and remedy: {planted}")
+    new_ok = mkbead("<new>", labels=["selftest", GOAL_PATH_LABEL + "gp-w2"], created_at=post)
+    new_bad = mkbead("<new>", labels=["selftest", GOAL_PATH_LABEL + "gp-under-shut"], created_at=post)
+    new_none = mkbead("<new>", created_at=post)
+    if goal_path_failure(new_ok, rows):
+        fails.append("create placed under gp-w2 refused")
+    if not goal_path_failure(new_bad, rows):
+        fails.append("create placed only under a closed goal admitted")
+    if not goal_path_failure(new_none, rows):
+        fails.append("unplaced create admitted")
+    if goal_path_failure(new_none, [r for r in rows if not is_goal(r)]):
+        fails.append("tracker with no goal judged")
+    # check f: a goal may gather 23 blockers and link to another goal; a work
+    # chain 5 deep under a goal is still refused.
+    fx = [mkbead("fx-goal-a", labels=["kind:goal"],
+                 deps=[dep_to("fx-goal-a", f"fx-b{n:02d}") for n in range(23)]
+                 + [dep_to("fx-goal-a", "fx-goal-b")]),
+          mkbead("fx-goal-b", labels=["kind:goal"])]
+    fx += [mkbead(f"fx-b{n:02d}", deps=[dep_to(f"fx-b{n:02d}", "fx-goal-b")]) for n in range(23)]
+    f_goal = check_f(fx)[0]
+    if f_goal:
+        fails.append(f"check f refused goal fanout or goal links: {f_goal}")
+    chain = [mkbead("fx-goal-c", labels=["kind:goal"], deps=[dep_to("fx-goal-c", "fx-c0")])]
+    chain += [mkbead(f"fx-c{n}", deps=[dep_to(f"fx-c{n}", f"fx-c{n + 1}")] if n < 5 else [])
+              for n in range(6)]
+    f_chain = check_f(chain)[0]
+    if "fx-c0" not in f_chain:
+        fails.append(f"check f admitted a work chain 5 deep: {f_chain}")
+    return fails, {"report": report, "planted": planted, "f_goal": f_goal, "f_chain": f_chain}
+
 
 # REPLAYABLE1 (ompkit-fp72.135.3.71). The box grammar lives only in
 # src/verify.ts; box-lint.ts runs it and this module shapes the verdict, so the
@@ -1486,12 +1731,15 @@ def lint_bead(bead: dict, byid: set[str] | None = None) -> dict[str, list[str]]:
 
 
 def lint_bead_failures(
-    bead: dict, byid: set[str] | None = None
+    bead: dict, byid: set[str] | None = None,
+    graph: list[dict] | None = None, dependents=None,
 ) -> list[str]:
     """Failing check names for one bead, including br-lint-template.
 
     Tombstones (deleted records) are exempt: `br lint` never flags
     them, and the gate must agree with `br lint` bead for bead.
+    `graph` (tracker rows with labels and status) turns on m-goal-path;
+    `dependents` reads blocks dependents live (default: the rows' own edges).
     """
     if (bead.get("status") or "") == "tombstone":
         return []
@@ -1502,6 +1750,8 @@ def lint_bead_failures(
     ]
     failures.extend(elapsed_time_mix_failure(bead))
     failures.extend(ac_phase_failure(bead))
+    if graph is not None:
+        failures.extend(goal_path_failure(bead, graph, dependents))
     if template_missing(
         bead.get("issue_type") or bead.get("type"),
         bead.get("description"),
@@ -1674,6 +1924,11 @@ def run_selftest(probe: str) -> tuple[bool, dict]:
             fails.append(f"replayable: replayable create refused: {rp_control}")
         log["replayable_report"] = {"rows": rp_rows, "refused": rp_refused,
                                     "planted_create": rp_plant}
+        # CUTGRAPH1 m-goal-path (ompkit-774u.61): planted unplaced beads are named,
+        # each control is admitted, and a path into a closed goal does not count.
+        gp_fails, gp_log = goal_path_selftest()
+        fails.extend(f"m-goal-path: {line}" for line in gp_fails)
+        log["goal_path"] = gp_log
         # LINTIDBOUND1 (ompkit-fp72.135.3.83): every boundary case is right with the whole-id
         # matcher; with the old \b pattern restored (planted negative) the child-id cases fail.
         mb_fails = mention_boundary_failures()
@@ -1926,11 +2181,13 @@ def lint_one(repo: str, bead_id: str) -> tuple[int, dict]:
     update gates run (lint_bead_failures). Exit 0 PASS, 1 FAIL, 3 UNVERIFIED."""
     try:
         bead = live_bead(repo, bead_id)
-        byid = live_ids(repo) | {bead["id"]}
+        rows = live_rows(repo)
+        byid = {row["id"] for row in rows} | {bead["id"]}
+        failures = lint_bead_failures(bead, byid, graph=rows,
+                                      dependents=live_dependents("br", "", repo))
     except (RuntimeError, OSError) as exc:
         return 3, {"bead": bead_id, "verdict": "UNVERIFIED",
                    "reason": str(exc)[:300]}
-    failures = lint_bead_failures(bead, byid)
     return (1 if failures else 0), {
         "bead": bead_id, "verdict": "FAIL" if failures else "PASS",
         "failures": failures}

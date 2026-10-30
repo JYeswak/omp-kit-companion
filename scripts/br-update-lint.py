@@ -166,7 +166,7 @@ def show_bead(real: str, project: str, db: str, bead_id: str) -> dict:
     return record
 
 
-def tracker_ids(real: str, project: str, db: str) -> set[str]:
+def tracker_rows(real: str, project: str, db: str) -> list[dict]:
     cmd = [real, "list", "--status", "all", "--deferred", "--limit", "0",
            "--json"]
     if db:
@@ -179,7 +179,7 @@ def tracker_ids(real: str, project: str, db: str) -> set[str]:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"br list unparsable: {exc}")
     rows = data.get("issues", data) if isinstance(data, dict) else data
-    return {row["id"] for row in rows if isinstance(row, dict) and row.get("id")}
+    return [row for row in rows if isinstance(row, dict) and row.get("id")]
 
 
 def prospective(
@@ -406,8 +406,8 @@ def main(argv: list[str]) -> int:
     repair_base = None
     admission = None
     try:
-        from bead_lint import (BoxGrammarUnavailable, lint_bead_failures,
-                               replayable_claim_refusal, replayable_findings)
+        from bead_lint import (BoxGrammarUnavailable, goal_path_legacy, lint_bead_failures,
+                               live_dependents, replayable_claim_refusal, replayable_findings)
         import ac_phase
         live = show_bead(real, project, db, args.bead_id)
         bead = prospective(live, args, project)
@@ -417,8 +417,14 @@ def main(argv: list[str]) -> int:
             except BoxGrammarUnavailable as exc:
                 replay_notices.append(f"REPLAYABLE_UNVERIFIED {exc}")
         if full:
-            byid = tracker_ids(real, project, db) | {bead["id"]}
-            failures = lint_bead_failures(bead, byid)
+            rows = tracker_rows(real, project, db)
+            byid = {row["id"] for row in rows} | {bead["id"]}
+            # CUTGRAPH1 m-goal-path: rows judge goals; blocks edges are read live.
+            # Pre-cutover beads are warned (GOAL_PATH_LEGACY), never refused.
+            dependents = live_dependents(real, db, project)
+            failures = lint_bead_failures(bead, byid, graph=rows, dependents=dependents)
+            for line in goal_path_legacy(bead, rows, dependents):
+                print(f"br-update-lint: {line}", file=sys.stderr)
             # REPLAYABLE1: only a box this edit adds or changes can fail; boxes
             # left as stored are reported, never refused. An edit that does not
             # touch acceptance cannot add a box, so it is not judged here (the

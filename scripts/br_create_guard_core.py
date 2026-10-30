@@ -252,10 +252,15 @@ def lint_prospective(
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in _sys.path:
         _sys.path.insert(0, here)
-    from bead_lint import BoxGrammarUnavailable, lint_bead_failures, replayable_findings
+    from bead_lint import (BoxGrammarUnavailable, lint_bead_failures, live_dependents,
+                           replayable_findings)
     bead = prospective_bead(parsed, project, now)
     byid = {row["id"] for row in issues} | {"<new>"}
-    failures = lint_bead_failures(bead, byid)
+    # CUTGRAPH1 m-goal-path: the rows judge goals; blocks edges are read live.
+    real = os.environ.get("BR_SHIM_REAL", "")
+    dependents = (live_dependents(real, os.environ.get("BR_SHIM_DB", ""), project)
+                  if real else None)
+    failures = lint_bead_failures(bead, byid, graph=issues, dependents=dependents)
     try:
         replay_failures, notices = replayable_findings(bead, None)
     except BoxGrammarUnavailable as exc:
