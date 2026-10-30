@@ -1,0 +1,107 @@
+{
+  "schema_version": "1",
+  "bead": "ompkit-fp72.135.3.83",
+  "producer": "LavenderPrairie",
+  "operation": "LINTIDBOUND1 acceptance and pregrade",
+  "status": "candidate_bound_pregrade_pass",
+  "code_repo": "/Users/josh/Developer/omp-kit-companion",
+  "source_commit": "64d7ed080cfe76ccc0c6e3bf6f6f2e42bf5d6df6",
+  "candidate_test_commit": "489de0e9039b5b706561630184d0bf0a525e39d9",
+  "acceptance": [
+    {
+      "index": 1,
+      "command": "python3 tests/scripts/bead_lint_bead_test.py",
+      "exit_code": 0,
+      "observed": "Ran 11 tests; OK",
+      "coverage": [
+        "literal child-only description does not infer parent",
+        "sentence-final parent mention without its relation edge fails i-mention-edges",
+        "restored legacy word-boundary matcher fails the reproduced structural-parent plus child-reference fixture"
+      ]
+    },
+    {
+      "index": 2,
+      "command": "python3 scripts/bead_lint.py --selftest",
+      "exit_code": 0,
+      "observed": "mode=selftest, ok=true, failures=[]"
+    }
+  ],
+  "private_index_checks": {
+    "base_commit": "c5e85f33f552a46a45ce2481d45d41e2f2a05189",
+    "checks": {
+      "kitlib": 0,
+      "tempsafe": 0,
+      "pysafe": 0,
+      "readme": 0,
+      "imports": 0,
+      "fragments": 0,
+      "sources": 0,
+      "regexploit": 0
+    }
+  },
+  "clean_copy": {
+    "base_commit": "c5e85f33f552a46a45ce2481d45d41e2f2a05189",
+    "overlay_paths": ["tests/scripts/bead_lint_bead_test.py"],
+    "git_init_without_commit": true,
+    "acceptance_exit_codes": [0, 0],
+    "observed": "11 tests OK; selftest ok=true, failures=[]"
+  },
+  "independent_pregrade": {
+    "rejected_unbound_run": {
+      "state": "pass_not_used",
+      "directory": "/Users/josh/Developer/omp-kit/var/agent-tmp/pregrade-fp72_135_3_83.16404",
+      "candidate_commit": null,
+      "landing_ref": "origin/main",
+      "landing_sha": "0a8c292711a4031a4c1de3f47f89e52aa72cf10f",
+      "evidence_comment": 16471,
+      "reason": "PASS was not bound to candidate_test_commit; excluded from acceptance evidence"
+    },
+    "candidate_bound_run": {
+      "state": "collected",
+      "directory": "/Users/josh/Developer/omp-kit/var/agent-tmp/pregrade-fp72_135_3_83.67309",
+      "record": "/Users/josh/.local/state/omp-kit/pregrade/ompkit-fp72.135.3.83.json",
+      "recorded_at": "2026-10-30T21:08:27Z",
+      "candidate_commit": "489de0e9039b5b706561630184d0bf0a525e39d9",
+      "landing_ref": "origin/main",
+      "landing_sha": "0a8c292711a4031a4c1de3f47f89e52aa72cf10f",
+      "verdict": "PASS",
+      "wave": "W-pregrade-fp72_135_3_83-20261030T210345Z",
+      "grader_family": "openai-codex",
+      "grader_model": "openai-codex/gpt-6-luna",
+      "acceptance_items": ["AC1 PASS", "AC2 PASS"]
+    }
+  },
+  "full_suite": {
+    "commit": "9d353edcbe9dbeb77cfb76eae97991a51b89b689",
+    "state": "observed_fail",
+    "verdict_artifact": "/Users/josh/.local/state/omp-kit/full-suite-verdicts/ed4dde1d7826f80bd92e12c4ac2cf44e699bc62e897d32d810cda6c96985b091/9d353edcbe9dbeb77cfb76eae97991a51b89b689.main.5f6c10acab81863125ac94ec0d943e99550884f8503d7365351a70efb261d467.json",
+    "log": "/Users/josh/.local/state/omp-kit/full-suite-verdicts/ed4dde1d7826f80bd92e12c4ac2cf44e699bc62e897d32d810cda6c96985b091/9d353edcbe9dbeb77cfb76eae97991a51b89b689.main.5f6c10acab81863125ac94ec0d943e99550884f8503d7365351a70efb261d467.log",
+    "recorded_at": "2026-10-30T21:11:51Z",
+    "exit_code": 1,
+    "runtime": "Darwin/arm64/bun-1.4.3/python-3.9.6/env-88bf611bc874cbff456bc418922a47860754250c606944c26dd13f4a90fdf474",
+    "checks_sha256": "1e53df5617f618ac8eff2314998fa9cde7285974893d603038572bed501c48f9",
+    "bun_files": 262,
+    "bun_ran": 3314,
+    "bun_failures": 7,
+    "shell_failures": 0,
+    "python_failures": 0,
+    "failed_files": {
+      "tests/cli/absolute-imports.test.ts": 2,
+      "tests/cli/bead-replayable.test.ts": 1,
+      "tests/cli/runtime.test.ts": 2,
+      "tests/cli/verify.test.ts": 1,
+      "tests/cli/work-doctor-stranded.test.ts": 1
+    },
+    "failure_notes": [
+      "absolute-imports, bead-replayable, and verify failures report ENOENT for /Users/josh/Developer/omp-kit-companion/var/agent-tmp/verify-dedup1.22691",
+      "runtime failures are REPLAYBR1 AC3 native-guard cases",
+      "The older tree is not candidate full-suite proof."
+    ]
+  },
+  "limitations": [
+    "The first unbound pregrade PASS is recorded but excluded from candidate evidence.",
+    "The full-suite run failed on older commit 9d353edcbe9dbeb77cfb76eae97991a51b89b689 and is not candidate proof.",
+    "This evidence is not a release or installation claim."
+  ],
+  "observed_at": "2026-10-30T21:11:51Z"
+}

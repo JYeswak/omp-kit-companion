@@ -1,0 +1,23 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_e20611af82263255089a5bdb8f51b4e008b88a705ac0a67693b77aa9ba500884",
+ "limitations": [
+  "The earlier unbound PASS is excluded; only the candidate-bound run is evidence.",
+  "The full-suite run failed on older commit 9d353edcbe9dbeb77cfb76eae97991a51b89b689 and is not candidate proof.",
+  "No release or installation claim."
+ ],
+ "operation": "LINTIDBOUND1 candidate-bound pregrade",
+ "parameters": {
+  "bead": "ompkit-fp72.135.3.83",
+  "candidate_commit": "489de0e9039b5b706561630184d0bf0a525e39d9",
+  "full_suite": "FAIL_older_commit_not_candidate_proof",
+  "pregrade_wave": "W-pregrade-fp72_135_3_83-20261030T210345Z",
+  "verdict": "PASS"
+ },
+ "producer": "LavenderPrairie",
+ "result_ref": {
+  "bytes": 4635,
+  "sha256": "f3827353d872b6e1c14b133c4e57e20f5bdf80108bdfd47b45e917ac07627658"
+ }
+}

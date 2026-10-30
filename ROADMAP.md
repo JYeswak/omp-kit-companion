@@ -96,6 +96,7 @@ The fixes shipped in #4. This roadmap follows from that finding: prove things on
 | Caller-selected patch construction applies the bytes read and parsed even if the patch file changes during fetch. The real-Git replacement regression passes; the full consumer file is 70/1 on the existing doctor deadline. Independent original calibration, publication and closure remain pending; no full-suite or release claim | ompkit-rhy9.8 (SOURCE READY; verification and publication pending) |
 | Full-suite children discard inherited publisher tracker selection while preserving explicit per-test choices. The owned native sentinel regression passes 23/0 and real repository trailer controls remain intact; the native PULL fixture still has two unchanged-deadline failures, so complete qualification, publication and independent acceptance remain pending | ompkit-fp72.143 (SOURCE READY; qualification and non-author acceptance pending; no release claim) |
 | Session startup puts the release-verified `br` shim first on PATH for Python/Bun children; doctor proves review, claim and create refusals on an owned fixture without live tracker writes | ompkit-fp72.135.3.82 (IN REVIEW; independent replay pending) |
+| Bead-lint whole-id mention handling rejects parent-prefix inference from child IDs while preserving sentence-final parent mentions; focused 11-test suite, selftest, clean-copy replay and candidate-bound pregrade pass | ompkit-fp72.135.3.83 (IN REVIEW; independent closure pending) |
 
 ## In progress
 
