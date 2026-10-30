@@ -70,11 +70,13 @@ def runtime_identity() -> str:
         raise ValueError("git exec path is empty")
     search_path = os.environ.get("PATH", "")
     path_parts = search_path.split(os.pathsep)
-    # Git prepends its exec directory to PATH for hooks. pre-push-gate clears
-    # GIT_* before judging, so discard only that exact leading component.
-    if path_parts and path_parts[0] and os.path.realpath(path_parts[0]) == os.path.realpath(git_exec_path):
+    # Git prepends its exec directory to PATH for hooks, once per nested git
+    # invocation (a hook that runs git gets it twice). pre-push-gate clears
+    # GIT_* before judging, so discard every exact leading copy, nothing else.
+    exec_real = os.path.realpath(git_exec_path)
+    while path_parts and path_parts[0] and os.path.realpath(path_parts[0]) == exec_real:
         path_parts.pop(0)
-        search_path = os.pathsep.join(path_parts)
+    search_path = os.pathsep.join(path_parts)
     environment = {
         "FULL_SUITE_RUNTIME_ID": os.environ.get("FULL_SUITE_RUNTIME_ID", ""),
         "FULL_SUITE_TIMEOUT_SECS": os.environ.get("FULL_SUITE_TIMEOUT_SECS", "1800"),
