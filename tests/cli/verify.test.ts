@@ -25,12 +25,13 @@ async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Pro
 }
 
 /** A repo whose HEAD carries scripts/t.sh (prints `16 pass 0 fail`, exit 0) and scripts/bad.sh (exit 1). */
-async function repo(name: string): Promise<{ dir: string; sha: string }> {
+async function repo(name: string, extraScripts: Record<string, string> = {}): Promise<{ dir: string; sha: string }> {
 	const dir = join(base, name);
 	mkdirSync(join(dir, "scripts"), { recursive: true });
 	writeFileSync(join(dir, "scripts", "t.sh"), "#!/bin/sh\necho ' 16 pass'\necho ' 0 fail'\n");
 	writeFileSync(join(dir, "scripts", "bad.sh"), "#!/bin/sh\necho 'selftest: FAIL'\nexit 1\n");
 	writeFileSync(join(dir, "scripts", "probe.sh"), "#!/bin/sh\ns=0\ni=1\nwhile [ $i -le 100 ]; do s=$((s + i)); i=$((i + 1)); done\nif [ $s -ne 5050 ]; then echo 'probe WRONG'; exit 1; fi\necho 'probe 5050 ok'\necho ' 0 fail'\n");
+	for (const [file, contents] of Object.entries(extraScripts)) writeFileSync(join(dir, "scripts", file), contents);
 	await sh(["git", "init", "-q"], dir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], dir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], dir);
@@ -71,6 +72,58 @@ test("verify closes a bead whose boxes name commands with expected outcomes: rep
 	expect(acts).toHaveLength(5);
 	expect(res.child).toBe("kit-1.1");
 });
+test("VERIFYDEDUP1: runs each distinct replay command once and judges every box with visible progress", async () => {
+	const sharedCount = join(base, "shared-runs");
+	const distinctCount = join(base, "distinct-runs");
+	const release = join(base, "release");
+	const { dir, sha } = await repo("dedup", {
+		"shared.sh": "#!/bin/sh\nwhile [ ! -e \"$VERIFY_RELEASE\" ]; do :; done\nprintf x >> \"$VERIFY_SHARED_COUNT\"\nprintf 'alpha beta gamma\\n'\n",
+		"distinct.sh": "#!/bin/sh\nprintf x >> \"$VERIFY_DISTINCT_COUNT\"\nprintf 'delta\\n'\n",
+	});
+	const acceptance = [
+		"- [ ] [a] [landed] `sh scripts/shared.sh` -> alpha",
+		"- [ ] [b] [landed] `sh scripts/shared.sh` -> not present",
+		"- [ ] [c] [landed] `sh scripts/shared.sh` -> gamma",
+		"- [ ] [d] [landed] `sh scripts/distinct.sh` -> delta",
+	].join("\n");
+	const br = fakeBr(dir, inReview(acceptance));
+	let released = false;
+	let seenProgress = "";
+	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--export", sha, "--project", dir, "--actor", "Peer", "--dry-run", "--json"], {
+		cwd: base,
+		deadline_s: 10,
+		env: { ...process.env, ...br.env, VERIFY_SHARED_COUNT: sharedCount, VERIFY_DISTINCT_COUNT: distinctCount, VERIFY_RELEASE: release },
+		on_output: (stream, chunk) => {
+			if (stream !== "stderr" || released) return;
+			seenProgress += new TextDecoder().decode(chunk);
+			if (seenProgress.includes("verify progress [a]")) {
+				released = true;
+				writeFileSync(release, "continue");
+			}
+		},
+	});
+	expect(released).toBe(true);
+	expect(r.rc).toBe(0);
+	expect(readFileSync(sharedCount, "utf8")).toBe("x");
+	expect(readFileSync(distinctCount, "utf8")).toBe("x");
+	const output = JSON.parse(new TextDecoder().decode(r.stdout)) as { data: { replays: { letter: string; expected: string; pass: boolean }[] } };
+	expect(output.data.replays.map(({ letter, expected, pass }) => [letter, expected, pass])).toEqual([
+		["a", "alpha", true], ["b", "not present", false], ["c", "gamma", true], ["d", "delta", true],
+	]);
+	expect(new TextDecoder().decode(r.stdout)).not.toContain("verify progress");
+	const progress = new TextDecoder().decode(r.stderr).trim().split("\n");
+	expect(progress).toHaveLength(4);
+	for (const [index, letter] of ["a", "b", "c", "d"].entries()) {
+		expect(progress[index]).toContain(`[${letter}]`);
+		expect(progress[index]).toContain("elapsed=");
+		expect(progress[index]).toContain("verdict=");
+	}
+	expect(progress[0]).toContain("final_verdict=PASS");
+	expect(progress[1]).toContain("verdict=FAIL");
+	expect(progress[2]).toContain("verdict=PASS");
+	expect(progress[3]).toContain("final_verdict=PASS");
+});
+
 
 test("planted: a dotted bead id proceeds past scratch allocation with the exact bead identity preserved (constant label, unchanged metadata)", async () => {
 	const { dir, sha } = await repo("dotted");

@@ -2,8 +2,8 @@
  * `omp-kit verify <bead> --export <sha> [--actor NAME] [--project PATH] [--json] [--dry-run]`
  * (AUTOCOMPLETE1 ompkit-fp72.135.3.17 [b]; plan section 22 step 6, section 23.2 close row, section 26 W1).
  *
- * The one non-author close verb. It exports the exact commit into owned scratch, replays the command each
- * acceptance box names, and judges each box by its NAMED EXPECTED OUTCOME, never by exit 0 alone
+ * The one non-author close verb. It exports the exact commit into owned scratch, replays each distinct
+ * command once, and judges every box by its own NAMED EXPECTED OUTCOME, never by exit 0 alone
  * (QuietBadger AM 68959 #1: our own examples include exit 0 with a null headline). A box with no replayable
  * command is refused ACCEPTANCE_NOT_REPLAYABLE and the bead goes back to intake. The author's own seat is
  * refused NON_AUTHOR_REQUIRED. A box whose command fails sets REWORK naming the box. Only when every box passes
@@ -28,7 +28,7 @@
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { run } from "./kitlib/run.ts";
+import { run, type RunResult } from "./kitlib/run.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { preflightBead } from "./preflight.ts";
 import { installReadonlyBr, resolveRealBr } from "./kitlib/readonly-br.ts";
@@ -237,30 +237,56 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	log.push(`exported ${input.exportSha} to ${exportDir}`);
 	const replays: BoxReplay[] = [];
 	const environmentFailures: string[] = [];
+	type ReplayOutcome = Pick<RunResult, "rc" | "timed_out" | "killed" | "truncated" | "total_truncated"> & { out: string; elapsedMs: number };
+	const commandResults = new Map<string, ReplayOutcome>();
 	for (const box of replayable) {
 		if (box.phase === "live" || box.phase === "after") {
+			const command = commandOf(box.body)!;
+			process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(command)} elapsed=0ms verdict=PENDING\n`);
 			replays.push({ index: box.index, letter: box.letter, command: null, expected: null, rc: null, pass: null, detail: `pending: ${box.phase} phase prerequisite unmet in export replay; not executed` });
 			log.push(`${tag(box)} PENDING ${box.phase} phase prerequisite unmet; not executed`);
 			continue;
 		}
 		const command = commandOf(box.body)!;
 		const expected = expectedOf(box.body)!; // non-null: unreplayableReason refused every box without one
-		const started = Date.now();
-		const r = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
-		const out = text(r.stdout) + text(r.stderr);
-		const v = judge(expected, r.rc, out);
-		const environment = !v.pass && r.rc !== null && r.rc !== 0 && !r.timed_out && !r.killed && !r.truncated && !r.total_truncated
+		const cached = commandResults.get(command);
+		const reused = cached !== undefined;
+		let replay: ReplayOutcome;
+		if (cached === undefined) {
+			const started = Date.now();
+			process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(command)} elapsed=0ms verdict=RUNNING`);
+			const result = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
+			replay = {
+				rc: result.rc,
+				timed_out: result.timed_out,
+				killed: result.killed,
+				truncated: result.truncated,
+				total_truncated: result.total_truncated,
+				out: text(result.stdout) + text(result.stderr),
+				elapsedMs: Date.now() - started,
+			};
+			commandResults.set(command, replay);
+		} else {
+			replay = cached;
+		}
+		const { out, elapsedMs } = replay;
+		const v = judge(expected, replay.rc, out);
+		const environment = !v.pass && replay.rc !== null && replay.rc !== 0 && !replay.timed_out && !replay.killed && !replay.truncated && !replay.total_truncated
 			? ompEnvironmentFailure(out, replayEnv) : null;
 		if (environment !== null) {
+			if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(command)} elapsed=${elapsedMs}ms verdict=ENVIRONMENT\n`);
+			else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=ENVIRONMENT\n`);
 			environmentFailures.push(`${tag(box)} ${environment}`);
-			const detail = `environment prerequisite unmet: ${environment}${childExcerpt(r.rc, r.timed_out, out)}`;
-			replays.push({ index: box.index, letter: box.letter, command, expected, rc: r.rc, pass: null, detail });
+			const detail = `environment prerequisite unmet: ${environment}${childExcerpt(replay.rc, replay.timed_out, out)}`;
+			replays.push({ index: box.index, letter: box.letter, command, expected, rc: replay.rc, pass: null, detail });
 			log.push(`${tag(box)} ENVIRONMENT ${command}: ${detail}; needs-director`);
 			continue;
 		}
-		const excerpt = v.pass ? "" : childExcerpt(r.rc, r.timed_out, out);
-		replays.push({ index: box.index, letter: box.letter, command, expected, rc: r.rc, pass: v.pass, detail: v.detail + excerpt });
-		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail}${excerpt} (${Date.now() - started} ms)${r.timed_out ? " TIMEOUT" : ""}`);
+		if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(command)} elapsed=${elapsedMs}ms verdict=${v.pass ? "PASS" : "FAIL"}\n`);
+		else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=${v.pass ? "PASS" : "FAIL"}\n`);
+		const excerpt = v.pass ? "" : childExcerpt(replay.rc, replay.timed_out, out);
+		replays.push({ index: box.index, letter: box.letter, command, expected, rc: replay.rc, pass: v.pass, detail: v.detail + excerpt });
+		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail}${excerpt} (${elapsedMs} ms)${replay.timed_out ? " TIMEOUT" : ""}`);
 	}
 	const failed = replays.filter(r => r.pass === false);
 	if (failed.length > 0) {
