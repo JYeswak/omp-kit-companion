@@ -125,13 +125,13 @@ test("planted: a box whose command fails sets REWORK naming the box; exit 0 with
 	expect(acts[0]).toStartWith("update kit-1 --status rework --transition-comment REWORK kit-1: [b] output lacks \"PASS\"; child rc 1 15 chars: selftest: FAIL\n; [c] summary 99 pass: not found; child rc 0 17 chars:  16 pass\n 0 fail\n");
 });
 
-test("exit-only boxes are judged by rc and flagged in the close reason; --dry-run runs nothing against the tracker", async () => {
+test("planted: a box whose first backticked span is not followed by -> or expect: is ACCEPTANCE_NOT_REPLAYABLE and never runs (quoted obligation text)", async () => {
 	const { dir, sha } = await repo("exitonly");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh`; planted: nothing"));
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] the seat runs `br update <id> --status in_review` after `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
-	expect(res.code).toBe("DRY_RUN");
-	expect(res.replays[0]).toMatchObject({ letter: "a", pass: true, outcome: "exit-only" });
-	expect(res.acts[2]?.join(" ")).toContain("exit-only boxes: [a]");
+	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
+	expect(res.replays).toEqual([]);
+	expect(res.log).toContain("[a] first backticked span \"br update <id> --status in_review\" is not followed by -> or expect:");
 	expect(br.acts()).toEqual([]);
 });
 

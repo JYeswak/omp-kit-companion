@@ -106,9 +106,14 @@ export function commandOf(body: string): string | null {
  * The one judgment verifyBead refuses ACCEPTANCE_NOT_REPLAYABLE by and scripts/box-lint.ts
  * (bead_lint's create and update admission) refuses new boxes by. `[v]` boxes are the caller's to skip.
  */
-export function unreplayableReason(box: Box): "unsupported-phase" | "no-command" | null {
+export function unreplayableReason(box: Box): "unsupported-phase" | "no-command" | "command-not-followed-by-expected" | null {
 	if (box.phase !== null && KNOWN_PHASES[box.phase] !== true) return "unsupported-phase";
-	return commandOf(box.body) === null ? "no-command" : null;
+	const span = CMD.exec(box.body);
+	if (span === null) return "no-command";
+	// The first backticked span is what runs, so it must be the command the box judges: `cmd` -> <expected> or
+	// `cmd` expect: <expected>. Quoted obligation text (`br update <id> --status in_review`) would otherwise run.
+	const after = box.body.slice(span.index + span[0].length).trimStart();
+	return after.startsWith("->") || /^expect(?:ed)?:/i.test(after) ? null : "command-not-followed-by-expected";
 }
 
 /** The expected-outcome clause of a box: text after `->` or after `expect:`; null when the box names none. */
@@ -164,7 +169,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const replayable = boxes.filter(b => b.letter !== "v");
 	const bad = replayable.filter(b => unreplayableReason(b) !== null);
 	if (replayable.length === 0 || bad.length > 0) {
-		log.push(`not replayable: ${bad.length ? bad.map(b => unreplayableReason(b) === "unsupported-phase" ? `${tag(b)} unsupported phase [${b.phase}]` : `${tag(b)} names no command`).join("; ") : "no boxes"}`);
+		log.push(`not replayable: ${bad.length ? bad.map(b => { const why = unreplayableReason(b); return why === "unsupported-phase" ? `${tag(b)} unsupported phase [${b.phase}]` : why === "no-command" ? `${tag(b)} names no command` : `${tag(b)} first backticked span ${JSON.stringify(commandOf(b.body))} is not followed by -> or expect:`; }).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
 	// The owned replay fixture uses an explicit database path under its per-run

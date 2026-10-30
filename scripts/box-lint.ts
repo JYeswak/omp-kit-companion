@@ -18,7 +18,8 @@
 import { expectedOf, parseBoxes, unreplayableReason, type Box } from "../src/verify.ts";
 
 interface Item { id: string; acceptance: string; baseline: string | null }
-interface Finding { index: number; letter: string | null; phase: string | null; reason: "unsupported-phase" | "no-command"; line: string; detail: string }
+type Reason = "unsupported-phase" | "no-command" | "command-not-followed-by-expected";
+interface Finding { index: number; letter: string | null; phase: string | null; reason: Reason; line: string; detail: string }
 
 const PHASES = ["build", "landed", "live", "after"];
 /** A box's identity across a write: its tags and body, not its checked state or position. */
@@ -31,10 +32,12 @@ function correctedShape(box: Box): string {
 	return `- [ ] [${letter}] [${phase}] <what it proves> \`<one bounded command>\` -> rc 0 (or: N pass 0 fail, prints <text>)`;
 }
 
-function finding(box: Box, reason: "unsupported-phase" | "no-command"): Finding {
+function finding(box: Box, reason: Reason): Finding {
 	const why = reason === "unsupported-phase"
 		? "has a tag run that is not one scope letter a-z then one phase (build, landed, live, after)"
-		: "names no backticked command";
+		: reason === "no-command"
+			? "names no backticked command"
+			: "has a first backticked span not followed by -> or expect:, so verify would run that text; quote an obligation's own backticks with single quotes, or put Replay `<cmd>` -> <expected>; first";
 	return { index: box.index, letter: box.letter, phase: box.phase, reason, line: box.line, detail: `box ${box.index} ${JSON.stringify(box.line)} ${why}; corrected shape: ${correctedShape(box)}` };
 }
 
