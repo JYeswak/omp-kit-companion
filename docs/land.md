@@ -127,6 +127,9 @@ Default derivation prefers the durable cache maps when both exist, otherwise `.g
 It reports recorded work `W`, longest file `p_max`, worker count `m`, all three budgets,
 and the necessary lower bound `max(W / m, p_max)`. Exceeding either the file cap or cycle
 lower bound fails the check. This is not a sufficient scheduling bound or a p95 guarantee.
+If neither location has both timing maps, derivation refuses instead of inventing
+durations. A complete measured full-suite run must supply the missing observations;
+legacy aggregate-only verdicts cannot seed per-file maps.
 Arrival/service history contains `{arrival_ms,service_ms}` samples; without measured
 history, utilisation/variability remain `NOT_MEASURED`. The initial cap is not presented
 as distribution-derived.
