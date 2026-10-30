@@ -7,6 +7,8 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { runSync } from "../../src/kitlib/run";
 
 const root = resolve(import.meta.dir, "../..");
+// The remaining scripts/ entries of suite-metrics.py JUDGING_FILES, which a fixture judge dir must also carry.
+const JUDGE_SUPPORT = ["full-suite-verdict.sh", "suite-hermetic-env.sh", "kitlib_run.py", "kitlib_tmp.py", "pysafe.py", "kitlib-tmp.sh"];
 const scratchRoot = root.includes("/fresh-gate.") ? resolve(root, "..") : resolve(root, "var/agent-tmp");
 const gate = join(root, "scripts/fresh-gate.sh");
 
@@ -543,7 +545,8 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 refuses a successful file over its measured po
 		const scripts = join(judge, "scripts");
 		mkdirSync(scripts, { recursive: true });
 		mkdirSync(join(judge, ".github"));
-		for (const name of ["fresh-gate.sh", "gate-disk-floor.ts", "suite-metrics.py", "full-suite-verdict-store.py", "test-budget.ts", "affected-tests.ts", "gate-ci-only.tsv"]) {
+		// Every file suite-metrics.py JUDGING_FILES hashes: a gate that exports FRESH_GATE_PASSED_OUT makes the judge read them all.
+		for (const name of ["fresh-gate.sh", "gate-disk-floor.ts", "suite-metrics.py", "full-suite-verdict-store.py", "test-budget.ts", "affected-tests.ts", "gate-ci-only.tsv", ...JUDGE_SUPPORT]) {
 			symlinkSync(join(root, "scripts", name), join(scripts, name));
 		}
 		const policy = join(judge, ".github/test-budget.json");
@@ -794,7 +797,7 @@ function gateTree(fx: SaveFixture, manifest: string): string {
 	mkdirSync(join(dir, "scripts"));
 	symlinkSync(join(root, "src"), join(dir, "src"));
 	for (const name of ["affected-tests.ts", "gate-disk-floor.ts"]) cpSync(join(root, "scripts", name), join(dir, "scripts", name));
-	for (const name of ["suite-metrics.py", "full-suite-verdict-store.py", "test-budget.ts", "fresh-gate.sh"]) symlinkSync(join(root, "scripts", name), join(dir, "scripts", name));
+	for (const name of ["suite-metrics.py", "full-suite-verdict-store.py", "test-budget.ts", "fresh-gate.sh", ...JUDGE_SUPPORT]) symlinkSync(join(root, "scripts", name), join(dir, "scripts", name));
 	mkdirSync(join(dir, ".github"));
 	cpSync(join(root, ".github/test-budget.json"), join(dir, ".github/test-budget.json"));
 	writeFileSync(join(dir, "scripts/gate-ci-only.tsv"), manifest);
