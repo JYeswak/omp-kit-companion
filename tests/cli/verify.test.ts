@@ -573,6 +573,16 @@ test("VERIFYENV1: missing linked OMP identity preserves review state and accepta
 	expect(failed.code).toBe("REWORK");
 	expect((await row(t, broken)).status).toBe("rework");
 	expect(failed.log).toContain("AssertionError");
+	// A command can report both a missing environment prerequisite and a real assertion defect.
+	const mixed = await createBead(t, "environment and assertion failure");
+	await shapeBead(t, mixed, "- [ ] [a] [build] `bun test '" + runtimeTest + "' -t 'linked OMP plugin'; bun -e 'import { strict as assert } from \"node:assert\"; assert.equal(2 + 2, 5)'` -> prints PASS");
+	const mixedFailure = await verifyBead({
+		bead: mixed, exportSha: sha, repo: cdir, actor: "Peer",
+		env: { ...trackerEnv(t), OMP_BIN: join(base, "missing-omp-launcher") },
+	});
+	expect(mixedFailure.code).toBe("REWORK");
+	expect((await row(t, mixed)).status).toBe("rework");
+	expect(mixedFailure.log).toContain("AssertionError");
 }, 120_000);
 
 test("VERIFYACTOR1 [a]: explicit-author refusal and dry-run leave fixture state and audit untouched", async () => {

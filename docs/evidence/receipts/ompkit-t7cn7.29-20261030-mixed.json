@@ -1,0 +1,47 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_e47b4210b60b7ef1573fbc7b81fdd3cbd35866a98be9706fdbeda8f8eea4e225",
+ "limitations": [
+  "Scoped correction only; predecessor full-suite RED retained; changed source needs fresh non-author pregrade."
+ ],
+ "operation": "VERIFYENV1-mixed-assertion-priority",
+ "parameters": {
+  "bead": "ompkit-t7cn7.29"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "bead": "ompkit-t7cn7.29",
+  "counterexample": {
+   "after": "real assertion wins REWORK; environment-only retains status/acceptance and adds needs-director",
+   "after_rc": 0,
+   "before": "mixed actual missing OMP identity plus Node AssertionError returned ENVIRONMENT, required REWORK",
+   "before_rc": 1
+  },
+  "files": {
+   "changelog.d/ompkit-t7cn7.29.md": "09dc814cd523f5aa967cd8933f962499a531c360490daa790b1f6d53d7992434",
+   "src/verify.ts": "a7d580ad6a75ef8ac8229b82aa145801f1dc3d347cee25c4abda3810ce8644fe",
+   "tests/cli/verify.test.ts": "6355fae133186d9707df829a53a0bc29cfb58b60719c7c3edbcb0a30d9bc0f76"
+  },
+  "history_free_final": {
+   "boundary_rc": 0,
+   "marker": "VERIFYENV1 boundary controls PASS",
+   "regression": "1 pass 0 fail 12 expect",
+   "runtime": "4 pass 0 fail 18 expect",
+   "verifier": "38 pass 0 fail 199 expect",
+   "verifier_rc": 0
+  },
+  "limits": [
+   "Prior complete CLI run RED3209pass21skip82fail retained, no new complete-suite PASS.",
+   "No publication/installation or incident closure.",
+   "Node/Bun explicit assertion diagnostics retain product priority; truncated, timed-out or killed captures cannot be environment-only."
+  ],
+  "predecessor_pregrade": "PASS on c119 collected; does not qualify changed source or refute later mixed-failure counterexample",
+  "prior_receipt": "ev_3daac14318bae33ddf07ae4759c4dd73b483fad19da14973f1cc09be7ebeb542",
+  "public_cli_before_mixed_correction": {
+   "overall": "ENVIRONMENT",
+   "rc": 2
+  },
+  "superseded_source": "c1199ac05c9aed536165de3c39d4146fae9b0a86"
+ }
+}

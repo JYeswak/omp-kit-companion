@@ -161,17 +161,20 @@ function childExcerpt(rc: number | null, timedOut: boolean, out: string): string
 	return `; child rc ${rc}${timedOut ? " TIMEOUT" : ""} ${total} chars: ${head}${omitted > 0 ? `...[${omitted} chars omitted]...${tail}` : tail}`;
 }
 
+const OMP_IDENTITY_KEYS = ["OMP_PATH", "OMP_BIN", "OMP", "OMP_SRC"];
+
 /** Require both the child's diagnostic and an independently invalid identity; arbitrary ENOENT is a product failure. */
 function ompEnvironmentFailure(out: string, env: Record<string, string>): string | null {
-	const keys = ["OMP_PATH", "OMP_BIN", "OMP", "OMP_SRC"];
-	if (!out.includes("omp executable not found on PATH") && !keys.some(key => env[key] && out.includes(`${key} `))) return null;
+	// Mixed failures are not environment-only: preserve an actual Node/Bun assertion as REWORK.
+	if (out.includes("AssertionError") || out.includes("error: expect(")) return null;
+	if (!out.includes("omp executable not found on PATH") && !OMP_IDENTITY_KEYS.some(key => env[key] && out.includes(`${key} `))) return null;
 	try {
 		resolveOmpIdentity(env);
 	} catch (error) {
 		if (!(error instanceof Error)) return null;
 		const message = error.message;
 		const identityDiagnostic = message === "omp executable not found on PATH"
-			|| keys.some(key => env[key] && message.startsWith(`${key} `));
+			|| OMP_IDENTITY_KEYS.some(key => env[key] && message.startsWith(`${key} `));
 		if (identityDiagnostic && out.includes(message)) return message;
 	}
 	return null;
@@ -246,7 +249,8 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const r = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
 		const out = text(r.stdout) + text(r.stderr);
 		const v = judge(expected, r.rc, out);
-		const environment = !v.pass && r.rc !== null && r.rc !== 0 ? ompEnvironmentFailure(out, replayEnv) : null;
+		const environment = !v.pass && r.rc !== null && r.rc !== 0 && !r.timed_out && !r.killed && !r.truncated && !r.total_truncated
+			? ompEnvironmentFailure(out, replayEnv) : null;
 		if (environment !== null) {
 			environmentFailures.push(`${tag(box)} ${environment}`);
 			const detail = `environment prerequisite unmet: ${environment}${childExcerpt(r.rc, r.timed_out, out)}`;
