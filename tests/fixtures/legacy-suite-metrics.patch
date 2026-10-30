@@ -1,0 +1,61 @@
+diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
+--- a/scripts/suite-metrics.py
++++ b/scripts/suite-metrics.py
+@@ -25,12 +25,14 @@
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parent))
+ from kitlib_run import run
++from kitlib_tmp import owned_tmp
+ import pysafe
+ JUDGE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+ JUDGING_FILES = (
+     "scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
+     "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
+-    "scripts/kitlib_run.py", "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
++    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
++    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
+     ".github/test-budget.json",
+ )
+ 
+@@ -172,17 +174,30 @@
+     # The native process writes directly to a retained file, never through a
+     # helper-owned pipe/sink thread: even SIGKILL of this helper cannot discard
+     # bytes the native process already flushed. Exec preserves its PID/group.
+-    with native_log.open("wb", buffering=0) as capture:
+-        fd = capture.fileno()
+-        launcher = [
+-            sys.executable, "-c",
+-            "import os,sys; fd=int(sys.argv[1]); "
+-            "os.dup2(fd,1); os.dup2(fd,2); os.close(fd); "
+-            "os.execvp(sys.argv[2],sys.argv[2:])",
+-            str(fd), *command,
+-        ]
+-        result = run(launcher, cwd=args.cwd, deadline_s=args.deadline,
+-                     inherit_fds=(fd,), max_output_bytes=1 << 20)
++    with owned_tmp("suite-hermetic") as scratch:
++        helper = str(Path(__file__).resolve().with_name("suite-hermetic-env.sh"))
++        wrapped = [
++            "sh", helper, "--archive", os.path.abspath(args.cwd),
++            "--scratch", scratch, "--suite", args.path,
++        ]
++        # Tern-backed tests need their OMP source cache despite the isolated suite HOME.
++        # The suite fence still denies writes outside its scratch and archive.
++        if os.environ.get("OMP_KIT_OMP_SRC_CACHE"):
++            wrapped.extend(["--allow-env", "OMP_KIT_OMP_SRC_CACHE"])
++        if args.loopback_port is not None:
++            wrapped.extend(["--loopback-port", str(args.loopback_port)])
++        wrapped.extend(["--", *command])
++        with native_log.open("wb", buffering=0) as capture:
++            fd = capture.fileno()
++            launcher = [
++                sys.executable, "-c",
++                "import os,sys; fd=int(sys.argv[1]); "
++                "os.dup2(fd,1); os.dup2(fd,2); os.close(fd); "
++                "os.execvp(sys.argv[2],sys.argv[2:])",
++                str(fd), *wrapped,
++            ]
++            result = run(launcher, cwd=args.cwd, deadline_s=args.deadline,
++                         inherit_fds=(fd,), max_output_bytes=1 << 20)
+     after = resource.getrusage(resource.RUSAGE_CHILDREN)
+     finished_ms = time.time_ns() // 1_000_000
+     digest = hashlib.sha256()

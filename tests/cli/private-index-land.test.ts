@@ -483,6 +483,48 @@ test("a v2 base missing a transitive judging dependency cannot publish using the
 	expect(responseCode(result.body)).toBe("LAND_FULL_SUITE_UNRUN");
 	expect(remoteHead(work)).toBe(base);
 });
+
+test("a legacy base without HERMETIC1 helpers still runs its archived judge", { timeout: 120_000 }, async () => {
+	const { work, fakeBin } = fixture();
+	// Reconstruct a helperless suite-metrics source while preserving the current runtime interface.
+	const legacyPatch = readFileSync(join(repoRoot, "tests", "fixtures", "legacy-suite-metrics.patch"));
+	const legacy = await kitlibRun(["git", "apply", "--reverse"], {
+		cwd: work, stdin: legacyPatch, deadline_s: 30,
+	});
+	expect(legacy.rc, new TextDecoder().decode(legacy.stderr)).toBe(0);
+	expect(legacy.timed_out || legacy.killed).toBe(false);
+	git(work, ["rm", "-f", "scripts/suite-hermetic-env.sh", "scripts/kitlib_tmp.py"]);
+	git(work, ["add", "-A"]);
+	git(work, ["commit", "-m", "legacy base judge without hermetic helpers [test]"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	const base = remoteHead(work);
+
+	writeFileSync(join(work, "owned.txt"), "candidate owned content\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const result = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(result.status, JSON.stringify(result.body)).toBe(0);
+	const data = result.body.data as { overall: string; commit: string };
+	expect(data.overall).toBe("PUSHED");
+	expect(data.commit).not.toBe(base);
+	expect(remoteHead(work)).toBe(data.commit);
+});
+
+test("a HERMETIC1 base missing suite-hermetic-env cannot borrow the worktree copy", () => {
+	const { work, fakeBin } = fixture();
+	git(work, ["rm", "scripts/suite-hermetic-env.sh"]);
+	git(work, ["commit", "-m", "plant missing hermetic judge dependency [test]"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	const base = remoteHead(work);
+	writeFileSync(join(work, "scripts", "suite-hermetic-env.sh"),
+		readFileSync(join(repoRoot, "scripts", "suite-hermetic-env.sh")));
+	writeFileSync(join(work, "owned.txt"), "candidate owned content\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const result = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(result.status).toBe(77);
+	expect(responseCode(result.body)).toBe("LAND_FULL_SUITE_UNRUN");
+	expect(remoteHead(work)).toBe(base);
+});
+
 test("contradictory cached PASS evidence is a cache miss and cannot publish", () => {
 	const { work } = fixture();
 	writeFileSync(join(work, "suite-contract.txt"), "FAIL\n");
