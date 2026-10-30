@@ -1129,7 +1129,6 @@ vpass=$(mktagverdictrepo tagpushverdictpass)
 vptip=$(git -C "$vpass" rev-parse HEAD)
 vpcache="$TMP/tag-verdict-pass-cache"
 vseedrc=$(seed_verdict "$vpass" "$vptip" "$vpcache" vpass)
-vptree=$(git -C "$vpass" rev-parse "$vptip^{tree}")
 if [ "$vseedrc" = "0" ] && [ -f "$(verdictcache "$vpass" main "$vpcache")" ]; then
 	pass=$((pass + 1))
 else
@@ -1159,7 +1158,6 @@ vfail=$(mktagverdictrepo tagpushverdictfail fail.test.sh)
 vftip=$(git -C "$vfail" rev-parse HEAD)
 vfcache="$TMP/tag-verdict-fail-cache"
 vfseedrc=$(seed_verdict "$vfail" "$vftip" "$vfcache" vfail)
-vftree=$(git -C "$vfail" rev-parse "$vftip^{tree}")
 if [ "$vfseedrc" != "0" ] && [ -f "$(verdictcache "$vfail" main "$vfcache")" ]; then
 	pass=$((pass + 1))
 else

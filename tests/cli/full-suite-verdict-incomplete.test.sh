@@ -1062,10 +1062,12 @@ if [ "$(fspar_order serial)" = "$want_order" ] && [ "$(fspar_order parallel)" = 
 else
 	not_ok "FULLSUITEPAR1 log order depends on the run"; fspar_order serial; fspar_order parallel
 fi
-set -- $(fspar_metrics parallel)
-parallel_peak=$1; parallel_tmp_count=$2; parallel_owned_count=$3; parallel_overlap=$4
-set -- $(fspar_metrics serial)
-serial_peak=$1; serial_tmp_count=$2; serial_owned_count=$3
+IFS=' ' read -r parallel_peak parallel_tmp_count parallel_owned_count parallel_overlap <<EOF
+$(fspar_metrics parallel)
+EOF
+IFS=' ' read -r serial_peak serial_tmp_count serial_owned_count _ <<EOF
+$(fspar_metrics serial)
+EOF
 if [ "$parallel_overlap" = 1 ] && [ "$parallel_peak" -ge 2 ] && [ "$parallel_peak" -le 3 ]; then
 	ok "FULLSUITEPAR1 shell suites overlap within the 3-worker bound (peak $parallel_peak)"
 else
