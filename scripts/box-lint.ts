@@ -9,13 +9,13 @@
  * BUN_BE_BUN=1, so the installed lint and the installed verb carry the same code.
  *
  * stdin:  {"items": [{"id": str, "acceptance": str, "baseline": str | null}]}
- * stdout: {"schema": "box-lint/v1", "items": [{"id", "boxes", "replayable", "refused", "legacy", "exit_only"}]}
+ * stdout: {"schema": "box-lint/v1", "items": [{"id", "boxes", "replayable", "refused", "legacy"}]}
  * `baseline` is the acceptance before the write (null for a create). A non-`[v]` box verify cannot replay
  * is `refused` when it is new or changed against the baseline and `legacy` when it is unchanged, so a
- * legacy bead is reported and never refused. `exit_only` lists replayable boxes with no expected outcome.
+ * legacy bead is reported and never refused.
  * Exit 0 with the verdict; exit 2 on unreadable input.
  */
-import { expectedOf, parseBoxes, unreplayableReason, type Box } from "../src/verify.ts";
+import { parseBoxes, unreplayableReason, type Box } from "../src/verify.ts";
 
 interface Item { id: string; acceptance: string; baseline: string | null }
 type Reason = "unsupported-phase" | "no-command" | "command-not-followed-by-expected";
@@ -46,17 +46,13 @@ export function judgeItem(item: Item) {
 	const before = new Set(item.baseline === null ? [] : parseBoxes(item.baseline).map(key));
 	const refused: Finding[] = [];
 	const legacy: Finding[] = [];
-	const exitOnly: number[] = [];
 	for (const box of boxes) {
 		const reason = unreplayableReason(box);
-		if (reason === null) {
-			if (expectedOf(box.body) === null) exitOnly.push(box.index);
-			continue;
-		}
+		if (reason === null) continue;
 		(before.has(key(box)) ? legacy : refused).push(finding(box, reason));
 	}
 	const replayable = boxes.length > 0 && refused.length === 0 && legacy.length === 0;
-	return { id: item.id, boxes: boxes.length, replayable, refused, legacy, exit_only: exitOnly };
+	return { id: item.id, boxes: boxes.length, replayable, refused, legacy };
 }
 
 if (import.meta.main) {

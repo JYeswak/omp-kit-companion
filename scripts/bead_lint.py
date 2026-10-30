@@ -556,12 +556,6 @@ def replayable_findings(
             f"ACCEPTANCE_NOT_REPLAYABLE_LEGACY {row['id']}: unchanged boxes omp-kit "
             f"verify cannot replay (reported, not refused): "
             + " ; ".join(f["detail"] for f in row["legacy"]))
-    if row["exit_only"]:
-        notices.append(
-            f"REPLAYABLE_EXIT_ONLY {row['id']}: box "
-            f"{', '.join(str(i) for i in row['exit_only'])} names a command but no "
-            f"expected outcome, so verify judges it by exit code alone; add "
-            f"-> rc N, -> N pass 0 fail or -> prints <text>")
     return failures, notices
 
 

@@ -47,12 +47,12 @@ with a one-line AC_PHASE_LEGACY notice.
 
 REPLAYABLE1 (ompkit-fp72.135.3.71): on an edit carrying --acceptance-criteria
 or --add-acceptance, a non-[v] box the edit adds or changes that `omp-kit
-verify` cannot replay (no backticked command, or a tag run other than one
-scope letter then one known phase) fails r-verify-replayable naming the box
+verify` cannot replay (no backticked command, a tag run other than one
+scope letter then one known phase, or a first backticked span not followed by
+-> <expected> or expect: <expected>) fails r-verify-replayable naming the box
 and its corrected shape. Boxes left as stored are reported on an
-ACCEPTANCE_NOT_REPLAYABLE_LEGACY line and never refused; REPLAYABLE_EXIT_ONLY
-names boxes with no expected outcome. The box grammar is src/verify.ts's, run
-through scripts/box-lint.ts.
+ACCEPTANCE_NOT_REPLAYABLE_LEGACY line and never refused. The box grammar is
+src/verify.ts's, run through scripts/box-lint.ts.
 
 Claim gate (REPLAYABLE1 revision, J-2026-10-29-22 'Migrate at claim,
 enforced'): `--claim` and `--status in_review` are refused (exit 4,

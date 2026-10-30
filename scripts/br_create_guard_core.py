@@ -244,9 +244,9 @@ def lint_prospective(
 
     `now` defaults to the wall clock; tests pin it across the cutover.
     REPLAYABLE1: every non-[v] acceptance box of a create is new, so one
-    `omp-kit verify` cannot replay fails r-verify-replayable naming it; an
-    exit-only box is a stderr notice. When box-lint.ts cannot run, the check is
-    reported unverified on stderr and the other checks still decide.
+    `omp-kit verify` cannot replay fails r-verify-replayable naming it. When
+    box-lint.ts cannot run, the check is reported unverified on stderr and the
+    other checks still decide.
     """
     import sys as _sys
     here = os.path.dirname(os.path.abspath(__file__))
