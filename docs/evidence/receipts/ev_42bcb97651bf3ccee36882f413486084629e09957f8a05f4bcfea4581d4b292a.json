@@ -1,0 +1,46 @@
+{
+ "authority": "pending",
+ "confidence": "observed",
+ "evidence_id": "ev_42bcb97651bf3ccee36882f413486084629e09957f8a05f4bcfea4581d4b292a",
+ "limitations": [
+  "Quality gate remains red; no suppression, threshold change, baseline reset or merge-ready claim.",
+  "Source tests only; no installed or compiled-native qualification."
+ ],
+ "operation": "HANDLERCAUSE1-executable-mutant-checkpoint",
+ "parameters": {
+  "bead": "ompkit-fp72.135.3.86",
+  "subject_sha256": "52872df256786e965ec36ef84823a6dd69ae61a60b1d5e3808b73fb0c2989a4b"
+ },
+ "producer": "RusticPine",
+ "result_ref": {
+  "named_replay": {
+   "assertions": 82,
+   "bare_catch_mutant": "executed by isolated preload; positive cause-retention assertion throws; canonical source files not rewritten",
+   "command": "bun test tests/cli/cli-dispatch.test.ts -t HANDLERCAUSE1",
+   "exit_code": 0,
+   "fail": 0,
+   "pass": 5
+  },
+  "native_pregrade": "Prior 7b6a63d90b record was UNVERIFIED for absent mutant witness; fresh current-source collection required.",
+  "nearest": {
+   "assertions": 171,
+   "command": "bun test src/cli-actions.test.ts tests/cli/cli-dispatch.test.ts",
+   "exit_code": 0,
+   "fail": 0,
+   "pass": 15
+  },
+  "quality": {
+   "finding": "short-horizon-churn withFailure",
+   "scoped_gating": 1,
+   "stamp": "19346bc1f+dirty+shallow",
+   "suppressed": false,
+   "tool_severity": "major",
+   "value": 2
+  },
+  "subject_files": {
+   "changelog.d/fp72.135.3.86.md": "80bdbc9f31d488e091431c1117244ac8322a42965482d9f414a3cdb50555f41c",
+   "src/cli.ts": "4be6b0b61838086136f2e28cc9e599a3f5a46d53401c66bfcaeb9a36a78c3e98",
+   "tests/cli/cli-dispatch.test.ts": "809f42936fec029791ee156a19845c35628b2390de359808a4972eb66297ad8e"
+  }
+ }
+}

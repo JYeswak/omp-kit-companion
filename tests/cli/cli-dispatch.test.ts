@@ -18,7 +18,34 @@ type Diagnostic = {
 	cause: { cause_name: string; cause_message: string; cause_stack_head: string | null };
 };
 
-async function withFailure(message: string, variant: "normal" | "blocked-state" | "uninspectable", check: (result: {
+/** Load the real CLI with only its dispatch catch reverted; never rewrite repository files. */
+function bareCatchPreload(directory: string): string {
+	const path = join(directory, "bare-catch.ts");
+	const current = "} catch (error) {\n\t\t\tresult = handlerFailure(error, actionId);\n\t\t}";
+	const previous = "} catch { result = " + JSON.stringify({
+		code: 1, data: { overall: "UNVERIFIED" },
+		errors: [{ code: "HANDLER_FAILED", message: "Command failed without verified completion",
+			remediation: "Inspect local diagnostics; no success or rollback is implied." }],
+		verification: "UNVERIFIED",
+	}) + "; }";
+	writeFileSync(path, `
+import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
+const cli = ${JSON.stringify(join(root, "src/cli.ts"))};
+Bun.plugin({ name: "handlercause-bare-catch", setup(builder) {
+	builder.onLoad({ filter: /cli\\.ts$/ }, args => {
+		if (args.path !== cli) return;
+		const source = readFileSync(cli, "utf8");
+		const current = ${JSON.stringify(current)};
+		if (!source.includes(current)) throw new Error("HANDLERCAUSE1 mutation did not match");
+		return { contents: source.replace(current, ${JSON.stringify(previous)}), loader: "ts", resolveDir: dirname(cli) };
+	});
+}});
+`);
+	return path;
+}
+
+async function withFailure(message: string, variant: "normal" | "blocked-state" | "uninspectable" | "bare-catch", check: (result: {
 	code: number | null; envelope: FailureEnvelope; output: string; state: string;
 }) => void): Promise<void> {
 	const scratch = ownedTmp("cli-dispatch-test");
@@ -36,7 +63,8 @@ function handlerCauseFixture() {
 registerCommandHandler("status", handlerCauseFixture);
 process.exitCode = await runCli(["status", "--json"]);
 `;
-		const result = await run([process.execPath, "--eval", driver], {
+		const preload = variant === "bare-catch" ? ["--preload", bareCatchPreload(scratch.path)] : [];
+		const result = await run([process.execPath, ...preload, "--eval", driver], {
 			cwd: root, deadline_s: 30,
 			env: { ...process.env, HOME: home, XDG_STATE_HOME: state,
 				TMPDIR: scratch.path, CC_STATE: join(scratch.path, "cc"),
@@ -121,5 +149,15 @@ test("HANDLERCAUSE1 cannot crash while inspecting a non-Error thrown value", asy
 		const diagnostic: Diagnostic = JSON.parse(readFileSync(path, "utf8"));
 		expect(diagnostic.cause.cause_name).toBe("object");
 		expect(diagnostic.cause.cause_stack_head).toBeNull();
+	});
+});
+
+test("HANDLERCAUSE1 restored bare catch fails the same cause-retention assertion", async () => {
+	await withFailure(marker, "normal", ({ code, envelope }) => checkFailure(code, envelope));
+	await withFailure(marker, "bare-catch", ({ code, envelope }) => {
+		expect(code).toBe(1);
+		expect(envelope.data.overall).toBe("UNVERIFIED");
+		expect(envelope.errors[0]?.code).toBe("HANDLER_FAILED");
+		expect(() => checkFailure(code, envelope)).toThrow();
 	});
 });
