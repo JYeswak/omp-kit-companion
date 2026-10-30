@@ -86,79 +86,13 @@ cleanup() {
 # and says so. The fetch names the literal refs/heads/main on that remote; a
 # stale local ref is never trusted. A fetch or peel failure fails closed into
 # the gate below.
-# tag_reusable_verdict TARGET WORKDIR: status 0 only when the verdict cache
-# holds a complete entry whose tree, checks and runtime match exactly what the
-# verdict script would compute for TARGET judged by WORKDIR's scripts. Any
-# doubt is a miss (refuse with the command), never a guess.
+# tag_reusable_verdict TARGET WORKDIR: status 0 only for a complete main-role PASS.
+#
 tag_reusable_verdict() {
 	v_tree=$(git -C "$ROOT" rev-parse "$1^{tree}" 2>/dev/null) || return 1
-	[ -n "$v_tree" ] || return 1
-	v_scripts="$2/scripts"
-	v_checks=$(python3 "$v_scripts/suite-metrics.py" identity --root "$2" --scope full 2>/dev/null) || return 1
-	[ "${#v_checks}" -eq 64 ] || return 1
-	v_bun=$(bun --version 2>/dev/null) || return 1
-	v_py=$(python3 --version 2>&1) || return 1
-	v_runtime="$(uname -s)/$(uname -m)/bun-$v_bun/$v_py"
-	[ -n "${FULL_SUITE_RUNTIME_ID:-}" ] && v_runtime="$v_runtime/pin-$FULL_SUITE_RUNTIME_ID"
-	v_cache=${FULL_SUITE_VERDICT_CACHE_DIR:-}
-	if [ -z "$v_cache" ]; then
-		v_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-		v_cache="$v_git/omp-kit/full-suite-verdicts"
-	fi
-	[ -f "$v_cache/$v_tree.json" ] && [ -f "$v_cache/$v_tree.log" ] || return 1
-	V_METRICS="$v_scripts/suite-metrics.py" V_TREE=$v_tree V_CHECKS=$v_checks V_RUNTIME=$v_runtime V_ENTRY="$v_cache/$v_tree.json" V_LOG="$v_cache/$v_tree.log" python3 - <<'PYEOF' 2>/dev/null
-import hashlib, importlib.util, json, os
-from pathlib import Path
-with open(os.environ["V_ENTRY"], encoding="utf-8") as f:
-    e = json.load(f)
-assert e.get("version") == 2
-assert e.get("tree") == os.environ["V_TREE"]
-assert e.get("checks") == os.environ["V_CHECKS"]
-assert e.get("runtime") == os.environ["V_RUNTIME"]
-assert e.get("verdict") in ("PASS", "FAIL")
-evidence = e.get("evidence")
-assert isinstance(evidence, dict) and evidence.get("complete") is True
-spec = importlib.util.spec_from_file_location("suite_metrics", os.environ["V_METRICS"])
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-assert module.complete_records(evidence.get("files"), evidence.get("declared_files", []))
-assert all(row["closure"]["tree"] == e["tree"] for row in evidence["files"])
-root = Path(os.environ["V_METRICS"]).resolve().parent.parent
-excluded = set()
-manifest = root / "scripts/gate-ci-only.tsv"
-if manifest.is_file():
-    excluded = {line.split("\t")[0] for line in manifest.read_text().splitlines()[1:] if line}
-declared = set()
-for directory in ("tests/cli", "tests/fleet-guard"):
-    declared.update(p.relative_to(root).as_posix() for p in (root / directory).rglob("*.test.ts")
-                    if p.is_file() and "var/agent-tmp/" not in p.relative_to(root).as_posix())
-declared.update(p.relative_to(root).as_posix() for p in (root / "tests/cli").glob("*.test.sh") if p.is_file())
-for directory in ("tests/cli", "tests/scripts"):
-    declared.update(p.relative_to(root).as_posix() for pattern in ("*_test.py", "*.test.py")
-                    for p in (root / directory).glob(pattern) if p.is_file())
-assert set(evidence["declared_files"]) == declared - excluded
-digest = hashlib.sha256()
-with open(os.environ["V_LOG"], "rb") as log:
-    for chunk in iter(lambda: log.read(1024 * 1024), b""):
-        digest.update(chunk)
-assert evidence.get("log_sha256") == digest.hexdigest()
-assert isinstance(e.get("exit_code"), int)
-names = ("bun_files", "bun_ran", "bun_fail", "shell_suites", "shell_fail", "py_suites", "py_fail")
-counts = [evidence.get(n) for n in names]
-assert all(isinstance(v, int) and v >= 0 for v in counts)
-bf, br, bfl, ss, sf, ps, pf = counts
-coverage = evidence.get("covered_by_focused", {})
-covered_count = sum(len(coverage.get(kind, [])) for kind in ("bun", "shell", "py"))
-assert len(evidence["files"]) == bf + ss + ps + covered_count
-assert len(evidence["files"]) > 0
-assert (bf == 0 and br == 0) or (bf > 0 and br > 0)
-assert bfl <= br and sf <= ss and pf <= ps
-if e["verdict"] == "PASS":
-    assert e["exit_code"] == 0 and bfl == sf == pf == 0
-    assert all(row["rc"] == 0 for row in evidence["files"])
-else:
-    assert e["exit_code"] != 0 and (bfl > 0 or sf > 0 or pf > 0)
-PYEOF
+	[ -f "$2/scripts/full-suite-verdict-store.py" ] || return 1
+	python3 "$2/scripts/full-suite-verdict-store.py" require-pass \
+		--repo "$ROOT" --tree "$v_tree" --role main --judge-root "$2" --suite-root "$2" >/dev/null
 }
 # tag_on_main_verdict NAME TARGET NOTE: admit or refuse the tag from the
 # verdict readback. Returns nonzero only when the target cannot be judged this
@@ -166,14 +100,14 @@ PYEOF
 tag_on_main_verdict() {
 	tag_root=$(owned_dir pre-push-gate-tag) || return 1
 	if ! git -C "$ROOT" archive "$2" | tar -xf - -C "$tag_root/tree" 2>/dev/null; then cleanup; tag_root=""; return 1; fi
-	if [ ! -f "$tag_root/tree/scripts/full-suite-verdict.sh" ] || [ ! -f "$tag_root/tree/scripts/fresh-gate.sh" ]; then cleanup; tag_root=""; return 1; fi
+	if [ ! -f "$tag_root/tree/scripts/full-suite-verdict.sh" ] || [ ! -f "$tag_root/tree/scripts/full-suite-verdict-store.py" ] || [ ! -f "$tag_root/tree/scripts/fresh-gate.sh" ]; then cleanup; tag_root=""; return 1; fi
 	if ! tag_reusable_verdict "$2" "$tag_root/tree"; then
 		cleanup; tag_root=""
-		printf 'pre-push-gate: REFUSED new tag %s: no reusable full-suite verdict for %s; run sh scripts/full-suite-verdict.sh --repo %s --commit %s, then push the tag\n' "$1" "$2" "$ROOT" "$2" >&2
+		printf 'pre-push-gate: REFUSED new tag %s: no reusable main-role full-suite verdict for %s; run sh scripts/full-suite-verdict.sh --repo %s --commit %s --judge-role main, then push the tag\n' "$1" "$2" "$ROOT" "$2" >&2
 		exit 1
 	fi
 	verdict_rc=0
-	verdict_out=$(sh "$tag_root/tree/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$2" --archive-dir "$tag_root/tree" 2>&1) || verdict_rc=$?
+	verdict_out=$(sh "$tag_root/tree/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$2" --judge-role main --archive-dir "$tag_root/tree" 2>&1) || verdict_rc=$?
 	cleanup; tag_root=""
 	if [ "$verdict_rc" = 0 ] && printf '%s\n' "$verdict_out" | grep -qE 'VERDICT (REUSED )?PASS'; then
 		verdict_line=$(printf '%s\n' "$verdict_out" | grep -E 'VERDICT (REUSED )?PASS' | head -n 1)
@@ -537,13 +471,13 @@ ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir) || { printf 'pre-push-
 # below runs only the complement. The report lives beside the archive, inside this gate's owned dir.
 focused_passed="$archive_root/focused-passed.txt"
 rm -f "$focused_passed"
-FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" \
+FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" \
 	sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
 if [ ! -f "$gate_scripts/scripts/full-suite-verdict.sh" ]; then
 	printf 'SKIP full-suite-verdict: checker absent from base archive\n' >&2
 else
 	printf '== full-suite-verdict\n'
-	set -- --repo "$ROOT" --commit "$local_sha" --archive-dir "$archive"
+	set -- --repo "$ROOT" --commit "$local_sha" --judge-role base --archive-dir "$archive"
 	[ -f "$focused_passed" ] && set -- "$@" --focused-passed "$focused_passed"
 	if sh "$gate_scripts/scripts/full-suite-verdict.sh" "$@"; then
 		printf 'GREEN full-suite-verdict\n'

@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import resource
 import signal
@@ -28,7 +29,8 @@ from kitlib_tmp import owned_tmp
 import pysafe
 JUDGE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 JUDGING_FILES = (
-    "scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
+    "scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
+    "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
     "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
     ".github/test-budget.json",
@@ -50,6 +52,27 @@ def judge_identity(root: Path | str, scope: str) -> str:
         digest.update(name.encode() + b"\0" + str(len(data)).encode() + b"\0")
         digest.update(data)
     return digest.hexdigest()
+
+
+def runtime_identity() -> str:
+    """Bind executable versions and the environment inputs admitted to the full-suite runner."""
+    bun = run(["bun", "--version"], deadline_s=10)
+    if bun.rc != 0 or bun.timed_out or bun.truncated:
+        raise ValueError("bun version is unavailable or incomplete")
+    bun_version = bun.stdout.decode("utf-8", errors="strict").strip()
+    if not bun_version:
+        raise ValueError("bun version is empty")
+    environment = {
+        "FULL_SUITE_RUNTIME_ID": os.environ.get("FULL_SUITE_RUNTIME_ID", ""),
+        "FULL_SUITE_TIMEOUT_SECS": os.environ.get("FULL_SUITE_TIMEOUT_SECS", "1800"),
+        "LANG": os.environ.get("LANG", "C"),
+        "PATH": os.environ.get("PATH", ""),
+    }
+    environment_bytes = json.dumps(environment, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":")).encode("utf-8")
+    environment_digest = hashlib.sha256(environment_bytes).hexdigest()
+    return (f"{platform.system()}/{platform.machine()}/bun-{bun_version}"
+            f"/python-{sys.version.split()[0]}/env-{environment_digest}")
 
 
 def hex_digest(value: object, length: int = 64) -> bool:
@@ -364,6 +387,7 @@ def main() -> int:
     identity = subs.add_parser("identity")
     identity.add_argument("--root", required=True)
     identity.add_argument("--scope", choices=("full", "focused"), required=True)
+    subs.add_parser("runtime")
     child = subs.add_parser("run")
     child.add_argument("--record", required=True)
     child.add_argument("--path", required=True)
@@ -393,6 +417,9 @@ def main() -> int:
     try:
         if args.action == "identity":
             print(judge_identity(args.root, args.scope))
+            return 0
+        if args.action == "runtime":
+            print(runtime_identity())
             return 0
         if args.action == "run":
             if args.parent_fd is not None:

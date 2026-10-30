@@ -3,11 +3,12 @@
 #
 # Run on the signing Mac. It cuts one omp-kit release without the CI qualification pipeline:
 #   1. preflight  source = an exact commit on origin/main (default: its head); version unused (no tag, no release,
-#                 no draft); the source is a developer-id release whose release.yml carries attest-local; the
-#                 Developer ID identity, certificate and notary profile are proven before anything is built.
-#   2. build      every ship-set platform (darwin-arm64-none, linux-arm64-gnu, linux-x64-gnu) from an exact-commit
-#                 `git archive` export with scripts/package-release.sh, exactly as ci.yml build-candidates does
-#                 (bun cross-compiles the linux targets); the unsigned release-index.json as native-candidate.py
+#                 no draft); the source is a developer-id release whose release.yml carries attest-local.
+#                 Its exact tree must have a reusable main-role full-suite PASS before the signing keychain opens.
+#   2. build      after the verdict readback and signing-identity preflight, build every ship-set platform
+#                 (darwin-arm64-none, linux-arm64-gnu, linux-x64-gnu) from an exact-commit `git archive`
+#                 export with scripts/package-release.sh, exactly as ci.yml build-candidates does (bun
+#                 cross-compiles the linux targets); the unsigned release-index.json as native-candidate.py
 #                 writes it. darwin-x64-none is not in the ship set and is never built.
 #   3. sign       Developer ID sign (hardened runtime, timestamp, source entitlements) every darwin Mach-O,
 #                 notarize, and prove with scripts/devid_release.py verify --execute, as sign-darwin-release.sh
@@ -148,6 +149,25 @@ git -C "$ROOT" show "$SOURCE:.github/workflows/release.yml" | grep -q '^  attest
 	die "source release.yml has no attest-local job (LOCAL-RELEASE-V1)"
 say "source $SOURCE (origin/main $MAIN) version $VERSION base $BASE_TAG mode $MODE"
 
+stage source
+SRC="$WORK/src"
+mkdir -p "$SRC" "$WORK/tmp" "$WORK/build"
+# Check the exact main tree's PASS before unlocking the signing keychain.
+git -C "$ROOT" archive --format=tar "$SOURCE" >"$WORK/source.tar"
+tar -xf "$WORK/source.tar" -C "$SRC"
+rm -f "$WORK/source.tar"
+[ "$(jq -r .source_revision "$SRC/package.json")" = "$SOURCE" ] || die "export did not stamp source_revision"
+[ "$(bun --version)" = "$(tr -d '[:space:]' <"$SRC/.bun-version")" ] || die "bun $(bun --version) differs from the source's pinned .bun-version"
+source_tree="$(git -C "$ROOT" rev-parse "$SOURCE^{tree}")" || die "cannot resolve exact source tree"
+if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
+	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \
+	>"$WORK/full-suite-verdict.out"; then
+	verdict_result="$(cat "$WORK/full-suite-verdict.out")"
+	die "source tree $source_tree has no reusable main-role full-suite PASS ($verdict_result)"
+fi
+[ "$(cat "$WORK/full-suite-verdict.out")" = PASS ] || die "source tree $source_tree full-suite readback is not PASS"
+say "full-suite verdict $source_tree: PASS (main role)"
+
 [ -f "$KEYCHAIN" ] || die "signing keychain $KEYCHAIN not found"
 # The password is read in-process by devid_release.py and never reaches argv, stdout or a log.
 bounded 60 python3 "$ROOT/scripts/devid_release.py" keychain-unlock --keychain "$KEYCHAIN" --password-file "$KEYCHAIN_PASSWORD" >/dev/null ||
@@ -179,15 +199,6 @@ say "identity $SHA1 ($AUTHORITY); notary profile $NOTARY_PROFILE proven"
 
 # -------------------------------------------------------------------------------------------------- 2. build
 stage build
-SRC="$WORK/src"
-mkdir -p "$SRC" "$WORK/tmp" "$WORK/build"
-# Read-only exact-commit export: peers' uncommitted edits in the shared checkout never reach the release bytes.
-# export-subst stamps package.json source_revision with the commit, as a CI checkout's package-release observes.
-git -C "$ROOT" archive --format=tar "$SOURCE" >"$WORK/source.tar"
-tar -xf "$WORK/source.tar" -C "$SRC"
-rm -f "$WORK/source.tar"
-[ "$(jq -r .source_revision "$SRC/package.json")" = "$SOURCE" ] || die "export did not stamp source_revision"
-[ "$(bun --version)" = "$(tr -d '[:space:]' <"$SRC/.bun-version")" ] || die "bun $(bun --version) differs from the source's pinned .bun-version"
 for platform in "${SHIP[@]}"; do
 	mkdir -p "$WORK/build/$platform"
 	TMPDIR="$WORK/tmp" bounded 900 sh "$SRC/scripts/package-release.sh" --version "$VERSION" --platform "$platform" \

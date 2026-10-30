@@ -96,6 +96,7 @@ function commandEnvironment(cwd: string, holds: unknown, options: CommandOptions
 	delete env.GIT_INDEX_FILE;
 	Object.assign(env, options.gitEnv);
 	env.PATH = `${options.amDir}:${env.PATH ?? "/usr/bin:/bin"}`;
+	env.FULL_SUITE_VERDICT_CACHE_DIR = join(cwd, "var", "agent-tmp", "full-suite-verdicts");
 	env.OMP_KIT_SCRATCH_ROOTS = landScratchRoot;
 
 	if (options.tmuxPane === null) delete env.TMUX_PANE;
@@ -185,6 +186,23 @@ function remoteHead(cwd: string): string {
 	return sha;
 }
 
+function stringEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
+	const environment: Record<string, string> = {};
+	for (const [key, value] of Object.entries(source)) if (value !== undefined) environment[key] = value;
+	return environment;
+}
+function verdictPath(work: string, tree: string, role: "base" | "main", env: NodeJS.ProcessEnv, checks?: string): string {
+	const cache = env.FULL_SUITE_VERDICT_CACHE_DIR ?? join(work, "var", "agent-tmp", "full-suite-verdicts");
+	const args = ["path", "--repo", work, "--cache-dir", cache, "--tree", tree, "--role", role, "--judge-root", work];
+	if (checks !== undefined) args.push("--checks", checks);
+	const result = kitlibRunSync(["python3", join(work, "scripts", "full-suite-verdict-store.py"), ...args],
+		{ cwd: work, env: stringEnvironment(env), deadline_s: 30 });
+	const decoder = new TextDecoder();
+	if (result.rc !== 0 || result.timed_out || result.killed || result.truncated || result.total_truncated)
+		throw new Error(`verdict-store path failed: ${decoder.decode(result.stdout)}${decoder.decode(result.stderr)}`);
+	return decoder.decode(result.stdout).trim();
+}
+
 // GATEFLAKE1 (ompkit-ll72v): every fixture is a directory copy of one Git-built template (its own bare
 // origin, clone, base commit and upstream), so a fixture no longer costs seven serial git spawns.
 // The 61 fixture() calls were 427 spawns; the template costs 5 once, built at module load so its
@@ -211,7 +229,7 @@ try {
 	mkdirSync(join(templateWork, "scripts"), { recursive: true });
 	mkdirSync(join(templateWork, ".github"), { recursive: true });
 	// The JUDGING_FILES closure of scripts/suite-metrics.py: a fixture missing one cannot run its gate.
-	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh",
+	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh",
 		"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
 		"scripts/pysafe.py", "scripts/test-budget.ts", ".github/test-budget.json"];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
@@ -301,6 +319,7 @@ test("checks the exact candidate with the base-registered push check before publ
 	git(work, ["add", "--", ".omp/push-check"]);
 	git(work, ["commit", "-m", "register push check [test]"]);
 	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	const base = remoteHead(work);
 
 	writeFileSync(join(work, "owned.txt"), "candidate owned content\n");
 	writeFileSync(join(work, ".git", "hooks", "post-commit"),
@@ -352,10 +371,45 @@ test("checks the exact candidate with the base-registered push check before publ
 	expect(readFileSync(checkContentFile, "utf8")).toBe("candidate owned content\n");
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("post-commit worktree edit\n");
 	const tree = git(work, ["rev-parse", `${data.commit}^{tree}`]).trim();
-	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
-	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({
-		tree, checks: expectedChecks, verdict: "PASS", evidence: { complete: true },
+	const verificationEnv = commandEnvironment(work, hold, {
+		amDir: fakeBin,
+		gitEnv: {
+			OMP_LAND_CHECK_SHA_FILE: checkShaFile,
+			OMP_LAND_REPOSITORY: work,
+			OMP_LAND_CHECK_CONTENT_FILE: checkContentFile,
+		},
 	});
+	const verdictFile = verdictPath(work, tree, "base", verificationEnv, expectedChecks);
+	const verdict = JSON.parse(readFileSync(verdictFile, "utf8")) as {
+		tree: string; checks: string; verdict: string; evidence: { complete: boolean };
+	};
+	expect(verdict).toMatchObject({ tree, checks: expectedChecks, verdict: "PASS", evidence: { complete: true } });
+	const judgeArchive = ownedTmp("land-prepush-verdict", { root: scratch });
+	try {
+		const gitEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", GIT_TERMINAL_PROMPT: "0",
+			GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+		const decoder = new TextDecoder();
+		const archive = await kitlibRun(["git", "-C", work, "archive", base], {
+			cwd: work, env: gitEnv, deadline_s: 30,
+		});
+		expect(archive.rc, decoder.decode(archive.stderr)).toBe(0);
+		expect(archive.timed_out || archive.killed || archive.truncated || archive.total_truncated).toBe(false);
+		const unpacked = await kitlibRun(["tar", "-xf", "-", "-C", judgeArchive.path], {
+			cwd: work, env: gitEnv, stdin: archive.stdout, deadline_s: 30,
+		});
+		expect(unpacked.rc, decoder.decode(unpacked.stderr)).toBe(0);
+		expect(unpacked.timed_out || unpacked.killed || unpacked.truncated || unpacked.total_truncated).toBe(false);
+		const replay = await kitlibRun(["sh", join(judgeArchive.path, "scripts", "full-suite-verdict.sh"),
+			"--repo", work, "--commit", data.commit, "--judge-role", "base"],
+			{ cwd: work, env: stringEnvironment(verificationEnv), deadline_s: 30 });
+		const replayOutput = decoder.decode(replay.stdout) + decoder.decode(replay.stderr);
+		expect(replay.rc, replayOutput).toBe(0);
+		expect(replay.timed_out || replay.killed || replay.truncated || replay.total_truncated).toBe(false);
+		expect(replayOutput).toContain("VERDICT REUSED PASS");
+		expect(replayOutput).not.toContain("running the complete suite");
+	} finally {
+		judgeArchive.cleanup();
+	}
 	expect(remoteHead(work)).toBe(data.commit);
 });
 test("a v2 base missing a transitive judging dependency cannot publish using the worktree copy", () => {
@@ -380,24 +434,24 @@ test("contradictory cached PASS evidence is a cache miss and cannot publish", ()
 	git(work, ["commit", "-m", "plant red suite [test]"]);
 	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
 	const script = join(work, "scripts", "full-suite-verdict.sh");
-	const cache = join(work, ".git", "omp-kit", "full-suite-verdicts");
+	const cache = join(work, "var", "agent-tmp", "full-suite-verdicts");
 	const first = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
 		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
 	});
 	expect(first.status, first.stdout + first.stderr).toBe(1);
 	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
-	const verdictPath = join(cache, `${tree}.json`);
-	const entry = JSON.parse(readFileSync(verdictPath, "utf8")) as { verdict: string; exit_code: number; evidence: Record<string, unknown> };
+	const entryPath = verdictPath(work, tree, "base", { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" });
+	const entry = JSON.parse(readFileSync(entryPath, "utf8")) as { verdict: string; exit_code: number; evidence: Record<string, unknown> };
 	entry.verdict = "PASS";
 	entry.exit_code = 0;
 	entry.evidence.shell_fail = 1;
-	writeFileSync(verdictPath, JSON.stringify(entry) + "\n");
+	writeFileSync(entryPath, JSON.stringify(entry) + "\n");
 	const contradictory = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
 		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
 	});
 	expect(contradictory.status, contradictory.stdout + contradictory.stderr).toBe(1);
 	expect(`${contradictory.stdout}${contradictory.stderr}`).toContain("cache miss");
-	const missingCount = JSON.parse(readFileSync(verdictPath, "utf8")) as { verdict: string; exit_code: number; evidence: Record<string, unknown> };
+	const missingCount = JSON.parse(readFileSync(entryPath, "utf8")) as { verdict: string; exit_code: number; evidence: Record<string, unknown> };
 	missingCount.verdict = "PASS";
 	missingCount.exit_code = 0;
 	delete missingCount.evidence.bun_files;
@@ -405,7 +459,7 @@ test("contradictory cached PASS evidence is a cache miss and cannot publish", ()
 	missingCount.evidence.bun_fail = 0;
 	missingCount.evidence.shell_fail = 0;
 	missingCount.evidence.py_fail = 0;
-	writeFileSync(verdictPath, JSON.stringify(missingCount) + "\n");
+	writeFileSync(entryPath, JSON.stringify(missingCount) + "\n");
 	const missing = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
 		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
 	});
@@ -416,7 +470,7 @@ test("missing or corrupt suite logs are not reused as cached PASS", async () => 
 	const { work } = fixture();
 	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
 	const script = join(work, "scripts", "full-suite-verdict.sh");
-	const cache = join(work, ".git", "omp-kit", "full-suite-verdicts");
+	const cache = join(work, "var", "agent-tmp", "full-suite-verdicts");
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) {
 		if (value !== undefined) env[key] = value;
@@ -432,10 +486,11 @@ test("missing or corrupt suite logs are not reused as cached PASS", async () => 
 	const first = await runOnce();
 	expect(first.status, first.stdout + first.stderr).toBe(0);
 	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
-	const logPath = join(cache, `${tree}.log`);
+	const entryPath = verdictPath(work, tree, "base", env);
+	const logPath = entryPath.slice(0, -".json".length) + ".log";
 	const originalLog = readFileSync(logPath, "utf8");
 	expect(originalLog).toContain("GREEN script-suite tests/cli/land-suite.test.sh");
-	const initialEntry = JSON.parse(readFileSync(join(cache, `${tree}.json`), "utf8")) as { evidence: { log_sha256?: string } };
+	const initialEntry = JSON.parse(readFileSync(entryPath, "utf8")) as { evidence: { log_sha256?: string } };
 	expect(initialEntry.evidence.log_sha256).toBe(createHash("sha256").update(originalLog).digest("hex"));
 
 	for (const damage of ["corrupt", "missing"] as const) {
@@ -446,8 +501,8 @@ test("missing or corrupt suite logs are not reused as cached PASS", async () => 
 		expect(replay.status, output).toBe(0);
 		expect(output).toContain("FULL-SUITE: cache miss");
 		expect(output).not.toContain("FULL-SUITE: VERDICT REUSED PASS");
-		const replacementLog = readFileSync(logPath);
-		const replacementEntry = JSON.parse(readFileSync(join(cache, `${tree}.json`), "utf8")) as { evidence: { log_sha256?: string } };
+		const replacementLog = readFileSync(logPath, "utf8");
+		const replacementEntry = JSON.parse(readFileSync(entryPath, "utf8")) as { evidence: { log_sha256?: string } };
 		expect(replacementEntry.evidence.log_sha256).toBe(createHash("sha256").update(replacementLog).digest("hex"));
 	}
 }, 35_000);
@@ -467,8 +522,8 @@ test("refuses a candidate whose exact full suite is red before origin advances",
 	expect(remoteHead(work)).toBe(base);
 	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
 	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
-	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
-	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({
+	const entryPath = verdictPath(work, tree, "base", commandEnvironment(work, hold, { amDir: fakeBin }));
+	expect(JSON.parse(readFileSync(entryPath, "utf8"))).toMatchObject({
 		tree, verdict: "FAIL", evidence: { complete: true },
 	});
 });
@@ -493,8 +548,10 @@ test("refuses incomplete full-suite evidence before origin advances", () => {
 	expect(remoteHead(work)).toBe(base);
 	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
 	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
-	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
-	expect(existsSync(verdictPath)).toBe(false);
+	const entryPath = verdictPath(work, tree, "base", commandEnvironment(work, hold, {
+		amDir: fakeBin, gitEnv: { FULL_SUITE_TIMEOUT_SECS: "1" },
+	}));
+	expect(existsSync(entryPath)).toBe(false);
 }, 35_000);
 test("requires explicit --yes before publishing", () => {
 	const { work, fakeBin } = fixture();
@@ -1918,8 +1975,11 @@ test("refuses a patch whose exact full suite is red before origin advances", () 
 		throw new Error("land patch refusal omitted its constructed candidate commit");
 	const candidate = data.commit;
 	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
-	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
-	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({
+	const entryPath = verdictPath(work, tree, "base", commandEnvironment(work, hold, {
+		amDir: fakeBin,
+		gitEnv: { OMP_LAND_CHECK_CONTENT_FILE: setup.checkContent, OMP_LAND_CHECK_ADDED_FILE: setup.checkAdded },
+	}));
+	expect(JSON.parse(readFileSync(entryPath, "utf8"))).toMatchObject({
 		tree, verdict: "FAIL", evidence: { complete: true },
 	});
 });

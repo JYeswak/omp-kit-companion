@@ -71,14 +71,14 @@ try {
 	} else {
 		timingSource = resolve(repo, timingsDir ?? ".github");
 		if (!timingsDir) {
-			const git = await run(["git", "-C", repo, "rev-parse", "--absolute-git-dir"], { deadline_s: 10 });
-			if (git.timed_out || git.truncated) throw new Error("INVALID_INPUT git directory discovery incomplete");
-			if (git.rc === 0) {
-				const gitDir = new TextDecoder().decode(git.stdout).trim();
-				if (!gitDir) throw new Error("INVALID_INPUT empty git directory");
-				const cached = resolve(gitDir, "omp-kit/full-suite-verdicts/timings");
-				if (["core-test-timings.json", "script-test-timings.json"].every(file => existsSync(resolve(cached, file)))) timingSource = cached;
-			}
+			const store = await run([
+				"python3", resolve(repo, "scripts/full-suite-verdict-store.py"),
+				"timings", "--repo", repo,
+			], { deadline_s: 10 });
+			if (store.rc !== 0 || store.timed_out || store.truncated) throw new Error("INVALID_INPUT shared verdict timings discovery incomplete");
+			const cached = new TextDecoder().decode(store.stdout).trim();
+			if (!cached) throw new Error("INVALID_INPUT shared verdict timing path is empty");
+			if (["core-test-timings.json", "script-test-timings.json"].every(file => existsSync(resolve(cached, file)))) timingSource = cached;
 		}
 		const paths = new Set<string>();
 		for (const table of ["core-test-timings.json", "script-test-timings.json"]) {

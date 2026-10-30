@@ -6,8 +6,8 @@
 # (ompkit-rhy9.12)
 #
 # Usage:
-#   scripts/full-suite-verdict.sh --repo ROOT --commit SHA [--archive-dir DIR] [--cache-dir DIR]
-#     [--focused-passed FILE] [--rerun-reason TEXT]
+#   scripts/full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main]
+#     [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]
 #
 # The complete declared repo suite runs against the exact-commit archive: every bun test under
 # tests/cli and tests/fleet-guard, every shell suite tests/cli/*.test.sh, and every python suite
@@ -17,34 +17,23 @@
 # that cannot be hermetic on a dev Mac; they are excluded by declaration, printed, and recorded in
 # the entry. A changed manifest changes the check identity below, so its verdicts never reuse.
 #
-# The verdict is cached by candidate tree hash with check/runtime identity bound to the entry:
-#   tree    = git tree object of the exact candidate commit (exact source bytes)
-#   checks  = sha256 of this script + scripts/fresh-gate.sh + scripts/gate-ci-only.tsv as executed
-#   runtime = os/arch + bun version + python3 version (+ FULL_SUITE_RUNTIME_ID when pinned)
-# A repeated identical tree under unchanged check/runtime identity reuses the recorded verdict
-# without rerunning. A changed tree, changed check bytes or changed runtime never reuses.
-# --rerun-reason TEXT reruns a cached FAIL for the same tree instead of reusing it: the old
-# entry is kept beside the cache as <tree>.superseded-<utc>.{json,log}, the suite runs again,
-# and the new entry records the reason, the actor (AGENT_NAME or USER) and the superseded
-# entry's digest. An empty reason is refused. A cached PASS is never rerun by this flag.
-# Missing, corrupt, timed-out or incomplete suite evidence is non-pass and is never cached GREEN:
-# only a finished suite run (PASS or FAIL with complete counts) is recorded. Incomplete or
-# timed-out runs record no verdict, so a retry reruns instead of reusing; their partial output is
-# kept as <tree>.incomplete.log for diagnosis, a name the verdict lookup never reads.
-#
-# Cache: <repo-git-dir>/omp-kit/full-suite-verdicts/<tree>.json plus <tree>.log (the suite output),
-# overridden by --cache-dir or FULL_SUITE_VERDICT_CACHE_DIR. The cache is local to the pushing
-# checkout and never committed. Pruning entries only costs a rerun.
+# The verdict store is shared by clones of the same repository and configured outside every
+# checkout. A record is keyed by exact candidate tree, judge role, complete judging-code identity,
+# and runtime identity. `base` judges a proposed commit using the base revision's gate; `main`
+# judges a commit already on main using its own gate. The two roles never satisfy each other's
+# lookup.
+# Only complete suite runs are recorded. Missing, corrupt, timed-out or incomplete evidence is a
+# miss. A complete FAIL is reusable as FAIL but never as PASS. `--rerun-reason TEXT` reruns a
+# cached FAIL and retains the superseded record and log.
+# FULL_SUITE_VERDICT_CACHE_DIR overrides the configured store for isolated tests and operators.
+# Otherwise scripts/full-suite-verdict-store.py uses
+# $XDG_CONFIG_HOME/omp-kit/full-suite-verdict.json and $XDG_STATE_HOME/omp-kit/full-suite-verdicts.
+# Shell suites: FULL_SUITE_SHELL_JOBS at a time (default 5, never more than online cores or
+# remaining suites). Every suite runs under an owned TMPDIR with output retained separately.
 # Suite bound: FULL_SUITE_TIMEOUT_SECS (default 1800). The suite runs at nice 10 inside the gate's
 # own admission; it takes no heavy slot.
-# Shell suites: FULL_SUITE_SHELL_JOBS at a time (default 5, never more than the online cores or
-# the suite count; FULLSUITEPAR1, ompkit-9t6f2). Each suite runs under its own owned TMPDIR with
-# its output kept apart; outputs and GREEN/RED lines join the log in sorted suite order, so the log
-# and the verdict do not depend on the worker count or on which suite finishes first. The default
-# is measured: the 54 suites took 1415 s one after another (2026-10-29, load 13-21 on 32 cores),
-# no worker count can beat the longest suite (404 s), and 5 is the fewest workers whose predicted
-# stage, claimed in sorted order, is within 5% of that floor (4: 460 s, 5: 411 s, 8: 405 s).
 set -eu
+umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 run_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
@@ -54,13 +43,12 @@ ARCHIVE_DIR=
 CACHE_DIR=
 RERUN_REASON=
 RERUN=0
+JUDGE_ROLE=base
 TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
 SHELL_JOBS=${FULL_SUITE_SHELL_JOBS:-5}
-RUNTIME_PIN=${FULL_SUITE_RUNTIME_ID:-}
-
 FOCUSED_PASSED=
 usage() {
-	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]" >&2
+	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main] [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]" >&2
 }
 
 fail() {
@@ -72,6 +60,7 @@ while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--repo) [ "$#" -ge 2 ] || { usage; exit 2; }; ROOT=$2; shift 2 ;;
 		--commit) [ "$#" -ge 2 ] || { usage; exit 2; }; COMMIT=$2; shift 2 ;;
+		--judge-role) [ "$#" -ge 2 ] || { usage; exit 2; }; JUDGE_ROLE=$2; shift 2 ;;
 		--archive-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; ARCHIVE_DIR=$2; shift 2 ;;
 		--cache-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; CACHE_DIR=$2; shift 2 ;;
 		--rerun-reason) [ "$#" -ge 2 ] || { usage; exit 2; }; RERUN=1; RERUN_REASON=$2; shift 2 ;;
@@ -96,6 +85,7 @@ exec </dev/null
 if [ "${GIT_DIR+x}" = x ]; then echo "FULL-SUITE: REFUSED caller GIT_DIR is set" >&2; exit 1; fi
 if [ "${GIT_WORK_TREE+x}" = x ]; then echo "FULL-SUITE: REFUSED caller GIT_WORK_TREE is set" >&2; exit 1; fi
 if [ "${BEADS_DB+x}" = x ]; then echo "FULL-SUITE: REFUSED caller BEADS_DB is set" >&2; exit 1; fi
+case "$JUDGE_ROLE" in base|main) ;; *) fail "--judge-role must be base or main"; exit 2 ;; esac
 
 command -v bun >/dev/null 2>&1 || { fail "bun is not on PATH; the full suite cannot run"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { fail "python3 is not on PATH; verdict evidence cannot be recorded"; exit 1; }
@@ -106,110 +96,83 @@ tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}" 2>/dev/null) || { fail "candida
 case "$tree" in *[!0-9a-f]*|???????????????????????????????????????) fail "candidate tree hash is not hex: $tree"; exit 1 ;; esac
 [ "${#tree}" -ge 40 ] || { fail "candidate tree hash is too short: $tree"; exit 1; }
 
-# Check identity: the judging bytes as executed. A base archive's gate runs its own scripts
-# against the candidate archive; a changed judge reruns every tree.
+# Judge identity is fixed across checkout and archive invocations. The helper owns identity,
+# runtime, repository-store resolution and validation so every producer and reader agrees.
 [ -f "$SCRIPT_DIR/full-suite-verdict.sh" ] || { fail "judging script is absent beside the gate"; exit 1; }
+[ -f "$SCRIPT_DIR/full-suite-verdict-store.py" ] || { fail "verdict store helper is absent beside the gate"; exit 1; }
 [ -f "$SCRIPT_DIR/fresh-gate.sh" ] || { fail "scripts/fresh-gate.sh is absent beside the gate"; exit 1; }
 checks=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$SCRIPT_DIR/.." --scope full) || {
 	fail "the complete judging dependency identity is unreadable"; exit 1;
 }
-
-bun_v=$(bun --version 2>/dev/null) || { fail "bun --version failed"; exit 1; }
-py_v=$(python3 --version 2>&1) || { fail "python3 --version failed"; exit 1; }
-runtime="$(uname -s)/$(uname -m)/bun-$bun_v/$py_v"
-[ -n "$RUNTIME_PIN" ] && runtime="$runtime/pin-$RUNTIME_PIN"
-
-if [ -z "$CACHE_DIR" ]; then
-	CACHE_DIR=${FULL_SUITE_VERDICT_CACHE_DIR:-}
-fi
-if [ -z "$CACHE_DIR" ]; then
-	git_dir=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || { fail "candidate repo has no git dir for the verdict cache"; exit 1; }
-	CACHE_DIR="$git_dir/omp-kit/full-suite-verdicts"
-fi
-mkdir -p "$CACHE_DIR" || { fail "verdict cache dir is not writable: $CACHE_DIR"; exit 1; }
-entry="$CACHE_DIR/$tree.json"
-log_entry="$CACHE_DIR/$tree.log"
-
-# A recorded verdict is reused only on an exact identity match with complete evidence. The
-# comparison is exact-string on tree, checks and runtime; verdict must be PASS or FAIL.
-if [ -f "$entry" ] && [ "$(wc -c <"$entry" 2>/dev/null | tr -d ' ')" -le 1048576 ]; then
-	cached=$(METRICS="$SCRIPT_DIR/suite-metrics.py" TREE=$tree CHECKS=$checks RUNTIME=$runtime ENTRY=$entry LOG=$log_entry python3 - <<'PYEOF' 2>/dev/null
-import hashlib, json, os
-try:
-    with open(os.environ["ENTRY"], encoding="utf-8") as f:
-        e = json.load(f)
-    assert e.get("version") == 2
-    assert e.get("tree") == os.environ["TREE"]
-    assert e.get("checks") == os.environ["CHECKS"]
-    assert e.get("runtime") == os.environ["RUNTIME"]
-    assert e.get("verdict") in ("PASS", "FAIL")
-    evidence = e.get("evidence")
-    assert isinstance(evidence, dict) and evidence.get("complete") is True
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("suite_metrics", os.environ["METRICS"])
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.complete_records(evidence.get("files"), evidence.get("declared_files", []))
-    digest = hashlib.sha256()
-    with open(os.environ["LOG"], "rb") as log:
-        for chunk in iter(lambda: log.read(1024 * 1024), b""):
-            digest.update(chunk)
-    assert evidence.get("log_sha256") == digest.hexdigest()
-    assert isinstance(e.get("exit_code"), int)
-    count_names = ("bun_files", "bun_ran", "bun_fail", "shell_suites", "shell_fail", "py_suites", "py_fail")
-    counts = [evidence.get(name) for name in count_names]
-    assert all(isinstance(value, int) and value >= 0 for value in counts)
-    bun_files, bun_ran, bun_fail, shell_suites, shell_fail, py_suites, py_fail = counts
-    coverage = evidence.get("covered_by_focused", {})
-    covered_count = sum(len(coverage.get(kind, [])) for kind in ("bun", "shell", "py"))
-    assert len(evidence["files"]) == bun_files + shell_suites + py_suites + covered_count
-    assert all(row["closure"]["tree"] == e["tree"] for row in evidence["files"])
-    assert len(evidence["files"]) > 0
-    assert (bun_files == 0 and bun_ran == 0) or (bun_files > 0 and bun_ran > 0)
-    assert bun_fail <= bun_ran and shell_fail <= shell_suites and py_fail <= py_suites
-    if e["verdict"] == "PASS":
-        assert e["exit_code"] == 0 and bun_fail == shell_fail == py_fail == 0
-        assert all(row["rc"] == 0 for row in evidence["files"])
-    else:
-        assert e["exit_code"] != 0 and (bun_fail > 0 or shell_fail > 0 or py_fail > 0)
-    print("%s %s" % (e["verdict"], e["exit_code"]))
-except Exception:
-    print("MISS")
-PYEOF
-) || cached="MISS"
-	case "$cached" in
-		MISS) echo "FULL-SUITE: cache miss for tree $tree (no reusable verdict); running the complete suite" ;;
-		PASS*)
-			echo "FULL-SUITE: VERDICT REUSED PASS tree=$tree checks=$checks runtime=$runtime"
-			exit 0 ;;
-		FAIL*)
-			if [ "$RERUN" = 1 ]; then
-				# A recorded rerun: the cached FAIL is not reused. The old entry is kept
-				# beside the cache as <tree>.superseded-<utc>.{json,log}; the suite runs
-				# again below and the new entry records the reason, the actor and the
-				# superseded entry's digest. A cached PASS is never rerun by this flag.
-				superseded_digest=$(shasum -a 256 "$entry" | cut -d' ' -f1) || { fail "cached verdict is unreadable; the cached FAIL is kept and nothing reruns"; exit 1; }
-				[ -n "$superseded_digest" ] || { fail "cached verdict is unreadable; the cached FAIL is kept and nothing reruns"; exit 1; }
-				superseded_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || { fail "the clock is unreadable; the cached FAIL is kept and nothing reruns"; exit 1; }
-				SUPERSEDED_BASE="$CACHE_DIR/$tree.superseded-$superseded_stamp"
-				cp "$entry" "$SUPERSEDED_BASE.json" || { fail "cannot keep the superseded verdict; the cached FAIL is kept and nothing reruns"; exit 1; }
-				cp "$log_entry" "$SUPERSEDED_BASE.log" || { rm -f "$SUPERSEDED_BASE.json"; fail "cannot keep the superseded log; the cached FAIL is kept and nothing reruns"; exit 1; }
-				RERUN_ACTOR=${AGENT_NAME:-${USER:-unknown}}
-				[ -n "$RERUN_ACTOR" ] || RERUN_ACTOR=unknown
-				export SUPERSEDED_DIGEST="$superseded_digest" SUPERSEDED_FILE="$SUPERSEDED_BASE.json"
-				echo "FULL-SUITE: RERUN reason='$RERUN_REASON' actor='$RERUN_ACTOR' superseded=$SUPERSEDED_BASE.json; running the complete suite again"
-			else
-				code=$(printf '%s' "$cached" | cut -d' ' -f2)
-				case "$code" in ''|*[!0-9]*|0) code=1 ;; esac
-				[ "$code" -gt 125 ] && code=1
-				echo "FULL-SUITE: VERDICT REUSED FAIL tree=$tree checks=$checks runtime=$runtime producer_rc=$code; the push is refused without rerun" >&2
-				exit "$code"
-			fi ;;
-		*) echo "FULL-SUITE: cache miss for tree $tree (unreadable verdict); running the complete suite" ;;
-	esac
+runtime=$(python3 "$SCRIPT_DIR/suite-metrics.py" runtime) || {
+	fail "the complete judging runtime identity is unreadable"; exit 1;
+}
+if [ -z "$CACHE_DIR" ]; then CACHE_DIR=${FULL_SUITE_VERDICT_CACHE_DIR:-}; fi
+if [ -n "$CACHE_DIR" ]; then
+	entry=$(python3 "$SCRIPT_DIR/full-suite-verdict-store.py" path --repo "$ROOT" --tree "$tree" \
+		--role "$JUDGE_ROLE" --checks "$checks" --runtime "$runtime" --judge-root "$SCRIPT_DIR/.." \
+		--cache-dir "$CACHE_DIR") || { fail "cannot resolve the shared verdict record path"; exit 1; }
 else
-	echo "FULL-SUITE: cache miss for tree $tree; running the complete suite"
+	entry=$(python3 "$SCRIPT_DIR/full-suite-verdict-store.py" path --repo "$ROOT" --tree "$tree" \
+		--role "$JUDGE_ROLE" --checks "$checks" --runtime "$runtime" --judge-root "$SCRIPT_DIR/..") || {
+		fail "cannot resolve the shared verdict record path"; exit 1;
+	}
 fi
+CACHE_DIR=${entry%/*}
+log_entry=${entry%.json}.log
+incomplete_log="${entry%.json}.incomplete.$$.log"
+timings_csv="${entry%.json}.timings.$$.csv"
+mkdir -p "$CACHE_DIR" || { fail "verdict store is not writable: $CACHE_DIR"; exit 1; }
+
+# A record is reusable only after the canonical store validates its role, judge/runtime identity,
+# exact commit suite set, complete measured rows and paired log digest.
+cached=MISS
+if [ -f "$entry" ]; then
+	if ! cached=$(python3 "$SCRIPT_DIR/full-suite-verdict-store.py" lookup --repo "$ROOT" \
+		--tree "$tree" --role "$JUDGE_ROLE" --checks "$checks" --runtime "$runtime" \
+		--judge-root "$SCRIPT_DIR/.." --commit "$COMMIT" --cache-dir "$CACHE_DIR"); then
+		fail "shared verdict lookup failed"
+		exit 1
+	fi
+fi
+case "$cached" in
+	PASS)
+		echo "FULL-SUITE: VERDICT REUSED PASS tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime"
+		exit 0 ;;
+	FAIL*)
+		if [ "$RERUN" = 1 ]; then
+			# Preserve the complete superseded FAIL and its matching log before rerunning.
+			superseded_digest=$(shasum -a 256 "$entry" | cut -d' ' -f1) || {
+				fail "cached verdict is unreadable; the cached FAIL is kept and nothing reruns"; exit 1;
+			}
+			[ -n "$superseded_digest" ] || {
+				fail "cached verdict is unreadable; the cached FAIL is kept and nothing reruns"; exit 1;
+			}
+			superseded_stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || {
+				fail "the clock is unreadable; the cached FAIL is kept and nothing reruns"; exit 1;
+			}
+			SUPERSEDED_BASE="${entry%.json}.superseded-$superseded_stamp"
+			cp "$entry" "$SUPERSEDED_BASE.json" || {
+				fail "cannot keep the superseded verdict; the cached FAIL is kept and nothing reruns"; exit 1;
+			}
+			cp "$log_entry" "$SUPERSEDED_BASE.log" || {
+				rm -f "$SUPERSEDED_BASE.json"
+				fail "cannot keep the superseded log; the cached FAIL is kept and nothing reruns"; exit 1;
+			}
+			RERUN_ACTOR=${AGENT_NAME:-${USER:-unknown}}
+			[ -n "$RERUN_ACTOR" ] || RERUN_ACTOR=unknown
+			export SUPERSEDED_DIGEST="$superseded_digest" SUPERSEDED_FILE="$SUPERSEDED_BASE.json"
+			echo "FULL-SUITE: RERUN reason='$RERUN_REASON' actor='$RERUN_ACTOR' superseded=$SUPERSEDED_BASE.json; running the complete suite again"
+		else
+			code=$(printf '%s' "$cached" | cut -d' ' -f2)
+			case "$code" in ''|*[!0-9]*|0) code=1 ;; esac
+			[ "$code" -gt 125 ] && code=1
+			echo "FULL-SUITE: VERDICT REUSED FAIL tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime producer_rc=$code; the push is refused without rerun" >&2
+			exit "$code"
+		fi ;;
+	MISS) echo "FULL-SUITE: cache miss for tree $tree role=$JUDGE_ROLE (no reusable verdict); running the complete suite" ;;
+	*) fail "shared verdict lookup returned an invalid result"; exit 1 ;;
+esac
 
 # The exact-commit archive under judgment. A caller-supplied archive (the pre-push gate's
 # candidate extract) is used as is; otherwise the candidate is exported from git objects only,
@@ -411,7 +374,7 @@ if [ "$shell_count" -gt 0 ]; then
 	echo "full-suite: shell suites run $SHELL_JOBS at a time (FULL_SUITE_SHELL_JOBS; $ncpu online cores)"
 fi
 
-SUITE_OUT="$CACHE_DIR/$tree.running.log"
+SUITE_OUT="${entry%.json}.running.$$.log"
 # The runner's own facts, written only by run_suite (never by a suite): one line per shell and
 # python suite plus the bun phase's exit code. Bun's output is kept apart so its summary is
 # parsed from the bun phase alone. Nested gate runs inside tests print the same marker lines
@@ -691,9 +654,9 @@ if [ -f "$timeout_mark" ]; then
 fi
 if [ "$timed_out" = 1 ]; then
 	unfinished=$(shell_unfinished)
-	finish_logs "$CACHE_DIR/$tree.incomplete.log"
+	finish_logs "$incomplete_log"
 	cleanup_archive
-	fail "full suite timed out after ${TIMEOUT_SECS}s${unfinished:+; unfinished script suites:$unfinished}; incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
+	fail "full suite timed out after ${TIMEOUT_SECS}s${unfinished:+; unfinished script suites:$unfinished}; incomplete evidence is non-pass and nothing was cached; partial log: $incomplete_log"
 	exit 1
 fi
 
@@ -730,9 +693,9 @@ fi
 [ "$(suite_set python-suite)" = "$(want_set "$kept_py")" ] || complete=0
 if [ "$complete" -ne 1 ]; then
 	unfinished=$(shell_unfinished)
-	finish_logs "$CACHE_DIR/$tree.incomplete.log"
+	finish_logs "$incomplete_log"
 	cleanup_archive
-	fail "full suite ended without complete evidence (rc=$suite_rc bun_ran=$bun_ran shell=$shell_green/$shell_count python=$py_green/$py_count)${unfinished:+; unfinished script suites:$unfinished}; incomplete evidence is non-pass and nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
+	fail "full suite ended without complete evidence (rc=$suite_rc bun_ran=$bun_ran shell=$shell_green/$shell_count python=$py_green/$py_count)${unfinished:+; unfinished script suites:$unfinished}; incomplete evidence is non-pass and nothing was cached; partial log: $incomplete_log"
 	exit 1
 fi
 
@@ -742,10 +705,10 @@ set --
 [ -z "$focused_metrics" ] || set -- --covered "$focused_metrics"
 if ! python3 "$SCRIPT_DIR/suite-metrics.py" collect \
 	--records "$METRICS_DIR" --declared "$METRICS_DECLARED" --output "$METRICS_ROWS" \
-	--csv "$CACHE_DIR/$tree.timings.csv" --cwd "$ARCHIVE_DIR" --tables-dir "$CACHE_DIR/timings" "$@"; then
-	finish_logs "$CACHE_DIR/$tree.incomplete.log"
+	--csv "$timings_csv" --cwd "$ARCHIVE_DIR" --tables-dir "$CACHE_DIR/timings" "$@"; then
+	finish_logs "$incomplete_log"
 	cleanup_archive
-	fail "per-file timing evidence is incomplete; nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
+	fail "per-file timing evidence is incomplete; nothing was cached; partial log: $incomplete_log"
 	exit 1
 fi
 run_finished_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
@@ -761,8 +724,8 @@ else
 fi
 
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
-finish_logs "$CACHE_DIR/$tree.log"
-METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" WORKERS_BUN="$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers)" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
+finish_logs "$log_entry"
+METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" WORKERS_BUN="$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers)" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF' || { rm -f "$log_entry"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
 import hashlib, json, os
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
@@ -782,13 +745,14 @@ for runner in ("bun", "sh", "python3"):
         "cpu_system_ms": sum(row["cpu_system_ms"] for row in selected),
     }
 entry = {
-    "version": 2,
+    "version": 3,
     "tree": os.environ["TREE"],
+    "judge_role": os.environ["ROLE"],
     "checks": os.environ["CHECKS"],
     "runtime": os.environ["RUNTIME"],
     "verdict": os.environ["VERDICT"],
     "exit_code": int(os.environ["CODE"]),
-    "judge": {"checks_sha256": os.environ["CHECKS"], "runtime": os.environ["RUNTIME"]},
+    "judge": {"role": os.environ["ROLE"], "checks_sha256": os.environ["CHECKS"], "runtime": os.environ["RUNTIME"]},
     "timing": {
         "wall_ms": int(os.environ["RUN_END"]) - int(os.environ["RUN_START"]),
         "started_ms": int(os.environ["RUN_START"]),
@@ -826,25 +790,25 @@ if os.environ.get("RERUN_FLAG") == "1":
         "superseded_digest": os.environ.get("RERUN_SUP_DIGEST", ""),
         "superseded_entry": os.environ.get("RERUN_SUP_FILE", ""),
     }
-tmp = os.environ["ENTRY"] + ".tmp"
+tmp = os.environ["ENTRY"] + ".tmp." + str(os.getpid())
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(entry, f, indent=2, sort_keys=True)
     f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
 os.replace(tmp, os.environ["ENTRY"])
 PYEOF
 rm -f "$METRICS_ROWS" "$METRICS_DECLARED"
 cleanup_archive
 if [ "$verdict" = "PASS" ]; then
 	set -- $covered_bun $covered_shell $covered_py; covered_count=$#
-	echo "FULL-SUITE: VERDICT PASS tree=$tree checks=$checks runtime=$runtime bun_ran=$bun_ran shell=$shell_count python=$py_count excluded_ci_only=$excluded_count covered_by_focused=$covered_count"
+	echo "FULL-SUITE: VERDICT PASS tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime bun_ran=$bun_ran shell=$shell_count python=$py_count excluded_ci_only=$excluded_count covered_by_focused=$covered_count"
 	exit 0
 else
-	echo "FULL-SUITE: VERDICT FAIL tree=$tree checks=$checks runtime=$runtime producer_rc=$code bun_fail=$bun_fail shell_red=$shell_red py_red=$py_red; the push is refused" >&2
-	# The failing names belong in the gate log, not only in the tree log (CI-SPEED, PeachLeopard 69007:
-	# three VERDICT FAILs tonight had to be diagnosed by hand from the cached log). Bun prints
-	# "(fail) <name> [ms]" under its file header; shell/python suites print RED lines in the log.
-	echo "FULL-SUITE: failing tests (full log: $CACHE_DIR/$tree.log):" >&2
-	awk '/^[A-Za-z0-9_.\/-]+\.test\.ts:$/ { file = $0 } /^\(fail\)/ { print "  " file " " $0 }' "$CACHE_DIR/$tree.log" | head -n 40 >&2
-	grep -E '^RED (script|python)-suite ' "$CACHE_DIR/$tree.log" | sed 's/^/  /' | head -n 20 >&2
+	echo "FULL-SUITE: VERDICT FAIL tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime producer_rc=$code bun_fail=$bun_fail shell_red=$shell_red py_red=$py_red; the push is refused" >&2
+	# Keep failing names beside the reused log for the pre-push gate.
+	echo "FULL-SUITE: failing tests (full log: $log_entry):" >&2
+	awk '/^[A-Za-z0-9_.\/-]+\.test\.ts:$/ { file = $0 } /^\(fail\)/ { print "  " file " " $0 }' "$log_entry" | head -n 40 >&2
+	grep -E '^RED (script|python)-suite ' "$log_entry" | sed 's/^/  /' | head -n 20 >&2
 	exit "$code"
 fi

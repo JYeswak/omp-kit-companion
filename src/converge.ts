@@ -16,7 +16,8 @@ export type ConvergeOptions = {
 	push?: boolean;
 	fetch?: boolean;
 	resolutions?: Readonly<Record<string, "ours" | "theirs">>;
-	beforePush?: (candidateSha: string, baseSha: string) => { allow: boolean; reason?: string };
+	beforePush?: (candidateSha: string, baseSha: string) =>
+		{ allow: boolean; reason?: string } | Promise<{ allow: boolean; reason?: string }>;
 };
 export type ConvergeConflict = { path: string; kind: string; detail?: string; class?: "true_divergence"; hint?: "theirs_behind" | "ours_behind" };
 export type ConvergeResult = {
@@ -409,7 +410,7 @@ function takeLock(repo: string): ConvergeLock {
 	throw new Refused("CONVERGE_BUSY");
 }
 /** Report by default. --push implies apply. Refusals preserve peer state; unexpected Git/I/O failures throw. */
-export function convergeRepository(options: ConvergeOptions): ConvergeResult {
+export async function convergeRepository(options: ConvergeOptions): Promise<ConvergeResult> {
 	const repo = resolve(options.repo), apply = options.apply === true || options.push === true, start = performance.now();
 	const result: ConvergeResult = { repo, state: null, reason: null, applied: false, pushed: false, conflicts: [], elapsed_s: 0 };
 	const done = (): ConvergeResult => { result.elapsed_s = Math.round((performance.now() - start)) / 1000; return result; };
@@ -426,7 +427,7 @@ export function convergeRepository(options: ConvergeOptions): ConvergeResult {
 			const head = out(repo, ["rev-parse", "refs/heads/main"]);
 			const publishedCommits = Number(out(repo, ["rev-list", "--count", `${plan.up}..${head}`]));
 			if (options.beforePush) {
-				const admission = options.beforePush(head, plan.up);
+				const admission = await options.beforePush(head, plan.up);
 				if (!admission.allow) {
 					result.state = "REFUSED";
 					result.reason = admission.reason ?? "PRE_PUSH_REFUSED";
@@ -456,7 +457,7 @@ export function convergeRepository(options: ConvergeOptions): ConvergeResult {
 		result.state = "REFUSED"; result.reason = error.reason; result.conflicts = error.conflicts; return done();
 	} finally { if (lock) releaseLock(repo, lock); }
 }
-export function convergeCommand(request: ParsedCommand): CliResult {
+export async function convergeCommand(request: ParsedCommand): Promise<CliResult> {
 	const usage = (message: string): CliResult => ({ code: 2, data: { overall: "NOT_RUN" }, errors: [{ code: "CONVERGE_USAGE", message, remediation: "Use converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]..." }], verification: "NOT_RUN" });
 	const repo = request.flags.get("--repo");
 	if (typeof repo !== "string" || !repo) return usage("--repo requires a repository path");
@@ -473,7 +474,7 @@ export function convergeCommand(request: ParsedCommand): CliResult {
 	}
 	if (!args.length && (request.flags.has("--ours") || request.flags.has("--theirs"))) return usage("Owner declarations require their original ordered arguments");
 	try {
-		const result = convergeRepository({ repo, apply: request.flags.has("--apply"), push: request.flags.has("--push"), fetch: !request.flags.has("--no-fetch"), resolutions });
+		const result = await convergeRepository({ repo, apply: request.flags.has("--apply"), push: request.flags.has("--push"), fetch: !request.flags.has("--no-fetch"), resolutions });
 		return { code: result.state === "REFUSED" ? 1 : request.flags.has("--push") && !result.pushed ? 3 : 0, data: { ...result }, verification: "PERFORMED" };
 	} catch (error) {
 		return { code: 3, data: { overall: "UNVERIFIED" }, errors: [{ code: "CONVERGE_FAILED", message: error instanceof Error ? error.message : String(error), remediation: "Inspect the reported Git/I/O failure and repository state before retrying; do not force-push." }], verification: "UNVERIFIED" };

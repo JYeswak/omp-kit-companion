@@ -27,8 +27,11 @@ for (const file of RELEASE_DATA_FILES) {
 }
 const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-policy.sh", "scripts/build-manifest.sh",
 	"scripts/package-release.sh", "scripts/receipt.py", "scripts/pysafe.py", "scripts/kitlib_run.py", "scripts/pysafe_check.py", "scripts/check-staged-pysafe.sh",
+	"scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh",
+	"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh",
 	"scripts/check-gap-mention.sh", "scripts/kitlib-findings.sh",
 	"scripts/kitlib_tmp.py", "scripts/kitlib-tmp.sh", "scripts/kitlib_lock.py", "scripts/kitlib_io.py", "scripts/kitlib_proc.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_poll.py", "scripts/kitlib_artifact.py", "scripts/tempsafe_check.py", "scripts/check-staged-tempsafe.sh",
+	"scripts/test-budget.ts", "scripts/gate-ci-only.tsv", ".github/test-budget.json",
 	"scripts/kitlib_ratchet_core.py", "scripts/kitlib_ratchet.py", "scripts/check-staged-kitlib.sh",
 	"scripts/check-commit-kitlib-reversal.sh", "scripts/native-br-preserve.py",
 	"scripts/br_init_check.py", "scripts/check-staged-br-init.sh",

@@ -242,18 +242,11 @@ const FULL_SUITE_VERDICT_TIMEOUT_MS = 1_830_000;
 const FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 type FullSuiteJudge = { root: string; script: string };
-type FullSuiteRun = {
-	error?: Error;
-	signal: NodeJS.Signals | null;
-	status: number | null;
-	stdout?: string | null;
-	stderr?: string | null;
-};
 
 function archiveFullSuiteJudge(repo: string, base: string): FullSuiteJudge | null {
 	const manifest = git(repo, ["ls-tree", base, "--", "scripts/gate-ci-only.tsv"]);
 	if (manifest.code !== 0 || manifest.interrupted) return null;
-	const gatePaths = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh"];
+	const gatePaths = ["scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh"];
 	const metrics = git(repo, ["ls-tree", base, "--", "scripts/suite-metrics.py"]);
 	if (metrics.code !== 0 || metrics.interrupted) return null;
 	if (metrics.out.trim()) gatePaths.push(
@@ -285,20 +278,23 @@ function archiveFullSuiteJudge(repo: string, base: string): FullSuiteJudge | nul
 	return { root, script: join(root, "scripts", "full-suite-verdict.sh") };
 }
 
-function fullSuiteVerdictFromRun(run: FullSuiteRun): FullSuiteVerdict {
-	const stdout = run.stdout ?? "";
-	const stderr = run.stderr ?? "";
-	if (!run.error && run.signal === null && run.status === 0 &&
+function fullSuiteVerdictFromRun(run: RunResult): FullSuiteVerdict {
+	const decoder = new TextDecoder();
+	const stdout = decoder.decode(run.stdout);
+	const stderr = decoder.decode(run.stderr);
+	const complete = !run.timed_out && !run.killed && !run.truncated && !run.total_truncated && run.rc !== null && run.rc >= 0;
+	if (!complete) return "UNRUN";
+	if (run.rc === 0 &&
 		(stdout.includes("FULL-SUITE: VERDICT PASS ") || stdout.includes("FULL-SUITE: VERDICT REUSED PASS ") ||
 			stderr.includes("FULL-SUITE: VERDICT PASS ") || stderr.includes("FULL-SUITE: VERDICT REUSED PASS ")))
 		return "PASS";
-	if (!run.error && run.signal === null && run.status !== 0 &&
+	if (run.rc !== 0 &&
 		(stdout.includes("FULL-SUITE: VERDICT FAIL ") || stdout.includes("FULL-SUITE: VERDICT REUSED FAIL ") ||
 			stderr.includes("FULL-SUITE: VERDICT FAIL ") || stderr.includes("FULL-SUITE: VERDICT REUSED FAIL ")))
 		return "FAIL";
 	return "UNRUN";
 }
-function runFullSuiteVerdict(repo: string, base: string, candidate: string): FullSuiteVerdict {
+async function runFullSuiteVerdict(repo: string, base: string, candidate: string): Promise<FullSuiteVerdict> {
 	const judge = archiveFullSuiteJudge(repo, base);
 	if (judge === null) return "UNRUN";
 	const configuredTimeoutSeconds = process.env.FULL_SUITE_TIMEOUT_SECS === undefined
@@ -307,11 +303,16 @@ function runFullSuiteVerdict(repo: string, base: string, candidate: string): Ful
 	const timeoutMs = Number.isSafeInteger(configuredTimeoutSeconds) && configuredTimeoutSeconds > 0 && configuredTimeoutSeconds < 2_147_000
 		? configuredTimeoutSeconds * 1000 + 30_000
 		: FULL_SUITE_VERDICT_TIMEOUT_MS;
-	const run = spawnSync("sh", [judge.script, "--repo", repo, "--commit", candidate], {
-		cwd: repo, env: gitEnvironment(), encoding: "utf8",
-		timeout: timeoutMs, maxBuffer: FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES,
-	});
-	const verdict = fullSuiteVerdictFromRun(run);
+	let verdict: FullSuiteVerdict = "UNRUN";
+	try {
+		const run = await kitlibRun(["sh", judge.script, "--repo", repo, "--commit", candidate, "--judge-role", "base"], {
+			cwd: repo, env: gitEnvironment(), deadline_s: timeoutMs / 1000,
+			max_output_bytes: FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES, max_total_bytes: FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES,
+		});
+		verdict = fullSuiteVerdictFromRun(run);
+	} catch {
+		verdict = "UNRUN";
+	}
 	try { rmSync(judge.root, { recursive: true, force: true }); }
 	catch { return "UNRUN"; }
 	return verdict;
@@ -877,7 +878,7 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 			verification: "PERFORMED",
 		};
 	}
-	const fullSuiteVerdict = runFullSuiteVerdict(repo, base, candidate);
+	const fullSuiteVerdict = await runFullSuiteVerdict(repo, base, candidate);
 	if (fullSuiteVerdict !== "PASS") {
 		cleanup();
 		const remoteAfter = observedRemoteMain(repo);
@@ -1090,14 +1091,14 @@ export async function landCommand(request: ParsedCommand): Promise<CliResult> {
 	let checkedCandidateSha: string | null = null;
 	try {
 		convergenceStarted = true;
-		const convergence = convergeRepository({
+		const convergence = await convergeRepository({
 			repo, apply: true, push: true,
-			beforePush: (candidateSha, baseSha) => {
+			beforePush: async (candidateSha, baseSha) => {
 				checkedCandidateSha = candidateSha;
 				checkResult = runPushCheck(repo, baseSha, candidateSha);
 				const admission = pushCheckAdmission(checkResult);
 				if (!admission.allow) return admission;
-				fullSuiteVerdict = runFullSuiteVerdict(repo, baseSha, candidateSha);
+				fullSuiteVerdict = await runFullSuiteVerdict(repo, baseSha, candidateSha);
 				if (fullSuiteVerdict !== "PASS")
 					return { allow: false, reason: fullSuiteVerdict === "FAIL" ? "CHECK_FAILED" : "CHECK_UNRUN" };
 				// SCRATCHBIN1 (ompkit-774u.15, Joshua scope 2026-10-20): refuse the push while the session holds an

@@ -364,10 +364,11 @@ run_affected_tests() {
 		script_ran=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["files"]))' "$WORK/scripts-metrics.stage")
 	fi
 	ran=$((bun_ran + script_ran))
-	timing_tables="$WORK/timings"
-	if [ -n "${FRESH_GATE_LEDGER:-}" ]; then
-		timing_tables="$(dirname "$FRESH_GATE_LEDGER")/full-suite-verdicts/timings"
-	fi
+	timing_repo=${FRESH_GATE_REPO:-$ROOT}
+	timing_tables=$(python3 "$SCRIPT_DIR/full-suite-verdict-store.py" timings --repo "$timing_repo") || {
+		fail "cannot resolve the shared full-suite timing store"
+		return 1
+	}
 	if ! python3 "$SCRIPT_DIR/suite-metrics.py" collect --records "$metric_dir" \
 		--declared "$metric_declared" --output "$metric_rows" --csv "$WORK/file-metrics.csv" \
 		--cwd "$ARCHIVE_DIR" --tables-dir "$timing_tables"; then

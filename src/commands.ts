@@ -203,6 +203,8 @@ export type Command = {
 	readonly subcommands?: readonly Command[];
 	/** Preserve a runnable parent route while exposing its named children. */
 	readonly subcommandOptional?: boolean;
+	/** Maximum positional values when a route accepts a small argument grammar. */
+	readonly maxArguments?: number;
 	readonly argument?: string;
 	readonly example: string;
 	readonly runnable: boolean;
@@ -424,6 +426,13 @@ const landData: DataSchema = { type: "object", required: ["overall", "check"], p
 	if: { properties: { overall: { const: "PUSHED" } } },
 	then: { required: ["commit", "candidate_sha", "pushed_sha", "owner", "paths", "base", "convergence"], properties: { commit: { type: "string" }, pushed_sha: { type: "string" } } },
 }] };
+const fullSuiteVerdictData: DataSchema = { type: "object", required: ["overall", "repo_key", "store", "records", "text"], properties: {
+	overall: { enum: ["OK"] }, repo_key: { type: "string" }, store: { type: "string" }, text: { type: "string" },
+	records: { type: "array", items: { type: "object", required: ["tree", "judge", "verdict", "integrity", "reason", "record"], properties: {
+		tree: { type: ["string", "null"] }, judge: { type: ["object", "null"] }, verdict: { enum: ["PASS", "FAIL", null] },
+		integrity: { enum: ["VALID", "INVALID"] }, reason: { type: "string" }, record: { type: "string" },
+	} } },
+} };
 const indexLockData: DataSchema = { type: "object", required: ["overall", "verdict"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS"] },
 	verdict: { enum: ["NOT_FOUND", "NON_EMPTY", "TOO_YOUNG", "UNKNOWN", "APPLY_REFUSED", "HELD", "WOULD_MOVE", "CHANGED", "BUSY", "REAPED"] },
@@ -499,6 +508,11 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--apply", description: "Request owner-bound save and publication" },
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
 	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
+	{ name: "full-suite", description: "Inspect the shared full-suite verdict store", usage: "full-suite verdict list [TREE] [--repo PATH] | full-suite verdict get TREE [--repo PATH]", flags: [], subcommands: [
+		{ name: "verdict", description: "List every stored full-suite verdict, including invalid records", usage: "full-suite verdict list [TREE] [--repo PATH] | full-suite verdict get TREE [--repo PATH]", argument: "ACTION [TREE]", maxArguments: 2, flags: [
+			{ name: "--repo", value: "PATH", description: "Git repository whose shared verdict store to inspect (default: current directory)" },
+		], example: "omp-kit full-suite verdict list --repo . --json", runnable: false, dataSchema: fullSuiteVerdictData },
+	], example: "omp-kit full-suite verdict list --repo . --json", runnable: false, dataSchema: textData },
 	{ name: "status", description: "Inspect kit and OMP presence without changing configuration", usage: "status", flags: [], example: "omp-kit status --json", runnable: true, dataSchema: statusData },
 	{ name: "lessons", description: "Append evidence-backed lessons or corrections without rewriting history", usage: "lessons add --class CLASS --what TEXT --evidence TEXT [--kind LESSON|GAP|NEGATIVE|CORRECTION] [--superseded-by ID|DOC] [--corrects ID] [--applies-to repo|fleet] [--project PATH] [--commit --bead ID]", flags: [], subcommands: [
 		{ name: "add", description: "Append a validated lesson; CORRECTION retires an earlier record by stable id", usage: "lessons add --class CLASS --what TEXT --evidence TEXT [--kind LESSON|GAP|NEGATIVE|CORRECTION] [--superseded-by ID|DOC] [--corrects ID] [--applies-to repo|fleet] [--project PATH] [--commit --bead ID]", flags: [

@@ -69,48 +69,57 @@ declaration, printed, and recorded in the entry, and CI stays their judge of rec
 is excluded: no focus selection, no wall-budget deferral, no SKIP, no CI deferral, no unrelated
 success.
 
-The verdict is cached by candidate tree hash with check/runtime identity bound to the entry:
+Each reusable verdict is keyed by a four-part identity:
 
-* `tree` — the git tree object of the exact candidate commit (exact source bytes).
-* `checks` — a path-and-byte digest of the full judge and its transitive Python helpers,
+* `tree` — the Git tree object of the exact candidate commit (exact source bytes).
+* `role` — `base` judges a proposed commit using the base revision's gate; `main` judges a
+  commit already on main using its own gate. Their verdicts never satisfy each other's lookup.
+* `checks` — a path-and-byte digest of the full judge and its transitive helpers,
   fresh gate, budget CLI/configuration, temporary-directory helper, and CI-only manifest.
-  `python3 scripts/suite-metrics.py identity --root . --scope full` prints that identity;
-  changing a dependency invalidates earlier results. The judge exported by `land` comes
+  `python3 scripts/suite-metrics.py identity --root . --scope full` prints this identity;
+  changing any bound bytes invalidates earlier results. The judge exported by `land` comes
   entirely from the authoritative base, never the working tree.
-* `runtime` — os/arch plus `bun --version` plus `python3 --version` (plus `FULL_SUITE_RUNTIME_ID`
-  when pinned). A changed runtime reruns every tree.
+* `runtime` — OS/architecture, Bun and Python versions, plus a digest of runner-affecting
+  environment inputs (`PATH`, `LANG`, timeout and optional `FULL_SUITE_RUNTIME_ID`).
 
-A repeated identical tree under unchanged check/runtime identity reuses the recorded verdict
-without rerunning — `PASS` publishes, `FAIL` refuses. A changed tree, changed check bytes or
-changed runtime never reuses. Schema-v2 evidence contains exactly one complete measured
-record for every declared file, including files covered by the same-tree focused pass.
-Missing records, unknown source closure, producer-identity mismatches, and schema-v1
-aggregate-only entries are cold. A timed-out or incomplete execution retains its partial
-log but writes no reusable verdict; a completed failing execution remains a reusable `FAIL`.
+A repeated identical tree under unchanged role/check/runtime identity reuses the recorded
+verdict without rerunning — `PASS` publishes, `FAIL` refuses. A changed tree, judge, role or
+runtime never reuses. Schema-v3 evidence contains exactly one complete measured record for every
+declared file, including files covered by the same-tree focused pass. Missing records, unknown
+source closure, producer-identity mismatches, and older aggregate-only entries are cold. A
+timed-out or incomplete execution retains its partial log but writes no reusable verdict; a
+completed failing execution remains a reusable `FAIL`, never a `PASS`.
 
 Each cache entry records the SHA-256 of its paired `.log`. A missing or altered log invalidates
 the entry and forces a complete rerun; no verdict is reused without matching raw suite evidence.
 
-The cache lives in the pushing checkout's git dir
-(`<git-dir>/omp-kit/full-suite-verdicts/<tree>.json` beside `<tree>.log`, the suite evidence),
-overridden by `FULL_SUITE_VERDICT_CACHE_DIR`; it is never committed. Pruning entries only costs
-a rerun. The suite is bounded by `FULL_SUITE_TIMEOUT_SECS` (default 1800) and runs at nice 10
-inside the gate's own admission.
+The store is shared by checkouts with the same canonical Git origin, outside every checkout.
+By default it is `$XDG_STATE_HOME/omp-kit/full-suite-verdicts` (or
+`$HOME/.local/state/omp-kit/full-suite-verdicts` when unset), partitioned by repository identity.
+`$XDG_CONFIG_HOME/omp-kit/full-suite-verdict.json` may set an absolute `store_root`; the
+`FULL_SUITE_VERDICT_CACHE_DIR` environment variable overrides that location for a process. The
+store is never committed. Pruning entries only costs a rerun. The suite is bounded by
+`FULL_SUITE_TIMEOUT_SECS` (default 1800) and runs at nice 10 inside the gate's own admission.
+
+Inspect stored entries with `omp-kit full-suite verdict list [TREE] [--repo PATH]`; use
+`omp-kit full-suite verdict get TREE [--repo PATH]` for one tree. Listing includes invalid
+records and reports tree, judge role/check identity/runtime, verdict and integrity status.
 
 ### Measured test budgets
 
 Each file records its runner, exact argument vector, elapsed milliseconds, CPU time,
 exit code, producer identity, output digest, and conservative whole-source-tree closure.
 The verdict also records stage/run wall time, start/end load, and the actual worker counts.
-`<tree>.timings.csv` sits beside the JSON/log, with `stage`, `file`, `elapsed_s`, `rc`,
+`<record>.timings.<pid>.csv` sits beside each verdict, with `stage`, `file`, `elapsed_s`, `rc`,
 `workers`, `load_1m`, CPU, command, judge, and closure columns.
 
 Complete runs refresh native Bun `{"version":1,"files":{"path":milliseconds}}` maps in
-`<cache>/timings/core-test-timings.json` and `script-test-timings.json`; unobserved entries
-are retained, as with Bun's `--update-timings`. Durable cache maps survive archive cleanup.
-The fresh-gate ledger is `<git-dir>/omp-kit/fresh-gate-runs.jsonl`; it records the terminal
-gate outcome and whole-gate interval, separately from per-file test stages. An archive-only
-fixture does not write the checkout's operational ledger unless explicitly requested.
+`<store>/timings/core-test-timings.json` and `script-test-timings.json`; unobserved entries
+are retained, as with Bun's `--update-timings`. The external maps survive archive cleanup and
+are shared by checkouts of the same repository. The fresh-gate ledger remains
+`<git-dir>/omp-kit/fresh-gate-runs.jsonl`; it records the terminal gate outcome and whole-gate
+interval, separately from per-file test stages. An archive-only fixture does not write the
+checkout's operational ledger unless explicitly requested.
 
 `.github/test-budget.json` declares the 600-second push-p95 requirement, 900-second cycle
 requirement, and the **starting heuristic** of 225 seconds per file (`full_cycle_s / 4`).

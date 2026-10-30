@@ -11,6 +11,9 @@ printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 kitlib_tmp TMP tag-after-green-test || exit 1
+unset FULL_SUITE_VERDICT_CACHE_DIR
+export XDG_CONFIG_HOME="$TMP/xdg-config"
+export XDG_STATE_HOME="$TMP/xdg-state"
 
 SHA_BUMP="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 SHA_OTHER="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -154,7 +157,7 @@ tag_verdict_cases() {
 	tag_git clone "$TMP/tag-origin.git" "$TMP/tag-work" >/dev/null 2>&1 || return 1
 	work="$TMP/tag-work"
 	mkdir -p "$work/scripts" "$work/.github" "$work/tests/cli" "$work/var/agent-tmp"
-	for file in full-suite-verdict.sh fresh-gate.sh suite-metrics.py kitlib_run.py pysafe.py kitlib-tmp.sh test-budget.ts; do
+	for file in full-suite-verdict.sh full-suite-verdict-store.py fresh-gate.sh suite-metrics.py kitlib_run.py pysafe.py kitlib-tmp.sh test-budget.ts; do
 		cp "$SOURCE/$file" "$work/scripts/$file" || return 1
 	done
 	cp "$SOURCE/../.github/test-budget.json" "$work/.github/test-budget.json" || return 1
@@ -166,7 +169,8 @@ tag_verdict_cases() {
 	tag_git -C "$work" push origin HEAD:refs/heads/main >/dev/null 2>&1 || return 1
 	sha=$(tag_git -C "$work" rev-parse HEAD) || return 1
 	tree=$(tag_git -C "$work" rev-parse 'HEAD^{tree}') || return 1
-	(cd "$work" && sh scripts/full-suite-verdict.sh --repo "$work" --commit "$sha") > "$TMP/tag-verdict-run.log" 2>&1 || return 1
+	(cd "$work" && sh scripts/full-suite-verdict.sh --repo "$work" --commit "$sha" --judge-role main) > "$TMP/tag-verdict-run.log" 2>&1 || return 1
+	entry=$(python3 "$work/scripts/full-suite-verdict-store.py" path --repo "$work" --tree "$tree" --role main --judge-root "$work") || return 1
 	# Working-tree judging code is untrusted: both readback and identity use
 	# the committed archive, not this planted helper.
 	printf 'raise SystemExit(99)\n' > "$work/scripts/suite-metrics.py"
@@ -175,15 +179,14 @@ tag_verdict_cases() {
 	if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qF 'VERDICT REUSED PASS'; then
 		pass=$((pass + 1))
 	else
-		fail=$((fail + 1)); printf 'FAIL v2-tag-reuse: rc=%s out<<<%s>>>\n' "$rc" "$out"
+		fail=$((fail + 1)); printf 'FAIL v3-tag-reuse: rc=%s out<<<%s>>>\n' "$rc" "$out"
 	fi
-	entry="$work/.git/omp-kit/full-suite-verdicts/$tree.json"
 	python3 - "$entry" <<'PYEOF' || return 1
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 entry = json.loads(path.read_text())
-assert entry["version"] == 2 and len(entry["evidence"]["files"]) == 2
+assert entry["version"] == 3 and len(entry["evidence"]["files"]) == 2
 # Keep the remaining row and counters internally consistent: completeness
 # must still bind the actual declared source suite, not this shortened list.
 entry["evidence"]["files"].pop()
@@ -196,10 +199,10 @@ PYEOF
 	if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qF 'no reusable full-suite verdict'; then
 		pass=$((pass + 1))
 	else
-		fail=$((fail + 1)); printf 'FAIL truncated-v2-tag: rc=%s out<<<%s>>>\n' "$rc" "$out"
+		fail=$((fail + 1)); printf 'FAIL truncated-v3-tag: rc=%s out<<<%s>>>\n' "$rc" "$out"
 	fi
 }
-tag_verdict_cases || { fail=$((fail + 1)); printf 'FAIL v2 tag fixture setup\n'; cat "$TMP/tag-verdict-run.log" 2>/dev/null; }
+tag_verdict_cases || { fail=$((fail + 1)); printf 'FAIL v3 tag fixture setup\n'; cat "$TMP/tag-verdict-run.log" 2>/dev/null; }
 
 printf 'tag-after-green: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

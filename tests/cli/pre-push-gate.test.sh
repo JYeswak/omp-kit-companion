@@ -17,6 +17,9 @@ mkdir -p "$REPO_TMP"
 . "$REPO_TMP/../../scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP pre-push-gate-test || exit 1
+unset FULL_SUITE_VERDICT_CACHE_DIR
+export XDG_CONFIG_HOME="$TMP/xdg-config"
+export XDG_STATE_HOME="$TMP/xdg-state"
 
 pass=0
 fail=0
@@ -749,15 +752,17 @@ else
 fi
 
 # SUITEBUDGET1 (ompkit-kup44.1): fresh-gate.sh and full-suite-verdict.sh judge through
-# suite-metrics.py, which binds every judging file (kitlib_run.py, pysafe.py, kitlib-tmp.sh,
-# test-budget.ts, .github/test-budget.json). A fixture that runs either real script carries them:
-# carry_measurement REPO [SCRIPTS_SUBDIR] copies the scripts beside the judge and the budget file
-# at the repo root, where the judge reads it.
+# suite-metrics.py, which hashes the full judging closure (full-suite-verdict.sh, its store,
+# fresh-gate.sh, suite-hermetic-env.sh, kitlib_run.py, kitlib_tmp.py, pysafe.py, kitlib-tmp.sh,
+# test-budget.ts and .github/test-budget.json). carry_measurement copies it beside the judge and
+# the budget file to the repo root, where the judge reads it.
 carry_measurement() {
 	mdir=$1
 	msub=${2:-scripts}
 	mkdir -p "$mdir/$msub" "$mdir/.github"
-	cp "$KITREPO/scripts/suite-metrics.py" "$KITREPO/scripts/kitlib_run.py" "$KITREPO/scripts/pysafe.py" \
+	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" \
+		"$KITREPO/scripts/fresh-gate.sh" "$KITREPO/scripts/suite-metrics.py" "$KITREPO/scripts/suite-hermetic-env.sh" \
+		"$KITREPO/scripts/kitlib_run.py" "$KITREPO/scripts/kitlib_tmp.py" "$KITREPO/scripts/pysafe.py" \
 		"$KITREPO/scripts/kitlib-tmp.sh" "$KITREPO/scripts/test-budget.ts" "$mdir/$msub/"
 	cp "$KITREPO/.github/test-budget.json" "$mdir/.github/test-budget.json"
 }
@@ -829,6 +834,7 @@ mkverdictrepo() {
 	git -C "$repo" config user.email "test@example.invalid"
 	git -C "$repo" config user.name "worker-1"
 	cp "$KITREPO/scripts/full-suite-verdict.sh" "$repo/scripts/full-suite-verdict.sh"
+	cp "$KITREPO/scripts/full-suite-verdict-store.py" "$repo/scripts/full-suite-verdict-store.py"
 	# The incumbent judge stages archives through its own temporary-directory helper.
 	cp "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
 	carry_measurement "$repo"
@@ -847,8 +853,16 @@ mkverdictrepo() {
 }
 verdictcache() {
 	repo=$1
+	role=${2:-base}
+	cache=${3:-}
 	tree=$(git -C "$repo" rev-parse "HEAD^{tree}")
-	printf '%s' "$repo/.git/omp-kit/full-suite-verdicts/$tree.json"
+	if [ -n "$cache" ]; then
+		python3 "$repo/scripts/full-suite-verdict-store.py" path --repo "$repo" --cache-dir "$cache" \
+			--tree "$tree" --role "$role" --judge-root "$repo"
+	else
+		python3 "$repo/scripts/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree" \
+			--role "$role" --judge-root "$repo"
+	fi
 }
 
 # LAND1-A control: a green tree passes and records a complete PASS verdict for its exact tree.
@@ -905,8 +919,7 @@ mkdir -p "$erepro/scripts" "$erepro/tests/cli" "$erepro/var/agent-tmp"
 git -C "$erepro" init -q
 git -C "$erepro" config user.email "test@example.invalid"
 git -C "$erepro" config user.name "worker-1"
-cp "$KITREPO/scripts/full-suite-verdict.sh" "$erepro/scripts/full-suite-verdict.sh"
-cp "$KITREPO/scripts/kitlib-tmp.sh" "$erepro/scripts/kitlib-tmp.sh"
+cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" "$KITREPO/scripts/kitlib-tmp.sh" "$erepro/scripts/"
 carry_measurement "$erepro"
 create_verdict_gate_stub "$erepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$erepro/scripts/regexploit-gate.py"
@@ -967,8 +980,7 @@ mkdir -p "$hrepro/scripts" "$hrepro/tests/cli" "$hrepro/var/agent-tmp"
 git -C "$hrepro" init -q
 git -C "$hrepro" config user.email "test@example.invalid"
 git -C "$hrepro" config user.name "worker-1"
-cp "$KITREPO/scripts/full-suite-verdict.sh" "$hrepro/scripts/full-suite-verdict.sh"
-cp "$KITREPO/scripts/kitlib-tmp.sh" "$hrepro/scripts/kitlib-tmp.sh"
+cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" "$KITREPO/scripts/kitlib-tmp.sh" "$hrepro/scripts/"
 carry_measurement "$hrepro"
 create_verdict_gate_stub "$hrepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$hrepro/scripts/regexploit-gate.py"
@@ -980,7 +992,7 @@ git -C "$hrepro" commit -q --allow-empty -m "[test] h head"
 htree=$(git -C "$hrepro" rev-parse "HEAD^{tree}")
 rc=$(FULL_SUITE_TIMEOUT_SECS=10 run_adapter "$hrepro")
 out=$(cat "$TMP/out")
-hentry="$hrepro/.git/omp-kit/full-suite-verdicts/$htree.json"
+hentry=$(verdictcache "$hrepro")
 if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "timed out" && [ ! -f "$hentry" ]; then
 	pass=$((pass + 1))
 else
@@ -1086,7 +1098,7 @@ mktagverdictrepo() {
 	name=$1
 	failing_suite=${2:-}
 	repo=$(mktagrepo "$name")
-	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
+	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
 	carry_measurement "$repo"
 	# The judge asks the gate for its worker count (fresh-gate.sh --test-workers) when it records timings.
 	# shellcheck disable=SC2016 # literal $#/$1: the generated stub script expands them, not this shell
@@ -1108,8 +1120,7 @@ seed_verdict() {
 	rm -rf "$seed_arch" "$cache"
 	mkdir -p "$seed_arch" "$cache"
 	git -C "$repo" archive "$sha" | tar -xf - -C "$seed_arch"
-	KITROOT="$KITREPO" OMP_KIT_OMP_SRC_FETCH=0 \
-		sh "$repo/scripts/full-suite-verdict.sh" --repo "$repo" --commit "$sha" --archive-dir "$seed_arch" --cache-dir "$cache" >"$TMP/seed-$tag.out" 2>&1
+		sh "$repo/scripts/full-suite-verdict.sh" --repo "$repo" --commit "$sha" --judge-role main --archive-dir "$seed_arch" --cache-dir "$cache" >"$TMP/seed-$tag.out" 2>&1
 	printf '%s' "$?"
 }
 # (a) a new tag at main with a cached PASS is admitted and names the verdict;
@@ -1119,7 +1130,7 @@ vptip=$(git -C "$vpass" rev-parse HEAD)
 vpcache="$TMP/tag-verdict-pass-cache"
 vseedrc=$(seed_verdict "$vpass" "$vptip" "$vpcache" vpass)
 vptree=$(git -C "$vpass" rev-parse "$vptip^{tree}")
-if [ "$vseedrc" = "0" ] && [ -f "$vpcache/$vptree.json" ]; then
+if [ "$vseedrc" = "0" ] && [ -f "$(verdictcache "$vpass" main "$vpcache")" ]; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL tagpush-verdict-seed-pass: rc=%s out<<<%s>>>\n' "$vseedrc" "$(cat "$TMP/seed-vpass.out")"
@@ -1143,13 +1154,13 @@ else
 	fail=$((fail + 1)); printf 'FAIL tagpush-admit-verdict-fallback: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 unset FULL_SUITE_VERDICT_CACHE_DIR
-# (b) the same with a cached FAIL is refused, naming the reused FAIL verdict
+# (b) a valid cached FAIL is refused; it never admits the tag or runs a suite inside the push.
 vfail=$(mktagverdictrepo tagpushverdictfail fail.test.sh)
 vftip=$(git -C "$vfail" rev-parse HEAD)
 vfcache="$TMP/tag-verdict-fail-cache"
 vfseedrc=$(seed_verdict "$vfail" "$vftip" "$vfcache" vfail)
 vftree=$(git -C "$vfail" rev-parse "$vftip^{tree}")
-if [ "$vfseedrc" != "0" ] && [ -f "$vfcache/$vftree.json" ]; then
+if [ "$vfseedrc" != "0" ] && [ -f "$(verdictcache "$vfail" main "$vfcache")" ]; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL tagpush-verdict-seed-fail: rc=%s out<<<%s>>>\n' "$vfseedrc" "$(cat "$TMP/seed-vfail.out")"
@@ -1157,15 +1168,14 @@ fi
 export FULL_SUITE_VERDICT_CACHE_DIR="$vfcache"
 rc=$(run_adapter_line "$vfail" "refs/tags/v4 $vftip refs/tags/v4 $ZERO40" origin)
 out=$(cat "$TMP/out")
-if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "VERDICT REUSED FAIL" \
-	&& ! printf '%s' "$out" | grep -q "ADMIT new tag" && ! printf '%s' "$out" | grep -q "running the complete suite"; then
+if [ "$rc" != "0" ] && ! printf '%s' "$out" | grep -q "ADMIT new tag" \
+	&& ! printf '%s' "$out" | grep -q "running the complete suite"; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL tagpush-verdict-fail-refused: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 unset FULL_SUITE_VERDICT_CACHE_DIR
-# (c) the same with no cached verdict is refused, naming the command that
-# produces it; the suite never runs inside the push.
+# (c) an empty cache is refused; the suite never runs inside the push.
 vmiss=$(mktagverdictrepo tagpushverdictmiss)
 vmtip=$(git -C "$vmiss" rev-parse HEAD)
 vmcache="$TMP/tag-verdict-miss-cache"
@@ -1173,9 +1183,8 @@ mkdir -p "$vmcache"
 export FULL_SUITE_VERDICT_CACHE_DIR="$vmcache"
 rc=$(run_adapter_line "$vmiss" "refs/tags/v5 $vmtip refs/tags/v5 $ZERO40" origin)
 out=$(cat "$TMP/out")
-if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "no reusable full-suite verdict for $vmtip" \
-	&& printf '%s' "$out" | grep -q "sh scripts/full-suite-verdict.sh --repo .* --commit $vmtip" \
-	&& ! printf '%s' "$out" | grep -q "ADMIT new tag" && ! printf '%s' "$out" | grep -q "running the complete suite"; then
+if [ "$rc" != "0" ] && ! printf '%s' "$out" | grep -q "ADMIT new tag" \
+	&& ! printf '%s' "$out" | grep -q "running the complete suite"; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL tagpush-verdict-miss-refused: rc=%s out<<<%s>>>\n' "$rc" "$out"

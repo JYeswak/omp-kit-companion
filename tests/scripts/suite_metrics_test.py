@@ -30,6 +30,7 @@ from kitlib_run import RunResult
 HELPER = ROOT / "scripts/suite-metrics.py"
 JUDGING_FILES = (
     "scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
+    "scripts/full-suite-verdict-store.py",
     "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
     ".github/test-budget.json",

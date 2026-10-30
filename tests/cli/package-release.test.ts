@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
@@ -194,6 +194,53 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	const compiled = Bun.spawnSync([staged.executable, "--info", "--json"], { cwd: output, env: { ...process.env, HOME: output, PATH: stubFirstPath, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" }, stdout: "pipe", stderr: "pipe" });
 	expect(compiled.exitCode).toBe(0);
 	expect(JSON.parse(compiled.stdout.toString()).data.release.source_tag).toBe("v1.2.3");
+	for (const judgeFile of ["scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
+		"scripts/fresh-gate.sh", "scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh",
+		"scripts/kitlib_run.py", "scripts/kitlib_tmp.py", "scripts/pysafe.py", "scripts/kitlib-tmp.sh",
+		"scripts/test-budget.ts", ".github/test-budget.json", "scripts/gate-ci-only.tsv"])
+		expect(staged.files).toContain(judgeFile);
+	const verdictRepo = join(output, "verdict-reader-repo");
+	mkdirSync(verdictRepo);
+	sourceGit(verdictRepo, ["init", "-q"]);
+	writeFileSync(join(verdictRepo, "tracked.txt"), "record inventory fixture\n");
+	sourceGit(verdictRepo, ["add", "tracked.txt"]);
+	sourceGit(verdictRepo, ["-c", "core.hooksPath=/dev/null", "commit", "-qm", "verdict inventory fixture"]);
+	const verdictTree = sourceGit(verdictRepo, ["rev-parse", "HEAD^{tree}"]).toString().trim();
+	const verdictCache = join(output, "verdict-reader-store");
+	const storeHelper = join(staged.root, "scripts", "full-suite-verdict-store.py");
+	const metricsHelper = join(staged.root, "scripts", "suite-metrics.py");
+	const verdictEnv = { ...process.env, HOME: output, TMPDIR: output, PATH: stubFirstPath,
+		FULL_SUITE_VERDICT_CACHE_DIR: verdictCache, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" };
+	const checksResult = await runBounded(["python3", metricsHelper, "identity", "--root", staged.root, "--scope", "full"],
+		{ cwd: output, env: verdictEnv, deadline_s: 30 });
+	expect(checksResult.rc, new TextDecoder().decode(checksResult.stderr)).toBe(0);
+	expect(checksResult.timed_out || checksResult.killed || checksResult.truncated || checksResult.total_truncated).toBe(false);
+	const checks = new TextDecoder().decode(checksResult.stdout).trim();
+	const runtimeResult = await runBounded(["python3", metricsHelper, "runtime"],
+		{ cwd: output, env: verdictEnv, deadline_s: 30 });
+	expect(runtimeResult.rc, new TextDecoder().decode(runtimeResult.stderr)).toBe(0);
+	expect(runtimeResult.timed_out || runtimeResult.killed || runtimeResult.truncated || runtimeResult.total_truncated).toBe(false);
+	const runtime = new TextDecoder().decode(runtimeResult.stdout).trim();
+	const recordPathResult = await runBounded(["python3", storeHelper, "path", "--repo", verdictRepo,
+		"--cache-dir", verdictCache, "--tree", verdictTree, "--role", "main", "--checks", checks, "--runtime", runtime],
+		{ cwd: output, env: verdictEnv, deadline_s: 30 });
+	expect(recordPathResult.rc, new TextDecoder().decode(recordPathResult.stderr)).toBe(0);
+	expect(recordPathResult.timed_out || recordPathResult.killed || recordPathResult.truncated || recordPathResult.total_truncated).toBe(false);
+	const recordPath = new TextDecoder().decode(recordPathResult.stdout).trim();
+	mkdirSync(dirname(recordPath), { recursive: true });
+	writeFileSync(recordPath, `${JSON.stringify({ schema_version: 3, tree: verdictTree,
+		judge: { role: "main", checks_sha256: checks, runtime }, verdict: "FAIL" })}\n`);
+	const listed = await runBounded([staged.executable, "full-suite", "verdict", "list", "--repo", verdictRepo, "--json"],
+		{ cwd: output, env: verdictEnv, deadline_s: 30 });
+	expect(listed.rc, new TextDecoder().decode(listed.stderr)).toBe(0);
+	const listedData = JSON.parse(new TextDecoder().decode(listed.stdout)) as {
+		data?: { records?: { tree?: string; judge?: { role?: string; checks_sha256?: string; runtime?: string };
+			verdict?: string; integrity?: string }[]; text?: string };
+	};
+	expect(listedData.data?.records).toMatchObject([{ tree: verdictTree,
+		judge: { role: "main", checks_sha256: checks, runtime }, verdict: "FAIL", integrity: "INVALID" }]);
+	expect(listedData.data?.text).toContain(`runtime=${runtime}`);
+	expect(listedData.data?.text).toContain("verdict=FAIL integrity=INVALID");
 	const dirty = Buffer.from(bytes);
 	dirty[dirty.length - 1030] ^= 1;
 	await expect(stageKitRelease({ archive: dirty, plan, stagingParent: output, probeBinaryInfo: async () => { throw new Error("must not execute unverified archive"); } })).rejects.toThrow("ARCHIVE_DIGEST_MISMATCH");

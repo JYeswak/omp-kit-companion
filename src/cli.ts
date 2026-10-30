@@ -13,6 +13,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { COMMANDS, GLOBAL_FLAGS, REFUSAL_DATA_SCHEMA, commandFlags, findCommand, type Command, type Flag } from "./commands.ts";
 import { RELEASE_DATA } from "./release-assets.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
+import { run as runBounded } from "./kitlib/run.ts";
 import { runtimeTempRoot } from "./runtime.ts";
 import { audit, undo, why } from "./audit.ts";
 import { LAND_GUARD_PUBLIC_IDENTITY, inspectLandGuard, landCommand } from "./land.ts";
@@ -340,7 +341,7 @@ function parse(args: readonly string[]): ParseResult {
 		// send is the one three-positional command (SESSION PANE MESSAGE); the
 		// message keeps its spaces because the request joins rest (see sendCommand).
 		if (rest.length !== 3 && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent."), json };
-	} else if ((!command.argument && rest.length) || (command.argument && rest.length > (command.name === "help" ? 2 : 1))) {
+	} else if ((!command.argument && rest.length) || (command.argument && rest.length > (command.maxArguments ?? (command.name === "help" ? 2 : 1)))) {
 		return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, `Run omp-kit help ${command.name}.`), json };
 	}
 	// A subcommand that declares --all accepts the flag in place of its positional (service status/doctor --all).
@@ -1183,12 +1184,67 @@ function receiptCommand(request: ParsedCommand): CliResult {
 			"Inspect the private receipt and current postimages; do not force replacement.");
 	}
 }
+async function fullSuiteVerdictCommand(request: ParsedCommand): Promise<CliResult> {
+	const args = (request.argument ?? "").split(" ").filter(Boolean);
+	const [action, tree] = args;
+	if ((action !== "list" && action !== "get") || args.length > 2 || (action === "get" && args.length !== 2))
+		return refusal("INVALID_ARGUMENT", "Use `full-suite verdict list [TREE]` or `full-suite verdict get TREE`",
+			"Run `omp-kit help full-suite verdict` for the exact read-only grammar.");
+	if (tree !== undefined && ((tree.length !== 40 && tree.length !== 64) || [...tree].some(char => !"0123456789abcdef".includes(char))))
+		return refusal("INVALID_TREE", "TREE must be a complete lowercase Git tree hash",
+			"Pass the 40-character SHA-1 or 64-character SHA-256 tree from the target repository.");
+	const repoFlag = request.flags.get("--repo");
+	if (repoFlag !== undefined && typeof repoFlag !== "string")
+		return refusal("INVALID_REPO", "--repo must name a Git repository path", "Use `--repo PATH`.");
+	const root = kitIdentity().release.root;
+	if (!root) return refusal("VERDICT_STORE_UNAVAILABLE", "The installed kit root is unavailable",
+		"Run this command from a complete omp-kit source checkout or installed release.");
+	const helper = join(root, "scripts", "full-suite-verdict-store.py");
+	if (!existsSync(helper)) return refusal("VERDICT_STORE_UNAVAILABLE", "The verdict-store helper is missing from this kit release",
+		"Install a release containing scripts/full-suite-verdict-store.py and scripts/suite-metrics.py.");
+	const argv = ["python3", helper, "list", "--repo", resolve(typeof repoFlag === "string" ? repoFlag : process.cwd()),
+		"--judge-root", root];
+	if (tree !== undefined) argv.push("--tree", tree);
+	let result;
+	try {
+		result = await runBounded(argv, { deadline_s: 30, max_output_bytes: 16 << 20, max_total_bytes: 32 << 20 });
+	} catch {
+		return refusal("VERDICT_STORE_UNAVAILABLE", "The bounded verdict-store query could not start",
+			"Verify Python 3 and the installed full-suite verdict-store files; no records were changed.");
+	}
+	const decoder = new TextDecoder();
+	if (result.timed_out || result.truncated || result.rc !== 0)
+		return refusal("VERDICT_STORE_ERROR", "The shared verdict store could not be read completely",
+			`${decoder.decode(result.stderr).trim() || "Inspect the repository and external verdict-store configuration; no records were changed."}`);
+	let parsed: unknown;
+	try { parsed = JSON.parse(decoder.decode(result.stdout)); }
+	catch { return refusal("VERDICT_STORE_ERROR", "The verdict-store helper returned invalid JSON",
+		"Inspect the installed helper and store files; no records were changed."); }
+	if (typeof parsed !== "object" || parsed === null || !("records" in parsed) || !Array.isArray(parsed.records) ||
+		!("store" in parsed) || typeof parsed.store !== "string" || !("repo_key" in parsed) || typeof parsed.repo_key !== "string")
+		return refusal("VERDICT_STORE_ERROR", "The verdict-store response is incomplete",
+			"Inspect the installed helper and store files; no records were changed.");
+	const records = parsed.records as Array<Record<string, unknown>>;
+	const lines = records.map(row => {
+		const judge = typeof row.judge === "object" && row.judge !== null ? row.judge as Record<string, unknown> : {};
+		const recordTree = typeof row.tree === "string" ? row.tree : "<unknown>";
+		const role = typeof judge.role === "string" ? judge.role : "<unknown>";
+		const checks = typeof judge.checks_sha256 === "string" ? judge.checks_sha256 : "<unknown>";
+		const runtime = typeof judge.runtime === "string" ? judge.runtime : "<unknown>";
+		const verdict = typeof row.verdict === "string" ? row.verdict : "INVALID";
+		const integrity = typeof row.integrity === "string" ? row.integrity : "INVALID";
+		return `${recordTree} judge=${role} checks=${checks} runtime=${runtime} verdict=${verdict} integrity=${integrity} record=${String(row.record ?? "<unknown>")}`;
+	});
+	const text = [`store: ${parsed.store}`, ...lines].join("\n");
+	return { code: 0, data: { ...parsed, text }, verification: "PERFORMED" };
+}
 
 registerCommandHandler("audit", receiptCommand);
 registerCommandHandler("why", receiptCommand);
 registerCommandHandler("undo", receiptCommand);
 registerCommandHandler("land", landCommand);
 registerCommandHandler("converge", convergeCommand);
+registerCommandHandler("full-suite verdict", fullSuiteVerdictCommand);
 registerCommandHandler("custody check", custodyCheckCommand);
 registerCommandHandler("intake", intakeCommand);
 

@@ -17,7 +17,7 @@ Current release: v0.2.80
 <!-- kit-release:end -->
 
 A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-50 top-level commands for an existing OMP install.
+51 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -271,19 +271,6 @@ postcheck. Private paths and credential shapes are redacted before truncation.
 
 OMP source cache details (fetch, verify, disable) live in [docs/omp-source-cache.md](docs/omp-source-cache.md).
 
-## Quick example
-
-```sh
-omp-kit status --json                       # what is installed; changes nothing
-omp-kit test --json                         # prove the pack against your OMP
-omp-kit apply rules --plan --json           # preview the rule install
-omp-kit apply rules --apply --yes           # install it with a receipt
-omp-kit audit --json                        # find the receipt id
-omp-kit undo RUN_ID --yes                   # put everything back
-omp-kit doctor --scope settings             # per-profile TTSR state
-omp-kit robot-docs guide                    # guidance for agents driving the CLI
-```
-
 ## Design philosophy
 
 **Plan before apply.** Guarded apply and repair commands default to a plan.
@@ -477,6 +464,7 @@ explicit report rather than inventing zero activity.
 
 | Command | Usage | What it does | Example |
 |---|---|---|---|
+| `omp-kit full-suite verdict` | `list [TREE] [--repo PATH] \| get TREE [--repo PATH]` | Show tree, judge identity, verdict and integrity, including invalid records | `omp-kit full-suite verdict list --json` |
 | `omp-kit status` | `status` | Kit and OMP presence; runtime `effective_rules` is `NOT_RUN` (use `doctor --scope rules --json`); changes nothing | `omp-kit status --json` |
 | `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append an evidence-backed lesson; optionally save its clean path on shared main and fast-forward publish | `omp-kit lessons add --class MISSING_EDGE --what w --evidence e` |
 | `omp-kit fleet-lessons` | `fleet-lessons [--project PATH]... [--json]` | Read current lesson advice, preserved history and unresolved references without intake, classification or service effects | `omp-kit fleet-lessons --project . --json` |
