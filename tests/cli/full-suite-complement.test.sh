@@ -132,6 +132,17 @@ tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
 run_verdict failc --focused-passed "$report"
 if [ "$rc" -ne 0 ] && grep -q 'VERDICT FAIL .*bun_fail=1' "$out"; then ok "planted failing complement: verdict FAIL bun_fail=1"; else not_ok "planted failing complement (rc=$rc)"; grep VERDICT "$out"; fi
 if grep -q 'FULL-SUITE: failing tests' "$out" && grep -q 'tests/cli/c.test.ts: (fail) c' "$out"; then ok "planted failing complement: the failing test is named in the gate output"; else not_ok "failing test not named"; grep -A3 'failing tests' "$out"; fi
+fail_pass_out="$TMP/verdictid1-fail-require-pass.out"
+python3 "$KITROOT_DIR/scripts/full-suite-verdict-store.py" require-pass \
+	--repo "$repo" --tree "$tree" --role base --judge-root "$KITROOT_DIR" --suite-root "$repo" \
+	--cache-dir "$repo.cache" >"$fail_pass_out" 2>&1
+fail_pass_rc=$?
+if [ "$fail_pass_rc" -ne 0 ] && grep -qx 'FAIL' "$fail_pass_out"; then
+	ok "VERDICTID1: a complete FAIL record is never served as PASS"
+else
+	not_ok "VERDICTID1: failing record require-pass returned rc=$fail_pass_rc"
+	cat "$fail_pass_out"
+fi
 repo=$pass_repo
 tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
 # 4. planted: a report naming a file the archive does not enumerate is reported and reduces nothing.
@@ -368,6 +379,15 @@ else
 	not_ok "VERDICTID1: cross-checkout release readback (producer_rc=$main_rc readback_rc=$release_rc)"
 	cat "$TMP/verdictid1-main-producer.out" "$TMP/verdictid1-release-readback.out"
 fi
+XDG_CONFIG_HOME="$TMP/verdictid1-config" XDG_STATE_HOME="$TMP/verdictid1-state" HOME="$TMP/verdictid1-home" \
+	sh "$VERDICT" --repo "$shared_a" --commit HEAD --judge-role base >"$TMP/verdictid1-base-producer.out" 2>&1
+base_rc=$?
+if [ "$base_rc" -eq 0 ] && grep -q "VERDICT PASS .* role=base" "$TMP/verdictid1-base-producer.out"; then
+	ok "VERDICTID1: a second distinct judge record is produced"
+else
+	not_ok "VERDICTID1: second judge record producer (rc=$base_rc)"
+	cat "$TMP/verdictid1-base-producer.out"
+fi
 
 list_json=$(XDG_CONFIG_HOME="$TMP/verdictid1-config" XDG_STATE_HOME="$TMP/verdictid1-state" HOME="$TMP/verdictid1-home" \
 	bun "$KITROOT_DIR/src/cli.ts" full-suite verdict list --repo "$shared_a" --json 2>"$TMP/verdictid1-list.err")
@@ -375,16 +395,23 @@ list_rc=$?
 if [ "$list_rc" -eq 0 ] && printf '%s' "$list_json" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)["data"]
-row=next((row for row in d["records"] if row.get("tree") == sys.argv[1]
-          and row.get("judge", {}).get("role") == "main"), None)
-assert row and row.get("verdict") == "PASS" and len(row["judge"].get("checks_sha256", "")) == 64
-runtime = row["judge"].get("runtime", "")
-assert "/env-" in runtime and len(runtime.rsplit("/env-", 1)[1]) == 64
-expected = (row["tree"] + " judge=main checks=" + row["judge"]["checks_sha256"]
-            + " runtime=" + row["judge"]["runtime"] + " verdict=PASS integrity=VALID record=" + row["record"])
-assert expected in d["text"], d["text"]
+rows=d["records"]
+assert len(rows)==2, rows
+assert {row.get("tree") for row in rows} == {sys.argv[1]}, rows
+by_role={row.get("judge", {}).get("role"): row for row in rows}
+assert set(by_role)=={"base","main"}, rows
+assert len({row.get("record") for row in rows})==2, rows
+for role,row in by_role.items():
+    judge=row["judge"]
+    assert row.get("verdict")=="PASS" and row.get("integrity")=="VALID", row
+    assert len(judge.get("checks_sha256",""))==64, row
+    runtime=judge.get("runtime","")
+    assert "/env-" in runtime and len(runtime.rsplit("/env-",1)[1])==64, row
+    expected=(row["tree"] + f" judge={role} checks=" + judge["checks_sha256"]
+              + " runtime=" + runtime + " verdict=PASS integrity=VALID record=" + row["record"])
+    assert expected in d["text"], (expected,d["text"])
 ' "$shared_tree"; then
-	ok "VERDICTID1: CLI list exposes tree, full judge identity, and PASS"
+	ok "VERDICTID1: CLI list exposes every tree, judge identity, verdict, and integrity row"
 else
 	not_ok "VERDICTID1: CLI list (rc=$list_rc)"
 	printf '%s\n' "$list_json" "$(cat "$TMP/verdictid1-list.err")"
@@ -417,6 +444,25 @@ if [ "$other_judge_rc" -ne 0 ] && grep -q 'MISS' "$TMP/verdictid1-other-judge.ou
 else
 	not_ok "VERDICTID1: changed judge hash reused or did not name MISS (rc=$other_judge_rc)"
 	cat "$TMP/verdictid1-other-judge.out"
+fi
+step "VERDICTID1 truncated record is a miss"
+main_record=$(XDG_CONFIG_HOME="$TMP/verdictid1-config" XDG_STATE_HOME="$TMP/verdictid1-state" HOME="$TMP/verdictid1-home" \
+	python3 "$KITROOT_DIR/scripts/full-suite-verdict-store.py" path \
+	--repo "$shared_a" --tree "$shared_tree" --role main --judge-root "$KITROOT_DIR")
+path_rc=$?
+if [ "$path_rc" -eq 0 ] && [ -f "$main_record" ]; then
+	printf '{"version":' >"$main_record"
+fi
+XDG_CONFIG_HOME="$TMP/verdictid1-config" XDG_STATE_HOME="$TMP/verdictid1-state" HOME="$TMP/verdictid1-home" \
+	python3 "$KITROOT_DIR/scripts/full-suite-verdict-store.py" require-pass \
+	--repo "$shared_a" --tree "$shared_tree" --role main --judge-root "$KITROOT_DIR" --suite-root "$shared_archive" \
+	>"$TMP/verdictid1-truncated-record.out" 2>&1
+truncated_rc=$?
+if [ "$path_rc" -eq 0 ] && [ "$truncated_rc" -ne 0 ] && grep -qx 'MISS' "$TMP/verdictid1-truncated-record.out"; then
+	ok "VERDICTID1: a truncated record is a MISS"
+else
+	not_ok "VERDICTID1: truncated record was not a MISS (path_rc=$path_rc require_pass_rc=$truncated_rc)"
+	cat "$TMP/verdictid1-truncated-record.out"
 fi
 
 printf 'full-suite-complement: %s pass %s fail\n' "$pass" "$fail"

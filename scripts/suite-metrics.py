@@ -62,11 +62,25 @@ def runtime_identity() -> str:
     bun_version = bun.stdout.decode("utf-8", errors="strict").strip()
     if not bun_version:
         raise ValueError("bun version is empty")
+    git_exec = run(["git", "--exec-path"], deadline_s=10)
+    if git_exec.rc != 0 or git_exec.timed_out or git_exec.truncated:
+        raise ValueError("git exec path is unavailable or incomplete")
+    git_exec_path = git_exec.stdout.decode("utf-8", errors="strict").strip()
+    if not git_exec_path:
+        raise ValueError("git exec path is empty")
+    search_path = os.environ.get("PATH", "")
+    path_parts = search_path.split(os.pathsep)
+    # Git prepends its exec directory to PATH for hooks. pre-push-gate clears
+    # GIT_* before judging, so discard only that exact leading component.
+    if path_parts and path_parts[0] and os.path.realpath(path_parts[0]) == os.path.realpath(git_exec_path):
+        path_parts.pop(0)
+        search_path = os.pathsep.join(path_parts)
     environment = {
         "FULL_SUITE_RUNTIME_ID": os.environ.get("FULL_SUITE_RUNTIME_ID", ""),
         "FULL_SUITE_TIMEOUT_SECS": os.environ.get("FULL_SUITE_TIMEOUT_SECS", "1800"),
+        "GIT_EXEC_PATH": git_exec_path,
         "LANG": os.environ.get("LANG", "C"),
-        "PATH": os.environ.get("PATH", ""),
+        "PATH": search_path,
     }
     environment_bytes = json.dumps(environment, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":")).encode("utf-8")

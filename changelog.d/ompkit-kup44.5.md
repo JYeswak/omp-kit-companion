@@ -1,1 +1,1 @@
-`omp-kit full-suite verdict list|get` inspects the shared, repository-scoped verdict store, including each record's tree, judge role/check/runtime identity, verdict and integrity state.
+`omp-kit full-suite verdict list|get` inspects the shared, repository-scoped verdict store, including each record's tree, judge role/check/runtime identity, verdict and integrity state. The runtime fingerprint also strips Git's exact leading exec-path entry from hook `PATH`, so a land-created PASS is reusable by pre-push; other `PATH` changes remain identity-bound.

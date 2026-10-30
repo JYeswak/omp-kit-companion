@@ -89,6 +89,7 @@ type CommandOptions = {
 	herdrAgent?: string;
 	expectedAmProject?: string;
 	subcommand?: string;
+	timeoutMs?: number;
 };
 
 function commandEnvironment(cwd: string, holds: unknown, options: CommandOptions): NodeJS.ProcessEnv {
@@ -123,14 +124,19 @@ function commandEnvironment(cwd: string, holds: unknown, options: CommandOptions
 
 function command(cwd: string, args: string[], holds: unknown, options: CommandOptions) {
 	const env = commandEnvironment(cwd, holds, options);
-	const run = spawnSync("bun", [cliPath, options.subcommand ?? "land", ...args, "--json"], { cwd, env, encoding: "utf8", timeout: 30_000 });
+	const result = kitlibRunSync(["bun", cliPath, options.subcommand ?? "land", ...args, "--json"], {
+		cwd, env: stringEnvironment(env), deadline_s: (options.timeoutMs ?? 30_000) / 1000,
+	});
+	const decoder = new TextDecoder();
+	const stdout = decoder.decode(result.stdout);
+	const stderr = decoder.decode(result.stderr);
 	let body: Record<string, unknown>;
 	try {
-		body = JSON.parse(run.stdout);
+		body = JSON.parse(stdout);
 	} catch {
-		throw new Error(`land command emitted invalid JSON (status ${run.status}): ${run.stdout}\n${run.stderr}`);
+		throw new Error(`land command emitted invalid JSON (status ${result.rc}): ${stdout}\n${stderr}`);
 	}
-	return { status: run.status ?? 1, body };
+	return { status: result.rc === null || result.rc < 0 ? 1 : result.rc, body };
 }
 
 // GATEFLAKE1 (ompkit-ll72v): a fixture git spawn's deadline is a property of the machine, not of the
@@ -229,9 +235,9 @@ try {
 	mkdirSync(join(templateWork, "scripts"), { recursive: true });
 	mkdirSync(join(templateWork, ".github"), { recursive: true });
 	// The JUDGING_FILES closure of scripts/suite-metrics.py: a fixture missing one cannot run its gate.
-	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh",
+	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh", "scripts/pre-push-gate.sh", "scripts/kitlib-tmp.sh",
 		"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
-		"scripts/pysafe.py", "scripts/test-budget.ts", ".github/test-budget.json"];
+		"scripts/pysafe.py", "scripts/test-budget.ts", "scripts/regexploit-gate.py", ".github/test-budget.json"];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
 	for (const path of gateFiles)
 		writeFileSync(join(templateWork, path), readFileSync(join(repoRoot, path)), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
@@ -305,8 +311,36 @@ function registerPushCheck(work: string, body: string): string {
 	return createHash("sha256").update(body).digest("hex");
 }
 
-test("checks the exact candidate with the base-registered push check before publishing", async () => {
+test("checks the exact candidate with the base-registered push check before publishing", { timeout: 120_000 }, async () => {
 	const { work, fakeBin } = fixture();
+	const prePushFixtureFiles = [
+		".github/workflows/release-train.yml", ".github/workflows/release.yml",
+		"README.md",
+		"scripts/ac_phase.py", "scripts/agent-trailer-hook.sh", "scripts/bead_lint.py",
+		"scripts/br-create-guard.py", "scripts/br_create_guard_core.py", "scripts/br-shim.sh",
+		"scripts/br-update-lint.py", "scripts/check-pushed-beads.sh",
+		"scripts/check-staged-br-init.sh", "scripts/close-guard.sh", "scripts/commit-msg-bead.sh",
+		"scripts/doc-drift-check.sh", "scripts/derived-check.sh", "scripts/dispatch-check.sh",
+		"scripts/install-agent-trailer-hook.sh", "scripts/kitlib_lock.py", "scripts/kitlib_run.py",
+		"scripts/kitlib_tmp.py", "scripts/kitlib_ratchet_core.py", "scripts/publishability-check.sh",
+		"scripts/public-files-check.sh", "scripts/pysafe_check.py", "scripts/release-notes.sh",
+		"scripts/release-notes.ts", "scripts/release-train.sh", "scripts/br_init_check.py",
+		"scripts/stamp-release-line.sh",
+		"src/actuator-admission.ts",
+		"tests/cli/actuator-admission.test.ts", "tests/cli/agent-trailer.test.sh",
+		"tests/cli/br-shim.test.sh", "tests/cli/check-pushed-beads.test.sh",
+		"tests/cli/check-staged-br-init.test.sh", "tests/cli/commit-msg-bead.test.sh",
+		"tests/cli/derived-check.test.sh", "tests/cli/dispatch-check.test.sh",
+		"tests/cli/doc-drift.test.sh", "tests/cli/git-env-fixtures.sh",
+		"tests/cli/lib/br-create-guard-tests.sh", "tests/cli/public-files.test.sh",
+		"tests/cli/publishability.test.sh", "tests/cli/release-train.test.sh",
+	];
+	mkdirSync(join(work, ".github", "workflows"), { recursive: true });
+	mkdirSync(join(work, "tests", "cli", "lib"), { recursive: true });
+	mkdirSync(join(work, "src"), { recursive: true });
+	for (const path of prePushFixtureFiles) cpSync(join(repoRoot, path), join(work, path));
+	writeFileSync(join(work, "scripts", "fresh-gate.sh"), "#!/bin/sh\nif [ \"${1-}\" = \"--test-workers\" ]; then printf '1\\n'; fi\nexit 0\n", { mode: 0o755 });
+	writeFileSync(join(fakeBin, "br"), "#!/bin/sh\nfor arg do\n\t[ \"$arg\" = \"ompkit-kup44.5\" ] && exit 0\ndone\nexit 3\n", { mode: 0o755 });
 	mkdirSync(join(work, ".omp"), { recursive: true });
 	const checkBody = [
 		"#!/bin/bash",
@@ -316,7 +350,7 @@ test("checks the exact candidate with the base-registered push check before publ
 	].join("\n") + "\n";
 	const checkPath = join(work, ".omp", "push-check");
 	writeFileSync(checkPath, checkBody, { mode: 0o755 });
-	git(work, ["add", "--", ".omp/push-check"]);
+	git(work, ["add", "-A"]);
 	git(work, ["commit", "-m", "register push check [test]"]);
 	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
 	const base = remoteHead(work);
@@ -327,6 +361,8 @@ test("checks the exact candidate with the base-registered push check before publ
 	chmodSync(join(work, ".git", "hooks", "post-commit"), 0o755);
 	const checkShaFile = join(scratch, `checked-sha-${fixtureNumber}.txt`);
 	const checkContentFile = join(scratch, `checked-content-${fixtureNumber}.txt`);
+	const prePushOutput = join(scratch, `land-pre-push-output-${fixtureNumber}.txt`);
+	writeFileSync(prePushOutput, "");
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	const identity = await kitlibRun(["python3", join(work, "scripts", "suite-metrics.py"), "identity", "--root", work, "--scope", "full"], {
 		cwd: work, deadline_s: 30,
@@ -334,16 +370,21 @@ test("checks the exact candidate with the base-registered push check before publ
 	expect(identity.rc, new TextDecoder().decode(identity.stderr)).toBe(0);
 	expect(identity.timed_out).toBe(false);
 	const expectedChecks = new TextDecoder().decode(identity.stdout).trim();
-	writeFileSync(join(work, "scripts", "fresh-gate.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-	const run = command(work, landArgs("owned.txt"), hold, {
+	const prePushHook = join(work, ".git", "hooks", "pre-push");
+	writeFileSync(prePushHook, "#!/bin/sh\nexec sh scripts/pre-push-gate.sh \"$@\" >\"$OMP_KIT_TEST_PRE_PUSH_OUTPUT\" 2>&1\n", { mode: 0o755 });
+	const landCommandArgs = landArgs("owned.txt");
+	landCommandArgs[landCommandArgs.indexOf("--message") + 1] = "feat(land): publish reserved fixture ompkit-kup44.5 [test]";
+	const run = command(work, landCommandArgs, hold, {
+		timeoutMs: 120_000,
 		amDir: fakeBin,
 		gitEnv: {
 			OMP_LAND_CHECK_SHA_FILE: checkShaFile,
 			OMP_LAND_REPOSITORY: work,
 			OMP_LAND_CHECK_CONTENT_FILE: checkContentFile,
+			OMP_KIT_TEST_PRE_PUSH_OUTPUT: prePushOutput,
 		},
 	});
-	expect(run.status).toBe(0);
+	expect(run.status, `${JSON.stringify(run.body)}\n${readFileSync(prePushOutput, "utf8")}`).toBe(0);
 	const data = run.body.data as {
 		overall: string;
 		commit: string;
@@ -410,6 +451,9 @@ test("checks the exact candidate with the base-registered push check before publ
 	} finally {
 		judgeArchive.cleanup();
 	}
+	const prePushGateOutput = readFileSync(prePushOutput, "utf8");
+	expect(prePushGateOutput).toContain(`FULL-SUITE: VERDICT REUSED PASS tree=${tree} role=base`);
+	expect(prePushGateOutput).not.toContain("running the complete suite");
 	expect(remoteHead(work)).toBe(data.commit);
 });
 test("a v2 base missing a transitive judging dependency cannot publish using the worktree copy", () => {
