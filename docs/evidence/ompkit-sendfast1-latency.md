@@ -182,6 +182,41 @@ Not counted:
   - The suppression rule itself is unchanged: `bun test tests/cli/send.test.ts -t "B5-7|AM58562-4|INV03|F5:"` gives
     8 pass.
 
+### SilverCondor's 265 MB journal: the 19.49 s steered send (profiled read-only, 02:3xZ)
+
+Main sent from source HEAD to `tern:2572436302200833`, SilverCondor's busy goal-mode seat (muse profile, journal about
+265 MB). The send returned `OK` PROVEN_STEERED, but the whole call took 19.49 s.
+
+I profiled it read-only: a scratch harness replayed every read phase of the send against the live seat and file.
+- It used `tern inspect`, `tern process`, `ps`, `am resolve-pane` and file reads only. Paste, keys and ctl were
+  refused in the harness, and nothing was written to the seat or its journal.
+- With the steer opt-in the seat observed BUSY and was IDENTIFIED. The journal parsed KNOWN with leaf `7c2b98bb`.
+
+| Phase | Time |
+|---|---|
+| observe (two inspects, two process reads, two `ps`, two 8 MiB tail reads) | 105 ms |
+| identify (observes again, plus `am resolve-pane`) | 126 ms |
+| eligibility read + parse (8 MiB tail; includes the `activeLeaf` walk) | 5 + 12 ms |
+| pre-paste re-read and proof check | 5 ms |
+| proof read, per 50 ms tick (stat, ranged tail read, `proveTernEntry`) | about 5 ms |
+
+The kit's own read path on the 265 MB journal is therefore about 0.3 s.
+
+**Where the 19 s went.** Main's steering USER entry is marker `kit-send-cffe75742f80`. Its text names
+`ompkit-kup44.4`, and it is the only kit-send marker in the journal's last 32 MB. It was journaled at
+02:31:38.566Z. Just before it in the journal:
+- −60.28 s: an assistant `toolUse` that started a `bash` call;
+- −0.26 s: that call's `toolResult`;
+- 0.00 s: Main's entry, `steering: true`.
+
+The paste landed about 41 s into a 60 s tool call. OMP holds a queued steer until the current tool call ends and
+only then journals it. The kit proved the entry on its next 50 ms tick and returned.
+
+**Conclusion.** On a busy seat, the journal proof's latency equals the time left in the seat's current tool call.
+This is OMP's time, not the kit's, so no kit change was made. The throwaway seats' busy numbers above were fast because
+their tool calls were short. How `fast` should read for a seat in a long tool call is a question for Joshua. The
+bead's budget and the keys above are unchanged.
+
 ## Commands and results
 
 - `nice -n 10 bun test tests/cli/send.test.ts -t SENDFAST1`: 6 pass, 0 fail.
