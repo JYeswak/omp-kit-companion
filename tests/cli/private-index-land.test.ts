@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { availableParallelism, loadavg } from "node:os";
 import { spawnSync } from "node:child_process";
-import { run as kitlibRun } from "../../src/kitlib/run.ts";
+import { run as kitlibRun, runSync as kitlibRunSync } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -131,12 +132,45 @@ function command(cwd: string, args: string[], holds: unknown, options: CommandOp
 	return { status: run.status ?? 1, body };
 }
 
-function git(cwd: string, args: string[]): string {
-	const run = spawnSync("git", ["-c", "user.name=LAND1 test", "-c", "user.email=land1@example.invalid", ...args], {
-		cwd, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, timeout: 10_000,
-	});
-	if (run.status !== 0) throw new Error(`git ${args.join(" ")} failed (${run.status}): ${String(run.stderr)}`);
-	return String(run.stdout);
+// GATEFLAKE1 (ompkit-ll72v): a fixture git spawn's deadline is a property of the machine, not of the
+// program, so it comes from one place: a 10 s quiet-machine floor scaled by min(4, loadavg1/ncpu*4)
+// (never below 1). A spawn that runs out of it is reported as TIMEOUT_UNDER_LOAD with the load, the
+// core count and the worker count on one line, never as a bare `git ... failed (null)`.
+// OMP_KIT_TEST_SPAWN_SLEEP=<s> is a test-only planted load, off by default: each template git spawn
+// after the bare init (the setup every test in this file shares)
+// first sleeps <s> quiet-machine seconds, stretched by the same load factor as the deadline, so a
+// planted 12 s spawn always exceeds the 10 s floor (TIMEOUT_UNDER_LOAD) and a planted 1 s spawn
+// always fits, whatever the machine's load when the planted run happens.
+const SPAWN_FLOOR_S = 10;
+const plantedSpawnSleepS = Number(process.env.OMP_KIT_TEST_SPAWN_SLEEP ?? "0");
+if (!Number.isFinite(plantedSpawnSleepS) || plantedSpawnSleepS < 0)
+	throw new Error(`OMP_KIT_TEST_SPAWN_SLEEP must be a non-negative number of seconds, got ${process.env.OMP_KIT_TEST_SPAWN_SLEEP}`);
+
+function spawnLoad(): { load1: number; ncpu: number; factor: number } {
+	const load1 = loadavg()[0] ?? 0;
+	const ncpu = availableParallelism();
+	return { load1, ncpu, factor: Math.max(1, Math.min(4, (load1 / ncpu) * 4)) };
+}
+
+function git(cwd: string, args: string[], planted = false): string {
+	const { load1, ncpu, factor } = spawnLoad();
+	const deadlineS = SPAWN_FLOOR_S * factor;
+	const gitArgv = ["git", "-c", "user.name=LAND1 test", "-c", "user.email=land1@example.invalid", ...args];
+	// runSync SIGKILLs only sh at the deadline, so the planted sleep writes to no pipe of ours: an
+	// orphaned sleep holding stdout would otherwise keep the call open past its deadline.
+	const argv = planted && plantedSpawnSleepS > 0
+		? ["sh", "-c", 'sleep "$0" </dev/null >/dev/null 2>&1 & wait "$!"; exec "$@"', (plantedSpawnSleepS * factor).toFixed(3), ...gitArgv]
+		: gitArgv;
+	const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
+	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] ??= value;
+	const run = kitlibRunSync(argv, { cwd, env, deadline_s: deadlineS });
+	if (run.timed_out)
+		throw new Error(`TIMEOUT_UNDER_LOAD git ${args.join(" ")} killed after ${Math.round(run.elapsed_s * 1000)} ms at its ${Math.round(deadlineS * 1000)} ms deadline `
+			+ `loadavg=${load1.toFixed(2)} ncpu=${ncpu} workers=${process.env.OMP_KIT_TEST_WORKERS ?? "unreported"} `
+			+ `planted_sleep_s=${plantedSpawnSleepS}`);
+	const decode = new TextDecoder();
+	if (run.rc !== 0) throw new Error(`git ${args.join(" ")} failed (${run.rc}): ${decode.decode(run.stderr)}`);
+	return decode.decode(run.stdout);
 }
 function remoteHead(cwd: string): string {
 	const output = git(cwd, ["ls-remote", "--refs", "origin", "refs/heads/main"]).trim();
@@ -145,32 +179,55 @@ function remoteHead(cwd: string): string {
 	return sha;
 }
 
-function fixture(): Fixture {
-	const id = fixtureNumber++;
-	const bare = join(scratch, `origin-${id}.git`);
-	const work = join(scratch, `work-${id}`);
-	git(scratch, ["init", "--bare", "--initial-branch=main", bare]);
-	git(scratch, ["clone", bare, work]);
-	git(work, ["config", "user.name", "LAND1 test"]);
-	git(work, ["config", "user.email", "land1@example.invalid"]);
-	mkdirSync(join(work, "var", "agent-tmp"), { recursive: true });
-	writeFileSync(join(work, "owned.txt"), "base owned\n");
-	writeFileSync(join(work, "peer.txt"), "peer baseline\n");
-	writeFileSync(join(work, "untouched.txt"), "untouched baseline\n");
-	mkdirSync(join(work, "tests", "cli"), { recursive: true });
-	writeFileSync(join(work, "suite-contract.txt"), "PASS\n");
-	writeFileSync(join(work, "tests", "cli", "land-suite.test.sh"), "#!/bin/sh\nset -eu\nif grep -Fxq SLOW suite-contract.txt; then sleep 10; fi\ngrep -Fxq PASS suite-contract.txt\n", { mode: 0o755 });
-	mkdirSync(join(work, "scripts"), { recursive: true });
-	mkdirSync(join(work, ".github"), { recursive: true });
+// GATEFLAKE1 (ompkit-ll72v): every fixture is a directory copy of one Git-built template (its own bare
+// origin, clone, base commit and upstream), so a fixture no longer costs seven serial git spawns.
+// The 61 fixture() calls were 427 spawns; the template costs 5 once, built at module load so its
+// spawns run under their own deadline and not inside one test's timeout. Each copy is a distinct
+// real repository: its origin URL is rewritten to its own bare copy, the base commit is pushed, and
+// the copied index needs a stat refresh (more work for land, not less).
+const templateRoot = join(scratch, "template");
+const templateBare = join(templateRoot, "origin.git");
+const templateWork = join(templateRoot, "work");
+// A failed build (a TIMEOUT_UNDER_LOAD included) fails module load, where bun runs no afterAll.
+try {
+	mkdirSync(templateRoot);
+	git(templateRoot, ["init", "--bare", "--initial-branch=main", templateBare]);
+	git(templateRoot, ["clone", templateBare, templateWork], true);
+	writeFileSync(join(templateWork, ".git", "config"),
+		readFileSync(join(templateWork, ".git", "config"), "utf8") + "[user]\n\tname = LAND1 test\n\temail = land1@example.invalid\n");
+	mkdirSync(join(templateWork, "var", "agent-tmp"), { recursive: true });
+	writeFileSync(join(templateWork, "owned.txt"), "base owned\n");
+	writeFileSync(join(templateWork, "peer.txt"), "peer baseline\n");
+	writeFileSync(join(templateWork, "untouched.txt"), "untouched baseline\n");
+	mkdirSync(join(templateWork, "tests", "cli"), { recursive: true });
+	writeFileSync(join(templateWork, "suite-contract.txt"), "PASS\n");
+	writeFileSync(join(templateWork, "tests", "cli", "land-suite.test.sh"), "#!/bin/sh\nset -eu\nif grep -Fxq SLOW suite-contract.txt; then sleep 10; fi\ngrep -Fxq PASS suite-contract.txt\n", { mode: 0o755 });
+	mkdirSync(join(templateWork, "scripts"), { recursive: true });
+	mkdirSync(join(templateWork, ".github"), { recursive: true });
 	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh",
 		"scripts/suite-metrics.py", "scripts/kitlib_run.py", "scripts/pysafe.py",
 		"scripts/test-budget.ts", ".github/test-budget.json"];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
 	for (const path of gateFiles)
-		writeFileSync(join(work, path), readFileSync(join(repoRoot, path)), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
-	git(work, ["add", "-A"]);
-	git(work, ["commit", "-m", "base [test]"]);
-	git(work, ["push", "-u", "origin", "HEAD:refs/heads/main"]);
+		writeFileSync(join(templateWork, path), readFileSync(join(repoRoot, path)), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
+	git(templateWork, ["add", "-A"], true);
+	git(templateWork, ["commit", "-m", "base [test]"], true);
+	git(templateWork, ["push", "-u", "origin", "HEAD:refs/heads/main"], true);
+} catch (error) {
+	ownedScratch.cleanup();
+	throw error;
+}
+
+function fixture(): Fixture {
+	const id = fixtureNumber++;
+	const bare = join(scratch, `origin-${id}.git`);
+	const work = join(scratch, `work-${id}`);
+	cpSync(templateBare, bare, { recursive: true });
+	cpSync(templateWork, work, { recursive: true });
+	const configPath = join(work, ".git", "config");
+	const config = readFileSync(configPath, "utf8");
+	if (!config.includes(templateBare)) throw new Error(`template config does not name its origin ${templateBare}`);
+	writeFileSync(configPath, config.replaceAll(templateBare, bare));
 	const fakeBin = join(scratch, `fake-am-${id}`);
 	mkdirSync(fakeBin);
 	const fakeAm = join(fakeBin, "am");
