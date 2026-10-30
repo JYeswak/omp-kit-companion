@@ -23,8 +23,8 @@
  * prose checkboxes are not boxes and keep their original meaning). A tag that is neither a
  * single letter nor a known phase makes the item unsupported: it is named and fails closed,
  * never silently dropped. Letter `v` marks a verification-note box that is never replayed.
- * This grammar is defined only here: scripts/box-lint.ts runs parseBoxes, commandOf, expectedOf and
- * unreplayableReason for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
+ * This grammar is defined only here: scripts/box-lint.ts runs parseBoxes and unreplayableReason
+ * for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  */
 import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -101,28 +101,38 @@ export function commandOf(body: string): string | null {
 	return CMD.exec(body)?.[1] ?? null;
 }
 
+/** Why verify cannot replay a box (REPLAYABLE1); box-lint refuses and reports by the same names. */
+export type UnreplayableReason = "unsupported-phase" | "no-command" | "arrow-before-command" | "command-not-followed-by-expected";
 /**
  * Why this verb cannot replay one box, or null when it can (REPLAYABLE1 ompkit-fp72.135.3.71).
  * The one judgment verifyBead refuses ACCEPTANCE_NOT_REPLAYABLE by and scripts/box-lint.ts
  * (bead_lint's create and update admission) refuses new boxes by. `[v]` boxes are the caller's to skip.
  */
-export function unreplayableReason(box: Box): "unsupported-phase" | "no-command" | "command-not-followed-by-expected" | null {
+export function unreplayableReason(box: Box): UnreplayableReason | null {
 	if (box.phase !== null && KNOWN_PHASES[box.phase] !== true) return "unsupported-phase";
 	const span = CMD.exec(box.body);
 	if (span === null) return "no-command";
+	// An arrow in the obligation text before the command reads as the box's expected outcome to a person
+	// and to every earlier copy of this grammar; refuse it so the only arrow is the one after the command.
+	// The obligation may still name an arrow quoted as the exact token '->'.
+	if (box.body.slice(0, span.index).split("'->'").join("").includes("->")) return "arrow-before-command";
 	// The first backticked span is what runs, so it must be the command the box judges: `cmd` -> <expected> or
 	// `cmd` expect: <expected>, with a non-empty expected outcome. Quoted obligation text
 	// (`br update <id> --status in_review`) or a bare `cmd` -> would otherwise run unjudged.
-	const after = box.body.slice(span.index + span[0].length).trimStart();
-	return (after.startsWith("->") || /^expect(?:ed)?:/i.test(after)) && expectedOf(box.body) !== null ? null : "command-not-followed-by-expected";
+	return expectedOf(box.body) !== null ? null : "command-not-followed-by-expected";
 }
 
-/** The expected-outcome clause of a box: text after `->` or after `expect:`; null when the box names none. */
+/**
+ * The expected-outcome clause of a box: the text right after its first backticked span (the command
+ * commandOf returns), introduced by `->` or `expect:`; null when that span is not followed by one.
+ * An arrow anywhere else in the box is obligation prose, never the expected outcome.
+ */
 export function expectedOf(body: string): string | null {
-	const arrow = /->\s*([^;.]+)/.exec(body);
-	if (arrow) return arrow[1]!.trim();
-	const exp = /\bexpect(?:ed)?:\s*([^;.]+)/i.exec(body);
-	return exp ? exp[1]!.trim() : null;
+	const span = CMD.exec(body);
+	if (span === null) return null;
+	const m = /^\s*(?:->|expect(?:ed)?:)\s*([^;.]+)/i.exec(body.slice(span.index + span[0].length));
+	const expected = m?.[1]!.trim() ?? "";
+	return expected === "" ? null : expected;
 }
 
 /** Judge output against the box's named expectation (unreplayableReason guarantees one). */
@@ -169,7 +179,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const replayable = boxes.filter(b => b.letter !== "v");
 	const bad = replayable.filter(b => unreplayableReason(b) !== null);
 	if (replayable.length === 0 || bad.length > 0) {
-		log.push(`not replayable: ${bad.length ? bad.map(b => { const why = unreplayableReason(b); return why === "unsupported-phase" ? `${tag(b)} unsupported phase [${b.phase}]` : why === "no-command" ? `${tag(b)} names no command` : `${tag(b)} first backticked span ${JSON.stringify(commandOf(b.body))} is not followed by -> <expected> or expect: <expected>`; }).join("; ") : "no boxes"}`);
+		log.push(`not replayable: ${bad.length ? bad.map(b => { const why = unreplayableReason(b); return why === "unsupported-phase" ? `${tag(b)} unsupported phase [${b.phase}]` : why === "no-command" ? `${tag(b)} names no command` : why === "arrow-before-command" ? `${tag(b)} has -> before its first backticked span ${JSON.stringify(commandOf(b.body))}` : `${tag(b)} first backticked span ${JSON.stringify(commandOf(b.body))} is not followed by -> <expected> or expect: <expected>`; }).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
 	// The owned replay fixture uses an explicit database path under its per-run

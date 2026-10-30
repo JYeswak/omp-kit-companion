@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { LIVE_READBACK_LABEL, liveReadback, liveReadbackAll, parseBoxes, verifyBead } from "../../src/verify.ts";
+import { LIVE_READBACK_LABEL, expectedOf, liveReadback, liveReadbackAll, parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
@@ -133,6 +133,24 @@ test("planted: a box whose first backticked span is not followed by -> or expect
 	expect(res.replays).toEqual([]);
 	expect(res.log).toContain("[a] first backticked span \"br update <id> --status in_review\" is not followed by -> <expected> or expect: <expected>");
 	expect(br.acts()).toEqual([]);
+});
+
+test("planted: a box with -> in its obligation text before the command is ACCEPTANCE_NOT_REPLAYABLE and never runs (arrow-before-command)", async () => {
+	const { dir, sha } = await repo("arrowfirst");
+	const br = fakeBr(dir, inReview("- [ ] [a] [landed] status open -> in_review is recorded `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
+	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
+	expect(res.replays).toEqual([]);
+	expect(res.log).toContain("[a] has -> before its first backticked span \"sh scripts/t.sh\"");
+	expect(br.acts()).toEqual([]);
+});
+
+test("expectedOf reads only the outcome right after the first backticked span, never an earlier or later arrow", () => {
+	expect(expectedOf("status open -> in_review `sh scripts/t.sh` -> 16 pass 0 fail")).toBe("16 pass 0 fail");
+	expect(expectedOf("Replay `sh scripts/t.sh` expect: prints ok; then open -> closed")).toBe("prints ok");
+	expect(expectedOf("`sh scripts/t.sh` runs; open -> closed")).toBeNull();
+	expect(expectedOf("`sh scripts/t.sh` ->; planted")).toBeNull();
+	expect(expectedOf("open -> closed, no command")).toBeNull();
 });
 
 test("the verify handler is registered at module load (planted: a registration left inside another function is HANDLER_UNAVAILABLE)", async () => {

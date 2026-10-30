@@ -3,8 +3,8 @@
  * box-lint.ts — acceptance replayability for bead admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  *
  * bead_lint.py (the create and update lint) runs this entry instead of keeping a second copy of the
- * box grammar: every judgment here is src/verify.ts's own parseBoxes, commandOf, expectedOf and
- * unreplayableReason, the functions `omp-kit verify` replays and refuses ACCEPTANCE_NOT_REPLAYABLE by.
+ * box grammar: every judgment here is src/verify.ts's own parseBoxes and unreplayableReason, the
+ * functions `omp-kit verify` replays and refuses ACCEPTANCE_NOT_REPLAYABLE by.
  * The release ships this file bundled (scripts/package-release.ts), run by the release binary with
  * BUN_BE_BUN=1, so the installed lint and the installed verb carry the same code.
  *
@@ -15,11 +15,10 @@
  * legacy bead is reported and never refused.
  * Exit 0 with the verdict; exit 2 on unreadable input.
  */
-import { parseBoxes, unreplayableReason, type Box } from "../src/verify.ts";
+import { parseBoxes, unreplayableReason, type Box, type UnreplayableReason } from "../src/verify.ts";
 
 interface Item { id: string; acceptance: string; baseline: string | null }
-type Reason = "unsupported-phase" | "no-command" | "command-not-followed-by-expected";
-interface Finding { index: number; letter: string | null; phase: string | null; reason: Reason; line: string; detail: string }
+interface Finding { index: number; letter: string | null; phase: string | null; reason: UnreplayableReason; line: string; detail: string }
 
 const PHASES = ["build", "landed", "live", "after"];
 /** A box's identity across a write: its tags and body, not its checked state or position. */
@@ -32,12 +31,14 @@ function correctedShape(box: Box): string {
 	return `- [ ] [${letter}] [${phase}] <what it proves> \`<one bounded command>\` -> rc 0 (or: N pass 0 fail, prints <text>)`;
 }
 
-function finding(box: Box, reason: Reason): Finding {
+function finding(box: Box, reason: UnreplayableReason): Finding {
 	const why = reason === "unsupported-phase"
 		? "has a tag run that is not one scope letter a-z then one phase (build, landed, live, after)"
 		: reason === "no-command"
 			? "names no backticked command"
-			: "has a first backticked span not followed by -> <expected> or expect: <expected>, so verify would run that text unjudged; quote an obligation's own backticks with single quotes, or put Replay `<cmd>` -> <expected>; first";
+			: reason === "arrow-before-command"
+				? "has -> before its first backticked span, so the obligation's arrow reads as the expected outcome; quote the obligation's arrow ('->'), or put Replay `<cmd>` -> <expected>; first"
+				: "has a first backticked span not followed by -> <expected> or expect: <expected>, so verify would run that text unjudged; quote an obligation's own backticks with single quotes, or put Replay `<cmd>` -> <expected>; first";
 	return { index: box.index, letter: box.letter, phase: box.phase, reason, line: box.line, detail: `box ${box.index} ${JSON.stringify(box.line)} ${why}; corrected shape: ${correctedShape(box)}` };
 }
 

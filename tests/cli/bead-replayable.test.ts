@@ -81,6 +81,21 @@ test("REPLAYABLE1 planted: a box whose first backticked span is quoted obligatio
 	expect(await create("- [ ] [a] [build] the widget builds `true` expect: rc 0; planted negative refused")).toEqual({ rc: 0, err: "" });
 });
 
+const ARROW_BEFORE = [
+	"- [ ] [a] [build] status open -> in_review is recorded `true` -> rc 0",
+	"- [ ] [a] [landed] the open->closed move lands `sh scripts/ok.sh` -> prints ok; planted negative refused",
+];
+
+test("REPLAYABLE1 planted: a box with -> in its obligation text before the first backticked span is refused with the fix; the quoted-arrow and Replay-first shapes are admitted", async () => {
+	for (const box of ARROW_BEFORE) {
+		const res = await create(box);
+		expect({ box, rc: res.rc }).toEqual({ box, rc: 4 });
+		expect(res.err).toContain(`box 1 ${JSON.stringify(box)} has -> before its first backticked span, so the obligation's arrow reads as the expected outcome; quote the obligation's arrow ('->'), or put Replay \`<cmd>\` -> <expected>; first`);
+	}
+	expect(await create("- [ ] [a] [build] status open '->' in_review is recorded `true` -> rc 0; planted negative refused")).toEqual({ rc: 0, err: "" });
+	expect(await create("- [ ] [a] [build] Replay `true` -> rc 0; status open -> in_review is recorded; planted negative refused")).toEqual({ rc: 0, err: "" });
+});
+
 test("REPLAYABLE1 legacy: an update that leaves a non-replayable box unchanged is admitted and reports it; a new commandless box is refused", async () => {
 	expect(await update("--title", "Legacy fixture, renamed")).toEqual({ rc: 0, err: "" });
 	const kept = await update("--acceptance-criteria", `${LEGACY_BOX.replace("- [ ]", "- [x]")}\n- [ ] [a] [landed] the new path runs \`true\` -> rc 0`);
@@ -166,6 +181,9 @@ const PARITY: string[] = [
 	"- [ ] [a] [build] exit-only `sh scripts/ok.sh`; planted negative refused",
 	...QUOTED_OBLIGATIONS,
 	"- [ ] [a] [build] Replay `sh scripts/ok.sh` -> prints ok; obligation 'br update <id> --status in_review'",
+	...ARROW_BEFORE,
+	"- [ ] [a] [build] status open '->' in_review `sh scripts/ok.sh` -> prints ok",
+	"- [ ] [a] [build] Replay `sh scripts/ok.sh` -> prints ok; status open -> in_review",
 ];
 
 /** Fixtures on which a judge disagrees with what verify does. */
@@ -185,6 +203,7 @@ test("REPLAYABLE1 parity: on every fixture box the create lint refuses exactly w
 	// Planted second copy of the grammar (letter AND phase required, as the pre-REPLAYABLE1 docs read it):
 	// verify replays the letter-only and phase-only boxes this judge refuses, and the parity check names them.
 	const secondCopy = (acceptance: string) => !acceptance.split("\n").every(line => line.startsWith("- [ ] [v]") || /^- \[[ xX]\] \[[a-z]\] \[(?:build|landed|live|after)\] [^`]*`[^`]+`/.test(line));
-	// It also admits every box whose first span is not the judged command (exit-only and quoted obligations).
-	expect(await divergences(secondCopy, repo)).toEqual([PARITY[5]!, PARITY[6]!, PARITY[10]!, ...QUOTED_OBLIGATIONS]);
+	// It also admits every box whose first span is not the judged command (exit-only and quoted obligations)
+	// and every box with an obligation arrow before its command.
+	expect(await divergences(secondCopy, repo)).toEqual([PARITY[5]!, PARITY[6]!, PARITY[10]!, ...QUOTED_OBLIGATIONS, ...ARROW_BEFORE]);
 }, 120_000);
