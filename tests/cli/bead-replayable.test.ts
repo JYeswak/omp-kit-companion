@@ -68,13 +68,14 @@ const QUOTED_OBLIGATIONS = [
 	"- [ ] [a] [build] a fresh `scratch new` dir is used; replay `true` -> rc 0",
 	"- [ ] [a] [build] `brew list --versions` shows the pin; `true` -> rc 0",
 	"- [ ] [a] [build] the worker must `ask` before acting `true` -> rc 0",
+	"- [ ] [a] [build] an arrow with no expected outcome `true` ->; planted negative refused",
 ];
 
 test("REPLAYABLE1 planted: a box whose first backticked span is quoted obligation text (not followed by -> or expect:) is refused with the fix; the correct shape is admitted", async () => {
 	for (const box of QUOTED_OBLIGATIONS) {
 		const res = await create(box);
 		expect({ box, rc: res.rc }).toEqual({ box, rc: 4 });
-		expect(res.err).toContain(`box 1 ${JSON.stringify(box)} has a first backticked span not followed by -> or expect:, so verify would run that text; quote an obligation's own backticks with single quotes, or put Replay \`<cmd>\` -> <expected>; first`);
+		expect(res.err).toContain(`box 1 ${JSON.stringify(box)} has a first backticked span not followed by -> <expected> or expect: <expected>, so verify would run that text unjudged; quote an obligation's own backticks with single quotes, or put Replay \`<cmd>\` -> <expected>; first`);
 	}
 	expect(await create("- [ ] [a] [build] Replay `true` -> rc 0; the seat moves it with 'br update <id> --status in_review'; planted negative refused")).toEqual({ rc: 0, err: "" });
 	expect(await create("- [ ] [a] [build] the widget builds `true` expect: rc 0; planted negative refused")).toEqual({ rc: 0, err: "" });

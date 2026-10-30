@@ -55,7 +55,7 @@ test("verify closes a bead whose boxes name commands with expected outcomes: rep
 	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [landed] `sh scripts/t.sh` expect: prints 0 fail\n- [ ] [v] [live] Verification: a non-author replays."));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, family: "same (claude)" });
 	expect(res.code).toBe("CLOSED");
-	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"]]);
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true]]);
 	const acts = br.acts();
 	// CLOSEPASS1: the unticked [v] box moves into a LIVEREADBACK child so br's close policy admits the close.
 	expect(acts[0]).toStartWith("create LIVEREADBACK: kit-1 -t task -l live-readback --parent ompkit-kup44 --deps related:kit-1 --description WHAT: read back");
@@ -131,7 +131,7 @@ test("planted: a box whose first backticked span is not followed by -> or expect
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.replays).toEqual([]);
-	expect(res.log).toContain("[a] first backticked span \"br update <id> --status in_review\" is not followed by -> or expect:");
+	expect(res.log).toContain("[a] first backticked span \"br update <id> --status in_review\" is not followed by -> <expected> or expect: <expected>");
 	expect(br.acts()).toEqual([]);
 });
 
@@ -195,7 +195,7 @@ test("phase-only boxes replay their literal command and are judged by the named 
 	const br = fakeBr(dir, inReview("- [ ] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [x] [build] `sh scripts/t.sh` expect: prints 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("CLOSED");
-	expect(res.replays.map(r => [r.index, r.letter, r.pass, r.outcome])).toEqual([[1, null, true, "named"], [2, null, true, "named"]]);
+	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, null, true], [2, null, true]]);
 	const acts = br.acts();
 	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2 --actor Peer");
 });
@@ -361,7 +361,7 @@ test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export rep
 	const beforeHash = stateHash(t);
 	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)" });
 	expect(res.code).toBe("DRY_RUN");
-	expect(res.replays.map(r => [r.letter, r.pass, r.outcome])).toEqual([["a", true, "named"], ["b", true, "named"], ["c", true, "named"], ["d", true, "named"]]);
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true], ["d", true]]);
 	expect(res.log).toContain("exported " + sha);
 	expect(snap(t)).toBe(before);
 	expect(stateHash(t)).toBe(beforeHash);

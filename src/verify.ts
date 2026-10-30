@@ -56,7 +56,7 @@ export const KNOWN_PHASES: Record<string, true> = { build: true, landed: true, l
  * `item` is its 1-based position among all `- [ ]` checklist lines, tagged or not: the number br's --check-acceptance takes.
  */
 export interface Box { index: number; item: number; letter: string | null; checked: boolean; phase: string | null; body: string; line: string }
-export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; outcome: "exit-only" | "named"; rc: number | null; pass: boolean | null; detail: string }
+export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; rc: number | null; pass: boolean | null; detail: string }
 export interface VerifyResult {
 	ok: boolean;
 	code: "CLOSED" | "REWORK" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING";
@@ -111,9 +111,10 @@ export function unreplayableReason(box: Box): "unsupported-phase" | "no-command"
 	const span = CMD.exec(box.body);
 	if (span === null) return "no-command";
 	// The first backticked span is what runs, so it must be the command the box judges: `cmd` -> <expected> or
-	// `cmd` expect: <expected>. Quoted obligation text (`br update <id> --status in_review`) would otherwise run.
+	// `cmd` expect: <expected>, with a non-empty expected outcome. Quoted obligation text
+	// (`br update <id> --status in_review`) or a bare `cmd` -> would otherwise run unjudged.
 	const after = box.body.slice(span.index + span[0].length).trimStart();
-	return after.startsWith("->") || /^expect(?:ed)?:/i.test(after) ? null : "command-not-followed-by-expected";
+	return (after.startsWith("->") || /^expect(?:ed)?:/i.test(after)) && expectedOf(box.body) !== null ? null : "command-not-followed-by-expected";
 }
 
 /** The expected-outcome clause of a box: text after `->` or after `expect:`; null when the box names none. */
@@ -124,19 +125,18 @@ export function expectedOf(body: string): string | null {
 	return exp ? exp[1]!.trim() : null;
 }
 
-/** Judge output against a named expectation; null expectation = exit-only. */
-export function judge(expected: string | null, rc: number | null, out: string): { pass: boolean; outcome: "exit-only" | "named"; detail: string } {
-	if (expected === null) return { pass: rc === 0, outcome: "exit-only", detail: `rc ${rc} (exit-only: the box names no expected outcome)` };
+/** Judge output against the box's named expectation (unreplayableReason guarantees one). */
+export function judge(expected: string, rc: number | null, out: string): { pass: boolean; detail: string } {
 	const e = expected.trim();
 	let m: RegExpExecArray | null;
-	if ((m = /^rc\s+(\d+)$/i.exec(e)) || (m = /^exit\s+(\d+)$/i.exec(e))) return { pass: rc === Number(m[1]), outcome: "named", detail: `rc ${rc}, expected ${m[1]}` };
+	if ((m = /^rc\s+(\d+)$/i.exec(e)) || (m = /^exit\s+(\d+)$/i.exec(e))) return { pass: rc === Number(m[1]), detail: `rc ${rc}, expected ${m[1]}` };
 	if ((m = /^(\d+)\s+pass(?:\s+(\d+)\s+fail)?$/i.exec(e))) {
 		const pass = new RegExp(`\\b${m[1]}\\s+pass\\b`).test(out) && (m[2] === undefined || new RegExp(`\\b${m[2]}\\s+fail\\b`).test(out));
-		return { pass, outcome: "named", detail: `summary ${m[1]} pass${m[2] !== undefined ? ` ${m[2]} fail` : ""}: ${pass ? "found" : "not found"}` };
+		return { pass, detail: `summary ${m[1]} pass${m[2] !== undefined ? ` ${m[2]} fail` : ""}: ${pass ? "found" : "not found"}` };
 	}
-	if ((m = /^(?:prints|contains)\s+(.+)$/i.exec(e))) { const needle = m[1]!.replace(/^["'`]|["'`]$/g, ""); return { pass: out.includes(needle), outcome: "named", detail: `output ${out.includes(needle) ? "contains" : "lacks"} ${JSON.stringify(needle)}` }; }
+	if ((m = /^(?:prints|contains)\s+(.+)$/i.exec(e))) { const needle = m[1]!.replace(/^["'`]|["'`]$/g, ""); return { pass: out.includes(needle), detail: `output ${out.includes(needle) ? "contains" : "lacks"} ${JSON.stringify(needle)}` }; }
 	// Any other wording: the literal text must appear in the output; rc is not consulted (the box said what it expects).
-	return { pass: out.includes(e), outcome: "named", detail: `output ${out.includes(e) ? "contains" : "lacks"} ${JSON.stringify(e)}` };
+	return { pass: out.includes(e), detail: `output ${out.includes(e) ? "contains" : "lacks"} ${JSON.stringify(e)}` };
 }
 /** Bounded child-output excerpt for a failed replay, so a future failure carries its own evidence. Passes keep the detail byte-identical. */
 const CHILD_HEAD = 1000;
@@ -169,7 +169,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const replayable = boxes.filter(b => b.letter !== "v");
 	const bad = replayable.filter(b => unreplayableReason(b) !== null);
 	if (replayable.length === 0 || bad.length > 0) {
-		log.push(`not replayable: ${bad.length ? bad.map(b => { const why = unreplayableReason(b); return why === "unsupported-phase" ? `${tag(b)} unsupported phase [${b.phase}]` : why === "no-command" ? `${tag(b)} names no command` : `${tag(b)} first backticked span ${JSON.stringify(commandOf(b.body))} is not followed by -> or expect:`; }).join("; ") : "no boxes"}`);
+		log.push(`not replayable: ${bad.length ? bad.map(b => { const why = unreplayableReason(b); return why === "unsupported-phase" ? `${tag(b)} unsupported phase [${b.phase}]` : why === "no-command" ? `${tag(b)} names no command` : `${tag(b)} first backticked span ${JSON.stringify(commandOf(b.body))} is not followed by -> <expected> or expect: <expected>`; }).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
 	// The owned replay fixture uses an explicit database path under its per-run
@@ -208,18 +208,18 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const replays: BoxReplay[] = [];
 	for (const box of replayable) {
 		if (box.phase === "live" || box.phase === "after") {
-			replays.push({ index: box.index, letter: box.letter, command: null, expected: null, outcome: "named", rc: null, pass: null, detail: `pending: ${box.phase} phase prerequisite unmet in export replay; not executed` });
+			replays.push({ index: box.index, letter: box.letter, command: null, expected: null, rc: null, pass: null, detail: `pending: ${box.phase} phase prerequisite unmet in export replay; not executed` });
 			log.push(`${tag(box)} PENDING ${box.phase} phase prerequisite unmet; not executed`);
 			continue;
 		}
 		const command = commandOf(box.body)!;
-		const expected = expectedOf(box.body);
+		const expected = expectedOf(box.body)!; // non-null: unreplayableReason refused every box without one
 		const started = Date.now();
 		const r = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
 		const out = text(r.stdout) + text(r.stderr);
 		const v = judge(expected, r.rc, out);
 		const excerpt = v.pass ? "" : childExcerpt(r.rc, r.timed_out, out);
-		replays.push({ index: box.index, letter: box.letter, command, expected, outcome: v.outcome, rc: r.rc, pass: v.pass, detail: v.detail + excerpt });
+		replays.push({ index: box.index, letter: box.letter, command, expected, rc: r.rc, pass: v.pass, detail: v.detail + excerpt });
 		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail}${excerpt} (${Date.now() - started} ms)${r.timed_out ? " TIMEOUT" : ""}`);
 	}
 	const failed = replays.filter(r => r.pass === false);
@@ -255,10 +255,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	}
 	const ranIndexes = new Set(ran.map(r => r.index));
 	const ticks = boxes.filter(b => ranIndexes.has(b.index)).map(b => b.item - deferred.filter(d => d.item < b.item).length);
-	const exitOnly = ran.filter(r => r.outcome === "exit-only").map(r => tag(r));
 	const family = input.family ?? "unknown (set --family)";
 	const deferredTags = deferred.map(b => tag(b)).join(" ");
-	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${exitOnly.length ? `; exit-only boxes: ${exitOnly.join(" ")}` : ""}${deferred.length ? `; deferred ${deferredTags} to ${CHILD} (LIVEREADBACK, child of ${homeNote || home}, related to ${input.bead})` : ""}`;
+	const reason = `verified by ${input.actor} (family: ${family}) on export ${input.exportSha}: ${ran.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}${deferred.length ? `; deferred ${deferredTags} to ${CHILD} (LIVEREADBACK, child of ${homeNote || home}, related to ${input.bead})` : ""}`;
 	if (deferred.length > 0) {
 		const moved = new Set(deferred.map(b => b.item));
 		let item = 0;
@@ -356,13 +355,13 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	const replays: BoxReplay[] = [];
 	for (const box of toRun) {
 		const command = commandOf(box.body)!;
-		const expected = expectedOf(box.body);
+		const expected = expectedOf(box.body)!; // non-null: unreplayableReason refused every box without one
 		const started = Date.now();
 		const r = await run(["sh", "-c", command], { cwd: input.repo, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
 		const out = text(r.stdout) + text(r.stderr);
 		const v = judge(expected, r.rc, out);
 		const excerpt = v.pass ? "" : childExcerpt(r.rc, r.timed_out, out);
-		replays.push({ index: box.index, letter: box.letter, command, expected, outcome: v.outcome, rc: r.rc, pass: v.pass, detail: v.detail + excerpt });
+		replays.push({ index: box.index, letter: box.letter, command, expected, rc: r.rc, pass: v.pass, detail: v.detail + excerpt });
 		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail}${excerpt} (${Date.now() - started} ms)${r.timed_out ? " TIMEOUT" : ""}`);
 	}
 	const failed = replays.filter(r => r.pass === false);

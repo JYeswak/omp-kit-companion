@@ -37,7 +37,7 @@ function finding(box: Box, reason: Reason): Finding {
 		? "has a tag run that is not one scope letter a-z then one phase (build, landed, live, after)"
 		: reason === "no-command"
 			? "names no backticked command"
-			: "has a first backticked span not followed by -> or expect:, so verify would run that text; quote an obligation's own backticks with single quotes, or put Replay `<cmd>` -> <expected>; first";
+			: "has a first backticked span not followed by -> <expected> or expect: <expected>, so verify would run that text unjudged; quote an obligation's own backticks with single quotes, or put Replay `<cmd>` -> <expected>; first";
 	return { index: box.index, letter: box.letter, phase: box.phase, reason, line: box.line, detail: `box ${box.index} ${JSON.stringify(box.line)} ${why}; corrected shape: ${correctedShape(box)}` };
 }
 
