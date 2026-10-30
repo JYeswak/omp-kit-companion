@@ -1,0 +1,24 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_6815dcd89e326120ab0398c81367469382eb434ad426f9f6f528c3b3ed26b181",
+ "limitations": [
+  "Independent agent of the same OpenAI family; isolated source guard/fixture metadata, not installed activation or an actual tracker close. Result digest binds the collected native pregrade JSON, retained on the bead."
+ ],
+ "operation": "record-independent-narrowclose1-pregrade",
+ "parameters": {
+  "bead": "ompkit-vcwet",
+  "code_repo": "omp-kit-companion",
+  "grader": "grader-vcwet",
+  "grader_family": "openai-codex",
+  "grader_model": "openai-codex/gpt-6-luna",
+  "outcome": "13 pass, 0 fail; semantic matcher-removal and complete-evidence controls executed",
+  "replay": "bun test extensions/kit-flywheel-guard.test.ts -t NARROWCLOSE1",
+  "source_commit": "edc12b56bb4e00e2ea8bc595455f1cd01b4ebcbc"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "bytes": 680,
+  "sha256": "9e88e640d6204aae3cbc4863713e64a39340e4e5e09e28135d4c5267bf41dbf1"
+ }
+}
