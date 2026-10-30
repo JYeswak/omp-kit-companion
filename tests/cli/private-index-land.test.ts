@@ -204,9 +204,10 @@ try {
 	writeFileSync(join(templateWork, "tests", "cli", "land-suite.test.sh"), "#!/bin/sh\nset -eu\nif grep -Fxq SLOW suite-contract.txt; then sleep 10; fi\ngrep -Fxq PASS suite-contract.txt\n", { mode: 0o755 });
 	mkdirSync(join(templateWork, "scripts"), { recursive: true });
 	mkdirSync(join(templateWork, ".github"), { recursive: true });
+	// The JUDGING_FILES closure of scripts/suite-metrics.py: a fixture missing one cannot run its gate.
 	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh",
-		"scripts/suite-metrics.py", "scripts/kitlib_run.py", "scripts/pysafe.py",
-		"scripts/test-budget.ts", ".github/test-budget.json"];
+		"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
+		"scripts/pysafe.py", "scripts/test-budget.ts", ".github/test-budget.json"];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
 	for (const path of gateFiles)
 		writeFileSync(join(templateWork, path), readFileSync(join(repoRoot, path)), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
