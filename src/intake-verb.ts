@@ -1,6 +1,6 @@
 // intake-verb: `omp-kit intake` CLI composition for INTAKE1 (bead ompkit-fp72.19.1.19).
-// AC1: record (rule -> decisions/joshua.jsonl row; work -> br search, else a new
-// bead with acceptance, parent and blocks edge), resolve the receiving seat's
+// AC1: record rule/work rows in intake.jsonl (work -> br search, else print new
+// bead arguments with acceptance, parent and blocks edge), resolve the receiving seat's
 // role, print DO or ROUTE <bead> -> <seat> plus the one-line reply.
 // AC2: ROUTE delivers through the existing path (br assignee + Agent Mail +
 // tern delivery) via deliverRoute and proves delivery from the session file.
@@ -45,7 +45,7 @@ export interface IntakeVerbOptions {
 	seat: string;
 	kind?: IntakeKind;
 	roleOverride?: string;
-	/** Absolute repo root: decisions ledger + br cwd. Defaults to the caller cwd. */
+	/** Absolute repo root: intake ledger + br cwd. Defaults to the caller cwd. */
 	repo?: string;
 	/** Tracker for br reads/writes (passed as --db right after br). */
 	db?: string;

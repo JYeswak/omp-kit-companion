@@ -2,7 +2,7 @@
 // record path appends one exact JSONL row per request, never dedupes, and
 // refuses malformed repo paths before any write.
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp, type OwnedTmp } from "./kitlib/tmp.ts";
 import {
@@ -10,7 +10,7 @@ import {
 	formatRouteLine,
 	handleIntake,
 	recordIntakeRow,
-	resolveDecisionsPath,
+	resolveIntakeLedgerPath,
 	type BrRunner,
 } from "./intake-record.ts";
 
@@ -26,16 +26,27 @@ function fixtureRepo(): string {
 }
 
 function readRows(repo: string): string[] {
-	return readFileSync(join(repo, "decisions", "joshua.jsonl"), "utf8")
-		.split("\n")
-		.filter((line) => line.length > 0);
+	const path = join(repo, "intake.jsonl");
+	if (!existsSync(path)) return [];
+	return readFileSync(path, "utf8").split("\n").filter((line) => line.length > 0);
 }
 
 const noMatchBr: BrRunner = () => ({ argv: [], code: 0, out: JSON.stringify({ issues: [] }) });
 
-test("rule intake appends the exact row and prints DO + reply", () => {
+test("rule intake preserves the decision register and writes its own ledger", () => {
 	const repo = fixtureRepo();
+	const decisionPath = join(repo, "decisions", "joshua.jsonl");
+	const existingDecision = JSON.stringify({
+		id: "J-2026-10-19-01",
+		date: "2026-10-19",
+		said: "preserve existing decisions",
+		rule: "intake must not alter decisions",
+		applies_to: ["fixture"],
+		source: "fixture",
+	}) + "\n";
 	try {
+		mkdirSync(join(repo, "decisions"), { recursive: true });
+		writeFileSync(decisionPath, existingDecision, "utf8");
 		const result = handleIntake({
 			repo,
 			text: "always confirm before landing",
@@ -44,17 +55,23 @@ test("rule intake appends the exact row and prints DO + reply", () => {
 			role: "owner",
 			now: () => "2026-10-19T00:00:00.000Z",
 		});
-		const rows = readRows(repo);
-		expect(rows.length).toBe(1);
-		expect(JSON.parse(rows[0])).toEqual({
-			at: "2026-10-19T00:00:00.000Z",
-			from: "joshua",
-			text: "always confirm before landing",
-			kind: "rule",
-			route: "DO",
-			bead: null,
-			seat: "joshua",
-			role: "owner",
+		expect({
+			ledgerExists: existsSync(join(repo, "intake.jsonl")),
+			decisions: readFileSync(decisionPath, "utf8"),
+			rows: readRows(repo).map((line) => JSON.parse(line)),
+		}).toEqual({
+			ledgerExists: true,
+			decisions: existingDecision,
+			rows: [{
+				at: "2026-10-19T00:00:00.000Z",
+				from: "joshua",
+				text: "always confirm before landing",
+				kind: "rule",
+				route: "DO",
+				bead: null,
+				seat: "joshua",
+				role: "owner",
+			}],
 		});
 		const lines = result.stdout.split("\n");
 		expect(lines[0]).toBe("DO");
@@ -145,7 +162,7 @@ test("work intake matching an open bead records ROUTE with the bead id", () => {
 
 test("malformed repo paths throw and never write", () => {
 	for (const bad of ["", "   ", "relative/path", "/definitely/not/a/real/repo-9z9z9z"]) {
-		expect(() => resolveDecisionsPath(bad)).toThrow();
+		expect(() => resolveIntakeLedgerPath(bad)).toThrow();
 		expect(() =>
 			recordIntakeRow({
 				repo: bad,
@@ -164,7 +181,7 @@ test("malformed repo paths throw and never write", () => {
 	const file = join(fileDir.path, "notadir");
 	writeFileSync(file, "x\n");
 	try {
-		expect(() => resolveDecisionsPath(file)).toThrow();
+		expect(() => resolveIntakeLedgerPath(file)).toThrow();
 		expect(existsSync(file + "-should-never-exist")).toBe(false);
 	} finally {
 		rmSync(join(file, ".."), { recursive: true, force: true });

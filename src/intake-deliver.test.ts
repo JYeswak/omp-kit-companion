@@ -233,9 +233,8 @@ test("hourly counts split received, routed, done-in-role and overridden", () => 
 test("readIntakeRows reads the record ledger and skips malformed lines", () => {
 	const repo = fixtureRepo();
 	try {
-		mkdirSync(join(repo, "decisions"), { recursive: true });
 		writeFileSync(
-			join(repo, "decisions", "joshua.jsonl"),
+			join(repo, "intake.jsonl"),
 			[
 				JSON.stringify({ at: new Date(HOUR).toISOString(), from: "joshua", text: TEXT, kind: "work", route: "DO", bead: BEAD, seat: SEAT, role: "worker" }),
 				"broken line",

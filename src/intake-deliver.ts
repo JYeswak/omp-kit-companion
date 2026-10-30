@@ -6,9 +6,8 @@
 // session file for the delivery marker (SEND1: one retry, then a
 // drop-folder fallback copy). Hourly counts extend the fleet-report
 // vocabulary (report-inject-job.ts REPORT_INJECT_JOB "fleet-report" runs
-// hourly): they are computed from the one existing ledger
-// (decisions/joshua.jsonl, owned by the record slice) — this file creates
-// no second ledger. The session-file marker is the delivery record.
+// hourly): they are computed from the intake ledger (intake.jsonl, owned by
+// the record slice). The session-file marker is the delivery record.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -17,7 +16,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { deliverToTernSeat, type TernDeliverResult } from "./send.ts";
 import type { TernSeatBinding } from "./plane-tern.ts";
 import { ownerRoleFor } from "./intake-route.ts";
-import type { BrRunner } from "./intake-record.ts";
+import { INTAKE_LEDGER_REL, type BrRunner } from "./intake-record.ts";
 
 export const INTAKE_DELIVER_BR_TIMEOUT_MS = 30_000;
 export const INTAKE_DELIVER_MAIL_TIMEOUT_MS = 30_000;
@@ -188,9 +187,9 @@ export interface IntakeHourlyCounts {
 }
 
 /**
- * Read the one intake ledger (decisions/joshua.jsonl, owned by the record
- * slice). Missing file -> []. Malformed lines are skipped. Throws only on a
- * malformed repo path, like the record slice.
+ * Read the intake ledger (intake.jsonl, owned by the record slice). Missing
+ * file -> []. Malformed lines are skipped. Throws only on a malformed repo
+ * path, like the record slice.
  */
 export function readIntakeRows(repo: string): IntakeCountRow[] {
 	if (typeof repo !== "string" || repo.trim() === "") throw new Error("intake deliver refused: empty repo path");
@@ -198,7 +197,7 @@ export function readIntakeRows(repo: string): IntakeCountRow[] {
 	const root = resolve(repo);
 	let raw: string;
 	try {
-		raw = readFileSync(join(root, "decisions", "joshua.jsonl"), "utf8");
+		raw = readFileSync(join(root, INTAKE_LEDGER_REL), "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
 		return [];

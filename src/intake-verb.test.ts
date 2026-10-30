@@ -29,7 +29,7 @@ function repo(label: string): string {
 }
 
 function rowsOf(root: string): Record<string, unknown>[] {
-	const path = join(root, "decisions", "joshua.jsonl");
+	const path = join(root, "intake.jsonl");
 	if (!existsSync(path)) return [];
 	return readFileSync(path, "utf8").split("\n").filter((line) => line.trim() !== "").map((line) => JSON.parse(line));
 }
@@ -58,7 +58,7 @@ function stubBr(seen: string[][], opts: { searchBead?: string; createId?: string
 	};
 }
 
-test("rule records a decisions row and prints DO plus reply", async () => {
+test("rule records an intake row and prints DO plus reply", async () => {
 	const root = repo("rule");
 	const result = await runIntakeVerb(base("fleet allows a second reviewer", root, { kind: "rule", runBr: stubBr([]) }));
 	assert.equal(result.action, "DO");
@@ -70,6 +70,7 @@ test("rule records a decisions row and prints DO plus reply", async () => {
 	assert.equal(rows.length, 1);
 	assert.equal(rows[0]?.kind, "rule");
 	assert.equal(rows[0]?.route, "DO");
+	assert.equal(existsSync(join(root, "decisions", "joshua.jsonl")), false);
 	assert.ok(result.countsLine.includes("received=1"));
 });
 
@@ -205,9 +206,8 @@ test("ROUTE with --deliver but missing binding refuses delivery inputs", async (
 
 test("intakeDigestLine reports hourly received/routed/done/overridden for fleet_report", () => {
 	const root = repo("digest");
-	mkdirSync(join(root, "decisions"), { recursive: true });
 	const hour = "2026-10-20T14:00:00.000Z";
-	writeFileSync(join(root, "decisions", "joshua.jsonl"), [
+	writeFileSync(join(root, "intake.jsonl"), [
 		JSON.stringify({ at: hour, from: "joshua", text: "fix this test", kind: "work", route: "ROUTE b1 -> director", bead: "b1", seat: "chief", role: "lead-chief" }),
 		JSON.stringify({ at: hour, from: "joshua", text: "fix this test", kind: "work", route: "DO b1", bead: "b1", seat: "w1", role: "worker" }),
 		JSON.stringify({ at: hour, from: "joshua", text: "plan the rollout", kind: "work", route: "DO b2", bead: "b2", seat: "w1", role: "worker" }),

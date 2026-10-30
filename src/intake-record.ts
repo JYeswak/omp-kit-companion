@@ -30,7 +30,7 @@ export interface IntakeRun {
 export type BrRunner = (argv: string[], opts: { cwd: string; timeoutMs: number }) => IntakeRun;
 
 export const BR_TIMEOUT_MS = 30_000;
-export const INTAKE_DECISIONS_REL = "decisions/joshua.jsonl";
+export const INTAKE_LEDGER_REL = "intake.jsonl";
 
 function defaultRunner(argv: string[], opts: { cwd: string; timeoutMs: number }): IntakeRun {
 	const result = spawnSync(argv[0], argv.slice(1), {
@@ -47,7 +47,7 @@ function defaultRunner(argv: string[], opts: { cwd: string; timeoutMs: number })
 }
 
 /** Validate the repo root before any write. Throws on malformed paths; never writes. */
-export function resolveDecisionsPath(repo: string): string {
+export function resolveIntakeLedgerPath(repo: string): string {
 	if (typeof repo !== "string" || repo.trim() === "") throw new Error("intake record refused: empty repo path");
 	if (!isAbsolute(repo)) throw new Error("intake record refused: repo path must be absolute: " + repo);
 	const root = resolve(repo);
@@ -58,7 +58,7 @@ export function resolveDecisionsPath(repo: string): string {
 		throw new Error("intake record refused: repo path does not exist: " + root);
 	}
 	if (!stat.isDirectory()) throw new Error("intake record refused: repo path is not a directory: " + root);
-	return join(root, INTAKE_DECISIONS_REL);
+	return join(root, INTAKE_LEDGER_REL);
 }
 
 export interface RecordIntakeInput {
@@ -83,7 +83,7 @@ export function recordIntakeRow(input: RecordIntakeInput): IntakeRecordRow {
 	}
 	if (input.bead !== null && (typeof input.bead !== "string" || input.bead.trim() === ""))
 		throw new Error("intake record refused: bead must be an id or null");
-	const path = resolveDecisionsPath(input.repo);
+	const path = resolveIntakeLedgerPath(input.repo);
 	const row: IntakeRecordRow = {
 		at: input.now ? input.now() : new Date().toISOString(),
 		from: "joshua",

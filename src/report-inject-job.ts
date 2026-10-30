@@ -17,7 +17,7 @@ export interface ReportInjectConfig {
 	home: string;
 	dropDir: string;
 	fleetConfigPath?: string;
-	/** Absolute repo root holding decisions/joshua.jsonl; appends the hourly intake counts line. */
+	/** Absolute repo root holding intake.jsonl; appends the hourly intake counts line. */
 	intakeRepo?: string;
 }
 
