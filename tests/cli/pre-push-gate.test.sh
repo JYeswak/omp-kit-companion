@@ -748,12 +748,29 @@ else
 	fail=$((fail + 1)); printf 'FAIL scr-stdin-open-writer: finished=%s writerless rc=%s open<<<%s>>>\n' "$sdone" "$crc" "$(cat "$TMP/stdin-open.out")"
 fi
 
+# SUITEBUDGET1 (ompkit-kup44.1): fresh-gate.sh and full-suite-verdict.sh judge through
+# suite-metrics.py, which binds every judging file (kitlib_run.py, pysafe.py, kitlib-tmp.sh,
+# test-budget.ts, .github/test-budget.json). A fixture that runs either real script carries them:
+# carry_measurement REPO [SCRIPTS_SUBDIR] copies the scripts beside the judge and the budget file
+# at the repo root, where the judge reads it.
+carry_measurement() {
+	mdir=$1
+	msub=${2:-scripts}
+	mkdir -p "$mdir/$msub" "$mdir/.github"
+	cp "$KITREPO/scripts/suite-metrics.py" "$KITREPO/scripts/kitlib_run.py" "$KITREPO/scripts/pysafe.py" \
+		"$KITREPO/scripts/kitlib-tmp.sh" "$KITREPO/scripts/test-budget.ts" "$mdir/$msub/"
+	cp "$KITREPO/.github/test-budget.json" "$mdir/.github/test-budget.json"
+}
+
 # fresh-gate.sh itself: its WORK dir is pid-named with .owner, traps are set before it exists, a
 # TERM mid-run stops its tree promptly and removes WORK (mutants: foreground steps, trap after
 # mktemp); a SIGKILLed fresh-gate leaves WORK, which the next push's sweep removes.
 repo=$(mkrepo scr-fresh 'echo BASE-GATE' 'echo HEAD-GATE')
 mkdir -p "$repo/tools" "$TMP/fg-archive/scripts" "$TMP/fg-archive/.git"
 cp "$KITREPO/scripts/fresh-gate.sh" "$repo/tools/fresh-gate.sh"
+# The gate runs from tools/ (its SCRIPT_DIR) but binds the judging files at repo-root scripts/.
+carry_measurement "$repo" tools
+carry_measurement "$repo"
 # shellcheck disable=SC2016
 printf '#!/bin/sh\necho $$ > "$FG_PIDFILE"\nsleep 300 &\necho $! > "$FG_SLEEPFILE"\nwait\n' > "$TMP/fg-archive/scripts/build-manifest.sh"
 : > "$TMP/fg-archive/scripts/ttsr-harness.ts"
@@ -814,6 +831,7 @@ mkverdictrepo() {
 	cp "$KITREPO/scripts/full-suite-verdict.sh" "$repo/scripts/full-suite-verdict.sh"
 	# The incumbent judge stages archives through its own temporary-directory helper.
 	cp "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
+	carry_measurement "$repo"
 	create_verdict_gate_stub "$repo"
 	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
 	create_checker_test_stubs "$repo"
@@ -889,6 +907,7 @@ git -C "$erepro" config user.email "test@example.invalid"
 git -C "$erepro" config user.name "worker-1"
 cp "$KITREPO/scripts/full-suite-verdict.sh" "$erepro/scripts/full-suite-verdict.sh"
 cp "$KITREPO/scripts/kitlib-tmp.sh" "$erepro/scripts/kitlib-tmp.sh"
+carry_measurement "$erepro"
 create_verdict_gate_stub "$erepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$erepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$erepro"
@@ -950,6 +969,7 @@ git -C "$hrepro" config user.email "test@example.invalid"
 git -C "$hrepro" config user.name "worker-1"
 cp "$KITREPO/scripts/full-suite-verdict.sh" "$hrepro/scripts/full-suite-verdict.sh"
 cp "$KITREPO/scripts/kitlib-tmp.sh" "$hrepro/scripts/kitlib-tmp.sh"
+carry_measurement "$hrepro"
 create_verdict_gate_stub "$hrepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$hrepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$hrepro"
@@ -1067,10 +1087,13 @@ mktagverdictrepo() {
 	failing_suite=${2:-}
 	repo=$(mktagrepo "$name")
 	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
+	carry_measurement "$repo"
+	# The judge asks the gate for its worker count (fresh-gate.sh --test-workers) when it records timings.
+	printf '#!/bin/sh\nif [ "$#" -eq 1 ] && [ "$1" = "--test-workers" ]; then printf "1\\n"; exit 0; fi\necho FRESH-GATE-RAN\n' > "$repo/scripts/fresh-gate.sh"
 	if [ -n "$failing_suite" ]; then
 		printf '#!/bin/sh\necho RED-FAIL; exit 1\n' > "$repo/tests/cli/$failing_suite"
 	fi
-	git -C "$repo" add scripts tests
+	git -C "$repo" add scripts tests .github
 	git -C "$repo" commit -qm "[test] tag verdict judge"
 	git -C "$repo" push -q origin HEAD:refs/heads/main
 	printf '%s' "$repo"

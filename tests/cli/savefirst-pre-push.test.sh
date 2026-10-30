@@ -29,6 +29,7 @@ if [ "$SOURCE_IDENTITY" = "GIT" ]; then
 	SOURCE_SHA=$(git -C "$SOURCE_ROOT" rev-parse HEAD) || exit 1
 	git -C "$SOURCE_ROOT" archive --format=tar "$SOURCE_SHA" \
 		scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh \
+		scripts/suite-metrics.py scripts/kitlib_run.py scripts/pysafe.py scripts/kitlib-tmp.sh scripts/test-budget.ts .github/test-budget.json \
 		src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \
 		config/heavy-labels.json \
 		> "$TMP/exact-source.tar"
@@ -37,12 +38,13 @@ else
 		cd "$SOURCE_ROOT" || exit 1
 		tar -cf "$TMP/exact-source.tar" \
 			scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh \
+			scripts/suite-metrics.py scripts/kitlib_run.py scripts/pysafe.py scripts/kitlib-tmp.sh scripts/test-budget.ts .github/test-budget.json \
 			src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \
 			config/heavy-labels.json
 	)
 fi
 tar -xf "$TMP/exact-source.tar" -C "$SOURCE"
-tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.json
+tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.json .github/test-budget.json
 
 make_checker_controls() {
 	repo=$1
@@ -117,11 +119,14 @@ CLI
 
 	printf '#!/bin/sh\nprintf "BASE-BOUNDARY\\n"\n' > "$sf_repo/tests/cli/savefirst-boundary.test.sh"
 	chmod +x "$sf_repo/tests/cli/savefirst-boundary.test.sh"
+	# The incomplete fixture the full-suite verifier must refuse: one Bun file in the complement that
+	# defines no test, so the suite records no Bun summary for it (bun_count 1, bun_ran 0).
+	printf '// SAVEFIRST1 fixture: deliberately defines no test.\nexport {};\n' > "$sf_repo/tests/cli/savefirst-incomplete.test.ts"
 	git -C "$sf_repo" init -q --initial-branch=main
 	git -C "$sf_repo" config user.email "test@example.invalid"
 	git -C "$sf_repo" config user.name "SaveFirstFixture"
 	git -C "$sf_repo" config core.hooksPath "$sf_repo/.git/hooks"
-	git -C "$sf_repo" add -- scripts src tests/cli rules MANIFEST.tsv config/omp-kit/load.json config/heavy-labels.json
+	git -C "$sf_repo" add -- scripts src tests/cli rules MANIFEST.tsv config/omp-kit/load.json config/heavy-labels.json .github/test-budget.json
 	git -C "$sf_repo" commit -qm "[test] SaveFirst minimal gate base"
 	git init -q --bare --initial-branch=main "$sf_remote"
 	git -C "$sf_repo" remote add origin "$sf_remote"
