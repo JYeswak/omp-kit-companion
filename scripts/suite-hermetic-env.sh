@@ -7,7 +7,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
+import subprocess
 import sys
 import sysconfig
 
@@ -45,8 +47,8 @@ reserved = {
     "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_NOSYSTEM", "GIT_CEILING_DIRECTORIES", "GIT_TERMINAL_PROMPT",
     "BUN_INSTALL", "BUN_CONFIG_FILE", "KITLIB_TMP_ROOT", "KITROOT",
-    "OMP_KIT_CASE_CWD", "OMP_KIT_OMP_SRC_FETCH", "OMP_KIT_DISK_OBSERVER",
-    "KIT_TEST_LOOPBACK_PORT", "GIT_DIR", "GIT_WORK_TREE", "BEADS_DB",
+    "OMP_KIT_CASE_CWD", "OMP_KIT_TEST_WORK_ROOT", "OMP_KIT_OMP_SRC_FETCH",
+    "OMP_KIT_DISK_OBSERVER", "KIT_TEST_LOOPBACK_PORT", "GIT_DIR", "GIT_WORK_TREE", "BEADS_DB",
 }
 for name in options.allow_env:
     if (not name or not name.isascii() or not (name[0].isalpha() or name[0] == "_")
@@ -95,10 +97,16 @@ try:
 except OSError as error:
     refuse("cannot seed suite git config: " + str(error))
 
-if options.loopback_port is not None:
-    if not 1024 <= options.loopback_port <= 65535 or options.loopback_port == 8765:
-        refuse("invalid suite loopback port " + str(options.loopback_port))
-    loopback_port = options.loopback_port
+loopback_port_option = options.loopback_port
+if loopback_port_option is None and os.environ.get("KIT_TEST_LOOPBACK_PORT"):
+    try:
+        loopback_port_option = int(os.environ["KIT_TEST_LOOPBACK_PORT"])
+    except ValueError:
+        refuse("invalid inherited suite loopback port")
+if loopback_port_option is not None:
+    if not 1024 <= loopback_port_option <= 65535 or loopback_port_option == 8765:
+        refuse("invalid suite loopback port " + str(loopback_port_option))
+    loopback_port = loopback_port_option
 else:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -107,6 +115,7 @@ else:
     except OSError as error:
         refuse("cannot allocate suite loopback port: " + str(error))
 
+original_path = os.environ.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin"
 path_prefix = ""
 if sys.platform == "darwin":
     bindir = sysconfig.get_config_var("BINDIR")
@@ -128,9 +137,44 @@ if sys.platform == "darwin":
         refuse("suite scratch python3 path is not a symlink")
     else:
         python_link.symlink_to(python_executable.resolve())
+
+    inherited_git = shutil.which("git", path=original_path)
+    if inherited_git and Path(inherited_git).resolve() == Path("/usr/bin/git"):
+        developer_dirs = []
+        xcode_select = Path("/usr/bin/xcode-select")
+        if xcode_select.is_file():
+            try:
+                selected = subprocess.run(
+                    [str(xcode_select), "-p"], check=True, capture_output=True,
+                    text=True, timeout=5, env={"PATH": "/usr/bin:/bin"},
+                ).stdout.strip()
+                if selected:
+                    developer_dirs.append(Path(selected))
+            except (OSError, subprocess.SubprocessError):
+                pass
+        developer_dirs.extend((
+            Path("/Applications/Xcode.app/Contents/Developer"),
+            Path("/Library/Developer/CommandLineTools"),
+        ))
+        developer_git = None
+        for developer_dir in developer_dirs:
+            candidate = developer_dir / "usr" / "bin" / "git"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                developer_git = candidate.resolve()
+                break
+        if developer_git is None:
+            refuse("system git is an xcrun shim and no developer Git executable was found")
+        git_link = python_tools / "git"
+        if git_link.is_symlink():
+            if git_link.resolve() != developer_git:
+                refuse("suite scratch git link points elsewhere")
+        elif git_link.exists():
+            refuse("suite scratch git path is not a symlink")
+        else:
+            git_link.symlink_to(developer_git)
     path_prefix = str(python_tools) + os.pathsep
 
-path_value = path_prefix + (os.environ.get("PATH") or "/usr/bin:/bin:/usr/sbin:/sbin")
+path_value = path_prefix + original_path
 lang_value = os.environ.get("LANG") or "C"
 env = {
     "PATH": path_value,
@@ -151,6 +195,7 @@ env = {
     "KITLIB_TMP_ROOT": str(scratch),
     "KITROOT": str(archive),
     "OMP_KIT_CASE_CWD": str(archive),
+    "OMP_KIT_TEST_WORK_ROOT": str(scratch),
     "OMP_KIT_OMP_SRC_FETCH": "0",
     "OMP_KIT_DISK_OBSERVER": "statfs",
     "KIT_TEST_LOOPBACK_PORT": str(loopback_port),

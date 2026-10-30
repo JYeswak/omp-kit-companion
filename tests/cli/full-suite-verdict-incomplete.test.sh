@@ -3,9 +3,9 @@
 # shellcheck source=tests/cli/git-env-fixtures.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 # full-suite-verdict-incomplete.test.sh — FULLSUITELOG1 (ompkit-lrbd.6).
-# A suite run that ends without complete evidence is non-pass, caches no verdict, and keeps its
-# output at the printed <tree>.incomplete.log path. A complete run still records <tree>.log plus
-# the <tree>.json verdict. FULLSUITEPAR1 (ompkit-9t6f2): parallel shell suites give the serial
+# Incomplete evidence is kept at the path printed by the runner. Complete records and logs use
+# full-suite-verdict-store's judge-keyed stem, not the tree hash alone.
+# FULLSUITEPAR1 (ompkit-9t6f2): parallel shell suites give the serial
 # GREEN/RED lines and counts, and a hung parallel suite is killed by the deadline and named.
 set -u
 
@@ -46,18 +46,45 @@ mkrepo() {
 	mkrepo_commit
 }
 
+resolve_cache_paths() {
+	tree_hash=$(git -C "$repo" rev-parse 'HEAD^{tree}') || return 1
+	cache="$repo.cache"
+	judge_dir=$(CDPATH='' cd -- "$(dirname -- "$VERDICT")" && pwd -P) || return 1
+	judge_root=$(CDPATH='' cd -- "$judge_dir/.." && pwd -P) || return 1
+	checks=$(python3 "$judge_dir/suite-metrics.py" identity --root "$judge_root" --scope full) || return 1
+	runtime=$(python3 "$judge_dir/suite-metrics.py" runtime) || return 1
+	entry=$(python3 "$judge_dir/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree_hash" \
+		--role base --checks "$checks" --runtime "$runtime" --judge-root "$judge_root" \
+		--cache-dir "$cache") || return 1
+	tree=${entry##*/}
+	tree=${tree%.json}
+	incomplete_log=$(python3 - "$out" <<'PY'
+import sys
+from pathlib import Path
+
+marker = "partial log: "
+result = ""
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    index = line.find(marker)
+    if index >= 0:
+        result = line[index + len(marker):]
+print(result)
+PY
+)
+}
+
 run_verdict() {
 	out="$TMP/$1.out"
 	KITROOT=$KITROOT_DIR OMP_KIT_OMP_SRC_FETCH=0 sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
 	rc=$?
-	tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+	resolve_cache_paths || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
 }
 run_verdict_with_env() {
 	out="$TMP/$1.out"
 	env "$2=$3" KITROOT="$KITROOT_DIR" OMP_KIT_OMP_SRC_FETCH=0 \
 		sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
 	rc=$?
-	tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+	resolve_cache_paths || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
 }
 
 run_verdict_with_envs() {
@@ -66,7 +93,7 @@ run_verdict_with_envs() {
 	env "$@" KITROOT="$KITROOT_DIR" OMP_KIT_OMP_SRC_FETCH=0 \
 		sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
 	rc=$?
-	tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+	resolve_cache_paths || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
 }
 
 refusal_case() {
@@ -112,9 +139,20 @@ fresh_refusal_case() {
 # side_files_gone: no runner-private file or dir is left beside the cache entry.
 side_files_gone() {
 	for side in status bun shell runner timed-out; do
-		if [ -e "$cache/$tree.running.log.$side" ]; then return 1; fi
+		for side_file in "$cache/$tree.running."*.log."$side"; do
+			[ ! -e "$side_file" ] || return 1
+		done
 	done
-	[ ! -e "$cache/$tree.running.log" ]
+	for running_log in "$cache/$tree.running."*.log; do
+		[ ! -e "$running_log" ] || return 1
+	done
+	return 0
+}
+no_incomplete_log() {
+	for incomplete_file in "$cache/$tree.incomplete."*.log; do
+		[ ! -e "$incomplete_file" ] || return 1
+	done
+	return 0
 }
 
 # Incomplete: the python suite prints a marker, then SIGKILLs the runner loop that would print
@@ -126,10 +164,10 @@ run_verdict incomplete
 cache="$repo.cache"
 if [ "$rc" -ne 0 ]; then ok "incomplete run exits non-pass (rc=$rc)"; else not_ok "incomplete run exited 0"; fi
 if [ ! -e "$cache/$tree.json" ]; then ok "incomplete run caches no verdict"; else not_ok "incomplete run cached $cache/$tree.json"; fi
-if [ ! -e "$cache/$tree.log" ]; then ok "incomplete run writes no reusable <tree>.log"; else not_ok "incomplete run left $cache/$tree.log"; fi
-if [ ! -e "$cache/$tree.running.log" ]; then ok "incomplete run leaves no running log"; else not_ok "running log left behind"; fi
-inc="$cache/$tree.incomplete.log"
-if grep -F "partial log: $inc" "$out" >/dev/null; then ok "RED line prints the incomplete log path"; else not_ok "RED line lacks the incomplete log path"; cat "$out"; fi
+if [ ! -e "$cache/$tree.log" ]; then ok "incomplete run writes no reusable evidence log"; else not_ok "incomplete run left $cache/$tree.log"; fi
+if side_files_gone; then ok "incomplete run leaves no running log"; else not_ok "running log left behind"; fi
+inc=$incomplete_log
+if [ -n "$inc" ] && grep -F "partial log: $inc" "$out" >/dev/null; then ok "RED line prints the incomplete log path"; else not_ok "RED line lacks the incomplete log path"; cat "$out"; fi
 if [ -f "$inc" ] && grep -F 'FULLSUITELOG1-MARKER before runner death' "$inc" >/dev/null; then
 	ok "incomplete log holds the suite output"
 else
@@ -142,8 +180,8 @@ run_verdict complete
 cache="$repo.cache"
 if [ "$rc" -eq 0 ]; then ok "complete run passes"; else not_ok "complete run rc=$rc"; cat "$out"; fi
 if [ -f "$cache/$tree.json" ] && grep -F '"verdict": "PASS"' "$cache/$tree.json" >/dev/null; then ok "complete run caches PASS verdict"; else not_ok "complete run cached no PASS verdict"; fi
-if grep -F 'FULLSUITELOG1-CONTROL ok' "$cache/$tree.log" >/dev/null 2>&1; then ok "complete run keeps <tree>.log"; else not_ok "complete run has no <tree>.log"; fi
-if [ ! -e "$cache/$tree.incomplete.log" ]; then ok "complete run writes no incomplete log"; else not_ok "complete run wrote an incomplete log"; fi
+if grep -F 'FULLSUITELOG1-CONTROL ok' "$cache/$tree.log" >/dev/null 2>&1; then ok "complete run keeps the paired evidence log"; else not_ok "complete run has no paired evidence log"; fi
+if no_incomplete_log; then ok "complete run writes no incomplete log"; else not_ok "complete run wrote an incomplete log"; fi
 
 # HERMETIC1: caller Git/tracker authority is refused before an actual suite can start.
 refusal_case inherited-git-dir GIT_DIR git-dir
@@ -184,13 +222,218 @@ else
 	[ ! -f "$cache/$tree.log" ] || cat "$cache/$tree.log"
 fi
 
+# HERMETIC1: exercise denied writes through the real runner. All protected targets are
+# synthetic siblings of the child archive, so a regression cannot damage a user's files.
+file_state() {
+	if [ -f "$1" ]; then
+		shasum -a 256 "$1" | cut -d' ' -f1
+	elif [ -e "$1" ]; then
+		printf 'PRESENT_NONREGULAR\n'
+	else
+		printf 'ABSENT\n'
+	fi
+}
+expect_runner_denial() {
+	label=$1
+	row=$2
+	needle=$3
+	cache="$repo.cache"
+	if [ "$rc" -ne 0 ] && grep -F 'VERDICT FAIL' "$out" >/dev/null \
+		&& grep -F "$row" "$cache/$tree.log" >/dev/null 2>&1 \
+		&& grep -F "$needle" "$cache/$tree.log" >/dev/null 2>&1 \
+		&& { grep -F 'Operation not permitted' "$cache/$tree.log" >/dev/null 2>&1 \
+			|| grep -F 'EPERM' "$cache/$tree.log" >/dev/null 2>&1; }; then
+		ok "$label is RED in the real runner with the denied path named"
+	else
+		not_ok "$label did not record the real-runner denial (rc=$rc, target=$needle)"
+		cat "$out"
+		[ ! -f "$cache/$tree.log" ] || cat "$cache/$tree.log"
+	fi
+}
+if [ "$(uname -s)" = Darwin ]; then
+	mkrepo_begin hermetic-git-ref
+	addfile tests/cli/fixture_test.py "from pathlib import Path
+target = Path('$repo/.git/refs/remotes/origin/main')
+target.write_text('changed')"
+	mkrepo_commit
+	ref_target="$repo/.git/refs/remotes/origin/main"
+	mkdir -p "$(dirname "$ref_target")"
+	printf 'synthetic ref sentinel\n' >"$ref_target"
+	ref_before=$(file_state "$ref_target")
+	run_verdict hermetic-git-ref
+	ref_after=$(file_state "$ref_target")
+	expect_runner_denial 'HERMETIC1 protected Git ref' \
+		'RED python-suite tests/cli/fixture_test.py' "$ref_target"
+	if [ "$ref_before" = "$ref_after" ]; then
+		ok "HERMETIC1 protected Git ref bytes remain unchanged"
+	else
+		not_ok "HERMETIC1 protected Git ref changed ($ref_before -> $ref_after)"
+	fi
+
+	if command -v br >/dev/null 2>&1; then
+		mkrepo_begin hermetic-br-default
+		addfile tests/cli/fixture_test.py "import subprocess
+from pathlib import Path
+root = Path('$repo')
+print('HERMETIC_BR_DEFAULT_TARGET ' + str(root / '.beads' / 'beads.db'), flush=True)
+subprocess.run(['br', '--no-daemon', '--no-auto-import', '--no-auto-flush',
+    'create', 'implicit database containment probe', '--json'], cwd=root, check=True)"
+		mkrepo_commit
+		br_actor=hermetic-fixture
+		br_db="$repo/.beads/beads.db"
+		if (
+			cd "$repo" &&
+			env -u BEADS_DB br --db "$br_db" --actor "$br_actor" --no-auto-import \
+				--no-auto-flush --no-daemon init --prefix hermetic --json >"$TMP/hermetic-br-init.out" 2>&1 \
+				&& env -u BEADS_DB br --db "$br_db" --actor "$br_actor" --no-auto-import \
+					--no-auto-flush --no-daemon create 'retained tracker sentinel' --json >"$TMP/hermetic-br-seed.out" 2>&1
+		); then
+			br_before=$(file_state "$br_db")
+			run_verdict hermetic-br-default
+			br_after=$(file_state "$br_db")
+			expect_runner_denial 'HERMETIC1 br create without --db' \
+				'RED python-suite tests/cli/fixture_test.py' "$br_db"
+			if [ "$br_before" = "$br_after" ]; then
+				ok "HERMETIC1 implicit br create leaves the synthetic tracker bytes unchanged"
+			else
+				not_ok "HERMETIC1 implicit br create changed the tracker ($br_before -> $br_after)"
+			fi
+		else
+			not_ok "HERMETIC1 synthetic br tracker setup failed"
+			cat "$TMP/hermetic-br-init.out" "$TMP/hermetic-br-seed.out" 2>/dev/null
+		fi
+	else
+		echo "HERMETIC1 br create negative NOT_RUN: br unavailable"
+	fi
+
+	external_home="$TMP/protected-home"
+	home_target="$external_home/.local/opt/omp-kit/x"
+	mkdir -p "$(dirname "$home_target")"
+	printf 'synthetic home sentinel\n' >"$home_target"
+	home_before=$(file_state "$home_target")
+	mkrepo_begin hermetic-home-write
+	addfile tests/cli/fixture_test.py "from pathlib import Path
+Path('$home_target').write_text('changed')"
+	mkrepo_commit
+	run_verdict hermetic-home-write
+	home_after=$(file_state "$home_target")
+	expect_runner_denial 'HERMETIC1 absolute HOME write' \
+		'RED python-suite tests/cli/fixture_test.py' "$home_target"
+	if [ "$home_before" = "$home_after" ]; then
+		ok "HERMETIC1 protected HOME bytes remain unchanged"
+	else
+		not_ok "HERMETIC1 protected HOME changed ($home_before -> $home_after)"
+	fi
+
+	external_config="$TMP/protected-global.gitconfig"
+	printf '[user]\n\tname = synthetic\n\temail = synthetic@example.invalid\n' >"$external_config"
+	config_before=$(file_state "$external_config")
+	outer_global_before=$(file_state "$HOME/.gitconfig")
+	mkrepo_begin hermetic-global-config
+	addfile tests/cli/fixture_test.py "import os, subprocess
+from pathlib import Path
+global_config = Path(os.environ['GIT_CONFIG_GLOBAL']).resolve()
+assert global_config.is_relative_to(Path(os.environ['TMPDIR']).resolve())
+subprocess.run(['git', 'config', '--global', 'hermetic.probe', 'scratch'], check=True)
+value = subprocess.run(['git', 'config', '--global', '--get', 'hermetic.probe'],
+    check=True, text=True, capture_output=True).stdout.strip()
+assert value == 'scratch', value
+print('HERMETIC_GLOBAL_REDIRECTED ' + str(global_config), flush=True)
+subprocess.run(['git', 'config', '--file', '$external_config',
+    'hermetic.probe', 'escaped'], check=True)"
+	mkrepo_commit
+	run_verdict hermetic-global-config
+	config_after=$(file_state "$external_config")
+	outer_global_after=$(file_state "$HOME/.gitconfig")
+	expect_runner_denial 'HERMETIC1 absolute global-config write' \
+		'RED python-suite tests/cli/fixture_test.py' "$external_config"
+	if [ -f "$repo.cache/$tree.log" ] && grep -F 'HERMETIC_GLOBAL_REDIRECTED ' "$repo.cache/$tree.log" >/dev/null; then
+		ok "git config --global writes through the suite-owned GIT_CONFIG_GLOBAL control"
+	else
+		not_ok "git config --global did not prove its scratch-config control"
+	fi
+	if [ "$config_before" = "$config_after" ] \
+		&& [ "$outer_global_before" = "$outer_global_after" ]; then
+		ok "HERMETIC1 protected global-config bytes remain unchanged"
+	else
+		not_ok "HERMETIC1 global config changed (synthetic $config_before -> $config_after; caller $outer_global_before -> $outer_global_after)"
+	fi
+
+	compiled_dir="$TMP/protected-compiled-output"
+	mkrepo_begin hermetic-compiled-output
+	addfile fixture.ts 'export const value = 1;'
+	addfile tests/cli/compiled.test.sh "printf 'HERMETIC_COMPILED_TARGET %s\\n' '$compiled_dir'
+bun build \"\$KITROOT/fixture.ts\" --outdir '$compiled_dir'"
+	mkrepo_commit
+	compiled_before=$(file_state "$compiled_dir")
+	run_verdict hermetic-compiled-output
+	compiled_after=$(file_state "$compiled_dir")
+	expect_runner_denial 'HERMETIC1 compiled output outside scratch' \
+		'RED script-suite tests/cli/compiled.test.sh' "$compiled_dir"
+	if [ "$compiled_before" = "$compiled_after" ]; then
+		ok "HERMETIC1 compiled output target remains absent"
+	else
+		not_ok "HERMETIC1 compiled output target changed ($compiled_before -> $compiled_after)"
+	fi
+
+	symlink_target="$TMP/protected-symlink-target"
+	printf 'synthetic symlink sentinel\n' >"$symlink_target"
+	symlink_before=$(file_state "$symlink_target")
+	mkrepo_begin hermetic-symlink-escape
+	addfile tests/cli/fixture_test.py "import os
+from pathlib import Path
+target = Path('$symlink_target')
+link = Path(os.environ['TMPDIR']) / 'escape'
+link.symlink_to(target)
+print('HERMETIC_SYMLINK_ESCAPE ' + str(link) + ' -> ' + str(target), flush=True)
+link.write_text('changed')"
+	mkrepo_commit
+	run_verdict hermetic-symlink-escape
+	symlink_after=$(file_state "$symlink_target")
+	expect_runner_denial 'HERMETIC1 symlink escape from suite scratch' \
+		'RED python-suite tests/cli/fixture_test.py' "$symlink_target"
+	if [ "$symlink_before" = "$symlink_after" ]; then
+		ok "HERMETIC1 symlink target bytes remain unchanged"
+	else
+		not_ok "HERMETIC1 symlink target changed ($symlink_before -> $symlink_after)"
+	fi
+fi
+
 # HERMETIC1: the shared helper must preserve declared controls, scrub authority, and fence writes.
 helper="$KITROOT_DIR/scripts/suite-hermetic-env.sh"
 helper_archive="$TMP/hermetic-helper-archive"
-helper_scratch="$TMP/hermetic-helper-scratch"
+helper_scratch_root="$helper_archive/var/agent-tmp"
+helper_scratch=
+helper_override_scratch=
 protected="$TMP/hermetic-helper-protected"
 helper_out="$TMP/hermetic-helper-control.out"
-mkdir -p "$helper_archive/work" "$helper_scratch"
+mkdir -p "$helper_archive/work" "$helper_scratch_root"
+helper_previous_root=${KITLIB_TMP_ROOT-}
+helper_previous_auto=${KITLIB_TMP_AUTO_CLEANUP-}
+helper_previous_pwd=$PWD
+cd "$helper_archive" || exit 1
+KITLIB_TMP_ROOT=$helper_scratch_root
+KITLIB_TMP_AUTO_CLEANUP=0
+kitlib_tmp helper_scratch hermetic-helper-env || exit 1
+kitlib_tmp helper_override_scratch hermetic-helper-env-override || exit 1
+cd "$helper_previous_pwd" || exit 1
+if [ -n "$helper_previous_root" ]; then KITLIB_TMP_ROOT=$helper_previous_root; else unset KITLIB_TMP_ROOT; fi
+if [ -n "$helper_previous_auto" ]; then KITLIB_TMP_AUTO_CLEANUP=$helper_previous_auto; else unset KITLIB_TMP_AUTO_CLEANUP; fi
+helper_loopback_port=$(python3 -c 'import os, socket
+p = int(os.environ.get("KIT_TEST_LOOPBACK_PORT", "0"))
+for _ in range(8):
+    server = socket.socket()
+    try:
+        server.bind(("127.0.0.1", p))
+        p = server.getsockname()[1]
+    finally:
+        server.close()
+    if p != 8765:
+        print(p)
+        break
+    p = 0
+else:
+    raise SystemExit("cannot choose a suite test loopback port")') || exit 1
 printf 'protected sentinel\n' >"$protected"
 cp "$protected" "$protected.before"
 if (
@@ -199,8 +442,9 @@ if (
 		FLEET_GUARD_LIVE=1 OMP_KIT_UNDECLARED=synthetic-value TMUX=synthetic \
 		HERMETIC_CONTROL=declared \
 		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
-		--suite tests/cli/fixture_test.py --allow-env HERMETIC_CONTROL -- \
-		python3 -c 'import os, pathlib, subprocess
+		--suite tests/cli/fixture_test.py --loopback-port "$helper_loopback_port" \
+		--allow-env HERMETIC_CONTROL -- \
+		python3 -c 'import os, pathlib, subprocess, sys
 home = pathlib.Path(os.environ["HOME"]).resolve()
 scratch = pathlib.Path(os.environ["TMPDIR"]).resolve()
 assert home.is_relative_to(scratch)
@@ -216,7 +460,12 @@ for name in ("AGENT_NAME", "AGENT_MAIL_TOKEN", "FLEET_GUARD_LIVE", "OMP_KIT_UNDE
 assert os.environ["PATH"] and os.environ["LANG"]
 pathlib.Path(os.environ["TMPDIR"], "scratch-write").write_text("allowed")
 pathlib.Path.cwd().joinpath("archive-write").write_text("allowed")
-print("HERMETIC_HELPER_CONTROL", flush=True)'
+workdir = subprocess.run(["sh", sys.argv[1], "--workdir"], check=True,
+    text=True, capture_output=True)
+workdir_path = pathlib.Path(workdir.stdout.strip()).resolve()
+assert workdir_path.is_relative_to(scratch), (workdir_path, scratch, workdir.stderr)
+assert "falling back to /tmp" not in workdir.stderr, workdir.stderr
+print("HERMETIC_HELPER_CONTROL", flush=True)' "$KITROOT_DIR/scripts/runtime-adapter.sh"
 ) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
 if [ "$helper_rc" -eq 0 ] && grep -F 'HERMETIC_HELPER_CONTROL' "$helper_out" >/dev/null \
 	&& grep -F 'suite=tests/cli/fixture_test.py' "$helper_out" >/dev/null \
@@ -229,6 +478,47 @@ if [ "$helper_rc" -eq 0 ] && grep -F 'HERMETIC_HELPER_CONTROL' "$helper_out" >/d
 	ok "the shared helper logs suite authority without values and keeps declared env with owned HOME/Git config"
 else
 	not_ok "shared helper environment control failed (rc=$helper_rc)"; cat "$helper_out"
+fi
+git_shim_out="$TMP/hermetic-git-shim.out"
+if (
+	cd "$helper_archive/work"
+	env PATH="$helper_scratch/bin:/usr/bin:/bin" \
+		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+		--suite tests/cli/fixture_test.py --loopback-port "$helper_loopback_port" -- \
+		python3 -c 'import pathlib, subprocess
+repo = pathlib.Path("git-shim-probe")
+created = subprocess.run(["git", "init", "-q", str(repo)], text=True, capture_output=True)
+assert created.returncode == 0, created.stderr
+assert "xcrun_db-" not in created.stderr, created.stderr
+resolved = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=repo, text=True, capture_output=True)
+assert resolved.returncode == 0 and resolved.stdout.strip() == ".git", (resolved.stdout, resolved.stderr)
+assert "xcrun_db-" not in resolved.stderr, resolved.stderr
+print("HERMETIC_GIT_SHIM_CONTROL")'
+) >"$git_shim_out" 2>&1; then
+	git_shim_rc=0
+else
+	git_shim_rc=$?
+fi
+if [ "$git_shim_rc" -eq 0 ] && grep -F 'HERMETIC_GIT_SHIM_CONTROL' "$git_shim_out" >/dev/null \
+	&& ! grep -F 'xcrun_db-' "$git_shim_out" >/dev/null; then
+	ok "suite helper replaces the xcrun system Git shim with the developer Git executable"
+else
+	not_ok "suite helper's developer Git control failed (rc=$git_shim_rc)"; cat "$git_shim_out"
+fi
+helper_override_out="$TMP/hermetic-helper-override.out"
+helper_override_rc=0
+env OMP_KIT_TEST_WORK_ROOT="$helper_override_scratch" \
+	sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+	--suite tests/cli/fixture_test.py --loopback-port "$helper_loopback_port" \
+	--allow-env OMP_KIT_TEST_WORK_ROOT -- \
+	sh "$KITROOT_DIR/scripts/runtime-adapter.sh" --workdir \
+	>"$helper_override_out" 2>&1 || helper_override_rc=$?
+if [ "$helper_override_rc" -ne 0 ] \
+	&& ! grep -F "$helper_override_scratch/omp-kit-work." "$helper_override_out" >/dev/null; then
+	ok "suite helper prevents caller override of the runtime adapter work root"
+else
+	not_ok "suite helper allowed caller override of the runtime adapter work root"
+	cat "$helper_override_out"
 fi
 helper_python="$helper_scratch/bin/python3"
 [ -x "$helper_python" ] || helper_python=$(command -v python3)
@@ -288,10 +578,11 @@ for mode, allow in (("scrubbed", False), ("control", True)):
         "FLEET_GUARD_LIVE": "1",
         "AGENT_MAIL_TOKEN": token,
         "HERMETIC_SENTINEL_PORT": str(port),
+        "KIT_TEST_LOOPBACK_PORT": str(port),
     }
     command = [
         "sh", helper, "--archive", archive, "--scratch", scratch,
-        "--suite", "tests/cli/fixture_test.py", "--loopback-port", str(port),
+        "--suite", "tests/cli/fixture_test.py",
     ]
     if allow:
         for name in ("FLEET_GUARD_LIVE", "AGENT_MAIL_TOKEN", "HERMETIC_SENTINEL_PORT"):
@@ -495,7 +786,7 @@ FORGE_DIR="$repo.cache"; export FORGE_DIR
 run_verdict forged
 unset FORGE_DIR
 cache="$repo.cache"
-inc="$cache/$tree.incomplete.log"
+inc=$incomplete_log
 if [ "$rc" -ne 0 ] && grep -F 'per-file timing evidence is incomplete' "$out" >/dev/null \
 	&& [ ! -e "$cache/$tree.json" ] && [ -f "$inc" ] \
 	&& grep -F 'FULLSUITE-FORGE-SCRUBBED' "$inc" >/dev/null \
@@ -592,7 +883,7 @@ test("FULLSUITELOG1 slow", async () => { console.log("FULLSUITELOG1-BUNPARTIAL")
 	run_verdict bunslow
 	unset FULL_SUITE_TIMEOUT_SECS
 	cache="$repo.cache"
-	inc="$cache/$tree.incomplete.log"
+inc=$incomplete_log
 	if [ "$rc" -ne 0 ] && grep -F 'timed out' "$out" >/dev/null && [ ! -e "$cache/$tree.json" ] \
 		&& grep -F 'FULLSUITELOG1-BUNPARTIAL' "$inc" >/dev/null 2>&1; then
 		ok "a timed-out bun phase leaves its partial output in the incomplete log"
@@ -807,7 +1098,7 @@ run_verdict parhang
 hang_wall=$(($(date +%s) - hang_t0))
 unset FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
 cache="$repo.cache"
-inc="$cache/$tree.incomplete.log"
+inc=$incomplete_log
 if [ "$rc" -ne 0 ] && grep -F 'timed out after 6s; unfinished script suites: tests/cli/h2.test.sh;' "$out" >/dev/null && [ ! -e "$cache/$tree.json" ] && [ ! -e "$cache/$tree.log" ]; then
 	ok "FULLSUITEPAR1 a hung parallel suite times the run out, named, nothing cached (rc=$rc)"
 else
