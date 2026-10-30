@@ -4,9 +4,9 @@
 // carries (including a writable production BEADS_DB). Deleting BEADS_DB is
 // not isolation: br falls back to a global default tracker. This module
 // builds a per-run `br` shim that is prepended to the replay PATH:
-// reads pass through to the real br; anything else is refused unless it
-// names an explicitly admitted owned tracker, so production state can
-// never be mutated through the supported dispatch.
+// reads pass through to the real br; writes require an explicitly owned
+// database or a local fixture database physically inside the owned root.
+// An inherited tracker outside that root is never a write target.
 //
 // The shim is shell (no new runtime dependency) with the real br path and
 // the owned root baked in at install time, so it keeps working for
@@ -24,22 +24,23 @@ ROOT='@@ROOT@@'
 MARKER='READONLY_TRACKER'
 RC=77
 deny() {
-	printf '%s: refusing %s (writes only via explicit owned --db under %s); unmet prerequisite: owned tracker binding\\n' "$MARKER" "$1" "$ROOT" >&2
+	printf '%s: refusing %s (writes require an owned tracker under %s); unmet prerequisite: owned tracker binding\n' "$MARKER" "$1" "$ROOT" >&2
 	exit $RC
 }
 DB=""
+HAS_DB_ARG=0
 SUB=""
 SUB2=""
 PREV=""
 for arg in "$@"; do
 	if [ -n "$PREV" ]; then
-		if [ "$PREV" = "--db" ]; then DB="$arg"; fi
+		if [ "$PREV" = "--db" ]; then DB="$arg"; HAS_DB_ARG=1; fi
 		PREV=""
 		continue
 	fi
 	case "$arg" in
-		--db) PREV="--db" ;;
-		--db=*) DB="$arg" ;;
+		--db) PREV="--db"; HAS_DB_ARG=1 ;;
+		--db=*) DB="$arg"; HAS_DB_ARG=1 ;;
 		--actor|--format|--limit|--offset|--sort|--since|--until) PREV="$arg" ;;
 		--*) ;;
 		*) if [ -z "$SUB" ]; then SUB="$arg"; elif [ -z "$SUB2" ]; then SUB2="$arg"; fi ;;
@@ -51,6 +52,61 @@ esac
 case "$SUB" in
 	""|help|version) exec "$REAL_BR" "$@" ;;
 esac
+ROOT_PHYS=$(cd "$ROOT" 2>/dev/null && pwd -P) || deny "root $ROOT"
+path_under_root() {
+	CHECK_PATH=$1
+	case "$CHECK_PATH" in
+		/*) ;;
+		*) CHECK_PATH="$PWD/$CHECK_PATH" ;;
+	esac
+	case "$CHECK_PATH" in
+		*"/../"*|*"/./"*|*"//"*) return 1 ;;
+	esac
+	if [ -L "$CHECK_PATH" ]; then return 1; fi
+	CHECK_PARENT=$(dirname "$CHECK_PATH") || return 1
+	while [ ! -d "$CHECK_PARENT" ]; do
+		CHECK_NEXT=$(dirname "$CHECK_PARENT") || return 1
+		[ "$CHECK_NEXT" != "$CHECK_PARENT" ] || return 1
+		CHECK_PARENT="$CHECK_NEXT"
+	done
+	CHECK_PARENT=$(cd "$CHECK_PARENT" 2>/dev/null && pwd -P) || return 1
+	case "$CHECK_PARENT/" in
+		"$ROOT_PHYS/"*) return 0 ;;
+	esac
+	return 1
+}
+if [ "$HAS_DB_ARG" = "0" ]; then
+	LOCAL_DB="$PWD/.beads/beads.db"
+	if [ -f "$LOCAL_DB" ] && [ ! -L "$LOCAL_DB" ] && path_under_root "$LOCAL_DB"; then
+		if [ -z "$BEADS_DB" ] || ! path_under_root "$BEADS_DB"; then
+			BEADS_DB="$LOCAL_DB"
+			export BEADS_DB
+		fi
+	fi
+fi
+if [ "$SUB" = "init" ]; then
+	if [ -n "$DB" ]; then
+		path_under_root "$DB" || deny "init database $DB"
+		exec "$REAL_BR" "$@"
+	fi
+	TGT="$SUB2"
+	if [ -z "$TGT" ]; then TGT="."; fi
+	case "$TGT" in
+		/*) ABS="$TGT" ;;
+		.) ABS="$PWD" ;;
+		*) ABS="$PWD/$TGT" ;;
+	esac
+	INIT_DB="$ABS/.beads/beads.db"
+	path_under_root "$INIT_DB" || deny "init $TGT"
+	BEADS_DB="$INIT_DB"
+	export BEADS_DB
+	exec "$REAL_BR" "$@"
+fi
+EFF="$DB"
+if [ -z "$EFF" ]; then EFF="$BEADS_DB"; fi
+if [ -n "$EFF" ] && path_under_root "$EFF"; then
+	exec "$REAL_BR" "$@"
+fi
 case "$SUB" in
 	comments|dep|gate|label|epic|config|query|audit)
 		case " $SUB " in
@@ -71,28 +127,6 @@ esac
 case " blocked capabilities changelog completions count coordination graph info lint list orphans ready robot-docs scheduler schema search show stale stats status vcs-status version where help " in
 	*" $SUB "*) exec "$REAL_BR" "$@" ;;
 esac
-if [ "$SUB" = "init" ]; then
-	TGT="$SUB2"
-	if [ -z "$TGT" ]; then TGT="."; fi
-	case "$TGT" in
-		/*) ABS="$TGT" ;;
-		*) ABS="$PWD/$TGT" ;;
-	esac
-	case "$ABS/" in
-		"$ROOT/"*) exec "$REAL_BR" "$@" ;;
-	esac
-	deny "init $TGT"
-fi
-EFF="$DB"
-if [ -z "$EFF" ]; then EFF="$BEADS_DB"; fi
-if [ -n "$EFF" ]; then
-	case "$EFF" in
-		*"/../"*|*"/./"*|*"//"*) deny "path $EFF" ;;
-	esac
-	case "$EFF/" in
-		"$ROOT/"*) exec "$REAL_BR" "$@" ;;
-	esac
-fi
 deny "$SUB"
 `;
 

@@ -688,7 +688,19 @@ test("VERIFYSCRATCH1: a replay's fixture tracker under $GRADE_WAVE_SCRATCH is ad
 	const cdir = join(base, "verifyscratch");
 	mkdirSync(join(cdir, "scripts"), { recursive: true });
 	// grade_wave.py --selftest's shape: fixtures under GRADE_WAVE_SCRATCH when set, else a sibling dir of its own.
-	writeFileSync(join(cdir, "scripts", "fx.sh"), "#!/bin/sh\nroot=\"${GRADE_WAVE_SCRATCH:-$1}\"\nd=\"$root/grade_wave_selftest.fx.$$\"\nmkdir -p \"$d\" && cd \"$d\" && br init --db \"$d/.beads/beads.db\"\n");
+	writeFileSync(join(cdir, "scripts", "fx.sh"), [
+		"#!/bin/sh",
+		"set -eu",
+		"root=\"${GRADE_WAVE_SCRATCH:-$1}\"",
+		"d=\"$root/grade_wave_selftest.fx.$$\"",
+		"mkdir -p \"$d\"",
+		"cd \"$d\"",
+		"br init",
+		"created=$(br create \"verify scratch fixture\" --acceptance-criteria \"- [ ] fixture\" --silent --no-auto-import --no-auto-flush --actor selftest)",
+		"listed=$(br show \"$created\" --json)",
+		"case \"$listed\" in *\"verify scratch fixture\"*) ;; *) printf '%s\\n' \"$listed\"; exit 10;; esac",
+		"printf '%s\\n' FIXTURE_OK",
+	].join("\n") + "\n");
 	await sh(["git", "init", "-q"], cdir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], cdir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], cdir);
@@ -696,7 +708,7 @@ test("VERIFYSCRATCH1: a replay's fixture tracker under $GRADE_WAVE_SCRATCH is ad
 	const t = await tracker("verifyscratch-t");
 	const id = await createBead(t, "verify scratch probe");
 	const ac = [
-		`- [ ] [a] [build] selftest fixture under the verify scratch is admitted: \`sh scripts/fx.sh ${outside}\` -> prints Initialized`,
+		`- [ ] [a] [build] selftest fixture under the verify scratch is admitted: \`sh scripts/fx.sh ${outside}\` -> prints FIXTURE_OK`,
 		`- [ ] [b] [build] the same fixture outside the verify root is refused: \`mkdir -p ${outside}/direct && cd ${outside}/direct && br init --db ${outside}/direct/.beads/beads.db\` -> prints READONLY_TRACKER`,
 		`- [ ] [c] [build] planted: with GRADE_WAVE_SCRATCH removed the first fixture is refused: \`env -u GRADE_WAVE_SCRATCH sh scripts/fx.sh ${outside}\` -> prints READONLY_TRACKER`,
 	].join("\n");
@@ -705,13 +717,13 @@ test("VERIFYSCRATCH1: a replay's fixture tracker under $GRADE_WAVE_SCRATCH is ad
 	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: trackerEnv(t), dryRun: true, family: "same (bun)" });
 	expect(res.code).toBe("DRY_RUN");
 	expect(res.replays.map(r => [r.letter, r.pass, r.detail.split(";")[0]])).toEqual([
-		["a", true, "output contains \"Initialized\""],
+		["a", true, "output contains \"FIXTURE_OK\""],
 		["b", true, "output contains \"READONLY_TRACKER\""],
 		["c", true, "output contains \"READONLY_TRACKER\""],
 	]);
 	expect(existsSync(join(outside, "direct", ".beads", "beads.db"))).toBe(false);
 	expect(stateHash(t)).toBe(beforeHash);
-});
+}, 30_000);
 
 /** br's own close policy, as the omp-kit tracker runs it: a close needs every acceptance box ticked and one reviewer. */
 const CLOSE_POLICY = [
