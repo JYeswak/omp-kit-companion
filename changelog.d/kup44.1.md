@@ -1,0 +1,3 @@
+- Record schema-v2 full-suite and focused-gate evidence with per-file wall/CPU time, exit status, command, source closure and producer identity; retain queryable timing CSVs and durable native-format timing maps.
+- Refuse successful but over-budget changed tests at push, naming their measured duration and cap. Report the 225-second cap as an initial heuristic; reject impossible aggregate cycle lower bounds without claiming a latency guarantee.
+- Bind reusable verdicts, focused coverage and tag admission to the complete authoritative judge dependency set. Reject incomplete or stale records, isolate per-run claims and propagate cancellation through nested file supervisors.

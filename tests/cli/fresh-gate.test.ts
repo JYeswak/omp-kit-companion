@@ -469,7 +469,7 @@ function runFocused(fx: SaveFixture, source: string, archive: string, changed: s
 	writeFileSync(probe, `set -eu\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\ngate_focused || rc=$?\nexit "$rc"\n`);
 	const started = Date.now();
 	const result = Bun.spawnSync(["sh", probe], {
-		env: { ...process.env, ...fx.env, TMPDIR: join(fx.dir, "caller-tmp"), ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
+		env: { ...process.env, ...fx.env, ROOT: root, TMPDIR: join(fx.dir, "caller-tmp"), ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
 		stdout: "pipe", stderr: "pipe",
 	});
 	return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString(), seconds: (Date.now() - started) / 1000 };
@@ -479,12 +479,27 @@ function ledger(fx: SaveFixture): Array<Record<string, unknown>> {
 	return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
 }
 
+function measuredFiles(record: Record<string, unknown>) {
+	const evidence = record.evidence;
+	if (!evidence || typeof evidence !== "object" || !("files" in evidence) || !Array.isArray(evidence.files)) {
+		throw new Error("missing measured file evidence");
+	}
+	return evidence.files.map((row: unknown) => {
+		if (!row || typeof row !== "object" || !("path" in row) || typeof row.path !== "string"
+			|| !("started_ms" in row) || typeof row.started_ms !== "number"
+			|| !("finished_ms" in row) || typeof row.finished_ms !== "number"
+			|| !("elapsed_ms" in row) || typeof row.elapsed_ms !== "number"
+			|| !("rc" in row) || typeof row.rc !== "number") throw new Error("invalid measured file");
+		return { path: row.path, started_ms: row.started_ms, finished_ms: row.finished_ms, elapsed_ms: row.elapsed_ms, rc: row.rc };
+	});
+}
+
 test.skipIf(!AMPLE)("CIGATE1 planted: a src change runs the tests importing it; breaking it refuses the push (needs >= 10 GiB free)", () => {
 	const source = readFileSync(gate, "utf8");
 	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
 	try {
 		const green = runFocused(fx, source, affectedArchive(fx, 42, 42), "lib/mod.ts");
-		expect(green.code).toBe(0);
+		expect(green.code, green.out).toBe(0);
 		expect(green.out).toContain("affected: tests/cli/mod.test.ts <- lib/mod.ts");
 		expect(green.out).toContain("disk-floor: OK");
 		expect(green.out).toContain("affected tests: files=1 ran=1 fail=0 rc=0");
@@ -503,6 +518,67 @@ test.skipIf(!AMPLE)("CIGATE1 planted: a src change runs the tests importing it; 
 	}
 }, 120_000);
 
+test.skipIf(!AMPLE)("SUITEBUDGET1 refuses a successful file over its measured policy cap", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const judge = join(fx.dir, "judge");
+		const scripts = join(judge, "scripts");
+		mkdirSync(scripts, { recursive: true });
+		mkdirSync(join(judge, ".github"));
+		for (const name of ["fresh-gate.sh", "gate-disk-floor.ts", "suite-metrics.py", "test-budget.ts", "affected-tests.ts", "gate-ci-only.tsv"]) {
+			symlinkSync(join(root, "scripts", name), join(scripts, name));
+		}
+		const policy = join(judge, ".github/test-budget.json");
+		const configure = (cycle: number) => writeFileSync(policy, JSON.stringify({
+			version: 1, requirements: { push_p95_s: 600, full_cycle_s: cycle },
+			initial_heuristic: { per_file_cap_s: cycle / 4, derivation: "full_cycle_s / 4",
+				status: "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED" },
+		}));
+		const archive = affectedArchive(fx, 42, 42);
+		configure(900);
+		const control = runFocused(fx, source, archive, "lib/mod.ts", scripts);
+		expect(control.code, control.out).toBe(0);
+		// A fixture-only tiny cap exercises the real measured refusal without a
+		// five-minute sleeper or a forged timing row. Product policy is untouched.
+		configure(0.004);
+		const refused = runFocused(fx, source, archive, "lib/mod.ts", scripts);
+		expect(refused.code, refused.out).not.toBe(0);
+		expect(refused.out).toContain("OVER_BUDGET");
+		expect(refused.out).toContain("tests/cli/mod.test.ts");
+		const record = ledger(fx).at(-1)!;
+		expect(record.rc).not.toBe(0);
+		const files = measuredFiles(record);
+		expect(files[0]!.rc).toBe(0);
+		expect(files[0]!.elapsed_ms).toBeGreaterThan(1);
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test.skipIf(!AMPLE || process.env.OMP_KIT_LITERAL_SUITE_BUDGET !== "1")("SUITEBUDGET1 literal 10-second control and 300-second file", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		writeFileSync(join(archive, "tests/cli/ten.test.sh"), '#!/bin/sh\nsleep 10\nprintf "ten-second control passed\\n"\n');
+		writeFileSync(join(archive, "tests/cli/three-hundred.test.sh"), '#!/bin/sh\nsleep 300\nprintf "three-hundred-second file passed\\n"\n');
+		const control = runFocused(fx, source, archive, "tests/cli/ten.test.sh");
+		expect(control.code, control.out).toBe(0);
+		const slow = runFocused(fx, source, archive, "tests/cli/three-hundred.test.sh");
+		console.log(slow.out);
+		expect(slow.code, slow.out).not.toBe(0);
+		expect(slow.out).toContain("OVER_BUDGET");
+		expect(slow.out).toContain("tests/cli/three-hundred.test.sh");
+		expect(slow.out).toContain('"cap_s":225');
+		const rows = measuredFiles(ledger(fx).at(-1)!);
+		expect(rows[0]!.elapsed_ms).toBeGreaterThanOrEqual(300000);
+		expect(rows[0]!.rc).toBe(0);
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 360_000);
+
 test.skipIf(!AMPLE)("CIGATE1 shards: the selection runs in K parallel bun workers, and a failure in any shard refuses (needs >= 10 GiB free)", () => {
 	const source = readFileSync(gate, "utf8");
 	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
@@ -513,17 +589,21 @@ test.skipIf(!AMPLE)("CIGATE1 shards: the selection runs in K parallel bun worker
 		const green = runFocused(fx, source, archive, "lib/mod.ts");
 		expect(green.code).toBe(0);
 		expect(green.out).toContain("affected bun tests: files=3 workers=2");
-		expect(green.out).toContain("2x PARALLEL");
+		const measured = measuredFiles(ledger(fx).at(-1)!).sort((a, b) => a.started_ms - b.started_ms);
+		expect(measured.map(row => row.path).sort()).toEqual(["tests/cli/mod.test.ts", "tests/cli/mod2.test.ts", "tests/cli/mod3.test.ts"]);
+		expect(measured.every(row => row.rc === 0)).toBe(true);
+		expect(measured[1]!.started_ms).toBeLessThan(measured[0]!.finished_ms);
 		expect(green.out).toContain("FRESH-GATE: VERDICT TESTED files=3 ran=3");
 		writeFileSync(join(archive, "tests/cli/mod3.test.ts"), `import { expect, test } from "bun:test";\ntest("broken shard", () => { expect(1).toBe(2); });\n`);
 		const red = runFocused(fx, source, archive, "lib/mod.ts\ntests/cli/mod3.test.ts");
 		expect(red.code).not.toBe(0);
 		expect(red.out).toContain("FRESH-GATE: RED: affected tests did not pass");
-		// Mutant: without --parallel the run is one serial process.
-		const serial = source.replace('set -- --parallel="$workers" "$@"', ":");
-		expect(serial).not.toBe(source);
+		// Paired serial control must not overlap file-process lifetimes.
+		fx.env.FRESH_GATE_TEST_WORKERS = "1";
 		writeFileSync(join(archive, "tests/cli/mod3.test.ts"), `import { expect, test } from "bun:test";\ntest("ok", () => { expect(1).toBe(1); });\n`);
-		expect(runFocused(fx, serial, archive, "lib/mod.ts").out).not.toContain("PARALLEL");
+		expect(runFocused(fx, source, archive, "lib/mod.ts").code).toBe(0);
+		const serial = measuredFiles(ledger(fx).at(-1)!).sort((a, b) => a.started_ms - b.started_ms);
+		expect(serial[1]!.started_ms).toBeGreaterThanOrEqual(serial[0]!.finished_ms);
 	} finally {
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
@@ -613,7 +693,7 @@ test.skipIf(!AMPLE)("CIGATE1 planted: a shell suite naming a changed script runs
 		writeFileSync(join(archive, "scripts/tool.sh"), "#!/bin/sh\necho tool-broken\n");
 		const red = runFocused(fx, source, archive, "scripts/tool.sh");
 		expect(red.code).not.toBe(0);
-		expect(red.out).toContain("RED script-suite tests/cli/tool.test.sh rc=1");
+		expect(red.out).toContain("RED script-suite tests/cli/tool.test.sh");
 		expect(red.out).toContain("FRESH-GATE: RED: affected tests did not pass");
 	} finally {
 		rmSync(fx.dir, { recursive: true, force: true });
@@ -682,6 +762,9 @@ function gateTree(fx: SaveFixture, manifest: string): string {
 	mkdirSync(join(dir, "scripts"));
 	symlinkSync(join(root, "src"), join(dir, "src"));
 	for (const name of ["affected-tests.ts", "gate-disk-floor.ts"]) cpSync(join(root, "scripts", name), join(dir, "scripts", name));
+	for (const name of ["suite-metrics.py", "test-budget.ts", "fresh-gate.sh"]) symlinkSync(join(root, "scripts", name), join(dir, "scripts", name));
+	mkdirSync(join(dir, ".github"));
+	cpSync(join(root, ".github/test-budget.json"), join(dir, ".github/test-budget.json"));
 	writeFileSync(join(dir, "scripts/gate-ci-only.tsv"), manifest);
 	return join(dir, "scripts");
 }

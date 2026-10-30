@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "requirements": { "push_p95_s": 600, "full_cycle_s": 900 },
+  "initial_heuristic": { "per_file_cap_s": 225, "derivation": "full_cycle_s / 4", "status": "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED" }
+}

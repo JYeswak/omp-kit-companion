@@ -15,6 +15,7 @@ ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
 COMMIT=HEAD
 BASE=
 ARCHIVE_DIR=
+ARCHIVE_SUPPLIED=0
 CHANGED=
 WORK=
 OWN_WORK=0
@@ -38,17 +39,18 @@ run_step() {
 	label=$1
 	shift
 	log="$WORK/$label.log"
+	phase_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 	echo "== $label"
-	if "$@" >"$log" 2>&1; then
-		cat "$log"
-		echo "GREEN $label"
-		return 0
-	else
-		rc=$?
-		cat "$log"
-		echo "RED $label producer_rc=$rc" >&2
-		return "$rc"
-	fi
+	if "$@" >"$log" 2>&1; then step_rc=0; else step_rc=$?; fi
+	cat "$log"
+	PHASE="$label" START="$phase_started_ms" RC="$step_rc" OUT="$WORK/gate-phases.jsonl" python3 - <<'PYEOF'
+import json, os, time
+row = {"stage": os.environ["PHASE"], "wall_ms": time.time_ns() // 1000000 - int(os.environ["START"]), "rc": int(os.environ["RC"])}
+with open(os.environ["OUT"], "a") as handle:
+    handle.write(json.dumps(row) + "\n")
+PYEOF
+	if [ "$step_rc" -eq 0 ]; then echo "GREEN $label"; else echo "RED $label producer_rc=$step_rc" >&2; fi
+	return "$step_rc"
 }
 
 # Scratch measurement refs skip ONLY the budget judgment; the wording names
@@ -286,14 +288,27 @@ run_affected_tests() {
 	scripts_out="$WORK/scripts.out"
 	: >"$tests_out"
 	: >"$scripts_out"
+	metric_dir="$WORK/file-metrics"
+	metric_rows="$WORK/file-metrics.json"
+	metric_declared="$WORK/file-metrics.declared"
+	mkdir -p "$metric_dir"
+	# A gate may judge more than one focused selection in the same owned WORK.
+	# Retain no outcome from an earlier selection as evidence for this one.
+	rm -f "$metric_dir"/*.json "$metric_dir"/*.log "$metric_dir"/*.timings \
+		"$WORK/bun-metrics.stage" "$WORK/scripts-metrics.stage" "$metric_rows"
+	for metric_path in "$@"; do printf '%s\n' "$metric_path"; done >"$metric_declared"
+	metric_tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}") || return 1
+	metric_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
+	metric_load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
 	# bun reads a bare argument as a name filter; ./PATH names the file. Shell and python suites run
 	# as CI runs them (`sh FILE`, `python3 FILE`).
 	bun_files=0
+	workers=0
 	script_files=
 	for test_file in "$@"; do
 		case "$test_file" in
 			*.test.sh|*.py) script_files="$script_files $test_file" ;;
-			*) set -- "$@" "./$test_file"; bun_files=$((bun_files + 1)) ;;
+			*) set -- "$@" "$test_file"; bun_files=$((bun_files + 1)) ;;
 		esac
 		shift
 	done
@@ -303,39 +318,30 @@ run_affected_tests() {
 	tests_rc=0
 	if [ "$bun_files" -gt 0 ]; then
 		mkdir -p "$ARCHIVE_DIR/var/agent-tmp"
-		# Shards: bun's own --parallel workers, K from cores (a quarter, 2..4, as CI shards core four
-		# ways; 8 workers timed out compiled-CLI tests at 120 s on this Mac, measured 2026-10-19), never
-		# more than the selected files. --timings (CI's measured per-file durations) starts the slowest
-		# files first. The whole run is one heavy job at nice 10.
 		workers=$(test_workers)
 		[ "$workers" -le "$bun_files" ] || workers=$bun_files
-		set -- --parallel="$workers" "$@"
-		[ -f "$ARCHIVE_DIR/.github/core-test-timings.json" ] && set -- --timings="$ARCHIVE_DIR/.github/core-test-timings.json" "$@"
 		echo "affected bun tests: files=$bun_files workers=$workers"
 		(
 			cd "$ARCHIVE_DIR"
-			# Keep Bun test temp files in this exact-tree export, not the caller's live repo.
 			heavy_step tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml" \
-				bun --config="$ARCHIVE_DIR/bunfig.toml" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@"
+				python3 "$SCRIPT_DIR/suite-metrics.py" stage --runner bun --records "$metric_dir" \
+				--cwd "$ARCHIVE_DIR" --tree "$metric_tree" --summary "$WORK/bun-metrics.stage" \
+				--bun-config "$ARCHIVE_DIR/bunfig.toml" --workers "$workers" --deadline 3600 "$@"
 		) >"$tests_out" 2>&1 || tests_rc=$?
 		cat "$tests_out"
 	fi
 	if [ -n "$script_files" ]; then
 		mkdir -p "$ARCHIVE_DIR/var/agent-tmp"
 		script_rc=0
-		# Intentional word splitting: newline/space-separated repo paths with no spaces.
-		# shellcheck disable=SC2086,SC2016
+		# Shell/Python retain their serial execution contract; only Bun uses the
+		# existing bounded worker count. Every record comes from a real file process.
+		# shellcheck disable=SC2086
 		(
 			cd "$ARCHIVE_DIR"
-			export TMPDIR="$ARCHIVE_DIR/var/agent-tmp"
-			heavy_step script-tests sh -c 'ran=0; failed=0
-				for suite; do
-					case "$suite" in *.py) runner=python3 ;; *) runner=sh ;; esac
-					if "$runner" "$suite"; then echo "GREEN script-suite $suite"; else echo "RED script-suite $suite rc=$?"; failed=$((failed + 1)); fi
-					ran=$((ran + 1))
-				done
-				echo "script suites: ran=$ran fail=$failed"
-				[ "$failed" -eq 0 ]' sh $script_files
+			heavy_step script-tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" \
+				python3 "$SCRIPT_DIR/suite-metrics.py" stage --runner scripts --records "$metric_dir" \
+				--cwd "$ARCHIVE_DIR" --tree "$metric_tree" --summary "$WORK/scripts-metrics.stage" \
+				--workers 1 --deadline 3600 $script_files
 		) >"$scripts_out" 2>&1 || script_rc=$?
 		cat "$scripts_out"
 		[ "$tests_rc" -ne 0 ] || tests_rc=$script_rc
@@ -344,26 +350,42 @@ run_affected_tests() {
 	echo "$(($(date +%s) - tests_started - (queued_after - queued_before)))" >>"$WORK/tests.secs"
 	# bun's summary: " N pass", " N fail", "Ran N test(s) across M file(s)." A bun selection that ran
 	# no test is not a pass, whatever its exit status. Each shell or python suite counts as one run.
-	bun_ran=$(awk '$1 == "Ran" && ($3 == "test" || $3 == "tests") && $4 == "across" { print $2 }' "$tests_out" | tail -n 1)
-	failed=$(awk 'NF == 2 && $2 == "fail" { print $1 }' "$tests_out" | tail -n 1)
-	script_ran=$(awk '$1 == "script" && $2 == "suites:" { sub("ran=", "", $3); print $3 }' "$scripts_out" | tail -n 1)
-	ran=$((${bun_ran:-0} + ${script_ran:-0}))
+	bun_ran=0; failed=0; script_ran=0
+	if [ -f "$WORK/bun-metrics.stage" ]; then
+		bun_ran=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["test_count"])' "$WORK/bun-metrics.stage")
+		failed=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["test_failures"])' "$WORK/bun-metrics.stage")
+	fi
+	if [ -f "$WORK/scripts-metrics.stage" ]; then
+		script_ran=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["files"]))' "$WORK/scripts-metrics.stage")
+	fi
+	ran=$((bun_ran + script_ran))
+	timing_tables="$WORK/timings"
+	if [ -n "${FRESH_GATE_LEDGER:-}" ]; then
+		timing_tables="$(dirname "$FRESH_GATE_LEDGER")/full-suite-verdicts/timings"
+	fi
+	if ! python3 "$SCRIPT_DIR/suite-metrics.py" collect --records "$metric_dir" \
+		--declared "$metric_declared" --output "$metric_rows" --csv "$WORK/file-metrics.csv" \
+		--cwd "$ARCHIVE_DIR" --tables-dir "$timing_tables"; then
+		[ "$tests_rc" -ne 0 ] || tests_rc=1
+	fi
+	if [ "$tests_rc" -eq 0 ]; then
+		bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \
+			--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --json || tests_rc=$?
+	fi
 	echo "affected tests: files=$files ran=$ran fail=${failed:-0} rc=$tests_rc"
 	record_run "$ran" "$files" "$tests_rc"
 	if [ "$tests_rc" -ne 0 ]; then
 		echo "FRESH-GATE: RED: affected tests did not pass (exit $tests_rc); the push is refused" >&2
 		return "$tests_rc"
 	fi
-	# NODOUBLEPASS1 (ompkit-bp50d): on GREEN, name the tree and every file this pass judged, so the
-	# full-suite verdict on the same tree runs only the complement. Bun ran the whole selection in one
-	# invocation with 0 fail, and the script loop exits 0 only when every suite was GREEN, so each
-	# listed file passed. A later verdict trusts the report only when its tree is the candidate's.
+	# Same-tree reuse carries the actual measured records as well as the selected
+	# paths. An absent/truncated row never becomes a reusable file outcome.
 	if [ -n "${FRESH_GATE_PASSED_OUT:-}" ] && { [ "$bun_files" -eq 0 ] || [ "${bun_ran:-0}" -gt 0 ]; }; then
 		passed_tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}" 2>/dev/null) || passed_tree=
 		if [ -n "$passed_tree" ]; then
 			# Header: tree, the judge (this script's bytes as executed) and the runtime; the verdict accepts
 			# the report only when all three are its own (QuietBadger AM 69014: never tree+names alone).
-			judge_sha=$(shasum -a 256 "$SCRIPT_DIR/fresh-gate.sh" 2>/dev/null | cut -d' ' -f1)
+			judge_sha=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$SCRIPT_DIR/.." --scope focused) || return 1
 			{
 				echo "tree $passed_tree"
 				echo "judge ${judge_sha:-unknown}"
@@ -371,6 +393,7 @@ run_affected_tests() {
 				# shellcheck disable=SC2086
 				printf '%s\n' $focused_selection
 			} >"$FRESH_GATE_PASSED_OUT" 2>/dev/null || :
+			cp "$metric_rows" "$FRESH_GATE_PASSED_OUT.timings.json" || return 1
 		fi
 	fi
 	if [ "$bun_files" -gt 0 ] && [ "${bun_ran:-0}" -eq 0 ]; then
@@ -437,14 +460,57 @@ apply_ci_only() {
 	'
 }
 
-# One JSON line per gate that reaches test selection, in the pushing repo's git dir, so a run of
-# pushes shows how many tests each gate ran (CIGATE1 live acceptance). Off when FRESH_GATE_LEDGER is
-# empty (fixture probes, a stock clone without a git dir).
+# One terminal JSON line per gate, including pre-selection failures. Focused-only
+# fixture callers record their own measured interval; absent timing stays unknown.
 record_run() {
-	[ -n "${FRESH_GATE_LEDGER:-}" ] || return 0
-	mkdir -p "$(dirname "$FRESH_GATE_LEDGER")" 2>/dev/null || return 0
-	printf '{"ts":"%s","commit":"%s","base":"%s","changed":%s,"selected_files":%s,"tests_ran":%s,"rc":%s}\n' \
-		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$COMMIT" "${BASE:-}" "$(printf '%s\n' "$CHANGED" | grep -c .)" "$2" "$1" "$3" >>"$FRESH_GATE_LEDGER" 2>/dev/null || true
+	last_record_tests=$1; last_record_files=$2
+	[ "${gate_defer_record:-0}" != 1 ] || return 0
+	METRICS="${metric_rows:-}" DECLARED="${metric_declared:-}" START_MS="${gate_started_ms:-${metric_started_ms:-0}}" LOAD_START="${gate_load_start:-${metric_load_start:-null}}" \
+	WORKER_COUNT="${workers:-0}" LEDGER="${FRESH_GATE_LEDGER:-}" RUN_COMMIT="$COMMIT" RUN_BASE="${BASE:-}" \
+	RUN_CHANGED="$CHANGED" RUN_TESTS="$1" RUN_FILES="$2" RUN_RC="$3" JUDGE="$SCRIPT_DIR/fresh-gate.sh" JUDGE_ID="${gate_judge_id:-}" GATE_PHASES="$WORK/gate-phases.jsonl" \
+	python3 - <<'PYEOF'
+import hashlib, json, os, time
+from datetime import datetime, timezone
+from pathlib import Path
+rows_path = Path(os.environ["METRICS"]) if os.environ["METRICS"] else None
+rows = json.loads(rows_path.read_text()) if rows_path and rows_path.is_file() else []
+declared_path = Path(os.environ["DECLARED"]) if os.environ["DECLARED"] else None
+declared = declared_path.read_text().splitlines() if declared_path and declared_path.is_file() else []
+stages = {}
+for runner in ("bun", "sh", "python3"):
+    selected = [row for row in rows if row["runner"] == runner]
+    stages[runner] = {
+        "wall_ms": max(row["finished_ms"] for row in selected) - min(row["started_ms"] for row in selected) if selected else 0,
+        "cpu_user_ms": sum(row["cpu_user_ms"] for row in selected),
+        "cpu_system_ms": sum(row["cpu_system_ms"] for row in selected),
+    }
+phase_path = Path(os.environ["GATE_PHASES"])
+if phase_path.is_file():
+    for line in phase_path.read_text().splitlines():
+        phase = json.loads(line)
+        stages[phase["stage"]] = {"wall_ms": phase["wall_ms"], "rc": phase["rc"]}
+end = time.time_ns() // 1000000
+start = int(os.environ["START_MS"])
+entry = {"version": 2, "ts": datetime.now(timezone.utc).isoformat(),
+         "commit": os.environ["RUN_COMMIT"], "base": os.environ["RUN_BASE"],
+         "changed": len(os.environ["RUN_CHANGED"].splitlines()),
+         "selected_files": int(os.environ["RUN_FILES"]), "tests_ran": int(os.environ["RUN_TESTS"]),
+         "rc": int(os.environ["RUN_RC"]),
+         "judge": {"sha256": os.environ["JUDGE_ID"] or hashlib.sha256(Path(os.environ["JUDGE"]).read_bytes()).hexdigest(),
+                   "scope": "focused" if os.environ["JUDGE_ID"] else "standalone-fixture"},
+         "timing": {"wall_ms": end - start if start else None, "started_ms": start or None,
+                    "load_start": json.loads(os.environ["LOAD_START"]), "load_end": list(os.getloadavg()),
+                    "workers": {"bun": int(os.environ["WORKER_COUNT"]), "scripts": int(any(row["runner"] != "bun" for row in rows))}, "stages": stages},
+         "evidence": {"complete": bool(declared) and len(rows) == len(declared) and all(row["complete"] for row in rows),
+                      "declared_files": declared, "files": rows}}
+line = json.dumps(entry, allow_nan=False)
+print("FRESH-GATE: measured-verdict " + line)
+if os.environ["LEDGER"]:
+    ledger = Path(os.environ["LEDGER"])
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a") as handle:
+        handle.write(line + "\n")
+PYEOF
 }
 
 gate_notes() {
@@ -759,6 +825,7 @@ while [ "$#" -gt 0 ]; do
 		--archive-dir)
 			[ "$#" -ge 2 ] || { usage; exit 2; }
 			ARCHIVE_DIR=$2
+			ARCHIVE_SUPPLIED=1
 			shift 2
 			;;
 		--changed-file)
@@ -815,13 +882,23 @@ setup_case_env
 # CIGATE1 ledger: the pushing checkout's own git dir (never committed, never shared). An explicit
 # FRESH_GATE_LEDGER (including empty, which turns it off) wins.
 if [ -z "${FRESH_GATE_LEDGER+set}" ]; then
-	ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || ledger_git=
-	FRESH_GATE_LEDGER=${ledger_git:+$ledger_git/omp-kit/fresh-gate-runs.jsonl}
+	if [ "$ARCHIVE_SUPPLIED" = 0 ]; then
+		ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || ledger_git=
+		FRESH_GATE_LEDGER=${ledger_git:+$ledger_git/omp-kit/fresh-gate-runs.jsonl}
+	else
+		# A caller-owned fixture/archive is not an operational push observation.
+		FRESH_GATE_LEDGER=""
+	fi
 fi
 # GATESCR1: the steps run in the background and this shell waits, because a POSIX shell defers a
 # trap until its foreground job ends; with a hung suite in the foreground, HUP/INT/TERM never ran
 # the handler. `wait` returns on the signal, so the handler stops the tree and removes WORK.
 run_gate() {
+	gate_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
+	gate_load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
+	gate_judge_id=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$SCRIPT_DIR/.." --scope focused) || return 1
+	gate_defer_record=1
+	last_record_tests=0; last_record_files=0
 	# SAVEFIRST1 (ompkit-774u.16): everything under the gate — including ladders nested
 	# inside `test --full` — admits on physical bytes. sanitizedEnv carries this into the
 	# isolated fixture; ladder.sh applies it to its heavy calls. Standalone runs leave it
@@ -829,13 +906,11 @@ run_gate() {
 	export OMP_KIT_DISK_OBSERVER=statfs
 	disk_pressure_flag
 	started=$(date +%s)
-	run_step manifest gate_manifest || exit 1
-	run_step cli-compile gate_cli_compile || exit 1
-	run_step cli-boot gate_cli_boot || exit 1
-	run_step harness-gate gate_harness || exit 1
-	run_step notes gate_notes || exit 1
-	run_step readme gate_readme || exit 1
-	run_step focused gate_focused || exit 1
+	gate_rc=0
+	for phase in manifest:gate_manifest cli-compile:gate_cli_compile cli-boot:gate_cli_boot \
+		harness-gate:gate_harness notes:gate_notes readme:gate_readme focused:gate_focused; do
+		run_step "${phase%%:*}" "${phase#*:}" || { gate_rc=$?; break; }
+	done
 	elapsed=$(($(date +%s) - started))
 	# The affected tests' own run time is reported, not judged against the 180 s machinery budget.
 	tests=0
@@ -848,7 +923,10 @@ run_gate() {
 	if [ -f "$WORK/queued.secs" ]; then
 		queued=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
 	fi
-	judge_budget "$elapsed" "$tests" "$queued" || exit 1
+	if [ "$gate_rc" -eq 0 ]; then judge_budget "$elapsed" "$tests" "$queued" || gate_rc=$?; fi
+	gate_defer_record=0
+	record_run "$last_record_tests" "$last_record_files" "$gate_rc" || return 1
+	return "$gate_rc"
 }
 run_gate &
 wait "$!" || exit $?

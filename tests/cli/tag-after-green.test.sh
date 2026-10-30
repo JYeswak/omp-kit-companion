@@ -3,6 +3,7 @@
 # Stub `git`/`gh` serve canned refs and jobs; every verdict comes from the
 # script's exit code plus its stdout and the recorded push/dispatch lines.
 set -u
+ORIGINAL_PATH=$PATH
 
 CHECK=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/tag-after-green.sh
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
@@ -139,6 +140,66 @@ run_case bad-version 2 "$SHA_BUMP" "OUT:recorded version is malformed" NOPUSH NO
 out="$(sh "$CHECK" --repo o/r --run-id 1 --head-sha xyz 2>&1)"
 if [ "$?" = "2" ]; then pass=$((pass + 1));
 else fail=$((fail + 1)); printf 'FAIL bad-usage: rc=%s out<<<%s>>>\n' "$?" "$out"; fi
+
+# Real v2 verdicts must be reusable by the tag-on-main hook; a truncated file
+# record (even with a matching log/tree/runtime) must refuse without a rerun.
+PATH=$ORIGINAL_PATH
+export PATH
+SOURCE=$(dirname "$CHECK")
+tag_git() {
+	git -c user.name=tag-verdict-test -c user.email=tag-verdict@example.invalid "$@"
+}
+tag_verdict_cases() {
+	tag_git init --bare --initial-branch=main "$TMP/tag-origin.git" >/dev/null 2>&1 || return 1
+	tag_git clone "$TMP/tag-origin.git" "$TMP/tag-work" >/dev/null 2>&1 || return 1
+	work="$TMP/tag-work"
+	mkdir -p "$work/scripts" "$work/.github" "$work/tests/cli" "$work/var/agent-tmp"
+	for file in full-suite-verdict.sh fresh-gate.sh suite-metrics.py kitlib_run.py pysafe.py kitlib-tmp.sh test-budget.ts; do
+		cp "$SOURCE/$file" "$work/scripts/$file" || return 1
+	done
+	cp "$SOURCE/../.github/test-budget.json" "$work/.github/test-budget.json" || return 1
+	if [ -f "$SOURCE/gate-ci-only.tsv" ]; then cp "$SOURCE/gate-ci-only.tsv" "$work/scripts/gate-ci-only.tsv" || return 1; fi
+	printf '#!/bin/sh\nexit 0\n' > "$work/tests/cli/tag-verdict.test.sh"
+	printf '#!/bin/sh\nexit 0\n' > "$work/tests/cli/tag-other.test.sh"
+	tag_git -C "$work" add -A || return 1
+	tag_git -C "$work" commit -m 'tag verdict fixture [test]' >/dev/null || return 1
+	tag_git -C "$work" push origin HEAD:refs/heads/main >/dev/null 2>&1 || return 1
+	sha=$(tag_git -C "$work" rev-parse HEAD) || return 1
+	tree=$(tag_git -C "$work" rev-parse 'HEAD^{tree}') || return 1
+	(cd "$work" && sh scripts/full-suite-verdict.sh --repo "$work" --commit "$sha") > "$TMP/tag-verdict-run.log" 2>&1 || return 1
+	# Working-tree judging code is untrusted: both readback and identity use
+	# the committed archive, not this planted helper.
+	printf 'raise SystemExit(99)\n' > "$work/scripts/suite-metrics.py"
+	out=$(cd "$work" && printf 'refs/tags/v-test %s refs/tags/v-test %s\n' "$sha" 0000000000000000000000000000000000000000 | sh "$SOURCE/pre-push-gate.sh" origin 2>&1)
+	rc=$?
+	if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qF 'VERDICT REUSED PASS'; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL v2-tag-reuse: rc=%s out<<<%s>>>\n' "$rc" "$out"
+	fi
+	entry="$work/.git/omp-kit/full-suite-verdicts/$tree.json"
+	python3 - "$entry" <<'PYEOF' || return 1
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+entry = json.loads(path.read_text())
+assert entry["version"] == 2 and len(entry["evidence"]["files"]) == 2
+# Keep the remaining row and counters internally consistent: completeness
+# must still bind the actual declared source suite, not this shortened list.
+entry["evidence"]["files"].pop()
+entry["evidence"]["declared_files"] = [row["path"] for row in entry["evidence"]["files"]]
+entry["evidence"]["shell_suites"] = 1
+path.write_text(json.dumps(entry) + "\n")
+PYEOF
+	out=$(cd "$work" && printf 'refs/tags/v-test %s refs/tags/v-test %s\n' "$sha" 0000000000000000000000000000000000000000 | sh "$SOURCE/pre-push-gate.sh" origin 2>&1)
+	rc=$?
+	if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qF 'no reusable full-suite verdict'; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL truncated-v2-tag: rc=%s out<<<%s>>>\n' "$rc" "$out"
+	fi
+}
+tag_verdict_cases || { fail=$((fail + 1)); printf 'FAIL v2 tag fixture setup\n'; cat "$TMP/tag-verdict-run.log" 2>/dev/null; }
 
 printf 'tag-after-green: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

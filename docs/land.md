@@ -72,17 +72,21 @@ success.
 The verdict is cached by candidate tree hash with check/runtime identity bound to the entry:
 
 * `tree` — the git tree object of the exact candidate commit (exact source bytes).
-* `checks` — sha256 of `scripts/full-suite-verdict.sh`, `scripts/fresh-gate.sh` and
-  `scripts/gate-ci-only.tsv` as executed. A changed judge (including a manifest change) reruns
-  every tree.
+* `checks` — a path-and-byte digest of the full judge and its transitive Python helpers,
+  fresh gate, budget CLI/configuration, temporary-directory helper, and CI-only manifest.
+  `python3 scripts/suite-metrics.py identity --root . --scope full` prints that identity;
+  changing a dependency invalidates earlier results. The judge exported by `land` comes
+  entirely from the authoritative base, never the working tree.
 * `runtime` — os/arch plus `bun --version` plus `python3 --version` (plus `FULL_SUITE_RUNTIME_ID`
   when pinned). A changed runtime reruns every tree.
 
 A repeated identical tree under unchanged check/runtime identity reuses the recorded verdict
 without rerunning — `PASS` publishes, `FAIL` refuses. A changed tree, changed check bytes or
-changed runtime never reuses. Missing, corrupt, timed-out or incomplete suite evidence is
-non-pass and is never cached GREEN: only a finished run with complete counts is recorded as
-`PASS` or `FAIL`. Anything else refuses without writing, so a retry reruns.
+changed runtime never reuses. Schema-v2 evidence contains exactly one complete measured
+record for every declared file, including files covered by the same-tree focused pass.
+Missing records, unknown source closure, producer-identity mismatches, and schema-v1
+aggregate-only entries are cold. A timed-out or incomplete execution retains its partial
+log but writes no reusable verdict; a completed failing execution remains a reusable `FAIL`.
 
 Each cache entry records the SHA-256 of its paired `.log`. A missing or altered log invalidates
 the entry and forces a complete rerun; no verdict is reused without matching raw suite evidence.
@@ -92,3 +96,45 @@ The cache lives in the pushing checkout's git dir
 overridden by `FULL_SUITE_VERDICT_CACHE_DIR`; it is never committed. Pruning entries only costs
 a rerun. The suite is bounded by `FULL_SUITE_TIMEOUT_SECS` (default 1800) and runs at nice 10
 inside the gate's own admission.
+
+### Measured test budgets
+
+Each file records its runner, exact argument vector, elapsed milliseconds, CPU time,
+exit code, producer identity, output digest, and conservative whole-source-tree closure.
+The verdict also records stage/run wall time, start/end load, and the actual worker counts.
+`<tree>.timings.csv` sits beside the JSON/log, with `stage`, `file`, `elapsed_s`, `rc`,
+`workers`, `load_1m`, CPU, command, judge, and closure columns.
+
+Complete runs refresh native Bun `{"version":1,"files":{"path":milliseconds}}` maps in
+`<cache>/timings/core-test-timings.json` and `script-test-timings.json`; unobserved entries
+are retained, as with Bun's `--update-timings`. Durable cache maps survive archive cleanup.
+The fresh-gate ledger is `<git-dir>/omp-kit/fresh-gate-runs.jsonl`; it records the terminal
+gate outcome and whole-gate interval, separately from per-file test stages. An archive-only
+fixture does not write the checkout's operational ledger unless explicitly requested.
+
+`.github/test-budget.json` declares the 600-second push-p95 requirement, 900-second cycle
+requirement, and the **starting heuristic** of 225 seconds per file (`full_cycle_s / 4`).
+The fresh gate compares actual file-process duration to that cap; `OVER_BUDGET` names the
+file, measurement, and cap even when the test itself passed.
+
+```sh
+bun scripts/test-budget.ts --derive --check
+bun scripts/test-budget.ts --derive --check --workers 4 --timings-dir PATH
+bun scripts/test-budget.ts --derive --verdict-history arrival-service.json --json
+```
+
+Default derivation prefers the durable cache maps when both exist, otherwise `.github`.
+It reports recorded work `W`, longest file `p_max`, worker count `m`, all three budgets,
+and the necessary lower bound `max(W / m, p_max)`. Exceeding either the file cap or cycle
+lower bound fails the check. This is not a sufficient scheduling bound or a p95 guarantee.
+Arrival/service history contains `{arrival_ms,service_ms}` samples; without measured
+history, utilisation/variability remain `NOT_MEASURED`. The initial cap is not presented
+as distribution-derived.
+
+The ordinary regression uses a tiny fixture-only cap. The optional literal boundary
+smoke really runs a 10-second control and a 300-second file:
+
+```sh
+OMP_KIT_LITERAL_SUITE_BUDGET=1 bun test tests/cli/fresh-gate.test.ts \
+  --test-name-pattern 'SUITEBUDGET1 literal'
+```

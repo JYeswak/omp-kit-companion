@@ -1,0 +1,100 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_aa5a28d2bc0b91149807d6a421448d05137adab03db9b405c3c66072e0fba231",
+ "limitations": [
+  "Default derivation awaits source-bound durable timing bootstrap. Independent exact-commit acceptance and post-install live cohort remain unqualified. No production latency target claimed.",
+  "Cancellation drills cover ready native processes and nested stage death; standalone helper SIGKILL cannot clean its own child, deliberately escaped groups and preexisting pysafe spawn-registration window remain outside a universal guarantee."
+ ],
+ "operation": "suite-budget-build",
+ "parameters": {
+  "bead": "ompkit-kup44.1"
+ },
+ "producer": "RusticPine",
+ "result_ref": {
+  "checks": [
+   {
+    "command": "python3 -B tests/scripts/suite_metrics_test.py",
+    "decisive_output": "Ran 21 tests; OK",
+    "exit_code": 0
+   },
+   {
+    "command": "bun test --timeout=120000 tests/cli/test-budget.test.ts",
+    "decisive_output": "32 pass; 0 fail; 70 expect() calls",
+    "exit_code": 0
+   },
+   {
+    "command": "sh tests/cli/full-suite-complement.test.sh",
+    "decisive_output": "full-suite-complement: 22 pass 0 fail",
+    "exit_code": 0
+   },
+   {
+    "command": "bun test --timeout=120000 tests/cli/fresh-gate.test.ts",
+    "decisive_output": "27 pass; 3 skip; 0 fail; 735 expect() calls",
+    "exit_code": 0
+   },
+   {
+    "command": "bun test --timeout=120000 tests/cli/private-index-land.test.ts",
+    "decisive_output": "73 pass; 0 fail; 694 expect() calls",
+    "exit_code": 0
+   },
+   {
+    "command": "sh tests/cli/tag-after-green.test.sh",
+    "decisive_output": "tag-after-green: 10 pass 0 fail",
+    "exit_code": 0
+   },
+   {
+    "command": "sh tests/cli/full-suite-verdict-incomplete.test.sh",
+    "decisive_output": "full-suite-verdict-incomplete: pass=37 fail=0",
+    "exit_code": 0
+   },
+   {
+    "command": "sh tests/cli/full-suite-verdict-rerun.test.sh",
+    "decisive_output": "full-suite-verdict-rerun: pass=13 fail=0",
+    "exit_code": 0
+   },
+   {
+    "command": "sh tests/cli/full-suite-complement.test.sh with per-file PASS validation removed",
+    "decisive_output": "21 pass 1 fail; aggregate PASS hid a failed file; VERDICT REUSED PASS",
+    "exit_code": 1,
+    "expected_negative": true
+   },
+   {
+    "command": "python3 -B tests/scripts/pysafe_test.py && python3 -B tests/scripts/kitlib_run_test.py",
+    "decisive_output": "23 pysafe tests OK; 30 kitlib_run tests OK",
+    "exit_code": 0
+   },
+   {
+    "command": "bun test --timeout=120000 tests/cli/private-index-land.test.ts --test-name-pattern \"checks the exact candidate with the base-registered push check\"",
+    "decisive_output": "1 pass; 72 filtered; 0 fail; 17 expect() calls after public kitlib identity-probe migration",
+    "exit_code": 0
+   }
+  ],
+  "literal_probe": {
+   "cap_s": 225,
+   "command": "OMP_KIT_LITERAL_SUITE_BUDGET=1 bun test tests/cli/fresh-gate.test.ts --test-name-pattern \"SUITEBUDGET1 literal\"",
+   "control_fixture_sleep_s": 10,
+   "decisive_output": "OVER_BUDGET tests/cli/three-hundred.test.sh; 1 pass 0 fail; actual child completed with rc0 and gate refused rc1",
+   "exit_code": 0,
+   "observed_slow_s": "300.071404167",
+   "scope": "Observed before final comment-only helper safety annotation and test-runner migration; independent exact-commit replay is separate."
+  },
+  "subject_files": {
+   ".github/test-budget.json": "3008c402bdd4cbc9c6e80dcd27f46784009a3516a03ce5cdab9dac5d657d8d4d",
+   "changelog.d/kup44.1.md": "25765d93179e90fc126ad99890a1df25f9d45a3146271fb1d0f4d69d8cb781e2",
+   "docs/land.md": "fa19f57ffa51c65b5d97568fbbf8d5e7b2a7d11bfd70542145f18073763466f5",
+   "scripts/fresh-gate.sh": "87dbef7af1cc3aea62693eed543da8d7320d421ec64cb8e28560306a4d864164",
+   "scripts/full-suite-verdict.sh": "16a30773c6b459436e6dc70caef6452f87886799b76a2f8cdda84060ae7fbddc",
+   "scripts/pre-push-gate.sh": "d40c716a33ef7d42cb7df82ae453e913b90d1621cff1c65bbe043a391e67bce0",
+   "scripts/suite-metrics.py": "3f553f0247e64ec57f01dc2f768024d5a8b7ed60a767ef25e409e006f80121ad",
+   "scripts/test-budget.ts": "71fc7cb50e64929bceb7cacbefe6a57f7e7cba33466d1b3b895787bddc10bdd7",
+   "src/land.ts": "1bf43609f6a158ccbed46241231c1f5a5b1d53e2084a0bd20c507a5bb5a901d6",
+   "tests/cli/fresh-gate.test.ts": "c2ba21b6166c9b3ae8515e3914c8e01204935f298830b9f65ab32ecca785ddc3",
+   "tests/cli/full-suite-complement.test.sh": "63388a08a69bc3d0967b2770982a20f5d2e8abcd56e2e2931b47dd34042c0199",
+   "tests/cli/private-index-land.test.ts": "2a28bf055589356142b5bfdb83d6c38565495d11b3b987ca6bbcb574507212fb",
+   "tests/cli/tag-after-green.test.sh": "a7627ebe2747ef0dc2eaafe9a0151ee32c8ce804d0f3c0b670c78a61a198af82",
+   "tests/cli/test-budget.test.ts": "a9e85734dbb96431b32aae893c3896013c7028d37e2d540b21ec6fda8d296324",
+   "tests/scripts/suite_metrics_test.py": "52a032b94f050c617a46141cd50e8aee144658adf2c97c15b5125e64665fa748"
+  }
+ }
+}

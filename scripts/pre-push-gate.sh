@@ -94,12 +94,8 @@ tag_reusable_verdict() {
 	v_tree=$(git -C "$ROOT" rev-parse "$1^{tree}" 2>/dev/null) || return 1
 	[ -n "$v_tree" ] || return 1
 	v_scripts="$2/scripts"
-	if [ -f "$v_scripts/gate-ci-only.tsv" ]; then
-		v_checks=$(cat "$v_scripts/full-suite-verdict.sh" "$v_scripts/fresh-gate.sh" "$v_scripts/gate-ci-only.tsv" 2>/dev/null | shasum -a 256 | cut -d' ' -f1) || return 1
-	else
-		v_checks=$(cat "$v_scripts/full-suite-verdict.sh" "$v_scripts/fresh-gate.sh" 2>/dev/null | shasum -a 256 | cut -d' ' -f1) || return 1
-	fi
-	[ -n "$v_checks" ] || return 1
+	v_checks=$(python3 "$v_scripts/suite-metrics.py" identity --root "$2" --scope full 2>/dev/null) || return 1
+	[ "${#v_checks}" -eq 64 ] || return 1
 	v_bun=$(bun --version 2>/dev/null) || return 1
 	v_py=$(python3 --version 2>&1) || return 1
 	v_runtime="$(uname -s)/$(uname -m)/bun-$v_bun/$v_py"
@@ -110,17 +106,37 @@ tag_reusable_verdict() {
 		v_cache="$v_git/omp-kit/full-suite-verdicts"
 	fi
 	[ -f "$v_cache/$v_tree.json" ] && [ -f "$v_cache/$v_tree.log" ] || return 1
-	V_TREE=$v_tree V_CHECKS=$v_checks V_RUNTIME=$v_runtime V_ENTRY="$v_cache/$v_tree.json" V_LOG="$v_cache/$v_tree.log" python3 - <<'PYEOF' 2>/dev/null
-import hashlib, json, os
+	V_METRICS="$v_scripts/suite-metrics.py" V_TREE=$v_tree V_CHECKS=$v_checks V_RUNTIME=$v_runtime V_ENTRY="$v_cache/$v_tree.json" V_LOG="$v_cache/$v_tree.log" python3 - <<'PYEOF' 2>/dev/null
+import hashlib, importlib.util, json, os
+from pathlib import Path
 with open(os.environ["V_ENTRY"], encoding="utf-8") as f:
     e = json.load(f)
-assert e.get("version") == 1
+assert e.get("version") == 2
 assert e.get("tree") == os.environ["V_TREE"]
 assert e.get("checks") == os.environ["V_CHECKS"]
 assert e.get("runtime") == os.environ["V_RUNTIME"]
 assert e.get("verdict") in ("PASS", "FAIL")
 evidence = e.get("evidence")
 assert isinstance(evidence, dict) and evidence.get("complete") is True
+spec = importlib.util.spec_from_file_location("suite_metrics", os.environ["V_METRICS"])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.complete_records(evidence.get("files"), evidence.get("declared_files", []))
+assert all(row["closure"]["tree"] == e["tree"] for row in evidence["files"])
+root = Path(os.environ["V_METRICS"]).resolve().parent.parent
+excluded = set()
+manifest = root / "scripts/gate-ci-only.tsv"
+if manifest.is_file():
+    excluded = {line.split("\t")[0] for line in manifest.read_text().splitlines()[1:] if line}
+declared = set()
+for directory in ("tests/cli", "tests/fleet-guard"):
+    declared.update(p.relative_to(root).as_posix() for p in (root / directory).rglob("*.test.ts")
+                    if p.is_file() and "var/agent-tmp/" not in p.relative_to(root).as_posix())
+declared.update(p.relative_to(root).as_posix() for p in (root / "tests/cli").glob("*.test.sh") if p.is_file())
+for directory in ("tests/cli", "tests/scripts"):
+    declared.update(p.relative_to(root).as_posix() for pattern in ("*_test.py", "*.test.py")
+                    for p in (root / directory).glob(pattern) if p.is_file())
+assert set(evidence["declared_files"]) == declared - excluded
 digest = hashlib.sha256()
 with open(os.environ["V_LOG"], "rb") as log:
     for chunk in iter(lambda: log.read(1024 * 1024), b""):
@@ -131,11 +147,15 @@ names = ("bun_files", "bun_ran", "bun_fail", "shell_suites", "shell_fail", "py_s
 counts = [evidence.get(n) for n in names]
 assert all(isinstance(v, int) and v >= 0 for v in counts)
 bf, br, bfl, ss, sf, ps, pf = counts
-assert bf + ss + ps > 0
+coverage = evidence.get("covered_by_focused", {})
+covered_count = sum(len(coverage.get(kind, [])) for kind in ("bun", "shell", "py"))
+assert len(evidence["files"]) == bf + ss + ps + covered_count
+assert len(evidence["files"]) > 0
 assert (bf == 0 and br == 0) or (bf > 0 and br > 0)
 assert bfl <= br and sf <= ss and pf <= ps
 if e["verdict"] == "PASS":
     assert e["exit_code"] == 0 and bfl == sf == pf == 0
+    assert all(row["rc"] == 0 for row in evidence["files"])
 else:
     assert e["exit_code"] != 0 and (bfl > 0 or sf > 0 or pf > 0)
 PYEOF

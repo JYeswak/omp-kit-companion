@@ -46,6 +46,8 @@
 # stage, claimed in sorted order, is within 5% of that floor (4: 460 s, 5: 411 s, 8: 405 s).
 set -eu
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+run_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
+load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
 ROOT=
 COMMIT=
 ARCHIVE_DIR=
@@ -104,17 +106,9 @@ case "$tree" in *[!0-9a-f]*|???????????????????????????????????????) fail "candi
 # against the candidate archive; a changed judge reruns every tree.
 [ -f "$SCRIPT_DIR/full-suite-verdict.sh" ] || { fail "judging script is absent beside the gate"; exit 1; }
 [ -f "$SCRIPT_DIR/fresh-gate.sh" ] || { fail "scripts/fresh-gate.sh is absent beside the gate"; exit 1; }
-checks_src="$SCRIPT_DIR/full-suite-verdict.sh
-$SCRIPT_DIR/fresh-gate.sh"
-if [ -z "$ARCHIVE_DIR" ]; then
-	[ -f "$SCRIPT_DIR/kitlib-tmp.sh" ] || { fail "scripts/kitlib-tmp.sh is absent beside the gate"; exit 1; }
-	checks_src="$checks_src
-$SCRIPT_DIR/kitlib-tmp.sh"
-fi
-[ -f "$SCRIPT_DIR/gate-ci-only.tsv" ] && checks_src="$checks_src
-$SCRIPT_DIR/gate-ci-only.tsv"
-checks=$(cat $checks_src 2>/dev/null | shasum -a 256 | cut -d' ' -f1) || { fail "judging scripts are unreadable"; exit 1; }
-[ -n "$checks" ] || { fail "judging scripts are unreadable"; exit 1; }
+checks=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$SCRIPT_DIR/.." --scope full) || {
+	fail "the complete judging dependency identity is unreadable"; exit 1;
+}
 
 bun_v=$(bun --version 2>/dev/null) || { fail "bun --version failed"; exit 1; }
 py_v=$(python3 --version 2>&1) || { fail "python3 --version failed"; exit 1; }
@@ -135,18 +129,23 @@ log_entry="$CACHE_DIR/$tree.log"
 # A recorded verdict is reused only on an exact identity match with complete evidence. The
 # comparison is exact-string on tree, checks and runtime; verdict must be PASS or FAIL.
 if [ -f "$entry" ] && [ "$(wc -c <"$entry" 2>/dev/null | tr -d ' ')" -le 1048576 ]; then
-	cached=$(TREE=$tree CHECKS=$checks RUNTIME=$runtime ENTRY=$entry LOG=$log_entry python3 - <<'PYEOF' 2>/dev/null
+	cached=$(METRICS="$SCRIPT_DIR/suite-metrics.py" TREE=$tree CHECKS=$checks RUNTIME=$runtime ENTRY=$entry LOG=$log_entry python3 - <<'PYEOF' 2>/dev/null
 import hashlib, json, os
 try:
     with open(os.environ["ENTRY"], encoding="utf-8") as f:
         e = json.load(f)
-    assert e.get("version") == 1
+    assert e.get("version") == 2
     assert e.get("tree") == os.environ["TREE"]
     assert e.get("checks") == os.environ["CHECKS"]
     assert e.get("runtime") == os.environ["RUNTIME"]
     assert e.get("verdict") in ("PASS", "FAIL")
     evidence = e.get("evidence")
     assert isinstance(evidence, dict) and evidence.get("complete") is True
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("suite_metrics", os.environ["METRICS"])
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.complete_records(evidence.get("files"), evidence.get("declared_files", []))
     digest = hashlib.sha256()
     with open(os.environ["LOG"], "rb") as log:
         for chunk in iter(lambda: log.read(1024 * 1024), b""):
@@ -157,11 +156,16 @@ try:
     counts = [evidence.get(name) for name in count_names]
     assert all(isinstance(value, int) and value >= 0 for value in counts)
     bun_files, bun_ran, bun_fail, shell_suites, shell_fail, py_suites, py_fail = counts
-    assert bun_files + shell_suites + py_suites > 0
+    coverage = evidence.get("covered_by_focused", {})
+    covered_count = sum(len(coverage.get(kind, [])) for kind in ("bun", "shell", "py"))
+    assert len(evidence["files"]) == bun_files + shell_suites + py_suites + covered_count
+    assert all(row["closure"]["tree"] == e["tree"] for row in evidence["files"])
+    assert len(evidence["files"]) > 0
     assert (bun_files == 0 and bun_ran == 0) or (bun_files > 0 and bun_ran > 0)
     assert bun_fail <= bun_ran and shell_fail <= shell_suites and py_fail <= py_suites
     if e["verdict"] == "PASS":
         assert e["exit_code"] == 0 and bun_fail == shell_fail == py_fail == 0
+        assert all(row["rc"] == 0 for row in evidence["files"])
     else:
         assert e["exit_code"] != 0 and (bun_fail > 0 or shell_fail > 0 or py_fail > 0)
     print("%s %s" % (e["verdict"], e["exit_code"]))
@@ -290,6 +294,7 @@ echo "full-suite: bun=$bun_count shell=$shell_count python=$py_count excluded_ci
 covered_bun=""; covered_shell=""; covered_py=""; covered_ignored=""
 # The join decision is recorded in the verdict json (focused_join), not only on stdout a caller may drop.
 focused_join="no-report"
+focused_metrics=""
 if [ -n "$FOCUSED_PASSED" ]; then
 	if [ ! -f "$FOCUSED_PASSED" ]; then
 		focused_join="absent"
@@ -298,7 +303,7 @@ if [ -n "$FOCUSED_PASSED" ]; then
 		report_tree=$(sed -n '1s/^tree //p' "$FOCUSED_PASSED")
 		report_judge=$(sed -n 's/^judge //p' "$FOCUSED_PASSED" | head -n 1)
 		report_runtime=$(sed -n 's/^runtime //p' "$FOCUSED_PASSED" | head -n 1)
-		own_judge=$(shasum -a 256 "$SCRIPT_DIR/fresh-gate.sh" 2>/dev/null | cut -d' ' -f1)
+		own_judge=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$SCRIPT_DIR/.." --scope focused) || own_judge=""
 		if [ "$report_tree" != "$tree" ]; then
 			focused_join="tree-mismatch:${report_tree:-?}"
 			echo "full-suite: focused-passed report is for tree ${report_tree:-?}, not candidate $tree; ignored, running the complete suite"
@@ -336,7 +341,32 @@ $candidate
 			for name in $reported; do
 				case " $kept_bun $kept_shell $kept_py " in *" $name "*) ;; *) covered_ignored="$covered_ignored $name"; echo "full-suite: focused-passed names $name, not in the declared suite; ignored" ;; esac
 			done
-			kept_bun=$rest_bun; kept_shell=$rest_shell; kept_py=$rest_py
+			if [ -n "$covered_bun$covered_shell$covered_py" ]; then
+				if METRICS="$SCRIPT_DIR/suite-metrics.py" FILE="$FOCUSED_PASSED.timings.json" \
+					COVERED="$covered_bun $covered_shell $covered_py" TREE="$tree" python3 - <<'PYEOF'
+import importlib.util, json, os
+try:
+    spec = importlib.util.spec_from_file_location("metrics", os.environ["METRICS"])
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with open(os.environ["FILE"]) as handle:
+        rows = json.load(handle)
+    wanted = os.environ["COVERED"].split()
+    rows = [row for row in rows if row["path"] in wanted]
+    assert module.complete_records(rows, wanted)
+    assert all(row["rc"] == 0 and row["closure"]["tree"] == os.environ["TREE"] for row in rows)
+except (OSError, ValueError, TypeError, KeyError, AssertionError):
+    raise SystemExit(1)
+PYEOF
+				then
+					focused_metrics="$FOCUSED_PASSED.timings.json"
+					kept_bun=$rest_bun; kept_shell=$rest_shell; kept_py=$rest_py
+				else
+					focused_join="timing-record-missing"
+					covered_bun=""; covered_shell=""; covered_py=""
+					echo "full-suite: focused timing evidence absent or incomplete; running the complete suite"
+				fi
+			fi
 			set -- $covered_bun; cb=$#; set -- $covered_shell; cs=$#; set -- $covered_py; cp=$#
 			set -- $kept_bun; bun_count=$#
 			set -- $kept_shell; shell_count=$#
@@ -390,6 +420,12 @@ BUN_OUT="$SUITE_OUT.bun"
 SHELL_DIR="$SUITE_OUT.shell"
 RUNNER_PID="$SUITE_OUT.runner"
 timeout_mark="$SUITE_OUT.timed-out"
+# Per-invocation claim state is never reused, even for a recorded rerun of one tree.
+METRICS_DIR="$SUITE_OUT.files.$$"
+METRICS_ROWS="$SUITE_OUT.files.$$.json"
+METRICS_DECLARED="$SUITE_OUT.declared.$$"
+if ! mkdir "$METRICS_DIR"; then cleanup_archive; fail "cannot create fresh suite measurement state"; exit 1; fi
+for metric_path in $kept_bun $kept_shell $kept_py $covered_bun $covered_shell $covered_py; do printf '%s\n' "$metric_path"; done >"$METRICS_DECLARED"
 rm -f "$SUITE_STATUS" "$BUN_OUT" "$RUNNER_PID" "$timeout_mark"
 rm -rf "$SHELL_DIR"
 if ! : >"$SUITE_OUT" || ! : >"$SUITE_STATUS" || ! mkdir "$SHELL_DIR"; then cleanup_archive; fail "cannot write suite evidence"; exit 1; fi
@@ -401,6 +437,16 @@ finish_logs() {
 	if [ -f "$BUN_OUT" ] && ! grep -q '^BUN rc=' "$SUITE_STATUS" 2>/dev/null; then
 		{ echo "full-suite: the bun phase did not finish; its partial output follows"; cat "$BUN_OUT"; } >>"$SUITE_OUT"
 	fi
+	if ! grep -q '^BUN rc=' "$SUITE_STATUS" 2>/dev/null; then
+		for fl_output in "$METRICS_DIR"/bun-*.log; do
+			case "$fl_output" in *.native.log) continue ;; esac
+			[ -f "$fl_output" ] || continue
+			{ echo "full-suite: unfinished Bun worker output follows"; cat "$fl_output"; } >>"$SUITE_OUT"
+		done
+	fi
+	for fl_suite in ${unfinished:-}; do
+		echo "full-suite: script-suite $fl_suite did not finish before the declared deadline; retained partial output follows" >>"$SUITE_OUT"
+	done
 	if [ -d "$SHELL_DIR" ]; then
 		fl_i=0
 		for fl_suite in $kept_shell; do
@@ -415,16 +461,28 @@ finish_logs() {
 		done >>"$SUITE_OUT"
 		rm -rf "$SHELL_DIR"
 	fi
+	# Native bytes bypass the metric supervisor's pipes. Preserve their retained
+	# file even when a suite killed that supervisor before it could write its row.
+	for fl_output in "$METRICS_DIR"/*.native.log; do
+		[ -f "$fl_output" ] || continue
+		fl_record="${fl_output%.native.log}.json"
+		if ! python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("complete") is True else 1)' "$fl_record" 2>/dev/null; then
+			{ echo "full-suite: retained unfinished native output follows"; cat "$fl_output"; } >>"$SUITE_OUT"
+		fi
+	done
 	mv -f "$SUITE_OUT" "$1"
 	rm -f "$SUITE_STATUS" "$BUN_OUT" "$RUNNER_PID"
+	rm -rf "$METRICS_DIR"
 }
-# shell_unfinished: the shell suites a worker started but never recorded an exit code for. The
-# runner keeps the claim of every such suite it merged, so the names survive its merge.
+# shell_unfinished: native file execution, not merely the logging supervisor's
+# exit status. The measurement survives removal of the shell worker claims.
 shell_unfinished() {
 	su_i=0
 	for su_suite in $kept_shell; do
 		su_i=$((su_i + 1))
-		if [ -d "$SHELL_DIR/$su_i.claim" ] && [ ! -f "$SHELL_DIR/$su_i.rc" ]; then printf ' %s' "$su_suite"; fi
+		if [ -d "$SHELL_DIR/$su_i.claim" ] || [ -f "$METRICS_DIR/shell-$su_i.native.log" ]; then
+			if ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); limit=int(sys.argv[2] or "0"); sys.exit(0 if r.get("complete") is True and (not limit or r["finished_ms"] <= limit) else 1)' "$METRICS_DIR/shell-$su_i.json" "${timeout_at_ms:-0}" 2>/dev/null; then printf ' %s' "$su_suite"; fi
+		fi
 	done
 }
 
@@ -472,23 +530,28 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 		failed=0
 		if [ "$bun_count" -gt 0 ]; then
 			bun_rc=0
-			# Reuse the focused runner's core-derived worker policy, with at most
-			# four isolated files in flight and no changes to the selected suite.
-			workers=$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers) || exit 1
-			case "$workers" in ''|*[!0-9]*|0) exit 1 ;; esac
-			[ "$workers" -le "$bun_count" ] || workers=$bun_count
-			[ "$workers" -le 4 ] || workers=4
-			set -- --parallel="$workers" $kept_bun
-			if [ -f "$ARCHIVE_DIR/.github/core-test-timings.json" ]; then
-				set -- --timings="$ARCHIVE_DIR/.github/core-test-timings.json" "$@"
-			fi
-			if [ -n "$bun_config" ]; then
-				dfl nice -n 10 bun "$bun_config" test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@" >"$BUN_OUT" 2>&1 || bun_rc=$?
-			else
-				dfl nice -n 10 bun test --timeout=120000 --path-ignore-patterns 'var/agent-tmp/**' "$@" >"$BUN_OUT" 2>&1 || bun_rc=$?
-			fi
+			bun_workers=$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers) || exit 1
+			case "$bun_workers" in ''|*[!0-9]*|0) exit 1 ;; esac
+			[ "$bun_workers" -le "$bun_count" ] || bun_workers=$bun_count
+			[ "$bun_workers" -le 4 ] || bun_workers=4
+			bun_stage="$METRICS_DIR/bun.stage"
+			bun_config_path=${bun_config#--config=}
+			[ -n "$bun_config_path" ] || bun_config_path=/dev/null
+			dfl nice -n 10 python3 "$SCRIPT_DIR/suite-metrics.py" stage \
+				--runner bun --records "$METRICS_DIR" --cwd "$ARCHIVE_DIR" --tree "$tree" \
+				--summary "$bun_stage" --bun-config "$bun_config_path" \
+				--workers "$bun_workers" --deadline "$TIMEOUT_SECS" $kept_bun \
+				>"$BUN_OUT" 2>&1 || bun_rc=$?
+			[ -f "$bun_stage" ] || exit 2
+			b_counts=$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print(v["test_count"],v["test_failures"])' "$bun_stage") || exit 2
+			# Values come from the runner-owned numeric summary, never child log markers.
+			# shellcheck disable=SC2086
+			set -- $b_counts
+			b_tests=$1; b_failed=$2
 			cat "$BUN_OUT"
 			echo "BUN rc=$bun_rc" >>"$SUITE_STATUS"
+			echo "BUN_RAN $b_tests" >>"$SUITE_STATUS"
+			echo "BUN_FAIL $b_failed" >>"$SUITE_STATUS"
 			[ "$bun_rc" -eq 0 ] || failed=1
 		fi
 		# FULLSUITEPAR1 (ompkit-9t6f2): SHELL_JOBS workers share the shell suites. A worker claims the
@@ -515,7 +578,10 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 						eval "TMPDIR=\$suite_tmp_$w_i"
 						export TMPDIR
 						w_rc=0
-						dfl sh "$w_suite" >"$SHELL_DIR/$w_i.out" 2>&1 || w_rc=$?
+						dfl python3 "$SCRIPT_DIR/suite-metrics.py" run \
+							--record "$METRICS_DIR/shell-$w_i.json" --path "$w_suite" --runner sh \
+							--tree "$tree" --cwd "$ARCHIVE_DIR" --workers "$SHELL_JOBS" --deadline "$TIMEOUT_SECS" -- sh "$w_suite" \
+							>"$SHELL_DIR/$w_i.out" 2>&1 || w_rc=$?
 						echo "$w_rc" >"$SHELL_DIR/$w_i.rc"
 					fi
 				done
@@ -562,8 +628,12 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 			if [ "$lost" -ne 0 ]; then exit 2; fi
 			rm -rf "$SHELL_DIR"
 		fi
+		p_i=0
 		for suite in $kept_py; do
-			if dfl python3 "$suite"; then
+			p_i=$((p_i + 1))
+			if dfl python3 "$SCRIPT_DIR/suite-metrics.py" run \
+				--record "$METRICS_DIR/python-$p_i.json" --path "$suite" --runner python3 \
+				--tree "$tree" --cwd "$ARCHIVE_DIR" --deadline "$TIMEOUT_SECS" -- python3 "$suite"; then
 				echo "GREEN python-suite $suite"; echo "GREEN python-suite $suite" >>"$SUITE_STATUS"
 			else
 				src=$?; echo "RED python-suite $suite rc=$src"; echo "RED python-suite $suite" >>"$SUITE_STATUS"; failed=1
@@ -589,6 +659,7 @@ kill_tree() {
 }
 
 timed_out=0
+timeout_at_ms=0
 suite_rc=0
 run_suite &
 suite_pid=$!
@@ -598,7 +669,7 @@ suite_pid=$!
 # round ends them otherwise.
 (
 	sleep "$TIMEOUT_SECS"
-	: >"$timeout_mark"
+	python3 -c 'import time; print(time.time_ns() // 1000000)' >"$timeout_mark"
 	kill_tree "$suite_pid" TERM "$suite_pid $(cat "$RUNNER_PID" 2>/dev/null || :)"
 	sleep 5
 	kill_tree "$suite_pid" KILL
@@ -608,6 +679,7 @@ wait "$suite_pid" 2>/dev/null || suite_rc=$?
 kill_tree "$watchdog_pid" TERM
 wait "$watchdog_pid" 2>/dev/null || true
 if [ -f "$timeout_mark" ]; then
+	timeout_at_ms=$(cat "$timeout_mark")
 	rm -f "$timeout_mark"
 	timed_out=1
 fi
@@ -619,15 +691,10 @@ if [ "$timed_out" = 1 ]; then
 	exit 1
 fi
 
-# Completeness comes from the runner's own status file and the bun phase's own output, never from
-# marker lines in the shared log (tests that run nested gates print those too). Bun prints its own
-# final summary last, so the last match within the bun-only output is the real one. A suite process
-# that died without accounting for every enumerated suite is incomplete evidence: refuse, cache nothing.
-bun_ran=""; bun_fail=""
-if [ -f "$BUN_OUT" ]; then
-	bun_ran=$(awk '$1 == "Ran" && ($3 == "test" || $3 == "tests") && $4 == "across" { print $2 }' "$BUN_OUT" | tail -n 1)
-	bun_fail=$(awk 'NF == 2 && $2 == "fail" { print $1 }' "$BUN_OUT" | tail -n 1)
-fi
+# Counts come from the final native summary in each isolated file output, summed by
+# the runner into its private status file. Never manufacture a native Bun summary.
+bun_ran=$(awk '$1 == "BUN_RAN" { print $2 }' "$SUITE_STATUS")
+bun_fail=$(awk '$1 == "BUN_FAIL" { print $2 }' "$SUITE_STATUS")
 bun_ran=${bun_ran:-0}
 bun_fail=${bun_fail:-0}
 bun_status=$(grep -c '^BUN rc=' "$SUITE_STATUS" 2>/dev/null || true)
@@ -663,6 +730,21 @@ if [ "$complete" -ne 1 ]; then
 	exit 1
 fi
 
+# A complete textual run is not reusable without the complete measured file set.
+# Keep the same declared suites and the same wall bound; missing rows fail cold.
+set --
+[ -z "$focused_metrics" ] || set -- --covered "$focused_metrics"
+if ! python3 "$SCRIPT_DIR/suite-metrics.py" collect \
+	--records "$METRICS_DIR" --declared "$METRICS_DECLARED" --output "$METRICS_ROWS" \
+	--csv "$CACHE_DIR/$tree.timings.csv" --cwd "$ARCHIVE_DIR" --tables-dir "$CACHE_DIR/timings" "$@"; then
+	finish_logs "$CACHE_DIR/$tree.incomplete.log"
+	cleanup_archive
+	fail "per-file timing evidence is incomplete; nothing was cached; partial log: $CACHE_DIR/$tree.incomplete.log"
+	exit 1
+fi
+run_finished_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
+load_end=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
+
 if [ "$suite_rc" -eq 0 ] && [ "${bun_status_rc:-0}" = 0 ] && [ "$bun_fail" -eq 0 ] && [ "$shell_red" -eq 0 ] && [ "$py_red" -eq 0 ]; then
 	verdict=PASS
 	code=0
@@ -674,23 +756,47 @@ fi
 
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
 finish_logs "$CACHE_DIR/$tree.log"
-RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
+METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" WORKERS_BUN="$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers)" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY=$entry LOG="$CACHE_DIR/$tree.log" python3 - <<'PYEOF' || { rm -f "$CACHE_DIR/$tree.log"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
 import hashlib, json, os
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
     for chunk in iter(lambda: log.read(1024 * 1024), b""):
         log_digest.update(chunk)
 from datetime import datetime, timezone
+with open(os.environ["METRICS_ROWS"]) as handle:
+    files = json.load(handle)
+with open(os.environ["METRICS_DECLARED"]) as handle:
+    declared_files = handle.read().splitlines()
+stages = {}
+for runner in ("bun", "sh", "python3"):
+    selected = [row for row in files if row["runner"] == runner and row.get("origin") != "focused"]
+    stages[runner] = {
+        "wall_ms": max(row["finished_ms"] for row in selected) - min(row["started_ms"] for row in selected) if selected else 0,
+        "cpu_user_ms": sum(row["cpu_user_ms"] for row in selected),
+        "cpu_system_ms": sum(row["cpu_system_ms"] for row in selected),
+    }
 entry = {
-    "version": 1,
+    "version": 2,
     "tree": os.environ["TREE"],
     "checks": os.environ["CHECKS"],
     "runtime": os.environ["RUNTIME"],
     "verdict": os.environ["VERDICT"],
     "exit_code": int(os.environ["CODE"]),
+    "judge": {"checks_sha256": os.environ["CHECKS"], "runtime": os.environ["RUNTIME"]},
+    "timing": {
+        "wall_ms": int(os.environ["RUN_END"]) - int(os.environ["RUN_START"]),
+        "started_ms": int(os.environ["RUN_START"]),
+        "load_start": json.loads(os.environ["LOAD_START"]),
+        "load_end": json.loads(os.environ["LOAD_END"]),
+        "workers": {"bun": min(4, int(os.environ["WORKERS_BUN"]), int(os.environ["BUNF"])),
+                    "shell": min(int(os.environ["WORKERS_SHELL"]), int(os.environ["SHC"])), "python": min(1, int(os.environ["PYC"]))},
+        "stages": stages,
+    },
     "evidence": {
         "log_sha256": log_digest.hexdigest(),
         "complete": True,
+        "files": files,
+        "declared_files": declared_files,
         "bun_files": int(os.environ["BUNF"]),
         "bun_ran": int(os.environ["BUNRAN"]),
         "bun_fail": int(os.environ["BUNFAIL"]),
@@ -720,6 +826,7 @@ with open(tmp, "w", encoding="utf-8") as f:
     f.write("\n")
 os.replace(tmp, os.environ["ENTRY"])
 PYEOF
+rm -f "$METRICS_ROWS" "$METRICS_DECLARED"
 cleanup_archive
 if [ "$verdict" = "PASS" ]; then
 	set -- $covered_bun $covered_shell $covered_py; covered_count=$#

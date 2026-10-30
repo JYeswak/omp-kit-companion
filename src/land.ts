@@ -254,6 +254,12 @@ function archiveFullSuiteJudge(repo: string, base: string): FullSuiteJudge | nul
 	const manifest = git(repo, ["ls-tree", base, "--", "scripts/gate-ci-only.tsv"]);
 	if (manifest.code !== 0 || manifest.interrupted) return null;
 	const gatePaths = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh"];
+	const metrics = git(repo, ["ls-tree", base, "--", "scripts/suite-metrics.py"]);
+	if (metrics.code !== 0 || metrics.interrupted) return null;
+	if (metrics.out.trim()) gatePaths.push(
+		"scripts/suite-metrics.py", "scripts/kitlib_run.py", "scripts/pysafe.py",
+		"scripts/test-budget.ts", ".github/test-budget.json",
+	);
 	if (manifest.out.trim()) gatePaths.push("scripts/gate-ci-only.tsv");
 	const archive = gitBytes(repo, ["archive", base, ...gatePaths]);
 	if (archive.code !== 0 || archive.interrupted) return null;

@@ -161,7 +161,10 @@ function fixture(): Fixture {
 	writeFileSync(join(work, "suite-contract.txt"), "PASS\n");
 	writeFileSync(join(work, "tests", "cli", "land-suite.test.sh"), "#!/bin/sh\nset -eu\nif grep -Fxq SLOW suite-contract.txt; then sleep 10; fi\ngrep -Fxq PASS suite-contract.txt\n", { mode: 0o755 });
 	mkdirSync(join(work, "scripts"), { recursive: true });
-	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh"];
+	mkdirSync(join(work, ".github"), { recursive: true });
+	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh",
+		"scripts/suite-metrics.py", "scripts/kitlib_run.py", "scripts/pysafe.py",
+		"scripts/test-budget.ts", ".github/test-budget.json"];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
 	for (const path of gateFiles)
 		writeFileSync(join(work, path), readFileSync(join(repoRoot, path)), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
@@ -220,7 +223,7 @@ function registerPushCheck(work: string, body: string): string {
 	return createHash("sha256").update(body).digest("hex");
 }
 
-test("checks the exact candidate with the base-registered push check before publishing", () => {
+test("checks the exact candidate with the base-registered push check before publishing", async () => {
 	const { work, fakeBin } = fixture();
 	mkdirSync(join(work, ".omp"), { recursive: true });
 	const checkBody = [
@@ -242,6 +245,12 @@ test("checks the exact candidate with the base-registered push check before publ
 	const checkShaFile = join(scratch, `checked-sha-${fixtureNumber}.txt`);
 	const checkContentFile = join(scratch, `checked-content-${fixtureNumber}.txt`);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const identity = await kitlibRun(["python3", join(work, "scripts", "suite-metrics.py"), "identity", "--root", work, "--scope", "full"], {
+		cwd: work, deadline_s: 30,
+	});
+	expect(identity.rc, new TextDecoder().decode(identity.stderr)).toBe(0);
+	expect(identity.timed_out).toBe(false);
+	const expectedChecks = new TextDecoder().decode(identity.stdout).trim();
 	writeFileSync(join(work, "scripts", "fresh-gate.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 	const run = command(work, landArgs("owned.txt"), hold, {
 		amDir: fakeBin,
@@ -280,16 +289,25 @@ test("checks the exact candidate with the base-registered push check before publ
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("post-commit worktree edit\n");
 	const tree = git(work, ["rev-parse", `${data.commit}^{tree}`]).trim();
 	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
-	const expectedChecks = createHash("sha256")
-		.update(git(work, ["show", `${data.commit}:scripts/full-suite-verdict.sh`]))
-		.update(git(work, ["show", `${data.commit}:scripts/fresh-gate.sh`]))
-		.update(git(work, ["show", `${data.commit}:scripts/kitlib-tmp.sh`]))
-		.update(git(work, ["show", `${data.commit}:scripts/gate-ci-only.tsv`]))
-		.digest("hex");
 	expect(JSON.parse(readFileSync(verdictPath, "utf8"))).toMatchObject({
 		tree, checks: expectedChecks, verdict: "PASS", evidence: { complete: true },
 	});
 	expect(remoteHead(work)).toBe(data.commit);
+});
+test("a v2 base missing a transitive judging dependency cannot publish using the worktree copy", () => {
+	const { work, fakeBin } = fixture();
+	git(work, ["rm", "scripts/pysafe.py"]);
+	git(work, ["commit", "-m", "plant incomplete v2 judge [test]"]);
+	git(work, ["push", "origin", "HEAD:refs/heads/main"]);
+	const base = remoteHead(work);
+	// The available working-tree helper must not repair the authoritative base.
+	writeFileSync(join(work, "scripts", "pysafe.py"), readFileSync(join(repoRoot, "scripts", "pysafe.py")));
+	writeFileSync(join(work, "owned.txt"), "candidate owned content\n");
+	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+	const result = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	expect(result.status).toBe(77);
+	expect(responseCode(result.body)).toBe("LAND_FULL_SUITE_UNRUN");
+	expect(remoteHead(work)).toBe(base);
 });
 test("contradictory cached PASS evidence is a cache miss and cannot publish", () => {
 	const { work } = fixture();
@@ -391,6 +409,8 @@ test("refuses a candidate whose exact full suite is red before origin advances",
 	});
 });
 
+// The 1 s suite deadline is unchanged. Its documented 5 s KILL grace and native
+// process drain must finish before this outer test/30 s command bound fires.
 test("refuses incomplete full-suite evidence before origin advances", () => {
 	const { work, fakeBin } = fixture();
 	const base = remoteHead(work);
@@ -411,7 +431,7 @@ test("refuses incomplete full-suite evidence before origin advances", () => {
 	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
 	const verdictPath = join(work, ".git", "omp-kit", "full-suite-verdicts", `${tree}.json`);
 	expect(existsSync(verdictPath)).toBe(false);
-});
+}, 35_000);
 test("requires explicit --yes before publishing", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "owner change\n");
