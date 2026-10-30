@@ -272,11 +272,15 @@ test("planted: under real timers the second send types only after the first subm
 	expect(b.status).toBe("DELIVERED");
 	expect(fa.taken.enters).toBe(1);
 	expect(fb.taken.enters).toBe(1);
-	const momentOf = (ev: string): number => {
-		const found = events.find((entry) => entry.ev === ev);
-		expect(found).toBeDefined();
-		return found!.t;
+	// Wall order is the append order: the fakes push synchronously as each step happens, while Date.now()
+	// has 1 ms resolution, so two steps in one millisecond tie (the 2026-10-30 16:31Z pre-push gate measured
+	// ntm-bravo and enter-alpha at the same 1793378449079). Timestamps must still never run backwards.
+	const indexOf = (ev: string): number => {
+		const index = events.findIndex((entry) => entry.ev === ev);
+		expect(index).toBeGreaterThanOrEqual(0);
+		return index;
 	};
-	expect(momentOf("ntm-alpha")).toBeLessThan(momentOf("ntm-bravo"));
-	expect(momentOf("ntm-bravo")).toBeGreaterThan(momentOf("enter-alpha"));
+	expect(indexOf("ntm-alpha")).toBeLessThan(indexOf("ntm-bravo"));
+	expect(indexOf("ntm-bravo")).toBeGreaterThan(indexOf("enter-alpha"));
+	expect(events[indexOf("ntm-bravo")]!.t).toBeGreaterThanOrEqual(events[indexOf("enter-alpha")]!.t);
 }, 30000);
