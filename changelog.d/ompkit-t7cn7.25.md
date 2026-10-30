@@ -1,0 +1,1 @@
+- Carry the complete measured-judge helper closure in save-first test fixtures from both Git checkouts and stamped history-free exports, preventing missing-helper failures without weakening the original component or source-identity assertions.

@@ -28,8 +28,8 @@ if [ "$SOURCE_IDENTITY" = "GIT" ]; then
 	}
 	SOURCE_SHA=$(git -C "$SOURCE_ROOT" rev-parse HEAD) || exit 1
 	git -C "$SOURCE_ROOT" archive --format=tar "$SOURCE_SHA" \
-		scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh \
-		scripts/suite-metrics.py scripts/kitlib_run.py scripts/pysafe.py scripts/kitlib-tmp.sh scripts/test-budget.ts .github/test-budget.json \
+		scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh scripts/full-suite-verdict-store.py \
+		scripts/suite-metrics.py scripts/suite-hermetic-env.sh scripts/kitlib_run.py scripts/kitlib_tmp.py scripts/pysafe.py scripts/kitlib-tmp.sh scripts/test-budget.ts .github/test-budget.json \
 		src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \
 		config/heavy-labels.json \
 		> "$TMP/exact-source.tar"
@@ -37,8 +37,8 @@ else
 	(
 		cd "$SOURCE_ROOT" || exit 1
 		tar -cf "$TMP/exact-source.tar" \
-			scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh \
-			scripts/suite-metrics.py scripts/kitlib_run.py scripts/pysafe.py scripts/kitlib-tmp.sh scripts/test-budget.ts .github/test-budget.json \
+			scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh scripts/full-suite-verdict-store.py \
+			scripts/suite-metrics.py scripts/suite-hermetic-env.sh scripts/kitlib_run.py scripts/kitlib_tmp.py scripts/pysafe.py scripts/kitlib-tmp.sh scripts/test-budget.ts .github/test-budget.json \
 			src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \
 			config/heavy-labels.json
 	)
