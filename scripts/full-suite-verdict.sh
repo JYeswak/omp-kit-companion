@@ -458,6 +458,11 @@ shell_unfinished() {
 # Timeout kills the suite's process tree, refuses, and records nothing, so a retry reruns.
 run_suite() {
 	(
+		append_suite_status() {
+			{
+				printf '%s\n' "$@"
+			} >>"$SUITE_STATUS"
+		}
 		# Publisher tracker selection must not redirect tests away from their own fixtures.
 		# Tests can still select an explicit tracker after the suite child starts.
 		unset BEADS_DB
@@ -516,11 +521,7 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 			set -- $b_counts
 			b_tests=$1; b_failed=$2
 			cat "$BUN_OUT"
-			{
-				echo "BUN rc=$bun_rc"
-				echo "BUN_RAN $b_tests"
-				echo "BUN_FAIL $b_failed"
-			} >>"$SUITE_STATUS"
+			append_suite_status "BUN rc=$bun_rc" "BUN_RAN $b_tests" "BUN_FAIL $b_failed"
 			[ "$bun_rc" -eq 0 ] || failed=1
 		fi
 		# FULLSUITEPAR1 (ompkit-9t6f2): SHELL_JOBS workers share the shell suites. A worker claims the
@@ -583,9 +584,12 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 					*)
 						cat "$SHELL_DIR/$i.out"
 						if [ "$src" -eq 0 ]; then
-							echo "GREEN script-suite $suite"; echo "GREEN script-suite $suite" >>"$SUITE_STATUS"
+							echo "GREEN script-suite $suite"
+							append_suite_status "GREEN script-suite $suite"
 						else
-							echo "RED script-suite $suite rc=$src"; echo "RED script-suite $suite" >>"$SUITE_STATUS"; failed=1
+							echo "RED script-suite $suite rc=$src"
+							append_suite_status "RED script-suite $suite"
+							failed=1
 						fi
 						rm -f "$SHELL_DIR/$i.out" "$SHELL_DIR/$i.rc"
 						rmdir "$SHELL_DIR/$i.claim" ;;
@@ -603,9 +607,13 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 			if dfl python3 "$SCRIPT_DIR/suite-metrics.py" run \
 				--record "$METRICS_DIR/python-$p_i.json" --path "$suite" --runner python3 \
 				--tree "$tree" --cwd "$ARCHIVE_DIR" --deadline "$TIMEOUT_SECS" -- python3 "$suite"; then
-				echo "GREEN python-suite $suite"; echo "GREEN python-suite $suite" >>"$SUITE_STATUS"
+				echo "GREEN python-suite $suite"
+				append_suite_status "GREEN python-suite $suite"
 			else
-				src=$?; echo "RED python-suite $suite rc=$src"; echo "RED python-suite $suite" >>"$SUITE_STATUS"; failed=1
+				src=$?
+				echo "RED python-suite $suite rc=$src"
+				append_suite_status "RED python-suite $suite"
+				failed=1
 			fi
 		done
 		exit "$failed"
