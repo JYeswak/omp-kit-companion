@@ -72,7 +72,7 @@ try {
 		timingSource = resolve(repo, timingsDir ?? ".github");
 		if (!timingsDir) {
 			const store = await run([
-				"python3", resolve(repo, "scripts/full-suite-verdict-store.py"),
+				"python3", resolve(import.meta.dir, "full-suite-verdict-store.py"),
 				"timings", "--repo", repo,
 			], { deadline_s: 10 });
 			if (store.rc !== 0 || store.timed_out || store.truncated) throw new Error("INVALID_INPUT shared verdict timings discovery incomplete");

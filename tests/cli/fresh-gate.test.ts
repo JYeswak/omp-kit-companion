@@ -4,6 +4,7 @@ import { cpSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statfsS
 import { join, resolve } from "node:path";
 import { writeBundledHarness } from "./release-manifest-fixture.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { runSync } from "../../src/kitlib/run";
 
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = root.includes("/fresh-gate.") ? resolve(root, "..") : resolve(root, "var/agent-tmp");
@@ -464,12 +465,28 @@ function affectedArchive(fx: SaveFixture, answer: number, expected: number, base
 	writeFileSync(join(dir, "docs/notes.md"), "# notes\n");
 	return dir;
 }
+// The focused gate names its candidate as "$COMMIT^{tree}" in the repository at $ROOT (the pushing
+// checkout), and resolves the shared timing store from that repository root. The fixture owns that
+// repository instead of borrowing the checkout this test runs in: the gate's exact-commit export
+// is an unborn `git init`, so HEAD there names no tree.
+function candidateRepo(fx: SaveFixture): string {
+	const repo = join(fx.dir, "candidate-repo");
+	if (existsSync(join(repo, ".git"))) return repo;
+	mkdirSync(repo);
+	const identity = ["-c", "user.name=fresh-gate test", "-c", "user.email=fresh-gate@example.invalid", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"];
+	for (const args of [["init", "-q"], [...identity, "commit", "-q", "--allow-empty", "-m", "[test] focused gate candidate"]]) {
+		const result = runSync(["git", "-C", repo, ...args], { env: { ...process.env, ...fx.env } as Record<string, string>, deadline_s: 30 });
+		if (result.rc !== 0) throw new Error(`git ${args.join(" ")} failed: ${new TextDecoder().decode(result.stderr)}`);
+	}
+	return repo;
+}
 function runFocused(fx: SaveFixture, source: string, archive: string, changed: string, scriptDir = join(root, "scripts")) {
 	const probe = join(fx.dir, `focused-${Math.random().toString(36).slice(2)}.sh`);
 	writeFileSync(probe, `set -eu\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\ngate_focused || rc=$?\nexit "$rc"\n`);
+	const repo = candidateRepo(fx);
 	const started = Date.now();
 	const result = Bun.spawnSync(["sh", probe], {
-		env: { ...process.env, ...fx.env, ROOT: root, TMPDIR: join(fx.dir, "caller-tmp"), ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
+		env: { ...process.env, ...fx.env, ROOT: repo, TMPDIR: join(fx.dir, "caller-tmp"), ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
 		stdout: "pipe", stderr: "pipe",
 	});
 	return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString(), seconds: (Date.now() - started) / 1000 };
@@ -526,7 +543,7 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 refuses a successful file over its measured po
 		const scripts = join(judge, "scripts");
 		mkdirSync(scripts, { recursive: true });
 		mkdirSync(join(judge, ".github"));
-		for (const name of ["fresh-gate.sh", "gate-disk-floor.ts", "suite-metrics.py", "test-budget.ts", "affected-tests.ts", "gate-ci-only.tsv"]) {
+		for (const name of ["fresh-gate.sh", "gate-disk-floor.ts", "suite-metrics.py", "full-suite-verdict-store.py", "test-budget.ts", "affected-tests.ts", "gate-ci-only.tsv"]) {
 			symlinkSync(join(root, "scripts", name), join(scripts, name));
 		}
 		const policy = join(judge, ".github/test-budget.json");
@@ -777,7 +794,7 @@ function gateTree(fx: SaveFixture, manifest: string): string {
 	mkdirSync(join(dir, "scripts"));
 	symlinkSync(join(root, "src"), join(dir, "src"));
 	for (const name of ["affected-tests.ts", "gate-disk-floor.ts"]) cpSync(join(root, "scripts", name), join(dir, "scripts", name));
-	for (const name of ["suite-metrics.py", "test-budget.ts", "fresh-gate.sh"]) symlinkSync(join(root, "scripts", name), join(dir, "scripts", name));
+	for (const name of ["suite-metrics.py", "full-suite-verdict-store.py", "test-budget.ts", "fresh-gate.sh"]) symlinkSync(join(root, "scripts", name), join(dir, "scripts", name));
 	mkdirSync(join(dir, ".github"));
 	cpSync(join(root, ".github/test-budget.json"), join(dir, ".github/test-budget.json"));
 	writeFileSync(join(dir, "scripts/gate-ci-only.tsv"), manifest);

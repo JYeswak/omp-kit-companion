@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -7,6 +7,7 @@ import { run } from "../../src/kitlib/run.ts";
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const fullSuiteVerdict = join(repoRoot, "scripts", "full-suite-verdict.sh");
+const verdictStore = join(repoRoot, "scripts", "full-suite-verdict-store.py");
 const scratch = ownedTmp("savefirst-sibling", { root: process.env.TMPDIR });
 afterAll(() => cleanupAllOwnedTmp());
 
@@ -18,6 +19,19 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 	return stdout.trim();
 }
 
+// The shared store owns the record name (tree, judge role, judging and runtime identity); resolve it
+// with the same environment the judged run saw, exactly as the shell suites do.
+async function recordBase(fixture: string, cache: string, env: Record<string, string>): Promise<string> {
+	const tree = await git(fixture, "rev-parse", "HEAD^{tree}");
+	const result = await run(["python3", verdictStore, "path", "--repo", fixture, "--tree", tree, "--role", "base",
+		"--judge-root", repoRoot, "--cache-dir", cache], { cwd: fixture, deadline_s: 60, env });
+	const stdout = new TextDecoder().decode(result.stdout).trim();
+	if (result.rc !== 0 || result.timed_out || !stdout.endsWith(".json")) {
+		throw new Error(`verdict record path unresolved: ${stdout}${new TextDecoder().decode(result.stderr)}`);
+	}
+	return stdout.slice(0, -".json".length);
+}
+
 test("full-suite sibling inherits statfs while auto/sbh still refuses", async () => {
 	const fixture = scratch.path;
 	const suiteDir = join(fixture, "tests", "cli");
@@ -25,6 +39,14 @@ test("full-suite sibling inherits statfs while auto/sbh still refuses", async ()
 	mkdirSync(suiteDir, { recursive: true });
 	mkdirSync(join(fixture, "scripts"), { recursive: true });
 	copyFileSync(join(repoRoot, "scripts", "kitlib-tmp.sh"), join(fixture, "scripts", "kitlib-tmp.sh"));
+	// HERMETIC1 points a suite's KITROOT at the candidate archive, so the candidate carries the CLI
+	// (and the files it imports) that its suite runs as "$KITROOT/src/cli.ts heavy".
+	cpSync(join(repoRoot, "src"), join(fixture, "src"), { recursive: true });
+	mkdirSync(join(fixture, "config"));
+	copyFileSync(join(repoRoot, "config", "heavy-labels.json"), join(fixture, "config", "heavy-labels.json"));
+	mkdirSync(join(fixture, "installer"));
+	copyFileSync(join(repoRoot, "installer", "install.py"), join(fixture, "installer", "install.py"));
+	copyFileSync(join(repoRoot, "scripts", "tern-script-routes.json"), join(fixture, "scripts", "tern-script-routes.json"));
 	mkdirSync(stateDir, { recursive: true });
 	await git(fixture, "init", "-q");
 	await git(fixture, "config", "user.name", "SAVEFIRST1 test");
@@ -73,7 +95,8 @@ fi
 rm -rf "$case_tmp"
 `, { mode: 0o755 });
 	chmodSync(suite, 0o755);
-	await git(fixture, "add", "--", "tests/cli/savefirst-sibling-pressure.test.sh", "scripts/kitlib-tmp.sh");
+	await git(fixture, "add", "--", "tests/cli/savefirst-sibling-pressure.test.sh", "scripts/kitlib-tmp.sh",
+		"scripts/tern-script-routes.json", "src", "config", "installer");
 	await git(fixture, "commit", "-q", "-m", "[test] SAVEFIRST1 sibling fixture");
 
 	const candidate = await git(fixture, "rev-parse", "HEAD");
@@ -86,18 +109,18 @@ rm -rf "$case_tmp"
 		cwd: fixture, deadline_s: 120, env,
 	});
 	const output = `${new TextDecoder().decode(result.stdout)}${new TextDecoder().decode(result.stderr)}`;
-	const tree = await git(fixture, "rev-parse", "HEAD^{tree}");
-	const log = readFileSync(join(cache, `${tree}.log`), "utf8");
+	const record = await recordBase(fixture, cache, env);
+	const log = readFileSync(`${record}.log`, "utf8");
 	const evidence = `${output}\n${log}`;
 	expect(result.rc, evidence).toBe(0);
 	expect(result.timed_out, evidence).toBe(false);
 	expect(output).toContain("FULL-SUITE: VERDICT PASS");
 	expect(readdirSync(join(fixture, "var", "agent-tmp"))).toEqual([]);
 
-	const verdictPath = join(cache, `${tree}.json`);
+	const verdictPath = `${record}.json`;
 	const verdict = JSON.parse(readFileSync(verdictPath, "utf8")) as { verdict: string; evidence: { complete: boolean; shell_suites: number; shell_fail: number } };
 	expect(verdict).toMatchObject({ verdict: "PASS", evidence: { complete: true, shell_suites: 1, shell_fail: 0 } });
-	expect(readFileSync(join(cache, `${tree}.log`), "utf8")).toContain("SAVEFIRST1 full-suite sibling pressure PASS");
+	expect(readFileSync(`${record}.log`, "utf8")).toContain("SAVEFIRST1 full-suite sibling pressure PASS");
 }, 30_000);
 test("full-suite supplies Git and private temp context to archived shell suites", async () => {
 	const fixture = join(scratch.path, "caller-context");
@@ -141,8 +164,7 @@ printf 'FULL-SUITE-CONTEXT PASS\n'
 		cwd: fixture, deadline_s: 120, env,
 	});
 	const output = `${new TextDecoder().decode(result.stdout)}${new TextDecoder().decode(result.stderr)}`;
-	const tree = await git(fixture, "rev-parse", "HEAD^{tree}");
-	const log = readFileSync(join(cache, `${tree}.log`), "utf8");
+	const log = readFileSync(`${await recordBase(fixture, cache, env)}.log`, "utf8");
 	const evidence = `${output}\n${log}`;
 	expect(result.rc, evidence).toBe(0);
 	expect(result.timed_out, evidence).toBe(false);
