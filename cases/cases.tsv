@@ -7,6 +7,10 @@ bash-glob-silenced	fire	tool	bash	-	grep\t-rl 'x'\tcrates/*/Cargo.toml\t2>/dev/n
 bash-pipe-exit	fire	tool	bash	-	./scripts/lane-status.sh 2>&1 | tail -16; echo "EXIT=$?"	rc read after the pipe	
 bash-pipe-exit	quiet	tool	bash	-	./scripts/lane-status.sh >/tmp/x 2>&1; echo "rc=$?"	rc read with no pipe	
 bash-pipe-exit	quiet	tool	bash	-	grep -c foo bar | tail -1	piped, rc never read	
+bash-silenced-filter-pipe	fire	tool	bash	-	br list --json 2>/dev/null | jq .	stderr silenced before jq	
+bash-silenced-filter-pipe	fire	tool	bash	-	ps -E 2>/dev/null | grep x	stderr silenced before grep	
+bash-silenced-filter-pipe	quiet	tool	bash	-	cmd > log 2>&1; echo rc=$?	captured stderr and exit status	
+bash-silenced-filter-pipe	quiet	tool	bash	-	cmd 2>/dev/null	stderr silenced without a pipe	
 kit-close-needs-evidence	fire	tool	bash	-	br close x	session regression: no reason; the JSON closing quote ends the command	
 kit-close-needs-evidence	fire	tool	bash	-	br close bd-42 && git push	baseline: no reason, then another command	
 kit-close-needs-evidence	fire	tool	bash	-	br close kit-x; br list	no reason, then ;	
