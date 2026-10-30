@@ -40,9 +40,9 @@ LEGACY_AT = "2026-10-23T23:59:59.999999Z"
 AUTHOR = "AuthorAgent"
 GRADER = "GraderAgent"
 GOOD_ACC = (
-    "- [x] [a] [build] parser handles tags; planted negative: an untagged line is refused\n"
-    "- [x] [a] [landed] on origin/main\n"
-    "- [ ] [a] [live] release installed and the gate fires live"
+    "- [x] [a] [build] parser handles tags `true` -> rc 0; planted negative: an untagged line is refused\n"
+    "- [x] [a] [landed] on origin/main `true` -> rc 0\n"
+    "- [ ] [a] [live] release installed and the gate fires live `true` -> rc 0"
 )
 # run_gate config sentinels: the repo opted in, or the opt-in path is a directory.
 REQUIRED = {"required": True}
@@ -397,7 +397,7 @@ class InReviewCli(unittest.TestCase):
 
     def test_legacy_bead_is_admitted_with_notice(self) -> None:
         bead = base_bead(created_at=LEGACY_AT,
-                         acceptance_criteria="- [ ] [a] untagged legacy item; planted negative RED")
+                         acceptance_criteria="- [ ] [a] untagged legacy item `true` -> rc 0; planted negative RED")
         rc, err = self.run_gate(bead, None)
         self.assertEqual(rc, 0, err)
         self.assertEqual(len(err.strip().splitlines()), 1, err)

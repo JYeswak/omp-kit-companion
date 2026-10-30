@@ -183,7 +183,7 @@ async function claimFixture(name: string, actor: string, root: string, brBin: st
 	// never an accidentally shadowed binary for scope-bearing calls.
 	mkdirSync(join(repo, ".beads"), { recursive: true });
 	await brun(["init", "--db", join(repo, ".beads", "beads.db")], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
-	const ac = "- [ ] [a] [build] probe passes";
+	const ac = "- [ ] [a] [build] probe passes `true` -> rc 0";
 	const gatedOut = await brun(["create", "gated bead [test]", "-l", "needs-director", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const eligibleOut = await brun(["create", "eligible bead [test]", "--acceptance-criteria", ac, "--silent", "--actor", actor], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const gated = gatedOut.trim().split("\n").filter(l => l.length > 0).at(-1)!;

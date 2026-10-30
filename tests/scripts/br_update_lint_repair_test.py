@@ -32,8 +32,8 @@ from pysafe import run_bounded  # noqa: E402  (cancel-safe spawn: own process gr
 UPDATE_LINT = str(SCRIPTS / "br-update-lint.py")
 ENFORCED_AT = "2026-10-24T00:00:00.000001Z"
 CODE_ACC = (
-    "- [ ] [a] [build] parser handles tags; planted negative: an untagged line is refused\n"
-    "- [ ] [a] [landed] on origin/main"
+    "- [ ] [a] [build] parser handles tags `true` -> rc 0; planted negative: an untagged line is refused\n"
+    "- [ ] [a] [landed] on origin/main `true` -> rc 0"
 )
 # An open time item beside code items: elapsed-time-mix, which a description
 # edit cannot repair (its fix is a split or a checker change).
@@ -144,7 +144,9 @@ class RepairAdmission(unittest.TestCase):
                 self.assertNotIn("LINT_REPAIR_ADMITTED", err)
 
     def test_standalone_claim_keeps_todays_pass_through(self) -> None:
-        rc, err = self.run_update(fixture(), "--claim")
+        # A replayable acceptance (J-2026-10-29-22): MIXED_ACC's [after 7d] box is refused at claim
+        # by REPLAYABLE1, which bead-replayable.test.ts covers; the bead still fails b-what-why-acc.
+        rc, err = self.run_update(fixture(BAD_DESC, CODE_ACC), "--claim")
         self.assertEqual((rc, err), (0, ""))
 
     def test_clean_edit_is_still_admitted_without_a_repair_note(self) -> None:
