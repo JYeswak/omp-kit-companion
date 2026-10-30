@@ -361,6 +361,28 @@ test("SENDOMP1 planted: a version-named process outside an omp/versions/ directo
 			.toMatchObject([argv0, { status: "UNKNOWN", reason: "FOREGROUND_OMP_MISSING" }]);
 	}
 });
+test("SENDOMP1: a bundled seat whose launcher path holds a space ('Application Support') is observed with its incarnation and AGENT_NAME", async () => {
+	// `ps eww -o lstart= -o command=` pads lstart and prints argv joined by single spaces, so the path's own space
+	// is indistinguishable from a separator unless argv is matched as one joined string.
+	const psLine = `Wed Oct 28 10:21:56 2026     ${TERN_BUNDLED_OMP} --profile codex AGENT_NAME=SilverCondor\n`;
+	const base = testIo(false, terminalJournal, agentResolution, [], psLine);
+	const io = { ...base, run: (argv: string[]) => argv.includes("process")
+		? { code: 0, out: JSON.stringify(withForeground(TERN_BUNDLED_OMP)) } : base.run(argv) };
+	expect(await observeTernSeat(seat, io)).toMatchObject({ state: "IDLE",
+		fg: { name: "18.13.3", started: "Wed Oct 28 10:21:56 2026", agentName: "SilverCondor" } });
+	expect(await identifyTernSeat(seat, io)).toMatchObject({ status: "IDENTIFIED", agent: "SilverCondor" });
+	// Planted: a ps line whose argv differs after the space is a different process, never this incarnation.
+	const other = `Wed Oct 28 10:21:56 2026 /Users/fixture/Library/Application Elsewhere/Tern/omp/versions/18.13.3 --profile codex AGENT_NAME=SilverCondor\n`;
+	const otherIo = { ...io, run: (argv: string[]) => argv[0] === "/bin/ps" ? { code: 0, out: other } : io.run(argv) };
+	expect(await observeTernSeat(seat, otherIo)).toMatchObject({ state: "UNKNOWN", reason: "FOREGROUND_INCARNATION_UNAVAILABLE" });
+	// Planted: an AGENT_NAME token inside argv is never read as the environment's.
+	const forged = { ...processFixture, foreground: { ...processFixture.foreground, name: "18.13.3",
+		argv: [TERN_BUNDLED_OMP, "--note", "AGENT_NAME=Forged"] } };
+	const forgedIo = { ...base, run: (argv: string[]) => argv.includes("process") ? { code: 0, out: JSON.stringify(forged) }
+		: argv[0] === "/bin/ps" ? { code: 0, out: `Wed Oct 28 10:21:56 2026 ${TERN_BUNDLED_OMP} --note AGENT_NAME=Forged\n` }
+		: base.run(argv) };
+	expect(await observeTernSeat(seat, forgedIo)).toMatchObject({ state: "IDLE", fg: { agentName: null } });
+});
 
 test("Tern process parser extracts the actual foreground OMP record", () => {
 	const result = parseTernProcess(processFixture, "/repo", 123);

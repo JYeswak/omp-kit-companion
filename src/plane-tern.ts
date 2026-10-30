@@ -1099,18 +1099,30 @@ function runTextCommand(
 	}
 }
 
+/** `ps -o lstart= -o command=`: five lstart fields, then argv joined by single spaces, then (with `e`) the
+ * environment. argv is matched as one joined string, so an argv[0] with its own space (Tern's bundled OMP under
+ * "Application Support", SENDOMP1) still matches, and nothing inside argv is ever read as environment. */
 function parseProcessStart(text: string, expectedArgv: readonly string[]): { started: string; agentName: string | null } | null {
-	const fields: string[] = [];
-	for (const field of text.trim().split(" ")) if (field.length > 0) fields.push(field);
-	if (fields.length < expectedArgv.length + 5) return null;
-	for (let index = 0; index < expectedArgv.length; index++) {
-		if (fields[index + 5] !== expectedArgv[index]) return null;
+	const line = text.trim();
+	const lstart: string[] = [];
+	let at = 0;
+	while (lstart.length < 5) {
+		while (line[at] === " ") at++;
+		if (at >= line.length) return null;
+		const end = line.indexOf(" ", at);
+		const stop = end < 0 ? line.length : end;
+		lstart.push(line.slice(at, stop));
+		at = stop;
 	}
-	const started = fields.slice(0, 5).join(" ");
+	while (line[at] === " ") at++;
+	const command = expectedArgv.join(" ");
+	if (!line.startsWith(command, at)) return null;
+	at += command.length;
+	if (at < line.length && line[at] !== " ") return null;
+	const started = lstart.join(" ");
 	let agentName: string | null = null;
 	let agentNameSeen = false;
-	for (let index = expectedArgv.length + 5; index < fields.length; index++) {
-		const field = fields[index]!;
+	for (const field of line.slice(at).split(" ")) {
 		if (!field.startsWith("AGENT_NAME=")) continue;
 		if (agentNameSeen) return { started, agentName: null };
 		agentNameSeen = true;
