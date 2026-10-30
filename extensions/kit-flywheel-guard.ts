@@ -10,6 +10,7 @@ import { gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
 import { parseCommit, planAutocomplete } from "./commit-autocomplete";
 import { renderEnvelope } from "../src/kitlib/findings.ts";
 import { agentMailStorageRoot } from "../src/holder-liveness.ts";
+import { projectAgentBrShimPath } from "../src/gate-plane.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -117,6 +118,7 @@ export interface FlywheelMessage {
 /** The slice of omp's ExtensionAPI this guard touches. */
 export interface FlywheelGuardApi {
 	on(event: "session_compact", handler: (event: { type: "session_compact" }, ctx: FlywheelContext) => unknown): void;
+	on(event: "session_start", handler: (event: { type: "session_start" }, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_call", handler: (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_execution_end", handler: (event: FlywheelToolExecutionEndEvent, ctx: FlywheelContext) => unknown): void;
 	sendMessage(message: FlywheelMessage, options?: { triggerTurn?: boolean; deliverAs?: "nextTurn" | "aside" }): void;
@@ -2168,6 +2170,13 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const closeIntents = new Map<string, CloseAttempt[]>();
 	/** Every tracker a successful br call reached this session, by key: an empty list in one never vouches for the others. */
 	const sessionTrackers = new Map<string, TrackerRef>();
+	pi.on("session_start", (_event, ctx) => {
+		if (!env.AGENT_NAME?.trim()) return;
+		const projected = projectAgentBrShimPath(env, home, deps.lintScriptsDir ?? BEAD_LINT_SCRIPTS_DIR);
+		if (!projected.ok) {
+			ctx.ui?.notify(`kit-flywheel-guard GATEPLANE1: br shim PATH projection failed (${projected.reason}); Python/Bun br calls may bypass admission.`, "warning");
+		}
+	});
 	pi.on("session_compact", async (_event, ctx) => {
 		pendingCalls.clear();
 		closeIntents.clear();

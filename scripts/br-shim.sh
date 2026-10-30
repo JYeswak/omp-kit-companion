@@ -214,17 +214,21 @@ fi
  	fi
  fi
 
-# REPLAYABLE1 claim gate (ompkit-fp72.135.3.71, J-2026-10-29-22 'Migrate at
-# claim, enforced'): `br update ID --claim` and the move to in_review are
-# refused REFUSED_NOT_REPLAYABLE when `omp-kit verify` cannot replay the
-# bead's acceptance. The verdict is br-update-lint.py's (the verify grammar
-# through box-lint.ts); the shim only relays exit 4. A helper that cannot run
-# passes through with a warning, the update lint's fail-open contract.
+# REPLAYABLE1 claim/review gate (ompkit-fp72.135.3.71, J-2026-10-29-22):
+# `br update ID --claim` and the move to in_review are refused when the
+# acceptance cannot be replayed. Review entry runs the full admission lint,
+# including AC phase and pregrade; claim runs only the replayability predicate.
+# A helper that cannot run passes through with the update lint's fail-open contract.
 if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && { [ "$gate_claim" = 1 ] || [ "$gate_status" = "in_review" ]; }; then
 	replay_lint="$(dirname -- "$self_path")/br-update-lint.py"
 	if [ -f "$replay_lint" ] && command -v python3 >/dev/null 2>&1; then
-		BR_UPDATE_REAL="$real" BR_UPDATE_PROJECT="$tracker_project" BR_UPDATE_DB="$tracker_db_path" BR_UPDATE_REPLAYABLE_ONLY=1 \
-			python3 "$replay_lint" update "$gate_id" "$@"
+		if [ "$gate_status" = "in_review" ]; then
+			BR_UPDATE_REAL="$real" BR_UPDATE_PROJECT="$tracker_project" BR_UPDATE_DB="$tracker_db_path" BR_UPDATE_REPLAYABLE_ONLY=0 \
+				python3 "$replay_lint" update "$gate_id" "$@"
+		else
+			BR_UPDATE_REAL="$real" BR_UPDATE_PROJECT="$tracker_project" BR_UPDATE_DB="$tracker_db_path" BR_UPDATE_REPLAYABLE_ONLY=1 \
+				python3 "$replay_lint" update "$gate_id" "$@"
+		fi
 		replay_rc=$?
 		case "$replay_rc" in
 			0) ;;

@@ -17,7 +17,7 @@ cat > "$BR_CREATE_FIXTURE" <<'EOF'
 ],"total":2,"offset":0,"has_more":false}
 EOF
 : > "$TMP/argv"
-br create --title "RELTRAIN2: candidate-completion never triggers the train publish job so green candidates never publish" > "$TMP/out" 2>&1
+br_create_valid --title "RELTRAIN2: candidate-completion never triggers the train publish job so green candidates never publish" > "$TMP/out" 2>&1
 got_rc=$?
 if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] \
 	&& grep -Fq "ompkit-fp72.25" "$TMP/out" && grep -Fq -- "--not-duplicate" "$TMP/out"; then
@@ -27,7 +27,7 @@ else
 	printf 'FAIL duplicate-refused: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 fi
 : > "$TMP/argv"
-br create --title "RELTRAIN2: candidate-completion never triggers the train publish job so green candidates never publish" --not-duplicate ompkit-dj7d > "$TMP/out" 2>&1
+br_create_valid --title "RELTRAIN2: candidate-completion never triggers the train publish job so green candidates never publish" --not-duplicate ompkit-dj7d > "$TMP/out" 2>&1
 got_rc=$?
 if [ "$got_rc" = "0" ] && [ "$(sed -n '1p' "$TMP/argv")" = "create" ] \
 	&& ! grep -Fq -- "--not-duplicate" "$TMP/argv"; then
@@ -68,7 +68,7 @@ json.dump({"issues":[{"id":"old-p0","title":"Existing P0 item","status":"open","
 PY
 : > "$TMP/argv"
 : > "$BR_CREATE_LOG"
-br create --title "Urgent new work" --priority P0 > "$TMP/out" 2>&1
+br_create_valid --title "Urgent new work" --priority P0 > "$TMP/out" 2>&1
 got_rc=$?
 if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -Fq "P0 cap" "$TMP/out"; then
 	pass=$((pass + 1))
@@ -79,7 +79,7 @@ fi
 printf '{"sessions":[{"repo":"%s","coordinatorSession":"fixture-director","coordinatorPane":"%%57","p0Cap":2}]}\n' "$REPO_ROOT" > "$OMP_KIT_FLEET_WATCH_CONFIG"
 : > "$TMP/argv"
 : > "$BR_CREATE_LOG"
-br create --title "Under cap" --priority 0 > "$TMP/out" 2>&1
+br_create_valid --title "Under cap" --priority 0 > "$TMP/out" 2>&1
 got_rc=$?
 if [ "$got_rc" = "0" ] && [ "$(sed -n '1p' "$TMP/argv")" = "create" ] \
 	&& ! grep -Fq "update" "$BR_CREATE_LOG" && ! grep -Fq "comments" "$BR_CREATE_LOG"; then
@@ -91,7 +91,7 @@ fi
 printf '{"sessions":[{"repo":"%s","coordinatorSession":"fixture-director","coordinatorPane":"%%57","p0Cap":1}]}\n' "$REPO_ROOT" > "$OMP_KIT_FLEET_WATCH_CONFIG"
 : > "$TMP/argv"
 : > "$BR_CREATE_LOG"
-br create --title "Urgent replacement" --priority P0 --displaces old-p0 > "$TMP/out" 2>&1
+br_create_valid --title "Urgent replacement" --priority P0 --displaces old-p0 > "$TMP/out" 2>&1
 got_rc=$?
 if [ "$got_rc" = "0" ] && grep -Fq '<update><old-p0><--priority><1>' "$BR_CREATE_LOG" \
 	&& grep -Fq '<create>' "$BR_CREATE_LOG" && grep -Fq '<comments><add>' "$BR_CREATE_LOG" \
@@ -114,7 +114,7 @@ printf '{"sessions":[{"repo":"%s","coordinatorSession":"fixture-director","coord
 : > "$TMP/argv"
 : > "$OMP_KIT_SEND_LOG"
 BR_CREATE_MUTATE_FIXTURE=1 BR_CREATE_ID=sweep-20 BR_CREATE_TITLE="planned sweep item" \
-	BR_CREATE_PRIORITY=2 BR_CREATE_CREATED="$TMP/sweep-created" br create --title "planned sweep item" > "$TMP/out" 2>&1
+	BR_CREATE_PRIORITY=2 BR_CREATE_CREATED="$TMP/sweep-created" br_create_valid --title "planned sweep item" > "$TMP/out" 2>&1
 got_rc=$?
 if [ "$got_rc" = "0" ] && grep -Fq "fixture-director" "$OMP_KIT_SEND_LOG" \
 	&& grep -Fq "sweep-19" "$OMP_KIT_SEND_LOG" && grep -Fq "planned sweep item" "$OMP_KIT_SEND_LOG"; then
@@ -197,11 +197,11 @@ export PATH="$TMP/racebin:$TMP/sendbin:$TMP/realbin:$PATH"
 BR_REAL="$TMP/realbin/br" BR_CREATE_ID=atomic-a BR_CREATE_TITLE="Atomic P0 A" \
 	BR_CREATE_PRIORITY=0 BR_CREATE_MUTATE_FIXTURE=1 BR_CREATE_GATE_DIR="$TMP/atomic-gate" \
 	BR_CREATE_CREATED="$TMP/atomic-created" BR_CREATE_P0_STATE="$TMP/atomic-p0" \
-	br create --title "Atomic P0 A" --priority P0 > "$TMP/atomic-a.out" 2>&1 & atomic_a=$!
+	br_create_valid --title "Atomic P0 A" --priority P0 > "$TMP/atomic-a.out" 2>&1 & atomic_a=$!
 BR_REAL="$TMP/realbin/br" BR_CREATE_ID=atomic-b BR_CREATE_TITLE="Atomic P0 B" \
 	BR_CREATE_PRIORITY=0 BR_CREATE_MUTATE_FIXTURE=1 BR_CREATE_GATE_DIR="$TMP/atomic-gate" \
 	BR_CREATE_CREATED="$TMP/atomic-created" BR_CREATE_P0_STATE="$TMP/atomic-p0" \
-	br create --title "Atomic P0 B" --priority P0 > "$TMP/atomic-b.out" 2>&1 & atomic_b=$!
+	br_create_valid --title "Atomic P0 B" --priority P0 > "$TMP/atomic-b.out" 2>&1 & atomic_b=$!
 wait_count=0
 while [ "$(wc -l < "$TMP/atomic-starts")" -lt 2 ] \
 	|| { [ ! -f "$TMP/atomic-gate/entered-atomic-a" ] && [ ! -f "$TMP/atomic-gate/entered-atomic-b" ]; }; do

@@ -3,8 +3,8 @@
 
 Gate content edits to a bead (`br update ID ...`) on the per-bead
 bead-lint subset before the write lands. Invoked by the kit-flywheel-guard
-extension and, for the REPLAYABLE1 claim gate only, by br-shim.sh; also
-usable directly as a kit `bead update` verb.
+extension and by br-shim.sh (full admission for in_review, replayability-only
+for claims); also usable directly as a kit `bead update` verb.
 
 Exit contract (shim honors it):
   0  admit (no content flags, or prospective bead passes)
@@ -60,8 +60,8 @@ REFUSED_NOT_REPLAYABLE on the LINT_REFUSED line) unless `omp-kit verify` can
 replay the bead's acceptance as it would stand after the command: at least
 one non-[v] box, and every such box replayable. Each bad box is named on its
 own REFUSED_NOT_REPLAYABLE line with the corrected shape; once the boxes are
-rewritten the claim is admitted. With BR_UPDATE_REPLAYABLE_ONLY=1 (the
-shim's call) only this gate runs.
+rewritten the claim is admitted. With BR_UPDATE_REPLAYABLE_ONLY=1 (the shim's
+claim-only call) only this gate runs.
 
 Reads are live (`br show`, `br list`); no JSONL flush is involved, so a
 fixed bead passes immediately (LINTGATE1 acceptance 2).
@@ -237,8 +237,8 @@ def main(argv: list[str]) -> int:
     if args.subcommand != "update" or not args.bead_id:
         return 0
     # REPLAYABLE1 claim gate (J-2026-10-29-22): a claim or an in_review move
-    # needs acceptance `omp-kit verify` can replay. br-shim.sh runs only this
-    # gate (BR_UPDATE_REPLAYABLE_ONLY=1); content edits get the full lint.
+    # needs acceptance `omp-kit verify` can replay. br-shim.sh uses replay-only
+    # mode for --claim and full admission for --status in_review.
     claim_gate = args.claim or args.status == "in_review"
     replay_only = os.environ.get("BR_UPDATE_REPLAYABLE_ONLY") == "1"
     full = not replay_only and has_content_flags(args)

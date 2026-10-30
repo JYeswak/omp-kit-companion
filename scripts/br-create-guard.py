@@ -15,6 +15,7 @@ from br_create_guard_core import (
     acquire_tracker_lock,
     duplicate_matches,
     fail,
+    lint_prospective,
     parse_create_args,
     project_policy,
     recent_creations,
@@ -217,6 +218,16 @@ def main(argv: list[str]) -> int:
                 if not parsed["quiet"]:
                     print(f"Added follow-up comment to {target_id}; no new bead created.")
                 return 0
+            try:
+                lint_failures = lint_prospective(parsed, issues, project)
+            except Exception as error:  # keep br-create-lint.py's fail-open probe contract
+                print(f"br-create-lint: LINT_GATE_UNVERIFIED {error}", file=sys.stderr)
+                lint_failures = []
+            if lint_failures:
+                print(f"br-create-lint: LINT_REFUSED {','.join(lint_failures)}: this "
+                      f"create would add a bead failing bead-lint; fix the named "
+                      f"checks and retry", file=sys.stderr)
+                return 4
 
             matches = duplicate_matches(parsed["title"], issues)
             not_duplicate = custom.get("--not-duplicate")

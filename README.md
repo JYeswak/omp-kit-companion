@@ -60,7 +60,7 @@ Fleet guards, services and the update channel are opt-in.
 | Know a rule fires | `omp-kit test` runs every authored case through the installed OMP matcher (G1 registration, G2 payload, G3 prefixes); `--full` adds the isolated live stage (G4) |
 | Change profiles safely | `apply rules\|policy\|extensions\|plugin\|mcp` print a plan; `--apply --yes` writes, records a receipt, and reads each changed key back |
 | Reverse a change | `omp-kit undo RUN_ID --yes` restores one receipt and refuses if a file changed since |
-| See what is broken | `omp-kit doctor --scope NAME` covers 39 scopes, from OMP identity to leaked secrets |
+| See what is broken | `omp-kit doctor --scope NAME` covers 40 scopes |
 | Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-agent-mail-guard`, `kit-guard-optin`, `kit-callback` extensions |
 | Stay current | The `kit-update` service installs each published release and relinks the plugin |
 | Script it | Every command takes `--json` and returns one envelope; `omp-kit schema --json` describes it |
@@ -126,15 +126,13 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 39 diagnostic scopes
+### Doctor: 40 scopes
 
 `omp-kit doctor --scope NAME` inspects one component read-only and reports
 `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
 a next step. The full scope table is in the [Command reference](#command-reference).
 
-```sh
-omp-kit doctor --scope settings          # per-profile TTSR keys via native `omp config get`
-```
+`omp-kit doctor --scope settings` reads profile TTSR keys via `omp config get`.
 
 ### Secrets scan
 
@@ -601,6 +599,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope services` | launchd jobs: running, idle, failing, path mismatch; `--services FILE` checks a required-jobs list | `omp-kit doctor --scope services` |
 | `--scope regex-tools` | Regex engineering tools on PATH | `omp-kit doctor --scope regex-tools` |
 | `--scope test-scope` | Runner scratch exclusions; `OMP_KIT_FLEET_WATCH_CONFIG` selects input | `omp-kit doctor --scope test-scope --json` |
+| `--scope gates` | Python `br` admission on owned fixtures; no live writes | `omp-kit doctor --scope gates` |
 | `--scope dicklesworthstone` | Installed agent tools (`ntm`, `am`, `caam`, ...) behind their latest release | `omp-kit doctor --scope dicklesworthstone` |
 | `--scope beads` | Acceptance criteria kept in their dedicated field | `omp-kit doctor --scope beads --project PATH` |
 | `--scope reservations` | Exclusive Agent Mail holds past the age limit | `omp-kit doctor --scope reservations --project PATH` |

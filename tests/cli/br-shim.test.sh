@@ -12,17 +12,18 @@ REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
 . "$REPO_ROOT/scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP br-shim-test || exit 1
+export XDG_STATE_HOME="$TMP/state"
 
 mkdir -p "$TMP/realbin" "$TMP/shimbindir" "$TMP/sendbin"
 cat > "$TMP/realbin/br" <<'EOF'
 #!/bin/sh
 # SYNC1 box 4: answer `show` with canned bead JSON for the close gate;
 # the creation guard reads a complete issue envelope before dispatch.
-if [ "$1" = "show" ]; then
+if [ "$1" = "show" ] || { [ "$1" = "--db" ] && [ "$3" = "show" ]; }; then
 	cat "$BR_GUARD_JSON_FILE"
 	exit 0
 fi
-if [ "$1" = "list" ]; then
+if [ "$1" = "list" ] || { [ "$1" = "--db" ] && [ "$3" = "list" ]; }; then
 	cat "$BR_CREATE_FIXTURE"
 	exit 0
 fi
@@ -126,6 +127,12 @@ export BR_CREATE_FIXTURE="$TMP/create-fixture.json"
 export BR_CREATE_LOG="$TMP/create.log"
 export BR_CREATE_ID="new-p0"
 export BR_CREATE_TITLE="new issue"
+CREATE_DESCRIPTION='WHAT: (a) a widget. WHY: needed.'
+BACKTICK=$(printf '\140')
+CREATE_ACCEPTANCE="- [ ] [a] [build] the widget builds; planted negative: bad input is refused ${BACKTICK}true${BACKTICK} -> rc 0"
+br_create_valid() {
+	br create "$@" -t task -l gate --description "$CREATE_DESCRIPTION" --acceptance "$CREATE_ACCEPTANCE"
+}
 printf '{"issues":[],"total":0,"offset":0,"has_more":false}\n' > "$BR_CREATE_FIXTURE"
 cat > "$TMP/sendbin/omp-kit" <<'EOF'
 #!/bin/sh
@@ -151,7 +158,7 @@ export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$PATH"
 export AGENT_NAME="TestShim"
 
 # 1. every write kind gets --actor appended when absent
-for kind in "create --title t" "update X --status open" "comments add --message m X" "close X" "reopen X" "dep add X Y" "dep remove X Y" "label add X y" "label remove X y" "sync --flush-only" "q quick" "delete X"; do
+for kind in "update X --status open" "comments add --message m X" "close X" "reopen X" "dep add X Y" "dep remove X Y" "label add X y" "label remove X y" "sync --flush-only" "q quick" "delete X"; do
 	: > "$TMP/argv"
 	# shellcheck disable=SC2086
 	br $kind > "$TMP/out" 2>&1
@@ -169,6 +176,11 @@ for kind in "create --title t" "update X --status open" "comments add --message 
 		printf 'FAIL inject [%s]: rc=%s argv<<<%s>>> want<<<%s>>>\n' "$kind" "$got_rc" "$recorded" "$want"
 	fi
 done
+: > "$TMP/argv"
+br_create_valid --title "Actor fixture" > "$TMP/out" 2>&1
+got_rc=$?
+want="create --title Actor fixture -t task -l gate --description $CREATE_DESCRIPTION --acceptance $CREATE_ACCEPTANCE --actor TestShim"
+check "inject [create]" 0 "$want"
 
 # 2. own name passes through unchanged (both spellings)
 : > "$TMP/argv"
@@ -253,10 +265,22 @@ fi
 # 8. SYNC1 box 4: the close gate runs at review/grading entry.
 # The claimant is refused before the real br sees the transition;
 # anyone else passes through; non-review statuses are ungated.
-export PATH="$TMP/shimbindir:$TMP/realbin:/usr/bin:/bin"
-printf '{"id":"X","status":"in_progress","assignee":"TestShim","labels":[]}' > "$TMP/bead.json"
+# The full in_review gate needs a complete fixture and an isolated tracker
+# without the checkout's opt-in pregrade policy.
+export PATH="$TMP/shimbindir:$TMP/realbin:$ORIGINAL_PATH"
+REVIEW_DB="$TMP/review-project/.beads/beads.db"
+mkdir -p "$TMP/review-project/.beads"
+: > "$REVIEW_DB"
+cat > "$TMP/review-testshim.json" <<'EOF'
+{"id":"X","title":"Review admission fixture","type":"task","issue_type":"task","status":"in_progress","priority":2,"created_at":"2026-10-30T00:00:00Z","assignee":"TestShim","labels":["gate"],"description":"WHAT: (a) a widget. WHY: needed.","dependencies":[],"acceptance_criteria":"- [x] [a] [build] the widget builds; planted negative: bad input is refused `true` -> rc 0\n- [ ] [v] [live] verification note, never replayed"}
+EOF
+cat > "$TMP/review-other.json" <<'EOF'
+{"id":"X","title":"Review admission fixture","type":"task","issue_type":"task","status":"in_progress","priority":2,"created_at":"2026-10-30T00:00:00Z","assignee":"OtherWorker","labels":["gate"],"description":"WHAT: (a) a widget. WHY: needed.","dependencies":[],"acceptance_criteria":"- [x] [a] [build] the widget builds; planted negative: bad input is refused `true` -> rc 0\n- [ ] [v] [live] verification note, never replayed"}
+EOF
+export AM_EXPECTED_PROJECT="$TMP/review-project"
+export BR_GUARD_JSON_FILE="$TMP/review-testshim.json"
 : > "$TMP/argv"
-br update X --status in_review > "$TMP/out" 2>&1
+br --db "$REVIEW_DB" update X --status in_review > "$TMP/out" 2>&1
 got_rc=$?
 if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -q "holds the claim" "$TMP/out"; then
 	pass=$((pass + 1))
@@ -265,7 +289,7 @@ else
 	printf 'FAIL review-entry-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
 fi
 : > "$TMP/argv"
-br close X > "$TMP/out" 2>&1
+br --db "$REVIEW_DB" close X > "$TMP/out" 2>&1
 got_rc=$?
 if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ]; then
 	pass=$((pass + 1))
@@ -273,20 +297,22 @@ else
 	fail=$((fail + 1))
 	printf 'FAIL close-refused: rc=%s\n' "$got_rc"
 fi
-printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' > "$TMP/bead.json"
+export BR_GUARD_JSON_FILE="$TMP/review-other.json"
 : > "$TMP/argv"
-br update X --status in_review > "$TMP/out" 2>&1
+br --db "$REVIEW_DB" update X --status in_review > "$TMP/out" 2>&1
 got_rc=$?
-check "review-entry-passes" 0 "update X --status in_review --actor TestShim"
+check "review-entry-passes" 0 "--db $REVIEW_DB update X --status in_review --actor TestShim"
 : > "$TMP/argv"
-br update X --status open > "$TMP/out" 2>&1
+br --db "$REVIEW_DB" update X --status open > "$TMP/out" 2>&1
 got_rc=$?
-check "non-review-ungated" 0 "update X --status open --actor TestShim"
+check "non-review-ungated" 0 "--db $REVIEW_DB update X --status open --actor TestShim"
 printf '{"id":"X","status":"in_progress","assignee":"TestShim","labels":["reviewer-fresh-context:muse"]}' > "$TMP/bead.json"
+export BR_GUARD_JSON_FILE="$TMP/bead.json"
 : > "$TMP/argv"
-br close X > "$TMP/out" 2>&1
+br --db "$REVIEW_DB" close X > "$TMP/out" 2>&1
 got_rc=$?
 check "fresh-context-label-refused" 4 ""
+export AM_EXPECTED_PROJECT="$REPO_ROOT"
  
  printf '{"id":"X","status":"in_progress","assignee":"OtherWorker","labels":[]}' > "$TMP/bead.json"
  # LESSON1: a close whose reason carries no lesson is refused before the real br runs
@@ -440,29 +466,52 @@ export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
 	br update X --claim > "$TMP/out" 2>&1
 	got_rc=$?
 	check "eligible-claim-passes" 0 "update X --claim --actor TestShim"
-	# 18. REPLAYABLE1 claim gate (J-2026-10-29-22): a claim or in_review move of
-	# a bead verify cannot replay is refused before the real br runs, naming the
-	# box; the same bead with the box rewritten is admitted.
+	# 18. REPLAYABLE1: the claim-only path remains independent of full lint;
+	# review entry additionally proves the complete phase gate on an isolated,
+	# pregrade-optional fixture tracker.
+	export AM_EXPECTED_PROJECT="$TMP/review-project"
 	for move in "--claim" "--status in_review"; do
-		printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works; planted negative refused"}' > "$TMP/bead.json"
-		: > "$TMP/argv"
-		# shellcheck disable=SC2086
-		br update X $move > "$TMP/out" 2>&1
+		if [ "$move" = "--claim" ]; then
+			printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works; planted negative refused"}' > "$TMP/bead.json"
+			export BR_GUARD_JSON_FILE="$TMP/bead.json"
+			: > "$TMP/argv"
+			br --db "$REVIEW_DB" update X --claim > "$TMP/out" 2>&1
+		else
+			cat > "$TMP/review-unreplayable.json" <<'EOF'
+{"id":"X","title":"Review admission fixture","type":"task","issue_type":"task","status":"in_progress","priority":2,"created_at":"2026-10-30T00:00:00Z","assignee":"OtherWorker","labels":["gate"],"description":"WHAT: (a) a widget. WHY: needed.","dependencies":[],"acceptance_criteria":"- [x] [a] [build] the widget builds; planted negative refused"}
+EOF
+			export BR_GUARD_JSON_FILE="$TMP/review-unreplayable.json"
+			: > "$TMP/argv"
+			br --db "$REVIEW_DB" update X --status in_review > "$TMP/out" 2>&1
+		fi
 		got_rc=$?
-		if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -Fq 'REFUSED_NOT_REPLAYABLE box 1 "- [ ] [a] [build] the widget works; planted negative refused" names no backticked command; corrected shape:' "$TMP/out"; then
+		replayable_refusal=0
+		if grep -Fq 'REFUSED_NOT_REPLAYABLE box 1 "- [ ] [a] [build] the widget works; planted negative refused" names no backticked command; corrected shape:' "$TMP/out" \
+			|| { [ "$move" = "--status in_review" ] && grep -Fq "REFUSED_NOT_REPLAYABLE" "$TMP/out"; }; then
+			replayable_refusal=1
+		fi
+		if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && [ "$replayable_refusal" = "1" ]; then
 			pass=$((pass + 1))
 		else
 			fail=$((fail + 1))
 			printf 'FAIL replayable-claim-refused [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$move" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 		fi
-		# shellcheck disable=SC2016 # literal backticks: fixture acceptance text, not a substitution
-		printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works `true` -> rc 0; planted negative refused"}' > "$TMP/bead.json"
-		: > "$TMP/argv"
-		# shellcheck disable=SC2086
-		br update X $move > "$TMP/out" 2>&1
-		got_rc=$?
-		check "replayable-claim-admitted [$move]" 0 "update X $move --actor TestShim"
+		if [ "$move" = "--claim" ]; then
+			printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works \u0060true\u0060 -> rc 0; planted negative refused"}' > "$TMP/bead.json"
+			export BR_GUARD_JSON_FILE="$TMP/bead.json"
+			: > "$TMP/argv"
+			br --db "$REVIEW_DB" update X --claim > "$TMP/out" 2>&1
+			got_rc=$?
+			check "replayable-claim-admitted" 0 "--db $REVIEW_DB update X --claim --actor TestShim"
+		else
+			export BR_GUARD_JSON_FILE="$TMP/review-other.json"
+			: > "$TMP/argv"
+			br --db "$REVIEW_DB" update X --status in_review > "$TMP/out" 2>&1
+			got_rc=$?
+			check "replayable-review-admitted" 0 "--db $REVIEW_DB update X --status in_review --actor TestShim"
+		fi
 	done
+	export AM_EXPECTED_PROJECT="$REPO_ROOT"
  else
  	printf 'SKIP needs-director-claim: no bun/python3/candidate cli.ts in this environment\n'
  fi
