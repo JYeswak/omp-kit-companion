@@ -144,10 +144,16 @@ class BeadCli(unittest.TestCase):
         {"id": PARENT, "dependency_type": "parent-child", "status": "open", "title": "parent"},
         {"id": SIBLING, "dependency_type": "discovered-from", "status": "open", "title": "sibling"},
     ]
+    CHILD_ONLY_TEXT = "WHAT: (a) the fixture does one thing. WHY: discovered-from: lintcli-par.19"
+
+    def test_child_only_text_does_not_infer_parent(self) -> None:
+        bead = clean_bead(id=self.CHILD, description=self.CHILD_ONLY_TEXT, dependencies=self.CHILD_EDGES)
+        code, verdict = self.run_cli(bead, ids=[self.CHILD, self.PARENT, self.SIBLING])
+        self.assertEqual((code, verdict["verdict"], verdict["failures"]), (0, "PASS", []), verdict)
 
     def test_child_id_never_mentions_its_parent(self) -> None:
-        # The ompkit-t7cn7.21 shape: the parent is named once (generic, met by the parent-child
-        # edge) and the discovered-from id is the parent's child; no related edge to the parent.
+        # The ompkit-t7cn7.21 shape: parent metadata is structural; discovered-from names its child.
+        # With the old \b matcher that relation also appears to apply to the parent prefix.
         bead = clean_bead(id=self.CHILD, description=self.CHILD_TEXT, dependencies=self.CHILD_EDGES)
         code, verdict = self.run_cli(bead, ids=[self.CHILD, self.PARENT, self.SIBLING])
         self.assertEqual((code, verdict["verdict"], verdict["failures"]), (0, "PASS", []), verdict)
