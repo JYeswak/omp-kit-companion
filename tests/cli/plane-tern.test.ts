@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
@@ -876,8 +876,8 @@ function decideFile(path: string, windowBytes?: number): SessionJournalResult {
 	return parseSessionView(view!);
 }
 const endedTurn = [nativeMessage("user-1", LAST_PAD, 5, userText("next")), nativeMessage("assistant-1", "user-1", 6, stopped)];
-/** The leaf proof a tail needs to claim IDLE. omp 18.10.3 never writes it (its ModelUsageEntry has no activeLeafId),
- * so a live over-cap tail can only reach BUSY or UNKNOWN; this stands for leaf proof in the synthetics. */
+/** Leaf proof for a bounded tail. omp 18.10.3 does not write activeLeafId; without this synthetic pin,
+ * the production reader must widen through the whole body to prove the leaf. */
 const leafPin = (leafId: string): string => JSON.stringify({ type: "model_usage", id: `usage-${leafId}`, parentId: leafId,
 	timestamp: stamp(13), activeLeafId: leafId });
 const endedTurnThenExit = [...endedTurn, disposeExit("exit-1", "assistant-1"), leafPin("exit-1")];
@@ -1079,4 +1079,77 @@ test("planted: a root record starting exactly at the cut is in the window; a cut
 	const mid = decideFile(path, window - 5);
 	expect(mid.status === "KNOWN" ? mid.window : mid).not.toMatchObject({ anchored: true });
 	if (mid.status === "KNOWN") expect(mid.window!.startBytes).toBe(rootAt + Buffer.byteLength(lines[2]!) + 1);
+});
+
+test("WAKEWINDOW1: a 100 MiB journal with its checkpoint 20 MiB back decides IDLE and an open turn BUSY", () => {
+	const path = join(tailTmp.path, "wake-window.jsonl");
+	writeFileSync(path, capHistory);
+	let position = Buffer.byteLength(capHistory);
+	let parent = LAST_PAD;
+	let serial = 0;
+	const filler = "x".repeat(PAD_RECORD_BYTES + 1024);
+	const padTo = (end: number) => {
+		while (position < end) {
+			const id = `wake-window-pad-${serial++}`;
+			const record = { type: "custom", id, parentId: parent, timestamp: stamp(8),
+				customType: "memory_recall", data: "" };
+			const overhead = Buffer.byteLength(JSON.stringify(record)) + 1;
+			let bytes = Math.min(PAD_RECORD_BYTES, end - position);
+			if (end - position - bytes < 1024) bytes = end - position;
+			appendFileSync(path, JSON.stringify({ ...record, data: filler.slice(0, bytes - overhead) }) + "\n");
+			position += bytes;
+			parent = id;
+		}
+	};
+	padTo(80 * 1024 * 1024);
+	const checkpointAt = position;
+	const checkpoint = disposeExit("wake-window-exit", parent) + "\n";
+	appendFileSync(path, checkpoint);
+	position += Buffer.byteLength(checkpoint);
+	parent = "wake-window-exit";
+	padTo(100 * 1024 * 1024);
+	appendFileSync(path, nativeMessage("wake-window-user", parent, 9, userText("next")) + "\n");
+	const openTurnEnd = statSync(path).size;
+	appendFileSync(path, nativeMessage("wake-window-assistant", "wake-window-user", 10, stopped) + "\n");
+	const size = statSync(path).size;
+	expect(size).toBeGreaterThanOrEqual(100 * 1024 * 1024);
+	expect(size - checkpointAt).toBeGreaterThanOrEqual(20 * 1024 * 1024);
+	expect(size - checkpointAt).toBeLessThan(20 * 1024 * 1024 + 1024);
+
+	const view = readSessionView(defaultTernIo(), path);
+	expect(view).not.toBeNull();
+	if (view === null) throw new Error("WAKEWINDOW1 journal was unreadable");
+	const idle = parseSessionView(view);
+	expect(sessionJournalDecision(idle)).toBe("IDLE");
+	expect(idle).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: false,
+		window: { anchored: true, leafProven: true } });
+	const steps = view.readSteps ?? [];
+	expect(steps[0]?.startBytes).toBe(size - SESSION_TAIL_WINDOW_BYTES);
+	expect(steps[steps.length - 1]?.startBytes).toBe(0);
+	for (const [index, step] of steps.entries()) {
+		expect(step.bytesRead).toBe(SESSION_HEAD_BYTES + size - step.startBytes + (step.startBytes === 0 ? 0 : 1));
+		const previous = steps[index - 1];
+		if (previous !== undefined) expect(step.startBytes).toBeLessThan(previous.startBytes);
+	}
+
+	// The same branch and checkpoint, but without the completed assistant turn.
+	truncateSync(path, openTurnEnd);
+	const busyView = readSessionView(defaultTernIo(), path);
+	expect(busyView).not.toBeNull();
+	if (busyView === null) throw new Error("WAKEWINDOW1 open turn was unreadable");
+	const busy = parseSessionView(busyView);
+	expect(sessionJournalDecision(busy)).toBe("BUSY");
+	expect(busy).toMatchObject({ status: "KNOWN", lastMessageRole: "user",
+		window: { anchored: true, leafProven: true } });
+}, 30_000);
+
+test("WAKEWINDOW1: widening does not turn a hidden unresolved async job into IDLE", () => {
+	const path = capSession([...endedTurn, leafPin("assistant-1")]);
+	const view = readSessionView(defaultTernIo(), path);
+	expect(view).not.toBeNull();
+	if (view === null) throw new Error("WAKEWINDOW1 unsettled session was unreadable");
+	const journal = parseSessionView(view);
+	expect(sessionJournalDecision(journal)).toBe("UNKNOWN");
+	expect(journal).toMatchObject({ status: "KNOWN", unresolvedAsyncTool: true,
+		window: { anchored: true, leafProven: true } });
 });

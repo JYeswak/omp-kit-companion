@@ -3,9 +3,9 @@ import { spawnSync } from "node:child_process";
 import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
-/** Whole-file parse cap; a larger session file is decided from a bounded tail (ompkit-774u.1.3). */
+/** Whole-file parse cap; larger session files use progressively widened tail reads. */
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
-/** Tail window for an over-cap session file: the decision reads at most this plus SESSION_HEAD_BYTES. */
+/** Initial window for an over-cap session file; widen only when branch proof needs older records. */
 export const SESSION_TAIL_WINDOW_BYTES = 8 * 1024 * 1024;
 /** Head read for the session header (one record cap; live headers end within 653 bytes). */
 export const SESSION_HEAD_BYTES = 64 * 1024;
@@ -101,6 +101,11 @@ export type SessionJournalResult =
 	}
 	| { status: "UNKNOWN"; reason: string };
 
+interface SessionReadStep {
+	startBytes: number;
+	bytesRead: number;
+}
+
 /** How a tail decision was read. Unless the state is anchored and the leaf proven, the result only ever reports
  * a not-idle verdict (oracleBusy null): tool calls and async jobs before the cut are unseen, so
  * `unresolvedAsyncTool` and `terminalAssistantStop` are then lower bounds read from the window alone. */
@@ -113,6 +118,8 @@ export interface SessionWindowInfo {
 	anchored: boolean;
 	/** The window holds the whole body or the last `model_usage.activeLeafId` pin. */
 	leafProven: boolean;
+	/** Actual positioned-read bytes for each progressively widened window. */
+	readSteps?: readonly SessionReadStep[];
 }
 
 /** A session file as read: whole (tailStart 0, from text) or a bounded tail of one inode. */
@@ -132,6 +139,8 @@ export interface SessionJournalView {
 	/** Tail read only, on request: bytes [start, start + bytes.length) of the same snapshot, for a proof key whose
 	 * pinned prefix lies before the tail (see readSessionTail's `proof`). */
 	proofRange?: { start: number; bytes: Buffer };
+	/** Each positioned read attempted before this snapshot's branch could be decided. */
+	readSteps?: readonly SessionReadStep[];
 }
 
 /** A proof key's pinned range: bytes [start, cursor) plus the entries just after the cursor. */
@@ -905,7 +914,7 @@ export function parseSessionJournalTail(view: SessionJournalView): SessionJourna
 	const state = evaluateBranch(suffix, rooted);
 	const identity: JournalIdentity = { sessionId: header.id, cwd: header.cwd, leafId, cursorBytes: fileSize,
 		sessionSha256: view.sha256, window: { startBytes: from, bytesRead: head.length + tail.length, anchored: state.anchored,
-			leafProven: coversBody || pinned !== null } };
+			leafProven: coversBody || pinned !== null, ...(view.readSteps ? { readSteps: view.readSteps } : {}) } };
 	// A checkpoint fixes tools and jobs, but the branch's last message must still be in the window.
 	const stateExact = state.anchored && (rooted || state.lastMessageRole !== null);
 	if (stateExact && (coversBody || pinned !== null)) return journalVerdict(state, identity);
@@ -938,9 +947,9 @@ export function sessionViewOfText(text: string): SessionJournalView {
 		fileSize: tail.length, identity: null, sha256: createHash("sha256").update(tail).digest("hex") };
 }
 
-/** Decide a view: a whole file parses in full, a bounded tail through parseSessionJournalTail. */
+/** Whole text keeps its parse cap; a positioned file view can widen through the complete body. */
 export function parseSessionView(view: SessionJournalView): SessionJournalResult {
-	if (view.tailStart !== 0) return parseSessionJournalTail(view);
+	if (view.tailStart !== 0 || (view.identity !== null && view.fileSize > MAX_SESSION_BYTES)) return parseSessionJournalTail(view);
 	return parseWholeJournal(view.tail.toString("utf8"), view.fileSize, view.sha256);
 }
 
@@ -999,6 +1008,29 @@ export function readSessionTail(path: string, windowBytes: number = SESSION_TAIL
 		return null;
 	} finally {
 		if (fd !== null) try { closeSync(fd); } catch { /* already closed */ }
+	}
+}
+
+/** Recover older branch anchors without weakening the bounded parser or trusting an unproven leaf. */
+function readAnchoredSessionTail(path: string, proof?: SessionProofRange): SessionJournalView | null {
+	let view = readSessionTail(path, SESSION_TAIL_WINDOW_BYTES, proof);
+	if (view === null || view.fileSize <= MAX_SESSION_BYTES) return null;
+	const identity = view.identity;
+	const fileSize = view.fileSize;
+	const readSteps: SessionReadStep[] = [];
+	for (;;) {
+		readSteps.push({ startBytes: view.tailStart,
+			bytesRead: view.head.length + view.tail.length + (view.tailStart === 0 ? 0 : 1)
+				+ (view.proofRange?.bytes.length ?? 0) });
+		const journal = parseSessionJournalTail(view);
+		const needsOlderRecords = journal.status === "KNOWN"
+			? !journal.window?.anchored || !journal.window.leafProven
+			: journal.reason === "TAIL_STATE_BEYOND_WINDOW" || journal.reason === "TAIL_ACTIVE_LEAF_UNPROVEN"
+				|| journal.reason === "TAIL_ACTIVE_LEAF_BEYOND_WINDOW" || journal.reason === "TAIL_WINDOW_HAS_NO_ENTRY";
+		if (!needsOlderRecords || view.tailStart === 0) return { ...view, readSteps };
+		const next = readSessionTail(path, Math.min(fileSize, view.tail.length * 2), proof);
+		if (next === null || next.identity !== identity || next.fileSize !== fileSize) return null;
+		view = next;
 	}
 }
 
@@ -1195,8 +1227,7 @@ export function defaultTernIo(): TernObserverIo {
 			} catch { return null; }
 		},
 		readSessionTail(path, proof) {
-			const view = readSessionTail(path, SESSION_TAIL_WINDOW_BYTES, proof);
-			return view !== null && view.fileSize > MAX_SESSION_BYTES ? view : null;
+			return readAnchoredSessionTail(path, proof);
 		},
 		wait(ms) { return new Promise<void>((resolve) => setTimeout(resolve, ms)); },
 	};

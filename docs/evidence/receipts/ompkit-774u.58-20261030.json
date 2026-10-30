@@ -1,0 +1,20 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_38bc2230569b1dafcd582feb06ad861f3d2b72ffa2d08560fefd05ee2332f9b9",
+ "limitations": [
+  "No installed-release send or live acceptance claimed.",
+  "No full repository suite or clean LSP diagnostic report claimed.",
+  "Scoped quality-delta exits 2 for required defaultTernIo wiring churn; no gate weakened."
+ ],
+ "operation": "WAKEWINDOW1 scoped build verification",
+ "parameters": {
+  "bead": "ompkit-774u.58",
+  "decisive_output": "{\"bead\":\"ompkit-774u.58\",\"source_digests\":{\"src/plane-tern.ts\":\"317bd2f3e395647f07b8886ae54eb35e52284c759fa6b6ffea4cd4c614057245\",\"tests/cli/plane-tern.test.ts\":\"2f6bb9c0352422a4be40eb8189fee6394a7fc101c917bf9cc1764218b36e258d\",\"changelog.d/ompkit-774u.58.md\":\"29e3935b91fe9221a4f0e15e90bb749e9299b2f84a3c190e0a49f6192d94d494\"},\"red\":{\"command\":\"bun test tests/cli/plane-tern.test.ts -t WAKEWINDOW1\",\"rc\":1,\"outcome\":\"Expected IDLE; received UNKNOWN\"},\"clean_empty_git\":{\"input_tree\":\"5a5ac654e70d820d45bd424312a6aafac45dad0f\",\"rc\":0,\"passes\":182,\"failures\":0,\"expectations\":3075,\"head_present\":false},\"slice\":{\"base\":\"4d1c2b93124ae9720c128f8471c5c8b6cf90aaa8\",\"plane\":{\"before\":85,\"after\":87},\"send_tern_paste\":11,\"send\":84,\"rc\":0},\"private_index\":[{\"member\":\"kitlib\",\"rc\":0},{\"member\":\"tempsafe\",\"rc\":0},{\"member\":\"pysafe\",\"rc\":0},{\"member\":\"readme\",\"rc\":0},{\"member\":\"imports\",\"rc\":0},{\"member\":\"fragments\",\"rc\":0},{\"member\":\"sources\",\"rc\":0},{\"member\":\"regexploit\",\"rc\":0}],\"own_journal\":{\"bytes\":265412141,\"old_decision\":\"BUSY\",\"new_decision\":\"BUSY\",\"steps\":[{\"startBytes\":257023533,\"bytesRead\":8454145},{\"startBytes\":248634925,\"bytesRead\":16842753},{\"startBytes\":231857709,\"bytesRead\":33619969},{\"startBytes\":198303277,\"bytesRead\":67174401},{\"startBytes\":131194413,\"bytesRead\":134283265},{\"startBytes\":0,\"bytesRead\":265477677}]},\"quality\":{\"rc\":2,\"gating\":1,\"kind\":\"short-horizon-churn\",\"symbol\":\"defaultTernIo\",\"before\":0,\"after\":14,\"decision\":\"Required production wiring change; historical churn is disclosed without suppression or acknowledgement.\"}}"
+ },
+ "producer": "TurquoiseSummit",
+ "result_ref": {
+  "bytes": 1559,
+  "sha256": "d8786b07516b0ae1d24f670692e123ee945a3b6501cdda2a8e05cec35f3cd561"
+ }
+}
