@@ -1,0 +1,241 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_e0fa3507213eed43a30f8b44cc6daba7bb00154633678bab15946322a5886008",
+ "limitations": [
+  "Source-only. Installed worker[e], publication/release and full CLI directory-suite qualification are not claimed. Fresh non-author pregrade remains separate.",
+  "sbh rc1 warned with121257218048 bytes free; load14.10/32cores. No resource-green claim. Initial compile temporary EEXIST and throwaway probe syntax error retained, not qualifying evidence. Production bounds and assertions unchanged.",
+  "ROADMAP.md belongs to SnowyFrog live lease; row update handed off73833. Changelog is updated; no foreign doc bytes adopted."
+ ],
+ "operation": "CUTCLAIM1 corrected portability forward restoration",
+ "parameters": {
+  "bead": "ompkit-774u.55",
+  "source_archive_base": "32ad93461e1eaaa92658160450bf1098ce8b34dc"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "archive_base": "32ad93461e1eaaa92658160450bf1098ce8b34dc",
+  "archive_unborn": true,
+  "bead": "ompkit-774u.55",
+  "compiled_sha256": "73dcc35e93fcfb507a60dd2ad3189bf20fe4696786330508ba30a6298ee1b852",
+  "configured_custom_database_after": {
+   "rc": 0,
+   "stderr": "",
+   "stdout": "{\"kind\":\"foreign\",\"code\":\"CLAIM_CUT_ADMITTED\",\"blocking\":false,\"detail\":\"plain-task: no declared milestone\",\"remedy\":\"continue with the remaining claim checks\",\"cut\":null,\"alternative\":null}\n{\"kind\":\"no-milestone\",\"code\":\"CLAIM_CUT_ADMITTED\",\"blocking\":false,\"detail\":\"plain-task: no declared milestone\",\"remedy\":\"continue with the remaining claim checks\",\"cut\":null,\"alternative\":null}\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "configured_custom_database_before": {
+   "rc": 1,
+   "stderr": "",
+   "stdout": "{\"kind\":\"foreign\",\"code\":\"CLAIM_CUT_UNKNOWN\",\"blocking\":true,\"detail\":\"plain-task: cut admission inconclusive: explicit tracker DB has no canonical .beads repository binding\",\"remedy\":\"restore the configured cut and bounded tracker graph reads before claiming\",\"cut\":null,\"alternative\":null}\n{\"kind\":\"no-milestone\",\"code\":\"CLAIM_CUT_UNKNOWN\",\"blocking\":true,\"detail\":\"plain-task: cut admission inconclusive: explicit tracker DB has no canonical .beads repository binding\",\"remedy\":\"restore the configured cut and bounded tracker graph reads before claiming\",\"cut\":null,\"alternative\":null}\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "forward_withdrawal": "b8d85f0cee2cb82803641b03ac948186debabbce",
+  "live_installed_worker_proof": false,
+  "named_files": {
+   "guard": {
+    "rc": 0,
+    "stderr": "\nextensions/kit-flywheel-guard.test.ts:\n(pass) ASKDEFAULT1: goal-mode RusticPine ask naming a recommended option is refused with take-record-report [3.50ms]\n(pass) ASKDEFAULT1 control: goal-mode RusticPine ask with no recommended option is allowed [0.38ms]\n(pass) ASKDEFAULT1 control: RusticPine with no active goal (no mode entry) may ask with a recommended option [0.27ms]\n(pass) ASKDEFAULT1 control: RusticPine with no active goal (goal_paused) may ask with a recommended option [0.28ms]\n(pass) ASKDEFAULT1 control: RusticPine with no active goal (none) may ask with a recommended option [0.28ms]\n(pass) ASKDEFAULT1: goal-mode PeachLeopard ask naming a recommended option is refused with take-record-report [1.23ms]\n(pass) ASKDEFAULT1 control: goal-mode PeachLeopard ask with no recommended option is allowed [0.33ms]\n(pass) ASKDEFAULT1 control: PeachLeopard with no active goal (no mode entry) may ask with a recommended option [0.26ms]\n(pass) ASKDEFAULT1 control: PeachLeopard with no active goal (goal_paused) may ask with a recommended option [0.47ms]\n(pass) ASKDEFAULT1 control: PeachLeopard with no active goal (none) may ask with a recommended option [0.33ms]\n(pass) ASKDEFAULT1: goal-mode QuietBadger ask naming a recommended option is refused with take-record-report [0.90ms]\n(pass) ASKDEFAULT1 control: goal-mode QuietBadger ask with no recommended option is allowed [0.35ms]\n(pass) ASKDEFAULT1 control: QuietBadger with no active goal (no mode entry) may ask with a recommended option [0.32ms]\n(pass) ASKDEFAULT1 control: QuietBadger with no active goal (goal_paused) may ask with a recommended option [0.28ms]\n(pass) ASKDEFAULT1 control: QuietBadger with no active goal (none) may ask with a recommended option [0.43ms]\n(pass) ASKDEFAULT1 control: goal-mode SilverCondor worker stays refused as ASKBLOCK1 [1.31ms]\n(pass) ASKDEFAULT1 control: goal-mode JadeThrush worker stays refused as ASKBLOCK1 [0.59ms]\n(pass) ASKDEFAULT1 control: goal-mode unbound session with a recommended option is allowed [0.59ms]\n(pass) ASKBLOCK1: SilverCondor worker ask is refused before the host opens a dialog [0.70ms]\n(pass) ASKBLOCK1: JadeThrush worker ask is refused before the host opens a dialog [0.62ms]\n(pass) ASKBLOCK1: unknown held bead still refuses and names the bead you hold [0.59ms]\n(pass) ASKBLOCK1 control: RusticPine ask is allowed [0.24ms]\n(pass) ASKBLOCK1 control: PeachLeopard ask is allowed [0.21ms]\n(pass) ASKBLOCK1 control: unbound session ask is allowed [0.24ms]\n(pass) ASKBLOCK1 control: unreadable roster null allows and says so [0.21ms]\n(pass) ASKBLOCK1 control: unreadable roster \"{broken\" allows and says so [0.26ms]\n(pass) ASKBLOCK1 control: unreadable roster {\"sessions\":null} allows and says so [0.27ms]\n(pass) stock compaction: a git repo without AGENTS.md or br remains editable and summarizes nothing held [16.91ms]\n(pass) COMPACTION_REREAD: session_compact summarizes the nearest AGENTS.md [0.73ms]\n(pass) COMPACTION_REREAD: mid-run compaction injects at the next step boundary and names the pane identity [0.69ms]\n(pass) COMPACTION_REREAD negative: an ordinary turn emits nothing [0.28ms]\n(pass) SELF_CLOSE_REFUSED: closing a bead assigned to the caller's pane identity is blocked [4.79ms]\n(pass) SELF_CLOSE_REFUSED: bd close, composite pane key and plain-text identity file are honoured [1.37ms]\n(pass) SELF_CLOSE_REFUSED: --actor, BR_ACTOR and BR_AGENT_NAME identify the caller [2.07ms]\n(pass) SELF_CLOSE_REFUSED negative: a different closer is allowed silently [1.09ms]\n(pass) FILERCLOSE1: the bead filer cannot close their own bead [0.65ms]\n(pass) FILERCLOSE1: every DONE-first commenter is treated as an author [1.11ms]\n(pass) FILERCLOSE1 control: a non-author can close with evidence [0.26ms]\n(pass) FILERCLOSE1 control: an ordinary commenter is not a DONE author [0.27ms]\n(pass) FILERCLOSE1: incomplete author metadata refuses a close [0.63ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: LIMITS: AC1's literal 900 s case was not run [0.23ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: box 2 UNVERIFIED [0.19ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: AC1 PASS; LIMITS: original boundary case not run [0.19ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: Acceptance case 3 was not tested [0.17ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: The original live test was skipped [0.18ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: AC2 is carried as a limit [0.17ms]\n(pass) NARROWCLOSE1: incomplete evidence refuses close: no UNVERIFIED boxes, but AC2 was not run [0.17ms]\n(pass) NARROWCLOSE1: closing through update --status closed cannot bypass the evidence refusal [0.40ms]\n(pass) NARROWCLOSE1: a wrapped incomplete-check clause cannot bypass refusal [0.22ms]\n(pass) NARROWCLOSE1 control: completed evidence permits independent close: AC1 PASS; box 2 PASS; all original acceptance cases ran [0.22ms]\n(pass) NARROWCLOSE1 control: completed evidence permits independent close: All acceptance cases PASS; no UNVERIFIED boxes and zero tests skipped [0.17ms]\n(pass) NARROWCLOSE1 control: completed evidence permits independent close: AC1 PASS; every original case executed; 0 skipped [0.17ms]\n(pass) NARROWCLOSE1: matcher removal permits the original incomplete closes [23.59ms]\n(pass) GATEEVENTS1: a refused close writes a refuse row and an allowed close writes a pass row; planted: a plain bash call writes nothing [2.28ms]\n(pass) SELF_CLOSE_REFUSED negative: an unassigned bead is allowed with a warning [1.04ms]\n(pass) SELF_CLOSE_REFUSED: a close whose authorship probe fails is refused, never skipped (ompkit-xa5s.13) [1.81ms]\n(pass) SELF_CLOSE_REFUSED: garbled-probe close is refused with the s49q shape, exit 3 Issue not found (ompkit-xa5s.13) [1.51ms]\n(pass) SELF_CLOSE_REFUSED negative: legit non-author close of s49q by CobaltCoyote still passes (ompkit-xa5s.13) [1.16ms]\n(pass) SELF_CLOSE_REFUSED negative: unknown caller identity is allowed with a warning [0.45ms]\n(pass) SELF_CLOSE_REFUSED negative: close text that is not a br/bd close never consults br [0.48ms]\n(pass) REDIRECTION_IDS: shell redirections never become bead ids (ompkit-xa5s.8) [0.19ms]\n(pass) SELF_CLOSE_REFUSED with redirection: assignee match still blocks, lookup uses the clean id [1.38ms]\n(pass) BGDEADLINE1: finite async bash jobs reject timeout zero and accept native bounded defaults [0.65ms]\n(pass) BGDEADLINE1: named services need readiness and cannot disguise a finite suite [0.42ms]\n(pass) BGDEADLINE1: timeout-zero refusal attributes job, owner, command, deadline, and owner-session cancel [0.16ms]\n(pass) BGDEADLINE1: tool input cannot spoof the refusal owner [0.26ms]\n(pass) BGDEADLINE1: unknown and service refusals carry job and deadline [0.53ms]\n(pass) GOAL_END_REFUSED: a fleet seat cannot drop or complete its own goal (J-2026-10-18-44) [0.62ms]\n(pass) GOAL_END_REFUSED negatives: get, create and resume pass; a session with no fleet identity may drop [0.16ms]\n(pass) GOAL_SEND_REFUSED: a fleet seat cannot type a /goal line into any pane, bare or wrapped (J-2026-10-18-45) [0.83ms]\n(pass) GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identity-less sessions pass [0.21ms]\n(pass) NO_WAIT_REFUSED: a fleet seat's idle_wait.py and sleep >= 30 s are refused, bare chained wrapped or sh -c (J-2026-10-18-43) [1.76ms]\n(pass) NO_WAIT_REFUSED negatives: short sleeps, mere mentions and identity-less sessions pass [0.29ms]\n(pass) NO_WAIT_REFUSED seam: the pure check refuses the planted wait and passes without identity [0.02ms]\n(pass) shell -c flag pattern: matches -c and -lc, rejects --c and -cx, and stays linear on a long near-miss [0.34ms]\n(pass) COMPACTION_REREAD: no tool call is blocked after compaction [0.97ms]\n(pass) COMPACTION_REREAD: the reminder lists a held in_progress bead from a fixture tracker [0.51ms]\n(pass) COMPACTION_REREAD: the reminder says none held for an empty tracker [0.33ms]\n(pass) COMPACTION_REREAD: a failing remembered tracker is named with its error and blocks nothing [1.22ms]\n(pass) COMPACTION_REREAD planted negative: rows come only from the guard's own list query [0.29ms]\n(pass) REREAD: without compaction nothing is blocked [0.48ms]\n(pass) isMutatingCall: edit/write, br mutations and git commit/push; never reads or queries [0.10ms]\n(pass) BLOCK_REFUSED: blocked with no blocks edge is refused, with an open blocks edge it is allowed [0.88ms]\n(pass) BLOCK_REFUSED: a closed blocker, a parent-child edge or a related edge is not a fix [0.93ms]\n(pass) BLOCK_REFUSED: human-gate needs a comment naming the effect only Joshua can perform [1.20ms]\n(pass) BLOCK_REFUSED: other status updates, other verbs and unreadable beads [1.29ms]\n(pass) BLOCK_REFUSED AC5: no br binary or no tracker stands the check down; a live tracker that cannot answer stays refused [0.72ms]\n(pass) BLOCK_REFUSED: a br update wrapped in sh -c, bash -lc or nested shells is checked like the bare command [1.33ms]\n(pass) BLOCK_REFUSED: shell words that only mention br, plain sh, and over-deep or odd -c flags are not parsed as mutations [2.55ms]\n(pass) trackerRequests: wrapped close and claim keep the caller's inline identity [0.08ms]\n(pass) BLOCK_RELEASE_REQUIRED: closing the only open blocker of a blocked bead is refused until it is released [1.06ms]\n(pass) BLOCK_RELEASE_REQUIRED: another open blocker, a non-blocked dependent or a non-blocks edge allow the close [0.98ms]\n(pass) BLOCK_RELEASE_REQUIRED AC5: outside a tracker a close is never a stranding refusal [0.53ms]\n(pass) SCRATCH_DISPOSAL_REFUSED: moving a bead to in_review with unreleased dirs is refused, naming each dir [0.38ms]\n(pass) SCRATCH_DISPOSAL_REFUSED: a verifier's close of another seat's bead is refused while the verifier owes dirs, logged as close [0.26ms]\n(pass) SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unusable answer yields no advice [1.38ms]\n(pass) SCRATCH_DISPOSAL_REFUSED: a thrown exec never blocks (fail-open) and a long list is refused with a count [0.40ms]\n(pass) SCRATCH_OWED: other tracker commands and refused closes never ask omp-kit [2.14ms]\n(pass) trackerRequests: update --status in_review is a review request, in either spelling [0.05ms]\n(pass) DRAIN1: bare release of a live held claim is refused until it clears assignee under revision [0.78ms]\n(pass) DRAIN1: third-party park of a live claim is refused; holder atomic release passes [0.51ms]\n(pass) DRAIN1: repair releases of ownerless or already-open beads pass untouched [0.33ms]\n(pass) DRAIN1: second active claim is refused naming the held id; re-claim of the held bead passes [1.14ms]\n(pass) DRAIN1: claim on a stale-held bead stays refused; nonauthor review still passes [0.38ms]\n(pass) DRAIN1: ownerless start still refuses with the atomic claim route [0.34ms]\n(pass) DRAIN1 custody: bare assignee clear on a live held claim is refused (fp72.95 shape) [0.95ms]\n(pass) DRAIN1 custody: repairs on ownerless or open beads pass [0.37ms]\n(pass) WAIT_REFUSED: a fleet seat's wait tool call is refused and names the next action (BGWAIT1) [0.40ms]\n(pass) WAIT_REFUSED: a fleet seat's sleep-poll loops, chained sleeps and time.sleep idles are refused (BGWAIT1) [1.36ms]\n(pass) WAIT_REFUSED negatives: async jobs, short single sleeps and identity-less sessions pass (BGWAIT1) [0.20ms]\n(pass) WAIT_REFUSED seam: the pure check refuses each planted form and passes without identity [0.04ms]\n(pass) CUTCLAIM1 [a]: real guarded k-2 claim refuses the cut and names eligible k-1; k-1 passes [1.41ms]\n(pass) CUTCLAIM1 [b]: open transitive blocks prerequisites pass from active pins, never closed or parent/related-only [2.75ms]\n(pass) CUTCLAIM1 [c]: every no-cut shape admits pillar-less claims without cut graph reads [3.25ms]\n(pass) CUTCLAIM1: malformed declarations and graph reads fail closed, never pillar fallback [2.15ms]\n(pass) CUTCLAIM1: canonical explicit tracker binding wins over a first unrelated session [1.07ms]\n(pass) CUTCLAIM1 planted negative: removing admission refusal from the actual guard makes the original assertion fail [31.95ms]\n(pass) CUTCLAIM1: pin order, explicit membership, omitted labels, empty cuts and strict config bytes [2.30ms]\n(pass) CUTCLAIM1 owned rework resumes without a second claim [0.52ms]\n\n 119 pass\n 0 fail\n 654 expect() calls\nRan 119 tests across 1 file. [221.00ms]\n",
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "legacy-shell": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "br-shim: 89 pass 0 fail\n",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "native": {
+    "rc": 0,
+    "stderr": "\ntests/cli/preflight.test.ts:\n(pass) preflight commit: four defects produce ONE envelope naming all four, each with a remedy; the staged --selftest runs [1188.38ms]\n(pass) preflight honors bash members and staged selftests, retaining real refusals and no-shebang scripts [1572.91ms]\n(pass) preflight commit: an empty index is a finding; with no prepared message that is a finding too, never a pass [1117.96ms]\n(pass) preflight close|in-review|claim: every tracker predicate in one envelope, bound to updated_at; a fake br answers [274.62ms]\n(pass) preflight fixtures keep inherited tracker writes inside the child database [1266.07ms]\n(pass) preflight claim: unresolved needs-director refuses NEEDS_DIRECTOR on the unit and the supported CLI path; recorded director resolution re-admits [5097.49ms]\n(pass) neutralized fixture root (ownedTmp) carries no agent attribution for read-only guards [0.49ms]\n(pass) findings grammar: parse ignores noise and malformed lines; an empty list is ok [0.07ms]\n(pass) every preflight verb is registered at module load (GATEDIAG1 [b] as published was HANDLER_UNAVAILABLE: the registrations sat inside rchLeaseCommand) [66.42ms]\n(pass) CUTCLAIM1 native [a]: k-2 is refused outside cut[k-1], pin passes with explicit adjudication marker [1.30ms]\n(pass) CUTCLAIM1 native [b]: transitive open blocks admitted; closed, related, parent-only and reversed edges denied [1.44ms]\n(pass) CUTCLAIM1 native [c]: no milestone and foreign sessions admit pillar-less claims; invalid authority stays unknown [1.52ms]\n(pass) CUTCLAIM1 native [c]: stock HOME and XDG callers without config admit claims without pillar metadata [28.10ms]\n(pass) CUTCLAIM1 native [c]: no-cut adjudication never needs a bead read or a stock caller's custom DB binding [0.88ms]\n(pass) CUTCLAIM1 native [c]: custom DB locations admit no-cut callers but cannot escape a managed checkout's cut [2.68ms]\n(pass) CUTCLAIM1 native [c] planted negative: restored pillar refusal breaks the same stock-claim assertion [36.91ms]\n(pass) CUTCLAIM1 native: canonical repo selection, conflicting rows, malformed edges and graph failures are bounded [2.09ms]\n(pass) CUTCLAIM1 native: portable BR_REAL reader binds every show and graph read to BEADS_DB [292.66ms]\n(pass) CUTCLAIM1 native: legacy repo-only rows and minimal epic/pinned cuts do not require unused fleet metadata [1.02ms]\n(pass) CUTCLAIM1 native: explicit pin bypasses unrelated missing pins, preserves order and accepts absent/null labels [1.13ms]\n(pass) CUTCLAIM1 native: active blocks intermediates connect an open target; empty cut and malformed UTF8 never admit [1.20ms]\n(pass) CUTCLAIM1 native: invalid JSON refusal does not echo operator config contents [0.49ms]\n(pass) CUTCLAIM1 native: a DB-file symlink selects the actual tracker cut, while a dangling link stays unknown [1.17ms]\n\n 23 pass\n 0 fail\n 139 expect() calls\nRan 23 tests across 1 file. [10.97s]\n",
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\nDEFY7_FIXTURE branch=local setter=none scratch=none br=ambient dir=/Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-checks.12207/var/agent-tmp/needs-director.95970\nDEFY7_SCOPE_NEGATIVE skipped: no harness shim resolved (local control run)\n",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "shell": {
+    "rc": 0,
+    "stderr": "\ntests/cli/br-shim.test.ts:\n(pass) CUTCLAIM1 actual shim admits k-1 and refuses k-2 on cut[k-1] [2612.08ms]\n(pass) CUTCLAIM1 explicit --db binds the actual tracker rather than cwd or the first session [2090.13ms]\n(pass) CUTCLAIM1 disabled-check mutant admits the same forbidden claim [1640.54ms]\n(pass) CUTCLAIM1 missing native authority cannot silently bypass admission [194.43ms]\n(pass) CUTCLAIM1 failed native authority cannot silently bypass admission [1746.59ms]\n(pass) CUTCLAIM1 stale native authority cannot silently bypass admission [1136.32ms]\n(pass) CUTCLAIM1 malformed nonblocking refusal is rejected and disabling consistency exposes the bypass [2343.20ms]\n(pass) CUTCLAIM1 blocking-admitted cut verdict is malformed and cannot admit [1148.80ms]\n(pass) CUTCLAIM1 duplicate cut verdict is malformed and cannot admit [1216.04ms]\n(pass) CUTCLAIM1 multi-ID claim cannot forward an off-cut second target [206.33ms]\n(pass) CUTCLAIM1 missing configured cut input fails closed through actual shim [1093.90ms]\n(pass) CUTCLAIM1 malformed configured cut input fails closed through actual shim [1065.50ms]\n(pass) CUTCLAIM1 default-missing admits an outsider without a pillar through the actual shim [1057.86ms]\n(pass) CUTCLAIM1 unlisted admits an outsider without a pillar through the actual shim [1030.64ms]\n(pass) CUTCLAIM1 no-milestone admits an outsider without a pillar through the actual shim [1065.01ms]\n(pass) CUTCLAIM1 value flags do not become extra claim targets [1039.35ms]\n\n 16 pass\n 0 fail\n 58 expect() calls\nRan 16 tests across 1 file. [20.70s]\n",
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   }
+  },
+  "native_compilation": {
+   "rc": 0,
+   "stderr": "",
+   "stdout": "  [21ms]  bundle  149 modules\n [145ms] compile  /Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-native.32793/omp-kit-portable\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "native_corrected_cut_subset": {
+   "rc": 0,
+   "stderr": "\ntests/cli/preflight.test.ts:\n(pass) CUTCLAIM1 native [a]: k-2 is refused outside cut[k-1], pin passes with explicit adjudication marker [2.44ms]\n(pass) CUTCLAIM1 native [b]: transitive open blocks admitted; closed, related, parent-only and reversed edges denied [1.55ms]\n(pass) CUTCLAIM1 native [c]: no milestone and foreign sessions admit pillar-less claims; invalid authority stays unknown [1.69ms]\n(pass) CUTCLAIM1 native [c]: stock HOME and XDG callers without config admit claims without pillar metadata [28.10ms]\n(pass) CUTCLAIM1 native [c]: no-cut adjudication never needs a bead read or a stock caller's custom DB binding [0.87ms]\n(pass) CUTCLAIM1 native [c] planted negative: restored pillar refusal breaks the same stock-claim assertion [33.57ms]\n(pass) CUTCLAIM1 native: canonical repo selection, conflicting rows, malformed edges and graph failures are bounded [2.14ms]\n(pass) CUTCLAIM1 native: portable BR_REAL reader binds every show and graph read to BEADS_DB [309.40ms]\n(pass) CUTCLAIM1 native: legacy repo-only rows and minimal epic/pinned cuts do not require unused fleet metadata [1.19ms]\n(pass) CUTCLAIM1 native: explicit pin bypasses unrelated missing pins, preserves order and accepts absent/null labels [1.06ms]\n(pass) CUTCLAIM1 native: active blocks intermediates connect an open target; empty cut and malformed UTF8 never admit [2.17ms]\n(pass) CUTCLAIM1 native: invalid JSON refusal does not echo operator config contents [0.57ms]\n(pass) CUTCLAIM1 native: a DB-file symlink selects the actual tracker cut, while a dangling link stays unknown [1.11ms]\n\n 13 pass\n 9 filtered out\n 0 fail\n 72 expect() calls\nRan 13 tests across 1 file. [404.00ms]\n",
+   "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "non_qualifying_attempts": {
+   "co_located_compiler_temporary_collision": {
+    "rc": 1,
+    "stderr": "error: failed to open temporary file to copy bun into\nEEXIST: /Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-checks.12207/.f8bf92397659e976-00000000.bun-build: File or folder exists (open())\nfailed to write compiled executable /Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-checks.12207/omp-kit-portable\n",
+    "stdout": "  [26ms]  bundle  149 modules\n",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "throwaway_smoke_syntax_error": {
+    "rc": 1,
+    "stderr": "1 | import assert from 'node:assert/strict';import {mkdirSync,writeFileSync} from 'node:fs';import {join} from 'node:path';import {ownedTmp} from './src/kitlib/tmp.ts';import {run} from './src/kitlib/run.ts';const fixture=ownedTmp('cutclaim-real-cli',{root:process.env.TMPDIR,bead:'ompkit-774u.55'});const repo=fixture.path;const db=join(repo,'.beads','beads.db');const real=process.argv[1],binary=process.argv[2],cli=join(process.cwd(),'src/cli.ts');const env={...process.env,HOME:repo,XDG_CONFIG_HOME:join(repo,'xdg'),BEADS_DB:db,BEADS_DIR:'',BR_REAL:real,AGENT_NAME:'CopperTrout'};delete env.OMP_KIT_FLEET_WATCH_CONFIG;const text=b=>new TextDecoder().decode(b);async function br(args){const r=await run([real,'--db',db,...args,'--actor','CopperTrout'],{cwd:repo,env,deadline_s:30,max_output_bytes:1048576});assert.equal(r.rc,0,'native BR '+args.join(' ')+': '+text(r.stderr));return text(r.stdout).trim();}await br(['init']);const ac='- [ ] [a] [build] fixture behavior `true` -> rc 0';async function create(name){return (await br(['create',name,'--acceptance-criteria',ac,'--silent'])).split('\n                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        ^\nerror: Unterminated string literal\n    at /Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-checks.12207/[eval]:1:1093\n\nBun v1.4.3 (macOS arm64)\n",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   }
+  },
+  "original_literal_before": {
+   "rc": 1,
+   "stderr": "",
+   "stdout": "{\"case\":\"foreign-session\",\"code\":\"CLAIM_PILLAR_REQUIRED\",\"blocking\":true,\"detail\":\"plain-task: no declared milestone in /Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-portability.45192/cut-portability-before.19812.w67gfw; pillar:* label required\",\"remedy\":\"choose a bead carrying its mission pillar label\",\"cut\":null,\"alternative\":null}\n{\"case\":\"no-milestone\",\"code\":\"CLAIM_PILLAR_REQUIRED\",\"blocking\":true,\"detail\":\"plain-task: no declared milestone in /Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-portability.45192/cut-portability-before.19812.w67gfw; pillar:* label required\",\"remedy\":\"choose a bead carrying its mission pillar label\",\"cut\":null,\"alternative\":null}\n{\"case\":\"missing-default\",\"code\":\"CLAIM_PILLAR_REQUIRED\",\"blocking\":true,\"detail\":\"plain-task: no declared milestone in /Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-cutclaim-portability.45192/cut-portability-before.19812.w67gfw; pillar:* label required\",\"remedy\":\"choose a bead carrying its mission pillar label\",\"cut\":null,\"alternative\":null}\n{\"case\":\"missing-default-custom-db\",\"code\":\"CLAIM_CUT_UNKNOWN\",\"blocking\":true,\"detail\":\"plain-task: cut admission inconclusive: explicit tracker DB has no canonical .beads repository binding\",\"remedy\":\"restore the configured cut and bounded tracker graph reads before claiming\",\"cut\":null,\"alternative\":null}\n{\"case\":\"missing-default-no-bead\",\"code\":\"CLAIM_CUT_UNKNOWN\",\"blocking\":true,\"detail\":\"plain-task: cut admission inconclusive: must not query unrelated graph\",\"remedy\":\"restore the configured cut and bounded tracker graph reads before claiming\",\"cut\":null,\"alternative\":null}\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "pinned_shellcheck_0_9_0": {
+   "rc": 0,
+   "stderr": "",
+   "stdout": "",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "private_index_members": {
+   "fragments": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "imports": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "kitlib": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "pysafe": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "readme": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "regexploit": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "sources": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   "tempsafe": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   }
+  },
+  "real_cli_probe_source": "import assert from 'node:assert/strict';import {mkdirSync,writeFileSync} from 'node:fs';import {join} from 'node:path';import {ownedTmp} from './src/kitlib/tmp.ts';import {run} from './src/kitlib/run.ts';const fixture=ownedTmp('cutclaim-real-cli',{root:process.env.TMPDIR,bead:'ompkit-774u.55'});const repo=fixture.path;const db=join(repo,'.beads','beads.db');const real=process.argv[1],binary=process.argv[2],cli=join(process.cwd(),'src/cli.ts');const env={...process.env,HOME:repo,XDG_CONFIG_HOME:join(repo,'xdg'),BEADS_DB:db,BEADS_DIR:'',BR_REAL:real,AGENT_NAME:'CopperTrout'};delete env.OMP_KIT_FLEET_WATCH_CONFIG;const text=b=>new TextDecoder().decode(b);async function br(args){const r=await run([real,'--db',db,...args,'--actor','CopperTrout'],{cwd:repo,env,deadline_s:30,max_output_bytes:1048576});assert.equal(r.rc,0,'native BR '+args.join(' ')+': '+text(r.stderr));return text(r.stdout).trim();}await br(['init']);const ac='- [ ] [a] [build] fixture behavior `true` -> rc 0';async function create(name){return (await br(['create',name,'--acceptance-criteria',ac,'--silent'])).split(String.fromCharCode(10)).pop();}const pin=await create('pin'),other=await create('offcut'),parent=await create('parent-only');async function probe(label,argv,id,expectRc,expectCode,extra={}){const r=await run([...argv,'preflight','claim',id,'--actor','CopperTrout','--json'],{cwd:repo,env:{...env,...extra},deadline_s:30,max_output_bytes:1048576});const doc=JSON.parse(text(r.stdout));const data=doc.data??doc;const codes=(data.findings??[]).map(x=>x.code);console.log(JSON.stringify({case:label,rc:r.rc,codes}));assert.equal(r.rc,expectRc,label+': '+text(r.stderr));assert.ok(codes.includes(expectCode),label+' verdict '+JSON.stringify(doc));}await probe('source-stock-no-config',[process.execPath,cli],other,0,'CLAIM_CUT_ADMITTED');await probe('compiled-stock-no-config-no-Bun-PATH',[binary],other,0,'CLAIM_CUT_ADMITTED',{PATH:'/usr/bin:/bin'});const config=join(repo,'fleet.json');writeFileSync(config,JSON.stringify({sessions:[{repo,milestone:{epic:'real-cut',pinned:[pin]}}]}));env.OMP_KIT_FLEET_WATCH_CONFIG=config;await probe('source-offcut',[process.execPath,cli],other,1,'CLAIM_OUT_OF_CUT');await probe('source-pin',[process.execPath,cli],pin,0,'CLAIM_CUT_ADMITTED');await probe('compiled-offcut-no-Bun-PATH',[binary],other,1,'CLAIM_OUT_OF_CUT',{PATH:'/usr/bin:/bin'});await br(['dep','add',pin,other,'--type','blocks']);await probe('real-blocks',[process.execPath,cli],other,0,'CLAIM_CUT_ADMITTED');await br(['dep','add',pin,parent,'--type','parent-child']);await probe('real-parent-only',[process.execPath,cli],parent,1,'CLAIM_OUT_OF_CUT');fixture.cleanup();",
+  "real_custom_cli_probe_source": "import assert from \"node:assert/strict\";\nimport {mkdirSync,writeFileSync} from \"node:fs\";\nimport {join} from \"node:path\";\nimport {ownedTmp} from \"./src/kitlib/tmp.ts\";\nimport {run} from \"./src/kitlib/run.ts\";\nconst owned=ownedTmp(\"cut-custom-native\",{root:process.env.TMPDIR,bead:\"ompkit-774u.55\"});\nconst repo=owned.path,state=join(repo,\"native-state\"),foreign=join(repo,\"foreign\");mkdirSync(state);mkdirSync(foreign);\nconst db=join(state,\"data.sqlite\"),real=process.argv[1],binary=process.argv[2],cli=join(process.cwd(),\"src/cli.ts\");\nconst env={...process.env,HOME:repo,XDG_CONFIG_HOME:join(repo,\"xdg\"),BEADS_DB:db,BEADS_DIR:\"\",BR_REAL:real,AGENT_NAME:\"CopperTrout\"};delete env.OMP_KIT_FLEET_WATCH_CONFIG;\nconst decode=b=>new TextDecoder().decode(b);\nasync function br(args){const r=await run([real,\"--db\",db,...args,\"--actor\",\"CopperTrout\"],{cwd:repo,env,deadline_s:30,max_output_bytes:1048576});assert.equal(r.rc,0,args.join(\" \")+decode(r.stderr));return decode(r.stdout).trim();}\nawait br([\"init\"]);\nconst ac=\"- [ ] [a] [build] fixture behavior `true` -> rc 0\";\nconst pin=(await br([\"create\",\"pin\",\"--acceptance-criteria\",ac,\"--silent\"])).split(\"\\n\").pop();\nconst other=(await br([\"create\",\"offcut\",\"--acceptance-criteria\",ac,\"--silent\"])).split(\"\\n\").pop();\nasync function probe(label,argv,id,rc,code,extra={}){const r=await run([...argv,\"preflight\",\"claim\",id,\"--actor\",\"CopperTrout\",\"--json\"],{cwd:repo,env:{...env,...extra},deadline_s:30,max_output_bytes:1048576});const doc=JSON.parse(decode(r.stdout));const codes=(doc.data.findings??[]).map(f=>f.code);console.log(JSON.stringify({case:label,rc:r.rc,codes}));assert.equal(r.rc,rc,label+decode(r.stderr));assert.ok(codes.includes(code),JSON.stringify(doc));}\nawait probe(\"custom-native-source-stock\",[process.execPath,cli],other,0,\"CLAIM_CUT_ADMITTED\");\nawait probe(\"custom-native-compiled-stock-no-Bun\",[binary],other,0,\"CLAIM_CUT_ADMITTED\",{PATH:\"/usr/bin:/bin\"});\nconst config=join(repo,\"fleet.json\");env.OMP_KIT_FLEET_WATCH_CONFIG=config;\nwriteFileSync(config,JSON.stringify({sessions:[{repo:foreign,milestone:{epic:\"elsewhere\",pinned:[pin]}}]}));\nawait probe(\"custom-native-foreign-session\",[process.execPath,cli],other,0,\"CLAIM_CUT_ADMITTED\");\nwriteFileSync(config,JSON.stringify({sessions:[{repo}]}));\nawait probe(\"custom-native-compiled-no-milestone\",[binary],other,0,\"CLAIM_CUT_ADMITTED\",{PATH:\"/usr/bin:/bin\"});\nwriteFileSync(config,JSON.stringify({sessions:[{repo,milestone:{epic:\"managed\",pinned:[pin]}}]}));\nawait probe(\"custom-native-managed-source-offcut\",[process.execPath,cli],other,1,\"CLAIM_OUT_OF_CUT\");\nawait probe(\"custom-native-managed-compiled-offcut\",[binary],other,1,\"CLAIM_OUT_OF_CUT\",{PATH:\"/usr/bin:/bin\"});\nawait probe(\"custom-native-managed-pin\",[binary],pin,0,\"CLAIM_CUT_ADMITTED\",{PATH:\"/usr/bin:/bin\"});\nowned.cleanup();",
+  "real_custom_database_cli": {
+   "rc": 0,
+   "stderr": "",
+   "stdout": "{\"case\":\"custom-native-source-stock\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n{\"case\":\"custom-native-compiled-stock-no-Bun\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n{\"case\":\"custom-native-foreign-session\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n{\"case\":\"custom-native-compiled-no-milestone\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n{\"case\":\"custom-native-managed-source-offcut\",\"rc\":1,\"codes\":[\"CLAIM_OUT_OF_CUT\"]}\n{\"case\":\"custom-native-managed-compiled-offcut\",\"rc\":1,\"codes\":[\"CLAIM_OUT_OF_CUT\"]}\n{\"case\":\"custom-native-managed-pin\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "real_source_and_compiled_cli": {
+   "rc": 0,
+   "stderr": "",
+   "stdout": "{\"case\":\"source-stock-no-config\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n{\"case\":\"compiled-stock-no-config-no-Bun-PATH\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n{\"case\":\"source-offcut\",\"rc\":1,\"codes\":[\"CLAIM_OUT_OF_CUT\"]}\n{\"case\":\"source-pin\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n{\"case\":\"compiled-offcut-no-Bun-PATH\",\"rc\":1,\"codes\":[\"CLAIM_OUT_OF_CUT\"]}\n{\"case\":\"real-blocks\",\"rc\":0,\"codes\":[\"CLAIM_CUT_ADMITTED\"]}\n{\"case\":\"real-parent-only\",\"rc\":1,\"codes\":[\"CLAIM_OUT_OF_CUT\"]}\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "roadmap_custody": "SnowyFrog live exclusive lease; update handed off73833; no foreign edit",
+  "same_literal_after": {
+   "rc": 0,
+   "stderr": "",
+   "stdout": "{\"case\":\"foreign-session\",\"code\":\"CLAIM_CUT_ADMITTED\",\"blocking\":false,\"detail\":\"plain-task: no declared milestone\",\"remedy\":\"continue with the remaining claim checks\",\"cut\":null,\"alternative\":null}\n{\"case\":\"no-milestone\",\"code\":\"CLAIM_CUT_ADMITTED\",\"blocking\":false,\"detail\":\"plain-task: no declared milestone\",\"remedy\":\"continue with the remaining claim checks\",\"cut\":null,\"alternative\":null}\n{\"case\":\"missing-default\",\"code\":\"CLAIM_CUT_ADMITTED\",\"blocking\":false,\"detail\":\"plain-task: no declared milestone\",\"remedy\":\"continue with the remaining claim checks\",\"cut\":null,\"alternative\":null}\n{\"case\":\"missing-default-custom-db\",\"code\":\"CLAIM_CUT_ADMITTED\",\"blocking\":false,\"detail\":\"plain-task: no declared milestone\",\"remedy\":\"continue with the remaining claim checks\",\"cut\":null,\"alternative\":null}\n{\"case\":\"missing-default-no-bead\",\"code\":\"CLAIM_CUT_ADMITTED\",\"blocking\":false,\"detail\":\"plain-task: no declared milestone\",\"remedy\":\"continue with the remaining claim checks\",\"cut\":null,\"alternative\":null}\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "source_file_sha256": {
+   "changelog.d/774u.55.md": null,
+   "changelog.d/ompkit-774u.55.md": "8299bcc2561bdf5a6c6c8739c00ae6918846428e43a273f60db72b4b87f30f0b",
+   "docs/evidence/receipts/ompkit-774u.55-20261030.json": "3e6ceb142fa7cc0f2d2a972bc2376798b8d1132cc8bcd86f1d89ecf661f17250",
+   "extensions/kit-flywheel-guard.test.ts": "4c4483538eda0c0f3c92da9c313b38f9020d0cde6b404455d3480c56b19b62e2",
+   "extensions/kit-flywheel-guard.ts": "dba2534b11c242efadf8835e4673e7df67cb8e761fae4b3eb1a031baec7bbac7",
+   "scripts/br-shim.sh": "1af6bcb72472553202754e61e41b569430dc37eae56c09bde3d94bf780d2804e",
+   "src/claim-cut.ts": "861cab80f7c0a9b35aab423b4be706571d1f3668a84f2621802d0c99772eb62b",
+   "src/preflight.ts": "290d05722a4e9704ab63bc24e9f70b840043c3ed549bad6c0a78b208cb145fab",
+   "tests/cli/br-shim.test.sh": "2377043d3586d30b6af48ba2162404813779f46a78bd7c87dcc58da029c386ad",
+   "tests/cli/br-shim.test.ts": "34634b2b901898ff9144ef798272bd86339c9b62c01863c9f1f96b9a15ae78cd",
+   "tests/cli/preflight.test.ts": "c4bd420bb35a6124346900e62c0f0afd83db7cf20a04adb2962cc44e225b5a87"
+  },
+  "stale_worktree_precheck": {
+   "rc": 0,
+   "stderr": "",
+   "stdout": "",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "trusted_source_override": false,
+  "wave": "W-CopperTrout-20261030T174918Z-1",
+  "withdrawn_original": "cbd9ae1cc068b199bf9b08c8bd0777b1b579dbb8"
+ }
+}

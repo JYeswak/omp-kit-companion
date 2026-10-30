@@ -11,6 +11,7 @@ import { parseCommit, planAutocomplete } from "./commit-autocomplete";
 import { renderEnvelope } from "../src/kitlib/findings.ts";
 import { agentMailStorageRoot } from "../src/holder-liveness.ts";
 import { projectAgentBrShimPath } from "../src/gate-plane.ts";
+import { admitClaimCut } from "../src/claim-cut.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -1326,8 +1327,10 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 		class: "unsupported_native", bead: request.ids[0] ?? null, actor: "UNKNOWN director",
 		next: "use a normal atomic --claim, not a forced or manual assignment/start; route any qualified custody transfer through its owner",
 	});
+	const db = request.db ?? deps.env.BEADS_DB;
+	const bound = db ? { ...request, db: resolve(request.cwd, db) } : request;
 	for (const id of request.ids) {
-		const found = await readBeadState(deps.exec, request, id);
+		const found = await readBeadState(deps.exec, bound, id);
 		if (!found.ok) return refuseClaim({
 			class: "tool_read_failure", bead: id, actor: "UNKNOWN native controller",
 			next: `restore the native lookup for ${id} before claiming: ${found.why}`,
@@ -1346,7 +1349,7 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 		});
 	}
 	if (request.operation === "claim") {
-		const held = await ownedBeadIds(deps.exec, request, actor);
+		const held = await ownedBeadIds(deps.exec, { ...bound, key: bound.db ?? bound.cwd }, actor);
 		if (held === null) return refuseClaim({
 			class: "tool_read_failure", bead: request.ids[0] ?? null, actor,
 			next: `the guard could not list active claims for ${actor}; restore the native lookup before claiming a second bead`,
@@ -1356,6 +1359,21 @@ async function checkNativeClaim(request: TrackerRequest, deps: TrackerMutationDe
 			class: "unsafe_custody", bead: request.ids[0] ?? null, actor,
 			next: `${actor} already holds active ${other}; release it (br update ${other} --status open --assignee "" --if-unchanged <updated_at>) or land it before claiming another implementation`,
 		});
+		for (const id of request.ids) {
+			const cut = await admitClaimCut({
+				repo: bound.cwd, id, env: deps.env, home: deps.home, ...(bound.db ? { db: bound.db } : {}),
+				read: async args => {
+					const result = await execJson(deps.exec, bound, args);
+					if (!result.ok) throw new Error(result.why);
+					return result.value;
+				},
+			});
+			if (cut.blocking) return {
+				block: true,
+				reason: JSON.stringify({ guard: "kit-flywheel-guard", code: cut.code, bead: id, cut: cut.cut,
+					alternative: cut.alternative, detail: cut.detail, remedy: cut.remedy }),
+			};
+		}
 	}
 	return undefined;
 }
