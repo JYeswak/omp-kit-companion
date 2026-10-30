@@ -1,0 +1,291 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_d60b4bba71a90f758fe07d7baa8a34cba189e746634926e8338ab75a1d7a253b",
+ "limitations": [
+  "Owner-authorized structural branch only; no budget increase, performance win, installed or global full-suite claim."
+ ],
+ "operation": "DIAGSCOPE2S1-authorized-structural-branch",
+ "parameters": {
+  "bead": "ompkit-v66l.27.15"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "actual_source_cli": {
+   "command": [
+    "bun",
+    "src/cli.ts",
+    "doctor",
+    "--scope",
+    "omp",
+    "--json"
+   ],
+   "findings": [
+    {
+     "component": "omp",
+     "launcher_version": "18.14.0",
+     "status": "OK",
+     "version_proof": "OMP_LAUNCHER"
+    }
+   ],
+   "rc": 0
+  },
+  "bead": "ompkit-v66l.27.15",
+  "branch_authority": {
+   "message": 73565,
+   "scope": "explicit description-authorized non-consumer synthetic-fixture branch; actual CLI <2000ms and eager >2000ms controls unchanged",
+   "tracker_commit": "fefb5b99"
+  },
+  "causal_controls": {
+   "missing-ntm-producer": {
+    "observation": {
+     "observed": [
+      "acfs",
+      "am",
+      "apr",
+      "br",
+      "bv",
+      "caam",
+      "cass",
+      "caut",
+      "cm",
+      "csctf",
+      "dcg",
+      "dsr",
+      "ee",
+      "fad",
+      "fg",
+      "ft",
+      "giil",
+      "ms",
+      "pt",
+      "rano",
+      "rch",
+      "ru",
+      "sbh",
+      "skillranker",
+      "slb",
+      "tru",
+      "ubs",
+      "vc",
+      "xf"
+     ],
+     "producer": "inspectDicklesworthstone",
+     "required": [
+      "acfs",
+      "am",
+      "apr",
+      "br",
+      "bv",
+      "caam",
+      "cass",
+      "caut",
+      "cm",
+      "csctf",
+      "dcg",
+      "dsr",
+      "ee",
+      "fad",
+      "fg",
+      "ft",
+      "giil",
+      "ms",
+      "ntm",
+      "pt",
+      "rano",
+      "rch",
+      "ru",
+      "sbh",
+      "skillranker",
+      "slb",
+      "tru",
+      "ubs",
+      "vc",
+      "xf"
+     ],
+     "status": "DEGRADED",
+     "variant": "missing-ntm-producer"
+    },
+    "rc": 1
+   },
+   "restored-control": {
+    "observation": {
+     "observed": [
+      "acfs",
+      "am",
+      "apr",
+      "br",
+      "bv",
+      "caam",
+      "cass",
+      "caut",
+      "cm",
+      "csctf",
+      "dcg",
+      "dsr",
+      "ee",
+      "fad",
+      "fg",
+      "ft",
+      "giil",
+      "ms",
+      "ntm",
+      "pt",
+      "rano",
+      "rch",
+      "ru",
+      "sbh",
+      "skillranker",
+      "slb",
+      "tru",
+      "ubs",
+      "vc",
+      "xf"
+     ],
+     "producer": "inspectDicklesworthstone",
+     "required": [
+      "acfs",
+      "am",
+      "apr",
+      "br",
+      "bv",
+      "caam",
+      "cass",
+      "caut",
+      "cm",
+      "csctf",
+      "dcg",
+      "dsr",
+      "ee",
+      "fad",
+      "fg",
+      "ft",
+      "giil",
+      "ms",
+      "ntm",
+      "pt",
+      "rano",
+      "rch",
+      "ru",
+      "sbh",
+      "skillranker",
+      "slb",
+      "tru",
+      "ubs",
+      "vc",
+      "xf"
+     ],
+     "status": "DEGRADED",
+     "variant": "restored-control"
+    },
+    "rc": 0
+   },
+   "valid-control": {
+    "observation": {
+     "observed": [
+      "acfs",
+      "am",
+      "apr",
+      "br",
+      "bv",
+      "caam",
+      "cass",
+      "caut",
+      "cm",
+      "csctf",
+      "dcg",
+      "dsr",
+      "ee",
+      "fad",
+      "fg",
+      "ft",
+      "giil",
+      "ms",
+      "ntm",
+      "pt",
+      "rano",
+      "rch",
+      "ru",
+      "sbh",
+      "skillranker",
+      "slb",
+      "tru",
+      "ubs",
+      "vc",
+      "xf"
+     ],
+     "producer": "inspectDicklesworthstone",
+     "required": [
+      "acfs",
+      "am",
+      "apr",
+      "br",
+      "bv",
+      "caam",
+      "cass",
+      "caut",
+      "cm",
+      "csctf",
+      "dcg",
+      "dsr",
+      "ee",
+      "fad",
+      "fg",
+      "ft",
+      "giil",
+      "ms",
+      "ntm",
+      "pt",
+      "rano",
+      "rch",
+      "ru",
+      "sbh",
+      "skillranker",
+      "slb",
+      "tru",
+      "ubs",
+      "vc",
+      "xf"
+     ],
+     "status": "DEGRADED",
+     "variant": "valid-control"
+    },
+    "rc": 0
+   }
+  },
+  "exact_export": {
+   "git_init_without_commits": true,
+   "manifest_build_rc": 0,
+   "manifest_check_rc": 0,
+   "suite": "95 pass 0 fail 525 expect",
+   "suite_rc": 0
+  },
+  "limits": [
+   "No product source/assertion/budget edits or performance win.",
+   "Original AC1 FAIL and old native94/1 remain retained; this is a changed authorized branch, not a relabelled old PASS.",
+   "Actual stack finding DEGRADED is retained; completeness controls do not certify fleet health.",
+   "No installed release/activation or global full-suite PASS."
+  ],
+  "other_observed_invocation": {
+   "command": [
+    "bun",
+    "run",
+    "src/cli.ts",
+    "doctor",
+    "--scope",
+    "omp",
+    "--json"
+   ],
+   "findings": [
+    {
+     "component": "omp",
+     "launcher_version": "18.12.6",
+     "status": "UNVERIFIED",
+     "version_proof": "OMP_LAUNCHER"
+    }
+   ],
+   "rc": 0
+  },
+  "source": "b6ef7a6f02d916899996f23e04efe78f3ea51622"
+ }
+}
