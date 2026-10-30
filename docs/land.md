@@ -144,7 +144,10 @@ history, utilisation/variability remain `NOT_MEASURED`. The initial cap is not p
 as distribution-derived.
 
 The ordinary regression uses a tiny fixture-only cap. The optional literal boundary
-smoke really runs a 10-second control and a 300-second file:
+smoke runs a 10-second control, a 300-second file refused against the unchanged
+225-second cap, and that same 300-second file through a fixture-only gate with budget
+enforcement removed. The original refusal assertion must reject the mutant's successful
+result. Allow about 11 minutes; the opt-in test has a 720-second harness timeout.
 
 ```sh
 OMP_KIT_LITERAL_SUITE_BUDGET=1 bun test tests/cli/fresh-gate.test.ts \

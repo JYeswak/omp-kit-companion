@@ -567,17 +567,32 @@ test.skipIf(!AMPLE || process.env.OMP_KIT_LITERAL_SUITE_BUDGET !== "1")("SUITEBU
 		expect(control.code, control.out).toBe(0);
 		const slow = runFocused(fx, source, archive, "tests/cli/three-hundred.test.sh");
 		console.log(slow.out);
-		expect(slow.code, slow.out).not.toBe(0);
-		expect(slow.out).toContain("OVER_BUDGET");
-		expect(slow.out).toContain("tests/cli/three-hundred.test.sh");
-		expect(slow.out).toContain('"cap_s":225');
+		const assertBudgetRefusal = (code: number, out: string) => {
+			expect(code, out).not.toBe(0);
+			expect(out).toContain("OVER_BUDGET");
+			expect(out).toContain("tests/cli/three-hundred.test.sh");
+			expect(out).toContain('"cap_s":225');
+		};
+		assertBudgetRefusal(slow.code, slow.out);
 		const rows = measuredFiles(ledger(fx).at(-1)!);
 		expect(rows[0]!.elapsed_ms).toBeGreaterThanOrEqual(300000);
 		expect(rows[0]!.rc).toBe(0);
+
+		// Remove only the fixture gate's budget enforcement, not the measured run.
+		const enforcement = '\t\tbun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \\\n\t\t\t--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --json || tests_rc=$?\n';
+		const withoutEnforcement = source.replace(enforcement, "\t\t:\n");
+		expect(withoutEnforcement).not.toBe(source);
+		const unchecked = runFocused(fx, withoutEnforcement, archive, "tests/cli/three-hundred.test.sh");
+		console.log("SUITEBUDGET1 literal enforcement removed", unchecked.out);
+		expect(unchecked.code, unchecked.out).toBe(0);
+		const uncheckedRows = measuredFiles(ledger(fx).at(-1)!);
+		expect(uncheckedRows[0]!.elapsed_ms).toBeGreaterThanOrEqual(300000);
+		expect(uncheckedRows[0]!.rc).toBe(0);
+		expect(() => assertBudgetRefusal(unchecked.code, unchecked.out)).toThrow();
 	} finally {
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
-}, 360_000);
+}, 720_000);
 
 test.skipIf(!AMPLE)("CIGATE1 shards: the selection runs in K parallel bun workers, and a failure in any shard refuses (needs >= 10 GiB free)", () => {
 	const source = readFileSync(gate, "utf8");
