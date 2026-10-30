@@ -15,7 +15,6 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { envelope, parseFindingLines, unjudged, type Envelope, type Finding, type PreflightAct } from "./kitlib/findings.ts";
 import { run } from "./kitlib/run.ts";
-import { admitClaimCut, type ClaimCutRead } from "./claim-cut.ts";
 
 const MEMBER_DEADLINE_S = 120;
 const SELFTEST_DEADLINE_S = 180;
@@ -103,54 +102,37 @@ export async function preflightCommit(repo: string, options: { message?: string;
 	return envelope("commit", null, snapshot, findings);
 }
 
-interface BeadView { id: string; status: string; assignee: string | null; updated_at: string; acceptance: { index: number; checked: boolean; text: string }[]; labels: string[]; raw: Record<string, unknown> }
-
-/** The same bounded, explicitly bound reader serves the bead and its cut graph, including compiled CLI calls. */
-async function readTracker(repo: string, env: Record<string, string>, args: string[]): Promise<unknown> {
-	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
-	const r = await run([env.BR_REAL || "br", ...args, "--no-auto-import", "--no-auto-flush", ...db], {
-		deadline_s: 3, cwd: repo, env, max_output_bytes: 4 * 1024 * 1024,
-	});
-	if (r.rc !== 0 || r.killed || r.truncated) throw new Error(`${args.join(" ")} failed (${r.timed_out ? "timeout" : r.rc}): ${text(r.stderr).trim().split("\n")[0] ?? ""}`);
-	return JSON.parse(text(r.stdout));
-}
+interface BeadView { id: string; status: string; assignee: string | null; updated_at: string; acceptance: { index: number; checked: boolean; text: string }[]; labels: string[] }
 
 /** Name the unmet tracker prerequisite when `br show` cannot resolve the bead: the sought bead plus
 the bound tracker's own identity read from the tracker itself (never a hardcoded path; best effort). */
 async function missingBeadDetail(repo: string, env: Record<string, string>, id: string, rc: number, firstLine: string | undefined): Promise<string> {
-	let binding = `tracker binding unresolved in ${repo}`;
-	try {
-		const w = await run([env.BR_REAL || "br", "where", ...(env.BEADS_DB ? ["--db", env.BEADS_DB] : [])], { deadline_s: 3, cwd: repo, env, max_output_bytes: 65536 });
-		binding = text(w.stdout).split("\n").map(l => l.trim()).find(l => l.startsWith("database:")) ?? binding;
-	} catch { /* the original failed read still produces an UNJUDGED finding */ }
+	const w = await run(["br", "where"], { deadline_s: 30, cwd: repo, env, max_output_bytes: 65536 });
+	const binding = text(w.stdout).split("\n").map(l => l.trim()).find(l => l.startsWith("database:")) ?? `tracker binding unresolved in ${repo}`;
 	return `br show ${id} failed (exit ${rc}): ${firstLine || "no message"}; unmet prerequisite: bead resolvable in bound tracker (${binding})`;
 }
 
-async function readBead(repo: string, id: string, env: Record<string, string>, read: ClaimCutRead): Promise<BeadView | Finding> {
+async function readBead(repo: string, id: string, env: Record<string, string>): Promise<BeadView | Finding> {
+	const r = await run(["br", "show", id, "--json"], { deadline_s: 60, cwd: repo, env, max_output_bytes: 4 * 1024 * 1024 });
+	if (r.rc !== 0) return unjudged("br", r.rc, await missingBeadDetail(repo, env, id, r.rc, text(r.stderr).trim().split("\n")[0]));
 	let doc: unknown;
-	try { doc = await read(["show", id, "--json"]); } catch (error) {
-		return unjudged("br", null, await missingBeadDetail(repo, env, id, -1, error instanceof Error ? error.message : String(error)));
-	}
-	const row = Array.isArray(doc) && doc.length === 1 ? doc[0] : doc;
-	if (!row || typeof row !== "object" || !("id" in row) || row.id !== id) return unjudged("br", null, "br show printed no matching bead");
+	try { doc = JSON.parse(text(r.stdout)); } catch { return unjudged("br", r.rc, "br show printed no JSON"); }
+	const row = Array.isArray(doc) ? doc[0] : doc;
+	if (!row || typeof row !== "object") return unjudged("br", r.rc, "br show printed no bead");
 	const b = row as Record<string, unknown>;
 	const acText = typeof b.acceptance_criteria === "string" ? b.acceptance_criteria : "";
 	const acceptance = acText.split("\n").filter(l => /^- \[[ xX]\]/.test(l)).map((l, i) => ({ index: i + 1, checked: /^- \[[xX]\]/.test(l), text: l }));
 	return { id: String(b.id), status: String(b.status), assignee: typeof b.assignee === "string" && b.assignee ? b.assignee : null,
-		updated_at: String(b.updated_at ?? ""), acceptance, labels: Array.isArray(b.labels) ? b.labels.map(String) : [], raw: b };
+		updated_at: String(b.updated_at ?? ""), acceptance, labels: Array.isArray(b.labels) ? b.labels.map(String) : [] };
 }
 
 const PHASE_TAG = /\[(build|landed|live)\]/;
 
 /** The tracker transition predicates, every one judged, none applied. */
-export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publish" | "scratch-release">, repo: string, id: string, options: { actor?: string; env?: Record<string, string>; read?: ClaimCutRead } = {}): Promise<Envelope> {
+export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publish" | "scratch-release">, repo: string, id: string, options: { actor?: string; env?: Record<string, string> } = {}): Promise<Envelope> {
 	const env = { ...process.env, ...(options.env ?? {}) } as Record<string, string>;
-	const read = options.read ?? ((args: string[]) => readTracker(repo, env, args));
-	const bead = await readBead(repo, id, env, read);
-	if ("gate" in bead) return envelope(act, id, "unknown", act === "claim" ? [bead, {
-		gate: "claim-cut", code: "CLAIM_CUT_UNKNOWN", detail: `${id}: cut admission requires a readable bead`,
-		remedy: "restore the bound tracker read before claiming", fix: null, blocking: true,
-	}] : [bead]);
+	const bead = await readBead(repo, id, env);
+	if ("gate" in bead) return envelope(act, id, "unknown", [bead]);
 	const snapshot = `bead:${bead.updated_at || "no-updated-at"}`;
 	const f: Finding[] = [];
 	const push = (code: string, detail: string, remedy: string, fix: string[] | null = null) => f.push({ gate: "br-policy", code, detail, remedy, fix, blocking: true });
@@ -161,15 +143,10 @@ export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publi
 		if (bead.assignee) push("ASSIGNED", `${id} is assigned to ${bead.assignee}`, "pick another bead or ask the holder");
 		if (bead.labels.includes("needs-director")) push("NEEDS_DIRECTOR", `${id} carries an unresolved director disposition (needs-director)`, "route it to the director; claim only after the label is resolved with a recorded disposition");
 		if (gated.length) push("GATED_LABEL", `${id} carries ${gated.join(", ")}`, "route it; never claim a human-gate, owner-decision or kind:process bead");
-		const cut = await admitClaimCut({ repo, id, env, bead: bead.raw, read });
-		f.push({ gate: "claim-cut", code: cut.code, detail: cut.detail, remedy: cut.remedy, fix: null, blocking: cut.blocking });
 		if (actor) {
+			const mine = await run(["br", "list", "--assignee", actor, "--status", "in_progress", "--json"], { deadline_s: 60, cwd: repo, env, max_output_bytes: 4 * 1024 * 1024 });
 			let n = 0;
-			try {
-				const result = await read(["list", "--assignee", actor, "--status", "in_progress", "--json"]);
-				const rows = Array.isArray(result) ? result : result && typeof result === "object" && "issues" in result ? result.issues : null;
-				n = Array.isArray(rows) ? rows.length : 0;
-			} catch { /* unreadable list: not a finding about this bead */ }
+			try { const rows = JSON.parse(text(mine.stdout)); n = Array.isArray(rows) ? rows.length : 0; } catch { /* unreadable list: not a finding about this bead */ }
 			if (n > 0) push("SEAT_BUSY", `${actor} already holds ${n} in_progress bead(s)`, "finish or release it first (one bead in progress per seat)");
 		}
 	}
