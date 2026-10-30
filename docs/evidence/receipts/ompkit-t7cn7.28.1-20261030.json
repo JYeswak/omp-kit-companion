@@ -1,0 +1,68 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_1d33f6df4da07767eaed2465db16338e878660809c6c751fc46807decf49d82d",
+ "limitations": [
+  "Existing source reused; build controls only. Full RED-configuration fresh-gate/live acceptance remains unqualified."
+ ],
+ "operation": "BRINITPIN1-C-existing-fix-build-qualification",
+ "parameters": {
+  "bead": "ompkit-t7cn7.28.1",
+  "tested_commit": "57e92c0124c679957c6d255fe11ae0c94cb2ea6d"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "consumer": "omp-kit in-review admission and non-author original-acceptance replay for ompkit-t7cn7.28.1",
+  "environment": {
+   "TMPDIR_under_tracker_owned_scratch": true,
+   "exact_git_archive": true,
+   "git_init_without_commits": true,
+   "inherited_BEADS_DB_removed": true,
+   "source_manifest_rc": 0,
+   "trusted_source_overrides": false
+  },
+  "feature": "fixture-local br database selection and staged/pushed br-init ratchet",
+  "observed_defect": "Original parent report: six fresh-gate failures when unpinned fixture br init discovered and locked an ancestor live tracker; no unsafe replay against the live tracker was attempted here.",
+  "oracle": {
+   "negative": "The same native init without a pin runs only under an isolated owned parent tracker; it changes that parent and creates a new named lock.",
+   "positive": "Actual br init explicitly binds the child .beads/beads.db; complete ancestor directory/file set, sizes and mtimes remain equal.",
+   "ratchet": "Real staged member and real pre-push adapter refuse newly unpinned/inherited sites naming file and line; fixture-local --db and BEADS_DB controls are admitted; unchanged legacy counts are not inflated."
+  },
+  "replays": [
+   {
+    "command": "bun test tests/cli/verify.test.ts -t BRINITPIN1",
+    "rc": 0,
+    "stderr": "\ntests/cli/verify.test.ts:\n(pass) BRINITPIN1 verify tracker init leaves ancestor tracker unchanged; unpinned control changes it [700.00ms]\n\n 1 pass\n 36 filtered out\n 0 fail\n 4 expect() calls\nRan 1 test across 1 file. [728.00ms]\n",
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "timed_out": false
+   },
+   {
+    "command": "bun test tests/cli/runtime.test.ts -t BRINITPIN1",
+    "rc": 0,
+    "stderr": "\ntests/cli/runtime.test.ts:\n(pass) BRINITPIN1 runtime fixture init leaves ancestor tracker unchanged; unpinned control changes it [581.87ms]\n\n 1 pass\n 32 filtered out\n 0 fail\n 5 expect() calls\nRan 1 test across 1 file. [615.00ms]\n",
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "timed_out": false
+   },
+   {
+    "command": "sh tests/cli/check-staged-br-init.test.sh",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "check-staged-br-init: 18 pass 0 fail\n",
+    "timed_out": false
+   }
+  ],
+  "scope_limits": [
+   "Three build clauses are qualified at the tested source only; no new implementation is claimed.",
+   "The original full fresh-gate/live clause at7207 and the real tracker file-set check have not been qualified by these focused runs.",
+   "No full-suite, installed-release, global tracker health, publication or close claim.",
+   "ROADMAP.md is held exclusively by SnowyFrog; requested its truthful status row in authenticated mail73426; no foreign file was edited."
+  ],
+  "source": {
+   "existing_fix": "7207a7cbe1306470c33c168ae9fe3b498e220ccf",
+   "fix_is_ancestor": true,
+   "new_source_or_test_changes_by_CopperTrout": false,
+   "repo": "/Users/josh/Developer/omp-kit-companion",
+   "tested_commit": "57e92c0124c679957c6d255fe11ae0c94cb2ea6d"
+  }
+ }
+}
