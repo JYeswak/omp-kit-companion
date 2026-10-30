@@ -263,7 +263,9 @@ else:
 
 for mode, allow in (("scrubbed", False), ("control", True)):
     server = socket.socket()
-    server.bind(("127.0.0.1", 0))
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    port = int(os.environ.get("KIT_TEST_LOOPBACK_PORT", "0"))
+    server.bind(("127.0.0.1", port))
     server.listen(1)
     server.settimeout(2)
     port = server.getsockname()[1]
@@ -324,11 +326,13 @@ else
 fi
 
 
-# A local owned stub proves that the network probe records a dial when no fence is applied.
+# A local owned stub proves that the network probe records a dial on its allowed loopback port.
 helper_out="$TMP/hermetic-network-control.out"
-if "$helper_python" -c 'import socket, threading
+if "$helper_python" -c 'import os, socket, threading
 server = socket.socket()
-server.bind(("127.0.0.1", 0))
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+port = int(os.environ.get("KIT_TEST_LOOPBACK_PORT", "0"))
+server.bind(("127.0.0.1", port))
 server.listen()
 server.settimeout(2)
 port = server.getsockname()[1]
@@ -345,9 +349,9 @@ thread.join(2)
 server.close()
 assert seen == [b"x"], seen
 print("HERMETIC_NETWORK_CONTROL dial-recorded")' >"$helper_out" 2>&1; then
-	ok "the unfenced network control reaches only its owned stub and records the dial"
+	ok "the local network control reaches only its allowed owned stub and records the dial"
 else
-	not_ok "the unfenced owned-stub network control failed"; cat "$helper_out"
+	not_ok "local owned-stub network control failed"; cat "$helper_out"
 fi
 if [ "$(uname -s)" = Darwin ]; then
 	helper_out="$TMP/hermetic-helper-denied.out"
