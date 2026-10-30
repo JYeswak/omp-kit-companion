@@ -1,0 +1,833 @@
+diff --git a/README.md b/README.md
+index 20740ab3ed..cbcccf13de 100644
+--- a/README.md
++++ b/README.md
+@@ -497,7 +497,7 @@ explicit report rather than inventing zero activity.
+ | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or explicitly resolve shared-main convergence; preserves peer staged/worktree state, refuses unresolved owner conflicts, and publishes only with a non-force push | `omp-kit converge --repo . --json` |
+ | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit reserved paths, admit via `commit-msg` and the [push check](docs/land.md), publish with no force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |
+ | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
+-| `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Tags agent text; bare slash commands; refuses forgeries | `omp-kit send s %1 "status" --json` |
++| `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` / `send --deferred` | Tags agent text; bare slash commands; refuses forgeries. A busy Tern seat returns `QUEUED` (`QUEUED_STEER`) once its omp queues the steer; `--deferred` later reports each `PROVEN_STEERED` or a failure | `omp-kit send s %1 "status" --json` |
+ | `omp-kit sha` | `sha SHA [--repo PATH]...` | Resolve a commit across every fleet repo and report which repos hold it; exit 0 found, 1 absent everywhere | `omp-kit sha dd82fb4e --json` |
+ | `omp-kit custody` | `custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH` | Answer whether one repo-relative path may be edited, from git and reservations; one PATH per call | `omp-kit custody check --repo /path/to/repo --json doc/README.md` |
+ | `omp-kit intake` | `intake --from joshua --text TEXT --seat SEAT [--kind rule\|work]` | Record one request, resolve the receiving seat's role, print DO or ROUTE | `omp-kit intake --from joshua --text 'fix this test' --seat chief --json` |
+diff --git a/extensions/kit-composer-state.test.ts b/extensions/kit-composer-state.test.ts
+index d2878f3f11..b62790c0d7 100644
+--- a/extensions/kit-composer-state.test.ts
++++ b/extensions/kit-composer-state.test.ts
+@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
+ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+ import { dirname, join } from "node:path";
+ import { pathToFileURL } from "node:url";
+-import kitComposerState, { composerRecordPath, type ComposerStateContext, type ComposerStateRecord } from "./kit-composer-state";
++import kitComposerState, { composerRecordPath, kitSendMarker, steerReceiptPath, STEER_RECEIPT_POLL_MS, STEER_RECEIPT_WINDOW_MS, type ComposerStateContext, type ComposerStateRecord, type SteerReceiptRecord } from "./kit-composer-state";
+ import { ownedTmp } from "../src/kitlib/tmp.ts";
+ 
+ let freshSeq = 0;
+@@ -49,13 +49,20 @@ registry?: unknown; malformedRegistry?: boolean; registryOverride?: boolean } =
+ 		setInterval: (cb: () => unknown) => { ticks.push(cb); return ++state.intervals; },
+ 		clearTimer: () => void ++state.cleared,
+ 	};
++	const confirmations: Promise<void>[] = [];
++	const sleeps: number[] = [];
+ 	await runner({ on: (event, handler) => void handlers.set(event, [...(handlers.get(event) ?? []), handler]) },
+-		{ home, env: { ...opts.env, ...(opts.registryOverride ? { CC_SEATS: registryPath } : {}) }, now: () => 1_000, pid: 4242 });
+-	const fire = async (event: string) => { for (const h of handlers.get(event) ?? []) await h(undefined as never, ctx); };
++		{ home, env: { ...opts.env, ...(opts.registryOverride ? { CC_SEATS: registryPath } : {}) }, now: () => 1_000, pid: 4242,
++			sleep: async (ms) => { sleeps.push(ms); }, track: (p) => void confirmations.push(p) });
++	const fire = async (event: string, payload?: unknown) => {
++		const results: unknown[] = [];
++		for (const h of handlers.get(event) ?? []) results.push(await h(payload as never, ctx));
++		return results;
++	};
+ 	const tick = async () => { for (const cb of ticks) await cb(); };
+ 	const path = composerRecordPath(home, realpathSync(sessionFile));
+ 	const record = () => existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as ComposerStateRecord : null;
+-	return { state, fire, tick, record, path, sessionFile };
++	return { state, fire, tick, record, path, sessionFile, ctx, home, confirmations, sleeps };
+ }
+ 
+ test("planted: an empty composer is published as empty, keyed by the session file's realpath", async () => {
+@@ -216,3 +223,66 @@ test("a malformed registry preserves an opted-in cwd", async () => {
+ 	await s.fire("session_start");
+ 	expect(s.record()?.empty).toBe(true);
+ });
++
++// SENDFAST1 QUEUED_STEER (ompkit-fp72.135.3.84, J-2026-10-30-04): the seat's own receipt that a kit send reached omp's queue.
++const SEND_TEXT = "[from agent PeachLeopard via omp-kit send]\nstatus update\n[kit-send-0123456789ab]";
++
++/** A streaming seat whose queue is empty until `queuedAfterChecks` re-reads, then holds the message. */
++async function streamingSeat(queuedAfterChecks: number | null, opts: { pendingBefore?: boolean; optedIn?: boolean } = {}) {
++	const s = await seat({ optedIn: opts.optedIn });
++	let checks = 0;
++	s.ctx.isIdle = () => false;
++	s.ctx.hasPendingMessages = () => {
++		checks++;
++		if (checks === 1) return opts.pendingBefore === true;
++		return queuedAfterChecks !== null && checks - 1 >= queuedAfterChecks;
++	};
++	const receipt = (marker = "kit-send-0123456789ab") => {
++		const path = steerReceiptPath(s.home, realpathSync(s.sessionFile), marker);
++		return existsSync(path) ? { path, record: JSON.parse(readFileSync(path, "utf8")) as SteerReceiptRecord } : null;
++	};
++	return { ...s, receipt };
++}
++
++test("QUEUED_STEER: a kit send submitted mid-turn that omp then queues leaves a receipt with the marker and text hash, never the text", async () => {
++	const s = await streamingSeat(3);
++	expect(await s.fire("input", { type: "input", text: SEND_TEXT, source: "interactive" })).toEqual([undefined]);
++	await Promise.all(s.confirmations);
++	const got = s.receipt();
++	expect(got?.record).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000,
++		marker: "kit-send-0123456789ab", text_sha256: createHash("sha256").update(SEND_TEXT.trim(), "utf8").digest("hex") });
++	expect(readFileSync(got!.path, "utf8")).not.toContain("status update");
++	expect(s.sleeps).toEqual([STEER_RECEIPT_POLL_MS, STEER_RECEIPT_POLL_MS, STEER_RECEIPT_POLL_MS]);
++});
++
++test("QUEUED_STEER planted: a submit whose text never reaches omp's queue leaves no receipt within the window", async () => {
++	const s = await streamingSeat(null);
++	await s.fire("input", { type: "input", text: SEND_TEXT, source: "interactive" });
++	await Promise.all(s.confirmations);
++	expect(s.receipt()).toBeNull();
++	expect(s.sleeps.length).toBe(STEER_RECEIPT_WINDOW_MS / STEER_RECEIPT_POLL_MS);
++});
++
++test("QUEUED_STEER planted: an idle seat, a queue already holding a message, another source, a foreign marker or an opted-out repo leaves no receipt", async () => {
++	const idle = await streamingSeat(1);
++	idle.ctx.isIdle = () => true;
++	const busyQueue = await streamingSeat(1, { pendingBefore: true });
++	const rpc = await streamingSeat(1);
++	const unmarked = await streamingSeat(1);
++	const optedOut = await streamingSeat(1, { optedIn: false });
++	const cases: Array<[string, typeof idle, Record<string, unknown>]> = [
++		["idle", idle, { text: SEND_TEXT, source: "interactive" }],
++		["queue already pending", busyQueue, { text: SEND_TEXT, source: "interactive" }],
++		["rpc source", rpc, { text: SEND_TEXT, source: "rpc" }],
++		["no marker line", unmarked, { text: "status update [kit-send-0123456789ab] trailing", source: "interactive" }],
++		["opted out", optedOut, { text: SEND_TEXT, source: "interactive" }],
++	];
++	for (const [label, s, event] of cases) {
++		await s.fire("input", { type: "input", ...event });
++		await Promise.all(s.confirmations);
++		expect([label, s.receipt()]).toEqual([label, null]);
++	}
++	expect(kitSendMarker("x\n[kit-send-0123456789AB]")).toBeNull();
++	expect(kitSendMarker("x\n[kit-send-0123456789a]")).toBeNull();
++	expect(kitSendMarker("x\n[kit-send-0123456789ab]  ")).toBe("kit-send-0123456789ab");
++});
+diff --git a/extensions/kit-composer-state.ts b/extensions/kit-composer-state.ts
+index 2b084d4ac4..a3e471b856 100644
+--- a/extensions/kit-composer-state.ts
++++ b/extensions/kit-composer-state.ts
+@@ -16,6 +16,9 @@ import { fleetPolicyState } from "./fleet-policy";
+  * its text. Inert unless the repo opted into the fleet, and outside the interactive TUI (RPC's getEditorText is "").
+  */
+ export const COMPOSER_INTERVAL_MS = 5_000;
++/** QUEUED_STEER receipt: re-check cadence for OMP's queue after a submitted kit send, and how long to look. */
++export const STEER_RECEIPT_POLL_MS = 20;
++export const STEER_RECEIPT_WINDOW_MS = 1_000;
+ 
+ export interface ComposerStateRecord {
+ 	schema: 1;
+@@ -34,11 +37,45 @@ export function composerRecordPath(home: string, sessionFile: string): string {
+ 	return join(home, ".local", "state", "omp-kit", "composer", `${key}.json`);
+ }
+ 
++/**
++ * SENDFAST1 QUEUED_STEER (ompkit-fp72.135.3.84, J-2026-10-30-04): OMP's own receipt that a kit send pasted into a busy
++ * seat reached its steering queue. omp holds a steer until the running tool call ends before it journals it, so the
++ * journal proof can take as long as that call (a 60 s bash call held one 19 s). The seat records, per marker, that its
++ * `input` hook saw the exact submitted text while the agent was streaming with nothing queued, and that omp's queue
++ * then held a message. The sender reads this as QUEUED_STEER: queued, never proven. The text itself is never written.
++ */
++export interface SteerReceiptRecord {
++	schema: 1;
++	session_file: string;
++	pid: number;
++	/** Epoch milliseconds the input hook saw the submit. */
++	at: number;
++	marker: string;
++	/** sha256 of the submitted text, trimmed: what the journal entry will hold. */
++	text_sha256: string;
++}
++
++export function steerReceiptPath(home: string, sessionFile: string, marker: string): string {
++	const key = createHash("sha1").update(sessionFile).digest("hex").slice(0, 16);
++	return join(home, ".local", "state", "omp-kit", "steer-queue", key, `${marker}.json`);
++}
++
++/** The marker a kit send ends with: a last line exactly `[kit-send-<12 lowercase hex>]`, else null. */
++export function kitSendMarker(text: string): string | null {
++	const trimmed = text.trim();
++	const last = trimmed.slice(trimmed.lastIndexOf("\n") + 1);
++	if (last.length !== 23 || !last.startsWith("[kit-send-") || !last.endsWith("]")) return null;
++	for (const ch of last.slice(10, 22)) if (!((ch >= "0" && ch <= "9") || (ch >= "a" && ch <= "f"))) return null;
++	return last.slice(1, 22);
++}
++
+ export interface ComposerStateContext {
+ 	cwd: string;
+ 	mode?: string;
+ 	hasUI?: boolean;
+ 	isIdle?: () => boolean;
++	/** omp: whether its steering or follow-up queue holds a message. */
++	hasPendingMessages?: () => boolean;
+ 	ui?: { getEditorText?: () => string };
+ 	sessionManager?: { getSessionFile?: () => string | undefined };
+ 	setInterval?: (callback: () => void, ms: number) => unknown;
+@@ -54,6 +91,10 @@ export interface ComposerStateDeps {
+ 	env?: Readonly<Record<string, string | undefined>>;
+ 	now?: () => number;
+ 	pid?: number;
++	/** Test seam for the receipt's queue re-check wait. */
++	sleep?: (ms: number) => Promise<void>;
++	/** Test seam: receives each receipt's background confirmation. */
++	track?: (confirmation: Promise<void>) => void;
+ }
+ 
+ /** A registered seat's repo owns its opt-in, even when its process starts above that repo. */
+@@ -129,6 +170,49 @@ export default async function kitComposerState(pi: ComposerStateApi, deps: Compo
+ 		publish(ctx);
+ 	}
+ 
++	/**
++	 * QUEUED_STEER: `input` runs before omp queues the submit, so the queue is re-read after it. A receipt needs the exact
++	 * submit, a streaming agent and an empty queue before it; a queue already holding a message cannot show ours
++	 * arriving, and the sender then waits for the journal as before. The hook itself never delays the submit.
++	 */
++	function steerReceipt(event: unknown, ctx: ComposerStateContext): Promise<void> | null {
++		if (typeof event !== "object" || event === null || !("source" in event) || event.source !== "interactive"
++			|| !("text" in event) || typeof event.text !== "string") return null;
++		const marker = kitSendMarker(event.text);
++		const pending = ctx.hasPendingMessages;
++		if (marker === null || typeof ctx.isIdle !== "function" || ctx.isIdle() !== false
++			|| typeof pending !== "function" || pending() !== false) return null;
++		const raw = ctx.sessionManager?.getSessionFile?.();
++		if (typeof raw !== "string" || raw === "") return null;
++		const at = now();
++		const textSha256 = createHash("sha256").update(event.text.trim(), "utf8").digest("hex");
++		const sleep = deps.sleep ?? ((ms: number) => {
++			const { promise, resolve } = Promise.withResolvers<void>();
++			setTimeout(resolve, ms);
++			return promise;
++		});
++		return (async () => {
++			try {
++				if ((await fleetPolicyState(policyCwd(ctx.cwd, home, env))).kind !== "on") return;
++				for (let waited = 0; waited < STEER_RECEIPT_WINDOW_MS; waited += STEER_RECEIPT_POLL_MS) {
++					await sleep(STEER_RECEIPT_POLL_MS);
++					if (pending() !== true) continue;
++					let sessionFile = raw;
++					try { sessionFile = realpathSync(raw); } catch { /* not on disk yet: the raw path is what Tern will report */ }
++					const record: SteerReceiptRecord = { schema: 1, session_file: sessionFile, pid, at, marker, text_sha256: textSha256 };
++					const path = steerReceiptPath(home, sessionFile, marker);
++					mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
++					const tmp = `${path}.${pid}.tmp`;
++					writeFileSync(tmp, JSON.stringify(record));
++					renameSync(tmp, path);
++					return;
++				}
++			} catch {
++				// No receipt only means the sender waits for the journal proof.
++			}
++		})();
++	}
++
+ 	pi.on("session_start", async (_event, ctx) => {
+ 		await tick(ctx);
+ 		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => tick(ctx), COMPOSER_INTERVAL_MS);
+@@ -136,6 +220,11 @@ export default async function kitComposerState(pi: ComposerStateApi, deps: Compo
+ 	for (const event of ["agent_start", "agent_end", "session_switch"]) {
+ 		pi.on(event, (_event, ctx) => tick(ctx));
+ 	}
++	pi.on("input", (event, ctx) => {
++		const confirmation = steerReceipt(event, ctx);
++		if (confirmation !== null) deps.track?.(confirmation);
++		return undefined;
++	});
+ 	pi.on("session_shutdown", (_event, ctx) => {
+ 		if (timer !== null) {
+ 			try { ctx.clearTimer?.(timer); } catch { /* cleared on shutdown anyway */ }
+diff --git a/extensions/kit-mail-wake.test.ts b/extensions/kit-mail-wake.test.ts
+index 9646c9b307..8216c57a93 100644
+--- a/extensions/kit-mail-wake.test.ts
++++ b/extensions/kit-mail-wake.test.ts
+@@ -152,6 +152,15 @@ test("planted (a) control: the same ask to its parent seat queues exactly one wa
+ 	expect(f.ledger()).toMatchObject([{ status: "WAKE_DELIVERED", message_id: 66101, recipient: "RusticPine", seat: "tern:5" }]);
+ });
+ 
++test("SENDFAST1 QUEUED_STEER: a wake omp queued as a steer is WAKE_QUEUED, never WAKE_DELIVERED", async () => {
++	const f = fleet({ omp: () => ({ code: 0, stdout: JSON.stringify({ data: { overall: "QUEUED", status: "QUEUED", tern_code: "QUEUED_STEER", detail: "queued by omp as a steer" } }) }) });
++	expect(await f.wake.beforeSend("q1", "send_message", ask("RusticPine"), REPO)).toBeUndefined();
++	const patch = JSON.stringify(await f.wake.afterSend({ toolCallId: "q1", content: sent(66111), isError: false }));
++	expect(patch).toContain("WAKE_QUEUED: mail 66111 -> RusticPine at tern:5 (omp-test, /abs/fleet/omp-kit); omp queued it as a steer");
++	expect(patch).not.toContain("WAKE_DELIVERED");
++	expect(f.ledger()).toMatchObject([{ status: "WAKE_STEER_QUEUED", message_id: 66111, recipient: "RusticPine", seat: "tern:5" }]);
++});
++
+ test("parent from the task description, roster worker, and a dead seat", async () => {
+ 	const f = fleet();
+ 	expect((await f.wake.beforeSend("c3", "send_message", ask("StormyCove"), REPO))?.reason).toContain("re-address the ask to CopperTrout (named in its Agent Mail task_description)");
+diff --git a/extensions/kit-mail-wake.ts b/extensions/kit-mail-wake.ts
+index d0ba85bc0c..b51a0b99c0 100644
+--- a/extensions/kit-mail-wake.ts
++++ b/extensions/kit-mail-wake.ts
+@@ -16,8 +16,9 @@ import type { FlywheelExec, FlywheelToolCallResult } from "./kit-flywheel-guard"
+  *   passes; the plan is remembered for the result side.
+  * - `afterSend(event)` runs on the tool_result. On success it queues one line,
+  *   `MAIL <id> from <sender>: <subject>`, to each seated recipient through the existing wake primitive
+- *   `omp-kit send <tab> tern:<block> <line> --cwd <repo> --until-delivered S` (BUSY seats are waited out,
+- *   so the line lands at the next turn boundary, never mid-turn). Every outcome is a ledger row keyed by
++ *   `omp-kit send <tab> tern:<block> <line> --cwd <repo> --until-delivered S`. Since SENDFAST1 a busy keyless seat
++ *   gets the line at once as an omp steer, journaled at its next tool boundary (QUEUED_STEER, WAKE_STEER_QUEUED);
++ *   keyed seats are still waited out to the next turn boundary. Every outcome is a ledger row keyed by
+  *   message id, and the sender gets the outcome appended to the tool result the same turn: WAKE_QUEUED /
+  *   WAKE_DELIVERED, or UNSIGNALED with the reason.
+  *
+@@ -341,6 +342,8 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
+ 		try { data = prop(JSON.parse(result.stdout), "data"); } catch { data = undefined; }
+ 		const status = typeof prop(data, "status") === "string" ? prop(data, "status") as string : "";
+ 		if (result.code === 0 && (status === "OK" || status === "DELIVERED")) return { ok: true, status: "WAKE_DELIVERED", detail: `${status} ${typeof prop(data, "detail") === "string" ? prop(data, "detail") : ""}`.trim() };
++		// QUEUED_STEER (SENDFAST1): omp queued the wake as a steer on a busy seat; it journals at the seat's next tool boundary.
++		if (result.code === 0 && status === "QUEUED") return { ok: true, status: "WAKE_STEER_QUEUED", detail: `QUEUED ${typeof prop(data, "detail") === "string" ? prop(data, "detail") : ""}`.trim() };
+ 		const detail = typeof prop(data, "detail") === "string" ? prop(data, "detail") as string : (result.stderr || result.stdout).trim().split("\n").at(-1)?.slice(0, 200) ?? "";
+ 		return { ok: false, status: "WAKE_FAILED", detail: `\`${ompKitBin} send\` exited ${result.killed ? "after timeout" : result.code}${status ? ` (${status})` : ""}${detail ? `: ${detail}` : ""}` };
+ 	}
+@@ -392,6 +395,8 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
+ 				void pending.finally(() => inFlight.delete(pending));
+ 				ledger({ ...base, status: "WAKE_QUEUED", seat: `tern:${seat.block}`, session: seat.session, repo: seat.repo, line });
+ 				notices.push(`WAKE_QUEUED: mail ${id} -> ${target.name} at ${where}; lands at its next turn boundary (until-delivered ${untilS}s). Outcome: ${ledgerPath}`);
++			} else if (outcome.ok && outcome.status === "WAKE_STEER_QUEUED") {
++				notices.push(`WAKE_QUEUED: mail ${id} -> ${target.name} at ${where}; omp queued it as a steer, so it lands at the seat's next tool boundary (\`${ompKitBin} send --deferred\` reports it journaled or failed).`);
+ 			} else if (outcome.ok) {
+ 				notices.push(`WAKE_DELIVERED: mail ${id} -> ${target.name} at ${where}.`);
+ 			} else {
+diff --git a/src/cli.ts b/src/cli.ts
+index 3a16337982..15c7f28d4c 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -84,7 +84,7 @@ import { closeQueue, landingCommits, readDrainStore, resolveProjectDb, staleClai
+ import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
+ import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
+ import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
+-import { proveSend, proveTernCliSend, routeSendTarget, ternSendSeat } from "./send.ts";
++import { proveSend, proveTernCliSend, reportQueuedSteers, routeSendTarget, ternSendSeat } from "./send.ts";
+ import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
+ import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
+ import { auditReservationAge } from "./reservation-age.ts";
+@@ -340,7 +340,10 @@ function parse(args: readonly string[]): ParseResult {
+ 	} else if (command.name === "send") {
+ 		// send is the one three-positional command (SESSION PANE MESSAGE); the
+ 		// message keeps its spaces because the request joins rest (see sendCommand).
+-		if (rest.length !== 3 && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent."), json };
++		// `send --deferred` (QUEUED_STEER report) takes none.
++		if (flags.has("--deferred")) {
++			if (rest.length) return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, "Run omp-kit send --deferred --json alone; nothing was sent."), json };
++		} else if (rest.length !== 3 && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent."), json };
+ 	} else if ((!command.argument && rest.length) || (command.argument && rest.length > (command.maxArguments ?? (command.name === "help" ? 2 : 1)))) {
+ 		return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, `Run omp-kit help ${command.name}.`), json };
+ 	}
+@@ -3219,12 +3222,6 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
+ 			errors: [{ code: "HOME_UNAVAILABLE", message: "Send needs an absolute HOME",
+ 				remediation: "Run with an absolute HOME; nothing was sent." }], verification: "UNVERIFIED" };
+ 	}
+-	// The parser joins the three positionals; session and pane never contain
+-	// spaces, so the first two tokens delimit and the remainder is the message.
+-	const [session, pane, ...messageParts] = (request.argument ?? "").split(" ").filter(part => part !== "");
+-	if (!session || !pane || messageParts.length === 0) {
+-		return refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent.");
+-	}
+ 	const stateRoot = receiptStateRoot();
+ 	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
+ 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; nothing was sent.");
+@@ -3233,6 +3230,22 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
+ 		return refusal("INVALID_DROP_DIR", "The drop folder requires a canonical absolute path",
+ 			"Pass an absolute --drop-dir; nothing was sent.");
+ 	}
++	const dropDir = typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop");
++	// QUEUED_STEER (SENDFAST1, J-2026-10-30-04): the deferred journal proof and failure report for queued steers.
++	if (request.flags.has("--deferred")) {
++		const report = reportQueuedSteers({ dropDir });
++		const failures = report.steers.filter((row) => row.outcome === "STEER_LOST" || row.outcome === "STEER_NEVER_JOURNALED"
++			|| row.outcome === "RECORD_UNREADABLE");
++		return { code: failures.length ? 1 : 0, data: { overall: report.overall, status: "DEFERRED", steers: report.steers },
++			verification: "UNVERIFIED", errors: failures.map((row) => ({ code: row.outcome, message: row.detail,
++				remediation: row.drop_path ? `Relay the message manually; the full text is at ${row.drop_path}.` : "Inspect the deferred record named in the message." })) };
++	}
++	// The parser joins the three positionals; session and pane never contain
++	// spaces, so the first two tokens delimit and the remainder is the message.
++	const [session, pane, ...messageParts] = (request.argument ?? "").split(" ").filter(part => part !== "");
++	if (!session || !pane || messageParts.length === 0) {
++		return refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent.");
++	}
+ 	const reasonFlag = request.flags.get("--no-bead-reason");
+ 	const untilFlag = request.flags.get("--until-delivered");
+ 	let untilDeliveredMs: number | undefined;
+@@ -3241,7 +3254,6 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
+ 			"Pass --until-delivered <seconds>; nothing was sent.");
+ 		untilDeliveredMs = Number(untilFlag) * 1000;
+ 	}
+-	const dropDir = typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop");
+ 	const noBeadReason = typeof reasonFlag === "string" ? reasonFlag : undefined;
+ 	// SEND1 Tern route (rz5.125) + TERNADDR1 (ompkit-fixjo): a tern:<block> pane is a Tern seat; tmux is never consulted.
+ 	const route = routeSendTarget(pane);
+@@ -3260,6 +3272,8 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
+ 			marker: tern.marker, sends: tern.sends, drop_path: tern.drop_path, detail: tern.detail, session_file: tern.sessionFile,
+ 			offset: tern.offset, bead_ids: tern.bead_ids, no_bead_reason: tern.no_bead_reason };
+ 		if (tern.status === "OK") return { code: 0, data: { overall: "OK", ...data }, verification: "UNVERIFIED" };
++		// QUEUED_STEER: omp holds the text in its steering queue; exit 0, but never OK or a proof (`send --deferred` settles it).
++		if (tern.status === "QUEUED") return { code: 0, data: { overall: "QUEUED", ...data, deferred_path: tern.deferred_path ?? null }, verification: "UNVERIFIED" };
+ 		return { code: 1, data: { overall: tern.status, ...data }, verification: "UNVERIFIED",
+ 			errors: [{ code: tern.status, message: tern.detail,
+ 				remediation: tern.drop_path ? `Relay the message manually; the full text is at ${tern.drop_path}.` : "Retry the send; no drop file was written." }] };
+diff --git a/src/commands.ts b/src/commands.ts
+index fd9d02072a..4b9e822f6e 100644
+--- a/src/commands.ts
++++ b/src/commands.ts
+@@ -273,14 +273,16 @@ const serviceData: DataSchema = { type: "object", required: ["overall", "job"],
+ 	} } },
+ 	receipt: { type: "object" }, detail: { type: "string" }, text: { type: "string" },
+ } };
+-const sendData: DataSchema = { type: "object", required: ["overall", "session", "pane", "status"], properties: {
+-	overall: { enum: ["OK", "NOT_DELIVERED", "PENDING_CONSUME", "UNAVAILABLE", "UNVERIFIED"] },
++/** A send names session, pane and status; `send --deferred` reports queued steers (status DEFERRED, steers). */
++const sendData: DataSchema = { type: "object", required: ["overall", "status"], properties: {
++	overall: { enum: ["OK", "QUEUED", "NOT_DELIVERED", "PENDING_CONSUME", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
+ 	session: { type: "string" }, pane: { type: "string" },
+-	status: { enum: ["OK", "DELIVERED", "NOT_DELIVERED", "UNDELIVERED", "PENDING_SUBMIT", "PENDING_CONSUME"] },
++	status: { enum: ["OK", "QUEUED", "DELIVERED", "NOT_DELIVERED", "UNDELIVERED", "PENDING_SUBMIT", "PENDING_CONSUME", "DEFERRED"] },
+ 	marker: { type: ["string", "null"] }, sends: { type: ["number", "null"] },
+ 	drop_path: { type: ["string", "null"] }, detail: { type: "string" },
+ 	bead_ids: { type: "array", items: { type: "string" } }, no_bead_reason: { type: ["string", "null"] },
+ 	session_file: { type: ["string", "null"] }, offset: { type: ["number", "null"] }, tern_code: { type: "string" },
++	deferred_path: { type: ["string", "null"] }, steers: { type: "array", items: { type: "object" } },
+ } };
+ const shaData: DataSchema = { type: "object", required: ["overall", "sha", "hits"], properties: {
+ 	overall: { enum: ["OK", "NOT_FOUND"] },
+@@ -860,13 +862,14 @@ export const COMMANDS: readonly Command[] = [
+ 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
+ 		{ name: "run", description: "Execute one job now (what launchd runs); writes a receipt (omp-watch tests OMP, scratch-reaper applies scratch quarantine/deletion)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
+ 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
+-	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback; tern:<id> resolves a live Tern block from inspection at send time)", usage: "send SESSION PANE MESSAGE", flags: [
++	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback; tern:<id> resolves a live Tern block from inspection at send time; a busy Tern seat returns QUEUED once omp queues the steer, its journal proof deferred to send --deferred)", usage: "send SESSION PANE MESSAGE | send --deferred", flags: [
+ 		{ name: "--drop-dir", value: "PATH", description: "Drop folder for undelivered messages (default: state-root send-drop)" },
+ 		{ name: "--no-bead-reason", value: "TEXT", description: "Send a work dispatch that cites no bead id; the reason is recorded in the result" },
+ 		{ name: "--until-delivered", value: "SECONDS", description: "Bound in seconds for a busy-seat send (default 300 for Tern sends and dispatches, off for other tmux sends; 0 refuses immediately)" },
+ 		{ name: "--cwd", value: "PATH", description: "Absolute repository cwd the tern:<id> seat is bound to (default: the session's cwd or repo in fleet-watch.json)" },
+ 		{ name: "--tern-session", value: "NAME", description: "Tern session name or id holding the tern:<id> block (default: the session's ternSession in fleet-watch.json)" },
+ 		{ name: "--window-key", value: "EP", description: "Control endpoint of the Tern window holding the block, as opened with `tern --control EP` (default: the session's windowKey in fleet-watch.json; none is TERN_WINDOW_UNBOUND)" },
++		{ name: "--deferred", description: "Report queued steers: each is PROVEN_STEERED once journaled, QUEUED while waiting, or a failure (STEER_LOST, STEER_NEVER_JOURNALED) naming its drop copy; exit 1 on a failure" },
+ 	], example: "omp-kit send omp-test %54 \"status update\" --json", runnable: false, dataSchema: sendData },
+ 	{ name: "sha", description: "Resolve a commit sha across every fleet repo (kit, companion, ~/.claude, project repos) and report which repos hold it", usage: "sha SHA [--repo PATH]...", argument: "SHA", flags: [
+ 		{ name: "--repo", value: "PATH", repeatable: true, description: "Search exactly these repos instead of the discovered fleet set" },
+diff --git a/src/send.ts b/src/send.ts
+index b6c70944ed..291adc34c4 100644
+--- a/src/send.ts
++++ b/src/send.ts
+@@ -609,7 +609,8 @@ export function ternSendSeat(config: unknown, session: string, pane: string,
+ 
+ /** SEND1 Tern route (rz5.125) for the CLI: a malformed address and an uncited dispatch each refuse with zero io and no
+  * drop file; anything else is deliverToTernSeat (observe, identify, one admission, session-file proof). A window key
+- * admits by one native ctl turn; no key admits by `tern send BLOCK paste` + `keys Enter` (TERNADDR1, ompkit-fixjo). */
++ * admits by one native ctl turn; no key admits by `tern send BLOCK paste` + `keys Enter` (TERNADDR1, ompkit-fixjo).
++ * A steered message returns QUEUED_STEER on the seat's own queue receipt (J-2026-10-30-04); its proof is deferred. */
+ export async function proveTernCliSend(input: {
+ 	session: string;
+ 	pane: string;
+@@ -626,6 +627,7 @@ export async function proveTernCliSend(input: {
+ 	wait?: (ms: number) => Promise<void>;
+ 	io?: TernObserverIo;
+ 	composer?: (sessionFile: string) => ComposerVerdict;
++	steerReceipt?: (sessionFile: string, marker: string) => SteerReceipt | null;
+ }): Promise<TernDeliverResult & { bead_ids: string[]; no_bead_reason: string | null }> {
+ 	const refuse = (code: string, detail: string, bead_ids: string[] = [], no_bead_reason: string | null = null) =>
+ 		({ status: "REFUSED" as const, code, marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null, detail, bead_ids, no_bead_reason });
+@@ -659,7 +661,8 @@ export async function proveTernCliSend(input: {
+ 	}
+ 	const result = await deliverToTernSeat({ seat: { session, pane: input.pane, windowKey, cwd: targetCwd }, text: input.message,
+ 		dropDir: input.dropDir, io, untilDeliveredMs: input.untilDeliveredMs ?? TERN_TURN_BOUNDARY_WAIT_MS,
+-		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer, env });
++		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer, env,
++		acceptQueuedSteer: true, steerReceipt: input.steerReceipt });
+ 	return { ...result, bead_ids: beads.bead_ids, no_bead_reason: beads.no_bead_reason };
+ }
+ 
+@@ -751,6 +754,37 @@ export const TERN_STEER_BOUND_MS = 3_000;
+ export const TERN_STEER_COMPOSER_POLL_MS = 250;
+ const JOURNAL_REWRITE_REASONS: Record<string, true> = { JOURNAL_SHRANK: true, JOURNAL_REPLACED: true,
+ 	JOURNAL_PREFIX_CHANGED: true, JOURNAL_PREFIX_BEYOND_WINDOW: true };
++/** QUEUED_STEER: a queued steer still unjournaled this long after omp queued it is reported as a failure. */
++export const TERN_QUEUED_STEER_DEADLINE_MS = 30 * 60_000;
++/** Deferred-proof records sit beside the pending ledger, one per queued marker. */
++const QUEUED_STEER_SUFFIX = ".queued.json";
++
++/** A seat's QUEUED_STEER receipt (extensions/kit-composer-state.ts SteerReceiptRecord), validated. */
++export interface SteerReceipt {
++	path: string;
++	pid: number;
++	/** Epoch milliseconds omp's input hook saw the submit. */
++	at: number;
++	textSha256: string;
++}
++
++/**
++ * Read the receipt kit-composer-state writes when omp queues a kit send as a steer: keyed by
++ * sha1(realpath(session file))[:16] and marker, schema 1, naming this session file and marker. Anything else is null.
++ */
++export function readSteerReceipt(sessionFile: string, marker: string, opts: { dir?: string } = {}): SteerReceipt | null {
++	let real = sessionFile;
++	try { real = realpathSync(sessionFile); } catch { /* not on disk: the raw path is what the writer keyed */ }
++	const dir = opts.dir ?? join(homedir(), ".local", "state", "omp-kit", "steer-queue");
++	const path = join(dir, createHash("sha1").update(real).digest("hex").slice(0, 16), `${marker}.json`);
++	let rec: Record<string, unknown> | null;
++	try { rec = recordOf(JSON.parse(readFileSync(path, "utf8"))); } catch { return null; }
++	if (!rec || rec.schema !== 1 || rec.session_file !== real || rec.marker !== marker) return null;
++	const { pid, at, text_sha256: textSha256 } = rec;
++	if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 || typeof at !== "number" || !Number.isFinite(at)
++		|| typeof textSha256 !== "string" || textSha256.length !== 64) return null;
++	return { path, pid, at, textSha256 };
++}
+ /**
+  * Resolve the tern binary without hardcoding a home directory (AM58562-5):
+  * explicit `TERN_CTL_BIN` env override, else `$HOME/.local/bin/tern`.
+@@ -880,7 +914,8 @@ export function buildNativeSendTurn(block: string, payload: string): string | nu
+ 	].join("\n");
+ }
+ 
+-export type TernDeliverStatus = "OK" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
++/** QUEUED (QUEUED_STEER): omp queued the steer by its own receipt; the journal proof is deferred, never implied. */
++export type TernDeliverStatus = "OK" | "QUEUED" | "PENDING_CONSUME" | "NOT_DELIVERED" | "REFUSED";
+ export type TernQueueState = "QUEUED" | "DELIVERED" | "EXPIRED" | "PENDING_CONSUME" | "REFUSED";
+ /** Caller-declared seat posture; any stated bad value refuses with zero sends. */
+ export interface TernSendGate {
+@@ -900,6 +935,8 @@ export interface TernDeliverResult {
+ 	detail: string;
+ 	code: string;
+ 	queue_states?: readonly TernQueueState[];
++	/** QUEUED_STEER: the deferred-proof record reportQueuedSteers settles. */
++	deferred_path?: string;
+ }
+ 
+ /** ASCII whitespace as String.prototype.trim and the OMP sigil checks see it (tab, LF, VT, FF, CR, space). */
+@@ -1170,6 +1207,14 @@ export interface TernPendingRecord extends TernProofKey {
+ 	createdAt: string;
+ }
+ 
++/** QUEUED_STEER deferred-proof record: the attempt's proof key plus where to look and until when. */
++export interface QueuedSteerRecord extends TernPendingRecord {
++	sessionFile: string;
++	queuedAt: string;
++	deadlineAt: string;
++	dropPath: string;
++}
++
+ const TERN_PENDING_STRINGS = ["marker", "payloadSha256", "objective", "sessionId", "leafId", "prefixSha256",
+ 	"seatKey", "sessionSha", "textSha256", "createdAt"];
+ 
+@@ -1281,6 +1326,14 @@ export async function deliverToTernSeat(input: {
+ 	identify?: typeof identifyTernSeat;
+ 	/** Composer truth for paste admission (no window key); default reads the seat's kit-composer-state record. */
+ 	composer?: (sessionFile: string) => ComposerVerdict;
++	/**
++	 * QUEUED_STEER (SENDFAST1, J-2026-10-30-04): a steered message may return QUEUED once the seat's own receipt shows
++	 * omp queued it, instead of waiting for the journal entry its running tool call holds back. Callers that need the
++	 * journal proof before they return leave this off.
++	 */
++	acceptQueuedSteer?: boolean;
++	/** The seat's steer receipt for a marker; default reads kit-composer-state's record. */
++	steerReceipt?: (sessionFile: string, marker: string) => SteerReceipt | null;
+ }): Promise<TernDeliverResult> {
+ 	const observe = input.observe ?? observeTernSeat;
+ 	const identify = input.identify ?? identifyTernSeat;
+@@ -1437,7 +1490,8 @@ export async function deliverToTernSeat(input: {
+ 		pendingNames = [];
+ 	}
+ 	for (const name of pendingNames) {
+-		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
++		// A queued steer's deferred record is settled only by reportQueuedSteers, which reports its failures.
++		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json") || name.endsWith(QUEUED_STEER_SUFFIX)) continue;
+ 		const rec = readTernPending(join(pendingDir, name));
+ 		if (rec === null) continue;
+ 		if (rec.sessionId !== journal.sessionId) {
+@@ -1489,6 +1543,7 @@ export async function deliverToTernSeat(input: {
+ 		// F5: a failed or crashed dispatch does not prove zero native effects;
+ 		// the attempt stays pending and proof is still reconciled below.
+ 		let dispatched = false;
++		const dispatchedAt = Date.now();
+ 		if (pasteMode) {
+ 			// Paste has no atomic admission, so the seat's own composer record must
+ 			// prove an empty composer first; a running agent is fine (omp queues the
+@@ -1542,11 +1597,41 @@ export async function deliverToTernSeat(input: {
+ 		let last: TernProof = { status: "ABSENT", reason: "NOT_READ" };
+ 		const polls = Math.max(1, Math.ceil(deadlineMs / proofPollMs));
+ 		let readSize: number | null = null;
++		const acceptsQueuedSteer = steer && pasteMode && input.acceptQueuedSteer === true;
++		/**
++		 * QUEUED_STEER: the seat's receipt for this exact text (marker, payload hash), written by the seat's own omp
++		 * process after this paste, moves the attempt to a deferred record whose journal proof reportQueuedSteers settles.
++		 * Never OK and never a proof: a receipt that names another process, text or time is ignored.
++		 */
++		const queuedSteer = (): TernDeliverResult | null => {
++			if (!acceptsQueuedSteer || !dispatched) return null;
++			const receipt = (input.steerReceipt ?? readSteerReceipt)(sessionFile, marker);
++			if (receipt === null || receipt.textSha256 !== key.payloadSha256 || receipt.pid !== ob.foregroundPid
++				|| receipt.at < dispatchedAt) return null;
++			const deferredPath = resolve(join(pendingDir, `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.${marker}${QUEUED_STEER_SUFFIX}`));
++			const dropPath = dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text);
++			const deferred: QueuedSteerRecord = { ...attempt, sessionFile, queuedAt: new Date(receipt.at).toISOString(),
++				deadlineAt: new Date(receipt.at + TERN_QUEUED_STEER_DEADLINE_MS).toISOString(), dropPath };
++			if (!persistTernAttempt(deferredPath, deferred)) return null;
++			try { rmSync(pendingPath, { force: true }); } catch {}
++			try { rmSync(receipt.path, { force: true }); } catch {}
++			try {
++				appendFileSync(join(pendingDir, "ledger.jsonl"), JSON.stringify({ at: new Date().toISOString(), status: "QUEUED_STEER",
++					marker, seatKey, sessionId: journal.sessionId, offset: null }) + "\n");
++			} catch {}
++			return { status: "QUEUED", marker, sends: 1, sessionFile, offset: null, drop_path: dropPath,
++				detail: `queued by omp as a steer at ${deferred.queuedAt}${via}: its input hook saw this exact text while the seat worked and its queue then held it. `
++					+ `The journal entry follows at the seat's next tool boundary, so delivery is not yet confirmed; deferred record ${deferredPath}, `
++					+ `checked by \`omp-kit send --deferred\` (a steer still unjournaled at ${deferred.deadlineAt} is reported as a failure)`,
++				code: "QUEUED_STEER", deferred_path: deferredPath };
++		};
+ 		for (let poll = 0; ; poll++) {
+ 			// A journal that has not grown since the last read holds no new entry; a failed stat always re-reads.
+ 			let size: number | null = null;
+ 			try { size = statSync(sessionFile).size; } catch {}
+ 			if (poll > 0 && size !== null && size === readSize) {
++				const queuedNow = queuedSteer();
++				if (queuedNow !== null) return queuedNow;
+ 				if (poll + 1 >= polls) break;
+ 				await wait(proofPollMs);
+ 				continue;
+@@ -1562,6 +1647,8 @@ export async function deliverToTernSeat(input: {
+ 					code: last.steering ? "PROVEN_STEERED" : "PROVEN",
+ 					...(queued ? { queue_states: ["QUEUED", "DELIVERED"] as const } : {}) };
+ 			}
++			const queuedNow = queuedSteer();
++			if (queuedNow !== null) return queuedNow;
+ 			if (poll + 1 >= polls) break;
+ 			await wait(proofPollMs);
+ 		}
+@@ -1591,3 +1678,80 @@ export function submitQueuedToTernSeat(_seat: TernSeatBinding): TernDeliverResul
+ 	return { status: "REFUSED", marker: "", sends: 0, sessionFile: null, offset: null, drop_path: null,
+ 		detail: `submitQueued disabled pending native queue admission qualification (F6); zero sends`, code: "SUBMITQUEUED_DISABLED" };
+ }
++
++/** A deferred steer's state: still QUEUED, journaled late (PROVEN_STEERED or PROVEN), or a failure. */
++export type QueuedSteerOutcome = "QUEUED" | "PROVEN_STEERED" | "PROVEN" | "STEER_LOST" | "STEER_NEVER_JOURNALED" | "RECORD_UNREADABLE";
++export interface QueuedSteerRow {
++	marker: string;
++	seat_key: string;
++	session_file: string | null;
++	queued_at: string | null;
++	deadline_at: string | null;
++	outcome: QueuedSteerOutcome;
++	offset: number | null;
++	drop_path: string | null;
++	detail: string;
++}
++export interface QueuedSteerReport {
++	/** FINDINGS: a failure is listed; QUEUED: some still wait for their journal entry; OK: none open. */
++	overall: "OK" | "QUEUED" | "FINDINGS";
++	steers: QueuedSteerRow[];
++}
++const QUEUED_STEER_FAILURES: Record<string, true> = { STEER_LOST: true, STEER_NEVER_JOURNALED: true, RECORD_UNREADABLE: true };
++
++function readQueuedSteer(path: string): QueuedSteerRecord | null {
++	const rec = readTernPending(path) as (TernPendingRecord & Record<string, unknown>) | null;
++	if (rec === null) return null;
++	for (const field of ["sessionFile", "queuedAt", "deadlineAt", "dropPath"]) if (typeof rec[field] !== "string") return null;
++	if (!Number.isFinite(Date.parse(rec.queuedAt as string)) || !Number.isFinite(Date.parse(rec.deadlineAt as string))) return null;
++	return rec as unknown as QueuedSteerRecord;
++}
++
++/**
++ * The deferred proof and failure report for QUEUED_STEER sends. Each record is proven against its seat's session file
++ * with the attempt's own key: a journal entry settles it as PROVEN_STEERED (or PROVEN) in the ledger; a rewritten or
++ * replaced journal is STEER_LOST; a steer still unjournaled at its deadline is STEER_NEVER_JOURNALED. Failures name the
++ * drop copy to relay by hand; nothing is ever resent. Still-waiting records stay QUEUED; unreadable ones are listed and kept.
++ */
++export function reportQueuedSteers(input: { dropDir: string; io?: TernObserverIo; now?: () => number }): QueuedSteerReport {
++	const io = input.io ?? defaultTernIo();
++	const now = input.now ?? Date.now;
++	const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
++	let names: string[] = [];
++	try { names = readdirSync(pendingDir).filter((name) => name.endsWith(QUEUED_STEER_SUFFIX)).sort(); } catch { names = []; }
++	const steers: QueuedSteerRow[] = [];
++	for (const name of names) {
++		const path = join(pendingDir, name);
++		const rec = readQueuedSteer(path);
++		if (rec === null) {
++			steers.push({ marker: "", seat_key: name, session_file: null, queued_at: null, deadline_at: null, outcome: "RECORD_UNREADABLE",
++				offset: null, drop_path: null, detail: `deferred record ${path} is unreadable; kept for inspection` });
++			continue;
++		}
++		const row = { marker: rec.marker, seat_key: rec.seatKey, session_file: rec.sessionFile, queued_at: rec.queuedAt,
++			deadline_at: rec.deadlineAt, drop_path: rec.dropPath };
++		const view = readSessionView(io, rec.sessionFile, { start: rec.prefixStart, cursor: rec.cursorBytes });
++		const proof: TernProof = view === null ? { status: "UNCERTAIN", reason: "SESSION_FILE_UNREADABLE" } : proveTernEntry(view, rec);
++		let outcome: QueuedSteerOutcome = "QUEUED";
++		let offset: number | null = null;
++		let detail: string;
++		if (proof.status === "PROVEN") {
++			outcome = proof.steering ? "PROVEN_STEERED" : "PROVEN";
++			offset = proof.offset;
++			detail = `journaled at offset ${proof.offset} after it was queued`;
++		} else if (proof.status === "UNCERTAIN" && JOURNAL_REWRITE_REASONS[proof.reason] === true) {
++			outcome = "STEER_LOST";
++			detail = `the seat's journal was rewritten or replaced (${proof.reason}) before the steer was journaled; relay ${rec.dropPath} by hand`;
++		} else if (now() >= Date.parse(rec.deadlineAt)) {
++			outcome = "STEER_NEVER_JOURNALED";
++			detail = `queued at ${rec.queuedAt} and still not journaled at its deadline ${rec.deadlineAt} (${proof.status} ${proof.reason}); relay ${rec.dropPath} by hand`;
++		} else {
++			detail = `queued at ${rec.queuedAt}; waiting for its journal entry until ${rec.deadlineAt} (${proof.status} ${proof.reason})`;
++		}
++		if (outcome !== "QUEUED") settleTernPending(pendingDir, name, rec, outcome, offset);
++		steers.push({ ...row, outcome, offset, detail });
++	}
++	const overall = steers.some((row) => QUEUED_STEER_FAILURES[row.outcome] === true) ? "FINDINGS"
++		: steers.some((row) => row.outcome === "QUEUED") ? "QUEUED" : "OK";
++	return { overall, steers };
++}
+diff --git a/tests/cli/send.test.ts b/tests/cli/send.test.ts
+index de84c572a2..b5681ff35b 100644
+--- a/tests/cli/send.test.ts
++++ b/tests/cli/send.test.ts
+@@ -2,8 +2,8 @@ import { afterAll, expect, test } from "bun:test";
+ import { spawnSync } from "node:child_process";
+ import { createHash } from "node:crypto";
+ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+-import { dirname, join, resolve } from "node:path";
+-import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec } from "../../src/send.ts";
++import { basename, dirname, join, resolve } from "node:path";
++import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, reportQueuedSteers, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_QUEUED_STEER_DEADLINE_MS, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec, type SteerReceipt } from "../../src/send.ts";
+ import { classifyTernObservation, parseSessionJournal } from "../../src/plane-tern.ts";
+ import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
+ import { ownedTmp } from "../../src/kitlib/tmp.ts";
+@@ -1272,4 +1272,123 @@ test("SENDFAST1.proof: a session path that cannot be stat'ed is re-read every ti
+ 	const { r, ms } = await proveLateEntry(join(scratch, "never-on-disk", "session.jsonl"), false, 50);
+ 	expect(r).toMatchObject({ status: "OK", code: "PROVEN", sends: 1 });
+ 	expect(ms).toBeLessThan(300);
+-}, 2_000);
+\ No newline at end of file
++}, 2_000);
++
++// ---- SENDFAST1 QUEUED_STEER (ompkit-fp72.135.3.84, J-2026-10-30-04): a busy seat's queued steer returns fast, never as proof ----
++
++interface HeldFake { journal: string; held: string; pastes: number; enters: number; receiptReads: number; io: TernObserverIo; release: () => void }
++interface HeldSteer {
++	fake: HeldFake;
++	steerReceipt: (sessionFile: string, marker: string) => SteerReceipt | null;
++	busy: () => Promise<TernObservation>;
++	receiptFile: string;
++}
++/** A busy keyless seat in a long tool call: Enter submits the paste into omp's steering queue and nothing is journaled
++ * until `release()` (the tool call ends). `receipt` is what the seat's kit-composer-state would write. */
++function heldSteerFake(receipt: "omp" | "none" | ((held: string, marker: string) => SteerReceipt | null) = "omp"): HeldSteer {
++	const fake: HeldFake = { journal: inFlightJournal, held: "", pastes: 0, enters: 0, receiptReads: 0, io: undefined as unknown as TernObserverIo,
++		release: () => { fake.journal += userEntry("steer-1", "a3", fake.held.trim(), { steering: true }); } };
++	let composer = "";
++	fake.io = {
++		run: (argv: string[]) => {
++			const send = argv.indexOf("send");
++			if (send >= 0 && argv[send + 2] === "paste") { fake.pastes++; composer += argv[send + 3] ?? ""; }
++			if (send >= 0 && argv[send + 2] === "keys") { fake.enters++; fake.held = composer; composer = ""; }
++			return { code: 0, out: "" };
++		},
++		readSessionFile: () => fake.journal,
++		wait: noWait,
++	};
++	const receiptFile = join(scratch, `steer-receipt-${Math.random().toString(36).slice(2)}.json`);
++	const steerReceipt = (_sessionFile: string, marker: string): SteerReceipt | null => {
++		fake.receiptReads++;
++		if (!fake.held.includes(`[${marker}]`)) return null;
++		if (typeof receipt === "function") return receipt(fake.held, marker);
++		if (receipt === "none") return null;
++		writeFileSync(receiptFile, "{}");
++		return { path: receiptFile, pid: ternRuntimeBinding.foregroundPid, at: Date.now(), textSha256: sha(fake.held.trim()) };
++	};
++	const busy = async (): Promise<TernObservation> => ({ ...ternIdle, state: "BUSY", working: true, oracleBusy: null,
++		sessionSha: sha(fake.journal), sessionCursorBytes: Buffer.byteLength(fake.journal) });
++	return { fake, steerReceipt, busy, receiptFile };
++}
++function deliverHeld(h: HeldSteer, dropDir: string, over: Partial<Parameters<typeof deliverToTernSeat>[0]> = {}) {
++	return deliverToTernSeat({ seat: keylessSeat, text: "status update", dropDir, io: h.fake.io, observe: h.busy,
++		identify: async () => ternIdentified, untilDeliveredMs: TERN_TURN_BOUNDARY_WAIT_MS, pollMs: 10, deadlineMs: 200, wait: noWait,
++		composer: () => ({ state: "EMPTY" }), acceptQueuedSteer: true, steerReceipt: h.steerReceipt, ...over });
++}
++function pendingFiles(dropDir: string): string[] {
++	const dir = join(dropDir, "..", "tern-pending");
++	return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".json")) : [];
++}
++
++test("SENDFAST1.queued: a busy seat whose omp queued the steer returns QUEUED_STEER at once, with a deferred record and a drop copy", async () => {
++	const h = heldSteerFake();
++	const dropDir = ternDropDir();
++	const started = performance.now();
++	const r = await deliverHeld(h, dropDir);
++	expect(performance.now() - started).toBeLessThan(1_000);
++	expect(r).toMatchObject({ status: "QUEUED", code: "QUEUED_STEER", sends: 1, offset: null });
++	expect([h.fake.pastes, h.fake.enters, h.fake.receiptReads]).toEqual([1, 1, 1]);
++	expect(readFileSync(r.drop_path!, "utf8")).toContain("status update");
++	expect(pendingFiles(dropDir)).toEqual([basename(r.deferred_path!)]);
++	expect(r.deferred_path!.endsWith(`${r.marker}.queued.json`)).toBe(true);
++	expect(existsSync(h.receiptFile)).toBe(false);
++	// QUEUED never satisfies a PROVEN check: not OK, no PROVEN code, no PROVEN anywhere in what the caller sees.
++	expect(r.status).not.toBe("OK");
++	expect(JSON.stringify(r)).not.toContain("PROVEN");
++	expect(reportQueuedSteers({ dropDir, io: h.fake.io })).toMatchObject({ overall: "QUEUED", steers: [{ marker: r.marker, outcome: "QUEUED" }] });
++});
++
++test("SENDFAST1.queued planted: a paste that never reached omp's queue, or a receipt for other text, process or time, never returns QUEUED_STEER", async () => {
++	const cases: Array<[string, Parameters<typeof heldSteerFake>[0]]> = [
++		["no receipt", "none"],
++		["other text", (held) => ({ path: join(scratch, "x.json"), pid: ternRuntimeBinding.foregroundPid, at: Date.now(), textSha256: sha(`${held.trim()} `) })],
++		["other process", (held) => ({ path: join(scratch, "x.json"), pid: ternRuntimeBinding.foregroundPid + 1, at: Date.now(), textSha256: sha(held.trim()) })],
++		["before the paste", (held) => ({ path: join(scratch, "x.json"), pid: ternRuntimeBinding.foregroundPid, at: Date.now() - 60_000, textSha256: sha(held.trim()) })],
++	];
++	for (const [label, receipt] of cases) {
++		const h = heldSteerFake(receipt);
++		const dropDir = ternDropDir();
++		const r = await deliverHeld(h, dropDir);
++		expect([label, r.status, r.code]).toEqual([label, "PENDING_CONSUME", "PROOF_TIMEOUT"]);
++		expect([label, pendingFiles(dropDir).some((name) => name.endsWith(".queued.json"))]).toEqual([label, false]);
++	}
++	// Control: a caller that needs the journal proof (acceptQueuedSteer off, as intake delivery) ignores the receipt.
++	const h = heldSteerFake();
++	expect(await deliverHeld(h, ternDropDir(), { acceptQueuedSteer: false })).toMatchObject({ status: "PENDING_CONSUME", code: "PROOF_TIMEOUT" });
++	expect(h.fake.receiptReads).toBe(0);
++});
++
++test("SENDFAST1.queued deferred proof: the later journal entry is recorded PROVEN_STEERED; the next send is not suppressed", async () => {
++	const h = heldSteerFake();
++	const dropDir = ternDropDir();
++	const first = await deliverHeld(h, dropDir);
++	expect(first.code).toBe("QUEUED_STEER");
++	// A queued steer never suppresses the next send the way an unproven attempt does.
++	const next = heldSteerFake();
++	expect((await deliverHeld(next, dropDir)).code).toBe("QUEUED_STEER");
++	h.fake.release();
++	const report = reportQueuedSteers({ dropDir, io: h.fake.io });
++	expect(report.steers.find((row) => row.marker === first.marker)).toMatchObject({ outcome: "PROVEN_STEERED", offset: Buffer.byteLength(inFlightJournal) });
++	expect(pendingFiles(dropDir).some((name) => name.includes(first.marker))).toBe(false);
++	const ledger = readFileSync(join(dropDir, "..", "tern-pending", "ledger.jsonl"), "utf8");
++	expect(ledger).toContain(`"status":"QUEUED_STEER","marker":"${first.marker}"`);
++	expect(ledger).toContain(`"status":"PROVEN_STEERED","marker":"${first.marker}"`);
++});
++
++test("SENDFAST1.queued failure report: a steer unjournaled at its deadline is STEER_NEVER_JOURNALED, a replaced journal is STEER_LOST", async () => {
++	const late = heldSteerFake();
++	const lateDrop = ternDropDir();
++	const queued = await deliverHeld(late, lateDrop);
++	expect(reportQueuedSteers({ dropDir: lateDrop, io: late.fake.io, now: () => Date.now() + TERN_QUEUED_STEER_DEADLINE_MS - 60_000 }).overall).toBe("QUEUED");
++	const failed = reportQueuedSteers({ dropDir: lateDrop, io: late.fake.io, now: () => Date.now() + TERN_QUEUED_STEER_DEADLINE_MS + 1 });
++	expect(failed).toMatchObject({ overall: "FINDINGS", steers: [{ marker: queued.marker, outcome: "STEER_NEVER_JOURNALED", drop_path: queued.drop_path }] });
++	expect(failed.steers[0]!.detail).toContain(queued.drop_path!);
++	expect(pendingFiles(lateDrop)).toEqual([]);
++	const lost = heldSteerFake();
++	const lostDrop = ternDropDir();
++	await deliverHeld(lost, lostDrop);
++	lost.fake.journal = HEADER.replace(`"s1"`, `"s2"`) + assistantEntry("m1", null);
++	expect(reportQueuedSteers({ dropDir: lostDrop, io: lost.fake.io })).toMatchObject({ overall: "FINDINGS", steers: [{ outcome: "STEER_LOST" }] });
++});
+\ No newline at end of file
