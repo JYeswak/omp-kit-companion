@@ -1747,10 +1747,13 @@ const BEAD_LINT_GATES: Record<string, { script: string; env: string }> = {
 	update: { script: "br-update-lint.py", env: "BR_UPDATE" },
 };
 const BEAD_LINT_HINT = "Fix the named checks: the description carries `WHAT:` and `WHY:` lines (a bug also needs `## Steps to Reproduce`, an epic `## Success Criteria`); "
-	+ "acceptance is `- [ ]` checkboxes with at least one planted negative (plant/refuse/reject/mutant); at least one label. "
+	+ "acceptance is `- [ ]` boxes omp-kit verify can replay, with at least one planted negative (plant/refuse/reject/mutant); at least one label. "
+	+ "Each box: one scope letter, one phase (build, landed, live or after), then the backticked replay command verify runs in an exact export, "
+	+ "immediately followed by -> and the expected outcome (rc N, N pass 0 fail, prints <text> or contains <text>); quote an obligation's own commands with single quotes. "
 	+ "Template: write a file whose text has a `WHAT: <the change>` line and a `WHY: <the measured reason>` line, then "
 	+ "br create \"<title>\" -t task -l <label> --description-file <that file> "
-	+ "--acceptance \"- [ ] AC1: <positive behavior>; planted negative: <bad input> is refused\".";
+	+ "--acceptance \"$(cat <<'EOF'\n- [ ] [a] [build] <positive behavior>; planted negative: <bad input> is refused. `<replay command>` -> 0 fail\nEOF\n)\" "
+	+ "(a quoted heredoc keeps the backticks intact through the shell).";
 
 export interface BeadLintDeps {
 	exec: FlywheelExec;
