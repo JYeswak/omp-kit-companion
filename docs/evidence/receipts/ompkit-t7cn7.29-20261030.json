@@ -1,0 +1,75 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_3daac14318bae33ddf07ae4759c4dd73b483fad19da14973f1cc09be7ebeb542",
+ "limitations": [
+  "Scoped source behavior only; complete CLI candidate run RED3209/21/82 retained, not a final global PASS; no publication or installed qualification."
+ ],
+ "operation": "VERIFYENV1-exact-runtime-and-classification",
+ "parameters": {
+  "bead": "ompkit-t7cn7.29"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "final_files": {
+   "changelog.d/ompkit-t7cn7.29.md": "3bfe15b44c84aac9ad7123100aa788cfa3f51023bbdcda52394bb66add166cb6",
+   "src/verify.ts": "756653e2703cf98ea3d34aa5bb4c69c7caabb8c2b8e39efed168f0971eefee88",
+   "tests/cli/verify.test.ts": "7ca90fec8ca3add771d399ea929ec4abf69fb3e551eef91db4ab7685d59f15f4"
+  },
+  "final_history_free_export": {
+   "git_initialized_without_commits": true,
+   "literal_acceptance_a_rc": 0,
+   "real_tracker_summary": "1 pass 0 fail 9 expect; environment preserves status/acceptance and actual Node AssertionError remains REWORK",
+   "runtime_summary": "4 pass 0 fail 18 expect",
+   "verifier_rc": 0,
+   "verifier_summary": "38 pass 0 fail 196 expect"
+  },
+  "final_parent": "78c03afc862c9b9aa7184e3165665cdcf3c6522f",
+  "global_verification": "RED full suite remains RED; prior candidate3209pass21skip82fail is not reclassified as full-suite success.",
+  "initial_candidate": {
+   "after": {
+    "actual_assertion": "REWORK; AssertionError log retained",
+    "final_regression": "1 pass 0 fail 9 expect in history-free export",
+    "invalid_OMP_BIN": "ENVIRONMENT false; needs-director; no status or acceptance mutation",
+    "original_runtime": "4 pass 0 fail 18 expect",
+    "verifier_file": "38 pass 0 fail 196 expect"
+   },
+   "base": "89ed8676d096270f7eb010b2c68f2aec39df2caf",
+   "before": {
+    "direct_runtime": "4 pass 0 fail 18 expect",
+    "invalid_OMP_BIN": "DRY_RUN false, proposed REWORK"
+   },
+   "files": {
+    "changelog.d/ompkit-t7cn7.29.md": "3bfe15b44c84aac9ad7123100aa788cfa3f51023bbdcda52394bb66add166cb6",
+    "src/verify.ts": "51c8b3308285010e7484b4015e702368e5a579856f1e6d7882c1888dc377f663",
+    "tests/cli/verify.test.ts": "7ca90fec8ca3add771d399ea929ec4abf69fb3e551eef91db4ab7685d59f15f4"
+   },
+   "full_cli_suite": {
+    "complete_capture": true,
+    "elapsed_s": 1548.49,
+    "expect": 27561,
+    "fail": 82,
+    "pass": 3209,
+    "rc": 1,
+    "skip": 21
+   },
+   "limits": [
+    "Full CLI suite RED; no global acceptance, publication or installed claim.",
+    "First clean verifier run had three 5s deadline failures; unchanged HEAD control37/0 and subsequent unchanged-budget candidate38/0; no budget raised.",
+    "Initial OMP_LAUNCHER negative ineffective and discarded; recognized OMP_BIN negative used.",
+    "Historical environment loss not reproduced on current runtime; linked environment preservation demonstrated, not rewritten."
+   ],
+   "original_export": "10df7cac84cc2aaac11a3e71aa928dacc4b49880",
+   "private_index_members": {
+    "fragments": 0,
+    "imports": 0,
+    "kitlib": 0,
+    "pysafe": 0,
+    "readme": 0,
+    "regexploit": 0,
+    "sources": 0,
+    "tempsafe": 0
+   }
+  }
+ }
+}

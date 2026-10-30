@@ -544,6 +544,37 @@ test("VERIFYACTOR1 [a]: failing probe REWORK carries the reviewer identity, neve
 	for (const e of afterEvents.slice(0, afterEvents.length - beforeEvents.length)) expect(e.actor).toBe(REVIEWER);
 });
 
+test("VERIFYENV1: missing linked OMP identity preserves review state and acceptance; an assertion failure still becomes REWORK", async () => {
+	const { dir: cdir, sha } = await repo("verifyenv-runtime");
+	const runtimeTest = join(import.meta.dir, "kit-flywheel-guard-runtime.test.ts").replaceAll("'", "'\\''");
+	const t = await tracker("verifyenv-t");
+	const id = await createBead(t, "linked runtime environment");
+	const ac = "- [ ] [a] [build] `bun test '" + runtimeTest + "' -t 'linked OMP plugin'` -> 1 pass 0 fail";
+	await shapeBead(t, id, ac);
+	const before = await row(t, id);
+	const res = await verifyBead({
+		bead: id, exportSha: sha, repo: cdir, actor: "Peer",
+		env: { ...trackerEnv(t), OMP_BIN: join(base, "missing-omp-launcher") },
+	});
+	expect(res.code).toBe("ENVIRONMENT");
+	expect(res.ok).toBe(false);
+	expect(res.log).toContain("OMP_BIN launcher cannot be resolved");
+	const after = await row(t, id);
+	expect(after.status).toBe(before.status);
+	expect(after.acceptance_criteria).toBe(before.acceptance_criteria);
+	expect(after.labels).toContain("needs-director");
+	// A broken ambient override alone cannot turn an unrelated product failure into an environment refusal.
+	const broken = await createBead(t, "actual assertion failure");
+	await shapeBead(t, broken, "- [ ] [a] [build] `bun -e 'import { strict as assert } from \"node:assert\"; assert.equal(2 + 2, 5)'` -> prints PASS");
+	const failed = await verifyBead({
+		bead: broken, exportSha: sha, repo: cdir, actor: "Peer",
+		env: { ...trackerEnv(t), OMP_BIN: join(base, "missing-omp-launcher") },
+	});
+	expect(failed.code).toBe("REWORK");
+	expect((await row(t, broken)).status).toBe("rework");
+	expect(failed.log).toContain("AssertionError");
+}, 120_000);
+
 test("VERIFYACTOR1 [a]: explicit-author refusal and dry-run leave fixture state and audit untouched", async () => {
 	const { dir: cdir, sha } = await repo("actoruntouched");
 	const t = await tracker("actoruntouched-t");

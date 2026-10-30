@@ -32,6 +32,7 @@ import { run } from "./kitlib/run.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { preflightBead } from "./preflight.ts";
 import { installReadonlyBr, resolveRealBr } from "./kitlib/readonly-br.ts";
+import { resolveOmpIdentity } from "./paths.ts";
 
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
 const CMD = /`([^`]+)`/;
@@ -59,7 +60,7 @@ export interface Box { index: number; item: number; letter: string | null; check
 export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; rc: number | null; pass: boolean | null; detail: string }
 export interface VerifyResult {
 	ok: boolean;
-	code: "CLOSED" | "REWORK" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING";
+	code: "CLOSED" | "REWORK" | "ENVIRONMENT" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING";
 	bead: string;
 	export: string;
 	replays: BoxReplay[];
@@ -160,6 +161,22 @@ function childExcerpt(rc: number | null, timedOut: boolean, out: string): string
 	return `; child rc ${rc}${timedOut ? " TIMEOUT" : ""} ${total} chars: ${head}${omitted > 0 ? `...[${omitted} chars omitted]...${tail}` : tail}`;
 }
 
+/** Require both the child's diagnostic and an independently invalid identity; arbitrary ENOENT is a product failure. */
+function ompEnvironmentFailure(out: string, env: Record<string, string>): string | null {
+	const keys = ["OMP_PATH", "OMP_BIN", "OMP", "OMP_SRC"];
+	if (!out.includes("omp executable not found on PATH") && !keys.some(key => env[key] && out.includes(`${key} `))) return null;
+	try {
+		resolveOmpIdentity(env);
+	} catch (error) {
+		if (!(error instanceof Error)) return null;
+		const message = error.message;
+		const identityDiagnostic = message === "omp executable not found on PATH"
+			|| keys.some(key => env[key] && message.startsWith(`${key} `));
+		if (identityDiagnostic && out.includes(message)) return message;
+	}
+	return null;
+}
+
 /** `laneParent` overrides LANE_PARENT (a tracker without the omp-kit lane, such as a fixture). */
 export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; laneParent?: string }
 
@@ -216,6 +233,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	mkdirSync(exportTmp, { recursive: true });
 	log.push(`exported ${input.exportSha} to ${exportDir}`);
 	const replays: BoxReplay[] = [];
+	const environmentFailures: string[] = [];
 	for (const box of replayable) {
 		if (box.phase === "live" || box.phase === "after") {
 			replays.push({ index: box.index, letter: box.letter, command: null, expected: null, rc: null, pass: null, detail: `pending: ${box.phase} phase prerequisite unmet in export replay; not executed` });
@@ -228,6 +246,14 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const r = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
 		const out = text(r.stdout) + text(r.stderr);
 		const v = judge(expected, r.rc, out);
+		const environment = !v.pass && r.rc !== null && r.rc !== 0 ? ompEnvironmentFailure(out, replayEnv) : null;
+		if (environment !== null) {
+			environmentFailures.push(`${tag(box)} ${environment}`);
+			const detail = `environment prerequisite unmet: ${environment}${childExcerpt(r.rc, r.timed_out, out)}`;
+			replays.push({ index: box.index, letter: box.letter, command, expected, rc: r.rc, pass: null, detail });
+			log.push(`${tag(box)} ENVIRONMENT ${command}: ${detail}; needs-director`);
+			continue;
+		}
 		const excerpt = v.pass ? "" : childExcerpt(r.rc, r.timed_out, out);
 		replays.push({ index: box.index, letter: box.letter, command, expected, rc: r.rc, pass: v.pass, detail: v.detail + excerpt });
 		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail}${excerpt} (${Date.now() - started} ms)${r.timed_out ? " TIMEOUT" : ""}`);
@@ -238,6 +264,16 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		acts.push(["br", "update", input.bead, "--status", "rework", "--transition-comment", comment, "--actor", input.actor]);
 		if (!input.dryRun) for (const a of acts) await run(a, { cwd: input.repo, deadline_s: 60, env });
 		return { ok: false, code: input.dryRun ? "DRY_RUN" : "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
+	}
+	if (environmentFailures.length > 0) {
+		const comment = `ENVIRONMENT ${input.bead}: ${environmentFailures.join("; ")}\n${log.join("\n")}`;
+		acts.push(["br", "update", input.bead, "--add-label", "needs-director", "--actor", input.actor]);
+		acts.push(["br", "comments", "add", input.bead, "--actor", input.actor, "-m", comment]);
+		if (!input.dryRun) {
+			const done = await executeActs(acts, input.repo, env);
+			if (done.failure !== null) log.push(done.failure);
+		}
+		return { ok: false, code: "ENVIRONMENT", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts };
 	}
 	const ran = replays.filter(r => r.pass === true);
 	if (ran.length === 0) {
