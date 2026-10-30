@@ -122,10 +122,13 @@ function commandEnvironment(cwd: string, holds: unknown, options: CommandOptions
 	return env;
 }
 
+/** One land command's own deadline (command() below). A test's cap never cuts it off first. */
+const LAND_COMMAND_DEADLINE_MS = 30_000;
+
 function command(cwd: string, args: string[], holds: unknown, options: CommandOptions) {
 	const env = commandEnvironment(cwd, holds, options);
 	const result = kitlibRunSync(["bun", cliPath, options.subcommand ?? "land", ...args, "--json"], {
-		cwd, env: stringEnvironment(env), deadline_s: (options.timeoutMs ?? 30_000) / 1000,
+		cwd, env: stringEnvironment(env), deadline_s: (options.timeoutMs ?? LAND_COMMAND_DEADLINE_MS) / 1000,
 	});
 	const decoder = new TextDecoder();
 	const stdout = decoder.decode(result.stdout);
@@ -162,8 +165,11 @@ function spawnLoad(): { load1: number; ncpu: number; factor: number } {
 // The same rule bounds a whole test: bun's 5 s per-test default is the quiet-machine figure, and a
 // test making two or three land runs (each a bun CLI plus a full-suite judge, 1.8-2.3 s at load 19)
 // ran 5.0-6.5 s at load 22 on 32 cores and was cut off with no assertion failed. The default is scaled
-// by the load factor at module load; tests carrying their own explicit cap keep it.
-setDefaultTimeout(Math.round(5_000 * spawnLoad().factor));
+// by the load factor at module load; tests carrying their own explicit cap keep it. It is never below
+// one land command's own deadline: in the 2026-10-30 15:52Z pre-push gate (4 bun workers, load 13-15)
+// two one-run tests that take 4.1 s alone were killed by a 10.4 s per-test cap (status -9/-15, empty
+// stdout), before the land command's 30 s deadline could report anything.
+setDefaultTimeout(Math.max(Math.round(5_000 * spawnLoad().factor), LAND_COMMAND_DEADLINE_MS));
 
 function git(cwd: string, args: string[], planted = false): string {
 	const { load1, ncpu, factor } = spawnLoad();
