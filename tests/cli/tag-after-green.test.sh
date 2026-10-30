@@ -157,7 +157,7 @@ tag_verdict_cases() {
 	tag_git clone "$TMP/tag-origin.git" "$TMP/tag-work" >/dev/null 2>&1 || return 1
 	work="$TMP/tag-work"
 	mkdir -p "$work/scripts" "$work/.github" "$work/tests/cli" "$work/var/agent-tmp"
-	for file in full-suite-verdict.sh full-suite-verdict-store.py fresh-gate.sh suite-metrics.py kitlib_run.py pysafe.py kitlib-tmp.sh test-budget.ts; do
+	for file in full-suite-verdict.sh full-suite-verdict-store.py fresh-gate.sh suite-metrics.py suite-hermetic-env.sh kitlib_run.py kitlib_tmp.py pysafe.py kitlib-tmp.sh test-budget.ts; do
 		cp "$SOURCE/$file" "$work/scripts/$file" || return 1
 	done
 	cp "$SOURCE/../.github/test-budget.json" "$work/.github/test-budget.json" || return 1
@@ -196,7 +196,10 @@ path.write_text(json.dumps(entry) + "\n")
 PYEOF
 	out=$(cd "$work" && printf 'refs/tags/v-test %s refs/tags/v-test %s\n' "$sha" 0000000000000000000000000000000000000000 | sh "$SOURCE/pre-push-gate.sh" origin 2>&1)
 	rc=$?
-	if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qF 'no reusable full-suite verdict'; then
+	if [ "$rc" != 0 ] \
+		&& printf '%s\n' "$out" | grep -qF 'pre-push-gate: REFUSED new tag v-test:' \
+		&& ! printf '%s\n' "$out" | grep -qF 'VERDICT REUSED PASS' \
+		&& ! printf '%s\n' "$out" | grep -qF 'running the complete suite'; then
 		pass=$((pass + 1))
 	else
 		fail=$((fail + 1)); printf 'FAIL truncated-v3-tag: rc=%s out<<<%s>>>\n' "$rc" "$out"
