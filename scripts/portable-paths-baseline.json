@@ -1,0 +1,26 @@
+{
+  "about": "Pre-existing portable-path findings by shipped path; this ratchet only shrinks.",
+  "counts": {
+    "extensions/cass-search.ts": 1,
+    "extensions/dcg-tool-bridge.ts": 1,
+    "extensions/ee-ambient-session-start.ts": 1,
+    "extensions/ee-failure-journal.ts": 1,
+    "extensions/kit-flywheel-guard.ts": 2,
+    "extensions/kit-mail-wake.ts": 1,
+    "extensions/kit-upgrade-notice.ts": 2,
+    "extensions/rch-lane-bind-bridge.ts": 1,
+    "extensions/rch-mutator.ts": 1,
+    "extensions/skill-topology-session-start.ts": 2,
+    "extensions/slb-guard-fail-closed.ts": 1,
+    "extensions/zestgraph-danger-gate.ts": 1,
+    "extensions/zeststream-cast-spawn-cap.ts": 1,
+    "scripts/pysafe.py": 1,
+    "scripts/readme-check.ts": 1,
+    "src/skill-stations.ts": 2,
+    "src/tern-ref.ts": 1
+  },
+  "schema": 1,
+  "totals": {
+    "portable-paths": 21
+  }
+}
