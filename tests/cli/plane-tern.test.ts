@@ -384,6 +384,46 @@ test("SENDOMP1: a bundled seat whose launcher path holds a space ('Application S
 	expect(await observeTernSeat(seat, forgedIo)).toMatchObject({ state: "IDLE", fg: { agentName: null } });
 });
 
+// SENDFAST1.context (ompkit-fp72.135.3.84): a working goal-mode seat often ends its branch in context OMP injected
+// for the model to answer next. Live 2026-10-30: SilverCondor's journal ended in a kit-flywheel-guard custom_message
+// for 26 s before the next assistant message, so a steer read SESSION_ORACLE_STATE_UNKNOWN for the whole 3 s bound.
+test("SENDFAST1.context: a working seat whose branch ends in injected context reads BUSY only for the steer opt-in", () => {
+	const inspection = { status: "FOUND" as const, sessionId: 41, sessionName: "Default", paneId: 123, cwd: "/repo",
+		working: true, exited: null, sessionFile: "/sessions/session-1.jsonl" };
+	const process = { status: "FOUND" as const, foreground: { pid: 13, name: "omp", cwd: "/repo", argv: ["omp"],
+		started: "Thu Oct 30 02:01:27 2026", agentName: "SilverCondor" } };
+	const line = (fields: Record<string, unknown>) => JSON.stringify(fields);
+	const toolTurn = [header, user,
+		line({ type: "message", id: "a2", parentId: "user-1", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }] } }),
+		line({ type: "message", id: "r3", parentId: "a2", message: { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "ok" }] } })];
+	const ending = (entry: string) => parseSessionJournal([...toolTurn, entry].join("\n") + "\n");
+	const contexts = {
+		custom_message: line({ type: "custom_message", id: "x4", parentId: "r3", customType: "kit-flywheel-guard", display: true, content: "guard" }),
+		compaction: line({ type: "compaction", id: "x4", parentId: "r3", summary: "s", firstKeptEntryId: "a2", tokensBefore: 9 }),
+		custom_role: line({ type: "message", id: "x4", parentId: "r3", message: { role: "custom", customType: "eval-state-context", display: false, content: "ctx" } }),
+	};
+	for (const [label, entry] of Object.entries(contexts)) {
+		const journal = ending(entry);
+		expect([label, journal]).toMatchObject([label, { status: "KNOWN", oracleBusy: null }]);
+		expect([label, classifyTernObservation(inspection, process, journal, { turnInFlightIsBusy: true })])
+			.toMatchObject([label, { state: "BUSY", reason: null, runtimeBinding: { paneId: 123, sessionUuid: "session-1" } }]);
+		// Control: without the opt-in every other observer keeps SESSION_ORACLE_STATE_UNKNOWN.
+		expect([label, classifyTernObservation(inspection, process, journal)])
+			.toMatchObject([label, { state: "UNKNOWN", reason: "SESSION_ORACLE_STATE_UNKNOWN", runtimeBinding: null }]);
+		// Planted: Tern not working is never BUSY, whatever the journal ends in.
+		expect([label, classifyTernObservation({ ...inspection, working: false }, process, journal, { turnInFlightIsBusy: true })])
+			.toMatchObject([label, { state: "UNKNOWN", runtimeBinding: null }]);
+	}
+	// Planted: a finished turn (terminal stop) waiting on a running async job is not mid-turn, even while Tern works.
+	const asyncWait = parseSessionJournal([header, user,
+		line({ type: "message", id: "a2", parentId: "user-1", message: { role: "assistant", stopReason: "stop", toolCallIds: ["j1"], content: [] } }),
+		line({ type: "tool_result", id: "r3", parentId: "a2", toolCallId: "j1", details: { async: { state: "running", jobId: "job-1" } } }),
+	].join("\n") + "\n");
+	expect(asyncWait).toMatchObject({ status: "KNOWN", oracleBusy: null, terminalAssistantStop: true });
+	expect(classifyTernObservation(inspection, process, asyncWait, { turnInFlightIsBusy: true }))
+		.toMatchObject({ state: "UNKNOWN", reason: "SESSION_ORACLE_STATE_UNKNOWN", runtimeBinding: null });
+});
+
 test("Tern process parser extracts the actual foreground OMP record", () => {
 	const result = parseTernProcess(processFixture, "/repo", 123);
 	expect(result).toMatchObject({

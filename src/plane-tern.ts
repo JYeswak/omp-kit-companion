@@ -999,8 +999,10 @@ function unknownObservation(reason: string): TernObservation {
 
 /**
  * SENDFAST1 (ompkit-fp72.135.3.84): a sender that can steer opts in to reading a working seat whose journal is
- * mid-turn (a user message, or an assistant awaiting its tools) as BUSY with its runtime binding. Tern's live
- * flag and the journal then agree the seat is busy; every other observer keeps the in-flight UNKNOWN.
+ * mid-turn as BUSY with its runtime binding: the branch ends in a user message, an assistant awaiting its tools, or
+ * context OMP injected for the model to answer next (a custom_message nudge or guard notice, a compaction, a
+ * branch summary, a `custom`-role message). Tern's live flag and the journal then agree the seat is busy; every
+ * other observer keeps the in-flight UNKNOWN.
  */
 export interface TernObserveOptions {
 	turnInFlightIsBusy?: boolean;
@@ -1026,8 +1028,10 @@ export function classifyTernObservation(
 			evidence: ["tern-inspect", "tern-process", "session-file"], reason: journal.reason };
 	}
 	if (journal.cwd !== inspection.cwd) return unknownObservation("SESSION_CWD_MISMATCH");
+	const endsInInjectedContext = journal.lastMessageRole !== null
+		&& (CONTEXT_TYPES[journal.lastMessageRole] === true || journal.lastMessageRole === "custom");
 	const inFlightBusy = opts.turnInFlightIsBusy === true && inspection.working === true && journal.oracleBusy === null
-		&& sessionJournalDecision(journal) === "BUSY";
+		&& (sessionJournalDecision(journal) === "BUSY" || endsInInjectedContext);
 	if (journal.oracleBusy === null && !inFlightBusy) {
 		return { state: "UNKNOWN", working: inspection.working, oracleBusy: null, sessionFile: inspection.sessionFile,
 			sessionSha: journal.sessionSha256, sessionCursorBytes: journal.cursorBytes, sessionLeafId: journal.leafId,
