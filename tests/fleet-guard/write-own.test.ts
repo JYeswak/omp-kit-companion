@@ -158,7 +158,8 @@ describe("WRITEOWN1 AC1: unreserved writes in a canonical checkout are refused a
 				["sed -i '' 's/a/b/' scripts/x.py", "scripts/x.py"],
 				["sed -i.bak -e 's/a/b/' scripts/x.py", "scripts/x.py"],
 				["cd scripts && echo x > y.py", "scripts/y.py"],
-				["echo x > ~/../../" + repo.slice(1) + "/scripts/z.py", "scripts/z.py"],
+				// Climb from $HOME to / by its real depth (the suite scrub puts HOME deep in scratch).
+				[`echo x > ~/${"../".repeat((process.env.HOME ?? "/").split("/").filter(Boolean).length)}${repo.slice(1)}/scripts/z.py`, "scripts/z.py"],
 				["echo x >&scripts/dup.txt", "scripts/dup.txt"],
 				["bash -c 'echo x > scripts/n.py'", "scripts/n.py"],
 				["echo $(echo x > scripts/s.py)", "scripts/s.py"],

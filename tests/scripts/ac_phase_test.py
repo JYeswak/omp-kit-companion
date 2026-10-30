@@ -59,6 +59,55 @@ if "show" in args or "list" in args:
     sys.exit(0)
 sys.exit(2)
 """
+# bead_lint's selftest certifies PageRank through an external probe (run_selftest's `probe`,
+# default BV_READINESS_PROBE else a flywheel checkout under $HOME). This fixture serves the
+# probe's `pagerank-cert --pagerank-graph-fixture FILE --json` contract with the same damped
+# power iteration, so the selftest needs no sibling checkout.
+PAGERANK_PROBE = """#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if args[:1] != ["pagerank-cert"] or "--pagerank-graph-fixture" not in args:
+    sys.exit(2)
+fixture = json.load(open(args[args.index("--pagerank-graph-fixture") + 1], encoding="utf-8"))
+nodes = list(dict.fromkeys(fixture["nodes"]))
+edges = [(e["from"], e["to"]) for e in fixture["edges"] if e["from"] in nodes and e["to"] in nodes]
+damping, tolerance = float(fixture["damping"]), float(fixture["tolerance"])
+
+def compute(order):
+    n = len(order)
+    out = {node: [dst for src, dst in edges if src == node] for node in order}
+    rank = {node: 1.0 / n for node in order}
+    residual = float("inf")
+    for _ in range(200):
+        dangling = damping * sum(rank[node] for node in order if not out[node]) / n
+        nxt = {node: (1.0 - damping) / n + dangling for node in order}
+        for node in order:
+            for dst in out[node]:
+                nxt[dst] += damping * rank[node] / len(out[node])
+        residual = sum(abs(nxt[node] - rank[node]) for node in order)
+        rank = nxt
+        if residual < tolerance:
+            break
+    return rank, min(order, key=lambda node: (-rank[node], node)), residual
+
+scores, top, residual = compute(nodes)
+shuffled, shuffled_top, _ = compute(nodes[::-1])
+invariant = top == shuffled_top and max(abs(scores[n] - shuffled[n]) for n in nodes) <= max(tolerance * 10, 1e-12)
+failures = []
+if residual >= tolerance:
+    failures.append("residual_not_converged")
+if fixture.get("expected_top_id") and top != fixture["expected_top_id"]:
+    failures.append("expected_top_mismatch")
+if fixture.get("bv_top_id") and top != fixture["bv_top_id"]:
+    failures.append("bv_top_mismatch")
+if not invariant:
+    failures.append("node_order_not_invariant")
+print(json.dumps({"schema_version": "bv-readiness-probe.pagerank-cert/v1",
+                  "status": "fail" if failures else "pass", "residual_l1": residual,
+                  "predicted_top_id": top, "node_order_invariant": invariant,
+                  "failure_class": failures}))
+sys.exit(1 if failures else 0)
+"""
 
 
 def utc_now() -> datetime:
@@ -465,6 +514,17 @@ class CreateAdmission(unittest.TestCase):
 
 
 class CheckL(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.work = kitlib_tmp.owned_tmp("ac-phase-check-l")
+        cls.probe = Path(cls.work.path) / "bv-readiness-probe"
+        cls.probe.write_text(PAGERANK_PROBE, encoding="utf-8")
+        cls.probe.chmod(0o700)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.work.cleanup()
+
     def test_enforced_offender_legacy_warning_and_controls(self) -> None:
         untagged = "- [ ] [a] x; planted negative RED"
         beads = [
@@ -487,7 +547,7 @@ class CheckL(unittest.TestCase):
         self.assertEqual(report["l-ac-phase-legacy"], ["l-old"])
 
     def test_selftest_bites_when_check_l_is_muted(self) -> None:
-        ok, report = bead_lint.run_selftest(bead_lint.PROBE_DEFAULT)
+        ok, report = bead_lint.run_selftest(str(self.probe))
         self.assertTrue(ok, report.get("failures"))
         mutants = {
             "check_l": lambda beads: [],
@@ -499,7 +559,7 @@ class CheckL(unittest.TestCase):
                 real = getattr(bead_lint, name)
                 setattr(bead_lint, name, mutant)
                 try:
-                    ok, report = bead_lint.run_selftest(bead_lint.PROBE_DEFAULT)
+                    ok, report = bead_lint.run_selftest(str(self.probe))
                 finally:
                     setattr(bead_lint, name, real)
                 self.assertFalse(ok, name)

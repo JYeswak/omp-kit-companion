@@ -172,6 +172,8 @@ if [ "$rc" -eq 0 ] && ! grep -q 'covered by the focused pass' "$out" && grep -q 
 # 6. FULLSUITEPAR1 (ompkit-9t6f2): the shell complement runs two at a time and a failing complement
 # suite still fails the verdict. The report covers s1; s2 and s3 (the first two complement suites,
 # claimed together) each wait for the other, so their overlap proves the complement ran in parallel.
+# The rendezvous lives in the directory each suite runs in: the runner starts a suite in its archive
+# (the suite path is archive-relative), whatever OMP_KIT_CASE_CWD the caller or the runner exports.
 step "parallel shell complement"
 repo="$TMP/par"
 par_archive="$TMP/par-archive"
@@ -180,7 +182,7 @@ cp "$KITROOT_DIR/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
 # shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
 par_body='name=$(basename "$0" .test.sh)
 echo "complement suite $name ran"
-probe="$OMP_KIT_CASE_CWD/var/agent-tmp/par-probe"
+probe="$(pwd -P)/var/agent-tmp/par-probe"
 mkdir -p "$probe"
 : >"$probe/up.$name"
 peer=

@@ -5,6 +5,7 @@ import { inspectLspReadiness, planLspSetup, resolveOmpDefaults, type LspReadines
 import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, probeLspReadiness } from "../../src/lsp-probe.ts";
 import { collectReadinessWaits } from "../../src/lsp-probe.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { cachedOmpPackage } from "../../src/omp-source-cache.ts";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
 const fixtures: string[] = [];
@@ -19,10 +20,13 @@ afterEach(() => { for (const restore of ompSrcRestores.splice(0)) restore(); });
  * OMP package), never a fabricated subset: the probe disables every non-target
  * server named there, so a truncated map would fan workspace/symbol out to
  * undisabled servers and fail the absent-symbol control. */
-function realDefaultsSource(): string {
-	const candidates = [
-		join(process.env.HOME ?? "/Users/josh", ".bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/src/lsp/defaults.json"),
-	];
+function realDefaultsSource(version: string): string {
+	const candidates: string[] = [];
+	// The verified OMP source cache for exactly the launcher's version is the hermetic source:
+	// OMP_KIT_OMP_SRC_CACHE survives the suite scrub, while HOME-relative globals do not.
+	const cached = cachedOmpPackage(version, process.env);
+	if (cached) candidates.push(join(cached, "src/lsp/defaults.json"));
+	candidates.push(join(process.env.HOME ?? "/Users/josh", ".bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/src/lsp/defaults.json"));
 	try {
 		const npmRoot = Bun.spawnSync(["npm", "root", "-g"], { stdout: "pipe", stderr: "pipe" }).stdout.toString().trim().split("\n")[0];
 		if (npmRoot) candidates.push(join(npmRoot, "@oh-my-pi/pi-coding-agent/src/lsp/defaults.json"));
@@ -51,7 +55,7 @@ function sourceTreeFor(root: string, ompPath: string): string | null {
 	const dir = join(root, "ompsrc");
 	mkdirSync(join(dir, "src", "lsp"), { recursive: true });
 	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
-	writeFileSync(join(dir, "src", "lsp", "defaults.json"), readFileSync(realDefaultsSource(), "utf8"));
+	writeFileSync(join(dir, "src", "lsp", "defaults.json"), readFileSync(realDefaultsSource(version), "utf8"));
 	const previous = process.env.OMP_SRC;
 	process.env.OMP_SRC = dir;
 	ompSrcRestores.push(() => {

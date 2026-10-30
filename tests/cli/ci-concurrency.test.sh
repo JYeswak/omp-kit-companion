@@ -27,8 +27,17 @@ check() { # name expected_rc actual_rc output [pattern...]
 	if [ "$ok" = "1" ]; then pass=$((pass + 1)); printf 'ok %s\n' "$name";
 	else fail=$((fail + 1)); printf 'FAIL %s (rc=%s want=%s out=%s)\n' "$name" "$got" "$want" "$out"; fi
 }
+# Bun.YAML (the repo's own runtime, as the .ts workflow tests use) turns each workflow into JSON, so the
+# python below needs only its standard library: PyYAML is a per-user install a scratch HOME hides.
+yaml_json() { # in.yml out.json
+	bun --no-env-file --config=/dev/null -e \
+		'const [i, o] = process.argv.slice(-2); await Bun.write(o, JSON.stringify(Bun.YAML.parse(await Bun.file(i).text())));' \
+		"$1" "$2"
+}
+yaml_json "$ROOT/.github/workflows/ci.yml" "$TMP/ci.json"
+yaml_json "$ROOT/.github/workflows/release.yml" "$TMP/release.json"
 cat > "$TMP/count.py" <<'PYEOF'
-import json, sys, yaml
+import json, sys
 
 MAX_MACOS_CONCURRENT = int(sys.argv[3]) if len(sys.argv) > 3 else 5
 ci_path, rel_path = sys.argv[1], sys.argv[2]
@@ -114,8 +123,8 @@ def depths(jobs):
         visit(name)
     return depth
 
-ci = yaml.safe_load(open(ci_path)) or {}
-rel = yaml.safe_load(open(rel_path)) or {}
+ci = json.load(open(ci_path)) or {}
+rel = json.load(open(rel_path)) or {}
 ci_jobs, rel_jobs = ci.get("jobs", {}) or {}, rel.get("jobs", {}) or {}
 levels = {}
 ci_depth = depths(ci_jobs)
@@ -137,20 +146,18 @@ for depth in sorted(levels):
 print("MAX_MACOS_CONCURRENT=%d depth details: %s" % (worst[0], "; ".join("%s=%d" % pair for pair in worst[1])))
 sys.exit(0 if worst[0] <= MAX_MACOS_CONCURRENT else 1)
 PYEOF
-out=$(python3 "$TMP/count.py" "$ROOT/.github/workflows/ci.yml" "$ROOT/.github/workflows/release.yml" 2>&1); rc=$?
+out=$(python3 "$TMP/count.py" "$TMP/ci.json" "$TMP/release.json" 2>&1); rc=$?
 check "macOS concurrency fits the pool" 0 "$rc" "$out" "MAX_MACOS_CONCURRENT="
 printf '%s\n' "$out"
 # Planted: one extra macOS job at the max depth must fail the ceiling.
-cp "$ROOT/.github/workflows/ci.yml" "$TMP/ci-six.yml"
-python3 - "$TMP/ci-six.yml" <<'PYEOF'
-import sys, yaml
-p = sys.argv[1]
-d = yaml.safe_load(open(p))
+python3 - "$TMP/ci.json" "$TMP/ci-six.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
 d["jobs"]["planted-macos"] = {"runs-on": "macos-15", "needs": "resolve-omp-versions"}
 d["jobs"]["planted-macos-2"] = {"runs-on": "macos-15", "needs": "resolve-omp-versions"}
-yaml.safe_dump(d, open(p, "w"))
+json.dump(d, open(sys.argv[2], "w"))
 PYEOF
-out=$(python3 "$TMP/count.py" "$TMP/ci-six.yml" "$ROOT/.github/workflows/release.yml" 2>&1); rc=$?
+out=$(python3 "$TMP/count.py" "$TMP/ci-six.json" "$TMP/release.json" 2>&1); rc=$?
 check "planted sixth concurrent macOS job fails" 1 "$rc" "$out" "MAX_MACOS_CONCURRENT="
 printf '%s tests passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

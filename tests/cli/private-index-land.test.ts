@@ -231,6 +231,12 @@ try {
 	git(templateRoot, ["clone", templateBare, templateWork], true);
 	writeFileSync(join(templateWork, ".git", "config"),
 		readFileSync(join(templateWork, ".git", "config"), "utf8") + "[user]\n\tname = LAND1 test\n\temail = land1@example.invalid\n");
+	// land keeps its full-suite gate scratch (src/land.ts) and this file's verdict cache under var/agent-tmp/,
+	// which a kit checkout never shows as untracked. The fixture repository ignores it itself, as the kit's
+	// own .gitignore does, instead of borrowing the caller's global excludes: a hermetic suite HOME has none,
+	// and then `git status` grew a `?? var/` line that no land change caused.
+	mkdirSync(join(templateWork, ".git", "info"), { recursive: true });
+	writeFileSync(join(templateWork, ".git", "info", "exclude"), "/var/agent-tmp/\n", { flag: "a" });
 	mkdirSync(join(templateWork, "var", "agent-tmp"), { recursive: true });
 	writeFileSync(join(templateWork, "owned.txt"), "base owned\n");
 	writeFileSync(join(templateWork, "peer.txt"), "peer baseline\n");

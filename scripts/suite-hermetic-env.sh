@@ -79,11 +79,15 @@ if "\n" in options.suite or "\r" in options.suite:
 # or python suites. A scratch HOME hides the linked omp install and the flywheel probe, and the scratch git link
 # makes git look for its templates and helpers in scratch. tests/cli/profile-rules.test.ts passes 14 of 14 run
 # directly and fails 4 under this helper, and its 077 umask fails the mode-preserving audit, migrate, repair and
-# operator-snapshot tests. Without the opt-in a suite runs with the caller's environment and umask, as in 0.2.80;
-# full-suite-verdict-incomplete.test.sh enables the scrub and the fence and keeps proving both.
+# operator-snapshot tests. Without the opt-in a suite runs with the caller's environment and umask, as in 0.2.80,
+# except that TMPDIR, TMP and TEMP still name the suite's owned scratch; full-suite-verdict-incomplete.test.sh
+# enables the scrub and the fence and keeps proving both.
 if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") != "1":
+    inherited = dict(os.environ)
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        inherited[name] = str(scratch)
     print("SUITE-HERMETIC suite=" + options.suite + " env=inherited fence=off-optin", flush=True)
-    os.execvp(command[0], command)
+    os.execvpe(command[0], command, inherited)
 
 os.umask(0o077)
 

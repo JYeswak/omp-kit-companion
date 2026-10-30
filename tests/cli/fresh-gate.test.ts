@@ -28,6 +28,10 @@ function fixture(): string {
 // Manifest tests isolate manifest behavior from compile/harness work.
 // The test-local Bun shim supplies fixture classifications, then stops at the
 // first downstream Bun command; regex-budget.test.ts exercises RX1 by default.
+// A healthy sbh stand-in keeps the host's disk pressure out of them: under real pressure the gate's
+// pressure flag first du-scans the caller checkout's var/agent-tmp (2.8 s for its first 200 owners on
+// 2026-10-30), which pushed a direct run past bun's 5 s default. SAVEFIRST1 below proves the flag
+// itself with its own sbh stand-in.
 const SKIP_BUDGET = { FRESH_GATE_SKIP_REGEX: "manifest fixture does not assess regex cost" };
 function manifestTestEnv(dir: string): Record<string, string> {
 	const fakeBin = join(dir, "bin");
@@ -43,6 +47,8 @@ case "$*" in
 esac
 `);
 	chmodSync(fakeBun, 0o755);
+	writeFileSync(join(fakeBin, "sbh"), "#!/bin/sh\nexit 0\n");
+	chmodSync(join(fakeBin, "sbh"), 0o755);
 	return { ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}` };
 }
 

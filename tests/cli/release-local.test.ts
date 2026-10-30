@@ -94,7 +94,9 @@ test("release gate refuses a kit rule with its fire fixture removed", () => {
 		writeFileSync(mutated, rows.join("\n"));
 		const run = (casesPath: string) => Bun.spawnSync(["bun", "scripts/ttsr-harness.ts", "--gate-json",
 			"--rules", join(ROOT, "rules"), "--cases", casesPath], {
-			cwd: ROOT, env: { ...process.env, OMP_SRC: process.env.OMP_SRC ?? join(process.env.HOME ?? "", ".bun", "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent", "src") },
+			// No HOME-derived OMP_SRC: rule-class.ts resolves the launcher's exact-version package itself
+			// (beside the launcher, bun global, or the OMP_KIT_OMP_SRC_CACHE source cache under the scrub).
+			cwd: ROOT, env: { ...process.env },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const control = run(cases);

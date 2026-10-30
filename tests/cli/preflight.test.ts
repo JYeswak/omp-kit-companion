@@ -116,6 +116,7 @@ const hasBr = Bun.which("br") !== null;
 const hasOmpKit = Bun.which("omp-kit") !== null;
 const kitRoot = new URL("../../", import.meta.url).pathname;
 
+const FIXTURE_AGENT = "PreflightFixture";
 async function nativeFixtureRoot(label: string): Promise<{ dir: string; capability: string }> {
 	let repo: string | null = null;
 	let scan = new URL("../../", import.meta.url).pathname;
@@ -132,7 +133,9 @@ async function nativeFixtureRoot(label: string): Promise<{ dir: string; capabili
 	// Declare this repo's own root through the documented override (resolved:
 	// /tmp-style spellings never match the release set).
 	const scratchRoots = join(realpathSync(repo), "var", "agent-tmp");
-	const childEnv = { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots };
+	// The owner record must name an agent; the suite scrub drops AGENT_NAME, so the
+	// child gets an explicit identity instead of inheriting whatever the host set.
+	const childEnv = { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots, AGENT_NAME: process.env.AGENT_NAME || FIXTURE_AGENT };
 	const argv = ["omp-kit", "scratch", "new", "--label", label, "--json"];
 	const exe = Bun.which("omp-kit") ?? "omp-kit";
 	let made: { rc: number | null; stdout: Uint8Array; stderr: Uint8Array };
@@ -166,7 +169,7 @@ async function releaseFixtureRoot(root: { dir: string; capability: string }): Pr
 	} catch {
 		scratchRoots = join(resolve(root.dir, "..", "..", ".."), "var", "agent-tmp");
 	}
-	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot, env: { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots } });
+	const r = await run(["omp-kit", "scratch", "release", root.dir, "--bin", "throwaway", "--now", "--capability", root.capability], { deadline_s: 60, cwd: kitRoot, env: { ...process.env, OMP_KIT_SCRATCH_ROOTS: scratchRoots, AGENT_NAME: process.env.AGENT_NAME || FIXTURE_AGENT } });
 	if (r.rc !== 0) throw new Error(`scratch release failed: ${new TextDecoder().decode(r.stderr)}`);
 }
 

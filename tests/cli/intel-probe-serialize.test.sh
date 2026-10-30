@@ -25,9 +25,14 @@ check() { # name expected_rc actual_rc output [pattern...]
 	if [ "$ok" = "1" ]; then pass=$((pass + 1)); printf 'ok %s\n' "$name";
 	else fail=$((fail + 1)); printf 'FAIL %s (rc=%s want=%s out=%s)\n' "$name" "$got" "$want" "$out"; fi
 }
+# Bun.YAML (the repo's own runtime, as the .ts workflow tests use) turns the workflow into JSON, so the
+# python below needs only its standard library: PyYAML is a per-user install a scratch HOME hides.
+bun --no-env-file --config=/dev/null -e \
+	'const [i, o] = process.argv.slice(-2); await Bun.write(o, JSON.stringify(Bun.YAML.parse(await Bun.file(i).text())));' \
+	"$ROOT/.github/workflows/release-intel-probe.yml" "$TMP/probe.json"
 cat > "$TMP/pin.py" <<'PYEOF'
-import sys, yaml
-doc = yaml.safe_load(open(sys.argv[1])) or {}
+import json, sys
+doc = json.load(open(sys.argv[1])) or {}
 job = (doc.get("jobs", {}) or {}).get("intel-probe", {})
 strategy = job.get("strategy", {}) or {}
 tracks = (strategy.get("matrix", {}) or {}).get("track", [])
@@ -38,29 +43,25 @@ ok = (strategy.get("max-parallel") == 1
       and job.get("runs-on") == "macos-15-intel")
 sys.exit(0 if ok else 1)
 PYEOF
-out=$(python3 "$TMP/pin.py" "$ROOT/.github/workflows/release-intel-probe.yml" 2>&1); rc=$?
+out=$(python3 "$TMP/pin.py" "$TMP/probe.json" 2>&1); rc=$?
 check "probe serializes both OMP tracks on the Intel label" 0 "$rc" "$out" "max-parallel=1"
 # Planted: two-way parallel tracks must fail the pin.
-cp "$ROOT/.github/workflows/release-intel-probe.yml" "$TMP/parallel.yml"
-python3 - "$TMP/parallel.yml" <<'PYEOF'
-import sys, yaml
-p = sys.argv[1]
-d = yaml.safe_load(open(p))
+python3 - "$TMP/probe.json" "$TMP/parallel.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
 d["jobs"]["intel-probe"]["strategy"]["max-parallel"] = 2
-yaml.safe_dump(d, open(p, "w"))
+json.dump(d, open(sys.argv[2], "w"))
 PYEOF
-out=$(python3 "$TMP/pin.py" "$TMP/parallel.yml" 2>&1); rc=$?
+out=$(python3 "$TMP/pin.py" "$TMP/parallel.json" 2>&1); rc=$?
 check "planted parallel tracks refused" 1 "$rc" "$out" "max-parallel=2"
 # Planted: unbounded (key absent) tracks must fail the pin.
-cp "$ROOT/.github/workflows/release-intel-probe.yml" "$TMP/unbounded.yml"
-python3 - "$TMP/unbounded.yml" <<'PYEOF'
-import sys, yaml
-p = sys.argv[1]
-d = yaml.safe_load(open(p))
+python3 - "$TMP/probe.json" "$TMP/unbounded.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
 d["jobs"]["intel-probe"]["strategy"].pop("max-parallel", None)
-yaml.safe_dump(d, open(p, "w"))
+json.dump(d, open(sys.argv[2], "w"))
 PYEOF
-out=$(python3 "$TMP/pin.py" "$TMP/unbounded.yml" 2>&1); rc=$?
+out=$(python3 "$TMP/pin.py" "$TMP/unbounded.json" 2>&1); rc=$?
 check "planted unbounded tracks refused" 1 "$rc" "$out" "max-parallel=None"
 printf '%s tests passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
