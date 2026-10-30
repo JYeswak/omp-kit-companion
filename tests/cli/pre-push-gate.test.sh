@@ -1089,6 +1089,7 @@ mktagverdictrepo() {
 	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
 	carry_measurement "$repo"
 	# The judge asks the gate for its worker count (fresh-gate.sh --test-workers) when it records timings.
+	# shellcheck disable=SC2016 # literal $#/$1: the generated stub script expands them, not this shell
 	printf '#!/bin/sh\nif [ "$#" -eq 1 ] && [ "$1" = "--test-workers" ]; then printf "1\\n"; exit 0; fi\necho FRESH-GATE-RAN\n' > "$repo/scripts/fresh-gate.sh"
 	if [ -n "$failing_suite" ]; then
 		printf '#!/bin/sh\necho RED-FAIL; exit 1\n' > "$repo/tests/cli/$failing_suite"

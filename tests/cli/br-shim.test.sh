@@ -434,6 +434,7 @@ export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
  		fail=$((fail + 1))
  		printf 'FAIL needs-director-claim-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
  	fi
+	# shellcheck disable=SC2016 # literal backticks: fixture acceptance text, not a substitution
 	printf '{"id":"X","status":"open","assignee":null,"labels":[],"acceptance_criteria":"- [ ] [a] [build] claimable `true` -> rc 0"}' > "$TMP/bead.json"
 	: > "$TMP/argv"
 	br update X --claim > "$TMP/out" 2>&1
@@ -454,6 +455,7 @@ export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$ORIGINAL_PATH"
 			fail=$((fail + 1))
 			printf 'FAIL replayable-claim-refused [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$move" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 		fi
+		# shellcheck disable=SC2016 # literal backticks: fixture acceptance text, not a substitution
 		printf '{"id":"X","status":"open","assignee":"OtherWorker","labels":[],"acceptance_criteria":"- [ ] [a] [build] the widget works `true` -> rc 0; planted negative refused"}' > "$TMP/bead.json"
 		: > "$TMP/argv"
 		# shellcheck disable=SC2086
