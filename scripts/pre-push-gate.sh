@@ -364,6 +364,19 @@ else
 		exit "$rc"
 	fi
 fi
+# PORTGATE1: evaluate pushed additions against the base-archive checker and ratchet.
+if [ ! -f "$gate_scripts/scripts/check-portable-paths.sh" ]; then
+	printf 'SKIP portable-paths-range: checker absent from base archive\n' >&2
+else
+	printf '== portable-paths-range\n'
+	if sh "$gate_scripts/scripts/check-portable-paths.sh" --repo "$ROOT" ${base_ref:+--base "$base_ref"} --head "$local_sha"; then
+		printf 'GREEN portable-paths-range\n'
+	else
+		rc=$?
+		printf 'RED portable-paths-range producer_rc=%s: new machine-local paths require resolution through the installed release or a documented config/env setting\n' "$rc" >&2
+		exit "$rc"
+	fi
+fi
 if [ -n "${base_ref:-}" ]; then
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --base "$base_ref" --head "$local_sha"
 else
