@@ -1,0 +1,1 @@
+The machine-specific shipped-path gate (PORTGATE1) is held back from this release: its new pre-commit member refused every commit in a repository without its baseline file, and twelve suites failed. It returns once a repository without a baseline is admitted and the full suite passes with it.

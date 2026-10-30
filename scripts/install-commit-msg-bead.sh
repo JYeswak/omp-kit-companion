@@ -630,15 +630,6 @@ install_staged_br_init() {
 	printf 'installed staged-br-init member: %s\n' "$member"
 }
 
-# install_staged_portable_paths: refuse newly added machine-local paths.
-install_staged_portable_paths() {
-	dir=$(chain_dir pre-commit)
-	member="$dir/54-omp-kit-staged-portable-paths"
-	place "$KITROOT/scripts/portable_paths_check.py" "$dir/portable_paths_check.py" -x
-	place "$KITROOT/scripts/check-portable-paths.sh" "$member" +x
-	printf 'installed staged-portable-paths member: %s\n' "$member"
-}
-
 install_staged_sources() {
 	dir=$(chain_dir pre-commit)
 	for helper in sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py; do
@@ -781,7 +772,6 @@ install_staged_tempsafe
 install_staged_kitlib
 install_staged_sources
 install_staged_br_init
-install_staged_portable_paths
 install_staged_readme
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 
