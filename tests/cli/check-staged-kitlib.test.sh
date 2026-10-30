@@ -56,6 +56,27 @@ commit() {
 	(CDPATH='' cd -- "$repo" && git commit -q "$@" 2>&1)
 }
 
+# A fixture's real commit hook must not resolve through the caller's tracker.
+DB="$TMP/inherited-beads.db"
+: > "$DB"
+FIXTURE_HELPER=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh
+out=$(BEADS_DB="$DB" FIXTURE_HELPER="$FIXTURE_HELPER" INSTALLER="$INSTALLER" R="$TMP/inherited-db-fixture" sh -c '
+	set -eu
+	. "$FIXTURE_HELPER"
+	mkdir -p "$R"
+	git -C "$R" init -q
+	git -C "$R" config user.email "test@invalid.example"
+	git -C "$R" config user.name "Test"
+	git -C "$R" commit -q --allow-empty -m "[test] root"
+	sh "$INSTALLER" "$R" >/dev/null
+	printf "fixture\n" > "$R/probe.txt"
+	git -C "$R" add probe.txt
+	git -C "$R" commit -q -m "[test] isolated fixture commit"
+	printf "fixture commit passed\n"
+' 2>&1)
+rc=$?
+check "$rc" "0" "fixture-ignores-inherited-beads-db" "$out" "fixture commit passed"
+
 # PY_BAD carries a reasoned pysafe pragma (pysafe refuses every bare
 # subprocess call): only the kitlib member judges it.
 PY_BAD='import subprocess
