@@ -1,0 +1,50 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_6382d046762908302b9f879685bf832790e351f6e91f8d1a47e2aeb54d3afda9",
+ "limitations": [
+  "Source CLI and targeted tests only; no installed or compiled-native qualification.",
+  "Workspace LSP has missing Bun declarations and unrelated type diagnostics; no clean typecheck claim."
+ ],
+ "operation": "HANDLERCAUSE1-source-regression",
+ "parameters": {
+  "bead": "ompkit-fp72.135.3.86",
+  "subject_sha256": "9e6f0140b6915fc5b801cc937d4e559d7f59f2363589d1a8e27ee6cd777816e1"
+ },
+ "producer": "RusticPine",
+ "result_ref": {
+  "after": {
+   "assertions": 137,
+   "command": "bun test src/cli-actions.test.ts tests/cli/cli-dispatch.test.ts",
+   "exit_code": 0,
+   "fail": 0,
+   "pass": 13
+  },
+  "before": {
+   "command": "bun test tests/cli/cli-dispatch.test.ts -t HANDLERCAUSE1",
+   "exit_code": 1,
+   "fail": 3,
+   "pass": 0,
+   "reason": "bare catch discards TypeError cause"
+  },
+  "quality": {
+   "api_contract": "unchanged",
+   "scope": "src/cli.ts,tests/cli/cli-dispatch.test.ts",
+   "scoped_gating": 0,
+   "stamp": "50bdf7c3b+dirty+shallow"
+  },
+  "source_cli_smoke": {
+   "class": "TypeError",
+   "code": "HANDLER_FAILED",
+   "diagnostic_file_readback": true,
+   "exit_code": 1,
+   "overall": "UNVERIFIED",
+   "secret_redacted": true
+  },
+  "subject_files": {
+   "changelog.d/fp72.135.3.86.md": "73d328fb9027cc7886ce67cb472f32ce28da7662134cfa0d86f1cb0c580cfac2",
+   "src/cli.ts": "9cf2ff39e7e61c8f6730a3e4b4a68e7ee2c303fb8e61981ade2551aad6e35f68",
+   "tests/cli/cli-dispatch.test.ts": "c055478f1027866bab07f44b840475eca23bc2c37d270cfa22eee4b75534bd90"
+  }
+ }
+}

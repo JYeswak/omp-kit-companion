@@ -54,7 +54,7 @@ import { releaseRoot, resolveOmpIdentity } from "./paths.ts";
 import { inspectProjectTrust } from "./project-trust.ts";
 import { PROFILE_RECIPE_KINDS, renderRecipe } from "./profile-recipes.ts";
 import { confirmMutation, renderOutput, type PresentationResult } from "./output.ts";
-import { runFullTest, type FullTestReport } from "./full-test-runner.ts";
+import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
 import { ompFingerprint, recordTestReceipt, type OmpFingerprint } from "./omp-watch.ts";
 import { inspectStateRoot, repairStateRootMode, type StateRootIssue } from "./state-root.ts";
 import { runFastTest, type FastTestReport } from "./test-runner.ts";
@@ -4637,6 +4637,43 @@ function ccEmit(spool: CcSpool | null, type: string, data: Record<string, unknow
 	}
 }
 
+/** A diagnostic path is returned only after the private writer has synced the file. */
+function persistHandlerDiagnostic(actionId: string, cause: FullTestCause): string | null {
+	try {
+		const state = receiptStateRoot();
+		if (state === null) return null;
+		ensureMutationStateRoot(state);
+		const directory = join(state, "diagnostics");
+		ensureMutationStateRoot(directory);
+		const path = join(directory, `handler-${actionId}.json`);
+		writePrivate(path, `${JSON.stringify({ schema_version: 1, action_id: actionId, cause })}\n`);
+		return path;
+	} catch {
+		return null; // Storage failure must not replace the handler's original cause.
+	}
+}
+
+function handlerFailure(error: unknown, actionId: string): CliResult {
+	const isError = error instanceof Error;
+	const frames = isError && error.stack
+		? error.stack.split("\n").filter(line => line.trimStart().startsWith("at ")).slice(0, 2).join("\n") : null;
+	const cause = redactFullTestCause({
+		cause_code: "HANDLER_FAILED", cause_name: isError ? error.name : typeof error,
+		cause_message: isError ? error.message : String(error), cause_stack_head: frames,
+	}, [process.env.HOME ?? "", process.cwd()]);
+	const path = persistHandlerDiagnostic(actionId, cause);
+	return {
+		code: 1, data: { overall: "UNVERIFIED", diagnostics_path: path },
+		errors: [{
+			code: "HANDLER_FAILED",
+			message: `${cause.cause_name}: ${cause.cause_message}${cause.cause_stack_head ? `\n${cause.cause_stack_head}` : ""}`,
+			remediation: path === null
+				? "Diagnostics could not be persisted; the redacted cause is retained above. No success or rollback is implied."
+				: `Inspect diagnostics at ${path}; no success or rollback is implied.`,
+		}], verification: "UNVERIFIED",
+	};
+}
+
 export async function runCli(args: readonly string[] = process.argv.slice(2)): Promise<number> {
 	const startPerf = performance.now();
 	const startMs = Date.now();
@@ -4668,8 +4705,8 @@ export async function runCli(args: readonly string[] = process.argv.slice(2)): P
 		let result: CliResult;
 		try {
 			result = "request" in parsed ? await dispatch(parsed.request, version) : parsed.failure;
-		} catch {
-			result = { code: 1, data: { overall: "UNVERIFIED" }, errors: [{ code: "HANDLER_FAILED", message: "Command failed without verified completion", remediation: "Inspect local diagnostics; no success or rollback is implied." }], verification: "UNVERIFIED" };
+		} catch (error) {
+			result = handlerFailure(error, actionId);
 		}
 		const rendered = renderOutput(result, { toolVersion: version, schemaVersion: SCHEMA_VERSION, json });
 		if (rendered.stdout) process.stdout.write(rendered.stdout);
