@@ -18,7 +18,7 @@ type Diagnostic = {
 	cause: { cause_name: string; cause_message: string; cause_stack_head: string | null };
 };
 
-async function withFailure(message: string, blockedState: boolean, check: (result: {
+async function withFailure(message: string, variant: "normal" | "blocked-state" | "uninspectable", check: (result: {
 	code: number | null; envelope: FailureEnvelope; output: string; state: string;
 }) => void): Promise<void> {
 	const scratch = ownedTmp("cli-dispatch-test");
@@ -26,10 +26,13 @@ async function withFailure(message: string, blockedState: boolean, check: (resul
 		const home = join(scratch.path, "home");
 		const state = join(scratch.path, "state");
 		mkdirSync(home, { mode: 0o700 });
-		if (blockedState) writeFileSync(state, "not a directory");
+		if (variant === "blocked-state") writeFileSync(state, "not a directory");
 		const driver = `
 import { registerCommandHandler, runCli } from ${JSON.stringify(join(root, "src/cli.ts"))};
-function handlerCauseFixture() { throw new TypeError(process.env.HANDLERCAUSE_MESSAGE); }
+function handlerCauseFixture() {
+	if (process.env.HANDLERCAUSE_VARIANT === "uninspectable") throw Object.create(null);
+	throw new TypeError(process.env.HANDLERCAUSE_MESSAGE);
+}
 registerCommandHandler("status", handlerCauseFixture);
 process.exitCode = await runCli(["status", "--json"]);
 `;
@@ -37,10 +40,11 @@ process.exitCode = await runCli(["status", "--json"]);
 			cwd: root, deadline_s: 30,
 			env: { ...process.env, HOME: home, XDG_STATE_HOME: state,
 				TMPDIR: scratch.path, CC_STATE: join(scratch.path, "cc"),
-				AGENT_NAME: "HandlerCauseFixture", HANDLERCAUSE_MESSAGE: message },
+				AGENT_NAME: "HandlerCauseFixture", HANDLERCAUSE_MESSAGE: message, HANDLERCAUSE_VARIANT: variant },
 		});
 		const output = new TextDecoder().decode(result.stdout);
 		expect(result.timed_out).toBe(false);
+		expect(output).toContain('"HANDLER_FAILED"');
 		const envelope: FailureEnvelope = JSON.parse(output);
 		check({ code: result.rc, envelope, output, state });
 	} finally {
@@ -60,7 +64,7 @@ function checkFailure(code: number | null, envelope: FailureEnvelope): void {
 }
 
 test("HANDLERCAUSE1 retains a redacted cause and names the private diagnostic file", async () => {
-	await withFailure(`${marker}; Bearer ${secret}`, false, ({ code, envelope, output, state }) => {
+	await withFailure(`${marker}; Bearer ${secret}`, "normal", ({ code, envelope, output, state }) => {
 		checkFailure(code, envelope);
 		expect(envelope.errors[0]?.message).toContain("handlerCauseFixture");
 		expect(output).not.toContain(secret);
@@ -81,7 +85,7 @@ test("HANDLERCAUSE1 retains a redacted cause and names the private diagnostic fi
 });
 
 test("HANDLERCAUSE1 bounds retained causes without losing the first stack frame", async () => {
-	await withFailure(`${marker}; Bearer ${secret}\n${"detail ".repeat(2000)}`, false, ({ code, envelope, output }) => {
+	await withFailure(`${marker}; Bearer ${secret}\n${"detail ".repeat(2000)}`, "normal", ({ code, envelope, output }) => {
 		checkFailure(code, envelope);
 		expect(output).not.toContain(secret);
 		expect(envelope.errors[0]?.message).toContain("handlerCauseFixture");
@@ -98,10 +102,24 @@ test("HANDLERCAUSE1 bounds retained causes without losing the first stack frame"
 });
 
 test("HANDLERCAUSE1 preserves the original failure when diagnostic storage is unavailable", async () => {
-	await withFailure(marker, true, ({ code, envelope, state }) => {
+	await withFailure(marker, "blocked-state", ({ code, envelope, state }) => {
 		checkFailure(code, envelope);
 		expect(envelope.data.diagnostics_path).toBeNull();
 		expect(existsSync(join(state, "omp-kit", "diagnostics"))).toBe(false);
 		expect(envelope.errors[0]?.remediation).not.toContain(join(state, "omp-kit", "diagnostics"));
+	});
+});
+
+test("HANDLERCAUSE1 cannot crash while inspecting a non-Error thrown value", async () => {
+	await withFailure(marker, "uninspectable", ({ code, envelope }) => {
+		expect(code).toBe(1);
+		expect(envelope.ok).toBe(false);
+		expect(envelope.data.overall).toBe("UNVERIFIED");
+		expect(envelope.errors[0]?.code).toBe("HANDLER_FAILED");
+		const path = envelope.data.diagnostics_path;
+		if (typeof path !== "string") throw new Error("diagnostics path missing");
+		const diagnostic: Diagnostic = JSON.parse(readFileSync(path, "utf8"));
+		expect(diagnostic.cause.cause_name).toBe("object");
+		expect(diagnostic.cause.cause_stack_head).toBeNull();
 	});
 });

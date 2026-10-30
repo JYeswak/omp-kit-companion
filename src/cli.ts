@@ -4653,14 +4653,24 @@ function persistHandlerDiagnostic(actionId: string, cause: FullTestCause): strin
 	}
 }
 
+/** Even a hostile thrown value must not make the error boundary itself throw. */
+function redactedHandlerCause(error: unknown): FullTestCause {
+	try {
+		const isError = error instanceof Error;
+		const frames = isError && error.stack
+			? error.stack.split("\n").filter(line => line.trimStart().startsWith("at ")).slice(0, 2).join("\n") : null;
+		return redactFullTestCause({
+			cause_code: "HANDLER_FAILED", cause_name: isError ? error.name : typeof error,
+			cause_message: isError ? error.message : String(error), cause_stack_head: frames,
+		}, [process.env.HOME ?? "", process.cwd()]);
+	} catch {
+		return { cause_code: "HANDLER_FAILED", cause_name: typeof error,
+			cause_message: "Exception details could not be read", cause_stack_head: null };
+	}
+}
+
 function handlerFailure(error: unknown, actionId: string): CliResult {
-	const isError = error instanceof Error;
-	const frames = isError && error.stack
-		? error.stack.split("\n").filter(line => line.trimStart().startsWith("at ")).slice(0, 2).join("\n") : null;
-	const cause = redactFullTestCause({
-		cause_code: "HANDLER_FAILED", cause_name: isError ? error.name : typeof error,
-		cause_message: isError ? error.message : String(error), cause_stack_head: frames,
-	}, [process.env.HOME ?? "", process.cwd()]);
+	const cause = redactedHandlerCause(error);
 	const path = persistHandlerDiagnostic(actionId, cause);
 	return {
 		code: 1, data: { overall: "UNVERIFIED", diagnostics_path: path },

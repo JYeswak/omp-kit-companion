@@ -1,0 +1,49 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_d8552894b378c62d80439ad00c7d7ee89e067e071a7a4802511c70b3240fb5c7",
+ "limitations": [
+  "Source CLI and targeted tests only; not installed or compiled-native qualification.",
+  "Prior candidate pregrade cannot qualify these changed source bytes."
+ ],
+ "operation": "HANDLERCAUSE1-inspection-fallback",
+ "parameters": {
+  "bead": "ompkit-fp72.135.3.86",
+  "subject_sha256": "7122abb19f8732e97970e62b9c8b33c5f02c7e5a386195f175ef872da4f1c70d"
+ },
+ "producer": "RusticPine",
+ "result_ref": {
+  "after": {
+   "assertions": 148,
+   "command": "bun test src/cli-actions.test.ts tests/cli/cli-dispatch.test.ts",
+   "exit_code": 0,
+   "fail": 0,
+   "pass": 14
+  },
+  "before": {
+   "command": "bun test tests/cli/cli-dispatch.test.ts -t 'non-Error thrown value'",
+   "exit_code": 1,
+   "fail": 1,
+   "pass": 0,
+   "reason": "no HANDLER_FAILED JSON response when thrown object has no prototype"
+  },
+  "previous_evidence": "ev_6382d046762908302b9f879685bf832790e351f6e91f8d1a47e2aeb54d3afda9",
+  "quality": {
+   "scope": "src/cli.ts,tests/cli/cli-dispatch.test.ts",
+   "scoped_gating": 0,
+   "stamp": "7b6a63d90+dirty+shallow"
+  },
+  "source_cli_smoke": {
+   "code": "HANDLER_FAILED",
+   "diagnostics_path_returned": true,
+   "exit_code": 1,
+   "input": "uninspectable non-Error object",
+   "overall": "UNVERIFIED"
+  },
+  "subject_files": {
+   "changelog.d/fp72.135.3.86.md": "80bdbc9f31d488e091431c1117244ac8322a42965482d9f414a3cdb50555f41c",
+   "src/cli.ts": "4be6b0b61838086136f2e28cc9e599a3f5a46d53401c66bfcaeb9a36a78c3e98",
+   "tests/cli/cli-dispatch.test.ts": "205b4a1ac3748deb9c687e913085ac36d7bc44a0db42f4663eac207afe455bb7"
+  }
+ }
+}
