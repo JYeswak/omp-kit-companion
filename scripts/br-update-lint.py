@@ -63,6 +63,18 @@ own REFUSED_NOT_REPLAYABLE line with the corrected shape; once the boxes are
 rewritten the claim is admitted. With BR_UPDATE_REPLAYABLE_ONLY=1 (the shim's
 claim-only call) only this gate runs.
 
+LANESPLIT1b handoff mode reads decoded DONE lines, not shell syntax: an
+absolute literal path (spaces and @ permitted) followed by @ and a Git
+object id, or an object id in the invoking checkout. Existing literal directory
+interpretations must be unique: a SHA-shaped path segment cannot select a
+different checkout, and ambiguous claims fail closed. Shell quoting/escaping
+is already decoded here; no eval or recovery is performed. Review entry needs
+a source claim; positional, flag, file and stdin DONE comments are gated too.
+The checkout's recent ledger tail must end cleanly and its latest matching
+version-2 observation must have integer rc=0 and complete evidence. Missing,
+malformed or incomplete observations fail closed, even if other admission
+checks passed. Older observations outside the bounded tail require a fresh run.
+
 Reads are live (`br show`, `br list`); no JSONL flush is involved, so a
 fixed bead passes immediately (LINTGATE1 acceptance 2).
 """
@@ -71,19 +83,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
+import shlex
+import shutil
+import stat
 import sys
+from pathlib import Path
+from collections.abc import Iterable
+from contextlib import nullcontext
+from itertools import chain
+
+import kitlib_run
+from kitlib_tmp import owned_tmp
 
 
 def run(cmd: list[str], cwd: str, timeout: int = 60) -> tuple[int, str, str]:
-    try:
-        proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-            stdin=subprocess.DEVNULL,  # pysafe: leaf exec to native br; timeout bounds the wait, DEVNULL stdin
-        )
-        return proc.returncode, proc.stdout, proc.stderr
-    except (OSError, subprocess.SubprocessError) as exc:
-        return 127, "", str(exc)
+    result = kitlib_run.run(cmd, cwd=cwd, deadline_s=timeout, stdin=b"",
+                            max_output_bytes=64 * 1024 * 1024)
+    return (127 if result.timed_out else result.rc,
+            result.stdout.decode("utf-8", "replace"),
+            result.stderr.decode("utf-8", "replace"))
 
 
 def split_csv(values: list[str] | None) -> list[str]:
@@ -229,7 +247,142 @@ def tracker_repo(project: str, db: str) -> str:
     return os.path.realpath(project)
 
 
+def _handoff_source(payload: str, project: str) -> tuple[str, str] | None:
+    """Read only the DONE subject, not hashes or email addresses in its explanation."""
+    def token(value: str) -> str:
+        words = value[:65].partition(":")[0].split(maxsplit=1)
+        return words[0] if words else ""
+
+    def sha(value: str) -> bool:
+        return 7 <= len(value) <= 64 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+    bare = token(payload)
+    if sha(bare):
+        return project, bare
+    sources: list[tuple[str, str]] = []
+    for index, character in enumerate(payload):
+        if character != "@":
+            continue
+        candidate = token(payload[index + 1:index + 66])
+        if sha(candidate):
+            repo = payload[:index].strip()
+            if Path(repo).is_absolute() and Path(repo).is_dir():
+                sources.append((repo, candidate))
+                if len(sources) > 1:
+                    return None
+    return sources[0] if sources else None
+
+
+def _fresh_green(repo: str, commit: str) -> bool:
+    rc, directory, _ = run(["git", "-C", repo, "rev-parse", "--absolute-git-dir"], repo, 10)
+    if rc != 0:
+        return False
+    ledger = Path(directory.strip()) / "omp-kit" / "fresh-gate-runs.jsonl"
+    limit = 8 * 1024 * 1024
+    try:
+        descriptor = os.open(ledger, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return False
+            size = handle.seek(0, os.SEEK_END)
+            start = max(0, size - limit)
+            handle.seek(start)
+            data = handle.read(limit)
+        if start:
+            data = data.partition(b"\n")[2]
+        if data and not data.endswith(b"\n"):
+            return False
+        for line in reversed(data.splitlines()):
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                return False
+            if row.get("commit") != commit:
+                continue
+            evidence = row.get("evidence")
+            return (row.get("version") == 2 and type(row.get("rc")) is int and row["rc"] == 0
+                    and isinstance(evidence, dict) and evidence.get("complete") is True)
+    except (OSError, ValueError, UnicodeError):
+        return False
+    return False
+
+
+def handoff_gate(argv: list[str]) -> int:
+    if len(argv) != 3 or argv[0] not in ("0", "1"):
+        print("br-shim: HANDOFF_UNGATED incomplete admission request; "
+              "run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>", file=sys.stderr)
+        return 4
+    return _handoff_check(argv[0] == "1", argv[1:])
+
+
+def _handoff_check(required: bool, texts: Iterable[str]) -> int:
+    project = os.path.realpath(os.environ.get("BR_HANDOFF_PROJECT", os.getcwd()))
+    claims: list[tuple[str, str]] = []
+    for text in texts:
+        for line in text.splitlines():
+            line = line.strip()
+            if line == "DONE" or line.startswith("DONE "):
+                source = _handoff_source(line[4:].strip(), project)
+                if source is None:
+                    claims.append((project, ""))
+                else:
+                    claims.append(source)
+    if not claims and not required:
+        return 0
+    if not claims:
+        claims.append((project, ""))
+    for repo, subject in claims:
+        repo = os.path.realpath(repo)
+        commit = ""
+        if subject:
+            rc, out, _ = run(["git", "-C", repo, "rev-parse", "--verify", f"{subject}^{{commit}}"], repo, 10)
+            if rc == 0:
+                commit = out.strip()
+        if commit and _fresh_green(repo, commit):
+            continue
+        target = commit or subject or "<sha>"
+        remedy = f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {target}"
+        print("br-shim: HANDOFF_UNGATED requires a complete GREEN observation for the exact DONE source; "
+              f"run: {remedy}", file=sys.stderr)
+        return 4
+    return 0
+
+
+def handoff_file(argv: list[str]) -> int:
+    """Validate and dispatch the same private file snapshot, including native -f -."""
+    try:
+        if len(argv) < 7 or argv[1] not in ("", "-f", "--file="):
+            raise ValueError("incomplete file admission request")
+        index = int(argv[0])
+        command = argv[5:]
+        if not 1 <= index < len(command):
+            raise ValueError("invalid file argument position")
+        if argv[2] == "-" and sys.stdin.isatty():
+            raise ValueError("file '-' requires piped stdin, not an interactive terminal")
+        with owned_tmp("br-handoff-comment") as directory:
+            snapshot = Path(directory) / "comment"
+            source = nullcontext(sys.stdin.buffer) if argv[2] == "-" else open(argv[2], "rb")
+            with source as reader, snapshot.open("wb") as writer:
+                shutil.copyfileobj(reader, writer)
+            with snapshot.open(encoding="utf-8") as lines:
+                refusal = _handoff_check(False, chain(argv[3:5], lines))
+            if refusal:
+                return refusal
+            command[index] = argv[1] + str(snapshot)
+            rc, out, err = run(command, os.getcwd())
+            sys.stdout.write(out)
+            sys.stderr.write(err)
+            return rc
+    except (OSError, UnicodeError, ValueError) as error:
+        print(f"br-shim: HANDOFF_UNGATED comment input could not be verified: {error}; "
+              "run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>", file=sys.stderr)
+        return 4
+
+
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["handoff"]:
+        return handoff_gate(argv[1:])
+    if argv[:1] == ["handoff-file"]:
+        return handoff_file(argv[1:])
     real = os.environ.get("BR_UPDATE_REAL", "br")
     project = os.environ.get("BR_UPDATE_PROJECT", os.getcwd())
     db = os.environ.get("BR_UPDATE_DB", "")

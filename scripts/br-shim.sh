@@ -69,29 +69,45 @@ fi
 # FAIL refuses the transition before a grader spends time on self-review.
 # All other invocations pass through untouched.
  gate_sub=""; gate_id=""; gate_status=""; gate_db=""; gate_claim=0; gate_skip=0; gate_reason=""; gate_want_reason=0; gate_tcomment=""; gate_want_tcomment=0
+gate_comment_id=""; gate_pos_comment=""; gate_literal=0
+gate_index=0; gate_file=0; gate_want_file=0; gate_file_index=0; gate_file_form=""; gate_file_path=""
  for gate_arg in "$@"; do
+	gate_index=$((gate_index + 1))
  	if [ "$gate_skip" = 1 ]; then
  		if [ "$gate_want_reason" = 1 ]; then gate_reason="$gate_arg"; gate_want_reason=0; fi
  		if [ "$gate_want_tcomment" = 1 ]; then gate_tcomment="$gate_arg"; gate_want_tcomment=0; fi
+		if [ "$gate_want_file" = 1 ]; then
+			gate_file=1; gate_file_index=$gate_index; gate_file_form=""; gate_file_path=$gate_arg; gate_want_file=0
+		fi
  		gate_skip=0; continue; fi
- 	case "$gate_arg" in
+	gate_kind=$gate_arg
+	if [ "$gate_literal" = 1 ]; then gate_kind=""; fi
+	case "$gate_kind" in
+		--) if [ "$gate_sub" = comments ] && [ "$gate_id" = add ]; then gate_literal=1; fi ;;
  		--status|--db)
  			case "$gate_arg" in
  				--status) gate_status="next" ;;
  				--db) gate_db="next" ;;
  			esac ;;
- 		--actor|-m|--message|--comment|--reason|-r|--transition-comment|--title)
+		--actor|--author|--lock-timeout|-m|--message|--content|--comment|--reason|-r|--transition-comment|--notes|--title|-f|--file)
  			gate_skip=1
  			case "$gate_arg" in
- 				-m|--message|--comment|--reason|-r) gate_want_reason=1 ;;
+				-m|--message|--content|--comment|--reason|-r|--notes) gate_want_reason=1 ;;
+				-f|--file) gate_want_file=1 ;;
  				--transition-comment) gate_want_tcomment=1 ;;
  			esac ;;
- 		--actor=*|--db=*|--status=*|-m*|--message=*|--comment=*|--reason=|--transition-comment=*)
+		--file=*|-f?*)
+			gate_file=1; gate_file_index=$gate_index
+			case "$gate_arg" in
+				--file=*) gate_file_form="--file="; gate_file_path=${gate_arg#--file=} ;;
+				*) gate_file_form="-f"; gate_file_path=${gate_arg#-f} ;;
+			esac ;;
+		--actor=*|--author=*|--lock-timeout=*|--db=*|--status=*|-m*|--message=*|--content=*|--comment=*|--reason=*|--notes=*|--transition-comment=*)
  			case "$gate_arg" in
  				--status=*) gate_status="${gate_arg#--status=}" ;;
  				--db=*) gate_db="${gate_arg#--db=}" ;;
  				--transition-comment=*) gate_tcomment="${gate_arg#--transition-comment=}" ;;
- 				-m*|--message=*|--comment=*|--reason=*) gate_reason="${gate_arg#*=}"; gate_reason="${gate_reason#-m}" ;;
+				-m*|--message=*|--content=*|--comment=*|--reason=*|--notes=*) gate_reason="${gate_arg#*=}"; gate_reason="${gate_reason#-m}" ;;
  			esac ;;
  		--claim) gate_claim=1 ;;
 		-*) ;;
@@ -99,7 +115,11 @@ fi
 			if [ "$gate_status" = "next" ]; then gate_status="$gate_arg";
 			elif [ "$gate_db" = "next" ]; then gate_db="$gate_arg";
 			elif [ -z "$gate_sub" ]; then gate_sub="$gate_arg";
-			elif [ -z "$gate_id" ]; then gate_id="$gate_arg"; fi ;;
+			elif [ -z "$gate_id" ]; then gate_id="$gate_arg";
+			elif [ "$gate_sub" = comments ] && [ "$gate_id" = add ]; then
+				if [ -z "$gate_comment_id" ]; then gate_comment_id=$gate_arg;
+				else gate_pos_comment="${gate_pos_comment:+$gate_pos_comment }$gate_arg"; fi
+			fi ;;
 	esac
 done
 tracker_write=0
@@ -256,6 +276,33 @@ if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_status" = "in_rev
  		echo "br-shim: close-guard absent, skipping review gate" >&2
  	fi
  fi
+# LANESPLIT1b: the source checkout's own measured ledger, never the metadata tracker's.
+handoff_review=0
+if [ "$gate_sub" = update ] && [ "$gate_status" = in_review ]; then handoff_review=1; fi
+handoff_probe=$handoff_review
+if [ "$gate_sub" = comments ] && [ "$gate_id" = add ] && [ "$gate_file" = 1 ]; then handoff_probe=1; fi
+case "$gate_tcomment$shim_nl$gate_reason$shim_nl$gate_pos_comment" in *DONE*) handoff_probe=1 ;; esac
+if { [ "$gate_sub" = update ] || { [ "$gate_sub" = comments ] && [ "$gate_id" = add ]; }; } && [ "$handoff_probe" = 1 ]; then
+	handoff_helper="$(dirname -- "$self_path")/br-update-lint.py"
+	if [ ! -f "$handoff_helper" ] || ! command -v python3 >/dev/null 2>&1; then
+		fail "HANDOFF_UNGATED admission helper unavailable; run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>"
+	fi
+	if [ "$gate_sub" = comments ] && [ "$gate_file" = 1 ]; then
+		if [ -n "$found" ]; then
+			BR_HANDOFF_PROJECT="$PWD" python3 "$handoff_helper" handoff-file "$gate_file_index" "$gate_file_form" "$gate_file_path" "$gate_tcomment" "$gate_reason$shim_nl$gate_pos_comment" "$real" "$@"
+		else
+			BR_HANDOFF_PROJECT="$PWD" python3 "$handoff_helper" handoff-file "$gate_file_index" "$gate_file_form" "$gate_file_path" "$gate_tcomment" "$gate_reason$shim_nl$gate_pos_comment" "$real" "$@" --actor "$AGENT_NAME"
+		fi
+		exit "$?"
+	fi
+	BR_HANDOFF_PROJECT="$PWD" python3 "$handoff_helper" handoff "$handoff_review" "$gate_tcomment" "$gate_reason$shim_nl$gate_pos_comment"
+	handoff_rc=$?
+	case "$handoff_rc" in
+		0) ;;
+		4) exit 4 ;;
+		*) fail "HANDOFF_UNGATED source admission could not be verified; run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>" ;;
+	esac
+fi
 if [ -n "$found" ]; then
 	exec "$real" "$@"
 else

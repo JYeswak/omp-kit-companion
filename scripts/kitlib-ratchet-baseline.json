@@ -25,7 +25,6 @@
    "installer/install.py": 4,
    "scripts/bead_lint.py": 1,
    "scripts/br-create-lint.py": 1,
-   "scripts/br-update-lint.py": 1,
    "scripts/br_create_guard_core.py": 2,
    "scripts/context-inventory.ts": 1,
    "scripts/converge-mutants.ts": 1,
@@ -277,6 +276,6 @@
  },
  "schema": 1,
  "totals": {
-  "raw-spawn": 755
+  "raw-spawn": 754
  }
 }

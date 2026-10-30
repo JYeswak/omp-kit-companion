@@ -1,0 +1,1 @@
+- Refuse `in_review` and `DONE` handoffs without a complete passing fresh-gate observation for the exact source commit in its source checkout; refusals name `sh scripts/fresh-gate.sh --commit <sha>`. Metadata trackers and observations for another commit cannot qualify the handoff.

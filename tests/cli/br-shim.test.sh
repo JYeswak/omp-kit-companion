@@ -7,7 +7,7 @@ set -u
 
 SHIM=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/br-shim.sh
 REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$SHIM")/.." && pwd)
-REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+REPO_TMP="$REPO_ROOT/var/agent-tmp"
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$REPO_ROOT/scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
@@ -298,10 +298,23 @@ else
 	printf 'FAIL close-refused: rc=%s\n' "$got_rc"
 fi
 export BR_GUARD_JSON_FILE="$TMP/review-other.json"
+# Owned source checkout, separate from the metadata tracker. No operator hooks are installed here.
+HANDOFF_CODE="$TMP/handoff-code"
+mkdir -p "$HANDOFF_CODE"
+git -C "$HANDOFF_CODE" init -q
+git -C "$HANDOFF_CODE" -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@invalid commit --allow-empty -q -m 'handoff fixture [test]'
+HANDOFF_SHA=$(git -C "$HANDOFF_CODE" rev-parse HEAD)
+HANDOFF_MESSAGE="DONE $HANDOFF_CODE@$HANDOFF_SHA: fixture"
+HANDOFF_LEDGER="$HANDOFF_CODE/.git/omp-kit/fresh-gate-runs.jsonl"
+mkdir -p "$(dirname "$HANDOFF_LEDGER")"
+handoff_row() {
+	printf '{"version":2,"commit":"%s","rc":%s,"evidence":{"complete":%s}}\n' "$1" "$3" "$2" > "$HANDOFF_LEDGER"
+}
+handoff_row "$HANDOFF_SHA" true 0
 : > "$TMP/argv"
-br --db "$REVIEW_DB" update X --status in_review > "$TMP/out" 2>&1
+br --db "$REVIEW_DB" update X --status in_review --transition-comment "$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
 got_rc=$?
-check "review-entry-passes" 0 "--db $REVIEW_DB update X --status in_review --actor TestShim"
+check "review-entry-passes" 0 "--db $REVIEW_DB update X --status in_review --transition-comment $HANDOFF_MESSAGE --actor TestShim"
 : > "$TMP/argv"
 br --db "$REVIEW_DB" update X --status open > "$TMP/out" 2>&1
 got_rc=$?
@@ -506,15 +519,156 @@ EOF
 		else
 			export BR_GUARD_JSON_FILE="$TMP/review-other.json"
 			: > "$TMP/argv"
-			br --db "$REVIEW_DB" update X --status in_review > "$TMP/out" 2>&1
+			br --db "$REVIEW_DB" update X --status in_review --transition-comment "$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
 			got_rc=$?
-			check "replayable-review-admitted" 0 "--db $REVIEW_DB update X --status in_review --actor TestShim"
+			check "replayable-review-admitted" 0 "--db $REVIEW_DB update X --status in_review --transition-comment $HANDOFF_MESSAGE --actor TestShim"
 		fi
 	done
 	export AM_EXPECTED_PROJECT="$REPO_ROOT"
  else
  	printf 'SKIP needs-director-claim: no bun/python3/candidate cli.ts in this environment\n'
  fi
+
+# LANESPLIT1b: real admission changes only with complete evidence for this exact source.
+export AGENT_NAME=TestShim
+export AM_EXPECTED_PROJECT="$TMP/review-project"
+export BR_GUARD_JSON_FILE="$TMP/review-other.json"
+handoff_case() {
+	handoff_name=$1; handoff_want=$2
+	handoff_target=${3:-$HANDOFF_SHA}
+	: > "$TMP/argv"
+	br --db "$REVIEW_DB" update X --status in_review --transition-comment "$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
+	handoff_rc=$?
+	if [ "$handoff_want" = 4 ]; then
+		if [ "$handoff_rc" = 4 ] && [ ! -s "$TMP/argv" ] \
+			&& grep -Fq HANDOFF_UNGATED "$TMP/out" \
+			&& grep -Fq "sh scripts/fresh-gate.sh --commit $handoff_target" "$TMP/out"; then
+			pass=$((pass + 1))
+		else
+			fail=$((fail + 1)); printf 'FAIL %s: rc=%s backend=%s out<<<%s>>>\n' "$handoff_name" "$handoff_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+		fi
+	elif [ "$handoff_rc" = 0 ] && grep -Fqx in_review "$TMP/argv" && grep -Fqx "$HANDOFF_MESSAGE" "$TMP/argv"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL %s: rc=%s out<<<%s>>>\n' "$handoff_name" "$handoff_rc" "$(cat "$TMP/out")"
+	fi
+}
+rm -f "$HANDOFF_LEDGER"
+handoff_case handoff-missing-green-refused 4
+git -C "$HANDOFF_CODE" -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@invalid commit --allow-empty -q -m 'other source [test]'
+HANDOFF_OTHER=$(git -C "$HANDOFF_CODE" rev-parse HEAD)
+handoff_row "$HANDOFF_OTHER" true 0
+handoff_case handoff-other-sha-green-refused 4
+handoff_row "$HANDOFF_SHA" false 0
+handoff_case handoff-incomplete-evidence-refused 4
+handoff_row "$HANDOFF_SHA" true 1
+handoff_case handoff-red-exact-sha-refused 4
+handoff_row "$HANDOFF_SHA" true 0
+handoff_case handoff-exact-complete-green-admitted 0
+handoff_row "$HANDOFF_SHA" true false
+handoff_case handoff-boolean-rc-is-not-green 4
+handoff_row "$HANDOFF_SHA" true 0
+printf '{"commit":"%s"' "$HANDOFF_SHA" >> "$HANDOFF_LEDGER"
+handoff_case handoff-partial-observation-refused 4
+handoff_row "$HANDOFF_SHA" true 0
+HANDOFF_MOVED="$TMP/handoff space@quoted'path"
+mv "$HANDOFF_CODE" "$HANDOFF_MOVED"
+HANDOFF_CODE=$HANDOFF_MOVED
+HANDOFF_LEDGER="$HANDOFF_CODE/.git/omp-kit/fresh-gate-runs.jsonl"
+HANDOFF_MESSAGE="DONE $HANDOFF_CODE@$HANDOFF_SHA: contact operator@deadbeef"
+handoff_case handoff-decoded-path-and-explanation-admitted 0
+HANDOFF_VALID_MESSAGE=$HANDOFF_MESSAGE
+HANDOFF_MESSAGE="DONE $HANDOFF_CODE@${HANDOFF_SHA}junk"
+handoff_case handoff-sha-prefix-plus-junk-refused 4 "<sha>"
+HANDOFF_MESSAGE=$HANDOFF_VALID_MESSAGE
+rm -f "$HANDOFF_LEDGER"
+: > "$TMP/argv"
+br --db "$REVIEW_DB" comments add X --message="$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
+handoff_rc=$?
+if [ "$handoff_rc" = 4 ] && [ ! -s "$TMP/argv" ] && grep -Fq HANDOFF_UNGATED "$TMP/out"; then pass=$((pass + 1))
+else fail=$((fail + 1)); printf 'FAIL handoff-DONE-comment-refused: rc=%s out<<<%s>>>\n' "$handoff_rc" "$(cat "$TMP/out")"; fi
+handoff_row "$HANDOFF_SHA" true 0
+: > "$TMP/argv"
+br --db "$REVIEW_DB" comments add X --message="$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
+handoff_rc=$?
+if [ "$handoff_rc" = 0 ] && grep -Fqx comments "$TMP/argv"; then pass=$((pass + 1))
+else fail=$((fail + 1)); printf 'FAIL handoff-DONE-comment-admitted: rc=%s out<<<%s>>>\n' "$handoff_rc" "$(cat "$TMP/out")"; fi
+: > "$TMP/argv"
+ordinary_message="quoted 'DONE' and \$(touch $TMP/handoff-injection) are data, not a DONE subject"
+br --db "$REVIEW_DB" comments add X --message="$ordinary_message" > "$TMP/out" 2>&1
+handoff_rc=$?
+if [ "$handoff_rc" = 0 ] && grep -Fqx comments "$TMP/argv" && [ ! -e "$TMP/handoff-injection" ]; then pass=$((pass + 1))
+else fail=$((fail + 1)); printf 'FAIL handoff-nonsubject-data-admitted: rc=%s out<<<%s>>>\n' "$handoff_rc" "$(cat "$TMP/out")"; fi
+printf '{"version":2,"commit":"%s","rc":0}\n' "$HANDOFF_SHA" > "$HANDOFF_LEDGER"
+handoff_case handoff-missing-completeness-refused 4
+handoff_row "$HANDOFF_SHA" true 0
+HANDOFF_MESSAGE="review requested without a source claim"
+handoff_case handoff-review-without-DONE-refused 4 "<sha>"
+HANDOFF_MESSAGE=$(printf 'evidence follows\n%s' "$HANDOFF_VALID_MESSAGE")
+: > "$TMP/argv"
+br --db "$REVIEW_DB" comments add X --message="$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
+handoff_rc=$?
+if [ "$handoff_rc" = 0 ] && grep -Fqx comments "$TMP/argv"; then pass=$((pass + 1))
+else fail=$((fail + 1)); printf 'FAIL handoff-multiline-DONE-admitted: rc=%s out<<<%s>>>\n' "$handoff_rc" "$(cat "$TMP/out")"; fi
+HANDOFF_MESSAGE=$HANDOFF_VALID_MESSAGE
+rm -f "$HANDOFF_LEDGER"
+: > "$TMP/argv"
+br --db "$REVIEW_DB" comments add X "$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
+handoff_rc=$?
+if [ "$handoff_rc" = 4 ] && [ ! -s "$TMP/argv" ] && grep -Fq HANDOFF_UNGATED "$TMP/out"; then pass=$((pass + 1))
+else fail=$((fail + 1)); printf 'FAIL handoff-positional-DONE-refused: rc=%s out<<<%s>>>\n' "$handoff_rc" "$(cat "$TMP/out")"; fi
+: > "$TMP/argv"
+positional_message=$(printf '%s\n%s' '- literal data' "$HANDOFF_MESSAGE")
+br --db "$REVIEW_DB" comments add -- X "$positional_message" > "$TMP/out" 2>&1
+handoff_rc=$?
+if [ "$handoff_rc" = 4 ] && [ ! -s "$TMP/argv" ] && grep -Fq HANDOFF_UNGATED "$TMP/out"; then pass=$((pass + 1))
+else fail=$((fail + 1)); printf 'FAIL handoff-positional-end-options-refused: rc=%s out<<<%s>>>\n' "$handoff_rc" "$(cat "$TMP/out")"; fi
+handoff_row "$HANDOFF_SHA" true 0
+: > "$TMP/argv"
+br --db "$REVIEW_DB" comments add X "$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
+handoff_rc=$?
+if [ "$handoff_rc" = 0 ] && grep -Fqx comments "$TMP/argv"; then pass=$((pass + 1))
+else fail=$((fail + 1)); printf 'FAIL handoff-positional-DONE-admitted: rc=%s out<<<%s>>>\n' "$handoff_rc" "$(cat "$TMP/out")"; fi
+HANDOFF_ACTUAL_LEDGER=$HANDOFF_LEDGER
+HANDOFF_PREFIX="$TMP/handoff-prefix"
+git init -q "$HANDOFF_PREFIX"
+git -C "$HANDOFF_PREFIX" -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@invalid commit --allow-empty -q -m 'qualified prefix source [test]'
+HANDOFF_PREFIX_SHA=$(git -C "$HANDOFF_PREFIX" rev-parse HEAD)
+mkdir -p "$HANDOFF_PREFIX/.git/omp-kit"
+HANDOFF_LEDGER="$HANDOFF_PREFIX/.git/omp-kit/fresh-gate-runs.jsonl"
+handoff_row "$HANDOFF_PREFIX_SHA" true 0
+HANDOFF_LEDGER=$HANDOFF_ACTUAL_LEDGER
+rm -f "$HANDOFF_LEDGER"
+HANDOFF_AMBIGUOUS="$HANDOFF_PREFIX@$HANDOFF_PREFIX_SHA branch"
+mv "$HANDOFF_CODE" "$HANDOFF_AMBIGUOUS"
+HANDOFF_CODE=$HANDOFF_AMBIGUOUS
+HANDOFF_LEDGER="$HANDOFF_CODE/.git/omp-kit/fresh-gate-runs.jsonl"
+HANDOFF_MESSAGE="DONE $HANDOFF_CODE@$HANDOFF_SHA: not the qualified prefix"
+handoff_case handoff-existing-prefix-cannot-qualify-other-checkout 4 "<sha>"
+handoff_row "$HANDOFF_SHA" true 0
+mv "$HANDOFF_PREFIX" "$HANDOFF_PREFIX-retired"
+handoff_case handoff-sha-shaped-path-segment-admitted 0
+handoff_carrier_case() {
+	carrier_name=$1; carrier_want=$2
+	shift 2
+	: > "$TMP/argv"
+	printf '%s' "$HANDOFF_MESSAGE" | br --db "$REVIEW_DB" comments add X "$@" > "$TMP/out" 2>&1
+	carrier_rc=$?
+	if [ "$carrier_want" = 4 ]; then
+		if [ "$carrier_rc" = 4 ] && [ ! -s "$TMP/argv" ] && grep -Fq HANDOFF_UNGATED "$TMP/out"; then pass=$((pass + 1))
+		else fail=$((fail + 1)); printf 'FAIL %s: rc=%s out<<<%s>>>\n' "$carrier_name" "$carrier_rc" "$(cat "$TMP/out")"; fi
+	elif [ "$carrier_rc" = 0 ] && grep -Fqx comments "$TMP/argv"; then pass=$((pass + 1))
+	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s out<<<%s>>>\n' "$carrier_name" "$carrier_rc" "$(cat "$TMP/out")"; fi
+}
+printf '%s' "$HANDOFF_MESSAGE" > "$TMP/handoff-message"
+rm -f "$HANDOFF_LEDGER"
+handoff_carrier_case handoff-content-alias-refused 4 --content "$HANDOFF_MESSAGE"
+handoff_carrier_case handoff-file-refused 4 --file="$TMP/handoff-message"
+handoff_carrier_case handoff-stdin-refused 4 -f -
+handoff_row "$HANDOFF_SHA" true 0
+handoff_carrier_case handoff-content-alias-admitted 0 --content "$HANDOFF_MESSAGE"
+handoff_carrier_case handoff-file-admitted 0 -f"$TMP/handoff-message"
+handoff_carrier_case handoff-stdin-admitted 0 --file -
 
  printf 'br-shim: %s pass %s fail\n' "$pass" "$fail"
  [ "$fail" = "0" ]
