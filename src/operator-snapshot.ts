@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, readlinkSync, unwatchFile, watchFile, type Stats } from "node:fs";
 import { basename, isAbsolute, join, relative } from "node:path";
 import { installedJobOwnedState, type OwnedStatePath } from "./service.ts";
 
@@ -7,6 +7,9 @@ import { installedJobOwnedState, type OwnedStatePath } from "./service.ts";
 const PROFILE_FILES = ["config.yml", "config.yaml", "config.json", "settings.json"] as const;
 const MAX_ENTRIES_PER_ROOT = 20_000;
 const MAX_BYTES_PER_ROOT = 512 * 1024 * 1024;
+const MAX_CONCURRENT_WRITER_CANDIDATES = 50;
+const CONCURRENT_WRITER_PROBE_MS = 1_000; // Timeout never counts as writer evidence; unobserved changes remain failures.
+const EMPTY_CONCURRENT_WRITER_PATHS: ReadonlySet<string> = new Set();
 
 /**
  * Volatile browser cache directory names: regenerable HTTP/GPU/code caches a browser rewrites on its own
@@ -31,17 +34,18 @@ export function isOwnedState(owned: readonly OwnedStatePath[], path: string): bo
 
 export type WatchedPaths = string[] & { owned?: readonly OwnedStatePath[] };
 export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[] };
-export type WatchedComparison = { unchanged: boolean; complete: boolean; watched: number; changed_paths: string[]; incomplete_paths: string[] };
+export type WatchedComparison = {
+	unchanged: boolean; complete: boolean; watched: number;
+	changed_paths: string[]; incomplete_paths: string[];
+	skipped_paths: { path: string; reason: "skipped-concurrent-writer" }[];
+};
 
 /**
- * Operator-side paths a kit run could plausibly write: OMP profile config files, rule and extension
+ * Watch operator-side paths a kit run could plausibly write: OMP profile config files, rule and extension
  * directories, installed plugins, and the kit state root. Live scenarios run in a private HOME, so these
- * must be byte-identical before and after; everything else in the operator HOME may change concurrently.
- * The one exception is state the kit's own service jobs write on their own clock (cc's store, ci-poller's
- * cache, the scratch quarantine...): each job declares it, and only the jobs installed in `home` are
- * excluded, so a write by anything else, including the run under test, still counts. The other is volatile
- * third-party browser cache subtrees (VOLATILE_CACHE_DIR_NAMES), which the kit never writes under a watched
- * root and which churn under long-running browsers the kit did not start.
+ * paths are compared before and after the run. Installed service-owned state and known volatile browser
+ * cache subtrees are ignored as declared exceptions. A changed regular file is skipped only when its
+ * contents change again after the test runner exits; a test's own write remains a postcheck failure.
  */
 export function operatorWatchedPaths(home: string, stateRoot: string | null, owned: readonly OwnedStatePath[] = installedJobOwnedState(home)): WatchedPaths {
 	const profileDirs = [join(home, ".omp", "agent")];
@@ -107,14 +111,81 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 	}
 	return { entries, incomplete };
 }
-
-export function compareWatched(before: WatchedSnapshot, after: WatchedSnapshot, home: string): WatchedComparison {
+function changedWatchedPaths(before: WatchedSnapshot, after: WatchedSnapshot): string[] {
 	const changed = new Set<string>();
 	for (const [path, value] of before.entries) if (after.entries.get(path) !== value) changed.add(path);
 	for (const path of after.entries.keys()) if (!before.entries.has(path)) changed.add(path);
+	return [...changed];
+}
+
+/** Only a post-run content hash change marks a changed file as concurrent; timed-out or unobserved changes remain failures. */
+export async function activeConcurrentWriterPaths(before: WatchedSnapshot, after: WatchedSnapshot): Promise<ReadonlySet<string>> {
+	const candidates = changedWatchedPaths(before, after)
+		.filter(path => after.entries.get(path)?.startsWith("file:"))
+		.sort()
+		.slice(0, MAX_CONCURRENT_WRITER_CANDIDATES);
+	if (!candidates.length) return EMPTY_CONCURRENT_WRITER_PATHS;
+
+	// This project targets a lib without Promise.withResolvers; the watcher lifecycle owns its resolver here.
+	return new Promise<ReadonlySet<string>>(resolve => {
+		const active = new Set<string>();
+		const listeners: { path: string; listener: (current: Stats, previous: Stats) => void }[] = [];
+		let timer: NodeJS.Timeout | undefined;
+		let finished = false;
+		const finish = () => {
+			if (finished) return;
+			finished = true;
+			clearTimeout(timer);
+			for (const { path, listener } of listeners) unwatchFile(path, listener);
+			resolve(active);
+		};
+		const inspect = (path: string) => {
+			if (finished || active.has(path)) return;
+			const current = snapshotWatched([path]);
+			if (current.incomplete.includes(path)) return;
+			const currentValue = current.entries.get(path);
+			const finalValue = after.entries.get(path);
+			if (currentValue?.startsWith("file:") && finalValue?.startsWith("file:")
+				&& currentValue.slice(currentValue.lastIndexOf(":") + 1) !== finalValue.slice(finalValue.lastIndexOf(":") + 1)) {
+				active.add(path);
+				if (active.size === candidates.length) finish();
+			}
+		};
+		// Bun's macOS fs.watch backend missed writes; poll only the bounded changed-file set.
+		timer = setTimeout(finish, CONCURRENT_WRITER_PROBE_MS);
+		for (const path of candidates) {
+			if (finished) break;
+			const listener = (_current: Stats, _previous: Stats) => inspect(path);
+			try {
+				watchFile(path, { persistent: false, interval: 100 }, listener);
+				listeners.push({ path, listener });
+			} catch {
+				// A path we cannot watch remains an ordinary changed path.
+			}
+		}
+		if (!listeners.length) finish();
+	});
+}
+
+
+export function compareWatched(
+	before: WatchedSnapshot,
+	after: WatchedSnapshot,
+	home: string,
+	skippedConcurrentWriter?: ReadonlySet<string>,
+): WatchedComparison {
+	const changed = changedWatchedPaths(before, after);
 	const display = (path: string) => path === home || path.startsWith(home + "/") ? `~/${relative(home, path)}` : path;
 	const incomplete = [...new Set([...before.incomplete, ...after.incomplete])].map(display).sort();
-	const changedPaths = [...changed].map(display).sort();
-	return { unchanged: changed.size === 0, complete: incomplete.length === 0, watched: before.entries.size,
-		changed_paths: changedPaths.slice(0, 50), incomplete_paths: incomplete.slice(0, 50) };
+	const changedPaths = changed.filter(path => skippedConcurrentWriter?.has(path) !== true).map(display).sort();
+	const skippedPaths = changed.filter(path => skippedConcurrentWriter?.has(path) === true).map(display).sort()
+		.map(path => ({ path, reason: "skipped-concurrent-writer" as const }));
+	return {
+		unchanged: changed.length === 0,
+		complete: incomplete.length === 0,
+		watched: before.entries.size,
+		changed_paths: changedPaths.slice(0, 50),
+		incomplete_paths: incomplete.slice(0, 50),
+		skipped_paths: skippedPaths.slice(0, 50),
+	};
 }

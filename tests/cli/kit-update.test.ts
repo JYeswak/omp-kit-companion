@@ -4,6 +4,8 @@ import { performance } from "node:perf_hooks";
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { runFullTest } from "../../src/full-test-runner.ts";
+import { runIsolatedShell } from "../../src/runtime.ts";
+import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { runFastTest } from "../../src/test-runner.ts";
 import type { ReleaseAsset, ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
@@ -588,8 +590,8 @@ function startLoopWriter(files: string[], operatorFile: string): { stop: () => P
 }
 
 // ompkit-2pkp1: on a live host the cc service writes its store every 15 s and every kit command appends its spool,
-// so the postcheck's isolation guard must tell an installed job's own state from a write it should catch.
-test("planted: a live cc writer during the isolated test is not an operator change; a write to an operator path still is", async () => fixture(async ctx => {
+// so the postcheck must distinguish installed-job state and an unrelated live operator writer.
+test("POSTCHECKBROWSER1: a concurrent operator writer is skipped; installed cc state remains ignored", async () => fixture(async ctx => {
 	const stateHome = join(ctx.home, ".local", "state"), kitState = join(stateHome, "omp-kit"), cc = join(kitState, "cc");
 	const plist = join(ctx.home, "Library", "LaunchAgents", `${serviceLabel("cc")}.plist`);
 	const unit = join(ctx.home, ".config", "systemd", "user", "omp-kit-cc.service");
@@ -599,24 +601,21 @@ test("planted: a live cc writer during the isolated test is not an operator chan
 	chmodSync(kitState, 0o700);
 	const ccFiles = [join(cc, "cc.db"), join(cc, "spool", "kit", "2026-10-22.jsonl")];
 	const operatorFile = join(ctx.home, ".agents", "rules", "planted.md");
-	// One real concurrent process writes both: the operator-path control proves it was writing inside the snapshot window.
 	const loop = startLoopWriter(ccFiles, operatorFile);
 	const previousXdg = process.env.XDG_STATE_HOME;
 	process.env.XDG_STATE_HOME = stateHome;
 	try {
-		// Poll for the writer's first iteration (a condition, not a guessed duration).
-		while (!existsSync(operatorFile)) await Bun.sleep(5);
 		const planned = await planKitUpdate({ ...input(ctx), stateRoot: kitState });
 		if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
 		const result = await applyKitUpdate(planned);
 		const report = result.postcheck.report;
 		if (!report) throw new Error(`expected a full-test report, observed ${JSON.stringify(result.postcheck)}`);
 		const operatorFailures = report.failures.filter(failure => failure.startsWith("Operator file changed"));
-		// The guard still names a write the run itself makes to the operator state root (on a host with rch, the fast
-		// stage's in-process doctor records rch-socket-ino.json there), so assert the planted pair, not the whole list.
-		expect(operatorFailures, JSON.stringify(report.failures)).toContain("Operator file changed during failed fast stage: ~/.agents/rules/planted.md");
+		expect(operatorFailures.some(failure => failure.endsWith("~/.agents/rules/planted.md")), JSON.stringify(report.failures)).toBe(false);
 		expect(operatorFailures.filter(failure => failure.includes("/omp-kit/cc")), JSON.stringify(report.failures)).toEqual([]);
-		expect(report.snapshots.home.changed_paths).toContain("~/.agents/rules/planted.md");
+		expect(report.snapshots.home.changed_paths).not.toContain("~/.agents/rules/planted.md");
+		expect(report.snapshots.home.unchanged).toBe(false);
+		expect(report.snapshots.home.skipped_paths).toContainEqual({ path: "~/.agents/rules/planted.md", reason: "skipped-concurrent-writer" });
 		expect(report.snapshots.home.changed_paths.filter(path => path.includes("/omp-kit/cc"))).toEqual([]);
 	} finally {
 		await loop.stop();
@@ -624,10 +623,10 @@ test("planted: a live cc writer during the isolated test is not an operator chan
 	}
 }));
 
-// ompkit-v66l.22 FLEETUPG1: on 2026-10-27 a long-running Chrome the kit did not start wrote its HTTP cache
-// under the watched state root during the isolated test and failed the postcheck. Volatile browser caches
-// are not operator state, so their churn must not fail it; a write the run should not make still must.
-test("planted: a foreign browser cache writer during the isolated test is not an operator change; an operator write still is", async () => fixture(async ctx => {
+
+// ompkit-v66l.22 FLEETUPG1: browser caches are volatile; profile files that a separate live browser continues
+// writing must be reported as skipped-concurrent-writer rather than failing the operator postcheck.
+test("POSTCHECKBROWSER1: live browser profile writer is skipped while its cache subtree stays ignored", async () => fixture(async ctx => {
 	const kitState = join(ctx.home, ".local", "state", "omp-kit");
 	mkdirSync(kitState, { recursive: true });
 	chmodSync(kitState, 0o700);
@@ -637,26 +636,45 @@ test("planted: a foreign browser cache writer during the isolated test is not an
 	for (const file of cacheFiles) writeFileSync(file, "seed\n");
 	mkdirSync(join(ctx.home, ".agents", "rules"), { recursive: true });
 	const operatorFile = join(ctx.home, ".agents", "rules", "planted-cache.md");
-	// One concurrent writer churns both: the operator-path control proves it was writing inside the snapshot window.
 	const loop = startLoopWriter(cacheFiles, operatorFile);
 	try {
-		// Poll for the writer's first iteration (a condition, not a guessed duration).
-		while (!existsSync(operatorFile)) await Bun.sleep(5);
 		const planned = await planKitUpdate({ ...input(ctx), stateRoot: kitState });
 		if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
 		const result = await applyKitUpdate(planned);
 		const report = result.postcheck.report;
 		if (!report) throw new Error(`expected a full-test report, observed ${JSON.stringify(result.postcheck)}`);
 		const operatorFailures = report.failures.filter(failure => failure.startsWith("Operator file changed"));
-		// The stage prefix depends on whether the fast stage passed on this host; the operator path must not.
-		expect(operatorFailures.some(failure => failure.endsWith("~/.agents/rules/planted-cache.md")), JSON.stringify(report.failures)).toBe(true);
-		expect(operatorFailures.filter(failure => failure.includes("chrome-jfp")), JSON.stringify(report.failures)).toEqual([]);
+		expect(operatorFailures.some(failure => failure.endsWith("~/.agents/rules/planted-cache.md")), JSON.stringify(report.failures)).toBe(false);
 		expect(report.snapshots.home.changed_paths.filter(path => path.includes("chrome-jfp"))).toEqual([]);
+		expect(report.snapshots.home.skipped_paths).toContainEqual({ path: "~/.agents/rules/planted-cache.md", reason: "skipped-concurrent-writer" });
 		expect(report.snapshots.home.incomplete_paths.filter(path => path.includes("chrome-jfp"))).toEqual([]);
 	} finally {
 		await loop.stop();
 	}
 }));
+
+test("POSTCHECKBROWSER1 planted negative: an isolated test write to operator state remains a change", async () => fixture(async ctx => {
+	const releaseRoot = join(ctx.prefix, "releases", ctx.currentVersion);
+	const executablePath = join(releaseRoot, "bin", "omp-kit");
+	const scriptDirectory = join(releaseRoot, "scripts");
+	const rulesDirectory = join(ctx.home, ".agents", "rules");
+	const operatorFile = join(rulesDirectory, "isolated-test.md");
+	mkdirSync(scriptDirectory, { recursive: true });
+	mkdirSync(rulesDirectory, { recursive: true });
+	const quotedOperatorFile = `'${operatorFile.replaceAll("'", "'\\''")}'`;
+	writeFileSync(join(scriptDirectory, "ladder.sh"),
+		`#!/bin/sh\nprintf '%s\\n' 'written by isolated test' > ${quotedOperatorFile}\n`, { mode: 0o755 });
+	const watched = operatorWatchedPaths(ctx.home, ctx.stateRoot);
+	const before = snapshotWatched(watched);
+	const result = await runIsolatedShell("scripts/ladder.sh", [], releaseRoot, executablePath);
+	expect(result.code).toBe(0);
+	const after = snapshotWatched(watched);
+	const activeWriters = await activeConcurrentWriterPaths(before, after);
+	const comparison = compareWatched(before, after, ctx.home, activeWriters);
+	expect(comparison.changed_paths).toContain("~/.agents/rules/isolated-test.md");
+	expect(comparison.skipped_paths).toEqual([]);
+}));
+
 
 // ompkit-2pkp1: heavy admission deferring a ladder stage means the release was never judged; the update says DEFERRED.
 test("planted: a heavy-deferred postcheck reports DEFERRED, not FAIL, and never PASS", async () => fixture(async ctx => {

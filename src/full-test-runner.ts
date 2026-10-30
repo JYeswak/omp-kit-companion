@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
+import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { BundledRunInterruptedError, runIsolatedShell, type BundledRunResult } from "./runtime.ts";
 import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
@@ -515,8 +515,12 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
  const empty = describeFullTestProducer(null, { source_revision: sourceRevision, references, roots: [input.root, input.home] });
  if (fast.status !== "PASS") {
   const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
+  const [homeWriters, projectWriters] = await Promise.all([
+   activeConcurrentWriterPaths(before.home, after.home), activeConcurrentWriterPaths(before.project, after.project),
+  ]);
   const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
-   home: compareWatched(before.home, after.home, input.home), project: compareWatched(before.project, after.project, input.home) };
+   home: compareWatched(before.home, after.home, input.home, homeWriters),
+   project: compareWatched(before.project, after.project, input.home, projectWriters) };
   const failures = [...fast.failures];
   if (!snapshots.release.unchanged) failures.push("Release snapshot changed during failed fast stage");
   for (const path of [...snapshots.home.changed_paths, ...snapshots.project.changed_paths]) failures.push(`Operator file changed during failed fast stage: ${path}`);
@@ -552,8 +556,12 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
   result = interrupted.result;
  }
  const after = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
+ const [homeWriters, projectWriters] = await Promise.all([
+  activeConcurrentWriterPaths(before.home, after.home), activeConcurrentWriterPaths(before.project, after.project),
+ ]);
  const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
-  home: compareWatched(before.home, after.home, input.home), project: compareWatched(before.project, after.project, input.home) };
+  home: compareWatched(before.home, after.home, input.home, homeWriters),
+  project: compareWatched(before.project, after.project, input.home, projectWriters) };
  const redact = (text: string) => redactFullTestText(text, privateRoots);
  const producer = describeFullTestProducer(result, { source_revision: sourceRevision, references, roots: privateRoots,
   ...(artifactRepo === undefined ? {} : { artifact_root: artifactRepo }) });
