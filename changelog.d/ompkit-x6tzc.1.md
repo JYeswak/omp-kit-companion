@@ -1,0 +1,1 @@
+The worker `ask` refusal now names the held bead even when the session cwd has no `.beads` ancestor. It reads every tracker the session reached plus the cwd's own, and lets br discover from the cwd. It used to fall back to "the bead you hold", so ASKBLOCK1 failed 7/2 whenever TMPDIR was outside a tracker.

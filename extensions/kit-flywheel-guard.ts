@@ -2248,13 +2248,22 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					const seat = Object.entries(seats).find(([seatName]) => seatName.toLowerCase() === name.toLowerCase())?.[1];
 					const role = field(seat, "role");
 					if (role !== "builder" && role !== "grader") continue;
-					let bead = "the bead you hold";
+					// The held bead lives in a tracker the seat used, not only its cwd's: read every tracker this
+					// session reached plus the cwd's, and with no `.beads` ancestor let br discover from the cwd.
+					const trackers = new Map<string, TrackerRef>(sessionTrackers);
+					let here: TrackerRef = { key: `cwd:${ctx.cwd}`, bin: "br", cwd: ctx.cwd };
 					try {
-						const tracker = trackerOf({ bin: "br", rest: [], cwd: ctx.cwd }, env);
-						const owned = tracker ? await readOwnedBeads(pi.exec, tracker, name) : null;
-						const held = owned?.ok ? owned.rows.filter(row => row.status === "in_progress").map(row => row.id) : [];
-						if (held.length > 0) bead = held.join(", ");
-					} catch { /* Missing tracker information never permits a worker modal. */ }
+						here = trackerOf({ bin: "br", rest: [], cwd: ctx.cwd }, env) ?? here;
+					} catch { /* br's own discovery from the cwd still answers. */ }
+					if (!trackers.has(here.key)) trackers.set(here.key, here);
+					const held = new Set<string>();
+					for (const tracker of trackers.values()) {
+						try {
+							const owned = await readOwnedBeads(pi.exec, tracker, name);
+							if (owned.ok) for (const row of owned.rows) if (row.status === "in_progress") held.add(row.id);
+						} catch { /* Missing tracker information never permits a worker modal. */ }
+					}
+					const bead = held.size > 0 ? [...held].join(", ") : "the bead you hold";
 					return { block: true, reason: `kit-flywheel-guard ASKBLOCK1: ask refused for ${role} seat ${name}; no dialog opened. Send QUESTION mail to your director naming ${bead}; questions never block work.` };
 				}
 				return undefined;
