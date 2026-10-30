@@ -3,7 +3,8 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, type SendExec } from "../../src/send.ts";
+import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec } from "../../src/send.ts";
+import { classifyTernObservation, parseSessionJournal } from "../../src/plane-tern.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -1127,4 +1128,101 @@ test("TERNADDR1: ternSendSeat binds flags first, then the fleet-watch.json entry
 	expect(ternSendSeat(config, "omp-test", "tern:7", { cwd: "/other", ternSession: "4", windowKey: "/run/w.sock" }, "/caller"))
 		.toEqual({ session: "4", pane: "tern:7", windowKey: "/run/w.sock", cwd: "/other" });
 	expect(ternSendSeat(null, "omp-test", "tern:7", {}, "/caller")).toEqual({ session: "", pane: "tern:7", windowKey: "", cwd: "" });
+});
+
+// ---- SENDFAST1 (ompkit-fp72.135.3.84): a keyless message steers a busy seat; the sender never waits a turn ----
+
+/** A seat mid-turn: the assistant awaits a tool call, as a goal-mode seat almost always is. */
+const inFlightJournal = settledJournal + userEntry("u2", "m1", "work")
+	+ jline({ type: "message", id: "a3", parentId: "u2", message: { role: "assistant", stopReason: "toolUse",
+		content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: {} }] } });
+const keylessSeat: TernSeatBinding = { ...ternSeat, windowKey: "" };
+
+/** Keyless Tern surface: `send N paste T` holds T in the composer; `keys Enter` journals it as OMP does. */
+function pasteFake(opts: { steering: boolean }) {
+	const fake = { journal: inFlightJournal, pastes: 0, enters: 0, observes: 0, composerReads: 0, io: undefined as unknown as TernObserverIo };
+	let composer = "";
+	fake.io = {
+		run: (argv: string[]) => {
+			const send = argv.indexOf("send");
+			if (send >= 0 && argv[send + 2] === "paste") { fake.pastes++; composer += argv[send + 3] ?? ""; }
+			if (send >= 0 && argv[send + 2] === "keys") {
+				fake.enters++;
+				fake.journal += userEntry(`s${fake.enters}`, "a3", composer.trim(), opts.steering ? { steering: true } : {});
+				composer = "";
+			}
+			return { code: 0, out: "" };
+		},
+		readSessionFile: () => fake.journal,
+		wait: noWait,
+	};
+	const busy = async (): Promise<TernObservation> => {
+		fake.observes++;
+		return { ...ternIdle, state: "BUSY", working: true, oracleBusy: null, sessionSha: sha(fake.journal),
+			sessionCursorBytes: Buffer.byteLength(fake.journal) };
+	};
+	return { fake, busy };
+}
+
+test("SENDFAST1: the steer opt-in reads a working seat whose journal is mid-turn as BUSY with its runtime binding", () => {
+	const inspection = { status: "FOUND" as const, sessionId: 1, sessionName: "s", paneId: 7, cwd: "/repo", working: true,
+		exited: null, sessionFile: "/sf" };
+	const process = { status: "FOUND" as const, foreground: ompForeground };
+	const journal = parseSessionJournal(inFlightJournal);
+	expect(journal).toMatchObject({ status: "KNOWN", oracleBusy: null, leafId: "a3" });
+	expect(classifyTernObservation(inspection, process, journal, { turnInFlightIsBusy: true }))
+		.toMatchObject({ state: "BUSY", reason: null, runtimeBinding: { paneId: 7, sessionUuid: "s1" } });
+	// Control: every other observer keeps the in-flight UNKNOWN, and an idle Tern flag never reads as BUSY.
+	expect(classifyTernObservation(inspection, process, journal))
+		.toMatchObject({ state: "UNKNOWN", reason: "SESSION_TURN_IN_FLIGHT", runtimeBinding: null });
+	expect(classifyTernObservation({ ...inspection, working: false }, process, journal, { turnInFlightIsBusy: true }))
+		.toMatchObject({ state: "UNKNOWN", runtimeBinding: null });
+});
+
+test("SENDFAST1: a BUSY keyless seat with an EMPTY composer is pasted at once and proven PROVEN_STEERED, no turn-boundary wait", async () => {
+	const { fake, busy } = pasteFake({ steering: true });
+	const waits: number[] = [];
+	const started = performance.now();
+	// The CLI's own bound; restoring the busy wait sleeps through it and this test's 2 s bound fails.
+	const r = await deliverToTernSeat({ seat: keylessSeat, text: "status update", dropDir: ternDropDir(), io: fake.io,
+		observe: busy, identify: async () => ternIdentified, untilDeliveredMs: TERN_TURN_BOUNDARY_WAIT_MS, pollMs: 10,
+		deadlineMs: 200, wait: async (ms) => { waits.push(ms); await Bun.sleep(ms); },
+		composer: () => { fake.composerReads++; return { state: "EMPTY" }; } });
+	expect(r).toMatchObject({ status: "OK", code: "PROVEN_STEERED", sends: 1, drop_path: null });
+	expect(r.detail).toContain("via paste+Enter as a steering entry");
+	expect(r.queue_states).toBeUndefined();
+	expect([fake.observes, fake.pastes, fake.enters, fake.composerReads]).toEqual([1, 1, 1, 1]);
+	expect(waits).toEqual([]);
+	expect(performance.now() - started).toBeLessThan(500);
+}, 2_000);
+
+test("SENDFAST1: a BUSY keyless seat with a DRAFT or UNKNOWN composer is NOT_DELIVERED within the steer bound, nothing pasted", async () => {
+	for (const [verdict, code] of [[{ state: "DRAFT" }, "TERN_COMPOSER_BUSY"],
+		[{ state: "UNKNOWN", reason: "composer record is stale" }, "TERN_COMPOSER_UNKNOWN"]] as const) {
+		const { fake, busy } = pasteFake({ steering: true });
+		let clock = 0;
+		const dropDir = ternDropDir();
+		const r = await deliverToTernSeat({ seat: keylessSeat, text: "status update", dropDir, io: fake.io, observe: busy,
+			identify: async () => ternIdentified, untilDeliveredMs: TERN_TURN_BOUNDARY_WAIT_MS, pollMs: 10, deadlineMs: 200,
+			now: () => clock, wait: async (ms) => { clock += ms; },
+			composer: (): ComposerVerdict => { fake.composerReads++; return verdict; } });
+		expect([code, r.status, r.code, r.sends]).toEqual([code, "NOT_DELIVERED", code, 0]);
+		expect(fake.pastes + fake.enters).toBe(0);
+		expect(clock).toBe(TERN_STEER_BOUND_MS);
+		expect(fake.composerReads).toBeGreaterThan(1);
+		expect(readFileSync(r.drop_path!, "utf8")).toContain("status update");
+		const pending = join(dropDir, "..", "tern-pending");
+		expect(existsSync(pending) ? readdirSync(pending).filter((n) => n.endsWith(".json")) : []).toEqual([]);
+	}
+});
+
+test("SENDFAST1 control: a keyless /goal set to a BUSY seat keeps its turn-boundary admission", async () => {
+	const { fake, busy } = pasteFake({ steering: true });
+	let clock = 0;
+	const r = await deliverToTernSeat({ seat: keylessSeat, text: "/goal set Ship it", dropDir: ternDropDir(), io: fake.io,
+		observe: busy, identify: async () => ternIdentified, untilDeliveredMs: 5, pollMs: 1, deadlineMs: 5,
+		now: () => clock, wait: async (ms) => { clock += ms; }, composer: () => ({ state: "EMPTY" }) });
+	expect(r).toMatchObject({ status: "NOT_DELIVERED", code: "UNTIL_DELIVERED_EXHAUSTED", sends: 0 });
+	expect(fake.pastes + fake.enters).toBe(0);
+	expect(fake.observes).toBeGreaterThan(1);
 });

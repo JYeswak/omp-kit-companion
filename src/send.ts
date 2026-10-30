@@ -9,7 +9,7 @@ import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
 import { defaultTernIo, discoverTernSeatFromInspection, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView,
 	resolveDaemonSocket, sessionViewOfText } from "./plane-tern.ts";
-import type { SessionJournalView, TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
+import type { SessionJournalView, TernObserveOptions, TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
@@ -658,7 +658,7 @@ export async function proveTernCliSend(input: {
 		targetCwd ||= discovery.seat.cwd;
 	}
 	const result = await deliverToTernSeat({ seat: { session, pane: input.pane, windowKey, cwd: targetCwd }, text: input.message,
-		dropDir: input.dropDir, io, untilDeliveredMs: input.untilDeliveredMs ?? 300_000,
+		dropDir: input.dropDir, io, untilDeliveredMs: input.untilDeliveredMs ?? TERN_TURN_BOUNDARY_WAIT_MS,
 		pollMs: input.pollMs, deadlineMs: input.deadlineMs, wait: input.wait, composer: input.composer, env });
 	return { ...result, bead_ids: beads.bead_ids, no_bead_reason: beads.no_bead_reason };
 }
@@ -677,7 +677,11 @@ export async function proveTernCliSend(input: {
  * `tern send BLOCK keys Enter` (the pane's own window, else the first), and
  * only when the seat's own fresh kit-composer-state record says its composer
  * is empty: a draft refuses TERN_COMPOSER_BUSY, a missing/stale record
- * refuses TERN_COMPOSER_UNKNOWN, never a blind paste.
+ * refuses TERN_COMPOSER_UNKNOWN, never a blind paste. SENDFAST1
+ * (ompkit-fp72.135.3.84): a message to a keyless seat that is BUSY is pasted
+ * at once into an EMPTY composer, so OMP's native steering queue takes it
+ * (PROVEN_STEERED); its DRAFT/UNKNOWN composer is re-read for at most
+ * TERN_STEER_BOUND_MS, then NOT_DELIVERED with a drop copy.
  *
  * Proof model (no screen parsing, no API receipt): a complete typed journal
  * entry strictly past the pre-send cursor, in the bound session file whose
@@ -728,6 +732,18 @@ export function readComposerRecord(sessionFile: string, opts: { dir?: string; no
 
 export const TERN_PROOF_POLL_MS = 1000;
 export const TERN_PROOF_DEADLINE_MS = 20_000;
+/**
+ * The CLI's default until-delivered bound. Only sends that need a turn boundary use it: a keyed seat's one ctl
+ * turn and a `/goal set` payload. A keyless message never waits on BUSY (SENDFAST1) and caps any wait at
+ * TERN_STEER_BOUND_MS.
+ */
+export const TERN_TURN_BOUNDARY_WAIT_MS = 300_000;
+/** SENDFAST1: the most a steerable message waits for a provable observation or an EMPTY composer record. */
+export const TERN_STEER_BOUND_MS = 3_000;
+/** Composer-record re-read cadence within TERN_STEER_BOUND_MS (the writer refreshes every 5 s and on edits). */
+export const TERN_STEER_COMPOSER_POLL_MS = 250;
+const JOURNAL_REWRITE_REASONS: Record<string, true> = { JOURNAL_SHRANK: true, JOURNAL_REPLACED: true,
+	JOURNAL_PREFIX_CHANGED: true, JOURNAL_PREFIX_BEYOND_WINDOW: true };
 /**
  * Resolve the tern binary without hardcoding a home directory (AM58562-5):
  * explicit `TERN_CTL_BIN` env override, else `$HOME/.local/bin/tern`.
@@ -1217,7 +1233,8 @@ function settleTernPending(pendingDir: string, name: string, rec: TernPendingRec
  *
  * Flow: GOALSEND form and payload class (an OMP shell escape is refused
  * outright, SENDGATE1) -> gate flags -> exact seat binding -> observe
- * (BUSY waits up to untilDeliveredMs, then NOT_DELIVERED with a drop file;
+ * (BUSY waits up to untilDeliveredMs, then NOT_DELIVERED with a drop file,
+ * except a keyless message, which steers: SENDFAST1;
  * a destructive payload to a pane not proven to run OMP is refused by rule
  * id) -> identify -> observe/identify/configured-pane fence (SENDX1) ->
  * eligibility from the very snapshot observe hashed -> refuse slash
@@ -1296,13 +1313,18 @@ export async function deliverToTernSeat(input: {
 	// TERNADDR1: no window key means no ctl endpoint; admit by paste + Enter into the pane's own window.
 	const windowKey = input.seat.windowKey.trim();
 	const pasteMode = windowKey === "";
+	// SENDFAST1: a message pasted into an EMPTY composer reaches a running OMP through its native steering queue, so
+	// a keyless message never waits for the turn boundary; ctl turns and `/goal set` keep their idle admission.
+	const steerable = pasteMode && payloadKind.kind === "message";
+	const observeOpts: TernObserveOptions = steerable ? { turnInFlightIsBusy: true } : {};
 	const seatKey = `${input.seat.session}/${input.seat.pane}@${input.seat.windowKey}`.replace(/[^A-Za-z0-9]+/g, "_");
-	let observation = await observe(input.seat, input.io);
-	const untilDeliveredMs = Math.max(0, input.untilDeliveredMs ?? 0);
+	let observation = await observe(input.seat, input.io, observeOpts);
+	const requestedUntilMs = Math.max(0, input.untilDeliveredMs ?? 0);
+	const untilDeliveredMs = steerable ? Math.min(requestedUntilMs, TERN_STEER_BOUND_MS) : requestedUntilMs;
 	const busyRetries = Math.ceil(untilDeliveredMs / pollMs);
 	const untilDeliveredDeadline = now() + untilDeliveredMs;
 	let deadlineExpired = false;
-	const waitsForTurnBoundary = () => observation.state === "BUSY"
+	const waitsForTurnBoundary = () => (observation.state === "BUSY" && !steerable)
 		|| (observation.state === "UNKNOWN" && observation.working === true
 			&& (observation.reason === "SESSION_TURN_IN_FLIGHT" || observation.reason === "ACTIVE_BRANCH_UNAVAILABLE"
 				|| observation.reason === "SESSION_FILE_UNAVAILABLE" || observation.reason === "SESSION_ORACLE_STATE_UNKNOWN"));
@@ -1318,7 +1340,7 @@ export async function deliverToTernSeat(input: {
 			deadlineExpired = true;
 			break;
 		}
-		observation = await observe(input.seat, input.io);
+		observation = await observe(input.seat, input.io, observeOpts);
 		if (now() >= untilDeliveredDeadline) {
 			deadlineExpired = true;
 			break;
@@ -1340,7 +1362,8 @@ export async function deliverToTernSeat(input: {
 			code: "UNTIL_DELIVERED_EXHAUSTED", queue_states: ["QUEUED", "EXPIRED"] };
 	}
 	if (observation.state === "DEAD") return fail("SEAT_DEAD", "seat pane is dead; zero sends");
-	if (observation.state !== "IDLE" || observation.runtimeBinding === null) {
+	const steer = steerable && observation.state === "BUSY";
+	if ((observation.state !== "IDLE" && !steer) || observation.runtimeBinding === null) {
 		const code = observation.reason === "SESSION_CWD_MISMATCH" ? "PLANE_SEAT_UNBOUND"
 			: observation.reason === "PLANE_SEAT_UNBOUND" || observation.reason === "TERN_WINDOW_UNBOUND"
 				|| observation.reason === "SEAT_REBOUND" || observation.reason === "SEAT_CWD_MISMATCH"
@@ -1349,7 +1372,7 @@ export async function deliverToTernSeat(input: {
 		return fail(code, `seat not provably idle (${observation.reason ?? "unknown"}); zero sends`);
 	}
 	const identityProject = input.seat.identityProject ?? (input.env ?? process.env).AGENT_MAIL_PROJECT;
-	const identity = await identify({ ...input.seat, identityProject }, input.io);
+	const identity = await identify({ ...input.seat, identityProject }, input.io, observeOpts);
 	if (identity.status !== "IDENTIFIED" || identity.runtimeBinding === null) {
 		const code = identity.status === "REFUSED" ? identity.code : "IDENTITY_UNKNOWN";
 		const reason = identity.reason;
@@ -1376,13 +1399,18 @@ export async function deliverToTernSeat(input: {
 	// tail of one inode); its fingerprint covers inode, size and every byte read.
 	const journalView = readSessionView(input.io, sessionFile);
 	if (journalView === null) return fail("ELIGIBILITY_UNKNOWN", "session file unreadable; zero sends");
-	if (journalView.sha256 !== observation.sessionSha) {
+	// A busy seat keeps journaling while it is observed; a steer needs only the same incarnation, grown not
+	// rewritten. The proof key pins the bytes this read saw.
+	if (steer ? journalView.fileSize < (observation.sessionCursorBytes ?? Number.POSITIVE_INFINITY)
+		: journalView.sha256 !== observation.sessionSha) {
 		return fail("SEAT_REBOUND", "session file changed since observation; zero sends");
 	}
 	const journal = parseSessionView(journalView);
-	if (journal.status !== "KNOWN" || journal.oracleBusy !== false || !journal.terminalAssistantStop || journal.unresolvedAsyncTool
-		|| journal.lastMessageRole !== "assistant") {
-		return fail("ELIGIBILITY_UNSETTLED", "turn not settled (parse, stop, pending tools or live user turn); zero sends");
+	const unsettled = "turn not settled (parse, stop, pending tools or live user turn); zero sends";
+	if (journal.status !== "KNOWN") return fail("ELIGIBILITY_UNSETTLED", unsettled);
+	if (!steer && (journal.oracleBusy !== false || !journal.terminalAssistantStop || journal.unresolvedAsyncTool
+		|| journal.lastMessageRole !== "assistant")) {
+		return fail("ELIGIBILITY_UNSETTLED", unsettled);
 	}
 	if (journal.sessionId !== ob.sessionUuid) return fail("SEAT_REBOUND", "journal session differs from the bound runtime; zero sends");
 	if (payloadKind.kind === "slash") {
@@ -1440,8 +1468,11 @@ export async function deliverToTernSeat(input: {
 	try {
 		// F1: this re-read is a cheap incarnation pre-filter, NOT atomicity;
 		// on the ctl path the admission checks live inside the one native turn.
-		const fresh = readSessionView(input.io, sessionFile);
-		if (fresh === null || fresh.sha256 !== observation.sessionSha) {
+		const fresh = steer ? readSessionView(input.io, sessionFile, { start: key.prefixStart, cursor: key.cursorBytes })
+			: readSessionView(input.io, sessionFile);
+		const preEffect = fresh !== null && steer ? proveTernEntry(fresh, key) : null;
+		const rewritten = preEffect !== null && preEffect.status === "UNCERTAIN" && JOURNAL_REWRITE_REASONS[preEffect.reason] === true;
+		if (fresh === null || (steer ? rewritten : fresh.sha256 !== observation.sessionSha)) {
 			try { rmSync(pendingPath, { force: true }); } catch {}
 			return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
 				detail: `session moved between observe and effect; zero sends`, code: "SEAT_REBOUND",
@@ -1455,14 +1486,26 @@ export async function deliverToTernSeat(input: {
 			// prove an empty composer first; a running agent is fine (omp queues the
 			// submit as a steer). Enter is never pressed after a failed paste: an
 			// empty submit aborts a streaming turn.
-			const composer = (input.composer ?? readComposerRecord)(sessionFile);
+			const readComposer = input.composer ?? readComposerRecord;
+			let composer = readComposer(sessionFile);
+			const composerDeadline = now() + TERN_STEER_BOUND_MS;
+			while (steer && composer.state !== "EMPTY" && now() < composerDeadline) {
+				await wait(Math.min(TERN_STEER_COMPOSER_POLL_MS, composerDeadline - now()));
+				composer = readComposer(sessionFile);
+			}
 			if (composer.state !== "EMPTY") {
 				try { rmSync(pendingPath, { force: true }); } catch {}
+				const code = composer.state === "DRAFT" ? "TERN_COMPOSER_BUSY" : "TERN_COMPOSER_UNKNOWN";
+				const why = composer.state === "DRAFT" ? "seat composer holds unsent text"
+					: `seat composer state UNKNOWN (${composer.reason}); never paste blind`;
+				if (steer) {
+					return { status: "NOT_DELIVERED", marker, sends: 0, sessionFile, offset: null,
+						drop_path: dropMessage(input.dropDir, input.seat.session, input.seat.pane, marker, input.text),
+						detail: `${why} through the ${TERN_STEER_BOUND_MS} ms steer bound; nothing pasted; recovery copy written`, code };
+				}
 				return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,
-					detail: composer.state === "DRAFT" ? "seat composer holds unsent text; nothing pasted, zero sends"
-						: `seat composer state UNKNOWN (${composer.reason}); never paste blind, zero sends`,
-					code: composer.state === "DRAFT" ? "TERN_COMPOSER_BUSY" : "TERN_COMPOSER_UNKNOWN",
-					...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) };
+					detail: composer.state === "DRAFT" ? `${why}; nothing pasted, zero sends` : `${why}, zero sends`,
+					code, ...(queued ? { queue_states: ["QUEUED", "REFUSED"] as const } : {}) };
 			}
 			const socket = resolveDaemonSocket();
 			const env = socket === null ? undefined : { TERN_DAEMON_SOCKET: socket };

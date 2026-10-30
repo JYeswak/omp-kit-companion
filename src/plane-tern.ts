@@ -984,11 +984,21 @@ function unknownObservation(reason: string): TernObservation {
 		sessionCursorBytes: null, sessionLeafId: null, fg: null, runtimeBinding: null, evidence: [], reason };
 }
 
+/**
+ * SENDFAST1 (ompkit-fp72.135.3.84): a sender that can steer opts in to reading a working seat whose journal is
+ * mid-turn (a user message, or an assistant awaiting its tools) as BUSY with its runtime binding. Tern's live
+ * flag and the journal then agree the seat is busy; every other observer keeps the in-flight UNKNOWN.
+ */
+export interface TernObserveOptions {
+	turnInFlightIsBusy?: boolean;
+}
+
 /** Classify only agreement between Tern's live flag and the independent OMP session journal. */
 export function classifyTernObservation(
 	inspection: TernInspectionResult,
 	process: TernProcessResult,
 	journal: SessionJournalResult,
+	opts: TernObserveOptions = {},
 ): TernObservation {
 	if (inspection.status === "DEAD") {
 		return { state: "DEAD", working: false, oracleBusy: null, sessionFile: inspection.sessionFile,
@@ -1003,14 +1013,16 @@ export function classifyTernObservation(
 			evidence: ["tern-inspect", "tern-process", "session-file"], reason: journal.reason };
 	}
 	if (journal.cwd !== inspection.cwd) return unknownObservation("SESSION_CWD_MISMATCH");
-	if (journal.oracleBusy === null) {
+	const inFlightBusy = opts.turnInFlightIsBusy === true && inspection.working === true && journal.oracleBusy === null
+		&& sessionJournalDecision(journal) === "BUSY";
+	if (journal.oracleBusy === null && !inFlightBusy) {
 		return { state: "UNKNOWN", working: inspection.working, oracleBusy: null, sessionFile: inspection.sessionFile,
 			sessionSha: journal.sessionSha256, sessionCursorBytes: journal.cursorBytes, sessionLeafId: journal.leafId,
 			fg: process.foreground, runtimeBinding: null,
 			evidence: ["tern-inspect", "tern-process", "session-file"],
 			reason: sessionJournalDecision(journal) === "BUSY" ? "SESSION_TURN_IN_FLIGHT" : "SESSION_ORACLE_STATE_UNKNOWN" };
 	}
-	if (inspection.working !== journal.oracleBusy) {
+	if (!inFlightBusy && inspection.working !== journal.oracleBusy) {
 		return { state: "UNKNOWN", working: inspection.working, oracleBusy: journal.oracleBusy,
 			sessionFile: inspection.sessionFile, sessionSha: journal.sessionSha256, sessionCursorBytes: journal.cursorBytes,
 			sessionLeafId: journal.leafId, fg: process.foreground, runtimeBinding: null,
@@ -1148,6 +1160,7 @@ function observationFromReads(
 	seat: TernSeatBinding,
 	io: TernObserverIo,
 	resolution: Extract<TernWindowResolution, { ok: true }>,
+	opts: TernObserveOptions,
 ): TernObservation {
 	const windowFlag = ternWindowArgv(resolution);
 	const windowEnv = ternWindowEnv(resolution);
@@ -1173,7 +1186,7 @@ function observationFromReads(
 		fg: process.foreground, runtimeBinding: null, evidence: ["tern-inspect", "tern-process"],
 		reason: "SESSION_FILE_UNAVAILABLE" };
 	const journal = parseSessionView(view);
-	const observation = classifyTernObservation(inspection, process, journal);
+	const observation = classifyTernObservation(inspection, process, journal, opts);
 	if (observation.state === "UNKNOWN" && observation.reason === "WORKING_ORACLE_DISAGREEMENT") return observation;
 	if (observation.state !== "IDLE" && observation.state !== "BUSY") return observation;
 	const secondInspect = runCommand(io, ["tern", ...windowFlag, "inspect", "--json"], "inspect", windowEnv);
@@ -1208,11 +1221,12 @@ function observationFromReads(
 /** Observe one window-resolved Tern seat; missing evidence is never IDLE.
 The window resolves (and re-resolves per call) before any read; an
 unresolvable seat is UNKNOWN with its refusal code, never observed blind. */
-export async function observeTernSeat(seat: TernSeatBinding, io: TernObserverIo = defaultTernIo()): Promise<TernObservation> {
+export async function observeTernSeat(seat: TernSeatBinding, io: TernObserverIo = defaultTernIo(),
+	opts: TernObserveOptions = {}): Promise<TernObservation> {
 	const window = resolveTernWindow(seat, io);
 	if (!window.ok) return unknownObservation(window.code);
 	for (let retry = 0; retry <= OBSERVE_RETRIES; retry++) {
-		const observation = observationFromReads(seat, io, window);
+		const observation = observationFromReads(seat, io, window, opts);
 		if (observation.reason !== "WORKING_ORACLE_DISAGREEMENT") return observation;
 		if (retry < OBSERVE_RETRIES) await io.wait(OBSERVE_RETRY_MS);
 		else return { ...observation, reason: "WORKING_ORACLE_DISAGREEMENT_AFTER_RETRIES" };
@@ -1221,11 +1235,12 @@ export async function observeTernSeat(seat: TernSeatBinding, io: TernObserverIo 
 }
 
 /** Validate the exact Agent Mail recipient and current runtime incarnation for a Tern seat. */
-export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo = defaultTernIo()): Promise<TernIdentityResult> {
+export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo = defaultTernIo(),
+	opts: TernObserveOptions = {}): Promise<TernIdentityResult> {
 	const window = resolveTernWindow(seat, io);
 	if (!window.ok) return { status: "REFUSED", code: window.code, reason: window.reason, agent: null,
 		binding: null, cwdOk: false, runtimeBinding: null };
-	const observation = await observeTernSeat(seat, io);
+	const observation = await observeTernSeat(seat, io, opts);
 	if (observation.state === "DEAD") return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: "Tern pane is dead",
 		agent: null, binding: null, cwdOk: false, runtimeBinding: null };
 	if (observation.state !== "IDLE" && observation.state !== "BUSY") {
