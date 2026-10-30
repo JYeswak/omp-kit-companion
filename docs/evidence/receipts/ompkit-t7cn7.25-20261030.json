@@ -1,0 +1,86 @@
+{
+ "authority": "pending",
+ "confidence": "observed",
+ "evidence_id": "ev_27108c06dc22f4a442e574d8c0d9591f4f3047b7a7c7901c419052b183f32282",
+ "limitations": [
+  "Original positive export/checkout suites remain RED on fenced setuid ps. Only fixture import closure and source identity/unstamped refusal were exercised. No gate weakened, no identity fabricated, no publication/close/pregrade PASS claimed."
+ ],
+ "operation": "savefirst-original-boundary-blocker",
+ "parameters": {
+  "bead": "ompkit-t7cn7.25",
+  "source_commit": "8fbf1e75afbf11599576450f42a24142a0ebb485"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "after_closure": {
+   "compile_boot_harness_observed_green": true,
+   "current_failure": "heavy cannot establish process start identity; fenced ps posix_spawn EPERM; no boundary child ran",
+   "export_component_rc": 1,
+   "export_stream_sha256": "4f1c1cd320a04727cdb8169c484ba7882c95ff506652210c0b338265df187921",
+   "missing_import_gone": true,
+   "normal_checkout_rc": 1,
+   "normal_stream_sha256": "cb7e1762e513e48f707935685861634bd4b36f33c25da2d8808a42d5bf348437"
+  },
+  "bead": "ompkit-t7cn7.25",
+  "before_closure": {
+   "failure": "ModuleNotFoundError: No module named kitlib_tmp in the actual subset suite-metrics producer",
+   "stream_sha256": "db25e48448a280b93ef7ec372fca725dfa32800322a4c3ba72a270727c188d5c",
+   "suite_rc": 1
+  },
+  "blocker": "ompkit-kup44.4 open, blocks edge added; itself waits on ompkit-sb3tn in_review",
+  "consumer": "the existing hermetic root-fix owner and future original-acceptance grader; prevents loss of the literal failed specimen",
+  "no_product_assertion_removed": true,
+  "original_unstamped_negative": {
+   "identity_rc": 1,
+   "identity_stderr": "no exact source identity; unmet prerequisite: stamped archive export (/Users/josh/Developer/omp-kit/var/agent-tmp/copper-milestone-pull.16184/savefirst-native-unstamped.31478.42vly2)\n",
+   "producer": "git archive exact commit tree object, preserving literal export-subst placeholder; no edit or synthetic stamp supplied",
+   "stamp": "$Format:%H$",
+   "suite_rc": 1,
+   "suite_stderr": "no exact source identity; unmet prerequisite: stamped archive export (/Users/josh/Developer/omp-kit/var/agent-tmp/copper-milestone-pull.16184/savefirst-native-unstamped.31478.42vly2)\nFAIL SAVEFIRST1 fixture: no exact source identity at /Users/josh/Developer/omp-kit/var/agent-tmp/copper-milestone-pull.16184/savefirst-native-unstamped.31478.42vly2 (clean checkout or stamped archive export)\n"
+  },
+  "packet": {
+   "fragments": 0,
+   "imports": 0,
+   "kitlib": 0,
+   "pysafe": 0,
+   "readme": 0,
+   "regexploit": 0,
+   "sources": 0,
+   "tempsafe": 0
+  },
+  "pending_closure_commit": "8fbf1e75afbf11599576450f42a24142a0ebb485",
+  "pinned_shellcheck_0_9_0": 0,
+  "platform_binary": "/bin/ps observed -rwsr-xr-x root",
+  "prior": {
+   "applied": "not copied: our heavy admission requires a real incarnation; native proc_pidinfo is a researched candidate, not verified here",
+   "did": "upstream avoids setuid ps on Darwin by returning no identity; retains fail-closed behavior without PID-reuse detection",
+   "issue": "https://github.com/nicobailon/pi-subagents/issues/1273",
+   "jeff_search": "No directly matching Dicklesworthstone result found in the scoped search.",
+   "merged_patch": "https://github.com/nicobailon/pi-subagents/pull/1277.diff"
+  },
+  "real_process_differential": {
+   "fenced": {
+    "rc": 1,
+    "stderr": "375 | \tif (process.platform !== \"darwin\" && process.platform !== \"linux\") throw new Error(`kitlib runSync needs POSIX; ${process.platform} is unsupported`);\n376 | \tconst deadlineMs = Math.max(1, Math.ceil(positive(\"deadline_s\", options.deadline_s) * 1000));\n377 | \tconst cap = options.max_output_bytes ?? DEFAULT_MAX_OUTPUT_BYTES;\n378 | \tif (!Number.isSafeInteger(cap) || cap < 0) throw new RangeError(`max_output_bytes must be a non-negative integer, got ${cap}`);\n379 | \tconst started = performance.now();\n380 | \tconst child = Bun.spawnSync([...argv], {\n                         ^\nEPERM: operation not permitted, posix_spawn 'ps'\n    path: \"ps\",\n syscall: \"posix_spawn\",\n   errno: -1,\n    code: \"EPERM\"\n\n      at runSync (/Users/josh/Developer/omp-kit-companion/var/agent-tmp/savefirst-source-proof.34624/src/kitlib/run.ts:380:20)\n      at /Users/josh/Developer/omp-kit-companion/var/agent-tmp/savefirst-source-proof.34624/[eval]:1:274\n\nBun v1.4.3 (macOS arm64)\n",
+    "stdout": "SUITE-HERMETIC suite=savefirst-proc-diagnostic allow=BUN_CONFIG_FILE,BUN_INSTALL,GIT_CEILING_DIRECTORIES,GIT_CONFIG_GLOBAL,GIT_CONFIG_NOSYSTEM,GIT_TERMINAL_PROMPT,HOME,KITLIB_TMP_ROOT,KITROOT,KIT_TEST_LOOPBACK_PORT,LANG,OMP_KIT_CASE_CWD,OMP_KIT_DISK_OBSERVER,OMP_KIT_OMP_SRC_FETCH,OMP_KIT_TEST_WORK_ROOT,PATH,TEMP,TMP,TMPDIR,XDG_CACHE_HOME,XDG_CONFIG_HOME,XDG_DATA_HOME,XDG_STATE_HOME home=\"/Users/josh/Developer/omp-kit-companion/var/agent-tmp/savefirst-source-proof.34624/savefirst-proc-diagnostic.31478.ekh7c2/home\" fence=darwin-write-network policy_sha256=60871bbdb182d2aedc789b520c70d20767fe15d802d4a11fd96a8b0fbe7a38d0 loopback_port=57345\n"
+   },
+   "outside": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "{\"pid\":6160,\"ps_rc\":0,\"ps_timeout\":false,\"ps_stdout\":\"Ss   Fri Oct 30 03:20:20 2026    \\n\",\"ps_stderr\":\"\",\"incarnation\":{\"pid\":6160,\"start\":\"Fri Oct 30 03:20:20 2026\"}}\n"
+   }
+  },
+  "scope": "bounded measured-judge fixture closure repair; original whole component positives remain BLOCKED, not accepted",
+  "source_identity": {
+   "git_ceiling_used": true,
+   "no_git_rc": 0,
+   "no_git_stdout": "6593fcb265f4ed101c0d924a72707b13ecec9cd6\n",
+   "trusted_source_override_used": false,
+   "unborn_git_rc": 0,
+   "unborn_git_stdout": "6593fcb265f4ed101c0d924a72707b13ecec9cd6\n"
+  },
+  "source_repo": "/Users/josh/Developer/omp-kit-companion",
+  "state": "both original ACs demoted to unchecked; source bead blocked; no pregrade, in_review, ACCEPTED, self-close or publication",
+  "tested_source_base": "6593fcb265f4ed101c0d924a72707b13ecec9cd6"
+ }
+}
