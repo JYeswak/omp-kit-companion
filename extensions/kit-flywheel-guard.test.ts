@@ -7,6 +7,7 @@ import { checkNoWait } from "./kit-flywheel-guard";
 import { checkBgWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
+import { run } from "../src/kitlib/run.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -339,6 +340,50 @@ for (const reason of [
 		expect(await toolCall(h, project, `br --actor Verifier close kit-complete --reason ${JSON.stringify(reason)}`)).toBeUndefined();
 	});
 }
+
+test("NARROWCLOSE1: matcher removal permits the original incomplete closes", async () => {
+	const reasons = [
+		"AC1's literal 900 s case was not run",
+		"box 2 UNVERIFIED",
+		"LIMITS: original boundary case not run",
+		"AC1 PASS; every original case executed; 0 skipped",
+	];
+	const moduleUrl = new URL("./kit-flywheel-guard.ts", import.meta.url).href;
+	const script = `
+		import { plugin } from "bun";
+		let applied = false;
+		plugin({ name: "narrowclose1-mutant", setup(build) {
+			build.onLoad({ filter: /kit-flywheel-guard[.]ts$/ }, async ({ path }) => {
+				const source = await Bun.file(path).text();
+				const site = "const incomplete = incompleteCloseClause(request.reason);";
+				if (source.split(site).length !== 2) throw new Error("MUTATION_SITE_NOT_UNIQUE");
+				applied = true;
+				return { contents: source.replace(site, "const incomplete = null;"), loader: "ts" };
+			});
+		}});
+		// Loading-boundary test: a static import would run before the mutation plugin.
+		const { checkTrackerMutations } = await import(${JSON.stringify(moduleUrl)});
+		const deps = { env: {}, home: process.cwd(), sessionCwd: process.cwd(),
+			exec: async () => ({ code: 0, stderr: "", stdout: JSON.stringify([{
+				id: "fixture-close", status: "in_review", assignee: "Builder", created_by: "Filer", comments: [],
+			}]) }),
+		};
+		const results = [];
+		for (const reason of ${JSON.stringify(reasons)}) {
+			const command = "br --actor Verifier close fixture-close --reason " + JSON.stringify(reason);
+			const verdict = await checkTrackerMutations({ toolName: "bash", input: { command } }, deps);
+			results.push({ reason, blocked: verdict?.block === true });
+		}
+		console.log(JSON.stringify({ applied, results }));
+	`;
+	const result = await run([process.execPath, "--eval", script], {
+		cwd: process.cwd(), deadline_s: 60, max_output_bytes: 65536,
+	});
+	expect(result.rc).toBe(0);
+	expect(JSON.parse(new TextDecoder().decode(result.stdout))).toEqual({
+		applied: true, results: reasons.map(reason => ({ reason, blocked: false })),
+	});
+});
 
 // GATEEVENTS1 (ompkit-fp72.135.3.12): the guard's verdict on a tracker act lands in the gate-events ledger under the
 // host's state dir, refusal and pass alike, so refusal chains and first-attempt success are measured.
