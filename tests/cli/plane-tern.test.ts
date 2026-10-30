@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
 	classifyTernObservation,
@@ -342,6 +342,24 @@ test("Tern process parser rejects a non-OMP foreground", () => {
 	const snapshot = { ...processFixture, foreground: { ...processFixture.foreground, argv: ["node"] } };
 	expect(parseTernProcess(snapshot, "/repo", 123))
 		.toMatchObject({ status: "UNKNOWN", reason: "FOREGROUND_OMP_MISSING" });
+});
+
+// SENDOMP1 (ompkit-fp72.135.3.85): Tern launches its bundled OMP as <app support>/omp/versions/<semver>.
+const TERN_BUNDLED_OMP = "/Users/fixture/Library/Application Support/Tern/omp/versions/18.13.3";
+const withForeground = (argv0: string, name = basename(argv0)) =>
+	({ ...processFixture, foreground: { ...processFixture.foreground, name, argv: [argv0, "--profile", "codex"] } });
+test("SENDOMP1: the parser accepts Tern's bundled OMP (omp/versions/<semver>, named for its version) and still accepts omp", () => {
+	expect(parseTernProcess(withForeground(TERN_BUNDLED_OMP), "/repo", 123)).toMatchObject({ status: "FOUND",
+		foreground: { name: "18.13.3", argv: [TERN_BUNDLED_OMP, "--profile", "codex"] } });
+	expect(parseTernProcess(withForeground("omp", "18.11.0"), "/repo", 123)).toMatchObject({ status: "FOUND" });
+	expect(parseTernProcess(withForeground("/opt/other/Tern/omp/versions/19.0.12"), "/repo", 123)).toMatchObject({ status: "FOUND" });
+});
+test("SENDOMP1 planted: a version-named process outside an omp/versions/ directory stays FOREGROUND_OMP_MISSING", () => {
+	for (const argv0 of ["/usr/bin/18.13.3", "/opt/tools/versions/18.13.3", "/x/omp/18.13.3", "/x/omp/bin/versions/18.13.3",
+		"omp/versions/18.13.3", "/x/omp/versions/latest", "/x/omp/versions/18.13", "/x/omp/versions/18.13.3-rc1", "/x/omp/versions/1..3"]) {
+		expect([argv0, parseTernProcess(withForeground(argv0), "/repo", 123)])
+			.toMatchObject([argv0, { status: "UNKNOWN", reason: "FOREGROUND_OMP_MISSING" }]);
+	}
 });
 
 test("Tern process parser extracts the actual foreground OMP record", () => {

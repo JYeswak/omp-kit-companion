@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 /** Whole-file parse cap; a larger session file is decided from a bounded tail (ompkit-774u.1.3). */
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
@@ -490,11 +490,24 @@ export function parseTernInspection(snapshot: unknown, seat: TernSeatBinding): T
 		exited: null, sessionFile };
 }
 
+/**
+ * SENDOMP1 (ompkit-fp72.135.3.85): Tern launches its bundled OMP as `<Tern app support>/omp/versions/<semver>`, so
+ * the process is named for its version. Only that absolute layout counts; a version-named binary anywhere else is
+ * not OMP. No home or app-support prefix is assumed.
+ */
+function isTernBundledOmp(command: string): boolean {
+	if (!isAbsolute(command)) return false;
+	const versionDir = dirname(command);
+	if (basename(versionDir) !== "versions" || basename(dirname(versionDir)) !== "omp") return false;
+	const parts = basename(command).split(".");
+	return parts.length === 3 && parts.every((part) => part.length > 0 && [...part].every((ch) => ch >= "0" && ch <= "9"));
+}
+
 function commandIsOmp(process: Record<string, unknown>, argv: string[]): boolean {
 	const name = typeof process.name === "string" ? process.name.toLowerCase() : "";
 	const executable = typeof process.executable === "string" ? basename(process.executable).toLowerCase() : "";
 	const command = argv.length > 0 ? basename(argv[0]!).toLowerCase() : "";
-	return name === "omp" || executable === "omp" || command === "omp";
+	return name === "omp" || executable === "omp" || command === "omp" || (argv.length > 0 && isTernBundledOmp(argv[0]!));
 }
 
 /** Parse Tern's actual per-pane process result; only its foreground OMP process is accepted. */
