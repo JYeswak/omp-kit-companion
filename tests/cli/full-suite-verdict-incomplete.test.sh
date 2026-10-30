@@ -52,6 +52,63 @@ run_verdict() {
 	rc=$?
 	tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
 }
+run_verdict_with_env() {
+	out="$TMP/$1.out"
+	env "$2=$3" KITROOT="$KITROOT_DIR" OMP_KIT_OMP_SRC_FETCH=0 \
+		sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
+	rc=$?
+	tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+}
+
+run_verdict_with_envs() {
+	out="$TMP/$1.out"
+	shift
+	env "$@" KITROOT="$KITROOT_DIR" OMP_KIT_OMP_SRC_FETCH=0 \
+		sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
+	rc=$?
+	tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+}
+
+refusal_case() {
+	label=$1
+	name=$2
+	value_kind=$3
+	marker="$TMP/$label.ran"
+	rm -f "$marker"
+	mkrepo_begin "$label"
+	addfile tests/cli/fixture_test.py "from pathlib import Path
+Path('$marker').write_text('ran')"
+	mkrepo_commit
+	case "$value_kind" in
+		git-dir) value="$repo/.git" ;;
+		work-tree) value="$repo" ;;
+		live-db) value="$KITROOT_DIR/.beads/beads.db" ;;
+		*) not_ok "unknown refusal fixture value $value_kind"; return 1 ;;
+	esac
+	run_verdict_with_env "$label" "$name" "$value"
+	if [ "$rc" -ne 0 ] && grep -F "FULL-SUITE: REFUSED caller $name is set" "$out" >/dev/null && [ ! -e "$marker" ]; then
+		ok "$name is named and no suite starts"
+	else
+		not_ok "$name did not refuse before starting a suite (rc=$rc)"; cat "$out"
+	fi
+}
+
+fresh_refusal_case() {
+	name=$1
+	value_kind=$2
+	case "$value_kind" in
+		git-dir) value="$repo/.git" ;;
+		work-tree) value="$repo" ;;
+		live-db) value="$KITROOT_DIR/.beads/beads.db" ;;
+	esac
+	fresh_out="$TMP/fresh-$name.out"
+	if env "$name=$value" sh "$KITROOT_DIR/scripts/fresh-gate.sh" --test-workers >"$fresh_out" 2>&1; then fresh_rc=0; else fresh_rc=$?; fi
+	if [ "$fresh_rc" -ne 0 ] && grep -F "FRESH-GATE: REFUSED caller $name is set" "$fresh_out" >/dev/null; then
+		ok "fresh gate refuses caller $name before its command proceeds"
+	else
+		not_ok "fresh gate did not refuse caller $name (rc=$fresh_rc)"; cat "$fresh_out"
+	fi
+}
 # side_files_gone: no runner-private file or dir is left beside the cache entry.
 side_files_gone() {
 	for side in status bun shell runner timed-out; do
@@ -88,6 +145,321 @@ if [ -f "$cache/$tree.json" ] && grep -F '"verdict": "PASS"' "$cache/$tree.json"
 if grep -F 'FULLSUITELOG1-CONTROL ok' "$cache/$tree.log" >/dev/null 2>&1; then ok "complete run keeps <tree>.log"; else not_ok "complete run has no <tree>.log"; fi
 if [ ! -e "$cache/$tree.incomplete.log" ]; then ok "complete run writes no incomplete log"; else not_ok "complete run wrote an incomplete log"; fi
 
+# HERMETIC1: caller Git/tracker authority is refused before an actual suite can start.
+refusal_case inherited-git-dir GIT_DIR git-dir
+refusal_case inherited-git-work-tree GIT_WORK_TREE work-tree
+refusal_case inherited-beads-db BEADS_DB live-db
+fresh_refusal_case GIT_DIR git-dir
+fresh_refusal_case GIT_WORK_TREE work-tree
+fresh_refusal_case BEADS_DB live-db
+
+# HERMETIC1: suite processes see only wrapper-owned locations and declared base variables.
+mkrepo_begin hermetic-env
+addfile tests/cli/fixture_test.py "import os
+from pathlib import Path
+import subprocess
+home = Path(os.environ['HOME']).resolve()
+scratch = Path(os.environ['TMPDIR']).resolve()
+assert home != Path('$HOME').resolve(), home
+assert home.is_relative_to(scratch), (home, scratch)
+for name in ('XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'GIT_CONFIG_GLOBAL'):
+    assert Path(os.environ[name]).resolve().is_relative_to(home), (name, os.environ[name], home)
+assert Path(os.environ['GIT_CEILING_DIRECTORIES']).resolve() == Path.cwd().resolve().parent
+assert Path(os.environ['GIT_CONFIG_GLOBAL']).is_file()
+assert subprocess.run(['git', 'config', '--global', '--get', 'user.email'],
+    check=True, text=True, capture_output=True).stdout.strip() == 'omp-kit-tests@example.invalid'
+for name in ('AGENT_NAME', 'AGENT_MAIL_TOKEN', 'FLEET_GUARD_LIVE',
+             'OMP_KIT_UNDECLARED', 'TMUX', 'TMUX_PANE'):
+    assert name not in os.environ, name
+assert os.environ['PATH'] and os.environ['LANG']
+print('HERMETIC1_ENV_BOUNDARY home=' + str(home), flush=True)"
+mkrepo_commit
+run_verdict_with_envs hermetic-env AGENT_NAME=SilverCondor AGENT_MAIL_TOKEN=synthetic-token-never-real \
+	FLEET_GUARD_LIVE=1 OMP_KIT_UNDECLARED=synthetic-value TMUX=synthetic TMUX_PANE=%999
+cache="$repo.cache"
+if [ "$rc" -eq 0 ] && grep -F 'HERMETIC1_ENV_BOUNDARY home=' "$cache/$tree.log" >/dev/null 2>&1; then
+	ok "the real suite runner scrubs authority and gives the suite an owned home and Git boundary"
+else
+	not_ok "the real suite runner leaked env or lacked an owned home/Git boundary (rc=$rc)"; cat "$out"
+	[ ! -f "$cache/$tree.log" ] || cat "$cache/$tree.log"
+fi
+
+# HERMETIC1: the shared helper must preserve declared controls, scrub authority, and fence writes.
+helper="$KITROOT_DIR/scripts/suite-hermetic-env.sh"
+helper_archive="$TMP/hermetic-helper-archive"
+helper_scratch="$TMP/hermetic-helper-scratch"
+protected="$TMP/hermetic-helper-protected"
+helper_out="$TMP/hermetic-helper-control.out"
+mkdir -p "$helper_archive/work" "$helper_scratch"
+printf 'protected sentinel\n' >"$protected"
+cp "$protected" "$protected.before"
+if (
+	cd "$helper_archive/work"
+	env AGENT_NAME=synthetic-agent AGENT_MAIL_TOKEN=synthetic-token-never-real \
+		FLEET_GUARD_LIVE=1 OMP_KIT_UNDECLARED=synthetic-value TMUX=synthetic \
+		HERMETIC_CONTROL=declared \
+		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+		--suite tests/cli/fixture_test.py --allow-env HERMETIC_CONTROL -- \
+		python3 -c 'import os, pathlib, subprocess
+home = pathlib.Path(os.environ["HOME"]).resolve()
+scratch = pathlib.Path(os.environ["TMPDIR"]).resolve()
+assert home.is_relative_to(scratch)
+for name in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "GIT_CONFIG_GLOBAL"):
+    assert pathlib.Path(os.environ[name]).resolve().is_relative_to(home)
+assert pathlib.Path(os.environ["GIT_CEILING_DIRECTORIES"]).resolve() == pathlib.Path.cwd().resolve().parent.parent
+assert pathlib.Path(os.environ["GIT_CONFIG_GLOBAL"]).is_file()
+assert subprocess.run(["git", "config", "--global", "--get", "user.email"],
+    check=True, text=True, capture_output=True).stdout.strip() == "omp-kit-tests@example.invalid"
+assert os.environ["HERMETIC_CONTROL"] == "declared"
+for name in ("AGENT_NAME", "AGENT_MAIL_TOKEN", "FLEET_GUARD_LIVE", "OMP_KIT_UNDECLARED", "TMUX"):
+    assert name not in os.environ, name
+assert os.environ["PATH"] and os.environ["LANG"]
+pathlib.Path(os.environ["TMPDIR"], "scratch-write").write_text("allowed")
+pathlib.Path.cwd().joinpath("archive-write").write_text("allowed")
+print("HERMETIC_HELPER_CONTROL", flush=True)'
+) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+if [ "$helper_rc" -eq 0 ] && grep -F 'HERMETIC_HELPER_CONTROL' "$helper_out" >/dev/null \
+	&& grep -F 'suite=tests/cli/fixture_test.py' "$helper_out" >/dev/null \
+	&& grep -F 'allow=' "$helper_out" >/dev/null \
+	&& grep -F "home=\"$helper_scratch/home\"" "$helper_out" >/dev/null \
+	&& grep -F 'fence=' "$helper_out" >/dev/null \
+	&& grep -F 'policy_sha256=' "$helper_out" >/dev/null \
+	&& ! grep -F 'synthetic-token-never-real' "$helper_out" >/dev/null \
+	&& ! grep -F 'xcrun_db' "$helper_out" >/dev/null; then
+	ok "the shared helper logs suite authority without values and keeps declared env with owned HOME/Git config"
+else
+	not_ok "shared helper environment control failed (rc=$helper_rc)"; cat "$helper_out"
+fi
+helper_python="$helper_scratch/bin/python3"
+[ -x "$helper_python" ] || helper_python=$(command -v python3)
+helper_out="$TMP/hermetic-sentinel-probe.out"
+if "$helper_python" - "$helper" "$helper_archive" "$helper_scratch" <<'PY' >"$helper_out" 2>&1
+import os
+import socket
+import subprocess
+import sys
+import threading
+
+helper, archive, scratch = sys.argv[1:]
+python = os.path.join(scratch, "bin", "python3")
+if not os.path.isfile(python):
+    python = sys.executable
+token = "synthetic-token-never-real"
+fixture = """import os, socket, sys
+mode, expected_port, expected_token = sys.argv[1:]
+names = ("FLEET_GUARD_LIVE", "AGENT_MAIL_TOKEN", "HERMETIC_SENTINEL_PORT")
+if mode == "scrubbed":
+    assert all(name not in os.environ for name in names), names
+    print("HERMETIC_SENTINEL_SCRUBBED")
+else:
+    assert os.environ["FLEET_GUARD_LIVE"] == "1"
+    assert os.environ["AGENT_MAIL_TOKEN"] == expected_token
+    port = int(os.environ["HERMETIC_SENTINEL_PORT"])
+    assert port == int(expected_port)
+    with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
+        connection.sendall(b"x")
+    print("HERMETIC_SENTINEL_DIAL")
+"""
+
+for mode, allow in (("scrubbed", False), ("control", True)):
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    server.settimeout(2)
+    port = server.getsockname()[1]
+    seen = []
+
+    def accept_one():
+        try:
+            connection, _address = server.accept()
+        except socket.timeout:
+            return
+        with connection:
+            seen.append(connection.recv(1))
+
+    thread = threading.Thread(target=accept_one)
+    thread.start()
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "TMPDIR": os.environ["TMPDIR"],
+        "LANG": os.environ.get("LANG", "C"),
+        "FLEET_GUARD_LIVE": "1",
+        "AGENT_MAIL_TOKEN": token,
+        "HERMETIC_SENTINEL_PORT": str(port),
+    }
+    command = [
+        "sh", helper, "--archive", archive, "--scratch", scratch,
+        "--suite", "tests/cli/fixture_test.py", "--loopback-port", str(port),
+    ]
+    if allow:
+        for name in ("FLEET_GUARD_LIVE", "AGENT_MAIL_TOKEN", "HERMETIC_SENTINEL_PORT"):
+            command.extend(("--allow-env", name))
+    command.extend(("--", python, "-c", fixture, mode, str(port), token))
+    result = subprocess.run(command, cwd=os.path.join(archive, "work"), env=env,
+                            text=True, capture_output=True)
+    thread.join(3)
+    server.close()
+    expected = 1 if allow else 0
+    if (result.returncode != 0 or len(seen) != expected
+            or (allow and b"x" not in seen)
+            or token in result.stdout or token in result.stderr):
+        raise AssertionError(
+            f"{mode}: rc={result.returncode} connections={seen} "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+    marker = "HERMETIC_SENTINEL_DIAL" if allow else "HERMETIC_SENTINEL_SCRUBBED"
+    if marker not in result.stdout:
+        raise AssertionError(f"{mode}: missing {marker}: {result.stdout!r}")
+    print(f"{marker} connections={len(seen)}", flush=True)
+PY
+then
+	if grep -F 'HERMETIC_SENTINEL_SCRUBBED connections=0' "$helper_out" >/dev/null \
+		&& grep -F 'HERMETIC_SENTINEL_DIAL connections=1' "$helper_out" >/dev/null; then
+		ok "a synthetic live-service sentinel is scrubbed with zero dials and connects only when declared"
+	else
+		not_ok "synthetic live-service sentinel control did not prove zero/one dials"; cat "$helper_out"
+	fi
+else
+	not_ok "synthetic live-service sentinel fixture failed"; cat "$helper_out"
+fi
+
+
+# A local owned stub proves that the network probe records a dial when no fence is applied.
+helper_out="$TMP/hermetic-network-control.out"
+if "$helper_python" -c 'import socket, threading
+server = socket.socket()
+server.bind(("127.0.0.1", 0))
+server.listen()
+server.settimeout(2)
+port = server.getsockname()[1]
+seen = []
+def accept_one():
+    connection, _ = server.accept()
+    with connection:
+        seen.append(connection.recv(1))
+thread = threading.Thread(target=accept_one)
+thread.start()
+with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+    client.sendall(b"x")
+thread.join(2)
+server.close()
+assert seen == [b"x"], seen
+print("HERMETIC_NETWORK_CONTROL dial-recorded")' >"$helper_out" 2>&1; then
+	ok "the unfenced network control reaches only its owned stub and records the dial"
+else
+	not_ok "the unfenced owned-stub network control failed"; cat "$helper_out"
+fi
+if [ "$(uname -s)" = Darwin ]; then
+	helper_out="$TMP/hermetic-helper-denied.out"
+	if (
+		cd "$helper_archive/work"
+		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+			--suite tests/cli/fixture_test.py -- \
+			python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text("changed")' "$protected"
+	) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+	if [ "$helper_rc" -ne 0 ] && grep -F "$protected" "$helper_out" >/dev/null \
+		&& cmp -s "$protected.before" "$protected"; then
+		ok "the macOS write fence names and blocks an outside-scratch path without changing its bytes"
+	else
+		not_ok "the macOS write fence failed its outside-scratch negative (rc=$helper_rc)"; cat "$helper_out"
+	fi
+	helper_out="$TMP/hermetic-helper-symlink.out"
+	if (
+		cd "$helper_archive/work"
+		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+			--suite tests/cli/fixture_test.py -- \
+			python3 -c 'import os, pathlib, sys
+link = pathlib.Path(os.environ["TMPDIR"], "escape")
+link.symlink_to(sys.argv[1])
+link.write_text("changed")' "$protected"
+	) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+	if [ "$helper_rc" -ne 0 ] && grep -F "$helper_scratch/escape" "$helper_out" >/dev/null \
+		&& cmp -s "$protected.before" "$protected"; then
+		ok "the macOS write fence blocks a symlink escape from suite scratch"
+	else
+		not_ok "the macOS write fence failed its symlink-escape negative (rc=$helper_rc)"; cat "$helper_out"
+	fi
+	helper_out="$TMP/hermetic-loopback.out"
+	if (
+		cd "$helper_archive/work"
+		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+			--suite tests/cli/fixture_test.py -- \
+			python3 -c 'import os, socket, threading
+port = int(os.environ["KIT_TEST_LOOPBACK_PORT"])
+server = socket.socket()
+server.bind(("127.0.0.1", port))
+server.listen()
+server.settimeout(2)
+seen = []
+def accept_one():
+    connection, _ = server.accept()
+    with connection:
+        seen.append(connection.recv(1))
+thread = threading.Thread(target=accept_one)
+thread.start()
+with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+    client.sendall(b"x")
+thread.join(2)
+server.close()
+assert seen == [b"x"], seen
+print("HERMETIC_LOOPBACK_POSITIVE")'
+	) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+	if [ "$helper_rc" -eq 0 ] && grep -F 'HERMETIC_LOOPBACK_POSITIVE' "$helper_out" >/dev/null; then
+		ok "the macOS network fence allows its suite-owned loopback port"
+	else
+		not_ok "the macOS network fence rejected its suite-owned loopback port (rc=$helper_rc)"; cat "$helper_out"
+	fi
+	helper_out="$TMP/hermetic-fixed-port.out"
+	if (
+		cd "$helper_archive/work"
+		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+			--suite tests/cli/fixture_test.py -- \
+			python3 -c 'import errno, socket
+probe = socket.socket()
+result = probe.connect_ex(("127.0.0.1", 8765))
+probe.close()
+assert result == errno.EPERM, result
+print("HERMETIC_FIXED_PORT_DENIED 127.0.0.1:8765")'
+	) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+	if [ "$helper_rc" -eq 0 ] && grep -F 'HERMETIC_FIXED_PORT_DENIED 127.0.0.1:8765' "$helper_out" >/dev/null; then
+		ok "the macOS network fence denies the fixed live Agent Mail port"
+	else
+		not_ok "the macOS network fence did not deny 127.0.0.1:8765 (rc=$helper_rc)"; cat "$helper_out"
+fi
+	helper_out="$TMP/hermetic-fixed-port-allow.out"
+	if (
+		cd "$helper_archive/work"
+		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+			--suite tests/cli/fixture_test.py --loopback-port 8765 -- \
+			python3 -c 'print("INVALID_LOOPBACK_LAUNCHED")'
+	) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+	if [ "$helper_rc" -eq 125 ] \
+		&& grep -F 'SUITE-HERMETIC: REFUSED invalid suite loopback port 8765' "$helper_out" >/dev/null \
+		&& ! grep -F 'INVALID_LOOPBACK_LAUNCHED' "$helper_out" >/dev/null; then
+		ok "the helper refuses 127.0.0.1:8765 as a requested suite port"
+	else
+		not_ok "the helper allowed or misreported a request for fixed port 8765 (rc=$helper_rc)"; cat "$helper_out"
+	fi
+
+	helper_out="$TMP/hermetic-external-egress.out"
+	if (
+		cd "$helper_archive/work"
+		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+			--suite tests/cli/fixture_test.py -- \
+			python3 -c 'import errno, socket
+probe = socket.socket()
+result = probe.connect_ex(("203.0.113.1", 9))
+probe.close()
+assert result == errno.EPERM, result
+print("HERMETIC_EXTERNAL_EGRESS_DENIED 203.0.113.1:9")'
+	) >"$helper_out" 2>&1; then helper_rc=0; else helper_rc=$?; fi
+	if [ "$helper_rc" -eq 0 ] && grep -F 'HERMETIC_EXTERNAL_EGRESS_DENIED 203.0.113.1:9' "$helper_out" >/dev/null; then
+		ok "the macOS network fence denies external egress"
+	else
+		not_ok "the macOS network fence did not deny external egress (rc=$helper_rc)"; cat "$helper_out"
+	fi
+fi
+
 # Suites start with SIGINT at its default, as in a foreground run. The runner launches them in a
 # background list, which a non-interactive shell starts with SIGINT ignored; kitlib_tmp_test's
 # SIGINT case failed only under this runner (ompkit-lrbd.3).
@@ -102,14 +474,15 @@ else
 	not_ok "a suite started with SIGINT not at its default (rc=$rc)"; cat "$out"
 fi
 
-# A runner killed mid-run is incomplete even when the status file happens to name every suite: here
-# the first suite writes status lines for both suites (FORGE_DIR models a suite that finds the cache)
-# and SIGKILLs the runner, so the second suite never runs (Lrbd7Verify's negative 2).
+# A suite receives an inherited cache path only if the helper fails to scrub it. Killing the
+# suite's supervisor still leaves the run incomplete; a child cannot forge reusable runner state.
 mkrepo_begin forged
 # shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
-addfile tests/cli/a.test.sh 'for f in "$FORGE_DIR"/*.running.log.status; do
-	[ -f "$f" ] && printf "GREEN script-suite tests/cli/a.test.sh\nGREEN script-suite tests/cli/b.test.sh\n" >>"$f"
-done
+addfile tests/cli/a.test.sh 'if [ "${FORGE_DIR+x}" = x ]; then
+	echo "FULLSUITE-FORGE-LEAKED"
+	exit 98
+fi
+echo "FULLSUITE-FORGE-SCRUBBED"
 kill -9 "$PPID"'
 addfile tests/cli/b.test.sh 'echo "FULLSUITE-B ran"'
 mkrepo_commit
@@ -118,10 +491,15 @@ FORGE_DIR="$repo.cache"; export FORGE_DIR
 run_verdict forged
 unset FORGE_DIR
 cache="$repo.cache"
-if [ "$rc" -ne 0 ] && grep -F 'without complete evidence' "$out" >/dev/null && [ ! -e "$cache/$tree.json" ]; then
-	ok "a killed runner is incomplete even when the status lines name every suite"
+inc="$cache/$tree.incomplete.log"
+if [ "$rc" -ne 0 ] && grep -F 'per-file timing evidence is incomplete' "$out" >/dev/null \
+	&& [ ! -e "$cache/$tree.json" ] && [ -f "$inc" ] \
+	&& grep -F 'FULLSUITE-FORGE-SCRUBBED' "$inc" >/dev/null \
+	&& ! grep -F 'FULLSUITE-FORGE-LEAKED' "$inc" >/dev/null; then
+	ok "the cache path is scrubbed and killing a suite supervisor cannot produce complete evidence"
 else
-	not_ok "a killed runner's forged status lines were taken as complete (rc=$rc)"; cat "$out"
+	not_ok "a suite leaked its cache path or created complete evidence after supervisor death (rc=$rc)"; cat "$out"
+	[ ! -f "$inc" ] || cat "$inc"
 fi
 
 # (a) Nested markers: a shell suite that itself prints the runner's marker lines (as a nested
@@ -222,8 +600,8 @@ else
 	not_ok "bun is unavailable; the masking case cannot run"
 fi
 
-# The native tracker adapter must not inherit the publisher database. Keep the sentinel
-# nonempty so an empty or failed inventory cannot masquerade as preservation.
+# The runner rejects caller-provided BEADS_DB before suites start. Keep a nonempty
+# native sentinel to detect any unintended writes from the scratch-local tracker fixture.
 if command -v br >/dev/null 2>&1; then
 	actor=${AGENT_NAME:-full-suite-fixture}
 	sentinel="$TMP/native-sentinel"
@@ -273,13 +651,9 @@ rows = br("--db", str(chosen), "list", "--limit", "0", "--json")
 rows = rows["issues"] if isinstance(rows, dict) else rows
 assert [row["id"] for row in rows] == [explicit["id"]]'
 		mkrepo_commit
-		inherited_db_set=${BEADS_DB+x}
-		inherited_db=${BEADS_DB-}
-		BEADS_DB=$sentinel_db; export BEADS_DB
 		run_verdict native_tracker
-		if [ "$inherited_db_set" = x ]; then BEADS_DB=$inherited_db; export BEADS_DB; else unset BEADS_DB; fi
-		if [ "$rc" -eq 0 ]; then ok "native suite creates only its default and explicitly selected tracker rows"
-		else not_ok "native suite selected the publisher tracker (rc=$rc)"; cat "$out"
+		if [ "$rc" -eq 0 ]; then ok "native suite uses only its scratch-selected tracker rows"
+		else not_ok "native suite failed its scratch-local tracker checks (rc=$rc)"; cat "$out"
 		fi
 		[ ! -f "$repo.cache/$tree.log" ] || cat "$repo.cache/$tree.log"
 		if br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush list --limit 0 --json >"$TMP/sentinel-after.json" 2>"$TMP/sentinel-after.err" \
@@ -292,7 +666,7 @@ assert len(before_rows) == 1
 assert after == before, (before, after)
 print("NATIVEFIXTUREDB1 retained native sentinel:", json.dumps(after, sort_keys=True))
 PY
-		then ok "the nonempty native sentinel is unchanged by the declared suite"
+		then ok "scratch-local tracker operations leave the nonempty native sentinel unchanged"
 		else not_ok "the declared suite mutated or could not inventory its native sentinel"
 		fi
 	else
@@ -308,36 +682,29 @@ fi
 # their partner ran at the same time; p3 fails with rc 3, and finishing order is not the sorted order.
 # shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
 fspar_body='name=$(basename "$0" .test.sh)
-d=$FSPAR_DIR
-mkdir "$d/run/$name"
 echo "FSPAR-OUT $name begin"
 suite_tmp=$(printenv TMPDIR) || suite_tmp=
-printf "%s\n" "$suite_tmp" >"$d/tmp.$name"
-if [ -n "$suite_tmp" ] && [ -f "$suite_tmp/.owner" ]; then : >"$d/owned.$name"; fi
-peer=
-case "$name" in p1) peer=p2 ;; p2) peer=p1 ;; esac
-if [ -n "$peer" ] && [ "${FSPAR_PAIR:-0}" = 1 ]; then
-	k=0
-	while [ ! -d "$d/run/$peer" ] && [ "$k" -lt 200 ]; do sleep 0.1; k=$((k + 1)); done
-	if [ -d "$d/run/$peer" ]; then : >"$d/overlap.$name"; fi
-fi
+owner=0
+[ ! -n "$suite_tmp" ] || [ ! -f "$suite_tmp/.owner" ] || owner=1
+start=$(python3 -c "import time; print(time.time_ns())")
+echo "FSPAR-OBS START name=$name t=$start tmp=$suite_tmp owner=$owner"
 sleep 0.5
-ls "$d/run" | wc -l | tr -d " " >"$d/peak.$name"
 case "$name" in p1) sleep 1 ;; p3) sleep 0.4 ;; p4) sleep 0.2 ;; esac
-rmdir "$d/run/$name"
+finish=$(python3 -c "import time; print(time.time_ns())")
+echo "FSPAR-OBS END name=$name t=$finish"
 echo "FSPAR-OUT $name end"
 [ "$name" != p3 ] || exit 3'
 mkrepo_begin par
 for n in p1 p2 p3 p4 p5; do addfile "tests/cli/$n.test.sh" "$fspar_body"; done
 mkrepo_commit
-# fspar_run LABEL JOBS PAIR: one verdict on the par tree; its cache and probe records move aside.
+# fspar_run LABEL JOBS: one verdict on the par tree; its cache and recorded observations move aside.
 fspar_run() {
 	rm -rf "$TMP/fspar" "$repo.cache"
-	mkdir -p "$TMP/fspar/run"
-	FSPAR_DIR="$TMP/fspar" FSPAR_PAIR=$3 FULL_SUITE_SHELL_JOBS=$2
-	export FSPAR_DIR FSPAR_PAIR FULL_SUITE_SHELL_JOBS
+	mkdir -p "$TMP/fspar"
+	FULL_SUITE_SHELL_JOBS=$2
+	export FULL_SUITE_SHELL_JOBS
 	run_verdict "$1"
-	unset FSPAR_DIR FSPAR_PAIR FULL_SUITE_SHELL_JOBS
+	unset FULL_SUITE_SHELL_JOBS
 	rm -rf "$repo.cache.$1" "$TMP/fspar.$1"
 	mv "$repo.cache" "$repo.cache.$1"
 	mv "$TMP/fspar" "$TMP/fspar.$1"
@@ -345,10 +712,40 @@ fspar_run() {
 fspar_lines() { grep -E '^(GREEN|RED) script-suite ' "$repo.cache.$1/$tree.log"; }
 fspar_order() { grep -E '^(FSPAR-OUT |GREEN script-suite |RED script-suite )' "$repo.cache.$1/$tree.log"; }
 fspar_counts() { python3 -c 'import json, sys; e = json.load(open(sys.argv[1]))["evidence"]; print(e["shell_suites"], e["shell_fail"])' "$repo.cache.$1/$tree.json"; }
-fspar_peak() { cat "$TMP/fspar.$1"/peak.* | sort -n | tail -n 1; }
-fspar_run serial 1 0
+fspar_metrics() {
+	python3 - "$repo.cache.$1/$tree.log" <<'PY'
+import sys
+from pathlib import Path
+
+starts, finishes, scratch, owners = {}, {}, set(), []
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if not line.startswith("FSPAR-OBS "):
+        continue
+    parts = line.split()
+    fields = dict(part.split("=", 1) for part in parts[2:])
+    name = fields.get("name")
+    if parts[1] == "START":
+        starts[name] = int(fields["t"])
+        scratch.add(fields["tmp"])
+        owners.append(fields["owner"])
+    elif parts[1] == "END":
+        finishes[name] = int(fields["t"])
+if set(starts) != {"p1", "p2", "p3", "p4", "p5"} or set(finishes) != set(starts):
+    print("0 0 0 0")
+    raise SystemExit(0)
+events = [(start, 1) for start in starts.values()]
+events.extend((finish, -1) for finish in finishes.values())
+active = peak = 0
+for _when, delta in sorted(events):
+    active += delta
+    peak = max(peak, active)
+overlap = int(max(starts["p1"], starts["p2"]) < min(finishes["p1"], finishes["p2"]))
+print(peak, len(scratch), sum(owner == "1" for owner in owners), overlap)
+PY
+}
+fspar_run serial 1
 serial_out=$out; serial_rc=$rc
-fspar_run parallel 3 1
+fspar_run parallel 3
 if [ "$serial_rc" -ne 0 ] && [ "$rc" -ne 0 ] && grep -F 'VERDICT FAIL' "$out" >/dev/null && grep -F 'shell_red=1' "$out" >/dev/null; then
 	ok "FULLSUITEPAR1 planted failing suite makes the parallel run FAIL (serial rc=$serial_rc, parallel rc=$rc)"
 else
@@ -370,17 +767,21 @@ if [ "$(fspar_order serial)" = "$want_order" ] && [ "$(fspar_order parallel)" = 
 else
 	not_ok "FULLSUITEPAR1 log order depends on the run"; fspar_order serial; fspar_order parallel
 fi
-if [ -e "$TMP/fspar.parallel/overlap.p1" ] && [ -e "$TMP/fspar.parallel/overlap.p2" ] && [ "$(fspar_peak parallel)" -ge 2 ] && [ "$(fspar_peak parallel)" -le 3 ]; then
-	ok "FULLSUITEPAR1 shell suites ran concurrently, at most 3 at a time (peak $(fspar_peak parallel))"
+set -- $(fspar_metrics parallel)
+parallel_peak=$1; parallel_tmp_count=$2; parallel_owned_count=$3; parallel_overlap=$4
+set -- $(fspar_metrics serial)
+serial_peak=$1; serial_tmp_count=$2; serial_owned_count=$3
+if [ "$parallel_overlap" = 1 ] && [ "$parallel_peak" -ge 2 ] && [ "$parallel_peak" -le 3 ]; then
+	ok "FULLSUITEPAR1 shell suites overlap within the 3-worker bound (peak $parallel_peak)"
 else
-	not_ok "FULLSUITEPAR1 shell suites did not run concurrently within the bound (peak $(fspar_peak parallel))"; ls "$TMP/fspar.parallel"
+	not_ok "FULLSUITEPAR1 shell suites did not overlap within the bound (peak $parallel_peak)"; cat "$repo.cache.parallel/$tree.log"
 fi
-if [ "$(fspar_peak serial)" = 1 ]; then ok "FULLSUITEPAR1 FULL_SUITE_SHELL_JOBS=1 runs one suite at a time"; else not_ok "FULLSUITEPAR1 jobs=1 peak $(fspar_peak serial)"; fi
-set -- "$TMP/fspar.parallel"/owned.*
-if [ "$#" -eq 5 ] && [ -e "$1" ] && [ "$(cat "$TMP/fspar.parallel"/tmp.* | sort -u | grep -c .)" -eq 5 ]; then
-	ok "FULLSUITEPAR1 every parallel suite ran under its own owned TMPDIR"
+if [ "$serial_peak" = 1 ]; then ok "FULLSUITEPAR1 FULL_SUITE_SHELL_JOBS=1 runs one suite at a time"; else not_ok "FULLSUITEPAR1 jobs=1 peak $serial_peak"; fi
+if [ "$parallel_tmp_count" = 5 ] && [ "$parallel_owned_count" = 5 ] \
+	&& [ "$serial_tmp_count" = 5 ] && [ "$serial_owned_count" = 5 ]; then
+	ok "FULLSUITEPAR1 every serial and parallel suite ran under a distinct owned TMPDIR"
 else
-	not_ok "FULLSUITEPAR1 parallel suites shared or lacked an owned TMPDIR"; cat "$TMP/fspar.parallel"/tmp.*
+	not_ok "FULLSUITEPAR1 suites shared or lacked an owned TMPDIR (parallel=$parallel_tmp_count/$parallel_owned_count serial=$serial_tmp_count/$serial_owned_count)"
 fi
 if grep -F 'shell stage: 5 suites, 3 at a time' "$repo.cache.parallel/$tree.log" >/dev/null; then ok "FULLSUITEPAR1 the log records the shell stage width and time"; else not_ok "FULLSUITEPAR1 no shell stage line in the log"; fi
 
@@ -389,21 +790,18 @@ if grep -F 'shell stage: 5 suites, 3 at a time' "$repo.cache.parallel/$tree.log"
 mkrepo_begin parhang
 addfile tests/cli/h1.test.sh 'echo "FSPAR-HANG-QUICK"'
 # shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
-addfile tests/cli/h2.test.sh 'echo "FSPAR-HANG-PARTIAL"
-echo "$$" >"$FSPAR_DIR/hang.pid"
+addfile tests/cli/h2.test.sh 'echo "FSPAR-HANG-PARTIAL pid=$$"
 n=0
 while [ "$n" -lt 40 ]; do sleep 1; n=$((n + 1)); done
 echo "FSPAR-HANG-SURVIVED"'
 addfile tests/cli/h3.test.sh 'echo "FSPAR-HANG-QUICK-3"'
 mkrepo_commit
-rm -rf "$TMP/fspar"
-mkdir -p "$TMP/fspar"
-FSPAR_DIR="$TMP/fspar" FULL_SUITE_SHELL_JOBS=3 FULL_SUITE_TIMEOUT_SECS=6
-export FSPAR_DIR FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
+FULL_SUITE_SHELL_JOBS=3 FULL_SUITE_TIMEOUT_SECS=6
+export FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
 hang_t0=$(date +%s)
 run_verdict parhang
 hang_wall=$(($(date +%s) - hang_t0))
-unset FSPAR_DIR FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
+unset FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
 cache="$repo.cache"
 inc="$cache/$tree.incomplete.log"
 if [ "$rc" -ne 0 ] && grep -F 'timed out after 6s; unfinished script suites: tests/cli/h2.test.sh;' "$out" >/dev/null && [ ! -e "$cache/$tree.json" ] && [ ! -e "$cache/$tree.log" ]; then
@@ -418,7 +816,8 @@ if [ -f "$inc" ] && grep -F 'FSPAR-HANG-PARTIAL' "$inc" >/dev/null && grep -F 's
 else
 	not_ok "FULLSUITEPAR1 incomplete log lacks parallel outputs or the hung suite survived"; [ -f "$inc" ] && cat "$inc"
 fi
-hang_pid=$(cat "$TMP/fspar/hang.pid" 2>/dev/null) || hang_pid=
+hang_marker=$(grep -F 'FSPAR-HANG-PARTIAL pid=' "$inc" 2>/dev/null) || hang_marker=
+hang_pid=${hang_marker##*pid=}
 k=0
 while [ -n "$hang_pid" ] && kill -0 "$hang_pid" 2>/dev/null && [ "$k" -lt 50 ]; do sleep 0.1; k=$((k + 1)); done
 if [ -n "$hang_pid" ] && ! kill -0 "$hang_pid" 2>/dev/null; then ok "FULLSUITEPAR1 the hung suite process is gone"; else not_ok "FULLSUITEPAR1 hung suite pid ${hang_pid:-?} still runs"; fi

@@ -460,7 +460,7 @@ function affectedArchive(fx: SaveFixture, answer: number, expected: number, base
 	writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
 	// A docs path in source text is a help pointer, not a dependency.
 	writeFileSync(join(dir, "lib/mod.ts"), `// see docs/notes.md\nexport const answer = (): number => ${answer};\n`);
-	writeFileSync(join(dir, "tests/cli/mod.test.ts"), `import { expect, test } from "bun:test";\nimport { join } from "node:path";\nimport { answer } from "../../lib/mod.ts";\ntest("answer and gate-owned TMPDIR", () => { expect(answer()).toBe(${expected}); expect(process.env.TMPDIR).toBe(join(import.meta.dir, "../../var/agent-tmp")); });\n`);
+	writeFileSync(join(dir, "tests/cli/mod.test.ts"), `import { expect, test } from "bun:test";\nimport { existsSync } from "node:fs";\nimport { join, relative } from "node:path";\nimport { answer } from "../../lib/mod.ts";\ntest("answer and suite-owned TMPDIR", () => { expect(answer()).toBe(${expected}); const tmp = process.env.TMPDIR ?? ""; expect(tmp).not.toBe(""); expect(relative(join(import.meta.dir, "../../var/agent-tmp"), tmp).startsWith("suite-hermetic.")).toBe(true); expect(existsSync(join(tmp, ".owner"))).toBe(true); });\n`);
 	writeFileSync(join(dir, "docs/notes.md"), "# notes\n");
 	return dir;
 }
@@ -844,6 +844,12 @@ test("CIGATE1 manifest: the checked-in manifest is valid and names only existing
 		expect(reason?.length ?? 0).toBeGreaterThan(10);
 		if (kind === "ci-only") expect(expires).toBe("-");
 	}
+	const liveReservation = manifest.slice(1).map((row) => row.split("\t"))
+		.find(([path]) => path === "tests/fleet-guard/reservations.live.test.ts");
+	expect(liveReservation?.[1]).toBe("ci-only");
+	expect(liveReservation?.[3]).toBe("-");
+	expect(liveReservation?.[4]).toContain("owner=SilverCondor");
+	expect(liveReservation?.[4]).toContain("Agent Mail");
 });
 
 test.skipIf(!AMPLE)("CIGATE1 wall budget: past the budget the nearest tests run and the rest are deferred by name in a PARTIAL verdict (needs >= 10 GiB free)", () => {

@@ -30,8 +30,9 @@ from kitlib_run import RunResult
 HELPER = ROOT / "scripts/suite-metrics.py"
 JUDGING_FILES = (
     "scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
-    "scripts/kitlib_run.py", "scripts/pysafe.py", "scripts/kitlib-tmp.sh",
-    "scripts/test-budget.ts", ".github/test-budget.json",
+    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
+    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
+    ".github/test-budget.json",
 )
 
 
@@ -208,16 +209,18 @@ class SuiteMetricsNativeLogTests(unittest.TestCase):
                     self.assertEqual(result.rc, -signal.SIGKILL if mode == "kill" else 0, result.stderr)
                     # The child flushed before killing its parent: no polling or
                     # helper-side replay is needed for these bytes to survive.
-                    self.assertEqual(record.with_suffix(".native.log").read_bytes(), expected)
+                    captured = record.with_suffix(".native.log").read_bytes()
+                    self.assertIn(b"SUITE-HERMETIC suite=native.py ", captured)
+                    self.assertTrue(captured.endswith(expected), captured)
                     if mode == "kill":
                         self.assertFalse(record.exists())
                     else:
-                        self.assertEqual(result.stdout, expected)
+                        self.assertEqual(result.stdout, captured)
                         measured = json.loads(record.read_text())
                         self.assertTrue(metrics.complete_records([measured], ["native.py"]))
                         self.assertEqual(measured["command"], command)
                         self.assertEqual(measured["launcher"][-len(command):], command)
-                        self.assertEqual(measured["output_sha256"], hashlib.sha256(expected).hexdigest())
+                        self.assertEqual(measured["output_sha256"], hashlib.sha256(captured).hexdigest())
 
     def test_stage_replays_native_output_after_helper_dies_and_keeps_other_results(self) -> None:
         with owned_tmp("suite-stage-native-log-test") as directory:
@@ -279,12 +282,13 @@ class SuiteMetricsCancellationTests(unittest.TestCase):
                 command = [sys.executable, str(HELPER), "stage", "--records", str(root / "records"),
                            "--summary", str(root / "summary.json"), "--runner", "python3",
                            "--workers", "1", "--cwd", directory, "--tree", "a" * 40,
-                           "--deadline", str(file_deadline), "native.py", "pending.py"]
+                           "--deadline", str(file_deadline), "--loopback-port", str(port),
+                           "native.py", "pending.py"]
             else:
                 command = [sys.executable, str(HELPER), "run", "--record", str(root / "record.json"),
                            "--path", "native.py", "--runner", "python3", "--cwd", directory,
-                           "--tree", "a" * 40, "--deadline", str(file_deadline), "--",
-                           sys.executable, str(fixture)]
+                           "--tree", "a" * 40, "--deadline", str(file_deadline),
+                           "--loopback-port", str(port), "--", sys.executable, str(fixture)]
             if supervisor_deadline is not None:
                 command = [sys.executable, str(ROOT / "scripts/pysafe.py"), "run",
                            "--timeout", str(supervisor_deadline), "--", *command]

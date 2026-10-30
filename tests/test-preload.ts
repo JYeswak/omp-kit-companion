@@ -5,7 +5,8 @@ mkdirSync(resolve(import.meta.dir, "../var/agent-tmp"), { recursive: true });
 // Fixture Git processes must resolve repositories from their explicit cwd,
 // not from the surrounding hook, private index, or agent environment.
 for (const name of Object.keys(process.env)) {
-	if (name.startsWith("GIT_") && name !== "GIT_TERMINAL_PROMPT") delete process.env[name];
+	if (name.startsWith("GIT_") && name !== "GIT_TERMINAL_PROMPT"
+		&& name !== "GIT_CEILING_DIRECTORIES" && name !== "GIT_CONFIG_GLOBAL") delete process.env[name];
 }
 
 

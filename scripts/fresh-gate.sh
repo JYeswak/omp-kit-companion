@@ -10,6 +10,11 @@
 # state, untracked fixtures, or stale var/agent-tmp test trees.
 set -eu
 
+# HERMETIC1: reject caller-supplied repository/tracker authority before suite discovery or Git probes.
+if [ "${GIT_DIR+x}" = x ]; then echo "FRESH-GATE: REFUSED caller GIT_DIR is set" >&2; exit 1; fi
+if [ "${GIT_WORK_TREE+x}" = x ]; then echo "FRESH-GATE: REFUSED caller GIT_WORK_TREE is set" >&2; exit 1; fi
+if [ "${BEADS_DB+x}" = x ]; then echo "FRESH-GATE: REFUSED caller BEADS_DB is set" >&2; exit 1; fi
+
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
 COMMIT=HEAD

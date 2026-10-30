@@ -24,12 +24,14 @@ from typing import Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kitlib_run import run
+from kitlib_tmp import owned_tmp
 import pysafe
 JUDGE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 JUDGING_FILES = (
     "scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
-    "scripts/kitlib_run.py", "scripts/pysafe.py", "scripts/kitlib-tmp.sh",
-    "scripts/test-budget.ts", ".github/test-budget.json",
+    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
+    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
+    ".github/test-budget.json",
 )
 
 
@@ -133,17 +135,26 @@ def execute(args: argparse.Namespace) -> int:
     # The native process writes directly to a retained file, never through a
     # helper-owned pipe/sink thread: even SIGKILL of this helper cannot discard
     # bytes the native process already flushed. Exec preserves its PID/group.
-    with native_log.open("wb", buffering=0) as capture:
-        fd = capture.fileno()
-        launcher = [
-            sys.executable, "-c",
-            "import os,sys; fd=int(sys.argv[1]); "
-            "os.dup2(fd,1); os.dup2(fd,2); os.close(fd); "
-            "os.execvp(sys.argv[2],sys.argv[2:])",
-            str(fd), *command,
+    with owned_tmp("suite-hermetic") as scratch:
+        helper = str(Path(__file__).resolve().with_name("suite-hermetic-env.sh"))
+        wrapped = [
+            "sh", helper, "--archive", os.path.abspath(args.cwd),
+            "--scratch", scratch, "--suite", args.path,
         ]
-        result = run(launcher, cwd=args.cwd, deadline_s=args.deadline,
-                     inherit_fds=(fd,), max_output_bytes=1 << 20)
+        if args.loopback_port is not None:
+            wrapped.extend(["--loopback-port", str(args.loopback_port)])
+        wrapped.extend(["--", *command])
+        with native_log.open("wb", buffering=0) as capture:
+            fd = capture.fileno()
+            launcher = [
+                sys.executable, "-c",
+                "import os,sys; fd=int(sys.argv[1]); "
+                "os.dup2(fd,1); os.dup2(fd,2); os.close(fd); "
+                "os.execvp(sys.argv[2],sys.argv[2:])",
+                str(fd), *wrapped,
+            ]
+            result = run(launcher, cwd=args.cwd, deadline_s=args.deadline,
+                         inherit_fds=(fd,), max_output_bytes=1 << 20)
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     finished_ms = time.time_ns() // 1_000_000
     digest = hashlib.sha256()
@@ -193,6 +204,7 @@ def execute(args: argparse.Namespace) -> int:
                     if table.get("version") != 1 or not nonnegative(duration):
                         raise ValueError("invalid native Bun timing for " + args.path)
                     row["native_timing_ms"] = duration
+                    native.unlink(missing_ok=True)
     atomic_json(Path(args.record), row)
     if not complete:
         print("SUITE_TIMING_INCOMPLETE: " + args.path, file=sys.stderr)
@@ -271,15 +283,22 @@ def stage(args: argparse.Namespace) -> int:
         logfile = directory / f"{args.runner}-{index}.log"
         runner = ("python3" if path.endswith(".py") else "sh") if args.runner == "scripts" else args.runner
         if runner == "bun":
+            # The child sandbox allows archive writes, not the stage's external records directory.
+            timing_path = (Path(args.cwd).resolve() / "var" / "agent-tmp"
+                           / f"suite-metrics-bun-{os.getpid()}-{index}.timings")
+            timing_path.parent.mkdir(parents=True, exist_ok=True)
             command = ["bun", "--config=" + args.bun_config, "test", "--timeout=120000",
-                       "--timings=" + str(directory / f"bun-{index}.timings"),
+                       "--timings=" + str(timing_path),
                        "--update-timings", "./" + path]
         else:
             command = [runner, path]
         child = [sys.executable, str(Path(__file__).resolve()), "run", "--record", str(record),
                  "--path", path, "--runner", runner, "--tree", args.tree,
                  "--cwd", args.cwd, "--deadline", str(args.deadline), "--workers", str(workers),
-                 "--parent-fd", str(parent_reader), "--", *command]
+                 "--parent-fd", str(parent_reader)]
+        if args.loopback_port is not None:
+            child.extend(["--loopback-port", str(args.loopback_port)])
+        child.extend(["--", *command])
         with logfile.open("wb") as output:
             result = run(child, cwd=args.cwd, deadline_s=args.deadline + 10,
                          on_output=lambda _stream, chunk: output.write(chunk),
@@ -349,6 +368,7 @@ def main() -> int:
     child.add_argument("--tree", required=True)
     child.add_argument("--deadline", type=float, required=True)
     child.add_argument("--workers", type=int, default=1)
+    child.add_argument("--loopback-port", type=int)
     child.add_argument("--parent-fd", type=int)
     child.add_argument("command", nargs=argparse.REMAINDER)
     bundle = subs.add_parser("collect")
@@ -362,6 +382,7 @@ def main() -> int:
     batch.add_argument("--runner", choices=("bun", "sh", "python3", "scripts"), required=True)
     batch.add_argument("--deadline", type=float, required=True)
     batch.add_argument("--workers", type=int, required=True)
+    batch.add_argument("--loopback-port", type=int)
     batch.add_argument("paths", nargs="+")
     batch.add_argument("--bun-config", default="/dev/null")
     args = parser.parse_args()
