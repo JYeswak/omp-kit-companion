@@ -62,10 +62,11 @@ function brTable(table: Record<string, FlywheelExecResult>): Responder {
 // --- ASKBLOCK1 -----------------------------------------------------------
 
 async function askSeat(name?: string, roster: unknown = {
+	chiefs: { lead: "PeachLeopard", peers: ["QuietBadger"] },
 	sessions: { "omp-test": { seats: {
 		SilverCondor: { role: "builder" }, JadeThrush: { role: "grader" }, RusticPine: { role: "director" },
 	} } },
-}, held = true) {
+}, held = true, input: unknown = { question: "Which option?" }, mode?: string) {
 	const home = freshDir(base, "ask-home-");
 	const dir = join(home, ".claude", "skills", "omp-kit-orchestration");
 	mkdirSync(dir, { recursive: true });
@@ -73,9 +74,58 @@ async function askSeat(name?: string, roster: unknown = {
 	const h = await createFlywheelHost(base, { home, env: name ? { AGENT_NAME: name } : {}, respond: () => ({
 		code: 0, stdout: JSON.stringify(held ? [{ id: "ompkit-worker-task", status: "in_progress", assignee: name }] : []),
 	}) });
-	const [result] = await h.emit("tool_call", { toolCallId: "ask-1", toolName: "ask", input: { question: "Which option?" } }, h.ctx(base));
+	const entries = mode === undefined ? [] : [{ type: "mode_change", mode: "goal" }, { type: "message" }, { type: "mode_change", mode }];
+	const ctx = { ...h.ctx(base), sessionManager: { getEntries: () => entries } };
+	const [result] = await h.emit("tool_call", { toolCallId: "ask-1", toolName: "ask", input }, ctx);
 	return { h, result: result as FlywheelToolCallResult | undefined };
 }
+
+// --- ASKDEFAULT1 ---------------------------------------------------------
+
+const withDefault = { questions: [
+	{ id: "a", question: "Scope?", options: [{ label: "Narrow" }, { label: "Wide" }] },
+	{ id: "b", question: "Busy-seat send verdict?", options: [{ label: "Drop" }, { label: "Queue and retry" }], recommended: 1 },
+] };
+const noDefault = { questions: [{ id: "a", question: "Which?", options: [{ label: "Left" }, { label: "Right" }] }] };
+
+for (const name of ["RusticPine", "PeachLeopard", "QuietBadger"]) {
+	test(`ASKDEFAULT1: goal-mode ${name} ask naming a recommended option is refused with take-record-report`, async () => {
+		const { h, result } = await askSeat(name, undefined, true, withDefault, "goal");
+		let dialogs = 0;
+		if (result?.block !== true) dialogs++;
+		expect(dialogs).toBe(0);
+		expect(result?.reason).toContain("ASKDEFAULT1");
+		expect(result?.reason).toContain(`"Queue and retry"`);
+		expect(result?.reason).toContain("record it as a decision (rule, alternatives, who may overrule)");
+		expect(result?.reason).toContain("next REPORT");
+		expect(result?.reason).toContain("keep working");
+		expect(h.sent).toEqual([]);
+	});
+	test(`ASKDEFAULT1 control: goal-mode ${name} ask with no recommended option is allowed`, async () => {
+		const { result } = await askSeat(name, undefined, true, noDefault, "goal");
+		expect(result?.block).not.toBe(true);
+	});
+	for (const mode of [undefined, "goal_paused", "none"]) {
+		test(`ASKDEFAULT1 control: ${name} with no active goal (${mode ?? "no mode entry"}) may ask with a recommended option`, async () => {
+			const { result } = await askSeat(name, undefined, true, withDefault, mode);
+			expect(result?.block).not.toBe(true);
+		});
+	}
+}
+
+for (const name of ["SilverCondor", "JadeThrush"]) {
+	test(`ASKDEFAULT1 control: goal-mode ${name} worker stays refused as ASKBLOCK1`, async () => {
+		const { result } = await askSeat(name, undefined, true, withDefault, "goal");
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("ASKBLOCK1");
+		expect(result?.reason).toContain("QUESTION mail");
+	});
+}
+
+test("ASKDEFAULT1 control: goal-mode unbound session with a recommended option is allowed", async () => {
+	const { result } = await askSeat(undefined, undefined, true, withDefault, "goal");
+	expect(result?.block).not.toBe(true);
+});
 
 for (const name of ["SilverCondor", "JadeThrush"]) {
 	test(`ASKBLOCK1: ${name} worker ask is refused before the host opens a dialog`, async () => {

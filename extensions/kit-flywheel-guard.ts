@@ -60,8 +60,11 @@ import { projectAgentBrShimPath } from "../src/gate-plane.ts";
  * run warns BEAD_LINT_UNVERIFIED and allows (the helpers' fail-open contract).
  *
  * ASKBLOCK1: roster builder/grader seats cannot open `ask` dialogs. They send
- * QUESTION mail naming their held bead instead. Directors and unbound sessions
- * may ask; an unreadable roster explicitly warns and allows asking.
+ * QUESTION mail naming their held bead instead. Unbound sessions may ask; an
+ * unreadable roster explicitly warns and allows asking.
+ * ASKDEFAULT1: a director or chief seat with an active goal cannot open an `ask`
+ * that names a recommended option; it takes that option, records the decision and
+ * reports it. Asks with no recommended option, or with no active goal, are allowed.
  */
 
 export interface FlywheelExecResult {
@@ -82,6 +85,7 @@ export interface FlywheelContext {
 	cwd: string;
 	isIdle?(): boolean;
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
+	sessionManager?: { getEntries?(): readonly unknown[] };
 }
 
 export interface FlywheelToolCallEvent {
@@ -948,6 +952,36 @@ export function admissionOwner(env: Record<string, string | undefined>): string 
 		if (value) return value;
 	}
 	return null;
+}
+
+/** ASKDEFAULT1: the session's goal is active when its latest `mode_change` transcript entry is mode `goal` (omp's
+agent-session persists `appendModeChange(mode, { goal })` on every goal transition; kit-goal-keepalive reads the same
+entry). `goal_paused`, `none`, no entry or an unreadable transcript read as not active. */
+export function goalActive(ctx: FlywheelContext): boolean {
+	let entries: readonly unknown[];
+	try {
+		entries = ctx.sessionManager?.getEntries?.() ?? [];
+	} catch {
+		return false;
+	}
+	for (let i = entries.length - 1; i >= 0; i--) {
+		if (field(entries[i], "type") === "mode_change") return field(entries[i], "mode") === "goal";
+	}
+	return false;
+}
+
+/** ASKDEFAULT1: the label of the first question's `recommended` option in an `ask` input, if any question names one. */
+export function recommendedLabel(input: unknown): string | undefined {
+	const questions = field(input, "questions");
+	if (!Array.isArray(questions)) return undefined;
+	for (const question of questions) {
+		const index = field(question, "recommended");
+		const options = field(question, "options");
+		if (typeof index !== "number" || !Array.isArray(options)) continue;
+		const label = field(options[index], "label");
+		if (typeof label === "string") return label;
+	}
+	return undefined;
 }
 
 /** GOAL_END_REFUSED (J-2026-10-18-44): a fleet seat never ends its own goal. In a session with a fleet identity
@@ -2240,22 +2274,28 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				const name = env.AGENT_NAME?.trim() || (await paneIdentities(pi.exec, env, home, [ctx.cwd]))[0];
 				const rosterPath = deps.rosterPath ?? join(home, ".claude", "skills", "omp-kit-orchestration", "fleet-roster.json");
 				let sessions: Record<string, unknown>;
+				let chiefs: string[] = [];
 				try {
 					const parsed: unknown = JSON.parse(readFileSync(rosterPath, "utf8"));
 					const rows = field(parsed, "sessions");
 					if (rows === null || typeof rows !== "object" || Array.isArray(rows)) throw new Error("sessions is not an object");
 					sessions = rows as Record<string, unknown>;
+					const chiefRow = field(parsed, "chiefs");
+					const peers = field(chiefRow, "peers");
+					chiefs = [field(chiefRow, "lead"), ...(Array.isArray(peers) ? peers : [])].filter((c): c is string => typeof c === "string");
 				} catch (error) {
 					const warning = `kit-flywheel-guard ASKBLOCK1: roster unreadable (${rosterPath}: ${error instanceof Error ? error.message : String(error)}); ask allowed (fail-open).`;
 					ctx.ui?.notify(warning, "warning");
 					return { additionalContext: warning };
 				}
 				if (!name) return undefined;
+				let director = chiefs.some(chief => chief.toLowerCase() === name.toLowerCase());
 				for (const session of Object.values(sessions)) {
 					const seats = field(session, "seats");
 					if (seats === null || typeof seats !== "object" || Array.isArray(seats)) continue;
 					const seat = Object.entries(seats).find(([seatName]) => seatName.toLowerCase() === name.toLowerCase())?.[1];
 					const role = field(seat, "role");
+					if (role === "director") director = true;
 					if (role !== "builder" && role !== "grader") continue;
 					// The held bead lives in a tracker the seat used, not only its cwd's: read every tracker this
 					// session reached plus the cwd's, and with no `.beads` ancestor let br discover from the cwd.
@@ -2274,6 +2314,12 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					}
 					const bead = held.size > 0 ? [...held].join(", ") : "the bead you hold";
 					return { block: true, reason: `kit-flywheel-guard ASKBLOCK1: ask refused for ${role} seat ${name}; no dialog opened. Send QUESTION mail to your director naming ${bead}; questions never block work.` };
+				}
+				if (director && goalActive(ctx)) {
+					const label = recommendedLabel(event.input);
+					if (label !== undefined) {
+						return { block: true, reason: `kit-flywheel-guard ASKDEFAULT1: ask refused for ${name} in goal mode; no dialog opened. Take the recommended option "${label}", record it as a decision (rule, alternatives, who may overrule), report it in your next REPORT, and keep working; questions never block (J-2026-10-27-75).` };
+					}
 				}
 				return undefined;
 			}
