@@ -61,7 +61,13 @@ export LOCKFD_LOCK
 pass=0
 fail=0
 
-python3 -B "$GUARD" create "lock fd probe" > "$TMP/guard.out" 2>&1 &
+# The guard lint-admits the create before native br runs (LINTGATE1, ompkit-fp72.135.3.82), so the
+# probe must be a bead that passes bead-lint; same shape as br-shim.test.sh br_create_valid.
+BACKTICK=$(printf '\140')
+python3 -B "$GUARD" create "lock fd probe" -t task -l gate \
+	--description 'WHAT: (a) a lock fd probe. WHY: needed.' \
+	--acceptance "- [ ] [a] [build] the probe holds the lock; planted negative: bad input is refused ${BACKTICK}true${BACKTICK} -> rc 0" \
+	> "$TMP/guard.out" 2>&1 &
 guard_pid=$!
 waited=0
 while [ ! -f "$TMP/entered" ] && [ "$waited" -lt 1000 ]; do sleep 0.01; waited=$((waited + 1)); done
