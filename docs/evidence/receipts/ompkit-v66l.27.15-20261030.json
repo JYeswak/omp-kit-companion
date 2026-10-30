@@ -1,0 +1,161 @@
+{
+ "authority": "pending",
+ "confidence": "observed",
+ "evidence_id": "ev_6aaf65de2ddcfb80ab433d25b953428413db3711e82c3d250652758f69c03d7d",
+ "limitations": [
+  "Native pregrade AC1 FAIL and AC2 PASS; not whole-feature acceptance. Prepared source tests95/0 and omission0/1/0 are bounded observations, not authority to replace original2000ms requirement or claim speedup. Owner scope decision requested; no publication/close."
+ ],
+ "operation": "diagnostics-original-scope-pending-disposition",
+ "parameters": {
+  "bead": "ompkit-v66l.27.15",
+  "source_commit": "ea14e603a088949efafa7b60c83f6beb67695e47"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "actual_cli_real_home": {
+   "argv": [
+    "bun",
+    "src/cli.ts",
+    "doctor",
+    "--scope",
+    "omp",
+    "--json"
+   ],
+   "limitation": "Correctness/surface execution only, not the synthetic scenario latency proxy or performance evidence.",
+   "rc": 0,
+   "source_fetch_disabled": true,
+   "stderr": "",
+   "stdout": "{\"ok\":true,\"tool_version\":\"unreleased\",\"data\":{\"evidence\":{\"effective_profile\":\"NOT_RUN\",\"installed_rules\":\"NOT_RUN\",\"matcher\":\"NOT_RUN\"},\"findings\":[{\"component\":\"omp\",\"evidence\":{\"availability\":\"PRESENT\",\"launcher_version\":\"18.14.0\",\"launcher_version_proof\":\"OMP_LAUNCHER\",\"location\":\"/Users/josh/Library/Application Support/Tern/omp/versions/18.14.0\",\"manager_source\":\"tern\",\"manager_source_provenance\":\"TERN_PATH_LAYOUT\",\"manager_version\":\"18.14.0\",\"manager_version_provenance\":\"TERN_STATE\",\"manager_versions\":{\"bun\":{\"provenance\":\"BUN_PACKAGE_METADATA\",\"status\":\"PRESENT\",\"version\":\"18.10.3\"},\"tern\":{\"provenance\":\"TERN_STATE\",\"status\":\"PRESENT\",\"version\":\"18.14.0\"}},\"package_root\":\"/Users/josh/.local/opt/omp-kit/omp-src/18.14.0/node_modules/@oh-my-pi/pi-coding-agent\",\"version\":\"18.14.0\",\"version_proof\":\"PACKAGE_METADATA\"},\"reason\":\"PATH-selected OMP manager, launcher and package versions agree\",\"recommended_action\":\"No action required.\",\"status\":\"OK\"}],\"kit\":{\"data_paths\":{\"data\":\"/Users/josh/.local/share\",\"state\":\"/Users/josh/.local/state\"},\"platform\":{\"arch\":\"arm64\",\"os\":\"darwin\"},\"release\":{\"entrypoint\":\"/Users/josh/Developer/omp-kit-companion/src/cli.ts\",\"executable\":\"/opt/homebrew/Cellar/bun/1.4.3/bin/bun\",\"identity\":\"UNVERIFIED\",\"root\":\"/Users/josh/Developer/omp-kit-companion\",\"source_tag\":null},\"version\":\"unreleased\"},\"omp\":{\"location\":\"/Users/josh/Library/Application Support/Tern/omp/versions/18.14.0\",\"reason\":\"PATH-selected OMP manager, launcher and package versions agree\",\"status\":\"PRESENT\",\"version\":\"18.14.0\",\"version_proof\":\"PACKAGE_METADATA\"},\"overall\":\"OK\",\"recommended_actions\":[]},\"meta\":{\"schema_version\":\"1\",\"verification\":\"PERFORMED\"},\"warnings\":[],\"commands\":[\"omp-kit capabilities --json\",\"omp-kit doctor --json\"],\"errors\":[]}\n"
+  },
+  "actual_producer_omission": {
+   "missing-ntm-producer": {
+    "rc": 1,
+    "stderr": "1 | import assert from \"node:assert/strict\";Bun.plugin({name:\"one-shot-required-probe-omission\",setup(build){build.onLoad({filter:/diagnostics[.]ts$/},async(args)=>{const source=await Bun.file(args.path).text();const before=\"const bins = Object.keys(STACK_SOURCE).sort();\";if(source.split(before).length!==2)throw new Error(\"mutation source mismatch\");return {contents:source.replace(before,'const bins = Object.keys(STACK_SOURCE).filter((bin) => bin !== \"ntm\").sort();'),loader:\"ts\"};});}});const api=await import(\"/Users/josh/Developer/omp-kit-companion/src/diagnostics.ts\");const result=await api.inspectDicklesworthstone();const required=Object.keys(api.STACK_SOURCE).sort();const observed=result.evidence.tools.map(x=>x.bin).sort();console.log(JSON.stringify({variant:\"missing-ntm-producer\",producer:\"inspectDicklesworthstone\",required,observed,status:result.status}));assert.deepEqual(observed,required);\n                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ^\nAssertionError: Expected values to be strictly deep-equal:\n+ actual - expected\n... Skipped lines\n\n  [\n    'acfs',\n    'am',\n    'apr',\n    'br',\n...\n    'ms',\n-   'ntm',\n    'pt',\n    'rano',\n    'rch',\n    'ru',\n    'sbh',\n\n generatedMessage: true,\n     actual: [\n  \"acfs\", \"am\", \"apr\", \"br\", \"bv\", \"caam\", \"cass\", \"caut\", \"cm\", \"csctf\", \"dcg\", \"dsr\", \"ee\", \"fad\", \"fg\", \"ft\",\n  \"giil\", \"ms\", \"pt\", \"rano\", \"rch\", \"ru\", \"sbh\", \"skillranker\", \"slb\", \"tru\", \"ubs\", \"vc\", \"xf\"\n],\n   expected: [\n  \"acfs\", \"am\", \"apr\", \"br\", \"bv\", \"caam\", \"cass\", \"caut\", \"cm\", \"csctf\", \"dcg\", \"dsr\", \"ee\", \"fad\", \"fg\", \"ft\",\n  \"giil\", \"ms\", \"ntm\", \"pt\", \"rano\", \"rch\", \"ru\", \"sbh\", \"skillranker\", \"slb\", \"tru\", \"ubs\", \"vc\", \"xf\"\n],\n   operator: \"deepStrictEqual\",\n       diff: \"simple\",\n       code: \"ERR_ASSERTION\"\n\n      at /Users/josh/Developer/omp-kit-companion/[eval]:1:878\n\nBun v1.4.3 (macOS arm64)\n",
+    "stdout": "{\"variant\":\"missing-ntm-producer\",\"producer\":\"inspectDicklesworthstone\",\"required\":[\"acfs\",\"am\",\"apr\",\"br\",\"bv\",\"caam\",\"cass\",\"caut\",\"cm\",\"csctf\",\"dcg\",\"dsr\",\"ee\",\"fad\",\"fg\",\"ft\",\"giil\",\"ms\",\"ntm\",\"pt\",\"rano\",\"rch\",\"ru\",\"sbh\",\"skillranker\",\"slb\",\"tru\",\"ubs\",\"vc\",\"xf\"],\"observed\":[\"acfs\",\"am\",\"apr\",\"br\",\"bv\",\"caam\",\"cass\",\"caut\",\"cm\",\"csctf\",\"dcg\",\"dsr\",\"ee\",\"fad\",\"fg\",\"ft\",\"giil\",\"ms\",\"pt\",\"rano\",\"rch\",\"ru\",\"sbh\",\"skillranker\",\"slb\",\"tru\",\"ubs\",\"vc\",\"xf\"],\"status\":\"DEGRADED\"}\n"
+   },
+   "restored-control": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "{\"variant\":\"restored-control\",\"producer\":\"inspectDicklesworthstone\",\"required\":[\"acfs\",\"am\",\"apr\",\"br\",\"bv\",\"caam\",\"cass\",\"caut\",\"cm\",\"csctf\",\"dcg\",\"dsr\",\"ee\",\"fad\",\"fg\",\"ft\",\"giil\",\"ms\",\"ntm\",\"pt\",\"rano\",\"rch\",\"ru\",\"sbh\",\"skillranker\",\"slb\",\"tru\",\"ubs\",\"vc\",\"xf\"],\"observed\":[\"acfs\",\"am\",\"apr\",\"br\",\"bv\",\"caam\",\"cass\",\"caut\",\"cm\",\"csctf\",\"dcg\",\"dsr\",\"ee\",\"fad\",\"fg\",\"ft\",\"giil\",\"ms\",\"ntm\",\"pt\",\"rano\",\"rch\",\"ru\",\"sbh\",\"skillranker\",\"slb\",\"tru\",\"ubs\",\"vc\",\"xf\"],\"status\":\"DEGRADED\"}\n"
+   },
+   "valid-control": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "{\"variant\":\"valid-control\",\"producer\":\"inspectDicklesworthstone\",\"required\":[\"acfs\",\"am\",\"apr\",\"br\",\"bv\",\"caam\",\"cass\",\"caut\",\"cm\",\"csctf\",\"dcg\",\"dsr\",\"ee\",\"fad\",\"fg\",\"ft\",\"giil\",\"ms\",\"ntm\",\"pt\",\"rano\",\"rch\",\"ru\",\"sbh\",\"skillranker\",\"slb\",\"tru\",\"ubs\",\"vc\",\"xf\"],\"observed\":[\"acfs\",\"am\",\"apr\",\"br\",\"bv\",\"caam\",\"cass\",\"caut\",\"cm\",\"csctf\",\"dcg\",\"dsr\",\"ee\",\"fad\",\"fg\",\"ft\",\"giil\",\"ms\",\"ntm\",\"pt\",\"rano\",\"rch\",\"ru\",\"sbh\",\"skillranker\",\"slb\",\"tru\",\"ubs\",\"vc\",\"xf\"],\"status\":\"DEGRADED\"}\n"
+   }
+  },
+  "bead": "ompkit-v66l.27.15",
+  "canonical_full_file": {
+   "expect": 525,
+   "fail": 0,
+   "pass": 95,
+   "rc": 0
+  },
+  "consumer": "non-author original-acceptance verifier and lead publisher; source-bound evidence integrity only",
+  "declared_build_artifact": {
+   "check": {
+    "rc": 0,
+    "stderr": "runtime-adapter: TMPDIR (/Users/josh/Developer/omp-kit-companion/var/agent-tmp/diagnostic-exact-source.22188) is inside the release tree; falling back to /tmp\n",
+    "stdout": "build-manifest --check: OK /Users/josh/Developer/omp-kit-companion/var/agent-tmp/diagnostic-exact-source.22188/MANIFEST.tsv (27 rules, pack uncommitted-2026-10-30)\nbuild-manifest --check: OK /Users/josh/Developer/omp-kit-companion/var/agent-tmp/diagnostic-exact-source.22188/MANIFEST.fleet.tsv (10 rules, pack uncommitted-2026-10-30)\n"
+   },
+   "outside-owned-root-check": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "build-manifest --check: OK /Users/josh/Developer/omp-kit-companion/var/agent-tmp/diagnostic-exact-source.22188/MANIFEST.tsv (27 rules, pack uncommitted-2026-10-30)\nbuild-manifest --check: OK /Users/josh/Developer/omp-kit-companion/var/agent-tmp/diagnostic-exact-source.22188/MANIFEST.fleet.tsv (10 rules, pack uncommitted-2026-10-30)\n"
+   },
+   "prepare": {
+    "rc": 0,
+    "stderr": "runtime-adapter: TMPDIR (/Users/josh/Developer/omp-kit-companion/var/agent-tmp/diagnostic-exact-source.22188) is inside the release tree; falling back to /tmp\n",
+    "stdout": "build-manifest: wrote /Users/josh/Developer/omp-kit-companion/var/agent-tmp/diagnostic-exact-source.22188/MANIFEST.tsv (27 rules, pack uncommitted-2026-10-30)\nbuild-manifest: wrote /Users/josh/Developer/omp-kit-companion/var/agent-tmp/diagnostic-exact-source.22188/MANIFEST.fleet.tsv (10 rules, pack uncommitted-2026-10-30)\n"
+   }
+  },
+  "limits": [
+   "Cu made no source/timing/assertion changes; candidate already replaced the synthetic bound, which the native literal reviewer did not qualify. Original requirement preserved; owner decision pending.",
+   "No skipped/omitted required probe in the control",
+   "No product/source test edits",
+   "No fresh performance improvement or installed-latency claim",
+   "No source-ready publication, installed release, self-close or ACCEPTED claim"
+  ],
+  "mutation_scope": "One-shot in-memory Bun loader changes only inspectDicklesworthstone enumeration from Object.keys(STACK_SOURCE).sort() to the same list with ntm omitted; immutable production files unchanged. Required registry stays intact. Actual producer valid0, missing-ntm assertion1, restored0.",
+  "native_failure_evidence": {
+   "at": "2026-10-30T09:56:39Z",
+   "bead": "ompkit-v66l.27.15",
+   "br_refusals": null,
+   "candidate_commit": "ea14e603a088949efafa7b60c83f6beb67695e47",
+   "detail": null,
+   "error": null,
+   "items": [
+    {
+     "ac": "AC1",
+     "command": "bun test tests/cli/diagnostics.test.ts (candidate export ea14e603a088949efafa7b60c83f6beb67695e47)",
+     "exit": 1,
+     "note": "Original scoped <=2000ms assertion is no longer present; candidate replaces it with structural launcher-only proof (test lines 198-206). Suite was 94 pass/1 fail, not rc 0; no ranked profile or same-invocation incumbent/candidate evidence. The failure is RCHRO1.",
+     "status": "FAIL"
+    }
+   ],
+   "landing_sha": "3cfb290b4bd6fbcd88c2577d54dd7d6e90e0cc5b",
+   "run_dir": "/Users/josh/Developer/omp-kit/var/agent-tmp/pregrade-v66l_27_15.58584",
+   "run_log": {
+    "bytes": 1559,
+    "tail": "grade_wave _run ompkit-v66l.27.15 wave W-pregrade-v66l_27_15-20261030T095122Z started 2026-10-30T09:51:23Z\nargv: '/Users/josh/Library/Application Support/Tern/omp/bin/omp' --profile codex --model openai-codex/gpt-6-luna --skills=beads-compliance-and-completion-verification,omp-kit-orchestration -p '<prompt.txt 19230 chars>'\ncwd: /Users/josh/Developer/omp-kit\nenv: TMPDIR=/Users/josh/Developer/omp-kit/var/agent-tmp/pregrade-v66l_27_15.58584/tmp GIT_OPTIONAL_LOCKS=0 AGENT_NAME=grader-v66l_27_15 PATH[0]=/Users/josh/Developer/omp-kit/var/agent-tmp/pregrade-v66l_27_15.58584/bin\nrc=0 timed_out=False killed=False truncated=False elapsed_s=199.186\nLOCK_CHECK FIRED: /Users/josh/Developer/omp-kit/.git/index.lock seen=True left=False (a grader git call took the index lock; GIT_OPTIONAL_LOCKS=0 must hold): --no-pager -c core.fsmonitor=false -c core.hooksPath=/dev/null -C /Users/josh/Developer/omp-kit hash-object --stdin --no; --no-pager -c core.fsmonitor=false -c core.hooksPath=/dev/null -C /Users/josh/Developer/omp-kit hash-object --stdin --no; --no-pager -c core.fsmonitor=false -c core.hooksPath=/dev/null -C /Users/josh/Developer/omp-kit hash-object --no-filters; symbolic-ref --quiet --short HEAD; symbolic-ref --quiet --short HEAD\n--- stdout ---\nThe two export directories were released. The grader scratch release was refused with `caller-not-owner`; I did not retry without its capability.\n\n--- stderr ---\nfleet-guard: Agent Mail storage-root discovery unavailable; reservation admission reports storage failures separately\nWorking...\n\n--- end ---\n",
+    "truncated": false
+   },
+   "schema": "omp-kit.pregrade-evidence.v1",
+   "timed_out": false,
+   "verdict": "FAIL",
+   "wave": "W-pregrade-v66l_27_15-20261030T095122Z"
+  },
+  "non_author_pregrade": {
+   "ac_sha256": "7bcf32164f6d4c63f4104d9447338bd16c805e93eeb8fd5f9f339660c80775e8",
+   "at": "2026-10-30T09:56:39Z",
+   "author": "CopperTrout",
+   "bead": "ompkit-v66l.27.15",
+   "candidate_commit": "ea14e603a088949efafa7b60c83f6beb67695e47",
+   "grader": "grader-v66l_27_15",
+   "grader_family": "openai-codex",
+   "grader_model": "openai-codex/gpt-6-luna",
+   "items": [
+    {
+     "ac": "AC1",
+     "phase": "build",
+     "status": "FAIL"
+    },
+    {
+     "ac": "AC2",
+     "phase": "build",
+     "status": "PASS"
+    }
+   ],
+   "landing_ref": "origin/main",
+   "landing_sha": "3cfb290b4bd6fbcd88c2577d54dd7d6e90e0cc5b",
+   "repo": "/Users/josh/Developer/omp-kit",
+   "schema": "omp-kit.pregrade.v1",
+   "verdict": "FAIL",
+   "wave": "W-pregrade-v66l_27_15-20261030T095122Z"
+  },
+  "prepared_exact_export": {
+   "expect": 525,
+   "fail": 0,
+   "git_init_without_commits": true,
+   "pass": 95,
+   "rc": 0,
+   "stream_sha256": "7ffcc037686df37c051b353d5295d01d8ccfb14311be448d737d68f06d875dfb",
+   "trusted_source_override_used": false
+  },
+  "product_or_test_edits_by_this_run": false,
+  "qualification_state": "FAIL AC1; PASS AC2. AC1 demoted; no original whole-feature qualification. Task-defined owner scope decision requested in AgentMail73555; no acceptance edited.",
+  "raw_export_before_required_artifact": {
+   "cause": "RCHRO1 unscoped CLI correctly refused missing MANIFEST.tsv; not a diagnostic timing/probe failure",
+   "fail": 1,
+   "pass": 94,
+   "rc": 1
+  },
+  "scenario_binding": {
+   "current_source": "The retained omission/restored controls from covering8419 source are already present; this run qualifies current immutable source, not a new lever.",
+   "original_failure": "02a2 publication log chief71651: synthetic diagnose fixture 3261.12ms versus2000ms; ground truth retained, not rerun as confirmation",
+   "scope_decision": "Existing source/profile/equivalence comments14949,14964,14965; synthetic scoped behavior is launcher --version only with no unscoped log; the separate actual CLI<=2000ms assertions remain unchanged. No installed-OMP proxy or new optimization/performance win is claimed."
+  },
+  "source_commit": "ea14e603a088949efafa7b60c83f6beb67695e47",
+  "source_repo": "/Users/josh/Developer/omp-kit-companion"
+ }
+}
