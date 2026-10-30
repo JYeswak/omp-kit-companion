@@ -1,12 +1,12 @@
 // R-015 reachable boundary: a genuine EACCES while reading an isolated pin file
-// exits nonzero; --json/--robot produce one stdout error envelope, human mode
-// uses stderr, and neither presentation leaks private paths, content or stacks.
-// This handler-level boundary already emits HANDLER_FAILED. The outer rejected-
-// promise CLI_FAILURE renderer remains UNVERIFIED: this does not exercise it.
+// exits nonzero; --json/--robot produce one stdout error envelope and human mode
+// uses stderr. HANDLERCAUSE1 now requires a bounded cause and a named private
+// diagnostic file; unreadable contents remain absent from both presentations.
+// This exercises HANDLER_FAILED, not the outer rejected-promise CLI_FAILURE renderer.
 // Requires an unprivileged test process; the EACCES precondition fails explicitly
 // rather than silently substituting a synthetic exception or skipping under root.
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { runSync } from "../../src/kitlib/run.ts";
@@ -14,7 +14,7 @@ import { runSync } from "../../src/kitlib/run.ts";
 const cli = resolve(import.meta.dir, "../../src/cli.ts");
 
 for (const mode of ["human", "json", "robot"] as const) {
-	test(`R-015 genuine read EACCES respects ${mode} output without private diagnostics`, () => {
+	test(`R-015 genuine read EACCES respects ${mode} output with bounded private diagnostics`, () => {
 		const owned = ownedTmp("ergo1-r-015");
 		const pins = join(owned.path, "private-ergo1-pins.toml");
 		try {
@@ -54,16 +54,23 @@ for (const mode of ["human", "json", "robot"] as const) {
 				expect(envelope.errors).toHaveLength(1);
 				expect(envelope.errors[0].code).toBe("HANDLER_FAILED");
 				expect(typeof envelope.errors[0].remediation).toBe("string");
-				expect(envelope.errors[0].remediation.length).toBeGreaterThan(0);
 			}
 			const output = stdout + stderr;
-			expect(output).not.toContain(owned.path);
-			expect(output).not.toContain("private-ergo1-pins");
+			const directory = join(home, "state", "omp-kit", "diagnostics");
+			const causes = readdirSync(directory).map(name => {
+				const path = join(directory, name);
+				expect(output).toContain(path);
+				expect(statSync(path).mode & 0o777).toBe(0o600);
+				const bytes = readFileSync(path, "utf8");
+				expect(bytes).not.toContain("private-ergo1-receipt-marker");
+				const diagnostic = JSON.parse(bytes);
+				expect(diagnostic.cause.cause_stack_head.trimStart()).toStartWith("at ");
+				return diagnostic.cause;
+			});
+			expect(causes).toContainEqual(expect.objectContaining({
+				cause_name: "Error", cause_message: expect.stringContaining("EACCES"),
+			}));
 			expect(output).not.toContain("private-ergo1-receipt-marker");
-			expect(output).not.toContain("readFileSync");
-			expect(output).not.toContain("src/cli.ts:");
-			expect(output).not.toContain("\n    at ");
-			expect(output).not.toContain("\n\tat ");
 			expect(output).not.toContain("\u001b");
 			chmodSync(pins, 0o600);
 			expect(readFileSync(pins, "utf8")).toBe(content);

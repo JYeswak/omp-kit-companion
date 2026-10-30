@@ -1,0 +1,56 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_ad1c9979fade4b3c1eba52bcc4369438ab6b141dd32e8f479cff2a10f112c2a7",
+ "limitations": [
+  "Scoped consumer migration; existing producer unchanged; exact isolated8/0, no global/pass/publication/installed claim."
+ ],
+ "operation": "HANDLERCAUSE1-genuine-consumer-contract",
+ "parameters": {
+  "bead": "ompkit-fp72.135.3.86"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "base": "6d93f64ebdc57fdee4d2e72bcd38c3af4253bab6",
+  "bead": "ompkit-fp72.135.3.86",
+  "compatibility": {
+   "existing_changelog_unchanged": "already documents cause, frames, private file and unchanged exit/verification",
+   "production_code_changed": false,
+   "reason": "old no-path/no-stack assertions contradict required named diagnostics/cause; preserve actual secret/content/stream/exit/private-mode invariants",
+   "supersedes_test_lines": "8d163ae396b13ec8ff99e912b78decf557e21b82"
+  },
+  "exact_history_free_candidate": {
+   "rc": 0,
+   "summary": "8 pass 0 fail 136 expect across handler and genuine EACCES presentations"
+  },
+  "genuine_builtin_probe": {
+   "cause_name": "Error",
+   "cli_rc": 1,
+   "code": "HANDLER_FAILED",
+   "diagnostic_named": true,
+   "message_has_EACCES": true,
+   "private_mode": 384,
+   "read_error": "EACCES",
+   "unreadable_content_disclosed": false,
+   "verification": "UNVERIFIED"
+  },
+  "limits": [
+   "Shared-tree run0pass8fail was peer uncommitted verify.ts duplicate declarations, live LavenderPrairie lease; no adoption or repeated shared-tree check.",
+   "Only exact HEAD plus own test overlay is qualified; no blanket full-suite, publication, installed or peer-code claim.",
+   "Earlier full CLI3209/21/82 remains retained; no subtraction or relabelled global PASS."
+  ],
+  "original_handler_test": {
+   "rc": 0,
+   "summary": "5 pass 0 fail 82 expect; actual CLI dispatch with bare-catch negative"
+  },
+  "own_file": {
+   "path": "tests/cli/ergo1-r-015.test.ts",
+   "sha256": "81220e9053a28bb261064588c1d0485fc177f7d30d17f4dd1894a0d541bcae97"
+  },
+  "owner_adjudication": {
+   "comment": 16330,
+   "message": 73640,
+   "scope": "history-only withFailure churn does not hold; finding/gate/threshold/baseline unchanged"
+  }
+ }
+}
