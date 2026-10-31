@@ -85,12 +85,16 @@ if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an own
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK release-local
 CHILD=''
+CI_PIDS=''
 UNLOCKED=0
 STARTED=$(date +%s)
 STAGE_LOG="$WORK/stages"
 : >"$STAGE_LOG"
 cleanup() {
 	if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null || true; wait "$CHILD" 2>/dev/null || true; fi
+	# Each CI-only test runs under `timeout`, which forwards TERM to the test it started.
+	local ci_pid
+	for ci_pid in $CI_PIDS; do kill -TERM "$ci_pid" 2>/dev/null || true; done
 	if [ "$UNLOCKED" = 1 ]; then security lock-keychain "$KEYCHAIN" </dev/null || echo "release-local: WARNING: could not re-lock $KEYCHAIN" >&2; fi
 }
 kitlib_tmp_atexit cleanup
@@ -331,12 +335,20 @@ ci_only_refuse() {
 	tail -n 20 "$WORK/ci-only-$1.stdout" >&2 || true
 	die "$1.test.ts FAIL on the release source; refusing release"
 }
-(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" bounded 900 bun test tests/cli/package-release.test.ts \
-	>"$WORK/ci-only-package-release.stdout" 2>"$WORK/ci-only-package-release.stderr") ||
-	ci_only_refuse package-release
-(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" bounded 2400 bun test tests/cli/kit-update.test.ts \
-	>"$WORK/ci-only-kit-update.stdout" 2>"$WORK/ci-only-kit-update.stderr") ||
-	ci_only_refuse kit-update
+# RELSPEED1 (ompkit-774u.72): the two files are independent (separate fixtures under their own
+# owned TMPDIRs), so they run side by side; measured serially on 0.2.81 the stage took 606 s.
+(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" timeout 900 bun test tests/cli/package-release.test.ts \
+	</dev/null >"$WORK/ci-only-package-release.stdout" 2>"$WORK/ci-only-package-release.stderr") &
+CI_PIDS="$!"
+(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" timeout 2400 bun test tests/cli/kit-update.test.ts \
+	</dev/null >"$WORK/ci-only-kit-update.stdout" 2>"$WORK/ci-only-kit-update.stderr") &
+CI_PIDS="$CI_PIDS $!"
+ci_pkg_rc=0; ci_upd_rc=0
+wait "${CI_PIDS%% *}" || ci_pkg_rc=$?
+wait "${CI_PIDS##* }" || ci_upd_rc=$?
+CI_PIDS=''
+[ "$ci_pkg_rc" -eq 0 ] || ci_only_refuse package-release
+[ "$ci_upd_rc" -eq 0 ] || ci_only_refuse kit-update
 say "ci-only-local PASS"
 
 receipt() {
