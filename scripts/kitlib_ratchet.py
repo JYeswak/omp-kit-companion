@@ -136,6 +136,9 @@ EXEMPT = (
     "scripts/pysafe.py",
     "tests/scripts/kitlib_ratchet_test.py",
     "tests/cli/check-staged-kitlib.test.sh",
+    "tests/cli/check-staged-kitlib-reversal.test.sh",
+    "tests/cli/check-staged-kitlib-replay.test.sh",
+    "tests/cli/check-staged-kitlib.lib.sh",
     "tests/fixtures/kitlib-ratchet/",
 )
 

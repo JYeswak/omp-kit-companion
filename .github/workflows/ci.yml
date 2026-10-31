@@ -121,6 +121,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version-file: .bun-version
+      - name: Install source-locked build dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Check the test quarantine registry once per run (an expired or malformed entry fails)
         run: bun scripts/test-quarantine.ts check
       - name: Prove stock PATH and run every portable extension contract
@@ -138,6 +140,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version-file: .bun-version
+      - name: Install source-locked build dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Run affected-test selection and exact-commit fresh-gate contracts
         run: bun test tests/cli/affected-tests.test.ts tests/cli/fresh-gate.test.ts
 
@@ -153,6 +157,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version-file: .bun-version
+      - name: Install source-locked build dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Install the certified OMP for service receipt contracts
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
@@ -206,6 +212,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version-file: .bun-version
+      - name: Install source-locked build dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Validate all unreleased source notes before main can become green
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (matrix.suite == 'core' || matrix.suite == 'core-1')
         env:
@@ -276,6 +284,8 @@ jobs:
           sh tests/cli/check-staged-tempsafe.test.sh
           python3 tests/scripts/kitlib_ratchet_test.py
           sh tests/cli/check-staged-kitlib.test.sh
+          sh tests/cli/check-staged-kitlib-reversal.test.sh
+          sh tests/cli/check-staged-kitlib-replay.test.sh
           python3 tests/scripts/sources_test.py
           sh tests/cli/check-staged-sources.test.sh
       - name: Fetch reviewed OMP memory source fixture (18.4.9)
@@ -531,6 +541,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
+      - name: Install source-locked build dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Install stock OMP for the ${{ matrix.omp.track }} ladder
         env:
           OMP_VERSION: ${{ matrix.omp.version }}
@@ -591,6 +603,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
+      - name: Install source-locked build dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Install the minimum OMP (package-time manifest classification parses rules with OMP)
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.minimum }}
@@ -633,6 +647,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
+      - name: Install source-locked build dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Install certified OMP and TypeScript LSP for the journey
         env:
           OMP_VERSION: ${{ needs.resolve-omp-versions.outputs.certified }}
@@ -697,6 +713,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: .bun-version
+      - name: Install source-locked build dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Install OMP ${{ matrix.omp.track }} for native behavior
         run: npm install --global "@oh-my-pi/pi-coding-agent@${OMP_VERSION}"
       - name: Install pinned TypeScript LSP for native route proof

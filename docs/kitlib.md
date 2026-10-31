@@ -335,7 +335,7 @@ ratchet's own tests and fixtures.
 Enforced by the pre-commit member `51-omp-kit-staged-kitlib` (`scripts/check-staged-kitlib.sh`, installed by
 `install-commit-msg-bead.sh` with `kitlib_ratchet.py`, `kitlib_ratchet_core.py` and `pysafe.py` beside it), the
 `kitlib-range` step of `pre-push-gate.sh`, and CI (`tests/scripts/kitlib_ratchet_test.py`,
-`tests/cli/check-staged-kitlib.test.sh`).
+`tests/cli/check-staged-kitlib.test.sh`, `-reversal.test.sh` and `-replay.test.sh`, which share `check-staged-kitlib.lib.sh`).
 The commit-msg member invokes the same ratchet from the sibling pre-commit hook directory. It is installed and
 checked by `install-commit-msg-bead.sh`; `51-omp-kit-staged-kitlib` refuses to run unless the `50` member exists.
 
