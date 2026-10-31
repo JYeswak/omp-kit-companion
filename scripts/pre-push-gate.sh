@@ -637,6 +637,17 @@ log_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || log_git=""
 if [ -f "$archive_root/gate.log" ] && [ -n "$log_git" ] && mkdir -p "$log_git/omp-kit/gate-logs" 2>/dev/null; then
 	cp "$archive_root/gate.log" "$log_git/omp-kit/gate-logs/${local_sha:-unknown}.$(date -u +%Y%m%dT%H%M%SZ).log" 2>/dev/null || :
 fi
+# RELCLOCK1 (ompkit-774u.67): a green gate that deferred the complete suite starts the release verdict
+# for this exact commit in the background (scripts/release-verdict.sh: the commit's own exported
+# runner, one run per repo), so the release finds it recorded. If the push itself then fails, the
+# cached verdict is for a tree that may never ship; nothing else depends on it. OMP_KIT_RELEASE_VERDICT=0
+# opts out. Its output goes to .git/omp-kit/release-verdict.log, never to this hook's stdout.
+if [ "$gate_rc" = 0 ] && [ "${PRE_PUSH_FULL_SUITE:-release}" != push ] && [ "${OMP_KIT_RELEASE_VERDICT:-1}" != 0 ] \
+	&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ]; then
+	nohup sh "$ROOT/scripts/release-verdict.sh" --commit "$local_sha" --no-fetch \
+		</dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1 &
+	printf 'release verdict: started for %s in the background (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
+fi
 trap - EXIT
 cleanup
 exit "$gate_rc"
