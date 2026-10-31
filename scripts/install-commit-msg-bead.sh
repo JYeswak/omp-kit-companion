@@ -252,6 +252,8 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh" \
 		"hooks.d/pre-commit/pysafe.py scripts/pysafe.py" \
 		"hooks.d/pre-commit/pysafe_check.py scripts/pysafe_check.py" \
+		"hooks.d/pre-commit/pysafe_inline.py scripts/pysafe_inline.py" \
+		"hooks.d/pre-commit/pysafe_inline_literals.py scripts/pysafe_inline_literals.py" \
 		"hooks.d/pre-commit/50-omp-kit-staged-tempsafe scripts/check-staged-tempsafe.sh" \
 		"hooks.d/pre-commit/tempsafe_check.py scripts/tempsafe_check.py" \
 		"hooks.d/pre-commit/kitlib_ratchet_core.py scripts/kitlib_ratchet_core.py" \
@@ -591,18 +593,19 @@ install_staged_pysafe() {
 	member="$dir/49-omp-kit-staged-pysafe"
 	place "$KITROOT/scripts/pysafe.py" "$dir/pysafe.py" -x
 	place "$KITROOT/scripts/pysafe_check.py" "$dir/pysafe_check.py" -x
+	place "$KITROOT/scripts/pysafe_inline.py" "$dir/pysafe_inline.py" -x
+	place "$KITROOT/scripts/pysafe_inline_literals.py" "$dir/pysafe_inline_literals.py" -x
+	place "$KITROOT/scripts/kitlib_ratchet_core.py" "$dir/kitlib_ratchet_core.py" -x
 	place "$KITROOT/scripts/check-staged-pysafe.sh" "$member" +x
 	printf 'installed staged-pysafe member: %s\n' "$member"
 }
 
-# install_staged_tempsafe: the checker and the ratchet engine it is built on
-# (kitlib_ratchet_core.py) sit beside the member, non-executable, next to the
-# pysafe.py copy install_staged_pysafe (always run first) placed there; the
-# engine imports only pysafe.py. Numbered after pysafe.
+# install_staged_tempsafe: its checker reuses the ratchet engine and bounded
+# runner that install_staged_pysafe (always run first) already placed beside
+# the members. Numbered after pysafe.
 install_staged_tempsafe() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/50-omp-kit-staged-tempsafe"
-	place "$KITROOT/scripts/kitlib_ratchet_core.py" "$dir/kitlib_ratchet_core.py" -x
 	place "$KITROOT/scripts/tempsafe_check.py" "$dir/tempsafe_check.py" -x
 	place "$KITROOT/scripts/check-staged-tempsafe.sh" "$member" +x
 	printf 'installed staged-tempsafe member: %s\n' "$member"

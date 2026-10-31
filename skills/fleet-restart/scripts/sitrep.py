@@ -30,8 +30,9 @@ WRAP_STOP = ("DONE ", "BLOCKED ", "─", "╭", "╰", "※")
 
 
 def run(argv, cwd=None):
-    p = subprocess.run(argv, capture_output=True, text=True, cwd=cwd, env=fr.tmux_env(dict(os.environ)))
-    return p.returncode, p.stdout, p.stderr
+    result = fr.capture_command(argv, cwd=cwd, env=fr.tmux_env(dict(os.environ)))
+    rc = 124 if result.timed_out else result.rc if result.rc is not None else 127
+    return rc, fr.process_text(result.stdout), fr.process_text(result.stderr)
 
 
 def match_callback(line):

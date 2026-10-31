@@ -55,6 +55,37 @@ descendants must use async `run()`. A missing `deadline_s` throws TypeError; a n
 
 Bytes are never decoded; strict UTF-8, transcript paths and redaction stay caller policy. `runSync` stays leaf-only.
 
+### Python source and inline programs (PYGATE2)
+
+PySafe judges complete Python ASTs, including literal `python -c` programs and Python heredocs in staged shell
+files and literal command arguments at recognized TypeScript runner call sites. Commit and range checks read
+Git blobs, not repaired worktree bytes. Unresolved Python payloads and incomplete syntax refuse judgment;
+ordinary Python-looking data strings are not executed or treated as commands. Findings retain the host path and
+source location. This is bounded literal extraction, not general shell or TypeScript evaluation.
+
+The hook installer and freshness checker include `pysafe_inline.py`, `pysafe_inline_literals.py` and the shared
+`kitlib_ratchet_core.py` beside `pysafe_check.py`. Install the complete reviewed hook chain; copying its shell
+member alone is insufficient. A source test pass does not prove that an operator's hook chain is current.
+
+Fresh installation cannot import helpers from the unverified candidate or assume a kit is installed. The standalone
+installer therefore transports the exact canonical `pysafe.py` and `kitlib_run.py` bytes in a generated in-memory
+bundle. `python3 -I installer/embed-bootstrap.py --check` refuses drift; explicit regeneration uses the same command
+without `--check`. Release packaging checks freshness before building and never regenerates source implicitly.
+The installer preserves its attestation deadlines and exception semantics and refuses truncated authority output.
+
+Fleet restart commands also use the canonical supervisor. Pane fanout runs one supervised Python worker per pane,
+with bounded input and a 600-second outer process deadline in addition to its stage budgets. A timed-out or
+failed worker cannot reuse a previous successful result file. Parent cancellation marks the run before canceling
+queued work; active groups use the canonical supervisor's cleanup path.
+
+Scratch orphan cleanup recognizes direct interpreter scripts and literal Python `-c` invocations, including
+cwd-only and FD-only linkage. Reaping requires a private recognized session, the caller's UID, a known executable
+image and incarnation, a dead recorded owner, no live or unknown seat/users, and no other process sharing the
+session. Identity-free or ambiguous owners, socket/pipe services and unavailable metadata preserve the process.
+Both TERM and KILL reconstruct that proof under the users lock; receipts record PID, start and path while
+omitting inline programs and hashing the opaque proof identity. POSIX probe-to-signal races and the platform's
+process-start precision remain limits; this is not an atomic pidfd capability.
+
 ## Owned temp dir (KITLIB-TMP v1, ompkit-41l85)
 
 The primitive creates `<root>/<label>.<pid>.<6 random [a-z0-9]>` with mode 0700. The root is the TMPDIR-honouring

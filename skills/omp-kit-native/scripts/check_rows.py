@@ -17,11 +17,12 @@ Usage: check_rows.py [SKILL.md]     exit 0 all rows pass, 1 any row fails, 2 usa
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import pathlib
 import re
-import subprocess
+import shutil
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -52,8 +53,18 @@ def table_rows(text):
 
 def run_help(argv):
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
-        return p.stdout + p.stderr
+        root = pathlib.Path(__file__).resolve().parents[3]
+        if not (root / "scripts" / "kitlib_run.py").is_file():
+            launcher = shutil.which("omp-kit")
+            if launcher is None:
+                return "ERROR omp-kit runner unavailable"
+            root = pathlib.Path(launcher).resolve().parent.parent
+        sys.path.insert(0, str(root / "scripts"))
+        runner = importlib.import_module("kitlib_run")
+        result = runner.run(argv, deadline_s=60)
+        if result.timed_out or result.truncated:
+            return "ERROR help command exceeded its deadline or output bound"
+        return (result.stdout + result.stderr).decode()
     except Exception as ex:
         return f"ERROR {ex}"
 

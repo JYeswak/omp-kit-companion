@@ -3,8 +3,9 @@ registry/pause/resume/dead-man, save (session file, executable, advisor state,
 scratch, WATCHDOG drift), per-pane mode (RESTART only on the target build, else
 RESPAWN), composer hold, version verify, advisor re-apply, respawn argv, run
 plan/apply/resume-run. Called by selftest.py; every gate pairs a planted negative
-with its control. launchctl, ntm, tmux, lsof, the clock and sleep are fakes:
-nothing here touches the live fleet or launchd, except the opt-in gates_native
+with its control. launchctl, ntm, tmux, lsof, the clock and sleep are fakes.
+Fanout cancellation uses real isolated Python workers held before any send.
+Nothing touches the live fleet or launchd, except the opt-in gates_native
 (owned selftest-prefixed labels only, swept afterwards; production watcher
 loaded state is snapshotted and must be unchanged)."""
 import argparse
@@ -16,7 +17,9 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 
+from types import SimpleNamespace
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "scripts"))
 import pysafe  # noqa: E402  (bounded child runs: process-group kill on timeout)
 
@@ -358,11 +361,13 @@ def gate_check_env(case, tmp, good_env):
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
     env.update(good_env)
     script = os.path.join(HERE, "fleet_restart.py")
-    p = subprocess.run([sys.executable, script, "check-env"], capture_output=True, text=True, env=env)
-    case("CTL check-env with the fleet socket -> exit 0, ok", p.returncode == 0 and json.loads(p.stdout)["ok"] is True, p.stdout + p.stderr)
-    p = subprocess.run([sys.executable, script, "env"], capture_output=True, text=True, env=env)
+    p = fr.capture_command([sys.executable, script, "check-env"], env=env)
+    out, err = fr.process_text(p.stdout), fr.process_text(p.stderr)
+    case("CTL check-env with the fleet socket -> exit 0, ok", p.rc == 0 and json.loads(out)["ok"] is True, out + err)
+    p = fr.capture_command([sys.executable, script, "env"], env=env)
+    out, err = fr.process_text(p.stdout), fr.process_text(p.stderr)
     case("NEG removed subcommand `env` rejected by argparse (uxr3: ran /usr/bin/env)",
-         p.returncode == 2 and "invalid choice" in p.stderr and not p.stdout, "rc=%d %s" % (p.returncode, p.stderr[-200:]))
+         p.rc == 2 and "invalid choice" in err and not out, "rc=%s %s" % (p.rc, err[-200:]))
 
 
 # ---------- 2. watchers ----------
@@ -840,18 +845,45 @@ def gate_parallel(case, tmp):
          not fr_run.should_fanout(type("C", (), {"parallel": True, "run_dir": tmp})(), rows, {"trip": {"pane": "c"}, "sends": False})
          and not fr_run.should_fanout(type("C", (), {"parallel": True, "run_dir": None})(), rows, {"trip": None, "sends": True})
          and fr_run.should_fanout(type("C", (), {"parallel": True, "run_dir": tmp})(), rows, {"trip": None, "sends": True}))
+
+    row = {"pane": "fixture:0.1", "pane_id": "%fixture", "mode": "RESPAWN"}
+    for name, deadline, expected in (("complete", 30, "HOLD_NOT_SAVED"), ("deadline", 0.000001, "FAILED")):
+        run_dir = os.path.join(tmp, "fanout-" + name)
+        os.makedirs(os.path.join(run_dir, "pane-results"))
+        # A previous success cannot become evidence for a timed-out worker.
+        with open(os.path.join(run_dir, "pane-results", "fixture_0.1.json"), "w") as fh:
+            json.dump(dict(row, result="VERIFIED", sends=1), fh)
+        ctx = SimpleNamespace(run_dir=run_dir, env={}, home=run_dir, releases=run_dir,
+                              version="0.0.0", spawn_fn=None, pane_deadline_s=deadline)
+        ledger = fr_run.Ledger(os.path.join(run_dir, fr_run.LEDGER), time.time)
+        results, breaker = {}, {"trip": None, "sends": True, "strict": False}
+        fr_run.parallel_panes(ctx, [row], {}, {}, {}, ledger, results, breaker)
+        result = results[row["pane"]]
+        events = ledger.events()
+        case(("CTL real isolated worker records its no-save hold" if name == "complete"
+              else "NEG expired real worker never reuses an old VERIFIED result"),
+             result["result"] == expected and result["sends"] == 0
+             and not any(e["event"] == "SEND_INTENT" for e in events),
+             json.dumps({"result": result, "events": [e["event"] for e in events]}))
+
 def gate_preserve(case, tmp):
     repo = os.path.join(tmp, "preserve-repo")
     os.makedirs(repo)
-    subprocess.run(["git", "init", "-q", repo], check=True)
-    subprocess.run(["git", "-C", repo, "config", "user.email", "preserve@example.invalid"], check=True)
-    subprocess.run(["git", "-C", repo, "config", "user.name", "preserve"], check=True)
+    for argv in (["git", "init", "-q", repo],
+                 ["git", "-C", repo, "config", "user.email", "preserve@example.invalid"],
+                 ["git", "-C", repo, "config", "user.name", "preserve"]):
+        p = fr.capture_command(argv, check=True)
+        sys.stdout.write(fr.process_text(p.stdout))
+        sys.stderr.write(fr.process_text(p.stderr))
     kept = os.path.join(repo, "kept.txt")
     with open(kept, "w") as fh:
         fh.write("base\n")
-    subprocess.run(["git", "-C", repo, "add", "kept.txt"], check=True)
-    subprocess.run(["git", "-C", repo, "commit", "-q", "-m", "base [test]"], check=True)
-    head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    for argv in (["git", "-C", repo, "add", "kept.txt"],
+                 ["git", "-C", repo, "commit", "-q", "-m", "base [test]"]):
+        p = fr.capture_command(argv, check=True)
+        sys.stdout.write(fr.process_text(p.stdout))
+        sys.stderr.write(fr.process_text(p.stderr))
+    head = fr.process_text(fr.capture_command(["git", "-C", repo, "rev-parse", "HEAD"], check=True).stdout).strip()
     with open(kept, "w") as fh:
         fh.write("dirty\n")
     scratch = os.path.join(repo, "var", "agent-tmp", "job.9")
@@ -862,11 +894,11 @@ def gate_preserve(case, tmp):
     doc = {"rows": [{"pane": "w:0.9", "repo": repo, "repo_dirt_count": 1,
                      "held_scratch": [{"path": scratch, "newest_mtime": 1, "newest_file": os.path.join(scratch, "notes.txt")}]}]}
     result = fr_save.preserve_work(doc, dest)
-    pinned = subprocess.run(["git", "-C", repo, "rev-parse", result["repos"][0]["ref"]], capture_output=True, text=True)
+    pinned = fr.capture_command(["git", "-C", repo, "rev-parse", result["repos"][0]["ref"]])
     still = open(kept).read()
-    main = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    main = fr.process_text(fr.capture_command(["git", "-C", repo, "rev-parse", "HEAD"], check=True).stdout).strip()
     case("CTL dirty repo pinned on refs/preserve; worktree and HEAD untouched; scratch copied",
-         result["ok"] and pinned.returncode == 0 and still == "dirty\n" and main == head
+         result["ok"] and pinned.rc == 0 and still == "dirty\n" and main == head
          and open(os.path.join(dest, "scratch", "w:0.9", "job.9", "notes.txt")).read() == "keep-me\n",
          json.dumps(result)[:300])
     missing = fr_save.preserve_work({"rows": [{"pane": "w:0.8", "repo": None, "repo_dirt_count": 0,
@@ -1033,8 +1065,8 @@ def gate_run(case, tmp, uid, good_env, aligned):
     case("CTL chief never in the run: SKIP_CHIEF, and its exact respawn command printed for the operator",
          acts["omp-test:0.1"] == "SKIP_CHIEF" and ch and ch["argv"][:5] == ["tmux", "respawn-pane", "-k", "-t", "%3"] and "--resume" in ch["argv"][-1]
          and "--advisor" in ch["argv"][-1], json.dumps(ch))
-    tpl = json.loads(subprocess.run([sys.executable, os.path.join(HERE, "fleet_restart.py"), "approval-template", "--manifest",
-                                     os.path.join(run_dir, fr_run.RUN_MANIFEST)], capture_output=True, text=True).stdout)
+    tpl = json.loads(fr.capture_command([sys.executable, os.path.join(HERE, "fleet_restart.py"), "approval-template", "--manifest",
+                                        os.path.join(run_dir, fr_run.RUN_MANIFEST)], check=True).stdout)
     case("CTL approval-template binds the run manifest sha, lists watchers to pause and the target",
          tpl["manifest_sha256"] == man["manifest_sha256"] and tpl["watchers_pause"] == ["com.omp-kit.fleet-watch"] and tpl["unprotect"] == []
          and tpl["target"]["path"] == TARGET, json.dumps(tpl)[:200])

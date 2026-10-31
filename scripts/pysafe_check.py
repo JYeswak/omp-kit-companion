@@ -6,6 +6,9 @@ running interpreter (>= 3.9), module mode, complete input only (a syntax error
 is the typed ``parse-error`` finding, never a silent pass). Comments come from
 ``tokenize`` so a ``# pysafe:`` inside a string is never a suppression. The
 source is parsed, never executed.
+Staged/range modes also extract complete literal Python programs from shell
+commands/heredocs and recognized TypeScript runner calls; failures to resolve
+a Python payload are parse-error findings at the host source location.
 
 Rules (each is a finding at ``path:line:col``):
 
@@ -65,9 +68,9 @@ Modes:
   pysafe_check.py PATH...                  judge files/dirs, every finding
   pysafe_check.py --tree LABEL PATH ...    same, grouped under LABEL
   pysafe_check.py --list LABEL FILE ...    paths read from FILE, one per line
-  pysafe_check.py --staged [--repo DIR]    pre-commit ratchet: staged .py files
+  pysafe_check.py --staged [--repo DIR]    pre-commit ratchet: staged .py/.sh/.ts
                                            against HEAD (GIT_INDEX_FILE honoured)
-  pysafe_check.py --head REV [--base REV]  CI ratchet over changed .py files
+  pysafe_check.py --head REV [--base REV]  CI ratchet over changed .py/.sh/.ts
 Ratchet: a finding is new when its (rule, enclosing scope, source text)
 fingerprint occurs more often in the new blob than in the old one; untouched
 pre-existing findings do not block, new ones always do.
@@ -511,10 +514,45 @@ def check_source(source: bytes, path: str) -> FileReport:
     return report
 
 
+def check_host_source(source: bytes, path: str) -> FileReport:
+    """Judge complete Python programs selected by the host's execution syntax."""
+    if path.endswith(".py") or len(source) > MAX_FILE_BYTES:
+        return check_source(source, path)
+    import pysafe_inline
+    import kitlib_ratchet_core as core
+    report = FileReport(path)
+    try:
+        extraction = pysafe_inline.extract(source, path)
+        text = source.decode("utf-8", "strict")
+    except (UnicodeError, ValueError, RecursionError) as error:
+        report.findings.append(Finding(path, 1, 1, "parse-error", str(error), "<inline>", type(error).__name__, 1))
+        return report
+    where = core.js_locator(text)
+    for offset, detail in extraction.errors:
+        line, col = where(offset)
+        snippet = text.splitlines()[line - 1][:SNIPPET_CHARS] if text else ""
+        report.findings.append(Finding(path, line, col, "parse-error", detail, "<inline>", snippet, line))
+    if extraction.errors:
+        return report
+    for payload in extraction.payloads:
+        try:
+            parsed = check_source(payload.text.encode("utf-8"), path)
+        except UnicodeError as error:
+            report.findings.append(Finding(path, 1, 1, "parse-error", str(error), "<inline>", "invalid payload encoding", 1))
+            continue
+        for finding in parsed.findings:
+            end_line, _ = where(payload.point(finding.end_line, 1))
+            finding.line, finding.col = where(payload.point(finding.line, finding.col))
+            finding.end_line = end_line
+            report.findings.append(finding)
+    report.findings.sort(key=lambda finding: (finding.line, finding.col, finding.rule))
+    return report
+
+
 def check_file(path: str) -> FileReport:
     with open(path, "rb") as handle:
         source = handle.read(MAX_FILE_BYTES + 1)
-    return check_source(source, path)
+    return check_host_source(source, path)
 
 
 def iter_python_files(path: str) -> Iterable[str]:
@@ -560,7 +598,7 @@ def _changed(raw: bytes) -> List[Tuple[Optional[str], str]]:
         index += 2
         if status in ("A", "M", "T"):
             pairs.append((path if status != "A" else None, path))
-    return [(old, new) for old, new in pairs if new.endswith(".py")]
+    return [(old, new) for old, new in pairs if new.endswith((".py", ".sh", ".ts"))]
 
 
 def _blob(repo: str, spec: str) -> bytes:
@@ -582,10 +620,10 @@ def ratchet(repo: str, base: Optional[str], head: Optional[str]) -> List[FileRep
     reports: List[FileReport] = []
     for old, new in _changed(raw):
         new_source = _blob(repo, (":" if head is None else head + ":") + new)
-        after = check_source(new_source, new)
+        after = check_host_source(new_source, new)
         before_keys: Counter = Counter()
         if old is not None and base is not None:
-            before_keys = Counter(f.key() for f in check_source(_blob(repo, f"{base}:{old}"), old).active())
+            before_keys = Counter(f.key() for f in check_host_source(_blob(repo, f"{base}:{old}"), old).active())
         after_active = after.active()
         after_keys = Counter(f.key() for f in after_active)
         new_keys = {key: after_keys[key] - before_keys.get(key, 0) for key in after_keys}

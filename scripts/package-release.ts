@@ -307,6 +307,15 @@ export async function probePackagedGapConsumer(stagedRoot: string): Promise<void
 	}
 }
 
+/** Never publish a standalone installer whose generated runner predates canonical source. */
+export async function checkInstallerBootstrap(sourceRoot: string): Promise<void> {
+	const checked = await runBounded(["python3", "-I", "installer/embed-bootstrap.py", "--check"],
+		{ cwd: sourceRoot, deadline_s: 30, grace_s: 2, max_output_bytes: 64 * 1024 });
+	if (checked.rc !== 0 || checked.timed_out || checked.truncated) {
+		fail(`INSTALLER_BOOTSTRAP_STALE_OR_UNAVAILABLE (${checked.rc}): ${new TextDecoder().decode(checked.stdout)} ${new TextDecoder().decode(checked.stderr)}`);
+	}
+}
+
 async function run(): Promise<void> {
 	const { version, key, out, signKey } = argumentsOf(process.argv.slice(2));
 	try {
@@ -315,6 +324,7 @@ async function run(): Promise<void> {
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
+	await checkInstallerBootstrap(root);
 	const sourcePackage = safeSource("package.json");
 	const initialSourceRevision = packageSourceRevision(root, sourcePackage);
 	const filename = `omp-kit-v${version}-${key}.tar`;

@@ -741,3 +741,11 @@ def _base_rev(repo: str, args: argparse.Namespace) -> Optional[str]:
         if parent.outcome == pysafe.OK and parent.returncode == 0:
             base = parent.text().strip()
     return base
+
+
+def js_identifier(code: str, start: int) -> tuple[str, int]:
+    """Read an identifier tail after the caller selects its initial lexical position."""
+    index = start
+    while index < len(code) and (code[index].isalnum() or code[index] in "_$"):
+        index += 1
+    return code[start:index], index

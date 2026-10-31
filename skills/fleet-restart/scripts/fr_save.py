@@ -217,13 +217,11 @@ def watchdog_files(adir, project_dirs):
 
 def repo_root(cwd):
     d = os.path.abspath(cwd)
-    while True:
+    while os.path.dirname(d) != d:
         if os.path.exists(os.path.join(d, ".git")):
             return d
-        up = os.path.dirname(d)
-        if up == d:
-            return None
-        d = up
+        d = os.path.dirname(d)
+    return d if os.path.exists(os.path.join(d, ".git")) else None
 
 
 def owner_pid(text):
@@ -660,8 +658,9 @@ def _git(repo, args, index=None):
     env["GIT_TERMINAL_PROMPT"] = "0"
     if index:
         env["GIT_INDEX_FILE"] = index
-    run = subprocess.run(["git", "-C", repo, *args], env=env, capture_output=True, text=True)
-    return run.returncode, (run.stdout or "").strip(), (run.stderr or "").strip()
+    result = core.capture_command(["git", "-C", repo, *args], env=env)
+    rc = 124 if result.timed_out else result.rc if result.rc is not None else 127
+    return rc, core.process_text(result.stdout).strip(), core.process_text(result.stderr).strip()
 
 
 def pin_repo(repo, ref, index_path):

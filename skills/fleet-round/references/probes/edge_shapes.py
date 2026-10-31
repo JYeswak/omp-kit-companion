@@ -7,12 +7,12 @@ Run from a tracker root: python3 edge_shapes.py
 """
 import collections
 import json
-import subprocess
+from br_shapes import checked_output
 
 FLAGS = ["--json", "--no-auto-import", "--no-auto-flush"]
-rows = json.loads(subprocess.run(["br", "list", "--all", "--limit", "0", *FLAGS], capture_output=True, text=True, check=True).stdout)["issues"]
+rows = json.loads(checked_output(["br", "list", "--all", "--limit", "0", *FLAGS]))["issues"]
 ids = [r["id"] for r in rows if r.get("dependency_count", 0) > 0]
-shown = json.loads(subprocess.run(["br", "show", *ids, *FLAGS], capture_output=True, text=True, check=True).stdout) if ids else []
+shown = json.loads(checked_output(["br", "show", *ids, *FLAGS])) if ids else []
 edges = [(x, e) for x in shown for e in x.get("dependencies") or []]
 print("dependency_types", dict(sorted(collections.Counter(e["dependency_type"] for _, e in edges).items())))
 print("edge_keys", sorted({k for _, e in edges for k in e}))

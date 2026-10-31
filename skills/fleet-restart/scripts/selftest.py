@@ -3,11 +3,11 @@
 and pass its paired control. Run from this directory: python3 selftest.py
 (requires an owned repo var/agent-tmp TMPDIR). Planted negatives include busy panes, dropped flags,
 missing TMUX env, stale plugin links, unsafe sends and advisor loss."""
+import importlib
 import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -114,11 +114,8 @@ def main():
             or not os.path.isdir(base) or not os.path.isfile(os.path.join(base, ".owner"))):
         print("TMPDIR must be an owned repo var/agent-tmp directory", file=sys.stderr)
         return 2
-    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(base)))
-    tmp = tempfile.mkdtemp(prefix="fleet-restart-selftest.%d." % os.getpid(), dir=base)
-    with open(os.path.join(tmp, ".owner"), "w") as owner:
-        owner.write("pid=%s\nlabel=fleet-restart-selftest\nrepo=%s\ncreated=%s\n" %
-                    (os.getpid(), repo_root, time.strftime("%Y-%m-%dT%H:%M:%S%z")))
+    scratch = importlib.import_module("kitlib_tmp").owned_tmp("fleet-restart-selftest", root=base)
+    tmp = scratch.path
     uid = os.getuid()
 
     # --- missing TMUX env (ntm send then fails "no tmux sessions running")
@@ -149,7 +146,10 @@ def main():
     case("CTL relink apply -> aligned with undo record of old targets", after["ok"] and all(r["old_target"].endswith("0.2.19") for r in undo_rows) and len(undo_rows) == 3)
     with open(undo) as fh:
         undo_cmd = json.load(fh)["undo"]
-    rc = subprocess.run(undo_cmd, shell=True).returncode
+    result = fr.capture_command(["/bin/sh", "-c", undo_cmd])
+    sys.stdout.write(fr.process_text(result.stdout))
+    sys.stderr.write(fr.process_text(result.stderr))
+    rc = 124 if result.timed_out else result.rc
     restored = fr.align_check(home, rel, "0.2.20")
     case("CTL undo record command restores the old targets", rc == 0 and len(restored["stale"]) == 3
          and all(r["target"].endswith("0.2.19") for r in restored["links"]), "rc=%s" % rc)

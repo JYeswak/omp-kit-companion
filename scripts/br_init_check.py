@@ -332,13 +332,6 @@ def _identifiers(code: str, span: Tuple[int, int]) -> Iterable[str]:
             index += 1
 
 
-def _js_identifier(code: str, start: int) -> Tuple[str, int]:
-    index = start
-    while index < len(code) and (code[index].isalnum() or code[index] in "_$"):
-        index += 1
-    return code[start:index], index
-
-
 def _js_wrapper_environment_pinned(code: str, strings: Dict[int, Tuple[str, int, bool]],
                                    pairs: Dict[int, int], arguments: Sequence[Tuple[int, int]],
                                    argv_argument_index: int) -> bool:
@@ -386,7 +379,7 @@ def _js_calls(source: bytes, path: str) -> core.Scan:
             index += 1
             continue
         start = index
-        name, index = _js_identifier(code, start)
+        name, index = core.js_identifier(code, start)
         if name not in JS_RUNNERS:
             continue
         opening = index

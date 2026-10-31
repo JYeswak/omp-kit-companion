@@ -20,14 +20,15 @@ The chief pane is never touched: the report prints its respawn command. Every
 action appends to ledger.jsonl; --resume-run continues from it. The only
 keystrokes sent are `/restart` and `/advisor on`. All side effects go through a
 Ctx of injected functions."""
+from __future__ import annotations
+
 import fcntl
 import hashlib
 import json
-import multiprocessing
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import os
 import shlex
 import signal
-import subprocess
 import sys
 import time
 
@@ -49,7 +50,7 @@ class Ctx:
     def __init__(self, env, uid, home, agents_dir, registry, run_fn, capture_fn, inventory_fn, snapshot_fn, lsof_fn, align_fn,
                  preflight_fn, target_fn, sleep_fn=time.sleep, clock_fn=time.time, verify_timeout=120, verify_poll=5, verify_settle=10,
                  advisor_grace=6, advisor_timeout=20, advisor_poll=2, busy_poll=30, parallel=False, spawn_fn=None,
-                 releases=None, version=None, run_dir=None):
+                 releases=None, version=None, run_dir=None, pane_deadline_s=600):
         self.env, self.uid, self.home, self.agents_dir, self.registry = env, uid, home, agents_dir, registry
         self.run_fn, self.capture_fn, self.inventory_fn, self.snapshot_fn, self.lsof_fn = run_fn, capture_fn, inventory_fn, snapshot_fn, lsof_fn
         self.align_fn, self.preflight_fn, self.target_fn, self.sleep_fn, self.clock_fn = align_fn, preflight_fn, target_fn, sleep_fn, clock_fn
@@ -57,6 +58,7 @@ class Ctx:
         self.advisor_grace, self.advisor_timeout, self.advisor_poll, self.busy_poll = advisor_grace, advisor_timeout, advisor_poll, busy_poll
         self.parallel, self.spawn_fn = parallel, spawn_fn
         self.releases, self.version, self.run_dir = releases, version, run_dir
+        self.pane_deadline_s = pane_deadline_s
         self.cancel_path = None
 
     def clock(self):
@@ -75,9 +77,11 @@ def live_ctx(env, home, releases, version=None, agents_dir=None, registry_path=f
         return inv
 
     def preflight_fn():
-        p = subprocess.run([sys.executable, os.path.join(HERE, "selftest.py")], capture_output=True, text=True)
-        lines = p.stdout.strip().splitlines()
-        return p.returncode == 0, lines[-1] if lines else "selftest printed nothing (rc %d)" % p.returncode
+        result = core.capture_command([sys.executable, os.path.join(HERE, "selftest.py")], deadline_s=300)
+        stdout = core.process_text(result.stdout)
+        lines = stdout.strip().splitlines()
+        rc = 124 if result.timed_out else result.rc if result.rc is not None else 127
+        return not result.timed_out and rc == 0, lines[-1] if lines else "selftest printed nothing (rc %d)" % rc
 
     ctx = Ctx(env=env, uid=os.getuid(), home=home, agents_dir=agents_dir or os.path.join(home, "Library", "LaunchAgents"),
               registry=fw.load_registry(registry_path), run_fn=core.run, capture_fn=core.capture_live(env),
@@ -616,14 +620,68 @@ def pane_main(payload):
     return res
 
 
-def spawn_pane_processes(payloads):
-    mp = multiprocessing.get_context("spawn")
-    procs = []
-    for payload in payloads:
-        proc = mp.Process(target=pane_main, args=(payload,), name="pane-%s" % payload["row"]["pane"])
-        proc.start()
-        procs.append(proc)
-    return procs
+def run_pane_process(payload: dict[str, object], deadline_s: float) -> core.CapturedCommand | None:
+    """The supervisor owns a bounded process group, not a multiprocessing PID."""
+    cancel = payload.get("cancel")
+    if isinstance(cancel, str) and os.path.exists(cancel):
+        return None
+    return core.kitlib_run.run(
+        [sys.executable, os.path.abspath(__file__)], deadline_s=deadline_s,
+        stdin=json.dumps(payload).encode("utf-8"))
+
+
+def _pane_failures(futures: dict[Future[core.CapturedCommand | None], str],
+                   deadline_s: float, ledger: Ledger) -> dict[str, str]:
+    failed: dict[str, str] = {}
+    for future in as_completed(futures, timeout=deadline_s + 15):
+        pane = futures[future]
+        try:
+            result = future.result(timeout=1)
+        except OSError as error:
+            failed[pane] = str(error)
+            continue
+        if result is None:
+            failed[pane] = "pane launch cancelled"
+            continue
+        sys.stdout.write(core.process_text(result.stdout))
+        sys.stderr.write(core.process_text(result.stderr))
+        if result.timed_out or result.truncated or result.rc != 0:
+            failed[pane] = "pane deadline exceeded" if result.timed_out else "pane process failed or output was truncated"
+            ledger.add("PANE_FAILED", pane=pane, rc=result.rc, timed_out=result.timed_out, truncated=result.truncated)
+    return failed
+
+
+def _supervise_panes(ctx: Ctx, payloads: list[dict[str, object]], cancel: str, ledger: Ledger) -> dict[str, str]:
+    with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+        with core.kitlib_run.pysafe.cancel_on_signals():
+            signals = (signal.SIGTERM, signal.SIGINT)
+            futures: dict[Future[core.CapturedCommand | None], str] = {}
+
+            def stop(signum: int, frame: object) -> None:
+                with open(cancel, "w") as fh:
+                    fh.write("parent-cancelled\n")
+                for future in futures:
+                    future.cancel()
+                raise core.kitlib_run.pysafe.Cancelled(signum)
+
+            for sig in signals:
+                signal.signal(sig, stop)
+            try:
+                for payload in payloads:
+                    if os.path.exists(cancel):
+                        break
+                    row = payload.get("row")
+                    if not isinstance(row, dict) or not isinstance(row.get("pane"), str):
+                        raise ValueError("pane payload must name its pane")
+                    future = pool.submit(run_pane_process, payload, ctx.pane_deadline_s)
+                    futures[future] = row["pane"]
+                return _pane_failures(futures, ctx.pane_deadline_s, ledger)
+            except BaseException:
+                with open(cancel, "w") as fh:
+                    fh.write("parent-cancelled\n")
+                for future in futures:
+                    future.cancel()
+                raise
 
 
 def parallel_panes(ctx, rows, saved, target, approval, ledger, results, brk):
@@ -635,30 +693,20 @@ def parallel_panes(ctx, rows, saved, target, approval, ledger, results, brk):
     ledger.add("PANE_FANOUT", count=len(payloads), panes=[p["row"]["pane"] for p in payloads])
     if ctx.spawn_fn:
         return ctx.spawn_fn(ctx, payloads, saved, target, approval, ledger, results, brk)
-    procs = spawn_pane_processes(payloads)
-    previous = signal.getsignal(signal.SIGTERM)
-
-    def stop(signum, frame):
-        with open(cancel, "w") as fh:
-            fh.write("parent-sigterm\n")
-        if callable(previous):
-            previous(signum, frame)
-
-    signal.signal(signal.SIGTERM, stop)
-    try:
-        for proc in procs:
-            proc.join()
-    finally:
-        signal.signal(signal.SIGTERM, previous)
+    if not payloads:
+        return []
+    failed = _supervise_panes(ctx, payloads, cancel, ledger)
     busy = []
     for payload in payloads:
         safe = payload["row"]["pane"].replace("/", "_").replace(":", "_")
         path = os.path.join(ctx.run_dir, "pane-results", safe + ".json")
         try:
+            if payload["row"]["pane"] in failed:
+                raise OSError(failed[payload["row"]["pane"]])
             with open(path) as fh:
                 res = json.load(fh)
-        except OSError:
-            res = held(payload["row"], "FAILED", "pane process exited without a result")
+        except OSError as error:
+            res = held(payload["row"], "FAILED", "pane process exited without a valid result: %s" % error)
             ledger.add("PANE_LOST", pane=payload["row"]["pane"])
         results[res["pane"]] = res
         if res.pop("busy", False):
@@ -1009,3 +1057,15 @@ def render_report(rep):
     else:
         out.append("- %s" % ("held: %s" % ", ".join(ch.get("holds") or []) if ch else "chief pane not found in the plan"))
     return "\n".join(out) + "\n"
+
+
+def _pane_worker_main() -> int:
+    outcome, data, truncated = core.kitlib_run.pysafe.read_stdin(5, cap_bytes=16 * 1024 * 1024)
+    if outcome != "OK" or truncated:
+        raise ValueError("pane worker payload exceeded its input deadline or byte bound")
+    pane_main(json.loads(data))
+    return 0
+
+
+if __name__ == "__main__":
+    core.kitlib_run.pysafe.run_main(_pane_worker_main)

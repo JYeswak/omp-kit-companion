@@ -10,17 +10,69 @@ Every command is read-only or plan/dry-run by default. The writers are `send
 replace with an undo record). Stdlib only (PyYAML, when importable, reads profile
 config.yml). Always call it by full path: python3 "$SKILL/scripts/fleet_restart.py" <cmd>.
 """
+from __future__ import annotations
+
 import argparse
 import datetime
 import glob
 import hashlib
+import importlib
 import json
+import locale
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from types import ModuleType
+from typing import Protocol
+
+
+class CapturedCommand(Protocol):
+    rc: int | None
+    stdout: bytes
+    stderr: bytes
+    timed_out: bool
+    truncated: bool
+
+
+def _load_runner() -> ModuleType:
+    """Use this package's helper, or the installed release for a library skill."""
+    root = Path(__file__).resolve().parents[3]
+    try:
+        local = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        local = {}
+    if local.get("name") != "omp-kit-companion":
+        launcher = shutil.which("omp-kit")
+        if launcher is None:
+            raise SystemExit("fleet-restart requires an installed omp-kit runner")
+        root = Path(os.path.realpath(launcher)).parent.parent
+    sys.path.insert(0, str(root / "scripts"))
+    return importlib.import_module("kitlib_run")
+
+
+kitlib_run = _load_runner()
+
+
+def process_text(data: bytes) -> str:
+    return data.decode(locale.getpreferredencoding(False)).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def capture_command(argv: Sequence[str], *, deadline_s: float = 60,
+                    env: Mapping[str, str] | None = None, cwd: str | None = None,
+                    check: bool = False) -> CapturedCommand:
+    result = kitlib_run.run(argv, deadline_s=deadline_s, env=env, cwd=cwd)
+    if result.truncated:
+        raise RuntimeError("fleet-restart command output exceeded its capture bound: %s" % argv[0])
+    if check and result.timed_out:
+        raise subprocess.TimeoutExpired(argv, deadline_s, output=result.stdout, stderr=result.stderr)
+    if check and result.rc != 0:
+        raise subprocess.CalledProcessError(result.rc, argv, output=result.stdout, stderr=result.stderr)
+    return result
 
 DEFAULT_PROTECT = ["uds--burn-down:0.0"]
 
@@ -330,7 +382,7 @@ def relink(report, undo_path, apply=False):
 
 
 def kit_version():
-    out = subprocess.run(["omp-kit", "--version"], capture_output=True, text=True, check=True).stdout
+    out = process_text(capture_command(["omp-kit", "--version"], check=True).stdout)
     m = re.search(r"(\d+\.\d+\.\d+)", out)
     if not m:
         raise SystemExit("cannot parse omp-kit --version: %r" % out)
@@ -811,8 +863,9 @@ def verify(plan, inv_after, expect_mcp, mode="restart", sent=None, sessions=None
 # ---------- live capture ----------
 
 def run(argv, env=None):
-    p = subprocess.run(argv, capture_output=True, text=True, env=env)
-    return p.returncode, (p.stdout + p.stderr)
+    result = capture_command(argv, env=env)
+    rc = 124 if result.timed_out else result.rc if result.rc is not None else 127
+    return rc, process_text(result.stdout) + process_text(result.stderr)
 
 
 def live_inventory(env, lines=TAIL_LINES, out_dir=None, only=None):

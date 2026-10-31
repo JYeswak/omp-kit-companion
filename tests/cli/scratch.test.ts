@@ -613,37 +613,11 @@ test("delete failure reports immutable flags only when observed", () => {
   expect(failed).toContainEqual(expect.objectContaining({ dir: unverifiedPath, cause: "unknown" }));
 });
 
-test("killOrphan reaps a real sleeper and reports a missing pid as gone", () => {
-  // A reparented grandchild behaves like a true orphan: no zombie lingers for us.
-  const launcher = Bun.spawnSync(["sh", "-c", "sleep 60 </dev/null >/dev/null 2>&1 & echo $!"], { stdout: "pipe", stderr: "ignore" });
-  const orphanPid = Number(launcher.stdout.toString().trim());
-  expect(Number.isSafeInteger(orphanPid)).toBe(true);
-  const deps: ApplyDeps = { ...depsFor(), home: "/tmp" };
-  expect(killOrphan(orphanPid, deps)).toBe(true);
-  expect(killOrphan(deadPid(), deps)).toBe(true);
-});
-test("apply kills only selected harness orphans and logs JSONL", () => {
-  const home = useState();
-  const root = agentTmp("scratch");
-  roots.push(root);
-  process.env.OMP_KIT_SCRATCH_ROOTS = root;
-  try {
-    const killed: number[] = [];
-    const psTable = "  PID  PPID ELAPSED COMMAND\n90210     1 02:00:00 bun /k/mock-model.mjs --port 9\n90211   500 02:00:00 bun /k/mock-model.mjs\n";
-    const deps: ApplyDeps = { liveness: defaultLiveness(),
-      run: (args: readonly string[]) => args[0] === "ps"
-        ? { code: 0, stdout: psTable, stderr: "" }
-        : { code: 1, stdout: "", stderr: "" },
-      home, kill: (pid: number) => { killed.push(pid); return true; } };
-    const result = applyScratch(home, deps);
-    expect(killed).toEqual([90210]);
-    const lines = readFileSync(reapLogPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
-    const event = lines.find(entry => entry.event === "orphan-kill");
-    expect(event).toMatchObject({ pid: 90210, ok: true });
-  } finally {
-    if (savedRoots === undefined) delete process.env.OMP_KIT_SCRATCH_ROOTS;
-    else process.env.OMP_KIT_SCRATCH_ROOTS = savedRoots;
-  }
+test("killOrphan rejects a bare numeric PID instead of signalling its current occupant", () => {
+  const signalled: number[] = [];
+  const deps: ApplyDeps = { ...depsFor(), home: process.cwd(), kill: (pid) => { signalled.push(pid); return true; } };
+  expect(() => Reflect.apply(killOrphan, undefined, [process.pid, deps])).toThrow("incarnation-bound scratch proof");
+  expect(signalled).toEqual([]);
 });
 
 function cli(args: string[], home: string, extraEnv: Record<string, string> = {}) {

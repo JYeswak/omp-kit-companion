@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { incarnationSync, isDead, normalizeStart, probeIncarnationSync, type Incarnation, type Probe, type ProbeState } from "./kitlib/proc.ts";
@@ -16,8 +16,8 @@ import { runSync } from "./kitlib/run.ts";
  * Entries without that process identity (including the fleet guard's four-field
  * marker and the legacy three-field format) use idle quarantine: past 72 h they
  * move to quarantine, then the configured TTL (24 h by default) plus owner/lsof
- * rechecks must pass before deletion. Orphan kill targets ONLY kit harness servers
- * (ppid 1, older than 1 h, mock-model.mjs / external-live.mjs argv).
+ * rechecks must pass before deletion. Interpreter termination requires a fresh,
+ * incarnation-bound proof of exclusive abandoned scratch ownership, never argv/age alone.
  */
 
 export interface ScratchRunResult { code: number | null; stdout: string; stderr: string }
@@ -278,6 +278,25 @@ export function sessionOwnersDir(env: NodeJS.ProcessEnv = process.env): string {
 	return env.OMP_KIT_SESSION_OWNERS_DIR ?? join(homedir(), ".omp", "run", "session-owners");
 }
 
+function sessionOwnerLive(session: string): boolean | null {
+	if (!SESSION_PATTERN.test(session)) return null;
+	const lock = join(sessionOwnersDir(), `${session}.lock`);
+	try {
+		const st = lstatSync(lock);
+		if (!st.isFile() || st.isSymbolicLink()) return null;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? false : null;
+	}
+	try {
+		const out = runSync(["lsof", "-t", "--", lock], { deadline_s: 3, max_output_bytes: 65536 });
+		if (out.timed_out || out.truncated) return null;
+		if (out.rc === 0 && new TextDecoder().decode(out.stdout).trim() !== "") return true;
+		return out.rc === 1 && new TextDecoder().decode(out.stderr).trim() === "" ? false : null;
+	} catch {
+		return null;
+	}
+}
+
 export function defaultLiveness(): LivenessDeps {
 	return {
 		signalAlive: (pid: number): boolean => {
@@ -307,18 +326,7 @@ export function defaultLiveness(): LivenessDeps {
 			}
 		},
 		probe: (owner: Incarnation): Probe => probeIncarnationSync(owner),
-		seatLive: (_agent: string, session: string): boolean | null => {
-			if (!SESSION_PATTERN.test(session)) return null;
-			const lock = join(sessionOwnersDir(), `${session}.lock`);
-			if (!existsSync(lock)) return false;
-			try {
-				const out = Bun.spawnSync(["lsof", "-t", "--", lock], { stdout: "pipe", stderr: "pipe" });
-				if (out.exitCode === 0 && out.stdout.toString().trim() !== "") return true;
-				return out.exitCode === 1 && out.stderr.toString().trim() === "" ? false : null;
-			} catch {
-				return null;
-			}
-		},
+		seatLive: (_agent: string, session: string): boolean | null => sessionOwnerLive(session),
 	};
 }
 
@@ -365,12 +373,12 @@ export function readScratchUsers(dir: string): ScratchUser[] | null {
 	} catch {
 		return null;
 	}
+	try { return parseScratchUsers(readFileSync(path, "utf8")); } catch { return null; }
+}
+
+function parseScratchUsers(text: string): ScratchUser[] | null {
 	let parsed: unknown;
-	try {
-		parsed = JSON.parse(readFileSync(path, "utf8"));
-	} catch {
-		return null;
-	}
+	try { parsed = JSON.parse(text); } catch { return null; }
 	if (parsed === null || typeof parsed !== "object" || !("version" in parsed) || parsed.version !== 1
 		|| !("users" in parsed) || !Array.isArray(parsed.users)) return null;
 	const out: ScratchUser[] = [];
@@ -397,7 +405,10 @@ function probeUser(user: ScratchUser, liveness: Pick<LivenessDeps, "probe">): Pr
  * malformed or unreadable `.users` file keeps the dir too (state unknown): evidence that cannot be read is not absence.
  */
 export function blockingScratchUser(dir: string, liveness: Pick<LivenessDeps, "probe">): ScratchUserBlock | null {
-	const users = readScratchUsers(dir);
+	return blockingUsers(readScratchUsers(dir), liveness);
+}
+
+function blockingUsers(users: ScratchUser[] | null, liveness: Pick<LivenessDeps, "probe">): ScratchUserBlock | null {
 	if (users === null) return { pid: null, start: null, state: "unknown", reason: `${SCRATCH_USERS_FILE} is unreadable or malformed` };
 	for (const user of users) {
 		const probe = probeUser(user, liveness);
@@ -702,8 +713,11 @@ function lsofClearDir(deps: InspectDeps, dir: string): boolean | null {
 
 export function defaultRunner(args: readonly string[], opts?: { timeoutMs?: number }): ScratchRunResult {
 	try {
-		const child = Bun.spawnSync([...args], { stdout: "pipe", stderr: "pipe", timeout: opts?.timeoutMs });
-		return { code: child.exitCode, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
+		const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+		const child = runSync(args, { deadline_s: (opts?.timeoutMs ?? 30_000) / 1000, max_output_bytes: 8 * 1024 * 1024,
+			env: args[0] === "ps" ? { ...env, LC_ALL: "C" } : env });
+		return { code: child.timed_out || child.truncated ? null : child.rc,
+			stdout: new TextDecoder().decode(child.stdout), stderr: new TextDecoder().decode(child.stderr) };
 	} catch (error) {
 		return { code: 127, stdout: "", stderr: error instanceof Error ? error.message : String(error) };
 	}
@@ -1373,6 +1387,31 @@ function scratchRootForDirectory(dir: string, home: string): string | null {
 
 export interface OrphanProcess { pid: number; ppid: number; ageSeconds: number; command: string }
 
+export interface ScratchOrphanLink { kind: "cwd" | "fd"; fd: string; path: string }
+/** A plan is evidence, not permission: killOrphan reconstructs it under the users lock before each signal. */
+export interface ScratchOrphanProof extends OrphanProcess, Incarnation {
+	uid: number;
+	executable: string;
+	script: string | null;
+	invocation: "script" | "python-c";
+	root: string;
+	dir: string;
+	linkage: ScratchOrphanLink[];
+	/** Stable filesystem/process metadata binds revalidation to the originally observed objects. */
+	identity: string;
+}
+export interface ScratchOrphanDecision {
+	pid: number;
+	command: string;
+	start: string | null;
+	path: string | null;
+	linkage: ScratchOrphanLink[];
+	status: "eligible" | "preserved" | "refused" | "terminated";
+	reason: string;
+	proof?: ScratchOrphanProof;
+}
+export interface ScratchOrphanResult extends ScratchOrphanDecision { ok: boolean }
+
 export function parseEtime(text: string): number | null {
 	const match = /^(?:(\d+)-)?(?:(\d+):)?(\d{1,2}):(\d{2})$/.exec(text.trim());
 	if (!match) return null;
@@ -1388,13 +1427,14 @@ export function isHarnessServer(command: string): boolean {
 	return HARNESS_SERVER_PATTERNS.some(pattern => command.includes(pattern));
 }
 
+/** Historical harness inventory for the read-only ownership doctor. NEVER grants signal authority. */
 export function selectHarnessOrphans(processes: OrphanProcess[]): OrphanProcess[] {
 	return processes.filter(proc =>
 		proc.ppid === 1 && proc.ageSeconds > ORPHAN_MIN_AGE_S && isHarnessServer(proc.command));
 }
 
 export function listProcesses(run: ScratchRunner): OrphanProcess[] {
-	const out = run(["ps", "-axo", "pid=,ppid=,etime=,command="]);
+	const out = run(["ps", "-ww", "-axo", "pid=,ppid=,etime=,command="]);
 	if (out.code !== 0) return [];
 	const rows: OrphanProcess[] = [];
 	for (const line of out.stdout.split("\n")) {
@@ -1405,6 +1445,357 @@ export function listProcesses(run: ScratchRunner): OrphanProcess[] {
 		rows.push({ pid: Number(match[1]), ppid: Number(match[2]), ageSeconds: age, command: match[4]! });
 	}
 	return rows;
+}
+
+const ORPHAN_METADATA_TIMEOUT_MS = 3000;
+const ORPHAN_METADATA_BYTES = 256 * 1024;
+
+function orphanRead(run: ScratchRunner, args: readonly string[]): ScratchRunResult | null {
+	try {
+		const out = run(args, { timeoutMs: ORPHAN_METADATA_TIMEOUT_MS });
+		return out.code === 0 && out.stderr === "" && out.stdout.length < ORPHAN_METADATA_BYTES ? out : null;
+	} catch {
+		return null;
+	}
+}
+
+function privateObjectIdentity(path: string, uid: number, directory: boolean): string | null {
+	try {
+		const st = lstatSync(path);
+		if (st.isSymbolicLink() || (directory ? !st.isDirectory() : !st.isFile() || st.nlink !== 1) || st.uid !== uid || (st.mode & 0o022) !== 0
+			|| realpathSync(path) !== path) return null;
+		// Directory mtimes change as the interpreter writes; their inode, owner and mode must not.
+		return [st.dev, st.ino, st.uid, st.mode, ...(directory ? [] : [st.size, st.mtimeMs, st.ctimeMs])].join(":");
+	} catch {
+		return null;
+	}
+}
+
+/** Read bounded regular metadata through a no-follow descriptor; replacement/mutation refuses the proof. */
+interface OrphanRecord { text: string; identity: string }
+function orphanRecord(path: string, uid: number, optional = false): OrphanRecord | null {
+	let fd: number | undefined;
+	try {
+		fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		const before = fstatSync(fd);
+		if (!before.isFile() || before.nlink !== 1 || before.uid !== uid || (before.mode & 0o022) !== 0 || before.size > 65536) return null;
+		const buffer = Buffer.alloc(before.size + 1);
+		let count = 0;
+		while (count < buffer.length) {
+			const next = readSync(fd, buffer, count, buffer.length - count, null);
+			if (next === 0) break;
+			count += next;
+		}
+		if (count !== before.size) return null;
+		const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, count));
+		const after = fstatSync(fd);
+		const current = lstatSync(path);
+		if (current.isSymbolicLink() || before.dev !== current.dev || before.ino !== current.ino
+			|| before.uid !== current.uid || before.mode !== current.mode || before.nlink !== current.nlink
+			|| before.size !== current.size || before.ctimeMs !== current.ctimeMs || before.mtimeMs !== current.mtimeMs
+			|| before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) return null;
+		return { text, identity: `${before.dev}:${before.ino}:${before.mode}:${before.ctimeMs}:${createHash("sha256").update(text).digest("hex")}` };
+	} catch (error) {
+		return optional && (error as NodeJS.ErrnoException).code === "ENOENT" ? { text: "", identity: "absent" } : null;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+function interpreterName(name: string): boolean {
+	return name.length <= 128 && /^(?:Python|python(?:[0-9]+(?:\.[0-9]+)*)?|node|nodejs|bun)$/.test(name);
+}
+
+/** A basename alone can be forged. Bind the kernel image to an interpreter actually resolved on this host. */
+function knownInterpreterExecutable(executable: string, run: ScratchRunner): boolean {
+	const name = basename(executable);
+	if (!interpreterName(name)) return false;
+	for (const candidate of [process.execPath, ...[name, "python3", "python", "node", "nodejs", "bun"].flatMap(command => {
+		const found = Bun.which(command);
+		return found === null ? [] : [found];
+	})]) {
+		try { if (realpathSync(candidate) === executable) return true; } catch { /* Unresolvable runtimes grant no authority. */ }
+	}
+	if (process.platform === "darwin" && name.toLowerCase().startsWith("python")) {
+		// Apple's python3 launchers can exec Python.app: realpath(launcher) is not the running image.
+		// Query libproc inside the selected interpreter, without spawning another process there.
+		const launcher = Bun.which("python3");
+		if (launcher === null) return false;
+		const program = "import ctypes,os,sys; image=ctypes.create_string_buffer(4096); "
+			+ "library=ctypes.CDLL('/usr/lib/libproc.dylib',use_errno=True); "
+			+ "size=library.proc_pidpath(ctypes.c_int(os.getpid()),image,ctypes.c_uint32(len(image))); "
+			+ "sys.exit(1) if size<=0 else print(os.fsdecode(image.value))";
+		const observed = orphanRead(run, [launcher, "-I", "-c", program]);
+		if (observed !== null) {
+			try { return realpathSync(observed.stdout.trim()) === executable; } catch { return false; }
+		}
+	}
+	return false;
+}
+
+interface OrphanMetadata {
+	uid: number; ppid: number; start: string; executable: string; command: string;
+	script: string | null; invocation: "script" | "python-c"; argvIdentity: string;
+}
+function orphanMetadata(pid: number, run: ScratchRunner): OrphanMetadata | null {
+	const out = orphanRead(run, ["ps", "-ww", "-p", String(pid), "-o", "uid=", "-o", "ppid=", "-o", "lstart=", "-o", "comm="]);
+	if (out === null) return null;
+	const lines = out.stdout.trim().split("\n");
+	if (lines.length !== 1) return null;
+	const fields = lines[0]!.trim().split(/\s+/);
+	if (fields.length < 8 || !/^[0-9]+$/.test(fields[0]!) || !/^[0-9]+$/.test(fields[1]!)) return null;
+	const start = fields.slice(2, 7).join(" ");
+	if (parsePsStart(start) === null) return null;
+	let executable: string;
+	let argv: string[];
+	let command: string, argvIdentity: string;
+	try {
+		if (process.platform === "linux") {
+			executable = realpathSync(`/proc/${pid}/exe`);
+			const fd = openSync(`/proc/${pid}/cmdline`, constants.O_RDONLY);
+			let raw: Buffer;
+			try {
+				const buffer = Buffer.alloc(ORPHAN_METADATA_BYTES);
+				const count = readSync(fd, buffer, 0, buffer.length, null);
+				if (count === 0 || count === buffer.length) return null;
+				raw = buffer.subarray(0, count);
+			} finally { closeSync(fd); }
+			argv = raw.toString("utf8").split("\0");
+			if (argv[argv.length - 1] === "") argv.pop();
+			command = argv.join(" ");
+			argvIdentity = JSON.stringify(argv);
+		} else if (process.platform === "darwin") {
+			executable = realpathSync(fields.slice(7).join(" "));
+			const args = orphanRead(run, ["ps", "-ww", "-p", String(pid), "-o", "args="]);
+			if (args === null) return null;
+			command = args.stdout.trim();
+			argvIdentity = command;
+			// Only the fixed interpreter option is classified. The entire -c program stays opaque,
+			// including quotes/whitespace; ps's flattened text is never parsed as Python or as shell.
+			argv = command.split(/\s+/, 3);
+		} else return null;
+	} catch {
+		return null;
+	}
+	if (!knownInterpreterExecutable(executable, run)) return null;
+	const pythonInline = basename(executable).toLowerCase().startsWith("python") && argv[1] === "-c"
+		&& argv[2] !== undefined && argv[2].trim() !== "";
+	if (pythonInline) return { uid: Number(fields[0]), ppid: Number(fields[1]), start, executable, command,
+		script: null, invocation: "python-c", argvIdentity };
+	// Non-inline invocation still needs an unambiguous real script path, not an eval/module/wrapper guess.
+	if (process.platform === "darwin" && (command.includes("\n") || command.includes("'") || command.includes('"') || command.includes("\\"))) return null;
+	const script = argv[1];
+	if (script === undefined || !isAbsolute(script) || script.includes("\n") || script.includes("\r")) return null;
+	try {
+		if (realpathSync(script) !== script) return null;
+	} catch {
+		return null;
+	}
+	return { uid: Number(fields[0]), ppid: Number(fields[1]), start, executable, command, script, invocation: "script", argvIdentity };
+}
+
+/** Per-pid lsof records retain both process and fd identity; the global pathSet is not ownership evidence. */
+function orphanLinks(pid: number, uid: number, executable: string, image: { dev: number; ino: number }, run: ScratchRunner): ScratchOrphanLink[] | null {
+	const out = orphanRead(run, ["lsof", "-nP", "-a", "-p", String(pid), "-F0puftDin"]);
+	if (out === null) return null;
+	let observedPid: number | null = null, observedUid: number | null = null, fd: string | null = null;
+	let device: string | null = null, inode: string | null = null;
+	let executableSeen = false;
+	const links: ScratchOrphanLink[] = [];
+	for (const field of out.stdout.split("\0")) {
+		const token = field.startsWith("\n") ? field.slice(1) : field;
+		if (token === "" || token === "\n") continue;
+		const value = token.slice(1);
+		if (token[0] === "p") {
+			if (observedPid !== null || Number(value) !== pid) return null;
+			observedPid = Number(value);
+		} else if (token[0] === "u") observedUid = Number(value);
+		else if (token[0] === "f") { fd = value; device = null; inode = null; }
+		else if (token[0] === "D") device = value;
+		else if (token[0] === "i") inode = value;
+		else if (token[0] === "t" && ["IPv4", "IPv6", "unix", "sock", "PIPE", "FIFO"].includes(value)) return null; // A service/pipe client outside scratch is unknown ownership.
+		else if (token[0] === "n") {
+			if (observedPid !== pid || observedUid !== uid || fd === null || value.includes("\n") || value.includes("\r")) return null;
+			if (fd === "txt") {
+				try {
+					if (realpathSync(value) === executable && device !== null && inode !== null
+						&& BigInt(device) === BigInt(image.dev) && BigInt(inode) === BigInt(image.ino)) executableSeen = true;
+				} catch { /* Missing/stale image metadata never identifies the real executable. */ }
+			} else if (fd === "cwd" || /^[0-9]+[rwu]?$/.test(fd)) {
+				if (isAbsolute(value)) links.push({ kind: fd === "cwd" ? "cwd" : "fd", fd, path: value });
+			}
+		}
+	}
+	return observedPid === pid && observedUid === uid && executableSeen ? links : null;
+}
+
+function orphanDirectory(path: string, roots: readonly string[]): { root: string; dir: string } | null {
+	for (const root of roots) {
+		if (!path.startsWith(root + sep)) continue;
+		const first = path.slice(root.length + 1).split(sep)[0];
+		if (first !== undefined && first !== "" && first !== "." && first !== "..") return { root, dir: join(root, first) };
+	}
+	return null;
+}
+
+/** Positive capability: a real interpreter runs a script inside one recognized, exclusively abandoned session. */
+export function inspectScratchOrphan(proc: OrphanProcess, home: string, deps: InspectDeps): ScratchOrphanDecision {
+	try {
+		const decision = inspectScratchOrphanMetadata(proc, home, deps);
+		// Inline programs can contain credentials. Publish the image and opaque identity, never argv.
+		const command = decision.proof === undefined ? "interpreter (arguments omitted)"
+			: decision.proof.executable + (decision.proof.invocation === "python-c" ? " -c (payload omitted)" : "");
+		decision.command = command;
+		if (decision.proof !== undefined) decision.proof.command = command;
+		return decision;
+	} catch {
+		return { pid: proc.pid, command: "interpreter (arguments omitted)", start: null, path: null, linkage: [], status: "refused", reason: "metadata-read-failed" };
+	}
+}
+
+function inspectScratchOrphanMetadata(proc: OrphanProcess, home: string, deps: InspectDeps): ScratchOrphanDecision {
+	const deadline = performance.now() + 15_000;
+	const proofLiveness: Pick<LivenessDeps, "probe"> = { probe: recorded => {
+		if (performance.now() >= deadline) throw new Error("orphan proof deadline");
+		return (deps.liveness.probe ?? probeIncarnationSync)(recorded);
+	} };
+	let start: string | null = null, path: string | null = null;
+	let linkage: ScratchOrphanLink[] = [];
+	const refuse = (reason: string, status: "preserved" | "refused" = "refused"): ScratchOrphanDecision =>
+		({ pid: proc.pid, command: proc.command, start, path, linkage, status, reason });
+	if (!Number.isSafeInteger(proc.pid) || proc.pid <= 1) return refuse("pid-invalid");
+	const meta = orphanMetadata(proc.pid, deps.run);
+	if (meta === null) return refuse("interpreter-metadata-unproven");
+	start = meta.start;
+	const uid = process.getuid?.();
+	if (uid === undefined || meta.uid !== uid) return refuse("foreign-uid", "preserved");
+	if (meta.ppid !== 1) return refuse("parent-live-or-unproven", "preserved");
+	const roots = resolveScratchRootEntries(home).map(entry => resolve(entry.root));
+	const exeStat = statSync(meta.executable, { throwIfNoEntry: false });
+	if (exeStat === undefined || !exeStat.isFile()) return refuse("executable-image-unproven");
+	const links = orphanLinks(proc.pid, uid, meta.executable, exeStat, deps.run);
+	if (links === null) return refuse("process-file-linkage-unproven");
+	const linkedSessions = new Map<string, { root: string; dir: string }>();
+	for (const link of links) {
+		const linked = orphanDirectory(link.path, roots);
+		if (linked !== null) linkedSessions.set(linked.dir, linked);
+	}
+	// An inline interpreter has no script path. One exclusive cwd/FD-associated session, plus the same
+	// private/dead-owner/no-seat/no-users proof below, supplies its scope; "-c" alone supplies none.
+	const session = meta.script === null
+		? (linkedSessions.size === 1 ? linkedSessions.values().next().value ?? null : null)
+		: orphanDirectory(meta.script, roots);
+	if (session === null) return refuse(meta.script !== null ? "script-outside-recognized-scratch"
+		: linkedSessions.size > 1 ? "shared-scratch-linkage" : "no-recognized-scratch-linkage", "preserved");
+	path = session.dir;
+	linkage = links.filter(link => orphanDirectory(link.path, roots)?.dir === session.dir);
+	if (linkage.length === 0) return refuse("no-cwd-or-fd-linkage");
+	const rootIdentity = privateObjectIdentity(session.root, uid, true);
+	const dirIdentity = privateObjectIdentity(session.dir, uid, true);
+	const scriptIdentity = meta.script === null ? null : privateObjectIdentity(meta.script, uid, false);
+	if (rootIdentity === null || dirIdentity === null || (meta.script !== null && scriptIdentity === null))
+		return refuse("root-or-file-identity-unproven");
+	const ownerRecord = orphanRecord(join(session.dir, ".owner"), uid);
+	const usersRecord = orphanRecord(join(session.dir, SCRATCH_USERS_FILE), uid, true);
+	const owner = ownerRecord === null ? null : parseOwnerFile(ownerRecord.text);
+	if (ownerRecord === null || usersRecord === null || owner === null || !hasProcessIdentity(owner))
+		return refuse("owner-or-users-metadata-unproven");
+	if (!ownerMatchesScratchRoot(owner, session.root, session.dir, deps)
+		|| !basename(session.dir).split(".").slice(1).includes(String(owner.pid))) return refuse("owner-root-mismatch");
+	if (owner.bin === "hold") return refuse("held-by-bead", "preserved");
+	const users = usersRecord.identity === "absent" ? [] : parseScratchUsers(usersRecord.text);
+	if (users !== null && users.length > 64) return refuse("too-many-registered-users", "preserved");
+	const ownershipVeto = (): ScratchOrphanDecision | null => {
+		try {
+			const state = ownerIncarnationState(owner.pid, owner.processStart, proofLiveness);
+			if (!isDead(state)) return refuse(state === "live" ? "owner-live" : "owner-unknown", "preserved");
+			if (owner.agent !== null && owner.session !== null
+				&& (deps.liveness.seatLive?.(owner.agent, owner.session) ?? null) !== false) return refuse("owner-seat-live-or-unknown", "preserved");
+			if (performance.now() >= deadline) return refuse("process-proof-deadline");
+			if (blockingUsers(users, proofLiveness) !== null) return refuse("registered-user-live-or-unknown", "preserved");
+			return null;
+		} catch {
+			return refuse("ownership-probe-unavailable");
+		}
+	};
+	const initialVeto = ownershipVeto();
+	if (initialVeto !== null) return initialVeto;
+	// A process shared by two sessions is not this abandoned session's exclusive interpreter.
+	if (links.some(link => { const other = orphanDirectory(link.path, roots); return other !== null && other.dir !== session.dir; }))
+		return refuse("shared-scratch-linkage", "preserved");
+	// Pin metadata again after all potentially slow liveness/lsof reads.
+	const identity = createHash("sha256").update(JSON.stringify({
+		uid, start, executable: meta.executable, executableIdentity: `${exeStat.dev}:${exeStat.ino}:${exeStat.ctimeMs}`,
+		script: meta.script, invocation: meta.invocation, argvIdentity: meta.argvIdentity,
+		root: session.root, dir: session.dir, rootIdentity, dirIdentity, scriptIdentity,
+		ownerRecord: ownerRecord.identity, usersRecord: usersRecord.identity, command: meta.command })).digest("hex");
+	if (JSON.stringify(orphanMetadata(proc.pid, deps.run)) !== JSON.stringify(meta)
+		|| (meta.script !== null && scriptIdentity !== privateObjectIdentity(meta.script, uid, false))) return refuse("process-metadata-changed");
+	if (!resolveScratchRootEntries(home).some(entry => resolve(entry.root) === session.root)) return refuse("root-recognition-changed");
+	const currentImage = statSync(meta.executable);
+	if (currentImage.dev !== exeStat.dev || currentImage.ino !== exeStat.ino || currentImage.ctimeMs !== exeStat.ctimeMs)
+		return refuse("executable-image-changed");
+	const exclusive = orphanDirectoryExclusive(session.dir, proc.pid, deps.run);
+	if (exclusive !== true) return refuse(exclusive === false ? "other-process-using-scratch" : "directory-users-unproven", "preserved");
+	const finalVeto = ownershipVeto();
+	if (finalVeto !== null) return finalVeto;
+	if (rootIdentity !== privateObjectIdentity(session.root, uid, true) || dirIdentity !== privateObjectIdentity(session.dir, uid, true)
+		|| ownerRecord.identity !== orphanRecord(join(session.dir, ".owner"), uid)?.identity
+		|| usersRecord.identity !== orphanRecord(join(session.dir, SCRATCH_USERS_FILE), uid, true)?.identity)
+		return refuse("ownership-metadata-changed");
+	if (performance.now() >= deadline) return refuse("process-proof-deadline");
+	let probe: Probe;
+	try { probe = probeIncarnationSync({ pid: proc.pid, start }); } catch { return refuse("incarnation-unproven"); }
+	if (probe.state !== "live") return refuse(`incarnation-${probe.state}`);
+	const proof: ScratchOrphanProof = { ...proc, ppid: 1, command: meta.command, start, uid, executable: meta.executable,
+		script: meta.script, invocation: meta.invocation, ...session, linkage, identity };
+	return { pid: proc.pid, command: meta.command, start, path, linkage, status: "eligible", reason: "abandoned-scratch-interpreter", proof };
+}
+
+/** No unregistered live/unknown process may be sharing the abandoned session either. */
+function orphanDirectoryExclusive(dir: string, pid: number, run: ScratchRunner): boolean | null {
+	let out: ScratchRunResult;
+	try { out = run(["lsof", "-nP", "+D", dir, "-F0p"], { timeoutMs: ORPHAN_METADATA_TIMEOUT_MS }); } catch { return null; }
+	// Like lsofClear/takeLsofSnapshot, status 1 can still carry complete matched records on macOS.
+	// Empty, warning-bearing, truncated or malformed observations never grant exclusivity.
+	if ((out.code !== 0 && out.code !== 1) || out.stderr !== "" || out.stdout.length >= ORPHAN_METADATA_BYTES) return null;
+	let targetSeen = false;
+	for (const field of out.stdout.split("\0")) {
+		const token = field.startsWith("\n") ? field.slice(1) : field;
+		if (token === "" || token === "\n") continue;
+		if (!token.startsWith("p")) {
+			if (!token.startsWith("f")) return null;
+			continue;
+		}
+		const current = Number(token.slice(1));
+		if (!Number.isSafeInteger(current) || current <= 1) return null;
+		if (current !== pid) return false;
+		targetSeen = true;
+	}
+	return targetSeen ? true : null;
+}
+
+function scratchOrphanDecisions(home: string, deps: InspectDeps): ScratchOrphanDecision[] {
+	// An eligible interpreter must have a cwd/FD path in recognized scratch. Use the invocation's
+	// existing complete snapshot only to rule out discovery; it never authorizes a signal.
+	const snapshot = deps.lsofSnapshot;
+	const uid = process.getuid?.();
+	if (snapshot === undefined || snapshot === null || uid === undefined) return [];
+	const roots = resolveScratchRootEntries(home).map(entry => resolve(entry.root));
+	const seen = new Set<string>();
+	let linked = false;
+	for (const path of snapshot) {
+		const session = orphanDirectory(path, roots);
+		if (session === null || seen.has(session.dir)) continue;
+		seen.add(session.dir);
+		const record = orphanRecord(join(session.dir, ".owner"), uid);
+		const owner = record === null ? null : parseOwnerFile(record.text);
+		if (owner !== null && hasProcessIdentity(owner)) { linked = true; break; }
+	}
+	if (!linked) return [];
+	// The table is discovery only. Every candidate gets fresh bounded metadata; age/argv never authorize signals.
+	return listProcesses(deps.run).filter(proc => proc.ppid === 1 && interpreterName(basename(proc.command.trim().split(/\s+/, 1)[0] ?? "")))
+		.map(proc => inspectScratchOrphan(proc, home, deps));
 }
 
 function inodeOf(path: string): string | null {
@@ -1418,7 +1809,8 @@ function inodeOf(path: string): string | null {
 
 export interface ApplyDeps extends InspectDeps {
 	home: string;
-	kill?: (pid: number) => boolean;
+	/** Signal seam used by safety regressions; reached only after the complete production proof. */
+	kill?: (pid: number, signal: "SIGTERM" | "SIGKILL") => boolean;
 	remove?: (path: string) => void;
 	/** Hold discharge probe (ompkit-774u.15): true when the hold's bead is closed, false when open, null when
 	unprovable. Defaults to a read-only `br show --json` through the runner; null fails open to a veto (keep). */
@@ -2583,37 +2975,55 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 	return done;
 }
 
-/** TERM, bounded wait, then KILL; true iff the pid is gone after. Exported as a test seam. */
-export function killOrphan(pid: number, deps: ApplyDeps): boolean {
-	const kill = deps.kill ?? ((target: number): boolean => {
-		try {
-			process.kill(target, "SIGTERM");
-		} catch (error) {
-			// Already gone is the goal, not a failure (the orphan raced us).
-			return (error as NodeJS.ErrnoException).code === "ESRCH";
-		}
-		const end = Date.now() + 5000;
-		while (Date.now() < end) {
-			try {
-				process.kill(target, 0);
-			} catch {
-				return true;
-			}
-			Bun.sleepSync(200);
-		}
-		try {
-			process.kill(target, "SIGKILL");
-		} catch {
-			return false;
-		}
-		try {
-			process.kill(target, 0);
-			return false;
-		} catch {
-			return true;
-		}
+function orphanSignalResult(proof: ScratchOrphanProof, status: ScratchOrphanResult["status"], reason: string, ok = false): ScratchOrphanResult {
+	return { pid: proof.pid, command: proof.command, start: proof.start, path: proof.dir, linkage: proof.linkage, status, reason, ok };
+}
+
+function signalScratchOrphan(proof: ScratchOrphanProof, deps: ApplyDeps, signal: "SIGTERM" | "SIGKILL"): ScratchOrphanResult | null {
+	const fresh = inspectScratchOrphan(proof, deps.home, deps);
+	if (fresh.proof === undefined) return { ...fresh, ok: false };
+	if (fresh.proof.identity !== proof.identity) return orphanSignalResult(proof, "refused", "proof-changed");
+	// Final incarnation read immediately before signalling, never a plan-time numeric PID.
+	const current = probeIncarnationSync(proof);
+	if (current.state !== "live") return orphanSignalResult(proof, "refused", `incarnation-${current.state}`);
+	try {
+		if (deps.kill !== undefined) {
+			if (!deps.kill(proof.pid, signal)) return orphanSignalResult(proof, "refused", "signal-failed");
+		} else process.kill(proof.pid, signal);
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ESRCH"
+			? orphanSignalResult(proof, "terminated", "exited-before-signal", true) : orphanSignalResult(proof, "refused", "signal-failed");
+	}
+	return null;
+}
+
+function awaitScratchOrphan(proof: ScratchOrphanProof, budgetMs: number): ScratchOrphanResult | null {
+	const deadline = performance.now() + budgetMs;
+	do {
+		const current = probeIncarnationSync(proof);
+		if (isDead(current)) return orphanSignalResult(proof, "terminated", `incarnation-${current.state}`, true);
+		if (current.state !== "live") return orphanSignalResult(proof, "refused", "incarnation-unknown-after-signal");
+		Bun.sleepSync(100);
+	} while (performance.now() < deadline);
+	return null;
+}
+
+/**
+ * TERM, bounded wait, then KILL. No numeric-PID overload: both signals require the original proof,
+ * a fresh incarnation, identical root/owner/user metadata, and current absence of a live/unknown owner.
+ */
+export function killOrphan(proof: ScratchOrphanProof, deps: ApplyDeps): ScratchOrphanResult {
+	if (typeof proof !== "object" || proof === null || typeof proof.identity !== "string")
+		throw new TypeError("killOrphan requires an incarnation-bound scratch proof");
+	return withScratchUsersLock(proof.dir, () => orphanSignalResult(proof, "refused", "users-lock-busy"), () => {
+		const term = signalScratchOrphan(proof, deps, "SIGTERM");
+		if (term !== null) return term;
+		const exited = awaitScratchOrphan(proof, 5000);
+		if (exited !== null) return exited;
+		const kill = signalScratchOrphan(proof, deps, "SIGKILL");
+		if (kill !== null) return kill;
+		return awaitScratchOrphan(proof, 1000) ?? orphanSignalResult(proof, "refused", "still-live-after-kill");
 	});
-	return kill(pid);
 }
 
 export interface ScratchTotals { sizeByVerdict: Record<string, number>; countByVerdict: Record<string, number>; sizeByRoot: Record<string, number>; malformedByRoot: Record<string, number> }
@@ -2915,6 +3325,7 @@ export interface ScratchPlan {
 	sessions: ScratchVerdict[];
 	bunBuilds: BunBuildVerdict[];
 	orphans: OrphanProcess[];
+	orphanDecisions: ScratchOrphanDecision[];
 	reapableBytes: number;
 	quarantinableBytes: number;
 	totals: ScratchTotals;
@@ -2955,12 +3366,13 @@ export function planScratch(home: string, deps: InspectDeps): ScratchPlan {
 	for (const root of roots) eachSessionDir(root, dir => visit(dir, root), dir => visit(dir, root, false));
 	for (const dir of systemWorkDirs) record(inspectSystemWorkDir(dir, snapDeps));
 	const allRoots = [...new Set([...roots, ...systemWorkDirs.map(dirname)])];
-	const orphans = selectHarnessOrphans(listProcesses(deps.run));
+	const orphanDecisions = scratchOrphanDecisions(home, snapDeps);
+	const orphans = orphanDecisions.flatMap(row => row.proof === undefined ? [] : [row.proof]);
 	const sized = dedupeNestedSizes(sessions);
 	const totals = summarizeScratch(sized, allRoots);
 	const rootMetrics = scratchRootMetrics(allRoots, totals.sizeByRoot, deps.statfs, rootSourceMap(entries, systemWorkDirs));
 	const bunBuilds = inspectBunBuildFiles(entries, snapDeps);
-	return { roots: allRoots, sessions: sized, bunBuilds, orphans, totals, rootMetrics,
+	return { roots: allRoots, sessions: sized, bunBuilds, orphans, orphanDecisions, totals, rootMetrics,
 		pressure: pressureForRoots(rootMetrics), quarantineBuckets: quarantineBuckets(home, deps.now ?? Date.now()),
 		unownedActiveRule: UNOWNED_ACTIVE_RULE,
 		reapableBytes: sized.filter(v => v.action === "REAP").reduce((n, v) => n + v.sizeBytes, 0)
@@ -2980,6 +3392,8 @@ export interface ScratchRunReceipt {
 	failed_gb: number;
 	refused_count: number;
 	refused_gb: number;
+	/** Per-incarnation terminal/preserved evidence, alongside the existing byte/count totals. */
+	orphan_processes: ScratchOrphanResult[];
 }
 
 export type ScratchGapClass = "never-released" | "pid-keyed-owner-never-released" | "released-unbinned" | "unowned" | "mismatched-owner";
@@ -2994,7 +3408,7 @@ export interface ScratchGapReport { rows: ScratchGap[]; by_agent: Record<string,
 
 export interface ScratchApplyResult extends ScratchPlan {
 	applied: ScratchVerdict[];
-	killed: { pid: number; command: string; ok: boolean }[];
+	killed: ScratchOrphanResult[];
 	expired: ScratchVerdict[];
 	receipt: ScratchRunReceipt;
 	gapReport: ScratchGapReport;
@@ -3203,12 +3617,15 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 			action: terminal.action, reason: terminal.reason, bytes: terminal.sizeBytes });
 		return terminal;
 	});
-	const orphans = selectHarnessOrphans(listProcesses(deps.run));
+	const orphanDecisions = scratchOrphanDecisions(home, snapDeps);
+	const orphans = orphanDecisions.flatMap(row => row.proof === undefined ? [] : [row.proof]);
 	const killed = orphans.map(proc => {
-		const ok = killOrphan(proc.pid, deps);
-		appendLog(home, { event: "orphan-kill", dir: "", at: new Date(now).toISOString(), pid: proc.pid, command: proc.command, ok });
-		return { pid: proc.pid, command: proc.command, ok };
+		const outcome = killOrphan(proc, deps);
+		appendLog(home, { event: "orphan-kill", dir: proc.dir, at: new Date(now).toISOString(), ...outcome });
+		return outcome;
 	});
+	for (const decision of orphanDecisions) if (decision.proof === undefined)
+		appendLog(home, { event: "orphan-preserved", dir: decision.path ?? "", at: new Date(now).toISOString(), ...decision });
 	const expired = applyQuarantineExpiry(home, deps);
 	const planEcho = dedupeNestedSizes(sessions);
 	const totals = summarizeScratch(planEcho, allRoots);
@@ -3263,6 +3680,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		failed_gb: failedBytes / 1_000_000_000,
 		refused_count: refusedCount,
 		refused_gb: refusedBytes / 1_000_000_000,
+		orphan_processes: [...killed, ...orphanDecisions.filter(row => row.proof === undefined).map(row => ({ ...row, ok: false }))],
 	};
 	appendLog(home, { event: "run-receipt", dir: "", at: finishedAt, ...receipt });
 	const gapReport = scratchGapReport(applied, now, home);
@@ -3272,6 +3690,7 @@ export function applyScratch(home: string, deps: ApplyDeps): ScratchApplyResult 
 		sessions: planEcho,
 		bunBuilds,
 		orphans,
+		orphanDecisions,
 		applied,
 		killed,
 		expired,
