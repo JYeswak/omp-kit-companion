@@ -1,0 +1,29 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_e8f0d4c7b7837319837e6a06611a7fb4c06d1a2de6264fcb6a5cc6944df346fa",
+ "limitations": [
+  "Four manifest-declared CI-only suites were excluded; no focused-suite subtraction."
+ ],
+ "operation": "exact-commit full declared suite",
+ "parameters": {
+  "bun_files": "266",
+  "bun_ran": "3407",
+  "candidate_commit": "51a438c8d2376257ab7ef72e92768f50769c5559",
+  "checks_sha256": "d448f436540ab75f7f10a55639e0ad35bae1f2bcf85bd0f860bcfc476aaf4af8",
+  "excluded_ci_only": "4",
+  "focused_subtraction": "0",
+  "full_suite_log": "/Users/josh/.local/state/omp-kit/full-suite-verdicts/ed4dde1d7826f80bd92e12c4ac2cf44e699bc62e897d32d810cda6c96985b091/9ab55a58be245fb79f7019d2291c04dedb61f9a1.main.b56b9abc2fb1d0a60bb0c78cb056b6f08d8429116c53b2c73cb33b2c805d01d2.log",
+  "judge_role": "main",
+  "python_ran": "29",
+  "run_recorded_at": "2026-10-31T03:19:55Z",
+  "shell_ran": "54",
+  "source_tree": "9ab55a58be245fb79f7019d2291c04dedb61f9a1",
+  "worker_setting": "FRESH_GATE_TEST_WORKERS_1"
+ },
+ "producer": "full-suite-verdict.sh",
+ "result_ref": {
+  "bytes": 144293,
+  "sha256": "ee59a3962ee5fd521f0a06fa4fa921e745ec58bda325b71f9518a6a39a6367f8"
+ }
+}
