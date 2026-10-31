@@ -1,0 +1,18 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_48ffc9ba751550f504a378f4f240e6d79fc115684189d3fed713da3231b6eb0a",
+ "limitations": [
+  "Full bun test tests/cli timed out after 1800 seconds; this receipt does not certify that suite."
+ ],
+ "operation": "AC2 exact candidate commit acceptance",
+ "parameters": {
+  "candidate_commit": "05d76786f9",
+  "clean_archive": "true"
+ },
+ "producer": "python3 tests/scripts/ac_phase_test.py",
+ "result_ref": {
+  "bytes": 129,
+  "sha256": "8ee7f9207c848714b620c496d5bf53db55301ba30ff32d75faadc0d0d09e70c5"
+ }
+}
