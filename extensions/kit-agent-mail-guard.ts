@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -301,7 +301,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			if (found.ok) return undefined;
 			why = found.why;
 		}
-		return refuse("AM_ACK_BEAD_UNRESOLVED", `no bead id in the subject resolves in this repo's tracker (${candidates.join(", ")}; last: ${why}). ack_required is for a real ask about a bead that exists.`);
+		return refuse("AM_ACK_BEAD_UNRESOLVED", `no bead id in the subject resolves in the tracker at ${cwd} (${candidates.join(", ")}; last: ${why}). ack_required is for a real ask about a bead that exists.`);
 	}
 	const amBin = deps.amBin ?? "am";
 	const scanBudgetMs = deps.scanBudgetMs ?? AM_SCAN_BUDGET_MS;
@@ -561,7 +561,11 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				if (ACK_VOCABULARY[lead] !== true) {
 					return refuse("AM_ACK_SUBJECT", `ack_required is only for a real ask: start the subject with ${Object.keys(ACK_VOCABULARY).join(", ")} (got ${lead}). Status and FYI mail never needs an ack.`);
 				}
-				const unresolved = await resolvesBead(subject, ctx.cwd);
+				// AMACKPROJECT1 (rz5.163): project_key is the recipient's repo, so the ask's bead lives in its
+				// tracker. The session cwd is only the fallback when project_key names no tracker on this host.
+				const key = prop(value, "project_key");
+				const tracker = typeof key === "string" && isAbsolute(key) && existsSync(join(key, ".beads")) ? key : ctx.cwd;
+				const unresolved = await resolvesBead(subject, tracker);
 				if (unresolved !== undefined) return unresolved;
 			}
 		} else if (ackOn) {

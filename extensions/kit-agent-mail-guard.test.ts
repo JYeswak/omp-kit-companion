@@ -356,6 +356,19 @@ test("ack_required: a typed subject with no bead id, or an id the tracker does n
 	// A word that merely looks like an id does not stop a real id later in the subject from resolving.
 	expect(await h.mail(cwd, "send_message", send({ subject: `QUESTION re-run ${BEAD}: which?`, ack_required: true }))).toBeUndefined();
 });
+test("ack_required: the bead resolves in the project_key repo's tracker, not the sender's cwd (AMACKPROJECT1)", async () => {
+	const cwd = fleetRepo(), recipient = fleetRepo();
+	mkdirSync(join(recipient, ".beads"));
+	const h = await createHost({}, fleetRespond({ ...defaultRosters(), [recipient]: [mailRow("PlumRaven"), mailRow("BlueLake"), mailRow("RedCat")] }));
+	expect(await h.mail(cwd, "send_message", send({ project_key: recipient, subject: `QUESTION ${BEAD}: which?`, ack_required: true }))).toBeUndefined();
+	expect(h.execs.filter(call => call.command === "br").at(-1)?.options?.cwd).toBe(recipient);
+	const unknown = await h.mail(cwd, "send_message", send({ project_key: recipient, subject: "QUESTION ompkit-zzzz: which?", ack_required: true }));
+	expect(code(unknown)).toBe("AM_ACK_BEAD_UNRESOLVED");
+	expect(unknown?.reason).toContain(`tracker at ${recipient}`);
+	// A project_key with no tracker on this host keeps the cwd fallback.
+	expect(await h.mail(cwd, "send_message", send({ subject: `QUESTION ${BEAD}: which?`, ack_required: true }))).toBeUndefined();
+	expect(h.execs.filter(call => call.command === "br").at(-1)?.options?.cwd).toBe(cwd);
+});
 
 test("ack_required: an unreadable tracker fails closed (br missing, br throwing, br garbage)", async () => {
 	const cwd = fleetRepo();
