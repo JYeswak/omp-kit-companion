@@ -143,6 +143,10 @@ BASE_TAG="$(jq -r '[.[][] | select(.draft == false and .prerelease == false) | .
 [ -n "$BASE_TAG" ] || die "no published base release"
 python3 -c 'import sys; a, b = (tuple(map(int, v.split("."))) for v in sys.argv[1:]); sys.exit(0 if a > b else 1)' "$VERSION" "${BASE_TAG#v}" ||
 	die "v$VERSION is not newer than the latest published $BASE_TAG"
+# RELSPEED1: the source's package.json must already say $VERSION. Checked here, in 2 s, instead of only
+# at the tag stage (the 0.2.82 run refused there after 7 minutes of build, sign and tests).
+sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" ||
+	die "package.json version does not match v$VERSION at $SOURCE; commit the release prepare (package.json, README stamp, changelog fragment) first"
 MODE="$(git -C "$ROOT" show "$SOURCE:scripts/release-signing.json" | jq -er 'select(.schema_version == 1) | .darwin_signing')" ||
 	die "source has no valid scripts/release-signing.json"
 if [ "$MODE" != developer-id ]; then
