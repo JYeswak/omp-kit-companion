@@ -707,7 +707,7 @@ describe("runFastTest", () => {
 		writeFileSync(cases, CASE_HEADER + "\n" + rule + "\tfire\ttool\tbash\t-\t" + command + "\tlong actor token\t\n");
 		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", join(REPO_ROOT, "rules"), "--cases", cases, "--rule", rule, "--line", "2", "--rule-sha256", ruleHash, "--timeout-ms", "2500"], {
 			cwd: REPO_ROOT,
-			env: { ...process.env, TMPDIR: workerTmp, TMP: workerTmp, TEMP: workerTmp, OMP_SRC: identity.source, OMP_BIN: identity.launcher },
+			env: { ...process.env, PATH: nativePath, TMPDIR: workerTmp, TMP: workerTmp, TEMP: workerTmp, OMP_SRC: identity.source, OMP_BIN: identity.launcher },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const cpuTimeUs = result.resourceUsage.cpuTime.total;

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "bead": "ompkit-774u.64",
+  "candidate_commit": "70a1530c79230ad2375e859228922335797026b2",
+  "source_files": {
+    "tests/cli/check-staged-pysafe.test.sh": "1367d82d2443133efa2a91d558465f15ba74c47de40d1d2fba9613d9474095ea",
+    "scripts/check-staged-pysafe.sh": "f2036960d7cab225c82cdcbf14cf27f5a3b9cc5515722565bfc4ed5e446111f9",
+    "scripts/pysafe.py": "8ce94cfa239a2a257e7981fb6020b44b8ccffe2828855a0edc29dd918f034c84"
+  },
+  "command": "nice -n 10 sh tests/cli/check-staged-pysafe.test.sh",
+  "environment": {
+    "TMPDIR": "/Users/josh/Developer/omp-kit-companion/var/agent-tmp/clockbound-roadmap.48341",
+    "concurrent_job": "nice -n 10 bun test tests/cli (bg_475); this target command started while that full-suite job was active"
+  },
+  "exit_code": 0,
+  "stdout": "check-staged-pysafe: 14 pass 0 fail\nCHECK_STAGED_PYSAFE_RC=0\n",
+  "stderr": "",
+  "wall_time_seconds": 111.98,
+  "assertions_exercised": [
+    "The hook uses PYSAFE_GATE_TIMEOUT=2 and refuses a checker that sleeps for 60 seconds",
+    "The checker and its child ignore SIGTERM; the planted child PID is absent after the hook returns",
+    "The script reports 14 passing checks and no failures without imposing a total wall-time ceiling"
+  ],
+  "limitations": [
+    "The target command ran while the full-suite command was active; this is not a full-suite result.",
+    "The recorded wall time is the process invocation duration, not an acceptance threshold.",
+    "This result does not constitute a candidate-bound non-author pregrade, publication, or installed-runtime claim."
+  ]
+}

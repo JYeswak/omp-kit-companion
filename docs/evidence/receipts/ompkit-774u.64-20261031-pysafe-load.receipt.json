@@ -1,0 +1,23 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_e1e59866ba3c9acb1625930ebf445b5f72cba9fae17d0515ad72fe5f56debe33",
+ "limitations": [
+  "Target test passed while the full-suite command was active; no full-suite verdict.",
+  "This is not the candidate-bound non-author pregrade verdict."
+ ],
+ "operation": "CLOCKBOUND1 staged checker under-load timeout",
+ "parameters": {
+  "candidate_commit": "70a1530c79230ad2375e859228922335797026b2",
+  "checker_sha256": "f2036960d7cab225c82cdcbf14cf27f5a3b9cc5515722565bfc4ed5e446111f9",
+  "observed_wall_time_s": "111.98",
+  "runner_sha256": "8ce94cfa239a2a257e7981fb6020b44b8ccffe2828855a0edc29dd918f034c84",
+  "test_script_sha256": "1367d82d2443133efa2a91d558465f15ba74c47de40d1d2fba9613d9474095ea"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 1589,
+  "path": "docs/evidence/receipts/ompkit-774u.64-20261031-pysafe-load.result.json",
+  "sha256": "2464db07ac2d2241171cc30ab2ab91e51973feecbc0f53b68993678041302aef"
+ }
+}
