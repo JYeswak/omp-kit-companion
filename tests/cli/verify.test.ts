@@ -807,6 +807,26 @@ test("CLOSEPASS1: two passing [build] boxes and an unticked [live] box close und
 	const children = JSON.parse((await brun(["list", "--status", "all", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json"], t.dir, env)).out) as { issues?: unknown[] } | unknown[];
 	expect((Array.isArray(children) ? children : children.issues ?? []).length).toBe(1);
 }, 120_000);
+test("CLOSEPASS1: a commandless [v][build] judgement stays on the parent when executable build boxes pass", async () => {
+	const code = await repo("closepass-v-build");
+	const t = await policyTracker("closepass-v-build-t");
+	const env = trackerEnv(t);
+	const judgement = "- [ ] [v] [build] Judge whether the causal analysis is complete";
+	const acceptance = `${BUILD_BOXES}\n${judgement}`;
+	const epic = await createBead(t, "closepass v build epic");
+	const id = await reviewBead(t, "closepass v build judgement", acceptance, epic);
+	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)" });
+	expect(res.code).toBe("PENDING");
+	expect(res.log).toContain("[v] build judgement remains on the parent");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true]]);
+	expect(res.child).toBeUndefined();
+	expect(res.acts).toEqual([]);
+	const parent = await row(t, id);
+	expect(parent.status).toBe("in_review");
+	expect(parent.acceptance_criteria).toBe(acceptance);
+	const children = JSON.parse((await brun(["list", "--status", "all", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json"], t.dir, env)).out) as { issues?: unknown[] } | unknown[];
+	expect(Array.isArray(children) ? children : children.issues ?? []).toHaveLength(0);
+}, 120_000);
 
 test("CLOSEPASS1 no active parent: the child goes under the constraint lane's parent and the close reason says so; with no readable lane parent the bead stays PENDING and nothing is written", async () => {
 	const code = await repo("closepass-lane");

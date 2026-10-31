@@ -10,12 +10,12 @@
  * does it tick the boxes, report the reviewer gate under the caller's identity (family disclosed), write the
  * transition comment from the command log and close. Transaction metadata is completed; the verdict is earned.
  *
- * CLOSEPASS1 (ompkit-774u.52): when every box it ran passes, unticked [live], [after] and [v] boxes (which no
- * export can run) move word for word into one open `LIVEREADBACK: <title>` bead labelled live-readback, created
- * under the closing bead's own active parent (else the constraint lane's parent, LANE_PARENT) with a `related` link
- * back. The closing bead keeps its original acceptance in its description and closes holding only ticked boxes, so
- * br's own close policy admits it with no --force. A bead with no executed box stays PENDING. `--live-readback`
- * (liveReadback, liveReadbackAll) reads such children back on the installed kit.
+ * CLOSEPASS1 (ompkit-774u.52): when every box it ran passes, unticked [live] and [after] boxes (which no export
+ * can run) move word for word into one open `LIVEREADBACK: <title>` bead labelled live-readback, created under the
+ * closing bead's own active parent (else the constraint lane's parent, LANE_PARENT) with a `related` link back.
+ * An unchecked [v][build] judgement is required evidence, not rollout debt: it stays on the parent and makes the
+ * result PENDING. The closing bead keeps its original acceptance in its description and closes holding only ticked
+ * boxes, so br's own close policy admits it with no --force. A bead with no executed box stays PENDING.
  *
  * Box grammar: `- [ ] [a] [phase] `command` -> <expected>` or `... ; expect: <expected>` or `...; planted: ...`.
  * The letter is optional and the phase is one of build/landed/live/after (VERIFYBOX1
@@ -310,12 +310,18 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const pending = replays.filter(r => r.pass === null);
 		return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${pending.map(p => `${tag(p)} ${p.detail}`).join("; ")}`).join("\n"), acts };
 	}
-	// CLOSEPASS1 (ompkit-774u.52, J-2026-10-29-20): br closes a bead only when every box is ticked, so the unticked
-	// boxes this export cannot run (live, after, [v]) move word for word into one LIVEREADBACK child. The parent keeps
-	// its original acceptance in its description and closes holding only boxes verify ran and ticked. The child lives
-	// under the closing bead's own active parent (else the constraint lane's parent) with a `related` link back, so
-	// every active bead keeps an edge to another active bead and a REWORK reopen is never held by its readback child.
-	const deferred = boxes.filter(b => !b.checked && (b.letter === "v" || b.phase === "live" || b.phase === "after"));
+	const buildJudgements = boxes.filter(b => !b.checked && b.letter === "v" && b.phase === "build");
+	if (buildJudgements.length > 0) {
+		const pending = buildJudgements.map(tag).join(" ");
+		return { ok: false, code: "PENDING", bead: input.bead, export: input.exportSha, replays, log: log.concat(`pending: ${pending} build judgement remains on the parent; it cannot be replayed or deferred as rollout debt`).join("\n"), acts };
+	}
+	// CLOSEPASS1 (ompkit-774u.52, J-2026-10-29-20): br closes a bead only when every box is ticked, so unticked
+	// [live]/[after] boxes this export cannot run move word for word into one LIVEREADBACK child. An unchecked
+	// [v][build] judgement is required evidence, not rollout debt; it remains on the parent as PENDING above.
+	// The parent keeps its original acceptance in its description and closes holding only boxes verify ran and ticked.
+	// The child lives under the closing bead's own active parent (else the constraint lane's parent) with a `related` link back,
+	// so every active bead keeps an edge to another active bead and a REWORK reopen is never held by its readback child.
+	const deferred = boxes.filter(b => !b.checked && (b.phase === "live" || b.phase === "after"));
 	let home = "";
 	let homeNote = "";
 	if (deferred.length > 0) {
