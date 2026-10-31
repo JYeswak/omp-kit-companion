@@ -7,7 +7,7 @@
 #
 # Usage:
 #   scripts/full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main]
-#     [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT] [--qualify-informing]
+#     [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]
 #
 # The complete declared repo suite runs against the exact-commit archive: every bun test under
 # tests/cli and tests/fleet-guard, every shell suite tests/cli/*.test.sh, and every python suite
@@ -25,8 +25,6 @@
 # Only complete suite runs are recorded. Missing, corrupt, timed-out or incomplete evidence is a
 # miss. A complete FAIL is reusable as FAIL but never as PASS. `--rerun-reason TEXT` reruns a
 # cached FAIL and retains the superseded record and log.
-# `--qualify-informing` explicitly executes a cached green main tree again to collect one real rollout run.
-# It does not turn cached FAILs into passes or change ordinary PASS reuse.
 # FULL_SUITE_VERDICT_CACHE_DIR overrides the configured store for isolated tests and operators.
 # Otherwise scripts/full-suite-verdict-store.py uses
 # $XDG_CONFIG_HOME/omp-kit/full-suite-verdict.json and $XDG_STATE_HOME/omp-kit/full-suite-verdicts.
@@ -45,13 +43,12 @@ ARCHIVE_DIR=
 CACHE_DIR=
 RERUN_REASON=
 RERUN=0
-QUALIFY_INFORMING=0
 JUDGE_ROLE=base
 TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
 SHELL_JOBS=${FULL_SUITE_SHELL_JOBS:-5}
 FOCUSED_PASSED=
 usage() {
-	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main] [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT] [--qualify-informing]" >&2
+	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main] [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]" >&2
 }
 
 fail() {
@@ -68,7 +65,6 @@ while [ "$#" -gt 0 ]; do
 		--cache-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; CACHE_DIR=$2; shift 2 ;;
 		--rerun-reason) [ "$#" -ge 2 ] || { usage; exit 2; }; RERUN=1; RERUN_REASON=$2; shift 2 ;;
 		--focused-passed) [ "$#" -ge 2 ] || { usage; exit 2; }; FOCUSED_PASSED=$2; shift 2 ;;
-		--qualify-informing) QUALIFY_INFORMING=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage; exit 2 ;;
 	esac
@@ -139,12 +135,8 @@ if [ -f "$entry" ]; then
 fi
 case "$cached" in
 	PASS)
-		if [ "$QUALIFY_INFORMING" = 1 ] && [ "$JUDGE_ROLE" = main ]; then
-			echo "FULL-SUITE: QUALIFY INFORMING tree=$tree; executing another complete main-role run, not reusing PASS"
-		else
-			echo "FULL-SUITE: VERDICT REUSED PASS tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime"
-			exit 0
-		fi ;;
+		echo "FULL-SUITE: VERDICT REUSED PASS tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime"
+		exit 0 ;;
 	FAIL*)
 		if [ "$RERUN" = 1 ]; then
 			# Preserve the complete superseded FAIL and its matching log before rerunning.
@@ -179,20 +171,6 @@ case "$cached" in
 	MISS) echo "FULL-SUITE: cache miss for tree $tree role=$JUDGE_ROLE (no reusable verdict); running the complete suite" ;;
 	*) fail "shared verdict lookup returned an invalid result"; exit 1 ;;
 esac
-
-# INFORMING1 counts real main-role invocations, never reused cache entries.
-# A begin without a validated completion breaks the promotion streak after a failed or cancelled run.
-rollout_run=""
-rollout_event() (
-	case "$ROOT" in /*) rollout_repo=$ROOT ;; *) rollout_repo="$(pwd -P)/$ROOT" ;; esac
-	cd -- "$SCRIPT_DIR" || exit 1
-	rollout_action=$1
-	shift
-	python3 ./gate-rollout.py "$rollout_action" --repo "$rollout_repo" --commit "$COMMIT" "$@"
-)
-if [ "$JUDGE_ROLE" = main ]; then
-	rollout_run=$(rollout_event begin) || { fail "informing full-run start could not be recorded"; exit 1; }
-fi
 
 # The exact-commit archive under judgment. A caller-supplied archive (the pre-push gate's
 # candidate extract) is used as is; otherwise the candidate is exported from git objects only,
@@ -884,13 +862,6 @@ print(entry["verdict"])
 PYEOF
 }
 recorded_verdict=$(write_complete_verdict) || { rm -f "$log_entry"; cleanup_archive; echo "FULL-SUITE: RED: verdict evidence could not be recorded; nothing was cached" >&2; exit 1; }
-if [ -n "$rollout_run" ]; then
-	rollout_event finish --run "$rollout_run" --record "$entry" || {
-		cleanup_archive
-		fail "complete verdict recorded but informing promotion evidence was not; no promotion credit"
-		exit 1
-	}
-fi
 case "$recorded_verdict" in
 	PASS) verdict=PASS ;;
 	FAIL) verdict=FAIL; [ "$code" -ne 0 ] || code=1 ;;

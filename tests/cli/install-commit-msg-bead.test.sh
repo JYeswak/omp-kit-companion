@@ -394,7 +394,6 @@ mkdir -p "$TMP/inertkit/scripts"
 for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-commit-kitlib-reversal.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-kitlib.sh check-staged-br-init.sh check-portable-paths.sh portable_paths_check.py check-staged-readme.sh check-staged-sources.sh pysafe.py pysafe_check.py pysafe_inline.py pysafe_inline_literals.py kitlib_ratchet_core.py tempsafe_check.py kitlib_ratchet.py br_init_check.py sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py readme-check.ts kitlib-tmp.sh kitlib-findings.sh gate-event.sh kitlib_jsonl.py kitlib_lock.py; do
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
-cp "$(dirname -- "$INSTALLER")/gate-rollout.py" "$TMP/inertkit/scripts/gate-rollout.py"
 cp "$(dirname -- "$INSTALLER")/check-gap-mention.sh" "$TMP/inertkit/scripts/check-gap-mention.sh"
 cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"
