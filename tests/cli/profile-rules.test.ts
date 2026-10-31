@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readdirSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { inspectEffectiveRules, inspectEffectiveRulesAsync, isolatedProbeHome, profilePluginRuleStatus, runEffectiveRuleProbe, type EffectiveRulesInput, type Finding } from "../../src/diagnostics.ts";
@@ -85,14 +85,25 @@ test("bounded async profile probes stay parallel", async () => {
 	const root = join(process.cwd(), "var", "agent-tmp", "prof2-stub.77773");
 	const homeDir = join(root, "home");
 	const stub = join(root, "omp-stub-sleep.sh");
+	const inflight = join(root, "inflight");
+	const peaks = join(root, "inflight-peaks.txt");
 	mkdirSync(homeDir, { recursive: true, mode: 0o700 });
-	writeFileSync(stub, "#!/bin/sh\nsleep 0.05\ncase \"$*\" in *ttsr*) printf \"[{\\\"name\\\":\\\"kit-a\\\",\\\"path\\\":\\\"%s/.omp/plugins/node_modules/omp-kit-companion/rules/kit-a.md\\\",\\\"provider\\\":\\\"plugin\\\"}]\" \"$PWD\" ;; *) printf \"{\\\"npm\\\":[{\\\"name\\\":\\\"omp-kit-companion\\\",\\\"version\\\":\\\"0.2.5\\\"}],\\\"marketplace\\\":[]}\" ;; esac\n");
+	rmSync(inflight, { recursive: true, force: true });
+	mkdirSync(inflight, { recursive: true });
+	rmSync(peaks, { force: true });
+	// CLOCKBOUND1: each probe marks itself in flight, records how many probes are in flight, holds for
+	// 0.3 s, then leaves. Overlap proves the probes run in parallel and the peak proves the bound,
+	// whatever the host load (the old < 2000 ms wall bound read 4,825 ms at load 19 on 2026-10-31).
+	writeFileSync(stub, `#!/bin/sh\nmkdir '${inflight}/'$$\nls '${inflight}' | wc -l >> '${peaks}'\nsleep 0.3\nrmdir '${inflight}/'$$\ncase "$*" in *ttsr*) printf "[{\\"name\\":\\"kit-a\\",\\"path\\":\\"%s/.omp/plugins/node_modules/omp-kit-companion/rules/kit-a.md\\",\\"provider\\":\\"plugin\\"}]" "$PWD" ;; *) printf "{\\"npm\\":[{\\"name\\":\\"omp-kit-companion\\",\\"version\\":\\"0.2.5\\"}],\\"marketplace\\":[]}" ;; esac\n`);
 	chmodSync(stub, 0o755);
 	const profiles = Array.from({ length: 17 }, (_, index) => ({ name: index === 0 ? "default" : `p${index}` }));
 	const finding = await inspectEffectiveRulesAsync({ home: homeDir, ompPath: stub, kitVersion: "0.2.5", ompVersion: "18.6.0", rules: ["kit-a"], profiles });
 	expect(finding.status).toBe("OK");
 	expect(finding.evidence?.probe_concurrency).toBe(6);
-	expect(finding.evidence?.probe_elapsed_ms).toBeLessThan(2000);
+	const peak = Math.max(...readFileSync(peaks, "utf8").trim().split("\n").map(Number));
+	expect(peak).toBeGreaterThan(1);
+	// Each of the 6 concurrent profiles runs its ttsr and plugin probes together.
+	expect(peak).toBeLessThanOrEqual(12);
 });
 
 const ownedScratch: OwnedTmp[] = [];

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { delimiter, dirname, join } from "node:path";
 import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, readRchSocketBaseline, writeRchSocketBaseline, type Finding, type RchConfigRead, type RchDaemonWorker, type RchProbeWorker, type RchReachabilityDeps, type RchSocketBaseline, type RchWorkerHealthDeps } from "../../src/diagnostics.ts";
@@ -241,10 +241,15 @@ test("CLI scopes and bare presence inventory keep explicit unperformed evidence"
 	const f = fixture(); installOmp(f);
 	const cli = join(import.meta.dir, "../../src/cli.ts");
 	const env = { ...process.env, HOME: f.home, PATH: `${dirname(f.ompPath)}:/usr/bin:/bin`, XDG_STATE_HOME: join(f.base, "state") };
+	const launcherLog = join(f.base, "bun-omp-argv.txt");
 	for (const args of [["doctor", "--scope", "omp"], ["doctor", "--scope", "profile"], ["status"], []]) {
-		const began = performance.now();
+		rmSync(launcherLog, { force: true });
 		const result = runFixture([process.execPath, cli, ...args, "--json"], { cwd: f.project, env });
-		expect(performance.now() - began, `${args.join(" ")}: ${decoder.decode(result.stderr)}`).toBeLessThan(2000);
+		// CLOCKBOUND1: the property is that these surfaces perform no live OMP probe (the stub logs every
+		// call and refuses anything but --version), not that the CLI starts within 2 s on a loaded host
+		// (measured 2,516 ms at load 19 on 2026-10-31 while the code was unchanged).
+		const calls = existsSync(launcherLog) ? readFileSync(launcherLog, "utf8").trim().split("\n").filter(Boolean) : [];
+		expect(calls.filter(call => call !== "--version"), `${args.join(" ")}: ${decoder.decode(result.stderr)}`).toEqual([]);
 		const envelope = JSON.parse(decoder.decode(result.stdout));
 		const rows: Finding[] = envelope.data.findings;
 		if (args[0] === "doctor") {
