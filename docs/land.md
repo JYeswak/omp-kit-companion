@@ -107,6 +107,42 @@ Inspect stored entries with `omp-kit full-suite verdict list [TREE] [--repo PATH
 `omp-kit full-suite verdict get TREE [--repo PATH]` for one tree. Listing includes invalid
 records and reports tree, judge role/check identity/runtime, verdict and integrity status.
 
+### Informing hook rollout
+
+A new executable hook member can declare `# omp-kit-rollout: informing N` within its
+first 16 lines (`N` is 1–1000). Run `scripts/install-commit-msg-bead.sh` normally.
+The installer preserves the member bytes in a hidden payload and installs its wrapper;
+this works with both kit dispatchers and retained foreign `hooks.d` chains. Existing
+unmarked checks stay blocking. Do not mark an established required check informing
+to get a change admitted.
+
+An informing member runs with its original arguments, working directory, interpreter
+and bounded hook input. Its exit status and `FINDING` output are recorded separately
+under the repository's Git common directory, `omp-kit/gate-rollout/member-verdicts.jsonl`.
+Informing failures remain visible but do not refuse the commit or push. A payload or
+declaration integrity failure refuses rather than executing unverified bytes.
+
+Promotion requires `N` distinct, complete green main-role full-suite runs on the same
+exact commit, with that same installed member digest present when each run began.
+The producer validates each completed verdict with the canonical store. A failed or
+unfinished run breaks the streak; another commit, old runs before installation and
+reused cached PASS results earn no credit. `--qualify-informing` explicitly executes
+another complete run of a cached green main tree; ordinary PASS reuse and cached-FAIL
+refusal are unchanged. Run it deliberately, not in a retry loop:
+
+```sh
+sh scripts/full-suite-verdict.sh --repo . --commit HEAD --judge-role main --qualify-informing
+```
+
+The next member invocation persists its qualifying commit/count and becomes blocking.
+Once promoted it stays blocking for that payload. Installing a declared new payload
+revision resets its qualification; old bytes must still match their retained digest.
+Missing, corrupt or unreadable
+history cannot promote; an informing member still runs and reports the unavailable
+evidence. Member verdicts and full-run history are distinct, bounded-read JSONL ledgers;
+neither is a release or installed-fleet certificate. Repeated record hashes never count
+as distinct full runs.
+
 ### Minimum full-run qualification
 
 Complete execution is necessary, not sufficient. The runner also compares the measured

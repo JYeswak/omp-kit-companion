@@ -292,6 +292,14 @@ if [ "$MODE" = "check" ]; then
 			stale=1
 		fi
 	done
+	for chain in pre-commit commit-msg pre-push reference-transaction; do
+		for helper in gate-rollout.py kitlib_run.py pysafe.py kitlib_io.py kitlib_jsonl.py kitlib_lock.py; do
+			if ! cmp -s "$KITROOT/scripts/$helper" "$HOOKS/hooks.d/$chain/$helper"; then
+				printf 'install-commit-msg-bead: MISSING or STALE informing helper: %s/%s\n' "$chain" "$helper" >&2
+				stale=1
+			fi
+		done
+	done
 	parser="$HOOKS/hooks.d/pre-commit/check-commit-imports.sh"
 	if [ ! -f "$parser" ] || ! sh "$parser" --parser-info --repo "$TARGET"; then
 		printf 'install-commit-msg-bead: MISSING or STALE installed import parser in %s\n' "$TARGET" >&2
@@ -659,6 +667,13 @@ install_kitlib_tmp() {
 		place "$KITROOT/scripts/kitlib-tmp.sh" "$(chain_dir "$chain")/kitlib-tmp.sh" -x
 		# GATEDIAG1: the FINDING grammar helper members source to report every defect at once.
 		place "$KITROOT/scripts/kitlib-findings.sh" "$(chain_dir "$chain")/kitlib-findings.sh" -x
+		for helper in gate-rollout.py kitlib_run.py pysafe.py kitlib_io.py kitlib_jsonl.py kitlib_lock.py; do
+			# Existing installers own these copies; publish each path once so rollback retains its original bytes.
+			case "$chain/$helper" in
+				pre-commit/kitlib_run.py | pre-commit/pysafe.py | pre-commit/kitlib_io.py | commit-msg/kitlib_jsonl.py | commit-msg/kitlib_lock.py) continue ;;
+			esac
+			place "$KITROOT/scripts/$helper" "$(chain_dir "$chain")/$helper" -x
+		done
 	done
 	printf 'installed kitlib-tmp.sh and kitlib-findings.sh into all four hook chains\n'
 }
@@ -857,6 +872,22 @@ if [ "$NATIVE_PRESERVATION" = 1 ]; then
 	if ! (CDPATH='' cd -- "$TARGET" && sh "$HOOKS/hooks.d/pre-commit/40-omp-kit-native-preserve"); then
 		rollback "native-preservation member refused the actual candidate in $TARGET"
 	fi
+fi
+# Explicit declarations opt in only new members; unmarked established checks remain blocking.
+# Preserve every wrapper/payload/config path in the installer's ordinary rollback transaction.
+for chain in pre-commit commit-msg pre-push reference-transaction; do
+	for member in "$(chain_dir "$chain")"/[0-9][0-9]-*; do
+		[ -x "$member" ] || continue
+		grep -Fq '# omp-kit-rollout: informing ' "$member" || continue
+		case " $UNDO_RM $UNDO_RESTORE " in *" $member "*) ;; *) backup "$member" ;; esac
+		for suffix in payload rollout.json; do
+			retained="$(dirname -- "$member")/.$(basename -- "$member").$suffix"
+			if [ -e "$retained" ]; then backup "$retained"; else UNDO_RM="$UNDO_RM $retained"; fi
+		done
+	done
+done
+if ! (cd -- "$KITROOT/scripts" && python3 ./gate-rollout.py install --hooks "$HOOKS"); then
+	rollback "informing declarations could not be installed"
 fi
 # shellcheck disable=SC2086
 for path in $UNDO_RESTORE; do rm -f -- "$(dirname -- "$path")/.undo.$$.$(basename -- "$path")"; done
