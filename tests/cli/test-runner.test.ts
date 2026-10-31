@@ -735,20 +735,40 @@ describe("runFastTest", () => {
 		const wireLength = JSON.stringify({ command }).length;
 		const ruleHash = createHash("sha256").update(readFileSync(rulePath)).digest("hex");
 		writeFileSync(cases, CASE_HEADER + "\n" + rule + "\tfire\ttool\tbash\t-\t" + command + "\tlong actor token\t\n");
-		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", join(REPO_ROOT, "rules"), "--cases", cases, "--rule", rule, "--line", "2", "--rule-sha256", ruleHash, "--timeout-ms", "2500"], {
-			cwd: REPO_ROOT,
-			env: { ...process.env, PATH: childNativePath, TMPDIR: workerTmp, TMP: workerTmp, TEMP: workerTmp, OMP_SRC: childIdentity.source, OMP_BIN: childIdentity.launcher },
-			stdout: "pipe", stderr: "pipe",
-		});
-		const cpuTimeUs = result.resourceUsage.cpuTime.total;
-		expect(result.exitCode).toBe(0);
-		const observation = JSON.parse(result.stdout.toString());
-		expect(observation).toMatchObject({
-			status: "OK", rule, case_line: 2, registration: "REGISTERED", whole: "fire",
-			prefix: { phase: "final", position: wireLength + 1, wire_length: wireLength },
-			evaluator: "OK", witness: { source: "tool", tool: "bash", expect: "fire" },
-		});
-		expect(cpuTimeUs).toBeLessThan(1_000_000n);
+		const run = (control?: "wall-stall" | "slow-fire") => {
+			const timeoutMs = control ? 10_000 : 2_500;
+			// Controls inject delay/work; keep the production-path watchdog unchanged.
+			const started = performance.now();
+			const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", join(REPO_ROOT, "rules"), "--cases", cases, "--rule", rule, "--line", "2", "--rule-sha256", ruleHash, "--timeout-ms", String(timeoutMs)], {
+				cwd: REPO_ROOT,
+				env: { ...process.env, PATH: childNativePath, TMPDIR: workerTmp, TMP: workerTmp, TEMP: workerTmp, OMP_SRC: childIdentity.source, OMP_BIN: childIdentity.launcher, TTSR_TEST_CLOCK_BOUND_CONTROL: control ?? "" },
+				stdout: "pipe", stderr: "pipe",
+			});
+			return { result, elapsedMs: performance.now() - started };
+		};
+		const assertWitness = (result: ReturnType<typeof run>["result"]) => {
+			expect(result.exitCode).toBe(0);
+			const observation = JSON.parse(result.stdout.toString());
+			expect(observation).toMatchObject({
+				status: "OK", rule, case_line: 2, registration: "REGISTERED", whole: "fire",
+				prefix: { phase: "final", position: wireLength + 1, wire_length: wireLength },
+				evaluator: "OK", witness: { source: "tool", tool: "bash", expect: "fire" },
+			});
+		};
+		const withinCpuBudget = (cpuTimeUs: bigint) => cpuTimeUs < 1_000_000n;
+
+		const normal = run();
+		assertWitness(normal.result);
+		expect(withinCpuBudget(normal.result.resourceUsage.cpuTime.total)).toBe(true);
+
+		const wallStalled = run("wall-stall");
+		assertWitness(wallStalled.result);
+		expect(wallStalled.elapsedMs).toBeGreaterThanOrEqual(2_000);
+		expect(withinCpuBudget(wallStalled.result.resourceUsage.cpuTime.total)).toBe(true);
+
+		const slowFire = run("slow-fire");
+		assertWitness(slowFire.result);
+		expect(withinCpuBudget(slowFire.result.resourceUsage.cpuTime.total)).toBe(false);
 	});
 	test("records an AST-only write hit at final snapshot, not a streamed prefix", () => {
 		const identity = resolveOmpIdentity(process.env);

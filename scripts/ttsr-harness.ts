@@ -81,6 +81,9 @@ if (process.argv.includes("--observe") && !process.argv.includes("--observe-chil
 		env.TMP = env.TEMP = path.join(privateRoot, "tmp");
 		env.OMP_BIN = OMP_BIN;
 		env.BUN_BE_BUN = "1";
+		// Only the named clock-bound test control crosses the isolated worker boundary.
+		const clockBoundControl = process.env.TTSR_TEST_CLOCK_BOUND_CONTROL;
+		if (clockBoundControl) env.TTSR_TEST_CLOCK_BOUND_CONTROL = clockBoundControl;
 		const worker = Bun.spawn([process.execPath, import.meta.path, ...process.argv.slice(2), "--observe-child"], {
 			env, stdout: "pipe", stderr: "pipe",
 		});
@@ -1511,6 +1514,28 @@ async function observeWitness(rulesDir: string, casesFile: string, ruleName: str
 		if (!validity.ok) return unavailable("INVALID_RULE", validity.detail);
 		const matcher = new TtsrManager(SETTINGS);
 		if (lr.cls === "always" || !matcher.addRule(lr.rule)) return unavailable("RULE_NOT_REGISTERED");
+		const clockBoundControl = process.env.TTSR_TEST_CLOCK_BOUND_CONTROL;
+		if (selected.source === "tool" && selected.tool === "bash"
+			&& selected.snippet.length >= OBSERVE_FINAL_WITNESS_MIN_WIRE_LENGTH && clockBoundControl) {
+			// Opt-in controls let the long-token regression prove CPU-boundness under a wall stall and extra work.
+			if (clockBoundControl === "wall-stall") {
+				Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000);
+			} else if (clockBoundControl === "slow-fire") {
+				const cpuStart = process.cpuUsage();
+				let work = 0;
+				let usedCpu = process.cpuUsage(cpuStart);
+				// Use process CPU, not elapsed wall time, so scheduler delays do not change the injected work.
+				while (usedCpu.user + usedCpu.system < 1_200_000) {
+					for (let i = 0; i < 16_384; i += 1) {
+						work = Math.imul(work ^ i, 1_664_525) + 1_013_904_223;
+					}
+					usedCpu = process.cpuUsage(cpuStart);
+				}
+				if (work === Number.MIN_SAFE_INTEGER) throw new Error("unreachable clockbound work value");
+			} else {
+				throw new Error(`unsupported test-only clock-bound control: ${clockBoundControl}`);
+			}
+		}
 		let fastFinalWitness = false;
 		let finalWitnessLength = 0;
 		if (selected.source === "tool" && selected.tool === "bash"
