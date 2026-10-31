@@ -2,3 +2,4 @@
 - Refuse successful but over-budget changed tests at push, naming their measured duration and cap. Report the 225-second cap as an initial heuristic; reject impossible aggregate cycle lower bounds without claiming a latency guarantee.
 - Bind reusable verdicts, focused coverage and tag admission to the complete authoritative judge dependency set. Reject incomplete or stale records, isolate per-run claims and propagate cancellation through nested file supervisors.
 - Split the two test files that crossed the 225-second per-file budget under machine load into balanced parts with shared helpers, every test unchanged: private-index-land (75 tests, three files) and check-staged-kitlib (84 cases, three parts). CI runs every part. (commit 5b31e2b)
+- The per-file 225-second test cap now reports OVER_BUDGET without refusing the push, until it is derived from measured per-file times; the aggregate makespan bound still refuses. (J-2026-10-31-01)

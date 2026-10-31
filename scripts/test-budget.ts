@@ -123,7 +123,9 @@ try {
 		for (const violation of violations) console.log(`OVER_BUDGET ${violation.path} ${violation.elapsed_s} ${violation.cap_s}`);
 		if (aggregateOverBudget) console.log(`AGGREGATE_OVER_BUDGET max(W_s/m,p_max_s)=${makespanLowerBound} full_cycle_s=${cycle}; necessary lower bound only, not a p95 guarantee`);
 	}
-	if (violations.length || aggregateOverBudget) process.exitCode = 1;
+	// The per-file cap is an initial heuristic, not derived from measured distributions: it reports
+	// and never refuses until SUITEBUDGET1 (ompkit-kup44.1) derives it (J-2026-10-31-01).
+	if (aggregateOverBudget) process.exitCode = 1;
 } catch (error) {
 	const message = error instanceof Error ? error.message : String(error);
 	if (machine) console.log(JSON.stringify({ status: "ERROR", error: message }));

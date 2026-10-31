@@ -581,7 +581,7 @@ test("ordinary assertion failure", () => {
 	}
 }, 120_000);
 
-test.skipIf(!AMPLE)("SUITEBUDGET1 refuses a successful file over its measured policy cap", () => {
+test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file over the heuristic per-file cap", () => {
 	const source = readFileSync(gate, "utf8");
 	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
 	try {
@@ -606,12 +606,12 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 refuses a successful file over its measured po
 		// A fixture-only tiny cap exercises the real measured refusal without a
 		// five-minute sleeper or a forged timing row. Product policy is untouched.
 		configure(0.004);
-		const refused = runFocused(fx, source, archive, "lib/mod.ts", scripts);
-		expect(refused.code, refused.out).not.toBe(0);
-		expect(refused.out).toContain("OVER_BUDGET");
-		expect(refused.out).toContain("tests/cli/mod.test.ts");
+		const reported = runFocused(fx, source, archive, "lib/mod.ts", scripts);
+		expect(reported.code, reported.out).toBe(0);
+		expect(reported.out).toContain("OVER_BUDGET");
+		expect(reported.out).toContain("tests/cli/mod.test.ts");
 		const record = ledger(fx).at(-1)!;
-		expect(record.rc).not.toBe(0);
+		expect(record.rc).toBe(0);
 		const files = measuredFiles(record);
 		expect(files[0]!.rc).toBe(0);
 		expect(files[0]!.elapsed_ms).toBeGreaterThan(1);
