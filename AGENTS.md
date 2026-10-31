@@ -115,7 +115,7 @@ The kit is an installable companion for an existing OMP: a tested rule pack, a p
 
 Work moves through three stages. Each is reported on its own and never folded into another:
 
-1. **Accepted.** The change is on `main`, its exact tree has a full-suite PASS (`scripts/full-suite-verdict.sh`, recorded by the pre-push gate), and someone other than the implementer re-ran its acceptance at that commit and cited the output.
+1. **Accepted.** The change is on `main`, its exact tree has a full-suite PASS (`sh scripts/full-suite-verdict.sh --repo . --commit <sha> --judge-role main`; the push defers it, the release requires it), and someone other than the implementer re-ran its acceptance at that commit and cited the output.
 2. **Published.** A release containing the commit was cut with `scripts/release-local.sh`. That is the release route while the CI pipeline is suspended (see [docs/release-signing.md](docs/release-signing.md)), so a green CI run is not a requirement.
 3. **Running.** The intended consumer loads that release. Show it with a readback, for example a profile's plugin link resolving to the release and `omp-kit doctor --scope activation`, never with an install log alone.
 

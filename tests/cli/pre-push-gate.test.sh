@@ -16,6 +16,9 @@ mkdir -p "$REPO_TMP"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP pre-push-gate-test || exit 1
 unset FULL_SUITE_VERDICT_CACHE_DIR
+# GATESPEED1: the full suite now gates the release by default. These cases exercise the in-push
+# runner, which stays available, so they opt in; DEFER1 below covers the default.
+export PRE_PUSH_FULL_SUITE=push
 export XDG_CONFIG_HOME="$TMP/xdg-config"
 export XDG_STATE_HOME="$TMP/xdg-state"
 
@@ -964,6 +967,24 @@ if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "GREEN full-suite-verdict" &&
 else
 	fail=$((fail + 1)); printf 'FAIL land1a-control: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
+
+# DEFER1 (GATESPEED1, J-2026-10-31-09): by default the push does not run the complete suite. A tree
+# whose only failure is an unselected suite is admitted at push, names the release command, and
+# runs nothing; release-local's require-pass readback is what refuses it.
+drepro=$(mkverdictrepo defer1)
+printf '#!/bin/sh\necho unselected-suite-runs\nexit 3\n' > "$drepro/tests/cli/unselected.test.sh"
+git -C "$drepro" add -A
+git -C "$drepro" commit -qm "[test] deferred red head"
+rc=$(PRE_PUSH_FULL_SUITE='' run_adapter "$drepro")
+out=$(cat "$TMP/out")
+if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "DEFERRED full-suite-verdict: the complete suite gates the release" \
+	&& ! printf '%s' "$out" | grep -q "running the complete suite" && ! printf '%s' "$out" | grep -q "unselected-suite-runs"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL defer1-push-skips-full-suite: rc=%s out<<<%s>>>\n' "$rc" "$out"
+fi
+# A prefix assignment on a shell function call may persist in a POSIX shell; restore the opt-in.
+export PRE_PUSH_FULL_SUITE=push
 
 # LAND1-B planted: a tree failing an otherwise-unselected shell suite is refused. fresh-gate is a
 # passing stub, so only the full-suite verdict can refuse this tree.

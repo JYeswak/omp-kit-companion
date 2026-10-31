@@ -322,33 +322,48 @@ run_affected_tests() {
 	queued_before=0
 	[ -f "$WORK/queued.secs" ] && queued_before=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
 	tests_rc=0
+	# GATESPEED1 (ompkit-774u.71): bun files and shell/python suites run at the same time, and the
+	# scripts on the same K workers as bun instead of one at a time. Measured 2026-10-31: a scripts
+	# push ran 12 shell suites serially after the bun stage; the full suite already runs 5 shell
+	# suites at once (FULLSUITEPAR1) on this machine.
+	bun_pid=""
+	k_workers=$(test_workers)
 	if [ "$bun_files" -gt 0 ]; then
 		mkdir -p "$ARCHIVE_DIR/var/agent-tmp"
-		workers=$(test_workers)
+		workers=$k_workers
 		[ "$workers" -le "$bun_files" ] || workers=$bun_files
-		echo "affected bun tests: files=$bun_files workers=$workers"
+		bun_workers=$workers
+		echo "affected bun tests: files=$bun_files workers=$bun_workers"
 		(
 			cd "$ARCHIVE_DIR"
-			heavy_step tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml" OMP_KIT_TEST_WORKERS="$workers" \
+			heavy_step tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml" OMP_KIT_TEST_WORKERS="$bun_workers" \
 				python3 "$SCRIPT_DIR/suite-metrics.py" stage --runner bun --records "$metric_dir" \
 				--cwd "$ARCHIVE_DIR" --tree "$metric_tree" --summary "$WORK/bun-metrics.stage" \
-				--bun-config "$ARCHIVE_DIR/bunfig.toml" --workers "$workers" --deadline 3600 "$@"
-		) >"$tests_out" 2>&1 || tests_rc=$?
-		cat "$tests_out"
+				--bun-config "$ARCHIVE_DIR/bunfig.toml" --workers "$bun_workers" --deadline 3600 "$@"
+		) >"$tests_out" 2>&1 &
+		bun_pid=$!
 	fi
 	if [ -n "$script_files" ]; then
 		mkdir -p "$ARCHIVE_DIR/var/agent-tmp"
 		script_rc=0
-		# Shell/Python retain their serial execution contract; only Bun uses the
-		# existing bounded worker count. Every record comes from a real file process.
+		# shellcheck disable=SC2086
+		script_count=$(printf '%s\n' $script_files | grep -c .)
+		script_workers=$k_workers
+		[ "$script_workers" -le "$script_count" ] || script_workers=$script_count
 		# shellcheck disable=SC2086
 		(
 			cd "$ARCHIVE_DIR"
 			heavy_step script-tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" OMP_KIT_TEST_WORKERS=1 \
 				python3 "$SCRIPT_DIR/suite-metrics.py" stage --runner scripts --records "$metric_dir" \
 				--cwd "$ARCHIVE_DIR" --tree "$metric_tree" --summary "$WORK/scripts-metrics.stage" \
-				--workers 1 --deadline 3600 $script_files
+				--workers "$script_workers" --deadline 3600 $script_files
 		) >"$scripts_out" 2>&1 || script_rc=$?
+	fi
+	if [ -n "$bun_pid" ]; then
+		wait "$bun_pid" || tests_rc=$?
+		cat "$tests_out"
+	fi
+	if [ -n "$script_files" ]; then
 		cat "$scripts_out"
 		[ "$tests_rc" -ne 0 ] || tests_rc=$script_rc
 	fi
@@ -708,18 +723,32 @@ fi
 	focus_tests=$(printf '%s\n' $affected $focus_tests | awk 'NF && !seen[$0]++')
 	# shellcheck disable=SC2086
 	focus_tests=$(apply_ci_only $focus_tests) || return $?
-	# Wall budget (CIGATE1 rule 3, default 360 s): if the selection's predicted wall on K workers (CI
-	# per-file timings) exceeds it, the changed tests and the nearest importers run and the rest are
-	# deferred by name; the verdict is PARTIAL, never a bare pass.
+	# GATESPEED1: a suite the pre-push contract stage already ran GREEN on this exact tree is not run
+	# again here (pre-push-gate.test.sh alone is about 4 minutes).
+	if [ -n "$focus_tests" ] && [ -s "${FRESH_GATE_PASSED_IN:-}" ]; then
+		# shellcheck disable=SC2086
+		focus_tests=$(printf '%s\n' $focus_tests | grep -Fvx -f "$FRESH_GATE_PASSED_IN" || :)
+		echo "focused: already GREEN in the contract stage: $(paste -sd , - <"$FRESH_GATE_PASSED_IN")"
+	fi
+	# Wall budget (CIGATE1 rule 3): if the selection's predicted wall on K workers exceeds it, the
+	# changed tests and the nearest importers run and the rest are deferred by name to the release's
+	# full suite; the verdict is PARTIAL, never a bare pass. GATESPEED1 (ompkit-774u.71,
+	# J-2026-10-31-09): the push takes under 4 minutes, so the default budget is 120 s, and the plan
+	# reads this machine's measured bun and script timings after the committed CI table, which has
+	# no shell suites.
 	if [ -n "$focus_tests" ]; then
 		set --
 		for file in $CHANGED; do
 			[ -n "$file" ] && set -- "$@" --changed-file "$file"
 		done
+		set -- "$@" --timings "$ARCHIVE_DIR/.github/core-test-timings.json"
+		if measured_tables=$(python3 "$SCRIPT_DIR/full-suite-verdict-store.py" timings --repo "${FRESH_GATE_REPO:-$ROOT}" 2>/dev/null); then
+			set -- "$@" --timings "$measured_tables/core-test-timings.json" --timings "$measured_tables/script-test-timings.json"
+		fi
 		# shellcheck disable=SC2086
 		focus_tests=$(bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --plan \
-			--budget-secs "${FRESH_GATE_TEST_BUDGET_SECS:-360}" --workers "$(test_workers)" \
-			--timings "$ARCHIVE_DIR/.github/core-test-timings.json" --deferred-out "$WORK/excluded" "$@" -- $focus_tests) || return $?
+			--budget-secs "${FRESH_GATE_TEST_BUDGET_SECS:-120}" --workers "$(test_workers)" \
+			--deferred-out "$WORK/excluded" "$@" -- $focus_tests) || return $?
 	fi
 	if [ -n "$focus_tests" ] && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
 		if ! (

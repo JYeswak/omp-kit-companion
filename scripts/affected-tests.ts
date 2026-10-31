@@ -192,7 +192,7 @@ export function planBudget(tests: readonly string[], changed: ReadonlySet<string
 }
 
 const USAGE = "usage: affected-tests.ts --root DIR [--changed-file PATH ...] [--explain] [--order path|distance]\n" +
-	"       affected-tests.ts --plan --budget-secs N --workers K [--timings FILE] [--deferred-out FILE] [--changed-file PATH ...] -- TEST...\n";
+	"       affected-tests.ts --plan --budget-secs N --workers K [--timings FILE ...] [--deferred-out FILE] [--changed-file PATH ...] -- TEST...\n";
 
 function main(argv: readonly string[]): number {
 	let root = "";
@@ -201,7 +201,7 @@ function main(argv: readonly string[]): number {
 	let plan = false;
 	let budgetSecs = Number.NaN;
 	let workers = Number.NaN;
-	let timings = "";
+	const timings: string[] = [];
 	let deferredOut = "";
 	const changed: string[] = [];
 	let i = 0;
@@ -217,23 +217,27 @@ function main(argv: readonly string[]): number {
 		else if (arg === "--order" && (value === "path" || value === "distance")) { order = value; i++; }
 		else if (arg === "--budget-secs") { budgetSecs = Number(value); i++; }
 		else if (arg === "--workers") { workers = Number(value); i++; }
-		else if (arg === "--timings") { timings = value; i++; }
+		else if (arg === "--timings") { timings.push(value); i++; }
 		else if (arg === "--deferred-out") { deferredOut = value; i++; }
 		else { process.stderr.write(USAGE); return 2; }
 	}
 	if (plan) {
 		if (!(budgetSecs > 0) || !Number.isInteger(workers) || workers < 1) { process.stderr.write(USAGE); return 2; }
-		let durations: Record<string, number> = {};
-		if (timings && existsSync(timings)) {
-			const parsed: unknown = JSON.parse(readFileSync(timings, "utf8"));
+		// Later tables override earlier ones: the committed CI table first, then this machine's measured
+		// bun and script tables (GATESPEED1: the CI table has no shell suites, so 56 suites measured at
+		// up to 440 s were each planned at the 10 s default and every scripts push blew the budget).
+		const durations: Record<string, number> = {};
+		for (const table of timings) {
+			if (!existsSync(table)) continue;
+			const parsed: unknown = JSON.parse(readFileSync(table, "utf8"));
 			if (typeof parsed === "object" && parsed !== null && "files" in parsed && typeof parsed.files === "object" && parsed.files !== null)
-				durations = parsed.files as Record<string, number>;
+				Object.assign(durations, parsed.files as Record<string, number>);
 		}
 		const result = planBudget(argv.slice(i).filter((test) => test !== ""), new Set(changed), durations, budgetSecs * 1000, workers);
 		for (const test of result.run) process.stdout.write(`${test}\n`);
 		if (deferredOut) writeFileSync(deferredOut, result.deferred.map((test) => `${test}\n`).join(""), { flag: "a" });
 		process.stderr.write(`affected-tests plan: run ${result.run.length}, defer ${result.deferred.length}, predicted ${Math.round(result.predictedMs / 1000)} s on ${workers} workers against a ${budgetSecs} s budget\n`);
-		for (const test of result.deferred) process.stderr.write(`focused: deferred ${test} (over the ${budgetSecs} s wall budget); CI runs it\n`);
+		for (const test of result.deferred) process.stderr.write(`focused: deferred ${test} (over the ${budgetSecs} s wall budget); the release's full suite runs it\n`);
 		return 0;
 	}
 	if (!root || !existsSync(root) || !statSync(root).isDirectory()) {

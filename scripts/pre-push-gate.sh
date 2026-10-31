@@ -392,6 +392,25 @@ checker_contracts() {
 		printf 'pre-push-gate: missing trusted bounded suite executor\n' >&2
 		exit 1
 	fi
+	# GATESPEED1 (ompkit-774u.71, J-2026-10-31-09): a candidate contract runs only when the pushed
+	# paths reach it. Measured 2026-10-31: the twelve contracts took 366 s serially on every push
+	# (pre-push-gate.test.sh 243 s, full-suite-verdict-incomplete.test.sh 73 s) whatever changed.
+	# Selection uses the base archive's affected-tests.ts, which the candidate cannot change; when
+	# there is no base or the selection fails, every contract runs, as before.
+	contract_select=""
+	contract_selected=0
+	contract_run=""
+	if [ "$contract_role" = candidate ] && [ -n "${base_ref:-}" ] && [ -f "${base_archive:-}/scripts/affected-tests.ts" ]; then
+		set --
+		while IFS= read -r contract_changed; do
+			[ -n "$contract_changed" ] && set -- "$@" --changed-file "$contract_changed"
+		done <<CONTRACT_EOF
+$changed
+CONTRACT_EOF
+		if contract_select=$(bun run --no-env-file --config=/dev/null "$base_archive/scripts/affected-tests.ts" --root "$contract_root" "$@" 2>/dev/null); then
+			contract_selected=1
+		fi
+	fi
 for checker_test in \
 	publishability.test.sh \
 	doc-drift.test.sh \
@@ -416,18 +435,47 @@ do
 		exit 1
 	fi
 	[ "$contract_role" = candidate ] || continue
+	if [ "$contract_selected" = 1 ] && ! printf '%s\n' "$contract_select" | grep -Fqx "tests/cli/$checker_test"; then
+		printf 'SKIP checker-contract %s: no pushed path reaches it\n' "$checker_test"
+		continue
+	fi
+	contract_run="$contract_run $checker_test"
+done
+# GATESPEED1: the selected contracts run at the same time, each to its own record and output, and
+# are reported in list order; any red refuses the push after all have finished. The ones that pass
+# are handed to fresh-gate, which does not run them again in the focused stage.
+contract_pids=""
+mkdir -p "$archive_root/contracts"
+for checker_test in $contract_run; do
+	(
+		# gate_body runs under set -e: capture the status in an AND-OR list, or a red contract ends
+		# this subshell before its code is written and reads back as 1.
+		contract_child_rc=0
+		TMPDIR="$gate_scripts/var/agent-tmp" python3 "$gate_scripts/scripts/suite-metrics.py" run \
+			--record "$archive_root/contracts/$contract_role-$checker_test.json" \
+			--path "tests/cli/$checker_test" --runner sh --tree "$local_sha" \
+			--cwd "$contract_root" --deadline "${FULL_SUITE_TIMEOUT_SECS:-1800}" -- sh "$contract_root/tests/cli/$checker_test" \
+			>"$archive_root/contracts/$checker_test.out" 2>&1 || contract_child_rc=$?
+		printf '%s\n' "$contract_child_rc" >"$archive_root/contracts/$checker_test.rc"
+	) &
+	contract_pids="$contract_pids $!"
+done
+for contract_pid in $contract_pids; do wait "$contract_pid" || :; done
+contract_red=0
+for checker_test in $contract_run; do
 	printf '== checker-contract %s role=%s\n' "$checker_test" "$contract_role"
-	if TMPDIR="$gate_scripts/var/agent-tmp" python3 "$gate_scripts/scripts/suite-metrics.py" run \
-		--record "$archive_root/contracts/$contract_role-$checker_test.json" \
-		--path "tests/cli/$checker_test" --runner sh --tree "$local_sha" \
-		--cwd "$contract_root" --deadline "${FULL_SUITE_TIMEOUT_SECS:-1800}" -- sh "$test_path"; then
+	cat "$archive_root/contracts/$checker_test.out"
+	contract_rc=$(cat "$archive_root/contracts/$checker_test.rc" 2>/dev/null) || contract_rc=1
+	case "$contract_rc" in ''|*[!0-9]*) contract_rc=1 ;; esac
+	if [ "$contract_rc" = 0 ]; then
 		printf 'GREEN checker-contract %s role=%s\n' "$checker_test" "$contract_role"
+		printf 'tests/cli/%s\n' "$checker_test" >>"$archive_root/contracts-passed.txt"
 	else
-		rc=$?
-		printf 'RED checker-contract %s producer_rc=%s\n' "$checker_test" "$rc" >&2
-		exit "$rc"
+		printf 'RED checker-contract %s producer_rc=%s\n' "$checker_test" "$contract_rc" >&2
+		[ "$contract_red" != 0 ] || contract_red=$contract_rc
 	fi
 done
+[ "$contract_red" = 0 ] || exit "$contract_red"
 }
 if [ "$gate_scripts" != "$archive" ]; then
 	checker_contracts "$gate_scripts" base
@@ -496,9 +544,14 @@ ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir) || { printf 'pre-push-
 # below runs only the complement. The report lives beside the archive, inside this gate's owned dir.
 focused_passed="$archive_root/focused-passed.txt"
 rm -f "$focused_passed"
-FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" \
+FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" FRESH_GATE_PASSED_IN="$archive_root/contracts-passed.txt" \
 	sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
-if [ ! -f "$gate_scripts/scripts/full-suite-verdict.sh" ]; then
+if [ "${PRE_PUSH_FULL_SUITE:-release}" != push ]; then
+	# GATESPEED1 (ompkit-774u.71, J-2026-10-31-09): pushes take under 4 minutes, so the complete suite
+	# (about 25 minutes) gates the release instead: release-local refuses unless the exact source
+	# tree has a main-role full-suite PASS. PRE_PUSH_FULL_SUITE=push restores the in-push run.
+	printf 'DEFERRED full-suite-verdict: the complete suite gates the release, not the push; before release-local run: sh scripts/full-suite-verdict.sh --repo %s --commit %s --judge-role main\n' "$ROOT" "$local_sha"
+elif [ ! -f "$gate_scripts/scripts/full-suite-verdict.sh" ]; then
 	if [ -n "${base_ref:-}" ] && [ -f "$base_archive/scripts/full-suite-verdict.sh" ]; then
 		printf 'RED full-suite-verdict CANDIDATE_RUNNER_MISSING: candidate removed the required runner\n' >&2
 		exit 1

@@ -56,10 +56,12 @@ Neither mode grants a history rewrite or force-push.
 
 ## Full-suite verdict (LAND1)
 
-Before every publication the gate also requires the full-suite verdict for the exact candidate
-tree (`scripts/full-suite-verdict.sh`, called by `scripts/pre-push-gate.sh` after `fresh-gate.sh`;
-`omp-kit land` requires it in its publication admission too). The focused suites `fresh-gate.sh`
-selected for the diff never substitute for this verdict.
+The full-suite verdict for the exact tree (`scripts/full-suite-verdict.sh`) gates the release:
+`scripts/release-local.sh` refuses unless the source tree has a reusable main-role PASS, and
+`omp-kit land` requires it in its publication admission. A push runs the focused suites
+`fresh-gate.sh` selects and prints `DEFERRED full-suite-verdict` with the command to run before the
+release, so a push takes minutes (GATESPEED1, J-2026-10-31-09); `PRE_PUSH_FULL_SUITE=push` runs the
+complete suite inside the push again. The focused suites never substitute for this verdict.
 
 The complete declared suite is every bun test under `tests/cli` and `tests/fleet-guard`, every
 shell suite `tests/cli/*.test.sh`, and every python suite under `tests/cli` and `tests/scripts`

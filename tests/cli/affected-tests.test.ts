@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
+import { runSync } from "../../src/kitlib/run.ts";
 
 // CIGATE1 (ompkit-v66l.27.1): the selector the pre-push gate uses to pick the tests a diff affects.
 const root = resolve(import.meta.dir, "../..");
@@ -118,7 +119,7 @@ test("wall-budget plan keeps changed tests and the nearest importers, and defers
 		expect(fits.code).toBe(0);
 		expect(fits.run).toEqual(["tests/a.test.ts", "tests/b.test.ts"]);
 		expect(fits.deferred).toEqual(["tests/c.test.ts"]);
-		expect(fits.err).toContain("focused: deferred tests/c.test.ts (over the 60 s wall budget); CI runs it");
+		expect(fits.err).toContain("focused: deferred tests/c.test.ts (over the 60 s wall budget); the release's full suite runs it");
 		// A changed test always runs, even past the budget; the first test always runs.
 		expect(plan(60, ["tests/big.test.ts", "tests/a.test.ts"], ["tests/a.test.ts"]).run).toEqual(["tests/big.test.ts", "tests/a.test.ts"]);
 		expect(plan(360, ["tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts"]).deferred).toEqual([]);
@@ -130,6 +131,29 @@ test("wall-budget plan keeps changed tests and the nearest importers, and defers
 		const mutant = join(dir, "mutant-plan.ts");
 		writeFileSync(mutant, blind);
 		expect(plan(60, ["tests/big.test.ts", "tests/a.test.ts"], ["tests/a.test.ts"], mutant).deferred).toEqual(["tests/a.test.ts"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a later timing table overrides an earlier one, so an untimed shell suite is planned at its measured time", () => {
+	const dir = tree({
+		"ci.json": JSON.stringify({ version: 1, files: { "tests/a.test.ts": 10_000 } }),
+		"measured.json": JSON.stringify({ version: 1, files: { "tests/slow.test.sh": 300_000 } }),
+	});
+	try {
+		const plan = (...tables: string[]) => {
+			const args = tables.flatMap((table) => ["--timings", join(dir, table)]);
+			const result = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", selector, "--plan", "--budget-secs", "120", "--workers", "4", ...args, "--", "tests/a.test.ts", "tests/slow.test.sh"], { deadline_s: 30 });
+			expect(result.rc).toBe(0);
+			return new TextDecoder().decode(result.stdout).split("\n").filter(Boolean);
+		};
+		// Only the CI table: the shell suite is planned at the 10 s default and runs past the budget.
+		expect(plan("ci.json")).toEqual(["tests/a.test.ts", "tests/slow.test.sh"]);
+		// With the measured table after it, the 300 s suite is known and deferred.
+		expect(plan("ci.json", "measured.json")).toEqual(["tests/a.test.ts"]);
+		// A missing table is skipped, not fatal.
+		expect(plan("ci.json", "absent.json", "measured.json")).toEqual(["tests/a.test.ts"]);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

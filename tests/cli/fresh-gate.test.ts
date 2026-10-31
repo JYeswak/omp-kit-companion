@@ -942,7 +942,7 @@ test.skipIf(!AMPLE)("CIGATE1 wall budget: past the budget the nearest tests run 
 		const partial = runFocused(fx, source, archive, "lib/mod.ts\ntests/cli/mod3.test.ts");
 		expect(partial.code).toBe(0);
 		expect(partial.out).toContain("affected-tests plan: run 1, defer 2");
-		expect(partial.out).toContain("focused: deferred tests/cli/mod.test.ts (over the 5 s wall budget); CI runs it");
+		expect(partial.out).toContain("focused: deferred tests/cli/mod.test.ts (over the 5 s wall budget); the release's full suite runs it");
 		expect(partial.out).toContain("FRESH-GATE: VERDICT PARTIAL files=1 ran=1 deferred=tests/cli/mod.test.ts,tests/cli/mod2.test.ts: CI runs the deferred files");
 		delete fx.env.FRESH_GATE_TEST_BUDGET_SECS;
 		const full = runFocused(fx, source, archive, "lib/mod.ts");
