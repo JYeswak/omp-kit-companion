@@ -73,6 +73,36 @@ def _git_optional(repo: str, args: list[str]) -> bytes | None:
     return stdout if returncode == 0 else None
 
 
+def _head_commit(repo: str) -> str | None:
+    returncode, stdout, stderr = _git_run(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+    if returncode == 0:
+        revision = stdout.decode("ascii", "replace").strip()
+        if not revision:
+            raise CheckError("HEAD resolved to an empty commit id")
+        return revision
+    if returncode != 1:
+        detail = stderr.decode("utf-8", "replace").strip()
+        raise CheckError(f"git rev-parse --verify HEAD^{{commit}} exited {returncode}: {detail}")
+
+    symbolic_code, symbolic, symbolic_stderr = _git_run(repo, ["symbolic-ref", "--quiet", "HEAD"])
+    if symbolic_code != 0:
+        detail = symbolic_stderr.decode("utf-8", "replace").strip()
+        raise CheckError(f"HEAD does not resolve to a commit: {detail}")
+    reference = symbolic.decode("utf-8", "replace").strip()
+    if not reference:
+        raise CheckError("HEAD has an empty symbolic reference")
+
+    reference_code, _, reference_stderr = _git_run(
+        repo, ["show-ref", "--verify", "--quiet", reference]
+    )
+    if reference_code == 1:
+        return None
+    if reference_code != 0:
+        detail = reference_stderr.decode("utf-8", "replace").strip()
+        raise CheckError(f"git show-ref --verify {reference} exited {reference_code}: {detail}")
+    raise CheckError(f"HEAD reference {reference} exists but does not resolve to a commit")
+
+
 def _in_scope(path: str) -> bool:
     parts = path.split("/")
     if not parts or parts[0] not in SCOPE_ROOTS or any(part in TEST_DIRS for part in parts):
@@ -533,7 +563,11 @@ def _check_observed(
 def _check_staged(repo: str) -> int:
     old_raw = _tree_blob(repo, "HEAD", BASELINE_PATH)
     bootstrap = old_raw is None
-    old_counts = _tree_counts(repo, "HEAD") if bootstrap else _read_baseline(old_raw, "HEAD")
+    if bootstrap:
+        head = _head_commit(repo)
+        old_counts = _tree_counts(repo, head) if head is not None else {}
+    else:
+        old_counts = _read_baseline(old_raw, "HEAD")
     new_raw = _index_blob(repo, BASELINE_PATH)
     if bootstrap and new_raw is None:
         new_counts = old_counts

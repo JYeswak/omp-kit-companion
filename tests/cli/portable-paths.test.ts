@@ -105,6 +105,16 @@ async function newPrecommitRepo(name: string, includeBaseline = true): Promise<s
 	return repo;
 }
 
+async function newUnbornPrecommitRepo(name: string): Promise<string> {
+	const repo = join(scratch.path, name);
+	mkdirSync(join(repo, "extensions"), { recursive: true });
+	await okay(["git", "init", "-q"], repo);
+	await gitOkay(repo, "config", "user.email", "portable-paths@example.invalid");
+	await gitOkay(repo, "config", "user.name", "Portable Paths Test");
+	await okay(["sh", join(repoRoot, "scripts", "install-commit-msg-bead.sh"), repo], repo);
+	return repo;
+}
+
 async function newPrepushRepo(name: string, includeBaseline = true): Promise<string> {
 	const repo = join(scratch.path, name);
 	mkdirSync(join(repo, "scripts"), { recursive: true });
@@ -187,6 +197,22 @@ test("gates: baseline-less repositories admit clean changes without losing the r
 	writeFileSync(join(repo, "extensions", "bad.ts"), 'export const bad = "/Users/josh/x";\n');
 	await gitOkay(repo, "add", "--", "extensions/bad.ts");
 	expectRefusal(await git(repo, "commit", "-m", "[test] reject new baseline-less path"), "extensions/bad.ts:1");
+}, 120_000);
+
+test("gates: unborn baseline-less repositories admit safe first commits and reject machine paths", async () => {
+	const cleanRepo = await newUnbornPrecommitRepo("precommit-unborn-clean");
+	writeFileSync(join(cleanRepo, "extensions", "clean.ts"), "export const clean = true;\n");
+	await gitOkay(cleanRepo, "add", "--", "extensions/clean.ts");
+	const accepted = await git(cleanRepo, "commit", "-m", "[test] clean unborn baseline-less commit");
+	if (accepted.rc !== 0) throw new Error(`unborn clean first commit failed\n${output(accepted)}`);
+
+	const badRepo = await newUnbornPrecommitRepo("precommit-unborn-bad");
+	writeFileSync(join(badRepo, "extensions", "bad.ts"), 'export const bad = "/Users/josh/x";\n');
+	await gitOkay(badRepo, "add", "--", "extensions/bad.ts");
+	const rejected = await git(badRepo, "commit", "-m", "[test] reject unborn machine path");
+	expectRefusal(rejected, "extensions/bad.ts:1");
+	const head = await git(badRepo, "rev-parse", "--verify", "HEAD^{commit}");
+	expect(head.rc).not.toBe(0);
 }, 120_000);
 
 test("gates: pre-commit rejects shipped local paths and exempts tests", async () => {
