@@ -113,8 +113,11 @@ git -C "$R" add ok.py
 hook="$R/.git/hooks/hooks.d/pre-commit"
 cp "$hook/pysafe_check.py" "$TMP/pysafe_check.py.keep"
 printf 'import signal, subprocess, sys, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\np = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)"], stdin=subprocess.DEVNULL)  # pysafe: planted hang\nopen(sys.argv[0] + ".pid", "w").write(str(p.pid))\ntime.sleep(60)\n' > "$hook/pysafe_check.py"
+hung_start=$(date +%s)
 out=$(cd "$R" && PYSAFE_GATE_TIMEOUT=2 git commit -q -m "[test] hung checker" 2>&1)
 rc=$?
+hung_elapsed=$(($(date +%s) - hung_start))
+printf 'hung-checker-bounded section elapsed: %ss\n' "$hung_elapsed"
 check "$rc" "1" "hung-checker-refused" "$out" "exceeded 2 s and was killed"
 hung_pid=$(cat "$hook/pysafe_check.py.pid")
 sleep 1
