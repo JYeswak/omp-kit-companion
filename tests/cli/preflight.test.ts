@@ -6,6 +6,7 @@ import { preflightBead, preflightCommit } from "../../src/preflight.ts";
 import { admitClaimCut } from "../../src/claim-cut.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { callerSeat, defaultRunner } from "../../src/scratch.ts";
 
 const base = ownedTmp("preflight-test").path;
 
@@ -204,7 +205,11 @@ async function nativeFixtureRoot(label: string): Promise<{ dir: string; capabili
 	if (!dir || !capability) throw new Error(`omp-kit scratch new printed no dir/capability; child envelope: ${childEnvelope}`);
 	const owner: unknown = JSON.parse(readFileSync(join(dir, ".owner"), "utf8"));
 	const agent: unknown = owner !== null && typeof owner === "object" && "agent" in owner ? owner.agent : null;
-	if (typeof agent !== "string" || agent.length === 0) throw new Error(`fixture root ${dir} lacks agent-attributed ownership; read-only guards cannot admit it`);
+	// scratch new records agent+session only as a pair, and the session comes from an omp lease in the caller's
+	// process ancestry. Off a seat (CI, or the release verdict a push starts in its own session) there is no lease,
+	// no read-only guard runs, and an unattributed owner is correct; under a seat a missing agent is the defect.
+	if ((typeof agent !== "string" || agent.length === 0) && callerSeat(defaultRunner).sessions.length > 0)
+		throw new Error(`fixture root ${dir} lacks agent-attributed ownership; read-only guards cannot admit it`);
 	return { dir, capability };
 }
 async function releaseFixtureRoot(root: { dir: string; capability: string }): Promise<void> {
