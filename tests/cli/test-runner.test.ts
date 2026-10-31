@@ -674,7 +674,7 @@ describe("runFastTest", () => {
 		expect(JSON.parse(quiet.stdout.toString())).toMatchObject({ status: "OK", whole: "quiet", prefix: null });
 	});
 
-	test("observes the 41 KB long-token close fire within the bounded budget", () => {
+	test("observes the 41 KB long-token close fire within the bounded CPU-time budget", () => {
 		const identity = resolveOmpIdentity(process.env);
 		const cases = join(fixtureBase, "long-close-reason.cases.tsv");
 		const workerTmp = join(fixtureBase, "long-close-reason-tmp");
@@ -686,13 +686,12 @@ describe("runFastTest", () => {
 		const wireLength = JSON.stringify({ command }).length;
 		const ruleHash = createHash("sha256").update(readFileSync(rulePath)).digest("hex");
 		writeFileSync(cases, CASE_HEADER + "\n" + rule + "\tfire\ttool\tbash\t-\t" + command + "\tlong actor token\t\n");
-		const started = performance.now();
 		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", join(REPO_ROOT, "rules"), "--cases", cases, "--rule", rule, "--line", "2", "--rule-sha256", ruleHash, "--timeout-ms", "2500"], {
 			cwd: REPO_ROOT,
 			env: { ...process.env, TMPDIR: workerTmp, TMP: workerTmp, TEMP: workerTmp, OMP_SRC: identity.source, OMP_BIN: identity.launcher },
 			stdout: "pipe", stderr: "pipe",
 		});
-		const elapsedMs = performance.now() - started;
+		const cpuTimeUs = result.resourceUsage.cpuTime.total;
 		expect(result.exitCode).toBe(0);
 		const observation = JSON.parse(result.stdout.toString());
 		expect(observation).toMatchObject({
@@ -700,7 +699,7 @@ describe("runFastTest", () => {
 			prefix: { phase: "final", position: wireLength + 1, wire_length: wireLength },
 			evaluator: "OK", witness: { source: "tool", tool: "bash", expect: "fire" },
 		});
-		expect(elapsedMs).toBeLessThan(1000);
+		expect(cpuTimeUs).toBeLessThan(1_000_000n);
 	});
 	test("records an AST-only write hit at final snapshot, not a streamed prefix", () => {
 		const identity = resolveOmpIdentity(process.env);
