@@ -498,8 +498,21 @@ for sig in (signal.SIGINT, signal.SIGQUIT):
 os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 		}
 		failed=0
+		# GATESPEED1 (ompkit-774u.71): the bun stage runs in the background while the shell and python
+		# stages run, instead of before them. Measured 2026-10-31 (tree 30b6d992, main role): the suite
+		# used 3,071 s of CPU in about 1,500 s of wall, so it is wait-bound, not CPU-bound, and the
+		# three stages ran back to back (bun 4 workers, shell 775 s at 5 jobs, python 271 s serial).
+		# Bun's output stays in $BUN_OUT and its counts in $bun_stage until it is joined below; only
+		# the order of blocks in the log changes, and the status file is read by key, not by order.
+		bun_bg=""
+		bun_rc_file="$METRICS_DIR/bun.rc"
+		# stop_bun: an early exit from the shell stage must not leave the background bun stage running.
+		stop_bun() {
+			[ -n "$bun_bg" ] || return 0
+			kill_tree "$bun_bg" TERM
+			wait "$bun_bg" 2>/dev/null || :
+		}
 		if [ "$bun_count" -gt 0 ]; then
-			bun_rc=0
 			bun_workers=$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers) || exit 1
 			case "$bun_workers" in ''|*[!0-9]*|0) exit 1 ;; esac
 			[ "$bun_workers" -le "$bun_count" ] || bun_workers=$bun_count
@@ -507,20 +520,17 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 			bun_stage="$METRICS_DIR/bun.stage"
 			bun_config_path=${bun_config#--config=}
 			[ -n "$bun_config_path" ] || bun_config_path=/dev/null
-			dfl nice -n 10 python3 "$SCRIPT_DIR/suite-metrics.py" stage \
-				--runner bun --records "$METRICS_DIR" --cwd "$ARCHIVE_DIR" --tree "$tree" \
-				--summary "$bun_stage" --bun-config "$bun_config_path" \
-				--workers "$bun_workers" --deadline "$TIMEOUT_SECS" $kept_bun \
-				>"$BUN_OUT" 2>&1 || bun_rc=$?
-			[ -f "$bun_stage" ] || exit 2
-			b_counts=$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print(v["test_count"],v["test_failures"])' "$bun_stage") || exit 2
-			# Values come from the runner-owned numeric summary, never child log markers.
-			# shellcheck disable=SC2086
-			set -- $b_counts
-			b_tests=$1; b_failed=$2
-			cat "$BUN_OUT"
-			append_suite_status "BUN rc=$bun_rc" "BUN_RAN $b_tests" "BUN_FAIL $b_failed"
-			[ "$bun_rc" -eq 0 ] || failed=1
+			rm -f "$bun_rc_file"
+			(
+				b_rc=0
+				dfl nice -n 10 python3 "$SCRIPT_DIR/suite-metrics.py" stage \
+					--runner bun --records "$METRICS_DIR" --cwd "$ARCHIVE_DIR" --tree "$tree" \
+					--summary "$bun_stage" --bun-config "$bun_config_path" \
+					--workers "$bun_workers" --deadline "$TIMEOUT_SECS" $kept_bun \
+					>"$BUN_OUT" 2>&1 || b_rc=$?
+				echo "$b_rc" >"$bun_rc_file"
+			) &
+			bun_bg=$!
 		fi
 		# FULLSUITEPAR1 (ompkit-9t6f2): SHELL_JOBS workers share the shell suites. A worker claims the
 		# next unclaimed suite in sorted order (mkdir is atomic), runs it under that suite's own owned
@@ -529,12 +539,12 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 		# kill_tree reaches every running suite. When all workers are done, each suite's output and its
 		# GREEN/RED line join the log in sorted order, as the serial loop wrote them.
 		if [ "$shell_count" -gt 0 ]; then
-			if [ -e "$timeout_mark" ]; then exit 2; fi
+			if [ -e "$timeout_mark" ]; then stop_bun; exit 2; fi
 			shell_t0=$(date +%s)
 			i=0
 			for suite in $kept_shell; do
 				i=$((i + 1))
-				kitlib_tmp suite_tmp full-suite-shell || exit 1
+				kitlib_tmp suite_tmp full-suite-shell || { stop_bun; exit 1; }
 				eval "suite_tmp_$i=\$suite_tmp"
 			done
 			shell_worker() {
@@ -596,7 +606,7 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 			echo "full-suite: shell stage: $shell_count suites, $SHELL_JOBS at a time, $(($(date +%s) - shell_t0))s"
 			# Suites without an exit code (a worker died, or the deadline passed) leave the run
 			# incomplete: exit outside 0|1 so the verdict process refuses it.
-			if [ "$lost" -ne 0 ]; then exit 2; fi
+			if [ "$lost" -ne 0 ]; then stop_bun; exit 2; fi
 			rm -rf "$SHELL_DIR"
 		fi
 		p_i=0
@@ -614,6 +624,20 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 				failed=1
 			fi
 		done
+		if [ -n "$bun_bg" ]; then
+			wait "$bun_bg" 2>/dev/null || :
+			bun_rc=$(cat "$bun_rc_file" 2>/dev/null) || bun_rc=
+			case "$bun_rc" in ''|*[!0-9]*) exit 2 ;; esac
+			[ -f "$bun_stage" ] || exit 2
+			b_counts=$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print(v["test_count"],v["test_failures"])' "$bun_stage") || exit 2
+			# Values come from the runner-owned numeric summary, never child log markers.
+			# shellcheck disable=SC2086
+			set -- $b_counts
+			b_tests=$1; b_failed=$2
+			cat "$BUN_OUT"
+			append_suite_status "BUN rc=$bun_rc" "BUN_RAN $b_tests" "BUN_FAIL $b_failed"
+			[ "$bun_rc" -eq 0 ] || failed=1
+		fi
 		exit "$failed"
 	) >>"$SUITE_OUT" 2>&1
 }
