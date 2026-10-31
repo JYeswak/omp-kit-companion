@@ -611,7 +611,11 @@ def _check_range(repo: str, base: str, head: str) -> int:
 
 
 def _check_head(repo: str, head: str) -> int:
-    _git(repo, ["rev-parse", "--verify", f"{head}^{{commit}}"])
+    if head == "HEAD":
+        if _head_commit(repo) is None:
+            return 0
+    else:
+        _git(repo, ["rev-parse", "--verify", f"{head}^{{commit}}"])
     baseline = _tree_blob(repo, head, BASELINE_PATH)
     if baseline is None:
         return 0

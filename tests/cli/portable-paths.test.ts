@@ -201,6 +201,11 @@ test("gates: baseline-less repositories admit clean changes without losing the r
 
 test("gates: unborn baseline-less repositories admit safe first commits and reject machine paths", async () => {
 	const cleanRepo = await newUnbornPrecommitRepo("precommit-unborn-clean");
+	const emptyHead = await command(
+		["python3", join(repoRoot, "scripts", "portable_paths_check.py"), "--repo", cleanRepo, "--head", "HEAD"],
+		cleanRepo,
+	);
+	expect(emptyHead.rc).toBe(0);
 	writeFileSync(join(cleanRepo, "extensions", "clean.ts"), "export const clean = true;\n");
 	await gitOkay(cleanRepo, "add", "--", "extensions/clean.ts");
 	const accepted = await git(cleanRepo, "commit", "-m", "[test] clean unborn baseline-less commit");
