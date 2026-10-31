@@ -1,0 +1,19 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_2c8c4c3b216358f4207151d5fb5eb1c879d8ab47ffcd6ff153e5e8d20e719625",
+ "limitations": [
+  "Author test evidence only; original claim full-run intermittence cause unproven; parent55 full verdict remains NONPASS/incomplete; no release, install or live proof; ripwire quality-delta rc2 for short-horizon churn, not suppressed."
+ ],
+ "operation": "CUTCLAIM1-R original reader contract replay",
+ "parameters": {
+  "base_commit": "98c5d419240d49dbdcb4ba4a97a344a2bf5e0cd4",
+  "decisive_output": "{\"actual_cli\": [\"{\\\"act\\\":\\\"close\\\",\\\"rc\\\":0,\\\"ok\\\":true,\\\"snapshot\\\":\\\"bead:reader-smoke\\\",\\\"codes\\\":[\\\"REVIEWER_GATE\\\",\\\"TRANSITION_COMMENT\\\"]}\", \"{\\\"act\\\":\\\"claim\\\",\\\"rc\\\":0,\\\"ok\\\":true,\\\"snapshot\\\":\\\"bead:reader-smoke\\\",\\\"codes\\\":[\\\"CLAIM_CUT_ADMITTED\\\"]}\"], \"before\": {\"3100ms_close_regression\": \"UNJUDGED timeout at 3s\", \"namespace_regression\": \"NOT_IN_REVIEW; expected admission\"}, \"claim_fixture_case_limit_ms\": 40000, \"claim_fixture_child_limit_s\": 15, \"claim_intermittence\": \"original explicitDB/duplicate full-run failures not reproduced in isolated or exact-copy execution; cause not proven; shim semantics unchanged, failure output exposed\", \"claim_limit_s\": 3, \"clean_copy\": {\"all_rc\": {\"claim-native\": 0, \"claim-shell\": 0, \"preflight-all\": 0, \"preflight-regressions\": 0, \"verify-original\": 0}, \"base\": \"98c5d419240d49dbdcb4ba4a97a344a2bf5e0cd4\", \"git_init_history_free\": true, \"overlay\": [\"src/preflight.ts\", \"tests/cli/preflight.test.ts\", \"tests/cli/br-shim.test.ts\", \"changelog.d/ompkit-774u.55.1.md\"], \"preflight\": \"25 pass 0 fail; 145 assertions\", \"shim_native\": \"16 pass 0 fail; 58 assertions\", \"shim_shell\": \"89 pass 0 fail\", \"verify\": \"39 pass 0 fail; 222 assertions\"}, \"retained_nonpass\": {\"parent_55_full_verdict\": \"NONPASS/incomplete, no cached GREEN; no unchanged retry\", \"shared_checkout_verify\": \"35 pass 4 fail 4 errors; four original 5000ms cases\"}, \"scope\": \"non-claim PATH reads restored to existing 60s and where 30s; no claim predicate, assertion outcome, retry or timeout relaxed\", \"selfcheck\": {\"fragments\": 0, \"imports\": 0, \"kitlib\": 0, \"pysafe\": 0, \"readme\": 0, \"regexploit\": 0, \"sources\": 0, \"tempsafe\": 0}}",
+  "subject_sha256": "{\"changelog.d/ompkit-774u.55.1.md\": \"4ec14bbd9f9971be068f803738b4522458c2a36fe2b4350c0e071c98063c7ff4\", \"src/preflight.ts\": \"97dade1592878cd2abf0001cd388d6662c5f1feedcc0a33435a9af5fa5895db1\", \"tests/cli/br-shim.test.ts\": \"0418e312e58c753599915fa79cf29cfad12ae410fc7711c80603c333ad604128\", \"tests/cli/preflight.test.ts\": \"7a49950dda75b1b6e8ed67d77b074ddfbd22b675318934aa9ea92c069abe33ed\"}"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "bytes": 1982,
+  "sha256": "b5deb68a4ea5b127489090f9fa44a2e3073cfb9c9ed72ed6d52eb5f6ae89063d"
+ }
+}

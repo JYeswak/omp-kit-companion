@@ -185,7 +185,7 @@ test("CUTCLAIM1 explicit --db binds the actual tracker rather than cwd or the fi
 	expect(denied.output).toContain("CLAIM_OUT_OF_CUT");
 	expect(denied.mutations).toBe("");
 	const allowed = await claim({ explicitDb: true, id: "k-1" });
-	expect(allowed.rc).toBe(0);
+	expect(allowed.rc, allowed.output).toBe(0);
 	expect(allowed.mutations).toContain('"id":"k-1"');
 }, CASE_BUDGET_MS);
 
@@ -220,7 +220,7 @@ test("CUTCLAIM1 malformed nonblocking refusal is rejected and disabling consiste
 for (const authority of ["blocking-admitted", "duplicate"] as const) {
 	test(`CUTCLAIM1 ${authority} cut verdict is malformed and cannot admit`, async () => {
 		const result = await claim({ authority, id: "k-1" });
-		expect(result.rc).toBe(4);
+		expect(result.rc, result.output).toBe(4);
 		expect(result.output).toContain("CLAIM_CUT_UNKNOWN");
 		expect(result.mutations).toBe("");
 	}, CASE_BUDGET_MS);

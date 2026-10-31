@@ -112,6 +112,51 @@ test("preflight close|in-review|claim: every tracker predicate in one envelope, 
 	expect(gone.findings[0]?.code).toBe("UNJUDGED");
 });
 
+test("non-claim preflight honors the PATH tracker even when BR_REAL names a different tracker", async () => {
+	const dir = join(base, "non-claim-namespace");
+	const bin = join(dir, "bin");
+	mkdirSync(bin, { recursive: true });
+	const data = join(dir, "bead.json");
+	writeFileSync(join(bin, "br"), `#!/bin/sh\ncat ${JSON.stringify(data)}\n`, { mode: 0o755 });
+	const other = join(dir, "other-br");
+	writeFileSync(other, '#!/bin/sh\nprintf \'{"id":"kit-1","status":"open","labels":[]}\'\n', { mode: 0o755 });
+	const env = { PATH: `${bin}:${process.env.PATH ?? ""}`, BR_REAL: other };
+	for (const act of ["close", "in-review"] as const) {
+		writeFileSync(data, JSON.stringify({
+			id: "kit-1", status: act === "close" ? "in_review" : "in_progress", assignee: "Author",
+			updated_at: "2026-10-31T02:00:00Z", labels: [],
+			acceptance_criteria: "- [x] [a] [build] `true` -> rc 0",
+		}));
+		const result = await preflightBead(act, dir, "kit-1", { actor: "Peer", env });
+		expect(result.ok, renderEnvelope(result)).toBe(true);
+		expect(result.snapshot).toBe("bead:2026-10-31T02:00:00Z");
+	}
+});
+
+test("close preflight retains its non-claim budget for a tracker response beyond three seconds", async () => {
+	const dir = join(base, "non-claim-budget");
+	const bin = join(dir, "bin");
+	mkdirSync(bin, { recursive: true });
+	const bead = {
+		id: "kit-1", status: "in_review", assignee: "Author", updated_at: "2026-10-31T02:00:00Z", labels: [],
+		acceptance_criteria: "- [x] [a] [build] `true` -> rc 0",
+	};
+	// This child must cross the real OS subprocess deadline; parent fake timers cannot drive its clock.
+	writeFileSync(join(bin, "br"), `#!${process.execPath}
+if (process.argv[2] === "show") {
+	await Bun.sleep(3100);
+	console.log(${JSON.stringify(JSON.stringify(bead))});
+} else {
+	console.log("database: fixture");
+}
+`, { mode: 0o755 });
+	const result = await preflightBead("close", dir, "kit-1", {
+		actor: "Peer", env: { PATH: `${bin}:${process.env.PATH ?? ""}`, BR_REAL: "", BEADS_DB: "", BEADS_DIR: "" },
+	});
+	expect(result.ok, renderEnvelope(result)).toBe(true);
+	expect(result.snapshot).toBe("bead:2026-10-31T02:00:00Z");
+}, 10000);
+
 const hasBr = Bun.which("br") !== null;
 const hasOmpKit = Bun.which("omp-kit") !== null;
 const kitRoot = new URL("../../", import.meta.url).pathname;
