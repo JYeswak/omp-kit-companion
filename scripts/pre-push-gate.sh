@@ -287,6 +287,7 @@ fi
 # Everything from here to the gate runs in gate_body, whose whole output (every checker, not only
 # fresh-gate) streams to the terminal and to archive_root/gate.log; a red at any step keeps the log.
 gate_body() {
+gate_t0=$(date +%s)
 archive="$archive_root/tree"
 git -C "$ROOT" archive "$local_sha" | tar -xf - -C "$archive"
 set -- --archive-dir "$archive"
@@ -544,6 +545,14 @@ ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir) || { printf 'pre-push-
 # below runs only the complement. The report lives beside the archive, inside this gate's owned dir.
 focused_passed="$archive_root/focused-passed.txt"
 rm -f "$focused_passed"
+# GATESPEED1 (J-2026-10-31-09): the whole push stays under 4 minutes. The focused tests get what is
+# left of a 210 s push budget (30 s minimum) after the stages above; the planner defers the rest by
+# name to the release's full suite. FRESH_GATE_TEST_BUDGET_SECS set by the caller wins.
+gate_elapsed=$(($(date +%s) - gate_t0))
+focus_budget=$((${PRE_PUSH_BUDGET_SECS:-210} - gate_elapsed))
+[ "$focus_budget" -ge 30 ] || focus_budget=30
+printf 'push budget: %ss used before the focused stage; focused budget %ss\n' "$gate_elapsed" "${FRESH_GATE_TEST_BUDGET_SECS:-$focus_budget}"
+FRESH_GATE_TEST_BUDGET_SECS="${FRESH_GATE_TEST_BUDGET_SECS:-$focus_budget}" \
 FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" FRESH_GATE_PASSED_IN="$archive_root/contracts-passed.txt" \
 	sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
 if [ "${PRE_PUSH_FULL_SUITE:-release}" != push ]; then

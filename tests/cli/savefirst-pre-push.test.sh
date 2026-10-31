@@ -180,7 +180,7 @@ push_fixture() {
 	SAVEFIRST_FIXTURE_REPO="$sf_repo" HOME="$sf_repo/home" XDG_CONFIG_HOME="$sf_repo/config" \
 		XDG_STATE_HOME="$sf_repo/state" XDG_DATA_HOME="$sf_repo/data" XDG_CACHE_HOME="$sf_repo/cache" \
 		TMPDIR="$TMP" OMP_KIT_DISK_OBSERVER="" OMP_KIT_HEAVY_FAKE_LOAD1=0.5 \
-		FULL_SUITE_TIMEOUT_SECS=60 AGENT_NAME=SaveFirstProbe TMUX_PANE="" PATH="$sf_bin:$PATH" \
+		FULL_SUITE_TIMEOUT_SECS=60 PRE_PUSH_FULL_SUITE=push AGENT_NAME=SaveFirstProbe TMUX_PANE="" PATH="$sf_bin:$PATH" \
 		git -C "$sf_repo" push origin main > "$sf_outfile" 2>&1 || sf_rc=$?
 	sf_after=$(git --git-dir="$sf_remote" rev-parse --verify refs/heads/main 2>/dev/null) || sf_after=
 	printf 'SAVEFIRST1 fixture gate %s push_rc=%s base=%s head=%s origin_after=%s\n' \
