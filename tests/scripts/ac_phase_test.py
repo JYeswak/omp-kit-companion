@@ -378,6 +378,25 @@ class InReviewCli(unittest.TestCase):
         rc, err = self.run_gate(bead, pregrade_record(bead), argv=["update", "acp-1", "--status=in_review"])
         self.assertEqual((rc, err), (0, ""))
 
+    def test_pregrade_requires_bound_candidate_commit(self) -> None:
+        bead = base_bead()
+        for candidate in (None, "", "a" * 6, "g" * 40, "a" * 41, 7):
+            with self.subTest(candidate=candidate):
+                record = pregrade_record(bead, verdict="PASS", candidate_commit=candidate)
+                err = self.assert_refused("PREGRADE_CANDIDATE_UNBOUND", bead, record)
+                self.assertIn("/omp-kit/pregrade/acp-1.json", err)
+
+        for candidate in ("A1B2C3D", "A" * 40):
+            with self.subTest(candidate=candidate):
+                record = pregrade_record(bead, verdict="WAITING", candidate_commit=candidate)
+                self.assertEqual(self.run_gate(bead, record), (0, ""))
+
+        invalid_nonadmitting = pregrade_record(
+            bead, verdict="FAIL", candidate_commit=None
+        )
+        err = self.assert_refused("PREGRADE_NOT_PASSING", bead, invalid_nonadmitting)
+        self.assertNotIn("PREGRADE_CANDIDATE_UNBOUND", err)
+
     def test_planted_pregrade_missing(self) -> None:
         bead = base_bead()
         err = self.assert_refused("PREGRADE_MISSING", bead, None)

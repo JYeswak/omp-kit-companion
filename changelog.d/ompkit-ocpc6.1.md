@@ -1,0 +1,1 @@
+- Reject in-review admission when a passing pregrade does not identify a valid candidate commit.

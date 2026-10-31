@@ -271,6 +271,16 @@ def pregrade_refusals(
     if verdict not in ADMITTING_VERDICTS:
         out.append(("PREGRADE_NOT_PASSING",
                     f"pregrade verdict {verdict!r}; in_review needs PASS or WAITING"))
+
+    candidate_commit = record.get("candidate_commit")
+    if verdict in ADMITTING_VERDICTS and (
+        not isinstance(candidate_commit, str)
+        or not 7 <= len(candidate_commit) <= 40
+        or any(char not in "0123456789abcdefABCDEF" for char in candidate_commit)
+    ):
+        out.append(("PREGRADE_CANDIDATE_UNBOUND",
+                    f"pregrade record {path} has no valid 7-40 character "
+                    "hexadecimal candidate commit"))
     at = parse_ts(record.get("at"))
     if at is None or now - at > PREGRADE_MAX_AGE or at - now > PREGRADE_MAX_SKEW:
         out.append(("PREGRADE_STALE",
