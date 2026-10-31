@@ -442,6 +442,45 @@ do
 	fi
 	contract_run="$contract_run $checker_test"
 done
+# GATESPEED1 (J-2026-10-31-09, under 1 minute): reached contracts are planned against what is left
+# of the push budget, like the focused tests, and the rest are deferred by name to the release's full
+# suite. Mandatory, whatever the budget: a contract whose own test file changed, and the gate's own
+# two contracts when a gate script changed, so a broken gate can never judge the pushes after it.
+if [ "$contract_selected" = 1 ] && [ -n "$contract_run" ]; then
+	contract_mandatory=""
+	contract_optional=""
+	for checker_test in $contract_run; do
+		if printf '%s\n' "$changed" | grep -Fqx "tests/cli/$checker_test"; then
+			contract_mandatory="$contract_mandatory $checker_test"
+		elif { [ "$checker_test" = pre-push-gate.test.sh ] || [ "$checker_test" = full-suite-verdict-incomplete.test.sh ]; } \
+			&& printf '%s\n' "$changed" | grep -Eq '^scripts/(pre-push-gate\.sh|fresh-gate\.sh|full-suite-verdict\.sh|full-suite-verdict-store\.py|suite-metrics\.py|affected-tests\.ts)$'; then
+			contract_mandatory="$contract_mandatory $checker_test"
+		else
+			contract_optional="$contract_optional $checker_test"
+		fi
+	done
+	contract_budget=$((${PRE_PUSH_BUDGET_SECS:-55} - ($(date +%s) - gate_t0) - 30))
+	contract_kept=""
+	if [ -n "$contract_optional" ] && [ "$contract_budget" -ge 1 ]; then
+		set -- --timings "$base_archive/.github/core-test-timings.json"
+		if contract_tables=$(python3 "$base_archive/scripts/full-suite-verdict-store.py" timings --repo "$ROOT" 2>/dev/null); then
+			set -- "$@" --timings "$contract_tables/script-test-timings.json"
+		fi
+		for checker_test in $contract_mandatory; do set -- "$@" --changed-file "tests/cli/$checker_test"; done
+		set -- "$@" --
+		for checker_test in $contract_mandatory $contract_optional; do set -- "$@" "tests/cli/$checker_test"; done
+		contract_kept=$(bun run --no-env-file --config=/dev/null "$base_archive/scripts/affected-tests.ts" --plan \
+			--budget-secs "$contract_budget" --workers 12 "$@" 2>/dev/null) || contract_kept=""
+	fi
+	contract_run="$contract_mandatory"
+	for checker_test in $contract_optional; do
+		if printf '%s\n' "$contract_kept" | grep -Fqx "tests/cli/$checker_test"; then
+			contract_run="$contract_run $checker_test"
+		else
+			printf 'DEFERRED checker-contract %s: over the push budget; the release full suite runs it\n' "$checker_test"
+		fi
+	done
+fi
 # GATESPEED1: the selected contracts run at the same time, each to its own record and output, and
 # are reported in list order; any red refuses the push after all have finished. The ones that pass
 # are handed to fresh-gate, which does not run them again in the focused stage.
@@ -545,12 +584,13 @@ ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir) || { printf 'pre-push-
 # below runs only the complement. The report lives beside the archive, inside this gate's owned dir.
 focused_passed="$archive_root/focused-passed.txt"
 rm -f "$focused_passed"
-# GATESPEED1 (J-2026-10-31-09): the whole push stays under 4 minutes. The focused tests get what is
-# left of a 210 s push budget (30 s minimum) after the stages above; the planner defers the rest by
-# name to the release's full suite. FRESH_GATE_TEST_BUDGET_SECS set by the caller wins.
+# GATESPEED1 (J-2026-10-31-09): a push takes under 1 minute. The focused tests get what is left of
+# a 55 s push budget after the stages above, less 15 s for fresh-gate's own judging (measured 12 s),
+# with a 15 s minimum; the planner defers the rest by name to the release's full suite.
+# PRE_PUSH_BUDGET_SECS or FRESH_GATE_TEST_BUDGET_SECS set by the caller wins.
 gate_elapsed=$(($(date +%s) - gate_t0))
-focus_budget=$((${PRE_PUSH_BUDGET_SECS:-210} - gate_elapsed))
-[ "$focus_budget" -ge 30 ] || focus_budget=30
+focus_budget=$((${PRE_PUSH_BUDGET_SECS:-55} - gate_elapsed - 15))
+[ "$focus_budget" -ge 15 ] || focus_budget=15
 printf 'push budget: %ss used before the focused stage; focused budget %ss\n' "$gate_elapsed" "${FRESH_GATE_TEST_BUDGET_SECS:-$focus_budget}"
 FRESH_GATE_TEST_BUDGET_SECS="${FRESH_GATE_TEST_BUDGET_SECS:-$focus_budget}" \
 FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" FRESH_GATE_PASSED_IN="$archive_root/contracts-passed.txt" \
