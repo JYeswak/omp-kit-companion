@@ -167,16 +167,28 @@ class LiveGates(unittest.TestCase):
         cls.br("init", "--prefix", "fx")
         # created_at is pinned by importing JSONL through native br, so the
         # post-cutover and legacy cases hold whatever the wall clock says.
-        def bead(bid: str, title: str, labels: list[str], at: str, deps=()) -> dict:
-            row = mk(bid, labels=labels, desc=DESC, acc=ACC, created_at=at,
-                     deps=[dep(bid, d) for d in deps], comments=[])
+        def bead(bid: str, title: str, labels: list[str], at: str, deps=(), desc: str = DESC) -> dict:
+            edges = [dep(bid, *d) if isinstance(d, tuple) else dep(bid, d) for d in deps]
+            row = mk(bid, labels=labels, desc=desc, acc=ACC, created_at=at, deps=edges, comments=[])
             row.update(title=title, updated_at=at, source_repo=".", created_by="GoalPathTest")
             row.pop("source_repo_path", None)
             return row
-        rows = [bead("fx-goal", "Release goal for the next train", ["kind:goal"], POST, ["fx-onpath.2"]),
+        rows = [bead("fx-goal", "Release goal for the next train", ["kind:goal"], POST,
+                     ["fx-onpath.2", "fx-mention", "fx-stray"]),
                 bead("fx-onpath.2", "Release gate checks the installed hooks", ["fixture"], POST),
                 bead("fx-loose", "Loose bead with no goal", ["fixture"], POST),
-                bead("fx-legacy", "Legacy bead with no goal", ["fixture"], PRE)]
+                bead("fx-legacy", "Legacy bead with no goal", ["fixture"], PRE),
+                # i-mention-edges: fx-mention names two beads whose only edges point AT it
+                # (incoming related and parent-child), the ompkit-9t6f2 shape.
+                bead("fx-mention", "Bead mentioning its linked peers", ["fixture"], POST,
+                     desc="WHAT: (a) a widget, see fx-peer and fx-kid. WHY: needed."),
+                bead("fx-peer", "Peer pointing at the mentioning bead", ["kind:intake"], POST,
+                     [("fx-mention", "related")]),
+                bead("fx-kid", "Child of the mentioning bead", ["kind:intake"], POST,
+                     [("fx-mention", "parent-child")]),
+                # Planted negative: a mention with no edge either way.
+                bead("fx-stray", "Bead mentioning an unlinked bead", ["fixture"], POST,
+                     desc="WHAT: (a) a widget, see fx-loose. WHY: needed.")]
         (cls.repo / ".beads" / "issues.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
         cls.br("sync", "--import-only")
@@ -203,12 +215,24 @@ class LiveGates(unittest.TestCase):
                            "--db", self.db, "--actor", "GoalPathTest"], 120, env=env, cwd=str(self.repo))
         return res.returncode, res.stdout.decode() + res.stderr.decode()
 
-    def update(self, bead_id: str) -> tuple[int, str]:
+    def update(self, bead_id: str, *edit: str) -> tuple[int, str]:
         env = dict(self.env, BR_UPDATE_REAL=REAL_BR, BR_UPDATE_PROJECT=str(self.repo),
                    BR_UPDATE_DB=self.db)
         res = run_bounded([sys.executable, str(SCRIPTS / "br-update-lint.py"), "update", bead_id,
-                           "--description", DESC + " Edited."], 120, env=env, cwd=str(self.repo))
+                           *(edit or ("--description", DESC + " Edited."))],
+                          120, env=env, cwd=str(self.repo))
         return res.returncode, res.stderr.decode()
+
+    def test_mention_with_incoming_edges_admitted_on_label_add(self) -> None:
+        rc, err = self.update("fx-mention", "--add-label", "needs-director")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("LINT_REFUSED", err)
+        self.assertNotIn("UNVERIFIED", err)
+
+    def test_mention_without_edge_refused_on_label_add(self) -> None:
+        rc, err = self.update("fx-stray", "--add-label", "needs-director")
+        self.assertEqual(rc, 4, err)
+        self.assertIn("i-mention-edges", err)
 
     def create_args(self, title: str, labels: str) -> list[str]:
         return ["--title", title, "-t", "task", "-l", labels,

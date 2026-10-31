@@ -203,6 +203,16 @@ def prospective(
             }
             for dep in (live.get("dependencies") or [])
         ],
+        # Incoming edges (`br show` dependents): i-mention-edges accepts a
+        # mention joined by an edge in either direction, so dropping these
+        # refused a bead whose mentioned peer points at it (ompkit-9t6f2).
+        "dependents": [
+            {
+                "id": dep.get("id", dep.get("issue_id")),
+                "type": dep.get("type", dep.get("dependency_type")),
+            }
+            for dep in (live.get("dependents") or [])
+        ],
     }
     if args.title is not None:
         bead["title"] = args.title
