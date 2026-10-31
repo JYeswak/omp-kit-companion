@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "bead": "ompkit-774u.64",
+  "candidate_commit": "c26f0dcf9feb10999ef771fda7fd712d5958643b",
+  "source_base": "cb1c71344fba2c375118791c4f080ba4bb15b543",
+  "acceptance": [
+    {
+      "criterion": "a",
+      "command": "bun test tests/cli/test-runner.test.ts -t 'long-token close fire'",
+      "exit_code": 0,
+      "result": "1 pass; 26 filtered; 0 fail; 3 expect() calls; test file 965ms",
+      "execution": "Clean archive from source_base with the two candidate test-file changes overlaid."
+    },
+    {
+      "criterion": "b",
+      "command": "nice -n 10 sh tests/cli/check-staged-pysafe.test.sh",
+      "exit_code": 0,
+      "result": "check-staged-pysafe: 14 pass 0 fail; wall time 67.09s",
+      "execution": "Same clean archive."
+    }
+  ],
+  "controls": {
+    "wall_stall": "2.01s wall sleep; 3904us CPU; passes the 1000000us CPU limit",
+    "extra_work": "1.2s CPU loop; 1217439us CPU; exceeds the 1000000us CPU limit"
+  },
+  "shellcheck": {
+    "version": "0.9.0",
+    "exit_code": 0
+  },
+  "private_index_gate_members": {
+    "kitlib": 0,
+    "tempsafe": 0,
+    "pysafe": 0,
+    "readme": 0,
+    "imports": 0,
+    "fragments": 0,
+    "sources": 0,
+    "regexploit": 0
+  },
+  "limitations": [
+    "No full declared-suite run; no published or installed-runtime claim."
+  ]
+}

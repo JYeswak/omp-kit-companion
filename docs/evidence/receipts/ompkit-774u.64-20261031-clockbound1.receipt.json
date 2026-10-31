@@ -1,0 +1,23 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_757321925545e25f7ff7dc8938965eef400b88a3a85652dcb910a6dca4e66154",
+ "limitations": [
+  "No full declared-suite run; no published or installed-runtime claim."
+ ],
+ "operation": "CLOCKBOUND1 build acceptance replay",
+ "parameters": {
+  "acceptance_a": "bun test long-token close fire: rc=0, 1 pass, 0 fail",
+  "acceptance_b": "check-staged-pysafe: rc=0, 14 pass, 0 fail",
+  "candidate_commit": "c26f0dcf9feb10999ef771fda7fd712d5958643b",
+  "private_index": "8 members: all rc=0",
+  "shellcheck": "v0.9.0: rc=0",
+  "source_base": "cb1c71344fba2c375118791c4f080ba4bb15b543"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 1313,
+  "path": "docs/evidence/receipts/ompkit-774u.64-20261031-clockbound1.result.json",
+  "sha256": "d85b8d06762e7788a8b0f805e5763ded0ab0d2dd6f51c22b425c9c8de3cd5cdd"
+ }
+}
