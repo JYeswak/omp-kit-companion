@@ -20,8 +20,7 @@ def refuse(message: str) -> None:
 
 
 for protected in ("GIT_DIR", "GIT_WORK_TREE", "BEADS_DB"):
-    if protected in os.environ:
-        refuse("caller " + protected + " is set")
+    os.environ.pop(protected, None)
 
 try:
     separator = sys.argv.index("--", 1)

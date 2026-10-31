@@ -81,10 +81,8 @@ case "$TIMEOUT_SECS" in ''|*[!0-9]*|0) fail "FULL_SUITE_TIMEOUT_SECS must be a p
 case "$SHELL_JOBS" in ''|*[!0-9]*|0) fail "FULL_SUITE_SHELL_JOBS must be a positive integer" ; exit 1 ;; esac
 # No suite may block on stdin (pre-push hooks inherit a pipe whose writer never closes).
 exec </dev/null
-# HERMETIC1: reject caller-supplied repository/tracker authority before probing Git or starting suites.
-if [ "${GIT_DIR+x}" = x ]; then echo "FULL-SUITE: REFUSED caller GIT_DIR is set" >&2; exit 1; fi
-if [ "${GIT_WORK_TREE+x}" = x ]; then echo "FULL-SUITE: REFUSED caller GIT_WORK_TREE is set" >&2; exit 1; fi
-if [ "${BEADS_DB+x}" = x ]; then echo "FULL-SUITE: REFUSED caller BEADS_DB is set" >&2; exit 1; fi
+# HERMETIC1-B: discard caller authority before Git probes and suite execution, not the requested verdict.
+unset GIT_DIR GIT_WORK_TREE BEADS_DB
 case "$JUDGE_ROLE" in base|main) ;; *) fail "--judge-role must be base or main"; exit 2 ;; esac
 
 command -v bun >/dev/null 2>&1 || { fail "bun is not on PATH; the full suite cannot run"; exit 1; }

@@ -102,27 +102,49 @@ run_verdict_with_envs() {
 	resolve_cache_paths || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
 }
 
-refusal_case() {
+inherited_authority_case() {
 	label=$1
-	name=$2
-	value_kind=$3
-	marker="$TMP/$label.ran"
-	rm -f "$marker"
 	mkrepo_begin "$label"
-	addfile tests/cli/fixture_test.py "from pathlib import Path
-Path('$marker').write_text('ran')"
+	caller_db="$TMP/$label.caller.db"
+	printf 'caller database sentinel\n' >"$caller_db"
+	cp "$caller_db" "$caller_db.before"
+	addfile tests/cli/fixture_test.py "import os
+from pathlib import Path
+inherited = os.environ.get('BEADS_DB')
+if inherited is not None:
+    Path(inherited).write_text('leaked tracker authority')
+for name in ('BEADS_DB', 'GIT_DIR', 'GIT_WORK_TREE'):
+    assert name not in os.environ, name
+print('HERMETIC1_B_PYTHON_UNSET', flush=True)"
+	addfile tests/cli/inherited.test.sh "set -eu
+test \"\${BEADS_DB+x}\" != x
+test \"\${GIT_DIR+x}\" != x
+test \"\${GIT_WORK_TREE+x}\" != x
+printf 'HERMETIC1_B_SHELL_UNSET\n'"
+	addfile tests/cli/inherited.test.ts 'import { expect, test } from "bun:test";
+test("inherited repository and tracker authority is absent", () => {
+  for (const name of ["BEADS_DB", "GIT_DIR", "GIT_WORK_TREE"]) {
+    expect(process.env[name]).toBeUndefined();
+  }
+  console.log("HERMETIC1_B_BUN_UNSET");
+});'
 	mkrepo_commit
-	case "$value_kind" in
-		git-dir) value="$repo/.git" ;;
-		work-tree) value="$repo" ;;
-		live-db) value="$KITROOT_DIR/.beads/beads.db" ;;
-		*) not_ok "unknown refusal fixture value $value_kind"; return 1 ;;
-	esac
-	run_verdict_with_env "$label" "$name" "$value"
-	if [ "$rc" -ne 0 ] && grep -F "FULL-SUITE: REFUSED caller $name is set" "$out" >/dev/null && [ ! -e "$marker" ]; then
-		ok "$name is named and no suite starts"
+	run_verdict_with_envs "$label" BEADS_DB="$caller_db" \
+		GIT_DIR="$TMP/not-a-git-directory" GIT_WORK_TREE="$TMP/not-a-work-tree"
+	if [ "$rc" -eq 0 ] && grep -F 'VERDICT PASS' "$out" >/dev/null \
+		&& grep -F 'HERMETIC1_B_PYTHON_UNSET' "$repo.cache/$tree.log" >/dev/null 2>&1 \
+		&& grep -F 'HERMETIC1_B_SHELL_UNSET' "$repo.cache/$tree.log" >/dev/null 2>&1 \
+		&& grep -F 'HERMETIC1_B_BUN_UNSET' "$repo.cache/$tree.log" >/dev/null 2>&1; then
+		ok "inherited Git/tracker bindings are discarded before Git and every suite reaches PASS"
 	else
-		not_ok "$name did not refuse before starting a suite (rc=$rc)"; cat "$out"
+		not_ok "inherited Git/tracker bindings refused or leaked instead of judging all suites (rc=$rc)"
+		cat "$out"
+		[ ! -f "$repo.cache/$tree.log" ] || cat "$repo.cache/$tree.log"
+	fi
+	if [ "$rc" -eq 0 ] && cmp -s "$caller_db.before" "$caller_db"; then
+		ok "a suite using inherited BEADS_DB cannot change the caller database"
+	else
+		not_ok "the completed suite did not prove the inherited caller database remains unchanged"
 	fi
 }
 
@@ -189,10 +211,8 @@ if [ -f "$cache/$tree.json" ] && grep -F '"verdict": "PASS"' "$cache/$tree.json"
 if grep -F 'FULLSUITELOG1-CONTROL ok' "$cache/$tree.log" >/dev/null 2>&1; then ok "complete run keeps the paired evidence log"; else not_ok "complete run has no paired evidence log"; fi
 if no_incomplete_log; then ok "complete run writes no incomplete log"; else not_ok "complete run wrote an incomplete log"; fi
 
-# HERMETIC1: caller Git/tracker authority is refused before an actual suite can start.
-refusal_case inherited-git-dir GIT_DIR git-dir
-refusal_case inherited-git-work-tree GIT_WORK_TREE work-tree
-refusal_case inherited-beads-db BEADS_DB live-db
+# HERMETIC1-B: the judge discards inherited authority; fresh-gate's separate entry policy is unchanged.
+inherited_authority_case inherited-authority
 fresh_refusal_case GIT_DIR git-dir
 fresh_refusal_case GIT_WORK_TREE work-tree
 fresh_refusal_case BEADS_DB live-db
@@ -274,6 +294,30 @@ target.write_text('changed')"
 		ok "HERMETIC1 protected Git ref bytes remain unchanged"
 	else
 		not_ok "HERMETIC1 protected Git ref changed ($ref_before -> $ref_after)"
+	fi
+
+	caller_db_target="$TMP/protected-inherited-caller.db"
+	printf 'synthetic caller database sentinel\n' >"$caller_db_target"
+	caller_db_before=$(file_state "$caller_db_target")
+	mkrepo_begin hermetic-inherited-db-write
+	addfile tests/cli/fixture_test.py "import os
+from pathlib import Path
+for name in ('BEADS_DB', 'GIT_DIR', 'GIT_WORK_TREE'):
+    assert name not in os.environ, name
+target = Path('$caller_db_target')
+print('HERMETIC1_B_CALLER_DB_WRITE ' + str(target), flush=True)
+target.write_text('changed')"
+	mkrepo_commit
+	run_verdict_with_envs hermetic-inherited-db-write BEADS_DB="$caller_db_target" \
+		GIT_DIR="$TMP/not-a-git-directory" GIT_WORK_TREE="$TMP/not-a-work-tree"
+	caller_db_after=$(file_state "$caller_db_target")
+	expect_runner_denial 'HERMETIC1-B explicit inherited caller database write' \
+		'RED python-suite tests/cli/fixture_test.py' "$caller_db_target"
+	if [ "$caller_db_before" = "$caller_db_after" ] \
+		&& grep -F 'HERMETIC1_B_CALLER_DB_WRITE' "$repo.cache/$tree.log" >/dev/null 2>&1; then
+		ok "HERMETIC1-B the existing write fence preserves the caller database after an actual write attempt"
+	else
+		not_ok "HERMETIC1-B unchanged caller database after an actual write attempt was not proven"
 	fi
 
 	if command -v br >/dev/null 2>&1; then
@@ -446,7 +490,8 @@ if (
 	cd "$helper_archive/work"
 	env AGENT_NAME=synthetic-agent AGENT_MAIL_TOKEN=synthetic-token-never-real \
 		FLEET_GUARD_LIVE=1 OMP_KIT_UNDECLARED=synthetic-value TMUX=synthetic \
-		HERMETIC_CONTROL=declared \
+		HERMETIC_CONTROL=declared BEADS_DB="$protected" \
+		GIT_DIR="$TMP/not-a-git-directory" GIT_WORK_TREE="$TMP/not-a-work-tree" \
 		sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
 		--suite tests/cli/fixture_test.py --loopback-port "$helper_loopback_port" \
 		--allow-env HERMETIC_CONTROL -- \
@@ -461,7 +506,7 @@ assert pathlib.Path(os.environ["GIT_CONFIG_GLOBAL"]).is_file()
 assert subprocess.run(["git", "config", "--global", "--get", "user.email"],
     check=True, text=True, capture_output=True).stdout.strip() == "omp-kit-tests@example.invalid"
 assert os.environ["HERMETIC_CONTROL"] == "declared"
-for name in ("AGENT_NAME", "AGENT_MAIL_TOKEN", "FLEET_GUARD_LIVE", "OMP_KIT_UNDECLARED", "TMUX"):
+for name in ("AGENT_NAME", "AGENT_MAIL_TOKEN", "FLEET_GUARD_LIVE", "OMP_KIT_UNDECLARED", "TMUX", "BEADS_DB", "GIT_DIR", "GIT_WORK_TREE"):
     assert name not in os.environ, name
 assert os.environ["PATH"] and os.environ["LANG"]
 pathlib.Path(os.environ["TMPDIR"], "scratch-write").write_text("allowed")
@@ -484,6 +529,27 @@ if [ "$helper_rc" -eq 0 ] && grep -F 'HERMETIC_HELPER_CONTROL' "$helper_out" >/d
 	ok "the shared helper logs suite authority without values and keeps declared env with owned HOME/Git config"
 else
 	not_ok "shared helper environment control failed (rc=$helper_rc)"; cat "$helper_out"
+fi
+helper_inherited_out="$TMP/hermetic-helper-inherited-authority.out"
+if env OMP_KIT_SUITE_HERMETIC_ENABLE=0 HERMETIC_CONTROL=retained \
+	BEADS_DB="$protected" GIT_DIR="$TMP/not-a-git-directory" GIT_WORK_TREE="$TMP/not-a-work-tree" \
+	sh "$helper" --archive "$helper_archive" --scratch "$helper_scratch" \
+	--suite tests/cli/fixture_test.py -- \
+	python3 -c 'import os
+for name in ("BEADS_DB", "GIT_DIR", "GIT_WORK_TREE"):
+    assert name not in os.environ, name
+assert os.environ["HERMETIC_CONTROL"] == "retained"
+print("HERMETIC1_B_HELPER_INHERITED_UNSET")' >"$helper_inherited_out" 2>&1; then
+	helper_inherited_rc=0
+else
+	helper_inherited_rc=$?
+fi
+if [ "$helper_inherited_rc" -eq 0 ] \
+	&& grep -F 'HERMETIC1_B_HELPER_INHERITED_UNSET' "$helper_inherited_out" >/dev/null; then
+	ok "the helper discards Git/tracker bindings in inherited mode without dropping unrelated env"
+else
+	not_ok "the helper refused or leaked inherited Git/tracker authority (rc=$helper_inherited_rc)"
+	cat "$helper_inherited_out"
 fi
 git_shim_out="$TMP/hermetic-git-shim.out"
 if (

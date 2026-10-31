@@ -1,0 +1,1 @@
+- Full-suite judging and suite execution discard inherited `BEADS_DB`, `GIT_DIR`, and `GIT_WORK_TREE` instead of refusing before the suites run; per-test tracker selection and existing write/network fences remain unchanged.
