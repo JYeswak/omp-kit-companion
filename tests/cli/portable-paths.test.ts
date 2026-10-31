@@ -219,6 +219,28 @@ test("gates: unborn baseline-less repositories admit safe first commits and reje
 	const head = await git(badRepo, "rev-parse", "--verify", "HEAD^{commit}");
 	expect(head.rc).not.toBe(0);
 }, 120_000);
+test("planted negative: removing the installed check lets the forbidden hunk through", async () => {
+	const repo = await newPrecommitRepo("precommit-deleted-check");
+	const hooksResult = await git(repo, "rev-parse", "--git-path", "hooks");
+	if (hooksResult.rc !== 0) throw new Error(`hooks path lookup failed\n${output(hooksResult)}`);
+	const hooksPath = output(hooksResult).trim();
+	const hooksRoot = hooksPath.startsWith("/") ? hooksPath : join(repo, hooksPath);
+	const member = join(hooksRoot, "hooks.d", "pre-commit", "54-omp-kit-staged-portable-paths");
+	writeFileSync(member, "#!/bin/sh\nexit 0\n");
+	chmodSync(member, 0o755);
+
+	writeFileSync(join(repo, "extensions", "mutant.ts"), 'export const path = "/Users/josh/x";\n');
+	await gitOkay(repo, "add", "--", "extensions/mutant.ts");
+	const mutantCommit = await git(repo, "commit", "-m", "[test] deleted portable-path check");
+	let refusalAssertionFailed = false;
+	try {
+		expectRefusal(mutantCommit, "extensions/mutant.ts:1");
+	} catch {
+		refusalAssertionFailed = true;
+	}
+	expect(mutantCommit.rc).toBe(0);
+	expect(refusalAssertionFailed).toBe(true);
+}, 120_000);
 
 test("gates: pre-commit rejects shipped local paths and exempts tests", async () => {
 	const repo = await newPrecommitRepo("precommit-paths");
