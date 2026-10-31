@@ -380,11 +380,12 @@ class InReviewCli(unittest.TestCase):
 
     def test_pregrade_requires_bound_candidate_commit(self) -> None:
         bead = base_bead()
-        for candidate in (None, "", "a" * 6, "g" * 40, "a" * 41, 7):
-            with self.subTest(candidate=candidate):
-                record = pregrade_record(bead, verdict="PASS", candidate_commit=candidate)
-                err = self.assert_refused("PREGRADE_CANDIDATE_UNBOUND", bead, record)
-                self.assertIn("/omp-kit/pregrade/acp-1.json", err)
+        for verdict in ("PASS", "WAITING"):
+            for candidate in (None, "", "a" * 6, "g" * 40, "a" * 41, 7):
+                with self.subTest(verdict=verdict, candidate=candidate):
+                    record = pregrade_record(bead, verdict=verdict, candidate_commit=candidate)
+                    err = self.assert_refused("PREGRADE_CANDIDATE_UNBOUND", bead, record)
+                    self.assertIn("/omp-kit/pregrade/acp-1.json", err)
 
         for candidate in ("A1B2C3D", "A" * 40):
             with self.subTest(candidate=candidate):
