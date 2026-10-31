@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "bead": "ompkit-774u.64",
+  "candidate_commit": "85c5d0216304bac080264e286fd7da1e99d057f3",
+  "consumer": "CLOCKBOUND1 acceptance review and non-author close",
+  "defect_class": "Load-dependent test bounds must distinguish wall stalls from CPU work and prove process-group deadline cancellation.",
+  "deletion_condition": "Retain as candidate-bound evidence for 85c5d0216304bac080264e286fd7da1e99d057f3; supersede only with a later candidate-bound replay.",
+  "source_sha256": {
+    "scripts/ttsr-harness.ts": "1c4e25d170d9d543eb8aecd623733793bdb6555de6ed3b354649da937b9a573d",
+    "tests/cli/test-runner.test.ts": "e7c6889f843d8cb3c4bb90db9fc32ba8f85e390bcb5a930c94d6553176d6436f",
+    "tests/cli/check-staged-pysafe.test.sh": "3de4e0281a7fac4166e0cd902d21d03d479b94beba7fa0224730cf297d577d9a"
+  },
+  "ac1": {
+    "command": "bun test tests/cli/test-runner.test.ts -t \"long-token close fire\"",
+    "exit_code": 0,
+    "local_output": "1 pass, 26 filtered out, 0 fail, 10 expectations; 5.07s",
+    "measurement": "Bun.spawnSync resourceUsage.cpuTime.total in microseconds; unchanged budget predicate is < 1,000,000.",
+    "normal_case": {
+      "final_fire_witness": true,
+      "within_cpu_budget": true
+    },
+    "wall_stall_control": {
+      "injected_effect": "Atomics.wait for 2,000 ms in the isolated observer worker before matcher execution",
+      "asserted_elapsed_ms_at_least": 2000,
+      "final_fire_witness": true,
+      "within_cpu_budget": true
+    },
+    "slow_fire_control": {
+      "injected_effect": "Worker consumes at least 1,200,000 microseconds of process CPU before matcher execution",
+      "final_fire_witness": true,
+      "within_cpu_budget": false
+    },
+    "isolation": "Only TTSR_TEST_CLOCK_BOUND_CONTROL is explicitly forwarded through the observer worker allowlist; when unset, the control branch is skipped."
+  },
+  "ac2": {
+    "command": "sh tests/cli/check-staged-pysafe.test.sh",
+    "execution": "nice -n 10; ran concurrently with the AC1 focused command",
+    "exit_code": 0,
+    "observed_output": "hung-checker load-before: load averages 9.86, 10.57, 12.35\nhung-checker load-after: load averages 9.87, 10.56, 12.34\nhung-checker-bounded section elapsed: 7s\ncheck-staged-pysafe: 14 pass 0 fail",
+    "negative_control": "Checker and grandchild ignore SIGTERM; commit is refused with the deadline-killed diagnostic and the grandchild PID is absent after process-group cancellation.",
+    "elapsed_wall_time_assertion": false
+  },
+  "independent_pregrade": {
+    "record": "/Users/josh/.local/state/omp-kit/pregrade/ompkit-774u.64.json",
+    "schema": "omp-kit.pregrade.v1",
+    "wave": "W-pregrade-774u_64-20261031T070826Z",
+    "at": "2026-10-31T07:13:48Z",
+    "candidate_commit": "85c5d0216304bac080264e286fd7da1e99d057f3",
+    "grader": "grader-774u_64",
+    "grader_model": "openai-codex/gpt-6-luna",
+    "verdict": "PASS",
+    "items": [
+      { "ac": "AC1", "status": "PASS", "exit_code": 0 },
+      { "ac": "AC2", "status": "PASS", "exit_code": 0 }
+    ]
+  },
+  "independent_review": {
+    "agent": "zeststream-reviewer",
+    "verdict": "PASS AC1 and AC2",
+    "limitations_noted": [
+      "The normal 2,500 ms evaluator watchdog remains wall-clock based and may fail closed under extreme load.",
+      "No current-candidate full-suite run was performed; load samples are not a full-suite run.",
+      "Linux CI portability of Bun child CPU-time accounting was not established by this host run."
+    ]
+  },
+  "limitations": [
+    "No full-suite run was performed on candidate 85c5d0216304bac080264e286fd7da1e99d057f3.",
+    "The recorded load averages are host-wide averages around the AC2 section, not a per-process utilization measurement.",
+    "The AC2 target was exercised with the AC1 focused test concurrently, not with the full CLI suite."
+  ]
+}

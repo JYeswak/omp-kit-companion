@@ -1,0 +1,21 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_18e6e27b867d19711210c74ab4594dd43064002a104289d8c57ae1d55b732337",
+ "limitations": [
+  "No full-suite run on this candidate; AC2 load samples came from a concurrent focused AC1 run, not the full suite.",
+  "Linux CI portability of Bun child CPU-time accounting remains unverified."
+ ],
+ "operation": "CLOCKBOUND1 candidate-bound acceptance replay",
+ "parameters": {
+  "ac1": "normal_wall_stall_slow_fire_controls_pass",
+  "ac2": "process_group_deadline_14_pass_0_fail",
+  "candidate_commit": "85c5d0216304bac080264e286fd7da1e99d057f3"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 3835,
+  "path": "docs/evidence/receipts/ompkit-774u.64-20261031-clockbound1-85c5.result.json",
+  "sha256": "4ca7ff496116f25a894f4554f46acfadac1a481ee0c5d469d16b6b630a2c9945"
+ }
+}
