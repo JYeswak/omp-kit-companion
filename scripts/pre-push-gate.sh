@@ -645,11 +645,18 @@ fi
 # runner, one run per repo), so the release finds it recorded. If the push itself then fails, the
 # cached verdict is for a tree that may never ship; nothing else depends on it. OMP_KIT_RELEASE_VERDICT=0
 # opts out. Its output goes to .git/omp-kit/release-verdict.log, never to this hook's stdout.
+# It runs in its own session: git_converge.py runs `git push` in a process group that its bounded runner
+# kills once the push returns, and nohup alone died with it (48c5513b5f, 2026-10-31: the log stopped
+# at the runner's header, the lock left naming a gone pid). macOS ships no setsid(1), so python3 forks,
+# calls setsid in the child and execs the verdict.
 if [ "$gate_rc" = 0 ] && [ "${PRE_PUSH_FULL_SUITE:-release}" != push ] && [ "${OMP_KIT_RELEASE_VERDICT:-1}" != 0 ] \
 	&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ]; then
-	nohup sh "$ROOT/scripts/release-verdict.sh" --commit "$local_sha" --no-fetch \
-		</dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1 &
-	printf 'release verdict: started for %s in the background (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
+	python3 -c 'import os, sys
+if os.fork(): os._exit(0)
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])' sh "$ROOT/scripts/release-verdict.sh" --commit "$local_sha" --no-fetch \
+		</dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1
+	printf 'release verdict: started for %s in the background in its own session (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
 fi
 trap - EXIT
 cleanup
