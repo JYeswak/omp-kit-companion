@@ -1,0 +1,21 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_81dbe79556e08af7ec53a836e2a6f63791e7f11b8334d82ca868f65086dd7eb7",
+ "limitations": [
+  "One serial-versus-five-worker pair; both full-suite verdicts FAIL; not the next-publish live gate."
+ ],
+ "operation": "ompkit-9t6f2 paired full-suite shell-stage measurement",
+ "parameters": {
+  "bead": "ompkit-9t6f2",
+  "shell_jobs_after": "5",
+  "shell_jobs_before": "1",
+  "source_commit": "831e25df768e93101c91055bd6b361e02513c1ba",
+  "source_tree": "313c3007553e7bdae082356f1205680c875addea"
+ },
+ "producer": "LavenderPrairie",
+ "result_ref": {
+  "bytes": 4993,
+  "sha256": "cd66536531c8efb98f59d7ec442e57247ccb70d82ae99befa7259547ae6db179"
+ }
+}
