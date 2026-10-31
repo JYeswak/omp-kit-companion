@@ -81,6 +81,9 @@ import { runPlanningScore } from "./planning-score.ts";
 import { runPlanningConvert } from "./planning-convert.ts";
 import { missionAnchorStatus, validateMissionRecord } from "./mission.ts";
 import { closeQueue, landingCommits, readDrainStore, resolveProjectDb, staleClaims } from "./drain.ts";
+import { chooseGraderNext, formatGraderSelection, graderUnavailableSources, type GraderCandidate, type QueueObservation } from "./grader-next.ts";
+import { realGradableCandidates } from "./grader-next-sources/gradable.ts";
+import { ccGapCandidates } from "./grader-next-sources/cc-gaps.ts";
 import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
@@ -4303,6 +4306,54 @@ function drainStaleClaimsCommand(request: ParsedCommand): CliResult {
 }
 registerCommandHandler("drain stale-claims", drainStaleClaimsCommand);
 
+async function graderNextCommand(request: ParsedCommand): Promise<CliResult> {
+	const repo = resolve(String(request.flags.get("--repo") ?? process.cwd()));
+	const agent = String(request.flags.get("--agent") ?? process.env.AGENT_NAME ?? "");
+	const gradableResult = await realGradableCandidates(repo, agent);
+	const gradable: QueueObservation<GraderCandidate[]> = gradableResult.status === "OK"
+		? { status: "KNOWN", source: gradableResult.source, value: gradableResult.rows }
+		: { status: gradableResult.status, source: gradableResult.source, reason: gradableResult.reason };
+	const unavailable = (source: string, reason: string): QueueObservation<never> => ({ status: "UNKNOWN", source, reason });
+	const cutAdmission = unavailable("BACKLOGMIG1", "public cut-scoped backlog producer is not implemented");
+	const ccGapResult = await ccGapCandidates(repo);
+	const ccGaps: QueueObservation<GraderCandidate[]> = ccGapResult.status === "OK"
+		? { status: "KNOWN", source: ccGapResult.source, value: ccGapResult.rows }
+		: { status: ccGapResult.status, source: ccGapResult.source, reason: ccGapResult.reason };
+	const remainingGapSources = [
+		{ source: "scratch plan gap report", reason: "exact actionable bead mapping is not implemented" },
+		{ source: "PySafe findings", reason: "finding-to-bead mapping is not implemented" },
+		{ source: "bead_lint_backlog", reason: "comparable gap cost is not implemented" },
+		{ source: "sitrep dirt/no_fix", reason: "typed sitrep source adapter is not implemented" },
+	];
+	const gaps = ccGaps.status === "KNOWN"
+		? unavailable("gap producers", "additional gap sources are not implemented")
+		: ccGaps;
+	const downtime = unavailable("downtime chores", "typed downtime-source adapter is not implemented");
+	const queue = { gradable, cutAdmission, gaps, downtime };
+	const selection = chooseGraderNext(agent, repo, queue);
+	const unknownSources = [
+		...graderUnavailableSources(queue),
+		...remainingGapSources.map(source => ({ ...source, status: "UNKNOWN" as const })),
+	];
+	const text = `${formatGraderSelection(selection, queue)}\nUnavailable source adapters:\n${remainingGapSources
+		.map(source => `- UNKNOWN ${source.source}: ${source.reason}`).join("\n")}`;
+	return {
+		code: selection.status === "UNKNOWN" || selection.status === "FAILED" ? 3 : 0,
+		data: {
+			status: selection.status,
+			next_action: selection.status === "ACTION" ? selection.action : null,
+			unknown_sources: unknownSources,
+			...(selection.status === "ACTION" ? {} : { reason: selection.reason }),
+			text,
+		},
+		...(selection.status === "UNKNOWN" || selection.status === "FAILED"
+			? { errors: [{ code: selection.status, message: selection.reason, remediation: "Restore every higher-priority queue source before treating the queue as empty." }] }
+			: {}),
+		verification: "PERFORMED",
+	};
+}
+registerCommandHandler("grader next", graderNextCommand);
+
 
 registerCommandHandler("update", updateCommand);
 
@@ -4613,7 +4664,7 @@ async function corpusReport(request: ParsedCommand): Promise<CliResult> {
 			}], verification: "UNVERIFIED" };
 		}
 	}
-	if (command.name === "next") {
+	if (command.name === "next" && !parent) {
 		const role = request.flags.get("--role");
 		const repo = request.flags.get("--repo");
 		const agent = request.flags.get("--agent");

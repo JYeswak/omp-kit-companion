@@ -113,6 +113,32 @@ test("preflight close|in-review|claim: every tracker predicate in one envelope, 
 	expect(gone.findings[0]?.code).toBe("UNJUDGED");
 });
 
+test("PRIORART blocks queued fix transitions without a valid code-cited comment", async () => {
+	const bead = {
+		id: "kit-fix", status: "in_progress", assignee: "Author", updated_at: "2026-10-31T02:00:00Z",
+		labels: ["grader-next-step-3"], acceptance_criteria: "- [x] [a] [build] tested\n",
+	};
+	let comments: unknown[] = [];
+	const read = async (args: string[]): Promise<unknown> => {
+		if (args[0] === "show") return [{ ...bead, status: args[1] === "kit-fix" ? bead.status : "in_progress" }];
+		if (args[0] === "comments") return comments;
+		throw new Error(`unexpected tracker read: ${args.join(" ")}`);
+	};
+	const valid = "prior=https://github.com/acme/tool/blob/main/src/queue.ts#L12-L18 did=Sort eligible queue candidates applied=Reuse stable ordering quoted=const rows = [...candidates].sort(compare);";
+	for (const marker of ["grader-next-step-3", "grader-next-step-4"]) {
+		for (const act of ["in-review", "close"] as const) {
+			bead.status = act === "close" ? "in_review" : "in_progress";
+			bead.labels = [marker];
+			comments = [];
+			const refused = await preflightBead(act, base, bead.id, { actor: "Peer", env: {}, read });
+			expect(refused.findings.filter(finding => finding.blocking).map(finding => finding.code)).toContain("PRIORART_REQUIRED");
+			comments = [{ id: 1, text: valid }];
+			const admitted = await preflightBead(act, base, bead.id, { actor: "Peer", env: {}, read });
+			expect(admitted.findings.map(finding => finding.code)).not.toContain("PRIORART_REQUIRED");
+		}
+	}
+});
+
 test("non-claim preflight honors the PATH tracker even when BR_REAL names a different tracker", async () => {
 	const dir = join(base, "non-claim-namespace");
 	const bin = join(dir, "bin");

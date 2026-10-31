@@ -2,6 +2,7 @@ import { UNOWNED_ACTIVE_RULE } from "./scratch.ts";
 import { PROFILE_RECIPE_KINDS } from "./profile-recipes.ts";
 import { TERN_COMMAND } from "./tern/registry.ts";
 import { NEXT_DATA_SCHEMA } from "./next.ts";
+import { GRADER_NEXT_DATA_SCHEMA } from "./grader-next.ts";
 
 export type Flag = {
 	readonly aliases?: readonly string[];
@@ -488,6 +489,13 @@ export const COMMANDS: readonly Command[] = [
 		124: { meaning: "Admitted child runtime budget exceeded", retryable: false },
 		child: "Raw child exit code passthrough, unchanged; kit category and retryability meanings do not apply. Decide retry from the child's own contract.",
 	} },
+	{ name: "grader", description: "Select the next prioritized action for an idle grader", usage: "grader next [--repo PATH] [--agent NAME]", flags: [],
+		example: "omp-kit grader next --repo . --json", runnable: false, subcommands: [
+			{ name: "next", description: "Select from typed priority queues; reports unavailable sources instead of treating them as empty", usage: "grader next [--repo PATH] [--agent NAME]", flags: [
+				{ name: "--repo", value: "PATH", description: "Repository to inspect (default: current directory)" },
+				{ name: "--agent", value: "NAME", description: "Grader identity (default: AGENT_NAME)" },
+			], example: "omp-kit grader next --repo . --json", runnable: false, dataSchema: GRADER_NEXT_DATA_SCHEMA },
+		] },
 	{ name: "next", description: "Recommend one next loop action and the skills that apply to current changes, without changing anything", usage: "next --role worker|director [--repo PATH] [--agent NAME]", flags: [
 		{ name: "--role", value: "worker|director", description: "Required loop role: worker or director" },
 		{ name: "--repo", value: "PATH", description: "Repository to inspect (default: current directory)" },

@@ -15,6 +15,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { envelope, parseFindingLines, unjudged, type Envelope, type Finding, type PreflightAct } from "./kitlib/findings.ts";
 import { run } from "./kitlib/run.ts";
+import { validatePriorArtComment } from "./grader-next.ts";
 import { admitClaimCut, type ClaimCutRead } from "./claim-cut.ts";
 
 const MEMBER_DEADLINE_S = 120;
@@ -161,6 +162,26 @@ export async function preflightBead(act: Exclude<PreflightAct, "commit" | "publi
 	const f: Finding[] = [];
 	const push = (code: string, detail: string, remedy: string, fix: string[] | null = null) => f.push({ gate: "br-policy", code, detail, remedy, fix, blocking: true });
 	const actor = options.actor ?? env.AGENT_NAME ?? null;
+	const queuedFix = (act === "in-review" || act === "close") && bead.labels.some(label => label === "grader-next-step-3" || label === "grader-next-step-4");
+	if (queuedFix) {
+		try {
+			const comments = await read(["comments", "list", "--json", id]);
+			if (!Array.isArray(comments)) {
+				push("PRIORART_UNJUDGED", "the bead comment response is not a complete list", "read the bead comments and retry; queued fix admission remains refused");
+			} else {
+				const verdicts = comments.flatMap(comment => comment && typeof comment === "object" && "text" in comment && typeof comment.text === "string"
+					? [validatePriorArtComment(comment.text)] : []);
+				if (!verdicts.some(verdict => verdict.status === "CODE" || verdict.status === "NOTHING_FOUND")) {
+					const reason = verdicts[0]?.reason ?? "no comments exist";
+					push("PRIORART_REQUIRED", `queued fix ${id} lacks a valid code-cited prior-art comment: ${reason}`,
+						"add a bead comment with prior=, did=, applied= and quoted= source lines, or a complete prior=nothing-found search record");
+				}
+			}
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			push("PRIORART_UNJUDGED", `bead comments could not be read: ${reason}`, "restore tracker comment reads and retry; queued fix admission remains refused");
+		}
+	}
 	const gated = bead.labels.filter(l => ["human-gate", "owner-decision", "kind:process"].includes(l));
 	if (act === "claim") {
 		if (bead.status !== "open") push("NOT_OPEN", `${id} is ${bead.status}`, "claim only an open bead");
