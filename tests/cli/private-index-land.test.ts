@@ -101,6 +101,9 @@ test("checks the exact candidate with the base-registered push check before publ
 			OMP_LAND_REPOSITORY: work,
 			OMP_LAND_CHECK_CONTENT_FILE: checkContentFile,
 			OMP_KIT_TEST_PRE_PUSH_OUTPUT: prePushOutput,
+			// GATESPEED1: the push defers the complete suite to the release by default; this case asserts
+			// the in-push main-role verdict, so it opts in.
+			PRE_PUSH_FULL_SUITE: "push",
 		},
 	});
 	expect(run.status, `${JSON.stringify(run.body)}\n${readFileSync(prePushOutput, "utf8")}`).toBe(0);
