@@ -486,6 +486,9 @@ fi
 # are handed to fresh-gate, which does not run them again in the focused stage.
 contract_pids=""
 mkdir -p "$archive_root/contracts"
+# The contracts resolve var/agent-tmp under their own tree and expect it to exist; run one after
+# another, an earlier contract always created it first. In parallel, create it before any starts.
+mkdir -p "$contract_root/var/agent-tmp"
 for checker_test in $contract_run; do
 	(
 		# gate_body runs under set -e: capture the status in an AND-OR list, or a red contract ends
