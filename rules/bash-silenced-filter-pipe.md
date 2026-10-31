@@ -1,5 +1,5 @@
 ---
-condition: '2>/dev/null\s*\|\s*(?:grep|jq|head|tail|wc|awk|cut)\b'
+condition: '2>/dev/null\s*\|\s*(?:grep|jq|head|tail|wc|awk|cut)\b(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)'
 scope: tool:bash
 interruptMode: never
 ---
