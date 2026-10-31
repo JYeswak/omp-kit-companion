@@ -1,0 +1,1 @@
+- Pre-push qualification keeps base-owned policy checks and the trusted bounded suite executor, validates candidate checker/runner contracts, then runs the pushed tree's own gates and full-suite runner with a main-role verdict. A candidate cannot remove a previously required runner or borrow a passing judgment from the base revision.

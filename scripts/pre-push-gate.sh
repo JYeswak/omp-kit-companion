@@ -382,8 +382,19 @@ if [ -n "${base_ref:-}" ]; then
 else
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --head "$local_sha"
 fi
-# Exercise the committed checker contracts before running the candidate tree's gate.
+# The base remains the policy/bootstrap anchor. Qualify both revisions' checker
+# contracts, then the candidate's runner contracts, before using its judge.
 mkdir -p "$gate_scripts/var/agent-tmp"
+candidate_contracts_run=""
+checker_contracts() {
+	contract_root=$1
+	contract_role=$2
+	contract_source=$local_sha
+	[ "$contract_role" != base ] || contract_source=$base_ref
+	if [ ! -f "$gate_scripts/scripts/suite-metrics.py" ]; then
+		printf 'pre-push-gate: missing trusted bounded suite executor\n' >&2
+		exit 1
+	fi
 for checker_test in \
 	publishability.test.sh \
 	doc-drift.test.sh \
@@ -394,26 +405,41 @@ for checker_test in \
 	commit-msg-bead.test.sh \
 	check-pushed-beads.test.sh \
 	release-train.test.sh \
-	check-staged-br-init.test.sh
+	check-staged-br-init.test.sh \
+	full-suite-verdict-incomplete.test.sh \
+	pre-push-gate.test.sh
 do
-	test_path="$gate_scripts/tests/cli/$checker_test"
+	case "$checker_test" in
+		full-suite-verdict-incomplete.test.sh|pre-push-gate.test.sh)
+			[ "$contract_role" = candidate ] || continue ;;
+	esac
+	if [ "$contract_role" = candidate ]; then
+		case " $candidate_contracts_run " in *" $checker_test "*) continue ;; esac
+	fi
+	test_path="$contract_root/tests/cli/$checker_test"
 	if [ ! -f "$test_path" ]; then
 		printf 'pre-push-gate: missing checker contract %s\n' "$checker_test" >&2
 		exit 1
 	fi
-	printf '== checker-contract %s\n' "$checker_test"
-	if TMPDIR="$gate_scripts/var/agent-tmp" sh "$test_path"; then
-		printf 'GREEN checker-contract %s\n' "$checker_test"
+	printf '== checker-contract %s role=%s\n' "$checker_test" "$contract_role"
+	if TMPDIR="$gate_scripts/var/agent-tmp" python3 "$gate_scripts/scripts/suite-metrics.py" run \
+		--record "$archive_root/contracts/$contract_role-$checker_test.json" \
+		--path "tests/cli/$checker_test" --runner sh --tree "$contract_source" \
+		--cwd "$contract_root" --deadline "${FULL_SUITE_TIMEOUT_SECS:-1800}" -- sh "$test_path"; then
+		printf 'GREEN checker-contract %s role=%s\n' "$checker_test" "$contract_role"
 	else
 		rc=$?
-		# GATE2: a contract red on the base tree is judged from the candidate
-		# tree. The loop, the regexploit gate and fresh-gate.sh still come
-		# from base; only this one rerun executes the candidate's test file.
+		# GATE2: a red base contract may be repaired by the candidate. Its
+		# successful rerun also satisfies the candidate contract pass below.
 		cand_path="$archive/tests/cli/$checker_test"
-		if [ -n "${base_ref:-}" ] && [ -f "$cand_path" ]; then
+		if [ "$contract_role" = base ] && [ -n "${base_ref:-}" ] && [ -f "$cand_path" ]; then
 			mkdir -p "$archive/var/agent-tmp"
-			if TMPDIR="$archive/var/agent-tmp" sh "$cand_path" >/dev/null 2>&1; then
+			if TMPDIR="$gate_scripts/var/agent-tmp" python3 "$gate_scripts/scripts/suite-metrics.py" run \
+				--record "$archive_root/contracts/candidate-$checker_test.json" \
+				--path "tests/cli/$checker_test" --runner sh --tree "$local_sha" \
+				--cwd "$archive" --deadline "${FULL_SUITE_TIMEOUT_SECS:-1800}" -- sh "$cand_path"; then
 				printf 'BASE-RED checker-contract %s: base rc=%s, candidate green\n' "$checker_test" "$rc"
+				candidate_contracts_run="$candidate_contracts_run $checker_test"
 				continue
 			fi
 		fi
@@ -421,6 +447,10 @@ do
 		exit "$rc"
 	fi
 done
+}
+if [ "$gate_scripts" != "$archive" ]; then
+	checker_contracts "$gate_scripts" base
+fi
 # COMMIT1: every pushed non-merge commit names a bead id that exists in the
 # repo tracker. Reads git objects only, so commit-tree landings are checked.
 # Skipped until the base archive carries the checker (first landing).
@@ -473,12 +503,13 @@ else
 fi
 # Not `exec`: exec replaces this shell, so the EXIT trap above never ran and every push leaked
 # its archive extracts into var/agent-tmp (ompkit-fp72.40). The gate runs as a child.
-# LAND1 (ompkit-rhy9.12): every publication needs the full-suite verdict for the exact candidate
-# tree, not just the focused suites fresh-gate selected. The verdict script comes from the gate
-# archive (base-authoritative, like every step above) and judges the candidate archive; its cache
-# is keyed by candidate tree with check/runtime identity, so a repeated identical tree reuses the
-# recorded verdict without rerunning. Skipped until the base archive carries the checker (first
-# landing), like pushed-bead-ids, commit-imports and doc-drift above.
+# LAND1 + RUNFROMTREE1: immutable policy checks and bootstrap contracts above
+# come from base. The candidate then judges its own exact tree with its own
+# scripts, so a broken new runner cannot borrow a PASS from the old runner.
+# A main-role verdict has the candidate's judging identity and is reusable by
+# the existing new-tag gate; a base-role verdict is not that qualification.
+checker_contracts "$archive" candidate
+gate_scripts="$archive"
 ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir) || { printf 'pre-push-gate: cannot resolve git dir for fresh-gate ledger\n' >&2; exit 1; }
 # NODOUBLEPASS1 (ompkit-bp50d): the focused gate reports what it ran GREEN on this tree; the verdict
 # below runs only the complement. The report lives beside the archive, inside this gate's owned dir.
@@ -487,10 +518,14 @@ rm -f "$focused_passed"
 FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" \
 	sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
 if [ ! -f "$gate_scripts/scripts/full-suite-verdict.sh" ]; then
+	if [ -n "${base_ref:-}" ] && [ -f "$base_archive/scripts/full-suite-verdict.sh" ]; then
+		printf 'RED full-suite-verdict CANDIDATE_RUNNER_MISSING: candidate removed the required runner\n' >&2
+		exit 1
+	fi
 	printf 'SKIP full-suite-verdict: checker absent from base archive\n' >&2
 else
 	printf '== full-suite-verdict\n'
-	set -- --repo "$ROOT" --commit "$local_sha" --judge-role base --archive-dir "$archive"
+	set -- --repo "$ROOT" --commit "$local_sha" --judge-role main --archive-dir "$archive"
 	[ -f "$focused_passed" ] && set -- "$@" --focused-passed "$focused_passed"
 	if sh "$gate_scripts/scripts/full-suite-verdict.sh" "$@"; then
 		printf 'GREEN full-suite-verdict\n'

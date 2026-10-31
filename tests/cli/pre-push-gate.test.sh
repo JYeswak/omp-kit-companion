@@ -2,15 +2,13 @@
 # shellcheck disable=SC1091
 # shellcheck source=tests/cli/git-env-fixtures.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
-# pre-push-gate.test.sh — GATE1 base-authoritative gate contract
-# (ompkit-rc-epic-land-fix-release-dogfood-rz5.88).
-# Fixture git repos where HEAD rewrites the gate: the adapter must run the
-# BASE archive's gate code, never HEAD's. Every verdict comes from the exit
-# code plus the complete output.
+# The base anchors policy checks; the candidate must pass its own contracts
+# and judge its own pushed tree. Every verdict uses the real adapter boundary.
 set -u
 
 ADAPTER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/pre-push-gate.sh
 ADAPTER=${OMP_KIT_PRE_PUSH_ADAPTER:-$ADAPTER}
+KITREPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)/var/agent-tmp
 mkdir -p "$REPO_TMP"
 # shellcheck source=scripts/kitlib-tmp.sh
@@ -24,11 +22,37 @@ export XDG_STATE_HOME="$TMP/xdg-state"
 pass=0
 fail=0
 
+# The immutable anchor needs its real bounded executor. These are declared
+# fixture dependencies, copied once; they are not fixture verdicts.
+carry_suite_executor() {
+	if [ -f "$1/scripts/suite-metrics.py" ] && [ -f "$1/scripts/suite-hermetic-env.sh" ] \
+		&& [ -f "$1/scripts/kitlib_run.py" ] && [ -f "$1/scripts/kitlib_tmp.py" ] && [ -f "$1/scripts/pysafe.py" ]; then
+		return 0
+	fi
+	python3 -B - "$KITREPO/scripts" "$1/scripts" <<'PY'
+from pathlib import Path
+import sys
+source, destination = Path(sys.argv[1]), sys.argv[2]
+sys.path.insert(0, str(source))
+import kitlib_run
+import pysafe
+def main():
+    names = ("suite-metrics.py", "suite-hermetic-env.sh", "kitlib_run.py", "kitlib_tmp.py", "pysafe.py")
+    result = kitlib_run.run(["cp", *[str(source / name) for name in names], destination], deadline_s=30)
+    sys.stdout.buffer.write(result.stdout)
+    sys.stderr.buffer.write(result.stderr)
+    if result.rc is None or result.timed_out or result.killed or result.truncated:
+        return 125
+    return result.rc
+pysafe.run_main(main)
+PY
+}
+
 create_checker_test_stubs() {
 	repo=$1
 	failing_test=${2:-}
 	mkdir -p "$repo/tests/cli"
-	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh check-staged-br-init.test.sh; do
+	for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh check-staged-br-init.test.sh full-suite-verdict-incomplete.test.sh pre-push-gate.test.sh; do
 		test_path="$repo/tests/cli/$checker_test"
 		if [ "$checker_test" = "$failing_test" ]; then
 			printf '#!/bin/sh\nprintf "CHECKER-FAIL: %s\\n" >&2\nexit 7\n' "$checker_test" > "$test_path"
@@ -36,13 +60,17 @@ create_checker_test_stubs() {
 			printf '#!/bin/sh\nprintf "CHECKER-PASS: %s\\n"\n' "$checker_test" > "$test_path"
 		fi
 	done
+	carry_suite_executor "$repo"
 }
 
 mkrepo() {
 	name=$1
 	base_body=$2
 	failing_test=${4:-}
-	head_body=$3
+	head_body=${3:-$base_body}
+	fixture_value=${5:-}
+	head_failing_checker=${6:-}
+	head_verdict_body=${7:-}
 	repo="$TMP/$name"
 	rm -rf "$repo"
 	mkdir -p "$repo/scripts" "$repo/var/agent-tmp"
@@ -52,9 +80,18 @@ mkrepo() {
 	printf '#!/bin/sh\n%s\n' "$base_body" > "$repo/scripts/fresh-gate.sh"
 	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
 	create_checker_test_stubs "$repo" "$failing_test"
+	if [ -n "$fixture_value" ]; then
+		printf '%s\n' "$fixture_value" > "$repo/tests/cli/runner-fixture-value"
+	fi
 	git -C "$repo" add -A
 	git -C "$repo" commit -qm "[test] base gate"
-	printf '#!/bin/sh\n%s\n' "$head_body" > "$repo/scripts/fresh-gate.sh"
+	printf '#!/bin/sh\n# Pushed fixture revision.\n%s\n' "$head_body" > "$repo/scripts/fresh-gate.sh"
+	if [ -n "$head_failing_checker" ]; then
+		create_checker_test_stubs "$repo" "$head_failing_checker"
+	fi
+	if [ -n "$head_verdict_body" ]; then
+		printf '#!/bin/sh\n%s\n' "$head_verdict_body" > "$repo/scripts/full-suite-verdict.sh"
+	fi
 	git -C "$repo" add -A
 	git -C "$repo" commit -qm "[test] head gate"
 	printf '%s' "$repo"
@@ -68,7 +105,7 @@ run_adapter() {
 	printf '%s' "$?"
 }
 if [ "${OMP_KIT_CHECKER_CONTRACT_DRIFT_PROBE:-0}" = 1 ]; then
-	repo=$(mkrepo checker-contract 'echo BASE-GATE' 'echo HEAD-GATE')
+	repo=$(mkrepo checker-contract 'echo BASE-GATE')
 	rc=$(run_adapter "$repo")
 	out=$(cat "$TMP/out")
 	if [ "$rc" = "0" ] && printf '%s' "$out" | grep -Fq 'GREEN checker-contract check-staged-br-init.test.sh'; then
@@ -79,19 +116,49 @@ if [ "${OMP_KIT_CHECKER_CONTRACT_DRIFT_PROBE:-0}" = 1 ]; then
 	exit 1
 fi
 
-# 1. planted: HEAD deletes the gate step; the BASE gate still judges
-repo=$(mkrepo weakened 'echo BASE-GATE' 'echo HEAD-GATE; exit 1')
+# RUNFROMTREE1: the candidate judge evaluates a real fixture input that the
+# incumbent judge did not check. A refusal must come from that check (23).
+candidate_fixture_gate="fixture_archive=
+while [ \"\$#\" -gt 0 ]; do
+	case \"\$1\" in
+		--archive-dir) fixture_archive=\$2; shift 2 ;;
+		*) shift ;;
+	esac
+done
+fixture_value=
+IFS= read -r fixture_value < \"\$fixture_archive/tests/cli/runner-fixture-value\"
+if [ \"\$fixture_value\" != healthy ]; then
+	printf 'RUNFROMTREE-FIXTURE-REJECTED: %s\n' \"\$fixture_value\" >&2
+	exit 23
+fi"
+repo=$(mkrepo candidate-runner-refuses 'exit 0' "$candidate_fixture_gate" "" broken)
 rc=$(run_adapter "$repo")
-out=$(cat "$TMP/out")
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "BASE-GATE" && ! printf '%s' "$out" | grep -q "HEAD-GATE"; then
+if [ "$rc" = 23 ]; then
 	pass=$((pass + 1))
 else
-	fail=$((fail + 1)); printf 'FAIL base-authoritative: rc=%s out<<<%s>>>\n' "$rc" "$out"
+	fail=$((fail + 1)); printf 'FAIL candidate-runner-must-refuse-fixture: rc=%s (want 23)\n' "$rc"
 fi
+repo=$(mkrepo candidate-runner-control 'exit 0' "$candidate_fixture_gate" "" healthy)
+rc=$(run_adapter "$repo")
+if [ "$rc" = 0 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL candidate-runner-fixed-fixture: rc=%s\n' "$rc"
+fi
+# A candidate checker contract must pass before its judge is used; the base
+# contract is healthy here, so checking only the base silently admits this.
+repo=$(mkrepo candidate-contract-refuses 'exit 0' 'exit 0' "" "" publishability.test.sh)
+rc=$(run_adapter "$repo")
+if [ "$rc" = 7 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL candidate-contract-must-refuse: rc=%s (want 7)\n' "$rc"
+fi
+
  # 1a. the installed archive gate binds its run ledger to the pushing checkout,
  # not the temporary exact-commit export (which has no .git directory).
  # shellcheck disable=SC2016
-repo=$(mkrepo ledger-bound 'mkdir -p "$(dirname "$FRESH_GATE_LEDGER")"; printf "%s\n" "$FRESH_GATE_LEDGER" > "$FRESH_GATE_LEDGER.probe"' 'echo HEAD-GATE')
+repo=$(mkrepo ledger-bound 'mkdir -p "$(dirname "$FRESH_GATE_LEDGER")"; printf "%s\n" "$FRESH_GATE_LEDGER" > "$FRESH_GATE_LEDGER.probe"')
 rc=$(run_adapter "$repo")
 ledger_probe="$repo/.git/omp-kit/fresh-gate-runs.jsonl.probe"
 if [ "$rc" = "0" ] && [ -s "$ledger_probe" ] && [ "$(cat "$ledger_probe")" = "$repo/.git/omp-kit/fresh-gate-runs.jsonl" ]; then
@@ -100,22 +167,13 @@ else
 	fail=$((fail + 1)); printf 'FAIL ledger-binding: rc=%s probe=%s out<<<%s>>>\n' "$rc" "$(cat "$ledger_probe" 2>/dev/null || true)" "$(cat "$TMP/out")"
 fi
 
-# 2. a failing BASE gate refuses even when HEAD passes
-repo=$(mkrepo strictbase 'echo BASE-GATE-FAIL; exit 1' 'echo HEAD-GATE')
-rc=$(run_adapter "$repo")
-out=$(cat "$TMP/out")
-if [ "$rc" != "0" ] && printf '%s' "$out" | grep -q "BASE-GATE-FAIL"; then
-	pass=$((pass + 1))
-else
-	fail=$((fail + 1)); printf 'FAIL base-failure-refuses: rc=%s out<<<%s>>>\n' "$rc" "$out"
-fi
 
 # 2a. fixture identity writes from the gate must not reach the hook repository.
 fixture="$TMP/git-env-fixture"
 mkdir -p "$fixture"
 git -C "$fixture" init -q
 git -C "$fixture" config user.name "Sentinel"
-repo=$(mkrepo scrub-git-env "git -C $fixture config user.name 'Fixture Identity'" "echo HEAD-GATE")
+repo=$(mkrepo scrub-git-env "git -C $fixture config user.name 'Fixture Identity'")
 rc=$(run_adapter "$repo")
 hook_name=$(git -C "$repo" config --local user.name)
 fixture_name=$(git -C "$fixture" config --local user.name)
@@ -127,7 +185,6 @@ fi
 
 # 3. planted: a commit built on base B that deletes lines added at B+1 is
 # refused, naming the commit that added them
-KITREPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 stalerepo="$TMP/stale"
 rm -rf "$stalerepo"
 mkdir -p "$stalerepo/scripts" "$stalerepo/src" "$stalerepo/var/agent-tmp"
@@ -176,7 +233,7 @@ fi
 
 # 5. every checker contract is invoked from the base archive and blocks on failure
 for checker_test in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh; do
-	repo=$(mkrepo "checker-$checker_test" 'echo BASE-GATE' 'echo HEAD-GATE' "$checker_test")
+	repo=$(mkrepo "checker-$checker_test" 'echo BASE-GATE' "" "$checker_test")
 	rc=$(run_adapter "$repo")
 	out=$(cat "$TMP/out")
 	if [ "$rc" = "7" ] && printf '%s' "$out" | grep -q "CHECKER-FAIL: $checker_test"; then
@@ -344,14 +401,14 @@ fi
 # holding .owner and gate.log (the failing output), and keeps its exit code. An `exec` into the
 # last step replaced the shell owning the EXIT trap, so every push leaked its extract.
 leftover() { find "$1/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate*' | wc -l | tr -d ' '; }
-repo=$(mkrepo cleangreen 'echo BASE-GATE' 'echo HEAD-GATE')
+repo=$(mkrepo cleangreen 'echo BASE-GATE')
 rc=$(run_adapter "$repo")
 if [ "$rc" = "0" ] && [ "$(leftover "$repo")" = "0" ]; then
 	pass=$((pass + 1))
 else
 	fail=$((fail + 1)); printf 'FAIL green-leaves-no-extract: rc=%s leftover=%s\n' "$rc" "$(leftover "$repo")"
 fi
-repo=$(mkrepo cleanred 'echo BASE-GATE-FAIL; exit 5' 'echo HEAD-GATE')
+repo=$(mkrepo cleanred 'echo BASE-GATE-FAIL; exit 5')
 rc=$(run_adapter "$repo")
 kept=$(find "$repo/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate.*' ! -name 'pre-push-gate-base.*')
 files=$( [ -n "$kept" ] && (cd "$kept" && find . ! -type d | sort | tr '\n' ' ') )
@@ -362,7 +419,7 @@ else
 fi
 # ompkit-fp72.40: a red before fresh-gate (an early checker) also keeps exactly its log and its
 # exit code, and fresh-gate never runs after it.
-repo=$(mkrepo earlyred 'echo FRESH-GATE-RAN' 'echo HEAD-GATE' publishability.test.sh)
+repo=$(mkrepo earlyred 'echo FRESH-GATE-RAN' "" publishability.test.sh)
 rc=$(run_adapter "$repo")
 kept=$(find "$repo/var/agent-tmp" -maxdepth 1 -name 'pre-push-gate.*' ! -name 'pre-push-gate-base.*')
 files=$( [ -n "$kept" ] && (cd "$kept" && find . ! -type d | sort | tr '\n' ' ') )
@@ -375,7 +432,7 @@ fi
 # ompkit-fp72.40: a step that fails without an explicit exit (the regexploit gate) still stops the
 # push: set -e must hold inside the logged body (POSIX drops it inside an AND-OR list).
 printf '#!/usr/bin/env python3\nimport sys\nprint("REGEXPLOIT-RED")\nsys.exit(3)\n' > "$TMP/regexploit-red.py"
-repo=$(mkrepo setered 'echo FRESH-GATE-RAN' 'echo HEAD-GATE')
+repo=$(mkrepo setered 'echo FRESH-GATE-RAN')
 git -C "$repo" checkout -q HEAD~1
 cp "$TMP/regexploit-red.py" "$repo/scripts/regexploit-gate.py"
 git -C "$repo" commit -qam "[test] base regexploit red"
@@ -390,7 +447,7 @@ fi
 
 # ompkit-fp72.40: a symlink inside the extract (a kit-update test fixture's prefix/bin/omp-kit link)
 # kept its parent dirs non-empty, so cleanup that deleted only regular files left the whole tree.
-repo=$(mkrepo cleansymlink "a=\$2; mkdir -p \"\$a/var/agent-tmp/kit-update-x/prefix/bin\"; ln -s ../releases/0.2.3/bin/omp-kit \"\$a/var/agent-tmp/kit-update-x/prefix/bin/omp-kit\"; echo BASE-GATE" 'echo HEAD-GATE')
+repo=$(mkrepo cleansymlink "a=\$2; mkdir -p \"\$a/var/agent-tmp/kit-update-x/prefix/bin\"; ln -s ../releases/0.2.3/bin/omp-kit \"\$a/var/agent-tmp/kit-update-x/prefix/bin/omp-kit\"; echo BASE-GATE")
 rc=$(run_adapter "$repo")
 if [ "$rc" = "0" ] && [ "$(leftover "$repo")" = "0" ]; then
 	pass=$((pass + 1))
@@ -400,7 +457,7 @@ fi
 
 # ompkit-fp72.40 planted negative: SIGKILL skips the trap, so the extract survives; it must carry an
 # .owner naming the dead gate pid in a pid-named dir, and the real scratch reaper must judge it REAP.
-repo=$(mkrepo killed "echo \$\$ > \"\$GATE_PIDFILE\"; exec sleep 30" 'echo HEAD-GATE')
+repo=$(mkrepo killed "echo \$\$ > \"\$GATE_PIDFILE\"; exec sleep 30")
 printf 'refs/heads/main %s refs/heads/main %s\n' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)" > "$TMP/killed.in"
 rm -f "$TMP/gate.pid"
 ( cd -- "$repo" && GATE_PIDFILE="$TMP/gate.pid" exec sh "$ADAPTER" ) < "$TMP/killed.in" > "$TMP/killed.out" 2>&1 &
@@ -426,7 +483,7 @@ fi
 # cleanup, so the extract tree is removed (AC2) while the failed parent keeps exactly .owner
 # + gate.log naming the dead gate pid (AC3). Never SIGKILL here: that skips the trap and
 # tests a different path (see killed-gate-extract-reapable above).
-repo=$(mkrepo termred "echo \$\$ > \"\$GATE_PIDFILE\"; exec sleep 30" 'echo HEAD-GATE')
+repo=$(mkrepo termred "echo \$\$ > \"\$GATE_PIDFILE\"; exec sleep 30")
 printf 'refs/heads/main %s refs/heads/main %s\n' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)" > "$TMP/term.in"
 rm -f "$TMP/term.pid"
 ( cd -- "$repo" && GATE_PIDFILE="$TMP/term.pid" exec sh "$ADAPTER" ) < "$TMP/term.in" > "$TMP/term.out" 2>&1 &
@@ -617,7 +674,7 @@ HANG="echo \$\$ > \"\$GATE_PIDFILE\"; python3 '$TMP/orphan.py' \"\$ORPHAN_PIDFIL
 # ignored SIGINT, which a shell cannot trap, so the launcher restores the default disposition a
 # terminal push has; setsid gives the adapter its own process group, as git_converge spawns git.
 start_hanging() {
-	repo=$(mkrepo "$1" "$HANG" 'echo HEAD-GATE')
+	repo=$(mkrepo "$1" "$HANG")
 	printf 'refs/heads/main %s refs/heads/main %s\n' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)" > "$TMP/$1.in"
 	rm -f "$TMP/$1.gate" "$TMP/$1.orphan" "$TMP/$1.orphan.leader" "$TMP/$1.sleep"
 	( cd -- "$repo" && GATE_PIDFILE="$TMP/$1.gate" ORPHAN_PIDFILE="$TMP/$1.orphan" SLEEP_PIDFILE="$TMP/$1.sleep" SETSID="${2:-}" \
@@ -660,9 +717,9 @@ start_hanging scr-int; kill -s INT "$hpid"; judge_signalled scr-int 130
 start_hanging scr-timeout setsid; kill -s TERM -- "-$hpid"; judge_signalled scr-timeout 143 "gate sleep"
 
 # Success and failure leave 0 extracts (a red keeps only its .owner + gate.log record).
-repo=$(mkrepo scr-green 'echo BASE-GATE' 'echo HEAD-GATE')
+repo=$(mkrepo scr-green 'echo BASE-GATE')
 grc=$(run_adapter "$repo"); gleft=$(extracts "$repo")
-repo=$(mkrepo scr-red 'echo BASE-GATE-FAIL; exit 5' 'echo HEAD-GATE')
+repo=$(mkrepo scr-red 'echo BASE-GATE-FAIL; exit 5')
 rrc=$(run_adapter "$repo"); rleft=$(extracts "$repo")
 if [ "$grc" = "0" ] && [ "$gleft" = "0" ] && [ "$rrc" = "5" ] && [ "$rleft" = "0" ]; then
 	pass=$((pass + 1))
@@ -703,7 +760,7 @@ fi
 # A live gate's extract is never swept, even with nothing holding it (mutant: owner_running always
 # false); a recorded pid that now names a different process (process_start differs: pid reuse) is
 # not that gate, so its extract goes (mutant: owner_running ignores process_start).
-repo=$(mkrepo scr-live 'echo BASE-GATE' 'echo HEAD-GATE')
+repo=$(mkrepo scr-live 'echo BASE-GATE')
 sleep 120 &
 livepid=$!
 livestart=$(ps -p "$livepid" -o lstart= | sed 's/^ *//;s/ *$//')
@@ -727,7 +784,7 @@ fi
 # with stdin closed it finishes at once. Mutant: the pre-fix body (foreground, inheriting stdin).
 # Control: a writerless pipe (the writer already closed, as git's chain runner leaves it) reads EOF
 # and finishes either way, so it is not what wedged a push.
-repo=$(mkrepo scr-stdin 'cat >/dev/null; echo STDIN-EOF' 'echo HEAD-GATE')
+repo=$(mkrepo scr-stdin 'cat >/dev/null; echo STDIN-EOF')
 line=$(printf 'refs/heads/main %s refs/heads/main %s' "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse HEAD~1)")
 kill_tree() {
 	for p in $(ps -A -o pid= -o ppid= | awk -v r="$1" '{ p[$1] = $2 } END { m[r] = 1; g = 1; while (g) { g = 0; for (x in p) if (!(x in m) && (p[x] in m)) { m[x] = 1; g = 1 } } for (x in m) print x }'); do
@@ -770,7 +827,7 @@ carry_measurement() {
 # fresh-gate.sh itself: its WORK dir is pid-named with .owner, traps are set before it exists, a
 # TERM mid-run stops its tree promptly and removes WORK (mutants: foreground steps, trap after
 # mktemp); a SIGKILLed fresh-gate leaves WORK, which the next push's sweep removes.
-repo=$(mkrepo scr-fresh 'echo BASE-GATE' 'echo HEAD-GATE')
+repo=$(mkrepo scr-fresh 'echo BASE-GATE')
 mkdir -p "$repo/tools" "$TMP/fg-archive/scripts" "$TMP/fg-archive/.git"
 cp "$KITREPO/scripts/fresh-gate.sh" "$repo/tools/fresh-gate.sh"
 # The gate runs from tools/ (its SCRIPT_DIR) but binds the judging files at repo-root scripts/.
@@ -827,6 +884,8 @@ GATE_STUB
 
 mkverdictrepo() {
 	name=$1
+	head_verdict_body=${2:-}
+	fixture_value=${3:-}
 	repo="$TMP/$name"
 	rm -rf "$repo"
 	mkdir -p "$repo/scripts" "$repo/tests/cli" "$repo/var/agent-tmp"
@@ -844,16 +903,22 @@ mkverdictrepo() {
 	printf 'import { test, expect } from "bun:test";\ntest("green", () => { expect(1 + 1).toBe(2); });\n' > "$repo/tests/cli/green.test.ts"
 	printf '#!/bin/sh\necho shell-suite-ok\n' > "$repo/tests/cli/green.test.sh"
 	printf 'import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1, 1)\nif __name__ == "__main__":\n    unittest.main()\n' > "$repo/tests/cli/green_test.py"
+	if [ -n "$fixture_value" ]; then
+		printf '%s\n' "$fixture_value" > "$repo/tests/cli/runner-fixture-value"
+	fi
 	git -C "$repo" add -A
 	git -C "$repo" commit -qm "[test] verdict base"
 	printf '#!/bin/sh\necho shell-suite-ok\nprintf "extra-ok\\n"\n' > "$repo/tests/cli/extra.test.sh"
+	if [ -n "$head_verdict_body" ]; then
+		printf '#!/bin/sh\n%s\n' "$head_verdict_body" > "$repo/scripts/full-suite-verdict.sh"
+	fi
 	git -C "$repo" add -A
 	git -C "$repo" commit -qm "[test] verdict head"
 	printf '%s' "$repo"
 }
 verdictcache() {
 	repo=$1
-	role=${2:-base}
+	role=${2:-main}
 	cache=${3:-}
 	tree=$(git -C "$repo" rev-parse "HEAD^{tree}")
 	if [ -n "$cache" ]; then
@@ -864,6 +929,31 @@ verdictcache() {
 			--role "$role" --judge-root "$repo"
 	fi
 }
+
+# The full-suite runner itself, not only fresh-gate, comes from the candidate.
+vrepro=$(mkverdictrepo candidate-verdict-refuses "$candidate_fixture_gate" broken)
+rc=$(run_adapter "$vrepro")
+if [ "$rc" = 23 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL candidate-full-suite-must-refuse-fixture: rc=%s (want 23)\n' "$rc"
+fi
+vrepro=$(mkverdictrepo candidate-verdict-control "$candidate_fixture_gate" healthy)
+rc=$(run_adapter "$vrepro")
+if [ "$rc" = 0 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL candidate-full-suite-fixed-fixture: rc=%s\n' "$rc"
+fi
+# The first version introducing a full-suite runner must also be judged, even
+# when the base predates that capability.
+vrepro=$(mkrepo candidate-introduces-verdict 'exit 0' 'exit 0' "" broken "" "$candidate_fixture_gate")
+rc=$(run_adapter "$vrepro")
+if [ "$rc" = 23 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL newly-introduced-verdict-must-refuse-fixture: rc=%s (want 23)\n' "$rc"
+fi
 
 # LAND1-A control: a green tree passes and records a complete PASS verdict for its exact tree.
 vrepro=$(mkverdictrepo land1a)
@@ -910,45 +1000,6 @@ else
 	fail=$((fail + 1)); printf 'FAIL land1d-changed-tree-reruns: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 
-# LAND1-E: the same tree under changed check bytes cannot reuse the old verdict. base2 carries a
-# comment-only change to the judging script; head2 re-commits head1's exact content under base2,
-# so the candidate tree is byte-identical while the checks identity moved.
-erepro="$TMP/land1e"
-rm -rf "$erepro"
-mkdir -p "$erepro/scripts" "$erepro/tests/cli" "$erepro/var/agent-tmp"
-git -C "$erepro" init -q
-git -C "$erepro" config user.email "test@example.invalid"
-git -C "$erepro" config user.name "worker-1"
-cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" "$KITREPO/scripts/kitlib-tmp.sh" "$erepro/scripts/"
-carry_measurement "$erepro"
-create_verdict_gate_stub "$erepro"
-printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$erepro/scripts/regexploit-gate.py"
-create_checker_test_stubs "$erepro"
-printf 'import { test, expect } from "bun:test";\ntest("green", () => { expect(1 + 1).toBe(2); });\n' > "$erepro/tests/cli/green.test.ts"
-git -C "$erepro" add -A
-git -C "$erepro" commit -qm "[test] e base1"
-printf '#!/bin/sh\necho shell-suite-ok\n' > "$erepro/tests/cli/extra.test.sh"
-git -C "$erepro" add -A
-git -C "$erepro" commit -qm "[test] e head1"
-head1=$(git -C "$erepro" rev-parse HEAD)
-rc=$(run_adapter "$erepro")
-out1=$(cat "$TMP/out")
-git -C "$erepro" checkout -q HEAD~1
-printf '# judging-script comment change only\n' >> "$erepro/scripts/full-suite-verdict.sh"
-git -C "$erepro" add -A
-git -C "$erepro" commit -qm "[test] e base2 judge change"
-git -C "$erepro" checkout -q "$head1" -- scripts tests
-git -C "$erepro" commit -qm "[test] e head2 same tree"
-tree1=$(git -C "$erepro" rev-parse "$head1^{tree}")
-tree2=$(git -C "$erepro" rev-parse "HEAD^{tree}")
-rc=$(run_adapter "$erepro")
-out=$(cat "$TMP/out")
-if [ "$tree1" = "$tree2" ] && [ "$rc" = "0" ] && printf '%s' "$out1" | grep -q "GREEN full-suite-verdict" \
-	&& printf '%s' "$out" | grep -q "running the complete suite" && ! printf '%s' "$out" | grep -q "VERDICT REUSED"; then
-	pass=$((pass + 1))
-else
-	fail=$((fail + 1)); printf 'FAIL land1e-changed-checks-rerun: tree1=%s tree2=%s rc=%s out<<<%s>>>\n' "$tree1" "$tree2" "$rc" "$out"
-fi
 
 # LAND1-F: the same tree under a changed runtime identity cannot reuse the old verdict.
 frepro=$(mkverdictrepo land1f)
@@ -999,14 +1050,45 @@ else
 	fail=$((fail + 1)); printf 'FAIL land1h-timeout-nocache: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 
-# LAND1-I: a base archive predating the checker skips with a named SKIP and passes the stub gate.
-irepro=$(mkrepo skipverdict 'echo BASE-GATE' 'echo HEAD-GATE')
-rc=$(run_adapter "$irepro")
-out=$(cat "$TMP/out")
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "SKIP full-suite-verdict: checker absent from base archive"; then
-	pass=$((pass + 1))
+
+# Removing a required candidate runner cannot fall back to the base judge or
+# turn a previously required full judgment into a bootstrap SKIP.
+missing_verdict_repo=$(mkverdictrepo candidate-verdict-missing)
+if python3 -B - "$KITREPO/scripts" "$missing_verdict_repo" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import kitlib_run
+import pysafe
+def main():
+    repo = sys.argv[2]
+    commands = [
+        ["git", "-C", repo, "rm", "scripts/full-suite-verdict.sh"],
+        ["git", "-C", repo, "commit", "-qm", "[test] candidate removes required runner"],
+    ]
+    for command in commands:
+        result = kitlib_run.run(command, deadline_s=30)
+        sys.stdout.buffer.write(result.stdout)
+        sys.stderr.buffer.write(result.stderr)
+        if result.rc is None or result.timed_out or result.killed or result.truncated:
+            return 125
+        if result.rc != 0:
+            return result.rc
+    return 0
+pysafe.run_main(main)
+PY
+then
+	rc=$(run_adapter "$missing_verdict_repo")
+	missing_marker=0
+	while IFS= read -r output_line; do
+		case "$output_line" in *CANDIDATE_RUNNER_MISSING*) missing_marker=1 ;; esac
+	done < "$TMP/out"
+	if [ "$rc" = 1 ] && [ "$missing_marker" = 1 ]; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL missing-candidate-runner-must-refuse: rc=%s marker=%s\n' "$rc" "$missing_marker"
+	fi
 else
-	fail=$((fail + 1)); printf 'FAIL land1i-bootstrap-skip: rc=%s out<<<%s>>>\n' "$rc" "$out"
+	fail=$((fail + 1)); printf 'FAIL missing-candidate-runner-fixture-setup\n'
 fi
 
 # TAGPUSHGATE1 (ompkit-t7cn7.2): a new tag at a commit already on the pushed-to
