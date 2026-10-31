@@ -4,6 +4,7 @@ import { chmodSync, closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, o
 import { dirname, join, resolve } from "node:path";
 import type { Stats } from "node:fs";
 import type { CliResult, ParsedCommand } from "./cli.ts";
+import { probeIncarnationSync } from "./kitlib/proc.ts";
 
 /** Native implementation based on git_converge.py (a58ef61, blob 9ffa2446cb6016132897059f4348028f468a98bb).
  * The .138 owner gate additionally covers every independently both-changed path, even equal results;
@@ -353,11 +354,28 @@ function applyConverge(repo: string, plan: Plan): { new_head: string; worktree_w
 	return { new_head: next, worktree_written: written, index_updated: updates.length, races };
 }
 type ConvergeLock = { path: string; ref: string; token: string };
+function unverifiedLock(detail: string): Refused {
+	return new Refused("CONVERGE_LOCK_UNVERIFIED", [{ path: "", kind: "CONVERGE_LOCK_UNVERIFIED", detail }]);
+}
 function liveOwner(text: string): number | null {
-	const pidText = text.split("\n")[0]?.trim() ?? "", pid = Number(pidText);
-	if (!pidText || !Number.isSafeInteger(pid) || pid < 0 || [...pidText].some(c => c < "0" || c > "9")) throw new Refused("CONVERGE_LOCK_UNVERIFIED", [{ path: "", kind: "CONVERGE_LOCK_UNVERIFIED", detail: "Lock owner PID is not verifiable" }]);
+	const pidText = text.split("\n")[0]?.trim() ?? "";
+	// git_converge.py keeps the same path as JSON {pid,start_time} under a kernel flock and leaves it in place
+	// after a run, so every repo it has published holds one. Its owner is an incarnation (PIDIDENT1 ompkit-a0vy1):
+	// only a live pid with the recorded start holds it; a zombie, a reused pid or a gone pid is dead.
+	if (pidText.startsWith("{")) return liveIncarnationOwner(pidText);
+	const pid = Number(pidText);
+	if (!pidText || !Number.isSafeInteger(pid) || pid < 0 || [...pidText].some(c => c < "0" || c > "9")) throw unverifiedLock("Lock owner PID is not verifiable");
 	try { process.kill(pid, 0); return pid; }
 	catch (error) { if (errno(error, "ESRCH")) return null; if (errno(error, "EPERM")) return pid; throw error; }
+}
+function liveIncarnationOwner(json: string): number | null {
+	let metadata: unknown;
+	try { metadata = JSON.parse(json); } catch { throw unverifiedLock("Lock metadata is not valid JSON {pid,start_time}"); }
+	const { pid, start_time: start } = (metadata ?? {}) as { pid?: unknown; start_time?: unknown };
+	if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0 || typeof start !== "string" || !start) throw unverifiedLock("Lock metadata is not valid JSON {pid,start_time}");
+	const probe = probeIncarnationSync({ pid, start });
+	if (probe.state === "unknown") throw unverifiedLock(`Unable to verify the lock owner's process incarnation: ${probe.evidence.reason}`);
+	return probe.state === "live" ? pid : null;
 }
 function releaseLock(repo: string, lock: ConvergeLock): void {
 	// Keep the CAS authority until the conventional PID file has been released.

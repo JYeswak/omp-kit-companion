@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSyn
 import { join, resolve } from "node:path";
 import { convergeCommand, convergeRepository, type ConvergeOptions, type ConvergeResult } from "../../src/converge.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { incarnationSync } from "../../src/kitlib/proc.ts";
 
 const root = resolve(import.meta.dir, "../.."), scratchRoot = join(root, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
@@ -237,6 +238,25 @@ function exitedPid(): number {
 test("dead conventional lock is reclaimed and convergence remains functional", async () => {
 	const w = world(); remote(w, "f1", "remote\n"); put(w.a, ".git/git_converge.lock", String(exitedPid()));
 	const r = await apply(w); expect(r.applied).toBe(true); expect(read(w.a, "f1")).toBe("remote\n"); expect(existsSync(join(w.a, ".git/git_converge.lock"))).toBe(false);
+});
+// git_converge.py leaves JSON {pid,start_time} at the same path after every run (PIDIDENT1 ompkit-a0vy1).
+test("a finished git_converge.py lock is reclaimed: its recorded incarnation is gone", async () => {
+	const w = world(); remote(w, "f1", "remote\n");
+	put(w.a, ".git/git_converge.lock", JSON.stringify({ pid: exitedPid(), start_time: "Sat Oct 31 13:22:18 2026" }));
+	const r = await apply(w); expect(r.applied).toBe(true); expect(read(w.a, "f1")).toBe("remote\n"); expect(existsSync(join(w.a, ".git/git_converge.lock"))).toBe(false);
+});
+test("a live git_converge.py incarnation holds the lock; the same pid with another start does not", async () => {
+	const live = incarnationSync(process.pid); if (!live) throw new Error("ps does not list this process");
+	const held = world(), lock = join(held.a, ".git/git_converge.lock"), meta = JSON.stringify({ pid: process.pid, start_time: live.start });
+	put(held.a, ".git/git_converge.lock", meta);
+	expect((await apply(held)).reason).toBe("CONVERGE_BUSY"); expect(readFileSync(lock, "utf8")).toBe(meta);
+	const reused = world(); remote(reused, "f1", "remote\n");
+	put(reused.a, ".git/git_converge.lock", JSON.stringify({ pid: process.pid, start_time: "Thu Jan 1 00:00:00 1970" }));
+	expect((await apply(reused)).applied).toBe(true); expect(read(reused.a, "f1")).toBe("remote\n");
+});
+test("malformed JSON lock metadata refuses instead of deleting it", async () => {
+	const w = world(); put(w.a, ".git/git_converge.lock", '{"pid":"x"}');
+	expect((await apply(w)).reason).toBe("CONVERGE_LOCK_UNVERIFIED"); expect(readFileSync(join(w.a, ".git/git_converge.lock"), "utf8")).toBe('{"pid":"x"}');
 });
 test("dead CAS authority is replaced using its exact token, not its pathname", async () => {
 	const w = world(), pid = exitedPid();
