@@ -61,7 +61,7 @@ const liveDirs = new Set<string>();
 let hooksInstalled = false;
 
 /** Gives the owner rwx on `dir` and every real directory under it; symlinks are never followed or changed. */
-function makeDirsWritable(dir: string): void {
+export function makeDirsWritable(dir: string): void {
 	const stat = lstatSync(dir, { throwIfNoEntry: false });
 	if (stat === undefined || !stat.isDirectory()) return;
 	chmodSync(dir, (stat.mode & 0o7777) | 0o700);

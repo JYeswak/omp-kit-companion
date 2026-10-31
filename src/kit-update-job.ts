@@ -1,12 +1,14 @@
-import { lstatSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { spawnSync } from "node:child_process";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
 import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, type KitPostcheck, type KitPostcheckDetail, type KitReconcileResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
+import { acquireKitUpdateLock, type UpdateLockToken } from "./mutations.ts";
+import { makeDirsWritable } from "./kitlib/tmp.ts";
 
 /** The job installs the kit for the whole machine: it has no project, and its service cwd (HOME) is never watched as one. */
 export type KitUpdateJobConfig = Omit<KitUpdateInput, "indexPath" | "archivePath" | "version" | "sourceTag" | "project"> & {
@@ -52,12 +54,14 @@ export type KitUpdateJobResult = {
 	 * for the owning director to commit (owner route); only failed > 0 is FINDINGS.
 	 */
 	hooks?: { status: "APPLIED" | "PENDING_COMMIT" | "FAILED" | "NOT_RUN"; repos: number; refreshed: number; fresh: number; pending_commit: number; failed: number };
+	retention?: { status: "APPLIED" | "FAILED"; kept: string[]; removed: string[]; pollsRemoved: string[]; reason?: string };
 };
 
-/** OK only for a clean cycle. A pending receipt, a postcheck that did not pass, or a failed relink, service reconcile or hook refresh is FINDINGS, even after a verified activation. */
+/** OK only for a clean cycle, including postchecks, relink, service reconcile, hook refresh and release retention. */
 export function kitUpdateJobOverall(result: KitUpdateJobResult): "OK" | "FINDINGS" {
 	return result.status === "FAILED" || result.status === "PENDING" || (result.postcheck !== undefined && result.postcheck !== "PASS") ||
-		result.relink === "FAILED" || result.service === "FAILED" || (result.hooks !== undefined && result.hooks.failed > 0) ? "FINDINGS" : "OK";
+		result.relink === "FAILED" || result.service === "FAILED" || (result.hooks !== undefined && result.hooks.failed > 0) ||
+		result.retention?.status === "FAILED" ? "FINDINGS" : "OK";
 }
 
 /** owner/repo slug for OMP_KIT_UPDATE_REPO; shared by the service renderer and the CLI gate. */
@@ -225,6 +229,69 @@ function pollTupleVerified(indexPath: string, archivePath: string, version: stri
 	} catch { return false; }
 }
 
+function retentionVersion(value: string): boolean {
+	return value.length <= 64 && !value.includes("\n") && SEMVER.test(value) &&
+		value.split(".").every(part => Number.isSafeInteger(Number(part)));
+}
+
+/** Capture the executable's physical release before activation can move the stable link. */
+function runningReleaseVersion(prefix: string): string | null {
+	const parts = relative(join(resolve(prefix), "releases"), realpathSync(process.execPath)).split(sep);
+	return parts.length === 3 && parts[1] === "bin" && parts[2] === "omp-kit" && retentionVersion(parts[0]!)
+		? parts[0]! : null;
+}
+
+/** Installed releases contain 0555 directories; never follow a symlink while changing their modes. */
+function writableReleaseTree(path: string): void {
+	const stat = lstatSync(path);
+	if (!stat.isDirectory() || realpathSync(path) !== path) throw new Error("KIT_RETENTION_UNSAFE_DIRECTORY");
+	makeDirsWritable(path);
+}
+
+/** The updater lock protects the active link and rollback selection for the whole destructive pass. */
+function retainReleases(prefix: string, stateRoot: string, active: string, protectedVersions: readonly (string | null)[]): NonNullable<KitUpdateJobResult["retention"]> {
+	const report: NonNullable<KitUpdateJobResult["retention"]> = { status: "APPLIED", kept: [], removed: [], pollsRemoved: [] };
+	let lock: UpdateLockToken | undefined;
+	try {
+		lock = acquireKitUpdateLock(stateRoot);
+		const releases = join(prefix, "releases");
+		if (!retentionVersion(active) || installedVersion(prefix) !== active ||
+			realpathSync(prefix) !== prefix || !lstatSync(releases).isDirectory() || realpathSync(releases) !== releases ||
+			!lstatSync(join(releases, active)).isDirectory()) throw new Error("KIT_RETENTION_ACTIVE_UNVERIFIED");
+		const versions = readdirSync(releases, { withFileTypes: true })
+			.filter(entry => entry.isDirectory() && retentionVersion(entry.name)).map(entry => entry.name);
+		const previous = versions.filter(version => compareSemver(version, active) < 0).sort(compareSemver).slice(-2);
+		const keep = new Set([active, ...previous]);
+		for (const version of protectedVersions) if (version !== null && retentionVersion(version)) keep.add(version);
+		report.kept = versions.filter(version => keep.has(version) || compareSemver(version, active) > 0).sort(compareSemver);
+		for (const version of versions) {
+			if (keep.has(version) || compareSemver(version, active) >= 0) continue;
+			const path = join(releases, version);
+			writableReleaseTree(path);
+			rmSync(path, { recursive: true });
+			report.removed.push(version);
+		}
+		for (const entry of readdirSync(stateRoot, { withFileTypes: true })) {
+			if (!entry.isDirectory() || !entry.name.startsWith("poll-")) continue;
+			const version = entry.name.slice(5);
+			if (!retentionVersion(version) || keep.has(version) || compareSemver(version, active) >= 0) continue;
+			const path = join(stateRoot, entry.name);
+			writableReleaseTree(path);
+			rmSync(path, { recursive: true });
+			report.pollsRemoved.push(entry.name);
+		}
+	} catch (error) {
+		report.status = "FAILED";
+		report.reason = error instanceof Error ? error.message : String(error);
+	} finally {
+		try { lock?.release(); } catch (error) {
+			report.status = "FAILED";
+			report.reason = error instanceof Error ? error.message : String(error);
+		}
+	}
+	return report;
+}
+
 /** One opt-in poll/apply cycle. No network or service installation occurs unless the caller enables it. */
 export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: KitUpdateJobDependencies = {}): Promise<KitUpdateJobResult> {
 	if (!config.enabled) return { status: "DISABLED", receiptId: null, activeVersion: null, notification: false };
@@ -250,6 +317,7 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		const preview = await plan({ prefix: config.prefix, stateRoot: config.stateRoot, home: config.home, platform: config.platform, ...source });
 		if (preview.status === "CURRENT") return record(config.stateRoot, runId, { status: "CURRENT", receiptId: null, activeVersion: preview.current.version, notification: false, relink: "NOT_RUN" });
 		if (preview.status !== "UPDATE_AVAILABLE") { const refusal = preview as KitUpdateRefusal; return record(config.stateRoot, runId, { status: "REFUSED", receiptId: null, activeVersion: null, notification: false, reason: refusal.reason, relink: "NOT_RUN" }); }
+		const runningVersion = runningReleaseVersion(config.prefix);
 		const result = await apply(preview);
 		if (result.status !== "UPDATED" && result.status !== "PARTIAL") return record(config.stateRoot, runId, { status: result.status, receiptId: result.receiptId, activeVersion: result.activeVersion, notification: false, relink: "NOT_RUN" });
 		const postcheck: Pick<KitUpdateJobResult, "postcheck" | "postcheckReason" | "postcheckDetail"> = result.status === "UPDATED"
@@ -315,10 +383,14 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		} catch {
 			hooks = { status: "FAILED" as const, repos: 0, refreshed: 0, fresh: 0, pending_commit: 0, failed: 1 };
 		}
+		const retention = result.status === "UPDATED" && result.postcheck.status === "PASS" && hooks.failed === 0 && activeVersion !== null
+			? retainReleases(config.prefix, config.stateRoot, activeVersion, [runningVersion])
+			: undefined;
 		const hookNote = hooks.repos === 0 ? "; no fleet repos to refresh hooks in"
 			: `; hooks ${hooks.status}: ${hooks.refreshed} refreshed, ${hooks.fresh} fresh, ${hooks.pending_commit} pending director commit, ${hooks.failed} failed over ${hooks.repos} repo(s)`;
-		await dependencies.notify?.(`omp-kit updated to ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${findings}${hookNote}`);
-		return record(config.stateRoot, runId, { ...activated, relink: "APPLIED", service: "APPLIED", ...pluginReceipt, hooks });
+		const retentionNote = retention?.status === "FAILED" ? "; release retention FAILED (see job record)" : "";
+		await dependencies.notify?.(`omp-kit updated to ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${findings}${hookNote}${retentionNote}`);
+		return record(config.stateRoot, runId, { ...activated, relink: "APPLIED", service: "APPLIED", ...pluginReceipt, hooks, ...(retention ? { retention } : {}) });
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		await dependencies.notify?.("omp-kit update job failed: " + reason);

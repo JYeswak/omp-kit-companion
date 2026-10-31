@@ -1,0 +1,1 @@
+- Automatic kit updates now retire older installed releases and their poll downloads only after a successful update, keeping the active release, its two preceding installed versions, the updater's running release, and newer staged versions. Partial updates preserve recovery artifacts; cleanup failures are recorded as findings.
