@@ -10,6 +10,7 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 import { nativeCacheEnv, writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { countCaseRows, runFastTest, type FastTestInput, type FastTestReport, type MatcherObservationInput, type MatcherObservationReport } from "../../src/test-runner.ts";
 import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } from "../../src/external-pack.ts";
+import { run as kitlibRun } from "../../src/kitlib/run.ts";
 
  const REPO_ROOT = resolve(import.meta.dir, "../..");
  // l9pt box 4: suite-owned TMPDIR. Fixtures must never land in the ambient
@@ -41,6 +42,7 @@ import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } f
  let matcherExecutable = "";
  let matcherCaller = "";
 let nativePath = "";
+let suiteManifest = "";
 function countRuleRows(root: string): { rules: number; ttsrRules: number } {
 	const rules = readdirSync(join(root, "rules")).filter((name) => name.endsWith(".md"));
 	const ttsrRules = readFileSync(join(root, "MANIFEST.tsv"), "utf8").split("\n").slice(1).filter((row) => row.trim() !== "" && row.split("\t")[2] !== "always").length;
@@ -50,7 +52,7 @@ function copyPackResources(destination: string): void {
 	for (const directory of ["rules", "retired", "cases", "policy", "extensions"]) {
 		cpSync(join(REPO_ROOT, directory), join(destination, directory), { recursive: true });
 	}
-	for (const file of ["MANIFEST.tsv"]) writeFileSync(join(destination, file), readFileSync(join(REPO_ROOT, file)));
+	for (const file of ["MANIFEST.tsv"]) writeFileSync(join(destination, file), readFileSync(suiteManifest));
 	mkdirSync(join(destination, "scripts"), { recursive: true });
 	for (const file of ["rule-class.ts"]) {
 		writeFileSync(join(destination, "scripts", file), readFileSync(join(REPO_ROOT, "scripts", file)));
@@ -221,11 +223,28 @@ function createCountMismatchRelease(name: string): { root: string; stable: strin
 	return { root, stable, executable };
 }
 
- beforeAll(() => {
+ beforeAll(async () => {
  	suiteTmp = ownedTmp("suite-fast-test", { root: join(REPO_ROOT, "var/agent-tmp") }).path;
  	process.env.TMPDIR = suiteTmp;
  	process.env.TMP = suiteTmp;
  	process.env.TEMP = suiteTmp;
+	suiteManifest = join(REPO_ROOT, "MANIFEST.tsv");
+	if (!existsSync(suiteManifest)) {
+		const manifest = await kitlibRun(["sh", join(REPO_ROOT, "scripts", "build-manifest.sh"), "--stdout"], {
+			deadline_s: 60,
+			cwd: REPO_ROOT,
+			env: {
+				PATH: process.env.PATH ?? "/usr/bin:/bin",
+				HOME: process.env.HOME ?? suiteTmp,
+				TMPDIR: suiteTmp, TMP: suiteTmp, TEMP: suiteTmp,
+			},
+		});
+		if (manifest.rc !== 0 || manifest.timed_out) {
+			throw new Error(`source manifest generation failed (rc=${manifest.rc}, timed_out=${manifest.timed_out}): ${manifest.stdout.toString()}\n${manifest.stderr.toString()}`);
+		}
+		suiteManifest = join(suiteTmp, "MANIFEST.tsv");
+		writeFileSync(suiteManifest, manifest.stdout);
+	}
  	fixtureBase = ownedTmp("omp-kit-fast-test").path;
 	const installedOmp = resolveOmpIdentity(process.env);
 	const toolBin = join(fixtureBase, "native-tools");
