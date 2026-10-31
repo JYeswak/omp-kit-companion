@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "bead": "ompkit-774u.64",
+  "candidate_commit": "2ec0903fa0",
+  "source_export": "git archive of exact candidate commit; MANIFEST.tsv absent before the test",
+  "acceptance": {
+    "criterion": "a",
+    "command": "nice -n 10 bun test tests/cli/test-runner.test.ts -t 'long-token close fire'",
+    "exit_code": 0,
+    "output": "1 pass; 26 filtered out; 0 fail; 3 expect() calls; test-file 1.69s",
+    "result": "PASS: beforeAll generated the missing manifest into suite-owned scratch via kitlibRun, then the long-token CPU-time acceptance passed"
+  },
+  "previous_exact_archive_replay": {
+    "candidate_commit": "c26f0dcf9feb10999ef771fda7fd712d5958643b",
+    "criterion_b": "nice -n 10 sh tests/cli/check-staged-pysafe.test.sh -> rc=0, 14 pass, 0 fail"
+  },
+  "limitations": [
+    "This exact-2ec replay covers AC1; AC2's exact archive replay is recorded on c26, whose only delta to 2ec is this AC1 test setup.",
+    "No full declared-suite run; no publication or installed-runtime claim."
+  ]
+}

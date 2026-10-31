@@ -1,0 +1,22 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_a983808148215fff989320de00cc7c07f5a42eebc0ea02aa9c58d1c7a4213a5f",
+ "limitations": [
+  "Official pregrade AC1 remains UNVERIFIED because its archive lacked generated MANIFEST.tsv.",
+  "No full declared-suite run; no publication or installed-runtime claim."
+ ],
+ "operation": "CLOCKBOUND1 injected control verification",
+ "parameters": {
+  "candidate_commit": "c26f0dcf9feb10999ef771fda7fd712d5958643b",
+  "cpu_work": "1.2s actual test failed at CPU assertion with 2182964us",
+  "pregrade": "UNVERIFIED: missing generated MANIFEST.tsv; non-author exact-archive replay passed after generation",
+  "wall_stall": "2s actual test passed after 3.34s"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 2004,
+  "path": "docs/evidence/receipts/ompkit-774u.64-20261031-clockbound1-controls.result.json",
+  "sha256": "a473958acea055296a368240cd043e3876cdf41623a87543390b415a84bb450e"
+ }
+}

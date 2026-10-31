@@ -1,0 +1,22 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_7fed6c8e73e8ae424d9f6adf139867f97c9c4ca68968f5bee5482ce5f63c31c4",
+ "limitations": [
+  "AC2 exact archive replay is from c26; 2ec only changes the AC1 test setup.",
+  "No full declared-suite run; no publication or installed-runtime claim."
+ ],
+ "operation": "CLOCKBOUND1 exact candidate manifest fallback replay",
+ "parameters": {
+  "acceptance_a": "rc 0, 1 pass, 26 filtered, 0 fail after suite-owned manifest generation",
+  "acceptance_b": "previous exact c26 archive replay rc 0, 14 pass, 0 fail; 2ec changes only AC1 test setup",
+  "candidate_commit": "2ec0903fa0",
+  "source_archive": "exact git archive; MANIFEST.tsv absent before test"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 1026,
+  "path": "docs/evidence/receipts/ompkit-774u.64-20261031-clockbound1-manifest-replay.result.json",
+  "sha256": "0d0752ab3fa9f9d3b42e294188be655b58f666c1b09da9e17a3f8a98ebadca5d"
+ }
+}

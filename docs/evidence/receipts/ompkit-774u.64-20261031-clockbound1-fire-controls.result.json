@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "bead": "ompkit-774u.64",
+  "candidate_commit": "c26f0dcf9feb10999ef771fda7fd712d5958643b",
+  "control_instrumentation": {
+    "target": "scripts/ttsr-harness.ts",
+    "injection_point": "inside observeWitness's selected long-bash-token branch, immediately before checkSnapshot; CLOCKBOUND_CONTROL was forwarded to the worker",
+    "wall_control": "Atomics.wait(..., 2000)",
+    "cpu_control": "busy loop until process.hrtime.bigint() + 1_200_000_000ns",
+    "lifecycle": "temporarily inserted in shared checkout under reservation 160766 for two runs, then removed; readback returned the pre-probe file snapshot 9AEF"
+  },
+  "controls": [
+    {
+      "control": "2 s wall stall inside the long-token fire path, no extra work",
+      "command": "CLOCKBOUND_CONTROL=worker-wall bun test tests/cli/test-runner.test.ts -t 'long-token close fire'",
+      "exit_code": 0,
+      "output": "1 pass; 26 filtered out; 0 fail; 3 expect() calls; test-file 3.10s; worker_wall_control_rc=0",
+      "result": "PASS: the test completed after 3.10s despite the injected 2 s wall stall; CPU-time assertion passed"
+    },
+    {
+      "control": "1.2 s CPU work inside the long-token fire path",
+      "command": "CLOCKBOUND_CONTROL=worker-cpu bun test tests/cli/test-runner.test.ts -t 'long-token close fire'",
+      "exit_code": 1,
+      "output": "The test failed at expect(cpuTimeUs).toBeLessThan(1_000_000n): expected < 1000000n, received 2016273n; 0 pass; 26 filtered out; 1 fail; 3 expect() calls; test-file 1703.01ms; worker_cpu_control_rc=1",
+      "result": "EXPECTED NEGATIVE: status, witness and final-position assertions passed; injected fire-path CPU work exceeded the CPU-time budget at the final assertion"
+    }
+  ],
+  "official_pregrade": {
+    "verdict": "UNVERIFIED",
+    "reason": "AC1 pregrade export lacked generated MANIFEST.tsv and stopped with ENOENT before the target test; AC2 passed"
+  },
+  "independent_replay": "A non-author replay on an exact c26f0dc archive generated MANIFEST.tsv first, then passed AC1 (1 pass, 0 fail) and AC2 (14 pass, 0 fail).",
+  "limitations": [
+    "No full declared-suite run.",
+    "No published or installed-runtime claim."
+  ]
+}

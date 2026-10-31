@@ -1,0 +1,22 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_0c4569686c4e0d06fca3ee8a8147ff7fed2632719e01405c95ef5e52b6813ac6",
+ "limitations": [
+  "Official pregrade AC1 remains UNVERIFIED because its exact archive lacked generated MANIFEST.tsv.",
+  "No full declared-suite run; no publication or installed-runtime claim."
+ ],
+ "operation": "CLOCKBOUND1 matcher-path injected controls",
+ "parameters": {
+  "candidate_commit": "c26f0dcf9feb10999ef771fda7fd712d5958643b",
+  "pregrade": "UNVERIFIED from missing MANIFEST.tsv; non-author exact-archive replay passed after manifest generation",
+  "worker_cpu": "1.2s injected in matcher path, test fails at CPU threshold with 2016273us",
+  "worker_wall": "2s injected in matcher path, test passes at 3.10s"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 2197,
+  "path": "docs/evidence/receipts/ompkit-774u.64-20261031-clockbound1-fire-controls.result.json",
+  "sha256": "d30aa0192fbcf0ae6477365ad76b45f32d20e5e79d956a97be119ce344b9217d"
+ }
+}
