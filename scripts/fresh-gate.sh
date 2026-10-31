@@ -302,7 +302,8 @@ run_affected_tests() {
 	rm -f "$metric_dir"/*.json "$metric_dir"/*.log "$metric_dir"/*.timings \
 		"$WORK/bun-metrics.stage" "$WORK/scripts-metrics.stage" "$metric_rows"
 	for metric_path in "$@"; do printf '%s\n' "$metric_path"; done >"$metric_declared"
-	metric_tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}") || return 1
+	# An archive's empty .git is not the repository supplying the candidate objects.
+	metric_tree=$(git -C "${FRESH_GATE_REPO:-$ROOT}" rev-parse "$COMMIT^{tree}") || return 1
 	metric_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 	metric_load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
 	# bun reads a bare argument as a name filter; ./PATH names the file. Shell and python suites run
@@ -409,7 +410,7 @@ PYEOF
 	# Same-tree reuse carries the actual measured records as well as the selected
 	# paths. An absent/truncated row never becomes a reusable file outcome.
 	if [ -n "${FRESH_GATE_PASSED_OUT:-}" ] && { [ "$bun_files" -eq 0 ] || [ "${bun_ran:-0}" -gt 0 ]; }; then
-		passed_tree=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}" 2>/dev/null) || passed_tree=
+		passed_tree=$(git -C "${FRESH_GATE_REPO:-$ROOT}" rev-parse "$COMMIT^{tree}" 2>/dev/null) || passed_tree=
 		if [ -n "$passed_tree" ]; then
 			# Header: tree, the judge (this script's bytes as executed) and the runtime; the verdict accepts
 			# the report only when all three are its own (QuietBadger AM 69014: never tree+names alone).
@@ -908,7 +909,7 @@ if [ -z "$ARCHIVE_DIR" ]; then
 	ARCHIVE_DIR="$WORK/archive"
 	mkdir -p "$ARCHIVE_DIR"
 	archive_tar="$WORK/source.tar"
-	git -C "$ROOT" archive --format=tar "$COMMIT" >"$archive_tar"
+	git -C "${FRESH_GATE_REPO:-$ROOT}" archive --format=tar "$COMMIT" >"$archive_tar"
 	tar -xf "$archive_tar" -C "$ARCHIVE_DIR"
 else
 	make_work
@@ -919,9 +920,9 @@ if [ ! -f "$ARCHIVE_DIR/scripts/build-manifest.sh" ] || [ ! -f "$ARCHIVE_DIR/scr
 	exit 1
 fi
 if [ -z "$CHANGED" ] && [ -n "$BASE" ]; then
-	CHANGED=$(git -C "$ROOT" diff --name-only "$BASE" "$COMMIT")
+	CHANGED=$(git -C "${FRESH_GATE_REPO:-$ROOT}" diff --name-only "$BASE" "$COMMIT")
 elif [ -z "$CHANGED" ]; then
-	CHANGED=$(git -C "$ROOT" diff-tree --root --no-commit-id --name-only -r "$COMMIT")
+	CHANGED=$(git -C "${FRESH_GATE_REPO:-$ROOT}" diff-tree --root --no-commit-id --name-only -r "$COMMIT")
 fi
 # ompkit-hecp: corpus-relative paths resolve against the harness hermetic root
 # unless the caller overrides OMP_KIT_CASE_CWD (e.g. pre-push-gate), so no
@@ -939,7 +940,7 @@ setup_case_env
 # FRESH_GATE_LEDGER (including empty, which turns it off) wins.
 if [ -z "${FRESH_GATE_LEDGER+set}" ]; then
 	if [ "$ARCHIVE_SUPPLIED" = 0 ]; then
-		ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || ledger_git=
+		ledger_git=$(git -C "${FRESH_GATE_REPO:-$ROOT}" rev-parse --absolute-git-dir 2>/dev/null) || ledger_git=
 		FRESH_GATE_LEDGER=${ledger_git:+$ledger_git/omp-kit/fresh-gate-runs.jsonl}
 	else
 		# A caller-owned fixture/archive is not an operational push observation.

@@ -382,15 +382,12 @@ if [ -n "${base_ref:-}" ]; then
 else
 	python3.11 "$gate_scripts/scripts/regexploit-gate.py" --head "$local_sha"
 fi
-# The base remains the policy/bootstrap anchor. Qualify both revisions' checker
-# contracts, then the candidate's runner contracts, before using its judge.
+# Base owns policy and the bounded bootstrap; its required contracts must remain present.
+# Candidate PASS is mandatory, so GATE2's extra base execution cannot change admission.
 mkdir -p "$gate_scripts/var/agent-tmp"
-candidate_contracts_run=""
 checker_contracts() {
 	contract_root=$1
 	contract_role=$2
-	contract_source=$local_sha
-	[ "$contract_role" != base ] || contract_source=$base_ref
 	if [ ! -f "$gate_scripts/scripts/suite-metrics.py" ]; then
 		printf 'pre-push-gate: missing trusted bounded suite executor\n' >&2
 		exit 1
@@ -413,36 +410,20 @@ do
 		full-suite-verdict-incomplete.test.sh|pre-push-gate.test.sh)
 			[ "$contract_role" = candidate ] || continue ;;
 	esac
-	if [ "$contract_role" = candidate ]; then
-		case " $candidate_contracts_run " in *" $checker_test "*) continue ;; esac
-	fi
 	test_path="$contract_root/tests/cli/$checker_test"
 	if [ ! -f "$test_path" ]; then
 		printf 'pre-push-gate: missing checker contract %s\n' "$checker_test" >&2
 		exit 1
 	fi
+	[ "$contract_role" = candidate ] || continue
 	printf '== checker-contract %s role=%s\n' "$checker_test" "$contract_role"
 	if TMPDIR="$gate_scripts/var/agent-tmp" python3 "$gate_scripts/scripts/suite-metrics.py" run \
 		--record "$archive_root/contracts/$contract_role-$checker_test.json" \
-		--path "tests/cli/$checker_test" --runner sh --tree "$contract_source" \
+		--path "tests/cli/$checker_test" --runner sh --tree "$local_sha" \
 		--cwd "$contract_root" --deadline "${FULL_SUITE_TIMEOUT_SECS:-1800}" -- sh "$test_path"; then
 		printf 'GREEN checker-contract %s role=%s\n' "$checker_test" "$contract_role"
 	else
 		rc=$?
-		# GATE2: a red base contract may be repaired by the candidate. Its
-		# successful rerun also satisfies the candidate contract pass below.
-		cand_path="$archive/tests/cli/$checker_test"
-		if [ "$contract_role" = base ] && [ -n "${base_ref:-}" ] && [ -f "$cand_path" ]; then
-			mkdir -p "$archive/var/agent-tmp"
-			if TMPDIR="$gate_scripts/var/agent-tmp" python3 "$gate_scripts/scripts/suite-metrics.py" run \
-				--record "$archive_root/contracts/candidate-$checker_test.json" \
-				--path "tests/cli/$checker_test" --runner sh --tree "$local_sha" \
-				--cwd "$archive" --deadline "${FULL_SUITE_TIMEOUT_SECS:-1800}" -- sh "$cand_path"; then
-				printf 'BASE-RED checker-contract %s: base rc=%s, candidate green\n' "$checker_test" "$rc"
-				candidate_contracts_run="$candidate_contracts_run $checker_test"
-				continue
-			fi
-		fi
 		printf 'RED checker-contract %s producer_rc=%s\n' "$checker_test" "$rc" >&2
 		exit "$rc"
 	fi

@@ -27,6 +27,8 @@ const checkerContracts = [
 	"check-pushed-beads.test.sh",
 	"release-train.test.sh",
 	"check-staged-br-init.test.sh",
+	"full-suite-verdict-incomplete.test.sh",
+	"pre-push-gate.test.sh",
 ];
 
 function environment(extra: Record<string, string> = {}): Record<string, string> {
@@ -133,6 +135,9 @@ async function newPrepushRepo(name: string, includeBaseline = true): Promise<str
 		"kitlib_ratchet_core.py",
 		"pysafe.py",
 		"kitlib_run.py",
+		"kitlib_tmp.py",
+		"suite-metrics.py",
+		"suite-hermetic-env.sh",
 	];
 	for (const file of baseScripts) {
 		const source = join(repoRoot, "scripts", file);

@@ -48,7 +48,7 @@ tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.js
 
 make_checker_controls() {
 	repo=$1
-	for name in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh check-staged-br-init.test.sh; do
+	for name in publishability.test.sh doc-drift.test.sh derived-check.test.sh dispatch-check.test.sh br-shim.test.sh public-files.test.sh commit-msg-bead.test.sh check-pushed-beads.test.sh release-train.test.sh check-staged-br-init.test.sh full-suite-verdict-incomplete.test.sh pre-push-gate.test.sh; do
 		printf '#!/bin/sh\nprintf "CHECKER-PASS: %s\\n"\n' "$name" > "$repo/tests/cli/$name"
 		chmod +x "$repo/tests/cli/$name"
 	done

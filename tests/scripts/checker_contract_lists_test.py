@@ -50,12 +50,11 @@ class CheckerContractFixtureLists(unittest.TestCase):
             work = Path(scratch)
             gate_override = work / "pre-push-gate-with-planted-checker.sh"
             gate = (ROOT / "scripts" / "pre-push-gate.sh").read_text(encoding="utf-8")
-            marker = "\tcheck-staged-br-init.test.sh\n"
-            self.assertEqual(gate.count(marker), 1, "checker-list insertion point changed")
+            marker = "\tcheck-staged-br-init.test.sh"
             gate_override.write_text(
                 gate.replace(
                     marker,
-                    "\tcheck-staged-br-init.test.sh \\\n\tchecker-list-drift-probe.test.sh\n",
+                    "\tchecker-list-drift-probe.test.sh \\\n" + marker,
                     1,
                 ),
                 encoding="utf-8",
