@@ -639,17 +639,27 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			remediation: "Run an installed omp-kit executable with an absolute HOME; no profile or rule data was read.",
 		}], verification: "UNVERIFIED" };
 	}
-	let ompPath: string | undefined, ompLauncher: string | undefined;
-	try {
-		const identity = resolveOmpIdentity(process.env);
-		for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-			const candidate = resolve(directory || ".", "omp");
-			try {
-				if (realpathSync(candidate) === identity.launcher) { ompPath = candidate; ompLauncher = identity.launcher; break; }
-			} catch { /* The next PATH entry may contain the validated launcher. */ }
-		}
-	} catch { /* Diagnose records an unavailable or conflicting OMP identity explicitly. */ }
 	const doctorScope = request.command.name === "doctor" && typeof request.flags.get("--scope") === "string" ? String(request.flags.get("--scope")) : undefined;
+	const requiredComponents = doctorScope ? DIAGNOSTIC_SCOPE_COMPONENTS[doctorScope] : undefined;
+	// Unknown and unscoped inventories retain the full identity path. Known
+	// independent scopes must not discover or provision unrelated OMP sources.
+	let needsOmp = requiredComponents === undefined;
+	for (let index = 0; requiredComponents && !needsOmp && index < requiredComponents.length; index++) {
+		const component = requiredComponents[index];
+		needsOmp = component === "omp" || component === "effective_rules" || component === "omp_drift" || component === "policy";
+	}
+	let ompPath: string | undefined, ompLauncher: string | undefined;
+	if (needsOmp) {
+		try {
+			const identity = resolveOmpIdentity(process.env);
+			for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+				const candidate = resolve(directory || ".", "omp");
+				try {
+					if (realpathSync(candidate) === identity.launcher) { ompPath = candidate; ompLauncher = identity.launcher; break; }
+				} catch { /* The next PATH entry may contain the validated launcher. */ }
+			}
+		} catch { /* Diagnose records an unavailable or conflicting OMP identity explicitly. */ }
+	}
 	const projectFlag = request.flags.get("--project");
 	const diagnosticProject = typeof projectFlag === "string" && projectFlag ? resolve(projectFlag) : process.cwd();
 	const diagnosedFindings = await diagnose({ root, home, project: diagnosticProject, inventoryOnly: request.command.name === "status", recordRchBaseline: request.command.name === "doctor", ...(doctorScope ? { scope: doctorScope } : {}), ...(ompPath ? { ompPath } : {}) });

@@ -1,0 +1,412 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_d6b9511a2a8eec250687f22589ebff953de224c746fd6ff335acf4a525f70eef",
+ "limitations": [
+  "Source scope and real archive guard closure only; whole published GREEN, final pregrade and installed-worker proof remain unqualified"
+ ],
+ "operation": "CUTCLAIM1-scoped-gates-source-and-native-closure",
+ "parameters": {
+  "bead": "ompkit-774u.55"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "bytes": 18552,
+  "evidence": {
+   "after_source": {
+    "diagnostics_file": {
+     "rc": 0,
+     "setup": "sh scripts/build-manifest.sh in the owned exact-source projection",
+     "stderr": "\ntests/cli/diagnostics.test.ts:\n(pass) fresh release verifies shipped bytes but does not claim unapplied rules or effective profile [13.84ms]\n(pass) scoped diagnostics retain the corresponding full findings and uncertainty [412.14ms]\n(pass) scope filtering proves launcher-only probing with no unscoped log while the eager negative breaches two seconds [4505.95ms]\n(pass) CLI scopes and bare presence inventory keep explicit unperformed evidence [625.39ms]\n(pass) stale plugin symlink fails by profile and the installed release target passes [237.58ms]\n(pass) STAMP1: lock version differing from the release manifest is DEGRADED with versionMismatch [216.52ms]\n(pass) plugin-link inventory treats a named profile without an agent directory as unverified [109.89ms]\n(pass) effective profile probes do not replace installed-byte diagnostics [5.86ms]\n(pass) without a native profile probe, installed-byte diagnostics remain available [111.99ms]\n(pass) an absent installed directory cannot prove absence of retired or unknown Markdown [5.27ms]\n(pass) unknown profile takes precedence over optional deterioration without concealing either finding [0.10ms]\n(pass) matching installed bytes establish equality but an old record never confers ownership [7.96ms]\n(pass) installed byte drift cannot inherit a legacy ownership claim [5.19ms]\n(pass) invalid manifest row rejects inventory: rule-a\tbad\ttripwire\tabc1234 [6.60ms]\n(pass) invalid manifest row rejects inventory: rule-a\tHASH\ttripwire\tabc1234\nrule-a\tHASH\ttripwire\tabc1234 [6.00ms]\n(pass) invalid manifest row rejects inventory: ../outside\tHASH\ttripwire\tabc1234 [5.72ms]\n(pass) invalid manifest row rejects inventory: rule-a\tHASH\tunknown\tabc1234 [5.58ms]\n(pass) invalid manifest row rejects inventory: rule-a\tHASH\ttripwire\t../bad [5.39ms]\n(pass) documented uncommitted pack is valid source bytes but not verified release provenance [5.61ms]\n(pass) shipped rule byte mismatch invalidates source manifest even when installed copy matches declared hash [5.47ms]\n(pass) retired and unknown Markdown remain observable without being removed [6.30ms]\n(pass) symlinked shipped rule and installed target never read outside their roots [7.85ms]\n(pass) project shadow with different bytes reports precedence risk without executing project contents [5.40ms]\n(pass) missing selected project is not a verified absence of shadow rules [5.95ms]\n(pass) missing OMP and unverifiable package version stay distinct from verified OMP [7.53ms]\n(pass) OMP doctor reports both manager-installed versions and the exact PATH winner without mutation [515.51ms]\n(pass) native doctor CLI reports exact Tern and Bun manager observations [720.86ms]\n(pass) an unknown OMP manager is explicit and cannot yield a verified current finding [233.34ms]\n(pass) a conflicting requested launcher cannot override the PATH winner [7.00ms]\n(pass) stale Tern manager state and wrong-version source remain unverified [493.65ms]\n(pass) recognized default and named YAML compare policy and extension bytes without asserting runtime activation [239.37ms]\n(pass) opaque or malformed profile remains unverified with concrete backup and consent boundary [399.62ms]\n(pass) removed named profile is not recreated or treated as an observed config [6.40ms]\n(pass) disabled global, project, and unknown-provider names remain disabled and distinctly conflicted [262.10ms]\n(pass) skipProfiles and project extensions empty override never count installed bytes as loaded [370.30ms]\n(pass) fresh and partial opt-in installs remain separate from rule hash findings and optional JSM [260.95ms]\n(pass) profile entry pointing at an unversioned file is reported by doctor [237.20ms]\n(pass) unsafe profile config symlink does not read outside HOME [6.67ms]\n(pass) project-level disabledRules overlay is not hidden by a matching global policy [420.91ms]\n(pass) omp_drift tracks the OMP of the last recorded test and clears only after a recorded re-test [14.76ms]\n(pass) agent_mail_guard flags an unset or dangling storage root and passes a live one [7.71ms]\n(pass) dicklesworthstone scope reports installed vs latest with one source per tool [1526.07ms]\n(pass) dual-config and policy-skipped profiles surface as not covered with named reasons [311.94ms]\n(pass) a same-named rule from a foreign plugin is not a kit win [0.32ms]\n(pass) regex tools finder names the install command per missing tool [0.11ms]\n(pass) planted missing grex is reported with its install command [0.81ms]\n(pass) all regex tools present reports OK [0.84ms]\n(pass) one identity on two live panes fails with both panes named [0.26ms]\n(pass) a live pane without an identity file degrades [0.03ms]\n(pass) an idle registration with no live pane degrades as stale [0.04ms]\n(pass) distinct identities on live panes pass, unavailable tmux is unverified [0.05ms]\n(pass) name-only resolver never verifies a sender [0.03ms]\n(pass) legacy-unverified and adopted-dead bindings never verify [0.03ms]\n(pass) director-seat override binding never verifies without qualified source [0.03ms]\n(pass) doctor identity scope reaches the pane finder through diagnose [523.14ms]\n(pass) private repo with Actions enabled fails billing with remedy [0.12ms]\n(pass) public repo with Actions enabled and private repo without are OK [0.03ms]\n(pass) unknown visibility or Actions state is UNVERIFIED, never OK\n(pass) diagnose includes the billing row only when a probe is supplied [214.10ms]\n(pass) effective-rules probe leaves the inspected HOME byte- and mtime-identical [1328.41ms]\n(pass) doctor lists tmux socket paths without a live server [110.35ms]\n(pass) rch: live listener on a present socket is RUNNING [1.82ms]\n(pass) rch: unlinked path under a live holder is SOCKET_UNLINKED, never capacity [0.51ms]\n(pass) rch: path replaced by a regular file is SOCKET_UNLINKED [0.34ms]\n(pass) rch: path replaced by a different socket (same path, new ino) is SOCKET_UNLINKED [0.48ms]\n(pass) rch: same path and same ino stays RUNNING; a stale or moved baseline is refreshed, not failed [0.50ms]\n(pass) rch: missing path after a healthy baseline is SOCKET_UNLINKED [0.29ms]\n(pass) rch: first healthy sight records the baseline and never fails; the next read compares [0.47ms]\n(pass) rch: socket ino baseline round-trips through the state root file; corrupt reads as absent [0.85ms]\n(pass) rch: only a recording diagnose writes the socket baseline; a read-only one still compares it and never rewrites it [991.88ms]\n(pass) rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERIFIED [0.47ms]\n(pass) rch: default statSocket reads real fixture socket state [0.78ms]\n(pass) oq1h.5: an unscoped inventory does not judge a planning skill the user never installed [11.43ms]\n(pass) oq1h.5: an unscoped inventory omits rch when it is not installed, and the rch diagnostic scope still says so [255.54ms]\n(pass) oq1h.5: on Linux the rchd pid is the single rchd process of this uid, never a guess [0.25ms]\n(pass) oq1h.5: a live rchd on Linux reaches RUNNING through the same checks, and an ambiguous pid stays UNVERIFIED [0.85ms]\n(pass) RCHRO1: unscoped doctor preserves caller HOME and XDG bytes despite a native-cache writer [387.77ms]\n(pass) RCHRO1: unavailable probe leaves nested caller-HOME temp metadata untouched [36.64ms]\n(pass) 5vph: a config without gc_extra_roots is a finding that names the key, the file and the exact fix line [0.17ms]\n(pass) 5vph: the same config with the key listing ~/rch-build/rch-remote is OK [0.08ms]\n(pass) 5vph: a near-miss never satisfies the check: ~ form, wrong table, wrong path, non-string entry [0.06ms]\n(pass) 5vph: an absent config file is missing roots; an unreadable or invalid one is UNVERIFIED, never OK [0.05ms]\n(pass) 5vph: the default reader selects rch's own config dir and reads config.toml from it [0.79ms]\n(pass) 5vph: rch diagnostic scope reports the gc roots through diagnose, from the fixture config, not the real one [314.74ms]\n(pass) 5vph: stale daemon health against a healthy probe is reported with its cause and the documented recovery only [0.63ms]\n(pass) 5vph: an open circuit with fresh telemetry is named as the cause, not stale health [0.05ms]\n(pass) 5vph: when the probe agrees the worker is down it is a worker fault, with no daemon restart advice [0.09ms]\n(pass) 5vph: a healthy daemon never runs the probe; operator-chosen states and missing evidence are not findings or OK [0.07ms]\n(pass) 5vph: on Linux the recovery names the service manager, not launchctl [0.03ms]\n(pass) 5vph: the real rch status and probe JSON shapes parse; a malformed row makes the view unknown [0.12ms]\n(pass) 5vph: the default health deps run only `rch --json status`, then the probe only when asked, and read probe rows even on a nonzero exit [0.09ms]\n(pass) fp72.96: one seat lists every project/name binding and its own lease reads self [0.24ms]\n(pass) fp72.96: holder custody follows the resolved seat, never a bare name [0.05ms]\n(pass) fp72.96: a name verified on two seats never attributes a seat-less holder [0.07ms]\n(pass) fp72.96: substituted, stale, and missing ack bindings stay unknown [0.04ms]\n\n 95 pass\n 0 fail\n 525 expect() calls\nRan 95 tests across 1 file. [16.58s]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+    },
+    "gate_file": {
+     "rc": 0,
+     "stderr": "\ntests/cli/gate-plane.test.ts:\n(pass) GATEPLANE1: session-start PATH makes Python br enforce review, claim, and create on owned fixtures [6292.39ms]\n(pass) GATEPLANE1: gates scope never discovers unrelated OMP, while omp scope still probes its launcher [3450.07ms]\n\n 2 pass\n 0 fail\n 26 expect() calls\nRan 2 tests across 1 file. [9.77s]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+    }
+   },
+   "authority_decoder": {
+    "actual_claim_counts": "16 pass, 0 fail,58 assertions; original malformed-authority guard-removal mutant retained",
+    "actual_claim_file_rc": 0,
+    "br_init_unpublished_range_rc": 0,
+    "byte_boundaries": [
+     {
+      "bounded_refusal": false,
+      "input_bytes": 4194304,
+      "rc": 0,
+      "stdout": "PASS\n",
+      "timed_out": false
+     },
+     {
+      "bounded_refusal": true,
+      "input_bytes": 4194305,
+      "rc": 1,
+      "stdout": "",
+      "timed_out": false
+     }
+    ],
+    "commit": "fa2cc99fd3069e0bbbc278f7efff310e45bf166a",
+    "legacy_shell": "89 pass,0 fail",
+    "packet_members": {
+     "br-init": 0,
+     "fragments": 0,
+     "imports": 0,
+     "kitlib": 0,
+     "pysafe": 0,
+     "readme": 0,
+     "regexploit": 0,
+     "sources": 0,
+     "tempsafe": 0
+    },
+    "range_summary": "30 files, zero findings, zero suppressed"
+   },
+   "bead": "ompkit-774u.55",
+   "before": {
+    "file_elapsed_ms": 65139,
+    "gate_doctor_child_rc": -15,
+    "global_budget_s": 1800,
+    "global_outcome": "incomplete non-pass, not cached",
+    "new_regression_rc": 1,
+    "new_regression_stderr": "\ntests/cli/gate-plane.test.ts:\n169 | \t\tconst gates = await run([...doctorCommand, \"--scope\", \"gates\", \"--json\"],\n170 | \t\t\t{ cwd: kitRoot, deadline_s: 30, env });\n171 | \t\texpect(gates.rc).toBe(0);\n172 | \t\tconst gateBody = JSON.parse(decode(gates.stdout)) as { data: { findings: { component: string; status: string }[] } };\n173 | \t\texpect(gateBody.data.findings.find(row => row.component === \"gates\")?.status).toBe(\"OK\");\n174 | \t\texpect(existsSync(versionLog)).toBe(false);\n                                       ^\nerror: expect(received).toBe(expected)\n\nExpected: false\nReceived: true\n\n      at <anonymous> (/Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-gatescope-candidate.32253/tests/cli/gate-plane.test.ts:174:34)\n(fail) GATEPLANE1: gates scope never discovers unrelated OMP, while omp scope still probes its launcher [3584.96ms]\n\n 0 pass\n 1 filtered out\n 1 fail\n 3 expect() calls\nRan 1 test across 1 file. [3.62s]\n",
+    "new_regression_stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "original_child_bound_s": 60,
+    "published_commit": "1b2c97f6b65940ccc94d2eb91d1c59c152ceb380",
+    "published_log": "/Users/josh/.local/state/omp-kit/full-suite-verdicts/ed4dde1d7826f80bd92e12c4ac2cf44e699bc62e897d32d810cda6c96985b091/88b1d46fb527b747a58fb09724d893c3cb5cb5d4.base.2575aceb451e7f61f288c9ca67aeab322af1d9c01a0c16aa4d35e9c94c8bb0e8.incomplete.12291.log"
+   },
+   "code_repo": "/Users/josh/Developer/omp-kit-companion",
+   "limits": [
+    "Complete published whole-tree GREEN is still unqualified; no full retry on unchanged external checker/budget failures",
+    "Fresh exact-final-commit non-author pregrade still pending; prior1b2 pregrade AC1-4PASS/live5WAITING is historical only",
+    "Actual compiled scope-boundary smoke for the eventual new scope commit remains to run; dcf archive proof covers shipped guard closure, not the new constructor",
+    "Installed real-worker AC[e] remains unchecked and unverified",
+    "No source or package publication, signing or activation was performed by CopperTrout",
+    "Timing values are observations on a shared32coreMac, not a generalized or same-invocation production speedup claim"
+   ],
+   "native_archive": {
+    "closure_commit": "dcf66e1596d1f99e035c21926bc1bbdc5bd96175",
+    "initial_asset": {
+     "arch": "arm64",
+     "filename": "omp-kit-v0.0.0-darwin-arm64-none.tar",
+     "libc": "none",
+     "manifest_sha256": "173d5b3b239cb858ba92233a285928cc95f0ff3abd3bdd151b2fa27352cad9e2",
+     "os": "darwin",
+     "sha256": "e650a6155b2e98d817ff4291ba6024b363a9c5b96f775c129734f97c6ebb7417"
+    },
+    "initial_exact_commit": "fa2cc99fd3069e0bbbc278f7efff310e45bf166a",
+    "initial_finding": [
+     {
+      "component": "gates",
+      "evidence": {
+       "fixture": "/Users/josh/Developer/omp-kit-companion/var/agent-tmp/copper-claim-verdict-package.98206/gateplane1.59619.1tmk48/fixture-project",
+       "live_tracker_mutated": false,
+       "mutation_count": 1,
+       "probes": {
+        "claim": {
+         "rc": 4,
+         "refused": true
+        },
+        "control": {
+         "admitted": true,
+         "rc": 0
+        },
+        "create": {
+         "rc": 4,
+         "refused": false
+        },
+        "in_review": {
+         "rc": 4,
+         "refused": true
+        }
+       }
+      },
+      "reason": "GATEPLANE1 fail: in_review=refused; claim=refused; create=rc 4; control=admitted.",
+      "recommended_action": "Restore the release br shim and its admission helpers, then rerun doctor --scope gates.",
+      "status": "FAIL"
+     }
+    ],
+    "initial_result": "not PASS: create rc4 lacked the required r-verify-replayable refusal because br-create-guard.py was absent",
+    "real_archive_regression": "native archive br admission reaches its creation,review,claim entrypoints: passed in full package-file run, all3refusals,one admittedcontrol,one fixturemutation,no livetrackerwrite asserted",
+    "static_test_replacement": "Source-list PKGMEMBER1 assertion replaced with actual sealed-archive compiled-doctor guard outcomes; all other package contracts retained",
+    "unchanged_failures": [
+     "installed integrations/invariant native full check: caller-owned scratch root mismatch, expected0 got3",
+     "named native full failing case: caller-owned scratch root mismatch, expected1 got3"
+    ],
+    "whole_package_file_observation": "17 pass,2 fail,786 assertions under clean-export/canonical-caller mismatch; not relabelled GREEN",
+    "withdrawn_fixture_experiment": "Allocating the shared output while chdir(caseCwd) admitted one caller but broke another manifest caller and exposed additional original timeout/ratchet limits; withdrawn completely. Production caller-root validation, fixture assertions and deadlines unchanged. No narrowed rerun used to claim the whole package file passes."
+   },
+   "rejected_compile_hypothesis": {
+    "conclusion": "source/native authority startup differs by only milliseconds; no compile-as-fix code retained; no production speedup claim",
+    "same_invocation_actual_policy_data": {
+     "act": "claim",
+     "blocking": 0,
+     "findings": [
+      {
+       "blocking": false,
+       "code": "CLAIM_CUT_ADMITTED",
+       "detail": "k-1: no declared milestone",
+       "fix": null,
+       "gate": "claim-cut",
+       "remedy": "continue with the remaining claim checks"
+      }
+     ],
+     "overall": "OK",
+     "snapshot": "bead:2026-10-30T00:00:00Z",
+     "target": "k-1",
+     "text": "claim: ok (bead:2026-10-30T00:00:00Z)"
+    },
+    "samples": [
+     {
+      "elapsed_ms": 79,
+      "rc": 0,
+      "round": 0,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 72,
+      "rc": 0,
+      "round": 0,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 73,
+      "rc": 0,
+      "round": 1,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 78,
+      "rc": 0,
+      "round": 1,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 80,
+      "rc": 0,
+      "round": 2,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 2,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 73,
+      "rc": 0,
+      "round": 3,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 87,
+      "rc": 0,
+      "round": 3,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 78,
+      "rc": 0,
+      "round": 4,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 4,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 72,
+      "rc": 0,
+      "round": 5,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 79,
+      "rc": 0,
+      "round": 5,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 82,
+      "rc": 0,
+      "round": 6,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 76,
+      "rc": 0,
+      "round": 6,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 90,
+      "rc": 0,
+      "round": 7,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 76,
+      "rc": 0,
+      "round": 7,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 8,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 8,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 71,
+      "rc": 0,
+      "round": 9,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 9,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 76,
+      "rc": 0,
+      "round": 10,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 10,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 72,
+      "rc": 0,
+      "round": 11,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 78,
+      "rc": 0,
+      "round": 11,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 77,
+      "rc": 0,
+      "round": 12,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 73,
+      "rc": 0,
+      "round": 12,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 72,
+      "rc": 0,
+      "round": 13,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 13,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 14,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 71,
+      "rc": 0,
+      "round": 14,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 72,
+      "rc": 0,
+      "round": 15,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 77,
+      "rc": 0,
+      "round": 15,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 77,
+      "rc": 0,
+      "round": 16,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 74,
+      "rc": 0,
+      "round": 16,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 70,
+      "rc": 0,
+      "round": 17,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 75,
+      "rc": 0,
+      "round": 17,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 79,
+      "rc": 0,
+      "round": 18,
+      "variant": "source"
+     },
+     {
+      "elapsed_ms": 72,
+      "rc": 0,
+      "round": 18,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 73,
+      "rc": 0,
+      "round": 19,
+      "variant": "compiled"
+     },
+     {
+      "elapsed_ms": 77,
+      "rc": 0,
+      "round": 19,
+      "variant": "source"
+     }
+    ]
+   },
+   "scope_change": "Only declared OMP-dependent diagnostic components resolve OMP identity. Unknown/unscoped inventory and OMP/policy requirements retain the original identity path. No caller identity variables are removed.",
+   "scope_source_base": "51fb8733e1a059d9427884382c2bef92180488ef",
+   "source_sha256": {
+    "changelog.d/ompkit-774u.55.md": "1469471f290051c1809d298b0ceaeb4ec9f988688776160a62bc91b24b3b1cdc",
+    "src/cli.ts": "6418ee2aa9efe1d20a64cf856d77dacd85b4d9bff4224e013d4a985cf381090b",
+    "tests/cli/gate-plane.test.ts": "ffd83e89891b5a8a96a83d9c7ab0c574bd8b27743d9fc4421aadd3421e3f5f63",
+    "tests/cli/package-release.test.ts": "8b5f8cc84d7c6d3fd938dcb94e339bea9448febfc2397fd1153fc110b46bd66a"
+   }
+  },
+  "sha256": "078d42ecd89f4a22e8478370e5b1931b183941594e9cf8e9907691d4fe7546ce"
+ }
+}

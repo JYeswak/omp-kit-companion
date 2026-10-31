@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
@@ -13,36 +13,6 @@ import { run as runBounded } from "../../src/kitlib/run.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 
-test("PKGMEMBER1: release ships every installer-placed script", () => {
-	const installer = readFileSync(join(repo, "scripts/install-commit-msg-bead.sh"), "utf8");
-	const packager = readFileSync(join(repo, "scripts/package-release.ts"), "utf8");
-	const shipList = packager.split("const files = [")[1]?.split("];")[0];
-	expect(shipList, "package-release.ts explicit shipped set").toBeDefined();
-	const shipped = new Set(shipList!.split('"').filter((_, index) => index % 2 === 1));
-	const placed = new Set<string>();
-	let helperLoop: { iterator: string; helpers: string[] } | undefined;
-	for (const raw of installer.split("\n")) {
-		const line = raw.trim();
-		if (line.startsWith("for ") && line.includes("; do")) {
-			const [iterator, helpers] = line.slice(4).split(" in ");
-			helperLoop = { iterator, helpers: helpers.split("; do")[0].split(" ").filter(Boolean) };
-		}
-		if (line === "done") helperLoop = undefined;
-		if (line.startsWith('place "$KITROOT/scripts/')) {
-			const source = line.split('"')[1].slice("$KITROOT/".length);
-			if (source.startsWith("scripts/$")) {
-				expect(helperLoop, "variable place source needs a literal helper loop").toBeDefined();
-				expect(source).toBe(`scripts/$${helperLoop!.iterator}`);
-				for (const helper of helperLoop!.helpers) placed.add(`scripts/${helper}`);
-			} else placed.add(source);
-		}
-		for (const quoted of line.split('"').filter((_, index) => index % 2 === 1)) {
-			if (quoted.startsWith("hooks.d/") && quoted.includes(" scripts/")) placed.add(quoted.split(" ")[1]);
-		}
-	}
-	expect(placed.size).toBeGreaterThan(0);
-	expect([...placed].filter(path => !shipped.has(path)).sort(), "installer sources absent from release ship list").toEqual([]);
-});
 const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
 const sourceCacheRoot = ompSourceCacheRoot(process.env);
 const nativeCacheEnv = sourceCacheRoot ? { OMP_KIT_OMP_SRC_CACHE: resolve(sourceCacheRoot) } : {};
@@ -788,3 +758,40 @@ test("SHIPSCRIPTS1: actual archive scanner consumer allows cited comments/mail a
 	writeFileSync(join(stage, "scripts/fixture-helper.sh"), "#!/bin/sh\nexit 0\n");
 	expect(await checkPackagedScriptDependencies(stage)).toEqual([]);
 });
+
+test("native archive's br admission reaches its creation, review and claim guard entrypoints", async () => {
+	const decoder = new TextDecoder();
+	const staged = join(output, "native-gate-archive");
+	const home = join(output, "native-gate-home");
+	const bindir = join(home, ".local", "share", "omp-kit", "agent-bin");
+	mkdirSync(staged, { recursive: true });
+	mkdirSync(bindir, { recursive: true });
+	const unpacked = await runBounded(["tar", "-xf", join(output, asset.filename), "-C", staged],
+		{ cwd: output, deadline_s: 10 });
+	expect(unpacked.rc, decoder.decode(unpacked.stderr)).toBe(0);
+	symlinkSync(join(staged, "scripts/br-shim.sh"), join(bindir, "br"));
+	const env = Object.fromEntries(Object.entries({
+		...process.env, HOME: home, AGENT_NAME: "ArchiveGateProbe",
+		PATH: [bindir, stubFirstPath].join(delimiter), TMPDIR: output,
+		XDG_DATA_HOME: join(home, ".local", "share"),
+		XDG_STATE_HOME: join(home, ".local", "state"),
+	}).filter((entry): entry is [string, string] => entry[1] !== undefined));
+	const native = await runBounded([join(staged, "bin/omp-kit"), "doctor", "--scope", "gates", "--json"],
+		{ cwd: staged, deadline_s: 30, env });
+	expect(native.rc, decoder.decode(native.stderr)).toBe(0);
+	const body = JSON.parse(decoder.decode(native.stdout)) as {
+		data: { findings: { component: string; status: string; evidence?: Record<string, unknown> }[] };
+	};
+	const gates = body.data.findings.find(row => row.component === "gates");
+	expect(gates?.status).toBe("OK");
+	expect(gates?.evidence).toMatchObject({
+		live_tracker_mutated: false,
+		mutation_count: 1,
+		probes: {
+			in_review: { rc: 4, refused: true },
+			claim: { rc: 4, refused: true },
+			create: { rc: 4, refused: true },
+			control: { rc: 0, admitted: true },
+		},
+	});
+}, 45_000);

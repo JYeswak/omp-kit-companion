@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFlywheelHost } from "../fleet-guard/kit-flywheel-host.ts";
@@ -145,3 +145,40 @@ process.exitCode = await runCli(process.argv.slice(2));
 		owned.cleanup();
 	}
 }, 90_000); // The doctor child is bounded at 60s; leave time to observe that result.
+
+test("GATEPLANE1: gates scope never discovers unrelated OMP, while omp scope still probes its launcher", async () => {
+	const owned = ownedTmp("gateplane-scope", { bead: "ompkit-774u.55" });
+	try {
+		const home = join(owned.path, "home");
+		const bindir = join(home, ".local", "share", "omp-kit", "agent-bin");
+		const external = join(owned.path, "external");
+		const versionLog = join(external, "omp-version.log");
+		mkdirSync(bindir, { recursive: true });
+		mkdirSync(external, { recursive: true });
+		symlinkSync(join(scripts, "br-shim.sh"), join(bindir, "br"));
+		writeFileSync(join(external, "omp"), '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "${0%/*}/omp-version.log"\nprintf \'%s\\n\' \'not-a-version\'\n', { mode: 0o755 });
+		const env = Object.fromEntries(Object.entries({
+			...process.env, HOME: home, AGENT_NAME: "GateScope",
+			XDG_DATA_HOME: join(home, ".local", "share"),
+			XDG_STATE_HOME: join(home, ".local", "state"), TMPDIR: owned.path,
+			PATH: [bindir, external, process.env.PATH ?? ""].join(delimiter),
+		}).filter((entry): entry is [string, string] => entry[1] !== undefined));
+		const doctorCommand = [
+			process.execPath, "run", "--no-env-file", "--config=/dev/null", join(kitRoot, "src/cli.ts"), "doctor",
+		];
+		const gates = await run([...doctorCommand, "--scope", "gates", "--json"],
+			{ cwd: kitRoot, deadline_s: 30, env });
+		expect(gates.rc).toBe(0);
+		const gateBody = JSON.parse(decode(gates.stdout)) as { data: { findings: { component: string; status: string }[] } };
+		expect(gateBody.data.findings.find(row => row.component === "gates")?.status).toBe("OK");
+		expect(existsSync(versionLog)).toBe(false);
+
+		const omp = await run([...doctorCommand, "--scope", "omp", "--json"], { cwd: kitRoot, deadline_s: 30, env });
+		expect(omp.rc).toBe(0);
+		const ompBody = JSON.parse(decode(omp.stdout)) as { data: { findings: { component: string }[] } };
+		expect(ompBody.data.findings.map(row => row.component)).toEqual(["omp"]);
+		expect([...new Set(readFileSync(versionLog, "utf8").trim().split("\n"))]).toEqual(["--version"]);
+	} finally {
+		owned.cleanup();
+	}
+}, 90_000);
