@@ -1,8 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { REPORT_INJECT_DEADLINE_MS, runReportInjectJob, type ReportInjectCommandResult } from "../../src/report-inject-job.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { FleetWatcher, type FleetWatchConfig } from "../../src/fleet-watch.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repoRoot = resolve(import.meta.dir, "../..");
@@ -29,7 +30,7 @@ function fixture(label: string, stateGeneratedAt: string, pulse: Record<string, 
 		}
 		if (argv[1]?.endsWith("sitrep.sh")) {
 			mkdirSync(join(kitRoot, "var", "sitrep"), { recursive: true });
-			if (pulse !== null) writeFileSync(pulsePath, `${(Array.isArray(pulse) ? pulse : [pulse]).map(row => JSON.stringify(row)).join("\n")}\n`);
+			if (pulse !== null) appendFileSync(pulsePath, `${(Array.isArray(pulse) ? pulse : [pulse]).map(row => JSON.stringify(row)).join("\n")}\n`);
 			return { code: 0, stdout: `SITREP ${observedAt}\n\n== Mission\nmission fixture\n== Closes per day\nflow fixture\n`, stderr: "" };
 		}
 		return { code: 2, stdout: "", stderr: "unexpected fixture command" };
@@ -150,3 +151,43 @@ test("deferred sender delivery logs deferred before delivered without relying on
 	expect(logs[1]).toContain("DELIVERED marker=kit-send-0123456789ab pane=w2:%1");
 });
 
+
+test("SUPPLYARM1 puts persistent overdue cut exhaustion first in the chief digest and full report until redeclared", async () => {
+	const f = fixture("cut-exhaustion", observedAt, {
+		repo: "w2", ts: observedAt, ready: 0, in_progress: 0, closed_24h: 0, blocked: 0, blocked_no_fix: 0,
+	});
+	const cfg: FleetWatchConfig = {
+		enabled: true, intervalSeconds: 30, noDecisionChecks: 4,
+		chief: { session: "chief", pane: "%99" },
+		sessions: [{
+			session: "w2", repo: f.kitRoot, workerPanes: [], coordinatorSession: "director", coordinatorPane: "%54",
+			milestone: { epic: "x-goal", declaredAt: "2026-10-13T17:00:00.000Z", pinned: ["x-waiting"] },
+		}],
+	};
+	let now = Date.parse(observedAt) - 120 * 60_000;
+	const watcher = new FleetWatcher(cfg, () => now);
+	watcher.supply.settleCutExhaustion(cfg.sessions[0]!, 0);
+	now += 120 * 60_000;
+	watcher.supply.settleCutExhaustion(cfg.sessions[0]!, 0);
+	const watcherStateDir = join(f.home, ".local", "state", "omp-kit");
+	mkdirSync(watcherStateDir, { recursive: true });
+	writeFileSync(join(watcherStateDir, "fleet-watch-state.json"), JSON.stringify(watcher.snapshot()), { mode: 0o600 });
+	writeFileSync(f.configPath, JSON.stringify(cfg));
+	const delivered: string[] = [];
+	const invoke = () => runReportInjectJob({ reportRoot: f.kitRoot, home: f.home, dropDir: join(f.root, "drop"), fleetConfigPath: f.configPath }, {
+		run: f.run, now: () => new Date(observedAt), log: () => {},
+		send: async input => {
+			delivered.push(input.message);
+			return { status: "DELIVERED", marker: "fixture", sends: 1, drop_path: null, detail: "fixture", bead_ids: [], no_bead_reason: null, tmux_socket: null };
+		},
+	});
+	expect((await invoke()).exit).toBe(0);
+	expect(delivered[0]!.split("\n")[0]).toStartWith("CUT-EXHAUSTED w2:");
+	const reportPath = join(f.kitRoot, "docs", "fleet-state", "latest.md");
+	expect(readFileSync(reportPath, "utf8").split("\n")[0]).toStartWith("CUT-EXHAUSTED w2:");
+	cfg.sessions[0]!.milestone!.declaredAt = observedAt;
+	writeFileSync(f.configPath, JSON.stringify(cfg));
+	expect((await invoke()).exit).toBe(0);
+	expect(delivered[1]!.split("\n")[0]).toStartWith("REPORTINJECT1 ");
+	expect(readFileSync(reportPath, "utf8").split("\n")[0]).toStartWith("SITREP ");
+});

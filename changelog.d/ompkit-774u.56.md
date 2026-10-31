@@ -1,0 +1,1 @@
+- Fleet Watch can plan single-bead builder/grader goals from a declared milestone cut, preserve active holders and busy seats, and retire stale idle scopes. Explicit pauses require an owner, reason and expiry; supply warnings and overdue cut escalation reach director/chief reporting without automatically resuming paused sessions.

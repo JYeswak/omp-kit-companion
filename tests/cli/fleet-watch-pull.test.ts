@@ -258,16 +258,6 @@ test("[triage] bv top-N with no focus leaf falls through to the first focus read
 	expect(none.coordinator()[0]).toContain("NO_TRIAGE_PICK");
 });
 
-test("[pause] round phase INSIGHT and pullEnabled false send no pull nudge, no escalation", () => {
-	const busyWorld = world({ statusRows: [review("x-9", "BlueWorker")], readyRows: [leaf("x-1")] });
-	for (const paused of [{ phase: "INSIGHT" }, { pullEnabled: false }]) {
-		const run = harness(configOf(paused), { world: busyWorld }, ["%2"]);
-		for (let tick = 0; tick < 6; tick++) run.tick();
-		expect(run.sends).toEqual([]);
-	}
-	const control = nudgeOnce(configOf({ phase: "SORT" }), busyWorld);
-	expect(control.worker("%1")).toHaveLength(1);
-});
 
 test("[transport] every nudge reports with omp-kit send, never ntm send", () => {
 	const picks: PullPick[] = [
@@ -822,4 +812,150 @@ test("[defer] native nudge never grades a parked deferred bead; a legit review r
 	expect(grade).toContain("Grade x-9 first (in_review, author BlueWorker; never grade your own)");
 	const [pull] = run.worker("%2");
 	expect(pull).toContain("take x-1 (bv --robot-triage #1, under x-epic)");
+});
+
+function scopedConfig(pinned: string[], workerPanes = ["%1", "%2", "%3"]) {
+	return {
+		...configOf(),
+		chief: { session: "chief", pane: "%99" },
+		sessions: [{
+			...session, focusEpics: [], workerPanes,
+			milestone: { epic: "x-goal", declaredAt: new Date(C8_NOW).toISOString(), pinned },
+		}],
+	};
+}
+
+test("SUPPLYARM1 plans one scoped grader and builder from cut supply, leaving the third paused", () => {
+	const cfg = scopedConfig(["x-build", "x-review"]);
+	const run = harness(cfg, { world: world({
+		readyRows: [leaf("x-outside"), leaf("x-build")],
+		statusRows: [review("x-review", "BlueWorker")],
+		issues: [issue("x-outside"), issue("x-build"), issue("x-review", { status: "in_review" })],
+		triage: { usable: true, ids: ["x-outside", "x-build"] },
+		seats: { ...SEATS, "%3": "ThirdWorker" },
+	}) }, [], OMP_KIT_POLICY);
+	writeFileSync(run.statePath, JSON.stringify({
+		version: 1,
+		panes: Object.fromEntries(cfg.sessions[0].workerPanes.map(pane => [`work:${pane}`, { parked: true }])),
+	}), { mode: 0o600 });
+	expect(run.tick().filter(action => action.kind.startsWith("SCOPED_"))).toEqual([
+		expect.objectContaining({ kind: "SCOPED_ARM", pane: "%1", bead: "x-review", role: "grader" }),
+		expect.objectContaining({ kind: "SCOPED_ARM", pane: "%2", bead: "x-build", role: "builder" }),
+	]);
+	expect(run.worker("%3")).toEqual([]);
+	expect([...run.worker("%1"), ...run.worker("%2")].every(text => text.startsWith("/goal set "))).toBe(true);
+	expect(run.sends.some(send => send.text.includes("x-outside"))).toBe(false);
+	expect(run.tick().filter(action => action.kind.startsWith("SCOPED_"))).toEqual([]);
+});
+
+test.each(["closed", "left-cut"])("SUPPLYARM1 pauses a stale %s scope but preserves an in-progress cut holder", (stale: string) => {
+	const cfg = scopedConfig(stale === "closed" ? ["x-held", "x-stale"] : ["x-held"], ["%1", "%2"]);
+	const held = { ...issue("x-held", { status: "in_progress" }), assignee: "GreenWorker" };
+	const run = harness(cfg, { world: world({
+		issues: [held, issue("x-stale", { status: stale === "closed" ? "closed" : "open" })],
+		statusRows: [{ ...leaf("x-held"), status: "in_progress", assignee: "GreenWorker" }],
+	}) }, [], OMP_KIT_POLICY);
+	writeFileSync(run.statePath, JSON.stringify({
+		version: 1,
+		panes: {
+			"work:%1": { scope: { bead: "x-held", role: "builder" } },
+			"work:%2": { scope: { bead: "x-stale", role: "builder" } },
+		},
+	}), { mode: 0o600 });
+	expect(run.tick().filter(action => action.kind.startsWith("SCOPED_"))).toEqual([
+		expect.objectContaining({ kind: "SCOPED_PAUSE", pane: "%2", bead: "x-stale" }),
+	]);
+	expect(run.worker("%1")).toEqual([]);
+	expect(run.worker("%2")).toEqual(["/goal pause"]);
+});
+
+test("SUPPLYARM1 persists cut exhaustion, escalates at sixty and one hundred twenty minutes, and clears on redeclaration", () => {
+	let now = C8_NOW;
+	const cfg = scopedConfig(["x-waiting"], []);
+	const current = { world: world({ issues: [issue("x-waiting")] }) };
+	const run = harness(cfg, current, [], OMP_KIT_POLICY, { now: () => now });
+	expect(run.tick()).toContainEqual(expect.objectContaining({ kind: "CUT_EXHAUSTED", stage: "director", pane: "%54" }));
+	now += 59 * 60_000;
+	expect(run.tick().filter(action => action.kind.startsWith("CUT_EXHAUSTED"))).toEqual([]);
+	now = C8_NOW + 60 * 60_000;
+	expect(run.tick()).toContainEqual(expect.objectContaining({ kind: "CUT_EXHAUSTED", stage: "chief", pane: "%99" }));
+	now = C8_NOW + 120 * 60_000;
+	const critical = run.tick();
+	expect(critical).toContainEqual(expect.objectContaining({ kind: "CUT_EXHAUSTED", stage: "critical", pane: "%99" }));
+	const chiefReport = run.sends.filter(send => send.pane === "%99").at(-1)?.text;
+	expect(chiefReport?.split("\n")[0]).toContain("CUT-EXHAUSTED");
+	expect(run.tick().filter(action => action.kind.startsWith("CUT_EXHAUSTED"))).toEqual([]);
+	cfg.sessions[0].milestone.declaredAt = new Date(now + 1).toISOString();
+	current.world.issues = [issue("x-waiting", { status: "closed" })];
+	expect(run.tick()).toContainEqual(expect.objectContaining({ kind: "CUT_EXHAUSTED", stage: "director" }));
+});
+
+test("SUPPLYARM1 reports owned paused-with-supply every cycle and expiry to the chief without resuming", () => {
+	let now = C8_NOW;
+	const cfg = scopedConfig(["x-build"]);
+	Object.assign(cfg.sessions[0], {
+		pullEnabled: false, pausedBy: "Operator", pauseReason: "maintenance",
+		pausedUntil: new Date(C8_NOW + 60_000).toISOString(),
+	});
+	const run = harness(cfg, { world: world({
+		readyRows: [leaf("x-build")], issues: [issue("x-build")],
+		triage: { usable: true, ids: ["x-build"] }, seats: { ...SEATS, "%3": "ThirdWorker" },
+	}) }, [], OMP_KIT_POLICY, { now: () => now });
+	for (let tick = 0; tick < 2; tick++) {
+		const actions = run.tick();
+		expect(actions).toContainEqual(expect.objectContaining({ kind: "PAUSED_WITH_SUPPLY", pane: "%54" }));
+		expect(actions.filter(action => action.kind.startsWith("SCOPED_"))).toEqual([]);
+	}
+	now = C8_NOW + 60_001;
+	expect(run.tick()).toContainEqual(expect.objectContaining({ kind: "PAUSE_EXPIRED", pane: "%99" }));
+	expect(run.sends.filter(send => !["%54", "%99"].includes(send.pane))).toEqual([]);
+});
+
+test("SUPPLYARM1 never downgrades an exhaustion episode after a clock rollback", () => {
+	let now = C8_NOW;
+	const cfg = scopedConfig(["x-waiting"], []);
+	const run = harness(cfg, { world: world({ issues: [issue("x-waiting")] }) }, [], OMP_KIT_POLICY, { now: () => now });
+	run.tick();
+	now += 60 * 60_000;
+	expect(run.tick()).toContainEqual(expect.objectContaining({ kind: "CUT_EXHAUSTED", stage: "chief" }));
+	now -= 60_000;
+	expect(run.tick().filter(action => action.kind === "CUT_EXHAUSTED")).toEqual([]);
+});
+
+test("SUPPLYARM1 treats equivalent cut field order as the same unresolved episode", () => {
+	const cfg = scopedConfig(["x-waiting"], []);
+	const run = harness(cfg, { world: world({ issues: [issue("x-waiting")] }) }, [], OMP_KIT_POLICY);
+	expect(run.tick()).toContainEqual(expect.objectContaining({ kind: "CUT_EXHAUSTED", stage: "director" }));
+	const cut = cfg.sessions[0].milestone;
+	cfg.sessions[0].milestone = { pinned: cut.pinned, declaredAt: cut.declaredAt, epic: cut.epic };
+	expect(run.tick().filter(action => action.kind === "CUT_EXHAUSTED")).toEqual([]);
+});
+
+test("SUPPLYARM1 gives an idle seat the cut's open blocking fix without interrupting a busy seat", () => {
+	const cfg = scopedConfig(["x-blocked"], ["%1", "%2"]);
+	const run = harness(cfg, { world: world({
+		readyRows: [leaf("x-outside"), leaf("x-fix")],
+		issues: [{ ...issue("x-blocked", { status: "blocked" }), blockers: ["x-fix"] }, issue("x-fix"), issue("x-outside")],
+		triage: { usable: true, ids: ["x-outside", "x-fix"] },
+	}) }, ["%1"], OMP_KIT_POLICY);
+	expect(run.tick().filter(action => action.kind === "SCOPED_ARM")).toEqual([
+		expect.objectContaining({ pane: "%2", bead: "x-fix", role: "builder" }),
+	]);
+	expect(run.worker("%1")).toEqual([]);
+});
+
+test("SUPPLYARM1 retires a dispatched scope claimed by another seat without pausing that holder", () => {
+	const cfg = scopedConfig(["x-held"], ["%1", "%2"]);
+	const run = harness(cfg, { world: world({
+		readyRows: [leaf("x-held")],
+		issues: [{ ...issue("x-held", { status: "in_progress" }), assignee: "BlueWorker" }],
+		statusRows: [{ ...leaf("x-held"), status: "in_progress", assignee: "BlueWorker" }],
+	}) }, [], OMP_KIT_POLICY);
+	writeFileSync(run.statePath, JSON.stringify({
+		version: 1, panes: { "work:%1": { scope: { bead: "x-held", role: "builder" } } },
+	}), { mode: 0o600 });
+	expect(run.tick().filter(action => action.kind.startsWith("SCOPED_"))).toEqual([
+		expect.objectContaining({ kind: "SCOPED_PAUSE", pane: "%1", bead: "x-held" }),
+	]);
+	expect(run.worker("%2")).toEqual([]);
 });

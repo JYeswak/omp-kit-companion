@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { FleetWatcher, paneIsBusy, paneTarget, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
+import { FleetWatcher, loadFleetWatchConfig, paneIsBusy, paneTarget, runFleetWatchOnce, type FleetWatchConfig, type FleetWatchSession } from "../../src/fleet-watch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 const session: FleetWatchSession = { session: "omp-test", coordinatorPane: "%54", coordinatorSession: "omp-test", repo: "/repo", workerPanes: ["%1"], readyCommand: "br ready --json", skipLabels: ["directive"] };
 const config: FleetWatchConfig = { enabled: true, intervalSeconds: 60, noDecisionChecks: 5, sessions: [session] };
@@ -296,6 +296,41 @@ test("planted GITLOCK1: tick reaps a stale lock and ledgers the receipt; null di
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 		if (existsSync(scratch)) rmSync(scratch, { recursive: true, force: true });
+	}
+});
+
+test.each(["pausedBy", "pauseReason", "pausedUntil"])("SUPPLYARM1 refuses a paused session missing %s", (field: string) => {
+	const task = ownedTmp("supplyarm1-pause-config");
+	try {
+		const paused: Record<string, unknown> = {
+			...session, pullEnabled: false, pausedBy: "Operator", pauseReason: "maintenance",
+			pausedUntil: "2030-01-01T00:00:00Z",
+		};
+		delete paused[field];
+		const path = join(task.path, "fleet-watch.json");
+		writeFileSync(path, JSON.stringify({ ...config, sessions: [paused] }));
+		expect(() => loadFleetWatchConfig(path)).toThrow("PAUSE_UNOWNED");
+	} finally {
+		task.cleanup();
+	}
+});
+
+test("SUPPLYARM1 refuses empty pause ownership and an unusable expiry", () => {
+	const task = ownedTmp("supplyarm1-pause-metadata");
+	try {
+		const path = join(task.path, "fleet-watch.json");
+		for (const invalid of [{ pausedBy: " " }, { pauseReason: "" }, { pausedUntil: "not-a-date" }]) {
+			writeFileSync(path, JSON.stringify({
+				...config,
+				sessions: [{
+					...session, pullEnabled: false, pausedBy: "Operator", pauseReason: "maintenance",
+					pausedUntil: "2030-01-01T00:00:00Z", ...invalid,
+				}],
+			}));
+			expect(() => loadFleetWatchConfig(path)).toThrow("PAUSE_UNOWNED");
+		}
+	} finally {
+		task.cleanup();
 	}
 });
 

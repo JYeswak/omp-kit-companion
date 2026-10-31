@@ -20,6 +20,7 @@ session-scoped `window.pane` selectors (`0.1`).
   "enabled": true,
   "intervalSeconds": 120,
   "noDecisionChecks": 5,
+  "chief": { "session": "chief", "pane": "%90" },
   "sessions": [
     {
       "session": "feature-workers",
@@ -33,7 +34,12 @@ session-scoped `window.pane` selectors (`0.1`).
       "mission": "ROADMAP.md:9",
       "round": 1,
       "phase": "SORT",
-      "pullEnabled": true
+      "pullEnabled": true,
+      "milestone": {
+        "epic": "proj-goal",
+        "declaredAt": "2026-10-31T00:00:00.000Z",
+        "pinned": ["proj-leaf1", "proj-review1"]
+      }
     }
   ]
 }
@@ -45,9 +51,10 @@ and runs as argv without a shell. Readiness adds `--no-auto-import` and
 `skipLabels` adds operator exclusions. Product workers always exclude
 `human-gate`, `owner-decision` and `kind:process`, even when `skipLabels`
 is absent, including grading and rework selection.
-`focusEpics`, `mission` (`file:line`), `round`, `phase` and `pullEnabled`
-are optional; a malformed value refuses the config with
-`FLEET_WATCH_CONFIG_INVALID: sessions[N].<field>`.
+`focusEpics`, `mission` (`file:line`), `round`, `phase`, `pullEnabled` and
+`milestone` are optional. A malformed value refuses the config with
+`FLEET_WATCH_CONFIG_INVALID: sessions[N].<field>`; an unowned explicit pause
+instead refuses with `PAUSE_UNOWNED`.
 The optional top-level `registeredTrackers` array (`{"repo", "session"}` per
 entry) covers MP6-registered trackers that have no session entry: each is
 visited exactly once per tick, recovery runs under the owning-director
@@ -77,6 +84,40 @@ recognition remains heuristic, and capture plus key delivery is not atomic.
 If dequeue succeeds but submission is refused, the doctor does not attempt
 to roll the draft back. This is not proof of native receiver ownership,
 live service safety or the cause of a particular paused goal.
+
+## Declared cuts and owned pauses
+
+With `milestone`, the watcher selects only its pinned ids and their active
+blocking prerequisites. This cut replaces the broader `focusEpics` filter;
+native readiness and atomic claim rules remain authoritative. Removing
+`milestone` selects the pull-nudge behavior below, not single-bead goals.
+
+An idle, unassigned seat receives at most one `/goal set` request for a named
+builder or non-author grader assignment. The remaining seats stay parked
+when supply is exhausted. Busy seats and native in-progress cut holders are
+not paused. An idle scope that closes, leaves the cut, or is claimed by
+another seat is retired; it receives `/goal pause` when no replacement
+qualifies. Persisted scope records and action rows describe control requests,
+not native goal adoption or delivery receipts. Installed Tern control and a
+real-fleet live-hour check require their own readback; source fixtures never
+establish them.
+
+Zero eligible supply produces one `CUT-EXHAUSTED` director episode, whether
+the remaining pins are open but unavailable or all closed. An unresolved
+episode escalates to the configured `chief` after 60 minutes. After 120
+minutes, `fleet-report` puts its unresolved row before the normal header in
+both the chief digest and full report. The digest retains its line bound.
+Available supply clears the episode; a new `declaredAt` or changed cut starts
+a new one. Reordering JSON object fields does not reset the clock, and a
+clock rollback cannot lower an escalation already reached. A missing chief
+route is reported as unknown to the coordinator, not as chief delivery.
+
+`pullEnabled: false` requires nonempty `pausedBy` and `pauseReason` strings
+and a parseable `pausedUntil` timestamp. A paused session with eligible supply
+reports `PAUSED-WITH-SUPPLY` to its director on every cycle. Passing the
+expiry sends a chief alarm once per pause declaration and leaves the
+session paused: expiry never resumes goals automatically. Change the owned
+pause decision explicitly after disposition.
 
 ## Pull nudges
 
@@ -201,9 +242,11 @@ atomic award and enforces its policy/dependencies. Source-test fixtures do
 not establish installed Tern delivery, service activation or live-fleet
 outcomes.
 
-**Parking a round.** Set `phase` to `INSIGHT` (any case) or `pullEnabled` to
-`false` and the session's workers get no pull nudge, escalation or
-no-decision alert, and no grading nudge. A missing field keeps pulling on.
+**Parking a round.** `phase: "INSIGHT"` (any case) suppresses worker pull
+controls. An explicit `pullEnabled: false` uses the owned-pause contract above.
+Declared-cut sessions still report paused supply. Missing pause fields keep
+normal pulling on unless `pullEnabled` is explicitly false, which must have
+the complete ownership metadata.
 
 **One escalation chain (Q23).** The chain runs worker, director (`:0.1`),
 chief, Josh. Every worker reply, `UNHEALTHY` and `BLOCKED` owner-decision or
@@ -228,11 +271,14 @@ parent) and `comments[]` (`author`, `text`, oldest first);
 ## Persisted state
 
 Each scheduled invocation loads per-pane idle-check counts, no-decision
-throttling, and Steering deduplication from `fleet-watch-state.json` beside
-the Fleet Watch JSONL log. The state file is private and atomically replaced.
-The file lets separate service processes continue the same idle sequence,
-avoid resending the same `Steering · N` message, keep NO-WORK seats parked,
-and send each director notice once per episode.
+throttling, Steering deduplication, scoped request intent and cut-exhaustion
+episodes from `fleet-watch-state.json` beside the Fleet Watch JSONL log.
+The state file is private and atomically replaced. Separate service processes
+continue the same idle sequence, avoid resending an unchanged control
+request, keep NO-WORK seats parked and retain unresolved escalation age.
+The hourly report reads this same state and ignores episodes for a
+superseded cut. An unreadable or invalid report source is explicit `UNKNOWN`
+and a nonzero report result, never a clean supply claim.
 
 A busy observation or capture failure resets that pane's idle history. Capture
 failure remains `UNKNOWN`/`NO_DECISION`; it is not treated as idle and cannot

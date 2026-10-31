@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { proveSend, type ProvenSend } from "./send.ts";
 import { isRecord } from "./type-guards.ts";
 import { intakeCountsLine, readIntakeRows, summarizeIntakeHour, INTAKE_DELIVER_HOUR_MS } from "./intake-deliver.ts";
+import { readFleetWatchCriticalReportLines } from "./fleet-watch.ts";
 
 export const REPORT_INJECT_JOB = "fleet-report";
 export const REPORT_INJECT_INTERVAL_SECONDS = 3600;
@@ -233,13 +234,14 @@ export function intakeDigestLine(repo: string | undefined, nowMs: number): strin
 	return intakeCountsLine(summarizeIntakeHour(rows, hourStart));
 }
 
-function digestText(generatedAt: string, ages: ReportSourceAges, projects: readonly ReportProjectRow[], reportPath: string): string {
+function digestText(generatedAt: string, ages: ReportSourceAges, projects: readonly ReportProjectRow[], reportPath: string, leadLines: readonly string[]): string {
 	const first = `REPORTINJECT1 generated_at=${generatedAt} source_age(sitrep)=${ages.sitrep} fleet-state=${ages.fleetState} fleet-pulse=${ages.fleetPulse} fleet-flow=${ages.fleetFlow} mission=${ages.mission}`;
-	const projectLimit = REPORT_INJECT_MAX_DIGEST_LINES - 3;
-	const lines = [first, ...projects.slice(0, projectLimit).map(row => {
+	const lines = leadLines.slice(0, REPORT_INJECT_MAX_DIGEST_LINES - 3);
+	const projectLimit = REPORT_INJECT_MAX_DIGEST_LINES - 3 - lines.length;
+	lines.push(first, ...projects.slice(0, projectLimit).map(row => {
 		const name = row.name.split("\r").join(" ").split("\n").join(" ").slice(0, 80);
 		return `${name}: ${row.status === "OK" ? row.detail : `${row.status} (${row.detail})`}`;
-	})];
+	}));
 	if (projects.length > projectLimit) lines.push(`... ${projects.length - projectLimit} project row(s) omitted`);
 	lines.push(`Full report: ${reportPath}`);
 	return lines.join("\n");
@@ -299,6 +301,15 @@ export async function runReportInjectJob(config: ReportInjectConfig, deps: Repor
 		reportBody = `${reportBody}${reportBody.endsWith("\n") || reportBody === "" ? "" : "\n"}SITREP UNKNOWN (${reason})\n`;
 	}
 	if (reportBody === "") reportBody = "SITREP UNKNOWN (producer returned no report)\n";
+	let cutLines: string[];
+	let cutSourceUnknown = false;
+	try {
+		cutLines = readFleetWatchCriticalReportLines(configPath, join(home, ".local", "state", "omp-kit", "fleet-watch-state.json"));
+	} catch (error) {
+		cutSourceUnknown = true;
+		cutLines = [`CUT-EXHAUSTED UNKNOWN: ${safeFailureText(String(error))}`];
+	}
+	if (cutLines.length > 0) reportBody = `${cutLines.join("\n")}\n${reportBody}`;
 	atomicReplace(reportPath, reportBody);
 
 	const pulseRows = pulseRowsSince(pulseLogPath, pulseStart);
@@ -319,7 +330,7 @@ export async function runReportInjectJob(config: ReportInjectConfig, deps: Repor
 		fleetFlow: reportBody.includes("FLOW UNKNOWN") ? "UNKNOWN" : boundedAge(runFinished.getTime() - reportStart.getTime(), reportBody.includes("== Closes per day")),
 		mission: reportBody.includes("MISSION UNKNOWN") ? "UNKNOWN" : boundedAge(runFinished.getTime() - reportStart.getTime(), reportBody.includes("== Mission")),
 	};
-	const sourceFailed = stateCurrent === false || sitrepRun.code !== 0
+	const sourceFailed = cutSourceUnknown || stateCurrent === false || sitrepRun.code !== 0
 		|| projects.some(row => row.status !== "OK")
 		|| Object.values(sourceAges).some(age => age === "UNKNOWN" || age === "STALE");
 	// INTAKE1 AC3: hourly intake counts ride the digest as one pseudo-project row.
@@ -327,7 +338,7 @@ export async function runReportInjectJob(config: ReportInjectConfig, deps: Repor
 	// line; result.projects below never carries the row.
 	const intakeLine = intakeDigestLine(config.intakeRepo, generatedAtMs);
 	if (intakeLine !== null) projects.push({ name: "intake", status: "OK", detail: intakeLine.slice("intake: ".length) });
-	const digest = digestText(generatedAt, sourceAges, projects, reportPath);
+	const digest = digestText(generatedAt, sourceAges, projects, reportPath, cutLines);
 	if (intakeLine !== null) projects.pop();
 	const route = chiefRoute(configData);
 	if (route === null) {

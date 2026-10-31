@@ -16,6 +16,10 @@ const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⡿⣟⣯⣷]/;
 /** Reserved uncommitted edits must exceed the work audit's 30-minute limit. */
 export const STRANDED_ESCALATION_LIMIT_MINUTES = 30;
 
+type ScopedAssignment = { bead: string; role: "builder" | "grader" };
+type CutStage = "director" | "chief" | "critical";
+type CutExhaustion = { declaration: string; startedAt: number; stage: CutStage };
+
 export type FleetWatchSession = {
 	session: string;
 	coordinatorPane: string;
@@ -29,10 +33,20 @@ export type FleetWatchSession = {
 	mission?: string;
 	round?: string | number;
 	phase?: string;
-	/** false parks the session's workers: no pull nudge, no escalation. Absent: pulling is on. */
+	/** false prevents worker goal changes; owned pauses still report supply and overdue expiry. */
 	pullEnabled?: boolean;
+	pausedBy?: string;
+	pauseReason?: string;
+	pausedUntil?: string;
+	/** A declared cut selects single-bead goals instead of broad pull nudges. */
+	milestone?: { epic: string; declaredAt: string; pinned: string[] };
 };
-export type FleetWatchConfig = { enabled: boolean; intervalSeconds: number; noDecisionChecks: number; sessions: FleetWatchSession[]; registeredTrackers?: FleetWatchRegisteredTracker[] };
+export type FleetWatchConfig = { enabled: boolean; intervalSeconds: number; noDecisionChecks: number; sessions: FleetWatchSession[]; registeredTrackers?: FleetWatchRegisteredTracker[]; chief?: { session: string; pane: string } };
+
+/** Object field ordering is not a new cut declaration; pin order is part of the cut. */
+function cutDeclaration(cut: NonNullable<FleetWatchSession["milestone"]>): string {
+	return JSON.stringify([cut.epic, cut.declaredAt, cut.pinned]);
+}
 /**
  * ompkit-ps3lo: MP6-registry seam. Every registered tracker is covered by
  * the health tick even when no session entry names its repo; recovery still
@@ -53,7 +67,13 @@ export type FleetWatchPullAction = {
 	kind: "PULL_WARNINGS" | Extract<PreassignVerdict, { ready: false }>["kind"];
 	session: string; pane: string; checks: number; text: string; refusals: readonly PullRefusal[];
 };
-export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchPullAction | FleetWatchStrandedAction | FleetWatchGitLockAction;
+/** Scoped control requests and routing plans, never goal-adoption receipts. */
+type FleetWatchSupplyAction = {
+	kind: "SCOPED_ARM" | "SCOPED_PAUSE" | "CUT_EXHAUSTED" | "PAUSED_WITH_SUPPLY" | "PAUSE_EXPIRED";
+	session: string; pane: string; checks: number; text: string;
+	bead?: string; role?: ScopedAssignment["role"]; stage?: CutStage;
+};
+export type FleetWatchAction = FleetWatchPaneAction | FleetWatchRecoveryAction | FleetWatchRetentionAction | FleetWatchPullAction | FleetWatchStrandedAction | FleetWatchGitLockAction | FleetWatchSupplyAction;
 export type FleetWatchCapture = { code: number; stdout: string; stderr: string };
 export type FleetWatchDecision = { busy: boolean; checks: number; actions: FleetWatchPaneAction[] };
 
@@ -276,18 +296,33 @@ function leafVerdict(sessionName: string, rows: ReadyRow[] | null, skipLabels: r
 	return { ready: false, kind: "NO_FREE_LEAF", text: noFreeLeafText(sessionName, rows),
 		refusals: refusals ?? [{ class: "unsafe_custody", bead: null, actor: coordinator, next: "director supplies an eligible native product leaf; absence of supply is not permission to take protected work" }] };
 }
-type FleetWatchPaneState = { checks?: number; lastDecision?: number; lastSteeringCount?: number; parked?: true };
-type FleetWatchState = { version: 1; panes: Record<string, FleetWatchPaneState>; eventSeq?: number; pendingEmitFailures?: number; preassign?: Record<string, { kind: string; atMs: number }> };
+type FleetWatchPaneState = { checks?: number; lastDecision?: number; lastSteeringCount?: number; parked?: true; scope?: ScopedAssignment };
+type FleetWatchState = { version: 1; panes: Record<string, FleetWatchPaneState>; eventSeq?: number; pendingEmitFailures?: number; preassign?: Record<string, { kind: string; atMs: number }>; cutExhaustion?: Record<string, CutExhaustion> };
+
+function parseScopedAssignment(value: unknown): ScopedAssignment {
+	if (!value || typeof value !== "object" || !("bead" in value) || !("role" in value)
+		|| typeof value.bead !== "string" || !value.bead
+		|| (value.role !== "builder" && value.role !== "grader")) throw new Error("FLEET_WATCH_STATE_INVALID");
+	return { bead: value.bead, role: value.role };
+}
+
+function parseCutExhaustion(value: unknown): CutExhaustion {
+	if (!value || typeof value !== "object" || !("declaration" in value) || !("startedAt" in value) || !("stage" in value)
+		|| typeof value.declaration !== "string" || !value.declaration
+		|| typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt) || value.startedAt < 0
+		|| (value.stage !== "director" && value.stage !== "chief" && value.stage !== "critical")) throw new Error("FLEET_WATCH_STATE_INVALID");
+	return { declaration: value.declaration, startedAt: value.startedAt, stage: value.stage };
+}
 
 function parseFleetWatchState(value: unknown): FleetWatchState {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("FLEET_WATCH_STATE_INVALID");
-	const state = value as { version?: unknown; panes?: unknown; eventSeq?: unknown; pendingEmitFailures?: unknown; preassign?: unknown };
+	const state = value as { version?: unknown; panes?: unknown; eventSeq?: unknown; pendingEmitFailures?: unknown; preassign?: unknown; cutExhaustion?: unknown };
 	const rawPanes = state.panes;
 	if (state.version !== 1 || typeof rawPanes !== "object" || rawPanes === null || Array.isArray(rawPanes)) throw new Error("FLEET_WATCH_STATE_INVALID");
 	const panes = Object.create(null) as Record<string, FleetWatchPaneState>;
 	for (const [key, raw] of Object.entries(rawPanes as Record<string, unknown>)) {
 		if (!key || typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("FLEET_WATCH_STATE_INVALID");
-		const candidate = raw as { checks?: unknown; lastDecision?: unknown; lastSteeringCount?: unknown; parked?: unknown };
+		const candidate = raw as { checks?: unknown; lastDecision?: unknown; lastSteeringCount?: unknown; parked?: unknown; scope?: unknown };
 		const pane: FleetWatchPaneState = {};
 		const checks = candidate.checks;
 		if (checks !== undefined) {
@@ -308,6 +343,7 @@ function parseFleetWatchState(value: unknown): FleetWatchState {
 			if (candidate.parked !== true) throw new Error("FLEET_WATCH_STATE_INVALID");
 			pane.parked = true;
 		}
+		if (candidate.scope !== undefined) pane.scope = parseScopedAssignment(candidate.scope);
 		panes[key] = pane;
 	}
 	const parsed: FleetWatchState = { version: 1, panes };
@@ -328,6 +364,11 @@ function parseFleetWatchState(value: unknown): FleetWatchState {
 			parsed.preassign[key] = { kind: report.kind, atMs: report.atMs };
 		}
 	}
+	if (state.cutExhaustion !== undefined) {
+		if (!state.cutExhaustion || typeof state.cutExhaustion !== "object" || Array.isArray(state.cutExhaustion)) throw new Error("FLEET_WATCH_STATE_INVALID");
+		parsed.cutExhaustion = Object.create(null) as Record<string, CutExhaustion>;
+		for (const [key, episode] of Object.entries(state.cutExhaustion)) parsed.cutExhaustion[key] = parseCutExhaustion(episode);
+	}
 	return parsed;
 }
 
@@ -345,6 +386,18 @@ function loadFleetWatchState(path: string): FleetWatchState | undefined {
 
 function saveFleetWatchState(path: string, state: FleetWatchState): void {
 	atomicReplaceBytes(resolve(path), Buffer.from(`${JSON.stringify(state)}\n`, "utf8"), { mode: 0o600, durability: "full" });
+}
+
+/** Read unresolved critical episodes for the current cut, not a fresh supply or delivery claim. */
+export function readFleetWatchCriticalReportLines(configPath: string, statePath: string): string[] {
+	const state = loadFleetWatchState(statePath);
+	if (state?.cutExhaustion === undefined) return [];
+	const episodes = state.cutExhaustion;
+	return loadFleetWatchConfig(configPath).sessions.flatMap(session => {
+		const episode = episodes[session.session];
+		return session.milestone !== undefined && episode?.stage === "critical" && episode.declaration === cutDeclaration(session.milestone)
+			? [`CUT-EXHAUSTED ${session.session}: cut ${session.milestone.epic} unresolved since ${new Date(episode.startedAt).toISOString()}; director response overdue`] : [];
+	});
 }
 
 export function paneIsBusy(paneText: string): boolean {
@@ -407,7 +460,7 @@ export function parseWorkerReply(text: string): WorkerReply | null {
 const LEGACY_VERDICT = /^(?:CONTROLLER[ \t]+|TRIAGE[ \t]+)?(?:GRADE[DS]?|VERIF(?:IED|ICATION|Y)|VERDICT|REVIEW(?:ED)?|REJECT(?:ED)?|ACCEPT(?:ED)?|INTEGRATE[DS]?|PASS(?:ED)?|FAIL(?:ED)?)\b/;
 
 export interface TrackerPolicy { statuses: string[]; transitions: Record<string, string[]>; ready: string[] }
-export interface TrackerIssue { id: string; status: string; priority: number; labels: string[]; parents: string[]; comments: { author: string; text: string }[] }
+export interface TrackerIssue { id: string; status: string; priority: number; labels: string[]; parents: string[]; comments: { author: string; text: string }[]; assignee?: string | null; blockers?: string[] }
 export interface GradingItem { id: string; status: string; author: string | null; via: string; labels: string[] }
 export interface ReworkItem { id: string; implementer: string | null; labels: string[] }
 export type TriageResult = { usable: true; ids: string[] } | { usable: false; reason: string };
@@ -477,6 +530,18 @@ export function reviewStatuses(policy: TrackerPolicy): string[] {
 	return (policy.transitions.in_progress ?? []).filter((status) => status !== "closed" && !policy.ready.includes(status) && !PARKED_STATUSES.includes(status) && (policy.transitions[status] ?? []).includes("closed"));
 }
 
+function issueDependencyTargets(id: string, dependencies: unknown): { parents: string[]; blockers: string[] } {
+	const parents: string[] = [], blockers: string[] = [];
+	if (Array.isArray(dependencies)) for (const dep of dependencies) {
+		if (!dep || typeof dep !== "object") continue;
+		const edge = dep as Record<string, unknown>;
+		if (edge.issue_id !== id || typeof edge.depends_on_id !== "string") continue;
+		if (edge.type === "parent-child") parents.push(edge.depends_on_id);
+		else if (edge.type === "blocks") blockers.push(edge.depends_on_id);
+	}
+	return { parents, blockers };
+}
+
 export function parseIssuesJsonl(text: string): TrackerIssue[] | null {
 	const issues: TrackerIssue[] = [];
 	for (const line of text.split("\n")) {
@@ -487,19 +552,19 @@ export function parseIssuesJsonl(text: string): TrackerIssue[] | null {
 		const row = value as Record<string, unknown>;
 		if (typeof row.id !== "string" || typeof row.status !== "string") return null;
 		const id = row.id;
-		const parents = Array.isArray(row.dependencies)
-			? row.dependencies.flatMap((dep: unknown) => {
-				const edge = dep as Record<string, unknown> | null;
-				return edge && edge.type === "parent-child" && edge.issue_id === id && typeof edge.depends_on_id === "string" ? [edge.depends_on_id] : [];
-			})
-			: [];
+		const { parents, blockers } = issueDependencyTargets(id, row.dependencies);
 		const comments = Array.isArray(row.comments)
 			? row.comments.flatMap((entry: unknown) => {
 				const comment = entry as Record<string, unknown> | null;
 				return comment && typeof comment.author === "string" && typeof comment.text === "string" ? [{ author: comment.author, text: comment.text }] : [];
 			})
 			: [];
-		issues.push({ id, status: row.status, priority: typeof row.priority === "number" ? row.priority : 4, labels: stringList(row.labels) ?? [], parents, comments });
+		issues.push({
+			id, status: row.status, priority: typeof row.priority === "number" ? row.priority : 4,
+			labels: stringList(row.labels) ?? [], parents, comments,
+			...(typeof row.assignee === "string" && row.assignee ? { assignee: row.assignee } : {}),
+			...(blockers.length > 0 ? { blockers } : {}),
+		});
 	}
 	return issues;
 }
@@ -850,16 +915,60 @@ export function nudgeText(config: FleetWatchSession, pick: PullPick): string {
 	}
 }
 
+/** Cut request intent and escalation age are separate from pane idle/steering history. */
+class CutSupplyState {
+	private readonly scopes = new Map<string, ScopedAssignment>();
+	private readonly cutExhaustion = new Map<string, CutExhaustion>();
+	constructor(private readonly now: () => number, state?: FleetWatchState) {
+		for (const [key, pane] of Object.entries(state?.panes ?? {})) if (pane.scope) this.scopes.set(key, { ...pane.scope });
+		for (const [key, episode] of Object.entries(state?.cutExhaustion ?? {})) this.cutExhaustion.set(key, { ...episode });
+	}
+	appendSnapshot(state: FleetWatchState): void {
+		for (const [key, scope] of this.scopes) (state.panes[key] ??= {}).scope = { ...scope };
+		if (this.cutExhaustion.size > 0) {
+			state.cutExhaustion = Object.create(null) as Record<string, CutExhaustion>;
+			for (const [key, episode] of this.cutExhaustion) state.cutExhaustion[key] = { ...episode };
+		}
+	}
+	scopeFor(session: FleetWatchSession, pane: string): Readonly<ScopedAssignment> | undefined {
+		return this.scopes.get(`${session.session}:${pane}`);
+	}
+	setScope(session: FleetWatchSession, pane: string, scope: ScopedAssignment | null): boolean {
+		const key = `${session.session}:${pane}`;
+		if (scope === null) return this.scopes.delete(key);
+		const previous = this.scopes.get(key);
+		if (previous?.bead === scope.bead && previous.role === scope.role) return false;
+		this.scopes.set(key, { ...scope });
+		return true;
+	}
+	settleCutExhaustion(session: FleetWatchSession, supply: number): { changed: boolean; stage: CutStage | null } {
+		const previous = this.cutExhaustion.get(session.session);
+		if (supply > 0 || session.milestone === undefined) return { changed: this.cutExhaustion.delete(session.session), stage: null };
+		const declaration = cutDeclaration(session.milestone);
+		if (previous === undefined || previous.declaration !== declaration) {
+			this.cutExhaustion.set(session.session, { declaration, startedAt: this.now(), stage: "director" });
+			return { changed: true, stage: "director" };
+		}
+		const elapsed = Math.max(0, this.now() - previous.startedAt);
+		const stage: CutStage = elapsed >= 120 * 60_000 ? "critical" : elapsed >= 60 * 60_000 ? "chief" : "director";
+		if (stage === "director" || stage === previous.stage || previous.stage === "critical") return { changed: false, stage: null };
+		this.cutExhaustion.set(session.session, { ...previous, stage });
+		return { changed: true, stage };
+	}
+}
+
 export class FleetWatcher {
 	private readonly checks = new Map<string, number>();
 	private readonly lastDecision = new Map<string, number>();
 	private readonly lastSteeringCount = new Map<string, number>();
 	private readonly preassignReports = new Map<string, { kind: string; atMs: number }>();
+	readonly supply: CutSupplyState;
 	/** NO-WORK seats: no repeated empty-queue nudge, but every idle tick re-checks the queues. */
 	private readonly parked = new Set<string>();
 	private eventSeq = 0;
 	private pendingEmitFailures = 0;
 	constructor(private readonly config: FleetWatchConfig, private readonly now: () => number = Date.now, state?: FleetWatchState) {
+		this.supply = new CutSupplyState(now, state);
 		this.eventSeq = state?.eventSeq ?? 0;
 		this.pendingEmitFailures = state?.pendingEmitFailures ?? 0;
 		for (const [key, pane] of Object.entries(state?.panes ?? {})) {
@@ -897,6 +1006,7 @@ export class FleetWatcher {
 		for (const [key, lastSteeringCount] of this.lastSteeringCount) (panes[key] ??= {}).lastSteeringCount = lastSteeringCount;
 		for (const key of this.parked) (panes[key] ??= {}).parked = true;
 		const state: FleetWatchState = { version: 1, panes };
+		this.supply.appendSnapshot(state);
 		if (this.eventSeq > 0) state.eventSeq = this.eventSeq;
 		if (this.pendingEmitFailures > 0) state.pendingEmitFailures = this.pendingEmitFailures;
 		if (this.preassignReports.size > 0) {
@@ -936,6 +1046,9 @@ export class FleetWatcher {
 			}
 		}
 		return cleared;
+	}
+	isParked(session: FleetWatchSession, pane: string): boolean {
+		return this.parked.has(`${session.session}:${pane}`);
 	}
 	/** Park (NO-WORK) or wake a seat; parked seats are re-checked on every idle tick, and a woken seat restarts at the nudge count. */
 	setParked(session: FleetWatchSession, pane: string, parked: boolean): void {
@@ -993,6 +1106,28 @@ export class FleetWatcher {
 
 const MISSION_REF = /^[^\n:][^\n]*:[1-9][0-9]{0,6}$/;
 
+function validateSessionSupply(session: FleetWatchSession, index: number): void {
+	if (session.pullEnabled === false && (
+		typeof session.pausedBy !== "string" || !session.pausedBy.trim()
+		|| typeof session.pauseReason !== "string" || !session.pauseReason.trim()
+		|| typeof session.pausedUntil !== "string" || !Number.isFinite(Date.parse(session.pausedUntil))
+	)) throw new Error(`PAUSE_UNOWNED: sessions[${index}] requires pausedBy, pauseReason and a valid pausedUntil`);
+	if (session.milestone !== undefined && (
+		!session.milestone || typeof session.milestone !== "object"
+		|| typeof session.milestone.epic !== "string" || !session.milestone.epic.trim()
+		|| !Number.isFinite(Date.parse(session.milestone.declaredAt))
+		|| !Array.isArray(session.milestone.pinned) || session.milestone.pinned.some(id => typeof id !== "string" || !id.trim())
+	)) throw new Error(`FLEET_WATCH_CONFIG_INVALID: sessions[${index}].milestone`);
+}
+
+function parseChiefRoute(value: unknown): FleetWatchConfig["chief"] {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || !("session" in value) || !("pane" in value)
+		|| typeof value.session !== "string" || !value.session.trim()
+		|| typeof value.pane !== "string" || !value.pane.trim()) throw new Error("FLEET_WATCH_CONFIG_INVALID: chief");
+	return { session: value.session, pane: value.pane };
+}
+
 export function loadFleetWatchConfig(path: string): FleetWatchConfig {
 	const value: unknown = JSON.parse(readFileSync(path, "utf8"));
 	if (!value || typeof value !== "object" || !Array.isArray((value as Record<string, unknown>).sessions)) throw new Error("FLEET_WATCH_CONFIG_INVALID");
@@ -1005,9 +1140,17 @@ export function loadFleetWatchConfig(path: string): FleetWatchConfig {
 		if (session.round !== undefined && typeof session.round !== "string" && typeof session.round !== "number") throw invalid("round");
 		if (session.phase !== undefined && (typeof session.phase !== "string" || session.phase === "")) throw invalid("phase");
 		if (session.pullEnabled !== undefined && typeof session.pullEnabled !== "boolean") throw invalid("pullEnabled");
+		validateSessionSupply(session, index);
 	}
 	const registeredTrackers = parseRegisteredTrackers((value as Record<string, unknown>).registeredTrackers);
-	return { enabled: (value as Record<string, unknown>).enabled !== false, intervalSeconds: Number((value as Record<string, unknown>).intervalSeconds ?? 120), noDecisionChecks: Number((value as Record<string, unknown>).noDecisionChecks ?? 5), sessions, ...(registeredTrackers === undefined ? {} : { registeredTrackers }) };
+	const chief = parseChiefRoute((value as Record<string, unknown>).chief);
+	return {
+		enabled: (value as Record<string, unknown>).enabled !== false,
+		intervalSeconds: Number((value as Record<string, unknown>).intervalSeconds ?? 120),
+		noDecisionChecks: Number((value as Record<string, unknown>).noDecisionChecks ?? 5),
+		sessions, ...(registeredTrackers === undefined ? {} : { registeredTrackers }),
+		...(chief === undefined ? {} : { chief }),
+	};
 }
 
 /**
@@ -1370,6 +1513,147 @@ class WatcherEventRecorder {
 
 
 
+type SessionPullContext = Omit<PullInput, "worker" | "taken"> & {
+	statusRows: ReadyRow[] | null;
+	members: ReadonlySet<string> | null;
+};
+
+/** Routing projection only: native claim admission remains authoritative. */
+function supplyCutMembers(session: FleetWatchSession, issues: readonly TrackerIssue[] | null): Set<string> | null {
+	if (session.milestone === undefined) return null;
+	const members = new Set(session.milestone.pinned);
+	const byId = new Map((issues ?? []).map(issue => [issue.id, issue]));
+	for (const id of members) for (const blocker of byId.get(id)?.blockers ?? []) {
+		switch (byId.get(blocker)?.status) {
+			case "open": case "in_progress": case "in_review": case "rework": case "blocked": members.add(blocker);
+		}
+	}
+	return members;
+}
+
+type ScopedSupplyCycle = {
+	config: FleetWatchConfig; session: FleetWatchSession; deps: FleetWatchOnceDeps; watcher: FleetWatcher;
+	context: SessionPullContext; actorFor: (pane: string) => string | null; choose: (pane: string) => PullChoice;
+	taken: Set<string>; actions: FleetWatchAction[]; persist: () => void; recordAttempt: PullAttemptRecorder;
+};
+
+function runScopedSupply(cycle: ScopedSupplyCycle): void {
+	const { config, session, deps, watcher, context, actorFor, choose, taken, actions, persist, recordAttempt } = cycle;
+	const now = deps.now ?? Date.now;
+	const submit = (action: FleetWatchSupplyAction | FleetWatchPaneAction, commit?: () => void): boolean => {
+		const bead = "bead" in action ? action.bead ?? null : null;
+		if (!admittedEffect(deps.admission, "send")) {
+			recordAdmissionRefusal(deps, recordAttempt, session.repo, { ...action, text: `admission refused ${action.kind}; no control sent` }, bead);
+			return false;
+		}
+		commit?.();
+		try { deps.send(action.session, action.pane, action.text); }
+		catch (error) {
+			const at = now();
+			appendFileSync(deps.logPath, JSON.stringify({ at: new Date(at).toISOString(), kind: "NOTICE_UNPROVEN", session: action.session, pane: action.pane, text: String(error), requested_kind: action.kind }) + "\n");
+			recordAttempt(session.session, session.repo, action.pane, "NOTICE_UNPROVEN", null, bead, at);
+			return false;
+		}
+		const at = now();
+		appendFileSync(deps.logPath, JSON.stringify({ at: new Date(at).toISOString(), ...action }) + "\n");
+		recordAttempt(session.session, session.repo, action.pane, action.kind, null, bead, at);
+		actions.push(action);
+		return true;
+	};
+	const director = { session: session.coordinatorSession, pane: session.coordinatorPane, checks: 0 };
+	const chief = { ...(config.chief ?? { session: session.coordinatorSession, pane: session.coordinatorPane }), checks: 0 };
+	if (context.readyRows === null || context.statusRows === null || context.issues === null) {
+		submit({ ...director, kind: "NO_DECISION", text: `Fleet watch: ${session.session} supply UNKNOWN; native queues or issue metadata unavailable; no goal changed` });
+		return;
+	}
+	const available = new Set<string>();
+	for (const row of context.readyRows) if (isClaimableLeaf(row, context.skipLabels)) available.add(row.id);
+	for (const row of context.grading) if (row.author !== null && !row.labels.some(label => excludedWorkerLabel(label, context.skipLabels))) available.add(row.id);
+	for (const row of context.rework) if (!row.labels.some(label => excludedWorkerLabel(label, context.skipLabels))) available.add(row.id);
+	const exhaustion = watcher.supply.settleCutExhaustion(session, available.size);
+	if (exhaustion.changed) persist();
+	if (exhaustion.stage !== null) {
+		const route = exhaustion.stage === "director" ? director : chief;
+		const lead = `CUT-EXHAUSTED ${session.session}: cut ${session.milestone?.epic ?? "undeclared"} has no eligible supply`;
+		submit({ ...route, kind: "CUT_EXHAUSTED", stage: exhaustion.stage, text: `${lead}\nstage=${exhaustion.stage}; director must replenish or redeclare the cut${config.chief === undefined && exhaustion.stage !== "director" ? "; chief route UNKNOWN" : ""}` });
+	}
+	if (pullPausedReason(session) !== null) {
+		if (available.size > 0) submit({ ...director, kind: "PAUSED_WITH_SUPPLY", text: `PAUSED-WITH-SUPPLY ${session.session}: ${available.size} eligible item(s); pausedBy=${session.pausedBy ?? "UNKNOWN"} reason=${session.pauseReason ?? session.phase ?? "UNKNOWN"} until=${session.pausedUntil ?? "UNKNOWN"}` });
+		if (session.pullEnabled === false && session.pausedUntil !== undefined && now() > Date.parse(session.pausedUntil)) {
+			const episode = JSON.stringify([session.pausedBy, session.pauseReason, session.pausedUntil]);
+			if (watcher.settlePreassignReport(`pause-expired:${session.session}`, episode)) {
+				persist();
+				submit({ ...chief, kind: "PAUSE_EXPIRED", text: `PAUSE-EXPIRED ${session.session}: ${session.pausedBy} must disposition ${session.pauseReason}; session stays paused${config.chief === undefined ? "; chief route UNKNOWN" : ""}` });
+			}
+		}
+		return;
+	}
+	if (session.milestone === undefined || context.members === null) return;
+	const facts = new Map<string, { status: string; assignee?: string | null }>();
+	for (const row of context.issues) facts.set(row.id, row);
+	for (const row of context.readyRows) facts.set(row.id, row);
+	for (const row of context.statusRows) facts.set(row.id, row);
+	const holds = new Map<string, string>();
+	for (const [id, row] of facts) if (context.members.has(id) && row.status === "in_progress" && row.assignee) {
+		holds.set(row.assignee, id);
+		taken.add(id);
+	}
+	const retained = new Set<string>();
+	for (const pane of session.workerPanes) {
+		const actor = actorFor(pane);
+		if (actor === null) continue;
+		const held = holds.get(actor);
+		if (held !== undefined) {
+			if (watcher.supply.setScope(session, pane, { bead: held, role: "builder" })) persist();
+			retained.add(pane);
+			continue;
+		}
+		const scope = watcher.supply.scopeFor(session, pane);
+		if (scope === undefined || !context.members.has(scope.bead)) continue;
+		const row = facts.get(scope.bead);
+		const valid = scope.role === "grader"
+			? context.grading.some(item => item.id === scope.bead && item.author !== null && item.author !== actor)
+			: row !== undefined && (row.assignee == null || row.assignee === actor)
+				&& (row.status === "open" || row.status === "in_progress" || row.status === "rework");
+		if (valid) { retained.add(pane); taken.add(scope.bead); }
+	}
+	for (const pane of session.workerPanes) {
+		if (retained.has(pane)) continue;
+		const capture = deps.capture(session.session, pane);
+		if (capture.code !== 0 || capture.stderr || !capture.stdout.trim()) {
+			submit(watcher.captureFailed(session, pane, { ...capture, code: capture.code || 1 }));
+			continue;
+		}
+		if (paneIsBusy(capture.stdout)) continue;
+		const actor = actorFor(pane);
+		if (actor === null) {
+			submit({ ...director, kind: "NO_DECISION", text: `Fleet watch: identity UNKNOWN for ${session.session}:${pane}; no goal changed` });
+			continue;
+		}
+		const scope = watcher.supply.scopeFor(session, pane);
+		if (scope !== undefined && context.members.has(scope.bead) && !facts.has(scope.bead)) continue;
+		const choice = choose(pane);
+		if (recordPullNotice(session, { kind: "NUDGED", session: session.session, pane, checks: 0, text: "" }, choice, deps, watcher, actions, recordAttempt)) persist();
+		if (choice.ready) {
+			const role: ScopedAssignment["role"] = choice.pick.kind === "GRADE" ? "grader" : "builder";
+			const bead = choice.pick.id;
+			taken.add(bead);
+			const objective = `Role=${role}. Tracker=${JSON.stringify(session.repo)}. Work only bead ${JSON.stringify(bead)} under the repository instructions and its original acceptance. Do not pull another item or run a broad role loop. Builders hand off to independent review and never close their own work; graders verify original outcomes before closure or rework. Stop at this scope's completion.`;
+			submit({ kind: "SCOPED_ARM", session: session.session, pane, checks: 0, bead, role, text: `/goal set ${objective}` }, () => {
+				watcher.supply.setScope(session, pane, { bead, role });
+				watcher.setParked(session, pane, false);
+				persist();
+			});
+		} else if ((choice.kind === "NO_FREE_LEAF" || choice.kind === "NO_TRIAGE_PICK") && (!watcher.isParked(session, pane) || scope !== undefined)) {
+			submit({ kind: "SCOPED_PAUSE", session: session.session, pane, checks: 0, ...(scope === undefined ? {} : { bead: scope.bead }), text: "/goal pause" }, () => {
+				watcher.supply.setScope(session, pane, null);
+				watcher.setParked(session, pane, true);
+				persist();
+			});
+		}
+	}
+}
+
 export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnceDeps, watcher?: FleetWatcher): FleetWatchAction[] {
 	if (!config.enabled) return [];
 	const now = deps.now ?? Date.now;
@@ -1507,18 +1791,27 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		}
 	}
 	let stateDirty = recordStrandedAudit(config, deps, activeWatcher, actions, eventRecorder.recordAttempt);
-	const pullFor = (session: FleetWatchSession, pane: string): PullChoice => {
-		const gate = writeGate(session.session, cached(flagCache, session.repo, () => probes.findRecoveryFlags(session.repo)), recoveryKinds.get(session.repo) ?? null);
-		if (!gate.ready) return gate;
+	const contexts = new Map<string, SessionPullContext>();
+	const contextFor = (session: FleetWatchSession): SessionPullContext => {
+		const key = `${session.session}\0${session.repo}`;
+		const previous = contexts.get(key);
+		if (previous !== undefined) return previous;
 		const policy = cached(policyCache, session.repo, () => pull.readPolicy(session.repo)) ?? EMPTY_POLICY;
 		const review = reviewStatuses(policy);
-		const statusRows = cached(statusCache, session.repo, () => pull.listStatuses(session.repo, policy.statuses.includes(REWORK_LABEL) ? [...review, REWORK_LABEL] : review));
+		const statuses = policy.statuses.includes(REWORK_LABEL) ? [...review, REWORK_LABEL] : [...review];
+		if (session.milestone !== undefined) statuses.push("in_progress");
+		const statusKey = `${session.repo}\0${statuses.join("\0")}`;
+		const statusRows = cached(statusCache, statusKey, () => pull.listStatuses(session.repo, statuses));
 		const ready = cached(rowsCache, `${session.repo}\0${session.readyCommand ?? ""}`, () => probes.listReadyRows(session.repo, session.readyCommand));
-		const readyRows = ready.rows;
+		const allReadyRows = ready.rows;
 		const issues = cached(issuesCache, session.repo, () => pull.readIssues(session.repo));
-		const grading = gradingQueue(statusRows, issues, review);
-		const rework = reworkQueue(statusRows, readyRows, issues);
-		const triage = cached(triageCache, session.repo, () => pull.triage(session.repo));
+		const members = supplyCutMembers(session, issues);
+		const readyRows = members === null ? allReadyRows : allReadyRows?.filter(row => members.has(row.id)) ?? null;
+		const grading = gradingQueue(statusRows, issues, review).filter(row => members === null || members.has(row.id));
+		const rework = reworkQueue(statusRows, readyRows, issues).filter(row => members === null || members.has(row.id));
+		const allTriage = cached(triageCache, session.repo, () => pull.triage(session.repo));
+		const triage: TriageResult = members !== null && allTriage.usable
+			? { usable: true, ids: allTriage.ids.filter(id => members.has(id)) } : allTriage;
 		const targets = nativeInspectionTargets(readyRows, triage, session.skipLabels ?? []);
 		const coordinator: PullCoordinator = {
 			actor: targets.length === 0 ? null : seat(session, session.coordinatorPane),
@@ -1527,10 +1820,9 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 		const nativeState = targets.length === 0 ? undefined : cached(nativeStateCache,
 			`${session.repo}\0${session.readyCommand ?? ""}\0${coordinator.actor ?? ""}\0${targets.join("\0")}`,
 			() => pull.readNativeState(session.repo, targets, coordinator.actor, session.readyCommand));
-		return choosePull({
+		const context: SessionPullContext = {
 			sessionName: session.session,
-			worker: grading.length > 0 || rework.length > 0 ? seat(session, pane) : null,
-			liveWorkers: new Set(rework.length > 0 ? session.workerPanes.flatMap((seatPane) => seat(session, seatPane) ?? []) : []),
+			liveWorkers: new Set(session.workerPanes.flatMap(pane => seat(session, pane) ?? [])),
 			grading,
 			rework,
 			triage,
@@ -1538,14 +1830,42 @@ export function runFleetWatchOnce(config: FleetWatchConfig, deps: FleetWatchOnce
 			readyRows,
 			readyFailure: ready.failure,
 			policy,
-			focus: session.focusEpics ?? [],
+			focus: members === null ? session.focusEpics ?? [] : [],
 			skipLabels: session.skipLabels ?? [],
-			taken: takenBySession.get(session.session) ?? new Set(),
 			coordinator,
 			nativeState,
+			statusRows, members,
+		};
+		contexts.set(key, context);
+		return context;
+	};
+	const pullFor = (session: FleetWatchSession, pane: string): PullChoice => {
+		const gate = writeGate(session.session, cached(flagCache, session.repo, () => probes.findRecoveryFlags(session.repo)), recoveryKinds.get(session.repo) ?? null);
+		if (!gate.ready) return gate;
+		const context = contextFor(session);
+		return choosePull({
+			...context,
+			worker: context.grading.length > 0 || context.rework.length > 0 ? seat(session, pane) : null,
+			taken: takenBySession.get(session.session) ?? new Set(),
 		});
 	};
+	const persistSupply = () => {
+		stateDirty = true;
+		if (statePath !== null) {
+			saveFleetWatchState(statePath, activeWatcher.snapshot());
+			stateDirty = false;
+		}
+	};
+	for (const session of config.sessions) {
+		if (session.milestone === undefined && session.pullEnabled !== false) continue;
+		const taken = takenBySession.get(session.session) ?? new Set<string>();
+		takenBySession.set(session.session, taken);
+		runScopedSupply({ config, session, deps, watcher: activeWatcher, context: contextFor(session),
+			actorFor: pane => seat(session, pane), choose: pane => pullFor(session, pane),
+			taken, actions, persist: persistSupply, recordAttempt: eventRecorder.recordAttempt });
+	}
 	for (const session of config.sessions) for (const pane of session.workerPanes) {
+		if (session.milestone !== undefined || session.pullEnabled === false) continue;
 		const capture = deps.capture(session.session, pane);
 		const decisions = capture.code !== 0 || capture.stderr.length > 0
 			? [activeWatcher.captureFailed(session, pane, capture)]

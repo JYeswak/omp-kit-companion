@@ -1,0 +1,22 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_9e003c27177851e53703bda119764aa6c49ce59dc4179c159cdf0a75577b6d4a",
+ "limitations": [
+  "No publication, service activation, Tern goal adoption, released live-hour or final-tree full-suite PASS claimed.",
+  "One broader pre-refactor CLI run was 3283 pass,21 skip,73 fail; no baseline-causality or repaired-full-suite claim.",
+  "Quality gating is zero but four new-symbol findings remain visible; no quality acknowledgement or baseline change.",
+  "Shared-tree ripwire test gate names foreign changes and cannot certify ownership; original final-source outcomes are separately replayed."
+ ],
+ "operation": "SUPPLYARM1 original build outcomes and source smoke",
+ "parameters": {
+  "bead": "ompkit-774u.56",
+  "decisive_output": "{\"bead\":\"ompkit-774u.56\",\"base\":\"dee9559404c989641077b710ce9730d60d20950b\",\"source_digests\":{\"src/fleet-watch.ts\":\"755dcdd35f9150203bdb028bce3d584a21485bdb15ccb0d9c6c1fa9503ef9019\",\"src/report-inject-job.ts\":\"30a28c4e270ee7fb254d0370732f5473f1ad3bb75805cec8c2e8b63c9d9dfe6e\",\"tests/cli/fleet-watch-pull.test.ts\":\"bf50d8fc5c51c0951bddc428996c9522cf7a6d2b0938b2eee5d5fb96dbb6fa04\",\"tests/cli/fleet-watch.test.ts\":\"fc3c4099fb96c958be3c03e174229145d69d89c9e0bba15035ae063b99933333\",\"tests/cli/report-inject-job.test.ts\":\"0edcde9c2639a19ad5586be0d5c3ba56582d03cd1ac9a2fdc77f8b5bb4d00745\",\"docs/fleet-watch.md\":\"d161a3b6b309ef9815c36dcfbb89def81848ac666712c492d73e622fff2dd532\",\"ROADMAP.md\":\"25e6f6d1df961223c41ac291eb4f6c1cd7d34816ba1433427799167e6a8c49d7\",\"changelog.d/ompkit-774u.56.md\":\"d08c7f24cb9676c7cd0ff493dee1eab3f222527d62cccc57eab29b5716a14d4d\"},\"before\":{\"pause_rc\":1,\"planner_rc\":1,\"report_and_clock_rc\":1,\"competing_claim_rc\":1},\"after\":[{\"command\":\"sh scripts/build-manifest.sh\",\"rc\":0,\"output\":[],\"truncated\":false},{\"command\":\"bun test tests/cli/fleet-watch-pull.test.ts -t SUPPLYARM1\",\"rc\":0,\"output\":[\" 9 pass\",\" 0 fail\",\" 32 expect() calls\",\"Ran 9 tests across 1 file. [50.00ms]\"],\"truncated\":false},{\"command\":\"bun test tests/cli/fleet-watch.test.ts -t SUPPLYARM1\",\"rc\":0,\"output\":[\" 4 pass\",\" 0 fail\",\" 6 expect() calls\",\"Ran 4 tests across 1 file. [25.00ms]\"],\"truncated\":false},{\"command\":\"bun test tests/cli/fleet-watch-pull.test.ts tests/cli/fleet-watch.test.ts tests/cli/report-inject-job.test.ts\",\"rc\":0,\"output\":[\" 73 pass\",\" 0 fail\",\" 387 expect() calls\",\"Ran 73 tests across 3 files. [643.00ms]\"],\"truncated\":false},{\"command\":\"sh scripts/build-manifest.sh --check\",\"rc\":0,\"output\":[],\"truncated\":false}],\"source_smoke\":{\"rc\":0,\"output\":\"{\\\"surface\\\":\\\"actual source parser + persistent chief-report reader\\\",\\\"unownedPause\\\":\\\"Error: PAUSE_UNOWNED: sessions[0] requires pausedBy, pauseReason and a valid pausedUntil\\\",\\\"ownedPauseRemains\\\":false,\\\"syntheticClockStages\\\":[\\\"director\\\",\\\"chief\\\",\\\"critical\\\"],\\\"criticalFirstLine\\\":\\\"CUT-EXHAUSTED synthetic-workers: cut synthetic-goal unresolved since 2026-10-31T00:00:00.000Z; director response overdue\\\",\\\"afterRedeclaration\\\":[]}\\n{\\\"ownedProbeRetired\\\":true}\\n\"},\"private_index\":{\"members\":[{\"member\":\"kitlib\",\"rc\":0},{\"member\":\"tempsafe\",\"rc\":0},{\"member\":\"pysafe\",\"rc\":0},{\"member\":\"readme\",\"rc\":0},{\"member\":\"imports\",\"rc\":0},{\"member\":\"fragments\",\"rc\":0},{\"member\":\"sources\",\"rc\":0},{\"member\":\"regexploit\",\"rc\":0}],\"scope_positive_control\":[\"ROADMAP.md\",\"changelog.d/ompkit-774u.56.md\",\"docs/fleet-watch.md\",\"src/fleet-watch.ts\",\"src/report-inject-job.ts\",\"tests/cli/fleet-watch-pull.test.ts\",\"tests/cli/fleet-watch.test.ts\",\"tests/cli/report-inject-job.test.ts\"]},\"structural\":{\"quality_rc\":0,\"gating\":0,\"new_symbol_findings\":4,\"edit_contract\":\"runFleetWatchOnce unchanged; incompatible=0\",\"whole_shared_tree_test_gate_rc\":4},\"broader_attempt\":{\"subject\":\"pre-structural-refactor overlay, not final tree\",\"command\":\"bun test tests/cli\",\"rc\":1,\"pass\":3283,\"skip\":21,\"fail\":73,\"full_qualification\":false}}",
+  "subject_sha256": "e2a9e24711fefab31eedaf430077a1cf9ddf9d115d95a7f7acdd0f7b94573e02"
+ },
+ "producer": "TurquoiseSummit",
+ "result_ref": {
+  "bytes": 3089,
+  "sha256": "35fa2768a140710b40da21e8454aa0e18f9e8a8a666204ad9e326a3bbc5e8183"
+ }
+}
