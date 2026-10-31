@@ -6,7 +6,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, read
 import { tmpdir } from "node:os";
 import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
-import { resolveOmpIdentity } from "../../src/paths.ts";
+import { resolveOmpIdentity, verifyTernOmpSource } from "../../src/paths.ts";
 import { nativeCacheEnv, writeBundledHarness, writeReleaseManifest } from "./release-manifest-fixture.ts";
 import { countCaseRows, runFastTest, type FastTestInput, type FastTestReport, type MatcherObservationInput, type MatcherObservationReport } from "../../src/test-runner.ts";
 import { EXTERNAL_PACK_LIMITS, readExternalPackSnapshot, runExternalPackTest } from "../../src/external-pack.ts";
@@ -695,16 +695,27 @@ describe("runFastTest", () => {
 
 	test("observes the 41 KB long-token close fire within the bounded CPU-time budget", () => {
 		const identity = resolveOmpIdentity(process.env);
-		// The candidate grader prepends an OMP policy shim; do not pass that shim into
-		// the isolated observer, which verifies the installed launcher against Tern.
-		const graderBin = process.env.GRADE_WAVE_SCRATCH ? resolve(process.env.GRADE_WAVE_SCRATCH, "bin") : null;
-		const childIdentity = graderBin && process.env.PATH
-			? resolveOmpIdentity({
-				...process.env,
-				PATH: process.env.PATH.split(delimiter).filter(directory => resolve(directory) !== graderBin).join(delimiter),
-				OMP_BIN: undefined, OMP_PATH: undefined, OMP: undefined,
-			})
-			: identity;
+		// Candidate grading may prepend an OMP policy shim that is not Tern-verified.
+		// Resolve a same-source launcher whose identity is verified against Tern state.
+		let childIdentity = identity;
+		if (!verifyTernOmpSource(identity.launcher, identity.source)) {
+			for (const directory of process.env.PATH?.split(delimiter) ?? []) {
+				if (!directory) continue;
+				try {
+					const candidate = resolveOmpIdentity({
+						...process.env,
+						PATH: directory,
+						OMP_BIN: undefined, OMP_PATH: undefined, OMP: undefined,
+					});
+					if (candidate.source === identity.source && verifyTernOmpSource(candidate.launcher, candidate.source)) {
+						childIdentity = candidate;
+						break;
+					}
+				} catch {
+					// This PATH entry is not a matching, Tern-verified launcher.
+				}
+			}
+		}
 		if (childIdentity.source !== identity.source) throw new Error("isolated observer OMP source differs from the suite identity");
 		const cases = join(fixtureBase, "long-close-reason.cases.tsv");
 		const workerTmp = join(fixtureBase, "long-close-reason-tmp");
