@@ -323,12 +323,20 @@ git -C "$SRC" -c init.defaultBranch=main init -q ||
 bounded 120 git -C "$SRC" fetch -q --depth 1 "$ROOT" "$SOURCE" ||
 	die "ci-only-local fetch of $SOURCE failed; refusing release"
 SRC_REAL="$(cd "$SRC" && pwd -P)" || die "ci-only-local cannot resolve $SRC; refusing release"
+# ci_only_refuse NAME: $WORK is removed on exit, so the refusal must carry the failure itself. On
+# 2026-10-31 the 0.2.81 refusal pointed at a deleted stderr file and cost a full reproduction run.
+ci_only_refuse() {
+	echo "release-local: $1 output (last 60 lines of stderr, then stdout):" >&2
+	tail -n 60 "$WORK/ci-only-$1.stderr" >&2 || true
+	tail -n 20 "$WORK/ci-only-$1.stdout" >&2 || true
+	die "$1.test.ts FAIL on the release source; refusing release"
+}
 (cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" bounded 900 bun test tests/cli/package-release.test.ts \
 	>"$WORK/ci-only-package-release.stdout" 2>"$WORK/ci-only-package-release.stderr") ||
-	die "package-release.test.ts FAIL on the release source; refusing release (see $WORK/ci-only-package-release.stderr)"
+	ci_only_refuse package-release
 (cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" bounded 2400 bun test tests/cli/kit-update.test.ts \
 	>"$WORK/ci-only-kit-update.stdout" 2>"$WORK/ci-only-kit-update.stderr") ||
-	die "kit-update.test.ts FAIL on the release source; refusing release (see $WORK/ci-only-kit-update.stderr)"
+	ci_only_refuse kit-update
 say "ci-only-local PASS"
 
 receipt() {
