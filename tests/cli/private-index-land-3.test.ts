@@ -9,6 +9,9 @@ import {
 } from "./private-index-land.helpers.ts";
 
 setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
+// GATESPEED1: land defers the complete suite to the release by default; these cases assert the
+// inline suite's refusals, so this file opts in for every land command it runs.
+process.env.PRE_PUSH_FULL_SUITE = "push";
 
 test("a v2 base missing a transitive judging dependency cannot publish using the worktree copy", () => {
 	const { work, fakeBin } = fixture();

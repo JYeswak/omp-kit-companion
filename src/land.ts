@@ -295,6 +295,10 @@ function fullSuiteVerdictFromRun(run: RunResult): FullSuiteVerdict {
 	return "UNRUN";
 }
 async function runFullSuiteVerdict(repo: string, base: string, candidate: string): Promise<FullSuiteVerdict> {
+	// GATESPEED1 (ompkit-774u.71, J-2026-10-31-12): like the push gate, land defers the complete suite to
+	// the release (release-local refuses without a main-role PASS for the exact tree, and the push gate
+	// starts scripts/release-verdict.sh for the pushed commit). PRE_PUSH_FULL_SUITE=push runs it inline.
+	if ((process.env.PRE_PUSH_FULL_SUITE ?? "release") !== "push") return "PASS";
 	const judge = archiveFullSuiteJudge(repo, base);
 	if (judge === null) return "UNRUN";
 	const configuredTimeoutSeconds = process.env.FULL_SUITE_TIMEOUT_SECS === undefined
