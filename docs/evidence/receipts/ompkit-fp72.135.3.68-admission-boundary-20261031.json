@@ -1,0 +1,19 @@
+{
+ "authority": "pending",
+ "confidence": "derived",
+ "evidence_id": "ev_682c2ba6d90f007279da16878abd23396f1eecd1fd601035b20ba2180d1c7c0e",
+ "limitations": [
+  "Receiver reproduction used controlled inbox/API callbacks, not native AgentSession admission. Pinned18.12.6 capability finding is a source audit, not an executed native suppression test. No product source edit, native fix, completed acceptance, installed change or live ledger causality claim. Original stronger queued-before-seen boundary remains unqualified pending owner/source/pin disposition; pre-send filtering alone is not accepted."
+ ],
+ "operation": "DUPWAKE1 partial receiver reproduction and pinned native admission boundary, not a repair",
+ "parameters": {
+  "decisive_output": "{\"ledger_audit\":{\"current_receiver_status\":\"WOKEN_INPROCESS only\",\"historical_consumed_writer\":\"432520eb76:extensions/kit-inbox-wake.ts:230;476b54abb1:232\",\"late_failure_writer\":\"extensions/kit-mail-wake.ts createMailWake.wake334-345 and afterSend382-394\",\"native_prerequisite\":\"ompkit-fp72.135.3.88\",\"scope\":\"static current/historical companion sources, not live ledger causality\"},\"pinned_source\":{\"authority\":\"immutable upstream source/docs; no native runtime replay performed\",\"before_agent_start_result\":[\"message\",\"systemPrompt\"],\"commit\":\"45c35e40c46166dc726ccc52f5d27f40f2449f99\",\"native_api_execution\":\"UNVERIFIED\",\"package\":\"@oh-my-pi/pi-coding-agent\",\"programmatic_input_hook\":false,\"version\":\"18.12.6\"},\"product_source_changes\":[],\"receiver_probe\":{\"rc\":0,\"stderr\":\"\",\"stdout\":\"{\\\"scope\\\":\\\"actual companion receiver with controlled inbox/API boundary; not native queue proof\\\",\\\"expected_enqueue_attempts\\\":1,\\\"observed_enqueue_attempts\\\":2,\\\"observed_ledger_rows\\\":4,\\\"ledger\\\":[{\\\"ts\\\":\\\"2026-10-31T08:07:54.703Z\\\",\\\"message_id\\\":69878,\\\"project_key\\\":\\\"/controlled-replay\\\",\\\"sender\\\":\\\"RusticPine\\\",\\\"recipient\\\":\\\"PeachLeopard\\\",\\\"subject\\\":\\\"original replay witness 69878\\\",\\\"status\\\":\\\"WOKEN_INPROCESS\\\",\\\"detail\\\":\\\"kit-inbox-wake followUp\\\",\\\"cursor\\\":101},{\\\"ts\\\":\\\"2026-10-31T08:07:54.703Z\\\",\\\"message_id\\\":69879,\\\"project_key\\\":\\\"/controlled-replay\\\",\\\"sender\\\":\\\"RusticPine\\\",\\\"recipient\\\":\\\"PeachLeopard\\\",\\\"subject\\\":\\\"original replay witness 69879\\\",\\\"status\\\":\\\"WOKEN_INPROCESS\\\",\\\"detail\\\":\\\"kit-inbox-wake followUp\\\",\\\"cursor\\\":102},{\\\"ts\\\":\\\"2026-10-31T08:07:54.703Z\\\",\\\"message_id\\\":69878,\\\"project_key\\\":\\\"/controlled-replay\\\",\\\"sender\\\":\\\"RusticPine\\\",\\\"recipient\\\":\\\"PeachLeopard\\\",\\\"subject\\\":\\\"original replay witness 69878\\\",\\\"status\\\":\\\"WOKEN_INPROCESS\\\",\\\"detail\\\":\\\"kit-inbox-wake followUp\\\",\\\"cursor\\\":101},{\\\"ts\\\":\\\"2026-10-31T08:07:54.703Z\\\",\\\"message_id\\\":69879,\\\"project_key\\\":\\\"/controlled-replay\\\",\\\"sender\\\":\\\"RusticPine\\\",\\\"recipient\\\":\\\"PeachLeopard\\\",\\\"subject\\\":\\\"original replay witness 69879\\\",\\\"status\\\":\\\"WOKEN_INPROCESS\\\",\\\"detail\\\":\\\"kit-inbox-wake followUp\\\",\\\"cursor\\\":102}],\\\"delivery_modes\\\":[{\\\"deliverAs\\\":\\\"followUp\\\",\\\"triggerTurn\\\":true},{\\\"deliverAs\\\":\\\"followUp\\\",\\\"triggerTurn\\\":true}]}\\n\"},\"source_head\":\"daac2131ae233a04e455b700633fb78d6cc46487\"}",
+  "prior": "https://github.com/can1357/oh-my-pi/blob/45c35e40c46166dc726ccc52f5d27f40f2449f99/packages/agent/src/agent.ts#L996-L1046",
+  "source_head": "daac2131ae233a04e455b700633fb78d6cc46487"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "bytes": 2321,
+  "sha256": "7dc961380866e8bdb238d61f10f7bd4c02b8fdcc0a493513438dedc963e264b1"
+ }
+}
