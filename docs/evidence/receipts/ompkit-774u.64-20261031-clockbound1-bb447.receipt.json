@@ -1,0 +1,22 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_878aa63dee6027766233fc5a58d452c371f4e82593597b1fde577cfc77fc0821",
+ "limitations": [
+  "AC1 direct resourceUsage probe, not completed named bun test command; shared checkout compiler failed on unrelated src/fleet-watch.ts syntax at line 1542",
+  "AC2 run used nice -n 10 without concurrent full suite or test-time load-average sample",
+  "Candidate bb447 official pregrade not yet run"
+ ],
+ "operation": "CLOCKBOUND1 candidate control replays",
+ "parameters": {
+  "ac1": "wall_stall_pass_cpu_under_1s_and_1.2s_cpu_negative_over_1s",
+  "ac2": "14_pass_0_fail_hung_section_7s",
+  "candidate_commit": "bb447e1f95a5500b95c5966206e55012aa040d0e"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "bytes": 3702,
+  "path": "docs/evidence/receipts/ompkit-774u.64-20261031-clockbound1-bb447.result.json",
+  "sha256": "f50659c0a5237058e50382c124cbd6aec7dc3ef18ba93491b1ed31bd504d6c82"
+ }
+}

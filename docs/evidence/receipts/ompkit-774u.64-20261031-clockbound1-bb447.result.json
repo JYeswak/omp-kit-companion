@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "bead": "ompkit-774u.64",
+  "candidate_commit": "bb447e1f95a5500b95c5966206e55012aa040d0e",
+  "consumer": "CLOCKBOUND1 acceptance review and candidate pregrade",
+  "defect_class": "load-dependent test bounds must distinguish wall stalls from CPU work and prove process-group deadline cancellation",
+  "deletion_condition": "retain as evidence for bb447; supersede only with a later candidate-bound replay",
+  "source_sha256": {
+    "scripts/ttsr-harness.ts (unmodified candidate bytes)": "d0d49c1fd72dc816adfe4bc112add279f935c7ca7b08942638e321392956ceda",
+    "tests/cli/test-runner.test.ts": "2ba1d7eb6c072b23193c1686ae1c9d4d0d2f336c03466e15c23f10a43a421956",
+    "tests/cli/check-staged-pysafe.test.sh": "1afdcc30a7659ad958a9b33544c508b968065e8421b33fb9baa10751faa2b5ec"
+  },
+  "ac1": {
+    "method": "Temporary control instrumentation was inserted in scripts/ttsr-harness.ts immediately before matcher.checkSnapshot in observeWitness; CLOCKBOUND_CONTROL was forwarded to the worker. The harness was run directly with Bun.spawnSync, collecting the same resourceUsage.cpuTime.total metric used by the permanent test. Instrumentation was removed; cmp against the pre-edit backup exited 0.",
+    "wall_stall_control": {
+      "injected_effect": "Atomics.wait for 2000 ms, no busy work, immediately before checkSnapshot",
+      "exit_code": 0,
+      "elapsed_ms": 2540,
+      "cpu_time_us": 791166,
+      "observation": "status OK, whole fire, final witness",
+      "cpu_budget_predicate_lt_1000000": true
+    },
+    "slow_fire_control": {
+      "injected_effect": "1.2 s process.hrtime.bigint busy loop immediately before checkSnapshot",
+      "exit_code": 0,
+      "elapsed_ms": 1622,
+      "cpu_time_us": 2050913,
+      "observation": "status OK, whole fire, final witness",
+      "cpu_budget_predicate_lt_1000000": false,
+      "permanent_test_assertion_expected_result": "FAIL at cpuTimeUs < 1000000n"
+    },
+    "permanent_test_command_status": "NOT RUN to completion in the shared checkout: Bun's test-file beforeAll failed compiling unrelated src/fleet-watch.ts at line 1542 with Unexpected ). Candidate clean-archive normal-path AC1 was previously 1 pass/0 fail at predecessor dee955; the test-runner source hash is unchanged in bb447. These controls are direct harness/resourceUsage probes, not a successful run of the named bun test command."
+  },
+  "ac2": {
+    "command": "nice -n 10 sh tests/cli/check-staged-pysafe.test.sh",
+    "candidate_commit": "bb447e1f95a5500b95c5966206e55012aa040d0e",
+    "exit_code": 0,
+    "output": "hung-checker-bounded section elapsed: 7s\ncheck-staged-pysafe: 14 pass 0 fail",
+    "invocation_wall_seconds": 55.49,
+    "negative_control": "checker and grandchild ignore SIGTERM; the hook refuses with exceeded 2 s and was killed, and the grandchild PID is absent after the group kill",
+    "outer_elapsed_time_assertion": false,
+    "load_limit": "Run used nice -n 10; no concurrent full-suite process and no test-time load-average sample."
+  },
+  "pregrade": {
+    "dee9559404c989641077b710ce9730d60d20950b": "FAIL on AC1 and AC2; recorded in the bead. This is a predecessor, not the current candidate.",
+    "bb447e1f95a5500b95c5966206e55012aa040d0e": "NOT RUN"
+  },
+  "limitations": [
+    "AC1's named bun test command could not complete in the shared checkout due to unrelated syntax damage in a path held by TurquoiseSummit; the exact candidate pregrade for bb447 remains unrun.",
+    "The AC1 negative is evaluated from the observed CPU-time predicate rather than a completed failing bun test invocation.",
+    "AC2 has a candidate-bound section timing replay under nice -n 10, but not a full-suite-concurrent replay."
+  ]
+}
