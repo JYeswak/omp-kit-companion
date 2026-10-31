@@ -101,8 +101,12 @@ def nonnegative(value: object) -> bool:
             and math.isfinite(value) and value >= 0)
 
 
-def complete_records(rows: object, declared: Sequence[str]) -> bool:
+def complete_records(rows: object, declared: Sequence[str], *, expected_judge: dict | None = None) -> bool:
     if not isinstance(rows, list) or len(rows) != len(declared) or not declared:
+        return False
+    producer = expected_judge if expected_judge is not None else {"sha256": JUDGE_SHA256, "python": sys.version.split()[0]}
+    if (not isinstance(producer, dict) or not hex_digest(producer.get("sha256"))
+            or not isinstance(producer.get("python"), str) or not producer["python"]):
         return False
     seen: set[str] = set()
     for row in rows:
@@ -125,8 +129,8 @@ def complete_records(rows: object, declared: Sequence[str]) -> bool:
             return False
         judge = row.get("judge")
         if (not isinstance(judge, dict) or not hex_digest(judge.get("sha256"))
-                or judge["sha256"] != JUDGE_SHA256
-                or judge.get("python") != sys.version.split()[0]
+                or judge["sha256"] != producer["sha256"]
+                or judge.get("python") != producer["python"]
                 or not hex_digest(row.get("output_sha256"))):
             return False
         closure = row.get("closure")

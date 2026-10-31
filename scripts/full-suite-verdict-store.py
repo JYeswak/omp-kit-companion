@@ -252,20 +252,137 @@ def declared_suite_files_from_git(repo: Path, commit: str) -> set[str]:
     return declared
 
 
-def json_file(path: Path) -> dict:
+def json_value(path: Path) -> object:
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_RECORD_BYTES:
         raise ValueError("record is not a bounded regular file")
-    value = json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def json_file(path: Path) -> dict:
+    value = json_value(path)
     if not isinstance(value, dict):
         raise ValueError("record is not a JSON object")
     return value
 
 
+def measured_counts(files: list[dict]) -> dict[str, int]:
+    """Include verified focused rows, not only this invocation's complement."""
+    counts = {"bun": 0, "shell": 0, "python": 0}
+    for row in files:
+        runner = row["runner"]
+        if runner == "bun":
+            count = row.get("test_count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValueError("Bun measured run count is invalid")
+            counts["bun"] += count
+        elif runner == "sh":
+            counts["shell"] += 1
+        elif runner == "python3":
+            counts["python"] += 1
+        else:
+            raise ValueError("measured runner is invalid")
+    return counts
+
+
+def measured_wall(files: list[dict], invocation_ms: int) -> int:
+    """Count verified focused work once, excluding idle gaps between invocations."""
+    intervals = []
+    for row in files:
+        start, end = row["started_ms"], row["finished_ms"]
+        if (not isinstance(start, int) or isinstance(start, bool) or start < 0
+                or not isinstance(end, int) or isinstance(end, bool) or end < start):
+            raise ValueError("minimum-run measured interval is invalid")
+        intervals.append((start, end))
+    covered, previous_end = 0, 0
+    for start, end in sorted(intervals):
+        covered += max(0, end - max(start, previous_end))
+        previous_end = max(previous_end, end)
+    return max(invocation_ms, covered)
+
+
+def minimum_policy(value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != {"max_count_drop", "wall_floor_ms", "wall_floor_percent"}:
+        raise ValueError("minimum_full_run policy fields are invalid")
+    drop = value["max_count_drop"]
+    if not isinstance(drop, dict) or set(drop) != {"bun", "shell", "python"}:
+        raise ValueError("minimum_full_run max_count_drop needs bun, shell and python")
+    numbers = [*drop.values(), value["wall_floor_ms"], value["wall_floor_percent"]]
+    if any(not isinstance(n, int) or isinstance(n, bool) or n < 0 or n > (1 << 53) - 1 for n in numbers):
+        raise ValueError("minimum_full_run requires bounded nonnegative integers")
+    if value["wall_floor_ms"] < 1 or not 1 <= value["wall_floor_percent"] <= 100:
+        raise ValueError("minimum_full_run wall floors must be positive (percent 1..100)")
+    return {"max_count_drop": dict(drop), "wall_floor_ms": value["wall_floor_ms"],
+            "wall_floor_percent": value["wall_floor_percent"]}
+
+
+def load_minimum_policy(suite_root: Path) -> dict:
+    defaults = {"max_count_drop": {"bun": 0, "shell": 0, "python": 0},
+                "wall_floor_ms": 1, "wall_floor_percent": 25}
+    config = suite_root / ".github" / "test-budget.json"
+    if not config.exists():
+        return minimum_policy(defaults)
+    return minimum_policy(json_file(config).get("minimum_full_run", defaults))
+
+
+def runtime_platform(runtime: str) -> tuple[str, str]:
+    parts = runtime.split("/")
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError("minimum-run runtime has no platform identity")
+    return parts[0], parts[1]
+
+
+def minimum_shortfalls(counts: dict, wall_ms: int, policy: dict, baseline: dict | None) -> list[dict]:
+    shortfalls = []
+    floor = policy["wall_floor_ms"]
+    if baseline is not None:
+        for kind in ("bun", "shell", "python"):
+            minimum = max(0, baseline["counts"][kind] - policy["max_count_drop"][kind])
+            if counts[kind] < minimum:
+                shortfalls.append({"measure": kind, "observed": counts[kind], "minimum": minimum})
+        floor = max(floor, (baseline["wall_ms"] * policy["wall_floor_percent"] + 99) // 100)
+    if wall_ms < floor:
+        shortfalls.append({"measure": "wall_ms", "observed": wall_ms, "minimum": floor})
+    return shortfalls
+
+
+def validate_minimum_report(report: object, files: list[dict], wall_ms: object,
+                            role: str, runtime: str) -> list[dict]:
+    if not isinstance(report, dict) or report.get("version") != 1:
+        raise ValueError("minimum-run report schema is invalid")
+    if not isinstance(wall_ms, int) or isinstance(wall_ms, bool) or wall_ms < 0:
+        raise ValueError("minimum-run wall time is invalid")
+    wall_ms = measured_wall(files, wall_ms)
+    counts = measured_counts(files)
+    policy = minimum_policy(report.get("policy"))
+    baseline = report.get("baseline")
+    if baseline is not None:
+        if not isinstance(baseline, dict):
+            raise ValueError("minimum-run baseline is invalid")
+        identity = (baseline.get("tree"), role, baseline.get("checks"), baseline.get("runtime"))
+        normalized_identity(*identity)
+        if (baseline.get("record") != record_key(*identity) + ".json"
+                or runtime_platform(identity[3]) != runtime_platform(runtime)):
+            raise ValueError("minimum-run baseline identity is inconsistent")
+        old_counts = baseline.get("counts")
+        old_wall = baseline.get("wall_ms")
+        if (not isinstance(old_counts, dict) or set(old_counts) != set(counts)
+                or any(not isinstance(n, int) or isinstance(n, bool) or n < 0 for n in old_counts.values())
+                or not isinstance(old_wall, int) or isinstance(old_wall, bool) or old_wall < 0):
+            raise ValueError("minimum-run baseline measurements are invalid")
+    expected = minimum_shortfalls(counts, wall_ms, policy, baseline)
+    if (report.get("counts") != counts or report.get("wall_ms") != wall_ms
+            or report.get("shortfalls") != expected
+            or report.get("status") != ("FAIL" if expected else "PASS")):
+        raise ValueError("minimum-run report disagrees with its measurements")
+    return expected
+
+
 def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, role: str | None = None,
                     checks: str | None = None, runtime: str | None = None,
                     suite_root: Path | None = None, repo: Path | None = None,
-                    commit: str | None = None, exact_filename: bool = False) -> tuple[dict | None, str]:
+                    commit: str | None = None, exact_filename: bool = False,
+                    historical: bool = False) -> tuple[dict | None, str]:
     try:
         entry = json_file(path)
         if entry.get("version") != 3:
@@ -309,7 +426,9 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
         if not isinstance(declared, list) or not all(isinstance(item, str) for item in declared) or len(set(declared)) != len(declared):
             raise ValueError("declared suite list is invalid")
         metrics = load_metrics(judge_root)
-        if not metrics.complete_records(files, declared):
+        # Historical rows establish only a reference, never a reusable current PASS.
+        producer = files[0].get("judge") if historical and files and isinstance(files[0], dict) else None
+        if not metrics.complete_records(files, declared, expected_judge=producer):
             raise ValueError("measured file evidence is incomplete")
         if suite_root is not None:
             expected_files = declared_suite_files(suite_root)
@@ -344,10 +463,19 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
             closure = row.get("closure")
             if not isinstance(closure, dict) or closure.get("tree") != entry_tree:
                 raise ValueError("measured row does not bind the candidate tree")
+        minimum_failures = []
+        if "minimum_run" not in entry and (not historical or files[0]["judge"]["sha256"] == metrics.JUDGE_SHA256):
+            raise ValueError("current verdict has no minimum-run qualification")
+        if "minimum_run" in entry:
+            timing = entry.get("timing")
+            if not isinstance(timing, dict):
+                raise ValueError("minimum-run timing is absent")
+            minimum_failures = validate_minimum_report(entry["minimum_run"], files, timing.get("wall_ms"),
+                                                      entry_role, entry_runtime)
         if entry["verdict"] == "PASS":
-            if exit_code != 0 or bun_fail or shell_fail or py_fail or any(row.get("rc") != 0 for row in files):
+            if exit_code != 0 or bun_fail or shell_fail or py_fail or minimum_failures or any(row.get("rc") != 0 for row in files):
                 raise ValueError("PASS contains a failing suite")
-        elif exit_code == 0 or not (bun_fail or shell_fail or py_fail):
+        elif exit_code == 0 or not (bun_fail or shell_fail or py_fail or minimum_failures):
             raise ValueError("FAIL has no recorded failure")
         log_path = path.with_suffix(".log")
         log_info = log_path.lstat()
@@ -362,6 +490,57 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
         return entry, "VALID"
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, KeyError, AttributeError) as error:
         return None, str(error)
+
+
+def last_green(directory: Path, judge_root: Path, role: str, runtime: str) -> dict | None:
+    """Newest validated complete PASS in this repository/role/platform, across judge revisions."""
+    candidates = []
+    for path in directory.glob("*.json"):
+        try:
+            raw = json_file(path)
+            timing = raw.get("timing", {})
+            wall = timing.get("wall_ms")
+            started = timing.get("started_ms")
+            if (raw.get("verdict") != "PASS" or raw.get("judge_role") != role
+                    or runtime_platform(raw.get("runtime", "")) != runtime_platform(runtime)
+                    or not isinstance(wall, int) or isinstance(wall, bool) or wall < 0
+                    or not isinstance(started, int) or isinstance(started, bool) or started < 0):
+                continue
+            candidates.append((started + wall, path.name, path))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    for _, _, path in sorted(candidates, reverse=True):
+        valid, _reason = validate_record(path, judge_root=judge_root, role=role,
+                                        exact_filename=True, historical=True)
+        if valid is not None:
+            try:
+                counts = measured_counts(valid["evidence"]["files"])
+                wall_ms = measured_wall(valid["evidence"]["files"], valid["timing"]["wall_ms"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            return {"record": path.name, "tree": valid["tree"], "checks": valid["checks"],
+                    "runtime": valid["runtime"], "counts": counts, "wall_ms": wall_ms}
+    return None
+
+
+def assess_minimum_run(judge_root: Path, suite_root: Path, directory: Path,
+                       role: str, runtime: str, files_path: Path, wall_ms: int) -> dict:
+    if wall_ms < 0:
+        raise ValueError("minimum-run wall time is negative")
+    files = json_value(files_path)
+    if not isinstance(files, list) or not all(isinstance(row, dict) for row in files):
+        raise ValueError("minimum-run measurements are not file rows")
+    metrics = load_metrics(judge_root)
+    if not metrics.complete_records(files, [row.get("path") for row in files]):
+        raise ValueError("minimum-run measured file evidence is incomplete")
+    wall_ms = measured_wall(files, wall_ms)
+    policy = load_minimum_policy(suite_root)
+    counts = measured_counts(files)
+    baseline = last_green(directory, judge_root, role, runtime)
+    shortfalls = minimum_shortfalls(counts, wall_ms, policy, baseline)
+    return {"version": 1, "status": "FAIL" if shortfalls else "PASS", "policy": policy,
+            "baseline": baseline, "counts": counts, "wall_ms": wall_ms, "shortfalls": shortfalls}
+
 
 
 def lookup(repo: Path, tree: str, role: str, checks: str, runtime: str, *,
@@ -440,6 +619,14 @@ def main() -> int:
     add_store_options(list_cmd)
     list_cmd.add_argument("--tree")
     list_cmd.add_argument("--judge-root")
+    minimum_cmd = actions.add_parser("minimum-run")
+    add_store_options(minimum_cmd)
+    minimum_cmd.add_argument("--role", choices=ROLES, required=True)
+    minimum_cmd.add_argument("--runtime", required=True)
+    minimum_cmd.add_argument("--judge-root", required=True)
+    minimum_cmd.add_argument("--suite-root", required=True)
+    minimum_cmd.add_argument("--files", required=True)
+    minimum_cmd.add_argument("--wall-ms", type=int, required=True)
     args = parser.parse_args()
     try:
         repo = repository_root(args.repo)
@@ -455,6 +642,11 @@ def main() -> int:
             return 0
         if args.action == "timings":
             print(directory / "timings")
+            return 0
+        if args.action == "minimum-run":
+            report = assess_minimum_run(judge_root, Path(args.suite_root).resolve(), directory,
+                                        args.role, args.runtime, Path(args.files), args.wall_ms)
+            print(json.dumps(report, sort_keys=True, separators=(",", ":")))
             return 0
         if args.action == "lookup":
             entry, _reason = lookup(repo, args.tree, args.role, args.checks, args.runtime,

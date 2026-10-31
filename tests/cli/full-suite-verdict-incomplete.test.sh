@@ -1193,5 +1193,199 @@ while [ -n "$hang_pid" ] && kill -0 "$hang_pid" 2>/dev/null && [ "$k" -lt 50 ]; 
 if [ -n "$hang_pid" ] && ! kill -0 "$hang_pid" 2>/dev/null; then ok "FULLSUITEPAR1 the hung suite process is gone"; else not_ok "FULLSUITEPAR1 hung suite pid ${hang_pid:-?} still runs"; fi
 if side_files_gone; then ok "FULLSUITEPAR1 timed-out parallel run removes runner side files"; else not_ok "FULLSUITEPAR1 timed-out parallel run left side files"; ls -la "$cache"; fi
 
+# MINRUN1: a complete-looking smaller declaration must not silently replace the
+# last green reference. Use real native suites, and change the measured producer
+# between the baseline and the planted skip.
+minrun_original_verdict=$VERDICT
+minrun_judge="$TMP/minrun-judge"
+mkdir -p "$minrun_judge/scripts" "$minrun_judge/.github"
+minrun_list_judging_files() {
+python3 - "$KITROOT_DIR" <<'PY'
+import importlib.util, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+spec = importlib.util.spec_from_file_location("minrun_fixture_metrics", root / "scripts/suite-metrics.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print("\n".join(module.JUDGING_FILES))
+PY
+}
+minrun_judging_files=$(minrun_list_judging_files) || exit 1
+for file in $minrun_judging_files; do
+	mkdir -p "$minrun_judge/$(dirname "$file")"
+	cp "$KITROOT_DIR/$file" "$minrun_judge/$file"
+done
+cp "$VERDICT" "$minrun_judge/scripts/full-suite-verdict.sh"
+VERDICT="$minrun_judge/scripts/full-suite-verdict.sh"
+minrun_policy() {
+	addfile .github/test-budget.json "{\"version\":1,\"minimum_full_run\":{\"max_count_drop\":{\"bun\":$1,\"shell\":$1,\"python\":$1},\"wall_floor_ms\":$2,\"wall_floor_percent\":25}}"
+}
+minrun_full_files() {
+	addfile tests/cli/b.test.ts 'import {test,expect} from "bun:test"; test("second arithmetic case",()=>expect(3*3).toBe(9));'
+	addfile tests/cli/b.test.sh "test \"\$((3 * 3))\" -eq 9"
+	addfile tests/cli/b_test.py 'assert 3 * 3 == 9'
+}
+minrun_commit() {
+	git -C "$repo" add -A
+	git -C "$repo" commit -qm "[test] $1"
+}
+mkrepo_begin minrun-counts
+addfile tests/cli/a.test.ts 'import {test,expect} from "bun:test"; test("first arithmetic case",()=>expect(2+2).toBe(4));'
+addfile tests/cli/a.test.sh "test \"\$((2 + 2))\" -eq 4"
+addfile tests/cli/a_test.py 'assert 2 + 2 == 4'
+minrun_full_files
+minrun_policy 0 1
+mkrepo_commit
+run_verdict minrun-reference
+minrun_reference_tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+minrun_assert_reference() {
+python3 - "$entry" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["verdict"] == "PASS"
+assert d["evidence"]["bun_ran"] == 2
+assert d["evidence"]["shell_suites"] == 2
+assert d["evidence"]["py_suites"] == 2
+assert d["timing"]["wall_ms"] > 0
+PY
+}
+if [ "$rc" = "0" ] && minrun_assert_reference; then
+	ok "MINRUN1 full native reference records ran counts and wall time"
+else not_ok "MINRUN1 full native reference did not pass (rc=$rc)"; cat "$out"; fi
+
+printf '\n# A genuinely different measured producer for the historical reference drill.\n' >> "$minrun_judge/scripts/suite-metrics.py"
+git -C "$repo" rm -q tests/cli/b.test.ts tests/cli/b.test.sh tests/cli/b_test.py
+minrun_commit "MINRUN1 planted skipped suites"
+run_verdict minrun-skipped
+minrun_assert_drop() {
+python3 - "$entry" "$minrun_reference_tree" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = d["minimum_run"]
+assert d["verdict"] == "FAIL"
+assert m["baseline"]["tree"] == sys.argv[2]
+assert m["counts"] == {"bun": 1, "shell": 1, "python": 1}
+assert {r["measure"] for r in m["shortfalls"]} >= {"bun", "shell", "python"}
+assert all(r["observed"] == 1 and r["minimum"] == 2 for r in m["shortfalls"] if r["measure"] != "wall_ms")
+PY
+}
+if [ "$rc" != 0 ] && minrun_assert_drop; then
+	ok "MINRUN1 real skipped suites are refused for all three kinds across a producer change"
+else not_ok "MINRUN1 skipped suites were admitted or lost their reference (rc=$rc)"; cat "$out"; fi
+
+addfile marker.txt 'The failed smaller run must not become a new baseline.'
+minrun_commit "MINRUN1 failed reference cannot advance"
+run_verdict minrun-still-skipped
+minrun_assert_reference_preserved() {
+python3 - "$entry" "$minrun_reference_tree" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["verdict"] == "FAIL"
+assert d["minimum_run"]["baseline"]["tree"] == sys.argv[2]
+PY
+}
+if [ "$rc" != 0 ] && minrun_assert_reference_preserved; then
+	ok "MINRUN1 a failed short run never advances the green reference"
+else not_ok "MINRUN1 failed run became the reference (rc=$rc)"; cat "$out"; fi
+
+minrun_full_files
+minrun_commit "MINRUN1 restore complete suite"
+run_verdict minrun-restored
+if [ "$rc" = 0 ]; then ok "MINRUN1 the restored full run is admitted"
+else not_ok "MINRUN1 restored full run refused (rc=$rc)"; cat "$out"; fi
+
+git -C "$repo" rm -q tests/cli/b.test.ts tests/cli/b.test.sh tests/cli/b_test.py
+minrun_policy 1 1
+minrun_commit "MINRUN1 fixture declares one-suite tolerance"
+run_verdict minrun-tolerance
+minrun_assert_tolerance() {
+python3 - "$entry" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["minimum_run"]["policy"]["max_count_drop"] == {"bun": 1, "shell": 1, "python": 1}
+assert d["minimum_run"]["counts"] == {"bun": 1, "shell": 1, "python": 1}
+assert d["minimum_run"]["shortfalls"] == []
+PY
+}
+if [ "$rc" = "0" ] && minrun_assert_tolerance; then
+	ok "MINRUN1 the explicit fixture tolerance admits its bounded decrease"
+else not_ok "MINRUN1 declared fixture tolerance was ignored (rc=$rc)"; cat "$out"; fi
+python3 - "$entry" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+d = json.loads(path.read_text())
+del d["minimum_run"]
+path.write_text(json.dumps(d))
+PY
+minrun_lookup_current() (
+	cd -- "$judge_dir" || exit 1
+	python3 ./full-suite-verdict-store.py lookup --repo "$repo" \
+		--tree "$tree_hash" --role base --checks "$checks" --runtime "$runtime" \
+		--judge-root "$judge_root" --cache-dir "$cache" --commit HEAD
+)
+if minrun_lookup=$(minrun_lookup_current) && [ "$minrun_lookup" = MISS ]; then
+	ok "MINRUN1 a current cached PASS without qualification is a MISS"
+else
+	not_ok "MINRUN1 erased qualification remained reusable: $minrun_lookup"
+fi
+
+mkrepo_begin minrun-floor
+addfile tests/cli/floor_test.py 'assert 7 * 6 == 42'
+minrun_policy 0 600000
+mkrepo_commit
+run_verdict minrun-under-floor
+minrun_assert_floor_failure() {
+python3 - "$entry" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["verdict"] == "FAIL"
+assert d["evidence"]["py_fail"] == 0
+assert any(r["measure"] == "wall_ms" and r["observed"] < r["minimum"] == 600000
+           for r in d["minimum_run"]["shortfalls"])
+PY
+}
+if [ "$rc" != 0 ] && minrun_assert_floor_failure; then
+	ok "MINRUN1 a physically complete green suite below its declared floor is FAIL"
+else not_ok "MINRUN1 under-floor run became PASS (rc=$rc)"; cat "$out"; fi
+minrun_policy 0 1
+minrun_commit "MINRUN1 fixture floor satisfying control"
+run_verdict minrun-floor-control
+if [ "$rc" = 0 ]; then ok "MINRUN1 the same full suite satisfies its fixture floor control"
+else not_ok "MINRUN1 floor satisfying control refused (rc=$rc)"; cat "$out"; fi
+addfile relative-marker.txt 'Relative repo and archive inputs keep their caller meaning.'
+minrun_commit "MINRUN1 relative repo and archive control"
+out="$TMP/minrun-relative.out"
+if (cd -- "$repo" && KITROOT="$KITROOT_DIR" OMP_KIT_OMP_SRC_FETCH=0 \
+	sh "$VERDICT" --repo . --archive-dir . --commit HEAD --cache-dir "$repo.cache") >"$out" 2>&1; then
+	rc=0
+else
+	rc=$?
+fi
+if [ "$rc" = 0 ]; then ok "MINRUN1 relative repo and caller-supplied archive remain admitted"
+else not_ok "MINRUN1 relative repo/archive changed meaning (rc=$rc)"; cat "$out"; fi
+VERDICT=$minrun_original_verdict
+
+if python3 - "$KITROOT_DIR/scripts/full-suite-verdict-store.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("minimum_wall_fixture", sys.argv[1])
+store = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(store)
+files = [{"started_ms": 0, "finished_ms": 100},
+         {"started_ms": 50, "finished_ms": 150},
+         {"started_ms": 1000, "finished_ms": 1100}]
+assert store.measured_wall(files, 50) == 250
+policy = {"max_count_drop": {"bun": 0, "shell": 0, "python": 0},
+          "wall_floor_ms": 1, "wall_floor_percent": 25}
+counts = {"bun": 1, "shell": 1, "python": 1}
+baseline = {"counts": counts, "wall_ms": 1000}
+assert store.minimum_shortfalls(counts, 250, policy, baseline) == []
+assert store.minimum_shortfalls(counts, 249, policy, baseline) == [
+    {"measure": "wall_ms", "observed": 249, "minimum": 250}]
+PY
+then ok "MINRUN1 verified work includes focused coverage once, excludes idle gaps and honors the exact wall floor"
+else not_ok "MINRUN1 covered-work interval or floor boundary is wrong"; fi
+
 echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
