@@ -695,9 +695,28 @@ describe("runFastTest", () => {
 
 	test("observes the 41 KB long-token close fire within the bounded CPU-time budget", () => {
 		const identity = resolveOmpIdentity(process.env);
+		// The candidate grader prepends an OMP policy shim; do not pass that shim into
+		// the isolated observer, which verifies the installed launcher against Tern.
+		const graderBin = process.env.GRADE_WAVE_SCRATCH ? resolve(process.env.GRADE_WAVE_SCRATCH, "bin") : null;
+		const childIdentity = graderBin && process.env.PATH
+			? resolveOmpIdentity({
+				...process.env,
+				PATH: process.env.PATH.split(delimiter).filter(directory => resolve(directory) !== graderBin).join(delimiter),
+				OMP_BIN: undefined, OMP_PATH: undefined, OMP: undefined,
+			})
+			: identity;
+		if (childIdentity.source !== identity.source) throw new Error("isolated observer OMP source differs from the suite identity");
 		const cases = join(fixtureBase, "long-close-reason.cases.tsv");
 		const workerTmp = join(fixtureBase, "long-close-reason-tmp");
 		mkdirSync(workerTmp);
+		const childToolBin = join(fixtureBase, "native-tools-long-token");
+		mkdirSync(childToolBin);
+		symlinkSync(process.execPath, join(childToolBin, "bun"));
+		symlinkSync(childIdentity.launcher, join(childToolBin, "omp"));
+		const git = Bun.which("git");
+		if (!git) throw new Error("long-token fixture needs Git on the suite PATH");
+		symlinkSync(git, join(childToolBin, "git"));
+		const childNativePath = [childToolBin, "/usr/bin", "/bin"].join(delimiter);
 		const rule = "kit-close-reason-no-evidence";
 		const rulePath = join(REPO_ROOT, "rules", rule + ".md");
 		const actorToken = String.fromCharCode(92, 92, 120).repeat(8192);
@@ -707,7 +726,7 @@ describe("runFastTest", () => {
 		writeFileSync(cases, CASE_HEADER + "\n" + rule + "\tfire\ttool\tbash\t-\t" + command + "\tlong actor token\t\n");
 		const result = Bun.spawnSync([process.execPath, join(REPO_ROOT, "scripts", "ttsr-harness.ts"), "--observe", "--rules", join(REPO_ROOT, "rules"), "--cases", cases, "--rule", rule, "--line", "2", "--rule-sha256", ruleHash, "--timeout-ms", "2500"], {
 			cwd: REPO_ROOT,
-			env: { ...process.env, PATH: nativePath, TMPDIR: workerTmp, TMP: workerTmp, TEMP: workerTmp, OMP_SRC: identity.source, OMP_BIN: identity.launcher },
+			env: { ...process.env, PATH: childNativePath, TMPDIR: workerTmp, TMP: workerTmp, TEMP: workerTmp, OMP_SRC: childIdentity.source, OMP_BIN: childIdentity.launcher },
 			stdout: "pipe", stderr: "pipe",
 		});
 		const cpuTimeUs = result.resourceUsage.cpuTime.total;
