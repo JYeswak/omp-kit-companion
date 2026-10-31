@@ -3,6 +3,9 @@ import { afterAll, afterEach, expect, test } from "bun:test";
 import { chmodSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
+import { runFixture } from "./fixture-process.ts";
+
+const decoder = new TextDecoder();
 
 const fixtures: string[] = [];
 const permRestores: Array<{ path: string; mode: number }> = [];
@@ -14,9 +17,9 @@ afterEach(() => {
 });
 
 function git(cwd: string, ...args: string[]): string {
-	const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
-	if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
-	return result.stdout.toString();
+	const result = runFixture(["git", "-C", cwd, ...args], { cwd, label: `git ${args[0]}` });
+	if (result.rc !== 0) throw new Error(`git ${args.join(" ")} failed: ${decoder.decode(result.stderr)}`);
+	return decoder.decode(result.stdout);
 }
 
 function seed(cwd: string, name: string): void {
@@ -116,11 +119,8 @@ function fixture(): { root: string; paths: Record<string, string> } {
 
 function cli(root: string, args: string[], env?: Record<string, string | undefined>) {
 	const entry = resolve(import.meta.dir, "../../src/cli.ts");
-	return Bun.spawnSync([process.execPath, entry, ...args], {
-		cwd: root,
-		stdout: "pipe",
-		stderr: "pipe",
-		env: { ...process.env, HOME: root, ...env },
+	return runFixture([process.execPath, entry, ...args], {
+		cwd: root, env: { ...process.env, HOME: root, ...env },
 	});
 }
 
@@ -129,8 +129,8 @@ const rowByName = (repos: Array<{ name: string }>, name: string) => repos.find((
 test("stranded audit emits one correctly identified row per named condition through the real CLI", async () => {
 	const f = fixture();
 	const result = cli(f.root, ["doctor", "--scope", "work", "--root", f.root, "--stranded-only", "--json"]);
-	expect(result.exitCode, result.stderr.toString()).toBe(0);
-	const envelope = JSON.parse(result.stdout.toString());
+	expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+	const envelope = JSON.parse(decoder.decode(result.stdout));
 	expect(envelope.data.scope).toBe("work");
 	expect(envelope.data.stranded_only).toBe(true);
 	expect(envelope.data.roots[0]?.discovery?.max_depth).toBeGreaterThan(0);
@@ -174,8 +174,8 @@ test("stranded audit emits one correctly identified row per named condition thro
 test("a clean pushed repo produces no stranded row but stays visible in the full report", async () => {
 	const f = fixture();
 	const full = cli(f.root, ["doctor", "--scope", "work", "--root", f.root, "--json"]);
-	expect(full.exitCode, full.stderr.toString()).toBe(0);
-	const envelope = JSON.parse(full.stdout.toString());
+	expect(full.rc, decoder.decode(full.stderr)).toBe(0);
+	const envelope = JSON.parse(decoder.decode(full.stdout));
 	const clean = rowByName(envelope.data.repos, "clean") as Record<string, any>;
 	expect(clean.stranded).toBe(false);
 	expect(clean.conditions).toEqual([]);
@@ -197,8 +197,8 @@ test("a bulk clean fleet stays measured at the default Git probe deadline", asyn
 	const names = Array.from({ length: 32 }, (_, index) => `clean-${index}`).sort();
 	for (const name of names) pushedRepo(root, name);
 	const result = cli(root, ["doctor", "--scope", "work", "--root", root, "--json"]);
-	expect(result.exitCode, result.stderr.toString()).toBe(0);
-	const envelope = JSON.parse(result.stdout.toString());
+	expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+	const envelope = JSON.parse(decoder.decode(result.stdout));
 	expect(envelope.data.roots[0]?.repo_count).toBe(32);
 	expect(envelope.data.repos.map((repo: { name: string }) => repo.name).sort()).toEqual(names);
 	for (const repo of envelope.data.repos) {
@@ -213,15 +213,15 @@ test("a bulk clean fleet stays measured at the default Git probe deadline", asyn
 test("doctor --scope work --fleet uses the canonical roots and refuses scoped combinations", async () => {
 	const f = fixture();
 	const fleet = cli(f.root, ["doctor", "--scope", "work", "--fleet", "--stranded-only", "--json"], { OMP_KIT_WORK_ROOTS: f.root });
-	expect(fleet.exitCode, fleet.stderr.toString()).toBe(0);
-	const envelope = JSON.parse(fleet.stdout.toString());
+	expect(fleet.rc, decoder.decode(fleet.stderr)).toBe(0);
+	const envelope = JSON.parse(decoder.decode(fleet.stdout));
 	expect(envelope.data.fleet).toBe(true);
 	expect(envelope.data.roots.map((entry: { path: string }) => entry.path)).toEqual([f.root]);
 	expect(envelope.data.repos.map((entry: { name: string }) => entry.name)).not.toContain("clean");
 	const conflict = cli(f.root, ["doctor", "--scope", "work", "--fleet", "--root", f.root, "--json"], { OMP_KIT_WORK_ROOTS: f.root });
-	expect(conflict.exitCode).toBe(2);
-	expect(conflict.stdout.toString()).toContain("CONFLICTING_FLAGS");
+	expect(conflict.rc).toBe(2);
+	expect(decoder.decode(conflict.stdout)).toContain("CONFLICTING_FLAGS");
 	const wrongScope = cli(f.root, ["doctor", "--scope", "load", "--fleet", "--json"]);
-	expect(wrongScope.exitCode).toBe(2);
-	expect(wrongScope.stdout.toString()).toContain("INVALID_FLAG");
+	expect(wrongScope.rc).toBe(2);
+	expect(decoder.decode(wrongScope.stdout)).toContain("INVALID_FLAG");
 }, 60_000);

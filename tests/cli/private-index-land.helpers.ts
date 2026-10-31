@@ -1,8 +1,7 @@
 /** Shared fixture and command helpers for the private-index-land test files (split for the per-file test budget). */
 import { expect } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { availableParallelism, loadavg } from "node:os";
-import { runSync as kitlibRunSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -116,8 +115,8 @@ export const LAND_COMMAND_DEADLINE_MS = 30_000;
 
 export function command(cwd: string, args: string[], holds: unknown, options: CommandOptions) {
 	const env = commandEnvironment(cwd, holds, options);
-	const result = kitlibRunSync(["bun", cliPath, options.subcommand ?? "land", ...args, "--json"], {
-		cwd, env: stringEnvironment(env), deadline_s: (options.timeoutMs ?? LAND_COMMAND_DEADLINE_MS) / 1000,
+	const result = runFixture(["bun", cliPath, options.subcommand ?? "land", ...args, "--json"], {
+		cwd, env: stringEnvironment(env), floor_s: (options.timeoutMs ?? LAND_COMMAND_DEADLINE_MS) / 1000,
 	});
 	const decoder = new TextDecoder();
 	const stdout = decoder.decode(result.stdout);
@@ -131,51 +130,23 @@ export function command(cwd: string, args: string[], holds: unknown, options: Co
 	return { status: result.rc === null || result.rc < 0 ? 1 : result.rc, body };
 }
 
-// GATEFLAKE1 (ompkit-ll72v): a fixture git spawn's deadline is a property of the machine, not of the
-// program, so it comes from one place: a 10 s quiet-machine floor scaled by min(4, loadavg1/ncpu*4)
-// (never below 1). A spawn that runs out of it is reported as TIMEOUT_UNDER_LOAD with the load, the
-// core count and the worker count on one line, never as a bare `git ... failed (null)`.
-// OMP_KIT_TEST_SPAWN_SLEEP=<s> is a test-only planted load, off by default: each template git spawn
-// after the bare init (the setup every test in this file shares)
-// first sleeps <s> quiet-machine seconds, stretched by the same load factor as the deadline, so a
-// planted 12 s spawn always exceeds the 10 s floor (TIMEOUT_UNDER_LOAD) and a planted 1 s spawn
-// always fits, whatever the machine's load when the planted run happens.
-export const SPAWN_FLOOR_S = 10;
+// GATEFLAKE1: the shared fixture primitive owns load scaling and timeout diagnostics.
+// Fault delay is passed only to the planted template operation, never selected by a test name.
 export const plantedSpawnSleepS = Number(process.env.OMP_KIT_TEST_SPAWN_SLEEP ?? "0");
 if (!Number.isFinite(plantedSpawnSleepS) || plantedSpawnSleepS < 0)
 	throw new Error(`OMP_KIT_TEST_SPAWN_SLEEP must be a non-negative number of seconds, got ${process.env.OMP_KIT_TEST_SPAWN_SLEEP}`);
 
-export function spawnLoad(): { load1: number; ncpu: number; factor: number } {
-	const load1 = loadavg()[0] ?? 0;
-	const ncpu = availableParallelism();
-	return { load1, ncpu, factor: Math.max(1, Math.min(4, (load1 / ncpu) * 4)) };
-}
 
-// The same rule bounds a whole test: bun's 5 s per-test default is the quiet-machine figure, and a
-// test making two or three land runs (each a bun CLI plus a full-suite judge, 1.8-2.3 s at load 19)
-// ran 5.0-6.5 s at load 22 on 32 cores and was cut off with no assertion failed. The default is scaled
-// by the load factor at module load; tests carrying their own explicit cap keep it. It is never below
-// one land command's own deadline: in the 2026-10-30 15:52Z pre-push gate (4 bun workers, load 13-15)
-// two one-run tests that take 4.1 s alone were killed by a 10.4 s per-test cap (status -9/-15, empty
-// stdout), before the land command's 30 s deadline could report anything.
-export const LAND_DEFAULT_TIMEOUT_MS = Math.max(Math.round(5_000 * spawnLoad().factor), LAND_COMMAND_DEADLINE_MS);
+// The enclosing test must not expire before one fixture command can report its own deadline.
+// Explicit per-test caps remain unchanged.
+export const LAND_DEFAULT_TIMEOUT_MS = Math.round(fixtureDeadlineS(Math.max(5, LAND_COMMAND_DEADLINE_MS / 1000)) * 1000);
 
 export function git(cwd: string, args: string[], planted = false): string {
-	const { load1, ncpu, factor } = spawnLoad();
-	const deadlineS = SPAWN_FLOOR_S * factor;
 	const gitArgv = ["git", "-c", "user.name=LAND1 test", "-c", "user.email=land1@example.invalid", ...args];
-	// runSync SIGKILLs only sh at the deadline, so the planted sleep writes to no pipe of ours: an
-	// orphaned sleep holding stdout would otherwise keep the call open past its deadline.
-	const argv = planted && plantedSpawnSleepS > 0
-		? ["sh", "-c", 'sleep "$0" </dev/null >/dev/null 2>&1 & wait "$!"; exec "$@"', (plantedSpawnSleepS * factor).toFixed(3), ...gitArgv]
-		: gitArgv;
 	const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] ??= value;
-	const run = kitlibRunSync(argv, { cwd, env, deadline_s: deadlineS });
-	if (run.timed_out)
-		throw new Error(`TIMEOUT_UNDER_LOAD git ${args.join(" ")} killed after ${Math.round(run.elapsed_s * 1000)} ms at its ${Math.round(deadlineS * 1000)} ms deadline `
-			+ `loadavg=${load1.toFixed(2)} ncpu=${ncpu} workers=${process.env.OMP_KIT_TEST_WORKERS ?? "unreported"} `
-			+ `planted_sleep_s=${plantedSpawnSleepS}`);
+	const run = runFixture(gitArgv, { cwd, env, label: `git ${args[0]}`,
+		planted_sleep_s: planted ? plantedSpawnSleepS : 0 });
 	const decode = new TextDecoder();
 	if (run.rc !== 0) throw new Error(`git ${args.join(" ")} failed (${run.rc}): ${decode.decode(run.stderr)}`);
 	return decode.decode(run.stdout);
@@ -196,8 +167,8 @@ export function verdictPath(work: string, tree: string, role: "base" | "main", e
 	const cache = env.FULL_SUITE_VERDICT_CACHE_DIR ?? join(work, "var", "agent-tmp", "full-suite-verdicts");
 	const args = ["path", "--repo", work, "--cache-dir", cache, "--tree", tree, "--role", role, "--judge-root", work];
 	if (checks !== undefined) args.push("--checks", checks);
-	const result = kitlibRunSync(["python3", join(work, "scripts", "full-suite-verdict-store.py"), ...args],
-		{ cwd: work, env: stringEnvironment(env), deadline_s: 30 });
+	const result = runFixture(["python3", join(work, "scripts", "full-suite-verdict-store.py"), ...args],
+		{ cwd: work, env: stringEnvironment(env), floor_s: 30 });
 	const decoder = new TextDecoder();
 	if (result.rc !== 0 || result.timed_out || result.killed || result.truncated || result.total_truncated)
 		throw new Error(`verdict-store path failed: ${decoder.decode(result.stdout)}${decoder.decode(result.stderr)}`);

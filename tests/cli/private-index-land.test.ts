@@ -1,7 +1,6 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { run as kitlibRun } from "../../src/kitlib/run.ts";
+import { runFixture, runFixtureAsync } from "./fixture-process.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -10,6 +9,7 @@ import {
 } from "./private-index-land.helpers.ts";
 
 setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
+const fixtureDecoder = new TextDecoder();
 
 test("the published land schema rejects what land never emits and what a PUSHED land must carry", () => {
 	const check = { status: "PASS", path: ".omp/push-check", sha256: null, selected_executable: null, selected_version: null, candidate_sha: null, checked_sha: null, pushed_sha: null, exit_code: null };
@@ -22,10 +22,10 @@ test("the published land schema rejects what land never emits and what a PUSHED 
 	expect(schemaViolations({ overall: "UNRUN" }, landSchema)).not.toEqual([]);
 });
 test("the published grammar lists exit 77 as not_run", () => {
-	const child = spawnSync(process.execPath, ["run", cliPath, "schema", "--json"], { stdio: ["ignore", "pipe", "pipe"],
-		env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" } as NodeJS.ProcessEnv });
-	expect(child.status).toBe(0);
-	const body = JSON.parse(child.stdout.toString()) as { data: { exit_codes: Record<string, number> } };
+	const child = runFixture([process.execPath, "run", cliPath, "schema", "--json"], {
+		cwd: repoRoot, env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" } });
+	expect(child.rc).toBe(0);
+	const body = JSON.parse(fixtureDecoder.decode(child.stdout)) as { data: { exit_codes: Record<string, number> } };
 	expect(body.data.exit_codes).toMatchObject({ not_run: 77, success: 0, finding: 1 });
 });
 test("checks the exact candidate with the base-registered push check before publishing", { timeout: 120_000 }, async () => {
@@ -81,8 +81,8 @@ test("checks the exact candidate with the base-registered push check before publ
 	const prePushOutput = join(scratch, `land-pre-push-output-${fixtureNumber}.txt`);
 	writeFileSync(prePushOutput, "");
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const identity = await kitlibRun(["python3", join(work, "scripts", "suite-metrics.py"), "identity", "--root", work, "--scope", "full"], {
-		cwd: work, deadline_s: 30,
+	const identity = await runFixtureAsync(["python3", join(work, "scripts", "suite-metrics.py"), "identity", "--root", work, "--scope", "full"], {
+		cwd: work, floor_s: 30,
 	});
 	expect(identity.rc, new TextDecoder().decode(identity.stderr)).toBe(0);
 	expect(identity.timed_out).toBe(false);
@@ -147,19 +147,19 @@ test("checks the exact candidate with the base-registered push check before publ
 		const gitEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", GIT_TERMINAL_PROMPT: "0",
 			GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
 		const decoder = new TextDecoder();
-		const archive = await kitlibRun(["git", "-C", work, "archive", base], {
-			cwd: work, env: gitEnv, deadline_s: 30,
+		const archive = await runFixtureAsync(["git", "-C", work, "archive", base], {
+			cwd: work, env: gitEnv, floor_s: 30,
 		});
 		expect(archive.rc, decoder.decode(archive.stderr)).toBe(0);
 		expect(archive.timed_out || archive.killed || archive.truncated || archive.total_truncated).toBe(false);
-		const unpacked = await kitlibRun(["tar", "-xf", "-", "-C", judgeArchive.path], {
-			cwd: work, env: gitEnv, stdin: archive.stdout, deadline_s: 30,
+		const unpacked = await runFixtureAsync(["tar", "-xf", "-", "-C", judgeArchive.path], {
+			cwd: work, env: gitEnv, stdin: archive.stdout, floor_s: 30,
 		});
 		expect(unpacked.rc, decoder.decode(unpacked.stderr)).toBe(0);
 		expect(unpacked.timed_out || unpacked.killed || unpacked.truncated || unpacked.total_truncated).toBe(false);
-		const replay = await kitlibRun(["sh", join(judgeArchive.path, "scripts", "full-suite-verdict.sh"),
+		const replay = await runFixtureAsync(["sh", join(judgeArchive.path, "scripts", "full-suite-verdict.sh"),
 			"--repo", work, "--commit", data.commit, "--judge-role", "base"],
-			{ cwd: work, env: stringEnvironment(verificationEnv), deadline_s: 30 });
+			{ cwd: work, env: stringEnvironment(verificationEnv), floor_s: 30 });
 		const replayOutput = decoder.decode(replay.stdout) + decoder.decode(replay.stderr);
 		expect(replay.rc, replayOutput).toBe(0);
 		expect(replay.timed_out || replay.killed || replay.truncated || replay.total_truncated).toBe(false);
@@ -181,10 +181,10 @@ test("contradictory cached PASS evidence is a cache miss and cannot publish", ()
 	const candidate = git(work, ["rev-parse", "HEAD"]).trim();
 	const script = join(work, "scripts", "full-suite-verdict.sh");
 	const cache = join(work, "var", "agent-tmp", "full-suite-verdicts");
-	const first = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
-		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
+	const first = runFixture(["sh", script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
+		cwd: work, env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, floor_s: 30,
 	});
-	expect(first.status, first.stdout + first.stderr).toBe(1);
+	expect(first.rc, fixtureDecoder.decode(first.stdout) + fixtureDecoder.decode(first.stderr)).toBe(1);
 	const tree = git(work, ["rev-parse", `${candidate}^{tree}`]).trim();
 	const entryPath = verdictPath(work, tree, "base", { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" });
 	const entry = JSON.parse(readFileSync(entryPath, "utf8")) as { verdict: string; exit_code: number; evidence: Record<string, unknown> };
@@ -192,11 +192,11 @@ test("contradictory cached PASS evidence is a cache miss and cannot publish", ()
 	entry.exit_code = 0;
 	entry.evidence.shell_fail = 1;
 	writeFileSync(entryPath, JSON.stringify(entry) + "\n");
-	const contradictory = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
-		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
+	const contradictory = runFixture(["sh", script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
+		cwd: work, env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, floor_s: 30,
 	});
-	expect(contradictory.status, contradictory.stdout + contradictory.stderr).toBe(1);
-	expect(`${contradictory.stdout}${contradictory.stderr}`).toContain("cache miss");
+	expect(contradictory.rc, fixtureDecoder.decode(contradictory.stdout) + fixtureDecoder.decode(contradictory.stderr)).toBe(1);
+	expect(fixtureDecoder.decode(contradictory.stdout) + fixtureDecoder.decode(contradictory.stderr)).toContain("cache miss");
 	const missingCount = JSON.parse(readFileSync(entryPath, "utf8")) as { verdict: string; exit_code: number; evidence: Record<string, unknown> };
 	missingCount.verdict = "PASS";
 	missingCount.exit_code = 0;
@@ -206,11 +206,11 @@ test("contradictory cached PASS evidence is a cache miss and cannot publish", ()
 	missingCount.evidence.shell_fail = 0;
 	missingCount.evidence.py_fail = 0;
 	writeFileSync(entryPath, JSON.stringify(missingCount) + "\n");
-	const missing = spawnSync("sh", [script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
-		cwd: work, encoding: "utf8", env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, timeout: 30_000,
+	const missing = runFixture(["sh", script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
+		cwd: work, env: { ...process.env, OMP_KIT_OMP_SRC_FETCH: "0" }, floor_s: 30,
 	});
-	expect(missing.status, missing.stdout + missing.stderr).toBe(1);
-	expect(`${missing.stdout}${missing.stderr}`).toContain("cache miss");
+	expect(missing.rc, fixtureDecoder.decode(missing.stdout) + fixtureDecoder.decode(missing.stderr)).toBe(1);
+	expect(fixtureDecoder.decode(missing.stdout) + fixtureDecoder.decode(missing.stderr)).toContain("cache miss");
 });
 test("missing or corrupt suite logs are not reused as cached PASS", async () => {
 	const { work } = fixture();
@@ -223,8 +223,8 @@ test("missing or corrupt suite logs are not reused as cached PASS", async () => 
 	}
 	env.OMP_KIT_OMP_SRC_FETCH = "0";
 	const runOnce = async () => {
-		const result = await kitlibRun(["sh", script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
-			cwd: work, env, deadline_s: 30,
+		const result = await runFixtureAsync(["sh", script, "--repo", work, "--commit", candidate, "--cache-dir", cache], {
+			cwd: work, env, floor_s: 30,
 		});
 		const decoder = new TextDecoder();
 		return { status: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
@@ -371,9 +371,9 @@ test("reconstructs only caller-selected hunks onto fresh origin/main", () => {
 	// advance shifted the caller hunk and changed its trailing context.
 	const checker = join(scratch, `plain-check-${fixtureNumber}`);
 	git(scratch, ["clone", "--branch", "main", bare, checker]);
-	const plain = spawnSync("git", ["apply", "--check", patch], { cwd: checker, encoding: "utf8", timeout: 10_000 });
-	expect(plain.status).not.toBe(0);
-	expect(String(plain.stderr)).toContain("service.txt");
+	const plain = runFixture(["git", "apply", "--check", patch], { cwd: checker });
+	expect(plain.rc).not.toBe(0);
+	expect(fixtureDecoder.decode(plain.stderr)).toContain("service.txt");
 	// The shared checkout stays stale with unrelated staged and worktree bytes.
 	writeFileSync(join(work, "peer.txt"), "staged peer bytes\n");
 	git(work, ["add", "peer.txt"]);

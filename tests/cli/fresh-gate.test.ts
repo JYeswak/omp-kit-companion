@@ -543,6 +543,44 @@ test.skipIf(!AMPLE)("CIGATE1 planted: a src change runs the tests importing it; 
 	}
 }, 120_000);
 
+test.skipIf(!AMPLE)("GATEFLAKE1 retains a real fixture timeout without misclassifying an assertion failure", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const timeoutArchive = affectedArchive(fx, 42, 42);
+		// Real process expiry is the behavior under test; fake timers cannot expire kitlib's OS deadline.
+		writeFileSync(join(timeoutArchive, "tests/cli/mod.test.ts"), `
+import { test } from "bun:test";
+import { runFixture } from ${JSON.stringify(join(root, "tests/cli/fixture-process.ts"))};
+test("real fixture expiry", () => runFixture([process.execPath, "-e", "setTimeout(() => {}, 5000)"], {
+	cwd: import.meta.dir, floor_s: 0.05, label: "gate-timeout",
+}));
+`);
+		const timeout = runFocused(fx, source, timeoutArchive, "tests/cli/mod.test.ts");
+		expect(timeout.code, timeout.out).toBe(1);
+		expect(timeout.out).toContain('FRESH-GATE: RED: TIMEOUT_UNDER_LOAD label="gate-timeout"');
+		expect(timeout.out).toContain("loadavg=");
+		expect(timeout.out).toContain("workers=");
+
+		const assertionArchive = affectedArchive(fx, 41, 42);
+		writeFileSync(join(assertionArchive, "tests/cli/mod.test.ts"), `
+import { expect, test } from "bun:test";
+test("ordinary assertion failure", () => {
+	// TIMEOUT_UNDER_LOAD loadavg=2 workers=1 is only a source excerpt.
+	expect(41).toBe(42);
+});
+`);
+		const assertion = runFocused(fx, source, assertionArchive, "tests/cli/mod.test.ts");
+		expect(assertion.code, assertion.out).toBe(1);
+		expect(assertion.out).toContain("TIMEOUT_UNDER_LOAD");
+		expect(assertion.out).not.toContain("FRESH-GATE: RED: TIMEOUT_UNDER_LOAD");
+		expect(assertion.out).toContain("FRESH-GATE: RED: affected tests did not pass (exit 1)");
+		expect(ledger(fx).map(row => [row.selected_files, row.tests_ran, row.rc])).toEqual([[1, 1, 1], [1, 1, 1]]);
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
 test.skipIf(!AMPLE)("SUITEBUDGET1 refuses a successful file over its measured policy cap", () => {
 	const source = readFileSync(gate, "utf8");
 	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });

@@ -10,7 +10,9 @@ import { join, resolve } from "node:path";
 import { createScratch, releaseScratch, reapLogPath, scratchContent, lsofClear, takeLsofSnapshot,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { run } from "../../src/kitlib/run.ts";
+import { runFixture, runFixtureAsync } from "./fixture-process.ts";
+
+const decoder = new TextDecoder();
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -224,10 +226,10 @@ test("retiring a marker-only throwaway with an open file keeps the dir and its m
 test("the CLI accepts --now and retires the directory", () => {
 	const { dir, home } = fixture(ownerText(process.pid, "bin=throwaway\npurpose=probe\n"));
 	writeFileSync(join(dir, "work.txt"), "done");
-	const cli = Bun.spawnSync([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir, "--bin", "throwaway", "--now", "--json"], {
-		cwd: repo, env: { ...process.env, HOME: home }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+	const cli = runFixture([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir, "--bin", "throwaway", "--now", "--json"], {
+		cwd: repo, env: { ...process.env, HOME: home },
 	});
-	const out = JSON.parse(cli.stdout.toString()) as { ok: boolean; data?: { reason?: string }; errors?: { code: string }[] };
+	const out = JSON.parse(decoder.decode(cli.stdout)) as { ok: boolean; data?: { reason?: string }; errors?: { code: string }[] };
 	expect(out.errors?.map((e) => e.code) ?? []).not.toContain("UNKNOWN_FLAG");
 	expect(out.ok).toBe(true);
 	expect(existsSync(dir)).toBe(false);
@@ -238,8 +240,8 @@ test("scratch new refuses an unregistered hidden repository before creating a sc
 	cleanup.push(home);
 	const hiddenRepo = join(home, ".claude");
 	mkdirSync(join(hiddenRepo, ".git"), { recursive: true });
-	const result = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", "new",
-		"--label", "hidden-root", "--json"], { deadline_s: 15, cwd: hiddenRepo, env: isolatedCliEnv(home) });
+	const result = await runFixtureAsync([process.execPath, join(repo, "src", "cli.ts"), "scratch", "new",
+		"--label", "hidden-root", "--json"], { floor_s: 15, cwd: hiddenRepo, env: isolatedCliEnv(home) });
 	const out = JSON.parse(new TextDecoder().decode(result.stdout)) as {
 		errors?: { code: string; message: string; remediation: string }[];
 	};
@@ -259,8 +261,8 @@ test("scratch new and release roundtrip under a registered Developer root", asyn
 	const project = join(home, "Developer", "project");
 	mkdirSync(join(project, ".git"), { recursive: true });
 	const env = isolatedCliEnv(home);
-	const created = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", "new",
-		"--label", "registered-root", "--json"], { deadline_s: 15, cwd: project, env });
+	const created = await runFixtureAsync([process.execPath, join(repo, "src", "cli.ts"), "scratch", "new",
+		"--label", "registered-root", "--json"], { floor_s: 15, cwd: project, env });
 	const createdOutput = JSON.parse(new TextDecoder().decode(created.stdout)) as {
 		data?: { overall?: string; dir?: string; capability?: string };
 	};
@@ -271,9 +273,9 @@ test("scratch new and release roundtrip under a registered Developer root", asyn
 	const capability = createdOutput.data?.capability;
 	if (!dir || !capability) throw new Error("scratch new returned no directory or capability");
 	expect(dir.startsWith(join(project, "var", "agent-tmp", "registered-root."))).toBe(true);
-	const released = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir,
+	const released = await runFixtureAsync([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir,
 		"--bin", "throwaway", "--now", "--capability", capability, "--json"],
-	{ deadline_s: 15, cwd: project, env });
+	{ floor_s: 15, cwd: project, env });
 	const releasedOutput = JSON.parse(new TextDecoder().decode(released.stdout)) as {
 		data?: { overall?: string; deleted?: boolean };
 	};
@@ -336,8 +338,8 @@ function legacyCliFixture(owner = "legacy task owner") {
 	writeFileSync(join(dir, "payload"), "preserve original task data");
 	const env = { ...isolatedCliEnv(home), OMP_KIT_SCRATCH_ROOTS: root };
 	const cli = async (args: string[], overrides: Record<string, string> = {}) => {
-		const result = await run([process.execPath, join(repo, "src", "cli.ts"), "scratch", ...args, "--json"],
-			{ cwd: repo, env: { ...env, ...overrides }, deadline_s: 20 });
+		const result = await runFixtureAsync([process.execPath, join(repo, "src", "cli.ts"), "scratch", ...args, "--json"],
+			{ cwd: repo, env: { ...env, ...overrides }, floor_s: 20 });
 		const output = JSON.parse(new TextDecoder().decode(result.stdout));
 		expect(result.timed_out).toBe(false);
 		return { result, output };

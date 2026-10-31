@@ -11,6 +11,9 @@ import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { snapshotWatched } from "../../src/operator-snapshot.ts";
+import { runFixture } from "./fixture-process.ts";
+
+const decoder = new TextDecoder();
 
 const fixtures: OwnedTmp[] = [];
 interface Fixture { base: string; root: string; home: string; project: string; bunRoot: string; bytes: string; ompPath: string }
@@ -240,26 +243,26 @@ test("CLI scopes and bare presence inventory keep explicit unperformed evidence"
 	const env = { ...process.env, HOME: f.home, PATH: `${dirname(f.ompPath)}:/usr/bin:/bin`, XDG_STATE_HOME: join(f.base, "state") };
 	for (const args of [["doctor", "--scope", "omp"], ["doctor", "--scope", "profile"], ["status"], []]) {
 		const began = performance.now();
-		const result = Bun.spawnSync([process.execPath, cli, ...args, "--json"], { cwd: f.project, env, stdout: "pipe", stderr: "pipe", timeout: 4000 });
-		expect(performance.now() - began, `${args.join(" ")}: ${result.stderr}`).toBeLessThan(2000);
-		const envelope = JSON.parse(result.stdout.toString());
+		const result = runFixture([process.execPath, cli, ...args, "--json"], { cwd: f.project, env });
+		expect(performance.now() - began, `${args.join(" ")}: ${decoder.decode(result.stderr)}`).toBeLessThan(2000);
+		const envelope = JSON.parse(decoder.decode(result.stdout));
 		const rows: Finding[] = envelope.data.findings;
 		if (args[0] === "doctor") {
-			expect(result.exitCode, result.stderr.toString()).toBe(0);
+			expect(result.rc, decoder.decode(result.stderr)).toBe(0);
 			expect(rows.map(row => row.component)).toEqual([args[2] === "omp" ? "omp" : "effective_profile"]);
 			if (args[2] === "profile") expect(rows[0]?.status).toBe("UNVERIFIED");
 		} else {
-			expect(result.exitCode).toBe(rows.some(row => ["kit", "manifest", "plugin_links"].includes(row.component) && row.status === "FAIL") ? 1 : 0);
+			expect(result.rc).toBe(rows.some(row => ["kit", "manifest", "plugin_links"].includes(row.component) && row.status === "FAIL") ? 1 : 0);
 			expect(finding(rows, "effective_rules").status).toBe("NOT_RUN");
 			expect(envelope.meta.verification).toBe("UNVERIFIED");
 			expect(envelope.data.overall).not.toBe("OK");
 		}
 	}
-	const missing = Bun.spawnSync([process.execPath, cli, "doctor", "--scope", "omp", "--json"], {
-		cwd: f.project, env: { ...env, PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe", timeout: 4000,
+	const missing = runFixture([process.execPath, cli, "doctor", "--scope", "omp", "--json"], {
+		cwd: f.project, env: { ...env, PATH: "/usr/bin:/bin" },
 	});
-	expect(missing.exitCode, missing.stderr.toString()).toBe(3);
-	expect(JSON.parse(missing.stdout.toString()).errors[0].code).toBe("OMP_UNAVAILABLE");
+	expect(missing.rc, decoder.decode(missing.stderr)).toBe(3);
+	expect(JSON.parse(decoder.decode(missing.stdout)).errors[0].code).toBe("OMP_UNAVAILABLE");
 });
 test("stale plugin symlink fails by profile and the installed release target passes", async () => {
 	const f = fixture();
@@ -567,11 +570,11 @@ test("native doctor CLI reports exact Tern and Bun manager observations", () => 
 		["bun", dirname(f.ompPath), "18.5.0"],
 	] as const) {
 		const env = { ...common, PATH: `${bin}${delimiter}${manager === "tern" ? dirname(f.ompPath) : tern.bin}${delimiter}/usr/bin:/bin` };
-		const result = Bun.spawnSync([process.execPath, cli, "doctor", "--scope", "omp", "--json"], {
-			cwd: f.project, env, stdout: "pipe", stderr: "pipe", timeout: 5_000,
+		const result = runFixture([process.execPath, cli, "doctor", "--scope", "omp", "--json"], {
+			cwd: f.project, env,
 		});
-		expect(result.exitCode, result.stderr.toString()).toBe(0);
-		const envelope = JSON.parse(result.stdout.toString());
+		expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+		const envelope = JSON.parse(decoder.decode(result.stdout));
 		const rows: Finding[] = envelope.data.findings;
 		expect(rows.map(row => row.component)).toEqual(["omp"]);
 		expect(finding(rows, "omp")).toMatchObject({
@@ -1503,7 +1506,7 @@ test("oq1h.5: an unscoped inventory omits rch when it is not installed, and the 
 	const f = fixture(); installOmp(f);
 	const input = { root: f.root, home: f.home, ompPath: f.ompPath };
 	// Positive control for the planted state: the diagnose PATH (only the omp bin directory) must lack rch.
-	expect(Bun.spawnSync(["/bin/sh", "-c", "command -v rch"], { env: { PATH: dirname(f.ompPath) } }).exitCode).not.toBe(0);
+	expect(runFixture(["/bin/sh", "-c", "command -v rch"], { cwd: f.project, env: { PATH: dirname(f.ompPath) } }).rc).not.toBe(0);
 	expect((await diagnose(input)).map((row) => row.component)).not.toContain("rch");
 	const scoped = finding(await diagnose({ ...input, scope: "rch" }), "rch");
 	expect(scoped.status).toBe("UNVERIFIED");
@@ -1612,7 +1615,7 @@ console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
 	const watched = [f.home, configHome, cacheHome, dataHome, stateHome, runtime];
 	const before = snapshotWatched(watched);
 	expect(before.incomplete).toEqual([]);
-	const run = Bun.spawnSync([process.execPath, join(import.meta.dir, "../../src/cli.ts"), "doctor", "--json"], {
+	const run = runFixture([process.execPath, join(import.meta.dir, "../../src/cli.ts"), "doctor", "--json"], {
 		cwd: project,
 		env: {
 			PATH: `${bin}${delimiter}${dirname(f.ompPath)}${delimiter}/usr/bin:/bin`,
@@ -1623,10 +1626,9 @@ console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
 			OMP_KIT_TEST_WORK_ROOT: ownedWork, OMP_KIT_CASE_CWD: project,
 			OMP_KIT_OMP_SRC_FETCH: "0",
 		},
-		stdout: "pipe", stderr: "pipe", timeout: 10_000,
 	});
-	const output = run.stdout.toString();
-	expect(run.exitCode, output + run.stderr.toString()).toBe(0);
+	const output = decoder.decode(run.stdout);
+	expect(run.rc, output + decoder.decode(run.stderr)).toBe(0);
 	const rows: Finding[] = JSON.parse(output).data.findings;
 	expect(finding(rows, "rch")).toMatchObject({ status: "OK", evidence: { state: "NOT_RUNNING" } });
 	expect(snapshotWatched(watched)).toEqual(before);
@@ -1653,17 +1655,16 @@ console.log(JSON.stringify({
   after: [String(after.mtimeNs), String(after.ctimeNs)],
 }));
 `;
-	const run = Bun.spawnSync([process.execPath, "--no-env-file", "-e", script], {
+	const run = runFixture([process.execPath, "--no-env-file", "-e", script], {
 		cwd: project,
 		env: {
 			PATH: emptyBin, HOME: f.home, TMPDIR: callerTmp, TMP: callerTmp, TEMP: callerTmp,
 			BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(f.base, "bun-transpiler"),
 			OMP_KIT_TEST_WORK_ROOT: ownedWork, OMP_KIT_CASE_CWD: project,
 		},
-		stdout: "pipe", stderr: "pipe", timeout: 5_000,
 	});
-	expect(run.exitCode, run.stdout.toString() + run.stderr.toString()).toBe(0);
-	const result = JSON.parse(run.stdout.toString());
+	expect(run.rc, decoder.decode(run.stdout) + decoder.decode(run.stderr)).toBe(0);
+	const result = JSON.parse(decoder.decode(run.stdout));
 	expect(result.daemon).toBeNull();
 	expect(result.after).toEqual(result.before);
 });

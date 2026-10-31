@@ -328,7 +328,7 @@ run_affected_tests() {
 		echo "affected bun tests: files=$bun_files workers=$workers"
 		(
 			cd "$ARCHIVE_DIR"
-			heavy_step tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml" \
+			heavy_step tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml" OMP_KIT_TEST_WORKERS="$workers" \
 				python3 "$SCRIPT_DIR/suite-metrics.py" stage --runner bun --records "$metric_dir" \
 				--cwd "$ARCHIVE_DIR" --tree "$metric_tree" --summary "$WORK/bun-metrics.stage" \
 				--bun-config "$ARCHIVE_DIR/bunfig.toml" --workers "$workers" --deadline 3600 "$@"
@@ -343,7 +343,7 @@ run_affected_tests() {
 		# shellcheck disable=SC2086
 		(
 			cd "$ARCHIVE_DIR"
-			heavy_step script-tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" \
+			heavy_step script-tests env TMPDIR="$ARCHIVE_DIR/var/agent-tmp" OMP_KIT_TEST_WORKERS=1 \
 				python3 "$SCRIPT_DIR/suite-metrics.py" stage --runner scripts --records "$metric_dir" \
 				--cwd "$ARCHIVE_DIR" --tree "$metric_tree" --summary "$WORK/scripts-metrics.stage" \
 				--workers 1 --deadline 3600 $script_files
@@ -381,6 +381,28 @@ run_affected_tests() {
 	echo "affected tests: files=$files ran=$ran fail=${failed:-0} rc=$tests_rc"
 	record_run "$ran" "$files" "$tests_rc"
 	if [ "$tests_rc" -ne 0 ]; then
+		# Keep full producer logs above and the original rc below. Only a runtime
+		# diagnostic (not a numbered source excerpt mentioning the marker) adds context.
+		python3 - "$tests_out" "$scripts_out" <<'PYEOF' || printf 'FRESH-GATE: RED: timeout-context reader failed; preserving producer_rc=%s\n' "$tests_rc" >&2
+import json, math, re, sys
+for path in sys.argv[1:]:
+    with open(path) as handle:
+        for line in handle:
+            line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip()
+            payload = line.removeprefix("error: ")
+            if not payload.startswith("TIMEOUT_UNDER_LOAD "):
+                continue
+            fields = dict(token.split("=", 1) for token in payload.partition(" stderr=")[0].split() if "=" in token)
+            try:
+                loadavg = float(fields["loadavg"])
+                workers = json.loads(fields["workers"])
+                if isinstance(workers, str):
+                    workers = int(workers)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(loadavg) and loadavg >= 0 and type(workers) is int and workers > 0:
+                print("FRESH-GATE: RED: " + payload, file=sys.stderr)
+PYEOF
 		echo "FRESH-GATE: RED: affected tests did not pass (exit $tests_rc); the push is refused" >&2
 		return "$tests_rc"
 	fi
@@ -801,10 +823,38 @@ make_work() {
 	printf 'pid=%s\nprocess_start=%s\nlabel=fresh-gate\nrepo=%s\ncreated=%s\n' "$$" "$start" "$ROOT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$WORK/.owner"
 }
 
-selftest() {
+selftest() (
 	require_gate_functions
+	make_work
+	# This is a ledger-writer fixture, not evidence that any selected test ran.
+	# Isolate it from a caller's operational ledger and read the actual appended row.
+	selftest_ledger="$WORK/selftest-runs.jsonl"
+	metric_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
+	metric_load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
+	workers=$(test_workers)
+	FRESH_GATE_LEDGER="$selftest_ledger" record_run 0 0 0 || return "$?"
+	python3 - "$selftest_ledger" "$workers" <<'PYEOF' || return "$?"
+import json, math, sys
+from pathlib import Path
+lines = Path(sys.argv[1]).read_text().splitlines()
+assert len(lines) == 1, "selftest must append exactly one ledger row"
+row = json.loads(lines[0])
+assert row["judge"]["scope"] == "standalone-fixture", "selftest is not operational gate evidence"
+assert row["tests_ran"] == 0 and row["selected_files"] == 0 and row["rc"] == 0
+timing = row["timing"]
+assert type(timing["started_ms"]) is int and timing["started_ms"] > 0
+assert type(timing["wall_ms"]) is int and timing["wall_ms"] >= 0
+for name in ("load_start", "load_end"):
+    load = timing[name]
+    assert isinstance(load, list) and len(load) == 3, f"invalid {name}"
+    assert all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in load), f"invalid {name}"
+workers = timing["workers"]["bun"]
+assert type(workers) is int and workers == int(sys.argv[2]) and workers > 0, "invalid worker count"
+assert type(timing["workers"]["scripts"]) is int and timing["workers"]["scripts"] == 0
+print(f"GATEFLAKE1 ledger-row loadavg={timing['load_start'][0]} workers={workers}")
+PYEOF
 	echo "FRESH-GATE SELFTEST: GREEN"
-}
+)
 
 # Read-only query for sibling runners; never mix it with a gate invocation.
 if [ "$#" -eq 1 ] && [ "$1" = "--test-workers" ]; then
