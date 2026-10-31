@@ -1525,7 +1525,7 @@ async function observeWitness(rulesDir: string, casesFile: string, ruleName: str
 				let work = 0;
 				let usedCpu = process.cpuUsage(cpuStart);
 				// Use process CPU, not elapsed wall time, so scheduler delays do not change the injected work.
-				while (usedCpu.user + usedCpu.system < 1_200_000) {
+				while (usedCpu.user + usedCpu.system < 4_000_000) {
 					for (let i = 0; i < 16_384; i += 1) {
 						work = Math.imul(work ^ i, 1_664_525) + 1_013_904_223;
 					}

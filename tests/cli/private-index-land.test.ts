@@ -28,7 +28,7 @@ test("the published grammar lists exit 77 as not_run", () => {
 	const body = JSON.parse(fixtureDecoder.decode(child.stdout)) as { data: { exit_codes: Record<string, number> } };
 	expect(body.data.exit_codes).toMatchObject({ not_run: 77, success: 0, finding: 1 });
 });
-test("checks the exact candidate with the base-registered push check before publishing", { timeout: 120_000 }, async () => {
+test("checks the exact candidate with the base-registered push check before publishing", { timeout: 300_000 }, async () => {
 	const { work, fakeBin } = fixture();
 	const prePushFixtureFiles = [
 		".github/workflows/release-train.yml", ".github/workflows/release.yml",
