@@ -1,0 +1,160 @@
+{
+  "schema_version": "omp-kit.test-run-observation.v1",
+  "bead": "ompkit-u3d55",
+  "author": "TurquoiseSummit",
+  "code_repo": "/Users/josh/Developer/omp-kit-companion",
+  "base_commit": "479d0c19b7bccb87881149d3eee1218f84e75fdf",
+  "tested_tree_without_evidence": "bed51afc3fde2370f6c36b733353bcbc0ddb9819",
+  "subject": {
+    "path": "tests/cli/gate-plane.test.ts",
+    "sha256": "0a51d7d6571226e69935eae905b949b483d0875c56e50b48017684d62ac24a76"
+  },
+  "scope": "PREVENT82 regression coverage, not a production identity change or installed fleet certification.",
+  "calibrated_boundary": {
+    "before_source_commit": "1428afcf02d636767f86351ab4f47c9368fa120b",
+    "before": {
+      "rc": 1,
+      "out": "bun test v1.4.3 (26aa4e1a9)\n",
+      "err": "\ntests/cli/gate-plane.test.ts:\n110 | \t\texpect(readFileSync(marker, \"utf8\")).toContain(\"update review-unticked\");\n111 | \n112 | \t\tconst host = await createFlywheelHost(base, { env, home });\n113 | \t\tawait host.emit(\"session_start\", { type: \"session_start\" }, host.ctx(project));\n114 | \t\tconst review = await runPythonBr(project, env, [\"br\", \"update\", \"review-unticked\", \"--status\", \"in_review\", \"--db\", database, \"--actor\", agent]);\n115 | \t\texpect(review.rc, `${review.stderr}${review.stdout}`).toBe(4);\n                                                              ^\nerror: expect(received).toBe(expected)\n\nExpected: 4\nReceived: 0\n\n      at <anonymous> (/Users/josh/Developer/omp-kit-companion/tests/cli/gate-plane.test.ts:115:57)\n(fail) GATEPLANE1: installed-release session-start PATH makes Python br enforce review, claim, and create on owned fixtures [780.89ms]\n\n 0 pass\n 3 filtered out\n 1 fail\n 3 expect() calls\nRan 1 test across 1 file. [831.00ms]\n",
+      "timed_out": false,
+      "truncated": false
+    },
+    "after": {
+      "rc": 0,
+      "out": "bun test v1.4.3 (26aa4e1a9)\n",
+      "err": "\ntests/cli/gate-plane.test.ts:\n(pass) GATEPLANE1: source session-start PATH makes Python br enforce review, claim, and create on owned fixtures [5876.80ms]\n(pass) GATEPLANE1: installed-release session-start PATH makes Python br enforce review, claim, and create on owned fixtures [6192.09ms]\n(pass) GATEPLANE1: source gates scope never discovers unrelated OMP, while omp scope still probes its launcher [3463.53ms]\n(pass) GATEPLANE1: installed-release gates scope never discovers unrelated OMP, while omp scope still probes its launcher [3453.29ms]\n\n 4 pass\n 0 fail\n 68 expect() calls\nRan 4 tests across 1 file. [19.04s]\n",
+      "timed_out": false,
+      "truncated": false
+    },
+    "method": "Unchanged new executable installed-layout fixture; test-loader adapter selects the exact pre-content-fix gate-plane module. No source export edited, fake identity function or widened timeout."
+  },
+  "setup_correction": "Initial copied shim was non-executable, causing both old/current installed variants to fail. That run is invalid red evidence and is not counted; corrected mode0755 before the retained paired proof.",
+  "clean_copy": {
+    "base_commit": "479d0c19b7bccb87881149d3eee1218f84e75fdf",
+    "overlay_only": [
+      "tests/cli/gate-plane.test.ts",
+      "ROADMAP.md",
+      "changelog.d/ompkit-u3d55.md"
+    ],
+    "git": "git init -q, no HEAD or TRUSTED_SOURCE override",
+    "result": {
+      "rc": 0,
+      "out": "bun test v1.4.3 (26aa4e1a9)\n",
+      "err": "\ntests/cli/gate-plane.test.ts:\n(pass) GATEPLANE1: source session-start PATH makes Python br enforce review, claim, and create on owned fixtures [9204.08ms]\n(pass) GATEPLANE1: installed-release session-start PATH makes Python br enforce review, claim, and create on owned fixtures [8445.29ms]\n(pass) GATEPLANE1: source gates scope never discovers unrelated OMP, while omp scope still probes its launcher [4626.43ms]\n(pass) GATEPLANE1: installed-release gates scope never discovers unrelated OMP, while omp scope still probes its launcher [5176.14ms]\n\n 4 pass\n 0 fail\n 68 expect() calls\nRan 4 tests across 1 file. [27.47s]\n",
+      "timed_out": false,
+      "truncated": false
+    }
+  },
+  "source_cli_smoke": [
+    {
+      "variant": "identical external installed shim",
+      "rc": 0,
+      "out": "{\"ok\":true,\"tool_version\":\"unreleased\",\"data\":{\"evidence\":{\"effective_profile\":\"NOT_RUN\",\"installed_rules\":\"NOT_RUN\",\"matcher\":\"NOT_RUN\"},\"findings\":[{\"component\":\"gates\",\"evidence\":{\"fixture\":\"/Users/josh/Developer/omp-kit-companion/var/agent-tmp/prevent82-smoke.46200/gateplane1.46237.yyk7km/fixture-project\",\"live_tracker_mutated\":false,\"mutation_count\":1,\"probes\":{\"claim\":{\"rc\":4,\"refused\":true},\"control\":{\"admitted\":true,\"rc\":0},\"create\":{\"rc\":4,\"refused\":true},\"in_review\":{\"rc\":4,\"refused\":true}}},\"reason\":\"GATEPLANE1 ok: fixture in_review refused AC_UNTICKED_BUILD_LANDED; claim refused REFUSED_NOT_REPLAYABLE; create refused r-verify-replayable; valid control reached native br.\",\"recommended_action\":\"No action required.\",\"status\":\"OK\"}],\"kit\":{\"data_paths\":{\"data\":\"/Users/josh/Developer/omp-kit-companion/var/agent-tmp/prevent82-smoke.46200/home/.local/share\",\"state\":\"/Users/josh/Developer/omp-kit-companion/var/agent-tmp/prevent82-smoke.46200/state\"},\"platform\":{\"arch\":\"arm64\",\"os\":\"darwin\"},\"release\":{\"entrypoint\":\"/Users/josh/Developer/omp-kit-companion/src/cli.ts\",\"executable\":\"/opt/homebrew/Cellar/bun/1.4.3/bin/bun\",\"identity\":\"UNVERIFIED\",\"root\":\"/Users/josh/Developer/omp-kit-companion\",\"source_tag\":null},\"version\":\"unreleased\"},\"omp\":{\"location\":null,\"reason\":\"OMP identity was not inspected\",\"status\":\"UNVERIFIED\",\"version\":null,\"version_proof\":\"UNVERIFIED\"},\"overall\":\"OK\",\"recommended_actions\":[]},\"meta\":{\"schema_version\":\"1\",\"verification\":\"PERFORMED\"},\"warnings\":[],\"commands\":[\"omp-kit capabilities --json\",\"omp-kit doctor --json\"],\"errors\":[]}\n",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "variant": "different-content external installed shim",
+      "rc": 0,
+      "out": "{\"ok\":true,\"tool_version\":\"unreleased\",\"data\":{\"evidence\":{\"effective_profile\":\"NOT_RUN\",\"installed_rules\":\"NOT_RUN\",\"matcher\":\"NOT_RUN\"},\"findings\":[{\"component\":\"gates\",\"evidence\":{\"probe\":\"not-run\",\"reason\":\"/Users/josh/Developer/omp-kit-companion/var/agent-tmp/prevent82-smoke.46200/home/.local/share/omp-kit/agent-bin/br content differs from this release's /Users/josh/Developer/omp-kit-companion/scripts/br-shim.sh\",\"shim\":\"/Users/josh/Developer/omp-kit-companion/var/agent-tmp/prevent82-smoke.46200/home/.local/share/omp-kit/agent-bin/br\"},\"reason\":\"GATEPLANE1 fail: /Users/josh/Developer/omp-kit-companion/var/agent-tmp/prevent82-smoke.46200/home/.local/share/omp-kit/agent-bin/br content differs from this release's /Users/josh/Developer/omp-kit-companion/scripts/br-shim.sh; Python and Bun children may resolve native br instead of the admission shim.\",\"recommended_action\":\"Start the seat with the release's agent-spawn environment and rerun doctor --scope gates.\",\"status\":\"FAIL\"}],\"kit\":{\"data_paths\":{\"data\":\"/Users/josh/Developer/omp-kit-companion/var/agent-tmp/prevent82-smoke.46200/home/.local/share\",\"state\":\"/Users/josh/Developer/omp-kit-companion/var/agent-tmp/prevent82-smoke.46200/state\"},\"platform\":{\"arch\":\"arm64\",\"os\":\"darwin\"},\"release\":{\"entrypoint\":\"/Users/josh/Developer/omp-kit-companion/src/cli.ts\",\"executable\":\"/opt/homebrew/Cellar/bun/1.4.3/bin/bun\",\"identity\":\"UNVERIFIED\",\"root\":\"/Users/josh/Developer/omp-kit-companion\",\"source_tag\":null},\"version\":\"unreleased\"},\"omp\":{\"location\":null,\"reason\":\"OMP identity was not inspected\",\"status\":\"UNVERIFIED\",\"version\":null,\"version_proof\":\"UNVERIFIED\"},\"overall\":\"FAIL\",\"recommended_actions\":[\"Start the seat with the release's agent-spawn environment and rerun doctor --scope gates.\"]},\"meta\":{\"schema_version\":\"1\",\"verification\":\"UNVERIFIED\"},\"warnings\":[],\"commands\":[\"omp-kit capabilities --json\",\"omp-kit doctor --json\"],\"errors\":[]}\n",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    }
+  ],
+  "private_index_members": [
+    {
+      "member": "kitlib",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "tempsafe",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "pysafe",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "readme",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "imports",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "fragments",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "sources",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "regexploit",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    }
+  ],
+  "quality": {
+    "whole_repo": {
+      "rc": 2,
+      "out": "<!-- ripwire quality-delta ripwire.quality-delta/v1: only what the change made WORSE vs baseline=: regressions= minor= gating=; <r kind= sym= p= was= now= gating= bar=>, <sa> acked. at=: commit+dirty+shallow. next=: the one pasteable follow-up. --><quality-delta schema=\"ripwire.quality-delta/v1\" baseline=\"git-HEAD\" regressions=\"30\" minor=\"16\" acked=\"0\" stale=\"0\" preexisting-worse=\"20\" new-symbol=\"10\" gating=\"4\" register-macro-excluded=\"0\" api-new-surface=\"0\" at=\"479d0c19b+dirty+shallow\"><r kind=\"complexity\" sym=\"analyzeJavaScriptWait\" was=\"0\" now=\"41\" bar=\"15\" origin=\"new-symbol\" p=\"src/kitlib/bgwait.ts:39\"/><r kind=\"complexity\" sym=\"analyze_python_wait\" was=\"0\" now=\"32\" bar=\"15\" origin=\"new-symbol\" p=\"scripts/kitlib_bgwait.py:32\"/><r kind=\"complexity\" sym=\"fixture\" was=\"0\" now=\"38\" bar=\"15\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe.ts:69\"/><r kind=\"complexity\" sym=\"observeJournal\" was=\"0\" now=\"21\" bar=\"15\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe.ts:22\"/><r kind=\"dead-code\" sym=\"analyze_eval_wait\" origin=\"new-symbol\" p=\"scripts/kitlib_bgwait.py:68\"/><r kind=\"dead-code\" sym=\"goalProbeEvents\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe-events.ts:9\"/><r kind=\"duplication\" members=\"errnoOf | node\" tokens=\"38\" p=\"src/kitlib/io.ts:123\" gating=\"1\"/><r kind=\"duplication\" members=\"isNotFound | node\" tokens=\"32\" p=\"src/mutations.ts:66\" gating=\"1\"/><r kind=\"duplication\" members=\"literalSeconds | memberName\" tokens=\"86\" origin=\"new-symbol\" p=\"src/kitlib/bgwait.ts:25\"/><r kind=\"error-masking\" sym=\"observeJournal\" was=\"0\" now=\"1\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe.ts:22\"/><r kind=\"nesting\" sym=\"analyzeJavaScriptWait\" was=\"0\" now=\"5\" bar=\"4\" origin=\"new-symbol\" p=\"src/kitlib/bgwait.ts:39\"/><r kind=\"new-clone-of-reused-helper\" sym=\"isNotFound | node\" was=\"0\" now=\"3\" p=\"src/mutations.ts:66\" gating=\"1\" next=\"--expand=&apos;src/mutations.ts:isNotFound | node&apos;\"/><r kind=\"short-horizon-churn\" sym=\"archiveFullSuiteJudge\" was=\"0\" now=\"19\" churn=\"self\" p=\"src/land.ts:246\" gating=\"1\" next=\"--expand=src/land.ts:archiveFullSuiteJudge\"/><r kind=\"short-horizon-churn\" sym=\"carry_measurement\" was=\"0\" now=\"25\" sev=\"minor\" churn=\"self\" p=\"tests/cli/pre-push-gate.test.sh:820\"/><r kind=\"short-horizon-churn\" sym=\"carry_suite_executor\" was=\"0\" now=\"25\" sev=\"minor\" churn=\"self\" p=\"tests/cli/pre-push-gate.test.sh:30\"/><r kind=\"short-horizon-churn\" sym=\"gate_body\" was=\"0\" now=\"27\" sev=\"minor\" churn=\"self\" p=\"scripts/pre-push-gate.sh:289\"/><r kind=\"short-horizon-churn\" sym=\"verdictcache\" was=\"0\" now=\"25\" sev=\"minor\" churn=\"self\" p=\"tests/cli/pre-push-gate.test.sh:924\"/><r kind=\"verbosity\" sym=\"detect\" was=\"74\" now=\"76\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:54\"/><r kind=\"verbosity\" sym=\"differential\" was=\"63\" now=\"65\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:131\"/><r kind=\"verbosity\" sym=\"fixture\" was=\"0\" now=\"87\" bar=\"60\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe.ts:69\"/><r kind=\"verbosity\" sym=\"jobs\" was=\"702\" now=\"706\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release.yml:65\"/><r kind=\"verbosity\" sym=\"jobs\" was=\"419\" now=\"425\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release-train.yml:39\"/><r kind=\"verbosity\" sym=\"jobs\" was=\"120\" now=\"122\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release-intel-probe.yml:22\"/><r kind=\"verbosity\" sym=\"jobs\" was=\"388\" now=\"396\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:53\"/><r kind=\"verbosity\" sym=\"prepare\" was=\"120\" now=\"122\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:197\"/><r kind=\"verbosity\" sym=\"publish\" was=\"138\" now=\"140\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release-train.yml:126\"/><r kind=\"verbosity\" sym=\"publish\" was=\"118\" now=\"120\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:329\"/><r kind=\"verbosity\" sym=\"signed-consumers\" was=\"90\" now=\"92\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release.yml:489\"/><r kind=\"verbosity\" sym=\"train\" was=\"83\" now=\"85\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release-train.yml:40\"/><r kind=\"verbosity\" sym=\"validate-tag\" was=\"150\" now=\"152\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release.yml:66\"/></quality-delta>",
+      "err": "ripwire: no /Users/josh/Developer/omp-kit-companion/.ripwire_quality_baseline — auto-comparing the working tree vs git HEAD (commit the baseline with --quality-baseline to pin it)\nripwire: --quality-delta gating: 4 preexisting-worse major finding(s); first: duplication errnoOf | node at src/kitlib/io.ts:123 (was=0 now=38)\n",
+      "timed_out": false,
+      "truncated": false
+    },
+    "own_test_rows": [],
+    "edit_check": {
+      "rc": 0,
+      "out": "<!-- ripwire edit-check ripwire.edit-check/v1: sym='s contract NOW vs HEAD: status=unchanged|new-symbol|contract-change; <c n= p= incompatible=1 sites_l=> callers. counts_floor=1: every count is a FLOOR, never a total. graph_ambiguous=/graph_unresolved=: resolver gauge. graph_unindexed=N: N files no grammar could read (the map header's unindexed=); their calls raise neither gauge. est_tokens=: price as emitted (an upper bound under compact). at=: commit+dirty+shallow. root=: p= relative to it. next=: the one pasteable follow-up. --><edit-check schema=\"ripwire.edit-check/v1\" sym=\"fixtureShim\" t=\"fn\" p=\"tests/cli/gate-plane.test.ts:37\" status=\"new-symbol\" defs=\"1\" callers=\"0\" incompatible=\"0\" at=\"479d0c19b+dirty+shallow\" graph_ambiguous=\"1405\" graph_unresolved=\"9976\" graph_unindexed=\"69\" counts_floor=\"1\" root=\"/Users/josh/Developer/omp-kit-companion\" next=\"--test-gate=tests/cli/gate-plane.test.ts\" est_tokens=\"2693\"></edit-check>",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    "limit": "Whole-repository quality rc2 is not green; four gating findings are outside this owned test. No suppression/ack/baseline change."
+  },
+  "diagnostics": {
+    "typescript": "LSP reports pre-existing unavailable bun:test declarations TS2307; no typecheck-clean claim. New callback implicit-any hints were removed by explicit SeatLayout.",
+    "markdown": "ROADMAP existing ambiguous AGENTS.md heading warning; no doc-lint-clean claim."
+  },
+  "limits": [
+    "Initial source qualification only; independent pregrade/review, publication and installed rollout remain separate.",
+    "No new command/doctor scope, production export or runtime dependency; README reference counts unchanged by this test-only fix.",
+    "No full CLI-suite green claim; prior broad source full-suite failures remain separately recorded, not attributed to this patch.",
+    "No same-version close, native land, publisher push or guard bypass."
+  ]
+}

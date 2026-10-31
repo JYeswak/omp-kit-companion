@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFlywheelHost } from "../fleet-guard/kit-flywheel-host.ts";
 import { run } from "../../src/kitlib/run.ts";
-import { inspectAgentBrShimPath } from "../../src/gate-plane.ts";
+import { inspectAgentBrShimPath, inspectGatePlane, projectAgentBrShimPath } from "../../src/gate-plane.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const kitRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -32,7 +32,21 @@ function fixtureBr(rows: Record<string, Record<string, unknown>>): string {
 	return `#!/bin/sh\nset -eu\ncase "\${1:-}" in\n\tshow)\n\t\tcase "\${2:-}" in\n${cases}\n\t\t*) exit 2 ;;\n\t\tesac\n\t\t;;\n\tlist) printf '%s\\n' '{"issues":[]}' ;;\n\tupdate) printf '%s\\n' "$*" >> "$BR_GATEPLANE_MARKER" ;;\n\tcreate) printf '%s\\n' "$*" >> "$BR_GATEPLANE_MARKER"; printf '%s\\n' '{"id":"created"}' ;;\n\t*) exit 2 ;;\nesac\n`;
 }
 
-test("GATEPLANE1: session-start PATH makes Python br enforce review, claim, and create on owned fixtures", async () => {
+type SeatLayout = "source" | "installed-release";
+
+function fixtureShim(base: string, layout: SeatLayout): string {
+	if (layout === "source") return join(scripts, "br-shim.sh");
+	const installedScripts = join(base, "release", "scripts");
+	mkdirSync(installedScripts, { recursive: true });
+	for (const name of readdirSync(scripts)) {
+		if (name !== "br-shim.sh") symlinkSync(join(scripts, name), join(installedScripts, name));
+	}
+	const shim = join(installedScripts, "br-shim.sh");
+	writeFileSync(shim, readFileSync(join(scripts, "br-shim.sh")), { mode: 0o755 });
+	return shim;
+}
+
+test.each(["source", "installed-release"] as const)("GATEPLANE1: %s session-start PATH makes Python br enforce review, claim, and create on owned fixtures", async (layout: SeatLayout) => {
 	const owned = ownedTmp("gateplane1-test", { bead: "ompkit-fp72.135.3.82" });
 	try {
 		const base = owned.path;
@@ -72,7 +86,7 @@ test("GATEPLANE1: session-start PATH makes Python br enforce review, claim, and 
 import { runCli } from ${JSON.stringify(join(kitRoot, "src/cli.ts"))};
 process.exitCode = await runCli(process.argv.slice(2));
 `, { mode: 0o755 });
-		symlinkSync(join(scripts, "br-shim.sh"), join(bindir, "br"));
+		symlinkSync(fixtureShim(base, layout), join(bindir, "br"));
 
 		const originalPath = process.env.PATH ?? "";
 		const env: Record<string, string | undefined> = {
@@ -98,7 +112,7 @@ process.exitCode = await runCli(process.argv.slice(2));
 		const host = await createFlywheelHost(base, { env, home });
 		await host.emit("session_start", { type: "session_start" }, host.ctx(project));
 		const review = await runPythonBr(project, env, ["br", "update", "review-unticked", "--status", "in_review", "--db", database, "--actor", agent]);
-		expect(review.rc).toBe(4);
+		expect(review.rc, `${review.stderr}${review.stdout}`).toBe(4);
 		expect(review.stderr).toContain("AC_UNTICKED_BUILD_LANDED");
 		expect(env.PATH?.split(delimiter)[0]).toBe(bindir);
 
@@ -156,12 +170,23 @@ process.exitCode = await runCli(process.argv.slice(2));
 		const differentShim = inspectAgentBrShimPath({ PATH: equivalentBindir }, equivalentHome, scripts);
 		expect(differentShim.ok).toBe(false);
 		if (!differentShim.ok) expect(differentShim.reason).toContain("content differs from this release");
+		const projectedEnv = { PATH: fakebin };
+		expect(projectAgentBrShimPath(projectedEnv, equivalentHome, scripts).ok).toBe(false);
+		expect(projectedEnv.PATH).toBe(fakebin);
+		const differentPlane = await inspectGatePlane({
+			root: kitRoot,
+			home: equivalentHome,
+			env: { ...env, HOME: equivalentHome, PATH: [equivalentBindir, fakebin, originalPath].join(delimiter) },
+		});
+		expect(differentPlane.status).toBe("FAIL");
+		expect(differentPlane.reason).toContain("content differs from this release");
+		expect(differentPlane.evidence?.probe).toBe("not-run");
 	} finally {
 		owned.cleanup();
 	}
 }, 90_000); // The doctor child is bounded at 60s; leave time to observe that result.
 
-test("GATEPLANE1: gates scope never discovers unrelated OMP, while omp scope still probes its launcher", async () => {
+test.each(["source", "installed-release"] as const)("GATEPLANE1: %s gates scope never discovers unrelated OMP, while omp scope still probes its launcher", async (layout: SeatLayout) => {
 	const owned = ownedTmp("gateplane-scope", { bead: "ompkit-774u.55" });
 	try {
 		const home = join(owned.path, "home");
@@ -170,7 +195,7 @@ test("GATEPLANE1: gates scope never discovers unrelated OMP, while omp scope sti
 		const versionLog = join(external, "omp-version.log");
 		mkdirSync(bindir, { recursive: true });
 		mkdirSync(external, { recursive: true });
-		symlinkSync(join(scripts, "br-shim.sh"), join(bindir, "br"));
+		symlinkSync(fixtureShim(owned.path, layout), join(bindir, "br"));
 		writeFileSync(join(external, "omp"), '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "${0%/*}/omp-version.log"\nprintf \'%s\\n\' \'not-a-version\'\n', { mode: 0o755 });
 		const env = Object.fromEntries(Object.entries({
 			...process.env, HOME: home, AGENT_NAME: "GateScope",

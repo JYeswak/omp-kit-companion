@@ -1,0 +1,20 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_636a6730d1b6998c7fe79d7867badf6586e9cc7b2fea845982868986a446f7e1",
+ "limitations": [
+  "Source and owned-fixture proof only; no full-repository, independent, publication or installed-fleet qualification."
+ ],
+ "operation": "prevent82-installed-layout-regression",
+ "parameters": {
+  "base_commit": "479d0c19b7bccb87881149d3eee1218f84e75fdf",
+  "bead": "ompkit-u3d55",
+  "result_path": "docs/evidence/receipts/ompkit-u3d55-20261031.result.json",
+  "subject_sha256": "0a51d7d6571226e69935eae905b949b483d0875c56e50b48017684d62ac24a76"
+ },
+ "producer": "TurquoiseSummit",
+ "result_ref": {
+  "bytes": 16555,
+  "sha256": "895f6e8a812f7488b8c4dcd35823652d7951b8013ecec8fc30d45d65d8a85e1f"
+ }
+}
