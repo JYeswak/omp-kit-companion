@@ -278,7 +278,7 @@ async function copyReleaseSource(sourceRoot: string, destination: string): Promi
 	mkdirSync(join(destination, "docs"), { recursive: true });
 	for (const file of ["flywheel-invariants.tsv", "tern-integration.md", "tern-verb-map.md", "tern-coverage.tsv", "sources.md"])
 		copyFileSync(join(sourceRoot, "docs", file), join(destination, "docs", file));
-	for (const file of ["LICENSE", "MANIFEST.fleet.tsv", "package.json"]) {
+	for (const file of ["LICENSE", "MANIFEST.fleet.tsv", "package.json", ".github/test-budget.json"]) {
 		const target = join(destination, file);
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(sourceRoot, file), target);
