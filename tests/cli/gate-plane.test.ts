@@ -4,6 +4,7 @@ import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFlywheelHost } from "../fleet-guard/kit-flywheel-host.ts";
 import { run } from "../../src/kitlib/run.ts";
+import { inspectAgentBrShimPath } from "../../src/gate-plane.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const kitRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -141,6 +142,20 @@ process.exitCode = await runCli(process.argv.slice(2));
 				control: { rc: 0, admitted: true },
 			},
 		}));
+		const equivalentDir = join(base, "release", "scripts");
+		mkdirSync(equivalentDir, { recursive: true });
+		const equivalentShim = join(equivalentDir, "br-shim.sh");
+		writeFileSync(equivalentShim, readFileSync(join(scripts, "br-shim.sh")));
+		const equivalentHome = join(base, "release-home");
+		const equivalentBindir = join(equivalentHome, ".local", "share", "omp-kit", "agent-bin");
+		mkdirSync(equivalentBindir, { recursive: true });
+		symlinkSync(equivalentShim, join(equivalentBindir, "br"));
+		expect(inspectAgentBrShimPath({ PATH: equivalentBindir }, equivalentHome, scripts)).toEqual({ ok: true, bindir: equivalentBindir });
+
+		writeFileSync(equivalentShim, `${readFileSync(equivalentShim, "utf8")}\n# different shim\n`);
+		const differentShim = inspectAgentBrShimPath({ PATH: equivalentBindir }, equivalentHome, scripts);
+		expect(differentShim.ok).toBe(false);
+		if (!differentShim.ok) expect(differentShim.reason).toContain("content differs from this release");
 	} finally {
 		owned.cleanup();
 	}

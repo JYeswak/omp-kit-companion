@@ -22,7 +22,9 @@ function brShimLink(home: string, scriptsDir: string): BrShimPathResult {
 		if (!lstatSync(link).isSymbolicLink()) return { ok: false, bindir, reason: `${link} is not a symlink` };
 		const actual = realpathSync(link);
 		const expected = realpathSync(join(scriptsDir, "br-shim.sh"));
-		if (actual !== expected) return { ok: false, bindir, reason: `${link} resolves to ${actual}, not this release's ${expected}` };
+		if (!readFileSync(actual).equals(readFileSync(expected))) {
+			return { ok: false, bindir, reason: `${link} content differs from this release's ${expected}` };
+		}
 	} catch (error) {
 		return { ok: false, bindir, reason: `${link} cannot be verified (${error instanceof Error ? error.message : String(error)})` };
 	}
