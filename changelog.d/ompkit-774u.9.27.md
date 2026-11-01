@@ -1,2 +1,2 @@
 ### Fixed
-- Add hourly OMP session transcript retention. Old regular JSONL files are removed only when CC's exact session cursor matches their identity and size and its committed source tick confirms the same error-free, zero-backlog byte frontier; otherwise they are kept. Deletions are fsynced to a private journal.
+- Add hourly OMP session transcript retention. Regular JSONL transcripts older than 14 days are removed only when CC's session state has `pending: null`, the exact transcript cursor matches path, device, inode and byte length, and the newest committed error-free session source tick confirms the same position; otherwise transcripts are kept. Planned and completed deletions are fsynced to a private journal.
