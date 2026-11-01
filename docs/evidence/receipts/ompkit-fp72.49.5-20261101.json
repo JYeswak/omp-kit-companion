@@ -1,0 +1,181 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_37dc1ccdcfb758c545f1dde47c384a73bcf66ff7c4ea014637ba3d725a0b46b9",
+ "limitations": [
+  "Synthetic selector and CLI behavior only; independent review, full-suite, publish and install not claimed."
+ ],
+ "operation": "SHAREDINFRA1",
+ "parameters": {
+  "bead": "ompkit-fp72.49.5",
+  "source_base": "0a5b0e87c456cde86960dc58aadba8185cc91406"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "actual_cli": {
+   "killed": false,
+   "rc": 0,
+   "stderr": "",
+   "stdout": "{\"case\":\"shared\",\"rc\":0,\"changed\":[\"scripts/check-staged-portable-paths.sh\"],\"selected\":[\"tests/a.test.ts\",\"tests/b.test.sh\",\"tests/test_c.py\"],\"stderr\":\"affected: tests/a.test.ts <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected: tests/b.test.sh <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected: tests/test_c.py <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected-tests: 3 selected (0 changed, 3 reach a changed path) from 1 changed paths under var/agent-tmp/copper-shared-infra.50498/shared-infra-cli-smoke.73045.mb7jao\\n\"}\n{\"case\":\"product\",\"rc\":0,\"changed\":[\"src/product.ts\"],\"selected\":[\"tests/a.test.ts\"],\"stderr\":\"affected: tests/a.test.ts <- src/product.ts (1 hops)\\naffected-tests: 1 selected (0 changed, 1 reach a changed path) from 1 changed paths under var/agent-tmp/copper-shared-infra.50498/shared-infra-cli-smoke.73045.mb7jao\\n\"}\n{\"case\":\"shared-distance\",\"rc\":0,\"changed\":[\"scripts/check-staged-portable-paths.sh\",\"tests/b.test.sh\"],\"selected\":[\"tests/b.test.sh\",\"tests/a.test.ts\",\"tests/test_c.py\"],\"stderr\":\"affected: tests/b.test.sh <- tests/b.test.sh (0 hops)\\naffected: tests/a.test.ts <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected: tests/test_c.py <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected-tests: 3 selected (1 changed, 2 reach a changed path) from 2 changed paths under var/agent-tmp/copper-shared-infra.50498/shared-infra-cli-smoke.73045.mb7jao\\n\"}\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "after_full_file": {
+   "killed": false,
+   "rc": 0,
+   "stderr": "\ntests/cli/affected-tests.test.ts:\n(pass) SHAREDINFRA1: shared hook, runner and fixture changes select every real suite [78.51ms]\n(pass) SHAREDINFRA1: imports stay transitive and product sources select only their importers [81.12ms]\n(pass) a docs path in source is a pointer, not a dependency; a test reading the doc still runs [33.10ms]\n(pass) changed tests run themselves; deleted paths and fixture trees select nothing [60.95ms]\n(pass) mutant: without transitive import edges, a src change misses the test that reaches it through cli.ts [30.83ms]\n(pass) wall-budget plan keeps changed tests and the nearest importers, and defers the rest by name [74.23ms]\n(pass) a later timing table overrides an earlier one, so an untimed shell suite is planned at its measured time [42.39ms]\n(pass) --order distance puts changed tests first, then the nearest importers [17.96ms]\n\n 8 pass\n 0 fail\n 38 expect() calls\nRan 8 tests across 1 file. [540.00ms]\n",
+   "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "baseline_boundary": "canonical source under exclusive lease before production edit; missing shared hook selects zero; paired product control passes",
+  "bead": "ompkit-fp72.49.5",
+  "before": {
+   "killed": false,
+   "rc": 1,
+   "stderr": "\ntests/cli/affected-tests.test.ts:\n(pass) SHAREDINFRA1: product source changes still select only their importers [19.01ms]\n69 | \tconst suites = [\n70 | \t\t\"tests/cli/docs.test.ts\", \"tests/cli/leaf.test.ts\", \"tests/cli/runner.test.ts\",\n71 | \t\t\"tests/cli/spawn-cli.test.ts\", \"tests/cli/tool.test.sh\", \"tests/cli/uses-helper.test.ts\",\n72 | \t\t\"tests/cli/via-cli.test.ts\", \"tests/scripts/runner_test.py\",\n73 | \t];\n74 | \tfor (const path of paths) expect(select(dir, [path]), path).toMatchObject({ code: 0, tests: suites });\n                                                                  ^\nerror: scripts/check-staged-portable-paths.sh\n\n  {\n    \"code\": 0,\n-   \"tests\": [\n-     \"tests/cli/docs.test.ts\",\n-     \"tests/cli/leaf.test.ts\",\n-     \"tests/cli/runner.test.ts\",\n-     \"tests/cli/spawn-cli.test.ts\",\n-     \"tests/cli/tool.test.sh\",\n-     \"tests/cli/uses-helper.test.ts\",\n-     \"tests/cli/via-cli.test.ts\",\n-     \"tests/scripts/runner_test.py\",\n-   ],\n+   \"err\": \n+ \"affected-tests: 0 selected (0 changed, 0 reach a changed path) from 1 changed paths under var/agent-tmp/affected-tests.6425.pqiorm\n+ \"\n+ ,\n+   \"tests\": [],\n  }\n\n- Expected  - 10\n+ Received  + 5\n\n      at <anonymous> (/Users/josh/Developer/omp-kit-companion/tests/cli/affected-tests.test.ts:74:62)\n(fail) SHAREDINFRA1: shared hook, runner and fixture changes select every real suite [18.34ms]\n\n 1 pass\n 7 filtered out\n 1 fail\n 2 expect() calls\nRan 2 tests across 1 file. [156.00ms]\n",
+   "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "candidate_base": "0a5b0e87c456cde86960dc58aadba8185cc91406",
+  "code_repo": "/Users/josh/Developer/omp-kit-companion",
+  "exact_actual_cli": {
+   "killed": false,
+   "rc": 0,
+   "stderr": "",
+   "stdout": "{\"case\":\"shared\",\"rc\":0,\"changed\":[\"scripts/check-staged-portable-paths.sh\"],\"selected\":[\"tests/a.test.ts\",\"tests/b.test.sh\",\"tests/test_c.py\"],\"stderr\":\"affected: tests/a.test.ts <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected: tests/b.test.sh <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected: tests/test_c.py <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected-tests: 3 selected (0 changed, 3 reach a changed path) from 1 changed paths under shared-infra-cli-smoke.18439.ytf7vg\\n\"}\n{\"case\":\"product\",\"rc\":0,\"changed\":[\"src/product.ts\"],\"selected\":[\"tests/a.test.ts\"],\"stderr\":\"affected: tests/a.test.ts <- src/product.ts (1 hops)\\naffected-tests: 1 selected (0 changed, 1 reach a changed path) from 1 changed paths under shared-infra-cli-smoke.18439.ytf7vg\\n\"}\n{\"case\":\"shared-distance\",\"rc\":0,\"changed\":[\"scripts/check-staged-portable-paths.sh\",\"tests/b.test.sh\"],\"selected\":[\"tests/b.test.sh\",\"tests/a.test.ts\",\"tests/test_c.py\"],\"stderr\":\"affected: tests/b.test.sh <- tests/b.test.sh (0 hops)\\naffected: tests/a.test.ts <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected: tests/test_c.py <- scripts/check-staged-portable-paths.sh (1 hops)\\naffected-tests: 3 selected (1 changed, 2 reach a changed path) from 2 changed paths under shared-infra-cli-smoke.18439.ytf7vg\\n\"}\n",
+   "timed_out": false,
+   "total_truncated": false,
+   "truncated": false
+  },
+  "exact_original_replays": [
+   {
+    "argv": [
+     "bun",
+     "test",
+     "tests/cli/affected-tests.test.ts",
+     "-t",
+     "SHAREDINFRA1"
+    ],
+    "killed": false,
+    "rc": 0,
+    "stderr": "\ntests/cli/affected-tests.test.ts:\n(pass) SHAREDINFRA1: shared hook, runner and fixture changes select every real suite [75.39ms]\n(pass) SHAREDINFRA1: imports stay transitive and product sources select only their importers [81.24ms]\n\n 2 pass\n 6 filtered out\n 0 fail\n 12 expect() calls\nRan 2 tests across 1 file. [183.00ms]\n",
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   {
+    "argv": [
+     "bun",
+     "test",
+     "tests/cli/affected-tests.test.ts"
+    ],
+    "killed": false,
+    "rc": 0,
+    "stderr": "\ntests/cli/affected-tests.test.ts:\n(pass) SHAREDINFRA1: shared hook, runner and fixture changes select every real suite [77.45ms]\n(pass) SHAREDINFRA1: imports stay transitive and product sources select only their importers [87.74ms]\n(pass) a docs path in source is a pointer, not a dependency; a test reading the doc still runs [37.19ms]\n(pass) changed tests run themselves; deleted paths and fixture trees select nothing [67.65ms]\n(pass) mutant: without transitive import edges, a src change misses the test that reaches it through cli.ts [21.44ms]\n(pass) wall-budget plan keeps changed tests and the nearest importers, and defers the rest by name [80.00ms]\n(pass) a later timing table overrides an earlier one, so an untimed shell suite is planned at its measured time [46.78ms]\n(pass) --order distance puts changed tests first, then the nearest importers [19.90ms]\n\n 8 pass\n 0 fail\n 38 expect() calls\nRan 8 tests across 1 file. [452.00ms]\n",
+    "stdout": "bun test v1.4.3 (26aa4e1a9)\n",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   }
+  ],
+  "execution_source_sha256": {
+   "scripts/affected-tests.ts": "f07735f410b8082bd81a1b7661f8ca7845df6066af283fdc42728bdcefb22b81",
+   "tests/cli/affected-tests.test.ts": "2993a56963e5ca015b22e0bc5fd2c98101670820995496ba0efcdcafe494e6d3"
+  },
+  "limits": [
+   "No full-repository suite, publication, installation or independent acceptance claimed.",
+   "Existing execution budget deferrals remain unchanged.",
+   "Exact copy is HEAD archive plus only own reserved packet, initialized with empty Git; no TRUSTED_SOURCE override.",
+   "Receipt binds decisive execution source; final documentation/receipt packet gates run separately."
+  ],
+  "preliminary_private_index_members": [
+   {
+    "killed": false,
+    "member": "kitlib",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   {
+    "killed": false,
+    "member": "tempsafe",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   {
+    "killed": false,
+    "member": "pysafe",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   {
+    "killed": false,
+    "member": "readme",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   {
+    "killed": false,
+    "member": "imports",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   {
+    "killed": false,
+    "member": "fragments",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   {
+    "killed": false,
+    "member": "sources",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   },
+   {
+    "killed": false,
+    "member": "regexploit",
+    "rc": 0,
+    "stderr": "",
+    "stdout": "",
+    "timed_out": false,
+    "total_truncated": false,
+    "truncated": false
+   }
+  ],
+  "prior": "https://github.com/nrwl/nx/blob/21.4.1/packages/nx/src/project-graph/affected/locators/workspace-projects.ts#L24-L62"
+ }
+}

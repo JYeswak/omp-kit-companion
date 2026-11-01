@@ -1,0 +1,2 @@
+- Shared hook, judge and fixture infrastructure now selects every real Bun, shell and Python suite, including when a declared infrastructure path is removed. The policy is explicit in `scripts/affected-tests.ts`; ordinary product sources retain their existing import-based selection.
+- Changed suites keep their direct-change priority in distance-ordered budget plans. This expands selection, not execution budgets or full-suite/release qualification.
