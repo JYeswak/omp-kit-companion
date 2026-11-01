@@ -17,7 +17,7 @@ Current release: v0.2.83
 <!-- kit-release:end -->
 
 A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-52 top-level commands for an existing OMP install.
+53 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -494,13 +494,14 @@ explicit report rather than inventing zero activity.
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
 | `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 124 over budget, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME]` | Read-only next action and applicable skills ([docs/next.md](docs/next.md)) | `omp-kit next --role worker --json` |
-| `omp-kit grader next` | `grader next [--repo PATH] [--agent NAME]` | Select one prioritized grader action; set `OMP_KIT_GRADE_WAVE` to the `grade_wave.py` script path; reports unavailable queue sources as UNKNOWN rather than treating them as empty | `OMP_KIT_GRADE_WAVE=/path/to/grade_wave.py omp-kit grader next --repo . --agent "$AGENT_NAME" --json` |
+| `omp-kit grader next` | `grader next [--repo PATH] [--agent NAME]` | Select one prioritized grader action (`OMP_KIT_GRADE_WAVE` = `grade_wave.py` path); unavailable queue sources read UNKNOWN, never empty | `OMP_KIT_GRADE_WAVE=/path/to/grade_wave.py omp-kit grader next --repo . --agent "$AGENT_NAME" --json` |
 | `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
-| `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or explicitly resolve shared-main convergence; preserves peer staged/worktree state, refuses unresolved owner conflicts, and publishes only with a non-force push | `omp-kit converge --repo . --json` |
-| `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit reserved paths, admit via `commit-msg` and the [push check](docs/land.md), publish with no force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit land --paths src/owned.ts --message 'fix: save reserved path [pending]' --apply --yes --json` |
+| `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or resolve shared-main convergence; keeps peer staged/worktree state, refuses owner conflicts, never force-pushes | `omp-kit converge --repo . --json` |
+| `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit reserved paths, pass `commit-msg` and the [push check](docs/land.md), publish without force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit land --paths src/a.ts --message 'fix: x [pending]' --apply --yes --json` |
+| `omp-kit save` | `save -m MSG -- PATH...` | `land --apply --yes` in one step; one `SAVED`/`REFUSED` line | `omp-kit save -m 'fix: x [pending]' -- src/a.ts` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Tags agent text; bare slash commands; refuses forgeries | `omp-kit send s %1 "status" --json` |
-| `omp-kit sha` | `sha SHA [--repo PATH]...` | Resolve a commit across every fleet repo and report which repos hold it; exit 0 found, 1 absent everywhere | `omp-kit sha dd82fb4e --json` |
+| `omp-kit sha` | `sha SHA [--repo PATH]...` | Which fleet repos hold a commit; exit 0 found, 1 absent everywhere | `omp-kit sha dd82fb4e --json` |
 | `omp-kit custody` | `custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH` | Answer whether one repo-relative path may be edited, from git and reservations; one PATH per call | `omp-kit custody check --repo /path/to/repo --json doc/README.md` |
 | `omp-kit intake` | `intake --from joshua --text TEXT --seat SEAT [--kind rule\|work]` | Record one request, resolve the receiving seat's role, print DO or ROUTE | `omp-kit intake --from joshua --text 'fix this test' --seat chief --json` |
 | `omp-kit fleet` | `fleet flush-pending [--apply --yes]` | Find idle panes with queued input and frozen turns; `--apply` submits only safe queued bands | `omp-kit fleet flush-pending --json` |

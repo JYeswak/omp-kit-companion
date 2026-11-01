@@ -516,6 +516,9 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--apply", description: "Request owner-bound save and publication" },
 		{ name: "--yes", description: "Confirm publication in noninteractive mode" },
 	], example: "omp-kit land --paths src/owned.ts --message 'fix: publish reserved path' --apply --yes --json", runnable: false, mutation: true, dataSchema: landData },
+	{ name: "save", description: "Commit your reserved paths and publish them in one step (land with one-line output)", usage: "save -m MSG -- PATH...", flags: [
+		{ name: "--message", value: "MSG", aliases: ["-m"], description: "Commit message for the shared-main commit" },
+	], example: "omp-kit save -m 'fix: publish reserved path' -- src/owned.ts", runnable: false, mutation: true, dataSchema: landData },
 	{ name: "full-suite", description: "Inspect the shared full-suite verdict store", usage: "full-suite verdict list [TREE] [--repo PATH] | full-suite verdict get TREE [--repo PATH]", flags: [], subcommands: [
 		{ name: "verdict", description: "List every stored full-suite verdict, including invalid records", usage: "full-suite verdict list [TREE] [--repo PATH] | full-suite verdict get TREE [--repo PATH]", argument: "ACTION [TREE]", maxArguments: 2, flags: [
 			{ name: "--repo", value: "PATH", description: "Git repository whose shared verdict store to inspect (default: current directory)" },

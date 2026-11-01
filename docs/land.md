@@ -31,6 +31,14 @@ not be verified. `SKIP` does not prove that a full suite passed.
 | `REFUSED` | 1 | Nothing was published: a hook or check failed, or origin moved after the check. |
 | `UNRUN` | 77 | Admission or publication could not be verified. |
 
+## `omp-kit save`
+
+`omp-kit save -m MSG -- PATH...` is `land --paths PATH... --message MSG` with
+`--apply --yes` implied: the same owner, reservation, hook and push checks run.
+It prints one line, `SAVED <sha> on origin in <n> s` or `REFUSED <code>: <remediation>`,
+keeps land's exit code, and adds a `save` object under `--json`. Each save appends
+`{ts, repo, sha, outcome, code, elapsed_s}` to `<git-common-dir>/omp-kit/save.log`.
+
 ## Selected-hunk patch mode
 
 `omp-kit land --patch FILE --message MSG --apply --yes` reconstructs the caller's

@@ -1,0 +1,112 @@
+// `omp-kit save -m MSG -- PATH...` (ompkit-ypiyn SAVEVERB1 AC1): land with implied --apply --yes and one
+// output line. Failure modes: a save that reports SAVED without origin holding the commit, a refused save
+// that still publishes or commits, a save that leaves no save-log row for the p50 measure, and `--` leaking
+// to commands that never take child arguments.
+import { expect, test } from "bun:test";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { runFixture } from "./fixture-process.ts";
+import { cliPath, commandEnvironment, fixture, git, remoteHead, repoRoot, scratch, stringEnvironment } from "./private-index-land.helpers.ts";
+
+const decoder = new TextDecoder();
+const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
+
+function save(work: string, fakeBin: string, args: string[]) {
+	const env = commandEnvironment(work, hold, { amDir: fakeBin });
+	const result = runFixture(["bun", cliPath, "save", ...args], { cwd: work, env: stringEnvironment(env), floor_s: 60 });
+	return { status: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
+}
+
+function saveLog(work: string): Record<string, unknown>[] {
+	const path = join(work, ".git", "omp-kit", "save.log");
+	if (!existsSync(path)) return [];
+	return readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+test("save converges a moved origin, publishes, prints one SAVED line and logs the save", () => {
+	const { work, fakeBin } = fixture();
+	const peerWork = join(scratch, `save-peer-${globalThis.fixtureNumber++}`);
+	git(scratch, ["clone", git(work, ["remote", "get-url", "origin"]).trim(), peerWork]);
+	writeFileSync(join(peerWork, "remote.txt"), "peer origin advance\n");
+	git(peerWork, ["add", "remote.txt"]);
+	git(peerWork, ["commit", "-m", "peer origin advance [test]"]);
+	git(peerWork, ["push", "origin", "HEAD:refs/heads/main"]);
+	const peerTip = git(peerWork, ["rev-parse", "HEAD"]).trim();
+	const localBase = git(work, ["rev-parse", "HEAD"]).trim();
+	expect(remoteHead(work)).toBe(peerTip);
+	expect(peerTip).not.toBe(localBase);
+
+	writeFileSync(join(work, "owned.txt"), "saved by omp-kit save\n");
+	const run = save(work, fakeBin, ["-m", "feat(save): publish reserved fixture [test]", "--", "owned.txt"]);
+	expect(run.status, `${run.stdout}${run.stderr}`).toBe(0);
+	const lines = run.stdout.split("\n").filter(Boolean);
+	expect(lines.length, run.stdout).toBe(1);
+	const match = /^SAVED ([0-9a-f]{40}) on origin in (\d+(?:\.\d)?) s$/.exec(lines[0] ?? "");
+	expect(match, lines[0]).not.toBeNull();
+	const published = match![1]!;
+	expect(remoteHead(work)).toBe(published);
+	// The published commit carries the owned change on top of the peer's commit, not over it.
+	expect(git(work, ["merge-base", "--is-ancestor", peerTip, published]).trim()).toBe("");
+	expect(git(work, ["show", `${published}:owned.txt`])).toBe("saved by omp-kit save\n");
+	expect(git(work, ["show", `${published}:remote.txt`])).toBe("peer origin advance\n");
+
+	const rows = saveLog(work);
+	expect(rows.length).toBe(1);
+	expect(rows[0]).toMatchObject({ sha: published, outcome: "SAVED", code: "PUSHED" });
+	expect(typeof rows[0]!.elapsed_s).toBe("number");
+	expect(Number(rows[0]!.elapsed_s)).toBe(Number(match![2]));
+	expect(typeof rows[0]!.ts).toBe("string");
+	expect(typeof rows[0]!.repo).toBe("string");
+}, { timeout: 180_000 });
+
+test("a failing commit hook refuses the save: nothing committed, nothing published, REFUSED line names land's code", () => {
+	const { work, fakeBin } = fixture();
+	const hook = join(work, ".git", "hooks", "pre-commit");
+	writeFileSync(hook, "#!/bin/sh\necho 'planted commit-time check failure' >&2\nexit 1\n");
+	chmodSync(hook, 0o755);
+	const headBefore = git(work, ["rev-parse", "HEAD"]).trim();
+	const originBefore = remoteHead(work);
+	writeFileSync(join(work, "owned.txt"), "never committed\n");
+
+	const run = save(work, fakeBin, ["-m", "feat(save): refused fixture [test]", "--", "owned.txt"]);
+	expect(run.status, `${run.stdout}${run.stderr}`).toBe(1);
+	const lines = run.stdout.split("\n").filter(Boolean);
+	expect(lines.length, run.stdout).toBe(1);
+	expect(lines[0]).toMatch(/^REFUSED COMMIT_CREATION_REFUSED: \S/);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
+	expect(remoteHead(work)).toBe(originBefore);
+	// The owned change is still the caller's uncommitted work.
+	expect(git(work, ["diff", "--name-only", "HEAD", "--", "owned.txt"]).trim()).toBe("owned.txt");
+
+	// --json keeps land's typed error and adds the save object.
+	const json = save(work, fakeBin, ["--json", "-m", "feat(save): refused fixture [test]", "--", "owned.txt"]);
+	expect(json.status).toBe(1);
+	const body = JSON.parse(json.stdout) as { errors: { code: string }[]; data: { overall: string; save: { line: string; elapsed_s: number } } };
+	expect(body.errors[0]?.code).toBe("COMMIT_CREATION_REFUSED");
+	expect(body.data.overall).toBe("REFUSED");
+	expect(body.data.save.line).toMatch(/^REFUSED COMMIT_CREATION_REFUSED: /);
+	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(headBefore);
+	expect(remoteHead(work)).toBe(originBefore);
+
+	const rows = saveLog(work);
+	expect(rows.length).toBe(2);
+	for (const row of rows) expect(row).toMatchObject({ outcome: "REFUSED", code: "COMMIT_CREATION_REFUSED", sha: null });
+}, { timeout: 180_000 });
+
+test("save grammar refuses a missing message or missing paths, and `--` stays refused elsewhere", () => {
+	const cases: [string[], string][] = [
+		[["save", "--json", "--", "owned.txt"], "MISSING_VALUE"],
+		[["save", "--json", "-m", "--", "owned.txt"], "MISSING_VALUE"],
+		[["save", "--json", "-m", "feat: x"], "MISSING_ARGUMENT"],
+		[["save", "--json", "-m", "feat: x", "--"], "MISSING_ARGUMENT"],
+		[["save", "--json", "-m", "feat: x", "owned.txt"], "UNEXPECTED_ARGUMENT"],
+		[["land", "--json", "--", "owned.txt"], "UNEXPECTED_SEPARATOR"],
+		[["status", "--json", "--", "x"], "UNEXPECTED_SEPARATOR"],
+	];
+	for (const [args, code] of cases) {
+		const result = runFixture(["bun", cliPath, ...args], { cwd: repoRoot, env: stringEnvironment(process.env), floor_s: 30 });
+		const body = JSON.parse(decoder.decode(result.stdout)) as { errors: { code: string }[] };
+		expect(result.rc, args.join(" ")).toBe(2);
+		expect(body.errors[0]?.code, args.join(" ")).toBe(code);
+	}
+}, { timeout: 120_000 });

@@ -17,6 +17,7 @@ import { run as runBounded } from "./kitlib/run.ts";
 import { runtimeTempRoot } from "./runtime.ts";
 import { audit, undo, why } from "./audit.ts";
 import { LAND_GUARD_PUBLIC_IDENTITY, inspectLandGuard, landCommand } from "./land.ts";
+import { saveCommand } from "./save.ts";
 import { convergeCommand } from "./converge.ts";
 import { applyExtensions, inspectPendingExtensions, planExtensions } from "./apply-extensions.ts";
 import { analyzeRegexBudgetOutput, applyPlugin, planPlugin, pluginPackageHash, pluginProfileHashes, readPluginReceipt, undoPlugin, type PluginProfile, type PluginRunner, type PluginSnapshot, type RegexBudgetSelection } from "./apply-plugin.ts";
@@ -130,6 +131,7 @@ export function registerCommandHandler(path: string, handler: CommandHandler): v
 /** oq1h.6: grammar paths whose handler shells out to a native binary, with the binaries probed on PATH. Drain verbs read a beads tracker and emit br reclaim commands, so they gate on the tracker CLI. */
 const TOOL_GATED_COMMANDS: Record<string, readonly string[]> = {
 	"land": ["am"],
+	"save": ["am"],
 	"send": ["ntm", "tmux"],
 	"rch lease": ["rch"],
 	"fleet flush-pending": ["tmux"],
@@ -331,7 +333,7 @@ function parse(args: readonly string[]): ParseResult {
 		return { failure: refusal(parent ? "UNKNOWN_SUBCOMMAND" : "UNKNOWN_COMMAND", `Unknown ${parent ? "subcommand" : "command"}: ${bad}`, hint ? `Try omp-kit ${parent ? `${parent.name} ` : ""}${hint} exactly; no command was run.` : "Run omp-kit --help; no command was run."), json };
 	}
 	const rchLease = parent?.name === "rch" && command.name === "lease";
-	if (separator >= 0 && command.name !== "heavy" && !rchLease) return { failure: refusal("UNEXPECTED_SEPARATOR", "The `--` command separator is supported only by heavy or rch lease", "Pass child arguments only to heavy or rch lease; no child command was run."), json };
+	if (separator >= 0 && command.name !== "heavy" && command.name !== "save" && !rchLease) return { failure: refusal("UNEXPECTED_SEPARATOR", "The `--` command separator is supported only by heavy, save or rch lease", "Pass child arguments only to heavy, save or rch lease; no child command was run."), json };
 	const allowedFlags = [...GLOBAL_FLAGS, ...(parent ? [...parent.flags, ...command.flags] : command.flags)].map((item) => item.name);
 	for (const flag of flags.keys()) if (!allowedFlags.includes(flag)) return { failure: refusal("INVALID_FLAG", `${flag} is not valid for ${command.name}`, `Run omp-kit help ${parent ? `${parent.name} ` : ""}${command.name}.`), json };
 	const consumed = parent ? 2 : (positional.length ? 1 : 0);
@@ -341,6 +343,10 @@ function parse(args: readonly string[]): ParseResult {
 		if (rest.length) return { failure: refusal("UNEXPECTED_ARGUMENT", "Pass the child command after `--`", `Use omp-kit ${route} [flags] -- COMMAND [ARG ...]; no child command was run.`), json };
 		if (!flags.has("--help") && (!childArgs || childArgs.length === 0)) return { failure: refusal("MISSING_ARGUMENT", `${route} needs \`-- COMMAND [ARG ...]\``, "Pass the child command after `--`; no command was run."), json };
 		if (command.name === "heavy" && !flags.has("--help") && json) return { failure: refusal("RAW_OUTPUT_MODE", "heavy preserves the child command's raw output", "Omit --json/--robot before `--`; pass child-specific flags after `--`."), json };
+	} else if (command.name === "save") {
+		if (rest.length) return { failure: refusal("UNEXPECTED_ARGUMENT", "Pass the paths to save after `--`", "Use omp-kit save -m MSG -- PATH...; nothing was committed."), json };
+		if (!flags.has("--help") && typeof flags.get("--message") !== "string") return { failure: refusal("MISSING_VALUE", "save needs -m MSG", "Use omp-kit save -m MSG -- PATH...; nothing was committed."), json };
+		if (!flags.has("--help") && (!childArgs || childArgs.length === 0)) return { failure: refusal("MISSING_ARGUMENT", "save needs `-- PATH...`", "Pass each reserved path after `--`; nothing was committed."), json };
 	} else if (command.name === "send") {
 		// send is the one three-positional command (SESSION PANE MESSAGE); the
 		// message keeps its spaces because the request joins rest (see sendCommand).
@@ -1257,6 +1263,7 @@ registerCommandHandler("audit", receiptCommand);
 registerCommandHandler("why", receiptCommand);
 registerCommandHandler("undo", receiptCommand);
 registerCommandHandler("land", landCommand);
+registerCommandHandler("save", saveCommand);
 registerCommandHandler("converge", convergeCommand);
 registerCommandHandler("full-suite verdict", fullSuiteVerdictCommand);
 registerCommandHandler("custody check", custodyCheckCommand);
