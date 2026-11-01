@@ -8,6 +8,7 @@ import { checkPlistContract, checkSystemdContract } from "./service-contract.ts"
 import { KIT_UPDATE_REPO_PATTERN } from "./kit-update-job.ts";
 import { classifyScratchPressure, fleetWatchRepos, quarantineDir, reapLogPath, type ScratchPressure } from "./scratch.ts";
 import { CACHE_NAME } from "./ci-cache.ts";
+import { agentMailRetentionRoot } from "./am-retain.ts";
 
 /**
  * Operator service lifecycle (launchd + systemd) per the consensus in
@@ -112,6 +113,7 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 		ownedState: home => [{ path: join(kitStateDir(home), CACHE_NAME) }] },
 	"claude-save": { name: "claude-save", label: "com.omp-kit.claude-save", kind: "interval", intervalSeconds: 3600, runAtLoad: false,
 		ownedState: home => [{ path: kitStateDir(home), names: name => CLAUDE_SAVE_RECEIPT.test(name) }] },
+	"am-retain": { name: "am-retain", label: "com.omp-kit.am-retain", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
 	"fleet-flush": { name: "fleet-flush", label: "com.omp-kit.fleet-flush", kind: "interval", intervalSeconds: 60, runAtLoad: false,
 		ownedState: home => [{ path: fleetFlushLogPath(home) }] },
 	// CC14 (.18.1 scaffolding for .18.2): the command-center server. Daemon
@@ -593,6 +595,12 @@ export function ciPollerEnvironment(job: ServiceJobDef): [string, string][] {
 	return [["OMP_KIT_CI_REPOS", repos.join(",")]];
 }
 
+function amRetentionEnvironment(job: ServiceJobDef): [string, string][] {
+	if (job.name !== "am-retain") return [];
+	const root = agentMailRetentionRoot(process.env.AGENT_MAIL_STORAGE_ROOT);
+	return root === null ? [] : [["AGENT_MAIL_STORAGE_ROOT", root]];
+}
+
 export interface RenderedPlist { label: string; text: string; launcher: string; watchPath: string | null }
 
 /** The configured program of an operator-configured job; rendering one without its config is a caller bug. */
@@ -631,6 +639,7 @@ export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: s
 		`\t\t<string>${xml(servicePath(home))}</string>`,
 		...ciPollerEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		...kitUpdateEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
+		...amRetentionEnvironment(job).flatMap(([key, value]) => [`\t\t<key>${key}</key>`, `\t\t<string>${xml(value)}</string>`]),
 		"\t\t<key>OMP_KIT_JOB</key>",
 		`\t\t<string>${xml(job.name)}</string>`,
 		"\t</dict>",
@@ -680,6 +689,7 @@ export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: s
 			: []),
 		...ciPollerEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		...kitUpdateEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
+		...amRetentionEnvironment(job).map(([key, value]) => `Environment=${key}=${systemdQuote(value)}`),
 		`Environment=OMP_KIT_JOB=${systemdQuote(job.name)}`,
 	];
 	const service = job.kind === "daemon" ? [

@@ -1,0 +1,224 @@
+{
+  "schema_version": "1",
+  "operation": "agent-mail-newest-rotation-retention",
+  "bead": "ompkit-774u.9.26",
+  "producer": "TurquoiseSummit",
+  "observed_at": "2026-11-01T04:24:03.698Z",
+  "source": {
+    "base_commit": "72a5c54785b2af72528ad25e0318e8378da8f11b",
+    "unreferenced_probe": "d913474f389e656f11c1897f86ac6c81bd0d3298",
+    "tree": "a9ba026ae5fe049cbcf9dcd1d1da376d07bfd6b9",
+    "files": [
+      {
+        "path": "src/am-retain.ts",
+        "sha256": "6325dbf25225a6d0df191b0602bd575a9029a44ac44cf3d2e2709140b3f38817"
+      },
+      {
+        "path": "src/service.ts",
+        "sha256": "d0dc2d7e8040de2d6c1a92b9b9033da65978611f42d04b331de4b3f03c5ca72e"
+      },
+      {
+        "path": "src/cli.ts",
+        "sha256": "58585e53de7c755604b3b5a595b91be983da9ab251e944d65cc640a73f260b71"
+      },
+      {
+        "path": "tests/cli/am-retain.test.ts",
+        "sha256": "c20d22ae9901e6cf4ca85851215cc7a6bdcc000531afd7bf04106d448955cab0"
+      },
+      {
+        "path": "README.md",
+        "sha256": "951cd9c7870ace0e9ba01596de61e102483ca984d2913d25bf433b27dad51cd5"
+      },
+      {
+        "path": "changelog.d/ompkit-774u.9.26.md",
+        "sha256": "29cd20bb3ed89c857f793a2f6fbe5faa97a1b50bd628ca6f4a8265ab74de762e"
+      },
+      {
+        "path": "docs/service-contract.md",
+        "sha256": "f375aeda16081bb97af03b5c20a3d6e045eb9dcc5024040014e8abdfbf6621d0"
+      }
+    ],
+    "subject_sha256": "2d3f203e9758c52ac16936de748faa3447fe51ae390a9cd38da31e3e7231a620"
+  },
+  "original_failure": {
+    "command": "bun run --no-env-file --config=/dev/null src/cli.ts service run am-retain --json",
+    "result": {
+      "rc": 2,
+      "out": "{\"ok\":false,\"tool_version\":\"unreleased\",\"data\":{\"overall\":\"NOT_RUN\"},\"meta\":{\"schema_version\":\"1\",\"verification\":\"NOT_RUN\"},\"warnings\":[],\"commands\":[],\"errors\":[{\"code\":\"UNKNOWN_JOB\",\"message\":\"Unknown service job: am-retain\",\"remediation\":\"Known jobs: omp-watch, scratch-reaper, scratch-pressure, kit-update, fleet-watch, fleet-lessons, load-watch, ci-poller, claude-save, fleet-flush, cc, loop-sentinel, gate-rationalize.\"}]}\n",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    "scope": "Owned two-rotation fixture; original CLI reports UNKNOWN_JOB and leaves both rotations."
+  },
+  "source_cli_smoke": {
+    "rc": 0,
+    "out": "{\"ok\":true,\"tool_version\":\"unreleased\",\"data\":{\"bytesRemoved\":19,\"job\":\"am-retain\",\"kept\":\"rotation-20261027T030917Z\",\"overall\":\"OK\",\"receipt_path\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/before-home/.local/state/omp-kit/jobs/am-retain.json\",\"recordPath\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/before-home/.local/state/omp-kit/jobs/am-retain.log.jsonl\",\"removed\":[{\"bytes\":19,\"name\":\"rotation-20261020T000000Z\"}],\"status\":\"CHANGED\",\"storageRoot\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/before-store\"},\"meta\":{\"schema_version\":\"1\",\"verification\":\"UNVERIFIED\"},\"warnings\":[],\"commands\":[],\"errors\":[]}\n",
+    "err": "",
+    "timed_out": false,
+    "truncated": false
+  },
+  "target_tests": {
+    "rc": 0,
+    "out": "bun test v1.4.3 (26aa4e1a9)\n",
+    "err": "\ntests/cli/am-retain.test.ts:\n(pass) two rotations keep only the newest timestamp and durably record removed logical bytes [2.50ms]\n(pass) a repeated retention leaves the surviving rotation and deletion journal unchanged [0.86ms]\n(pass) a linked doctor directory never authorizes deletion outside the selected store [0.52ms]\n(pass) a linked rotation cannot replace the newest retained backup [0.72ms]\n(pass) a trailing-newline rotation name is refused before any deletion [0.71ms]\n(pass) an unwritable deletion record refuses before removing an older backup [0.86ms]\n(pass) the native scheduled argv and persisted root execute the real retention consumer [674.47ms]\n\n 7 pass\n 0 fail\n 27 expect() calls\nRan 7 tests across 1 file. [835.00ms]\n",
+    "timed_out": false,
+    "truncated": false
+  },
+  "immutable_clean_copy": {
+    "empty_git_head_rc": 128,
+    "command": "omp-kit heavy --no-wait --label am-retain-clean-contracts --max-runtime 480 -- nice -n 10 bun test tests/cli/am-retain.test.ts tests/cli/service-contract.test.ts tests/cli/service.test.ts",
+    "result": {
+      "rc": 0,
+      "out": "bun test v1.4.3 (26aa4e1a9)\nskip: systemd CLI integration requires Linux; timer state is covered by the runner test\n",
+      "err": "\ntests/cli/service.test.ts:\n(pass) service launchctl query reports loaded state and plist identity [0.34ms]\n(pass) service launchctl query distinguishes a missing label from a failed query [0.06ms]\n(pass) service launchctl query reports parse failure instead of unloaded [0.02ms]\n(pass) fleet rows read a not-found label as unloaded and any other failed query as unknown (planted) [0.05ms]\n(pass) labels accept dots and reject spaces and shell metacharacters [0.03ms]\n(pass) rendered plist calls the stable launcher directly with fixed env and watch trigger [1.51ms]\n(pass) ci-poller persists explicit repo scope in native launchd and systemd definitions [0.83ms]\n(pass) planted: ci-poller rejects empty, malformed, and oversized explicit scope [0.13ms]\n(pass) fleet-watch plist captures TMUX_TMPDIR from the install environment [0.70ms]\n(pass) planted: fleet-watch doctor fails when the installed TMUX_TMPDIR is unresolved [2.32ms]\n(pass) rendered plist uses private service scratch under the XDG state root [0.66ms]\n(pass) launchd no-op install provisions private service scratch with an owner marker [1.46ms]\n(pass) rendered plist escapes XML metacharacters in paths [0.90ms]\n(pass) interval jobs render their configured cadence without run-at-load [0.77ms]\n(pass) fleet-lessons is a six-hour interval without run-at-load [0.80ms]\n(pass) systemd scratch timer repeats at the configured interval without a boot start [0.01ms]\n(pass) rendered plist passes plutil -lint on macOS [6.72ms]\n(pass) identical plists diff empty; drifted plists diff both ways [0.93ms]\n(pass) launchctl print parses state, pid, runs and last exit [0.04ms]\n(pass) install is a no-op without touching launchctl when bytes match and the job is loaded [1.26ms]\n(pass) install backs up replaced bytes and runs bootout, bootstrap and verify in order [1.85ms]\n(pass) install boots out with a single domain/label target [1.29ms]\n(pass) install unloads before replacing bytes so launchd never sees a hot swap [1.67ms]\n(pass) install retries bootout plus bootstrap when already loaded [1.40ms]\n(pass) uninstall on an absent job reports already_absent and still bootouts [0.58ms]\n(pass) uninstall moves the plist into the backup dir outside LaunchAgents [1.32ms]\n(pass) a healthy install passes every doctor check [1.67ms]\n(pass) planted: absent plist fails plist-present [0.64ms]\n(pass) planted: mismatched label fails plist-valid [0.57ms]\n(pass) planted: drifted bytes warn on plist-matches-renderer [0.61ms]\n(pass) planted: missing launcher fails binary-resolves [0.94ms]\n(pass) planted: versioned symlink target warns on binary-resolves [1.20ms]\n(pass) planted: unloaded job fails loaded [0.60ms]\n(pass) planted: foreign plist path fails loaded [0.68ms]\n(pass) planted: nonzero last exit warns on last-exit [0.69ms]\n(pass) CC14: a running daemon whose previous instance ended on SIGTERM passes last-exit; SIGKILL, not running, or an interval job warns [0.98ms]\n(pass) planted: spawn-scheduled flood fails crash-loop [0.74ms]\n(pass) planted: second label on the same binary fails duplicate-jobs [1.80ms]\n(pass) planted: stale bak sibling fails duplicate-jobs [1.99ms]\n(pass) planted: foreign disabled file passes duplicate-jobs [1.84ms]\n(pass) planted: oversized own log warns on log-dir-logs [2.07ms]\n(pass) planted: unknown watch target fails trigger-target-exists [0.84ms]\n(pass) planted: a matching launchd plist without TMPDIR fails tmpdir-present [1.12ms]\n(pass) planted: launchd doctor rejects TMPDIR outside private state scratch [1.86ms]\n(pass) linux units render service plus path trigger with fixed env [0.73ms]\n(pass) linux service uses private service scratch under the XDG state root [0.61ms]\n(pass) linux install is a no-op when bytes match and the trigger is enabled [1.64ms]\n(pass) linux interval lifecycle state uses the timer trigger [2.27ms]\n(pass) Linux service status and doctor read interval timer state [0.09ms]\n(pass) linux uninstall moves units to the backup dir [1.32ms]\n(pass) linux doctor flags a missing unit and a stopped trigger [0.57ms]\n(pass) planted: a matching systemd unit without TMPDIR fails tmpdir-present [0.85ms]\n(pass) planted: systemd doctor rejects TMPDIR outside private state scratch [1.75ms]\n(pass) service run executes the stable launcher and writes a job receipt [520.68ms]\n(pass) service run maps a failing launcher to FINDINGS without losing the receipt [796.83ms]\n(pass) planted: service run kit-update with no tuple and no poll refuses KIT_UPDATE_JOB_CONFIG [274.34ms]\n(pass) service run kit-update with poll-only config reaches the job instead of refusing [267.67ms]\n(pass) scratch worker refuses a forged keeper before inspecting its root [100.27ms]\n(pass) REAP1 whole scheduled scratch job preempts a synchronous owner read and releases single-flight [1151.52ms]\n(pass) REAP1 supervisor caps synchronous browser work and kills its owned process group [507.48ms]\n(pass) service status reports HOME-scoped install state from source [107.71ms]\n(pass) service install without --apply refuses and writes no plist [93.58ms]\n(pass) fleet-watch install refuses when its config is absent [97.00ms]\n(pass) fleet-watch dry-run captures TMUX_TMPDIR into the plist [89.50ms]\n(pass) fleet-watch install refuses when TMUX_TMPDIR is unset [100.90ms]\n(pass) fleet-watch install refuses relative and unresolved TMUX_TMPDIR values [143.78ms]\n(pass) service uninstall without --apply refuses and keeps the plist [100.02ms]\n(pass) service uninstall reports already_absent through the CLI wire [101.08ms]\n(pass) service uninstall moves a stale install to backup through the CLI wire [100.29ms]\n(pass) systemd install addresses real unit names and backs up replaced bytes [2.42ms]\n(pass) fleet-watch systemd unit captures TMUX_TMPDIR and doctor rejects an unresolved directory [1.31ms]\n(pass) systemd uninstall disables both path and timer triggers [1.62ms]\n(pass) examples omp-watch renders the managed plist and installs nothing [93.97ms]\n(pass) service labels stay production without the test namespace and namespace under it [0.16ms]\n(pass) service commands refuse a non-test label namespace [99.99ms]\n(pass) install refuses a label loaded from a different plist and names both paths [1.55ms]\n(pass) systemd install refuses a unit enabled from elsewhere unless replaced [1.49ms]\n(pass) notify posts osascript on darwin failure, notify-send on linux, and nothing elsewhere [0.12ms]\n(pass) service run under explicit overload refuses before executing the launcher [95.61ms]\n(pass) service run notifies on failure and stays silent on success [1580.35ms]\n(pass) a fixture install never takes over a foreign label, and --replace does it openly [320.85ms]\n(pass) REAP1 contract refuses empty PATH components and relative log paths [1.01ms]\n(pass) scheduled kit-update persists only its validated local tuple, not arbitrary environment [5.44ms]\n(pass) scheduled kit-update persists a validated poll-only config without a static tuple [1.04ms]\n(pass) kit-update ticks every 300 s and a stale 3600 plist is rewritten on install [2.14ms]\n(pass) REAP1 failed process census is explicit UNKNOWN evidence rather than an empty success [0.12ms]\n(pass) REAP1 concurrent actual service invocation cannot enter a blocked scratch worker [1486.41ms]\n\ntests/cli/am-retain.test.ts:\n(pass) two rotations keep only the newest timestamp and durably record removed logical bytes [2.12ms]\n(pass) a repeated retention leaves the surviving rotation and deletion journal unchanged [1.04ms]\n(pass) a linked doctor directory never authorizes deletion outside the selected store [0.45ms]\n(pass) a linked rotation cannot replace the newest retained backup [0.56ms]\n(pass) a trailing-newline rotation name is refused before any deletion [0.50ms]\n(pass) an unwritable deletion record refuses before removing an older backup [0.55ms]\n(pass) the native scheduled argv and persisted root execute the real retention consumer [736.65ms]\n\ntests/cli/service-contract.test.ts:\n(pass) real renderer output with RunAtLoad false passes every plist contract check [0.20ms]\n(pass) real renderer output with RunAtLoad true fails contract-run-at-load [0.05ms]\n(pass) planted ProcessType Interactive fails contract-processtype [0.03ms]\n(pass) planted relative HOME fails contract-env [0.03ms]\n(pass) planted API_TOKEN env entry fails contract-no-secrets and names the key [0.04ms]\n(pass) planted secret-shaped PATH value fails contract-no-secrets without printing it [0.04ms]\n(pass) missing log paths fail contract-log-paths [0.07ms]\n(pass) real systemd renderer output passes every systemd contract check [0.05ms]\n(pass) planted password env line fails contract-systemd-no-secrets and names the key [0.04ms]\n(pass) unit without TimeoutStartSec fails contract-systemd-timeout [0.03ms]\n(pass) cc renders the deadline shape; a non-cc daemon keeps background QoS [0.08ms]\n(pass) planted: a deadline job rendered Background fails contract-processtype naming the class [0.04ms]\n(pass) planted: a background job rendered Standard still fails contract-processtype [0.03ms]\n(pass) gate-rationalize renders the operator argv with a weekly StartInterval; planted: unconfigured it refuses to render [0.12ms]\n\n 108 pass\n 0 fail\n 405 expect() calls\nRan 108 tests across 3 files. [9.41s]\n",
+      "timed_out": false,
+      "truncated": false
+    }
+  },
+  "standalone": {
+    "compile": {
+      "rc": 0,
+      "out": "  [21ms]  bundle  153 modules\n [109ms] compile  /Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/omp-kit-am-retain\n",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    "command": "<owned compiled binary> service run am-retain --json",
+    "path": "/usr/bin:/bin",
+    "absent_external_providers": [
+      {
+        "path": "/usr/bin/bun",
+        "exists": false
+      },
+      {
+        "path": "/bin/bun",
+        "exists": false
+      },
+      {
+        "path": "/usr/bin/am",
+        "exists": false
+      },
+      {
+        "path": "/bin/am",
+        "exists": false
+      }
+    ],
+    "result": {
+      "rc": 0,
+      "out": "{\"ok\":true,\"tool_version\":\"unreleased\",\"data\":{\"bytesRemoved\":18,\"job\":\"am-retain\",\"kept\":\"rotation-20261027T030917Z\",\"overall\":\"OK\",\"receipt_path\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/compiled-home/.local/state/omp-kit/jobs/am-retain.json\",\"recordPath\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/compiled-home/.local/state/omp-kit/jobs/am-retain.log.jsonl\",\"removed\":[{\"bytes\":18,\"name\":\"rotation-20261001T000000Z\"}],\"status\":\"CHANGED\",\"storageRoot\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/compiled-store\"},\"meta\":{\"schema_version\":\"1\",\"verification\":\"UNVERIFIED\"},\"warnings\":[],\"commands\":[],\"errors\":[]}\n",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    "remaining_rotation": [
+      "rotation-20261027T030917Z"
+    ],
+    "retained_file": "KEEP",
+    "journal": "{\"at\":\"2026-11-01T04:21:09.362Z\",\"event\":\"planned\",\"storageRoot\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/compiled-store\",\"kept\":\"rotation-20261027T030917Z\",\"name\":\"rotation-20261001T000000Z\",\"bytes\":18}\n{\"at\":\"2026-11-01T04:21:09.362Z\",\"event\":\"removed\",\"storageRoot\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/am-retain.45845/compiled-store\",\"kept\":\"rotation-20261027T030917Z\",\"name\":\"rotation-20261001T000000Z\",\"bytes\":18}\n"
+  },
+  "regex": {
+    "initial_diagnostic": {
+      "rc": 1,
+      "out": "{\"version\":1,\"status\":\"FAIL\",\"scope\":\"finite runtime conformance; not a complexity or universal equivalence proof\",\"runtime\":{\"engine\":\"JavaScriptCore\",\"executable\":\"/opt/homebrew/Cellar/bun/1.4.3/bin/bun\",\"versions\":{\"node\":\"26.3.0\",\"bun\":\"1.4.3\",\"boringssl\":\"41bf9b59c2ebf277a7aa427e1ecad5cc80dd4d4f\",\"openssl\":\"1.1.0\",\"llhttp\":\"9.4.2\",\"libarchive\":\"27cbc7827172698143e440801fc0ba39ccb4f1f5\",\"mimalloc\":\"92ef6587c57b262f6e6abf513f7776a2f8d12aeb\",\"picohttpparser\":\"f4d94b48b31e0abae029ebeafcfd9ca0680ede58\",\"uwebsockets\":\"26aa4e1a92bf95a3c059271a3e13749575aa3d4b\",\"webkit\":\"0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f\",\"zig\":\"04e7f6ac1e009525bc00934f20199c68f04e0a24\",\"zlib\":\"12731092979c6d07f42da27da673a9f6c7b13586\",\"tinycc\":\"05f0fafaa3be31e31d7b4b5c17dc60f62c991171\",\"lolhtml\":\"725ce499aa9b71e38b7a2d0a9fbb6d7294a4079e\",\"ares\":\"c7a3138dcfe3bb0eaaf10c0c24c36dc66dc790ab\",\"libdeflate\":\"92e6a0db9fa848d742f9eb286c92afc60f2c3dda\",\"usockets\":\"26aa4e1a92bf95a3c059271a3e13749575aa3d4b\",\"lshpack\":\"cf0f70dd10b352194c97448eb5d00b4aa484f531\",\"zstd\":\"f8745da6ff1ad1e7bab384bd1f9d742439278e99\",\"v8\":\"14.6.202.34-node.20\",\"uv\":\"1.48.0\",\"napi\":\"10\",\"icu\":\"78.1\",\"unicode\":\"17.0\",\"sqlite\":\"3.51.0\",\"typescript\":\"7.0.2\",\"modules\":\"147\"},\"indexUnits\":\"UTF-16 code units\"},\"limits\":{\"maxInputUnits\":1048576,\"maxPatternUnits\":4096,\"maxMatches\":1000,\"maxOutputBytes\":65536,\"timeoutMs\":10000,\"budgetMs\":1000},\"loadAverage\":{\"before\":[20.45947265625,20.48828125,20.25],\"after\":[20.45947265625,20.48828125,20.25]},\"cases\":[{\"id\":\"native-current-format\",\"expected\":{\"value\":true,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":true,\"lastIndex\":0},\"operationMs\":0.11091600000000135},{\"id\":\"older-valid-format\",\"expected\":{\"value\":true,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":true,\"lastIndex\":0},\"operationMs\":0.10712499999999991},{\"id\":\"missing-digit\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.10062499999999908},{\"id\":\"unicode-digits-not-ascii\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.10683299999999996},{\"id\":\"suffix-refused\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.10829199999999872},{\"id\":\"native-final-newline-observable\",\"expected\":{\"value\":true,\"lastIndex\":0},\"status\":\"FAIL\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.11095799999999656},{\"id\":\"bounded-near-miss-32\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.17287499999999945},{\"id\":\"bounded-near-miss-1024\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.15262500000000045},{\"id\":\"bounded-near-miss-1000000\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.12470800000000004}]}\n",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    "initial_failure_explanation": "The initial diagnostic oracle incorrectly expected non-multiline JavaScript $ to accept a final newline. MDN Input boundary assertion documents actual end-of-input semantics; production filesystem newline-refusal test remained unchanged. Corrected finite diagnostic has all nine cases passing.",
+    "authority": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Regular_expressions/Input_boundary_assertion",
+    "final_diagnostic": {
+      "rc": 0,
+      "out": "{\"version\":1,\"status\":\"PASS\",\"scope\":\"finite runtime conformance; not a complexity or universal equivalence proof\",\"runtime\":{\"engine\":\"JavaScriptCore\",\"executable\":\"/opt/homebrew/Cellar/bun/1.4.3/bin/bun\",\"versions\":{\"node\":\"26.3.0\",\"bun\":\"1.4.3\",\"boringssl\":\"41bf9b59c2ebf277a7aa427e1ecad5cc80dd4d4f\",\"openssl\":\"1.1.0\",\"llhttp\":\"9.4.2\",\"libarchive\":\"27cbc7827172698143e440801fc0ba39ccb4f1f5\",\"mimalloc\":\"92ef6587c57b262f6e6abf513f7776a2f8d12aeb\",\"picohttpparser\":\"f4d94b48b31e0abae029ebeafcfd9ca0680ede58\",\"uwebsockets\":\"26aa4e1a92bf95a3c059271a3e13749575aa3d4b\",\"webkit\":\"0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f\",\"zig\":\"04e7f6ac1e009525bc00934f20199c68f04e0a24\",\"zlib\":\"12731092979c6d07f42da27da673a9f6c7b13586\",\"tinycc\":\"05f0fafaa3be31e31d7b4b5c17dc60f62c991171\",\"lolhtml\":\"725ce499aa9b71e38b7a2d0a9fbb6d7294a4079e\",\"ares\":\"c7a3138dcfe3bb0eaaf10c0c24c36dc66dc790ab\",\"libdeflate\":\"92e6a0db9fa848d742f9eb286c92afc60f2c3dda\",\"usockets\":\"26aa4e1a92bf95a3c059271a3e13749575aa3d4b\",\"lshpack\":\"cf0f70dd10b352194c97448eb5d00b4aa484f531\",\"zstd\":\"f8745da6ff1ad1e7bab384bd1f9d742439278e99\",\"v8\":\"14.6.202.34-node.20\",\"uv\":\"1.48.0\",\"napi\":\"10\",\"icu\":\"78.1\",\"unicode\":\"17.0\",\"sqlite\":\"3.51.0\",\"typescript\":\"7.0.2\",\"modules\":\"147\"},\"indexUnits\":\"UTF-16 code units\"},\"limits\":{\"maxInputUnits\":1048576,\"maxPatternUnits\":4096,\"maxMatches\":1000,\"maxOutputBytes\":65536,\"timeoutMs\":10000,\"budgetMs\":1000},\"loadAverage\":{\"before\":[25.75927734375,21.93310546875,20.80078125],\"after\":[25.75927734375,21.93310546875,20.80078125]},\"cases\":[{\"id\":\"native-current-format\",\"expected\":{\"value\":true,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":true,\"lastIndex\":0},\"operationMs\":0.11558400000000013},{\"id\":\"older-valid-format\",\"expected\":{\"value\":true,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":true,\"lastIndex\":0},\"operationMs\":0.11258400000000002},{\"id\":\"missing-digit\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.11341600000000085},{\"id\":\"unicode-digits-not-ascii\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.10374999999999979},{\"id\":\"suffix-refused\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.10508399999999973},{\"id\":\"native-final-newline-observable\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.10650000000000048},{\"id\":\"bounded-near-miss-32\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.09395900000000168},{\"id\":\"bounded-near-miss-1024\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.10862499999999997},{\"id\":\"bounded-near-miss-1000000\",\"expected\":{\"value\":false,\"lastIndex\":0},\"status\":\"PASS\",\"actual\":{\"value\":false,\"lastIndex\":0},\"operationMs\":0.1183329999999998}]}\n",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    }
+  },
+  "private_index_members": [
+    {
+      "member": "kitlib",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "tempsafe",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "pysafe",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "readme",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "imports",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "fragments",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "sources",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "regexploit",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    }
+  ],
+  "readme": {
+    "rc": 0,
+    "out": "readme-check: registry 52 commands, 40 doctor scopes (/Users/josh/Developer/omp-kit-companion/src/commands.ts); 27 rules, 12 extensions, 5 skills\n!! 1 rule(s) disabled: M1-mandatory -- this run is a mutation test, not a gate\n== /Users/josh/Developer/omp-kit-companion/README.md\n   D1-emdash  1 prose emdashes (0 of them inside table rows), 0.02 per 1kB; corpus p75=0.35 p90=0.62\n   S1-size    54864 bytes, 770 lines; corpus median=26214 p75=54872 -> over median, under p75\n   N1-notes   /Users/josh/Developer/omp-kit-companion/README-NOTES.md carries 1 undrained entry\n   counts: N1-paste=0, W1-session-heading=0, W2-change-heading=0, W3-changelog-heading=0, W4-dated-heading=0, W5-pane-heading=0, W6-changelog-bullet=0, W7-todo-checkbox=0, W8-sha-prose=0\n   PASS   no rule fired\n-- scanned 1 file(s); exit 0\nREADME-CHECK: GREEN\n",
+    "err": "",
+    "timed_out": false,
+    "truncated": false
+  },
+  "quality": {
+    "rc": 0,
+    "owned_deltas_xml": "<!-- ripwire quality-delta ripwire.quality-delta/v1: only what the change made WORSE vs baseline=: regressions= minor= gating=; <r kind= sym= p= was= now= gating= bar=>, <sa> acked. at=: commit+dirty+shallow. --><quality-delta schema=\"ripwire.quality-delta/v1\" baseline=\"git-HEAD\" regressions=\"8\" minor=\"6\" acked=\"0\" stale=\"0\" preexisting-worse=\"6\" new-symbol=\"2\" gating=\"0\" register-macro-excluded=\"0\" api-new-surface=\"0\" at=\"d4688657f+dirty+shallow\" scope=\"src/am-retain.ts,src/service.ts,src/cli.ts,tests/cli/am-retain.test.ts\" scoped-out=\"49\" scoped-out-gating=\"12\"><r kind=\"complexity\" sym=\"retainAgentMailRotations\" was=\"0\" now=\"27\" bar=\"15\" origin=\"new-symbol\" p=\"src/am-retain.ts:59\"/><r kind=\"complexity\" sym=\"serviceCommand\" was=\"484\" now=\"502\" bar=\"15\" sev=\"minor\" p=\"src/cli.ts:2575\"/><r kind=\"short-horizon-churn\" sym=\"KNOWN_JOBS\" was=\"0\" now=\"11\" sev=\"minor\" churn=\"ambient\" p=\"src/service.ts:100\"/><r kind=\"short-horizon-churn\" sym=\"renderLaunchdPlist\" was=\"0\" now=\"11\" sev=\"minor\" churn=\"ambient\" p=\"src/service.ts:613\"/><r kind=\"short-horizon-churn\" sym=\"renderSystemdUnits\" was=\"0\" now=\"11\" sev=\"minor\" churn=\"ambient\" p=\"src/service.ts:679\"/><r kind=\"short-horizon-churn\" sym=\"serviceCommand\" was=\"0\" now=\"75\" sev=\"minor\" churn=\"ambient\" p=\"src/cli.ts:2575\"/><r kind=\"verbosity\" sym=\"retainAgentMailRotations\" was=\"0\" now=\"61\" bar=\"60\" origin=\"new-symbol\" p=\"src/am-retain.ts:59\"/><r kind=\"verbosity\" sym=\"serviceCommand\" was=\"606\" now=\"636\" bar=\"60\" sev=\"minor\" p=\"src/cli.ts:2575\"/>",
+    "acknowledgements_added": 0,
+    "limits": "New retention function complexity 27 and length 61 remain visible; no score suppression or quality waiver. 49 out-of-scope rows/12 would-gate rows were not graded as this change."
+  },
+  "limits": [
+    "Owned synthetic filesystem fixtures only; no live Agent Mail rotation deleted and no native supervisor installed or activated.",
+    "Rendered launchd argv was actually executed. Linux unit rendering/contracts passed; actual systemd CLI integration requires Linux and was skipped by the existing suite.",
+    "Standalone direct compilation reports tool_version unreleased and verification UNVERIFIED; this is not an installed release, published artifact, or whole-suite PASS.",
+    "These source/test/doc seven-path checks precede diagnostic sidecars. Exact final committed candidate still requires official non-author pregrade.",
+    "Logical regular-file bytes, not physical reclaimable/APFS bytes; ordinary reclaimable rotations are assumed inactive."
+  ]
+}

@@ -106,6 +106,7 @@ import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
 import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
+import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -3032,6 +3033,36 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			lock.release();
 			const overall = result.status === "FAILED" ? "FINDINGS" : result.status === "REFUSED" ? "REFUSED" : "OK";
 			return { code: result.status === "FAILED" || result.status === "REFUSED" ? 1 : 0, data: { overall, job: job.name, ...result }, verification: "UNVERIFIED" };
+		}
+		if (job.name === "am-retain") {
+			const started = new Date().toISOString();
+			const recordPath = join(jobsDir, "am-retain.log.jsonl");
+			try {
+				const storageRoot = agentMailRetentionRoot(process.env.AGENT_MAIL_STORAGE_ROOT);
+				if (storageRoot === null) {
+					return refusal("AM_RETAIN_ROOT_REQUIRED", "Agent Mail retention has no explicitly selected storage root",
+						"Set AGENT_MAIL_STORAGE_ROOT when installing or running am-retain; read am doctor locks --json for Agent Mail's storage_root.");
+				}
+				const retention = retainAgentMailRotations(storageRoot, recordPath);
+				const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 0,
+					omp_version: null, status: "OK", retention };
+				if (!recordJobReceipt(home, job.name, receipt)) {
+					return { code: 3, data: { overall: "UNAVAILABLE", job: job.name, record_path: recordPath },
+						errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Retention completed but its job receipt could not be written",
+							remediation: "Read the durable deletion journal before retrying; do not infer that nothing was removed." }], verification: "UNVERIFIED" };
+				}
+				return { code: 0, data: { overall: "OK", job: job.name,
+					status: retention.removed.length ? "CHANGED" : "UNCHANGED", ...retention,
+					receipt_path: jobReceiptPath(home, job.name) }, verification: "UNVERIFIED" };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 1,
+					omp_version: null, status: "FAILED", record_path: recordPath, message };
+				const receiptWritten = recordJobReceipt(home, job.name, receipt);
+				return { code: 1, data: { overall: "FINDINGS", job: job.name, record_path: recordPath, receipt_written: receiptWritten },
+					errors: [{ code: "AM_RETAIN_FAILED", message,
+						remediation: "Inspect the selected store and deletion journal; unsafe paths and unrecorded deletions are refused." }], verification: "UNVERIFIED" };
+			} finally { lock.release(); }
 		}
 		const launcher = stableLauncher(home);
 		if (!executableFile(launcher)) {

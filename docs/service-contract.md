@@ -31,6 +31,33 @@ contract; `service doctor` enforces it item by item.
 | 16 | one schedule owner per machine; doctor flags double scheduling | MISSING | MISSING: `contract-double-schedule` (runtime; holder wires) |
 | 17 | fleet view: `status --all` / `list` report loaded, last exit, run age, run count, matching `launchctl print` | FIXED: parser accepts declared `--all`; rows carry loaded/lastExit/runs/last_run_at (box-2 commit) | `service status --all`, `service list` |
 
+## Agent Mail retention
+
+The hourly `am-retain` job keeps the newest
+`doctor/reclaimable/rotation-YYYYMMDDTHHMMSSZ` directory by its UTC name, not
+filesystem mtime. Older rotations are permanently removed; the live database,
+mail archive and unrelated directories are not retention targets.
+
+Select the store explicitly when installing. Agent Mail reports its current
+`storage_root` through the read-only `am doctor locks --json` interface:
+
+```sh
+store="$(am doctor locks --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["storage_root"])')" &&
+AGENT_MAIL_STORAGE_ROOT="$store" omp-kit service install am-retain --apply --yes
+```
+
+Both native supervisors persist that approved scope. A manual
+`service run am-retain` also requires `AGENT_MAIL_STORAGE_ROOT`; missing scope
+refuses before deletion. The normal off switch, single-flight lock and load
+admission apply. No Agent Mail CLI or Python interpreter is needed by the
+running retention body.
+
+The private `jobs/am-retain.log.jsonl` records each planned and completed removal
+with its name and regular-file logical bytes. The intent is synced before
+deletion. Links inside the selected store are not followed; an unsafe namespace
+or unwritable record refuses, and the newest rotation is not walked. The receipt includes the
+retention result. These records are not an undo copy.
+
 ## Fleet lesson report producer
 
 `service run fleet-lessons` runs the existing `omp-kit.fleet-lessons/v1`

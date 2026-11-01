@@ -1,0 +1,20 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_5b45dbde01102cf1bce378b7767e05f334eb9730bf747af5694cf5feeb4fec83",
+ "limitations": [
+  "Owned fixtures and exact source snapshot only; no production purge, OS activation, Linux supervisor or installed-release qualification."
+ ],
+ "operation": "am-retain-build",
+ "parameters": {
+  "base_commit": "72a5c54785b2af72528ad25e0318e8378da8f11b",
+  "bead": "ompkit-774u.9.26",
+  "result_path": "docs/evidence/receipts/am-retain-ompkit-774u.9.26.result.json",
+  "subject_sha256": "2d3f203e9758c52ac16936de748faa3447fe51ae390a9cd38da31e3e7231a620"
+ },
+ "producer": "TurquoiseSummit",
+ "result_ref": {
+  "bytes": 28270,
+  "sha256": "2c9599b814bd505dd5b0c8ca13ff4afed89208a9dbbc649143ea7879287ce2c7"
+ }
+}

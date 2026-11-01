@@ -246,11 +246,12 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-`omp-kit service` manages twelve launchd (macOS) or systemd (Linux) jobs, labeled
-`com.omp-kit.<name>`: `omp-watch`, `scratch-reaper` (6 h), `scratch-pressure` (60 s),
+Fourteen launchd/systemd jobs use `com.omp-kit.<name>`:
+`omp-watch`, `scratch-reaper` (6 h), `scratch-pressure` (60 s),
 `kit-update` (300 s), `fleet-watch` (120 s), `fleet-lessons` (6 h), `load-watch`
-(60 s), `ci-poller` (60 s), `claude-save` (1 h), `fleet-flush` (60 s), and the
-daemons `cc` and `loop-sentinel`.
+(60 s), `ci-poller` (60 s), `claude-save` (1 h), `fleet-flush` (60 s),
+`gate-rationalize` (weekly), [`am-retain`](docs/service-contract.md#agent-mail-retention)
+(1 h), and the daemons `cc` and `loop-sentinel`.
 Install previews a diff first and keeps a backup.
 
 ```sh
