@@ -97,8 +97,9 @@ if [ "$SUB" = "close" ] || [ "$SUB" = "update" ]; then
 	if [ -n "$cited" ]; then
 		publication_tab=$(printf '\t')
 		printf '%s\n' "$cited" | while IFS="$publication_tab" read -r citation_repo sha; do
-			[ -n "$citation_repo" ] && [ -n "$sha" ] ||
+			if [ -z "$citation_repo" ] || [ -z "$sha" ]; then
 				refuse "NOT_PUBLISHED UNKNOWN cited repository or SHA is empty; publish with git_converge.py --push"
+			fi
 			source_root=$(git -C "$citation_repo" rev-parse --show-toplevel 2>/dev/null) ||
 				refuse "NOT_PUBLISHED UNKNOWN cited SHA $sha repository cannot be read; publish with git_converge.py --push"
 			if [ "$source_root" != "${fetched_root:-}" ]; then
