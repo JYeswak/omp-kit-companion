@@ -341,10 +341,12 @@ ci_only_refuse() {
 }
 # RELSPEED1 (ompkit-774u.72): the two files are independent (separate fixtures under their own
 # owned TMPDIRs), so they run side by side; measured serially on 0.2.81 the stage took 606 s.
-(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" timeout 900 bun test tests/cli/package-release.test.ts \
+# AUTOCUT1 (ompkit-2uubn): the same 120 s per-test budget the full suite runs with (--timeout=120000);
+# bun's 5 s default refused the 0.2.83 cut on a 5001 ms package-release case at load 20+.
+(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" timeout 900 bun test --timeout=120000 tests/cli/package-release.test.ts \
 	</dev/null >"$WORK/ci-only-package-release.stdout" 2>"$WORK/ci-only-package-release.stderr") &
 CI_PIDS="$!"
-(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" timeout 2400 bun test tests/cli/kit-update.test.ts \
+(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" timeout 2400 bun test --timeout=120000 tests/cli/kit-update.test.ts \
 	</dev/null >"$WORK/ci-only-kit-update.stdout" 2>"$WORK/ci-only-kit-update.stderr") &
 CI_PIDS="$CI_PIDS $!"
 ci_pkg_rc=0; ci_upd_rc=0
