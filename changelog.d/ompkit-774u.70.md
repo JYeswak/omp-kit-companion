@@ -1,0 +1,1 @@
+- Require a deploy or recovery step for commits that change installation, hook-chain, service, or update behavior.

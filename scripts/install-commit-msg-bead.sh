@@ -13,6 +13,9 @@
 # The commit-notes member (scripts/check-commit-notes.sh) is always installed:
 # it refuses a shipped-path commit the push notes gate would refuse (no single
 # Bead: trailer with a changelog.d fragment, and no [no-changelog] reason).
+# The deploy-step member (scripts/check-deploy-step.sh) is always installed:
+# it requires a runbook/reference change or a Deploy-Step trailer when staged
+# paths alter installer, hook-chain, service, or update behavior.
 # The staged-fragments member (scripts/check-staged-fragments.sh) is always
 # installed: it refuses a commit whose staged changelog.d fragments the repo's
 # own scripts/release-notes.sh cannot fold (passes where the repo has none).
@@ -709,6 +712,14 @@ install_commit_notes() {
 	place "$KITROOT/scripts/check-commit-notes.sh" "$member" +x
 	printf 'installed commit-notes member: %s\n' "$member"
 }
+# install_deploy_step: require a runbook/reference update or an explicit
+# install/recovery command for commits changing deploy-sensitive paths.
+install_deploy_step() {
+	member="$(chain_dir commit-msg)/48-omp-kit-deploy-step"
+	place "$KITROOT/scripts/check-deploy-step.sh" "$member" +x
+	printf 'installed deploy-step member: %s\n' "$member"
+}
+
 
 # install_gap_mention: the commit-msg member that refuses, once, a body naming a gap without a bead id
 # (GAPFADE1, ompkit-3waa2); it runs after the notes member and reads kitlib-findings.sh beside it.
@@ -786,7 +797,7 @@ ensure_chain commit-msg
 install_commit_msg
 install_commit_notes
 install_gap_mention
-install_stale_worktree
+install_deploy_step
 install_kitlib_reversal
 install_commit_gate
 ensure_chain pre-push
