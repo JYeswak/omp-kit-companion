@@ -28,11 +28,11 @@ listed = open(os.environ["PASS_TREES"]).read().split() if os.path.exists(os.envi
 print("PASS" if tree in listed else "MISS")
 sys.exit(0 if tree in listed else 1)
 PY
+# The verdict readback runs under the candidate's own scripts/pysafe.py, as in the real repo.
+cp "$REPO/scripts/pysafe.py" "$repo/scripts/pysafe.py"
 commit() { # VERSION MESSAGE -> prints the new sha
 	printf '{"name":"fixture","version":"%s"}\n' "$1" > "$repo/package.json"
 	printf '%s\n' "$2" > "$repo/note.txt"
-# The verdict readback runs under the candidate's own scripts/pysafe.py, as in the real repo.
-cp "$REPO/scripts/pysafe.py" "$repo/scripts/pysafe.py"
 	git -C "$repo" add -A
 	git -C "$repo" commit -q -m "$2" --no-verify
 	git -C "$repo" rev-parse HEAD
