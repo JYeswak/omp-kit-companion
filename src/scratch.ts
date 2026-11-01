@@ -771,7 +771,7 @@ export interface InspectDeps { liveness: LivenessDeps; run: ScratchRunner; now?:
 	 * stand-in so plan and apply never read the machine's real temp. */
 	systemTempBases?: readonly string[] }
 
-function dirSize(dir: string): number {
+function dirSize(dir: string, measure?: { entries: number; newestMtimeMs: number | null }): number {
 	let total = 0;
 	const stack: string[] = [dir];
 	while (stack.length > 0) {
@@ -780,6 +780,7 @@ function dirSize(dir: string): number {
 		try {
 			entries = readdirSync(current);
 		} catch {
+			if (measure !== undefined) measure.newestMtimeMs = null;
 			continue;
 		}
 		for (const entry of entries) {
@@ -788,7 +789,12 @@ function dirSize(dir: string): number {
 			try {
 				stat = lstatSync(path);
 			} catch {
+				if (measure !== undefined) measure.newestMtimeMs = null;
 				continue;
+			}
+			if (measure !== undefined) {
+				measure.entries++;
+				if (measure.newestMtimeMs !== null) measure.newestMtimeMs = Math.max(measure.newestMtimeMs, stat.mtimeMs);
 			}
 		if (stat.isDirectory() && !stat.isSymbolicLink()) stack.push(path);
 		else total += stat.size;
@@ -1898,16 +1904,60 @@ function immutableFlagPresent(path: string, deps: ApplyDeps): boolean {
 	return flags !== null && flags.split(",").some(flag => flag === "uchg" || flag === "schg");
 }
 
-function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | null, reason: string,
+function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | null, released: ReleaseRecord | null,
 	home: string, deps: ApplyDeps, at: string): ScratchVerdict {
-	let original: { dev: number; ino: number } | null = null;
+	const verdictOwner = released?.owner ?? owner;
+	let original: { dev: number; ino: number; mtimeMs: number } | null = null;
 	try {
 		const stat = lstatSync(path);
-		if (!stat.isSymbolicLink()) original = { dev: stat.dev, ino: stat.ino };
+		if (!stat.isSymbolicLink()) original = { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs };
 	} catch {
 		/* A missing path cannot be safely marked after the delete attempt. */
 	}
-	const bytesBefore = dirSize(path);
+	if (original === null)
+		return { dir: path, action: "SKIP", reason: "inode-proof-unavailable", owner: verdictOwner, sizeBytes: 0 };
+	const ownerBefore = readText(join(path, ".owner"));
+	const releaseBefore = readText(join(path, ".omp-kit-release"));
+	const observedOwner = ownerBefore === null ? null : parseOwnerFile(ownerBefore);
+	if (JSON.stringify(observedOwner) !== JSON.stringify(owner) ||
+		(released !== null && (released.ownerText !== ownerBefore || released.markerText !== releaseBefore || readReleaseRecord(path) === null)))
+		return { dir: path, action: "SKIP", reason: "final-delete-recheck-failed", owner: verdictOwner, sizeBytes: 0 };
+	const measure: { entries: number; newestMtimeMs: number | null; sizeBytes: number } = { entries: 0, newestMtimeMs: original.mtimeMs, sizeBytes: 0 };
+	const bytesBefore = measure.sizeBytes = dirSize(path, measure);
+	// Allow 1 ms per inspected entry beyond the base budget, capped at two minutes per proof.
+	const lsofTimeoutMs = Math.min(120_000, (deps.lsofTimeoutMs ?? LSOF_TIMEOUT_MS) + measure.entries);
+	// A name-only plan snapshot cannot prove an inode is unused through an outside hard link.
+	const clear = lsofClear(path, deps.run, lsofTimeoutMs);
+	if (clear !== true)
+		return { dir: path, action: "SKIP", reason: clear === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
+			owner: verdictOwner, sizeBytes: bytesBefore, cause: clear === null ? "lsof-unavailable" : "open-fd" };
+	try {
+		const current = lstatSync(path);
+		if (current.dev !== original.dev || current.ino !== original.ino || current.isSymbolicLink() ||
+			readText(join(path, ".owner")) !== ownerBefore || readText(join(path, RELEASE_FILE)) !== releaseBefore)
+			return { dir: path, action: "SKIP", reason: "final-delete-recheck-failed", owner: verdictOwner, sizeBytes: bytesBefore };
+		if (measure.newestMtimeMs !== null) measure.newestMtimeMs = Math.max(measure.newestMtimeMs, current.mtimeMs);
+	} catch {
+		return { dir: path, action: "SKIP", reason: "final-delete-recheck-failed", owner: verdictOwner, sizeBytes: bytesBefore };
+	}
+	// Reuse traversal freshness here: never run another recursive walk after open-file proof.
+	const eligibility = quarantineExpiryDecision(path, home, observedOwner,
+		ownerBefore !== null && observedOwner === null, released !== null, deps, measure);
+	if (eligibility.action !== "DELETE")
+		return { dir: path, ...eligibility, owner: verdictOwner, sizeBytes: bytesBefore };
+	const user = blockingScratchUser(path, deps.liveness);
+	if (user !== null) {
+		appendLog(home, { event: "skip", dir: path, at, action: "LIVE", reason: "user-live", detail: describeUserBlock(user) });
+		return { dir: path, action: "LIVE", reason: "user-live", owner: verdictOwner, sizeBytes: bytesBefore };
+	}
+	try {
+		const current = lstatSync(path);
+		if (current.dev !== original.dev || current.ino !== original.ino || current.isSymbolicLink() ||
+			readText(join(path, ".owner")) !== ownerBefore || readText(join(path, ".omp-kit-release")) !== releaseBefore)
+			return { dir: path, action: "SKIP", reason: "final-delete-recheck-failed", owner: verdictOwner, sizeBytes: bytesBefore };
+	} catch {
+		return { dir: path, action: "SKIP", reason: "final-delete-recheck-failed", owner: verdictOwner, sizeBytes: bytesBefore };
+	}
 	let errorCode: string | null = null;
 	try {
 		if (deps.remove) deps.remove(path);
@@ -1917,7 +1967,7 @@ function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | n
 	}
 	if (errorCode === "ENOENT" && !existsSync(path)) errorCode = null;
 	if (errorCode !== null || existsSync(path)) {
-		const clear = lsofClearDir(deps, path);
+		const clear = existsSync(path) ? lsofClear(path, deps.run, lsofTimeoutMs) : null;
 		const immutable = errorCode === "EPERM" && immutableFlagPresent(path, deps);
 		const cause = clear === false ? "open-fd"
 			: clear === null ? "lsof-unavailable"
@@ -1926,7 +1976,7 @@ function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | n
 						: errorCode === "EPERM" ? "unknown"
 							: existsSync(path) ? "delete-leftover" : "unknown";
 		let failedPath = path;
-		if (clear === true && original !== null && !entry.includes(".delete-")) {
+		if (clear === true && !entry.includes(".delete-")) {
 			try {
 				const current = lstatSync(path);
 				const marked = `${path}.delete-${process.pid}`;
@@ -1940,15 +1990,49 @@ function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | n
 			}
 		}
 		const failed: ScratchVerdict = { dir: failedPath, action: "SKIP", reason: "delete-failed",
-			owner, sizeBytes: dirSize(failedPath), cause };
+			owner: verdictOwner, sizeBytes: dirSize(failedPath), cause };
 		appendLog(home, { event: "delete-failed", dir: failedPath, at, entry: basename(failedPath), source_entry: entry,
 			cause, error_code: errorCode });
 		return failed;
 	}
-	const deleted: ScratchVerdict = { dir: path, action: "DELETE", reason, owner, sizeBytes: bytesBefore };
-	appendLog(home, { event: "delete-quarantined", dir: path, at, entry, owner: owner?.pid ?? null });
+	const deleted: ScratchVerdict = { dir: path, action: "DELETE", reason: eligibility.reason, owner: verdictOwner, sizeBytes: bytesBefore };
+	appendLog(home, { event: "delete-quarantined", dir: path, at, entry, owner: verdictOwner?.pid ?? null });
 	return deleted;
 }
+
+/** The same dynamic eligibility policy runs before expensive proof and again at the final delete gate. */
+function quarantineExpiryDecision(path: string, home: string, owner: ScratchOwner | null, malformed: boolean,
+	released: boolean, deps: ApplyDeps, measurement?: { sizeBytes: number; newestMtimeMs: number | null }): { action: "DELETE" | "LIVE" | "SKIP"; reason: string } {
+	const now = deps.now ?? Date.now();
+	if (owner === null) {
+		const fresh = measurement === undefined ? idleSince(path, now) : measurement.newestMtimeMs;
+		if (fresh === null) return { action: "SKIP", reason: "idle-proof-unavailable" };
+		if (fresh >= now - QUARANTINE_IDLE_MS) return { action: "SKIP", reason: "quarantine-active-mtime" };
+	}
+	if (owner !== null && owner.bin !== "hold" && owner.agent !== null && owner.session !== null) {
+		const seat = deps.liveness.seatLive?.(owner.agent, owner.session) ?? null;
+		if (seat === true) return { action: "LIVE", reason: "owner-seat-alive" };
+		if (seat === null) return { action: "SKIP", reason: "owner-seat-liveness-unproven" };
+	}
+	if (released) return { action: "DELETE", reason: "quarantine-expired-owner-released" };
+	// A hold is owed until its bead is proven closed; expiry alone never discharges it.
+	if (owner && !malformed && owner.bin === "hold") {
+		const closed = owner.bead === null ? null : isBeadClosed(owner.bead, deps);
+		if (closed !== true) {
+			const ms = owner.expires === null ? NaN : Date.parse(owner.expires);
+			const reason = !Number.isNaN(ms) && ms <= now ? "quarantine-hold-expired" : "quarantine-hold-active";
+			appendLog(home, { event: reason, dir: path, at: new Date(now).toISOString(), bead: owner.bead,
+				entry: basename(path), sizeBytes: measurement?.sizeBytes ?? dirSize(path) });
+			return { action: "SKIP", reason };
+		}
+	}
+	if (!owner || malformed || !hasProcessIdentity(owner)) return { action: "DELETE", reason: "quarantine-expired" };
+	const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
+	if (state === "live" || state === "unknown")
+		return { action: "SKIP", reason: state === "unknown" ? "owner-liveness-unproven" : "quarantine-owner-active" };
+	return { action: "DELETE", reason: `quarantine-expired-owner-${state}` };
+}
+
 interface ReleaseRecord { owner: ScratchOwner; ownerText: string; markerText: string; releasedAt: string; legacy: boolean; legacyName: string | null;
 	/** The destination the owner named when releasing (ompkit-774u.15): evidence and promote carry the reference that proves it; absent is the unbinned legacy release. */
 	bin: ScratchBin | null; ref: string | null }
@@ -2845,13 +2929,14 @@ function applyUnownedLocked(dir: string, root: string, deps: ApplyDeps, planned?
  * held across the check and the delete. A live or unknown user (or an unreadable `.users`) keeps the entry, logged
  * with who and why; dead, reused and zombie users do not block.
  */
-function expireEntryUnlessUsed(path: string, entry: string, owner: ScratchOwner | null, reason: string,
+function expireEntryUnlessUsed(path: string, entry: string, owner: ScratchOwner | null, released: ReleaseRecord | null,
 	home: string, deps: ApplyDeps, at: string): ScratchVerdict {
-	return withScratchUsersLock(path, () => ({ dir: path, action: "SKIP" as const, reason: "users-lock-busy", owner, sizeBytes: dirSize(path) }), () => {
+	const verdictOwner = released?.owner ?? owner;
+	return withScratchUsersLock<ScratchVerdict>(path, () => ({ dir: path, action: "SKIP", reason: "users-lock-busy", owner: verdictOwner, sizeBytes: dirSize(path) }), () => {
 		const user = blockingScratchUser(path, deps.liveness);
-		if (user === null) return removeExpiredEntry(path, entry, owner, reason, home, deps, at);
+		if (user === null) return removeExpiredEntry(path, entry, owner, released, home, deps, at);
 		appendLog(home, { event: "skip", dir: path, at, action: "LIVE", reason: "user-live", detail: describeUserBlock(user) });
-		return { dir: path, action: "LIVE", reason: "user-live", owner, sizeBytes: dirSize(path) };
+		return { dir: path, action: "LIVE", reason: "user-live", owner: verdictOwner, sizeBytes: dirSize(path) };
 	});
 }
 
@@ -2886,91 +2971,31 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		const quarantinedAt = quarantineTimeOf(entry);
 		if (quarantinedAt === null || now - quarantinedAt < ttlMs) continue;
 		const path = join(qt, entry);
-		const { owner: liveOwner } = readOwner(path);
-		if (liveOwner === null) {
-			const fresh = idleSince(path, now);
-			if (fresh === null) {
-				done.push({ dir: path, action: "SKIP", reason: "idle-proof-unavailable", owner: null, sizeBytes: dirSize(path) });
-				continue;
-			}
-			if (fresh >= now - QUARANTINE_IDLE_MS) {
-				done.push({ dir: path, action: "SKIP", reason: "quarantine-active-mtime", owner: null, sizeBytes: dirSize(path) });
-				continue;
-			}
-		}
-		if (liveOwner !== null && liveOwner.bin !== "hold" && liveOwner.agent !== null && liveOwner.session !== null) {
-			const seat = deps.liveness.seatLive?.(liveOwner.agent, liveOwner.session) ?? null;
-			if (seat === true) {
-				done.push({ dir: path, action: "LIVE", reason: "owner-seat-alive", owner: liveOwner, sizeBytes: dirSize(path) });
-				continue;
-			}
-			if (seat === null) {
-				done.push({ dir: path, action: "SKIP", reason: "owner-seat-liveness-unproven", owner: liveOwner, sizeBytes: dirSize(path) });
-				continue;
-			}
-		}
+		const { owner, malformed } = readOwner(path);
 		if (isSymlink(path)) {
 			done.push({ dir: path, action: "SKIP", reason: "quarantine-symlink", owner: null, sizeBytes: 0 });
 			continue;
 		}
 		const released = readReleaseRecord(path);
+		const eligibility = quarantineExpiryDecision(path, home, owner, malformed, released !== null, deps);
+		if (eligibility.action !== "DELETE") {
+			done.push({ dir: path, ...eligibility, owner, sizeBytes: dirSize(path) });
+			continue;
+		}
 		if (released) {
 			const identity = inodeOf(path);
 			if (identity === null) {
 				done.push({ dir: path, action: "SKIP", reason: "inode-proof-unavailable", owner: released.owner, sizeBytes: dirSize(path) });
 				continue;
 			}
-			const clearBefore = lsofClearDir(deps, path);
-			if (clearBefore !== true) {
-				done.push({ dir: path, action: "SKIP", reason: clearBefore === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
-					owner: released.owner, sizeBytes: dirSize(path), ...(clearBefore === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) });
-				continue;
-			}
 			const rechecked = readReleaseRecord(path);
 			if (!rechecked || rechecked.markerText !== released.markerText || rechecked.ownerText !== released.ownerText ||
-				inodeOf(path) !== identity || lsofClearDir(deps, path) !== true) {
+				inodeOf(path) !== identity) {
 				done.push({ dir: path, action: "SKIP", reason: "final-recheck-refused", owner: released.owner, sizeBytes: dirSize(path) });
 				continue;
 			}
-			done.push(expireEntryUnlessUsed(path, entry, released.owner, "quarantine-expired-owner-released", home, deps, at));
-			continue;
 		}
-		const { owner, malformed } = readOwner(path);
-		// Holds are owed until discharged (ompkit-774u.15, Joshua scope 2026-10-20): a quarantined hold is vetoed
-		// while its bead is open or unprovable, and flagged but never deleted once expired. Only a closed bead
-		// discharges the hold back to the normal liveness path below. Fail-open: an unprovable bead keeps the dir.
-		if (owner && !malformed && owner.bin === "hold") {
-			const closed = owner.bead === null ? null : isBeadClosed(owner.bead, deps);
-			if (closed !== true) {
-				const ms = owner.expires === null ? NaN : Date.parse(owner.expires);
-				const reason = !Number.isNaN(ms) && ms <= now ? "quarantine-hold-expired" : "quarantine-hold-active";
-				appendLog(home, { event: reason, dir: path, at, bead: owner.bead, entry, sizeBytes: dirSize(path) });
-				done.push({ dir: path, action: "SKIP", reason, owner, sizeBytes: dirSize(path) });
-				continue;
-			}
-		}
-		if (!owner || malformed || !hasProcessIdentity(owner)) {
-			const clear = lsofClearDir(deps, path);
-			if (clear !== true) {
-				done.push({ dir: path, action: "SKIP", reason: clear === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
-					owner, sizeBytes: dirSize(path), ...(clear === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) });
-				continue;
-			}
-			done.push(expireEntryUnlessUsed(path, entry, owner, "quarantine-expired", home, deps, at));
-			continue;
-		}
-		const state = ownerIncarnationState(owner.pid, owner.processStart, deps.liveness);
-		if (state === "live" || state === "unknown") {
-			done.push({ dir: path, action: "SKIP", reason: state === "unknown" ? "owner-liveness-unproven" : "quarantine-owner-active", owner, sizeBytes: dirSize(path) });
-			continue;
-		}
-		const clear = lsofClearDir(deps, path);
-		if (clear !== true) {
-			done.push({ dir: path, action: "SKIP", reason: clear === null ? "lsof-evidence-unavailable" : "owner-released-but-open-fds-present",
-				owner, sizeBytes: dirSize(path), ...(clear === false ? { cause: "open-fd" as const } : { cause: "lsof-unavailable" as const }) });
-			continue;
-		}
-		done.push(expireEntryUnlessUsed(path, entry, owner, `quarantine-expired-owner-${state}`, home, deps, at));
+		done.push(expireEntryUnlessUsed(path, entry, owner, released, home, deps, at));
 	}
 	return done;
 }
