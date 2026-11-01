@@ -45,7 +45,8 @@ function fixture(exactCutoff = false) {
 	db.exec("CREATE TABLE events (cursor INTEGER PRIMARY KEY, type TEXT, producer TEXT, data TEXT)");
 	db.exec("CREATE TABLE source_ticks (cursor INTEGER PRIMARY KEY, producer TEXT, time_ms INTEGER, position INTEGER, error_code TEXT)");
 	db.query("INSERT INTO events VALUES (1, 'source.tick', 'session', ?)").run(JSON.stringify({
-		position: info.size, error_code: null, backlog_bytes: 0, complete_through_ms: oldMs,
+		instance: "fixture", records_seen: 0, records_emitted: 0, records_ignored: 0, records_quarantined: 0,
+		position: info.size, error_code: null, complete_through_ms: oldMs, coverage: [],
 	}));
 	db.query("INSERT INTO source_ticks VALUES (1, 'session', ?, ?, NULL)").run(now, info.size);
 	db.close();
@@ -94,4 +95,20 @@ test("session-retain reports old transcripts kept when CC state is missing", () 
 	const result = retainOmpSessions(f.home, join(f.root, "missing-cc"), join(f.root, "jobs", "retention.log.jsonl"), f.now);
 	expect(result).toMatchObject({ examined: 2, kept: 2, removed: [], ccVerified: false });
 	expect(statSync(f.boundary).isFile()).toBe(true);
+});
+test("session-retain chooses the newest committed source tick, not wall-clock order", () => {
+	const f = fixture();
+	const info = statSync(f.ingested);
+	const ccRoot = join(f.home, ".local", "state", "omp-kit", "cc");
+	const db = new Database(join(ccRoot, "cc.db"));
+	db.query("INSERT INTO events VALUES (2, 'source.tick', 'session', ?)").run(JSON.stringify({
+		instance: "fixture", records_seen: 0, records_emitted: 0, records_ignored: 0, records_quarantined: 0,
+		position: info.size + 1, error_code: null, complete_through_ms: f.now, coverage: [],
+	}));
+	db.query("INSERT INTO source_ticks VALUES (2, 'session', ?, ?, NULL)").run(f.now, info.size + 1);
+	db.query("UPDATE source_ticks SET time_ms = ? WHERE cursor = 1").run(f.now + 60_000);
+	db.close();
+	const result = retainOmpSessions(f.home, ccRoot, join(f.root, "jobs", "retention.log.jsonl"), f.now);
+	expect(result).toMatchObject({ examined: 2, kept: 2, removed: [], ccVerified: false });
+	expect(statSync(f.ingested).isFile()).toBe(true);
 });

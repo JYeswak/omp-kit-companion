@@ -73,9 +73,8 @@ included.
 A transcript is deleted only when the CC session producer's exact cursor
 matches its canonical path, device, inode and current byte length, the producer
 state has no pending intent, and the latest committed `source.tick` has the
-same global byte position with no error and `backlog_bytes: 0`. Missing,
-malformed or mismatched CC evidence keeps the transcript. This is
-deliberately fail-closed; the job reads `cc.db` and
+same global byte position and no error. Missing, malformed or mismatched CC
+evidence keeps the transcript. This is deliberately fail-closed; the job reads `cc.db` and
 `producers/session.state.json` under the configured CC state root.
 
 `jobs/session-retain.log.jsonl` fsyncs a planned record before unlink and a

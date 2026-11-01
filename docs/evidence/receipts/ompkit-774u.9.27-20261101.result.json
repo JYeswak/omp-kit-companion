@@ -1,0 +1,6 @@
+{
+  "command": "nice -n 10 bun test tests/cli/session-retain.test.ts",
+  "exit_code": 0,
+  "stdout": "bun test v1.4.3 (26aa4e1a9)\n\n 3 pass\n 0 fail\n 10 expect() calls\nRan 3 tests across 1 file. [937.00ms]\n",
+  "stderr": ""
+}

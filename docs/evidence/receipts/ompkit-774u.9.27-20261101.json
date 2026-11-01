@@ -1,0 +1,18 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_66d134a0eb081912b649c2606d3b1326c3542cb286dd0c2b1a69f9a9fd107540",
+ "limitations": [
+  "targeted acceptance only; full CLI suite pending"
+ ],
+ "operation": "session-retention acceptance",
+ "parameters": {
+  "bead": "ompkit-774u.9.27",
+  "command": "nice -n 10 bun test tests/cli/session-retain.test.ts"
+ },
+ "producer": "bun test",
+ "result_ref": {
+  "bytes": 230,
+  "sha256": "14484a37c2c1f6a2ae2af2713a40134183dd5fa156449e13972f7d83b13de507"
+ }
+}

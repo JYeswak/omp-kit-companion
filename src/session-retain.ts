@@ -9,7 +9,7 @@ const SESSION_FILE = /\.jsonl$/;
 
 type SessionCursor = { path: string; dev: number; inode: number; offset: number };
 type SessionState = { schema_version: string; files: Record<string, SessionCursor>; position: number; pending: unknown };
-type SessionTick = { position: number; error_code: null; backlog_bytes: 0 };
+type SessionTick = { position: number; error_code: null };
 type SessionEvidence = { raw: string; state: SessionState; tick: SessionTick };
 
 export interface SessionRemoval { path: string; bytes: number }
@@ -79,14 +79,14 @@ function readCommittedTick(ccRoot: string): SessionTick | null {
 		db = new Database(databasePath, { readonly: true });
 		const row = db.query("SELECT t.position, t.error_code, e.data FROM source_ticks AS t "
 			+ "JOIN events AS e ON e.cursor=t.cursor WHERE t.producer='session' AND e.type='source.tick' "
-			+ "AND e.producer='session' ORDER BY t.time_ms DESC, t.cursor DESC LIMIT 1").get() as
+			+ "AND e.producer='session' ORDER BY t.cursor DESC LIMIT 1").get() as
 			{ position: unknown; error_code: unknown; data: unknown } | null;
 		if (!row || !Number.isSafeInteger(row.position) || row.error_code !== null || typeof row.data !== "string") return null;
 		const data: unknown = JSON.parse(row.data);
 		if (!data || typeof data !== "object" || Array.isArray(data)) return null;
 		const tick = data as Record<string, unknown>;
-		if (tick.position !== row.position || tick.error_code !== null || tick.backlog_bytes !== 0) return null;
-		return { position: row.position as number, error_code: null, backlog_bytes: 0 };
+		if (tick.position !== row.position || tick.error_code !== null) return null;
+		return { position: row.position as number, error_code: null };
 	} catch { return null; }
 	finally { db?.close(); }
 }
@@ -103,8 +103,8 @@ function matchesIngested(evidence: SessionEvidence, sourcePath: string, source: 
 	const realPath = realpathSync(sourcePath);
 	const cursor = evidence.state.files[realPath];
 	return cursor !== undefined && cursor.path === realPath && cursor.dev === source.dev && cursor.inode === source.ino
-		&& cursor.offset === source.size && evidence.tick.position === evidence.state.position
-		&& evidence.tick.error_code === null && evidence.tick.backlog_bytes === 0;
+	&& cursor.offset === source.size && evidence.tick.position === evidence.state.position
+		&& evidence.tick.error_code === null;
 }
 
 function sameFile(left: Stats, right: Stats): boolean {
