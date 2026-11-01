@@ -490,7 +490,8 @@ test("SENTINELLIVE1: a hand service run is refused; launchd runs the configured 
 
 test("SENTINELLIVE1 (4): no job definition or render carries a hard-coded /Users/ path", () => {
 	sanitizedEnv();
-	const saved = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("OMP_KIT_UPDATE_") || key === "OMP_KIT_CI_REPOS"));
+	// Operator env a render copies on purpose (update channel, CI repos, the Agent Mail root) is not a hard-coded path.
+	const saved = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith("OMP_KIT_UPDATE_") || key === "OMP_KIT_CI_REPOS" || key === "AGENT_MAIL_STORAGE_ROOT"));
 	for (const key of Object.keys(saved)) delete process.env[key];
 	try {
 		for (const def of Object.values(KNOWN_JOBS)) {
