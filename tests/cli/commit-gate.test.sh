@@ -51,20 +51,23 @@ printf 'change\n\nBead: x-1\n' > "$msg"
 printf 'more\n' >> "$repo/a.txt"
 git -C "$repo" add a.txt
 if (cd "$repo" && sh "$CHECK" "$msg" > "$TMP/out" 2>&1); then ok; else bad "green: rc!=0 $(cat "$TMP/out")"; fi
-set -- $(cut -d'|' -f1 "$GATE_LOG")
-cand=$2
-[ "$1" = refs/heads/main ] && [ "$3" = refs/heads/main ] && [ "$4" = "$(git -C "$repo" rev-parse origin/main)" ] && ok || bad "green: ref line $(cat "$GATE_LOG")"
-[ "$(git -C "$repo" rev-parse "$cand^{tree}")" = "$(git -C "$repo" write-tree)" ] && ok || bad "green: candidate tree is not the staged tree"
-[ "$(git -C "$repo" rev-parse "$cand^")" = "$(git -C "$repo" rev-parse HEAD)" ] && ok || bad "green: candidate parent is not HEAD"
-[ "$(cut -d'|' -f2 "$GATE_LOG")" = 0 ] && ok || bad "green: release verdict not opted out"
-[ "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$repo" rev-parse origin/main)" ] && ok || bad "green: a ref moved"
+same() { if [ "$1" = "$2" ]; then ok; else bad "$3: got '$1' want '$2'"; fi; }
+refs=$(cut -d'|' -f1 "$GATE_LOG")
+IFS=' ' read -r lref cand rref rsha <<EOF
+$refs
+EOF
+same "$lref $rref $rsha" "refs/heads/main refs/heads/main $(git -C "$repo" rev-parse origin/main)" "green: ref line"
+same "$(git -C "$repo" rev-parse "$cand^{tree}")" "$(git -C "$repo" write-tree)" "green: candidate tree is the staged tree"
+same "$(git -C "$repo" rev-parse "$cand^")" "$(git -C "$repo" rev-parse HEAD)" "green: candidate parent is HEAD"
+same "$(cut -d'|' -f2 "$GATE_LOG")" 0 "green: release verdict opted out"
+same "$(git -C "$repo" rev-parse HEAD)" "$(git -C "$repo" rev-parse origin/main)" "green: no ref moved"
 
 # 2. RED: a staged file the push gate refuses makes the commit refuse with the gate's status.
 printf 'x\n' > "$repo/BROKEN"
 git -C "$repo" add BROKEN
 if (cd "$repo" && sh "$CHECK" "$msg" > "$TMP/out" 2>&1); then bad "red: rc=0"; else
 	rc=$?
-	[ "$rc" = 7 ] && grep -q 'commit-gate: REFUSED' "$TMP/out" && ok || bad "red: rc=$rc $(cat "$TMP/out")"
+	if [ "$rc" = 7 ] && grep -q 'commit-gate: REFUSED' "$TMP/out"; then ok; else bad "red: rc=$rc $(cat "$TMP/out")"; fi
 fi
 
 # 3. GIT_INDEX_FILE (commit --only) is honored: a private index without BROKEN is GREEN even though

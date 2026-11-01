@@ -16,7 +16,10 @@
 set -u
 
 msg=${1:-}
-[ -n "$msg" ] && [ -f "$msg" ] || { echo "commit-gate: usage: check-commit-gate.sh MSGFILE" >&2; exit 2; }
+if [ -z "$msg" ] || [ ! -f "$msg" ]; then
+	echo "commit-gate: usage: check-commit-gate.sh MSGFILE" >&2
+	exit 2
+fi
 
 hooks=$(git rev-parse --git-path hooks 2>/dev/null) || exit 0
 case "$hooks" in /*) ;; *) hooks="$(git rev-parse --show-toplevel)/$hooks" ;; esac
