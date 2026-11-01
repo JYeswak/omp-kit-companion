@@ -247,6 +247,7 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/47-omp-kit-staged-fragments scripts/check-staged-fragments.sh" \
 		"hooks.d/commit-msg/49-omp-kit-stale-worktree scripts/check-stale-worktree.sh" \
 		"hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal scripts/check-commit-kitlib-reversal.sh" \
+		"hooks.d/commit-msg/55-omp-kit-commit-gate scripts/check-commit-gate.sh" \
 		"hooks.d/commit-msg/47-omp-kit-gap-mention scripts/check-gap-mention.sh" \
 		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh" \
 		"hooks.d/pre-commit/49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh" \
@@ -723,6 +724,15 @@ install_kitlib_reversal() {
 	printf 'installed kitlib-reversal member: %s\n' "$member"
 }
 
+# install_commit_gate: COMMITPARITY1 (ompkit-9d9fx). The commit-msg member runs the installed pre-push
+# fresh-gate member on the commit being made, so a commit the push would refuse never lands on main.
+# It is a no-op in a repo without that pre-push member; it runs last, after every cheaper member.
+install_commit_gate() {
+	member="$(chain_dir commit-msg)/55-omp-kit-commit-gate"
+	place "$KITROOT/scripts/check-commit-gate.sh" "$member" +x
+	printf 'installed commit-gate member: %s\n' "$member"
+}
+
 
 install_native_preservation() {
 	dir=$(chain_dir pre-commit)
@@ -767,6 +777,7 @@ install_commit_notes
 install_gap_mention
 install_stale_worktree
 install_kitlib_reversal
+install_commit_gate
 ensure_chain pre-push
 install_on_main
 install_pushed_vlevel

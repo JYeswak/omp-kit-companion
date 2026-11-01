@@ -46,6 +46,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/check-portable-paths.sh", "scripts/portable_paths_check.py", "scripts/portable-paths-baseline.json",
 	"scripts/commit-msg-bead.sh", "scripts/check-pushed-on-main.sh", "scripts/pre-push-verification-level.sh", "scripts/check-pushed-beads.sh", "scripts/ref-txn-bead.sh",
 	"scripts/check-staged-imports.sh", "scripts/check-commit-imports.sh", "scripts/check-commit-notes.sh", "scripts/release-notes.ts", "scripts/check-staged-fragments.sh",
+	"scripts/check-commit-gate.sh",
 	"scripts/check-stale-worktree.sh", "scripts/check-staged-regexploit.sh", "scripts/gate-event.sh", "scripts/check-staged-readme.sh", "scripts/readme-check.ts",
 	"scripts/ladder.sh", "scripts/test-case-report.sh", "scripts/limit-process-tree.sh", "scripts/rule_pipeline.py", "scripts/rule-class.ts", "scripts/runtime-adapter.sh",
 	"scripts/check-flywheel-invariants.ts", "scripts/ttsr-harness.ts", "scripts/external-live.mjs", "docs/flywheel-invariants.tsv"];

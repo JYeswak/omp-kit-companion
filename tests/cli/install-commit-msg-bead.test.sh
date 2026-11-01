@@ -396,6 +396,7 @@ for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.s
 done
 cp "$(dirname -- "$INSTALLER")/check-gap-mention.sh" "$TMP/inertkit/scripts/check-gap-mention.sh"
 cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"
+cp "$(dirname -- "$INSTALLER")/check-commit-gate.sh" "$TMP/inertkit/scripts/check-commit-gate.sh"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"
 K=$(new_repo inert)
 git -C "$K" branch -M main
