@@ -1,0 +1,1 @@
+- Add the hourly `cache-retain` service with registered 30-day cache/log and 90-day runtime-receipt expiry, a 120-second run bound, and durable deletion journals. Live or unverified users, browser login data, rollback-linked receipts and reusable bundles with fresh descendants are preserved; the job is not activated by building it.

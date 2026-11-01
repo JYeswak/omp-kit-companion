@@ -246,13 +246,11 @@ mapping fields, activation commands and read-only verification.
 
 ### Service jobs and kit updates
 
-Fifteen launchd/systemd jobs:
-`omp-watch`, `scratch-reaper` (6 h), `scratch-pressure` (60 s),
-`kit-update` (300 s), `fleet-watch` (120 s), `fleet-lessons` (6 h), `load-watch`
-(60 s), `ci-poller` (60 s), `claude-save` (1 h), `fleet-flush` (60 s),
-`gate-rationalize` (weekly), [`am-retain`](docs/service-contract.md#agent-mail-retention)
-(1 h), and the daemons `cc` and `loop-sentinel`.
-Plus `session-retain` (1 h).
+17 launchd/systemd jobs: `omp-watch`; every 60 s: `scratch-pressure`,
+`load-watch`, `ci-poller`, `fleet-flush`; 120 s: `fleet-watch`; 300 s:
+`kit-update`; hourly: `claude-save`, [`am-retain`](docs/service-contract.md#agent-mail-retention),
+`session-retain`, `cache-retain`, `autocut`; 6 h: `scratch-reaper`,
+`fleet-lessons`; weekly: `gate-rationalize`; daemons: `cc`, `loop-sentinel`.
 Install previews a diff first and keeps a backup.
 
 ```sh

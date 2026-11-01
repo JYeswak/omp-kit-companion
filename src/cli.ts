@@ -110,6 +110,7 @@ import { intakeCommand } from "./intake-verb.ts";
 import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
 import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts";
+import { retainFleetCaches } from "./cache-retain.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -2521,23 +2522,80 @@ function runScratchReaperBody(home: string): CliResult {
 }
 
 /** Decode only the expected worker's structured result; malformed output never becomes success. */
-function parseScratchWorkerResult(stdout: string, exit: number): CliResult {
+function parseServiceWorkerResult(stdout: string, exit: number, expectedJob: string): CliResult {
 	const decoded: unknown = JSON.parse(stdout);
 	if (decoded === null || typeof decoded !== "object" || !("data" in decoded)
 		|| decoded.data === null || typeof decoded.data !== "object" || Array.isArray(decoded.data)
-		|| !("job" in decoded.data) || decoded.data.job !== "scratch-reaper"
-		|| !("errors" in decoded) || !Array.isArray(decoded.errors)) throw new Error("invalid scratch worker envelope");
+		|| !("job" in decoded.data) || decoded.data.job !== expectedJob
+		|| !("errors" in decoded) || !Array.isArray(decoded.errors)) throw new Error("invalid service worker envelope");
 	const entries: readonly unknown[] = decoded.errors;
 	const errors: { code: string; message: string; remediation: string }[] = [];
 	for (const entry of entries) {
 		if (entry === null || typeof entry !== "object"
 			|| !("code" in entry) || typeof entry.code !== "string"
 			|| !("message" in entry) || typeof entry.message !== "string"
-			|| !("remediation" in entry) || typeof entry.remediation !== "string") throw new Error("invalid scratch worker error");
+			|| !("remediation" in entry) || typeof entry.remediation !== "string") throw new Error("invalid service worker error");
 		errors.push({ code: entry.code, message: entry.message, remediation: entry.remediation });
 	}
 	const code = exit === 0 ? 0 : exit === 2 ? 2 : exit === 3 ? 3 : exit === 4 ? 4 : 1;
 	return { code, data: { ...decoded.data }, errors, verification: "UNVERIFIED" };
+}
+
+async function runCacheRetainWorker(job: string, home: string, jobsDir: string, claim: string): Promise<CliResult> {
+	const keeper = readRunClaim(jobsDir, job);
+	if (job !== "cache-retain" || keeper === null || keeper.pid !== process.ppid || claimIncarnation(keeper) !== claim) {
+		return refusal("CACHE_RETAIN_KEEPER_CHANGED", "The cache worker is not bound to its current service keeper",
+			"Run service run cache-retain normally; no cache work was performed.");
+	}
+	delete process.env.OMP_KIT_CACHE_RETAIN_CLAIM;
+	const recordPath = join(jobsDir, `cache-retain.${Date.now()}-${randomBytes(8).toString("hex")}.log.jsonl`);
+	const report = await retainFleetCaches(home, recordPath, { stateRoot: dirname(jobsDir) });
+	return { code: report.overall === "OK" ? 0 : report.overall === "UNVERIFIED" ? 3 : 1,
+		data: { ...report, job, record_path: recordPath },
+		errors: report.errors.map(message => ({ code: "CACHE_RETAIN_FAILED", message,
+			remediation: "Inspect retention findings and the per-run journal; held or unverified entries are retained." })),
+		verification: "UNVERIFIED" };
+}
+
+async function runCacheRetainJob(home: string, jobsDir: string, claim: string, capMs: number, env: Record<string, string>): Promise<CliResult> {
+	const job = "cache-retain";
+	const started = new Date().toISOString();
+	const cap = Math.min(Math.max(1, Math.trunc(capMs)), RUN_TIME_CAPS_MS[job]);
+	const argv = [process.execPath];
+	if (!import.meta.path.startsWith("/$bunfs/")) argv.push(import.meta.path);
+	argv.push("service", "run", job, "--json");
+	env.OMP_KIT_CACHE_RETAIN_CLAIM = claim;
+	let status = "FAILED";
+	let result: CliResult;
+	try {
+		const run = await runBounded(argv, { cwd: process.cwd(), env, deadline_s: cap / 1000, max_output_bytes: 1 << 20 });
+		if (run.timed_out || run.killed || run.truncated || run.total_truncated || run.rc === null) {
+			status = run.timed_out ? "TIMEOUT" : "FAILED";
+			result = { code: 1, data: { overall: "UNVERIFIED", job, status, killed: run.killed, truncated: run.truncated || run.total_truncated },
+				errors: [{ code: run.timed_out ? "TIMEOUT" : "CACHE_RETAIN_WORKER_INCOMPLETE",
+					message: run.timed_out ? "The cache-retain worker exceeded its deadline" : "The cache-retain worker did not return complete bounded output",
+					remediation: "Inspect per-run journals; earlier removals may have completed before interruption." }], verification: "UNVERIFIED" };
+		} else {
+			const decoder = new TextDecoder("utf-8", { fatal: true });
+			result = parseServiceWorkerResult(decoder.decode(run.stdout), run.rc, job);
+			status = result.code === 0 ? "OK" : "FAILED";
+		}
+	} catch (error) {
+		result = { code: 1, data: { overall: "UNVERIFIED", job, status },
+			errors: [{ code: "CACHE_RETAIN_WORKER_FAILED", message: redactedHandlerCause(error).cause_message,
+				remediation: "Inspect worker diagnostics; no successful completion is implied." }], verification: "UNVERIFIED" };
+	}
+	const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: result.code, omp_version: null, status, cap_ms: cap };
+	if (!recordJobReceipt(home, job, receipt)) {
+		result.code = 3;
+		result.data.overall = "UNAVAILABLE";
+		result.data.receipt_written = false;
+		result.errors = [...(result.errors ?? []), { code: "RECEIPT_UNAVAILABLE", message: "The cache job receipt could not be written",
+			remediation: "Repair the private state root; inspect the preserved counts and per-run journal for completed effects." }];
+		return result;
+	}
+	result.data.receipt = receipt;
+	return result;
 }
 
 /**
@@ -2883,6 +2941,8 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 			return refusal("SERVICE_BODY_UNIMPLEMENTED", `No service body is implemented for ${job.name}`,
 				"Do not activate this job until its producer is wired; no matcher was substituted.");
 		}
+		const cacheClaim = process.env.OMP_KIT_CACHE_RETAIN_CLAIM;
+		if (cacheClaim !== undefined) return runCacheRetainWorker(job.name, home, jobsDir, cacheClaim);
 		const scratchClaim = process.env.OMP_KIT_SCRATCH_CLAIM;
 		if (scratchClaim !== undefined) {
 			const keeper = readRunClaim(jobsDir, job.name);
@@ -3098,6 +3158,13 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 						remediation: "Inspect the CC session cursor, source tick, and session tree; unverified transcripts are retained." }], verification: "UNVERIFIED" };
 			} finally { lock.release(); }
 		}
+		if (job.name === "cache-retain") {
+			try {
+				if (bodyVersion === null) return refusal("CACHE_RETAIN_KEEPER_CHANGED", "The cache job has no current keeper incarnation",
+					"Retry the ordinary service run; no cache work was performed.");
+				return await runCacheRetainJob(home, jobsDir, bodyVersion, capMs, childEnv);
+			} finally { lock.release(); }
+		}
 		const launcher = stableLauncher(home);
 		if (!executableFile(launcher)) {
 			lock.release();
@@ -3190,7 +3257,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 						verification: "UNVERIFIED" };
 				} else {
 					try {
-						result = parseScratchWorkerResult(run.stdout, run.exit);
+						result = parseServiceWorkerResult(run.stdout, run.exit, job.name);
 					} catch {
 						status = "FAILED";
 						result = { code: 1, data: { overall: "FINDINGS", job: job.name, status, interruptedAction: run.lastAction },
