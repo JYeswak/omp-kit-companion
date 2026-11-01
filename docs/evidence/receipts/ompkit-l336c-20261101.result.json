@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "bead": "ompkit-l336c",
+  "producer": "JadeThrush",
+  "consumer": "The non-author verifier of ompkit-l336c",
+  "feature": "Portable-path pre-commit regression cases remain bounded under suite contention",
+  "observed_defect": "The bead records a 0.2.83 full-suite failure at 120002.20 ms against the 120000 ms case cap; the test grouped about 12 hook-enabled commits in one case.",
+  "deletion_condition": "Retain with the bead evidence; supersede only if the bead is withdrawn or a later exact-source receipt replaces this evidence.",
+  "subject": {
+    "path": "tests/cli/portable-paths.test.ts",
+    "sha256": "74c095141b1fca8976324f694fe6d1573cb0eaee02c45de528475c64ace5cbca",
+    "bytes": 21273
+  },
+  "profile_first": {
+    "source_head": "1ee5603debadd947d6e3111bb8ae2755e93c9072",
+    "test": "nice -n 10 env -u BEADS_DB -u BR_BIN PORTABLE_PATHS_PROFILE=1 bun test tests/cli/portable-paths.test.ts -t \"gates: pre-commit rejects shipped local paths and exempts tests\"",
+    "result": "1 pass, 0 fail, 21 expects, 54.94 s",
+    "hook_commit_ms": [8677, 4460, 2105, 3426, 2519, 3870, 1930, 3318, 1932, 3119, 1875, 2818, 3123, 1648],
+    "hook_commit_sum_ms": 44820,
+    "hook_commit_mean_ms": 3201,
+    "hook_commit_median_ms": 2969,
+    "hook_commit_nearest_rank_p95_ms": 8677,
+    "dominant_cost": "The complete installed hook chain repeats for each git commit; hook-enabled commits account for 81.58 percent of this test wall time.",
+    "source_evidence": "Tracker comment 17068; one unloaded profile run, no cross-run percentile claim."
+  },
+  "loaded_prior_source": {
+    "source_head": "214c48d4c441abb4e5c78fff77692744ace2ade5",
+    "burner_pids": [41510, 41511, 41512, 41513, 41514, 41516, 41517, 41518],
+    "runs": [
+      {"rc": 0, "tests": 10, "failures": 0, "errors": 0, "skipped": 0, "elapsed_s": 131.035},
+      {"rc": 0, "tests": 10, "failures": 0, "errors": 0, "skipped": 0, "elapsed_s": 124.818},
+      {"rc": 0, "tests": 10, "failures": 0, "errors": 0, "skipped": 0, "elapsed_s": 121.394}
+    ],
+    "split_case_nearest_rank_p95_ms": {
+      "direct and test exemption": 13781,
+      "joined and tilde": 19187,
+      "escaped and nested": 19030,
+      "Python, heredoc, prefix and comment": 17381
+    },
+    "half_cap_ms": 60000,
+    "source_evidence": "Tracker comment 17090; this is an earlier exact-source export, not the current 5a7612f base. All workers were observed active before and after every run and absent after cleanup."
+  },
+  "current_parent_clean_copy": {
+    "source_head": "5a7612f85891db4fb5a50f7e9189fa82ea1a61ef",
+    "command": "omp-kit slice-verify --overlay tests/cli/portable-paths.test.ts --test tests/cli/portable-paths.test.ts --project /Users/josh/Developer/omp-kit-companion --json",
+    "result": "CLEAN",
+    "base": {"rc": 1, "pass": 2, "fail": 5, "elapsed_s": 95.8322535},
+    "overlay": {"rc": 0, "pass": 10, "fail": 0, "elapsed_s": 419.3793125},
+    "introduced_failures": [],
+    "overlay_paths": ["tests/cli/portable-paths.test.ts"],
+    "source_evidence": "Exact git archive of 5a7612f with one reserved test-file overlay; native slice-verify outcome is recorded in the tracker evidence comment. The base failures disappear in the overlay after excluding inherited BEADS_DB and BR_BIN from fixture environments."
+  },
+  "private_index_selfcheck": {
+    "source_head": "5a7612f85891db4fb5a50f7e9189fa82ea1a61ef",
+    "members": {
+      "kitlib": 0,
+      "tempsafe": 0,
+      "pysafe": 0,
+      "readme": 0,
+      "imports": 0,
+      "fragments": 0,
+      "sources": 0,
+      "regexploit": 0
+    }
+  },
+  "baseline_replay": {
+    "source_head": "5a7612f85891db4fb5a50f7e9189fa82ea1a61ef",
+    "target": "gates: pre-commit rejects shipped local paths and exempts tests",
+    "load": "One exact-baseline target case at a time with eight owned CPU burners; this is not a full-suite replay.",
+    "initial_attempt": {
+      "burner_pids": [1333, 1334, 1335, 1336, 1337, 1338, 1339, 1341],
+      "junit": {"suite_tests": 7, "assertions": 21, "failures": 0, "skipped": 6, "target_time_ms": 108086.808},
+      "driver_exit_code": 1,
+      "child_exit_code": null,
+      "driver_error": "TextDecoder.decode expects an ArrayBuffer or TypedArray after the test and JUnit report completed.",
+      "cleanup_ps_rc": 1,
+      "remaining_pids": ""
+    },
+    "corrected_capture": {
+      "burner_pids": [97457, 97458, 97459, 97460, 97461, 97462, 97463, 97464],
+      "child_rc": 0,
+      "child_timed_out": false,
+      "elapsed_s": 68.401681875,
+      "junit": {"suite_tests": 7, "assertions": 21, "failures": 0, "skipped": 6, "target_case": "gates: pre-commit rejects shipped local paths and exempts tests", "target_time_ms": 68358.706},
+      "workers_live_before_and_after": true,
+      "cleanup_ps_rc": 1,
+      "remaining_pids": ""
+    },
+    "result": "The old single test passed under this eight-burner scenario, so the reported 120002.20 ms full-suite timeout was not reproduced by the target-only replay. The historical failure remains lead-recorded evidence; a full suite was not repeated."
+  },
+  "current_parent_loaded_runs": {
+    "source_head": "5a7612f85891db4fb5a50f7e9189fa82ea1a61ef",
+    "admission": {"sampled_at": "2026-11-01T02:14:22.281Z", "heavy_jobs": 0, "cpu_idle_pct": 62.89, "load1": 24.5386, "cores": 32, "free_bytes": 141853200384},
+    "burner_pids": [84405, 84407, 84408, 84409, 84410, 84411, 84413, 84414],
+    "runs": [
+      {"rc": 0, "tests": 10, "failures": 0, "errors": 0, "skipped": 0, "elapsed_s": 271.704394, "profile_count": 36, "profile_sum_ms": 189419, "profile_max_ms": 27285},
+      {"rc": 0, "tests": 10, "failures": 0, "errors": 0, "skipped": 0, "elapsed_s": 138.506569, "profile_count": 36, "profile_sum_ms": 99109, "profile_max_ms": 6998},
+      {"rc": 0, "tests": 10, "failures": 0, "errors": 0, "skipped": 0, "elapsed_s": 147.061762, "profile_count": 36, "profile_sum_ms": 105614, "profile_max_ms": 7676}
+    ],
+    "split_case_nearest_rank_p95_ms": {
+      "direct and test exemption": 30114.236,
+      "joined and tilde": 36333.935,
+      "escaped and nested": 23618.752,
+      "Python, heredoc, prefix and comment": 21017.334
+    },
+    "split_case_sample_count": 3,
+    "split_case_samples_ms": {
+      "direct and test exemption": [13781, 16039.825, 30114.236],
+      "joined and tilde": [19268.566, 22815.542, 36333.935],
+      "escaped and nested": [18570.276, 20606.169, 23618.752],
+      "Python, heredoc, prefix and comment": [18124.417, 18850.852, 21017.334]
+    },
+    "half_cap_ms": 60000,
+    "all_split_case_p95_below_half_cap": true,
+    "workers_observed_live_before_and_after": true,
+    "post_run_cpu_pct_range": [97.3, 100.0],
+    "cleanup_ps_rc": 1,
+    "remaining_pids": ""
+  },
+  "limitations": [
+    "The recorded 120002.20 ms original full-suite timeout is prior lead evidence. The target-only eight-burner baseline passed; the full suite was not re-run per the lead's no-confirmation rule.",
+    "No publication, release, installed-runtime qualification, or independent non-author grade is claimed.",
+    "The first baseline wrapper attempt exited 1 after producing JUnit because of a TextDecoder argument bug; the corrected-capture attempt recorded child rc=0 and the same passing target case."
+  ]
+}
