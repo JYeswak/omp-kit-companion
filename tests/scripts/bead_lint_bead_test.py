@@ -136,15 +136,15 @@ class BeadCli(unittest.TestCase):
         self.assertEqual((code, verdict["verdict"]), (3, "UNVERIFIED"), verdict)
 
     # LINTIDBOUND1 (ompkit-fp72.135.3.83): a parent id is never read inside a child id.
-    PARENT = "lintcli-par"
-    CHILD = "lintcli-par.1"
-    SIBLING = "lintcli-par.19"
-    CHILD_TEXT = "WHAT: (a) the fixture does one thing. WHY: parent: lintcli-par\ndiscovered-from: lintcli-par.19"
+    PARENT = "ompkit-x"
+    CHILD = "ompkit-x.1"
+    SIBLING = "ompkit-x.19"
+    CHILD_TEXT = "WHAT: (a) the fixture does one thing. WHY: parent: ompkit-x\ndiscovered-from: ompkit-x.19"
     CHILD_EDGES = [
         {"id": PARENT, "dependency_type": "parent-child", "status": "open", "title": "parent"},
         {"id": SIBLING, "dependency_type": "discovered-from", "status": "open", "title": "sibling"},
     ]
-    CHILD_ONLY_TEXT = "WHAT: (a) the fixture does one thing. WHY: discovered-from: lintcli-par.19"
+    CHILD_ONLY_TEXT = "WHAT: (a) the fixture does one thing. WHY: discovered-from: ompkit-x.19"
 
     def test_child_only_text_does_not_infer_parent(self) -> None:
         bead = clean_bead(id=self.CHILD, description=self.CHILD_ONLY_TEXT, dependencies=self.CHILD_EDGES)
