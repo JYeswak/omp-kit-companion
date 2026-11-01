@@ -7,6 +7,7 @@ import { admitClaimCut } from "../../src/claim-cut.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { callerSeat, defaultRunner } from "../../src/scratch.ts";
+import { nativeBr } from "./lib/native-br.ts";
 
 const base = ownedTmp("preflight-test").path;
 
@@ -275,14 +276,17 @@ async function brun(args: string[], cwd: string, env: Record<string, string>, br
 function beadsSnapshot(beadsDir: string): string[] {
 	return readdirSync(beadsDir).sort().map(name => `${name}\t${statSync(join(beadsDir, name), { bigint: true }).mtimeNs}`);
 }
+function fixtureBootstrapBr(harness: { brBinDir: string } | null): string {
+	if (harness) return harness.brBinDir ? join(harness.brBinDir, "br") : "br";
+	return nativeBr();
+}
 async function claimFixture(name: string, actor: string, root: string, brBin: string): Promise<{ repo: string; gated: string; eligible: string }> {
 	const repo = join(root, name);
 	mkdirSync(repo, { recursive: true });
 	await sh(["git", "init", "-q"], repo);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty", "-m", "root [test]"], repo);
-	// brBin is the resolved harness shim (absolute path, read-only outside
-	// its baked scratch) when a harness is present, else ambient `br`;
-	// never an accidentally shadowed binary for scope-bearing calls.
+	// Preserve the resolved harness authority exactly. Only local fixture
+	// bootstrap selects the native backend rather than a caller's policy shim.
 	mkdirSync(join(repo, ".beads"), { recursive: true });
 	await brun(["init", "--db", join(repo, ".beads", "beads.db")], repo, { BEADS_DB: join(repo, ".beads", "beads.db") }, brBin);
 	const ac = "- [ ] [a] [build] probe passes `true` -> rc 0";
@@ -293,6 +297,28 @@ async function claimFixture(name: string, actor: string, root: string, brBin: st
 	return { repo, gated, eligible };
 }
 
+test.skipIf(!hasBr || !hasOmpKit)("local preflight bootstrap survives a guarded outer actor while the old ambient choice is refused", { timeout: 120000 }, async () => {
+	const owned = ownedTmp("preflight-bootstrap-actor");
+	const savedActor = process.env.AGENT_NAME, savedPath = process.env.PATH, savedDb = process.env.BEADS_DB;
+	const bin = join(owned.path, "policy-bin");
+	mkdirSync(bin);
+	symlinkSync(join(import.meta.dir, "../../scripts/br-shim.sh"), join(bin, "br"));
+	try {
+		process.env.AGENT_NAME = "OuterFixtureIdentity";
+		process.env.PATH = `${bin}:${savedPath ?? ""}`;
+		delete process.env.BEADS_DB;
+		await expect(claimFixture("old-ambient", "BootstrapActor", owned.path, "br")).rejects.toThrow("BR_SHIM_ACTOR_MISMATCH");
+		const positive = await claimFixture("native-local", "BootstrapActor", owned.path, fixtureBootstrapBr(null));
+		expect(await beadRow(positive.repo, positive.gated)).toEqual({ status: "open", assignee: null, labels: expect.arrayContaining(["needs-director"]) });
+		expect(await beadRow(positive.repo, positive.eligible)).toEqual({ status: "open", assignee: null, labels: [] });
+	} finally {
+		if (savedActor === undefined) delete process.env.AGENT_NAME; else process.env.AGENT_NAME = savedActor;
+		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+		if (savedDb === undefined) delete process.env.BEADS_DB; else process.env.BEADS_DB = savedDb;
+		owned.cleanup();
+	}
+});
+
 test.skipIf(!hasBr || !hasOmpKit)("preflight fixtures keep inherited tracker writes inside the child database", { timeout: 120000 }, async () => {
 	const harness = resolveHarness();
 	const scratchRoot = harness ? join(harness.scratch, "tmp") : base;
@@ -302,7 +328,7 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight fixtures keep inherited tracker wri
 	const beadsDir = join(parent, ".beads");
 	mkdirSync(beadsDir, { recursive: true });
 	const parentDb = join(beadsDir, "beads.db");
-	const brBin = harness && harness.brBinDir ? join(harness.brBinDir, "br") : "br";
+	const brBin = fixtureBootstrapBr(harness);
 	const savedDb = process.env.BEADS_DB;
 
 	try {
@@ -426,9 +452,9 @@ test.skipIf(!hasBr || !hasOmpKit)("preflight claim: unresolved needs-director re
 	// Grader-visible record: which root the positive was initialized
 	// against. A local run records branch=local and proves only the
 	// control; the harness positive requires branch=harness.
-	console.log(`DEFY7_FIXTURE branch=${harness ? "harness" : "local"} setter=${harness?.setter ?? "none"} scratch=${harness?.scratch ?? "none"} br=${harness && harness.brBinDir ? join(harness.brBinDir, "br") : "ambient"} dir=${dir}`);
 	try {
-		const brBin = harness && harness.brBinDir ? join(harness.brBinDir, "br") : "br";
+		const brBin = fixtureBootstrapBr(harness);
+		console.log(`DEFY7_FIXTURE branch=${harness ? "harness" : "local"} setter=${harness?.setter ?? "none"} scratch=${harness?.scratch ?? "none"} br=${brBin} dir=${dir}`);
 		const { repo, gated, eligible } = await claimFixture("needs-director", actor, dir, brBin);
 		process.env.BEADS_DB = join(repo, ".beads", "beads.db");
 	// unit: the refusal is the named NEEDS_DIRECTOR code, and it is the sole
