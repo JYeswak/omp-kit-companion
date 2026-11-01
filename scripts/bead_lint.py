@@ -21,6 +21,10 @@ Check catalog (all trace to the beads-north-star standard):
   i-mention-edges  j-stale-blocked (warning)  k-close-receipt
   l-ac-phase  l-ac-phase-legacy (warning)  r-verify-replayable (admission only)
   m-goal-path (admission + goal_path_report; legacy rows are warnings)
+RELLINT1 admission: a kind:goal/pillar:release acceptance must execute the
+release-local.sh dry-run using its default freshly fetched origin head.
+An explicit --source override or a printed command is not that readback;
+positive bead-closure prerequisites never substitute for the release path.
 m-goal-path (CUTGRAPH1 ompkit-774u.61): a bead in scope that is neither
 kind:goal nor kind:intake needs a blocks path into an open kind:goal (the
 goal or a bead on its path depends on it); the create and update gates refuse
@@ -54,6 +58,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -1706,6 +1711,66 @@ def template_missing(
             missing.append(ACCEPTANCE_HEADER)
     return missing
 
+_RELEASE_CLOSURE_RE = re.compile(
+    r"^(?:(?:all|every|each)\s+(?:(?:pinned|child|release)\s+)?"
+    r"(?:beads?|children|issues?)\s+(?:(?:are|is)\s+|must\s+be\s+)?closed\b"
+    r"|(?:tag(?:\s+the)?\s+release\s+(?:only\s+)?after|no\s+release\s+tag\s+until)\s+"
+    r"(?:all\s+)?(?:(?:pinned|child)\s+)?(?:beads?|children|issues?)\s+"
+    r"(?:(?:are|is)\s+|must\s+be\s+)?closed\b)",
+    re.IGNORECASE,
+)
+
+
+def _origin_release_dry_run(command: str) -> bool:
+    """Recognize a simple direct/bash/sh invocation; unsupported shell forms do not qualify."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return False
+    if any(word and all(char in ";&|" for char in word) for word in words):
+        return False
+    if words and Path(words[0]).name in ("bash", "sh"):
+        words = words[1:]
+    if not words or Path(words[0]).name != "release-local.sh":
+        return False
+    dry_run = False
+    index = 1
+    while index < len(words):
+        if words[index] == "--dry-run":
+            dry_run = True
+            index += 1
+        elif words[index] == "--version" and index + 1 < len(words):
+            index += 2
+        else:
+            return False
+    return dry_run
+
+
+def release_goal_failures(bead: dict) -> list[str]:
+    """Release goals depend on the real release check, not closure-count ceremony."""
+    if not {"kind:goal", "pillar:release"}.issubset(bead.get("labels") or []):
+        return []
+    items = ac_phase.parse(bead.get("acceptance_criteria"))
+    failures = []
+    if not any(
+        _origin_release_dry_run(command)
+        for item in items
+        for command in item["line"].split("`")[1::2]
+    ):
+        failures.append("RELEASE_DRYRUN_BOX_MISSING")
+    for item in items:
+        line = item["text"]
+        position = 0
+        while token := ac_phase.RUN_TOKEN_RE.match(line, position):
+            position = token.end()
+        if _RELEASE_CLOSURE_RE.match(line[position:].lstrip()):
+            failures.append("RELEASE_BEAD_CLOSURE_PREREQUISITE")
+            break
+    return failures
+
+
 
 def lint_bead(bead: dict, byid: set[str] | None = None) -> dict[str, list[str]]:
     """Per-bead LINTGATE1 verdict over GATE_CHECKS.
@@ -1750,6 +1815,7 @@ def lint_bead_failures(
     ]
     failures.extend(elapsed_time_mix_failure(bead))
     failures.extend(ac_phase_failure(bead))
+    failures.extend(release_goal_failures(bead))
     if graph is not None:
         failures.extend(goal_path_failure(bead, graph, dependents))
     if template_missing(
