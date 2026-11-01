@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { applyActivationManifest, recordOptOut, updatePostApplyEnvelope } from "../../src/activation.ts";
@@ -77,6 +77,63 @@ test("opt-outs skip without failure, envelope stays UPDATED with records", async
 	const out = updatePostApplyEnvelope(envelopeBase, { ok: true, detail: "linked" }, result, root);
 	expect(out.code).toBe(0);
 	expect(out.data["overall"]).toBe("UPDATED");
+});
+test("manifest apply ignores an unrelated caller project guard", async () => {
+	const { root, home, stateRoot } = fixtureDirs("unrelated-cwd");
+	const project = join(base, "unrelated-project");
+	mkdirSync(project, { recursive: true });
+	symlinkSync(base, join(project, ".omp"));
+	const callerDirectory = process.cwd();
+	try {
+		process.chdir(project);
+		const result = await applyActivationManifest({ root, home, stateRoot, binary: "/nonexistent/omp-kit",
+			exec: okService(), hookIo: hookIo([]) });
+		expect(result.ok, JSON.stringify(result)).toBe(true);
+		expect(result.failed).toEqual([]);
+	} finally {
+		process.chdir(callerDirectory);
+	}
+});
+
+test("opt-out keeps shared support dependencies untouched", async () => {
+	const { root, home, stateRoot } = fixtureDirs("support-optout");
+	const entry = 'import { helper } from "../src/helper.ts";\nexport const x = helper;\n';
+	const extensions = ["extensions/hello.ts", "extensions/other.ts"];
+	const newHelper = "export const helper = 'new';\n";
+	mkdirSync(join(root, "src"), { recursive: true });
+	for (const name of ["hello.ts", "other.ts"]) writeFileSync(join(root, "extensions", name), entry);
+	writeFileSync(join(root, "src", "helper.ts"), newHelper);
+	writeFileSync(join(root, "policy", "extensions.json"), JSON.stringify({ extensions: ["hello.ts", "other.ts"], skipProfiles: [] }));
+	writeFileSync(join(root, "package.json"), JSON.stringify({ version: "9.9.9", omp: { extensions, notLoadedExtensions: {} } }));
+	mkdirSync(join(home, ".omp", "omp-extensions"), { recursive: true });
+	for (const name of ["hello.ts", "other.ts"]) writeFileSync(join(home, ".omp", "omp-extensions", name), entry);
+	recordOptOut(home, "extension:extensions/other.ts", "retain installed extension");
+
+	const result = await applyActivationManifest({
+		root, home, stateRoot, binary: "/nonexistent/omp-kit", exec: okService(), hookIo: hookIo([]),
+	});
+	expect(result.ok, JSON.stringify(result)).toBe(true);
+	expect(existsSync(join(home, ".omp", "src", "helper.ts"))).toBe(false);
+	expect(result.skipped.map(entry => entry.item)).toContain("extensions");
+});
+test("opt-out prevents relinking an already-installed extension", async () => {
+	const { root, home, stateRoot } = fixtureDirs("preinstalled-optout");
+	const profile = join(home, ".omp", "agent");
+	mkdirSync(profile, { recursive: true });
+	const config = join(profile, "config.yml");
+	writeFileSync(config, "extensions: []\n");
+	const installed = join(home, ".omp", "omp-extensions");
+	mkdirSync(installed, { recursive: true });
+	writeFileSync(join(installed, "hello.ts"), readFileSync(join(root, "extensions", "hello.ts")));
+	recordOptOut(home, "extension:extensions/hello.ts", "keep disabled");
+
+	const result = await applyActivationManifest({
+		root, home, stateRoot, binary: "/nonexistent/omp-kit", exec: okService(), hookIo: hookIo([]),
+	});
+	expect(result.ok, JSON.stringify(result)).toBe(true);
+	expect(result.failed).toEqual([]);
+	expect(result.skipped.map(entry => entry.item)).toContain("extensions");
+	expect(readFileSync(config, "utf8")).toBe("extensions: []\n");
 });
 
 test("planted: a failing service apply reports FINDINGS, never UPDATED", async () => {

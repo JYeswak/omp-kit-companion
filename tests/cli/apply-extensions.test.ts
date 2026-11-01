@@ -1,9 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { writeProfileConfig } from "./profile-fixture.ts";
 import { applyExtensions, inspectExtensionGuard, planExtensions } from "../../src/apply-extensions.ts";
+import { planNamedApply } from "../../src/apply.ts";
+import { checkExtensionImports } from "../../src/extensions.ts";
 const fixtures: string[] = [];
 function fixture() {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
@@ -47,6 +49,37 @@ test("unresolvable fleet-guard import refuses and rolls back the complete receip
 	expect(() => applyExtensions(plan)).toThrow("EXTENSION_IMPORTS_UNRESOLVED");
 	expect(existsSync(join(f.home, ".omp", "omp-extensions", "fleet-guard.ts"))).toBe(false);
 	expect(readFileSync(config)).toEqual(beforeConfig);
+});
+test("declared extension imports are installed once as manifest entrypoints", () => {
+	const f = fixture(), config = f.profile("default");
+	writeFileSync(join(f.release, "policy", "extensions.json"),
+		JSON.stringify({ extensions: ["kit-guard-optin.ts", "fleet-guard.ts"], skipProfiles: [] }));
+	writeFileSync(join(f.release, "extensions", "kit-guard-optin.ts"),
+		'import "./fleet-guard.ts";\nexport default function guard() {}\n');
+	writeFileSync(join(f.release, "extensions", "fleet-guard.ts"), "export default function fleet() {}\n");
+	const plan = planExtensions({ ...f.input, includeDefault: true });
+	const extensionDir = join(f.home, ".omp", "omp-extensions");
+	expect(plan.skippedReasons).toEqual([]);
+	expect(plan.steps.filter(step => step.kind === "extension").map(step => step.path))
+		.toEqual([join(extensionDir, "kit-guard-optin.ts"), join(extensionDir, "fleet-guard.ts")]);
+	applyExtensions(plan);
+	expect(readFileSync(config, "utf8")).toContain(join(extensionDir, "fleet-guard.ts"));
+	expect(checkExtensionImports({ home: f.home })).toMatchObject({ status: "OK", findings: [] });
+});
+
+
+test("profile-installed extension dependencies resolve from the copied tree", () => {
+	const workspace = ownedTmp("p13-extension-imports", {
+		root: process.env.TMPDIR ?? join(import.meta.dir, "../../var/agent-tmp"),
+	}).path;
+	fixtures.push(workspace);
+	const root = resolve(import.meta.dir, "../..");
+	const home = join(workspace, "home");
+	mkdirSync(home, { recursive: true });
+	writeProfileConfig(home, "default", "model: test\nextensions: []\n", 0o666);
+	const plan = planExtensions({ root, home, stateRoot: join(workspace, "state"), profiles: "all", includeDefault: true });
+	applyExtensions(plan);
+	expect(checkExtensionImports({ home })).toMatchObject({ status: "OK", files_checked: 15, findings: [] });
 });
 
 test("skipProfiles excludes named profile while install and default config share one receipt", () => {
@@ -315,4 +348,10 @@ test("corrupt config in one profile skips with reason instead of aborting the ot
 	applyExtensions(plan);
 	expect(readFileSync(good, "utf8")).toContain(f.destination);
 	expect(readFileSync(corrupt, "utf8")).toBe("extensions: [broken\n");
+});
+test("named extension plans expose HOME-relative destinations", () => {
+	const f = fixture();
+	const config = f.profile("default");
+	const plan = planNamedApply({ ...f.input, scope: "extensions" });
+	expect(plan.steps.map(step => step.path)).toEqual([relative(f.home, f.destination), relative(f.home, config)]);
 });

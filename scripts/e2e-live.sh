@@ -270,6 +270,12 @@ reap_mock() {
     wait "$MP" 2>/dev/null
     mock_cleanup_rc=$?
   fi
+  # Remove the reaped PID before a later scenario can reuse it.
+  still_tracked=""
+  for entry in $MOCK_PIDS; do
+    [ "${entry%%:*}" = "$MP" ] || still_tracked="$still_tracked $entry"
+  done
+  MOCK_PIDS=$still_tracked
   MP=""
 }
 # Normal-path group reap: the limit wrapper's waitpid returns when the omp

@@ -452,14 +452,18 @@ export async function applyActivationManifest(input: { root: string; home: strin
 		}
 	}
 	try {
-		const plan = planExtensions({ root, home, stateRoot, project: process.cwd(), profiles: "all", includeDefault: true });
+		const plan = planExtensions({ root, home, stateRoot, profiles: "all", includeDefault: true });
 		const destination = join(home, ".omp", "omp-extensions");
 		const manifestId = (stepPath: string): string => `extension:extensions/${relative(destination, stepPath)}`;
-		const touch = plan.steps.filter((step) =>
-			step.kind === "extension" && step.beforeSha256 !== step.afterSha256 &&
-			optedOut.has(manifestId(step.path)));
-		if (touch.length > 0) {
-			skipped.push({ item: "extensions", reason: `opted-out extensions would change: ${touch.map((step) => manifestId(step.path)).join(", ")}` });
+		const optedOutChanges = new Set<string>();
+		for (const step of plan.steps) {
+			if (step.beforeSha256 === step.afterSha256) continue;
+			const ids = step.kind === "extension" ? [manifestId(step.path)] : [];
+			for (const owner of step.owners ?? []) ids.push(`extension:extensions/${owner}`);
+			for (const id of ids) if (optedOut.has(id)) optedOutChanges.add(id);
+		}
+		if (optedOutChanges.size > 0) {
+			skipped.push({ item: "extensions", reason: `opted-out extensions would change: ${[...optedOutChanges].sort().join(", ")}` });
 		} else {
 			extensionsApplied += applyExtensions(plan).files;
 		}

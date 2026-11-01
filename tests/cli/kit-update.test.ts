@@ -10,8 +10,9 @@ import { runFastTest } from "../../src/test-runner.ts";
 import type { ReleaseAsset, ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import { applyKitUpdate, judgeKitPostcheck, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
+import { recordOptOut } from "../../src/activation.ts";
 import { kitUpdateJobOverall } from "../../src/kit-update-job.ts";
-import { serviceLabel } from "../../src/service.ts";
+import { KNOWN_JOBS, serviceLabel } from "../../src/service.ts";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run as runBounded } from "../../src/kitlib/run";
@@ -1002,7 +1003,11 @@ os.execv(sys.executable, [sys.executable, FIXTURE, *args])
 
 test("compiled synthetic predecessor authenticates, activates, and leaves unavailable postcheck pending", async () => {
 	const repoRoot = realpathSync(resolve(import.meta.dir, "../.."));
-	const scratchRoot = realpathSync(ownedTmp("kit-update-compiled", { root: scratch }).path);
+	const runtimeScratchParent = join(repoRoot, "var", "agent-tmp");
+	mkdirSync(runtimeScratchParent, { recursive: true, mode: 0o700 });
+	const callerWorkRoot = ownedTmp("kit-update-caller", { root: runtimeScratchParent });
+	const scratchOwned = ownedTmp("kit-update-compiled", { root: scratch });
+	const scratchRoot = realpathSync(scratchOwned.path);
 		const home = join(scratchRoot, "home");
 		const buildHome = join(scratchRoot, "build-home");
 		const prefix = join(scratchRoot, "positive-prefix");
@@ -1011,6 +1016,7 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 		for (const directory of [home, buildHome, negativeHome]) mkdirSync(directory, { mode: 0o700 });
 		const previous = buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.2", hostPlatform);
 		const candidate = buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.3", hostPlatform);
+		const failureCandidate = buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.4", hostPlatform);
 		const tokenConfig = join(scratchRoot, "gh-config-token");
 		const configOnly = join(scratchRoot, "gh-config-only");
 		mkdirSync(tokenConfig, { mode: 0o700 });
@@ -1023,6 +1029,8 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 		if (!python) throw new Error("python3 is required for the compiled updater regression");
 		symlinkSync(python, join(toolBin, "python3"));
 		symlinkSync(process.execPath, join(toolBin, "bun"));
+		const launchctlStub = join(toolBin, "launchctl");
+		writeFileSync(launchctlStub, "#!/bin/sh\nprintf '%s\\n' 'unexpected launchctl call in isolated updater test' >&2\nexit 97\n", { mode: 0o700, flag: "wx" });
 		const path = [ghBin, toolBin, "/usr/bin", "/bin"].join(":");
 		const installerEnv = {
 			PATH: path, HOME: home, TMPDIR: scratchRoot,
@@ -1050,6 +1058,8 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 		expect(configOnlyReports.every(report => report.auth_mode === "config-only" &&
 			report.gh_config_dir_scoped === true && report.unrelated_context_absent === true)).toBe(true);
 
+		for (const name of Object.keys(KNOWN_JOBS))
+			recordOptOut(home, `service:${name}`, "isolated updater test must not touch launchd");
 		const updaterEnv = {
 			PATH: path, HOME: home, TMPDIR: scratchRoot, CI: "1",
 			GH_TOKEN: "SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL",
@@ -1058,7 +1068,8 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 			GH_ENTERPRISE_TOKEN: "SYNTHETIC_UNRELATED_GH_TOKEN",
 			PI_BRIDGE_SENTINEL: "SYNTHETIC_PI_BRIDGE_CONTEXT",
 			MCP_PROVIDER_SENTINEL: "SYNTHETIC_MCP_PROVIDER_CONTEXT",
-			OMP_KIT_TEST_WORK_ROOT: scratchRoot, OMP_KIT_CASE_CWD: repoRoot,
+			OMP_KIT_TEST_WORK_ROOT: callerWorkRoot.path, OMP_KIT_CASE_CWD: repoRoot,
+			OMP_KIT_TEST_LABEL_NAMESPACE: "com.omp-kit.test.compiled-update",
 		};
 		const stable = join(prefix, "bin", "omp-kit");
 		const update = Bun.spawnSync([stable, "update", "--apply", "--yes", "--version", candidate.version,
@@ -1067,7 +1078,7 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 		});
 		const updateStdout = update.stdout.toString();
 		const updateStderr = update.stderr.toString();
-		// OMP is deliberately absent: auth must pass through activation, while the unchanged full postcheck remains blocked.
+		// OMP is deliberately absent, so this update stays PARTIAL before relink or manifest application.
 		expect(update.exitCode).toBe(1);
 		const updateEnvelope = JSON.parse(updateStdout) as {
 			data: {
@@ -1081,6 +1092,8 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 		expect(updateEnvelope.data.postcheck_detail.failed_stages).toContain("fast-test");
 		expect(updateEnvelope.data.postcheck_detail.failed_stages).toContain("omp-version");
 		expect(updateEnvelope.data.receipt_id).toBeTruthy();
+		expect(updateEnvelope.data).not.toHaveProperty("plugin_relink");
+		expect(updateEnvelope.data).not.toHaveProperty("manifest");
 		expect(readlinkSync(stable)).toBe(`../releases/${candidate.version}/bin/omp-kit`);
 		const version = Bun.spawnSync([stable, "--version"], { cwd: home, env: updaterEnv, stdout: "pipe", stderr: "pipe" });
 		expect(version.exitCode).toBe(0);
@@ -1108,7 +1121,7 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 		writeFileSync(join(configOnly, "reject-source"), "synthetic invalid authority\n", { mode: 0o600, flag: "wx" });
 		const noTokenUpdaterEnv = {
 			PATH: path, HOME: negativeHome, TMPDIR: scratchRoot, GH_CONFIG_DIR: configOnly,
-			OMP_KIT_TEST_WORK_ROOT: scratchRoot, OMP_KIT_CASE_CWD: repoRoot,
+			OMP_KIT_TEST_WORK_ROOT: callerWorkRoot.path, OMP_KIT_CASE_CWD: repoRoot,
 		};
 		const negativeStable = join(negativePrefix, "bin", "omp-kit");
 		const refused = Bun.spawnSync([negativeStable, "update", "--apply", "--yes", "--version", candidate.version,
@@ -1125,16 +1138,107 @@ test("compiled synthetic predecessor authenticates, activates, and leaves unavai
 			.split("\n").filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>);
 		expect(configOnlyAfterRefusal.some(report => report.source_lookup === true &&
 			report.auth_mode === "config-only" && report.gh_config_dir_scoped === true)).toBe(true);
+		const ompPath = Bun.which("omp");
+		if (!ompPath) throw new Error("omp is required for the successful compiled updater regression");
+		for (const name of Object.keys(KNOWN_JOBS))
+			recordOptOut(negativeHome, `service:${name}`, "isolated updater test must not touch launchd");
+		mkdirSync(join(negativeHome, ".omp"), { recursive: true, mode: 0o700 });
+		writeFileSync(join(negativeHome, ".omp", "marketplaces.json"), "{}\n");
+		for (const profile of RECONCILE_PROFILES) {
+			const agent = profile === "default"
+				? join(negativeHome, ".omp", "agent")
+				: join(negativeHome, ".omp", "profiles", profile, "agent");
+			mkdirSync(agent, { recursive: true, mode: 0o700 });
+			writeFileSync(join(agent, "config.yml"), "ttsr:\n  disabledRules: []\n");
+			const pluginDir = profile === "default"
+				? join(negativeHome, ".omp", "plugins")
+				: join(negativeHome, ".omp", "profiles", profile, "plugins");
+			const link = reconcilePluginLink(negativeHome, profile);
+			mkdirSync(dirname(link), { recursive: true, mode: 0o700 });
+			symlinkSync(join(negativePrefix, "releases", previous.version), link);
+			writeFileSync(join(pluginDir, "omp-plugins.lock.json"), JSON.stringify({
+				plugins: { "omp-kit-companion": { version: previous.version, enabled: true } }, settings: {},
+			}));
+			writeFileSync(join(pluginDir, "installed_plugins.json"), "{}");
+			writeFileSync(join(pluginDir, "package.json"), JSON.stringify({
+				name: "omp-plugins", private: true,
+				dependencies: { "omp-kit-companion": `github:JYeswak/omp-kit-companion#v${previous.version}` },
+			}));
+		}
+		const successPath = [ghBin, toolBin, dirname(ompPath), "/usr/bin", "/bin"].join(":");
+		const successEnv = { ...updaterEnv, PATH: successPath, HOME: negativeHome };
+		const success = await runBounded([negativeStable, "update", "--apply", "--yes", "--version", candidate.version,
+			"--index", candidate.indexPath, "--archive", candidate.archivePath, "--json"], {
+			deadline_s: 900, cwd: negativeHome, env: successEnv,
+		});
+		const successStdout = Buffer.from(success.stdout).toString("utf8");
+		const successStderr = Buffer.from(success.stderr).toString("utf8");
+		const successEnvelope = JSON.parse(successStdout) as {
+			data: {
+				action: string; active_version: string | null; postcheck: string; reason?: string | null;
+				postcheck_detail?: { failed_stages?: string[]; failures?: string[] };
+				plugin_relink: string; plugin_relink_detail?: string;
+				manifest: { status: string; rules_applied: number; extensions_applied: number; skipped: { item: string }[]; failed: { item: string; detail: string }[] };
+			};
+			errors?: { code?: string }[];
+		};
+		const failureSummary = JSON.stringify({
+			action: successEnvelope.data?.action, reason: successEnvelope.data?.reason,
+			postcheck: successEnvelope.data?.postcheck, postcheck_detail: successEnvelope.data?.postcheck_detail,
+			plugin_relink: successEnvelope.data?.plugin_relink, plugin_relink_detail: successEnvelope.data?.plugin_relink_detail,
+			manifest_failed: successEnvelope.data?.manifest?.failed,
+			error_codes: successEnvelope.errors?.map(error => error.code),
+		});
+		expect(success.timed_out, failureSummary).toBe(false);
+		expect(success.rc, failureSummary).toBe(0);
+		expect(successEnvelope.data).toMatchObject({
+			action: "UPDATED", active_version: candidate.version, postcheck: "PASS", plugin_relink: "APPLIED",
+		});
+		expect(successEnvelope.data.manifest.status).toBe("APPLIED");
+		expect(successEnvelope.data.manifest.rules_applied).toBeGreaterThan(0);
+		expect(successEnvelope.data.manifest.extensions_applied).toBeGreaterThan(0);
+		expect(successEnvelope.data.manifest.failed).toEqual([]);
+		expect(successEnvelope.data.manifest.skipped.filter(row => row.item.startsWith("service:")))
+			.toHaveLength(Object.keys(KNOWN_JOBS).length);
+		for (const profile of RECONCILE_PROFILES)
+			expect(realpathSync(reconcilePluginLink(negativeHome, profile)))
+				.toBe(realpathSync(join(negativePrefix, "releases", candidate.version)));
+		expect(readlinkSync(negativeStable)).toBe(`../releases/${candidate.version}/bin/omp-kit`);
+		const dualProfile = join(negativeHome, ".omp", "profiles", "relink-negative", "agent");
+		mkdirSync(dualProfile, { recursive: true, mode: 0o700 });
+		writeFileSync(join(dualProfile, "config.yml"), "ttsr:\n  disabledRules: []\n");
+		writeFileSync(join(dualProfile, "config.yaml"), "ttsr:\n  disabledRules: []\n");
+		const relinkFailure = await runBounded([negativeStable, "update", "--apply", "--yes", "--version", failureCandidate.version,
+			"--index", failureCandidate.indexPath, "--archive", failureCandidate.archivePath, "--json"], {
+			deadline_s: 900, cwd: negativeHome, env: successEnv,
+		});
+		const relinkFailureStdout = Buffer.from(relinkFailure.stdout).toString("utf8");
+		const relinkFailureSummary = JSON.stringify({ rc: relinkFailure.rc, timed_out: relinkFailure.timed_out,
+			stdout: relinkFailureStdout, stderr: Buffer.from(relinkFailure.stderr).toString("utf8") });
+		const relinkFailureEnvelope = JSON.parse(relinkFailureStdout) as {
+			data: { overall: string; plugin_relink: string; manifest: unknown };
+			errors?: { code?: string }[];
+		};
+		expect(relinkFailure.timed_out, relinkFailureSummary).toBe(false);
+		expect(relinkFailure.rc, relinkFailureSummary).not.toBe(0);
+		expect(relinkFailureEnvelope.data).toMatchObject({
+			overall: "FINDINGS", plugin_relink: "FAILED", manifest: null,
+		});
+		expect(relinkFailureEnvelope.data.overall).not.toBe("UPDATED");
+		expect(relinkFailureEnvelope.errors?.map(error => error.code)).toContain("PLUGIN_RELINK_FAILED");
 
 		const visible = [installer.stdout.toString(), installer.stderr.toString(), configOnlyVerifier.stdout.toString(),
-			configOnlyVerifier.stderr.toString(), updateStdout, updateStderr, version.stdout.toString(), version.stderr.toString(),
-			negativeInstall.stdout.toString(), negativeInstall.stderr.toString(), refused.stdout.toString(), refused.stderr.toString(),
-			JSON.stringify(auditMutations(stateRoot)), readFileSync(join(tokenConfig, "observed.ndjson"), "utf8"),
-			readFileSync(join(configOnly, "observed.ndjson"), "utf8")].join("\n");
+			configOnlyVerifier.stderr.toString(), updateStdout, updateStderr, successStdout, successStderr,
+			relinkFailureStdout, Buffer.from(relinkFailure.stderr).toString("utf8"),
+			version.stdout.toString(), version.stderr.toString(), negativeInstall.stdout.toString(), negativeInstall.stderr.toString(),
+			refused.stdout.toString(), refused.stderr.toString(), JSON.stringify(auditMutations(stateRoot)),
+			readFileSync(join(tokenConfig, "observed.ndjson"), "utf8"), readFileSync(join(configOnly, "observed.ndjson"), "utf8")].join("\n");
 		for (const sentinel of ["SYNTHETIC_GH_TOKEN_V66L21_NOT_A_CREDENTIAL",
 			"SYNTHETIC_GITHUB_TOKEN_V66L21_NOT_A_CREDENTIAL", "SYNTHETIC_UNRELATED_GH_TOKEN",
 			"SYNTHETIC_PI_BRIDGE_CONTEXT", "SYNTHETIC_MCP_PROVIDER_CONTEXT"])
 			expect(visible).not.toContain(sentinel);
+		callerWorkRoot.cleanup();
+		scratchOwned.cleanup();
 }, 900_000);
 
 afterAll(() => cleanupAllOwnedTmp());

@@ -44,9 +44,14 @@ export interface OmpManagerObservation {
 	versions: { tern: OmpManagerVersionObservation; bun: OmpManagerVersionObservation };
 }
 
-function isWithin(root: string, candidate: string): boolean {
+export function relativePathWithinRoot(root: string, candidate: string, includeRoot = false): string | null {
 	const rel = relative(root, candidate);
-	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+	if (!rel) return includeRoot ? rel : null;
+	return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? null : rel;
+}
+
+function isWithin(root: string, candidate: string): boolean {
+	return relativePathWithinRoot(root, candidate, true) !== null;
 }
 
 function realpath(target: string, description: string): string {

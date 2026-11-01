@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, type Stats } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { YAML } from "bun";
 import { applyMutation, inspectPendingMutations, planMutation, undoMutation, type ApplyOptions, type FileMutation, type Image, type MutationPlan, type PendingInspection } from "./mutations.ts";
-import { checkExtensionImports } from "./extensions.ts";
+import { relativePathWithinRoot } from "./paths.ts";
+import { checkExtensionImports, extractImportSpecifiers } from "./extensions.ts";
 import { matchesBounded } from "./regex-guards.ts";
 export type ExtensionInput = { root: string; home: string; stateRoot: string; project?: string; profiles?: "all" | readonly string[]; includeDefault?: boolean };
-export type ExtensionStep = { kind: "extension" | "profile"; path: string; profile?: string; beforeSha256: string | null; afterSha256: string };
+export type ExtensionStep = { kind: "extension" | "support" | "profile"; path: string; profile?: string; owners?: readonly string[]; beforeSha256: string | null; afterSha256: string };
 export type ExtensionPlan = {
 	readonly destination: string;
 	readonly stateRoot: string;
@@ -65,6 +66,102 @@ function readOptional(path: string): { bytes: Buffer; image: Image } | null {
 	} finally { closeSync(fd); }
 }
 function required(path: string): { bytes: Buffer; image: Image } { return readOptional(path) ?? stop("MISSING_EXTENSION_INPUT"); }
+
+
+function addLocalImports(root: string, path: string, bytes: Buffer, pending: string[]): void {
+	for (const { specifier } of extractImportSpecifiers(bytes.toString("utf8"))) {
+		if (!specifier.startsWith(".")) continue;
+		let importedPath: string;
+		try { importedPath = resolve(Bun.resolveSync(specifier, dirname(path))); } catch { continue; }
+		if (relativePathWithinRoot(root, importedPath)) pending.push(importedPath);
+	}
+}
+
+function localImportClosure(root: string, entry: string): { relativePath: string; source: { bytes: Buffer; image: Image } }[] {
+	const entryPath = resolve(entry);
+	const files = new Map<string, { relativePath: string; source: { bytes: Buffer; image: Image } }>();
+	const pending = [entryPath];
+	while (pending.length) {
+		const path = resolve(pending.pop()!);
+		if (files.has(path)) continue;
+		const relativePath = relativePathWithinRoot(root, path);
+		if (!relativePath) continue;
+		const source = required(path);
+		files.set(path, { relativePath, source });
+		addLocalImports(root, path, source.bytes, pending);
+	}
+	return [...files.entries()].filter(([path]) => path !== entryPath).map(([, file]) => file);
+}
+type ExtensionFiles = { files: FileMutation[]; steps: ExtensionStep[] };
+type SingleExtensionPlan = ExtensionFiles & { installableName: string | null; skippedReason: ProfileSkip | null };
+type InstalledExtensionsPlan = ExtensionFiles & { installableNames: string[]; skippedReasons: ProfileSkip[] };
+type ExtensionPlanState = { seen: Set<string>; dependencyOwners: Map<string, Set<string>> };
+
+function planExtensionDependencies(root: string, name: string, destinationDir: string, state: ExtensionPlanState, declaredExtensions: ReadonlySet<string>): ExtensionFiles {
+	const files: FileMutation[] = [], steps: ExtensionStep[] = [];
+	for (const dependency of localImportClosure(root, join(root, "extensions", name))) {
+		const extensionPrefix = `extensions${sep}`;
+		const isExtensionFile = dependency.relativePath.startsWith(extensionPrefix);
+		const relativePath = isExtensionFile ? dependency.relativePath.slice(extensionPrefix.length) : dependency.relativePath;
+		if (isExtensionFile && declaredExtensions.has(relativePath)) {
+			const current = readOptional(join(destinationDir, relativePath));
+			if (current && !current.bytes.equals(dependency.source.bytes)) stop("UNMANAGED_EXTENSION_DEPENDENCY");
+			continue;
+		}
+		const dependencyRoot = isExtensionFile ? "extensions" : "support";
+		const destination = isExtensionFile
+			? join(destinationDir, relativePath)
+			: join(resolve(destinationDir, ".."), relativePath);
+		const owners = state.dependencyOwners.get(destination) ?? new Set<string>();
+		owners.add(name);
+		state.dependencyOwners.set(destination, owners);
+		const current = readOptional(destination);
+		if (current && !current.bytes.equals(dependency.source.bytes)) stop("UNMANAGED_EXTENSION_DEPENDENCY");
+		if (state.seen.has(destination)) continue;
+		state.seen.add(destination);
+		if (current) continue;
+		files.push({ root: dependencyRoot, relativePath, expectedBefore: null,
+			after: { bytes: dependency.source.bytes, mode: dependency.source.image.mode } });
+		steps.push({ kind: "support", path: destination, owners: [name], beforeSha256: null, afterSha256: dependency.source.image.sha256 });
+	}
+	return { files, steps };
+}
+
+function planOneExtension(root: string, home: string, name: string, state: ExtensionPlanState, declaredExtensions: ReadonlySet<string>): SingleExtensionPlan {
+	const source = required(join(root, "extensions", name));
+	const destinationDir = join(home, ".omp", "omp-extensions");
+	inspectDirectory(destinationDir, true);
+	const destination = join(destinationDir, name);
+	const existing = readOptional(destination);
+	if (existing && !existing.bytes.equals(source.bytes))
+		return { files: [], steps: [], installableName: null, skippedReason: { name, reason: "SKIPPED_UNMANAGED" } };
+	const dependencies = planExtensionDependencies(root, name, destinationDir, state, declaredExtensions);
+	if (state.seen.has(destination)) stop("INVALID_EXTENSION_POLICY");
+	state.seen.add(destination);
+	if (!existing) {
+		dependencies.files.push({ root: "extensions", relativePath: name, expectedBefore: null,
+			after: { bytes: source.bytes, mode: source.image.mode } });
+		dependencies.steps.push({ kind: "extension", path: destination, beforeSha256: null, afterSha256: source.image.sha256 });
+	}
+	return { ...dependencies, installableName: name, skippedReason: null };
+}
+
+function planInstalledExtensions(root: string, home: string, names: readonly string[]): InstalledExtensionsPlan {
+	const result: InstalledExtensionsPlan = { files: [], steps: [], installableNames: [], skippedReasons: [] };
+	const declaredExtensions = new Set(names);
+	const state: ExtensionPlanState = { seen: new Set<string>(), dependencyOwners: new Map() };
+	for (const name of names) {
+		const planned = planOneExtension(root, home, name, state, declaredExtensions);
+		result.files.push(...planned.files);
+		result.steps.push(...planned.steps);
+		if (planned.skippedReason) result.skippedReasons.push(planned.skippedReason);
+		if (planned.installableName) result.installableNames.push(planned.installableName);
+	}
+	for (const step of result.steps) if (step.kind === "support")
+		step.owners = [...(state.dependencyOwners.get(step.path) ?? [])].sort();
+	return result;
+}
+
 
 type ProfileConfig = { name: string; path: string; source: { bytes: Buffer; image: Image } | null; data: Record<string, unknown> };
 export interface ProfileSkip { name: string; reason: string }
@@ -176,37 +273,26 @@ export function planExtensions(input: ExtensionInput): ExtensionPlan {
 	const names = [...new Set(manifest.extensions)];
 	if (names.length !== manifest.extensions.length) stop("INVALID_EXTENSION_POLICY");
 	const { selected, skipped } = profiles(home, manifest.skipProfiles, input.profiles, input.includeDefault);
-	const steps: ExtensionStep[] = [], files: FileMutation[] = [], roots = [{ id: "extensions", path: join(home, ".omp", "omp-extensions") }];
-	const skippedReasons: ProfileSkip[] = [...skipped];
-	const installableNames: string[] = [];
-	const seen = new Set<string>();
-	for (const name of names) {
-		const source = required(join(root, "extensions", name));
-		const destinationDir = join(home, ".omp", "omp-extensions");
-		inspectDirectory(destinationDir, true);
-		const destination = join(destinationDir, name);
-		const existing = readOptional(destination);
-		if (existing && !existing.bytes.equals(source.bytes)) {
-			skippedReasons.push({ name, reason: "SKIPPED_UNMANAGED" });
-			continue;
-		}
-		if (seen.has(destination)) stop("INVALID_EXTENSION_POLICY");
-		seen.add(destination);
-		installableNames.push(name);
-		if (!existing) {
-			files.push({ root: "extensions", relativePath: name, expectedBefore: null, after: { bytes: source.bytes, mode: source.image.mode } });
-			steps.push({ kind: "extension", path: destination, beforeSha256: null, afterSha256: source.image.sha256 });
-		}
-	}
+	const installed = planInstalledExtensions(root, home, names);
+	const steps = installed.steps, files = installed.files, installableNames = installed.installableNames;
+	const roots = [
+		{ id: "extensions", path: join(home, ".omp", "omp-extensions") },
+		{ id: "support", path: join(home, ".omp") },
+	];
+	const skippedReasons: ProfileSkip[] = [...skipped, ...installed.skippedReasons];
 	const skippedProfiles = skipped.map(entry => entry.name), alreadyListedProfiles: string[] = [];
 	const destinations = installableNames.map(name => join(home, ".omp", "omp-extensions", name));
 	for (const profile of selected) {
 		let current: readonly string[] = stringArray(profile.data.extensions) ? profile.data.extensions as string[] : [];
 		let listed = true;
+		const addedExtensions: string[] = [];
 		for (const destination of destinations) {
 			const decision = planExtensionChanges(destination, profile.name, current, manifest.skipProfiles);
 			if (decision.action === "skip") { listed = false; break; }
-			if (decision.action !== "already-listed") listed = false;
+			if (decision.action !== "already-listed") {
+				listed = false;
+				addedExtensions.push(relative(join(home, ".omp", "omp-extensions"), destination));
+			}
 			current = decision.extensions;
 		}
 		if (listed) { alreadyListedProfiles.push(profile.name); continue; }
@@ -215,7 +301,7 @@ export function planExtensions(input: ExtensionInput): ExtensionPlan {
 		roots.push({ id: rootId, path: resolve(profile.path, "..") });
 		files.push({ root: rootId, relativePath: basename(profile.path), expectedBefore: profile.source?.image ?? null,
 			after: { bytes: next, mode: profile.source?.image.mode ?? 0o600, ...(profile.source ? { uid: profile.source.image.uid, gid: profile.source.image.gid } : {}) } });
-		steps.push({ kind: "profile", path: profile.path, profile: profile.name, beforeSha256: profile.source?.image.sha256 ?? null, afterSha256: hash(next) });
+		steps.push({ kind: "profile", path: profile.path, profile: profile.name, owners: addedExtensions, beforeSha256: profile.source?.image.sha256 ?? null, afterSha256: hash(next) });
 	}
 	return { destination: destinations[0] ?? join(home, ".omp", "omp-extensions"), stateRoot, steps, skippedProfiles, skippedReasons, alreadyListedProfiles, guard: inspectExtensionGuard(input),
 		mutation: files.length ? planMutation({ stateRoot, roots, files }) : null };
@@ -227,7 +313,7 @@ export function applyExtensions(plan: ExtensionPlan, options?: ApplyOptions): Ex
 		return { receiptId: null, files: 0 };
 	}
 	const receipt = applyMutation(plan.mutation, options);
-	if (plan.steps.some(step => step.kind === "extension")) {
+	if (plan.steps.some(step => step.kind === "extension" || step.kind === "support")) {
 		const imports = checkExtensionImports({ home: resolve(plan.destination, "..", "..", "..") });
 		if (imports.status === "DEGRADED") {
 			undoMutation(plan.stateRoot, receipt.id, { confirmed: true });

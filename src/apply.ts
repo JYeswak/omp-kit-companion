@@ -1,8 +1,9 @@
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { applyExtensions, planExtensions, type ExtensionPlan } from "./apply-extensions.ts";
 import { applyPolicyPlan, planPolicy, type PolicyPlan } from "./apply-policy.ts";
 import { applyRulePlan, planRules, type RulePlan } from "./apply-rules.ts";
 import { inspectPendingMutations, type ApplyOptions } from "./mutations.ts";
+import { relativePathWithinRoot } from "./paths.ts";
 
 export type NamedScope = "rules" | "policy" | "extensions";
 export type NamedApplyInput = Readonly<{ root: string; home: string; stateRoot: string; project?: string; scope: NamedScope; profileConfigHome?: string }>;
@@ -13,15 +14,9 @@ export type NamedApplyResult = Readonly<{ status: "APPLIED" | "UNCHANGED"; recei
 type Backing = { input: NamedApplyInput; plan: RulePlan | PolicyPlan | ExtensionPlan };
 const plans = new WeakMap<NamedApplyPlan, Backing>();
 function inside(base: string, path: string): boolean {
-	const name = relative(base, path);
-	return name === "" || (name !== ".." && !name.startsWith(`..${sep}`) && !isAbsolute(name));
+	return relativePathWithinRoot(base, path, true) !== null;
 }
 
-function homeRelative(home: string, path: string): string {
-	const name = relative(home, path);
-	if (!name || name === ".." || name.startsWith(`..${sep}`) || isAbsolute(name)) throw new Error("UNSAFE_PATH");
-	return name;
-}
 
 export function validateNamedApplyPaths(input: Pick<NamedApplyInput, "root" | "home" | "stateRoot">): void {
 	if (![input.root, input.home, input.stateRoot].every(path => isAbsolute(path)) ||
@@ -52,8 +47,10 @@ export function planNamedApply(input: NamedApplyInput): NamedApplyPlan {
 		steps = extension.steps.map(step => {
 			const image = extension.mutation?.files.find(file => file.path === step.path);
 			if (!image) throw new Error("INVALID_PLAN");
+			const path = relativePathWithinRoot(input.home, step.path);
+			if (path === null) throw new Error("UNSAFE_PATH");
 			return { action: step.beforeSha256 === null ? "install" : "update",
-				path: homeRelative(input.home, step.path), ...(step.profile ? { profile: step.profile } : {}),
+				path, ...(step.profile ? { profile: step.profile } : {}),
 				beforeSha256: step.beforeSha256, afterSha256: step.afterSha256,
 				beforeMode: image.before?.mode ?? null, afterMode: image.after?.mode ?? null };
 		});
