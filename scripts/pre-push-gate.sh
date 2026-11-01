@@ -146,6 +146,50 @@ case "${remote_sha:-}" in
 		;;
 	*) base_ref=$remote_sha ;;
 esac
+# RELCLOCK1 (ompkit-774u.67): a green gate that deferred the complete suite starts the release verdict
+# for this exact commit in the background (scripts/release-verdict.sh: the commit's own exported
+# runner, one run per repo), so the release finds it recorded. If the push itself then fails, the
+# cached verdict is for a tree that may never ship; nothing else depends on it. OMP_KIT_RELEASE_VERDICT=0
+# opts out. Its output goes to .git/omp-kit/release-verdict.log, never to this hook's stdout.
+# It runs in its own session: git_converge.py runs `git push` in a process group that its bounded runner
+# kills once the push returns, and nohup alone died with it (48c5513b5f, 2026-10-31: the log stopped
+# at the runner's header, the lock left naming a gone pid). macOS ships no setsid(1), so python3 forks,
+# calls setsid in the child and execs the verdict.
+start_release_verdict() {
+	if [ "${PRE_PUSH_FULL_SUITE:-release}" != push ] && [ "${OMP_KIT_RELEASE_VERDICT:-1}" != 0 ] \
+		&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ]; then
+		python3 -c 'import os, sys
+if os.fork(): os._exit(0)
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])' sh "$ROOT/scripts/release-verdict.sh" --commit "$local_sha" --no-fetch \
+			</dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1
+		printf 'release verdict: started for %s in the background in its own session (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
+	fi
+}
+# COMMITPARITY1 (ompkit-9d9fx): the commit-msg member check-commit-gate.sh runs this same file on the
+# commit being made and records a green run under a key binding the tree, the single parent, the
+# message as stored (git stripspace), the origin/main it was judged against and this file's blob id.
+# A pushed tip that matches a record on every one of them was already judged by this gate against this
+# remote main, so the push reuses that verdict instead of judging the same commit twice. Any miss (a
+# moved remote, another message, an edited gate, a merge or root commit, PRE_PUSH_FULL_SUITE=push)
+# runs the full gate below.
+if [ -n "${base_ref:-}" ] && [ "$base_ref" = "${remote_sha:-}" ] && [ "${PRE_PUSH_FULL_SUITE:-release}" != push ]; then
+	reuse_parents=$(git -C "$ROOT" rev-list --parents -n 1 "$local_sha" 2>/dev/null) || reuse_parents=
+	reuse_parent=${reuse_parents#* }
+	case "$reuse_parent" in *' '*|"$reuse_parents") reuse_parent= ;; esac
+	reuse_tree=$(git -C "$ROOT" rev-parse -q --verify "$local_sha^{tree}" 2>/dev/null) || reuse_tree=
+	reuse_message=$(git -C "$ROOT" cat-file commit "$local_sha" 2>/dev/null | sed '1,/^$/d' | git -C "$ROOT" stripspace | git -C "$ROOT" hash-object --stdin) || reuse_message=
+	reuse_gate=$(git -C "$ROOT" hash-object -- "$0" 2>/dev/null) || reuse_gate=
+	log_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || log_git=
+	if [ -n "$reuse_parent" ] && [ -n "$reuse_tree" ] && [ -n "$reuse_message" ] && [ -n "$reuse_gate" ] && [ -n "$log_git" ]; then
+		reuse_key=$(printf 'commit-gate-v1\n%s\n%s\n%s\n%s\n%s\n' "$reuse_tree" "$reuse_parent" "$base_ref" "$reuse_message" "$reuse_gate" | git -C "$ROOT" hash-object --stdin) || reuse_key=
+		if [ -n "$reuse_key" ] && [ -f "$log_git/omp-kit/commit-gate-pass/$reuse_key" ]; then
+			printf 'FRESH-GATE: VERDICT REUSED commit-gate PASS commit=%s tree=%s base=%s record=%s\n' "$local_sha" "$reuse_tree" "$base_ref" "$reuse_key"
+			start_release_verdict
+			exit 0
+		fi
+	fi
+fi
 # GATESCR1 (ompkit-fp72.40): an interrupted run is red, not clean. The HUP/INT/TERM handler marks
 # the run red BEFORE cleanup, so the failed parent keeps exactly .owner + gate.log while the
 # extract tree is removed. Every descendant (fresh-gate, omp-kit heavy, bun and their children,
@@ -641,23 +685,9 @@ log_git=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) || log_git=""
 if [ -f "$archive_root/gate.log" ] && [ -n "$log_git" ] && mkdir -p "$log_git/omp-kit/gate-logs" 2>/dev/null; then
 	cp "$archive_root/gate.log" "$log_git/omp-kit/gate-logs/${local_sha:-unknown}.$(date -u +%Y%m%dT%H%M%SZ).log" 2>/dev/null || :
 fi
-# RELCLOCK1 (ompkit-774u.67): a green gate that deferred the complete suite starts the release verdict
-# for this exact commit in the background (scripts/release-verdict.sh: the commit's own exported
-# runner, one run per repo), so the release finds it recorded. If the push itself then fails, the
-# cached verdict is for a tree that may never ship; nothing else depends on it. OMP_KIT_RELEASE_VERDICT=0
-# opts out. Its output goes to .git/omp-kit/release-verdict.log, never to this hook's stdout.
-# It runs in its own session: git_converge.py runs `git push` in a process group that its bounded runner
-# kills once the push returns, and nohup alone died with it (48c5513b5f, 2026-10-31: the log stopped
-# at the runner's header, the lock left naming a gone pid). macOS ships no setsid(1), so python3 forks,
-# calls setsid in the child and execs the verdict.
-if [ "$gate_rc" = 0 ] && [ "${PRE_PUSH_FULL_SUITE:-release}" != push ] && [ "${OMP_KIT_RELEASE_VERDICT:-1}" != 0 ] \
-	&& [ -n "$log_git" ] && [ -n "${local_sha:-}" ] && [ -f "$ROOT/scripts/release-verdict.sh" ]; then
-	python3 -c 'import os, sys
-if os.fork(): os._exit(0)
-os.setsid()
-os.execvp(sys.argv[1], sys.argv[1:])' sh "$ROOT/scripts/release-verdict.sh" --commit "$local_sha" --no-fetch \
-		</dev/null >>"$log_git/omp-kit/release-verdict.log" 2>&1
-	printf 'release verdict: started for %s in the background in its own session (log %s)\n' "$local_sha" "$log_git/omp-kit/release-verdict.log"
+# RELCLOCK1: see start_release_verdict above.
+if [ "$gate_rc" = 0 ]; then
+	start_release_verdict
 fi
 trap - EXIT
 cleanup

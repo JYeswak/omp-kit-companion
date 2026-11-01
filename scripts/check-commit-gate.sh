@@ -10,6 +10,11 @@
 # members already have commit-time twins (commit-msg-bead, verification-level) or judge ref
 # placement only (storage-root, on-main), so the fresh gate is the one left to mirror.
 #
+# A green run is recorded for the push: .git/omp-kit/commit-gate-pass/<key>, where the key binds the
+# staged tree, the parent, the message as git will store it (git stripspace), the origin/main judged
+# against and the blob id of the gate file itself. pre-push-gate.sh reuses a record only when the
+# pushed tip matches every one of them, so committing and then publishing runs the gate once.
+#
 # Installed as hooks.d/commit-msg/55-omp-kit-commit-gate. Usage: check-commit-gate.sh MSGFILE
 # Exit 0 when the push gate would admit (or there is nothing to mirror: no installed fresh-gate
 # member, no origin/main, no HEAD, or a branch other than main), the gate's status otherwise.
@@ -45,4 +50,13 @@ if [ "$rc" -ne 0 ]; then
 	exit "$rc"
 fi
 printf 'commit-gate: GREEN in %ss (push gate on the staged commit against origin/main %s)\n' "$took" "$(printf '%s' "$base" | cut -c1-10)" >&2
+# The record is an optimisation only: when it cannot be written the push simply runs the gate again.
+gate_id=$(git hash-object "$gate") || exit 0
+message_id=$(git stripspace < "$msg" | git hash-object --stdin) || exit 0
+key=$(printf 'commit-gate-v1\n%s\n%s\n%s\n%s\n%s\n' "$tree" "$head" "$base" "$message_id" "$gate_id" | git hash-object --stdin) || exit 0
+records="$(git rev-parse --absolute-git-dir)/omp-kit/commit-gate-pass"
+if mkdir -p "$records" 2>/dev/null; then
+	find "$records" -type f -mtime +1 -delete 2>/dev/null || :
+	printf 'tree=%s\nparent=%s\nbase=%s\nmessage=%s\ngate=%s\nrecorded=%s\n' "$tree" "$head" "$base" "$message_id" "$gate_id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$records/$key" || :
+fi
 exit 0

@@ -1292,5 +1292,51 @@ else
 fi
 unset FULL_SUITE_VERDICT_CACHE_DIR
 
+# COMMITPARITY1 (ompkit-9d9fx): check-commit-gate.sh runs this gate at commit time and records the
+# pass; the push of that same commit reuses it instead of judging it again. Any changed input misses.
+reuse_count="$TMP/commit-reuse-count"
+: > "$reuse_count"
+reuse=$(mkrepo commit-reuse 'exit 0' "printf 'x\n' >> '$reuse_count'")
+git -C "$reuse" branch -M main
+reuse_base=$(git -C "$reuse" rev-parse HEAD)
+git -C "$reuse" update-ref refs/remotes/origin/main "$reuse_base"
+reuse_member="$reuse/.git/hooks/hooks.d/pre-push/40-omp-kit-fresh-gate"
+mkdir -p "${reuse_member%/*}"
+cp "$ADAPTER" "$reuse_member"
+chmod +x "$reuse_member"
+printf 'new\n' > "$reuse/new.txt"
+git -C "$reuse" add new.txt
+printf '[test] add new\n\nBead: x-1\n' > "$TMP/reuse-msg"
+(cd -- "$reuse" && PRE_PUSH_FULL_SUITE=release sh "$KITREPO/scripts/check-commit-gate.sh" "$TMP/reuse-msg") > "$TMP/reuse-commit-out" 2>&1
+reuse_commit_rc=$?
+git -C "$reuse" commit -q -F "$TMP/reuse-msg"
+reuse_tip=$(git -C "$reuse" rev-parse HEAD)
+reuse_push() {
+	printf 'refs/heads/main %s refs/heads/main %s\n' "$1" "$reuse_base" | (cd -- "$reuse" && PRE_PUSH_FULL_SUITE=release sh "$reuse_member" origin url > "$TMP/out" 2>&1)
+	printf '%s' "$?"
+}
+rc=$(reuse_push "$reuse_tip")
+if [ "$reuse_commit_rc" = 0 ] && [ "$rc" = 0 ] && grep -q 'FRESH-GATE: VERDICT REUSED commit-gate PASS' "$TMP/out" && [ "$(wc -l < "$reuse_count" | tr -d ' ')" = 1 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL commit-gate-verdict-reused: commit_rc=%s rc=%s runs=%s commit<<<%s>>> out<<<%s>>>\n' "$reuse_commit_rc" "$rc" "$(wc -l < "$reuse_count")" "$(cat "$TMP/reuse-commit-out")" "$(cat "$TMP/out")"
+fi
+# planted: the same tree and parent under another message is a different commit; the gate runs.
+reuse_other=$(git -C "$reuse" commit-tree "$reuse_tip^{tree}" -p "$reuse_base" -m '[test] another message')
+rc=$(reuse_push "$reuse_other")
+if [ "$rc" = 0 ] && ! grep -q 'VERDICT REUSED' "$TMP/out" && [ "$(wc -l < "$reuse_count" | tr -d ' ')" = 2 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL commit-gate-other-message-judged: rc=%s runs=%s out<<<%s>>>\n' "$rc" "$(wc -l < "$reuse_count")" "$(cat "$TMP/out")"
+fi
+# planted: an edited gate file never reuses a record made by the previous gate.
+printf '# edited gate\n' >> "$reuse_member"
+rc=$(reuse_push "$reuse_tip")
+if [ "$rc" = 0 ] && ! grep -q 'VERDICT REUSED' "$TMP/out" && [ "$(wc -l < "$reuse_count" | tr -d ' ')" = 3 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL commit-gate-edited-gate-judged: rc=%s runs=%s out<<<%s>>>\n' "$rc" "$(wc -l < "$reuse_count")" "$(cat "$TMP/out")"
+fi
+
 printf 'pre-push-gate: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]
