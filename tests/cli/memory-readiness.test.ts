@@ -228,7 +228,7 @@ test.serial("maintenance-required CASS status stays unqualified and reports its 
 	const configBefore = readFileSync(f.config, "utf8");
 	const projectNamesBefore = readdirSync(f.project).sort();
 	const storePath = join(f.agent, "memories", "mnemopi", "mnemopi.db");
-	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath });
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath, cassStatusTimeoutMs: 15_000 });
 	expect(report.cass).toMatchObject({ configured: true, observed: "MAINTENANCE_REQUIRED", retrieval_qualified: false, exit_code: 5 });
 	expect(report.cass.first_required_command).toBe("cass status --json");
 	expect(report.cass.authorization_boundary).toContain("No search, memory rows");
@@ -244,7 +244,7 @@ test.serial("maintenance-required CASS status stays unqualified and reports its 
 	expect(readdirSync(f.project).sort()).toEqual(projectNamesBefore);
 	expect(() => lstatSync(storePath)).toThrow();
 	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
-});
+}, 30_000);
 test.serial("successful CASS status metadata never qualifies actual retrieval", async () => {
 	const f = fixture();
 	const cassPath = join(f.root, "tools", "cass");
@@ -260,13 +260,13 @@ test.serial("successful CASS status metadata never qualifies actual retrieval", 
 		"",
 	].join("\n"));
 	chmodSync(cassPath, 0o755);
-	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath });
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath, cassStatusTimeoutMs: 15_000 });
 	expect(report.cass).toMatchObject({ configured: true, observed: "AVAILABLE", retrieval_qualified: false, database_exists: true, index_stale: false });
 	expect(report.retrieval_qualified).toBe(false);
 	expect(report.source_refs.some(reference => reference.includes(cassPath))).toBe(true);
 	expect(report.status).not.toBe("OK");
 	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
-});
+}, 30_000);
 test.serial("malformed CASS and scheduler inputs remain unverified", async () => {
 	const f = fixture();
 	writeFileSync(f.config, "memory:\n  backend: mnemopi\nmnemopi:\n  noEmbeddings: true\n  llmMode: none\n");
@@ -285,7 +285,7 @@ test.serial("malformed CASS and scheduler inputs remain unverified", async () =>
 	writeFileSync(join(schedulerRoot, "com.dicklesworthstone.cass.incremental.plist"), "not a property list");
 	const oversizedPath = join(schedulerRoot, "com.dicklesworthstone.cass.oversized.plist");
 	writeFileSync(oversizedPath, Buffer.alloc(64 * 1024 + 1, 0x20));
-	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath });
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath, cassStatusTimeoutMs: 15_000 });
 	expect(report.cass).toMatchObject({ configured: true, observed: "UNVERIFIED", retrieval_qualified: false, database_exists: null, index_stale: null });
 	expect(report.scheduler).toMatchObject({ state: "UNVERIFIED", scheduler: "UNKNOWN", owner: "UNKNOWN", actual_state: "NOT_PROBED", entries: [] });
 	expect(report.source_refs).toContain("~/Library/LaunchAgents/com.dicklesworthstone.cass.incremental.plist");
@@ -293,7 +293,7 @@ test.serial("malformed CASS and scheduler inputs remain unverified", async () =>
 	expect(report.retrieval_qualified).toBe(false);
 	expect(() => lstatSync(join(f.agent, "memories", "mnemopi", "mnemopi.db"))).toThrow();
 	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
-});
+}, 30_000);
 test.serial("CASS unhealthy metadata overrides a successful status exit", async () => {
 	const f = fixture();
 	const cassPath = join(f.root, "tools", "cass");
@@ -309,8 +309,29 @@ test.serial("CASS unhealthy metadata overrides a successful status exit", async 
 		"",
 	].join("\n"));
 	chmodSync(cassPath, 0o755);
-	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath });
+	const report = await inspectMemoryReadiness({ home: f.home, project: f.project, ompPath: f.ompPath, cassPath, cassStatusTimeoutMs: 15_000 });
 	expect(report.cass).toMatchObject({ observed: "MAINTENANCE_REQUIRED", retrieval_qualified: false, database_exists: true, index_stale: false, exit_code: 0 });
 	expect(report.retrieval_qualified).toBe(false);
 	expect(readFileSync(`${cassPath}.calls`, "utf8")).toBe("status --json\n");
-});
+}, 30_000);
+
+test.serial("CASS status past its configured deadline stays unverified", async () => {
+	const f = fixture();
+	const cassPath = join(f.root, "tools", "cass");
+	mkdirSync(dirname(cassPath), { recursive: true });
+	writeFileSync(cassPath, [
+		"#!/bin/sh",
+		"sleep 1",
+		"printf '%s\\n' '{\"healthy\":true}'",
+		"",
+	].join("\n"));
+	chmodSync(cassPath, 0o755);
+	const report = await inspectMemoryReadiness({
+		home: f.home, project: f.project, ompPath: f.ompPath, cassPath, cassStatusTimeoutMs: 50,
+	});
+	expect(report.cass).toMatchObject({
+		configured: true, observed: "UNVERIFIED", retrieval_qualified: false,
+		exit_code: null, reason: "CASS status command failed or timed out",
+	});
+	expect(report.retrieval_qualified).toBe(false);
+}, 30_000);

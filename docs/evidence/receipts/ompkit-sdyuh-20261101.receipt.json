@@ -1,0 +1,21 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_3e9877a2c94a464ef66dc6eacb1abfd31adac3b139bd9c55c5b30b6159ccce71",
+ "limitations": [
+  "Source and owned-fixture evidence only; no independent, full-repository, publication, release or installed qualification. Lead owns the CASSCLOCK1 roadmap row in0.2.83prepare."
+ ],
+ "operation": "cassclock1-bounded-status-and-loaded-classification",
+ "parameters": {
+  "base_commit": "1ee5603debadd947d6e3111bb8ae2755e93c9072",
+  "bead": "ompkit-sdyuh",
+  "probe_commit": "e8309fdb021ee4398d97ccce50d6087282595d75",
+  "result_path": "docs/evidence/receipts/ompkit-sdyuh-20261101.result.json",
+  "subject_sha256": "73f756fea4fc762a95bf7c06345127e6423374e34b9a96ecc3e587f06daf842b"
+ },
+ "producer": "TurquoiseSummit",
+ "result_ref": {
+  "bytes": 36990,
+  "sha256": "762bbcc9dc0866392f0957be805ad0864e0aaae2a06a3db24c760ff5bff14e70"
+ }
+}

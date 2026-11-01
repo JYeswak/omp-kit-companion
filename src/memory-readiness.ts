@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { run } from "./kitlib/run.ts";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -13,6 +13,8 @@ export interface MemoryReadinessInput {
 	ompPath?: string;
 	/** Resolved CASS executable for read-only status metadata; null means unavailable. */
 	cassPath?: string | null;
+	/** CASS status deadline in milliseconds; callers default to the production 2000 ms bound. */
+	cassStatusTimeoutMs?: number;
 	/** Explicit OMP XDG state root, if the caller has verified its environment. */
 	xdgStateHome?: string;
 }
@@ -123,11 +125,12 @@ function safeDirectories(base: string, segments: readonly string[]): boolean {
 const CASS_STATUS_COMMAND = "cass status --json";
 const CASS_STATUS_TIMEOUT_MS = 2_000;
 const MAX_CASS_STATUS_BYTES = 64 * 1024;
+const CASS_STATUS_DECODER = new TextDecoder();
 const MAX_LAUNCH_AGENT_BYTES = 64 * 1024;
 const MAX_LAUNCH_AGENT_ENTRIES = 20;
 const CASS_LAUNCH_AGENT_PREFIX = "com.dicklesworthstone.cass.";
 
-function inspectCassStatus(requestedPath?: string | null): MemoryCassReadiness {
+async function inspectCassStatus(requestedPath?: string | null, timeoutMs = CASS_STATUS_TIMEOUT_MS): Promise<MemoryCassReadiness> {
 	const path = requestedPath === undefined ? Bun.which("cass") : requestedPath;
 	const unavailable = (configured: boolean, source_ref: string | null, exit_code: number | null, reason: string): MemoryCassReadiness => ({
 		configured, observed: configured ? "UNVERIFIED" : "UNAVAILABLE", retrieval_qualified: false,
@@ -142,10 +145,12 @@ function inspectCassStatus(requestedPath?: string | null): MemoryCassReadiness {
 	let output: string;
 	let commandError = false;
 	try {
-		const result = spawnSync(executable, ["status", "--json"], { encoding: "utf8", timeout: CASS_STATUS_TIMEOUT_MS, maxBuffer: MAX_CASS_STATUS_BYTES });
-		resultStatus = result.status;
-		output = typeof result.stdout === "string" ? result.stdout : "";
-		commandError = result.error !== undefined;
+		const result = await run([executable, "status", "--json"], {
+			deadline_s: timeoutMs / 1000, max_output_bytes: MAX_CASS_STATUS_BYTES,
+		});
+		resultStatus = result.rc !== null && result.rc >= 0 ? result.rc : null;
+		output = CASS_STATUS_DECODER.decode(result.stdout);
+		commandError = result.timed_out || result.truncated;
 	} catch { return unavailable(true, executable, null, "CASS status command failed to start"); }
 	let summary: Record<string, unknown> | null = null;
 	let parseFailed = false;
@@ -353,7 +358,7 @@ async function probeRedactor(ompPath?: string): Promise<MemoryRedactorReport> {
 /** Inspect memory configuration, CASS status metadata, and static scheduler declarations only; never open memory rows or invoke OMP/models/jobs. */
 export async function inspectMemoryReadiness(input: MemoryReadinessInput): Promise<MemoryReadinessReport> {
 	const home = resolve(input.home);
-	const cass = inspectCassStatus(input.cassPath);
+	const cass = await inspectCassStatus(input.cassPath, input.cassStatusTimeoutMs);
 	const scheduler = inspectMemoryScheduler(home);
 	const sourceRefs = [
 		`CASS status: ${cass.source_ref ?? "unavailable"} (${cass.first_required_command})`,

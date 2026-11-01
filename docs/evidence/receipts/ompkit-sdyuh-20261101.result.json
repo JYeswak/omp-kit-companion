@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "bead": "ompkit-sdyuh",
+  "authority": "test",
+  "producer": "TurquoiseSummit",
+  "production_default_ms": 2000,
+  "fixture_timeout_ms": 15000,
+  "fixture_outer_timeout_ms": 30000,
+  "negative_timeout_ms": 50,
+  "source_sha256": {
+    "src/memory-readiness.ts": "9eaf196267cb0bbbcb1b449ab01bd5b5ce460aac65c6c42a8e9d52c7fdaed985",
+    "tests/cli/memory-readiness.test.ts": "a990648cb1bf2c53d0eb804455fff247d80aedd29ff1efeb4e0ad45211e74bf4",
+    "changelog.d/ompkit-sdyuh.md": "6fd83a8d1810409a88829858808a3a79d1392b31decf4a24e252208c10ba1ac3",
+    "tests/cli/memory-readiness-load.ts": "bf62cefb18e15bc2141d81a0d7bbf837e4199e95595267addc40792fbcf5e6f1"
+  },
+  "baseline_original_implementation_blob": "efc9f875426df677ae10b657c078698fa1cbb6d9",
+  "before_calibration": {
+    "base": "42e735bb7a5d34aa4a2e60fdc90dc41442520884",
+    "tests_only_probe": "089256cabc11b11e3b6674bb6880d95409745caa",
+    "rc": 1,
+    "out": "bun test v1.4.3 (26aa4e1a9)\n",
+    "err": "\ntests/cli/memory-readiness.test.ts:\n327 | \t].join(\"\\n\"));\n328 | \tchmodSync(cassPath, 0o755);\n329 | \tconst report = await inspectMemoryReadiness({\n330 | \t\thome: f.home, project: f.project, ompPath: f.ompPath, cassPath, cassStatusTimeoutMs: 50,\n331 | \t});\n332 | \texpect(report.cass).toMatchObject({\n                           ^\nerror: expect(received).toMatchObject(expected)\n\n  {\n+   \"authorization_boundary\": \"Only `cass status --json` metadata was read; a successful status, database, or schedule never proves retrieval. No search, memory rows, repairs, or indexing were run.\",\n    \"configured\": true,\n-   \"exit_code\": null,\n-   \"observed\": \"UNVERIFIED\",\n-   \"reason\": \"CASS status command failed or timed out\",\n+   \"database_exists\": null,\n+   \"exit_code\": 0,\n+   \"first_required_command\": \"cass status --json\",\n+   \"index_stale\": null,\n+   \"observed\": \"AVAILABLE\",\n+   \"reason\": \"CASS status metadata responded; retrieval remains unqualified\",\n    \"retrieval_qualified\": false,\n+   \"source_ref\": \"/Users/josh/Developer/omp-kit/var/agent-tmp/cassclock1.27286/omp-kit-memory.82823.lyhan4/tools/cass\",\n  }\n\n- Expected  - 3\n+ Received  + 8\n\n      at <anonymous> (/Users/josh/Developer/omp-kit-companion/var/agent-tmp/cassclock1-before.82742/tests/cli/memory-readiness.test.ts:332:22)\n(fail) CASS status past its configured deadline stays unverified [1178.87ms]\n\n 0 pass\n 16 filtered out\n 1 fail\n 1 expect() calls\nRan 1 test across 1 file. [1196.00ms]\n",
+    "timed_out": false,
+    "truncated": false
+  },
+  "after_calibration": {
+    "rc": 0,
+    "out": "bun test v1.4.3 (26aa4e1a9)\n",
+    "err": "\ntests/cli/memory-readiness.test.ts:\n(pass) CASS status past its configured deadline stays unverified [55.62ms]\n\n 1 pass\n 16 filtered out\n 0 fail\n 2 expect() calls\nRan 1 test across 1 file. [166.00ms]\n",
+    "timed_out": false,
+    "truncated": false
+  },
+  "configured_and_default_smoke": {
+    "rc": 0,
+    "out": "{\"short\":{\"configured\":true,\"observed\":\"UNVERIFIED\",\"retrieval_qualified\":false,\"first_required_command\":\"cass status --json\",\"source_ref\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/cassclock1.27286/fake-cass-before\",\"exit_code\":null,\"database_exists\":null,\"index_stale\":null,\"reason\":\"CASS status command failed or timed out\",\"authorization_boundary\":\"Only `cass status --json` metadata was read; a successful status, database, or schedule never proves retrieval. No search, memory rows, repairs, or indexing were run.\"},\"standard\":{\"configured\":true,\"observed\":\"AVAILABLE\",\"retrieval_qualified\":false,\"first_required_command\":\"cass status --json\",\"source_ref\":\"/Users/josh/Developer/omp-kit/var/agent-tmp/cassclock1.27286/fake-cass-before\",\"exit_code\":0,\"database_exists\":null,\"index_stale\":null,\"reason\":\"CASS status metadata responded; retrieval remains unqualified\",\"authorization_boundary\":\"Only `cass status --json` metadata was read; a successful status, database, or schedule never proves retrieval. No search, memory rows, repairs, or indexing were run.\"}}\n",
+    "err": "",
+    "timed_out": false,
+    "truncated": false
+  },
+  "original_file": {
+    "rc": 0,
+    "out": "bun test v1.4.3 (26aa4e1a9)\n",
+    "err": "\ntests/cli/memory-readiness.test.ts:\n(pass) reviewed OMP 18.12.6 source hashes report on-disk OFF and the redactor limitation [4.55ms]\n(pass) reviewed source hashes, not package version, govern memory inspection [2.50ms]\n(pass) one changed redactor source byte refuses the synthetic probe [2.23ms]\n(pass) one changed memory settings source byte names the exact path and hash [7.56ms]\n(pass) OFF and configured Mnemopi do not turn into runtime OK [2.74ms]\n(pass) empty-not-created store and observed local SQLite store remain distinct without reading rows [4.31ms]\n(pass) an explicit XDG state root is inspected without creating or reading its memory rows [379.14ms]\n(pass) parked model role cannot count as model availability and remains separate from missing role [7.53ms]\n(pass) malformed, unsupported and unsafe profile layers refuse an effective backend claim [7.19ms]\n(pass) legacy mnemosyne config refuses an effective Mnemopi claim before migration [3.56ms]\n(pass) custom store symlink and inaccessible store do not get dereferenced or certified [5.80ms]\n(pass) synthetic redactor canaries report source-pinned limits without exposing canary bytes [9.03ms]\n(pass) maintenance-required CASS status stays unqualified and reports its static scheduler source [816.76ms]\n(pass) successful CASS status metadata never qualifies actual retrieval [925.62ms]\n(pass) malformed CASS and scheduler inputs remain unverified [664.14ms]\n(pass) CASS unhealthy metadata overrides a successful status exit [1049.45ms]\n(pass) CASS status past its configured deadline stays unverified [52.38ms]\n\n 17 pass\n 0 fail\n 111 expect() calls\nRan 17 tests across 1 file. [4.09s]\n",
+    "timed_out": false,
+    "truncated": false
+  },
+  "complete_clean_copy": {
+    "base": "1ee5603debadd947d6e3111bb8ae2755e93c9072",
+    "probe": "e8309fdb021ee4398d97ccce50d6087282595d75",
+    "tree": "b2c4ad5f0222c00aad25c54235e7b615906c40c8",
+    "paths": [
+      "changelog.d/ompkit-sdyuh.md",
+      "src/memory-readiness.ts",
+      "tests/cli/memory-readiness-load.ts",
+      "tests/cli/memory-readiness.test.ts"
+    ],
+    "empty_git": true,
+    "negative": {
+      "rc": 0,
+      "out": "bun test v1.4.3 (26aa4e1a9)\n",
+      "err": "\ntests/cli/memory-readiness.test.ts:\n(pass) CASS status past its configured deadline stays unverified [58.56ms]\n\n 1 pass\n 16 filtered out\n 0 fail\n 2 expect() calls\nRan 1 test across 1 file. [80.00ms]\n",
+      "timed_out": false,
+      "truncated": false
+    },
+    "load": {
+      "rc": 0,
+      "out": "bun test v1.4.3 (26aa4e1a9)\nbun test v1.4.3 (26aa4e1a9)\nbun test v1.4.3 (26aa4e1a9)\n{\"kind\":\"memory-readiness-load\",\"ok\":true,\"owned_workers\":[32438,32439,32440,32441,32442,32443,32444,32446],\"runs\":[{\"index\":1,\"rc\":0,\"counts\":{\"pass\":17,\"fail\":0,\"found\":true},\"before\":\"32438   0.0 RNs \\n32439   0.0 RNs \\n32440   0.0 RNs \\n32441   0.0 RNs \\n32442   0.0 RNs \\n32443   0.0 RNs \\n32444   0.0 RNs \\n32446   0.0 RNs \\n\",\"after\":\"32438  99.1 RNs \\n32439  98.8 RNs \\n32440  98.5 RNs \\n32441 100.0 RNs \\n32442  98.5 RNs \\n32443 100.0 RNs \\n32444  98.2 RNs \\n32446  99.2 RNs \\n\"},{\"index\":2,\"rc\":0,\"counts\":{\"pass\":17,\"fail\":0,\"found\":true},\"before\":\"32438 100.0 RNs \\n32439 100.0 RNs \\n32440  99.1 RNs \\n32441  99.6 RNs \\n32442  99.6 RNs \\n32443  98.3 RNs \\n32444  99.1 RNs \\n32446  99.0 RNs \\n\",\"after\":\"32438 100.0 RNs \\n32439  98.7 RNs \\n32440  99.6 RNs \\n32441  99.6 RNs \\n32442  99.7 RNs \\n32443  99.0 RNs \\n32444  98.8 RNs \\n32446 100.0 RNs \\n\"},{\"index\":3,\"rc\":0,\"counts\":{\"pass\":17,\"fail\":0,\"found\":true},\"before\":\"32438  99.2 RNs \\n32439  99.4 RNs \\n32440  98.6 RNs \\n32441  98.2 RNs \\n32442  99.0 RNs \\n32443  98.8 RNs \\n32444  99.0 RNs \\n32446  99.4 RNs \\n\",\"after\":\"32438  99.9 RNs \\n32439  99.5 RNs \\n32440  99.4 RNs \\n32441 100.0 RNs \\n32442  97.9 RNs \\n32443 100.0 RNs \\n32444  99.3 RNs \\n32446  99.1 RNs \\n\"}]}\n{\"cleanup\":[{\"pid\":32438,\"settled\":\"rejected\"},{\"pid\":32439,\"settled\":\"rejected\"},{\"pid\":32440,\"settled\":\"rejected\"},{\"pid\":32441,\"settled\":\"rejected\"},{\"pid\":32442,\"settled\":\"rejected\"},{\"pid\":32443,\"settled\":\"rejected\"},{\"pid\":32444,\"settled\":\"rejected\"},{\"pid\":32446,\"settled\":\"rejected\"}]}\n",
+      "err": "\ntests/cli/memory-readiness.test.ts:\n(pass) reviewed OMP 18.12.6 source hashes report on-disk OFF and the redactor limitation [5.93ms]\n(pass) reviewed source hashes, not package version, govern memory inspection [3.10ms]\n(pass) one changed redactor source byte refuses the synthetic probe [2.93ms]\n(pass) one changed memory settings source byte names the exact path and hash [9.65ms]\n(pass) OFF and configured Mnemopi do not turn into runtime OK [3.11ms]\n(pass) empty-not-created store and observed local SQLite store remain distinct without reading rows [4.40ms]\n(pass) an explicit XDG state root is inspected without creating or reading its memory rows [361.00ms]\n(pass) parked model role cannot count as model availability and remains separate from missing role [4.99ms]\n(pass) malformed, unsupported and unsafe profile layers refuse an effective backend claim [8.37ms]\n(pass) legacy mnemosyne config refuses an effective Mnemopi claim before migration [2.83ms]\n(pass) custom store symlink and inaccessible store do not get dereferenced or certified [3.48ms]\n(pass) synthetic redactor canaries report source-pinned limits without exposing canary bytes [2.86ms]\n(pass) maintenance-required CASS status stays unqualified and reports its static scheduler source [289.22ms]\n(pass) successful CASS status metadata never qualifies actual retrieval [1233.88ms]\n(pass) malformed CASS and scheduler inputs remain unverified [318.90ms]\n(pass) CASS unhealthy metadata overrides a successful status exit [1166.80ms]\n(pass) CASS status past its configured deadline stays unverified [52.80ms]\n\n 17 pass\n 0 fail\n 111 expect() calls\nRan 17 tests across 1 file. [3.52s]\n\ntests/cli/memory-readiness.test.ts:\n(pass) reviewed OMP 18.12.6 source hashes report on-disk OFF and the redactor limitation [6.82ms]\n(pass) reviewed source hashes, not package version, govern memory inspection [2.69ms]\n(pass) one changed redactor source byte refuses the synthetic probe [2.43ms]\n(pass) one changed memory settings source byte names the exact path and hash [10.38ms]\n(pass) OFF and configured Mnemopi do not turn into runtime OK [2.74ms]\n(pass) empty-not-created store and observed local SQLite store remain distinct without reading rows [6.26ms]\n(pass) an explicit XDG state root is inspected without creating or reading its memory rows [343.14ms]\n(pass) parked model role cannot count as model availability and remains separate from missing role [4.57ms]\n(pass) malformed, unsupported and unsafe profile layers refuse an effective backend claim [7.87ms]\n(pass) legacy mnemosyne config refuses an effective Mnemopi claim before migration [3.21ms]\n(pass) custom store symlink and inaccessible store do not get dereferenced or certified [3.52ms]\n(pass) synthetic redactor canaries report source-pinned limits without exposing canary bytes [2.25ms]\n(pass) maintenance-required CASS status stays unqualified and reports its static scheduler source [261.16ms]\n(pass) successful CASS status metadata never qualifies actual retrieval [242.57ms]\n(pass) malformed CASS and scheduler inputs remain unverified [200.91ms]\n(pass) CASS unhealthy metadata overrides a successful status exit [262.06ms]\n(pass) CASS status past its configured deadline stays unverified [54.81ms]\n\n 17 pass\n 0 fail\n 111 expect() calls\nRan 17 tests across 1 file. [1466.00ms]\n\ntests/cli/memory-readiness.test.ts:\n(pass) reviewed OMP 18.12.6 source hashes report on-disk OFF and the redactor limitation [5.93ms]\n(pass) reviewed source hashes, not package version, govern memory inspection [2.32ms]\n(pass) one changed redactor source byte refuses the synthetic probe [3.06ms]\n(pass) one changed memory settings source byte names the exact path and hash [11.24ms]\n(pass) OFF and configured Mnemopi do not turn into runtime OK [2.93ms]\n(pass) empty-not-created store and observed local SQLite store remain distinct without reading rows [5.46ms]\n(pass) an explicit XDG state root is inspected without creating or reading its memory rows [329.00ms]\n(pass) parked model role cannot count as model availability and remains separate from missing role [4.20ms]\n(pass) malformed, unsupported and unsafe profile layers refuse an effective backend claim [7.06ms]\n(pass) legacy mnemosyne config refuses an effective Mnemopi claim before migration [3.42ms]\n(pass) custom store symlink and inaccessible store do not get dereferenced or certified [4.26ms]\n(pass) synthetic redactor canaries report source-pinned limits without exposing canary bytes [3.25ms]\n(pass) maintenance-required CASS status stays unqualified and reports its static scheduler source [420.79ms]\n(pass) successful CASS status metadata never qualifies actual retrieval [223.94ms]\n(pass) malformed CASS and scheduler inputs remain unverified [194.43ms]\n(pass) CASS unhealthy metadata overrides a successful status exit [267.69ms]\n(pass) CASS status past its configured deadline stays unverified [54.60ms]\n\n 17 pass\n 0 fail\n 111 expect() calls\nRan 17 tests across 1 file. [1.59s]\n",
+      "timed_out": false,
+      "truncated": false
+    },
+    "load_report": {
+      "kind": "memory-readiness-load",
+      "ok": true,
+      "owned_workers": [
+        32438,
+        32439,
+        32440,
+        32441,
+        32442,
+        32443,
+        32444,
+        32446
+      ],
+      "runs": [
+        {
+          "index": 1,
+          "rc": 0,
+          "counts": {
+            "pass": 17,
+            "fail": 0,
+            "found": true
+          },
+          "before": "32438   0.0 RNs \n32439   0.0 RNs \n32440   0.0 RNs \n32441   0.0 RNs \n32442   0.0 RNs \n32443   0.0 RNs \n32444   0.0 RNs \n32446   0.0 RNs \n",
+          "after": "32438  99.1 RNs \n32439  98.8 RNs \n32440  98.5 RNs \n32441 100.0 RNs \n32442  98.5 RNs \n32443 100.0 RNs \n32444  98.2 RNs \n32446  99.2 RNs \n"
+        },
+        {
+          "index": 2,
+          "rc": 0,
+          "counts": {
+            "pass": 17,
+            "fail": 0,
+            "found": true
+          },
+          "before": "32438 100.0 RNs \n32439 100.0 RNs \n32440  99.1 RNs \n32441  99.6 RNs \n32442  99.6 RNs \n32443  98.3 RNs \n32444  99.1 RNs \n32446  99.0 RNs \n",
+          "after": "32438 100.0 RNs \n32439  98.7 RNs \n32440  99.6 RNs \n32441  99.6 RNs \n32442  99.7 RNs \n32443  99.0 RNs \n32444  98.8 RNs \n32446 100.0 RNs \n"
+        },
+        {
+          "index": 3,
+          "rc": 0,
+          "counts": {
+            "pass": 17,
+            "fail": 0,
+            "found": true
+          },
+          "before": "32438  99.2 RNs \n32439  99.4 RNs \n32440  98.6 RNs \n32441  98.2 RNs \n32442  99.0 RNs \n32443  98.8 RNs \n32444  99.0 RNs \n32446  99.4 RNs \n",
+          "after": "32438  99.9 RNs \n32439  99.5 RNs \n32440  99.4 RNs \n32441 100.0 RNs \n32442  97.9 RNs \n32443 100.0 RNs \n32444  99.3 RNs \n32446  99.1 RNs \n"
+        }
+      ]
+    },
+    "owned_workers_absent": {
+      "rc": 1,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    }
+  },
+  "canonical_driver": {
+    "rc": 0,
+    "out": "bun test v1.4.3 (26aa4e1a9)\nbun test v1.4.3 (26aa4e1a9)\nbun test v1.4.3 (26aa4e1a9)\n{\"kind\":\"memory-readiness-load\",\"ok\":true,\"owned_workers\":[51443,51445,51446,51447,51448,51449,51450,51451],\"runs\":[{\"index\":1,\"rc\":0,\"counts\":{\"pass\":17,\"fail\":0,\"found\":true},\"before\":\"51443   0.0 RNs \\n51445   0.0 RNs \\n51446   0.0 RNs \\n51447   0.0 RNs \\n51448   0.0 RNs \\n51449   0.0 RNs \\n51450   0.0 RNs \\n51451   0.0 RNs \\n\",\"after\":\"51443 100.0 RNs \\n51445  99.5 RNs \\n51446  99.4 RNs \\n51447 100.0 RNs \\n51448 100.0 RNs \\n51449 100.0 RNs \\n51450 100.0 RNs \\n51451 100.0 RNs \\n\"},{\"index\":2,\"rc\":0,\"counts\":{\"pass\":17,\"fail\":0,\"found\":true},\"before\":\"51443  98.5 RNs \\n51445  98.7 RNs \\n51446  99.5 RNs \\n51447  98.3 RNs \\n51448  98.2 RNs \\n51449  98.3 RNs \\n51450  98.8 RNs \\n51451  99.2 RNs \\n\",\"after\":\"51443  99.2 RNs \\n51445  99.4 RNs \\n51446 100.0 RNs \\n51447  98.8 RNs \\n51448  99.9 RNs \\n51449  99.3 RNs \\n51450  99.0 RNs \\n51451 100.0 RNs \\n\"},{\"index\":3,\"rc\":0,\"counts\":{\"pass\":17,\"fail\":0,\"found\":true},\"before\":\"51443  99.2 RNs \\n51445  99.0 RNs \\n51446  98.8 RNs \\n51447  98.4 RNs \\n51448  98.6 RNs \\n51449 100.0 RNs \\n51450 100.0 RNs \\n51451 100.0 RNs \\n\",\"after\":\"51443  98.8 RNs \\n51445 100.0 RNs \\n51446  99.6 RNs \\n51447  99.4 RNs \\n51448  99.6 RNs \\n51449  98.7 RNs \\n51450  99.1 RNs \\n51451 100.0 RNs \\n\"}]}\n{\"cleanup\":[{\"pid\":51443,\"settled\":\"rejected\"},{\"pid\":51445,\"settled\":\"rejected\"},{\"pid\":51446,\"settled\":\"rejected\"},{\"pid\":51447,\"settled\":\"rejected\"},{\"pid\":51448,\"settled\":\"rejected\"},{\"pid\":51449,\"settled\":\"rejected\"},{\"pid\":51450,\"settled\":\"rejected\"},{\"pid\":51451,\"settled\":\"rejected\"}]}\n",
+    "err": "\ntests/cli/memory-readiness.test.ts:\n(pass) reviewed OMP 18.12.6 source hashes report on-disk OFF and the redactor limitation [4.27ms]\n(pass) reviewed source hashes, not package version, govern memory inspection [1.85ms]\n(pass) one changed redactor source byte refuses the synthetic probe [1.81ms]\n(pass) one changed memory settings source byte names the exact path and hash [6.51ms]\n(pass) OFF and configured Mnemopi do not turn into runtime OK [2.83ms]\n(pass) empty-not-created store and observed local SQLite store remain distinct without reading rows [3.67ms]\n(pass) an explicit XDG state root is inspected without creating or reading its memory rows [395.53ms]\n(pass) parked model role cannot count as model availability and remains separate from missing role [2.86ms]\n(pass) malformed, unsupported and unsafe profile layers refuse an effective backend claim [4.47ms]\n(pass) legacy mnemosyne config refuses an effective Mnemopi claim before migration [1.74ms]\n(pass) custom store symlink and inaccessible store do not get dereferenced or certified [3.12ms]\n(pass) synthetic redactor canaries report source-pinned limits without exposing canary bytes [2.94ms]\n(pass) maintenance-required CASS status stays unqualified and reports its static scheduler source [343.69ms]\n(pass) successful CASS status metadata never qualifies actual retrieval [257.19ms]\n(pass) malformed CASS and scheduler inputs remain unverified [239.30ms]\n(pass) CASS unhealthy metadata overrides a successful status exit [290.21ms]\n(pass) CASS status past its configured deadline stays unverified [51.69ms]\n\n 17 pass\n 0 fail\n 111 expect() calls\nRan 17 tests across 1 file. [1.69s]\n\ntests/cli/memory-readiness.test.ts:\n(pass) reviewed OMP 18.12.6 source hashes report on-disk OFF and the redactor limitation [3.79ms]\n(pass) reviewed source hashes, not package version, govern memory inspection [2.04ms]\n(pass) one changed redactor source byte refuses the synthetic probe [2.03ms]\n(pass) one changed memory settings source byte names the exact path and hash [6.38ms]\n(pass) OFF and configured Mnemopi do not turn into runtime OK [2.21ms]\n(pass) empty-not-created store and observed local SQLite store remain distinct without reading rows [3.32ms]\n(pass) an explicit XDG state root is inspected without creating or reading its memory rows [246.56ms]\n(pass) parked model role cannot count as model availability and remains separate from missing role [2.80ms]\n(pass) malformed, unsupported and unsafe profile layers refuse an effective backend claim [5.52ms]\n(pass) legacy mnemosyne config refuses an effective Mnemopi claim before migration [1.96ms]\n(pass) custom store symlink and inaccessible store do not get dereferenced or certified [2.53ms]\n(pass) synthetic redactor canaries report source-pinned limits without exposing canary bytes [1.95ms]\n(pass) maintenance-required CASS status stays unqualified and reports its static scheduler source [196.21ms]\n(pass) successful CASS status metadata never qualifies actual retrieval [168.14ms]\n(pass) malformed CASS and scheduler inputs remain unverified [164.47ms]\n(pass) CASS unhealthy metadata overrides a successful status exit [166.95ms]\n(pass) CASS status past its configured deadline stays unverified [52.43ms]\n\n 17 pass\n 0 fail\n 111 expect() calls\nRan 17 tests across 1 file. [1089.00ms]\n\ntests/cli/memory-readiness.test.ts:\n(pass) reviewed OMP 18.12.6 source hashes report on-disk OFF and the redactor limitation [4.22ms]\n(pass) reviewed source hashes, not package version, govern memory inspection [1.87ms]\n(pass) one changed redactor source byte refuses the synthetic probe [2.18ms]\n(pass) one changed memory settings source byte names the exact path and hash [6.93ms]\n(pass) OFF and configured Mnemopi do not turn into runtime OK [2.85ms]\n(pass) empty-not-created store and observed local SQLite store remain distinct without reading rows [3.81ms]\n(pass) an explicit XDG state root is inspected without creating or reading its memory rows [246.68ms]\n(pass) parked model role cannot count as model availability and remains separate from missing role [2.83ms]\n(pass) malformed, unsupported and unsafe profile layers refuse an effective backend claim [5.14ms]\n(pass) legacy mnemosyne config refuses an effective Mnemopi claim before migration [1.80ms]\n(pass) custom store symlink and inaccessible store do not get dereferenced or certified [3.79ms]\n(pass) synthetic redactor canaries report source-pinned limits without exposing canary bytes [2.12ms]\n(pass) maintenance-required CASS status stays unqualified and reports its static scheduler source [200.18ms]\n(pass) successful CASS status metadata never qualifies actual retrieval [241.67ms]\n(pass) malformed CASS and scheduler inputs remain unverified [164.57ms]\n(pass) CASS unhealthy metadata overrides a successful status exit [163.42ms]\n(pass) CASS status past its configured deadline stays unverified [52.31ms]\n\n 17 pass\n 0 fail\n 111 expect() calls\nRan 17 tests across 1 file. [1168.00ms]\n",
+    "timed_out": false,
+    "truncated": false,
+    "report": {
+      "kind": "memory-readiness-load",
+      "ok": true,
+      "owned_workers": [
+        51443,
+        51445,
+        51446,
+        51447,
+        51448,
+        51449,
+        51450,
+        51451
+      ],
+      "runs": [
+        {
+          "index": 1,
+          "rc": 0,
+          "counts": {
+            "pass": 17,
+            "fail": 0,
+            "found": true
+          },
+          "before": "51443   0.0 RNs \n51445   0.0 RNs \n51446   0.0 RNs \n51447   0.0 RNs \n51448   0.0 RNs \n51449   0.0 RNs \n51450   0.0 RNs \n51451   0.0 RNs \n",
+          "after": "51443 100.0 RNs \n51445  99.5 RNs \n51446  99.4 RNs \n51447 100.0 RNs \n51448 100.0 RNs \n51449 100.0 RNs \n51450 100.0 RNs \n51451 100.0 RNs \n"
+        },
+        {
+          "index": 2,
+          "rc": 0,
+          "counts": {
+            "pass": 17,
+            "fail": 0,
+            "found": true
+          },
+          "before": "51443  98.5 RNs \n51445  98.7 RNs \n51446  99.5 RNs \n51447  98.3 RNs \n51448  98.2 RNs \n51449  98.3 RNs \n51450  98.8 RNs \n51451  99.2 RNs \n",
+          "after": "51443  99.2 RNs \n51445  99.4 RNs \n51446 100.0 RNs \n51447  98.8 RNs \n51448  99.9 RNs \n51449  99.3 RNs \n51450  99.0 RNs \n51451 100.0 RNs \n"
+        },
+        {
+          "index": 3,
+          "rc": 0,
+          "counts": {
+            "pass": 17,
+            "fail": 0,
+            "found": true
+          },
+          "before": "51443  99.2 RNs \n51445  99.0 RNs \n51446  98.8 RNs \n51447  98.4 RNs \n51448  98.6 RNs \n51449 100.0 RNs \n51450 100.0 RNs \n51451 100.0 RNs \n",
+          "after": "51443  98.8 RNs \n51445 100.0 RNs \n51446  99.6 RNs \n51447  99.4 RNs \n51448  99.6 RNs \n51449  98.7 RNs \n51450  99.1 RNs \n51451 100.0 RNs \n"
+        }
+      ]
+    },
+    "owned_workers_absent": {
+      "rc": 1,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    }
+  },
+  "private_index_initial_members": [
+    {
+      "member": "kitlib",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "tempsafe",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "pysafe",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "readme",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "imports",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "fragments",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "sources",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    },
+    {
+      "member": "regexploit",
+      "rc": 0,
+      "out": "",
+      "err": "",
+      "timed_out": false,
+      "truncated": false
+    }
+  ],
+  "owned_quality": {
+    "rc": 0,
+    "out": "<!-- ripwire quality-delta ripwire.quality-delta/v1: only what the change made WORSE vs baseline=: regressions= minor= gating=; <r kind= sym= p= was= now= gating= bar=>, <sa> acked. at=: commit+dirty+shallow. --><quality-delta schema=\"ripwire.quality-delta/v1\" baseline=\"git-HEAD\" regressions=\"2\" minor=\"1\" acked=\"0\" stale=\"0\" preexisting-worse=\"1\" new-symbol=\"1\" gating=\"0\" register-macro-excluded=\"0\" api-new-surface=\"0\" at=\"1ee5603de+dirty+shallow\" scope=\"src/memory-readiness.ts,tests/cli/memory-readiness.test.ts,tests/cli/memory-readiness-load.ts\" scoped-out=\"42\" scoped-out-gating=\"4\"><r kind=\"complexity\" sym=\"inspectCassStatus\" was=\"35\" now=\"37\" bar=\"15\" sev=\"minor\" p=\"src/memory-readiness.ts:133\"/><r kind=\"dead-code\" sym=\"on_output\" origin=\"new-symbol\" p=\"tests/cli/memory-readiness-load.ts:26\"/><out-of-scope n=\"42\" would-gate=\"4\" note=\"not yours - do not ack: these rows lie outside the scope this run named. They are disclosed rather than hidden, they never gate this exit code, and the ack refuses to write them.\"><r kind=\"complexity\" sym=\"analyzeJavaScriptWait\" was=\"0\" now=\"41\" bar=\"15\" origin=\"new-symbol\" p=\"src/kitlib/bgwait.ts:39\"/><r kind=\"complexity\" sym=\"analyze_python_wait\" was=\"0\" now=\"32\" bar=\"15\" origin=\"new-symbol\" p=\"scripts/kitlib_bgwait.py:32\"/><r kind=\"complexity\" sym=\"brCommandLines\" was=\"38\" now=\"42\" bar=\"15\" sev=\"minor\" p=\"extensions/kit-flywheel-guard.ts:678\"/><r kind=\"complexity\" sym=\"fixture\" was=\"0\" now=\"38\" bar=\"15\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe.ts:69\"/><r kind=\"complexity\" sym=\"observeJournal\" was=\"0\" now=\"21\" bar=\"15\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe.ts:22\"/><r kind=\"complexity\" sym=\"splitShellCommands\" was=\"0\" now=\"160\" bar=\"15\" origin=\"new-symbol\" p=\"extensions/kit-flywheel-guard.ts:488\"/><r kind=\"complexity\" sym=\"staticLintArgs\" was=\"30\" now=\"32\" bar=\"15\" sev=\"minor\" p=\"extensions/kit-flywheel-guard.ts:1919\"/><r kind=\"complexity\" sym=\"staticShellValue\" was=\"24\" now=\"25\" bar=\"15\" sev=\"minor\" p=\"extensions/kit-flywheel-guard.ts:1896\"/><r kind=\"dead-code\" sym=\"analyze_eval_wait\" origin=\"new-symbol\" p=\"scripts/kitlib_bgwait.py:68\"/><r kind=\"dead-code\" sym=\"goalProbeEvents\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe-events.ts:9\"/><r kind=\"duplication\" members=\"errnoOf | node\" tokens=\"38\" p=\"src/kitlib/io.ts:123\"/><r kind=\"duplication\" members=\"isNotFound | node\" tokens=\"32\" p=\"src/mutations.ts:66\"/><r kind=\"duplication\" members=\"literalSeconds | memberName\" tokens=\"86\" origin=\"new-symbol\" p=\"src/kitlib/bgwait.ts:25\"/><r kind=\"error-masking\" sym=\"observeJournal\" was=\"0\" now=\"1\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe.ts:22\"/><r kind=\"nesting\" sym=\"analyzeJavaScriptWait\" was=\"0\" now=\"5\" bar=\"4\" origin=\"new-symbol\" p=\"src/kitlib/bgwait.ts:39\"/><r kind=\"nesting\" sym=\"splitShellCommands\" was=\"0\" now=\"8\" bar=\"4\" origin=\"new-symbol\" p=\"extensions/kit-flywheel-guard.ts:488\"/><r kind=\"new-clone-of-reused-helper\" sym=\"isNotFound | node\" was=\"0\" now=\"3\" p=\"src/mutations.ts:66\"/><r kind=\"short-horizon-churn\" sym=\"BrCommandLine\" was=\"0\" now=\"51\" sev=\"minor\" churn=\"ambient\" p=\"extensions/kit-flywheel-guard.ts:666\"/><r kind=\"short-horizon-churn\" sym=\"archiveFullSuiteJudge\" was=\"0\" now=\"19\" churn=\"self\" p=\"src/land.ts:246\"/><r kind=\"short-horizon-churn\" sym=\"brCommandLines\" was=\"0\" now=\"51\" sev=\"minor\" churn=\"self\" p=\"extensions/kit-flywheel-guard.ts:678\"/><r kind=\"short-horizon-churn\" sym=\"carry_measurement\" was=\"0\" now=\"25\" sev=\"minor\" churn=\"self\" p=\"tests/cli/pre-push-gate.test.sh:820\"/><r kind=\"short-horizon-churn\" sym=\"carry_suite_executor\" was=\"0\" now=\"25\" sev=\"minor\" churn=\"self\" p=\"tests/cli/pre-push-gate.test.sh:30\"/><r kind=\"short-horizon-churn\" sym=\"checkBeadLint\" was=\"0\" now=\"51\" sev=\"minor\" churn=\"self\" p=\"extensions/kit-flywheel-guard.ts:2030\"/><r kind=\"short-horizon-churn\" sym=\"gate_body\" was=\"0\" now=\"27\" sev=\"minor\" churn=\"self\" p=\"scripts/pre-push-gate.sh:289\"/><r kind=\"short-horizon-churn\" sym=\"shellExpands\" was=\"0\" now=\"51\" sev=\"minor\" churn=\"self\" p=\"extensions/kit-flywheel-guard.ts:1881\"/><r kind=\"short-horizon-churn\" sym=\"staticLintArgs\" was=\"0\" now=\"51\" sev=\"minor\" churn=\"self\" p=\"extensions/kit-flywheel-guard.ts:1919\"/><r kind=\"short-horizon-churn\" sym=\"staticShellValue\" was=\"0\" now=\"51\" sev=\"minor\" churn=\"self\" p=\"extensions/kit-flywheel-guard.ts:1896\"/><r kind=\"short-horizon-churn\" sym=\"verdictcache\" was=\"0\" now=\"25\" sev=\"minor\" churn=\"self\" p=\"tests/cli/pre-push-gate.test.sh:924\"/><r kind=\"verbosity\" sym=\"detect\" was=\"74\" now=\"76\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:54\"/><r kind=\"verbosity\" sym=\"differential\" was=\"63\" now=\"65\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:131\"/><r kind=\"verbosity\" sym=\"fixture\" was=\"0\" now=\"87\" bar=\"60\" origin=\"new-symbol\" p=\"tests/live/goal-async-probe.ts:69\"/><r kind=\"verbosity\" sym=\"jobs\" was=\"388\" now=\"396\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:53\"/><r kind=\"verbosity\" sym=\"jobs\" was=\"120\" now=\"122\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release-intel-probe.yml:22\"/><r kind=\"verbosity\" sym=\"jobs\" was=\"419\" now=\"425\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release-train.yml:39\"/><r kind=\"verbosity\" sym=\"jobs\" was=\"702\" now=\"706\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release.yml:65\"/><r kind=\"verbosity\" sym=\"prepare\" was=\"120\" now=\"122\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:197\"/><r kind=\"verbosity\" sym=\"publish\" was=\"118\" now=\"120\" bar=\"60\" sev=\"minor\" p=\".github/workflows/omp-certify.yml:329\"/><r kind=\"verbosity\" sym=\"publish\" was=\"138\" now=\"140\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release-train.yml:126\"/><r kind=\"verbosity\" sym=\"signed-consumers\" was=\"90\" now=\"92\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release.yml:489\"/><r kind=\"verbosity\" sym=\"splitShellCommands\" was=\"0\" now=\"107\" bar=\"60\" origin=\"new-symbol\" p=\"extensions/kit-flywheel-guard.ts:488\"/><r kind=\"verbosity\" sym=\"train\" was=\"83\" now=\"85\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release-train.yml:40\"/><r kind=\"verbosity\" sym=\"validate-tag\" was=\"150\" now=\"152\" bar=\"60\" sev=\"minor\" p=\".github/workflows/release.yml:66\"/></out-of-scope></quality-delta>",
+    "err": "ripwire: no /Users/josh/Developer/omp-kit-companion/.ripwire_quality_baseline — auto-comparing the working tree vs git HEAD (commit the baseline with --quality-baseline to pin it)\n",
+    "timed_out": false,
+    "truncated": false
+  },
+  "contract_check": {
+    "rc": 0,
+    "out": "<!-- ripwire edit-check ripwire.edit-check/v1: sym='s contract NOW vs HEAD: status=unchanged|new-symbol|contract-change; <c n= p= incompatible=1 sites_l=> callers. counts_floor=1: every count is a FLOOR, never a total. graph_ambiguous=/graph_unresolved=: resolver gauge. graph_unindexed=N: N files no grammar could read (the map header's unindexed=); their calls raise neither gauge. est_tokens=: price as emitted (an upper bound under compact). at=: commit+dirty+shallow. root=: p= relative to it. next=: the one pasteable follow-up. --><edit-check schema=\"ripwire.edit-check/v1\" sym=\"inspectCassStatus\" t=\"fn\" p=\"src/memory-readiness.ts:133\" status=\"contract-change\" defs=\"1\" params_was=\"1\" params_now=\"2\" public_was=\"0\" public_now=\"0\" defs_was=\"1\" defs_now=\"1\" change=\"params\" callers=\"1\" incompatible=\"0\" at=\"42e735bb7+dirty+shallow\" graph_ambiguous=\"1398\" graph_unresolved=\"9971\" graph_unindexed=\"69\" counts_floor=\"1\" root=\"/Users/josh/Developer/omp-kit-companion\" next=\"--uses=inspectCassStatus\" est_tokens=\"2755\"><c n=\"inspectMemoryReadiness\" p=\"src/memory-readiness.ts:359\"/></edit-check>",
+    "err": "",
+    "timed_out": false,
+    "truncated": false
+  },
+  "affected_tests": {
+    "rc": 0,
+    "out": "<!-- ripwire affected ripwire.affected/v1: test files that transitively reach the changed files/symbols: <test p= partner= hops= run=> in evidence order (order= partners=); seeded_by= the reading taken. counts_floor=1: every count is a FLOOR, never a total. graph_ambiguous=/graph_unresolved=: resolver gauge. graph_unindexed=N: N files no grammar could read (the map header's unindexed=); their calls raise neither gauge. run_unknown=1: no runner derivable (a guess would be worse). root=: p= relative to it. --><affected schema=\"ripwire.affected/v1\" changed=\"src/memory-readiness.ts:inspectCassStatus\" seeded_by=\"symbol\" seeds=\"1\" seed_test_files=\"0\" tests=\"1\" reached=\"7\" script_gates_unmodelled=\"77\" order=\"evidence\" partners=\"1\" root=\"/Users/josh/Developer/omp-kit-companion\" graph_ambiguous=\"1398\" graph_unresolved=\"9971\" graph_unindexed=\"69\" counts_floor=\"1\"><test p=\"tests/cli/memory-readiness.test.ts\" partner=\"1\" hops=\"2\" run_unknown=\"1\"/></affected>",
+    "err": "",
+    "timed_out": false,
+    "truncated": false
+  },
+  "limitations": [
+    "Source/owned fixture verification only; not independent acceptance, whole-repository qualification, publication, release, installed runtime or a performance speedup.",
+    "ROADMAP CASSCLOCK1 row is owed to the lead in 0.2.83 prepare under decisions75206/75208; the source commit intentionally does not edit the foreign-held file.",
+    "The clean candidate is a native read-only export of an unreferenced real Git probe object whose tree is exactly the named base plus the four owned code/fragment paths; no reference or shared index was moved. Export Git is initialized without commits and no TRUSTED_SOURCE variable is used.",
+    "The permanent negative was replayed on old production code with only the new test overlaid in an immutable tests-only probe. The original module blob is identical across the calibration and final-source bases.",
+    "LSP ambient Bun/ES2024 project configuration is unresolved; no tsc-clean claim. Actual Bun1.4.3 entry compilation and the actual standalone/empty-Git executions pass.",
+    "The early ad-hoc CPU cohort was not native-heavy-admitted; it is not the primary AC3 qualifier. Both retained reusable-driver qualifiers were actually run through heavy --no-wait and their eight recorded PIDs were absent afterward."
+  ],
+  "excluded_development_attempts": [
+    "Packaged process.execPath and initial malformed Bun -e snippets produced no CASS/load verdict; no pass is attributed to them.",
+    "An initial unsupported grace_s:0 caused failed-to-start rather than timeout and failed the smoke; it was removed. Final code uses the helper default bounded shutdown grace and the unchanged 2000ms command deadline.",
+    "Editable overlay attempts were refused by scratch custody. They were not bypassed; the repository gate private-index probe-object convention supplied the immutable exact snapshot instead."
+  ]
+}
