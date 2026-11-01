@@ -1,0 +1,101 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_56d4200043d4ad51aee69f0fde91bd3cb585154ac9e6b22b7dbe21ff196f8cd3",
+ "limitations": [
+  "No whole-suite, release, installed-runtime, independent acceptance or closure claim.",
+  "The first original-parent driver passed unittest the wrong argv and produced two harness errors; it was not red evidence. Corrected driver preserves final tests and executes the original-parent module, yielding thirteen assertion failures.",
+  "Dry-run admission recognizes direct/sh/bash simple invocation and the script default fetched origin head; source overrides and nested/compound shell forms do not qualify. Closure recognition is the tested explicit prerequisite grammar, not arbitrary natural-language classification."
+ ],
+ "operation": "RELLINT1 exact-source intake qualification",
+ "parameters": {
+  "bead": "ompkit-774u.68",
+  "source_commit": "be88922aa58a80c3b622a62726fc20891e8a3eb7",
+  "subject_sha256": "9b116e53c1b0af2beb74e0a4893a2b6938c5f3f4578e4fcb39ff8f197d9c1d77",
+  "test_sha256": "a08140220a864f807a0230e76e062bb86e886d5131fac35dafb108f8739d29de"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "existing_exact_suites": [
+   {
+    "command": "python3 tests/scripts/bead_lint_bead_test.py",
+    "rc": 0,
+    "result": "OK",
+    "tests": 11
+   },
+   {
+    "command": "python3 tests/scripts/bead_lint_goal_path_test.py",
+    "rc": 0,
+    "result": "OK",
+    "tests": 22
+   }
+  ],
+  "original_acceptance": {
+   "command": "python3 tests/scripts/bead_lint_test.py",
+   "exact_candidate": {
+    "rc": 0,
+    "result": "OK",
+    "tests": 10
+   },
+   "original_parent_final_corpus": {
+    "failure_assertions": 13,
+    "rc": 1,
+    "result": "FAILED (failures=13)",
+    "tests": 10
+   }
+  },
+  "original_parent": "67204454d38652a5048588c0067bc042e6d88f9b",
+  "private_index": {
+   "baseline": "67204454d38652a5048588c0067bc042e6d88f9b",
+   "candidate": "be88922aa58a80c3b622a62726fc20891e8a3eb7",
+   "members": {
+    "br-init": 0,
+    "fragments": 0,
+    "imports": 0,
+    "kitlib": 0,
+    "pysafe": 0,
+    "readme": 0,
+    "regexploit": 0,
+    "sources": 0,
+    "tempsafe": 0
+   },
+   "scope": "Exact candidate archive, detached test-fixture parent, read-only alternate Git objects and own private index; canonical HEAD and shared index untouched",
+   "staged_paths": [
+    "ROADMAP.md",
+    "changelog.d/ompkit-774u.68.md",
+    "scripts/bead_lint.py",
+    "tests/scripts/bead_lint_test.py"
+   ]
+  },
+  "real_native_intake": {
+   "create_control": {
+    "rc": 0,
+    "rejected_create_absent": true,
+    "stored": true
+   },
+   "create_negative": {
+    "output": "br-create-lint: LINT_REFUSED RELEASE_BEAD_CLOSURE_PREREQUISITE,RELEASE_DRYRUN_BOX_MISSING",
+    "rc": 4
+   },
+   "fixture": "existing LiveGates native-br owned tracker; no live tracker used",
+   "update_control": {
+    "rc": 0,
+    "stored_acceptance_preserved": true
+   },
+   "update_negative": {
+    "output": "br-shim: LINT_REFUSED RELEASE_BEAD_CLOSURE_PREREQUISITE,RELEASE_DRYRUN_BOX_MISSING",
+    "rc": 4
+   }
+  },
+  "regex": {
+   "claim": "Finite conformance and no reported static witness, not an asymptotic or security proof",
+   "engine": "Python re",
+   "matched": false,
+   "near_miss_bytes": 1048602,
+   "near_miss_elapsed_seconds": "0.069956125",
+   "regexploit_rc": 0,
+   "required_and_rejected_cases": "PASS"
+  },
+  "source_commit": "be88922aa58a80c3b622a62726fc20891e8a3eb7"
+ }
+}
