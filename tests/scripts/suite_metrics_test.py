@@ -15,6 +15,7 @@ import sys
 import threading
 from typing import Iterator
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -96,6 +97,54 @@ class SuiteMetricsTests(unittest.TestCase):
         merged = metrics.merge_timings(previous, [row("a"), row("b"), row("c")])
         self.assertEqual(merged, {"version": 1, "files": {"gone": 99, "a": 10.0, "b": 10.0, "c": 10.0}})
         self.assertEqual(previous["files"]["a"], 90)
+
+
+class ResourceAdmissionTests(unittest.TestCase):
+    def admit(self, load=3.5, free=20 * 1024 ** 3, limit="6") -> dict:
+        space = os.statvfs_result((1, 1, free, free, free, 0, 0, 0, 0, 255))
+        with patch.object(metrics.os, "cpu_count", return_value=8), \
+             patch.object(metrics.os, "getloadavg", return_value=(load,) * 3), \
+             patch.object(metrics.os, "statvfs", return_value=space):
+            return metrics.verdict_resources(Path("."), 5, limit)
+
+    def test_quiet_run_uses_spare_cores_and_records_disk(self) -> None:
+        facts = self.admit()
+        self.assertTrue(facts["allowed"])
+        self.assertEqual(facts["shell_capacity"], 4)
+        self.assertEqual(facts["load_millionths"], [3500000] * 3)
+        self.assertEqual(facts["max_load_millionths"], 6000000)
+        self.assertEqual(facts["free_bytes"], 20 * 1024 ** 3)
+        self.assertEqual(facts["cores"], 8)
+
+    def test_load_ceiling_is_inclusive_and_disk_floor_is_physical(self) -> None:
+        boundary = self.admit(load=6, free=10 * 1024 ** 3)
+        self.assertTrue(boundary["allowed"])
+        self.assertEqual(boundary["shell_capacity"], 2)
+        high = self.admit(load=6.000001)
+        self.assertFalse(high["allowed"])
+        self.assertEqual(high["reason"], "LOAD_ABOVE_CEILING")
+        low = self.admit(free=10 * 1024 ** 3 - 1)
+        self.assertFalse(low["allowed"])
+        self.assertEqual(low["reason"], "DISK_BELOW_FLOOR")
+
+    def test_admitted_fractional_spare_core_retains_one_worker(self) -> None:
+        facts = self.admit(load=7.5, limit="8")
+        self.assertTrue(facts["allowed"])
+        self.assertEqual(facts["shell_capacity"], 1)
+
+    def test_load_ingress_has_one_rounding_and_zero_rule(self) -> None:
+        for value, units in ((0, 0), (-0.0, 0), ("0.0000005", 1),
+                             ("1.2345674", 1234567), ("1.2345675", 1234568),
+                             ("1.234567499999999999999999999999999999999", 1234567)):
+            with self.subTest(value=value):
+                self.assertEqual(metrics._load_millionths(value), units)
+        for value in ("NaN", "Infinity", "-Infinity", "-1", "1e999999", "not-a-load"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.admit(limit=value)
+
+    def test_invalid_os_load_is_not_an_admission(self) -> None:
+        with self.assertRaises(OSError):
+            self.admit(load=float("nan"))
 
 
 class JudgeIdentityTests(unittest.TestCase):

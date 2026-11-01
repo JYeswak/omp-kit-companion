@@ -28,15 +28,18 @@
 # FULL_SUITE_VERDICT_CACHE_DIR overrides the configured store for isolated tests and operators.
 # Otherwise scripts/full-suite-verdict-store.py uses
 # $XDG_CONFIG_HOME/omp-kit/full-suite-verdict.json and $XDG_STATE_HOME/omp-kit/full-suite-verdicts.
-# Shell suites: FULL_SUITE_SHELL_JOBS at a time (default 5, never more than online cores or
-# remaining suites). Every suite runs under an owned TMPDIR with output retained separately.
+# New runs refuse load above FULL_SUITE_MAX_LOAD (default: online cores) or free staging
+# disk below 10 GiB. Load decisions use millionths, rounded half up once at ingress.
+# Shell suites: at most FULL_SUITE_SHELL_JOBS (default 5), bounded by floor(cores-load),
+# with one runnable slot retained, and never more than remaining suites. Admission facts
+# are stored as integer millionths and free bytes; timing.load_start is their display form.
+# Every suite runs under an owned TMPDIR with output retained separately.
 # Suite bound: FULL_SUITE_TIMEOUT_SECS (default 1800). The suite runs at nice 10 inside the gate's
 # own admission; it takes no heavy slot.
 set -eu
 umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
 run_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
-load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
 ROOT=
 COMMIT=
 ARCHIVE_DIR=
@@ -120,7 +123,6 @@ CACHE_DIR=${entry%/*}
 log_entry=${entry%.json}.log
 incomplete_log="${entry%.json}.incomplete.$$.log"
 timings_csv="${entry%.json}.timings.$$.csv"
-mkdir -p "$CACHE_DIR" || { fail "verdict store is not writable: $CACHE_DIR"; exit 1; }
 
 # A record is reusable only after the canonical store validates its role, judge/runtime identity,
 # exact commit suite set, complete measured rows and paired log digest.
@@ -172,12 +174,49 @@ case "$cached" in
 	*) fail "shared verdict lookup returned an invalid result"; exit 1 ;;
 esac
 
+# Admit only new work. Cached verdicts retain their original observations.
+WORK_PARENT="$ROOT/var/agent-tmp"
+if [ -z "$ARCHIVE_DIR" ]; then
+	resource_root="$WORK_PARENT"
+	# Probe the existing ancestor on the staging filesystem before creating anything.
+	while [ ! -d "$resource_root" ]; do resource_root=${resource_root%/*}; done
+else
+	[ -d "$ARCHIVE_DIR/tests" ] || { fail "candidate archive has no tests/ tree"; exit 1; }
+	resource_root="$ARCHIVE_DIR"
+fi
+read_resource_admission() {
+python3 - "$SCRIPT_DIR/suite-metrics.py" "$resource_root" "$SHELL_JOBS" "${FULL_SUITE_MAX_LOAD:-}" <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("verdict_metrics", sys.argv[1])
+metrics = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = metrics
+spec.loader.exec_module(metrics)
+try:
+    facts = metrics.verdict_resources(sys.argv[2], int(sys.argv[3]), sys.argv[4] or None)
+except ValueError:
+    print("FULL-SUITE: REFUSED reason=INVALID_RESOURCE_POLICY", file=sys.stderr)
+    sys.exit(2)
+except OSError as error:
+    print(f"FULL-SUITE: UNVERIFIED reason=RESOURCE_PROBE_FAILED errno={error.errno}", file=sys.stderr)
+    sys.exit(3)
+if not facts["allowed"]:
+    print("FULL-SUITE: REFUSED reason=" + facts["reason"] + " " +
+          json.dumps(facts, separators=(",", ":")), file=sys.stderr)
+    sys.exit(1)
+print(facts["cores"], facts["shell_capacity"], json.dumps(facts, separators=(",", ":")))
+PY
+}
+resource_report=$(read_resource_admission) || exit "$?"
+IFS=' ' read -r ncpu SHELL_JOBS resource_facts <<EOF
+$resource_report
+EOF
+mkdir -p "$CACHE_DIR" || { fail "verdict store is not writable: $CACHE_DIR"; exit 1; }
+
 # The exact-commit archive under judgment. A caller-supplied archive (the pre-push gate's
 # candidate extract) is used as is; otherwise the candidate is exported from git objects only,
 # never the working tree.
 OWN_ARCHIVE=0
 if [ -z "$ARCHIVE_DIR" ]; then
-	WORK_PARENT="$ROOT/var/agent-tmp"
 	mkdir -p "$WORK_PARENT" || { fail "cannot stage the candidate archive"; exit 1; }
 	export KITLIB_TMP_ROOT="$WORK_PARENT"
 	# shellcheck source=scripts/kitlib-tmp.sh
@@ -363,10 +402,7 @@ if [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ] && [ -f "$ARCHIVE_DIR/scripts/build-mani
 	fi
 fi
 
-# FULLSUITEPAR1: never more shell workers than online cores or shell suites left to run.
-ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || ncpu=
-case "$ncpu" in ''|*[!0-9]*|0) ncpu=1 ;; esac
-[ "$SHELL_JOBS" -le "$ncpu" ] || SHELL_JOBS=$ncpu
+# FULLSUITEPAR1: admission bounds shell workers by spare cores; also cap by suites left.
 if [ "$shell_count" -gt 0 ]; then
 	[ "$SHELL_JOBS" -le "$shell_count" ] || SHELL_JOBS=$shell_count
 	echo "full-suite: shell suites run $SHELL_JOBS at a time (FULL_SUITE_SHELL_JOBS; $ncpu online cores)"
@@ -781,7 +817,7 @@ fi
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
 finish_logs "$log_entry"
 write_complete_verdict() {
-MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" WORKERS_BUN="$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers)" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
+MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" RESOURCE_FACTS="$resource_facts" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" WORKERS_BUN="$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers)" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
 import hashlib, json, os
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
@@ -800,6 +836,7 @@ for runner in ("bun", "sh", "python3"):
         "cpu_user_ms": sum(row["cpu_user_ms"] for row in selected),
         "cpu_system_ms": sum(row["cpu_system_ms"] for row in selected),
     }
+admission = json.loads(os.environ["RESOURCE_FACTS"])
 entry = {
     "version": 3,
     "tree": os.environ["TREE"],
@@ -809,10 +846,11 @@ entry = {
     "verdict": os.environ["VERDICT"],
     "exit_code": int(os.environ["CODE"]),
     "judge": {"role": os.environ["ROLE"], "checks_sha256": os.environ["CHECKS"], "runtime": os.environ["RUNTIME"]},
+    "admission": admission,
     "timing": {
         "wall_ms": int(os.environ["RUN_END"]) - int(os.environ["RUN_START"]),
         "started_ms": int(os.environ["RUN_START"]),
-        "load_start": json.loads(os.environ["LOAD_START"]),
+        "load_start": [value / admission["load_scale"] for value in admission["load_millionths"]],
         "load_end": json.loads(os.environ["LOAD_END"]),
         "workers": {"bun": min(4, int(os.environ["WORKERS_BUN"]), int(os.environ["BUNF"])),
                     "shell": min(int(os.environ["WORKERS_SHELL"]), int(os.environ["SHC"])), "python": min(1, int(os.environ["PYC"]))},

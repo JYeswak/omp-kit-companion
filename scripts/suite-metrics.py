@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import csv
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import math
@@ -35,6 +36,48 @@ JUDGING_FILES = (
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
     ".github/test-budget.json",
 )
+LOAD_SCALE = 1_000_000
+FULL_SUITE_DISK_FLOOR_BYTES = 10 * 1024 ** 3
+_MAX_LOAD = Decimal("9007199254.740991")  # Millionths fit the exact JSON integer range.
+_LOAD_QUANTUM = Decimal("0.000001")
+_LOAD_CONTEXT = Context(prec=24, rounding=ROUND_HALF_UP)
+
+
+def _load_millionths(value: object) -> int:
+    """One ingress rounding rule; decisions and persisted admission facts are integers."""
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError("load must be a finite nonnegative number") from None
+    if not number.is_finite() or number < 0 or number > _MAX_LOAD:
+        raise ValueError("load is outside the finite nonnegative range")
+    rounded = number.quantize(_LOAD_QUANTUM, context=_LOAD_CONTEXT)
+    return int(rounded.scaleb(6, context=_LOAD_CONTEXT))
+
+
+def verdict_resources(root: Path | str, worker_limit: int, max_load: str | None = None) -> dict:
+    """Admit execution, not a verdict: sample the staging filesystem and bound new work."""
+    if worker_limit < 1:
+        raise ValueError("worker limit must be positive")
+    cores = max(1, os.cpu_count() or 1)
+    ceiling = cores * LOAD_SCALE if max_load is None else _load_millionths(max_load)
+    space = os.statvfs(root)
+    free_bytes = space.f_bavail * (space.f_frsize or space.f_bsize)
+    try:
+        load = [_load_millionths(value) for value in os.getloadavg()]
+    except ValueError:
+        raise OSError("load probe returned invalid facts") from None
+    if len(load) != 3 or free_bytes < 0:
+        raise OSError("resource probe returned invalid facts")
+    reason = ("LOAD_ABOVE_CEILING" if load[0] > ceiling else
+              "DISK_BELOW_FLOOR" if free_bytes < FULL_SUITE_DISK_FLOOR_BYTES else "OK")
+    # Load is an estimate: retain one runnable slot, then respect the configured cap.
+    capacity = min(worker_limit, max(1, (cores * LOAD_SCALE - load[0]) // LOAD_SCALE))
+    return {"allowed": reason == "OK", "reason": reason, "cores": cores,
+            "load_millionths": load, "load_scale": LOAD_SCALE,
+            "max_load_millionths": ceiling, "free_bytes": free_bytes,
+            "min_free_bytes": FULL_SUITE_DISK_FLOOR_BYTES, "shell_capacity": capacity}
+
 
 
 def judge_identity(root: Path | str, scope: str) -> str:
