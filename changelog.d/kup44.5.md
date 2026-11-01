@@ -1,0 +1,1 @@
+- Pre-push reuses the base-role full-suite verdict that land produces for the same tree; release-local continues to use the main-role verdict.
