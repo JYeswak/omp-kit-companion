@@ -812,19 +812,47 @@ else
 fi
 
 # SUITEBUDGET1 (ompkit-kup44.1): fresh-gate.sh and full-suite-verdict.sh judge through
-# suite-metrics.py, which hashes the full judging closure (full-suite-verdict.sh, its store,
-# fresh-gate.sh, suite-hermetic-env.sh, kitlib_run.py, kitlib_tmp.py, pysafe.py, kitlib-tmp.sh,
-# test-budget.ts and .github/test-budget.json). carry_measurement copies it beside the judge and
-# the budget file to the repo root, where the judge reads it.
+# suite-metrics.py, which hashes the full judging closure (its JUDGING_FILES). JUDGECLOSURE1
+# (ompkit-t3x4u): carry_measurement copies exactly that closure, read from suite-metrics.py's own
+# source, never a list kept here: a file added to the closure reaches every fixture with no edit to
+# this test (e9d81a33ff added four and this list, kept by hand, refused the 0.2.83 publish).
+# Files under scripts/ go beside the judge ($2, default scripts); the rest keep their repo path.
+judge_closure() {
+	python3 -B - "$KITREPO/scripts/suite-metrics.py" <<'PY'
+import ast, pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+for node in ast.parse(source).body:
+    if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "JUDGING_FILES" for t in node.targets):
+        names = ast.literal_eval(node.value)
+        break
+else:
+    sys.exit(f"JUDGING_FILES is not a literal assignment in {sys.argv[1]}")
+for name in names:
+    print(name)
+PY
+}
+judge_closure > "$TMP/judge-closure" || { printf 'FAIL judge-closure-readable: scripts/suite-metrics.py JUDGING_FILES\n'; exit 1; }
+# The static half: every closure file resolves in this checkout, or the fixture could not carry it.
+closure_missing=""
+while IFS= read -r closure_name; do
+	[ -f "$KITREPO/$closure_name" ] || closure_missing="$closure_missing $closure_name"
+done < "$TMP/judge-closure"
+if [ -z "$closure_missing" ] && [ -s "$TMP/judge-closure" ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL judge-closure-resolves: JUDGING_FILES names files absent from the repo:%s\n' "$closure_missing"
+fi
 carry_measurement() {
 	mdir=$1
 	msub=${2:-scripts}
-	mkdir -p "$mdir/$msub" "$mdir/.github"
-	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" \
-		"$KITREPO/scripts/fresh-gate.sh" "$KITREPO/scripts/suite-metrics.py" "$KITREPO/scripts/suite-hermetic-env.sh" \
-		"$KITREPO/scripts/kitlib_run.py" "$KITREPO/scripts/kitlib_tmp.py" "$KITREPO/scripts/pysafe.py" \
-		"$KITREPO/scripts/kitlib-tmp.sh" "$KITREPO/scripts/test-budget.ts" "$mdir/$msub/"
-	cp "$KITREPO/.github/test-budget.json" "$mdir/.github/test-budget.json"
+	while IFS= read -r closure_name; do
+		case "$closure_name" in
+			scripts/*) closure_dest="$mdir/$msub/${closure_name#scripts/}" ;;
+			*) closure_dest="$mdir/$closure_name" ;;
+		esac
+		mkdir -p "${closure_dest%/*}"
+		cp "$KITREPO/$closure_name" "$closure_dest"
+	done < "$TMP/judge-closure"
 }
 
 # fresh-gate.sh itself: its WORK dir is pid-named with .owner, traps are set before it exists, a
