@@ -13,6 +13,7 @@ import {
 	type TrackerRequest,
 } from "./kit-flywheel-guard";
 import { createMailWake, type MailToolResultEvent, type MailWake } from "./kit-mail-wake";
+import { checkPublishedCommits, extractCitedCommitShas } from "./kit-published-commit.ts";
 
 /**
  * kit-agent-mail-guard (AMGUARD1, ompkit-774u.13.2): a seat's Agent Mail calls are checked at the act.
@@ -43,6 +44,9 @@ import { createMailWake, type MailToolResultEvent, type MailWake } from "./kit-m
  *     project and the target is not the most recently active one; names each project's last
  *     activity.
  *
+ *   AM_DONE_NOT_PUBLISHED: a send_message whose subject starts with DONE must cite commit SHA(s)
+ *     in its body, each reachable from a freshly fetched origin/main in project_key; missing,
+ *     unknown, unpublished, or unfetchable citations fail closed.
  * Inert unless the repo opted into the fleet (`.omp/fleet.json` {"enabled": true}, see fleet-policy.ts);
  * a stock session touches no br, tmux or Agent Mail. An opted-in repo whose marker is unreadable refuses
  * Agent Mail calls, as fleet-guard does.
@@ -544,6 +548,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		if (typeof sender !== "string" || !names.some(name => name.toLowerCase() === sender.trim().toLowerCase())) {
 			return refuse("AM_IDENTITY_MISMATCH", `sender_name ${typeof sender === "string" ? `"${sender}"` : "is missing"} is not this seat (${names.join(", ")}). Send as yourself; never as another agent.`);
 		}
+		let doneCallback = false;
 		let notice: FlywheelToolCallResult | undefined;
 		if (tool === "send_message") {
 			notice = await checkRecipients(sender, value, ctx);
@@ -557,6 +562,7 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			if (typeof subject !== "string" || lead === null) {
 				return refuse("AM_SUBJECT_VOCAB", `the subject must start with one of ${Object.keys(SUBJECT_VOCABULARY).join(", ")} and name the bead id, e.g. "DONE <bead-id>: ..." (got "${typeof subject === "string" ? subject.slice(0, 80) : ""}").`);
 			}
+			doneCallback = lead === "DONE";
 			if (ackOn) {
 				if (ACK_VOCABULARY[lead] !== true) {
 					return refuse("AM_ACK_SUBJECT", `ack_required is only for a real ask: start the subject with ${Object.keys(ACK_VOCABULARY).join(", ")} (got ${lead}). Status and FYI mail never needs an ack.`);
@@ -583,6 +589,32 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		}
 		if (patterns.some(pattern => pattern.test(body))) {
 			return refuse("AM_BODY_SECRET", "the body holds what the secret scanner flags as a literal credential. Never mail a secret: name where it lives (Infisical key name) instead.");
+		}
+		if (doneCallback) {
+			const project = prop(value, "project_key");
+			const shas = extractCitedCommitShas(body);
+			if (shas.length === 0) {
+				return refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; the body must cite at least one commit SHA. Save and publish on origin/main with git_converge.py --push.");
+			}
+			if (typeof project !== "string" || !isAbsolute(project)) {
+				return refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; project_key must identify the local repository to verify. Save and publish on origin/main with git_converge.py --push.");
+			}
+			const checks = await checkPublishedCommits(project, shas, async (repo, args) => {
+				try {
+					const result = await pi.exec("git", ["-C", repo, ...args], { cwd: repo, timeout: AM_ROSTER_TIMEOUT_MS });
+					return {
+						rc: result.killed ? null : result.code,
+						out: result.stdout.trim(),
+						failed: result.killed === true,
+					};
+				} catch {
+					return { rc: null, out: "", failed: true };
+				}
+			});
+			const failed = checks.find(check => check.status !== "PUBLISHED");
+			if (failed !== undefined) {
+				return refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: ${failed.status} ${failed.sha || "(no SHA)"}: ${failed.detail}. Save and publish on origin/main with git_converge.py --push.`);
+			}
 		}
 		return notice;
 	}

@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
+
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -7,6 +8,7 @@ import { LIVE_READBACK_LABEL, expectedOf, liveReadback, liveReadbackAll, parseBo
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
+jest.setTimeout(15_000);
 
 /** Test bases live where the ambient br authority permits writes: a grading
  * harness designates GRADE_WAVE_SCRATCH, otherwise the default TMPDIR root. */
@@ -35,7 +37,14 @@ async function repo(name: string, extraScripts: Record<string, string> = {}): Pr
 	await sh(["git", "init", "-q"], dir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], dir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], dir);
+	await publishHead(dir, name);
 	return { dir, sha: (await sh(["git", "rev-parse", "HEAD"], dir)).trim() };
+}
+async function publishHead(dir: string, name: string): Promise<void> {
+	const origin = join(base, `${name}.origin.git`);
+	await sh(["git", "init", "--bare", "-q", origin], base);
+	await sh(["git", "remote", "add", "origin", origin], dir);
+	await sh(["git", "push", "-q", "origin", "HEAD:main"], dir);
 }
 
 /** A fake br: `show` prints the bead; every other act appends its argv to a log file; `create` prints child id kit-1.1. */
@@ -299,11 +308,11 @@ test("[v] verification notes stay skipped even when they carry a phase", async (
 	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, "a", true]]);
 });
 
-test("planted: an unknown export sha fails closed as EXPORT_FAILED with no replays and no acts", async () => {
+test("planted: an unknown export sha fails closed as UNKNOWN with no replays and no acts", async () => {
 	const { dir } = await repo("badexport");
 	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: "deadbeef".repeat(5).slice(0, 40), repo: dir, actor: "Peer", env: br.env });
-	expect(res.code).toBe("EXPORT_FAILED");
+	expect(res.code).toBe("UNKNOWN");
 	expect(res.replays).toEqual([]);
 	expect(res.acts).toEqual([]);
 	expect(br.acts()).toEqual([]);
@@ -704,6 +713,7 @@ test("VERIFYSCRATCH1: a replay's fixture tracker under $GRADE_WAVE_SCRATCH is ad
 	await sh(["git", "init", "-q"], cdir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], cdir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], cdir);
+	await publishHead(cdir, "verify-scratch");
 	const sha = (await sh(["git", "rev-parse", "HEAD"], cdir)).trim();
 	const t = await tracker("verifyscratch-t");
 	const id = await createBead(t, "verify scratch probe");
@@ -902,6 +912,7 @@ test("VERIFYSCRATCH1.exportroot: the export carries var/agent-tmp (gitignored, s
 	await sh(["git", "init", "-q"], dir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], dir);
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], dir);
+	await publishHead(dir, "exportroot");
 	const sha = (await sh(["git", "rev-parse", "HEAD"], dir)).trim();
 	const scratch = "python3 -c 'import sys; sys.path.insert(0, \"scripts\"); import kitlib_tmp; print(\"scratch\", kitlib_tmp.owned_tmp(\"replay\", root=\"var/agent-tmp\").path)'";
 	const br = fakeBr(dir, inReview([

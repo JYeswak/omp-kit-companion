@@ -159,6 +159,11 @@ async function exportRepo(): Promise<{ dir: string; sha: string }> {
 	await git("init", "-q");
 	await git("add", "-A");
 	await git("commit", "-q", "-m", "fixture [test]");
+	const origin = join(base, "export-origin.git");
+	const originInit = await run(["git", "init", "--bare", "-q", origin], { cwd: base, deadline_s: 60 });
+	if (originInit.rc !== 0) throw new Error(`origin init -> ${originInit.rc}: ${decode(originInit.stderr)}`);
+	await git("remote", "add", "origin", origin);
+	await git("push", "-q", "origin", "HEAD:main");
 	return { dir, sha: await git("rev-parse", "HEAD") };
 }
 

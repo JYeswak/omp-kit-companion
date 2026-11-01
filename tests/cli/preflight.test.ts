@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { envelope, parseFindingLines, renderEnvelope } from "../../src/kitlib/findings.ts";
-import { preflightBead, preflightCommit } from "../../src/preflight.ts";
+import { checkPublishedCommits, preflightBead, preflightCommit } from "../../src/preflight.ts";
 import { admitClaimCut } from "../../src/claim-cut.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -113,6 +113,25 @@ test("preflight close|in-review|claim: every tracker predicate in one envelope, 
 	expect(gone.findings[0]?.code).toBe("UNJUDGED");
 });
 
+test("publication gate: only commits reachable from a freshly fetched origin/main pass", async () => {
+	const repo = await repoWithChain("published-commits");
+	const origin = join(base, "published-origin.git");
+	await sh(["git", "init", "--bare", "-q", origin], base);
+	await sh(["git", "remote", "add", "origin", origin], repo);
+	await sh(["git", "push", "-q", "origin", "HEAD:main"], repo);
+	const published = (await sh(["git", "rev-parse", "HEAD"], repo)).trim();
+	expect((await checkPublishedCommits(repo, [published]))[0]?.status).toBe("PUBLISHED");
+
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "--no-verify", "-q", "--allow-empty", "-m", "unpublished [test]"], repo);
+	const unpublished = (await sh(["git", "rev-parse", "HEAD"], repo)).trim();
+	expect((await checkPublishedCommits(repo, [unpublished]))[0]?.status).toBe("NOT_PUBLISHED");
+	expect((await checkPublishedCommits(repo, [published, unpublished])).map(result => result.status)).toEqual(["PUBLISHED", "NOT_PUBLISHED"]);
+	expect((await checkPublishedCommits(repo, ["not-a-commit"]))[0]?.status).toBe("UNKNOWN");
+
+	await sh(["git", "remote", "set-url", "origin", join(base, "missing-origin.git")], repo);
+	expect((await checkPublishedCommits(repo, [published]))[0]?.status).toBe("UNKNOWN");
+	expect((await checkPublishedCommits(repo, [published], async () => { throw new Error("git unavailable"); }))[0]?.status).toBe("UNKNOWN");
+});
 test("PRIORART blocks queued fix transitions without a valid code-cited comment", async () => {
 	const bead = {
 		id: "kit-fix", status: "in_progress", assignee: "Author", updated_at: "2026-10-31T02:00:00Z",

@@ -17,6 +17,9 @@ import { envelope, parseFindingLines, unjudged, type Envelope, type Finding, typ
 import { run } from "./kitlib/run.ts";
 import { validatePriorArtComment } from "./grader-next.ts";
 import { admitClaimCut, type ClaimCutRead } from "./claim-cut.ts";
+import { checkPublishedCommits as checkPublishedCommitShas, type PublicationGit, type PublishedCommitCheck } from "../extensions/kit-published-commit.ts";
+export { extractCitedCommitShas } from "../extensions/kit-published-commit.ts";
+export type { PublishedCommitCheck, PublishedCommitStatus } from "../extensions/kit-published-commit.ts";
 
 const MEMBER_DEADLINE_S = 120;
 const SELFTEST_DEADLINE_S = 180;
@@ -25,6 +28,25 @@ const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 async function git(repo: string, args: string[]): Promise<{ rc: number | null; out: string; err: string }> {
 	const r = await run(["git", "-C", repo, ...args], { deadline_s: 60, max_output_bytes: 4 * 1024 * 1024 });
 	return { rc: r.rc, out: text(r.stdout).trim(), err: text(r.stderr).trim() };
+}
+
+async function publicationGit(repo: string, args: string[]): Promise<{ rc: number | null; out: string; failed: boolean }> {
+	const r = await run(["git", "-C", repo, ...args], {
+		deadline_s: 60, max_output_bytes: 16 * 1024,
+	});
+	return {
+		rc: r.rc,
+		out: text(r.stdout).trim(),
+		failed: r.timed_out || r.killed || r.truncated || r.total_truncated || r.rc === null,
+	};
+}
+
+export async function checkPublishedCommits(
+	repo: string,
+	shas: readonly string[],
+	execute: PublicationGit = publicationGit,
+): Promise<PublishedCommitCheck[]> {
+	return checkPublishedCommitShas(repo, shas, execute);
 }
 
 function members(hooksDir: string, kind: string): string[] {

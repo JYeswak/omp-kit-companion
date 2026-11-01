@@ -1,0 +1,1 @@
+- `br` status transitions, `omp-kit verify`, and DONE callbacks now fail closed unless cited commits are reachable from a freshly fetched `origin/main`.

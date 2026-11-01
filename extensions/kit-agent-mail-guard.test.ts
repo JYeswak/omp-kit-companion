@@ -15,6 +15,7 @@ import kitAgentMailGuard, {
 } from "./kit-agent-mail-guard";
 import type { FlywheelContext, FlywheelExecOptions, FlywheelExecResult, FlywheelToolCallEvent, FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
+import { run } from "../src/kitlib/run.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -63,12 +64,18 @@ function recordingWake(block: string | null = null): MailWakeHooks & { before: u
 	};
 }
 
+const PUBLISHED_TEST_SHA = "1234567";
 /** Known beads answer `br show`; any other id misses the way br 0.7.4 does (JSON error on stdout, exit 3). */
 function brKnows(...ids: string[]): Responder {
 	return call => {
 		// The guard also reads Agent Mail rosters; the stock backend roster answers those reads.
 		if (call.command === "am") return fleetRespond(defaultRosters())(call);
 		if (call.command === "tmux") return { stdout: "", stderr: "no server", code: 1 };
+		if (call.command === "git") {
+			const operation = call.args[call.args[0] === "-C" ? 2 : 0];
+			if (operation === "fetch" || operation === "merge-base") return { stdout: "", stderr: "", code: 0 };
+			if (operation === "rev-parse") return { stdout: `${PUBLISHED_TEST_SHA}\n`, stderr: "", code: 0 };
+		}
 		const id = call.args[1] ?? "";
 		if (call.command === "br" && call.args[0] === "show" && ids.includes(id)) {
 			return { stdout: JSON.stringify([{ id, title: "t", status: "open", assignee: null }]), stderr: "", code: 0 };
@@ -210,6 +217,13 @@ function gitInit(parent: string): string {
 	return cwd;
 }
 
+async function gitOutput(cwd: string, args: string[]): Promise<string> {
+	const result = await run(["git", "-C", cwd, ...args], { cwd, deadline_s: 60, max_output_bytes: 16 * 1024 });
+	const stdout = new TextDecoder().decode(result.stdout).trim();
+	if (result.rc !== 0) throw new Error(`git ${args.join(" ")} -> ${result.rc}: ${new TextDecoder().decode(result.stderr)}`);
+	return stdout;
+}
+
 /** A repo that opted into the fleet (.omp/fleet.json). */
 function fleetRepo(enabled = true): string {
 	const cwd = gitInit(base);
@@ -224,7 +238,7 @@ const stockRepo = (): string => gitInit(base);
 function send(over: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
 		project_key: "/abs/path/backend", sender_name: "PlumRaven", to: ["BlueLake"], cc: ["RedCat"],
-		subject: `DONE ${BEAD}: landed`, body_md: "Landed; evidence is in the bead comment.",
+		subject: `DONE ${BEAD}: landed`, body_md: `commit ${PUBLISHED_TEST_SHA}; landed; evidence is in the bead comment.`,
 		importance: "normal", ack_required: false, thread_id: "ompkit-1abc", topic: "ompkit-1abc",
 		idempotency_key: "ompkit-1abc-done", ...over,
 	};
@@ -381,7 +395,7 @@ test("ack_required: an unreadable tracker fails closed (br missing, br throwing,
 	// A `br` outage only: the roster reads stay up, so status mail still flows and asks still fail closed.
 	const mailUp = fleetRespond(defaultRosters());
 	for (const respond of down) {
-		const brOutage: Responder = call => (call.command === "am" ? mailUp(call) : respond(call));
+		const brOutage: Responder = call => call.command === "am" ? mailUp(call) : call.command === "git" ? brKnows()(call) : respond(call);
 		const h = await createHost({}, brOutage);
 		expect(code(await h.mail(cwd, "send_message", send({ subject, ack_required: true })))).toBe("AM_ACK_BEAD_UNRESOLVED");
 		// Without ack_required the tracker is never asked, so an outage does not stop status mail.
@@ -403,7 +417,8 @@ test("body: the cap is inclusive; one character over is refused and points at a 
 	const h = await createHost();
 	const cwd = fleetRepo();
 	expect(AM_BODY_CAP).toBe(1800);
-	expect(await h.mail(cwd, "send_message", send({ body_md: "x".repeat(AM_BODY_CAP) }))).toBeUndefined();
+	const prefix = `commit ${PUBLISHED_TEST_SHA}\n`;
+	expect(await h.mail(cwd, "send_message", send({ body_md: prefix + "x".repeat(AM_BODY_CAP - prefix.length) }))).toBeUndefined();
 	const refused = await h.mail(cwd, "send_message", send({ body_md: "x".repeat(AM_BODY_CAP + 1) }));
 	expect(code(refused)).toBe("AM_BODY_TOO_LONG");
 	expect(refused?.reason).toContain("bead comment");
@@ -419,12 +434,12 @@ const secretValue = ["ghp1fake2abc", "3def4ghi5jkl6"].join("");
 test("body: the kit secret scanner refuses a literal credential; a placeholder passes", async () => {
 	const h = await createHost();
 	const cwd = fleetRepo();
-	expect(await h.mail(cwd, "send_message", send({ body_md: `Set ${secretName}=$${secretName} from Infisical.` }))).toBeUndefined();
+	expect(await h.mail(cwd, "send_message", send({ body_md: `commit ${PUBLISHED_TEST_SHA}\nSet ${secretName}=$${secretName} from Infisical.` }))).toBeUndefined();
 	const refused = await h.mail(cwd, "send_message", send({ body_md: `run: export ${secretName}=${secretValue}` }));
 	expect(code(refused)).toBe("AM_BODY_SECRET");
 	expect(refused?.reason).not.toContain(secretValue);
 	expect(code(await h.mail(cwd, "reply_message", reply({ body_md: `${secretName}=${secretValue}` })))).toBe("AM_BODY_SECRET");
-	expect(await h.mail(cwd, "send_message", send({ body_md: "Authorization: Bearer ${FOO_TOKEN}" }))).toBeUndefined();
+	expect(await h.mail(cwd, "send_message", send({ body_md: `commit ${PUBLISHED_TEST_SHA}\nAuthorization: Bearer \${FOO_TOKEN}` }))).toBeUndefined();
 	expect(code(await h.mail(cwd, "send_message", send({ body_md: `Authorization: Bearer ${secretValue}` })))).toBe("AM_BODY_SECRET");
 });
 
@@ -543,11 +558,15 @@ const JEV = "/Users/josh/Developer/jev";
 const SKILL_LIB = "/Users/josh/Developer/skill-library-growth";
 const LOCALBENCH = "/Users/josh/Developer/localbench";
 
-/** Every exec the guard may issue is a read; the guard never registers, writes, or deletes. */
-function execsAreReadsOnly(execs: ExecCall[]): boolean {
-	return execs.every(call =>
-		(call.command === "am" && (call.args[1] === "list" || call.args[1] === "projects" || call.args[1] === "show"))
-		|| call.command === "br" || call.command === "tmux");
+/** Guard execs may read rosters, tracker state, or refresh origin/main; they never mutate Agent Mail registrations. */
+function execsAvoidMailMutation(execs: ExecCall[]): boolean {
+	return execs.every(call => {
+		if ((call.command === "am" && (call.args[1] === "list" || call.args[1] === "projects" || call.args[1] === "show"))
+			|| call.command === "br" || call.command === "tmux") return true;
+		if (call.command !== "git") return false;
+		const operation = call.args[call.args[0] === "-C" ? 2 : 0];
+		return operation === "fetch" || operation === "rev-parse" || operation === "merge-base";
+	});
 }
 test("phantom capped roster: exact project-scoped lookup admits a valid older recipient", async () => {
 	const rows = Array.from({ length: 250 }, (_, index) => mailRow(`Recent${index}`));
@@ -559,7 +578,7 @@ test("phantom capped roster: exact project-scoped lookup admits a valid older re
 	};
 	const host = await createHost({}, respond);
 	expect(await host.mail(fleetRepo(), "send_message", send({ project_key: OMPKIT, to: ["oldrecipient"], cc: [] }))).toBeUndefined();
-	expect(execsAreReadsOnly(host.execs)).toBe(true);
+	expect(execsAvoidMailMutation(host.execs)).toBe(true);
 });
 
 test("phantom capped roster: exact membership retains cross-project ambiguity warnings", async () => {
@@ -643,7 +662,7 @@ test("phantom (a): a send to a name registered only elsewhere is refused naming 
 	// The refusal is decided from roster reads alone: a mutant that skips the check is the only way
 	// this send passes, and a server that auto-registers never sees the call. Nothing was sent.
 	expect(refused?.reason).toContain("Nothing was sent");
-	expect(execsAreReadsOnly(h.execs)).toBe(true);
+	expect(execsAvoidMailMutation(h.execs)).toBe(true);
 });
 
 test("phantom (b): the same send under the recipient's own key is delivered", async () => {
@@ -664,7 +683,7 @@ test("phantom (c): a name registered nowhere is refused as registered nowhere", 
 	const refused = await h.mail(cwd, "send_message", send({ project_key: OMPKIT, to: ["ZzPlantedNobody"], cc: [] }));
 	expect(code(refused)).toBe("AM_PHANTOM_REFUSED");
 	expect(refused?.reason).toContain("not registered in any other project");
-	expect(execsAreReadsOnly(h.execs)).toBe(true);
+	expect(execsAvoidMailMutation(h.execs)).toBe(true);
 });
 
 test("phantom (d): a name in two projects warns naming each project's last activity unless the target is the most active", async () => {
@@ -892,4 +911,43 @@ test("MAILWAKE1.2 a real tmux identity remains valid with an OMP session outside
 	writeFileSync(join(dir, "7"), JSON.stringify({ name: "RedCat" }));
 	const h = await createHost({ env: { TMUX_PANE: "%7" }, home, sessionFile: join(home, "tmux-session.jsonl") });
 	expect(await h.mail(cwd, "send_message", send({ sender_name: "RedCat" }))).toBeUndefined();
+});
+test("DONE mail: refuses unpublished or unreadable citations and admits only freshly published commits", async () => {
+	const repo = gitInit(base);
+	const origin = freshDir(base, "mail-publish-origin-");
+	await gitOutput(base, ["init", "--bare", "--quiet", origin]);
+	await gitOutput(repo, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--no-verify", "--allow-empty", "-m", "published fixture [test]"]);
+	const published = await gitOutput(repo, ["rev-parse", "HEAD"]);
+	await gitOutput(repo, ["remote", "add", "origin", origin]);
+	await gitOutput(repo, ["push", "-q", "origin", `${published}:refs/heads/main`]);
+	await gitOutput(repo, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--no-verify", "--allow-empty", "-m", "unpublished fixture [test]"]);
+	const unpublished = await gitOutput(repo, ["rev-parse", "HEAD"]);
+
+	const roster = fleetRespond({ [repo]: [mailRow("PlumRaven"), mailRow("BlueLake"), mailRow("RedCat")] }, BEAD);
+	const respond: Responder = async call => {
+		if (call.command === "git") {
+			const result = await run(["git", ...call.args], { cwd: repo, deadline_s: 60, max_output_bytes: 16 * 1024 });
+			return { stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr), code: result.rc ?? 1 };
+		}
+		return roster(call);
+	};
+	const h = await createHost({}, respond);
+	const cwd = fleetRepo();
+	const done = (body_md: string) => send({ project_key: repo, body_md });
+	const refused = await h.mail(cwd, "send_message", done(`commit ${unpublished}`));
+	expect(code(refused)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(refused?.reason).toContain("NOT_PUBLISHED");
+	const mixed = await h.mail(cwd, "send_message", done(`commit ${published}\ncommit ${unpublished}`));
+	expect(code(mixed)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(mixed?.reason).toContain(unpublished);
+
+	await gitOutput(repo, ["push", "-q", "origin", `${unpublished}:refs/heads/main`]);
+	expect(await h.mail(cwd, "send_message", done(`commit ${unpublished}`))).toBeUndefined();
+	expect(code(await h.mail(cwd, "send_message", done("Done; no commit cited")))).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(code(await h.mail(cwd, "send_message", done("commit deadbeef")))).toBe("AM_DONE_NOT_PUBLISHED");
+
+	await gitOutput(repo, ["remote", "set-url", "origin", join(base, "missing-origin.git")]);
+	const offline = await h.mail(cwd, "send_message", done(`commit ${published}`));
+	expect(code(offline)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(offline?.reason).toContain("UNKNOWN");
 });

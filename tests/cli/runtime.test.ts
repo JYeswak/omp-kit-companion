@@ -1056,6 +1056,11 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		await git(["init", "-q"]);
 		await git(["-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"]);
 		await git(["-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"]);
+		const origin = join(root, "code.origin.git");
+		const originInit = await run(["git", "init", "--bare", "-q", origin], { cwd: root, deadline_s: 60 });
+		if (originInit.rc !== 0) throw new Error(`origin init -> ${originInit.rc}: ${utf8(originInit.stderr)}`);
+		await git(["remote", "add", "origin", origin]);
+		await git(["push", "-q", "origin", "HEAD:main"]);
 		const rev = await run(["git", "rev-parse", "HEAD"], { cwd: cdir, deadline_s: 60 });
 		const sha = utf8(rev.stdout).trim();
 		const brBin = resolveRealBr(process.env.PATH);

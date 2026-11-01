@@ -9,6 +9,8 @@
  * refused NON_AUTHOR_REQUIRED. A box whose command fails sets REWORK naming the box. Only when every box passes
  * does it tick the boxes, report the reviewer gate under the caller's identity (family disclosed), write the
  * transition comment from the command log and close. Transaction metadata is completed; the verdict is earned.
+ * Before replay, verify the exact export SHA is reachable from a freshly fetched `origin/main`; unpublished or
+ * unreadable exports are refused without replay or tracker acts.
  *
  * CLOSEPASS1 (ompkit-774u.52): when every box it ran passes, unticked [live] and [after] boxes (which no export
  * can run) move word for word into one open `LIVEREADBACK: <title>` bead labelled live-readback, created under the
@@ -30,7 +32,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { run, type RunResult } from "./kitlib/run.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { preflightBead } from "./preflight.ts";
+import { checkPublishedCommits, preflightBead } from "./preflight.ts";
 import { installReadonlyBr, resolveRealBr } from "./kitlib/readonly-br.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 
@@ -60,7 +62,7 @@ export interface Box { index: number; item: number; letter: string | null; check
 export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; rc: number | null; pass: boolean | null; detail: string }
 export interface VerifyResult {
 	ok: boolean;
-	code: "CLOSED" | "REWORK" | "ENVIRONMENT" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING";
+	code: "CLOSED" | "REWORK" | "ENVIRONMENT" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
 	bead: string;
 	export: string;
 	replays: BoxReplay[];
@@ -191,6 +193,12 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const blocking = pre.findings.filter(f => f.blocking);
 	if (blocking.some(f => f.code === "SELF_CLOSE")) return { ok: false, code: "NON_AUTHOR_REQUIRED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`refused: ${input.actor} is the assignee`).join("\n"), acts };
 	if (blocking.some(f => f.code === "NOT_IN_REVIEW" || f.code === "UNJUDGED")) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(blocking.map(f => `${f.code}: ${f.detail}`)).join("\n"), acts };
+	const publication = (await checkPublishedCommits(input.repo, [input.exportSha]))[0]!;
+	if (publication.status !== "PUBLISHED") {
+		const code = publication.status === "NOT_PUBLISHED" ? "NOT_PUBLISHED" : "UNKNOWN";
+		log.push(`${code}: export ${publication.sha || input.exportSha} ${publication.detail}; publish with git_converge.py --push`);
+		return { ok: false, code, bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts };
+	}
 	const row = await showBead(input.bead, input.repo, env);
 	const acceptance = row?.acceptance ?? "";
 	const title = row?.title || input.bead;

@@ -257,3 +257,107 @@ test("CUTCLAIM1 value flags do not become extra claim targets", async () => {
 	expect(result.rc).toBe(0);
 	expect(result.mutations).toContain('"id":"k-1"');
 }, CASE_BUDGET_MS);
+async function publicationGit(repo: string, args: string[]): Promise<string> {
+	const result = await run(["git", "-C", repo, ...args], {
+		deadline_s: 30, cwd: repo, env: { ...process.env }, max_output_bytes: 1024 * 1024,
+	});
+	if (result.rc !== 0) throw new Error(`git ${args.join(" ")} failed: ${decoder.decode(result.stderr)}`);
+	return decoder.decode(result.stdout).trim();
+}
+
+test("PUBLISHGATE1 actual br shim refuses transitions until origin/main contains cited commits", async () => {
+	const scratch = ownedTmp("publish-gate-shim");
+	try {
+		const repo = join(scratch.path, "repo");
+		const origin = join(scratch.path, "origin.git");
+		const bin = join(scratch.path, "bin");
+		const scripts = join(scratch.path, "scripts");
+		mkdirSync(repo, { recursive: true });
+		mkdirSync(bin, { recursive: true });
+		mkdirSync(scripts, { recursive: true });
+		await publicationGit(scratch.path, ["init", "--bare", origin]);
+		await publicationGit(repo, ["init", "-q", "-b", "main"]);
+		await publicationGit(repo, ["config", "user.email", "test@invalid.example"]);
+		await publicationGit(repo, ["config", "user.name", "Test"]);
+		await publicationGit(repo, ["commit", "--no-verify", "--allow-empty", "-m", "published parent"]);
+		await publicationGit(repo, ["remote", "add", "origin", origin]);
+		await publicationGit(repo, ["push", "--set-upstream", "origin", "main"]);
+		await publicationGit(repo, ["commit", "--no-verify", "--allow-empty", "-m", "unpublished candidate", "-m", "Bead: k-pub", "-m", "Agent: Builder"]);
+		const sha = await publicationGit(repo, ["rev-parse", "HEAD"]);
+		const db = join(repo, ".beads/beads.db");
+		mkdirSync(join(repo, ".beads"), { recursive: true });
+		const mutations = join(scratch.path, "mutations.jsonl");
+		const shim = join(scripts, "br-shim.sh");
+		const guard = join(scripts, "close-guard.sh");
+		writeFileSync(shim, readFileSync(join(root, "scripts/br-shim.sh"), "utf8"), { mode: 0o755 });
+		writeFileSync(guard, readFileSync(join(root, "scripts/close-guard.sh"), "utf8"), { mode: 0o755 });
+		// The transition's unrelated replay/handoff admission is out of scope here.
+		writeFileSync(join(scripts, "br-update-lint.py"), "raise SystemExit(0)\n");
+		const fakeBr = join(bin, "br");
+		writeFileSync(fakeBr, `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args[0] === "--db") args.splice(0, 2);
+if (args[0] === "show" && args[1] === "k-pub") {
+  console.log(JSON.stringify({ id: "k-pub", assignee: "Builder", updated_at: "2026-11-01T00:00:00Z" }));
+} else if (args[0] === "update" || args[0] === "close") {
+  appendFileSync(process.env.PUBLISH_MUTATIONS, JSON.stringify(args) + "\\n");
+} else {
+  console.error("unexpected br command " + JSON.stringify(args));
+  process.exit(2);
+}
+`, { mode: 0o755 });
+		writeFileSync(join(bin, "am"), `#!/bin/sh
+case "$1:$2" in
+  agents:show) printf '{"name":"Verifier"}\\n' ;;
+  file_reservations:conflicts) printf 'No conflicts detected.\\n' ;;
+  *) exit 9 ;;
+esac
+`, { mode: 0o755 });
+		const runShim = async (args: string[]) => {
+			const result = await run(["sh", shim, ...args], {
+				deadline_s: 30, cwd: repo, env: {
+					...process.env, AGENT_NAME: "Verifier", BEADS_DB: db, BR_REAL: fakeBr,
+					PUBLISH_MUTATIONS: mutations,
+					PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+				}, max_output_bytes: 1024 * 1024,
+			});
+			return { rc: result.rc, output: decoder.decode(result.stdout) + decoder.decode(result.stderr) };
+		};
+		const update = (reason: string) => runShim(["update", "k-pub", "--status", "in_review", "--transition-comment", reason]);
+		const close = (reason: string) => runShim(["close", "k-pub", "--reason", reason]);
+		for (const rejected of [
+			await update(`DONE k-pub ${sha} evidence`),
+			await close(`Lesson: none\nexport ${sha}`),
+		]) {
+			expect(rejected.rc, rejected.output).toBe(4);
+			expect(rejected.output).toContain("NOT_PUBLISHED");
+			expect(rejected.output).toContain(sha);
+			expect(rejected.output).toContain("git_converge.py --push");
+		}
+		expect(existsSync(mutations)).toBe(false);
+		for (const reason of ["DONE k-pub evidence", "export 0000000000000000000000000000000000000000"]) {
+			const rejected = await update(reason);
+			expect(rejected.rc, rejected.output).toBe(4);
+			expect(rejected.output).toContain("NOT_PUBLISHED");
+			expect(rejected.output).toContain("UNKNOWN");
+		}
+		await publicationGit(repo, ["push", "origin", "main"]);
+		for (const admitted of [
+			await update(`DONE k-pub ${sha} evidence`),
+			await close(`Lesson: none\nexport ${sha}`),
+		]) {
+			expect(admitted.rc, admitted.output).toBe(0);
+			expect(admitted.output).toContain("close-guard: OK");
+		}
+		const beforeFetchFailure = readFileSync(mutations, "utf8");
+		await publicationGit(repo, ["remote", "set-url", "origin", join(scratch.path, "missing.git")]);
+		const fetchFailure = await update(`DONE k-pub ${sha} evidence`);
+		expect(fetchFailure.rc, fetchFailure.output).toBe(4);
+		expect(fetchFailure.output).toContain("NOT_PUBLISHED");
+		expect(fetchFailure.output).toContain("UNKNOWN");
+		expect(readFileSync(mutations, "utf8")).toBe(beforeFetchFailure);
+	} finally {
+		scratch.cleanup();
+	}
+}, CASE_BUDGET_MS);
