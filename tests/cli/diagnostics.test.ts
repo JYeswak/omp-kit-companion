@@ -7,6 +7,7 @@ import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diag
 // Separate additive import: the shared import above stays byte-identical (fp72.96).
 import { attributeAckSender, type IdentityAck, type PaneBinding, type ReservationHolder, type SeatBindingRow } from "../../src/diagnostics.ts";
 import { STACK_SOURCE } from "../../src/diagnostics.ts";
+import { RCH_DAEMON_STATUS_TIMEOUT_MS } from "../../src/diagnostics.ts";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
@@ -1455,6 +1456,7 @@ test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERI
 	expect(stopped.evidence?.state).toBe("NOT_RUNNING");
 	for (const [state, over] of [
 		["RCH_UNAVAILABLE", { daemon: () => null }],
+		["RCH_PROBE_TIMEOUT", { daemon: () => "TIMEOUT" as const }],
 		["SOCKET_PATH_UNKNOWN", { daemon: () => ({ running: true, socketPath: null }) }],
 		["PID_UNKNOWN", { daemonPid: () => null }],
 		["LSOF_UNAVAILABLE", { lsofUnixSockets: () => null }],
@@ -1464,6 +1466,23 @@ test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERI
 		expect(row.status).toBe("UNVERIFIED");
 		noCapacity(row);
 	}
+});
+
+test("RCHPROBE1: a timed-out rch daemon probe is RCH_PROBE_TIMEOUT, never RCH_UNAVAILABLE (the state the unscoped inventory drops)", () => {
+	const calls: Array<[string, readonly string[], number]> = [];
+	const deps = (answer: { code: number; out: string; timedOut?: boolean } | null) =>
+		defaultRchReachability((binary, args, timeoutMs) => { calls.push([binary, args, timeoutMs]); return binary === "rch" ? answer : null; }, "darwin");
+	// Planted: rch ran and was killed at its deadline.
+	const slow = deps({ code: -1, out: "", timedOut: true });
+	expect(slow.daemon()).toBe("TIMEOUT");
+	const row = inspectRchReachability(slow);
+	expect(row.status).toBe("UNVERIFIED");
+	expect(row.evidence?.state).toBe("RCH_PROBE_TIMEOUT");
+	expect(calls[0]).toEqual(["rch", ["--json", "daemon", "status"], RCH_DAEMON_STATUS_TIMEOUT_MS]);
+	expect(RCH_DAEMON_STATUS_TIMEOUT_MS).toBe(15000);
+	// Controls: a missing binary stays RCH_UNAVAILABLE; a stopped daemon still reads NOT_RUNNING.
+	expect(inspectRchReachability(deps(null)).evidence?.state).toBe("RCH_UNAVAILABLE");
+	expect(inspectRchReachability(deps({ code: 0, out: '{"data":{"running":false}}' })).evidence?.state).toBe("NOT_RUNNING");
 });
 
 test("rch: default statSocket reads real fixture socket state", async () => {

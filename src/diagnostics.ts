@@ -1775,8 +1775,8 @@ export interface RchReachabilityDeps {
 	uid: number | null;
 	/** Platform that selects the pid lookup and the restore advice. */
 	platform: NodeJS.Platform;
-	/** Parsed `rch --json daemon status`, or null when rch is missing/unrunnable/unparseable. */
-	daemon(): RchDaemonReport | null;
+	/** Parsed `rch --json daemon status`; "TIMEOUT" when rch ran but did not answer within its deadline; null when rch is missing, unrunnable, failed or unparseable. */
+	daemon(): RchDaemonReport | "TIMEOUT" | null;
 	/** Live pid of the rch daemon (macOS: com.rch.daemon under launchd; elsewhere: the single rchd process of this uid), or null when none or ambiguous. */
 	daemonPid(): number | null;
 	/** Unix-socket paths the pid holds listening, or null when lsof is unavailable. */
@@ -1898,6 +1898,12 @@ function inspectRchSocketIno(input: { path: string; pid: number; bound: boolean;
 
 export function inspectRchReachability(deps: RchReachabilityDeps): Finding {
 	const report = deps.daemon();
+	// RCHPROBE1 (ompkit-7htcx): a slow rch is not an absent one. Reading the timeout as RCH_UNAVAILABLE made the
+	// unscoped inventory drop rch as if it were not installed (a 5 s deadline at load 20+, 2026-11-01).
+	if (report === "TIMEOUT") {
+		return finding("rch", "UNVERIFIED", `rch --json daemon status did not answer within ${RCH_DAEMON_STATUS_TIMEOUT_MS / 1000} s; daemon reachability was not inspected`,
+			"Rerun omp-kit doctor --scope rch; if it times out again with the host idle, check `rch --json daemon status` by hand.", { state: "RCH_PROBE_TIMEOUT" });
+	}
 	if (report === null) {
 		return finding("rch", "UNVERIFIED", "rch is unavailable; daemon reachability was not inspected",
 			"Install rch or put it on PATH, then rerun omp-kit doctor.", { state: "RCH_UNAVAILABLE" });
@@ -2080,7 +2086,7 @@ export function inspectRchWorkerHealth(deps: RchWorkerHealthDeps): Finding {
 		{ ...totals, state: "DAEMON_PROBE_DISAGREE", cause: distinct.join("+"), probe_ok: probeOk, probe_total: probes.length, workers: evidence, causes });
 }
 
-function rchArgs(binary: string, args: readonly string[], timeoutMs: number): { code: number; out: string } | null {
+function rchArgs(binary: string, args: readonly string[], timeoutMs: number): RchRunResult | null {
 	let privateRoot: string | undefined;
 	try {
 		let env: NodeJS.ProcessEnv = process.env;
@@ -2105,7 +2111,8 @@ function rchArgs(binary: string, args: readonly string[], timeoutMs: number): { 
 			};
 		}
 		const run = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "ignore", env, timeout: timeoutMs });
-		return { code: run.exitCode, out: run.stdout.toString() };
+		// A killed-at-deadline child has no exit code; report it as a timeout, never as a failed or absent binary.
+		return { code: run.exitCode ?? -1, out: run.stdout.toString(), timedOut: run.exitedDueToTimeout === true };
 	} catch {
 		return null;
 	} finally {
@@ -2128,7 +2135,11 @@ function parseRchStatus(out: string): RchDaemonReport | null {
 	return { running: record["running"], socketPath: typeof socketPath === "string" && socketPath !== "" ? socketPath : null };
 }
 
-type RchRun = (binary: string, args: readonly string[], timeoutMs: number) => { code: number; out: string } | null;
+/** One probe run: exit code (-1 when killed), stdout, and whether the deadline killed it. */
+type RchRunResult = { code: number; out: string; timedOut?: boolean };
+type RchRun = (binary: string, args: readonly string[], timeoutMs: number) => RchRunResult | null;
+/** RCHPROBE1 (ompkit-7htcx): the daemon-status probe gets the 15 s its sibling rch probes (lsof, `rch --json status`) have. */
+export const RCH_DAEMON_STATUS_TIMEOUT_MS = 15000;
 
 /** The one rchd process this uid owns, or null when there is none or several: an ambiguous match is never guessed. */
 function singleRchdPid(uid: number | null, run: RchRun): number | null {
@@ -2145,8 +2156,10 @@ export function defaultRchReachability(run: RchRun = rchArgs, platform: NodeJS.P
 		uid,
 		platform,
 		daemon: () => {
-			const status = run("rch", ["--json", "daemon", "status"], 5000);
-			if (status === null || status.code !== 0) return null;
+			const status = run("rch", ["--json", "daemon", "status"], RCH_DAEMON_STATUS_TIMEOUT_MS);
+			if (status === null) return null;
+			if (status.timedOut) return "TIMEOUT";
+			if (status.code !== 0) return null;
 			return parseRchStatus(status.out);
 		},
 		daemonPid: () => {
