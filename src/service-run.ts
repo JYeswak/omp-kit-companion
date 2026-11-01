@@ -290,6 +290,7 @@ export const RUN_TIME_CAPS_MS: Record<string, number> = {
 	"fleet-lessons": 1_800_000,
 	"load-watch": 45_000,
 	"gate-rationalize": 600_000,
+	"autocut": 3_300_000,
 };
 
 export interface SpawnHandle {

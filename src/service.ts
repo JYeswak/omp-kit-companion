@@ -129,6 +129,10 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// command is operator data (fleet-watch.json `gateRationalize`: python3 gate_registry.py rationalize --out ...),
 	// so the kit never hardcodes a repo path; UNCONFIGURED until the operator sets it.
 	"gate-rationalize": { name: "gate-rationalize", label: "com.omp-kit.gate-rationalize", kind: "interval", intervalSeconds: 604800, runAtLoad: false, commandConfigKey: "gateRationalize" },
+	// AUTOCUT1 (ompkit-2uubn): hourly, cut a release from the newest origin/main commit with a full-suite PASS once
+	// the 12 h floor has passed, then install and read it back (scripts/autocut.sh run). Its command is operator
+	// data (fleet-watch.json `autocut`: sh <companion>/scripts/autocut.sh run --repo <companion>); UNCONFIGURED until set.
+	"autocut": { name: "autocut", label: "com.omp-kit.autocut", kind: "interval", intervalSeconds: 3600, runAtLoad: false, commandConfigKey: "autocut" },
 };
 
 /** A claude-save run receipt, `claude-save-<runId>.json`, directly in the kit state root. */

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { KNOWN_JOBS, renderLaunchdPlist, renderSystemdUnits } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
+import { RUN_TIME_CAPS_MS } from "../../src/service-run.ts";
 
 const HOME = "/fixture/user-home/test-op";
 const LAUNCHER = "/fixture/user-home/test-op/.local/bin/omp-kit";
@@ -119,4 +120,16 @@ test("gate-rationalize renders the operator argv with a weekly StartInterval; pl
 	expect(text).toContain("<key>StartInterval</key>\n\t<integer>604800</integer>");
 	expect(text).not.toContain("service</string>\n\t\t<string>run</string>");
 	expect(() => renderLaunchdPlist(HOME, { ...job }, LAUNCHER, null)).toThrow("GATE_RATIONALIZE_UNCONFIGURED");
+});
+
+// AUTOCUT1 (ompkit-2uubn): the release cut runs the operator's argv hourly; its run cap ends before the next start.
+test("autocut renders the operator argv hourly; planted: unconfigured it refuses to render", () => {
+	const job = KNOWN_JOBS["autocut"]!;
+	expect([job.kind, job.intervalSeconds, job.commandConfigKey]).toEqual(["interval", 3600, "autocut"]);
+	expect(RUN_TIME_CAPS_MS["autocut"]!).toBeLessThan(job.intervalSeconds * 1000);
+	const program = { argv: ["/bin/sh", "/repo/scripts/autocut.sh", "run", "--repo", "/repo"], cwd: "/repo" };
+	const text = renderLaunchdPlist(HOME, { ...job, program }, LAUNCHER, null).text;
+	expect(text).toContain("<string>/repo/scripts/autocut.sh</string>\n\t\t<string>run</string>");
+	expect(text).toContain("<key>StartInterval</key>\n\t<integer>3600</integer>");
+	expect(() => renderLaunchdPlist(HOME, { ...job }, LAUNCHER, null)).toThrow("AUTOCUT_UNCONFIGURED");
 });
