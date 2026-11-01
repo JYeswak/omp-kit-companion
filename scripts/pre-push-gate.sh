@@ -655,8 +655,7 @@ elif [ ! -f "$gate_scripts/scripts/full-suite-verdict.sh" ]; then
 	printf 'SKIP full-suite-verdict: checker absent from base archive\n' >&2
 else
 	printf '== full-suite-verdict\n'
-	# Match land.ts's base-role producer; release-verdict.sh produces the main-role record for release-local.
-	set -- --repo "$ROOT" --commit "$local_sha" --judge-role base --archive-dir "$archive"
+	set -- --repo "$ROOT" --commit "$local_sha" --judge-role main --archive-dir "$archive"
 	[ -f "$focused_passed" ] && set -- "$@" --focused-passed "$focused_passed"
 	if sh "$gate_scripts/scripts/full-suite-verdict.sh" "$@"; then
 		printf 'GREEN full-suite-verdict\n'

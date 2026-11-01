@@ -921,7 +921,7 @@ mkverdictrepo() {
 }
 verdictcache() {
 	repo=$1
-	role=${2:-base}
+	role=${2:-main}
 	cache=${3:-}
 	tree=$(git -C "$repo" rev-parse "HEAD^{tree}")
 	if [ -n "$cache" ]; then
