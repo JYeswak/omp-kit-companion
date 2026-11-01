@@ -1,0 +1,12 @@
+{
+  "archived_at": "2026-10-29T23:04:59Z",
+  "bead": "ompkit-fp72.19.1.11",
+  "bytes": 5404,
+  "dest": "docs/evidence/cleanup-2026-10-29/tests__fleet-guard__write-own.test.ts.diff",
+  "git_head": "cb7ab0e8e1065bd7cba6d3463d82cf916937a1cc",
+  "path": "tests/fleet-guard/write-own.test.ts",
+  "route": "archive then restore/remove",
+  "secrets": false,
+  "sha256": "a68fb9b38f9eaf368e531884b01bf9d144da436e8fadd189ede5a47f33ceb12b",
+  "truncated": false
+}
