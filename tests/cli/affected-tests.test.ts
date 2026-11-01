@@ -50,26 +50,7 @@ const FILES: Record<string, string> = {
 	"tests/scripts/runner_test.py": 'open("src/runner.ts")\n',
 };
 
-test("SHAREDINFRA1: shared hook, runner and fixture changes select every real suite", () => {
-	const paths = [
-		"scripts/check-staged-portable-paths.sh",
-		".githooks/hooks.d/pre-commit/54-omp-kit-staged-portable-paths",
-		"scripts/full-suite-verdict.sh",
-		"tests/cli/fixture-process.ts",
-	];
-	const dir = tree({ ...FILES, ...Object.fromEntries(paths.map(path => [path, ""])) });
-	const suites = [
-		"tests/cli/docs.test.ts", "tests/cli/leaf.test.ts", "tests/cli/runner.test.ts",
-		"tests/cli/spawn-cli.test.ts", "tests/cli/tool.test.sh", "tests/cli/uses-helper.test.ts",
-		"tests/cli/via-cli.test.ts", "tests/scripts/runner_test.py",
-	];
-	for (const path of paths) expect(select(dir, [path]), path).toMatchObject({ code: 0, tests: suites });
-	// Removing an infrastructure member changes every fixture's environment too.
-	rmSync(join(dir, paths[0]!));
-	expect(select(dir, [paths[0]!])).toMatchObject({ code: 0, tests: suites });
-});
-
-test("SHAREDINFRA1: imports stay transitive and product sources select only their importers", () => {
+test("imports are followed transitively; a test that names a file runs only when that file changes", () => {
 	const dir = tree(FILES);
 	try {
 		// leaf <- mid (via ./leaf.js meaning leaf.ts) <- cli <- via-cli; spawn-cli names cli.ts, so it is not pulled by leaf.

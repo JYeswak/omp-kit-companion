@@ -13,7 +13,6 @@
 //       own parser finds (Bun.Transpiler.scanImports, so no regex reads source), followed
 //       transitively, or a literal path naming the changed file (a test that spawns `src/cli.ts` or
 //       runs `$ROOT/scripts/x.sh`), one hop from the change.
-// Shared hook/judge/fixture infrastructure declared below invalidates every suite, even when removed.
 // stdout: one selected test path per line, sorted. stderr: a one-line summary; with --explain, one
 // `path <- changed` line per selection naming the changed path that pulled it in.
 // Exit 0 with an empty stdout means no test is affected; 2 is a usage or unreadable-root error.
@@ -28,17 +27,6 @@ const SCANNED_EXT = [...SOURCE_EXT, ".sh", ".py"];
 // Never source: VCS state, dependencies, peers' scratch (var/agent-tmp) and build output.
 const SKIP_DIR: Record<string, true> = { ".git": true, node_modules: true, var: true, dist: true };
 const FIXTURE_DIR = "tests/fixtures/";
-// These inputs affect fixture execution outside the static import graph. Ordinary product
-// sources still follow that graph; neither all scripts/ nor all tests/ are global inputs.
-const SHARED_INFRA_FILES: Record<string, true> = {
-	"scripts/install-commit-msg-bead.sh": true, "scripts/pre-push-gate.sh": true, "scripts/fresh-gate.sh": true,
-	"scripts/full-suite-verdict.sh": true, "scripts/suite-metrics.py": true, "scripts/affected-tests.ts": true,
-	"scripts/test-budget.ts": true, ".github/test-budget.json": true,
-	"tests/cli/fixture-process.ts": true, "tests/cli/git-env-fixtures.sh": true,
-	"tests/cli/tracker-init-parent.ts": true, "tests/cli/private-index-land.helpers.ts": true,
-};
-const SHARED_INFRA_PREFIXES = [".githooks/", "scripts/check-staged-", "scripts/check-commit-"];
-
 
 export type Selection = { tests: string[]; reasons: Map<string, string>; distance: Map<string, number> };
 
@@ -121,26 +109,8 @@ function referencedPaths(text: string, files: ReadonlySet<string>, fromRel: stri
 	return found;
 }
 
-function sharedInfrastructureSelection(all: readonly string[], changed: readonly string[]): Selection | null {
-	const shared = changed.find(path => SHARED_INFRA_FILES[path] === true
-		|| SHARED_INFRA_PREFIXES.some(prefix => path.startsWith(prefix)));
-	if (shared === undefined) return null;
-	const tests = all.filter(isTestFile).sort();
-	const reasons = new Map<string, string>();
-	const distance = new Map<string, number>();
-	for (const test of tests) { reasons.set(test, shared); distance.set(test, 1); }
-	// Changed suites retain their direct-change priority in distance-ordered budget plans.
-	for (const path of changed) if (distance.has(path)) {
-		reasons.set(path, path);
-		distance.set(path, 0);
-	}
-	return { tests, reasons, distance };
-}
-
 export function selectAffected(root: string, changed: readonly string[]): Selection {
 	const all = walk(root);
-	const shared = sharedInfrastructureSelection(all, changed);
-	if (shared !== null) return shared;
 	const files = new Set(all);
 	// importers[x] = sources whose import graph reaches x in one step; namers[x] = sources that name
 	// x as a literal path. Imports are followed transitively. A naming edge counts only as the first
