@@ -4211,7 +4211,10 @@ function missionValidateCommand(request: ParsedCommand): CliResult {
 		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Use omp-kit mission validate --project PATH or run from the project root.");
 	const projectRoot = resolve(typeof projectFlag === "string" ? projectFlag : process.cwd());
 	const report = validateMissionRecord(projectRoot);
-	return { code: report.overall === "VALID" ? 0 : 1, data: { ...report }, verification: "PERFORMED" };
+	const code = report.errors.some(error => error.startsWith("MISSION_RECORD_MISSING:"))
+		? 2
+		: report.overall === "VALID" ? 0 : 1;
+	return { code, data: { ...report }, verification: "PERFORMED" };
 }
 registerCommandHandler("mission validate", missionValidateCommand);
 // GATEDIAG1 (ompkit-fp72.135.3.16): one complete diagnostic before the act; nothing is changed.

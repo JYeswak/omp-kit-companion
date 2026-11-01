@@ -108,6 +108,15 @@ function runMissionCli(projectRoot: string) {
 		"--project", projectRoot, "--json"], { cwd: projectRoot, stdout: "pipe", stderr: "pipe" });
 }
 
+test("mission validate CLI distinguishes a missing record from invalid record contents", () => {
+	const root = join(scratch, "cli-missing-record");
+	mkdirSync(root, { recursive: true });
+	const missing = runMissionCli(root);
+	expect(missing.exitCode).toBe(2);
+	const missingEnvelope = JSON.parse(missing.stdout.toString());
+	expect(missingEnvelope.data.errors).toContain("MISSION_RECORD_MISSING:.omp/mission.toml");
+});
+
 test("mission validate CLI reports registration and rejects an unknown pillar without running checks", () => {
 	const valid = runMissionCli(fixture("cli-registered"));
 	expect(valid.exitCode).toBe(0);
