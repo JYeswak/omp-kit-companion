@@ -57,10 +57,17 @@ export async function runUnpinnedInitControl(root: string, name: string): Promis
 	const before = parent.snapshot();
 	const child = join(parent.dir, "nested", "child");
 	mkdirSync(child, { recursive: true });
+	// Exercise native ancestor discovery only for this owned negative-control fixture.
+	const env = withoutBeadsDb();
+	const scratch = env.GRADE_WAVE_SCRATCH;
+	const entries = (env.PATH ?? "").split(":");
+	if (scratch !== undefined && entries[0] === join(scratch, "bin")) {
+		env.PATH = entries.slice(1).join(":");
+	}
 	const result = await run(["sh", UNPINNED_FIXTURE], {
 		cwd: child,
 		deadline_s: 60,
-		env: withoutBeadsDb(),
+		env,
 	});
 	const after = parent.snapshot();
 	const beforeNames = new Set(before.entries.map(entry => entry.name));

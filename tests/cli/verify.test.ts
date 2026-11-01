@@ -362,7 +362,7 @@ async function trackerInRepo(cdir: string): Promise<{ dir: string; db: string }>
 	return { dir: cdir, db: join(cdir, ".beads", "beads.db") };
 }
 
-test("BRINITPIN1 verify tracker init leaves ancestor tracker unchanged; unpinned control changes it", async () => {
+test("BRINITPIN1 verify tracker init leaves ancestor tracker unchanged; unpinned native control changes it", async () => {
 	const parent = await createParentTracker(base, "br-init-parent");
 	const before = parent.snapshot();
 	await tracker(join("br-init-parent", "nested", "child"));
