@@ -58,6 +58,31 @@ deletion. Links inside the selected store are not followed; an unsafe namespace
 or unwritable record refuses, and the newest rotation is not walked. The receipt includes the
 retention result. These records are not an undo copy.
 
+## OMP session retention
+
+The `session-retain` job reads the session producer's exact state schema and
+latest committed `source.tick` from CC's state root. It does not consult a
+staleness interval; ingestion proof is the matching byte frontier, not recent
+producer activity.
+
+The hourly `session-retain` job considers direct regular `.jsonl` files under
+`~/.omp/profiles/*/agent/sessions` after their filesystem mtime is older than
+14 days. Other agent or application session stores outside this tree are not
+included.
+
+A transcript is deleted only when the CC session producer's exact cursor
+matches its canonical path, device, inode and current byte length, the producer
+state has no pending intent, and the latest committed `source.tick` has the
+same global byte position with no error and `backlog_bytes: 0`. Missing,
+malformed or mismatched CC evidence keeps the transcript. This is
+deliberately fail-closed; the job reads `cc.db` and
+`producers/session.state.json` under the configured CC state root.
+
+`jobs/session-retain.log.jsonl` fsyncs a planned record before unlink and a
+removed record after it. The normal service admission and single-flight lock
+apply. The receipt reports examined, kept and removed files; a retained
+un-ingested file is not treated as deletion success.
+
 ## Fleet lesson report producer
 
 `service run fleet-lessons` runs the existing `omp-kit.fleet-lessons/v1`

@@ -72,6 +72,8 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
 import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
+import { ccStateDir } from "./service.ts";
+import { retainOmpSessions } from "./session-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
 import { defaultBudgetLedgerPath, releaseBudgetEntry, updateScratchUsers } from "./scratch.ts";
 import type { ScratchReleaseOptions } from "./scratch.ts";
@@ -3069,6 +3071,31 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 				return { code: 1, data: { overall: "FINDINGS", job: job.name, record_path: recordPath, receipt_written: receiptWritten },
 					errors: [{ code: "AM_RETAIN_FAILED", message,
 						remediation: "Inspect the selected store and deletion journal; unsafe paths and unrecorded deletions are refused." }], verification: "UNVERIFIED" };
+			} finally { lock.release(); }
+		}
+		if (job.name === "session-retain") {
+			const started = new Date().toISOString();
+			const recordPath = join(jobsDir, "session-retain.log.jsonl");
+			try {
+				const retention = retainOmpSessions(home, ccStateDir(home), recordPath);
+				const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 0,
+					omp_version: null, status: "OK", retention };
+				if (!recordJobReceipt(home, job.name, receipt)) {
+					return { code: 3, data: { overall: "UNAVAILABLE", job: job.name, record_path: recordPath },
+						errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Retention completed but its job receipt could not be written",
+							remediation: "Inspect the durable session deletion journal before retrying; do not infer that nothing was removed." }], verification: "UNVERIFIED" };
+				}
+				return { code: 0, data: { overall: "OK", job: job.name,
+					status: retention.removed.length ? "CHANGED" : "UNCHANGED", ...retention,
+					receipt_path: jobReceiptPath(home, job.name) }, verification: "UNVERIFIED" };
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: 1,
+					omp_version: null, status: "FAILED", record_path: recordPath, message };
+				const receiptWritten = recordJobReceipt(home, job.name, receipt);
+				return { code: 1, data: { overall: "FINDINGS", job: job.name, record_path: recordPath, receipt_written: receiptWritten },
+					errors: [{ code: "SESSION_RETAIN_FAILED", message,
+						remediation: "Inspect the CC session cursor, source tick, and session tree; unverified transcripts are retained." }], verification: "UNVERIFIED" };
 			} finally { lock.release(); }
 		}
 		const launcher = stableLauncher(home);

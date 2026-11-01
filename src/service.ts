@@ -114,6 +114,7 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	"claude-save": { name: "claude-save", label: "com.omp-kit.claude-save", kind: "interval", intervalSeconds: 3600, runAtLoad: false,
 		ownedState: home => [{ path: kitStateDir(home), names: name => CLAUDE_SAVE_RECEIPT.test(name) }] },
 	"am-retain": { name: "am-retain", label: "com.omp-kit.am-retain", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
+	"session-retain": { name: "session-retain", label: "com.omp-kit.session-retain", kind: "interval", intervalSeconds: 3600, runAtLoad: false },
 	"fleet-flush": { name: "fleet-flush", label: "com.omp-kit.fleet-flush", kind: "interval", intervalSeconds: 60, runAtLoad: false,
 		ownedState: home => [{ path: fleetFlushLogPath(home) }] },
 	// CC14 (.18.1 scaffolding for .18.2): the command-center server. Daemon
