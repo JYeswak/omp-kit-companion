@@ -111,6 +111,7 @@ import { looksSecret } from "./mcp-sources.ts";
 import { formatNext, next } from "./next.ts";
 import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts";
 import { retainFleetCaches } from "./cache-retain.ts";
+import { beadsMigrateCommand } from "./beads-migrate.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -144,6 +145,7 @@ const TOOL_GATED_COMMANDS: Record<string, readonly string[]> = {
 	"tern-ref validate": ["tern"],
 	"tern-ref drift": ["tern"],
 	"planning convert": ["br"],
+	"beads migrate": ["br", "python3"],
 	"drain close-queue": ["br"],
 	"drain stale-claims": ["br"],
 	"intake": ["br"],
@@ -1271,6 +1273,13 @@ registerCommandHandler("converge", convergeCommand);
 registerCommandHandler("full-suite verdict", fullSuiteVerdictCommand);
 registerCommandHandler("custody check", custodyCheckCommand);
 registerCommandHandler("intake", intakeCommand);
+registerCommandHandler("beads migrate", request => {
+	const root = kitIdentity().release.root;
+	if (root === null) return { code: 3, data: { overall: "UNAVAILABLE" },
+		errors: [{ code: "KIT_ROOT_UNAVAILABLE", message: "The canonical migration linter's release root could not be resolved",
+			remediation: "Use a recognized source checkout or release bin/omp-kit; no tracker was changed." }], verification: "UNVERIFIED" };
+	return beadsMigrateCommand(request, root);
+});
 
 function rulesCommand(request: ParsedCommand): CliResult {
 	const root = kitIdentity().release.root, home = process.env.HOME;

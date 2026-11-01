@@ -2193,6 +2193,36 @@ def lint_one(repo: str, bead_id: str) -> tuple[int, dict]:
         "failures": failures}
 
 
+def admission_stdin() -> int:
+    """Read-only batch composition over the existing predicates; never flush a tracker."""
+    try:
+        if sys.stdin.isatty():
+            raise ValueError("admission-stdin requires piped JSON, not an interactive terminal")
+        raw = sys.stdin.buffer.read((16 << 20) + 1)
+        if len(raw) > 16 << 20:
+            raise ValueError("admission input exceeds 16 MiB")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
+            raise ValueError("records must be an array")
+        records = payload["records"]
+        if any(not isinstance(row, dict) or not isinstance(row.get("id"), str) for row in records):
+            raise ValueError("every record needs an id")
+        normalized = [normalize_show_record(row) for row in records]
+        byid = {row["id"]: row for row in normalized}
+        if len(byid) != len(normalized):
+            raise ValueError("duplicate record id")
+        targets = payload.get("targets")
+        if not isinstance(targets, list) or any(not isinstance(value, str) or value not in byid for value in targets):
+            raise ValueError("targets must name existing records")
+        rows = [{"id": ident, "failures": lint_bead_failures(byid[ident], set(byid), normalized)} for ident in targets]
+        print(json.dumps({"schema_version": KIT_BEAD_LINT_VERSION, "mode": "admission-stdin", "rows": rows}, sort_keys=True))
+        return 0
+    except (OSError, ValueError, TypeError, KeyError, BoxGrammarUnavailable) as error:
+        print(json.dumps({"schema_version": KIT_BEAD_LINT_VERSION, "mode": "admission-stdin",
+                          "error": str(error)}, sort_keys=True))
+        return 3
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Upstream home: bead-lint north-star checks (a)-(j) + "
@@ -2219,7 +2249,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="REPLAYABLE1: list the live tracker's in-scope beads "
                     "whose acceptance omp-kit verify cannot replay, as JSON; "
                     "reports only, never refuses; exit 0, 3 UNVERIFIED")
+    ap.add_argument("--admission-stdin", action="store_true",
+                    help="read-only canonical admission for records/targets JSON on stdin")
     args = ap.parse_args(argv)
+    if args.admission_stdin:
+        return admission_stdin()
     if args.replayable_report:
         code, report = replayable_report_live(os.path.abspath(args.repo))
         print(json.dumps({"schema_version": KIT_BEAD_LINT_VERSION,

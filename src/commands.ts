@@ -897,6 +897,19 @@ export const COMMANDS: readonly Command[] = [
 			3: { meaning: "Custody authority UNAVAILABLE", retryable: false },
 		} },
 	], example: "omp-kit custody check --repo /path/to/repo --json doc/README.md", runnable: false, dataSchema: custodyData },
+	{ name: "beads", description: "Preserving migrations for existing tracker obligations", usage: "beads migrate [FLAGS]", flags: [], runnable: false, subcommands: [
+		{ name: "migrate", description: "Plan lossless legacy acceptance repairs; apply only as a non-author with revision checks", usage: "beads migrate [--project PATH] [--actor NAME] [--bead ID]... [--apply]", flags: [
+			{ name: "--project", value: "PATH", description: "Tracker and candidate root (default: cwd)" },
+			{ name: "--actor", value: "NAME", description: "Non-author migration actor (default: AGENT_NAME)" },
+			{ name: "--bead", value: "ID", repeatable: true, description: "Limit to exact ids; default: all open records" },
+			{ name: "--apply", description: "Apply validated proposals with --if-unchanged and exact readback" },
+			{ name: "--yes", description: "Confirm --apply after reviewing the plan; never enables apply by itself" },
+		], example: "omp-kit beads migrate --project /path/to/repo --actor Reviewer --json", runnable: false, mutation: true, dataSchema: {
+			type: "object", required: ["overall", "apply", "migrations"], properties: {
+				overall: { enum: ["OK", "FINDINGS"] }, apply: { type: "boolean" }, migrations: { type: "array" },
+			},
+		} },
+	], example: "omp-kit beads migrate --actor Reviewer --json", dataSchema: REFUSAL_DATA_SCHEMA },
 	{ name: "intake", description: "Record one request from Joshua, resolve the receiving seat's role, print DO or ROUTE <bead> -> <seat>", usage: "intake --from joshua --text TEXT --seat SEAT [--kind rule|work]", flags: [
 		{ name: "--from", value: "NAME", description: "Request source; only joshua is recorded" },
 		{ name: "--text", value: "TEXT", description: "Verbatim request text" },

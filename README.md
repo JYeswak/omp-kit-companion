@@ -17,7 +17,7 @@ Current release: v0.2.83
 <!-- kit-release:end -->
 
 A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-53 top-level commands for an existing OMP install.
+54 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -451,16 +451,14 @@ applied. `omp-kit quickstart` prints the same safe first commands.
 
 ## Command reference
 
-Every command accepts `--json` (one envelope: `ok`, `tool_version`, `data`,
-`meta`, `warnings`, `commands`, `errors`) and `omp-kit help COMMAND` prints its
-grammar. Guarded apply operations need `--apply` and, non-interactively, `--yes`.
+JSON (`--json`): `ok`, `tool_version`, `data`, `meta`, `warnings`, `commands`,
+`errors`. `omp-kit help COMMAND` shows grammar.
 
-`lessons add` and `checkin` append to `.omp/lessons.jsonl`. Their `--commit`
-mode requires a clean lesson path and shared `main`, runs normal commit/push
-hooks, and never adopts another writer's staged or working lesson rows.
-Check-ins without `--done` require complete native activity coverage; an
-unavailable source refuses before writing. Use repeatable `--done` for an
-explicit report rather than inventing zero activity.
+`lessons add`/`checkin` append `.omp/lessons.jsonl`. `--commit` needs a clean
+lesson path on shared `main`, runs normal commit/push hooks and never adopts
+peers' staged/worktree rows. Without `--done`, check-ins require complete native
+activity coverage and refuse unavailable sources, never invent zero activity.
+Use repeatable `--done` for explicit reports.
 
 | Command | Usage | What it does | Example |
 |---|---|---|---|
@@ -502,6 +500,7 @@ explicit report rather than inventing zero activity.
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Tags agent text; bare slash commands; refuses forgeries | `omp-kit send s %1 "status" --json` |
 | `omp-kit sha` | `sha SHA [--repo PATH]...` | Which fleet repos hold a commit; exit 0 found, 1 absent everywhere | `omp-kit sha dd82fb4e --json` |
 | `omp-kit custody` | `custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH` | Answer whether one repo-relative path may be edited, from git and reservations; one PATH per call | `omp-kit custody check --repo /path/to/repo --json doc/README.md` |
+| `omp-kit beads` | `beads migrate [--apply --yes]` | Lossless non-author repair | `omp-kit beads migrate --actor Reviewer` |
 | `omp-kit intake` | `intake --from joshua --text TEXT --seat SEAT [--kind rule\|work]` | Record one request, resolve the receiving seat's role, print DO or ROUTE | `omp-kit intake --from joshua --text 'fix this test' --seat chief --json` |
 | `omp-kit fleet` | `fleet flush-pending [--apply --yes]` | Find idle panes with queued input and frozen turns; `--apply` submits only safe queued bands | `omp-kit fleet flush-pending --json` |
 | `omp-kit fleet` | `fleet respawn [--panes SESSION:W.P,...] [--apply --yes]` | Report panes whose omp predates the latest applied relink; `--apply` respawns named idle panes with `--resume`, strictly serially; busy, frozen, dirty, holding and sessionless panes never touched | `omp-kit fleet respawn --json` |
