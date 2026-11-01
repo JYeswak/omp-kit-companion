@@ -36,6 +36,18 @@ const rules: { rule: string; cases: [string, boolean][] }[] = [
 			["lldb /usr/local/bin/mytool", false],
 		],
 	},
+	{
+		rule: "bash-silenced-filter-pipe",
+		cases: [
+			["br list --json 2>/dev/null | jq .", true],
+			["ps -E 2>/dev/null | grep x", true],
+			['echo "br list --json 2>/dev/null | jq ."', false],
+			["printf '%s\\n' \"br list --json 2>/dev/null | jq .\"", false],
+			['echo "ps -E 2>/dev/null | grep x"', false],
+			["printf '%s\\n' \"ps -E 2>/dev/null | grep x\"", false],
+			['echo "text" && br list --json 2>/dev/null | jq .', true],
+		],
+	},
 ];
 
 for (const { rule, cases } of rules) {

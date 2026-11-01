@@ -1,0 +1,28 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_d9396e3e353043095af89cb2a3ca703f8d99e77f8bb6ddcdc34b5d612462ba82",
+ "limitations": [
+  "Receipt covers only this bead acceptance and focused regression test; no full suite or publication claim."
+ ],
+ "operation": "ompkit-sb3tn-acceptance",
+ "parameters": {
+  "base_head": "5a7612f85891db4fb5a50f7e9189fa82ea1a61ef",
+  "bead": "ompkit-sb3tn",
+  "clean_archive": "git-archive-HEAD-plus-two-owned-files",
+  "private_index": "all-8-members-rc0",
+  "regression_test_sha256": "bce08d5f896ed5fb94f99a20d7749444ad8bef813326c810034e78e6c4ab6ae2",
+  "rule_sha256": "c2b90ed64901921071f37a9bf37ff37eaf9590491b123afcf36758702dc410f9"
+ },
+ "producer": "LavenderPrairie",
+ "result_ref": {
+  "clean_archive_gate_and_test": {
+   "bytes": 74277,
+   "sha256": "0882bd1226bf9941929b4a48ca4bbe488eea6b2f642b3e2b9c24b0d8400e32ea"
+  },
+  "tracked_gate": {
+   "bytes": 74174,
+   "sha256": "cad02456d055e17ce9857e3a7c2aa40de1ad9657c7d1354dc18fa20b1f4fea39"
+  }
+ }
+}

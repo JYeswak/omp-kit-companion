@@ -1,2 +1,2 @@
 ### Fixed
-- bash-silenced-filter-pipe stays quiet when the pipeline is only quoted text in echo or printf, so the metamorphic ratchet passes and the release's package test runs.
+- Keep the bounded echo/printf exclusion before the pipeline token, so quoted filter commands printed as text remain quiet.
