@@ -49,7 +49,11 @@ async function makeRepo(): Promise<{ dir: string; sha: string; env: Record<strin
 
 test("omp-kit verify refuses an unpublished export before replay and admits it after publish", async () => {
 	const { dir, sha, marker, env } = await makeRepo();
-	const args = (exportSha: string) => ["bun", "run", "--silent", cliPath, "verify", "kit-1", "--export", exportSha, "--project", dir, "--actor", "Peer", "--dry-run", "--json"];
+	const args = (exportSha: string) => [
+		"bun", "run",
+		...(process.env.PUBLISH_GATE_MUTATION_PRELOAD ? ["--preload", process.env.PUBLISH_GATE_MUTATION_PRELOAD] : []),
+		"--silent", cliPath, "verify", "kit-1", "--export", exportSha, "--project", dir, "--actor", "Peer", "--dry-run", "--json",
+	];
 
 	const missingSha = "0".repeat(40);
 	const missing = await run(args(missingSha), { cwd: base, deadline_s: 60, env });
@@ -82,3 +86,54 @@ test("omp-kit verify refuses an unpublished export before replay and admits it a
 	expect(fetchUnknown.data.replays).toEqual([]);
 	expect(fetchUnknown.data.acts).toEqual([]);
 }, 60_000);
+
+test("planted negative: removing the ancestry check makes the unpublished regression fail", async () => {
+	const helperPath = join(import.meta.dir, "..", "..", "extensions", "kit-published-commit.ts");
+	const helperSource = readFileSync(helperPath, "utf8");
+	const needle = 'const ancestor = await runPublicationGit(["merge-base", "--is-ancestor", commit.out, tip.out]);';
+	if (!helperSource.includes(needle)) throw new Error("published-commit mutation site changed");
+
+	const mutationDir = join(base, "mutation");
+	mkdirSync(mutationDir, { recursive: true });
+	const preloadPath = join(mutationDir, "disable-ancestry-check.ts");
+	const markerPath = join(mutationDir, "mutant-loaded");
+	writeFileSync(preloadPath, `
+import { readFileSync, writeFileSync } from "node:fs";
+const helperPath = ${JSON.stringify(helperPath)};
+const markerPath = ${JSON.stringify(markerPath)};
+const needle = ${JSON.stringify(needle)};
+Bun.plugin({
+	name: "published-commit-ancestry-mutation",
+	setup(builder) {
+		builder.onLoad({ filter: /kit-published-commit\\.ts$/ }, () => {
+			const source = readFileSync(helperPath, "utf8");
+			if (!source.includes(needle)) throw new Error("published-commit mutation site changed");
+			writeFileSync(markerPath, "ancestry-check-removed");
+			return {
+				contents: source.replace(needle, 'const ancestor = { rc: 0, out: "", failed: false };'),
+				loader: "ts",
+			};
+		});
+	},
+});
+`);
+
+	const testPath = join(import.meta.dir, "published-commit-gate.test.ts");
+	const result = await run([
+		"bun", "test", "--timeout", "60000", "--test-name-pattern",
+		"omp-kit verify refuses an unpublished export before replay and admits it after publish",
+		testPath,
+	], {
+		cwd: join(import.meta.dir, "..", ".."),
+		deadline_s: 90,
+		env: {
+			...process.env,
+			PUBLISH_GATE_MUTATION_PRELOAD: preloadPath,
+		},
+	});
+	const output = `${new TextDecoder().decode(result.stdout)}\n${new TextDecoder().decode(result.stderr)}`;
+	expect(result.rc).toBe(1);
+	if (!existsSync(markerPath)) throw new Error(output);
+	expect(output).toContain("NOT_PUBLISHED");
+	expect(output).toContain("DRY_RUN");
+}, 90_000);
