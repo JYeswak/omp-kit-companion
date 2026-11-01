@@ -648,6 +648,26 @@ def goal_path_target(starts: list[str], goal_ids: set[str], dependents) -> str |
     return None
 
 
+def parent_child_ancestors(bead: dict, rows: list[dict], limit: int = 32) -> set[str]:
+    """Ids reached from `bead` by parent-child edges, read from the bead itself and then the tracker rows."""
+    parents: dict[str, list[str]] = {}
+    for row in rows:
+        for dep in row.get("dependencies") or []:
+            if dep.get("type") == "parent-child" and dep.get("depends_on_id"):
+                parents.setdefault(row["id"], []).append(dep["depends_on_id"])
+    own = [dep.get("depends_on_id") or dep.get("id") for dep in bead.get("dependencies") or []
+           if (dep.get("type") or dep.get("dependency_type")) == "parent-child"]
+    found: set[str] = set()
+    queue = [p for p in own if p] or list(parents.get(bead.get("id") or "", []))
+    while queue and len(found) < limit:
+        current = queue.pop(0)
+        if current in found:
+            continue
+        found.add(current)
+        queue.extend(parents.get(current, []))
+    return found
+
+
 def goal_path_finding(bead: dict, rows: list[dict], dependents=None) -> list[str]:
     """m-goal-path finding for one bead against the tracker rows, whatever its age."""
     labels = bead.get("labels") or []
@@ -675,16 +695,24 @@ def goal_path_finding(bead: dict, rows: list[dict], dependents=None) -> list[str
     if starts and goal_path_target(starts, goal_ids, dependents):
         return []
     named = "; ".join(f"{g['id']} ({(g.get('title') or '')[:80]})" for g in goals)
-    first = goals[0]["id"]
-    if bid == "<new>":
-        fix = (f"create with --labels {GOAL_PATH_LABEL}{encode_goal_path_id(goals[0]['id'])} "
+    # PARENTBLOCK1 (rz5.134): never tell an author to make one of the bead's own parent-child ancestors wait on it;
+    # that edge parent-blocks every child of the ancestor (2026-11-01: 54 of 61 release-train children hidden).
+    ancestors = parent_child_ancestors(bead, rows)
+    eligible = [g for g in goals if g["id"] not in ancestors]
+    if not eligible:
+        fix = (f"label it {INTAKE_LABEL} for the director to place (every open goal is an ancestor of this bead, and "
+               f"an ancestor that waits on its own descendant hides all of its children from br ready)")
+    elif bid == "<new>":
+        first = eligible[0]["id"]
+        fix = (f"create with --labels {GOAL_PATH_LABEL}{encode_goal_path_id(first)} "
                f"(a goal or a bead on its path; dots in the id written as _) and then run "
                f"`br dep add {first} <NEW_ID>` (the target waits on the new bead), or label it "
                f"{INTAKE_LABEL}; scripts/beads_place.py --title TEXT --json picks the target")
     else:
+        first = eligible[0]["id"]
         fix = (f"run `br dep add {first} {bid}` (or a bead on that goal's path in place of "
-               f"{first}), or label it {INTAKE_LABEL}; scripts/beads_place.py --title TEXT "
-               f"--json picks the target")
+               f"{first}, never one of {bid}'s own parents), or label it {INTAKE_LABEL}; "
+               f"scripts/beads_place.py --title TEXT --json picks the target")
     return [f"{GOAL_PATH_CHECK}:GOAL_PATH_MISSING {bid} has no blocks path into an open "
             f"{GOAL_LABEL} bead; open goals: {named}; fix: {fix}"]
 
@@ -750,6 +778,11 @@ def goal_path_selftest() -> tuple[list[str], dict]:
     planted = goal_path_failure(rows[5], rows)
     if not (planted and "gp-goal" in planted[0] and "br dep add gp-goal gp-unplaced" in planted[0]):
         fails.append(f"unplaced bead not refused naming the goal and remedy: {planted}")
+    # PARENTBLOCK1 (rz5.134): a child of the only open goal is never told to make that goal wait on it (the edge
+    # parent-blocks every sibling); the unplaced control above still gets the `br dep add` remedy.
+    child = goal_path_failure(rows[6], rows)
+    if not child or "br dep add gp-goal gp-parent-only" in child[0] or "kind:intake" not in child[0]:
+        fails.append(f"child of the only goal told to block its own parent: {child}")
     new_ok = mkbead("<new>", labels=["selftest", GOAL_PATH_LABEL + "gp-w2"], created_at=post)
     new_bad = mkbead("<new>", labels=["selftest", GOAL_PATH_LABEL + "gp-under-shut"], created_at=post)
     new_none = mkbead("<new>", created_at=post)
