@@ -31,7 +31,7 @@ type Cut = { epic: string; pinned: string[] };
 const MAX_BYTES = 1024 * 1024;
 const MAX_NODES = 128;
 const MAX_EDGES = 4096;
-const GRAPH_DEADLINE_MS = 10000;
+const GRAPH_DEADLINE_MS = 20_000;
 const ACTIVE: Record<string, true> = { open: true, in_progress: true, rework: true, blocked: true, in_review: true };
 const GATED: Record<string, true> = { "human-gate": true, "owner-decision": true, "kind:process": true, "needs-director": true };
 
