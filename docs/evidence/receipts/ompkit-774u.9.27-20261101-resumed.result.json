@@ -1,0 +1,30 @@
+{
+  "candidate_commit": "7f6e05e1b707d3eb2581304026fd0db9fe6f1de9",
+  "setup": "git archive exact candidate into owned scratch; git init -q; TRUSTED_SOURCE variables unset",
+  "command": "nice -n 10 bun test tests/cli/session-retain.test.ts",
+  "exit_code": 0,
+  "stdout": "bun test v1.4.3 (26aa4e1a9)\n\n 3 pass\n 0 fail\n 16 expect() calls\nRan 3 tests across 1 file. [757.00ms]\n",
+  "stderr": "",
+  "independent_verifier": {
+    "agent": "SessionRetainVerifier-2",
+    "model_family": "openai-codex",
+    "same_model_family_as_author": true,
+    "scratch_released": true
+  },
+  "behavior_checked": [
+    "old un-ingested transcript retained",
+    "old transcripts retained when CC state is missing",
+    "nested producer-confirmed transcript removed",
+    "same-inode/same-size modified transcript retained",
+    "14-day cutoff boundary retained"
+  ],
+  "pregrade": {
+    "candidate_commit": "7f6e05e1b707d3eb2581304026fd0db9fe6f1de9",
+    "grader_family": "openai-codex",
+    "verdict": "PASS",
+    "at": "2026-11-01T12:56:51Z"
+  },
+  "limitations": [
+    "Repository-wide CLI suite status is not part of this bead-specific acceptance result."
+  ]
+}

@@ -1,0 +1,21 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_54cd7b5ff8f7e54b021dfab22d74d7eb3a7a2af708fd2f5a45a58c499959bf6c",
+ "limitations": [
+  "Same model family as author; assertion outcomes are aggregated by Bun."
+ ],
+ "operation": "session-retention acceptance",
+ "parameters": {
+  "bead": "ompkit-774u.9.27",
+  "candidate_commit": "7f6e05e1b707d3eb2581304026fd0db9fe6f1de9",
+  "replay": "independent-exact-archive",
+  "verifier": "SessionRetainVerifier-2",
+  "verifier_family": "openai-codex"
+ },
+ "producer": "bun test",
+ "result_ref": {
+  "bytes": 1155,
+  "sha256": "740806cae7988c4b64342352d8bbb56652804d5b702d1a040e31c068e0d8a4c0"
+ }
+}
