@@ -32,15 +32,9 @@ async function repo(name: string, extraScripts: Record<string, string> = {}): Pr
 	writeFileSync(join(dir, "scripts", "bad.sh"), "#!/bin/sh\necho 'selftest: FAIL'\nexit 1\n");
 	writeFileSync(join(dir, "scripts", "probe.sh"), "#!/bin/sh\ns=0\ni=1\nwhile [ $i -le 100 ]; do s=$((s + i)); i=$((i + 1)); done\nif [ $s -ne 5050 ]; then echo 'probe WRONG'; exit 1; fi\necho 'probe 5050 ok'\necho ' 0 fail'\n");
 	for (const [file, contents] of Object.entries(extraScripts)) writeFileSync(join(dir, "scripts", file), contents);
-	const fixtureGitEnv = {
-		...process.env,
-		HOME: dir,
-		GIT_CONFIG_GLOBAL: join(dir, ".gitconfig"),
-		GIT_CONFIG_NOSYSTEM: "1",
-	} as Record<string, string>;
-	await sh(["git", "init", "-q"], dir, fixtureGitEnv);
-	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], dir, fixtureGitEnv);
-	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], dir, fixtureGitEnv);
+	await sh(["git", "init", "-q"], dir);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "add", "-A"], dir);
+	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], dir);
 	return { dir, sha: (await sh(["git", "rev-parse", "HEAD"], dir)).trim() };
 }
 
@@ -536,34 +530,16 @@ async function shapeActorBead(t: { dir: string; db: string }, id: string, ac: st
 	const env = ambientEnv(t.db);
 	const desc = "WHAT: verifyactor1 fixture.\n\nWHY: proves native verify binds the reviewer identity on durable mutations.";
 	const moves: string[][] = [
-		[
-			"update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix",
-			"--status", "in_progress", "--transition-comment", "fixture start",
-		],
-		["update", id, "--check-acceptance", "1", "--assignee", "Author"],
+		["update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix"],
+		["update", id, "--status", "in_progress", "--transition-comment", "fixture start"],
+		["update", id, "--check-acceptance", "1"],
+		["update", id, "--assignee", "Author"],
 		["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "tester"],
 	];
 	for (const m of moves) {
 		const r = await brun(m, t.dir, env);
 		if (r.rc !== 0) throw new Error(`${m.slice(0, 3).join(" ")} -> ${r.rc}: ${r.out.slice(0, 300)}`);
 	}
-}
-
-async function createActorBeads(t: { dir: string; db: string }): Promise<[string, string]> {
-	const path = join(t.dir, "actor-beads.md");
-	writeFileSync(path, "## actor close probe\n\n## actor control probe\n");
-	const created = await brun(["create", "--file", path, "--json"], t.dir, ambientEnv(t.db));
-	if (created.rc !== 0) throw new Error(`create actor beads -> ${created.rc}: ${created.out.slice(0, 300)}`);
-	const parsed: unknown = JSON.parse(created.out);
-	if (!Array.isArray(parsed) || parsed.length !== 2) throw new Error(`create actor beads returned unexpected rows: ${created.out.slice(0, 300)}`);
-	const idAt = (index: number): string => {
-		const row: unknown = parsed[index];
-		if (typeof row !== "object" || row === null || !("id" in row) || typeof row.id !== "string") {
-			throw new Error(`create actor beads row ${index} has no id: ${created.out.slice(0, 300)}`);
-		}
-		return row.id;
-	};
-	return [idAt(0), idAt(1)];
 }
 
 async function auditActors(t: { dir: string; db: string }, id: string): Promise<{ event_type: string; actor: string }[]> {
@@ -578,7 +554,8 @@ test("VERIFYACTOR1 [a]: passing verify binds the reviewer on ticks, gate report 
 	const t = await tracker("actorpass-t");
 	await actorPolicy(t);
 	const envT = ambientEnv(t.db);
-	const [id, control] = await createActorBeads(t);
+	const id = await createBead(t, "actor close probe");
+	const control = await createBead(t, "actor control probe");
 	const ac = "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass";
 	await shapeActorBead(t, id, ac);
 	await shapeActorBead(t, control, ac);

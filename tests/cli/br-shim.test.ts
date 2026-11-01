@@ -61,9 +61,9 @@ async function claim(options: Scenario = {}) {
 		const shim = join(release, "scripts/br-shim.sh");
 		writeFileSync(shim, source);
 		const mutations = join(scratch.path, "mutations.jsonl");
-		const rows = ["cut", "k-1", "k-2"].map(id => ({
+		const rows = ["k-1", "k-2"].map(id => ({
 			id, title: `Claim ${id}`, status: "open", assignee: null,
-			labels: id === "cut" ? ["kind:goal"] : options.labels ?? [], dependencies: [], created_at: "2026-10-30T00:00:00Z", updated_at: "2026-10-30T00:00:00Z",
+			labels: options.labels ?? [], dependencies: [], updated_at: "2026-10-30T00:00:00Z",
 			acceptance_criteria: "- [ ] [a] [build] claim path works `true` -> rc 0; planted negative: out-of-cut claim refused",
 		}));
 		const trackerData = join(scratch.path, "beads.json");
@@ -87,8 +87,7 @@ if (args[0] === "show") {
 } else if (args[0] === "list") {
   console.log(JSON.stringify(args.includes("--assignee") ? [] : rows));
 } else if (args[0] === "dep" && args[1] === "list") {
-  const edges = args[2] === "cut" ? [{ issue_id: "cut", depends_on_id: "k-1", type: "blocks", status: "open" }] : [];
-  console.log(JSON.stringify(edges));
+  console.log("[]");
 } else if (args[0] === "where") {
   console.log("database: " + database);
 } else if (args[0] === "update" && args.includes("--claim")) {

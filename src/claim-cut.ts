@@ -179,6 +179,7 @@ export async function admitClaimCut(input: ClaimCutInput): Promise<ClaimCutVerdi
 			return value;
 		};
 		const candidate = beadRow(input.bead ?? await read(["show", input.id, "--json"]), input.id);
+		if (candidate.status === "open" && cut.pinned.includes(input.id)) return verdict("CLAIM_CUT_ADMITTED", `${input.id}: explicit pin in cut ${cut.epic}`, "continue with the remaining claim checks");
 		const rows = new Map<string, Row>([[input.id, candidate]]);
 		const load = async (id: string): Promise<Row> => {
 			const cached = rows.get(id);
@@ -188,13 +189,14 @@ export async function admitClaimCut(input: ClaimCutInput): Promise<ClaimCutVerdi
 			rows.set(id, row);
 			return row;
 		};
-		const goal = await load(cut.epic);
-		if (typeof goal.status !== "string" || ACTIVE[goal.status] !== true)
-			throw new Error(`declared goal ${cut.epic} is not active`);
-		if (!Array.isArray(goal.labels) || !goal.labels.includes("kind:goal"))
-			throw new Error(`declared goal ${cut.epic} is not labeled kind:goal`);
-		const reachable = new Set([cut.epic]);
-		const queue = [cut.epic];
+		const activePins: string[] = [];
+		for (const id of cut.pinned) {
+			const row = await load(id);
+			if (typeof row.status === "string" && ACTIVE[row.status] === true) activePins.push(id);
+			if (alternative === null && eligiblePin(row)) alternative = id;
+		}
+		const reachable = new Set(activePins);
+		const queue = [...activePins];
 		let edgeCount = 0;
 		for (let index = 0; index < queue.length; index++) {
 			const id = queue[index]!;
@@ -212,15 +214,8 @@ export async function admitClaimCut(input: ClaimCutInput): Promise<ClaimCutVerdi
 					queue.push(edge.depends_on_id);
 				}
 			}
-			if (reachable.has(input.id)) break;
 		}
-		for (const id of cut.pinned) {
-			if (!reachable.has(id)) continue;
-			const row = await load(id);
-			if (eligiblePin(row)) { alternative = id; break; }
-		}
-		if (candidate.status === "open" && reachable.has(input.id) && input.id !== cut.epic)
-			return verdict("CLAIM_CUT_ADMITTED", `${input.id}: open blocks path from goal ${cut.epic}`, "continue with the remaining claim checks");
+		if (candidate.status === "open" && reachable.has(input.id)) return verdict("CLAIM_CUT_ADMITTED", `${input.id}: open blocks prerequisite in cut ${cut.epic}`, "continue with the remaining claim checks");
 		return verdict("CLAIM_OUT_OF_CUT", `${input.id} is outside declared cut ${cut.epic}; nearest eligible pinned alternative: ${alternative ?? "none (no open eligible pin)"}`,
 			alternative ? `claim pinned ${alternative} instead` : `ask the cut owner to resolve the pinned work for ${cut.epic}`);
 	} catch (error) {
