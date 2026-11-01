@@ -1,0 +1,1 @@
+- Add `python3 scripts/gate_profile.py --runs 10 --json` to rank retained focused-gate and full-suite stage/file costs. Missing wait/setup/run measurements and invalid history stay explicitly partial with exit 3; no optimization, cache reuse, gate relaxation or speedup is inferred.

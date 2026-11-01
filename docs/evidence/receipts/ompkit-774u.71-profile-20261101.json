@@ -1,0 +1,36 @@
+{
+ "authority": "pending",
+ "confidence": "observed",
+ "evidence_id": "ev_1ede0ba3490b584431c50903a3e3bb259813f8419efc64f59985ad0ba588d629",
+ "limitations": [
+  "No separate historical queue/setup/pure-run spans: actual profiler remains PARTIAL/3. No original AC, median-halving, release or installed-runtime qualification.",
+  "Current deferred full-suite default predates this work; different historical inputs/roles/load are not a causal performance comparison.",
+  "Quality gate0 means no existing-code regression; new summarize complexity54/80LOC and unittest-class verbosity remain disclosed debt. No acknowledgement or foreign-scope waiver was added."
+ ],
+ "operation": "GATESPEED1 retained-history measurement checkpoint",
+ "parameters": {
+  "bead": "ompkit-774u.71",
+  "subject_sha256": "2bde0252559ae199358173d747b62f193d7574aaab9412fd86ca8a9038f56531",
+  "test_sha256": "f470e42b8cbe10f87435dc401b542f4542c633e9cc3adb9ab96877c53465fac7"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "actual_data_root_cli_control": true,
+  "affected_test": "tests/scripts/gate_profile_test.py",
+  "command": "python3 scripts/gate_profile.py --runs 10 --json",
+  "optimization_changes": 0,
+  "original_a_satisfied": false,
+  "original_b_satisfied": false,
+  "profile": "docs/evidence/gate-profile-20261101.json",
+  "rc": 3,
+  "regression": {
+   "rc": 0,
+   "tests": 12
+  },
+  "selected": {
+   "full": 10,
+   "push": 10
+  },
+  "status": "PARTIAL"
+ }
+}
