@@ -121,22 +121,26 @@ function referencedPaths(text: string, files: ReadonlySet<string>, fromRel: stri
 	return found;
 }
 
-export function selectAffected(root: string, changed: readonly string[]): Selection {
-	const all = walk(root);
+function sharedInfrastructureSelection(all: readonly string[], changed: readonly string[]): Selection | null {
 	const shared = changed.find(path => SHARED_INFRA_FILES[path] === true
 		|| SHARED_INFRA_PREFIXES.some(prefix => path.startsWith(prefix)));
-	if (shared !== undefined) {
-		const tests = all.filter(isTestFile).sort();
-		const reasons = new Map<string, string>();
-		const distance = new Map<string, number>();
-		for (const test of tests) { reasons.set(test, shared); distance.set(test, 1); }
-		// Changed suites retain their direct-change priority in distance-ordered budget plans.
-		for (const path of changed) if (distance.has(path)) {
-			reasons.set(path, path);
-			distance.set(path, 0);
-		}
-		return { tests, reasons, distance };
+	if (shared === undefined) return null;
+	const tests = all.filter(isTestFile).sort();
+	const reasons = new Map<string, string>();
+	const distance = new Map<string, number>();
+	for (const test of tests) { reasons.set(test, shared); distance.set(test, 1); }
+	// Changed suites retain their direct-change priority in distance-ordered budget plans.
+	for (const path of changed) if (distance.has(path)) {
+		reasons.set(path, path);
+		distance.set(path, 0);
 	}
+	return { tests, reasons, distance };
+}
+
+export function selectAffected(root: string, changed: readonly string[]): Selection {
+	const all = walk(root);
+	const shared = sharedInfrastructureSelection(all, changed);
+	if (shared !== null) return shared;
 	const files = new Set(all);
 	// importers[x] = sources whose import graph reaches x in one step; namers[x] = sources that name
 	// x as a literal path. Imports are followed transitively. A naming edge counts only as the first
