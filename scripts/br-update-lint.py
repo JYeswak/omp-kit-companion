@@ -487,7 +487,75 @@ def handoff_file(argv: list[str]) -> int:
         return 4
 
 
+# PARENTBLOCK1 (ompkit-rc-epic-land-fix-release-dogfood-rz5.134): `br dep add P C` with the default blocks type, where
+# C is a parent-child descendant of P, parent-blocks every child of P and drops them from br ready. Measured: jev
+# 2026-10-13 (54 edges in four waves); omp-kit 2026-11-01 (54 then 51 of ~60 release-train children hidden, four times).
+DEP_VALUE_FLAGS = {"-t", "--type", "--metadata", "--db", "--actor", "--lock-timeout"}
+PARENT_WALK_LIMIT = 8
+
+
+def _dep_add_args(argv: list[str]) -> tuple[str, str, str, str] | None:
+    """(issue, depends_on, type, db) from a br argv holding `dep add`, or None when it is not one."""
+    words: list[str] = []
+    dep_type, db, i = "blocks", "", 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in DEP_VALUE_FLAGS and i + 1 < len(argv):
+            if arg in ("-t", "--type"):
+                dep_type = argv[i + 1]
+            elif arg == "--db":
+                db = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--type="):
+            dep_type = arg.split("=", 1)[1]
+        elif arg.startswith("--db="):
+            db = arg.split("=", 1)[1]
+        elif not arg.startswith("-"):
+            words.append(arg)
+        i += 1
+    if words[:2] != ["dep", "add"] or len(words) < 4:
+        return None
+    return words[2], words[3], dep_type, db
+
+
+def dep_parent_gate(argv: list[str]) -> int:
+    """Refuse a blocks edge from a bead onto one of its own parent-child descendants; 0 admits."""
+    if not argv:
+        return 0
+    real, rest = argv[0], argv[1:]
+    parsed = _dep_add_args(rest)
+    if parsed is None:
+        return 0
+    issue, depends_on, dep_type, db = parsed
+    if dep_type != "blocks" or issue == depends_on:
+        return 0
+    project = os.environ.get("BR_UPDATE_PROJECT", os.getcwd())
+    chain, current = [depends_on], depends_on
+    try:
+        for _ in range(PARENT_WALK_LIMIT):
+            record = show_bead(real, project, db, current)
+            parents = [edge.get("id") for edge in record.get("dependencies") or []
+                       if isinstance(edge, dict) and edge.get("dependency_type") == "parent-child"]
+            if not parents or not isinstance(parents[0], str):
+                return 0
+            current = parents[0]
+            chain.append(current)
+            if current == issue:
+                print(f"br-shim: PARENT_CHILD_BLOCKS refused: {depends_on} descends from {issue} by parent-child "
+                      f"({' -> '.join(reversed(chain))}). A blocks edge from {issue} onto it parent-blocks every child "
+                      f"of {issue} and drops them from br ready (rz5.134). {issue} already stays open while a child is "
+                      f"open; give {depends_on} its goal path through a release train or a bead on that path instead.",
+                      file=sys.stderr)
+                return 4
+    except RuntimeError as exc:
+        print(f"br-shim: PARENT_BLOCK_UNVERIFIED {exc}; passing through", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["dep-parent"]:
+        return dep_parent_gate(argv[1:])
     if argv[:1] == ["handoff"]:
         return handoff_gate(argv[1:])
     if argv[:1] == ["handoff-file"]:

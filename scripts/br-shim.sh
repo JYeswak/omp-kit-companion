@@ -322,6 +322,25 @@ if { [ "$gate_sub" = update ] || { [ "$gate_sub" = comments ] && [ "$gate_id" = 
 		*) fail "HANDOFF_UNGATED source admission could not be verified; run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>" ;;
 	esac
 fi
+# PARENTBLOCK1 (rz5.134): a blocks edge from a bead onto its own parent-child descendant hides every child of it from
+# br ready. The helper walks the target's parent chain with the real br and refuses only that edge. It runs by a
+# literal script path from the shim's own directory, so the Python it executes is the judged file beside this shim;
+# its tracker reads use the caller's directory (BR_UPDATE_PROJECT), so relative --db paths keep their meaning.
+if [ "$gate_sub" = dep ] && [ "$gate_id" = add ]; then
+	dep_dir=$(dirname -- "$self_path")
+	dep_project=$PWD
+	if [ -f "$dep_dir/br-update-lint.py" ] && command -v python3 >/dev/null 2>&1; then
+		(cd -- "$dep_dir" && BR_UPDATE_PROJECT="$dep_project" python3 ./br-update-lint.py dep-parent "$real" "$@")
+		dep_rc=$?
+		case "$dep_rc" in
+			0) ;;
+			4) exit 4 ;;
+			*) echo "br-shim: PARENT_BLOCK_UNVERIFIED dep lint rc=$dep_rc, passing through" >&2 ;;
+		esac
+	else
+		echo "br-shim: PARENT_BLOCK_UNVERIFIED dep lint or python3 absent, passing through" >&2
+	fi
+fi
 if [ -n "$found" ]; then
 	exec "$real" "$@"
 else
