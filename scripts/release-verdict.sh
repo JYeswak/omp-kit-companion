@@ -22,7 +22,22 @@
 # Usage: scripts/release-verdict.sh [--commit SHA] [--no-fetch]
 # Exit: the verdict runner's status (0 PASS), 0 when another run will cover the commit, 2 usage.
 set -eu
-ROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
+# Run from a private copy (ompkit-6xxhu): a running sh reads its script as it goes, so a commit that
+# rewrites this file while a verdict runs (e78aa29091 did, 2026-11-01) would feed the live run new bytes
+# at old offsets. exec keeps the pid, so the lock still names this process; the copy unlinks itself
+# at once (sh keeps reading the open file).
+if [ -z "${RELEASE_VERDICT_ROOT:-}" ]; then
+	RELEASE_VERDICT_ROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd -P)
+	rv_state="$(git -C "$RELEASE_VERDICT_ROOT" rev-parse --absolute-git-dir)/omp-kit"
+	mkdir -p "$rv_state"
+	rv_copy="$rv_state/release-verdict.run.$$.sh"
+	cp "$0" "$rv_copy"
+	RELEASE_VERDICT_ROOT=$RELEASE_VERDICT_ROOT RELEASE_VERDICT_COPY=$rv_copy exec sh "$rv_copy" "$@"
+fi
+[ -z "${RELEASE_VERDICT_COPY:-}" ] || rm -f "$RELEASE_VERDICT_COPY"
+ROOT=$RELEASE_VERDICT_ROOT
+# Children (the suite runs fixture copies of this script) must take their own copy of their own repo.
+unset RELEASE_VERDICT_ROOT RELEASE_VERDICT_COPY
 COMMIT=""
 FETCH=1
 while [ $# -gt 0 ]; do
