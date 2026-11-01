@@ -475,22 +475,41 @@ export interface RereadCall {
 	cwd: string;
 }
 
-/** Split a shell command into simple-command word lists. Quotes are honoured; expansions are not evaluated. */
+/** Split shell commands without evaluation; only bead-lint asks the lexer to retain active expansion context. */
 export function shellCommands(command: string): string[][] {
+	return splitShellCommands(command);
+}
+
+function shellCommandsWithExpansions(command: string): { commands: string[][]; expansionFlags: boolean[][] } {
+	const expansionFlags: boolean[][] = [];
+	return { commands: splitShellCommands(command, expansionFlags), expansionFlags };
+}
+
+function splitShellCommands(command: string, expansionFlags?: boolean[][]): string[][] {
 	const commands: string[][] = [];
 	let words: string[] = [];
 	let word = "";
+	let wordExpands = false;
+	let wordFlags: boolean[] | undefined = expansionFlags === undefined ? undefined : [];
 	let inWord = false;
 	let quote: "'" | "\"" | null = null;
 	const endWord = (): void => {
-		if (inWord) words.push(word);
+		if (inWord) {
+			words.push(word);
+			wordFlags?.push(wordExpands);
+		}
 		word = "";
 		inWord = false;
+		wordExpands = false;
 	};
 	const endCommand = (): void => {
 		endWord();
-		if (words.length > 0) commands.push(words);
+		if (words.length > 0) {
+			commands.push(words);
+			if (expansionFlags !== undefined) expansionFlags.push(wordFlags ?? []);
+		}
 		words = [];
+		wordFlags = expansionFlags === undefined ? undefined : [];
 	};
 	for (let index = 0; index < command.length; index += 1) {
 		const ch = command[index]!;
@@ -502,7 +521,10 @@ export function shellCommands(command: string): string[][] {
 		if (quote === "\"") {
 			if (ch === "\"") quote = null;
 			else if (ch === "\\" && index + 1 < command.length) word += command[++index]!;
-			else word += ch;
+			else {
+				if (expansionFlags !== undefined && shellExpansionStarts(command, index)) wordExpands = true;
+				word += ch;
+			}
 			continue;
 		}
 		if (ch === "'" || ch === "\"") {
@@ -562,17 +584,28 @@ export function shellCommands(command: string): string[][] {
 						index = scan - 1;
 					}
 				}
-			}		} else if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "(" || ch === ")" || ch === "`") {
+		}		} else if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "(" || ch === ")" || ch === "`") {
+			if (expansionFlags !== undefined && ch === "`") wordExpands = true;
 			endCommand();
 		} else if (ch === " " || ch === "\t" || ch === "\r") {
 			endWord();
 		} else {
+			if (expansionFlags !== undefined && shellExpansionStarts(command, index)) wordExpands = true;
 			word += ch;
 			inWord = true;
 		}
 	}
 	endCommand();
 	return commands;
+}
+
+function shellExpansionStarts(text: string, at: number): boolean {
+	const ch = text[at]!;
+	if (ch === "`") return true;
+	if (ch !== "$") return false;
+	const next = text.charCodeAt(at + 1);
+	const letter = (next >= 65 && next <= 90) || (next >= 97 && next <= 122) || next === 95;
+	return letter || next === 123 || next === 40 || next === 39 || next === 34;
 }
 
 export interface TrackerRequest {
@@ -632,6 +665,8 @@ function shellScript(argv: string[]): string | undefined {
 /** One `br`/`bd` argv a bash command runs, with its cwd and the identities its own words claim. */
 interface BrCommandLine {
 	argv: string[];
+	/** Per-word active expansion state; absent outside the bead-lint parse path. */
+	expansionFlags?: boolean[];
 	cwd: string;
 	/** Identities from inline env assignments (IDENTITY_ENV), outer `sh -c` wrappers first. */
 	identities: string[];
@@ -640,10 +675,14 @@ interface BrCommandLine {
 }
 
 /** Every `br`/`bd` argv a command runs, with the cwd selected by leading cd commands; `sh -c` strings are followed. */
-function brCommandLines(command: string, cwd: string, home: string, depth = 0): BrCommandLine[] {
+function brCommandLines(command: string, cwd: string, home: string, depth = 0, trackExpansions = false): BrCommandLine[] {
 	const lines: BrCommandLine[] = [];
 	let current = cwd;
-	for (const raw of shellCommands(command)) {
+	const parsed = trackExpansions ? shellCommandsWithExpansions(command) : undefined;
+	const commands = parsed?.commands ?? shellCommands(command);
+	for (let commandIndex = 0; commandIndex < commands.length; commandIndex += 1) {
+		const raw = commands[commandIndex]!;
+		const rawExpansionFlags = parsed?.expansionFlags[commandIndex];
 		const identities: string[] = [];
 		let inlineActor: string | null = null;
 		let at = 0;
@@ -659,6 +698,7 @@ function brCommandLines(command: string, cwd: string, home: string, depth = 0): 
 			else break;
 		}
 		const argv = raw.slice(at);
+		const expansionFlags = rawExpansionFlags?.slice(at);
 		if (argv.length === 0) continue;
 		if (argv[0] === "cd") {
 			const target = argv[1];
@@ -670,13 +710,13 @@ function brCommandLines(command: string, cwd: string, home: string, depth = 0): 
 		if (SHELL_WRAPPERS[name] === true && depth < MAX_SHELL_DEPTH) {
 			const script = shellScript(argv);
 			if (script !== undefined) {
-				for (const nested of brCommandLines(script, current, home, depth + 1)) {
+				for (const nested of brCommandLines(script, current, home, depth + 1, trackExpansions)) {
 					lines.push({ ...nested, identities: [...identities, ...nested.identities], inlineActor: nested.inlineActor ?? inlineActor });
 				}
 			}
 			continue;
 		}
-		if (name === "br" || name === "bd") lines.push({ argv, cwd: current, identities, inlineActor });
+		if (name === "br" || name === "bd") lines.push({ argv, cwd: current, identities, inlineActor, ...(expansionFlags === undefined ? {} : { expansionFlags }) });
 	}
 	return lines;
 }
@@ -1839,11 +1879,8 @@ const BEAD_LINT_CREATE_FLAGS: Record<string, true> = { ...BEAD_LINT_UPDATE_FLAGS
 
 /** True when bash would rewrite `text` at run time: a backtick, or `$` opening a parameter, `${`, `$(`, `$'` or `$"`. */
 function shellExpands(text: string): boolean {
-	if (text.includes("`")) return true;
-	for (let at = text.indexOf("$"); at >= 0; at = text.indexOf("$", at + 1)) {
-		const next = text.charCodeAt(at + 1);
-		const letter = (next >= 65 && next <= 90) || (next >= 97 && next <= 122) || next === 95;
-		if (letter || next === 123 || next === 40 || next === 39 || next === 34) return true;
+	for (let at = 0; at < text.length; at += 1) {
+		if (shellExpansionStarts(text, at)) return true;
 	}
 	return false;
 }
@@ -1856,8 +1893,8 @@ const HEREDOC_OPENER = "$(cat <<";
  * (any delimiter; an unquoted delimiter only when the body has no `$`, backtick
  * or backslash), else null: the guard cannot know the value before it runs.
  */
-function staticShellValue(word: string): string | null {
-	if (!word.startsWith(HEREDOC_OPENER) || !word.endsWith(")")) return shellExpands(word) ? null : word;
+function staticShellValue(word: string, expansionSeen = false): string | null {
+	if (!word.startsWith(HEREDOC_OPENER) || !word.endsWith(")")) return expansionSeen || shellExpands(word) ? null : word;
 	const text = word.slice(HEREDOC_OPENER.length, -1);
 	const firstBreak = text.indexOf("\n");
 	if (firstBreak < 0) return null;
@@ -1879,7 +1916,7 @@ function staticShellValue(word: string): string | null {
 }
 
 /** `args` with every lint-read flag value replaced by the literal bash would pass, or the first value the guard cannot evaluate. */
-function staticLintArgs(args: string[], lintFlags: Record<string, true>): { args: string[] } | { problem: string } {
+function staticLintArgs(args: string[], lintFlags: Record<string, true>, expansionFlags: boolean[]): { args: string[] } | { problem: string } {
 	const out = [...args];
 	for (let index = 0; index < out.length; index += 1) {
 		const word = out[index]!;
@@ -1895,7 +1932,7 @@ function staticLintArgs(args: string[], lintFlags: Record<string, true>): { args
 			: short !== null && lintFlags[name] !== true ? [index, short, word.slice(2)]
 				: [index + 1, "", out[index + 1]];
 		if (value === undefined) return { problem: `passes ${name} with no value (a backtick substitution ends the word)` };
-		const literal = staticShellValue(value);
+		const literal = expansionFlags[at] === true ? staticShellValue(value, true) : value;
 		if (literal === null) return { problem: `passes ${short ?? name} a value the shell expands at run time ($VAR, $(...), backticks, $'...')` };
 		if (name === "--description-file" && literal === "-") return { problem: "reads --description-file from stdin" };
 		out[at] = prefix + literal;
@@ -2000,19 +2037,19 @@ export async function checkBeadLint(event: FlywheelToolCallEvent, deps: BeadLint
 		: deps.sessionCwd;
 	const scriptsDir = deps.scriptsDir ?? BEAD_LINT_SCRIPTS_DIR;
 	const warnings: string[] = [];
-	for (const line of brCommandLines(command, callCwd, deps.home)) {
+	for (const line of brCommandLines(command, callCwd, deps.home, 0, true)) {
 		if (basename(line.argv[0]!) !== "br") continue;
 		const args = line.argv.slice(1);
 		if (args.some(word => word === "--help" || word === "-h")) continue;
 		const verb = firstVerb(args, BR_VALUE_FLAGS);
 		const gate = verb === null ? undefined : BEAD_LINT_GATES[verb];
 		if (gate === undefined) continue;
-		const statics = staticLintArgs(args, verb === "update" ? BEAD_LINT_UPDATE_FLAGS : BEAD_LINT_CREATE_FLAGS);
+		const statics = staticLintArgs(args, verb === "update" ? BEAD_LINT_UPDATE_FLAGS : BEAD_LINT_CREATE_FLAGS, line.expansionFlags?.slice(1) ?? []);
 		if ("problem" in statics) {
 			return {
 				block: true,
 				reason: `kit-flywheel-guard ${BEAD_LINT_UNEVALUABLE}: \`br ${verb}\` ${statics.problem}, so bead-lint cannot read it before the command runs. `
-					+ "Write the text with the write tool and pass --description-file <literal path>, or use a quoted literal or $(cat <<'EOF' ... EOF). Nothing was changed.",
+					+ "Use a single-quoted shell literal; encode apostrophes as `'\\''`. Nothing was changed.",
 			};
 		}
 		const helperArgs = verb === "update" ? updateLintArgv(statics.args) : statics.args;

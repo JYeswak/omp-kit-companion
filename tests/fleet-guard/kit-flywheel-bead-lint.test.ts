@@ -1,7 +1,9 @@
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { run as kitlibRun } from "../../src/kitlib/run.ts";
 import { afterAll, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BEAD_LINT_REFUSED, BEAD_LINT_SCRIPTS_DIR, BEAD_LINT_UNEVALUABLE, BEAD_LINT_UNVERIFIED, checkBeadLint, type FlywheelExecResult } from "../../extensions/kit-flywheel-guard";
 import { createFlywheelHost, toolCall, type Responder } from "./kit-flywheel-host";
 
@@ -59,6 +61,26 @@ function tracker() {
 }
 
 const lintExecs = (execs: { command: string; args: string[] }[]) => execs.filter(call => call.command === "env" && call.args.some(arg => arg.endsWith("-lint.py")));
+
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = join(TEST_DIR, "../..");
+const ACCEPTANCE_FIXTURE = readFileSync(join(TEST_DIR, "fixtures/ternadopt1-acceptance.md"), "utf8");
+const DOUBLE_QUOTED_SUBSTITUTION_RULE = join(REPO_ROOT, "rules/kit-no-double-quoted-substitution.md");
+async function ttsrMatches(command: string): Promise<boolean> {
+	const result = await kitlibRun(["omp", "ttsr", "test", "--rule", DOUBLE_QUOTED_SUBSTITUTION_RULE, "--source", "tool", "--tool", "bash", "--json", command], {
+		cwd: REPO_ROOT, deadline_s: 20,
+	});
+	const stdout = new TextDecoder().decode(result.stdout);
+	const stderr = new TextDecoder().decode(result.stderr);
+	if (result.timed_out || result.rc !== 0) {
+		throw new Error(`native TTSR check failed (rc=${result.rc}, timed_out=${result.timed_out}): ${stdout}\n${stderr}`);
+	}
+	const report: unknown = JSON.parse(stdout);
+	if (report === null || typeof report !== "object" || !("triggered" in report) || !Array.isArray(report.triggered)) {
+		throw new Error(`native TTSR check returned an invalid report: ${stdout}`);
+	}
+	return report.triggered.some(entry => typeof entry === "object" && entry !== null && "name" in entry && entry.name === "kit-no-double-quoted-substitution");
+}
 
 test("LINTEVERY1 AC1 planted: an unlinted br create tool call is refused naming the failing checks, and nothing is created", async () => {
 	const t = tracker();
@@ -136,6 +158,36 @@ test("LINTEVERY1: a lint-read value the shell expands at run time is refused UNE
 	const dollarDigits = await toolCall(h, t.project, `br create "Fee gate" -t task -l a --description 'WHAT: charge $5. WHY: cost.' ${ACCEPTANCE_ARG}`);
 	expect(dollarDigits?.block).not.toBe(true);
 	expect(t.count()).toBe(0);
+});
+
+test("LINTEVERY1: a single-quoted acceptance with apostrophes and backticks is linted literally, while substitutions remain refused", async () => {
+	const t = tracker();
+	const id = t.create(["Quote-rich acceptance", "-t", "task", "-l", "admission", "--description", CLEAN_DESCRIPTION, "--acceptance", CLEAN_ACCEPTANCE]);
+	const h = await createFlywheelHost(base, { respond: t.respond });
+	const quotedAcceptance = `'${ACCEPTANCE_FIXTURE.split("'").join("'\\''")}'`;
+	const command = `br update ${id} --acceptance ${quotedAcceptance}`;
+	expect(await ttsrMatches(command)).toBe(false);
+	const admitted = await toolCall(h, t.project, command);
+	expect(admitted?.block).not.toBe(true);
+	expect(lintExecs(h.execs)).toHaveLength(1);
+	expect(lintExecs(h.execs)[0]?.args).toContain(ACCEPTANCE_FIXTURE);
+	const applied = await t.respond({ command: "sh", args: ["-c", `${command} --db '${t.db}' --actor LintFixture`], options: { cwd: t.project } });
+	expect(applied.code).toBe(0);
+	const stored: unknown = JSON.parse(t.run(["show", id]).stdout);
+	expect(stored).toEqual([expect.objectContaining({ id, acceptance_criteria: ACCEPTANCE_FIXTURE })]);
+	const before = t.count();
+	for (const substitution of ["$(" + "env)", "$(" + "cat secrets.txt)"]) {
+		const unsafe = `br update ${id} --acceptance "${substitution}"`;
+		expect(await ttsrMatches(unsafe)).toBe(true);
+		const refused = await toolCall(h, t.project, unsafe);
+		expect(refused?.block).toBe(true);
+		expect(refused?.reason).toContain(BEAD_LINT_UNEVALUABLE);
+		expect(refused?.reason).toContain("Use a single-quoted shell literal; encode apostrophes as `'\\''`.");
+		expect(lintExecs(h.execs)).toHaveLength(1);
+	}
+	expect(t.count()).toBe(before);
+	const unchanged: unknown = JSON.parse(t.run(["show", id]).stdout);
+	expect(unchanged).toEqual([expect.objectContaining({ id, acceptance_criteria: ACCEPTANCE_FIXTURE })]);
 });
 
 test("LINTEVERY1: content-changing br update is gated; workflow-only updates spawn no helper", async () => {
