@@ -1,1 +1,1 @@
-- `br` status transitions, `omp-kit verify`, and DONE callbacks now fail closed unless cited commits are reachable from a freshly fetched `origin/main`.
+- `br` close and in-review transitions validate each cited commit against a freshly fetched `origin/main` in its source repository; citation-free transitions continue to the existing guards. `omp-kit verify` and DONE callbacks remain fail-closed for unresolved cited commits.

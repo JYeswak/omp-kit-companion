@@ -291,8 +291,16 @@ test("PUBLISHGATE1 actual br shim refuses transitions until origin/main contains
 		const guard = join(scripts, "close-guard.sh");
 		writeFileSync(shim, readFileSync(join(root, "scripts/br-shim.sh"), "utf8"), { mode: 0o755 });
 		writeFileSync(guard, readFileSync(join(root, "scripts/close-guard.sh"), "utf8"), { mode: 0o755 });
-		// The transition's unrelated replay/handoff admission is out of scope here.
-		writeFileSync(join(scripts, "br-update-lint.py"), "raise SystemExit(0)\n");
+		writeFileSync(join(scripts, "br-update-lint.py"), `#!/usr/bin/env python3
+import os, runpy, sys
+real = ${JSON.stringify(join(root, "scripts/br-update-lint.py"))}
+if sys.argv[1:2] == ["publication-citations"]:
+    sys.path.insert(0, os.path.dirname(real))
+    sys.argv[0] = real
+    runpy.run_path(real, run_name="__main__")
+else:
+    raise SystemExit(0)
+`, { mode: 0o755 });
 		const fakeBr = join(bin, "br");
 		writeFileSync(fakeBr, `#!${process.execPath}
 import { appendFileSync } from "node:fs";
@@ -336,7 +344,7 @@ esac
 			expect(rejected.output).toContain("git_converge.py --push");
 		}
 		expect(existsSync(mutations)).toBe(false);
-		for (const reason of ["DONE k-pub evidence", "export 0000000000000000000000000000000000000000"]) {
+		for (const reason of ["export 0000000000000000000000000000000000000000"]) {
 			const rejected = await update(reason);
 			expect(rejected.rc, rejected.output).toBe(4);
 			expect(rejected.output).toContain("NOT_PUBLISHED");
@@ -357,6 +365,12 @@ esac
 		expect(fetchFailure.output).toContain("NOT_PUBLISHED");
 		expect(fetchFailure.output).toContain("UNKNOWN");
 		expect(readFileSync(mutations, "utf8")).toBe(beforeFetchFailure);
+		const beforeNoCitation = readFileSync(mutations, "utf8");
+		const noCitationClose = await close("Lesson: none");
+		expect(noCitationClose.rc, noCitationClose.output).toBe(0);
+		expect(noCitationClose.output).toContain("close-guard: OK");
+		const afterNoCitation = readFileSync(mutations, "utf8");
+		expect(afterNoCitation.slice(beforeNoCitation.length)).toBe(`${JSON.stringify(["close", "k-pub", "--reason", "Lesson: none", "--actor", "Verifier"])}\n`);
 	} finally {
 		scratch.cleanup();
 	}

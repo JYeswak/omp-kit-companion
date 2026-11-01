@@ -282,6 +282,105 @@ def _handoff_source(payload: str, project: str) -> tuple[str, str] | None:
                     return None
     return sources[0] if sources else None
 
+def _is_commit_sha(value: str) -> bool:
+    return 7 <= len(value) <= 64 and all(
+        character in "0123456789abcdefABCDEF" for character in value
+    )
+
+
+def _has_absolute_repo_sha(value: str) -> bool:
+    subject = value.partition(":")[0]
+    for index, character in enumerate(subject):
+        if character != "@":
+            continue
+        candidate = subject[index + 1:index + 66].partition(":")[0].split(maxsplit=1)
+        repo = subject[:index].strip()
+        if candidate and _is_commit_sha(candidate[0]) and Path(repo).is_absolute():
+            return True
+    return False
+
+
+def _field_commit_shas(text: str, field: str) -> Iterable[str]:
+    lower = text.lower()
+    offset = 0
+    hexadecimal = "0123456789abcdefABCDEF"
+    while offset < len(lower):
+        index = lower.find(field, offset)
+        if index < 0:
+            return
+        offset = index + len(field)
+        before = lower[index - 1] if index else ""
+        after_index = index + len(field)
+        after = lower[after_index] if after_index < len(lower) else ""
+        if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+            continue
+        start = after_index
+        while start < len(text) and text[start] in " \t":
+            start += 1
+        end = start
+        while end < len(text) and text[end] in hexadecimal and end - start <= 64:
+            end += 1
+        candidate = text[start:end]
+        if _is_commit_sha(candidate) and (end == len(text) or text[end] not in hexadecimal):
+            yield candidate.lower()
+
+
+def publication_citations(argv: list[str]) -> int:
+    """Print repository/SHA pairs for the close guard's fail-closed publication check."""
+    if len(argv) != 3 or argv[0] not in ("close", "update"):
+        print("PUBLISH_CITATION_UNKNOWN incomplete citation request", file=sys.stderr)
+        return 2
+    subcommand, project_arg, text = argv
+    project = os.path.realpath(project_arg)
+    if len(text.encode("utf-8")) > 1024 * 1024:
+        print("PUBLISH_CITATION_UNKNOWN transition comment exceeds 1 MiB", file=sys.stderr)
+        return 2
+
+    citations: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        is_done = stripped == "DONE" or stripped.startswith("DONE ")
+        if is_done:
+            payload = stripped[4:].strip()
+            source = _handoff_source(payload, project)
+            if source is not None:
+                citations.append(source)
+            else:
+                subject = payload.partition(":")[0]
+                words = subject.split()
+                if words and _is_commit_sha(words[0]):
+                    citations.append((project, words[0]))
+                elif len(words) > 1 and _is_commit_sha(words[1]):
+                    citations.append((project, words[1]))
+                elif _has_absolute_repo_sha(subject) and subcommand == "close":
+                    print("PUBLISH_CITATION_UNKNOWN DONE source repository is ambiguous or unreadable",
+                          file=sys.stderr)
+                    return 2
+        else:
+            source = _handoff_source(line, project)
+            if source is not None:
+                citations.append(source)
+            elif _has_absolute_repo_sha(line) and subcommand == "close":
+                print("PUBLISH_CITATION_UNKNOWN cited repository is ambiguous or unreadable",
+                      file=sys.stderr)
+                return 2
+        citations.extend((project, sha) for field in ("export", "commit")
+                         for sha in _field_commit_shas(line, field))
+
+    ordered: dict[str, list[str]] = {}
+    for repo, sha in citations:
+        if "\t" in repo or "\n" in repo or "\r" in repo:
+            print("PUBLISH_CITATION_UNKNOWN cited repository path has unsupported control characters",
+                  file=sys.stderr)
+            return 2
+        values = ordered.setdefault(repo, [])
+        if sha.lower() not in values:
+            values.append(sha.lower())
+    for repo, shas in ordered.items():
+        for sha in shas:
+            print(f"{repo}\t{sha}")
+    return 0
+
 
 def _fresh_green(repo: str, commit: str) -> bool:
     rc, directory, _ = run(["git", "-C", repo, "rev-parse", "--absolute-git-dir"], repo, 10)
@@ -393,6 +492,8 @@ def main(argv: list[str]) -> int:
         return handoff_gate(argv[1:])
     if argv[:1] == ["handoff-file"]:
         return handoff_file(argv[1:])
+    if argv[:1] == ["publication-citations"]:
+        return publication_citations(argv[1:])
     real = os.environ.get("BR_UPDATE_REAL", "br")
     project = os.environ.get("BR_UPDATE_PROJECT", os.getcwd())
     db = os.environ.get("BR_UPDATE_DB", "")

@@ -309,6 +309,10 @@ mkdir -p "$HANDOFF_CODE"
 git -C "$HANDOFF_CODE" init -q
 git -C "$HANDOFF_CODE" -c core.hooksPath=/dev/null -c user.name=Fixture -c user.email=fixture@invalid commit --allow-empty -q -m 'handoff fixture [test]'
 HANDOFF_SHA=$(git -C "$HANDOFF_CODE" rev-parse HEAD)
+HANDOFF_ORIGIN="$TMP/handoff-origin.git"
+git init --bare -q "$HANDOFF_ORIGIN"
+git -C "$HANDOFF_CODE" remote add origin "$HANDOFF_ORIGIN"
+git -C "$HANDOFF_CODE" push -q origin HEAD:main
 HANDOFF_MESSAGE="DONE $HANDOFF_CODE@$HANDOFF_SHA: fixture"
 HANDOFF_LEDGER="$HANDOFF_CODE/.git/omp-kit/fresh-gate-runs.jsonl"
 mkdir -p "$(dirname "$HANDOFF_LEDGER")"

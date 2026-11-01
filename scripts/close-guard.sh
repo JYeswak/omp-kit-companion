@@ -91,42 +91,36 @@ fi
 # Citations are the SHA in a DONE line, a repo@SHA token, or an explicit
 # export/commit field. Missing or unresolvable citations fail closed.
 if [ "$SUB" = "close" ] || [ "$SUB" = "update" ]; then
-	cited=$(python3 -c '
-import re, sys
-text = sys.argv[1]
-if len(text) > 1048576:
-    sys.exit(2)
-patterns = (
-    r"\bDONE[ \t]+\S+[ \t]+([0-9a-f]{7,40})(?![0-9a-f])",
-    r"@([0-9a-f]{7,40})(?![0-9a-f])",
-    r"\bexport[ \t]+([0-9a-f]{7,40})(?![0-9a-f])",
-    r"\bcommit[ \t]+([0-9a-f]{7,40})(?![0-9a-f])",
-)
-found = []
-for pattern in patterns:
-    found.extend(re.findall(pattern, text, re.IGNORECASE))
-print("\n".join(dict.fromkeys(found)))
-' "$REASON") || refuse "NOT_PUBLISHED UNKNOWN transition citation could not be parsed; publish with git_converge.py --push"
-	[ -n "$cited" ] || refuse "NOT_PUBLISHED UNKNOWN transition has no cited commit SHA; publish with git_converge.py --push"
-	if ! git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main; then
-		refuse "NOT_PUBLISHED UNKNOWN fresh origin/main fetch failed; publish with git_converge.py --push"
+	publication_helper=$(dirname "$0")/br-update-lint.py
+	cited=$("$publication_helper" publication-citations "$SUB" "$(pwd -P)" "$REASON") ||
+		refuse "NOT_PUBLISHED UNKNOWN transition citation could not be parsed; publish with git_converge.py --push"
+	if [ -n "$cited" ]; then
+		publication_tab=$(printf '\t')
+		printf '%s\n' "$cited" | while IFS="$publication_tab" read -r citation_repo sha; do
+			[ -n "$citation_repo" ] && [ -n "$sha" ] ||
+				refuse "NOT_PUBLISHED UNKNOWN cited repository or SHA is empty; publish with git_converge.py --push"
+			source_root=$(git -C "$citation_repo" rev-parse --show-toplevel 2>/dev/null) ||
+				refuse "NOT_PUBLISHED UNKNOWN cited SHA $sha repository cannot be read; publish with git_converge.py --push"
+			if [ "$source_root" != "${fetched_root:-}" ]; then
+				git -C "$source_root" fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main ||
+					refuse "NOT_PUBLISHED UNKNOWN fresh origin/main fetch failed for cited SHA $sha; publish with git_converge.py --push"
+				remote_tip=$(git -C "$source_root" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) ||
+					refuse "NOT_PUBLISHED UNKNOWN freshly fetched origin/main has no readable commit for cited SHA $sha; publish with git_converge.py --push"
+				fetched_root=$source_root
+			fi
+			resolved=$(git -C "$source_root" rev-parse --verify "$sha^{commit}" 2>/dev/null) ||
+				refuse "NOT_PUBLISHED UNKNOWN cited SHA $sha does not resolve to a commit; publish with git_converge.py --push"
+			git -C "$source_root" merge-base --is-ancestor "$resolved" "$remote_tip" >/dev/null 2>&1
+			ancestor_rc=$?
+			case "$ancestor_rc" in
+				0) ;;
+				1) refuse "NOT_PUBLISHED $sha is not an ancestor of freshly fetched origin/main; publish with git_converge.py --push" ;;
+				*) refuse "NOT_PUBLISHED UNKNOWN ancestry of cited SHA $sha could not be verified; publish with git_converge.py --push" ;;
+			esac
+		done
+		publication_rc=$?
+		[ "$publication_rc" -eq 0 ] || exit "$publication_rc"
 	fi
-	remote_tip=$(git rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) ||
-		refuse "NOT_PUBLISHED UNKNOWN freshly fetched origin/main has no readable commit; publish with git_converge.py --push"
-	printf '%s\n' "$cited" | while IFS= read -r sha; do
-		[ -n "$sha" ] || continue
-		resolved=$(git rev-parse --verify "$sha^{commit}" 2>/dev/null) ||
-			refuse "NOT_PUBLISHED UNKNOWN cited SHA $sha does not resolve to a commit; publish with git_converge.py --push"
-		git merge-base --is-ancestor "$resolved" "$remote_tip" >/dev/null 2>&1
-		ancestor_rc=$?
-		case "$ancestor_rc" in
-			0) ;;
-			1) refuse "NOT_PUBLISHED $sha is not an ancestor of freshly fetched origin/main; publish with git_converge.py --push" ;;
-			*) refuse "NOT_PUBLISHED UNKNOWN ancestry of cited SHA $sha could not be verified; publish with git_converge.py --push" ;;
-		esac
-	done
-	publication_rc=$?
-	[ "$publication_rc" -eq 0 ] || exit "$publication_rc"
 fi
  # LESSON1 (ompkit-ok3y): a close carries its lesson in the transition comment.
  # Only the close subcommand with a non-empty comment is judged; review/grading
