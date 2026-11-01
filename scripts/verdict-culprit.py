@@ -177,6 +177,14 @@ def commit_identity(repo: Path, sha: str) -> tuple[str, str | None]:
     author = "".join("_" if char.isspace() else char for char in author)
     trailers = git(repo, "log", "-1", "--format=%(trailers:key=Bead,valueonly,separator=%x2C)", sha)
     bead = trailers.split(",", 1)[0].strip() if trailers else ""
+    if not bead:
+        # git reads trailers only from the final paragraph, so a Supersedes:/Revert: block written after the
+        # Bead: line hides it (238de69864 was named with bead 'none'). Take the first `Bead: <id>` line anywhere.
+        for line in git(repo, "log", "-1", "--format=%B", sha).splitlines():
+            key, sep, value = line.strip().partition(":")
+            if sep and key == "Bead" and value.split():
+                bead = value.split()[0]
+                break
     return author, bead if len(bead) <= 64 and STORE.BEAD_ID.fullmatch(bead) else None
 
 

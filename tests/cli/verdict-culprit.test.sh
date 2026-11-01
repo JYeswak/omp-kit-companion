@@ -78,7 +78,12 @@ change "$repo" early@example.invalid ompkit-early "[test] a2" notes/a2.txt a2 >/
 change "$repo" early@example.invalid ompkit-early "[test] a3" notes/a3.txt a3 >/dev/null
 c0=$(change "$repo" fixer@example.invalid ompkit-fix "[test] fix" lib/answer.txt 42)
 c1=$(change "$repo" good@example.invalid ompkit-good "[test] c1" notes/c1.txt c1)
-c2=$(change "$repo" breaker@example.invalid ompkit-brk "[test] the break" lib/answer.txt 43)
+# c2's Bead: line sits above a Supersedes: block, as 238de69864's did: git reads trailers only from the last
+# paragraph, so the culprit's bead must still be found (it was named 'none' live on 2026-11-01).
+change "$repo" breaker@example.invalid ompkit-brk "[test] the break" lib/answer.txt 43 >/dev/null
+git -C "$repo" -c user.name="Agent breaker" -c user.email=breaker@example.invalid commit -q --amend --no-verify \
+	-m "[test] the break" -m "Bead: ompkit-brk" -m "Supersedes: $r0"
+c2=$(git -C "$repo" rev-parse HEAD)
 c3=$(change "$repo" later@example.invalid ompkit-later "[test] c3" notes/c3.txt c3)
 c4=$(change "$repo" later@example.invalid ompkit-later "[test] c4" notes/c4.txt c4)
 if [ "$(git -C "$repo" rev-list --count HEAD)" = 9 ] && [ -n "$r0" ] && [ -n "$c1" ]; then st=0; else st=1; fi
