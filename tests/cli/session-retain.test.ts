@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -17,26 +18,42 @@ function fixture(exactCutoff = false) {
 	const root = ownedTmp("session-retain-test").path;
 	const home = join(root, "home");
 	const sessions = join(home, ".omp", "profiles", "fixture", "agent", "sessions");
+	const nestedSessions = join(sessions, "repo");
 	const state = join(home, ".local", "state", "omp-kit", "cc");
-	mkdirSync(sessions, { recursive: true });
+	mkdirSync(nestedSessions, { recursive: true });
 	mkdirSync(join(state, "producers"), { recursive: true });
 	chmodSync(join(state, ".."), 0o700);
 	const ingested = join(sessions, "ingested.jsonl");
 	const untracked = join(sessions, "untracked.jsonl");
+	const rewritten = join(sessions, "rewritten.jsonl");
+	const nested = join(nestedSessions, "eligible.jsonl");
 	const boundary = join(sessions, "boundary.jsonl");
-	writeFileSync(ingested, '{"type":"message/user"}\n');
-	writeFileSync(untracked, '{"type":"message/user"}\n');
-	writeFileSync(boundary, '{"type":"message/user"}\n');
-	utimesSync(ingested, new Date(oldMs), new Date(oldMs));
-	utimesSync(untracked, new Date(oldMs), new Date(oldMs));
+	for (const path of [ingested, untracked, rewritten, nested, boundary]) {
+		writeFileSync(path, '{"type":"message/user"}\n');
+	}
+	for (const path of [ingested, untracked, rewritten, nested]) {
+		utimesSync(path, new Date(oldMs), new Date(oldMs));
+	}
 	utimesSync(boundary, new Date(boundaryMs), new Date(boundaryMs));
-	const info = statSync(ingested);
+	const sha = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
+	const cursor = (path: string) => {
+		const raw = readFileSync(path);
+		const stat = statSync(path);
+		const prefix = raw.subarray(0, 4096);
+		const offset = raw.length;
+		const tailStart = offset > 256 ? Math.max(256, offset - 256) : offset;
+		return {
+			path: resolve(path), dev: stat.dev, inode: stat.ino, generation: 0, offset, through_ms: oldMs,
+			slot_len: Math.min(256, prefix.length), slot_sha: sha(prefix.subarray(0, 256)),
+			title_valid: false, prefix_end: prefix.length, prefix_sha: sha(prefix.subarray(256)),
+			tail_start: tailStart, tail_sha: sha(raw.subarray(tailStart, offset)),
+		};
+	};
+	const cursors = [ingested, rewritten, nested].map(cursor);
 	const sessionState = {
 		schema_version: "omp-kit.cc.session-tail.v1",
-		files: { [resolve(ingested)]: { path: resolve(ingested), dev: info.dev, inode: info.ino, generation: 0,
-			offset: info.size, slot_len: 0, prefix_end: 0, tail_start: info.size, through_ms: oldMs,
-			title_valid: false, slot_sha: "0".repeat(64), prefix_sha: "0".repeat(64), tail_sha: "0".repeat(64) } },
-		position: info.size,
+		files: Object.fromEntries(cursors.map(value => [value.path, value])),
+		position: cursors.reduce((sum, value) => sum + value.offset, 0),
 		pending: null,
 		next_path: resolve(ingested),
 	};
@@ -46,11 +63,13 @@ function fixture(exactCutoff = false) {
 	db.exec("CREATE TABLE source_ticks (cursor INTEGER PRIMARY KEY, producer TEXT, time_ms INTEGER, position INTEGER, error_code TEXT)");
 	db.query("INSERT INTO events VALUES (1, 'source.tick', 'session', ?)").run(JSON.stringify({
 		instance: "fixture", records_seen: 0, records_emitted: 0, records_ignored: 0, records_quarantined: 0,
-		position: info.size, error_code: null, complete_through_ms: oldMs, coverage: [],
+		position: sessionState.position, error_code: null, complete_through_ms: oldMs, coverage: [],
 	}));
-	db.query("INSERT INTO source_ticks VALUES (1, 'session', ?, ?, NULL)").run(now, info.size);
+	db.query("INSERT INTO source_ticks VALUES (1, 'session', ?, ?, NULL)").run(now, sessionState.position);
 	db.close();
-	return { root, home, sessions, ingested, untracked, boundary, now };
+	writeFileSync(rewritten, '{"type":"message/evil"}\n');
+	utimesSync(rewritten, new Date(oldMs), new Date(oldMs));
+	return { root, home, sessions, ingested, untracked, rewritten, nested, boundary, now };
 }
 
 test.serial("session-retain deletes only old transcripts at the committed CC session frontier", async () => {
@@ -81,20 +100,29 @@ print(json.dumps({"argv": data["ProgramArguments"], "env": data["EnvironmentVari
 	const output = new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
 	if (result.rc !== 0) throw new Error(`scheduled consumer -> ${result.rc}: ${output}`);
 	const receipt = JSON.parse(readFileSync(join(f.home, ".local", "state", "omp-kit", "jobs", "session-retain.json"), "utf8"));
-	expect(receipt.retention).toMatchObject({ examined: 2, kept: 1, removed: [{ path: f.ingested, bytes: statSync(f.untracked).size }], ccVerified: false });
+	expect(receipt.retention).toMatchObject({ examined: 4, kept: 2, bytesRemoved: 2 * statSync(f.untracked).size,
+		ccVerified: false });
+	expect(receipt.retention.removed.map((entry: { path: string }) => entry.path).sort())
+		.toEqual([f.ingested, f.nested].sort());
 	expect(() => statSync(f.ingested)).toThrow();
+	expect(() => statSync(f.nested)).toThrow();
 	expect(statSync(f.untracked).isFile()).toBe(true);
+	expect(statSync(f.rewritten).isFile()).toBe(true);
 	expect(statSync(f.boundary).isFile()).toBe(true);
+
 	const journal = readFileSync(join(f.home, ".local", "state", "omp-kit", "jobs", "session-retain.log.jsonl"), "utf8")
 		.trim().split("\n").map(line => JSON.parse(line));
-	expect(journal.map(row => row.event)).toEqual(["planned", "removed"]);
+
+	expect(journal.filter((row: { event: string }) => row.event === "planned")).toHaveLength(2);
+	expect(journal.filter((row: { event: string }) => row.event === "removed")).toHaveLength(2);
 }, 90_000);
 test("session-retain reports old transcripts kept when CC state is missing", () => {
 	const f = fixture(true);
 	rmSync(join(f.root, "home", ".local", "state", "omp-kit", "cc"), { recursive: true });
 	const result = retainOmpSessions(f.home, join(f.root, "missing-cc"), join(f.root, "jobs", "retention.log.jsonl"), f.now);
-	expect(result).toMatchObject({ examined: 2, kept: 2, removed: [], ccVerified: false });
+	expect(result).toMatchObject({ examined: 4, kept: 4, removed: [], ccVerified: false });
 	expect(statSync(f.boundary).isFile()).toBe(true);
+	expect(statSync(f.nested).isFile()).toBe(true);
 });
 test("session-retain chooses the newest committed source tick, not wall-clock order", () => {
 	const f = fixture();
@@ -109,6 +137,7 @@ test("session-retain chooses the newest committed source tick, not wall-clock or
 	db.query("UPDATE source_ticks SET time_ms = ? WHERE cursor = 1").run(f.now + 60_000);
 	db.close();
 	const result = retainOmpSessions(f.home, ccRoot, join(f.root, "jobs", "retention.log.jsonl"), f.now);
-	expect(result).toMatchObject({ examined: 2, kept: 2, removed: [], ccVerified: false });
+	expect(result).toMatchObject({ examined: 4, kept: 4, removed: [], ccVerified: false });
 	expect(statSync(f.ingested).isFile()).toBe(true);
+	expect(statSync(f.nested).isFile()).toBe(true);
 });
