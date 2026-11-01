@@ -262,6 +262,8 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/kitlib_ratchet.py scripts/kitlib_ratchet.py" \
 		"hooks.d/pre-commit/br_init_check.py scripts/br_init_check.py" \
 		"hooks.d/pre-commit/53-omp-kit-staged-br-init scripts/check-staged-br-init.sh" \
+		"hooks.d/pre-commit/55-omp-kit-staged-wallclock scripts/check-staged-wallclock.sh" \
+		"hooks.d/pre-commit/wallclock_check.py scripts/wallclock_check.py" \
 		"hooks.d/pre-commit/52-omp-kit-staged-sources scripts/check-staged-sources.sh" \
 		"hooks.d/pre-commit/sources.py scripts/sources.py" \
 		"hooks.d/pre-commit/staged-selection.py scripts/staged-selection.py" \
@@ -644,6 +646,15 @@ install_staged_portable_paths() {
 	place "$KITROOT/scripts/check-portable-paths.sh" "$member" +x
 	printf 'installed staged-portable-paths member: %s\n' "$member"
 }
+# install_staged_wallclock: WALLCLOCK1 (ompkit-qf9fk) refuses new test lines that pass only within a small fixed
+# wall-clock bound; it runs the checker beside it under pysafe.py, with kitlib_run.py from install_staged_sources.
+install_staged_wallclock() {
+	dir=$(chain_dir pre-commit)
+	member="$dir/55-omp-kit-staged-wallclock"
+	place "$KITROOT/scripts/wallclock_check.py" "$dir/wallclock_check.py" -x
+	place "$KITROOT/scripts/check-staged-wallclock.sh" "$member" +x
+	printf 'installed staged-wallclock member: %s\n' "$member"
+}
 
 
 install_staged_sources() {
@@ -802,6 +813,7 @@ install_staged_kitlib
 install_staged_sources
 install_staged_br_init
 install_staged_portable_paths
+install_staged_wallclock
 install_staged_readme
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 
