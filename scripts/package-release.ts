@@ -38,6 +38,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/check-commit-kitlib-reversal.sh", "scripts/native-br-preserve.py",
 	"scripts/br_init_check.py", "scripts/check-staged-br-init.sh",
 	"scripts/sources.py", "scripts/check-staged-sources.sh", "docs/sources.md",
+	"scripts/selection-coverage.ts", "scripts/affected-tests.ts", "scripts/staged-selection.py",
 	"scripts/bead_lint.py", "scripts/ac_phase.py", "scripts/br_create_guard_core.py", "scripts/br-create-lint.py", "scripts/br-update-lint.py", "scripts/box-lint.ts",
 	"scripts/tern-docs-census.py", "scripts/tern-script-routes.json",
 	"docs/tern-integration.md", "docs/tern-verb-map.md", "docs/tern-coverage.tsv",

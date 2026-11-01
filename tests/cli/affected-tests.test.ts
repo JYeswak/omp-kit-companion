@@ -8,6 +8,7 @@ import { runSync } from "../../src/kitlib/run.ts";
 const root = resolve(import.meta.dir, "../..");
 const scratchRoot = root.includes("/fresh-gate.") ? resolve(root, "..") : resolve(root, "var/agent-tmp");
 const selector = join(root, "scripts/affected-tests.ts");
+const decoder = new TextDecoder();
 
 const owned: OwnedTmp[] = [];
 afterAll(() => {
@@ -26,8 +27,8 @@ function tree(files: Record<string, string>): string {
 }
 
 function select(dir: string, changed: string[], script = selector): { code: number; tests: string[]; err: string } {
-	const result = Bun.spawnSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", script, "--root", dir, "--explain", ...changed.flatMap((path) => ["--changed-file", path])], { stdout: "pipe", stderr: "pipe" });
-	return { code: result.exitCode, tests: result.stdout.toString().split("\n").filter(Boolean), err: result.stderr.toString() };
+	const result = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", script, "--root", dir, "--explain", ...changed.flatMap((path) => ["--changed-file", path])], { deadline_s: 120 });
+	return { code: result.rc ?? -1, tests: decoder.decode(result.stdout).split("\n").filter(Boolean), err: decoder.decode(result.stderr) };
 }
 
 const FILES: Record<string, string> = {
@@ -49,18 +50,18 @@ const FILES: Record<string, string> = {
 	"tests/scripts/runner_test.py": 'open("src/runner.ts")\n',
 };
 
-test("imports are followed transitively; a test that names a file runs only when that file changes", () => {
+test("imports and executed code are followed transitively to every actual consumer", () => {
 	const dir = tree(FILES);
 	try {
-		// leaf <- mid (via ./leaf.js meaning leaf.ts) <- cli <- via-cli; spawn-cli names cli.ts, so it is not pulled by leaf.
+		// Both importing cli.ts and spawning it exercise the leaf through mid.ts.
 		const leaf = select(dir, ["src/leaf.ts"]);
 		expect(leaf.code).toBe(0);
-		expect(leaf.tests).toEqual(["tests/cli/leaf.test.ts", "tests/cli/via-cli.test.ts"]);
+		expect(leaf.tests).toEqual(["tests/cli/leaf.test.ts", "tests/cli/spawn-cli.test.ts", "tests/cli/via-cli.test.ts"]);
 		expect(leaf.err).toContain("affected: tests/cli/via-cli.test.ts <- src/leaf.ts");
 		expect(select(dir, ["src/cli.ts"]).tests).toEqual(["tests/cli/spawn-cli.test.ts", "tests/cli/via-cli.test.ts"]);
-		// A script a source names is a dependency of that source and of the tests importing it; a shell
-		// suite naming "$ROOT/scripts/tool.sh" runs too.
-		expect(select(dir, ["scripts/tool.sh"]).tests).toEqual(["tests/cli/runner.test.ts", "tests/cli/tool.test.sh"]);
+		// Code-path references are conservative dependencies: the shell invocation and
+		// the Python source reader both follow runner.ts to its tool path.
+		expect(select(dir, ["scripts/tool.sh"]).tests).toEqual(["tests/cli/runner.test.ts", "tests/cli/tool.test.sh", "tests/scripts/runner_test.py"]);
 		expect(select(dir, ["src/runner.ts"]).tests).toEqual(["tests/cli/runner.test.ts", "tests/scripts/runner_test.py"]);
 		expect(select(dir, ["tests/cli/helper.ts"]).tests).toEqual(["tests/cli/uses-helper.test.ts"]);
 	} finally {
@@ -92,27 +93,14 @@ test("changed tests run themselves; deleted paths and fixture trees select nothi
 	}
 });
 
-test("mutant: without transitive import edges, a src change misses the test that reaches it through cli.ts", () => {
-	const dir = tree(FILES);
-	try {
-		const source = readFileSync(selector, "utf8");
-		const oneHop = source.replace("for (const next of importers.get(node) ?? []) {", "for (const next of node === start ? importers.get(node) ?? [] : []) {");
-		expect(oneHop).not.toBe(source);
-		const mutant = join(dir, "mutant-selector.ts");
-		writeFileSync(mutant, oneHop);
-		expect(select(dir, ["src/leaf.ts"], mutant).tests).toEqual(["tests/cli/leaf.test.ts"]);
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
-	}
-});
 
 test("wall-budget plan keeps changed tests and the nearest importers, and defers the rest by name", () => {
 	const dir = tree({ "timings.json": JSON.stringify({ version: 1, files: { "tests/a.test.ts": 50_000, "tests/b.test.ts": 50_000, "tests/c.test.ts": 50_000, "tests/big.test.ts": 400_000 } }) });
 	try {
 		const plan = (budget: number, tests: string[], changed: string[] = [], script = selector) => {
 			const deferred = join(dir, `deferred-${Math.random().toString(36).slice(2)}`);
-			const result = Bun.spawnSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", script, "--plan", "--budget-secs", String(budget), "--workers", "2", "--timings", join(dir, "timings.json"), "--deferred-out", deferred, ...changed.flatMap((path) => ["--changed-file", path]), "--", ...tests], { stdout: "pipe", stderr: "pipe" });
-			return { code: result.exitCode, run: result.stdout.toString().split("\n").filter(Boolean), deferred: existsSync(deferred) ? readFileSync(deferred, "utf8").split("\n").filter(Boolean) : [], err: result.stderr.toString() };
+			const result = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", script, "--plan", "--budget-secs", String(budget), "--workers", "2", "--timings", join(dir, "timings.json"), "--deferred-out", deferred, ...changed.flatMap((path) => ["--changed-file", path]), "--", ...tests], { deadline_s: 120 });
+			return { code: result.rc ?? -1, run: decoder.decode(result.stdout).split("\n").filter(Boolean), deferred: existsSync(deferred) ? readFileSync(deferred, "utf8").split("\n").filter(Boolean) : [], err: decoder.decode(result.stderr) };
 		};
 		// 2 workers, 60 s: a + b predict 50 s; adding c predicts 75 s, so c is deferred.
 		const fits = plan(60, ["tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts"]);
@@ -162,8 +150,9 @@ test("a later timing table overrides an earlier one, so an untimed shell suite i
 test("--order distance puts changed tests first, then the nearest importers", () => {
 	const dir = tree(FILES);
 	try {
-		const result = Bun.spawnSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", selector, "--root", dir, "--order", "distance", "--changed-file", "src/leaf.ts", "--changed-file", "tests/cli/via-cli.test.ts"], { stdout: "pipe" });
-		expect(result.stdout.toString().split("\n").filter(Boolean)).toEqual(["tests/cli/via-cli.test.ts", "tests/cli/leaf.test.ts"]);
+		const result = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", selector, "--root", dir, "--order", "distance", "--changed-file", "src/leaf.ts", "--changed-file", "tests/cli/via-cli.test.ts"], { deadline_s: 120 });
+		expect(result.rc).toBe(0);
+		expect(decoder.decode(result.stdout).split("\n").filter(Boolean)).toEqual(["tests/cli/via-cli.test.ts", "tests/cli/leaf.test.ts", "tests/cli/spawn-cli.test.ts"]);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

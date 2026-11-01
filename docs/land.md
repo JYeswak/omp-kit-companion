@@ -63,6 +63,28 @@ The full-suite verdict for the exact tree (`scripts/full-suite-verdict.sh`) gate
 release, so a push takes minutes (GATESPEED1, J-2026-10-31-09); `PRE_PUSH_FULL_SUITE=push` runs the
 complete suite inside the push again. The focused suites never substitute for this verdict.
 
+Before budget or CI-only deferral, the focused gate independently walks forward from real test
+sources and checks the reverse selector's complete result. A missing required consumer,
+invalid selected path or failed dependency parse refuses with `SELECTION_GAP` naming the
+affected file; an unrelated passing suite cannot replace a required consumer. Imports
+and literal code-path dependencies are transitive, including subprocess entry points; direct
+test data/document readers remain separate from production help pointers. This is conservative
+static reachability, not a claim that arbitrary computed paths or runtime dataflow were inferred.
+
+Repositories opt into staged coverage with `.github/test-selection.json` (`version: 1`).
+`no_test` maps exact files to reviewed, nonempty reasons for genuinely untested/manual inputs;
+it cannot excuse omitting a known consumer. Optional `required_tests` entries name exact real
+suites plus a reason for a normative consumer obligation that static parsing cannot infer.
+Wildcards, stale files, nonexistent suites and empty reasons fail closed. The existing staged
+sources member audits an exact index archive, so unstaged tests or repaired policy bytes cannot
+rescue a candidate; deleting an already-required policy is refused.
+
+Run `bun scripts/selection-coverage.ts --root . --all` to check every regular `src/` and
+`scripts/` file. Explicit no-test admission reports that no suite ran; it is not `DOCS_ONLY`
+or a full-suite PASS. Ordinary wall-budget deferral still records `PARTIAL`, never selection
+coverage as execution evidence.
+
+
 The complete declared suite is every bun test under `tests/cli` and `tests/fleet-guard`, every
 shell suite `tests/cli/*.test.sh`, and every python suite under `tests/cli` and `tests/scripts`
 (`*_test.py`, `*.test.py`), run against the exact-commit archive. Rows of

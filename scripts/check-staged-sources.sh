@@ -3,6 +3,12 @@
 set -u
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 root=$(git rev-parse --show-toplevel) || exit 1
+out=$(CDPATH='' cd -- "$here" && python3 -B staged-selection.py --repo "$root" 2>&1)
+rc=$?
+if [ "$rc" != 0 ]; then
+	printf 'staged-sources: REFUSED\n%s\n' "$out" >&2
+	exit 1
+fi
 [ -f "$root/.omp/sources.toml" ] || exit 0
 out=$(python3 -B "$here/sources.py" staged --repo "$root" 2>&1)
 rc=$?
