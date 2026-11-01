@@ -5,6 +5,7 @@ import { liveReadback, liveReadbackAll, verifyBead, verifyProject } from "./veri
 import { renderEnvelope } from "./kitlib/findings.ts";
 import { chmodSync, existsSync, mkdirSync, renameSync, writeFileSync, readdirSync, lstatSync, readlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
 import { createInterface } from "node:readline";
@@ -141,9 +142,12 @@ const TOOL_GATED_COMMANDS: Record<string, readonly string[]> = {
 	"drain close-queue": ["br"],
 	"drain stale-claims": ["br"],
 	"intake": ["br"],
+	"cut rank": ["python3"],
+	"beads place": ["python3"],
 };
 
 const TOOL_UNAVAILABLE_CODES: Record<string, string> = {
+	"python3": "PYTHON_UNAVAILABLE",
 	"am": "AGENT_MAIL_UNAVAILABLE",
 	"ntm": "NTM_UNAVAILABLE",
 	"tmux": "TMUX_UNAVAILABLE",
@@ -4214,6 +4218,68 @@ for (const act of ["claim", "in-review", "close"] as const) {
 		return preflightResult(await preflightBead(act, repo, request.argument, { actor: typeof actor === "string" ? actor : undefined }));
 	});
 }
+
+async function cutGraphCommand(request: ParsedCommand, mode: "rank" | "place"): Promise<CliResult> {
+	const projectFlag = request.flags.get("--project");
+	if (projectFlag !== undefined && (typeof projectFlag !== "string" || !projectFlag.trim()))
+		return refusal("INVALID_FLAG", "--project requires a non-empty path", "Pass --project PATH.");
+	const project = resolve(typeof projectFlag === "string" ? projectFlag : process.cwd());
+	const dbFlag = request.flags.get("--db");
+	if (dbFlag !== undefined && (typeof dbFlag !== "string" || !dbFlag.trim()))
+		return refusal("INVALID_FLAG", "--db requires a non-empty path", "Pass --db PATH.");
+	const db = resolve(project, typeof dbFlag === "string" ? dbFlag : process.env.BEADS_DB ?? join(project, ".beads", "beads.db"));
+	const helper = fileURLToPath(new URL("../scripts/beads_place.py", import.meta.url));
+	if (!existsSync(helper))
+		return refusal("CUT_GRAPH_HELPER_UNAVAILABLE", "The installed cut-graph helper is missing", `Expected ${helper}; no tracker data was changed.`);
+	const argv = ["python3", helper, "--mode", mode, "--db", db, "--json"];
+	if (mode === "rank") {
+		const configPath = process.env.OMP_KIT_FLEET_WATCH_CONFIG
+			?? join(process.env.XDG_CONFIG_HOME ?? join(serviceHome(), ".config"), "omp-kit", "fleet-watch.json");
+		let goals: (string | null)[] = [];
+		try {
+			const config = loadFleetWatchConfig(configPath);
+			const canonical = (path: string): string => {
+				try { return realpathSync(path); } catch { return resolve(path); }
+			};
+			const matches = config.sessions.filter(session => canonical(session.repo) === canonical(project));
+			goals = matches.map(session => session.milestone?.epic ?? null);
+		} catch {
+			return refusal("FLEET_WATCH_CONFIG_UNAVAILABLE", "Cannot load the fleet-watch milestone configuration", `Check ${configPath}; no ranking was produced.`);
+		}
+		const goal = goals[0];
+		if (typeof goal !== "string" || !goal.trim())
+			return refusal("NO_DECLARED_GOAL", "No declared milestone goal matches this tracker repository", "Configure its milestone epic in fleet-watch before ranking.");
+		if (goals.some(candidate => candidate !== goal))
+			return refusal("AMBIGUOUS_GOAL", "Matching fleet-watch sessions declare different milestone goals", "Make their milestone epic agree before ranking.");
+		argv.push("--goal", goal);
+	} else {
+		const title = request.flags.get("--title");
+		if (typeof title !== "string" || !title.trim())
+			return refusal("MISSING_TITLE", "--title is required", "Use omp-kit beads place --title TEXT.");
+		argv.push("--title", title);
+		const description = request.flags.get("--description");
+		if (description !== undefined && typeof description !== "string")
+			return refusal("INVALID_FLAG", "--description requires text", "Pass --description TEXT.");
+		if (typeof description === "string" && description.trim()) argv.push("--description", description);
+	}
+	const result = await runBounded(argv, { deadline_s: 30, max_output_bytes: 8 << 20, max_total_bytes: 8 << 20 }).catch(() => null);
+	if (result === null)
+		return refusal("CUT_GRAPH_HELPER_FAILED", "The bounded cut-graph helper could not start", "Verify Python 3 and the installed helper; no tracker data was changed.");
+	if (result.timed_out || result.truncated)
+		return refusal("CUT_GRAPH_RESULT_INCOMPLETE", "The cut-graph helper exceeded its time or output bound", "Reduce the tracker scope and retry; incomplete ranking was not returned.");
+	let data: unknown;
+	try { data = JSON.parse(new TextDecoder().decode(result.stdout)); } catch {
+		return refusal("CUT_GRAPH_RESULT_INVALID", "The cut-graph helper returned invalid JSON", new TextDecoder().decode(result.stderr).trim() || "No result was accepted.");
+	}
+	if (typeof data !== "object" || data === null || Array.isArray(data))
+		return refusal("CUT_GRAPH_RESULT_INVALID", "The cut-graph helper returned a non-object result", "No result was accepted.");
+	if (result.rc !== 0 && result.rc !== 3)
+		return refusal("CUT_GRAPH_HELPER_FAILED", `The cut-graph helper exited ${result.rc}`, new TextDecoder().decode(result.stderr).trim() || "No ranking was accepted.");
+	return { code: result.rc === 0 ? 0 : 3, data: data as Record<string, unknown>, verification: "PERFORMED" };
+}
+
+registerCommandHandler("cut rank", request => cutGraphCommand(request, "rank"));
+registerCommandHandler("beads place", request => cutGraphCommand(request, "place"));
 
 function missionAnchorCommand(request: ParsedCommand): CliResult {
 	const projectFlag = request.flags.get("--project");

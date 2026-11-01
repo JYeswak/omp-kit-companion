@@ -69,6 +69,12 @@ const drainData: DataSchema = { type: "object", required: ["overall", "rows"], p
 	overall: { enum: ["OK"] },
 	rows: { type: "array" },
 } };
+
+const cutGraphData: DataSchema = { type: "object", required: ["verdict"], properties: {
+	verdict: { enum: ["RANKED", "NO_OPEN_GOAL", "NO_CONVERGENCE", "PLACED"] },
+	goal: {}, node_count: { type: "number" }, ranking: { type: "array" },
+	target: {}, parent: { type: ["string", "null"] }, commands: { type: "array" },
+} };
 const statusData: DataSchema = { type: "object", required: ["overall", "kit", "omp", "findings", "evidence", "recommended_actions"], properties: {
 	overall: { enum: ["OK", "DEGRADED", "UNVERIFIED", "FAIL"] },
 	kit: { type: "object", required: ["version", "release", "data_paths", "platform"], properties: {
@@ -578,6 +584,20 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "PATH", repeatable: true, description: "Project root to check; repeat for a fleet; defaults to the current directory" },
 		], example: "omp-kit mission anchor --project ~/Developer/omp-kit --json", runnable: false, dataSchema: missionData },
 	], example: "omp-kit mission validate --json", runnable: false },
+	{ name: "cut", description: "Rank only the open blockers in the declared milestone goal's dependency subgraph", usage: "cut rank [--project PATH] [--db PATH] [--json]", flags: [], subcommands: [
+		{ name: "rank", description: "Goal-seeded personalized PageRank over the open goal subgraph; each row prints its dependency path", usage: "cut rank [--project PATH] [--db PATH] [--json]", flags: [
+			{ name: "--project", value: "PATH", description: "Tracker repository; defaults to the current directory" },
+			{ name: "--db", value: "PATH", description: "Tracker beads.db or issues.jsonl; defaults to the project's .beads database" },
+		], example: "omp-kit cut rank --project ~/Developer/omp-kit --json", runnable: false, dataSchema: cutGraphData },
+	], runnable: false },
+	{ name: "beads", description: "Place new work on an open goal's blockers path", usage: "beads place --title TEXT [--description TEXT] [--project PATH] [--db PATH] [--json]", flags: [], subcommands: [
+		{ name: "place", description: "Rank open goal-subgraph beads by text similarity and print the goal, target, parent and exact create/link commands", usage: "beads place --title TEXT [--description TEXT] [--project PATH] [--db PATH] [--json]", flags: [
+			{ name: "--title", value: "TEXT", description: "Title of the proposed bead" },
+			{ name: "--description", value: "TEXT", description: "Description text used in similarity ranking" },
+			{ name: "--project", value: "PATH", description: "Tracker repository; defaults to the current directory" },
+			{ name: "--db", value: "PATH", description: "Tracker beads.db or issues.jsonl; defaults to the project's .beads database" },
+		], example: "omp-kit beads place --title 'Cut graph rank' --project ~/Developer/omp-kit --json", runnable: false, dataSchema: cutGraphData },
+	], runnable: false },
 	{ name: "drain", description: "List landed-but-open beads and stale in-progress claims from a tracker", usage: "drain close-queue|stale-claims --db PATH [--repo DIR] [--json]", flags: [], subcommands: [
 		{ name: "close-queue", description: "Open beads named by a landing commit with no grader verdict since", usage: "drain close-queue --db PATH --repo DIR [--json]", flags: [
 			{ name: "--db", value: "PATH", description: "Tracker beads.db to read (read-only)" },

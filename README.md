@@ -17,7 +17,7 @@ Current release: v0.2.83
 <!-- kit-release:end -->
 
 A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-52 top-level commands for an existing OMP install.
+54 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -451,24 +451,16 @@ applied. `omp-kit quickstart` prints the same safe first commands.
 
 ## Command reference
 
-Every command accepts `--json` (one envelope: `ok`, `tool_version`, `data`,
-`meta`, `warnings`, `commands`, `errors`) and `omp-kit help COMMAND` prints its
-grammar. Guarded apply operations need `--apply` and, non-interactively, `--yes`.
+All commands accept `--json`; non-interactive guarded apply also requires `--yes`.
 
-`lessons add` and `checkin` append to `.omp/lessons.jsonl`. Their `--commit`
-mode requires a clean lesson path and shared `main`, runs normal commit/push
-hooks, and never adopts another writer's staged or working lesson rows.
-Check-ins without `--done` require complete native activity coverage; an
-unavailable source refuses before writing. Use repeatable `--done` for an
-explicit report rather than inventing zero activity.
 
 | Command | Usage | What it does | Example |
 |---|---|---|---|
 | `omp-kit full-suite verdict` | `list [TREE] [--repo PATH] \| get TREE [--repo PATH]` | Show tree, judge identity, verdict and integrity, including invalid records | `omp-kit full-suite verdict list --json` |
 | `omp-kit status` | `status` | Kit and OMP presence; runtime `effective_rules` is `NOT_RUN` (use `doctor --scope rules --json`); changes nothing | `omp-kit status --json` |
-| `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append an evidence-backed lesson; optionally save its clean path on shared main and fast-forward publish | `omp-kit lessons add --class MISSING_EDGE --what w --evidence e` |
+| `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append evidence-backed lessons; commit/publish a clean path with hooks, without peer rows | `omp-kit lessons add --class MISSING_EDGE --what w --evidence e` |
 | `omp-kit fleet-lessons` | `fleet-lessons [--project PATH]... [--json]` | Read current lesson advice, preserved history and unresolved references without intake, classification or service effects | `omp-kit fleet-lessons --project . --json` |
-| `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable automatic coverage | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
+| `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record own verified activity; require full native coverage or explicit `--done` items; refuse unavailable sources | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |
 | `omp-kit doctor` | `doctor [--scope NAME] [--project PATH] [--profile NAME] [--staged] [--deep --yes]` | Read-only diagnosis of one scope (table below) | `omp-kit doctor --scope lsp --json` |
 | `omp-kit health` | `health` | Strict monitoring status | `omp-kit health --json` |
@@ -485,6 +477,8 @@ explicit report rather than inventing zero activity.
 | `omp-kit lsp` | `lsp setup --plan [--project PATH] [--file PATH]` | Language-server readiness; never installs or starts servers | `omp-kit lsp setup --plan --json` |
 | `omp-kit memory` | `memory audit --store-root PATH --yes` | Separately consented audit of a Mnemopi store | `omp-kit memory audit --store-root /private/isolated/mnemopi --yes --json` |
 | `omp-kit planning` | `planning score\|convert` | Score planning evidence; convert a plan into native beads (dry run into a fresh `--db`, or `--apply` to a tracker) | `omp-kit planning score --fleet --json` |
+| `omp-kit cut rank` | `cut rank [--project PATH] [--db PATH]` | Rank open blockers reachable from the declared goal; print paths | `omp-kit cut rank --json` |
+| `omp-kit beads place` | `beads place --title TEXT [--description TEXT] [--project PATH] [--db PATH]` | Recommend goal, nearest work item and create/link commands | `omp-kit beads place --title 'Release' --json` |
 | `omp-kit mission` | `mission validate\|anchor [--project PATH]` | Check `.omp/mission.toml` fields and check hashes; `anchor` compares the live-doc Mission statement with the record (`AGREE`/`DRIFT`) | `omp-kit mission anchor --json` |
 | `omp-kit preflight` | `preflight commit\|claim\|in-review\|close [BEAD]` | Every finding an act faces, with fix, at once; changes nothing | `omp-kit preflight close x` |
 | `omp-kit verify` | `verify BEAD --export SHA` | Non-author close: replay each box's command on the export, judge by named outcome, tick, gate, close | `omp-kit verify x` |

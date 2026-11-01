@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-"""beads_place.py -- CUTGRAPH1 box e (ompkit-774u.61): where does a new bead go?
+"""beads_place.py -- CUTGRAPH1 goal-path ranking and placement commands.
 
-Lists the open kind:goal beads, ranks the open beads on each goal's blocks path
-(the goal and every bead it waits on through blocks edges, any depth) by TF-IDF
-cosine similarity to the new bead's text, and prints the recommended goal, the
-nearest bead the new bead should block, and the two commands that place it:
+`--mode rank --goal ID` applies goal-seeded personalized PageRank only to the
+open goal and its open blocks prerequisites. `--mode place --title TEXT`
+scores each open kind:goal subgraph by TF-IDF and prints the selected goal,
+nearest target, parent, and the create/link commands. The blocks edge is added
+from the target to the new issue; parent-child is grouping only.
 
-  1. br create --title ... --labels goal-path:<target> [--parent <epic>]
-  2. br dep add <target> <NEW_ID>      (the target waits on the new bead)
-
-parent-child is grouping only; the blocks edge from step 2 is what satisfies
-bead_lint m-goal-path. Read-only: reads the tracker's JSONL export (--db takes
-a .jsonl file, a beads.db whose sibling issues.jsonl is read, or a directory
-holding issues.jsonl or .beads/issues.jsonl). Stdlib only.
-
-Exit 0 recommendation printed, 3 no open goal (label the bead kind:intake),
-2 usage or unreadable tracker.
+Read-only: reads tracker JSONL (`--db` accepts an issues.jsonl file, a
+beads.db whose sibling issues.jsonl is read, or a directory). Stdlib only.
+Exit 0 on a ranking/recommendation, 3 when no open goal can be used, 2 on
+usage or unreadable tracker.
 """
 from __future__ import annotations
 
@@ -26,8 +21,7 @@ import os
 import re
 import shlex
 import sys
-from collections import Counter
-
+from collections import Counter, deque
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from bead_lint import GOAL_LABEL, GOAL_PATH_LABEL, encode_goal_path_id  # noqa: E402  (single home)
 
@@ -75,19 +69,83 @@ def doc_text(row: dict) -> str:
     return f"{row.get('title') or ''} {row.get('title') or ''} {row.get('description') or ''}"
 
 
-def goal_subgraph(goal_id: str, byid: dict[str, dict]) -> list[str]:
-    """The goal plus every bead it waits on through blocks edges, any depth."""
-    seen: list[str] = []
-    queue = [goal_id]
+def goal_paths(goal_id: str, byid: dict[str, dict]) -> dict[str, list[str]]:
+    """Return shortest goal-to-blocker paths over open `blocks` edges."""
+    root = byid.get(goal_id)
+    if root is None or not is_open(root):
+        return {}
+    paths = {goal_id: [goal_id]}
+    queue = deque([goal_id])
     while queue:
-        bid = queue.pop(0)
-        if bid in seen or bid not in byid:
-            continue
-        seen.append(bid)
-        for dep in byid[bid].get("dependencies") or []:
-            if dep.get("type") == "blocks":
-                queue.append(dep.get("depends_on_id"))
-    return seen
+        bid = queue.popleft()
+        deps = sorted(
+            dep.get("depends_on_id") for dep in byid[bid].get("dependencies") or []
+            if dep.get("type") == "blocks" and dep.get("depends_on_id") in byid
+            and is_open(byid[dep["depends_on_id"]])
+        )
+        for dep_id in deps:
+            if dep_id not in paths:
+                paths[dep_id] = paths[bid] + [dep_id]
+                queue.append(dep_id)
+    return paths
+
+
+def goal_subgraph(goal_id: str, byid: dict[str, dict]) -> list[str]:
+    """The open goal plus every open bead it waits on through blocks edges."""
+    return list(goal_paths(goal_id, byid))
+
+
+def rank_goal(rows: list[dict], goal_id: str, *, damping: float = 0.85,
+              tolerance: float = 1e-12, max_iterations: int = 1000) -> dict:
+    """Goal-seeded personalized PageRank over only the open goal subgraph."""
+    byid = {row["id"]: row for row in rows}
+    root = byid.get(goal_id)
+    paths = goal_paths(goal_id, byid)
+    if root is None or not is_open(root) or GOAL_LABEL not in (root.get("labels") or []) or not paths:
+        return {"verdict": "NO_OPEN_GOAL", "goal": goal_id, "ranking": [],
+                "advice": f"{goal_id} is missing, closed, or not labeled {GOAL_LABEL}"}
+    nodes = sorted(paths)
+    node_set = set(nodes)
+    dependencies = {
+        node: sorted({
+            dep["depends_on_id"] for dep in byid[node].get("dependencies") or []
+            if dep.get("type") == "blocks" and dep.get("depends_on_id") in node_set
+        })
+        for node in nodes
+    }
+    personalization = {node: 1.0 if node == goal_id else 0.0 for node in nodes}
+    scores = dict(personalization)
+    delta = math.inf
+    for iteration in range(1, max_iterations + 1):
+        dangling = math.fsum(scores[node] for node in nodes if not dependencies[node])
+        updated = {
+            node: (1.0 - damping) * personalization[node] + damping * dangling * personalization[node]
+            for node in nodes
+        }
+        for source in nodes:
+            targets = dependencies[source]
+            if targets:
+                share = damping * scores[source] / len(targets)
+                for target in targets:
+                    updated[target] += share
+        total = math.fsum(updated.values())
+        if abs(total - 1.0) > 1e-12:
+            raise ValueError(f"PageRank mass is not conserved: {total!r}")
+        delta = math.fsum(abs(updated[node] - scores[node]) for node in nodes)
+        scores = updated
+        if delta < tolerance:
+            break
+    else:
+        return {"verdict": "NO_CONVERGENCE", "goal": goal_id, "ranking": [],
+                "iterations": max_iterations, "delta": delta}
+    ranking = sorted(
+        ({"id": node, "title": byid[node].get("title") or "",
+          "score": scores[node], "path": list(reversed(paths[node]))} for node in nodes),
+        key=lambda row: (-row["score"], row["id"]),
+    )
+    return {"verdict": "RANKED", "goal": {"id": goal_id, "title": byid[goal_id].get("title") or ""},
+            "node_count": len(nodes), "iterations": iteration, "delta": delta,
+            "ranking": ranking}
 
 
 def parent_of(row: dict, byid: dict[str, dict]) -> str | None:
@@ -154,28 +212,38 @@ def place(rows: list[dict], title: str, description: str = "") -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--title", required=True)
+    ap.add_argument("--mode", choices=("place", "rank"), default="place")
+    ap.add_argument("--goal", help="goal bead ID (required with --mode rank)")
+    ap.add_argument("--title")
     ap.add_argument("--description", default="")
     ap.add_argument("--db", default=os.path.join(".beads", "issues.jsonl"),
                     help="tracker JSONL, beads.db (sibling issues.jsonl is read) or directory")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    if args.mode == "rank" and (not args.goal or args.title is not None):
+        ap.error("--mode rank requires --goal and forbids --title")
+    if args.mode == "place" and (not args.title or args.goal is not None):
+        ap.error("--mode place requires --title and forbids --goal")
     try:
         rows = load_rows(args.db)
     except (OSError, ValueError) as exc:
         print(f"beads_place: cannot read tracker: {exc}", file=sys.stderr)
         return 2
-    result = place(rows, args.title, args.description)
+    result = rank_goal(rows, args.goal) if args.mode == "rank" else place(rows, args.title, args.description)
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif result["verdict"] == "RANKED":
+        print(f"goal: {result['goal']['id']}  {result['goal']['title']}")
+        for row in result["ranking"]:
+            print(f"{row['score']:.12f}  {row['id']}  {' -> '.join(row['path'])}")
     elif result["verdict"] == "PLACED":
         print(f"goal:   {result['goal']['id']}  {result['goal']['title']}")
         print(f"target: {result['target']['id']}  (score {result['target']['score']})")
         for step, cmd in enumerate(result["commands"], 1):
             print(f"{step}. {cmd}")
     else:
-        print(result["advice"])
-    return 0 if result["verdict"] == "PLACED" else 3
+        print(result.get("advice", result["verdict"]))
+    return 0 if result["verdict"] in ("RANKED", "PLACED") else 3
 
 
 if __name__ == "__main__":

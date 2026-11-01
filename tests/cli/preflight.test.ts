@@ -507,10 +507,12 @@ function preflightCutFixture() {
 	const config = join(repo, "fleet-watch.json");
 	const milestone = { epic: "cut", due: "2026-11-01", declaredAt: "2026-10-30T00:00:00Z", pinned: ["k-1"] };
 	writeFileSync(config, JSON.stringify({ sessions: [{ session: "fixture", repo, milestone }] }));
-	const rows: Record<string, { id: string; status: string; assignee: string | null; labels?: string[] | null; updated_at: string }> = {};
+	const rows: Record<string, { id: string; status: string; assignee: string | null; labels?: string[] | null; created_at: string; updated_at: string }> = {};
 	const graph: Record<string, unknown> = {};
+	rows.cut = { id: "cut", status: "open", assignee: null, labels: ["kind:goal"], created_at: "2026-10-30T00:00:00Z", updated_at: "2026-10-30T00:00:00Z" };
+	graph.cut = [];
 	for (const id of ["k-1", "k-2", "k-3"]) {
-		rows[id] = { id, status: "open", assignee: null, labels: [], updated_at: "2026-10-30T00:00:00Z" };
+		rows[id] = { id, status: "open", assignee: null, labels: [], created_at: "2026-10-30T00:00:00Z", updated_at: "2026-10-30T00:00:00Z" };
 		graph[id] = [];
 	}
 	const env = { HOME: repo, XDG_CONFIG_HOME: join(repo, "config"), OMP_KIT_FLEET_WATCH_CONFIG: config,
@@ -532,17 +534,38 @@ function preflightCutFixture() {
 	return { repo, config, milestone, rows, graph, env, read, cleanup: owned.cleanup };
 }
 
-test("CUTCLAIM1 native [a]: k-2 is refused outside cut[k-1], pin passes with explicit adjudication marker", async () => {
+test("CUTCLAIM1 native [a]: k-2 is refused outside the goal; a pin must have an open blocks path", async () => {
 	const f = preflightCutFixture();
 	try {
 		const outside = await preflightBead("claim", f.repo, "k-2", { env: f.env, read: f.read });
 		expect(outside.ok).toBe(false);
 		expect(outside.findings.filter(finding => finding.blocking).map(finding => finding.code)).toEqual(["CLAIM_OUT_OF_CUT"]);
 		expect(outside.findings[0]?.detail).toContain("cut");
-		expect(outside.findings[0]?.detail).toContain("nearest eligible pinned alternative: k-1");
+		expect(outside.findings[0]?.detail).toContain("nearest eligible pinned alternative: none (no open eligible pin)");
+
+		f.graph.cut = [{ issue_id: "cut", depends_on_id: "k-1", type: "blocks", status: "open" }];
 		const pin = await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read });
 		expect(pin.ok).toBe(true);
 		expect(pin.findings).toEqual([expect.objectContaining({ code: "CLAIM_CUT_ADMITTED", blocking: false })]);
+	} finally { f.cleanup(); }
+});
+
+test("[PINPATH] pinned beads require a blocks path from the declared goal regardless of creation date", async () => {
+	const f = preflightCutFixture();
+	try {
+		expect(f.rows["k-1"]!.created_at).toBe("2026-10-30T00:00:00Z");
+		f.graph.cut = [{ issue_id: "cut", depends_on_id: "k-1", type: "parent-child", status: "open" }];
+		const unlinked = await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read });
+		expect(unlinked.findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
+
+		f.graph.cut = [{ issue_id: "cut", depends_on_id: "k-1", type: "blocks", status: "open" }];
+		const linked = await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read });
+		expect(linked.findings.map(finding => finding.code)).toContain("CLAIM_CUT_ADMITTED");
+
+		f.graph.cut = [];
+		f.graph["k-1"] = [{ issue_id: "k-1", depends_on_id: "cut", type: "blocks", status: "open" }];
+		const reversed = await preflightBead("claim", f.repo, "k-1", { env: f.env, read: f.read });
+		expect(reversed.findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
 	} finally { f.cleanup(); }
 });
 
