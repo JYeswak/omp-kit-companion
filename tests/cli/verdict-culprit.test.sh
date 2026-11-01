@@ -155,13 +155,17 @@ ok "$st" "mutant-wrong-side-caught: want the wrong $c3, got $out"
 if [ "$(wc -l <"$br_log" | tr -d ' ')" = 1 ] && [ "$(culprit_field "$rec3" sha)" = "\"$c2\"" ]; then st=0; else st=1; fi
 ok "$st" "dry-runs-write-nothing: br=$(cat "$br_log")"
 
-# 6. Flake control: the file fails inside the full-suite run's archive and passes on rerun at the head,
-# so no commit is blamed and no bead is commented.
+# 6. Flake control: the file fails in the judged full-suite run and passes when the culprit step reruns it
+# in its own export (a culprit-<sha> dir), so no commit is blamed and no bead is commented. Keyed on the
+# rerun dir, not on "full-suite-verdict": when this test itself runs inside the release full suite, every
+# path under it contains that name, and the flake would fail on rerun too.
 flake="$TMP/flake"
 seed "$flake"
 cat >"$flake/tests/cli/flaky.test.sh" <<'EOF'
 #!/bin/sh
-case "$(pwd -P)" in *full-suite-verdict*) echo "flaked"; exit 1 ;; esac
+case "$(pwd -P)" in */culprit-[0-9a-f]*) exit 0 ;; esac
+echo "flaked"
+exit 1
 EOF
 f0=$(change "$flake" flaky@example.invalid ompkit-flaky "[test] flaky" notes/f0.txt f0)
 out=$(verdict "$flake" "$f0"); rc=$?
