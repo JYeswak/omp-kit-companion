@@ -192,6 +192,23 @@ describe("fleet guard main-only git checks", () => {
 		expect(gitState()).toBe(gitBefore);
 	});
 
+	test("COMMITTRAILER1: --trailer and other value options are metadata; every path after -- is still judged", () => {
+		withOnlyFixture(onlyHolds("some/path"), "ok", "FixtureAgent", () => {
+			for (const command of [
+				"git commit --only -m msg --trailer \"Bead: ompkit-l336c\" --trailer \"Supersedes: c711a66c25\" -- some/path",
+				"git commit --only -F msg.txt --cleanup verbatim --trailer \"Bead: ompkit-l336c\" -- some/path",
+				"git commit --only --reuse-message HEAD --trailer \"Bead: ompkit-l336c\" -- some/path",
+			]) {
+				expect(check(event(command), context), command).toBeUndefined();
+			}
+			const unreserved = check(event("git commit --only -m msg --trailer \"Bead: ompkit-l336c\" -- some/path foreignB.txt"), context);
+			expect(unreserved?.block, "unreserved path after trailers admitted").toBe(true);
+			expect(unreserved?.reason).toContain("without an active exclusive reservation");
+			const unseen = check(event("git commit --only -m msg --pathspec-from-file list.txt"), context);
+			expect(unseen?.block, "pathspec-from-file admitted").toBe(true);
+		});
+	});
+
 	test("ompkit-rz5.158: a call's own cwd picks the repository its commit is judged in", () => {
 		const other = join(scratch, "other");
 		mkdirSync(other, { recursive: true });

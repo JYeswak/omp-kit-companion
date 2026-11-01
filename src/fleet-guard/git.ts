@@ -540,7 +540,10 @@ interface CommitScope {
 	paths: string[];
 }
 
-const COMMIT_VALUE_OPTIONS = ["-m", "--message", "-F", "--file", "--author", "--date", "--reuse-message", "--reedit-message"];
+// Options of `git commit` whose next word is a value (message, trailer, commit, template), never a
+// path. --pathspec-from-file stays out on purpose: its paths are unseen, so it must stay refused.
+const COMMIT_VALUE_OPTIONS = ["-m", "--message", "-F", "--file", "--author", "--date", "--reuse-message", "--reedit-message",
+	"--trailer", "--cleanup", "--fixup", "--squash", "-t", "--template"];
 
 function analyzeCommit(words: readonly string[]): CommitScope | null {
 	let index = 1;
