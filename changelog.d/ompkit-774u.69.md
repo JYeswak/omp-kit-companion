@@ -1,0 +1,1 @@
+The per-file test-budget threshold is explicitly report-only while it remains distribution-heuristic. Budget checks reject a policy that attempts to enforce that heuristic; measured overages remain visible in report mode.

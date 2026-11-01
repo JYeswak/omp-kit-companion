@@ -63,7 +63,7 @@ try {
 	const push = number(requirements.push_p95_s, "push_p95_s");
 	const cycle = number(requirements.full_cycle_s, "full_cycle_s");
 	const cap = number(heuristic.per_file_cap_s, "per_file_cap_s");
-	if (push <= 0 || cycle <= 0 || cap !== cycle / 4 || heuristic.status !== "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED" || heuristic.derivation !== "full_cycle_s / 4") throw new Error("INVALID_INPUT budget derivation");
+	if (push <= 0 || cycle <= 0 || cap !== cycle / 4 || heuristic.status !== "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED" || heuristic.derivation !== "full_cycle_s / 4" || heuristic.mode !== "report") throw new Error("INVALID_INPUT budget derivation or heuristic mode");
 	const rows: { path: string; elapsed_ms: number }[] = [];
 	let timingSource: string | undefined;
 	if (enforcement) {
@@ -114,7 +114,7 @@ try {
 	if (!Number.isFinite(total)) throw new Error("INVALID_INPUT total timing overflow");
 	const makespanLowerBound = Math.max(total / workers, longest.elapsed_ms / 1000);
 	const aggregateOverBudget = derive && makespanLowerBound > cycle;
-	const result = { status: violations.length ? "OVER_BUDGET" : aggregateOverBudget ? "AGGREGATE_OVER_BUDGET" : "OK", mode: enforcement ? "enforce" : "derive", timings_dir: timingSource, W_s: total, p_max_s: longest.elapsed_ms / 1000, p_max_path: longest.path, m: workers, worker_count_source: seen.has("--workers") ? "declared" : "default_not_measured", makespan_lower_bound_s: makespanLowerBound, makespan_bound_note: "Necessary lower bound only; not a scheduling or p95 guarantee", push_p95_s: push, full_cycle_s: cycle, per_file_cap_s: cap, per_file_cap_status: heuristic.status, queueing, violations };
+	const result = { status: violations.length ? "OVER_BUDGET" : aggregateOverBudget ? "AGGREGATE_OVER_BUDGET" : "OK", mode: enforcement ? "enforce" : "derive", timings_dir: timingSource, W_s: total, p_max_s: longest.elapsed_ms / 1000, p_max_path: longest.path, m: workers, worker_count_source: seen.has("--workers") ? "declared" : "default_not_measured", makespan_lower_bound_s: makespanLowerBound, makespan_bound_note: "Necessary lower bound only; not a scheduling or p95 guarantee", push_p95_s: push, full_cycle_s: cycle, per_file_cap_s: cap, per_file_cap_status: heuristic.status, per_file_cap_mode: heuristic.mode, queueing, violations };
 	if (machine) console.log(JSON.stringify(result));
 	else {
 		console.log(`W=${total}s p_max=${result.p_max_s}s path=${longest.path} m=${workers} (${result.worker_count_source})`);

@@ -597,7 +597,7 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file o
 		const configure = (cycle: number) => writeFileSync(policy, JSON.stringify({
 			version: 1, requirements: { push_p95_s: 600, full_cycle_s: cycle },
 			initial_heuristic: { per_file_cap_s: cycle / 4, derivation: "full_cycle_s / 4",
-				status: "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED" },
+				status: "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED", mode: "report" },
 		}));
 		const archive = affectedArchive(fx, 42, 42);
 		configure(900);

@@ -107,6 +107,30 @@ test("missing timing table and malformed requirement numbers fail closed", async
 	expect((await invoke(root, "--enforce", "rows.json")).rc).toBe(1);
 });
 
+test("heuristic cap rejects enforce policy and reports the same measured overage in report mode", async () => {
+	const root = fixture();
+	const policyPath = join(root, ".github/test-budget.json");
+	const policy = JSON.parse(await Bun.file(policyPath).text());
+	const rowsPath = join(root, "rows.json");
+	writeFileSync(rowsPath, JSON.stringify([{ path: "original-overage.test.ts", elapsed_ms: 300000 }]));
+	policy.initial_heuristic.mode = "enforce";
+	writeFileSync(policyPath, JSON.stringify(policy));
+	const enforced = await invoke(root, "--enforce", "rows.json", "--json");
+	expect(enforced.rc).toBe(1);
+	expect(JSON.parse(enforced.stdout)).toMatchObject({ status: "ERROR" });
+	expect(JSON.parse(enforced.stdout).error).toContain("heuristic mode");
+
+	policy.initial_heuristic.mode = "report";
+	writeFileSync(policyPath, JSON.stringify(policy));
+	const reported = await invoke(root, "--enforce", "rows.json", "--json");
+	expect(reported.rc).toBe(0);
+	expect(JSON.parse(reported.stdout)).toMatchObject({
+		status: "OVER_BUDGET",
+		per_file_cap_mode: "report",
+		violations: [{ code: "OVER_BUDGET", path: "original-overage.test.ts", elapsed_s: 300, cap_s: 225 }],
+	});
+});
+
 test("stdin enforcement uses actual rows and reports the planted 300 second file without refusing", async () => {
 	const root = fixture();
 	const result = await run([process.execPath, script, "--repo", root, "--enforce", "-"], {
