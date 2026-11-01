@@ -49,7 +49,7 @@ function ownedDir(pid: number, start: string, label = "omp"): { root: string; di
 	return { root, dir };
 }
 
-type Subjects = { live: Incarnation; zombie: Incarnation; stop: () => Promise<void> };
+type Subjects = { live: Incarnation; zombie: Incarnation; zombieRawStart: string; stop: () => Promise<void> };
 
 /**
  * One kitlib-run tree: /bin/sh forks two sleeps, writes their pids, then exec's into sleep, which never reaps. The first
@@ -67,18 +67,22 @@ async function subjects(): Promise<Subjects> {
 	const [zombiePid, livePid] = readFileSync(out, "utf8").trim().split(" ").map(Number) as [number, number];
 	const [zombie, live] = [await incarnation(zombiePid), await incarnation(livePid)];
 	if (zombie === null || live === null) { await stop(); throw new Error("no incarnation for a subject"); }
+	// What a pre-5m6ej writer recorded: the raw `ps -o lstart=` text, read while the subject was alive. kitlib collapses
+	// whitespace, so on days 1-9 of a month ("Nov  1") the two strings differ and the legacy probe would read "reused".
+	const zombieRawStart = defaultLiveness().processStart(zombiePid);
+	if (zombieRawStart === null) { await stop(); throw new Error("no raw lstart for the zombie subject"); }
 	process.kill(zombiePid, "SIGKILL");
 	// Real-clock poll: the OS marks the killed child Z on its own schedule, which no fake timer drives.
 	for (let tries = 0; tries < 60 && ownerIncarnationState(zombiePid, zombie.start, {}) !== "zombie"; tries++) await Bun.sleep(50);
-	return { live, zombie, stop };
+	return { live, zombie, zombieRawStart, stop };
 }
 
 test("planted: a zombie owner reads dead and its dir is reapable, where the pre-5m6ej probe read it alive; control: a live owner is LIVE", async () => {
-	const { live, zombie, stop } = await subjects();
+	const { live, zombie, zombieRawStart, stop } = await subjects();
 	try {
 		expect(ownerIncarnationState(zombie.pid, zombie.start, {})).toBe("zombie");
 		// The pre-5m6ej probe: kill -0 succeeds on a zombie and ps still prints its start, so it read "live".
-		expect(probeOwner(zombie.pid, zombie.start, defaultLiveness())).toBe("live");
+		expect(probeOwner(zombie.pid, zombieRawStart, defaultLiveness())).toBe("live");
 		const dead = ownedDir(zombie.pid, zombie.start);
 		expect(inspectSession(dead.dir, dead.root, real())).toMatchObject({ action: "REAP", reason: "owner-zombie-no-open-fds" });
 		const alive = ownedDir(live.pid, live.start);
