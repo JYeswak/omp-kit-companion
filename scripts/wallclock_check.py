@@ -10,7 +10,9 @@ wall-clock bound around child processes. This checker flags those shapes in test
   small-timeout-s  timeout= below 10 s                         (python subprocess / socket)
   elapsed-assert   an elapsed/duration/took value asserted with toBeLessThan
 
-A line carrying `wallclock: p99=<measured> headroom=<factor>` is annotated and never flagged.
+A line carrying a complete `wallclock: p99=<number>(ms|s) headroom=<number>x` annotation, with p99 above 0 and
+headroom of at least 2x, is annotated and never flagged. Anything less (no headroom, an empty or non-numeric p99,
+headroom under 2x) is not an annotation: the line is judged like any other. Line length never exempts a line.
 
   --base REV --head REV   judge test files changed between REV and REV; a finding is new when its (path, rule, line
                           text) occurs more often at head than at base, so untouched offenders never block. Exit 1
@@ -29,7 +31,9 @@ from kitlib_run import run  # noqa: E402
 
 SUFFIXES = (".ts", ".js", ".mjs", ".sh", ".py")
 LOAD_SAFE_S = 10.0
-ANNOTATION = "wallclock: p99="
+MIN_HEADROOM = 2.0
+ANNOTATION = re.compile(
+    r"\bwallclock:[ \t]{0,4}p99=([0-9]{1,6}(?:[.][0-9]{1,3})?)(?:ms|s)[ \t]{1,4}headroom=([0-9]{1,4}(?:[.][0-9]{1,2})?)x\b")
 DEADLINE = re.compile(r"\b(?:deadline_s|timeout_s)[ \t]*[:=][ \t]*([0-9]{1,6}(?:[.][0-9]{1,3})?)\b")
 TIMEOUT_MS = re.compile(r"\btimeout(?:Ms)?[ \t]*:[ \t]*([0-9][0-9_]{0,9})\b")
 TIMEOUT_S = re.compile(r"\btimeout[ \t]*=[ \t]*([0-9]{1,6}(?:[.][0-9]{1,3})?)\b")
@@ -37,11 +41,17 @@ ELAPSED = re.compile(r"\b(?:elapsed|duration|took)[A-Za-z_]{0,20}\b", re.I)
 LESS_THAN = re.compile(r"[.]toBeLessThan(?:OrEqual)?[(]")
 
 
+def annotated(line: str) -> bool:
+    """True only for a complete annotation: a measured p99 above 0 and headroom of at least MIN_HEADROOM."""
+    match = ANNOTATION.search(line)
+    return match is not None and float(match.group(1)) > 0 and float(match.group(2)) >= MIN_HEADROOM
+
+
 def findings(path: str, text: str):
     if not path.startswith("tests/") or not path.endswith(SUFFIXES):
         return
     for number, line in enumerate(text.splitlines(), 1):
-        if ANNOTATION in line or len(line) > 4000:
+        if annotated(line):
             continue
         stripped = line.strip()
         for match in DEADLINE.finditer(line):

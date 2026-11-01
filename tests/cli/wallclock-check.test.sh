@@ -23,13 +23,14 @@ git init -q -b main "$repo"
 git -C "$repo" config user.email t@example.invalid
 git -C "$repo" config user.name t
 mkdir -p "$repo/tests/cli" "$repo/src"
-printf 'const legacy = run(["x"], { deadline_s: 3 });\n' > "$repo/tests/cli/legacy.test.ts" # wallclock: p99=n/a, planted fixture text the member must refuse
+# Fixture lines are built with printf arguments, so this file's own source never holds the shapes it plants.
+printf 'const legacy = run(["x"], { deadline_s: %s });\n' 3 > "$repo/tests/cli/legacy.test.ts"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m base --no-verify
 check() { (cd "$repo" && sh "$member") > "$TMP/out" 2>&1; }
 
 # 1. planted: a new test line with a 2 s child deadline is refused, naming file, line and rule
-printf 'test("x", async () => { await run(["sh", "-c", "true"], { deadline_s: 2 }); });\n' > "$repo/tests/cli/new.test.ts" # wallclock: p99=n/a, planted fixture text the member must refuse
+printf 'test("x", async () => { await run(["sh", "-c", "true"], { deadline_s: %s }); });\n' 2 > "$repo/tests/cli/new.test.ts"
 git -C "$repo" add tests/cli/new.test.ts
 if check; then bad "small deadline admitted"; else
 	if grep -q 'tests/cli/new.test.ts:1: small-deadline' "$TMP/out"; then ok; else bad "refusal text: $(cat "$TMP/out")"; fi
@@ -43,21 +44,37 @@ printf 'const killed = run(["sleep", "30"], { deadline_s: 1 }); // wallclock: p9
 git -C "$repo" add tests/cli/new.test.ts
 if check; then ok; else bad "annotated line refused: $(cat "$TMP/out")"; fi
 # 4. an untouched legacy offender never blocks an unrelated edit of its file
-printf 'const legacy = run(["x"], { deadline_s: 3 });\nconst more = 1;\n' > "$repo/tests/cli/legacy.test.ts" # wallclock: p99=n/a, planted fixture text the member must refuse
+printf 'const legacy = run(["x"], { deadline_s: %s });\nconst more = 1;\n' 3 > "$repo/tests/cli/legacy.test.ts"
 git -C "$repo" add tests/cli/legacy.test.ts
 if check; then ok; else bad "legacy offender blocked: $(cat "$TMP/out")"; fi
 # 5. a non-test path is out of scope; an elapsed assertion is flagged
-printf 'export const t = spawnSync("x", { timeout: 2000 });\n' > "$repo/src/tool.ts" # wallclock: p99=n/a, planted fixture text the member must refuse
+printf 'export const t = spawnSync("x", { timeout: %s });\n' 2000 > "$repo/src/tool.ts"
 git -C "$repo" add src/tool.ts
 if check; then ok; else bad "non-test path judged: $(cat "$TMP/out")"; fi
-printf 'expect(elapsedMs).toBeLessThan(500);\n' > "$repo/tests/cli/elapsed.test.ts" # wallclock: p99=n/a, planted fixture text the member must refuse
+printf 'expect(elapsedMs).%s(500);\n' toBeLessThan > "$repo/tests/cli/elapsed.test.ts"
 git -C "$repo" add tests/cli/elapsed.test.ts
 if check; then bad "elapsed assertion admitted"; else
 	if grep -q 'elapsed.test.ts:1: elapsed-assert' "$TMP/out"; then ok; else bad "elapsed refusal text: $(cat "$TMP/out")"; fi
 fi
 git -C "$repo" rm -q --cached tests/cli/elapsed.test.ts
+# 7. an incomplete annotation is no annotation: no headroom, an empty p99 and a headroom under 2x are each refused
+for tail in '// wallclock: p99=0.02s' '// wallclock: p99=' '// wallclock: p99=0.02s headroom=1x'; do
+	printf 'test("x", async () => { await run(["sh", "-c", "true"], { deadline_s: %s }); }); %s\n' 2 "$tail" > "$repo/tests/cli/new.test.ts"
+	git -C "$repo" add tests/cli/new.test.ts
+	if check; then bad "incomplete annotation admitted: $tail"; else
+		if grep -q 'tests/cli/new.test.ts:1: small-deadline' "$TMP/out"; then ok; else bad "incomplete annotation refusal text: $(cat "$TMP/out")"; fi
+	fi
+done
+# 8. line length never exempts: the same short deadline padded past 4000 bytes is refused
+pad=$(printf '%4100s' '')
+printf 'test("x", async () => { await run(["sh", "-c", "true"], { deadline_s: %s }); });%s\n' 2 "$pad" > "$repo/tests/cli/new.test.ts"
+git -C "$repo" add tests/cli/new.test.ts
+if check; then bad "long unannotated line admitted"; else
+	if grep -q 'tests/cli/new.test.ts:1: small-deadline' "$TMP/out"; then ok; else bad "long-line refusal text: $(cat "$TMP/out")"; fi
+fi
+git -C "$repo" rm -q --cached tests/cli/new.test.ts
 # 6. GIT_INDEX_FILE is honored: a private index without the offender passes while the shared one stages it
-printf 'const t = Bun.spawnSync(["x"], { timeout: 3000 });\n' > "$repo/tests/cli/spawn.test.ts" # wallclock: p99=n/a, planted fixture text the member must refuse
+printf 'const t = Bun.spawnSync(["x"], { timeout: %s });\n' 3000 > "$repo/tests/cli/spawn.test.ts"
 git -C "$repo" add tests/cli/spawn.test.ts
 idx="$TMP/only.index"
 GIT_INDEX_FILE="$idx" git -C "$repo" read-tree HEAD
