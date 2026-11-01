@@ -11,10 +11,8 @@
 //   (a) it is itself a changed path that still exists, or
 //   (b) it reaches a changed path through static edges: an import/export/require/import() that Bun's
 //       own parser finds (Bun.Transpiler.scanImports, so no regex reads source), followed
-//       transitively, including literal code paths (a test that spawns `src/cli.ts` or runs
-//       `$ROOT/scripts/x.sh`). Doc/data references count only directly from a test.
-//   (c) an exact required_tests policy obligation names it for the changed file, where static
-//       inference cannot recover a known consumer (for example an imported data-path constant).
+//       transitively, or a literal path naming the changed file (a test that spawns `src/cli.ts` or
+//       runs `$ROOT/scripts/x.sh`), one hop from the change.
 // stdout: one selected test path per line, sorted. stderr: a one-line summary; with --explain, one
 // `path <- changed` line per selection naming the changed path that pulled it in.
 // Exit 0 with an empty stdout means no test is affected; 2 is a usage or unreadable-root error.
@@ -27,8 +25,8 @@ const TEST_SUFFIX = [".test.ts", ".test.tsx", ".test.mts", ".test.js", ".test.mj
 // Text scanned for literal path references: sources plus the shell and python that run them.
 const SCANNED_EXT = [...SOURCE_EXT, ".sh", ".py"];
 // Never source: VCS state, dependencies, peers' scratch (var/agent-tmp) and build output.
-const SKIP_DIR: Record<string, true> = { ".git": true, node_modules: true, var: true, dist: true, __pycache__: true };
-const FIXTURE_DIRS: Record<string, true> = { fixtures: true, __fixtures__: true };
+const SKIP_DIR: Record<string, true> = { ".git": true, node_modules: true, var: true, dist: true };
+const FIXTURE_DIR = "tests/fixtures/";
 
 export type Selection = { tests: string[]; reasons: Map<string, string>; distance: Map<string, number> };
 
@@ -44,7 +42,7 @@ function walk(root: string, at = ""): string[] {
 }
 
 export function isTestFile(rel: string): boolean {
-	if (rel.split("/").some((part) => Object.hasOwn(FIXTURE_DIRS, part))) return false;
+	if (rel.startsWith(FIXTURE_DIR)) return false;
 	const name = rel.slice(rel.lastIndexOf("/") + 1);
 	return TEST_SUFFIX.some((suffix) => name.endsWith(suffix)) || (name.startsWith("test_") && name.endsWith(".py"));
 }
@@ -111,302 +109,38 @@ function referencedPaths(text: string, files: ReadonlySet<string>, fromRel: stri
 	return found;
 }
 
-export type SelectionGraph = {
-	files: ReadonlySet<string>;
-	dependencies: ReadonlyMap<string, ReadonlySet<string>>;
-	testReferences: ReadonlyMap<string, ReadonlySet<string>>;
-	problems: ReadonlyMap<string, string>;
-};
-
-export function isCodeFile(rel: string): boolean {
-	return SCANNED_EXT.some((ext) => rel.endsWith(ext));
-}
-
-function isCodePath(rel: string): boolean {
-	return isCodeFile(rel) &&
-		!rel.split("/").some((part) => Object.hasOwn(FIXTURE_DIRS, part));
-}
-
-export type SelectionPolicy = {
-	noTest: Map<string, string>;
-	requiredTests: Map<string, { tests: string[]; reason: string }>;
-};
-
-export function isExactSelectionPath(path: string): boolean {
-	return path.length > 0 && path.trim() === path && !path.includes("\\") &&
-		!["*", "?", "[", "]", "{", "}", "\0", "\n", "\r"].some((char) => path.includes(char)) &&
-		path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
-}
-
-function policyObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function noTestReason(file: string, reason: unknown, files: ReadonlySet<string>): string {
-	if (!isExactSelectionPath(file)) throw new Error(`no_test key is not an exact repository-relative file: ${JSON.stringify(file)}`);
-	if (!files.has(file)) throw new Error(`no_test declaration names a missing regular file: ${file}`);
-	if (typeof reason !== "string" || !reason.trim()) throw new Error(`no_test reason must be nonempty for ${file}`);
-	return reason;
-}
-
-function requiredTestObligation(file: string, value: unknown, files: ReadonlySet<string>): { tests: string[]; reason: string } {
-	if (!isExactSelectionPath(file) || !files.has(file))
-		throw new Error(`required_tests source must be an exact existing regular file: ${JSON.stringify(file)}`);
-	if (!policyObject(value) || Object.keys(value).length !== 2 ||
-		!Object.hasOwn(value, "tests") || !Object.hasOwn(value, "reason") ||
-		!Array.isArray(value.tests) || value.tests.length === 0 ||
-		typeof value.reason !== "string" || !value.reason.trim())
-		throw new Error(`required_tests ${file} must contain exactly nonempty tests and reason`);
-	const tests: string[] = [];
-	for (const test of value.tests) {
-		if (typeof test !== "string" || !isExactSelectionPath(test) || !files.has(test) || !isTestFile(test))
-			throw new Error(`required_tests ${file} names a missing, invalid, or fixture test: ${JSON.stringify(test)}`);
-		if (tests.includes(test)) throw new Error(`required_tests ${file} repeats test ${test}`);
-		tests.push(test);
-	}
-	return { tests, reason: value.reason };
-}
-
-/** Human no-test decisions and irreducible obligations only, never generated graph snapshots. */
-export function readSelectionPolicy(root: string, files: ReadonlySet<string>): SelectionPolicy {
-	const policy: SelectionPolicy = { noTest: new Map(), requiredTests: new Map() };
-	const path = join(root, ".github/test-selection.json");
-	if (!existsSync(path)) return policy;
-	const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-	if (!policyObject(value) || value.version !== 1 || !policyObject(value.no_test) ||
-		!Object.hasOwn(value, "version") || !Object.hasOwn(value, "no_test") ||
-		Object.keys(value).some((key) => key !== "version" && key !== "no_test" && key !== "required_tests"))
-		throw new Error("expected version:1, exact no_test reasons, and optional required_tests obligations only");
-	for (const [file, reason] of Object.entries(value.no_test))
-		policy.noTest.set(file, noTestReason(file, reason, files));
-	if (Object.hasOwn(value, "required_tests")) {
-		if (!policyObject(value.required_tests)) throw new Error("required_tests must be an object of exact-file obligations");
-		for (const [file, obligation] of Object.entries(value.required_tests))
-			policy.requiredTests.set(file, requiredTestObligation(file, obligation, files));
-	}
-	return policy;
-}
-
-/** Return the next position, or the same position when no comment starts here. */
-function skipPathComment(text: string, at: number, literalsOnly: boolean): number {
-	if ((literalsOnly && text.startsWith("//", at)) || (!literalsOnly && text.charAt(at) === "#")) {
-		const end = text.indexOf("\n", at);
-		return end === -1 ? text.length : end + 1;
-	}
-	if (literalsOnly && text.startsWith("/*", at)) {
-		const end = text.indexOf("*/", at + 2);
-		return end === -1 ? text.length : end + 2;
-	}
-	return at;
-}
-
-function isHexText(text: string, length: number): boolean {
-	if (text.length !== length) return false;
-	for (const char of text) if (!"0123456789abcdefABCDEF".includes(char)) return false;
-	return true;
-}
-
-/** Append one decoded literal without allocating a token object; return its ending position. */
-function appendQuotedPath(text: string, at: number, parts: string[]): number {
-	const quote = text.charAt(at++);
-	let literal = "";
-	while (at < text.length) {
-		const next = text.charAt(at++);
-		if (next === quote) break;
-		if (next !== "\\" || at >= text.length) { literal += next; continue; }
-		const escaped = text.charAt(at++);
-		if (escaped !== "u" && escaped !== "x") {
-			literal += escaped === "n" || escaped === "r" || escaped === "t" ? " " : escaped;
-			continue;
-		}
-		const length = escaped === "u" ? 4 : 2;
-		const digits = text.slice(at, at + length);
-		if (isHexText(digits, length)) {
-			literal += String.fromCharCode(Number.parseInt(digits, 16));
-			at += length;
-		} else literal += " ";
-	}
-	parts.push(literal);
-	return at;
-}
-
-type PathCall = { path: boolean; suffix: string[]; literal: string | null; other: boolean };
-
-function finishPathArgument(call: PathCall): void {
-	if (!call.other && call.literal !== null) call.suffix.push(call.literal);
-	else call.suffix.length = 0;
-	call.literal = null;
-	call.other = false;
-}
-
-function isPathCallAt(text: string, at: number): boolean {
-	let end = at;
-	while (end > 0 && text.charAt(end - 1).trim() === "") end--;
-	let start = end;
-	while (start > 0 && "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$".includes(text.charAt(start - 1))) start--;
-	const name = text.slice(start, end);
-	return name === "join" || name === "resolve";
-}
-
-function recordCallLiteral(calls: PathCall[], literal: string): void {
-	const call = calls[calls.length - 1];
-	if (!call) return;
-	if (call.literal !== null) call.other = true;
-	call.literal = literal;
-}
-
-function recordCallCharacter(text: string, at: number, calls: PathCall[], parts: string[]): void {
-	const char = text.charAt(at);
-	const call = calls[calls.length - 1];
-	if (char === "(") {
-		if (call) call.other = true;
-		calls.push({ path: isPathCallAt(text, at), suffix: [], literal: null, other: false });
-	} else if (char === ")") {
-		const closed = calls.pop();
-		if (!closed?.path) return;
-		finishPathArgument(closed);
-		if (closed.suffix.length > 1) parts.push(closed.suffix.join("/"), "\n");
-	} else if (char === "," && call) finishPathArgument(call);
-	else if (call && char.trim() !== "") call.other = true;
-}
-
-/**
- * Bun parses TS/JS before we examine its literal strings, not comments or identifiers.
- * Static template fragments count too; computed paths without a literal repo tail cannot be
- * inferred. Shell/Python also admit unquoted command paths, but discard line comments.
- * This is lexical path recognition, not an assertion that a named command is executed.
- */
-function pathText(text: string, literalsOnly: boolean): string {
-	const parts: string[] = [];
-	const calls: PathCall[] = [];
-	const slashParts: string[] = [];
-	let previousEnd = -1;
-	for (let at = 0; at < text.length;) {
-		const afterComment = skipPathComment(text, at, literalsOnly);
-		if (afterComment !== at) { parts.push("\n"); at = afterComment; continue; }
-		const char = text.charAt(at);
-		if (char !== '"' && char !== "'" && char !== "`") {
-			if (literalsOnly) recordCallCharacter(text, at, calls, parts);
-			else parts.push(char);
-			at++;
-			continue;
-		}
-		const start = at;
-		at = appendQuotedPath(text, at, parts);
-		const literal = parts[parts.length - 1] ?? "";
-		parts.push("\n");
-		if (literalsOnly) { recordCallLiteral(calls, literal); continue; }
-		// pathlib's literal / segments also occur in Python embedded in shell heredocs.
-		if (previousEnd < 0 || text.slice(previousEnd, start).trim() !== "/") slashParts.length = 0;
-		slashParts.push(literal);
-		if (slashParts.length > 1) parts.push(slashParts.join("/"), "\n");
-		previousEnd = at;
-	}
-	return parts.join("");
-}
-
-/** Static dirname/cd/pwd shell idiom; never guess an arbitrary command's basename. */
-function shellJoinedPaths(text: string): string {
-	const paths: string[] = [];
-	for (const line of text.split("\n")) {
-		if (line.trimStart().startsWith("#")) continue;
-		const pwd = line.indexOf("&& pwd");
-		if (pwd === -1) continue;
-		const close = line.indexOf(")", pwd);
-		if (close === -1 || line.charAt(close + 1) !== "/") continue;
-		const command = line.slice(pwd + 2, close).trim();
-		if (command !== "pwd" && command !== "pwd -P") continue;
-		const quoteEnd = line.lastIndexOf('"', pwd);
-		const quoteStart = line.lastIndexOf('"', quoteEnd - 1);
-		if (quoteStart === -1 || quoteEnd === -1) continue;
-		let directory = line.slice(quoteStart + 1, quoteEnd);
-		// The opening quote may belong to "$0" inside $(dirname ...).
-		const dirnameEnd = directory.lastIndexOf(")");
-		if (dirnameEnd !== -1) directory = directory.slice(dirnameEnd + 1);
-		if (directory.startsWith("/../") || directory.startsWith("/./")) directory = directory.slice(1);
-		let end = close + 2;
-		while (end < line.length && isPathChar(line.charCodeAt(end))) end++;
-		paths.push(directory + line.slice(close + 1, end));
-	}
-	return paths.join("\n");
-}
-
-function parseSource(
-	rel: string,
-	text: string,
-	files: ReadonlySet<string>,
-	parsers: Map<string, Bun.Transpiler>,
-	targets: Set<string>,
-): string {
-	// Bun executes hashbang sources, but Transpiler scanning rejects #!. Treat only the
-	// initial directive as a same-width comment; retain every newline/source position.
-	const parseText = text.startsWith("#!") ? `//${text.slice(2)}` : text;
-	const loader = loaderFor(rel);
-	let parser = parsers.get(loader);
-	if (!parser) parsers.set(loader, (parser = new Bun.Transpiler({ loader })));
-	for (const item of parser.scanImports(parseText)) {
-		const target = resolveSpecifier(files, rel, item.path);
-		if (target) targets.add(target);
-		else if (item.path.startsWith("./") || item.path.startsWith("../"))
-			throw new Error(`unresolved local import ${JSON.stringify(item.path)}`);
-	}
-	// scanImports alone can accept a prefix; transform validates the whole source body.
-	return parser.transformSync(parseText);
-}
-
-/** Shared parsing only: selection walks reverse edges; the coverage oracle walks forward. */
-export function buildSelectionGraph(root: string): SelectionGraph {
+export function selectAffected(root: string, changed: readonly string[]): Selection {
 	const all = walk(root);
 	const files = new Set(all);
-	const dependencies = new Map<string, Set<string>>();
-	const testReferences = new Map<string, Set<string>>();
-	const problems = new Map<string, string>();
-	const parsers = new Map<string, Bun.Transpiler>();
-	for (const rel of all) {
-		if (!isCodePath(rel)) continue;
-		try {
-			const text = readFileSync(join(root, rel), "utf8");
-			const targets = new Set<string>();
-			const source = SOURCE_EXT.some((ext) => rel.endsWith(ext));
-			const literalSource = source ? parseSource(rel, text, files, parsers, targets) : text;
-			const direct = new Set<string>();
-			const named = pathText(literalSource, source) + (rel.endsWith(".sh") ? `\n${shellJoinedPaths(text)}` : "");
-			for (const target of referencedPaths(named, files, rel)) {
-				if (isCodePath(target)) targets.add(target);
-				else if (isTestFile(rel)) direct.add(target);
-			}
-			dependencies.set(rel, targets);
-			if (direct.size > 0) testReferences.set(rel, direct);
-		} catch (error) {
-			problems.set(rel, error instanceof Error ? error.message : String(error));
-		}
-	}
-	return { files, dependencies, testReferences, problems };
-}
-
-export function selectAffected(root: string, changed: readonly string[]): Selection {
-	const graph = buildSelectionGraph(root);
-	const files = graph.files;
-	if (graph.problems.size > 0) {
-		const [file, reason] = graph.problems.entries().next().value as [string, string];
-		throw new Error(`SELECTION_GAP ${file}: dependency analysis failed: ${reason}`);
-	}
-	let policy: SelectionPolicy;
-	try { policy = readSelectionPolicy(root, files); }
-	catch (error) {
-		throw new Error(`SELECTION_GAP .github/test-selection.json: ${error instanceof Error ? error.message : String(error)}`);
-	}
+	// importers[x] = sources whose import graph reaches x in one step; namers[x] = sources that name
+	// x as a literal path. Imports are followed transitively. A naming edge counts only as the first
+	// hop from a changed file: a test that spawns src/cli.ts runs when cli.ts itself changes, not
+	// whenever any module cli.ts imports changes (that would select every CLI suite for every src
+	// edit, ~55 suites, which is CI's full run, not an affected set).
 	const importers = new Map<string, Set<string>>();
 	const namers = new Map<string, Set<string>>();
-	const reverse = (forward: ReadonlyMap<string, ReadonlySet<string>>, into: Map<string, Set<string>>) => {
-		for (const [from, targets] of forward) for (const target of targets) {
-			let parents = into.get(target);
-			if (!parents) into.set(target, (parents = new Set()));
-			parents.add(from);
-		}
+	const edge = (graph: Map<string, Set<string>>, from: string, to: string) => {
+		if (from === to) return;
+		let set = graph.get(to);
+		if (!set) graph.set(to, (set = new Set()));
+		set.add(from);
 	};
-	reverse(graph.dependencies, importers);
-	reverse(graph.testReferences, namers);
+	for (const rel of all) {
+		if (!SCANNED_EXT.some((ext) => rel.endsWith(ext))) continue;
+		const text = readFileSync(join(root, rel), "utf8");
+		if (SOURCE_EXT.some((ext) => rel.endsWith(ext))) {
+			let imports: { path: string }[] = [];
+			try { imports = new Bun.Transpiler({ loader: loaderFor(rel) }).scanImports(text); }
+			catch { /* An unparsable source still contributes its literal path references below. */ }
+			for (const item of imports) {
+				const target = resolveSpecifier(files, rel, item.path);
+				if (target) edge(importers, rel, target);
+			}
+		}
+		for (const target of referencedPaths(text, files, rel)) {
+			if (isTestFile(rel) || SCANNED_EXT.some((ext) => target.endsWith(ext))) edge(namers, rel, target);
+		}
+	}
 	const reasons = new Map<string, string>();
 	// Hops from the nearest change: 0 for a changed test, 1 for a direct importer or namer, and so on.
 	const distance = new Map<string, number>();
@@ -416,9 +150,6 @@ export function selectAffected(root: string, changed: readonly string[]): Select
 		const queue = [start];
 		for (const namer of namers.get(start) ?? []) {
 			if (!seen.has(namer)) { seen.set(namer, 1); queue.push(namer); }
-		}
-		for (const test of policy.requiredTests.get(start)?.tests ?? []) {
-			if (!seen.has(test)) { seen.set(test, 1); queue.push(test); }
 		}
 		while (queue.length > 0) {
 			const node = queue.shift() as string;

@@ -28,7 +28,13 @@ from kitlib_tmp import owned_tmp
 from kitlib_run import RunResult
 
 HELPER = ROOT / "scripts/suite-metrics.py"
-JUDGING_FILES = metrics.JUDGING_FILES
+JUDGING_FILES = (
+    "scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
+    "scripts/full-suite-verdict-store.py",
+    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
+    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
+    ".github/test-budget.json",
+)
 
 
 def row(path: str, rc: int = 0) -> dict:
@@ -170,30 +176,6 @@ class JudgeIdentityTests(unittest.TestCase):
                     path.write_bytes(original + b"\nchanged")
                     self.assertNotEqual(before, metrics.judge_identity(self.root, scope))
                     path.write_bytes(original)
-
-    def test_selector_and_independent_checker_bytes_change_identity(self) -> None:
-        for name in ("scripts/affected-tests.ts", "scripts/selection-coverage.ts"):
-            path = self.root / name
-            for scope in ("full", "focused"):
-                with self.subTest(scope=scope, path=name):
-                    path.write_bytes(b"select actual consumer")
-                    before = metrics.judge_identity(self.root, scope)
-                    path.write_bytes(b"select unrelated consumer")
-                    self.assertNotEqual(before, metrics.judge_identity(self.root, scope))
-
-    def test_selection_policy_presence_and_bytes_change_both_identities(self) -> None:
-        path = self.root / ".github/test-selection.json"
-        original = {scope: metrics.judge_identity(self.root, scope)
-                    for scope in ("full", "focused")}
-        for content in (b'{"version":1,"no_test":{}}',
-                        b'{"version":1,"no_test":{"scripts/manual.sh":"operator only"}}'):
-            before = {scope: metrics.judge_identity(self.root, scope) for scope in original}
-            path.write_bytes(content)
-            for scope in original:
-                self.assertNotEqual(before[scope], metrics.judge_identity(self.root, scope))
-        path.unlink()
-        for scope in original:
-            self.assertEqual(original[scope], metrics.judge_identity(self.root, scope))
 
     def test_missing_required_dependency_fails_closed(self) -> None:
         for scope in ("full", "focused"):

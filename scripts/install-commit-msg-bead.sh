@@ -266,9 +266,6 @@ if [ "$MODE" = "check" ]; then
 		"hooks.d/pre-commit/wallclock_check.py scripts/wallclock_check.py" \
 		"hooks.d/pre-commit/52-omp-kit-staged-sources scripts/check-staged-sources.sh" \
 		"hooks.d/pre-commit/sources.py scripts/sources.py" \
-		"hooks.d/pre-commit/staged-selection.py scripts/staged-selection.py" \
-		"hooks.d/pre-commit/selection-coverage.ts scripts/selection-coverage.ts" \
-		"hooks.d/pre-commit/affected-tests.ts scripts/affected-tests.ts" \
 		"hooks.d/pre-commit/kitlib_run.py scripts/kitlib_run.py" \
 		"hooks.d/pre-commit/kitlib_io.py scripts/kitlib_io.py" \
 		"hooks.d/pre-commit/kitlib_tmp.py scripts/kitlib_tmp.py" \
@@ -660,9 +657,6 @@ install_staged_wallclock() {
 install_staged_sources() {
 	dir=$(chain_dir pre-commit)
 	for helper in sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py; do
-		place "$KITROOT/scripts/$helper" "$dir/$helper" -x
-	done
-	for helper in staged-selection.py selection-coverage.ts affected-tests.ts; do
 		place "$KITROOT/scripts/$helper" "$dir/$helper" -x
 	done
 	place "$KITROOT/scripts/check-staged-sources.sh" "$dir/52-omp-kit-staged-sources" +x

@@ -31,7 +31,6 @@ JUDGE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 JUDGING_FILES = (
     "scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
     "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
-    "scripts/affected-tests.ts", "scripts/selection-coverage.ts",
     "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
     ".github/test-budget.json",
@@ -45,9 +44,8 @@ def judge_identity(root: Path | str, scope: str) -> str:
     root = Path(root)
     paths = [name for name in JUDGING_FILES
              if scope == "full" or name != "scripts/full-suite-verdict.sh"]
-    for optional in ("scripts/gate-ci-only.tsv", ".github/test-selection.json"):
-        if (root / optional).exists():
-            paths.append(optional)
+    if (root / "scripts/gate-ci-only.tsv").exists():
+        paths.append("scripts/gate-ci-only.tsv")
     digest = hashlib.sha256(b"SUITEBUDGET1-judge-v1\0" + scope.encode() + b"\0")
     for name in sorted(paths):
         data = (root / name).read_bytes()

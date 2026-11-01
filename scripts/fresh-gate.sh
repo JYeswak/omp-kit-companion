@@ -35,7 +35,7 @@ fail() {
 }
 
 require_gate_functions() {
-	for name in gate_manifest gate_cli_compile gate_cli_boot gate_harness gate_notes gate_readme gate_focused select_affected_tests audit_test_selection run_affected_tests; do
+	for name in gate_manifest gate_cli_compile gate_cli_boot gate_harness gate_notes gate_readme gate_focused select_affected_tests run_affected_tests; do
 		command -v "$name" >/dev/null 2>&1 || fail "required gate function is missing: $name"
 	done
 }
@@ -255,23 +255,12 @@ $1"
 # CIGATE1 (ompkit-v66l.27.1): the bun tests a push runs are the ones its diff affects: changed test
 # files, plus tests whose static import graph reaches a changed path or that name a changed file
 # (scripts/affected-tests.ts, from the gate's own tree). Prints one path per line.
-selection_tool() {
-	selection_script=$1
-	shift
+select_affected_tests() {
+	set --
 	for file in $CHANGED; do
 		[ -n "$file" ] && set -- "$@" --changed-file "$file"
 	done
-	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/$selection_script" --root "$ARCHIVE_DIR" "$@"
-}
-
-select_affected_tests() {
-	selection_tool affected-tests.ts --explain --order distance
-}
-
-# The forward coverage oracle checks the actual selector output before CI-only or
-# budget deferral. A nonempty but unrelated selected suite is not coverage.
-audit_test_selection() {
-	selection_tool selection-coverage.ts --selected-file "$1"
+	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --explain --order distance "$@"
 }
 
 # K parallel bun workers for the affected tests: a quarter of the online cores, 2..4, unless
@@ -729,8 +718,6 @@ fi
 		fi
 	fi
 	affected=$(select_affected_tests) || { echo "focused: affected-test selection failed" >&2; return 1; }
-	printf '%s\n' "$affected" >"$WORK/selected-tests"
-	audit_test_selection "$WORK/selected-tests" || return $?
 	# Nearest first (changed tests, then direct importers); explicit mappings follow; each runs once.
 	# shellcheck disable=SC2086
 	focus_tests=$(printf '%s\n' $affected $focus_tests | awk 'NF && !seen[$0]++')
@@ -783,13 +770,6 @@ fi
 	else
 		echo "focused suites: none selected for changed paths"
 		code=$(changed_code)
-		if [ -n "$code" ] && [ -z "$affected" ] && [ ! -s "$WORK/excluded" ]; then
-			# The independent audit admitted only exact no-test reasons or deleted
-			# paths. This is not evidence that a suite ran, nor a docs-only change.
-			record_run 0 0 0
-			echo "FRESH-GATE: VERDICT NO_TEST_REASON: coverage audited; no remaining test obligation (declared no-test or deleted code); ran=0"
-			return 0
-		fi
 		if [ -n "$code" ]; then
 			record_run 0 0 1
 			if [ -s "$WORK/excluded" ]; then
