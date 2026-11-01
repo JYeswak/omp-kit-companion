@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 from urllib.parse import unquote, urlsplit
@@ -18,6 +19,46 @@ from kitlib_run import run
 ROLES = ("base", "main")
 MAX_RECORD_BYTES = 1 << 20
 MAX_COMMAND_OUTPUT = 16 << 20
+
+# CULPRIT1 (ompkit-6xxhu): the one optional key scripts/verdict-culprit.py adds to a FAIL record.
+CULPRIT_KEYS = frozenset(("sha", "author", "bead", "failing_files", "method", "reason"))
+CULPRIT_NONE_METHODS = ("flake-rerun", "unattributed")
+BEAD_ID = re.compile(r"[a-z][a-z0-9]*-[a-z0-9]+(?:\.[a-z0-9]+)*")
+
+
+def validate_culprit(value: object, verdict: object) -> None:
+    """Raise ValueError unless value is a well-formed culprit attribution on a FAIL verdict.
+
+    method "bisect" names a commit (sha, author without whitespace, bead or null, empty reason);
+    "flake-rerun" and "unattributed" name none (sha, author and bead null) and say why."""
+    if verdict != "FAIL":
+        raise ValueError("culprit is recorded on a verdict that is not FAIL")
+    if not isinstance(value, dict) or set(value) != CULPRIT_KEYS:
+        raise ValueError("culprit keys are invalid")
+    files = value["failing_files"]
+    if (not isinstance(files, list) or not all(isinstance(item, str) and item for item in files)
+            or len(set(files)) != len(files)):
+        raise ValueError("culprit failing files are invalid")
+    method = value["method"]
+    reason = value["reason"]
+    if method == "bisect":
+        author = value["author"]
+        bead = value["bead"]
+        if not valid_hex(value["sha"], (40, 64)) or not files:
+            raise ValueError("culprit commit is invalid")
+        if not isinstance(author, str) or not author or any(char.isspace() for char in author):
+            raise ValueError("culprit author is invalid")
+        if bead is not None and (not isinstance(bead, str) or BEAD_ID.fullmatch(bead) is None):
+            raise ValueError("culprit bead is invalid")
+        if reason != "":
+            raise ValueError("an attributed culprit carries no reason")
+    elif method in CULPRIT_NONE_METHODS:
+        if value["sha"] is not None or value["author"] is not None or value["bead"] is not None:
+            raise ValueError("an unattributed culprit names a commit")
+        if not isinstance(reason, str) or not reason or "\n" in reason:
+            raise ValueError("an unattributed culprit has no reason")
+    else:
+        raise ValueError("culprit method is invalid")
 
 
 def checked_run(argv: list[str], *, deadline_s: float = 15, cwd: Path | None = None,
@@ -477,6 +518,8 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
                 raise ValueError("PASS contains a failing suite")
         elif exit_code == 0 or not (bun_fail or shell_fail or py_fail or minimum_failures):
             raise ValueError("FAIL has no recorded failure")
+        if "culprit" in entry:
+            validate_culprit(entry["culprit"], entry["verdict"])
         log_path = path.with_suffix(".log")
         log_info = log_path.lstat()
         if not stat.S_ISREG(log_info.st_mode):
