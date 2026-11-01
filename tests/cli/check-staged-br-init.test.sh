@@ -63,6 +63,136 @@ rc=$?
 check "$rc" "0" "staged-bound-call-admitted" "$out" ""
 git -C "$R" reset -q -- bound.ts
 
+# BRREADBIND1: judge the selected DB at the read call, not a fixture-path spelling.
+selected_case() {
+	label=$1
+	want=$2
+	needle=$3
+	selected=$(new_repo "selected-$label")
+	before=$(git -C "$selected" rev-parse HEAD)
+	cat > "$selected/reader.ts"
+	git -C "$selected" add reader.ts
+	out=$(CDPATH='' cd -- "$selected" && sh "$SCRIPTS/check-staged-br-init.sh" 2>&1)
+	rc=$?
+	check "$rc" "$want" "selected-$label-staged" "$out" "$needle"
+	git -C "$selected" commit -q -m "[test] selected namespace specimen"
+	after=$(git -C "$selected" rev-parse HEAD)
+	out=$(range_check "$selected" "$before" "$after" 2>&1)
+	rc=$?
+	check "$rc" "$want" "selected-$label-range" "$out" "$needle"
+}
+
+selected_case production 0 "" <<'TS'
+async function closeLesson(repo, env, bead) {
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	const result = await run(["br", "comments", "list", bead.id, "--json", ...db], { cwd: repo, deadline_s: 60, env });
+	return result;
+}
+TS
+
+selected_case renamed 0 "" <<'TS'
+async function selectedRead(workspace, bindings, issue) {
+	const trackerFlags = bindings.BEADS_DB ? ['--db', bindings.BEADS_DB] : [];
+	return await run(["br", "show", issue.id, ...trackerFlags], { cwd: workspace, env: bindings });
+}
+TS
+
+selected_case omitted 1 "inherited-br-call" <<'TS'
+async function omittedFlags(repo, env, bead) {
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	return await run(["br", "comments", "list", bead.id], { cwd: repo, env });
+}
+TS
+
+selected_case wrong-environment 1 "inherited-br-call" <<'TS'
+async function wrongEnvironment(repo, env, other, bead) {
+	const db = other.BEADS_DB ? ["--db", other.BEADS_DB] : [];
+	return await run(["br", "comments", "list", bead.id, ...db], { cwd: repo, env });
+}
+TS
+
+selected_case conflicting-flags 1 "inherited-br-call" <<'TS'
+async function conflictingFlags(repo, env, bead, other) {
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	return await run(["br", "show", bead.id, "--db", other, ...db], { cwd: repo, env });
+}
+TS
+
+selected_case indirect-mutation 1 "inherited-br-call" <<'TS'
+async function indirectMutation(repo, env, bead) {
+	function changeFlags() { db.pop(); }
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	changeFlags();
+	return await run(["br", "show", bead.id, ...db], { cwd: repo, env });
+}
+TS
+
+selected_case mutated 1 "inherited-br-call" <<'TS'
+async function mutatedFlags(repo, env, bead) {
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	db.pop();
+	return await run(["br", "comments", "list", bead.id, ...db], { cwd: repo, env });
+}
+TS
+
+selected_case shadowed 1 "inherited-br-call" <<'TS'
+async function shadowedFlags(repo, env, bead) {
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	{
+		const db = [];
+		await run(["br", "comments", "list", bead.id, ...db], { cwd: repo, env });
+	}
+}
+TS
+
+selected_case inherited-write 1 "inherited-br-call" <<'TS'
+async function inheritedWrite(repo, env) {
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	await run(["br", "create", "probe", ...db], { cwd: repo, env });
+}
+TS
+
+selected_case inherited-init 1 "unpinned-br-init" <<'TS'
+async function inheritedInit(repo, env) {
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	await run(["br", "init", ...db], { cwd: repo, env });
+}
+TS
+
+# Run the unsafe-source oracle against the real scanner, then neutralize its
+# binding detector. The very same refusal assertions must now go RED.
+python3 -B - "$SCRIPTS" > "$TMP/neutralized.out" <<'PY'
+import sys
+from unittest.mock import patch
+
+sys.path.insert(0, sys.argv[1])
+import br_init_check as checker
+
+
+def require_refusal(source: bytes, rule: str) -> None:
+    if rule not in checker._js_calls(source, "fixture.ts").hits.by_rule:
+        raise AssertionError(f"unsafe source admitted: {rule}")
+
+
+cases = [
+    (b'run(["br", "init"]);', checker.RULE),
+    (b'run(["br", "create", "probe"]);', checker.INHERITED_RULE),
+]
+for source, rule in cases:
+    require_refusal(source, rule)
+    with patch.object(checker, "_js_pinned", return_value=True):
+        try:
+            require_refusal(source, rule)
+        except AssertionError:
+            print(f"neutralized-negative RED {rule}")
+        else:
+            raise AssertionError("negative oracle survived detector neutralization")
+PY
+rc=$?
+out=$(cat "$TMP/neutralized.out")
+check "$rc" "0" "neutralized-init-oracle-red" "$out" "neutralized-negative RED unpinned-br-init"
+check "$rc" "0" "neutralized-write-oracle-red" "$out" "neutralized-negative RED inherited-br-call"
+
 
 # Pushed range: an unchanged legacy call is allowed, a newly added call is refused,
 # and a pinned call is admitted after the unsafe site becomes baseline.

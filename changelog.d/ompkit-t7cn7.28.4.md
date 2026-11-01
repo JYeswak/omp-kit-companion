@@ -1,0 +1,1 @@
+- Recognize adjacent, same-block caller-selected database argument spreads on tracker metadata reads. Keep unpinned fixture initialization, inherited writes, changed bindings and namespace mismatches refused; staged and pushed-range checks exercise both valid reads and unsafe controls.

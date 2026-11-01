@@ -7,6 +7,10 @@ heredoc scanner and shlex. Initialization requires the fixture's
 ``.beads/beads.db`` in ``--db`` or an inline ``BEADS_DB`` binding. Other
 fixture commands must show a local database binding instead of inheriting the
 suite's caller-selected ``BEADS_DB``. Source suppressions are disabled.
+Caller-selected metadata reads may instead carry a same-scope const DB-argument
+array derived from the exact process environment and immediately followed by the
+read invocation. This recognizes that bounded idiom, not arbitrary JavaScript
+dataflow; init and write calls still require a fixture-local binding.
 """
 from __future__ import annotations
 
@@ -347,15 +351,141 @@ def _js_wrapper_environment_pinned(code: str, strings: Dict[int, Tuple[str, int,
     return True
 
 
+def _js_call_environment(code: str, strings: Dict[int, Tuple[str, int, bool]],
+                         pairs: Dict[int, int], options: Tuple[int, int]) -> Optional[str]:
+    start, end = _trim(code, *options)
+    if code[start:start + 1] != "{" or pairs.get(start) != end - 1:
+        return None
+    environment: Optional[str] = None
+    for prop in _parts(code, start + 1, end - 1, pairs):
+        raw = code[prop[0]:prop[1]].strip()
+        if raw.startswith(("...", "[")):
+            return None
+        parsed = _property(code, strings, prop, pairs)
+        if parsed is None:
+            if not raw.isidentifier():
+                return None
+            key, value = raw, raw
+        else:
+            key, span = parsed
+            value = code[span[0]:span[1]].strip()
+        if key == "env":
+            if environment is not None or not value.isidentifier():
+                return None
+            environment = value
+    return environment
+
+
+def _js_selected_db_value(code: str, strings: Dict[int, Tuple[str, int, bool]],
+                          pairs: Dict[int, int], span: Tuple[int, int], environment: str) -> bool:
+    start, end = _trim(code, *span)
+    marks: List[Tuple[int, str]] = []
+    index = start
+    while index < end:
+        if code[index] in "([{" and index in pairs:
+            index = pairs[index] + 1
+            continue
+        if code[index] in "?:":
+            marks.append((index, code[index]))
+        index += 1
+    if len(marks) != 2 or [mark for _, mark in marks] != ["?", ":"]:
+        return False
+    question, colon = marks[0][0], marks[1][0]
+    binding = environment + ".BEADS_DB"
+    if "".join(code[start:question].split()) != binding:
+        return False
+    yes_start, yes_end = _trim(code, question + 1, colon)
+    if code[yes_start:yes_start + 1] != "[" or pairs.get(yes_start) != yes_end - 1:
+        return False
+    values = _parts(code, yes_start + 1, yes_end - 1, pairs)
+    return (
+        len(values) == 2
+        and _literal(strings, values[0]) == "--db"
+        and "".join(code[values[1][0]:values[1][1]].split()) == binding
+        and "".join(code[colon + 1:end].split()) == "[]"
+    )
+
+
+def _js_adjacent_read(code: str, start: int, end: int) -> bool:
+    start, end = _trim(code, start, end)
+    prefix = " ".join(code[start:end].split())
+    if prefix in {"", "await", "return", "return await"}:
+        return True
+    declaration, after = core.js_identifier(code, start)
+    if declaration not in {"const", "let"}:
+        return False
+    name_start, _ = _trim(code, after, end)
+    name, after_name = core.js_identifier(code, name_start)
+    return bool(name) and "".join(code[after_name:end].split()) in {"=", "=await"}
+
+
+def _js_selected_db_read(code: str, strings: Dict[int, Tuple[str, int, bool]],
+                         pairs: Dict[int, int], arguments: Sequence[Tuple[int, int]],
+                         argv: Sequence[Tuple[int, int]], call_start: int) -> bool:
+    if len(argv) < 2 or _literal(strings, argv[0]) != "br" or len(arguments) != 2:
+        return False
+    command = _literal(strings, argv[1])
+    if command == "comments":
+        if len(argv) < 3 or _literal(strings, argv[2]) != "list":
+            return False
+    elif command not in {"show", "list", "ready", "blocked", "stats", "count", "where", "info"}:
+        return False
+    environment = _js_call_environment(code, strings, pairs, arguments[1])
+    if environment is None:
+        return False
+    spread = "".join(code[argv[-1][0]:argv[-1][1]].split())
+    if not spread.startswith("...") or not spread[3:].isidentifier():
+        return False
+    variable = spread[3:]
+    for span in argv[:-1]:
+        literal = _literal(strings, span)
+        if code[span[0]:span[1]].lstrip().startswith("...") or literal == "--db":
+            return False
+        if literal is not None and literal.startswith("--db="):
+            return False
+    # Stay inside the call's immediate lexical block. A sibling/outer binding
+    # or an ambiguous shadow is not proof of this call's selected namespace.
+    block = max((a for a, b in pairs.items() if a < call_start < b and code[a] == "{"), default=-1)
+    index = block + 1
+    while index < call_start:
+        if code[index] in "([{" and index in pairs:
+            index = pairs[index] + 1
+            continue
+        if not (code[index].isalpha() or code[index] in "_$"):
+            index += 1
+            continue
+        token, index = core.js_identifier(code, index)
+        if token != "const":
+            continue
+        name_start, _ = _trim(code, index, call_start)
+        name, name_end = core.js_identifier(code, name_start)
+        if name != variable:
+            continue
+        value_start, _ = _trim(code, name_end, call_start)
+        if code[value_start:value_start + 1] != "=":
+            return False
+        stop = value_start + 1
+        while stop < call_start and code[stop] != ";":
+            stop = pairs[stop] + 1 if code[stop] in "([{" and stop in pairs else stop + 1
+        return (
+            stop < call_start
+            and _js_selected_db_value(code, strings, pairs, (value_start + 1, stop), environment)
+            and _js_adjacent_read(code, stop + 1, call_start)
+        )
+    return False
+
+
 def _js_pinned(code: str, strings: Dict[int, Tuple[str, int, bool]], pairs: Dict[int, int],
                arguments: Sequence[Tuple[int, int]], argv: Sequence[Tuple[int, int]], offset: int,
-               name: str, wrapper: bool, argv_argument_index: int) -> bool:
+               name: str, wrapper: bool, argv_argument_index: int, call_start: int) -> bool:
     for index in range(offset, len(argv)):
         option = _literal(strings, argv[index])
         if option == "--db" and index + 1 < len(argv) and _span_has_fixture_db(strings, argv[index + 1]):
             return True
         if option is not None and option.startswith("--db=") and _path_is_fixture_db([option]):
             return True
+    if _js_selected_db_read(code, strings, pairs, arguments, argv, call_start):
+        return True
     database_argument = argv_argument_index + 1
     if wrapper and name in {"runBr", "run_br"} and database_argument < len(arguments):
         if set(_identifiers(code, arguments[database_argument])) & {"db", "database", "db_path", "database_path"}:
@@ -422,7 +552,7 @@ def _js_calls(source: bytes, path: str) -> core.Scan:
                 else:
                     argv = []
         if argv:
-            if not _js_pinned(code, strings, pairs, arguments, argv, offset, name, wrapper, argv_argument_index):
+            if not _js_pinned(code, strings, pairs, arguments, argv, offset, name, wrapper, argv_argument_index, start):
                 line, column = where(start)
                 hits.add(rule, line, column, "br init" if rule == RULE else "br call")
             continue
