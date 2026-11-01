@@ -1,0 +1,1 @@
+- SUBAGENTRESTART1 (ompkit-o2iif): the fleet UPGRADE_NOTICE now tells a background task subagent that it is not the seat and must ignore the notice; `self_restart.py` refuses such a caller with `REFUSED_SUBAGENT` before any Esc reaches the seat.

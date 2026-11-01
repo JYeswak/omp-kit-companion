@@ -91,7 +91,9 @@ export function upgradeNoticeMessage(installed: string, loaded: string, fleet = 
 		`or a \`[pending]\` commit.\n` +
 		`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\`\n` +
 		`3. End your turn now with no further tool call. The helper pauses your goal (Esc), reloads this seat ` +
-		`on omp-kit ${installed} and resumes your goal.`
+		`on omp-kit ${installed} and resumes your goal.\n` +
+		`A background task subagent is not the seat: ignore this notice and finish your task. Only the seat ` +
+		`restarts the seat, and the helper refuses a subagent (REFUSED_SUBAGENT).`
 	);
 }
 
