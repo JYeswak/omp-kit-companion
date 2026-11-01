@@ -395,6 +395,7 @@ for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.s
 	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
 done
 cp "$(dirname -- "$INSTALLER")/check-gap-mention.sh" "$TMP/inertkit/scripts/check-gap-mention.sh"
+cp "$(dirname -- "$INSTALLER")/check-deploy-step.sh" "$TMP/inertkit/scripts/check-deploy-step.sh"
 cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"
 cp "$(dirname -- "$INSTALLER")/check-commit-gate.sh" "$TMP/inertkit/scripts/check-commit-gate.sh"
 cp "$(dirname -- "$INSTALLER")/check-staged-wallclock.sh" "$TMP/inertkit/scripts/check-staged-wallclock.sh"

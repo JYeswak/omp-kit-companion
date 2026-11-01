@@ -66,7 +66,7 @@ files=$(git -C "$R" diff-tree --no-commit-id --name-only -r HEAD | tr '\n' ' ')
 check 0 0 "$files" 'changelog.d/x-1.md scripts/install-commit-msg-bead.sh ' 'valid commit includes installer and changelog'
 printf '\n### Recovery\n' >> "$R/docs/release-procedure.md"
 printf '### Fixed\n\n- Document a deployment recovery path.\n' > "$R/changelog.d/x-2.md"
-printf '#!/bin/sh\n# documented installer edit\n' > "$R/scripts/install-commit-msg-bead.sh"
+printf '# documented installer edit\n' >> "$R/scripts/install-commit-msg-bead.sh"
 git -C "$R" add docs/release-procedure.md changelog.d/x-2.md scripts/install-commit-msg-bead.sh
 before_reference=$(git -C "$R" rev-parse HEAD)
 out=$(git -C "$R" commit -q -m '[test] document installer recovery' -m 'Bead: x-2' 2>&1)

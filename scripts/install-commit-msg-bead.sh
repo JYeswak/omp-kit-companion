@@ -797,6 +797,7 @@ ensure_chain commit-msg
 install_commit_msg
 install_commit_notes
 install_gap_mention
+install_stale_worktree
 install_deploy_step
 install_kitlib_reversal
 install_commit_gate
