@@ -506,7 +506,9 @@ test("native full-test retains a real named failing case without counting later 
 		expect(stream.capture_complete).toBe(true);
 	}
 	expect(readFileSync(reference.stdout.path, "utf8")).toContain("SELFTEST_FAIL: planted unmatched enforce=yes row was accepted");
-}, 120_000);
+	// The installed full test runs every stage before claim-selftest; at load ~20 it ran past
+	// 120 s during the 0.2.83 cut (2026-11-01). The bound only stops a hang.
+}, 300_000);
 
 test("installed integrations refuse a planted missing tests/live/integrations.json and name the matrix", () => {
 	const { home, installedRoot, installedBinary } = installCandidate("missing-matrix-home");
