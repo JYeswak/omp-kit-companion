@@ -3,6 +3,8 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, r
 import { dirname, join, resolve } from "node:path";
 import { run as runCommand } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
+import { writeBundledHarness } from "./release-manifest-fixture.ts";
 
 const entry = realpathSync(resolve(import.meta.dir, "../../src/cli.ts"));
 const roots: string[] = [];
@@ -32,22 +34,26 @@ async function doctorFixture(): Promise<{ home: string; entry: string; env: Reco
 	const home = realpathSync(owned.path);
 	const release = join(home, "release");
 	const sourceRoot = realpathSync(resolve(import.meta.dir, "../../"));
-	const manifestBuild = await runCommand(["sh", join(sourceRoot, "scripts", "build-manifest.sh")], {
-		deadline_s: 120,
-		cwd: sourceRoot,
-		env: { ...process.env },
-	});
-	if (manifestBuild.rc !== 0) {
-		throw new Error(`failed to build activation manifest fixtures (exit ${manifestBuild.rc}): ${Buffer.from(manifestBuild.stderr).toString()}`);
-	}
 	const entry = join(release, "src", "cli.ts");
 	const bin = join(home, "bin");
 	mkdirSync(join(release, "src"), { recursive: true });
 	for (const directory of ["rules", "rules-fleet", "retired", "extensions"]) {
 		cpSync(join(sourceRoot, directory), join(release, directory), { recursive: true });
 	}
-	for (const file of ["MANIFEST.tsv", "MANIFEST.fleet.tsv", "package.json"]) {
-		cpSync(join(sourceRoot, file), join(release, file));
+	mkdirSync(join(release, "scripts"), { recursive: true });
+	for (const file of ["build-manifest.sh", "kitlib-tmp.sh", "runtime-adapter.sh", "rule-class.ts"]) {
+		cpSync(join(sourceRoot, "scripts", file), join(release, "scripts", file));
+	}
+	cpSync(join(sourceRoot, "package.json"), join(release, "package.json"));
+	writeBundledHarness(release);
+	const identity = resolveOmpIdentity();
+	const manifestBuild = await runCommand(["sh", join(release, "scripts", "build-manifest.sh")], {
+		deadline_s: 120,
+		cwd: release,
+		env: { ...process.env, TMPDIR: home, OMP: identity.launcher, OMP_BIN: identity.launcher, OMP_PATH: identity.launcher, OMP_SRC: identity.source },
+	});
+	if (manifestBuild.rc !== 0) {
+		throw new Error(`failed to build activation manifest fixtures (exit ${manifestBuild.rc}): ${Buffer.from(manifestBuild.stderr).toString()}`);
 	}
 	const installedFleet = join(home, ".agents", "rules");
 	cpSync(join(release, "rules-fleet"), installedFleet, { recursive: true });
