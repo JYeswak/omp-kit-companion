@@ -1,0 +1,36 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_6aa6716cdcb1744733b916c6a78b926325e40942672dda54d859f355ab87a3cf",
+ "limitations": [
+  "Receipt covers only the original targeted acceptance in an exact git archive of HEAD with the two reserved test files overlaid; it does not claim the full CLI suite. The previously observed full CLI suite was red and was not rerun."
+ ],
+ "operation": "ompkit-774u.55.1-acceptance-replay",
+ "parameters": {
+  "ac1_command": "sh tests/cli/br-shim.test.sh && bun test tests/cli/br-shim.test.ts",
+  "ac1_exit": "0",
+  "ac1_result": "shell 89 pass 0 fail; Bun 16 pass 0 fail; 58 expects",
+  "ac1_source_sha256": "23643bb5f2643a2815db3c72f01937ba2c190ea8bcea060a51966e4deb880576",
+  "ac2_command": "bun test tests/cli/verify.test.ts",
+  "ac2_exit": "0",
+  "ac2_result": "40 pass 0 fail; 230 expects",
+  "ac2_source_sha256": "9b068738d234213acf9550013d821194bb30062c79542387ffc8ba290a542abe",
+  "archive": "git-archive-HEAD-plus-two-reserved-tests",
+  "bead": "ompkit-774u.55.1"
+ },
+ "producer": "SnowyFrog",
+ "result_ref": {
+  "ac1_bun": {
+   "bytes": 102,
+   "sha256": "39d6c22c6ece97d993ee6e22497bd96036c6e030005fc47c892f4fe2fb6317b1"
+  },
+  "ac1_shell": {
+   "bytes": 24,
+   "sha256": "7f6c77f7f0dbd68e4dda4ca6bd881957c6a971c79ed55ac55a7845719f8bcc81"
+  },
+  "ac2": {
+   "bytes": 8614,
+   "sha256": "71958bf83a96aa80a97035581cb9926f448193909dbe86140bb2a2a6dd620fcc"
+  }
+ }
+}
