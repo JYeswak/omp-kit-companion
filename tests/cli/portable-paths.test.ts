@@ -12,9 +12,12 @@ import { run as runProcess, type RunResult } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const scratch = ownedTmp("portable-paths-test");
-const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+const repoRoot = process.env.PORTABLE_PATHS_SOURCE_ROOT ?? fileURLToPath(new URL("../../", import.meta.url));
+// Fixture repos must not inherit the operator's tracker database or br shim.
 const baseEnvironment = Object.fromEntries(
-	Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+	Object.entries(process.env).filter(
+		(entry): entry is [string, string] => entry[1] !== undefined && entry[0] !== "BEADS_DB" && entry[0] !== "BR_BIN",
+	),
 ) as Record<string, string>;
 const checkerContracts = [
 	"publishability.test.sh",
@@ -63,8 +66,19 @@ async function okay(argv: string[], cwd: string): Promise<void> {
 	if (result.rc !== 0) throw new Error(`${argv.join(" ")} failed (${result.rc})\n${output(result)}`);
 }
 
+// Profiling-only: reports each git commit's wall time including hooks; disabled in normal runs.
 async function git(repo: string, ...args: string[]) {
-	return command(["git", "-C", repo, ...args], repo);
+	const result = await command(["git", "-C", repo, ...args], repo);
+	if (process.env.PORTABLE_PATHS_PROFILE === "1" && args[0] === "commit") {
+		const messageIndex = args.indexOf("-m");
+		console.error(JSON.stringify({
+			event: "portable-paths-profile",
+			subject: messageIndex >= 0 ? args[messageIndex + 1] ?? "" : "(no -m)",
+			elapsed_ms: Math.round(result.elapsed_s * 1000),
+			rc: result.rc,
+		}));
+	}
+	return result;
 }
 
 async function gitOkay(repo: string, ...args: string[]): Promise<void> {
@@ -248,7 +262,7 @@ test("planted negative: removing the installed check lets the forbidden hunk thr
 }, 120_000);
 
 test("gates: pre-commit rejects shipped local paths and exempts tests", async () => {
-	const repo = await newPrecommitRepo("precommit-paths");
+	const repo = await newPrecommitRepo("precommit-paths-direct");
 	writeFileSync(join(repo, "extensions", "foo.ts"), 'export const path = "/Users/josh/x";\n');
 	await gitOkay(repo, "add", "--", "extensions/foo.ts");
 	expectRefusal(await git(repo, "commit", "-m", "[test] add machine path"), "extensions/foo.ts:1");
@@ -258,7 +272,10 @@ test("gates: pre-commit rejects shipped local paths and exempts tests", async ()
 	await gitOkay(repo, "add", "--", "extensions/foo.ts", "extensions/foo.test.ts");
 	const testControl = await git(repo, "commit", "-m", "[test] test fixture control");
 	if (testControl.rc !== 0) throw new Error(`test-path control failed\n${output(testControl)}`);
+}, 120_000);
 
+test("gates: pre-commit rejects joined and tilde machine paths", async () => {
+	const repo = await newPrecommitRepo("precommit-paths-joined-tilde");
 	writeFileSync(
 		join(repo, "extensions", "joined.ts"),
 		'import { join } from "node:path";\nexport const path = join(home, ".claude", "skills");\n',
@@ -277,7 +294,10 @@ test("gates: pre-commit rejects shipped local paths and exempts tests", async ()
 	await gitOkay(repo, "add", "--", "extensions/tilde.ts");
 	const tildeControl = await git(repo, "commit", "-m", "[test] clear tilde path");
 	if (tildeControl.rc !== 0) throw new Error(`tilde-path control failed\n${output(tildeControl)}`);
+}, 120_000);
 
+test("gates: pre-commit rejects escaped and nested machine paths", async () => {
+	const repo = await newPrecommitRepo("precommit-paths-escaped-nested");
 	writeFileSync(join(repo, "extensions", "escaped.ts"), 'export const path = join(home, "\\x2eclaude", "skills");\n');
 	await gitOkay(repo, "add", "--", "extensions/escaped.ts");
 	expectRefusal(await git(repo, "commit", "-m", "[test] add escaped joined path"), "extensions/escaped.ts");
@@ -293,7 +313,10 @@ test("gates: pre-commit rejects shipped local paths and exempts tests", async ()
 	await gitOkay(repo, "add", "--", "extensions/nested.ts");
 	const nestedControl = await git(repo, "commit", "-m", "[test] clear nested path");
 	if (nestedControl.rc !== 0) throw new Error(`nested-path control failed\n${output(nestedControl)}`);
+}, 120_000);
 
+test("gates: pre-commit rejects Python and heredoc paths and keeps prefix/comment controls", async () => {
+	const repo = await newPrecommitRepo("precommit-paths-python-heredoc");
 	writeFileSync(
 		join(repo, "scripts", "joined.py"),
 		'from os.path import join\npath = join(home, "\\x2eclaude", "skills")\n',
@@ -322,23 +345,32 @@ test("gates: pre-commit rejects shipped local paths and exempts tests", async ()
 	expectRefusal(await git(repo, "commit", "-m", "[test] heredoc machine path"), "extensions/heredoc.sh:2");
 }, 120_000);
 
-test("allowlist ratchet permits removals but refuses new occurrences and entries", async () => {
-	const repo = await newPrecommitRepo("allowlist-ratchet");
+test("allowlist ratchet permits removal of an existing occurrence", async () => {
+	const repo = await newPrecommitRepo("allowlist-removal");
 	writeFileSync(join(repo, "extensions", "legacy.ts"), "export const legacy = \"safe\";\n");
 	await gitOkay(repo, "add", "--", "extensions/legacy.ts");
 	const removed = await git(repo, "commit", "-m", "[test] remove legacy path");
 	if (removed.rc !== 0) throw new Error(`allowlisted removal failed\n${output(removed)}`);
+}, 60_000);
 
+test("allowlist ratchet refuses a new occurrence in an allowlisted file", async () => {
+	const repo = await newPrecommitRepo("allowlist-new-occurrence");
 	writeFileSync(join(repo, "extensions", "legacy.ts"), 'export const legacy = "/Users/josh/new";\n');
 	await gitOkay(repo, "add", "--", "extensions/legacy.ts");
 	expectRefusal(await git(repo, "commit", "-m", "[test] add path to legacy file"), "extensions/legacy.ts");
+}, 60_000);
 
+test("allowlist ratchet permits shrinking the baseline", async () => {
+	const repo = await newPrecommitRepo("allowlist-shrink");
 	writeFileSync(join(repo, "extensions", "legacy.ts"), "export const legacy = \"safe\";\n");
 	writeFileSync(join(repo, "scripts", "portable-paths-baseline.json"), baseline({}));
 	await gitOkay(repo, "add", "--", "extensions/legacy.ts", "scripts/portable-paths-baseline.json");
 	const shrunk = await git(repo, "commit", "-m", "[test] shrink path baseline");
 	if (shrunk.rc !== 0) throw new Error(`allowlist shrink failed\n${output(shrunk)}`);
+}, 60_000);
 
+test("allowlist ratchet refuses a raised baseline entry", async () => {
+	const repo = await newPrecommitRepo("allowlist-raise");
 	writeFileSync(
 		join(repo, "scripts", "portable-paths-baseline.json"),
 		baseline({ "extensions/new.ts": 1 }),

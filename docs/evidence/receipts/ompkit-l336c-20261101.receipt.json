@@ -1,0 +1,26 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_2fe7d50739366bf81963e7b6327664f29f95f6dcb35ec01b6c078a77a85b2d2c",
+ "limitations": [
+  "No full CLI suite, publication, release, installed-runtime qualification, or independent non-author grade is claimed.",
+  "The historical full-suite timeout was not reproduced by the target-only eight-burner replay; a full suite was not rerun.",
+  "The first baseline capture wrapper failed after the JUnit report; the corrected capture recorded child rc zero."
+ ],
+ "operation": "portable-paths-test-load-and-clean-copy-verification",
+ "parameters": {
+  "base_commit": "5a7612f85891db4fb5a50f7e9189fa82ea1a61ef",
+  "bead": "ompkit-l336c",
+  "consumer": "non-author verifier of ompkit-l336c",
+  "deletion_condition": "retain with bead evidence; supersede only if bead withdrawn or later exact-source receipt replaces it",
+  "feature": "portable-path pre-commit test remains bounded under load",
+  "observed_defect": "lead-recorded test timeout at 120002.20ms against 120000ms cap",
+  "result_path": "docs/evidence/receipts/ompkit-l336c-20261101.result.json",
+  "subject_sha256": "74c095141b1fca8976324f694fe6d1573cb0eaee02c45de528475c64ace5cbca"
+ },
+ "producer": "JadeThrush",
+ "result_ref": {
+  "bytes": 7259,
+  "sha256": "f98bd6d95c0639d45ab7cdad82ff8bbf151220f3a41d47fda7e40bcbf3458f8a"
+ }
+}
