@@ -102,6 +102,22 @@ test("SENDANY1: derive the block's Tern session when no fleet binding exists", (
 	expect(result).toMatchObject({ status: "ok", sessionId: 4, sessionName: "Default", tabId: 55834574849, tabName: "omp-chief" });
 });
 
+// WAKEBIGID1 (ompkit-774u.82): Tern browser and picture-in-picture blocks carry 64-bit ids above 2^53. Live on
+// 2026-11-01 one pip block (9275462912049159) in another tab made locateBlock refuse the whole snapshot, so every
+// send and mail wake to every seat failed PLANE_SEAT_UNBOUND. The id is parsed from the raw JSON text, as Tern emits it.
+test("WAKEBIGID1: an unrelated 64-bit block id never hides the configured seat; a non-integer id is still schema drift", () => {
+	const raw = JSON.stringify(fleetInspect).replace('"blocks":[{"id":5,', '"blocks":[{"id":9275462912049159,"cwd":"/repo","program":"","browser":"about:blank"},{"id":5,');
+	expect(raw).toContain("9275462912049159");
+	const withPip = JSON.parse(raw) as typeof fleetInspect;
+	expect(locateBlock(withPip, 5, "omp-test")).toMatchObject({ status: "ok", tabName: "omp-test" });
+	expect(parseTernInspection(withPip, { session: "omp-test", pane: "5", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", paneId: 5 });
+	const io = { ...defaultTernIo(), run: (argv: string[]) => argv[0] === "tern" && argv.includes("inspect")
+		? { code: 0, out: raw } : { code: 1, out: "" } } as TernObserverIo;
+	expect(resolveTernWindow({ session: "omp-test", pane: "5", windowKey: "", cwd: "/repo" }, io, {})).toMatchObject({ ok: true, kind: "default" });
+	const stringId = JSON.parse(raw.replace("9275462912049159", '"9275462912049159"')) as typeof fleetInspect;
+	expect(locateBlock(stringId, 5, "omp-test")).toMatchObject({ status: "schema", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" });
+});
+
 test("TERNADDR1: resolveTernWindow admits the default window when the fleet session is a tab of it", () => {
 	const io = { ...defaultTernIo(), run: (argv: string[]) => argv[0] === "tern" && argv.includes("inspect")
 		? { code: 0, out: JSON.stringify(fleetInspect) } : { code: 1, out: "" } } as TernObserverIo;

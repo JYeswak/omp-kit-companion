@@ -259,12 +259,15 @@ export type BlockLocation =
 	| { status: "rebound"; sessionName: string | null; tabName: string | null }
 	| { status: "schema"; reason: string };
 
+// Tern ids are 64-bit: browser and picture-in-picture blocks get ids above 2^53, which JSON.parse cannot hold
+// exactly. Such an id is still a well-formed integer and can never equal a configured pane (paneNumber admits safe
+// integers only), so it is skipped as not ours; only a non-integer id is schema drift (WAKEBIGID1, ompkit-774u.82).
 export function locateBlock(root: Record<string, unknown>, paneId: number, seatSession: string): BlockLocation {
 	if (!Array.isArray(root.sessions)) return { status: "schema", reason: "INSPECT_SCHEMA_UNKNOWN" };
 	const hits: Extract<BlockLocation, { status: "ok" }>[] = [];
 	for (const rawSession of root.sessions) {
 		const session = objectValue(rawSession);
-		if (!session || !Number.isSafeInteger(session.id) || (typeof session.name !== "string" && session.name !== null)
+		if (!session || !Number.isInteger(session.id) || (typeof session.name !== "string" && session.name !== null)
 			|| (session.tabs !== undefined && !Array.isArray(session.tabs))) {
 			return { status: "schema", reason: "INSPECT_SESSION_SCHEMA_UNKNOWN" };
 		}
@@ -275,7 +278,7 @@ export function locateBlock(root: Record<string, unknown>, paneId: number, seatS
 			if (!tab || !Array.isArray(tab.blocks)) return { status: "schema", reason: "INSPECT_TAB_SCHEMA_UNKNOWN" };
 			for (const rawBlock of tab.blocks) {
 				const block = objectValue(rawBlock);
-				if (!block || !Number.isSafeInteger(block.id)) return { status: "schema", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" };
+				if (!block || !Number.isInteger(block.id)) return { status: "schema", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" };
 				if (block.id === paneId) {
 					hits.push({ status: "ok", sessionId, sessionName, tabId: Number.isSafeInteger(tab.id) ? tab.id as number : null,
 						tabName: typeof tab.name === "string" ? tab.name : null, tab: rawTab });
