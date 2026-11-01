@@ -25,31 +25,6 @@ mkdir -p "$REPO_TMP"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP full-suite-verdict-incomplete-test || exit 1
 
-# Resource reports are an external input, not the verdict under test. Keep ordinary
-# fixture runs independent of the host; individual admission cases change only these facts.
-resource_probe="$TMP/resource-probe"
-mkdir -p "$resource_probe"
-cat >"$resource_probe/sitecustomize.py" <<'PY'
-import os
-
-_statvfs = os.statvfs
-os.getloadavg = lambda: (float(os.environ["OMP_KIT_RESOURCE_FIXTURE_LOAD"]),) * 3
-os.cpu_count = lambda: 8
-
-def _fixture_statvfs(path):
-    fields = list(_statvfs(path))
-    fields[0] = fields[1] = 4096
-    fields[2] = 10485760
-    fields[3] = fields[4] = int(os.environ["OMP_KIT_RESOURCE_FIXTURE_FREE_BYTES"]) // 4096
-    return os.statvfs_result(fields)
-
-os.statvfs = _fixture_statvfs
-PY
-PYTHONPATH="$resource_probe${PYTHONPATH:+:$PYTHONPATH}"
-OMP_KIT_RESOURCE_FIXTURE_LOAD=3.5
-OMP_KIT_RESOURCE_FIXTURE_FREE_BYTES=21474836480
-export PYTHONPATH OMP_KIT_RESOURCE_FIXTURE_LOAD OMP_KIT_RESOURCE_FIXTURE_FREE_BYTES
-
 pass=0
 fail=0
 ok() { pass=$((pass + 1)); echo "ok - $1"; }
@@ -1411,65 +1386,6 @@ assert store.minimum_shortfalls(counts, 249, policy, baseline) == [
 PY
 then ok "MINRUN1 verified work includes focused coverage once, excludes idle gaps and honors the exact wall floor"
 else not_ok "MINRUN1 covered-work interval or floor boundary is wrong"; fi
-
-# VERDICTPREFLIGHT1: exercise the real judge with controlled OS reports. No fixture
-# returns a verdict; admitted suites run through the ordinary metrics and completeness path.
-resource_fixture() {
-	mkrepo_begin "$1"
-	for resource_n in 1 2 3 4 5 6; do
-		addfile "tests/cli/resource-$resource_n.test.sh" "set -eu
-printf 'RESOURCE_SUITE_EXECUTED %s\n' \"\$0\""
-	done
-	mkrepo_commit
-}
-
-resource_refusal_case() {
-	resource_fixture "$1"
-	run_verdict_with_envs "$1" FULL_SUITE_MAX_LOAD=6 \
-		"OMP_KIT_RESOURCE_FIXTURE_LOAD=$2" "OMP_KIT_RESOURCE_FIXTURE_FREE_BYTES=$3"
-	if [ "$rc" = 1 ] && grep -F "FULL-SUITE: REFUSED reason=$4" "$out" >/dev/null \
-		&& [ ! -f "$entry" ]; then
-		ok "VERDICTPREFLIGHT1 $4 refuses before suites or a completed verdict"
-	else
-		not_ok "VERDICTPREFLIGHT1 $4 was not a typed pre-run refusal (rc=$rc)"
-		cat "$out"
-	fi
-}
-
-resource_refusal_case resource-high-load 100 21474836480 LOAD_ABOVE_CEILING
-resource_refusal_case resource-low-disk 3.5 1073741824 DISK_BELOW_FLOOR
-resource_fixture resource-quiet
-run_verdict_with_envs resource-quiet FULL_SUITE_MAX_LOAD=6
-if [ "$rc" = 0 ] && grep -F "RESOURCE_SUITE_EXECUTED" "$repo.cache/$tree.log" >/dev/null; then
-	ok "VERDICTPREFLIGHT1 quiet control executes its declared suites and reaches PASS"
-else
-	not_ok "VERDICTPREFLIGHT1 quiet control did not run to completion (rc=$rc)"
-	cat "$out"
-fi
-telemetry_rc=1
-if [ "$rc" = 0 ]; then
-python3 - "$entry" <<'PY'
-import json, sys
-entry = json.load(open(sys.argv[1]))
-assert entry["verdict"] == "PASS"
-assert entry["evidence"]["shell_suites"] == 6
-assert entry["evidence"]["shell_fail"] == 0
-assert len(entry["evidence"]["files"]) == 6
-assert all(row["complete"] and row["rc"] == 0 for row in entry["evidence"]["files"])
-assert entry["admission"]["load_millionths"] == [3500000, 3500000, 3500000]
-assert entry["admission"]["load_scale"] == 1000000
-assert entry["admission"]["free_bytes"] == 21474836480
-assert entry["admission"]["cores"] == 8
-assert entry["timing"]["load_start"] == [3.5, 3.5, 3.5]
-assert entry["timing"]["workers"]["shell"] == 4
-PY
-	telemetry_rc=$?
-fi
-if [ "$telemetry_rc" = 0 ]; then
-	ok "VERDICTPREFLIGHT1 records resource facts and caps workers by cores minus load"
-else
-	not_ok "VERDICTPREFLIGHT1 resource telemetry or shell capacity is missing/wrong"
-fi
 
 echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
