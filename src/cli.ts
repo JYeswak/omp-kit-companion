@@ -2548,7 +2548,9 @@ async function runCacheRetainWorker(job: string, home: string, jobsDir: string, 
 			"Run service run cache-retain normally; no cache work was performed.");
 	}
 	delete process.env.OMP_KIT_CACHE_RETAIN_CLAIM;
-	const recordPath = join(jobsDir, `cache-retain.${Date.now()}-${randomBytes(8).toString("hex")}.log.jsonl`);
+	// Fixed daily slots bound both retained journals and the SDK's stable coordination inodes.
+	const slot = (BigInt(Date.now()) / 86_400_000n) % 32n;
+	const recordPath = join(jobsDir, `cache-retain.${slot}.log.jsonl`);
 	const report = await retainFleetCaches(home, recordPath, { stateRoot: dirname(jobsDir) });
 	return { code: report.overall === "OK" ? 0 : report.overall === "UNVERIFIED" ? 3 : 1,
 		data: { ...report, job, record_path: recordPath },

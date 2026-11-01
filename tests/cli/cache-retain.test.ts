@@ -225,3 +225,41 @@ test("CACHERETAIN1 named browser activity protects its owner without holding an 
 	expect(readFileSync(cookies, "utf8")).toBe("live login");
 	expect(existsSync(cold)).toBe(false);
 });
+
+test("CACHERETAIN1 a full retention journal refuses new removals without losing existing evidence", async () => {
+	const f = fixture();
+	const old = f.file(".omp/cache/expired.bin", 120, "preserved without journal capacity");
+	const evidence = `{"previous":"${"x".repeat(8 << 20)}"}\n`;
+	writeFileSync(f.journal, evidence, { mode: 0o600 });
+	const result = await retainFleetCaches(f.home, f.journal, { nowMs: f.now, openFiles: new Set() });
+	expect(result.overall).toBe("FINDINGS");
+	expect(result.removed).toBe(0);
+	expect(readFileSync(old, "utf8")).toBe("preserved without journal capacity");
+	expect(readFileSync(f.journal, "utf8")).toBe(evidence);
+});
+
+test("CACHERETAIN1 a forged delegated worker cannot remove an expired cache entry", async () => {
+	const f = fixture();
+	const old = f.file(".omp/cache/expired.bin", 120, "not authorized");
+	const result = await run([process.execPath, join(ROOT, "src/cli.ts"), "service", "run", "cache-retain", "--json"], {
+		cwd: ROOT, env: { ...process.env, HOME: f.home, XDG_STATE_HOME: join(f.home, ".local/state"),
+			OMP_KIT_CACHE_RETAIN_CLAIM: "forged", OMP_KIT_LOAD_OVERRIDE: "0/32" },
+		deadline_s: 20, max_output_bytes: 1 << 20,
+	});
+	expect(result.rc).toBe(2);
+	expect(JSON.parse(new TextDecoder().decode(result.stdout)).errors[0].code).toBe("CACHE_RETAIN_KEEPER_CHANGED");
+	expect(readFileSync(old, "utf8")).toBe("not authorized");
+}, 30_000);
+
+test("CACHERETAIN1 the real service deadline stops its worker before an expired entry is removed", async () => {
+	const f = fixture();
+	const old = f.file(".omp/cache/expired.bin", 120, "not removed after timeout");
+	const result = await run([process.execPath, join(ROOT, "src/cli.ts"), "service", "run", "cache-retain", "--json"], {
+		cwd: ROOT, env: { ...process.env, HOME: f.home, XDG_STATE_HOME: join(f.home, ".local/state"),
+			OMP_KIT_LOAD_OVERRIDE: "0/32", OMP_KIT_RUN_CAP_MS: "1" },
+		deadline_s: 20, max_output_bytes: 1 << 20,
+	});
+	expect(result.rc).toBe(1);
+	expect(JSON.parse(new TextDecoder().decode(result.stdout)).data.receipt.status).toBe("TIMEOUT");
+	expect(readFileSync(old, "utf8")).toBe("not removed after timeout");
+}, 30_000);

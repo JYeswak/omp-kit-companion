@@ -7,6 +7,7 @@ import { snapshotClear, takeLsofSnapshot, type ScratchRunner } from "./scratch.t
 import { redactFullTestCause } from "./full-test-runner.ts";
 
 const DAY = 86_400_000;
+const JOURNAL_ADMISSION_BYTES = 8 << 20;
 export type CacheRetentionKind = "cache" | "log" | "receipt" | "browser-cache";
 /** Conservative shipped expiry decisions; paths and liveness are discovered, never copied from a census. */
 export const CACHE_RETENTION_AGE_MS: Readonly<Record<CacheRetentionKind, number>> = {
@@ -240,7 +241,10 @@ export async function retainFleetCaches(home: string, recordPath: string, option
 					if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("CACHE_RETAIN_BYTES_UNREPRESENTABLE");
 					const event = { at: new Date(now).toISOString(), target: safeText(target.id, home), entry: safeText(entry.name, home),
 						path_sha256: createHash("sha256").update(path).digest("hex"), bytes: Number(bytes) };
-					await appendJsonl(recordPath, () => ({ ...event, event: "planned" }), journalOptions);
+					await appendJsonl(recordPath, state => {
+						if (state.size >= JOURNAL_ADMISSION_BYTES) throw new Error("CACHE_RETAIN_JOURNAL_FULL");
+						return { ...event, event: "planned" };
+					}, journalOptions);
 					const currentRoot = safeRoot(target.anchorRoot, target.root), current = info(path);
 					if (currentRoot === null || currentRoot.dev !== rootInfo.dev || currentRoot.ino !== rootInfo.ino ||
 						current === null || current.dev !== before.dev || current.ino !== before.ino || current.mtimeNs !== before.mtimeNs || current.size !== before.size) {

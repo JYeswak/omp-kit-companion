@@ -82,6 +82,33 @@ removed record after it. The normal service admission and single-flight lock
 apply. The receipt reports examined, kept and removed files; a retained
 un-ingested file is not treated as deletion success.
 
+## Cache, log and receipt retention
+
+The hourly `cache-retain` job expires closed cache/log entries after 30 days
+and ordinary receipts after 90 days. Registered namespaces are OMP's cache,
+web cache, agent/profile caches and logs; the selected kit state's receipts,
+operational receipts, job logs, composer, tracker-snapshot, reopen-rate and
+diagnostics caches; and regenerable Chrome cache leaves. Browser discovery
+includes named browser-profile stores and OMP headless daemon profiles.
+
+An open profile is held whole. Unknown system-wide open-file evidence permits
+no deletion. Symlinks, hard-linked files, login/configuration data, ownership
+markers, SQLite sidecars and receipts with retained rollback backups are not
+ordinary expirable entries. A reusable bundle is retained if any descendant
+is fresh. Session journals remain the separate `session-retain` job's concern.
+
+The normal off switch, load admission, keeper and single-flight rules apply.
+A keeper-bound SDK worker has a 120-second deadline; timeout or incomplete
+output cannot report successful completion. Planned deletion records are
+fsynced before removal, and identity plus descendant freshness are rechecked
+after that append. Counts retain completed effects if later journaling fails.
+
+The job reuses 32 daily journal slots under `jobs`, bounding stable SDK lock
+inodes without unlinking them. An 8 MiB journal admission budget refuses new
+removals when full; completion records for already-planned effects remain
+allowed. Closed old journal slots also follow the job-log expiry policy.
+Installing or activating the schedule remains an explicit operator action.
+
 ## Fleet lesson report producer
 
 `service run fleet-lessons` runs the existing `omp-kit.fleet-lessons/v1`
