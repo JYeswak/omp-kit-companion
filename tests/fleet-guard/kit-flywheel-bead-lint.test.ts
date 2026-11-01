@@ -186,6 +186,9 @@ test("LINTEVERY1: a single-quoted acceptance with apostrophes and backticks is l
 		expect(lintExecs(h.execs)).toHaveLength(1);
 	}
 	expect(t.count()).toBe(before);
+	const blockedRecommendation = `br update ${id} --acceptance "$(cat <<'EOF'\n${ACCEPTANCE_FIXTURE}\nEOF\n)"`;
+	// Planted negative: a formerly recommended double-quoted heredoc must fail the same TTSR admissibility check.
+	expect(await ttsrMatches(blockedRecommendation)).toBe(true);
 	const unchanged: unknown = JSON.parse(t.run(["show", id]).stdout);
 	expect(unchanged).toEqual([expect.objectContaining({ id, acceptance_criteria: ACCEPTANCE_FIXTURE })]);
 });
