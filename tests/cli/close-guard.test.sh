@@ -10,11 +10,9 @@ set -u
 REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 # CLOSE_GUARD_CHECK runs the suite against another guard copy (planted negative).
 CHECK="${CLOSE_GUARD_CHECK:-$REPO/scripts/close-guard.sh}"
-REPO_TMP="$REPO/var/agent-tmp"
-mkdir -p "$REPO_TMP" || exit 1
-TMP="$REPO_TMP/close-guard-test.$$"
-mkdir -m 700 "$TMP" || exit 1
-printf 'pid=%s label=close-guard-test repo=%s created=%s\n' "$$" "$REPO" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$TMP/.owner"
+# shellcheck source=scripts/kitlib-tmp.sh
+. "$REPO/scripts/kitlib-tmp.sh"
+kitlib_tmp TMP close-guard-test || exit 1
 
 pass=0
 fail=0
@@ -35,7 +33,7 @@ BEAD=bead-1
 
 # 1. caller holds the claim -> refused
 set_bead '{"id":"bead-1","status":"in_progress","assignee":"GuardTest","labels":[]}'
-if sh "$CHECK" "$BEAD" --db "$TMP/db" > "$TMP/out" 2>&1; then
+if sh "$CHECK" "$BEAD" --db "$TMP/db" --sub close > "$TMP/out" 2>&1; then
 	fail=$((fail + 1)); printf 'FAIL claim: rc=0\n'
 elif grep -q "holds the claim" "$TMP/out"; then
 	pass=$((pass + 1))
@@ -67,8 +65,7 @@ git -C "$repo" config user.email "test@example.invalid"
 git -C "$repo" config user.name "worker-1"
 printf 'work\n' > "$repo/f.txt"
 git -C "$repo" add f.txt
-git -C "$repo" commit -qm "[test] work bead-1" --no-verify 2>/dev/null
-git -C "$repo" commit -q --amend -m "[test] work bead-1" -m "Agent: GuardTest" --no-verify 2>/dev/null
+git -C "$repo" commit -qm "[test] work bead-1" -m "Agent: GuardTest" --no-verify 2>/dev/null
 set_bead '{"id":"bead-1","status":"in_progress","assignee":"","labels":[]}'
 if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" > "$TMP/out" 2>&1); then
 	fail=$((fail + 1)); printf 'FAIL trailer: rc=0\n'
@@ -109,11 +106,11 @@ else
  else
  	fail=$((fail + 1)); printf 'FAIL real-lesson: rc!=0\n'
  fi
- # 9. LESSON1: review entries carry no lesson requirement
- if (cd -- "$repo" && sh "$CHECK" "$BEAD" --db "$TMP/db" --sub update > "$TMP/out" 2>&1); then
+ # 9. The Agent-trailer author may hand off to review without claiming a close.
+ if (cd -- "$repo" && AGENT_NAME=GuardTest sh "$CHECK" "$BEAD" --db "$TMP/db" --sub update > "$TMP/out" 2>&1); then
  	pass=$((pass + 1))
  else
- 	fail=$((fail + 1)); printf 'FAIL review-ungated: rc!=0\n'
+	fail=$((fail + 1)); printf 'FAIL author-review-handoff: rc!=0\n'
  fi
 
 # 10-12 (ompkit-fp72.98): every historical implementer is refused, not only the

@@ -64,10 +64,9 @@ done
 if [ "$real" = "$self_path" ]; then
 	fail "BR_SHIM_LOOP refusing to exec the shim itself (no real br beyond it on PATH)"
 fi
-# SYNC1 box 4: run the close gate at review/grading entry. `br update ID
-# --status in_review` and `br close ID` call close-guard.sh unchanged; its
-# FAIL refuses the transition before a grader spends time on self-review.
-# All other invocations pass through untouched.
+# SYNC1 box 4: run the close gate at review entry and every close route.
+# Author handoff is not grading; closed status updates use the close stage
+# so they retain ownership, publication and Lesson requirements.
  gate_sub=""; gate_id=""; gate_status=""; gate_db=""; gate_claim=0; gate_skip=0; gate_reason=""; gate_want_reason=0; gate_tcomment=""; gate_want_tcomment=0
 gate_comment_id=""; gate_pos_comment=""; gate_literal=0
 gate_extra_ids=0
@@ -279,16 +278,18 @@ if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && { [ "$gate_claim" = 1 ] ||
 fi
 
 gate_fire=0
+gate_guard_sub=$gate_sub
 if [ "$gate_sub" = "close" ] && [ -n "$gate_id" ]; then gate_fire=1; fi
 if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_status" = "in_review" ]; then gate_fire=1; fi
+if [ "$gate_sub" = "update" ] && [ -n "$gate_id" ] && [ "$gate_status" = "closed" ]; then gate_fire=1; gate_guard_sub=close; fi
  if [ "$gate_fire" = 1 ]; then
  	gate_guard="$(dirname -- "$self_path")/close-guard.sh"
  	gate_comment="${gate_tcomment:-$gate_reason}"
  	if [ -x "$gate_guard" ]; then
  		if [ -n "$gate_db" ]; then
- 			sh "$gate_guard" "$gate_id" --db "$gate_db" --sub "$gate_sub" ${gate_comment:+--reason} ${gate_comment:+"$gate_comment"} || exit "$?"
+ 			sh "$gate_guard" "$gate_id" --db "$gate_db" --sub "$gate_guard_sub" ${gate_comment:+--reason} ${gate_comment:+"$gate_comment"} || exit "$?"
  		else
- 			sh "$gate_guard" "$gate_id" --sub "$gate_sub" ${gate_comment:+--reason} ${gate_comment:+"$gate_comment"} || exit "$?"
+ 			sh "$gate_guard" "$gate_id" --sub "$gate_guard_sub" ${gate_comment:+--reason} ${gate_comment:+"$gate_comment"} || exit "$?"
  		fi
  	else
  		echo "br-shim: close-guard absent, skipping review gate" >&2

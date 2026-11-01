@@ -1,9 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
-import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { assertObligationUnchanged, planBeadMigration } from "../../src/beads-migrate.ts";
+import { nativeBr } from "./lib/native-br.ts";
 
 afterAll(cleanupAllOwnedTmp);
 const ROOT = resolve(import.meta.dir, "../..");
@@ -11,21 +12,6 @@ const STAMP = "2026-10-01T00:00:00Z";
 const DESCRIPTION = "WHAT: (a) Validate the fixture payload.\nWHY: prevent payload regressions.\nPlanted negative: a changed payload is rejected.";
 const REPLAY = "sh tests/replay.sh";
 const CLEAN = `- [x] [a] [build] \`${REPLAY}\` -> rc 0; planted negative rejects a changed payload.`;
-
-// Fixture bootstrap uses the native backend, never an agent's live tracker or its guarded PATH alias.
-function nativeBr(): string {
-	const header = Buffer.alloc(2);
-	for (const dir of (process.env.PATH ?? "").split(":")) {
-		if (!dir) continue;
-		const candidate = join(dir, "br");
-		let fd: number;
-		try { accessSync(candidate, constants.X_OK); fd = openSync(candidate, "r"); } catch { continue; }
-		try {
-			if (readSync(fd, header, 0, 2, 0) === 2 && !(header[0] === 35 && header[1] === 33)) return realpathSync(candidate);
-		} finally { closeSync(fd); }
-	}
-	throw new Error("A native br executable is required for the owned tracker fixture");
-}
 
 async function fixture() {
 	const root = ownedTmp("beads-migrate-test").path;

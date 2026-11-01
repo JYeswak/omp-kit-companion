@@ -267,11 +267,11 @@ elif [ "$waited" -lt 5 ]; then
 	printf 'FAIL self-loop: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
 fi
 
-# 8. SYNC1 box 4: the close gate runs at review/grading entry.
-# The claimant is refused before the real br sees the transition;
-# anyone else passes through; non-review statuses are ungated.
-# The full in_review gate needs a complete fixture and an isolated tracker
-# without the checkout's opt-in pregrade policy.
+# 8. SYNC1 box 4: review entry retains its other gates, but author handoff is
+# not self-grading. The real native ownership/state controls live in
+# pwdi-handoff.test.ts; a close by the claimant must still be refused here.
+# The full in_review gate needs a complete isolated tracker fixture without
+# the checkout's opt-in pregrade policy.
 export PATH="$TMP/shimbindir:$TMP/realbin:$ORIGINAL_PATH"
 REVIEW_DB="$TMP/review-project/.beads/beads.db"
 mkdir -p "$TMP/review-project/.beads"
@@ -284,15 +284,6 @@ cat > "$TMP/review-other.json" <<'EOF'
 EOF
 export AM_EXPECTED_PROJECT="$TMP/review-project"
 export BR_GUARD_JSON_FILE="$TMP/review-testshim.json"
-: > "$TMP/argv"
-br --db "$REVIEW_DB" update X --status in_review > "$TMP/out" 2>&1
-got_rc=$?
-if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -q "holds the claim" "$TMP/out"; then
-	pass=$((pass + 1))
-else
-	fail=$((fail + 1))
-	printf 'FAIL review-entry-refused: rc=%s out<<<%s>>>\n' "$got_rc" "$(cat "$TMP/out")"
-fi
 : > "$TMP/argv"
 br --db "$REVIEW_DB" close X > "$TMP/out" 2>&1
 got_rc=$?

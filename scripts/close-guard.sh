@@ -1,10 +1,10 @@
 #!/bin/sh
 # close-guard.sh — ID1 grader-must-differ-from-implementer guard
 # (ompkit-rc-epic-land-fix-release-dogfood-rz5.108).
-# Run before closing or grading a bead: refuses when the caller (AGENT_NAME)
-# is the bead's implementer — the claim assignee, or the Agent trailer on a
-# commit naming the bead. A fresh-context gate provider is recorded separately;
-# it never overrides same-pane refusal. Prints the reason; exit 4 on refusal,
+# Direct grading and close refuse when the caller (AGENT_NAME) is the bead's
+# implementer: its claim assignee or Agent-trailer author. --sub update is
+# author handoff to review, not grading; claim stability and publication still
+# apply. A fresh-context provider never overrides same-pane close refusal.
 # exit 0 to proceed, exit 2 on usage/context errors.
  # Usage: close-guard.sh BEAD_ID [--db PATH] [--sub close|update] [--reason TEXT]
 set -u
@@ -50,6 +50,7 @@ field() {
 info=$(read_bead) || fail "cannot read bead $BEAD"
 assignee=$(field assignee) || fail "cannot parse bead $BEAD"
 updated_at=$(field updated_at) || fail "cannot parse bead $BEAD"
+if [ "$SUB" != "update" ]; then
 if [ -n "$assignee" ] && [ "$assignee" = "$AGENT_NAME" ]; then
 	refuse "caller $AGENT_NAME holds the claim on $BEAD; a different worker must close or grade"
 fi
@@ -79,6 +80,7 @@ BEGIN { want = tolower(trim(me)) }
 END { flush(); print out }') || hit=""
 if [ -n "$hit" ]; then
 	refuse "caller $AGENT_NAME has an Agent trailer on $BEAD commit $hit; a different worker must close or grade"
+fi
 fi
 # Native claim revision: the claim must not move while the guard decides.
 info=$(read_bead) || fail "cannot re-read bead $BEAD"
@@ -135,4 +137,8 @@ fi
  		refuse "close of $BEAD carries no Lesson: line or explicit none in its transition comment"
  	fi
  fi
- printf 'close-guard: OK (%s may close or grade %s)\n' "$AGENT_NAME" "$BEAD"
+if [ "$SUB" = "update" ]; then
+	printf 'close-guard: OK (%s may hand off %s for review)\n' "$AGENT_NAME" "$BEAD"
+else
+	printf 'close-guard: OK (%s may close or grade %s)\n' "$AGENT_NAME" "$BEAD"
+fi
