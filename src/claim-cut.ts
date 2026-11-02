@@ -188,34 +188,37 @@ export async function admitClaimCut(input: ClaimCutInput): Promise<ClaimCutVerdi
 		};
 		const candidate = beadRow(input.bead ?? await read(["show", input.id, "--json"]), input.id);
 		if (candidate.status === "open" && cut.pinned.includes(input.id)) return verdict("CLAIM_CUT_ADMITTED", `${input.id}: explicit pin in cut ${cut.epic}`, "continue with the remaining claim checks");
-		// CUTREADBULK1 (ompkit-774u.55.2): the whole active graph in two bulk reads, never one subprocess per bead.
-		// Measured 2026-11-02 on the live tracker: the per-bead walk made 128 serial reads for one unpinned claim and ended
-		// CLAIM_CUT_UNKNOWN at the deadline; `br list` of the 1,607 active beads took 0.37 s and `br blocked` 0.2 s, while a
-		// batched `br show` of the 43 pins took 5.3 s. `br blocked` omits in_progress beads, so active in_progress pins
-		// add one batched `show` for their own edges.
-		const listed = allIssues(await read(["list", ...Object.keys(ACTIVE).flatMap(status => ["--status", status]), "--json", "--limit", "0"]), "br list");
+		// CUTREADBULK1 (ompkit-774u.55.2): bulk reads, never one subprocess per bead. Measured 2026-11-02 on the live
+		// tracker: the per-bead walk made 128 serial reads for one unpinned claim and ended CLAIM_CUT_UNKNOWN at the
+		// deadline; `br list` of the 1,607 active beads took 0.37 s and `br blocked` 0.2 s, while a batched `br show` of
+		// the 43 pins took 5.3 s. `br blocked` lists every blocker kind (blocks, waits-for, conditional-blocks) and a
+		// child's parent (measured on a native scratch tracker), so it is only a SUPERSET screen: a bead it cannot reach
+		// is out of cut, and a bead it reaches is admitted only along typed `blocks` edges read by batched `show`.
+		// `--status all`: a stock tracker has no rework/in_review statuses, and naming them is VALIDATION_FAILED (rc 4).
+		const listed = allIssues(await read(["list", "--status", "all", "--json", "--limit", "0"]), "br list");
 		if (listed.length > MAX_NODES) throw new Error(`cut graph exceeds ${MAX_NODES} beads`);
 		const active = new Map<string, Row>();
 		for (const raw of listed) {
 			const row = beadRow(raw, record(raw) && typeof raw.id === "string" ? raw.id : "<missing id>");
 			if (typeof row.status === "string" && ACTIVE[row.status] === true) active.set(row.id as string, row);
 		}
-		const waitsOn = new Map<string, string[]>();
+		const screen = new Map<string, string[]>();
 		for (const raw of allIssues(await read(["blocked", "--json", "--limit", "0"]), "br blocked")) {
 			if (!record(raw) || !nonempty(raw.id) || !Array.isArray(raw.blocked_by) || !raw.blocked_by.every(nonempty)) throw new Error("malformed blocked row");
-			waitsOn.set(raw.id, raw.blocked_by as string[]);
+			screen.set(raw.id, raw.blocked_by as string[]);
 		}
 		const activePins = cut.pinned.filter(id => active.has(id));
 		for (const id of cut.pinned) if (alternative === null && active.has(id) && eligiblePin(active.get(id)!)) alternative = id;
-		// `br blocked` omits in_progress beads, so their edges come from one batched `show` (2 such beads on the live
-		// tracker 2026-11-02); an in_progress intermediate between a pin and the claimed bead stays connected.
-		const inProgress = [...active.values()].filter(row => row.status === "in_progress").map(row => row.id as string);
-		if (inProgress.length > 0) {
-			const shown = await read(["show", ...inProgress, "--json"]);
+		// Typed `blocks` prerequisites, read by batched `show` only for the beads that need them.
+		const typed = new Map<string, string[]>();
+		const loadTyped = async (ids: string[]): Promise<void> => {
+			const missing = [...new Set(ids)].filter(id => !typed.has(id));
+			if (missing.length === 0) return;
+			const shown = await read(["show", ...missing, "--json"]);
 			const list = Array.isArray(shown) ? shown : [shown];
-			if (list.length !== inProgress.length) throw new Error(`bulk read returned ${list.length} rows for ${inProgress.length} beads`);
+			if (list.length !== missing.length) throw new Error(`bulk read returned ${list.length} rows for ${missing.length} beads`);
 			for (const raw of list) {
-				if (!record(raw) || !nonempty(raw.id) || !inProgress.includes(raw.id)) throw new Error("malformed in_progress row");
+				if (!record(raw) || !nonempty(raw.id) || !missing.includes(raw.id)) throw new Error("malformed bulk show row");
 				const deps = raw.dependencies ?? [];
 				if (!Array.isArray(deps)) throw new Error(`malformed dependency graph for ${raw.id}`);
 				const prerequisites: string[] = [];
@@ -223,23 +226,49 @@ export async function admitClaimCut(input: ClaimCutInput): Promise<ClaimCutVerdi
 					if (!record(dep) || !nonempty(dep.id) || !nonempty(dep.dependency_type)) throw new Error(`malformed dependency edge for ${raw.id}`);
 					if (dep.dependency_type === "blocks") prerequisites.push(dep.id);
 				}
-				waitsOn.set(raw.id, prerequisites);
+				typed.set(raw.id, prerequisites);
 			}
-		}
-		const reachable = new Set(activePins);
+		};
+		// `br blocked` omits in_progress beads, so their typed edges join the screen (2 such beads live on 2026-11-02).
+		const inProgress = [...active.values()].filter(row => row.status === "in_progress").map(row => row.id as string);
+		await loadTyped(inProgress);
+		for (const id of inProgress) screen.set(id, typed.get(id)!);
+		const parent = new Map<string, string | null>(activePins.map(id => [id, null]));
 		const queue = [...activePins];
 		let edgeCount = 0;
-		for (let index = 0; index < queue.length && !reachable.has(input.id); index++) {
-			const prerequisites = waitsOn.get(queue[index]!) ?? [];
+		for (let index = 0; index < queue.length && !parent.has(input.id); index++) {
+			const prerequisites = screen.get(queue[index]!) ?? [];
 			edgeCount += prerequisites.length;
 			if (edgeCount > MAX_EDGES) throw new Error(`cut graph exceeds ${MAX_EDGES} edges`);
 			for (const dep of prerequisites) {
-				if (!active.has(dep) || reachable.has(dep)) continue;
-				reachable.add(dep);
+				if (!active.has(dep) || parent.has(dep)) continue;
+				parent.set(dep, queue[index]!);
 				queue.push(dep);
 			}
 		}
-		if (candidate.status === "open" && reachable.has(input.id)) return verdict("CLAIM_CUT_ADMITTED", `${input.id}: open blocks prerequisite in cut ${cut.epic}`, "continue with the remaining claim checks");
+		let admitted = false;
+		if (candidate.status === "open" && parent.has(input.id)) {
+			// Confirm the screened path hop by hop with typed edges; if a hop is not `blocks` (waits-for,
+			// conditional-blocks or an inherited parent), search typed `blocks` edges level by level over active beads.
+			const path: string[] = [];
+			for (let at = parent.get(input.id) ?? null; at !== null; at = parent.get(at) ?? null) path.unshift(at);
+			await loadTyped(path);
+			admitted = path.every((id, i) => typed.get(id)!.includes(i + 1 < path.length ? path[i + 1]! : input.id));
+			let frontier = admitted ? [] : [...activePins];
+			const seen = new Set(activePins);
+			while (!admitted && frontier.length > 0) {
+				await loadTyped(frontier);
+				const next: string[] = [];
+				for (const id of frontier) for (const dep of typed.get(id)!) {
+					if (!active.has(dep) || seen.has(dep)) continue;
+					seen.add(dep);
+					next.push(dep);
+				}
+				admitted = seen.has(input.id);
+				frontier = next;
+			}
+		}
+		if (admitted) return verdict("CLAIM_CUT_ADMITTED", `${input.id}: open blocks prerequisite in cut ${cut.epic}`, "continue with the remaining claim checks");
 		return verdict("CLAIM_OUT_OF_CUT", `${input.id} is outside declared cut ${cut.epic}; nearest eligible pinned alternative: ${alternative ?? "none (no open eligible pin)"}`,
 			alternative ? `claim pinned ${alternative} instead` : `ask the cut owner to resolve the pinned work for ${cut.epic}`);
 	} catch (error) {

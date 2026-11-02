@@ -1,21 +1,26 @@
 import { expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { admitClaimCut } from "../../src/claim-cut.ts";
+import { runSync } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
-type FakeRow = { id: string; status: string; assignee?: string | null; labels?: string[]; blocks?: string[]; parents?: string[] };
+type FakeRow = { id: string; status: string; assignee?: string | null; labels?: string[]; blocks?: string[]; waits?: string[]; parents?: string[] };
 const ACTIVE: Record<string, true> = { open: true, in_progress: true, blocked: true, rework: true, in_review: true };
 const isActive = (status: string | undefined) => status !== undefined && ACTIVE[status] === true;
 
-/** Native br shapes: `list` and `blocked` are paged envelopes; `blocked` omits in_progress beads; `show` rows carry edges. */
+/**
+ * Native br shapes, as measured on a scratch tracker 2026-11-02: `list` and `blocked` are paged envelopes; `blocked`
+ * lists every blocker kind (blocks, waits-for) plus a child's blocked parent, untyped; `show` rows carry typed edges.
+ */
 function nativeAnswer(rows: Record<string, FakeRow>, args: string[]): unknown {
 	const all = Object.values(rows);
-	if (args[0] === "list") return { issues: all.filter(row => isActive(row.status)), has_more: false, total: all.length };
+	const direct = (row: FakeRow) => [...(row.blocks ?? []), ...(row.waits ?? [])].filter(dep => isActive(rows[dep]?.status));
+	if (args[0] === "list") return { issues: all, has_more: false, total: all.length };
 	if (args[0] === "blocked") {
 		return { has_more: false, issues: all
 			.filter(row => row.status !== "in_progress" && row.status !== "closed")
-			.map(row => ({ id: row.id, blocked_by: (row.blocks ?? []).filter(dep => isActive(rows[dep]?.status)) }))
+			.map(row => ({ id: row.id, blocked_by: [...direct(row), ...(row.parents ?? []).filter(p => rows[p] && direct(rows[p]!).length > 0)] }))
 			.filter(row => row.blocked_by.length > 0) };
 	}
 	if (args[0] === "show") {
@@ -24,6 +29,7 @@ function nativeAnswer(rows: Record<string, FakeRow>, args: string[]): unknown {
 			if (!row) throw new Error(`no fixture row ${id}`);
 			return { ...row, dependencies: [
 				...(row.blocks ?? []).map(dep => ({ id: dep, dependency_type: "blocks", status: rows[dep]?.status ?? "closed" })),
+				...(row.waits ?? []).map(dep => ({ id: dep, dependency_type: "waits-for", status: rows[dep]?.status ?? "closed" })),
 				...(row.parents ?? []).map(dep => ({ id: dep, dependency_type: "parent-child", status: rows[dep]?.status ?? "open" })),
 			] };
 		});
@@ -74,18 +80,19 @@ const simple = (): Record<string, FakeRow> => ({
 });
 
 test("claim-cut deadline admits a valid loaded graph and still refuses past its bound", async () => {
-	const within = await admit({ pinned: ["pin"], id: "candidate", rows: simple(), readDurationsMs: [9_000, 9_000] });
-	expect(within.reads).toBe(2);
+	// Reads: `list`, `blocked`, then one typed `show` of the screened path.
+	const within = await admit({ pinned: ["pin"], id: "candidate", rows: simple(), readDurationsMs: [6_000, 6_000, 6_000] });
+	expect(within.reads).toBe(3);
 	expect(within.verdict.code).toBe("CLAIM_CUT_ADMITTED");
 
-	const beyond = await admit({ pinned: ["pin"], id: "candidate", rows: simple(), readDurationsMs: [10_001, 10_001] });
-	expect(beyond.reads).toBe(2);
+	const beyond = await admit({ pinned: ["pin"], id: "candidate", rows: simple(), readDurationsMs: [7_000, 7_000, 7_000] });
+	expect(beyond.reads).toBe(3);
 	expect(beyond.verdict.code).toBe("CLAIM_CUT_UNKNOWN");
 	expect(beyond.verdict.detail).toContain("cut graph read deadline exceeded");
 });
 
 // CUTREADBULK1 (ompkit-774u.55.2): 150 pins in a blocks chain; the claimed bead is an unpinned open prerequisite of
-// the chain's last pin. The per-bead walk needed one read per bead and hit the 128-node cap; bulk reads need two.
+// the chain's last pin. The per-bead walk needed one read per bead and hit the 128-node cap; bulk reads need three.
 function chain(): { rows: Record<string, FakeRow>; pinned: string[] } {
 	const rows: Record<string, FakeRow> = {};
 	const pinned: string[] = [];
@@ -149,3 +156,83 @@ test("CUTREADBULK1 a closed prerequisite is not followed, and a parent-child rel
 	expect((await admit({ pinned: ["pin"], id: "child", rows })).verdict.code).toBe("CLAIM_OUT_OF_CUT");
 	expect((await admit({ pinned: ["pin"], id: "mid", rows })).verdict.code).toBe("CLAIM_CUT_ADMITTED");
 });
+
+// CUTREADBULK1 [b] mutant, executed in this file so a replay proves it: a copy of the module whose catch admits on
+// read failure admits the failed read; the real module refuses it as CLAIM_CUT_UNKNOWN.
+test("CUTREADBULK1 mutant: admission that admits on read failure is caught by the failed-read case", async () => {
+	const source = readFileSync(join(import.meta.dir, "../../src/claim-cut.ts"), "utf8");
+	const marker = 'return verdict("CLAIM_CUT_UNKNOWN", `${input.id}: cut admission inconclusive:';
+	expect(source.includes(marker)).toBe(true);
+	const scratch = ownedTmp("claim-cut-mutant");
+	try {
+		const mutantPath = join(scratch.path, "claim-cut-mutant.ts");
+		writeFileSync(mutantPath, source.replace(marker, 'return verdict("CLAIM_CUT_ADMITTED", `${input.id}: MUTANT admits on failure').replaceAll('from "./', `from "${join(import.meta.dir, "../../src")}/`));
+		const mutant = (await import(mutantPath)) as { admitClaimCut: typeof admitClaimCut };
+		const { rows, pinned } = chain();
+		const configPath = join(scratch.path, "fleet-watch.json");
+		writeFileSync(configPath, JSON.stringify({ sessions: [{ repo: scratch.path, milestone: { epic: "cut", pinned } }] }));
+		const input = { repo: scratch.path, id: "fix", db: join(scratch.path, ".beads", "beads.db"), bead: rows.fix,
+			env: { OMP_KIT_FLEET_WATCH_CONFIG: configPath }, read: async () => { throw new Error("tracker unavailable"); } };
+		expect((await mutant.admitClaimCut(input)).code).toBe("CLAIM_CUT_ADMITTED");
+		expect((await admitClaimCut(input)).code).toBe("CLAIM_CUT_UNKNOWN");
+	} finally {
+		scratch.cleanup();
+	}
+});
+
+// CUTREADBULK1: `br blocked` is an untyped superset (waits-for, conditional-blocks and a blocked parent all appear), so
+// admission must confirm `blocks` edges by type. Mocked here, and on a real native tracker below.
+test("CUTREADBULK1 waits-for and inherited-parent blockers are not blocks prerequisites; a blocks edge still admits", async () => {
+	const rows: Record<string, FakeRow> = {
+		pin: { id: "pin", status: "blocked", labels: [], blocks: ["b"], waits: ["w"] },
+		b: { id: "b", status: "open", labels: [] },
+		w: { id: "w", status: "open", labels: [] },
+		epic: { id: "epic", status: "blocked", labels: [], blocks: ["eb"] },
+		eb: { id: "eb", status: "open", labels: [] },
+		child: { id: "child", status: "open", labels: [], parents: ["epic"] },
+	};
+	expect((await admit({ pinned: ["pin"], id: "b", rows })).verdict.code).toBe("CLAIM_CUT_ADMITTED");
+	expect((await admit({ pinned: ["pin"], id: "w", rows })).verdict.code).toBe("CLAIM_OUT_OF_CUT");
+	// The child pin's untyped blocked_by names its blocked parent; neither the parent nor its blocker is in this cut.
+	expect((await admit({ pinned: ["child"], id: "epic", rows })).verdict.code).toBe("CLAIM_OUT_OF_CUT");
+	expect((await admit({ pinned: ["child"], id: "eb", rows })).verdict.code).toBe("CLAIM_OUT_OF_CUT");
+});
+
+test("CUTREADBULK1 native br: only typed blocks edges admit, measured against a real scratch tracker", async () => {
+	if (!Bun.which("br")) throw new Error("native br is a precondition of this case");
+	const scratch = ownedTmp("claim-cut-native");
+	try {
+		const db = join(scratch.path, ".beads", "beads.db");
+		const decoder = new TextDecoder();
+		const br = (...args: string[]) => {
+			const out = runSync(["br", ...args, "--db", db], { deadline_s: 30, cwd: scratch.path, env: { ...process.env, AGENT_NAME: "fixture" } });
+			if (out.rc !== 0) throw new Error(`br ${args.join(" ")} -> ${out.rc}: ${decoder.decode(out.stderr)}`);
+			return decoder.decode(out.stdout);
+		};
+		br("init", "--prefix", "cc", "--json");
+		const id = (title: string) => {
+			const created = JSON.parse(br("create", title, "--type", "task", "--json")) as { id?: string } | { id: string }[];
+			return Array.isArray(created) ? created[0]!.id : created.id!;
+		};
+		const [pin, waits, cond, blocks, epic, epicBlocker, child] = ["pin", "waits", "cond", "blocks", "epic", "epicblocker", "child"].map(id);
+		br("dep", "add", pin!, waits!, "--type", "waits-for");
+		br("dep", "add", pin!, cond!, "--type", "conditional-blocks");
+		br("dep", "add", pin!, blocks!);
+		br("dep", "add", child!, epic!, "--type", "parent-child");
+		br("dep", "add", epic!, epicBlocker!);
+		const configPath = join(scratch.path, "fleet-watch.json");
+		const read = async (args: string[]) => JSON.parse(br(...args, "--no-auto-import", "--no-auto-flush"));
+		const claim = async (pinned: string[], candidate: string) => {
+			writeFileSync(configPath, JSON.stringify({ sessions: [{ repo: scratch.path, milestone: { epic: "cut", pinned } }] }));
+			const verdict = await admitClaimCut({ repo: scratch.path, id: candidate, db, env: { OMP_KIT_FLEET_WATCH_CONFIG: configPath }, read });
+			return verdict.code === "CLAIM_CUT_UNKNOWN" ? `${verdict.code}: ${verdict.detail}` : verdict.code;
+		};
+		expect(await claim([pin!], blocks!)).toBe("CLAIM_CUT_ADMITTED");
+		expect(await claim([pin!], waits!)).toBe("CLAIM_OUT_OF_CUT");
+		expect(await claim([pin!], cond!)).toBe("CLAIM_OUT_OF_CUT");
+		expect(await claim([child!], epic!)).toBe("CLAIM_OUT_OF_CUT");
+		expect(await claim([child!], epicBlocker!)).toBe("CLAIM_OUT_OF_CUT");
+	} finally {
+		scratch.cleanup();
+	}
+}, 120_000);
