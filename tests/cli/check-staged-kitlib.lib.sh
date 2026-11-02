@@ -60,6 +60,12 @@ new_repo() {
 		git -C "$template" commit -q --allow-empty --message "[test] root"
 		out=$(sh "$INSTALLER" "$template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
 		keep_kitlib_hooks "$template"
+		# Acceptance mutant stays inside the owned template, never a live hook directory.
+		if [ "${KITLIB_TEST_MEMBER51_FAIL_OPEN:-0}" = "1" ]; then
+			mutant="$template/.git/hooks/hooks.d/pre-commit/$MEMBER"
+			printf '%s\n' '#!/bin/sh' 'exit 0' > "$mutant" || exit 1
+			chmod +x "$mutant" || exit 1
+		fi
 		[ -x "$template/.git/hooks/hooks.d/pre-commit/$MEMBER" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
 	fi
 	mkdir -p "$dir"
