@@ -560,17 +560,37 @@ function preflightCutFixture() {
 	}
 	const env = { HOME: repo, XDG_CONFIG_HOME: join(repo, "config"), OMP_KIT_FLEET_WATCH_CONFIG: config,
 		BEADS_DB: join(repo, ".beads", "beads.db"), BEADS_DIR: "" };
+	// CUTREADBULK1: admission reads `list` (active rows), `blocked` (edges, in_progress omitted, as native br does) and a
+	// batched `show` for in_progress pins; every answer is derived from the same rows and dep-list graph the cases edit.
+	const ACTIVE: Record<string, true> = { open: true, in_progress: true, blocked: true, rework: true, in_review: true };
+	const edges = (id: string) => {
+		if (!(id in graph)) throw new Error("missing fixture graph");
+		const value = graph[id];
+		if (!Array.isArray(value)) throw new Error(`malformed dependency graph for ${id}`);
+		return value as { issue_id?: unknown; depends_on_id?: unknown; type?: unknown; status?: unknown }[];
+	};
 	const read = async (args: string[]): Promise<unknown> => {
 		if (args[0] === "show") {
-			const row = rows[args[1] ?? ""];
-			if (!row) throw new Error("missing fixture bead");
-			return [row];
+			const ids = args.slice(1).filter(arg => !arg.startsWith("--"));
+			return ids.map(id => {
+				const row = rows[id];
+				if (!row) throw new Error("missing fixture bead");
+				return ids.length === 1 && !(id in graph) ? row : { ...row, dependencies: edges(id).map(edge =>
+					({ id: edge.depends_on_id, dependency_type: edge.type, status: edge.status })) };
+			});
 		}
-		if (args[0] === "list") return { issues: [], total: 0 };
-		if (args[0] === "dep" && args[1] === "list") {
-			const id = args[2] ?? "";
-			if (!(id in graph)) throw new Error("missing fixture graph");
-			return graph[id];
+		if (args[0] === "list" && args.includes("--assignee")) return { issues: [], total: 0 };
+		if (args[0] === "list") return { issues: Object.values(rows).filter(row => ACTIVE[row.status] === true), total: Object.keys(rows).length, has_more: false };
+		if (args[0] === "blocked") {
+			const issues = [];
+			for (const row of Object.values(rows)) {
+				if (row.status === "in_progress" || row.status === "closed") continue;
+				// A malformed fixture edge (no status, or rooted at another bead) reaches admission as a malformed row.
+				const blockedBy = edges(row.id).filter(edge => edge.type === "blocks" && (typeof edge.status !== "string" || edge.issue_id !== row.id || ACTIVE[edge.status] === true))
+					.map(edge => typeof edge.status === "string" && edge.issue_id === row.id ? edge.depends_on_id : null);
+				if (blockedBy.length > 0) issues.push({ id: row.id, blocked_by: blockedBy });
+			}
+			return { issues, has_more: false };
 		}
 		throw new Error("unexpected fixture tracker read");
 	};
@@ -818,6 +838,7 @@ case "$verb:$id" in
 	show:k-2) printf '%s' '${JSON.stringify([f.rows["k-2"]])}' ;;
 	dep:list) printf '[]' ;;
 	list:*) printf '{"issues":[],"total":0}' ;;
+	blocked:*) printf '{"issues":[],"has_more":false}' ;;
 	*) echo 'unexpected fixture read' >&2; exit 98 ;;
 esac
 `);

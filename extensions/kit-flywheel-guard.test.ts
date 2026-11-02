@@ -1357,14 +1357,30 @@ async function cutFixture() {
 	const rows: Record<string, CutBead> = {};
 	for (const id of ["k-1", "k-2", "k-3"]) rows[id] = { id, status: "open", assignee: null, labels: [] };
 	const graph: Record<string, CutEdge[]> = { "k-1": [], "k-2": [], "k-3": [] };
+	// CUTREADBULK1: admission reads `list` (active rows), `blocked` (edges, in_progress omitted, as native br does) and a
+	// batched `show` for in_progress beads; every answer comes from the same rows and dep-list graph the cases edit.
+	const ACTIVE: Record<string, true> = { open: true, in_progress: true, blocked: true, rework: true, in_review: true };
 	const respond: Responder = call => {
 		if (call.command === "tmux") return { code: 1, stdout: "", stderr: "no server" };
 		if (call.command === "env") return { code: 0, stdout: "", stderr: "" };
 		if (call.args[0] === "show") {
-			const row = rows[call.args[1] ?? ""];
-			return row ? { code: 0, stdout: JSON.stringify([row]) } : { code: 3, stdout: "", stderr: "missing fixture bead" };
+			const ids = call.args.slice(1).filter(arg => !arg.startsWith("--") && !arg.endsWith(".db"));
+			if (ids.some(id => !rows[id])) return { code: 3, stdout: "", stderr: "missing fixture bead" };
+			return { code: 0, stdout: JSON.stringify(ids.map(id => ({ ...rows[id], dependencies: (graph[id] ?? []).map(edge =>
+				({ id: edge.depends_on_id, dependency_type: edge.type, status: edge.status })) }))) };
 		}
-		if (call.args[0] === "list") return { code: 0, stdout: JSON.stringify({ issues: [], total: 0 }) };
+		if (call.args[0] === "list" && call.args.includes("--assignee")) return { code: 0, stdout: JSON.stringify({ issues: [], total: 0 }) };
+		if (call.args[0] === "list") return { code: 0, stdout: JSON.stringify({ issues: Object.values(rows).filter(row => ACTIVE[row.status] === true), has_more: false }) };
+		if (call.args[0] === "blocked") {
+			const open = Object.values(rows).filter(row => row.status !== "in_progress" && row.status !== "closed");
+			if (open.some(row => !graph[row.id])) return { code: 3, stdout: "", stderr: "missing fixture graph" };
+			// A malformed fixture edge (rooted at another bead) reaches admission as a malformed row.
+			const issues = open.map(row => ({ id: row.id, blocked_by: graph[row.id]!
+				.filter(edge => edge.type === "blocks" && (edge.issue_id !== row.id || ACTIVE[edge.status] === true))
+				.map(edge => edge.issue_id === row.id ? edge.depends_on_id : null) }))
+				.filter(row => row.blocked_by.length > 0);
+			return { code: 0, stdout: JSON.stringify({ issues, has_more: false }) };
+		}
 		if (call.args[0] === "dep" && call.args[1] === "list") {
 			const edges = graph[call.args[2] ?? ""];
 			return edges ? { code: 0, stdout: JSON.stringify(edges) } : { code: 3, stdout: "", stderr: "missing fixture graph" };
@@ -1471,7 +1487,9 @@ test("CUTCLAIM1: canonical explicit tracker binding wins over a first unrelated 
 	] }));
 	const command = `br --db ${JSON.stringify(join(alias, ".beads", "beads.db"))} --actor Holder update k-2 --claim`;
 	expect((await toolCall(f.h, caller, command))?.reason).toContain("CLAIM_OUT_OF_CUT");
-	expect(f.h.execs.filter(call => call.args[0] === "dep").every(call => call.args.includes(join(alias, ".beads", "beads.db")))).toBe(true);
+	const graphReads = f.h.execs.filter(call => call.args[0] === "blocked" || (call.args[0] === "list" && !call.args.includes("--assignee")));
+	expect(graphReads.length).toBeGreaterThan(0);
+	expect(graphReads.every(call => call.args.includes(join(alias, ".beads", "beads.db")))).toBe(true);
 });
 
 test("CUTCLAIM1 planted negative: removing admission refusal from the actual guard makes the original assertion fail", async () => {

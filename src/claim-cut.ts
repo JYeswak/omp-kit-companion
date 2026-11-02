@@ -29,7 +29,9 @@ export interface ClaimCutVerdict {
 type Row = Record<string, unknown>;
 type Cut = { epic: string; pinned: string[] };
 const MAX_BYTES = 1024 * 1024;
-const MAX_NODES = 128;
+// Bulk reads (CUTREADBULK1) list every active bead at once, so the node cap bounds memory, not process count; the
+// live omp-kit tracker held 1,607 active beads on 2026-11-02.
+const MAX_NODES = 20_000;
 const MAX_EDGES = 4096;
 const GRAPH_DEADLINE_MS = 20_000;
 const ACTIVE: Record<string, true> = { open: true, in_progress: true, rework: true, blocked: true, in_review: true };
@@ -159,6 +161,12 @@ function beadRow(value: unknown, id: string): Row {
 function eligiblePin(row: Row): boolean {
 	return row.status === "open" && !row.assignee && Array.isArray(row.labels) && !row.labels.some(label => typeof label === "string" && GATED[label] === true);
 }
+/** `issues` of a paged br list/blocked envelope (or a bare array); a page with more rows is a partial graph. */
+function allIssues(value: unknown, what: string): unknown[] {
+	if (Array.isArray(value)) return value;
+	if (!record(value) || !Array.isArray(value.issues) || value.has_more === true) throw new Error(`${what} returned a partial or malformed page`);
+	return value.issues;
+}
 
 /** No declared cut admits without bead reads; configured invalid authority and bounded graph failures refuse. */
 export async function admitClaimCut(input: ClaimCutInput): Promise<ClaimCutVerdict> {
@@ -180,39 +188,55 @@ export async function admitClaimCut(input: ClaimCutInput): Promise<ClaimCutVerdi
 		};
 		const candidate = beadRow(input.bead ?? await read(["show", input.id, "--json"]), input.id);
 		if (candidate.status === "open" && cut.pinned.includes(input.id)) return verdict("CLAIM_CUT_ADMITTED", `${input.id}: explicit pin in cut ${cut.epic}`, "continue with the remaining claim checks");
-		const rows = new Map<string, Row>([[input.id, candidate]]);
-		const load = async (id: string): Promise<Row> => {
-			const cached = rows.get(id);
-			if (cached) return cached;
-			if (rows.size >= MAX_NODES) throw new Error(`cut graph exceeds ${MAX_NODES} beads`);
-			const row = beadRow(await read(["show", id, "--json"]), id);
-			rows.set(id, row);
-			return row;
-		};
-		const activePins: string[] = [];
-		for (const id of cut.pinned) {
-			const row = await load(id);
-			if (typeof row.status === "string" && ACTIVE[row.status] === true) activePins.push(id);
-			if (alternative === null && eligiblePin(row)) alternative = id;
+		// CUTREADBULK1 (ompkit-774u.55.2): the whole active graph in two bulk reads, never one subprocess per bead.
+		// Measured 2026-11-02 on the live tracker: the per-bead walk made 128 serial reads for one unpinned claim and ended
+		// CLAIM_CUT_UNKNOWN at the deadline; `br list` of the 1,607 active beads took 0.37 s and `br blocked` 0.2 s, while a
+		// batched `br show` of the 43 pins took 5.3 s. `br blocked` omits in_progress beads, so active in_progress pins
+		// add one batched `show` for their own edges.
+		const listed = allIssues(await read(["list", ...Object.keys(ACTIVE).flatMap(status => ["--status", status]), "--json", "--limit", "0"]), "br list");
+		if (listed.length > MAX_NODES) throw new Error(`cut graph exceeds ${MAX_NODES} beads`);
+		const active = new Map<string, Row>();
+		for (const raw of listed) {
+			const row = beadRow(raw, record(raw) && typeof raw.id === "string" ? raw.id : "<missing id>");
+			if (typeof row.status === "string" && ACTIVE[row.status] === true) active.set(row.id as string, row);
+		}
+		const waitsOn = new Map<string, string[]>();
+		for (const raw of allIssues(await read(["blocked", "--json", "--limit", "0"]), "br blocked")) {
+			if (!record(raw) || !nonempty(raw.id) || !Array.isArray(raw.blocked_by) || !raw.blocked_by.every(nonempty)) throw new Error("malformed blocked row");
+			waitsOn.set(raw.id, raw.blocked_by as string[]);
+		}
+		const activePins = cut.pinned.filter(id => active.has(id));
+		for (const id of cut.pinned) if (alternative === null && active.has(id) && eligiblePin(active.get(id)!)) alternative = id;
+		// `br blocked` omits in_progress beads, so their edges come from one batched `show` (2 such beads on the live
+		// tracker 2026-11-02); an in_progress intermediate between a pin and the claimed bead stays connected.
+		const inProgress = [...active.values()].filter(row => row.status === "in_progress").map(row => row.id as string);
+		if (inProgress.length > 0) {
+			const shown = await read(["show", ...inProgress, "--json"]);
+			const list = Array.isArray(shown) ? shown : [shown];
+			if (list.length !== inProgress.length) throw new Error(`bulk read returned ${list.length} rows for ${inProgress.length} beads`);
+			for (const raw of list) {
+				if (!record(raw) || !nonempty(raw.id) || !inProgress.includes(raw.id)) throw new Error("malformed in_progress row");
+				const deps = raw.dependencies ?? [];
+				if (!Array.isArray(deps)) throw new Error(`malformed dependency graph for ${raw.id}`);
+				const prerequisites: string[] = [];
+				for (const dep of deps) {
+					if (!record(dep) || !nonempty(dep.id) || !nonempty(dep.dependency_type)) throw new Error(`malformed dependency edge for ${raw.id}`);
+					if (dep.dependency_type === "blocks") prerequisites.push(dep.id);
+				}
+				waitsOn.set(raw.id, prerequisites);
+			}
 		}
 		const reachable = new Set(activePins);
 		const queue = [...activePins];
 		let edgeCount = 0;
-		for (let index = 0; index < queue.length; index++) {
-			const id = queue[index]!;
-			const edges = await read(["dep", "list", id, "--json"]);
-			if (!Array.isArray(edges)) throw new Error(`malformed dependency graph for ${id}`);
-			edgeCount += edges.length;
+		for (let index = 0; index < queue.length && !reachable.has(input.id); index++) {
+			const prerequisites = waitsOn.get(queue[index]!) ?? [];
+			edgeCount += prerequisites.length;
 			if (edgeCount > MAX_EDGES) throw new Error(`cut graph exceeds ${MAX_EDGES} edges`);
-			for (const edge of edges) {
-				if (!record(edge) || edge.issue_id !== id || !nonempty(edge.depends_on_id) || !nonempty(edge.type) || !nonempty(edge.status)) throw new Error(`malformed dependency edge for ${id}`);
-				if (edge.type !== "blocks" || ACTIVE[edge.status] !== true) continue;
-				const dependency = await load(edge.depends_on_id);
-				if (typeof dependency.status !== "string" || ACTIVE[dependency.status] !== true) continue;
-				if (!reachable.has(edge.depends_on_id)) {
-					reachable.add(edge.depends_on_id);
-					queue.push(edge.depends_on_id);
-				}
+			for (const dep of prerequisites) {
+				if (!active.has(dep) || reachable.has(dep)) continue;
+				reachable.add(dep);
+				queue.push(dep);
 			}
 		}
 		if (candidate.status === "open" && reachable.has(input.id)) return verdict("CLAIM_CUT_ADMITTED", `${input.id}: open blocks prerequisite in cut ${cut.epic}`, "continue with the remaining claim checks");
