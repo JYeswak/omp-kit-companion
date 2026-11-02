@@ -91,25 +91,31 @@ def summarize(observations: list[dict], runs: int, issues: list[dict] | None = N
                "verdict": raw.get("verdict"), "integrity": observation["integrity"],
                "complete": evidence.get("complete"), **spans(timing), "stages": []}
         trusted = observation["integrity"] == "VALID"
-        phase_complete &= trusted and evidence.get("complete") is True and all(row[key] is not None for key in ("wall_s", *PHASES))
+        phase_complete &= trusted and evidence.get("complete") is True and row["wall_s"] is not None
         stages = timing.get("stages")
         if stages is not None and not isinstance(stages, dict):
             issues.append({"source": source, "code": "STAGE_TIMING_INVALID"})
             phase_complete = False
             stages = {}
+        if not stages:
+            phase_complete = False
         for name, value in (stages or {}).items():
             if not isinstance(value, dict):
                 issues.append({"source": source, "code": "STAGE_TIMING_INVALID", "stage": name})
                 phase_complete = False
                 continue
-            stage = {"name": name, **spans(value)}
+            stage = {"name": name, **spans(value),
+                     "file_count": value.get("file_count"),
+                     "phase_basis": value.get("phase_basis")}
             row["stages"].append(stage)
-            phase_complete &= all(stage[key] is not None for key in ("wall_s", *PHASES))
+            phase_complete &= stage["wall_s"] is not None
+            if value.get("file_count") != 0:
+                phase_complete &= all(stage[key] is not None for key in PHASES)
             if trusted:
                 stage_groups[kind, role, name].append({**stage, "run_id": run_id})
         files = evidence.get("files")
         row["file_count"] = len(files) if isinstance(files, list) else None
-        phase_complete &= isinstance(files, list)
+        phase_complete &= isinstance(files, list) and bool(files)
         for value in files if isinstance(files, list) else []:
             if not isinstance(value, dict) or not isinstance(value.get("path"), str):
                 issues.append({"source": source, "code": "FILE_TIMING_INVALID"})
@@ -126,12 +132,15 @@ def summarize(observations: list[dict], runs: int, issues: list[dict] | None = N
     return {
         "schema_version": 1, "advisory": True, "status": "COMPLETE" if complete else "PARTIAL",
         "requested_per_kind": runs, "selected": counts, "issues": issues,
+        "phase_scope": "stages-and-files",
         "runs": rows, "stage_hotspots": ranked(stage_groups, "name"), "file_hotspots": ranked(file_groups, "path"),
         "limitations": [
+            "Top-level gate wall time is reported, but its wait/setup/run decomposition is not claimed.",
             "Push rows describe fresh-gate, not unrecorded publisher lock/queue time or the entire push pipeline.",
             "wait_s/setup_s/run_s require explicit producer measurements; missing is UNKNOWN, never zero or inferred from elapsed time.",
             "Bun native file timing includes fixture work and is not pure test execution or setup.",
             "Parent stages and runner envelopes overlap; do not sum them as serial wall time.",
+            "Runner-stage phase spans sum per-file worker time; concurrent workers may exceed stage wall time.",
             "These historical runs have different inputs, loads and judges; rankings are not a causal speedup or comparable benchmark.",
             "Cache-hit invocations and incomplete executions without retained records are not reconstructed.",
         ],

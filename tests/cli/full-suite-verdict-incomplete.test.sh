@@ -22,8 +22,18 @@ REPO_TMP="$KITROOT_DIR/var/agent-tmp"
 mkdir -p "$REPO_TMP"
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$KITROOT_DIR/scripts/kitlib-tmp.sh"
-printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
+KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP full-suite-verdict-incomplete-test || exit 1
+FIXTURE_WORKSPACE=
+while IFS= read -r owner_line; do
+	case $owner_line in
+		repo=*) FIXTURE_WORKSPACE=${owner_line#repo=}; break ;;
+	esac
+done <"$TMP/.owner"
+case $FIXTURE_WORKSPACE in
+	/*) ;;
+	*) echo "fixture scratch owner has no absolute repo" >&2; exit 1 ;;
+esac
 
 pass=0
 fail=0
@@ -100,6 +110,10 @@ run_verdict_with_envs() {
 		sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
 	rc=$?
 	resolve_cache_paths || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
+}
+fixture_br() {
+	env -u BEADS_DB OMP_KIT_CASE_CWD="$FIXTURE_WORKSPACE" \
+		GITHUB_WORKSPACE="$FIXTURE_WORKSPACE" br "$@"
 }
 
 inherited_authority_case() {
@@ -322,20 +336,23 @@ target.write_text('changed')"
 
 	if command -v br >/dev/null 2>&1; then
 		mkrepo_begin hermetic-br-default
-		addfile tests/cli/fixture_test.py "import subprocess
+		addfile tests/cli/fixture_test.py "import os, subprocess
 from pathlib import Path
 root = Path('$repo')
 print('HERMETIC_BR_DEFAULT_TARGET ' + str(root / '.beads' / 'beads.db'), flush=True)
+env = os.environ.copy()
+env.pop('OMP_KIT_CASE_CWD', None)
+env.pop('GITHUB_WORKSPACE', None)
 subprocess.run(['br', '--no-daemon', '--no-auto-import', '--no-auto-flush',
-    'create', 'implicit database containment probe', '--json'], cwd=root, check=True)"
+    'create', 'implicit database containment probe', '--json'], cwd=root, env=env, check=True)"
 		mkrepo_commit
-		br_actor=hermetic-fixture
+		br_actor=${AGENT_NAME:-hermetic-fixture}
 		br_db="$repo/.beads/beads.db"
 		if (
 			cd "$repo" &&
-			env -u BEADS_DB br --db "$br_db" --actor "$br_actor" --no-auto-import \
+			fixture_br --db "$br_db" --actor "$br_actor" --no-auto-import \
 				--no-auto-flush --no-daemon init --prefix hermetic --json >"$TMP/hermetic-br-init.out" 2>&1 \
-				&& env -u BEADS_DB br --db "$br_db" --actor "$br_actor" --no-auto-import \
+				&& fixture_br --db "$br_db" --actor "$br_actor" --no-auto-import \
 					--no-auto-flush --no-daemon create 'retained tracker sentinel' --json >"$TMP/hermetic-br-seed.out" 2>&1
 		); then
 			br_before=$(file_state "$br_db")
@@ -976,9 +993,9 @@ if command -v br >/dev/null 2>&1; then
 	sentinel_db="$sentinel/.beads/beads.db"
 	mkdir -p "$sentinel"
 	git -C "$sentinel" init -q
-	if (cd "$sentinel" && br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush init --prefix sentinel --json) >"$TMP/sentinel-init.out" 2>&1 \
-		&& br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush create "retained sentinel" --json >"$TMP/sentinel-seed.out" 2>&1 \
-		&& br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush list --limit 0 --json >"$TMP/sentinel-before.json" 2>"$TMP/sentinel-before.err"; then
+	if (cd "$sentinel" && fixture_br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush init --prefix sentinel --json) >"$TMP/sentinel-init.out" 2>&1 \
+		&& fixture_br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush create "retained sentinel" --json >"$TMP/sentinel-seed.out" 2>&1 \
+		&& fixture_br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush list --limit 0 --json >"$TMP/sentinel-before.json" 2>"$TMP/sentinel-before.err"; then
 		mkrepo_begin native_tracker
 		cp "$KITROOT_DIR/scripts/kitlib_run.py" "$KITROOT_DIR/scripts/pysafe.py" "$repo/scripts/"
 		addfile tests/cli/tracker_test.py 'import json, os, sys
@@ -988,8 +1005,12 @@ from kitlib_run import run
 
 actor = os.environ.get("AGENT_NAME", "full-suite-fixture")
 def br(*args, cwd=None):
+    env = os.environ.copy()
+    env["AGENT_NAME"] = actor
+    env.pop("OMP_KIT_CASE_CWD", None)
+    env.pop("GITHUB_WORKSPACE", None)
     result = run(["br", "--actor", actor, "--no-auto-import", "--no-auto-flush", *args],
-                 deadline_s=20, max_output_bytes=1048576, cwd=cwd)
+                 deadline_s=20, max_output_bytes=1048576, cwd=cwd, env=env)
     sys.stdout.buffer.write(result.stdout)
     sys.stderr.buffer.write(result.stderr)
     assert result.rc == 0 and not result.truncated and not result.timed_out
@@ -1024,8 +1045,10 @@ assert [row["id"] for row in rows] == [explicit["id"]]'
 		else not_ok "native suite failed its scratch-local tracker checks (rc=$rc)"; cat "$out"
 		fi
 		[ ! -f "$repo.cache/$tree.log" ] || cat "$repo.cache/$tree.log"
-		if br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush list --limit 0 --json >"$TMP/sentinel-after.json" 2>"$TMP/sentinel-after.err" \
-			&& python3 - "$TMP/sentinel-before.json" "$TMP/sentinel-after.json" <<'PY'
+		fixture_br --db "$sentinel_db" --actor "$actor" --no-auto-import --no-auto-flush list --limit 0 --json >"$TMP/sentinel-after.json" 2>"$TMP/sentinel-after.err"
+		sentinel_rc=$?
+		if [ "$sentinel_rc" -eq 0 ]; then
+			python3 - "$TMP/sentinel-before.json" "$TMP/sentinel-after.json" <<'PY'
 import json, sys
 from pathlib import Path
 before, after = (json.loads(Path(path).read_text(encoding="utf-8")) for path in sys.argv[1:])
@@ -1034,8 +1057,13 @@ assert len(before_rows) == 1
 assert after == before, (before, after)
 print("NATIVEFIXTUREDB1 retained native sentinel:", json.dumps(after, sort_keys=True))
 PY
-		then ok "scratch-local tracker operations leave the nonempty native sentinel unchanged"
-		else not_ok "the declared suite mutated or could not inventory its native sentinel"
+			sentinel_rc=$?
+		fi
+		if [ "$sentinel_rc" -eq 0 ]; then
+			ok "scratch-local tracker operations leave the nonempty native sentinel unchanged"
+		else
+			not_ok "the declared suite mutated or could not inventory its native sentinel"
+			cat "$TMP/sentinel-after.err" 2>/dev/null
 		fi
 	else
 		not_ok "native tracker fixture initialization failed"

@@ -47,15 +47,27 @@ class GateProfileTests(unittest.TestCase):
         self.assertIsNone(run["run_s"])
         self.assertEqual(report["status"], "PARTIAL")
 
-    def test_explicit_phase_measurements_preserve_real_zero(self):
-        timing = {"wall_ms": 1000, "wait_ms": 0, "setup_ms": 200, "run_ms": 800}
-        report = gate_profile.summarize([
-            observation("push", 1, timing=timing),
-            observation("full", 1, timing=timing),
-        ], 1)
+    def test_explicit_stage_and_file_phases_complete_without_top_level_phase_claims(self):
+        phase = {"wall_ms": 1000, "wait_ms": 0, "setup_ms": 200, "run_ms": 800}
+        records = [
+            observation("push", 1, timing={"wall_ms": 1500, "stages": {"shell": phase}},
+                        evidence={"complete": True, "files": [
+                            {"path": "tests/a.sh", "complete": True, **phase},
+                        ]}),
+            observation("full", 1, timing={"wall_ms": 1500, "stages": {"shell": phase}},
+                        evidence={"complete": True, "files": [
+                            {"path": "tests/a.sh", "complete": True, **phase},
+                        ]}),
+        ]
+        report = gate_profile.summarize(records, 1)
         self.assertEqual(report["status"], "COMPLETE")
-        for row in report["runs"]:
-            self.assertEqual((row["wait_s"], row["setup_s"], row["run_s"]), (0, .2, .8))
+        self.assertEqual(report["phase_scope"], "stages-and-files")
+        for run in report["runs"]:
+            self.assertEqual((run["wait_s"], run["setup_s"], run["run_s"]), (None, None, None))
+            self.assertEqual((run["stages"][0]["wait_s"], run["stages"][0]["setup_s"],
+                              run["stages"][0]["run_s"]), (0, .2, .8))
+        file = report["file_hotspots"][0]
+        self.assertEqual((file["wait_s"], file["setup_s"], file["run_s"]), (0, .2, .8))
 
     def test_overlapping_stage_envelopes_are_not_summed_as_wall(self):
         timing = {"wall_ms": 10000, "stages": {
