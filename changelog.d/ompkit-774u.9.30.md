@@ -1,0 +1,1 @@
+- Prevent scratch exports from overwriting their structured `.owner` with an archived root `.owner`, preserving capability-based release.

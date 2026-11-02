@@ -2666,8 +2666,9 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
  * (file output, never a pipe, so binary stays intact), extract, remove the
  * tarball. The archive runs from the work-tree root: below it `git archive`
  * holds only that subtree, and an untracked one is an empty tar with exit 0.
- * The dir already exists and is owned by the caller; on failure the
- * dir is left in place with nothing added. Null on success, else the reason.
+ * The dir is already owned by the caller. Existing files are never overwritten,
+ * but extraction errors may leave partial export files; the caller can still
+ * release the dir by capability. Null on success, else the reason.
  */
 export function exportCommitToScratch(repo: string, commit: string, dir: string, run: ScratchRunner): string | null {
 	const typed = run(["git", "-C", repo, "cat-file", "-t", commit], { timeoutMs: 15_000 });
@@ -2677,7 +2678,7 @@ export function exportCommitToScratch(repo: string, commit: string, dir: string,
 	const tarball = join(dir, ".export.tar");
 	const archived = run(["git", "-C", top.stdout.trim(), "archive", "--format=tar", `--output=${tarball}`, commit], { timeoutMs: 120_000 });
 	if (archived.code !== 0) return "export-archive-failed";
-	const extracted = run(["tar", "-xf", tarball, "-C", dir], { timeoutMs: 120_000 });
+	const extracted = run(["tar", "-xkf", tarball, "-C", dir], { timeoutMs: 120_000 });
 	try {
 		rmSync(tarball, { force: true });
 	} catch { /* best effort */ }

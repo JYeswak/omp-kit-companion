@@ -1928,12 +1928,13 @@ test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", ()
  * and sits in the enclosing repo's ignored var/agent-tmp, and the full-suite gate archive is a
  * commitless `git init`, so neither has a HEAD to export.
  */
-function commitFixture(): { source: string; head: string } {
+function commitFixture(emptyOwner = false): { source: string; head: string } {
 	const source = agentTmp("export-src");
 	roots.push(source);
 	mkdirSync(join(source, "sub"));
 	writeFileSync(join(source, "package.json"), "{}\n");
 	writeFileSync(join(source, "sub", "inner.txt"), "inner\n");
+	if (emptyOwner) writeFileSync(join(source, ".owner"), "");
 	const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_") && key !== "GIT_CONFIG_NOSYSTEM" && key !== "GIT_CONFIG_GLOBAL") delete env[key];
 	const git = (...args: string[]): string => {
@@ -1943,7 +1944,7 @@ function commitFixture(): { source: string; head: string } {
 		return child.stdout.toString().trim();
 	};
 	git("init", "-q");
-	git("add", "package.json", "sub");
+	git("add", "package.json", "sub", ...(emptyOwner ? [".owner"] : []));
 	git("commit", "-q", "-m", "fixture");
 	return { source, head: git("rev-parse", "HEAD") };
 }
@@ -1960,6 +1961,47 @@ test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (p
 	expect(readFileSync(join(made.dir, "sub", "inner.txt"), "utf8")).toBe("inner\n");
 	expect(exportCommitToScratch(source, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", made.dir, defaultRunner)).toBe("export-commit-unknown");
 }, 60000);
+test("EXPORTOWNER: CLI export preserves the structured owner and capability release", () => {
+	const { source, head } = commitFixture(true);
+	const state = join(source, "state");
+	privateKitState(state);
+	writeFileSync(join(source, "browser-inventory.ts"), "");
+	const env = {
+		OMP_KIT_SCRATCH_ROOTS: join(source, "var", "agent-tmp"),
+		XDG_STATE_HOME: state,
+	};
+	const created = cli(["scratch", "new", "--label", "expowner", "--export", head, "--bead", "ompkit-774u.9.30"], source, env);
+	const createdOk = created.code === 0 && created.envelope.data.overall === "OK";
+	const createdRefused = created.code === 1 && created.envelope.data.overall === "FINDINGS"
+		&& created.envelope.data.reason === "export-extract-failed";
+	expect(createdOk || createdRefused).toBe(true);
+	const dir = created.envelope.data.dir as string;
+	const capability = created.envelope.data.capability as string;
+	expect(parseOwnerFile(readFileSync(join(dir, ".owner"), "utf8"))).not.toBeNull();
+	const released = cli(["scratch", "release", dir, "--capability", capability, "--bin", "throwaway", "--now"], source, env);
+	expect(released.code).toBe(0);
+	expect(released.envelope.data.deleted).toBe(true);
+	expect(existsSync(dir)).toBe(false);
+}, 60000);
+
+test("EXPORTOWNER.retire: an empty owner on a 73-hour-idle dir reaches safe reaper quarantine", () => {
+	const home = useState();
+	const root = agentTmp("scratch");
+	roots.push(root);
+	const now = Date.now();
+	const dir = join(root, `empty-owner.${deadPid()}`);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, ".owner"), "");
+	writeFileSync(join(dir, "data"), "retain\n");
+	backdateTree(dir, 73 * 3600 * 1000, now);
+	const deps = { ...depsFor({ now }), home, now };
+	const planned = inspectOne(dir, root, deps);
+	expect(planned).toMatchObject({ action: "QUARANTINE", reason: "unowned-idle-72h-would-quarantine" });
+	const applied = applyUnowned(dir, root, deps, planned!);
+	expect(applied).toMatchObject({ action: "QUARANTINE", reason: "malformed-owner-idle-72h-quarantined" });
+	expect(existsSync(dir)).toBe(false);
+	expect(readFileSync(join(applied.dir, "data"), "utf8")).toBe("retain\n");
+});
 
 // SCRATCHLEAK1 planted: `scratch new --export` exports from its cwd. Below the work-tree root a bare
 // `git archive` holds only that subtree, and an untracked one (an export nested in its repo's
