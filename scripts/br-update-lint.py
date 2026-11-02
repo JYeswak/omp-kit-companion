@@ -70,10 +70,12 @@ interpretations must be unique: a SHA-shaped path segment cannot select a
 different checkout, and ambiguous claims fail closed. Shell quoting/escaping
 is already decoded here; no eval or recovery is performed. Review entry needs
 a source claim; positional, flag, file and stdin DONE comments are gated too.
-The checkout's recent ledger tail must end cleanly and its latest matching
-version-2 observation must have integer rc=0 and complete evidence. Missing,
-malformed or incomplete observations fail closed, even if other admission
-checks passed. Older observations outside the bounded tail require a fresh run.
+Repositories that declare fresh-gate.sh keep the bounded ledger requirement:
+the latest matching version-2 observation needs integer rc=0 and complete
+evidence. Other repositories may use their declared exact-source non-author
+pregrade, bound to the authoritative tracker, prospective acceptance and
+passing build outcomes. Missing or invalid proof fails closed. No configured
+pregrade hint is executed by this gate; it is rendered only as guidance.
 
 Reads are live (`br show`, `br list`); no JSONL flush is involved, so a
 fixed bead passes immediately (LINTGATE1 acceptance 2).
@@ -87,11 +89,13 @@ import shlex
 import shutil
 import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Iterable
 from contextlib import nullcontext
 from itertools import chain
 
+import ac_phase
 import kitlib_run
 from kitlib_tmp import owned_tmp
 
@@ -415,15 +419,104 @@ def _fresh_green(repo: str, commit: str) -> bool:
     return False
 
 
+def _requires_fresh_gate(repo: str, commit: str) -> bool:
+    """Deleting a companion's working-tree script cannot select a weaker authority."""
+    if (Path(repo) / "scripts/fresh-gate.sh").is_file():
+        return True
+    for revision in (commit, "HEAD"):
+        if run(["git", "-C", repo, "cat-file", "-e", f"{revision}:scripts/fresh-gate.sh"], repo, 10)[0] == 0:
+            return True
+    return False
+
+
+def _build_pregrade_green(bead: dict, proofs: object) -> bool:
+    if not isinstance(proofs, list) or any(not isinstance(item, dict) for item in proofs):
+        return False
+    by_item = {item.get("ac"): item for item in proofs if isinstance(item.get("ac"), str)}
+    if len(by_item) != len(proofs):
+        return False
+    build = [item for item in ac_phase.parse(bead.get("acceptance_criteria")) if item["phase"] == "build"]
+    if not build:
+        return False
+    for item in build:
+        proof = by_item.get(f"AC{item['index'] + 1}", {})
+        if proof.get("phase") != "build" or proof.get("status") != "PASS":
+            return False
+    return True
+
+
+def _pregrade_green(repo: str, commit: str, request: list[str]) -> bool:
+    bead_id = os.environ.get("BR_HANDOFF_BEAD", "")
+    real = os.environ.get("BR_HANDOFF_REAL", "")
+    tracker = os.environ.get("BR_HANDOFF_TRACKER", "")
+    database = os.environ.get("BR_HANDOFF_DB", "")
+    if not bead_id or not real or not tracker:
+        return False
+    try:
+        path = ac_phase.pregrade_path(bead_id)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        _, invalid, _ = ac_phase.pregrade_config(tracker)
+        if invalid:
+            return False
+        bead = show_bead(real, tracker, database, bead_id)
+        if os.environ.get("BR_HANDOFF_SUBCOMMAND") == "update":
+            bead = prospective(bead, parse_update(request), os.environ.get("BR_HANDOFF_PROJECT") or tracker)
+        if ac_phase.pregrade_record_refusals(bead, record, datetime.now(timezone.utc), path):
+            return False
+        if not isinstance(record.get("repo"), str) or os.path.realpath(record["repo"]) != os.path.realpath(tracker):
+            return False
+        if not _build_pregrade_green(bead, record.get("items")):
+            return False
+        rc, observed, _ = run(["git", "-C", repo, "rev-parse", "--verify", f"{record['candidate_commit']}^{{commit}}"], repo, 10)
+        return rc == 0 and observed.strip() == commit
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def handoff_gate(argv: list[str]) -> int:
-    if len(argv) != 3 or argv[0] not in ("0", "1"):
+    if len(argv) < 3 or argv[0] not in ("0", "1"):
         print("br-shim: HANDOFF_UNGATED incomplete admission request; "
               "run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>", file=sys.stderr)
         return 4
-    return _handoff_check(argv[0] == "1", argv[1:])
+    return _handoff_check(argv[0] == "1", argv[1:3], argv[3:])
 
 
-def _handoff_check(required: bool, texts: Iterable[str]) -> int:
+def _handoff_remedy(repo: str, target: str, fresh_required: bool) -> str:
+    if fresh_required:
+        return f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {target}"
+    tracker = os.environ.get("BR_HANDOFF_TRACKER") or repo
+    bead_id = os.environ.get("BR_HANDOFF_BEAD") or "<id>"
+    actor = os.environ.get("AGENT_NAME") or "<actor>"
+    _, _, hint = ac_phase.pregrade_config(tracker)
+    if not hint:
+        return (f"omp-kit preflight in-review {shlex.quote(bead_id)} "
+                f"--project {shlex.quote(tracker)} --actor {shlex.quote(actor)}")
+    for key, value in (("<repo>", tracker), ("<id>", bead_id), ("<you>", actor)):
+        hint = hint.replace(key, shlex.quote(value))
+    return f"cd {shlex.quote(tracker)} && {hint}"
+
+
+def _handoff_claim(repo: str, subject: str, request: list[str]) -> int:
+    repo = os.path.realpath(repo)
+    commit = ""
+    if subject:
+        rc, out, _ = run(["git", "-C", repo, "rev-parse", "--verify", f"{subject}^{{commit}}"], repo, 10)
+        if rc == 0:
+            commit = out.strip()
+    if commit and _fresh_green(repo, commit):
+        return 0
+    fresh_required = _requires_fresh_gate(repo, commit) if commit else (Path(repo) / "scripts/fresh-gate.sh").is_file()
+    if commit and not fresh_required and _pregrade_green(repo, commit, request):
+        return 0
+    target = commit or subject or "<sha>"
+    remedy = _handoff_remedy(repo, target, fresh_required)
+    print("br-shim: HANDOFF_UNGATED requires a complete GREEN observation for the exact DONE source "
+          f"{repo}@{target}; obtain the repository's declared non-author pregrade/check "
+          f"(diagnose with preflight if no hint is configured); run: {remedy}", file=sys.stderr)
+    return 4
+
+
+def _handoff_check(required: bool, texts: Iterable[str], request: list[str]) -> int:
     project = os.path.realpath(os.environ.get("BR_HANDOFF_PROJECT", os.getcwd()))
     claims: list[tuple[str, str]] = []
     for text in texts:
@@ -440,19 +533,9 @@ def _handoff_check(required: bool, texts: Iterable[str]) -> int:
     if not claims:
         claims.append((project, ""))
     for repo, subject in claims:
-        repo = os.path.realpath(repo)
-        commit = ""
-        if subject:
-            rc, out, _ = run(["git", "-C", repo, "rev-parse", "--verify", f"{subject}^{{commit}}"], repo, 10)
-            if rc == 0:
-                commit = out.strip()
-        if commit and _fresh_green(repo, commit):
-            continue
-        target = commit or subject or "<sha>"
-        remedy = f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {target}"
-        print("br-shim: HANDOFF_UNGATED requires a complete GREEN observation for the exact DONE source; "
-              f"run: {remedy}", file=sys.stderr)
-        return 4
+        refusal = _handoff_claim(repo, subject, request)
+        if refusal:
+            return refusal
     return 0
 
 
@@ -473,7 +556,7 @@ def handoff_file(argv: list[str]) -> int:
             with source as reader, snapshot.open("wb") as writer:
                 shutil.copyfileobj(reader, writer)
             with snapshot.open(encoding="utf-8") as lines:
-                refusal = _handoff_check(False, chain(argv[3:5], lines))
+                refusal = _handoff_check(False, chain(argv[3:5], lines), command[1:])
             if refusal:
                 return refusal
             command[index] = argv[1] + str(snapshot)

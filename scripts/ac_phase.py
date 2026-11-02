@@ -256,6 +256,14 @@ def pregrade_refusals(
                  "non-author pregrade for this bead first")]
     except (OSError, UnicodeError, ValueError) as exc:
         return [("PREGRADE_MISSING", f"pregrade record {path} unreadable: {exc}")]
+    return pregrade_record_refusals(bead, record, now, path)
+
+
+def pregrade_record_refusals(
+    bead: dict, record: object, now: datetime, path: Path,
+) -> list[tuple[str, str]]:
+    """Validate one already-read record; callers never join two mutable snapshots."""
+    bead_id = bead.get("id") or ""
     if not isinstance(record, dict) or record.get("schema") != PREGRADE_SCHEMA:
         return [("PREGRADE_MISSING", f"pregrade record {path} is not {PREGRADE_SCHEMA}")]
     if record.get("bead") != bead_id:

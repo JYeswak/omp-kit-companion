@@ -1,0 +1,95 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_45651df4555fbba0648c602c53a1dad4de4e611520916a61fccefa11fff2b160",
+ "limitations": [
+  "Protocol fixture rows are controlled inputs, not actual non-author reviews; real69 smoke is read-only.",
+  "Canonical mount lint1 and initial static/commit refusals retained; exact-copy pinned0 is not a claim of fixing the unclassified mount observation."
+ ],
+ "operation": "HANDOFFREPO1 final original red/green and first commit refusal",
+ "parameters": {
+  "bead": "ompkit-774u.87",
+  "bridge_sha256": "56337c811e7860f253ee534b2750669bb3dc5bc5026fdf8369cdd878a5282b33",
+  "phase_sha256": "f7cab87f5da807a073c9c9f0ecb0213bc0c069ff3c01f63ee199bc4339f99e6d",
+  "subject_sha256": "d8476b71751525a2a46502dbe31a366bfbd4207ac3205c00b8017de670524b66",
+  "test_sha256": "936abf76f76583fbfa19b2d9126f79829bd717657a6e9d2d9635626a36c18686"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "actual_original": {
+   "after_rc": 0,
+   "bead": "ompkit-774u.81",
+   "before_rc": 4,
+   "proof": "actual existing native non-author record, no production tracker transition",
+   "repo": "/Users/josh/Developer/omp-kit",
+   "source": "69aaf5cd1a32c9bab1d7410c5a3bb3c300452c47"
+  },
+  "base_commit": "b196f158ea0f126f65c8b447358f08c645ccd244",
+  "first_commit": {
+   "correction": "Restore landed import byte-for-byte, add unlink only on a new import line; declare source-only build scope and required lead release/install, no invented Supersedes or deploy execution.",
+   "findings": [
+    "DEPLOY_STEP_MISSING",
+    "STALE_WORKTREE test import line from1b2c97f6b65940ccc94d2eb91d1c59c152ceb380"
+   ],
+   "rc": 1,
+   "runtime_controls_in_refused_commit": "24/0 focused with explicit deferrals, not repository full-suite"
+  },
+  "first_static": {
+   "after": 0,
+   "correction": "static Python entrypoint with caller cwd preserved; decoded cwd plus static declared gate argv; no pragma",
+   "pysafe": 1
+  },
+  "no_claim": "No repository full suite, release, installed runtime, production mutation, independent acceptance or candidate publication yet.",
+  "original_acceptance_final": {
+   "command": "bun test tests/cli/br-shim.test.ts -t HANDOFFREPO1",
+   "rc": 0,
+   "source": "exact HEAD+onlyowned overlays; .git initialized, no commits",
+   "stderr": "\ntests/cli/br-shim.test.ts:\n(pass) HANDOFFREPO1 exact non-companion pregrade admits the real native author handoff [2329.81ms]\n(pass) HANDOFFREPO1 missing observation refuses without mutation and names the declared existing repo check [2384.10ms]\n(pass) HANDOFFREPO1 pregrade must bind the candidate, tracker, acceptance, non-author and passing build outcomes [8317.03ms]\n(pass) HANDOFFREPO1 companion still requires its ledger even if its committed script is missing from the worktree [3509.81ms]\n(pass) HANDOFFREPO1 native positional, file and stdin DONE comments all use the same exact pregrade [3473.68ms]\n(pass) HANDOFFREPO1 one pregrade cannot admit an ambiguous multiple-bead update [2319.02ms]\n(pass) HANDOFFREPO1 pregrade binds prospective acceptance in the same native update [3577.92ms]\n\n 7 pass\n 17 filtered out\n 0 fail\n 50 expect() calls\nRan 7 tests across 1 file. [25.93s]\n",
+   "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+  },
+  "original_red": {
+   "literal_rc": 4,
+   "literal_stderr": "br-shim: HANDOFF_UNGATED requires a complete GREEN observation for the exact DONE source; run: cd /Users/josh/Developer/omp-kit && sh scripts/fresh-gate.sh --commit 69aaf5cd1a32c9bab1d7410c5a3bb3c300452c47\n",
+   "native_initial": {
+    "fail": 4,
+    "pass": 2,
+    "total": 6
+   }
+  },
+  "pinned_lint": {
+   "canonical_mount_rc": 1,
+   "cause": "UNCLASSIFIED canonical bind-mount observation; identical local/exact SHA and full-source stdin parse0. Required pinned exact-copy command passes, no suppression or changed linter.",
+   "exact_copy_rc": 0,
+   "version": "koalaman/shellcheck:v0.9.0"
+  },
+  "preserved_full_file": {
+   "bun": {
+    "expects": 131,
+    "fail": 0,
+    "pass": 24
+   },
+   "phase": {
+    "fail": 0,
+    "pass": 29
+   },
+   "shell": {
+    "fail": 0,
+    "pass": 88
+   }
+  },
+  "quality": {
+   "acknowledgements": 0,
+   "gating": 0,
+   "residual": "Unchanged extracted canonical validator complexity16 and fixture98LOC; churn retained"
+  },
+  "source_sha256": {
+   "ROADMAP.md": "354c701ecc23a9b0e114577486de9d05640024299a32b08102aa92c272860913",
+   "changelog.d/ompkit-774u.87.md": "eb35a3fab67a3f63640085312de33e464e06c8a23451b0b9c23183d2fe125581",
+   "scripts/ac_phase.py": "f7cab87f5da807a073c9c9f0ecb0213bc0c069ff3c01f63ee199bc4339f99e6d",
+   "scripts/br-shim.sh": "56337c811e7860f253ee534b2750669bb3dc5bc5026fdf8369cdd878a5282b33",
+   "scripts/br-update-lint.py": "d8476b71751525a2a46502dbe31a366bfbd4207ac3205c00b8017de670524b66",
+   "tests/cli/br-shim.test.sh": "cd8706e359ce3c9db88c1340ae7a08456f1e5fa6e7b6c5980d5000f0c743e7ce",
+   "tests/cli/br-shim.test.ts": "936abf76f76583fbfa19b2d9126f79829bd717657a6e9d2d9635626a36c18686"
+  }
+ }
+}

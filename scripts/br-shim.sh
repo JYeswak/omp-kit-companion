@@ -306,6 +306,15 @@ if { [ "$gate_sub" = update ] || { [ "$gate_sub" = comments ] && [ "$gate_id" = 
 	if [ ! -f "$handoff_helper" ] || ! command -v python3 >/dev/null 2>&1; then
 		fail "HANDOFF_UNGATED admission helper unavailable; run in the source checkout: sh scripts/fresh-gate.sh --commit <sha>"
 	fi
+	BR_HANDOFF_REAL=$real
+	BR_HANDOFF_TRACKER=$tracker_project
+	BR_HANDOFF_DB=$tracker_db_path
+	BR_HANDOFF_BEAD=$gate_id
+	BR_HANDOFF_SUBCOMMAND=$gate_sub
+	if [ "$gate_sub" = comments ]; then BR_HANDOFF_BEAD=$gate_comment_id
+	elif [ "$gate_extra_ids" != 0 ]; then BR_HANDOFF_BEAD=""
+	fi
+	export BR_HANDOFF_REAL BR_HANDOFF_TRACKER BR_HANDOFF_DB BR_HANDOFF_BEAD BR_HANDOFF_SUBCOMMAND
 	if [ "$gate_sub" = comments ] && [ "$gate_file" = 1 ]; then
 		if [ -n "$found" ]; then
 			BR_HANDOFF_PROJECT="$PWD" python3 "$handoff_helper" handoff-file "$gate_file_index" "$gate_file_form" "$gate_file_path" "$gate_tcomment" "$gate_reason$shim_nl$gate_pos_comment" "$real" "$@"
@@ -314,7 +323,8 @@ if { [ "$gate_sub" = update ] || { [ "$gate_sub" = comments ] && [ "$gate_id" = 
 		fi
 		exit "$?"
 	fi
-	BR_HANDOFF_PROJECT="$PWD" python3 "$handoff_helper" handoff "$handoff_review" "$gate_tcomment" "$gate_reason$shim_nl$gate_pos_comment"
+	handoff_source_cwd=$PWD
+	(cd -- "${handoff_helper%/*}" && BR_HANDOFF_PROJECT="$handoff_source_cwd" python3 ./br-update-lint.py handoff "$handoff_review" "$gate_tcomment" "$gate_reason$shim_nl$gate_pos_comment" "$@")
 	handoff_rc=$?
 	case "$handoff_rc" in
 		0) ;;

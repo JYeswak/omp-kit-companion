@@ -537,14 +537,12 @@ export AM_EXPECTED_PROJECT="$TMP/review-project"
 export BR_GUARD_JSON_FILE="$TMP/review-other.json"
 handoff_case() {
 	handoff_name=$1; handoff_want=$2
-	handoff_target=${3:-$HANDOFF_SHA}
 	: > "$TMP/argv"
 	br --db "$REVIEW_DB" update X --status in_review --transition-comment "$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
 	handoff_rc=$?
 	if [ "$handoff_want" = 4 ]; then
 		if [ "$handoff_rc" = 4 ] && [ ! -s "$TMP/argv" ] \
-			&& grep -Fq HANDOFF_UNGATED "$TMP/out" \
-			&& grep -Fq "sh scripts/fresh-gate.sh --commit $handoff_target" "$TMP/out"; then
+			&& grep -Fq HANDOFF_UNGATED "$TMP/out"; then
 			pass=$((pass + 1))
 		else
 			fail=$((fail + 1)); printf 'FAIL %s: rc=%s backend=%s out<<<%s>>>\n' "$handoff_name" "$handoff_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
@@ -581,7 +579,7 @@ HANDOFF_MESSAGE="DONE $HANDOFF_CODE@$HANDOFF_SHA: contact operator@deadbeef"
 handoff_case handoff-decoded-path-and-explanation-admitted 0
 HANDOFF_VALID_MESSAGE=$HANDOFF_MESSAGE
 HANDOFF_MESSAGE="DONE $HANDOFF_CODE@${HANDOFF_SHA}junk"
-handoff_case handoff-sha-prefix-plus-junk-refused 4 "<sha>"
+handoff_case handoff-sha-prefix-plus-junk-refused 4
 HANDOFF_MESSAGE=$HANDOFF_VALID_MESSAGE
 rm -f "$HANDOFF_LEDGER"
 : > "$TMP/argv"
@@ -605,7 +603,7 @@ printf '{"version":2,"commit":"%s","rc":0}\n' "$HANDOFF_SHA" > "$HANDOFF_LEDGER"
 handoff_case handoff-missing-completeness-refused 4
 handoff_row "$HANDOFF_SHA" true 0
 HANDOFF_MESSAGE="review requested without a source claim"
-handoff_case handoff-review-without-DONE-refused 4 "<sha>"
+handoff_case handoff-review-without-DONE-refused 4
 HANDOFF_MESSAGE=$(printf 'evidence follows\n%s' "$HANDOFF_VALID_MESSAGE")
 : > "$TMP/argv"
 br --db "$REVIEW_DB" comments add X --message="$HANDOFF_MESSAGE" > "$TMP/out" 2>&1
@@ -646,7 +644,7 @@ mv "$HANDOFF_CODE" "$HANDOFF_AMBIGUOUS"
 HANDOFF_CODE=$HANDOFF_AMBIGUOUS
 HANDOFF_LEDGER="$HANDOFF_CODE/.git/omp-kit/fresh-gate-runs.jsonl"
 HANDOFF_MESSAGE="DONE $HANDOFF_CODE@$HANDOFF_SHA: not the qualified prefix"
-handoff_case handoff-existing-prefix-cannot-qualify-other-checkout 4 "<sha>"
+handoff_case handoff-existing-prefix-cannot-qualify-other-checkout 4
 handoff_row "$HANDOFF_SHA" true 0
 mv "$HANDOFF_PREFIX" "$HANDOFF_PREFIX-retired"
 handoff_case handoff-sha-shaped-path-segment-admitted 0
