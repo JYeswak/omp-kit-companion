@@ -158,6 +158,10 @@ export AM_FAKE_MODE=clear
 # also lacks the untracked .beads directory the path branch resolves through.
 mkdir -p "$REPO_ROOT/.beads"
 export BEADS_DB="$REPO_ROOT/.beads/beads.db"
+# These are fleet-policy countercases, not identity-free owned-fixture calls.
+# Even inside an outer owned export, this project's root tracker is outside
+# its own var/agent-tmp namespace and must retain every production refusal.
+export OMP_KIT_CASE_CWD="$REPO_ROOT"
 : > "$AM_LOG"
 export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$PATH"
 export AGENT_NAME="TestShim"

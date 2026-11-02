@@ -613,7 +613,9 @@ type HermeticFixture = {
 };
 
 function hermeticFixture(): HermeticFixture {
-	const scratch = ownedTmp("shim-hermetic-test", { root: join(root, "var/agent-tmp") });
+	const fixtureRoot = join(root, "var/agent-tmp");
+	mkdirSync(fixtureRoot, { recursive: true });
+	const scratch = ownedTmp("shim-hermetic-test", { root: fixtureRoot });
 	const bin = join(scratch.path, "bin");
 	mkdirSync(bin);
 	// Only the external mail service is unavailable; the tracker is native br.
