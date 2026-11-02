@@ -1231,6 +1231,28 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 	// definition. bootout takes a single domain/label target; separate domain
 	// and label arguments fail with exit 5.
 	const target = `${domain()}/${job.label}`;
+	// INSTALLROLLBACK1 (ompkit-fp72.120.16.84): once the old job is booted out, every failure path restores the
+	// installed bytes and bootstraps them again, so a failed install never leaves the job unloaded. On 2026-11-02 a
+	// cc install failed `bootstrap retry failed: Bootstrap failed: 5` and left the command center down until a hand
+	// restore of the backup, which bootstrapped at once.
+	const rollBack = (why: string): LifecycleResult => {
+		if (!installed) return { ok: false, changed: true, backup: plan.backup, detail: why };
+		writeFileSync(dest, installed.text, { mode: 0o644 });
+		waitUnloaded();
+		const restored = run(["launchctl", "bootstrap", domain(), dest]);
+		const back = restored.code === 0 || isAlreadyLoaded(restored);
+		return { ok: false, changed: true, backup: plan.backup,
+			detail: `INSTALL_ROLLED_BACK: ${why}; restored the previous plist${plan.backup ? ` (backup ${plan.backup})` : ""} and ` +
+				(back ? "reloaded it" : `its reload also failed: ${restored.stdout.trim() || restored.stderr.trim()}`) };
+	};
+	// A bootout returns before launchd has removed the label; bootstrapping in that window fails with exit 5.
+	// Bounded at 2 s (8 polls of 250 ms); the wait ends as soon as the label reads absent.
+	const waitUnloaded = (): void => {
+		for (let attempt = 0; attempt < 8; attempt++) {
+			if (isAbsentService(run(["launchctl", "print", `${domain()}/${job.label}`]))) return;
+			sleepMs(250);
+		}
+	};
 	let out = run(["launchctl", "bootout", target]);
 	for (let attempt = 0; isTransientLaunchctl(out) && attempt < 2; attempt++) {
 		sleepMs(1000);
@@ -1245,7 +1267,7 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 	writeFileSync(temp, plan.plist, { mode: 0o600 });
 	const lint = run(["plutil", "-lint", temp]);
 	if (lint.code !== 0) {
-		return { ok: false, changed: true, backup: plan.backup, detail: `plutil -lint refused the rendered plist: ${lint.stderr.trim() || lint.stdout.trim()}` };
+		return rollBack(`plutil -lint refused the rendered plist: ${lint.stderr.trim() || lint.stdout.trim()}`);
 	}
 	renameSync(temp, dest);
 	chmodSync(dest, 0o644);
@@ -1258,16 +1280,17 @@ export function installService(home: string, job: ServiceJobDef, launcher: strin
 		}
 	}
 	if (boot.code !== 0 && !isAlreadyLoaded(boot)) {
-		return { ok: false, changed: true, backup: plan.backup, detail: `bootstrap failed: ${boot.stdout.trim() || boot.stderr.trim()}` };
+		return rollBack(`bootstrap failed: ${boot.stdout.trim() || boot.stderr.trim()}`);
 	}
 	if (boot.code !== 0) {
 		const redoBootout = run(["launchctl", "bootout", target]);
 		if (redoBootout.code !== 0 && !isAbsentService(redoBootout) && !isTransientLaunchctl(redoBootout)) {
-			return { ok: false, changed: true, backup: plan.backup, detail: `bootstrap retry bootout failed: ${redoBootout.stderr.trim() || redoBootout.stdout.trim()}` };
+			return rollBack(`bootstrap retry bootout failed: ${redoBootout.stderr.trim() || redoBootout.stdout.trim()}`);
 		}
+		waitUnloaded();
 		const retry = run(["launchctl", "bootstrap", domain(), dest]);
 		if (retry.code !== 0) {
-			return { ok: false, changed: true, backup: plan.backup, detail: `bootstrap retry failed: ${retry.stdout.trim() || retry.stderr.trim()}` };
+			return rollBack(`bootstrap retry failed: ${retry.stdout.trim() || retry.stderr.trim()}`);
 		}
 	}
 	const verify = run(["launchctl", "print", `${domain()}/${job.label}`]);

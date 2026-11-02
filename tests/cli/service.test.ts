@@ -375,6 +375,59 @@ test("install retries bootout plus bootstrap when already loaded", () => {
   expect(calls.filter(call => call[1] === "bootout")).toHaveLength(2);
 });
 
+// INSTALLROLLBACK1 (ompkit-fp72.120.16.84): a failed install never leaves the job unloaded.
+test("INSTALLROLLBACK1: a bootstrap that fails after bootout restores the previous plist and reloads it", () => {
+  const { home, launcher, watch } = fixture();
+  const calls: string[][] = [];
+  const dest = join(home, "Library", "LaunchAgents", `${job.label}.plist`);
+  const old = renderLaunchdPlist(home, job, launcher, watch).text.replace("ThrottleInterval", "Other");
+  mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+  writeFileSync(dest, old);
+  let bootstraps = 0;
+  let bytesAtLastBootstrap: string | null = null;
+  const run = runner(calls, args => {
+    if (args[1] === "bootstrap") {
+      bootstraps++;
+      bytesAtLastBootstrap = readFileSync(dest, "utf8");
+      // first: already loaded (forces the retry path); second: the 2026-11-02 failure; third: the restore succeeds
+      if (bootstraps === 1) return { code: 5, stdout: "", stderr: "Bootstrap failed: 5: already loaded" };
+      if (bootstraps === 2) return { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" };
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (args[1] === "print") return { code: 113, stdout: "", stderr: "Could not find service" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const result = installService(home, job, launcher, watch, { path: dest, text: old },
+    { loaded: true, path: dest, state: "running", pid: 1, runs: 1, lastExit: 0 }, run);
+  expect(result.ok).toBe(false);
+  expect(result.detail).toContain("INSTALL_ROLLED_BACK");
+  expect(result.detail).toContain("reloaded it");
+  expect(readFileSync(dest, "utf8")).toBe(old);
+  expect(bytesAtLastBootstrap).toBe(old);
+  expect(bootstraps).toBe(3);
+});
+
+test("INSTALLROLLBACK1: the retry bootstrap waits until the old label reads absent", () => {
+  const { home, launcher, watch } = fixture();
+  const calls: string[][] = [];
+  let bootstraps = 0;
+  let printsBeforeRetry = 0;
+  let lingering = 2;
+  const run = runner(calls, args => {
+    if (args[1] === "bootstrap" && bootstraps++ === 0) return { code: 5, stdout: "", stderr: "Bootstrap failed: 5: already loaded" };
+    if (args[1] === "print" && bootstraps === 1) {
+      printsBeforeRetry++;
+      if (lingering-- > 0) return { code: 0, stdout: healthyPrint(join(home, "Library", "LaunchAgents", `${job.label}.plist`)), stderr: "" };
+      return { code: 113, stdout: "", stderr: "Could not find service" };
+    }
+    if (args[1] === "print") return { code: 0, stdout: healthyPrint(join(home, "Library", "LaunchAgents", `${job.label}.plist`)), stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const result = installService(home, job, launcher, watch, null, { loaded: false, path: null, state: null, pid: null, runs: null, lastExit: null }, run);
+  expect(result.ok).toBe(true);
+  expect(printsBeforeRetry).toBe(3);
+});
+
 test("uninstall on an absent job reports already_absent and still bootouts", () => {
   const { home } = fixture();
   const calls: string[][] = [];
