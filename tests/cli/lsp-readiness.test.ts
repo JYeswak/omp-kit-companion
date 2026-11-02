@@ -1,10 +1,11 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { basename, delimiter, dirname, join } from "node:path";
 import { inspectLspReadiness, planLspSetup, resolveOmpDefaults, type LspReadinessReport } from "../../src/lsp-readiness.ts";
-import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, probeLspReadiness } from "../../src/lsp-probe.ts";
-import { collectReadinessWaits } from "../../src/lsp-probe.ts";
+import { buildLspJsonRpcReceipt, classifyLspProbeOutcome, collectReadinessWaits, nextLspReadinessDecision, probeLspReadiness, type LspProbeReport } from "../../src/lsp-probe.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { run } from "../../src/kitlib/run.ts";
 import { cachedOmpPackage } from "../../src/omp-source-cache.ts";
 
 const scratch = join(import.meta.dir, "../../var/agent-tmp");
@@ -260,8 +261,10 @@ test("deep LSP refuses a server from another checkout without executing it", asy
 
 const installedOmp = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 const nativeLspTest = installedOmp && Bun.which("typescript-language-server") && Bun.which("node") && Bun.which("git") ? test : test.skip;
-nativeLspTest("one alternative root marker permits a real cold request and preserves absent alternatives", async () => {
+nativeLspTest("one alternative root marker permits a real cold request under controlled contention and preserves absent alternatives", async () => {
 	if (!installedOmp) throw new Error("installed OMP required");
+	const node = Bun.which("node");
+	if (!node) throw new Error("Node required");
 	const f = fixture();
 	sourceTreeFor(f.root, installedOmp);
 	writeFileSync(join(f.project, "package.json"), "{}");
@@ -271,7 +274,58 @@ nativeLspTest("one alternative root marker permits a real cold request and prese
 	writeFileSync(join(f.project, ".omp", "lsp.json"), JSON.stringify({ servers: { "typescript-native": { disabled: true } } }));
 	const before = tree(f.root);
 	const input = { home: f.home, project: f.project, file, ompPath: installedOmp, pathEnv: process.env.PATH };
-	const report = await probeLspReadiness({ ...input, readiness: inspectLspReadiness(input), timeoutMs: 60_000 });
+	const readiness = inspectLspReadiness(input);
+	const stressCode = `process.stdout.write("ready\\n");
+const until = Date.now() + 65_000;
+let state = 0;
+while (Date.now() < until) state = Math.imul(state + 1, 1664525) + 1013904223;
+process.stdout.write(String(state));`;
+	const stressAbort = new AbortController();
+	const stressFailures: Error[] = [];
+	const stressWorkers: Array<{ started: Promise<void>; run: Promise<void> }> = [];
+	let report: LspProbeReport;
+	try {
+		for (let index = 0; index < Math.min(2, availableParallelism()); index++) {
+			let started = false;
+			let output = "";
+			let resolveStarted!: () => void;
+			let rejectStarted!: (error: Error) => void;
+			const start = new Promise<void>((resolve, reject) => { resolveStarted = resolve; rejectStarted = reject; });
+			const worker = run([node, "-e", stressCode], {
+				deadline_s: 65,
+				signal: stressAbort.signal,
+				max_output_bytes: 64,
+				on_output: (stream, chunk) => {
+					if (started || stream !== "stdout") return;
+					output += new TextDecoder().decode(chunk);
+					if (output.includes("ready")) {
+						started = true;
+						resolveStarted();
+					}
+				},
+			}).then(result => {
+				if (!started) {
+					const error = new Error(`contention worker exited before it could start (rc=${result.rc})`);
+					rejectStarted(error);
+					stressFailures.push(error);
+				} else if (!stressAbort.signal.aborted) stressFailures.push(new Error("contention worker exited before the cold probe finished"));
+			}, error => {
+				if (!stressAbort.signal.aborted) {
+					const failure = error instanceof Error ? error : new Error(String(error));
+					stressFailures.push(failure);
+					if (!started) rejectStarted(failure);
+				}
+			});
+			stressWorkers.push({ started: start, run: worker });
+		}
+		await Promise.all(stressWorkers.map(worker => worker.started));
+		report = await probeLspReadiness({ ...input, readiness, timeoutMs: 60_000 });
+	} finally {
+		stressAbort.abort();
+		await Promise.all(stressWorkers.map(worker => worker.run));
+		if (stressFailures.length > 0) throw stressFailures[0]!;
+	}
+	if (report.status !== "PASS") console.error("B10_LSP_CONTENTION_FAILURE " + JSON.stringify(report));
 	expect(report.status).toBe("PASS");
 	expect(report.elapsed_ms).toBeGreaterThan(0);
 	expect(report.checks.known_positive_reference).toBe(true);
@@ -345,6 +399,11 @@ test("planted: slow-to-ready and never-ready servers record elapsed per readines
 	expect(slowWaits.map(wait => wait.attempt)).toEqual([1, 2, 3]);
 	expect(slowWaits.map(wait => wait.elapsed_ms)).toEqual([18.4, 22.7, 21015.3]);
 	expect(slowWaits.map(wait => wait.ready)).toEqual([false, false, true]);
+	expect(nextLspReadinessDecision(notReady, 5, 1_250)).toEqual({ kind: "retry", delayMs: 250 });
+	expect(nextLspReadinessDecision(ready, 5, 21_015.3)).toEqual({ kind: "ready" });
+	expect(nextLspReadinessDecision(notReady, 5, 21_015.3)).toEqual({ kind: "retry", delayMs: 250 });
+	expect(nextLspReadinessDecision(notReady, 100, 24_999)).toEqual({ kind: "incomplete" });
+	expect(nextLspReadinessDecision(notReady, 99, 25_000)).toEqual({ kind: "incomplete" });
 	const neverCalls = [
 		{ action: "status", elapsed_ms: 15.2, result: notReady },
 		{ action: "status", elapsed_ms: 19.8, result: notReady },

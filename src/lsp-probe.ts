@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import type { LspReadinessReport, LspServerReadiness } from "./lsp-readiness.ts";
 import { resolveOmpDefaults } from "./lsp-readiness.ts";
@@ -14,21 +15,33 @@ export interface LspJsonRpcTraceEntry {
 }
 
 const MAX_JSON_RPC_TRACE_ENTRIES = 64;
+const MAX_READINESS_POLL_RETRIES = 100;
+const MAX_READINESS_WAIT_MS = 25_000;
+const READINESS_POLL_INTERVAL_MS = 250;
 
 export function buildLspJsonRpcReceipt(state: LspProbeState, calls: readonly { action: string; elapsed_ms?: number; result: string }[]): LspJsonRpcTraceEntry[] | undefined {
 	if (state === "PASS") return undefined;
 	const start = Math.max(0, calls.length - MAX_JSON_RPC_TRACE_ENTRIES);
 	return calls.slice(start).map((call, index) => ({ method: "lsp/" + call.action, id: String(start + index), elapsed_ms: call.elapsed_ms ?? null, result_bytes: Buffer.byteLength(call.result, "utf8") }));
 }
-// l9kv: every issued `status` call is one readiness attempt (the wait stage re-issues
-// status until the server reports ready, max five bounded polls). Elapsed per attempt is
-// recorded so the B10 report shows cold-start timing without re-running the probe.
+// l9kv: every issued `status` call is one readiness attempt; the wait stage polls the real
+// server at READINESS_POLL_INTERVAL_MS intervals, capped at MAX_READINESS_WAIT_MS and
+// MAX_READINESS_POLL_RETRIES. Elapsed per attempt is recorded in the B10 report.
 export function collectReadinessWaits(calls: readonly { action: string; elapsed_ms?: number; result: string }[]): LspProbeReport["readiness_waits"] {
 	return calls.filter(call => call.action === "status").map((call, index) => ({
 		attempt: index + 1,
 		elapsed_ms: call.elapsed_ms ?? null,
 		ready: call.result.includes("Language servers: typescript-language-server (ready)"),
 	}));
+}
+export function nextLspReadinessDecision(
+	latestToolResult: string,
+	pollRetries: number,
+	elapsedMs: number,
+): { kind: "ready" } | { kind: "retry"; delayMs: number } | { kind: "incomplete" } {
+	if (latestToolResult.includes("Language servers: typescript-language-server (ready)")) return { kind: "ready" };
+	if (pollRetries >= MAX_READINESS_POLL_RETRIES || elapsedMs >= MAX_READINESS_WAIT_MS) return { kind: "incomplete" };
+	return { kind: "retry", delayMs: READINESS_POLL_INTERVAL_MS };
 }
 export type LspProbeState = "PASS" | "MISSING" | "IMMEDIATE_EXIT" | "WRONG_MARKER" | "INCOMPLETE" | "TIMEOUT" | "UNVERIFIED";
 type ProbeTreeSnapshot = Record<string, [number, number, number, string | null]>;
@@ -526,6 +539,7 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 		const toolCallIssuedAt = new Map<string, number>();
 		let stage: "status" | "capabilities" | "wait" | "references" | "symbols" | "done" = "status";
 		let readinessPolls = 0;
+		let readinessWaitStartedAt: number | null = null;
 		mockServer = Bun.serve({
 			hostname: "127.0.0.1", port: 0,
 			async fetch(request) {
@@ -560,15 +574,21 @@ export async function probeLspReadiness(input: LspProbeInput): Promise<LspProbeR
 					} else if (stage === "capabilities") {
 						turn = turns[1]!;
 						stage = "wait";
-					} else if (stage === "wait" && /Language servers: typescript-language-server \(ready\)/.test(latestToolResult)) {
-						turn = turns[2]!;
-						stage = "references";
-					} else if (stage === "wait" && readinessPolls < 5) {
-						readinessPolls += 1;
-						turn = turns[0]!;
 					} else if (stage === "wait") {
-						stage = "done";
-						turn = { text: "LSP readiness did not reach ready within five bounded status checks." };
+						const elapsed = readinessWaitStartedAt === null ? 0 : performance.now() - readinessWaitStartedAt;
+						readinessWaitStartedAt ??= performance.now();
+						const decision = nextLspReadinessDecision(latestToolResult, readinessPolls, elapsed);
+						if (decision.kind === "ready") {
+							turn = turns[2]!;
+							stage = "references";
+						} else if (decision.kind === "retry") {
+							readinessPolls += 1;
+							await delay(decision.delayMs);
+							turn = turns[0]!;
+						} else {
+							stage = "done";
+							turn = { text: "LSP readiness did not reach ready within the bounded status-check window." };
+						}
 					} else if (stage === "references") {
 						turn = turns[3]!;
 						stage = "symbols";
