@@ -6,6 +6,7 @@ import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
 import { nativeBr } from "./lib/native-br.ts";
 import { unlinkSync } from "node:fs";
+import { callerScratchRoot } from "../../src/runtime.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const shimSource = readFileSync(join(root, "scripts/br-shim.sh"), "utf8");
@@ -602,3 +603,188 @@ test("HANDOFFREPO1 pregrade binds prospective acceptance in the same native upda
 		expect(after.acceptance_criteria).toBe(next);
 	} finally { f.scratch.cleanup(); }
 }, 120_000);
+
+type HermeticFixture = {
+	path: string;
+	database: string;
+	env: Record<string, string>;
+	backend: string;
+	cleanup(): void;
+};
+
+function hermeticFixture(): HermeticFixture {
+	const scratch = ownedTmp("shim-hermetic-test", { root: join(root, "var/agent-tmp") });
+	const bin = join(scratch.path, "bin");
+	mkdirSync(bin);
+	// Only the external mail service is unavailable; the tracker is native br.
+	writeFileSync(join(bin, "am"), "#!/bin/sh\nprintf 'fixture project is not registered\\n' >&2\nexit 2\n", { mode: 0o755 });
+	const backend = nativeBr();
+	return {
+		path: scratch.path, database: join(scratch.path, ".beads/beads.db"), backend,
+		env: { PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, HOME: scratch.path,
+			TMPDIR: scratch.path, XDG_STATE_HOME: join(scratch.path, "state"),
+			OMP_KIT_CASE_CWD: root, BR_REAL: backend },
+		cleanup: () => scratch.cleanup(),
+	};
+}
+
+async function hermeticCall(fixture: HermeticFixture, args: string[], options: {
+	shim?: string; env?: Record<string, string>; native?: boolean; implicit?: boolean;
+} = {}) {
+	const result = await run(options.native
+		? [fixture.backend, "--db", fixture.database, ...args]
+		: ["/bin/sh", options.shim ?? join(root, "scripts/br-shim.sh"), ...(options.implicit ? [] : ["--db", fixture.database]), ...args],
+	{ cwd: fixture.path, env: options.env ?? fixture.env, deadline_s: 15, max_output_bytes: 1024 * 1024 });
+	return { rc: result.rc, timedOut: result.timed_out, truncated: result.truncated,
+		stdout: decoder.decode(result.stdout), output: decoder.decode(result.stdout) + decoder.decode(result.stderr) };
+}
+
+function fixtureOwnerFields(text: string): Record<string, string> {
+	return Object.fromEntries(text.split("\n").filter(Boolean).map(line => {
+		const separator = line.indexOf("=");
+		if (separator < 0) throw new Error("Expected kitlib's key=value owner fixture");
+		return [line.slice(0, separator), line.slice(separator + 1)];
+	}));
+}
+
+test.each(["identity-unset", "unregistered-actor", "json-owner"] as const)(
+	"SHIMHERMETIC1 native init/create work for an owned %s fixture", async (mode: "identity-unset" | "unregistered-actor" | "json-owner") => {
+		const fixture = hermeticFixture();
+		try {
+			if (mode === "json-owner") {
+				const owner = join(fixture.path, ".owner");
+				writeFileSync(owner, `\ufeff${JSON.stringify(fixtureOwnerFields(readFileSync(owner, "utf8")))}\ufeff`);
+			}
+			expect(callerScratchRoot(fixture.path, root)).toBe(fixture.path);
+			const env = mode === "unregistered-actor" ? { ...fixture.env, AGENT_NAME: "UnregisteredPane" } : fixture.env;
+			const initialized = await hermeticCall(fixture, ["init", "--prefix", "hx"], { env });
+			expect(initialized.output).not.toContain("BR_SHIM_IDENTITY_REQUIRED");
+			expect(initialized.rc).toBe(0);
+			expect(initialized.timedOut || initialized.truncated).toBe(false);
+			const created = await hermeticCall(fixture, ["create", "Owned native fixture task", "--actor", "FixtureAuthor", "--json"], { env });
+			expect(created.rc).toBe(0);
+			expect(created.timedOut || created.truncated).toBe(false);
+			const id = JSON.parse(created.stdout).id;
+			expect(id).toStartWith("hx-");
+			const observed = await hermeticCall(fixture, ["show", id, "--json"], { native: true });
+			expect(observed.rc).toBe(0);
+			const row = JSON.parse(observed.stdout);
+			const issue = Array.isArray(row) ? row[0] : row;
+			expect({ id: issue.id, title: issue.title, status: issue.status, author: issue.created_by })
+				.toEqual({ id, title: "Owned native fixture task", status: "open", author: "FixtureAuthor" });
+		} finally { fixture.cleanup(); }
+	}, CASE_BUDGET_MS,
+);
+
+test("SHIMHERMETIC1 owner/physical/production negatives preserve the native tracker", async () => {
+	const fixture = hermeticFixture();
+	const ownerPath = join(fixture.path, ".owner");
+	const originalOwner = readFileSync(ownerPath, "utf8");
+	try {
+		const initialized = await hermeticCall(fixture, ["init", "--prefix", "hx"], { native: true });
+		expect(initialized.rc).toBe(0);
+		const created = await hermeticCall(fixture, ["create", "Protected native fixture task", "--json"], { native: true });
+		expect(created.rc).toBe(0);
+		const id = JSON.parse(created.stdout).id;
+		const foreign = join(fixture.path, "foreign-workspace");
+		mkdirSync(foreign);
+		const alias = join(fixture.path, "scratch-alias");
+		symlinkSync(fixture.path, alias);
+		const savedOwner = join(fixture.path, "saved-owner");
+		writeFileSync(savedOwner, originalOwner);
+		for (const kind of ["symlink-root", "missing-owner", "foreign-owner", "symlink-owner", "oversize-owner", "numeric-owner-capability", "outside-workspace", "production-root"] as const) {
+			let env = fixture.env;
+			let database = fixture.database;
+			if (kind === "symlink-root") database = join(alias, ".beads/beads.db");
+			if (kind === "missing-owner") unlinkSync(ownerPath);
+			if (kind === "foreign-owner") writeFileSync(ownerPath, originalOwner.replace(`repo=${root}`, `repo=${foreign}`));
+			if (kind === "symlink-owner") { unlinkSync(ownerPath); symlinkSync(savedOwner, ownerPath); }
+			if (kind === "oversize-owner") writeFileSync(ownerPath, `${originalOwner}${" ".repeat(4097)}`);
+			if (kind === "numeric-owner-capability") {
+				writeFileSync(ownerPath, JSON.stringify({ ...fixtureOwnerFields(originalOwner), capability_sha256: Number("1".repeat(64)) }));
+				expect(() => callerScratchRoot(fixture.path, root)).toThrow();
+			}
+			if (kind === "outside-workspace") {
+				env = { ...fixture.env, OMP_KIT_CASE_CWD: foreign };
+				writeFileSync(ownerPath, originalOwner.replace(`repo=${root}`, `repo=${foreign}`));
+			}
+			if (kind === "production-root") {
+				env = { ...fixture.env, OMP_KIT_CASE_CWD: fixture.path };
+				writeFileSync(ownerPath, originalOwner.replace(`repo=${root}`, `repo=${fixture.path}`));
+			}
+			const before = createHash("sha256").update(readFileSync(fixture.database)).digest("hex");
+			const denied = await hermeticCall({ ...fixture, database }, ["comments", "add", id, "-m", "must not reach native storage"], { env });
+			expect({ kind, rc: denied.rc, incomplete: denied.timedOut || denied.truncated })
+				.toEqual({ kind, rc: 4, incomplete: false });
+			expect(denied.output.includes("BR_SHIM_IDENTITY_REQUIRED") || denied.output.includes("BR_SHIM_RESERVATION_UNKNOWN")).toBe(true);
+			expect(createHash("sha256").update(readFileSync(fixture.database)).digest("hex")).toBe(before);
+			if (existsSync(ownerPath) || kind === "symlink-owner") unlinkSync(ownerPath);
+			writeFileSync(ownerPath, originalOwner);
+		}
+		const observed = await hermeticCall(fixture, ["comments", "list", id, "--json"], { native: true });
+		expect(observed.rc).toBe(0);
+		expect(JSON.parse(observed.stdout)).toEqual([]);
+	} finally {
+		if (existsSync(ownerPath)) unlinkSync(ownerPath);
+		writeFileSync(ownerPath, originalOwner);
+		fixture.cleanup();
+	}
+}, CASE_BUDGET_MS);
+
+test("SHIMHERMETIC1 an always-false owner predicate loses the same native positive", async () => {
+	const fixture = hermeticFixture();
+	try {
+		expect((await hermeticCall(fixture, ["init", "--prefix", "hx"], { native: true })).rc).toBe(0);
+		const release = join(fixture.path, "release");
+		mkdirSync(release);
+		const shim = join(release, "br-shim.sh");
+		copyFileSync(join(root, "scripts/br-shim.sh"), shim);
+		const predicate = readFileSync(join(root, "scripts/br-fixture-scope.py"), "utf8");
+		const boundary = '    """Fail closed on the physical root, marker, uid and canonical repo binding."""';
+		if (!predicate.includes(boundary)) throw new Error("SHIMHERMETIC1 predicate mutation did not match");
+		writeFileSync(join(release, "br-fixture-scope.py"), predicate.replace(boundary, `${boundary}\n    return False`));
+		const args = ["create", "Paired owner predicate control", "--json"];
+		const admitted = await hermeticCall(fixture, args);
+		expect(admitted.rc).toBe(0);
+		const id = JSON.parse(admitted.stdout).id;
+		const before = createHash("sha256").update(readFileSync(fixture.database)).digest("hex");
+		const denied = await hermeticCall(fixture, args, { shim });
+		expect(denied.rc).toBe(4);
+		expect(denied.output).toContain("BR_SHIM_IDENTITY_REQUIRED");
+		expect(denied.timedOut || denied.truncated).toBe(false);
+		expect(createHash("sha256").update(readFileSync(fixture.database)).digest("hex")).toBe(before);
+		const observed = await hermeticCall(fixture, ["list", "--all", "--json"], { native: true });
+		expect(observed.rc).toBe(0);
+		const listed = JSON.parse(observed.stdout);
+		const rows = Array.isArray(listed) ? listed : listed.issues;
+		expect(rows.map((row: { id: string; title: string }) => ({ id: row.id, title: row.title })))
+			.toEqual([{ id, title: "Paired owner predicate control" }]);
+	} finally { fixture.cleanup(); }
+}, CASE_BUDGET_MS);
+
+test("SHIMHERMETIC1 actual DB selection preserves explicit, ambient and local fixture bindings", async () => {
+	const a = hermeticFixture();
+	const b = hermeticFixture();
+	try {
+		expect((await hermeticCall(a, ["init", "--prefix", "hxa"], { native: true })).rc).toBe(0);
+		expect((await hermeticCall(b, ["init", "--prefix", "hxb"], { native: true })).rc).toBe(0);
+		const env = { ...a.env, BEADS_DB: b.database };
+		const explicit = await hermeticCall(a, ["create", "Explicit A beats ambient B", "--json"], { env });
+		expect(explicit.rc).toBe(0);
+		expect(JSON.parse(explicit.stdout).id).toStartWith("hxa-");
+		const ambient = await hermeticCall(a, ["create", "Ambient B from A cwd", "--json"], { env, implicit: true });
+		expect(ambient.rc).toBe(0);
+		expect(JSON.parse(ambient.stdout).id).toStartWith("hxb-");
+		const local = await hermeticCall(a, ["create", "Local A without an ambient selector", "--json"], { implicit: true });
+		expect(local.rc).toBe(0);
+		expect(JSON.parse(local.stdout).id).toStartWith("hxa-");
+		for (const [fixture, expected] of [[a, ["Explicit A beats ambient B", "Local A without an ambient selector"]],
+			[b, ["Ambient B from A cwd"]]] as const) {
+			const observed = await hermeticCall(fixture, ["list", "--all", "--json"], { native: true });
+			expect(observed.rc).toBe(0);
+			const listed = JSON.parse(observed.stdout);
+			const rows = Array.isArray(listed) ? listed : listed.issues;
+			expect(rows.map((row: { title: string }) => row.title).sort()).toEqual([...expected].sort());
+		}
+	} finally { a.cleanup(); b.cleanup(); }
+}, CASE_BUDGET_MS);

@@ -1,9 +1,9 @@
 #!/bin/sh
 # br-shim.sh — ID1 identity, TRACKLEASE1 reservation and CREATEBUDGET1 create guards.
-# Installed as `br` ahead of the real binary on an agent pane's PATH. Every
-# invocation carries --actor "$AGENT_NAME": appended when absent, enforced when
-# present. Mutations also require a registered Agent Mail identity and no
-# foreign exclusive lease on the repo's tracker files.
+# Installed as `br` ahead of the real binary on an agent pane's PATH. Fleet
+# invocations carry --actor "$AGENT_NAME": appended when absent, enforced when
+# present. Fleet mutations require a registered Agent Mail identity and no
+# foreign exclusive lease; physically owned native fixtures need neither.
 # Real binary resolution: $BR_REAL, else the first `br` on PATH with this
 # shim's own directory removed. Runtime dependencies: POSIX sh, awk, git, am; create guard uses python3 and omp-kit.
 set -u
@@ -13,14 +13,6 @@ fail() {
 	exit 4
 }
 
-if [ -z "${AGENT_NAME:-}" ]; then
-	fail "BR_SHIM_IDENTITY_REQUIRED refusing to run br without AGENT_NAME (pane identity not resolved at spawn)"
-fi
-shim_nl='
-'
-case "$AGENT_NAME" in
-	*"$shim_nl"*) fail "BR_SHIM_IDENTITY_REQUIRED AGENT_NAME must be one line" ;;
-esac
 
 found=""
 prev=""
@@ -35,9 +27,6 @@ for arg in "$@"; do
 		--actor=*) found="${arg#--actor=}" ;;
 	esac
 done
-if [ -n "$found" ] && [ "$found" != "$AGENT_NAME" ]; then
-	fail "BR_SHIM_ACTOR_MISMATCH refusing --actor $found for pane identity $AGENT_NAME"
-fi
 
 real="${BR_REAL:-}"
 if [ -z "$real" ]; then
@@ -148,6 +137,38 @@ if [ "$gate_sub" = "sync" ]; then
 	if [ "$sync_reconcile" = 1 ] && [ "$sync_dry_run" = 0 ]; then tracker_write=1; fi
 	if [ "$sync_requires_apply" = 1 ] && [ "$sync_apply" = 1 ]; then tracker_write=1; fi
 fi
+# SHIMHERMETIC1: an owned native fixture has no pane or mail identity requirement.
+# Registered pane identities still take the ordinary policy path. Resolve the
+# actual selected destinations before considering this exception, never just cwd.
+fixture_project=""
+fixture_identity_project=""
+fixture_scope="$(dirname -- "$self_path")/br-fixture-scope.py"
+if [ -f "$fixture_scope" ]; then
+	fixture_cwd=$PWD
+	fixture_project=$(CDPATH='' cd -- "$(dirname -- "$self_path")" && python3 ./br-fixture-scope.py "$fixture_cwd" "$@") || fixture_project=""
+fi
+if [ -n "$fixture_project" ]; then
+	if [ -z "${AGENT_NAME:-}" ] || [ "$tracker_write" != 1 ]; then
+		exec "$real" "$@"
+	fi
+	identity_out=$(am agents show --project "$fixture_project" --json "$AGENT_NAME" 2>&1)
+	identity_rc=$?
+	if [ "$identity_rc" -ne 0 ]; then
+		exec "$real" "$@"
+	fi
+	fixture_identity_project=$fixture_project
+fi
+if [ -z "${AGENT_NAME:-}" ]; then
+	fail "BR_SHIM_IDENTITY_REQUIRED refusing to run br without AGENT_NAME (pane identity not resolved at spawn)"
+fi
+shim_nl='
+'
+case "$AGENT_NAME" in
+	*"$shim_nl"*) fail "BR_SHIM_IDENTITY_REQUIRED AGENT_NAME must be one line" ;;
+esac
+if [ -n "$found" ] && [ "$found" != "$AGENT_NAME" ]; then
+	fail "BR_SHIM_ACTOR_MISMATCH refusing --actor $found for pane identity $AGENT_NAME"
+fi
 if [ "$tracker_write" = 1 ]; then
 	tracker_db=${gate_db:-${BEADS_DB:-}}
 	if [ -n "$tracker_db" ]; then
@@ -165,8 +186,10 @@ if [ "$tracker_write" = 1 ]; then
 		tracker_project=$(git rev-parse --show-toplevel 2>/dev/null) || fail "BR_SHIM_RESERVATION_UNKNOWN cannot resolve tracker project root"
 	fi
 	tracker_db_path=${tracker_db_path:-"$tracker_project/.beads/beads.db"}
-	identity_out=$(am agents show --project "$tracker_project" --json "$AGENT_NAME" 2>&1)
-	identity_rc=$?
+	if [ "$fixture_identity_project" != "$tracker_project" ]; then
+		identity_out=$(am agents show --project "$tracker_project" --json "$AGENT_NAME" 2>&1)
+		identity_rc=$?
+	fi
 	[ "$identity_rc" -eq 0 ] || fail "BR_SHIM_RESERVATION_UNKNOWN Agent Mail cannot verify $AGENT_NAME in $tracker_project (rc=$identity_rc): $identity_out"
 	conflict_out=$(am file_reservations conflicts "$tracker_project" .beads/issues.jsonl .beads/beads.db 2>&1)
 	conflict_rc=$?
