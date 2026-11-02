@@ -816,9 +816,11 @@ fi
 # (ompkit-t3x4u): carry_measurement copies exactly that closure, read from suite-metrics.py's own
 # source, never a list kept here: a file added to the closure reaches every fixture with no edit to
 # this test (e9d81a33ff added four and this list, kept by hand, refused the 0.2.83 publish).
-# Files under scripts/ go beside the judge ($2, default scripts); the rest keep their repo path.
+# Files under scripts/ go in the destination subdir (default scripts); other paths keep their repo path.
+# Reader, resolver and copier use the same root argument; omitted or empty roots default to KITREPO.
 judge_closure() {
-	python3 -B - "$KITREPO/scripts/suite-metrics.py" <<'PY'
+	input_root=${1:-$KITREPO}
+	python3 -B - "$input_root/scripts/suite-metrics.py" <<'PY'
 import ast, pathlib, sys
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 for node in ast.parse(source).body:
@@ -831,29 +833,90 @@ for name in names:
     print(name)
 PY
 }
+judge_closure_resolves() {
+	resolve_root=${1:-$KITREPO}
+	resolve_file=${2:-$TMP/judge-closure}
+	resolve_missing=""
+	while IFS= read -r closure_name; do
+		[ -f "$resolve_root/$closure_name" ] || resolve_missing="$resolve_missing $closure_name"
+	done < "$resolve_file"
+	if [ -n "$resolve_missing" ] || [ ! -s "$resolve_file" ]; then
+		printf 'FAIL judge-closure-resolves: JUDGING_FILES names files absent from the repo:%s\n' "$resolve_missing"
+		return 1
+	fi
+	return 0
+}
 judge_closure > "$TMP/judge-closure" || { printf 'FAIL judge-closure-readable: scripts/suite-metrics.py JUDGING_FILES\n'; exit 1; }
-# The static half: every closure file resolves in this checkout, or the fixture could not carry it.
-closure_missing=""
-while IFS= read -r closure_name; do
-	[ -f "$KITREPO/$closure_name" ] || closure_missing="$closure_missing $closure_name"
-done < "$TMP/judge-closure"
-if [ -z "$closure_missing" ] && [ -s "$TMP/judge-closure" ]; then
+if judge_closure_resolves "$KITREPO" "$TMP/judge-closure"; then
 	pass=$((pass + 1))
 else
-	fail=$((fail + 1)); printf 'FAIL judge-closure-resolves: JUDGING_FILES names files absent from the repo:%s\n' "$closure_missing"
+	fail=$((fail + 1))
 fi
 carry_measurement() {
-	mdir=$1
-	msub=${2:-scripts}
+	measure_root=${1:-$KITREPO}
+	mdir=$2
+	msub=${3:-scripts}
+	measure_closure="$TMP/judge-closure-carry"
+	judge_closure "$measure_root" > "$measure_closure" || return 1
+	judge_closure_resolves "$measure_root" "$measure_closure" || return 1
 	while IFS= read -r closure_name; do
 		case "$closure_name" in
 			scripts/*) closure_dest="$mdir/$msub/${closure_name#scripts/}" ;;
 			*) closure_dest="$mdir/$closure_name" ;;
 		esac
-		mkdir -p "${closure_dest%/*}"
-		cp "$KITREPO/$closure_name" "$closure_dest"
-	done < "$TMP/judge-closure"
+		mkdir -p "${closure_dest%/*}" || return 1
+		cp "$measure_root/$closure_name" "$closure_dest" || return 1
+	done < "$measure_closure"
 }
+judge_fixture="$TMP/judge-closure-root"
+judge_fixture_list="$TMP/judge-closure-root.list"
+judge_fixture_carried="$TMP/judge-closure-carried"
+mkdir -p "$judge_fixture/scripts"
+cat > "$judge_fixture/scripts/suite-metrics.py" <<'PY'
+JUDGING_FILES = ("scripts/suite-metrics.py", "scripts/planted-judge.py")
+PY
+printf 'planted judge input\n' > "$judge_fixture/scripts/planted-judge.py"
+if judge_closure "$judge_fixture" > "$judge_fixture_list"; then
+	fixture_added=0
+	while IFS= read -r closure_name; do
+		[ "$closure_name" = "scripts/planted-judge.py" ] && fixture_added=1
+	done < "$judge_fixture_list"
+else
+	fixture_added=0
+fi
+carry_measurement "$judge_fixture" "$judge_fixture_carried" scripts
+if [ "$fixture_added" = 1 ] && [ -f "$judge_fixture_carried/scripts/planted-judge.py" ] \
+	&& cmp -s "$judge_fixture/scripts/planted-judge.py" "$judge_fixture_carried/scripts/planted-judge.py"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL judge-closure-added-input: closure entry was not carried from the fixture root\n'
+fi
+
+ghost_root="$TMP/judge-closure-ghost"
+ghost_list="$TMP/judge-closure-ghost.list"
+ghost_output="$TMP/judge-closure-ghost.out"
+mkdir -p "$ghost_root/scripts"
+cat > "$ghost_root/scripts/suite-metrics.py" <<'PY'
+JUDGING_FILES = ("scripts/ghost-judge.py",)
+PY
+if judge_closure "$ghost_root" > "$ghost_list"; then
+	if judge_closure_resolves "$ghost_root" "$ghost_list" > "$ghost_output" 2>&1; then
+		ghost_rc=0
+	else
+		ghost_rc=$?
+	fi
+else
+	ghost_rc=125
+fi
+case "$(cat "$ghost_output" 2>/dev/null)" in
+	*scripts/ghost-judge.py*) ghost_named=1 ;;
+	*) ghost_named=0 ;;
+esac
+if [ "$ghost_rc" -ne 0 ] && [ "$ghost_named" = 1 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL judge-closure-missing-input: absent fixture entry did not fail with its path\n'
+fi
 
 # fresh-gate.sh itself: its WORK dir is pid-named with .owner, traps are set before it exists, a
 # TERM mid-run stops its tree promptly and removes WORK (mutants: foreground steps, trap after
@@ -862,8 +925,8 @@ repo=$(mkrepo scr-fresh 'echo BASE-GATE')
 mkdir -p "$repo/tools" "$TMP/fg-archive/scripts" "$TMP/fg-archive/.git"
 cp "$KITREPO/scripts/fresh-gate.sh" "$repo/tools/fresh-gate.sh"
 # The gate runs from tools/ (its SCRIPT_DIR) but binds the judging files at repo-root scripts/.
-carry_measurement "$repo" tools
-carry_measurement "$repo"
+carry_measurement "$KITREPO" "$repo" tools
+carry_measurement "$KITREPO" "$repo"
 # shellcheck disable=SC2016
 printf '#!/bin/sh\necho $$ > "$FG_PIDFILE"\nsleep 300 &\necho $! > "$FG_SLEEPFILE"\nwait\n' > "$TMP/fg-archive/scripts/build-manifest.sh"
 : > "$TMP/fg-archive/scripts/ttsr-harness.ts"
@@ -927,7 +990,7 @@ mkverdictrepo() {
 	cp "$KITREPO/scripts/full-suite-verdict-store.py" "$repo/scripts/full-suite-verdict-store.py"
 	# The incumbent judge stages archives through its own temporary-directory helper.
 	cp "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
-	carry_measurement "$repo"
+	carry_measurement "$KITREPO" "$repo"
 	create_verdict_gate_stub "$repo"
 	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
 	create_checker_test_stubs "$repo"
@@ -1081,7 +1144,7 @@ git -C "$hrepro" init -q
 git -C "$hrepro" config user.email "test@example.invalid"
 git -C "$hrepro" config user.name "worker-1"
 cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" "$KITREPO/scripts/kitlib-tmp.sh" "$hrepro/scripts/"
-carry_measurement "$hrepro"
+carry_measurement "$KITREPO" "$hrepro"
 create_verdict_gate_stub "$hrepro"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$hrepro/scripts/regexploit-gate.py"
 create_checker_test_stubs "$hrepro"
@@ -1230,7 +1293,7 @@ mktagverdictrepo() {
 	failing_suite=${2:-}
 	repo=$(mktagrepo "$name")
 	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
-	carry_measurement "$repo"
+	carry_measurement "$KITREPO" "$repo"
 	# The judge asks the gate for its worker count (fresh-gate.sh --test-workers) when it records timings.
 	# shellcheck disable=SC2016 # literal $#/$1: the generated stub script expands them, not this shell
 	printf '#!/bin/sh\nif [ "$#" -eq 1 ] && [ "$1" = "--test-workers" ]; then printf "1\\n"; exit 0; fi\necho FRESH-GATE-RAN\n' > "$repo/scripts/fresh-gate.sh"
