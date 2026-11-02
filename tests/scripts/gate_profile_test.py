@@ -240,6 +240,9 @@ class GateProfileTests(unittest.TestCase):
                 "wall_ms": 1000, "wait_ms": 0, "setup_ms": 200, "run_ms": 800,
             })["record"]
             append_jsonl(str(ledger), lambda _: value, deadline_s=5, state_dir=str(base / "locks"))
+            cache = base / "empty-store"
+            cache.mkdir()
+            (cache / "inflight.running.123.log.files.123.json").write_text("{", encoding="utf-8")
             result = run([sys.executable, PROFILE_SCRIPT, "--repo", str(repo), "--runs", "1", "--json"],
                          cwd=ROOT, env=env, deadline_s=30)
             self.assertFalse(result.timed_out or result.truncated)
@@ -248,6 +251,7 @@ class GateProfileTests(unittest.TestCase):
             self.assertEqual(report["status"], "PARTIAL")
             self.assertEqual(report["selected"], {"push": 1, "full": 0})
             self.assertEqual((report["runs"][0]["wait_s"], report["runs"][0]["setup_s"]), (0, .2))
+            self.assertNotIn("FULL_RECORD_UNREADABLE", {issue["code"] for issue in report["issues"]})
 
 
 if __name__ == "__main__":

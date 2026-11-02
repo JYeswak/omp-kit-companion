@@ -178,7 +178,10 @@ def collect(repo: Path, runs: int) -> dict:
     directory = store.cache_directory(repo, None)
     inventory = store.records(repo, directory, ROOT, None)
     for item in inventory["records"]:
-        path = directory / item["record"]
+        name = item["record"]
+        if ".running." in name:
+            continue
+        path = directory / name
         try:
             raw = store.json_file(path)
         except (OSError, UnicodeError, ValueError) as error:
