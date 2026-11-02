@@ -60,7 +60,13 @@ class GoalPath(unittest.TestCase):
         self.assertTrue(got[0].startswith("m-goal-path:GOAL_PATH_MISSING w-loose"), got)
         self.assertIn("g-rel", got[0])
         self.assertNotIn("g-shut", got[0])
-        self.assertIn("br dep add g-rel w-loose", got[0])
+        # EPICWAIT1 (ompkit-fp72.120.16.88): g-rel has an open child (w-parent), so it is never named as the bead to
+        # wait on w-loose (that edge would hide w-parent from br ready); the remedy is kind:intake.
+        self.assertNotIn("br dep add g-rel w-loose", got[0])
+        self.assertIn("kind:intake", got[0])
+        # Control: with g-rel childless the same bead gets the `br dep add` remedy.
+        childless = [r for r in rows if r["id"] != "w-parent"]
+        self.assertIn("br dep add g-rel w-loose", bead_lint.goal_path_failure(by(childless, "w-loose"), childless)[0])
 
     def test_placed_any_depth_admitted(self) -> None:
         rows = tracker()
@@ -91,7 +97,10 @@ class GoalPath(unittest.TestCase):
         self.assertEqual(bead_lint.goal_path_failure(placed, rows), [])
         self.assertTrue(bead_lint.goal_path_failure(under_shut, rows))
         got = bead_lint.goal_path_failure(bare, rows)
-        self.assertTrue(got and "g-rel" in got[0] and "br dep add g-rel <NEW_ID>" in got[0], got)
+        self.assertTrue(got and "g-rel" in got[0] and "kind:intake" in got[0] and "br dep add g-rel" not in got[0], got)
+        childless = [r for r in rows if r["id"] != "w-parent"]
+        got = bead_lint.goal_path_failure(bare, childless)
+        self.assertTrue(got and "br dep add g-rel <NEW_ID>" in got[0], got)
 
     def test_tracker_without_goal_not_judged(self) -> None:
         rows = [r for r in tracker() if not bead_lint.is_goal(r)]
