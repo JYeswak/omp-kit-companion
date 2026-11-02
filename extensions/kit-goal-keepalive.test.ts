@@ -104,7 +104,7 @@ function advance(h: FakeSeat, ms: number): void {
 	h.ctx.fireDue();
 }
 
-test("live: an idle fleet goal seat gets exactly one wake at 120 s, aside, with the downtime list and idle time", async () => {
+test("live: an idle fleet goal seat gets exactly one wake at 120 s, aside, carrying J-2026-10-29-18 and the idle time", async () => {
 	const h = fakeHost();
 	await idleSeat(h);
 	expect(h.ctx.armed()).toBe(1);
@@ -114,8 +114,13 @@ test("live: an idle fleet goal seat gets exactly one wake at 120 s, aside, with 
 	expect(h.sent[0]!.customType).toBe("kit-goal-keepalive");
 	expect(h.sent[0]!.content).toContain("QuietBadger");
 	expect(h.sent[0]!.content).toContain("2m");
-	for (const item of ["held beads", "in_review", "DAG repair", "reality-check-for-project", "profiling-software-performance"]) {
+	// KEEPALIVE2 [b] (ompkit-774u.50): J-2026-10-29-18's phrases are present...
+	for (const item of ["never idles", "NO-WORK", "comment on the nearest bead", "in_review"]) {
 		expect(h.sent[0]!.content).toContain(item);
+	}
+	// ...and the retired never-wait downtime list is gone (planted negative: the old text fails here).
+	for (const banned of ["never wait", "downtime", "reality-check", "as a bead", "profiling"]) {
+		expect(h.sent[0]!.content.toLowerCase()).not.toContain(banned);
 	}
 	// Still idle with no new agent_end: no second wake from the same arm.
 	h.ctx.fireDue();
@@ -262,13 +267,14 @@ test("turnMadeToolCall: assistant toolCall reads true; text-only, tool results a
 	expect(turnMadeToolCall(undefined)).toBe(false);
 });
 
-test("message: names the seat, the idle time, and every downtime step", () => {
+test("message: names the seat, the idle time, and J-2026-10-29-18's constraint-first rule", () => {
 	const body = downtimeMessage("RusticPine", 185_000);
 	expect(body).toContain("RusticPine");
 	expect(body).toContain("3m 5s");
-	for (const item of ["(1)", "(2)", "(3)", "(4)", "(5)", "never waits"]) {
+	for (const item of ["never idles", "NO-WORK", "end the turn", "comment on the nearest bead"]) {
 		expect(body).toContain(item);
 	}
+	expect(body).not.toContain("never waits");
 });
 test("resume: session_start with a persisted active goal arms the wake with no goal_updated ever", async () => {
 	const h = fakeHost({ sessionEntries: [{ type: "mode_change", mode: "goal", data: { goal: { status: "active" } } }] });
@@ -280,7 +286,7 @@ test("resume: session_start with a persisted active goal arms the wake with no g
 	expect(h.sent).toHaveLength(1);
 	expect(h.sent[0]!.deliverAs).toBe("aside");
 	expect(h.sent[0]!.content).toContain("QuietBadger");
-	expect(h.sent[0]!.content).toContain("held beads");
+	expect(h.sent[0]!.content).toContain("held bead");
 });
 test("resume planted: paused, exited, empty, or malformed transcript wakes nothing", async () => {
 	const cases: KeepaliveModeEntry[][] = [

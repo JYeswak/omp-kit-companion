@@ -59,17 +59,17 @@ function formatIdle(ms: number): string {
 	return `${m}m${s % 60 === 0 ? "" : ` ${s % 60}s`}`;
 }
 
-/** The wake body: the seat's role downtime list plus the idle time. */
+/** The wake body (KEEPALIVE2 ompkit-774u.50, J-2026-10-29-18, replacing J-2026-10-18-43's downtime list):
+ * a seat on the declared constraint resumes it; a seat off it with no pinned work reports NO-WORK and
+ * stops; a finding off the constraint is a comment on the nearest bead. Measured 2026-11-02: the old
+ * text ("A seat never waits — pull downtime work now", ending in profiling) reached 8 seats 230 times
+ * in one day and sent seats into self-chosen off-constraint work (docs/research/throughput-2026-11-02). */
 export function downtimeMessage(seat: string, idleMs: number): string {
 	return (
-		`[kit-goal-keepalive] ${seat}: goal active but the seat has been idle ${formatIdle(idleMs)} ` +
-		`with no continuation scheduled. A seat never waits — pull downtime work now, in this order: ` +
-		`(1) your held beads; ` +
-		`(2) another worker's in_review beads (verify, never your own); ` +
-		`(3) bead DAG repair (orphans, cycles, blocked beads with no open fix); ` +
-		`(4) /skill:reality-check-for-project, filing every NO_BEAD gap as a bead; ` +
-		`(5) /skill:profiling-software-performance then /skill:extreme-software-optimization on the slowest gate, test, or tool. ` +
-		`Start with (1); report PROGRESS or DONE the same turn.`
+		`[kit-goal-keepalive] ${seat}: goal active, idle ${formatIdle(idleMs)}. ` +
+		`A seat on the declared constraint never idles: resume your held bead, or verify another worker's in_review bead. ` +
+		`With no pinned work, report NO-WORK to your director in one line and end the turn. ` +
+		`Do not invent work: a finding off the constraint is a comment on the nearest bead.`
 	);
 }
 
