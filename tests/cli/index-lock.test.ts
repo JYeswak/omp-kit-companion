@@ -1,8 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { run, runSync } from "../../src/kitlib/run.ts";
 import {
 	indexLockStaleAfterMs,
 	lsofFileClear,
@@ -281,5 +282,73 @@ const root = realpathSync(ownedTmp("index-lock-real").path);
 		rmSync(root, { recursive: true, force: true });
 	}
 }, 120_000);
+
+// REAPCLI1 (ompkit-fp72.19.1.9.1): `scratch index-lock --reap --yes` runs the gated reaper the help documents; it used to
+// print WOULD_MOVE from the dry-run reporter and move nothing (jev's lock sat 7 days, 2026-11-01).
+function reapCli(root: string, extra: string[]): { code: number; data: { overall?: string; verdict?: string; results?: Array<{ file: string; verdict: string }>; ledger?: string | null } } {
+	const result = runSync([process.execPath, "run", join(import.meta.dir, "../../src/cli.ts"),
+		"scratch", "index-lock", "--repo", root, ...extra, "--json"], { deadline_s: 60, cwd: root, env: { ...process.env, HOME: root } });
+	const envelope = JSON.parse(new TextDecoder().decode(result.stdout)) as { data: { overall?: string } };
+	return { code: result.rc ?? -1, data: envelope.data };
+}
+
+test("REAPCLI1 --reap --yes renames a stale holder-less empty lock aside with one ledger receipt", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	const ledger = join(root, "reap-ledger.jsonl");
+	try {
+		const out = reapCli(root, ["--reap", "--yes", "--min-age-ms", String(AGE), "--ledger", ledger]);
+		expect(out.code).toBe(0);
+		expect(out.data.overall).toBe("CHANGED");
+		expect(out.data.results?.find(r => r.file === lock)?.verdict).toBe("REAPED");
+		expect(existsSync(lock)).toBe(false);
+		expect(readdirSync(gitDir).filter(name => name.startsWith("index.lock.stale-"))).toHaveLength(1);
+		const rows = readFileSync(ledger, "utf8").trim().split("\n").map(line => JSON.parse(line) as { kind: string; lock: string });
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({ kind: "GITLOCK_REAPED", lock });
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("REAPCLI1 planted: a lock held open by a live process stays in place and reports HELD; no ledger row", async () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	const ledger = join(root, "reap-ledger.jsonl");
+	const ready = join(root, "holder.ready");
+	const stop = join(root, "holder.stop");
+	const holder = run(["sh", "-c", 'exec 3<"$1"; : > "$2"; while [ ! -e "$3" ]; do sleep 0.1; done', "holder", lock, ready, stop], { deadline_s: 25 });
+	try {
+		// A real separate process must hold the fd (lsof is the gate under test); poll for its ready file, no fixed wait.
+		for (let waited = 0; !existsSync(ready); waited += 50) {
+			if (waited > 10_000) throw new Error("holder never opened the lock");
+			await Bun.sleep(50);
+		}
+		const out = reapCli(root, ["--reap", "--yes", "--min-age-ms", String(AGE), "--ledger", ledger]);
+		expect(out.code).toBe(0);
+		expect(out.data.results?.find(r => r.file === lock)?.verdict).toBe("HELD");
+		expect(existsSync(lock)).toBe(true);
+		expect(readdirSync(gitDir).some(name => name.startsWith("index.lock.stale-"))).toBe(false);
+		expect(existsSync(ledger)).toBe(false);
+	} finally {
+		writeFileSync(stop, "");
+		await holder;
+		rmSync(root, { recursive: true, force: true });
+	}
+}, 30_000);
+
+test("REAPCLI1 --reap without --yes stays a dry-run report; a lock younger than --min-age-ms is TOO_YOUNG and stays", () => {
+	const { lock, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		const dry = reapCli(root, ["--reap", "--min-age-ms", String(AGE)]);
+		expect(dry.code).toBe(0);
+		expect(dry.data.verdict).toBe("WOULD_MOVE");
+		expect(existsSync(lock)).toBe(true);
+		const young = reapCli(root, ["--reap", "--yes", "--min-age-ms", String(10 * AGE), "--ledger", join(root, "l.jsonl")]);
+		expect(young.code).toBe(0);
+		expect(young.data.results?.find(r => r.file === lock)?.verdict).toBe("TOO_YOUNG");
+		expect(existsSync(lock)).toBe(true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 afterAll(() => cleanupAllOwnedTmp());

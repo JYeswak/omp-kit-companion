@@ -89,7 +89,7 @@ import { realGradableCandidates } from "./grader-next-sources/gradable.ts";
 import { ccGapCandidates } from "./grader-next-sources/cc-gaps.ts";
 import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
-import { indexLockStaleAfterMs, maybeMoveStaleIndexLock } from "./index-lock.ts";
+import { appendReapReceipt, defaultGitLockLedgerPath, indexLockStaleAfterMs, maybeMoveStaleIndexLock, reapRepoGitLocks, reapStaleAfterMs } from "./index-lock.ts";
 import { proveSend, proveTernCliSend, routeSendTarget, ternSendSeat } from "./send.ts";
 import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
@@ -4008,8 +4008,31 @@ async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResul
 			"Pass the repository root holding .git; nothing was changed.");
 	if (request.flags.has("--apply"))
 		return { code: 1, data: { overall: "FINDINGS", verdict: "APPLY_REFUSED", receipt: null }, verification: "UNVERIFIED" };
+	const minAgeFlag = request.flags.get("--min-age-ms");
+	const minAge = typeof minAgeFlag === "string" ? Number(minAgeFlag) : null;
+	if (minAge !== null && (!Number.isInteger(minAge) || minAge < 0))
+		return refusal("SCRATCH_MIN_AGE_INVALID", "--min-age-ms must be a non-negative integer", "Pass milliseconds, e.g. --min-age-ms 120000; nothing was changed.");
+	// REAPCLI1 (ompkit-fp72.19.1.9.1): `--reap --yes` runs the gated reaper the help documents (empty, aged, no lsof
+	// holder, no git process rooted in the tree, unchanged identity; rename aside, never unlink, one ledger row each).
+	// It used to fall through to the dry-run reporter and move nothing (jev's lock sat 7 days; cfsios today).
+	if (request.flags.has("--reap") && request.flags.has("--yes")) {
+		const ledgerFlag = request.flags.get("--ledger");
+		const ledger = typeof ledgerFlag === "string" ? ledgerFlag : defaultGitLockLedgerPath(process.env.HOME ?? "");
+		const results = reapRepoGitLocks(repoFlag, { run: scratchRunner, staleAfterMs: minAge ?? reapStaleAfterMs() });
+		let reaped = 0;
+		let ledgerFailed = false;
+		for (const result of results) {
+			if (result.verdict !== "REAPED" || !result.receipt) continue;
+			reaped++;
+			if (!appendReapReceipt(ledger, result.receipt)) ledgerFailed = true;
+		}
+		return { code: ledgerFailed ? 1 : 0, data: {
+			overall: ledgerFailed ? "FINDINGS" : reaped > 0 ? "CHANGED" : "OK", ledger, reaped,
+			results: results.map(result => ({ file: result.file, verdict: result.verdict, moved_to: result.receipt?.movedTo ?? null })),
+		}, verification: "PERFORMED" };
+	}
 	const outcome = maybeMoveStaleIndexLock(join(repoFlag, ".git"), {
-		run: scratchRunner, staleAfterMs: indexLockStaleAfterMs(), dryRun: true,
+		run: scratchRunner, staleAfterMs: minAge ?? indexLockStaleAfterMs(), dryRun: true,
 	});
 	return { code: 0, data: { overall: "OK", verdict: outcome.verdict, receipt: outcome.receipt ?? null }, verification: "UNVERIFIED" };
 }
