@@ -83,7 +83,7 @@ case "$mode:$1:$2" in
 	query-fail:file_reservations:conflicts) printf 'AM_UNAVAILABLE\n' >&2; exit 7 ;;
 	foreign:file_reservations:conflicts)
 		[ "$3" = "$AM_EXPECTED_PROJECT" ] || { printf 'wrong project\n' >&2; exit 9; }
-		printf '1 conflict(s) found:\nPATH HOLDER PATTERN EXPIRES\n.beads/issues.jsonl OtherWorker .beads/issues.jsonl 2099-12-31T23:59:59Z\n'
+		printf '1 conflict(s) found:\nPATH HOLDER PATTERN EXPIRES\n.beads/beads.db OtherWorker .beads/beads.db 2099-12-31T23:59:59Z\n'
 		exit 0 ;;
 	own:file_reservations:conflicts)
 		[ "$3" = "$AM_EXPECTED_PROJECT" ] || { printf 'wrong project\n' >&2; exit 9; }
@@ -91,7 +91,7 @@ case "$mode:$1:$2" in
 		exit 0 ;;
 	foreign:file_reservations:list)
 		[ "$3" = "$AM_EXPECTED_PROJECT" ] || { printf 'wrong project\n' >&2; exit 9; }
-		printf 'ID PATTERN AGENT EXPIRES REASON\n42 .beads/issues.jsonl OtherWorker 2099-12-31T23:59:59Z fixture\n'
+		printf 'ID PATTERN AGENT EXPIRES REASON\n42 .beads/beads.db OtherWorker 2099-12-31T23:59:59Z fixture\n'
 		exit 0 ;;
 	*:file_reservations:conflicts)
 		[ "$3" = "$AM_EXPECTED_PROJECT" ] || { printf 'wrong project\n' >&2; exit 9; }
@@ -399,7 +399,7 @@ for kind in "show X" "list" "ready" "search token" "sync --status"; do
 done
 if [ ! -s "$AM_LOG" ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL readonly-called-am: %s\n' "$(cat "$AM_LOG")"; fi
 
-# 12. every mutating command refuses a foreign exclusive lease before reaching real br
+# 12. every mutating command refuses foreign exclusive DB custody before reaching real br
 AM_FAKE_MODE=foreign
 for kind in "create --title t" "update X --status open" "update X --status in_review" \
 	"close X" "reopen X" "comments add --message m X" "dep add X Y" "dep remove X Y" \

@@ -154,6 +154,7 @@ def has_content_flags(args: argparse.Namespace) -> bool:
 
 def show_bead(real: str, project: str, db: str, bead_id: str) -> dict:
     cmd = [real, "show", bead_id, "--json"]
+    cmd.extend(["--no-auto-import", "--no-auto-flush"])
     if db:
         cmd.extend(["--db", db])
     rc, out, err = run(cmd, project)
@@ -172,6 +173,7 @@ def show_bead(real: str, project: str, db: str, bead_id: str) -> dict:
 def tracker_rows(real: str, project: str, db: str) -> list[dict]:
     cmd = [real, "list", "--status", "all", "--deferred", "--limit", "0",
            "--json"]
+    cmd.extend(["--no-auto-import", "--no-auto-flush"])
     if db:
         cmd.extend(["--db", db])
     rc, out, err = run(cmd, project)

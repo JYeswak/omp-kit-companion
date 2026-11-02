@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { nativeBr } from "./lib/native-br.ts";
 import { unlinkSync } from "node:fs";
 import { callerScratchRoot } from "../../src/runtime.ts";
+import { readJsonl } from "../../src/kitlib/jsonl.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const shimSource = readFileSync(join(root, "scripts/br-shim.sh"), "utf8");
@@ -790,3 +791,210 @@ test("SHIMHERMETIC1 actual DB selection preserves explicit, ambient and local fi
 		}
 	} finally { a.cleanup(); b.cleanup(); }
 }, CASE_BUDGET_MS);
+
+function leaseCreate(title: string, extra: string[] = []): string[] {
+	return ["create", "--title", title, "-t", "task", "-l", "kind:intake",
+		"--description", "WHAT: (a) native lease fixture. WHY: prove deferred export safety.",
+		"--acceptance-criteria", "- [ ] [a] [build] native mutation persists; planted negative: a leased export cannot be written `true` -> rc 0",
+		"--actor", "LeasePeer", ...extra, "--json"];
+}
+
+type LeaseFixture = HermeticFixture & { first: string; second: string; exportFile: string };
+type NativeLeaseRow = { id: string; title: string; priority: number };
+type NativeLeaseComment = { text: string };
+
+async function leaseRead(fixture: HermeticFixture, args: string[]) {
+	const result = await hermeticCall(fixture, [...args, "--no-auto-import", "--no-auto-flush"], { native: true });
+	if (result.rc !== 0 || result.timedOut || result.truncated) throw new Error(result.output);
+	return JSON.parse(result.stdout);
+}
+
+async function leaseRows(fixture: HermeticFixture): Promise<NativeLeaseRow[]> {
+	const data = await leaseRead(fixture, ["list", "--all", "--limit", "0", "--json"]);
+	return Array.isArray(data) ? data : data.issues;
+}
+
+function leaseExport(fixture: LeaseFixture): NativeLeaseRow[] {
+	const stream = readJsonl(fixture.exportFile);
+	if (stream.missing || stream.more || stream.pending_tail_bytes !== 0 || stream.errors.length !== 0)
+		throw new Error(`Native export is incomplete: ${JSON.stringify(stream)}`);
+	return stream.rows.map(row => {
+		if (typeof row !== "object" || row === null || !("id" in row) || typeof row.id !== "string"
+			|| !("title" in row) || typeof row.title !== "string" || !("priority" in row) || typeof row.priority !== "number")
+			throw new Error(`Invalid native exported issue: ${JSON.stringify(row)}`);
+		return { id: row.id, title: row.title, priority: row.priority };
+	});
+}
+
+async function nativeLeaseFixture(priority = 2): Promise<LeaseFixture> {
+	const fixture = hermeticFixture();
+	fixture.env = { ...fixture.env, AGENT_NAME: "LeasePeer", OMP_KIT_CASE_CWD: fixture.path,
+		AM_LEASE_MODE: "none", OMP_KIT_FLEET_WATCH_CONFIG: join(fixture.path, "fleet-watch.json") };
+	writeFileSync(fixture.env.OMP_KIT_FLEET_WATCH_CONFIG, JSON.stringify({
+		sessions: [{ repo: fixture.path, p0Cap: 1, coordinatorSession: "fixture", coordinatorPane: "%57" }],
+	}));
+	// The external authority supplies lease states; every database operation is native br.
+	writeFileSync(join(fixture.path, "bin/am"), `#!/bin/sh
+case "$1:$2" in
+ agents:show) printf '{"name":"LeasePeer"}\\n' ;;
+ file_reservations:conflicts)
+  case "\${AM_LEASE_MODE:-none}" in
+   none) printf 'No conflicts detected.\\n' ;;
+   query-fail) printf 'AM_UNAVAILABLE\\n' >&2; exit 7 ;;
+   malformed) printf '1 conflict(s) found:\\nPATH HOLDER PATTERN EXPIRES\\nmissing-fields\\n' ;;
+   database) printf '1 conflict(s) found:\\nPATH HOLDER PATTERN EXPIRES\\n.beads/beads.db ExportKeeper .beads/beads.db 2099-12-31T23:59:59Z\\n' ;;
+   mixed) printf '2 conflict(s) found:\\nPATH HOLDER PATTERN EXPIRES\\n.beads/issues.jsonl ExportKeeper .beads/issues.jsonl 2099-12-31T23:59:59Z\\n.beads/beads.db ExportKeeper .beads/beads.db 2099-12-31T23:59:59Z\\n' ;;
+   *) printf '1 conflict(s) found:\\nPATH HOLDER PATTERN EXPIRES\\n.beads/issues.jsonl ExportKeeper .beads/issues.jsonl 2099-12-31T23:59:59Z\\n' ;;
+  esac ;;
+ file_reservations:list)
+  if [ "\${AM_LEASE_MODE:-}" = lookup-fail ]; then exit 7; fi
+  printf 'ID PATTERN AGENT EXPIRES REASON\\n42 .beads/issues.jsonl ExportKeeper 2099-12-31T23:59:59Z export\\n43 .beads/beads.db ExportKeeper 2099-12-31T23:59:59Z database\\n' ;;
+ *) exit 9 ;;
+esac
+`, { mode: 0o755 });
+	try {
+		const initialized = await hermeticCall(fixture, ["init", "--prefix", "lease"], { native: true });
+		if (initialized.rc !== 0) throw new Error(initialized.output);
+		const first = await hermeticCall(fixture, leaseCreate("Baseline anchor alpha", ["-p", String(priority)]), { native: true });
+		const second = await hermeticCall(fixture, leaseCreate("Baseline anchor beta"), { native: true });
+		if (first.rc !== 0 || second.rc !== 0) throw new Error(first.output + second.output);
+		const flushed = await hermeticCall(fixture, ["sync", "--flush-only"], { native: true });
+		if (flushed.rc !== 0) throw new Error(flushed.output);
+		return { ...fixture, first: JSON.parse(first.stdout).id, second: JSON.parse(second.stdout).id,
+			exportFile: join(fixture.path, ".beads/issues.jsonl") };
+	} catch (error) { fixture.cleanup(); throw error; }
+}
+
+test("TRACKERLEASE1 lease: native create/dep/comments defer export and a later flush is complete", async () => {
+	const fixture = await nativeLeaseFixture();
+	try {
+		const original = readFileSync(fixture.exportFile);
+		fixture.env.AM_LEASE_MODE = "export";
+		const created = await hermeticCall(fixture, leaseCreate("Deferred native payload"));
+		expect(created.rc).toBe(0);
+		const id = JSON.parse(created.stdout).id;
+		expect(id).toStartWith("lease-");
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const dependency = await hermeticCall(fixture, ["dep", "add", id, fixture.first, "--type", "blocks"]);
+		expect(dependency.rc).toBe(0);
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const comment = await hermeticCall(fixture, ["comments", "add", id, "-m", "Deferred native comment"]);
+		expect(comment.rc).toBe(0);
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const commentFile = join(fixture.path, "leased-comment.txt");
+		writeFileSync(commentFile, "Deferred file comment");
+		expect((await hermeticCall(fixture, ["comments", "add", id, "--file", commentFile])).rc).toBe(0);
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		writeFileSync(commentFile, "Single restriction already set");
+		expect((await hermeticCall(fixture, ["--no-auto-flush", "comments", "add", id, "--file", commentFile])).rc).toBe(0);
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		expect((await hermeticCall(fixture, ["--actor", "LeasePeer", "comments", "add", id, "--", "--no-db"])).rc).toBe(0);
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const rows = await leaseRows(fixture);
+		expect(rows.map(row => ({ id: row.id, title: row.title })).sort((a, b) => a.id.localeCompare(b.id)))
+			.toEqual([{ id: fixture.first, title: "Baseline anchor alpha" }, { id: fixture.second, title: "Baseline anchor beta" },
+				{ id, title: "Deferred native payload" }].sort((a, b) => a.id.localeCompare(b.id)));
+		const edges = await leaseRead(fixture, ["dep", "list", id, "--direction", "down", "--json"]);
+		expect(edges.map((edge: { depends_on_id: string; type: string }) => ({ id: edge.depends_on_id, type: edge.type })))
+			.toEqual([{ id: fixture.first, type: "blocks" }]);
+		const comments = await leaseRead(fixture, ["comments", "list", id, "--json"]);
+		expect(comments.map((row: NativeLeaseComment) => row.text).sort())
+			.toEqual(["Deferred native comment", "Deferred file comment", "Single restriction already set", "--no-db"].sort());
+		const forbiddenFlush = await hermeticCall(fixture, ["sync", "--flush-only"]);
+		expect(forbiddenFlush.rc).toBe(4);
+		expect(forbiddenFlush.output).toContain("BR_SHIM_TRACKER_RESERVED");
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const jsonlOnly = await hermeticCall(fixture, ["update", id, "--title", "Forbidden export edit", "--no-db"]);
+		expect(jsonlOnly.rc).toBe(4);
+		expect(jsonlOnly.output).toContain("BR_SHIM_TRACKER_RESERVED");
+		expect((await leaseRows(fixture)).find(row => row.id === id)?.title).toBe("Deferred native payload");
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		fixture.env.AM_LEASE_MODE = "none";
+		const flushed = await hermeticCall(fixture, ["sync", "--flush-only"]);
+		expect(flushed.rc).toBe(0);
+		expect(leaseExport(fixture).map(row => row.id).sort()).toEqual((await leaseRows(fixture)).map(row => row.id).sort());
+		expect(leaseExport(fixture).find(row => row.id === id)?.title).toBe("Deferred native payload");
+		const normal = await hermeticCall(fixture, leaseCreate("Ordinary unleased export"));
+		expect(normal.rc).toBe(0);
+		const normalId = JSON.parse(normal.stdout).id;
+		expect(leaseExport(fixture).find(row => row.id === normalId)?.title).toBe("Ordinary unleased export");
+	} finally { fixture.cleanup(); }
+}, 120_000);
+
+test("TRACKERLEASE1 lease: delegated comment-target and P0 displacement preserve admission and export", async () => {
+	const fixture = await nativeLeaseFixture(0);
+	try {
+		const original = readFileSync(fixture.exportFile);
+		fixture.env.AM_LEASE_MODE = "export";
+		const rejected = await hermeticCall(fixture, ["create", "--title", "Unspecified unsafe task"]);
+		expect(rejected.rc).toBe(4);
+		expect(rejected.output).toContain("LINT_REFUSED");
+		expect((await leaseRows(fixture)).map(row => row.id).sort()).toEqual([fixture.first, fixture.second].sort());
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const followup = await hermeticCall(fixture, leaseCreate("Existing issue followup", ["--comment-target", fixture.first]));
+		expect(followup.rc).toBe(0);
+		expect((await leaseRows(fixture)).map(row => row.id).sort()).toEqual([fixture.first, fixture.second].sort());
+		const firstComments = await leaseRead(fixture, ["comments", "list", fixture.first, "--json"]);
+		expect(firstComments.some((row: NativeLeaseComment) => row.text.includes("Follow-up requested for: Existing issue followup"))).toBe(true);
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const displaced = await hermeticCall(fixture, leaseCreate("Urgent replacement payload", ["-p", "0", "--displaces", fixture.first]));
+		expect(displaced.rc).toBe(0);
+		const id = JSON.parse(displaced.stdout).id;
+		const rows = await leaseRows(fixture);
+		expect(rows.find(row => row.id === fixture.first)?.priority).toBe(1);
+		expect(rows.find(row => row.id === id)?.priority).toBe(0);
+		const oldComments = await leaseRead(fixture, ["comments", "list", fixture.first, "--json"]);
+		const newComments = await leaseRead(fixture, ["comments", "list", id, "--json"]);
+		expect(oldComments.some((row: NativeLeaseComment) => row.text.includes(`Displaced by ${id}`))).toBe(true);
+		expect(newComments.some((row: NativeLeaseComment) => row.text.includes(`Displaces ${fixture.first}`))).toBe(true);
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		fixture.env.AM_LEASE_MODE = "none";
+		expect((await hermeticCall(fixture, ["sync", "--flush-only"])).rc).toBe(0);
+		expect(leaseExport(fixture).map(row => ({ id: row.id, priority: row.priority })).sort((a, b) => a.id.localeCompare(b.id)))
+			.toEqual(rows.map(row => ({ id: row.id, priority: row.priority })).sort((a, b) => a.id.localeCompare(b.id)));
+	} finally { fixture.cleanup(); }
+}, 120_000);
+
+test("TRACKERLEASE1 lease: DB custody, mixed conflicts and unknown authority remain fail-closed", async () => {
+	const fixture = await nativeLeaseFixture();
+	try {
+		const original = readFileSync(fixture.exportFile);
+		for (const mode of ["database", "mixed", "query-fail", "malformed", "lookup-fail"]) {
+			fixture.env.AM_LEASE_MODE = mode;
+			const denied = await hermeticCall(fixture, ["comments", "add", fixture.first, "-m", `Forbidden ${mode}`]);
+			expect({ mode, rc: denied.rc, incomplete: denied.timedOut || denied.truncated })
+				.toEqual({ mode, rc: 4, incomplete: false });
+			expect(denied.output.includes("BR_SHIM_TRACKER_RESERVED") || denied.output.includes("BR_SHIM_RESERVATION_UNKNOWN")).toBe(true);
+			expect(readFileSync(fixture.exportFile)).toEqual(original);
+			expect(await leaseRead(fixture, ["comments", "list", fixture.first, "--json"])).toEqual([]);
+			expect((await leaseRows(fixture)).map(row => ({ id: row.id, title: row.title })).sort((a, b) => a.id.localeCompare(b.id)))
+				.toEqual([{ id: fixture.first, title: "Baseline anchor alpha" }, { id: fixture.second, title: "Baseline anchor beta" }]
+					.sort((a, b) => a.id.localeCompare(b.id)));
+		}
+	} finally { fixture.cleanup(); }
+}, 120_000);
+
+test("TRACKERLEASE1 lease: disabling the explicit-flush guard exposes the same native export leak", async () => {
+	const fixture = await nativeLeaseFixture();
+	try {
+		fixture.env.AM_LEASE_MODE = "export";
+		const original = readFileSync(fixture.exportFile);
+		const created = await hermeticCall(fixture, leaseCreate("Causal flush boundary payload"));
+		expect(created.rc).toBe(0);
+		const id = JSON.parse(created.stdout).id;
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const denied = await hermeticCall(fixture, ["sync", "--flush-only"]);
+		expect(denied.rc).toBe(4);
+		expect(denied.output).toContain("BR_SHIM_TRACKER_RESERVED");
+		expect(readFileSync(fixture.exportFile)).toEqual(original);
+		const guard = '[ "$gate_sub" = sync ] || ';
+		if (!shimSource.includes(guard)) throw new Error("TRACKERLEASE1 flush mutation did not match");
+		const mutated = join(fixture.path, "flush-guard-mutant.sh");
+		writeFileSync(mutated, shimSource.replace(guard, ""));
+		const leaked = await hermeticCall(fixture, ["sync", "--flush-only"], { shim: mutated });
+		expect(leaked.rc).toBe(0);
+		expect(leaked.timedOut || leaked.truncated).toBe(false);
+		expect(leaseExport(fixture).find(row => row.id === id)?.title).toBe("Causal flush boundary payload");
+		expect(leaseExport(fixture).map(row => row.id).sort()).toEqual((await leaseRows(fixture)).map(row => row.id).sort());
+	} finally { fixture.cleanup(); }
+}, 120_000);

@@ -2,8 +2,9 @@
 # br-shim.sh — ID1 identity, TRACKLEASE1 reservation and CREATEBUDGET1 create guards.
 # Installed as `br` ahead of the real binary on an agent pane's PATH. Fleet
 # invocations carry --actor "$AGENT_NAME": appended when absent, enforced when
-# present. Fleet mutations require a registered Agent Mail identity and no
-# foreign exclusive lease; physically owned native fixtures need neither.
+# present. Fleet mutations require a registered identity. Foreign DB custody
+# refuses writes; foreign export-only custody permits restricted DB-only writes.
+# Physically owned native fixtures need neither pane identity nor mail registration.
 # Real binary resolution: $BR_REAL, else the first `br` on PATH with this
 # shim's own directory removed. Runtime dependencies: POSIX sh, awk, git, am; create guard uses python3 and omp-kit.
 set -u
@@ -60,6 +61,7 @@ fi
 gate_comment_id=""; gate_pos_comment=""; gate_literal=0
 gate_extra_ids=0
 gate_index=0; gate_file=0; gate_want_file=0; gate_file_index=0; gate_file_form=""; gate_file_path=""
+gate_no_auto_flush=0; gate_no_auto_import=0; gate_unsafe_export_mode=0
  for gate_arg in "$@"; do
 	gate_index=$((gate_index + 1))
  	if [ "$gate_skip" = 1 ]; then
@@ -102,6 +104,9 @@ gate_index=0; gate_file=0; gate_want_file=0; gate_file_index=0; gate_file_form="
 				-m*|--message=*|--content=*|--comment=*|--reason=*|--notes=*) gate_reason="${gate_arg#*=}"; gate_reason="${gate_reason#-m}" ;;
  			esac ;;
  		--claim) gate_claim=1 ;;
+		--no-auto-flush) gate_no_auto_flush=1 ;;
+		--no-auto-import) gate_no_auto_import=1 ;;
+		--no-db|--no-db=*|--no-auto-flush=*|--no-auto-import=*) gate_unsafe_export_mode=1 ;;
 		-*) ;;
 		*)
 			if [ "$gate_status" = "next" ]; then gate_status="$gate_arg";
@@ -169,6 +174,7 @@ esac
 if [ -n "$found" ] && [ "$found" != "$AGENT_NAME" ]; then
 	fail "BR_SHIM_ACTOR_MISMATCH refusing --actor $found for pane identity $AGENT_NAME"
 fi
+tracker_db_only=0
 if [ "$tracker_write" = 1 ]; then
 	tracker_db=${gate_db:-${BEADS_DB:-}}
 	if [ -n "$tracker_db" ]; then
@@ -212,14 +218,36 @@ if [ "$tracker_write" = 1 ]; then
 					[ -n "$conflict_path" ] || continue
 					reservation_ids=$(printf '%s\n' "$reservation_list" | awk -v pattern="$pattern" -v holder="$holder" -v expires="$expires" '$2 == pattern && $3 == holder && $4 == expires { if (ids != "") ids = ids ","; ids = ids $1 } END { print ids }')
 					[ -n "$reservation_ids" ] || fail "BR_SHIM_RESERVATION_UNKNOWN cannot resolve reservation id for $holder/$pattern (expires=$expires)"
-					fail "BR_SHIM_TRACKER_RESERVED path=$conflict_path holder=$holder reservation=$reservation_ids expires=$expires"
+					case "$conflict_path" in
+						.beads/issues.jsonl) ;;
+						.beads/beads.db)
+							fail "BR_SHIM_TRACKER_RESERVED path=$conflict_path holder=$holder reservation=$reservation_ids expires=$expires" ;;
+						*) fail "BR_SHIM_RESERVATION_UNKNOWN unexpected tracker conflict path: $conflict_path" ;;
+					esac
 				done
 				reservation_check_rc=$?
 				[ "$reservation_check_rc" -eq 0 ] || exit "$reservation_check_rc"
+				tracker_db_only=1
 			fi
 			;;
 		*) fail "BR_SHIM_RESERVATION_UNKNOWN unrecognized Agent Mail conflict response: $conflict_out" ;;
 	esac
+fi
+# TRACKERLEASE1: JSONL custody is not database custody. Restrict execution before
+# create admission/delegation as well as the final exec. Prefixing keeps native
+# flags ahead of a literal `--`; preserve the recorded comment-file position.
+if [ "$tracker_db_only" = 1 ]; then
+	if [ "$gate_sub" = sync ] || [ "$gate_unsafe_export_mode" = 1 ]; then
+		fail "BR_SHIM_TRACKER_RESERVED export lease forbids explicit sync or JSONL-only/ambiguous export modes"
+	fi
+	if [ "$gate_no_auto_flush" = 0 ]; then
+		set -- --no-auto-flush "$@"
+		if [ "$gate_file" = 1 ]; then gate_file_index=$((gate_file_index + 1)); fi
+	fi
+	if [ "$gate_no_auto_import" = 0 ]; then
+		set -- --no-auto-import "$@"
+		if [ "$gate_file" = 1 ]; then gate_file_index=$((gate_file_index + 1)); fi
+	fi
 fi
 if [ "$gate_sub" = "create" ]; then
 	create_guard="$(dirname -- "$self_path")/br-create-guard.py"
