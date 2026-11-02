@@ -47,16 +47,98 @@ class GateProfileTests(unittest.TestCase):
         self.assertIsNone(run["run_s"])
         self.assertEqual(report["status"], "PARTIAL")
 
-    def test_explicit_stage_and_file_phases_complete_without_top_level_phase_claims(self):
+    def test_zero_file_count_does_not_hide_missing_stage_phases(self):
+        for file_count in (0, False, "0"):
+            with self.subTest(file_count=file_count):
+                records = [
+                    observation("push", 1, timing={"wall_ms": 1500, "stages": {
+                        "shell": {"wall_ms": 1000, "file_count": file_count,
+                                  "phase_basis": "per-file-sum"},
+                    }}, evidence={"complete": True, "files": [
+                        {"path": "tests/a.sh", "complete": True, "wall_ms": 1000,
+                         "wait_ms": 0, "setup_ms": 200, "run_ms": 800,
+                         "phase_basis": "stage-queue+exec-marker"},
+                    ]}),
+                    observation("full", 1, timing={"wall_ms": 1500, "stages": {
+                        "shell": {"wall_ms": 1000, "file_count": file_count,
+                                  "phase_basis": "per-file-sum"},
+                    }}, evidence={"complete": True, "files": [
+                        {"path": "tests/a.sh", "complete": True, "wall_ms": 1000,
+                         "wait_ms": 0, "setup_ms": 200, "run_ms": 800,
+                         "phase_basis": "stage-queue+exec-marker"},
+                    ]}),
+                ]
+                report = gate_profile.summarize(records, 1)
+                self.assertEqual(report["status"], "PARTIAL")
+
+
+    def test_empty_file_rows_keep_profile_partial(self):
+        phase = {"wall_ms": 1000, "wait_ms": 0, "setup_ms": 200, "run_ms": 800,
+                 "phase_basis": "per-file-sum"}
+        records = [
+            observation(kind, 1, timing={"wall_ms": 1500, "stages": {"shell": phase}},
+                        evidence={"complete": True, "files": []})
+            for kind in ("push", "full")
+        ]
+        self.assertEqual(gate_profile.summarize(records, 1)["status"], "PARTIAL")
+
+    def test_missing_phase_basis_is_unknown_without_issue(self):
         phase = {"wall_ms": 1000, "wait_ms": 0, "setup_ms": 200, "run_ms": 800}
         records = [
-            observation("push", 1, timing={"wall_ms": 1500, "stages": {"shell": phase}},
+            observation(kind, 1, timing={"wall_ms": 1500, "stages": {"shell": phase}},
                         evidence={"complete": True, "files": [
                             {"path": "tests/a.sh", "complete": True, **phase},
+                        ]})
+            for kind in ("push", "full")
+        ]
+        report = gate_profile.summarize(records, 1)
+        self.assertEqual(report["status"], "PARTIAL")
+        self.assertEqual(report["issues"], [])
+
+
+    def test_inferred_stage_basis_keeps_profile_partial(self):
+        phase = {"wall_ms": 1000, "wait_ms": 0, "setup_ms": 200, "run_ms": 800}
+        records = [
+            observation(kind, 1, timing={"wall_ms": 1500, "stages": {
+                "shell": {**phase, "phase_basis": "elapsed-minus-inferred"},
+            }}, evidence={"complete": True, "files": [
+                {"path": "tests/a.sh", "complete": True, **phase,
+                 "phase_basis": "stage-queue+exec-marker"},
+            ]})
+            for kind in ("push", "full")
+        ]
+        report = gate_profile.summarize(records, 1)
+        self.assertEqual(report["status"], "PARTIAL")
+        self.assertIn("STAGE_PHASE_BASIS_INVALID", {issue["code"] for issue in report["issues"]})
+
+    def test_inferred_file_basis_keeps_profile_partial(self):
+        phase = {"wall_ms": 1000, "wait_ms": 0, "setup_ms": 200, "run_ms": 800}
+        records = [
+            observation(kind, 1, timing={"wall_ms": 1500, "stages": {
+                "shell": {**phase, "phase_basis": "per-file-sum"},
+            }}, evidence={"complete": True, "files": [
+                {"path": "tests/a.sh", "complete": True, **phase,
+                 "phase_basis": "elapsed-minus-inferred"},
+            ]})
+            for kind in ("push", "full")
+        ]
+        report = gate_profile.summarize(records, 1)
+        self.assertEqual(report["status"], "PARTIAL")
+        self.assertIn("FILE_PHASE_BASIS_INVALID", {issue["code"] for issue in report["issues"]})
+
+
+    def test_explicit_stage_and_file_phases_complete_without_top_level_phase_claims(self):
+        phase = {"wall_ms": 1000, "wait_ms": 0, "setup_ms": 200, "run_ms": 800}
+        stage = {**phase, "phase_basis": "per-file-sum"}
+        file = {**phase, "phase_basis": "stage-queue+exec-marker"}
+        records = [
+            observation("push", 1, timing={"wall_ms": 1500, "stages": {"shell": stage}},
+                        evidence={"complete": True, "files": [
+                            {"path": "tests/a.sh", "complete": True, **file},
                         ]}),
-            observation("full", 1, timing={"wall_ms": 1500, "stages": {"shell": phase}},
+            observation("full", 1, timing={"wall_ms": 1500, "stages": {"shell": stage}},
                         evidence={"complete": True, "files": [
-                            {"path": "tests/a.sh", "complete": True, **phase},
+                            {"path": "tests/a.sh", "complete": True, **file},
                         ]}),
         ]
         report = gate_profile.summarize(records, 1)

@@ -23,6 +23,8 @@ from kitlib_jsonl import JsonlError, read_jsonl
 
 ROOT = Path(__file__).resolve().parents[1]
 PHASES = ("wait_s", "setup_s", "run_s")
+STAGE_PHASE_BASES = frozenset(("per-file-sum", "wall-partition"))
+FILE_PHASE_BASIS = "stage-queue+exec-marker"
 
 
 VERDICT_STORE = SimpleNamespace(**runpy.run_path(str(ROOT / "scripts/full-suite-verdict-store.py")))
@@ -109,8 +111,11 @@ def summarize(observations: list[dict], runs: int, issues: list[dict] | None = N
                      "phase_basis": value.get("phase_basis")}
             row["stages"].append(stage)
             phase_complete &= stage["wall_s"] is not None
-            if value.get("file_count") != 0:
-                phase_complete &= all(stage[key] is not None for key in PHASES)
+            phase_complete &= all(stage[key] is not None for key in PHASES)
+            if stage["phase_basis"] not in STAGE_PHASE_BASES:
+                phase_complete = False
+                if stage["phase_basis"] is not None:
+                    issues.append({"source": source, "code": "STAGE_PHASE_BASIS_INVALID", "stage": name})
             if trusted:
                 stage_groups[kind, role, name].append({**stage, "run_id": run_id})
         files = evidence.get("files")
@@ -124,6 +129,10 @@ def summarize(observations: list[dict], runs: int, issues: list[dict] | None = N
             sample = {**spans(value), "run_id": run_id, "complete": value.get("complete"),
                       "native_file_s": seconds(value.get("native_timing_ms"))}
             phase_complete &= sample["complete"] is True and all(sample[key] is not None for key in ("wall_s", *PHASES))
+            if value.get("phase_basis") != FILE_PHASE_BASIS:
+                phase_complete = False
+                if value.get("phase_basis") is not None:
+                    issues.append({"source": source, "code": "FILE_PHASE_BASIS_INVALID"})
             if trusted:
                 file_groups[kind, role, value["path"]].append(sample)
         rows.append(row)
