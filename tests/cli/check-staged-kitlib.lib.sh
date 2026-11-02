@@ -23,6 +23,19 @@ check() {
 	if [ "$1" = "$2" ] && printf '%s' "$4" | grep -q -- "$5"; then pass=$((pass + 1));
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
 }
+# keep_kitlib_hooks DIR: leave the members exercised by this contract and their
+# support files; unrelated numbered hooks only add fixture commit cost.
+keep_kitlib_hooks() {
+	_repo=$1
+	for _member in "$_repo/.git/hooks/hooks.d/pre-commit/"* "$_repo/.git/hooks/hooks.d/commit-msg/"*; do
+		[ -e "$_member" ] || continue
+		case "$(basename "$_member")" in
+		51-omp-kit-staged-kitlib|50-omp-kit-staged-kitlib-reversal|*.*) ;;
+		*) rm -f "$_member" ;;
+		esac
+	done
+}
+
 
 # new_repo NAME [FILE CONTENT]: a fresh repo whose root commit (made before
 # any hook exists) optionally holds FILE, then the installer's chains.
@@ -39,6 +52,7 @@ new_repo() {
 	fi
 	git -C "$dir" commit -q --allow-empty --message "[test] root"
 	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+	keep_kitlib_hooks "$dir"
 	[ -x "$dir/.git/hooks/hooks.d/pre-commit/$MEMBER" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
 	printf '%s' "$dir"
 }
@@ -158,12 +172,7 @@ real_repo() {
 	# members (staged-imports, staged-regexploit) that the synthetic fixtures never
 	# touch, so only the staged-kitlib and reversal members stay installed. Helper
 	# files (pysafe, the ratchet engine) stay: the members refuse without them.
-	for member in "$dir/.git/hooks/hooks.d/pre-commit/"* "$dir/.git/hooks/hooks.d/commit-msg/"*; do
-		case "$(basename "$member")" in
-		51-omp-kit-staged-kitlib|50-omp-kit-staged-kitlib-reversal|*.*) ;;
-		*) rm -f "$member" ;;
-		esac
-	done
+	keep_kitlib_hooks "$dir"
 	sync_tree "$dir" "$PREAL" || return 1
 	for p in $XPATHS; do [ -e "$dir/$p" ] && git -C "$dir" add -- "$p"; done
 	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] published origin"
