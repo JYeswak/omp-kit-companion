@@ -95,7 +95,6 @@ from collections.abc import Iterable
 from contextlib import nullcontext
 from itertools import chain
 
-import ac_phase
 import kitlib_run
 from kitlib_tmp import owned_tmp
 
@@ -430,6 +429,8 @@ def _requires_fresh_gate(repo: str, commit: str) -> bool:
 
 
 def _build_pregrade_green(bead: dict, proofs: object) -> bool:
+    import ac_phase
+
     if not isinstance(proofs, list) or any(not isinstance(item, dict) for item in proofs):
         return False
     by_item = {item.get("ac"): item for item in proofs if isinstance(item.get("ac"), str)}
@@ -446,6 +447,8 @@ def _build_pregrade_green(bead: dict, proofs: object) -> bool:
 
 
 def _pregrade_green(repo: str, commit: str, request: list[str]) -> bool:
+    import ac_phase
+
     bead_id = os.environ.get("BR_HANDOFF_BEAD", "")
     real = os.environ.get("BR_HANDOFF_REAL", "")
     tracker = os.environ.get("BR_HANDOFF_TRACKER", "")
@@ -484,6 +487,8 @@ def handoff_gate(argv: list[str]) -> int:
 def _handoff_remedy(repo: str, target: str, fresh_required: bool) -> str:
     if fresh_required:
         return f"cd {shlex.quote(repo)} && sh scripts/fresh-gate.sh --commit {target}"
+    import ac_phase
+
     tracker = os.environ.get("BR_HANDOFF_TRACKER") or repo
     bead_id = os.environ.get("BR_HANDOFF_BEAD") or "<id>"
     actor = os.environ.get("AGENT_NAME") or "<actor>"

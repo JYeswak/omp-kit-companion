@@ -1,0 +1,67 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_fe3e462de083ca855af594c0d9c135845bfd9a112d4569d126e2480bc4689cef",
+ "limitations": [
+  "The actual existing two-case parent-mode control and seven original handoff cases pass; unrelated broad gate failures remain explicitly unqualified."
+ ],
+ "operation": "HANDOFFREPO1 parent-mode dependency forward repair",
+ "parameters": {
+  "bead": "ompkit-774u.87",
+  "existing_regression_sha256": "ef6813867d7bc1974d8c7ade48e93a762bfc5679d372ac4d0b871091df3d3bec",
+  "subject_sha256": "e16177b13f0ee4d831a710aa3445fd52cf1ff3a5b1d4c6a20a704fd9329c724a"
+ },
+ "producer": "CopperTrout",
+ "result_ref": {
+  "base_commit": "05c1889daba35e98ff7fb391d58c1bc01ee9006d",
+  "bead": "ompkit-774u.87",
+  "broader_first_gate": {
+   "candidate": "05c1889daba35e98ff7fb391d58c1bc01ee9006d",
+   "fixture_identity": "16 LINTEVERY/PULLADMIT cases show BR_SHIM_ACTOR_MISMATCH; goal-path Python class shows BR_SHIM_IDENTITY_REQUIRED; existing kup44.4.3",
+   "own_parent_case": "new and repaired",
+   "rc": 1,
+   "remaining_unattributed": [
+    "preflight bootstrap timeout vs expected actor mismatch",
+    "preflight NEEDS_DIRECTOR supported CLI case",
+    "package-release commitless-root Needed a single revision; existing v66l.27.8"
+   ],
+   "reported_fail": 20,
+   "reported_ran": 410
+  },
+  "exact": {
+   "git_present_without_HEAD": true,
+   "owned_overlays": [
+    "scripts/br-update-lint.py",
+    "changelog.d/ompkit-774u.87.md"
+   ],
+   "results": [
+    {
+     "command": "nice -n 10 bun test tests/cli/br-shim-parent-block.test.ts",
+     "rc": 0,
+     "stderr": "\ntests/cli/br-shim-parent-block.test.ts:\n(pass) PARENTBLOCK1 planted: a parent blocked by its own child or grandchild is refused and no edge is written [2679.76ms]\n(pass) PARENTBLOCK1 controls: related type, child-to-sibling and unrelated blocks edges still pass through [4623.65ms]\n\n 2 pass\n 0 fail\n 22 expect() calls\nRan 2 tests across 1 file. [7.32s]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+    },
+    {
+     "command": "nice -n 10 bun test tests/cli/br-shim.test.ts -t HANDOFFREPO1",
+     "rc": 0,
+     "stderr": "\ntests/cli/br-shim.test.ts:\n(pass) HANDOFFREPO1 exact non-companion pregrade admits the real native author handoff [3077.29ms]\n(pass) HANDOFFREPO1 missing observation refuses without mutation and names the declared existing repo check [2585.86ms]\n(pass) HANDOFFREPO1 pregrade must bind the candidate, tracker, acceptance, non-author and passing build outcomes [9647.43ms]\n(pass) HANDOFFREPO1 companion still requires its ledger even if its committed script is missing from the worktree [3866.28ms]\n(pass) HANDOFFREPO1 native positional, file and stdin DONE comments all use the same exact pregrade [3698.41ms]\n(pass) HANDOFFREPO1 one pregrade cannot admit an ambiguous multiple-bead update [2729.68ms]\n(pass) HANDOFFREPO1 pregrade binds prospective acceptance in the same native update [4322.32ms]\n\n 7 pass\n 17 filtered out\n 0 fail\n 50 expect() calls\nRan 7 tests across 1 file. [29.94s]\n",
+     "stdout": "bun test v1.4.3 (26aa4e1a9)\n"
+    }
+   ]
+  },
+  "no_claim": "No full-suite/fresh-gate GREEN, release, installed or independent acceptance for the repair; original05c pregrade is not promoted to the new revision.",
+  "own_regression": {
+   "candidate": "05c1889daba35e98ff7fb391d58c1bc01ee9006d",
+   "correction": "Import ac_phase only inside its actual pregrade consumer modes, following existing update-mode lazy-import convention. No catch-and-pass fallback.",
+   "error": "ModuleNotFoundError: ac_phase in minimal parent-block helper package",
+   "source": "new eager import at module startup, introduced by Cu"
+  },
+  "prior_finite_pregrade": {
+   "candidate": "05c1889daba35e98ff7fb391d58c1bc01ee9006d",
+   "collector_rc": 0,
+   "items": 2,
+   "scope": "Original seven-case command only, not broader integration acceptance",
+   "verdict": "PASS"
+  }
+ }
+}
