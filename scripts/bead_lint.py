@@ -698,10 +698,14 @@ def goal_path_finding(bead: dict, rows: list[dict], dependents=None) -> list[str
     # PARENTBLOCK1 (rz5.134): never tell an author to make one of the bead's own parent-child ancestors wait on it;
     # that edge parent-blocks every child of the ancestor (2026-11-01: 54 of 61 release-train children hidden).
     ancestors = parent_child_ancestors(bead, rows)
-    eligible = [g for g in goals if g["id"] not in ancestors]
+    # EPICWAIT1: a goal with open parent-child children is no safe target either; a blocks edge from it to the new bead
+    # parent-blocks every child (2026-11-02: this advice named ompkit-774u, which would have hidden its 96 children).
+    with_children = {dep["depends_on_id"] for row in rows if is_open_row(row) for dep in row.get("dependencies") or []
+                     if dep.get("type") == "parent-child" and dep.get("depends_on_id")}
+    eligible = [g for g in goals if g["id"] not in ancestors and g["id"] not in with_children]
     if not eligible:
-        fix = (f"label it {INTAKE_LABEL} for the director to place (every open goal is an ancestor of this bead, and "
-               f"an ancestor that waits on its own descendant hides all of its children from br ready)")
+        fix = (f"label it {INTAKE_LABEL} for the director to place (every open goal is an ancestor of this bead or an "
+               f"epic with open children, and a goal that waits on a new bead hides all of its children from br ready)")
     elif bid == "<new>":
         first = eligible[0]["id"]
         fix = (f"create with --labels {GOAL_PATH_LABEL}{encode_goal_path_id(first)} "
@@ -768,6 +772,7 @@ def goal_path_selftest() -> tuple[list[str], dict]:
                deps=[dep_to("gp-parent-only", "gp-goal", "parent-child")]),
         mkbead("gp-legacy", created_at=pre),
         mkbead("gp-intake", labels=["kind:intake"], created_at=post),
+        mkbead("gp-leafgoal", labels=["kind:goal"]),
     ]
     fails: list[str] = []
     report = goal_path_report(rows)
@@ -776,8 +781,14 @@ def goal_path_selftest() -> tuple[list[str], dict]:
     if report != want:
         fails.append(f"report: want {want} got {report}")
     planted = goal_path_failure(rows[5], rows)
-    if not (planted and "gp-goal" in planted[0] and "br dep add gp-goal gp-unplaced" in planted[0]):
+    if not (planted and "gp-goal" in planted[0] and "br dep add gp-leafgoal gp-unplaced" in planted[0]):
         fails.append(f"unplaced bead not refused naming the goal and remedy: {planted}")
+    # EPICWAIT1: gp-goal has an open child (gp-parent-only), so it is never the remedy target; with no childless goal
+    # left the remedy is kind:intake (2026-11-02: the advice named ompkit-774u and would have hidden its 96 children).
+    epic_only = [r for r in rows if r["id"] != "gp-leafgoal"]
+    advice = goal_path_failure(rows[5], epic_only)
+    if not advice or "br dep add gp-goal" in advice[0] or "kind:intake" not in advice[0]:
+        fails.append(f"an epic with open children was offered as the wait target: {advice}")
     # PARENTBLOCK1 (rz5.134): a child of the only open goal is never told to make that goal wait on it (the edge
     # parent-blocks every sibling); the unplaced control above still gets the `br dep add` remedy.
     child = goal_path_failure(rows[6], rows)
