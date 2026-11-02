@@ -142,6 +142,14 @@ if [ "$gate_sub" = "sync" ]; then
 	if [ "$sync_reconcile" = 1 ] && [ "$sync_dry_run" = 0 ]; then tracker_write=1; fi
 	if [ "$sync_requires_apply" = 1 ] && [ "$sync_apply" = 1 ]; then tracker_write=1; fi
 fi
+# DBLITERAL1 (ompkit-nxlx1): an unexpanded `$NAME` in the tracker path made br create a whole new beads
+# database named `$DB` at the omp-kit root three times (2026-10-21, 10-31, 11-01); each copy blocked every
+# build wave as checkout dirt. Refuse before br runs, for every subcommand and both ways of naming the path.
+for shim_db in "$gate_db" "${BEADS_DB:-}"; do
+	case "$shim_db" in
+		*'$'*) fail "BR_SHIM_DB_LITERAL refusing tracker path '$shim_db': it holds an unexpanded \$ variable, and br would create a new database there" ;;
+	esac
+done
 # SHIMHERMETIC1: an owned native fixture has no pane or mail identity requirement.
 # Registered pane identities still take the ordinary policy path. Resolve the
 # actual selected destinations before considering this exception, never just cwd.
