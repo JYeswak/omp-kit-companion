@@ -109,6 +109,29 @@ function referencedPaths(text: string, files: ReadonlySet<string>, fromRel: stri
 	return found;
 }
 
+/**
+ * Top-level module names a Python source imports (`import a, b as c` and `from a.b import x`): the first dotted
+ * component of each, read line by line without a regex. Relative imports (`from . import x`) are skipped.
+ */
+function pythonImports(text: string): string[] {
+	const out = new Set<string>();
+	const isIdent = (word: string) => word.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(word);
+	for (const raw of text.split("\n")) {
+		const line = raw.trim();
+		if (line.startsWith("from ")) {
+			const module = line.slice(5).trim().split(/\s+/, 1)[0] ?? "";
+			const head = module.split(".", 1)[0] ?? "";
+			if (isIdent(head)) out.add(head);
+		} else if (line.startsWith("import ")) {
+			for (const part of line.slice(7).split("#", 1)[0]!.split(",")) {
+				const head = (part.trim().split(/\s+/, 1)[0] ?? "").split(".", 1)[0] ?? "";
+				if (isIdent(head)) out.add(head);
+			}
+		}
+	}
+	return [...out];
+}
+
 export function selectAffected(root: string, changed: readonly string[]): Selection {
 	const all = walk(root);
 	const files = new Set(all);
@@ -125,6 +148,15 @@ export function selectAffected(root: string, changed: readonly string[]): Select
 		if (!set) graph.set(to, (set = new Set()));
 		set.add(from);
 	};
+	// FRESHGATEFIXTURE1 (ompkit-fp72.120.16.87): two dependency kinds the gate missed on 2026-11-02, each costing a
+	// release full-suite cycle: a test that reads a fixture by joined path segments (join(root, "tests", "fixtures",
+	// "legacy-suite-metrics.patch")) and a Python test that imports a script module after sys.path.insert.
+	const fixtureByBase = new Map<string, string[]>();
+	for (const rel of all) {
+		if (!rel.startsWith(FIXTURE_DIR)) continue;
+		const base = rel.slice(rel.lastIndexOf("/") + 1);
+		fixtureByBase.set(base, [...(fixtureByBase.get(base) ?? []), rel]);
+	}
 	for (const rel of all) {
 		if (!SCANNED_EXT.some((ext) => rel.endsWith(ext))) continue;
 		const text = readFileSync(join(root, rel), "utf8");
@@ -137,8 +169,21 @@ export function selectAffected(root: string, changed: readonly string[]): Select
 				if (target) edge(importers, rel, target);
 			}
 		}
+		if (rel.endsWith(".py")) {
+			for (const module of pythonImports(text)) {
+				for (const target of [join(dirname(rel), `${module}.py`), `scripts/${module}.py`]) {
+					if (files.has(target)) edge(importers, rel, target);
+				}
+			}
+		}
 		for (const target of referencedPaths(text, files, rel)) {
 			if (isTestFile(rel) || SCANNED_EXT.some((ext) => target.endsWith(ext))) edge(namers, rel, target);
+		}
+		if (isTestFile(rel)) {
+			for (const [base, fixtures] of fixtureByBase) {
+				if (!text.includes(`"${base}"`) && !text.includes(`'${base}'`)) continue;
+				for (const fixture of fixtures) edge(namers, rel, fixture);
+			}
 		}
 	}
 	const reasons = new Map<string, string>();

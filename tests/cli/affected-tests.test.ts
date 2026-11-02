@@ -107,6 +107,48 @@ test("mutant: without transitive import edges, a src change misses the test that
 	}
 });
 
+// FRESHGATEFIXTURE1 (ompkit-fp72.120.16.87): on 2026-11-02 a fixture read by joined path segments and a script module
+// imported by a Python test both selected nothing at the push gate, and each failed a release full suite instead.
+const MISSED: Record<string, string> = {
+	"tests/fixtures/legacy.patch": "diff\n",
+	"tests/fixtures/unread.patch": "diff\n",
+	"tests/cli/land.test.ts": 'const patch = readFileSync(join(repoRoot, "tests", "fixtures", "legacy.patch"));\n',
+	"scripts/bead_lint.py": "def lint(): pass\n",
+	"scripts/other_tool.py": "def other(): pass\n",
+	"tests/scripts/bead_lint_goal_path_test.py": "import sys\nsys.path.insert(0, str(SCRIPTS))\nimport bead_lint  # noqa: E402\nfrom pysafe import run_bounded\n",
+	"tests/scripts/unrelated_test.py": "import json, os.path as p\n",
+};
+
+test("FRESHGATEFIXTURE1 a fixture read by joined segments and a script a Python test imports select that test", () => {
+	const dir = tree(MISSED);
+	try {
+		expect(select(dir, ["tests/fixtures/legacy.patch"]).tests).toEqual(["tests/cli/land.test.ts"]);
+		expect(select(dir, ["scripts/bead_lint.py"]).tests).toEqual(["tests/scripts/bead_lint_goal_path_test.py"]);
+		// Planted negatives: a fixture no test reads and a script no test imports still select nothing.
+		expect(select(dir, ["tests/fixtures/unread.patch"]).tests).toEqual([]);
+		expect(select(dir, ["scripts/other_tool.py"]).tests).toEqual([]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("FRESHGATEFIXTURE1 mutants: without the fixture or Python-import edges the missed suites select 0 files", () => {
+	const dir = tree(MISSED);
+	try {
+		const source = readFileSync(selector, "utf8");
+		const noFixture = source.replace("for (const fixture of fixtures) edge(namers, rel, fixture);", "void fixtures;");
+		const noPython = source.replace("if (files.has(target)) edge(importers, rel, target);", "void target;");
+		expect(noFixture).not.toBe(source);
+		expect(noPython).not.toBe(source);
+		writeFileSync(join(dir, "no-fixture.ts"), noFixture);
+		writeFileSync(join(dir, "no-python.ts"), noPython);
+		expect(select(dir, ["tests/fixtures/legacy.patch"], join(dir, "no-fixture.ts")).tests).toEqual([]);
+		expect(select(dir, ["scripts/bead_lint.py"], join(dir, "no-python.ts")).tests).toEqual([]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("wall-budget plan keeps changed tests and the nearest importers, and defers the rest by name", () => {
 	const dir = tree({ "timings.json": JSON.stringify({ version: 1, files: { "tests/a.test.ts": 50_000, "tests/b.test.ts": 50_000, "tests/c.test.ts": 50_000, "tests/big.test.ts": 400_000 } }) });
 	try {
