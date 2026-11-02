@@ -41,19 +41,30 @@ keep_kitlib_hooks() {
 # any hook exists) optionally holds FILE, then the installer's chains.
 new_repo() {
 	dir="$TMP/$1"
-	mkdir -p "$dir"
-	git -C "$dir" init -q 2>/dev/null
-	git -C "$dir" config user.email "test@invalid.example"
-	git -C "$dir" config user.name "Test"
-	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
 	if [ $# -ge 3 ]; then
-		mkdir -p "$dir/$(dirname "$2")"
-		printf '%s\n' "$3" > "$dir/$2" && git -C "$dir" add "$2"
+		template_key=$(printf '%s\n%s' "$2" "$3" | git hash-object --stdin) || return 1
+	else
+		template_key=empty
 	fi
-	git -C "$dir" commit -q --allow-empty --message "[test] root"
-	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
-	keep_kitlib_hooks "$dir"
-	[ -x "$dir/.git/hooks/hooks.d/pre-commit/$MEMBER" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
+	template="$TMP/.kitlib-templates/$template_key"
+	if [ ! -x "$template/.git/hooks/hooks.d/pre-commit/$MEMBER" ]; then
+		mkdir -p "$template"
+		git -C "$template" init -q 2>/dev/null
+		git -C "$template" config user.email "test@invalid.example"
+		git -C "$template" config user.name "Test"
+		rm -f "$template/.git/hooks/commit-msg" "$template/.git/hooks/commit-msg-"* "$template/.git/hooks/pre-commit"
+		if [ $# -ge 3 ]; then
+			mkdir -p "$template/$(dirname "$2")"
+			printf '%s\n' "$3" > "$template/$2" && git -C "$template" add "$2"
+		fi
+		git -C "$template" commit -q --allow-empty --message "[test] root"
+		out=$(sh "$INSTALLER" "$template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+		keep_kitlib_hooks "$template"
+		[ -x "$template/.git/hooks/hooks.d/pre-commit/$MEMBER" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
+	fi
+	mkdir -p "$dir"
+	cp -Rp "$template/." "$dir/" || { printf 'FAIL copy %s from template\n' "$1" >&2; exit 1; }
+	[ -x "$dir/.git/hooks/hooks.d/pre-commit/$MEMBER" ] || { printf 'FAIL copy %s: member absent\n' "$1" >&2; exit 1; }
 	printf '%s' "$dir"
 }
 
