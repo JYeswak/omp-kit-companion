@@ -1,1 +1,2 @@
 - Profile retained focused-gate and full-suite costs with `python3 scripts/gate_profile.py --runs 10 --json`. Record worker-queue wait, pre-exec setup and post-exec run per file; aggregate explicit spans into stage rows. Stage and file phase basis must match producer contracts; a zero file count cannot waive stage spans. Historical runs without these fields remain unknown and cannot be reconstructed.
+- Gate records now carry explicit wait, setup, and run spans per file and stage; structurally empty runner stages record zero phases rather than missing data.

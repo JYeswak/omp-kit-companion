@@ -378,7 +378,7 @@ test.skipIf(!AMPLE)("planted: a heavy step runs on the gate's own PATH, never bu
 		expect(runProbe(fx, source, body, archive).code).toBe(0);
 		expect(readFileSync(marker, "utf8")).toBe(fx.env.PATH);
 		// Plant: without the pin, the same step sees the archive's ancestor node_modules/.bin first.
-		const mutant = source.replace(`env PATH="$PATH" sh -c 'date`, `sh -c 'date`);
+		const mutant = source.replace(`env PATH="$PATH" sh -c 'python3 -c`, `sh -c 'python3 -c`);
 		expect(mutant).not.toBe(source);
 		expect(runProbe(fx, mutant, body, archive).code).toBe(0);
 		expect(readFileSync(marker, "utf8").split(":")).toContain(join(fx.dir, "node_modules", ".bin"));
@@ -405,7 +405,7 @@ test("SAVEFIRST1 planted (c): heavy queue wait is recorded apart from the step's
 	const source = readFileSync(gate, "utf8");
 	const fx = saveFixture(0, { slots: 1, max_wait_s: 20 });
 	const marker = join(fx.dir, "worked");
-	// 4 s of work against whole-second gate clocks: each recorded second may be off by up to 1 s.
+	// The step still runs 4 s; queue budget seconds stay whole-second truncated for compatibility.
 	const body = `heavy_step harness sh -c 'sleep 4; printf ran > "$1"' sh '${marker}'`;
 	const queued = (fixture: SaveFixture) => Number(readFileSync(join(fixture.env.WORK, "queued.secs"), "utf8").trim());
 	try {
@@ -420,7 +420,7 @@ test("SAVEFIRST1 planted (c): heavy queue wait is recorded apart from the step's
 		// The 4 s of work is not wait: wall time exceeds the recorded wait by the work, less clock rounding.
 		expect(honest.seconds - wait).toBeGreaterThanOrEqual(2.5);
 		// Mutant: timing the whole step as wait swallows the work.
-		const mutant = source.replace('wait_s=$(($(cat "$admitted") - queued_at))', "wait_s=$(($(date +%s) - queued_at))");
+		const mutant = source.replace("wait_ms=$((admitted_at_ms - queued_at_ms))", "wait_ms=$((finished_at_ms - queued_at_ms))");
 		expect(mutant).not.toBe(source);
 		rmSync(join(fx.env.WORK, "queued.secs"));
 		holdSlot(fx, 3);
@@ -458,7 +458,7 @@ test("SAVEFIRST1 planted (c): the 180 s budget subtracts queue wait but still ju
 // ---- CIGATE1 (ompkit-v66l.27.1): the push runs the tests its diff affects, or refuses ---------------
 // The real selector, disk floor, heavy and bun test run against a small exact-tree fixture; src is the
 // checkout's (heavy runs from it), the code under test lives in lib/ so the fixture owns its edits.
-const FOCUSED_FUNCTIONS = ["fail", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"];
+const FOCUSED_FUNCTIONS = ["fail", "run_step", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"];
 function affectedArchive(fx: SaveFixture, answer: number, expected: number, base = fx.dir): string {
 	const dir = ownedTmp("archive", { root: base }).path;
 	symlinkSync(join(root, "src"), join(dir, "src"));
@@ -490,11 +490,11 @@ function candidateRepo(fx: SaveFixture): string {
 }
 function runFocused(fx: SaveFixture, source: string, archive: string, changed: string, scriptDir = join(root, "scripts")) {
 	const probe = join(fx.dir, `focused-${Math.random().toString(36).slice(2)}.sh`);
-	writeFileSync(probe, `set -eu\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\ngate_focused || rc=$?\nexit "$rc"\n`);
+	writeFileSync(probe, `set -eu\ngate_defer_record=1\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\nrun_step focused gate_focused || rc=$?\ngate_defer_record=0\nrecord_run "$last_record_tests" "$last_record_files" "$rc"\nexit "$rc"\n`);
 	const repo = candidateRepo(fx);
 	const started = Date.now();
 	const result = Bun.spawnSync(["sh", probe], {
-		env: { ...process.env, ...fx.env, ROOT: repo, TMPDIR: join(fx.dir, "caller-tmp"), ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
+		env: { ...process.env, ...fx.env, ROOT: repo, TMPDIR: join(fx.dir, "caller-tmp"), WORK: fx.dir, ...SKIP_BUDGET, ARCHIVE_DIR: archive, SCRIPT_DIR: scriptDir, CHANGED: changed, FRESH_GATE_LEDGER: join(fx.dir, "runs.jsonl") },
 		stdout: "pipe", stderr: "pipe",
 	});
 	return { code: result.exitCode, out: result.stdout.toString() + result.stderr.toString(), seconds: (Date.now() - started) / 1000 };
@@ -504,6 +504,15 @@ function ledger(fx: SaveFixture): Array<Record<string, unknown>> {
 	return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
 }
 
+function assertPhases(value: unknown): asserts value is Record<string, unknown> {
+	if (!value || typeof value !== "object") throw new Error("missing measured phase spans");
+	const phases = value as Record<string, unknown>;
+	for (const name of ["wait_ms", "setup_ms", "run_ms"]) {
+		if (typeof phases[name] !== "number" || !Number.isFinite(phases[name]) || phases[name] < 0) {
+			throw new Error("invalid measured phase " + name);
+		}
+	}
+}
 function measuredFiles(record: Record<string, unknown>) {
 	const evidence = record.evidence;
 	if (!evidence || typeof evidence !== "object" || !("files" in evidence) || !Array.isArray(evidence.files)) {
@@ -515,7 +524,12 @@ function measuredFiles(record: Record<string, unknown>) {
 			|| !("finished_ms" in row) || typeof row.finished_ms !== "number"
 			|| !("elapsed_ms" in row) || typeof row.elapsed_ms !== "number"
 			|| !("rc" in row) || typeof row.rc !== "number") throw new Error("invalid measured file");
-		return { path: row.path, started_ms: row.started_ms, finished_ms: row.finished_ms, elapsed_ms: row.elapsed_ms, rc: row.rc };
+		assertPhases(row);
+		return {
+			path: row.path, started_ms: row.started_ms, finished_ms: row.finished_ms,
+			elapsed_ms: row.elapsed_ms, rc: row.rc,
+			wait_ms: row.wait_ms as number, setup_ms: row.setup_ms as number, run_ms: row.run_ms as number,
+		};
 	});
 }
 
@@ -612,9 +626,21 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file o
 		expect(reported.out).toContain("tests/cli/mod.test.ts");
 		const record = ledger(fx).at(-1)!;
 		expect(record.rc).toBe(0);
+		const timing = record.timing as Record<string, unknown>;
+		const stages = timing.stages as Record<string, unknown>;
+		expect(Object.keys(stages)).toContain("focused");
+		expect(Object.keys(stages)).toContain("tests-admission");
+		assertPhases(stages.focused);
+		assertPhases(stages["tests-admission"]);
 		const files = measuredFiles(record);
 		expect(files[0]!.rc).toBe(0);
 		expect(files[0]!.elapsed_ms).toBeGreaterThan(1);
+		assertPhases(stages.bun);
+		for (const name of ["sh", "python3"]) {
+			expect(stages[name]).toMatchObject({
+				file_count: 0, phase_basis: "per-file-sum", wait_ms: 0, setup_ms: 0, run_ms: 0,
+			});
+		}
 	} finally {
 		rmSync(fx.dir, { recursive: true, force: true });
 	}

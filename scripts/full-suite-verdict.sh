@@ -480,7 +480,7 @@ run_suite() {
 		# be the harness's plain bucket. Give every suite a private owned temp root.
 		kitlib_tmp TMPDIR full-suite-run || exit 1
 		export TMPDIR
-		export OMP_KIT_CASE_CWD="$ROOT"
+		export OMP_KIT_CASE_CWD="$ARCHIVE_DIR"
 		if [ -f "$ARCHIVE_DIR/bunfig.toml" ]; then
 			export BUN_CONFIG_FILE="$ARCHIVE_DIR/bunfig.toml"
 			bun_config="--config=$ARCHIVE_DIR/bunfig.toml"
@@ -782,7 +782,7 @@ fi
 finish_logs "$log_entry"
 write_complete_verdict() {
 MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" WORKERS_BUN="$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers)" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
-import hashlib, json, os
+import hashlib, json, math, os
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
     for chunk in iter(lambda: log.read(1024 * 1024), b""):
@@ -792,11 +792,24 @@ with open(os.environ["METRICS_ROWS"]) as handle:
     files = json.load(handle)
 with open(os.environ["METRICS_DECLARED"]) as handle:
     declared_files = handle.read().splitlines()
+def phase_total(rows, field):
+    values = [row.get(field) for row in rows]
+    if not values:
+        return 0
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool)
+           or not math.isfinite(value) or value < 0 for value in values):
+        return None
+    return sum(values)
 stages = {}
 for runner in ("bun", "sh", "python3"):
     selected = [row for row in files if row["runner"] == runner and row.get("origin") != "focused"]
     stages[runner] = {
         "wall_ms": max(row["finished_ms"] for row in selected) - min(row["started_ms"] for row in selected) if selected else 0,
+        "wait_ms": phase_total(selected, "wait_ms"),
+        "setup_ms": phase_total(selected, "setup_ms"),
+        "run_ms": phase_total(selected, "run_ms"),
+        "file_count": len(selected),
+        "phase_basis": "per-file-sum",
         "cpu_user_ms": sum(row["cpu_user_ms"] for row in selected),
         "cpu_system_ms": sum(row["cpu_system_ms"] for row in selected),
     }

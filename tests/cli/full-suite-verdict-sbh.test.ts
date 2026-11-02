@@ -116,10 +116,25 @@ rm -rf "$case_tmp"
 	expect(result.timed_out, evidence).toBe(false);
 	expect(output).toContain("FULL-SUITE: VERDICT PASS");
 	expect(readdirSync(join(fixture, "var", "agent-tmp"))).toEqual([]);
-
 	const verdictPath = `${record}.json`;
-	const verdict = JSON.parse(readFileSync(verdictPath, "utf8")) as { verdict: string; evidence: { complete: boolean; shell_suites: number; shell_fail: number } };
+
+	const verdict = JSON.parse(readFileSync(verdictPath, "utf8")) as {
+		verdict: string;
+		evidence: { complete: boolean; shell_suites: number; shell_fail: number };
+		timing: { stages: Record<string, { file_count: number; phase_basis: string; wait_ms: number | null; setup_ms: number | null; run_ms: number | null }> };
+	};
 	expect(verdict).toMatchObject({ verdict: "PASS", evidence: { complete: true, shell_suites: 1, shell_fail: 0 } });
+	const shell = verdict.timing.stages.sh;
+	expect(shell).toMatchObject({ file_count: 1, phase_basis: "per-file-sum" });
+	for (const phase of [shell.wait_ms, shell.setup_ms, shell.run_ms]) {
+		expect(typeof phase).toBe("number");
+		expect(phase).toBeGreaterThanOrEqual(0);
+	}
+	for (const name of ["bun", "python3"]) {
+		expect(verdict.timing.stages[name]).toMatchObject({
+			file_count: 0, phase_basis: "per-file-sum", wait_ms: 0, setup_ms: 0, run_ms: 0,
+		});
+	}
 	expect(readFileSync(`${record}.log`, "utf8")).toContain("SAVEFIRST1 full-suite sibling pressure PASS");
 }, 30_000);
 test("full-suite supplies Git and private temp context to archived shell suites", async () => {
@@ -137,6 +152,7 @@ test("full-suite supplies Git and private temp context to archived shell suites"
 	writeFileSync(suite, String.raw`#!/bin/sh
 set -eu
 : "$OMP_KIT_CASE_CWD"
+test "$OMP_KIT_CASE_CWD" = "$(pwd -P)"
 git -C "$OMP_KIT_CASE_CWD" rev-parse --show-toplevel >/dev/null
 : "$KITLIB_TMP_ROOT"
 . "$KITROOT/scripts/kitlib-tmp.sh"

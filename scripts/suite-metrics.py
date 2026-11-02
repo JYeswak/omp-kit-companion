@@ -118,7 +118,12 @@ def complete_records(rows: object, declared: Sequence[str], *, expected_judge: d
         seen.add(path)
         if row.get("runner") not in ("bun", "sh", "python3") or row.get("complete") is not True:
             return False
-        if not all(nonnegative(row.get(k)) for k in ("elapsed_ms", "cpu_user_ms", "cpu_system_ms", "started_ms", "finished_ms")):
+        if not all(nonnegative(row.get(k)) for k in ("elapsed_ms", "cpu_user_ms", "cpu_system_ms", "wait_ms", "setup_ms", "run_ms")):
+            return False
+        if any(not isinstance(row.get(k), int) or isinstance(row.get(k), bool)
+               for k in ("started_ms", "finished_ms")):
+            return False
+        if row.get("phase_basis") != "stage-queue+exec-marker":
             return False
         if row["finished_ms"] < row["started_ms"]:
             return False
@@ -169,20 +174,25 @@ def execute(args: argparse.Namespace) -> int:
         command = command[1:]
     if not command:
         raise ValueError("run needs an actual command after --")
+    if not nonnegative(args.wait_ms):
+        raise ValueError("wait duration must be finite and nonnegative")
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     record = Path(args.record)
     record.parent.mkdir(parents=True, exist_ok=True)
     native_log = record.with_suffix(".native.log")
-    started_ms = time.time_ns() // 1_000_000
+    started_ns = time.time_ns()
+    started_ms = started_ns // 1_000_000
     load_1m = os.getloadavg()[0]
     # The native process writes directly to a retained file, never through a
     # helper-owned pipe/sink thread: even SIGKILL of this helper cannot discard
     # bytes the native process already flushed. Exec preserves its PID/group.
     with owned_tmp("suite-hermetic") as scratch:
         helper = str(Path(__file__).resolve().with_name("suite-hermetic-env.sh"))
+        exec_marker = Path(scratch) / "exec-boundary.ns"
         wrapped = [
             "sh", helper, "--archive", os.path.abspath(args.cwd),
             "--scratch", scratch, "--suite", args.path,
+            "--exec-marker", str(exec_marker),
         ]
         # Tern-backed tests need their OMP source cache despite the isolated suite HOME.
         # The suite fence still denies writes outside its scratch and archive.
@@ -202,8 +212,15 @@ def execute(args: argparse.Namespace) -> int:
             ]
             result = run(launcher, cwd=args.cwd, deadline_s=args.deadline,
                          inherit_fds=(fd,), max_output_bytes=1 << 20)
+        if not exec_marker.is_file() or exec_marker.is_symlink():
+            raise ValueError("suite exec boundary marker is missing")
+        exec_ns = int(exec_marker.read_text().strip())
+        finished_ns = time.time_ns()
+        finished_ms = finished_ns // 1_000_000
+        if exec_ns < started_ns or finished_ns < exec_ns:
+            raise ValueError("suite exec boundary timestamps are out of order")
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    finished_ms = time.time_ns() // 1_000_000
+    # Cross-process phase markers use wall time; elapsed_ms remains supervisor-measured.
     digest = hashlib.sha256()
     tail = bytearray()
     with native_log.open("rb") as capture:
@@ -220,6 +237,9 @@ def execute(args: argparse.Namespace) -> int:
                 and result.stream_dropped_bytes == 0 and result.sink_error is None)
     row = {"path": args.path, "runner": args.runner, "elapsed_ms": result.elapsed_s * 1000,
            "started_ms": started_ms, "finished_ms": finished_ms,
+           "wait_ms": args.wait_ms, "setup_ms": (exec_ns - started_ns) / 1_000_000,
+           "run_ms": (finished_ns - exec_ns) / 1_000_000,
+           "phase_basis": "stage-queue+exec-marker",
            "cpu_user_ms": max(0.0, after.ru_utime - before.ru_utime) * 1000,
            "cpu_system_ms": max(0.0, after.ru_stime - before.ru_stime) * 1000,
            "rc": result.rc, "command": command, "launcher": launcher, "complete": complete,
@@ -324,7 +344,7 @@ def stage(args: argparse.Namespace) -> int:
         raise ValueError("stage requires distinct file paths")
     parent_reader, parent_writer = os.pipe()
 
-    def one(item: tuple[int, str]) -> tuple[Path, bool]:
+    def one(item: tuple[int, str], queued_ns: int) -> tuple[Path, bool]:
         index, path = item
         record = directory / f"{args.runner}-{index}.json"
         logfile = directory / f"{args.runner}-{index}.log"
@@ -343,6 +363,8 @@ def stage(args: argparse.Namespace) -> int:
                  "--path", path, "--runner", runner, "--tree", args.tree,
                  "--cwd", args.cwd, "--deadline", str(args.deadline), "--workers", str(workers),
                  "--parent-fd", str(parent_reader)]
+        wait_ms = max(0, time.monotonic_ns() - queued_ns) / 1_000_000
+        child.extend(["--wait-ms", repr(wait_ms)])
         if args.loopback_port is not None:
             child.extend(["--loopback-port", str(args.loopback_port)])
         child.extend(["--", *command])
@@ -357,7 +379,9 @@ def stage(args: argparse.Namespace) -> int:
     workers = min(args.workers, len(paths))
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
-        futures = [pool.submit(one, item) for item in enumerate(paths)]
+        futures = []
+        for item in enumerate(paths):
+            futures.append(pool.submit(one, item, time.monotonic_ns()))
         outcomes = [future.result() for future in futures]  # pysafe: each future only invokes the bounded kitlib runner; parent cancellation closes its liveness writer before worker join.
     finally:
         # Do not let executor.__exit__ wait before cancellation reaches file
@@ -416,6 +440,7 @@ def main() -> int:
     child.add_argument("--tree", required=True)
     child.add_argument("--deadline", type=float, required=True)
     child.add_argument("--workers", type=int, default=1)
+    child.add_argument("--wait-ms", type=float, default=0)
     child.add_argument("--loopback-port", type=int)
     child.add_argument("--parent-fd", type=int)
     child.add_argument("command", nargs=argparse.REMAINDER)

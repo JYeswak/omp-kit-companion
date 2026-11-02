@@ -40,7 +40,9 @@ JUDGING_FILES = (
 def row(path: str, rc: int = 0) -> dict:
     return {"path": path, "runner": "sh", "elapsed_ms": 10.0, "rc": rc,
             "command": ["sh", path], "cpu_user_ms": 1.0, "cpu_system_ms": 1.0,
-            "started_ms": 1000, "finished_ms": 1010, "workers": 1, "load_1m": 1.0,
+            "started_ms": 1000, "finished_ms": 1010, "wait_ms": 0.0,
+            "setup_ms": 2.0, "run_ms": 8.0, "phase_basis": "stage-queue+exec-marker",
+            "workers": 1, "load_1m": 1.0,
             "judge": {"sha256": metrics.JUDGE_SHA256, "python": sys.version.split()[0]},
             "output_sha256": hashlib.sha256(b"output").hexdigest(),
             "complete": True, "closure": {"kind": "whole-source-tree", "tree": "a" * 40}}
@@ -64,8 +66,10 @@ class SuiteMetricsTests(unittest.TestCase):
     def test_invalid_or_incomplete_measurements_are_not_evidence(self) -> None:
         for field, value in (("elapsed_ms", float("nan")), ("rc", None),
                              ("cpu_user_ms", -1), ("complete", False),
-                             ("started_ms", None), ("started_ms", float("inf")),
-                             ("finished_ms", float("nan")), ("finished_ms", 999),
+                             ("started_ms", None), ("started_ms", float("inf")), ("started_ms", 1000.0),
+                             ("finished_ms", float("nan")), ("finished_ms", 999), ("finished_ms", 1010.0),
+                             ("wait_ms", float("nan")), ("setup_ms", -1), ("run_ms", float("inf")),
+                             ("phase_basis", "elapsed-minus-inferred"),
                              ("output_sha256", "x" * 64), ("output_sha256", "a" * 63),
                              ("judge", None), ("judge", {}),
                              ("judge", {"sha256": metrics.JUDGE_SHA256}),
@@ -78,8 +82,8 @@ class SuiteMetricsTests(unittest.TestCase):
 
     def test_every_required_field_omission_is_cold(self) -> None:
         for field in ("path", "runner", "elapsed_ms", "rc", "command", "cpu_user_ms",
-                      "cpu_system_ms", "started_ms", "finished_ms", "complete", "closure",
-                      "judge", "output_sha256"):
+                      "cpu_system_ms", "started_ms", "finished_ms", "wait_ms", "setup_ms",
+                      "run_ms", "phase_basis", "complete", "closure", "judge", "output_sha256"):
             with self.subTest(field=field):
                 r = row("a")
                 del r[field]
@@ -255,13 +259,37 @@ class SuiteMetricsNativeLogTests(unittest.TestCase):
                         self.assertEqual(measured["command"], command)
                         self.assertEqual(measured["launcher"][-len(command):], command)
                         self.assertEqual(measured["output_sha256"], hashlib.sha256(captured).hexdigest())
+                        self.assertGreaterEqual(measured["wait_ms"], 0)
+                        self.assertGreaterEqual(measured["setup_ms"], 0)
+                        self.assertGreaterEqual(measured["run_ms"], 0)
+
+
+    def test_hermetic_helper_marks_the_exec_boundary_before_the_child(self) -> None:
+        with owned_tmp("suite-exec-marker-test") as directory:
+            root = Path(directory)
+            archive, scratch = root / "archive", root / "scratch"
+            archive.mkdir()
+            scratch.mkdir()
+            marker, child_started = scratch / "exec.ns", root / "child.started"
+            command = [
+                "sh", str(ROOT / "scripts/suite-hermetic-env.sh"),
+                "--archive", str(archive), "--scratch", str(scratch),
+                "--suite", "exec-marker-test", "--exec-marker", str(marker), "--",
+                sys.executable, "-c",
+                "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(time.time_ns()))",
+                str(child_started),
+            ]
+            result = metrics.run(command, cwd=str(archive), deadline_s=10)
+            self.assertEqual(result.rc, 0, result.stderr)
+            self.assertLessEqual(int(marker.read_text()), int(child_started.read_text()))
 
     def test_stage_replays_native_output_after_helper_dies_and_keeps_other_results(self) -> None:
         with owned_tmp("suite-stage-native-log-test") as directory:
             root = Path(directory)
             (root / "interrupted.py").write_text(
-                "import os, signal\n"
+                "import os, signal, time\n"
                 "print('INTERRUPTED-NATIVE-DETAIL', flush=True)\n"
+                "time.sleep(0.15)\n"
                 "os.kill(os.getppid(), signal.SIGKILL)\n"
             )
             (root / "control.py").write_text("print('SUCCESSFUL-CONTROL-DETAIL', flush=True)\n")
@@ -276,7 +304,11 @@ class SuiteMetricsNativeLogTests(unittest.TestCase):
             self.assertIn(b"INTERRUPTED-NATIVE-DETAIL", result.stdout)
             self.assertIn(b"SUCCESSFUL-CONTROL-DETAIL", result.stdout)
             self.assertFalse((records / "python3-0.json").exists())
-            self.assertEqual(json.loads((records / "python3-1.json").read_text())["rc"], 0)
+            measured = json.loads((records / "python3-1.json").read_text())
+            self.assertEqual(measured["rc"], 0)
+            self.assertGreaterEqual(measured["wait_ms"], 100)
+            self.assertGreaterEqual(measured["setup_ms"], 0)
+            self.assertGreaterEqual(measured["run_ms"], 0)
             self.assertFalse(summary.exists())
 
 

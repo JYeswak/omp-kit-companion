@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import sysconfig
+import time
 
 
 def refuse(message: str) -> None:
@@ -33,6 +34,7 @@ parser.add_argument("--scratch", required=True)
 parser.add_argument("--suite", required=True)
 parser.add_argument("--loopback-port", type=int)
 parser.add_argument("--allow-env", action="append", default=[])
+parser.add_argument("--exec-marker")
 try:
     options = parser.parse_args(sys.argv[1:separator])
 except SystemExit:
@@ -72,6 +74,23 @@ if not archive.is_dir() or not scratch.is_dir() or archive == Path("/") or scrat
 if "\n" in options.suite or "\r" in options.suite:
     refuse("suite identifier must be one line")
 
+
+def mark_exec() -> None:
+    if options.exec_marker is None:
+        return
+    marker = Path(options.exec_marker)
+    try:
+        if marker.parent.resolve(strict=True) != scratch or marker.is_symlink() or marker.exists():
+            refuse("exec marker must be a new file directly under scratch")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(marker, flags, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(str(time.time_ns()) + "\n")
+    except OSError as error:
+        refuse("cannot write exec marker: " + str(error))
+
 # The environment scrub and the write/network fence are opt-in (OMP_KIT_SUITE_HERMETIC_ENABLE=1) until
 # ompkit-kup44.4's own control, "the full declared suite on one tree is GREEN" under them, passes. Measured
 # 2026-10-30 on published 32ad93461e: the main-role full suite under the scrub failed 100 bun tests and 10 script
@@ -86,6 +105,7 @@ if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") != "1":
     for name in ("TMPDIR", "TMP", "TEMP"):
         inherited[name] = str(scratch)
     print("SUITE-HERMETIC suite=" + options.suite + " env=inherited fence=off-optin", flush=True)
+    mark_exec()
     os.execvpe(command[0], command, inherited)
 
 os.umask(0o077)
@@ -259,5 +279,6 @@ print("SUITE-HERMETIC suite=" + options.suite
       + " fence=" + fence
       + " policy_sha256=" + policy_digest
       + " loopback_port=" + str(loopback_port), flush=True)
+mark_exec()
 os.execvpe(executable[0], executable, env)
 PY

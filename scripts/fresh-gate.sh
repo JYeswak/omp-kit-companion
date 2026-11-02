@@ -46,11 +46,35 @@ run_step() {
 	log="$WORK/$label.log"
 	phase_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 	echo "== $label"
+	phase_exec_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 	if "$@" >"$log" 2>&1; then step_rc=0; else step_rc=$?; fi
+	phase_finished_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 	cat "$log"
-	PHASE="$label" START="$phase_started_ms" RC="$step_rc" OUT="$WORK/gate-phases.jsonl" python3 - <<'PYEOF'
-import json, os, time
-row = {"stage": os.environ["PHASE"], "wall_ms": time.time_ns() // 1000000 - int(os.environ["START"]), "rc": int(os.environ["RC"])}
+	PHASE="$label" START="$phase_started_ms" EXEC="$phase_exec_ms" FINISH="$phase_finished_ms" RC="$step_rc" OUT="$WORK/gate-phases.jsonl" WORKDIR="$WORK" python3 - <<'PYEOF'
+import json, os
+from pathlib import Path
+start = int(os.environ["START"])
+exec_at = int(os.environ["EXEC"])
+finish = int(os.environ["FINISH"])
+wait_ms = 0
+if os.environ["PHASE"] == "focused":
+    intervals = []
+    for path in Path(os.environ["WORKDIR"]).glob("*.admission.json"):
+        phase = json.loads(path.read_text())
+        queued, admitted = phase["queued_at_ms"], phase["admitted_at_ms"]
+        if isinstance(queued, int) and isinstance(admitted, int) and admitted >= queued:
+            intervals.append((queued, admitted))
+    end = start
+    for left, right in sorted(intervals):
+        if right > end:
+            wait_ms += right - max(left, end)
+            end = right
+setup_ms = exec_at - start
+run_ms = finish - exec_at - wait_ms
+row = {"stage": os.environ["PHASE"], "wall_ms": finish - start,
+       "wait_ms": wait_ms, "setup_ms": setup_ms,
+       "run_ms": run_ms if run_ms >= 0 else None,
+       "phase_basis": "wall-partition", "rc": int(os.environ["RC"])}
 with open(os.environ["OUT"], "a") as handle:
     handle.write(json.dumps(row) + "\n")
 PYEOF
@@ -119,21 +143,34 @@ heavy_step() {
 	step=$1
 	shift
 	admitted="$WORK/$step.admitted"
-	rm -f "$admitted"
-	queued_at=$(date +%s)
+	admission="$WORK/$step.admission.json"
+	rm -f "$admitted" "$admission"
+	queued_at_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 	rc=0
 	# The child script expands $0/$@ itself, so the single quotes are intended. `bun run` prepends
 	# every ancestor node_modules/.bin to its children's PATH, so a step would run whatever `omp`
 	# sits above wherever the archive was extracted; `env PATH="$PATH"` gives the step the gate's own PATH.
 	# shellcheck disable=SC2016
 	bun run --no-env-file --config=/dev/null src/cli.ts heavy --label "fresh-gate-$step" --disk-observer statfs -- \
-		env PATH="$PATH" sh -c 'date +%s >"$0"; exec "$@"' "$admitted" "$@" || rc=$?
-	if [ -s "$admitted" ]; then
-		wait_s=$(($(cat "$admitted") - queued_at))
-	else
-		wait_s=$(($(date +%s) - queued_at))
-	fi
+		env PATH="$PATH" sh -c 'python3 -c "import sys,time; open(sys.argv[1],\"w\").write(str(time.time_ns() // 1000000))" "$0"; exec "$@"' "$admitted" "$@" || rc=$?
+	finished_at_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
+	if [ -s "$admitted" ]; then admitted_at_ms=$(cat "$admitted"); else admitted_at_ms=$finished_at_ms; fi
+	wait_ms=$((admitted_at_ms - queued_at_ms))
+	wait_s=$((wait_ms / 1000))
 	echo "$wait_s" >>"$WORK/queued.secs"
+	STEP="$step-admission" QUEUED="$queued_at_ms" ADMITTED="$admitted_at_ms" FINISHED="$finished_at_ms" RC="$rc" OUT="$admission" python3 - <<'PYEOF'
+import json, os
+queued = int(os.environ["QUEUED"])
+admitted_at = int(os.environ["ADMITTED"])
+finished = int(os.environ["FINISHED"])
+row = {"stage": os.environ["STEP"], "wall_ms": finished - queued,
+       "wait_ms": admitted_at - queued, "setup_ms": 0,
+       "run_ms": finished - admitted_at,
+       "queued_at_ms": queued, "admitted_at_ms": admitted_at,
+       "phase_basis": "wall-partition", "rc": int(os.environ["RC"])}
+with open(os.environ["OUT"], "w") as handle:
+    handle.write(json.dumps(row) + "\n")
+PYEOF
 	echo "heavy admission wait: ${wait_s}s ($step)"
 	if [ ! -s "$admitted" ]; then
 		echo "FRESH-GATE: RED: heavy refused admission for $step (exit $rc); the heavy line above names the reason" >&2
@@ -511,9 +548,9 @@ record_run() {
 	[ "${gate_defer_record:-0}" != 1 ] || return 0
 	METRICS="${metric_rows:-}" DECLARED="${metric_declared:-}" START_MS="${gate_started_ms:-${metric_started_ms:-0}}" LOAD_START="${gate_load_start:-${metric_load_start:-null}}" \
 	WORKER_COUNT="${workers:-0}" LEDGER="${FRESH_GATE_LEDGER:-}" RUN_COMMIT="$COMMIT" RUN_BASE="${BASE:-}" \
-	RUN_CHANGED="$CHANGED" RUN_TESTS="$1" RUN_FILES="$2" RUN_RC="$3" JUDGE="$SCRIPT_DIR/fresh-gate.sh" JUDGE_ID="${gate_judge_id:-}" GATE_PHASES="$WORK/gate-phases.jsonl" \
+	RUN_CHANGED="$CHANGED" RUN_TESTS="$1" RUN_FILES="$2" RUN_RC="$3" JUDGE="$SCRIPT_DIR/fresh-gate.sh" JUDGE_ID="${gate_judge_id:-}" GATE_PHASES="$WORK/gate-phases.jsonl" WORKDIR="$WORK" \
 	python3 - <<'PYEOF'
-import hashlib, json, os, time
+import hashlib, json, math, os, time
 from datetime import datetime, timezone
 from pathlib import Path
 rows_path = Path(os.environ["METRICS"]) if os.environ["METRICS"] else None
@@ -523,8 +560,21 @@ declared = declared_path.read_text().splitlines() if declared_path and declared_
 stages = {}
 for runner in ("bun", "sh", "python3"):
     selected = [row for row in rows if row["runner"] == runner]
+    def phase_total(field):
+        values = [row.get(field) for row in selected]
+        if not values:
+            return 0
+        if any(not isinstance(value, (int, float)) or isinstance(value, bool)
+               or not math.isfinite(value) or value < 0 for value in values):
+            return None
+        return sum(values)
     stages[runner] = {
         "wall_ms": max(row["finished_ms"] for row in selected) - min(row["started_ms"] for row in selected) if selected else 0,
+        "wait_ms": phase_total("wait_ms"),
+        "setup_ms": phase_total("setup_ms"),
+        "run_ms": phase_total("run_ms"),
+        "file_count": len(selected),
+        "phase_basis": "per-file-sum",
         "cpu_user_ms": sum(row["cpu_user_ms"] for row in selected),
         "cpu_system_ms": sum(row["cpu_system_ms"] for row in selected),
     }
@@ -532,7 +582,13 @@ phase_path = Path(os.environ["GATE_PHASES"])
 if phase_path.is_file():
     for line in phase_path.read_text().splitlines():
         phase = json.loads(line)
-        stages[phase["stage"]] = {"wall_ms": phase["wall_ms"], "rc": phase["rc"]}
+        stages[phase["stage"]] = {key: phase[key] for key in
+                                  ("wall_ms", "wait_ms", "setup_ms", "run_ms", "phase_basis", "rc")}
+work_dir = Path(os.environ["WORKDIR"])
+for phase_path in work_dir.glob("*.admission.json"):
+    phase = json.loads(phase_path.read_text())
+    stages[phase["stage"]] = {key: phase[key] for key in
+                              ("wall_ms", "wait_ms", "setup_ms", "run_ms", "phase_basis", "rc")}
 end = time.time_ns() // 1000000
 start = int(os.environ["START_MS"])
 entry = {"version": 2, "ts": datetime.now(timezone.utc).isoformat(),
