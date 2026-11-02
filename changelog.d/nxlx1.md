@@ -1,2 +1,3 @@
 ### Fixed
 - The `br` shim now refuses a tracker path that still holds an unexpanded `$` variable (`--db '$DB'`, `--db=$DB`, or `BEADS_DB=$DB`) before br runs, naming `BR_SHIM_DB_LITERAL`. Such a call made br create a whole new beads database named `$DB` at the omp-kit root three times, and each copy blocked every build wave as checkout dirt.
+- The flywheel guard refuses a `br` or `bd` call whose `--db` is a shell expansion (`--db $D`, `--db=${DB}`, a command substitution) with `TRACKER_DB_UNEXPANDED`, before any of its tracker checks run. Those checks ran `br show --db <the literal text>` in the cwd, which created the empty `$DB*` and `$D*` databases: the guard was the writer, not an agent.

@@ -1540,3 +1540,30 @@ test("CUTCLAIM1 owned rework resumes without a second claim", async () => {
 	f.rows["k-1"]!.assignee = "Holder";
 	expect(await toolCall(f.h, f.repo, "br --actor Holder update k-1 --status in_progress")).toBeUndefined();
 });
+
+// --- DBLITERAL2 (ompkit-nxlx1): the guard never runs br with an unexpanded --db -----
+
+const BT = String.fromCharCode(96);
+
+test("DBLITERAL2: a br mutation whose --db is a shell expansion is refused before the guard runs any br", async () => {
+	const project = freshDir(base, "proj-");
+	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Holder" }, respond: brTable({ "kit-1": bead("kit-1", "Holder") }) });
+	for (const command of [
+		"D=.beads/beads.db; br update kit-1 --status open --assignee '' --db $D",
+		"br close kit-1 --db=${DB}",
+		"br update kit-1 --status open --db " + BT + "cat dbpath" + BT,
+	]) {
+		const result = await toolCall(h, project, command);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("TRACKER_DB_UNEXPANDED");
+	}
+	// The planted negative this guards: before the check, the release path ran `br show ... --db $D` here.
+	expect(h.execs.filter(call => call.command === "br" && call.args.includes("--db"))).toEqual([]);
+});
+
+test("DBLITERAL2 control: a literal --db path is not refused by this check", async () => {
+	const project = freshDir(base, "proj-");
+	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Holder" }, respond: brTable({ "kit-1": bead("kit-1", "Holder") }) });
+	const result = await toolCall(h, project, "br update kit-1 --priority 2 --db /abs/repo/.beads/beads.db");
+	expect(result?.reason ?? "").not.toContain("TRACKER_DB_UNEXPANDED");
+});

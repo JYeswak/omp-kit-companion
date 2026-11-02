@@ -1321,6 +1321,37 @@ export function checkBashAdmission(event: FlywheelToolCallEvent, owner: string |
 	return undefined;
 }
 
+export const TRACKER_DB_UNEXPANDED = "TRACKER_DB_UNEXPANDED";
+
+/**
+ * DBLITERAL2 (ompkit-nxlx1): every check below that reads the tracker before a br mutation runs its own
+ * `br show --db <value>` with the --db word exactly as written. For `D=...; br ... --db $D` that word is the literal
+ * `$D`, so the guard's own br created an empty database named `$D` in the cwd: the writer of all four `$DB*` and
+ * `$D*` recurrences in omp-kit (2026-10-31 to 11-02). A --db holding a shell expansion is refused here, before any
+ * tracker read, so the guard never runs br with it.
+ */
+export function checkTrackerDbLiteral(event: FlywheelToolCallEvent): FlywheelToolCallResult | undefined {
+	if (event.toolName !== "bash") return undefined;
+	const command = field(event.input, "command");
+	if (typeof command !== "string") return undefined;
+	for (const words of shellCommands(command)) {
+		const parsed = simpleExecutable(words);
+		if (parsed === null || (parsed.exe !== "br" && parsed.exe !== "bd")) continue;
+		for (let i = 0; i < parsed.rest.length; i += 1) {
+			const word = parsed.rest[i]!;
+			// The shell splitter drops a command-substitution word, so `--db` followed by nothing is an expansion too.
+			const dropped = word === "--db" && parsed.rest[i + 1] === undefined;
+			const value = word === "--db" ? (parsed.rest[i + 1] ?? "<expansion>") : word.startsWith("--db=") ? word.slice("--db=".length) : undefined;
+			if (value !== undefined && (dropped || value.includes("$") || value.includes("`"))) {
+				return { block: true, reason: `kit-flywheel-guard ${TRACKER_DB_UNEXPANDED}: \`${parsed.exe} --db ${value}\` names the tracker with a shell expansion the guard cannot read; ` +
+					"its tracker checks would run br on that literal text and create a database of that name. Pass the literal path " +
+					"(for example --db /abs/path/.beads/beads.db). Nothing was changed." };
+			}
+		}
+	}
+	return undefined;
+}
+
 export interface TrackerMutationDeps {
 	exec: FlywheelExec;
 	env: Record<string, string | undefined>;
@@ -2394,6 +2425,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
+			const dbLiteral = checkTrackerDbLiteral(event);
+			if (dbLiteral !== undefined) return dbLiteral;
 			const gap = await checkGapMentions(event, pi.exec, ctx.cwd);
 			if (gap !== undefined) return gap;
 			const lint = await checkBeadLint(event, { exec: pi.exec, home, sessionCwd: ctx.cwd, scriptsDir: deps.lintScriptsDir });
