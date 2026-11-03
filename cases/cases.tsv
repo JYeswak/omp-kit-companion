@@ -477,3 +477,21 @@ kit-probe-readable-facts	fire	tool	write	config/omp.json	pinned_version = "omp 1
 kit-probe-readable-facts	quiet	tool	edit	.config/omp-kit/fleet-watch.json	[/Users/example/.config/omp-kit/fleet-watch.json#C82E]\nPUT 5.=5:\n+      "pinned": ["ompkit-nxlx1", "ompkit-774u.52"],	DERIVE1 / .3.16.2 (b): the edit tool's own hashline header is not a written fact; it refused every agent pin edit to fleet-watch.json on 2026-11-02 (RusticPine AM78007).	
 kit-probe-readable-facts	fire	tool	edit	.config/omp-kit/fleet-watch.json	[/Users/example/.config/omp-kit/fleet-watch.json#C82E]\nPUT 5.=5:\n+      "repo": "/Users/example/Developer/x",	DERIVE1 / .3.16.2 (b) planted negative: a new /Users line in the edit body still fires.	
 kit-probe-readable-facts	fire	tool	edit	config/paths.toml	[/home/example/proj/config/paths.toml#AB12]\nPUT 2.=2:\n+cache_root = "/home/example"	DERIVE1 / .3.16.2 (b) planted negative: a /home body line under a /home header still fires.	
+kit-commit-preflight	fire	tool	bash	-	git commit -F planned-message	C05: commit routes to cheap checks of actual planned message.	
+kit-commit-preflight	fire	tool	bash	-	cd /repo && git commit --only -F planned-message -- src/main.ts	C05: chained commit still needs preflight.	
+kit-commit-preflight	fire	tool	bash	-	git -C /repo commit -m "fix: change [test]"	C05: inline message still needs a materialized preflight message.	
+kit-commit-preflight	quiet	tool	bash	-	git status --short	C05: read-only Git operation is not a commit.	
+kit-commit-preflight	quiet	tool	bash	-	git commit-tree TREE -p HEAD -F planned-message	C05: unreferenced probe object is not a real commit.	
+kit-commit-preflight	quiet	tool	bash	-	printf 'git commit -F planned-message'	C05: quoted command documentation is not execution.	
+kit-test-source-runtime	fire	tool	write	tests/cli/new-feature.test.ts	const result = run(["omp-kit", "verify", "--lesson", "new"]);	C10: candidate feature cannot run through host PATH binary.	
+kit-test-source-runtime	quiet	tool	write	tests/cli/new-feature.test.ts	const result = run([candidateBin, "verify", "--lesson", "new"]);	C10: only executable identity changes to exact candidate.	
+kit-test-source-runtime	fire	tool	edit	tests/cli/new-feature.test.ts	const child = Bun.spawn(["omp-kit", "verify", "--lesson", "new"]);	C10: Bun array process launch uses host binary.	
+kit-test-source-runtime	quiet	tool	edit	tests/cli/new-feature.test.ts	const child = Bun.spawn([candidateBin, "verify", "--lesson", "new"]);	C10: Bun candidate executable control.	
+kit-test-source-runtime	fire	tool	write	tests/fixtures/new-feature.sh	#!/bin/sh\nomp-kit verify --lesson new	C10: shell fixture must not inherit installed CLI.	
+kit-test-source-runtime	quiet	tool	write	tests/fixtures/new-feature.sh	#!/bin/sh\n"$candidate_bin" verify --lesson new	C10: fixture binds candidate executable.	
+kit-test-source-runtime	fire	tool	write	tests/cli/runtime_test.py	result = subprocess.run(["/Users/example/.local/opt/omp-kit/current/bin/omp-kit", "verify"])	C10: direct installed release path is not candidate identity.	
+kit-test-source-runtime	quiet	tool	write	tests/cli/runtime_test.py	result = subprocess.run([candidate_bin, "verify"])	C10: Python explicit candidate executable control.	
+kit-test-source-runtime	fire	tool	write	tests/fixtures/runtime.sh	"$HOME/.local/opt/omp-kit/current/bin/omp-kit" verify	C10: quoted installed HOME release command still launches host.	
+kit-test-source-runtime	quiet	tool	write	tests/fixtures/runtime.sh	printf '%s\\n' "$HOME/.local/opt/omp-kit/current/bin/omp-kit"	C10: printing an installation path does not launch it.	
+kit-test-source-runtime	quiet	tool	write	src/cli.ts	const child = Bun.spawn(["omp-kit", "verify"]);	C10: rule is test/fixture-only, not production launch policy.	
+kit-test-source-runtime	quiet	tool	write	tests/cli/runtime.test.ts	expect(helpText).toContain("omp-kit");	C10: CLI name in an assertion is not a process launch.	

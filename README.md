@@ -79,7 +79,7 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack has 27 rules: 13 `reminder`, 11 `tripwire`, 1 `always`
+The pack has 29 rules: 14 `reminder`, 12 `tripwire`, 1 `always`
 (`kit-standing-law`), 1 `router` (`rs-unsafe-added-router`), and 1 `canary`
 (`zz-canary-scope-probe`). The router loads unsafe-code skills for Rust `unsafe`;
 the canary tests discovery. Tripwires cover unverified "done", unevidenced closes,
