@@ -52,7 +52,7 @@ judge_dir=$(CDPATH='' cd -- "$(dirname -- "$VERDICT")" && pwd -P) || exit 1
 judge_root=$(CDPATH='' cd -- "$judge_dir/.." && pwd -P) || exit 1
 checks=$(python3 "$judge_dir/suite-metrics.py" identity --root "$judge_root" --scope full) || exit 1
 runtime=$(python3 "$judge_dir/suite-metrics.py" runtime) || exit 1
-entry=$(python3 "$judge_dir/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree" \
+entry=$("$judge_dir/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree" \
 	--role base --checks "$checks" --runtime "$runtime" --judge-root "$judge_root" \
 	--cache-dir "$cache") || { echo "test harness: cannot resolve the verdict record path"; exit 1; }
 record=${entry%.json}
@@ -165,6 +165,58 @@ if ! grep -F 'marker=third' "$record.log" >/dev/null; then
 	ok "reused PASS executed nothing"
 else
 	not_ok "flag reran a cached PASS"; grep -F 'FSRERUN1-RUN' "$record.log"
+fi
+
+# Timing-split control: the one-worker native start times expose dispatch order, not merge order.
+# The existing fixture is also unknown; the explicit unknown sorts before it.
+for name in a b c; do
+	printf 'import sys\nsys.exit(%s)\n' "$(if [ "$name" = c ]; then echo 4; else echo 0; fi)" >"$repo/tests/cli/${name}_test.py"
+done
+printf 'exit 0\n' >"$repo/tests/cli/d.test.sh"
+cat >"$repo/tests/cli/e.test.ts" <<'TSEOF'
+import { test, expect } from "bun:test";
+test("native mixed-pool fixture", async () => {
+	await Bun.sleep(100);
+	expect(1 + 1).toBe(2);
+});
+TSEOF
+git -C "$repo" add -A
+git -C "$repo" commit -q -m "[test] timing split dispatch"
+tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+python3 - "$cache/scheduling-hints.json" "$checks" <<'PYEOF'
+import json, sys
+json.dump({"judge_role": "base", "checks": sys.argv[2], "evidence": {"files": [
+    {"path": "tests/cli/a_test.py", "elapsed_ms": 1000},
+    {"path": "tests/cli/b_test.py", "elapsed_ms": 30000}
+]}}, open(sys.argv[1], "w"))
+PYEOF
+VERDICT_ENV="FULL_SUITE_JOBS=1"
+run_verdict timing-split
+entry=$("$judge_dir/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree" \
+	--role base --checks "$checks" --runtime "$runtime" --judge-root "$judge_root" --cache-dir "$cache")
+if python3 - "$entry" <<'PYEOF'
+import json, sys
+rows = json.load(open(sys.argv[1]))["evidence"]["files"]
+order = [r["path"] for r in sorted(rows, key=lambda r: r["started_ms"])]
+assert order.index("tests/cli/c_test.py") < order.index("tests/cli/b_test.py") < order.index("tests/cli/a_test.py"), order
+assert {r["runner"] for r in rows} == {"bun", "sh", "python3"}
+assert len(rows) == 6
+ordered = sorted(rows, key=lambda r: r["started_ms"])
+assert all(a["finished_ms"] <= b["started_ms"] for a, b in zip(ordered, ordered[1:])), ordered
+PYEOF
+then ok "timing split starts unknown files first then descending recorded elapsed time"
+else not_ok "timing split dispatch order"; cat "$out"
+fi
+if python3 - "$entry" "$rc" <<'PYEOF'
+import json, sys
+entry = json.load(open(sys.argv[1]))
+assert int(sys.argv[2]) != 0
+assert entry["verdict"] == "FAIL"
+assert next(r for r in entry["evidence"]["files"] if r["path"] == "tests/cli/c_test.py")["rc"] == 4
+assert entry["evidence"]["py_suites"] == 4
+PYEOF
+then ok "timing split retains every file and planted rc=4 still fails verdict"
+else not_ok "timing split lost the planted failure"; cat "$out"
 fi
 
 echo "full-suite-verdict-rerun: pass=$pass fail=$fail"

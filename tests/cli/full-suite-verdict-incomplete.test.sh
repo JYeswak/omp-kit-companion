@@ -14,6 +14,10 @@ set -u
 OMP_KIT_SUITE_HERMETIC_ENABLE=1
 OMP_KIT_SUITE_FENCE_ENABLE=1
 export OMP_KIT_SUITE_HERMETIC_ENABLE OMP_KIT_SUITE_FENCE_ENABLE
+# Tiny fixture repositories need at most three workers, including the mixed-language
+# and two-Bun-worker controls. Do not multiply the host-sized default across groups.
+FULL_SUITE_JOBS=3
+export FULL_SUITE_JOBS
 
 KITROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 # FULL_SUITE_VERDICT_UNDER_TEST lets a planted-negative run point at a scratch copy of the judge.
@@ -197,6 +201,9 @@ no_incomplete_log() {
 	return 0
 }
 
+# Each group has independent repositories, caches, environment and counters. Keep
+# dependent transitions (serial/parallel and MINRUN1 history) inside their group.
+evidence_cases() {
 # Incomplete: the python suite prints a marker, then SIGKILLs the runner loop that would print
 # its GREEN/RED line, so the run never accounts for it.
 mkrepo incomplete 'import os, signal
@@ -261,7 +268,9 @@ else
 	not_ok "the real suite runner leaked env or lacked an owned home/Git boundary (rc=$rc)"; cat "$out"
 	[ ! -f "$cache/$tree.log" ] || cat "$cache/$tree.log"
 fi
+}
 
+runner_fence_cases() {
 # HERMETIC1: exercise denied writes through the real runner. All protected targets are
 # synthetic siblings of the child archive, so a regression cannot damage a user's files.
 file_state() {
@@ -465,7 +474,9 @@ link.write_text('changed')"
 		not_ok "HERMETIC1 symlink target changed ($symlink_before -> $symlink_after)"
 	fi
 fi
+}
 
+helper_cases() {
 # HERMETIC1: the shared helper must preserve declared controls, scrub authority, and fence writes.
 helper="$KITROOT_DIR/scripts/suite-hermetic-env.sh"
 helper_archive="$TMP/hermetic-helper-archive"
@@ -844,7 +855,9 @@ print("HERMETIC_EXTERNAL_EGRESS_DENIED 203.0.113.1:9")'
 		not_ok "the macOS network fence did not deny external egress (rc=$helper_rc)"; cat "$helper_out"
 	fi
 fi
+}
 
+worker_evidence_cases() {
 # Suites start with SIGINT at its default, as in a foreground run. The runner launches them in a
 # background list, which a non-interactive shell starts with SIGINT ignored; kitlib_tmp_test's
 # SIGINT case failed only under this runner (ompkit-lrbd.3).
@@ -984,7 +997,9 @@ inc=$incomplete_log
 else
 	not_ok "bun is unavailable; the masking case cannot run"
 fi
+}
 
+tracker_cases() {
 # The runner rejects caller-provided BEADS_DB before suites start. Keep a nonempty
 # native sentinel to detect any unintended writes from the scratch-local tracker fixture.
 if command -v br >/dev/null 2>&1; then
@@ -1072,10 +1087,12 @@ PY
 else
 	echo "NATIVEFIXTUREDB1: optional native br adapter unavailable; native tracker case NOT_RUN"
 fi
+}
 
-# FULLSUITEPAR1 (ompkit-9t6f2): shell suites run FULL_SUITE_SHELL_JOBS at a time. Five probe suites
-# record their TMPDIR, how many suites were running at once, and (p1/p2 when FSPAR_PAIR=1) whether
-# their partner ran at the same time; p3 fails with rc 3, and finishing order is not the sorted order.
+# FULLSUITEPAR1 (ompkit-9t6f2): shell suites run FULL_SUITE_JOBS at a time. Five probe suites
+# record their TMPDIR, how many suites were running at once, and whether p1/p2 overlap;
+# p3 fails with rc 3, and finishing order is not the sorted order.
+pool_cases() {
 # shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
 fspar_body='name=$(basename "$0" .test.sh)
 echo "FSPAR-OUT $name begin"
@@ -1097,10 +1114,10 @@ mkrepo_commit
 fspar_run() {
 	rm -rf "$TMP/fspar" "$repo.cache"
 	mkdir -p "$TMP/fspar"
-	FULL_SUITE_SHELL_JOBS=$2
-	export FULL_SUITE_SHELL_JOBS
+	FULL_SUITE_JOBS=$2
+	export FULL_SUITE_JOBS
 	run_verdict "$1"
-	unset FULL_SUITE_SHELL_JOBS
+	unset FULL_SUITE_JOBS
 	rm -rf "$repo.cache.$1" "$TMP/fspar.$1"
 	mv "$repo.cache" "$repo.cache.$1"
 	mv "$TMP/fspar" "$TMP/fspar.$1"
@@ -1174,7 +1191,7 @@ if [ "$parallel_overlap" = 1 ] && [ "$parallel_peak" -ge 2 ] && [ "$parallel_pea
 else
 	not_ok "FULLSUITEPAR1 shell suites did not overlap within the bound (peak $parallel_peak)"; cat "$repo.cache.parallel/$tree.log"
 fi
-if [ "$serial_peak" = 1 ]; then ok "FULLSUITEPAR1 FULL_SUITE_SHELL_JOBS=1 runs one suite at a time"; else not_ok "FULLSUITEPAR1 jobs=1 peak $serial_peak"; fi
+if [ "$serial_peak" = 1 ]; then ok "FULLSUITEPAR1 FULL_SUITE_JOBS=1 runs one suite at a time"; else not_ok "FULLSUITEPAR1 jobs=1 peak $serial_peak"; fi
 if [ "$parallel_tmp_count" = 5 ] && [ "$parallel_owned_count" = 5 ] \
 	&& [ "$serial_tmp_count" = 5 ] && [ "$serial_owned_count" = 5 ]; then
 	ok "FULLSUITEPAR1 every serial and parallel suite ran under a distinct owned TMPDIR"
@@ -1194,12 +1211,12 @@ while [ "$n" -lt 40 ]; do sleep 1; n=$((n + 1)); done
 echo "FSPAR-HANG-SURVIVED"'
 addfile tests/cli/h3.test.sh 'echo "FSPAR-HANG-QUICK-3"'
 mkrepo_commit
-FULL_SUITE_SHELL_JOBS=3 FULL_SUITE_TIMEOUT_SECS=6
-export FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
+FULL_SUITE_JOBS=3 FULL_SUITE_TIMEOUT_SECS=6
+export FULL_SUITE_JOBS FULL_SUITE_TIMEOUT_SECS
 hang_t0=$(date +%s)
 run_verdict parhang
 hang_wall=$(($(date +%s) - hang_t0))
-unset FULL_SUITE_SHELL_JOBS FULL_SUITE_TIMEOUT_SECS
+unset FULL_SUITE_JOBS FULL_SUITE_TIMEOUT_SECS
 cache="$repo.cache"
 inc=$incomplete_log
 if [ "$rc" -ne 0 ] && grep -F 'timed out after 6s; unfinished script suites: tests/cli/h2.test.sh;' "$out" >/dev/null && [ ! -e "$cache/$tree.json" ] && [ ! -e "$cache/$tree.log" ]; then
@@ -1220,7 +1237,9 @@ k=0
 while [ -n "$hang_pid" ] && kill -0 "$hang_pid" 2>/dev/null && [ "$k" -lt 50 ]; do sleep 0.1; k=$((k + 1)); done
 if [ -n "$hang_pid" ] && ! kill -0 "$hang_pid" 2>/dev/null; then ok "FULLSUITEPAR1 the hung suite process is gone"; else not_ok "FULLSUITEPAR1 hung suite pid ${hang_pid:-?} still runs"; fi
 if side_files_gone; then ok "FULLSUITEPAR1 timed-out parallel run removes runner side files"; else not_ok "FULLSUITEPAR1 timed-out parallel run left side files"; ls -la "$cache"; fi
+}
 
+minimum_run_reference() {
 # MINRUN1: a complete-looking smaller declaration must not silently replace the
 # last green reference. Use real native suites, and change the measured producer
 # between the baseline and the planted skip.
@@ -1283,6 +1302,11 @@ if [ "$rc" = "0" ] && minrun_assert_reference; then
 else not_ok "MINRUN1 full native reference did not pass (rc=$rc)"; cat "$out"; fi
 
 printf '\n# A genuinely different measured producer for the historical reference drill.\n' >> "$minrun_judge/scripts/suite-metrics.py"
+VERDICT=$minrun_original_verdict
+}
+
+minimum_run_cases() {
+VERDICT="$minrun_judge/scripts/full-suite-verdict.sh"
 git -C "$repo" rm -q tests/cli/b.test.ts tests/cli/b.test.sh tests/cli/b_test.py
 minrun_commit "MINRUN1 planted skipped suites"
 run_verdict minrun-skipped
@@ -1358,6 +1382,10 @@ if minrun_lookup=$(minrun_lookup_current) && [ "$minrun_lookup" = MISS ]; then
 else
 	not_ok "MINRUN1 erased qualification remained reusable: $minrun_lookup"
 fi
+}
+
+minimum_floor_cases() {
+VERDICT="$minrun_judge/scripts/full-suite-verdict.sh"
 
 mkrepo_begin minrun-floor
 addfile tests/cli/floor_test.py 'assert 7 * 6 == 42'
@@ -1414,6 +1442,41 @@ assert store.minimum_shortfalls(counts, 249, policy, baseline) == [
 PY
 then ok "MINRUN1 verified work includes focused coverage once, excludes idle gaps and honors the exact wall floor"
 else not_ok "MINRUN1 covered-work interval or floor boundary is wrong"; fi
+}
+
+# Establish the historical wall reference before starting competing fixture groups.
+# Otherwise initial fanout inflates it and a later identical, quieter run looks too short.
+minimum_run_reference
+
+# Fixed groups bound fixture concurrency. Buffer output and merge every group's
+# counters in declaration order; a crashed group cannot disappear as PASS.
+groups="evidence_cases runner_fence_cases helper_cases worker_evidence_cases tracker_cases pool_cases minimum_run_cases minimum_floor_cases"
+group_pids=
+# shellcheck disable=SC2030,SC2031 # each group counts in its own subshell; the parent sums them from the result files
+for group in $groups; do
+	(
+		KITLIB__TMP_DIRS=
+		KITLIB__TMP_ATEXIT=
+		TMP="$TMP/$group"
+		mkdir -p "$TMP" || exit 1
+		pass=0
+		fail=0
+		"$group"
+		printf '%s %s\n' "$pass" "$fail" >"$TMP.result"
+	) >"$TMP/$group.out" 2>&1 &
+	group_pids="$group_pids $!"
+done
+for group_pid in $group_pids; do wait "$group_pid" || :; done
+# shellcheck disable=SC2030,SC2031 # each group counts in its own subshell; the parent sums them from the result files
+for group in $groups; do
+	cat "$TMP/$group.out"
+	if [ -f "$TMP/$group.result" ] && read -r group_pass group_fail <"$TMP/$group.result"; then
+		pass=$((pass + group_pass))
+		fail=$((fail + group_fail))
+	else
+		not_ok "$group did not finish and report its assertion counts"
+	fi
+done
 
 echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]

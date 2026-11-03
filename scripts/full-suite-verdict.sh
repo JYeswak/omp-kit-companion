@@ -28,8 +28,8 @@
 # FULL_SUITE_VERDICT_CACHE_DIR overrides the configured store for isolated tests and operators.
 # Otherwise scripts/full-suite-verdict-store.py uses
 # $XDG_CONFIG_HOME/omp-kit/full-suite-verdict.json and $XDG_STATE_HOME/omp-kit/full-suite-verdicts.
-# Shell suites: FULL_SUITE_SHELL_JOBS at a time (default 5, never more than online cores or
-# remaining suites). Every suite runs under an owned TMPDIR with output retained separately.
+# Files share FULL_SUITE_JOBS workers (default max(8, online cores - 4)).
+# Unknown files run first, then longest recorded elapsed time for this judge/role.
 # Suite bound: FULL_SUITE_TIMEOUT_SECS (default 1800). The suite runs at nice 10 inside the gate's
 # own admission; it takes no heavy slot.
 set -eu
@@ -45,7 +45,6 @@ RERUN_REASON=
 RERUN=0
 JUDGE_ROLE=base
 TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
-SHELL_JOBS=${FULL_SUITE_SHELL_JOBS:-5}
 FOCUSED_PASSED=
 usage() {
 	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main] [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]" >&2
@@ -78,7 +77,6 @@ if [ "$RERUN" = 1 ] && [ -z "$RERUN_REASON" ]; then
 	exit 1
 fi
 case "$TIMEOUT_SECS" in ''|*[!0-9]*|0) fail "FULL_SUITE_TIMEOUT_SECS must be a positive integer" ; exit 1 ;; esac
-case "$SHELL_JOBS" in ''|*[!0-9]*|0) fail "FULL_SUITE_SHELL_JOBS must be a positive integer" ; exit 1 ;; esac
 # No suite may block on stdin (pre-push hooks inherit a pipe whose writer never closes).
 exec </dev/null
 # HERMETIC1-B: discard caller authority before Git probes and suite execution, not the requested verdict.
@@ -363,22 +361,24 @@ if [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ] && [ -f "$ARCHIVE_DIR/scripts/build-mani
 	fi
 fi
 
-# FULLSUITEPAR1: never more shell workers than online cores or shell suites left to run.
-ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || ncpu=
+# One timing-split pool: unknown files first, then longest processing time first.
+ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || ncpu=1
 case "$ncpu" in ''|*[!0-9]*|0) ncpu=1 ;; esac
-[ "$SHELL_JOBS" -le "$ncpu" ] || SHELL_JOBS=$ncpu
-if [ "$shell_count" -gt 0 ]; then
-	[ "$SHELL_JOBS" -le "$shell_count" ] || SHELL_JOBS=$shell_count
-	echo "full-suite: shell suites run $SHELL_JOBS at a time (FULL_SUITE_SHELL_JOBS; $ncpu online cores)"
-fi
+pool_default=$((ncpu - 4))
+[ "$pool_default" -ge 8 ] || pool_default=8
+# Legacy name retained until the foreign-dirty complement test is migrated by its owner.
+# An explicit width is authoritative; load includes this release's own tests.
+POOL_JOBS=${FULL_SUITE_JOBS:-${FULL_SUITE_SHELL_JOBS:-$pool_default}}
+case "$POOL_JOBS" in ''|*[!0-9]*|0) cleanup_archive; fail "FULL_SUITE_JOBS must be a positive integer"; exit 1 ;; esac
+pool_files=$((bun_count + shell_count + py_count))
+if [ "$pool_files" -gt 0 ] && [ "$POOL_JOBS" -gt "$pool_files" ]; then POOL_JOBS=$pool_files; fi
+SHELL_JOBS=$POOL_JOBS
+echo "full-suite: global timing-split pool: $POOL_JOBS workers"
 
 SUITE_OUT="${entry%.json}.running.$$.log"
-# The runner's own facts, written only by run_suite (never by a suite): one line per shell and
-# python suite plus the bun phase's exit code. Bun's output is kept apart so its summary is
-# parsed from the bun phase alone. Nested gate runs inside tests print the same marker lines
-# into the shared log; they must not count (FULLSUITECOUNT1, ompkit-lrbd.7).
+# Runner-owned summaries, never parsed from the combined log: nested tests print the same
+# markers, but cannot contribute to this invocation's counts (FULLSUITECOUNT1).
 SUITE_STATUS="$SUITE_OUT.status"
-BUN_OUT="$SUITE_OUT.bun"
 # Runner-private shell stage state: per suite N (sorted order) a claim dir N.claim, its output N.out
 # and its exit code N.rc. The deadline watchdog touches the timed-out mark before it kills anything
 # and reads the runner subshell's own pid from RUNNER_PID.
@@ -391,24 +391,15 @@ METRICS_ROWS="$SUITE_OUT.files.$$.json"
 METRICS_DECLARED="$SUITE_OUT.declared.$$"
 if ! mkdir "$METRICS_DIR"; then cleanup_archive; fail "cannot create fresh suite measurement state"; exit 1; fi
 for metric_path in $kept_bun $kept_shell $kept_py $covered_bun $covered_shell $covered_py; do printf '%s\n' "$metric_path"; done >"$METRICS_DECLARED"
-rm -f "$SUITE_STATUS" "$BUN_OUT" "$RUNNER_PID" "$timeout_mark"
+rm -f "$SUITE_STATUS" "$RUNNER_PID" "$timeout_mark"
 rm -rf "$SHELL_DIR"
 if ! : >"$SUITE_OUT" || ! : >"$SUITE_STATUS" || ! mkdir "$SHELL_DIR"; then cleanup_archive; fail "cannot write suite evidence"; exit 1; fi
-# finish_logs DEST: move the log to DEST and drop the runner-private side files. A bun phase that
-# never finished (timeout, killed runner) has its partial output only in $BUN_OUT; append it first
-# so the kept log still shows how far bun got (lrbd.6 AC1). Shell suite outputs the runner never
-# merged (it was killed in the shell stage) follow in sorted suite order, each naming its suite.
+# finish_logs DEST: preserve unmerged per-file output before dropping private worker state.
 finish_logs() {
-	if [ -f "$BUN_OUT" ] && ! grep -q '^BUN rc=' "$SUITE_STATUS" 2>/dev/null; then
-		{ echo "full-suite: the bun phase did not finish; its partial output follows"; cat "$BUN_OUT"; } >>"$SUITE_OUT"
-	fi
-	if ! grep -q '^BUN rc=' "$SUITE_STATUS" 2>/dev/null; then
-		for fl_output in "$METRICS_DIR"/bun-*.log; do
-			case "$fl_output" in *.native.log) continue ;; esac
-			[ -f "$fl_output" ] || continue
-			{ echo "full-suite: unfinished Bun worker output follows"; cat "$fl_output"; } >>"$SUITE_OUT"
-		done
-	fi
+	for fl_output in "$METRICS_DIR"/bun-*.out "$METRICS_DIR"/python-*.out; do
+		[ -f "$fl_output" ] || continue
+		{ echo "full-suite: unfinished worker output follows ($fl_output)"; cat "$fl_output"; } >>"$SUITE_OUT"
+	done
 	for fl_suite in ${unfinished:-}; do
 		echo "full-suite: script-suite $fl_suite did not finish before the declared deadline; retained partial output follows" >>"$SUITE_OUT"
 	done
@@ -436,7 +427,7 @@ finish_logs() {
 		fi
 	done
 	mv -f "$SUITE_OUT" "$1"
-	rm -f "$SUITE_STATUS" "$BUN_OUT" "$RUNNER_PID"
+	rm -f "$SUITE_STATUS" "$RUNNER_PID"
 	rm -rf "$METRICS_DIR"
 }
 # shell_unfinished: native file execution, not merely the logging supervisor's
@@ -498,146 +489,101 @@ for sig in (signal.SIGINT, signal.SIGQUIT):
 os.execvp(sys.argv[1], sys.argv[1:])' "$@"
 		}
 		failed=0
-		# GATESPEED1 (ompkit-774u.71): the bun stage runs in the background while the shell and python
-		# stages run, instead of before them. Measured 2026-10-31 (tree 30b6d992, main role): the suite
-		# used 3,071 s of CPU in about 1,500 s of wall, so it is wait-bound, not CPU-bound, and the
-		# three stages ran back to back (bun 4 workers, shell 775 s at 5 jobs, python 271 s serial).
-		# Bun's output stays in $BUN_OUT and its counts in $bun_stage until it is joined below; only
-		# the order of blocks in the log changes, and the status file is read by key, not by order.
-		bun_bg=""
-		bun_rc_file="$METRICS_DIR/bun.rc"
-		# stop_bun: an early exit from the shell stage must not leave the background bun stage running.
-		stop_bun() {
-			[ -n "$bun_bg" ] || return 0
-			kill_tree "$bun_bg" TERM
-			wait "$bun_bg" 2>/dev/null || :
-		}
-		if [ "$bun_count" -gt 0 ]; then
-			bun_workers=$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers) || exit 1
-			case "$bun_workers" in ''|*[!0-9]*|0) exit 1 ;; esac
-			[ "$bun_workers" -le "$bun_count" ] || bun_workers=$bun_count
-			[ "$bun_workers" -le 4 ] || bun_workers=4
-			bun_stage="$METRICS_DIR/bun.stage"
-			bun_config_path=${bun_config#--config=}
-			[ -n "$bun_config_path" ] || bun_config_path=/dev/null
-			rm -f "$bun_rc_file"
-			(
-				b_rc=0
-				dfl nice -n 10 python3 "$SCRIPT_DIR/suite-metrics.py" stage \
-					--runner bun --records "$METRICS_DIR" --cwd "$ARCHIVE_DIR" --tree "$tree" \
-					--summary "$bun_stage" --bun-config "$bun_config_path" \
-					--workers "$bun_workers" --deadline "$TIMEOUT_SECS" $kept_bun \
-					>"$BUN_OUT" 2>&1 || b_rc=$?
-				echo "$b_rc" >"$bun_rc_file"
-			) &
-			bun_bg=$!
-		fi
-		# FULLSUITEPAR1 (ompkit-9t6f2): SHELL_JOBS workers share the shell suites. A worker claims the
-		# next unclaimed suite in sorted order (mkdir is atomic), runs it under that suite's own owned
-		# TMPDIR with its output kept apart, records its exit code, and claims nothing once the
-		# deadline has marked the run. Workers are children of this subshell, so the watchdog's
-		# kill_tree reaches every running suite. When all workers are done, each suite's output and its
-		# GREEN/RED line join the log in sorted order, as the serial loop wrote them.
-		if [ "$shell_count" -gt 0 ]; then
-			if [ -e "$timeout_mark" ]; then stop_bun; exit 2; fi
-			shell_t0=$(date +%s)
-			i=0
-			for suite in $kept_shell; do
-				i=$((i + 1))
-				kitlib_tmp suite_tmp full-suite-shell || { stop_bun; exit 1; }
-				eval "suite_tmp_$i=\$suite_tmp"
-			done
-			shell_worker() {
-				w_i=0
-				for w_suite in $kept_shell; do
-					w_i=$((w_i + 1))
-					if [ -e "$timeout_mark" ]; then return 0; fi
-					if mkdir "$SHELL_DIR/$w_i.claim" 2>/dev/null; then
-						eval "TMPDIR=\$suite_tmp_$w_i"
-						export TMPDIR
-						w_rc=0
-						dfl python3 "$SCRIPT_DIR/suite-metrics.py" run \
-							--record "$METRICS_DIR/shell-$w_i.json" --path "$w_suite" --runner sh \
-							--tree "$tree" --cwd "$ARCHIVE_DIR" --workers "$SHELL_JOBS" --deadline "$TIMEOUT_SECS" -- sh "$w_suite" \
-							>"$SHELL_DIR/$w_i.out" 2>&1 || w_rc=$?
-						echo "$w_rc" >"$SHELL_DIR/$w_i.rc"
-					fi
-				done
-			}
-			workers=""
-			w=0
-			while [ "$w" -lt "$SHELL_JOBS" ]; do
-				w=$((w + 1))
-				shell_worker &
-				workers="$workers $!"
-			done
-			lost=0
-			for worker in $workers; do
-				wait "$worker" || lost=1
-			done
-			# A recorded suite drops its files as it is merged, so a runner killed mid-merge never makes
-			# finish_logs repeat it. An unrecorded suite keeps its claim for shell_unfinished.
-			i=0
-			for suite in $kept_shell; do
-				i=$((i + 1))
-				src=$(cat "$SHELL_DIR/$i.rc" 2>/dev/null) || src=
-				case "$src" in
-					''|*[!0-9]*)
-						lost=1
-						if [ -f "$SHELL_DIR/$i.out" ]; then
-							echo "full-suite: script-suite $suite did not finish; its partial output follows"
-							cat "$SHELL_DIR/$i.out"
-						fi
-						rm -f "$SHELL_DIR/$i.out" "$SHELL_DIR/$i.rc" ;;
-					*)
-						cat "$SHELL_DIR/$i.out"
-						if [ "$src" -eq 0 ]; then
-							echo "GREEN script-suite $suite"
-							append_suite_status "GREEN script-suite $suite"
-						else
-							echo "RED script-suite $suite rc=$src"
-							append_suite_status "RED script-suite $suite"
-							failed=1
-						fi
-						rm -f "$SHELL_DIR/$i.out" "$SHELL_DIR/$i.rc"
-						rmdir "$SHELL_DIR/$i.claim" ;;
-				esac
-			done
-			echo "full-suite: shell stage: $shell_count suites, $SHELL_JOBS at a time, $(($(date +%s) - shell_t0))s"
-			# Suites without an exit code (a worker died, or the deadline passed) leave the run
-			# incomplete: exit outside 0|1 so the verdict process refuses it.
-			if [ "$lost" -ne 0 ]; then stop_bun; exit 2; fi
-			rm -rf "$SHELL_DIR"
-		fi
-		p_i=0
-		for suite in $kept_py; do
-			p_i=$((p_i + 1))
-			if dfl python3 "$SCRIPT_DIR/suite-metrics.py" run \
-				--record "$METRICS_DIR/python-$p_i.json" --path "$suite" --runner python3 \
-				--tree "$tree" --cwd "$ARCHIVE_DIR" --deadline "$TIMEOUT_SECS" -- python3 "$suite"; then
-				echo "GREEN python-suite $suite"
-				append_suite_status "GREEN python-suite $suite"
-			else
-				src=$?
-				echo "RED python-suite $suite rc=$src"
-				append_suite_status "RED python-suite $suite"
-				failed=1
+		# All languages claim work from the same immutable timing-sorted queue.
+		queue="$METRICS_DIR/queue"
+		KEPT_BUN="$kept_bun" KEPT_SH="$kept_shell" KEPT_PY="$kept_py" CACHE="$CACHE_DIR" ROLE="$JUDGE_ROLE" CHECKS="$checks" python3 - <<'PYQUEUE' >"$queue"
+import json, os
+from pathlib import Path
+history = {}
+# Only this judge/role supplies scheduling hints; a hint never supplies a verdict.
+for entry in sorted(Path(os.environ['CACHE']).glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+    try:
+        data = json.loads(entry.read_text())
+        if data.get('judge_role') != os.environ['ROLE'] or data.get('checks') != os.environ['CHECKS']:
+            continue
+        for row in data.get('evidence', {}).get('files', []):
+            history.setdefault(row['path'], row['elapsed_ms'] / 1000)
+    except (ValueError, KeyError, OSError, TypeError):
+        continue
+items = []
+for kind, key in [('bun','KEPT_BUN'), ('shell','KEPT_SH'), ('python','KEPT_PY')]:
+    for index, path in enumerate(os.environ[key].split(), 1):
+        items.append((kind, index, path))
+items.sort(key=lambda item: (item[2] in history, -history.get(item[2], 0), item[2]))
+for kind, index, path in items:
+    print(kind, index, path)
+PYQUEUE
+		# Allocate in the supervisor: kitlib's signal traps re-raise at $$, which in
+		# POSIX worker subshells still names the outer verdict process.
+		while read -r kind index suite; do
+			kitlib_tmp suite_tmp "full-suite-$kind" || exit 1
+			eval "suite_tmp_${kind}_$index=\$suite_tmp"
+			if [ "$kind" = bun ]; then
+				kitlib_tmp suite_timing_dir bun-timings || exit 1
+				eval "suite_timing_${kind}_$index=\$suite_timing_dir"
 			fi
+		done <"$queue"
+		workers=""
+		# shellcheck disable=SC2317,SC2329 # invoked indirectly: kitlib_tmp_atexit runs it on exit
+		stop_workers() {
+			for worker in $workers; do kill_tree "$worker" TERM; done
+			for worker in $workers; do wait "$worker" 2>/dev/null || :; done
+		}
+		kitlib_tmp_atexit 'stop_workers'
+		pool_worker() {
+			# Workers inherit paths, not signal traps; the supervisor owns their cleanup.
+			while read -r kind index suite; do
+				[ ! -e "$timeout_mark" ] || return 0
+				mkdir "$METRICS_DIR/$kind-$index.claim" 2>/dev/null || continue
+				eval "TMPDIR=\$suite_tmp_${kind}_$index"
+				export TMPDIR
+				case "$kind" in
+					bun) runner='bun'; bun_timing_dir=''; eval "bun_timing_dir=\$suite_timing_${kind}_$index"; set -- bun "${bun_config:---config=/dev/null}" test --timeout=120000 "--timings=$bun_timing_dir/bun.timings" --update-timings "./$suite" ;;
+					shell) runner='sh'; set -- sh "$suite"; mkdir "$SHELL_DIR/$index.claim" ;;
+					python) runner='python3'; set -- python3 "$suite" ;;
+				esac
+				rc=0
+				dfl nice -n 10 python3 "$SCRIPT_DIR/suite-metrics.py" run \
+					--record "$METRICS_DIR/$kind-$index.json" --path "$suite" --runner "$runner" \
+					--tree "$tree" --cwd "$ARCHIVE_DIR" --workers "$POOL_JOBS" --deadline "$TIMEOUT_SECS" -- "$@" \
+					>"$METRICS_DIR/$kind-$index.out" 2>&1 || rc=$?
+				echo "$rc" >"$METRICS_DIR/$kind-$index.rc"
+				if [ "$kind" = shell ]; then cp "$METRICS_DIR/$kind-$index.out" "$SHELL_DIR/$index.out"; echo "$rc" >"$SHELL_DIR/$index.rc"; fi
+			done <"$queue"
+		}
+		w=0
+		while [ "$w" -lt "$POOL_JOBS" ]; do
+			w=$((w + 1)); pool_worker & workers="$workers $!"
 		done
-		if [ -n "$bun_bg" ]; then
-			wait "$bun_bg" 2>/dev/null || :
-			bun_rc=$(cat "$bun_rc_file" 2>/dev/null) || bun_rc=
-			case "$bun_rc" in ''|*[!0-9]*) exit 2 ;; esac
-			[ -f "$bun_stage" ] || exit 2
-			b_counts=$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print(v["test_count"],v["test_failures"])' "$bun_stage") || exit 2
-			# Values come from the runner-owned numeric summary, never child log markers.
-			# shellcheck disable=SC2086
-			set -- $b_counts
-			b_tests=$1; b_failed=$2
-			cat "$BUN_OUT"
+		lost=0
+		for worker in $workers; do wait "$worker" || lost=1; done
+		workers=""
+		bun_rc=0; b_tests=0; b_failed=0
+		for kind in shell python bun; do
+			case "$kind" in shell) suites=$kept_shell; label=script-suite ;; python) suites=$kept_py; label=python-suite ;; bun) suites=$kept_bun ;; esac
+			i=0
+			for suite in $suites; do
+				i=$((i + 1))
+				src=$(cat "$METRICS_DIR/$kind-$i.rc" 2>/dev/null) || { lost=1; continue; }
+				cat "$METRICS_DIR/$kind-$i.out"
+				if [ "$kind" = bun ]; then
+					counts=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["test_count"],r["test_failures"])' "$METRICS_DIR/$kind-$i.json") || { lost=1; continue; }
+					set -- $counts; b_tests=$((b_tests + $1)); b_failed=$((b_failed + $2))
+					[ "$src" -eq 0 ] || bun_rc=1
+				else
+					if [ "$src" -eq 0 ]; then line="GREEN $label $suite"; else line="RED $label $suite rc=$src"; failed=1; fi
+					echo "$line"; append_suite_status "$line"
+				fi
+				if [ "$kind" = shell ]; then rm -f "$SHELL_DIR/$i.out" "$SHELL_DIR/$i.rc"; rmdir "$SHELL_DIR/$i.claim"; fi
+				rm -f "$METRICS_DIR/$kind-$i.out"
+			done
+		done
+		if [ "$bun_count" -gt 0 ]; then
 			append_suite_status "BUN rc=$bun_rc" "BUN_RAN $b_tests" "BUN_FAIL $b_failed"
 			[ "$bun_rc" -eq 0 ] || failed=1
 		fi
+		echo "full-suite: shell stage: $shell_count suites, $SHELL_JOBS at a time (shared global pool)"
+		[ "$lost" -eq 0 ] || exit 2
 		exit "$failed"
 	) >>"$SUITE_OUT" 2>&1
 }
@@ -781,7 +727,7 @@ fi
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
 finish_logs "$log_entry"
 write_complete_verdict() {
-MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" WORKERS_BUN="$(sh "$SCRIPT_DIR/fresh-gate.sh" --test-workers)" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
+MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
 import hashlib, json, math, os
 log_digest = hashlib.sha256()
 with open(os.environ["LOG"], "rb") as log:
@@ -827,8 +773,8 @@ entry = {
         "started_ms": int(os.environ["RUN_START"]),
         "load_start": json.loads(os.environ["LOAD_START"]),
         "load_end": json.loads(os.environ["LOAD_END"]),
-        "workers": {"bun": min(4, int(os.environ["WORKERS_BUN"]), int(os.environ["BUNF"])),
-                    "shell": min(int(os.environ["WORKERS_SHELL"]), int(os.environ["SHC"])), "python": min(1, int(os.environ["PYC"]))},
+        "workers": {"bun": min(int(os.environ["WORKERS_SHELL"]), int(os.environ["BUNF"])),
+                    "shell": min(int(os.environ["WORKERS_SHELL"]), int(os.environ["SHC"])), "python": min(int(os.environ["WORKERS_SHELL"]), int(os.environ["PYC"]))},
         "stages": stages,
     },
     "evidence": {

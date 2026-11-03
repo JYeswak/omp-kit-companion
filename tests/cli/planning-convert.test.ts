@@ -1,307 +1,15 @@
-import { afterAll, expect, test } from "bun:test";
+// Coverage: src/commands.ts, src/cli.ts, src/kitlib/tmp.ts, src/kitlib/run.ts, scripts/bead_lint.py
+import { afterAll, expect } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
-import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
+import { planningFixture, type ApplyPlanItem } from "./planning-convert.helpers.ts";
 afterAll(cleanupAllOwnedTmp);
+const { repoRoot, scratch, validPlan, negativePlan, childEnv, isolatedTest, runCli, nativeOutput, nativeJson, issueRows, median, planSource, writePlan, initializeTracker, createNativeIssue, showNativeIssue, applyResult, applyArgs, writeAmendPlan, amendAcceptanceV1, amendAcceptanceV2, concurrentWriteFixture } = planningFixture();
 
-const repoRoot = resolve(import.meta.dir, "../..");
-const scratchRoot = join(repoRoot, "var", "agent-tmp");
-mkdirSync(scratchRoot, { recursive: true });
-const scratch = ownedTmp("planning-convert-test", { root: scratchRoot }).path;
-const cli = join(repoRoot, "src", "cli.ts");
-const validPlan = join(import.meta.dir, "../fixtures/planning-convert/valid.md");
-const negativePlan = join(import.meta.dir, "../fixtures/planning-convert/negative.md");
-const childEnv = { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
-
-type CliRunResult = { exitCode: number; stdout: string; stderr: string };
-
-function runCli(args: string[], overrides: Record<string, string> = {}): Promise<CliRunResult> {
-	const child = Bun.spawn([process.execPath, cli, ...args], { cwd: repoRoot, env: { ...childEnv, ...overrides }, stdout: "pipe", stderr: "pipe" });
-	return Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]).then(([exitCode, stdout, stderr]) => {
-		if (!stdout.trim()) throw new Error("planning convert returned no stdout; stderr=" + stderr);
-		return { exitCode, stdout, stderr };
-	});
-}
-
-function nativeOutput(args: string[], dbDir: string): string {
-	const result = Bun.spawnSync(["br", ...args, "--db", join(dbDir, ".beads", "beads.db"), "--no-auto-import", "--no-auto-flush", "--no-daemon", "--json", "--no-color"], {
-		cwd: dbDir, env: childEnv, stdout: "pipe", stderr: "pipe",
-	});
-	if (result.exitCode !== 0) throw new Error("br command failed: " + result.stdout.toString() + result.stderr.toString());
-	return result.stdout.toString();
-}
-
-function nativeJson(args: string[], dbDir: string): unknown {
-	return JSON.parse(nativeOutput(args, dbDir));
-}
-
-type NativeIssueRow = {
-	id: string;
-	title: string;
-	description: string;
-	acceptance_criteria: string;
-	status: string;
-	priority: number;
-	issue_type: string;
-	labels: string[];
-	dependency_count: number;
-	external_ref?: string;
-};
-
-function issueRows(dbDir: string): NativeIssueRow[] {
-	const value = nativeJson(["list"], dbDir);
-	let candidates: unknown[];
-	if (Array.isArray(value)) candidates = value;
-	else if (typeof value === "object" && value !== null && "issues" in value && Array.isArray(value.issues)) candidates = value.issues;
-	else throw new Error("br list JSON did not contain an issue array");
-	return candidates.map((row, index) => {
-		if (typeof row !== "object" || row === null || Array.isArray(row) ||
-			!("id" in row) || typeof row.id !== "string" ||
-			!("title" in row) || typeof row.title !== "string" ||
-			!("description" in row) || typeof row.description !== "string" ||
-			!("acceptance_criteria" in row) || typeof row.acceptance_criteria !== "string" ||
-			!("status" in row) || typeof row.status !== "string" ||
-			!("priority" in row) || typeof row.priority !== "number" ||
-			!("issue_type" in row) || typeof row.issue_type !== "string" ||
-			!("labels" in row) || !Array.isArray(row.labels) ||
-			!("dependency_count" in row) || typeof row.dependency_count !== "number")
-			throw new Error("br list JSON issue " + index + " has an invalid shape");
-		const labels: string[] = [];
-		for (const label of row.labels) {
-			if (typeof label !== "string") throw new Error("br list JSON issue " + index + " has a non-string label");
-			labels.push(label);
-		}
-		const issue: NativeIssueRow = {
-			id: row.id, title: row.title, description: row.description, acceptance_criteria: row.acceptance_criteria,
-			status: row.status, priority: row.priority, issue_type: row.issue_type, labels, dependency_count: row.dependency_count,
-		};
-		if ("external_ref" in row && typeof row.external_ref === "string") issue.external_ref = row.external_ref;
-		return issue;
-	});
-}
-
-function median(values: number[]): number | null {
-	if (!values.length) return null;
-	const ordered = [...values].sort((left, right) => left - right);
-	const middle = Math.floor(ordered.length / 2);
-	return ordered.length % 2 ? ordered[middle]! : (ordered[middle - 1]! + ordered[middle]!) / 2;
-}
-type ApplyPlanItem = { slug: string; existing: string; dependsOn?: string[]; parent?: string };
-
-function planSource(items: ApplyPlanItem[], mission = "core8"): string {
-	return items.map((item) => [
-		"```text",
-		"### " + item.slug + " — " + item.slug.replaceAll("-", " "),
-		"type: task priority: 1",
-		"labels: plan:" + mission + ", mission:" + mission + ", test:planning-convert",
-		"depends-on: " + (item.dependsOn?.join(", ") || "(none)"),
-		"existing: " + item.existing,
-		...(item.parent ? ["parent: " + item.parent] : []),
-		"discovered-from: planning-convert-test",
-		"WHAT: (a) " + item.slug + " is applied to the selected tracker.",
-		"WHY: The selected tracker must retain unrelated state.",
-		"ACCEPTANCE:",
-		"- [a] " + item.slug + " contributes its positive acceptance criterion.",
-		"- [a] Planted negative: " + item.slug + " is not applied twice.",
-		"NO-CLAIM: This fixture does not certify unrelated tracker state.",
-		"```",
-	].join("\n")).join("\n\n");
-}
-
-function writePlan(name: string, items: ApplyPlanItem[], mission = "core8"): string {
-	const path = join(scratch, name + ".md");
-	writeFileSync(path, planSource(items, mission));
-	return path;
-}
-
-function initializeTracker(trackerRoot: string): void {
-	mkdirSync(trackerRoot, { recursive: true });
-	nativeOutput(["init", "--prefix", "core8"], trackerRoot);
-}
-
-function createNativeIssue(trackerRoot: string, title: string, options: {
-	externalRef?: string; parent?: string; acceptance?: string; type?: string;
-} = {}): string {
-	const args = ["create", "--title", title, "--type", options.type ?? "task", "--priority", "1",
-		"--labels", "mission:core8,test:planning-convert", "--description", "Seeded for planning-convert apply tests",
-		"--acceptance-criteria", options.acceptance ?? "- [ ] Original tracker acceptance."];
-	if (options.parent) args.push("--parent", options.parent);
-	if (options.externalRef) args.push("--external-ref", options.externalRef);
-	const result = nativeJson(args, trackerRoot);
-	const row = Array.isArray(result) ? result[0] : result;
-	if (typeof row !== "object" || row === null || !("id" in row) || typeof row.id !== "string")
-		throw new Error("br create did not return an issue id");
-	return row.id;
-}
-
-function showNativeIssue(trackerRoot: string, id: string): Record<string, unknown> {
-	const result = nativeJson(["show", id], trackerRoot);
-	const row = Array.isArray(result) ? result[0] : result;
-	if (typeof row !== "object" || row === null || Array.isArray(row))
-		throw new Error("br show did not return an issue");
-	return row as Record<string, unknown>;
-}
-
-function applyResult(result: CliRunResult): Record<string, any> {
-	return JSON.parse(result.stdout).data;
-}
-
-function applyArgs(plan: string, trackerRoot: string, mission = "core8", actor = "PlanningWriter", extra: string[] = []): string[] {
-	return ["planning", "convert", "--plan", plan, "--mission", mission, "--apply", "--tracker-root", trackerRoot, "--actor", actor, "--yes", ...extra, "--json"];
-}
-
-function amendPlanSource(slug: string, existing: string, acceptance: string[], mission = "core8"): string {
-	return [
-		"```text",
-		"### " + slug + " — " + slug.replaceAll("-", " "),
-		"type: task priority: 1",
-		"labels: plan:" + mission + ", mission:" + mission + ", test:planning-convert",
-		"depends-on: (none)",
-		"existing: " + existing,
-		"discovered-from: planning-convert-test",
-		"WHAT: (a) " + slug + " reconciles a changed acceptance.",
-		"WHY: The selected tracker must never silently drop a changed acceptance.",
-		"ACCEPTANCE:",
-		...acceptance,
-		"NO-CLAIM: This fixture does not certify unrelated tracker state.",
-		"```",
-	].join("\n");
-}
-
-function writeAmendPlan(name: string, slug: string, existing: string, acceptance: string[]): string {
-	const path = join(scratch, name + ".md");
-	writeFileSync(path, amendPlanSource(slug, existing, acceptance));
-	return path;
-}
-
-const amendAcceptanceV1 = [
-	"- [a] amend-target contributes its positive acceptance criterion.",
-	"- [a] Planted negative: amend-target is not applied twice.",
-];
-const amendAcceptanceV2 = [
-	"- [a] amend-target now requires a changed acceptance criterion.",
-	"- [a] Planted negative: the changed criterion is never silently dropped.",
-];
-
-function concurrentWriteFixture(trackerRoot: string, targetId: string): Record<string, string> {
-	const realBr = Bun.which("br");
-	if (!realBr) throw new Error("native br unavailable");
-	const bin = join(trackerRoot, "concurrent-bin");
-	mkdirSync(bin, { recursive: true });
-	const sentinel = join(bin, "tripped");
-	writeFileSync(join(bin, "br"), `#!/usr/bin/env bun
-const args = process.argv.slice(2);
-const dbIndex = args.indexOf("--db");
-const db = dbIndex >= 0 ? args[dbIndex + 1] : "";
-if (args[0] === "update" && args[1] === process.env.CONCURRENT_TARGET && !(await Bun.file(process.env.CONCURRENT_SENTINEL).exists())) {
-	await Bun.write(process.env.CONCURRENT_SENTINEL, "tripped\\n");
-	const concurrent = Bun.spawnSync([${JSON.stringify(realBr)}, "update", process.env.CONCURRENT_TARGET, "--append-notes", "concurrent-probe", "--db", db, "--actor", "ConcurrentWriter", "--no-auto-import", "--no-auto-flush", "--no-daemon", "--no-color", "--json"], { stdout: "pipe", stderr: "pipe" });
-	if (concurrent.exitCode !== 0) {
-		process.stderr.write("concurrent probe write failed: " + concurrent.stderr.toString());
-		process.exit(1);
-	}
-}
-const result = Bun.spawnSync([${JSON.stringify(realBr)}, ...args], { stdout: "pipe", stderr: "pipe" });
-process.stdout.write(result.stdout);
-process.stderr.write(result.stderr);
-process.exit(result.exitCode ?? 1);
-`, { mode: 0o755 });
-	return { PATH: bin + ":" + childEnv.PATH, CONCURRENT_TARGET: targetId, CONCURRENT_SENTINEL: sentinel };
-}
-
-function nativeShapeFixture(trackerRoot: string, targetId: string, mode: string): Record<string, string> {
-	const realBr = Bun.which("br");
-	if (!realBr) throw new Error("native br unavailable");
-	const bin = join(trackerRoot, "shape-bin");
-	mkdirSync(bin, { recursive: true });
-	const wrapper = join(bin, "br");
-	writeFileSync(wrapper, `#!/usr/bin/env bun
-const args = process.argv.slice(2);
-const result = Bun.spawnSync([${JSON.stringify(realBr)}, ...args], { stdout: "pipe", stderr: "pipe" });
-process.stderr.write(result.stderr);
-if (result.exitCode !== 0 || !["list", "show"].includes(args[0])) {
-  process.stdout.write(result.stdout);
-  process.exit(result.exitCode ?? 1);
-}
-const value = JSON.parse(result.stdout.toString());
-const rows = Array.isArray(value) ? value : value.issues;
-for (const row of rows ?? []) {
-  if (row.id !== process.env.SHAPE_TARGET) continue;
-  const [phase, field, kind] = process.env.SHAPE_MODE.split(":");
-  if (phase !== "both" && phase !== args[0]) continue;
-  if (kind === "missing") delete row[field];
-  else if (kind === "null") row[field] = null;
-  else if (kind === "number") row[field] = 17;
-  else if (kind === "string") row[field] = "wrong-shape";
-  else if (kind === "element") row[field] = [17];
-  else if (kind === "identity") row[field] = "another-issue";
-  else if (kind === "null-text") {
-    row.description = null;
-    row.acceptance_criteria = null;
-    delete row.labels;
-  }
-}
-process.stdout.write(JSON.stringify(value));
-`, { mode: 0o755 });
-	return { PATH: bin + ":" + childEnv.PATH, SHAPE_TARGET: targetId, SHAPE_MODE: mode };
-}
-
-for (const nullableText of [false, true]) {
-	test(`planning convert applies with native sparse optional fields (${nullableText ? "null text" : "omitted"})`, async () => {
-		const trackerRoot = join(scratch, "apply-sparse-" + nullableText);
-		initializeTracker(trackerRoot);
-		createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
-		const sparse = nativeJson(["create", "--title", "Sparse native target", "--type", "task", "--priority", "1"], trackerRoot);
-		if (typeof sparse !== "object" || sparse === null || !("id" in sparse) || typeof sparse.id !== "string") {
-			throw new Error("native sparse create returned no id");
-		}
-		const before = showNativeIssue(trackerRoot, sparse.id);
-		expect(before.description ?? "").toBe("");
-		expect(before.acceptance_criteria ?? "").toBe("");
-		expect(before.labels ?? []).toEqual([]);
-		const plan = writePlan("sparse-" + nullableText, [
-			{ slug: "new-sparse-neighbor", existing: "(new)" },
-			{ slug: "amend-sparse-target", existing: sparse.id + " (amend)" },
-		]);
-		const result = await runCli(applyArgs(plan, trackerRoot),
-			nullableText ? nativeShapeFixture(trackerRoot, sparse.id, "both:description:null-text") : {});
-		expect(result.exitCode).toBe(0);
-		expect(applyResult(result).overall).toBe("CLEAN");
-		const after = showNativeIssue(trackerRoot, sparse.id);
-		expect(after.title).toBe("Sparse native target");
-		expect(after.description ?? "").toBe("");
-		expect(after.acceptance_criteria).toContain("amend-sparse-target contributes its positive acceptance criterion");
-		expect(applyResult(result).created_items).toMatchObject([{ slug: "new-sparse-neighbor" }]);
-	});
-}
-
-for (const mode of [
-	"list:description:number", "list:acceptance_criteria:number", "list:labels:null", "list:labels:element",
-	"list:id:missing", "list:title:missing", "list:status:missing", "list:priority:string",
-	"list:priority:missing",
-	"list:issue_type:missing", "list:dependency_count:missing",
-	"show:description:number", "show:labels:string", "show:id:identity", "show:updated_at:missing",
-]) {
-	test(`planning convert refuses malformed present native fields before writes (${mode})`, async () => {
-		const trackerRoot = join(scratch, "bad-native-" + mode.replaceAll(":", "-"));
-		initializeTracker(trackerRoot);
-		createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
-		const target = createNativeIssue(trackerRoot, "Existing target");
-		const plan = writePlan("bad-native-" + mode.replaceAll(":", "-"), [
-			{ slug: "new-after-preflight", existing: "(new)" },
-			{ slug: "amend-after-preflight", existing: target + " (amend)" },
-		]);
-		const before = nativeOutput(["list", "--all", "--limit", "0"], trackerRoot);
-		const result = await runCli(applyArgs(plan, trackerRoot), nativeShapeFixture(trackerRoot, target, mode));
-		expect(result.exitCode).not.toBe(0);
-		expect(applyResult(result).overall).toBe("REFUSED");
-		expect(nativeOutput(["list", "--all", "--limit", "0"], trackerRoot)).toBe(before);
-	});
-}
-
-test("planning convert apply preserves prior acceptance while grouping repeated contributions", async () => {
+isolatedTest("planning convert apply preserves prior acceptance while grouping repeated contributions", async () => {
 	const trackerRoot = join(scratch, "apply-grouped-tracker");
 	initializeTracker(trackerRoot);
 	const parentId = createNativeIssue(trackerRoot, "Existing parent", { externalRef: "core8", type: "epic" });
@@ -339,7 +47,7 @@ test("planning convert apply preserves prior acceptance while grouping repeated 
 	expect(first.notes).toContain("core8:first-d");
 });
 
-test("planning convert apply second run creates no duplicate issues, notes, acceptance, or edges", async () => {
+isolatedTest("planning convert apply second run creates no duplicate issues, notes, acceptance, or edges", async () => {
 	const trackerRoot = join(scratch, "apply-idempotent-tracker");
 	initializeTracker(trackerRoot);
 	const existingId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this criterion." });
@@ -370,7 +78,7 @@ test("planning convert apply second run creates no duplicate issues, notes, acce
 	const dependencies = JSON.stringify(nativeJson(["dep", "list", existingId], trackerRoot));
 	expect(dependencies.split(created[0]!.id).length - 1).toBe(1);
 });
-test("planning convert refuses a changed acceptance under an existing token with STALE_ACCEPTANCE", async () => {
+isolatedTest("planning convert refuses a changed acceptance under an existing token with STALE_ACCEPTANCE", async () => {
 	const trackerRoot = join(scratch, "apply-stale-tracker");
 	initializeTracker(trackerRoot);
 	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [x] Keep this verified criterion." });
@@ -395,7 +103,7 @@ test("planning convert refuses a changed acceptance under an existing token with
 	expect(String(report.text)).toContain("STALE_ACCEPTANCE");
 });
 
-test("planning convert --amend-acceptance appends changed boxes under the revision gate", async () => {
+isolatedTest("planning convert --amend-acceptance appends changed boxes under the revision gate", async () => {
 	const trackerRoot = join(scratch, "apply-amend-tracker");
 	initializeTracker(trackerRoot);
 	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this manual criterion." });
@@ -423,7 +131,7 @@ test("planning convert --amend-acceptance appends changed boxes under the revisi
 	expect(String(final.acceptance_criteria).split("changed acceptance criterion").length - 1).toBe(1);
 });
 
-test("planning convert guarded amendment refuses a concurrent target change", async () => {
+isolatedTest("planning convert guarded amendment refuses a concurrent target change", async () => {
 	const trackerRoot = join(scratch, "apply-concurrent-tracker");
 	initializeTracker(trackerRoot);
 	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this criterion." });
@@ -442,14 +150,14 @@ test("planning convert guarded amendment refuses a concurrent target change", as
 	expect(String(after.acceptance_criteria)).not.toContain("changed acceptance criterion");
 });
 
-test("planning convert refuses --amend-acceptance without --apply", async () => {
+isolatedTest("planning convert refuses --amend-acceptance without --apply", async () => {
 	const dbDir = join(scratch, "amend-flag-db");
 	const result = await runCli(["planning", "convert", "--plan", validPlan, "--mission", "core8", "--dry-run", "--db", dbDir, "--amend-acceptance", "--json"]);
 	expect(result.exitCode).not.toBe(0);
 	expect(JSON.parse(result.stdout).data.overall).toBe("NOT_RUN");
 });
 
-test("planning convert apply reports foreign targets without writing them", async () => {
+isolatedTest("planning convert apply reports foreign targets without writing them", async () => {
 	const trackerRoot = join(scratch, "apply-foreign-tracker");
 	initializeTracker(trackerRoot);
 	const plan = writePlan("apply-foreign", [{ slug: "foreign-target", existing: "uds-81kq" }]);
@@ -468,7 +176,7 @@ function closeNative(trackerRoot: string, id: string): void {
 	nativeOutput(["close", id, "--reason", "fixture: finished before this plan was applied"], trackerRoot);
 }
 
-test("apply treats a closed reused target it would not change as satisfied and applies the rest", async () => {
+isolatedTest("apply treats a closed reused target it would not change as satisfied and applies the rest", async () => {
 	const trackerRoot = join(scratch, "apply-terminal-reused");
 	initializeTracker(trackerRoot);
 	const epicId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
@@ -491,7 +199,7 @@ test("apply treats a closed reused target it would not change as satisfied and a
 	for (const field of ["status", "acceptance_criteria", "notes", "description", "closed_at"]) expect(after[field]).toEqual(before[field]);
 });
 
-test("apply never adds a dependency from a closed target and reports the edge SKIPPED_TERMINAL", async () => {
+isolatedTest("apply never adds a dependency from a closed target and reports the edge SKIPPED_TERMINAL", async () => {
 	const trackerRoot = join(scratch, "apply-terminal-source-edge");
 	initializeTracker(trackerRoot);
 	const epicId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
@@ -515,7 +223,7 @@ test("apply never adds a dependency from a closed target and reports the edge SK
 	expect(after.dependencies).toEqual(before.dependencies);
 });
 
-test("apply refuses to amend a closed existing target and writes nothing", async () => {
+isolatedTest("apply refuses to amend a closed existing target and writes nothing", async () => {
 	const trackerRoot = join(scratch, "apply-terminal-amend");
 	initializeTracker(trackerRoot);
 	const doneId = createNativeIssue(trackerRoot, "Closed existing target");
@@ -537,7 +245,7 @@ test("apply refuses to amend a closed existing target and writes nothing", async
 	expect(issueRows(trackerRoot)).toEqual([]);
 });
 
-test("apply skips a closed existing target whose plan contribution is already recorded", async () => {
+isolatedTest("apply skips a closed existing target whose plan contribution is already recorded", async () => {
 	const trackerRoot = join(scratch, "apply-terminal-satisfied");
 	initializeTracker(trackerRoot);
 	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this criterion." });
@@ -555,7 +263,7 @@ test("apply skips a closed existing target whose plan contribution is already re
 	expect(showNativeIssue(trackerRoot, targetId)).toEqual(before);
 });
 
-test("apply refuses the same closed fixture once its plan acceptance is edited and writes nothing", async () => {
+isolatedTest("apply refuses the same closed fixture once its plan acceptance is edited and writes nothing", async () => {
 	const trackerRoot = join(scratch, "apply-terminal-edited");
 	initializeTracker(trackerRoot);
 	const targetId = createNativeIssue(trackerRoot, "Existing target", { acceptance: "- [ ] Keep this criterion." });
@@ -585,7 +293,7 @@ test("apply refuses the same closed fixture once its plan acceptance is edited a
 	expect(issueRows(trackerRoot).map((row) => row.id).sort()).toEqual(openBefore);
 });
 
-test("apply never reopens or writes a tombstoned target", async () => {
+isolatedTest("apply never reopens or writes a tombstoned target", async () => {
 	const trackerRoot = join(scratch, "apply-terminal-tombstone");
 	initializeTracker(trackerRoot);
 	const epicId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
@@ -602,7 +310,7 @@ test("apply never reopens or writes a tombstoned target", async () => {
 	expect(showNativeIssue(trackerRoot, goneId)).toEqual(before);
 });
 
-test("planning convert apply preflights every block before writing any target", async () => {
+isolatedTest("planning convert apply preflights every block before writing any target", async () => {
 	const trackerRoot = join(scratch, "apply-preflight-tracker");
 	initializeTracker(trackerRoot);
 	const plan = writePlan("apply-preflight", [{ slug: "valid-new", existing: "(new)" }]);
@@ -632,7 +340,7 @@ test("planning convert apply preflights every block before writing any target", 
 });
 
 
-test("planning convert apply refuses a cycle introduced by the merged tracker graph before writes", async () => {
+isolatedTest("planning convert apply refuses a cycle introduced by the merged tracker graph before writes", async () => {
 	const trackerRoot = join(scratch, "apply-cycle-tracker");
 	initializeTracker(trackerRoot);
 	const parentId = createNativeIssue(trackerRoot, "Core8 epic", { externalRef: "core8", type: "epic" });
@@ -657,7 +365,7 @@ test("planning convert apply refuses a cycle introduced by the merged tracker gr
 	expect(showNativeIssue(trackerRoot, reusedId)).toEqual(beforeReused);
 });
 
-test("planning convert apply creates new targets beneath one core8 epic and reports the foreign target", async () => {
+isolatedTest("planning convert apply creates new targets beneath one core8 epic and reports the foreign target", async () => {
 	const trackerRoot = join(scratch, "apply-new-tracker");
 	initializeTracker(trackerRoot);
 	const result = await runCli(applyArgs(validPlan, trackerRoot));
@@ -677,7 +385,7 @@ test("planning convert apply creates new targets beneath one core8 epic and repo
 });
 
 
-test("planning convert is a public dry-run and apply command with explicit mode flags", () => {
+isolatedTest("planning convert is a public dry-run and apply command with explicit mode flags", () => {
 	const planning = COMMANDS.find((command) => command.name === "planning");
 	const convert = planning?.subcommands?.find((command) => command.name === "convert");
 	expect(convert?.usage).toBe("planning convert --plan PATH --mission M (--dry-run --db DIR | --apply --tracker-root DIR --actor ACTOR) [--yes] [--amend-acceptance] [--json]");
@@ -685,7 +393,7 @@ test("planning convert is a public dry-run and apply command with explicit mode 
 	expect(convert?.mutation).toBe(true);
 });
 
-test("valid plan creates native parented beads and refuses a duplicate database", async () => {
+isolatedTest("valid plan creates native parented beads and refuses a duplicate database", async () => {
 	const dbDir = join(scratch, "valid-db");
 	const first = await runCli(["planning", "convert", "--plan", validPlan, "--mission", "core8", "--dry-run", "--db", dbDir, "--json"]);
 	expect(first.exitCode).toBe(0);
@@ -734,7 +442,7 @@ test("valid plan creates native parented beads and refuses a duplicate database"
 	expect(issueRows(dbDir).map((row) => row.id).sort()).toEqual(before);
 });
 
-test("planted negatives are named and the human report survives a nonzero exit", async () => {
+isolatedTest("planted negatives are named and the human report survives a nonzero exit", async () => {
 	const dbDir = join(scratch, "negative-db");
 	const result = await runCli(["planning", "convert", "--plan", negativePlan, "--mission", "core8", "--dry-run", "--db", dbDir]);
 	expect(result.exitCode).not.toBe(0);
@@ -758,7 +466,7 @@ test("planted negatives are named and the human report survives a nonzero exit",
 	expect(result.stdout).toContain(lint);
 });
 
-test("planning convert rejects conflicting modes without creating either target", async () => {
+isolatedTest("planning convert rejects conflicting modes without creating either target", async () => {
 	const dbDir = join(scratch, "conflicting-mode-db");
 	const trackerRoot = join(scratch, "conflicting-mode-tracker");
 	const result = await runCli([
@@ -770,7 +478,7 @@ test("planning convert rejects conflicting modes without creating either target"
 	expect(existsSync(dbDir)).toBe(false);
 	expect(existsSync(trackerRoot)).toBe(false);
 });
-test("missing explicit mode refuses before creating the requested database directory", async () => {
+isolatedTest("missing explicit mode refuses before creating the requested database directory", async () => {
 	const dbDir = join(scratch, "no-mode-db");
 	const result = await runCli(["planning", "convert", "--plan", validPlan, "--mission", "core8", "--db", dbDir, "--json"]);
 	expect(result.exitCode).not.toBe(0);
@@ -810,7 +518,7 @@ function storedParentContract(issue: Record<string, unknown>): Record<string, un
 	return contract;
 }
 
-test("noncore public dry-run and native apply preserve mission, actor, amendment, parents and exporter custody", async () => {
+isolatedTest("noncore public dry-run and native apply preserve mission, actor, amendment, parents and exporter custody", async () => {
 	const mission = "frontier";
 	const trackerRoot = join(scratch, "authority-native-smoke");
 	initializeTracker(trackerRoot);
@@ -887,7 +595,7 @@ test("noncore public dry-run and native apply preserve mission, actor, amendment
 	}
 }, 60_000);
 
-test("explicit parents do not create a substitute mission epic and reapply without parent changes", async () => {
+isolatedTest("explicit parents do not create a substitute mission epic and reapply without parent changes", async () => {
 	const trackerRoot = join(scratch, "explicit-parent-only");
 	initializeTracker(trackerRoot);
 	const parent = createNativeIssue(trackerRoot, "Original feature", { acceptance: "- [ ] Full rollout contract remains unchanged.", type: "feature" });
@@ -911,7 +619,7 @@ test("explicit parents do not create a substitute mission epic and reapply witho
 });
 
 for (const actor of [null, "", "  WrongWriter", "WrongWriter\n"]) {
-	test("apply refuses missing or malformed explicit actor " + JSON.stringify(actor), async () => {
+	isolatedTest("apply refuses missing or malformed explicit actor " + JSON.stringify(actor), async () => {
 		const trackerRoot = join(scratch, "bad-actor-" + String(actor).length);
 		initializeTracker(trackerRoot);
 		const plan = writePlan("bad-actor-" + String(actor).length, [{ slug: "no-write", existing: "(new)" }]);
@@ -928,7 +636,7 @@ for (const actor of [null, "", "  WrongWriter", "WrongWriter\n"]) {
 }
 
 for (const conflict of ["missing-parent", "closed-parent", "blocked-parent", "moved-parent", "wrong-mission", "ref-target", "note-target", "reused-parent"]) {
-	test("apply refuses exact native target conflict before any write: " + conflict, async () => {
+	isolatedTest("apply refuses exact native target conflict before any write: " + conflict, async () => {
 		const trackerRoot = join(scratch, "authority-conflict-" + conflict);
 		initializeTracker(trackerRoot);
 		const parent = createNativeIssue(trackerRoot, "Original parent", { externalRef: "core8", type: "epic" });
@@ -968,7 +676,7 @@ for (const conflict of ["missing-parent", "closed-parent", "blocked-parent", "mo
 	});
 }
 
-test("native amendment context mismatch remains a refusal without retry or acceptance overwrite", async () => {
+isolatedTest("native amendment context mismatch remains a refusal without retry or acceptance overwrite", async () => {
 	const trackerRoot = join(scratch, "native-context-mismatch");
 	initializeTracker(trackerRoot);
 	const target = createNativeIssue(trackerRoot, "Concurrent amendment target");
@@ -985,7 +693,7 @@ test("native amendment context mismatch remains a refusal without retry or accep
 	expect(calls.filter((args) => args[0] === "update")).toHaveLength(1);
 });
 
-test("native durable creation followed by failure is reconciled, never reported as zero writes", async () => {
+isolatedTest("native durable creation followed by failure is reconciled, never reported as zero writes", async () => {
 	const trackerRoot = join(scratch, "authority-partial-create");
 	initializeTracker(trackerRoot);
 	const plan = writePlan("authority-partial-create", [{ slug: "durable-child", existing: "(new)" }]);
@@ -1021,7 +729,7 @@ async function requireCanonicalAdmission(dbDir: string): Promise<void> {
 	expect(result.rc, text.decode(result.stdout) + text.decode(result.stderr)).toBe(0);
 }
 
-test("canonical checkbox plans retain scoped coverage and pass canonical admission", async () => {
+isolatedTest("canonical checkbox plans retain scoped coverage and pass canonical admission", async () => {
 	const plan = writePlan("canonical-checkbox", [{ slug: "canonical-checkbox", existing: "(new)" }]);
 	writeFileSync(plan, readFileSync(plan, "utf8").replaceAll("- [a]", "- [ ] [a]"));
 	const dbDir = join(scratch, "canonical-checkbox-db");
@@ -1030,7 +738,7 @@ test("canonical checkbox plans retain scoped coverage and pass canonical admissi
 	await requireCanonicalAdmission(dbDir);
 });
 
-test("legacy lettered plans are stored as gradeable canonical criteria including the generated parent", async () => {
+isolatedTest("legacy lettered plans are stored as gradeable canonical criteria including the generated parent", async () => {
 	const plan = writePlan("legacy-checkbox", [{ slug: "legacy-checkbox", existing: "(new)" }]);
 	const dbDir = join(scratch, "legacy-checkbox-db");
 	const result = await runCli(["planning", "convert", "--plan", plan, "--mission", "core8", "--dry-run", "--db", dbDir, "--json"]);
@@ -1038,7 +746,7 @@ test("legacy lettered plans are stored as gradeable canonical criteria including
 	await requireCanonicalAdmission(dbDir);
 });
 
-test("canonical acceptance amendment is idempotent and preserves checked progress", async () => {
+isolatedTest("canonical acceptance amendment is idempotent and preserves checked progress", async () => {
 	const trackerRoot = join(scratch, "canonical-amend-tracker");
 	initializeTracker(trackerRoot);
 	const plan = writePlan("canonical-amend", [{ slug: "canonical-amend", existing: "(new)" }]);
@@ -1061,7 +769,7 @@ test("canonical acceptance amendment is idempotent and preserves checked progres
 	expect(afterThird.notes).toEqual(afterSecond.notes);
 });
 
-test("canonical scope sets preserve explicit progress while legacy scope x remains a scope", async () => {
+isolatedTest("canonical scope sets preserve explicit progress while legacy scope x remains a scope", async () => {
 	const plan = join(scratch, "canonical-scope-sets.md");
 	let source = planSource([
 		{ slug: "scope-sets", existing: "(new)" },

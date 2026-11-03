@@ -348,7 +348,7 @@ function activePid(pid: number): boolean {
 
 // These integration specimens exercise OS signal delivery and inherited pipe
 // descriptors in separate real processes; fake timers cannot drive that clock.
-async function until(predicate: () => boolean, milliseconds = 3000): Promise<void> {
+async function until(predicate: () => boolean, milliseconds = 30_000): Promise<void> {
 	const deadline = Date.now() + milliseconds;
 	while (!predicate()) {
 		if (Date.now() >= deadline) throw new Error("owned fixture condition exceeded deadline");
@@ -438,27 +438,25 @@ test("CANCELP0: actual source service runner cleans a non-fleet-lessons timeout"
 	mkdirSync(bin, { recursive: true });
 	const launcher = join(bin, "omp-kit");
 	writeFileSync(launcher, `#!/bin/sh\n[ "$1" = --ready ] && exit 0\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(treeFixture)} tree ${JSON.stringify(root)}\n`, { mode: 0o755 });
-	// macOS assesses a newly written executable on its first exec (measured
-	// 0.2-2.5 s under load, ~7 ms after). Finish that one-time exec before
-	// the runner starts its 1000 ms cap, which must time the owned tree.
-	const ready = await run([launcher, "--ready"], { deadline_s: 5 });
+	// macOS assesses a newly written executable on its first exec. The loaded
+	// release suite exhausted the old 5 s readiness budget before the service
+	// even started; this setup must not consume the product's 1000 ms cap.
+	const ready = await run([launcher, "--ready"], { deadline_s: 30 });
 	expect({ rc: ready.rc, timedOut: ready.timed_out }).toEqual({ rc: 0, timedOut: false });
-	const parent = Bun.spawn([process.execPath, join(repoRoot, "src", "cli.ts"), "service", "run", "omp-watch", "--json"], {
+	const parent = run([process.execPath, join(repoRoot, "src", "cli.ts"), "service", "run", "omp-watch", "--json"], {
 		// OMP version discovery has its own 15s native deadline and is not
 		// under test here. Omit OMP from this isolated PATH (truthful null),
 		// rather than supplying an echo-version stub or timing that probe.
 		cwd: root, env: { ...fixtureEnv(), HOME: root, TMPDIR: root, PATH: `${LAUNCHER_TABLE}:${bin}:/usr/bin:/bin`, XDG_STATE_HOME: join(root, ".local", "state"),
 			OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "1000", AGENT_NAME: "CancelP0Fixture" },
-		stdout: "pipe", stderr: "pipe",
+		deadline_s: 30,
 	});
-	const stdout = new Response(parent.stdout).text();
-	const stderr = new Response(parent.stderr).text();
 	try {
-		// The exit event, bounded so a hung runner still reaches cleanup below.
-		const hung = Promise.withResolvers<never>();
-		const timer = setTimeout(() => hung.reject(new Error(`service runner did not exit after its cap; active PIDs: ${recordedPids(root).filter(activePid)}`)), 5000);
-		const exit = await Promise.race([parent.exited, hung.promise]).finally(() => clearTimeout(timer));
-		const result = { exit, stdout: await stdout, stderr: await stderr };
+		// Wait for the actual exit and drained output, with owned-group cleanup
+		// if the runner hangs. The service's own cap remains 1000 ms.
+		const child = await parent;
+		expect(child.timed_out).toBe(false);
+		const result = { exit: child.rc, stdout: new TextDecoder().decode(child.stdout), stderr: new TextDecoder().decode(child.stderr) };
 		const pids = recordedPids(root);
 		console.log("CANCELP0 actual source runner smoke", JSON.stringify({ platform: process.platform, arch: process.arch, pids, ...result }));
 		expect(result.exit).toBe(1);
@@ -472,10 +470,8 @@ test("CANCELP0: actual source service runner cleans a non-fleet-lessons timeout"
 		expect(existsSync(join(root, ".local", "state", "omp-kit", "jobs", "omp-watch.lock"))).toBe(false);
 	} finally {
 		cleanFixture(root);
-		parent.kill("SIGKILL");
-		await Promise.all([parent.exited, stdout, stderr]);
 	}
-}, 10000);
+}, 60_000);
 
 test("CANCELP0: leader exit cannot leave a grandchild holding its pipes", async () => {
 	const root = jobsDir();

@@ -12,7 +12,8 @@ import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { snapshotWatched } from "../../src/operator-snapshot.ts";
-import { runFixture } from "./fixture-process.ts";
+import { runFixture, runFixtureAsync } from "./fixture-process.ts";
+import { run } from "../../src/kitlib/run.ts";
 
 const decoder = new TextDecoder();
 
@@ -1430,6 +1431,13 @@ test("rch: only a recording diagnose writes the socket baseline; a read-only one
 		writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`);
 		chmodSync(join(bin, name), 0o755);
 	}
+	// New executable fixtures incur macOS's first-exec assessment. Finish it
+	// before the product's deliberately short daemon/pid/lsof probes start;
+	// otherwise the baseline assertion observes PID_UNKNOWN, not the fixture.
+	for (const name of Object.keys(fakes)) {
+		const ready = await run([join(bin, name), ...(name === "rch" ? ["--json", "daemon", "status"] : [])], { deadline_s: 30 });
+		expect({ name, rc: ready.rc, timedOut: ready.timed_out }).toEqual({ name, rc: 0, timedOut: false });
+	}
 	const server = await unixListener(sock);
 	try {
 		const ino = lstatSync(sock).ino;
@@ -1447,7 +1455,7 @@ test("rch: only a recording diagnose writes the socket baseline; a read-only one
 	} finally {
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
-});
+}, 60_000);
 
 test("rch: stopped daemon is NOT_RUNNING, unknown daemon/path/pid/lsof is UNVERIFIED", async () => {
 	const sock = join(ownedFixture("rch-absent"), "rch-absent.sock");
@@ -1600,7 +1608,7 @@ test("oq1h.5: a live rchd on Linux reaches RUNNING through the same checks, and 
 	}
 });
 
-test("RCHRO1: unscoped doctor preserves caller HOME and XDG bytes despite a native-cache writer", () => {
+test("RCHRO1: unscoped doctor preserves caller HOME and XDG bytes despite a native-cache writer", async () => {
 	const f = fixture(); installOmp(f);
 	const bin = join(f.base, "probe-bin");
 	const configHome = join(f.base, "caller-config");
@@ -1636,10 +1644,16 @@ for (const directory of [join(home, "Library/Caches/com.rch.rch"), join(home, "L
 }
 console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
 `, { mode: 0o755 });
+	// The source CLI derives its release root from Bun.main. A real entrypoint
+	// in the fixture keeps unscoped doctor on its manifest/rules, not on the
+	// shared checkout's independently changing, ignored MANIFEST.tsv.
+	const entrypoint = join(f.root, "src", "cli.ts");
+	mkdirSync(dirname(entrypoint));
+	writeFileSync(entrypoint, `import { runCli } from ${JSON.stringify(join(import.meta.dir, "../../src/cli.ts"))};\nprocess.exitCode = await runCli();\n`);
 	const watched = [f.home, configHome, cacheHome, dataHome, stateHome, runtime];
 	const before = snapshotWatched(watched);
 	expect(before.incomplete).toEqual([]);
-	const run = runFixture([process.execPath, join(import.meta.dir, "../../src/cli.ts"), "doctor", "--json"], {
+	const result = await runFixtureAsync([process.execPath, entrypoint, "doctor", "--json"], {
 		cwd: project,
 		env: {
 			PATH: `${bin}${delimiter}${dirname(f.ompPath)}${delimiter}/usr/bin:/bin`,
@@ -1651,12 +1665,14 @@ console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
 			OMP_KIT_OMP_SRC_FETCH: "0",
 		},
 	});
-	const output = decoder.decode(run.stdout);
-	expect(run.rc, output + decoder.decode(run.stderr)).toBe(0);
-	const rows: Finding[] = JSON.parse(output).data.findings;
+	const output = decoder.decode(result.stdout);
+	expect(result.rc, output + decoder.decode(result.stderr)).toBe(0);
+	const report = JSON.parse(output).data;
+	expect(report.kit.release.root).toBe(f.root);
+	const rows: Finding[] = report.findings;
 	expect(finding(rows, "rch")).toMatchObject({ status: "OK", evidence: { state: "NOT_RUNNING" } });
 	expect(snapshotWatched(watched)).toEqual(before);
-}, 15_000);
+}, 60_000);
 
 test("RCHRO1: unavailable probe leaves nested caller-HOME temp metadata untouched", () => {
 	const f = fixture();
