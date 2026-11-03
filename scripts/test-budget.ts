@@ -25,6 +25,35 @@ function cv2(values: number[]): number {
 	return average === 0 ? 0 : mean(values.map(value => (value - average) ** 2)) / average ** 2;
 }
 
+// FILEBUDGET1: an explicit maintainer policy, independent of the report-only
+// distribution heuristic below. No timing cache can grant a new exemption.
+function filePolicy(config: Record<string, unknown>) {
+	const policy = object(config.changed_file_budget);
+	const cap = number(policy.cap_s, "changed_file_budget.cap_s");
+	if (cap <= 0 || cap > 90) throw new Error("INVALID_INPUT changed-file cap must be in (0, 90] seconds");
+	const grandfathered = new Map<string, number>();
+	for (const [name, value] of Object.entries(object(policy.grandfathered))) {
+		path(name);
+		const entry = object(value);
+		const measured = number(entry.measured_s, name);
+		if (measured <= cap || typeof entry.evidence !== "string" || !entry.evidence.trim()) throw new Error(`INVALID_INPUT grandfather evidence ${name}`);
+		grandfathered.set(name, measured);
+	}
+	return { cap, grandfathered };
+}
+
+function checkFilePolicy(config: Record<string, unknown>, baseline: Record<string, unknown>) {
+	const next = filePolicy(config);
+	// First adoption is the only transition from the old report-only schema.
+	if (baseline.changed_file_budget === undefined) return;
+	const previous = filePolicy(baseline);
+	if (next.cap > previous.cap) throw new Error("FILE_BUDGET_RATCHET default cap may only shrink");
+	for (const [name, ceiling] of next.grandfathered) {
+		const old = previous.grandfathered.get(name);
+		if (old === undefined || ceiling > old) throw new Error(`FILE_BUDGET_RATCHET ${name}: grandfather list and measured ceilings may only shrink`);
+	}
+}
+
 const args = process.argv.slice(2);
 const machine = args.includes("--json");
 try {
@@ -35,6 +64,9 @@ try {
 	let enforcement: string | undefined;
 	let history: string | undefined;
 	let timingsDir: string | undefined;
+	let changedFiles: string | undefined;
+	let basePolicy: string | undefined;
+	let checkFile = false;
 	const seen = new Set<string>();
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -43,7 +75,8 @@ try {
 		if (arg === "--derive") derive = true;
 		else if (arg === "--check") check = true;
 		else if (arg === "--json") continue;
-		else if (["--repo", "--workers", "--enforce", "--verdict-history", "--timings-dir"].includes(arg)) {
+		else if (arg === "--check-file-policy") checkFile = true;
+		else if (["--repo", "--workers", "--enforce", "--verdict-history", "--timings-dir", "--changed-files", "--base-policy"].includes(arg)) {
 			const value = args[++i];
 			if (!value || value.startsWith("--")) throw new Error(`INVALID_ARGUMENT missing ${arg} value`);
 			if (arg === "--repo") repo = resolve(value);
@@ -52,12 +85,19 @@ try {
 				if (String(workers) !== value || !Number.isSafeInteger(workers) || workers < 1) throw new Error("INVALID_ARGUMENT workers");
 			} else if (arg === "--enforce") enforcement = value;
 			else if (arg === "--timings-dir") timingsDir = value;
+			else if (arg === "--changed-files") changedFiles = value;
+			else if (arg === "--base-policy") basePolicy = value;
 			else history = value;
 		} else throw new Error(`INVALID_ARGUMENT ${arg}`);
 	}
-	if ((!derive && !enforcement) || (derive && enforcement) || (check && !derive) || (history && !derive) || (timingsDir && !derive)) throw new Error("INVALID_ARGUMENT use --derive [--check] [--timings-dir DIR] or --enforce FILE");
+	if (checkFile ? (!basePolicy || derive || enforcement || changedFiles || history || timingsDir || check) : ((!derive && !enforcement) || (derive && enforcement) || (check && !derive) || (history && !derive) || (timingsDir && !derive) || (changedFiles && !enforcement) || basePolicy)) throw new Error("INVALID_ARGUMENT use --check-file-policy --base-policy FILE, --derive [--check] [--timings-dir DIR], or --enforce FILE [--changed-files FILE]");
 	const config = object(json(resolve(repo, ".github/test-budget.json")));
 	if (config.version !== 1) throw new Error("INVALID_INPUT budget version");
+	if (checkFile) {
+		checkFilePolicy(config, object(json(resolve(repo, basePolicy!))));
+		console.log(machine ? JSON.stringify({ status: "OK", mode: "file-policy" }) : "FILE_BUDGET_POLICY OK (grandfather list and ceilings may only shrink)");
+		process.exit(0);
+	}
 	const requirements = object(config.requirements);
 	const heuristic = object(config.initial_heuristic);
 	const push = number(requirements.push_p95_s, "push_p95_s");
@@ -67,7 +107,10 @@ try {
 	const rows: { path: string; elapsed_ms: number }[] = [];
 	let timingSource: string | undefined;
 	if (enforcement) {
-		for (const row of samples(json(enforcement === "-" ? "-" : resolve(repo, enforcement)))) rows.push({ path: path(row.path), elapsed_ms: number(row.elapsed_ms, "elapsed_ms") });
+		for (const row of samples(json(enforcement === "-" ? "-" : resolve(repo, enforcement)))) {
+			if (changedFiles && (row.complete !== true || row.rc !== 0)) throw new Error(`INVALID_INPUT incomplete or failed measured file ${row.path}`);
+			rows.push({ path: path(row.path), elapsed_ms: number(row.elapsed_ms, "elapsed_ms") });
+		}
 	} else {
 		timingSource = resolve(repo, timingsDir ?? ".github");
 		if (!timingsDir) {
@@ -95,6 +138,13 @@ try {
 		}
 	}
 	const violations = rows.filter(row => row.elapsed_ms / 1000 > cap).map(row => ({ code: "OVER_BUDGET", path: row.path, elapsed_s: row.elapsed_ms / 1000, cap_s: cap }));
+	const fileBudget = changedFiles ? filePolicy(config) : undefined;
+	const changed = changedFiles ? new Set(readFileSync(resolve(repo, changedFiles), "utf8").split("\n").filter(Boolean)) : new Set<string>();
+	const fileViolations = fileBudget ? rows.filter(row => changed.has(row.path) && row.elapsed_ms / 1000 > (fileBudget.grandfathered.get(row.path) ?? fileBudget.cap)).map(row => ({
+		code: "FILE_OVER_BUDGET", path: row.path, elapsed_s: row.elapsed_ms / 1000,
+		cap_s: fileBudget.grandfathered.get(row.path) ?? fileBudget.cap,
+		remedy: "Split this file, preserving assertions, like private-index-land-2/-3 and kit-update-*; do not raise the budget.",
+	})) : [];
 	let queueing: Record<string, unknown> = { status: "NOT_MEASURED", guarantee: "NONE", reason: "No measured arrival/service history supplied" };
 	if (history) {
 		const records = samples(json(resolve(repo, history))).map(row => ({ arrival: number(row.arrival_ms, "arrival_ms"), service: number(row.service_ms, "service_ms") })).sort((a, b) => a.arrival - b.arrival);
@@ -115,17 +165,20 @@ try {
 	const makespanLowerBound = Math.max(total / workers, longest.elapsed_ms / 1000);
 	const aggregateOverBudget = derive && makespanLowerBound > cycle;
 	const result = { status: violations.length ? "OVER_BUDGET" : aggregateOverBudget ? "AGGREGATE_OVER_BUDGET" : "OK", mode: enforcement ? "enforce" : "derive", timings_dir: timingSource, W_s: total, p_max_s: longest.elapsed_ms / 1000, p_max_path: longest.path, m: workers, worker_count_source: seen.has("--workers") ? "declared" : "default_not_measured", makespan_lower_bound_s: makespanLowerBound, makespan_bound_note: "Necessary lower bound only; not a scheduling or p95 guarantee", push_p95_s: push, full_cycle_s: cycle, per_file_cap_s: cap, per_file_cap_status: heuristic.status, per_file_cap_mode: heuristic.mode, queueing, violations };
-	if (machine) console.log(JSON.stringify(result));
+	const fileResult = { cap_s: fileBudget?.cap, mode: "enforce", violations: fileViolations };
+	const output = { ...result, ...(fileBudget ? { file_budget: fileResult } : {}), status: fileViolations.length ? "FILE_OVER_BUDGET" : result.status };
+	if (machine) console.log(JSON.stringify(output));
 	else {
 		console.log(`W=${total}s p_max=${result.p_max_s}s path=${longest.path} m=${workers} (${result.worker_count_source})`);
 		console.log(`push_p95_s=${push} full_cycle_s=${cycle} per_file_cap_s=${cap} INITIAL_HEURISTIC (full_cycle_s / 4)`);
 		console.log(`queueing=${JSON.stringify(queueing)}`);
 		for (const violation of violations) console.log(`OVER_BUDGET ${violation.path} ${violation.elapsed_s} ${violation.cap_s}`);
 		if (aggregateOverBudget) console.log(`AGGREGATE_OVER_BUDGET max(W_s/m,p_max_s)=${makespanLowerBound} full_cycle_s=${cycle}; necessary lower bound only, not a p95 guarantee`);
+		for (const violation of fileViolations) console.error(`${violation.code} ${violation.path}: ${violation.elapsed_s}s > ${violation.cap_s}s. ${violation.remedy}`);
 	}
 	// The per-file cap is an initial heuristic, not derived from measured distributions: it reports
 	// and never refuses until SUITEBUDGET1 (ompkit-kup44.1) derives it (J-2026-10-31-01).
-	if (aggregateOverBudget) process.exitCode = 1;
+	if (aggregateOverBudget || fileViolations.length) process.exitCode = 1;
 } catch (error) {
 	const message = error instanceof Error ? error.message : String(error);
 	if (machine) console.log(JSON.stringify({ status: "ERROR", error: message }));

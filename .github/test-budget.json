@@ -2,6 +2,20 @@
   "version": 1,
   "requirements": { "push_p95_s": 600, "full_cycle_s": 900 },
   "initial_heuristic": { "per_file_cap_s": 225, "derivation": "full_cycle_s / 4", "status": "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED", "mode": "report" },
+  "changed_file_budget": {
+    "cap_s": 90,
+    "decision": "90 s per changed test file in the fresh gate's own individually timed run; Joshua via Main, 2026-11-03; grandfather list and ceilings may only shrink",
+    "grandfathered": {
+      "tests/cli/private-index-land.test.ts": {
+        "measured_s": 139.818255083,
+        "evidence": "690f971744020d0189ce9fcce85e816fcacd2c09 main verdict 53ce25d225b9a7c747ba14d5acfb979790791bad3c56b222bf595cc867e7ca91, evidence.files elapsed_ms=139818.255083, complete=true rc=0"
+      },
+      "tests/cli/verify.test.ts": {
+        "measured_s": 123.820724916,
+        "evidence": "690f971744020d0189ce9fcce85e816fcacd2c09 main verdict 53ce25d225b9a7c747ba14d5acfb979790791bad3c56b222bf595cc867e7ca91, evidence.files elapsed_ms=123820.724916, complete=true rc=0"
+      }
+    }
+  },
   "minimum_full_run": {
     "max_count_drop": { "bun": 0, "shell": 0, "python": 0 },
     "wall_floor_ms": 1,

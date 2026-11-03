@@ -284,6 +284,18 @@ judge_budget() {
 	echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${1}s tests=${2}s queued=${3}s judged=${judged}s"
 }
 
+# FILEBUDGET1: compare immutable predecessor policy even when no test runs.
+# The policy is a shrinking allowance, never learned from the timing cache.
+gate_file_budget_policy() {
+	budget_base=${BASE:-$COMMIT^}
+	git -C "${FRESH_GATE_REPO:-$ROOT}" show "$budget_base:.github/test-budget.json" >"$WORK/base-test-budget.json" || {
+		fail "cannot read predecessor test-budget policy at $budget_base"
+		return 1
+	}
+	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \
+		--repo "$ARCHIVE_DIR" --check-file-policy --base-policy "$WORK/base-test-budget.json"
+}
+
 append_changed() {
 	CHANGED="$CHANGED
 $1"
@@ -428,8 +440,9 @@ run_affected_tests() {
 		[ "$tests_rc" -ne 0 ] || tests_rc=1
 	fi
 	if [ "$tests_rc" -eq 0 ]; then
+		printf '%s\n' "$CHANGED" >"$WORK/budget-changed-files"
 		bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \
-			--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --json || tests_rc=$?
+			--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --changed-files "$WORK/budget-changed-files" --json || tests_rc=$?
 	fi
 	echo "affected tests: files=$files ran=$ran fail=${failed:-0} rc=$tests_rc"
 	record_run "$ran" "$files" "$tests_rc"
@@ -1049,7 +1062,7 @@ run_gate() {
 	disk_pressure_flag
 	started=$(date +%s)
 	gate_rc=0
-	for phase in manifest:gate_manifest cli-compile:gate_cli_compile cli-boot:gate_cli_boot \
+	for phase in manifest:gate_manifest file-budget-policy:gate_file_budget_policy cli-compile:gate_cli_compile cli-boot:gate_cli_boot \
 		harness-gate:gate_harness notes:gate_notes readme:gate_readme focused:gate_focused; do
 		run_step "${phase%%:*}" "${phase#*:}" || { gate_rc=$?; break; }
 	done

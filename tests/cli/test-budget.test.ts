@@ -191,3 +191,69 @@ test("default prefers complete shared-store timing maps, falls back only when a 
 	expect(fallback.rc).toBe(0);
 	expect(JSON.parse(new TextDecoder().decode(fallback.stdout))).toMatchObject({ W_s: 60, timings_dir: join(root, ".github") });
 });
+
+function measured(root: string, file: string, elapsed: number, changed = file) {
+	writeFileSync(join(root, "changed.txt"), changed + "\n");
+	writeFileSync(join(root, "rows.json"), JSON.stringify([{ path: file, elapsed_ms: elapsed, complete: true, rc: 0 }]));
+	return invoke(root, "--enforce", "rows.json", "--changed-files", "changed.txt", "--json");
+}
+
+test("FILEBUDGET1 refuses a planted slow changed file, accepts the boundary and leaves unchanged slow files alone", async () => {
+	const root = fixture();
+	for (const elapsed of [1000, 90000, 90001]) {
+		const result = await measured(root, "new.test.ts", elapsed);
+		expect(result.rc).toBe(elapsed > 90000 ? 1 : 0);
+		const data = JSON.parse(result.stdout);
+		expect(data.file_budget.cap_s).toBe(90);
+		if (elapsed > 90000) {
+			expect(data.file_budget.violations[0]).toMatchObject({ path: "new.test.ts", elapsed_s: 90.001, cap_s: 90 });
+			expect(data.file_budget.violations[0].remedy).toContain("private-index-land-2/-3 and kit-update-*");
+		} else expect(data.file_budget.violations).toEqual([]);
+	}
+	expect((await measured(root, "existing.test.ts", 300000, "docs/notes.md")).rc).toBe(0);
+});
+
+test("FILEBUDGET1 grandfather passes at its measured ceiling and fails when it grows", async () => {
+	const root = fixture();
+	const policyPath = join(root, ".github/test-budget.json");
+	const policy = JSON.parse(await Bun.file(policyPath).text());
+	policy.changed_file_budget.grandfathered = { "legacy.test.ts": { measured_s: 131, evidence: "owned fixture observation" } };
+	writeFileSync(policyPath, JSON.stringify(policy));
+	expect((await measured(root, "legacy.test.ts", 131000)).rc).toBe(0);
+	const grown = await measured(root, "legacy.test.ts", 131001);
+	expect(grown.rc).toBe(1);
+	expect(JSON.parse(grown.stdout).file_budget.violations[0]).toMatchObject({ path: "legacy.test.ts", elapsed_s: 131.001, cap_s: 131 });
+});
+
+test("FILEBUDGET1 policy ratchet permits removals/reductions, refuses growth/additions/deletion and malformed evidence", async () => {
+	const root = fixture();
+	const policyPath = join(root, ".github/test-budget.json");
+	const baseline = JSON.parse(await Bun.file(policyPath).text());
+	baseline.changed_file_budget.grandfathered = { "legacy.test.ts": { measured_s: 131, evidence: "owned baseline" } };
+	writeFileSync(join(root, "base-policy.json"), JSON.stringify(baseline));
+	const check = async (budget: unknown) => {
+		writeFileSync(policyPath, JSON.stringify({ ...baseline, changed_file_budget: budget }));
+		return invoke(root, "--check-file-policy", "--base-policy", "base-policy.json", "--json");
+	};
+	expect((await check({ cap_s: 90, grandfathered: {} })).rc).toBe(0);
+	expect((await check({ cap_s: 80, grandfathered: { "legacy.test.ts": { measured_s: 130, evidence: "reduction" } } })).rc).toBe(0);
+	for (const budget of [
+		{ cap_s: 91, grandfathered: {} },
+		{ cap_s: 90, grandfathered: { "legacy.test.ts": { measured_s: 132, evidence: "growth" } } },
+		{ cap_s: 90, grandfathered: { "new.test.ts": { measured_s: 131, evidence: "new exemption" } } },
+		{ cap_s: 90, grandfathered: { "legacy.test.ts": { measured_s: 131, evidence: "" } } },
+		undefined,
+	]) expect((await check(budget)).rc).toBe(1);
+	// Removing an allowance is irreversible in the next baseline.
+	writeFileSync(join(root, "base-policy.json"), JSON.stringify({ ...baseline, changed_file_budget: { cap_s: 90, grandfathered: {} } }));
+	expect((await check(baseline.changed_file_budget)).rc).toBe(1);
+});
+
+test("FILEBUDGET1 does not accept failed or incomplete timing rows", async () => {
+	const root = fixture();
+	writeFileSync(join(root, "changed.txt"), "new.test.ts\n");
+	for (const row of [{ complete: false, rc: 0 }, { complete: true, rc: 1 }]) {
+		writeFileSync(join(root, "rows.json"), JSON.stringify([{ path: "new.test.ts", elapsed_ms: 1, ...row }]));
+		expect((await invoke(root, "--enforce", "rows.json", "--changed-files", "changed.txt")).rc).toBe(1);
+	}
+});

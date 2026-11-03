@@ -385,6 +385,7 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file o
 			version: 1, requirements: { push_p95_s: 600, full_cycle_s: cycle },
 			initial_heuristic: { per_file_cap_s: cycle / 4, derivation: "full_cycle_s / 4",
 				status: "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED", mode: "report" },
+			changed_file_budget: { cap_s: 90, grandfathered: {} },
 		}));
 		const archive = affectedArchive(fx, 42, 42);
 		configure(900);
@@ -434,7 +435,7 @@ test.skipIf(!AMPLE || process.env.OMP_KIT_LITERAL_SUITE_BUDGET !== "1")("SUITEBU
 			expect(code, out).not.toBe(0);
 			expect(out).toContain("OVER_BUDGET");
 			expect(out).toContain("tests/cli/three-hundred.test.sh");
-			expect(out).toContain('"cap_s":225');
+			expect(out).toContain('"cap_s":90');
 		};
 		assertBudgetRefusal(slow.code, slow.out);
 		const rows = measuredFiles(ledger(fx).at(-1)!);
@@ -442,7 +443,7 @@ test.skipIf(!AMPLE || process.env.OMP_KIT_LITERAL_SUITE_BUDGET !== "1")("SUITEBU
 		expect(rows[0]!.rc).toBe(0);
 
 		// Remove only the fixture gate's budget enforcement, not the measured run.
-		const enforcement = '\t\tbun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \\\n\t\t\t--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --json || tests_rc=$?\n';
+		const enforcement = '\t\tbun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \\\n\t\t\t--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --changed-files "$WORK/budget-changed-files" --json || tests_rc=$?\n';
 		const withoutEnforcement = source.replace(enforcement, "\t\t:\n");
 		expect(withoutEnforcement).not.toBe(source);
 		const unchecked = runFocused(fx, withoutEnforcement, archive, "tests/cli/three-hundred.test.sh");
@@ -456,6 +457,79 @@ test.skipIf(!AMPLE || process.env.OMP_KIT_LITERAL_SUITE_BUDGET !== "1")("SUITEBU
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 }, 720_000);
+
+test.skipIf(!AMPLE)("FILEBUDGET1 own timed run admits a normal changed file and refuses a planted over-budget file", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const scripts = gateTree(fx, MANIFEST_HEADER);
+		const policyPath = join(scripts, "../.github/test-budget.json");
+		const policy = JSON.parse(readFileSync(policyPath, "utf8"));
+		const archive = affectedArchive(fx, 42, 42);
+		const fast = runFocused(fx, source, archive, "tests/cli/mod.test.ts", scripts);
+		expect(fast.code, fast.out).toBe(0);
+		expect(fast.out).toContain("VERDICT TESTED");
+		// A fixture-only tight policy proves the real measured boundary without
+		// a 90-second sleeper, forged measurement, or an extra production run.
+		policy.changed_file_budget = { cap_s: 0.001, grandfathered: {} };
+		writeFileSync(policyPath, JSON.stringify(policy));
+		const slow = runFocused(fx, source, archive, "tests/cli/mod.test.ts", scripts);
+		expect(slow.code, slow.out).toBe(1);
+		expect(slow.out).toContain("FILE_OVER_BUDGET");
+		expect(slow.out).toContain("private-index-land-2/-3 and kit-update-*");
+		expect(slow.out).toContain('"cap_s":0.001');
+		const row = measuredFiles(ledger(fx).at(-1)!)[0]!;
+		expect(row.rc).toBe(0);
+		expect(row.elapsed_ms).toBeGreaterThan(1);
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test("FILEBUDGET1 policy ratchet uses Git predecessor bytes even for a docs-only change", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const repo = candidateRepo(fx);
+		mkdirSync(join(repo, ".github"));
+		const policy = JSON.parse(readFileSync(join(root, ".github/test-budget.json"), "utf8"));
+		const policyPath = join(repo, ".github/test-budget.json");
+		writeFileSync(policyPath, JSON.stringify(policy));
+		const identity = ["-c", "user.name=fresh-gate test", "-c", "user.email=fresh-gate@example.invalid", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"];
+		for (const args of [["add", ".github/test-budget.json"], [...identity, "commit", "-q", "-m", "[test] file budget baseline"]]) {
+			const result = runSync(["git", "-C", repo, ...args], { deadline_s: 10 });
+			expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+		}
+		const archive = affectedArchive(fx, 42, 42);
+		mkdirSync(join(archive, ".github"));
+		const candidate = join(archive, ".github/test-budget.json");
+		writeFileSync(candidate, JSON.stringify(policy));
+		const probe = join(fx.dir, "file-policy.sh");
+		writeFileSync(probe, `set -eu\n${gateFunctions(source, ["fail", "gate_file_budget_policy"])}gate_file_budget_policy\n`);
+		const check = (base = "HEAD") => {
+			const result = runSync(["sh", probe], { deadline_s: 15, env: {
+				...process.env, ...fx.env, ROOT: repo, FRESH_GATE_REPO: repo, BASE: base, COMMIT: "HEAD",
+				ARCHIVE_DIR: archive, SCRIPT_DIR: join(root, "scripts"), CHANGED: "docs/notes.md",
+			} });
+			return { rc: result.rc, out: new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr) };
+		};
+		expect(check().rc).toBe(0);
+		// Pre-push exports FRESH_GATE_REPO. Bind it to the owned fixture rather
+		// than silently checking the outer checkout's pre-adoption policy.
+		const missing = check("refs/heads/filebudget-missing-baseline");
+		expect(missing.rc, missing.out).toBe(1);
+		expect(missing.out).toContain("cannot read predecessor test-budget policy at refs/heads/filebudget-missing-baseline");
+		expect(missing.out).not.toContain("FILE_BUDGET_POLICY OK");
+		policy.changed_file_budget.grandfathered["new.test.ts"] = { measured_s: 131, evidence: "planted increase" };
+		writeFileSync(candidate, JSON.stringify(policy));
+		const refused = check();
+		expect(refused.rc).toBe(1);
+		expect(refused.out).toContain("FILE_BUDGET_RATCHET new.test.ts");
+		expect(refused.out).not.toContain("affected tests:");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+});
 
 test.skipIf(!AMPLE)("CIGATE1 shards: the selection runs in K parallel bun workers, and a failure in any shard refuses (needs >= 10 GiB free)", () => {
 	const source = readFileSync(gate, "utf8");
