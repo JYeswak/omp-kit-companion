@@ -5,6 +5,8 @@
 #   1. preflight  source = an exact commit on origin/main (default: its head); version unused (no tag, no release,
 #                 no draft); the source is a developer-id release whose release.yml carries attest-local.
 #                 Its exact tree must have a reusable main-role full-suite PASS before the signing keychain opens.
+#                 It must also have the push-time ci-only PASS (every local gate-ci-only.tsv file: package-release,
+#                 kit-update and their split live journeys, run by release-verdict.sh); the cut never runs tests itself.
 #   2. build      after the verdict readback and signing-identity preflight, build every ship-set platform
 #                 (darwin-arm64-none, linux-arm64-gnu, linux-x64-gnu) from an exact-commit `git archive`
 #                 export with scripts/package-release.sh, exactly as ci.yml build-candidates does (bun
@@ -16,12 +18,6 @@
 #   4. checksum   SHA256SUMS over release-index.json and the archives.
 #   4b. rule-gate the postcheck's ttsr coverage gate (every rule needs fire+quiet
 #                 fixtures) on the exact-commit source; refusal exits 4, nothing remote written.
-#   4c. ci-only-local
-#                 package-release.test.ts and kit-update.test.ts against the
-#                 exact-commit export (gate-ci-only.tsv calls them "ci-only",
-#                 but CI is disabled); refusal exits 4, nothing remote written.
-#                 external-live.test.ts stays out: it needs the host's live OMP
-#                 launcher, so it is not hermetic.
 #   --dry-run stops here: no tag, no draft, no dispatch, no remote write.
 #   5. tag        push the lightweight tag v<version> -> source (never forced, never re-tagged).
 #   6. draft      create the draft release with the notes from release-notes.sh and require GitHub's recorded
@@ -85,16 +81,12 @@ if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an own
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK release-local
 CHILD=''
-CI_PIDS=''
 UNLOCKED=0
 STARTED=$(date +%s)
 STAGE_LOG="$WORK/stages"
 : >"$STAGE_LOG"
 cleanup() {
 	if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null || true; wait "$CHILD" 2>/dev/null || true; fi
-	# Each CI-only test runs under `timeout`, which forwards TERM to the test it started.
-	local ci_pid
-	for ci_pid in $CI_PIDS; do kill -TERM "$ci_pid" 2>/dev/null || true; done
 	if [ "$UNLOCKED" = 1 ]; then security lock-keychain "$KEYCHAIN" </dev/null || echo "release-local: WARNING: could not re-lock $KEYCHAIN" >&2; fi
 }
 kitlib_tmp_atexit cleanup
@@ -186,6 +178,19 @@ if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass 
 fi
 [ "$(cat "$WORK/full-suite-verdict.out")" = PASS ] || die "source tree $source_tree full-suite readback is not PASS"
 say "full-suite verdict $source_tree: PASS (main role)"
+# CIONLY1 (Joshua J-2026-11-03-34/35: a full release in under 4 minutes, failing fast). The local gate-ci-only.tsv
+# files (package-release, kit-update and their split live journeys; full-suite-verdict-store.py CI_ONLY_FILES) are
+# kept out of the full suite and run by release-verdict.sh at push time, on a git-initialized export of the exact
+# commit, and recorded for its tree. The cut never runs them: it requires that recorded PASS here, in seconds,
+# before build, sign and notarize, and refuses with the producer command.
+ci_only_status=0
+bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
+	--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC" \
+	>"$WORK/ci-only-verdict.out" 2>"$WORK/ci-only-verdict.err" || ci_only_status=$?
+if [ "$ci_only_status" != 0 ] || [ "$(cat "$WORK/ci-only-verdict.out")" != PASS ]; then
+	die "source tree $source_tree has no push-time ci-only PASS ($(head -n 1 "$WORK/ci-only-verdict.out") $(head -n 1 "$WORK/ci-only-verdict.err")); produce it with: sh scripts/release-verdict.sh --commit $SOURCE"
+fi
+say "ci-only verdict $source_tree: PASS (push time)"
 
 [ -f "$KEYCHAIN" ] || die "signing keychain $KEYCHAIN not found"
 # The password is read in-process by devid_release.py and never reaches argv, stdout or a log.
@@ -315,63 +320,6 @@ bounded 600 bun "$SRC/scripts/ttsr-harness.ts" --selftest >"$WORK/rule-selftest.
 	die "ttsr-harness --selftest failed on the release source; refusing release (see $WORK/rule-selftest.stderr)"
 say "rule selftest PASS"
 
-# ----------------------------------------------------------------- 4c. ci-only-local
-# gate-ci-only.tsv lists package-release.test.ts and kit-update.test.ts as
-# "ci-only", but CI is disabled, so without this stage they run nowhere. Run
-# both files with cwd set to the exact-commit export: kit-update builds its
-# N+2 candidate from that tree (its MANIFEST.tsv is regenerated inside the
-# fixture), and package-release archives the exact commit and asserts the
-# export carries no MANIFEST.tsv. Refuse here, before the tag, in both
-# dry-run and real runs.
-# The export is made a throwaway git root first (a local --depth 1 fetch of
-# $SOURCE): the test's `git -C` archive only yields the full tree from a
-# repository root, and the runtime work-root check requires OMP_KIT_CASE_CWD
-# to be that same root.
-# Wall time on this Mac (2026-10-27, exact 0021cef export, load ~16 on 32 cores):
-# package-release.test.ts 353 s (18 pass, 0 fail), kit-update.test.ts 300 s
-# (24 tests: 20 pass; the other 4 are UpdateBundleIsolation's uncommitted-hunk
-# tests, which need their uncommitted src). Bounds below (900/2400) hold
-# 2.5x/8x margin over both.
-# tests/cli/external-live.test.ts stays out: it executes the host's real OMP
-# launcher (ambient OMP/OMP_BIN/OMP_PATH must all name the same absolute
-# binary, or the run fails closed BLOCKED/NATIVE_IDENTITY_UNAVAILABLE)
-# and binds a localhost mock-model server, so it is not hermetic.
-stage ci-only-local
-git -C "$SRC" -c init.defaultBranch=main init -q ||
-	die "ci-only-local git init failed; refusing release"
-bounded 120 git -C "$SRC" fetch -q --depth 1 "$ROOT" "$SOURCE" ||
-	die "ci-only-local fetch of $SOURCE failed; refusing release"
-SRC_REAL="$(cd "$SRC" && pwd -P)" || die "ci-only-local cannot resolve $SRC; refusing release"
-# ci_only_show NAME: $WORK is removed on exit, so the refusal must carry the failure itself. On
-# 2026-10-31 the 0.2.81 refusal pointed at a deleted stderr file and cost a full reproduction run.
-ci_only_show() {
-	echo "release-local: $1 FAIL; output (last 60 lines of stderr, then stdout):" >&2
-	tail -n 60 "$WORK/ci-only-$1.stderr" >&2 || true
-	tail -n 20 "$WORK/ci-only-$1.stdout" >&2 || true
-}
-# RELSPEED1 (ompkit-774u.72): the two files are independent (separate fixtures under their own
-# owned TMPDIRs), so they run side by side; measured serially on 0.2.81 the stage took 606 s.
-# AUTOCUT1 (ompkit-2uubn): the same 120 s per-test budget the full suite runs with (--timeout=120000);
-# bun's 5 s default refused the 0.2.83 cut on a 5001 ms package-release case at load 20+.
-# RELFAILFAST1 (Joshua J-2026-11-03-34): the packaged ladder queues in `omp-kit heavy` for up to 900 s by default,
-# the same as package-release's whole budget, so a held queue surfaced only as a test timeout. Cap the wait at 180 s:
-# a queue that does not clear by then fails naming disk, load or slots (needs a source with the cap; older ignore it).
-(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" OMP_KIT_HEAVY_MAX_WAIT_S=180 timeout 900 bun test --timeout=120000 tests/cli/package-release.test.ts \
-	</dev/null >"$WORK/ci-only-package-release.stdout" 2>"$WORK/ci-only-package-release.stderr") &
-CI_PIDS="$!"
-(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" OMP_KIT_HEAVY_MAX_WAIT_S=180 timeout 2400 bun test --timeout=120000 tests/cli/kit-update.test.ts \
-	</dev/null >"$WORK/ci-only-kit-update.stdout" 2>"$WORK/ci-only-kit-update.stderr") &
-CI_PIDS="$CI_PIDS $!"
-ci_pkg_rc=0; ci_upd_rc=0
-wait "${CI_PIDS%% *}" || ci_pkg_rc=$?
-wait "${CI_PIDS##* }" || ci_upd_rc=$?
-CI_PIDS=''
-# RELFAILFAST1 (Joshua J-2026-11-03-34): show every failing file before refusing, so one run reports them all.
-ci_failed=''
-[ "$ci_pkg_rc" -eq 0 ] || { ci_only_show package-release; ci_failed="$ci_failed package-release.test.ts"; }
-[ "$ci_upd_rc" -eq 0 ] || { ci_only_show kit-update; ci_failed="$ci_failed kit-update.test.ts"; }
-[ -z "$ci_failed" ] || die "FAIL on the release source:$ci_failed; refusing release"
-say "ci-only-local PASS"
 
 receipt() {
 	local phase=$1 url=${2:-} run_id=${3:-}
