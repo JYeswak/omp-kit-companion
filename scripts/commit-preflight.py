@@ -61,11 +61,17 @@ def main():
         checks = [(name, ['sh', str(HERE / ('check-staged-' + name + '.sh'))]) for name in
                   ('imports', 'readme', 'fragments', 'regexploit', 'pysafe', 'tempsafe', 'kitlib', 'sources', 'br-init', 'wallclock')]
         checks.append(('portable-paths', ['python3', '-B', str(HERE / 'portable_paths_check.py'), '--staged', '--repo', str(root)]))
-        checks.extend([
-            ('deploy-step', ['bash', str(HERE / 'check-deploy-step.sh'), str(message)]),
+        checks.append(('deploy-step', ['bash', str(HERE / 'check-deploy-step.sh'), str(message)]))
+        message_checks = [
             ('stale-worktree', ['sh', str(HERE / 'check-stale-worktree.sh'), str(message)]),
             ('kitlib-reversal', ['python3', '-B', str(HERE / 'kitlib_ratchet.py'), '--verify-reversal-message', str(message), '--repo', str(root)]),
-        ])
+            ('commit-notes', ['sh', str(HERE / 'check-commit-notes.sh'), str(message)]),
+        ]
+        if args.message:
+            checks.extend(message_checks)
+        else:
+            for name, _argv in message_checks:
+                print('NOT_JUDGED ' + name + ': supply --message FILE with the planned Bead/Revert/Supersedes trailers', flush=True)
         # ShellCheck reads the very same staged bytes, never unstaged edits.
         paths = required(['git', 'diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRT'], env).split(b'\0')
         for raw in paths:
@@ -92,6 +98,8 @@ def main():
                 failures += 1
                 print('UNJUDGED ' + name + ': ' + str(error))
         print(f'commit-preflight: {len(checks)} checks, {failures} refused, {time.monotonic() - started:.2f}s; no fresh gate or tests run')
+        if not args.message:
+            print('commit-preflight: message-dependent checks NOT_JUDGED; this is staged-file feedback, not commit admission')
         return int(failures != 0)
     finally:
         allocation.cleanup()
