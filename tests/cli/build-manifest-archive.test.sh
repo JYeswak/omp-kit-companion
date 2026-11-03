@@ -42,6 +42,26 @@ HOME="$work/home" PATH="${PATH:-/usr/bin:/bin}" TMPDIR="$work" \
 [ ! -e "$work/state" ]
 grep -q 'install: dry run, nothing written' "$work/install.log"
 
+# Exact TSV contracts for an added rule and a name that must remain one argv
+# operand through the batched hasher (spaces, brackets, quotes and a hash).
+pack=$(awk -F '\t' 'NR == 2 { print $4 }' "$PHYSICAL/MANIFEST.tsv")
+added_name=zzz-added-rule
+printf '%s\n' '---' 'alwaysApply: true' '---' 'Added manifest rule.' > "$PHYSICAL/rules/$added_name.md"
+added_sha=$(shasum -a 256 "$PHYSICAL/rules/$added_name.md" | cut -d ' ' -f 1)
+cp "$PHYSICAL/MANIFEST.tsv" "$work/added.want"
+printf '%s\t%s\talways\t%s\n' "$added_name" "$added_sha" "$pack" >> "$work/added.want"
+TMPDIR="$work" sh "$SOURCE/scripts/build-manifest.sh" --stdout > "$work/added.have"
+diff -u "$work/added.want" "$work/added.have"
+
+odd_name="zzzz odd [x] 'quote' #hash"
+printf '%s\n' '---' 'interruptMode: never' '---' 'Odd filename manifest rule.' > "$PHYSICAL/rules/$odd_name.md"
+odd_sha=$(shasum -a 256 "$PHYSICAL/rules/$odd_name.md" | cut -d ' ' -f 1)
+cp "$work/added.want" "$work/odd.want"
+printf '%s\t%s\treminder\t%s\n' "$odd_name" "$odd_sha" "$pack" >> "$work/odd.want"
+TMPDIR="$work" sh "$SOURCE/scripts/build-manifest.sh" --stdout > "$work/odd.have"
+diff -u "$work/odd.want" "$work/odd.have"
+TMPDIR="$work" sh "$SOURCE/scripts/build-manifest.sh" > "$work/added-regenerated.log" 2>&1
+
 # Planted negative: changed rule bytes with the old manifest must still refuse.
 printf '\nplanted stale-manifest input\n' >> "$PHYSICAL/rules/control.md"
 if PATH="${PATH:-/usr/bin:/bin}" TMPDIR="$work" \

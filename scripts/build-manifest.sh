@@ -31,8 +31,6 @@ case "${1:-}" in
   *) echo "build-manifest: unknown argument: $1" >&2; exit 2 ;;
 esac
 
-sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
-
 OMP_KIT_BUN="$ROOT/scripts/runtime-adapter.sh"
 [ -x "$OMP_KIT_BUN" ] || { echo "build-manifest: runtime adapter missing: $OMP_KIT_BUN" >&2; exit 2; }
 pack=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)
@@ -59,13 +57,13 @@ fi
 [ -n "$work_dir" ] || { echo "build-manifest: empty private workdir" >&2; exit 2; }
 tmp="$work_dir/manifest.tsv"
 cleanup() {
-  rm -f "$tmp" "$tmp.have" "$tmp.want" "$work_dir/.owner"
+  rm -f "$tmp" "$tmp.have" "$tmp.want" "$tmp.classes" "$tmp.hashes" "$work_dir/.owner"
   rmdir "$work_dir" 2>/dev/null || true
 }
 kitlib_tmp_atexit cleanup
 
 
-# One process for every rule: name TAB class, from the rule object omp itself builds.
+# One classifier invocation for the whole ordered rule glob.
 classify_rules() {
   if [ "$stdout" = 1 ] || [ "$source_export" = 1 ]; then
     command -v bun >/dev/null 2>&1 || { echo "build-manifest: Bun is required for a source export" >&2; return 127; }
@@ -81,7 +79,8 @@ build_one() { # build_one <rulesdir>: write candidate manifest to $tmp
   found=0
   for f in "$rulesdir"/*.md; do if [ -f "$f" ]; then found=1; fi; done
   [ "$found" = 1 ] || { echo "build-manifest: no rules in $rulesdir" >&2; exit 1; }
-  # One process for every rule: name TAB class, from the rule object omp itself builds.
+  # Classifier and hasher consume the same ordered argv. Join by row, not by
+  # whitespace-splitting shasum's filename (rule names may contain spaces).
   if classes=$(classify_rules "$rulesdir"/*.md); then
     :
   else
@@ -89,15 +88,30 @@ build_one() { # build_one <rulesdir>: write candidate manifest to $tmp
     echo "build-manifest: scripts/rule-class.ts producer_rc=$class_rc" >&2
     exit "$class_rc"
   fi
-  for f in "$rulesdir"/*.md; do
-    name=$(basename "$f" .md)
-    class=$(printf '%s\n' "$classes" | awk -F '\t' -v n="$name" '$1 == n { print $2 }')
-    case "$class" in
-      always|tripwire|reminder|canary|router) ;;
-      *) echo "build-manifest: no class for $name (got '$class')" >&2; exit 1 ;;
-    esac
-    printf '%s\t%s\t%s\t%s\n' "$name" "$(sha256 "$f")" "$class" "$pack" >> "$tmp"
-  done
+  printf '%s\n' "$classes" > "$tmp.classes"
+  shasum -a 256 "$rulesdir"/*.md > "$tmp.hashes"
+  awk -F '\t' -v pack="$pack" '
+    NR == FNR { names[FNR] = $1; classes[FNR] = $2; count = FNR; next }
+    {
+      name = names[FNR]
+      class = classes[FNR]
+      if (class !~ /^(always|tripwire|reminder|canary|router)$/) {
+        printf "build-manifest: no class for %s (got '\''%s'\'')\n", name, class > "/dev/stderr"
+        bad = 1
+        exit 1
+      }
+      hash = $0
+      sub(/ .*/, "", hash)
+      printf "%s\t%s\t%s\t%s\n", name, hash, class, pack
+      hashed = FNR
+    }
+    END {
+      if (!bad && hashed != count) {
+        print "build-manifest: rule checksum/class count mismatch" > "/dev/stderr"
+        exit 1
+      }
+    }
+  ' "$tmp.classes" "$tmp.hashes" >> "$tmp"
 }
 
 check_one() { # check_one <rulesdir> <manifestfile>
