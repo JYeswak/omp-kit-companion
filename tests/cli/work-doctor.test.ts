@@ -217,7 +217,7 @@ test("work scope reports only old dirty files with matching active reservations"
 	const envelope = JSON.parse(decoder.decode(cli.stdout));
 	expect(envelope.data.stale_edit_limit_minutes).toBe(45);
 	const cliRow = envelope.data.repos.find((entry: { path: string }) => entry.path === target);
-	expect(cliRow.reservation_scan_status).toBe("OK");
+	expect(cliRow.reservation_scan_status, JSON.stringify(cliRow)).toBe("OK");
 	expect(cliRow.stale_uncommitted_edits).toEqual([]);
 	expect([stalePath, freshPath, freePath].map((path) => ({ bytes: readFileSync(path), mtime: statSync(path).mtimeMs }))).toEqual(beforeCli);
 	expect(git(target, "status", "--porcelain=v1")).toBe(statusBeforeCli);

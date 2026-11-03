@@ -6,6 +6,7 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { incarnation, probeIncarnation } from "../../src/kitlib/proc";
 import { run } from "../../src/kitlib/run";
 import { type DiskCapacity, decideDiskPressure, type DiskVerdict, diskVerdict, HEAVY_DISK_NEED_BYTES, HEAVY_PREREQ_MISSING, machineLoadBlockReason } from "../../src/heavy.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 
@@ -90,8 +91,11 @@ test.concurrent("SCANNERADMIT preserves genuine child exit 75 without refusal ma
 	expect(result.stderr).not.toContain("RESOURCE_DEFERRED");
 });
 
-// Separate processes own these platform-clock deadlines; parent fake timers cannot drive them. They run through the
-// real CLI entry (`omp-kit heavy --max-runtime`), the path users and gates take.
+// Separate processes own these platform-clock deadlines; parent fake timers cannot drive them.
+// They run through the real CLI entry (`omp-kit heavy --max-runtime`).
+// At measured load 41, CLI startup made the old 10/15/20 s harness watchdogs
+// fire before the product cases completed. Scale only those fixture watchdogs;
+// max_wait_s, --max-runtime, grace periods and their result assertions stay fixed.
 async function invokeRuntime(root: string, maxRuntime?: string, label = "runtime", childCode = "setTimeout(() => process.exit(7), 30000)") {
 	return invoke(root, ["heavy", "--label", label, ...(maxRuntime === undefined ? [] : ["--max-runtime", maxRuntime]),
 		"--", process.execPath, "-e", childCode]);
@@ -102,7 +106,7 @@ test.concurrent("HEAVYRUNTIME planted: admitted child outlives admission wait an
 	configure(root, { slots: 1, max_wait_s: 2 });
 	const result = await invokeRuntime(root, "30", "planted", "setTimeout(() => process.exit(7), 4000)");
 	expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 7, stderr: "" });
-}, 15000);
+}, fixtureDeadlineS(15) * 1000);
 
 test.concurrent("HEAVYRUNTIME control: never admitted still defers at queue timeout", async () => {
 	const root = fixture();
@@ -113,7 +117,7 @@ test.concurrent("HEAVYRUNTIME control: never admitted still defers at queue time
 	expect(result.stderr).toContain("RESOURCE_DEFERRED");
 	expect(result.stderr).toContain("queue timeout");
 	expect(readdirSync(jobs)).toEqual(["held.json"]);
-}, 10000);
+}, fixtureDeadlineS(10) * 1000);
 
 test.concurrent("HEAVYRUNTIME cuts runtime at flag budget and removes the job", async () => {
 	const root = fixture();
@@ -123,7 +127,7 @@ test.concurrent("HEAVYRUNTIME cuts runtime at flag budget and removes the job", 
 	expect(result.stderr).toContain("RUNTIME_BUDGET_EXCEEDED: child ran ");
 	expect(result.stderr).toContain("> --max-runtime 2s (label runtime)");
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs"))).toEqual([]);
-}, 15000);
+}, fixtureDeadlineS(15) * 1000);
 
 test.concurrent("HEAVYRUNTIME declared label table stops child; undeclared label has no global default", async () => {
 	const root = fixture();
@@ -135,14 +139,14 @@ test.concurrent("HEAVYRUNTIME declared label table stops child; undeclared label
 	expect(labeled.stderr).toContain("source=label table load.json runtime_budget_s.runtime");
 	const fallback = await invokeRuntime(root, undefined, "other", "setTimeout(() => process.exit(7), 2200)");
 	expect({ code: fallback.code, stderr: fallback.stderr }).toEqual({ code: 7, stderr: "" });
-}, 15000);
+}, fixtureDeadlineS(15) * 1000);
 
 test.concurrent("HEAVYRUNTIME explicit flag overrides the label table", async () => {
 	const root = fixture();
 	configure(root, { max_wait_s: 5, runtime_budget_s: { runtime: 1 } });
 	const result = await invokeRuntime(root, "4", "runtime", "setTimeout(() => process.exit(7), 2200)");
 	expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 7, stderr: "" });
-}, 10000);
+}, fixtureDeadlineS(10) * 1000);
 
 test.concurrent("HEAVYRUNTIME shipped label table and global-default mutant use the real CLI", async () => {
 	const root = fixture();
@@ -188,7 +192,7 @@ test.concurrent("HEAVYRUNTIME shipped label table and global-default mutant use 
 	expect(mutant.stdout).not.toContain("CHILD_DONE");
 	expect(mutant.code).toBe(124);
 	expect(mutant.stderr).toContain("source=none");
-}, 15000);
+}, fixtureDeadlineS(15) * 1000);
 
 test.concurrent("HEAVYRUNTIME rejects nonpositive and noninteger flag budgets", async () => {
 	const root = fixture();
@@ -197,7 +201,7 @@ test.concurrent("HEAVYRUNTIME rejects nonpositive and noninteger flag budgets", 
 		expect(result.code).toBe(2);
 		expect(result.stderr).toContain("--max-runtime");
 	}
-}, 15000);
+}, fixtureDeadlineS(15) * 1000);
 
 test.concurrent("HEAVYRUNTIME escalates a SIGTERM-resistant child after the grace period", async () => {
 	const root = fixture();
@@ -208,14 +212,14 @@ test.concurrent("HEAVYRUNTIME escalates a SIGTERM-resistant child after the grac
 	expect(result.stdout).toBe("term-received");
 	expect(result.stderr).toContain("> --max-runtime 1s (label resistant)");
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs"))).toEqual([]);
-}, 20000);
+}, fixtureDeadlineS(20) * 1000);
 
 test.concurrent("HEAVYRUNTIME long positive budgets do not overflow native timers", async () => {
 	const root = fixture();
 	const result = await invokeRuntime(root, "2147484", "long", "setTimeout(() => process.exit(7), 100)");
 	expect(result.code).toBe(7);
 	expect(result.stderr).toBe("");
-}, 10000);
+}, fixtureDeadlineS(10) * 1000);
 
  // Slot-logic tests pin the heavy-specific load seam so the
  // slot behavior under test, not ambient runner load, decides the outcome.
@@ -326,6 +330,7 @@ test.concurrent("a zero wait budget returns 75 when admission remains blocked", 
 // ledger for the awaited state with a deadline instead of sleeping blindly.
 async function waitForLedgerState(root: string, want: "queued" | "running" | "empty", timeoutMs: number): Promise<void> {
 	const directory = join(root, "state", "omp-kit", "load", "jobs");
+	timeoutMs = fixtureDeadlineS(timeoutMs / 1000) * 1000;
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		let entries: string[] = [];
@@ -392,7 +397,7 @@ test.concurrent("SIGINT releases the slot with exit 130", async () => {
 	expect(stderr).toBe("");
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
 // macos-15 CI hit the 5 s default at 5002 ms (spawn + ledger poll under load); measured cause.
-}, 30000);
+}, fixtureDeadlineS(30) * 1000);
 
 test.concurrent("SIGTERM releases the slot with exit 143", async () => {
 	const root = fixture();
@@ -408,7 +413,7 @@ test.concurrent("SIGTERM releases the slot with exit 143", async () => {
 	expect(code).toBe(143);
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
 // Same measured cause as above.
-}, 30000);
+}, fixtureDeadlineS(30) * 1000);
 
 test("planted contention queues the job even with a free slot", async () => {
 	const root = fixture();
@@ -553,6 +558,57 @@ test.concurrent("HEAVYDISK1: healthy disk runs the command", async () => {
 	expect(readFileSync(marker, "utf8")).toBe("ran");
 });
 
+test.concurrent("HEAVYCI1: a stalled sbh observer is unavailable within the fail-fast budget", async () => {
+	const root = fixture();
+	const bin = fakeSbh(root, 0, "stalled-bin");
+	const groups = join(root, "observer-groups");
+	writeFileSync(join(bin, "sbh"), `#!/bin/sh\nps -o pid=,pgid=,ppid= -p "$$,$PPID" > ${JSON.stringify(groups)}\nexec sleep 10\n`, { mode: 0o755 });
+	const started = Date.now();
+	const verdict = await diskVerdict({
+		config: { slots: 1, max_wait_s: 20, disk_observer: "sbh", disk_floor_pct: null },
+		cwd: root, sbhBin: join(bin, "sbh"),
+	});
+	expect(verdict).toMatchObject({ kind: "unavailable", observer: "sbh" });
+	if (verdict.kind !== "unavailable") throw new Error("stalled observer supplied no verdict");
+	expect(verdict.text).toContain("sbh check timed out after 4s");
+	expect(Date.now() - started).toBeLessThan(8_000);
+	// The timeout must target the observer's new group, never the test runner's.
+	const rows = readFileSync(groups, "utf8").trim().split("\n")
+		.map(line => line.replaceAll("\t", " ").split(" ").filter(Boolean).map(Number));
+	const caller = rows.find(row => row[0] === process.pid)!;
+	const observer = rows.find(row => row[2] === process.pid)!;
+	expect(caller).toBeDefined();
+	expect(observer).toBeDefined();
+	expect(observer[1]).toBe(observer[0]);
+	expect(observer[1]).not.toBe(caller[1]);
+}, fixtureDeadlineS(15) * 1000);
+
+// Trace the real pre-queue observer check, excluding Bun/CLI startup. The source
+// probe only records timestamps; it does not replace the observer or its result.
+function prerequisiteProbe(root: string): { preload: string; timing: string } {
+	const preload = join(root, "prerequisite-timing.ts");
+	const timing = join(root, "prerequisite-timing.json");
+	writeFileSync(preload, `
+import ${JSON.stringify(forgeHealthyStatfs)};
+import { plugin } from "bun";
+import { readFileSync } from "node:fs";
+plugin({ name: "prerequisite-timing", setup(build) {
+	build.onLoad({ filter: /heavy[.]ts$/ }, ({ path }) => {
+		let contents = readFileSync(path, "utf8");
+		const start = "const precheck = await diskVerdict({ config, cwd });";
+		const refused = "return prerequisiteMissing(precheck.observer, precheck.text);";
+		if (!contents.includes(start) || !contents.includes(refused)) throw new Error("prerequisite timing target missing");
+		contents = 'import { writeFileSync as writePrerequisiteTiming } from "node:fs";\\n' + contents;
+		contents = contents.replace(start, "const prerequisiteStartedAt = Date.now();\\n" + start);
+		contents = contents.replace(refused, "return (writePrerequisiteTiming(" + ${JSON.stringify(JSON.stringify(timing))}
+			+ ", JSON.stringify({ started_at: prerequisiteStartedAt, refused_at: Date.now() })), prerequisiteMissing(precheck.observer, precheck.text));");
+		return { contents, loader: "ts" };
+	});
+}});
+`);
+	return { preload, timing };
+}
+
 test.concurrent("HEAVYCI1 planted: a missing sbh fails fast with 69 on the waiting path, queueing and starting nothing", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 20, disk_observer: "sbh" });
@@ -560,12 +616,15 @@ test.concurrent("HEAVYCI1 planted: a missing sbh fails fast with 69 on the waiti
 	// Positive control for the planted state: this PATH must really lack sbh.
 	expect(Bun.spawnSync(["/bin/sh", "-c", "command -v sbh"], { env: { PATH: noSbhPath } }).exitCode).not.toBe(0);
 	const marker = join(root, "should-not-run");
-	const started = Date.now();
-	const result = await invoke(root, ["heavy", "--label", "nosbh", "--", "sh", "-c", `printf ran > '${marker}'`], { PATH: noSbhPath });
+	const probe = prerequisiteProbe(root);
+	const result = await invoke(root, ["heavy", "--label", "nosbh", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ PATH: noSbhPath }, { preload: probe.preload });
 	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
 	expect(result.stderr).toContain("heavy: sbh unavailable: sbh binary not runnable");
 	// The pre-fix path waited out the whole 20 s budget and returned 75.
-	expect(Date.now() - started).toBeLessThan(8_000);
+	const timing = JSON.parse(readFileSync(probe.timing, "utf8"));
+	expect(timing.refused_at - timing.started_at).toBeGreaterThanOrEqual(0);
+	expect(timing.refused_at - timing.started_at).toBeLessThan(8_000);
 	expect(existsSync(marker)).toBe(false);
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
 }, 40_000);
@@ -575,12 +634,14 @@ test.concurrent("HEAVYCI1 planted: an sbh error answer is a missing prerequisite
 	configure(root, { slots: 8, max_wait_s: 20 });
 	const bin = fakeSbh(root, 2);
 	const marker = join(root, "should-not-run");
-	const started = Date.now();
+	const probe = prerequisiteProbe(root);
 	const result = await invoke(root, ["heavy", "--label", "diskerr", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
+		{ PATH: `${bin}:${process.env.PATH ?? ""}:/usr/bin:/bin` }, { preload: probe.preload });
 	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
 	expect(result.stderr).toContain("heavy: sbh unavailable: sbh check exited 2");
-	expect(Date.now() - started).toBeLessThan(8_000);
+	const timing = JSON.parse(readFileSync(probe.timing, "utf8"));
+	expect(timing.refused_at - timing.started_at).toBeGreaterThanOrEqual(0);
+	expect(timing.refused_at - timing.started_at, JSON.stringify(timing)).toBeLessThan(8_000);
 	expect(existsSync(marker)).toBe(false);
 }, 40_000);
 
@@ -997,15 +1058,21 @@ test.skipIf(!FIXTURE_AMPLE).concurrent("SAVEFIRST1: a waiting job re-reads load.
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 8 });
 	const marker = join(root, "refresh-marker");
-	const started = Date.now();
-	const run = invoke(root, ["heavy", "--label", "stale-config", "--", "sh", "-c", `printf ran > '${marker}'`],
+	const jobs = join(root, "state", "omp-kit", "load", "jobs");
+	// The admitted child snapshots its real running row before the parent removes
+	// it. Launch/precheck and child-exit delays are outside the admission budget.
+	const run = invoke(root, ["heavy", "--label", "stale-config", "--", "sh", "-c", `cat ${JSON.stringify(jobs)}/*.json > ${JSON.stringify(marker)}`],
 		{ PATH: `${fakeSbh(root, 1)}:${process.env.PATH ?? ""}:/usr/bin:/bin` });
 	await waitForLedgerState(root, "queued", 15_000);
+	const queuedObservedAt = Date.now();
 	configure(root, { slots: 8, max_wait_s: 8, disk_observer: "statfs" });
 	const result = await run;
 	expect(result.code).toBe(0);
-	expect(readFileSync(marker, "utf8")).toBe("ran");
-	expect(Date.now() - started).toBeLessThan(8_000);
-}, 30_000);
+	const admitted = JSON.parse(readFileSync(marker, "utf8"));
+	expect(admitted).toMatchObject({ label: "stale-config", state: "running" });
+	const admissionWaitMs = Date.parse(admitted.started_at) - queuedObservedAt;
+	expect(admissionWaitMs).toBeGreaterThanOrEqual(0);
+	expect(admissionWaitMs).toBeLessThan(8_000);
+}, fixtureDeadlineS(30) * 1000);
 
 afterAll(() => cleanupAllOwnedTmp());

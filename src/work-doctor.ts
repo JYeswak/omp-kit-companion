@@ -19,7 +19,10 @@ export interface WorkDoctorReport {
 }
 interface GitResult { code: number | null; stdout: string; stderr: string; timed_out: boolean; }
 const DEFAULT_CONCURRENCY = 4;
-const DEFAULT_REPO_TIMEOUT_MS = 2_000;
+// Darwin Git status: isolated fixture/real checkout 17/22 ms at load 20.63;
+// during three concurrent heavy suites at load 39.92, maxima were 119/1512 ms.
+// Round twice the measured loaded maximum up to whole seconds for headroom.
+const DEFAULT_REPO_TIMEOUT_MS = 4_000;
 const UNTRACKED_FILE_CAP = 1_000;
 const DISCOVERY_MAX_DEPTH = 10;
 

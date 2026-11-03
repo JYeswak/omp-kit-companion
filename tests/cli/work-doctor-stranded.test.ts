@@ -188,7 +188,7 @@ test("a clean pushed repo produces no stranded row but stays visible in the full
 	expect(clean.dirty_file_count).toBe(0);
 }, 60_000);
 
-// Keep the product's default 2000 ms Git deadline and all 32 real repositories.
+// Keep the product's default Git deadline and all 32 real repositories.
 // Scan one repo at a time: these classification tests otherwise add 12 simultaneous
 // Git children apiece to a loaded suite, making healthy clean controls time out.
 // The separate work-doctor suite still exercises bounded multi-repo concurrency.

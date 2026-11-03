@@ -6,6 +6,7 @@ import process from "node:process";
 import { inspectStateRoot } from "./state-root.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { incarnation, incarnationSync, isDead, normalizeStart, probeIncarnation } from "./kitlib/proc.ts";
+import { run } from "./kitlib/run.ts";
 import { admitDiskWork } from "./disk-stage.ts";
 import type { LoadJob } from "./load-doctor.ts";
 import labelBudgets from "../config/heavy-labels.json";
@@ -120,11 +121,20 @@ export function statfsSummary(cwd: string): string {
 	if (capacity === null) return "statfs: no reading";
 	return `statfs: ${(capacity.freeBytes / 1024 ** 3).toFixed(1)} GB free (${capacity.freePct.toFixed(1)}%)`;
 }
+// Native sbh check measured 0.06–0.08 s alone and 0.16–0.17 s at 3x.
+// Four seconds gives >20x headroom without the unbounded observer wait that
+// delayed prerequisite refusal by 10.456 s; cleanup still fits its 8 s budget.
+const SBH_CHECK_DEADLINE_S = 4;
+
 async function sbhVerdict(sbhBin = "sbh", cwd = process.cwd()): Promise<DiskVerdict> {
 	let code: number;
 	try {
-		const proc = Bun.spawn([sbhBin, "check", "--need", HEAVY_DISK_NEED], { stdout: "ignore", stderr: "ignore" });
-		code = await proc.exited;
+		const result = await run([sbhBin, "check", "--need", HEAVY_DISK_NEED], {
+			cwd, deadline_s: SBH_CHECK_DEADLINE_S, grace_s: 0.2, max_output_bytes: 0,
+		});
+		if (result.timed_out) return { kind: "unavailable", text: `sbh check timed out after ${SBH_CHECK_DEADLINE_S}s`, observer: "sbh" };
+		if (result.rc === null || result.killed) return { kind: "unavailable", text: "sbh check did not complete", observer: "sbh" };
+		code = result.rc;
 	} catch {
 		return { kind: "unavailable", text: "sbh binary not runnable", observer: "sbh" };
 	}
