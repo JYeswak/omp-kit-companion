@@ -19,11 +19,14 @@ function fixture() {
 	writeFileSync(join(dir, "bunfig.toml"), "[test]\ntimeout = 120000\n");
 	writeFileSync(join(dir, "changed"), "tests/cli/control.test.ts\n");
 	writeFileSync(join(dir, "queued.secs"), "0\n");
+	writeFileSync(join(dir, "home/runtime-canary"), "linked-runtime-present");
+	writeFileSync(join(dir, "home/.gitconfig"), "");
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
 	Object.assign(env, { HOME: join(dir, "home"), TMPDIR: join(dir, "var/agent-tmp"),
 		XDG_CONFIG_HOME: join(dir, "home/.config"), XDG_CACHE_HOME: join(dir, "home/.cache"),
 		XDG_DATA_HOME: join(dir, "home/.local/share"), XDG_STATE_HOME: join(dir, "home/.state"),
+		GIT_CONFIG_GLOBAL: join(dir, "home/.gitconfig"),
 		OMP_KIT_SUITE_HERMETIC_ENABLE: "0", OMP_KIT_CC: "0" });
 	const invoke = (argv: string[], deadline = 30) => {
 		const result = runSync(argv, { cwd: dir, env, deadline_s: deadline });
@@ -34,21 +37,23 @@ function fixture() {
 		"--records", join(dir, `records-${Math.random().toString(36).slice(2)}`), "--changed-files", join(dir, "changed"),
 		"--policy-root", policyRoot, "--workers", String(workers), ...paths,
 	], deadline);
-	return { dir, scratch, invoke, load };
+	return { dir, scratch, env, invoke, load };
 }
 
 function control(dir: string, name: string) {
 	writeFileSync(join(dir, "tests/cli", name), `
 import { expect, test } from "bun:test";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 test("hermetic fixed-name control", async () => {
-  const locations = [process.env.HOME, process.env.TMPDIR, process.env.XDG_CONFIG_HOME,
-    process.env.XDG_CACHE_HOME, process.env.XDG_DATA_HOME, process.env.XDG_STATE_HOME];
-  for (const location of locations) {
-    expect(location).toBeTruthy();
-    writeFileSync(join(location!, ${JSON.stringify(`exclusive-${name}`)}), "owned", { flag: "wx" });
-  }
+  const inherited = ${JSON.stringify({
+		HOME: join(dir, "home"), XDG_CONFIG_HOME: join(dir, "home/.config"),
+		XDG_CACHE_HOME: join(dir, "home/.cache"), XDG_DATA_HOME: join(dir, "home/.local/share"),
+		XDG_STATE_HOME: join(dir, "home/.state"), GIT_CONFIG_GLOBAL: join(dir, "home/.gitconfig"),
+	})};
+  for (const [name, value] of Object.entries(inherited)) expect(process.env[name]).toBe(value);
+  expect(readFileSync(join(process.env.HOME!, "runtime-canary"), "utf8")).toBe("linked-runtime-present");
+  writeFileSync(join(process.env.TMPDIR!, ${JSON.stringify(`exclusive-${name}`)}), "owned", { flag: "wx" });
   expect(existsSync(join(process.env.TMPDIR!, ".owner"))).toBe(true);
   writeFileSync(${JSON.stringify(join(dir, "audit"))} + "/${name}-" + process.pid,
     JSON.stringify({ home: process.env.HOME, tmp: process.env.TMPDIR,
@@ -80,7 +85,7 @@ run_affected_tests ${paths.map(path => JSON.stringify(path)).join(" ")}
 	return fx.invoke(["sh", probe]);
 }
 
-test("LOADGATE1: changed hermetic file passes K isolated copies; unchanged importer runs only once", () => {
+test("LOADGATE1: changed hermetic file inherits the suite environment with K private temp copies; unchanged importer runs only once", () => {
 	const fx = fixture();
 	try {
 		control(fx.dir, "control.test.ts");
@@ -88,20 +93,34 @@ test("LOADGATE1: changed hermetic file passes K isolated copies; unchanged impor
 		const result = focused(fx, ["tests/cli/control.test.ts", "tests/cli/unchanged.test.ts"], ["tests/cli/control.test.ts"]);
 		expect(result.rc, result.out).toBe(0);
 		expect(result.out).toContain(`LOADGATE1 GREEN file=tests/cli/control.test.ts concurrency=${width}`);
+		expect(result.out.split("\n").find(line => line.startsWith("LOADGATE1 GREEN"))).toContain(" env=inherited ");
 		expect(result.out).not.toContain("LOADGATE1 GREEN file=tests/cli/unchanged.test.ts");
 		const audits = readdirSync(join(fx.dir, "audit"));
 		expect(audits.filter(name => name.startsWith("control.test.ts-"))).toHaveLength(width + 1);
 		expect(audits.filter(name => name.startsWith("unchanged.test.ts-"))).toHaveLength(1);
 		const copies = audits.filter(name => name.startsWith("control.test.ts-")).map(name => JSON.parse(readFileSync(join(fx.dir, "audit", name), "utf8")));
-		expect(new Set(copies.map(copy => copy.home)).size).toBe(width + 1);
+		expect(new Set(copies.map(copy => copy.home))).toEqual(new Set([join(fx.dir, "home")]));
 		expect(new Set(copies.map(copy => copy.tmp)).size).toBe(width + 1);
-		const loadCopies = copies.filter(copy => copy.home !== join(fx.dir, "home"));
+		const loadCopies = copies.filter(copy => copy.parentOwned);
 		expect(loadCopies).toHaveLength(width);
 		expect(loadCopies.every(copy => copy.parentOwned)).toBe(true);
 		expect(loadCopies.every(copy => !existsSync(copy.tmp) && !existsSync(copy.wave))).toBe(true);
 		console.log(result.out.split("\n").find(line => line.startsWith("LOADGATE1 GREEN")));
 	} finally { fx.scratch.cleanup(); }
 }, 30_000);
+
+test("LOADGATE1: an explicitly enabled scrubbed suite keeps the same wrapper mode", () => {
+	const fx = fixture();
+	try {
+		fx.env.OMP_KIT_SUITE_HERMETIC_ENABLE = "1";
+		writeFileSync(join(fx.dir, "changed"), "tests/cli/control.test.sh\n");
+		writeFileSync(join(fx.dir, "tests/cli/control.test.sh"),
+			'test "$HOME" = "$TMPDIR/home" && test -f "$TMPDIR/.owner" || exit 1\nprintf owned > "$TMPDIR/exclusive-control"\n');
+		const result = fx.load(["tests/cli/control.test.sh"], root, 2);
+		expect(result.rc, result.out).toBe(0);
+		expect(result.out.split("\n").find(line => line.startsWith("LOADGATE1 GREEN"))).toContain(" env=scrubbed ");
+	} finally { fx.scratch.cleanup(); }
+}, 20_000);
 
 test("LOADGATE1 planted deadline holds alone but the concurrent wave refuses, naming case, concurrency and load1", () => {
 	const fx = fixture();
@@ -124,6 +143,7 @@ test("deadline-only-alone plant", async () => {
 		expect(result.out).toContain(" 1 pass\n 0 fail\nRan 1 test across 1 file.");
 		expect(result.out).toContain("(fail) deadline-only-alone plant");
 		expect(result.out).toContain(`LOADGATE1 file=tests/cli/control.test.ts concurrency=${width} load1=`);
+		expect(result.out.split("\n").find(line => line.startsWith("FRESH-GATE: RED: LOADGATE1"))).toContain(" env=inherited;");
 		expect(result.out).toContain("affected tests did not pass");
 	} finally { fx.scratch.cleanup(); }
 }, 30_000);

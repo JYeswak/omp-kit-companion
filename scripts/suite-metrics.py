@@ -201,21 +201,6 @@ def execute(args: argparse.Namespace) -> int:
         if args.loopback_port is not None:
             wrapped.extend(["--loopback-port", str(args.loopback_port)])
         wrapped.extend(["--", *command])
-        environment = None
-        if args.isolated_home:
-            # The inherited-env wrapper still owns TMPDIR; each load copy must
-            # also own HOME/XDG without forcing the opt-in scrub/write fence.
-            home = Path(scratch) / "home"
-            home.mkdir()
-            environment = dict(os.environ, HOME=str(home))
-            for name, suffix in (("XDG_CONFIG_HOME", ".config"), ("XDG_CACHE_HOME", ".cache"),
-                                 ("XDG_DATA_HOME", ".local/share"), ("XDG_STATE_HOME", ".local/state")):
-                directory = home / suffix
-                directory.mkdir(parents=True, exist_ok=True)
-                environment[name] = str(directory)
-            config = home / ".gitconfig"
-            config.write_text("[user]\n\tname = omp-kit tests\n\temail = omp-kit-tests@example.invalid\n")
-            environment["GIT_CONFIG_GLOBAL"] = str(config)
         with native_log.open("wb", buffering=0) as capture:
             fd = capture.fileno()
             launcher = [
@@ -225,7 +210,7 @@ def execute(args: argparse.Namespace) -> int:
                 "os.execvp(sys.argv[2],sys.argv[2:])",
                 str(fd), *wrapped,
             ]
-            result = run(launcher, cwd=args.cwd, env=environment, deadline_s=args.deadline,
+            result = run(launcher, cwd=args.cwd, deadline_s=args.deadline,
                          inherit_fds=(fd,), max_output_bytes=1 << 20)
         if not exec_marker.is_file() or exec_marker.is_symlink():
             raise ValueError("suite exec boundary marker is missing")
@@ -381,8 +366,6 @@ def stage(args: argparse.Namespace) -> int:
                  "--parent-fd", str(parent_reader)]
         wait_ms = max(0, time.monotonic_ns() - queued_ns) / 1_000_000
         child.extend(["--wait-ms", repr(wait_ms)])
-        if load_wave:
-            child.append("--isolated-home")
         if args.loopback_port is not None:
             child.extend(["--loopback-port", str(args.loopback_port)])
         child.extend(["--", *command])
@@ -465,6 +448,7 @@ def load(args: argparse.Namespace) -> int:
     # hang guard; the load verdict comes from native copy failures, not elapsed
     # time. The ordinary focused cap already passed and remains unchanged.
     allowance = args.workers
+    env_mode = "scrubbed" if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") == "1" else "inherited"
     for index, path in enumerate(selected):
         ceiling = policy["grandfathered"].get(path, policy["cap_s"])
         directory = Path(args.records) / str(index)
@@ -491,10 +475,10 @@ def load(args: argparse.Namespace) -> int:
                     os.environ["TMPDIR"] = inherited_tmp
         elapsed = round((time.monotonic() - started) * 1000)
         print(f"LOADGATE1 {'GREEN' if code == 0 else 'RED'} file={path} concurrency={args.workers} "
-              f"load1={load1:.2f} load1_end={os.getloadavg()[0]:.2f} "
+              f"load1={load1:.2f} env={env_mode} load1_end={os.getloadavg()[0]:.2f} "
               f"ceiling_s={ceiling} contention_allowance={allowance} added_ms={elapsed}", flush=True)
         if code != 0:
-            print(f"FRESH-GATE: RED: LOADGATE1 file={path} concurrency={args.workers} load1={load1:.2f}; "
+            print(f"FRESH-GATE: RED: LOADGATE1 file={path} concurrency={args.workers} load1={load1:.2f} env={env_mode}; "
                   "native failing case output above", file=sys.stderr)
             return 1
     return 0
@@ -518,7 +502,6 @@ def main() -> int:
     child.add_argument("--wait-ms", type=float, default=0)
     child.add_argument("--loopback-port", type=int)
     child.add_argument("--parent-fd", type=int)
-    child.add_argument("--isolated-home", action="store_true")
     child.add_argument("command", nargs=argparse.REMAINDER)
     bundle = subs.add_parser("collect")
     for option in ("records", "declared", "output", "csv", "cwd"):
