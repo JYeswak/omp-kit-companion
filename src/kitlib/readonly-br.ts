@@ -11,7 +11,7 @@
 // The shim is shell (no new runtime dependency) with the real br path and
 // the owned root baked in at install time, so it keeps working for
 // env-stripped children. Unknown future mutators refuse closed.
-import { accessSync, chmodSync, constants, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, mkdirSync, openSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const READONLY_BR_MARKER = "READONLY_TRACKER";
@@ -140,6 +140,26 @@ export function resolveRealBr(searchPath: string | undefined): string | null {
 			accessSync(cand, constants.X_OK);
 			if (statSync(cand).isFile()) return cand;
 		} catch { /* next */ }
+	}
+	return null;
+}
+
+/** Owned fixture writes must skip policy scripts without changing ambient seat identity. */
+export function resolveNativeBr(searchPath: string | undefined): string | null {
+	const header = Buffer.alloc(2);
+	for (const dir of (searchPath ?? process.env.PATH ?? "").split(":")) {
+		if (!dir) continue;
+		const candidate = join(dir, "br");
+		let fd: number;
+		try {
+			accessSync(candidate, constants.X_OK);
+			if (!statSync(candidate).isFile()) continue;
+			fd = openSync(candidate, "r");
+		} catch { continue; }
+		try {
+			if (readSync(fd, header, 0, 2, 0) === 2 && !(header[0] === 35 && header[1] === 33))
+				return realpathSync(candidate);
+		} finally { closeSync(fd); }
 	}
 	return null;
 }

@@ -1,6 +1,6 @@
 // Coverage: src/commands.ts, src/cli.ts, src/kitlib/tmp.ts, src/kitlib/run.ts, scripts/bead_lint.py
 import { afterAll, expect } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
 import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp.ts";
@@ -8,6 +8,38 @@ import { run as runBounded } from "../../src/kitlib/run.ts";
 import { planningFixture, type ApplyPlanItem } from "./planning-convert.helpers.ts";
 afterAll(cleanupAllOwnedTmp);
 const { repoRoot, scratch, validPlan, negativePlan, childEnv, isolatedTest, runCli, nativeOutput, nativeJson, issueRows, median, planSource, writePlan, initializeTracker, createNativeIssue, showNativeIssue, applyResult, applyArgs, writeAmendPlan, amendAcceptanceV1, amendAcceptanceV2, concurrentWriteFixture } = planningFixture();
+
+isolatedTest("planning dry-run skips the seat shim only for its isolated database; apply keeps actor admission", async () => {
+	const trackerRoot = join(scratch, "shim-live-tracker");
+	initializeTracker(trackerRoot);
+	createNativeIssue(trackerRoot, "Untouched live issue");
+	const liveDb = join(trackerRoot, ".beads", "beads.db");
+	const before = readFileSync(liveDb);
+	const beforeMtime = statSync(liveDb).mtimeMs;
+	const shimBin = join(scratch, "seat-shim-bin");
+	mkdirSync(shimBin);
+	symlinkSync(join(repoRoot, "scripts", "br-shim.sh"), join(shimBin, "br"));
+	const env = {
+		PATH: `${shimBin}:${childEnv.PATH ?? ""}`,
+		AGENT_NAME: "RealConversionSeat",
+		BEADS_DB: liveDb,
+	};
+	const dbDir = join(scratch, "shim-dry-db");
+	const dry = await runCli(["planning", "convert", "--plan", validPlan, "--mission", "core8", "--dry-run", "--db", dbDir, "--json"], env);
+	expect(dry.exitCode, dry.stdout + dry.stderr).toBe(0);
+	expect(JSON.parse(dry.stdout).data).toMatchObject({
+		overall: "CLEAN", beads_created: 3, total_beads_created: 4,
+		database_path: join(dbDir, ".beads", "beads.db"),
+	});
+	expect(readFileSync(liveDb)).toEqual(before);
+	expect(statSync(liveDb).mtimeMs).toBe(beforeMtime);
+
+	const apply = await runCli(applyArgs(validPlan, trackerRoot, "core8", "DifferentActor"), env);
+	expect(apply.exitCode).not.toBe(0);
+	expect(apply.stdout + apply.stderr).toContain("BR_SHIM_ACTOR_MISMATCH");
+	expect(readFileSync(liveDb)).toEqual(before);
+	expect(statSync(liveDb).mtimeMs).toBe(beforeMtime);
+});
 
 isolatedTest("planning convert apply preserves prior acceptance while grouping repeated contributions", async () => {
 	const trackerRoot = join(scratch, "apply-grouped-tracker");

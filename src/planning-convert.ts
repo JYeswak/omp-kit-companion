@@ -1,8 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, parse, resolve, sep } from "node:path";
 import type { PresentationResult } from "./output.ts";
 import { scorePlanningSnapshot, type MissionScore, type PlanningBead, type PlanningScoreSnapshot } from "./planning-score.ts";
+import { resolveNativeBr } from "./kitlib/readonly-br.ts";
+import { runSync } from "./kitlib/run.ts";
 
 type PlanItem = {
 	slug: string;
@@ -635,7 +637,7 @@ function safeTrackerRoot(path: string, cwd: string): { trackerRoot: string; comm
 }
 
 
-function runBr(args: string[], database: string, cwd: string, input?: string, actor = "planning-convert-dry-run"): CapturedCommand {
+function runBrCommand(args: string[], database: string, cwd: string, input?: string, actor = "planning-convert-dry-run"): CapturedCommand {
 	try {
 		const result = spawnSync("br", [...args, "--db", database, "--actor", actor, ...NATIVE_ARGS, "--json"], {
 			cwd, input, encoding: "utf8", timeout: BR_TIMEOUT_MS, maxBuffer: BR_MAX_BUFFER,
@@ -990,7 +992,7 @@ function runPlanningConvertApply(
 	data.db_dir = tracker.trackerRoot;
 	data.database_path = tracker.database;
 	const runApplyBr = (args: string[], database: string, commandCwd: string, input?: string): CapturedCommand =>
-		runBr(args, database, commandCwd, input, actor);
+		runBrCommand(args, database, commandCwd, input, actor);
 
 	const listResult = runApplyBr(["list", "--all", "--limit", "0"], tracker.database, tracker.commandCwd);
 	data.br_list_exit_code = listResult.exit_code;
@@ -1520,6 +1522,40 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 		initial.db_refusal = database.error;
 		return finish(initial, 1);
 	}
+	const nativeBr = resolveNativeBr(process.env.PATH);
+	if (!nativeBr) {
+		initial.overall = "REFUSED";
+		initial.db_refusal = "A native br executable is required for the isolated dry-run database";
+		return finish(initial, 1);
+	}
+	// This closure is created only after isolated DB admission; apply retains PATH br.
+	const runBr = (args: string[], db: string, commandCwd: string, input?: string): CapturedCommand => {
+		const descriptionPath = join(database.directory, "conversion-description.txt");
+		const nativeArgs = [...args];
+		let descriptionCreated = false;
+		try {
+			if (input !== undefined) {
+				const descriptionIndex = nativeArgs.indexOf("--description-file");
+				if (descriptionIndex < 0 || nativeArgs[descriptionIndex + 1] !== "-")
+					throw new Error("Dry-run description input requires --description-file -");
+				writeFileSync(descriptionPath, input, { flag: "wx", mode: 0o600 });
+				nativeArgs[descriptionIndex + 1] = descriptionPath;
+				descriptionCreated = true;
+			}
+			const result = runSync([nativeBr, ...nativeArgs, "--db", db, "--actor", "planning-convert-dry-run", ...NATIVE_ARGS, "--json"], {
+				cwd: commandCwd, deadline_s: BR_TIMEOUT_MS / 1000, max_output_bytes: BR_MAX_BUFFER,
+				env: { ...process.env, RUST_LOG: "warn" },
+			});
+			return { exit_code: result.rc, stdout: Buffer.from(result.stdout).toString(), stderr: Buffer.from(result.stderr).toString(),
+				error: result.timed_out ? "br dry-run command timed out" : result.truncated ? "br dry-run command exceeded output limit" : null };
+		} catch (error) {
+			return { exit_code: null, stdout: "", stderr: "", error: error instanceof Error ? error.message : String(error) };
+		} finally {
+			if (descriptionCreated) {
+				try { unlinkSync(descriptionPath); } catch { /* absent when creation failed */ }
+			}
+		}
+	};
 	initial.db_dir = database.directory;
 	initial.database_path = database.database;
 	const itemsToCreate = items;
