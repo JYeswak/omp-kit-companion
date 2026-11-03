@@ -23,6 +23,8 @@ function legacyHome() {
 function run(home: string, args: string[]) {
 	const { XDG_STATE_HOME: _unset, ...inherited } = process.env;
 	const result = Bun.spawnSync([process.execPath, cli, ...args, "--json"], {
+		// The state-root specimen is the project too: don't audit the caller's live checkout.
+		cwd: home,
 		env: { ...inherited, HOME: home }, stdout: "pipe", stderr: "pipe",
 	});
 	return { code: result.exitCode, envelope: JSON.parse(result.stdout.toString()), stderr: result.stderr.toString() };

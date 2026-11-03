@@ -4,6 +4,8 @@ import { join, resolve } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
 import { PROFILE_RECIPE_KINDS } from "../../src/profile-recipes.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { cliOutputBundle } from "./cli-bundle-fixture.ts";
+import { runFixture } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const cli = resolve(import.meta.dir, "../../src/cli.ts");
@@ -29,13 +31,18 @@ test("rendered CLI output never names internal tracker ids", () => {
 	const { XDG_STATE_HOME: _state, XDG_DATA_HOME: _data, XDG_CONFIG_HOME: _config, ...inherited } = process.env;
 	const hits: { argv: string; id: string }[] = [];
 	const silent: { argv: string; code: number }[] = [];
+	// Help, grammar and examples are declarative output. Bundle their real CLI
+	// once instead of loading its entire module graph for every fresh process.
+	// Runtime commands retain the source entry point and its checkout identity.
+	const outputCli = cliOutputBundle();
 	for (const args of surfaces) {
-		const result = Bun.spawnSync([process.execPath, cli, ...args], {
-			env: { ...inherited, HOME: home }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+		const declarative = args.length === 0 || ["--version", "-V", "help", "capabilities", "schema", "quickstart", "examples", "no-such-command"].includes(args[0]!);
+		const result = runFixture([process.execPath, declarative ? outputCli : cli, ...args], {
+			cwd: home, env: { ...inherited, HOME: home }, floor_s: 120,
 		});
 		const argv = `omp-kit ${args.join(" ")}`.trim();
-		const output = `${result.stdout.toString()}${result.stderr.toString()}`;
-		if (output.trim() === "") silent.push({ argv, code: result.exitCode });
+		const output = `${new TextDecoder().decode(result.stdout)}${new TextDecoder().decode(result.stderr)}`;
+		if (output.trim() === "") silent.push({ argv, code: result.rc ?? -1 });
 		for (const match of output.matchAll(INTERNAL_ID)) hits.push({ argv, id: match[0] });
 	}
 	// A surface that printed nothing would pass the scan vacuously.
