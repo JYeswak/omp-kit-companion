@@ -36,10 +36,10 @@ seed() {
 	git -C "$1" init -q --template= -b main
 	git -C "$1" config user.email t@example.invalid
 	git -C "$1" config user.name t
-	for path in scripts/full-suite-verdict.sh scripts/full-suite-verdict-store.py scripts/suite-metrics.py \
-		scripts/suite-hermetic-env.sh scripts/kitlib_run.py scripts/kitlib_tmp.py scripts/pysafe.py \
-		scripts/kitlib-tmp.sh scripts/test-budget.ts scripts/kitlib_io.py scripts/kitlib_jsonl.py \
-		scripts/kitlib_lock.py .github/test-budget.json scripts/release-verdict.sh scripts/verdict-culprit.py; do
+	judging_files=$(PYTHONPATH="$KITREPO/scripts" python3 -m suite-metrics judging-files) || return 1
+	for path in $judging_files scripts/kitlib_io.py scripts/kitlib_jsonl.py \
+		scripts/kitlib_lock.py scripts/release-verdict.sh scripts/verdict-culprit.py; do
+		mkdir -p "$1/$(dirname "$path")" || return 1
 		cp "$KITREPO/$path" "$1/$path" || exit 1
 	done
 	cat >"$1/scripts/fresh-gate.sh" <<'EOF'

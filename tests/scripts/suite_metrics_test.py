@@ -28,13 +28,7 @@ from kitlib_tmp import owned_tmp
 from kitlib_run import RunResult
 
 HELPER = ROOT / "scripts/suite-metrics.py"
-JUDGING_FILES = (
-    "scripts/full-suite-verdict.sh", "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
-    "scripts/full-suite-verdict-store.py",
-    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
-    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
-    ".github/test-budget.json",
-)
+JUDGING_FILES = metrics.JUDGING_FILES
 
 
 def row(path: str, rc: int = 0) -> dict:
@@ -49,6 +43,64 @@ def row(path: str, rc: int = 0) -> dict:
 
 
 class SuiteMetricsTests(unittest.TestCase):
+    def test_judging_files_command_preserves_an_added_member(self) -> None:
+        import contextlib
+        import io
+        from unittest.mock import patch
+        planted = "scripts/planted-judge.py"
+        with patch.object(metrics, "JUDGING_FILES", (*metrics.JUDGING_FILES, planted)):
+            with patch.object(sys, "argv", [str(HELPER), "judging-files"]):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(metrics.main(), 0)
+                self.assertEqual(output.getvalue().splitlines(), [*JUDGING_FILES, planted])
+
+    def test_literal_closure_copy_is_reported(self) -> None:
+        with owned_tmp("judging-copy-test") as directory:
+            planted = Path(directory) / "fixture.test.ts"
+            planted.write_text("const files = " + json.dumps(list(JUDGING_FILES)) + ";\n")
+            self.assertEqual(metrics.judging_file_copies([planted]), [str(planted)])
+            planted.write_text('const files = readCanonicalClosure();\n')
+            self.assertEqual(metrics.judging_file_copies([planted]), [])
+
+    def test_migrated_fixtures_use_the_canonical_closure(self) -> None:
+        fixtures = [
+            "tests/cli/fresh-gate.helpers.ts", "tests/cli/ci-only-verdict-fixtures.sh",
+            "tests/cli/package-release.test.ts", "tests/cli/portable-paths.test.ts",
+            "tests/cli/savefirst-pre-push.test.sh", "tests/cli/tag-after-green.test.sh",
+            "tests/cli/verdict-culprit.test.sh",
+        ]
+        paths = [ROOT / name for name in fixtures]
+        self.assertEqual(metrics.judging_file_copies(paths), [])
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertIn("judging-files", path.read_text())
+
+    def test_ci_only_fixture_copies_a_planted_judged_file(self) -> None:
+        import shutil
+        from kitlib_run import run
+        with owned_tmp("judging-fixture-test") as directory:
+            source, fixture = Path(directory) / "source", Path(directory) / "fixture"
+            for name in (*JUDGING_FILES, "scripts/gate-ci-only.tsv", "scripts/release-verdict.sh"):
+                destination = source / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / name, destination)
+            planted = "additional/judged.txt"
+            (source / planted).parent.mkdir()
+            (source / planted).write_text("planted judged bytes\n")
+            helper = source / "scripts/suite-metrics.py"
+            text = helper.read_text()
+            anchor = 'if __name__ == "__main__":'
+            self.assertEqual(text.count(anchor), 1)
+            helper.write_text(text.replace(anchor, f"JUDGING_FILES = (*JUDGING_FILES, {planted!r})\n\n" + anchor))
+            result = run(
+                ["sh", "-c", '. "$1"; cio_fixture "$2"', "fixture",
+                 str(ROOT / "tests/cli/ci-only-verdict-fixtures.sh"), str(fixture)],
+                env={**os.environ, "KITREPO": str(source)}, deadline_s=30,
+            )
+            self.assertEqual(result.rc, 0, result.stdout + result.stderr)
+            self.assertEqual((fixture / planted).read_bytes(), (source / planted).read_bytes())
+
     def test_missing_declared_file_cannot_certify_complete(self) -> None:
         self.assertFalse(metrics.complete_records([row("a")], ["a", "b"]))
 

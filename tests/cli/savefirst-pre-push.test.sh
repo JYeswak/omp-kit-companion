@@ -21,30 +21,32 @@ SOURCE_IDENTITY=$(bun "$KITREPO/scripts/exact-source.ts" --root "$SOURCE_ROOT") 
 }
 SOURCE="$TMP/exact-source"
 mkdir -p "$SOURCE"
+judging_files=$(PYTHONPATH="$SOURCE_ROOT/scripts" python3 -m suite-metrics judging-files) || exit 1
 if [ "$SOURCE_IDENTITY" = "GIT" ]; then
 	git -C "$SOURCE_ROOT" rev-parse --show-toplevel >/dev/null 2>&1 || {
 		printf 'FAIL SAVEFIRST1 fixture: no Git source checkout at %s\n' "$SOURCE_ROOT" >&2
 		exit 1
 	}
 	SOURCE_SHA=$(git -C "$SOURCE_ROOT" rev-parse HEAD) || exit 1
+	# shellcheck disable=SC2086 # Canonical newline-separated repository paths intentionally become archive operands.
 	git -C "$SOURCE_ROOT" archive --format=tar "$SOURCE_SHA" \
-		scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh scripts/full-suite-verdict-store.py \
-		scripts/suite-metrics.py scripts/suite-hermetic-env.sh scripts/kitlib_run.py scripts/kitlib_tmp.py scripts/pysafe.py scripts/kitlib-tmp.sh scripts/test-budget.ts .github/test-budget.json \
-		src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \
+		$judging_files scripts/pre-push-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts \
+		src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib src/mutations.ts src/regex-guards.ts \
 		config/heavy-labels.json \
 		> "$TMP/exact-source.tar"
 else
 	(
 		cd "$SOURCE_ROOT" || exit 1
+		# shellcheck disable=SC2086 # Canonical newline-separated repository paths intentionally become archive operands.
 		tar -cf "$TMP/exact-source.tar" \
-			scripts/pre-push-gate.sh scripts/fresh-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts scripts/full-suite-verdict.sh scripts/full-suite-verdict-store.py \
-			scripts/suite-metrics.py scripts/suite-hermetic-env.sh scripts/kitlib_run.py scripts/kitlib_tmp.py scripts/pysafe.py scripts/kitlib-tmp.sh scripts/test-budget.ts .github/test-budget.json \
-			src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib/io.ts src/kitlib/proc.ts src/kitlib/run.ts src/mutations.ts src/regex-guards.ts \
+			$judging_files scripts/pre-push-gate.sh scripts/gate-disk-floor.ts scripts/affected-tests.ts \
+			src/heavy.ts src/disk-stage.ts src/state-root.ts src/kitlib src/mutations.ts src/regex-guards.ts \
 			config/heavy-labels.json
 	)
 fi
 tar -xf "$TMP/exact-source.tar" -C "$SOURCE"
-tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.json .github/test-budget.json
+# shellcheck disable=SC2086 # Include every canonical repository-relative judged path as an operand.
+tar -cf "$TMP/source-subset.tar" -C "$SOURCE" scripts src config/heavy-labels.json $judging_files
 
 make_checker_controls() {
 	repo=$1

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as runProcess, type RunResult } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 // Repositories are case-owned; only the immutable installed hook template is shared.
 const test = bunTest.concurrent;
@@ -61,7 +62,7 @@ async function command(
 ) {
 	return runProcess(argv, {
 		cwd,
-		deadline_s: 120,
+		deadline_s: fixtureDeadlineS(120),
 		env: environment(options.env),
 		stdin: options.stdin,
 	});
@@ -175,17 +176,20 @@ async function newPrepushRepo(name: string, includeBaseline = true): Promise<str
 	await gitOkay(repo, "config", "user.email", "portable-paths@example.invalid");
 	await gitOkay(repo, "config", "user.name", "Portable Paths Test");
 	if (includeBaseline) writeFileSync(join(repo, "scripts", "portable-paths-baseline.json"), baseline({}));
+	const judging = await command(["python3", join(repoRoot, "scripts/suite-metrics.py"), "judging-files"], repoRoot);
+	if (judging.rc !== 0) throw new Error(output(judging));
+	const judgingFiles = new TextDecoder().decode(judging.stdout).trim().split("\n");
+	for (const path of judgingFiles) {
+		mkdirSync(join(repo, path, ".."), { recursive: true });
+		copyFileSync(join(repoRoot, path), join(repo, path));
+	}
 	writeFileSync(join(repo, "scripts", "fresh-gate.sh"), "#!/bin/sh\nexit 0\n");
 	writeFileSync(join(repo, "scripts", "regexploit-gate.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n");
 	const baseScripts = [
 		"check-portable-paths.sh",
 		"portable_paths_check.py",
 		"kitlib_ratchet_core.py",
-		"pysafe.py",
-		"kitlib_run.py",
-		"kitlib_tmp.py",
-		"suite-metrics.py",
-		"suite-hermetic-env.sh",
+		// Judge dependencies are copied through the canonical closure above.
 	];
 	for (const file of baseScripts) {
 		const source = join(repoRoot, "scripts", file);
@@ -198,6 +202,7 @@ async function newPrepushRepo(name: string, includeBaseline = true): Promise<str
 		writeFileSync(join(repo, "tests", "cli", name), "#!/bin/sh\nexit 0\n");
 	}
 	const initialPaths = [
+		...judgingFiles,
 		"scripts/fresh-gate.sh",
 		"scripts/regexploit-gate.py",
 		...baseScripts.filter(file => existsSync(join(repo, "scripts", file))).map(file => `scripts/${file}`),
@@ -250,7 +255,7 @@ test("gates: baseline-less repositories admit clean changes without losing the r
 	writeFileSync(join(repo, "extensions", "bad.ts"), 'export const bad = "/Users/josh/x";\n');
 	await gitOkay(repo, "add", "--", "extensions/bad.ts");
 	expectRefusal(await git(repo, "commit", "-m", "[test] reject new baseline-less path"), "extensions/bad.ts:1");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("gates: unborn baseline-less repositories admit safe first commits and reject machine paths", async () => {
 	const cleanRepo = await newUnbornPrecommitRepo("precommit-unborn-clean");
@@ -271,7 +276,7 @@ test("gates: unborn baseline-less repositories admit safe first commits and reje
 	expectRefusal(rejected, "extensions/bad.ts:1");
 	const head = await git(badRepo, "rev-parse", "--verify", "HEAD^{commit}");
 	expect(head.rc).not.toBe(0);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 test("planted negative: removing the installed check lets the forbidden hunk through", async () => {
 	const repo = await newPrecommitRepo("precommit-deleted-check");
 	const hooksResult = await git(repo, "rev-parse", "--git-path", "hooks");
@@ -293,7 +298,7 @@ test("planted negative: removing the installed check lets the forbidden hunk thr
 	}
 	expect(mutantCommit.rc).toBe(0);
 	expect(refusalAssertionFailed).toBe(true);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("gates: pre-commit rejects shipped local paths and exempts tests", async () => {
 	const repo = await newPrecommitRepo("precommit-paths-direct");
@@ -306,7 +311,7 @@ test("gates: pre-commit rejects shipped local paths and exempts tests", async ()
 	await gitOkay(repo, "add", "--", "extensions/foo.ts", "extensions/foo.test.ts");
 	const testControl = await git(repo, "commit", "-m", "[test] test fixture control");
 	if (testControl.rc !== 0) throw new Error(`test-path control failed\n${output(testControl)}`);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("gates: pre-commit rejects joined and tilde machine paths", async () => {
 	const repo = await newPrecommitRepo("precommit-paths-joined-tilde");
@@ -328,7 +333,7 @@ test("gates: pre-commit rejects joined and tilde machine paths", async () => {
 	await gitOkay(repo, "add", "--", "extensions/tilde.ts");
 	const tildeControl = await git(repo, "commit", "-m", "[test] clear tilde path");
 	if (tildeControl.rc !== 0) throw new Error(`tilde-path control failed\n${output(tildeControl)}`);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("gates: pre-commit rejects escaped and nested machine paths", async () => {
 	const repo = await newPrecommitRepo("precommit-paths-escaped-nested");
@@ -347,7 +352,7 @@ test("gates: pre-commit rejects escaped and nested machine paths", async () => {
 	await gitOkay(repo, "add", "--", "extensions/nested.ts");
 	const nestedControl = await git(repo, "commit", "-m", "[test] clear nested path");
 	if (nestedControl.rc !== 0) throw new Error(`nested-path control failed\n${output(nestedControl)}`);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("gates: pre-commit rejects Python and heredoc paths and keeps prefix/comment controls", async () => {
 	const repo = await newPrecommitRepo("precommit-paths-python-heredoc");
@@ -377,7 +382,7 @@ test("gates: pre-commit rejects Python and heredoc paths and keeps prefix/commen
 	writeFileSync(join(repo, "extensions", "heredoc.sh"), "cat <<'EOF'\n/Users/josh/x\nEOF\n");
 	await gitOkay(repo, "add", "--", "extensions/heredoc.sh");
 	expectRefusal(await git(repo, "commit", "-m", "[test] heredoc machine path"), "extensions/heredoc.sh:2");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("allowlist ratchet permits removal of an existing occurrence", async () => {
 	const repo = await newPrecommitRepo("allowlist-removal");
@@ -385,14 +390,14 @@ test("allowlist ratchet permits removal of an existing occurrence", async () => 
 	await gitOkay(repo, "add", "--", "extensions/legacy.ts");
 	const removed = await git(repo, "commit", "-m", "[test] remove legacy path");
 	if (removed.rc !== 0) throw new Error(`allowlisted removal failed\n${output(removed)}`);
-}, 60_000);
+}, fixtureDeadlineS(60) * 1_000);
 
 test("allowlist ratchet refuses a new occurrence in an allowlisted file", async () => {
 	const repo = await newPrecommitRepo("allowlist-new-occurrence");
 	writeFileSync(join(repo, "extensions", "legacy.ts"), 'export const legacy = "/Users/josh/new";\n');
 	await gitOkay(repo, "add", "--", "extensions/legacy.ts");
 	expectRefusal(await git(repo, "commit", "-m", "[test] add path to legacy file"), "extensions/legacy.ts");
-}, 60_000);
+}, fixtureDeadlineS(60) * 1_000);
 
 test("allowlist ratchet permits shrinking the baseline", async () => {
 	const repo = await newPrecommitRepo("allowlist-shrink");
@@ -401,7 +406,7 @@ test("allowlist ratchet permits shrinking the baseline", async () => {
 	await gitOkay(repo, "add", "--", "extensions/legacy.ts", "scripts/portable-paths-baseline.json");
 	const shrunk = await git(repo, "commit", "-m", "[test] shrink path baseline");
 	if (shrunk.rc !== 0) throw new Error(`allowlist shrink failed\n${output(shrunk)}`);
-}, 60_000);
+}, fixtureDeadlineS(60) * 1_000);
 
 test("allowlist ratchet refuses a raised baseline entry", async () => {
 	const repo = await newPrecommitRepo("allowlist-raise");
@@ -414,7 +419,7 @@ test("allowlist ratchet refuses a raised baseline entry", async () => {
 	expect(raised.rc).not.toBe(0);
 	expect(output(raised)).toContain("scripts/portable-paths-baseline.json");
 	expect(output(raised)).toContain("adds or raises allowlist entry extensions/new.ts");
-}, 60_000);
+}, fixtureDeadlineS(60) * 1_000);
 
 test("gates: pre-push uses the base checker and rejects a planted range", async () => {
 	const badRepo = await newPrepushRepo("prepush-paths-bad");
@@ -445,7 +450,7 @@ test("gates: pre-push uses the base checker and rejects a planted range", async 
 	const cleanPush = await runPrepush(cleanRepo, cleanBase, cleanHead);
 	if (cleanPush.rc !== 0) throw new Error(`clean push control failed (${cleanPush.rc})\n${output(cleanPush)}`);
 	expect(output(cleanPush)).toContain("GREEN portable-paths-range");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 test("gates: pre-push admits a clean range without a baseline", async () => {
 	const repo = await newPrepushRepo("prepush-paths-baseline-less", false);
 	const baseResult = await git(repo, "rev-parse", "HEAD");
@@ -460,4 +465,4 @@ test("gates: pre-push admits a clean range without a baseline", async () => {
 	const push = await runPrepush(repo, base, head);
 	if (push.rc !== 0) throw new Error(`baseline-less push failed (${push.rc})\n${output(push)}`);
 	expect(output(push)).toContain("GREEN portable-paths-range");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);

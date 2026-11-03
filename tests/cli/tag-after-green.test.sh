@@ -157,10 +157,11 @@ tag_verdict_cases() {
 	tag_git clone "$TMP/tag-origin.git" "$TMP/tag-work" >/dev/null 2>&1 || return 1
 	work="$TMP/tag-work"
 	mkdir -p "$work/scripts" "$work/.github" "$work/tests/cli" "$work/var/agent-tmp"
-	for file in full-suite-verdict.sh full-suite-verdict-store.py fresh-gate.sh suite-metrics.py suite-hermetic-env.sh kitlib_run.py kitlib_tmp.py pysafe.py kitlib-tmp.sh test-budget.ts; do
-		cp "$SOURCE/$file" "$work/scripts/$file" || return 1
+	judging_files=$(PYTHONPATH="$SOURCE" python3 -m suite-metrics judging-files) || return 1
+	for file in $judging_files; do
+		mkdir -p "$work/$(dirname "$file")" || return 1
+		cp "$SOURCE/../$file" "$work/$file" || return 1
 	done
-	cp "$SOURCE/../.github/test-budget.json" "$work/.github/test-budget.json" || return 1
 	if [ -f "$SOURCE/gate-ci-only.tsv" ]; then cp "$SOURCE/gate-ci-only.tsv" "$work/scripts/gate-ci-only.tsv" || return 1; fi
 	printf '#!/bin/sh\nexit 0\n' > "$work/tests/cli/tag-verdict.test.sh"
 	printf '#!/bin/sh\nexit 0\n' > "$work/tests/cli/tag-other.test.sh"

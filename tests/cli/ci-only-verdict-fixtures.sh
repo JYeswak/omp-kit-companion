@@ -11,9 +11,9 @@ cio_fixture() {
 	git -C "$cio_repo" init -q --template= -b main || return 1
 	git -C "$cio_repo" config user.email t@example.invalid
 	git -C "$cio_repo" config user.name t
-	for cio_path in scripts/release-verdict.sh scripts/suite-metrics.py scripts/kitlib_run.py scripts/kitlib_tmp.py \
-		scripts/pysafe.py scripts/kitlib-tmp.sh scripts/suite-hermetic-env.sh scripts/test-budget.ts \
-		scripts/gate-ci-only.tsv .github/test-budget.json; do
+	cio_judging=$(PYTHONPATH="$KITREPO/scripts" python3 -m suite-metrics judging-files) || return 1
+	for cio_path in scripts/release-verdict.sh scripts/gate-ci-only.tsv $cio_judging; do
+		mkdir -p "$cio_repo/$(dirname "$cio_path")" || return 1
 		cp "$KITREPO/$cio_path" "$cio_repo/$cio_path" || return 1
 	done
 	cp "${CIO_STORE_UNDER_TEST:-$KITREPO/scripts/full-suite-verdict-store.py}" "$cio_repo/scripts/full-suite-verdict-store.py" || return 1

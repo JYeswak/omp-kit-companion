@@ -80,8 +80,17 @@ export function runProbe(fx: SaveFixture, source: string, body: string, cwd = ro
 	const result = runSync(["sh", probe], { env: { ...process.env, ...fx.env }, deadline_s: 120 });
 	return { code: result.rc, out: Buffer.from(result.stdout).toString() + Buffer.from(result.stderr).toString(), seconds: (Date.now() - started) / 1000 };
 }
-// The remaining scripts/ entries of suite-metrics.py JUDGING_FILES, which a fixture judge dir must also carry.
-export const JUDGE_SUPPORT = ["full-suite-verdict.sh", "suite-hermetic-env.sh", "kitlib_run.py", "kitlib_tmp.py", "pysafe.py", "kitlib-tmp.sh"];
+export function copyJudgingFiles(destination: string, exclude: string[] = []): void {
+	const result = runSync(["python3", "-m", "suite-metrics", "judging-files"], { env: { ...process.env, PYTHONPATH: join(root, "scripts") }, deadline_s: 10 });
+	if (result.rc !== 0) throw new Error(Buffer.from(result.stderr).toString());
+	for (const path of Buffer.from(result.stdout).toString().trim().split("\n")) {
+		if (exclude.includes(path)) continue;
+		mkdirSync(resolve(destination, path, ".."), { recursive: true });
+		// Preserve script-relative imports through the source checkout, as the original fixture did.
+		if (path.startsWith("scripts/")) symlinkSync(join(root, path), join(destination, path));
+		else cpSync(join(root, path), join(destination, path));
+	}
+}
 export const SKIP_BUDGET = { FRESH_GATE_SKIP_REGEX: "manifest fixture does not assess regex cost" };
 const FOCUSED_FUNCTIONS = ["fail", "run_step", "heavy_step", "print_budget_skip", "select_affected_tests", "test_workers", "run_affected_tests", "changed_code", "apply_ci_only", "record_run", "gate_focused"];
 export function affectedArchive(fx: SaveFixture, answer: number, expected: number, base = fx.dir): string {
@@ -189,10 +198,8 @@ export function gateTree(fx: SaveFixture, manifest: string): string {
 	mkdirSync(join(dir, "scripts"));
 	symlinkSync(join(root, "src"), join(dir, "src"));
 	for (const name of ["affected-tests.ts", "gate-disk-floor.ts"]) cpSync(join(root, "scripts", name), join(dir, "scripts", name));
-	for (const name of ["full-suite-verdict-store.py", "test-budget.ts", "fresh-gate.sh", ...JUDGE_SUPPORT]) symlinkSync(join(root, "scripts", name), join(dir, "scripts", name));
+	copyJudgingFiles(dir, ["scripts/suite-metrics.py"]);
 	writeFileSync(join(dir, "scripts/suite-metrics.py"), fixtureMetrics(readFileSync(join(root, "scripts/suite-metrics.py"), "utf8")));
-	mkdirSync(join(dir, ".github"));
-	cpSync(join(root, ".github/test-budget.json"), join(dir, ".github/test-budget.json"));
 	writeFileSync(join(dir, "scripts/gate-ci-only.tsv"), manifest);
 	return join(dir, "scripts");
 }

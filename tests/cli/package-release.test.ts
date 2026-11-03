@@ -68,10 +68,9 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	const compiled = Bun.spawnSync([staged.executable, "--info", "--json"], { cwd: output, env: { ...process.env, HOME: output, PATH: stubFirstPath, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" }, stdout: "pipe", stderr: "pipe" });
 	expect(compiled.exitCode).toBe(0);
 	expect(JSON.parse(compiled.stdout.toString()).data.release.source_tag).toBe("v1.2.3");
-	for (const judgeFile of ["scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
-		"scripts/fresh-gate.sh", "scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh",
-		"scripts/kitlib_run.py", "scripts/kitlib_tmp.py", "scripts/pysafe.py", "scripts/kitlib-tmp.sh",
-		"scripts/test-budget.ts", ".github/test-budget.json", "scripts/gate-ci-only.tsv"])
+	const judging = await runBounded(["python3", "-m", "suite-metrics", "judging-files"], { env: { ...process.env, PYTHONPATH: join(repo, "scripts") }, deadline_s: 10 });
+	expect(judging.rc).toBe(0);
+	for (const judgeFile of [...Buffer.from(judging.stdout).toString().trim().split("\n"), "scripts/gate-ci-only.tsv"])
 		expect(staged.files).toContain(judgeFile);
 	const verdictRepo = join(output, "verdict-reader-repo");
 	mkdirSync(verdictRepo);

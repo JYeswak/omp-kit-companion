@@ -490,6 +490,18 @@ def load(args: argparse.Namespace) -> int:
     return 0
 
 
+def judging_file_copies(paths: list[Path]) -> list[str]:
+    """Find fixture-local literal closure lists, including script-basename lists."""
+    names = {name for path in JUDGING_FILES for name in (path, Path(path).name)}
+    findings = []
+    for path in paths:
+        source = path.read_text()
+        matched = {Path(value).name for value in names
+                   if any(quote + value + quote in source for quote in ("'", '"'))}
+        if len(matched) >= 6:
+            findings.append(str(path))
+    return findings
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subs = parser.add_subparsers(dest="action", required=True)
@@ -497,6 +509,9 @@ def main() -> int:
     identity.add_argument("--root", required=True)
     identity.add_argument("--scope", choices=("full", "focused"), required=True)
     subs.add_parser("runtime")
+    subs.add_parser("judging-files", help="Print the canonical judged-file closure, one repository-relative path per line")
+    copies = subs.add_parser("check-judging-copies", help="Reject fixture-local literal copies of the judged-file closure")
+    copies.add_argument("paths", nargs="+")
     child = subs.add_parser("run")
     child.add_argument("--record", required=True)
     child.add_argument("--path", required=True)
@@ -530,6 +545,14 @@ def main() -> int:
     stress.add_argument("paths", nargs="*")
     args = parser.parse_args()
     try:
+        if args.action == "judging-files":
+            print("\n".join(JUDGING_FILES))
+            return 0
+        if args.action == "check-judging-copies":
+            findings = judging_file_copies([Path(path) for path in args.paths])
+            for path in findings:
+                print("JUDGECLOSURE1: literal judging closure: " + path, file=sys.stderr)
+            return int(bool(findings))
         if args.action == "identity":
             print(judge_identity(args.root, args.scope))
             return 0

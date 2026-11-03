@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync
 import { join } from "node:path";
 import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp";
 import { runSync } from "../../src/kitlib/run";
-import { AMPLE, JUDGE_SUPPORT, MANIFEST_HEADER, affectedArchive, assertPhases, candidateRepo, fixtureMetrics, gate, gateFunctions, gateTree, ledger, measuredFiles, root, runFocused, saveFixture } from "./fresh-gate.helpers.ts";
+import { AMPLE, copyJudgingFiles, MANIFEST_HEADER, affectedArchive, assertPhases, candidateRepo, fixtureMetrics, gate, gateFunctions, gateTree, ledger, measuredFiles, root, runFocused, saveFixture } from "./fresh-gate.helpers.ts";
 
 test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file over the heuristic per-file cap", () => {
 	const source = readFileSync(gate, "utf8");
@@ -13,8 +13,8 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file o
 		const scripts = join(judge, "scripts");
 		mkdirSync(scripts, { recursive: true });
 		mkdirSync(join(judge, ".github"));
-		// Every file suite-metrics.py JUDGING_FILES hashes: a gate that exports FRESH_GATE_PASSED_OUT makes the judge read them all.
-		for (const name of ["fresh-gate.sh", "gate-disk-floor.ts", "suite-metrics.py", "full-suite-verdict-store.py", "test-budget.ts", "affected-tests.ts", "gate-ci-only.tsv", ...JUDGE_SUPPORT]) {
+		copyJudgingFiles(judge, [".github/test-budget.json"]);
+		for (const name of ["gate-disk-floor.ts", "affected-tests.ts", "gate-ci-only.tsv"]) {
 			symlinkSync(join(root, "scripts", name), join(scripts, name));
 		}
 		const policy = join(judge, ".github/test-budget.json");
