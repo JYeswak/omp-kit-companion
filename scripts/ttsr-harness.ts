@@ -267,6 +267,7 @@ function contextFor(c: Case): MatchContext {
 function wirePayload(c: Case): string {
 	if (c.source === "tool" && c.tool === "bash") return JSON.stringify({ command: c.snippet });
 	if (c.source === "tool" && c.tool === "eval") return JSON.stringify({ language: "py", code: c.snippet });
+	if (c.source === "tool" && c.tool === "read") return JSON.stringify({ path: c.snippet });
 	return c.snippet;
 }
 function scopeApplies(rule: Rule, c: Case): boolean {

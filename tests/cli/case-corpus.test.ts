@@ -16,8 +16,12 @@ test("native harness rejects malformed corpus shape without discarding shifted f
 		const cases = join(root, "cases.tsv");
 		mkdirSync(rules);
 		writeFileSync(join(rules, "schema-control.md"), "---\ncondition:\n  - 'SCHEMA_CONTROL_TOKEN'\nscope: text\ninterruptMode: never\n---\nIndependent SDK schema control.\n");
+		writeFileSync(join(rules, "read-control.md"), "---\ncondition:\n  - '\"path\":\"control\\.jsonl\\?q=group_by'\nscope: tool:read\ninterruptMode: always\n---\nGroup complete records only after slurping.\n");
 		const fire = "schema-control\tfire\ttext\t-\t-\tSCHEMA_CONTROL_TOKEN\tpositive\t";
 		const quiet = "schema-control\tquiet\ttext\t-\t-\tunrelated prose\tnegative\t";
+		const readFire = "read-control\tfire\ttool\tread\tcontrol.jsonl\tcontrol.jsonl?q=group_by(.status)\tread path serialized as JSON\t";
+		const readQuiet = "read-control\tquiet\ttool\tread\tcontrol.jsonl\tcontrol.jsonl?q=.status\tper-record projection\t";
+		const controls = `${fire}\n${quiet}\n${readFire}\n${readQuiet}\n`;
 		const run = (corpus: string) => {
 			writeFileSync(cases, corpus);
 			const child = Bun.spawnSync([process.execPath, join(ROOT, "scripts/ttsr-harness.ts"), "--gate-json", "--rules", rules, "--cases", cases], {
@@ -25,7 +29,7 @@ test("native harness rejects malformed corpus shape without discarding shifted f
 			});
 			return { code: child.exitCode, output: child.stdout.toString() + child.stderr.toString() };
 		};
-		const valid = run(`${CASE_HEADER}\r\n${fire}\r\n${quiet}\r\n`);
+		const valid = run(`${CASE_HEADER}\n${controls}`);
 		expect(valid.code).toBe(0);
 		const malformedHeader = run(`wrong${CASE_HEADER}\n${fire}\n${quiet}\n`);
 		expect(malformedHeader.code).not.toBe(0);
@@ -33,6 +37,9 @@ test("native harness rejects malformed corpus shape without discarding shifted f
 		const shifted = run(`${CASE_HEADER}\n${fire}\t${JSON.stringify({ tracked: { "scripts/source.ts": "source" } })}\n${quiet}\n`);
 		expect(shifted.code).not.toBe(0);
 		expect(shifted.output).toContain("9 columns, need exactly 8");
+		const unknown = run(`${CASE_HEADER}\n${controls}schema-control\tquiet\ttool\tunknown-tool\t-\tx\tnegative\t\n`);
+		expect(unknown.code).not.toBe(0);
+		expect(unknown.output).toContain("tool=unknown-tool");
 	} finally {
 		owned.cleanup();
 	}
@@ -43,6 +50,15 @@ test("eval is a supported corpus tool without opening the tool enum", () => {
 	const admitted = parseCaseCorpus(row("eval"));
 	expect(admitted.errors).toEqual([]);
 	expect(admitted.cases[0]?.tool).toBe("eval");
+	const unknown = parseCaseCorpus(row("unknown-tool"));
+	expect(unknown.errors).toEqual(["cases line 2: tool=unknown-tool"]);
+});
+
+test("read is a supported corpus tool while unknown tools remain rejected", () => {
+	const row = (tool: string) => `${CASE_HEADER}\ncontrol\tquiet\ttool\t${tool}\tissues.jsonl\tissues.jsonl?q=.status\tread carrier\t\n`;
+	const admitted = parseCaseCorpus(row("read"));
+	expect(admitted.errors).toEqual([]);
+	expect(admitted.cases[0]?.tool).toBe("read");
 	const unknown = parseCaseCorpus(row("unknown-tool"));
 	expect(unknown.errors).toEqual(["cases line 2: tool=unknown-tool"]);
 });

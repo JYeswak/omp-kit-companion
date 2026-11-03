@@ -29,6 +29,8 @@ replacement and the rate measured over 24 h on four live seats (2026-10-19, 59 s
 | Seat state (directors) | `python3 ~/.claude/skills/omp-kit-orchestration/scripts/fleet_seat_audit.py --tabs <session> --json` | tmux capture-pane scrapes: 0 observed; audit 1.01/seat-h |
 | Missing native verb | `omp-kit capabilities --json` first; if no verb fits, apply the gap rule below | gap lines with no bead within 10 lines: 2.88/seat-h (text 2.14, mail 0.74) |
 
+Before invoking tools (DAILYCLASSES): for exact source exports use `scratch new --export` above, not Python `TarFile.extractall(filter=...)` (the host's Python 3.9 rejects that keyword; never remove extraction safety to silence it). A task subagent ignores upgrade notices and finishes its task; only the seat invokes `self_restart.py`. A `read` query on JSONL runs per record, not on a slurped array: `.beads/issues.jsonl?q=group_by(.status)` is invalid for issue objects; use `jq -s 'group_by(.status)' .beads/issues.jsonl` for cross-record grouping, while `?q=.status` remains a per-record query.
+
 ## Gap rule: every gap becomes a bead the same turn
 
 A gap is anything you hit that blocks or degrades the work: a missing verb, a refusal with no

@@ -510,3 +510,11 @@ bash-capped-git-status	quiet	tool	eval	-	rc,out,_=g('status','--porcelain','-ual
 bash-capped-git-status	quiet	tool	eval	-	rc,out,_=g('status','--porcelain','-uall'); Path('owned/status').write_text(out)	CAPPEDREAD1: complete captured inventory retained.	
 bash-capped-git-status	quiet	tool	eval	-	import subprocess\nout = subprocess.check_output(['service','status'], text=True)\nprint(out[:800])	CAPPEDREAD1: non-git status output is outside the rule.	
 bash-capped-git-status	quiet	tool	eval	-	out = 'unrelated data'; print(out[:800])	CAPPEDREAD1: an ordinary non-git slice stays quiet.	
+kit-br-readonly-unsupported	fire	tool	bash	-	br --readonly show bead --json	Unsupported native br flag is corrected before retry.	
+kit-br-readonly-unsupported	quiet	tool	bash	-	br show bead --json	Supported native read remains quiet.	
+kit-br-readonly-unsupported	fire	tool	eval	-	subprocess.run(["br", "--readonly", "--no-auto-import", "show", "cfs-twenty-app-portfolio-hgub5.56.8", "--json"])	DAILYCLASSES row 33 actual argv.	
+kit-br-readonly-unsupported	quiet	tool	eval	-	subprocess.run(["br", "--no-auto-import", "show", "cfs-twenty-app-portfolio-hgub5.56.8", "--json"])	Corrected row 33 argv.	
+kit-jsonl-aggregate	fire	tool	read	.beads/issues.jsonl	.beads/issues.jsonl?q={export_rows:length,statuses:(group_by(.status)|map({status:.[0].status,count:length}))}	DAILYCLASSES actual inventory grouped an individual issue object.	
+kit-jsonl-aggregate	quiet	tool	read	.beads/issues.jsonl	.beads/issues.jsonl?q={status:.status}	Per-record object projection remains supported.	
+kit-jsonl-aggregate	fire	tool	read	.beads/issues.jsonl	.beads/issues.jsonl?q=group_by(.status)	Top-level grouping requires slurp.	
+kit-jsonl-aggregate	quiet	tool	read	.beads/issues.jsonl	.beads/issues.jsonl?q=.labels|group_by(.)	Grouping an explicit nested array is not cross-record grouping.	

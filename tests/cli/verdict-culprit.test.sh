@@ -4,6 +4,60 @@
 # the last main-role PASS), records it as the verdict's validated `culprit` object, adds one REWORK
 # comment to the culprit's bead, and proposes (never runs) a forward revert when the next judged head
 # is red with the same culprit. A head whose failing file passes on rerun is a flake: nobody is blamed.
+# --algorithm-only runs the boundary controls without exports, suites, git, or tracker writes.
+{
+	PYTHONDONTWRITEBYTECODE=1 python3 - "${2:-$(dirname -- "$0")/../../scripts}" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+scripts = Path(sys.argv[1]).resolve()
+spec = importlib.util.spec_from_file_location("culprit", scripts / "verdict-culprit.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.git = lambda _repo, _verb, ref: ref.split("^")[0]
+module.commit_identity = lambda _repo, _sha: ("agent@example.invalid", "ompkit-test")
+path = "tests/cli/example.test.sh"
+files = [(path, "sh")]
+
+class Store:
+    def records(self, tree):
+        return [(None, None, {"verdict": "PASS"})] if tree == "good" else []
+
+class Probe:
+    def __init__(self, mode):
+        self.mode = mode
+        self.calls = []
+        self.counts = {}
+
+    def failing(self, sha, _files, *, stop_at_first):
+        self.calls.append(sha)
+        self.counts[sha] = self.counts.get(sha, 0) + 1
+        failed = sha != "good"
+        if sha == "bad" and self.mode == "alternating":
+            failed = self.counts[sha] % 2 == 1
+        if sha == "good" and self.mode == "predecessor-flips":
+            failed = self.counts[sha] > 1
+        return [path] if failed else []
+
+for mode in ("deterministic", "alternating", "predecessor-flips"):
+    probe = Probe(mode)
+    result = module.attribute(Path("."), ["head", "bad", "good"], Store(), files, probe)
+    if mode == "deterministic":
+        assert result["sha"] == "bad" and result["method"] == "bisect", ("boundary-deterministic must name bad", result)
+        assert probe.calls == ["head", "bad", "bad", "good", "bad", "good"], probe.calls
+    else:
+        assert result["sha"] is None and result["method"] == "unattributed", result
+        assert result["reason"].startswith("unstable boundary:"), result
+        assert len(probe.calls) <= 6, probe.calls
+    print("PASS boundary-" + mode)
+PY
+	algorithm_rc=$?
+	[ "$algorithm_rc" = 0 ] || exit "$algorithm_rc"
+}
+if [ "${1:-}" = --algorithm-only ]; then
+	exit 0
+fi
 # Real full-suite runs on a throwaway repo produce every verdict; br is a fake that logs its calls.
 # shellcheck source=tests/cli/git-env-fixtures.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
@@ -153,10 +207,14 @@ if [ "$out" = "CULPRIT $a1 early@example.invalid ompkit-early" ]; then st=0; els
 ok "$st" "mutant-ignore-pass-caught: want the wrong $a1, got $out"
 tool "$TMP/wrong-side" 's/if bad else/if not bad else/'
 ok $? "mutant-wrong-side-applied"
-# Keeping the wrong half walks to the head itself.
-out=$(dry "$TMP/wrong-side")
-if [ "$out" = "CULPRIT $c3 later@example.invalid ompkit-later" ]; then st=0; else st=1; fi
-ok "$st" "mutant-wrong-side-caught: want the wrong $c3, got $out"
+# A wrong-side search can now be refused as unstable instead of falsely naming the head.
+# That still breaks deterministic attribution: run the SAME acceptance against both copies.
+out=$(sh "$KITREPO/tests/cli/verdict-culprit.test.sh" --algorithm-only "$TMP/control/scripts" 2>&1); rc=$?
+if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -q '^PASS boundary-deterministic$'; then st=0; else st=1; fi
+ok "$st" "boundary-deterministic-unmutated: rc=$rc out=$out"
+out=$(sh "$KITREPO/tests/cli/verdict-culprit.test.sh" --algorithm-only "$TMP/wrong-side/scripts" 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -q 'AssertionError:.*boundary-deterministic must name bad'; then st=0; else st=1; fi
+ok "$st" "mutant-wrong-side-caught: deterministic acceptance must fail, rc=$rc out=$out"
 if [ "$(wc -l <"$br_log" | tr -d ' ')" = 1 ] && [ "$(culprit_field "$rec3" sha)" = "\"$c2\"" ]; then st=0; else st=1; fi
 ok "$st" "dry-runs-write-nothing: br=$(cat "$br_log")"
 

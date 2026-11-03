@@ -11,6 +11,8 @@ runner returns nonzero. Steps:
      kitlib tmp dir; when none fails again the red was a flake and no commit is blamed;
   4. otherwise bisect the first-parent commits newer than the newest commit whose tree has a valid
      main-role PASS (at most 8, the head included), rerunning only the files that failed again;
+     Confirm the selected boundary with two fresh probes on each side before naming anyone;
+     a changing candidate or predecessor is unattributed, not a REWORK accusation.
   5. record the result as the verdict's `culprit` object (full-suite-verdict-store.py validates
      it), print `CULPRIT <sha> <author> <bead>` or `CULPRIT none (<reason>)`, and add a REWORK
      comment to the culprit's bead (`br comments add`, in the tracker that owns its prefix).
@@ -229,6 +231,14 @@ def attribute(repo: Path, chain: list[str], store: Store, files: list[tuple[str,
         return none(f"red before the {len(window)}-commit window; no main-role PASS within {MAX_COMMITS} "
                     "first-parent commits", reproduced)
     sha = window[lo]
+    # DAILYCLASSES: a single load-flaky probe is not a causal boundary. At most four
+    # additional exports, each probing at most MAX_FILES files, and stop on instability.
+    predecessor = window[lo - 1] if lo else chain[good]
+    for _repeat in range(2):
+        if set(rerun.failing(sha, reproducing, stop_at_first=False)) != again:
+            return none("unstable boundary: candidate failures changed on confirmation", reproduced)
+        if rerun.failing(predecessor, reproducing, stop_at_first=False):
+            return none("unstable boundary: predecessor failed on confirmation", reproduced)
     author, bead = commit_identity(repo, sha)
     return {"sha": sha, "author": author, "bead": bead, "failing_files": reproduced, "method": "bisect", "reason": ""}
 
