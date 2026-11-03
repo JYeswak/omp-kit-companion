@@ -5,7 +5,7 @@ import policy from "../../src/secret-output-policy.v1.json";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fingerprintOfSecret, redactBindingFields, scrubText } from "../../extensions/secret-output-guard.ts";
-import { checkPackagedExtensionLoads } from "../../scripts/package-release.ts";
+import { checkPackagedExtensionLoads, packageSecretOutputGuard } from "../../scripts/package-release.ts";
 import { runFixture, runFixtureAsync } from "./fixture-process.ts";
 
 const scratch = ownedTmp("mine-replay-policy");
@@ -188,17 +188,19 @@ test("current package ship list includes replay dependencies and staged guard re
 	// Trusted current packager data declaration, not HEAD's archived source.
 	const files: unknown = new Function(`return (${source.slice(start + opener.length, end + 1)})`)();
 	expect(Array.isArray(files)).toBe(true);
-	for (const file of ["scripts/gate_event_replay.py", "src/cc-credential-shapes.v1.json", "src/secret-output-policy.v1.json"]) {
+	for (const file of ["scripts/gate_event_replay.py", "scripts/cc-credential-shapes.v1.json", "scripts/secret-output-policy.v1.json"]) {
 		expect(files).toContain(file);
 	}
+	// The package ships no src/ (REDMAIN family C): the staged extension imports the policy from scripts/.
 	const root = join(scratch.path, "current-package-policy");
 	mkdirSync(join(root, "extensions"), { recursive: true });
-	mkdirSync(join(root, "src"));
-	for (const file of ["extensions/secret-output-guard.ts", "src/secret-output-policy.v1.json"]) {
-		cpSync(resolve(import.meta.dir, "../..", file), join(root, file));
-	}
+	mkdirSync(join(root, "scripts"));
+	const repoRoot = resolve(import.meta.dir, "../..");
+	writeFileSync(join(root, "extensions/secret-output-guard.ts"),
+		packageSecretOutputGuard(readFileSync(join(repoRoot, "extensions/secret-output-guard.ts"))));
+	cpSync(join(repoRoot, "src/secret-output-policy.v1.json"), join(root, "scripts/secret-output-policy.v1.json"));
 	expect(checkPackagedExtensionLoads(root)).toEqual([]);
-	unlinkSync(join(root, "src/secret-output-policy.v1.json"));
+	unlinkSync(join(root, "scripts/secret-output-policy.v1.json"));
 	const failures = checkPackagedExtensionLoads(root);
 	expect(failures.map(failure => failure.file)).toEqual(["extensions/secret-output-guard.ts"]);
 	expect(failures[0]?.error).toContain("secret-output-policy.v1.json");

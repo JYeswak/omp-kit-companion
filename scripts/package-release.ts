@@ -34,7 +34,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh",
 	"scripts/check-gap-mention.sh", "scripts/kitlib-findings.sh",
 	"scripts/kitlib_tmp.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib_lock.py", "scripts/kitlib_io.py", "scripts/kitlib_proc.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_poll.py", "scripts/kitlib_artifact.py", "scripts/tempsafe_check.py", "scripts/check-staged-tempsafe.sh",
-	"scripts/gate_event_replay.py", "src/cc-credential-shapes.v1.json", "src/secret-output-policy.v1.json",
+	"scripts/gate_event_replay.py", "scripts/cc-credential-shapes.v1.json", "scripts/secret-output-policy.v1.json",
 	"scripts/test-budget.ts", "scripts/gate-ci-only.tsv", ".github/test-budget.json",
 	"scripts/kitlib_ratchet_core.py", "scripts/kitlib_ratchet.py", "scripts/check-staged-kitlib.sh",
 	"scripts/kitlib-ratchet-signal-baseline.json",
@@ -157,6 +157,13 @@ export function packageSourceRevision(sourceRoot: string, sourcePackage: Uint8Ar
  } catch {
   return null;
  }
+}
+export function packageSecretOutputGuard(source: Buffer): Buffer {
+	const file = "extensions/secret-output-guard.ts";
+	const from = '"../src/secret-output-policy.v1.json"';
+	const text = source.toString("utf8");
+	if (text.split(from).length !== 2) fail(`PACKAGE_IMPORT_MISMATCH: ${file}: expected exactly one ${from}`);
+	return Buffer.from(text.replace(from, '"../scripts/secret-output-policy.v1.json"'));
 }
 
 function safeSource(name: string): Buffer {
@@ -361,6 +368,11 @@ async function run(): Promise<void> {
 			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));
 			else if (name === "MANIFEST.tsv") content.set(name, ruleManifest);
 			else if (name === "licenses/tern-sdk/LICENSE") content.set(name, safeSource("src/tern/LICENSE"));
+			else if (name === "scripts/cc-credential-shapes.v1.json" || name === "scripts/secret-output-policy.v1.json")
+				// Runtime replay data lives beside its Python consumer, never in a source-only tree.
+				content.set(name, safeSource(`src/${name.slice("scripts/".length)}`));
+			else if (name === "extensions/secret-output-guard.ts")
+				content.set(name, packageSecretOutputGuard(safeSource(name)));
 			else if (BUNDLE_ERRORS[name]) {
 				// Bundle local helpers so the installed script needs no checkout source tree.
 				const bundled = await Bun.build({ entrypoints: [join(root, name)], target: "bun", format: "esm", minify: false });

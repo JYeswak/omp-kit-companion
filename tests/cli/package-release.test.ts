@@ -5,13 +5,25 @@ import { delimiter, dirname, join } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset } from "../../src/kit-release.ts";
-import { packageSourceRevision, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
+import { packageSourceRevision, packageSecretOutputGuard, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 import { repo, caseCwd, nativeCacheEnv, output, stubFirstPath, authorityPath, platform, key, indexPath,
  asset, bytes, index, sourceRevision, sourceGit, installArgs, installCandidate, run, candidateEnv,
  type Candidate } from "./package-release-fixture.ts";
+test("native release refuses a drifted or duplicate policy import before staging", () => {
+	const source = readFileSync(join(repo, "extensions", "secret-output-guard.ts"));
+	const original = '"../src/secret-output-policy.v1.json"';
+	expect(packageSecretOutputGuard(source).toString()).toContain('"../scripts/secret-output-policy.v1.json"');
+	for (const planted of [
+		source.toString().replace(original, "'../src/secret-output-policy.v1.json'"),
+		`${source.toString()}\n// ${original}\n`,
+	]) {
+		expect(() => packageSecretOutputGuard(Buffer.from(planted)))
+			.toThrow(`PACKAGE_IMPORT_MISMATCH: extensions/secret-output-guard.ts: expected exactly one ${original}`);
+	}
+});
 test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
 	const plan = await previewKitRelease({ currentVersion: "1.2.2", platform, sourceTag: "v1.2.3", fetchIndex: async () => index });
 	expect(plan.exitCode).toBe(0);
@@ -47,6 +59,25 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	expect(lstatSync(join(staged.root, "scripts", "runtime-adapter.sh")).mode & 0o111).toBeGreaterThan(0);
 	for (const forbidden of ["reports/", ".git/", ".beads/", "var/", "src/", "private/"])
 		expect(staged.files.some(file => file.startsWith(forbidden))).toBe(false);
+	for (const asset of ["cc-credential-shapes.v1.json", "secret-output-policy.v1.json"]) {
+		expect(staged.files).toContain(`scripts/${asset}`);
+		expect(readFileSync(join(staged.root, "scripts", asset)))
+			.toEqual(readFileSync(join(output, "archived-source", "src", asset)));
+	}
+	expect(checkPackagedExtensionLoads(staged.root)).toEqual([]);
+	const policyPath = join(staged.root, "scripts", "secret-output-policy.v1.json");
+	const policyBytes = readFileSync(policyPath);
+	rmSync(policyPath);
+	try {
+		expect(checkPackagedExtensionLoads(staged.root).some(failure => failure.file === "extensions/secret-output-guard.ts")).toBe(true);
+	} finally {
+		writeFileSync(policyPath, policyBytes);
+	}
+	expect(checkPackagedExtensionLoads(staged.root)).toEqual([]);
+	const replayPolicy = await runBounded(["python3", "-c",
+		"from gate_event_replay import ScrubPolicy, CredentialScreen; ScrubPolicy(); CredentialScreen()"],
+		{ cwd: staged.root, env: { ...process.env, PYTHONPATH: join(staged.root, "scripts"), PYTHONDONTWRITEBYTECODE: "1" }, deadline_s: 10 });
+	expect(replayPolicy.rc, Buffer.from(replayPolicy.stderr).toString()).toBe(0);
 	for (const essential of ["bin/omp-kit", "scripts/runtime-adapter.sh", "scripts/e2e-live.sh", "scripts/ladder.sh",
 		"scripts/limit-process-tree.sh", "scripts/external-live.mjs", "checkers/check-readiness.sh", "checkers/check-claim-discipline.sh",
 		"tests/live/mock-model.mjs", "MANIFEST.tsv", "cases/cases.tsv", "LICENSE"])
