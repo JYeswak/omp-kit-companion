@@ -59,6 +59,16 @@ export const RLIMIT_PROLOGUE = 'cpu=$1; as=$2; shift 2; '
 	+ 'if [ "$as" != - ]; then ulimit -v "$as" || { printf "kitlib-run: cannot apply RLIMIT_AS=%sKiB\\n" "$as" >&2; exit 126; }; fi; '
 	+ 'exec "$@"';
 
+/** Monotonic parent observations, in performance.now() milliseconds.
+ * `started_ms` is Bun.spawn's return boundary, not the child's first instruction;
+ * `exited_ms` is when its exit promise is observed. Unobserved boundaries stay null.
+ * A supplied sink is reset for each run, including a spawn that throws. */
+export interface RunTimings {
+	spawn_started_ms: number | null;
+	started_ms: number | null;
+	exited_ms: number | null;
+}
+
 export interface RunOptions {
 	/** Wall-clock bound in seconds; required and positive. */
 	deadline_s: number;
@@ -82,6 +92,8 @@ export interface RunOptions {
 	max_total_bytes?: number;
 	/** Bytes the sink queue may hold before chunks are dropped and counted. */
 	max_sink_queue_bytes?: number;
+	/** Optional lifecycle observations; leaves the existing result contract unchanged. */
+	timings?: RunTimings;
 }
 
 export type OutputStream = "stdout" | "stderr";
@@ -264,11 +276,22 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 	abort?.throwIfAborted();
 
 	const started = performance.now();
+	const timings = options.timings;
+	if (timings) {
+		timings.spawn_started_ms = started;
+		timings.started_ms = null;
+		timings.exited_ms = null;
+	}
 	const stdinSpec = stdin ?? "ignore";
 	const io = inherit.length === 0
 		? { stdin: stdinSpec, stdout: "pipe" as const, stderr: "pipe" as const }
 		: { stdio: inheritedStdio(stdinSpec, inherit) };
 	const child = Bun.spawn(args, { cwd: options.cwd, env: options.env, ...io, detached: true });
+	if (timings) timings.started_ms = performance.now();
+	const childExited = timings ? child.exited.then(code => {
+		timings.exited_ms = performance.now();
+		return code;
+	}) : child.exited;
 	const pgid = child.pid;
 	liveGroups.add(pgid);
 	if (!exitSweepInstalled) {
@@ -292,7 +315,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		const deadlineAt = started + deadlineMs;
 		const remaining = () => deadlineAt - performance.now();
 		// Every wait also ends on abort, so an aborted call keeps no timer alive.
-		const exited = await within(Promise.race([child.exited, aborted]), remaining());
+		const exited = await within(Promise.race([childExited, aborted]), remaining());
 		if (abort?.aborted) throw abort.reason;
 		if (exited) {
 			const pipeWait = Math.min(graceMs, remaining());
@@ -313,18 +336,18 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		if (timedOut) {
 			killed = true;
 			signalGroup("SIGTERM");
-			await within(child.exited, graceMs);
+			await within(childExited, graceMs);
 			signalGroup("SIGKILL");
 			await within(pipesClosed, DRAIN_MS);
 		}
-		await within(child.exited, graceMs);
+		await within(childExited, graceMs);
 		settled = true;
 	} finally {
 		abort?.removeEventListener("abort", abortListener);
 		if (!settled) {
 			// Aborted (or any other exception) mid-run: the group dies first.
 			signalGroup("SIGKILL");
-			await within(child.exited, graceMs);
+			await within(childExited, graceMs);
 		}
 		await Promise.all([out.cancel(), err.cancel()]);
 		await pipesClosed;

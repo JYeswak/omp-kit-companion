@@ -9,7 +9,7 @@ import { closeSync, existsSync, openSync, readFileSync, realpathSync, rmSync, wr
 import { constants } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
-import { run, runSync, type RunOptions, type RunResult, type RunSyncOptions } from "../../src/kitlib/run";
+import { run, runSync, type RunOptions, type RunResult, type RunSyncOptions, type RunTimings } from "../../src/kitlib/run";
 
 type Expect = {
 	rc?: number; rc_signal?: string; timed_out?: boolean; killed?: boolean; truncated?: boolean;
@@ -266,6 +266,27 @@ console.log(JSON.stringify({ rc: result.rc, timed_out: result.timed_out,
 	test("a missing deadline is refused", async () => {
 		await expect(run(["/bin/sh", "-c", "exit 0"], {} as RunOptions)).rejects.toThrow(TypeError);
 	});
+});
+
+test("kitlib run lifecycle timing reports spawn return and observed exit, leaving missing starts unknown", async () => {
+	const timing: RunTimings = { spawn_started_ms: null, started_ms: null, exited_ms: null };
+	const before = performance.now();
+	// Timing boundaries are the subject, not a short launch-to-exit deadline.
+	// Use the measured observer startup hang guard; all ordering assertions remain.
+	const result = await run(["/bin/sh", "-c", "exit 7"], { deadline_s: 30, timings: timing });
+	const after = performance.now();
+	expect(result.rc).toBe(7);
+	expect(timing.spawn_started_ms).toBeGreaterThanOrEqual(before);
+	expect(timing.started_ms).toBeGreaterThanOrEqual(timing.spawn_started_ms!);
+	expect(timing.exited_ms).toBeGreaterThanOrEqual(timing.started_ms!);
+	expect(timing.exited_ms).toBeLessThanOrEqual(after);
+	expect(result.elapsed_s * 1000).toBeGreaterThanOrEqual(timing.exited_ms! - timing.spawn_started_ms!);
+
+	// Reusing a timing sink must not carry an earlier process's start/exit into
+	// a failed spawn. A missing executable has no observed start or exit.
+	await expect(run(["/no-such-kitlib-run-executable"], { deadline_s: 30, timings: timing })).rejects.toThrow();
+	expect(timing.started_ms).toBeNull();
+	expect(timing.exited_ms).toBeNull();
 });
 
 // TypeScript-only surface (Python cancellation is pysafe's Cancelled unwinding).

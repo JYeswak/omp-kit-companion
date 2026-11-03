@@ -6,7 +6,8 @@ import process from "node:process";
 import { inspectStateRoot } from "./state-root.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { incarnation, incarnationSync, isDead, normalizeStart, probeIncarnation } from "./kitlib/proc.ts";
-import { run } from "./kitlib/run.ts";
+import { run, type RunTimings } from "./kitlib/run.ts";
+import { appendJsonl } from "./kitlib/jsonl.ts";
 import { admitDiskWork } from "./disk-stage.ts";
 import type { LoadJob } from "./load-doctor.ts";
 import labelBudgets from "../config/heavy-labels.json";
@@ -20,7 +21,7 @@ const MAX_WAIT_SECONDS = 900;
 type HeavyJob = LoadJob & { argv: string[]; process_start: string; queued_at: string; started_at?: string };
 type DiskObserver = "sbh" | "statfs" | "auto";
 const DISK_OBSERVERS: readonly DiskObserver[] = ["sbh", "statfs", "auto"];
-type HeavyConfig = { slots: number; max_wait_s: number; disk_observer: DiskObserver; disk_floor_pct: number | null; runtime_budget_s?: Record<string, number> };
+type HeavyConfig = { slots: number; max_wait_s: number; disk_observer: DiskObserver; disk_floor_pct: number | null; sbh_deadline_s?: number; runtime_budget_s?: Record<string, number> };
 type MachineLoad = { load1: number; ncpu: number };
 type HeavySignal = "SIGINT" | "SIGTERM";
 type HeavyChild = { exited: Promise<number>; kill(signal: HeavySignal | "SIGKILL"): void };
@@ -64,6 +65,7 @@ function loadConfig(override?: DiskObserver): HeavyConfig {
 	const maxWait = "max_wait_s" in value ? value.max_wait_s : MAX_WAIT_SECONDS;
 	const observer: unknown = "disk_observer" in value ? value.disk_observer : "auto";
 	const floor: unknown = "disk_floor_pct" in value ? value.disk_floor_pct : null;
+	const sbhDeadline = "sbh_deadline_s" in value ? value.sbh_deadline_s : SBH_CHECK_DEADLINE_S;
 	const runtimeBudgets: unknown = "runtime_budget_s" in value ? value.runtime_budget_s : {};
 	if (typeof runtimeBudgets !== "object" || runtimeBudgets === null || Array.isArray(runtimeBudgets) ||
 		Object.values(runtimeBudgets).some(budget => typeof budget !== "number" || !Number.isSafeInteger(budget) || budget <= 0))
@@ -75,7 +77,9 @@ function loadConfig(override?: DiskObserver): HeavyConfig {
 		throw new Error(`invalid heavy-work config: disk_observer must be "sbh", "statfs" or "auto": ${path}`);
 	if (floor !== null && (typeof floor !== "number" || !Number.isFinite(floor) || floor < 0 || floor > 50))
 		throw new Error(`invalid heavy-work config: disk_floor_pct must be 0..50: ${path}`);
-	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: override === "statfs" ? null : floor, runtime_budget_s: runtimeBudgets as Record<string, number> };
+	if (typeof sbhDeadline !== "number" || !Number.isFinite(sbhDeadline) || sbhDeadline <= 0)
+		throw new Error(`invalid heavy-work config: sbh_deadline_s must be positive finite seconds: ${path}`);
+	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: override === "statfs" ? null : floor, sbh_deadline_s: sbhDeadline, runtime_budget_s: runtimeBudgets as Record<string, number> };
 }
 
 export function machineLoadBlockReason(load1: number, ncpu: number): string | null {
@@ -103,6 +107,8 @@ function testFakeLoad(): number | undefined {
  * that contract, is a missing prerequisite rather than pressure. Waiting cannot
  * fix it, so admission fails fast with HEAVY_PREREQ_MISSING instead of
  * deferring 75; the disk check is never skipped.
+ * HEAVYDEFER1: a deadline expiry is temporary uncertainty, not evidence that an
+ * observer is missing. It defers with 75, without admitting or falling back.
  * oq1h.1 (portable default): admission prefers OS-native statfs on the cwd,
  * with sbh as an auto-detected adapter. disk_observer "sbh" keeps the strict
  * contract above byte-for-byte; "statfs" never touches sbh; "auto" (default)
@@ -114,25 +120,41 @@ export const HEAVY_DISK_NEED = "10G";
 export const HEAVY_DISK_NEED_BYTES = 10 * 1024 ** 3;
 /** EX_UNAVAILABLE (sysexits.h): a required observer is missing; distinct from the 75 deferral. */
 export const HEAVY_PREREQ_MISSING = 69;
-export type DiskVerdict = { kind: "ok"; observer: DiskObserver } | { kind: "pressure"; text: string; observer: DiskObserver } | { kind: "unavailable"; text: string; observer: DiskObserver };
+export type DiskVerdict = { kind: "ok"; observer: DiskObserver } | { kind: "pressure"; text: string; observer: DiskObserver } | { kind: "unavailable"; text: string; observer: DiskObserver } | { kind: "timeout"; text: string; observer: DiskObserver };
+type ObserverTiming = {
+	/** Parent-observed Bun.spawn return, never a claim about the child's first instruction. */
+	start_boundary: "spawn-return" | null;
+	spawn_to_start_ms: number | null;
+	start_to_exit_ms: number | null;
+	cleanup_ms: number | null;
+	/** Epoch milliseconds of the observer answer (or observed spawn failure), before decision/cleanup. */
+	answer_observed_at_ms: number;
+	total_ms: number;
+	deadline_ms: number | null;
+};
+type ObservedDiskVerdict = DiskVerdict & { timing: ObserverTiming };
 /** `statfs: 129.2 GB free (13.6%)` for the cwd, or the reason there is no reading; never throws. */
 export function statfsSummary(cwd: string): string {
 	const capacity = statfsCapacity(cwd);
 	if (capacity === null) return "statfs: no reading";
 	return `statfs: ${(capacity.freeBytes / 1024 ** 3).toFixed(1)} GB free (${capacity.freePct.toFixed(1)}%)`;
 }
-// Native sbh check measured 0.06–0.08 s alone and 0.16–0.17 s at 3x.
-// Four seconds gives >20x headroom without the unbounded observer wait that
-// delayed prerequisite refusal by 10.456 s; cleanup still fits its 8 s budget.
-const SBH_CHECK_DEADLINE_S = 4;
+// HEAVYDEFER1: this is a hang guard, not a latency budget. A 15 s diagnostic
+// window completed 33 probes at load1 19.30–19.76: spawn-return to first child
+// clock median 779.809 ms/max 3090.082 ms; child body median 8.252 ms/max 41.632 ms;
+// child-end to observed exit median 1.029 ms/max 1.681 ms. Data:
+// var/agent-tmp/heavy-observer-window.79959/observations.jsonl. Four seconds cut
+// the startup tail under load 25–40; 30 s guards hangs above that observed tail.
+// load.json sbh_deadline_s selects an explicit shorter guard when required.
+const SBH_CHECK_DEADLINE_S = 30;
 
-async function sbhVerdict(sbhBin = "sbh", cwd = process.cwd()): Promise<DiskVerdict> {
+async function sbhVerdict(sbhBin: string, cwd: string, timings: RunTimings, deadlineS: number): Promise<DiskVerdict> {
 	let code: number;
 	try {
 		const result = await run([sbhBin, "check", "--need", HEAVY_DISK_NEED], {
-			cwd, deadline_s: SBH_CHECK_DEADLINE_S, grace_s: 0.2, max_output_bytes: 0,
+			cwd, deadline_s: deadlineS, grace_s: 0.2, max_output_bytes: 0, timings,
 		});
-		if (result.timed_out) return { kind: "unavailable", text: `sbh check timed out after ${SBH_CHECK_DEADLINE_S}s`, observer: "sbh" };
+		if (result.timed_out) return { kind: "timeout", text: `sbh check timed out after ${deadlineS}s`, observer: "sbh" };
 		if (result.rc === null || result.killed) return { kind: "unavailable", text: "sbh check did not complete", observer: "sbh" };
 		code = result.rc;
 	} catch {
@@ -177,23 +199,65 @@ function sbhResolvable(): boolean {
 	}
 	return false;
 }
-export async function diskVerdict(input?: { config?: HeavyConfig; cwd?: string; sbhBin?: string }): Promise<DiskVerdict> {
+function observerTiming(started: number, observer: DiskObserver, timings?: RunTimings, deadlineS = SBH_CHECK_DEADLINE_S): ObserverTiming {
+	const finished = performance.now();
+	const spawning = timings?.spawn_started_ms ?? null;
+	const spawned = timings?.started_ms ?? null;
+	const exited = timings?.exited_ms ?? null;
+	return {
+		start_boundary: spawned === null ? null : "spawn-return",
+		spawn_to_start_ms: spawning === null || spawned === null ? null : spawned - spawning,
+		start_to_exit_ms: spawned === null || exited === null ? null : exited - spawned,
+		cleanup_ms: exited === null ? null : finished - exited,
+		answer_observed_at_ms: performance.timeOrigin + (exited ?? finished),
+		total_ms: finished - started,
+		deadline_ms: observer === "sbh" ? deadlineS * 1000 : null,
+	};
+}
+
+export async function diskVerdict(input?: { config?: HeavyConfig; cwd?: string; sbhBin?: string }): Promise<ObservedDiskVerdict> {
+	const started = performance.now();
 	const observer = input?.config?.disk_observer ?? "auto";
 	const floor = input?.config?.disk_floor_pct ?? null;
 	const cwd = input?.cwd ?? process.cwd();
 	const sbhBin = input?.sbhBin ?? "sbh";
-	if (observer === "sbh") return sbhVerdict(sbhBin, cwd);
-	if (observer === "statfs") return decideDiskPressure(statfsCapacity(cwd), floor);
-	if (sbhResolvable()) {
-		const verdict = await sbhVerdict(sbhBin, cwd);
-		if (verdict.kind === "unavailable")
-			return { kind: "unavailable", text: `${verdict.text} (set disk_observer to "statfs" for OS-native admission)`, observer: "sbh" };
-		return verdict;
+	const deadlineS = input?.config?.sbh_deadline_s ?? SBH_CHECK_DEADLINE_S;
+	let timings: RunTimings | undefined;
+	let verdict: DiskVerdict;
+	if (observer === "sbh" || (observer === "auto" && sbhResolvable())) {
+		timings = { spawn_started_ms: null, started_ms: null, exited_ms: null };
+		verdict = await sbhVerdict(sbhBin, cwd, timings, deadlineS);
+		if (observer === "auto" && verdict.kind === "unavailable")
+			verdict = { ...verdict, text: `${verdict.text} (set disk_observer to "statfs" for OS-native admission)` };
+	} else {
+		verdict = decideDiskPressure(statfsCapacity(cwd), floor);
 	}
-	return decideDiskPressure(statfsCapacity(cwd), floor);
+	return { ...verdict, timing: observerTiming(started, verdict.observer, timings, deadlineS) };
 }
-function prerequisiteMissing(observer: "sbh" | "statfs", text: string): number {
-	process.stderr.write(`heavy: ${observer} unavailable: ${text}; disk admission requires ${observer === "sbh" ? "sbh" : "an observer"}; no command was run\n`);
+
+/**
+ * HEAVYDEFER1: a separate append-only ledger survives removal (or absence) of
+ * the queued job. Read with kitlib readJsonl at $XDG_STATE_HOME/omp-kit/load/
+ * observer-refusals.jsonl. The canonical writer locks, completes the line and
+ * fsyncs before returning; an append failure propagates and never admits work.
+ * Null subprocess boundaries mean no observed process (e.g. missing sbh or statfs).
+ */
+async function recordObserverRefusal(root: string, job: Pick<HeavyJob, "id" | "label">, phase: "disk-stage" | "precheck" | "admission", verdict: Exclude<ObservedDiskVerdict, { kind: "ok" }>): Promise<void> {
+	ensurePrivateDirectory(root);
+	await appendJsonl(join(root, "observer-refusals.jsonl"), () => ({
+		schema_version: 1, ts: new Date().toISOString(), job_id: job.id, pid: process.pid,
+		label: job.label, phase, observer: verdict.observer, kind: verdict.kind, reason: verdict.text,
+		load1: loadavg()[0] ?? null, timing: verdict.timing,
+	}), { deadline_s: 5, durable: true, state_dir: root });
+}
+
+function refuseObserver(verdict: Extract<DiskVerdict, { kind: "unavailable" | "timeout" }>): number {
+	if (verdict.kind === "timeout") {
+		process.stderr.write(`RESOURCE_DEFERRED: ${verdict.text}; disk state unknown; no command was run\n`);
+		process.stderr.write(`deferred: ${verdict.text}\n`);
+		return 75;
+	}
+	process.stderr.write(`heavy: ${verdict.observer} unavailable: ${verdict.text}; disk admission requires ${verdict.observer === "sbh" ? "sbh" : "an observer"}; no command was run\n`);
 	return HEAVY_PREREQ_MISSING;
 }
 
@@ -347,10 +411,19 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		}
 		waitCapS = Number(envMaxWait);
 	}
+	const cwd = process.cwd();
+	const id = randomUUID();
+	const label = options.label || basename(command[0] ?? "heavy");
+	const stateRoot = join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "omp-kit", "load");
 	// A caller-selected statfs observer makes the physical 10 GiB verdict
 	// authoritative; the later check still refuses low or unavailable capacity.
-	const staged = admitDiskWork("heavy", process.cwd(), { allowLowPercentForStatfs: override === "statfs" });
+	const stageStarted = performance.now();
+	const staged = admitDiskWork("heavy", cwd, { allowLowPercentForStatfs: override === "statfs" });
 	if (!staged.allowed) {
+		await recordObserverRefusal(stateRoot, { id, label }, "disk-stage", {
+			kind: staged.code === "DISK_OBSERVER_UNAVAILABLE" ? "unavailable" : "pressure",
+			observer: "statfs", text: staged.code, timing: observerTiming(stageStarted, "statfs"),
+		});
 		process.stdout.write(`${staged.code}\n`);
 		return staged.code === "DISK_OBSERVER_UNAVAILABLE" ? HEAVY_PREREQ_MISSING : 10;
 	}
@@ -359,7 +432,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 	let storage: { jobs: string; lock: string };
 	try {
 		config = loadConfig(observerOverride);
-		storage = ensureStorage(join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "omp-kit", "load"));
+		storage = ensureStorage(stateRoot);
 	} catch (error) {
 		process.stderr.write(`heavy: ${error instanceof Error ? error.message : String(error)}\n`);
 		return 2;
@@ -370,12 +443,10 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		return 2;
 	}
 	const owner = { pid: process.pid, process_start: ownStart };
-	const cwd = process.cwd();
-	const id = randomUUID();
 	const argv = [...command];
 	const queuedAt = new Date().toISOString();
 	const job: HeavyJob = {
-		id, pid: process.pid, process_start: ownStart, label: options.label || basename(command[0] ?? "heavy"),
+		id, pid: process.pid, process_start: ownStart, label,
 		repo: currentRepo(cwd), cwd, agent: process.env.AGENT_NAME ?? process.env.OMP_AGENT_NAME ?? "unknown",
 		tmux_pane: process.env.TMUX_PANE ?? "", argv, state: "queued", queued_at: queuedAt,
 	};
@@ -390,7 +461,8 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 	// admission below observes the disk again inside the mutex, because a
 	// reading taken before a lock wait can be stale (QuietBadger AM57798).
 	const precheck = await diskVerdict({ config, cwd });
-	if (precheck.kind === "unavailable") return prerequisiteMissing(precheck.observer, precheck.text);
+	if (precheck.kind !== "ok") await recordObserverRefusal(stateRoot, job, "precheck", precheck);
+	if (precheck.kind === "unavailable" || precheck.kind === "timeout") return refuseObserver(precheck);
 	// SAVEFIRST1: explicit statfs pressure is the physical floor, not retryable queue contention.
 	if (precheck.kind === "pressure" && observerOverride === "statfs") {
 		process.stderr.write(`heavy: REFUSED reason=DISK_BELOW_FLOOR need=${HEAVY_DISK_NEED} need_bytes=${HEAVY_DISK_NEED_BYTES} observer=statfs path=${cwd}: ${precheck.text}; free at least 10 GiB and retry; no command was run\n`);
@@ -430,7 +502,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 				// its deadline (2026-10-18: one stale job held the queue head for 900 s). Slots and the
 				// wait deadline stay as first read.
 				const fresh = loadConfig(observerOverride);
-				config = { ...config, disk_observer: fresh.disk_observer, disk_floor_pct: fresh.disk_floor_pct };
+				config = { ...config, disk_observer: fresh.disk_observer, disk_floor_pct: fresh.disk_floor_pct, sbh_deadline_s: fresh.sbh_deadline_s };
 			}
 			const acquired = await acquireLock(storage.lock, owner, deadline, options.noWait);
 			if (!acquired) {
@@ -441,7 +513,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			}
 			let waitingJobs: HeavyJob[] = [];
 			let reason: string | null = null;
-			let missing: { observer: "sbh" | "statfs"; text: string } | null = null;
+			let observerFailure: Extract<DiskVerdict, { kind: "unavailable" | "timeout" }> | null = null;
 			try {
 				waitingJobs = await readJobs(storage.jobs);
 				if (!waitingJobs.some((entry) => entry.id === id)) {
@@ -452,17 +524,18 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 				reason = admissionReason(waitingJobs, id, config.slots, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
 				if (!reason) {
 					const disk = await diskVerdict({ config, cwd: job.cwd });
-					if (disk.kind === "unavailable") {
+					if (disk.kind !== "ok") await recordObserverRefusal(stateRoot, job, "admission", disk);
+					if (disk.kind === "unavailable" || disk.kind === "timeout") {
 						removeJob(storage.jobs, id);
 						rowCreated = false;
-						missing = disk;
+						observerFailure = disk;
 					} else if (disk.kind === "pressure") reason = disk.text;
 				}
 				// This deadline covers admission only; runtime starts when the child does.
-				if (!reason && missing === null && Date.now() >= deadline) {
+				if (!reason && observerFailure === null && Date.now() >= deadline) {
 					reason = "admission deadline expired before child start";
 				}
-				if (!reason && missing === null) {
+				if (!reason && observerFailure === null) {
 					const running: HeavyJob = { ...job, state: "running", started_at: new Date().toISOString() };
 					writeJob(storage.jobs, running);
 					rowCreated = true;
@@ -483,7 +556,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 			} finally {
 				releaseLock(storage.lock, owner);
 			}
-			if (missing !== null) return prerequisiteMissing(missing.observer, missing.text);
+			if (observerFailure !== null) return refuseObserver(observerFailure);
 			if (child) {
 				let timer: NodeJS.Timeout | undefined;
 				const timeout = Promise.withResolvers<"deadline">();
