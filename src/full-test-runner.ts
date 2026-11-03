@@ -10,6 +10,7 @@ import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTe
 import { RELEASE_DATA } from "./release-assets.ts";
 import { RELEASE_MANIFEST_NAME, validateReleaseManifest } from "./kit-release.ts";
 import { summarizeTestCaseReports, type NativeTestCaseCounts } from "./test-case-report.ts";
+import { REPLAY_GENERIC_ASSIGNMENT } from "../extensions/secret-output-guard.ts";
 
 const STAGES = ["manifest", "harness-gate", "harness-selftest", "flywheel-invariants", "regex-budget", "claim-selftest", "cli-crosscheck", "metamorphic-ratchet", "readiness-selftest", "e2e-live", "e2e-plant"] as const;
 export type FullStageName = typeof STAGES[number];
@@ -71,7 +72,7 @@ function redactFullTestText(text: string, roots: readonly string[]): string {
   .replace(/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z ]+ )?PRIVATE KEY-----|$)/g, "<redacted-private-key>")
   .replace(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^/\s"'<>@]+@/gi, "$1<redacted>@")
   .replace(/\b(Bearer|Basic)\s+[^\s,"'<>]+/gi, "$1 <redacted>")
-  .replace(/(\b(?:authorization|proxy-authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|password|passwd|secret)\b["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\[\s\S])*(?:"|\\?$)|'(?:[^'\\]|\\[\s\S])*(?:'|\\?$)|[^\s,;"'<>]+)/gi, "$1<redacted>")
+  .replace(REPLAY_GENERIC_ASSIGNMENT, "$1<redacted>")
   .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-(?:ant-|proj-)?[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9-]+|glpat-[A-Za-z0-9_-]+|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g, "<redacted>")
   .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "<redacted>");
 }

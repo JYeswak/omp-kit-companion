@@ -27,6 +27,19 @@
  * kit-owned candidate under test, not a containment claim.
  */
 import { createHash } from "node:crypto";
+import secretOutputPolicy from "../src/secret-output-policy.v1.json";
+
+if (secretOutputPolicy.schema_version !== "omp-kit.secret-output-policy.v1" ||
+	!Array.isArray(secretOutputPolicy.binding_keys) || secretOutputPolicy.binding_keys.length !== 7 ||
+	!secretOutputPolicy.binding_keys.every(key => typeof key === "string" && key.length > 0)) {
+	throw new Error("SECRET_OUTPUT_POLICY_INVALID");
+}
+function policyPattern(name: keyof typeof secretOutputPolicy.patterns): RegExp {
+	const spec = secretOutputPolicy.patterns?.[name];
+	if (!spec || typeof spec.pattern !== "string" || typeof spec.flags !== "string" || !spec.flags.includes("g")) throw new Error("SECRET_OUTPUT_POLICY_INVALID");
+	try { return new RegExp(spec.pattern, spec.flags); }
+	catch { throw new Error("SECRET_OUTPUT_POLICY_INVALID"); }
+}
 
 export const REDACTED = "[REDACTED]";
 export const FINGERPRINT_HEX = 16;
@@ -36,10 +49,15 @@ export function fingerprintOfSecret(value: string): string {
 	return createHash("sha256").update(value, "utf8").digest("hex").slice(0, FINGERPRINT_HEX);
 }
 
-const GH_CLASSIC = /\bgh[po]_[A-Za-z0-9]{8,}/g;
-const GH_FINE_GRAINED = /\bgithub_pat_[A-Za-z0-9_]{8,}/g;
-const HOSTS_OAUTH_TOKEN = /^([ \t]*oauth_token[ \t]*:[ \t]*)(\S+)[ \t]*$/gm;
-const SECURITY_PASSWORD = /(password[ \t]*:[ \t]*)(?:"[^"\n]*"|'[^'\n]*')/g;
+const GH_CLASSIC = policyPattern("GH_CLASSIC");
+const GH_FINE_GRAINED = policyPattern("GH_FINE_GRAINED");
+const HOSTS_OAUTH_TOKEN = policyPattern("HOSTS_OAUTH_TOKEN");
+const SECURITY_PASSWORD = policyPattern("SECURITY_PASSWORD");
+
+const replayAssignment = secretOutputPolicy.replay_patterns?.GENERIC_ASSIGNMENT;
+if (!replayAssignment || typeof replayAssignment.pattern !== "string" || replayAssignment.flags !== "gi") throw new Error("SECRET_OUTPUT_POLICY_INVALID");
+/** Existing full-test producer assignment policy, shared verbatim with replay capture. */
+export const REPLAY_GENERIC_ASSIGNMENT = new RegExp(replayAssignment.pattern, replayAssignment.flags);
 
 /** gh token-shaped values -> `fp:<16hex>`; safe metadata untouched. */
 export function redactGhTokenShapes(text: string): string {
@@ -99,15 +117,7 @@ export function legacyListFirstField(text: string): string {
 }
 
 /** Binding/capability fields whose string values must never reach a preview. */
-const BINDING_KEYS: Record<string, true> = {
-	registration_token: true,
-	sender_token: true,
-	bearer_token: true,
-	session_token: true,
-	access_token: true,
-	refresh_token: true,
-	auth_token: true,
-};
+const BINDING_KEYS: Record<string, true> = Object.fromEntries(secretOutputPolicy.binding_keys.map(key => [key, true as const]));
 
 /**
  * Deep redaction of binding fields. Objects/arrays keep their shape (counts

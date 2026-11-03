@@ -59,7 +59,7 @@ function receipts(manifestPath: string) {
 test("project/day/source READ receipts survive reopen and skip unchanged cells without touching source bytes", async () => {
 	const f = await fixture(), before = snapshot(f.home), first = await runMine(f.options);
 	expect(snapshot(f.home)).toBe(before);
-	expect(first.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:bash", f.project, 2]]);
+	expect(first.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:unclassified", f.project, 2]]);
 	expect(first.ledger?.cells).toHaveLength(20);
 	expect(first.ledger?.totals.PARTIAL).toBe(0);
 	const second = await runMine(f.options);
@@ -78,7 +78,7 @@ test("P missing / Q present cannot certify P from Q's transcript directories or 
 	expect(report.ledger?.cells.filter(cell => cell.project === missing && cell.source === "transcripts").map(cell => cell.status)).toEqual(["NONE-EXISTS", "NONE-EXISTS"]);
 	expect(report.ledger?.cells.filter(cell => cell.project === f.project && cell.source === "transcripts").map(cell => cell.status)).toEqual(["READ", "READ"]);
 	expect(report.projects.find(p => p.path === missing)?.source_records["omp-transcript"]).toBeUndefined();
-	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:bash", f.project, 2]]);
+	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:unclassified", f.project, 2]]);
 	expect(renderMine(report)).toContain("not-started project/day/source cells are rebuilt");
 });
 
@@ -136,7 +136,7 @@ test("quarantined unbound CLI telemetry is not a scan-bound failure", async () =
 test("an actual class scan limit remains PARTIAL with its named bound", async () => {
 	const f = await fixture(), rows = [JSON.stringify(f.rows[0])];
 	for (let i = 0; i < 2050; i++) rows.push(JSON.stringify({ type: "message", timestamp: "2026-10-01T12:00:00Z",
-		message: { role: "toolResult", toolCallId: `limited-${i}`, toolName: `limited-${i}`, isError: true, content: [{ type: "text", text: "failure" }] } }));
+		message: { role: "toolResult", toolCallId: `limited-${i}`, toolName: "bash", isError: true, content: [{ type: "text", text: `AssertionError: distinct cause ${i}` }] } }));
 	put(f.source, rows.join("\n") + "\n");
 	const report = await runMine(f.options);
 	expect(report.ledger?.cells.find(cell => cell.source === "transcripts" && cell.project === f.project && cell.day === "2026-10-01")?.status).toBe("PARTIAL");
@@ -154,7 +154,7 @@ test("a WAL store without side files follows canonical query-only access without
 	for (const suffix of ["-wal", "-shm"]) rmSync(path + suffix, { force: true });
 	const before = createHash("sha256").update(readFileSync(path)).digest("hex"), report = await runMine(f.options);
 	expect(report.ledger?.totals.PARTIAL).toBe(0);
-	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["command-failure:wal-tool", f.project, 1]]);
+	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:unclassified", f.project, 1]]);
 	expect(createHash("sha256").update(readFileSync(path)).digest("hex")).toBe(before);
 });
 
@@ -164,7 +164,7 @@ test("an unavailable CC census stays PARTIAL without suppressing primary finding
 	const before = snapshot(f.home), report = await runMine(f.options);
 	expect(snapshot(f.home)).toBe(before);
 	expect(report.status).toBe("PARTIAL");
-	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:bash", f.project, 2]]);
+	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:unclassified", f.project, 2]]);
 	const cells = report.ledger!.cells.filter(cell => cell.source === "cc");
 	expect(cells).toHaveLength(4);
 	expect(cells.every(cell => cell.status === "PARTIAL" && cell.reasons.some(reason => reason.includes(path)))).toBe(true);
@@ -205,7 +205,7 @@ test("cross-midnight action attempts retain their real surface and project in da
 	insert.run(2, "result", "action.result", Date.parse("2026-10-02T00:01:00Z"), null, JSON.stringify({ action_id: "overnight", outcome: "failed", duration_ms: 120000 }));
 	db.close();
 	const report = await runMine(f.options);
-	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["command-failure:kit-check", f.project, 1]]);
+	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:unclassified", f.project, 1]]);
 	expect(report.excluded_inputs.unbound_cli_events).toBe(0);
 });
 

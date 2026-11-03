@@ -2,6 +2,8 @@ import { open, readdir, realpath } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
 import type { MineSourceContext } from "./mine.ts";
+import { classifyMineResult } from "./mine-cause.ts";
+import { captureMineReplay, type MineReplay } from "./mine-replay.ts";
 
 const PRODUCER = "omp-transcript";
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -17,11 +19,13 @@ function content(value: unknown): string {
 	if (!Array.isArray(value)) return "";
 	return value.map(part => { const p = object(part); return p?.type === "text" ? text(p.text) : ""; }).filter(Boolean).join("\n");
 }
-function snippet(value: string): string {
-	return value.replace(/\b(?:sk-[\w-]{12,}|gh[pousr]_[\w]{12,}|AKIA[A-Z0-9]{16}|Bearer\s+[^\s]+)\b/gi, "[REDACTED]")
-		.replace(/((?:token|password|secret|api[_-]?key)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]").replace(/\s+/g, " ").trim().slice(0, 400);
+function toolName(value: unknown): string { return (captureMineReplay({ tool: text(value) }).tool ?? "").replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 80) || "unknown"; }
+function captureCallReplay(tool: string, args: unknown, cwd: string): MineReplay {
+	const fields = object(args);
+	return captureMineReplay({ tool, cwd, ...(args !== undefined ? { arguments: args } : {}),
+		...(typeof fields?.message === "string" ? { message: fields.message } : {}),
+		...(fields?.custody !== undefined ? { custody: fields.custody } : {}) });
 }
-function toolName(value: unknown): string { return text(value).replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 80) || "unknown"; }
 
 /** Stream native session records; filenames and filesystem dates never determine event time. */
 export async function mineTranscripts(ctx: MineSourceContext): Promise<void> {
@@ -54,13 +58,21 @@ export async function mineTranscripts(ctx: MineSourceContext): Promise<void> {
 		if (ctx.targetProject && headerProject?.path !== ctx.targetProject) return;
 		if (headerProject) { covered.add(headerProject.path); ctx.markSource(headerProject.path, PRODUCER, 0); }
 		if (ctx.skipFile?.(path)) { ctx.coverage(PRODUCER, path, "Complete unchanged event-time index and mapped native header prove no records in the requested UTC cell."); return; }
-		let project = headerProject ?? rootProject, session = "", records = 0, gaps = 0, unmapped = 0, first: string | null = null, last: string | null = null;
-		const calls = new Map<string, { name: string; start: number | null }>();
+		let project = headerProject ?? rootProject, session = "", cwd = "", records = 0, gaps = 0, unmapped = 0, first: string | null = null, last: string | null = null;
+		type CallContext = { name: string; start: number | null; replay: MineReplay; completedKind?: "message" | "execution" };
+		const calls = new Map<string, CallContext>(), completed = new Map<string, CallContext>();
+		let droppedContexts = 0;
+		function rememberCall(id: string, call: CallContext): void {
+			completed.delete(id);
+			calls.delete(id);
+			calls.set(id, call);
+			if (calls.size > 256) { calls.delete(calls.keys().next().value!); droppedContexts++; }
+		}
 		const cov = await ctx.readLines(path, PRODUCER, (row, citation) => {
 			if (row.type === "title") return; // Mutable display metadata has updatedAt, not an event timestamp.
 			if (row.type === "session") {
 				session = text(row.id) || text(row.sessionId);
-				if (text(row.cwd)) project = byCwd(resolve(text(row.cwd)));
+				if (text(row.cwd)) { cwd = text(row.cwd); project = byCwd(resolve(cwd)); }
 				return;
 			}
 			const message = object(row.message), data = object(row.data) ?? row;
@@ -69,40 +81,69 @@ export async function mineTranscripts(ctx: MineSourceContext): Promise<void> {
 			const executionResult = object(data.result);
 			const id = text(message?.toolCallId) || text(row.toolCallId) || text(data.tool_call_id) || text(data.toolCallId);
 			if (message?.role === "assistant" && Array.isArray(message.content)) {
-				for (const part of message.content) { const call = object(part); if (call?.type === "toolCall" && text(call.id)) calls.set(text(call.id), { name: toolName(call.name), start: null }); }
+				for (const part of message.content) {
+					const call = object(part);
+					if (call?.type === "toolCall" && text(call.id)) rememberCall(text(call.id), {
+						name: toolName(call.name), start: calls.get(text(call.id))?.start ?? null,
+						replay: captureCallReplay(toolName(call.name), call.arguments, cwd),
+					});
+				}
 			}
-			if (row.type === "tool_execution_start" && id) calls.set(id, { name: toolName(data.toolName ?? data.name ?? calls.get(id)?.name), start: t });
+			if (row.type === "tool_execution_start" && id) {
+				const previous = calls.get(id);
+				rememberCall(id, { name: toolName(data.toolName ?? data.name ?? previous?.name), start: t,
+					replay: Object.hasOwn(data, "input") || !previous ? captureCallReplay(toolName(data.toolName ?? data.name ?? previous?.name), data.input, cwd) : previous.replay });
+			}
+			const result = message?.role === "toolResult" || row.type === "tool_execution_end";
+			const call = calls.get(id) ?? completed.get(id);
+			if (result && call) {
+				const previous = completed.get(id), kind = message?.role === "toolResult" ? "message" : "execution";
+				calls.delete(id);
+				completed.delete(id);
+				if (!previous || previous.completedKind === kind) completed.set(id, { ...call, completedKind: kind });
+				// Native execution-end and persisted toolResult can describe the same call.
+				// Keep bounded, sanitized context for either representation, including across UTC cells.
+				if (completed.size > 256) completed.delete(completed.keys().next().value!);
+			}
 			if (t < ctx.since_ms || t >= ctx.until_ms) return;
 			if (!project) { unmapped++; return; }
 			records++;
 			const iso = new Date(t).toISOString();
 			if (first === null || iso < first) first = iso;
 			if (last === null || iso > last) last = iso;
-			const result = message?.role === "toolResult" || row.type === "tool_execution_end";
-			const body = (result ? content(message?.content ?? executionResult?.content ?? data.result ?? data.output) || text(data.message) || text(data.error) : message?.role === "user" ? content(message.content) : text(data.message) || text(data.reason)).slice(0, 65_536);
-			const name = toolName(message?.toolName ?? data.toolName ?? data.name ?? calls.get(id)?.name);
-			let classId = "";
+			const retainedResult = { ...data, ...(message?.role === "toolResult" ? message : executionResult) };
+			const body = result ? content(message?.content ?? executionResult?.content ?? data.result ?? data.output) || text(data.message) || text(data.error)
+				: message?.role === "user" ? content(message.content) : text(data.message) || text(data.reason);
+			const name = toolName(message?.toolName ?? data.toolName ?? data.name ?? call?.name);
+			let classId = "", summary = "";
 			if (result) {
-				const refusal = body.match(/(?:^|\n)\s*(?:(?:omp-kit|commit)[ :\-]+)?(MEMBER_REFUSED|REFUSED)\b/);
-				if (refusal && (name === "bash" || name === "shell" || name === "commit" || message?.isError === true || executionResult?.isError === true || data.isError === true)) classId = `commit-refusal:${refusal[1]}`;
-				else if (/\b(?:timed out|timeout|deadline exceeded)\b/i.test(body) && (message?.isError === true || executionResult?.isError === true || data.isError === true || data.is_error === true || /^(?:error:|command timed out|execution timed out)/i.test(body.trim()))) classId = `timeout:${name}`;
-				else if (message?.isError === true || executionResult?.isError === true || data.isError === true || data.is_error === true || data.success === false) classId = `tool-error:${name}`;
+				const cause = classifyMineResult({ tool: name, result: retainedResult });
+				if (cause) { classId = cause.class_id; summary = cause.summary; }
 			} else if (message?.role === "user" && /^(?:no[,!\s]|stop\b|why did\b|that's wrong\b|that’s wrong\b|do not\b)/i.test(body.trim())) classId = "user-correction";
 			else if ((/^(?:guard|refusal|hook)[._:-](?:refused|blocked|deny|denied|refusal)$/.test(text(row.type))
-				|| (["guard", "refusal", "hook"].includes(text(row.type)) && ["refused", "blocked", "deny", "denied", "refusal"].includes(text(data.status) || text(data.outcome)))) && body) classId = `guard-refusal:${toolName(data.code ?? row.type)}`;
+				|| (["guard", "refusal", "hook"].includes(text(row.type)) && ["refused", "blocked", "deny", "denied", "refusal"].includes(text(data.status) || text(data.outcome)))) && body) classId = `${data.act === "commit" ? "commit-refusal" : "guard-friction"}:${toolName(data.code ?? row.type)}`;
 			if (!classId) return;
 			const identity = `${PRODUCER}:${project.canonical}:${session}:${id || text(row.id) || createHash("sha256").update(`${t}:${classId}:${body}`).digest("hex")}:${classId}`;
 			if (seen.has(identity)) return;
 			seen.add(identity);
-			const start = calls.get(id)?.start;
+			const start = call?.start;
+			const nested = executionResult ?? object(message?.result);
+			const custody = retainedResult.custody ?? object(retainedResult.details)?.custody
+				?? nested?.custody ?? object(nested?.details)?.custody ?? call?.replay.custody;
+			const actualMessage = typeof retainedResult.commit_message === "string" ? retainedResult.commit_message : call?.replay.message;
+			const replay = captureMineReplay({ tool: name, cwd, ...(call ? { arguments: call.replay.arguments } : {}),
+				...(typeof actualMessage === "string" ? { message: actualMessage } : {}), ...(custody !== undefined && custody !== null ? { custody } : {}) });
+			if (call) { replay.redacted ||= call.replay.redacted; replay.truncated ||= call.replay.truncated; }
+			const safeSummary = captureMineReplay({ message: summary || (classId === "user-correction" ? "Heuristic user correction: " : "") + (body || `${name} reported an error`) }).message ?? "";
 			ctx.emit({ class_id: classId, project: project.path, time_ms: t, producer: PRODUCER, citation,
-				summary: snippet((classId === "user-correction" ? "Heuristic user correction: " : "") + (body || `${name} reported an error`)),
+				summary: safeSummary.replace(/\s+/g, " ").trim().slice(0, 400), ...(id || text(row.id) ? { event_id: id || text(row.id) } : {}), replay,
 				measured_minutes: result && start !== null && start !== undefined && start <= t ? (t - start) / 60_000 : null, proxy_minutes: 0, identity });
 		});
 		cov.first_timestamp = first; cov.last_timestamp = last;
 		// Preserve the shared reader's malformed/truncated status while exposing window-only counts.
 		cov.rows = records;
 		if (gaps || unmapped) { cov.status = "PARTIAL"; cov.detail += `; timestamp gaps=${gaps}; unmapped window records=${unmapped} (unconfigured cwd excluded)`; }
+		if (droppedContexts) { cov.status = "PARTIAL"; cov.detail += `; bounded replay context evictions=${droppedContexts} (omitted inputs remain explicit)`; }
 		if (project) { covered.add(project.path); ctx.markSource(project.path, PRODUCER, records); }
 	}
 	async function walk(path: string, project: typeof projects[number] | undefined, depth = 0): Promise<void> {

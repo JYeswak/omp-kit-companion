@@ -230,66 +230,85 @@ PY
 EOF
 }
 
+# Canonical copied-file closure: group chain destination source chmod-mode.
+# Installation and --check consume these same rows; generated wrappers and reviewed
+# caller-supplied template data remain explicit at their existing publication sites.
+installation_manifest() {
+	cat <<'INSTALLATION_MANIFEST'
+commit_msg commit-msg 40-omp-kit-commit-msg-bead scripts/commit-msg-bead.sh +x
+pre_push pre-push check-pushed-beads.sh scripts/check-pushed-beads.sh -x
+pre_push pre-push commit-msg-bead.sh scripts/commit-msg-bead.sh -x
+on_main pre-push 30-omp-kit-on-main scripts/check-pushed-on-main.sh +x
+pushed_vlevel pre-push 41-omp-kit-pushed-vlevel scripts/pre-push-verification-level.sh +x
+ref_txn reference-transaction 40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh +x
+ref_txn reference-transaction commit-msg-bead.sh scripts/commit-msg-bead.sh -x
+staged_imports pre-commit check-commit-imports.sh scripts/check-commit-imports.sh -x
+staged_imports pre-commit 45-omp-kit-staged-imports scripts/check-staged-imports.sh +x
+staged_fragments pre-commit 47-omp-kit-staged-fragments scripts/check-staged-fragments.sh +x
+staged_regexploit pre-commit 48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh +x
+staged_pysafe pre-commit pysafe.py scripts/pysafe.py -x
+staged_pysafe pre-commit pysafe_check.py scripts/pysafe_check.py -x
+staged_pysafe pre-commit pysafe_inline.py scripts/pysafe_inline.py -x
+staged_pysafe pre-commit pysafe_inline_literals.py scripts/pysafe_inline_literals.py -x
+staged_pysafe pre-commit kitlib_ratchet_core.py scripts/kitlib_ratchet_core.py -x
+staged_pysafe pre-commit 49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh +x
+staged_tempsafe pre-commit tempsafe_check.py scripts/tempsafe_check.py -x
+staged_tempsafe pre-commit 50-omp-kit-staged-tempsafe scripts/check-staged-tempsafe.sh +x
+staged_kitlib pre-commit kitlib_ratchet.py scripts/kitlib_ratchet.py -x
+staged_kitlib pre-commit 51-omp-kit-staged-kitlib scripts/check-staged-kitlib.sh +x
+staged_br_init pre-commit br_init_check.py scripts/br_init_check.py -x
+staged_br_init pre-commit 53-omp-kit-staged-br-init scripts/check-staged-br-init.sh +x
+staged_portable_paths pre-commit portable_paths_check.py scripts/portable_paths_check.py -x
+staged_portable_paths pre-commit 54-omp-kit-staged-portable-paths scripts/check-portable-paths.sh +x
+staged_wallclock pre-commit wallclock_check.py scripts/wallclock_check.py -x
+staged_wallclock pre-commit 55-omp-kit-staged-wallclock scripts/check-staged-wallclock.sh +x
+staged_sources pre-commit sources.py scripts/sources.py -x
+staged_sources pre-commit kitlib_run.py scripts/kitlib_run.py -x
+staged_sources pre-commit kitlib_io.py scripts/kitlib_io.py -x
+staged_sources pre-commit kitlib_tmp.py scripts/kitlib_tmp.py -x
+staged_sources pre-commit 52-omp-kit-staged-sources scripts/check-staged-sources.sh +x
+kitlib_tmp pre-commit kitlib-tmp.sh scripts/kitlib-tmp.sh -x
+kitlib_tmp pre-commit kitlib-findings.sh scripts/kitlib-findings.sh -x
+kitlib_tmp commit-msg kitlib-tmp.sh scripts/kitlib-tmp.sh -x
+kitlib_tmp commit-msg kitlib-findings.sh scripts/kitlib-findings.sh -x
+kitlib_tmp pre-push kitlib-tmp.sh scripts/kitlib-tmp.sh -x
+kitlib_tmp pre-push kitlib-findings.sh scripts/kitlib-findings.sh -x
+kitlib_tmp reference-transaction kitlib-tmp.sh scripts/kitlib-tmp.sh -x
+kitlib_tmp reference-transaction kitlib-findings.sh scripts/kitlib-findings.sh -x
+gate_event commit-msg gate-event.sh scripts/gate-event.sh +x
+gate_event commit-msg gate_event_replay.py scripts/gate_event_replay.py -x
+gate_event commit-msg cc-credential-shapes.v1.json src/cc-credential-shapes.v1.json -x
+gate_event commit-msg secret-output-policy.v1.json src/secret-output-policy.v1.json -x
+gate_event commit-msg kitlib_run.py scripts/kitlib_run.py -x
+gate_event commit-msg pysafe.py scripts/pysafe.py -x
+gate_event commit-msg kitlib_jsonl.py scripts/kitlib_jsonl.py -x
+gate_event commit-msg kitlib_lock.py scripts/kitlib_lock.py -x
+staged_readme pre-commit readme-check.ts scripts/readme-check.ts -x
+staged_readme pre-commit 46-omp-kit-staged-readme scripts/check-staged-readme.sh +x
+commit_notes commit-msg release-notes.ts scripts/release-notes.ts -x
+commit_notes commit-msg limit-process-tree.sh scripts/limit-process-tree.sh -x
+commit_notes commit-msg 46-omp-kit-commit-notes scripts/check-commit-notes.sh +x
+deploy_step commit-msg 48-omp-kit-deploy-step scripts/check-deploy-step.sh +x
+gap_mention commit-msg 47-omp-kit-gap-mention scripts/check-gap-mention.sh +x
+stale_worktree commit-msg 49-omp-kit-stale-worktree scripts/check-stale-worktree.sh +x
+kitlib_reversal commit-msg 50-omp-kit-staged-kitlib-reversal scripts/check-commit-kitlib-reversal.sh +x
+commit_gate commit-msg 55-omp-kit-commit-gate scripts/check-commit-gate.sh +x
+native_preservation pre-commit native-br-preserve.py scripts/native-br-preserve.py -x
+INSTALLATION_MANIFEST
+}
+
 # --check names installed members that differ from this checkout (a stale
 # installed hook runs old rules after the source moves on). Exit 0 when every
 # member matches, 3 naming each missing or stale member.
 if [ "$MODE" = "check" ]; then
 	stale=0
-	for pair in "hooks.d/commit-msg/40-omp-kit-commit-msg-bead scripts/commit-msg-bead.sh" \
-		"hooks.d/pre-push/30-omp-kit-on-main scripts/check-pushed-on-main.sh" \
-		"hooks.d/pre-push/41-omp-kit-pushed-vlevel scripts/pre-push-verification-level.sh" \
-		"hooks.d/pre-push/check-pushed-beads.sh scripts/check-pushed-beads.sh" \
-		"hooks.d/pre-push/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
-		"hooks.d/reference-transaction/40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh" \
-		"hooks.d/reference-transaction/commit-msg-bead.sh scripts/commit-msg-bead.sh" \
-		"hooks.d/pre-commit/45-omp-kit-staged-imports scripts/check-staged-imports.sh" \
-		"hooks.d/pre-commit/check-commit-imports.sh scripts/check-commit-imports.sh" \
-		"hooks.d/commit-msg/46-omp-kit-commit-notes scripts/check-commit-notes.sh" \
-		"hooks.d/commit-msg/release-notes.ts scripts/release-notes.ts" \
-		"hooks.d/commit-msg/limit-process-tree.sh scripts/limit-process-tree.sh" \
-		"hooks.d/pre-commit/47-omp-kit-staged-fragments scripts/check-staged-fragments.sh" \
-		"hooks.d/commit-msg/49-omp-kit-stale-worktree scripts/check-stale-worktree.sh" \
-		"hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal scripts/check-commit-kitlib-reversal.sh" \
-		"hooks.d/commit-msg/55-omp-kit-commit-gate scripts/check-commit-gate.sh" \
-		"hooks.d/commit-msg/47-omp-kit-gap-mention scripts/check-gap-mention.sh" \
-		"hooks.d/pre-commit/48-omp-kit-staged-regexploit scripts/check-staged-regexploit.sh" \
-		"hooks.d/pre-commit/49-omp-kit-staged-pysafe scripts/check-staged-pysafe.sh" \
-		"hooks.d/pre-commit/pysafe.py scripts/pysafe.py" \
-		"hooks.d/pre-commit/pysafe_check.py scripts/pysafe_check.py" \
-		"hooks.d/pre-commit/pysafe_inline.py scripts/pysafe_inline.py" \
-		"hooks.d/pre-commit/pysafe_inline_literals.py scripts/pysafe_inline_literals.py" \
-		"hooks.d/pre-commit/50-omp-kit-staged-tempsafe scripts/check-staged-tempsafe.sh" \
-		"hooks.d/pre-commit/tempsafe_check.py scripts/tempsafe_check.py" \
-		"hooks.d/pre-commit/kitlib_ratchet_core.py scripts/kitlib_ratchet_core.py" \
-		"hooks.d/pre-commit/51-omp-kit-staged-kitlib scripts/check-staged-kitlib.sh" \
-		"hooks.d/pre-commit/kitlib_ratchet.py scripts/kitlib_ratchet.py" \
-		"hooks.d/pre-commit/br_init_check.py scripts/br_init_check.py" \
-		"hooks.d/pre-commit/53-omp-kit-staged-br-init scripts/check-staged-br-init.sh" \
-		"hooks.d/pre-commit/55-omp-kit-staged-wallclock scripts/check-staged-wallclock.sh" \
-		"hooks.d/pre-commit/wallclock_check.py scripts/wallclock_check.py" \
-		"hooks.d/pre-commit/52-omp-kit-staged-sources scripts/check-staged-sources.sh" \
-		"hooks.d/pre-commit/sources.py scripts/sources.py" \
-		"hooks.d/pre-commit/kitlib_run.py scripts/kitlib_run.py" \
-		"hooks.d/pre-commit/kitlib_io.py scripts/kitlib_io.py" \
-		"hooks.d/pre-commit/kitlib_tmp.py scripts/kitlib_tmp.py" \
-		"hooks.d/pre-commit/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
-		"hooks.d/pre-commit/kitlib-findings.sh scripts/kitlib-findings.sh" \
-		"hooks.d/commit-msg/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
-		"hooks.d/commit-msg/kitlib-findings.sh scripts/kitlib-findings.sh" \
-		"hooks.d/pre-push/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
-		"hooks.d/pre-push/kitlib-findings.sh scripts/kitlib-findings.sh" \
-		"hooks.d/reference-transaction/kitlib-tmp.sh scripts/kitlib-tmp.sh" \
-		"hooks.d/reference-transaction/kitlib-findings.sh scripts/kitlib-findings.sh" \
-		"hooks.d/commit-msg/gate-event.sh scripts/gate-event.sh" \
-		"hooks.d/commit-msg/kitlib_jsonl.py scripts/kitlib_jsonl.py" \
-		"hooks.d/commit-msg/kitlib_lock.py scripts/kitlib_lock.py" \
-		"hooks.d/pre-commit/46-omp-kit-staged-readme scripts/check-staged-readme.sh" \
-		"hooks.d/pre-commit/readme-check.ts scripts/readme-check.ts"; do
-		# shellcheck disable=SC2086
-		set -- $pair
-		case "$1" in hooks.d/pre-push/check-pushed-beads.sh | hooks.d/pre-push/commit-msg-bead.sh) [ "$PUSHED_BEADS" = 1 ] || continue ;; esac
-		dest="$HOOKS/$1"
-		src="$KITROOT/$2"
+	while IFS=' ' read -r file_group file_chain file_dest file_source file_mode; do
+		case "$file_group" in
+			pre_push) [ "$PUSHED_BEADS" = 1 ] || continue ;;
+			native_preservation) [ "$NATIVE_PRESERVATION" = 1 ] || continue ;;
+		esac
+		dest="$HOOKS/hooks.d/$file_chain/$file_dest"
+		src="$KITROOT/$file_source"
 		if [ ! -f "$dest" ]; then
 			printf 'install-commit-msg-bead: MISSING installed member: %s\n' "$dest" >&2
 			stale=1
@@ -297,7 +316,9 @@ if [ "$MODE" = "check" ]; then
 			printf 'install-commit-msg-bead: STALE installed member: %s differs from %s; rerun %s\n' "$dest" "$src" "$0" >&2
 			stale=1
 		fi
-	done
+	done <<EOF
+$(installation_manifest)
+EOF
 	parser="$HOOKS/hooks.d/pre-commit/check-commit-imports.sh"
 	if [ ! -f "$parser" ] || ! sh "$parser" --parser-info --repo "$TARGET"; then
 		printf 'install-commit-msg-bead: MISSING or STALE installed import parser in %s\n' "$TARGET" >&2
@@ -305,8 +326,7 @@ if [ "$MODE" = "check" ]; then
 	fi
 	if [ "$NATIVE_PRESERVATION" = 1 ]; then
 		dir="$HOOKS/hooks.d/pre-commit"
-		if ! cmp -s "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" ||
-			! native_member | cmp -s "$dir/40-omp-kit-native-preserve" -; then
+		if ! native_member | cmp -s "$dir/40-omp-kit-native-preserve" -; then
 			printf 'install-commit-msg-bead: MISSING or STALE native-preservation member in %s\n' "$TARGET" >&2
 			stale=1
 		fi
@@ -358,6 +378,21 @@ place() {
 	fi
 }
 
+# Feed the loop with a here-document, not a pipeline/subshell: place's rollback
+# records must survive in the installer process, including restored file modes.
+install_manifest_group() {
+	manifest_requested_group=$1
+	manifest_found=0
+	while IFS=' ' read -r file_group file_chain file_dest file_source file_mode; do
+		[ "$file_group" = "$manifest_requested_group" ] || continue
+		place "$KITROOT/$file_source" "$(chain_dir "$file_chain")/$file_dest" "$file_mode"
+		manifest_found=1
+	done <<EOF
+$(installation_manifest)
+EOF
+	[ "$manifest_found" = 1 ]
+}
+
 # write_runner <path>: the chain runner. Hook types fed on stdin (pre-push,
 # reference-transaction) replay one buffered copy to every member, so a
 # member that reads stdin cannot starve the ones after it.
@@ -383,7 +418,7 @@ case "$kind" in
 		;;
 esac
 rc=0
-# GATEEVENTS1 runner v5 (ompkit-fp72.135.3.16.1): every member runs with its own interpreter;
+# GATEEVENTS1 runner v6: actual member rc and hook arguments accompany replay observations;
 # each verdict is one gate-events row (act = commit/publish, gate = member name); FINDING lines (kitlib-findings.sh
 # grammar) from every member are collected into ONE envelope printed once at the end, and the chain exits
 # non-zero once iff any member found something. A legacy member that exits non-zero without FINDING lines
@@ -422,8 +457,11 @@ for hook in "$here/hooks.d/$kind"/[0-9][0-9]-*; do
 	# Exit once, with the first refusing member's own code (installer probes and `--check` read it).
 	if [ "$n" -ne 0 ] && [ "$rc" -eq 0 ]; then if [ "$member_rc" -ne 0 ]; then rc=$member_rc; else rc=1; fi; fi
 	if [ -x "$ledger" ]; then
-		if [ "$n" -eq 0 ]; then row=pass; else row=refuse; fi
-		sh "$ledger" "$act" "$target" "$member" "$row" "git-$PPID" "findings=$n rc=$member_rc" || :
+		if [ "$member_rc" -eq 0 ]; then row=pass; else row=refuse; fi
+		message_file=''
+		case "$kind" in commit-msg | prepare-commit-msg) message_file=${1:-} ;; esac
+		OMP_KIT_GATE_EVENT_RC=$member_rc OMP_KIT_GATE_EVENT_HOOK=$kind OMP_KIT_GATE_EVENT_MESSAGE_FILE=$message_file \
+			sh "$ledger" "$act" "$target" "$member" "$row" "git-$PPID" "findings=$n rc=$member_rc" "$@" || :
 	fi
 done
 [ -z "$input" ] || rm -f "$input"
@@ -460,7 +498,7 @@ ensure_chain() {
 	if [ -x "$entry" ] && grep -q 'hooks\.d' "$entry" 2>/dev/null; then
 		# The marker names the runner generation: bump it (here and in write_runner) with every runner change,
 		# or installed repos keep the old runner while --check reports them fresh.
-		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v5' "$entry"; }; then
+		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v6' "$entry"; }; then
 			write_runner "$entry"
 			printf 'upgraded chain runner (stdin replay + gate-events ledger): %s\n' "$entry"
 		else
@@ -511,7 +549,7 @@ rollback() {
 # install_commit_msg: ours runs after any bespoke entry (sort order).
 install_commit_msg() {
 	dest=$(chain_dir commit-msg)/40-omp-kit-commit-msg-bead
-	place "$KITROOT/scripts/commit-msg-bead.sh" "$dest" +x
+	install_manifest_group commit_msg
 	printf 'installed bead-id hook: %s\n' "$dest"
 }
 
@@ -522,8 +560,7 @@ install_commit_msg() {
 install_pre_push() {
 	dir=$(chain_dir pre-push)
 	member="$dir/40-omp-kit-pushed-beads"
-	place "$KITROOT/scripts/check-pushed-beads.sh" "$dir/check-pushed-beads.sh" -x
-	place "$KITROOT/scripts/commit-msg-bead.sh" "$dir/commit-msg-bead.sh" -x
+	install_manifest_group pre_push
 	wrapper=$(mktemp "${TMPDIR:-/tmp}/pushed-beads-member.XXXXXX") || exit 2
 	cat > "$wrapper" <<'EOF'
 #!/bin/sh
@@ -541,7 +578,7 @@ EOF
 # refused before a slow gate starts.
 install_on_main() {
 	member="$(chain_dir pre-push)/30-omp-kit-on-main"
-	place "$KITROOT/scripts/check-pushed-on-main.sh" "$member" +x
+	install_manifest_group on_main
 	printf 'installed shared-main push member: %s\n' "$member"
 }
 
@@ -553,7 +590,7 @@ install_on_main() {
 # companion source byte-identical and --check names any stale installation.
 install_pushed_vlevel() {
 	member="$(chain_dir pre-push)/41-omp-kit-pushed-vlevel"
-	place "$KITROOT/scripts/pre-push-verification-level.sh" "$member" +x
+	install_manifest_group pushed_vlevel
 	printf 'installed pushed-verification-level member: %s\n' "$member"
 }
 
@@ -563,8 +600,7 @@ install_pushed_vlevel() {
 install_ref_txn() {
 	dir=$(chain_dir reference-transaction)
 	member="$dir/40-omp-kit-ref-txn-bead"
-	place "$KITROOT/scripts/ref-txn-bead.sh" "$member" +x
-	place "$KITROOT/scripts/commit-msg-bead.sh" "$dir/commit-msg-bead.sh" -x
+	install_manifest_group ref_txn
 	printf 'installed ref-update bead guard: %s\n' "$member"
 }
 
@@ -573,8 +609,7 @@ install_ref_txn() {
 install_staged_imports() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/45-omp-kit-staged-imports"
-	place "$KITROOT/scripts/check-commit-imports.sh" "$dir/check-commit-imports.sh" -x
-	place "$KITROOT/scripts/check-staged-imports.sh" "$member" +x
+	install_manifest_group staged_imports
 	if [ -n "$TEMPLATE_IMPORT_MAP" ]; then
 		# The reviewed input may already be the managed declaration itself.
 		if ! cmp -s "$TEMPLATE_IMPORT_MAP" "$dir/template-import-map.json"; then
@@ -595,13 +630,13 @@ install_staged_imports() {
 # over the staged tree; no helper beside them, since they resolve the repo root.
 install_staged_fragments() {
 	member="$(chain_dir pre-commit)/47-omp-kit-staged-fragments"
-	place "$KITROOT/scripts/check-staged-fragments.sh" "$member" +x
+	install_manifest_group staged_fragments
 	printf 'installed staged-fragments member: %s\n' "$member"
 }
 
 install_staged_regexploit() {
 	member="$(chain_dir pre-commit)/48-omp-kit-staged-regexploit"
-	place "$KITROOT/scripts/check-staged-regexploit.sh" "$member" +x
+	install_manifest_group staged_regexploit
 	printf 'installed staged-regexploit member: %s\n' "$member"
 }
 
@@ -610,12 +645,7 @@ install_staged_regexploit() {
 install_staged_pysafe() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/49-omp-kit-staged-pysafe"
-	place "$KITROOT/scripts/pysafe.py" "$dir/pysafe.py" -x
-	place "$KITROOT/scripts/pysafe_check.py" "$dir/pysafe_check.py" -x
-	place "$KITROOT/scripts/pysafe_inline.py" "$dir/pysafe_inline.py" -x
-	place "$KITROOT/scripts/pysafe_inline_literals.py" "$dir/pysafe_inline_literals.py" -x
-	place "$KITROOT/scripts/kitlib_ratchet_core.py" "$dir/kitlib_ratchet_core.py" -x
-	place "$KITROOT/scripts/check-staged-pysafe.sh" "$member" +x
+	install_manifest_group staged_pysafe
 	printf 'installed staged-pysafe member: %s\n' "$member"
 }
 
@@ -625,8 +655,7 @@ install_staged_pysafe() {
 install_staged_tempsafe() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/50-omp-kit-staged-tempsafe"
-	place "$KITROOT/scripts/tempsafe_check.py" "$dir/tempsafe_check.py" -x
-	place "$KITROOT/scripts/check-staged-tempsafe.sh" "$member" +x
+	install_manifest_group staged_tempsafe
 	printf 'installed staged-tempsafe member: %s\n' "$member"
 }
 
@@ -636,8 +665,7 @@ install_staged_tempsafe() {
 install_staged_kitlib() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/51-omp-kit-staged-kitlib"
-	place "$KITROOT/scripts/kitlib_ratchet.py" "$dir/kitlib_ratchet.py" -x
-	place "$KITROOT/scripts/check-staged-kitlib.sh" "$member" +x
+	install_manifest_group staged_kitlib
 	printf 'installed staged-kitlib member: %s\n' "$member"
 }
 
@@ -647,16 +675,14 @@ install_staged_kitlib() {
 install_staged_br_init() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/53-omp-kit-staged-br-init"
-	place "$KITROOT/scripts/br_init_check.py" "$dir/br_init_check.py" -x
-	place "$KITROOT/scripts/check-staged-br-init.sh" "$member" +x
+	install_manifest_group staged_br_init
 	printf 'installed staged-br-init member: %s\n' "$member"
 }
 # install_staged_portable_paths: refuse newly added machine-local paths.
 install_staged_portable_paths() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/54-omp-kit-staged-portable-paths"
-	place "$KITROOT/scripts/portable_paths_check.py" "$dir/portable_paths_check.py" -x
-	place "$KITROOT/scripts/check-portable-paths.sh" "$member" +x
+	install_manifest_group staged_portable_paths
 	printf 'installed staged-portable-paths member: %s\n' "$member"
 }
 # install_staged_wallclock: WALLCLOCK1 (ompkit-qf9fk) refuses new test lines that pass only within a small fixed
@@ -664,18 +690,14 @@ install_staged_portable_paths() {
 install_staged_wallclock() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/55-omp-kit-staged-wallclock"
-	place "$KITROOT/scripts/wallclock_check.py" "$dir/wallclock_check.py" -x
-	place "$KITROOT/scripts/check-staged-wallclock.sh" "$member" +x
+	install_manifest_group staged_wallclock
 	printf 'installed staged-wallclock member: %s\n' "$member"
 }
 
 
 install_staged_sources() {
 	dir=$(chain_dir pre-commit)
-	for helper in sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py; do
-		place "$KITROOT/scripts/$helper" "$dir/$helper" -x
-	done
-	place "$KITROOT/scripts/check-staged-sources.sh" "$dir/52-omp-kit-staged-sources" +x
+	install_manifest_group staged_sources
 	printf 'installed staged-sources member: %s\n' "$dir/52-omp-kit-staged-sources"
 }
 
@@ -683,22 +705,15 @@ install_staged_sources() {
 # for owned temp dirs (KITLIB-TMP v1). Each gets a non-executable helper
 # that the chain runner never executes arg-less.
 install_kitlib_tmp() {
-	for chain in pre-commit commit-msg pre-push reference-transaction; do
-		place "$KITROOT/scripts/kitlib-tmp.sh" "$(chain_dir "$chain")/kitlib-tmp.sh" -x
-		# GATEDIAG1: the FINDING grammar helper members source to report every defect at once.
-		place "$KITROOT/scripts/kitlib-findings.sh" "$(chain_dir "$chain")/kitlib-findings.sh" -x
-	done
+	install_manifest_group kitlib_tmp
 	printf 'installed kitlib-tmp.sh and kitlib-findings.sh into all four hook chains\n'
 }
 
-# install_gate_event: the gate-events ledger writer (GATEEVENTS1, plan section 23.4) and the two
-# kitlib modules it imports sit beside the commit-msg chain; every chain runner calls it by that
-# path for each member's verdict. Non-executable Python helpers are never run arg-less.
+# install_gate_event: the ledger writer and its declared standalone Python/JSON
+# closure sit beside commit-msg; helpers remain non-executable in the chain.
 install_gate_event() {
 	dir=$(chain_dir commit-msg)
-	place "$KITROOT/scripts/gate-event.sh" "$dir/gate-event.sh" +x
-	place "$KITROOT/scripts/kitlib_jsonl.py" "$dir/kitlib_jsonl.py" -x
-	place "$KITROOT/scripts/kitlib_lock.py" "$dir/kitlib_lock.py" -x
+	install_manifest_group gate_event
 	printf 'installed gate-event.sh (gate-events ledger) beside the commit-msg chain\n'
 }
 
@@ -708,8 +723,7 @@ install_gate_event() {
 install_staged_readme() {
 	dir=$(chain_dir pre-commit)
 	member="$dir/46-omp-kit-staged-readme"
-	place "$KITROOT/scripts/readme-check.ts" "$dir/readme-check.ts" -x
-	place "$KITROOT/scripts/check-staged-readme.sh" "$member" +x
+	install_manifest_group staged_readme
 	printf 'installed staged-readme member: %s\n' "$member"
 }
 
@@ -720,16 +734,14 @@ install_staged_readme() {
 install_commit_notes() {
 	dir=$(chain_dir commit-msg)
 	member="$dir/46-omp-kit-commit-notes"
-	place "$KITROOT/scripts/release-notes.ts" "$dir/release-notes.ts" -x
-	place "$KITROOT/scripts/limit-process-tree.sh" "$dir/limit-process-tree.sh" -x
-	place "$KITROOT/scripts/check-commit-notes.sh" "$member" +x
+	install_manifest_group commit_notes
 	printf 'installed commit-notes member: %s\n' "$member"
 }
 # install_deploy_step: require a runbook/reference update or an explicit
 # install/recovery command for commits changing deploy-sensitive paths.
 install_deploy_step() {
 	member="$(chain_dir commit-msg)/48-omp-kit-deploy-step"
-	place "$KITROOT/scripts/check-deploy-step.sh" "$member" +x
+	install_manifest_group deploy_step
 	printf 'installed deploy-step member: %s\n' "$member"
 }
 
@@ -738,7 +750,7 @@ install_deploy_step() {
 # (GAPFADE1, ompkit-3waa2); it runs after the notes member and reads kitlib-findings.sh beside it.
 install_gap_mention() {
 	member="$(chain_dir commit-msg)/47-omp-kit-gap-mention"
-	place "$KITROOT/scripts/check-gap-mention.sh" "$member" +x
+	install_manifest_group gap_mention
 	printf 'installed gap-mention member: %s\n' "$member"
 }
 
@@ -747,7 +759,7 @@ install_gap_mention() {
 # the notes member.
 install_stale_worktree() {
 	member="$(chain_dir commit-msg)/49-omp-kit-stale-worktree"
-	place "$KITROOT/scripts/check-stale-worktree.sh" "$member" +x
+	install_manifest_group stale_worktree
 	printf 'installed stale-worktree member: %s\n' "$member"
 }
 
@@ -755,7 +767,7 @@ install_stale_worktree() {
 # after stale-worktree (49); a trailer alone never grants the admission.
 install_kitlib_reversal() {
 	member="$(chain_dir commit-msg)/50-omp-kit-staged-kitlib-reversal"
-	place "$KITROOT/scripts/check-commit-kitlib-reversal.sh" "$member" +x
+	install_manifest_group kitlib_reversal
 	printf 'installed kitlib-reversal member: %s\n' "$member"
 }
 
@@ -764,14 +776,14 @@ install_kitlib_reversal() {
 # It is a no-op in a repo without that pre-push member; it runs last, after every cheaper member.
 install_commit_gate() {
 	member="$(chain_dir commit-msg)/55-omp-kit-commit-gate"
-	place "$KITROOT/scripts/check-commit-gate.sh" "$member" +x
+	install_manifest_group commit_gate
 	printf 'installed commit-gate member: %s\n' "$member"
 }
 
 
 install_native_preservation() {
 	dir=$(chain_dir pre-commit)
-	place "$KITROOT/scripts/native-br-preserve.py" "$dir/native-br-preserve.py" -x
+	install_manifest_group native_preservation
 	wrapper=$(mktemp "${TMPDIR:-/tmp}/native-preserve-member.XXXXXX") || exit 2
 	native_member > "$wrapper" || rollback "cannot render native-preservation member"
 	place "$wrapper" "$dir/40-omp-kit-native-preserve" +x

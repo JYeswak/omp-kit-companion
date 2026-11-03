@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendJsonl } from "../src/kitlib/jsonl.ts";
+import { captureMineReplay, readMineReplay, type MineReplay } from "../src/mine-replay.ts";
 
 /**
  * gate-events (GATEEVENTS1, ompkit-fp72.135.3.12; plan section 23.4): one ledger every gate appends to, so
@@ -24,6 +25,10 @@ export interface GateEvent {
 	kind: GateEventKind;
 	/** One act attempt: the tool call id, or the git process pid shared by every hook runner of one git command. */
 	attempt?: string;
+	event_id?: string;
+	replay?: MineReplay;
+	/** Actual producer exit status, never a synthesized refusal status. */
+	rc?: number;
 	detail?: string;
 }
 
@@ -68,9 +73,25 @@ export function gateFromReason(reason: string): string {
 
 export async function recordGateEvent(event: GateEvent, options: { env?: Record<string, string | undefined>; home?: string; path?: string } = {}): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
 	const path = options.path ?? gateEventsPath(options.env, options.home);
-	const row = { ts: new Date().toISOString(), seat: event.seat, act: event.act, target: event.target, gate: event.gate, kind: event.kind,
-		...(event.attempt ? { attempt: event.attempt } : {}),
-		...(event.detail ? { detail: event.detail.slice(0, 400) } : {}) };
+	const replay = event.replay === undefined ? undefined : readMineReplay(event.replay);
+	let metadataRedacted = false;
+	let metadataTruncated = false;
+	const clean = (value: string | null): string | null => {
+		if (value === null) return null;
+		const captured = captureMineReplay({ message: value });
+		metadataRedacted ||= captured.redacted;
+		metadataTruncated ||= captured.truncated;
+		return captured.message ?? "[OMITTED]";
+	};
+	const row = { ts: new Date().toISOString(), seat: clean(event.seat), act: clean(event.act), target: clean(event.target), gate: clean(event.gate),
+		kind: event.rc === 0 && event.kind === "refuse" ? "pass" : clean(event.kind),
+		...(event.attempt ? { attempt: clean(event.attempt) } : {}),
+		...(event.event_id ? { event_id: clean(event.event_id) } : {}),
+		...(typeof event.rc === "number" ? { rc: event.rc } : {}),
+		...(replay ? { replay } : {}),
+		...(event.detail ? { detail: clean(event.detail)?.slice(0, 400) } : {}),
+		...(metadataRedacted ? { metadata_redacted: true } : {}),
+		...(metadataTruncated ? { metadata_truncated: true } : {}) };
 	try {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 		// The lock lives beside the ledger, so a test or a seat with its own XDG_STATE_HOME never shares a lock root.

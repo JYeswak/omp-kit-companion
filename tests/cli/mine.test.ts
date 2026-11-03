@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, syml
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { runMine, renderMine, type MineOptions } from "../../src/mine.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 let scratch = "", fixtureNumber = 0;
 beforeAll(() => {
@@ -61,6 +62,94 @@ function snapshot(root: string): string {
 	visit(root); return rows.join("\n");
 }
 
+test("MINEDEFECTS retained rc zero is neither a refusal nor a false timeout", async () => {
+	const f = fixture(false);
+	put(join(f.home, ".local", "state", "omp-kit", "gate-events.jsonl"), jsonl([
+		{ ts: "2026-10-15T14:00:00Z", repo: f.alpha, act: "commit", gate: "planted", kind: "refuse", rc: 0, detail: "findings=0 rc=0" },
+	]));
+	put(join(f.cc, "spool", "session", "2026-10-15.jsonl"), jsonl([
+		envelope("not-timeout", f.alpha, "tool.call", { tool: "eval", timed_out: false, rc: 0, is_error: false, output: "timeout settings checked successfully" }),
+	]));
+	const report = await runMine(f.options);
+	expect(report.classes).toEqual([]);
+});
+
+test("MINEDEFECTS guard and native result share one occurrence and retained input", async () => {
+	const f = fixture(false), id = "shared-native-guard", source = join(f.home, ".omp", "profiles", "default", "agent", "sessions", "-projects-alpha", "joined.jsonl");
+	const originalInput = { timeout: fixtureDeadlineS(30) };
+	put(source, jsonl([
+		{ type: "session", id: "joined", cwd: f.alpha },
+		{ type: "message", timestamp: "2026-10-15T13:59:00Z", message: { role: "assistant", content: [{ type: "toolCall", id, name: "wait", arguments: originalInput }] } },
+		{ type: "message", timestamp: "2026-10-15T14:00:00Z", message: { role: "toolResult", toolCallId: id, toolName: "wait", isError: true, content: [{ type: "text", text: "kit-flywheel-guard WAIT_REFUSED: this call uses the wait tool" }] } },
+	]));
+	put(join(f.home, ".local", "state", "omp-kit", "gate-events.jsonl"), jsonl([
+		{ ts: "2026-10-15T14:00:00Z", event_id: id, attempt: id, act: "wait", gate: "WAIT_REFUSED", kind: "refuse", detail: "kit-flywheel-guard WAIT_REFUSED: this call uses the wait tool" },
+	]));
+	const report = await runMine(f.options);
+	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["guard-friction:WAIT_REFUSED", f.alpha, 1]]);
+	expect(report.classes[0]?.evidence.some(e => e.event_id === id && JSON.stringify(e.replay?.arguments) === JSON.stringify(originalInput))).toBe(true);
+	expect(renderMine(report)).toContain(`"timeout": ${originalInput.timeout}`);
+});
+
+test("MINEDEFECTS merged replay preserves actual commit context instead of diagnostic status", async () => {
+	const f = fixture(false), id = "commit-context", source = join(f.home, ".omp", "profiles", "default", "agent", "sessions", "-projects-alpha", "commit.jsonl");
+	put(source, jsonl([
+		{ type: "session", id: "commit-context-session", cwd: f.alpha },
+		{ type: "message", timestamp: "2026-10-15T13:59:00Z", message: { role: "assistant", content: [{ type: "toolCall", id, name: "bash", arguments: { command: "git commit -F .git/COMMIT_EDITMSG" } }] } },
+		{ type: "message", timestamp: "2026-10-15T14:00:00Z", message: { role: "toolResult", toolCallId: id, toolName: "bash", isError: true, content: [{ type: "text", text: "MEMBER_REFUSED: path is reserved" }] } },
+	]));
+	const custody = { source: "canonical-custody", status: "OWNED" }, message = "fix(owned): repair witnessed failure", digest = "a".repeat(64);
+	put(join(f.home, ".local", "state", "omp-kit", "gate-events.jsonl"), jsonl([
+		{ ts: "2026-10-15T14:00:00Z", repo: f.alpha, attempt: id, event_id: id, act: "commit", gate: "MEMBER_REFUSED", kind: "refuse",
+			replay: { version: 1, tool: "git-hook", arguments: { hook: "commit-msg", argv: [".git/COMMIT_EDITMSG"] }, cwd: f.alpha,
+				staged_paths: ["src/owned.ts"], diff_sha256: digest, message, custody, redacted: false, truncated: false, missing: [] } },
+	]));
+	const report = await runMine(f.options), replay = report.classes[0]?.evidence[0]?.replay;
+	expect(report.classes.map(c => [c.id, c.count])).toEqual([["commit-refusal:MEMBER_REFUSED", 1]]);
+	expect(replay?.arguments).toEqual({ command: "git commit -F .git/COMMIT_EDITMSG" });
+	expect(replay?.message).toBe(message);
+	expect(replay?.custody).toEqual(custody);
+	expect(replay?.staged_paths).toEqual(["src/owned.ts"]);
+	expect(replay?.diff_sha256).toBe(digest);
+	expect(replay?.missing).not.toContain("message");
+});
+
+test("MINEDEFECTS resumable source cells deduplicate by event id and keep distinct CC errors", async () => {
+	const f = fixture(false), id = "shared-resume-guard";
+	const originalInput = { timeout: fixtureDeadlineS(30) };
+	await quietGitProject(f.alpha); await quietGitProject(f.beta);
+	put(join(f.home, ".omp", "profiles", "default", "agent", "sessions", "-projects-alpha", "joined.jsonl"), jsonl([
+		{ type: "session", id: "joined-resume", cwd: f.alpha },
+		{ type: "message", timestamp: "2026-10-15T13:59:00Z", message: { role: "assistant", content: [{ type: "toolCall", id, name: "wait", arguments: originalInput }] } },
+		{ type: "message", timestamp: "2026-10-15T14:00:00Z", message: { role: "toolResult", toolCallId: id, toolName: "wait", isError: true, content: [{ type: "text", text: "kit-flywheel-guard WAIT_REFUSED: this call uses the wait tool" }] } },
+	]));
+	put(join(f.home, ".local", "state", "omp-kit", "gate-events.jsonl"), jsonl([
+		{ ts: "2026-10-15T14:00:00Z", repo: f.alpha, event_id: id, attempt: id, act: "wait", gate: "WAIT_REFUSED", kind: "refuse" },
+	]));
+	put(join(f.cc, "spool", "session", "2026-10-15.jsonl"), jsonl([
+		envelope("normalized-same", f.alpha, "tool.call", { tool: "wait", tool_call_id: id, guard_decision: "deny", guard_rule: "WAIT_REFUSED" }),
+		envelope("distinct-cc-failure", f.alpha, "tool.call", { tool: "bash", tool_call_id: "a-different-real-call", is_error: true, exit_code: 7 }),
+	]));
+	const options = { ...f.options, since: "2026-10-15", until: "2026-10-16", resumeDir: join(f.home, "mine-state") };
+	const first = await runMine(options), second = await runMine(options);
+	expect(first.classes.reduce((sum, c) => sum + c.count, 0)).toBe(2);
+	expect(first.classes.find(c => c.id === "guard-friction:WAIT_REFUSED")?.count).toBe(1);
+	expect(first.classes.flatMap(c => c.evidence).some(e => e.event_id === "a-different-real-call")).toBe(true);
+	expect(second.classes).toEqual(first.classes);
+	expect(second.ledger?.scanned).toBe(0);
+});
+
+test("MINEDEFECTS historical event citations never become executable firing proof", async () => {
+	const f = fixture(false), source = join(f.home, ".local", "state", "omp-kit", "gate-events.jsonl");
+	put(source, jsonl([{ ts: "2026-10-15T14:00:00Z", repo: f.alpha, event_id: "observation-not-proof",
+		act: "wait", gate: "WAIT_REFUSED", kind: "refuse", proof_it_fires: `live case: ${source}:1` }]));
+	const report = await runMine(f.options);
+	expect(report.classes[0]?.proof_it_fires).toBeNull();
+	expect(report.classes[0]?.evidence[0]?.citation).toBe(`${source}:1`);
+	expect(report.classes[0]?.evidence[0]?.replay?.missing).toEqual(expect.arrayContaining(["arguments", "cwd", "message", "custody"]));
+	expect(renderMine(report)).toContain("historical observations, not regression-test proof");
+});
+
 describe("mine: observed incidents, not transcript mentions", () => {
 	test("planted fire spool ranks loss, deduplicates archive/live, cites source and leaves bytes unchanged", async () => {
 		// Cluster determinism uses a spool-only producer set. Native br matching is exercised below.
@@ -82,7 +171,7 @@ describe("mine: observed incidents, not transcript mentions", () => {
 		]));
 		const before = snapshot(f.home), report = await runMine(f.options);
 		expect(snapshot(f.home)).toBe(before);
-		expect(report.classes.map(c => c.id)).toEqual(["command-failure:bash", "reopened-bead", "rework", "commit-refusal:staged-imports", "slow-command:eval", "timeout:build"]);
+		expect(report.classes.map(c => c.id)).toEqual(["tool-error:unclassified", "reopened-bead", "rework", "commit-refusal:staged-imports", "slow-command:eval", "timeout:build"]);
 		expect(report.classes.map(c => c.count)).toEqual([1, 1, 1, 1, 1, 1]);
 		expect(report.classes[0]?.measured_minutes_lost).toBe(10);
 		expect(report.classes.find(c => c.id === "slow-command:eval")?.measured_minutes_lost).toBe(2);
@@ -136,7 +225,7 @@ describe("mine: observed incidents, not transcript mentions", () => {
 		put(join(f.alpha, ".git", "omp-kit", "full-suite-verdicts", "failed.json"), JSON.stringify({ version: 3, tree: "a".repeat(40), checks: "b".repeat(64), recorded_at: "2026-10-18T12:00:00Z", verdict: "FAIL", timing: { wall_ms: 1_200_000 }, judge_role: "main" }));
 		const before = snapshot(f.home), report = await runMine(f.options);
 		expect(snapshot(f.home)).toBe(before);
-		expect(report.classes.map(c => c.id)).toEqual(["release-fail", "command-failure:bash"]);
+		expect(report.classes.map(c => c.id)).toEqual(["release-fail", "tool-error:unclassified"]);
 		expect(report.classes[0]?.measured_minutes_lost).toBe(20);
 		expect(report.classes[1]?.evidence[0]?.citation).toContain("#events.cursor=1");
 	});
@@ -208,7 +297,7 @@ describe("mine: observed incidents, not transcript mentions", () => {
 			envelope("engine", f.alpha, "guard.decision", { engine: "observational-hook", decision: "failure", rule: null }),
 		]));
 		const report = await runMine(f.options);
-		expect(report.classes.map(c => c.id)).toEqual(["command-failure:kit-check", "guard-failure:observational-hook"]);
+		expect(report.classes.map(c => c.id)).toEqual(["guard-failure:observational-hook", "tool-error:unclassified"]);
 		expect(report.excluded_inputs.unbound_cli_events).toBe(1);
 		expect(report.excluded_inputs.unconfigured_scratch_events).toBe(1);
 		expect(report.excluded_inputs.evidence).toHaveLength(2);
@@ -227,10 +316,10 @@ describe("mine: observed incidents, not transcript mentions", () => {
 		expect(report.classes).toEqual([]);
 	});
 
-	test("native transcripts cover pre-CC days and replace overlapping normalized failures", async () => {
+	test("native transcripts cover pre-CC days and join normalized failures by retained call id", async () => {
 		const f = fixture(), start = Date.parse("2026-10-20T12:00:00Z");
 		put(join(f.cc, "spool", "session", "2026-10-20.jsonl"), jsonl([
-			envelope("normalized", f.alpha, "tool.call", { tool: "bash", is_error: true, start_ms: start, end_ms: start + 120_000 }, "2026-10-20T12:00:00Z"),
+			envelope("normalized", f.alpha, "tool.call", { tool: "bash", tool_call_id: "commit", is_error: true, start_ms: start, end_ms: start + 120_000 }, "2026-10-20T12:00:00Z"),
 		]));
 		const source = join(f.home, ".omp", "profiles", "native", "agent", "sessions", "-projects-alpha", "october.jsonl");
 		put(source, jsonl([

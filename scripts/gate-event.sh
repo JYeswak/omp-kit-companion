@@ -25,27 +25,9 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 command -v python3 >/dev/null 2>&1 || exit 0
 # The KL08 lock refuses a permissive state dir: create it private, like the TypeScript writer.
 (umask 077 && mkdir -p "$state/omp-kit") 2>/dev/null || exit 0
+# Hook arguments follow the six ledger fields; hand them straight to Python, never shell-evaluate.
+if [ "$#" -ge 6 ]; then shift 6; else set --; fi
 GATE_EVENT_LEDGER=$ledger GATE_EVENT_SEAT=$seat GATE_EVENT_ACT=$act GATE_EVENT_TARGET=$target \
 GATE_EVENT_GATE=$gate GATE_EVENT_KIND=$kind GATE_EVENT_ATTEMPT=$attempt GATE_EVENT_DETAIL=$detail \
-python3 - "$here" >/dev/null 2>&1 <<'PY' || exit 0
-import datetime, json, os, sys
-sys.path.insert(0, sys.argv[1])
-import kitlib_jsonl
-row = {
-    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-    "seat": os.environ.get("GATE_EVENT_SEAT") or None,
-    "act": os.environ["GATE_EVENT_ACT"],
-    "target": os.environ.get("GATE_EVENT_TARGET") or None,
-    "gate": os.environ["GATE_EVENT_GATE"],
-    "kind": os.environ["GATE_EVENT_KIND"],
-}
-detail = os.environ.get("GATE_EVENT_DETAIL", "")
-attempt = os.environ.get("GATE_EVENT_ATTEMPT", "")
-if attempt:
-    row["attempt"] = attempt
-if detail:
-    row["detail"] = detail[:400]
-ledger = os.environ["GATE_EVENT_LEDGER"]
-kitlib_jsonl.append_jsonl(ledger, lambda _state: row, deadline_s=2, torn_tail="newline", state_dir=os.path.dirname(ledger))
-PY
+python3 "$here/gate_event_replay.py" "$@" >/dev/null 2>&1 || exit 0
 exit 0

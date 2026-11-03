@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { run } from "./kitlib/run.ts";
 import { MineLedger, MINE_SOURCES, type MineCell, type MineCellStatus, type MineSource } from "./mine-ledger.ts";
-import { enforcement, scanMine, type MineClass, type MineCoverage, type MineOptions, type MineProject, type MineReport, type MineSourceFinding } from "./mine.ts";
+import { enforcement, mergeMineFindings, mineFindingEvidence, mineFindingKey, scanMine, type MineClass, type MineCoverage, type MineOptions, type MineProject, type MineReport, type MineSourceFinding } from "./mine.ts";
 
 export interface MineFileIndex {
 	canSkip(path: string, since: number, until: number): boolean;
@@ -114,7 +114,7 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 	const env = options.env ?? process.env, home = options.home ?? env.HOME ?? homedir();
 	const root = physical(options.resumeDir ?? join(options.root ?? options.cwd ?? process.cwd(), "var", "mine"));
 	const revisionHash = createHash("sha256");
-	for (const name of ["mine.ts", "mine-resume.ts", "mine-ledger.ts", "mine-history.ts", "mine-transcripts.ts"]) {
+	for (const name of ["mine.ts", "mine-resume.ts", "mine-ledger.ts", "mine-history.ts", "mine-transcripts.ts", "mine-cause.ts", "mine-replay.ts", "secret-output-policy.v1.json", "../extensions/secret-output-guard.ts"]) {
 		try { revisionHash.update(readFileSync(new URL(name, import.meta.url))); }
 		catch { revisionHash.update(`${name}:${fingerprint([process.execPath])}`); }
 	}
@@ -194,8 +194,7 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		index.flush();
 		current.push(ledger.put({ project: target, day: date, source, input_fingerprint: signature, status, reasons, result: { report, findings } })); scanned++;
 	}
-	const primary = new Set(current.filter(cell => cell.source === "transcripts" && cell.result.report.projects.some(p => (p.source_records["omp-transcript"] ?? 0) > 0)).map(cell => `${cell.project}\0${cell.day}`));
-	const seen = new Set<string>(), classes = new Map<string, MineClass>();
+	const uniqueFindings = new Map<string, MineSourceFinding>(), classes = new Map<string, MineClass>();
 	const projects = census.projects.map(p => ({ ...p, events: 0, session_spans: 0, telemetry_sources: [] as string[], source_records: {} as Record<string, number> }));
 	const excluded: MineReport["excluded_inputs"] = { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] };
 	for (const cell of current) {
@@ -211,15 +210,22 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 			for (const evidence of value.evidence) if (excluded.evidence.length < 5) excluded.evidence.push(evidence);
 		}
 		for (const finding of cell.result.findings) {
-			if (seen.has(finding.identity) || cell.source === "cc" && primary.has(`${cell.project}\0${cell.day}`) && finding.class_id !== "rework" && finding.class_id !== "reopened-bead") continue;
-			seen.add(finding.identity);
-			const classKey = `${finding.project}\0${finding.class_id}`;
-			let entry = classes.get(classKey);
-			if (!entry) { entry = { id: finding.class_id, project: finding.project, count: 0, measured_minutes_lost: null, estimated_minutes_lost: null, unmeasured_events: 0, evidence: [], existing_beads: [], bead_search: "UNAVAILABLE", cheapest_enforcement: enforcement(finding.class_id) }; classes.set(classKey, entry); }
-			entry.count++; if (p) p.events++;
-			if (finding.measured_minutes === null) entry.unmeasured_events++; else entry.measured_minutes_lost = (entry.measured_minutes_lost ?? 0) + finding.measured_minutes;
-			if (finding.measured_minutes !== null || finding.proxy_minutes > 0) entry.estimated_minutes_lost = (entry.estimated_minutes_lost ?? 0) + (finding.measured_minutes ?? finding.proxy_minutes);
-			if (entry.evidence.length < 5) entry.evidence.push({ citation: finding.citation, timestamp: new Date(finding.time_ms).toISOString(), producer: finding.producer, summary: finding.summary });
+			const key = mineFindingKey(finding), previous = uniqueFindings.get(key);
+			uniqueFindings.set(key, previous ? mergeMineFindings(previous, finding) : finding);
+		}
+	}
+	for (const finding of uniqueFindings.values()) {
+		const classKey = `${finding.project}\0${finding.class_id}`;
+		let entry = classes.get(classKey);
+		if (!entry) { entry = { id: finding.class_id, project: finding.project, count: 0, measured_minutes_lost: null, estimated_minutes_lost: null, unmeasured_events: 0, evidence: [], existing_beads: [], bead_search: "UNAVAILABLE", proof_it_fires: null, cheapest_enforcement: enforcement(finding.class_id) }; classes.set(classKey, entry); }
+		const p = projects.find(project => project.path === finding.project);
+		entry.count++; if (p) p.events++;
+		if (finding.measured_minutes === null) entry.unmeasured_events++; else entry.measured_minutes_lost = (entry.measured_minutes_lost ?? 0) + finding.measured_minutes;
+		if (finding.measured_minutes !== null || finding.proxy_minutes > 0) entry.estimated_minutes_lost = (entry.estimated_minutes_lost ?? 0) + (finding.measured_minutes ?? finding.proxy_minutes);
+		if (entry.evidence.length < 5) entry.evidence.push(mineFindingEvidence(finding));
+		for (const evidence of finding.related_evidence ?? []) {
+			if (entry.evidence.length >= 5) break;
+			if (!entry.evidence.some(row => row.citation === evidence.citation)) entry.evidence.push(evidence);
 		}
 	}
 	const joined = await scanMine({ ...options, sources: [], census: projects, seedClasses: [...classes.values()], lookupBeads: true });

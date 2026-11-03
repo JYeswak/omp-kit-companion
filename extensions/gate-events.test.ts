@@ -45,3 +45,40 @@ test("recordGateEvent appends one row per event under the state dir and never th
 	expect(bad.ok).toBe(false);
 	expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(2);
 });
+
+test("recordGateEvent retains sanitized replay and raw event identity before bounding", async () => {
+	const path = join(base, "replay.jsonl");
+	const sentinel = `ghp_${"7cX9".repeat(10)}`;
+	const event = {
+		seat: "PlumRaven", act: "bash", target: null, gate: "INPUT_REFUSED", kind: "refuse" as const,
+		event_id: "native-tool-call-17",
+		replay: {
+			version: 1 as const, tool: "bash", arguments: { command: "echo ordinary", registration_token: "private-binding-value", oversized: `${"x".repeat(70000)} ${sentinel}` },
+			cwd: "/repo", staged_paths: null, diff_sha256: null, message: null, custody: null,
+			redacted: false, truncated: false, missing: ["staged_paths", "diff_sha256", "message", "custody"],
+		},
+	};
+	expect((await recordGateEvent(event, { path })).ok).toBe(true);
+	const row = JSON.parse(readFileSync(path, "utf8"));
+	expect(row.event_id).toBe("native-tool-call-17");
+	expect(row.replay.arguments.command).toBe("echo ordinary");
+	expect(row.replay.redacted).toBe(true);
+	expect(row.replay.truncated).toBe(true);
+	expect(Buffer.byteLength(JSON.stringify(row.replay))).toBeLessThanOrEqual(32768);
+	expect(JSON.stringify(row)).not.toContain(sentinel);
+	expect(JSON.stringify(row)).not.toContain("private-binding-value");
+});
+
+test("recordGateEvent scrubs bounded metadata including unexpected credential-shaped IDs", async () => {
+	const path = join(base, "metadata.jsonl");
+	const sentinel = `ghp_${"7cX9".repeat(10)}`;
+	await recordGateEvent({ seat: sentinel, act: sentinel, target: sentinel, gate: sentinel, kind: "refuse",
+		attempt: sentinel, event_id: sentinel, detail: `${"x".repeat(70000)} ${sentinel}` }, { path });
+	const raw = readFileSync(path, "utf8");
+	const row = JSON.parse(raw);
+	expect(raw).not.toContain(sentinel);
+	expect(row.metadata_redacted).toBe(true);
+	expect(row.metadata_truncated).toBe(true);
+	expect(row.target).not.toBe(sentinel);
+	expect(row.event_id).not.toBe(sentinel);
+});

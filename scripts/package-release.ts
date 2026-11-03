@@ -34,6 +34,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh",
 	"scripts/check-gap-mention.sh", "scripts/kitlib-findings.sh",
 	"scripts/kitlib_tmp.py", "scripts/kitlib-tmp.sh", "scripts/kitlib_lock.py", "scripts/kitlib_io.py", "scripts/kitlib_proc.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_poll.py", "scripts/kitlib_artifact.py", "scripts/tempsafe_check.py", "scripts/check-staged-tempsafe.sh",
+	"scripts/gate_event_replay.py", "src/cc-credential-shapes.v1.json", "src/secret-output-policy.v1.json",
 	"scripts/test-budget.ts", "scripts/gate-ci-only.tsv", ".github/test-budget.json",
 	"scripts/kitlib_ratchet_core.py", "scripts/kitlib_ratchet.py", "scripts/check-staged-kitlib.sh",
 	"scripts/check-commit-kitlib-reversal.sh", "scripts/native-br-preserve.py",

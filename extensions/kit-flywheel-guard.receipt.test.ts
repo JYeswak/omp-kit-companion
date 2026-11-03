@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import {
 	CC_BEAD_RE,
 	parseEvidenceIds,
@@ -11,6 +12,7 @@ import {
 } from "./kit-flywheel-guard";
 import { createFlywheelHost, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
+import { runFixture } from "../tests/cli/fixture-process.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -281,4 +283,70 @@ test("refused: a non-bead token ($b, a sentence) is recorded without ctx.bead, s
 
 beforeEach(() => {
 	delete process.env.CC_STATE;
+});
+
+test("mine replay: refused tool call retains original input and context", async () => {
+	const cwd = stockRepo();
+	const state = freshDir(base, "mine-state-");
+	const h = await createFlywheelHost(base, {
+		env: { BR_ACTOR: "BlueFox", XDG_STATE_HOME: state },
+		respond: respond({ "rc-replay": bead("rc-replay", "in_progress", "BlueFox") }, cwd),
+	});
+	const command = 'br close rc-replay --reason "ordinary attempted input"';
+	const verdict = await closeCall(h, cwd, "native-refusal-1", command);
+	expect(verdict?.block).toBe(true);
+	const rows = readFileSync(join(state, "omp-kit", "gate-events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+	const row = rows.find(row => row.kind === "refuse");
+	expect(row.event_id).toBe("native-refusal-1");
+	expect(row.replay.tool).toBe("bash");
+	expect(row.replay.arguments.command).toBe(command);
+	expect(row.replay.cwd).toBe(cwd);
+});
+
+test("mine replay: failed execution retains pending input but authoritative zero rc is not refused", async () => {
+	const cwd = stockRepo();
+	const state = freshDir(base, "mine-execution-");
+	const h = await createFlywheelHost(base, { env: { XDG_STATE_HOME: state } });
+	await h.emit("tool_call", { toolCallId: "native-failure-1", toolName: "read", input: { path: "ordinary-missing.txt" } }, h.ctx(cwd));
+	await h.emit("tool_execution_end", { toolCallId: "native-failure-1", toolName: "read", isError: true, result: { code: 2, stderr: "ENOENT: no such file" } }, h.ctx(cwd));
+	const ledger = join(state, "omp-kit", "gate-events.jsonl");
+	const failed = readFileSync(ledger, "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(failed.find(row => row.event_id === "native-failure-1").replay.arguments).toEqual({ path: "ordinary-missing.txt" });
+	await h.emit("tool_call", { toolCallId: "native-success-1", toolName: "read", input: { path: "ordinary.txt" } }, h.ctx(cwd));
+	await h.emit("tool_execution_end", { toolCallId: "native-success-1", toolName: "read", isError: true, result: { code: 0, stderr: "historical REFUSED timeout text", timed_out: false } }, h.ctx(cwd));
+	const rows = readFileSync(ledger, "utf8").trim().split("\n").map(line => JSON.parse(line));
+	expect(rows.some(row => row.event_id === "native-success-1" && row.kind === "refuse")).toBe(false);
+});
+
+test("mine replay: commit refusal observes staged paths diff message and canonical custody", async () => {
+	const cwd = stockRepo();
+	writeFileSync(join(cwd, "ordinary.txt"), "staged replay content\n");
+	expect(runFixture(["git", "-C", cwd, "add", "--", "ordinary.txt"], { cwd }).rc).toBe(0);
+	const diff = runFixture(["git", "-C", cwd, "diff", "--cached", "--binary", "--no-ext-diff"], { cwd }).stdout;
+	const state = freshDir(base, "mine-commit-");
+	const fleet = freshDir(base, "custody-reader-");
+	mkdirSync(join(fleet, "scripts", "cc"), { recursive: true });
+	writeFileSync(join(fleet, "scripts", "cc", "custody.py"), "# fixture canonical reader selected via OMP_KIT_FLEET_ROOT\n");
+	const h = await createFlywheelHost(base, {
+		env: { BR_ACTOR: "ReplaySeat", XDG_STATE_HOME: state, OMP_KIT_FLEET_ROOT: fleet },
+		respond: call => {
+			if (call.command === "python3") {
+				expect(call.args).not.toContain("--reserve");
+				return { code: 10, stdout: JSON.stringify({ overall: "HELD", observed_by: "fixture canonical reader" }), stderr: "" };
+			}
+			if (call.command === "git") {
+				const result = runFixture(["git", ...call.args], { cwd: call.options?.cwd ?? cwd });
+				if (result.rc === null) throw new Error(`git fixture did not exit: ${Buffer.from(result.stderr).toString()}`);
+				return { code: result.rc, stdout: Buffer.from(result.stdout).toString(), stderr: Buffer.from(result.stderr).toString() };
+			}
+			return { code: 127, stdout: "", stderr: "not available" };
+		},
+	});
+	await h.emit("tool_call", { toolCallId: "native-commit-1", toolName: "bash", input: { command: 'git commit -m "ordinary replay commit"' } }, h.ctx(cwd));
+	const rows = readFileSync(join(state, "omp-kit", "gate-events.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+	const row = rows.find(row => row.event_id === "native-commit-1");
+	expect(row.replay.staged_paths).toEqual(["ordinary.txt"]);
+	expect(row.replay.diff_sha256).toBe(createHash("sha256").update(diff).digest("hex"));
+	expect(row.replay.message).toBe("ordinary replay commit");
+	expect(row.replay.custody.observations[0].result).toEqual({ overall: "HELD", observed_by: "fixture canonical reader" });
 });

@@ -12,6 +12,9 @@ import { renderEnvelope } from "../src/kitlib/findings.ts";
 import { agentMailStorageRoot } from "../src/holder-liveness.ts";
 import { projectAgentBrShimPath } from "../src/gate-plane.ts";
 import { admitClaimCut } from "../src/claim-cut.ts";
+import { captureMineReplay, type MineReplay } from "../src/mine-replay.ts";
+import { resolveCustodyScript } from "../src/custody.ts";
+import { classifyMineResult } from "../src/mine-cause.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -307,6 +310,18 @@ function resultFailed(result: unknown): boolean {
 		}
 	}
 	return false;
+}
+
+/** Preserve the producer status when present, rather than synthesizing a refusal code. */
+function replayExitCode(result: unknown): number | undefined {
+	for (const source of [result, field(result, "details")]) {
+		for (const key of ["exit_code", "exitCode", "rc", "code"]) {
+			const value = field(source, key);
+			if (typeof value === "number" && Number.isInteger(value)) return value;
+			if (typeof value === "string" && value.trim() !== "" && Number.isInteger(Number(value))) return Number(value);
+		}
+	}
+	return undefined;
 }
 
 /** One `br|bd` invocation in a bash command, with the directory it runs in (null: a `cd` the guard cannot resolve). */
@@ -2365,6 +2380,76 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	/** Seat-identity fallback for the commit-autocomplete lookup and the compaction summary. */
 	let selfDeclared: string | null = null;
 	const pendingCalls = new Map<string, RereadCall>();
+	const pendingReplays = new Map<string, MineReplay>();
+	// Observation only: no write-tree, tracker mutation, reservation or custody --reserve.
+	const replayFor = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<MineReplay> => {
+		const tool = typeof event.toolName === "string" ? event.toolName : undefined;
+		const rawCwd = field(event.input, "cwd");
+		let cwd = typeof rawCwd === "string" ? resolve(ctx.cwd, expandHome(rawCwd, home)) : ctx.cwd;
+		const command = field(event.input, "command");
+		let commitArgs: string[] | undefined;
+		let expansionFlags: boolean[] = [];
+		if (tool?.toLowerCase() === "bash" && typeof command === "string") {
+			const parsed = shellCommandsWithExpansions(command);
+			for (let index = 0; index < parsed.commands.length; index++) {
+				const words = parsed.commands[index]!;
+				if (words[0] === "cd" && words[1] && !shellExpands(words[1])) cwd = resolve(cwd, expandHome(words[1], home));
+				if (words[0] !== "git") continue;
+				let at = 1;
+				if (words[at] === "-C" && words[at + 1]) { cwd = resolve(cwd, words[at + 1]!); at += 2; }
+				if (words[at] === "commit") {
+					commitArgs = words.slice(at + 1);
+					expansionFlags = (parsed.expansionFlags[index] ?? []).slice(at + 1);
+					break;
+				}
+			}
+		}
+		const input = { ...(tool ? { tool } : {}), arguments: event.input, cwd };
+		if (!commitArgs) return captureMineReplay(input);
+		const observe = async (args: string[]) => {
+			try { return await pi.exec("git", args, { cwd, timeout: 2000 }); } catch { return null; }
+		};
+		const [paths, diff, top] = await Promise.all([
+			observe(["diff", "--cached", "--name-only", "-z"]),
+			observe(["diff", "--cached", "--binary", "--no-ext-diff"]),
+			observe(["rev-parse", "--show-toplevel"]),
+		]);
+		const staged = paths?.code === 0 ? paths.stdout.split("\0").filter(Boolean) : undefined;
+		const messages: string[] = [];
+		for (let at = 0; at < commitArgs.length; at++) {
+			const arg = commitArgs[at]!;
+			if (arg === "-m" || arg === "--message") {
+				const value = staticShellValue(commitArgs[at + 1] ?? "", expansionFlags[at + 1]);
+				if (value !== null) messages.push(value);
+				at++;
+			} else if (arg.startsWith("--message=") || (arg.startsWith("-m") && arg.length > 2)) {
+				const value = staticShellValue(arg.startsWith("--") ? arg.slice(10) : arg.slice(2), expansionFlags[at]);
+				if (value !== null) messages.push(value);
+			} else if (arg === "-F" || arg === "--file") {
+				const file = staticShellValue(commitArgs[at + 1] ?? "", expansionFlags[at + 1]);
+				if (file && file !== "-") { try { messages.push(readFileSync(resolve(cwd, file), "utf8")); } catch { /* explicitly missing */ } }
+				at++;
+			}
+		}
+		const script = resolveCustodyScript({ ...env, HOME: home });
+		let custody: unknown = { status: "UNAVAILABLE", reason: script ? "No staged paths were observed." : "Canonical custody reader unavailable." };
+		if (script && staged?.length) {
+			const observations: unknown[] = [];
+			for (const path of staged.slice(0, 16)) {
+				try {
+					const seat = admissionOwner(env) ?? selfDeclared;
+					const observed = await pi.exec("python3", [script, "--repo", top?.code === 0 ? top.stdout.trim() : cwd, ...(seat ? ["--agent", seat] : []), path], { cwd, timeout: 2000 });
+					let result: unknown;
+					try { result = JSON.parse(observed.stdout); } catch { result = { status: "UNAVAILABLE", reason: "Custody reader returned non-JSON output." }; }
+					observations.push({ path, rc: observed.code, result });
+				} catch { observations.push({ path, status: "UNAVAILABLE", reason: "Custody reader could not complete." }); }
+			}
+			custody = { observations, ...(staged.length > 16 ? { omitted_paths: staged.length - 16 } : {}) };
+		}
+		return captureMineReplay({ ...input, ...(staged ? { staged_paths: staged } : {}),
+			...(diff?.code === 0 ? { diff_sha256: createHash("sha256").update(diff.stdout).digest("hex") } : {}),
+			...(messages.length ? { message: messages.join("\n\n") } : {}), custody });
+	};
 	/** Allowed closes awaiting their tool_execution_end, keyed by toolCallId for receipt emission. */
 	const closeIntents = new Map<string, CloseAttempt[]>();
 	/** Every tracker a successful br call reached this session, by key: an empty list in one never vouches for the others. */
@@ -2378,6 +2463,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	});
 	pi.on("session_compact", async (_event, ctx) => {
 		pendingCalls.clear();
+		pendingReplays.clear();
 		closeIntents.clear();
 		const envIdentities = IDENTITY_ENV.map(name => env[name]?.trim()).filter((value): value is string => Boolean(value));
 		let identities: string[];
@@ -2537,6 +2623,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		}
 	};
 	pi.on("tool_call", async (event, ctx) => {
+		let replay: MineReplay;
+		try { replay = await replayFor(event, ctx); }
+		catch { replay = captureMineReplay({ ...(typeof event.toolName === "string" ? { tool: event.toolName } : {}), arguments: event.input, cwd: ctx.cwd }); }
+		if (typeof event.toolCallId === "string") pendingReplays.set(event.toolCallId, replay);
 		const verdict = await guardVerdict(event, ctx);
 		const command = typeof event.toolName === "string" && event.toolName.toLowerCase() === "bash" ? field(event.input, "command") : undefined;
 		const act = typeof command === "string" ? trackerAct(command) : null;
@@ -2561,11 +2651,18 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					if (plan.findings.length > 0) {
 						const envelope = renderEnvelope({ ok: false, act: "commit", target: plan.bead, snapshot: `tree:${(await git(["write-tree"], repo)).stdout.trim()}`, findings: plan.findings });
 						const reason = `kit-flywheel-guard COMMIT_INCOMPLETE: ${envelope}\nNothing was completed and nothing was run.`;
-						await recordGateEvent({ seat, act: "commit", target: plan.bead, gate: "COMMIT_INCOMPLETE", kind: "refuse", detail: plan.findings.map(f => f.code).join(","), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
+						await recordGateEvent({ seat, act: "commit", target: plan.bead, gate: "COMMIT_INCOMPLETE", kind: "refuse", replay, detail: plan.findings.map(f => f.code).join(","), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}) }, { env, home });
+						if (typeof event.toolCallId === "string") { pendingReplays.delete(event.toolCallId); pendingCalls.delete(event.toolCallId); }
 						return { block: true, reason };
 					}
 					if (plan.command !== command) {
 						const raw = event.input;
+						if (typeof event.toolCallId === "string" && typeof raw === "object" && raw !== null) {
+							const input = { ...(raw as Record<string, unknown>), command: plan.command };
+							pendingCalls.set(event.toolCallId, { toolName: "bash", input, cwd: repo });
+							pendingReplays.set(event.toolCallId, captureMineReplay({ tool: "bash", arguments: input, cwd: repo,
+								...(replay.staged_paths ? { staged_paths: replay.staged_paths } : {}), ...(replay.diff_sha256 ? { diff_sha256: replay.diff_sha256 } : {}), custody: replay.custody }));
+						}
 						if (typeof raw === "object" && raw !== null) return { input: { ...(raw as Record<string, unknown>), command: plan.command } };
 					}
 				}
@@ -2578,20 +2675,33 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				target: act?.target ?? null,
 				gate: verdict?.block === true ? gateFromReason(String(verdict.reason ?? "")) : "kit-flywheel-guard",
 				kind: verdict?.block === true ? "refuse" : "pass",
-				...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}),
-				...(verdict?.block === true ? { detail: String(verdict.reason ?? "").slice(0, 200) } : {}),
+				replay,
+				...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}),
+				...(verdict?.block === true ? { detail: String(verdict.reason ?? "") } : {}),
 			}, { env, home });
 			if (!row.ok) ctx.ui?.notify(`kit-flywheel-guard GATE_LEDGER_UNWRITTEN: ${row.why}; the verdict stands.`, "warning");
 		}
+		if (verdict?.block === true && typeof event.toolCallId === "string") { pendingCalls.delete(event.toolCallId); pendingReplays.delete(event.toolCallId); }
 		return verdict;
 	});
 	pi.on("tool_execution_end", async (_event, ctx) => {
 		try {
 			if (typeof _event.toolCallId !== "string") return;
+			const replay = pendingReplays.get(_event.toolCallId);
+			pendingReplays.delete(_event.toolCallId);
 			const call = pendingCalls.get(_event.toolCallId);
-			if (call === undefined) return;
 			pendingCalls.delete(_event.toolCallId);
-			if (_event.isError === true || resultFailed(_event.result)) return;
+			const cause = classifyMineResult({ tool: call?.toolName ?? (typeof _event.toolName === "string" ? _event.toolName : "unknown"), result: _event.result, is_error: _event.isError === true });
+			const sourceRc = replayExitCode(_event.result);
+			if (cause !== null) {
+				await recordGateEvent({ seat: admissionOwner(env) ?? selfDeclared, act: call?.toolName.toLowerCase() ?? "unknown", target: null,
+					gate: cause.class_id, kind: "refuse", event_id: _event.toolCallId, attempt: _event.toolCallId,
+					detail: cause.summary, replay: replay ?? captureMineReplay({ tool: typeof _event.toolName === "string" ? _event.toolName : "unknown", cwd: ctx.cwd }),
+					// A zero found only inside prior nested command output is not this failing tool's rc.
+					...(sourceRc !== undefined && sourceRc !== 0 ? { rc: sourceRc } : {}) }, { env, home });
+			}
+			if (call === undefined) return;
+			if (_event.isError === true || resultFailed(_event.result)) { closeIntents.delete(_event.toolCallId); return; }
 			const command = field(call.input, "command");
 			if (call.toolName.toLowerCase() === "bash" && typeof command === "string") {
 				for (const ref of commandTrackers(command, call.cwd, home, env)) if (!sessionTrackers.has(ref.key)) sessionTrackers.set(ref.key, ref);

@@ -217,6 +217,23 @@ ok "$?" "2" "nonrepo-refused"
 # (planted: the installed hook predates the digit-less fix).
 sh "$INSTALLER" --check "$A" > /dev/null 2>&1
 ok "$?" "0" "check-fresh-rc"
+# Previously installed helpers escaped --check's duplicate list. The canonical
+# manifest must name missing/stale copies and preserve helper/member modes on repair.
+rm "$A/.git/hooks/hooks.d/pre-commit/portable_paths_check.py"
+printf '\n# planted stale helper\n' >> "$A/.git/hooks/hooks.d/pre-commit/wallclock_check.py"
+sh "$INSTALLER" --check "$A" > "$TMP/o-manifest-closure" 2>&1
+ok "$?" "3" "check-canonical-closure-rc"
+grep -q "MISSING installed member: $A/.git/hooks/hooks.d/pre-commit/portable_paths_check.py" "$TMP/o-manifest-closure"
+ok "$?" "0" "check-canonical-portable-helper-named"
+grep -q "STALE installed member: $A/.git/hooks/hooks.d/pre-commit/wallclock_check.py" "$TMP/o-manifest-closure"
+ok "$?" "0" "check-canonical-wallclock-helper-named"
+sh "$INSTALLER" "$A" > /dev/null 2>&1
+ok "$?" "0" "canonical-closure-reinstall-rc"
+sh "$INSTALLER" --check "$A" > /dev/null 2>&1
+ok "$?" "0" "canonical-closure-reinstall-fresh"
+modes=1
+[ ! -x "$A/.git/hooks/hooks.d/pre-commit/portable_paths_check.py" ] && [ ! -x "$A/.git/hooks/hooks.d/pre-commit/wallclock_check.py" ] && [ -x "$A/.git/hooks/hooks.d/commit-msg/48-omp-kit-deploy-step" ] && modes=0
+ok "$modes" "0" "canonical-closure-helper-member-modes"
 mkdir -p "$TMP/oldkit/scripts"
 cp "$INSTALLER" "$TMP/oldkit/scripts/install-commit-msg-bead.sh"
 printf '#!/bin/sh\n# old hook predating the fix\nexit 0\n' > "$TMP/oldkit/scripts/commit-msg-bead.sh"
@@ -493,15 +510,24 @@ group_inert() {
 # 11. an inert shared-main member (passes an off-main commit) is caught by the
 #     live probe: the install rolls back and leaves no member behind
 mkdir -p "$TMP/inertkit/scripts"
-for script in install-commit-msg-bead.sh commit-msg-bead.sh check-pushed-beads.sh ref-txn-bead.sh check-staged-imports.sh check-commit-imports.sh check-commit-notes.sh release-notes.ts limit-process-tree.sh check-staged-fragments.sh check-staged-regexploit.sh check-stale-worktree.sh check-commit-kitlib-reversal.sh check-staged-pysafe.sh check-staged-tempsafe.sh check-staged-kitlib.sh check-staged-br-init.sh check-portable-paths.sh portable_paths_check.py check-staged-readme.sh check-staged-sources.sh pysafe.py pysafe_check.py pysafe_inline.py pysafe_inline_literals.py kitlib_ratchet_core.py tempsafe_check.py kitlib_ratchet.py br_init_check.py sources.py kitlib_run.py kitlib_io.py kitlib_tmp.py readme-check.ts kitlib-tmp.sh kitlib-findings.sh gate-event.sh kitlib_jsonl.py kitlib_lock.py; do
-	cp "$(dirname -- "$INSTALLER")/$script" "$TMP/inertkit/scripts/$script"
-done
-cp "$(dirname -- "$INSTALLER")/check-gap-mention.sh" "$TMP/inertkit/scripts/check-gap-mention.sh"
-cp "$(dirname -- "$INSTALLER")/check-deploy-step.sh" "$TMP/inertkit/scripts/check-deploy-step.sh"
-cp "$(dirname -- "$INSTALLER")/pre-push-verification-level.sh" "$TMP/inertkit/scripts/pre-push-verification-level.sh"
-cp "$(dirname -- "$INSTALLER")/check-commit-gate.sh" "$TMP/inertkit/scripts/check-commit-gate.sh"
-cp "$(dirname -- "$INSTALLER")/check-staged-wallclock.sh" "$TMP/inertkit/scripts/check-staged-wallclock.sh"
-cp "$(dirname -- "$INSTALLER")/wallclock_check.py" "$TMP/inertkit/scripts/wallclock_check.py"
+cp "$INSTALLER" "$TMP/inertkit/scripts/install-commit-msg-bead.sh"
+# Derive the foreign-install dependency closure from the exact manifest consumed
+# by installation and --check, including optional copied helpers and their data.
+python3 - "$INSTALLER" "$TMP/inertkit" <<'PY'
+import pathlib, shutil, sys
+installer = pathlib.Path(sys.argv[1])
+root = installer.parent.parent
+destination = pathlib.Path(sys.argv[2])
+manifest = installer.read_text().split("<<'INSTALLATION_MANIFEST'\n", 1)[1].split("\nINSTALLATION_MANIFEST", 1)[0]
+rows = [line.split() for line in manifest.splitlines() if line.strip()]
+if not rows or any(len(row) != 5 for row in rows):
+    raise ValueError('invalid canonical installation manifest')
+sources = {row[3] for row in rows}
+for relative in sorted(sources - {'scripts/check-pushed-on-main.sh'}):
+    target = destination / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(root / relative, target)
+PY
 printf '#!/bin/sh\nexit 0\n' > "$TMP/inertkit/scripts/check-pushed-on-main.sh"
 K=$(new_repo inert) || exit 1
 git -C "$K" branch -M main

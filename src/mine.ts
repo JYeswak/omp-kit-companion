@@ -8,6 +8,8 @@ import { mineTranscripts } from "./mine-transcripts.ts";
 import { mineHistory } from "./mine-history.ts";
 import { MINE_SOURCES, type MineSource } from "./mine-ledger.ts";
 import { runResumableMine, type MineFileIndex } from "./mine-resume.ts";
+import { classifyMineResult } from "./mine-cause.ts";
+import { captureMineReplay, readMineReplay, type MineReplay } from "./mine-replay.ts";
 export type { MineSource } from "./mine-ledger.ts";
 
 /** Read existing producers only. No ingest, reindex, tracker import/export or model call. */
@@ -22,7 +24,7 @@ export interface MineScanOptions extends MineOptions {
 	verdictOwners?: Readonly<Record<string, string>>;
 	onFinding?: (finding: MineSourceFinding) => void;
 }
-export interface MineEvidence { citation: string; timestamp: string; producer: string; summary: string }
+export interface MineEvidence { citation: string; timestamp: string; producer: string; summary: string; event_id?: string; replay?: MineReplay }
 export interface MineCoverage {
 	producer: string; location: string; status: "READ" | "MISSING" | "PARTIAL";
 	rows: number; first_timestamp: string | null; last_timestamp: string | null; detail: string;
@@ -33,11 +35,14 @@ export interface MineClass {
 	unmeasured_events: number; evidence: MineEvidence[];
 	existing_beads: { id: string; title: string }[];
 	bead_search: "MATCHES" | "NONE" | "UNAVAILABLE";
+	/** Historical observations never certify an executable regression witness. */
+	proof_it_fires: null;
 	cheapest_enforcement: { kind: "TTSR rule" | "preflight check" | "gate" | "skill line" | "code fix"; change: string };
 }
 export interface MineSourceFinding {
 	class_id: string; project: string; time_ms: number; producer: string; citation: string;
 	summary: string; measured_minutes: number | null; proxy_minutes: number; identity: string;
+	event_id?: string; replay?: MineReplay; related_evidence?: MineEvidence[];
 }
 export interface MineSourceContext {
 	home: string; projects: readonly { name: string; path: string }[]; since_ms: number; until_ms: number;
@@ -64,6 +69,47 @@ export interface MineReport {
 	ledger?: { path: string; totals: Record<"READ" | "PARTIAL" | "MISSING" | "NONE-EXISTS", number>; reused: number; scanned: number;
 		cells: { project: string; day: string; source: MineSource; status: "READ" | "PARTIAL" | "MISSING" | "NONE-EXISTS"; reasons: string[] }[] };
 }
+
+/** Source projections of one retained tool-call id are one occurrence, not independent incidents. */
+export function mineFindingKey(finding: MineSourceFinding): string {
+	return finding.event_id ? `event:${finding.event_id}` : finding.identity;
+}
+export function mineFindingEvidence(finding: MineSourceFinding): MineEvidence {
+	return { citation: finding.citation, timestamp: new Date(finding.time_ms).toISOString(), producer: finding.producer,
+		summary: finding.summary, ...(finding.event_id ? { event_id: finding.event_id } : {}),
+		replay: finding.replay ?? captureMineReplay({}) };
+}
+function mergeReplay(first?: MineReplay, second?: MineReplay): MineReplay | undefined {
+	if (!first) return second;
+	if (!second) return first;
+	const merged = { ...second, ...first,
+		tool: first.tool ?? second.tool, arguments: first.arguments ?? second.arguments, cwd: first.cwd ?? second.cwd,
+		staged_paths: first.staged_paths ?? second.staged_paths, diff_sha256: first.diff_sha256 ?? second.diff_sha256,
+		message: first.message ?? second.message, custody: first.custody ?? second.custody,
+		redacted: first.redacted || second.redacted, truncated: first.truncated || second.truncated,
+		missing: [...new Set([...first.missing, ...second.missing])],
+	};
+	merged.missing = merged.missing.filter(field => !(field in merged) || merged[field as keyof typeof merged] === null);
+	return readMineReplay(merged) ?? undefined;
+}
+export function mergeMineFindings(first: MineSourceFinding, second: MineSourceFinding): MineSourceFinding {
+	const score = (finding: MineSourceFinding) =>
+		(finding.class_id === "tool-error:unclassified" ? 0 : 1000)
+		+ (finding.project.startsWith("@") ? 0 : 100)
+		+ (finding.producer === "omp-transcript" ? 20 : 0)
+		+ (finding.replay?.arguments === null || finding.replay?.arguments === undefined ? 0 : 10);
+	const best = score(second) > score(first) ? second : first, other = best === first ? second : first;
+	const evidence = [mineFindingEvidence(first), ...(first.related_evidence ?? []), mineFindingEvidence(second), ...(second.related_evidence ?? [])];
+	const citations = new Set<string>();
+	const related = evidence.filter(row => {
+		if (row.citation === best.citation || citations.has(row.citation)) return false;
+		citations.add(row.citation); return true;
+	}).slice(0, 4);
+	return { ...best, project: best.project.startsWith("@") && !other.project.startsWith("@") ? other.project : best.project,
+		replay: mergeReplay(best.replay, other.replay),
+		measured_minutes: best.measured_minutes ?? other.measured_minutes,
+		related_evidence: related };
+}
 const MAX_ROWS = 10_000_000, MAX_FILES = 16_384, MAX_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024 * 1024, MAX_LINE_BYTES = 8 * 1024 * 1024, MAX_COMMAND_BYTES = 64 * 1024 * 1024;
 const MAX_PROJECTS = 512, MAX_CLASSES = 2048, MAX_SEARCHES = 128;
@@ -74,7 +120,7 @@ const INVENTORY: MineReport["inventory"] = [
 	{ producer: "gate-events / hook refusal ledgers", covers: "Commit refusals, guard friction and explicit hook timeouts; refusal counts are observations, not proof a guard is wrong.", limits: "Old rows without repo or resolvable bead stay @unattributed; no assignment from the current seat." },
 	{ producer: "release-verdict / full-suite verdict store", covers: "Persisted FAIL records, exact record citations and recorded wall time; native store helper resolves shared store identity.", limits: "Legacy overwritten verdicts cannot be recovered; logs without dates are not assigned the current mtime." },
 	{ producer: "bead history / REWORK", covers: "CC bead transitions (closed-to-open and rework), plus dated REWORK comments in the existing JSONL export. One read-only br search '-' census per tracker confirms canonical hyphenated ids; local literal issue/comment matches supply up to three existing-bead candidates per class.", limits: "Text matches are candidates, not proof the bead covers the defect. Snapshot diffs are observations, not complete audit history; missing exports/searches are reported. Comments and transitions on the same bead/day coalesce." },
-	{ producer: "primary OMP transcripts", covers: "Native project sessions across every profile, including pre-CC October tool failures, refusal messages, timeouts and heuristic user corrections; physical citations and measured endpoints when present.", limits: "Never filtered by mtime. Primary transcripts replace overlapping normalized CC failure/friction counts, not add to them. Heuristic corrections remain labeled; missing/unmapped/oversize records remain explicit." },
+	{ producer: "primary OMP transcripts", covers: "Native project sessions across every profile, including pre-CC October tool failures, refusal messages, timeouts and heuristic user corrections; physical citations and measured endpoints when present.", limits: "Never filtered by mtime. Only observations sharing an original call/event ID coalesce across sources; unmatched CC incidents remain. Old projections without that identity cannot prove overlap. Heuristic corrections remain labeled; missing/unmapped/oversize records remain explicit." },
 	{ producer: "primary tracker / git / repo hook history", covers: "Native .br_history transitions and REWORK witnesses, dated git Revert/Supersedes commits, and timestamped repo gitdir hook/gate logs.", limits: "Snapshot transitions are observations, not complete audit receipts. Read-only snapshots only: no tracker SQLite writes or ingest. Shared/copied tracker origins and same-bead/day events coalesce." },
 	{ producer: "scratch mine", covers: "Existing scratch-reap-log flags, owed scratch and expired holds.", limits: "scratch mine itself is a current ownership census, not historical incident mining; it is not invoked and no flag is appended." },
 	{ producer: "flywheel", covers: "Existing hook block/audit/timeout JSONL under the flywheel state root; repeated-ritual skill remains the lesson authoring consumer.", limits: "No skill pipeline, agent dispatch or ledger mutation is triggered." },
@@ -127,6 +173,9 @@ export function enforcement(id: string): MineClass["cheapest_enforcement"] {
 	if (id.startsWith("timeout:")) return { kind: "code fix", change: "Bound and cancel the named producer's entire process group and diagnose its slow dependency; preserve timeout as failure." };
 	if (id.startsWith("guard-failure:")) return { kind: "code fix", change: "Repair the named guard engine's failed observation/transport; keep a missing observation UNKNOWN instead of treating it as permission or blaming the guarded command." };
 	if (id.startsWith("tool-error:")) return { kind: "code fix", change: "Replay the exact failing invocation in the cited transcript, repair its input/implementation at the responsible layer, and keep the error visible until the real path succeeds." };
+	if (id.startsWith("mcp-transport:")) return { kind: "code fix", change: "Repair the cited MCP transport/server failure at the named inner tool; do not misclassify the wrapper as a local write failure." };
+	if (id.startsWith("validation:")) return { kind: "preflight check", change: "Validate the retained invocation against the named tool's actual input contract before dispatch; preserve the original validation failure and missing-input markers." };
+	if (id.startsWith("assertion:") || id.startsWith("identity:")) return { kind: "code fix", change: "Replay the retained input against the named invariant or authoritative identity lookup; fix the failing contract rather than suppressing its assertion or inventing custody." };
 	if (id === "user-correction") return { kind: "skill line", change: "Preserve the user's corrected requirement in the role's action contract; inspect the cited heuristic before promoting it into an automatic prohibition." };
 	if (id.startsWith("git-")) return { kind: "code fix", change: "Inspect the cited correction commit and its reverted/superseded behavior; carry its regression witness into the owning change rather than treating a revert as proof of the root cause." };
 	if (id === "bead-blocked") return { kind: "preflight check", change: "Resolve the cited blocked dependency or missing input before dispatch; do not count a snapshot status as an independent verification receipt." };
@@ -160,14 +209,13 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	const warn = (message: string) => { if (!report.warnings.includes(message)) report.warnings.push(message); };
 	const projects = new Map<string, MineProject>();
 	const configuredProjects = new Set<string>();
-	const classes = new Map<string, MineClass>((options.seedClasses ?? []).map(c => [`${c.project}\0${c.id}`, c]));
+	const classes = new Map<string, MineClass>((options.seedClasses ?? []).map(c => [`${c.project}\0${c.id}`, { ...c, proof_it_fires: null }]));
 	const beads = new Map<string, string>();
 	const beadDocuments = new Map<string, string>();
 	const seen = new Set<string>();
 	const telemetrySeen = new Set<string>();
 	const actions = new Map<string, { surface: string; repo: string | null }>();
-	const deferredCc = new Map<string, MineSourceFinding>();
-	const primaryObserved = new Set<string>();
+	const pendingFindings = new Map<string, MineSourceFinding>();
 	const start = performance.now(); let rows = 0, files = 0, bytes = 0, searches = 0;
 	const fileLimitBytes = options.fileIndex ? byteLimit : MAX_FILE_BYTES;
 	const expired = () => performance.now() - start >= DEADLINE_MS;
@@ -198,7 +246,7 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 		if (!cov.last_timestamp || iso > cov.last_timestamp) cov.last_timestamp = iso;
 	}
 	function projectFor(row: Record<string, unknown>): string {
-		const raw = text(row.repo) ?? text(row.cwd) ?? text(row.project_path) ?? text(row.repo_path);
+		const raw = text(row.repo) ?? text(row.cwd) ?? text(row.project_path) ?? text(row.repo_path) ?? text(object(row.replay)?.cwd);
 		if (raw && isAbsolute(raw)) return addProject(raw) ?? "@excluded-scratch";
 		if (raw) {
 			const matches = [...projects.values()].filter(p => p.name === raw);
@@ -207,26 +255,37 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 		const bead = text(row.bead) ?? text(row.target);
 		return bead && beads.has(bead) ? beads.get(bead)! : "@unattributed";
 	}
-	function emit(id: string, project: string, t: number, producer: string, citation: string, summary: string, measured: number | null, proxy: number, identity: string) {
-		if (t < since || t >= until || seen.has(identity)) return;
-		if (producer === "CC observations" || producer === "CC observations:spool") {
-			if (!deferredCc.has(identity)) deferredCc.set(identity, { class_id: id, project, time_ms: t, producer: producer.endsWith(":spool") ? "CC spool" : "CC projections", citation, summary, measured_minutes: measured, proxy_minutes: proxy, identity });
-			return;
-		}
-		seen.add(identity);
+	function emit(id: string, project: string, t: number, producer: string, citation: string, summary: string, measured: number | null, proxy: number, identity: string, extra?: Pick<MineSourceFinding, "event_id" | "replay" | "related_evidence">) {
+		if (t < since || t >= until) return;
+		const replay = extra?.replay ?? captureMineReplay({});
+		const finding: MineSourceFinding = { class_id: id, project, time_ms: t,
+			producer: producer === "CC observations" ? "CC projections" : producer === "CC observations:spool" ? "CC spool" : producer,
+			citation, summary: (captureMineReplay({ message: summary }).message ?? "[Unavailable diagnostic]").slice(0, 400),
+			measured_minutes: measured, proxy_minutes: proxy, identity,
+			...(extra?.event_id ? { event_id: extra.event_id } : {}), ...(extra?.related_evidence ? { related_evidence: extra.related_evidence } : {}), replay };
+		const key = mineFindingKey(finding), previous = pendingFindings.get(key);
+		pendingFindings.set(key, previous ? mergeMineFindings(previous, finding) : finding);
+	}
+	function aggregate(finding: MineSourceFinding) {
+		const { class_id: id, project, measured_minutes: measured, proxy_minutes: proxy, producer } = finding;
 		const key = `${project}\0${id}`;
 		let entry = classes.get(key);
 		if (!entry) {
 			if (classes.size >= MAX_CLASSES) { warn("Class limit reached (2048); coverage is partial."); return; }
-			entry = { id, project, count: 0, measured_minutes_lost: null, estimated_minutes_lost: null, unmeasured_events: 0, evidence: [], existing_beads: [], bead_search: "UNAVAILABLE", cheapest_enforcement: enforcement(id) };
+			entry = { id, project, count: 0, measured_minutes_lost: null, estimated_minutes_lost: null, unmeasured_events: 0,
+				evidence: [], existing_beads: [], bead_search: "UNAVAILABLE", proof_it_fires: null, cheapest_enforcement: enforcement(id) };
 			classes.set(key, entry);
 		}
 		entry.count++;
-		options.onFinding?.({ class_id: id, project, time_ms: t, producer, citation, summary, measured_minutes: measured, proxy_minutes: proxy, identity });
+		options.onFinding?.(finding);
 		if (measured !== null) entry.measured_minutes_lost = (entry.measured_minutes_lost ?? 0) + measured;
 		else entry.unmeasured_events++;
 		if (measured !== null || proxy > 0) entry.estimated_minutes_lost = (entry.estimated_minutes_lost ?? 0) + (measured ?? proxy);
-		if (entry.evidence.length < 5) entry.evidence.push({ citation, timestamp: new Date(t).toISOString(), producer, summary });
+		if (entry.evidence.length < 5) entry.evidence.push(mineFindingEvidence(finding));
+		for (const evidence of finding.related_evidence ?? []) {
+			if (entry.evidence.length >= 5) break;
+			if (!entry.evidence.some(row => row.citation === evidence.citation)) entry.evidence.push(evidence);
+		}
 		const p = projects.get(project);
 		if (p) { p.events++; if (!p.telemetry_sources.includes(producer)) p.telemetry_sources.push(producer); }
 	}
@@ -267,9 +326,16 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 		const cost = number(data.cost_min) ?? (duration !== null ? duration / 60_000 : null);
 		const decision = text(data.guard_decision) ?? text(data.decision) ?? text(data.kind) ?? text(data.outcome) ?? "";
 		const rule = code(data.guard_rule ?? data.rule ?? data.gate ?? data.code ?? data.reason ?? data.hook);
-		const tool = code(data.tool ?? data.verb ?? action?.surface ?? (type === "action.result" ? data.code : null) ?? (text(data.hook) ? basename(String(data.hook)) : producer));
-		const exit = data.exit_code ?? data.code ?? data.rc;
-		const timeout = data.timed_out === true || exit === 124 || exit === 142 || decision === "timeout" || data.reason === "timeout";
+		const tool = code(data.tool ?? object(data.replay)?.tool ?? data.verb ?? action?.surface ?? data.act ?? (type === "action.result" ? data.code : null) ?? (text(data.hook) ? basename(String(data.hook)) : producer));
+		const exit = data.exit_code ?? data.rc ?? (typeof data.code === "number" ? data.code : undefined);
+		const eventId = text(data.tool_call_id) ?? text(data.toolCallId) ?? text(row.toolCallId) ?? text(row.attempt) ?? text(data.attempt) ?? text(row.event_id) ?? text(row.id);
+		const retained = readMineReplay(data.replay ?? row.replay);
+		const originalCwd = text(data.cwd) ?? text(row.cwd);
+		const originalArguments = data.input ?? data.arguments ?? (typeof data.command === "string" ? { command: data.command } : undefined);
+		const replay = retained ?? captureMineReplay({ tool, ...(originalCwd ? { cwd: originalCwd } : {}),
+			...(originalArguments !== undefined ? { arguments: originalArguments } : {}),
+			...(typeof data.commit_message === "string" ? { message: data.commit_message } : {}), ...(data.custody !== undefined ? { custody: data.custody } : {}) });
+		const extra = { ...(eventId ? { event_id: eventId } : {}), replay };
 		if (type === "bead.status" || producer === "bead-transitions") {
 			const to = text(data.to_status) ?? text(data.status), from = text(data.from_status);
 			const bead = text(row.bead) ?? text(data.bead) ?? "unknown";
@@ -283,18 +349,22 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 			emit("release-fail", project, t, producer, citation, `FAIL tree=${code(data.tree)} role=${code(data.judge_role)}`, wall === null ? null : wall / 60_000, 15, `verdict:${project}:${code(data.tree)}:${code(data.checks)}:${t}`);
 			return;
 		}
-		if (timeout) emit(`timeout:${tool}`, project, t, producer, citation, `Explicit timeout ${tool}`, cost, 1, `timeout:${identity}`);
-		else if (["refuse", "refusal", "deny", "block", "blocked", "refused", "warn", "inject"].includes(decision.toLowerCase())) {
-			const commit = data.act === "commit";
-			emit(`${commit ? "commit-refusal" : "guard-friction"}:${rule}`, project, t, producer, citation, `${commit ? "Commit refusal" : "Guard friction"} ${rule}`, cost, commit ? 2 : 1, `refusal:${identity}`);
-		} else if (type === "guard.decision" && decision === "failure") {
-			emit(`guard-failure:${code(data.engine)}`, project, t, producer, citation, `Guard engine failed to observe: ${code(data.engine)}`, cost, 1, `guard-failure:${identity}`);
-		} else if (data.is_error === true || data.is_error === 1 || (typeof exit === "number" && exit !== 0) || decision === "failed" || decision === "failure") {
-			emit(`command-failure:${tool}`, project, t, producer, citation, `Failed ${tool}; exit=${typeof exit === "number" ? exit : "unknown"}`, cost, 1, `failure:${identity}`);
+		if (type === "guard.decision" && decision === "failure" && exit !== 0) {
+			emit(`guard-failure:${code(data.engine)}`, project, t, producer, citation, `Guard engine failed to observe: ${code(data.engine)}`, cost, 1, `guard-failure:${identity}`, extra);
+			return;
+		}
+		const cause = classifyMineResult({ tool, result: data,
+			text: text(data.detail) ?? text(data.stderr) ?? text(data.message) ?? text(data.output) ?? "",
+			is_error: data.is_error === true || data.is_error === 1, exit_code: exit, timed_out: data.timed_out,
+			outcome: decision, ...(rule !== "unknown" ? { code: rule } : {}) });
+		if (cause) {
+			const classId = data.act === "commit" && cause.class_id.startsWith("guard-friction:")
+				? cause.class_id.replace("guard-friction:", "commit-refusal:") : cause.class_id;
+			emit(classId, project, t, producer, citation, cause.summary, cost, data.act === "commit" ? 2 : 1, `failure:${identity}`, extra);
 		} else if ((type === "action.result" || (type === "tool.call" && (data.category === "process" || tool === "bash" || tool === "eval"))) && duration !== null && duration > SLOW_MS) {
-			emit(`slow-command:${tool}`, project, t, producer, citation, `${tool} wall=${round(duration / 1000)}s; excess above 60s`, (duration - SLOW_MS) / 60_000, 0, `slow:${identity}`);
+			emit(`slow-command:${tool}`, project, t, producer, citation, `${tool} wall=${round(duration / 1000)}s; excess above 60s`, (duration - SLOW_MS) / 60_000, 0, `slow:${identity}`, extra);
 		} else if (producer === "scratch mine" && /flag|owed|hold.expired/i.test(String(data.event ?? ""))) {
-			emit(`scratch:${code(data.event)}`, project, t, producer, citation, "Historical scratch disposal flag", null, 1, `scratch:${identity}`);
+			emit(`scratch:${code(data.event)}`, project, t, producer, citation, "Historical scratch disposal flag", null, 1, `scratch:${identity}`, extra);
 		}
 	}
 	function json(path: string, max = MAX_FILE_BYTES): unknown {
@@ -499,12 +569,11 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 		home, projects: [...projects.values()].filter(p => options.census || options.all || selectedProjects.has(p.path)), since_ms: since, until_ms: until,
 		sources: options.sources, targetProject, skipFile: options.fileIndex ? path => options.fileIndex!.canSkip(path, since, until) : undefined,
 		readLines: lines, command, expired, warn, coverage,
-		emit: f => emit(f.class_id, f.project, f.time_ms, f.producer, f.citation, f.summary, f.measured_minutes, f.proxy_minutes, f.identity),
+		emit: f => emit(f.class_id, f.project, f.time_ms, f.producer, f.citation, f.summary, f.measured_minutes, f.proxy_minutes, f.identity, f),
 		markSource: (project, producer, records) => {
 			const p = projects.get(project); if (!p) return;
 			if (!p.telemetry_sources.includes(producer)) p.telemetry_sources.push(producer);
 			p.source_records[producer] = (p.source_records[producer] ?? 0) + records;
-			if (producer.includes("transcript") && records > 0) primaryObserved.add(project);
 		},
 	};
 	// Compact tracker/git evidence must not be starved by large primary session archives.
@@ -550,7 +619,7 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 		}
 	}
 	if (wanted("transcripts")) await mineTranscripts(sourceContext);
-	for (const f of deferredCc.values()) if (!primaryObserved.has(f.project)) emit(f.class_id, f.project, f.time_ms, f.producer, f.citation, f.summary, f.measured_minutes, f.proxy_minutes, f.identity);
+	for (const finding of pendingFindings.values()) aggregate(finding);
 	report.projects = [...projects.values()].filter(p => options.all || selectedProjects.has(p.path)).sort((a, b) => compare(a.path, b.path));
 	for (const p of report.projects) p.telemetry_sources.sort(compare);
 	report.classes = [...classes.values()].filter(c => (options.all ? projects.has(c.project) || c.project === "@unattributed" : selectedProjects.has(c.project)))
@@ -587,6 +656,9 @@ export function renderMine(report: MineReport): string {
 	for (const c of report.classes) {
 		lines.push("", `## ${markdown(c.project)} — ${c.id}`, c.cheapest_enforcement.change);
 		for (const e of c.evidence) lines.push(`- ${e.timestamp} ${e.producer}: ${markdown(e.summary)} — \`${markdown(e.citation)}\``);
+		lines.push("Executable firing proof: not provided. These citations are historical observations, not regression-test proof.");
+		const example = c.evidence.find(row => row.replay?.arguments !== null && row.replay?.arguments !== undefined) ?? c.evidence[0];
+		if (example?.replay) lines.push("Retained replay context (redacted and bounded; missing/truncated fields are explicit):", "```json", JSON.stringify(example.replay, null, 2), "```");
 	}
 	if (report.ledger) {
 		lines.push("", "## Resumable UTC coverage ledger", `Ledger: \`${markdown(report.ledger.path)}\``,
