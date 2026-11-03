@@ -3,6 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { runFixture } from "./fixture-process.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const scenarios = await Bun.file(join(root, "tests/live/scenarios.json")).json();
@@ -50,6 +51,47 @@ test("an unbound tool response cannot satisfy the installed-plan verdict", () =>
 test("successful JSON for an apply action is not PLAN evidence", () => {
 	const applied = '{"ok":true,"data":{"action":"APPLY"}}\n\nWall time 1ms';
 	expect(verdict(applied)).toMatch(/^FAIL:.*PLAN/);
+});
+
+const readIndex = scenarios.findIndex((s: { id: string }) => s.id === "jsonl-aggregate-fire");
+if (readIndex < 0) throw new Error("read interruption scenario is missing");
+const readArgs = { path: ".beads/issues.jsonl?q=group_by(.status)" };
+const readCall = { event: "call", timestamp: 1, id: "read_1", name: "read", args: readArgs };
+const readAbort = { event: "stop", timestamp: 1, reason: "aborted", error: "TTSR matched rule: kit-jsonl-aggregate" };
+
+function readVerdict(events: unknown[], complete = true): string {
+	mkdirSync(join(project, ".beads"), { recursive: true });
+	writeFileSync(join(project, ".beads/issues.jsonl"), '{"id":"example","status":"open","labels":[]}\n');
+	writeFileSync(join(project, ".omp-kit-tool-events.jsonl"), [...events, ...(complete ? [{ event: "end" }] : [])].map(row => JSON.stringify(row)).join("\n") + "\n");
+	const log = join(fixture, "read-requests.jsonl");
+	const injection = { role: "user", content: 'rule="kit-jsonl-aggregate"' };
+	writeFileSync(log, [0, 1, 2].map(n => JSON.stringify({
+		n, main: true, body: { messages: n === 2 ? [injection] : [{ role: "user", content: "go" }] },
+	})).join("\n") + "\n");
+	const run = runFixture([process.execPath, join(root, "tests/live/lib.mjs"), "verdict", String(readIndex), log, project, "0"], { cwd: root, label: "live-verdict-read" });
+	if (run.rc !== 0) throw new Error(`verdict parser failed: ${Buffer.from(run.stderr).toString()}`);
+	return Buffer.from(run.stdout).toString().trim();
+}
+
+test("a read tripwire accepts only its native call-bound interruption without execution or a result", () => {
+	expect(readVerdict([readCall, readAbort])).toBe("ok");
+	expect(readVerdict([readCall, readAbort, { event: "result", id: "read_1", content: '[{"status":"open"}]' }])).toMatch(/^FAIL:.*(?:read|interruption)/);
+	expect(readVerdict([readCall, readAbort, { event: "execution", id: "read_1" }])).toMatch(/^FAIL:.*(?:read|interruption)/);
+});
+
+test("a different tool's interruption cannot prove the read was blocked", () => {
+	expect(readVerdict([{ ...readCall, name: "bash" }, readAbort])).toMatch(/^FAIL:.*(?:read|interruption)/);
+	expect(readVerdict([readCall, { ...readAbort, timestamp: 2 }])).toMatch(/^FAIL:.*(?:read|interruption)/);
+});
+
+test("scripted rule prose without a native interrupted read is not non-execution evidence", () => {
+	expect(readVerdict([{ role: "assistant", content: readAbort.error }])).toMatch(/^FAIL:.*(?:read|interruption)/);
+	expect(readVerdict([readCall, { role: "assistant", content: readAbort.error }])).toMatch(/^FAIL:.*(?:read|interruption)/);
+});
+
+test("another read path or an incomplete capture cannot satisfy the blocked query", () => {
+	expect(readVerdict([{ ...readCall, args: { path: "another.jsonl" } }, readAbort])).toMatch(/^FAIL:.*(?:read|interruption)/);
+	expect(readVerdict([readCall, readAbort], false)).toMatch(/^FAIL:.*(?:read|interruption)/);
 });
 
 afterAll(() => cleanupAllOwnedTmp());
