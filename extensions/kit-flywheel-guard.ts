@@ -841,7 +841,10 @@ export async function paneIdentities(exec: FlywheelExec, env: Record<string, str
 }
 
 export type BeadState = { ok: true; id: string; status: string; assignee: string | null; updatedAt: string | null } | { ok: false; why: string };
-type BeadStateWithAuthorship = BeadState & { authorship?: { known: boolean; createdBy: string | null; doneAuthors: string[] } };
+type BeadStateWithAuthorship = BeadState & {
+	authorship?: { known: boolean; createdBy: string | null; doneAuthors: string[] };
+	priorArt?: { required: boolean; comments: unknown[] };
+};
 
 function isDoneFirstComment(text: string): boolean {
 	const first = text.trimStart();
@@ -909,6 +912,13 @@ export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerReq
 				status,
 				assignee: owner === "" ? null : owner,
 				authorship,
+				priorArt: {
+					required: !["chore", "docs", "process"].includes(String(field(row, "issue_type")))
+						&& !(Array.isArray(field(row, "labels")) && (field(row, "labels") as unknown[]).some(label => ["kind:process", "kind:chore", "kind:docs"].includes(String(label))))
+						&& (["bug", "feature"].includes(String(field(row, "issue_type")))
+							|| (Array.isArray(field(row, "labels")) && (field(row, "labels") as unknown[]).includes("kind:fix"))),
+					comments: Array.isArray(field(row, "comments")) ? field(row, "comments") as unknown[] : [],
+				},
 				updatedAt: typeof revised === "string" ? revised : null,
 			};
 		}
@@ -2165,6 +2175,66 @@ function incompleteCloseClause(reason: string | null): string | null {
 	return null;
 }
 
+const PRIOR_ART_LINE = "prior=<url or repo path:line> did=<what they do> applied=<what we changed>";
+/** Fixed rollout boundary; sitrep reads this same constant rather than duplicating it. */
+export const PRIOR_GATE_ACTIVATION = "2026-11-03T08:00:00Z";
+
+/** A citation is a structured line, not an arbitrary URL pasted into a DONE report. */
+export function validPriorArtLine(text: string): boolean {
+	if (text.length > 16_384) return false;
+	return text.split(/\r?\n/).some(line => {
+		const none = /\bprior=none\s+searched=(.+)$/.exec(line);
+		if (none) return none[1]!.replace(/[\s,[\]{}"'`;]/g, "").length > 0;
+		return /\bprior=(?:https?:\/\/\S+|[^\s=]+:\d+)\s+did=(\S.*)\s+applied=(\S.*)$/.test(line);
+	});
+}
+
+async function checkPriorArtClose(found: BeadStateWithAuthorship, request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+	if (!found.ok || !found.priorArt?.required) return undefined;
+	const refuse = (why: string): FlywheelToolCallResult => ({
+		block: true,
+		reason: `kit-flywheel-guard PRIOR_ART_REFUSED: ${found.id}: ${why}. Add a timestamped tracker comment before implementation: ${PRIOR_ART_LINE} OR prior=none searched=<non-empty list of queries/sources>. A close reason cannot establish an earlier citation; no close was executed.`,
+	});
+	const citations = found.priorArt.comments.flatMap(comment => {
+		const text = field(comment, "text");
+		const at = field(comment, "created_at");
+		const time = typeof at === "string" ? Date.parse(at) : NaN;
+		return typeof text === "string" && validPriorArtLine(text) && Number.isFinite(time) ? [time] : [];
+	});
+	try {
+		const escaped = found.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const commits = await deps.exec("git", ["log", "--all", "--extended-regexp", `--grep=Bead:[[:space:]]+${escaped}([^[:alnum:]_.-]|$)`, "--format=%ct"], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+		if (commits.code !== 0 || commits.killed) return refuse("first implementation commit lookup failed");
+		const stamps = commits.stdout.trim() ? commits.stdout.trim().split(/\s+/).map(value => Number(value) * 1000) : [];
+		if (stamps.some(time => !Number.isFinite(time))) return refuse("unreadable implementation commit time");
+		let first = stamps.length ? Math.min(...stamps) : NaN;
+		let basis = "first implementation commit";
+		if (!stamps.length) {
+			let db = request.db;
+			if (!db) {
+				const info = await deps.exec(request.bin, ["info", "--json", "--no-auto-import", "--no-auto-flush"], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+				if (info.code !== 0 || info.killed) return refuse("claim-time tracker discovery failed");
+				db = field(JSON.parse(info.stdout), "database_path") as string;
+			}
+			if (typeof db !== "string" || !db) return refuse("claim-time database path unavailable");
+			const sql = `SELECT min(created_at) FROM events WHERE issue_id='${found.id.replace(/'/g, "''")}' AND event_type='status_changed' AND new_value='in_progress'`;
+			const claim = await deps.exec("sqlite3", ["-readonly", db, sql], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+			if (claim.code !== 0 || claim.killed) return refuse("in_progress claim-time lookup failed");
+			first = Date.parse(claim.stdout.trim());
+			basis = "first in_progress claim";
+		}
+		if (!Number.isFinite(first)) return refuse(`${basis} timestamp unavailable`);
+		if (first < Date.parse(PRIOR_GATE_ACTIVATION)) return {
+			additionalContext: `kit-flywheel-guard PRIOR_ART_GRANDFATHERED (activation ${PRIOR_GATE_ACTIVATION}): ${found.id} ${basis} at ${new Date(first).toISOString()} predates activation; prior-art timing gate exempt, independent-close checks still apply.`,
+		};
+		if (citations.length === 0) return refuse("missing valid prior-art line with a readable comment timestamp");
+		if (!citations.some(time => time < first)) return refuse(`citation must be before ${basis} at ${new Date(first).toISOString()}`);
+		return undefined;
+	} catch (error) {
+		return refuse(`prior-art timing lookup failed (${error instanceof Error ? error.message : String(error)})`);
+	}
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps, attempts: CloseAttempt[] = []): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -2180,6 +2250,7 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	const pane = hasClose ? await paneIdentities(deps.exec, deps.env, deps.home, [deps.sessionCwd, callCwd, ...requests.map(r => r.cwd)]) : [];
 	const warnings: string[] = [];
 	const released = new Set(requests.filter(request => request.operation === "release").flatMap(request => request.ids));
+	const closeNotes: string[] = [];
 	for (const request of requests) {
 		if (request.operation === "release") {
 			const refusal = await checkRelease(request, deps);
@@ -2232,6 +2303,9 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 						+ "and let an independent verifier run the close; no close was executed.",
 				};
 			}
+			const priorResult = await checkPriorArtClose(found, request, deps);
+			if (priorResult?.block === true) return priorResult;
+			if (priorResult?.additionalContext) closeNotes.push(priorResult.additionalContext);
 			const orphaned = await checkCloseOrphansDependents(request, id, released, deps);
 			if (orphaned !== undefined) return orphaned;
 			const assignee = found.assignee?.trim();
@@ -2267,7 +2341,7 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 		}
 	}
-	const parts: string[] = [];
+	const parts: string[] = [...closeNotes];
 	if (warnings.length > 0) parts.push(`kit-flywheel-guard: ${warnings.join("; ")}. The close was allowed; do not close a bead you implemented.`);
 	if (requests.some(request => request.operation === "review" || request.operation === "close")) {
 		const owed = await scratchOwedNote(deps.exec, deps.sessionCwd, hasClose ? "close" : "review");

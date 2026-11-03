@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
-import { checkNoWait } from "./kit-flywheel-guard";
+import { checkNoWait, validPriorArtLine } from "./kit-flywheel-guard";
 import { checkBgWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
@@ -282,6 +282,85 @@ test("SELF_CLOSE_REFUSED negative: a different closer is allowed silently", asyn
 	expect(await toolCall(h, project, "br close kit-1 --reason \"bun test extensions/kit-flywheel-guard.test.ts -> 26 passed\"")).toBeUndefined();
 	expect(h.notices).toEqual([]);
 });
+
+for (const specimen of [
+	{ name: "missing citation", text: "", at: "2026-11-01T08:00:00Z", refused: true },
+	{ name: "late citation", text: "prior=https://example.org/design did=requires sections applied=enforced sections", at: "2026-11-01T10:00:00Z", refused: true },
+	{ name: "early citation", text: "prior=src/gate.ts:12 did=requires sections applied=enforced sections", at: "2026-11-01T08:00:00Z", refused: false },
+	{ name: "early none", text: "prior=none searched=required-checks, ADR considered options", at: "2026-11-01T08:00:00Z", refused: false },
+	{ name: "empty search", text: "prior=none searched=[]", at: "2026-11-01T08:00:00Z", refused: true },
+	{ name: "chore exemption", text: "", at: "2026-11-01T10:00:00Z", type: "chore", refused: false },
+	{ name: "process exemption", text: "", at: "2026-11-01T10:00:00Z", labels: ["kind:process"], refused: false },
+	{ name: "fix label", text: "", at: "2026-11-01T08:00:00Z", type: "task", labels: ["kind:fix"], refused: true },
+	{ name: "early claim fallback", text: "prior=none searched=ADR patterns", at: "2026-11-01T08:00:00Z", noCommit: true, refused: false },
+	{ name: "late claim fallback", text: "prior=none searched=ADR patterns", at: "2026-11-01T10:00:00Z", noCommit: true, refused: true },
+	{ name: "equal timestamp", text: "prior=none searched=ADR patterns", at: "2026-11-01T09:00:00Z", refused: true },
+	{ name: "grandfathered commit", text: "", at: "", started: "2026-11-03T07:59:59Z", refused: false },
+	{ name: "grandfathered claim", text: "", at: "", started: "2026-11-03T07:59:59Z", noCommit: true, refused: false },
+	{ name: "activation boundary", text: "", at: "", started: "2026-11-03T08:00:00Z", refused: true },
+]) {
+	test(`PRIORGATE1: ${specimen.name}`, async () => {
+		const project = freshDir(base, "prior-");
+		const row = { id: "kit-prior", status: "in_review", assignee: "Builder", created_by: "Filer",
+			issue_type: specimen.type ?? "bug", labels: specimen.labels ?? [],
+			comments: specimen.text ? [{ author: "Builder", text: specimen.text, created_at: specimen.at.replace("2026-11-01", "2026-11-04") }] : [] };
+		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: call => {
+			if (call.command === "git") return { code: 0, stdout: specimen.noCommit ? "" : `${Date.parse(specimen.started ?? "2026-11-04T09:00:00Z") / 1000}\n` };
+			if (call.args[0] === "info") return { code: 0, stdout: '{"database_path":"/tracker/beads.db"}' };
+			if (call.command === "sqlite3") return { code: 0, stdout: `${specimen.started ?? "2026-11-04T09:00:00Z"}\n` };
+			return brTable({ "kit-prior": { code: 0, stdout: JSON.stringify([row]) } })(call);
+		} });
+		const result = await toolCall(h, project, 'br close kit-prior --reason "bun test -> 8 passed"');
+		expect(result?.block === true).toBe(specimen.refused);
+		if (specimen.name.startsWith("grandfathered")) expect(result?.additionalContext).toContain("PRIOR_ART_GRANDFATHERED (activation 2026-11-03T08:00:00Z)");
+		if (specimen.refused) {
+			expect(result?.reason).toContain("PRIOR_ART_REFUSED");
+			expect(result?.reason).toContain("prior=<url or repo path:line> did=<what they do> applied=<what we changed>");
+			if (specimen.name === "late citation") expect(result?.reason).toContain("before first implementation commit");
+		}
+	});
+}
+
+test("PRIORGATE1: bounded validator rejects long near-misses and empty fields", () => {
+	expect(validPriorArtLine("prior=https://example.org did=required sections applied=added gate")).toBe(true);
+	for (const text of ["prior=none searched=", "prior=none searched= [ , ]", "prior=src/gate.ts did=x applied=y", "prior=https://example.org did= applied=y"]) {
+		expect(validPriorArtLine(text)).toBe(false);
+	}
+	const started = performance.now();
+	expect(validPriorArtLine("prior=https://example.org did=" + "x".repeat(16000))).toBe(false);
+	console.log(`PRIORGATE1 16029-character near-miss: ${(performance.now() - started).toFixed(3)} ms`);
+	expect(validPriorArtLine("x".repeat(16385))).toBe(false);
+});
+
+test("PRIORGATE1: real git uses committer time and exact bead identity", async () => {
+	const project = freshDir(base, "prior-git-");
+	const git = async (...args: string[]) => {
+		const result = await run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", ...args], {
+			cwd: project, deadline_s: 10, max_output_bytes: 65536, env: { ...process.env,
+				GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.org",
+				GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.org",
+				GIT_AUTHOR_DATE: "2026-10-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-11-04T09:00:00Z" } as Record<string, string> });
+		expect(result.rc).toBe(0);
+		return { code: result.rc!, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
+	};
+	await git("init", "-q");
+	await git("commit", "--allow-empty", "-qm", "Implementation\n\nBead: kit-prior.1");
+	for (const [id, at, refused] of [
+		["kit-prior.1", "2026-11-04T08:00:00Z", false],
+		["kit-prior.1", "2026-11-04T10:00:00Z", true],
+		["kit-prior", "2026-11-04T10:00:00Z", true],
+	] as const) {
+		const row = { id, status: "in_review", assignee: "Builder", created_by: "Filer", issue_type: "feature",
+			comments: [{ author: "Builder", text: "prior=none searched=required checks", created_at: at }] };
+		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: call => {
+			if (call.command === "git") return git(...call.args);
+			if (call.args[0] === "info") return { code: 0, stdout: '{"database_path":"/tracker/beads.db"}' };
+			if (call.command === "sqlite3") return { code: 0, stdout: "2026-11-04T09:00:00Z\n" };
+			return brTable({ [id]: { code: 0, stdout: JSON.stringify([row]) } })(call);
+		} });
+		expect((await toolCall(h, project, `br close ${id} --reason "bun test -> 3 passed"`))?.block === true).toBe(refused);
+	}
+}, 30_000);
 
 // --- FILERCLOSE1 ---------------------------------------------------------
 
