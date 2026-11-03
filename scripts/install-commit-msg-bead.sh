@@ -333,9 +333,17 @@ execute_hook() (
 )
 
 # backup <path>: keep a pre-existing file so rollback restores it, never
-# deletes it. The dot prefix keeps the copy out of the runner's NN-* glob.
+# deletes it. The dot prefix keeps the copy out of this runner's NN-* glob, and
+# the copy is never executable: Agent Mail's pre-commit/pre-push chain runners
+# run every executable file in the directory, so an executable copy left by an
+# interrupted install ran as an extra hook on every commit and push
+# (companion, 2026-11-03). The original mode is restored exactly on rollback.
 backup() {
-	cp -p "$1" "$(dirname -- "$1")/.undo.$$.$(basename -- "$1")"
+	undo="$(dirname -- "$1")/.undo.$$.$(basename -- "$1")"
+	cp -p "$1" "$undo"
+	mode=$(stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1")
+	printf '%s\n' "$mode" > "$undo.mode"
+	chmod a-x "$undo"
 	UNDO_RESTORE="$UNDO_RESTORE $1"
 }
 
@@ -486,7 +494,12 @@ rollback() {
 	# shellcheck disable=SC2086
 	for pair in $UNDO_RM; do rm -f "$pair"; done
 	# shellcheck disable=SC2086
-	for path in $UNDO_RESTORE; do mv -f -- "$(dirname -- "$path")/.undo.$$.$(basename -- "$path")" "$path" 2>/dev/null || true; done
+	for path in $UNDO_RESTORE; do
+		undo="$(dirname -- "$path")/.undo.$$.$(basename -- "$path")"
+		mv -f -- "$undo" "$path" 2>/dev/null || continue
+		[ ! -f "$undo.mode" ] || chmod "$(cat "$undo.mode")" "$path" 2>/dev/null || true
+		rm -f -- "$undo.mode"
+	done
 	# shellcheck disable=SC2086
 	for pair in $UNDO_MOVES; do
 		src=${pair%%:*}; dst=${pair#*:}
@@ -896,5 +909,5 @@ if [ "$NATIVE_PRESERVATION" = 1 ]; then
 	fi
 fi
 # shellcheck disable=SC2086
-for path in $UNDO_RESTORE; do rm -f -- "$(dirname -- "$path")/.undo.$$.$(basename -- "$path")"; done
+for path in $UNDO_RESTORE; do rm -f -- "$(dirname -- "$path")/.undo.$$.$(basename -- "$path")" "$(dirname -- "$path")/.undo.$$.$(basename -- "$path").mode"; done
 printf 'verified active in %s\n' "$TARGET"

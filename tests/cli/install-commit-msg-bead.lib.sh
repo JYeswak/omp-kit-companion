@@ -374,7 +374,8 @@ group_restore() {
 F=$(new_repo restore) || exit 1
 mkdir -p "$F/.git/hooks/hooks.d/commit-msg"
 printf '#!/bin/sh\n# older member\nexit 0\n' > "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
-chmod +x "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
+# 711 is not a plain 755, so a sloppy restore (a+x, 755) is caught.
+chmod 711 "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead"
 cat > "$F/.git/hooks/commit-msg" <<'HOOK'
 #!/bin/sh
 case "$0" in */hooks/commit-msg) exit 0;; *) exit 1;; esac
@@ -387,6 +388,11 @@ ok "$?" "0" "restore-member-restored"
 rc=0
 for leftover in "$F/.git/hooks/hooks.d/commit-msg"/.undo.*; do [ -e "$leftover" ] && rc=1; done
 ok "$rc" "0" "restore-no-backup-left"
+# The backup is made non-executable (other chain runners run every executable file in the directory);
+# rollback still restores the member's exact original mode.
+mode=$(stat -f %Lp "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead" 2>/dev/null || stat -c %a "$F/.git/hooks/hooks.d/commit-msg/40-omp-kit-commit-msg-bead")
+[ "$mode" = 711 ]
+ok "$?" "0" "restore-member-mode-exact: $mode"
 }
 
 group_idless() {
