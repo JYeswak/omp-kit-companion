@@ -46,6 +46,17 @@ start_case_report
 LIB="$HERE/tests/live/lib.mjs"
 MOCK="$HERE/tests/live/mock-model.mjs"
 TIMEOUT="${TIMEOUT:-120}"
+# Same loaded-host window: native-seeded widths 1/4/8 took 582.62/133.64/122.80 s
+# (width 1 exposed a real auto-background flake; widths 4/8 kept all 157 verdicts).
+# Reserve three quarters of the cores for the other files in the global pool.
+ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)
+case "$ncpu" in ''|*[!0-9]*) ncpu=1 ;; esac
+default_jobs=$((ncpu / 4))
+[ "$default_jobs" -ge 1 ] || default_jobs=1
+[ "$default_jobs" -le 8 ] || default_jobs=8
+JOBS=${OMP_KIT_E2E_JOBS:-$default_jobs}
+case "$JOBS" in ''|*[!0-9]*|0) echo "OMP_KIT_E2E_JOBS must be 1..16" >&2; exit 2 ;; esac
+[ "$JOBS" -le 16 ] || { echo "OMP_KIT_E2E_JOBS must be 1..16" >&2; exit 2; }
 omp_candidate=${OMP:-$(command -v omp || true)}
 case "$omp_candidate" in
   */*) ;;
@@ -95,6 +106,7 @@ MP=""
 OP=""
 MOCK_PIDS=""
 DEFIANT_MOCK_SCENARIOS=""
+WORKER_PIDS=""
 cleanup() {
   [ -n "$MP" ] && kill "$MP" 2>/dev/null
   if [ "$OWN_WORK_ROOT" = 1 ] && [ "$KEEP_WORK" != 1 ]; then rm -rf "$WORK_ROOT"; fi
@@ -120,17 +132,21 @@ on_signal() {
   fi
   [ -n "$OP" ] && kill -TERM "$OP" 2>/dev/null
   [ -n "$MP" ] && kill -TERM "$MP" 2>/dev/null
+  for worker in $WORKER_PIDS; do kill -TERM "$worker" 2>/dev/null; done
   w=0
   while [ "$w" -lt 50 ]; do
     op_alive=0
     mock_alive=0
     [ -n "$OP" ] && kill -0 "$OP" 2>/dev/null && op_alive=1
     [ -n "$MP" ] && kill -0 "$MP" 2>/dev/null && mock_alive=1
-    [ "$op_alive" = 0 ] && [ "$mock_alive" = 0 ] && break
+    workers_alive=0
+    for worker in $WORKER_PIDS; do kill -0 "$worker" 2>/dev/null && workers_alive=1; done
+    [ "$op_alive" = 0 ] && [ "$mock_alive" = 0 ] && [ "$workers_alive" = 0 ] && break
     sleep 0.1; w=$((w+1))
   done
   [ -n "$OP" ] && kill -0 "$OP" 2>/dev/null && kill -KILL "$OP" 2>/dev/null
   [ -n "$MP" ] && kill -0 "$MP" 2>/dev/null && kill -KILL "$MP" 2>/dev/null
+  for worker in $WORKER_PIDS; do kill -KILL "$worker" 2>/dev/null; done
   wait 2>/dev/null
   OP=""; MP=""
   echo "e2e-live: stopped on signal, exit $code" >&2
@@ -239,7 +255,10 @@ isolate() {
     TMPDIR="$T/tmp" BUN_INSTALL="$H/.bun" GIT_CONFIG_NOSYSTEM=1 PATH="$T/bin:$KIT_PATH$PATH"
 }
 
-echo "omp: $(isolate && "$OMP" --version 2>/dev/null) ($OMP)"
+OMP_VERSION=$(isolate && "$OMP" --version) || exit 2
+OMP_BINARY_SHA=$(shasum -a 256 "$OMP" | cut -d' ' -f1) || exit 2
+OMP_NATIVE_SEED_ID=$(printf '%s\n%s\n' "$OMP_VERSION" "$OMP_BINARY_SHA" | shasum -a 256 | cut -d' ' -f1) || exit 2
+echo "omp: $OMP_VERSION ($OMP; native seed $OMP_NATIVE_SEED_ID)"
 if [ "${OMP_KIT_RULES_VIA:-agents}" = plugin ]; then
   (isolate && "$OMP" plugin link "${PLUGIN_SOURCE:-$T/kit-plugin}" >/dev/null) || { link_rc=$?; KEEP_WORK=1; echo "plugin link producer_rc=$link_rc" >&2; exit "$link_rc"; }
   if [ -n "${OMP_KIT_PLUGIN_DISABLE_AFTER_LINK:-}" ]; then
@@ -253,6 +272,22 @@ select_rc=$?
 [ "$select_rc" -eq 0 ] || { KEEP_WORK=1; echo "scenario select producer_rc=$select_rc" >&2; exit "$select_rc"; }
 [ -n "$scenario_ids" ] || { KEEP_WORK=1; echo "scenario select returned no scenarios" >&2; exit 2; }
 printf 'scenario ids: %s\n' "$scenario_ids"
+# Profiling only: Time::HiRes ships with the Perl already used by the process
+# limiter. The no-op control exposes clock-process startup cost.
+profile_step() {
+  profile_label=$1; shift
+  if [ "${OMP_KIT_E2E_PROFILE:-0}" != 1 ]; then "$@"; return $?; fi
+  profile_started=$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f", time')
+  "$@"
+  profile_rc=$?
+  /usr/bin/perl -MTime::HiRes=time -e '
+    my ($scenario, $step, $start) = @ARGV; my $end = time;
+    printf STDERR "E2E_PROFILE scenario=%s step=%s started_s=%.6f ended_s=%.6f duration_ms=%.3f\n",
+      $scenario, $step, $start, $end, ($end-$start)*1000;
+  ' "${name:-suite}" "$profile_label" "$profile_started"
+  return "$profile_rc"
+}
+profile_step noop :
 # Bounded mock reap: TERM, short grace, then KILL and reap. A mock that ignores
 # SIGTERM is recorded by scenario; the exit check below fails loudly on it, so a
 # defiant mock can never hang the suite on `wait`.
@@ -293,17 +328,69 @@ reap_group() {
   while kill -0 "-$pgid" 2>/dev/null && [ "$w" -lt 20 ]; do sleep 0.1; w=$((w+1)); done
   kill -KILL "-$pgid" 2>/dev/null
 }
-for i in $scenario_ids; do
-  name=$("$OMP_KIT_BUN" "$LIB" name "$i")
+BASE_HOME=$H
+NATIVE_SEED="$T/native-seed/$OMP_NATIVE_SEED_ID"
+BUN_SEED="$T/bun-cache-seed/$OMP_NATIVE_SEED_ID"
+native_seeded=0
+# A compiled OMP extracts a large immutable binding on its first real turn.
+# Reuse only those verified bytes, not another scenario's configs or databases.
+seed_runtime_cache() {
+  for binding in "$T/home-$1/.omp/natives"/*/*.node; do
+    if [ ! -f "$binding" ] || [ -L "$binding" ]; then continue; fi
+    version_dir=${binding%/*}; version_dir=${version_dir##*/}
+    binding_name=${binding##*/}
+    mkdir -p "$NATIVE_SEED/$version_dir" || return 2
+    cp "$binding" "$NATIVE_SEED/$version_dir/$binding_name" || return 2
+    cmp -s "$binding" "$NATIVE_SEED/$version_dir/$binding_name" || return 2
+    chmod 444 "$NATIVE_SEED/$version_dir/$binding_name" || return 2
+  done
+  # Bun's .pile files are content-addressed transpilation output. Each home
+  # receives a private copy; never copy extension DBs, credentials or models.
+  for compiled in "$T/home-$1/.cache/bun"/*/*.pile; do
+    [ "${OMP_KIT_E2E_BUN_CACHE:-1}" = 1 ] || break
+    if [ ! -f "$compiled" ] || [ -L "$compiled" ]; then continue; fi
+    cache_dir=${compiled%/*}; cache_dir=${cache_dir##*/}
+    mkdir -p "$BUN_SEED/$cache_dir" || return 2
+    cp "$compiled" "$BUN_SEED/$cache_dir/${compiled##*/}" || return 2
+    cmp -s "$compiled" "$BUN_SEED/$cache_dir/${compiled##*/}" || return 2
+    chmod 444 "$BUN_SEED/$cache_dir/${compiled##*/}" || return 2
+  done
+  native_seeded=1
+}
+run_scenario() {
+  i=$1
+  WORKER_PIDS=""
+  # Worker traps own only their mock and OMP group, never the parent's root.
+  trap '[ -z "$OP$MP" ] || on_signal 143' EXIT
+  trap 'on_signal 143' TERM
+  trap 'on_signal 130' INT
+  name=$(profile_step name "$OMP_KIT_BUN" "$LIB" name "$i")
   name_rc=$?
   if [ "$name_rc" -ne 0 ] || [ -z "$name" ]; then
     KEEP_WORK=1; echo "scenario name producer_rc=$name_rc id=$i" >&2; exit 2
   fi
-  case " ${ONLY:-$name} " in *" $name "*) selected=$((selected+1)) ;; *) continue ;; esac
+  case " ${ONLY:-$name} " in *" $name "*) ;; *) return 0 ;; esac
+  printf '%s\n' "$name" >"$T/result-$i.name"
+  H="$T/home-$i"
+  cp -R "$BASE_HOME" "$H" || return 2
+  for compiled in "$BUN_SEED"/*/*.pile; do
+    [ "${OMP_KIT_E2E_BUN_CACHE:-1}" = 1 ] || break
+    [ -f "$compiled" ] || continue
+    cache_dir=${compiled%/*}; cache_dir=${cache_dir##*/}
+    mkdir -p "$H/.cache/bun/$cache_dir" || return 2
+    cp "$compiled" "$H/.cache/bun/$cache_dir/${compiled##*/}" || return 2
+    chmod 600 "$H/.cache/bun/$cache_dir/${compiled##*/}" || return 2
+  done
+  for binding in "$NATIVE_SEED"/*/*.node; do
+    [ -f "$binding" ] || continue
+    version_dir=${binding%/*}; version_dir=${version_dir##*/}
+    mkdir -p "$H/.omp/natives/$version_dir" || return 2
+    ln "$binding" "$H/.omp/natives/$version_dir/${binding##*/}" || return 2
+  done
   P="$T/proj-$name"; LOG="$T/log-$name.jsonl"; SC="$T/scen-$name.json"; PF="$T/port-$name"
   mkdir -p "$P"
   (cd "$P" && isolate && git init -q && git commit -q --allow-empty -m init) || { git_rc=$?; KEEP_WORK=1; echo "git init producer_rc=$git_rc scenario=$name" >&2; exit "$git_rc"; }
-  "$OMP_KIT_BUN" "$LIB" prep "$i" "$SC" "$P" || { prep_rc=$?; KEEP_WORK=1; echo "scenario prep producer_rc=$prep_rc id=$i" >&2; exit "$prep_rc"; }
+  profile_step prep "$OMP_KIT_BUN" "$LIB" prep "$i" "$SC" "$P" || { prep_rc=$?; KEEP_WORK=1; echo "scenario prep producer_rc=$prep_rc id=$i" >&2; exit "$prep_rc"; }
   "$OMP_KIT_BUN" --work-dir "$WORK_ROOT" --scenario "$SC" --log "$LOG" --port-file "$PF" "$MOCK" >"$T/mock-$name.txt" 2>&1 &
   MP=$!
   MOCK_PIDS="$MOCK_PIDS $MP:$name"
@@ -314,19 +401,19 @@ for i in $scenario_ids; do
     cat "$T/mock-$name.txt" >&2
     KEEP_WORK=1; exit 2
   fi
-  "$OMP_KIT_BUN" "$LIB" models "$(cat "$PF")" "$H/.omp/agent/models.yml" || { models_rc=$?; KEEP_WORK=1; echo "models producer_rc=$models_rc scenario=$name" >&2; exit "$models_rc"; }
+  profile_step models "$OMP_KIT_BUN" "$LIB" models "$(cat "$PF")" "$H/.omp/agent/models.yml" || { models_rc=$?; KEEP_WORK=1; echo "models producer_rc=$models_rc scenario=$name" >&2; exit "$models_rc"; }
   LIMIT_PGID_FILE="$T/pgid-$name"; rm -f "$LIMIT_PGID_FILE"; export LIMIT_PGID_FILE
-  (cd "$P" && isolate && "$LIMIT" "$TIMEOUT" "$OMP" --extension "$HERE/tests/live/admission-extension.mjs" -p --no-session --model mock/mock --approval-mode yolo "go" </dev/null) >"$T/out-$name.txt" 2>&1 & OP=$!
-  echo "e2e-live: started scenario=$name omp_pid=$OP mock_pid=$MP" >&2
+  (cd "$P" && isolate && profile_step omp "$LIMIT" "$TIMEOUT" "$OMP" --extension "$HERE/tests/live/admission-extension.mjs" -p --no-session --model mock/mock --approval-mode yolo "go" </dev/null) >"$T/out-$name.txt" 2>&1 & OP=$!
+  echo "e2e-live: started scenario=$name omp_pid=$OP mock_pid=$MP" >&3
   wait "$OP"; rc=$?; OP=""
-  reap_mock
-  reap_group
+  profile_step mock-reap reap_mock
+  profile_step group-reap reap_group
   rm -f "$LIMIT_PGID_FILE"; unset LIMIT_PGID_FILE
   echo "mock server cleanup_rc=$mock_cleanup_rc log=$T/mock-$name.txt"
   cat "$T/mock-$name.txt"
   echo "OMP producer_rc=$rc output_log=$T/out-$name.txt transcript=$LOG"
   cat "$T/out-$name.txt"
-  verdict=$("$OMP_KIT_BUN" "$LIB" verdict "$i" "$LOG" "$P" "$rc")
+  verdict=$(profile_step verdict "$OMP_KIT_BUN" "$LIB" verdict "$i" "$LOG" "$P" "$rc")
   verdict_rc=$?
   if [ "$verdict_rc" -ne 0 ] || [ -z "$verdict" ]; then
     [ "$verdict_rc" -ne 0 ] || verdict_rc=2
@@ -336,16 +423,82 @@ for i in $scenario_ids; do
     # Report-only OMP race probe: prints PROBE omp-late-interrupt: continued|aborted and
     # never counts toward pass/fail, so the gate does not depend on OMP's continuation race.
     "$OMP_KIT_BUN" "$LIB" probe "$i" "$LOG"
-    continue
+    printf 'probe\n' >"$T/result-$i.verdict"
+    return 0
   fi
-  if [ "$verdict" = ok ]; then
-    pass=$((pass+1)); echo "ok    $name"
-    if [ "$MODE" = full ]; then report_test_case "$name" PASS; fi
-  else
-    fail=$((fail+1)); echo "FAIL  $name :: $verdict (omp exit $rc; transcript: $LOG)"
-    if [ "$MODE" = full ]; then report_test_case "$name" FAIL; fi
+  printf '%s\n' "$verdict" >"$T/result-$i.verdict"
+  printf '%s\n' "$rc" >"$T/result-$i.omp-rc"
+  printf '%s\n' "$DEFIANT_MOCK_SCENARIOS" >"$T/result-$i.defiant"
+}
+# A bounded work-conserving pool: a slow scenario never holds every other slot
+# idle. Only the parent reports cases, preserving order and the end counter.
+finish_batch() {
+  for entry in $batch; do
+    worker=${entry%%:*}; case_id=${entry#*:}
+    if [ ! -f "$T/result-$case_id.worker-rc" ]; then
+      wait "$worker"; worker_rc=$?
+      printf '%s\n' "$worker_rc" >"$T/result-$case_id.worker-rc"
+    fi
+  done
+  WORKER_PIDS=""
+  for entry in $batch; do
+    case_id=${entry#*:}
+    cat "$T/worker-$case_id.stdout"
+    cat "$T/worker-$case_id.stderr" >&2
+    IFS= read -r worker_rc <"$T/result-$case_id.worker-rc"
+    if [ "$worker_rc" -ne 0 ]; then KEEP_WORK=1; return "$worker_rc"; fi
+    [ -f "$T/result-$case_id.name" ] || continue
+    IFS= read -r name <"$T/result-$case_id.name"
+    selected=$((selected+1))
+    if [ "$native_seeded" = 0 ]; then seed_runtime_cache "$case_id" || { KEEP_WORK=1; return 2; }; fi
+    IFS= read -r verdict <"$T/result-$case_id.verdict" || { KEEP_WORK=1; return 2; }
+    [ "$verdict" != probe ] || continue
+    IFS= read -r rc <"$T/result-$case_id.omp-rc" || { KEEP_WORK=1; return 2; }
+    IFS= read -r defiant <"$T/result-$case_id.defiant" || defiant=""
+    DEFIANT_MOCK_SCENARIOS="$DEFIANT_MOCK_SCENARIOS$defiant"
+    if [ "$verdict" = ok ]; then
+      pass=$((pass+1)); echo "ok    $name"
+      if [ "$MODE" = full ]; then report_test_case "$name" PASS; fi
+    else
+      fail=$((fail+1)); echo "FAIL  $name :: $verdict (omp exit $rc; transcript: $T/log-$name.jsonl)"
+      if [ "$MODE" = full ]; then report_test_case "$name" FAIL; fi
+    fi
+  done
+  batch=""; active=""; running=0
+}
+reap_finished() {
+  while :; do
+    pending=""; pending_pids=""
+    for entry in $active; do
+      worker=${entry%%:*}; case_id=${entry#*:}
+      if kill -0 "$worker" 2>/dev/null; then
+        pending="$pending $entry"; pending_pids="$pending_pids $worker"
+      else
+        wait "$worker"; worker_rc=$?
+        printf '%s\n' "$worker_rc" >"$T/result-$case_id.worker-rc"
+        running=$((running-1))
+      fi
+    done
+    active=$pending; WORKER_PIDS=$pending_pids
+    [ "$running" -lt "$JOBS" ] && return 0
+    sleep 0.02
+  done
+}
+batch=""; active=""; running=0
+for i in $scenario_ids; do
+  (run_scenario "$i") 3>&2 >"$T/worker-$i.stdout" 2>"$T/worker-$i.stderr" &
+  worker=$!
+  WORKER_PIDS="$WORKER_PIDS $worker"
+  batch="$batch $worker:$i"
+  active="$active $worker:$i"
+  running=$((running+1))
+  if [ "$native_seeded" = 0 ]; then
+    finish_batch || exit $?
+  elif [ "$running" -ge "$JOBS" ]; then
+    reap_finished
   fi
 done
+[ -z "$batch" ] || finish_batch || exit $?
 ISOLATION_AFTER="$T/isolation-after.txt"
 isolation_snapshot >"$ISOLATION_AFTER" 2>&1
 if ! cmp -s "$ISOLATION_BEFORE" "$ISOLATION_AFTER"; then

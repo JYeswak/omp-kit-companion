@@ -1,9 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { run } from "../../src/kitlib/run";
 
 // Integration test: exercises real SIGTERM delivery and child reaping against
 // the platform clock. Fake timers cannot work: the waits synchronize with a
@@ -49,7 +49,7 @@ async function alive(pid: number): Promise<boolean> {
 test("SIGTERM stops e2e-live within 10 s with no surviving children", async () => {
 	const child = Bun.spawn(["sh", "scripts/e2e-live.sh"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, ONLY: "canary-fire canary-near pipe-exit-fire pipe-exit-near glob-silenced-fire glob-silenced-near" },
+		env: { ...process.env, OMP_KIT_E2E_JOBS: "4", ONLY: "canary-fire canary-near pipe-exit-fire pipe-exit-near glob-silenced-fire glob-silenced-near" },
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -72,7 +72,8 @@ test("SIGTERM stops e2e-live within 10 s with no surviving children", async () =
 	const pumpErr = (async () => {
 		for await (const chunk of child.stderr) {
 			err += decoder.decode(chunk, { stream: true });
-			if (!started && /e2e-live: started scenario=\S+ omp_pid=\d+/.test(err)) {
+			// First turn seeds natives; terminate only after the parallel workers start.
+			if (!started && [...err.matchAll(/e2e-live: started scenario=\S+ omp_pid=\d+/g)].length >= 5) {
 				started = true;
 				markStarted();
 			}
@@ -169,5 +170,52 @@ test("lingering scenario child is reaped and the tree removes cleanly", async ()
 	expect(existsSync(kept[2])).toBe(false);
 	rmSync(stubDir, { recursive: true, force: true });
 }, 300_000);
+
+test("parallel live cases retain ordered reports, private models and read-only native bytes", async () => {
+	const fixture = ownedTmp("e2e-pool");
+	const reportPath = join(fixture.path, "cases.jsonl");
+	const names = ["standing-law-system", "canary-fire", "canary-near", "unsafe-router-fire", "unsafe-router-near"];
+	try {
+		const env = Object.fromEntries(Object.entries({
+			...process.env, OMP_KIT_E2E_JOBS: "4", ONLY: names.join(" "), KEEP: "1",
+			OMP_KIT_TEST_WORK_ROOT: fixture.path, OMP_KIT_CASE_CWD: REPO_ROOT,
+			OMP_KIT_TEST_CASE_REPORT: reportPath, OMP_KIT_TEST_CASE_SCOPE: "e2e-live",
+		}).filter((entry): entry is [string, string] => entry[1] !== undefined));
+		const result = await run(["sh", "scripts/e2e-live.sh"], { cwd: REPO_ROOT, env, deadline_s: 120 });
+		const stdout = Buffer.from(result.stdout).toString(), stderr = Buffer.from(result.stderr).toString();
+		expect(result.rc, stdout + stderr).toBe(0);
+		expect(stdout.split("\n").filter(line => line.startsWith("ok    ")).map(line => line.slice(6))).toEqual(names);
+		const kept = /kept private e2e output: (\S+) \(work root (\S+)\)/.exec(stdout);
+		expect(kept).not.toBeNull();
+		const tree = kept![1]!;
+		const models = names.map((_, index) => readFileSync(join(tree, `home-${index}`, ".omp/agent/models.yml"), "utf8"));
+		expect(new Set(models).size).toBe(names.length);
+		const rows = readFileSync(reportPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+		expect(rows.filter(row => row.event === "case").map(row => row.name)).toEqual([...names, "launchd-isolation", "mock-server-cleanup"]);
+		expect(rows.at(-1)).toMatchObject({ event: "end", cases: names.length + 2 });
+		const nativeRoot = join(tree, "home-1/.omp/natives");
+		if (existsSync(nativeRoot)) {
+			const versions = readdirSync(nativeRoot);
+			const binding = readdirSync(join(nativeRoot, versions[0]!)).find(name => name.endsWith(".node"))!;
+			const first = statSync(join(nativeRoot, versions[0]!, binding));
+			const next = statSync(join(tree, "home-2/.omp/natives", versions[0]!, binding));
+			expect(first.ino).toBe(next.ino);
+			expect(first.mode & 0o222).toBe(0);
+		}
+		const firstCache = join(tree, "home-1/.cache/bun");
+		if (existsSync(firstCache)) {
+			for (const group of readdirSync(firstCache)) {
+				for (const file of readdirSync(join(firstCache, group)).filter(name => name.endsWith(".pile"))) {
+					const first = join(firstCache, group, file);
+					const next = join(tree, "home-2/.cache/bun", group, file);
+					if (!existsSync(next)) continue;
+					expect(statSync(first).ino).not.toBe(statSync(next).ino);
+					expect(readFileSync(first)).toEqual(readFileSync(next));
+				}
+			}
+		}
+		rmSync(kept![2]!, { recursive: true, force: true });
+	} finally { fixture.cleanup(); }
+}, 180_000);
 
 afterAll(() => cleanupAllOwnedTmp());

@@ -1,5 +1,9 @@
 path	kind	bead	expires	reason
-tests/cli/kit-update.test.ts	ci-only	ompkit-v66l.27.1	-	runs the ladder against an installed kit under a 900 s bound (timed out at 900 s in the gate export, 2026-10-19); CI runs it as its own kit-update suite
+tests/cli/kit-update.test.ts	ci-only	ompkit-v66l.27.1	-	updater contract suite; live journeys are separate files so the global pool can schedule each ladder independently
+tests/cli/kit-update-nplus-two.test.ts	ci-only	ompkit-v66l.27.1	-	complete live N+2 updater journey with manifest-bound corpus denominator
+tests/cli/kit-update-compiled.test.ts	ci-only	ompkit-v66l.27.1	-	compiled authenticated updater journey and manifest/profile activation
+tests/cli/kit-update-relink.test.ts	ci-only	ompkit-v66l.27.1	-	independent compiled live postcheck followed by the duplicate-profile relink refusal
 tests/cli/external-live.test.ts	ci-only	ompkit-v66l.27.1	-	drives a relocated release through real OMP native marker effects; the dev-Mac export reports a fast-tier diff where CI passes
 tests/fleet-guard/reservations.live.test.ts	ci-only	ompkit-oq1h.19	-	owner=SilverCondor; live Agent Mail probe on 127.0.0.1:8765 is excluded from hermetic runs and runs only in the explicit CI live suite
 tests/cli/package-release.test.ts	hermeticity	ompkit-v66l.27.8	2026-11-01	reads the enclosing checkout's git history; the gate export has none (fatal: Needed a single revision)
+tests/cli/package-release-live.test.ts	hermeticity	ompkit-v66l.27.8	2026-11-01	complete installed-package ladder; shares the source-revision fixture contract with package-release.test.ts

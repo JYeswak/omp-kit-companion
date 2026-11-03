@@ -1,113 +1,16 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { beforeAll, expect, test } from "bun:test";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { countCaseRows } from "../../src/test-runner.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
-import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset, type ReleasePlatform } from "../../src/kit-release.ts";
-import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
-import { packageSourceRevision } from "../../scripts/package-release.ts";
-import { checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
-import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { previewKitRelease, stageKitRelease, validateReleaseManifest, type ReleaseAsset } from "../../src/kit-release.ts";
+import { packageSourceRevision, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
-
-const repo = resolve(import.meta.dir, "../..");
-
-const caseCwd = process.env.OMP_KIT_CASE_CWD || process.env.GITHUB_WORKSPACE || repo;
-const sourceCacheRoot = ompSourceCacheRoot(process.env);
-const nativeCacheEnv = sourceCacheRoot ? { OMP_KIT_OMP_SRC_CACHE: resolve(sourceCacheRoot) } : {};
-const scratch = resolve(import.meta.dir, "../../var/agent-tmp");
-const outputTmp = ownedTmp("p21-release", { root: scratch });
-const output = outputTmp.path;
-const stubBin = join(output, "stub-bin");
-mkdirSync(stubBin, { recursive: true });
-writeFileSync(join(stubBin, "omp"), "#!/bin/sh\nprintf 'omp stub\\n'\n");
-chmodSync(join(stubBin, "omp"), 0o755);
-const stubFirstPath = [stubBin, process.env.PATH ?? ""].join(delimiter);
-// Explicitly synthetic authority-policy double, not real signature evidence.
-const authorityPath = [join(repo, "tests/fixtures/kit-release"), process.env.PATH ?? ""].join(delimiter);
-const platform: ReleasePlatform = { os: process.platform as "darwin" | "linux", arch: process.arch as "arm64" | "x64", libc: process.platform === "darwin" ? "none" : "gnu" };
-const key = `${platform.os}-${platform.arch}-${platform.libc}`;
-const indexPath = join(output, "release-index.json");
-let asset: ReleaseAsset;
-let bytes: Buffer;
-let index: { schema_version: number; version: string; source_tag: string; assets: Record<string, ReleaseAsset> };
-let sourceRevision: string;
-
-function sourceGit(directory: string, args: string[]): Buffer {
-	const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
-	const result = Bun.spawnSync(["git", "-C", directory, ...args], { cwd: directory,
-		env: { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "SourceStamp",
-			GIT_AUTHOR_EMAIL: "source@example.invalid", GIT_COMMITTER_NAME: "SourceStamp", GIT_COMMITTER_EMAIL: "source@example.invalid" },
-		stdout: "pipe", stderr: "pipe" });
-	expect(result.exitCode, result.stderr.toString()).toBe(0);
-	return result.stdout;
-}
-function sourceTree(directory: string, mode: "freeze" | "digest" | "release"): string {
-	const digest = createHash("sha256");
-	const visit = (path: string, name: string): void => {
-		const stat = lstatSync(path);
-		if (stat.isDirectory()) {
-			if (mode === "release") chmodSync(path, 0o700);
-			for (const child of readdirSync(path).sort()) visit(join(path, child), `${name}/${child}`);
-			if (mode === "freeze") chmodSync(path, 0o555);
-			digest.update(JSON.stringify([name, "directory", lstatSync(path).mode]));
-		} else if (stat.isSymbolicLink()) {
-			digest.update(JSON.stringify([name, "symlink", readlinkSync(path)]));
-		} else {
-			if (mode === "freeze") chmodSync(path, stat.mode & 0o111 ? 0o555 : 0o444);
-			digest.update(JSON.stringify([name, lstatSync(path).mode,
-				createHash("sha256").update(readFileSync(path)).digest("hex")]));
-		}
-	};
-	visit(directory, "");
-	return digest.digest("hex");
-}
-
-beforeAll(() => {
-	const metadata: unknown = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
-	const exported = metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)
-		&& "source_revision" in metadata && typeof metadata.source_revision === "string"
-		&& metadata.source_revision !== "$Format:%H$" ? metadata.source_revision : undefined;
-	const selected = process.env.OMP_KIT_CASE_SOURCE_SHA ?? exported;
-	// An admitted archive has no HEAD; its expanded revision selects objects from the explicit caller.
-	const objectStore = exported === undefined ? repo : caseCwd;
-	if (exported === undefined)
-		expect(sourceGit(repo, ["rev-parse", "--show-toplevel"]).toString().trim()).toBe(repo);
-	sourceRevision = sourceGit(objectStore, ["rev-parse", "--verify", "--end-of-options", `${selected ?? "HEAD"}^{commit}`]).toString().trim();
-	if (selected !== undefined) expect(sourceRevision).toBe(selected);
-	const sourceArchive = join(output, "selected-source.tar");
-	sourceGit(objectStore, ["archive", "--format=tar", `--output=${sourceArchive}`, sourceRevision]);
-	const archived = join(output, "archived-source");
-	mkdirSync(archived);
-	const extracted = Bun.spawnSync(["tar", "-xf", sourceArchive, "-C", archived], { stdout: "pipe", stderr: "pipe" });
-	expect(extracted.exitCode, extracted.stderr.toString()).toBe(0);
-	expect(existsSync(join(archived, "MANIFEST.tsv"))).toBe(false);
-	const sourceBefore = sourceTree(archived, "freeze");
-	const built = Bun.spawnSync(["sh", join(archived, "scripts", "package-release.sh"), "--version", "1.2.3", "--platform", key, "--out", output], {
-		cwd: output, env: { ...process.env, OMP_KIT_TEST_WORK_ROOT: output, TMPDIR: output }, stdout: "pipe", stderr: "pipe",
-	});
-	expect(built.exitCode, built.stdout.toString() + built.stderr.toString()).toBe(0);
-	expect(readdirSync(output).filter(name => name.startsWith("omp-kit-work."))).toEqual([]);
-	expect(sourceTree(archived, "digest")).toBe(sourceBefore);
-	expect(existsSync(join(archived, "MANIFEST.tsv"))).toBe(false);
-	asset = JSON.parse(built.stdout.toString()) as ReleaseAsset;
-	bytes = readFileSync(join(output, asset.filename));
-	expect(createHash("sha256").update(bytes).digest("hex")).toBe(asset.sha256);
-	index = { schema_version: 1, version: "1.2.3", source_tag: "v1.2.3", assets: { [key]: asset } };
-	writeFileSync(indexPath, `${JSON.stringify(index)}\n`);
-	writeFileSync(join(output, `${asset.filename}.sigstore.json`), '{"fixture":true}\n');
-}, 30_000);
-afterAll(() => {
-	const archived = join(output, "archived-source");
-	try {
-		if (existsSync(archived)) sourceTree(archived, "release");
-	} finally {
-		try { outputTmp.cleanup(); }
-		finally { cleanupAllOwnedTmp(); }
-	}
-});
-
+import { repo, caseCwd, nativeCacheEnv, output, stubFirstPath, authorityPath, platform, key, indexPath,
+ asset, bytes, index, sourceRevision, sourceGit, installArgs, installCandidate, run, candidateEnv,
+ type Candidate } from "./package-release-fixture.ts";
 test("native release derives the rule manifest from rules, covers it in archive integrity, and refuses corrupted bytes", async () => {
 	const plan = await previewKitRelease({ currentVersion: "1.2.2", platform, sourceTag: "v1.2.3", fetchIndex: async () => index });
 	expect(plan.exitCode).toBe(0);
@@ -233,7 +136,7 @@ test("packaging's manifest producer supersedes stale input and changed rule byte
 	let generated: Buffer;
 	try {
 		process.env.OMP_KIT_TEST_WORK_ROOT = output;
-		process.env.OMP_KIT_CASE_CWD = repo;
+		process.env.OMP_KIT_CASE_CWD = caseCwd;
 		generated = packageRuleManifest(selected, output);
 	} finally {
 		if (previousWorkRoot === undefined) delete process.env.OMP_KIT_TEST_WORK_ROOT;
@@ -307,27 +210,6 @@ test("SourceStamp stays outside the closed release manifest schema", () => {
 	expect(() => validateReleaseManifest({ ...legacy, source_revision: sourceRevision, extra: true })).toThrow("INVALID_RELEASE_MANIFEST");
 });
 
-type Candidate = { home: string; installedRoot: string; installedBinary: string };
-function installArgs(name: string): { home: string; prefix: string; command: string[]; options: { cwd: string; env: Record<string, string | undefined> } } {
-	const home = join(output, name);
-	mkdirSync(home);
-	const prefix = join(home, ".local", "opt", "omp-kit");
-	return { home, prefix, command: ["sh", join(repo, "installer", "install.sh"), "--version", "1.2.3",
-		"--index", indexPath, "--offline", join(output, asset.filename), "--prefix", prefix],
-	options: { cwd: output, env: { ...process.env, PATH: authorityPath, HOME: home, TMPDIR: output, OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" } } };
-}
-function installCandidate(name: string): Candidate {
-	const { home, prefix, command, options } = installArgs(name);
-	const installed = Bun.spawnSync(command, { ...options, stdout: "pipe", stderr: "pipe" });
-	expect(installed.exitCode, installed.stdout.toString() + installed.stderr.toString()).toBe(0);
-	return { home, installedRoot: join(prefix, "releases", "1.2.3"), installedBinary: join(prefix, "bin", "omp-kit") };
-}
-type Run = { exitCode: number | null; stdout: string; stderr: string };
-async function run(command: string[], options: { cwd: string; env: Record<string, string | undefined> }): Promise<Run> {
-	const child = Bun.spawn(command, { ...options, stdout: "pipe", stderr: "pipe" });
-	const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-	return { exitCode, stdout, stderr };
-}
 // Each candidate below needs its own pristine install; the installs are independent, so they
 // run concurrently once here instead of serially inside the per-test time budget.
 const PREINSTALLED = ["operator-home", "drift-home", "bounded-home", "bounded-watched-home"] as const;
@@ -344,10 +226,6 @@ function candidate(name: (typeof PREINSTALLED)[number]): Candidate {
 	const found = preinstalled.get(name);
 	expect(found, `preinstalled candidate ${name}`).toBeDefined();
 	return found!;
-}
-function candidateEnv(home: string, extra: Record<string, string> = {}): Record<string, string | undefined> {
-	return { ...process.env, ...nativeCacheEnv, HOME: home, XDG_STATE_HOME: join(home, "xdg-state"),
-		XDG_CACHE_HOME: join(home, "xdg-cache"), OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "", ...extra };
 }
 
 function installerBoundary(name: string, substitute: boolean): { root: string; environment: Record<string, string>; binary: string } {
@@ -411,69 +289,9 @@ test("installer boundary excludes operator credentials and tool configuration fr
 	expect(existsSync(environment.HOME)).toBe(false);
 });
 
-test("installed integrations and invariant gate run from the package", async () => {
-	const { home, installedBinary } = installCandidate("integrations-home");
-	const agentDir = join(home, ".omp", "profiles", "packaging-probe", "agent");
-	mkdirSync(agentDir, { recursive: true });
-	writeFileSync(join(agentDir, "config.yml"), "extensions:\n");
-	const stubBin = join(output, "omp-stub");
-	mkdirSync(stubBin, { recursive: true });
-	const stubOmp = join(stubBin, "omp");
-	writeFileSync(stubOmp, "#!/bin/sh\nprintf 'omp stub\\n'\n");
-	chmodSync(stubOmp, 0o755);
-	const args = [installedBinary, "test", "--integrations", "--profile", "packaging-probe", "--json"];
-	const env = { ...process.env, HOME: home, TMPDIR: output, TMP: output, TEMP: output, PATH: stubBin,
-		OMP: "", OMP_BIN: "", OMP_PATH: "", OMP_SRC: "" };
-	const installed = Bun.spawnSync(args, { cwd: home, env, stdout: "pipe", stderr: "pipe" });
-	const stdout = installed.stdout.toString();
-	expect(installed.exitCode, `${stdout}\n${installed.stderr.toString()}`).toBe(0);
-	const report = JSON.parse(stdout) as {
-		data?: {
-			overall?: string;
-			integrations?: { matrix?: Array<{ profile: string; integration: string; verdict: string }> };
-		};
-	};
-	const matrix = report.data?.integrations?.matrix ?? [];
-	expect(report.data?.overall).toBe("OK");
-	expect(matrix.some(row => row.profile === "packaging-probe" && row.integration === "dcg" && row.verdict === "ABSENT")).toBe(true);
-	expect(matrix.every(row => row.profile === "packaging-probe" && row.verdict === "ABSENT")).toBe(true);
-	const ompIdentity = resolveOmpIdentity(process.env);
-	const ladderPath = [join(home, ".local", "opt", "omp-kit", "bin"), process.env.PATH ?? ""].join(delimiter);
-	const packageEnv = { ...process.env, ...nativeCacheEnv, HOME: home, TMPDIR: output, TMP: output, TEMP: output,
-		XDG_STATE_HOME: join(home, "xdg-state"), XDG_CACHE_HOME: join(home, "xdg-cache"),
-		OMP_KIT_CASE_CWD: caseCwd, OMP_KIT_TEST_WORK_ROOT: output, PATH: ladderPath };
-	const appliedEnv: Record<string, string> = {};
-	for (const [name, value] of Object.entries(packageEnv)) {
-		if (value !== undefined) appliedEnv[name] = value;
-	}
-	const appliedRules = await runBounded([installedBinary, "apply", "rules", "--apply", "--yes", "--json"], {
-		cwd: home, env: appliedEnv, deadline_s: 120,
-	});
-	const applyStdout = new TextDecoder().decode(appliedRules.stdout);
-	const applyStderr = new TextDecoder().decode(appliedRules.stderr);
-	expect(appliedRules.rc, `${applyStdout}\n${applyStderr}`).toBe(0);
-	const full = Bun.spawnSync([installedBinary, "test", "--full", "--json"], {
-		cwd: home,
-		env: { ...packageEnv, OMP: ompIdentity.launcher, OMP_BIN: ompIdentity.launcher,
-			OMP_PATH: ompIdentity.launcher, OMP_SRC: ompIdentity.source },
-		stdout: "pipe", stderr: "pipe",
-	});
-	const fullOutput = `${full.stdout.toString()}\n${full.stderr.toString()}`;
-	expect(full.exitCode, fullOutput).toBe(0);
-	const fullReport = JSON.parse(full.stdout.toString()).data.test;
-	expect(fullReport.producer.stdout).toContain("GREEN flywheel-invariants");
-	expect(fullReport.stages.manifest.status).toBe("PASS");
-	expect(fullReport.producer.result_ref).toMatchObject({
-		source_revision: sourceRevision, producer_exit: 0, runner_exit: 0,
-		execution_capture_complete: true, missing_fields: [], failing_names: [],
-		counts: { protocol: "OMP_KIT_CASES", unit: "TEST_CASE_EXECUTION", fail: 0 },
-		retention: { status: "UNRETAINED", durable: false },
-	});
-// The full ladder runs the complete e2e-live suite (~200 s locally); same budget as kit-update's N+2 journey.
-}, 900_000);
 
-test("native full-test retains a real named failing case without counting later stages as skips", () => {
-	const { home, installedBinary } = installCandidate("named-failure-home");
+test("native full-test retains a real named failing case without counting later stages as skips", async () => {
+	const { home, installedBinary } = await installCandidate("named-failure-home");
 	const identity = resolveOmpIdentity(process.env);
 	const faultBin = join(output, "archived-source", "tests", "fixtures", "full-test-claim-failure");
 	const failed = Bun.spawnSync([installedBinary, "test", "--full", "--json"], {
@@ -508,8 +326,8 @@ test("native full-test retains a real named failing case without counting later 
 	expect(readFileSync(reference.stdout.path, "utf8")).toContain("SELFTEST_FAIL: planted unmatched enforce=yes row was accepted");
 }, 120_000);
 
-test("installed integrations refuse a planted missing tests/live/integrations.json and name the matrix", () => {
-	const { home, installedRoot, installedBinary } = installCandidate("missing-matrix-home");
+test("installed integrations refuse a planted missing tests/live/integrations.json and name the matrix", async () => {
+	const { home, installedRoot, installedBinary } = await installCandidate("missing-matrix-home");
 	const matrixPath = join(installedRoot, "tests/live/integrations.json");
 	rmSync(matrixPath);
 	const missing = Bun.spawnSync([installedBinary, "test", "--integrations", "--profile", "claude", "--json"], {
@@ -523,8 +341,8 @@ test("installed integrations refuse a planted missing tests/live/integrations.js
 	expect(failure.errors?.[0]?.message).toContain(matrixPath);
 }, 120_000);
 
-test("installed integrations run packaged mock-model fire and quiet turns through real OMP", () => {
-	const { home, installedRoot, installedBinary } = installCandidate("embedded-mock-home");
+test("installed integrations run packaged mock-model fire and quiet turns through real OMP", async () => {
+	const { home, installedRoot, installedBinary } = await installCandidate("embedded-mock-home");
 	const agentDir = join(home, ".omp", "profiles", "claude", "agent");
 	mkdirSync(agentDir, { recursive: true });
 	writeFileSync(join(agentDir, "config.yml"), `extensions:\n  - ${join(installedRoot, "extensions", "kit-guard-optin.ts")}\n`);
@@ -592,7 +410,7 @@ test("oversized operator files bound the watched snapshot only where the kit cou
 	expect(JSON.parse(ignored!.stdout).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: true, incomplete_paths: [] });
 	expect(bounded!.exitCode, bounded!.stdout + bounded!.stderr).toBe(1);
 	expect(JSON.parse(bounded!.stdout).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: false, incomplete_paths: ["~/.agents/rules"] });
-});
+}, 5_000);
 
 test("release SBOM is SPDX 2.3 and names the exact archive, runtime, binary, and every manifest file", () => {
 	const sbomPath = join(output, `${asset.filename}.sbom.spdx.json`);
