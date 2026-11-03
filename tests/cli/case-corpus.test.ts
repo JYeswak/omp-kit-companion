@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { join } from "node:path";
-import { CASE_HEADER } from "../../src/case-corpus.ts";
+import { CASE_HEADER, parseCaseCorpus } from "../../src/case-corpus.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const ROOT = join(import.meta.dir, "../..");
@@ -37,3 +37,12 @@ test("native harness rejects malformed corpus shape without discarding shifted f
 		owned.cleanup();
 	}
 }, 120_000);
+
+test("eval is a supported corpus tool without opening the tool enum", () => {
+	const row = (tool: string) => `${CASE_HEADER}\ncontrol\tquiet\ttool\t${tool}\t-\tprint(out[:800])\teval carrier\t\n`;
+	const admitted = parseCaseCorpus(row("eval"));
+	expect(admitted.errors).toEqual([]);
+	expect(admitted.cases[0]?.tool).toBe("eval");
+	const unknown = parseCaseCorpus(row("unknown-tool"));
+	expect(unknown.errors).toEqual(["cases line 2: tool=unknown-tool"]);
+});

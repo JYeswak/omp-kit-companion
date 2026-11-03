@@ -1,11 +1,12 @@
 #!/bin/sh
 # check-staged-wallclock.sh -- pre-commit member (ompkit-qf9fk, WALLCLOCK1).
-# Staged test files add no new line whose pass rides on a small fixed wall-clock bound (a child deadline or
-# spawn timeout under 10 s, an elapsed-time toBeLessThan) unless the line is annotated
-# `wallclock: p99=<measured> headroom=<factor>`. Tonight's 0.2.83 verdicts failed only on such bounds at load
-# 20-36 (2 s, 3 s, 5 s, 10 s). Writes the staged index (GIT_INDEX_FILE is respected, so `git commit --only`
-# is judged as committed) as an unreferenced probe commit on HEAD and runs wallclock_check.py, installed
-# beside this member, over HEAD..probe: untouched offenders never block, new ones always do. Exit 1 refuses.
+# Staged test files add no new load-fragile timing bound: JS/TS literal fixture
+# deadlines require fixtureDeadlineS() or a reasoned product-deadline comment.
+# Small child bounds and elapsed assertions also retain WALLCLOCK1's measured
+# `wallclock: p99=<measured> headroom=<factor>` requirement.
+# The staged index (GIT_INDEX_FILE respected) becomes an unreferenced probe
+# commit on HEAD; wallclock_check.py and its kitlib lexer sit beside this member.
+# Over HEAD..probe untouched offenders never block; new occurrences refuse.
 set -u
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 root=$(git rev-parse --show-toplevel) || { printf 'staged-wallclock: not inside a work tree\n' >&2; exit 1; }

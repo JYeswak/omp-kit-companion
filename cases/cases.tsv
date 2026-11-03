@@ -497,3 +497,16 @@ kit-test-source-runtime	quiet	tool	write	src/cli.ts	const child = Bun.spawn(["om
 kit-test-source-runtime	quiet	tool	write	tests/cli/runtime.test.ts	expect(helpText).toContain("omp-kit");	C10: CLI name in an assertion is not a process launch.	
 kit-commit-preflight	quiet	tool	bash	-	grep -q x '$(git commit --no-verify -m wip)' /dev/null; true	Live nv-search-literal-near: single-quoted search text cannot execute a commit.	
 kit-commit-preflight	fire	tool	bash	-	grep -q x "$(git commit --no-verify -m wip)" /dev/null; true	Matched execution control: double-quoted substitution executes the same commit.	
+bash-capped-git-status	fire	tool	bash	-	git status --porcelain | head -c 800	CAPPEDREAD1: truncated inventory can hide untracked replacements.	
+bash-capped-git-status	fire	tool	bash	-	git -C /repo status --short | head -20	CAPPEDREAD1: alternate checkout and line cap.	
+bash-capped-git-status	fire	tool	bash	-	git status --porcelain | cut -c 1-800; git restore -- src	CAPPEDREAD1: loss precedes destructive decision.	
+bash-capped-git-status	quiet	tool	bash	-	git status --porcelain=v1 -uall	CAPPEDREAD1: complete inventory.	
+bash-capped-git-status	quiet	tool	bash	-	git status --porcelain=v1 -uall > owned/status; rc=$?; printf 'rc=%s' "$rc"	CAPPEDREAD1: full producer captured with exit status.	
+bash-capped-git-status	quiet	tool	bash	-	printf 'git status --short | head -c 800'	CAPPEDREAD1: inert documentation is not execution.	
+bash-capped-git-status	quiet	tool	bash	-	git log --oneline | head -20	CAPPEDREAD1: history preview is not working-tree inventory.	
+bash-capped-git-status	fire	tool	eval	-	rc,out,_=g('status','--porcelain', '-uall'); print(out[:800])	CAPPEDREAD1: exact helper-capture and capped-print replay.	
+bash-capped-git-status	fire	tool	eval	-	import subprocess\nout = subprocess.check_output(['git','status','--porcelain'], text=True)\nprint(out.splitlines()[:N])	CAPPEDREAD1: line cap hides the remainder just like a byte cap.	
+bash-capped-git-status	quiet	tool	eval	-	rc,out,_=g('status','--porcelain','-uall'); print(out)	CAPPEDREAD1: complete captured inventory printed.	
+bash-capped-git-status	quiet	tool	eval	-	rc,out,_=g('status','--porcelain','-uall'); Path('owned/status').write_text(out)	CAPPEDREAD1: complete captured inventory retained.	
+bash-capped-git-status	quiet	tool	eval	-	import subprocess\nout = subprocess.check_output(['service','status'], text=True)\nprint(out[:800])	CAPPEDREAD1: non-git status output is outside the rule.	
+bash-capped-git-status	quiet	tool	eval	-	out = 'unrelated data'; print(out[:800])	CAPPEDREAD1: an ordinary non-git slice stays quiet.	

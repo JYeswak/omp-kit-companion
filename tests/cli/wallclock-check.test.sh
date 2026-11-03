@@ -15,7 +15,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 members="$TMP/members"
 mkdir -p "$members"
-for helper in wallclock_check.py pysafe.py kitlib_run.py kitlib_tmp.py; do cp "$REPO/scripts/$helper" "$members/$helper"; done
+for helper in wallclock_check.py kitlib_ratchet_core.py pysafe.py kitlib_run.py kitlib_tmp.py; do cp "$REPO/scripts/$helper" "$members/$helper"; done
 cp "$REPO/scripts/check-staged-wallclock.sh" "$members/55-omp-kit-staged-wallclock"
 member="$members/55-omp-kit-staged-wallclock"
 repo="$TMP/repo"
@@ -35,12 +35,12 @@ git -C "$repo" add tests/cli/new.test.ts
 if check; then bad "small deadline admitted"; else
 	if grep -q 'tests/cli/new.test.ts:1: small-deadline' "$TMP/out"; then ok; else bad "refusal text: $(cat "$TMP/out")"; fi
 fi
-# 2. control: the same line with a load-safe 30 s bound passes
-printf 'test("x", async () => { await run(["sh", "-c", "true"], { deadline_s: 30 }); });\n' > "$repo/tests/cli/new.test.ts"
+# 2. control: the same fixture uses its existing floor through the load-aware helper
+printf 'test("x", async () => { await run(["sh", "-c", "true"], { deadline_s: fixtureDeadlineS(30) }); });\n' > "$repo/tests/cli/new.test.ts"
 git -C "$repo" add tests/cli/new.test.ts
-if check; then ok; else bad "load-safe bound refused: $(cat "$TMP/out")"; fi
+if check; then ok; else bad "load-scaled bound refused: $(cat "$TMP/out")"; fi
 # 3. an annotated small bound passes
-printf 'const killed = run(["sleep", "30"], { deadline_s: 1 }); // wallclock: p99=0.02s headroom=50x (asserts the kill)\n' > "$repo/tests/cli/new.test.ts"
+printf 'const killed = run(["sleep", "30"], { deadline_s: 1 }); // product-deadline: asserts the real child kill; wallclock: p99=0.02s headroom=50x\n' > "$repo/tests/cli/new.test.ts"
 git -C "$repo" add tests/cli/new.test.ts
 if check; then ok; else bad "annotated line refused: $(cat "$TMP/out")"; fi
 # 4. an untouched legacy offender never blocks an unrelated edit of its file
@@ -80,6 +80,30 @@ idx="$TMP/only.index"
 GIT_INDEX_FILE="$idx" git -C "$repo" read-tree HEAD
 if (cd "$repo" && GIT_INDEX_FILE="$idx" sh "$member") > "$TMP/out" 2>&1; then ok; else bad "private index judged the shared index: $(cat "$TMP/out")"; fi
 if check; then bad "small spawn timeout admitted"; else ok; fi
+
+# FIXTUREDEADLINE1: the formerly admitted 30/60/120-second sites now refuse.
+git -C "$repo" rm -q --cached tests/cli/spawn.test.ts
+for shape in 'run(cmd, { deadline_s: 30 })' 'test("slow", () => { nested(a, b); }, 60_000)' 'test("trailing", () => {}, 60_000,)' 'beforeAll(() => { setup(); }, 120_000)' 'setDefaultTimeout(60_000)' 'test("multiline", () => {\n nested(a, b);\n}, 60_000)'; do
+	printf '%b;\n' "$shape" > "$repo/tests/cli/new.test.ts"
+	git -C "$repo" add tests/cli/new.test.ts
+	if check; then bad "literal fixture bound admitted: $shape"; else
+		if grep -q 'literal-fixture-deadline' "$TMP/out"; then ok; else bad "literal refusal text: $(cat "$TMP/out")"; fi
+	fi
+done
+for shape in 'test("slow", () => { nested(a, b); }, fixtureDeadlineS(60) * 1000)' 'runFixture(cmd, { floor_s: 120 })' 'const docs = "test(x, fn, 60000)"; // timeout: 120000' 'test("product", () => { checkKill(); }, 60_000); // product-deadline: asserts a real product latency ceiling'; do
+	printf '%s;\n' "$shape" > "$repo/tests/cli/new.test.ts"
+	git -C "$repo" add tests/cli/new.test.ts
+	if check; then ok; else bad "literal quiet control refused: $(cat "$TMP/out")"; fi
+done
+# A measured annotation alone must not launder an ordinary fixture deadline.
+printf 'test("slow", () => {}, 60000); // wallclock: p99=1s headroom=60x\n' > "$repo/tests/cli/new.test.ts"
+git -C "$repo" add tests/cli/new.test.ts
+if check; then bad "measurement laundered fixture bound"; else ok; fi
+# Grandfathering is shrink-only: duplicating the pre-existing literal refuses.
+git -C "$repo" rm -q --cached tests/cli/new.test.ts
+printf 'const legacy = run(["x"], { deadline_s: %s });\nconst legacy = run(["x"], { deadline_s: %s });\n' 3 3 > "$repo/tests/cli/legacy.test.ts"
+git -C "$repo" add tests/cli/legacy.test.ts
+if check; then bad "duplicated legacy literal admitted"; else ok; fi
 
 printf 'wallclock-check: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

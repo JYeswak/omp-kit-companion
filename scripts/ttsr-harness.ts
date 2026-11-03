@@ -266,6 +266,7 @@ function contextFor(c: Case): MatchContext {
 /** The live coordinator streams JSON-encoded tool arguments; snapshot is reserved for content tools. */
 function wirePayload(c: Case): string {
 	if (c.source === "tool" && c.tool === "bash") return JSON.stringify({ command: c.snippet });
+	if (c.source === "tool" && c.tool === "eval") return JSON.stringify({ language: "py", code: c.snippet });
 	return c.snippet;
 }
 function scopeApplies(rule: Rule, c: Case): boolean {

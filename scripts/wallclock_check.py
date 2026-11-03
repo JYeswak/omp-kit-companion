@@ -10,9 +10,19 @@ wall-clock bound around child processes. This checker flags those shapes in test
   small-timeout-s  timeout= below 10 s                         (python subprocess / socket)
   elapsed-assert   an elapsed/duration/took value asserted with toBeLessThan
 
-A line carrying a complete `wallclock: p99=<number>(ms|s) headroom=<number>x` annotation, with p99 above 0 and
-headroom of at least 2x, is annotated and never flagged. Anything less (no headroom, an empty or non-numeric p99,
-headroom under 2x) is not an annotation: the line is judged like any other. Line length never exempts a line.
+FIXTUREDEADLINE1 (ompkit-fp72.120.16.125) additionally refuses literal JS/TS
+deadline_s/timeout_s/timeoutMs/timeout options and Bun case/lifecycle timeout
+arguments at any size. Use fixtureDeadlineS(existing_floor), or runFixture
+with floor_s. Existing occurrences are grandfathered by the same shrink-only
+ratchet. A real product deadline needs an inline comment beginning
+`product-deadline: <reason>` (at least two words and ten characters).
+The JS subset uses the existing kitlib lexer; aliases, computed expressions,
+tagged test factories and Python/shell fixture bounds are not covered by this
+new rule. Those languages retain their existing small-bound checks.
+
+The original small-bound and elapsed checks still require a complete
+`wallclock: p99=<number>(ms|s) headroom=<number>x` annotation (positive p99,
+headroom >=2x). That annotation alone never exempts a literal fixture bound.
 
   --base REV --head REV   judge test files changed between REV and REV; a finding is new when its (path, rule, line
                           text) occurs more often at head than at base, so untouched offenders never block. Exit 1
@@ -28,6 +38,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from kitlib_run import run  # noqa: E402
+import kitlib_ratchet_core as core  # noqa: E402
 
 SUFFIXES = (".ts", ".js", ".mjs", ".sh", ".py")
 LOAD_SAFE_S = 10.0
@@ -39,6 +50,59 @@ TIMEOUT_MS = re.compile(r"\btimeout(?:Ms)?[ \t]*:[ \t]*([0-9][0-9_]{0,9})\b")
 TIMEOUT_S = re.compile(r"\btimeout[ \t]*=[ \t]*([0-9]{1,6}(?:[.][0-9]{1,3})?)\b")
 ELAPSED = re.compile(r"\b(?:elapsed|duration|took)[A-Za-z_]{0,20}\b", re.I)
 LESS_THAN = re.compile(r"[.]toBeLessThan(?:OrEqual)?[(]")
+PRODUCT_DEADLINE = re.compile(r"^\s*product-deadline:\s*(\S.*)$")
+LITERAL = r"[0-9][0-9_]*(?:\.[0-9_]+)?"
+FIXTURE_BOUND = re.compile(
+    rf"\b(?:deadline_s|timeout_s|timeoutMs|timeout)\s*[:=]\s*({LITERAL})(?![\w.])")
+CASE_CALL = re.compile(r"\b(?:(?:test|it)(?:\.(?:only|skip|todo|concurrent|serial))?"
+                       r"|beforeAll|afterAll|beforeEach|afterEach|setDefaultTimeout)\s*\(")
+
+
+def fixture_bounds(text: str):
+    """Lex JS first: documentation strings/comments are not executable deadlines.
+
+    Recognise direct numeric options and final numeric arguments of Bun case/
+    lifecycle calls, including multiline callbacks. Names aliased by the caller
+    and computed numeric expressions are outside this literal-site ratchet.
+    """
+    if len(text) > core.MAX_FILE_BYTES:
+        yield 1, "fixture-source-too-large", "test source exceeds the 4 MiB lexical budget"
+        return
+    code, _, _, comments = core.lex_js(text)
+    where = core.js_locator(text)
+    lines = text.splitlines()
+    product = set()
+    for offset, body in comments:
+        match = PRODUCT_DEADLINE.match(body)
+        if match and len(match.group(1)) >= 10 and len(match.group(1).split()) >= 2:
+            product.add(where(offset)[0])
+    offsets = set()
+    case_openers = {match.end() - 1 for match in CASE_CALL.finditer(code)}
+    for match in FIXTURE_BOUND.finditer(code):
+        # Zero is also a real literal deadline (often disabling a timeout).
+        offsets.add(match.start(1))
+    stack = []
+    for offset, char in enumerate(code):
+        if char in "([{":
+            stack.append([char, offset, [], char == "(" and offset in case_openers])
+        elif char == "," and stack and stack[-1][0] == "(":
+            stack[-1][2].append(offset)
+        elif char in ")]}" and stack:
+            opener, start, commas, case = stack.pop()
+            if {"(": ")", "[": "]", "{": "}"}[opener] != char:
+                continue
+            if case:
+                end = offset
+                if commas and not code[commas[-1] + 1:end].strip():
+                    end = commas.pop()
+                arg_start = commas[-1] + 1 if commas else start + 1
+                arg = code[arg_start:end]
+                if re.fullmatch(rf"\s*{LITERAL}\s*", arg):
+                    offsets.add(arg_start + len(arg) - len(arg.lstrip()))
+    for offset in sorted(offsets):
+        number, _ = where(offset)
+        if number not in product:
+            yield number, "literal-fixture-deadline", lines[number - 1].strip()
 
 
 def annotated(line: str) -> bool:
@@ -50,6 +114,8 @@ def annotated(line: str) -> bool:
 def findings(path: str, text: str):
     if not path.startswith("tests/") or not path.endswith(SUFFIXES):
         return
+    if path.endswith((".ts", ".js", ".mjs")):
+        yield from fixture_bounds(text)
     for number, line in enumerate(text.splitlines(), 1):
         if annotated(line):
             continue
@@ -93,9 +159,10 @@ def judge(repo: str, base: str, head: str) -> int:
             new.append("%s:%d: %s: %s" % (path, number, rule, text[:200]))
     if not new:
         return 0
-    print("wallclock-check: REFUSED: %d new test line(s) pass only within a small fixed wall-clock bound; under "
-          "fleet load they fail without a code change. Judge the mechanism, give the child a load-safe bound "
-          "(>= %d s), or annotate the line with `wallclock: p99=<measured> headroom=<factor>`:" % (len(new), LOAD_SAFE_S),
+    print("wallclock-check: REFUSED: %d new timing finding(s). Fixture deadlines must use fixtureDeadlineS() "
+          "(or runFixture floor_s); a literal real product deadline needs an inline "
+          "`product-deadline: <reason>` comment. Elapsed assertions still require measured "
+          "`wallclock: p99=<measured> headroom=<factor>` evidence:" % len(new),
           file=sys.stderr)
     for line in new:
         print(line, file=sys.stderr)
