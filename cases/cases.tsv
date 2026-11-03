@@ -518,3 +518,11 @@ kit-jsonl-aggregate	fire	tool	read	.beads/issues.jsonl	.beads/issues.jsonl?q={ex
 kit-jsonl-aggregate	quiet	tool	read	.beads/issues.jsonl	.beads/issues.jsonl?q={status:.status}	Per-record object projection remains supported.	
 kit-jsonl-aggregate	fire	tool	read	.beads/issues.jsonl	.beads/issues.jsonl?q=group_by(.status)	Top-level grouping requires slurp.	
 kit-jsonl-aggregate	quiet	tool	read	.beads/issues.jsonl	.beads/issues.jsonl?q=.labels|group_by(.)	Grouping an explicit nested array is not cross-record grouping.	
+bash-capped-git-status	fire	tool	bash	-	FOO=1 git status --porcelain | head -c 800	CAPPEDREAD1: an environment assignment does not make a capped inventory safe.	
+bash-capped-git-status	quiet	tool	bash	-	FOO=1 git status --porcelain	CAPPEDREAD1: the same environment-prefixed inventory without the cap is complete.	
+bash-capped-git-status	fire	tool	bash	-	FOO=1 BAR= git -C /repo status --short | cut -c 1-800	CAPPEDREAD1: multiple assignments, including an empty value, preserve capped execution.	
+bash-capped-git-status	quiet	tool	bash	-	FOO=1 BAR= git -C /repo status --short	CAPPEDREAD1: the same multiple-assignment inventory without the cap is complete.	
+kit-br-readonly-unsupported	fire	tool	bash	-	FOO=1 BAR= br --readonly show bead --json	DAILYCLASSES: environment assignments do not make the unsupported flag valid.	
+kit-br-readonly-unsupported	quiet	tool	bash	-	FOO=1 BAR= br show bead --json	DAILYCLASSES: the same environment-prefixed read without the unsupported flag is valid.	
+kit-br-readonly-unsupported	fire	tool	bash	-	br \\n--readonly show bead --json	DAILYCLASSES: shell line continuation leaves the unsupported flag on the br command.	
+kit-br-readonly-unsupported	quiet	tool	bash	-	br \\nshow bead --json	DAILYCLASSES: the same continued read without the unsupported flag is valid.	

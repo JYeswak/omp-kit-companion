@@ -1,7 +1,8 @@
 ---
 description: "br has no --readonly flag: use supported read commands without inventing flags"
 condition:
-  - '(?:^|[;&|\n]|"command"\s*:\s*")\s*br[ \t]+--readonly\b'
+  # Match shell assignment prefixes and raw/JSON-serialized whitespace or continuations.
+  - '(?:^|[;&|\n]|\\n|"command"\s*:\s*")\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s"\\;&|]*\s+)*br(?:\s|\\{1,3}[nrt]|\\\r?\n)+--readonly\b'
   - '(?:\[|,)\s*\\?["\x27]br\\?["\x27]\s*,\s*\\?["\x27]--readonly\\?["\x27]'
 scope: tool:bash,tool:eval
 interruptMode: never

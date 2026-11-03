@@ -25,6 +25,25 @@ test("br unsupported --readonly: shell call fires; help and inert text stay quie
 	expect(rule.scope).toContain("tool:eval");
 });
 
+test("br unsupported --readonly: assignments and continued flags preserve the call", () => {
+	for (const command of [
+		"FOO=1 br --readonly show bead --json",
+		"FOO=1 BAR= br --readonly show bead --json",
+		"br\t--readonly show bead --json",
+		"br \\\n--readonly show bead --json",
+		"FOO=1 br \\\n--readonly show bead --json",
+	]) {
+		expect(fires(command), command).toBe(true);
+		expect(fires(JSON.stringify({ command })), command).toBe(true);
+		const corrected = command.replace("--readonly ", "");
+		expect(fires(corrected), corrected).toBe(false);
+		expect(fires(JSON.stringify({ command: corrected })), corrected).toBe(false);
+	}
+	const inert = "FOO=1 printf '%s\\n' 'br --readonly show bead'";
+	expect(fires(inert)).toBe(false);
+	expect(fires(JSON.stringify({ command: inert }))).toBe(false);
+});
+
 test("br unsupported --readonly: 64K near miss stays quiet within the native matcher budget", () => {
 	const near = JSON.stringify({ code: `${'[\"br\", \"--readonlx\"],'.repeat(3500)}` });
 	const start = performance.now();

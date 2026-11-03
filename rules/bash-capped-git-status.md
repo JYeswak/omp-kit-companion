@@ -1,7 +1,8 @@
 ---
 # CAPPEDREAD1: intercept the lossy observation, not a guessed later decision.
 condition:
-  - '(?:^|"command"\s*:\s*"|[;&|\n]|\\n)\s*git\s+(?:-C\s+[^;|\n]{1,256}?\s+)?status\b[^;|\n]{0,512}\|\s*(?:head|tail|cut)\b'
+  # Unquoted NAME=value prefixes do not change the command being executed.
+  - '(?:^|"command"\s*:\s*"|[;&|\n]|\\n)\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s"\\;&|]*\s+)*git\s+(?:-C\s+[^;|\n]{1,256}?\s+)?status\b[^;|\n]{0,512}\|\s*(?:head|tail|cut)\b'
   # Eval's serialized code retains the helper/command and the printed slice.
   - '(?:\bg\s*\(|subprocess\.(?:run|check_output|Popen)\s*\([\s\S]{0,256}?\bgit\b)[\s\S]{0,256}?\bstatus\b[\s\S]{0,4096}?(?:\b|\\[nt])print\s*\(\s*[A-Za-z_]\w*(?:\.stdout)?(?:\.splitlines\(\))?\s*\[\s*:\s*(?:[0-9]{1,9}|[A-Za-z_]\w*)\s*\]'
 scope: tool:bash, tool:eval
