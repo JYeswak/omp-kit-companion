@@ -2052,7 +2052,9 @@ function parseReleaseMarker(text: string): Omit<ReleaseRecord, "owner" | "ownerT
 		const value = line.slice(eq + 1);
 		if (!(RELEASE_MARKER_REQUIRED as readonly string[]).includes(key) &&
 			!(RELEASE_MARKER_OPTIONAL as readonly string[]).includes(key)) return null;
-		if (value === "" || /[\t\r\n]/.test(value) || seen[key] !== undefined) return null;
+		// LEGACYEMPTY1 (ompkit-fp72.120.16.100): the base64 of an empty .owner is "", and the legacy release writes it;
+		// every other key still refuses an empty value.
+		if ((value === "" && key !== "legacy_owner_b64") || /[\t\r\n]/.test(value) || seen[key] !== undefined) return null;
 		seen[key] = value;
 	}
 	for (const key of RELEASE_MARKER_REQUIRED) if (seen[key] === undefined) return null;
