@@ -495,3 +495,5 @@ kit-test-source-runtime	fire	tool	write	tests/fixtures/runtime.sh	"$HOME/.local/
 kit-test-source-runtime	quiet	tool	write	tests/fixtures/runtime.sh	printf '%s\\n' "$HOME/.local/opt/omp-kit/current/bin/omp-kit"	C10: printing an installation path does not launch it.	
 kit-test-source-runtime	quiet	tool	write	src/cli.ts	const child = Bun.spawn(["omp-kit", "verify"]);	C10: rule is test/fixture-only, not production launch policy.	
 kit-test-source-runtime	quiet	tool	write	tests/cli/runtime.test.ts	expect(helpText).toContain("omp-kit");	C10: CLI name in an assertion is not a process launch.	
+kit-commit-preflight	quiet	tool	bash	-	grep -q x '$(git commit --no-verify -m wip)' /dev/null; true	Live nv-search-literal-near: single-quoted search text cannot execute a commit.	
+kit-commit-preflight	fire	tool	bash	-	grep -q x "$(git commit --no-verify -m wip)" /dev/null; true	Matched execution control: double-quoted substitution executes the same commit.	

@@ -4,7 +4,7 @@ condition:
   # Reuse the starter-kit checker router's prefix and inert-print exclusions.
   # Reject non-command tokens and non-commit suffixes before unbounded context,
   # as kit-no-verify does; repeated "git" near-misses must not scan their history.
-  - 'git(?<=\bgit|\\ngit|\\tgit)(?=\s+(?:-C\s+[^\s"\\;&|]+\s+)?commit(?=[\s;&|)"\x60]|\\n))(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)(?<=(?:^|"command"\s*:\s*"|[;&|(]|\\n|\\t)\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s"\\;&|]*\s+)*(?:(?:env|sudo|time)\s+)*(?:command\s+)?git)'
+  - 'git(?<=\bgit|\\ngit|\\tgit)(?=\s+(?:-C\s+[^\s"\\;&|]+\s+)?commit(?=[\s;&|)"\x60]|\\n))(?<!\b(?:echo|printf|e?grep|fgrep|rg|ag|ack)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf|e?grep|fgrep|rg|ag|ack)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)(?<=(?:^|"command"\s*:\s*"|[;&|(]|\\n|\\t)\s*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s"\\;&|]*\s+)*(?:(?:env|sudo|time)\s+)*(?:command\s+)?git)'
 scope: "tool:bash"
 interruptMode: never
 ---
