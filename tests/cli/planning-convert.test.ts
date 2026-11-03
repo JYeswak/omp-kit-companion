@@ -24,6 +24,20 @@ isolatedTest("planning dry-run skips the seat shim only for its isolated databas
 		AGENT_NAME: "RealConversionSeat",
 		BEADS_DB: liveDb,
 	};
+	// Neither an outside tracker root nor its DB file may enter native-only dispatch.
+	// Remove native br from this child's PATH: the DB-admission reason proves refusal
+	// occurs before native resolution, rather than merely failing to find a backend.
+	for (const [outsideDb, reason] of [
+		[trackerRoot, "--db directory is not fresh"],
+		[liveDb, "--db must not be inside a `.beads` tracker directory"],
+	] as const) {
+		const outside = await runCli(["planning", "convert", "--plan", validPlan, "--mission", "core8", "--dry-run", "--db", outsideDb, "--json"], { ...env, PATH: shimBin });
+		expect(outside.exitCode).not.toBe(0);
+		expect(JSON.parse(outside.stdout).data).toMatchObject({ overall: "REFUSED", db_refusal: expect.stringContaining(reason) });
+		expect(outside.stdout + outside.stderr).not.toContain("BR_SHIM_ACTOR_MISMATCH");
+		expect(readFileSync(liveDb)).toEqual(before);
+		expect(statSync(liveDb).mtimeMs).toBe(beforeMtime);
+	}
 	const dbDir = join(scratch, "shim-dry-db");
 	const dry = await runCli(["planning", "convert", "--plan", validPlan, "--mission", "core8", "--dry-run", "--db", dbDir, "--json"], env);
 	expect(dry.exitCode, dry.stdout + dry.stderr).toBe(0);
