@@ -289,3 +289,37 @@ test("SCRATCHLSOF1 preserves the released legacy owner's identity", () => {
 	expect(row).toMatchObject({ action: "DELETE", reason: "quarantine-expired-owner-released", owner: { pid: process.pid } });
 	expect(existsSync(entry)).toBe(false);
 }, 60_000);
+
+// QRELEASED1 (ompkit-fp72.120.16.103): an entry its owner released is deleted once its quarantine hold expires,
+// even while the owner seat stays alive; an unreleased entry under the same live seat is kept. Measured
+// 2026-11-03: 55 released entries (5.5 GB) sat past the 24 h hold because the seat-liveness check ran first.
+test("QRELEASED1 a released quarantine entry expires while its owner seat lives; an unreleased one is kept", () => {
+	const home = tempDir("scratch-qreleased-home");
+	process.env.XDG_STATE_HOME = join(home, "state");
+	process.env.XDG_CONFIG_HOME = join(home, "config");
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+	const now = Date.parse("2026-10-22T00:00:00.000Z");
+	const old = now - 30 * 86_400_000;
+	const seatOwner = `agent=FixtureOwner\nsession=fixture-session\n`;
+	const { root, dir: released } = ownedDir(process.pid, "Mon Oct  5 13:27:00 2026", "released");
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	writeFileSync(join(released, ".owner"), `${readFileSync(join(released, ".owner"), "utf8")}${seatOwner}`);
+	expect(releaseScratch(released, home, { liveness: planted("live"), run: clearRun, now: old })).toMatchObject({ ok: true, reason: "owner-released" });
+	const qt = quarantineDir(home);
+	mkdirSync(qt, { recursive: true, mode: 0o700 });
+	const releasedEntry = join(qt, quarantineEntryFor(`released.${process.pid}`, new Date(old)));
+	renameSync(released, releasedEntry);
+	const keptEntry = join(qt, quarantineEntryFor(`kept.${process.pid}`, new Date(old)));
+	mkdirSync(keptEntry);
+	writeFileSync(join(keptEntry, ".owner"), `${ownerText(process.pid, "Mon Oct  5 13:27:00 2026", "kept")}${seatOwner}`);
+	writeFileSync(join(keptEntry, "payload"), "keep");
+	for (const entry of [releasedEntry, keptEntry]) {
+		for (const name of readdirSync(entry)) utimesSync(join(entry, name), new Date(old), new Date(old));
+		utimesSync(entry, new Date(old), new Date(old));
+	}
+	const rows = applyQuarantineExpiry(home, { liveness: { ...planted("live"), seatLive: () => true }, run: defaultRunner, home, now });
+	expect(rows.find(row => row.dir === releasedEntry)).toMatchObject({ action: "DELETE", reason: "quarantine-expired-owner-released" });
+	expect(existsSync(releasedEntry)).toBe(false);
+	expect(rows.find(row => row.dir === keptEntry)).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
+	expect(readFileSync(join(keptEntry, "payload"), "utf8")).toBe("keep");
+}, 60_000);

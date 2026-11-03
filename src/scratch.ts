@@ -2009,6 +2009,9 @@ function quarantineExpiryDecision(path: string, home: string, owner: ScratchOwne
 		if (fresh === null) return { action: "SKIP", reason: "idle-proof-unavailable" };
 		if (fresh >= now - QUARANTINE_IDLE_MS) return { action: "SKIP", reason: "quarantine-active-mtime" };
 	}
+	// QRELEASED1 (ompkit-fp72.120.16.103): the owner's own release discharges the entry once its hold expires,
+	// whether or not its seat still lives; checked first, a long-lived seat kept every dir it had released.
+	if (released && owner?.bin !== "hold") return { action: "DELETE", reason: "quarantine-expired-owner-released" };
 	if (owner !== null && owner.bin !== "hold" && owner.agent !== null && owner.session !== null) {
 		const seat = deps.liveness.seatLive?.(owner.agent, owner.session) ?? null;
 		if (seat === true) return { action: "LIVE", reason: "owner-seat-alive" };
