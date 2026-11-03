@@ -228,23 +228,21 @@ function createCountMismatchRelease(name: string): { root: string; stable: strin
  	process.env.TMPDIR = suiteTmp;
  	process.env.TMP = suiteTmp;
  	process.env.TEMP = suiteTmp;
-	suiteManifest = join(REPO_ROOT, "MANIFEST.tsv");
-	if (!existsSync(suiteManifest)) {
-		const manifest = await kitlibRun(["sh", join(REPO_ROOT, "scripts", "build-manifest.sh"), "--stdout"], {
-			deadline_s: 60,
-			cwd: REPO_ROOT,
-			env: {
-				PATH: process.env.PATH ?? "/usr/bin:/bin",
-				HOME: process.env.HOME ?? suiteTmp,
-				TMPDIR: suiteTmp, TMP: suiteTmp, TEMP: suiteTmp,
-			},
-		});
-		if (manifest.rc !== 0 || manifest.timed_out) {
-			throw new Error(`source manifest generation failed (rc=${manifest.rc}, timed_out=${manifest.timed_out}): ${manifest.stdout.toString()}\n${manifest.stderr.toString()}`);
-		}
-		suiteManifest = join(suiteTmp, "MANIFEST.tsv");
-		writeFileSync(suiteManifest, manifest.stdout);
+	// Source fixtures bind current rules, never an ignored manifest left by an older build.
+	const manifest = await kitlibRun(["sh", join(REPO_ROOT, "scripts", "build-manifest.sh"), "--stdout"], {
+		deadline_s: 60,
+		cwd: REPO_ROOT,
+		env: {
+			PATH: process.env.PATH ?? "/usr/bin:/bin",
+			HOME: process.env.HOME ?? suiteTmp,
+			TMPDIR: suiteTmp, TMP: suiteTmp, TEMP: suiteTmp,
+		},
+	});
+	if (manifest.rc !== 0 || manifest.timed_out) {
+		throw new Error(`source manifest generation failed (rc=${manifest.rc}, timed_out=${manifest.timed_out}): ${manifest.stdout.toString()}\n${manifest.stderr.toString()}`);
 	}
+	suiteManifest = join(suiteTmp, "MANIFEST.tsv");
+	writeFileSync(suiteManifest, manifest.stdout);
  	fixtureBase = ownedTmp("omp-kit-fast-test").path;
 	const installedOmp = resolveOmpIdentity(process.env);
 	const toolBin = join(fixtureBase, "native-tools");
@@ -455,8 +453,8 @@ describe("runFastTest", () => {
 		});
 		expect(report.status).toBe("FAIL");
 		expect(report.diagnostics.manifest.status).toBe("FAIL");
-		expect(report.proofs.G2_payload.status).toBe("PASS");
-		expect(report.proofs.G3_quiet_prefix.status).toBe("PASS");
+		expect(report.proofs.G2_payload.status, JSON.stringify({ proof: report.proofs.G2_payload, failures: report.failures })).toBe("PASS");
+		expect(report.proofs.G3_quiet_prefix.status, JSON.stringify({ proof: report.proofs.G3_quiet_prefix, failures: report.failures })).toBe("PASS");
 		expect(report.failures).toContain("cases/cases.tsv is missing from, or does not match, release-manifest.json");
 	});
 

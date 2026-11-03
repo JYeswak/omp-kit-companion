@@ -38,6 +38,13 @@ ENV["PYTHONDONTWRITEBYTECODE"] = "1"
 PARENT = Path(os.environ["TMPDIR"])
 ROOT = Path(owned_tmp("native-preserve", root=str(PARENT)).path)
 
+# The two installed-chain journeys run the real source installer and every hook member.
+# Measured under load: installer 31.3 s; commit 10.6 s (native guard 0.56 s,
+# largest member staged-sources 1.11 s; commit-gate 0.02 s, with no fresh gate).
+# A 90 s composed-operation bound gives ~3x the observed installer time; leaf
+# git/native/guard calls retain 30 s. No chain members are disabled for these proofs.
+INSTALLED_CHAIN_TIMEOUT = 90
+
 
 def issue(ident: str, creator: str = "FixtureCreator", comment: bool = False, before: bool = False) -> dict:
     born = "2026-09-08T20:15:29Z" if before else "2026-09-08T20:15:31Z"
@@ -83,9 +90,10 @@ class Fixture:
         shutil.copytree(self.root, template)
         Fixture.seeds[key] = template
 
-    def cmd(self, argv: list[str], env: dict | None = None, expected: int = 0) -> subprocess.CompletedProcess:
+    def cmd(self, argv: list[str], env: dict | None = None, expected: int = 0,
+            *, timeout: int = 30) -> subprocess.CompletedProcess:
         p = subprocess.run(argv, cwd=self.root, env=env or ENV, capture_output=True, text=True,  # pysafe: leaf git/native-br fixture subprocess; timeout bounds the wait, DEVNULL stdin
-                           timeout=30, stdin=subprocess.DEVNULL)
+                           timeout=timeout, stdin=subprocess.DEVNULL)
         with (self.root / "commands.jsonl").open("a") as out:
             out.write(json.dumps({"argv": argv, "rc": p.returncode, "stdout": p.stdout, "stderr": p.stderr}) + "\n")
         if p.returncode != expected:
@@ -93,8 +101,8 @@ class Fixture:
                                              "stdout": p.stdout, "stderr": p.stderr}))
         return p
 
-    def git(self, *args: str) -> subprocess.CompletedProcess:
-        return self.cmd(["git", "-c", "commit.gpgsign=false", "-C", str(self.root), *args])
+    def git(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess:
+        return self.cmd(["git", "-c", "commit.gpgsign=false", "-C", str(self.root), *args], timeout=timeout)
 
     def br(self, *args: str) -> subprocess.CompletedProcess:
         return self.cmd([str(NATIVE), "--db", str(self.root / ".beads/beads.db"),
@@ -283,12 +291,12 @@ class PreservationTests(unittest.TestCase):
         peer_entry = f.git("ls-files", "--stage", "--", "peer.txt").stdout
         peer_bytes = (f.root / "peer.txt").read_bytes()
         candidate = f.source.read_bytes()
-        f.cmd(self.install_args(f))
+        f.cmd(self.install_args(f), timeout=INSTALLED_CHAIN_TIMEOUT)
         check = self.install_args(f)
         check.insert(2, "--check")
-        f.cmd(check)
+        f.cmd(check, timeout=INSTALLED_CHAIN_TIMEOUT)
         f.git("commit", "--only", "-m", "fixture native preservation [test]",
-              "-m", "Bead: fixture-aaa", "--", guard.TRACKER)
+              "-m", "Bead: fixture-aaa", "--", guard.TRACKER, timeout=INSTALLED_CHAIN_TIMEOUT)
         self.assertEqual(f.git("show", "HEAD:" + guard.TRACKER).stdout.encode(), candidate)
         self.assertEqual(f.git("ls-files", "--stage", "--", "peer.txt").stdout, peer_entry)
         self.assertEqual((f.root / "peer.txt").read_bytes(), peer_bytes)
@@ -297,7 +305,7 @@ class PreservationTests(unittest.TestCase):
     def test_tampered_installed_runtime_cannot_allow_a_normal_commit(self):
         f = Fixture()
         f.progress()
-        f.cmd(self.install_args(f))
+        f.cmd(self.install_args(f), timeout=INSTALLED_CHAIN_TIMEOUT)
         hooks = Path(f.git("rev-parse", "--git-path", "hooks").stdout.strip())
         if not hooks.is_absolute():
             hooks = f.root / hooks
@@ -308,7 +316,8 @@ class PreservationTests(unittest.TestCase):
         p = f.cmd(["sh", str(hooks / "hooks.d/pre-commit/40-omp-kit-native-preserve")], expected=4)
         self.assertEqual(json.loads(p.stderr)["reason"], "INSTALLED_GUARD_CHANGED")
         f.cmd(["git", "-c", "commit.gpgsign=false", "-C", str(f.root), "commit", "--only",
-               "-m", "fixture refusal [test]", "-m", "Bead: fixture-aaa", "--", guard.TRACKER], expected=1)
+               "-m", "fixture refusal [test]", "-m", "Bead: fixture-aaa", "--", guard.TRACKER], expected=1,
+              timeout=INSTALLED_CHAIN_TIMEOUT)
         self.assertEqual(f.git("rev-parse", "HEAD").stdout, before)
 
     def test_installer_refuses_an_unreviewed_guard_digest_before_any_hook_effect(self):
