@@ -63,6 +63,26 @@ try:
     for check in ('stale-worktree', 'kitlib-reversal', 'commit-notes'):
         assert 'NOT_JUDGED ' + check in clean_text, clean_text
     passed += 1
+    # SC2015 is info severity: local 0.11 no longer reports this exact idiom,
+    # but focused CI's pinned 0.9 must refuse the same bytes as publication.
+    (root/'tests/cli').mkdir()
+    info = root/'tests/cli/info.sh'
+    info.write_text('#!/bin/sh\nfor binding in "$@"; do\n    [ -f "$binding" ] && [ ! -L "$binding" ] || continue\n    printf "%s\\n" "$binding"\ndone\n')
+    info_bad = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','tests/cli/info.sh'],root,env)
+    info_text = (info_bad.stdout+info_bad.stderr).decode()
+    assert info_bad.rc == 1 and 'SC2015 (info)' in info_text, info_text
+    passed += 1
+    info.write_text('#!/bin/sh\nfor binding in "$@"; do\n    if [ ! -f "$binding" ] || [ -L "$binding" ]; then\n        continue\n    fi\n    printf "%s\\n" "$binding"\ndone\n')
+    info_clean = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','tests/cli/info.sh'],root,env)
+    assert info_clean.rc == 0, (info_clean.stdout+info_clean.stderr).decode()
+    passed += 1
+    # Unavailable pinned engine must not silently accept via the local binary.
+    offline_env = dict(env, DOCKER_HOST='unix://' + str(root/'absent-docker.sock'))
+    offline_env.pop('DOCKER_CONTEXT', None)
+    offline = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','clean.sh'],root,offline_env)
+    offline_text = (offline.stdout+offline.stderr).decode()
+    assert offline.rc == 1 and 'UNJUDGED shellcheck:clean.sh' in offline_text and 'docker pull koalaman/shellcheck:v0.9.0' in offline_text, offline_text
+    passed += 1
     assert cmd(['git','add','clean.sh'],root,env).rc == 0
     (root/'clean.sh').write_text('#!/bin/sh\necho $unstaged\n')
     staged = cmd(['sh',str(scripts/'commit-preflight.sh')],root,env)
@@ -126,6 +146,34 @@ try:
         fragment.write('- Cover the follow-on preflight change. (ompkit-demo)\n')
     updated = cmd(['sh',str(scripts/'commit-preflight.sh'),'--message',str(msg),'--files','src/probe.txt','changelog.d/demo.md'],root,env)
     assert updated.rc == 0, (updated.stdout+updated.stderr).decode()
+    passed += 1
+    # Source closure: an unchanged INDEX helper with a non-shell suffix must be
+    # available to the changed caller. Unstaged helper/config dirt is irrelevant.
+    helper = root/'scripts/report-data.inc'
+    helper.write_text('REPORT_VALUE=staged\n')
+    assert cmd(['git','add','scripts/report-data.inc'],root,env).rc == 0
+    tree = cmd(['git','write-tree'],root,env).stdout.decode().strip()
+    helper_base = cmd(['git','commit-tree',tree,'-p',published,'-m','fixture helper'],root,env).stdout.decode().strip()
+    assert cmd(['git','update-ref','HEAD',helper_base],root,env).rc == 0
+    caller = root/'tests/source-closure.sh'
+    caller.write_text('#!/bin/sh\nROOT=.\n# shellcheck source=scripts/report-data.inc\n. "$ROOT/scripts/report-data.inc"\nprintf "%s\\\\n" "$REPORT_VALUE"\n')
+    helper.write_text("REPORT_VALUE='unterminated\n")
+    (root/'.shellcheckrc').write_text('this-is-not-a-valid-shellcheck-directive\n')
+    closure = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','tests/source-closure.sh'],root,env)
+    assert closure.rc == 0, (closure.stdout+closure.stderr).decode()
+    passed += 1
+    # Reverse the dirt: INDEX parse failure cannot be hidden by clean worktree.
+    assert cmd(['git','add','scripts/report-data.inc','tests/source-closure.sh'],root,env).rc == 0
+    helper.write_text('REPORT_VALUE=clean_worktree\n')
+    broken_source = cmd(['sh',str(scripts/'commit-preflight.sh')],root,env)
+    broken_text = (broken_source.stdout+broken_source.stderr).decode()
+    assert broken_source.rc == 1 and 'SC1094' in broken_text, broken_text
+    passed += 1
+    # A helper absent from INDEX must still refuse, even if worktree has it.
+    assert cmd(['git','update-index','--force-remove','--','scripts/report-data.inc'],root,env).rc == 0
+    missing_source = cmd(['sh',str(scripts/'commit-preflight.sh')],root,env)
+    missing_source_text = (missing_source.stdout+missing_source.stderr).decode()
+    assert missing_source.rc == 1 and 'SC1091' in missing_source_text, missing_source_text
     passed += 1
     print(f'commit-preflight: {passed} pass 0 fail; six-finding run {elapsed:.2f}s; total {time.monotonic()-started:.2f}s')
 finally:

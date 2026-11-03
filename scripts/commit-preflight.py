@@ -101,25 +101,46 @@ def main():
         else:
             for name, _argv in message_checks:
                 print('NOT_JUDGED ' + name + ': supply --message FILE with the planned Bead/Revert/Supersedes trailers', flush=True)
-        # ShellCheck reads the very same staged bytes, never unstaged edits.
+        # Resolve sourced helpers from the effective INDEX, including unchanged
+        # and non-.sh helpers. Cwd/source paths must never fall back to worktree.
         paths = required(['git', 'diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRT'], env).split(b'\0')
-        for raw in paths:
-            if not raw:
-                continue
-            path = os.fsdecode(raw)
-            if not path.endswith(('.sh', '.bash')):
-                continue
-            dest = scratch / 'shell' / path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(required(['git', 'show', ':' + path], env))
-            checks.append(('shellcheck:' + path, ['shellcheck', str(dest)]))
+        shell_paths = [os.fsdecode(raw) for raw in paths if raw.endswith((b'.sh', b'.bash'))]
+        shell_root = scratch / 'shell'
+        if shell_paths:
+            shell_root.mkdir()
+            required(['git', 'checkout-index', '--all', '--prefix=' + str(shell_root) + os.sep], env)
+            # A staged link must not send source resolution back to the host
+            # worktree. Missing external helpers remain genuine SC1091 errors.
+            for member in shell_root.rglob('*'):
+                if member.is_symlink() and not member.resolve().is_relative_to(shell_root):
+                    member.unlink()
+        for path in shell_paths:
+            dest = shell_root / path
+            # Keep the changed script byte-exact even if checkout filters exist.
+            if dest.is_file() and not dest.is_symlink():
+                dest.write_bytes(required(['git', 'show', ':' + path], env))
+            # Same engine, default severity and checker options as fresh-gate's
+            # focused stage. Local 0.11 misses SC2015 that pinned CI 0.9 reports.
+            # Never download during cheap feedback or silently substitute local.
+            checks.append(('shellcheck:' + path, ['docker', 'run', '--pull=never', '--rm',
+                           '-v', str(shell_root) + ':/archive:ro', '-w', '/archive',
+                           'koalaman/shellcheck:v0.9.0', '-x', '-P', '/archive', '/archive/' + path]))
         failures = 0
+        shellcheck_probe = None
         for name, argv in checks:
             print('== ' + name, flush=True)
             try:
-                result = command(argv, env)
+                if name.startswith('shellcheck:'):
+                    if shellcheck_probe is None:
+                        shellcheck_probe = command(['docker', 'image', 'inspect',
+                                                    'koalaman/shellcheck:v0.9.0', '--format', '{{.Id}}'], env)
+                    if shellcheck_probe.rc:
+                        raise RuntimeError('pinned ShellCheck unavailable: ' + shellcheck_probe.stderr.decode(errors='replace').strip())
+                result = command(argv, env, cwd=shell_root if name.startswith('shellcheck:') else None)
                 sys.stdout.write(result.stdout.decode(errors='replace'))
                 sys.stdout.write(result.stderr.decode(errors='replace'))
+                if name.startswith('shellcheck:') and result.rc not in (0, 1):
+                    raise RuntimeError('pinned ShellCheck did not judge the file (exit ' + str(result.rc) + ')')
                 if result.rc:
                     failures += 1
                     print('REFUSED ' + name + ' (exit ' + str(result.rc) + ')')
@@ -128,7 +149,8 @@ def main():
                     print('REFUSED commit-notes-delta (no added note line)')
             except (OSError, RuntimeError) as error:
                 failures += 1
-                print('UNJUDGED ' + name + ': ' + str(error))
+                remedy = '; require Docker and cached engine: docker pull koalaman/shellcheck:v0.9.0' if name.startswith('shellcheck:') else ''
+                print('UNJUDGED ' + name + ': ' + str(error) + remedy)
         print(f'commit-preflight: {len(checks)} checks, {failures} refused, {time.monotonic() - started:.2f}s; no fresh gate or tests run')
         if not args.message:
             print('commit-preflight: message-dependent checks NOT_JUDGED; this is staged-file feedback, not commit admission')
