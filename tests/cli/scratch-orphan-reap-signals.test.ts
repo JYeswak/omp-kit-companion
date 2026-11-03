@@ -4,7 +4,7 @@ import { closeSync, existsSync, openSync, unlinkSync, writeFileSync } from "node
 import { join } from "node:path";
 import { applyScratch, killOrphan } from "../../src/scratch.ts";
 import { isDead, probeIncarnationSync } from "../../src/kitlib/proc.ts";
-import { run } from "../../src/kitlib/run.ts";
+import { run, runSync } from "../../src/kitlib/run.ts";
 import { eligible, repo, runtimeFixture, scratchModule, supported } from "./scratch-orphan-reap.helpers.ts";
 
 test.skipIf(!supported)("ownership metadata changed after real TERM vetoes escalation to KILL", async () => {
@@ -30,6 +30,24 @@ test.skipIf(!supported)("unchanged abandoned interpreter ignoring TERM is revali
 		const result = killOrphan(eligible(child, fixture), fixture.deps);
 		expect(result).toMatchObject({ pid: child.pid, start: child.start, path: child.dir, ok: true, status: "terminated" });
 		expect(isDead(probeIncarnationSync(child))).toBe(true);
+	});
+}, 60000);
+
+test.skipIf(!supported)("complete directory-user evidence arriving after three seconds can still authorize the real interpreter proof", async () => {
+	await runtimeFixture(async fixture => {
+		const child = await fixture.launch("loaded-directory-probe", { inline: true });
+		const realRunner = fixture.deps.run;
+		fixture.deps.run = (args, options) => {
+			if (args[0] !== "lsof" || !args.includes("+D")) return realRunner(args, options);
+			// Deliberately exceed the old 3 s deadline before executing the real OS probe.
+			// This tests the deadline itself, not a guessed delay for interpreter readiness.
+			const out = runSync(["python3", "-c", "import os,sys,time; time.sleep(3.1); os.execvp(sys.argv[1], sys.argv[1:])", ...args], {
+				deadline_s: (options?.timeoutMs ?? 0) / 1000, max_output_bytes: 8192,
+			});
+			return { code: out.timed_out || out.truncated ? null : out.rc,
+				stdout: new TextDecoder().decode(out.stdout), stderr: new TextDecoder().decode(out.stderr) };
+		};
+		expect(eligible(child, fixture).pid).toBe(child.pid);
 	});
 }, 60000);
 

@@ -16,8 +16,12 @@ afterEach(() => {
 	for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+// Fixture setup must not invoke the operator's template hooks or signing configuration.
+const gitEnv = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0" };
+
 function git(cwd: string, ...args: string[]): string {
-	const result = runFixture(["git", "-C", cwd, ...args], { cwd, label: `git ${args[0]}` });
+	const result = runFixture(["git", "-c", "init.templateDir=", "-c", "core.hooksPath=/dev/null",
+		"-c", "commit.gpgsign=false", "-C", cwd, ...args], { cwd, env: gitEnv, label: `git ${args[0]}` });
 	if (result.rc !== 0) throw new Error(`git ${args.join(" ")} failed: ${decoder.decode(result.stderr)}`);
 	return decoder.decode(result.stdout);
 }
@@ -120,7 +124,7 @@ function fixture(): { root: string; paths: Record<string, string> } {
 function cli(root: string, args: string[], env?: Record<string, string | undefined>) {
 	const entry = resolve(import.meta.dir, "../../src/cli.ts");
 	return runFixture([process.execPath, entry, ...args], {
-		cwd: root, env: { ...process.env, HOME: root, ...env },
+		cwd: root, env: { ...gitEnv, HOME: root, ...env },
 	});
 }
 
@@ -128,7 +132,7 @@ const rowByName = (repos: Array<{ name: string }>, name: string) => repos.find((
 
 test("stranded audit emits one correctly identified row per named condition through the real CLI", async () => {
 	const f = fixture();
-	const result = cli(f.root, ["doctor", "--scope", "work", "--root", f.root, "--stranded-only", "--json"]);
+	const result = cli(f.root, ["doctor", "--scope", "work", "--root", f.root, "--jobs", "1", "--stranded-only", "--json"]);
 	expect(result.rc, decoder.decode(result.stderr)).toBe(0);
 	const envelope = JSON.parse(decoder.decode(result.stdout));
 	expect(envelope.data.scope).toBe("work");
@@ -173,7 +177,7 @@ test("stranded audit emits one correctly identified row per named condition thro
 
 test("a clean pushed repo produces no stranded row but stays visible in the full report", async () => {
 	const f = fixture();
-	const full = cli(f.root, ["doctor", "--scope", "work", "--root", f.root, "--json"]);
+	const full = cli(f.root, ["doctor", "--scope", "work", "--root", f.root, "--jobs", "1", "--json"]);
 	expect(full.rc, decoder.decode(full.stderr)).toBe(0);
 	const envelope = JSON.parse(decoder.decode(full.stdout));
 	const clean = rowByName(envelope.data.repos, "clean") as Record<string, any>;
@@ -184,19 +188,16 @@ test("a clean pushed repo produces no stranded row but stays visible in the full
 	expect(clean.dirty_file_count).toBe(0);
 }, 60_000);
 
-// Deadline derivation: the doctor run is bounded by the product, not the machine. Every Git probe
-// is SIGKILLed at the default 2000 ms, a clean repo makes two sequential probe rounds (status, log
-// and ls-files together, then rev-list), and the default fan-out is 4, so 32 repos finish within
-// ceil(32/4) x 2 x 2000 = 32 s even if every probe times out (measured 0.6 s at load 18). Setup is
-// at most the template's 8 git spawns plus 64 directory copies: 0.7-1.2 s measured at load 16-18,
-// and 2 s at the 0.25 s per spawn of the refused 421d0864 suite (245 spawns started in 60.1 s).
-// 32 s + 2 s leaves the 60 s cap 26 s for the CLI start; it no longer depends on a quiet machine.
+// Keep the product's default 2000 ms Git deadline and all 32 real repositories.
+// Scan one repo at a time: these classification tests otherwise add 12 simultaneous
+// Git children apiece to a loaded suite, making healthy clean controls time out.
+// The separate work-doctor suite still exercises bounded multi-repo concurrency.
 test("a bulk clean fleet stays measured at the default Git probe deadline", async () => {
 	const root = ownedTmp("omp-kit-work-bulk-clean", { root: runtimeTempRoot() }).path;
 	fixtures.push(root);
 	const names = Array.from({ length: 32 }, (_, index) => `clean-${index}`).sort();
 	for (const name of names) pushedRepo(root, name);
-	const result = cli(root, ["doctor", "--scope", "work", "--root", root, "--json"]);
+	const result = cli(root, ["doctor", "--scope", "work", "--root", root, "--jobs", "1", "--json"]);
 	expect(result.rc, decoder.decode(result.stderr)).toBe(0);
 	const envelope = JSON.parse(decoder.decode(result.stdout));
 	expect(envelope.data.roots[0]?.repo_count).toBe(32);
@@ -211,17 +212,24 @@ test("a bulk clean fleet stays measured at the default Git probe deadline", asyn
 }, 60_000);
 
 test("doctor --scope work --fleet uses the canonical roots and refuses scoped combinations", async () => {
-	const f = fixture();
-	const fleet = cli(f.root, ["doctor", "--scope", "work", "--fleet", "--stranded-only", "--json"], { OMP_KIT_WORK_ROOTS: f.root });
+	// Root selection needs one clean control and one stranded repo, not another eight-repo
+	// condition audit. Keep the default product probe deadline, but avoid the unnecessary
+	// process fan-out that made a clean control time out and appear stranded in the release run.
+	const root = ownedTmp("omp-kit-work-fleet-roots", { root: runtimeTempRoot() }).path;
+	fixtures.push(root);
+	pushedRepo(root, "clean");
+	const dirty = pushedRepo(root, "dirty").path;
+	writeFileSync(join(dirty, "untracked.txt"), "dirty\n");
+	const fleet = cli(root, ["doctor", "--scope", "work", "--fleet", "--jobs", "1", "--stranded-only", "--json"], { OMP_KIT_WORK_ROOTS: root });
 	expect(fleet.rc, decoder.decode(fleet.stderr)).toBe(0);
 	const envelope = JSON.parse(decoder.decode(fleet.stdout));
 	expect(envelope.data.fleet).toBe(true);
-	expect(envelope.data.roots.map((entry: { path: string }) => entry.path)).toEqual([f.root]);
-	expect(envelope.data.repos.map((entry: { name: string }) => entry.name)).not.toContain("clean");
-	const conflict = cli(f.root, ["doctor", "--scope", "work", "--fleet", "--root", f.root, "--json"], { OMP_KIT_WORK_ROOTS: f.root });
+	expect(envelope.data.roots.map((entry: { path: string }) => entry.path)).toEqual([root]);
+	expect(envelope.data.repos.map((entry: { name: string }) => entry.name)).toEqual(["dirty"]);
+	const conflict = cli(root, ["doctor", "--scope", "work", "--fleet", "--root", root, "--json"], { OMP_KIT_WORK_ROOTS: root });
 	expect(conflict.rc).toBe(2);
 	expect(decoder.decode(conflict.stdout)).toContain("CONFLICTING_FLAGS");
-	const wrongScope = cli(f.root, ["doctor", "--scope", "load", "--fleet", "--json"]);
+	const wrongScope = cli(root, ["doctor", "--scope", "load", "--fleet", "--json"]);
 	expect(wrongScope.rc).toBe(2);
 	expect(decoder.decode(wrongScope.stdout)).toContain("INVALID_FLAG");
 }, 60_000);

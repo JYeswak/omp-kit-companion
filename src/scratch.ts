@@ -1454,6 +1454,11 @@ export function listProcesses(run: ScratchRunner): OrphanProcess[] {
 }
 
 const ORPHAN_METADATA_TIMEOUT_MS = 3000;
+// LSOFLOAD1: Darwin +D took 2.30 s alone and 2.30–2.54 s with three concurrent
+// probes; 3 s made complete ownership evidence unavailable under load.
+// Allow roughly 3x the measured loaded maximum, without changing the 15 s proof
+// ceiling or accepting timed-out, warning-bearing, truncated or malformed evidence.
+const ORPHAN_DIRECTORY_TIMEOUT_MS = 8000;
 const ORPHAN_METADATA_BYTES = 256 * 1024;
 
 function orphanRead(run: ScratchRunner, args: readonly string[]): ScratchRunResult | null {
@@ -1761,7 +1766,7 @@ function inspectScratchOrphanMetadata(proc: OrphanProcess, home: string, deps: I
 /** No unregistered live/unknown process may be sharing the abandoned session either. */
 function orphanDirectoryExclusive(dir: string, pid: number, run: ScratchRunner): boolean | null {
 	let out: ScratchRunResult;
-	try { out = run(["lsof", "-nP", "+D", dir, "-F0p"], { timeoutMs: ORPHAN_METADATA_TIMEOUT_MS }); } catch { return null; }
+	try { out = run(["lsof", "-nP", "+D", dir, "-F0p"], { timeoutMs: ORPHAN_DIRECTORY_TIMEOUT_MS }); } catch { return null; }
 	// Like lsofClear/takeLsofSnapshot, status 1 can still carry complete matched records on macOS.
 	// Empty, warning-bearing, truncated or malformed observations never grant exclusivity.
 	if ((out.code !== 0 && out.code !== 1) || out.stderr !== "" || out.stdout.length >= ORPHAN_METADATA_BYTES) return null;

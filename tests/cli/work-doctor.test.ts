@@ -1,29 +1,51 @@
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { runtimeTempRoot } from "../../src/runtime.ts";
 import { inspectWorkFleet } from "../../src/work-doctor.ts";
 import { projectSlug } from "../../src/reservation-age.ts";
+import { run } from "../../src/kitlib/run.ts";
+import { runFixture } from "./fixture-process.ts";
 
+const decoder = new TextDecoder();
 const fixtures: string[] = [];
 afterEach(() => { for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
+// These are Git-state fixtures, not tests of the operator's Git template, signing, or hooks.
+const gitEnv = {
+	...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+	GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0",
+};
+
 function git(cwd: string, ...args: string[]): string {
-	const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
-	if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
-	return result.stdout.toString();
+	const result = runFixture(["git", "-c", "init.templateDir=", "-c", "core.hooksPath=/dev/null",
+		"-c", "commit.gpgsign=false", "-C", cwd, ...args], { cwd, env: gitEnv, label: `git ${args[0]}` });
+	if (result.rc !== 0) throw new Error(`git ${args.join(" ")} failed: ${decoder.decode(result.stderr)}`);
+	return decoder.decode(result.stdout);
 }
 
+// Reuse one real committed repository instead of running six init/config/add/commit
+// sequences per case. The release failure was still inside fixture()'s commit at 30 s,
+// before either CLI scan began; copied repositories keep all six classification controls.
+let template: { root: string; path: string } | null = null;
+afterAll(() => { if (template) rmSync(template.root, { recursive: true, force: true }); });
+
 function repo(root: string, name: string): string {
+	if (template === null) {
+		const templateRoot = ownedTmp("omp-kit-work-doctor-template", { root: runtimeTempRoot() }).path;
+		const templatePath = join(templateRoot, "repo");
+		mkdirSync(templatePath);
+		git(templatePath, "init", "--quiet");
+		git(templatePath, "config", "user.email", "fixture@example.invalid");
+		git(templatePath, "config", "user.name", "fixture");
+		writeFileSync(join(templatePath, "README.md"), "fixture\n");
+		git(templatePath, "add", "README.md");
+		git(templatePath, "commit", "--quiet", "-m", "initial [test]");
+		template = { root: templateRoot, path: templatePath };
+	}
 	const path = join(root, name);
-	mkdirSync(path, { recursive: true });
-	git(path, "init", "--quiet");
-	git(path, "config", "user.email", "fixture@example.invalid");
-	git(path, "config", "user.name", "fixture");
-	writeFileSync(join(path, "README.md"), `${name}\n`);
-	git(path, "add", "README.md");
-	git(path, "commit", "--quiet", "-m", "initial [test]");
+	cpSync(template.path, path, { recursive: true });
 	return path;
 }
 
@@ -98,29 +120,28 @@ test("work scope CLI renders JSON and human table while exiting zero", async () 
 	const f = fixture();
 	const entry = resolve(import.meta.dir, "../../src/cli.ts");
 	const args = [entry, "doctor", "--scope", "work", "--root", f.root, "--jobs", "6", "--timeout-ms", "1000"];
-	const json = Bun.spawnSync([process.execPath, ...args, "--json"], { cwd: f.root, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: f.root, OMP_KIT_WORK_STALE_EDIT_MINUTES: "45" } });
-	expect(json.exitCode).toBe(0);
-	const envelope = JSON.parse(json.stdout.toString());
+	const json = await run([process.execPath, ...args, "--json"], {
+		cwd: f.root, deadline_s: 20, env: { ...gitEnv, HOME: f.root, OMP_KIT_WORK_STALE_EDIT_MINUTES: "45" },
+	});
+	expect(json.rc, decoder.decode(json.stderr)).toBe(0);
+	const envelope = JSON.parse(decoder.decode(json.stdout));
 	expect(envelope.data.scope).toBe("work");
 	expect(envelope.data.stale_edit_limit_minutes).toBe(45);
 	expect(envelope.data.elapsed_ms).toBeGreaterThan(0);
-	const human = Bun.spawnSync([process.execPath, ...args], { cwd: f.root, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: f.root } });
-	expect(human.exitCode).toBe(0);
-	expect(human.stdout.toString()).toContain("RISK");
+	const human = await run([process.execPath, ...args], { cwd: f.root, deadline_s: 20, env: { ...gitEnv, HOME: f.root } });
+	expect(human.rc, decoder.decode(human.stderr)).toBe(0);
+	expect(decoder.decode(human.stdout)).toContain("RISK");
 }, 30_000);
 
-test("work scope --project overrides --root and scans only the selected repo", () => {
+test("work scope --project overrides --root and scans only the selected repo", async () => {
 	const f = fixture();
 	const target = f.repos.dirty;
 	const entry = resolve(import.meta.dir, "../../src/cli.ts");
-	const result = Bun.spawnSync([process.execPath, entry, "doctor", "--scope", "work", "--root", f.root, "--project", target, "--json"], {
-		cwd: f.root,
-		stdout: "pipe",
-		stderr: "pipe",
-		env: { ...process.env, HOME: f.root },
+	const result = await run([process.execPath, entry, "doctor", "--scope", "work", "--root", f.root, "--project", target, "--json"], {
+		cwd: f.root, deadline_s: 20, env: { ...gitEnv, HOME: f.root },
 	});
-	expect(result.exitCode, result.stderr.toString()).toBe(0);
-	const envelope = JSON.parse(result.stdout.toString());
+	expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+	const envelope = JSON.parse(decoder.decode(result.stdout));
 	expect(envelope.data.roots.map((root: { path: string }) => root.path)).toEqual([target]);
 	expect(envelope.data.repos.map((repo: { path: string }) => repo.path)).toEqual([target]);
 }, 30_000);
@@ -189,11 +210,11 @@ test("work scope reports only old dirty files with matching active reservations"
 	const beforeCli = [stalePath, freshPath, freePath].map((path) => ({ bytes: readFileSync(path), mtime: statSync(path).mtimeMs }));
 	const statusBeforeCli = git(target, "status", "--porcelain=v1");
 	const entry = resolve(import.meta.dir, "../../src/cli.ts");
-	const cli = Bun.spawnSync([process.execPath, entry, "doctor", "--scope", "work", "--root", root, "--json"], {
-		cwd: target, stdout: "pipe", stderr: "pipe", env: { ...process.env, HOME: root, OMP_KIT_WORK_STALE_EDIT_MINUTES: "45" },
+	const cli = await run([process.execPath, entry, "doctor", "--scope", "work", "--root", root, "--json"], {
+		cwd: target, deadline_s: 20, env: { ...gitEnv, HOME: root, OMP_KIT_WORK_STALE_EDIT_MINUTES: "45" },
 	});
-	expect(cli.exitCode, cli.stderr.toString()).toBe(0);
-	const envelope = JSON.parse(cli.stdout.toString());
+	expect(cli.rc, decoder.decode(cli.stderr)).toBe(0);
+	const envelope = JSON.parse(decoder.decode(cli.stdout));
 	expect(envelope.data.stale_edit_limit_minutes).toBe(45);
 	const cliRow = envelope.data.repos.find((entry: { path: string }) => entry.path === target);
 	expect(cliRow.reservation_scan_status).toBe("OK");

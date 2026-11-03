@@ -82,6 +82,18 @@ test("planted: a rule with no quiet corpus row, or a missing named test, fails",
 	expect(check(tree(), fullMap([testRow])).failures.some(f => f.startsWith("T1 ") && f.includes("FIRE_PROOF_MISSING"))).toBe(true);
 });
 
+test("isolated test registrations remain named proofs, but name prefixes do not", () => {
+	const root = tree();
+	mkdirSync(join(root, "tests"));
+	writeFileSync(join(root, "tests/x.test.ts"), 'isolatedTest("named proof", () => {});\n');
+	for (const name of ["named proof", "named"]) {
+		const proofRow = `T1\t${K("3")}\tcli\tplanning convert\ttests/x.test.ts::${name}\ttests/x.test.ts::${name}`;
+		const result = check(root, fullMap([proofRow]));
+		if (name === "named proof") expect(result.failures).toEqual([]);
+		else expect(result.failures).toContain("T1 (line 16): FIRE_PROOF_MISSING tests/x.test.ts::named");
+	}
+});
+
 test("planted: duplicate ids and a malformed header are refused", () => {
 	expect(check(tree(), fullMap([row("K1", K("1"))])).failures.some(f => f.includes("DUPLICATE_ID"))).toBe(true);
 	expect(check(tree(), "id\tguide\n").failures).toEqual(["MAP_HEADER"]);

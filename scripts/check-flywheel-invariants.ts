@@ -3,6 +3,8 @@
  * Release gate for docs/flywheel-invariants.tsv: every Agent Flywheel Guide kernel invariant
  * (1-9) and anti-pattern (5) maps to a mechanism that acts at the moment of the breach, and
  * every named mechanism and its fire/quiet proof exist in this tree. Prose is not a mechanism.
+ * Named test proofs accept test/it and planningFixture's isolatedTest registration;
+ * the complete quoted name must match, never just a prefix.
  *
  * Usage: bun scripts/check-flywheel-invariants.ts [--root DIR] [--json]
  * Exit 0 PASS, 1 FAIL (each failure names its row), 2 usage/read error.
@@ -53,7 +55,9 @@ function testExists(root: string, file: string, name: string): boolean {
 	const path = join(root, file);
 	if (!existsSync(path)) return false;
 	const source = readFileSync(path, "utf8");
-	return [`test("${name}`, `it("${name}`, `test('${name}`, `it('${name}`].some(opener => source.includes(opener));
+	// planningFixture exposes the same test registration through its isolation wrapper.
+	return ["test", "it", "isolatedTest"].some(register =>
+		['"', "'"].some(quote => source.includes(`${register}(${quote}${name}${quote}`)));
 }
 
 function symbolExists(root: string, file: string, symbol: string): boolean {
