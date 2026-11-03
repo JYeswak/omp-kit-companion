@@ -92,7 +92,7 @@ function parent(): void {
 	if (mode === "check") args.splice(args.length - 1, 0, "--capabilities", capabilitiesPath);
 	for (const knob of knobArgs) args.splice(args.length - 1, 0, "--knob", knob);
 	const childEnv: Record<string, string> = {};
-	for (const key of ["PATH", "LANG", "LC_ALL", "NO_COLOR"] as const) {
+	for (const key of ["PATH", "LANG", "LC_ALL", "NO_COLOR", "UV_THREADPOOL_SIZE", "TOKIO_WORKER_THREADS", "RAYON_NUM_THREADS"] as const) {
 		const value = process.env[key];
 		if (value !== undefined) childEnv[key] = value;
 	}

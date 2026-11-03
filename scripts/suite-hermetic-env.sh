@@ -26,6 +26,12 @@ for protected in ("GIT_DIR", "GIT_WORK_TREE", "BEADS_DB"):
 # Test activity must never enter fleet telemetry, including the inherited-env branch.
 os.environ["OMP_KIT_CC"] = "0"
 
+# RELEASE4MIN (.98): two alternating skill-set rounds measured 96.88 -> 8.68 s
+# system CPU at a budget of 4 per pool (76 -> 20 threads per inventory child).
+# Set test defaults in both environment modes; product children only forward them.
+thread_caps = {name: "4" for name in ("UV_THREADPOOL_SIZE", "TOKIO_WORKER_THREADS", "RAYON_NUM_THREADS")}
+os.environ.update(thread_caps)
+
 try:
     separator = sys.argv.index("--", 1)
 except ValueError:
@@ -55,6 +61,7 @@ reserved = {
     "OMP_KIT_DISK_OBSERVER", "KIT_TEST_LOOPBACK_PORT", "GIT_DIR", "GIT_WORK_TREE", "BEADS_DB",
     "OMP_KIT_CC",
 }
+reserved.update(thread_caps)
 for name in options.allow_env:
     if (not name or not name.isascii() or not (name[0].isalpha() or name[0] == "_")
             or any(not (char.isalnum() or char == "_") for char in name)):
@@ -243,6 +250,7 @@ env = {
     "OMP_KIT_DISK_OBSERVER": "statfs",
     "KIT_TEST_LOOPBACK_PORT": str(loopback_port),
 }
+env.update(thread_caps)
 bun_config = archive / "bunfig.toml"
 if bun_config.is_file():
     env["BUN_CONFIG_FILE"] = str(bun_config)

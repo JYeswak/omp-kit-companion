@@ -43,7 +43,8 @@ export class BundledRunInterruptedError extends Error {
 	}
 }
 
-const CHILD_ENV_KEYS = ["CI", "GITHUB_ACTIONS", "LANG", "LC_ALL", "LOGNAME", "NO_COLOR", "PATH", "SHELL", "USER"] as const;
+const CHILD_ENV_KEYS = ["CI", "GITHUB_ACTIONS", "LANG", "LC_ALL", "LOGNAME", "NO_COLOR", "PATH", "SHELL", "USER",
+	"UV_THREADPOOL_SIZE", "TOKIO_WORKER_THREADS", "RAYON_NUM_THREADS"] as const;
 const PRIVATE_DIRS = ["home", "tmp", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "bun-install"] as const;
 
 let cachedSystemTempRoots: readonly string[] | undefined;

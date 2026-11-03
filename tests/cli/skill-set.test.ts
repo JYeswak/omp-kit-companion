@@ -103,6 +103,10 @@ beforeAll(() => {
 		PATH: process.env.PATH ?? "/usr/bin:/bin", OMP: omp.launcher, OMP_BIN: omp.launcher,
 		OMP_PATH: omp.launcher, OMP_SRC: omp.source,
 	};
+	for (const key of ["UV_THREADPOOL_SIZE", "TOKIO_WORKER_THREADS", "RAYON_NUM_THREADS"] as const) {
+		const value = process.env[key];
+		if (value !== undefined) environment[key] = value;
+	}
 }, 120_000);
 
 afterAll(() => {
