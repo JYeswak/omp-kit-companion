@@ -99,9 +99,33 @@ try:
     missing_text = (missing.stdout+missing.stderr).decode()
     assert missing.rc == 1 and 'has no changelog fragment: changelog.d/demo.md' in missing_text, missing_text
     passed += 1
-    (root/'changelog.d/demo.md').write_text('- Cover the isolated preflight fixture. (ompkit-demo)\n')
+    (root/'changelog.d/demo.md').write_text('- Cover the isolated preflight fixture. (ompkit-demo)\n- Exercise the original candidate. (ompkit-demo)\n')
     covered = cmd(['sh',str(scripts/'commit-preflight.sh'),'--message',str(msg),'--files','src/probe.txt','changelog.d/demo.md'],root,env)
     assert covered.rc == 0, (covered.stdout+covered.stderr).decode()
+    passed += 1
+    # Reproduce cpf6: the old fragment exists since the release floor, but
+    # this new commit has contributed no note to it. The push delta refuses.
+    assert cmd(['git','add','src/probe.txt','changelog.d/demo.md'],root,env).rc == 0
+    tree = cmd(['git','write-tree'],root,env).stdout.decode().strip()
+    published = cmd(['git','commit-tree',tree,'-p',landing,'-F',str(msg)],root,env).stdout.decode().strip()
+    assert cmd(['git','update-ref','HEAD',published],root,env).rc == 0
+    (root/'src/probe.txt').write_text('new follow-on shipped change\n')
+    reused = cmd(['sh',str(scripts/'commit-preflight.sh'),'--message',str(msg),'--files','src/probe.txt'],root,env)
+    reused_text = (reused.stdout+reused.stderr).decode()
+    assert reused.rc == 1 and 'REFUSED commit-notes-delta' in reused_text, reused_text
+    assert 'has no changelog fragment: changelog.d/demo.md' in reused_text, reused_text
+    assert 'REFUSED commit-notes (' not in reused_text, reused_text
+    passed += 1
+    # Modifying the fragment only by deleting a line is not an added note.
+    (root/'changelog.d/demo.md').write_text('- Cover the isolated preflight fixture. (ompkit-demo)\n')
+    removed = cmd(['sh',str(scripts/'commit-preflight.sh'),'--message',str(msg),'--files','src/probe.txt','changelog.d/demo.md'],root,env)
+    removed_text = (removed.stdout+removed.stderr).decode()
+    assert removed.rc == 1 and 'no added note line' in removed_text, removed_text
+    passed += 1
+    with (root/'changelog.d/demo.md').open('a') as fragment:
+        fragment.write('- Cover the follow-on preflight change. (ompkit-demo)\n')
+    updated = cmd(['sh',str(scripts/'commit-preflight.sh'),'--message',str(msg),'--files','src/probe.txt','changelog.d/demo.md'],root,env)
+    assert updated.rc == 0, (updated.stdout+updated.stderr).decode()
     passed += 1
     print(f'commit-preflight: {passed} pass 0 fail; six-finding run {elapsed:.2f}s; total {time.monotonic()-started:.2f}s')
 finally:

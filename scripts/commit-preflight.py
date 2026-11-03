@@ -7,6 +7,7 @@ supplies planned trailers; absent it Deploy-Step is intentionally checked agains
 an empty message, so deployment obligations are discovered before composing it.
 """
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
@@ -31,6 +32,27 @@ def required(argv, env=None):
     if result.rc:
         raise RuntimeError(result.stderr.decode(errors="replace") or str(argv))
     return result.stdout
+
+
+def note_has_added_line(stdout, env):
+    """Use the native judge's selected fragment; do not reimplement bead/waiver parsing."""
+    try:
+        verdict = json.loads(stdout)
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError('native notes judge returned unreadable JSON') from error
+    if verdict.get('verdict') in ('waived', 'exempt'):
+        return True
+    fragment = verdict.get('fragment')
+    if verdict.get('verdict') != 'covered' or not isinstance(fragment, str):
+        raise RuntimeError('native notes judge returned no covered fragment')
+    stat = required(['git', 'diff', '--cached', '--numstat', '-z', 'HEAD', '--', fragment], env)
+    added = stat.split(b'\t', 1)[0]
+    if not added.isdigit():
+        raise RuntimeError('cannot read added-line count for native selected fragment ' + fragment)
+    if int(added) > 0:
+        return True
+    print('commit-notes-delta: REFUSED: ' + fragment + ' has no added note line in this commit; add the note for this change')
+    return False
 
 
 def main():
@@ -69,6 +91,13 @@ def main():
         ]
         if args.message:
             checks.extend(message_checks)
+            if command(['git', 'cat-file', '-e', 'HEAD:changelog.d'], env).rc == 0:
+                # The commit member judges since the release floor. A fragment
+                # already published after that floor cannot cover this new
+                # direct commit in the push delta. Reuse the SAME native judge
+                # with HEAD as its floor; an untouched fragment earns no credit.
+                checks.append(('commit-notes-delta', ['sh', str(HERE / 'release-notes.sh'),
+                               'fragment-for', '--message', str(message), '--base', 'HEAD']))
         else:
             for name, _argv in message_checks:
                 print('NOT_JUDGED ' + name + ': supply --message FILE with the planned Bead/Revert/Supersedes trailers', flush=True)
@@ -94,6 +123,9 @@ def main():
                 if result.rc:
                     failures += 1
                     print('REFUSED ' + name + ' (exit ' + str(result.rc) + ')')
+                elif name == 'commit-notes-delta' and not note_has_added_line(result.stdout, env):
+                    failures += 1
+                    print('REFUSED commit-notes-delta (no added note line)')
             except (OSError, RuntimeError) as error:
                 failures += 1
                 print('UNJUDGED ' + name + ': ' + str(error))
