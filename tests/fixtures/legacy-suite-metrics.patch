@@ -17,7 +17,7 @@ diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
      ".github/test-budget.json",
  )
  
-@@ -184,21 +186,39 @@ def execute(args: argparse.Namespace) -> int:
+@@ -184,21 +186,54 @@ def execute(args: argparse.Namespace) -> int:
      # The native process writes directly to a retained file, never through a
      # helper-owned pipe/sink thread: even SIGKILL of this helper cannot discard
      # bytes the native process already flushed. Exec preserves its PID/group.
@@ -50,6 +50,21 @@ diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
 +        if args.loopback_port is not None:
 +            wrapped.extend(["--loopback-port", str(args.loopback_port)])
 +        wrapped.extend(["--", *command])
++        environment = None
++        if args.isolated_home:
++            # The inherited-env wrapper still owns TMPDIR; each load copy must
++            # also own HOME/XDG without forcing the opt-in scrub/write fence.
++            home = Path(scratch) / "home"
++            home.mkdir()
++            environment = dict(os.environ, HOME=str(home))
++            for name, suffix in (("XDG_CONFIG_HOME", ".config"), ("XDG_CACHE_HOME", ".cache"),
++                                 ("XDG_DATA_HOME", ".local/share"), ("XDG_STATE_HOME", ".local/state")):
++                directory = home / suffix
++                directory.mkdir(parents=True, exist_ok=True)
++                environment[name] = str(directory)
++            config = home / ".gitconfig"
++            config.write_text("[user]\n\tname = omp-kit tests\n\temail = omp-kit-tests@example.invalid\n")
++            environment["GIT_CONFIG_GLOBAL"] = str(config)
 +        with native_log.open("wb", buffering=0) as capture:
 +            fd = capture.fileno()
 +            launcher = [
@@ -59,7 +74,7 @@ diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
 +                "os.execvp(sys.argv[2],sys.argv[2:])",
 +                str(fd), *wrapped,
 +            ]
-+            result = run(launcher, cwd=args.cwd, deadline_s=args.deadline,
++            result = run(launcher, cwd=args.cwd, env=environment, deadline_s=args.deadline,
 +                         inherit_fds=(fd,), max_output_bytes=1 << 20)
 +        if not exec_marker.is_file() or exec_marker.is_symlink():
 +            raise ValueError("suite exec boundary marker is missing")

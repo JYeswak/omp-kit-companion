@@ -143,7 +143,8 @@ jobs:
       - name: Install source-locked build dependencies
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Run affected-test selection and exact-commit fresh-gate contracts
-        run: bun test tests/cli/affected-tests.test.ts tests/cli/fresh-gate.test.ts
+        # decision: retain the split gate cases in this job; reason: preserve pre-split CI coverage; who: Main; when: 2026-11-03
+        run: bun test tests/cli/affected-tests.test.ts tests/cli/fresh-gate.test.ts tests/cli/fresh-gate-budget.test.ts tests/cli/fresh-gate-manifest.test.ts tests/cli/fresh-gate-selection.test.ts tests/cli/fresh-gate-dispatch.test.ts
 
   mac-service-contracts:
     if: github.event.repository.private == false && (github.event_name == 'push' || github.event_name == 'pull_request')
