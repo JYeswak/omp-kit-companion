@@ -87,6 +87,7 @@ export interface FlywheelContext {
 	isIdle?(): boolean;
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
 	sessionManager?: { getEntries?(): readonly unknown[] };
+	agent?: { kind: "main" | "sub" };
 }
 
 export interface FlywheelToolCallEvent {
@@ -1222,9 +1223,13 @@ function bgWaitRefusal(owner: string, detail: string): FlywheelToolCallResult {
 with a fleet identity (admissionOwner), the `wait` tool is refused, as is any blocking poll: a non-async bash
 loop (for/while/until) containing `sleep`, `sleep` totalling >= 30 s across the call, and eval/python
 `time.sleep` in a loop or totalling >= 20 s. The refusal names the next action. Async bash jobs and short
-single sleeps pass untouched, as do sessions without a fleet identity. */
-export function checkBgWait(event: FlywheelToolCallEvent, owner: string | null): FlywheelToolCallResult | undefined {
-	if (owner === null) return undefined;
+single sleeps pass untouched, as do sessions without a fleet identity and subagent sessions.
+OMP ExtensionContext.agent.kind is authoritative (not depth or inherited env):
+src/extensibility/extensions/types.ts:520-536,731-732; task/executor.ts:4663-4666.
+The session manager's parentSession is not sufficient: ordinary forks also set it
+(src/session/session-manager.ts:3944). */
+export function checkBgWait(event: FlywheelToolCallEvent, owner: string | null, ctx?: Pick<FlywheelContext, "agent">): FlywheelToolCallResult | undefined {
+	if (owner === null || ctx?.agent?.kind === "sub") return undefined;
 	const tool = typeof event.toolName === "string" ? event.toolName.toLowerCase() : "";
 	if (tool === "wait") {
 		return bgWaitRefusal(owner, "this call uses the `wait` tool.");
@@ -2495,7 +2500,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (goalEnd !== undefined) return goalEnd;
 			const noWait = checkNoWait(event, admissionOwner(env));
 			if (noWait !== undefined) return noWait;
-			const bgWait = checkBgWait(event, admissionOwner(env));
+			const bgWait = checkBgWait(event, admissionOwner(env), ctx);
 			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;

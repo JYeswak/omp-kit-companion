@@ -1373,6 +1373,23 @@ test("WAIT_REFUSED: a fleet seat's wait tool call is refused and names the next 
 	}
 });
 
+test("SUBAGENTWAIT1: inherited fleet identity allows subagent wait, not main-seat wait", async () => {
+	const cwd = freshDir(base, "bgwait-child-");
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	const event = { toolCallId: "w", toolName: "wait", input: {} };
+	for (const kind of ["sub", "main"] as const) {
+		const ctx = { ...h.ctx(cwd), agent: { kind, id: kind, name: kind, depth: 0 } };
+		const [result] = await h.emit("tool_call", event, ctx);
+		if (kind === "sub") expect(result).toBeUndefined();
+		else expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
+	}
+	// The exemption must not bypass another guard: NO_WAIT_REFUSED still owns long sleeps.
+	const [otherGuard] = await h.emit("tool_call", {
+		toolCallId: "sleep", toolName: "bash", input: { command: "sleep 600" },
+	}, { ...h.ctx(cwd), agent: { kind: "sub", id: "child", name: "child", depth: 0 } });
+	expect((otherGuard as FlywheelToolCallResult)?.reason).toContain("NO_WAIT_REFUSED");
+});
+
 test("WAIT_REFUSED: a fleet seat's sleep-poll loops, chained sleeps and time.sleep idles are refused (BGWAIT1)", async () => {
 	const cwd = freshDir(base, "bgwait-");
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
