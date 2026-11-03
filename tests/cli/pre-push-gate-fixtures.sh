@@ -69,6 +69,27 @@ create_checker_test_stubs() {
 	carry_suite_executor "$repo"
 }
 
+# Build the expensive, path-independent fixture once in the owning shell, not
+# inside mkrepo's command substitution. Clonefile copies retain independent
+# Git indexes, configs and working files; ordinary recursive copies do too on
+# filesystems without clonefile. Never hardlink mutable fixture files.
+FIXTURE_COPY=-R
+if cp -c "$KITREPO/scripts/pysafe.py" "$TMP/clonefile-probe" 2>/dev/null; then
+	FIXTURE_COPY=-cR
+fi
+copy_fixture() {
+	mkdir -p "$2" || return 1
+	cp "$FIXTURE_COPY" "$1/." "$2"
+}
+REPO_SEED="$TMP/repo-seed"
+mkdir -p "$REPO_SEED/scripts" "$REPO_SEED/var/agent-tmp"
+git -C "$REPO_SEED" init --template= -q
+git -C "$REPO_SEED" config user.email "test@example.invalid"
+git -C "$REPO_SEED" config user.name "worker-1"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$REPO_SEED/scripts/regexploit-gate.py"
+create_checker_test_stubs "$REPO_SEED"
+
+
 mkrepo() {
 	name=$1
 	base_body=$2
@@ -79,13 +100,11 @@ mkrepo() {
 	head_verdict_body=${7:-}
 	repo="$TMP/$name"
 	rm -rf "$repo"
-	mkdir -p "$repo/scripts" "$repo/var/agent-tmp"
-	git -C "$repo" init --template= -q
-	git -C "$repo" config user.email "test@example.invalid"
-	git -C "$repo" config user.name "worker-1"
+	copy_fixture "$REPO_SEED" "$repo" || exit 1
 	printf '#!/bin/sh\n%s\n' "$base_body" > "$repo/scripts/fresh-gate.sh"
-	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
-	create_checker_test_stubs "$repo" "$failing_test"
+	if [ -n "$failing_test" ]; then
+		create_checker_test_stubs "$repo" "$failing_test"
+	fi
 	if [ -n "$fixture_value" ]; then
 		printf '%s\n' "$fixture_value" > "$repo/tests/cli/runner-fixture-value"
 	fi
@@ -156,6 +175,10 @@ carry_measurement() {
 	measure_root=${1:-$KITREPO}
 	mdir=$2
 	msub=${3:-scripts}
+	if [ "$measure_root" = "$KITREPO" ] && [ "$msub" = scripts ] && [ -n "${MEASUREMENT_SEED:-}" ]; then
+		copy_fixture "$MEASUREMENT_SEED" "$mdir"
+		return $?
+	fi
 	measure_closure="$TMP/judge-closure-carry"
 	judge_closure "$measure_root" > "$measure_closure" || return 1
 	judge_closure_resolves "$measure_root" "$measure_closure" || return 1
@@ -168,6 +191,11 @@ carry_measurement() {
 		cp "$measure_root/$closure_name" "$closure_dest" || return 1
 	done < "$measure_closure"
 }
+# Snapshot only the production judging closure; foreign-root and relocated
+# closure probes still exercise the resolver/copier above without this cache.
+MEASUREMENT_SEED=
+carry_measurement "$KITREPO" "$TMP/measurement-seed" || exit 1
+MEASUREMENT_SEED="$TMP/measurement-seed"
 verdictcache() {
 	repo=$1
 	role=${2:-main}
@@ -252,16 +280,12 @@ fi
 # refused, naming the commit that added them
 stalerepo="$TMP/stale"
 rm -rf "$stalerepo"
-mkdir -p "$stalerepo/scripts" "$stalerepo/src" "$stalerepo/var/agent-tmp"
-git -C "$stalerepo" init --template= -q
-git -C "$stalerepo" config user.email "test@example.invalid"
-git -C "$stalerepo" config user.name "worker-1"
+copy_fixture "$REPO_SEED" "$stalerepo" || exit 1
+mkdir -p "$stalerepo/src"
 cp "$KITREPO/src/land-guard.ts" "$stalerepo/src/land-guard.ts"
-printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$stalerepo/scripts/regexploit-gate.py"
 printf '#!/bin/sh\nexit 0\n' > "$stalerepo/scripts/fresh-gate.sh"
 chmod +x "$stalerepo/scripts/fresh-gate.sh"
 printf 'one\n' > "$stalerepo/f.ts"
-create_checker_test_stubs "$stalerepo"
 git -C "$stalerepo" add -A
 git -C "$stalerepo" commit -qm "[test] base B"
 base=$(git -C "$stalerepo" rev-parse HEAD)
@@ -311,13 +335,8 @@ done
 # 6. planted: base archive carrying a failing doc-drift checker refuses, naming the surface
 driftrepo="$TMP/drift"
 rm -rf "$driftrepo"
-mkdir -p "$driftrepo/scripts" "$driftrepo/var/agent-tmp"
-git -C "$driftrepo" init --template= -q
-git -C "$driftrepo" config user.email "test@example.invalid"
-git -C "$driftrepo" config user.name "worker-1"
+copy_fixture "$REPO_SEED" "$driftrepo" || exit 1
 printf '#!/bin/sh\nexit 0\n' > "$driftrepo/scripts/fresh-gate.sh"
-printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$driftrepo/scripts/regexploit-gate.py"
-create_checker_test_stubs "$driftrepo"
 printf '#!/bin/sh\nprintf "doc-drift: serve|flag:--port\\n" >&2\nexit 1\n' > "$driftrepo/scripts/doc-drift-check.sh"
 git -C "$driftrepo" add -A
 git -C "$driftrepo" commit -qm "[test] base with failing drift checker"
@@ -354,12 +373,8 @@ fi
 # 8. A red former contract does not prevent a passing candidate repair.
 g2="$TMP/g2base"
 rm -rf "$g2"
-mkdir -p "$g2/scripts" "$g2/var/agent-tmp"
-git -C "$g2" init --template= -q
-git -C "$g2" config user.email "test@example.invalid"
-git -C "$g2" config user.name "worker-1"
+copy_fixture "$REPO_SEED" "$g2" || exit 1
 printf '#!/bin/sh\nexit 0\n' > "$g2/scripts/fresh-gate.sh"
-printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$g2/scripts/regexploit-gate.py"
 create_checker_test_stubs "$g2" "br-shim.test.sh"
 git -C "$g2" add -A
 git -C "$g2" commit -qm "[test] base with red br-shim contract"
@@ -393,10 +408,7 @@ fi
 # 10. GATE2 row C: green base plus a candidate that adds a vulnerable regex is refused by the base gate scripts judging the candidate tree
 g3="$TMP/g3base"
 rm -rf "$g3"
-mkdir -p "$g3/scripts" "$g3/var/agent-tmp"
-git -C "$g3" init --template= -q
-git -C "$g3" config user.email "test@example.invalid"
-git -C "$g3" config user.name "worker-1"
+copy_fixture "$REPO_SEED" "$g3" || exit 1
 printf '#!/bin/sh\nexit 0\n' > "$g3/scripts/fresh-gate.sh"
 cat > "$g3/scripts/regexploit-gate.py" <<'PYEOF'
 #!/usr/bin/env python3
@@ -409,7 +421,6 @@ bad = [p for p in changed if p.endswith(".ts") and "(a+)+b" in subprocess.run(["
 print("vulnerable: " + ", ".join(bad) if bad else "clean")
 sys.exit(1 if bad else 0)
 PYEOF
-create_checker_test_stubs "$g3"
 git -C "$g3" add -A
 git -C "$g3" commit -qm "[test] green base"
 printf 'const ok = /(a+)+b/.test(source);\n' > "$g3/evil.ts"
@@ -440,13 +451,8 @@ run_adapter_ref() {
 }
 s4="$TMP/skiproute"
 rm -rf "$s4"
-mkdir -p "$s4/scripts" "$s4/var/agent-tmp"
-git -C "$s4" init --template= -q
-git -C "$s4" config user.email "test@example.invalid"
-git -C "$s4" config user.name "worker-1"
+copy_fixture "$REPO_SEED" "$s4" || exit 1
 printf "#!/bin/sh\nprintf \"SKIPVAL=%%s\\\\n\" \"\$FRESH_GATE_SKIP_REGEX\"\n" > "$s4/scripts/fresh-gate.sh"
-printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$s4/scripts/regexploit-gate.py"
-create_checker_test_stubs "$s4"
 git -C "$s4" add -A
 git -C "$s4" commit -qm "[test] skip routing base"
 git -C "$s4" commit -qm "[test] skip routing head" --allow-empty
@@ -1005,32 +1011,30 @@ echo VERDICT-STUB-GATE
 GATE_STUB
 }
 
+# Keep the common root commit, judge and three language suites outside every
+# case's command substitution. Cases with a base input amend only their copy.
+VERDICT_SEED="$TMP/verdict-seed"
+copy_fixture "$REPO_SEED" "$VERDICT_SEED" || exit 1
+carry_measurement "$KITREPO" "$VERDICT_SEED" || exit 1
+create_verdict_gate_stub "$VERDICT_SEED"
+printf 'import { test, expect } from "bun:test";\ntest("green", () => { expect(1 + 1).toBe(2); });\n' > "$VERDICT_SEED/tests/cli/green.test.ts"
+printf '#!/bin/sh\necho shell-suite-ok\n' > "$VERDICT_SEED/tests/cli/green.test.sh"
+printf 'import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1, 1)\nif __name__ == "__main__":\n    unittest.main()\n' > "$VERDICT_SEED/tests/cli/green_test.py"
+git -C "$VERDICT_SEED" add -A
+git -C "$VERDICT_SEED" commit -qm "[test] verdict base"
+
 mkverdictrepo() {
 	name=$1
 	head_verdict_body=${2:-}
 	fixture_value=${3:-}
 	repo="$TMP/$name"
 	rm -rf "$repo"
-	mkdir -p "$repo/scripts" "$repo/tests/cli" "$repo/var/agent-tmp"
-	git -C "$repo" init --template= -q
-	git -C "$repo" config user.email "test@example.invalid"
-	git -C "$repo" config user.name "worker-1"
-	cp "$KITREPO/scripts/full-suite-verdict.sh" "$repo/scripts/full-suite-verdict.sh"
-	cp "$KITREPO/scripts/full-suite-verdict-store.py" "$repo/scripts/full-suite-verdict-store.py"
-	# The incumbent judge stages archives through its own temporary-directory helper.
-	cp "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/kitlib-tmp.sh"
-	carry_measurement "$KITREPO" "$repo"
-	create_verdict_gate_stub "$repo"
-	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
-	create_checker_test_stubs "$repo"
-	printf 'import { test, expect } from "bun:test";\ntest("green", () => { expect(1 + 1).toBe(2); });\n' > "$repo/tests/cli/green.test.ts"
-	printf '#!/bin/sh\necho shell-suite-ok\n' > "$repo/tests/cli/green.test.sh"
-	printf 'import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertEqual(1, 1)\nif __name__ == "__main__":\n    unittest.main()\n' > "$repo/tests/cli/green_test.py"
+	copy_fixture "$VERDICT_SEED" "$repo" || exit 1
 	if [ -n "$fixture_value" ]; then
 		printf '%s\n' "$fixture_value" > "$repo/tests/cli/runner-fixture-value"
+		git -C "$repo" add -A
+		git -C "$repo" commit --amend -qm "[test] verdict base"
 	fi
-	git -C "$repo" add -A
-	git -C "$repo" commit -qm "[test] verdict base"
 	printf '#!/bin/sh\necho shell-suite-ok\nprintf "extra-ok\\n"\n' > "$repo/tests/cli/extra.test.sh"
 	if [ -n "$head_verdict_body" ]; then
 		printf '#!/bin/sh\n%s\n' "$head_verdict_body" > "$repo/scripts/full-suite-verdict.sh"
@@ -1155,15 +1159,9 @@ fi
 # LAND1-H: a timed-out suite is non-pass and caches nothing, so a retry would rerun.
 hrepro="$TMP/land1h"
 rm -rf "$hrepro"
-mkdir -p "$hrepro/scripts" "$hrepro/tests/cli" "$hrepro/var/agent-tmp"
-git -C "$hrepro" init --template= -q
-git -C "$hrepro" config user.email "test@example.invalid"
-git -C "$hrepro" config user.name "worker-1"
-cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" "$KITREPO/scripts/kitlib-tmp.sh" "$hrepro/scripts/"
+copy_fixture "$REPO_SEED" "$hrepro" || exit 1
 carry_measurement "$KITREPO" "$hrepro"
 create_verdict_gate_stub "$hrepro"
-printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$hrepro/scripts/regexploit-gate.py"
-create_checker_test_stubs "$hrepro"
 printf '#!/bin/sh\necho hanging-suite-start\nsleep 120\necho hanging-suite-end\n' > "$hrepro/tests/cli/hang.test.sh"
 git -C "$hrepro" add -A
 git -C "$hrepro" commit -qm "[test] h base"
@@ -1233,23 +1231,24 @@ run_adapter_line() {
 	printf '%s\n' "$line" | (cd -- "$repo" && sh "$ADAPTER" "$@" > "$TMP/out" 2>&1)
 	printf '%s' "$?"
 }
+# A tag case owns both ends of the remote. Copying the initialized bare repo
+# preserves the real push/fetch boundary without recreating its base history.
+TAG_SEED="$TMP/tag-seed"
+copy_fixture "$REPO_SEED" "$TAG_SEED" || exit 1
+printf '#!/bin/sh\necho FRESH-GATE-RAN\n' > "$TAG_SEED/scripts/fresh-gate.sh"
+git -C "$TAG_SEED" add scripts tests
+git -C "$TAG_SEED" commit -qm "[test] tag base"
+git -C "$TAG_SEED" commit -q --allow-empty -m "[test] tag head"
+git init --template= -q --bare --initial-branch=main "$TAG_SEED.origin.git"
+git -C "$TAG_SEED" remote add origin "$TAG_SEED.origin.git"
+git -C "$TAG_SEED" push -q origin HEAD:refs/heads/main
 mktagrepo() {
 	name=$1
 	repo="$TMP/$name"
 	rm -rf "$repo" "$repo.origin.git"
-	mkdir -p "$repo/scripts" "$repo/var/agent-tmp"
-	git -C "$repo" init --template= -q
-	git -C "$repo" config user.email "test@example.invalid"
-	git -C "$repo" config user.name "worker-1"
-	printf '#!/bin/sh\necho FRESH-GATE-RAN\n' > "$repo/scripts/fresh-gate.sh"
-	printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$repo/scripts/regexploit-gate.py"
-	create_checker_test_stubs "$repo"
-	git -C "$repo" add scripts tests
-	git -C "$repo" commit -qm "[test] tag base"
-	git -C "$repo" commit -q --allow-empty -m "[test] tag head"
-	git init --template= -q --bare --initial-branch=main "$repo.origin.git"
-	git -C "$repo" remote add origin "$repo.origin.git"
-	git -C "$repo" push -q origin HEAD:refs/heads/main
+	copy_fixture "$TAG_SEED" "$repo" || exit 1
+	copy_fixture "$TAG_SEED.origin.git" "$repo.origin.git" || exit 1
+	git -C "$repo" remote set-url origin "$repo.origin.git"
 	printf '%s' "$repo"
 }
 trepo=$(mktagrepo tagpush)
