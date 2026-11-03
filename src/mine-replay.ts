@@ -1,4 +1,4 @@
-import { redactBindingFields, scrubText, REDACTED, REPLAY_GENERIC_ASSIGNMENT } from "../extensions/secret-output-guard.ts";
+import { redactBindingFields, scrubText, REDACTED, REPLAY_GENERIC_ASSIGNMENT, REPLAY_SECRET_FLAGS } from "../extensions/secret-output-guard.ts";
 import catalog from "./cc-credential-shapes.v1.json";
 import { createCcCredentialScreen } from "./cc-credentials.ts";
 
@@ -26,6 +26,7 @@ interface ReplayInput {
 	custody?: unknown;
 }
 const screen = createCcCredentialScreen(catalog);
+const SHORT_SECRET_FLAGS = [...REPLAY_SECRET_FLAGS].filter(flag => flag.length === 2 && flag[1] !== "-");
 const FIELDS = ["tool", "arguments", "cwd", "staged_paths", "diff_sha256", "message", "custody"] as const;
 const MAX_BYTES = 32 * 1024;
 
@@ -57,7 +58,29 @@ export function captureMineReplay(input: ReplayInput): MineReplay {
 		try {
 			if (Array.isArray(value)) {
 				if (value.length > 128) truncated = true;
-				return value.slice(0, 128).map(entry => visit(entry, depth + 1));
+				let hideNext = false;
+				return value.slice(0, 128).map(entry => {
+					if (hideNext) {
+						hideNext = false;
+						redacted = true;
+						if (typeof entry === "string" && entry.length > 8192) truncated = true;
+						return REDACTED;
+					}
+					if (typeof entry === "string") {
+						if (REPLAY_SECRET_FLAGS.has(entry)) hideNext = true;
+						else {
+							const equals = entry.indexOf("=");
+							const flag = equals > 0 && REPLAY_SECRET_FLAGS.has(entry.slice(0, equals))
+								? entry.slice(0, equals) : SHORT_SECRET_FLAGS.find(flag => entry.length > flag.length && entry.startsWith(flag));
+							if (flag) {
+								redacted = true;
+								if (entry.length > 8192) truncated = true;
+								return `${flag}${equals === flag.length ? "=" : ""}${REDACTED}`;
+							}
+						}
+					}
+					return visit(entry, depth + 1);
+				});
 			}
 			const out: Record<string, unknown> = Object.create(null);
 			let count = 0;

@@ -108,7 +108,7 @@ test("canonical secret policy TS Python parity screens the same complete synthet
 });
 
 test("canonical secret policy missing invalid and delete-pattern mutation never emits raw values in TS or Python", () => {
-	for (const mode of ["missing", "invalid", "delete-pattern", "delete-replay-pattern"]) {
+	for (const mode of ["missing", "invalid", "delete-pattern", "delete-replay-pattern", "delete-secret-flags"]) {
 		const root = join(scratch.path, mode);
 		mkdirSync(join(root, "src"), { recursive: true });
 		mkdirSync(join(root, "extensions"));
@@ -123,6 +123,11 @@ test("canonical secret policy missing invalid and delete-pattern mutation never 
 		if (mode === "delete-replay-pattern") {
 			const mutant = structuredClone(policy);
 			delete (mutant.replay_patterns as Partial<typeof mutant.replay_patterns>).GENERIC_ASSIGNMENT;
+			changed = mutant;
+		}
+		if (mode === "delete-secret-flags") {
+			const mutant = structuredClone(policy);
+			Reflect.deleteProperty(mutant, "secret_flags");
 			changed = mutant;
 		}
 		const policyPath = join(root, "src/secret-output-policy.v1.json");
@@ -224,4 +229,33 @@ test("canonical JS Python translation distinguishes class carets escaped carets 
 		expect(child.rc).toBe(0);
 		expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual(expected);
 	}
+});
+
+const secretFlagCases = [
+	{ argv: ["--api-key", "short-test-value"], expected: ["--api-key", "[REDACTED]"] },
+	{ argv: ["--password", "x"], expected: ["--password", "[REDACTED]"] },
+	{ argv: ["-p", "x"], expected: ["-p", "[REDACTED]"] },
+	{ argv: ["--token", "x"], expected: ["--token", "[REDACTED]"] },
+	{ argv: ["--api-key=short-test-value"], expected: ["--api-key=[REDACTED]"] },
+	{ argv: ["--password=x"], expected: ["--password=[REDACTED]"] },
+	{ argv: ["--token=x"], expected: ["--token=[REDACTED]"] },
+	{ argv: ["-px"], expected: ["-p[REDACTED]"] },
+	{ argv: ["--project", "visible-value"], expected: ["--project", "visible-value"] },
+	{ argv: ["--token"], expected: ["--token"] },
+];
+
+test("secret flags redact split attached and trailing argv in TS without consuming ordinary values", () => {
+	for (const item of secretFlagCases) {
+		const replay = captureMineReplay({ arguments: { argv: item.argv } });
+		expect(replay.arguments).toEqual({ argv: item.expected });
+		expect(replay.redacted).toBe(item.argv.some((value, index) => value !== item.expected[index]));
+	}
+});
+
+test("secret flags Python argv redaction matches TS and independent expectations", async () => {
+	const child = await runFixtureAsync(["python3", "-c",
+		"import json,sys; sys.path.insert(0,sys.argv[1]); from gate_event_replay import CredentialScreen,capture\nif sys.stdin.isatty(): raise RuntimeError('PIPE_INPUT_REQUIRED')\nrows=json.load(sys.stdin); screen=CredentialScreen(); print(json.dumps([capture({'arguments':{'argv':row}},screen)['arguments']['argv'] for row in rows]))",
+		resolve(import.meta.dir, "../../scripts")], { cwd: repository, stdin: Buffer.from(JSON.stringify(secretFlagCases.map(item => item.argv))) });
+	if (child.rc !== 0) throw new Error(`Python secret flag parity failed: ${Buffer.from(child.stderr).toString()}`);
+	expect(JSON.parse(Buffer.from(child.stdout).toString())).toEqual(secretFlagCases.map(item => item.expected));
 });

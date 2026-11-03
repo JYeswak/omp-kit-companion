@@ -32,6 +32,13 @@ class ScrubPolicy:
         if policy.get('schema_version') != 'omp-kit.secret-output-policy.v1' or not isinstance(policy.get('binding_keys'), list) or len(policy['binding_keys']) != 7 or not all(isinstance(key, str) and key for key in policy['binding_keys']):
             raise ValueError('SECRET_OUTPUT_POLICY_INVALID')
         self.binding_keys = frozenset(policy['binding_keys'])
+        secret_flags = policy.get('secret_flags')
+        if (not isinstance(secret_flags, list) or not secret_flags
+                or not all(isinstance(flag, str) and len(flag) >= 2 and flag.startswith('-') and flag != '--' and '=' not in flag and all('!' <= char <= '~' for char in flag) for flag in secret_flags)
+                or len(set(secret_flags)) != len(secret_flags)):
+            raise ValueError('SECRET_OUTPUT_POLICY_INVALID')
+        self.secret_flags = frozenset(secret_flags)
+        self.short_secret_flags = tuple(flag for flag in secret_flags if len(flag) == 2 and flag[1] != '-')
         self.patterns = {}
         for name in ('GH_CLASSIC', 'GH_FINE_GRAINED', 'HOSTS_OAUTH_TOKEN', 'SECURITY_PASSWORD'):
             spec = policy['patterns'][name]
@@ -205,7 +212,31 @@ def capture(input_value: dict, screen: CredentialScreen, *, lost: bool = False) 
         if isinstance(value, list):
             if len(value) > 128:
                 truncated = True
-            return [clean(item, depth + 1) for item in value[:128]]
+            result = []
+            hide_next = False
+            for item in value[:128]:
+                if hide_next:
+                    hide_next = False
+                    redacted = True
+                    if isinstance(item, str) and len(item) > 8192:
+                        truncated = True
+                    result.append('[REDACTED]')
+                    continue
+                if isinstance(item, str):
+                    if item in screen.scrub_policy.secret_flags:
+                        hide_next = True
+                    else:
+                        equals = item.find('=')
+                        flag = item[:equals] if equals > 0 and item[:equals] in screen.scrub_policy.secret_flags else next(
+                            (flag for flag in screen.scrub_policy.short_secret_flags if len(item) > len(flag) and item.startswith(flag)), None)
+                        if flag:
+                            redacted = True
+                            if len(item) > 8192:
+                                truncated = True
+                            result.append(flag + ('=' if equals == len(flag) else '') + '[REDACTED]')
+                            continue
+                result.append(clean(item, depth + 1))
+            return result
         if isinstance(value, dict):
             result = {}
             if len(value) > 128:

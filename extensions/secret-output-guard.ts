@@ -34,6 +34,12 @@ if (secretOutputPolicy.schema_version !== "omp-kit.secret-output-policy.v1" ||
 	!secretOutputPolicy.binding_keys.every(key => typeof key === "string" && key.length > 0)) {
 	throw new Error("SECRET_OUTPUT_POLICY_INVALID");
 }
+const secretFlags = secretOutputPolicy.secret_flags;
+if (!Array.isArray(secretFlags) || secretFlags.length === 0 ||
+	secretFlags.some(flag => typeof flag !== "string" || flag.length < 2 || !flag.startsWith("-") || flag === "--" || flag.includes("=") || [...flag].some(char => char < "!" || char > "~")) ||
+	new Set(secretFlags).size !== secretFlags.length) throw new Error("SECRET_OUTPUT_POLICY_INVALID");
+export const REPLAY_SECRET_FLAGS: ReadonlySet<string> = new Set(secretFlags);
+
 function policyPattern(name: keyof typeof secretOutputPolicy.patterns): RegExp {
 	const spec = secretOutputPolicy.patterns?.[name];
 	if (!spec || typeof spec.pattern !== "string" || typeof spec.flags !== "string" || !spec.flags.includes("g")) throw new Error("SECRET_OUTPUT_POLICY_INVALID");

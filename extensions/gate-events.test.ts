@@ -3,6 +3,7 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gateEventsPath, gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
+import { captureMineReplay } from "../src/mine-replay.ts";
 
 const base = ownedTmp("gate-events").path;
 afterAll(() => rmSync(base, { recursive: true, force: true }));
@@ -81,4 +82,13 @@ test("recordGateEvent scrubs bounded metadata including unexpected credential-sh
 	expect(row.metadata_truncated).toBe(true);
 	expect(row.target).not.toBe(sentinel);
 	expect(row.event_id).not.toBe(sentinel);
+});
+
+test("recordGateEvent rescreens split secret flags in untrusted retained argv", async () => {
+	const path = join(base, "split-flags.jsonl");
+	const replay = { ...captureMineReplay({ arguments: {} }), arguments: { argv: ["--api-key", "short-test-value", "--password=x", "-px", "--project", "visible-value", "--token"] } };
+	await recordGateEvent({ seat: null, act: "commit", target: null, gate: "fixture", kind: "refuse", replay }, { path });
+	const row = JSON.parse(readFileSync(path, "utf8"));
+	expect(row.replay.arguments.argv).toEqual(["--api-key", "[REDACTED]", "--password=[REDACTED]", "-p[REDACTED]", "--project", "visible-value", "--token"]);
+	expect(row.replay.redacted).toBe(true);
 });
