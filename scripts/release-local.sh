@@ -124,6 +124,17 @@ for tool in git gh jq python3 bun shasum codesign xcrun security spctl ditto plu
 	command -v "$tool" >/dev/null || die "missing tool: $tool"
 done
 bounded 60 gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is not authenticated to github.com"
+# RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34: fail fast on big gates). The ci-only stage runs the
+# packaged ladder through `omp-kit heavy`; when heavy work cannot be admitted (disk, load, slots) it waits queued
+# until package-release.test.ts hits its 900 s budget (0.2.86 dry run, 2026-11-03). Ask the same gate now, in seconds.
+if command -v omp-kit >/dev/null; then
+	admit_rc=0
+	admit_out="$(bounded 60 omp-kit heavy --no-wait --label release-preflight -- true 2>&1)" || admit_rc=$?
+	[ "$admit_rc" -ne 75 ] || die "heavy work cannot be admitted now, so the ci-only stage would time out queued; fix this first: $(printf '%s' "$admit_out" | tail -n 3)"
+	[ "$admit_rc" -eq 0 ] || die "heavy admission probe failed (rc $admit_rc): $(printf '%s' "$admit_out" | tail -n 3)"
+else
+	echo "release-local: no omp-kit on PATH; heavy admission probe skipped" >&2
+fi
 bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "git fetch origin main failed"
 MAIN="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"
 if [ -z "$SOURCE" ]; then SOURCE="$MAIN"; fi
@@ -331,30 +342,35 @@ git -C "$SRC" -c init.defaultBranch=main init -q ||
 bounded 120 git -C "$SRC" fetch -q --depth 1 "$ROOT" "$SOURCE" ||
 	die "ci-only-local fetch of $SOURCE failed; refusing release"
 SRC_REAL="$(cd "$SRC" && pwd -P)" || die "ci-only-local cannot resolve $SRC; refusing release"
-# ci_only_refuse NAME: $WORK is removed on exit, so the refusal must carry the failure itself. On
+# ci_only_show NAME: $WORK is removed on exit, so the refusal must carry the failure itself. On
 # 2026-10-31 the 0.2.81 refusal pointed at a deleted stderr file and cost a full reproduction run.
-ci_only_refuse() {
-	echo "release-local: $1 output (last 60 lines of stderr, then stdout):" >&2
+ci_only_show() {
+	echo "release-local: $1 FAIL; output (last 60 lines of stderr, then stdout):" >&2
 	tail -n 60 "$WORK/ci-only-$1.stderr" >&2 || true
 	tail -n 20 "$WORK/ci-only-$1.stdout" >&2 || true
-	die "$1.test.ts FAIL on the release source; refusing release"
 }
 # RELSPEED1 (ompkit-774u.72): the two files are independent (separate fixtures under their own
 # owned TMPDIRs), so they run side by side; measured serially on 0.2.81 the stage took 606 s.
 # AUTOCUT1 (ompkit-2uubn): the same 120 s per-test budget the full suite runs with (--timeout=120000);
 # bun's 5 s default refused the 0.2.83 cut on a 5001 ms package-release case at load 20+.
-(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" timeout 900 bun test --timeout=120000 tests/cli/package-release.test.ts \
+# RELFAILFAST1 (Joshua J-2026-11-03-34): the packaged ladder queues in `omp-kit heavy` for up to 900 s by default,
+# the same as package-release's whole budget, so a held queue surfaced only as a test timeout. Cap the wait at 180 s:
+# a queue that does not clear by then fails naming disk, load or slots (needs a source with the cap; older ignore it).
+(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" OMP_KIT_HEAVY_MAX_WAIT_S=180 timeout 900 bun test --timeout=120000 tests/cli/package-release.test.ts \
 	</dev/null >"$WORK/ci-only-package-release.stdout" 2>"$WORK/ci-only-package-release.stderr") &
 CI_PIDS="$!"
-(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" timeout 2400 bun test --timeout=120000 tests/cli/kit-update.test.ts \
+(cd "$SRC_REAL" && OMP_KIT_CASE_CWD="$SRC_REAL" OMP_KIT_HEAVY_MAX_WAIT_S=180 timeout 2400 bun test --timeout=120000 tests/cli/kit-update.test.ts \
 	</dev/null >"$WORK/ci-only-kit-update.stdout" 2>"$WORK/ci-only-kit-update.stderr") &
 CI_PIDS="$CI_PIDS $!"
 ci_pkg_rc=0; ci_upd_rc=0
 wait "${CI_PIDS%% *}" || ci_pkg_rc=$?
 wait "${CI_PIDS##* }" || ci_upd_rc=$?
 CI_PIDS=''
-[ "$ci_pkg_rc" -eq 0 ] || ci_only_refuse package-release
-[ "$ci_upd_rc" -eq 0 ] || ci_only_refuse kit-update
+# RELFAILFAST1 (Joshua J-2026-11-03-34): show every failing file before refusing, so one run reports them all.
+ci_failed=''
+[ "$ci_pkg_rc" -eq 0 ] || { ci_only_show package-release; ci_failed="$ci_failed package-release.test.ts"; }
+[ "$ci_upd_rc" -eq 0 ] || { ci_only_show kit-update; ci_failed="$ci_failed kit-update.test.ts"; }
+[ -z "$ci_failed" ] || die "FAIL on the release source:$ci_failed; refusing release"
 say "ci-only-local PASS"
 
 receipt() {

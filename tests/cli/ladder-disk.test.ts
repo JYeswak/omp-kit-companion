@@ -27,6 +27,14 @@ test("SAVEFIRST1: sanitizedEnv carries only valid disk observers into the isolat
 	expect("OMP_KIT_DISK_OBSERVER" in sanitizedEnv(identity, { OMP_KIT_DISK_OBSERVER: "" }, "/private")).toBe(false);
 });
 
+test("RELFAILFAST1: sanitizedEnv carries only a whole-seconds heavy wait cap into the isolated run", () => {
+	expect(sanitizedEnv(identity, { OMP_KIT_HEAVY_MAX_WAIT_S: "120" }, "/private").OMP_KIT_HEAVY_MAX_WAIT_S).toBe("120");
+	expect("OMP_KIT_HEAVY_MAX_WAIT_S" in sanitizedEnv(identity, {}, "/private")).toBe(false);
+	expect("OMP_KIT_HEAVY_MAX_WAIT_S" in sanitizedEnv(identity, { OMP_KIT_HEAVY_MAX_WAIT_S: "2m" }, "/private")).toBe(false);
+	expect("OMP_KIT_HEAVY_MAX_WAIT_S" in sanitizedEnv(identity, { OMP_KIT_HEAVY_MAX_WAIT_S: "12345" }, "/private")).toBe(false);
+	expect("OMP_KIT_HEAVY_MAX_WAIT_S" in sanitizedEnv(identity, { OMP_KIT_HEAVY_MAX_WAIT_S: "" }, "/private")).toBe(false);
+});
+
 test("SAVEFIRST1: the gate exports the statfs observer for everything under it", () => {
 	const source = readFileSync(gate, "utf8");
 	expect(source).toContain("export OMP_KIT_DISK_OBSERVER=statfs");

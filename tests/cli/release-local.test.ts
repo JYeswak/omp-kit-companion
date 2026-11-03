@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
-import { cpSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 afterAll(cleanupAllOwnedTmp);
 
@@ -104,6 +105,44 @@ test("release gate refuses a kit rule with its fire fixture removed", () => {
 		const negative = run(mutated);
 		expect(negative.exitCode).not.toBe(0);
 		expect(negative.stdout.toString() + negative.stderr.toString()).toContain("COVERAGE kit-tool-result-is-not-json");
+	} finally {
+		rmSync(work, { recursive: true, force: true });
+	}
+});
+
+// RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34): heavy admission is asked in preflight, in seconds,
+// instead of being discovered by the ci-only stage's 900 s timeout. Stubs: gh (authenticated), omp-kit (admission),
+// git (records the fetch and fails it, so a passing probe stops right after preflight's next step).
+test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at once when heavy work cannot be admitted", async () => {
+	const work = realpathSync(ownedTmp("relfailfast", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+	const bin = join(work, "bin");
+	mkdirSync(bin);
+	const stub = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, name), 0o755); };
+	stub("gh", "exit 0");
+	stub("git", `echo called >> "${join(work, "git-called")}"; exit 1`);
+	const attempt = async (admission: number) => {
+		stub("omp-kit", admission === 75 ? "echo 'heavy: waiting: disk low: sbh check --need 10G reports pressure' >&2; exit 75" : "exit 0");
+		rmSync(join(work, "git-called"), { force: true });
+		const started = Date.now();
+		const env: Record<string, string> = {};
+		for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
+		const result = await run(["bash", join(ROOT, "scripts/release-local.sh"), "--dry-run", "--version", "9.9.9"], {
+			deadline_s: 60, cwd: ROOT, env: { ...env, PATH: `${bin}:${env.PATH ?? ""}`, TMPDIR: work },
+		});
+		return { rc: result.rc, err: new TextDecoder().decode(result.stderr), ms: Date.now() - started, gitCalled: existsSync(join(work, "git-called")) };
+	};
+	try {
+		const held = await attempt(75);
+		expect(held.rc, held.err).toBe(4);
+		expect(held.err).toContain("heavy work cannot be admitted now");
+		expect(held.err).toContain("disk low");
+		expect(held.gitCalled).toBe(false);
+		expect(held.ms).toBeLessThan(10_000);
+		// Control: with admission available, preflight passes the probe and reaches its next step (the stubbed fetch).
+		const admitted = await attempt(0);
+		expect(admitted.rc, admitted.err).toBe(4);
+		expect(admitted.err).toContain("git fetch origin main failed");
+		expect(admitted.gitCalled).toBe(true);
 	} finally {
 		rmSync(work, { recursive: true, force: true });
 	}

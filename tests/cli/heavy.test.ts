@@ -446,6 +446,33 @@ test("a waiting job reports position, running jobs and the contention reason", a
 	expect(result.stderr).toContain("deferred:");
 });
 
+// RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34): a caller with a short budget caps the queue wait, so a
+// held queue is named in seconds instead of surfacing as the caller's own timeout (0.2.86: a 900 s ladder test against
+// the 900 s default queue wait).
+test("RELFAILFAST1 OMP_KIT_HEAVY_MAX_WAIT_S defers a held job at the cap, below load.json's wait", async () => {
+	const root = fixture();
+	// load.json allows a 600 s wait; only the 2 s cap can end the queue inside this test's 60 s budget.
+	configure(root, { slots: 2, max_wait_s: 600 });
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--label", "capped", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ OMP_KIT_HEAVY_FAKE_LOAD1: "9999", OMP_KIT_HEAVY_MAX_WAIT_S: "2" });
+	expect(result.code).toBe(75);
+	expect(result.stderr).toContain("deferred:");
+	expect(result.stderr).toContain("deferred: queue timeout");
+	expect(result.stderr).toContain("LOAD1");
+	expect(existsSync(marker)).toBe(false);
+}, 60000);
+
+test("RELFAILFAST1 an invalid OMP_KIT_HEAVY_MAX_WAIT_S refuses before running anything", async () => {
+	const root = fixture();
+	const marker = join(root, "should-not-run");
+	const result = await invoke(root, ["heavy", "--label", "bad-cap", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ OMP_KIT_HEAVY_MAX_WAIT_S: "2m" });
+	expect(result.code).toBe(2);
+	expect(result.stderr).toContain("OMP_KIT_HEAVY_MAX_WAIT_S must be whole seconds");
+	expect(existsSync(marker)).toBe(false);
+});
+
 test("GITHUB_ACTIONS=true bypasses LOAD1 and starts the command", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 1 });

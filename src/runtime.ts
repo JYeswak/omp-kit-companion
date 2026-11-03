@@ -135,6 +135,9 @@ export function sanitizedEnv(
 	// nested inside `test --full`; only the three heavy observers cross the boundary, so a
 	// typo can never smuggle an arbitrary value into the isolated run.
 	if (inherited.OMP_KIT_DISK_OBSERVER === "statfs" || inherited.OMP_KIT_DISK_OBSERVER === "sbh" || inherited.OMP_KIT_DISK_OBSERVER === "auto") env.OMP_KIT_DISK_OBSERVER = inherited.OMP_KIT_DISK_OBSERVER;
+	// RELFAILFAST1 (ompkit-fp72.120.16.104): the release's queue-wait cap must reach the packaged ladder inside
+	// `test --full`; only whole seconds cross, so nothing arbitrary is smuggled in.
+	if (inherited.OMP_KIT_HEAVY_MAX_WAIT_S !== undefined && /^[0-9]{1,4}$/.test(inherited.OMP_KIT_HEAVY_MAX_WAIT_S)) env.OMP_KIT_HEAVY_MAX_WAIT_S = inherited.OMP_KIT_HEAVY_MAX_WAIT_S;
 	const sourceCache = ompSourceCacheRoot(inherited);
 	if (sourceCache) env.OMP_KIT_OMP_SRC_CACHE = resolve(sourceCache);
 	env.HOME = join(privateRoot, "home");

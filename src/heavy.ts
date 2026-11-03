@@ -324,6 +324,19 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		process.stderr.write(`heavy: ${source} must be "statfs", "sbh" or "auto", got "${override}"; no command was run\n`);
 		return 2;
 	}
+	// RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34): OMP_KIT_HEAVY_MAX_WAIT_S caps the queue wait for a
+	// caller whose own budget is shorter than the default. The release's packaged ladder had a 900 s test budget against
+	// the 900 s default queue wait, so a held queue surfaced only as that test's timeout. It only lowers the wait; a value
+	// that is not 0-9999 whole seconds refuses loudly (exit 2), never silently changes admission.
+	const envMaxWait = process.env.OMP_KIT_HEAVY_MAX_WAIT_S;
+	let waitCapS: number | null = null;
+	if (envMaxWait !== undefined && envMaxWait !== "") {
+		if (!/^[0-9]{1,4}$/.test(envMaxWait)) {
+			process.stderr.write(`heavy: OMP_KIT_HEAVY_MAX_WAIT_S must be whole seconds 0..9999, got "${envMaxWait}"; no command was run\n`);
+			return 2;
+		}
+		waitCapS = Number(envMaxWait);
+	}
 	// A caller-selected statfs observer makes the physical 10 GiB verdict
 	// authoritative; the later check still refuses low or unavailable capacity.
 	const staged = admitDiskWork("heavy", process.cwd(), { allowLowPercentForStatfs: override === "statfs" });
@@ -374,7 +387,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		return 1;
 	}
 
-	const deadline = Date.now() + config.max_wait_s * 1000;
+	const deadline = Date.now() + (waitCapS === null ? config.max_wait_s : Math.min(config.max_wait_s, waitCapS)) * 1000;
 	let nextStatus = 0;
 	let signal: HeavySignal | null = null;
 	let child: HeavyChild | undefined;
