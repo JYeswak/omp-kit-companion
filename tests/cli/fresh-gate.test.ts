@@ -34,6 +34,17 @@ function fixture(): string {
 // itself with its own sbh stand-in.
 const SKIP_BUDGET = { FRESH_GATE_SKIP_REGEX: "manifest fixture does not assess regex cost" };
 function manifestTestEnv(dir: string): Record<string, string> {
+	// Full-suite exports have no predecessor history. Give this manifest-only
+	// fixture its own real baseline so the next gate phase reaches the Bun
+	// stop marker without weakening production's missing-baseline refusal.
+	const repo = candidateRepo({ dir, env: {} });
+	mkdirSync(join(repo, ".github"));
+	cpSync(join(root, ".github/test-budget.json"), join(repo, ".github/test-budget.json"));
+	const identity = ["-c", "user.name=fresh-gate test", "-c", "user.email=fresh-gate@example.invalid", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"];
+	for (const args of [["add", ".github/test-budget.json"], [...identity, "commit", "-q", "-m", "[test] manifest budget baseline"], [...identity, "commit", "-q", "--allow-empty", "-m", "[test] manifest candidate"]]) {
+		const result = runSync(["git", "-C", repo, ...args], { deadline_s: 10 });
+		if (result.rc !== 0) throw new Error(`manifest budget baseline: ${new TextDecoder().decode(result.stderr)}`);
+	}
 	const fakeBin = join(dir, "bin");
 	mkdirSync(fakeBin);
 	const fakeBun = join(fakeBin, "bun");
@@ -49,7 +60,7 @@ esac
 	chmodSync(fakeBun, 0o755);
 	writeFileSync(join(fakeBin, "sbh"), "#!/bin/sh\nexit 0\n");
 	chmodSync(join(fakeBin, "sbh"), 0o755);
-	return { ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}` };
+	return { ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FRESH_GATE_REPO: repo };
 }
 
 
