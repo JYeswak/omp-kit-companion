@@ -17,7 +17,7 @@ diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
      ".github/test-budget.json",
  )
  
-@@ -184,21 +186,39 @@ def execute(args: argparse.Namespace) -> int:
+@@ -188,22 +190,40 @@ def execute(args: argparse.Namespace) -> int:
      # The native process writes directly to a retained file, never through a
      # helper-owned pipe/sink thread: even SIGKILL of this helper cannot discard
      # bytes the native process already flushed. Exec preserves its PID/group.
@@ -43,6 +43,7 @@ diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
 -    exec_ns = started_ns
 -    finished_ns = time.time_ns()
 -    finished_ms = finished_ns // 1_000_000
+-    load_1m_end = sample_load()
 +        # Tern-backed tests need their OMP source cache despite the isolated suite HOME.
 +        # The suite fence still denies writes outside its scratch and archive.
 +        if os.environ.get("OMP_KIT_OMP_SRC_CACHE"):
@@ -66,6 +67,7 @@ diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
 +        exec_ns = int(exec_marker.read_text().strip())
 +        finished_ns = time.time_ns()
 +        finished_ms = finished_ns // 1_000_000
++        load_1m_end = sample_load()
 +        if exec_ns < started_ns or finished_ns < exec_ns:
 +            raise ValueError("suite exec boundary timestamps are out of order")
      after = resource.getrusage(resource.RUSAGE_CHILDREN)
