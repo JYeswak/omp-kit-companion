@@ -8,7 +8,10 @@ import { LIVE_READBACK_LABEL, expectedOf, liveReadback, liveReadbackAll, parseBo
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
-jest.setTimeout(15_000);
+import { fixtureDeadlineS } from "./fixture-process.ts";
+// This bounds fixture Git initialization/publication and verification subprocesses,
+// not a product latency contract; retain the 15-second floor and account for load.
+jest.setTimeout(fixtureDeadlineS(15) * 1_000);
 
 /** Test bases live where the ambient br authority permits writes: a grading
  * harness designates GRADE_WAVE_SCRATCH, otherwise the default TMPDIR root. */
@@ -21,7 +24,7 @@ const base = testBase("verify-test");
 const cliPath = join(import.meta.dir, "..", "..", "src", "cli.ts");
 
 async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {
-	const r = await run(cmd, { cwd, deadline_s: 60, env: env ? { ...process.env, ...env } as Record<string, string> : undefined });
+	const r = await run(cmd, { cwd, deadline_s: fixtureDeadlineS(60), env: env ? { ...process.env, ...env } as Record<string, string> : undefined });
 	if (r.rc !== 0) throw new Error(`${cmd.join(" ")} -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);
 	return new TextDecoder().decode(r.stdout);
 }
@@ -100,7 +103,7 @@ test("VERIFYDEDUP1: runs each distinct replay command once and judges every box 
 	let seenProgress = "";
 	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--export", sha, "--project", dir, "--actor", "Peer", "--dry-run", "--json"], {
 		cwd: base,
-		deadline_s: 10,
+		deadline_s: fixtureDeadlineS(10),
 		env: { ...process.env, ...br.env, VERIFY_SHARED_COUNT: sharedCount, VERIFY_DISTINCT_COUNT: distinctCount, VERIFY_RELEASE: release },
 		on_output: (stream, chunk) => {
 			if (stream !== "stderr" || released) return;
@@ -216,7 +219,7 @@ test("expectedOf reads only the outcome right after the first backticked span, n
 });
 
 test("the verify handler is registered at module load (planted: a registration left inside another function is HANDLER_UNAVAILABLE)", async () => {
-	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--json"], { cwd: base, deadline_s: 120 });
+	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--json"], { cwd: base, deadline_s: fixtureDeadlineS(120) });
 	const text = new TextDecoder().decode(r.stdout) + new TextDecoder().decode(r.stderr);
 	expect(text).not.toContain("HANDLER_UNAVAILABLE");
 	expect(text).toContain("--export");
@@ -333,7 +336,7 @@ test("planted: a failing reviewer-gate report fails the close as REWORK naming t
 
 async function brun(args: string[], cwd: string, env?: Record<string, string>): Promise<{ rc: number | null; out: string }> {
 	const merged = { ...process.env, ...(env ?? {}) } as Record<string, string>;
-	const r = await run(["br", ...args], { cwd, deadline_s: 60, env: merged });
+	const r = await run(["br", ...args], { cwd, deadline_s: fixtureDeadlineS(60), env: merged });
 	return { rc: r.rc, out: new TextDecoder().decode(r.stdout) + new TextDecoder().decode(r.stderr) };
 }
 
@@ -343,7 +346,7 @@ async function tracker(name: string): Promise<{ dir: string; db: string }> {
 	mkdirSync(dir, { recursive: true });
 	const env = { ...process.env } as Record<string, string>;
 	delete env.BEADS_DB;
-	const r = await run(["br", "init", "--db", join(dir, ".beads", "beads.db")], { cwd: dir, deadline_s: 60, env });
+	const r = await run(["br", "init", "--db", join(dir, ".beads", "beads.db")], { cwd: dir, deadline_s: fixtureDeadlineS(60), env });
 	if (r.rc !== 0) throw new Error(`br init -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);
 	return { dir, db: join(dir, ".beads", "beads.db") };
 }
@@ -645,7 +648,7 @@ test("VERIFYENV1: missing linked OMP identity preserves review state and accepta
 	expect(mixedFailure.code).toBe("REWORK");
 	expect((await row(t, mixed)).status).toBe("rework");
 	expect(mixedFailure.log).toContain("AssertionError");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("VERIFYACTOR1 [a]: explicit-author refusal and dry-run leave fixture state and audit untouched", async () => {
 	const { dir: cdir, sha } = await repo("actoruntouched");
@@ -681,7 +684,7 @@ test("VERIFYACTOR1 [a]: intake refusal binds the reviewer on the open/needs-inta
 	expect(res.acts).toEqual([["br", "update", id, "--status", "open", "--add-label", "needs-intake", "--actor", REVIEWER]]);
 	// verifyBead returns intake acts for the operator; execute them as the operator would, then prove durable reviewer binding.
 	for (const a of res.acts) {
-		const r = await run(a, { cwd: cdir, deadline_s: 60, env: envT });
+		const r = await run(a, { cwd: cdir, deadline_s: fixtureDeadlineS(60), env: envT });
 		if (r.rc !== 0) throw new Error(`intake act -> ${r.rc}`);
 	}
 	const afterEvents = await auditActors(t, id);
@@ -733,7 +736,7 @@ test("VERIFYSCRATCH1: a replay's fixture tracker under $GRADE_WAVE_SCRATCH is ad
 	]);
 	expect(existsSync(join(outside, "direct", ".beads", "beads.db"))).toBe(false);
 	expect(stateHash(t)).toBe(beforeHash);
-}, 30_000);
+}, fixtureDeadlineS(30) * 1_000);
 
 /** br's own close policy, as the omp-kit tracker runs it: a close needs every acceptance box ticked and one reviewer. */
 const CLOSE_POLICY = [
@@ -816,7 +819,7 @@ test("CLOSEPASS1: two passing [build] boxes and an unticked [live] box close und
 	expect((await row(t, allLive)).status).toBe("in_review");
 	const children = JSON.parse((await brun(["list", "--status", "all", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json"], t.dir, env)).out) as { issues?: unknown[] } | unknown[];
 	expect((Array.isArray(children) ? children : children.issues ?? []).length).toBe(1);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 test("CLOSEPASS1: a commandless [v][build] judgement stays on the parent when executable build boxes pass", async () => {
 	const code = await repo("closepass-v-build");
 	const t = await policyTracker("closepass-v-build-t");
@@ -836,7 +839,7 @@ test("CLOSEPASS1: a commandless [v][build] judgement stays on the parent when ex
 	expect(parent.acceptance_criteria).toBe(acceptance);
 	const children = JSON.parse((await brun(["list", "--status", "all", "--label", LIVE_READBACK_LABEL, "--limit", "0", "--json"], t.dir, env)).out) as { issues?: unknown[] } | unknown[];
 	expect(Array.isArray(children) ? children : children.issues ?? []).toHaveLength(0);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("CLOSEPASS1 no active parent: the child goes under the constraint lane's parent and the close reason says so; with no readable lane parent the bead stays PENDING and nothing is written", async () => {
 	const code = await repo("closepass-lane");
@@ -854,7 +857,7 @@ test("CLOSEPASS1 no active parent: the child goes under the constraint lane's pa
 	expect(res.code).toBe("CLOSED");
 	expect(await row(t, res.child!)).toMatchObject({ status: "open", parent: lane, labels: [LIVE_READBACK_LABEL] });
 	expect(JSON.stringify(await row(t, id))).toContain(`(LIVEREADBACK, child of lane parent ${lane}, because ${id} has no active parent, related to ${id})`);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("CLOSEPASS1.live: --live-readback runs only the child's boxes on the installed tree; a pass ticks them and closes the child", async () => {
 	const code = await repo("closepass-live");
@@ -867,7 +870,7 @@ test("CLOSEPASS1.live: --live-readback runs only the child's boxes on the instal
 	expect(await row(t, child)).toMatchObject({ status: "closed", acceptance_criteria: "- [x] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass" });
 	expect((await row(t, id)).status).toBe("closed");
 	expect((await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t) })).code).toBe("NOT_LIVE_READBACK");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("CLOSEPASS1.live planted: a failing live box reopens the parent with REWORK naming the box, and the child stays open", async () => {
 	const code = await repo("closepass-livefail");
@@ -883,7 +886,7 @@ test("CLOSEPASS1.live planted: a failing live box reopens the parent with REWORK
 	// The child hangs off the active epic, not the reopened bead, so the readback never holds the bead's next close.
 	expect(await row(t, child)).toMatchObject({ status: "open", parent: epic });
 	expect(JSON.stringify((await row(t, id)).dependents ?? [])).not.toContain("parent-child");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("CLOSEPASS1.all: --live-readback --all visits exactly the open live-readback children, and no others", async () => {
 	const code = await repo("closepass-all");
@@ -902,7 +905,7 @@ test("CLOSEPASS1.all: --live-readback --all visits exactly the open live-readbac
 	expect(res.visited).not.toContain(other);
 	expect(res.results.map(r => [r.bead, r.code])).toEqual([[open.child, "CLOSED"]]);
 	expect(res.ok).toBe(true);
-}, 180_000);
+}, fixtureDeadlineS(180) * 1_000);
 
 test("VERIFYSCRATCH1.exportroot: the export carries var/agent-tmp (gitignored, so absent from git archive) and KITLIB_TMP_ROOT names it; planted: without the dir kitlib scratch under the repo root fails NotADirectoryError", async () => {
 	const dir = join(base, "exportroot");
