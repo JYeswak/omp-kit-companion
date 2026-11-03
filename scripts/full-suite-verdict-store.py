@@ -612,13 +612,24 @@ def command_identity(args: argparse.Namespace, judge_root: Path) -> tuple[str, s
     return checks, runtime
 
 
-# CIONLY1 (Joshua J-2026-11-03-34): the two files gate-ci-only.tsv keeps out of the full suite are judged at push time.
-# release-local's ci-only-local stage ran them against the exact source export on every cut, after build, sign and
-# notarize (bounds 900/2400 s). release-verdict.sh now runs them (run-ci-only) against its own export of the exact
-# commit, prepared as release-local prepares it, and records the result beside the full-suite verdicts; release-local
-# reads it back (require-ci-only-pass) and runs the files only without a matching PASS. The spec, the full judge
-# identity and both files' bytes make up the record's checks digest, so changing any of them orphans old records.
-CI_ONLY_FILES = (("tests/cli/package-release.test.ts", 900), ("tests/cli/kit-update.test.ts", 2400))
+# CIONLY1: push-time CI-only evidence covers every locally runnable exclusion, including split live journeys.
+# The spec, complete judge identity and every selected file's bytes bind the record; selection changes orphan PASS.
+# Keep the existing base-file bounds. New journey bounds retain their 900 s test budget: observed N+2 196.62 s,
+# compiled 360.52 s, relink 216.11 s, package-live 120.18 s at load 10->40 (at least 2.49x measured headroom).
+CI_ONLY_FILES = (
+    ("tests/cli/package-release.test.ts", 900),
+    ("tests/cli/kit-update.test.ts", 2400),
+    ("tests/cli/kit-update-nplus-two.test.ts", 900),
+    ("tests/cli/kit-update-compiled.test.ts", 900),
+    ("tests/cli/kit-update-relink.test.ts", 900),
+    ("tests/cli/package-release-live.test.ts", 900),
+)
+CI_ONLY_GITHUB_ONLY = {
+    "tests/cli/external-live.test.ts":
+        "GitHub core suite owns the relocated OMP live proof; dev-Mac exports have a known fast-tier diff.",
+    "tests/fleet-guard/reservations.live.test.ts":
+        "Explicit CI live Agent Mail suite needs 127.0.0.1:8765; it is not a hermetic local verdict.",
+}
 CI_ONLY_BUN_ARGS = ("test", "--timeout=120000")
 CI_ONLY_ENV = (("OMP_KIT_HEAVY_MAX_WAIT_S", "180"),)
 CI_ONLY_KEYS = frozenset(("version", "kind", "tree", "commit", "checks", "runtime", "spec", "verdict", "files",
@@ -630,13 +641,33 @@ CI_ONLY_SPAWN_RC = 127
 CI_ONLY_DOMAIN = b"OMP-KIT-CI-ONLY-VERDICT-v1\0"
 
 
+def validate_ci_only_coverage(suite_root: Path) -> None:
+    """Every CI-only exclusion has exactly one local or explicitly reasoned GitHub owner."""
+    lines = (suite_root / "scripts" / "gate-ci-only.tsv").read_text(encoding="utf-8").splitlines()
+    declared = {path for path, kind, *_rest in (line.split("\t") for line in lines[1:] if line)
+                if kind == "ci-only"}
+    local = {path for path, _limit in CI_ONLY_FILES}
+    github = set(CI_ONLY_GITHUB_ONLY)
+    if len(local) != len(CI_ONLY_FILES) or local & github:
+        raise ValueError("CI-only coverage has duplicate execution owners")
+    if any(not reason.strip() for reason in CI_ONLY_GITHUB_ONLY.values()):
+        raise ValueError("CI-only GitHub exemption needs a reason")
+    missing = declared - local - github
+    stale = (local | github) - declared
+    if missing or stale:
+        raise ValueError(f"CI-only coverage differs: missing execution owner={sorted(missing)}; "
+                         f"selection without ci-only exclusion={sorted(stale)}")
+
+
 def ci_only_spec() -> dict:
     return {"files": [{"path": path, "timeout_s": limit} for path, limit in CI_ONLY_FILES],
             "argv": ["bun", *CI_ONLY_BUN_ARGS], "env": dict(CI_ONLY_ENV),
-            "case_cwd": "suite-root", "git": "init, fetch --depth 1 of the exact commit"}
+            "case_cwd": "suite-root", "git": "init, fetch --depth 1 of the exact commit",
+            "github_only": dict(CI_ONLY_GITHUB_ONLY)}
 
 
 def ci_only_checks(judge_root: Path, suite_root: Path) -> str:
+    validate_ci_only_coverage(suite_root)
     digest = hashlib.sha256(CI_ONLY_DOMAIN)
     digest.update(judge_identity(judge_root).encode("ascii") + b"\0")
     digest.update(json.dumps(ci_only_spec(), sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\0")

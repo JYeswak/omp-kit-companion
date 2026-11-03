@@ -1,7 +1,7 @@
 #!/bin/sh
 # CIONLY1 fixtures shared by ci-only-verdict.test.sh and release-local-ci-only-reuse.test.sh (sourced, never run).
 # cio_fixture REPO: a git repo holding the store, its judge files, release-verdict.sh, a passing stub full-suite runner
-# and stub copies of the two ci-only test files, committed once. CIO_STORE_UNDER_TEST swaps the store (planted mutants).
+# and stub copies of its declared ci-only test files, committed once. CIO_STORE_UNDER_TEST swaps the store (mutants).
 # cio_stub_bin DIR: a `bun` whose --version is the real one and whose `test` run logs argv, cwd, OMP_KIT_CASE_CWD,
 # OMP_KIT_HEAVY_MAX_WAIT_S and the export's FETCH_HEAD to $CIO_LOG, and fails the files CIO_FAIL names, printing
 # boom-stdout/boom-stderr lines; plus a `timeout` that drops its bound (as release-verdict.test.sh's does).
@@ -13,15 +13,18 @@ cio_fixture() {
 	git -C "$cio_repo" config user.name t
 	for cio_path in scripts/release-verdict.sh scripts/suite-metrics.py scripts/kitlib_run.py scripts/kitlib_tmp.py \
 		scripts/pysafe.py scripts/kitlib-tmp.sh scripts/suite-hermetic-env.sh scripts/test-budget.ts \
-		.github/test-budget.json; do
+		scripts/gate-ci-only.tsv .github/test-budget.json; do
 		cp "$KITREPO/$cio_path" "$cio_repo/$cio_path" || return 1
 	done
 	cp "${CIO_STORE_UNDER_TEST:-$KITREPO/scripts/full-suite-verdict-store.py}" "$cio_repo/scripts/full-suite-verdict-store.py" || return 1
 	# shellcheck disable=SC2016 # the stub's own $1, expanded when it runs
 	printf '#!/bin/sh\ncase "${1:-}" in --test-workers) printf "1\\n" ;; *) exit 0 ;; esac\n' >"$cio_repo/scripts/fresh-gate.sh"
 	printf '#!/bin/sh\nexit 0\n' >"$cio_repo/scripts/full-suite-verdict.sh"
-	printf '// stub package-release\n' >"$cio_repo/tests/cli/package-release.test.ts"
-	printf '// stub kit-update\n' >"$cio_repo/tests/cli/kit-update.test.ts"
+	for cio_case in tests/cli/package-release.test.ts tests/cli/kit-update.test.ts \
+		tests/cli/kit-update-nplus-two.test.ts tests/cli/kit-update-compiled.test.ts \
+		tests/cli/kit-update-relink.test.ts tests/cli/package-release-live.test.ts; do
+		printf '// stub CI-only file\n' >"$cio_repo/$cio_case" || return 1
+	done
 	git -C "$cio_repo" add -A && git -C "$cio_repo" commit -qm "[test] ci-only fixture"
 }
 

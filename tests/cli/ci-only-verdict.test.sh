@@ -1,5 +1,5 @@
 #!/bin/sh
-# CIONLY1 (J-2026-11-03-34): release-verdict.sh judges the two ci-only files on an exact-commit export prepared as
+# CIONLY1 (J-2026-11-03-34): release-verdict.sh judges all six ci-only files on an exact-commit export prepared as
 # release-local prepares it, and records PASS/FAIL for the exact tree and judge identity; require-ci-only-pass reads
 # PASS back only for a matching, untampered record. Planted negatives: another tree, a forged record, another judge,
 # other test-file bytes. CIO_STORE_UNDER_TEST runs the cases against a mutant store.
@@ -35,23 +35,27 @@ require() {
 	req_out=$(PYTHONDONTWRITEBYTECODE=1 "$2/scripts/full-suite-verdict-store.py" require-ci-only-pass --repo "$repo" --tree "$1" --judge-root "$2" --suite-root "$2" --cache-dir "${3:-$store}" </dev/null 2>"$TMP/require.err") || req_rc=$?
 }
 
-# 1. The push-time verdict runs both files on a git-initialized export of the exact commit and records PASS.
+# 1. The push-time verdict runs all six files on a git-initialized export and records every path and bound.
 : >"$CIO_LOG"
 rc=0
 sh "$repo/scripts/release-verdict.sh" --commit "$c1" --no-fetch >"$TMP/o1" 2>&1 || rc=$?
 runs=$(grep -c . "$CIO_LOG")
 pkg=$(grep '^test --timeout=120000 tests/cli/package-release.test.ts|' "$CIO_LOG")
 upd=$(grep '^test --timeout=120000 tests/cli/kit-update.test.ts|' "$CIO_LOG")
+nplus=$(grep '^test --timeout=120000 tests/cli/kit-update-nplus-two.test.ts|' "$CIO_LOG")
+compiled=$(grep '^test --timeout=120000 tests/cli/kit-update-compiled.test.ts|' "$CIO_LOG")
+relink=$(grep '^test --timeout=120000 tests/cli/kit-update-relink.test.ts|' "$CIO_LOG")
+live=$(grep '^test --timeout=120000 tests/cli/package-release-live.test.ts|' "$CIO_LOG")
 case_ok=1
-for line in "$pkg" "$upd"; do
+for line in "$pkg" "$upd" "$nplus" "$compiled" "$relink" "$live"; do
 	cwd=$(printf '%s' "$line" | cut -d'|' -f2)
 	[ -n "$line" ] && [ "$(printf '%s' "$line" | cut -d'|' -f3)" = "$cwd" ] \
 		&& [ "$(printf '%s' "$line" | cut -d'|' -f4)" = 180 ] && [ "$(printf '%s' "$line" | cut -d'|' -f5)" = "$c1" ] || case_ok=0
 done
 set -- "$store"/ci-only/"$t1".ci-only.*.json
-[ "$rc" = 0 ] && [ "$runs" = 2 ] && [ "$case_ok" = 1 ] && [ -f "$1" ] \
+[ "$rc" = 0 ] && [ "$runs" = 6 ] && [ "$case_ok" = 1 ] && [ -f "$1" ] \
 	&& grep -Fq "CI-ONLY: VERDICT PASS tree=$t1" "$TMP/o1" && grep -Fq "release-verdict: $c1 ci_only_rc=0" "$TMP/o1" \
-	&& python3 -c 'import json,sys; e=json.load(open(sys.argv[1])); sys.exit(not (e["verdict"] == "PASS" and [(f["path"], f["rc"], f["timeout_s"]) for f in e["files"]] == [("tests/cli/package-release.test.ts", 0, 900), ("tests/cli/kit-update.test.ts", 0, 2400)] and all(isinstance(f["duration_ms"], int) for f in e["files"])))' "$1"
+	&& python3 -c 'import json,sys; e=json.load(open(sys.argv[1])); expected=[("tests/cli/package-release.test.ts",0,900),("tests/cli/kit-update.test.ts",0,2400),("tests/cli/kit-update-nplus-two.test.ts",0,900),("tests/cli/kit-update-compiled.test.ts",0,900),("tests/cli/kit-update-relink.test.ts",0,900),("tests/cli/package-release-live.test.ts",0,900)]; sys.exit(not (e["verdict"] == "PASS" and [(f["path"],f["rc"],f["timeout_s"]) for f in e["files"]] == expected and all(isinstance(f["duration_ms"],int) for f in e["files"])))' "$1"
 ok $? "push-time-records-pass: rc=$rc runs=$runs case_ok=$case_ok record=$* out=$(cat "$TMP/o1") log=$(cat "$CIO_LOG")"
 record1=$1
 
@@ -144,7 +148,7 @@ require "$t1" "$TMP/x1" "$huge"
 st=1; [ "$req_rc" = 1 ] && [ "$req_out" = MISS ] && st=0
 ok "$st" "oversized-record-miss: rc=$req_rc out=$req_out"
 
-# 9. A commit without the two files records nothing and does not fail the verdict.
+# 9. A commit missing a required CI-only file records nothing and does not fail the verdict.
 git -C "$repo" rm -q tests/cli/kit-update.test.ts && git -C "$repo" commit -qm "[test] no ci-only file"
 c4=$(git -C "$repo" rev-parse HEAD)
 t4=$(git -C "$repo" rev-parse 'HEAD^{tree}')
