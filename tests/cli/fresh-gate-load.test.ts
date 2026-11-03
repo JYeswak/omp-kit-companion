@@ -159,11 +159,12 @@ test("LOADGATE1: no changed selected files means no copies, including deleted pa
 });
 
 function policy(dir: string, ceiling: number) {
-	writeFileSync(join(dir, ".github/test-budget.json"), JSON.stringify({ version: 1,
-		changed_file_budget: { cap_s: ceiling > 90 ? 90 : ceiling / 2, grandfathered: {
-			"tests/cli/grandfather.test.sh": { measured_s: ceiling, evidence: "load-wave regression fixture" },
-		} },
-	}));
+	const budget = JSON.parse(readFileSync(join(root, ".github/test-budget.json"), "utf8"));
+	budget.changed_file_budget.cap_s = ceiling > 90 ? 90 : ceiling / 2;
+	budget.changed_file_budget.grandfathered["tests/cli/grandfather.test.sh"] = {
+		measured_s: ceiling, evidence: "load-wave regression fixture",
+	};
+	writeFileSync(join(dir, ".github/test-budget.json"), JSON.stringify(budget));
 	writeFileSync(join(dir, "changed"), "tests/cli/grandfather.test.sh\n");
 }
 
