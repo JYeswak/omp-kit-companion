@@ -27,13 +27,61 @@ check() {
 # support files; unrelated numbered hooks only add fixture commit cost.
 keep_kitlib_hooks() {
 	_repo=$1
-	for _member in "$_repo/.git/hooks/hooks.d/pre-commit/"* "$_repo/.git/hooks/hooks.d/commit-msg/"*; do
+	for _member in "$_repo"/.git/hooks/hooks.d/*/*; do
 		[ -e "$_member" ] || continue
 		case "$(basename "$_member")" in
 		51-omp-kit-staged-kitlib|50-omp-kit-staged-kitlib-reversal|*.*) ;;
 		*) rm -f "$_member" ;;
 		esac
 	done
+	rm -f "$_repo/.git/hooks/pre-push" "$_repo/.git/hooks/reference-transaction"
+	git -C "$_repo" config maintenance.auto false
+}
+
+# Install once; content-specific root commits below still precede their hooks.
+installed_hooks() {
+	installed="$TMP/.installed-kitlib"
+	if [ ! -x "$installed/.git/hooks/hooks.d/pre-commit/$MEMBER" ]; then
+		mkdir -p "$installed"
+		if [ -n "${KITLIB_INSTALLED_FIXTURE:-}" ]; then
+			cp -Rp "$KITLIB_INSTALLED_FIXTURE/." "$installed/" || return 1
+		else
+			git -C "$installed" init -q 2>/dev/null
+			git -C "$installed" config user.email "test@invalid.example"
+			git -C "$installed" config user.name "Test"
+			git -C "$installed" -c core.hooksPath=/dev/null commit -q --allow-empty -m "[test] root"
+			out=$(sh "$INSTALLER" "$installed" 2>&1) || { printf 'FAIL install template: %s\n' "$out" >&2; return 1; }
+		fi
+		keep_kitlib_hooks "$installed"
+		if [ "${KITLIB_TEST_MEMBER51_FAIL_OPEN:-0}" = "1" ]; then
+			printf '%s\n' '#!/bin/sh' 'exit 0' > "$installed/.git/hooks/hooks.d/pre-commit/$MEMBER"
+		fi
+	fi
+	printf '%s' "$installed/.git/hooks"
+}
+
+# Immutable cases share the actual installed hook inodes: a new executable
+# copy otherwise pays macOS first-exec scanning again. Mutation cases request
+# private copies before deleting or editing any member/helper.
+fixture_hooks() {
+	hooks=$(installed_hooks) || return 1
+	python3 - "$hooks" "$1/.git/hooks" "${2:-link}" <<'PY'
+import os, pathlib, shutil, sys
+source, target, mode = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+if mode == "private":
+    for path in target.rglob("*"):
+        if path.is_file() and path.stat().st_nlink > 1:
+            private = path.with_name(path.name + ".private")
+            shutil.copy2(path, private)
+            os.replace(private, path)
+else:
+    for path in source.rglob("*"):
+        if path.is_file():
+            dest = target / path.relative_to(source)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.unlink(missing_ok=True)
+            os.link(path, dest)
+PY
 }
 
 
@@ -57,19 +105,15 @@ new_repo() {
 			mkdir -p "$template/$(dirname "$2")"
 			printf '%s\n' "$3" > "$template/$2" && git -C "$template" add "$2"
 		fi
-		git -C "$template" commit -q --allow-empty --message "[test] root"
-		out=$(sh "$INSTALLER" "$template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+		git -C "$template" -c core.hooksPath=/dev/null commit -q --allow-empty --message "[test] root"
+		hooks=$(installed_hooks) || exit 1
+		cp -Rp "$hooks/." "$template/.git/hooks/" || exit 1
 		keep_kitlib_hooks "$template"
-		# Acceptance mutant stays inside the owned template, never a live hook directory.
-		if [ "${KITLIB_TEST_MEMBER51_FAIL_OPEN:-0}" = "1" ]; then
-			mutant="$template/.git/hooks/hooks.d/pre-commit/$MEMBER"
-			printf '%s\n' '#!/bin/sh' 'exit 0' > "$mutant" || exit 1
-			chmod +x "$mutant" || exit 1
-		fi
 		[ -x "$template/.git/hooks/hooks.d/pre-commit/$MEMBER" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
 	fi
 	mkdir -p "$dir"
 	cp -Rp "$template/." "$dir/" || { printf 'FAIL copy %s from template\n' "$1" >&2; exit 1; }
+	fixture_hooks "$dir" || exit 1
 	[ -x "$dir/.git/hooks/hooks.d/pre-commit/$MEMBER" ] || { printf 'FAIL copy %s: member absent\n' "$1" >&2; exit 1; }
 	printf '%s' "$dir"
 }
@@ -93,18 +137,30 @@ TS_GOOD='import { run } from "./src/kitlib/run";
 export const p = run(["x"], { deadline_s: 5 });'
 SH_BAD='timeout 5 git fetch'
 origin_repo() {
+	template="$TMP/.origin-template"
+	if [ -d "$template" ]; then
+		dir="$TMP/$1"
+		mkdir -p "$dir"
+		cp -Rp "$template/." "$dir/" || return 1
+		fixture_hooks "$dir" || return 1
+		git -C "$dir" remote set-url origin "$dir/published.git" || return 1
+		printf '%s\n' "$dir"
+		return
+	fi
 	dir=$(new_repo "$1" tool.py "$PY_BAD_OLD") || return 1
 	printf '%s\n' "$PY_BAD" > "$dir/tool.py"
 	git -C "$dir" add tool.py
 	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] published origin"
 	origin=$(git -C "$dir" rev-parse HEAD) || return 1
-	git -C "$dir" init --bare -q "$dir/published.git" || return 1
+	git -C "$dir" -c init.templateDir= init --bare -q "$dir/published.git" || return 1
 	git -C "$dir" remote add origin "$dir/published.git" || return 1
 	git -C "$dir" -c core.hooksPath=/dev/null push -q origin "$origin:refs/heads/main" || return 1
 	git -C "$dir" update-ref refs/remotes/origin/main "$origin" || return 1
 	printf '%s\n' "$PY_GOOD" > "$dir/tool.py"
 	git -C "$dir" add tool.py
 	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] ratchet reduction"
+	mkdir -p "$template"
+	cp -Rp "$dir/." "$template/" || return 1
 	printf '%s\n' "$dir"
 }
 
@@ -149,52 +205,74 @@ hydrate_capsule() {
 # the X diff set must equal the manifest set, and every path's mode and
 # blob at X and at P must equal the manifest (ABSENT where missing).
 validate_inputs() {
-	: > "$TMP/.hydrate-bad"
 	git -C "$OBJSRC" diff-tree --no-commit-id --name-only -r "$XREAL" 2>/dev/null | LC_ALL=C sort > "$TMP/.diffset" || return 1
 	sed -n '/^## PATHS78/,$p' "$CAPSULE_MANIFEST" | grep -v '^#' | grep -v '^$' | cut -d' ' -f1 | LC_ALL=C sort > "$TMP/.manifestset" || return 1
 	cmp -s "$TMP/.diffset" "$TMP/.manifestset" || { echo "PRECHECK-REFUSED X path set differs from manifest" >&2; return 1; }
-	sed -n '/^## PATHS78/,$p' "$CAPSULE_MANIFEST" | grep -v '^#' | grep -v '^$' | while read -r _pp _mx _bx _mp _bp; do
-		_gx=$(git -C "$OBJSRC" ls-tree "$XREAL" -- "$_pp" 2>/dev/null); _gxm=${_gx%% *}; _gxb=$(printf '%s' "$_gx" | cut -d' ' -f3 | cut -f1); [ -n "$_gx" ] || { _gxm=ABSENT; _gxb=ABSENT; }
-		_gp=$(git -C "$OBJSRC" ls-tree "$PREAL" -- "$_pp" 2>/dev/null); _gpm=${_gp%% *}; _gpb=$(printf '%s' "$_gp" | cut -d' ' -f3 | cut -f1); [ -n "$_gp" ] || { _gpm=ABSENT; _gpb=ABSENT; }
-		if [ "$_gxm" != "$_mx" ] || [ "$_gxb" != "$_bx" ] || [ "$_gpm" != "$_mp" ] || [ "$_gpb" != "$_bp" ]; then echo "MISMATCH-path:$_pp" >> "$TMP/.hydrate-bad"; fi
-	done
-	[ ! -s "$TMP/.hydrate-bad" ] || { echo "PRECHECK-REFUSED path identity mismatch"; cat "$TMP/.hydrate-bad"; return 1; } >&2
+	git -C "$OBJSRC" ls-tree -r "$XREAL" > "$TMP/.x-tree" || return 1
+	git -C "$OBJSRC" ls-tree -r "$PREAL" > "$TMP/.p-tree" || return 1
+	python3 - "$CAPSULE_MANIFEST" "$TMP/.x-tree" "$TMP/.p-tree" <<'PY'
+import pathlib, sys
+def entries(filename):
+    result = {}
+    for line in pathlib.Path(filename).read_text().splitlines():
+        metadata, path = line.split("\t", 1)
+        mode, _, blob = metadata.split()
+        result[path] = (mode, blob)
+    return result
+x, p = entries(sys.argv[2]), entries(sys.argv[3])
+rows = pathlib.Path(sys.argv[1]).read_text().split("## PATHS78", 1)[1]
+bad = []
+for line in rows.splitlines()[1:]:
+    if not line.strip() or line.startswith("#"):
+        continue
+    path, mx, bx, mp, bp = line.split()
+    if x.get(path, ("ABSENT", "ABSENT")) != (mx, bx) or p.get(path, ("ABSENT", "ABSENT")) != (mp, bp):
+        bad.append(path)
+if bad:
+    print("PRECHECK-REFUSED path identity mismatch", file=sys.stderr)
+    for path in bad:
+        print("MISMATCH-path:" + path, file=sys.stderr)
+    sys.exit(1)
+PY
 }
 # sync_tree DIR REV: check out exactly the 78 X paths at REV bytes and mode;
 # paths absent at REV (the two X-added files) are removed for the reversal.
 sync_tree() {
-	for p in $XPATHS; do
-		mkdir -p "$1/$(dirname "$p")"
-		if git -C "$OBJSRC" show "$2:$p" > "$1/$p" 2>/dev/null; then
-			if git -C "$OBJSRC" ls-tree --full-tree "$2" -- "$p" | grep -q "100755"; then
-				chmod +x "$1/$p"
-			else
-				chmod -x "$1/$p"
-			fi
-		else
-			rm -f "$1/$p"
-		fi
-	done
+	# Remove selected entries first: archive omits paths absent at the target.
+	for p in $XPATHS; do rm -f "$1/$p"; done
+	# shellcheck disable=SC2086 # intended split: a whitespace-separated list of literal repo paths, no globs
+	paths=$(git -C "$OBJSRC" ls-tree -r --name-only "$2" -- $XPATHS) || return 1
+	# The capsule intentionally omits unrelated blobs. Its empty worktree has
+	# no export attributes; do not hydrate an index for the incomplete full tree.
+	# shellcheck disable=SC2086 # intended split: a whitespace-separated list of literal repo paths, no globs
+	git -C "$OBJSRC" archive --worktree-attributes "$2" -- $paths | tar -x -C "$1"
 }
 # real_repo NAME: root, P-tree published as a local origin, X-tree on top.
 real_repo() {
 	dir="$TMP/$1"
+	template="$TMP/.real-template"
+	if [ -d "$template" ]; then
+		mkdir -p "$dir"
+		cp -Rp "$template/." "$dir/" || return 1
+		fixture_hooks "$dir" || return 1
+		git -C "$dir" remote set-url origin "$dir/published.git" || return 1
+		printf '%s' "$dir"
+		return
+	fi
 	mkdir -p "$dir"
 	git -C "$dir" init -q 2>/dev/null
 	git -C "$dir" config user.email "test@invalid.example"
 	git -C "$dir" config user.name "Test"
-	git -C "$dir" commit -q --allow-empty --message "[test] root"
-	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; return 1; }
-	# The replay judges the kitlib ratchet alone: the 78 real files trip sibling
-	# members (staged-imports, staged-regexploit) that the synthetic fixtures never
-	# touch, so only the staged-kitlib and reversal members stay installed. Helper
-	# files (pysafe, the ratchet engine) stay: the members refuse without them.
+	git -C "$dir" -c core.hooksPath=/dev/null commit -q --allow-empty --message "[test] root"
+	hooks=$(installed_hooks) || return 1
+	cp -Rp "$hooks/." "$dir/.git/hooks/" || return 1
 	keep_kitlib_hooks "$dir"
+	fixture_hooks "$dir" || return 1
 	sync_tree "$dir" "$PREAL" || return 1
 	for p in $XPATHS; do [ -e "$dir/$p" ] && git -C "$dir" add -- "$p"; done
 	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] published origin"
 	origin=$(git -C "$dir" rev-parse HEAD) || return 1
-	git -C "$dir" init --bare -q "$dir/published.git" || return 1
+	git -C "$dir" -c init.templateDir= init --bare -q "$dir/published.git" || return 1
 	git -C "$dir" remote add origin "$dir/published.git" || return 1
 	git -C "$dir" -c core.hooksPath=/dev/null push -q origin "$origin:refs/heads/main" || return 1
 	git -C "$dir" update-ref refs/remotes/origin/main "$origin" || return 1
@@ -202,6 +280,8 @@ real_repo() {
 	for p in $XPATHS; do git -C "$dir" add -- "$p"; done
 	git -C "$dir" -c core.hooksPath=/dev/null commit -q -m "[test] ratchet introduction"
 	X=$(git -C "$dir" rev-parse HEAD) || return 1
+	mkdir -p "$template"
+	cp -Rp "$dir/." "$template/" || return 1
 	printf '%s' "$dir"
 }
 # replay_setup: hydrate the capsule, prove X/P identity and bind XPATHS;

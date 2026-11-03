@@ -146,4 +146,5 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 	} finally {
 		rmSync(work, { recursive: true, force: true });
 	}
-});
+// Two release-local preflights run back to back (stubbed admission, git and gh); bun's 5 s default is too tight under load.
+}, 60000);

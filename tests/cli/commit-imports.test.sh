@@ -18,18 +18,25 @@ kitlib_tmp TMP commit-imports-test || exit 1
 pass=0
 fail=0
 
+clean_template="$TMP/.commit-imports-template"
 mkrepo() {
 	name=$1
 	repo="$TMP/$name"
+	# The checker reads commit trees, not ambient user hooks. Seed the identical
+	# clean parent once; each case still writes and checks its own real commit.
+	if [ ! -d "$clean_template/.git" ]; then
+		mkdir -p "$clean_template/src"
+		git -C "$clean_template" init -q --template=
+		git -C "$clean_template" config user.email "test@example.invalid"
+		git -C "$clean_template" config user.name "worker-1"
+		git -C "$clean_template" config maintenance.auto false
+		printf 'export const ok = 1;\n' > "$clean_template/src/ok.ts"
+		printf 'import { ok } from "./ok.ts";\nconsole.log(ok);\n' > "$clean_template/src/main.ts"
+		git -C "$clean_template" add -A
+		git -C "$clean_template" commit -qm "[test] base clean tree"
+	fi
 	mkdir -p "$repo"
-	git -C "$repo" init -q
-	git -C "$repo" config user.email "test@example.invalid"
-	git -C "$repo" config user.name "worker-1"
-	mkdir -p "$repo/src"
-	printf 'export const ok = 1;\n' > "$repo/src/ok.ts"
-	printf 'import { ok } from "./ok.ts";\nconsole.log(ok);\n' > "$repo/src/main.ts"
-	git -C "$repo" add -A
-	git -C "$repo" commit -qm "[test] base clean tree"
+	cp -Rp "$clean_template/." "$repo/" || exit 1
 	printf '%s' "$repo"
 }
 

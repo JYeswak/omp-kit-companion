@@ -192,6 +192,28 @@ function runCli(args: string[]): { exitCode: number; envelope: Record<string, un
 	return { exitCode: child.exitCode, envelope: JSON.parse(stdout) as Record<string, unknown> };
 }
 
+// Each matrix cell tests one bridge, not unrelated bridge and MCP startup.
+function integrationHome(integration: string): string {
+	const selected = join(base, `selected-${integration}-home`);
+	const agent = join(selected, ".omp/profiles/planted/agent");
+	if (!existsSync(agent)) {
+		mkdirSync(agent, { recursive: true });
+		const planted = join(plantHome, ".omp/profiles/planted/agent");
+		const extensions: Record<string, string> = {
+			dcg: "dcg-tool-bridge.ts", slb: "slb-guard-fail-closed.ts",
+			rch: "rch-mutator.ts", "kit-guard": "kit-guard-optin.ts", "fleet-guard": "fleet-guard.ts",
+		};
+		const extension = extensions[integration];
+		if (extension) {
+			mkdirSync(join(agent, "extensions"));
+			cpSync(join(planted, "extensions", extension), join(agent, "extensions", extension));
+		}
+		writeFileSync(join(agent, "config.yml"), profileConfig(extension ? [join(agent, "extensions", extension)] : []));
+		if (integration === "mcp-agent-mail") cpSync(join(planted, "mcp.json"), join(agent, "mcp.json"));
+	}
+	return selected;
+}
+
 test("planted profile without the dcg extension reports ABSENT without running", async () => {
 	const absentHome = join(base, "absent-home");
 	const dir = join(absentHome, ".omp/profiles/planted/agent");
@@ -329,8 +351,7 @@ test("integrations rejects OMP aliases and Darwin sandbox-temp work paths", asyn
 });
 
 test("live dcg fire blocks and quiet near-miss is allowed on the planted profile", async () => {
-	const report = await runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
-		integrations: ["dcg"], workDir: join(base, "live-dcg"), ompPath: ompLauncher, timeoutSecs: 120 });
+	const report = await runIntegrations({ root: release, home: integrationHome("dcg"), profiles: ["planted"], integrations: ["dcg"], workDir: join(base, "live-dcg"), ompPath: ompLauncher, timeoutSecs: 120 });
 	const dcg = report.matrix.find(cell => cell.integration === "dcg");
 	expect(dcg?.verdict).toBe("WIRED");
 	expect(dcg?.detail).toContain("still exists");
@@ -340,7 +361,7 @@ test("live dcg fire blocks and quiet near-miss is allowed on the planted profile
 	expect(report.ompVersion.length).toBeGreaterThan(0);
 	expect(report.limitations.join(" ")).toContain("model tool choice");
 	expect(report.realOmpIntegrity).toMatchObject({
-		homeOmpPath: join(plantHome, ".omp"), complete: true, unchanged: true,
+		homeOmpPath: join(integrationHome("dcg"), ".omp"), complete: true, unchanged: true,
 	});
 	expect(existsSync(report.realOmpIntegrity.path)).toBe(true);
 }, 300_000);
@@ -365,12 +386,11 @@ test("DCG no-op mutant makes the fire assertion fail", async () => {
 }, 300_000);
 
 test("live slb reports its source hash and allows a quiet near-miss", async () => {
-	const report = await runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
-		integrations: ["slb"], workDir: join(base, "live-slb"), ompPath: ompLauncher, timeoutSecs: 120 });
+	const report = await runIntegrations({ root: release, home: integrationHome("slb"), profiles: ["planted"], integrations: ["slb"], workDir: join(base, "live-slb"), ompPath: ompLauncher, timeoutSecs: 120 });
 	const slb = report.matrix.find(cell => cell.integration === "slb");
 	expect(slb?.verdict).toBe("WIRED");
 	expect(slb?.quiet?.outcome).toBe("ALLOWED");
-	const source = join(plantHome, ".omp/profiles/planted/agent/extensions/slb-guard-fail-closed.ts");
+	const source = join(integrationHome("slb"), ".omp/profiles/planted/agent/extensions/slb-guard-fail-closed.ts");
 	expect(slb?.source).toEqual({ path: source, sha256: createHash("sha256").update(readFileSync(source)).digest("hex") });
 	expect(slb?.evidence.every(path => existsSync(path))).toBe(true);
 }, 300_000);
@@ -386,8 +406,7 @@ test("RCH cargo check rewrite is visible and the quiet cargo version is allowed"
 	process.env.PATH = `${fixtureBin}${delimiter}${savedPath ?? ""}`;
 	let report: IntegrationsReport;
 	try {
-		report = await runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
-			integrations: ["rch"], workDir: join(base, "live-rch"), ompPath: ompLauncher, timeoutSecs: 120 });
+		report = await runIntegrations({ root: release, home: integrationHome("rch"), profiles: ["planted"], integrations: ["rch"], workDir: join(base, "live-rch"), ompPath: ompLauncher, timeoutSecs: 120 });
 	} finally {
 		if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
 	}
@@ -404,8 +423,7 @@ test("RCH cargo check rewrite is visible and the quiet cargo version is allowed"
 }, 300_000);
 
 test("Agent Mail MCP health_check passes while a failed health tool is not WIRED", async () => {
-	const report = await runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
-		integrations: ["mcp-agent-mail"], workDir: join(base, "live-mcp"), ompPath: ompLauncher, timeoutSecs: 120 });
+	const report = await runIntegrations({ root: release, home: integrationHome("mcp-agent-mail"), profiles: ["planted"], integrations: ["mcp-agent-mail"], workDir: join(base, "live-mcp"), ompPath: ompLauncher, timeoutSecs: 120 });
 	const mcp = report.matrix.find(cell => cell.integration === "mcp-agent-mail");
 	expect(mcp?.verdict).toBe("WIRED");
 	expect(mcp?.quiet?.outcome).toBe("ALLOWED");
@@ -425,8 +443,7 @@ test("Agent Mail MCP health_check passes while a failed health tool is not WIRED
 	expect(mutant?.quiet?.outcome).toBe("BLOCKED");
 }, 300_000);
 test("kit-guard opt-in fires while a no-op guard is not WIRED", async () => {
-	const report = await runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
-		integrations: ["kit-guard"], workDir: join(base, "live-kit-guard"), ompPath: ompLauncher, timeoutSecs: 120 });
+	const report = await runIntegrations({ root: release, home: integrationHome("kit-guard"), profiles: ["planted"], integrations: ["kit-guard"], workDir: join(base, "live-kit-guard"), ompPath: ompLauncher, timeoutSecs: 120 });
 	const guard = report.matrix.find(cell => cell.integration === "kit-guard");
 	expect(guard?.verdict).toBe("WIRED");
 	expect(guard?.quiet?.outcome).toBe("ALLOWED");
@@ -443,10 +460,8 @@ test("kit-guard opt-in fires while a no-op guard is not WIRED", async () => {
 	expect(mutant?.verdict).toBe("CONFIGURED_NOT_FIRING");
 	expect(mutant?.quiet?.outcome).toBe("ALLOWED");
 }, 300_000);
-test.skipIf(process.platform !== "darwin" && Bun.which("bwrap") === null)(
-	"fleet-guard blocks /tmp and a disabled guard remains contained", async () => {
-		const report = await runIntegrations({ root: release, home: plantHome, profiles: ["planted"],
-			integrations: ["fleet-guard"], workDir: join(base, "live-fleet"), ompPath: ompLauncher, timeoutSecs: 120 });
+test.skipIf(process.platform !== "darwin" && Bun.which("bwrap") === null)("fleet-guard blocks /tmp and a disabled guard remains contained", async () => {
+		const report = await runIntegrations({ root: release, home: integrationHome("fleet-guard"), profiles: ["planted"], integrations: ["fleet-guard"], workDir: join(base, "live-fleet"), ompPath: ompLauncher, timeoutSecs: 120 });
 		const fleet = report.matrix.find(cell => cell.integration === "fleet-guard");
 		if (!fleet?.markerPath) throw new Error("fleet report omitted the contained marker path");
 		const fleetMarkerWritten = existsSync(fleet.markerPath);
@@ -485,8 +500,7 @@ test.skipIf(process.platform !== "darwin" && Bun.which("bwrap") === null)(
 		expect(mockLog).toContain('"role":"tool"');
 		expect(mutantReport.realOmpIntegrity.unchanged).toBe(true);
 	},
-	300_000,
-);
+	300_000,);
 
 
 

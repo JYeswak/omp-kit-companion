@@ -107,8 +107,8 @@ MIT.
 MD
 }
 
-new_repo() {
-	dir="$TMP/$1"
+install_baseline() {
+	dir="$TMP/installed-baseline"
 	mkdir -p "$dir/rules" "$dir/skills/s1" "$dir/skills/s2" "$dir/src"
 	write_base_readme "$dir"
 	write_gate_stub "$dir"
@@ -127,6 +127,20 @@ new_repo() {
 	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
 	[ -x "$dir/.git/hooks/hooks.d/pre-commit/46-omp-kit-staged-readme" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
 	[ -f "$dir/.git/hooks/hooks.d/pre-commit/readme-check.ts" ] || { printf 'FAIL install %s: checker absent\n' "$1" >&2; exit 1; }
+	# Keep the real staged README member, its non-numbered dependencies, and
+	# its runner; unrelated installed gates are not part of this contract.
+	for member in "$dir"/.git/hooks/hooks.d/*/[0-9]*; do
+		case "$member" in */pre-commit/46-omp-kit-staged-readme) ;; *) rm -f "$member" ;; esac
+	done
+	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/pre-push" "$dir/.git/hooks/reference-transaction"
+	git -C "$dir" config maintenance.auto false
+}
+
+install_baseline installed-baseline
+new_repo() {
+	dir="$TMP/$1"
+	mkdir -p "$dir"
+	cp -R "$TMP/installed-baseline/." "$dir/"
 	printf '%s' "$dir"
 }
 
@@ -259,7 +273,7 @@ git -C "$R" init -q
 git -C "$R" config user.email test@invalid.example
 git -C "$R" config user.name Test
 git -C "$R" commit -q --allow-empty -m "[test] root"
-out=$(sh "$INSTALLER" "$R" 2>&1) || { printf 'FAIL foreign install: %s\n' "$out"; exit 1; }
+cp -R "$TMP/installed-baseline/.git/hooks/." "$R/.git/hooks/"
 printf '# Example\n' > "$R/skills/example/SKILL.md"
 git -C "$R" add skills/example/SKILL.md
 out=$(commit "$R" -m "[test] skill without README obligation")

@@ -14,6 +14,10 @@ if ! printenv TMPDIR >/dev/null; then KITLIB_TMP_ROOT=$REPO_TMP; fi
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 kitlib_tmp TMP staged-imports-test || exit 1
+# The installer deliberately probes an unknown bead; these import fixtures
+# must not query the caller's live tracker to resolve it.
+BR_BIN=/usr/bin/false
+export BR_BIN
 
 pass=0
 fail=0
@@ -22,12 +26,21 @@ check() {
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
 }
 
+# Reinstalls also restore unrelated members. Keep every real commit scoped to
+# the installed import runner, including commits after projection activation.
+only_import_member() {
+	for member in "$1"/.git/hooks/hooks.d/*/[0-9]*; do
+		case "$member" in */pre-commit/45-omp-kit-staged-imports) ;; *) rm -f "$member" ;; esac
+	done
+	rm -f "$1/.git/hooks/commit-msg" "$1/.git/hooks/pre-push" "$1/.git/hooks/reference-transaction"
+}
+
 template="$TMP/.staged-imports-template"
 new_repo() {
 	dir="$TMP/$1"
 	if [ ! -x "$template/.git/hooks/hooks.d/pre-commit/45-omp-kit-staged-imports" ]; then
 		mkdir -p "$template"
-		git -C "$template" init -q 2>/dev/null
+		git -C "$template" init -q --template= 2>/dev/null
 		git -C "$template" config user.email "test@invalid.example"
 		git -C "$template" config user.name "Test"
 		rm -f "$template/.git/hooks/commit-msg" "$template/.git/hooks/commit-msg-"* "$template/.git/hooks/pre-commit"
@@ -35,10 +48,7 @@ new_repo() {
 		out=$(sh "$INSTALLER" "$template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
 		# RELEASE15 (ompkit-fp72.120.16.98): keep only the member under test and its pre-commit runner; the other
 		# members and runners have their own suites and made each fixture commit cost seconds.
-		for member in "$template"/.git/hooks/hooks.d/*/[0-9]*; do
-			case "$member" in */pre-commit/45-omp-kit-staged-imports) ;; *) rm -f "$member" ;; esac
-		done
-		rm -f "$template/.git/hooks/commit-msg" "$template/.git/hooks/pre-push" "$template/.git/hooks/reference-transaction"
+		only_import_member "$template"
 		git -C "$template" config maintenance.auto false
 	fi
 	mkdir -p "$dir"
@@ -50,6 +60,7 @@ new_repo() {
 commit() {
 	repo=$1
 	shift
+	only_import_member "$repo"
 	(CDPATH='' cd -- "$repo" && git commit -q "$@" 2>&1)
 }
 
@@ -149,7 +160,7 @@ cmp "$R/.git/hooks/pre-commit" "$TMP/link-hook.before" >/dev/null
 check "$?" "0" "symlink-hook-unchanged" "x" "x"
 mv "$PIN" "$TMP/refused-pin-link"
 out=$(sh "$INSTALLER" --template-import-map "$MAP" --template-import-map-sha256 "$SHA" "$R" 2>&1)
-check "$?" "0" "reviewed-map-installed" "x" "x"
+check "$?" "0" "reviewed-map-installed" "$out x" "x"
 printf 'import { y } from "../logical/y.js";\nconsole.log(y);\n' > "$R/kit/templates/x.ts"
 git -C "$R" add kit/templates/x.ts
 out=$(commit "$R" -m "[test] projected importer" -m "[no-changelog] fixture")

@@ -61,13 +61,13 @@ async function seedJob(root: string, input: { id: string; pid?: number; process_
 	return directory;
 }
 
-test("machine admission blocks only above 2.5 times the core count", () => {
+test.concurrent("machine admission blocks only above 2.5 times the core count", () => {
 	expect(machineLoadBlockReason(80, 32)).toBeNull();
 	expect(machineLoadBlockReason(80.01, 32)).toContain("LOAD1");
 	expect(machineLoadBlockReason(1, 4)).toBeNull();
 });
 
-test("SCANNERADMIT refuses a zero-budget start while GITHUB_ACTIONS bypasses LOAD1", async () => {
+test.concurrent("SCANNERADMIT refuses a zero-budget start while GITHUB_ACTIONS bypasses LOAD1", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 0 });
 	const marker = join(root, "scanner-ran");
@@ -82,7 +82,7 @@ test("SCANNERADMIT refuses a zero-budget start while GITHUB_ACTIONS bypasses LOA
 	expect(existsSync(marker)).toBe(false);
 });
 
-test("SCANNERADMIT preserves genuine child exit 75 without refusal marker", async () => {
+test.concurrent("SCANNERADMIT preserves genuine child exit 75 without refusal marker", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 5 });
 	const result = await invoke(root, ["heavy", "--", "sh", "-c", "exit 75"]);
@@ -97,14 +97,14 @@ async function invokeRuntime(root: string, maxRuntime?: string, label = "runtime
 		"--", process.execPath, "-e", childCode]);
 }
 
-test("HEAVYRUNTIME planted: admitted child outlives admission wait and preserves exit 7", async () => {
+test.concurrent("HEAVYRUNTIME planted: admitted child outlives admission wait and preserves exit 7", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 2 });
 	const result = await invokeRuntime(root, "30", "planted", "setTimeout(() => process.exit(7), 4000)");
 	expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 7, stderr: "" });
 }, 15000);
 
-test("HEAVYRUNTIME control: never admitted still defers at queue timeout", async () => {
+test.concurrent("HEAVYRUNTIME control: never admitted still defers at queue timeout", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 1 });
 	const jobs = await seedJob(root, { id: "held" });
@@ -115,7 +115,7 @@ test("HEAVYRUNTIME control: never admitted still defers at queue timeout", async
 	expect(readdirSync(jobs)).toEqual(["held.json"]);
 }, 10000);
 
-test("HEAVYRUNTIME cuts runtime at flag budget and removes the job", async () => {
+test.concurrent("HEAVYRUNTIME cuts runtime at flag budget and removes the job", async () => {
 	const root = fixture();
 	configure(root, { max_wait_s: 5, runtime_budget_s: { runtime: 3 } });
 	const result = await invokeRuntime(root, "2");
@@ -125,7 +125,7 @@ test("HEAVYRUNTIME cuts runtime at flag budget and removes the job", async () =>
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs"))).toEqual([]);
 }, 15000);
 
-test("HEAVYRUNTIME declared label table stops child; undeclared label has no global default", async () => {
+test.concurrent("HEAVYRUNTIME declared label table stops child; undeclared label has no global default", async () => {
 	const root = fixture();
 	// The removed global fallback is scaled to one second; the child crosses it.
 	configure(root, { max_wait_s: 5, default_runtime_s: 1, runtime_budget_s: { runtime: 1 } });
@@ -137,14 +137,14 @@ test("HEAVYRUNTIME declared label table stops child; undeclared label has no glo
 	expect({ code: fallback.code, stderr: fallback.stderr }).toEqual({ code: 7, stderr: "" });
 }, 15000);
 
-test("HEAVYRUNTIME explicit flag overrides the label table", async () => {
+test.concurrent("HEAVYRUNTIME explicit flag overrides the label table", async () => {
 	const root = fixture();
 	configure(root, { max_wait_s: 5, runtime_budget_s: { runtime: 1 } });
 	const result = await invokeRuntime(root, "4", "runtime", "setTimeout(() => process.exit(7), 2200)");
 	expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 7, stderr: "" });
 }, 10000);
 
-test("HEAVYRUNTIME shipped label table and global-default mutant use the real CLI", async () => {
+test.concurrent("HEAVYRUNTIME shipped label table and global-default mutant use the real CLI", async () => {
 	const root = fixture();
 	configure(root, { max_wait_s: 5 });
 	// The child uses a real process clock; parent fake timers cannot drive it.
@@ -190,7 +190,7 @@ test("HEAVYRUNTIME shipped label table and global-default mutant use the real CL
 	expect(mutant.stderr).toContain("source=none");
 }, 15000);
 
-test("HEAVYRUNTIME rejects nonpositive and noninteger flag budgets", async () => {
+test.concurrent("HEAVYRUNTIME rejects nonpositive and noninteger flag budgets", async () => {
 	const root = fixture();
 	for (const value of ["0", "abc", "1.5", "-1"]) {
 		const result = await invokeRuntime(root, value);
@@ -199,7 +199,7 @@ test("HEAVYRUNTIME rejects nonpositive and noninteger flag budgets", async () =>
 	}
 }, 15000);
 
-test("HEAVYRUNTIME escalates a SIGTERM-resistant child after the grace period", async () => {
+test.concurrent("HEAVYRUNTIME escalates a SIGTERM-resistant child after the grace period", async () => {
 	const root = fixture();
 	configure(root, { max_wait_s: 5 });
 	const result = await invokeRuntime(root, "1", "resistant",
@@ -210,7 +210,7 @@ test("HEAVYRUNTIME escalates a SIGTERM-resistant child after the grace period", 
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs"))).toEqual([]);
 }, 20000);
 
-test("HEAVYRUNTIME long positive budgets do not overflow native timers", async () => {
+test.concurrent("HEAVYRUNTIME long positive budgets do not overflow native timers", async () => {
 	const root = fixture();
 	const result = await invokeRuntime(root, "2147484", "long", "setTimeout(() => process.exit(7), 100)");
 	expect(result.code).toBe(7);
@@ -221,17 +221,17 @@ test("HEAVYRUNTIME long positive budgets do not overflow native timers", async (
  // slot behavior under test, not ambient runner load, decides the outcome.
  // The LOAD1 gate itself stays covered by the machineLoadBlockReason tests.
  const QUIET_LOAD = { OMP_KIT_HEAVY_FAKE_LOAD1: "0.5" };
- test("heavy streams the child and preserves its exit code", async () => {
+ test.concurrent("heavy streams the child and preserves its exit code", async () => {
  	const root = fixture();
  	configure(root, { slots: 1, max_wait_s: 1 });
  	const result = await invoke(root, ["heavy", "--label", "tiny", "--", "sh", "-c", "printf child; exit 23"], QUIET_LOAD);
+ 
+ 	expect(result.code).toBe(23);
+ 	expect(result.stdout).toBe("child");
+ 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
+ });
 
-	expect(result.code).toBe(23);
-	expect(result.stdout).toBe("child");
-	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
-});
-
-test("no-wait defers on a full machine slot without starting the command", async () => {
+test.concurrent("no-wait defers on a full machine slot without starting the command", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 1 });
 	const jobs = await seedJob(root, { id: "slot-owner" });
@@ -244,7 +244,7 @@ test("no-wait defers on a full machine slot without starting the command", async
 	expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual(["slot-owner.json"]);
 });
 
-test("a pane cannot start a second heavy command when another global slot is free", async () => {
+test.concurrent("a pane cannot start a second heavy command when another global slot is free", async () => {
 	const root = fixture();
 	configure(root, { slots: 2, max_wait_s: 1 });
 	await seedJob(root, { id: "pane-owner", pane: "%heavy-pane" });
@@ -254,7 +254,7 @@ test("a pane cannot start a second heavy command when another global slot is fre
 	expect(result.stderr).toContain("pane already has running job existing");
 });
 
-test("process-reused ledger entries are reaped before admission", async () => {
+test.concurrent("process-reused ledger entries are reaped before admission", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 1 });
 	const jobs = await seedJob(root, { id: "reused-owner", process_start: "not-this-process-start" });
@@ -287,7 +287,7 @@ async function subjects(root: string): Promise<{ live: { pid: number; start: str
 	return { live: liveSeen, zombie: zombieSeen, stop };
 }
 
-test("5m6ej planted: a zombie ledger row is reaped before admission; control: a live row with a raw multi-space lstart holds its slot", async () => {
+test.concurrent("5m6ej planted: a zombie ledger row is reaped before admission; control: a live row with a raw multi-space lstart holds its slot", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 1 });
 	const { live, zombie, stop } = await subjects(root);
@@ -311,7 +311,7 @@ test("5m6ej planted: a zombie ledger row is reaped before admission; control: a 
 	}
 }, 60_000);
 
-test("a zero wait budget returns 75 when admission remains blocked", async () => {
+test.concurrent("a zero wait budget returns 75 when admission remains blocked", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 0 });
 	await seedJob(root, { id: "timeout-owner" });
@@ -363,7 +363,7 @@ test("two concurrent runs serialize on one slot", async () => {
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
 });
 
-test("the child runs ten nice points above its parent when the platform can raise it", async () => {
+test.concurrent("the child runs ten nice points above its parent when the platform can raise it", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 5 });
 	const result = await invoke(root, ["heavy", "--label", "nicecheck", "--", "sh", "-c", "ps -o nice= -p $$; ps -o nice= -p $PPID"]);
@@ -377,7 +377,7 @@ test("the child runs ten nice points above its parent when the platform can rais
 	// macos-15 CI hit the 5 s default at 5008 ms (bun spawn + admission under load); measured cause.
 }, 30000);
 
-test("SIGINT releases the slot with exit 130", async () => {
+test.concurrent("SIGINT releases the slot with exit 130", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 30 });
 	const child = Bun.spawn([process.execPath, entry, "heavy", "--label", "interruptible", "--", "sleep", "30"], {
@@ -394,7 +394,7 @@ test("SIGINT releases the slot with exit 130", async () => {
 // macos-15 CI hit the 5 s default at 5002 ms (spawn + ledger poll under load); measured cause.
 }, 30000);
 
-test("SIGTERM releases the slot with exit 143", async () => {
+test.concurrent("SIGTERM releases the slot with exit 143", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 30 });
 	const child = Bun.spawn([process.execPath, entry, "heavy", "--label", "terminable", "--", "sleep", "30"], {
@@ -422,7 +422,7 @@ test("planted contention queues the job even with a free slot", async () => {
 	expect(existsSync(marker)).toBe(false);
 });
 
-test("planted no-wait under contention exits 75 without starting", async () => {
+test.concurrent("planted no-wait under contention exits 75 without starting", async () => {
 	const root = fixture();
 	configure(root, { slots: 2, max_wait_s: 30 });
 	const marker = join(root, "should-not-run");
@@ -449,7 +449,7 @@ test("a waiting job reports position, running jobs and the contention reason", a
 // RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34): a caller with a short budget caps the queue wait, so a
 // held queue is named in seconds instead of surfacing as the caller's own timeout (0.2.86: a 900 s ladder test against
 // the 900 s default queue wait).
-test("RELFAILFAST1 OMP_KIT_HEAVY_MAX_WAIT_S defers a held job at the cap, below load.json's wait", async () => {
+test.concurrent("RELFAILFAST1 OMP_KIT_HEAVY_MAX_WAIT_S defers a held job at the cap, below load.json's wait", async () => {
 	const root = fixture();
 	// load.json allows a 600 s wait; only the 2 s cap can end the queue inside the 45 s deadline. kitlib run() owns the
 	// child's process group, so an uncapped (mutant) child is stopped at the deadline instead of queueing on for 600 s.
@@ -468,7 +468,7 @@ test("RELFAILFAST1 OMP_KIT_HEAVY_MAX_WAIT_S defers a held job at the cap, below 
 	expect(existsSync(marker)).toBe(false);
 }, 60000);
 
-test("RELFAILFAST1 an invalid OMP_KIT_HEAVY_MAX_WAIT_S refuses before running anything", async () => {
+test.concurrent("RELFAILFAST1 an invalid OMP_KIT_HEAVY_MAX_WAIT_S refuses before running anything", async () => {
 	const root = fixture();
 	const marker = join(root, "should-not-run");
 	const result = await invoke(root, ["heavy", "--label", "bad-cap", "--", "sh", "-c", `printf ran > '${marker}'`],
@@ -478,7 +478,7 @@ test("RELFAILFAST1 an invalid OMP_KIT_HEAVY_MAX_WAIT_S refuses before running an
 	expect(existsSync(marker)).toBe(false);
 });
 
-test("GITHUB_ACTIONS=true bypasses LOAD1 and starts the command", async () => {
+test.concurrent("GITHUB_ACTIONS=true bypasses LOAD1 and starts the command", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 1 });
 	const marker = join(root, "gha-ran");
@@ -488,7 +488,7 @@ test("GITHUB_ACTIONS=true bypasses LOAD1 and starts the command", async () => {
 	expect(readFileSync(marker, "utf8")).toBe("ran");
 });
 
-test("CI=1 alone does not bypass LOAD1 admission", async () => {
+test.concurrent("CI=1 alone does not bypass LOAD1 admission", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 1 });
 	const marker = join(root, "ci-ran");
@@ -499,7 +499,7 @@ test("CI=1 alone does not bypass LOAD1 admission", async () => {
 	expect(existsSync(marker)).toBe(false);
 });
 
-test("GITHUB_ACTIONS load exemption preserves slot admission", async () => {
+test.concurrent("GITHUB_ACTIONS load exemption preserves slot admission", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 1 });
 	const jobs = await seedJob(root, { id: "gha-slot-owner" });
@@ -530,7 +530,7 @@ function countingSbh(dir: string, laterCode: number): string {
 	return bin;
 }
 
-test("HEAVYDISK1 planted: no-wait defers on sbh pressure without starting", async () => {
+test.concurrent("HEAVYDISK1 planted: no-wait defers on sbh pressure without starting", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 1 });
 	const bin = fakeSbh(root, 1);
@@ -542,7 +542,7 @@ test("HEAVYDISK1 planted: no-wait defers on sbh pressure without starting", asyn
 	expect(existsSync(marker)).toBe(false);
 });
 
-test("HEAVYDISK1: healthy disk runs the command", async () => {
+test.concurrent("HEAVYDISK1: healthy disk runs the command", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 1 });
 	const bin = fakeSbh(root, 0);
@@ -553,7 +553,7 @@ test("HEAVYDISK1: healthy disk runs the command", async () => {
 	expect(readFileSync(marker, "utf8")).toBe("ran");
 });
 
-test("HEAVYCI1 planted: a missing sbh fails fast with 69 on the waiting path, queueing and starting nothing", async () => {
+test.concurrent("HEAVYCI1 planted: a missing sbh fails fast with 69 on the waiting path, queueing and starting nothing", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 20, disk_observer: "sbh" });
 	const noSbhPath = "/usr/bin:/bin";
@@ -570,7 +570,7 @@ test("HEAVYCI1 planted: a missing sbh fails fast with 69 on the waiting path, qu
 	expect(readdirSync(join(root, "state", "omp-kit", "load", "jobs")).filter((name) => name.endsWith(".json"))).toEqual([]);
 }, 40_000);
 
-test("HEAVYCI1 planted: an sbh error answer is a missing prerequisite (69), never a 75 deferral", async () => {
+test.concurrent("HEAVYCI1 planted: an sbh error answer is a missing prerequisite (69), never a 75 deferral", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 20 });
 	const bin = fakeSbh(root, 2);
@@ -584,7 +584,7 @@ test("HEAVYCI1 planted: an sbh error answer is a missing prerequisite (69), neve
 	expect(existsSync(marker)).toBe(false);
 }, 40_000);
 
-test("HEAVYCI1: --no-wait with a missing sbh also returns 69, not 75", async () => {
+test.concurrent("HEAVYCI1: --no-wait with a missing sbh also returns 69, not 75", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 1, disk_observer: "sbh" });
 	const result = await invoke(root, ["heavy", "--no-wait", "--label", "nosbh-nowait", "--", "sh", "-c", "exit 0"], { PATH: "/usr/bin:/bin" });
@@ -592,7 +592,7 @@ test("HEAVYCI1: --no-wait with a missing sbh also returns 69, not 75", async () 
 	expect(result.stderr).toContain("sbh unavailable");
 });
 
-test("HEAVYCI1: an observer lost while queued fails with 69 at admission and leaves no ledger row", async () => {
+test.concurrent("HEAVYCI1: an observer lost while queued fails with 69 at admission and leaves no ledger row", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 20 });
 	const jobs = await seedJob(root, { id: "slot-owner" });
@@ -609,7 +609,7 @@ test("HEAVYCI1: an observer lost while queued fails with 69 at admission and lea
 	expect(readdirSync(jobs).filter((name) => name.endsWith(".json"))).toEqual([]);
 }, 40_000);
 
-test("HEAVYCI1: a queued job re-observes the disk, so pressure that appears while waiting still defers", async () => {
+test.concurrent("HEAVYCI1: a queued job re-observes the disk, so pressure that appears while waiting still defers", async () => {
 	const root = fixture();
 	configure(root, { slots: 1, max_wait_s: 4 });
 	const jobs = await seedJob(root, { id: "slot-owner" });
@@ -626,7 +626,7 @@ test("HEAVYCI1: a queued job re-observes the disk, so pressure that appears whil
 	expect(existsSync(marker)).toBe(false);
 }, 40_000);
 
-test("HEAVYCI1: admission observes the disk after acquiring the state mutex, not before the lock wait (QuietBadger AM57798)", async () => {
+test.concurrent("HEAVYCI1: admission observes the disk after acquiring the state mutex, not before the lock wait (QuietBadger AM57798)", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 4 });
 	const lock = join(root, "state", "omp-kit", "load", "mutex");
@@ -706,11 +706,11 @@ function failingCases(decide: Decide): string[] {
 	});
 }
 
-test("oq1h.1 unit: statfs decision matrix without environment", () => {
+test.concurrent("oq1h.1 unit: statfs decision matrix without environment", () => {
 	for (const check of Object.values(STATFS_CASES)) check(decideDiskPressure);
 });
 
-test("oq1h.1 planted: each statfs mutant is killed by exactly the cases that guard it", () => {
+test.concurrent("oq1h.1 planted: each statfs mutant is killed by exactly the cases that guard it", () => {
 	const healthy: DiskVerdict = { kind: "ok", observer: "statfs" };
 	const mutants: Record<string, { decide: Decide; killedBy: string[] }> = {
 		"always healthy (forced ok): the 5 GiB pressure case fails": {
@@ -733,7 +733,7 @@ test("oq1h.1 planted: each statfs mutant is killed by exactly the cases that gua
 	}
 });
 
-test("oq1h.1: auto prefers a failing sbh over healthy statfs (sbh precedence)", async () => {
+test.concurrent("oq1h.1: auto prefers a failing sbh over healthy statfs (sbh precedence)", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 1 });
 	const bin = fakeSbh(root, 1);
@@ -745,7 +745,7 @@ test("oq1h.1: auto prefers a failing sbh over healthy statfs (sbh precedence)", 
 	expect(existsSync(marker)).toBe(false);
 });
 
-test("oq1h.1: auto with an erroring sbh fails fast with 69 naming the escape", async () => {
+test.concurrent("oq1h.1: auto with an erroring sbh fails fast with 69 naming the escape", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 20 });
 	const bin = fakeSbh(root, 2);
@@ -809,11 +809,11 @@ async function nativeRun(input: { cwd: string; config?: Parameters<typeof config
 	return { code: result.code, stderr: result.stderr, ran: existsSync(marker) };
 }
 
-test.skipIf(!LOW_FS_REQUIRED)("oq1h.1 native: GitHub's Linux runner offers a real filesystem below the 10 GiB need", () => {
+test.skipIf(!LOW_FS_REQUIRED).concurrent("oq1h.1 native: GitHub's Linux runner offers a real filesystem below the 10 GiB need", () => {
 	expect(LOW_BASE).not.toBeNull();
 });
 
-test.skipIf(LOW_BASE === null)("oq1h.1 native: statfs pressure on a real low-capacity filesystem defers 75 and never starts the command", async () => {
+test.skipIf(LOW_BASE === null).concurrent("oq1h.1 native: statfs pressure on a real low-capacity filesystem defers 75 and never starts the command", async () => {
 	await onLowFilesystem(async (cwd) => {
 		const result = await nativeRun({ cwd });
 		expect(result.code).toBe(75);
@@ -822,7 +822,7 @@ test.skipIf(LOW_BASE === null)("oq1h.1 native: statfs pressure on a real low-cap
 	});
 });
 
-test.skipIf(LOW_BASE === null)("oq1h.1 planted: a forged-healthy statfs reading starts the command on the same real low filesystem", async () => {
+test.skipIf(LOW_BASE === null).concurrent("oq1h.1 planted: a forged-healthy statfs reading starts the command on the same real low filesystem", async () => {
 	await onLowFilesystem(async (cwd) => {
 		const honest = await nativeRun({ cwd });
 		expect(honest.code).toBe(75);
@@ -834,7 +834,7 @@ test.skipIf(LOW_BASE === null)("oq1h.1 planted: a forged-healthy statfs reading 
 	});
 });
 
-test.skipIf(LOW_BASE === null)("SAVEFIRST1: explicit statfs returns typed floor refusal", async () => {
+test.skipIf(LOW_BASE === null).concurrent("SAVEFIRST1: explicit statfs returns typed floor refusal", async () => {
 	await onLowFilesystem(async (cwd) => {
 		const root = fixture();
 		configure(root, { slots: 8, max_wait_s: 0 });
@@ -847,7 +847,7 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1: explicit statfs returns typed floor 
 	});
 });
 
-test.skipIf(LOW_BASE === null)("oq1h.1 native: auto lets a healthy sbh decide over real statfs pressure (sbh precedence)", async () => {
+test.skipIf(LOW_BASE === null).concurrent("oq1h.1 native: auto lets a healthy sbh decide over real statfs pressure (sbh precedence)", async () => {
 	await onLowFilesystem(async (cwd) => {
 		const result = await nativeRun({ cwd, sbh: 0 });
 		expect(result.code).toBe(0);
@@ -855,7 +855,7 @@ test.skipIf(LOW_BASE === null)("oq1h.1 native: auto lets a healthy sbh decide ov
 	});
 });
 
-test.skipIf(LOW_BASE === null)("oq1h.1 native: disk_observer statfs never consults sbh, so a healthy sbh cannot hide real pressure", async () => {
+test.skipIf(LOW_BASE === null).concurrent("oq1h.1 native: disk_observer statfs never consults sbh, so a healthy sbh cannot hide real pressure", async () => {
 	await onLowFilesystem(async (cwd) => {
 		const result = await nativeRun({ cwd, sbh: 0, config: { disk_observer: "statfs" } });
 		expect(result.code).toBe(75);
@@ -864,7 +864,7 @@ test.skipIf(LOW_BASE === null)("oq1h.1 native: disk_observer statfs never consul
 	});
 });
 
-test("oq1h.1 native: with no sbh the statfs verdict on the fixture disk equals the independent measurement", async () => {
+test.concurrent("oq1h.1 native: with no sbh the statfs verdict on the fixture disk equals the independent measurement", async () => {
 	const cwd = fixture();
 	const pressured = measure(cwd).freeBytes < HEAVY_DISK_NEED_BYTES;
 	const result = await nativeRun({ cwd });
@@ -873,7 +873,7 @@ test("oq1h.1 native: with no sbh the statfs verdict on the fixture disk equals t
 	if (pressured) expect(result.stderr).toContain("disk low (statfs)");
 });
 
-test("oq1h.1 native: disk_floor_pct reaches the real CLI verdict", async () => {
+test.concurrent("oq1h.1 native: disk_floor_pct reaches the real CLI verdict", async () => {
 	const cwd = fixture();
 	const { freeBytes, freePct } = measure(cwd);
 	const pressured = freeBytes < HEAVY_DISK_NEED_BYTES || freePct < 50;
@@ -882,7 +882,7 @@ test("oq1h.1 native: disk_floor_pct reaches the real CLI verdict", async () => {
 	expect(result.ran).toBe(!pressured);
 });
 
-test("oq1h.1 native: a floor above the measured percent defers through diskVerdict", async () => {
+test.concurrent("oq1h.1 native: a floor above the measured percent defers through diskVerdict", async () => {
 	const verdict = await diskVerdict({ config: { slots: 2, max_wait_s: 1, disk_observer: "statfs", disk_floor_pct: 100 }, cwd: fixture() });
 	expect(verdict.kind).toBe("pressure");
 	if (verdict.kind === "pressure") {
@@ -891,7 +891,7 @@ test("oq1h.1 native: a floor above the measured percent defers through diskVerdi
 	}
 });
 
-test("SAVEFIRST1: explicit statfs saves bypass percent-stage refusal but auto and sbh retain it", async () => {
+test.concurrent("SAVEFIRST1: explicit statfs saves bypass percent-stage refusal but auto and sbh retain it", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 1, disk_observer: "auto", disk_floor_pct: 20 });
 	const statfsFixture = join(root, "nine-percent-statfs.ts");
@@ -937,7 +937,7 @@ mock.module("node:fs", () => ({ ...snapshot, default: { ...snapshot, statfsSync:
 // skips by name rather than passing on a different state.
 const FIXTURE_AMPLE = measure(process.cwd()).freeBytes >= HEAVY_DISK_NEED_BYTES;
 
-test.skipIf(!FIXTURE_AMPLE)("SAVEFIRST1 planted: --disk-observer statfs admits under sbh pressure when the bytes physically fit (needs >= 10 GiB free)", async () => {
+test.skipIf(!FIXTURE_AMPLE).concurrent("SAVEFIRST1 planted: --disk-observer statfs admits under sbh pressure when the bytes physically fit (needs >= 10 GiB free)", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 1 });
 	const pressured = { PATH: `${fakeSbh(root, 1)}:${process.env.PATH ?? ""}:/usr/bin:/bin` };
@@ -955,7 +955,7 @@ test.skipIf(!FIXTURE_AMPLE)("SAVEFIRST1 planted: --disk-observer statfs admits u
 	expect(readFileSync(marker, "utf8")).toBe("ran");
 });
 
-test("SAVEFIRST1: --disk-observer overrides load.json, so a missing sbh named there cannot block a statfs call", async () => {
+test.concurrent("SAVEFIRST1: --disk-observer overrides load.json, so a missing sbh named there cannot block a statfs call", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 1, disk_observer: "sbh" });
 	const noSbh = { PATH: "/usr/bin:/bin" };
@@ -969,7 +969,7 @@ test("SAVEFIRST1: --disk-observer overrides load.json, so a missing sbh named th
 	expect(overridden.stderr).not.toContain("sbh unavailable");
 });
 
-test("SAVEFIRST1: an unknown --disk-observer value runs nothing", async () => {
+test.concurrent("SAVEFIRST1: an unknown --disk-observer value runs nothing", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 1 });
 	const marker = join(root, "bogus-marker");
@@ -979,7 +979,7 @@ test("SAVEFIRST1: an unknown --disk-observer value runs nothing", async () => {
 	expect(existsSync(marker)).toBe(false);
 });
 
-test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted: --disk-observer statfs still refuses below the 10 GiB physical floor, whatever sbh says", async () => {
+test.skipIf(LOW_BASE === null).concurrent("SAVEFIRST1 planted: --disk-observer statfs still refuses below the 10 GiB physical floor, whatever sbh says", async () => {
 	await onLowFilesystem(async (cwd) => {
 		const root = fixture();
 		configure(root, { slots: 8, max_wait_s: 1 });
@@ -993,7 +993,7 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted: --disk-observer statfs still
 	});
 });
 
-test.skipIf(!FIXTURE_AMPLE)("SAVEFIRST1: a waiting job re-reads load.json each poll, so an observer change admits it before its deadline (needs >= 10 GiB free)", async () => {
+test.skipIf(!FIXTURE_AMPLE).concurrent("SAVEFIRST1: a waiting job re-reads load.json each poll, so an observer change admits it before its deadline (needs >= 10 GiB free)", async () => {
 	const root = fixture();
 	configure(root, { slots: 8, max_wait_s: 8 });
 	const marker = join(root, "refresh-marker");

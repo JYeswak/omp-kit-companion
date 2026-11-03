@@ -14,6 +14,11 @@ printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-tmp.sh"
 kitlib_tmp TMP stale-worktree-test || exit 1
+# Installer probes use an intentionally unresolvable bead, never the live
+# tracker. The stale-worktree member itself derives attribution from Git.
+BR_BIN=/usr/bin/false
+export BR_BIN
+
 
 pass=0
 fail=0
@@ -27,9 +32,13 @@ check() {
 # reference-transaction member ~1 s per ref update), so ~47 commits cost 6.5 min, the slowest file in the full suite.
 # Every commit still goes through the real installed runner and member 49; the other members have their own suites.
 only_stale_member() {
-	for member in "$1"/.git/hooks/hooks.d/*/[0-9]*; do
-		[ -e "$member" ] || continue
-		case "$member" in */commit-msg/49-omp-kit-stale-worktree) ;; *) rm -f "$member" ;; esac
+	for member in "$1"/.git/hooks/hooks.d/*/*; do
+		[ -f "$member" ] || continue
+		case "$member" in
+			*/commit-msg/49-omp-kit-stale-worktree | */commit-msg/kitlib-tmp.sh | \
+			*/commit-msg/gate-event.sh | */commit-msg/kitlib_jsonl.py | */commit-msg/kitlib_lock.py) ;;
+			*) rm -f "$member" ;;
+		esac
 	done
 	# The pre-commit, pre-push and reference-transaction runners have no member left; drop them so a commit does not
 	# spawn them (reference-transaction fires 3-5 times per commit). The commit-msg runner stays: it is under test.
@@ -41,7 +50,7 @@ new_repo() {
 	dir="$TMP/$1"
 	if [ ! -x "$seeded_template/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree" ]; then
 		mkdir -p "$seeded_template/pkg"
-		git -C "$seeded_template" init -q 2>/dev/null
+		git -C "$seeded_template" init -q --template= 2>/dev/null
 		git -C "$seeded_template" config user.email "test@invalid.example"
 		git -C "$seeded_template" config user.name "Test"
 		rm -f "$seeded_template/.git/hooks/commit-msg" "$seeded_template/.git/hooks/commit-msg-"* "$seeded_template/.git/hooks/pre-commit"
@@ -122,7 +131,7 @@ new_export_repo() {
 	dir="$TMP/$1"
 	if [ ! -x "$export_template/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree" ]; then
 		mkdir -p "$export_template/.beads"
-		git -C "$export_template" init -q 2>/dev/null
+		git -C "$export_template" init -q --template= 2>/dev/null
 		git -C "$export_template" config user.email "test@invalid.example"
 		git -C "$export_template" config user.name "Test"
 		rm -f "$export_template/.git/hooks/commit-msg" "$export_template/.git/hooks/commit-msg-"* "$export_template/.git/hooks/pre-commit"

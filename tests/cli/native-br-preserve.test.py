@@ -55,6 +55,7 @@ def issue(ident: str, creator: str = "FixtureCreator", comment: bool = False, be
 
 class Fixture:
     serial = 0
+    seeds: dict[str, Path] = {}
 
     def __init__(self, data: list[dict] | None = None):
         Fixture.serial += 1
@@ -62,17 +63,25 @@ class Fixture:
         self.root.mkdir()
         (self.root / ".owner").write_text(json.dumps({"pid": os.getpid(), "label": "native-fixture", "repo": str(KIT)}))
         self.source = self.root / guard.TRACKER
+        key = json.dumps(data or [issue("fixture-aaa")], sort_keys=True)
+        template = Fixture.seeds.get(key)
+        if template is not None:
+            shutil.copytree(template, self.root, dirs_exist_ok=True)
+            return
         self.git("init", "--initial-branch=main")
         self.git("config", "user.name", "GuardFixture")
         self.git("config", "user.email", "fixture@example.test")
         (self.root / "no-hooks").mkdir()
-        self.git("config", "core.hooksPath", str(self.root / "no-hooks"))
+        self.git("config", "core.hooksPath", "no-hooks")
         self.br("init", "--prefix", "fixture")
         self.write(data or [issue("fixture-aaa")])
         self.br("sync", "--import-only")
         self.export()
         self.git("add", "--", guard.TRACKER)
         self.git("commit", "--only", "-m", "fixture native baseline", "--", guard.TRACKER)
+        template = ROOT / ("seed-" + str(Fixture.serial))
+        shutil.copytree(self.root, template)
+        Fixture.seeds[key] = template
 
     def cmd(self, argv: list[str], env: dict | None = None, expected: int = 0) -> subprocess.CompletedProcess:
         p = subprocess.run(argv, cwd=self.root, env=env or ENV, capture_output=True, text=True,  # pysafe: leaf git/native-br fixture subprocess; timeout bounds the wait, DEVNULL stdin

@@ -35,6 +35,8 @@ out=$(BEADS_DB="$DB" FIXTURE_HELPER="$FIXTURE_HELPER" INSTALLER="$INSTALLER" R="
 ' 2>&1)
 rc=$?
 check "$rc" "0" "fixture-ignores-inherited-beads-db" "$out" "fixture commit passed"
+# Reuse that genuine full install for the narrower ratchet cases below.
+KITLIB_INSTALLED_FIXTURE="$TMP/inherited-db-fixture"
 
 # 1. a fresh installed repo refuses a staged new raw spawn, naming kitlib;
 #    the same call through kitlib passes
@@ -89,6 +91,7 @@ check "$?" "1" "legacy-new-refused" "$out" "old.py:4:1: raw-spawn: .*subprocess.
 
 # 4. --only judges the temporary index; a missing ratchet or engine refuses
 R=$(new_repo only)
+fixture_hooks "$R" private || exit 1
 printf '%s\n' "$TS_BAD" > "$R/bad.ts"
 printf 'export const ok = 1;\n' > "$R/good.ts"
 git -C "$R" add bad.ts good.ts
@@ -265,18 +268,15 @@ send_got=$(git -C "$R" rev-parse "HEAD:src/send.ts")
 send_want=$(git -C "$OBJSRC" rev-parse "$PREAL:src/send.ts")
 check "$send_got" "$send_want" "real-withdrawal-send-kept" "x" "x"
 alleq=0
-for p in $XPATHS; do
-	if git -C "$R" rev-parse --verify --quiet "HEAD:$p" >/dev/null 2>&1; then in_head=1; else in_head=0; fi
-	if git -C "$OBJSRC" rev-parse --verify --quiet "$PREAL:$p" >/dev/null 2>&1; then in_p=1; else in_p=0; fi
-	if [ "$in_head" != "$in_p" ]; then echo "MISMATCH-PRESENCE:$p head=$in_head p=$in_p"; alleq=1
-	elif [ "$in_head" = 1 ]; then
-		got=$(git -C "$R" rev-parse "HEAD:$p")
-		want=$(git -C "$OBJSRC" rev-parse "$PREAL:$p")
-		gotmode=$(git -C "$R" ls-files -s -- "$p" | cut -d' ' -f1)
-		wantmode=$(git -C "$OBJSRC" ls-tree --full-tree "$PREAL" -- "$p" | cut -d' ' -f1)
-		if [ "$got" != "$want" ] || [ "$gotmode" != "$wantmode" ]; then echo "MISMATCH:$p"; alleq=1; fi
-	fi
-done
+# Compare the complete selected tree entries (presence, blob and mode) in
+# batches, then ensure the committed index still matches that HEAD tree.
+# shellcheck disable=SC2086 # intended split: a whitespace-separated list of literal repo paths, no globs
+git -C "$R" ls-tree -r HEAD -- $XPATHS > "$TMP/withdrawal-head-tree" || alleq=1
+# shellcheck disable=SC2086 # intended split: a whitespace-separated list of literal repo paths, no globs
+git -C "$OBJSRC" ls-tree -r "$PREAL" -- $XPATHS > "$TMP/withdrawal-parent-tree" || alleq=1
+cmp -s "$TMP/withdrawal-head-tree" "$TMP/withdrawal-parent-tree" || alleq=1
+# shellcheck disable=SC2086 # intended split: a whitespace-separated list of literal repo paths, no globs
+git -C "$R" diff --cached --quiet HEAD -- $XPATHS || alleq=1
 check "$alleq" "0" "real-withdrawal-all-bytes" "x" "x"
 # The prior .41 fixture change is this real X/P delta. Compare the complete
 # P-side blob as history, without claiming .41 qualification.

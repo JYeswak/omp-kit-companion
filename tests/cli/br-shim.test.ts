@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test as bunTest } from "bun:test";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
@@ -9,12 +9,27 @@ import { unlinkSync } from "node:fs";
 import { callerScratchRoot } from "../../src/runtime.ts";
 import { readJsonl } from "../../src/kitlib/jsonl.ts";
 
+// Each scenario owns its scratch, tracker, authority and environment. No case
+// observes another case's mutations, so native subprocess waits may overlap.
+const test = bunTest.concurrent;
+// Native serial cases below are barriers between batches of at most three
+// concurrent claim cases. Queue at the test runner, before a case's clock starts,
+// not inside claim(): that made later cases spend their 40 s bound waiting.
+
 const root = resolve(import.meta.dir, "../..");
 const shimSource = readFileSync(join(root, "scripts/br-shim.sh"), "utf8");
 const decoder = new TextDecoder();
 // Admission tests are not latency benchmarks. Each case owns at most two 15s
 // subprocesses plus their bounded reap and fixture cleanup; the file gate is unchanged.
 const CASE_BUDGET_MS = 40_000;
+const claimPrograms = ownedTmp("cutclaim-programs");
+
+// Share immutable executable bytes, never scenario data or tracker mutations.
+function claimProgram(name: string, source: string): string {
+	const path = join(claimPrograms.path, name);
+	if (!existsSync(path)) writeFileSync(path, source, { mode: 0o755 });
+	return path;
+}
 
 type Scenario = {
 	id?: string;
@@ -27,6 +42,7 @@ type Scenario = {
 	config?: "cut" | "malformed" | "missing" | "default-missing" | "unlisted" | "no-milestone";
 	labels?: string[];
 };
+
 
 /** Real shell bridge and real source CLI; only external tracker and mail services are fixtures. */
 async function claim(options: Scenario = {}) {
@@ -66,45 +82,97 @@ async function claim(options: Scenario = {}) {
 		const shim = join(release, "scripts/br-shim.sh");
 		writeFileSync(shim, source);
 		const mutations = join(scratch.path, "mutations.jsonl");
+		const unexpected = join(scratch.path, "unexpected-tracker-argv");
 		const rows = ["k-1", "k-2"].map(id => ({
 			id, title: `Claim ${id}`, status: "open", assignee: null,
 			labels: options.labels ?? [], dependencies: [], updated_at: "2026-10-30T00:00:00Z",
 			acceptance_criteria: "- [ ] [a] [build] claim path works `true` -> rc 0; planted negative: out-of-cut claim refused",
 		}));
-		const trackerData = join(scratch.path, "beads.json");
-		writeFileSync(trackerData, JSON.stringify(rows));
+		const readFlags = ["--no-auto-import", "--no-auto-flush"];
+		const trackerArgv = [
+			...["k-1", "k-2"].map(id => ["show", id, "--json", ...readFlags]),
+			...["k-1", "k-2"].flatMap(first => ["k-1", "k-2"].map(second => ["show", first, second, "--json", ...readFlags])),
+			["list", "--status", "all", "--fields", "id,status,assignee,labels", "--json", "--limit", "0", ...readFlags],
+			["blocked", "--json", "--limit", "0", ...readFlags],
+			["list", "--assignee", "CutClaimShellFixture", "--status", "in_progress", "--json", ...readFlags],
+			["where"],
+			...["k-1", "k-2"].map(id => ["update", id, "--claim", ...(options.claimArgs ?? []), "--actor", "CutClaimShellFixture"]),
+		];
 		const realBr = join(bin, "br");
-		// A python3 fake, not a bun one: claim reads have a 3 s deadline each, and under full-suite load a cold bun
-		// start per fake call exceeded it (release verdict 47d13bec70: `show k-1 --json failed (timeout)`).
-		writeFileSync(realBr, `#!/usr/bin/env python3
-import json, os, sys
-def dump(value): return json.dumps(value, separators=(",", ":"))
-args = sys.argv[1:]
-database = os.environ.get("BEADS_DB")
-if "--db" in args:
-    i = args.index("--db"); database = args[i + 1]; del args[i:i + 2]
-if database != os.environ["CUTCLAIM_TRACKER_DB"]:
-    sys.stderr.write("wrong tracker database: %s\\n" % database); sys.exit(9)
-rows = json.load(open(os.environ["CUTCLAIM_TRACKER_DATA"]))
-verb = args[0] if args else ""
-if verb == "show":
-    ids = [a for a in args[1:] if not a.startswith("--")]
-    found = [next((r for r in rows if r["id"] == i), None) for i in ids]
-    if any(r is None for r in found): sys.exit(2)
-    print(dump(found[0] if len(ids) == 1 else found))
-elif verb == "list":
-    print(dump([] if "--assignee" in args else rows))
-elif verb == "blocked":
-    print(dump({"issues": [], "has_more": False}))
-elif verb == "dep" and args[1:2] == ["list"]:
-    print("[]")
-elif verb == "where":
-    print("database: %s" % database)
-elif verb == "update" and "--claim" in args:
-    with open(os.environ["CUTCLAIM_MUTATIONS"], "a") as f: f.write(dump({"id": args[1], "database": database}) + "\\n")
-else:
-    sys.stderr.write("unexpected tracker command %s\\n" % json.dumps(args)); sys.exit(8)
-`, { mode: 0o755 });
+		// Only the external tracker is a protocol fixture. Shell builtins avoid an
+		// env -> Python interpreter/import startup for every three-second read.
+		// Rows still derive from this scenario; real shim, CLI and verdict readers stay intact.
+		symlinkSync(claimProgram("br", `#!/bin/sh
+unexpected_argv() {
+  printf 'unexpected tracker argv:' >&2
+  printf ' <%s>' "$@" >&2
+  printf '\\n' >&2
+  printf 'unexpected tracker argv: <%s>\\n' "$*" >> "$CUTCLAIM_UNEXPECTED"
+  exit 8
+}
+separator='${String.fromCharCode(31)}'
+signature=
+database=\${BEADS_DB:-}
+verb=; ids=; claim=0; assignee=0; take_db=0; db_count=0
+for arg do
+  if [ "$take_db" = 1 ]; then database=$arg; take_db=0; continue; fi
+  if [ "$arg" != --db ]; then
+    case "$arg" in *"$separator"*|*'
+'*) unexpected_argv "$@" ;; esac
+    if [ -z "$signature" ]; then signature=$arg; else signature="$signature$separator$arg"; fi
+  fi
+  case "$arg" in
+    --db) db_count=$((db_count + 1)); [ "$db_count" = 1 ] || unexpected_argv "$@"; take_db=1 ;;
+    --claim) claim=1 ;;
+    --assignee) assignee=1 ;;
+    --*) ;;
+    *) if [ -z "$verb" ]; then verb=$arg; else ids="$ids $arg"; fi ;;
+  esac
+done
+[ "$take_db" = 0 ] || unexpected_argv "$@"
+if [ "$database" != "$CUTCLAIM_TRACKER_DB" ]; then
+  printf 'wrong tracker database: %s\\n' "$database" >&2
+  printf 'wrong tracker database: %s\\n' "$database" >> "$CUTCLAIM_UNEXPECTED"
+  exit 9
+fi
+case "$verb" in
+  show|list|blocked|where) [ "$db_count" = 1 ] || unexpected_argv "$@" ;;
+  update) [ "$db_count" = "$CUTCLAIM_EXPLICIT_DB" ] || unexpected_argv "$@" ;;
+esac
+known=0
+while IFS= read -r expected; do
+  if [ "$signature" = "$expected" ]; then known=1; break; fi
+done <<FIXTURE_EXACT_ARGV
+$CUTCLAIM_ARGV
+FIXTURE_EXACT_ARGV
+[ "$known" = 1 ] || unexpected_argv "$@"
+row1=$CUTCLAIM_ROW_ONE
+row2=$CUTCLAIM_ROW_TWO
+mutation1=$CUTCLAIM_MUTATION_ONE
+mutation2=$CUTCLAIM_MUTATION_TWO
+case "$verb" in
+  show)
+    found=; count=0
+    for id in $ids; do
+      case "$id" in k-1) row=$row1 ;; k-2) row=$row2 ;; *) exit 2 ;; esac
+      if [ "$count" = 0 ]; then found=$row; else found="$found,$row"; fi
+      count=$((count + 1))
+    done
+    if [ "$count" = 1 ]; then printf '%s\\n' "$found"; else printf '[%s]\\n' "$found"; fi ;;
+  list)
+    if [ "$assignee" = 1 ]; then printf '[]\\n'; else printf '[%s,%s]\\n' "$row1" "$row2"; fi ;;
+  blocked) printf '{"issues":[],"has_more":false}\\n' ;;
+  where) printf 'database: %s\\n' "$database" ;;
+  update)
+    [ "$claim" = 1 ] || exit 8
+    case "$ids" in
+      " k-1"|" k-1 "*) printf '%s\\n' "$mutation1" >> "$CUTCLAIM_MUTATIONS" ;;
+      " k-2"|" k-2 "*) printf '%s\\n' "$mutation2" >> "$CUTCLAIM_MUTATIONS" ;;
+      *) exit 2 ;;
+    esac ;;
+  *) unexpected_argv "$@" ;;
+esac
+`), realBr);
 		writeFileSync(join(bin, "am"), `#!/bin/sh
 case "$1:$2" in
   agents:show) printf '{"name":"CutClaimShellFixture"}\\n' ;;
@@ -141,7 +209,7 @@ process.exitCode = doc.ok ? 0 : 1;
 			const launcher = authority === "failed"
 				? `#!${process.execPath}\nconsole.error("native authority unavailable"); process.exitCode = 7;\n`
 				: alteredLauncher || `#!${process.execPath}\nimport { runCli } from ${JSON.stringify(join(root, "src/cli.ts"))};\nprocess.exitCode = await runCli(process.argv.slice(2));\n`;
-			writeFileSync(join(release, "bin/omp-kit"), launcher, { mode: 0o755 });
+			symlinkSync(claimProgram(`omp-kit-${authority}`, launcher), join(release, "bin/omp-kit"));
 		}
 		const config = join(scratch.path, "fleet-watch.json");
 		if (options.config === "malformed") writeFileSync(config, "{not JSON");
@@ -163,9 +231,17 @@ process.exitCode = doc.ok ? 0 : 1;
 				XDG_CONFIG_HOME: join(home, ".config"), XDG_STATE_HOME: join(home, ".local/state"),
 				...(options.config === "default-missing" ? {} : { OMP_KIT_FLEET_WATCH_CONFIG: config }), BR_REAL: realBr,
 				BEADS_DB: options.explicitDb ? join(decoy, ".beads/beads.db") : db,
-				CUTCLAIM_TRACKER_DB: db, CUTCLAIM_TRACKER_DATA: trackerData, CUTCLAIM_MUTATIONS: mutations,
+				CUTCLAIM_TRACKER_DB: db, CUTCLAIM_MUTATIONS: mutations,
+				CUTCLAIM_UNEXPECTED: unexpected,
+				CUTCLAIM_EXPLICIT_DB: options.explicitDb ? "1" : "0",
+				CUTCLAIM_ARGV: trackerArgv.map(argv => argv.join(String.fromCharCode(31))).join("\n"),
+				CUTCLAIM_ROW_ONE: JSON.stringify(rows[0]), CUTCLAIM_ROW_TWO: JSON.stringify(rows[1]),
+				CUTCLAIM_MUTATION_ONE: JSON.stringify({ id: "k-1", database: db }),
+				CUTCLAIM_MUTATION_TWO: JSON.stringify({ id: "k-2", database: db }),
 				TMPDIR: scratch.path },
 		});
+		// Do not let a changed reader query masquerade as an expected fail-closed verdict.
+		if (existsSync(unexpected)) throw new Error(readFileSync(unexpected, "utf8"));
 		return { rc: result.rc, timedOut: result.timed_out,
 			output: decoder.decode(result.stdout) + decoder.decode(result.stderr),
 			mutations: existsSync(mutations) ? readFileSync(mutations, "utf8") : "" };
@@ -207,7 +283,7 @@ test("CUTCLAIM1 disabled-check mutant admits the same forbidden claim", async ()
 }, CASE_BUDGET_MS);
 
 for (const authority of ["missing", "failed", "stale"] as const) {
-	test(`CUTCLAIM1 ${authority} native authority cannot silently bypass admission`, async () => {
+	(authority === "missing" ? bunTest.serial : test)(`CUTCLAIM1 ${authority} native authority cannot silently bypass admission`, async () => {
 		const result = await claim({ authority, id: "k-1" });
 		expect(result.rc).toBe(4);
 		expect(result.output).toContain("CLAIM_CUT_UNKNOWN");
@@ -226,7 +302,7 @@ test("CUTCLAIM1 malformed nonblocking refusal is rejected and disabling consiste
 }, CASE_BUDGET_MS);
 
 for (const authority of ["blocking-admitted", "duplicate"] as const) {
-	test(`CUTCLAIM1 ${authority} cut verdict is malformed and cannot admit`, async () => {
+	(authority === "blocking-admitted" ? bunTest.serial : test)(`CUTCLAIM1 ${authority} cut verdict is malformed and cannot admit`, async () => {
 		const result = await claim({ authority, id: "k-1" });
 		expect(result.rc, result.output).toBe(4);
 		expect(result.output).toContain("CLAIM_CUT_UNKNOWN");
@@ -243,7 +319,7 @@ test("CUTCLAIM1 multi-ID claim cannot forward an off-cut second target", async (
 }, CASE_BUDGET_MS);
 
 for (const config of ["missing", "malformed"] as const) {
-	test(`CUTCLAIM1 ${config} configured cut input fails closed through actual shim`, async () => {
+	(config === "malformed" ? bunTest.serial : test)(`CUTCLAIM1 ${config} configured cut input fails closed through actual shim`, async () => {
 		const result = await claim({ config, id: "k-1" });
 		expect(result.rc).toBe(4);
 		expect(result.output).toContain("CLAIM_CUT_UNKNOWN");
@@ -260,7 +336,7 @@ for (const config of ["default-missing", "unlisted", "no-milestone"] as const) {
 	}, CASE_BUDGET_MS);
 }
 
-test("CUTCLAIM1 value flags do not become extra claim targets", async () => {
+bunTest.serial("CUTCLAIM1 value flags do not become extra claim targets", async () => {
 	const result = await claim({ id: "k-1", claimArgs: ["-p", "1", "--description", "ordinary claim metadata", "--add-label", "gate"] });
 	expect(result.rc).toBe(0);
 	expect(result.mutations).toContain('"id":"k-1"');

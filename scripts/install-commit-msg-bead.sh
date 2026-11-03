@@ -836,7 +836,9 @@ fi
 # BY OUR member (exit 4 naming commit-msg-bead). BEADS_DB points at an empty
 # file so no tracker resolves, in any repo, without touching real state.
 printf '[test] fix widgets ompkit-zzzz-1\n' > "$PROBE"
-if PROBE_OUT=$(BEADS_DB="$PROBE_DB" sh "$HOOKS/commit-msg" "$PROBE" 2>&1); then
+# The probe runs inside $TARGET, as git runs the hook: from the caller's cwd, a member that reads the current repo
+# (commit-gate) judged the CALLER's checkout and ran its full fresh gate inside every fixture install (2026-11-03).
+if PROBE_OUT=$(cd "$TARGET" && BEADS_DB="$PROBE_DB" sh "$HOOKS/commit-msg" "$PROBE" 2>&1); then
 	rollback "chain accepted an id-less message in $TARGET"
 fi
 case "$PROBE_OUT" in

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { applyMigration, planMigration, planMigrationMutation, unifiedDiff } from "../../src/migrate.ts";
-import { ensureOmpSource } from "../../src/omp-source-cache.ts";
+import { ensureOmpSource, ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 afterAll(cleanupAllOwnedTmp);
@@ -69,18 +69,20 @@ async function stageKitRelease(ompSrc: string): Promise<void> {
 
 beforeAll(async () => {
 	const runtimeRoot = ownedTmp("omp-kit-migrate-omp").path;
-	OMP_SOURCE_CACHE = join(runtimeRoot, "source-cache");
+	// Migration tests need the certified native runtime, not a fresh package-manager
+	// install per suite. The version-addressed cache is shared; fixture HOME is not.
+	OMP_SOURCE_CACHE = ompSourceCacheRoot(process.env);
 	const installerHome = join(runtimeRoot, "home");
 	const installerTmp = join(runtimeRoot, "tmp");
 	mkdirSync(installerHome, { recursive: true });
 	mkdirSync(installerTmp, { recursive: true });
-	const packageRoot = ensureOmpSource(certifiedOmpVersion(), {
+	const packageRoot = profileSpan("ensureOmpSource", () => ensureOmpSource(certifiedOmpVersion(), {
 		HOME: installerHome, TMPDIR: installerTmp, PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
 		OMP_KIT_OMP_SRC_CACHE: OMP_SOURCE_CACHE,
-	});
+	}));
 	OMP_BIN_DIR = join(dirname(dirname(packageRoot)), ".bin");
 	if (!existsSync(join(OMP_BIN_DIR, "omp"))) throw new Error("certified OMP package did not install its launcher");
-	await stageKitRelease(join(packageRoot, "src"));
+	await profileSpanAsync("stageKitRelease", () => stageKitRelease(join(packageRoot, "src")));
 }, 600_000);
 afterEach(() => {
 	for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true });

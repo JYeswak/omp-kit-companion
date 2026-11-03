@@ -23,8 +23,8 @@ check() {
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
 }
 
-new_repo() {
-	dir="$TMP/$1"
+install_baseline() {
+	dir="$TMP/installed-baseline"
 	mkdir -p "$dir"
 	git -C "$dir" init -q 2>/dev/null
 	git -C "$dir" config user.email "test@invalid.example"
@@ -40,7 +40,22 @@ new_repo() {
 	git -C "$dir" tag v0.0.0
 	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
 	[ -x "$dir/.git/hooks/hooks.d/commit-msg/46-omp-kit-commit-notes" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
+	# RELEASE15 (ompkit-fp72.120.16.98): keep only the member under test and the commit-msg runner.
+	for member in "$dir"/.git/hooks/hooks.d/*/[0-9]*; do
+		case "$member" in */commit-msg/46-omp-kit-commit-notes) ;; *) rm -f "$member" ;; esac
+	done
+	rm -f "$dir/.git/hooks/pre-commit" "$dir/.git/hooks/pre-push" "$dir/.git/hooks/reference-transaction"
+	git -C "$dir" config maintenance.auto false
 	mkdir -p "$dir/scripts" "$dir/changelog.d" "$dir/docs"
+}
+
+# Install the real member once; each case gets an independent repository and
+# hook tree, including the installed resolver whose absence is tested below.
+install_baseline installed-baseline
+new_repo() {
+	dir="$TMP/$1"
+	mkdir -p "$dir"
+	cp -R "$TMP/installed-baseline/." "$dir/"
 	printf '%s' "$dir"
 }
 
@@ -145,7 +160,7 @@ git -C "$N" config user.email "test@invalid.example"
 git -C "$N" config user.name "Test"
 rm -f "$N/.git/hooks/commit-msg" "$N/.git/hooks/commit-msg-"* "$N/.git/hooks/pre-commit"
 git -C "$N" commit -q --allow-empty --message "[test] root"
-sh "$INSTALLER" "$N" > /dev/null 2>&1 || { printf 'FAIL install no-fragments\n' >&2; exit 1; }
+cp -R "$TMP/installed-baseline/.git/hooks/." "$N/.git/hooks/"
 printf 'echo a\n' > "$N/scripts/a.sh"
 git -C "$N" add scripts/a.sh
 out=$(commit "$N" -m "[test] fix a x-1")

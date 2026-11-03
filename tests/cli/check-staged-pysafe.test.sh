@@ -24,16 +24,28 @@ check() {
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
 }
 
+template="$TMP/.staged-pysafe-template"
 new_repo() {
 	dir="$TMP/$1"
+	if [ ! -x "$template/.git/hooks/hooks.d/pre-commit/49-omp-kit-staged-pysafe" ]; then
+		mkdir -p "$template"
+		git -C "$template" init -q --template= 2>/dev/null
+		git -C "$template" config user.email "test@invalid.example"
+		git -C "$template" config user.name "Test"
+		rm -f "$template/.git/hooks/commit-msg" "$template/.git/hooks/commit-msg-"* "$template/.git/hooks/pre-commit"
+		git -C "$template" commit -q --allow-empty --message "[test] root"
+		# Installer probes require an unresolved bead in an empty tracker, not a live tracker lookup.
+		out=$(BR_BIN=/usr/bin/false sh "$INSTALLER" "$template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+		# Keep the real chain runner and all helpers, but judge only this member.
+		for member in "$template"/.git/hooks/hooks.d/*/[0-9]*; do
+			case "$member" in */pre-commit/49-omp-kit-staged-pysafe) ;; *) rm -f "$member" ;; esac
+		done
+		rm -f "$template/.git/hooks/commit-msg" "$template/.git/hooks/pre-push" "$template/.git/hooks/reference-transaction"
+		git -C "$template" config maintenance.auto false
+	fi
 	mkdir -p "$dir"
-	git -C "$dir" init -q 2>/dev/null
-	git -C "$dir" config user.email "test@invalid.example"
-	git -C "$dir" config user.name "Test"
-	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
-	git -C "$dir" commit -q --allow-empty --message "[test] root"
-	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
-	[ -x "$dir/.git/hooks/hooks.d/pre-commit/49-omp-kit-staged-pysafe" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
+	cp -Rp "$template/." "$dir/" || { printf 'FAIL copy %s from template\n' "$1" >&2; exit 1; }
+	[ -x "$dir/.git/hooks/hooks.d/pre-commit/49-omp-kit-staged-pysafe" ] || { printf 'FAIL copy %s: member absent\n' "$1" >&2; exit 1; }
 	printf '%s' "$dir"
 }
 
@@ -59,9 +71,7 @@ printf '%s  # pysafe:\n' "$BAD" > "$R/tool.py"
 git -C "$R" add tool.py
 out=$(commit "$R" -m "[test] reasonless suppression")
 check "$?" "1" "reasonless-refused" "$out" "suppression-no-reason"
-# The installer also adds the kitlib ratchet member (51-omp-kit-staged-kitlib), which refuses any new raw spawn
-# regardless of a pysafe reason, and a Python line carries one comment, so it cannot hold both pragmas. The reasoned
-# case therefore uses a pysafe finding that is not a spawn (wait-no-timeout), which only this member judges.
+# Use a non-spawn finding to exercise the reasoned wait suppression.
 printf 'import os\nos.waitpid(-1, 0)  # pysafe: fixture reaper, the caller bounds it\n' > "$R/tool.py"
 git -C "$R" add tool.py
 out=$(commit "$R" -m "[test] reasoned suppression")

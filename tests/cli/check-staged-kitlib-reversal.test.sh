@@ -191,6 +191,7 @@ out=$(commit "$R" -m "[test] ordinary new spawn")
 check "$?" "1" "origin-new-spawn-refused" "$out" "new.py:2:1: raw-spawn"
 
 R=$(origin_repo origin-missing-msg-member)
+fixture_hooks "$R" private || exit 1
 X=$(git -C "$R" rev-parse HEAD)
 member="$R/.git/hooks/hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal"
 mv "$member" "$TMP/reversal-member.keep"
@@ -200,6 +201,7 @@ out=$(commit "$R" -m "[test] missing commit-msg verifier" -m "Revert: $X")
 check "$?" "1" "origin-reversal-member-required" "$out" "commit-msg reversal validator is missing"
 mv "$TMP/reversal-member.keep" "$member"
 R=$(new_repo origin-no-reversal-member)
+fixture_hooks "$R" private || exit 1
 member="$R/.git/hooks/hooks.d/commit-msg/50-omp-kit-staged-kitlib-reversal"
 mv "$member" "$TMP/reversal-member.ordinary.keep"
 printf 'export const ordinary = 1;\n' > "$R/ordinary.ts"

@@ -23,25 +23,39 @@ check() {
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
 }
 
+# Install once, then copy the installed fixture for each independent case.
+template="$TMP/.staged-fragments-template"
 # new_repo NAME [validator]: a fixture repo with a minimal valid CHANGELOG.md
 # (fold needs exactly one `## [Unreleased]` heading) and, when asked, the real
 # release-notes.sh/.ts committed under scripts/.
 new_repo() {
+	if [ ! -x "$template/.git/hooks/hooks.d/pre-commit/47-omp-kit-staged-fragments" ]; then
+		mkdir -p "$template"
+		git -C "$template" init -q --template= 2>/dev/null
+		mkdir -p "$template/.git/hooks"
+		git -C "$template" config user.email "test@invalid.example"
+		git -C "$template" config user.name "Test"
+		git -C "$template" -c core.hooksPath=/dev/null commit -q --allow-empty --message "[test] root"
+		# The installer's empty-tracker refusal probe needs no live tracker process.
+		out=$(BR_BIN=/usr/bin/false sh "$INSTALLER" "$template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+		# Other hook members have their own suites; retain the real runner and tested member.
+		for member in "$template"/.git/hooks/hooks.d/*/[0-9]*; do
+			case "$member" in */pre-commit/47-omp-kit-staged-fragments) ;; *) rm -f "$member" ;; esac
+		done
+		rm -f "$template/.git/hooks/commit-msg" "$template/.git/hooks/pre-push" "$template/.git/hooks/reference-transaction"
+		git -C "$template" config maintenance.auto false
+	fi
 	dir="$TMP/$1"
 	mkdir -p "$dir"
-	git -C "$dir" init -q 2>/dev/null
-	git -C "$dir" config user.email "test@invalid.example"
-	git -C "$dir" config user.name "Test"
-	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
+	cp -Rp "$template/." "$dir/" || { printf 'FAIL copy %s from template\n' "$1" >&2; exit 1; }
 	printf '# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n\n### Added\n\n- First release.\n' > "$dir/CHANGELOG.md"
 	if [ "${2:-}" = validator ]; then
 		mkdir -p "$dir/scripts"
 		cp "$SCRIPTS/release-notes.sh" "$SCRIPTS/release-notes.ts" "$dir/scripts/"
 	fi
 	git -C "$dir" add -A
-	git -C "$dir" commit -q --message "[test] root" --message "[no-changelog] fixture"
-	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
-	[ -x "$dir/.git/hooks/hooks.d/pre-commit/47-omp-kit-staged-fragments" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
+	git -C "$dir" -c core.hooksPath=/dev/null commit -q --amend --no-edit
+	[ -x "$dir/.git/hooks/hooks.d/pre-commit/47-omp-kit-staged-fragments" ] || { printf 'FAIL copy %s: member absent\n' "$1" >&2; exit 1; }
 	printf '%s' "$dir"
 }
 

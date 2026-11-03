@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { cpSync, chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { convergeCommand, convergeRepository, type ConvergeOptions, type ConvergeResult } from "../../src/converge.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -27,9 +27,16 @@ function put(repo: string, path: string, value: string): void { writeFileSync(jo
 function read(repo: string, path: string): string | null { return existsSync(join(repo, path)) ? readFileSync(join(repo, path), "utf8") : null; }
 function local(repo: string, path: string, value: string, message = "local"): void { put(repo, path, value); git(repo, "commit", "-q", "--only", "-m", message, "--", path); }
 function remote(w: World, path: string, value: string): void { put(w.b, path, value); git(w.b, "add", "--", path); git(w.b, "commit", "-q", "-m", `remote ${path}`); git(w.b, "push", "-q", "origin", "main"); }
+let seed: World | undefined;
 function world(): World {
 	const dir = join(scratch, String(number++)); mkdirSync(dir);
 	const w = { dir, bare: join(dir, "origin.git"), a: join(dir, "a"), b: join(dir, "b") };
+	if (seed) {
+		cpSync(seed.dir, dir, { recursive: true });
+		git(w.a, "remote", "set-url", "origin", w.bare);
+		git(w.b, "remote", "set-url", "origin", w.bare);
+		return w;
+	}
 	git(dir, "init", "-q", "--bare", "-b", "main", w.bare);
 	git(dir, "clone", "-q", w.bare, w.a);
 	for (const path of ["f1", "f2", "f3", "f4", "gone"]) put(w.a, path, `${path} v0\n`);
@@ -37,7 +44,8 @@ function world(): World {
 	git(w.a, "add", "."); git(w.a, "commit", "-q", "-m", "base"); git(w.a, "push", "-q", "origin", "main");
 	git(dir, "clone", "-q", w.bare, w.b);
 	git(w.b, "config", "user.name", "converge test"); git(w.b, "config", "user.email", "converge@example.invalid"); git(w.b, "config", "core.hooksPath", "/dev/null");
-	return w;
+	seed = w;
+	return world();
 }
 function state(repo: string) { return [git(repo, "rev-parse", "HEAD"), git(repo, "ls-files", "-s"), git(repo, "status", "--porcelain=v1", "-uall")]; }
 function apply(w: World, more: Partial<ConvergeOptions> = {}) { return convergeRepository({ repo: w.a, apply: true, ...more }); }
@@ -53,7 +61,13 @@ function hinted(oursLonger: boolean): World {
 function raced(w: World, when: "after_hash" | "before_ref" | "before_push" | "before_write", action: string, once = true, options: Partial<ConvergeOptions> = {}): ConvergeResult {
 	const bin = join(w.dir, "bin"); mkdirSync(bin);
 	const marker = join(w.dir, "calls"), wrapper = join(bin, "git");
-	writeFileSync(wrapper, `#!${process.execPath}
+	const injection = join(bin, "inject.ts");
+	const triggerCommand = when === "after_hash" ? "hash-object" : when === "before_ref" ? "update-ref" : when === "before_write" ? "cat-file" : "push";
+	// Only the fault boundary needs a JS interpreter; every other operation is
+	// still real Git and can exec directly, preserving argv, stdin and status.
+	const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+	writeFileSync(wrapper, `#!/bin/sh\nif [ "$3" = ${quote(triggerCommand)} ]; then exec ${quote(process.execPath)} ${quote(injection)} "$@"; fi\nexec ${quote(realGit)} "$@"\n`);
+	writeFileSync(injection, `#!${process.execPath}
 import {spawnSync} from 'node:child_process';
 import {readFileSync,writeFileSync,existsSync,renameSync,symlinkSync} from 'node:fs';
 import {join} from 'node:path';
