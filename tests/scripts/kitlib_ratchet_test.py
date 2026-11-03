@@ -15,6 +15,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import sys
 import textwrap
 import time
@@ -306,6 +307,55 @@ class Ratchet(unittest.TestCase):
         ])]
         admitted = checker.RULESET._apply_origin_admissions(reports, {"tool.py": "published-sha"})
         self.assertEqual([(f.rule, f.line) for f in admitted[0].active()], [("other-rule", 3)])
+
+    def test_published_signal_restoration_is_admitted(self) -> None:
+        signal = "process.kill(Number(process.env.PID), 'SIGTERM');\n"
+        self.write("pid.ts", signal)
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-q", "-m", "[test] published signal")
+        published = self.publish_head_to_origin()
+        self.write("pid.ts", "// signal removed\n")
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-q", "-m", "[test] remove signal")
+        self.write("pid.ts", signal)
+        _git(self.repo, "add", ".")
+        reports = checker.ratchet(self.repo, "HEAD", None)
+        self.assertEqual([f for report in reports for f in report.active()], [])
+        self.assertIn(
+            f"incumbent unsafe-signal-pid entry matches exact staged path at origin/main@{published}: pid.ts",
+            [message for report in reports for message in report.admissions])
+        gate = kitlib_tmp.owned_tmp("kitlib-signal-gate")
+        self.addCleanup(gate.cleanup)
+        scripts = Path(gate.path) / "scripts"
+        shutil.copytree(ROOT / "scripts", scripts)
+        result = pysafe.run_bounded(
+            ["sh", str(scripts / "check-staged-kitlib.sh")], 60.0, cwd=self.repo)
+        self.assertEqual(result.outcome, pysafe.OK)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("commit-msg reversal validator is missing", result.text("stderr"))
+
+    def test_signal_path_differing_from_published_origin_is_refused(self) -> None:
+        self.publish_head_to_origin()
+        self.write("pid.ts", "process.kill(Number(process.env.PID), 'SIGTERM');\n")
+        _git(self.repo, "add", ".")
+        self.assertEqual([(p, rule) for p, _, rule, _ in self.staged()],
+                         [("pid.ts", checker.UNSAFE_SIGNAL)])
+
+    def test_unpublished_local_signal_restoration_is_refused(self) -> None:
+        self.publish_head_to_origin()
+        signal = "process.kill(Number(process.env.PID), 'SIGTERM');\n"
+        self.write("pid.ts", signal)
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-q", "-m", "[test] unpublished signal")
+        unpublished = _git(self.repo, "rev-parse", "HEAD")
+        self.write("pid.ts", "// signal removed\n")
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-q", "-m", "[test] remove unpublished signal")
+        self.write("pid.ts", signal)
+        _git(self.repo, "add", ".")
+        self.assertTrue(checker._index_entry_matches_tree(self.repo, unpublished, "pid.ts"))
+        self.assertEqual([(p, rule) for p, _, rule, _ in self.staged()],
+                         [("pid.ts", checker.UNSAFE_SIGNAL)])
 
 
     def test_untouched_site_does_not_block(self) -> None:

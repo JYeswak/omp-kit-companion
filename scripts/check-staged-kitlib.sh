@@ -46,11 +46,11 @@ out=$("$py" -B "$here/pysafe.py" run --timeout "$budget" -- "$py" -B "$here/kitl
 rc=$?
 has_admission=0
 case "$out" in
-	*"ADMITTED incumbent raw-spawn entry matches exact staged path at origin/main@"*) has_admission=1 ;;
+	*"ADMITTED incumbent raw-spawn entry matches exact staged path at origin/main@"*|*"ADMITTED incumbent unsafe-signal-pid entry matches exact staged path at origin/main@"*) has_admission=1 ;;
 esac
 printf '%s\n' "$out" | while IFS= read -r line; do
 	case "$line" in
-		*"ADMITTED incumbent raw-spawn entry matches exact staged path at origin/main@"*) printf '%s\n' "$line" ;;
+		*"ADMITTED incumbent raw-spawn entry matches exact staged path at origin/main@"*|*"ADMITTED incumbent unsafe-signal-pid entry matches exact staged path at origin/main@"*) printf '%s\n' "$line" ;;
 	esac
 done
 case "$rc" in

@@ -708,7 +708,7 @@ class KitlibRuleSet(core.RuleSet):
     def _origin_equal_staged_paths(
         self, repo: str, base: Optional[str], head: Optional[str], candidate_paths: Set[str]
     ) -> Dict[str, str]:
-        """Bind only incumbent raw-spawn paths whose complete index entry equals published origin/main."""
+        """Bind incumbent site paths whose complete index entry equals published origin/main."""
         if head is not None or base is None or not candidate_paths:
             return {}
 
@@ -740,16 +740,18 @@ class KitlibRuleSet(core.RuleSet):
             report = by_path.get(path)
             if report is None:
                 continue
-            eligible = any(f.rule == RAW_SPAWN and f.suppressed is None for f in report.findings)
+            eligible = {f.rule for f in report.findings
+                        if f.rule in SITE_RULES and f.suppressed is None}
             if not eligible:
                 continue
             report.findings = [
                 finding for finding in report.findings
-                if finding.rule != RAW_SPAWN or finding.suppressed is not None
+                if finding.rule not in eligible or finding.suppressed is not None
             ]
-            report.admissions.append(
-                f"incumbent raw-spawn entry matches exact staged path at origin/main@{origin}: {path}"
-            )
+            for rule in sorted(eligible):
+                report.admissions.append(
+                    f"incumbent {rule} entry matches exact staged path at origin/main@{origin}: {path}"
+                )
         return reports
 
     def _apply_published_origin_admissions(
@@ -757,7 +759,7 @@ class KitlibRuleSet(core.RuleSet):
     ) -> List[core.FileReport]:
         candidates = {
             report.path for report in reports
-            if any(f.rule == RAW_SPAWN and f.suppressed is None for f in report.findings)
+            if any(f.rule in SITE_RULES and f.suppressed is None for f in report.findings)
         }
         origin_equal = self._origin_equal_staged_paths(repo, base, head, candidates)
         return self._apply_origin_admissions(reports, origin_equal)
@@ -876,14 +878,14 @@ class KitlibRuleSet(core.RuleSet):
             if rules:
                 active[report.path] = rules
 
-        # The exact named-X proof below authorizes only a published-origin raw-spawn admission.
+        # The exact named-X proof below authorizes only published-origin site admissions.
         # A Revert trailer on an ordinary commit (a root, partial or multi-commit rewrite that member 49
         # judges) uses no admission, so it gets the ordinary verdict: refuse active findings, else pass.
         if not reverts or not admitted:
             if admitted:
                 _reversal_verdict({
                     "verdict": "REFUSED",
-                    "reason": "missing Revert trailer for published-origin raw-spawn admission",
+                    "reason": "missing Revert trailer for published-origin site admission",
                     "paths": [
                         {"path": path, "verdict": "REFUSED", "origin_main": origin,
                          "reason": "missing Revert trailer"}
@@ -1011,7 +1013,10 @@ class KitlibRuleSet(core.RuleSet):
             "origin_main": origin,
             "paths": [
                 {"path": path, "verdict": "PASS", "x_parent_entry": "PASS",
-                 "raw_spawn_admitted": path in admitted, "origin_main": admitted.get(path)}
+                 "raw_spawn_admitted": any(
+                     f"incumbent {RAW_SPAWN} entry " in message
+                     for report in reports if report.path == path for message in report.admissions),
+                 "origin_main": admitted.get(path)}
                 for path in sorted(expected)
             ],
         })
