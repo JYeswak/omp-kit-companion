@@ -17,7 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kitlib_run import run
 
 ROLES = ("base", "main")
-MAX_RECORD_BYTES = 1 << 20
+# VERDICTSIZE1: a main-role record holds per-file evidence for ~380 suites and grew past 1 MiB on 2026-11-02 (1,065,616
+# bytes for tree eab1fdfe66); at the old 1 MiB bound every PASS since then read back as MISS and no release could be cut.
+# 8 MiB keeps a bound with headroom for several times the current suite.
+MAX_RECORD_BYTES = 8 << 20
 MAX_COMMAND_OUTPUT = 16 << 20
 
 # CULPRIT1 (ompkit-6xxhu): the one optional key scripts/verdict-culprit.py adds to a FAIL record.
