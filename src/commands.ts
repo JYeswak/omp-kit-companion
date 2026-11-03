@@ -329,8 +329,8 @@ const scratchGateData: DataSchema = { type: "object", required: ["overall", "poi
 } };
 const scratchData: DataSchema = { type: "object", required: ["overall"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
-	// scratch new: the dir, its TMPDIR export line, and the release capability returned only here (PIDIDENT1).
-	dir: { type: "string" }, exportLine: { type: "string" }, capability: { type: "string" },
+	// scratch new: owned root, optional separate export content, TMPDIR line and release capability.
+	dir: { type: "string" }, exportDir: { type: "string" }, exportLine: { type: "string" }, capability: { type: "string" },
 	roots: { type: "array", items: { type: "string" } },
 	rootMetrics: { type: "array", items: { type: "object", required: ["root", "free_pct", "scratch_gb"], properties: {
 		root: { type: "string" }, free_pct: { type: ["number", "null"] }, scratch_gb: { type: "number" },
@@ -351,7 +351,7 @@ const scratchData: DataSchema = { type: "object", required: ["overall"], propert
 	} },
 	sessions: { type: "array", items: { type: "object", required: ["dir", "action", "reason", "sizeBytes", "owner"], properties: {
 		dir: { type: "string" }, action: { enum: ["REAP", "QUARANTINE", "DELETE", "LIVE", "SKIP"] },
-		reason: { type: "string" }, sizeBytes: { type: "number" },
+		reason: { type: "string" }, detail: { type: "string" }, sizeBytes: { type: "number" },
 		owner: { type: ["object", "null"], properties: { pid: { type: "number" }, processStart: { type: ["string", "null"] },
 			label: { type: "string" }, repo: { type: "string" }, createdAt: { type: "string" }, argv0: { type: ["string", "null"] } } },
 		cause: { enum: ["permission", "immutable-flag", "open-fd", "lsof-unavailable", "unknown", "delete-leftover"] },
@@ -978,7 +978,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "new", description: "Create one owned task scratch dir with a JSON .owner and print its path plus a release capability (data.capability, 256 random bits returned only here; .owner keeps its sha256, never the token). Keep the capability: `scratch release DIR --capability TOKEN` releases the dir from any later process, whatever its seat or pid; the only writer agents use", usage: "scratch new --label LABEL [--bead ID] [--export COMMIT]", flags: [
 				{ name: "--label", value: "LABEL", description: "Directory label: <repo>/var/agent-tmp/<label>.<pid>" },
 				{ name: "--bead", value: "ID", description: "Bead that owns this work, recorded in .owner" },
-				{ name: "--export", value: "COMMIT", description: "Exact commit to read-only export into the new dir" },
+				{ name: "--export", value: "COMMIT", description: "Exact commit to export into data.exportDir (<data.dir>/src); data.dir stays the owned root for TMPDIR and release" },
 			], example: "omp-kit scratch new --label probe --json", runnable: false, dataSchema: scratchData },
 			{ name: "plan", description: "Read-only report over all scratch roots with sized rows and per-root/per-verdict totals; changes nothing", usage: "scratch plan", flags: [], example: "omp-kit scratch plan --json", runnable: false, dataSchema: scratchData },
 			{ name: "mine", description: "List the caller's own scratch dirs (owner agent and session, or the caller's exact pid) with their state (unreleased, released, held, hold-expired) and bin; live process_start-matching owners are in-use and not owed; exit 0, overall FINDINGS while any is unreleased or its hold expired. Read-only unless --at is given", usage: "scratch mine [--at review|close|session-end]", flags: [

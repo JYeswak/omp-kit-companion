@@ -75,7 +75,7 @@ import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPa
 import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
-import { defaultBudgetLedgerPath, releaseBudgetEntry, updateScratchUsers } from "./scratch.ts";
+import { defaultBudgetLedgerPath, releaseBudgetEntry, SCRATCH_EXPORT_DIRECTORY, updateScratchUsers } from "./scratch.ts";
 import type { ScratchReleaseOptions } from "./scratch.ts";
 import { ternRefCommand } from "./tern-ref.ts";
 import { registerTernHandlers } from "./tern/omp-adapter.ts";
@@ -3880,7 +3880,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			`Scratch release refused: ${released.reason}${released.detail ? ` — ${released.detail}` : ""}`,
 			released.reason === "caller-not-owner"
 				? "Pass the capability `scratch new` returned for this directory: --capability TOKEN (or OMP_KIT_SCRATCH_CAPABILITY=TOKEN), or release from the owning seat; no directory was quarantined."
-				: "Use the exact owned task directory from its owner process; no directory was quarantined.");
+				: released.detail ?? "Use the exact owned task directory from its owner process; no directory was quarantined.");
 		releaseBudgetEntry(defaultBudgetLedgerPath(), released.dir);
 		return { code: 0, data: { overall: released.changed ? "CHANGED" : "OK", action: "RELEASED",
 			dir: released.dir, changed: released.changed, bin: bin ?? null, ref: typeof refFlag === "string" ? refFlag : null,
@@ -3956,12 +3956,13 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 			return refusal("SCRATCH_NEW_REFUSED",
 				`scratch new refused: ${created.reason}${created.detail ? ` — ${created.detail}` : ""}`, detail);
 		}
+		const exportDir = typeof exportFlag === "string" ? join(created.dir, SCRATCH_EXPORT_DIRECTORY) : undefined;
 		if (typeof exportFlag === "string") {
 			const err = exportCommitToScratch(repo, exportFlag, created.dir, deps.run);
 			// The dir exists either way, so its capability is returned either way: it is the only way to release it later.
-			if (err !== null) return { code: 1, data: { overall: "FINDINGS", dir: created.dir, reason: err, capability: created.capability }, verification: "UNVERIFIED" };
+			if (err !== null) return { code: 1, data: { overall: "FINDINGS", dir: created.dir, exportDir, reason: err, capability: created.capability }, verification: "UNVERIFIED" };
 		}
-		return { code: 0, data: { overall: "OK", dir: created.dir, exportLine: created.exportLine, capability: created.capability }, verification: "UNVERIFIED" };
+		return { code: 0, data: { overall: "OK", dir: created.dir, ...(exportDir ? { exportDir } : {}), exportLine: created.exportLine, capability: created.capability }, verification: "UNVERIFIED" };
 	}
 	if (sub === "mine") {
 		const atFlag = request.flags.get("--at");

@@ -1528,7 +1528,7 @@ const SUN_PATH_MAX = 103;
 
 /**
  * The platform temp root (Darwin `getconf DARWIN_USER_TEMP_DIR`, else /tmp), never `$TMPDIR`:
- * `omp-kit scratch new --export` and the full-suite gate point TMPDIR into the deep checkout itself.
+ * `omp-kit scratch new --export` and the full-suite gate put TMPDIR in deep owned scratch trees.
  */
 function platformTempRoot(): string {
 	if (process.platform !== "darwin") return realpathSync("/tmp");
@@ -1950,15 +1950,19 @@ function commitFixture(emptyOwner = false): { source: string; head: string } {
 }
 
 test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (planted)", () => {
-	const { source, head } = commitFixture();
+	const { source, head } = commitFixture(true);
 	const repo = agentTmp("newrepo");
 	roots.push(repo);
 	registerRepoScratchRoot(repo);
 	const made = createScratch("exp", repo, depsFor(), {}, true, join(repo, "scratch-budgets.json"));
 	expect(made.ok).toBe(true);
+	const originalOwner = readFileSync(join(made.dir, ".owner"), "utf8");
 	expect(exportCommitToScratch(source, head, made.dir, defaultRunner)).toBeNull();
-	expect(readFileSync(join(made.dir, "package.json"), "utf8")).toBe("{}\n");
-	expect(readFileSync(join(made.dir, "sub", "inner.txt"), "utf8")).toBe("inner\n");
+	expect(readFileSync(join(made.dir, "src", "package.json"), "utf8")).toBe("{}\n");
+	expect(readFileSync(join(made.dir, "src", "sub", "inner.txt"), "utf8")).toBe("inner\n");
+	expect(readFileSync(join(made.dir, ".owner"), "utf8")).toBe(originalOwner);
+	expect(readFileSync(join(made.dir, "src", ".owner"), "utf8")).toBe("");
+	expect(exportCommitToScratch(source, head, made.dir, defaultRunner)).toBe("export-destination-unavailable");
 	expect(exportCommitToScratch(source, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", made.dir, defaultRunner)).toBe("export-commit-unknown");
 }, 60000);
 test("EXPORTOWNER: CLI export preserves the structured owner and capability release", () => {
@@ -1971,18 +1975,56 @@ test("EXPORTOWNER: CLI export preserves the structured owner and capability rele
 		XDG_STATE_HOME: state,
 	};
 	const created = cli(["scratch", "new", "--label", "expowner", "--export", head, "--bead", "ompkit-774u.9.30"], source, env);
-	const createdOk = created.code === 0 && created.envelope.data.overall === "OK";
-	const createdRefused = created.code === 1 && created.envelope.data.overall === "FINDINGS"
-		&& created.envelope.data.reason === "export-extract-failed";
-	expect(createdOk || createdRefused).toBe(true);
+	expect(created.code).toBe(0);
+	expect(created.envelope.data.overall).toBe("OK");
 	const dir = created.envelope.data.dir as string;
 	const capability = created.envelope.data.capability as string;
+	const exportDir = created.envelope.data.exportDir as string;
+	expect(exportDir).toBe(join(dir, "src"));
+	expect(created.envelope.data.exportLine).toBe(`export TMPDIR=${dir}`);
+	expect(existsSync(join(dir, "package.json"))).toBe(false);
+	expect(readFileSync(join(exportDir, ".owner"), "utf8")).toBe("");
+	expect(readFileSync(join(exportDir, "package.json"), "utf8")).toBe("{}\n");
 	expect(parseOwnerFile(readFileSync(join(dir, ".owner"), "utf8"))).not.toBeNull();
 	const released = cli(["scratch", "release", dir, "--capability", capability, "--bin", "throwaway", "--now"], source, env);
 	expect(released.code).toBe(0);
 	expect(released.envelope.data.deleted).toBe(true);
 	expect(existsSync(dir)).toBe(false);
 }, 60000);
+
+test("EXPORTOWNER: raw root extraction is diagnosed and explicit legacy release stays reclaimable", () => {
+	const { source, head } = commitFixture(true);
+	const home = useState();
+	registerRepoScratchRoot(source);
+	const root = join(source, "var", "agent-tmp");
+	const made = createScratch("raw-clobber", source, depsFor(), {}, true, join(home, "budgets.json"));
+	expect(made.ok).toBe(true);
+	const tarball = join(source, "raw.tar");
+	expect(defaultRunner(["git", "-C", source, "archive", "--format=tar", `--output=${tarball}`, head]).code).toBe(0);
+	expect(defaultRunner(["tar", "-xf", tarball, "-C", made.dir]).code).toBe(0);
+	expect(readFileSync(join(made.dir, ".owner"), "utf8")).toBe("");
+	const deps = { ...depsFor(), home };
+	expect(inspectOne(made.dir, root, deps)?.detail).toContain("archive extraction");
+	const refused = releaseScratch(made.dir, home, deps, { capability: made.capability });
+	expect(refused.ok).toBe(false);
+	expect(refused.detail).toContain("--legacy-owner --reason");
+	const held = releaseScratch(made.dir, home, { ...deps,
+		run: () => ({ code: 0, stdout: "p123\n", stderr: "" }),
+	}, { legacyOwner: true, reason: "archive extraction clobbered .owner" });
+	expect(held.reason).toBe("release-open-fds-present");
+	expect(existsSync(join(made.dir, ".omp-kit-release"))).toBe(false);
+	// A vanished capability hash cannot establish authority; the existing explicit
+	// operator recovery keeps unchanged-owner, pinned-inode and open-file checks.
+	expect(releaseScratch(made.dir, home, deps, {
+		legacyOwner: true, reason: "archive extraction overwrote the owner marker",
+	}).ok).toBe(true);
+	expect(inspectOne(made.dir, root, deps)).toMatchObject({
+		action: "QUARANTINE", reason: "owner-released-would-quarantine",
+	});
+	const applied = applyScratch(home, { ...deps, now: Date.now() });
+	expect(applied.applied.some(row => row.action === "QUARANTINE" && row.reason === "owner-released-quarantined")).toBe(true);
+	expect(existsSync(made.dir)).toBe(false);
+});
 
 test("EXPORTOWNER.retire: an empty owner on a 73-hour-idle dir reaches safe reaper quarantine", () => {
 	const home = useState();
@@ -2016,8 +2058,8 @@ test("SCRATCHLEAK1: export asked from a subdirectory still materializes the whol
 		const made = createScratch("exp", repo, depsFor(), {}, true, join(repo, "scratch-budgets.json"));
 		expect(made.ok).toBe(true);
 		expect(exportCommitToScratch(join(source, from), head, made.dir, defaultRunner), from).toBeNull();
-		expect(existsSync(join(made.dir, "package.json")), from).toBe(true);
-		expect(existsSync(join(made.dir, "sub", "inner.txt")), from).toBe(true);
+		expect(existsSync(join(made.dir, "src", "package.json")), from).toBe(true);
+		expect(existsSync(join(made.dir, "src", "sub", "inner.txt")), from).toBe(true);
 	}
 }, 60000);
 

@@ -245,7 +245,10 @@ export function diagnoseOwnerFailure(ownerText: string | null): string | null {
 	if ("owner" in parsed) return null;
 	const { field, problem } = parsed.failure;
 	const head = field === null ? "owner file" : `owner field '${field}'`;
-	return `${head} ${problem}; accepted owner field sets: ${OWNER_FIELD_SETS}`;
+	const recovery = ownerText.trim() === ""
+		? "; empty .owner may have been overwritten by archive extraction. For a finished directory, run `omp-kit scratch release DIR --legacy-owner --reason 'archive extraction clobbered .owner' --yes` without --now or --bin, then preview `omp-kit scratch plan` and confirm `omp-kit scratch apply --apply --yes`. Extract content into a child directory, never the owned root"
+		: "";
+	return `${head} ${problem}; accepted owner field sets: ${OWNER_FIELD_SETS}${recovery}`;
 }
 function hasProcessIdentity(owner: ScratchOwner): owner is ScratchOwner & { processStart: string; argv0: string } {
 	return owner.processStart !== null && owner.argv0 !== null;
@@ -735,7 +738,9 @@ export type ScratchAction = "REAP" | "QUARANTINE" | "DELETE" | "LIVE" | "SKIP";
 
 export interface ScratchVerdict { dir: string; action: ScratchAction; reason: string; owner: ScratchOwner | null; sizeBytes: number; cause?: "permission" | "immutable-flag" | "open-fd" | "lsof-unavailable" | "unknown" | "delete-leftover";
 	/** The OS error that failed this action (e.g. "EACCES: permission denied, mkdir '/...'"). Present only on failed mutations; a refusal never carries one. */
-	error?: string }
+	error?: string;
+	/** Ownership diagnosis and recovery, without granting release authority. */
+	detail?: string }
 
 /** An OS error as a stable verdict string: the errno plus the platform message (which already names the syscall and path). */
 export function osErrorText(error: unknown): string {
@@ -1041,7 +1046,9 @@ function inspectByPid(dir: string, root: string, deps: InspectDeps, nameRequired
 			if (closed === false) return sized("LIVE", "text-owner-bead-open");
 			return sized("SKIP", "text-owner-bead-unproven");
 		}
-		return sized("SKIP", malformed ? "malformed-owner-file" : "no-owner-file");
+		const detail = raw !== null && raw.trim() === "" ? diagnoseOwnerFailure(raw) : null;
+		return { ...sized("SKIP", malformed ? "malformed-owner-file" : "no-owner-file"),
+			...(detail ? { detail } : {}) };
 	}
 	if (!ownerMatchesScratchRoot(owner, ownerRoot, dir, deps)) return sized("SKIP", "owner-repo-outside-scratch-root", owner);
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith(".")) {
@@ -2671,24 +2678,31 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	return { ok: true, dir, exportLine: `export TMPDIR=${dir}`, reason: "created", capability: capability.token };
 }
 
+export const SCRATCH_EXPORT_DIRECTORY = "src";
+
 /**
- * Exact-commit read-only export into a scratch dir: `git archive` to a tarball
- * (file output, never a pipe, so binary stays intact), extract, remove the
- * tarball. The archive runs from the work-tree root: below it `git archive`
- * holds only that subtree, and an untracked one is an empty tar with exit 0.
- * The dir is already owned by the caller. Existing files are never overwritten,
- * but extraction errors may leave partial export files; the caller can still
- * release the dir by capability. Null on success, else the reason.
+ * Exact-commit read-only export into the owned root's `src/` child. Administrative
+ * files such as `.owner` stay outside the archive's namespace. `git archive` runs
+ * from the work-tree root so a call from a subdirectory still exports the whole
+ * commit. Existing content is never overwritten; a failed export may leave a
+ * partial child, but the root remains releasable by its original capability.
+ * Null on success, else the reason.
  */
 export function exportCommitToScratch(repo: string, commit: string, dir: string, run: ScratchRunner): string | null {
 	const typed = run(["git", "-C", repo, "cat-file", "-t", commit], { timeoutMs: 15_000 });
 	if (typed.code !== 0 || typed.stdout.trim() !== "commit") return "export-commit-unknown";
 	const top = run(["git", "-C", repo, "rev-parse", "--show-toplevel"], { timeoutMs: 15_000 });
 	if (top.code !== 0 || top.stdout.trim() === "") return "export-archive-failed";
+	const exportDir = join(dir, SCRATCH_EXPORT_DIRECTORY);
+	try {
+		mkdirSync(exportDir, { mode: 0o700 });
+	} catch {
+		return "export-destination-unavailable";
+	}
 	const tarball = join(dir, ".export.tar");
 	const archived = run(["git", "-C", top.stdout.trim(), "archive", "--format=tar", `--output=${tarball}`, commit], { timeoutMs: 120_000 });
 	if (archived.code !== 0) return "export-archive-failed";
-	const extracted = run(["tar", "-xkf", tarball, "-C", dir], { timeoutMs: 120_000 });
+	const extracted = run(["tar", "-xkf", tarball, "-C", exportDir], { timeoutMs: 120_000 });
 	try {
 		rmSync(tarball, { force: true });
 	} catch { /* best effort */ }

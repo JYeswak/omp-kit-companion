@@ -41,6 +41,20 @@ A hold outlives its dead owner until it expires, and shows as `LIVE held-by-bead
 
 `scratch new` creates a task directory only when its `<repo>/var/agent-tmp` root is discoverable by `scratch release`. If it is not, the command returns `SCRATCH_NEW_REFUSED` with `scratch-root-unrecognized` and the root to add to the complete `OMP_KIT_SCRATCH_ROOTS` list. It may create the empty `var/agent-tmp` parent, but not the task directory or `.owner`. Use the same root configuration for creation and later release, or run from a registered root. `scratch plan --json` reports the active roots.
 
+## Exporting a commit
+
+`omp-kit scratch new --label probe --export COMMIT --json` keeps ownership metadata
+in `data.dir` and extracts the commit into `data.exportDir`, a new `src/` child.
+Use `data.dir` for TMPDIR and release; build and test in `data.exportDir`.
+An archive's `.owner` is ordinary source content inside that child, never the
+managed root's owner record. An existing export child is refused, not overwritten.
+Export failures still return the owned root and its capability for cleanup.
+
+For manual extraction, create a child below the owned root and target that child,
+not the root. Same-user tools such as raw `tar -x` can overwrite a root `.owner`;
+the CLI cannot prevent arbitrary external filesystem writes.
+
+
 ## Disposing of a directory
 
 ```
@@ -85,6 +99,26 @@ OMP_KIT_SCRATCH_CAPABILITY=TOKEN omp-kit scratch release DIR --bin throwaway --n
 - The comparison is constant-time over the digests.
 - A wrong or missing token, with no seat match, is refused with `SCRATCH_RELEASE_REFUSED: caller-not-owner`. The detail says whether no token was presented or the token did not match, and the remediation names `--capability`.
 - A dir whose record has no `capability_sha256` (made before the capability existed) is released exactly as before.
+
+### An owner marker clobbered by extraction
+
+An empty `.owner` is diagnosed by `scratch plan --json` and by release refusal
+details as a possible archive-extraction clobber. Once its stored capability hash
+is gone, the token alone cannot authenticate the directory; the kit does not
+invent replacement ownership. For a finished directory, use the existing
+operator-confirmed recovery:
+
+```sh
+omp-kit scratch release DIR --legacy-owner --reason 'archive extraction clobbered .owner' --yes
+omp-kit scratch plan --json
+omp-kit scratch apply --apply --yes --json
+```
+
+Do not add `--now` or `--bin`: a legacy release records the original owner bytes
+and pins the directory's device and inode, then the reaper quarantines it after
+the unchanged-owner and open-file rechecks. An open or unprovable user remains
+protected. Direct future extraction into a child directory.
+
 
 ### Registered users
 

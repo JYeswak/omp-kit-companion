@@ -32,7 +32,7 @@ const SCRATCH = "var/agent-tmp";
 const CHILD_PROBE = "\0";
 const SAFE_SHELL_WORD = /^[A-Za-z0-9_./@%+=:,-]+$/;
 const COPIERS = new Set(["cp", "mv", "install", "gcp", "gmv", "ginstall"]);
-const EXPORT_ROUTE = "or develop in an exact-commit export under var/agent-tmp/ (`omp-kit scratch new --export <sha>`)";
+const EXPORT_ROUTE = "or develop in an exact-commit export under var/agent-tmp/ (`omp-kit scratch new --export <sha>`; use data.exportDir for source, data.dir for TMPDIR and release)";
 
 function quote(word: string): string {
 	return SAFE_SHELL_WORD.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
