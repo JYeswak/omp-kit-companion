@@ -15,12 +15,20 @@
 #      `release-verdict: CULPRIT <sha> <author> <bead>` or `release-verdict: CULPRIT none (<reason>)`,
 #      plus a `PROPOSE: git revert ...` line (never run) when the head stayed red for a wave. The
 #      culprit step never changes this script's exit status.
+#   5. CIONLY1 (J-2026-11-03-34): beside the full suite, the export's own full-suite-verdict-store.py
+#      `run-ci-only` judges the two files gate-ci-only.tsv keeps out of it (package-release.test.ts and
+#      kit-update.test.ts) on a second export of the same commit, git-initialized with that commit as
+#      release-local's ci-only-local stage prepares it, and records PASS/FAIL for the exact tree; a cut
+#      reuses a PASS instead of running them (up to 900/2400 s) after build, sign and notarize. Its
+#      output (every failing file's, in one run) is printed after the suite's. Exports without
+#      run-ci-only (commits before it) skip this step silently; release-local then runs the files.
 #
 # A tree that already has a verdict is a cache hit and returns at once. Called with no arguments by
 # the publisher after a successful push, or by hand before release-local.
 #
 # Usage: scripts/release-verdict.sh [--commit SHA] [--no-fetch]
-# Exit: the verdict runner's status (0 PASS), 0 when another run will cover the commit, 2 usage.
+# Exit: the verdict runner's status (0 PASS), else the ci-only step's when the runner passed; 0 when
+# another run will cover the commit, 2 usage.
 set -eu
 # Run from a private copy (ompkit-6xxhu): a running sh reads its script as it goes, so a commit that
 # rewrites this file while a verdict runs (e78aa29091 did, 2026-11-01) would feed the live run new bytes
@@ -44,7 +52,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--commit) COMMIT=${2:-}; shift 2 ;;
 		--no-fetch) FETCH=0; shift ;;
-		-h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+		-h|--help) sed -n '2,31p' "$0"; exit 0 ;;
 		*) printf 'release-verdict: unknown argument: %s\n' "$1" >&2; exit 2 ;;
 	esac
 done
@@ -75,6 +83,10 @@ printf '%s\n' "$$" >"$LOCK/pid"
 . "$ROOT/scripts/kitlib-tmp.sh"
 kitlib_tmp WORK release-verdict || exit 1
 kitlib_tmp_atexit "rm -rf \"$LOCK\""
+# A cancelled verdict cancels its ci-only judge too; run-ci-only kills its bun process groups on TERM.
+ci_pid=''
+# shellcheck disable=SC2016 # expanded at exit, when ci_pid names the live judge (or is empty)
+kitlib_tmp_atexit '[ -z "$ci_pid" ] || kill -TERM "$ci_pid" 2>/dev/null || :'
 # culprit_step: name the commit that broke $sha (see step 4). Its output and status never decide ours.
 culprit_step() {
 	if [ ! -f "$tree/scripts/verdict-culprit.py" ]; then
@@ -98,13 +110,31 @@ while :; do
 	tree="$WORK/tree.$sha"
 	mkdir -p "$tree"
 	git -C "$ROOT" archive "$sha" | tar -xf - -C "$tree"
+	# Step 5 gets its own export: git-initializing the full suite's tree would change what its tests see.
+	ci_tree="$WORK/ci-only.$sha"
+	if grep -q '"run-ci-only"' "$tree/scripts/full-suite-verdict-store.py" 2>/dev/null; then
+		mkdir -p "$ci_tree"
+		git -C "$ROOT" archive "$sha" | tar -xf - -C "$ci_tree"
+		env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB TMPDIR="$WORK" \
+			python3 -B "$ci_tree/scripts/full-suite-verdict-store.py" run-ci-only --repo "$ROOT" --commit "$sha" \
+			</dev/null >"$WORK/ci-only.$sha.out" 2>&1 &
+		ci_pid=$!
+	fi
 	printf 'release-verdict: judging %s with its own runner\n' "$sha"
 	rc=0
 	env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB TMPDIR="$WORK" \
 		sh "$tree/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$sha" --judge-role main </dev/null || rc=$?
 	printf 'release-verdict: %s producer_rc=%s\n' "$sha" "$rc"
 	[ "$rc" = 0 ] || culprit_step || :
-	rm -rf "$tree"
+	if [ -n "$ci_pid" ]; then
+		ci_rc=0
+		wait "$ci_pid" || ci_rc=$?
+		ci_pid=''
+		cat "$WORK/ci-only.$sha.out"
+		printf 'release-verdict: %s ci_only_rc=%s\n' "$sha" "$ci_rc"
+		[ "$rc" != 0 ] || rc=$ci_rc
+	fi
+	rm -rf "$tree" "$ci_tree"
 	[ -s "$WANTED" ] || break
 	next=$(cat "$WANTED")
 	[ "$next" != "$sha" ] || break

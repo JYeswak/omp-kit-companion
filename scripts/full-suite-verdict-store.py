@@ -11,10 +11,13 @@ from pathlib import Path
 import re
 import stat
 import sys
+import threading
+import time
 from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kitlib_run import run
+import pysafe
 
 ROLES = ("base", "main")
 # VERDICTSIZE1: a main-role record holds per-file evidence for ~380 suites and grew past 1 MiB on 2026-11-02 (1,065,616
@@ -609,6 +612,189 @@ def command_identity(args: argparse.Namespace, judge_root: Path) -> tuple[str, s
     return checks, runtime
 
 
+# CIONLY1 (Joshua J-2026-11-03-34): the two files gate-ci-only.tsv keeps out of the full suite are judged at push time.
+# release-local's ci-only-local stage ran them against the exact source export on every cut, after build, sign and
+# notarize (bounds 900/2400 s). release-verdict.sh now runs them (run-ci-only) against its own export of the exact
+# commit, prepared as release-local prepares it, and records the result beside the full-suite verdicts; release-local
+# reads it back (require-ci-only-pass) and runs the files only without a matching PASS. The spec, the full judge
+# identity and both files' bytes make up the record's checks digest, so changing any of them orphans old records.
+CI_ONLY_FILES = (("tests/cli/package-release.test.ts", 900), ("tests/cli/kit-update.test.ts", 2400))
+CI_ONLY_BUN_ARGS = ("test", "--timeout=120000")
+CI_ONLY_ENV = (("OMP_KIT_HEAVY_MAX_WAIT_S", "180"),)
+CI_ONLY_KEYS = frozenset(("version", "kind", "tree", "commit", "checks", "runtime", "spec", "verdict", "files",
+                          "log_sha256", "finished_ms"))
+CI_ONLY_FILE_KEYS = frozenset(("path", "timeout_s", "rc", "timed_out", "duration_ms"))
+CI_ONLY_OUTPUT_BYTES = 4 << 20
+CI_ONLY_TIMEOUT_RC = 124  # the coreutils `timeout` status release-local's runs report
+CI_ONLY_SPAWN_RC = 127
+CI_ONLY_DOMAIN = b"OMP-KIT-CI-ONLY-VERDICT-v1\0"
+
+
+def ci_only_spec() -> dict:
+    return {"files": [{"path": path, "timeout_s": limit} for path, limit in CI_ONLY_FILES],
+            "argv": ["bun", *CI_ONLY_BUN_ARGS], "env": dict(CI_ONLY_ENV),
+            "case_cwd": "suite-root", "git": "init, fetch --depth 1 of the exact commit"}
+
+
+def ci_only_checks(judge_root: Path, suite_root: Path) -> str:
+    digest = hashlib.sha256(CI_ONLY_DOMAIN)
+    digest.update(judge_identity(judge_root).encode("ascii") + b"\0")
+    digest.update(json.dumps(ci_only_spec(), sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\0")
+    for path, _limit in CI_ONLY_FILES:
+        data = (suite_root / path).read_bytes()
+        digest.update(path.encode("utf-8") + b"\0" + str(len(data)).encode("ascii") + b"\0")
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def ci_only_key(tree: str, checks: str, runtime: str) -> str:
+    tree, _role, checks, runtime = normalized_identity(tree, "main", checks, runtime)
+    identity = json.dumps([tree, checks, runtime], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return f"{tree}.ci-only.{hashlib.sha256(CI_ONLY_DOMAIN + identity).hexdigest()}"
+
+
+def ci_only_header(row: dict) -> str:
+    return (f"CI-ONLY-FILE {row['path']} rc={row['rc']} timed_out={int(row['timed_out'])} "
+            f"duration_ms={row['duration_ms']}")
+
+
+def validate_ci_only_record(path: Path, *, tree: str, checks: str, runtime: str) -> tuple[dict | None, str]:
+    """A bounded record whose identity, spec, verdict and digested log all agree, else None and why."""
+    try:
+        entry = json_file(path)
+        if set(entry) != CI_ONLY_KEYS or entry["version"] != 1 or entry["kind"] != "ci-only":
+            raise ValueError("ci-only record schema is invalid")
+        if entry["tree"] != tree or entry["checks"] != checks or entry["runtime"] != runtime:
+            raise ValueError("ci-only record identity differs")
+        if path.name != ci_only_key(tree, checks, runtime) + ".json":
+            raise ValueError("ci-only record filename does not match its identity")
+        if not valid_hex(entry["commit"], (40, 64)) or entry["spec"] != ci_only_spec():
+            raise ValueError("ci-only record commit or spec is invalid")
+        finished = entry["finished_ms"]
+        if not isinstance(finished, int) or isinstance(finished, bool) or finished < 0:
+            raise ValueError("ci-only record time is invalid")
+        files = entry["files"]
+        if not isinstance(files, list) or len(files) != len(CI_ONLY_FILES):
+            raise ValueError("ci-only record files are invalid")
+        for row, (name, limit) in zip(files, CI_ONLY_FILES):
+            if (not isinstance(row, dict) or set(row) != CI_ONLY_FILE_KEYS or row["path"] != name
+                    or row["timeout_s"] != limit or not isinstance(row["timed_out"], bool)):
+                raise ValueError("ci-only record file row is invalid")
+            for field in ("rc", "duration_ms"):
+                if not isinstance(row[field], int) or isinstance(row[field], bool):
+                    raise ValueError(f"ci-only record {field} is invalid")
+            if row["duration_ms"] < 0 or (row["timed_out"] and row["rc"] != CI_ONLY_TIMEOUT_RC):
+                raise ValueError("ci-only record timing is invalid")
+        if entry["verdict"] != ("FAIL" if any(row["rc"] != 0 for row in files) else "PASS"):
+            raise ValueError("ci-only verdict disagrees with its exit codes")
+        log_path = path.with_suffix(".log")
+        if not stat.S_ISREG(log_path.lstat().st_mode):
+            raise ValueError("ci-only paired log is not a regular file")
+        digest = hashlib.sha256()
+        with log_path.open("rb") as log:
+            head = [log.readline(4096) for _row in files]
+            for line in head:
+                digest.update(line)
+            for chunk in iter(lambda: log.read(1 << 20), b""):
+                digest.update(chunk)
+        if entry["log_sha256"] != digest.hexdigest():
+            raise ValueError("ci-only paired log digest mismatch")
+        if [line.decode("utf-8", errors="strict").rstrip("\n") for line in head] != [ci_only_header(row) for row in files]:
+            raise ValueError("ci-only paired log disagrees with the recorded exit codes")
+        return entry, "VALID"
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, KeyError) as error:
+        return None, str(error)
+
+
+def ci_only_identity(repo: Path, tree: str, *, judge_root: Path, suite_root: Path,
+                     cache_dir: str | None) -> tuple[str, str, Path]:
+    """The checks digest, runtime and record path a ci-only verdict of tree is stored and found under."""
+    checks = ci_only_checks(judge_root, suite_root)
+    runtime = runtime_identity(judge_root)
+    return checks, runtime, cache_directory(repo, cache_dir) / "ci-only" / (ci_only_key(tree, checks, runtime) + ".json")
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    temp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp.write_bytes(data)
+    os.replace(temp, path)
+
+
+def tail_lines(data: bytes, count: int) -> str:
+    return "\n".join(data.decode("utf-8", errors="replace").rstrip("\n").splitlines()[-count:])
+
+
+def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, cache_dir: str | None) -> int:
+    """Judge CI_ONLY_FILES on suite_root (an export of commit) side by side and record the verdict."""
+    commit = text_output(checked_run(["git", "-C", str(repo), "rev-parse", "--verify", f"{commit}^{{commit}}"]), "commit")
+    tree = text_output(checked_run(["git", "-C", str(repo), "rev-parse", "--verify", f"{commit}^{{tree}}"]), "tree")
+    for name, _limit in CI_ONLY_FILES:
+        if not (suite_root / name).is_file():
+            print(f"CI-ONLY: SKIP tree={tree} {name} is absent from this commit; nothing recorded")
+            return 0
+        if checked_run(["git", "-C", str(repo), "show", f"{commit}:{name}"]) != (suite_root / name).read_bytes():
+            raise ValueError(f"{name} in {suite_root} is not the bytes of {commit}")
+    checks, runtime, path = ci_only_identity(repo, tree, judge_root=judge_root, suite_root=suite_root,
+                                             cache_dir=cache_dir)
+    entry, _reason = validate_ci_only_record(path, tree=tree, checks=checks, runtime=runtime)
+    if entry is not None and entry["verdict"] == "PASS":
+        print(f"CI-ONLY: VERDICT PASS tree={tree} (already recorded: {path.name})")
+        return 0
+    # The export becomes a throwaway git root holding the exact commit, as release-local makes it: package-release
+    # archives from a repository root, and the runtime work-root check requires OMP_KIT_CASE_CWD to be that root.
+    checked_run(["git", "-C", str(suite_root), "-c", "init.defaultBranch=main", "init", "-q"], deadline_s=60)
+    checked_run(["git", "-C", str(suite_root), "fetch", "-q", "--depth", "1", str(repo), commit], deadline_s=120)
+    env = dict(os.environ)
+    env.update(CI_ONLY_ENV)
+    env["OMP_KIT_CASE_CWD"] = str(suite_root)
+    rows: list[dict] = [{} for _ in CI_ONLY_FILES]
+    outputs: list[tuple[bytes, bytes]] = [(b"", b"") for _ in CI_ONLY_FILES]
+
+    def judge(index: int, name: str, limit: int) -> None:
+        started = time.monotonic()
+        try:
+            result = run(["bun", *CI_ONLY_BUN_ARGS, name], deadline_s=limit, cwd=suite_root, env=env,
+                         max_output_bytes=CI_ONLY_OUTPUT_BYTES)
+            rc = CI_ONLY_TIMEOUT_RC if result.timed_out else (result.rc if result.rc is not None else -1)
+            outputs[index] = (result.stdout, result.stderr)
+            timed_out = result.timed_out
+        except OSError as error:
+            rc, timed_out = CI_ONLY_SPAWN_RC, False
+            outputs[index] = (b"", f"ci-only: cannot start bun: {error}\n".encode("utf-8"))
+        rows[index] = {"path": name, "timeout_s": limit, "rc": rc, "timed_out": timed_out,
+                       "duration_ms": int((time.monotonic() - started) * 1000)}
+
+    threads = [threading.Thread(target=judge, args=(index, name, limit), daemon=True)
+               for index, (name, limit) in enumerate(CI_ONLY_FILES)]
+    # A TERM/INT reaches the main thread as Cancelled; leaving the block kills every bun group run() still owns.
+    with pysafe.cancel_on_signals():
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            while thread.is_alive():
+                thread.join(1.0)
+    verdict = "FAIL" if any(row["rc"] != 0 for row in rows) else "PASS"
+    log = "".join(ci_only_header(row) + "\n" for row in rows).encode("utf-8")
+    for row, (stdout, stderr) in zip(rows, outputs):
+        log += f"=== {row['path']} stdout\n".encode("utf-8") + stdout + f"\n=== {row['path']} stderr\n".encode("utf-8") + stderr + b"\n"
+    entry = {"version": 1, "kind": "ci-only", "tree": tree, "commit": commit, "checks": checks, "runtime": runtime,
+             "spec": ci_only_spec(), "verdict": verdict, "files": rows,
+             "log_sha256": hashlib.sha256(log).hexdigest(), "finished_ms": int(time.time() * 1000)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(path.with_suffix(".log"), log)
+    write_atomic(path, (json.dumps(entry, sort_keys=True, indent=1) + "\n").encode("utf-8"))
+    for row in rows:
+        print(f"CI-ONLY: {row['path']} rc={row['rc']} timed_out={int(row['timed_out'])} duration_ms={row['duration_ms']}")
+    # Every failing file's output in this one run (RELFAILFAST1): stderr's last 60 lines, then stdout's last 20.
+    for row, (stdout, stderr) in zip(rows, outputs):
+        if row["rc"] != 0:
+            print(f"CI-ONLY: {row['path']} FAIL; output (last 60 lines of stderr, then stdout):")
+            print(tail_lines(stderr, 60))
+            print(tail_lines(stdout, 20))
+    print(f"CI-ONLY: VERDICT {verdict} tree={tree} record={path}")
+    return 0 if verdict == "PASS" else 1
+
+
 def records(repo: Path, directory: Path, judge_root: Path, tree: str | None) -> dict:
     rows = []
     if directory.is_dir():
@@ -661,6 +847,16 @@ def main() -> int:
     pass_cmd.add_argument("--role", choices=ROLES, required=True)
     pass_cmd.add_argument("--judge-root", required=True)
     pass_cmd.add_argument("--suite-root", required=True)
+    ci_run_cmd = actions.add_parser("run-ci-only")
+    add_store_options(ci_run_cmd)
+    ci_run_cmd.add_argument("--commit", required=True)
+    ci_run_cmd.add_argument("--judge-root")
+    ci_run_cmd.add_argument("--suite-root")
+    ci_pass_cmd = actions.add_parser("require-ci-only-pass")
+    add_store_options(ci_pass_cmd)
+    ci_pass_cmd.add_argument("--tree", required=True)
+    ci_pass_cmd.add_argument("--judge-root", required=True)
+    ci_pass_cmd.add_argument("--suite-root", required=True)
     list_cmd = actions.add_parser("list")
     add_store_options(list_cmd)
     list_cmd.add_argument("--tree")
@@ -716,6 +912,28 @@ def main() -> int:
                 print("PASS")
                 return 0
             print("FAIL" if entry is not None else "MISS")
+            return 1
+        if args.action == "run-ci-only":
+            suite_root = Path(args.suite_root).expanduser().resolve() if args.suite_root else judge_root
+            try:
+                return run_ci_only(repo, args.commit, judge_root=judge_root, suite_root=suite_root,
+                                   cache_dir=args.cache_dir)
+            except pysafe.Cancelled as cancelled:
+                print(f"CI-ONLY: cancelled by signal {cancelled.signum}; nothing recorded", file=sys.stderr)
+                return 128 + cancelled.signum
+        if args.action == "require-ci-only-pass":
+            if not valid_hex(args.tree, (40, 64)):
+                raise ValueError("tree must be a full Git tree hash")
+            checks, runtime, path = ci_only_identity(repo, args.tree, judge_root=judge_root,
+                                                     suite_root=Path(args.suite_root).expanduser().resolve(),
+                                                     cache_dir=args.cache_dir)
+            entry, reason = validate_ci_only_record(path, tree=args.tree, checks=checks, runtime=runtime)
+            if entry is not None and entry["verdict"] == "PASS":
+                print("PASS")
+                return 0
+            print("FAIL" if entry is not None else "MISS")
+            if entry is None:
+                print(f"ci-only record {path.name}: {reason}", file=sys.stderr)
             return 1
         result = records(repo, directory, judge_root, args.tree)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
