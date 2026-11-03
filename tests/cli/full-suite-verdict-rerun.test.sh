@@ -190,6 +190,9 @@ json.dump({"judge_role": "base", "checks": sys.argv[2], "evidence": {"files": [
     {"path": "tests/cli/b_test.py", "elapsed_ms": 30000}
 ]}}, open(sys.argv[1], "w"))
 PYEOF
+# The real store also holds non-record JSON (a list); the scheduler must skip it, never die on it
+# (2026-11-03: one such file ended the release verdict with 0 suites run).
+printf '[{"not": "a record"}]\n' >"$cache/zz-non-record.json"
 VERDICT_ENV="FULL_SUITE_JOBS=1"
 run_verdict timing-split
 entry=$("$judge_dir/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree" \

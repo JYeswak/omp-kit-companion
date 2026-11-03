@@ -499,11 +499,16 @@ history = {}
 for entry in sorted(Path(os.environ['CACHE']).glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
     try:
         data = json.loads(entry.read_text())
+        # The store also holds non-record JSON (lists); a hint that is not a record is skipped, never fatal.
+        if not isinstance(data, dict):
+            continue
         if data.get('judge_role') != os.environ['ROLE'] or data.get('checks') != os.environ['CHECKS']:
             continue
-        for row in data.get('evidence', {}).get('files', []):
+        evidence = data.get('evidence')
+        rows = evidence.get('files', []) if isinstance(evidence, dict) else []
+        for row in rows if isinstance(rows, list) else []:
             history.setdefault(row['path'], row['elapsed_ms'] / 1000)
-    except (ValueError, KeyError, OSError, TypeError):
+    except (ValueError, KeyError, OSError, TypeError, AttributeError):
         continue
 items = []
 for kind, key in [('bun','KEPT_BUN'), ('shell','KEPT_SH'), ('python','KEPT_PY')]:
