@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -22,11 +22,19 @@ function freshDir(parent: string, prefix: string): string {
 
 const base = ownedTmp("kit-guard-receipt").path;
 const savedCcState = process.env.CC_STATE;
+const savedCc = process.env.OMP_KIT_CC;
 
 afterAll(() => {
 	rmSync(base, { recursive: true, force: true });
 	if (savedCcState === undefined) delete process.env.CC_STATE;
 	else process.env.CC_STATE = savedCcState;
+});
+
+afterEach(() => {
+	if (savedCcState === undefined) delete process.env.CC_STATE;
+	else process.env.CC_STATE = savedCcState;
+	if (savedCc === undefined) delete process.env.OMP_KIT_CC;
+	else process.env.OMP_KIT_CC = savedCc;
 });
 
 function stockRepo(): string {
@@ -61,7 +69,7 @@ function spoolState(): string {
 	const state = freshDir(base, "cc-");
 	mkdirSync(join(state, "spool"), { recursive: true });
 	process.env.CC_STATE = state;
-	delete process.env.OMP_KIT_CC;
+	process.env.OMP_KIT_CC = "1";
 	return state;
 }
 
@@ -239,6 +247,7 @@ test("inert spool: no fleet state means no receipt and no warning", async () => 
 	const cwd = stockRepo();
 	const empty = freshDir(base, "nostate-");
 	process.env.CC_STATE = empty;
+	process.env.OMP_KIT_CC = "1";
 	const h = await createFlywheelHost(base, { respond: respond({ "rc-7": bead("rc-7", "open", "BlueFox") }, cwd) });
 	const verdict = await closeCall(h, cwd, "r7", "br --actor Verifier close rc-7 --reason ok");
 	expect(verdict).toBeUndefined();

@@ -41,7 +41,7 @@ for (const r of rows) {
 if (bad > 0) process.exit(1);
 console.log(`parity ${rows.length}/${rows.length}`);
 EOF
-if SPOOL_SRC="$REPO/src/cc-spool.ts" nice -n 10 bun "$STATE/parity.ts" "$GOLDEN" "$STATE" > "$STATE/parity.log" 2>&1; then
+if OMP_KIT_CC=1 SPOOL_SRC="$REPO/src/cc-spool.ts" nice -n 10 bun "$STATE/parity.ts" "$GOLDEN" "$STATE" > "$STATE/parity.log" 2>&1; then
 	pass "parity" "5/5 byte-identical" "$(cat "$STATE/parity.log")"
 else
 	fail "parity" "5/5 byte-identical" "$(cat "$STATE/parity.log")"
@@ -71,7 +71,7 @@ console.log("redaction detected");
 EOF
 TOKEN="ghp_$(printf 'z%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36)"
 NOW="$(as_of_ms)"
-if SPOOL_SRC="$REPO/src/cc-spool.ts" nice -n 10 bun "$STATE/redact.ts" "$STATE" "$TOKEN" "$NOW" > "$STATE/redact.log" 2>&1; then
+if OMP_KIT_CC=1 SPOOL_SRC="$REPO/src/cc-spool.ts" nice -n 10 bun "$STATE/redact.ts" "$STATE" "$TOKEN" "$NOW" > "$STATE/redact.log" 2>&1; then
 	pass "planted_credential_redacted" "U-redaction, token absent" "$(cat "$STATE/redact.log")"
 else
 	fail "planted_credential_redacted" "U-redaction, token absent" "$(cat "$STATE/redact.log")"
@@ -118,7 +118,7 @@ if (lines[0] !== '{"fragment": tru' || JSON.parse(lines[1]).id !== env.id) {
 }
 console.log("tail terminated");
 EOF
-if SPOOL_SRC="$REPO/src/cc-spool.ts" nice -n 10 bun "$STATE/tail.ts" "$STATE" "$DAY" "$NOW" > "$STATE/tail.log" 2>&1; then
+if OMP_KIT_CC=1 SPOOL_SRC="$REPO/src/cc-spool.ts" nice -n 10 bun "$STATE/tail.ts" "$STATE" "$DAY" "$NOW" > "$STATE/tail.log" 2>&1; then
 	pass "planted_tail_terminated" "fragment stands alone" "$(cat "$STATE/tail.log")"
 else
 	fail "planted_tail_terminated" "fragment stands alone" "$(cat "$STATE/tail.log")"

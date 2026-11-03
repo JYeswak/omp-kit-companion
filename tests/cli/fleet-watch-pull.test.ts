@@ -129,7 +129,17 @@ function harness(
 	};
 	return {
 		sends,
-		tick: () => runFleetWatchOnce(config, deps),
+		tick: () => {
+			if (ccStateDir === undefined) return runFleetWatchOnce(config, deps);
+			const savedCc = process.env.OMP_KIT_CC;
+			process.env.OMP_KIT_CC = "1";
+			try {
+				return runFleetWatchOnce(config, deps);
+			} finally {
+				if (savedCc === undefined) delete process.env.OMP_KIT_CC;
+				else process.env.OMP_KIT_CC = savedCc;
+			}
+		},
 		worker: (pane: string) => sends.filter((send) => send.pane === pane).map((send) => send.text),
 		coordinator: () => sends.filter((send) => send.pane === "%54").map((send) => send.text),
 		state: () => JSON.parse(readFileSync(deps.statePath, "utf8")),
