@@ -94,8 +94,14 @@ test("a session arriving during status cannot be hidden by the earlier source sc
 	writeFileSync(old, "{}\n");
 	utimesSync(old, new Date(indexedAt.getTime() - 1000), new Date(indexedAt.getTime() - 1000));
 	const response = status(indexedAt.toISOString());
-	const body = `const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(arrived)},${JSON.stringify('{"text":"LESSON FIXTURE_TEXT_MUST_NOT_ESCAPE"}\n')});console.log(${JSON.stringify(JSON.stringify(response))});`;
-	writeFileSync(join(bin, "cass"), "#!/bin/sh\nexec " + JSON.stringify(process.execPath) + " -e " + JSON.stringify(body) + "\n", { mode: 0o755 });
+	// The status boundary creates the arriving session; no second JS runtime startup
+	// belongs in the production status deadline this source-ordering proof exercises.
+	const [arrivalPath, arrivalBody, statusBody] = [
+		arrived, '{"text":"LESSON FIXTURE_TEXT_MUST_NOT_ESCAPE"}', JSON.stringify(response),
+	].map(value => `'${value.replaceAll("'", "'\\''")}'`);
+	writeFileSync(join(bin, "cass"),
+		`#!/bin/sh\nprintf '%s\\n' ${arrivalBody} > ${arrivalPath}\nprintf '%s\\n' ${statusBody}\n`,
+		{ mode: 0o755 });
 	const probe = `import {readCassFreshness} from ${JSON.stringify(join(root, "src", "cass-freshness.ts"))};console.log(JSON.stringify(readCassFreshness(process.env.HOME)));`;
 	const child = Bun.spawnSync([process.execPath, "-e", probe], {
 		cwd: root, env: { ...process.env, HOME: home, TMPDIR: home, PATH: bin + ":" + (process.env.PATH ?? "") },
@@ -103,7 +109,7 @@ test("a session arriving during status cannot be hidden by the earlier source sc
 	});
 	expect(child.exitCode, child.stderr.toString()).toBe(0);
 	const result = JSON.parse(child.stdout.toString());
-	expect(result.status).toBe("STALE");
+	expect(result.status, JSON.stringify(result)).toBe("STALE");
 	expect(result.sessions.newest_path).toBe(arrived);
 	expect(child.stdout.toString()).not.toContain("FIXTURE_TEXT_MUST_NOT_ESCAPE");
 }, 30_000);
