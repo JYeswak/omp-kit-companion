@@ -51,6 +51,17 @@ def _check_pid(pid) -> int:
     return pid
 
 
+def safe_pid(value: object) -> int:
+    """PIDGUARD1: parse a destructive signal target, never a process-group sentinel."""
+    if isinstance(value, str):
+        if len(value) > 32 or not value.strip() or any(c < "0" or c > "9" for c in value.strip()):
+            raise ValueError("signal pid must be decimal digits")
+        value = int(value.strip())
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 < value <= PID_MAX:
+        raise ValueError(f"signal pid must be an integer in 2..{PID_MAX}")
+    return value
+
+
 def normalize_start(start: str) -> str:
     """Collapses whitespace runs so ``Mon Oct  5 ...`` equals ``Mon Oct 5 ...``."""
     return " ".join(start.split())

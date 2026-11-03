@@ -79,6 +79,20 @@ function checkPid(pid: unknown): number {
 	return pid;
 }
 
+/** PIDGUARD1: parse an untrusted destructive-signal target; never admits process-group sentinels. */
+export function safePid(value: unknown): number {
+	if (typeof value === "string") {
+		if (value.length > 32) throw new TypeError("signal pid is too long");
+		const text = value.trim();
+		if (!text) throw new TypeError("signal pid is empty");
+		for (const char of text) if (char < "0" || char > "9") throw new TypeError("signal pid must be decimal digits");
+		value = Number(text);
+	}
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 1 || value > PID_MAX) throw new TypeError(`signal pid must be an integer in 2..${PID_MAX}`);
+	const pid = value;
+	return pid;
+}
+
 /** Collapses runs of whitespace so `Mon Oct  5 ...` and `Mon Oct 5 ...` compare equal. */
 export function normalizeStart(start: string): string {
 	return start.split(/\s+/).filter(part => part !== "").join(" ");

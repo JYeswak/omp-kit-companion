@@ -10,6 +10,7 @@ Every fixture repo lives in a kitlib-owned temp dir.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -443,6 +444,37 @@ class Allowlist(unittest.TestCase):
         data = json.loads((Path(self.repo) / checker.BASELINE).read_text())
         self.assertEqual((data["counts"], data["totals"]), ({"raw-spawn": {"old.ts": 2}}, {"raw-spawn": 2}))
 
+    def test_pidguard_rule_migration_seeds_only_immutable_base_sites(self) -> None:
+        original = "process.kill(Number(process.env.PID), 'SIGTERM');\n"
+        self.write("pid.ts", original)
+        legacy_bytes = (Path(self.repo) / checker.BASELINE).read_bytes()
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-q", "-m", "[test] legacy pid site")
+        self.assertEqual(self.cli("--write-baseline", "--signal-baseline", "--repo", self.repo)[0], 0)
+        self.assertEqual((Path(self.repo) / checker.BASELINE).read_bytes(), legacy_bytes)
+        self.assertEqual(self.staged(), [])
+        self.write("pid.ts", "process.kill(Number(readFileSync(p)), 'SIGKILL');\n")
+        self.assertEqual([(p, rule) for p, rule, _, _ in self.staged()],
+                         [("pid.ts", "unsafe-signal-pid")])
+        self.write("pid.ts", original)
+        self.write("new-pid.ts", "process.kill(Number(p), 'SIGKILL');\n")
+        _git(self.repo, "add", "--", "new-pid.ts")
+        self.assertEqual(self.cli("--write-baseline", "--signal-baseline", "--repo", self.repo)[0], 0)
+        found = [(p, rule) for p, rule, _, _ in self.staged()]
+        self.assertIn(("new-pid.ts", "unsafe-signal-pid"), found)
+        self.assertIn((checker.SIGNAL_BASELINE, "allowlist-raised"), found)
+
+    def test_pidguard_mapping_cannot_be_removed_after_introduction(self) -> None:
+        self.assertEqual(self.cli("--write-baseline", "--signal-baseline", "--repo", self.repo)[0], 0)
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-q", "-m", "[test] signal inventory introduced")
+        data = json.loads((Path(self.repo) / checker.SIGNAL_BASELINE).read_text())
+        data["counts"].pop("unsafe-signal-pid")
+        data["totals"].pop("unsafe-signal-pid")
+        self.write(checker.SIGNAL_BASELINE, json.dumps(data))
+        self.assertIn((checker.SIGNAL_BASELINE, "allowlist-invalid"),
+                      [(p, rule) for p, rule, _, _ in self.staged()])
+
     def test_planted_new_spawn_refused_naming_kitlib_run_and_kitlib_control_passes(self) -> None:
         self.write("new.py", PY_SPAWN)
         found = self.staged()
@@ -543,6 +575,15 @@ class Allowlist(unittest.TestCase):
         """CI runs this file: the committed allowlist bounds the whole tracked tree."""
         rc, out, err = self.cli("--check-baseline", "--repo", str(ROOT))
         self.assertEqual(rc, 0, out + err)
+
+    def test_pidguard_preserves_installed_schema_one_baseline_bytes(self) -> None:
+        """New rules must not widen the file parsed by already-installed checkers."""
+        raw = (ROOT / checker.BASELINE).read_bytes()
+        # Pin the pre-PIDGUARD1 schema-1 bytes, independent of Git history or
+        # checkout shape: commit-gate archives intentionally have no HEAD.
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),
+                         "ff273b3d83e2151c26092f91418e5774cfc1229880ea043edc0f25e6c6299f9f")
+        self.assertEqual(set(json.loads(raw)["counts"]), {"raw-spawn"})
 
 
 

@@ -35,6 +35,8 @@ case "${1:-}" in
 esac
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=scripts/kitlib-proc.sh
+. "$HERE/scripts/kitlib-proc.sh"
 # Reporting is optional for standalone copies; never synthesize complete records.
 report_test_case() { :; }
 start_case_report() { :; }
@@ -126,9 +128,9 @@ on_signal() {
   # the wrapper published, then fall through to the OP/MP reaping below.
   if [ -n "${LIMIT_PGID_FILE:-}" ] && [ -s "$LIMIT_PGID_FILE" ]; then
     pgid=$(cat "$LIMIT_PGID_FILE" 2>/dev/null) || pgid=""
-    case "$pgid" in ''|*[!0-9]*) ;;
-      *) kill -TERM "-$pgid" 2>/dev/null; sleep 0.5; kill -KILL "-$pgid" 2>/dev/null ;;
-    esac
+    if pgid=$(kitlib_safe_pid "$pgid"); then
+      kitlib_signal TERM "$pgid" group 2>/dev/null; sleep 0.5; kitlib_signal KILL "$pgid" group 2>/dev/null
+    fi
   fi
   [ -n "$OP" ] && kill -TERM "$OP" 2>/dev/null
   [ -n "$MP" ] && kill -TERM "$MP" 2>/dev/null
@@ -322,11 +324,11 @@ reap_mock() {
 reap_group() {
   [ -n "${LIMIT_PGID_FILE:-}" ] && [ -s "$LIMIT_PGID_FILE" ] || return 0
   pgid=$(cat "$LIMIT_PGID_FILE" 2>/dev/null) || pgid=""
-  case "$pgid" in ''|*[!0-9]*) return 0 ;; esac
-  kill -TERM "-$pgid" 2>/dev/null
+  pgid=$(kitlib_safe_pid "$pgid") || return 0
+  kitlib_signal TERM "$pgid" group 2>/dev/null
   w=0
   while kill -0 "-$pgid" 2>/dev/null && [ "$w" -lt 20 ]; do sleep 0.1; w=$((w+1)); done
-  kill -KILL "-$pgid" 2>/dev/null
+  kitlib_signal KILL "$pgid" group 2>/dev/null
 }
 BASE_HOME=$H
 NATIVE_SEED="$T/native-seed/$OMP_NATIVE_SEED_ID"

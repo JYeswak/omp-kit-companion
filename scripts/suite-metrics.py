@@ -32,7 +32,8 @@ JUDGING_FILES = (
     "scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py",
     "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
     "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
-    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
+    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/test-budget.ts",
+    "scripts/kitlib-ratchet-signal-baseline.json",
     ".github/test-budget.json",
 )
 

@@ -33,6 +33,16 @@ Spawn through ``kitlib_run.run`` (scripts/kitlib_run.py) or ``run()``
           optional s/m/h/d suffix, or a $ expansion) and a command; inside an
           unquoted-delimiter heredoc body only $(timeout / `timeout count.
 
+
+PIDGUARD1 additionally refuses destructive process.kill / os.kill / os.killpg
+and shell kill targets unless they are literal integers with magnitude > 1
+or inline safePid / kitlib_proc.safe_pid calls. Shell callers use kitlib_signal.
+Signal 0 probes are excluded. Existing sites are fingerprint-grandfathered
+and counted in scripts/kitlib-ratchet-signal-baseline.json, leaving the installed
+schema-1 raw-spawn inventory unchanged. First introduction seeds only from
+immutable base source. Regenerate this inventory with --write-baseline
+--signal-baseline. This is lexical/AST sink
+checking, not whole-program data-flow or authority/incarnation validation.
 Also: ``suppression-no-reason``, ``suppression-unused``, ``parse-error`` and
 ``too-large``, as in every kitlib ratchet. Pragma: a comment (``#`` or
 ``//`` or ``/*``) whose text starts ``kitlib: <reason>`` on the flagged line,
@@ -91,6 +101,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -101,30 +112,36 @@ import kitlib_ratchet_core as core  # noqa: E402  (imports only pysafe, never py
 
 PRAGMA = "kitlib"
 RAW_SPAWN = "raw-spawn"
+UNSAFE_SIGNAL = "unsafe-signal-pid"
 ALLOWLIST_RAISED = "allowlist-raised"
 ALLOWLIST_INVALID = "allowlist-invalid"
 ALLOWLIST_DELETED = "allowlist-deleted"
 # The committed per-repo allowlist: site counts per rule per path.
 BASELINE = "scripts/kitlib-ratchet-baseline.json"
+SIGNAL_BASELINE = "scripts/kitlib-ratchet-signal-baseline.json"
 BASELINE_SCHEMA = 1
 ORIGIN_QUERY_TIMEOUT_S = 10.0
 
 
 RULES = {
     RAW_SPAWN: "process spawned outside kitlib (no deadline, no process-group cancel, no output cap)",
-    ALLOWLIST_RAISED: f"{BASELINE} raises an allowlisted count or adds an entry; the allowlist only shrinks",
-    ALLOWLIST_INVALID: f"{BASELINE} is not a kitlib allowlist (schema {BASELINE_SCHEMA}, positive counts)",
-    ALLOWLIST_DELETED: f"{BASELINE} is deleted; once committed it stays, shrinking to empty counts",
+    UNSAFE_SIGNAL: "destructive signal target is not a literal pid > 1 or an inline kitlib pid guard",
+    ALLOWLIST_RAISED: "committed kitlib allowlist raises a count or adds an entry; the allowlist only shrinks",
+    ALLOWLIST_INVALID: f"invalid kitlib allowlist (schema {BASELINE_SCHEMA}, positive counts)",
+    ALLOWLIST_DELETED: "committed kitlib allowlist is deleted; once committed it stays, shrinking to empty counts",
     **core.meta_rules(PRAGMA),
 }
 # The rules whose sites the allowlist counts (one site per rule and line).
-SITE_RULES = (RAW_SPAWN,)
+SITE_RULES = (RAW_SPAWN, UNSAFE_SIGNAL)
 # (rule, language) -> the kitlib replacement a finding names.
 HINT = {
     (RAW_SPAWN, "py"): "use kitlib_run.run(argv, deadline_s=...) from scripts/kitlib_run.py",
     (RAW_SPAWN, "ts"): "use run(argv, { deadline_s }) from src/kitlib/run.ts",
     (RAW_SPAWN, "sh"): "bound the command with python3 -B scripts/pysafe.py run --timeout N -- CMD "
                        "(the process primitive kitlib_run wraps), never a call-site timeout",
+    (UNSAFE_SIGNAL, "py"): "use os.kill(safe_pid(value), signal) from scripts/kitlib_proc.py",
+    (UNSAFE_SIGNAL, "ts"): "use process.kill(safePid(value), signal) from src/kitlib/proc.ts",
+    (UNSAFE_SIGNAL, "sh"): "use kitlib_signal SIGNAL PID [group] from scripts/kitlib-proc.sh",
 }
 # Kitlib's own implementations, pysafe.py (the process primitive kitlib_run
 # wraps), and this ratchet with its tests and fixtures. An entry ending in "/"
@@ -133,6 +150,7 @@ EXEMPT = (
     "src/kitlib/",
     "scripts/kitlib_*.py",
     "scripts/kitlib-tmp.sh",
+    "scripts/kitlib-proc.sh",
     "scripts/pysafe.py",
     "tests/scripts/kitlib_ratchet_test.py",
     "tests/cli/check-staged-kitlib.test.sh",
@@ -322,11 +340,167 @@ def _sh_raw_spawn_heredoc(line: str, number: int, hits: core.Hits) -> None:
             hits.add(RAW_SPAWN, number, start + 1, "timeout N")
 
 
+# --- PIDGUARD1: inline validation, not speculative variable/data-flow inference.
+# Python uses its AST/import aliases; JS uses the shared comment/string lexer
+# and balanced argument spans. Shell uses the shared command-position lexer
+# then shlex words. Aliased JS sinks and embedded interpreter programs remain
+# outside this lexical ratchet, as they do for raw-spawn.
+def _literal_pid(value: str) -> bool:
+    value = value.strip()
+    if value.startswith("-"):
+        value = value[1:]
+    return 0 < len(value) <= 10 and value.isascii() and value.isdecimal() and 1 < int(value) <= 2147483647
+
+
+def _py_safe_target(node: ast.AST, aliases: Dict[str, str]) -> bool:
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        node = node.operand
+    if isinstance(node, ast.Constant):
+        return type(node.value) is int and 1 < node.value <= 2147483647
+    return (isinstance(node, ast.Call) and
+            core.resolve(node.func, aliases) == "kitlib_proc.safe_pid" and len(node.args) == 1)
+
+
+def _py_signal(parsed: core.PySource, hits: core.Hits) -> None:
+    for node in ast.walk(parsed.tree):
+        if not isinstance(node, ast.Call) or core.resolve(node.func, parsed.aliases) not in ("os.kill", "os.killpg"):
+            continue
+        if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and type(node.args[1].value) is int and node.args[1].value == 0:
+            continue
+        if not node.args or not _py_safe_target(node.args[0], parsed.aliases):
+            hits.add(UNSAFE_SIGNAL, node.lineno, node.col_offset + 1, "os.kill/killpg")
+
+
+def _js_arguments(code: str, start: int) -> Optional[List[Tuple[int, int]]]:
+    """Top-level argument slices, using the already lexed JS representation."""
+    stack = []
+    begin = start + 1
+    args = []
+    for offset in range(begin, len(code)):
+        char = code[offset]
+        if char in "([{":
+            stack.append(char)
+        elif char in ")]}":
+            if not stack:
+                if char == ")":
+                    args.append((begin, offset))
+                    return args
+                return None
+            if {"(": ")", "[": "]", "{": "}"}[stack.pop()] != char:
+                return None
+        elif char == "," and not stack:
+            args.append((begin, offset))
+            begin = offset + 1
+    return None
+
+
+def _js_pid_guards(js: JsSource) -> Set[str]:
+    """Recognise static imports of the shared helper, not lookalike local functions."""
+    names: Set[str] = set()
+    for offset, literal, _, _ in js.strings:
+        module = literal.removesuffix(".ts").removesuffix(".js")
+        if not literal.startswith(".") or not module.endswith("/kitlib/proc"):
+            continue
+        before = js.code[max(0, offset - 4096):offset].rstrip()
+        if not before.endswith("from"):
+            continue
+        keywords = list(JS_KEYWORD_RE.finditer(before))
+        if not keywords or keywords[-1].group(1) != "import":
+            continue
+        clause = before[keywords[-1].end():-4].strip()
+        if clause.startswith("type"):
+            continue
+        if clause.startswith("*"):
+            words = clause.split()
+            if len(words) == 3 and words[1] == "as" and JS_IDENT_RE.fullmatch(words[2]):
+                names.add(words[2] + ".safePid")
+        elif clause.startswith("{") and clause.endswith("}"):
+            for spec in clause[1:-1].split(","):
+                words = spec.split()
+                if words == ["safePid"]:
+                    names.add("safePid")
+                elif len(words) == 3 and words[:2] == ["safePid", "as"] and JS_IDENT_RE.fullmatch(words[2]):
+                    names.add(words[2])
+    return names
+
+
+def _js_safe_target(value: str, guards: Set[str]) -> bool:
+    value = value.strip()
+    if _literal_pid(value):
+        return True
+    if value.startswith("-"):
+        value = value[1:].strip()
+    callee, opening, tail = value.partition("(")
+    if not opening or callee.strip() not in guards:
+        return False
+    rest = opening + tail
+    args = _js_arguments(rest, 0)
+    return args is not None and len(args) == 1 and args[0][1] == len(rest) - 1
+
+
+JS_SIGNAL_RE = re.compile(r"\bprocess\s*\.\s*kill\s*\(")
+SH_SIGNAL_RE = re.compile(r"\bkill(?![A-Za-z0-9_.=-])")
+
+
+def _js_signal(js: JsSource, hits: core.Hits) -> None:
+    guards = _js_pid_guards(js)
+    for match in JS_SIGNAL_RE.finditer(js.code):
+        args = _js_arguments(js.code, match.end() - 1)
+        if args is not None and len(args) >= 2:
+            signal = js.bare[slice(*args[1])].strip()
+            if signal in ("0", "'0'", '"0"'):
+                continue
+        if args is None or not _js_safe_target(js.code[slice(*args[0])], guards):
+            line, col = js.where(match.start())
+            hits.add(UNSAFE_SIGNAL, line, col, "process.kill")
+
+
+def _sh_signal(code: str, number: int, hits: core.Hits, heredoc: bool = False) -> None:
+    for start, end in core.sh_command_words(code, SH_SIGNAL_RE):
+        if not core.sh_command_position(code, start):
+            continue
+        if heredoc and not code[:start].endswith(("$(", "`")):
+            continue
+        if code[end:].lstrip().startswith("("):  # shell function definition, not a signal
+            continue
+        try:
+            lexer = shlex.shlex(code[end:], posix=True, punctuation_chars=";&|<>")
+            lexer.whitespace_split = True
+            words = list(lexer)
+        except ValueError:
+            hits.add(UNSAFE_SIGNAL, number, start + 1, "kill (unparsed)")
+            continue
+        signal = "TERM"
+        if words and words[0] in ("-s", "--signal", "-n"):
+            if len(words) < 2:
+                continue
+            signal, words = words[1], words[2:]
+        elif words and words[0].startswith("--signal="):
+            signal, words = words[0].partition("=")[2], words[1:]
+        elif words and words[0].startswith("-") and words[0] != "--":
+            signal, words = words[0][1:], words[1:]
+        if signal == "0":
+            continue
+        if words and words[0] == "--":
+            words = words[1:]
+        targets = []
+        for word in words:
+            if word and word[0] in ";&|<>":
+                break
+            targets.append(word)
+        if any(not _literal_pid(word) for word in targets):
+            hits.add(UNSAFE_SIGNAL, number, start + 1, "kill")
+
+
+def _sh_signal_heredoc(code: str, number: int, hits: core.Hits) -> None:
+    _sh_signal(code, number, hits, heredoc=True)
+
+
 # --- rule registry: add a primitive's rule by appending its functions ----
-PY_RULES: List[Callable[[core.PySource, core.Hits], None]] = [_py_raw_spawn]
-JS_RULES: List[Callable[[JsSource, core.Hits], None]] = [_js_raw_spawn]
-SH_CODE_RULES: List[core.ShCodeFn] = [_sh_raw_spawn_code]
-SH_HEREDOC_RULES: List[core.ShCodeFn] = [_sh_raw_spawn_heredoc]
+PY_RULES: List[Callable[[core.PySource, core.Hits], None]] = [_py_raw_spawn, _py_signal]
+JS_RULES: List[Callable[[JsSource, core.Hits], None]] = [_js_raw_spawn, _js_signal]
+SH_CODE_RULES: List[core.ShCodeFn] = [_sh_raw_spawn_code, _sh_signal]
+SH_HEREDOC_RULES: List[core.ShCodeFn] = [_sh_raw_spawn_heredoc, _sh_signal_heredoc]
 
 
 def _scan_py(source: bytes, path: str) -> core.Scan:
@@ -367,36 +541,39 @@ def _detail(rule: str, lang: str, constructs: List[str]) -> str:
 Allowlist = Dict[str, Dict[str, int]]
 
 
-def parse_allowlist(raw: bytes) -> Allowlist:
+def parse_allowlist(raw: bytes, rules: Sequence[str] = (RAW_SPAWN,)) -> Allowlist:
     """The counts of a committed allowlist; ValueError when it is not one."""
     data = json.loads(raw.decode("utf-8"))
     if not isinstance(data, dict) or data.get("schema") != BASELINE_SCHEMA or not isinstance(data.get("counts"), dict):
         raise ValueError(f"want an object with schema {BASELINE_SCHEMA} and counts")
     counts: Allowlist = {}
     for rule, paths in data["counts"].items():
-        if rule not in SITE_RULES or not isinstance(paths, dict):
+        if rule not in rules or not isinstance(paths, dict):
             raise ValueError(f"counts.{rule}: not a site rule mapping paths to counts")
         for path, count in paths.items():
             if isinstance(count, bool) or not isinstance(count, int) or count < 1:
                 raise ValueError(f"counts.{rule}.{path}: want a positive integer")
         counts[rule] = dict(paths)
-    if data.get("totals") != render_totals(counts):
+    if UNSAFE_SIGNAL in rules and UNSAFE_SIGNAL not in counts:
+        raise ValueError("unsafe-signal-pid mapping is required")
+    if data.get("totals") != {rule: sum(paths.values()) for rule, paths in counts.items()}:
         raise ValueError("totals do not sum the counts")
     return counts
 
 
-def render_totals(counts: Allowlist) -> Dict[str, int]:
-    return {rule: sum(counts.get(rule, {}).values()) for rule in SITE_RULES}
+def render_totals(counts: Allowlist, rules: Sequence[str] = (RAW_SPAWN,)) -> Dict[str, int]:
+    return {rule: sum(counts.get(rule, {}).values()) for rule in rules}
 
 
-def render_allowlist(counts: Allowlist) -> str:
+def render_allowlist(counts: Allowlist, rules: Sequence[str] = (RAW_SPAWN,)) -> str:
     payload = {
         "schema": BASELINE_SCHEMA,
         "about": "kitlib_ratchet allowlist (ompkit-qwqh1): pre-existing sites per rule per path. "
                  "It only shrinks: a commit or push that raises a count or adds an entry is refused. "
-                 "Regenerate with: python3 scripts/kitlib_ratchet.py --write-baseline",
-        "totals": render_totals(counts),
-        "counts": {rule: dict(sorted(counts.get(rule, {}).items())) for rule in SITE_RULES},
+                 "Regenerate with: python3 scripts/kitlib_ratchet.py --write-baseline"
+                 + (" --signal-baseline" if UNSAFE_SIGNAL in rules else ""),
+        "totals": render_totals(counts, rules),
+        "counts": {rule: dict(sorted(counts.get(rule, {}).items())) for rule in rules},
     }
     return json.dumps(payload, indent=1, sort_keys=True) + "\n"
 
@@ -587,40 +764,61 @@ class KitlibRuleSet(core.RuleSet):
 
     def ratchet(self, repo: str, base: Optional[str], head: Optional[str]) -> List[core.FileReport]:
         reports = super().ratchet(repo, base, head)
-        new_raw = _blob(repo, _spec(head, BASELINE))
-        old_raw = _blob(repo, _spec(base, BASELINE)) if base is not None else None
+        self._ratchet_allowlist(repo, base, head, reports, BASELINE, (RAW_SPAWN,))
+        self._ratchet_allowlist(repo, base, head, reports, SIGNAL_BASELINE, (UNSAFE_SIGNAL,))
+        return self._apply_published_origin_admissions(repo, base, head, reports)
+
+    def _ratchet_allowlist(self, repo: str, base: Optional[str], head: Optional[str],
+                          reports: List[core.FileReport], baseline: str, rules: Sequence[str]) -> None:
+        new_raw = _blob(repo, _spec(head, baseline))
+        old_raw = _blob(repo, _spec(base, baseline)) if base is not None else None
         if new_raw is None and old_raw is None:
-            sys.stderr.write(f"{self.prog}: no {BASELINE}; judged against git history only\n")
-            return self._apply_published_origin_admissions(repo, base, head, reports)
-        listing = core.FileReport(BASELINE)
+            sys.stderr.write(f"{self.prog}: no {baseline}; judged against git history only\n")
+            return
+        listing = core.FileReport(baseline)
         old: Optional[Allowlist] = None
         if old_raw is not None:
             try:
-                old = parse_allowlist(old_raw)
+                old = parse_allowlist(old_raw, rules)
             except ValueError:
                 old = None  # a broken base allowlist is replaced, never extended against
         new: Allowlist = {}
         if new_raw is None:
-            listing.findings.append(core.Finding(BASELINE, 1, 1, ALLOWLIST_DELETED, RULES[ALLOWLIST_DELETED],
+            listing.findings.append(core.Finding(baseline, 1, 1, ALLOWLIST_DELETED, RULES[ALLOWLIST_DELETED],
                                                  "deleted; write an empty one with --write-baseline"))
         else:
             try:
-                new = parse_allowlist(new_raw)
+                new = parse_allowlist(new_raw, rules)
             except ValueError as exc:
-                listing.findings.append(core.Finding(BASELINE, 1, 1, ALLOWLIST_INVALID, RULES[ALLOWLIST_INVALID],
+                listing.findings.append(core.Finding(baseline, 1, 1, ALLOWLIST_INVALID, RULES[ALLOWLIST_INVALID],
                                                      core.collapse(str(exc))))
                 new = old or {}
         pairs = self.changed(self._diff(repo, base, head))
         renamed = {path: old_path for old_path, path in pairs if old_path is not None and old_path != path}
+        # First introduction of the signal inventory is bounded by immutable
+        # base source, never the candidate file. The raw-spawn schema stays
+        # byte-compatible with checkers installed before PIDGUARD1.
+        if baseline == SIGNAL_BASELINE and old_raw is None and new_raw is not None and base is not None:
+            seeded: Dict[str, int] = {}
+            for path in new.get(UNSAFE_SIGNAL, {}):
+                if not path or not _judged(path):
+                    continue
+                source = _blob(repo, _spec(base, path))
+                lang = core.language(path, (source or b"")[:256])
+                if source is not None and lang is not None:
+                    count = len(_sites(self.check_source(source, path, lang), UNSAFE_SIGNAL))
+                    if count:
+                        seeded[path] = count
+            old = {UNSAFE_SIGNAL: seeded}
         if old is not None:
-            for rule in SITE_RULES:
+            for rule in rules:
                 before, after = old.get(rule, {}), new.get(rule, {})
                 for path, count in sorted(after.items()):
                     prev = before.get(path)
                     if prev is None and path in renamed and renamed[path] not in after:
                         prev = before.get(renamed[path])
                     if prev is None or count > prev:
-                        listing.findings.append(core.Finding(BASELINE, 1, 1, ALLOWLIST_RAISED,
+                        listing.findings.append(core.Finding(baseline, 1, 1, ALLOWLIST_RAISED,
                                                              RULES[ALLOWLIST_RAISED],
                                                              f"{rule} {path}: {prev or 0} -> {count}"))
         targets = {path for _, path in pairs}
@@ -636,7 +834,7 @@ class KitlibRuleSet(core.RuleSet):
             if source is None or lang is None:
                 continue
             full = self.check_source(source, path, lang)
-            for rule in SITE_RULES:
+            for rule in rules:
                 sites = _sites(full, rule)
                 allowed = new.get(rule, {}).get(path, 0)
                 report = by_path.get(path)
@@ -650,13 +848,12 @@ class KitlibRuleSet(core.RuleSet):
                 for finding in [f for f in sites if f.line not in reported][-surplus:]:
                     pragma = f"; its {self.pragma}: pragma documents an allowlisted site and admits no new one" \
                         if finding.suppressed is not None else ""
-                    finding.detail += f" ({len(sites)} sites, {allowed} allowlisted in {BASELINE}{pragma})"
+                    finding.detail += f" ({len(sites)} sites, {allowed} allowlisted in {baseline}{pragma})"
                     finding.suppressed = None
                     report.findings.append(finding)
                 report.findings.sort(key=lambda f: (f.line, f.col, f.rule))
         if listing.findings:
             reports.append(listing)
-        return self._apply_published_origin_admissions(repo, base, head, reports)
 
     def verify_reversal_message(self, repo: str, message_path: str) -> int:
         try:
@@ -861,34 +1058,47 @@ class KitlibRuleSet(core.RuleSet):
         mode.add_argument("--write-baseline", action="store_true")
         mode.add_argument("--check-baseline", action="store_true")
         parser.add_argument("--repo", default=".")
+        parser.add_argument("--signal-baseline", action="store_true",
+                            help="write/check the separate PIDGUARD1 inventory; preserve the legacy raw-spawn schema")
         parser.add_argument("--output", help=f"write the allowlist here ('-' for stdout), not REPO/{BASELINE}")
         args = parser.parse_args(argv)
+        baseline = SIGNAL_BASELINE if args.signal_baseline else BASELINE
+        rules = (UNSAFE_SIGNAL,) if args.signal_baseline else (RAW_SPAWN,)
         try:
             if args.write_baseline:
-                text = render_allowlist(self.tree_counts(args.repo))
+                text = render_allowlist(self.tree_counts(args.repo), rules)
                 if args.output == "-":
                     sys.stdout.write(text)
                 else:
-                    with open(args.output or os.path.join(args.repo, BASELINE), "w", encoding="utf-8") as handle:
+                    with open(args.output or os.path.join(args.repo, baseline), "w", encoding="utf-8") as handle:
                         handle.write(text)
                 return 0
             if args.output:
                 parser.error("--output goes with --write-baseline")
-            with open(os.path.join(args.repo, BASELINE), "rb") as handle:
-                allowed = parse_allowlist(handle.read())
+            inventories = [(baseline, rules)]
+            if not args.signal_baseline and os.path.isfile(os.path.join(args.repo, SIGNAL_BASELINE)):
+                inventories.append((SIGNAL_BASELINE, (UNSAFE_SIGNAL,)))
+            allowed: Allowlist = {}
+            checked_rules = []
+            inventory_paths = {}
+            for name, inventory_rules in inventories:
+                with open(os.path.join(args.repo, name), "rb") as handle:
+                    allowed.update(parse_allowlist(handle.read(), inventory_rules))
+                checked_rules.extend(inventory_rules)
+                inventory_paths.update((rule, name) for rule in inventory_rules)
             reports = self.tree_reports(args.repo)
         except (OSError, ValueError, core.GitError) as exc:
             sys.stderr.write(f"{self.prog}: {exc}\n")
             return 2
         over = 0
         for report in reports:
-            for rule in SITE_RULES:
+            for rule in checked_rules:
                 sites = _sites(report, rule)
                 limit = allowed.get(rule, {}).get(report.path, 0)
                 for finding in sites[limit:]:
                     over += 1
                     sys.stdout.write(f"{finding.path}:{finding.line}:{finding.col}: {rule}: {finding.detail} "
-                                     f"({len(sites)} sites, {limit} allowlisted in {BASELINE}): {finding.snippet}\n")
+                                     f"({len(sites)} sites, {limit} allowlisted in {inventory_paths[rule]}): {finding.snippet}\n")
                 if len(sites) < limit:
                     sys.stderr.write(f"{self.prog}: {report.path}: {rule} allowlists {limit}, {len(sites)} remain; "
                                      "lower it with --write-baseline\n")

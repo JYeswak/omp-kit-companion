@@ -1310,7 +1310,7 @@ mktagverdictrepo() {
 	name=$1
 	failing_suite=${2:-}
 	repo=$(mktagrepo "$name")
-	cp "$KITREPO/scripts/full-suite-verdict.sh" "$KITREPO/scripts/full-suite-verdict-store.py" "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
+	# The canonical judge closure includes verdict, store and their PIDGUARD1 helper.
 	carry_measurement "$KITREPO" "$repo"
 	# The judge asks the gate for its worker count (fresh-gate.sh --test-workers) when it records timings.
 	# shellcheck disable=SC2016 # literal $#/$1: the generated stub script expands them, not this shell

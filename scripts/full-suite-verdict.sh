@@ -35,6 +35,8 @@
 set -eu
 umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+# shellcheck source=scripts/kitlib-proc.sh
+. "$SCRIPT_DIR/kitlib-proc.sh"
 run_started_ms=$(python3 -c 'import time; print(time.time_ns() // 1000000)')
 load_start=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
 ROOT=
@@ -605,11 +607,12 @@ PYQUEUE
 # function-local state in POSIX sh: with PID in a global the recursion overwrote it and only the last
 # leaf was signalled, so a hung suite's shell and the runner went on past the deadline (FULLSUITEPAR1).
 kill_tree() {
+	kitlib_safe_pid "$1" >/dev/null || return 2
 	kt_children=$(ps -A -o pid= -o ppid= 2>/dev/null | awk -v r="$1" '$2 == r { print $1 }')
 	for kt_child in $kt_children; do kill_tree "$kt_child" "$2" "${3:-}"; done
 	case " ${3:-} " in
 		*" $1 "*) ;;
-		*) kill "-$2" "$1" 2>/dev/null || true ;;
+		*) kitlib_signal "$2" "$1" 2>/dev/null || true ;;
 	esac
 }
 
