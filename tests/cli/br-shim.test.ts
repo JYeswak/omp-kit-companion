@@ -8,6 +8,7 @@ import { nativeBr } from "./lib/native-br.ts";
 import { unlinkSync } from "node:fs";
 import { callerScratchRoot } from "../../src/runtime.ts";
 import { readJsonl } from "../../src/kitlib/jsonl.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 // Each scenario owns its scratch, tracker, authority and environment. No case
 // observes another case's mutations, so native subprocess waits may overlap.
@@ -19,9 +20,9 @@ const test = bunTest.concurrent;
 const root = resolve(import.meta.dir, "../..");
 const shimSource = readFileSync(join(root, "scripts/br-shim.sh"), "utf8");
 const decoder = new TextDecoder();
-// Admission tests are not latency benchmarks. Each case owns at most two 15s
-// subprocesses plus their bounded reap and fixture cleanup; the file gate is unchanged.
-const CASE_BUDGET_MS = 40_000;
+// Admission tests are not latency benchmarks. Each case owns at most two load-scaled
+// 15s subprocess fixtures plus bounded reap and cleanup; the file gate is unchanged.
+const CASE_BUDGET_MS = fixtureDeadlineS(40) * 1_000;
 const claimPrograms = ownedTmp("cutclaim-programs");
 
 // Share immutable executable bytes, never scenario data or tracker mutations.
@@ -186,8 +187,9 @@ esac
 			// Alter only real native findings to emulate stale or malformed authorities.
 			const alteredLauncher = ["stale", "nonblocking-refusal", "blocking-admitted", "duplicate"].includes(authority) ? `#!${process.execPath}
 import { run } from ${JSON.stringify(join(root, "src/kitlib/run.ts"))};
+import { fixtureDeadlineS } from ${JSON.stringify(join(root, "tests/cli/fixture-process.ts"))};
 const result = await run([process.execPath, ${JSON.stringify(join(root, "src/cli.ts"))}, ...process.argv.slice(2)],
-  { deadline_s: 30, cwd: process.cwd(), env: { ...process.env }, max_output_bytes: 4 * 1024 * 1024 });
+  { deadline_s: fixtureDeadlineS(30), cwd: process.cwd(), env: { ...process.env }, max_output_bytes: 4 * 1024 * 1024 });
 if (result.timed_out || result.truncated || ![0, 1].includes(result.rc)) {
   throw new Error("real preflight fixture failed: " + new TextDecoder().decode(result.stderr));
 }
@@ -226,7 +228,7 @@ process.exitCode = doc.ok ? 0 : 1;
 		const env = { ...process.env };
 		delete env.OMP_KIT_FLEET_WATCH_CONFIG;
 		const result = await run(["/bin/sh", shim, ...(options.explicitDb ? ["--db", db] : []), "update", id, ...(options.extraIds ?? []), "--claim", ...(options.claimArgs ?? [])], {
-			cwd: decoy, deadline_s: 15,
+			cwd: decoy, deadline_s: fixtureDeadlineS(15),
 			env: { ...env, HOME: home, PATH: bin, AGENT_NAME: "CutClaimShellFixture",
 				XDG_CONFIG_HOME: join(home, ".config"), XDG_STATE_HOME: join(home, ".local/state"),
 				...(options.config === "default-missing" ? {} : { OMP_KIT_FLEET_WATCH_CONFIG: config }), BR_REAL: realBr,
@@ -343,7 +345,7 @@ bunTest.serial("CUTCLAIM1 value flags do not become extra claim targets", async 
 }, CASE_BUDGET_MS);
 async function publicationGit(repo: string, args: string[]): Promise<string> {
 	const result = await run(["git", "-C", repo, ...args], {
-		deadline_s: 30, cwd: repo, env: { ...process.env }, max_output_bytes: 1024 * 1024,
+		deadline_s: fixtureDeadlineS(30), cwd: repo, env: { ...process.env }, max_output_bytes: 1024 * 1024,
 	});
 	if (result.rc !== 0) throw new Error(`git ${args.join(" ")} failed: ${decoder.decode(result.stderr)}`);
 	return decoder.decode(result.stdout).trim();
@@ -408,7 +410,7 @@ esac
 `, { mode: 0o755 });
 		const runShim = async (args: string[]) => {
 			const result = await run(["sh", shim, ...args], {
-				deadline_s: 30, cwd: repo, env: {
+				deadline_s: fixtureDeadlineS(30), cwd: repo, env: {
 					...process.env, AGENT_NAME: "Verifier", BEADS_DB: db, BR_REAL: fakeBr,
 					PUBLISH_MUTATIONS: mutations,
 					PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -478,7 +480,7 @@ async function handoffRepo(companion = false) {
 		GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0",
 	};
 	const checked = async (argv: string[], cwd = tracker) => {
-		const result = await run(argv, { cwd, env, deadline_s: 30, max_output_bytes: 4 << 20 });
+		const result = await run(argv, { cwd, env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 4 << 20 });
 		if (result.rc !== 0 || result.timed_out || result.truncated) {
 			throw new Error(`${argv.join(" ")}: ${result.rc}\n${decoder.decode(result.stdout)}${decoder.decode(result.stderr)}`);
 		}
@@ -540,7 +542,7 @@ esac
 			}));
 		};
 		const shim = (args: string[], input?: string) => run(["sh", join(root, "scripts/br-shim.sh"), "--db", db, ...args], {
-			cwd: code, env, deadline_s: 30, max_output_bytes: 4 << 20,
+			cwd: code, env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 4 << 20,
 			...(input === undefined ? {} : { stdin: input }),
 		});
 		const status = async (id = "hh-owned") => {
@@ -571,7 +573,7 @@ test("HANDOFFREPO1 exact non-companion pregrade admits the real native author ha
 		expect(result.rc, decoder.decode(result.stderr)).toBe(0);
 		expect(await f.status()).toBe("in_review");
 	} finally { f.scratch.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("HANDOFFREPO1 missing observation refuses without mutation and names the declared existing repo check", async () => {
 	const f = await handoffRepo();
@@ -585,13 +587,13 @@ test("HANDOFFREPO1 missing observation refuses without mutation and names the de
 		expect(await f.status()).toBe("in_progress");
 		const command = out.slice(out.lastIndexOf("run: ") + 5).trim();
 		const declaredCwd = command.slice("cd ".length, command.indexOf(" && "));
-		const repaired = await run(["sh", "tests/replay.sh"], { cwd: declaredCwd, env: f.env, deadline_s: 15 });
+		const repaired = await run(["sh", "tests/replay.sh"], { cwd: declaredCwd, env: f.env, deadline_s: fixtureDeadlineS(15) });
 		expect(repaired.rc, decoder.decode(repaired.stderr)).toBe(0);
 		unlinkSync(join(f.tracker, "payload.txt"));
-		const negative = await run(["sh", "tests/replay.sh"], { cwd: declaredCwd, env: f.env, deadline_s: 15 });
+		const negative = await run(["sh", "tests/replay.sh"], { cwd: declaredCwd, env: f.env, deadline_s: fixtureDeadlineS(15) });
 		expect(negative.rc).toBe(1);
 	} finally { f.scratch.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("HANDOFFREPO1 pregrade must bind the candidate, tracker, acceptance, non-author and passing build outcomes", async () => {
 	const f = await handoffRepo();
@@ -610,7 +612,7 @@ test("HANDOFFREPO1 pregrade must bind the candidate, tracker, acceptance, non-au
 		expect(control.rc, decoder.decode(control.stderr)).toBe(0);
 		expect(await f.status()).toBe("in_review");
 	} finally { f.scratch.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("HANDOFFREPO1 companion still requires its ledger even if its committed script is missing from the worktree", async () => {
 	const f = await handoffRepo(true);
@@ -626,7 +628,7 @@ test("HANDOFFREPO1 companion still requires its ledger even if its committed scr
 		expect(control.rc, decoder.decode(control.stderr)).toBe(0);
 		expect(await f.status()).toBe("in_review");
 	} finally { f.scratch.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("HANDOFFREPO1 native positional, file and stdin DONE comments all use the same exact pregrade", async () => {
 	const f = await handoffRepo();
@@ -651,7 +653,7 @@ test("HANDOFFREPO1 native positional, file and stdin DONE comments all use the s
 			expect(await f.status()).toBe("in_progress");
 		}
 	} finally { f.scratch.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("HANDOFFREPO1 one pregrade cannot admit an ambiguous multiple-bead update", async () => {
 	const f = await handoffRepo();
@@ -662,7 +664,7 @@ test("HANDOFFREPO1 one pregrade cannot admit an ambiguous multiple-bead update",
 		expect(await f.status()).toBe("in_progress");
 		expect(await f.status("hh-other")).toBe("in_progress");
 	} finally { f.scratch.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("HANDOFFREPO1 pregrade binds prospective acceptance in the same native update", async () => {
 	const f = await handoffRepo();
@@ -682,7 +684,7 @@ test("HANDOFFREPO1 pregrade binds prospective acceptance in the same native upda
 		expect(after.status).toBe("in_review");
 		expect(after.acceptance_criteria).toBe(next);
 	} finally { f.scratch.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 type HermeticFixture = {
 	path: string;
@@ -716,7 +718,7 @@ async function hermeticCall(fixture: HermeticFixture, args: string[], options: {
 	const result = await run(options.native
 		? [fixture.backend, "--db", fixture.database, ...args]
 		: ["/bin/sh", options.shim ?? join(root, "scripts/br-shim.sh"), ...(options.implicit ? [] : ["--db", fixture.database]), ...args],
-	{ cwd: fixture.path, env: options.env ?? fixture.env, deadline_s: 15, max_output_bytes: 1024 * 1024 });
+	{ cwd: fixture.path, env: options.env ?? fixture.env, deadline_s: fixtureDeadlineS(15), max_output_bytes: 1024 * 1024 });
 	return { rc: result.rc, timedOut: result.timed_out, truncated: result.truncated,
 		stdout: decoder.decode(result.stdout), output: decoder.decode(result.stdout) + decoder.decode(result.stderr) };
 }
@@ -998,7 +1000,7 @@ test("TRACKERLEASE1 lease: native create/dep/comments defer export and a later f
 		const normalId = JSON.parse(normal.stdout).id;
 		expect(leaseExport(fixture).find(row => row.id === normalId)?.title).toBe("Ordinary unleased export");
 	} finally { fixture.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("TRACKERLEASE1 lease: delegated comment-target and P0 displacement preserve admission and export", async () => {
 	const fixture = await nativeLeaseFixture(0);
@@ -1032,7 +1034,7 @@ test("TRACKERLEASE1 lease: delegated comment-target and P0 displacement preserve
 		expect(leaseExport(fixture).map(row => ({ id: row.id, priority: row.priority })).sort((a, b) => a.id.localeCompare(b.id)))
 			.toEqual(rows.map(row => ({ id: row.id, priority: row.priority })).sort((a, b) => a.id.localeCompare(b.id)));
 	} finally { fixture.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("TRACKERLEASE1 lease: DB custody, mixed conflicts and unknown authority remain fail-closed", async () => {
 	const fixture = await nativeLeaseFixture();
@@ -1051,7 +1053,7 @@ test("TRACKERLEASE1 lease: DB custody, mixed conflicts and unknown authority rem
 					.sort((a, b) => a.id.localeCompare(b.id)));
 		}
 	} finally { fixture.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("TRACKERLEASE1 lease: disabling the explicit-flush guard exposes the same native export leak", async () => {
 	const fixture = await nativeLeaseFixture();
@@ -1076,4 +1078,4 @@ test("TRACKERLEASE1 lease: disabling the explicit-flush guard exposes the same n
 		expect(leaseExport(fixture).find(row => row.id === id)?.title).toBe("Causal flush boundary payload");
 		expect(leaseExport(fixture).map(row => row.id).sort()).toEqual((await leaseRows(fixture)).map(row => row.id).sort());
 	} finally { fixture.cleanup(); }
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
