@@ -8,6 +8,7 @@ import { writeBundledHarness, writeReleaseManifest } from "./release-manifest-fi
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 // Every `service run` below sees only this file's own launchers in the host process table.
 const LAUNCHER_TABLE = fixtureLauncherTableBin();
@@ -554,11 +555,22 @@ test("a capped producer group leaves no active nested process after timeout", as
 	});
 	const pid = Number(readFileSync(marker, "utf8").trim());
 	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Owned descendant PID was not recorded");
-	const state = Bun.spawnSync(["ps", "-p", String(pid), "-o", "stat="], { stdout: "pipe", stderr: "pipe" });
-	const active = state.exitCode === 0 && !state.stdout.toString().trim().startsWith("Z");
+	let active = true;
+	let lastState = "not observed";
 	try {
 		expect(result.status).toBe("TIMEOUT");
-		expect(active, `owned descendant ${pid} remains ${state.stdout.toString()}`).toBe(false);
+		const deadline = performance.now() + fixtureDeadlineS(2) * 1_000;
+		do {
+			const state = runFixture(["ps", "-p", String(pid), "-o", "stat="], { cwd: scratch, floor_s: 2 });
+			lastState = new TextDecoder().decode(state.stdout).trim();
+			// Darwin can prefix the exiting E state with ? while kernel teardown finishes.
+			const status = lastState.startsWith("?") ? lastState.slice(1) : lastState;
+			active = state.rc === 0 && !status.startsWith("Z") && !status.startsWith("E");
+			if (!active || performance.now() >= deadline) break;
+			// Observe real kernel process state; fake timers cannot drive process teardown.
+			await Bun.sleep(10);
+		} while (true);
+		expect(active, `owned descendant ${pid} remains ${lastState || "(gone)"}`).toBe(false);
 	} finally {
 		if (active) {
 			try { process.kill(pid, "SIGKILL"); } catch { /* only our recorded descendant, already exited */ }
