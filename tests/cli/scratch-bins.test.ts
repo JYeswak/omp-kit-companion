@@ -268,3 +268,18 @@ test("OWNERMSG1: a binned release on a one-bad-field JSON owner names the field 
 	expect(releaseScratch(legacy.dir, legacy.home, deps(), { bin: "throwaway" })).toMatchObject({ ok: true, changed: true });
 	expect(diagnoseOwnerFailure(ownerText(42))).toBeNull();
 });
+
+test("LEGACYEMPTY1 a legacy release of a dir whose .owner is empty records and reads back; a second release is already-released", () => {
+	// 2026-11-03 field case: an archive extracted into an owned scratch root overwrote .owner with an empty blob.
+	const { dir, home } = fixture("");
+	expect(releaseScratch(dir, home, deps(), { legacyOwner: true, reason: "owner clobbered by an archive extraction" })).toMatchObject({ ok: true, changed: true });
+	expect(releaseScratch(dir, home, deps(), { legacyOwner: true, reason: "owner clobbered by an archive extraction" })).toMatchObject({ ok: true, changed: false, reason: "already-released" });
+});
+
+test("LEGACYEMPTY1 planted negative: an empty value for any other marker key is still rejected", () => {
+	const { dir, home, root } = fixture("");
+	expect(releaseScratch(dir, home, deps(), { legacyOwner: true, reason: "x" }).ok).toBe(true);
+	const marker = join(dir, ".omp-kit-release");
+	writeFileSync(marker, readFileSync(marker, "utf8").replace(/^owner_sha256=.*$/m, "owner_sha256="));
+	expect(inspectOne(dir, root, deps())?.reason).not.toBe("owner-released-would-quarantine");
+});

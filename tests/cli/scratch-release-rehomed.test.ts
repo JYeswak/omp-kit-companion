@@ -2,7 +2,7 @@
 // directory name. The owner (the successor) must still be able to release that dir, the release must stand at plan and
 // apply time, and a caller that is not the owner must not. The dir name is not release authority.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { applyScratch, inspectOne, releaseScratch, type InspectDeps, type LivenessDeps } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -85,23 +85,6 @@ test("a legacy (free-form owner) release stays bound to the directory name it wa
 	const moved = join(root, "renamed");
 	renameSync(dir, moved);
 	expect(inspectOne(moved, root, deps())?.reason).not.toBe("owner-released-would-quarantine");
-});
-
-test("LEGACYEMPTY1 a legacy release of a dir whose .owner is empty records and reads back; a second release is already-released", () => {
-	const { dir, home } = fixture(process.pid);
-	// 2026-11-03 field case: an archive extracted into an owned scratch root overwrote .owner with an empty blob.
-	writeFileSync(join(dir, ".owner"), "");
-	expect(releaseScratch(dir, home, deps(), { legacyOwner: true, reason: "owner clobbered by an archive extraction" })).toMatchObject({ ok: true, changed: true });
-	expect(releaseScratch(dir, home, deps(), { legacyOwner: true, reason: "owner clobbered by an archive extraction" })).toMatchObject({ ok: true, changed: false, reason: "already-released" });
-});
-
-test("LEGACYEMPTY1 planted negative: an empty value for any other marker key is still rejected", () => {
-	const { dir, home, root } = fixture(process.pid);
-	writeFileSync(join(dir, ".owner"), "");
-	expect(releaseScratch(dir, home, deps(), { legacyOwner: true, reason: "x" }).ok).toBe(true);
-	const marker = join(dir, ".omp-kit-release");
-	writeFileSync(marker, readFileSync(marker, "utf8").replace(/^owner_sha256=.*$/m, "owner_sha256="));
-	expect(inspectOne(dir, root, deps())?.reason).not.toBe("owner-released-would-quarantine");
 });
 
 test("a hidden or path-like label is still refused: the release is bound to a valid owner record", () => {
