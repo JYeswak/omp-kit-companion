@@ -82,18 +82,18 @@ function payload(value: unknown): value is Payload {
 }
 
 /** Metadata is a cache invalidator only; event inclusion still always uses event timestamps. */
-function fingerprint(paths: string[]): string {
+function fingerprint(paths: string[], shallowPaths: readonly string[] = []): string {
 	const hash = createHash("sha256"); let entries = 0;
-	function visit(path: string, depth = 0): void {
+	function visit(path: string, depth = 0, recursive = true): void {
 		if (++entries > 200_000 || depth > 40) throw new Error(`MINE_INPUT_CENSUS_BOUND: ${path}`);
 		try {
 			const s = lstatSync(path, { bigint: true });
 			hash.update(JSON.stringify([path, String(s.dev), String(s.ino), String(s.mode), String(s.size), String(s.mtimeNs), String(s.ctimeNs)]));
-			if (s.isSymbolicLink()) { const target = physical(path); if (target !== path) visit(target, depth + 1); }
-			else if (s.isDirectory()) for (const name of readdirSync(path).sort()) visit(join(path, name), depth + 1);
+			if (s.isSymbolicLink()) { const target = physical(path); if (target !== path) visit(target, depth + 1, recursive); }
+			else if (s.isDirectory() && recursive) for (const name of readdirSync(path).sort()) visit(join(path, name), depth + 1);
 		} catch (error) { hash.update(JSON.stringify([path, String(error)])); if (String(error).includes("MINE_INPUT_CENSUS_BOUND")) throw error; }
 	}
-	for (const path of [...new Set(paths)].sort()) visit(path);
+	for (const path of [...new Set(paths)].sort()) visit(path, 0, !shallowPaths.includes(path));
 	return hash.digest("hex");
 }
 function gitdir(project: string): string | null {
@@ -108,7 +108,9 @@ function gitdir(project: string): string | null {
 
 export async function runResumableMine(options: MineOptions): Promise<MineReport> {
 	const census = await scanMine({ ...options, censusOnly: true, lookupBeads: false });
-	if (census.status === "PARTIAL") throw new Error(`MINE_CENSUS_INCOMPLETE: ${census.coverage.filter(c => c.status === "PARTIAL").map(c => c.detail).join("; ")}`);
+	const censusFailures = census.coverage.filter(row => row.status === "PARTIAL").map(row => ({
+		...row, detail: `Project census incomplete: ${row.detail}`,
+	}));
 	const env = options.env ?? process.env, home = options.home ?? env.HOME ?? homedir();
 	const root = physical(options.resumeDir ?? join(options.root ?? options.cwd ?? process.cwd(), "var", "mine"));
 	const revisionHash = createHash("sha256");
@@ -145,13 +147,18 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		}
 	}
 	const fingerprints = new Map<string, string>(), pathFingerprints = new Map<string, string>();
+	const flywheel = join(env.XDG_STATE_HOME ?? join(home, ".local", "state"), "flywheel");
+	// The scanner admits only top-level regular hook logs, not nested agent homes or their repository symlinks.
+	const flywheelLogs = existsSync(flywheel) ? readdirSync(flywheel, { withFileTypes: true })
+		.filter(entry => entry.isFile() && /(?:block|refus|timeout|audit).*\.jsonl$/.test(entry.name)).map(entry => join(flywheel, entry.name)) : [];
 	for (const target of targets) for (const source of MINE_SOURCES) {
 		const dir = target === "@unattributed" ? null : gitdir(target);
 		const paths = source === "transcripts" ? transcriptRoots : source === "tracker" ? [join(target, ".beads", "issues.jsonl"), join(target, ".beads", ".br_history")]
 			: source === "git" ? dir ? [join(dir, "HEAD"), join(dir, "refs"), join(dir, "packed-refs"), join(dir, "commondir"), join(dir, "shallow")] : [join(target, ".git")]
 			: source === "cc" ? [env.CC_STATE ?? join(state, "cc")]
-			: [join(state, "gate-events.jsonl"), join(state, "gate-events.jsonl.1"), join(state, "scratch-reap-log.jsonl"), join(state, "scratch-reap-log.jsonl.1"), join(env.XDG_STATE_HOME ?? join(home, ".local", "state"), "flywheel"), ...(dir ? [join(dir, "omp-kit")] : []), ...(stores.get(target) ?? [])];
-		const pathsKey = JSON.stringify(paths), digest = pathFingerprints.get(pathsKey) ?? fingerprint(paths);
+			: [join(state, "gate-events.jsonl"), join(state, "gate-events.jsonl.1"), join(state, "scratch-reap-log.jsonl"), join(state, "scratch-reap-log.jsonl.1"), flywheel, ...flywheelLogs, ...(dir ? [join(dir, "omp-kit")] : []), ...(stores.get(target) ?? [])];
+		const shallow = source === "hooks" ? [flywheel] : [];
+		const pathsKey = JSON.stringify([paths, shallow]), digest = pathFingerprints.get(pathsKey) ?? fingerprint(paths, shallow);
 		pathFingerprints.set(pathsKey, digest);
 		fingerprints.set(JSON.stringify([target, source]), digest);
 	}
@@ -159,20 +166,21 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 	const current: MineCell<Payload>[] = [];
 	for (const target of targets) for (const source of MINE_SOURCES) for (const date of days) {
 		const signature = fingerprints.get(JSON.stringify([target, source]))!, previous = old.get(key(target, date, source));
-		if (previous && previous.input_fingerprint === signature && previous.status !== "PARTIAL" && payload(previous.result)) { current.push(previous as MineCell<Payload>); reused++; continue; }
+		if (previous && previous.input_fingerprint === signature && previous.status !== "PARTIAL" && !(source === "cc" && censusFailures.length) && payload(previous.result)) { current.push(previous as MineCell<Payload>); reused++; continue; }
 		const findings: MineSourceFinding[] = [], until = new Date(Date.parse(`${date}T00:00:00Z`) + 86400_000).toISOString().slice(0, 10);
 		const synthetic = target === "@unattributed" && source !== "cc" && source !== "hooks";
 		const report = synthetic ? { ...census, projects: [], classes: [], coverage: [], warnings: [], excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] } }
 			: await scanMine({ ...options, since: date, until, all: target === "@unattributed", project: target === "@unattributed" ? undefined : target,
 				census: census.projects, scopeProject: target, sources: [source], lookupBeads: false, fileIndex: index, verdictOwners,
 				budgetMultiplier: Math.min(4, 2 ** Math.min(2, previous?.attempts ?? 0)), onFinding: finding => { if (finding.project === target) findings.push(finding); } });
+		if (source === "cc") report.coverage.push(...censusFailures.map(row => ({ ...row })));
 		const relevant = report.coverage.filter(row => sourceOf(row.producer) === source);
 		const partial = relevant.filter(row => row.status === "PARTIAL"), missing = relevant.filter(row => row.status === "MISSING");
 		const read = source === "transcripts"
 			? report.projects.some(p => p.path === target && Object.hasOwn(p.source_records, "omp-transcript"))
 			: relevant.some(row => row.status === "READ");
 		const retentionGap = source === "cc" && missing.some(row => row.detail.includes("No retained CC rows"));
-		const bounded = report.warnings.filter(warning => warning.includes("bound") && !warning.includes("bead search") || warning.includes("deadline"));
+		const bounded = report.warnings.filter(warning => (warning.includes(" bound") || warning.includes("limit reached")) && !warning.includes("bead search") || warning.includes("deadline"));
 		let status: MineCellStatus = partial.length || bounded.length ? "PARTIAL" : retentionGap ? "MISSING" : read || findings.length ? "READ" : "NONE-EXISTS";
 		if (status === "NONE-EXISTS" && previous && previous.status !== "NONE-EXISTS") status = "MISSING";
 		const explain = (row: MineCoverage) => `${row.location}: ${row.detail.length > 1024 ? `${row.detail.slice(0, 512)} […] ${row.detail.slice(-512)}` : row.detail || "Previously inventoried source is now absent"}`;
@@ -221,6 +229,7 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 	for (const cell of current) totals[cell.status]++;
 	joined.ledger = { path: ledger.path, totals, reused, scanned, cells: current.map(cell => ({ project: cell.project, day: cell.day, source: cell.source, status: cell.status, reasons: cell.status === "READ" ? [] : cell.reasons })) };
 	joined.warnings = [...new Set([...joined.warnings.filter(w => !w.startsWith("Some projects have no observed telemetry")),
+		...(censusFailures.length ? ["CC project census is incomplete; configured projects are mined, but additional observed-only projects may be missing. See the named PARTIAL CC cells."] : []),
 		...(totals.PARTIAL ? [`${totals.PARTIAL} source/day cells remain PARTIAL; each unresolved source and reason is named in the coverage ledger.`] : []),
 		...(totals.MISSING ? [`${totals.MISSING} source/day cells are MISSING (including pre-retention/deleted inputs); missing history is not recoverable by replaying current files.`] : []),
 		"Interrupted manifests contain completed receipts only; not-started project/day/source cells are rebuilt from the requested window and refreshed project census on resume.",

@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -117,6 +117,83 @@ test("unchanged PARTIAL cells alone retry, retain exact source reasons, and reco
 	const repaired = await runMine(f.options);
 	expect(repaired.ledger?.totals.PARTIAL).toBe(0);
 	expect(repaired.classes[0]?.count).toBe(2);
+});
+
+test("quarantined unbound CLI telemetry is not a scan-bound failure", async () => {
+	const f = await fixture(), path = join(f.home, ".local", "state", "omp-kit", "cc", "cc.db");
+	mkdirSync(dirname(path), { recursive: true });
+	const db = new Database(path);
+	db.exec("CREATE TABLE events(cursor INTEGER PRIMARY KEY,event_id TEXT,type TEXT,time_ms INTEGER,repo TEXT,bead TEXT,data TEXT)");
+	db.query("INSERT INTO events VALUES(1,'retained','tool.call',?,?,NULL,'{}')").run(Date.parse("2026-10-01T00:00:00Z"), f.project);
+	db.query("INSERT INTO events VALUES(2,'unbound','action.result',?,NULL,NULL,?)").run(Date.parse("2026-10-01T12:00:00Z"), JSON.stringify({ action_id: "unbound", outcome: "failed" }));
+	db.close();
+	const report = await runMine(f.options);
+	expect(report.excluded_inputs.unbound_cli_events).toBe(1);
+	expect(report.ledger?.cells.filter(cell => cell.source === "cc").every(cell => cell.status === "READ")).toBe(true);
+	expect(report.ledger?.totals.PARTIAL).toBe(0);
+});
+
+test("an actual class scan limit remains PARTIAL with its named bound", async () => {
+	const f = await fixture(), rows = [JSON.stringify(f.rows[0])];
+	for (let i = 0; i < 2050; i++) rows.push(JSON.stringify({ type: "message", timestamp: "2026-10-01T12:00:00Z",
+		message: { role: "toolResult", toolCallId: `limited-${i}`, toolName: `limited-${i}`, isError: true, content: [{ type: "text", text: "failure" }] } }));
+	put(f.source, rows.join("\n") + "\n");
+	const report = await runMine(f.options);
+	expect(report.ledger?.cells.find(cell => cell.source === "transcripts" && cell.project === f.project && cell.day === "2026-10-01")?.status).toBe("PARTIAL");
+	expect(report.ledger?.cells.some(cell => cell.reasons.some(reason => reason.includes("Class limit reached (2048)")))).toBe(true);
+	expect(report.status).toBe("PARTIAL");
+});
+
+test("a WAL store without side files follows canonical query-only access without changing database bytes", async () => {
+	const f = await fixture(false), path = join(f.home, ".local", "state", "omp-kit", "cc", "cc.db");
+	mkdirSync(dirname(path), { recursive: true });
+	const db = new Database(path);
+	db.exec("PRAGMA journal_mode=WAL; CREATE TABLE events(cursor INTEGER PRIMARY KEY,event_id TEXT,type TEXT,time_ms INTEGER,repo TEXT,bead TEXT,data TEXT)");
+	db.query("INSERT INTO events VALUES(1,'wal-failure','tool.call',?,?,NULL,?)").run(Date.parse("2026-10-01T12:00:00Z"), f.project, JSON.stringify({ tool: "wal-tool", is_error: true }));
+	db.close();
+	for (const suffix of ["-wal", "-shm"]) rmSync(path + suffix, { force: true });
+	const before = createHash("sha256").update(readFileSync(path)).digest("hex"), report = await runMine(f.options);
+	expect(report.ledger?.totals.PARTIAL).toBe(0);
+	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["command-failure:wal-tool", f.project, 1]]);
+	expect(createHash("sha256").update(readFileSync(path)).digest("hex")).toBe(before);
+});
+
+test("an unavailable CC census stays PARTIAL without suppressing primary findings and recovers on resume", async () => {
+	const f = await fixture(), path = join(f.home, ".local", "state", "omp-kit", "cc", "cc.db");
+	mkdirSync(path, { recursive: true });
+	const before = snapshot(f.home), report = await runMine(f.options);
+	expect(snapshot(f.home)).toBe(before);
+	expect(report.status).toBe("PARTIAL");
+	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["tool-error:bash", f.project, 2]]);
+	const cells = report.ledger!.cells.filter(cell => cell.source === "cc");
+	expect(cells).toHaveLength(4);
+	expect(cells.every(cell => cell.status === "PARTIAL" && cell.reasons.some(reason => reason.includes(path)))).toBe(true);
+	expect(report.warnings.some(warning => warning.includes("project census") && warning.includes("incomplete"))).toBe(true);
+	rmSync(path, { recursive: true });
+	const db = new Database(path);
+	db.exec("CREATE TABLE events(cursor INTEGER PRIMARY KEY,event_id TEXT,type TEXT,time_ms INTEGER,repo TEXT,bead TEXT,data TEXT)");
+	db.query("INSERT INTO events VALUES(1,'retained','tool.call',?,?,NULL,'{}')").run(Date.parse("2026-10-01T00:00:00Z"), f.project);
+	db.close();
+	const repaired = await runMine(f.options);
+	expect(repaired.ledger?.totals.PARTIAL).toBe(0);
+	expect(repaired.classes).toEqual(report.classes);
+});
+
+test("hook fingerprints ignore unrelated directory cycles but invalidate admitted top-level logs", async () => {
+	const f = await fixture(), directory = join(f.home, ".local", "state", "flywheel"), path = join(directory, "block-audit.jsonl");
+	const row = { type: "guard.decision", repo: f.project, time_ms: Date.parse("2026-10-01T12:00:00Z"), data: { decision: "deny", rule: "planted-hook" } };
+	put(path, JSON.stringify({ ...row, id: "one" }) + "\n");
+	symlinkSync(directory, join(directory, "unrelated-cycle"));
+	const first = await runMine(f.options);
+	expect(first.ledger?.totals.PARTIAL).toBe(0);
+	expect(first.classes.find(c => c.id === "guard-friction:planted-hook")?.count).toBe(1);
+	const unchanged = await runMine(f.options);
+	expect(unchanged.ledger?.scanned).toBe(0);
+	appendFileSync(path, JSON.stringify({ ...row, id: "two" }) + "\n");
+	const next = await runMine(f.options);
+	expect(next.classes.find(c => c.id === "guard-friction:planted-hook")?.count).toBe(2);
+	expect(next.ledger?.scanned).toBe(4);
+	expect(next.ledger?.reused).toBe(16);
 });
 
 test("cross-midnight action attempts retain their real surface and project in daily CC slices", async () => {

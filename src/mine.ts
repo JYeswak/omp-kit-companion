@@ -98,6 +98,28 @@ function day(value: string): number {
 	return parsed;
 }
 function physical(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
+
+/** Match cclib.open_readonly (CCWALREAD1): recreate absent WAL side files, never the database or its rows. */
+function openMineDatabase(path: string): Database {
+	const sideFiles = [`${path}-wal`, `${path}-shm`];
+	for (const name of [path, ...sideFiles]) {
+		const info = lstatSync(name, { throwIfNoEntry: false });
+		if (info?.isSymbolicLink() || info?.isFile() && info.nlink > 1) throw new Error(`Linked database path refused: ${name}`);
+	}
+	let database: Database | undefined;
+	try {
+		database = new Database(path, { readonly: true, create: false });
+		database.query("SELECT 1 FROM sqlite_master LIMIT 1").get();
+	} catch (error) {
+		database?.close();
+		if (!(error instanceof Error && "code" in error && error.code === "SQLITE_CANTOPEN")
+			|| sideFiles.some(name => lstatSync(name, { throwIfNoEntry: false }) !== undefined)) throw error;
+		database = new Database(path, { readwrite: true, create: false });
+	}
+	try { database.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=1000; BEGIN"); }
+	catch (error) { database.close(); throw error; }
+	return database;
+}
 export function enforcement(id: string): MineClass["cheapest_enforcement"] {
 	if (id.startsWith("commit-refusal:")) return { kind: "preflight check", change: `Expose ${id.slice(15)} in omp-kit preflight before the commit attempt; retain the commit gate as authority.` };
 	if (id.startsWith("release-fail")) return { kind: "code fix", change: "Fix the failing suite/file named by the verdict evidence; do not weaken the release gate or regenerate a passing verdict." };
@@ -350,9 +372,7 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	if ((wanted("cc") || options.censusOnly) && existsSync(dbPath)) {
 		const cov = coverage("CC projections", dbPath, "Read-only snapshot of windowed tool spans, guards, action failures and bead transitions; raw sessions are not rescanned.");
 		try {
-			if (lstatSync(dbPath).isSymbolicLink()) throw new Error("symlink database");
-			database = new Database(dbPath, { readonly: true });
-			database.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=1000; BEGIN");
+			database = openMineDatabase(dbPath);
 			const sql = options.censusOnly
 				? "SELECT DISTINCT repo FROM events WHERE repo IS NOT NULL AND time_ms>=? AND time_ms<? LIMIT ?"
 				: "SELECT e.event_id,e.cursor,e.type,e.time_ms,e.repo,e.bead,e.data FROM events e WHERE e.type IN ('tool.call','guard.decision','action.attempt','action.result','bead.status') AND (e.type<>'action.attempt' OR e.repo IS NOT NULL) AND ((e.time_ms>=? AND e.time_ms<?) OR (e.type='action.attempt' AND e.time_ms>=? AND e.time_ms<?)) ORDER BY e.time_ms,e.cursor LIMIT ?";
