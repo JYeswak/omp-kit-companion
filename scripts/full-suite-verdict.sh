@@ -28,7 +28,7 @@
 # FULL_SUITE_VERDICT_CACHE_DIR overrides the configured store for isolated tests and operators.
 # Otherwise scripts/full-suite-verdict-store.py uses
 # $XDG_CONFIG_HOME/omp-kit/full-suite-verdict.json and $XDG_STATE_HOME/omp-kit/full-suite-verdicts.
-# Files share FULL_SUITE_JOBS workers (default max(8, online cores - 4)).
+# Files share FULL_SUITE_JOBS workers (default ncpu/4 clamped to 2..6; see the measurement at pool_default).
 # Unknown files run first, then longest recorded elapsed time for this judge/role.
 # Suite bound: FULL_SUITE_TIMEOUT_SECS (default 1800). The suite runs at nice 10 inside the gate's
 # own admission; it takes no heavy slot.
@@ -364,8 +364,13 @@ fi
 # One timing-split pool: unknown files first, then longest processing time first.
 ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || ncpu=1
 case "$ncpu" in ''|*[!0-9]*|0) ncpu=1 ;; esac
-pool_default=$((ncpu - 4))
-[ "$pool_default" -ge 8 ] || pool_default=8
+# Width from a measured sweep (2026-11-03, 32 cores, frozen 67f835b939, 401 files, load 11-20):
+# width 6 652.7 s with 1 contention failure; 10 593.1 s with 9; 16 544.4 s with 36; 28 (the old
+# default) ~800 s with ~40. System CPU grows with width (1,954 -> 2,558 s): wider pools mostly add
+# contention. Default ncpu/4 clamped to 2..6 (6 here, 2 on a 4-core runner).
+pool_default=$((ncpu / 4))
+[ "$pool_default" -ge 2 ] || pool_default=2
+[ "$pool_default" -le 6 ] || pool_default=6
 # Legacy name retained until the foreign-dirty complement test is migrated by its owner.
 # An explicit width is authoritative; load includes this release's own tests.
 POOL_JOBS=${FULL_SUITE_JOBS:-${FULL_SUITE_SHELL_JOBS:-$pool_default}}
