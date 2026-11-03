@@ -74,36 +74,36 @@ async function claim(options: Scenario = {}) {
 		const trackerData = join(scratch.path, "beads.json");
 		writeFileSync(trackerData, JSON.stringify(rows));
 		const realBr = join(bin, "br");
-		writeFileSync(realBr, `#!${process.execPath}
-import { appendFileSync, readFileSync } from "node:fs";
-const args = process.argv.slice(2);
-const dbIndex = args.indexOf("--db");
-const database = dbIndex < 0 ? process.env.BEADS_DB : args[dbIndex + 1];
-if (database !== process.env.CUTCLAIM_TRACKER_DB) {
-  console.error("wrong tracker database: " + database);
-  process.exit(9);
-}
-if (dbIndex >= 0) args.splice(dbIndex, 2);
-const rows = JSON.parse(readFileSync(process.env.CUTCLAIM_TRACKER_DATA, "utf8"));
-if (args[0] === "show") {
-  const ids = args.slice(1).filter(arg => !arg.startsWith("--"));
-  const found = ids.map(id => rows.find(row => row.id === id));
-  if (found.some(row => !row)) process.exit(2);
-  console.log(JSON.stringify(ids.length === 1 ? found[0] : found));
-} else if (args[0] === "list") {
-  console.log(JSON.stringify(args.includes("--assignee") ? [] : rows));
-} else if (args[0] === "blocked") {
-  console.log(JSON.stringify({ issues: [], has_more: false }));
-} else if (args[0] === "dep" && args[1] === "list") {
-  console.log("[]");
-} else if (args[0] === "where") {
-  console.log("database: " + database);
-} else if (args[0] === "update" && args.includes("--claim")) {
-  appendFileSync(process.env.CUTCLAIM_MUTATIONS, JSON.stringify({ id: args[1], database }) + "\\n");
-} else {
-  console.error("unexpected tracker command " + JSON.stringify(args));
-  process.exit(8);
-}
+		// A python3 fake, not a bun one: claim reads have a 3 s deadline each, and under full-suite load a cold bun
+		// start per fake call exceeded it (release verdict 47d13bec70: `show k-1 --json failed (timeout)`).
+		writeFileSync(realBr, `#!/usr/bin/env python3
+import json, os, sys
+def dump(value): return json.dumps(value, separators=(",", ":"))
+args = sys.argv[1:]
+database = os.environ.get("BEADS_DB")
+if "--db" in args:
+    i = args.index("--db"); database = args[i + 1]; del args[i:i + 2]
+if database != os.environ["CUTCLAIM_TRACKER_DB"]:
+    sys.stderr.write("wrong tracker database: %s\\n" % database); sys.exit(9)
+rows = json.load(open(os.environ["CUTCLAIM_TRACKER_DATA"]))
+verb = args[0] if args else ""
+if verb == "show":
+    ids = [a for a in args[1:] if not a.startswith("--")]
+    found = [next((r for r in rows if r["id"] == i), None) for i in ids]
+    if any(r is None for r in found): sys.exit(2)
+    print(dump(found[0] if len(ids) == 1 else found))
+elif verb == "list":
+    print(dump([] if "--assignee" in args else rows))
+elif verb == "blocked":
+    print(dump({"issues": [], "has_more": False}))
+elif verb == "dep" and args[1:2] == ["list"]:
+    print("[]")
+elif verb == "where":
+    print("database: %s" % database)
+elif verb == "update" and "--claim" in args:
+    with open(os.environ["CUTCLAIM_MUTATIONS"], "a") as f: f.write(dump({"id": args[1], "database": database}) + "\\n")
+else:
+    sys.stderr.write("unexpected tracker command %s\\n" % json.dumps(args)); sys.exit(8)
 `, { mode: 0o755 });
 		writeFileSync(join(bin, "am"), `#!/bin/sh
 case "$1:$2" in

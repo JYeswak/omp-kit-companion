@@ -22,16 +22,28 @@ check() {
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
 }
 
+template="$TMP/.staged-imports-template"
 new_repo() {
 	dir="$TMP/$1"
+	if [ ! -x "$template/.git/hooks/hooks.d/pre-commit/45-omp-kit-staged-imports" ]; then
+		mkdir -p "$template"
+		git -C "$template" init -q 2>/dev/null
+		git -C "$template" config user.email "test@invalid.example"
+		git -C "$template" config user.name "Test"
+		rm -f "$template/.git/hooks/commit-msg" "$template/.git/hooks/commit-msg-"* "$template/.git/hooks/pre-commit"
+		git -C "$template" commit -q --allow-empty --message "[test] root"
+		out=$(sh "$INSTALLER" "$template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+		# RELEASE15 (ompkit-fp72.120.16.98): keep only the member under test and its pre-commit runner; the other
+		# members and runners have their own suites and made each fixture commit cost seconds.
+		for member in "$template"/.git/hooks/hooks.d/*/[0-9]*; do
+			case "$member" in */pre-commit/45-omp-kit-staged-imports) ;; *) rm -f "$member" ;; esac
+		done
+		rm -f "$template/.git/hooks/commit-msg" "$template/.git/hooks/pre-push" "$template/.git/hooks/reference-transaction"
+		git -C "$template" config maintenance.auto false
+	fi
 	mkdir -p "$dir"
-	git -C "$dir" init -q 2>/dev/null
-	git -C "$dir" config user.email "test@invalid.example"
-	git -C "$dir" config user.name "Test"
-	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
-	git -C "$dir" commit -q --allow-empty --message "[test] root"
-	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
-	[ -x "$dir/.git/hooks/hooks.d/pre-commit/45-omp-kit-staged-imports" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
+	cp -Rp "$template/." "$dir/" || { printf 'FAIL copy %s from template\n' "$1" >&2; exit 1; }
+	[ -x "$dir/.git/hooks/hooks.d/pre-commit/45-omp-kit-staged-imports" ] || { printf 'FAIL copy %s: member absent\n' "$1" >&2; exit 1; }
 	printf '%s' "$dir"
 }
 

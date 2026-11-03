@@ -195,7 +195,9 @@ export async function admitClaimCut(input: ClaimCutInput): Promise<ClaimCutVerdi
 		// child's parent (measured on a native scratch tracker), so it is only a SUPERSET screen: a bead it cannot reach
 		// is out of cut, and a bead it reaches is admitted only along typed `blocks` edges read by batched `show`.
 		// `--status all`: a stock tracker has no rework/in_review statuses, and naming them is VALIDATION_FAILED (rc 4).
-		const listed = allIssues(await read(["list", "--status", "all", "--json", "--limit", "0"]), "br list");
+		// `--fields`: the full rows of the live tracker are 7.8 MB, past the 4 MiB claim-read cap (preflight.ts); these
+		// four fields are 0.27 MB (measured 2026-11-03, 2,414 beads).
+		const listed = allIssues(await read(["list", "--status", "all", "--fields", "id,status,assignee,labels", "--json", "--limit", "0"]), "br list");
 		if (listed.length > MAX_NODES) throw new Error(`cut graph exceeds ${MAX_NODES} beads`);
 		const active = new Map<string, Row>();
 		for (const raw of listed) {

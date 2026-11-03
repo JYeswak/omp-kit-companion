@@ -22,21 +22,41 @@ check() {
 	else fail=$((fail + 1)); printf 'FAIL %s: rc=%s want %s out<<<%s>>>\n' "$3" "$1" "$2" "$4"; fi
 }
 
+# RELEASE15 (ompkit-fp72.120.16.98): the fixture templates keep only the member under test. Each fixture commit
+# otherwise ran the whole installed chain (11 pre-commit members ~4 s, 7 other commit-msg members ~1 s, and the
+# reference-transaction member ~1 s per ref update), so ~47 commits cost 6.5 min, the slowest file in the full suite.
+# Every commit still goes through the real installed runner and member 49; the other members have their own suites.
+only_stale_member() {
+	for member in "$1"/.git/hooks/hooks.d/*/[0-9]*; do
+		[ -e "$member" ] || continue
+		case "$member" in */commit-msg/49-omp-kit-stale-worktree) ;; *) rm -f "$member" ;; esac
+	done
+	# The pre-commit, pre-push and reference-transaction runners have no member left; drop them so a commit does not
+	# spawn them (reference-transaction fires 3-5 times per commit). The commit-msg runner stays: it is under test.
+	rm -f "$1/.git/hooks/pre-commit" "$1/.git/hooks/pre-push" "$1/.git/hooks/reference-transaction"
+	git -C "$1" config maintenance.auto false
+}
+seeded_template="$TMP/.stale-worktree-seeded-template"
 new_repo() {
 	dir="$TMP/$1"
+	if [ ! -x "$seeded_template/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree" ]; then
+		mkdir -p "$seeded_template/pkg"
+		git -C "$seeded_template" init -q 2>/dev/null
+		git -C "$seeded_template" config user.email "test@invalid.example"
+		git -C "$seeded_template" config user.name "Test"
+		rm -f "$seeded_template/.git/hooks/commit-msg" "$seeded_template/.git/hooks/commit-msg-"* "$seeded_template/.git/hooks/pre-commit"
+		printf 'base line\nlanded line L\n' > "$seeded_template/pkg/f.txt"
+		git -C "$seeded_template" add pkg/f.txt
+		git -C "$seeded_template" commit -q --message "[test] land L" --message "Bead: t-land"
+		out=$(sh "$INSTALLER" "$seeded_template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+		only_stale_member "$seeded_template"
+	fi
 	mkdir -p "$dir"
-	git -C "$dir" init -q 2>/dev/null
-	git -C "$dir" config user.email "test@invalid.example"
-	git -C "$dir" config user.name "Test"
-	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
-	mkdir -p "$dir/pkg"
-	printf 'base line\nlanded line L\n' > "$dir/pkg/f.txt"
-	git -C "$dir" add pkg/f.txt
-	git -C "$dir" commit -q --message "[test] land L" --message "Bead: t-land"
-	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
-	[ -x "$dir/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree" ] || { printf 'FAIL install %s: member absent\n' "$1" >&2; exit 1; }
+	cp -Rp "$seeded_template/." "$dir/" || { printf 'FAIL copy %s from template\n' "$1" >&2; exit 1; }
+	[ -x "$dir/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree" ] || { printf 'FAIL copy %s: member absent\n' "$1" >&2; exit 1; }
 	printf '%s' "$dir"
 }
+
 
 backdate() {
 	# Portable old mtime (predates every test commit).
@@ -97,14 +117,21 @@ check "$(git -C "$R" status --porcelain -- pkg/peer.txt)" "?? pkg/peer.txt" "pee
 # 7. native export regeneration: a serializer commit writes rows for two
 # issues; regenerating (reordered + reworded, no issue lost) under another
 # bead passes. Fails today: rule (b) blames the serializer's bead.
+export_template="$TMP/.stale-worktree-export-template"
 new_export_repo() {
 	dir="$TMP/$1"
-	mkdir -p "$dir/.beads"
-	git -C "$dir" init -q 2>/dev/null
-	git -C "$dir" config user.email "test@invalid.example"
-	git -C "$dir" config user.name "Test"
-	rm -f "$dir/.git/hooks/commit-msg" "$dir/.git/hooks/commit-msg-"* "$dir/.git/hooks/pre-commit"
-	out=$(sh "$INSTALLER" "$dir" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+	if [ ! -x "$export_template/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree" ]; then
+		mkdir -p "$export_template/.beads"
+		git -C "$export_template" init -q 2>/dev/null
+		git -C "$export_template" config user.email "test@invalid.example"
+		git -C "$export_template" config user.name "Test"
+		rm -f "$export_template/.git/hooks/commit-msg" "$export_template/.git/hooks/commit-msg-"* "$export_template/.git/hooks/pre-commit"
+		out=$(sh "$INSTALLER" "$export_template" 2>&1) || { printf 'FAIL install %s: %s\n' "$1" "$out" >&2; exit 1; }
+		only_stale_member "$export_template"
+	fi
+	mkdir -p "$dir"
+	cp -Rp "$export_template/." "$dir/" || { printf 'FAIL copy %s from template\n' "$1" >&2; exit 1; }
+	[ -x "$dir/.git/hooks/hooks.d/commit-msg/49-omp-kit-stale-worktree" ] || { printf 'FAIL copy %s: member absent\n' "$1" >&2; exit 1; }
 	printf '%s' "$dir"
 }
 R=$(new_export_repo export-regen)
