@@ -20,7 +20,7 @@ export const MILESTONE_COMMAND: Command = {
 		usage: `milestone ${action} SESSION${action === "show" ? "" : " BEAD... --reason TEXT [--by NAME]"}`,
 		argument: action === "show" ? "SESSION" : "SESSION BEAD...", maxArguments: action === "show" ? 1 : 129,
 		flags: action === "show" ? [] : [{ name: "--reason", value: "TEXT", description: "Required reason recorded in milestone.pinLog" }, { name: "--by", value: "NAME", description: "Audit actor (default AGENT_NAME, then operating-system user)" }],
-		example: action === "show" ? "omp-kit milestone show omp-test --json" : `omp-kit milestone ${action} omp-test ompkit-123 --reason 'Director replan' --json`,
+		example: action === "show" ? "omp-kit milestone show SESSION --json" : `omp-kit milestone ${action} SESSION BEAD --reason 'Director replan' --json`,
 		runnable: true, mutation: action !== "show", dataSchema,
 	})),
 };
