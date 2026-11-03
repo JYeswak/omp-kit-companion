@@ -8,6 +8,7 @@ import { previewKitRelease, stageKitRelease, validateReleaseManifest, type Relea
 import { packageSourceRevision, checkPackagedExtensionLoads, checkPackagedScriptDependencies } from "../../scripts/package-release.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 import { repo, caseCwd, nativeCacheEnv, output, stubFirstPath, authorityPath, platform, key, indexPath,
  asset, bytes, index, sourceRevision, sourceGit, installArgs, installCandidate, run, candidateEnv,
  type Candidate } from "./package-release-fixture.ts";
@@ -212,6 +213,7 @@ test("SourceStamp stays outside the closed release manifest schema", () => {
 
 // Each candidate below needs its own pristine install; the installs are independent, so they
 // run concurrently once here instead of serially inside the per-test time budget.
+// Each install has a 120-second child deadline; allow that work plus fixture overhead under load.
 const PREINSTALLED = ["operator-home", "drift-home", "bounded-home", "bounded-watched-home"] as const;
 const preinstalled = new Map<string, Candidate>();
 beforeAll(async () => {
@@ -221,7 +223,7 @@ beforeAll(async () => {
 		expect(installed.exitCode, installed.stdout + installed.stderr).toBe(0);
 		preinstalled.set(name, { home, installedRoot: join(prefix, "releases", "1.2.3"), installedBinary: join(prefix, "bin", "omp-kit") });
 	}));
-}, 30_000);
+}, fixtureDeadlineS(130) * 1_000);
 function candidate(name: (typeof PREINSTALLED)[number]): Candidate {
 	const found = preinstalled.get(name);
 	expect(found, `preinstalled candidate ${name}`).toBeDefined();
@@ -324,7 +326,7 @@ test("native full-test retains a real named failing case without counting later 
 		expect(stream.capture_complete).toBe(true);
 	}
 	expect(readFileSync(reference.stdout.path, "utf8")).toContain("SELFTEST_FAIL: planted unmatched enforce=yes row was accepted");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("installed integrations refuse a planted missing tests/live/integrations.json and name the matrix", async () => {
 	const { home, installedRoot, installedBinary } = await installCandidate("missing-matrix-home");
@@ -339,7 +341,7 @@ test("installed integrations refuse a planted missing tests/live/integrations.js
 	const failure = JSON.parse(missing.stdout.toString()) as { errors?: Array<{ code: string; message: string }> };
 	expect(failure.errors?.[0]?.code).toBe("INTEGRATIONS_UNAVAILABLE");
 	expect(failure.errors?.[0]?.message).toContain(matrixPath);
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("installed integrations run packaged mock-model fire and quiet turns through real OMP", async () => {
 	const { home, installedRoot, installedBinary } = await installCandidate("embedded-mock-home");
@@ -357,7 +359,7 @@ test("installed integrations run packaged mock-model fire and quiet turns throug
 	const guard = report.data?.integrations?.matrix?.find(row => row.profile === "claude" && row.integration === "kit-guard");
 	expect(guard?.verdict).toBe("WIRED");
 	expect(guard?.quiet?.outcome).toBe("ALLOWED");
-}, 300_000);
+}, fixtureDeadlineS(300) * 1_000);
 
 test("installed candidate fast proof and planted rule drift fail the full check without live execution or mutation", async () => {
 	// The fast proof needs a pristine candidate and the full check a drifted one; two installs of
@@ -392,6 +394,7 @@ test("installed candidate fast proof and planted rule drift fail the full check 
 test("oversized operator files bound the watched snapshot only where the kit could write", async () => {
 	// Two drifted candidates: one holds only the unwatched oversized file, the other holds it
 	// plus an oversized watched file, so both bounded snapshots are observed concurrently.
+	// The concurrent children each have a 120-second deadline, not a five-second product claim.
 	const homes = [candidate("bounded-home"), candidate("bounded-watched-home")];
 	for (const { home, installedRoot } of homes) {
 		appendFileSync(join(installedRoot, "rules", "kit-close-needs-evidence.md"), "\n# planted post-package rule drift\n");
@@ -410,7 +413,7 @@ test("oversized operator files bound the watched snapshot only where the kit cou
 	expect(JSON.parse(ignored!.stdout).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: true, incomplete_paths: [] });
 	expect(bounded!.exitCode, bounded!.stdout + bounded!.stderr).toBe(1);
 	expect(JSON.parse(bounded!.stdout).data.test.snapshots.home).toMatchObject({ unchanged: true, complete: false, incomplete_paths: ["~/.agents/rules"] });
-}, 5_000);
+}, fixtureDeadlineS(130) * 1_000);
 
 test("release SBOM is SPDX 2.3 and names the exact archive, runtime, binary, and every manifest file", () => {
 	const sbomPath = join(output, `${asset.filename}.sbom.spdx.json`);
@@ -447,7 +450,7 @@ test("release SBOM is SPDX 2.3 and names the exact archive, runtime, binary, and
 		{ cwd: repo, stdout: "pipe", stderr: "pipe" });
 	expect(refused.exitCode).toBe(1);
 	expect(refused.stderr.toString()).toContain("SBOM_ARCHIVE_MISMATCH");
-}, 60_000);
+}, fixtureDeadlineS(60) * 1_000);
 
 test("detached signatures verify on a fresh copy; planted tampering, wrong keys, and missing sigs fail", () => {
 	const archived = join(output, "archived-source");
@@ -502,7 +505,7 @@ test("detached signatures verify on a fresh copy; planted tampering, wrong keys,
 		"--file", join(fresh, receipt.filename), "--sig", join(fresh, "no-such.sig")], { cwd: repo, stdout: "pipe", stderr: "pipe" });
 	expect(missing.exitCode).toBe(1);
 	expect(missing.stderr.toString()).toContain("SIG_NOT_FOUND");
-}, 120_000);
+}, fixtureDeadlineS(120) * 1_000);
 
 test("GUARDLOAD1: bundled kit-flywheel-guard carries no ../src/ escape and loads with no src/ present", async () => {
 	const bundled = await Bun.build({ entrypoints: [join(repo, "extensions", "kit-flywheel-guard.ts")],
@@ -612,4 +615,4 @@ test("native archive's br admission reaches its creation, review and claim guard
 			control: { rc: 0, admitted: true },
 		},
 	});
-}, 45_000);
+}, fixtureDeadlineS(45) * 1_000);
