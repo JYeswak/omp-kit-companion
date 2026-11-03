@@ -131,7 +131,7 @@ export function candidateRepo(fx: SaveFixture): string {
 	}
 	return repo;
 }
-export function runFocused(fx: SaveFixture, source: string, archive: string, changed: string, scriptDir = join(root, "scripts")) {
+export function runFocused(fx: SaveFixture, source: string, archive: string, changed: string, scriptDir = gateTree(fx, MANIFEST_HEADER)) {
 	const probe = join(fx.dir, `focused-${Math.random().toString(36).slice(2)}.sh`);
 	writeFileSync(probe, `set -eu\ngate_defer_record=1\n${gateFunctions(source, FOCUSED_FUNCTIONS)}rc=0\nrun_step focused gate_focused || rc=$?\ngate_defer_record=0\nrecord_run "$last_record_tests" "$last_record_files" "$rc"\nexit "$rc"\n`);
 	const repo = candidateRepo(fx);
@@ -175,13 +175,22 @@ export function measuredFiles(record: Record<string, unknown>) {
 		};
 	});
 }
+// Native fixture work is real; only the host-load observation is synthetic.
+// Generate from the current producer and fail loudly if its sampler changes.
+export function fixtureMetrics(source: string, load = 0): string {
+	const anchor = "def sample_load() -> float:\n    return os.getloadavg()[0]\n";
+	const parts = source.split(anchor);
+	if (parts.length !== 2) throw new Error("fixture metrics load sampler anchor must occur exactly once");
+	return parts[0] + `def sample_load() -> float:\n    return ${load}\n` + parts[1];
+}
 // ---- CIGATE1 CI-only manifest: explicit, printed exclusions that turn the verdict PARTIAL ----------
 export function gateTree(fx: SaveFixture, manifest: string): string {
 	const dir = ownedTmp("gate", { root: fx.dir }).path;
 	mkdirSync(join(dir, "scripts"));
 	symlinkSync(join(root, "src"), join(dir, "src"));
 	for (const name of ["affected-tests.ts", "gate-disk-floor.ts"]) cpSync(join(root, "scripts", name), join(dir, "scripts", name));
-	for (const name of ["suite-metrics.py", "full-suite-verdict-store.py", "test-budget.ts", "fresh-gate.sh", ...JUDGE_SUPPORT]) symlinkSync(join(root, "scripts", name), join(dir, "scripts", name));
+	for (const name of ["full-suite-verdict-store.py", "test-budget.ts", "fresh-gate.sh", ...JUDGE_SUPPORT]) symlinkSync(join(root, "scripts", name), join(dir, "scripts", name));
+	writeFileSync(join(dir, "scripts/suite-metrics.py"), fixtureMetrics(readFileSync(join(root, "scripts/suite-metrics.py"), "utf8")));
 	mkdirSync(join(dir, ".github"));
 	cpSync(join(root, ".github/test-budget.json"), join(dir, ".github/test-budget.json"));
 	writeFileSync(join(dir, "scripts/gate-ci-only.tsv"), manifest);

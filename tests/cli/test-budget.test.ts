@@ -192,10 +192,21 @@ test("default prefers complete shared-store timing maps, falls back only when a 
 	expect(JSON.parse(new TextDecoder().decode(fallback.stdout))).toMatchObject({ W_s: 60, timings_dir: join(root, ".github") });
 });
 
-function measured(root: string, file: string, elapsed: number, changed = file) {
+function measured(root: string, file: string, elapsed: number, changed = file, telemetry: Record<string, unknown> = {}) {
+	const { gate_workers = telemetry.workers ?? 1, default_workers = 1, ...sample } = telemetry;
 	writeFileSync(join(root, "changed.txt"), changed + "\n");
-	writeFileSync(join(root, "rows.json"), JSON.stringify([{ path: file, elapsed_ms: elapsed, complete: true, rc: 0 }]));
-	return invoke(root, "--enforce", "rows.json", "--changed-files", "changed.txt", "--json");
+	writeFileSync(join(root, "rows.json"), JSON.stringify([{
+		path: file, elapsed_ms: elapsed, complete: true, rc: 0,
+		cpu_user_ms: 1000, cpu_system_ms: 1000, ncpu: 32, workers: 1, load_1m: 4, load_1m_end: 4,
+		...sample,
+	}]));
+	return invoke(root, "--enforce", "rows.json", "--changed-files", "changed.txt", "--workers", String(gate_workers), "--default-workers", String(default_workers), "--annotate-records", "--json");
+}
+function budget(cap_s = 90, grandfathered: Record<string, unknown> = {}, references: Record<string, unknown> = {}) {
+	return { version: 2, cap_s, grandfathered, references, envelope: { max_load_per_cpu: 0.5, worker_rule: "gate-default-widths" } };
+}
+function reference(wall_s = 90, cpu_s = 45) {
+	return { wall_s, cpu_s, evidence: { tree: "a".repeat(40), verdict_sha256: "b".repeat(64), judge_sha256: "c".repeat(64), output_sha256: "d".repeat(64) } };
 }
 
 test("FILEBUDGET1 refuses a planted slow changed file, accepts the boundary and leaves unchanged slow files alone", async () => {
@@ -235,17 +246,17 @@ test("FILEBUDGET1 policy ratchet permits removals/reductions, refuses growth/add
 		writeFileSync(policyPath, JSON.stringify({ ...baseline, changed_file_budget: budget }));
 		return invoke(root, "--check-file-policy", "--base-policy", "base-policy.json", "--json");
 	};
-	expect((await check({ cap_s: 90, grandfathered: {} })).rc).toBe(0);
-	expect((await check({ cap_s: 80, grandfathered: { "legacy.test.ts": { measured_s: 130, evidence: "reduction" } } })).rc).toBe(0);
-	for (const budget of [
-		{ cap_s: 91, grandfathered: {} },
-		{ cap_s: 90, grandfathered: { "legacy.test.ts": { measured_s: 132, evidence: "growth" } } },
-		{ cap_s: 90, grandfathered: { "new.test.ts": { measured_s: 131, evidence: "new exemption" } } },
-		{ cap_s: 90, grandfathered: { "legacy.test.ts": { measured_s: 131, evidence: "" } } },
+	expect((await check(budget())).rc).toBe(0);
+	expect((await check(budget(80, { "legacy.test.ts": { measured_s: 130, evidence: "reduction" } }))).rc).toBe(0);
+	for (const next of [
+		budget(91),
+		budget(90, { "legacy.test.ts": { measured_s: 132, evidence: "growth" } }),
+		budget(90, { "new.test.ts": { measured_s: 131, evidence: "new exemption" } }),
+		budget(90, { "legacy.test.ts": { measured_s: 131, evidence: "" } }),
 		undefined,
-	]) expect((await check(budget)).rc).toBe(1);
+	]) expect((await check(next)).rc).toBe(1);
 	// Removing an allowance is irreversible in the next baseline.
-	writeFileSync(join(root, "base-policy.json"), JSON.stringify({ ...baseline, changed_file_budget: { cap_s: 90, grandfathered: {} } }));
+	writeFileSync(join(root, "base-policy.json"), JSON.stringify({ ...baseline, changed_file_budget: budget() }));
 	expect((await check(baseline.changed_file_budget)).rc).toBe(1);
 });
 
@@ -256,4 +267,89 @@ test("FILEBUDGET1 does not accept failed or incomplete timing rows", async () =>
 		writeFileSync(join(root, "rows.json"), JSON.stringify([{ path: "new.test.ts", elapsed_ms: 1, ...row }]));
 		expect((await invoke(root, "--enforce", "rows.json", "--changed-files", "changed.txt")).rc).toBe(1);
 	}
+});
+
+test("FILEBUDGET1 v2 same file outside the envelope is NOT_CALIBRATED, never a wall refusal or PASS", async () => {
+	const root = fixture();
+	const qualified = await measured(root, "same.test.ts", 90001);
+	expect(qualified.rc).toBe(1);
+	expect(JSON.parse(qualified.stdout).file_budget.violations[0].clock).toBe("qualified-wall");
+	for (const telemetry of [
+		{ load_1m: 16.001 }, { load_1m_end: 48 }, { workers: 5 }, { ncpu: undefined }, { load_1m_end: undefined },
+	]) {
+		const busy = await measured(root, "same.test.ts", 90001, "same.test.ts", telemetry);
+		expect(busy.rc).toBe(75);
+		expect(JSON.parse(busy.stdout).status).toBe("NOT_CALIBRATED");
+		expect(JSON.parse(busy.stdout).file_budget.violations).toEqual([]);
+		expect(busy.stderr).toContain("busy machine");
+		expect(busy.stdout + busy.stderr).not.toContain("Split this file");
+	}
+	// A genuinely new file has no CPU substitute for a qualifying observation.
+	expect((await measured(root, "new.test.ts", 1000, "new.test.ts", { load_1m: 48 })).rc).toBe(75);
+});
+
+test("FILEBUDGET1 v2 frozen CPU-equivalent overage refuses at every load, without normalizing wall", async () => {
+	const root = fixture();
+	const policyPath = join(root, ".github/test-budget.json");
+	const policy = JSON.parse(await Bun.file(policyPath).text());
+	policy.changed_file_budget.references["same.test.ts"] = reference();
+	writeFileSync(policyPath, JSON.stringify(policy));
+	for (const load of [4, 48]) {
+		const result = await measured(root, "same.test.ts", 1000, "same.test.ts", { cpu_user_ms: 46000, cpu_system_ms: 0, load_1m: load, load_1m_end: load });
+		expect(result.rc).toBe(1);
+		expect(JSON.parse(result.stdout).file_budget.violations[0]).toMatchObject({ clock: "cpu-equivalent", equivalent_wall_s: 92, cap_s: 90 });
+	}
+	const busy = await measured(root, "same.test.ts", 139600, "same.test.ts", { cpu_user_ms: 44000, cpu_system_ms: 0, load_1m: 48 });
+	expect(busy.rc).toBe(75); // Equivalent 88 s does not turn an unqualified wall observation into PASS.
+});
+
+test("FILEBUDGET1 v2 original grandfather references preserve their exact evidence-bound CPU ceilings", async () => {
+	const root = fixture();
+	const policy = JSON.parse(await Bun.file(join(root, ".github/test-budget.json")).text());
+	for (const [name, value] of Object.entries(policy.changed_file_budget.references)) {
+		const pair = value as { cpu_s: number; wall_s: number };
+		const at = await measured(root, name, pair.wall_s * 1000, name, { cpu_user_ms: pair.cpu_s * 1000, cpu_system_ms: 0 });
+		expect(at.rc, at.stdout).toBe(0);
+		const grown = await measured(root, name, 1000, name, { cpu_user_ms: (pair.cpu_s + 0.001) * 1000, cpu_system_ms: 0, load_1m: 48 });
+		expect(grown.rc).toBe(1);
+		expect(JSON.parse(grown.stdout).file_budget.violations[0].clock).toBe("cpu-equivalent");
+	}
+});
+
+test("FILEBUDGET1 v2 ratchet freezes reference pairs/evidence and only tightens the envelope", async () => {
+	const root = fixture();
+	const policyPath = join(root, ".github/test-budget.json");
+	const baseline = JSON.parse(await Bun.file(policyPath).text());
+	baseline.changed_file_budget = budget(90, {}, { "same.test.ts": reference() });
+	writeFileSync(join(root, "same.test.ts"), "// owned fixture source\n");
+	writeFileSync(join(root, "base-policy.json"), JSON.stringify(baseline));
+	const check = async (next: unknown) => {
+		writeFileSync(policyPath, JSON.stringify({ ...baseline, changed_file_budget: next }));
+		return invoke(root, "--check-file-policy", "--base-policy", "base-policy.json", "--json");
+	};
+	expect((await check(baseline.changed_file_budget)).rc).toBe(0);
+	for (const pair of [reference(91, 45), reference(90, 46), reference(89, 45), { ...reference(), evidence: { ...reference().evidence, tree: "e".repeat(40) } }]) {
+		const result = await check(budget(90, {}, { "same.test.ts": pair }));
+		expect(result.rc).toBe(1);
+		expect(JSON.parse(result.stdout).error).toContain("reference pair and evidence are frozen");
+	}
+	expect((await check(budget())).rc).toBe(1); // Removing the reference cannot bypass the CPU check.
+	const tighter = budget(90, {}, { "same.test.ts": reference() });
+	tighter.envelope.max_load_per_cpu = 0.25;
+	expect((await check(tighter)).rc).toBe(0);
+	writeFileSync(join(root, "base-policy.json"), JSON.stringify({ ...baseline, changed_file_budget: tighter }));
+	expect((await check(baseline.changed_file_budget)).rc).toBe(1);
+});
+
+test("FILEBUDGET1 v2 the default combined 4+4 workers are qualified; non-default widths are not", async () => {
+	const root = fixture();
+	const defaultWidths = await measured(root, "same.test.ts", 90001, "same.test.ts", { workers: 4, gate_workers: 8, default_workers: 8 });
+	expect(defaultWidths.rc).toBe(1);
+	expect(JSON.parse(defaultWidths.stdout).file_budget.violations[0].clock).toBe("qualified-wall");
+	const overridden = await measured(root, "same.test.ts", 90001, "same.test.ts", { workers: 2, gate_workers: 4, default_workers: 8 });
+	expect(overridden.rc).toBe(75);
+	const recorded = JSON.parse(await Bun.file(join(root, "rows.json")).text());
+	expect(recorded[0].rc).toBe(0); // Native-test outcome remains successful.
+	expect(recorded[0].file_budget.status).toBe("NOT_CALIBRATED");
+	expect(recorded[0].file_budget.default_workers).toBe(8);
 });

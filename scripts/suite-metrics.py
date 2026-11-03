@@ -168,6 +168,10 @@ def atomic_json(path: Path, value: object) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def sample_load() -> float:
+    return os.getloadavg()[0]
+
+
 def execute(args: argparse.Namespace) -> int:
     command = args.command
     if command and command[0] == "--":
@@ -182,7 +186,7 @@ def execute(args: argparse.Namespace) -> int:
     native_log = record.with_suffix(".native.log")
     started_ns = time.time_ns()
     started_ms = started_ns // 1_000_000
-    load_1m = os.getloadavg()[0]
+    load_1m = sample_load()
     # The native process writes directly to a retained file, never through a
     # helper-owned pipe/sink thread: even SIGKILL of this helper cannot discard
     # bytes the native process already flushed. Exec preserves its PID/group.
@@ -217,6 +221,7 @@ def execute(args: argparse.Namespace) -> int:
         exec_ns = int(exec_marker.read_text().strip())
         finished_ns = time.time_ns()
         finished_ms = finished_ns // 1_000_000
+        load_1m_end = sample_load()
         if exec_ns < started_ns or finished_ns < exec_ns:
             raise ValueError("suite exec boundary timestamps are out of order")
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -243,7 +248,8 @@ def execute(args: argparse.Namespace) -> int:
            "cpu_user_ms": max(0.0, after.ru_utime - before.ru_utime) * 1000,
            "cpu_system_ms": max(0.0, after.ru_stime - before.ru_stime) * 1000,
            "rc": result.rc, "command": command, "launcher": launcher, "complete": complete,
-           "workers": args.workers, "load_1m": load_1m,
+           "workers": args.workers, "ncpu": os.cpu_count() or 1,
+           "load_1m": load_1m, "load_1m_end": load_1m_end,
            "judge": {"sha256": JUDGE_SHA256,
                      "python": sys.version.split()[0]},
            "output_sha256": digest.hexdigest(),

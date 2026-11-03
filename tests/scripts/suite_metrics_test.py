@@ -101,6 +101,27 @@ class SuiteMetricsTests(unittest.TestCase):
         self.assertEqual(merged, {"version": 1, "files": {"gone": 99, "a": 10.0, "b": 10.0, "c": 10.0}})
         self.assertEqual(previous["files"]["a"], 90)
 
+    def test_focused_reuse_retains_uncalibrated_budget_without_granting_credit(self) -> None:
+        with owned_tmp("suite-budget-reuse") as directory:
+            root = Path(directory)
+            records = root / "records"
+            records.mkdir()
+            declared, covered, output = root / "declared", root / "covered.json", root / "output.json"
+            declared.write_text("a\n")
+            observed = row("a")
+            observed["file_budget"] = {"status": "NOT_CALIBRATED", "qualified": False}
+            covered.write_text(json.dumps([observed]))
+            args = metrics.argparse.Namespace(
+                records=str(records), declared=str(declared), covered=str(covered),
+                output=str(output), csv=str(root / "metrics.csv"),
+                cwd=str(root), tables_dir=str(root / "tables"),
+            )
+            self.assertEqual(metrics.collect(args), 0)
+            reused = json.loads(output.read_text())[0]
+            self.assertEqual(reused["rc"], 0)
+            self.assertEqual(reused["origin"], "focused")
+            self.assertEqual(reused["file_budget"], {"status": "NOT_CALIBRATED", "qualified": False})
+
 
 class JudgeIdentityTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -262,6 +283,10 @@ class SuiteMetricsNativeLogTests(unittest.TestCase):
                         self.assertGreaterEqual(measured["wait_ms"], 0)
                         self.assertGreaterEqual(measured["setup_ms"], 0)
                         self.assertGreaterEqual(measured["run_ms"], 0)
+                        self.assertIsInstance(measured["ncpu"], int)
+                        self.assertGreater(measured["ncpu"], 0)
+                        self.assertGreaterEqual(measured["load_1m"], 0)
+                        self.assertGreaterEqual(measured["load_1m_end"], 0)
 
 
     def test_hermetic_helper_marks_the_exec_boundary_before_the_child(self) -> None:

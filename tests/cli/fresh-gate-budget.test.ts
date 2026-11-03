@@ -1,9 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp";
 import { runSync } from "../../src/kitlib/run";
-import { AMPLE, JUDGE_SUPPORT, MANIFEST_HEADER, affectedArchive, assertPhases, candidateRepo, gate, gateFunctions, gateTree, ledger, measuredFiles, root, runFocused, saveFixture } from "./fresh-gate.helpers.ts";
+import { AMPLE, JUDGE_SUPPORT, MANIFEST_HEADER, affectedArchive, assertPhases, candidateRepo, fixtureMetrics, gate, gateFunctions, gateTree, ledger, measuredFiles, root, runFocused, saveFixture } from "./fresh-gate.helpers.ts";
 
 test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file over the heuristic per-file cap", () => {
 	const source = readFileSync(gate, "utf8");
@@ -18,11 +18,12 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file o
 			symlinkSync(join(root, "scripts", name), join(scripts, name));
 		}
 		const policy = join(judge, ".github/test-budget.json");
+		const measuredPolicy = JSON.parse(readFileSync(join(root, ".github/test-budget.json"), "utf8")).changed_file_budget;
 		const configure = (cycle: number) => writeFileSync(policy, JSON.stringify({
 			version: 1, requirements: { push_p95_s: 600, full_cycle_s: cycle },
 			initial_heuristic: { per_file_cap_s: cycle / 4, derivation: "full_cycle_s / 4",
 				status: "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED", mode: "report" },
-			changed_file_budget: { cap_s: 90, grandfathered: {} },
+			changed_file_budget: { ...measuredPolicy, grandfathered: {}, references: {} },
 		}));
 		const archive = affectedArchive(fx, 42, 42);
 		configure(900);
@@ -80,7 +81,7 @@ test.skipIf(!AMPLE || process.env.OMP_KIT_LITERAL_SUITE_BUDGET !== "1")("SUITEBU
 		expect(rows[0]!.rc).toBe(0);
 
 		// Remove only the fixture gate's budget enforcement, not the measured run.
-		const enforcement = '\t\tbun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \\\n\t\t\t--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --changed-files "$WORK/budget-changed-files" --json || tests_rc=$?\n';
+		const enforcement = '\t\tbun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \\\n\t\t\t--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --changed-files "$WORK/budget-changed-files" --workers "$budget_workers" --default-workers "$budget_default_workers" --annotate-records --json || budget_rc=$?\n';
 		const withoutEnforcement = source.replace(enforcement, "\t\t:\n");
 		expect(withoutEnforcement).not.toBe(source);
 		const unchecked = runFocused(fx, withoutEnforcement, archive, "tests/cli/three-hundred.test.sh");
@@ -108,7 +109,7 @@ test.skipIf(!AMPLE)("FILEBUDGET1 own timed run admits a normal changed file and 
 		expect(fast.out).toContain("VERDICT TESTED");
 		// A fixture-only tight policy proves the real measured boundary without
 		// a 90-second sleeper, forged measurement, or an extra production run.
-		policy.changed_file_budget = { cap_s: 0.001, grandfathered: {} };
+		policy.changed_file_budget.cap_s = 0.001;
 		writeFileSync(policyPath, JSON.stringify(policy));
 		const slow = runFocused(fx, source, archive, "tests/cli/mod.test.ts", scripts);
 		expect(slow.code, slow.out).toBe(1);
@@ -187,4 +188,37 @@ test.skipIf(!AMPLE)("CIGATE1 wall budget: past the budget the nearest tests run 
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
 }, 120_000);
+test("FILEBUDGET1 fixture metrics refuse a missing or duplicate production load-sampler anchor", () => {
+	expect(() => fixtureMetrics("def unrelated():\n    return 0\n")).toThrow("anchor must occur exactly once");
+	const producer = readFileSync(join(root, "scripts/suite-metrics.py"), "utf8");
+	expect(() => fixtureMetrics(producer + producer)).toThrow("anchor must occur exactly once");
+});
+
+test.skipIf(!AMPLE)("FILEBUDGET1 v2 a busy otherwise-green commit proceeds without budget PASS credit", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const scripts = gateTree(fx, MANIFEST_HEADER);
+		// Deliberately synthetic host telemetry; native wall/CPU work is unchanged.
+		writeFileSync(join(scripts, "suite-metrics.py"), fixtureMetrics(readFileSync(join(root, "scripts/suite-metrics.py"), "utf8"), 1000));
+		const archive = affectedArchive(fx, 42, 42);
+		fx.env.FRESH_GATE_PASSED_OUT = join(fx.dir, "native-passed-budget-not-calibrated");
+		const result = runFocused(fx, source, archive, "tests/cli/mod.test.ts", scripts);
+		expect(result.code, result.out).toBe(0);
+		expect(result.out).toContain("NOT_CALIBRATED");
+		expect(result.out).toContain("busy machine");
+		expect(result.out).not.toContain("Split this file");
+		expect(result.out).toContain("no budget PASS credit; other gates continue");
+		expect(result.out).toContain("VERDICT TESTED");
+		expect(result.out).toContain("LOADGATE1 GREEN");
+		expect(existsSync(fx.env.FRESH_GATE_PASSED_OUT)).toBe(true);
+		const reused = JSON.parse(readFileSync(fx.env.FRESH_GATE_PASSED_OUT + ".timings.json", "utf8"));
+		expect(reused[0].rc).toBe(0);
+		expect(reused[0].file_budget.status).toBe("NOT_CALIBRATED");
+		expect(ledger(fx).at(-1)!.rc).toBe(0);
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
 afterAll(() => cleanupAllOwnedTmp());

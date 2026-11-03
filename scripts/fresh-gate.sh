@@ -315,10 +315,12 @@ select_affected_tests() {
 # K parallel bun workers for the affected tests: a quarter of the online cores, 2..4, unless
 # FRESH_GATE_TEST_WORKERS names a positive count.
 test_workers() {
-	case "${FRESH_GATE_TEST_WORKERS:-}" in
-		''|*[!0-9]*|0) ;;
-		*) echo "$FRESH_GATE_TEST_WORKERS"; return 0 ;;
-	esac
+	if [ "${1:-}" != "--default" ]; then
+		case "${FRESH_GATE_TEST_WORKERS:-}" in
+			''|*[!0-9]*|0) ;;
+			*) echo "$FRESH_GATE_TEST_WORKERS"; return 0 ;;
+		esac
+	fi
 	ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || ncpu=4
 	case "$ncpu" in ''|*[!0-9]*) ncpu=4 ;; esac
 	k=$((ncpu / 4))
@@ -359,6 +361,9 @@ run_affected_tests() {
 	# as CI runs them (`sh FILE`, `python3 FILE`).
 	bun_files=0
 	workers=0
+	bun_workers=0
+	script_workers=0
+	script_count=0
 	script_files=
 	for test_file in "$@"; do
 		case "$test_file" in
@@ -441,8 +446,21 @@ run_affected_tests() {
 	fi
 	if [ "$tests_rc" -eq 0 ]; then
 		printf '%s\n' "$CHANGED" >"$WORK/budget-changed-files"
+		budget_workers=$((${bun_workers:-0} + ${script_workers:-0}))
+		budget_default_k=$(test_workers --default)
+		budget_default_bun=$bun_files
+		[ "$budget_default_bun" -le "$budget_default_k" ] || budget_default_bun=$budget_default_k
+		budget_default_scripts=$script_count
+		[ "$budget_default_scripts" -le "$budget_default_k" ] || budget_default_scripts=$budget_default_k
+		budget_default_workers=$((budget_default_bun + budget_default_scripts))
+		budget_rc=0
 		bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \
-			--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --changed-files "$WORK/budget-changed-files" --json || tests_rc=$?
+			--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --changed-files "$WORK/budget-changed-files" --workers "$budget_workers" --default-workers "$budget_default_workers" --annotate-records --json || budget_rc=$?
+		if [ "$budget_rc" -eq 75 ]; then
+			echo "FRESH-GATE: file budget NOT_CALIBRATED (busy machine or non-default widths); no budget PASS credit; other gates continue"
+		else
+			tests_rc=$budget_rc
+		fi
 	fi
 	load_selection=
 	for load_file in $focused_selection; do

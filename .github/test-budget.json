@@ -3,8 +3,10 @@
   "requirements": { "push_p95_s": 600, "full_cycle_s": 900 },
   "initial_heuristic": { "per_file_cap_s": 225, "derivation": "full_cycle_s / 4", "status": "INITIAL_HEURISTIC_NOT_DISTRIBUTION_DERIVED", "mode": "report" },
   "changed_file_budget": {
+    "version": 2,
+    "envelope": { "max_load_per_cpu": 0.5, "worker_rule": "gate-default-widths" },
     "cap_s": 90,
-    "decision": "90 s per changed test file in the fresh gate's own individually timed run; Joshua via Main, 2026-11-03; grandfather list and ceilings may only shrink",
+    "decision": "90 s qualified wall ceiling; start/end load1 <= ncpu/2 and actual gate widths equal its own defaults for the selection (including concurrent Bun/script stages). Otherwise budget item NOT_CALIBRATED, no budget PASS credit, but other commit gates continue. Frozen CPU-equivalent overages refuse at any load. Main approved, 2026-11-03.",
     "grandfathered": {
       "tests/cli/private-index-land.test.ts": {
         "measured_s": 139.818255083,
@@ -13,6 +15,28 @@
       "tests/cli/verify.test.ts": {
         "measured_s": 123.820724916,
         "evidence": "690f971744020d0189ce9fcce85e816fcacd2c09 main verdict 53ce25d225b9a7c747ba14d5acfb979790791bad3c56b222bf595cc867e7ca91, evidence.files elapsed_ms=123820.724916, complete=true rc=0"
+      }
+    },
+    "references": {
+      "tests/cli/private-index-land.test.ts": {
+        "wall_s": 139.818255083,
+        "cpu_s": 129.863914,
+        "evidence": {
+          "tree": "690f971744020d0189ce9fcce85e816fcacd2c09",
+          "verdict_sha256": "23ce9b2cabe9dd702af09fb95c48b9c60bb028ca1ad371dc91f377f8f6a5edb9",
+          "judge_sha256": "5d839cc79e75f4ebe2df628c36ea78410b7fce0ccc4ad119e46e11599cccf251",
+          "output_sha256": "6a69db17ffeffd64b4282db19ea0d96c715bf2bc0c0336286808a93ee5b4bb43"
+        }
+      },
+      "tests/cli/verify.test.ts": {
+        "wall_s": 123.820724916,
+        "cpu_s": 24.586423000000003,
+        "evidence": {
+          "tree": "690f971744020d0189ce9fcce85e816fcacd2c09",
+          "verdict_sha256": "23ce9b2cabe9dd702af09fb95c48b9c60bb028ca1ad371dc91f377f8f6a5edb9",
+          "judge_sha256": "5d839cc79e75f4ebe2df628c36ea78410b7fce0ccc4ad119e46e11599cccf251",
+          "output_sha256": "f1827531377d743dacd536fd2e5eca454d0823d97ddd873b6349e3c89c719011"
+        }
       }
     }
   },
