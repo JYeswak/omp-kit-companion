@@ -1,8 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, test as bunTest } from "bun:test";
 import {
 	chmodSync,
 	copyFileSync,
+	cpSync,
 	existsSync,
+	readdirSync,
+	rmSync,
 	mkdirSync,
 	writeFileSync,
 } from "node:fs";
@@ -10,6 +13,9 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as runProcess, type RunResult } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+
+// Repositories are case-owned; only the immutable installed hook template is shared.
+const test = bunTest.concurrent;
 
 const scratch = ownedTmp("portable-paths-test");
 const repoRoot = process.env.PORTABLE_PATHS_SOURCE_ROOT ?? fileURLToPath(new URL("../../", import.meta.url));
@@ -97,6 +103,34 @@ function baseline(counts: Record<string, number>): string {
 	}, null, 2)}\n`;
 }
 
+// These cases exercise portable-path admission through the installed runner, not
+// unrelated commit-message, reference-transaction or pre-push members.
+let portableHooks: Promise<string> | undefined;
+async function installPortableHook(repo: string): Promise<void> {
+	portableHooks ??= (async () => {
+		const template = join(scratch.path, "hook-template");
+		mkdirSync(template);
+		await okay(["git", "init", "-q"], template);
+		await okay(["sh", join(repoRoot, "scripts", "install-commit-msg-bead.sh"), template], template);
+		const hooks = join(template, ".git", "hooks");
+		const chains = join(hooks, "hooks.d");
+		for (const kind of readdirSync(chains, { withFileTypes: true })) {
+			if (!kind.isDirectory()) continue;
+			for (const member of readdirSync(join(chains, kind.name))) {
+				if (member[0]! < "0" || member[0]! > "9") continue;
+				if (kind.name === "pre-commit" && member === "54-omp-kit-staged-portable-paths") continue;
+				rmSync(join(chains, kind.name, member));
+			}
+		}
+		for (const runner of ["commit-msg", "pre-push", "reference-transaction"]) {
+			rmSync(join(hooks, runner), { force: true });
+		}
+		return hooks;
+	})();
+	// Copy, never symlink: the planted removal must mutate only its own member.
+	cpSync(await portableHooks, join(repo, ".git", "hooks"), { recursive: true });
+}
+
 async function newPrecommitRepo(name: string, includeBaseline = true): Promise<string> {
 	const repo = join(scratch.path, name);
 	mkdirSync(join(repo, "scripts"), { recursive: true });
@@ -117,7 +151,7 @@ async function newPrecommitRepo(name: string, includeBaseline = true): Promise<s
 	if (includeBaseline) initialPaths.unshift("scripts/portable-paths-baseline.json");
 	await gitOkay(repo, "add", "--", ...initialPaths);
 	await gitOkay(repo, "commit", "-m", "[test] fixture root");
-	await okay(["sh", join(repoRoot, "scripts", "install-commit-msg-bead.sh"), repo], repo);
+	await installPortableHook(repo);
 	return repo;
 }
 
@@ -127,7 +161,7 @@ async function newUnbornPrecommitRepo(name: string): Promise<string> {
 	await okay(["git", "init", "-q"], repo);
 	await gitOkay(repo, "config", "user.email", "portable-paths@example.invalid");
 	await gitOkay(repo, "config", "user.name", "Portable Paths Test");
-	await okay(["sh", join(repoRoot, "scripts", "install-commit-msg-bead.sh"), repo], repo);
+	await installPortableHook(repo);
 	return repo;
 }
 

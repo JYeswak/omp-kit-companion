@@ -3,11 +3,24 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, join } from "node:path";
 import { ERROR_TEXT, judgeResult, ompMcpToolName, parseCallSpec, parseExpectSpec, probeMcpProfiles, RESULT_TEXT_CAP } from "../../src/mcp-probe.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { run } from "../../src/kitlib/run.ts";
+import { ompSourceCacheRoot } from "../../src/omp-source-cache.ts";
+
+async function cli(argv: string[], options: { cwd: string; env: Record<string, string> }) {
+	const result = await run(argv, { ...options, deadline_s: 120 });
+	if (result.timed_out || result.truncated) throw new Error("MCP fixture CLI exceeded its execution bound");
+	return { exitCode: result.rc, stdout: Buffer.from(result.stdout), stderr: Buffer.from(result.stderr) };
+}
 
 const OMP = process.env.OMP_INSTALLED_PATH ?? Bun.which("omp");
 if (!OMP) throw new Error("mcp-probe tests require an installed OMP on PATH: the proof runs through OMP itself");
 const FAKE = join(import.meta.dir, "mcp-fake-server.ts");
 const CLI = join(import.meta.dir, "../../src/cli.ts");
+// MCP behavior does not test source installation. Reuse the installed OMP's
+// exact-version source cache rather than unpacking ~27,000 files in every HOME.
+// The normal resolver still validates that cache against the actual launcher.
+const sourceCache = ompSourceCacheRoot(process.env);
+const baseEnvironment = { ...process.env, ...(sourceCache ? { OMP_KIT_OMP_SRC_CACHE: sourceCache } : {}) };
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -24,18 +37,19 @@ function fixture(modes: Record<string, string | { mode: string; env: Record<stri
 	writeFileSync(mcpPath, JSON.stringify({ mcpServers: Object.fromEntries(Object.entries(modes).map(([name, spec]) => [name, typeof spec === "string"
 		? { command: process.execPath, args: [FAKE, spec] } : { command: process.execPath, args: [FAKE, spec.mode], env: spec.env }])) }));
 	if (dotenv !== undefined) writeFileSync(join(agentDir, ".env"), dotenv);
-	return { root, home, work, mcpPath, profile: { name: "alpha", agentDir, mcpPath } };
+	return { root, home, work, mcpPath, profile: { name: "alpha", agentDir, mcpPath },
+		env: { ...baseEnvironment, HOME: home, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), TMPDIR: root } };
 }
 
 test("a server that lists 0 tools is ZERO_TOOLS, never a pass, and the CLI exits non-zero with a receipt", async () => {
 	const f = fixture({ empty: "zero" });
-	const [row] = await probeMcpProfiles({ ompPath: OMP!, profiles: [f.profile], calls: [], startupTimeoutMs: 30_000, workDir: f.work });
+	const [row] = await probeMcpProfiles({ ompPath: OMP!, profiles: [f.profile], calls: [], startupTimeoutMs: 30_000, workDir: f.work, env: f.env });
 	expect(row!.servers).toEqual([expect.objectContaining({ server: "empty", status: "ZERO_TOOLS", tools: 0 })]);
 	expect(row!.status).toBe("FAIL");
 	const before = readFileSync(f.mcpPath);
-	const result = Bun.spawnSync([process.execPath, CLI, "test", "--mcp", "--profiles", "alpha", "--startup-timeout-ms", "30000", "--json"], {
-		cwd: f.root, stdout: "pipe", stderr: "pipe",
-		env: { ...process.env, HOME: f.home, XDG_STATE_HOME: join(f.root, "state"), TMPDIR: f.root, PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` } });
+	const result = await cli([process.execPath, CLI, "test", "--mcp", "--profiles", "alpha", "--startup-timeout-ms", "30000", "--json"], {
+		cwd: f.root,
+		env: { ...f.env, PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` } });
 	expect(result.exitCode).toBe(1);
 	const envelope = JSON.parse(result.stdout.toString());
 	expect(envelope.data.overall).toBe("FAIL");
@@ -49,7 +63,7 @@ test("only an answer that matches --expect without error-shaped text is CALLABLE
 	// OMP folds servers with identical launch configs into one, so the echo variants differ by a literal env tag.
 	const f = fixture({ echo: "echo", plain: { mode: "echo", env: { TAG: "plain" } }, wrong: { mode: "echo", env: { TAG: "wrong" } }, broken: "fail", auth: "auth" });
 	const call = (spec: string, expect?: string) => ({ ...parseCallSpec(spec), ...(expect === undefined ? {} : { expect }) });
-	const [row] = await probeMcpProfiles({ ompPath: OMP!, profiles: [f.profile], startupTimeoutMs: 30_000, workDir: f.work,
+	const [row] = await probeMcpProfiles({ ompPath: OMP!, profiles: [f.profile], startupTimeoutMs: 30_000, workDir: f.work, env: f.env,
 		calls: [call("echo:echo:{\"text\":\"proof:1\"}", "^echo:proof:1$"), call("plain:echo:{\"text\":\"x\"}"), call("wrong:echo:{\"text\":\"x\"}", "^nine$"),
 			call("broken:echo:{\"text\":\"x\"}", "."), call("auth:echo:{\"text\":\"x\"}", ".")] });
 	const by = (name: string) => row!.servers.find(server => server.server === name)!;
@@ -63,18 +77,18 @@ test("only an answer that matches --expect without error-shaped text is CALLABLE
 	expect(readdirSync(f.work)).toEqual([]);
 }, 120_000);
 
-test("the CLI reports the auth-error server CALL_FAILED and exits 1; --expect needs a --call for its server", () => {
+test("the CLI reports the auth-error server CALL_FAILED and exits 1; --expect needs a --call for its server", async () => {
 	const f = fixture({ auth: "auth" });
-	const env = { ...process.env, HOME: f.home, XDG_STATE_HOME: join(f.root, "state"), TMPDIR: f.root, PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` };
-	const run = (extra: string[]) => Bun.spawnSync([process.execPath, CLI, "test", "--mcp", "--profiles", "alpha", "--startup-timeout-ms", "30000", "--json", ...extra], { cwd: f.root, stdout: "pipe", stderr: "pipe", env });
-	const result = run(["--call", "auth:echo:{\"text\":\"x\"}", "--expect", "auth:HTTP"]);
+	const env = { ...f.env, PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` };
+	const invoke = (extra: string[]) => cli([process.execPath, CLI, "test", "--mcp", "--profiles", "alpha", "--startup-timeout-ms", "30000", "--json", ...extra], { cwd: f.root, env });
+	const result = await invoke(["--call", "auth:echo:{\"text\":\"x\"}", "--expect", "auth:HTTP"]);
 	expect(result.exitCode).toBe(1);
 	const server = JSON.parse(result.stdout.toString()).data.mcp.profiles[0].servers[0];
 	expect(server).toMatchObject({ server: "auth", status: "CALL_FAILED", call: { is_error: false, error_text: true } });
-	const orphan = run(["--expect", "auth:x"]);
+	const orphan = await invoke(["--expect", "auth:x"]);
 	expect(orphan.exitCode).not.toBe(0);
 	expect(orphan.stdout.toString() + orphan.stderr.toString()).toContain("INVALID_EXPECT");
-	const unparsable = run(["--call", "auth:echo:{}", "--expect", "auth:("]);
+	const unparsable = await invoke(["--call", "auth:echo:{}", "--expect", "auth:("]);
 	expect(unparsable.stdout.toString() + unparsable.stderr.toString()).toContain("INVALID_EXPECT");
 }, 120_000);
 
@@ -88,7 +102,7 @@ test("an env reference unset where OMP runs is ENV_UNSET and a failing !command 
 		cmdempty: { mode: "echo", env: { APP_ID: "!true" } },
 		cmdok: { mode: "echo", env: { APP_ID: "!printf command-output-never-shown", MODE: "fast-literal" } },
 	}, "OMP_KIT_TEST_DOTENV_9F3A=from-dotenv\n");
-	const env = { ...process.env, OMP_KIT_TEST_SET_9F3A: "present" };
+	const env = { ...f.env, OMP_KIT_TEST_SET_9F3A: "present" };
 	delete env[unset];
 	const calls = ["unsetref", "setref", "dotref", "cmdfail", "cmdok"].map(name => ({ ...parseCallSpec(`${name}:echo:{"text":"x"}`), expect: "^echo:x$" }));
 	const [row] = await probeMcpProfiles({ ompPath: OMP!, profiles: [f.profile], startupTimeoutMs: 30_000, workDir: f.work, env, calls });
@@ -125,7 +139,7 @@ test("the error-text check fires on auth and HTTP 4xx/5xx text, stays quiet on a
 });
 test("a server that prints a non-JSON banner on stdout fails under OMP's strict reader, from a decoy cwd", async () => {
 	const f = fixture({ chatty: "banner" });
-	const [row] = await probeMcpProfiles({ ompPath: OMP!, profiles: [f.profile], servers: ["chatty", "absent"], startupTimeoutMs: 30_000, workDir: f.work,
+	const [row] = await probeMcpProfiles({ ompPath: OMP!, profiles: [f.profile], servers: ["chatty", "absent"], startupTimeoutMs: 30_000, workDir: f.work, env: f.env,
 		calls: [parseCallSpec("chatty:echo:{\"text\":\"x\"}")] });
 	expect(row!.servers).toEqual([
 		expect.objectContaining({ server: "chatty", status: "START_FAILED" }),
@@ -142,19 +156,23 @@ test("call specs and OMP tool names parse the way OMP mints them", () => {
 	expect(ompMcpToolName("s", "t".repeat(80))).toHaveLength(64);
 });
 test("a slow answer is CALL_TIMEOUT at a small bound and CALLABLE when raised, with the bound recorded", async () => {
-	const f = fixture({ slow: { mode: "slow", env: { SLOW_MS: "3000" } } });
-	const env = { ...process.env, HOME: f.home, XDG_STATE_HOME: join(f.root, "state"), TMPDIR: f.root, PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` };
-	const run = (extra: string[]) => Bun.spawnSync([process.execPath, CLI, "test", "--mcp", "--profiles", "alpha", "--startup-timeout-ms", "30000", "--json", ...extra], { cwd: f.root, stdout: "pipe", stderr: "pipe", env });
+	const invoke = (extra: string[]) => {
+		const f = fixture({ slow: { mode: "slow", env: { SLOW_MS: "3000" } } });
+		const env = { ...f.env, PATH: `${dirname(OMP!)}:${dirname(process.execPath)}:/usr/bin:/bin` };
+		return cli([process.execPath, CLI, "test", "--mcp", "--profiles", "alpha", "--startup-timeout-ms", "30000", "--json", ...extra], { cwd: f.root, env });
+	};
 	const callArgs = ["--call", "slow:echo:{\"text\":\"hi\"}", "--expect", "slow:^echo:hi$"];
-	const timedOut = run(["--call-timeout-ms", "1000", ...callArgs]);
+	const [timedOut, raised, fallback] = await Promise.all([
+		invoke(["--call-timeout-ms", "1000", ...callArgs]),
+		invoke(["--call-timeout-ms", "30000", ...callArgs]),
+		invoke(callArgs),
+	]);
 	const timedOutServer = JSON.parse(timedOut.stdout.toString()).data.mcp.profiles[0].servers[0];
 	expect(timedOutServer).toMatchObject({ server: "slow", status: "CALL_TIMEOUT" });
 	expect(String(timedOutServer.detail)).toContain("--call-timeout-ms");
 	expect(String(timedOutServer.detail)).toContain("1000");
-	const raised = run(["--call-timeout-ms", "30000", ...callArgs]);
 	const raisedServer = JSON.parse(raised.stdout.toString()).data.mcp.profiles[0].servers[0];
 	expect(raisedServer).toMatchObject({ server: "slow", status: "CALLABLE", call: { bound_ms: 30000 } });
-	const fallback = run(callArgs);
 	const fallbackServer = JSON.parse(fallback.stdout.toString()).data.mcp.profiles[0].servers[0];
 	expect(fallbackServer).toMatchObject({ server: "slow", status: "CALLABLE", call: { bound_ms: 120000 } });
 }, 120_000);
