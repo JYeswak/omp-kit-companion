@@ -275,7 +275,8 @@ async function runGit(
 	cwd: string,
 	args: string[],
 ): Promise<SaveGuardExecResult> {
-	return exec("git", args, { cwd, timeout: SAVE_GUARD_GIT_TIMEOUT_MS });
+	// This observer has a short deadline: never let status acquire an optional index lock.
+	return exec("git", ["--no-optional-locks", ...args], { cwd, timeout: SAVE_GUARD_GIT_TIMEOUT_MS });
 }
 
 function parsePatch(diff: string): PatchDelta {

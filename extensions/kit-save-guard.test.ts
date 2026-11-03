@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import kitSaveGuard, { type SaveGuardApi, type SaveGuardContext } from "./kit-save-guard";
 import { check as checkFleetGit } from "../src/fleet-guard/git";
@@ -165,6 +165,49 @@ function cfsiosFixture(): { root: string; file: string; base: string; held: stri
 	expect(sh(root, "diff", "--numstat", "--", "AGENTS.md").stdout.trim()).toBe("188\t27\tAGENTS.md");
 	return { root, file, base, held };
 }
+
+test("save guard observes start and stop without refreshing the shared Git index", async () => {
+	const root = repo({ remote: true });
+	const tracked = join(root, ".omp", "fleet.json");
+	const index = join(root, ".git", "index");
+	const fake = fakePi(root);
+	await kitSaveGuard(fake.pi);
+	// Unchanged bytes with different stat data force an ordinary status to refresh the index.
+	utimesSync(tracked, 1_000, 1_000);
+	const beforeStart = readFileSync(index);
+	await fake.emit("session_start", { type: "session_start" });
+	expect(readFileSync(index)).toEqual(beforeStart);
+	await claimFixture(fake);
+
+	const owned = join(root, "owned.txt");
+	await ownWrite(fake, owned, "unsaved work must still be detected\n");
+	utimesSync(tracked, 2_000, 2_000);
+	const beforeStop = readFileSync(index);
+	expect(reasonOf(await stop(fake))).toContain("owned.txt");
+	expect(readFileSync(index)).toEqual(beforeStop);
+	expect(existsSync(join(root, ".git", "index.lock"))).toBe(false);
+});
+
+test("save guard preserves a live writer's index lock while detecting unsaved work", async () => {
+	const root = repo({ remote: true });
+	const index = join(root, ".git", "index");
+	const lock = join(root, ".git", "index.lock");
+	const fd = openSync(lock, "wx");
+	const before = readFileSync(index);
+	try {
+		const fake = fakePi(root);
+		await kitSaveGuard(fake.pi);
+		await fake.emit("session_start", { type: "session_start" });
+		await claimFixture(fake);
+		await ownWrite(fake, join(root, "owned.txt"), "unsaved while peer holds index\n");
+		expect(reasonOf(await stop(fake))).toContain("owned.txt");
+		expect(readFileSync(index)).toEqual(before);
+		expect(existsSync(lock)).toBe(true);
+		expect(readFileSync(lock).byteLength).toBe(0);
+	} finally {
+		closeSync(fd);
+	}
+});
 
 
 test("stock absent and explicit-off policies allow stops without any local fleet tools", async () => {
