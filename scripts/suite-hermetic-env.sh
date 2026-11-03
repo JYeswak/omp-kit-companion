@@ -23,6 +23,13 @@ def refuse(message: str) -> None:
 for protected in ("GIT_DIR", "GIT_WORK_TREE", "BEADS_DB"):
     os.environ.pop(protected, None)
 
+# Gate controls belong to the parent judge, never its test children. In particular,
+# FRESH_GATE_REPO can make a fixture borrow the outer checkout's predecessor policy.
+# Scrub before either environment mode and before explicit allow-env copies.
+for name in tuple(os.environ):
+    if name.startswith("FRESH_GATE_"):
+        os.environ.pop(name, None)
+
 # Test activity must never enter fleet telemetry, including the inherited-env branch.
 os.environ["OMP_KIT_CC"] = "0"
 
