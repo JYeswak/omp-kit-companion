@@ -17,7 +17,7 @@ Current release: v0.2.86
 <!-- kit-release:end -->
 
 A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-54 top-level commands for an existing OMP install.
+56 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -114,8 +114,6 @@ Each `apply` subcommand plans by default. `--apply` requests the change and
 
 ```sh
 omp-kit apply rules --plan --json
-omp-kit apply policy --plan --json        # per-profile ttsr.* through native `omp config get/set`
-omp-kit apply extensions --plan --json
 omp-kit audit --json                      # receipt chronology
 omp-kit why RUN_ID --json                 # one run explained
 omp-kit undo RUN_ID --yes                 # restore one verified receipt
@@ -128,11 +126,8 @@ postimage changed after the apply.
 
 ### Doctor: 40 scopes
 
-`omp-kit doctor --scope NAME` inspects one component read-only and reports
-`OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or `NOT_RUN` per finding, with
-a next step. The full scope table is in the [Command reference](#command-reference).
-
-`omp-kit doctor --scope settings` reads profile TTSR keys via `omp config get`.
+Read-only findings report `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or
+`NOT_RUN`, with a next step. See the [scope table](#doctor-scopes).
 
 ### Secrets scan
 
@@ -172,12 +167,7 @@ The repo is an OMP plugin. `package.json` declares 12 extensions:
 
 Installing the plugin loads all twelve. `omp-kit apply extensions` installs only
 the two listed in `policy/extensions.json` (`kit-guard-optin.ts` and
-`fleet-guard.ts`) into the profiles you select:
-
-```sh
-omp-kit apply extensions --plan --profiles all --json
-omp-kit apply extensions --apply --yes --profiles all
-```
+`fleet-guard.ts`) into the profiles you select.
 
 ### Skills
 
@@ -273,14 +263,11 @@ OMP source cache details (fetch, verify, disable) live in [docs/omp-source-cache
 
 ## Design philosophy
 
-**Plan before apply.** Guarded apply and repair commands default to a plan.
-Their writes need `--apply`, and non-interactive writes also need `--yes`.
+**Plan before apply.** Guarded writes require `--apply` and non-interactive `--yes`.
 Append-only `lessons add` and `checkin` record their explicit invocation;
 publishing those records additionally requires `--commit --bead ID`.
 
-**Receipts and undo.** Each mutation is recorded as a receipt in the private
-state root. `undo` restores from that receipt and refuses when a file changed
-since; a failed restore is reported as `PARTIAL_UNDO`, never hidden.
+**Receipts and undo.** Each mutation leaves a receipt; `undo` restores from it, refuses when a file changed since, and reports a failed restore as `PARTIAL_UNDO`.
 Lesson records are append-only, not undo receipts. If publication fails after
 a normal save, the rows and local commit remain available for convergence.
 
@@ -409,10 +396,9 @@ The manual cut and rehearsal are documented in
 
 ### What a check proves
 
-`omp-kit test` reports proof classes: G1 registration, G2 whole-payload match,
-G3 prefix behavior, G4 isolated live blocking. `status` separately reports
-installed files, project shadowing, and the effective profile, and says which
-of those it could not observe.
+`status` reports installed files, project shadowing and the effective profile,
+including which evidence it could not observe. Matcher proof classes are listed
+in [Why use omp-kit](#why-use-omp-kit).
 
 ## Quick start
 
@@ -466,6 +452,8 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit status` | `status` | Kit and OMP presence; runtime `effective_rules` is `NOT_RUN` (use `doctor --scope rules --json`); changes nothing | `omp-kit status --json` |
 | `omp-kit lessons` | `lessons add --class CLASS --what TEXT --evidence TEXT [--kind KIND] [--project PATH] [--commit --bead ID]` | Append an evidence-backed lesson; optionally save its clean path on shared main and fast-forward publish | `omp-kit lessons add --class MISSING_EDGE --what w --evidence e` |
 | `omp-kit fleet-lessons` | `fleet-lessons [--project PATH]... [--json]` | Read current lesson advice, preserved history and unresolved references without intake, classification or service effects | `omp-kit fleet-lessons --project . --json` |
+| `omp-kit mine` | `mine --since DATE --until DATE [--project P\|--all] [--json]` | Read-only UTC-window mining of transcripts, tracker, git, hooks and command-center sources; ranked cited candidates and source counts; unbound CLI/scratch events quarantined; unmeasured minutes null | `omp-kit mine --since 2026-10-01 --until 2026-11-01 --all --json` |
+| `omp-kit milestone` | `milestone pin\|unpin SESSION BEAD... --reason TEXT [--by NAME]`; `milestone show SESSION` | Validate session-tracker bead ids; atomically pin/unpin with history. `show`: epic, dates, pins and recent history | `omp-kit milestone show cfsios --json` |
 | `omp-kit checkin` | `checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]` | Record verified own activity or explicit items; refuses unavailable automatic coverage | `omp-kit checkin --done br-123 --next 'Verify the consumer' --bead br-123 --commit --json` |
 | `omp-kit test` | `test [--full] [--record] [--rules DIR --cases FILE] [--integrations] [--mcp] [--metamorphic] [--mutants] [--repeat N]` | Matcher conformance, external packs, live fixtures, per-profile integration and MCP proofs, mutation and flake checks | `omp-kit test --json` |
 | `omp-kit doctor` | `doctor [--scope NAME] [--project PATH] [--profile NAME] [--staged] [--deep --yes]` | Read-only diagnosis of one scope (table below) | `omp-kit doctor --scope lsp --json` |

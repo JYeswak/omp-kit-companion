@@ -104,6 +104,8 @@ import { acquireDaemonLock, acquireRunLock, claimIncarnation, DAEMON_HELD_EXIT, 
 import { type RunLock } from "./service-run.ts";
 import { appendLesson, appendLessonAndCommit, collectCheckinActivity, inspectLessons, isLessonClass, latestCheckinAt, lessonIdentity, lessonRecordId, readLessonsLog, writeCheckin, writeCheckinAndCommit, type AddLessonInput, type CheckinInput } from "./lessons.ts";
 import { buildFleetLessonsReport, FleetRepoSnapshot, readFleetRepoSnapshot, runFleetLessonsOnce } from "./fleet-lessons.ts";
+import { renderMine, runMine } from "./mine.ts";
+import { runMilestone } from "./milestone.ts";
 import { ccSpool, type CcSpool } from "./cc-spool.ts";
 import { custodyCheckCommand } from "./custody.ts";
 import { intakeCommand } from "./intake-verb.ts";
@@ -4610,10 +4612,21 @@ registerCommandHandler("fleet-lessons", request => {
 	};
 });
 
+registerCommandHandler("mine", async request => {
+	const root = kitIdentity().release.root;
+	const project = request.flags.get("--project");
+	const report = await runMine({
+		since: String(request.flags.get("--since") ?? ""), until: String(request.flags.get("--until") ?? ""),
+		all: request.flags.has("--all"), ...(typeof project === "string" ? { project } : {}), ...(root ? { root } : {}),
+	});
+	return { code: 0, data: { ...report, ...(!request.json && !request.robot ? { text: renderMine(report) } : {}) }, verification: "PERFORMED" };
+});
+
 async function dispatch(request: ParsedCommand, version: string): Promise<CliResult> {
 	const { command, parent, flags } = request;
 	const path = `${parent ? `${parent.name} ` : ""}${command.name}`;
 	if (flags.has("--help")) return { code: 0, data: { text: command.name === "help" ? help() : help(command, parent) }, verification: "PERFORMED" };
+	if (parent?.name === "milestone") return runMilestone(request);
 	if (command.name === "--version") return { code: 0, data: { text: `omp-kit ${version}`, version }, verification: "PERFORMED" };
 	if (command.name === "--info") {
 		const kit = kitIdentity();

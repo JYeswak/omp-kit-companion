@@ -3,6 +3,7 @@ import { PROFILE_RECIPE_KINDS } from "./profile-recipes.ts";
 import { TERN_COMMAND } from "./tern/registry.ts";
 import { NEXT_DATA_SCHEMA } from "./next.ts";
 import { GRADER_NEXT_DATA_SCHEMA } from "./grader-next.ts";
+import { MILESTONE_COMMAND } from "./milestone.ts";
 
 export type Flag = {
 	readonly aliases?: readonly string[];
@@ -546,6 +547,13 @@ export const COMMANDS: readonly Command[] = [
 			overall: { enum: ["OK", "UNVERIFIED"] }, report: { type: "object" },
 		},
 	} },
+	{ name: "mine", description: "Mine primary omp transcripts, tracker, git and hook history and the command-center producers for a UTC window into ranked, cited enforcement candidates (read-only)", usage: "mine --since DATE --until DATE [--project P|--all] [--json]", flags: [
+		{ name: "--since", value: "DATE", description: "Inclusive UTC day, YYYY-MM-DD" },
+		{ name: "--until", value: "DATE", description: "Exclusive UTC day, YYYY-MM-DD" },
+		{ name: "--project", value: "P", description: "Fleet name, repository basename or absolute checkout path (default: current directory)" },
+		{ name: "--all", description: "Every configured and observed project" },
+	], example: "omp-kit mine --since 2026-10-01 --until 2026-11-01 --all --json", runnable: false },
+	MILESTONE_COMMAND,
 	{ name: "checkin", description: "Record verified own activity or explicit completed, blocked and next items", usage: "checkin [--done TEXT]... [--blocked TEXT]... [--next TEXT]... [--project PATH] [--commit --bead ID]", flags: [
 		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
 		{ name: "--done", value: "TEXT", repeatable: true, description: "Explicit completed item; omit to derive activity, refusing unavailable sources" },
