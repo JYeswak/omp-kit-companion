@@ -1089,6 +1089,154 @@ else
 fi
 }
 
+# POOLTRAP1: a signalled worker must not inherit the supervisor's cleanup authority.
+# Ordinary async-function return does not run EXIT traps in macOS /bin/sh, so wait
+# for two live suites and signal one worker explicitly. Inspect the other suite's
+# actual scratch before releasing either suite; aggregate judge failure is not proof.
+pool_trap_cases() {
+	mkrepo_begin pooltrap
+	# shellcheck disable=SC2016 # literal fixture, evaluated only inside the archive
+	pooltrap_body='python3 - "$0" <<'"'"'PY'"'"'
+import json, os, sys, time
+from pathlib import Path
+role = Path(sys.argv[1]).stem
+root = Path.cwd()
+ready = root / (role + ".pending")
+ready.write_text(json.dumps({
+    "pid": os.getpid(), "parent": os.getppid(), "scratch": os.environ["TMPDIR"]}))
+ready.replace(root / (role + ".ready"))
+deadline = time.monotonic() + 60
+while not (root / (role + ".release")).exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit("POOLTRAP1 fixture release deadline")
+    time.sleep(0.02)
+PY'
+	addfile tests/cli/a.test.sh "$pooltrap_body"
+	addfile tests/cli/b.test.sh "$pooltrap_body"
+	mkrepo_commit
+	# Freeze the complete judging closure, not only the script: identity and helpers
+	# must describe the same source snapshot even while another seat edits the runner.
+	if python3 - "$KITROOT_DIR" "$VERDICT" "$repo" "$TMP/pooltrap-judge" "${POOLTRAP_PLANT:-0}" <<'PY'
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import sys
+import threading
+import time
+
+root, verdict, archive, judge = map(Path, sys.argv[1:5])
+sys.path.insert(0, str(root / "scripts"))
+from kitlib_run import run
+
+spec = importlib.util.spec_from_file_location("pooltrap_metrics", root / "scripts/suite-metrics.py")
+metrics = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(metrics)
+for name in metrics.JUDGING_FILES:
+    destination = judge / name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / name, destination)
+runner = judge / "scripts/full-suite-verdict.sh"
+shutil.copyfile(verdict, runner)
+if sys.argv[5] == "1":
+    source = runner.read_text()
+    source, replacements = re.subn(
+        r"(?m)^([ \t]*)pool_worker\(\) \{\n",
+        lambda match: match[0] + match[1] +
+        '  kitlib_tmp pooltrap_worker_tmp pooltrap-worker || exit 1\n', source)
+    if replacements != 1:
+        raise SystemExit("POOLTRAP1 mutation anchor is not unique")
+    runner.write_text(source)
+    print("POOLTRAP1 planted kitlib_tmp inside owned runner copy", flush=True)
+
+environment = dict(os.environ, FULL_SUITE_JOBS="2", OMP_KIT_OMP_SRC_FETCH="0",
+                   KITROOT=str(root), FULL_SUITE_TIMEOUT_SECS="75")
+results = []
+errors = []
+
+def execute():
+    try:
+        results.append(run(["sh", str(runner), "--repo", str(archive), "--commit", "HEAD",
+                            "--archive-dir", str(archive), "--cache-dir", str(archive) + ".cache"],
+                           cwd=str(root), env=environment, deadline_s=90))
+    except BaseException as error:
+        errors.append(error)
+
+def await_condition(description, predicate, seconds=20):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        if not execution.is_alive():
+            raise AssertionError("runner stopped before " + description)
+        time.sleep(0.02)
+    raise AssertionError("deadline waiting for " + description)
+
+def process_field(pid, field):
+    result = run(["ps", "-p", str(pid), "-o", field + "="], deadline_s=10)
+    return result.stdout.decode().strip() if result.rc == 0 else ""
+
+execution = threading.Thread(target=execute)
+execution.start()
+observation_complete = False
+try:
+    await_condition("both live suites", lambda: all(
+        (archive / (name + ".ready")).is_file() for name in ("a.test", "b.test")))
+    first, second = [json.loads((archive / (name + ".ready")).read_text())
+                     for name in ("a.test", "b.test")]
+    # The shell fixture execs a Python child: its parent is the suite shell,
+    # whose parent is suite-metrics, whose parent is the actual pool worker.
+    def worker_for(observation):
+        suite_metrics = int(process_field(observation["parent"], "ppid"))
+        worker = int(process_field(suite_metrics, "ppid"))
+        command = process_field(suite_metrics, "command")
+        assert "suite-metrics.py" in command and " run " in command, command
+        return worker
+    sibling_worker, victim_worker = map(worker_for, (first, second))
+    assert sibling_worker != victim_worker, "fixtures did not occupy distinct workers"
+    sibling_scratch = Path(first["scratch"])
+    assert sibling_scratch.is_dir(), "sibling scratch absent before signal"
+    os.kill(victim_worker, signal.SIGTERM)
+    # POSIX shells defer traps during a foreground command. Let the victim's
+    # native suite finish so its worker reaches that checkpoint; keep the sibling live.
+    (archive / "b.test.release").touch()
+    # A zombie counts as exited: the supervisor may still be waiting for the
+    # unreleased first worker. Do not use kill(pid, 0), which counts zombies alive.
+    def signal_observed():
+        if not sibling_scratch.is_dir():
+            return "sibling-removed"
+        state = process_field(victim_worker, "stat")
+        return "worker-exited" if not state or state.startswith("Z") else ""
+    observed = await_condition("worker TERM delivery", signal_observed, seconds=10)
+    survived = sibling_scratch.is_dir()
+    print("POOLTRAP1 observed=" + observed + " sibling_before=present sibling_after=" +
+          ("present" if survived else "REMOVED") + " sibling_worker=" + str(sibling_worker) +
+          " victim_worker=" + str(victim_worker) + " scratch=" + str(sibling_scratch), flush=True)
+    observation_complete = True
+    assert survived, "worker trap removed live sibling scratch before fixture release"
+finally:
+    for name in ("a.test", "b.test"):
+        (archive / (name + ".release")).touch()
+    execution.join(timeout=95)
+    assert not execution.is_alive(), "bounded judge invocation did not finish"
+    if errors:
+        raise errors[0]
+    if results:
+        # Deliberately killing a worker makes the verdict incomplete. Its status
+        # is diagnostic only; the assertion above observes cleanup ownership.
+        print("POOLTRAP1 judge_rc=" + str(results[0].rc), flush=True)
+        if not observation_complete:
+            print(results[0].stdout.decode(errors="replace"), end="")
+            print(results[0].stderr.decode(errors="replace"), end="", file=sys.stderr)
+PY
+	then ok "POOLTRAP1 worker TERM leaves live sibling scratch owned by supervisor"
+	else not_ok "POOLTRAP1 worker-isolation control failed (readiness or direct-effect evidence above)"; fi
+}
+
 # FULLSUITEPAR1 (ompkit-9t6f2): shell suites run FULL_SUITE_JOBS at a time. Five probe suites
 # record their TMPDIR, how many suites were running at once, and whether p1/p2 overlap;
 # p3 fails with rc 3, and finishing order is not the sorted order.
@@ -1444,13 +1592,26 @@ then ok "MINRUN1 verified work includes focused coverage once, excludes idle gap
 else not_ok "MINRUN1 covered-work interval or floor boundary is wrong"; fi
 }
 
+# Focused real/planted entrypoints exercise the same assertion as the full suite.
+# The negative plants only the owned copy; never mutate the live judge.
+case "${1-}" in
+	--pooltrap-only|--pooltrap-planted)
+		POOLTRAP_PLANT=0
+		[ "$1" != --pooltrap-planted ] || POOLTRAP_PLANT=1
+		pool_trap_cases
+		echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
+		[ "$fail" -eq 0 ]
+		exit $?
+		;;
+esac
+
 # Establish the historical wall reference before starting competing fixture groups.
 # Otherwise initial fanout inflates it and a later identical, quieter run looks too short.
 minimum_run_reference
 
 # Fixed groups bound fixture concurrency. Buffer output and merge every group's
 # counters in declaration order; a crashed group cannot disappear as PASS.
-groups="evidence_cases runner_fence_cases helper_cases worker_evidence_cases tracker_cases pool_cases minimum_run_cases minimum_floor_cases"
+groups="evidence_cases runner_fence_cases helper_cases worker_evidence_cases tracker_cases pool_cases pool_trap_cases minimum_run_cases minimum_floor_cases"
 group_pids=
 # shellcheck disable=SC2030,SC2031 # each group counts in its own subshell; the parent sums them from the result files
 for group in $groups; do
