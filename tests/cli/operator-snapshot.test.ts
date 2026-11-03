@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { ccStateDir, KNOWN_JOBS, plistPath, serviceLabel, type OwnedStatePath } from "../../src/service.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
+import { run } from "../../src/kitlib/run.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const roots: string[] = [];
@@ -266,7 +268,7 @@ test("planted: a foreign browser cache churning under the watched state root is 
 	expect(result, JSON.stringify(result)).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [] });
 }, 60_000);
 
-test("control: beside the browser cache, an operator write and a profile non-cache write still count", () => {
+test("BROWSERSNAP1 control: beside a live browser profile, operator state still counts", () => {
 	const { home, paths } = operatorHome();
 	const profile = join(home, ".local", "state", "omp-kit", "chrome-jfp", "Default");
 	const cache = join(profile, "Cache", "Cache_Data");
@@ -274,10 +276,31 @@ test("control: beside the browser cache, an operator write and a profile non-cac
 	const before = snapshotWatched(paths);
 	writeFileSync(join(cache, "2f139af954fbeb4a_0"), "entry");
 	writeFileSync(join(profile, "Preferences"), "{\"theme\":1}\n");
+	writeFileSync(join(home, ".agents", "rules", "kit-test-skip.md"), "changed rule\n");
 	writeFileSync(join(home, ".local", "state", "omp-kit", "kit-activation-planted.json"), "{}\n");
 	const result = compareWatched(before, snapshotWatched(paths), home);
 	expect(result.changed_paths).toEqual([
-		"~/.local/state/omp-kit/chrome-jfp/Default/Preferences",
+		"~/.agents/rules/kit-test-skip.md",
 		"~/.local/state/omp-kit/kit-activation-planted.json",
 	]);
-}, 60_000);
+}, fixtureDeadlineS() * 1000);
+
+for (const namespace of ["chrome-jfp", "browser-profiles"]) {
+	test(`BROWSERSNAP1 planted: a process writes ${namespace} profile data inside the snapshot window`, async () => {
+		const { home, paths } = operatorHome();
+		const base = join(home, ".local", "state", "omp-kit", namespace);
+		const profile = join(base, "Default");
+		mkdirSync(profile, { recursive: true });
+		const cookies = join(profile, "Cookies");
+		writeFileSync(cookies, "seed");
+		const before = snapshotWatched(paths);
+		// One write, completed before the after-snapshot: no post-run writer probe can rescue this case.
+		const child = await run(["/bin/sh", "-c", 'printf changed > "$1"; mkdir -p "$2"; printf leveldb > "$2/000001.log"', "writer",
+			cookies, join(profile, "Local Storage", "leveldb")], { deadline_s: fixtureDeadlineS() });
+		expect(child.rc).toBe(0);
+		const result = compareWatched(before, snapshotWatched(paths), home);
+		expect(result).toMatchObject({ unchanged: true, complete: true, changed_paths: [], incomplete_paths: [],
+			live_state_paths: [`~/.local/state/omp-kit/${namespace}`] });
+		expect(before.entries.has(cookies)).toBe(false);
+	}, fixtureDeadlineS() * 1000);
+}

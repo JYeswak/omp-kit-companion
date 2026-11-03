@@ -418,7 +418,7 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
 /** A postcheck's named failed and heavy-deferred stages, changed operator paths, cause and first failures; null when nothing was reported. */
 export type KitPostcheckDetail =
  | { status: FullTestReport["status"]; omp_version: string | null; live: FullTestReport["proofs"]["G4_live"]; failed_stages: string[];
-  deferred_stages: string[]; current_stage: FullTestReport["current_stage"]; cause: FullTestCause | null; changed_operator_paths: string[]; failures: string[] }
+  deferred_stages: string[]; current_stage: FullTestReport["current_stage"]; cause: FullTestCause | null; changed_operator_paths: string[]; live_state_paths: string[]; failures: string[] }
  | { current_stage: null; cause: FullTestCause; failures: string[] };
 /**
  * The detail of `postcheck`, redacted under `roots`, capped at 20 failures.
@@ -439,6 +439,7 @@ export function kitPostcheckDetail(postcheck: KitPostcheck, roots: readonly stri
   current_stage: report.current_stage,
   cause,
   changed_operator_paths: [...report.snapshots.home.changed_paths, ...report.snapshots.project.changed_paths],
+  live_state_paths: [...(report.snapshots.home.live_state_paths ?? []), ...(report.snapshots.project.live_state_paths ?? [])],
   failures: report.failures.slice(0, 20),
  } : cause ? { current_stage: null, cause, failures: [] } : null;
 }
@@ -451,17 +452,26 @@ export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult)
  const postcheckDetail = kitPostcheckDetail(outcome.postcheck, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]);
  const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
  const deferred = outcome.postcheck.status === "DEFERRED";
+ const report = outcome.postcheck.report;
+ const onlyLiveState = report !== null && report !== undefined
+  && [...(report.snapshots.home.live_state_paths ?? []), ...(report.snapshots.project.live_state_paths ?? [])].length > 0
+  && report.snapshots.home.changed_paths.length === 0 && report.snapshots.project.changed_paths.length === 0
+  && report.snapshots.home.complete && report.snapshots.project.complete
+  && report.snapshots.release.unchanged === true && report.snapshots.release.complete
+  && report.failures.length === 0 && report.cause === null
+  && outcome.postcheck.matcher === "PASS" && outcome.postcheck.live === "PASS";
+ const reconcile = onlyLiveState && outcome.receiptId ? `omp-kit update --reconcile ${outcome.receiptId} --yes` : null;
  return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" && !deferred ? "FAIL" : "UNVERIFIED",
   scope: "kit", action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,
   provenance: outcome.provenance, matcher: outcome.postcheck.matcher, live: outcome.postcheck.live,
   postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null, postcheck_detail: postcheckDetail },
-  ...(recover ? { commands: [recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
+  ...(recover ? { commands: [reconcile ?? recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
    message: deferred
     ? `Kit update to ${plan.release.version} is active but unverified: heavy admission deferred its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`
     : `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
    remediation: deferred
     ? `Run omp-kit test --full --record when load allows heavy work. To return to ${plan.current.version} and clear the pending receipt: ${recover}`
-    : `Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
+    : `${reconcile ? `Only excluded live browser state was observed; reconcile the pending update: ${reconcile}. ` : ""}Inspect postcheck_detail (--json). To return to ${plan.current.version} and clear the pending receipt: ${recover}` }] } : {}),
   verification: "UNVERIFIED" };
 }
 

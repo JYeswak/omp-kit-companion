@@ -78,14 +78,31 @@ function browserOwners(base: string): string[] {
 	return owners;
 }
 
+/** Canonical kit-managed browser namespaces, shared by retention and isolated-test snapshots. */
+export function managedBrowserProfileRoots(home: string, stateRoot?: string): string[] {
+	const omp = join(home, ".omp"), kit = stateRoot ?? join(home, ".local", "state", "omp-kit");
+	const bases = [join(kit, "chrome-jfp"), join(kit, "browser-profiles"), join(omp, "browser-profiles"),
+		join(omp, "agent", "cache", "browser-profiles")];
+	for (const profile of childDirectories(join(omp, "profiles"))) {
+		const owner = join(omp, "profiles", profile);
+		if (info(owner)?.isSymbolicLink() === true) continue;
+		bases.push(join(owner, "agent", "cache", "browser-profiles"));
+		const daemons = join(owner, "run", "daemons");
+		for (const daemon of childDirectories(daemons)) {
+			if (info(join(daemons, daemon))?.isSymbolicLink() !== true)
+				bases.push(join(daemons, daemon, "omp.browser.headless.profile"));
+		}
+	}
+	return bases;
+}
+
 /** Only explicitly regenerable namespaces are registered. Session journals and operator configuration are not caches. */
 export function cacheRetentionTargets(home: string, stateRoot?: string): CacheRetentionTarget[] {
 	if (!isAbsolute(home) || resolve(home) !== home || home.includes("\0")) throw new Error("CACHE_RETAIN_HOME_INVALID");
 	const omp = join(home, ".omp"), kit = stateRoot ?? join(home, ".local", "state", "omp-kit");
 	if (!isAbsolute(kit) || resolve(kit) !== kit || kit.includes("\0")) throw new Error("CACHE_RETAIN_STATE_ROOT_INVALID");
 	const targets: CacheRetentionTarget[] = [];
-	const browserBases = [join(kit, "chrome-jfp"), join(kit, "browser-profiles"), join(omp, "browser-profiles"),
-		join(omp, "agent", "cache", "browser-profiles")];
+	const browserBases = managedBrowserProfileRoots(home, kit);
 	const add = (id: string, root: string, kind: CacheRetentionKind, guardRoot: string | null = null,
 		selection: CacheRetentionTarget["selection"] = "all") => {
 		const anchorRoot = root === kit || root.startsWith(`${kit}/`) ? kit : home;
@@ -99,15 +116,6 @@ export function cacheRetentionTargets(home: string, stateRoot?: string): CacheRe
 		const owner = join(omp, "profiles", profile);
 		add(`omp-profile-cache:${profile}`, join(owner, "agent", "cache"), "cache", owner);
 		add(`omp-profile-logs:${profile}`, join(owner, "logs"), "log");
-		if (info(owner)?.isSymbolicLink() !== true) {
-			browserBases.push(join(owner, "agent", "cache", "browser-profiles"));
-			const daemons = join(owner, "run", "daemons");
-			for (const daemon of childDirectories(daemons)) {
-				if (info(join(daemons, daemon))?.isSymbolicLink() !== true) {
-					browserBases.push(join(daemons, daemon, "omp.browser.headless.profile"));
-				}
-			}
-		}
 	}
 	add("kit-receipts", join(kit, "receipts"), "receipt");
 	add("kit-operational-receipts", kit, "receipt", null, "operational-receipts");

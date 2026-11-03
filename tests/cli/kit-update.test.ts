@@ -236,6 +236,25 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
  });
  expect(causeOnly.errors?.[0]?.remediation).toContain(undoCommand);
 
+ // Excluded browser namespaces are separately visible; a pending receipt needs reconcile, not only undo.
+ const liveStateReport = { ...report, failures: [], cause: null, snapshots: {
+  release: { unchanged: true, complete: true },
+  home: { ...report.snapshots.home, changed_paths: [], incomplete_paths: [], complete: true,
+   live_state_paths: ["~/.local/state/omp-kit/chrome-jfp"] },
+  project: { ...report.snapshots.project, changed_paths: [], incomplete_paths: [], complete: true },
+ } };
+ const liveStateOutcome = { ...result, postcheck: { ...result.postcheck, matcher: "PASS" as const, live: "PASS" as const, report: liveStateReport } };
+ const liveState = kitUpdateEnvelope(planned, liveStateOutcome);
+ const reconcileCommand = `omp-kit update --reconcile ${result.receiptId} --yes`;
+ expect(liveState.commands).toEqual([reconcileCommand]);
+ expect(liveState.errors?.[0]?.remediation).toContain(reconcileCommand);
+ expect(liveState.data.postcheck_detail).toMatchObject({ changed_operator_paths: [], live_state_paths: ["~/.local/state/omp-kit/chrome-jfp"] });
+ const operatorChanged = kitUpdateEnvelope(planned, { ...liveStateOutcome, postcheck: { ...liveStateOutcome.postcheck,
+  report: { ...liveStateReport, failures: ["Operator file changed during isolated test: ~/.agents/rules/planted.md"],
+   snapshots: { ...liveStateReport.snapshots, home: { ...liveStateReport.snapshots.home, changed_paths: ["~/.agents/rules/planted.md"] } } },
+ } });
+ expect(operatorChanged.commands).toEqual([undoCommand]);
+
  // The report's original cause must not be hidden behind a generic postcheck wrapper.
  const rootCause = updateFailureCause(new Error("native interruption before completion"));
  const wrapped = kitUpdateEnvelope(planned, { ...result, postcheck: { ...result.postcheck,

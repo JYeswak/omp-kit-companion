@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync, readlinkSync, unwatchFile, watchFile, type Stats } from "node:fs";
 import { basename, isAbsolute, join, relative } from "node:path";
 import { installedJobOwnedState, type OwnedStatePath } from "./service.ts";
+import { managedBrowserProfileRoots } from "./cache-retain.ts";
 
 /** Profile files the kit could write; agent.db, sessions and caches change under normal agent use and are not watched. */
 const PROFILE_FILES = ["config.yml", "config.yaml", "config.json", "settings.json"] as const;
@@ -32,20 +33,22 @@ export function isOwnedState(owned: readonly OwnedStatePath[], path: string): bo
 	});
 }
 
-export type WatchedPaths = string[] & { owned?: readonly OwnedStatePath[] };
-export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[] };
+export type WatchedPaths = string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[] };
+export type WatchedSnapshot = { entries: Map<string, string>; incomplete: string[]; liveState?: string[] };
 export type WatchedComparison = {
 	unchanged: boolean; complete: boolean; watched: number;
 	changed_paths: string[]; incomplete_paths: string[];
+	/** Declared live browser namespaces, not hashed or judged as operator files. */
+	live_state_paths?: string[];
 	skipped_paths: { path: string; reason: "skipped-concurrent-writer" }[];
 };
 
 /**
  * Watch operator-side paths a kit run could plausibly write: OMP profile config files, rule and extension
  * directories, installed plugins, and the kit state root. Live scenarios run in a private HOME, so these
- * paths are compared before and after the run. Installed service-owned state and known volatile browser
- * cache subtrees are ignored as declared exceptions. A changed regular file is skipped only when its
- * contents change again after the test runner exits; a test's own write remains a postcheck failure.
+ * paths are compared before and after the run. Installed service-owned state, canonical kit-managed browser
+ * profiles and known volatile browser cache subtrees are ignored as declared exceptions. A changed regular
+ * file elsewhere is skipped only when its contents change again after the test runner exits.
  */
 export function operatorWatchedPaths(home: string, stateRoot: string | null, owned: readonly OwnedStatePath[] = installedJobOwnedState(home)): WatchedPaths {
 	const profileDirs = [join(home, ".omp", "agent")];
@@ -65,19 +68,23 @@ export function operatorWatchedPaths(home: string, stateRoot: string | null, own
 		join(dir, "installed_plugins.json"), join(dir, "omp-plugins.lock.json"));
 	if (stateRoot) paths.push(stateRoot);
 	paths.owned = owned;
+	paths.liveState = managedBrowserProfileRoots(home, stateRoot ?? undefined);
 	return paths;
 }
 
 /** Content and mode only: an mtime-only touch is not a change. An absent path is a recorded state, not an error. */
-export function snapshotWatched(paths: readonly string[] & { owned?: readonly OwnedStatePath[] }): WatchedSnapshot {
+export function snapshotWatched(paths: readonly string[] & { owned?: readonly OwnedStatePath[]; liveState?: readonly string[] }): WatchedSnapshot {
 	const entries = new Map<string, string>();
 	const incomplete: string[] = [];
+	const liveState = new Set<string>();
 	for (const root of paths) {
 		if (!isAbsolute(root)) throw new Error("watched paths must be absolute");
 		let count = 0, bytes = 0, overflow = false;
 		const visit = (path: string): void => {
 			if (overflow) return;
 			if (paths.owned && isOwnedState(paths.owned, path)) return;
+			// Do not traverse live profiles: SQLite/LevelDB files can disappear or change mid-read.
+			if (paths.liveState?.includes(path)) { liveState.add(path); return; }
 			let stat;
 			try { stat = lstatSync(path); }
 			catch (error) {
@@ -109,7 +116,7 @@ export function snapshotWatched(paths: readonly string[] & { owned?: readonly Ow
 		};
 		visit(root);
 	}
-	return { entries, incomplete };
+	return { entries, incomplete, ...(liveState.size ? { liveState: [...liveState].sort() } : {}) };
 }
 function changedWatchedPaths(before: WatchedSnapshot, after: WatchedSnapshot): string[] {
 	const changed = new Set<string>();
@@ -186,6 +193,7 @@ export function compareWatched(
 		watched: before.entries.size,
 		changed_paths: changedPaths.slice(0, 50),
 		incomplete_paths: incomplete.slice(0, 50),
+		live_state_paths: [...new Set([...(before.liveState ?? []), ...(after.liveState ?? [])])].map(display).sort(),
 		skipped_paths: skippedPaths.slice(0, 50),
 	};
 }
