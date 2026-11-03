@@ -150,7 +150,10 @@ test.concurrent("HEAVYRUNTIME explicit flag overrides the label table", async ()
 
 test.concurrent("HEAVYRUNTIME shipped label table and global-default mutant use the real CLI", async () => {
 	const root = fixture();
-	configure(root, { max_wait_s: 5 });
+	// This is a runtime-budget probe, not an sbh-adapter timing test. Use the
+	// already-forged healthy statfs reading so an observer refusal cannot hide
+	// the label-table/control/mutant behavior (release run returned 69, not 124).
+	configure(root, { max_wait_s: 5, disk_observer: "statfs" });
 	// The child uses a real process clock; parent fake timers cannot drive it.
 	// Scale only this shipped row to 1s, then restore the old global fallback in memory.
 	const preload = join(root, "runtime-probe.ts");
@@ -177,7 +180,7 @@ test.concurrent("HEAVYRUNTIME shipped label table and global-default mutant use 
 		'console.log("CHILD_START"); setTimeout(() => { console.log("CHILD_DONE"); process.exit(7) }, 2200)'];
 	probe(false);
 	const declared = await invoke(root, args("cli-tests"), {}, { preload });
-	expect(declared.code).toBe(124);
+	expect(declared.code, declared.stderr).toBe(124);
 	expect(declared.stdout).toContain("CHILD_START");
 	expect(declared.stdout).not.toContain("CHILD_DONE");
 	expect(declared.stderr).toContain("1s (label cli-tests)");
