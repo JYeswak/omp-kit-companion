@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Finding } from "./diagnostics.ts";
 import { fleetWatchRepos } from "./scratch.ts";
+import { run } from "./kitlib/run.ts";
 
 /** [installed rel (under the hooks dir), source rel (under the kit root)]. */
 export const HOOK_MEMBER_PAIRS: ReadonlyArray<readonly [string, string]> = [
@@ -212,6 +213,40 @@ export function inspectHooks(io: HookFreshnessIo): Finding[] {
 			stale_members: staleRepos.map((row) => ({ repo: row.repo, hooks_dir: row.hooks_dir, tracked: row.tracked, members: row.stale })),
 		},
 	}];
+}
+
+/** Use the installers' complete manifests, not the fleet census's mirrored subset. */
+export async function inspectHookInstallers(repo: string, kitRoot: string): Promise<Finding[]> {
+	const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+	const findings: Finding[] = [];
+	for (const installer of ["install-pre-push-gate.sh", "install-commit-msg-bead.sh"]) {
+		const script = join(kitRoot, "scripts", installer);
+		// The fresh-gate installer installs its own checkout; the bead installer
+		// explicitly accepts a target repo. Never suggest passing it to the former.
+		const repair = installer === "install-pre-push-gate.sh"
+			? `cd ${quote(repo)} && sh scripts/install-pre-push-gate.sh`
+			: `sh ${quote(script)} ${quote(repo)}`;
+		try {
+			const result = await run(["sh", script, "--check", repo], { deadline_s: 30, max_output_bytes: 64 * 1024 });
+			const complete = !result.timed_out && !result.killed && !result.truncated;
+			const status = complete && result.rc === 0 ? "OK" : complete && result.rc === 3 ? "DRIFT" : "UNVERIFIED";
+			const output = `${Buffer.from(result.stdout).toString("utf8")}\n${Buffer.from(result.stderr).toString("utf8")}`.trim();
+			findings.push({
+				component: "hooks", status,
+				reason: `${repo}: ${installer} --check: ${status}\n${output}`,
+				recommended_action: status === "OK" ? "No action required." : `Reinstall: ${repair}; then rerun omp-kit doctor --scope hooks --project ${quote(repo)}.`,
+				evidence: { repo, installer: script, rc: result.rc, timed_out: result.timed_out, truncated: result.truncated, output, reinstall_command: repair },
+			});
+		} catch (error) {
+			findings.push({
+				component: "hooks", status: "UNVERIFIED",
+				reason: `${repo}: ${installer} --check could not run: ${error instanceof Error ? error.message : String(error)}`,
+				recommended_action: `Reinstall: ${repair}; then rerun the hooks doctor.`,
+				evidence: { repo, installer: script, reinstall_command: repair },
+			});
+		}
+	}
+	return findings;
 }
 
 function gitOut(repo: string, args: string[]): string | null {

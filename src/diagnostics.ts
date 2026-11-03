@@ -19,7 +19,7 @@ import type { Image } from "./mutations.ts";
 import { checkExtensionImports } from "./extensions.ts";
 import { pluginPackageHash } from "./apply-plugin.ts";
 import { inspectPluginRelease, livePluginReleaseIo } from "./plugin-release.ts";
-import { inspectHooks, liveHookFreshnessIo } from "./hook-refresh.ts";
+import { inspectHookInstallers, inspectHooks, liveHookFreshnessIo } from "./hook-refresh.ts";
 import { analyzeBeadBreadth, loadPlanningScoreConfig, type LoadedPlanningScoreConfig, type PlanningBead } from "./planning-score.ts";
 import { inspectTestScope } from "./test-scope.ts";
 import { inspectGatePlane } from "./gate-plane.ts";
@@ -2401,10 +2401,12 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 	if (wants("plugin_links")) rows.push(inspectPluginLinks(root, home));
 	// FLEETUPG1: only on an explicit scope, since it asks GitHub for the latest release.
 	if (input.scope === "plugin_release") rows.push(inspectPluginRelease(livePluginReleaseIo(home)));
-	// HOOKREFRESH1: per-repo hook members vs the active release; explicit scope
-	// only (like plugin_release): it reads every fleet repo and stays out of
-	// the unscoped inventory.
-	if (input.scope === "hooks") rows.push(...inspectHooks(liveHookFreshnessIo(home, root)));
+	// Keep the fleet census and add authoritative installer manifests for the
+	// selected project (the CLI defaults it to cwd), not a mirrored subset.
+	if (input.scope === "hooks") {
+		rows.push(...inspectHooks(liveHookFreshnessIo(home, root)));
+		rows.push(...await inspectHookInstallers(input.project ?? root, root));
+	}
 	if (wants("effective_rules") && input.inventoryOnly && !input.scope) {
 		rows.push(finding("effective_rules", "NOT_RUN", "Presence inventory did not probe runtime rule activation", "Run omp-kit doctor --scope rules --json for live per-profile rule evidence."));
 	} else if (wants("effective_rules") && input.ompPath && manifest && profiles) {

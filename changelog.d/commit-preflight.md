@@ -1,0 +1,1 @@
+- RELEASE4MIN: `sh scripts/commit-preflight.sh [--files P...]` runs every staged-file commit check at once (seconds) and reports all findings, so a commit is not refused one finding per multi-minute retry.

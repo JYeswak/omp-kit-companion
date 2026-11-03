@@ -1,0 +1,2 @@
+### Fixed
+- `omp-kit doctor --scope hooks` retains its fleet census and also runs both hook installers' read-only `--check` against `--project PATH` (the CLI defaults to the current repo), reporting missing/stale fresh-gate and bead-chain members with reinstall commands. Run `sh scripts/install-pre-push-gate.sh` from the source checkout being repaired and `sh <release>/scripts/install-commit-msg-bead.sh <repo>`, then rerun the doctor; it never mutates installed hooks itself.

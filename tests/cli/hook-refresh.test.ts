@@ -3,7 +3,7 @@
 // records each member's before/after digest; doctor --scope hooks lists the
 // members whose digest differs from the active release.
 import { expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -15,6 +15,9 @@ import {
 	refreshFleetHooks,
 	type HookFreshnessIo,
 } from "../../src/hook-refresh.ts";
+import { diagnose } from "../../src/diagnostics.ts";
+import { run } from "../../src/kitlib/run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 
@@ -197,3 +200,45 @@ test("only pullEnabled sessions refresh; doctor still sees every fleet repo", ()
 		rmSync(home, { recursive: true, force: true });
 	}
 });
+
+test("hooks doctor runs both installer checks: fresh, stale, missing and restored", async () => {
+	const root = resolve(import.meta.dir, "../..");
+	const repo = ownedTmp("hook-installer-doctor").path;
+	try {
+		const init = await run(["git", "init", "-q", repo], { deadline_s: 15 });
+		expect(init.rc).toBe(0);
+		const installed = await run(["sh", join(root, "scripts/install-commit-msg-bead.sh"), repo], { deadline_s: 60 });
+		expect({ rc: installed.rc, stderr: Buffer.from(installed.stderr).toString() }).toEqual({ rc: 0, stderr: expect.any(String) });
+		const push = join(repo, ".git/hooks/hooks.d/pre-push/40-omp-kit-fresh-gate");
+		// Same member-copy operation as install-pre-push-gate.sh; do not ask
+		// native am to register a disposable project in the real mail archive.
+		copyFileSync(join(root, "scripts/pre-push-gate.sh"), push);
+		const inspect = () => diagnose({ root, home: repo, project: repo, scope: "hooks" });
+		const fresh = await inspect();
+		expect(fresh.filter(row => row.evidence?.installer).map(row => row.status)).toEqual(["OK", "OK"]);
+		writeFileSync(push, "# stale installed fresh-gate member\n");
+		const stale = (await inspect()).find(row => row.evidence?.installer === join(root, "scripts/install-pre-push-gate.sh"))!;
+		expect(stale.status).toBe("DRIFT");
+		expect(stale.reason).toContain(`STALE installed member: ${push}`);
+		expect(stale.recommended_action).toContain("sh scripts/install-pre-push-gate.sh");
+		copyFileSync(join(root, "scripts/pre-push-gate.sh"), push);
+		// This member is omitted by the legacy HOOK_MEMBER_PAIRS mirror.
+		const commit = join(repo, ".git/hooks/hooks.d/commit-msg/55-omp-kit-commit-gate");
+		const original = readFileSync(commit);
+		writeFileSync(commit, "# stale installed commit-gate member\n");
+		const commitStale = (await inspect()).find(row => row.evidence?.installer === join(root, "scripts/install-commit-msg-bead.sh"))!;
+		expect(commitStale.status).toBe("DRIFT");
+		expect(commitStale.reason).toContain(`STALE installed member: ${commit}`);
+		expect(commitStale.recommended_action).toContain(`install-commit-msg-bead.sh' '${repo}'`);
+		writeFileSync(commit, original);
+		rmSync(push);
+		const missing = (await inspect()).find(row => row.evidence?.installer === join(root, "scripts/install-pre-push-gate.sh"))!;
+		expect(missing.status).toBe("DRIFT");
+		expect(missing.reason).toContain(`MISSING installed member: ${push}`);
+		expect(missing.recommended_action).toContain("sh scripts/install-pre-push-gate.sh");
+		copyFileSync(join(root, "scripts/pre-push-gate.sh"), push);
+		expect((await inspect()).filter(row => row.evidence?.installer).map(row => row.status)).toEqual(["OK", "OK"]);
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+	}
+}, 120_000);
