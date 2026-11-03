@@ -451,15 +451,20 @@ test("a waiting job reports position, running jobs and the contention reason", a
 // the 900 s default queue wait).
 test("RELFAILFAST1 OMP_KIT_HEAVY_MAX_WAIT_S defers a held job at the cap, below load.json's wait", async () => {
 	const root = fixture();
-	// load.json allows a 600 s wait; only the 2 s cap can end the queue inside this test's 60 s budget.
+	// load.json allows a 600 s wait; only the 2 s cap can end the queue inside the 45 s deadline. kitlib run() owns the
+	// child's process group, so an uncapped (mutant) child is stopped at the deadline instead of queueing on for 600 s.
 	configure(root, { slots: 2, max_wait_s: 600 });
 	const marker = join(root, "should-not-run");
-	const result = await invoke(root, ["heavy", "--label", "capped", "--", "sh", "-c", `printf ran > '${marker}'`],
-		{ OMP_KIT_HEAVY_FAKE_LOAD1: "9999", OMP_KIT_HEAVY_MAX_WAIT_S: "2" });
-	expect(result.code).toBe(75);
-	expect(result.stderr).toContain("deferred:");
-	expect(result.stderr).toContain("deferred: queue timeout");
-	expect(result.stderr).toContain("LOAD1");
+	const env: Record<string, string> = {};
+	for (const [name, value] of Object.entries(heavyEnv(root, { OMP_KIT_HEAVY_FAKE_LOAD1: "9999", OMP_KIT_HEAVY_MAX_WAIT_S: "2" })))
+		if (value !== undefined) env[name] = value;
+	const result = await run([process.execPath, "--preload", forgeHealthyStatfs, entry, "heavy", "--label", "capped", "--", "sh", "-c", `printf ran > '${marker}'`],
+		{ deadline_s: 45, cwd: root, env });
+	const stderr = new TextDecoder().decode(result.stderr);
+	expect(result.timed_out, stderr).toBe(false);
+	expect(result.rc).toBe(75);
+	expect(stderr).toContain("deferred: queue timeout");
+	expect(stderr).toContain("LOAD1");
 	expect(existsSync(marker)).toBe(false);
 }, 60000);
 
