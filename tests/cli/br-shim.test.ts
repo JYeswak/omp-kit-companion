@@ -86,11 +86,14 @@ if (database !== process.env.CUTCLAIM_TRACKER_DB) {
 if (dbIndex >= 0) args.splice(dbIndex, 2);
 const rows = JSON.parse(readFileSync(process.env.CUTCLAIM_TRACKER_DATA, "utf8"));
 if (args[0] === "show") {
-  const bead = rows.find(row => row.id === args[1]);
-  if (!bead) process.exit(2);
-  console.log(JSON.stringify(bead));
+  const ids = args.slice(1).filter(arg => !arg.startsWith("--"));
+  const found = ids.map(id => rows.find(row => row.id === id));
+  if (found.some(row => !row)) process.exit(2);
+  console.log(JSON.stringify(ids.length === 1 ? found[0] : found));
 } else if (args[0] === "list") {
   console.log(JSON.stringify(args.includes("--assignee") ? [] : rows));
+} else if (args[0] === "blocked") {
+  console.log(JSON.stringify({ issues: [], has_more: false }));
 } else if (args[0] === "dep" && args[1] === "list") {
   console.log("[]");
 } else if (args[0] === "where") {
