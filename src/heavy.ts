@@ -18,10 +18,10 @@ const LOCK_POLL_MS = 100;
 const QUEUE_POLL_MS = 1_000;
 const MAX_WAIT_SECONDS = 900;
 
-type HeavyJob = LoadJob & { argv: string[]; process_start: string; queued_at: string; started_at?: string };
+type HeavyJob = LoadJob & { argv: string[]; process_start: string; queued_at: string; started_at?: string; lane?: string };
 type DiskObserver = "sbh" | "statfs" | "auto";
 const DISK_OBSERVERS: readonly DiskObserver[] = ["sbh", "statfs", "auto"];
-type HeavyConfig = { slots: number; max_wait_s: number; disk_observer: DiskObserver; disk_floor_pct: number | null; sbh_deadline_s?: number; runtime_budget_s?: Record<string, number> };
+type HeavyConfig = { slots: number; max_wait_s: number; disk_observer: DiskObserver; disk_floor_pct: number | null; sbh_deadline_s?: number; runtime_budget_s?: Record<string, number>; lane_slots?: Record<string, number> };
 type MachineLoad = { load1: number; ncpu: number };
 type HeavySignal = "SIGINT" | "SIGTERM";
 type HeavyChild = { exited: Promise<number>; kill(signal: HeavySignal | "SIGKILL"): void };
@@ -67,6 +67,10 @@ function loadConfig(override?: DiskObserver): HeavyConfig {
 	const floor: unknown = "disk_floor_pct" in value ? value.disk_floor_pct : null;
 	const sbhDeadline = "sbh_deadline_s" in value ? value.sbh_deadline_s : SBH_CHECK_DEADLINE_S;
 	const runtimeBudgets: unknown = "runtime_budget_s" in value ? value.runtime_budget_s : {};
+	const laneSlots: unknown = "lane_slots" in value ? value.lane_slots : {};
+	if (typeof laneSlots !== "object" || laneSlots === null || Array.isArray(laneSlots) ||
+		Object.entries(laneSlots).some(([lane, count]) => !validLane(lane) || typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 64))
+		throw new Error("invalid heavy-work config: lane_slots must map lane names to slot counts 1..64");
 	if (typeof runtimeBudgets !== "object" || runtimeBudgets === null || Array.isArray(runtimeBudgets) ||
 		Object.values(runtimeBudgets).some(budget => typeof budget !== "number" || !Number.isSafeInteger(budget) || budget <= 0))
 		throw new Error("invalid heavy-work config for --max-runtime: runtime_budget_s values must be positive integer seconds");
@@ -79,7 +83,7 @@ function loadConfig(override?: DiskObserver): HeavyConfig {
 		throw new Error(`invalid heavy-work config: disk_floor_pct must be 0..50: ${path}`);
 	if (typeof sbhDeadline !== "number" || !Number.isFinite(sbhDeadline) || sbhDeadline <= 0)
 		throw new Error(`invalid heavy-work config: sbh_deadline_s must be positive finite seconds: ${path}`);
-	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: override === "statfs" ? null : floor, sbh_deadline_s: sbhDeadline, runtime_budget_s: runtimeBudgets as Record<string, number> };
+	return { slots, max_wait_s: maxWait, disk_observer: override ?? observer, disk_floor_pct: override === "statfs" ? null : floor, sbh_deadline_s: sbhDeadline, runtime_budget_s: runtimeBudgets as Record<string, number>, lane_slots: laneSlots as Record<string, number> };
 }
 
 export function machineLoadBlockReason(load1: number, ncpu: number): string | null {
@@ -272,12 +276,23 @@ function currentRepo(cwd: string): string {
 	return cwd;
 }
 
+function validLane(value: string): boolean {
+	if (value.length < 1 || value.length > 64) return false;
+	for (let index = 0; index < value.length; index++) {
+		const code = value.charCodeAt(index);
+		const alphanumeric = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+		if (!alphanumeric && (index === 0 || (code !== 45 && code !== 46 && code !== 95))) return false;
+	}
+	return true;
+}
+
 function validJob(value: unknown): value is HeavyJob {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	return "id" in value && typeof value.id === "string" && "pid" in value && typeof value.pid === "number" && Number.isInteger(value.pid) && value.pid > 0 &&
 		"process_start" in value && typeof value.process_start === "string" && normalizeStart(value.process_start) !== "" && "label" in value && typeof value.label === "string" &&
 		"repo" in value && typeof value.repo === "string" && "cwd" in value && typeof value.cwd === "string" &&
 		"agent" in value && typeof value.agent === "string" && "tmux_pane" in value && typeof value.tmux_pane === "string" &&
+		(!("lane" in value) || (typeof value.lane === "string" && validLane(value.lane))) &&
 		"state" in value && (value.state === "queued" || value.state === "running") && "argv" in value && Array.isArray(value.argv) &&
 		value.argv.every((item: unknown) => typeof item === "string") && "queued_at" in value && typeof value.queued_at === "string";
 }
@@ -353,15 +368,37 @@ function removeJob(directory: string, id: string): void {
 }
 
 
-function admissionReason(jobs: readonly HeavyJob[], id: string, slots: number, load: MachineLoad): string | null {
+function laneCapacity(config: HeavyConfig, lane: string): number {
+	const slots = config.lane_slots;
+	return slots && Object.hasOwn(slots, lane) ? slots[lane] ?? 1 : 1;
+}
+
+function laneHolders(running: readonly HeavyJob[], lane: string): HeavyJob[] {
+	return running.filter((job) => job.lane === lane);
+}
+
+function holderDescription(job: HeavyJob): string {
+	const age = job.started_at ? `${Math.max(0, (Date.now() - Date.parse(job.started_at)) / 1000).toFixed(1)}s` : "unknown";
+	return `${job.label}@${job.repo}[${job.agent}; pane=${job.tmux_pane || "none"}; pid=${job.pid}; held=${age}]`;
+}
+
+function admissionReason(jobs: readonly HeavyJob[], id: string, config: HeavyConfig, load: MachineLoad): string | null {
 	const loadReason = process.env.GITHUB_ACTIONS === "true" ? null : machineLoadBlockReason(load.load1, load.ncpu);
 	if (loadReason) return loadReason;
 	const running = jobs.filter((job) => job.state === "running");
-	if (running.length >= slots) return `all ${slots} heavy-work slot${slots === 1 ? " is" : "s are"} occupied`;
-	const queued = jobs.filter((job) => job.state === "queued").sort((left, right) => left.queued_at.localeCompare(right.queued_at) || left.id.localeCompare(right.id));
-	const eligible = queued.find((job) => !job.tmux_pane || !running.some((active) => active.tmux_pane === job.tmux_pane));
-	if (eligible?.id === id) return null;
 	const own = jobs.find((job) => job.id === id);
+	if (own?.lane) {
+		const holders = laneHolders(running, own.lane);
+		const slots = laneCapacity(config, own.lane);
+		if (holders.length >= slots) return `lane ${own.lane}: all ${slots} slot${slots === 1 ? " is" : "s are"} occupied; holders=${holders.map(holderDescription).join(", ")}`;
+	}
+	if (running.length >= config.slots) return `all ${config.slots} heavy-work slot${config.slots === 1 ? " is" : "s are"} occupied`;
+	const queued = jobs.filter((job) => job.state === "queued").sort((left, right) => left.queued_at.localeCompare(right.queued_at) || left.id.localeCompare(right.id));
+	// A full lane must not strand other lanes (or unlaned work) behind its queue head.
+	const eligible = queued.find((job) =>
+		(!job.tmux_pane || !running.some((active) => active.tmux_pane === job.tmux_pane)) &&
+		(!job.lane || laneHolders(running, job.lane).length < laneCapacity(config, job.lane)));
+	if (eligible?.id === id) return null;
 	const paneJob = own?.tmux_pane ? running.find((job) => job.tmux_pane === own.tmux_pane) : undefined;
 	if (paneJob) return `pane already has running job ${paneJob.label} (${paneJob.repo})`;
 	return eligible ? `queued behind ${eligible.label} (${eligible.repo})` : "waiting for an available slot";
@@ -376,9 +413,13 @@ function statusLine(jobs: readonly HeavyJob[], id: string, reason: string): stri
 }
 
 
-export async function runHeavy(command: readonly string[], options: { label?: string; noWait: boolean; diskObserver?: string; maxRuntime?: string }): Promise<number> {
+export async function runHeavy(command: readonly string[], options: { label?: string; lane?: string; noWait: boolean; diskObserver?: string; maxRuntime?: string }): Promise<number> {
 	if (command.length === 0 || !command[0]) {
-		process.stderr.write("heavy: expected `omp-kit heavy [--label LABEL] [--no-wait] [--max-runtime SECONDS] [--disk-observer statfs|sbh|auto] -- <command...>`\n");
+		process.stderr.write("heavy: expected `omp-kit heavy [--label LABEL] [--lane NAME] [--no-wait] [--max-runtime SECONDS] [--disk-observer statfs|sbh|auto] -- <command...>`\n");
+		return 2;
+	}
+	if (options.lane !== undefined && !validLane(options.lane)) {
+		process.stderr.write("heavy: --lane must be 1..64 ASCII letters, digits, dots, underscores or hyphens, starting with a letter or digit; no command was run\n");
 		return 2;
 	}
 	const flagRuntime = options.maxRuntime === undefined ? undefined : Number(options.maxRuntime);
@@ -449,6 +490,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 		id, pid: process.pid, process_start: ownStart, label,
 		repo: currentRepo(cwd), cwd, agent: process.env.AGENT_NAME ?? process.env.OMP_AGENT_NAME ?? "unknown",
 		tmux_pane: process.env.TMUX_PANE ?? "", argv, state: "queued", queued_at: queuedAt,
+		...(options.lane !== undefined ? { lane: options.lane } : {}),
 	};
 	const declared = Object.hasOwn(labelBudgets, job.label) ? labelBudgets[job.label as keyof typeof labelBudgets] : undefined;
 	const configured = Object.hasOwn(config.runtime_budget_s ?? {}, job.label) ? config.runtime_budget_s?.[job.label] : undefined;
@@ -521,7 +563,7 @@ export async function runHeavy(command: readonly string[], options: { label?: st
 					rowCreated = true;
 					waitingJobs = [...waitingJobs, job];
 				}
-				reason = admissionReason(waitingJobs, id, config.slots, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
+				reason = admissionReason(waitingJobs, id, config, { load1: testFakeLoad() ?? loadavg()[0] ?? Number.NaN, ncpu: cpus().length });
 				if (!reason) {
 					const disk = await diskVerdict({ config, cwd: job.cwd });
 					if (disk.kind !== "ok") await recordObserverRefusal(stateRoot, job, "admission", disk);

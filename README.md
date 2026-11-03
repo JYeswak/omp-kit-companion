@@ -477,7 +477,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit slice-verify` | `slice-verify --overlay PATH [--test FILE...]` | Base-vs-overlay verdict on a clean export | `omp-kit slice-verify --overlay src/x.ts --test tests/x.test.ts` |
 | `omp-kit drain` | `drain close-queue\|stale-claims (--db PATH \| --project DIR) [--repo DIR] [--json]` | Report landed-but-open beads and orphaned claims; reclaim only with no live holder (seat, mail in 24 h, reservation); UNKNOWN never reclaimed | `omp-kit drain stale-claims --project .` |
 | `omp-kit load` | `load watch` | Write one load census sample to the state root | `omp-kit load watch --json` |
-| `omp-kit heavy` | `heavy [--label LABEL] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 124 over budget, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
+| `omp-kit heavy` | `heavy [--label LABEL] [--lane NAME] [--no-wait] [--max-runtime S] -- COMMAND [ARG ...]` | Run one load- and disk-admitted command at nice 10; exit 75 when deferred, 124 over budget, 69 when no disk observer is available | `omp-kit heavy --label cli-tests -- bun test tests/cli` |
 | `omp-kit next` | `next --role worker\|director [--repo PATH] [--agent NAME]` | Read-only next action and applicable skills ([docs/next.md](docs/next.md)) | `omp-kit next --role worker --json` |
 | `omp-kit grader next` | `grader next [--repo PATH] [--agent NAME]` | Select one prioritized grader action (`OMP_KIT_GRADE_WAVE` = `grade_wave.py` path); unavailable queue sources read UNKNOWN, never empty | `OMP_KIT_GRADE_WAVE=/path/to/grade_wave.py omp-kit grader next --repo . --agent "$AGENT_NAME" --json` |
 | `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
@@ -670,6 +670,7 @@ Example files:
 // $XDG_CONFIG_HOME/omp-kit/load.json: slots 1..64, max_wait_s in seconds,
 // disk_observer "sbh"|"statfs"|"auto" (default "auto": sbh when on PATH else statfs),
 // disk_floor_pct 0..50; runtime: flag > runtime_budget_s.<label> > label table
+// --lane NAME: lane_slots.NAME (default 1, 1..64).
 { "slots": 2, "max_wait_s": 600, "disk_observer": "auto" }
 ```
 
