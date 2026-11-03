@@ -1,5 +1,5 @@
 /** Unit tests for the byte-compatible spool writer (bead ompkit-fp72.120.16.11.3). */
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +45,16 @@ test("defaultStateDir keeps persistent state in the OS home when HOME is unset",
 });
 
 describe("cc-spool", () => {
+	let savedCc: string | undefined;
+	beforeEach(() => {
+		savedCc = process.env.OMP_KIT_CC;
+		process.env.OMP_KIT_CC = "1";
+	});
+	afterEach(() => {
+		if (savedCc === undefined) delete process.env.OMP_KIT_CC;
+		else process.env.OMP_KIT_CC = savedCc;
+	});
+
 	test("make_id matches cclib (sha256 producer\\x1fposition\\xtype, 32 hex)", () => {
 		expect(makeId("kit", "verb:doctor:0001", "action.attempt")).toBe("d430a3ff88c69377a83d4e959e9aa35c");
 	});

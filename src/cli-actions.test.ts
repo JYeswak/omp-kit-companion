@@ -34,6 +34,7 @@ function spawnCli(args: string[], env: Record<string, string>): Promise<CliRun> 
 			XDG_STATE_HOME: join(env.STATE, "xdg"),
 			HOME: join(env.STATE, "home"),
 			CC_STATE: env.STATE,
+			OMP_KIT_CC: "1",
 			AGENT_NAME: "TestCliActions",
 			...env,
 		},
@@ -78,6 +79,8 @@ test("attempt_before_effect", async () => {
 	process.stdout.write = ((chunk: unknown) => { captured += String(chunk); return true; }) as typeof process.stdout.write;
 	process.stderr.write = (() => true) as typeof process.stderr.write;
 	const savedState = process.env.CC_STATE, savedAgent = process.env.AGENT_NAME;
+	const savedCc = process.env.OMP_KIT_CC;
+	process.env.OMP_KIT_CC = "1";
 	process.env.CC_STATE = state;
 	process.env.AGENT_NAME = "TestProbe";
 	try {
@@ -93,6 +96,7 @@ test("attempt_before_effect", async () => {
 		process.stdout.write = savedOut;
 		process.stderr.write = savedErr;
 		if (savedState === undefined) delete process.env.CC_STATE; else process.env.CC_STATE = savedState;
+		if (savedCc === undefined) delete process.env.OMP_KIT_CC; else process.env.OMP_KIT_CC = savedCc;
 		if (savedAgent === undefined) delete process.env.AGENT_NAME; else process.env.AGENT_NAME = savedAgent;
 	}
 	expect(probeSawAttempt).toBe(true);
