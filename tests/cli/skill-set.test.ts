@@ -10,11 +10,17 @@ import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 
+interface CliResult {
+	exitCode: number;
+	envelope: Record<string, unknown>;
+}
+
 let base = "";
 let binary = "";
 let home = "";
 let release = "";
 let environment: Record<string, string>;
+let defaultRecipe: CliResult | undefined;
 
 const SKILL = (name: string, description: string): string =>
 	`---\nname: ${name}\ndescription: ${description}\n---\n\n${name} body.\n`;
@@ -103,7 +109,7 @@ afterAll(() => {
 	if (base) rmSync(base, { recursive: true, force: true });
 });
 
-function runCli(args: string[]): { exitCode: number; envelope: Record<string, unknown> } {
+function runCli(args: string[]): CliResult {
 	const child = Bun.spawnSync([binary, ...args], {
 		cwd: home, env: { ...environment }, stdout: "pipe", stderr: "pipe",
 	});
@@ -112,8 +118,14 @@ function runCli(args: string[]): { exitCode: number; envelope: Record<string, un
 	return { exitCode: child.exitCode, envelope: JSON.parse(stdout) as Record<string, unknown> };
 }
 
+function defaultHistoryRecipe(): CliResult {
+	// These four cases inspect the same read-only invocation over an unchanged
+	// HOME/history. Share its real loader result, not four identical process trees.
+	return defaultRecipe ??= runCli(["examples", "skill-set", "--from-history", "7", "--json"]);
+}
+
 test("skill-set derives the exact usage candidate and renders a measured recipe", () => {
-	const { exitCode, envelope } = runCli(["examples", "skill-set", "--from-history", "7", "--json"]);
+	const { exitCode, envelope } = defaultHistoryRecipe();
 	expect(exitCode).toBe(0);
 	const data = envelope.data as { overall?: string; skill_set?: {
 		candidate_skills?: string[]; reads?: Record<string, number>; explicit?: Record<string, number>;
@@ -142,7 +154,7 @@ test("skill-set derives the exact usage candidate and renders a measured recipe"
 }, 300_000);
 
 test("skill-set resolves project-scoped skills under their own project", () => {
-	const { exitCode, envelope } = runCli(["examples", "skill-set", "--from-history", "7", "--json"]);
+	const { exitCode, envelope } = defaultHistoryRecipe();
 	expect(exitCode).toBe(0);
 	const set = (envelope.data as { skill_set?: {
 		candidate_skills?: string[];
@@ -164,7 +176,7 @@ test("skill-set resolves project-scoped skills under their own project", () => {
 }, 300_000);
 
 test("skill-set lists unresolvable cwd skills separately instead of failing the global recipe", () => {
-	const { exitCode, envelope } = runCli(["examples", "skill-set", "--from-history", "7", "--json"]);
+	const { exitCode, envelope } = defaultHistoryRecipe();
 	expect(exitCode).toBe(0);
 	const set = (envelope.data as { skill_set?: {
 		candidate_skills?: string[]; capability_check?: { overall?: string; missing?: number };
@@ -202,7 +214,7 @@ test("SKILL_SET_GATE: a required capability outside the candidate set exits 1 na
 test("skill-set bytes-after is loader-measured, not estimated", async () => {
 	const direct = await runContextInventory({ root: release, executablePath: binary, home,
 		profile: "default", project: home, overrides: { includeSkills: ["alpha", "gamma"] } });
-	const { envelope } = runCli(["examples", "skill-set", "--from-history", "7", "--json"]);
+	const { envelope } = defaultHistoryRecipe();
 	const set = (envelope.data as { skill_set?: { bytes_after?: number; listed_after?: number } }).skill_set;
 	expect(set?.bytes_after).toBe(direct.skills.listed_bytes);
 	expect(set?.listed_after).toBe(direct.skills.listed);
