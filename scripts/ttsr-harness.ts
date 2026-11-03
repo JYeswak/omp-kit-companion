@@ -31,7 +31,7 @@ import { verifyTernOmpSource } from "../src/paths.ts";
 import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
 import { checkBypassEnvironment } from "../src/fleet-guard/git.ts";
 import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
-import { mechanicalVerdicts as admissionVerdicts, NONDETERMINISM_ERROR, PARTITION_ERROR } from "../src/mechanical-admission.ts";
+import { mechanicalVerdicts as admissionVerdicts, AdmissionUnknownError, NONDETERMINISM_ERROR, PARTITION_ERROR } from "../src/mechanical-admission.ts";
 import { CASE_HEADER, parseCaseCorpus, type CorpusCase, type CaseReferenceFacts } from "../src/case-corpus.ts";
 import { createTestCaseReporter, type TestCaseReporter } from "../src/test-case-report.ts";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
@@ -328,6 +328,12 @@ async function mechanicalVerdicts(c: Case, chunkWidths: readonly (number | undef
 	// exact wire to share the verdict.
 	return admissionVerdicts(c, chunkWidths, { kit: KIT, evaluate: evaluator });
 }
+
+function admissionFailureKind(error: unknown): "UNKNOWN" | "NONDETERMINISM" | undefined {
+	if (error instanceof AdmissionUnknownError) return "UNKNOWN";
+	if (error instanceof Error && error.message === NONDETERMINISM_ERROR) return "NONDETERMINISM";
+	return undefined;
+}
 /**
  * G2: full payload through the live-shaped path. Returns the verdict at the end of the stream.
  * For edit/write, omp also runs `astCondition` rules once at toolcall_end
@@ -544,11 +550,12 @@ async function runGate(rulesDir: string, casesFile: string, caseReporter: TestCa
 				const outcome = await admissionOutcome.get(c)!;
 				if (outcome.status === "rejected") {
 					const error = outcome.reason;
-					if (!(error instanceof Error) || error.message !== NONDETERMINISM_ERROR) throw error;
+					const kind = admissionFailureKind(error);
+					if (!(error instanceof Error) || kind === undefined) throw error;
 					const tag = `${c.rule} ${c.expect} ${ctxLabel(c)} line ${c.line}`;
 					if (evaluated) caseReporter?.record(tag, "FAIL");
 					lines.push(`FAIL ${tag} | ${error.message} | ${show(c.snippet)}`);
-					failures.push(`NONDETERMINISM ${tag}: ${error.message}`);
+					failures.push(`${kind} ${tag}: ${error.message}`);
 					continue;
 				}
 				evidence = outcome.value;
@@ -1029,13 +1036,26 @@ async function admissionSelftest(tmp: string, caseReporter: TestCaseReporter | n
 	let nextOutcome = 0;
 	for (const [index, control] of mechanicalControls.entries()) {
 		const verdicts: boolean[] = [];
+		let failure: string | undefined;
 		for (let run = 0; run < controlRuns[index]!.length; run++) {
 			const outcome = await controlOutcomes[nextOutcome++]!;
 			if (outcome.status === "rejected") {
-				await Promise.all(controlOutcomes);
-				throw outcome.reason;
+				const error = outcome.reason;
+				const kind = admissionFailureKind(error);
+				if (!(error instanceof Error) || kind === undefined) {
+					await Promise.all(controlOutcomes);
+					throw error;
+				}
+				failure ??= `${kind} mechanical control ${control.rule} line ${control.line}: ${control.note} | ${error.message}`;
+				continue;
 			}
 			verdicts.push(outcome.value);
+		}
+		if (failure !== undefined) {
+			caseReporter?.record(`mechanical control ${control.rule} line ${control.line}: ${control.note}`, "FAIL");
+			console.log(`FAIL ${failure}`);
+			bad++;
+			continue;
 		}
 		const [actual, sweepOk, ...variants] = verdicts;
 		const ok = actual === (control.expect === "fire") && sweepOk === true && variants.every(verdict => verdict === actual);

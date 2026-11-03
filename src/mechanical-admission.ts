@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import * as path from "node:path";
 import type { CorpusCase } from "./case-corpus.ts";
-import { check as durabilityCheck } from "./fleet-guard/durability.ts";
+import { check as durabilityCheck, type DurabilityBlock } from "./fleet-guard/durability.ts";
 import { writeScratchOwner } from "./fleet-guard/scratch.ts";
 
 export interface MechanicalCase extends CorpusCase {
@@ -14,6 +14,16 @@ export type Reassembler = (wire: string, width: number) => string;
 
 export const PARTITION_ERROR = "mechanical admission depends on chunk partition";
 export const NONDETERMINISM_ERROR = "mechanical admission is nondeterministic on one fixture";
+
+/** A blocked live read is missing evidence, never a positive policy match or a verdict difference. */
+export class AdmissionUnknownError extends Error {
+	readonly status = "UNKNOWN";
+	readonly block = true;
+	constructor(readonly read: string, reason: string) {
+		super(reason);
+		this.name = "AdmissionUnknownError";
+	}
+}
 
 export const reassemble: Reassembler = (wire, width) => {
 	let assembled = "";
@@ -45,15 +55,19 @@ async function withFixture<T>(c: MechanicalCase, kit: string, use: (fixture: Fix
 		for (const key of ["PATH", "LANG", "LC_ALL"]) if (process.env[key]) env[key] = process.env[key]!;
 		Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
 		const git = async (args: string[], input?: string): Promise<string> => {
-			const child = Bun.spawn(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", root, ...args],
-				{ env, stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "pipe", timeout: 2_000 });
-			const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-			if (child.exitCode !== 0) throw new Error(`mechanical Git fixture setup failed: ${stderr}`);
-			return stdout.trimEnd();
+			const read = `fixture setup git ${args.join(" ")}`;
+			try {
+				const child = Bun.spawn(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", root, ...args],
+					{ env, stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+				const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+				if (child.exitCode !== 0) throw new Error(`exit=${child.exitCode}, signal=${child.signalCode}: ${stderr}`);
+				return stdout.trimEnd();
+			} catch (error) {
+				throw new AdmissionUnknownError(read, `UNKNOWN mechanical admission setup BLOCKED: ${read}: ${error instanceof Error ? error.message : String(error)}`);
+			}
 		};
-		await git(["init", "--quiet"]);
-		fs.mkdirSync(path.join(root, ".omp"));
-		fs.writeFileSync(path.join(root, ".omp/fleet.json"), '{"enabled":true}\n');
+		// No hooks or template files participate in admission; only this fixture's index and objects do.
+		await git(["init", "--quiet", "--template="]);
 		for (const [p, content] of Object.entries(c.reference?.tracked ?? {})) {
 			const oid = await git(["hash-object", "-w", "--no-filters", "--stdin"], content);
 			await git(["update-index", "--add", "--cacheinfo", `100644,${oid},${p}`]);
@@ -81,9 +95,9 @@ async function withFixture<T>(c: MechanicalCase, kit: string, use: (fixture: Fix
 }
 
 /** One dispatch decodes the complete wire and re-reads production repository facts live; nothing is cached. */
-async function dispatch(fixture: Fixture, evaluate: AdmissionEvaluator): Promise<boolean> {
+async function dispatch(fixture: Fixture, evaluate: AdmissionEvaluator): Promise<DurabilityBlock | undefined> {
 	const { root, wire, toolName } = fixture;
-	return (await evaluate({ toolName, input: JSON.parse(wire), cwd: root }, { cwd: root }))?.block === true;
+	return evaluate({ toolName, input: JSON.parse(wire), cwd: root }, { cwd: root });
 }
 
 export interface MechanicalOptions {
@@ -92,12 +106,15 @@ export interface MechanicalOptions {
 	join?: Reassembler;
 }
 
-/** Dispatches twice on one fixture; unequal verdicts mean a single dispatch cannot stand for a case. */
+/** Only completed live reads have verdicts to compare; missing facts block the proof as UNKNOWN. */
 async function deterministicDispatch(fixture: Fixture, evaluate: AdmissionEvaluator): Promise<boolean> {
 	const first = await dispatch(fixture, evaluate);
 	const second = await dispatch(fixture, evaluate);
-	if (first !== second) throw new Error(NONDETERMINISM_ERROR);
-	return first;
+	const unknown = first?.status === "UNKNOWN" ? first : second?.status === "UNKNOWN" ? second : undefined;
+	if (unknown) throw new AdmissionUnknownError(unknown.read, unknown.reason);
+	const blocked = first?.block === true;
+	if (blocked !== (second?.block === true)) throw new Error(NONDETERMINISM_ERROR);
+	return blocked;
 }
 
 /**

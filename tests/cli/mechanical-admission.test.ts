@@ -1,11 +1,12 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseCaseCorpus } from "../../src/case-corpus.ts";
 import { check as durabilityCheck } from "../../src/fleet-guard/durability.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { run } from "../../src/kitlib/run.ts";
 import {
 	assertDeterministicAdmission, mechanicalVerdicts, NONDETERMINISM_ERROR, PARTITION_ERROR,
 	reassemble, type AdmissionEvaluator, type MechanicalCase,
@@ -83,6 +84,107 @@ describe("mechanical admission dispatch", () => {
 	});
 });
 
+describe("ADMITFLAKE1 live admission reads", () => {
+	async function fault(mode: "slow" | "failed" | "changed" | "setup-failed", call: number) {
+		const temp = ownedTmp("admitflake-read");
+		// macOS /usr/bin/git is an xcrun launcher; delegate to the actual developer binary, not another PATH lookup.
+		const located = process.platform === "darwin" ? await run(["xcrun", "--find", "git"], { deadline_s: 10 }) : null;
+		const realGit = located ? Buffer.from(located.stdout).toString().trim() : Bun.which("git");
+		if (!realGit) throw new Error("ADMITFLAKE1 requires Git");
+		try {
+			const shim = join(temp.path, "git");
+			writeFileSync(shim, `#!/bin/sh
+if [ "${mode}" = setup-failed ] && [ "$1" = -c ] && [ "$7" = init ]; then
+  printf '%s\\n' 'planted fixture setup failure' >&2
+  exit 73
+fi
+if [ "$1" = --no-pager ]; then
+  if { [ "${mode}" = changed ] && [ "$8" = rev-parse ]; } ||
+     { [ "${mode}" != changed ] && [ "$8" = ls-files ] && [ "$9" = --stage ]; }; then
+    counter="$7/.git/admitflake-count"
+    n=0
+    if [ -f "$counter" ]; then IFS= read -r n < "$counter"; fi
+    n=$((n + 1))
+    printf '%s\\n' "$n" > "$counter"
+    if [ "$n" = "${call}" ]; then
+      case "${mode}" in
+        slow) exec sleep 30 ;;
+        failed) printf '%s\\n' 'planted index read failure' >&2; exit 73 ;;
+        changed) printf '/\\n'; exit 0 ;;
+      esac
+    fi
+  fi
+fi
+exec ${JSON.stringify(realGit)} "$@"
+`);
+			chmodSync(shim, 0o700);
+			const script = `
+import { check } from ${JSON.stringify(join(KIT, "src/fleet-guard/durability.ts"))};
+import { assertDeterministicAdmission, mechanicalVerdicts } from ${JSON.stringify(join(KIT, "src/mechanical-admission.ts"))};
+const c = { line: 1, rule: "scratch-is-not-a-home", expect: "quiet", source: "tool", tool: "write",
+  path: "var/agent-tmp/admitflake.1/report.md", snippet: "Disposable read capture.", note: "ADMITFLAKE1" };
+const outcomes = [];
+for (const api of [assertDeterministicAdmission, (c, options) => mechanicalVerdicts(c, [undefined, 1, 7], options)]) {
+  const observed = [];
+  const evaluate = async (event, context) => {
+    const verdict = await check(event, context);
+    observed.push(verdict ?? { block: false });
+    return verdict;
+  };
+  try { outcomes.push({ value: await api(c, { kit: ${JSON.stringify(KIT)}, evaluate }), observed }); }
+  catch (error) { outcomes.push({ message: error.message, status: error.status, block: error.block, read: error.read, observed }); }
+}
+console.log(JSON.stringify(outcomes));
+`;
+			const result = await run([process.execPath, "-e", script], {
+				deadline_s: 30, cwd: KIT,
+				env: { ...process.env, TMPDIR: temp.path, PATH: `${temp.path}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+			});
+			expect(result.rc, Buffer.from(result.stderr).toString()).toBe(0);
+			return JSON.parse(Buffer.from(result.stdout).toString()) as {
+				message: string; status?: string; block?: boolean; read?: string;
+				observed: { block: boolean; status?: string; read?: string; reason?: string }[];
+			}[];
+		} finally { temp.cleanup(); }
+	}
+
+	for (const mode of ["slow", "failed"] as const) for (const call of [1, 2]) {
+		test(`${mode} live index read in dispatch ${call} is UNKNOWN/blocked, never a verdict flip`, async () => {
+			const outcomes = await fault(mode, call);
+			expect(outcomes).toHaveLength(2);
+			for (const outcome of outcomes) {
+				expect(outcome.observed, JSON.stringify(outcome)).toHaveLength(2);
+				expect(outcome.observed[call - 1]).toMatchObject({ block: true, status: "UNKNOWN", read: "git ls-files --stage -z" });
+				expect(outcome.observed[2 - call]).toEqual({ block: false });
+				expect(outcome).toMatchObject({ status: "UNKNOWN", block: true, read: "git ls-files --stage -z" });
+				expect(outcome.message).toContain("UNKNOWN");
+				expect(outcome.message).toContain("git ls-files --stage -z");
+				expect(outcome.message).not.toContain(NONDETERMINISM_ERROR);
+			}
+		}, 30_000);
+	}
+
+	test("planted successful but different repository facts still fail NONDETERMINISM", async () => {
+		for (const outcome of await fault("changed", 2)) {
+			expect(outcome.observed[0], JSON.stringify(outcome)).toEqual({ block: false });
+			expect(outcome.observed[1]?.reason).toContain("scratch path does not belong to the calling repository");
+			expect(outcome.message).toBe(NONDETERMINISM_ERROR);
+			expect(outcome.status).toBeUndefined();
+		}
+	}, 30_000);
+
+	test("failed fixture setup is BLOCKED/UNKNOWN with its step named before any dispatch", async () => {
+		for (const outcome of await fault("setup-failed", 1)) {
+			expect(outcome.observed).toEqual([]);
+			expect(outcome).toMatchObject({ status: "UNKNOWN", block: true });
+			expect(outcome.read).toContain("fixture setup git init");
+			expect(outcome.message).toContain("setup BLOCKED");
+			expect(outcome.message).toContain("planted fixture setup failure");
+			expect(outcome.message).not.toContain(NONDETERMINISM_ERROR);
+		}
+	}, 30_000);
+});
+
 // FLEETOPTIN1 (ompkit-26xhq) live probe 2026-10-22: fleet-guard set a seat's TMPDIR to its own
 // var/agent-tmp/omp.<pid> dir, then refused every write-tool write into it ("scratch ownership metadata is
 // invalid"): the admission parser accepted only the four legacy keys, never the seat owner fleet-guard
@@ -130,19 +232,21 @@ describe("owned-scratch admission in a repository with more than 1024 tracked fi
 		const run = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "-C", repo, ...args]);
 		if (run.exitCode !== 0) throw new Error(run.stderr.toString());
 	};
-	git("init", "--quiet");
-	mkdirSync(join(repo, ".omp"));
-	writeFileSync(join(repo, ".omp/fleet.json"), '{"enabled":true}\n');
-	mkdirSync(join(repo, "src"));
-	for (let index = 0; index < TRACKED; index++) writeFileSync(join(repo, "src", `f${index}.txt`), `tracked source ${index}\n`);
-	git("add", "--", ".omp/fleet.json", "src");
-	git("commit", "--quiet", "-m", "fixture");
 	// A modified working copy: its bytes are in no index blob, only on disk.
 	const modified = "edited canonical working copy, not yet committed\n";
-	writeFileSync(join(repo, "src", "f1234.txt"), modified);
 	const scratch = join(repo, "var/agent-tmp/own.4242");
-	mkdirSync(scratch, { recursive: true });
-	writeFileSync(join(scratch, ".owner"), `pid=4242\nlabel=own\nrepo=${repo}\ncreated=2026-10-22T06:20:00.000Z\n`);
+	beforeAll(() => {
+		git("init", "--quiet");
+		mkdirSync(join(repo, ".omp"));
+		writeFileSync(join(repo, ".omp/fleet.json"), '{"enabled":true}\n');
+		mkdirSync(join(repo, "src"));
+		for (let index = 0; index < TRACKED; index++) writeFileSync(join(repo, "src", `f${index}.txt`), `tracked source ${index}\n`);
+		git("add", "--", ".omp/fleet.json", "src");
+		git("commit", "--quiet", "-m", "fixture");
+		writeFileSync(join(repo, "src", "f1234.txt"), modified);
+		mkdirSync(scratch, { recursive: true });
+		writeFileSync(join(scratch, ".owner"), `pid=4242\nlabel=own\nrepo=${repo}\ncreated=2026-10-22T06:20:00.000Z\n`);
+	}, 30_000);
 	const write = (content: string) =>
 		durabilityCheck({ toolName: "write", input: { path: join(scratch, "probe-owned.txt"), content }, cwd: repo }, { cwd: repo });
 	afterAll(() => rmSync(repo, { recursive: true, force: true }));

@@ -16,6 +16,17 @@ const refuse = (detail: string): FleetGuardBlock => ({ block: true,
 	reason: `fleet-guard scratch-is-not-a-home: ${detail}. Keep canonical source, reusable scripts, prompts and packets in their repository home; scratch is for disposable synthetic inputs.` });
 const inside = (root: string, path: string): boolean => path === root || path.startsWith(`${root}/`);
 
+/** Missing live facts block the write, but do not establish a policy match. */
+export type DurabilityBlock = FleetGuardBlock & (
+	{ status: "UNKNOWN"; read: string } | { status?: never; read?: never }
+);
+
+class UnknownReadError extends Error {
+	constructor(readonly read: string, cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause), { cause });
+	}
+}
+
 async function readBounded(path: string, limit = LIMIT): Promise<string> {
 	const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
 	try {
@@ -28,16 +39,20 @@ async function readBounded(path: string, limit = LIMIT): Promise<string> {
 	} finally { await file.close(); }
 }
 
+const GIT_DEADLINE_MS = 2_000;
+
 // No inherited Git redirection, lazy-fetch, pager, credential or network operations.
 function git(repo: string, args: string[], input?: string): Promise<string> {
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
 	Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_OPTIONAL_LOCKS: "0" });
 	const running = promisify(execFile)("git", ["--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...args],
-		{ env, timeout: 2_000, maxBuffer: INDEX_LIMIT, encoding: "utf8" });
+		{ env, timeout: GIT_DEADLINE_MS, maxBuffer: INDEX_LIMIT, encoding: "utf8" });
 	running.child.stdin?.on("error", () => { running.child.kill(); });
 	running.child.stdin?.end(input);
-	return running.then(result => result.stdout);
+	const end = args.indexOf("--");
+	const read = `git ${(end < 0 ? args : args.slice(0, end)).join(" ")}`;
+	return running.then(result => result.stdout, error => { throw new UnknownReadError(read, error); });
 }
 
 // SCRATCHOWNERFORM1 (ompkit-ma3sn): the bound is the work this comparison may do, not the repository's size. Real
@@ -55,14 +70,14 @@ async function workingCopyMatches(repo: string, content: string, hash: string): 
 	const deadline = Date.now() + WORKING_COPY_STAT_BUDGET_MS;
 	const candidates: string[] = [];
 	for (let start = 0; start < entries.length; start += STAT_BATCH) {
-		if (Date.now() > deadline) throw new Error("materialized source facts exceed admission time budget");
+		if (Date.now() > deadline) throw new UnknownReadError("materialized canonical source lstat", new Error("materialized source facts exceed admission time budget"));
 		const facts = await Promise.all(entries.slice(start, start + STAT_BATCH).map(async candidate => {
 			const path = join(repo, candidate);
 			if (!inside(repo, path)) throw new Error("materialized source path escapes its repository");
 			try { return { candidate, path, stat: await lstat(path) }; }
 			catch (error) {
 				if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-				throw error;
+				throw new UnknownReadError("materialized canonical source lstat", error);
 			}
 		}));
 		for (const fact of facts) {
@@ -145,13 +160,14 @@ export async function physicalTarget(path: string): Promise<string> {
  * Exact indexed path/blob identity is mechanical evidence, not semantic intent detection.
  * No cache: an index-only transition must affect the very next admission.
  */
-export async function check(event: FleetGuardEvent, context: FleetGuardContext): Promise<FleetGuardBlock | undefined> {
+export async function check(event: FleetGuardEvent, context: FleetGuardContext): Promise<DurabilityBlock | undefined> {
 	const cwd = context.cwd ?? (typeof event.cwd === "string" && event.cwd ? event.cwd : process.cwd());
 	// Ownership metadata is written only by the native scratch lifecycle. Tool
 	// payloads (including shell redirection, cp/mv, and in-place sed) must not
 	// replace or adopt a live marker.
 	if (event.toolName === "bash") return undefined;
 	if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
+	let read = "filesystem targets from tool payload";
 	try {
 		const entries = await targets(event);
 		if (entries.length === 0) return refuse("filesystem targets cannot be established from this payload variant");
@@ -163,6 +179,7 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 				if (path.includes("/var/agent-tmp/")) return refuse("remote scratch repository facts are unavailable");
 				continue;
 			}
+			read = "scratch target realpath";
 			const physical = await physicalTarget(path);
 			const marker = `/${join("var", "agent-tmp")}/`;
 			const lexicalScratch = path.includes(marker);
@@ -170,6 +187,7 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			// The native caller's repository is the reference, never a nested .git
 			// created beneath the destination. A synthetic repository may itself
 			// live in an owned test directory without making its canonical files copies.
+			read = "calling repository realpath";
 			referenceRepo ??= await realpath((await git(cwd, ["rev-parse", "--show-toplevel"])).trimEnd());
 			const repo = referenceRepo;
 			const scratchRoot = join(repo, "var", "agent-tmp");
@@ -183,12 +201,18 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			if (beneath.length < 2) return refuse("scratch write has no owned session child");
 			const scratch = join(scratchRoot, beneath[0]!);
 			const ownerPath = join(scratch, ".owner");
+			read = "scratch ownership metadata lstat";
 			if ((await lstat(ownerPath)).isSymbolicLink()) return refuse("scratch ownership metadata is a symlink");
 			// The one owner parser the kit writes against: the seat owner (agent/session/bin) and the JSON owner
 			// from `omp-kit scratch new` are both owned scratch, not invalid metadata (ompkit-26xhq).
+			read = "scratch ownership metadata read";
 			const owner = parseOwnerFile(await readBounded(ownerPath, 4096));
 			if (owner === null) return refuse("scratch ownership metadata is invalid");
-			const ownerRepo = await realpath(owner.repo).catch(() => null);
+			read = "scratch owner repository realpath";
+			const ownerRepo = await realpath(owner.repo).catch(error => {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+				throw error;
+			});
 			if (!Number.isInteger(owner.pid) || owner.pid < 1 || !Number.isFinite(Date.parse(owner.createdAt)) || ownerRepo !== repo)
 				return refuse("scratch ownership metadata does not identify this repository");
 			const snapshot = await git(repo, ["ls-files", "--stage", "-z"]);
@@ -204,6 +228,7 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			}
 			let content = entry.content;
 			if (entry.replacement) {
+				read = "scratch edit content read";
 				const before = await readBounded(physical);
 				const beforeHash = (await git(repo, ["hash-object", "--stdin", "--no-filters"], before)).trim();
 				if (blobs.has(beforeHash)) return refuse("tracked-source-copy existing content matches the canonical Git index");
@@ -221,10 +246,13 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			const hash = (await git(repo, ["hash-object", "--stdin", "--no-filters"], content)).trim();
 			if (!GIT_OBJECT_ID.test(hash)) return refuse("Git blob identity is unavailable");
 			if (blobs.has(hash)) return refuse("tracked-source-copy content matches the canonical Git index");
+			read = "materialized canonical source";
 			if (await workingCopyMatches(repo, content, hash)) return refuse("tracked-source-copy content matches materialized canonical source");
 		}
 		return undefined;
 	} catch (error) {
-		return refuse(`required repository or payload facts unavailable (${error instanceof Error ? error.message : String(error)})`);
+		if (error instanceof UnknownReadError) read = error.read;
+		return { ...refuse(`UNKNOWN required read ${read} unavailable (${error instanceof Error ? error.message : String(error)})`),
+			status: "UNKNOWN", read };
 	}
 }
