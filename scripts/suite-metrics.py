@@ -201,6 +201,21 @@ def execute(args: argparse.Namespace) -> int:
         if args.loopback_port is not None:
             wrapped.extend(["--loopback-port", str(args.loopback_port)])
         wrapped.extend(["--", *command])
+        environment = None
+        if args.isolated_home:
+            # The inherited-env wrapper still owns TMPDIR; each load copy must
+            # also own HOME/XDG without forcing the opt-in scrub/write fence.
+            home = Path(scratch) / "home"
+            home.mkdir()
+            environment = dict(os.environ, HOME=str(home))
+            for name, suffix in (("XDG_CONFIG_HOME", ".config"), ("XDG_CACHE_HOME", ".cache"),
+                                 ("XDG_DATA_HOME", ".local/share"), ("XDG_STATE_HOME", ".local/state")):
+                directory = home / suffix
+                directory.mkdir(parents=True, exist_ok=True)
+                environment[name] = str(directory)
+            config = home / ".gitconfig"
+            config.write_text("[user]\n\tname = omp-kit tests\n\temail = omp-kit-tests@example.invalid\n")
+            environment["GIT_CONFIG_GLOBAL"] = str(config)
         with native_log.open("wb", buffering=0) as capture:
             fd = capture.fileno()
             launcher = [
@@ -210,7 +225,7 @@ def execute(args: argparse.Namespace) -> int:
                 "os.execvp(sys.argv[2],sys.argv[2:])",
                 str(fd), *wrapped,
             ]
-            result = run(launcher, cwd=args.cwd, deadline_s=args.deadline,
+            result = run(launcher, cwd=args.cwd, env=environment, deadline_s=args.deadline,
                          inherit_fds=(fd,), max_output_bytes=1 << 20)
         if not exec_marker.is_file() or exec_marker.is_symlink():
             raise ValueError("suite exec boundary marker is missing")
@@ -340,8 +355,9 @@ def stage(args: argparse.Namespace) -> int:
     directory = Path(args.records)
     directory.mkdir(parents=True, exist_ok=True)
     paths = args.paths
-    if len(set(paths)) != len(paths) or not paths:
-        raise ValueError("stage requires distinct file paths")
+    load_wave = getattr(args, "load_wave", False)
+    if not paths or (len(set(paths)) != len(paths) and not load_wave):
+        raise ValueError("stage requires distinct file paths outside a load wave")
     parent_reader, parent_writer = os.pipe()
 
     def one(item: tuple[int, str], queued_ns: int) -> tuple[Path, bool]:
@@ -365,6 +381,8 @@ def stage(args: argparse.Namespace) -> int:
                  "--parent-fd", str(parent_reader)]
         wait_ms = max(0, time.monotonic_ns() - queued_ns) / 1_000_000
         child.extend(["--wait-ms", repr(wait_ms)])
+        if load_wave:
+            child.append("--isolated-home")
         if args.loopback_port is not None:
             child.extend(["--loopback-port", str(args.loopback_port)])
         child.extend(["--", *command])
@@ -416,13 +434,70 @@ def stage(args: argparse.Namespace) -> int:
             print(("GREEN" if row["rc"] == 0 else "RED") + " " + kind + " " + path, flush=True)
     if incomplete:
         raise ValueError("stage children did not complete: " + ", ".join(incomplete))
-    complete = complete_records(rows, paths)
+    complete = (all(complete_records([row], [path]) for row, path in zip(rows, paths))
+                if load_wave else complete_records(rows, paths))
     code = 0 if complete and all(row["rc"] == 0 for row in rows) else 1
     atomic_json(Path(args.summary), {"complete": complete, "rc": code, "workers": workers,
                                    "test_count": sum(row.get("test_count", 0) for row in rows),
                                    "test_failures": sum(row.get("test_failures", 0) for row in rows),
                                    "files": rows})
     return code
+
+
+def load(args: argparse.Namespace) -> int:
+    """Endorse only changed files, with one bounded K-copy wave per file."""
+    if not 2 <= args.workers <= 6:
+        raise ValueError("load concurrency must be 2..6")
+    changed = set(Path(args.changed_files).read_text().splitlines())
+    selected = [path for path in dict.fromkeys(args.paths)
+                if path in changed and (Path(args.cwd) / path).is_file()]
+    if not selected:
+        print("LOADGATE1: no changed focused test files; no copies run", flush=True)
+        return 0
+    limits = run(["bun", "run", "--no-env-file", "--config=/dev/null",
+                  str(Path(__file__).with_name("test-budget.ts")), "--repo", args.policy_root,
+                  "--file-limits", "--json"], deadline_s=10)
+    if limits.rc != 0 or limits.timed_out or limits.truncated:
+        raise ValueError("cannot read canonical changed-file limits: " + limits.stdout.decode(errors="replace")
+                         + limits.stderr.decode(errors="replace"))
+    policy = json.loads(limits.stdout)
+    # At worst K copies serialize their work. ceiling * K is only the outer
+    # hang guard; the load verdict comes from native copy failures, not elapsed
+    # time. The ordinary focused cap already passed and remains unchanged.
+    allowance = args.workers
+    for index, path in enumerate(selected):
+        ceiling = policy["grandfathered"].get(path, policy["cap_s"])
+        directory = Path(args.records) / str(index)
+        wave_args = argparse.Namespace(
+            cwd=args.cwd, tree=args.tree, records=str(directory), summary=str(directory / "wave.json"),
+            runner="bun" if path.endswith((".ts", ".tsx", ".js", ".mts", ".cts")) else "scripts",
+            paths=[path] * args.workers, workers=args.workers, deadline=ceiling * allowance,
+            bun_config=str(Path(args.cwd) / "bunfig.toml"), loopback_port=None, load_wave=True,
+        )
+        started = time.monotonic()
+        load1 = os.getloadavg()[0]
+        with owned_tmp("loadgate-wave", root=str(Path(args.cwd).resolve() / "var" / "agent-tmp")) as scratch:
+            inherited_tmp = os.environ.get("TMPDIR")
+            os.environ["TMPDIR"] = scratch
+            try:
+                code = stage(wave_args)
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                print("LOADGATE1: " + str(error), file=sys.stderr)
+                code = 1
+            finally:
+                if inherited_tmp is None:
+                    os.environ.pop("TMPDIR", None)
+                else:
+                    os.environ["TMPDIR"] = inherited_tmp
+        elapsed = round((time.monotonic() - started) * 1000)
+        print(f"LOADGATE1 {'GREEN' if code == 0 else 'RED'} file={path} concurrency={args.workers} "
+              f"load1={load1:.2f} load1_end={os.getloadavg()[0]:.2f} "
+              f"ceiling_s={ceiling} contention_allowance={allowance} added_ms={elapsed}", flush=True)
+        if code != 0:
+            print(f"FRESH-GATE: RED: LOADGATE1 file={path} concurrency={args.workers} load1={load1:.2f}; "
+                  "native failing case output above", file=sys.stderr)
+            return 1
+    return 0
 
 
 def main() -> int:
@@ -443,6 +518,7 @@ def main() -> int:
     child.add_argument("--wait-ms", type=float, default=0)
     child.add_argument("--loopback-port", type=int)
     child.add_argument("--parent-fd", type=int)
+    child.add_argument("--isolated-home", action="store_true")
     child.add_argument("command", nargs=argparse.REMAINDER)
     bundle = subs.add_parser("collect")
     for option in ("records", "declared", "output", "csv", "cwd"):
@@ -458,6 +534,11 @@ def main() -> int:
     batch.add_argument("--loopback-port", type=int)
     batch.add_argument("paths", nargs="+")
     batch.add_argument("--bun-config", default="/dev/null")
+    stress = subs.add_parser("load")
+    for option in ("records", "cwd", "tree", "changed-files", "policy-root"):
+        stress.add_argument("--" + option, required=True)
+    stress.add_argument("--workers", type=int, default=max(2, min(6, (os.cpu_count() or 4) // 4)))
+    stress.add_argument("paths", nargs="*")
     args = parser.parse_args()
     try:
         if args.action == "identity":
@@ -474,6 +555,8 @@ def main() -> int:
             if args.workers < 1 or args.deadline <= 0:
                 raise ValueError("workers and deadline must be positive")
             return stage(args)
+        if args.action == "load":
+            return load(args)
         return collect(args)
     except (OSError, ValueError, TypeError, KeyError) as error:
         print("SUITE_TIMING_INVALID: " + str(error), file=sys.stderr)

@@ -444,6 +444,24 @@ run_affected_tests() {
 		bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/test-budget.ts" \
 			--repo "$SCRIPT_DIR/.." --enforce "$metric_rows" --changed-files "$WORK/budget-changed-files" --json || tests_rc=$?
 	fi
+	load_selection=
+	for load_file in $focused_selection; do
+		if printf '%s\n' "$CHANGED" | grep -Fxq "$load_file"; then
+			load_selection="$load_selection $load_file"
+		fi
+	done
+	if [ "$tests_rc" -eq 0 ] && [ -n "$load_selection" ]; then
+		load_started=$(date +%s)
+		load_queued_before=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
+		# LOADGATE1: only added/changed files get a second, concurrent K-copy wave.
+		# Keep its records separate: load copies are not reusable focused-file timings.
+		# shellcheck disable=SC2086
+		heavy_step load-tests python3 "$SCRIPT_DIR/suite-metrics.py" load \
+			--cwd "$ARCHIVE_DIR" --tree "$metric_tree" --records "$WORK/load-metrics-$(date +%s)-$$" \
+			--policy-root "$SCRIPT_DIR/.." --changed-files "$WORK/budget-changed-files" $load_selection || tests_rc=$?
+		load_queued_after=$(awk '{ s += $1 } END { printf "%d", s }' "$WORK/queued.secs")
+		echo "$(($(date +%s) - load_started - (load_queued_after - load_queued_before)))" >>"$WORK/tests.secs"
+	fi
 	echo "affected tests: files=$files ran=$ran fail=${failed:-0} rc=$tests_rc"
 	record_run "$ran" "$files" "$tests_rc"
 	if [ "$tests_rc" -ne 0 ]; then

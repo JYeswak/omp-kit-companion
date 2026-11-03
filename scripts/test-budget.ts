@@ -67,6 +67,7 @@ try {
 	let changedFiles: string | undefined;
 	let basePolicy: string | undefined;
 	let checkFile = false;
+	let limitsOnly = false;
 	const seen = new Set<string>();
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -76,6 +77,7 @@ try {
 		else if (arg === "--check") check = true;
 		else if (arg === "--json") continue;
 		else if (arg === "--check-file-policy") checkFile = true;
+		else if (arg === "--file-limits") limitsOnly = true;
 		else if (["--repo", "--workers", "--enforce", "--verdict-history", "--timings-dir", "--changed-files", "--base-policy"].includes(arg)) {
 			const value = args[++i];
 			if (!value || value.startsWith("--")) throw new Error(`INVALID_ARGUMENT missing ${arg} value`);
@@ -90,9 +92,14 @@ try {
 			else history = value;
 		} else throw new Error(`INVALID_ARGUMENT ${arg}`);
 	}
-	if (checkFile ? (!basePolicy || derive || enforcement || changedFiles || history || timingsDir || check) : ((!derive && !enforcement) || (derive && enforcement) || (check && !derive) || (history && !derive) || (timingsDir && !derive) || (changedFiles && !enforcement) || basePolicy)) throw new Error("INVALID_ARGUMENT use --check-file-policy --base-policy FILE, --derive [--check] [--timings-dir DIR], or --enforce FILE [--changed-files FILE]");
+	if (limitsOnly ? (checkFile || basePolicy || derive || enforcement || changedFiles || history || timingsDir || check || seen.has("--workers")) : checkFile ? (!basePolicy || derive || enforcement || changedFiles || history || timingsDir || check) : ((!derive && !enforcement) || (derive && enforcement) || (check && !derive) || (history && !derive) || (timingsDir && !derive) || (changedFiles && !enforcement) || basePolicy)) throw new Error("INVALID_ARGUMENT use --file-limits, --check-file-policy --base-policy FILE, --derive [--check] [--timings-dir DIR], or --enforce FILE [--changed-files FILE]");
 	const config = object(json(resolve(repo, ".github/test-budget.json")));
 	if (config.version !== 1) throw new Error("INVALID_INPUT budget version");
+	if (limitsOnly) {
+		const policy = filePolicy(config);
+		console.log(JSON.stringify({ cap_s: policy.cap, grandfathered: Object.fromEntries(policy.grandfathered) }));
+		process.exit(0);
+	}
 	if (checkFile) {
 		checkFilePolicy(config, object(json(resolve(repo, basePolicy!))));
 		console.log(machine ? JSON.stringify({ status: "OK", mode: "file-policy" }) : "FILE_BUDGET_POLICY OK (grandfather list and ceilings may only shrink)");
