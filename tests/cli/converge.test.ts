@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { convergeCommand, convergeRepository, type ConvergeOptions, type ConvergeResult } from "../../src/converge.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { incarnationSync } from "../../src/kitlib/proc.ts";
+import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 const root = resolve(import.meta.dir, "../.."), scratchRoot = join(root, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
@@ -87,9 +88,11 @@ process.stdout.write(p.stdout??'');process.stderr.write(p.stderr??'');process.ex
 `);
 	chmodSync(wrapper, 0o755);
 	const code = `import {convergeRepository} from ${JSON.stringify(join(root, "src/converge.ts"))}; console.log(JSON.stringify(await convergeRepository(JSON.parse(process.argv[1]))));`;
-	const p = spawnSync(process.execPath, ["-e", code, JSON.stringify({ repo: w.a, apply: true, ...options })], { env: { ...cleanEnv, PATH: `${bin}:${cleanEnv.PATH}` }, encoding: "utf8", timeout: 30_000 });
-	if (p.status !== 0) throw new Error(`converge child failed: ${p.stdout}\n${p.stderr}`);
-	return JSON.parse(p.stdout) as ConvergeResult;
+	const p = runFixture([process.execPath, "-e", code, JSON.stringify({ repo: w.a, apply: true, ...options })],
+		{ cwd: root, env: { ...cleanEnv, PATH: `${bin}:${cleanEnv.PATH}` }, floor_s: 30, label: "converge race child" });
+	const stdout = new TextDecoder().decode(p.stdout), stderr = new TextDecoder().decode(p.stderr);
+	if (p.rc !== 0) throw new Error(`converge child failed: ${stdout}\n${stderr}`);
+	return JSON.parse(stdout) as ConvergeResult;
 }
 afterAll(() => owned.cleanup());
 
@@ -279,6 +282,8 @@ test("dead CAS authority is replaced using its exact token, not its pathname", a
 	git(w.a, "update-ref", "refs/omp-kit/converge-lock", token.stdout.trim()); put(w.a, ".git/git_converge.lock", String(pid)); remote(w, "f1", "remote\n");
 	expect((await apply(w)).applied).toBe(true); expect(read(w.a, "f1")).toBe("remote\n"); expect(git(w.a, "for-each-ref", "--format=%(refname)", "refs/omp-kit/converge-lock")).toBe("");
 });
+// Fixture setup, runtime startup and rendezvous are not latency assertions.
+// Scale their bounds together; production lock checks and the file budget stay unchanged.
 test("two simultaneous stale-lock reclaimers cannot delete the active replacement lock", async () => {
 	const w = world(); remote(w, "f1", "remote\n"); put(w.a, ".git/git_converge.lock", String(exitedPid()));
 	const bin = join(w.dir, "concurrent-bin"); mkdirSync(bin);
@@ -286,7 +291,7 @@ test("two simultaneous stale-lock reclaimers cannot delete the active replacemen
 	writeFileSync(wrapper, `#!${process.execPath}
 import {spawnSync} from 'node:child_process'; import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import {join} from 'node:path';
 const args=process.argv.slice(2), label=process.env.CONVERGE_CASE, other=label==='a'?'b':'a', dir=${JSON.stringify(w.dir)}, real=${JSON.stringify(realGit)};
-function waitFor(path){const deadline=Date.now()+10000;while(!existsSync(path)){if(Date.now()>deadline)throw new Error('concurrency rendezvous timed out: '+path);Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);}}
+function waitFor(path){const deadline=Date.now()+${fixtureDeadlineS(10) * 1000};while(!existsSync(path)){if(Date.now()>deadline)throw new Error('concurrency rendezvous timed out: '+path);Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5);}}
 if(args[2]==='update-ref'&&args[3]==='refs/omp-kit/converge-lock'){writeFileSync(join(dir,'ready-'+label),'ready');waitFor(join(dir,'ready-'+other));}
 if(args[2]==='symbolic-ref'){waitFor(join(dir,'finished-'+other));if(readFileSync(join(${JSON.stringify(w.a)},'.git/git_converge.lock'),'utf8')!==String(process.ppid))throw new Error('active replacement PID file was removed');}
 const p=spawnSync(real,args,{env:process.env,input:readFileSync(0)});process.stdout.write(p.stdout??'');process.stderr.write(p.stderr??'');process.exit(p.status??1);
@@ -296,7 +301,7 @@ const p=spawnSync(real,args,{env:process.env,input:readFileSync(0)});process.std
 	const children = ["a", "b"].map(label => Bun.spawn([process.execPath, "-e", source], { env: { ...cleanEnv, PATH: `${bin}:${cleanEnv.PATH}`, CONVERGE_CASE: label }, stdout: "pipe", stderr: "pipe" }));
 	const outputs = await Promise.all(children.map(async child => { const [stdout, stderr, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]); if (status !== 0) throw new Error(stderr); return JSON.parse(stdout) as ConvergeResult; }));
 	expect(outputs.filter(r => r.applied)).toHaveLength(1); expect(outputs.filter(r => r.reason === "CONVERGE_BUSY")).toHaveLength(1); expect(read(w.a, "f1")).toBe("remote\n"); expect(existsSync(join(w.a, ".git/git_converge.lock"))).toBe(false); expect(git(w.a, "for-each-ref", "--format=%(refname)", "refs/omp-kit/converge-lock")).toBe("");
-}, 20_000);
+}, fixtureDeadlineS(20) * 1000);
 test("unverifiable stale-file ownership refuses instead of deleting an unknown lock", async () => {
 	const w = world(); put(w.a, ".git/git_converge.lock", "not-a-verifiable-owner");
 	expect((await apply(w)).reason).toBe("CONVERGE_LOCK_UNVERIFIED"); expect(readFileSync(join(w.a, ".git/git_converge.lock"), "utf8")).toBe("not-a-verifiable-owner"); expect(git(w.a, "for-each-ref", "--format=%(refname)", "refs/omp-kit/converge-lock")).toBe("");
