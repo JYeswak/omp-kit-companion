@@ -6,11 +6,21 @@ import { createGunzip, type Gunzip } from "node:zlib";
 import { run } from "./kitlib/run.ts";
 import { mineTranscripts } from "./mine-transcripts.ts";
 import { mineHistory } from "./mine-history.ts";
+import { MINE_SOURCES, type MineSource } from "./mine-ledger.ts";
+import { runResumableMine, type MineFileIndex } from "./mine-resume.ts";
+export type { MineSource } from "./mine-ledger.ts";
 
 /** Read existing producers only. No ingest, reindex, tracker import/export or model call. */
 export interface MineOptions {
 	since: string; until: string; all?: boolean; project?: string;
-	cwd?: string; home?: string; env?: NodeJS.ProcessEnv; root?: string;
+	cwd?: string; home?: string; env?: NodeJS.ProcessEnv; root?: string; resumeDir?: string;
+}
+export interface MineScanOptions extends MineOptions {
+	sources?: readonly MineSource[]; census?: MineProject[]; censusOnly?: boolean; lookupBeads?: boolean;
+	seedClasses?: MineClass[]; fileIndex?: MineFileIndex; budgetMultiplier?: number;
+	scopeProject?: string;
+	verdictOwners?: Readonly<Record<string, string>>;
+	onFinding?: (finding: MineSourceFinding) => void;
 }
 export interface MineEvidence { citation: string; timestamp: string; producer: string; summary: string }
 export interface MineCoverage {
@@ -31,6 +41,7 @@ export interface MineSourceFinding {
 }
 export interface MineSourceContext {
 	home: string; projects: readonly { name: string; path: string }[]; since_ms: number; until_ms: number;
+	sources?: readonly MineSource[]; targetProject?: string; skipFile?: (path: string) => boolean;
 	readLines: (path: string, producer: string, consume: (row: Record<string, unknown>, citation: string) => void) => Promise<MineCoverage>;
 	emit: (finding: MineSourceFinding) => void;
 	markSource: (project: string, producer: string, records: number) => void;
@@ -40,6 +51,7 @@ export interface MineSourceContext {
 }
 export interface MineProject {
 	name: string; path: string; events: number; session_spans: number; telemetry_sources: string[]; source_records: Record<string, number>;
+	configured?: boolean;
 }
 export interface MineReport {
 	schema_version: "omp-kit.mine.v1"; since: string; until: string;
@@ -49,6 +61,8 @@ export interface MineReport {
 	inventory: { producer: string; covers: string; limits: string }[];
 	excluded_inputs: { unconfigured_scratch_events: number; unbound_cli_events: number; evidence: MineEvidence[] };
 	cost_basis: string;
+	ledger?: { path: string; totals: Record<"READ" | "PARTIAL" | "MISSING" | "NONE-EXISTS", number>; reused: number; scanned: number;
+		cells: { project: string; day: string; source: MineSource; status: "READ" | "PARTIAL" | "MISSING" | "NONE-EXISTS"; reasons: string[] }[] };
 }
 const MAX_ROWS = 10_000_000, MAX_FILES = 16_384, MAX_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024 * 1024, MAX_LINE_BYTES = 8 * 1024 * 1024, MAX_COMMAND_BYTES = 64 * 1024 * 1024;
@@ -84,7 +98,7 @@ function day(value: string): number {
 	return parsed;
 }
 function physical(path: string): string { try { return realpathSync(path); } catch { return resolve(path); } }
-function enforcement(id: string): MineClass["cheapest_enforcement"] {
+export function enforcement(id: string): MineClass["cheapest_enforcement"] {
 	if (id.startsWith("commit-refusal:")) return { kind: "preflight check", change: `Expose ${id.slice(15)} in omp-kit preflight before the commit attempt; retain the commit gate as authority.` };
 	if (id.startsWith("release-fail")) return { kind: "code fix", change: "Fix the failing suite/file named by the verdict evidence; do not weaken the release gate or regenerate a passing verdict." };
 	if (id === "reopened-bead" || id === "rework") return { kind: "gate", change: "Require non-author replay of the original acceptance on the exact published revision before close; include this bead's failed witness." };
@@ -100,12 +114,21 @@ function enforcement(id: string): MineClass["cheapest_enforcement"] {
 	return { kind: "preflight check", change: `Surface ${id.replace(/^guard-friction:/, "")} and its existing remedy before dispatch; preserve the guard and check the cited refusal for false positives.` };
 }
 
+/** Native commands supply root and resume under var/; library callers may explicitly stay ephemeral. */
 export async function runMine(options: MineOptions): Promise<MineReport> {
+	return options.root || options.resumeDir ? runResumableMine(options) : scanMine(options);
+}
+
+/** Existing producers remain the sole analyzers; the resume driver scopes this scanner to one cell. */
+export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	const since = day(options.since), until = day(options.until);
 	if (until <= since || until - since > 366 * 86400_000) throw new Error("mine window must be positive and at most 366 days; --until is exclusive");
 	if (options.all && options.project) throw new Error("mine accepts --project or --all, not both");
 	const env = options.env ?? process.env, home = options.home ?? env.HOME ?? homedir();
 	const cwd = physical(options.cwd ?? process.cwd());
+	const wanted = (source: MineSource) => (options.sources ?? MINE_SOURCES).includes(source);
+	const multiplier = Math.max(1, Math.min(4, options.budgetMultiplier ?? 1));
+	const byteLimit = MAX_BYTES * multiplier, rowLimit = MAX_ROWS * multiplier, fileLimit = MAX_FILES * multiplier;
 	const state = join(env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
 	const cc = env.CC_STATE ?? join(state, "cc");
 	const config = env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "omp-kit", "fleet-watch.json");
@@ -115,7 +138,7 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 	const warn = (message: string) => { if (!report.warnings.includes(message)) report.warnings.push(message); };
 	const projects = new Map<string, MineProject>();
 	const configuredProjects = new Set<string>();
-	const classes = new Map<string, MineClass>();
+	const classes = new Map<string, MineClass>((options.seedClasses ?? []).map(c => [`${c.project}\0${c.id}`, c]));
 	const beads = new Map<string, string>();
 	const beadDocuments = new Map<string, string>();
 	const seen = new Set<string>();
@@ -124,6 +147,7 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 	const deferredCc = new Map<string, MineSourceFinding>();
 	const primaryObserved = new Set<string>();
 	const start = performance.now(); let rows = 0, files = 0, bytes = 0, searches = 0;
+	const fileLimitBytes = options.fileIndex ? byteLimit : MAX_FILE_BYTES;
 	const expired = () => performance.now() - start >= DEADLINE_MS;
 	function addProject(path: string, name?: string): string | null {
 		if (!isAbsolute(path)) return null;
@@ -176,6 +200,7 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 			classes.set(key, entry);
 		}
 		entry.count++;
+		options.onFinding?.({ class_id: id, project, time_ms: t, producer, citation, summary, measured_minutes: measured, proxy_minutes: proxy, identity });
 		if (measured !== null) entry.measured_minutes_lost = (entry.measured_minutes_lost ?? 0) + measured;
 		else entry.unmeasured_events++;
 		if (measured !== null || proxy > 0) entry.estimated_minutes_lost = (entry.estimated_minutes_lost ?? 0) + (measured ?? proxy);
@@ -186,13 +211,14 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 	function event(row: Record<string, unknown>, citation: string, producer: string, forcedProject?: string) {
 		const data = object(row.data) ?? row;
 		const t = timestamp(row.time_ms ?? row.time ?? row.ts ?? row.at ?? row.timestamp ?? row.recorded_at ?? row.finished_ms ?? data.start_ms);
-		if (t === null || t < since || t >= until) return;
+		if (t === null) return;
 		const type = text(row.type) ?? "";
 		const actionId = text(data.action_id), action = actionId ? actions.get(actionId) : undefined;
-		if (type === "action.attempt") {
+		if (type === "action.attempt" && t < until) {
 			if (actionId) actions.set(actionId, { surface: code(data.surface), repo: text(row.repo) });
 			return;
 		}
+		if (t < since || t >= until) return;
 		const project = forcedProject ?? projectFor(action?.repo && !text(row.repo) ? { ...row, repo: action.repo } : row);
 		const identity = text(row.event_id) ?? text(row.id) ?? citation;
 		if (project === "@excluded-scratch" || (type === "action.result" && project === "@unattributed")) {
@@ -251,26 +277,29 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 	}
 	function json(path: string, max = MAX_FILE_BYTES): unknown {
 		const st = lstatSync(path);
-		if (!st.isFile() || st.isSymbolicLink() || st.size > max || bytes + st.size > MAX_BYTES) throw new Error("bounded regular file required");
+		if (!st.isFile() || st.isSymbolicLink() || st.size > max || bytes + st.size > byteLimit) throw new Error("bounded regular file required");
 		bytes += st.size; return JSON.parse(readFileSync(path, "utf8"));
 	}
 	async function lines(path: string, producer: string, consume: (row: Record<string, unknown>, citation: string) => void) {
 		const cov = coverage(producer, path);
 		if (!existsSync(path)) { cov.status = "MISSING"; return cov; }
-		if (++files > MAX_FILES || expired()) { cov.status = "PARTIAL"; cov.detail = "File/deadline bound reached"; return cov; }
+		if (producer === "omp-transcript" && options.fileIndex?.canSkip(path, since, until)) { cov.detail = "Unchanged complete timestamp index proves no records in this UTC cell."; return cov; }
+		if (++files > fileLimit || expired()) { cov.status = "PARTIAL"; cov.detail = `${path}:1: Cell file/deadline bound reached`; return cov; }
 		let stream: ReadStream | Gunzip | undefined;
 		let source: ReadStream | undefined;
+		let line = 0, min: number | null = null, max: number | null = null, safeIndex = true;
+		const signature = producer === "omp-transcript" ? options.fileIndex?.signature(path) : undefined;
 		try {
 			const st = lstatSync(path);
 			if (!st.isFile() || st.isSymbolicLink()) throw new Error("not regular");
 			source = createReadStream(path, { highWaterMark: 64 * 1024 });
 			stream = path.endsWith(".gz") ? source.pipe(createGunzip()) : source;
 			if (stream !== source) source.on("error", error => stream?.destroy(error));
-			let pending = "", length = 0, line = 0, dropping = false;
+			let pending = "", length = 0, dropping = false;
 			const decoder = new TextDecoder("utf-8", { fatal: true });
 			for await (const chunk of stream) {
 				length += chunk.length; bytes += chunk.length;
-				if (length > MAX_FILE_BYTES || bytes > MAX_BYTES || expired()) throw new Error("read bound");
+				if (length > fileLimitBytes || bytes > byteLimit || expired()) throw new Error("Cell byte/deadline bound reached");
 				let decoded = decoder.decode(chunk, { stream: true });
 				if (dropping) {
 					const newline = decoded.indexOf("\n");
@@ -281,79 +310,103 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 				let end: number;
 				while ((end = pending.indexOf("\n")) >= 0) {
 					const raw = pending.slice(0, end); pending = pending.slice(end + 1); line++;
-					if (++rows > MAX_ROWS) throw new Error("row bound");
-					if (Buffer.byteLength(raw) > MAX_LINE_BYTES) { cov.status = "PARTIAL"; cov.detail = "Oversize records omitted; later records still scanned"; continue; }
+					if (++rows > rowLimit) throw new Error("Cell row bound reached");
+					if (Buffer.byteLength(raw) > MAX_LINE_BYTES) { cov.status = "PARTIAL"; cov.detail = `${path}:${line}: Oversize record omitted; later records still scanned`; safeIndex = false; continue; }
 					if (!raw.trim()) continue;
 					try {
 						const row = object(JSON.parse(raw));
 						if (!row) throw new Error("nonobject");
-						observe(cov, timestamp(row.time_ms ?? row.time ?? row.ts ?? row.at ?? row.timestamp));
+						const time = timestamp(row.time_ms ?? row.time ?? row.ts ?? row.at ?? row.timestamp ?? object(row.message)?.timestamp);
+						if (row.type !== "title" && row.type !== "session") {
+							if (time === null) safeIndex = false;
+							else { min = min === null ? time : Math.min(min, time); max = max === null ? time : Math.max(max, time); }
+						}
+						observe(cov, time);
 						consume(row, `${path}:${line}`);
-					} catch { cov.status = "PARTIAL"; cov.detail = "Malformed or unprocessable rows omitted"; }
+					} catch (error) { cov.status = "PARTIAL"; cov.detail = `${path}:${line}: Malformed or unprocessable row: ${String(error).slice(0, 300)}`; safeIndex = false; }
 				}
-				if (pending.length > MAX_LINE_BYTES) { pending = ""; dropping = true; cov.status = "PARTIAL"; cov.detail = "Oversize records omitted; later records still scanned"; }
+				if (pending.length > MAX_LINE_BYTES) { pending = ""; dropping = true; cov.status = "PARTIAL"; cov.detail = `${path}:${line + 1}: Oversize record omitted; later records still scanned`; safeIndex = false; }
 			}
 			pending += decoder.decode();
-			if (pending.trim() || dropping) { cov.status = "PARTIAL"; cov.detail ||= "Unterminated tail omitted"; }
-		} catch { cov.status = "PARTIAL"; cov.detail ||= "Unreadable, malformed, nonregular or bounded source"; }
+			if (pending.trim() || dropping) { cov.status = "PARTIAL"; cov.detail ||= `${path}:${line + 1}: Unterminated tail omitted`; safeIndex = false; }
+			if (signature && safeIndex && cov.status === "READ") options.fileIndex?.record(path, signature, min, max);
+		} catch (error) { cov.status = "PARTIAL"; cov.detail ||= `${path}:${line + 1}: ${String(error).slice(0, 300)}; unread content remains unknown`; }
 		finally { stream?.destroy(); source?.destroy(); }
 		return cov;
 	}
 	try {
-		const doc = object(json(config, 2 * 1024 * 1024));
+		const doc = options.census ? null : object(json(config, 2 * 1024 * 1024));
 		for (const key of ["sessions", "herdr"]) for (const row of Array.isArray(doc?.[key]) ? doc[key] : []) {
 			const p = object(row);
 			if (text(p?.repo)) { const path = addProject(String(p!.repo), text(p?.session) ?? basename(String(p!.repo))); if (path) configuredProjects.add(path); }
+		}
+		for (const p of options.census ?? []) {
+			const path = addProject(p.path, p.name); if (path && p.configured) configuredProjects.add(path);
 		}
 	} catch { warn("Fleet configuration unavailable; project census falls back to observed CC repos and cwd."); }
 	if (!options.all && !options.project) addProject(cwd);
 	let database: Database | undefined;
 	const dbPath = join(cc, "cc.db");
-	if (existsSync(dbPath)) {
+	if ((wanted("cc") || options.censusOnly) && existsSync(dbPath)) {
 		const cov = coverage("CC projections", dbPath, "Read-only snapshot of windowed tool spans, guards, action failures and bead transitions; raw sessions are not rescanned.");
 		try {
 			if (lstatSync(dbPath).isSymbolicLink()) throw new Error("symlink database");
 			database = new Database(dbPath, { readonly: true });
 			database.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=1000; BEGIN");
-			const sql = "SELECT e.event_id,e.cursor,e.type,e.time_ms,e.repo,e.bead,e.data FROM events e WHERE e.type IN ('tool.call','guard.decision','action.attempt','action.result','bead.status') AND (e.type<>'action.attempt' OR e.repo IS NOT NULL) AND e.time_ms>=? AND e.time_ms<? ORDER BY e.time_ms,e.cursor LIMIT ?";
-			for (const raw of database.query(sql).iterate(since, until, MAX_ROWS + 1)) {
-				if (++rows > MAX_ROWS || expired()) { cov.status = "PARTIAL"; cov.detail += " Row/deadline bound reached."; break; }
+			const sql = options.censusOnly
+				? "SELECT DISTINCT repo FROM events WHERE repo IS NOT NULL AND time_ms>=? AND time_ms<? LIMIT ?"
+				: "SELECT e.event_id,e.cursor,e.type,e.time_ms,e.repo,e.bead,e.data FROM events e WHERE e.type IN ('tool.call','guard.decision','action.attempt','action.result','bead.status') AND (e.type<>'action.attempt' OR e.repo IS NOT NULL) AND ((e.time_ms>=? AND e.time_ms<?) OR (e.type='action.attempt' AND e.time_ms>=? AND e.time_ms<?)) ORDER BY e.time_ms,e.cursor LIMIT ?";
+			const parameters = options.censusOnly ? [since, until, rowLimit + 1] : [since, until, since - 86400_000, since, rowLimit + 1];
+			for (const raw of database.query(sql).iterate(...parameters)) {
+				if (++rows > rowLimit || expired()) { cov.status = "PARTIAL"; cov.detail += " Cell row/deadline bound reached."; break; }
 				const row = object(raw); if (!row) continue;
 				observe(cov, timestamp(row.time_ms));
 				if (text(row.repo)) addProject(String(row.repo));
+				if (options.censusOnly) continue;
 				try { row.data = JSON.parse(String(row.data)); event(row, `${dbPath}#events.cursor=${row.cursor}`, row.type === "bead.status" ? "CC projections" : "CC observations"); }
 				catch { cov.status = "PARTIAL"; cov.detail += " Invalid event data."; }
 			}
 			const first = object(database.query("SELECT MIN(time_ms) AS first FROM events WHERE type='tool.call'").get());
-			if (number(first?.first) === null || Number(first?.first) > since) warn("CC session history starts after --since (or is empty); earlier days are not proven quiet.");
-		} catch { cov.status = "PARTIAL"; cov.detail = "CC database unavailable or incompatible; inspect cc.py unknowns. No ingest performed."; }
+			if (!options.censusOnly && (number(first?.first) === null || Number(first?.first) > since)) {
+				warn("CC session history starts after --since (or is empty); earlier days are not proven quiet.");
+				if (cov.rows === 0) { cov.status = "MISSING"; cov.detail = `${dbPath}: No retained CC rows in this day; first retained tool span ${first?.first === null ? "unknown" : new Date(Number(first?.first)).toISOString()}. Earlier records cannot be recovered from this store.`; }
+			}
+		} catch (error) { cov.status = "PARTIAL"; cov.detail = `${dbPath}: ${String(error).slice(0, 300)}; no ingest performed.`; }
 		finally { database?.close(); }
-	} else {
+	} else if (wanted("cc") || options.censusOnly) {
 		coverage("CC projections", dbPath).status = "MISSING";
 		for (const base of [join(cc, "spool-archive"), join(cc, "spool")]) {
 			if (!existsSync(base)) { coverage("CC spool", base).status = "MISSING"; continue; }
 			for (const producer of readdirSync(base, { withFileTypes: true }).filter(d => d.isDirectory()).sort((a, b) => compare(a.name, b.name))) {
 				for (const entry of readdirSync(join(base, producer.name), { withFileTypes: true }).filter(d => d.isFile() && /\.jsonl(?:\.gz)?$/.test(d.name)).sort((a, b) => compare(a.name, b.name))) {
 					// Day is append/observation day, not event time. Include later shards (backfills), then filter each event's time.
-					if (/^\d{4}-\d{2}-\d{2}/.test(entry.name) && entry.name.slice(0, 10) < options.since) continue;
+					if (/^\d{4}-\d{2}-\d{2}/.test(entry.name) && entry.name.slice(0, 10) < new Date(since - 86400_000).toISOString().slice(0, 10)) continue;
 					await lines(join(base, producer.name, entry.name), "CC spool", (row, citation) => { if (text(row.repo)) addProject(String(row.repo)); event(row, citation, row.type === "bead.status" ? "CC spool" : "CC observations:spool"); });
 				}
 			}
 		}
 	}
+	let targetProject = options.scopeProject;
 	if (options.project) {
 		if (isAbsolute(options.project) && existsSync(options.project) && lstatSync(physical(options.project)).isDirectory()) addProject(options.project, basename(options.project));
 		const matches = [...projects.values()].filter(p => p.name === options.project || basename(p.path) === options.project || p.path === physical(options.project!));
 		if (matches.length !== 1) throw new Error("--project must identify exactly one fleet/observed project or existing absolute checkout path");
-		for (const key of projects.keys()) if (key !== matches[0]!.path) projects.delete(key);
+		targetProject ??= matches[0]!.path;
+		if (!options.census) for (const key of projects.keys()) if (key !== matches[0]!.path) projects.delete(key);
 	} else if (!options.all) {
-		for (const key of projects.keys()) if (key !== cwd) projects.delete(key);
+		targetProject ??= cwd;
+		if (!options.census) for (const key of projects.keys()) if (key !== cwd) projects.delete(key);
 	}
-	const selectedProjects = new Set(projects.keys());
+	const selectedProjects = targetProject ? new Set([targetProject]) : new Set(projects.keys());
+	if (options.censusOnly) {
+		report.projects = [...projects.values()].filter(p => options.all || selectedProjects.has(p.path)).map(p => ({ ...p, configured: configuredProjects.has(p.path) })).sort((a, b) => compare(a.path, b.path));
+		report.status = report.coverage.some(c => c.status === "PARTIAL") ? "PARTIAL" : "QUIET";
+		return report;
+	}
 	if (!projects.size && options.all) warn("No configured or observed projects were found.");
 	// Resolve bead ids before reading old gate rows, whose only project binding may be target=BEAD.
 	const trackerExports = new Set<string>();
-	for (const p of projects.values()) {
+	for (const p of wanted("tracker") || wanted("hooks") || wanted("cc") || options.lookupBeads !== false ? projects.values() : []) {
 		const exportPath = join(p.path, ".beads", "issues.jsonl");
 		const canonicalExport = physical(exportPath);
 		if (trackerExports.has(canonicalExport)) {
@@ -369,13 +422,14 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 			beads.set(id, beadOwner);
 			beadDocuments.set(`${canonicalExport}\0${id}`, [text(row.title), text(row.description), text(row.notes),
 				...(Array.isArray(row.comments) ? row.comments.map(c => text(object(c)?.text) ?? text(object(c)?.body)) : [])].filter(Boolean).join("\n").toLowerCase());
-			for (const comment of Array.isArray(row.comments) ? row.comments : []) {
+			for (const comment of wanted("tracker") ? Array.isArray(row.comments) ? row.comments : [] : []) {
 				const c = object(comment); const content = text(c?.text) ?? text(c?.body) ?? "";
 				const t = timestamp(c?.created_at ?? c?.timestamp);
 				if (t !== null && /^(?:REWORK\b|(?:VERDICT|Verdict):[ \t]*REWORK\b)/.test(content.trimStart())) emit("rework", beadOwner, t, "bead export", `${citation}#comment=${code(c?.id)}`, `REWORK ${code(id)}`, null, 5, `rework:${beadOwner}:${id}:${new Date(t).toISOString().slice(0, 10)}`);
 			}
 		});
 	}
+	if (wanted("hooks")) {
 	for (const suffix of [".1", ""]) await lines(join(state, `gate-events.jsonl${suffix}`), "gate-events", (r, c) => event(r, c, "gate-events"));
 	for (const suffix of [".1", ""]) await lines(join(state, `scratch-reap-log.jsonl${suffix}`), "scratch mine", (r, c) => event(r, c, "scratch mine"));
 	const flywheel = join(env.XDG_STATE_HOME ?? join(home, ".local", "state"), "flywheel");
@@ -389,13 +443,14 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 		}
 		if (oldFiles) coverage("hook refusals", flywheel, `${oldFiles} historical logs last written before --since were not read; no event dates inferred from mtime.`);
 	} else coverage("hook refusals", flywheel).status = "MISSING";
+	}
 	const childEnv: Record<string, string> = {};
 	for (const [key, value] of Object.entries(env)) if (value !== undefined && !key.startsWith("BEADS_") && !key.startsWith("BR_") && !key.startsWith("GIT_")) childEnv[key] = value;
 	childEnv.HOME = home; childEnv.PYTHONDONTWRITEBYTECODE = "1";
 	async function command(argv: string[], cwd: string, deadlineSeconds = 3, outputBytes = 1024 * 1024): Promise<string | null> {
-		if (expired() || bytes >= MAX_BYTES) return null;
+		if (expired() || bytes >= byteLimit) return null;
 		try {
-			const result = await run(["nice", "-n", "10", ...argv], { cwd, env: childEnv, deadline_s: Math.min(deadlineSeconds, Math.max(0.05, (DEADLINE_MS - (performance.now() - start)) / 1000)), grace_s: 0.1, max_output_bytes: Math.min(outputBytes, MAX_BYTES - bytes) });
+			const result = await run(["nice", "-n", "10", ...argv], { cwd, env: childEnv, deadline_s: Math.min(deadlineSeconds, Math.max(0.05, (DEADLINE_MS - (performance.now() - start)) / 1000)), grace_s: 0.1, max_output_bytes: Math.min(outputBytes, byteLimit - bytes) });
 			bytes += result.stdout.length + result.stderr.length;
 			if (result.rc !== 0 || result.timed_out || result.truncated) return null;
 			return new TextDecoder("utf-8", { fatal: true }).decode(result.stdout).trim();
@@ -403,7 +458,7 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 	}
 	// Cache the native tracker census once, before large session archives can consume the scan budget.
 	const searchCache = new Map<string, { id: string; title: string; document: string }[] | null>();
-	for (const p of projects.values()) {
+	for (const p of options.lookupBeads === false ? [] : projects.values()) {
 		if ((!options.all && !selectedProjects.has(p.path)) || searches >= MAX_SEARCHES || expired()) continue;
 		const tracker = join(p.path, ".beads", "issues.jsonl");
 		if (!existsSync(tracker)) continue;
@@ -421,7 +476,8 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 		} catch { /* Invalid native census stays UNAVAILABLE. */ }
 	}
 	const sourceContext: MineSourceContext = {
-		home, projects: [...projects.values()].filter(p => options.all || selectedProjects.has(p.path)), since_ms: since, until_ms: until,
+		home, projects: [...projects.values()].filter(p => options.census || options.all || selectedProjects.has(p.path)), since_ms: since, until_ms: until,
+		sources: options.sources, targetProject, skipFile: options.fileIndex ? path => options.fileIndex!.canSkip(path, since, until) : undefined,
 		readLines: lines, command, expired, warn, coverage,
 		emit: f => emit(f.class_id, f.project, f.time_ms, f.producer, f.citation, f.summary, f.measured_minutes, f.proxy_minutes, f.identity),
 		markSource: (project, producer, records) => {
@@ -434,9 +490,10 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 	// Compact tracker/git evidence must not be starved by large primary session archives.
 	await mineHistory(sourceContext);
 	const stores = new Map<string, string>();
-	for (const p of projects.values()) {
+	for (const p of wanted("hooks") ? projects.values() : []) {
 		if (expired()) break;
 		if (!options.all && !selectedProjects.has(p.path)) continue;
+		if (targetProject && p.path !== targetProject) continue;
 		// git walks upward: never charge an unversioned nested project for its ancestor's failures.
 		const top = await command(["git", "-C", p.path, "rev-parse", "--show-toplevel"], p.path);
 		if (!top || physical(top) !== p.path) continue;
@@ -454,12 +511,13 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 		}
 	}
 	for (const [store, project] of [...stores].sort((a, b) => compare(a[0], b[0]))) {
+		if (options.verdictOwners?.[physical(store)] && options.verdictOwners[physical(store)] !== project) continue;
 		if (!existsSync(store)) { coverage("release-verdict", store).status = "MISSING"; continue; }
 		for (const directory of [store, join(store, "ci-only")]) {
 			if (!existsSync(directory)) continue;
 			for (const entry of readdirSync(directory, { withFileTypes: true }).filter(d => d.isFile() && d.name.endsWith(".json")).sort((a, b) => compare(a.name, b.name))) {
 				const path = join(directory, entry.name), cov = coverage("release-verdict", path);
-				if (++files > MAX_FILES || expired()) { cov.status = "PARTIAL"; cov.detail = "File/deadline bound"; break; }
+				if (++files > fileLimit || expired()) { cov.status = "PARTIAL"; cov.detail = `${path}: Cell file/deadline bound`; break; }
 				try {
 					const row = object(json(path, 4 * 1024 * 1024));
 					if (!row || (row.verdict !== "PASS" && row.verdict !== "FAIL")) { cov.detail = "Not a complete verdict record; ignored"; continue; }
@@ -471,7 +529,7 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 			}
 		}
 	}
-	await mineTranscripts(sourceContext);
+	if (wanted("transcripts")) await mineTranscripts(sourceContext);
 	for (const f of deferredCc.values()) if (!primaryObserved.has(f.project)) emit(f.class_id, f.project, f.time_ms, f.producer, f.citation, f.summary, f.measured_minutes, f.proxy_minutes, f.identity);
 	report.projects = [...projects.values()].filter(p => options.all || selectedProjects.has(p.path)).sort((a, b) => compare(a.path, b.path));
 	for (const p of report.projects) p.telemetry_sources.sort(compare);
@@ -494,7 +552,7 @@ export async function runMine(options: MineOptions): Promise<MineReport> {
 	if (report.excluded_inputs.unconfigured_scratch_events || report.excluded_inputs.unbound_cli_events) warn("Unconfigured scratch/test cwds and unbound CLI telemetry are quarantined in excluded_inputs, not ranked as operational loss.");
 	if (report.projects.some(p => p.telemetry_sources.length === 0)) warn("Some projects have no observed telemetry in this window; their zero events do not mean quiet.");
 	if (expired()) warn("20-minute mining deadline reached; output is partial.");
-	if (bytes >= MAX_BYTES || rows >= MAX_ROWS || files >= MAX_FILES) warn("Mining resource bound reached; output is partial.");
+	if (bytes >= byteLimit || rows >= rowLimit || files >= fileLimit) warn("Mining cell resource bound reached; output is partial.");
 	if (report.coverage.some(c => c.status === "PARTIAL") || report.warnings.length) report.status = "PARTIAL";
 	else report.status = report.classes.length ? "FINDINGS" : "QUIET";
 	report.warnings.sort(compare);
@@ -509,6 +567,12 @@ export function renderMine(report: MineReport): string {
 	for (const c of report.classes) {
 		lines.push("", `## ${markdown(c.project)} — ${c.id}`, c.cheapest_enforcement.change);
 		for (const e of c.evidence) lines.push(`- ${e.timestamp} ${e.producer}: ${markdown(e.summary)} — \`${markdown(e.citation)}\``);
+	}
+	if (report.ledger) {
+		lines.push("", "## Resumable UTC coverage ledger", `Ledger: \`${markdown(report.ledger.path)}\``,
+			`READ ${report.ledger.totals.READ}; PARTIAL ${report.ledger.totals.PARTIAL}; MISSING ${report.ledger.totals.MISSING}; NONE-EXISTS ${report.ledger.totals["NONE-EXISTS"]}. Reused ${report.ledger.reused}; scanned ${report.ledger.scanned} cells.`,
+			"Each cell is one project, one UTC day and one source. NONE-EXISTS describes currently inventoried stores, not proof of historical quiet.");
+		for (const cell of report.ledger.cells) if (cell.status !== "READ" && cell.status !== "NONE-EXISTS") lines.push(`- ${cell.status} ${cell.day} ${cell.source} \`${markdown(cell.project)}\`: ${cell.reasons.map(markdown).join("; ")}`);
 	}
 	lines.push("", "## Project census");
 	for (const p of report.projects) {

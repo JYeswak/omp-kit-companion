@@ -62,14 +62,14 @@ function context(home: string, paths: string[]) {
 			if (!existsSync(path)) { cov.status = "MISSING"; return cov; }
 			if (!lstatSync(path).isFile() || lstatSync(path).isSymbolicLink()) { cov.status = "PARTIAL"; return cov; }
 			const rows = readFileSync(path, "utf8").split("\n");
-			if (rows.pop()?.trim()) cov.status = "PARTIAL";
+			if (rows.pop()?.trim()) { cov.status = "PARTIAL"; cov.detail = `${path}:${rows.length + 1}: Unterminated tail omitted`; }
 			for (let i = 0; i < rows.length; i++) {
 				const raw = rows[i]; if (!raw?.trim()) continue;
 				try {
 					const row: unknown = JSON.parse(raw);
 					if (row === null || typeof row !== "object" || Array.isArray(row)) throw new Error("object required");
 					cov.rows++; consume(row as Record<string, unknown>, `${path}:${i + 1}`);
-				} catch { cov.status = "PARTIAL"; }
+				} catch (error) { cov.status = "PARTIAL"; cov.detail += ` ${path}:${i + 1}: ${String(error)}`; }
 			}
 			return cov;
 		},
@@ -153,6 +153,8 @@ describe("mineHistory native sources", () => {
 		expect(result.findings).toHaveLength(1); expect(result.findings[0]?.citation).toBe(`${finalPath}:1`);
 		expect(result.coverage.some(c => c.status === "PARTIAL" && c.detail.includes("baseline"))).toBe(true);
 		expect(result.coverage.some(c => c.detail.includes("unknown"))).toBe(true);
+		expect(result.coverage.some(c => c.status === "PARTIAL" && c.detail.includes(`${f.project}/.beads/.br_history/issues.20261003_130000_000000000.jsonl:2:`))).toBe(true);
+		expect(result.coverage.some(c => c.detail.includes(`${finalPath}:2: Changed status`))).toBe(true);
 	});
 
 	test("real git objects supply exact SHA citations, committer window, correction declarations and no writes", async () => {
@@ -200,6 +202,11 @@ describe("mineHistory native sources", () => {
 		expect(result.findings.find(r => r.class_id === "gate-failure:fresh-gate")?.measured_minutes).toBeNull();
 		expect(result.findings.find(r => r.class_id === "release-fail")?.citation).toBe(`${logs}/release-verdict.log:1`);
 		expect(result.coverage.some(c => c.status === "PARTIAL" && c.detail.includes("Undated"))).toBe(true);
+		const consoleCoverage = result.coverage.find(c => c.location === join(logs, "release-verdict.log"));
+		expect(consoleCoverage?.status).toBe("PARTIAL");
+		expect(consoleCoverage?.detail).toContain(`${logs}/release-verdict.log:2: Undated console capture`);
+		expect(consoleCoverage?.detail).not.toContain("bound reached");
+		expect(result.coverage.some(c => c.detail.includes(`${logs}/hook-refusals.jsonl:3: Undated structured row`))).toBe(true);
 	});
 
 	test("structured release verdict reuses identity; credentials redacted before 400-character summary bound", async () => {
@@ -224,5 +231,106 @@ describe("mineHistory native sources", () => {
 		expect(result.findings).toEqual([]);
 		expect(result.coverage.find(c => c.location === join(logs, "release-verdict.log"))?.rows).toBe(2);
 		expect(result.coverage.some(c => c.status === "PARTIAL" && c.detail.includes("Nonregular"))).toBe(true);
+	});
+
+	test("unreadable log directory is partial with its path and OS error rather than missing", async () => {
+		const f = fixture(); await init(f.project);
+		const logs = join(f.project, ".git", "omp-kit");
+		put(logs, "not a directory");
+		const result = context(f.home, [f.project]); result.ctx.sources = ["hooks"];
+		await mineHistory(result.ctx);
+		const cov = result.coverage.find(row => row.location === logs);
+		expect(cov?.status).toBe("PARTIAL");
+		expect(cov?.detail).toContain(`${logs}:1:`);
+		expect(cov?.detail).toContain("ENOTDIR");
+		expect(result.findings).toEqual([]);
+	});
+
+	test("source scopes isolate tracker, git and hooks, including separate gitdir discovery", async () => {
+		const f = fixture(), storage = join(f.home, "git-storage");
+		await git(f.project, ["init", "-q", "--separate-git-dir", storage]);
+		history(f.project, "20260928_130000_000000000", [issue("scoped", "closed", "2026-09-28T12:00:00Z")]);
+		const changed = [issue("scoped", "open", "2026-10-03T12:00:00Z")];
+		history(f.project, "20261004_130000_000000000", changed);
+		put(join(f.project, ".beads", "issues.jsonl"), jsonl(changed));
+		const sha = await commit(f.project, 'Revert "scoped regression"', "2026-10-03T00:00:00Z");
+		await git(f.project, ["update-ref", "refs/heads/history", sha]);
+		put(join(storage, "omp-kit", "hook-refusals.jsonl"), jsonl([{ ts: "2026-10-03T01:00:00Z", event_id: "scoped", gate: "acceptance", act: "commit", kind: "refuse" }]));
+		const before = snapshot(f.home);
+		for (const scope of ["tracker", "git", "hooks"] as const) {
+			const result = context(f.home, [f.project]), commands: string[][] = [];
+			result.ctx.sources = [scope];
+			const command = result.ctx.command;
+			result.ctx.command = async (...args) => { commands.push(args[0]); return command(...args); };
+			await mineHistory(result.ctx);
+			const producer = scope === "tracker" ? "bead history snapshots" : scope === "git" ? "git correction commits" : "repo hook/gate logs";
+			expect(result.findings.map(row => row.class_id)).toEqual([scope === "tracker" ? "reopened-bead" : scope === "git" ? "git-revert" : "commit-refusal:acceptance"]);
+			expect(result.coverage.every(row => row.producer === producer)).toBe(true);
+			expect(result.sources.every(row => row.producer === producer)).toBe(true);
+			if (scope === "tracker") expect(commands).toEqual([]);
+			else {
+				expect(commands.filter(argv => argv.includes("rev-parse"))).toHaveLength(2);
+				expect(commands.some(argv => argv.includes("log"))).toBe(scope === "git");
+			}
+		}
+		expect(snapshot(f.home)).toBe(before);
+	});
+
+	test("transcript, cc and empty scopes do not read history or spawn children, even when expired", async () => {
+		const f = fixture();
+		for (const scopes of [["transcripts"], ["cc"], ["transcripts", "cc"], []] as const) {
+			for (const expired of [false, true]) {
+				const result = context(f.home, [f.project]);
+				result.ctx.sources = scopes;
+				result.ctx.expired = () => expired;
+				result.ctx.command = async () => { throw new Error("unrelated scope spawned a child"); };
+				result.ctx.readLines = async () => { throw new Error("unrelated scope read history"); };
+				await mineHistory(result.ctx);
+				expect(result.findings).toEqual([]);
+				expect(result.coverage).toEqual([]);
+				expect(result.sources).toEqual([]);
+			}
+		}
+	});
+
+	test("text log limits apply per file rather than exhausting later files", async () => {
+		const f = fixture(); await init(f.project);
+		const logs = join(f.project, ".git", "omp-kit"), ts = "2026-10-06T12:00:00Z";
+		const padding = `${ts} docs: ${"x".repeat(64 * 1024)}\n`.repeat(272);
+		for (const name of ["gate-a.log", "gate-b.log"]) put(join(logs, name), padding);
+		put(join(logs, "release-z.log"), `${ts} release: FAIL after both large files\n`);
+		const result = context(f.home, [f.project]); result.ctx.sources = ["hooks"];
+		await mineHistory(result.ctx);
+		expect(result.findings.map(row => row.citation)).toEqual([`${logs}/release-z.log:1`]);
+		for (const name of ["gate-a.log", "gate-b.log", "release-z.log"]) expect(result.coverage.find(row => row.location === join(logs, name))?.status).toBe("READ");
+	});
+
+	test("bounded, malformed, undated and invalid-encoding log failures retain distinct path and line reasons", async () => {
+		const f = fixture(); await init(f.project);
+		const logs = join(f.project, ".git", "omp-kit"), ts = "2026-10-06T12:00:00Z";
+		put(join(logs, "gate-record.log"), `${ts} gate: PASS\n${"x".repeat(1024 * 1024 + 1)}\n`);
+		put(join(logs, "gate-file.log"), `${ts} docs: ${"x".repeat(64 * 1024)}\n`.repeat(520));
+		put(join(logs, "gate-malformed.log"), `${ts} gate: PASS\n{broken-json\n`);
+		put(join(logs, "gate-undated.log"), "FULL-SUITE: VERDICT FAIL console capture\n");
+		put(join(logs, "gate-zone.log"), "2026-10-06T12:00:00 release: FAIL missing zone\n");
+		put(join(logs, "gate-encoding.log"), "");
+		writeFileSync(join(logs, "gate-encoding.log"), Buffer.from([0xff, 0x0a]));
+		put(join(logs, "release-z.log"), `${ts} release: FAIL later readable file\n`);
+		const result = context(f.home, [f.project]); result.ctx.sources = ["hooks"];
+		await mineHistory(result.ctx);
+		for (const [name, line, reason] of [
+			["gate-record.log", 2, "Record byte bound 1048576"],
+			["gate-file.log", null, "Per-file text byte bound 33554432"],
+			["gate-malformed.log", 2, "Malformed structured log"],
+			["gate-undated.log", 1, "Undated console capture"],
+			["gate-zone.log", 1, "Invalid or missing explicit-zone timestamp"],
+			["gate-encoding.log", 1, "TypeError"],
+		] as const) {
+			const cov = result.coverage.find(row => row.location === join(logs, name));
+			expect(cov?.status).toBe("PARTIAL");
+			expect(cov?.detail).toContain(`${logs}/${name}:${line ?? ""}`);
+			expect(cov?.detail).toContain(reason);
+		}
+		expect(result.findings.map(row => row.citation)).toEqual([`${logs}/release-z.log:1`]);
 	});
 });

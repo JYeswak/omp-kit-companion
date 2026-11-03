@@ -40,18 +40,21 @@ export async function mineTranscripts(ctx: MineSourceContext): Promise<void> {
 		visited.add(physical);
 		// Session artifact directories also hold regression corpora and captures named *.jsonl.
 		// Admit the native session envelope before spending the shared streaming budget on a file.
-		let native = false;
+		let native = false, headerProject: typeof projects[number] | undefined;
 		try {
 			const handle = await open(path, "r");
 			try {
 				const prefix = Buffer.alloc(65_536), read = await handle.read(prefix, 0, prefix.length, 0);
 				for (const line of prefix.subarray(0, read.bytesRead).toString("utf8").split("\n")) {
-					try { const header = object(JSON.parse(line)); if (header?.type === "session" && text(header.id) && text(header.cwd)) { native = true; break; } } catch { /* Incomplete prefix or non-session artifact. */ }
+					try { const header = object(JSON.parse(line)); if (header?.type === "session" && text(header.id) && text(header.cwd)) { native = true; headerProject = byCwd(resolve(text(header.cwd))); break; } } catch { /* Incomplete prefix or non-session artifact. */ }
 				}
 			} finally { await handle.close(); }
 		} catch { const c = ctx.coverage(PRODUCER, path, "Native session header unreadable or changed during discovery"); c.status = "PARTIAL"; return; }
 		if (!native) { ctx.coverage(PRODUCER, path, "Non-session artifact JSONL skipped: no native session header in bounded 64 KiB prefix."); return; }
-		let project = rootProject, session = "", records = 0, gaps = 0, unmapped = 0, first: string | null = null, last: string | null = null;
+		if (ctx.targetProject && headerProject?.path !== ctx.targetProject) return;
+		if (headerProject) { covered.add(headerProject.path); ctx.markSource(headerProject.path, PRODUCER, 0); }
+		if (ctx.skipFile?.(path)) { ctx.coverage(PRODUCER, path, "Complete unchanged event-time index and mapped native header prove no records in the requested UTC cell."); return; }
+		let project = headerProject ?? rootProject, session = "", records = 0, gaps = 0, unmapped = 0, first: string | null = null, last: string | null = null;
 		const calls = new Map<string, { name: string; start: number | null }>();
 		const cov = await ctx.readLines(path, PRODUCER, (row, citation) => {
 			if (row.type === "title") return; // Mutable display metadata has updatedAt, not an event timestamp.
@@ -129,11 +132,11 @@ export async function mineTranscripts(ctx: MineSourceContext): Promise<void> {
 	const priority = (p: typeof projects[number]) => ["jev", "localbench", "uds", "zestroku"].includes(basename(p.canonical)) ? 0 : 1;
 	roots.sort((a, b) => priority(a.project) - priority(b.project) || (a.project.path < b.project.path ? -1 : a.project.path > b.project.path ? 1 : a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 	for (const source of roots) {
-		covered.add(source.project.path); ctx.markSource(source.project.path, PRODUCER, 0);
+		if (!ctx.targetProject) { covered.add(source.project.path); ctx.markSource(source.project.path, PRODUCER, 0); }
 		ctx.coverage(PRODUCER, source.path, `Native project session directory: ${source.project.path}`);
 		await walk(source.path, source.project);
 	}
-	for (const project of projects) if (!covered.has(project.path)) {
+	for (const project of projects) if ((!ctx.targetProject || project.path === ctx.targetProject) && !covered.has(project.path)) {
 		const cov = ctx.coverage(PRODUCER, project.path, "No mapped native transcript records discovered"); cov.status = "MISSING";
 	}
 }
