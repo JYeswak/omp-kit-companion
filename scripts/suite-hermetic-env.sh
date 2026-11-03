@@ -23,6 +23,9 @@ def refuse(message: str) -> None:
 for protected in ("GIT_DIR", "GIT_WORK_TREE", "BEADS_DB"):
     os.environ.pop(protected, None)
 
+# Test activity must never enter fleet telemetry, including the inherited-env branch.
+os.environ["OMP_KIT_CC"] = "0"
+
 try:
     separator = sys.argv.index("--", 1)
 except ValueError:
@@ -50,6 +53,7 @@ reserved = {
     "BUN_INSTALL", "BUN_CONFIG_FILE", "KITLIB_TMP_ROOT", "KITROOT",
     "OMP_KIT_CASE_CWD", "OMP_KIT_TEST_WORK_ROOT", "OMP_KIT_OMP_SRC_FETCH",
     "OMP_KIT_DISK_OBSERVER", "KIT_TEST_LOOPBACK_PORT", "GIT_DIR", "GIT_WORK_TREE", "BEADS_DB",
+    "OMP_KIT_CC",
 }
 for name in options.allow_env:
     if (not name or not name.isascii() or not (name[0].isalpha() or name[0] == "_")
@@ -225,6 +229,7 @@ env = {
     "XDG_CACHE_HOME": str(xdg_cache),
     "XDG_DATA_HOME": str(xdg_data),
     "XDG_STATE_HOME": str(xdg_state),
+    "OMP_KIT_CC": "0",
     "GIT_CONFIG_GLOBAL": str(git_config),
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CEILING_DIRECTORIES": str(archive.parent),
