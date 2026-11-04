@@ -56,6 +56,39 @@ while [ $# -gt 0 ]; do
 		*) printf 'release-verdict: unknown argument: %s\n' "$1" >&2; exit 2 ;;
 	esac
 done
+# SUITESHIMPATH1 (ompkit-774u.60.1): the publisher runs this from a seat whose PATH puts the omp-kit
+# agent-bin br shim first, which turns every fixture br call red. full-suite-verdict.sh refuses such a
+# PATH, so drop the agent-bin dir ($HOME/.local/share/omp-kit/agent-bin, as agent-spawn-env.sh installs
+# it) and any entry whose br resolves to scripts/br-shim.sh before calling the runner.
+rv_agent_bin="${HOME:-}/.local/share/omp-kit/agent-bin"
+rv_agent_bin_real=$(CDPATH='' cd -- "$rv_agent_bin" 2>/dev/null && pwd -P) || rv_agent_bin_real=$rv_agent_bin
+rv_path=''
+rv_removed=''
+rv_ifs=$IFS
+IFS=:
+for rv_dir in $PATH; do
+	rv_drop=0
+	if [ -n "$rv_dir" ]; then
+		[ "$rv_dir" = "$rv_agent_bin" ] && rv_drop=1
+		[ "$(CDPATH='' cd -- "$rv_dir" 2>/dev/null && pwd -P)" = "$rv_agent_bin_real" ] && rv_drop=1
+		if [ -f "$rv_dir/br" ]; then
+			case "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$rv_dir/br")" in
+				*/scripts/br-shim.sh) rv_drop=1 ;;
+			esac
+		fi
+	fi
+	if [ "$rv_drop" = 1 ]; then
+		rv_removed="${rv_removed:+$rv_removed:}$rv_dir"
+	else
+		rv_path="${rv_path:+$rv_path:}$rv_dir"
+	fi
+done
+IFS=$rv_ifs
+if [ -n "$rv_removed" ]; then
+	PATH=$rv_path
+	export PATH
+	printf 'release-verdict: PATH sanitized (removed %s)\n' "$rv_removed"
+fi
 GIT_DIR_ABS=$(git -C "$ROOT" rev-parse --absolute-git-dir)
 STATE="$GIT_DIR_ABS/omp-kit"
 LOCK="$STATE/release-verdict.lock"

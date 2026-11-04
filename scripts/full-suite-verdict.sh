@@ -48,8 +48,10 @@ RERUN=0
 JUDGE_ROLE=base
 TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
 FOCUSED_PASSED=
+CHECK_ENV=0
 usage() {
 	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main] [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]" >&2
+	echo "       full-suite-verdict.sh --check-env   (run only the environment guard below)" >&2
 }
 
 fail() {
@@ -66,10 +68,32 @@ while [ "$#" -gt 0 ]; do
 		--cache-dir) [ "$#" -ge 2 ] || { usage; exit 2; }; CACHE_DIR=$2; shift 2 ;;
 		--rerun-reason) [ "$#" -ge 2 ] || { usage; exit 2; }; RERUN=1; RERUN_REASON=$2; shift 2 ;;
 		--focused-passed) [ "$#" -ge 2 ] || { usage; exit 2; }; FOCUSED_PASSED=$2; shift 2 ;;
+		--check-env) CHECK_ENV=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) usage; exit 2 ;;
 	esac
 done
+# SUITESHIMPATH1 (ompkit-774u.60.1): a seat PATH puts the omp-kit agent-bin br shim first; every fixture
+# br call then hits the live shim and is refused, so the suite goes red for the environment, not the tree
+# (bun_fail=99 on 2026-11-02, again 2026-11-04). Refuse before the runtime identity or any suite, with no
+# verdict written. The agent-bin dir is $HOME/.local/share/omp-kit/agent-bin, the path
+# scripts/agent-spawn-env.sh installs; any br whose realpath ends in scripts/br-shim.sh is refused too.
+shim_agent_bin="${HOME:-}/.local/share/omp-kit/agent-bin"
+shim_br=$(command -v br 2>/dev/null) || shim_br=
+if [ -n "$shim_br" ]; then
+	shim_dir=$(CDPATH='' cd -- "$(dirname -- "$shim_br")" 2>/dev/null && pwd -P) || shim_dir=$(dirname -- "$shim_br")
+	shim_real=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$shim_br" 2>/dev/null) || shim_real=$shim_br
+	shim_bin_real=$(CDPATH='' cd -- "$shim_agent_bin" 2>/dev/null && pwd -P) || shim_bin_real=$shim_agent_bin
+	case "$shim_dir|$shim_real" in
+		"$shim_bin_real|"*|*"|"*/scripts/br-shim.sh)
+			echo "FULL_SUITE_SHIM_PATH: br resolves to $shim_br; remove $(dirname -- "$shim_br") from PATH" >&2
+			exit 2 ;;
+	esac
+fi
+if [ "$CHECK_ENV" = 1 ]; then
+	echo "FULL_SUITE_ENV: ok (br=${shim_br:-absent})"
+	exit 0
+fi
 if [ -z "$ROOT" ] || [ -z "$COMMIT" ]; then
 	usage
 	exit 2
