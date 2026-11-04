@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { KNOWN_JOBS, renderLaunchdPlist, renderSystemdUnits } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { RUN_TIME_CAPS_MS } from "../../src/service-run.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { runSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const HOME = "/fixture/user-home/test-op";
 const LAUNCHER = "/fixture/user-home/test-op/.local/bin/omp-kit";
@@ -132,4 +137,48 @@ test("autocut renders the operator argv hourly; planted: unconfigured it refuses
 	expect(text).toContain("<string>/repo/scripts/autocut.sh</string>\n\t\t<string>run</string>");
 	expect(text).toContain("<key>StartInterval</key>\n\t<integer>3600</integer>");
 	expect(() => renderLaunchdPlist(HOME, { ...job }, LAUNCHER, null)).toThrow("AUTOCUT_UNCONFIGURED");
+});
+
+// CLOSEPASS1b (ompkit-774u.52.1): the close pass runs every 5 min from the operator's closePass argv, never a kit path.
+test("close-pass is a 300 s interval job whose argv and cwd come from fleet-watch.json closePass; planted: keyless install refuses CLOSE_PASS_UNCONFIGURED", () => {
+	const job = KNOWN_JOBS["close-pass"]!;
+	expect(job).toMatchObject({ label: "com.omp-kit.close-pass", kind: "interval", intervalSeconds: 300, runAtLoad: false, commandConfigKey: "closePass", lockedRun: true });
+	expect(job.program).toBeUndefined();
+	expect(() => renderLaunchdPlist(HOME, { ...job }, LAUNCHER, null)).toThrow("CLOSE_PASS_UNCONFIGURED");
+	if (process.platform !== "darwin") return;
+	const home = ownedTmp("service-contract-closepass", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
+	try {
+		mkdirSync(join(home, ".local", "bin"), { recursive: true });
+		writeFileSync(join(home, ".local", "bin", "omp-kit"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		const configPath = join(home, ".config", "omp-kit", "fleet-watch.json");
+		mkdirSync(dirname(configPath), { recursive: true });
+		const plan = (config: unknown) => {
+			writeFileSync(configPath, JSON.stringify(config));
+			const env: Record<string, string> = {};
+			for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") env[key] = value;
+			Object.assign(env, { HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_FLEET_WATCH_CONFIG: configPath,
+				OMP_KIT_TEST_LABEL_NAMESPACE: `com.omp-kit.test.closepass${Math.random().toString(36).slice(2, 10)}` });
+			const child = runSync([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), "service", "install", "close-pass", "--plan", "--json"],
+				{ deadline_s: fixtureDeadlineS(20), cwd: home, env });
+			return { code: child.rc, envelope: JSON.parse(new TextDecoder().decode(child.stdout)) };
+		};
+		const argv = ["/usr/bin/python3", "/fixture/skills/grade_wave.py", "apply", "--close-pass"];
+		const configured = plan({ sessions: [], closePass: { argv, cwd: "/fixture/skills" } });
+		expect(configured.envelope.errors ?? []).toEqual([]);
+		expect(configured.code).toBe(0);
+		expect(configured.envelope.data.program).toEqual({ argv, cwd: "/fixture/skills" });
+		expect(configured.envelope.data.plist).toContain("<key>StartInterval</key>\n\t<integer>300</integer>");
+		expect(configured.envelope.data.plist).toContain("<key>WorkingDirectory</key>\n\t<string>/fixture/skills</string>");
+		// The configured argv carries no kit path; the supervisor only invokes the kit's run lock around it.
+		expect(argv.some(arg => arg.includes("omp-kit"))).toBe(false);
+		expect(configured.envelope.data.plist).toContain("<string>service</string>\n\t\t<string>run</string>\n\t\t<string>close-pass</string>");
+		const keyless = plan({ sessions: [] });
+		expect(keyless.code).toBe(2);
+		expect(keyless.envelope.errors[0].code).toBe("CLOSE_PASS_UNCONFIGURED");
+		expect(keyless.envelope.errors[0].message).toContain("no closePass key");
+		expect(keyless.envelope.errors[0].message).toContain(configPath);
+		expect(keyless.envelope.errors[0].remediation).toContain(`"closePass"`);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
 });

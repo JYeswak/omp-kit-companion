@@ -4,9 +4,10 @@ import { join, resolve } from "node:path";
 import { daemonLiveness, KNOWN_JOBS, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveOperatorCommand, serviceLabel, type ServiceJobDef } from "../../src/service.ts";
 import { CC_BOOT_SOURCE, CC_SERVICE_HOST, CC_SERVICE_PORT, ccServiceCommand } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
-import { acquireDaemonLock, DAEMON_HELD_EXIT } from "../../src/service-run.ts";
-import { runSync } from "../../src/kitlib/run.ts";
+import { acquireDaemonLock, DAEMON_HELD_EXIT, readRunClaim } from "../../src/service-run.ts";
+import { run, runSync } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const AGENT_TMP = join(import.meta.dir, "../../var/agent-tmp");
 
@@ -487,6 +488,68 @@ test("SENTINELLIVE1: a hand service run is refused; launchd runs the configured 
 	expect(result.envelope.errors[0].code).toBe("LOOP_SENTINEL_SUPERVISED");
 	expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs"))).toBe(false);
 });
+
+// CLOSEPASS1b (ompkit-774u.52.1): a close-pass tick while a pass holds the job lock starts no second pass.
+const CLOSE_PASS_FIXTURE = `#!/bin/sh
+state="$1"
+trap 'echo TERM >> "$state/signalled"; exit 143' TERM INT
+echo $$ >> "$state/started"
+if [ ! -f "$state/closed" ]; then
+	while [ ! -f "$state/go" ]; do sleep 0.05; done
+	echo "bead-1 close comment: accepted commit installed and loaded" >> "$state/comments"
+	: > "$state/closed"
+fi
+`;
+
+function lines(path: string): string[] {
+	return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : [];
+}
+
+/** Polls files written by real child processes; fake timers cannot advance another process's clock. */
+async function until(check: () => boolean, ms: number): Promise<boolean> {
+	const end = Date.now() + ms;
+	while (Date.now() < end) {
+		if (check()) return true;
+		await Bun.sleep(25);
+	}
+	return check();
+}
+
+test("CLOSEPASS1b: an overlapping close-pass tick starts no second pass, logs the holder pid, and the bead gets one close comment", async () => {
+	if (process.platform !== "darwin" && process.platform !== "linux") return;
+	sanitizedEnv();
+	const home = fixtureHome();
+	const state = join(home, "closepass-state");
+	mkdirSync(state);
+	const script = join(home, "close_pass.sh");
+	writeFileSync(script, CLOSE_PASS_FIXTURE, { mode: 0o755 });
+	const env: Record<string, string> = { HOME: home, XDG_STATE_HOME: join(home, ".local", "state"), OMP_KIT_TEST_LABEL_NAMESPACE: namespace(),
+		OMP_KIT_FLEET_WATCH_CONFIG: fleetConfig(home, { sessions: [], closePass: { argv: ["/bin/sh", script, state], cwd: state } }) };
+	for (const [key, value] of Object.entries(process.env)) if (typeof value === "string" && !(key in env)) env[key] = value;
+	const tick = () => run([process.execPath, resolve(import.meta.dir, "../../src/cli.ts"), "service", "run", "close-pass", "--json"],
+		{ deadline_s: fixtureDeadlineS(20), cwd: home, env });
+	const first = tick();
+	expect(await until(() => lines(join(state, "started")).length === 1, 20_000)).toBe(true);
+	const holder = readRunClaim(join(home, ".local", "state", "omp-kit", "jobs"), "close-pass");
+	const second = tick();
+	// A second pass would show up as a second start; wait for either that or the overlapping tick's exit.
+	let secondExited = false;
+	void second.then(() => { secondExited = true; });
+	await until(() => secondExited || lines(join(state, "started")).length > 1, 20_000);
+	writeFileSync(join(state, "go"), "");
+	const [firstRun, secondRun] = await Promise.all([first, second]);
+	const decode = new TextDecoder();
+	const firstOut = JSON.parse(decode.decode(firstRun.stdout));
+	const secondOut = JSON.parse(decode.decode(secondRun.stdout));
+	expect(lines(join(state, "comments"))).toHaveLength(1);
+	expect(lines(join(state, "started"))).toHaveLength(1);
+	expect(existsSync(join(state, "signalled"))).toBe(false);
+	expect([firstRun.rc, firstOut.data.status]).toEqual([0, "COMPLETE"]);
+	expect(holder).not.toBeNull();
+	expect(secondOut.data).toMatchObject({ status: "SKIPPED-OVERLAP", holder_pid: holder!.pid });
+	expect(secondRun.rc).not.toBe(0);
+	expect(decode.decode(secondRun.stderr)).toContain(`close-pass SKIPPED-OVERLAP holder_pid=${holder!.pid}`);
+}, fixtureDeadlineS(60) * 1000);
 
 test("SENTINELLIVE1 (4): no job definition or render carries a hard-coded /Users/ path", () => {
 	sanitizedEnv();

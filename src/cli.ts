@@ -72,7 +72,7 @@ import { FalseFireInputError, runFalseFireReduction } from "./false-fire.ts";
  import { CACHE_NAME, STALE_AFTER_MS, defaultTrackedRepos, pollRepos, readCacheFile, readStatus, type CiCacheFile } from "./ci-cache.ts";
 import { ExternalLiveInputError, runExternalLive, type ExternalLiveInput } from "./external-live.ts";
 import { KNOWN_JOBS, CC_SERVICE_ADAPTER, checkService, checkServiceLinux, defaultRunner, domain, executableFile, installService, installSystemd, jobReceiptPath, notifyJobFailure, oversizedOwnLogs, parseLaunchctlPrint, planInstall, plistPath, queryPrint, readInstalledPlist, renderLaunchdPlist, renderSystemdUnits, resolveFleetAdapter, resolveWatchTarget, runLoadWatch, serviceLabel, stableLauncher, serviceHome, superviseScratchJob, systemctlState, systemdTimer, uninstallService, uninstallSystemd, type ServiceCheck, type ServiceJobDef } from "./service.ts";
-import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand } from "./service.ts";
+import { ccServiceCommand, daemonLiveness, fleetFlushLogPath, fleetWatchConfigPath, fleetWatchLogPath, jobCodePrefix, launchdLoaded, resolveOperatorCommand, type OperatorCommand, type ServiceProgram } from "./service.ts";
 import { ccStateDir } from "./service.ts";
 import { retainOmpSessions } from "./session-retain.ts";
 import { applyScratch, callerSeat, createScratch, defaultLiveness, defaultRunner as scratchRunner, disposalGate, exportCommitToScratch, fileGapReports, isApplyFailure, logOwedFlag, OWED_FLAG_POINTS, owesRelease, ownedScratch, planScratch, releaseScratch, SCRATCH_BINS, type ScratchApplyResult } from "./scratch.ts";
@@ -2662,6 +2662,50 @@ async function runCcService(home: string, adapter: string, lock: RunLock): Promi
 		verification: "UNVERIFIED" };
 }
 
+/**
+ * CLOSEPASS1b (ompkit-774u.52.1): one tick of a lockedRun job (close-pass). The supervisor runs
+ * `service run <job>`; this holds the kit per-job run lock for the whole configured argv, so a tick
+ * that finds the lock held starts no process, leaves the running pass unsignalled, and logs one
+ * SKIPPED-OVERLAP line naming the holder pid (stderr, which launchd/systemd route to the job's err log).
+ */
+async function runLockedConfiguredJob(home: string, jobsDir: string, job: ServiceJobDef & { program: ServiceProgram }): Promise<CliResult> {
+	const off = readJobOff(join(home, ".local", "state", "omp-kit", `${job.name}.off`));
+	if (off.disabled) return { code: 0, data: { overall: "OK", job: job.name, status: "OFF", ...(off.reason ? { reason: off.reason } : {}) }, verification: "UNVERIFIED" };
+	try {
+		mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
+	} catch { /* acquireRunLock reports unusable directories */ }
+	const unavailable: CliResult = { code: 3, data: { overall: "UNAVAILABLE", job: job.name },
+		errors: [{ code: "RECEIPT_UNAVAILABLE", message: "Job receipt could not be written to the private state root",
+			remediation: "Repair the state root; the job receipt is missing." }], verification: "UNVERIFIED" };
+	const claimed = acquireRunLock(jobsDir, job.name);
+	if (claimed.status !== "ACQUIRED") {
+		const now = new Date().toISOString();
+		process.stderr.write(`${now} ${job.name} SKIPPED-OVERLAP holder_pid=${claimed.holderPid ?? "unknown"}: a pass is running; no second pass was started\n`);
+		const receipt = { started_at: now, finished_at: now, exit: OVERLAP_EXIT, omp_version: null, status: "SKIPPED-OVERLAP", holder_pid: claimed.holderPid };
+		if (!recordJobReceipt(home, job.name, receipt)) return unavailable;
+		return { code: OVERLAP_EXIT, data: { overall: "OK", job: job.name, status: "SKIPPED-OVERLAP", holder_pid: claimed.holderPid, holder_age_ms: claimed.holderAgeMs, receipt }, verification: "UNVERIFIED" };
+	}
+	try {
+		const capOverride = Number(process.env.OMP_KIT_RUN_CAP_MS);
+		// The pass ends before the next 5-minute tick would find it still running.
+		const capMs = Number.isFinite(capOverride) && capOverride > 0 ? capOverride : (job.intervalSeconds * 1000 * 4) / 5;
+		const env: Record<string, string> = {};
+		for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") env[key] = value;
+		const started = new Date().toISOString();
+		const result = await runBounded(job.program.argv, { deadline_s: capMs / 1000, cwd: job.program.cwd, env });
+		const decoder = new TextDecoder();
+		if (result.stderr.byteLength > 0) process.stderr.write(decoder.decode(result.stderr));
+		const status = result.timed_out ? "TIMED-OUT" : result.rc === 0 ? "COMPLETE" : "FAILED";
+		const receipt = { started_at: started, finished_at: new Date().toISOString(), exit: result.rc, omp_version: null, status };
+		if (!recordJobReceipt(home, job.name, receipt)) return unavailable;
+		return { code: result.rc === 0 ? 0 : 1, data: { overall: result.rc === 0 ? "OK" : "FINDINGS", job: job.name, status, stdout: decoder.decode(result.stdout), receipt },
+			...(result.rc === 0 ? {} : { errors: [{ code: `${jobCodePrefix(job.name)}_FAILED`, message: `${job.name} exited ${result.rc}${result.timed_out ? " after its time cap" : ""}`,
+				remediation: `Read omp-kit service logs ${job.name} --errors; the next tick retries.` }] }), verification: "UNVERIFIED" };
+	} finally {
+		claimed.lock.release();
+	}
+}
+
 async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	const sub = request.command.name;
 	const platform = process.platform;
@@ -2788,7 +2832,7 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		}
 		if (wantPlan) {
 			const rendered = planInstall(home, job, launcher, watch, installed);
-			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, plan: true, changed: !rendered.alreadyInstalled, backup: rendered.backup, diff: rendered.diff, plist: rendered.plist }, verification: "UNVERIFIED" };
+			return { code: 0, data: { overall: "UNVERIFIED", job: job.name, label: job.label, plan: true, changed: !rendered.alreadyInstalled, backup: rendered.backup, diff: rendered.diff, plist: rendered.plist, ...(job.program ? { program: job.program } : {}) }, verification: "UNVERIFIED" };
 		}
 		const print = parseLaunchctlPrint(defaultRunner(["launchctl", "print", `${domain()}/${job.label}`]).stdout);
 		const result = installService(home, job, launcher, watch, installed, print, defaultRunner, request.flags.has("--replace"));
@@ -2935,6 +2979,12 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 		// SENTINELLIVE1: a configured-command job is executed by launchd/systemd directly from its
 		// rendered argv. A hand `service run` would start a second, unsupervised copy (the failure
 		// this job exists to end), so it is refused; the supervisor is the only runner.
+		// CLOSEPASS1b: a lockedRun job is the exception; its supervisor runs this path, and the run lock
+		// held here is what keeps a hand run or an overlapping tick from starting a second copy.
+		if (job.lockedRun === true) {
+			if (operator[job.name] !== undefined) return unconfiguredRefusal(job.name);
+			return runLockedConfiguredJob(home, jobsDir, { ...job, program: job.program! });
+		}
 		if (job.commandConfigKey !== undefined) {
 			return refusal(`${jobCodePrefix(job.name)}_SUPERVISED`, `${job.name} runs only under its service supervisor, from the configured ${job.commandConfigKey} argv`,
 				`Install it with omp-kit service install ${job.name} --apply --yes and read omp-kit service status ${job.name}; no process was started.`);

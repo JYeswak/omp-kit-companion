@@ -87,6 +87,12 @@ export interface ServiceJobDef {
 	name: string; label: string; kind: "watch" | "interval" | "daemon"; intervalSeconds: number; runAtLoad?: boolean;
 	restart?: "always"; commandConfigKey?: string; program?: ServiceProgram;
 	/**
+	 * CLOSEPASS1b: the supervisor runs `<launcher> service run <name>`, which holds the kit per-job run lock
+	 * around the configured argv, so an overlapping tick logs SKIPPED-OVERLAP with the holder pid instead of
+	 * starting a second copy. Requires commandConfigKey; the configured cwd stays the WorkingDirectory.
+	 */
+	lockedRun?: true;
+	/**
 	 * SVCQOS1: scheduling class. Absent = "background" (ProcessType Background, Nice 10, LowPriorityIO).
 	 * "deadline" = ProcessType Standard, Nice 10, no LowPriorityIO, for a job with freshness budgets.
 	 */
@@ -135,6 +141,10 @@ export const KNOWN_JOBS: Record<string, ServiceJobDef> = {
 	// the 12 h floor has passed, then install and read it back (scripts/autocut.sh run). Its command is operator
 	// data (fleet-watch.json `autocut`: sh <companion>/scripts/autocut.sh run --repo <companion>); UNCONFIGURED until set.
 	"autocut": { name: "autocut", label: "com.omp-kit.autocut", kind: "interval", intervalSeconds: 3600, runAtLoad: false, commandConfigKey: "autocut" },
+	// CLOSEPASS1b (ompkit-774u.52.1): every 5 min, the unattended close pass closes pending beads whose accepted
+	// commit is installed and loaded. Its command is operator data (fleet-watch.json `closePass`: the grade_wave.py
+	// close pass), never a kit path; UNCONFIGURED until set. lockedRun: a tick never starts a second pass while one runs.
+	"close-pass": { name: "close-pass", label: "com.omp-kit.close-pass", kind: "interval", intervalSeconds: 300, runAtLoad: false, commandConfigKey: "closePass", lockedRun: true },
 };
 
 /** A claude-save run receipt, `claude-save-<runId>.json`, directly in the kit state root. */
@@ -618,7 +628,7 @@ function configuredProgram(job: ServiceJobDef): ServiceProgram | null {
 
 export function renderLaunchdPlist(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedPlist {
 	const program = configuredProgram(job);
-	const programArguments = program?.argv ?? [launcher, "service", "run", job.name];
+	const programArguments = program !== null && job.lockedRun !== true ? program.argv : [launcher, "service", "run", job.name];
 	const lines = [
 		'<?xml version="1.0" encoding="UTF-8"?>',
 		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -684,7 +694,7 @@ function systemdQuote(value: string): string {
 
 export function renderSystemdUnits(home: string, job: ServiceJobDef, launcher: string, watchPath: string | null): RenderedSystemd {
 	const program = configuredProgram(job);
-	const execStart = program ? program.argv.map(systemdQuote).join(" ") : `${launcher} service run ${job.name}`;
+	const execStart = program !== null && job.lockedRun !== true ? program.argv.map(systemdQuote).join(" ") : `${launcher} service run ${job.name}`;
 	const env = [
 		`Environment=HOME=${systemdQuote(home)}`,
 		`Environment=XDG_STATE_HOME=${systemdQuote(stateHome(home))}`,
