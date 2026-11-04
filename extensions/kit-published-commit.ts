@@ -6,20 +6,36 @@ export interface PublishedCommitCheck {
 }
 export type PublicationGit = (repo: string, args: string[]) => Promise<{ rc: number | null; out: string; failed: boolean }>;
 
-/** Extract the transition's commit citations using the close-guard grammar. */
-export function extractCitedCommitShas(value: string): string[] {
+/** A commit citation; repo-qualified `@SHA` entries retain their source repository. */
+export interface CitedCommitReference {
+	sha: string;
+	repo?: string;
+	invalidQualifier?: string;
+}
+
+/** Extract transition commit citations; an explicit absolute-path `@SHA` qualifies its source repo. */
+export function extractCitedCommitReferences(value: string): CitedCommitReference[] {
 	if (value.length > 1024 * 1024) return [];
-	const patterns = [
-		/\bDONE[ \t]+\S+[ \t]+([0-9a-f]{7,40})(?![0-9a-f])/gi,
-		/@([0-9a-f]{7,40})(?![0-9a-f])/gi,
-		/\bexport[ \t]+([0-9a-f]{7,40})(?![0-9a-f])/gi,
-		/\bcommit[ \t]+([0-9a-f]{7,40})(?![0-9a-f])/gi,
+	const patterns: { pattern: RegExp; qualified: boolean }[] = [
+		{ pattern: /\bDONE[ \t]+\S+[ \t]+([0-9a-f]{7,40})(?![0-9a-f])/gi, qualified: false },
+		{ pattern: /(?<![\w@])([^@\s]+)?@([0-9a-f]{7,40})(?![0-9a-f@])/gi, qualified: true },
+		{ pattern: /\bexport[ \t]+([0-9a-f]{7,40})(?![0-9a-f])/gi, qualified: false },
+		{ pattern: /\bcommit[ \t]+([0-9a-f]{7,40})(?![0-9a-f])/gi, qualified: false },
 	];
-	const found = new Set<string>();
-	for (const pattern of patterns) {
-		for (const match of value.matchAll(pattern)) found.add(match[1]!.toLowerCase());
+	const found = new Map<string, CitedCommitReference>();
+	for (const { pattern, qualified } of patterns) {
+		for (const match of value.matchAll(pattern)) {
+			const qualifier = qualified ? match[1] : undefined;
+			const sha = (qualified ? match[2] : match[1])!.toLowerCase();
+			const repo = qualifier?.startsWith("/") ? qualifier : undefined;
+			const invalidQualifier = qualifier !== undefined && repo === undefined ? qualifier : undefined;
+			const key = `${repo ?? invalidQualifier ?? ""}\0${sha}`;
+			found.set(key, repo === undefined
+				? (invalidQualifier === undefined ? { sha } : { sha, invalidQualifier })
+				: { repo, sha });
+		}
 	}
-	return [...found];
+	return [...found.values()];
 }
 
 /** Verify each cited commit against a newly fetched origin/main; all errors fail closed as UNKNOWN. */

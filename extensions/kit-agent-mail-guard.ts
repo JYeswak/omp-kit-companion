@@ -13,7 +13,7 @@ import {
 	type TrackerRequest,
 } from "./kit-flywheel-guard";
 import { createMailWake, type MailToolResultEvent, type MailWake } from "./kit-mail-wake";
-import { checkPublishedCommits, extractCitedCommitShas } from "./kit-published-commit.ts";
+import { checkPublishedCommits, extractCitedCommitReferences, type PublishedCommitStatus } from "./kit-published-commit.ts";
 
 /**
  * kit-agent-mail-guard (AMGUARD1, ompkit-774u.13.2): a seat's Agent Mail calls are checked at the act.
@@ -45,8 +45,8 @@ import { checkPublishedCommits, extractCitedCommitShas } from "./kit-published-c
  *     activity.
  *
  *   AM_DONE_NOT_PUBLISHED: a send_message whose subject starts with DONE must cite commit SHA(s)
- *     in its body, each reachable from a freshly fetched origin/main in project_key; missing,
- *     unknown, unpublished, or unfetchable citations fail closed.
+ *     reachable from freshly fetched origin/main. Plain citations use project_key; explicit
+ *     absolute-repository `path@SHA` citations are checked in that source repository.
  * Inert unless the repo opted into the fleet (`.omp/fleet.json` {"enabled": true}, see fleet-policy.ts);
  * a stock session touches no br, tmux or Agent Mail. An opted-in repo whose marker is unreadable refuses
  * Agent Mail calls, as fleet-guard does.
@@ -592,28 +592,43 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		}
 		if (doneCallback) {
 			const project = prop(value, "project_key");
-			const shas = extractCitedCommitShas(body);
-			if (shas.length === 0) {
+			const citations = extractCitedCommitReferences(body);
+			if (citations.length === 0) {
 				return refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; the body must cite at least one commit SHA. Save and publish on origin/main with git_converge.py --push.");
 			}
 			if (typeof project !== "string" || !isAbsolute(project)) {
 				return refuse("AM_DONE_NOT_PUBLISHED", "DONE is not sendable: NOT_PUBLISHED UNKNOWN; project_key must identify the local repository to verify. Save and publish on origin/main with git_converge.py --push.");
 			}
-			const checks = await checkPublishedCommits(project, shas, async (repo, args) => {
-				try {
-					const result = await pi.exec("git", ["-C", repo, ...args], { cwd: repo, timeout: AM_ROSTER_TIMEOUT_MS });
-					return {
-						rc: result.killed ? null : result.code,
-						out: result.stdout.trim(),
-						failed: result.killed === true,
-					};
-				} catch {
-					return { rc: null, out: "", failed: true };
-				}
-			});
+			const invalid = citations.find(citation => citation.invalidQualifier !== undefined);
+			if (invalid !== undefined) {
+				return refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: UNKNOWN ${invalid.sha}: unsupported repository qualifier "${invalid.invalidQualifier}". Use an absolute repository path followed by @SHA.`);
+			}
+			const citationsByRepo = new Map<string, string[]>();
+			for (const citation of citations) {
+				const repo = citation.repo ?? project;
+				const shas = citationsByRepo.get(repo) ?? [];
+				shas.push(citation.sha);
+				citationsByRepo.set(repo, shas);
+			}
+			const checks: { repo: string; status: PublishedCommitStatus; sha: string; detail: string }[] = [];
+			for (const [repo, shas] of citationsByRepo) {
+				const repoChecks = await checkPublishedCommits(repo, shas, async (gitRepo, args) => {
+					try {
+						const result = await pi.exec("git", ["-C", gitRepo, ...args], { cwd: gitRepo, timeout: AM_ROSTER_TIMEOUT_MS });
+						return {
+							rc: result.killed ? null : result.code,
+							out: result.stdout.trim(),
+							failed: result.killed === true,
+						};
+					} catch {
+						return { rc: null, out: "", failed: true };
+					}
+				});
+				checks.push(...repoChecks.map(check => ({ ...check, repo })));
+			}
 			const failed = checks.find(check => check.status !== "PUBLISHED");
 			if (failed !== undefined) {
-				return refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: ${failed.status} ${failed.sha || "(no SHA)"}: ${failed.detail}. Save and publish on origin/main with git_converge.py --push.`);
+				return refuse("AM_DONE_NOT_PUBLISHED", `DONE is not sendable: ${failed.status} ${failed.sha || "(no SHA)"} in ${failed.repo}: ${failed.detail}. Save and publish on origin/main with git_converge.py --push.`);
 			}
 		}
 		return notice;

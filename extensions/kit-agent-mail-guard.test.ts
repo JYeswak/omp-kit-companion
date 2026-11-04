@@ -951,3 +951,82 @@ test("DONE mail: refuses unpublished or unreadable citations and admits only fre
 	expect(code(offline)).toBe("AM_DONE_NOT_PUBLISHED");
 	expect(offline?.reason).toContain("UNKNOWN");
 });
+
+test("DONE mail: checks repo-qualified commit citations in their code-source repository", async () => {
+	const recipientRepo = gitInit(base);
+	const sourceRepo = gitInit(base);
+	const recipientOrigin = freshDir(base, "mail-recipient-origin-");
+	await gitOutput(base, ["init", "--bare", "--quiet", recipientOrigin]);
+	await gitOutput(recipientRepo, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--no-verify", "--allow-empty", "-m", "published recipient fixture [test]"]);
+	const recipientPublished = await gitOutput(recipientRepo, ["rev-parse", "HEAD"]);
+	await gitOutput(recipientRepo, ["remote", "add", "origin", recipientOrigin]);
+	await gitOutput(recipientRepo, ["push", "-q", "origin", `${recipientPublished}:refs/heads/main`]);
+	const origin = freshDir(base, "mail-code-origin-");
+	await gitOutput(base, ["init", "--bare", "--quiet", origin]);
+	await gitOutput(sourceRepo, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--no-verify", "--allow-empty", "-m", "published code fixture [test]"]);
+	const published = await gitOutput(sourceRepo, ["rev-parse", "HEAD"]);
+	await gitOutput(sourceRepo, ["remote", "add", "origin", origin]);
+	await gitOutput(sourceRepo, ["push", "-q", "origin", `${published}:refs/heads/main`]);
+	await gitOutput(sourceRepo, ["-c", "user.name=t", "-c", "user.email=t@x", "commit", "--no-verify", "--allow-empty", "-m", "unpublished code fixture [test]"]);
+	const unpublished = await gitOutput(sourceRepo, ["rev-parse", "HEAD"]);
+
+	const roster = fleetRespond({ [recipientRepo]: [mailRow("PlumRaven"), mailRow("BlueLake"), mailRow("RedCat")] }, BEAD);
+	const respond: Responder = async call => {
+		if (call.command === "git") {
+			const repo = call.args[1]!;
+			const result = await run(["git", ...call.args], { cwd: repo, deadline_s: 60, max_output_bytes: 16 * 1024 });
+			return { stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr), code: result.rc ?? 1 };
+		}
+		return roster(call);
+	};
+	const h = await createHost({}, respond);
+	const cwd = fleetRepo();
+	const done = (sha: string) => send({ project_key: recipientRepo, body_md: `DONE ${sourceRepo}@${sha}: evidence is in the bead.` });
+
+	expect(await h.mail(cwd, "send_message", done(published))).toBeUndefined();
+	const unpublishedResult = await h.mail(cwd, "send_message", done(unpublished));
+	expect(code(unpublishedResult)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(unpublishedResult?.reason).toContain(unpublished);
+	expect(h.execs.filter(call => call.command === "git").every(call => call.args[1] === sourceRepo)).toBe(true);
+
+	const mixedStart = h.execs.length;
+	const mixed = await h.mail(cwd, "send_message", send({
+		project_key: recipientRepo,
+		body_md: `DONE ${sourceRepo}@${published}: evidence is in the bead; recipient commit ${recipientPublished}.`,
+	}));
+	expect(mixed).toBeUndefined();
+	const mixedGitRepos = new Set(h.execs.slice(mixedStart).filter(call => call.command === "git").map(call => call.args[1]!));
+	expect([...mixedGitRepos].sort()).toEqual([recipientRepo, sourceRepo].sort());
+
+	const unknown = await h.mail(cwd, "send_message", done("deadbeef"));
+	expect(code(unknown)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(unknown?.reason).toContain("UNKNOWN");
+	const recipientUnknown = await h.mail(cwd, "send_message", send({
+		project_key: recipientRepo,
+		body_md: "recipient commit deadbeef",
+	}));
+	expect(code(recipientUnknown)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(recipientUnknown?.reason).toContain(`in ${recipientRepo}:`);
+	const malformed = await h.mail(cwd, "send_message", send({
+		project_key: recipientRepo,
+		body_md: `Code source ${sourceRepo}@@${published}; evidence is in the bead.`,
+	}));
+	expect(code(malformed)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(malformed?.reason).toContain("the body must cite at least one commit SHA");
+	const unsupported = await h.mail(cwd, "send_message", send({
+		project_key: recipientRepo,
+		body_md: `Code source alias@${published}; evidence is in the bead.`,
+	}));
+	expect(code(unsupported)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(unsupported?.reason).toContain("unsupported repository qualifier");
+	const missingRepo = await h.mail(cwd, "send_message", send({
+		project_key: recipientRepo,
+		body_md: `Code source ${join(base, "missing-code-repo")}@${published}; evidence is in the bead.`,
+	}));
+	expect(code(missingRepo)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(missingRepo?.reason).toContain("UNKNOWN");
+	await gitOutput(sourceRepo, ["remote", "set-url", "origin", join(base, "missing-code-origin.git")]);
+	const offline = await h.mail(cwd, "send_message", done(published));
+	expect(code(offline)).toBe("AM_DONE_NOT_PUBLISHED");
+	expect(offline?.reason).toContain("UNKNOWN");
+});

@@ -18,8 +18,8 @@ import { run } from "./kitlib/run.ts";
 import { validatePriorArtComment } from "./grader-next.ts";
 import { admitClaimCut, type ClaimCutRead } from "./claim-cut.ts";
 import { checkPublishedCommits as checkPublishedCommitShas, type PublicationGit, type PublishedCommitCheck } from "../extensions/kit-published-commit.ts";
-export { extractCitedCommitShas } from "../extensions/kit-published-commit.ts";
-export type { PublishedCommitCheck, PublishedCommitStatus } from "../extensions/kit-published-commit.ts";
+export { extractCitedCommitReferences } from "../extensions/kit-published-commit.ts";
+export type { CitedCommitReference, PublishedCommitCheck, PublishedCommitStatus } from "../extensions/kit-published-commit.ts";
 
 const MEMBER_DEADLINE_S = 120;
 const SELFTEST_DEADLINE_S = 180;
