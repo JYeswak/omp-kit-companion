@@ -37,6 +37,13 @@ function expectedInterruptedTool(scenario) {
 	return tools.length === 1 ? tools[0] : undefined;
 }
 
+function expectedExecutedTool(scenario) {
+	const name = scenario.expect.tool_executed;
+	if (typeof name !== "string") return undefined;
+	const tools = scenario.turns.flatMap(turn => turn.tool ? [turn.tool] : []).filter(tool => tool.name === name);
+	return tools.length === 1 ? tools[0] : undefined;
+}
+
 async function coverage(rulesDirs) {
 	// Loaded here, not at the top: rule-class.ts imports omp's parser (~0.3 s), and every other
 	// subcommand runs several times per scenario without needing it.
@@ -61,7 +68,7 @@ async function coverage(rulesDirs) {
 		for (const s of mine.filter(s => s.kind === "fire" || s.kind === "repeat")) {
 			const e = s.expect;
 			const blocked = e.marker === "absent" || (e.files_absent ?? []).length > 0 || Boolean(expectedInterruptedTool(s));
-			const ran = e.marker === "present" || (e.files_present ?? []).length > 0;
+			const ran = e.marker === "present" || (e.files_present ?? []).length > 0 || Boolean(expectedExecutedTool(s));
 			if (cls === "tripwire" && !blocked) errs.push(`${s.id}: tripwire fire must assert the action did not run`);
 			if (cls !== "tripwire" && !ran) errs.push(`${s.id}: ${cls} fire must assert the action ran`);
 			if (backend === "ttsr" && !(name in (e.rules ?? {}))) errs.push(`${s.id}: fire scenario does not expect ${name}`);
@@ -165,6 +172,26 @@ function interruptedToolFailures(project, scenario, messages) {
 	return [];
 }
 
+function executedToolFailures(project, scenario) {
+	const expected = expectedExecutedTool(scenario);
+	if (!expected) return ["tool execution must select exactly one scripted tool call"];
+	let events;
+	try {
+		events = fs.readFileSync(path.join(project, ".omp-kit-tool-events.jsonl"), "utf8").trim().split("\n").map(row => JSON.parse(row));
+	} catch { return ["tool execution native capture is missing or invalid"]; }
+	if (events.at(-1)?.event !== "end") return ["tool execution native capture is incomplete"];
+	const matching = events.filter(row => row.event === "call" && row.name === expected.name && isDeepStrictEqual(row.args, expected.args));
+	const calls = new Map(matching.map(call => [call.id, call]));
+	if (calls.size !== 1) return ["tool execution did not match the original tool and arguments exactly once"];
+	const call = [...calls.values()][0];
+	if (typeof call.id !== "string" || !call.id || !Number.isFinite(call.timestamp)) return ["tool execution has no native call identity"];
+	if (events.some(row => row.event === "stop" && row.timestamp === call.timestamp)) return ["tool execution was aborted"];
+	for (const event of ["execution", "result"]) {
+		if (!events.some(row => row.event === event && row.id === call.id)) return [`tool execution lacks the matching call's native ${event}`];
+	}
+	return [];
+}
+
 function verdict(i, log, proj, ompExit) {
 	const s = scenarios[i];
 	const e = s.expect;
@@ -203,6 +230,7 @@ function verdict(i, log, proj, ompExit) {
 	if (e.tool_result_json) errs.push(...toolResultFailures(reqs.at(-1).body.messages, e.tool_result_json));
 	if (e.admission) errs.push(...admissionFailures(reqs.at(-1).body.messages, s));
 	if (e.tool_not_executed !== undefined) errs.push(...interruptedToolFailures(proj, s, reqs.at(-1).body.messages));
+	if (e.tool_executed !== undefined) errs.push(...executedToolFailures(proj, s));
 
 	const marker = path.join(proj, `.ran_${s.id}`);
 	if (e.marker === "present" && !fs.existsSync(marker)) errs.push(`marker .ran_${s.id} absent: the command did not run`);
@@ -231,8 +259,8 @@ switch (cmd) {
 		break;
 	case "prep": {
 		const s = scenarios[Number(args[0])];
-		if (s.expect.tool_not_executed !== undefined) {
-			if (!args[2]) throw new Error("tool interruption fixture requires the actual project root");
+		if (s.expect.tool_not_executed !== undefined || s.expect.tool_executed !== undefined) {
+			if (!args[2]) throw new Error("tool capture fixture requires the actual project root");
 			fs.writeFileSync(path.join(args[2], ".omp-kit-tool-events.jsonl"), "");
 		}
 		if (s.backend === "admission") {

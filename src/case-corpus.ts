@@ -60,7 +60,7 @@ export function parseCaseCorpus(text: string): { cases: CorpusCase[]; errors: st
 		}
 		if (expect !== "fire" && expect !== "quiet") errors.push(`cases line ${i + 1}: expect=${expect}`);
 		if (!["text", "thinking", "tool"].includes(source)) errors.push(`cases line ${i + 1}: source=${source}`);
-		if (source === "tool" && !["bash", "edit", "write", "eval", "read"].includes(tool)) errors.push(`cases line ${i + 1}: tool=${tool}`);
+		if (source === "tool" && !["bash", "edit", "write", "eval", "read", "grep", "todo"].includes(tool)) errors.push(`cases line ${i + 1}: tool=${tool}`);
 		cases.push({
 			line: i + 1, rule, expect: expect as CorpusCase["expect"], source: source as CorpusCase["source"],
 			tool, path, snippet: snippet.replace(/\\([nt])/g, (_, character: string) => character === "n" ? "\n" : "\t"), note, reference,

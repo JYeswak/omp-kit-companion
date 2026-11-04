@@ -94,4 +94,33 @@ test("another read path or an incomplete capture cannot satisfy the blocked quer
 	expect(readVerdict([readCall, readAbort], false)).toMatch(/^FAIL:.*(?:read|interruption)/);
 });
 
+const grepIndex = scenarios.findIndex((s: { id: string }) => s.id === "grep-root-ignored-fire");
+if (grepIndex < 0) throw new Error("grep execution scenario is missing");
+const grepCall = { event: "call", timestamp: 3, id: "grep_1", name: "grep", args: scenarios[grepIndex].turns[0].tool.args };
+const grepExecution = { event: "execution", id: "grep_1" };
+const grepResult = { event: "result", id: "grep_1" };
+
+function executionVerdict(events: unknown[], reminder = true): string {
+	writeFileSync(join(project, ".omp-kit-tool-events.jsonl"), [...events, { event: "end" }].map(row => JSON.stringify(row)).join("\n") + "\n");
+	const log = join(fixture, "execution-requests.jsonl");
+	writeFileSync(log, [0, 1].map(n => JSON.stringify({
+		n, main: true, body: { messages: [{ role: "user", content: reminder && n === 1 ? 'rule="kit-grep-root-ignored"' : "go" }] },
+	})).join("\n") + "\n");
+	const run = runFixture([process.execPath, join(root, "tests/live/lib.mjs"), "verdict", String(grepIndex), log, project, "0"], { cwd: root, label: "live-verdict-execution" });
+	if (run.rc !== 0) throw new Error(`verdict parser failed: ${Buffer.from(run.stderr).toString()}`);
+	return Buffer.from(run.stdout).toString().trim();
+}
+
+test("an advisory tool fire requires native execution and result for its exact call", () => {
+	expect(executionVerdict([grepCall, grepExecution, grepResult])).toBe("ok");
+	expect(executionVerdict([grepCall, grepResult])).toMatch(/^FAIL:.*execution/);
+	expect(executionVerdict([grepCall, grepExecution])).toMatch(/^FAIL:.*result/);
+	expect(executionVerdict([{ ...grepCall, name: "read" }, grepExecution, grepResult])).toMatch(/^FAIL:.*original tool/);
+	expect(executionVerdict([grepCall, { ...grepExecution, id: "other" }, grepResult])).toMatch(/^FAIL:.*execution/);
+	expect(executionVerdict([grepCall, grepExecution, { ...grepResult, id: "other" }])).toMatch(/^FAIL:.*result/);
+	expect(executionVerdict([{ ...grepCall, args: { path: "elsewhere" } }, grepExecution, grepResult])).toMatch(/^FAIL:.*original tool/);
+	expect(executionVerdict([grepCall, grepExecution, grepResult, { event: "stop", timestamp: 3, reason: "aborted" }])).toMatch(/^FAIL:.*aborted/);
+	expect(executionVerdict([grepCall, grepExecution, grepResult], false)).toMatch(/^FAIL:.*rule/);
+});
+
 afterAll(() => cleanupAllOwnedTmp());

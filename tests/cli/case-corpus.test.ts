@@ -62,3 +62,13 @@ test("read is a supported corpus tool while unknown tools remain rejected", () =
 	const unknown = parseCaseCorpus(row("unknown-tool"));
 	expect(unknown.errors).toEqual(["cases line 2: tool=unknown-tool"]);
 });
+
+for (const tool of ["grep", "todo"]) {
+	test(`${tool} is a supported raw-argument corpus tool while unknown tools remain rejected`, () => {
+		const row = (name: string) => `${CASE_HEADER}\ncontrol\tquiet\ttool\t${name}\t-\t{}\traw argument carrier\t\n`;
+		const admitted = parseCaseCorpus(row(tool));
+		expect(admitted.errors).toEqual([]);
+		expect(admitted.cases[0]?.tool).toBe(tool);
+		expect(parseCaseCorpus(row("unknown-tool")).errors).toEqual(["cases line 2: tool=unknown-tool"]);
+	});
+}
