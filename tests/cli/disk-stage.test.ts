@@ -77,6 +77,8 @@ test("DISKSTAGE-WIRE1 real admission is before work and records the reaper refus
 	const rows = readFileSync(join(state, "receipts.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
 	expect(rows.some(row => row.action === "reaper" && (row.reaper as Record<string, unknown>)?.action === "RECLAIM_TRIGGERED")).toBe(true);
 	expect(rows.some(row => row.action === "wave-refused" && row.code === "DISK_WAVE_REFUSED")).toBe(true);
+	// ompkit-6gbej: every row names its writer, so an isolated postcheck can attribute a live-fleet append.
+	expect(rows.every(row => row.pid === process.pid && row.ppid === process.ppid)).toBe(true);
 });
 test("DISKSTAGE-WIRE1 real entrypoints admit the paired 21% boundary", () => {
 	const state = fixture("admit-entrypoints");

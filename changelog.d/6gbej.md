@@ -1,0 +1,1 @@
+- Kit update postchecks report a live-fleet write as `skipped-live-writer` only when its declared writer (a composer record's pid, a full-suite verdict's `.running.<pid>` path, or a disk-stage row's new pid/ppid) is a process proven outside the isolated test; every unattributed change, and any disk-stage row from an older writer without a pid, still fails.

@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
+import { activeConcurrentWriterPaths, compareWatched, liveWriterPaths, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { BundledRunInterruptedError, runIsolatedShell, type BundledRunResult } from "./runtime.ts";
 import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
@@ -510,9 +510,12 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
  const sourceRevision = fullTestSourceRevision(input.root);
  const references = input.references ?? process.env.OMP_KIT_FULL_TEST_REFERENCES;
  const artifactRepo = process.env.OMP_KIT_CASE_CWD ?? process.env.GITHUB_WORKSPACE;
- const watchedPaths = operatorWatchedPaths(input.home, input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(input.home, ".local", "state"), "omp-kit"));
+ const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(input.home, ".local", "state"), "omp-kit");
+ const watchedPaths = operatorWatchedPaths(input.home, stateRoot);
  // Only project paths a kit run could write; the rest of a real repository changes under concurrent work.
  const projectPaths = input.project ? [".omp", ".agents", ".claude"].map(name => join(input.project!, name)) : [];
+ // Taken before the before-snapshot: every isolated-test process starts after it (live-writer evidence, ompkit-6gbej).
+ const liveWriter = { stateRoot, runStartedMs: Date.now() };
  const before = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
 	const fastStarted = performance.now();
 	const fast = expectedCounts ? await runFastTest(input, expectedCounts) : await runFastTest(input);
@@ -525,7 +528,7 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
    activeConcurrentWriterPaths(before.home, after.home), activeConcurrentWriterPaths(before.project, after.project),
   ]);
   const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
-   home: compareWatched(before.home, after.home, input.home, homeWriters),
+   home: compareWatched(before.home, after.home, input.home, homeWriters, liveWriterPaths(before.home, after.home, liveWriter, homeWriters)),
    project: compareWatched(before.project, after.project, input.home, projectWriters) };
   const failures = [...fast.failures];
   if (!snapshots.release.unchanged) failures.push("Release snapshot changed during failed fast stage");
@@ -566,7 +569,7 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
   activeConcurrentWriterPaths(before.home, after.home), activeConcurrentWriterPaths(before.project, after.project),
  ]);
  const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
-  home: compareWatched(before.home, after.home, input.home, homeWriters),
+  home: compareWatched(before.home, after.home, input.home, homeWriters, liveWriterPaths(before.home, after.home, liveWriter, homeWriters)),
   project: compareWatched(before.project, after.project, input.home, projectWriters) };
  const redact = (text: string) => redactFullTestText(text, privateRoots);
  const producer = describeFullTestProducer(result, { source_revision: sourceRevision, references, roots: privateRoots,
