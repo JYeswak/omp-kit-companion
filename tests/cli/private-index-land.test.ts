@@ -1,11 +1,11 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { runFixture, runFixtureAsync } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
-	EXPECTED_SERVICE, SERVICE_BASE, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, landSchema, patchHold, remoteHead, repoRoot, responseCode, schemaViolations, scratch, stringEnvironment, verdictPath, LAND_DEFAULT_TIMEOUT_MS,
+	EXPECTED_SERVICE, SERVICE_BASE, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, landSchema, patchHold, remoteHead, repoRoot, responseCode, schemaViolations, scratch, stringEnvironment, verdictPath, LAND_COMMAND_DEADLINE_MS, LAND_DEFAULT_TIMEOUT_MS,
 } from "./private-index-land.helpers.ts";
 
 setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
@@ -28,7 +28,7 @@ test("the published grammar lists exit 77 as not_run", () => {
 	const body = JSON.parse(fixtureDecoder.decode(child.stdout)) as { data: { exit_codes: Record<string, number> } };
 	expect(body.data.exit_codes).toMatchObject({ not_run: 77, success: 0, finding: 1 });
 });
-test("checks the exact candidate with the base-registered push check before publishing", { timeout: 300_000 }, async () => {
+test("checks the exact candidate with the base-registered push check before publishing", { timeout: fixtureDeadlineS(300) * 1000 }, async () => {
 	const { work, fakeBin } = fixture();
 	const prePushFixtureFiles = [
 		".github/workflows/release-train.yml", ".github/workflows/release.yml",
@@ -55,8 +55,13 @@ test("checks the exact candidate with the base-registered push check before publ
 	mkdirSync(join(work, ".github", "workflows"), { recursive: true });
 	mkdirSync(join(work, "tests", "cli", "lib"), { recursive: true });
 	mkdirSync(join(work, "src"), { recursive: true });
-	for (const path of prePushFixtureFiles) cpSync(join(repoRoot, path), join(work, path));
-	// Bootstrap runner contracts are healthy dependencies, not this land test's subject.
+	// The gate's checker contracts (and the other copied shell suites) are healthy dependencies, not this
+	// land test's subject: each must exist by name, and the pushed tree's suite must pass. Real copies
+	// ran the kit's own suites inside the fixture, about 160 s of CPU; a passing stub keeps the name.
+	for (const path of prePushFixtureFiles) {
+		if (path.endsWith(".test.sh")) writeFileSync(join(work, path), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		else cpSync(join(repoRoot, path), join(work, path));
+	}
 	for (const name of ["full-suite-verdict-incomplete.test.sh", "pre-push-gate.test.sh"])
 		writeFileSync(join(work, "tests", "cli", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 	writeFileSync(join(work, "scripts", "fresh-gate.sh"), "#!/bin/sh\nif [ \"${1-}\" = \"--test-workers\" ]; then printf '1\\n'; fi\nexit 0\n", { mode: 0o755 });
@@ -94,7 +99,8 @@ test("checks the exact candidate with the base-registered push check before publ
 	const landCommandArgs = landArgs("owned.txt");
 	landCommandArgs[landCommandArgs.indexOf("--message") + 1] = "feat(land): publish reserved fixture ompkit-kup44.5 [test]";
 	const run = command(work, landCommandArgs, hold, {
-		timeoutMs: 120_000,
+		// A 120 s floor; command() hands it to runFixture, which applies the load factor once.
+		timeoutMs: LAND_COMMAND_DEADLINE_MS * 4,
 		amDir: fakeBin,
 		gitEnv: {
 			OMP_LAND_CHECK_SHA_FILE: checkShaFile,
@@ -152,17 +158,22 @@ test("checks the exact candidate with the base-registered push check before publ
 		const gitEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", GIT_TERMINAL_PROMPT: "0",
 			GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
 		const decoder = new TextDecoder();
-		const archive = await runFixtureAsync(["git", "-C", work, "archive", data.commit], {
+		// The candidate tree's tar outgrew the 1 MiB capture cap (rc 0 with truncated stdout), so git
+		// writes it to an owned file and tar reads that file.
+		const tarball = join(judgeArchive.path, "candidate.tar");
+		const tree = join(judgeArchive.path, "tree");
+		mkdirSync(tree);
+		const archive = await runFixtureAsync(["git", "-C", work, "archive", "-o", tarball, data.commit], {
 			cwd: work, env: gitEnv, floor_s: 30,
 		});
 		expect(archive.rc, decoder.decode(archive.stderr)).toBe(0);
 		expect(archive.timed_out || archive.killed || archive.truncated || archive.total_truncated).toBe(false);
-		const unpacked = await runFixtureAsync(["tar", "-xf", "-", "-C", judgeArchive.path], {
-			cwd: work, env: gitEnv, stdin: archive.stdout, floor_s: 30,
+		const unpacked = await runFixtureAsync(["tar", "-xf", tarball, "-C", tree], {
+			cwd: work, env: gitEnv, floor_s: 30,
 		});
 		expect(unpacked.rc, decoder.decode(unpacked.stderr)).toBe(0);
 		expect(unpacked.timed_out || unpacked.killed || unpacked.truncated || unpacked.total_truncated).toBe(false);
-		const replay = await runFixtureAsync(["sh", join(judgeArchive.path, "scripts", "full-suite-verdict.sh"),
+		const replay = await runFixtureAsync(["sh", join(tree, "scripts", "full-suite-verdict.sh"),
 			"--repo", work, "--commit", data.commit, "--judge-role", "main"],
 			{ cwd: work, env: stringEnvironment(verificationEnv), floor_s: 30 });
 		const replayOutput = decoder.decode(replay.stdout) + decoder.decode(replay.stderr);
@@ -251,7 +262,7 @@ test("missing or corrupt suite logs are not reused as cached PASS", async () => 
 		const replacementEntry = JSON.parse(readFileSync(entryPath, "utf8")) as { evidence: { log_sha256?: string } };
 		expect(replacementEntry.evidence.log_sha256).toBe(createHash("sha256").update(replacementLog).digest("hex"));
 	}
-}, 35_000);
+}, fixtureDeadlineS(35) * 1000);
 test("first check registration is skipped until a later landing", () => {
 	const { work, fakeBin } = fixture();
 	mkdirSync(join(work, ".omp"), { recursive: true });
