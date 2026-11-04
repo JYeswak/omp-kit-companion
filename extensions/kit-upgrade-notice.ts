@@ -3,6 +3,7 @@
  * detects the gap between the installed omp-kit release and the release its process loaded, and injects
  * exactly one notice per release per seat with pi.sendMessage (deliverAs nextTurn when idle, aside when
  * busy): 'omp-kit <installed> is installed; this seat runs <loaded>; upgrade now', plus how to restart.
+ * PAUSEDRESTART1: a stopped project or recorded paused goal instead stays paused for the lead's approved restart.
  * Fleet mode (SELFRESTART1 ompkit-v66l.33, J-2026-10-20-08/09): the seat restarts ITSELF from the notice:
  * save work, run the self-restart helper (one command), end the turn. The helper resolves the seat, pauses its
  * goal (Esc), reloads omp on the new release and resumes the goal; no seat waits on the chief's sentinel (the
@@ -20,7 +21,7 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export const UPGRADE_NOTICE = "UPGRADE_NOTICE";
 
@@ -75,7 +76,12 @@ export const SELF_RESTART_COMMAND = "python3 ~/.claude/skills/omp-kit-orchestrat
  * The notice body: the gap plus the restart steps. Fleet mode: (1) save work, (2) run the self-restart helper,
  * (3) end the turn with no further tool call. Stock mode: only how to restart omp to load the release.
  */
-export function upgradeNoticeMessage(installed: string, loaded: string, fleet = false): string {
+export function upgradeNoticeMessage(installed: string, loaded: string, fleet = false, paused = false): string {
+	if (paused) {
+		return `kit-upgrade-notice ${UPGRADE_NOTICE}: omp-kit ${installed} is installed; this seat runs ${loaded}.\n` +
+			`This project or goal is paused: stay paused. The lead upgrades this seat in the next approved fleet restart. ` +
+			`Do not self-restart or resume the goal.`;
+	}
 	const head = `kit-upgrade-notice ${UPGRADE_NOTICE}: omp-kit ${installed} is installed; this seat runs ${loaded}; upgrade now.\n`;
 	if (!fleet) {
 		return (
@@ -112,8 +118,9 @@ export interface UpgradeNoticeApi {
 }
 
 export interface UpgradeNoticeContext {
+	cwd?: string;
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
-	sessionManager?: { getSessionId?: () => string | undefined };
+	sessionManager?: { getSessionId?: () => string | undefined; getEntries?: () => readonly unknown[] };
 	isIdle?: () => boolean;
 }
 
@@ -168,6 +175,33 @@ function readSentReleases(path: string, deps: UpgradeNoticeDeps): string[] {
 	}
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
+}
+
+/** The latest goal mode wins; any paused goal is protected, regardless of who paused it. */
+function seatPaused(ctx: UpgradeNoticeContext, home: string, deps: UpgradeNoticeDeps): boolean {
+	const entries = ctx.sessionManager?.getEntries?.() ?? [];
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = record(entries[i]);
+		if (entry?.type !== "mode_change") continue;
+		if (entry.mode === "goal_paused") return true;
+		break;
+	}
+	const raw = (deps.readFile ?? defaultReadFile)(join(home, ".config", "omp-kit", "fleet-watch.json"));
+	if (raw === undefined || !ctx.cwd) return false;
+	const config = record(JSON.parse(raw));
+	const rows = [...(Array.isArray(config?.sessions) ? config.sessions : []),
+		...(Array.isArray(config?.herdr) ? config.herdr : [])];
+	const cwd = resolve(ctx.cwd);
+	return rows.some((value) => {
+		const row = record(value);
+		if (row?.pullEnabled !== false || typeof row.repo !== "string") return false;
+		const repo = resolve(row.repo);
+		return cwd === repo || cwd.startsWith(`${repo}/`);
+	});
+}
+
 export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: UpgradeNoticeDeps = {}): Promise<void> {
 	const sentMemory = new Set<string>();
 	let warned = false;
@@ -197,7 +231,8 @@ export default async function kitUpgradeNotice(pi: UpgradeNoticeApi, deps: Upgra
 			pi.sendMessage(
 				{
 					customType: "kit-upgrade-notice",
-					content: upgradeNoticeMessage(gap.installed, gap.loaded, (deps.isFile ?? defaultIsFile)(join(home, SELF_RESTART_SCRIPT))),
+					content: upgradeNoticeMessage(gap.installed, gap.loaded, (deps.isFile ?? defaultIsFile)(join(home, SELF_RESTART_SCRIPT)),
+						seatPaused(ctx, home, deps)),
 					display: true,
 					details: { behavior: UPGRADE_NOTICE },
 				},

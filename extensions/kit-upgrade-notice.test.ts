@@ -151,6 +151,43 @@ test("mode: the installed self-restart helper under home selects fleet text; its
 	}
 });
 
+test("PAUSEDRESTART1 planted: stopped projects and recorded paused goals stay paused; active controls restart", async () => {
+	const config = JSON.stringify({ sessions: [
+		{ session: "omp-test", repo: "/projects/stopped", pullEnabled: false },
+		{ session: "active", repo: "/projects/active", pullEnabled: true },
+	] });
+	for (const [cwd, modes, paused] of [
+		["/projects/stopped", ["goal"], true],
+		["/projects/stopped/subdir", ["goal"], true],
+		["/projects/active", ["goal", "goal_paused"], true],
+		["/projects/active", ["goal_paused", "goal"], false],
+		["/projects/active", ["goal_paused", "none"], false],
+		["/projects/stopped-other", ["goal"], false],
+	] as const) {
+		const ctx: UpgradeNoticeContext = {
+			...IDLE, cwd, sessionManager: {
+				getSessionId: () => "seat-1",
+				getEntries: () => modes.map((mode) => ({ type: "mode_change", mode })),
+			},
+		};
+		const f = files({ "/h/.config/omp-kit/fleet-watch.json": config });
+		const { api, sent, handlers } = fakePi(ctx);
+		await kitUpgradeNotice(api, { selfPath: LOADED, home: "/h", ...f.deps, isFile: () => true });
+		handlers["session_start"]!(null, ctx);
+		expect(sent).toHaveLength(1);
+		const msg = sent[0]!.content;
+		if (paused) {
+			expect(msg).toContain("stay paused");
+			expect(msg).toContain("next approved fleet restart");
+			expect(msg).not.toContain("upgrade now");
+			expect(msg).not.toContain(SELF_RESTART_COMMAND);
+			expect(msg).not.toContain("restart this seat yourself");
+		} else {
+			expect(msg).toBe(upgradeNoticeMessage("0.2.58", "0.2.57", true));
+		}
+	}
+});
+
 test("regex: a 1 MiB non-matching path completes without hanging", () => {
 	const big = `/x/releases/${"9".repeat(1024 * 1024)}/extensions/kit-upgrade-notice.ts`;
 	expect(loadedRelease(big)).toBeNull();
