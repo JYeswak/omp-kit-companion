@@ -42,7 +42,7 @@ async function fixture(gated = true) {
 	return repo;
 }
 
-test("brief derives required rules from installed members and source checks, not repo names", async () => {
+test("BRIEFSTABLE1 brief derives required rules from installed members and source checks, not repo names; a working-tree edit leaves the digest until committed", async () => {
 	const repo = await fixture();
 	const scripts = join(repo, "scripts");
 	mkdirSync(scripts);
@@ -83,7 +83,7 @@ test("BRIEFSTABLE1 Comply lines come from a member's own remedy text; generic on
 	expect(rules.find(rule => rule.member.endsWith("62-silent"))?.compliant).toStartWith(GENERIC_COMPLY);
 });
 
-test("build task requires the current repo-bound digest; read-only and ungated controls stay admitted", async () => {
+test("BRIEFSTABLE1 build task requires the current repo-bound digest; no-change (read-only, Change: None) and ungated controls stay admitted", async () => {
 	const repo = await fixture();
 	const contract = await briefContract(repo, execute);
 	const context = `Repo: ${repo}`;
