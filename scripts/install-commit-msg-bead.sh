@@ -293,6 +293,12 @@ gap_mention commit-msg 47-omp-kit-gap-mention scripts/check-gap-mention.sh +x
 stale_worktree commit-msg 49-omp-kit-stale-worktree scripts/check-stale-worktree.sh +x
 kitlib_reversal commit-msg 50-omp-kit-staged-kitlib-reversal scripts/check-commit-kitlib-reversal.sh +x
 commit_gate commit-msg 55-omp-kit-commit-gate scripts/check-commit-gate.sh +x
+commit_gate commit-msg scripts/check-red-main.py scripts/check-red-main.py -x
+commit_gate commit-msg scripts/full-suite-verdict-store.py scripts/full-suite-verdict-store.py -x
+commit_gate commit-msg scripts/suite-metrics.py scripts/suite-metrics.py -x
+commit_gate commit-msg scripts/kitlib_run.py scripts/kitlib_run.py -x
+commit_gate commit-msg scripts/kitlib_tmp.py scripts/kitlib_tmp.py -x
+commit_gate commit-msg scripts/pysafe.py scripts/pysafe.py -x
 native_preservation pre-commit native-br-preserve.py scripts/native-br-preserve.py -x
 INSTALLATION_MANIFEST
 }
@@ -773,9 +779,10 @@ install_kitlib_reversal() {
 
 # install_commit_gate: COMMITPARITY1 (ompkit-9d9fx). The commit-msg member runs the installed pre-push
 # fresh-gate member on the commit being made, so a commit the push would refuse never lands on main.
-# It is a no-op in a repo without that pre-push member; it runs last, after every cheaper member.
+# It checks the recorded release verdict even without a pre-push member, and runs last.
 install_commit_gate() {
 	member="$(chain_dir commit-msg)/55-omp-kit-commit-gate"
+	mkdir -p "$(chain_dir commit-msg)/scripts"
 	install_manifest_group commit_gate
 	printf 'installed commit-gate member: %s\n' "$member"
 }

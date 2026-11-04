@@ -29,10 +29,26 @@ fi
 hooks=$(git rev-parse --git-path hooks 2>/dev/null) || exit 0
 case "$hooks" in /*) ;; *) hooks="$(git rev-parse --show-toplevel)/$hooks" ;; esac
 gate="$hooks/hooks.d/pre-push/40-omp-kit-fresh-gate"
-[ -x "$gate" ] || exit 0
 [ "$(git symbolic-ref -q HEAD 2>/dev/null)" = refs/heads/main ] || exit 0
 head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || exit 0
 base=$(git rev-parse -q --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null) || exit 0
+
+# REDMAINLAND1: surface existing main failures before judging this commit's range.
+# The installed reader lives under scripts/ so its store/metrics imports retain
+# their source layout. A source invocation uses the adjacent reader instead.
+here=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
+reader="$here/scripts/check-red-main.py"
+[ -f "$reader" ] || reader="$here/check-red-main.py"
+if [ -f "$reader" ] && command -v python3 >/dev/null 2>&1; then
+	root=$(git rev-parse --show-toplevel)
+	case "$msg" in /*) ;; *) msg="$(pwd -P)/$msg" ;; esac
+	# Preserve relative alternate-index paths when entering the reader directory.
+	case "${GIT_INDEX_FILE:-}" in ''|/*) ;; *) GIT_INDEX_FILE="$(pwd -P)/$GIT_INDEX_FILE"; export GIT_INDEX_FILE ;; esac
+	(CDPATH='' cd -- "$(dirname "$reader")" && python3 -B check-red-main.py "$root" "$base" "$msg") || exit $?
+else
+	echo "commit-gate: UNKNOWN release verdict (reader unavailable)" >&2
+fi
+[ -x "$gate" ] || exit 0
 
 # git write-tree honors GIT_INDEX_FILE, so `commit --only` is judged as it will be committed.
 tree=$(git write-tree) || { echo "commit-gate: REFUSED cannot write the staged tree" >&2; exit 1; }

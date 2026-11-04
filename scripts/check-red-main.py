@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""REDMAINLAND1: refuse unrelated commits while origin/main has a recorded red release.
+
+Read-only: reuse the verdict store's validators and CULPRIT1 flake attribution;
+never rerun a suite or fetch. Missing, incomplete or unreadable evidence is UNKNOWN.
+"""
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import sys
+
+SCRIPTS = Path(__file__).resolve().parent
+
+
+def load_store():
+    spec = importlib.util.spec_from_file_location("red_main_store", SCRIPTS / "full-suite-verdict-store.py")
+    if spec is None or spec.loader is None:
+        raise ValueError("verdict reader unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def message_bead(store, message: str, label: str) -> str | None:
+    for line in message.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key == label and store.BEAD_ID.fullmatch(value.strip()):
+            return value.strip()
+    return None
+
+
+def git(store, repo: Path, *args: str) -> str:
+    # Retain GIT_INDEX_FILE: commit --only supplies its real prospective index.
+    result = store.run(["git", "-C", str(repo), *args], deadline_s=10, max_output_bytes=4 << 20)
+    if result.rc != 0 or result.timed_out or result.truncated:
+        raise ValueError("git evidence unavailable")
+    return result.stdout.decode("utf-8", errors="strict").strip()
+
+
+def latest(store, directory: Path, tree: str, ci_only: bool = False) -> dict | None:
+    rows = []
+    folder = directory / "ci-only" if ci_only else directory
+    kind = "ci-only" if ci_only else "main"
+    for path in folder.glob(f"{tree}.{kind}.*.json"):
+        if ci_only:
+            raw = store.json_file(path)
+            entry, _reason = store.validate_ci_only_record(
+                path, tree=tree, checks=raw.get("checks"), runtime=raw.get("runtime"))
+            stamp = entry.get("finished_ms", 0) if entry else 0
+        else:
+            entry, _reason = store.validate_record(path, judge_root=SCRIPTS.parent, tree=tree,
+                                                  role="main", exact_filename=True, historical=True)
+            stamp = entry.get("timing", {}).get("started_ms", 0) if entry else 0
+        if entry is not None:
+            rows.append((stamp, path.name, entry))
+    return max(rows, key=lambda row: row[:2])[2] if rows else None
+
+
+def red_files(entry: dict | None, ci_only: bool = False) -> set[str]:
+    if entry is None or entry["verdict"] != "FAIL":
+        return set()
+    rows = entry["files"] if ci_only else entry["evidence"]["files"]
+    failures = {row["path"] for row in rows if row["rc"] != 0}
+    culprit = entry.get("culprit", {})
+    if culprit.get("method") == "flake-rerun":
+        # CULPRIT1 reruns only a bounded subset. It does not clear untested failures.
+        failures.difference_update(culprit["failing_files"])
+    return failures
+
+
+def is_red(entry: dict | None, ci_only: bool = False) -> bool:
+    if entry is None or entry["verdict"] != "FAIL":
+        return False
+    if ci_only:
+        return bool(red_files(entry, True))
+    return entry["exit_code"] != 0 and (
+        bool(red_files(entry)) or bool(entry.get("minimum_run", {}).get("shortfalls"))
+        or entry.get("culprit", {}).get("method") != "flake-rerun")
+
+
+def first_red(store, repo: Path, directory: Path, base: str, entry: dict | None,
+              ci_only: bool) -> tuple[str, str | None]:
+    culprit = (entry or {}).get("culprit", {})
+    if culprit.get("method") == "bisect":
+        return culprit["sha"], culprit["bead"]
+    # With no causal attribution, name the first observed red since the last
+    # recorded green. Background verdicts may skip intermediate published heads.
+    first = base
+    for row in git(store, repo, "log", "--first-parent", "--max-count=128", "--format=%H:%T", base).splitlines():
+        sha, tree = row.split(":", 1)
+        prior = latest(store, directory, tree, ci_only)
+        if prior is None:
+            continue
+        if not is_red(prior, ci_only):
+            break
+        first = sha
+    message = git(store, repo, "log", "-1", "--format=%B", first)
+    return first, message_bead(store, message, "Bead")
+
+
+def check(store, repo: Path, base: str, message: Path) -> int:
+    directory = store.cache_directory(repo, None)
+    tree = git(store, repo, "rev-parse", base + "^{tree}")
+    full = latest(store, directory, tree)
+    ci = latest(store, directory, tree, True)
+    full_red, ci_red = is_red(full), is_red(ci, True)
+    if not full_red and not ci_red:
+        if full is None or ci is None:
+            print(f"commit-gate: UNKNOWN release verdict for origin/main {base[:12]} (absent, pending or unreadable)", file=sys.stderr)
+        return 0
+    files = red_files(full) | red_files(ci, True)
+    first, bead = first_red(store, repo, directory, base, full if full_red else ci, not full_red)
+    detail = f"origin/main {base[:12]} is RED; first recorded red commit {first}; bead {bead or 'none'}; failing tests: {', '.join(sorted(files)) or '(no failing file recorded)'}"
+    trailer = message_bead(store, message.read_text(encoding="utf-8"), "Fixes-Red")
+    changed = set(git(store, repo, "diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD").rstrip("\0").split("\0"))
+    culprit = (full or {}).get("culprit", {})
+    culprit_files = set(culprit.get("failing_files", [])) if culprit.get("method") == "bisect" else set()
+    if trailer or changed.intersection(files | culprit_files):
+        print(f"commit-gate: RED FIX admitted: {detail}", file=sys.stderr)
+        return 0
+    print(f"commit-gate: REFUSED: {detail}. Fix the failing files or carry Fixes-Red: <bead-id> for the repair.", file=sys.stderr)
+    return 1
+
+
+def main() -> int:
+    try:
+        repo, base, message = Path(sys.argv[1]).resolve(), sys.argv[2], Path(sys.argv[3])
+        return check(load_store(), repo, base, message)
+    except Exception as error:
+        # A broken store must never turn the main branch into an unrepairable gate.
+        print(f"commit-gate: UNKNOWN release verdict ({type(error).__name__}: {str(error).splitlines()[0] if str(error) else 'read error'})", file=sys.stderr)
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
