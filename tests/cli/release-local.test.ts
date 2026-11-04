@@ -3,6 +3,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, r
 import { join } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 // LOCAL-RELEASE-V1 (ompkit-v66l.27.11, docs/release-signing.md): enabling release.yml must never start the
@@ -127,7 +128,7 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 		const env: Record<string, string> = {};
 		for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
 		const result = await run(["bash", join(ROOT, "scripts/release-local.sh"), "--dry-run", "--version", "9.9.9"], {
-			deadline_s: 60, cwd: ROOT, env: { ...env, PATH: `${bin}:${env.PATH ?? ""}`, TMPDIR: work },
+			deadline_s: fixtureDeadlineS(60), cwd: ROOT, env: { ...env, PATH: `${bin}:${env.PATH ?? ""}`, TMPDIR: work },
 		});
 		return { rc: result.rc, err: new TextDecoder().decode(result.stderr), ms: Date.now() - started, gitCalled: existsSync(join(work, "git-called")) };
 	};
@@ -147,4 +148,121 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 		rmSync(work, { recursive: true, force: true });
 	}
 // Two release-local preflights run back to back (stubbed admission, git and gh); bun's 5 s default is too tight under load.
-}, 60000);
+}, fixtureDeadlineS(60) * 1_000);
+
+// Execute the production shell stages with real curl/checksums and only the
+// GitHub transport redirected to a loopback server. No signing or remote writes.
+const localScript = readFileSync(join(ROOT, "scripts/release-local.sh"), "utf8");
+function releaseStage(start: string, end: string): string {
+	const first = localScript.indexOf(start);
+	const last = localScript.indexOf(end, first + start.length);
+	if (first < 0 || last < 0) throw new Error(`release stage boundary missing: ${start} / ${end}`);
+	return localScript.slice(first, last);
+}
+const helperScript = releaseStage("bounded() {", "# ---------------------------------------------------------------------------------------------- 1. preflight");
+const downloadStage = releaseStage("stage verify\n", 'for platform in "${SHIP[@]}"; do');
+const attestStage = releaseStage("stage attest\n", "# -------------------------------------------------------------------------------------------------- 8. verify");
+const stagePrelude = `set -euo pipefail
+die() { echo "release-local: refused: $*" >&2; exit 4; }
+say() { echo "== $*"; }
+WORK=$1; DIST="$WORK/dist"; VERSION=0.0.0; REPO=fixture/release
+DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar"
+STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"
+${helperScript}`;
+
+for (const failure of ["none", "http", "bytes"] as const) {
+	test(`public release downloads ${failure === "none" ? "overlap without rejecting valid bytes" : "refuse " + failure + " failures"}`, async () => {
+		const work = realpathSync(ownedTmp("release-download", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const dist = join(work, "dist");
+		const bin = join(work, "bin");
+		mkdirSync(dist); mkdirSync(bin);
+		const names = ["release-index.json", ...["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"].map(platform => `omp-kit-v0.0.0-${platform}.tar`)];
+		const payloads = new Map(names.map(name => [name, `published bytes for ${name}\n`]));
+		payloads.set("SHA256SUMS", names.map(name => `${new Bun.CryptoHasher("sha256").update(payloads.get(name)!).digest("hex")}  ${name}\n`).join(""));
+		for (const [name, bytes] of payloads) writeFileSync(join(dist, name), bytes);
+		const broken = names[2]!;
+		const archives = new Set<string>();
+		const { promise: allArchivesStarted, resolve: releaseDownloads } = Promise.withResolvers<void>();
+		const server = Bun.serve({
+			hostname: "127.0.0.1", port: Number(process.env.KIT_TEST_LOOPBACK_PORT ?? 0),
+			async fetch(request) {
+				const name = new URL(request.url).pathname.split("/").at(-1)!;
+				if (name.endsWith(".tar")) {
+					archives.add(name);
+					if (archives.size === 3) releaseDownloads();
+					// A serial implementation cannot pass this control. No timing assertion
+					// or arbitrary sleep: all three archive requests must coexist.
+					if (failure === "none") await allArchivesStarted;
+				}
+				if (failure === "http" && name === broken) return new Response("missing", { status: 404 });
+				return new Response(failure === "bytes" && name === broken ? "tampered" : payloads.get(name));
+			},
+		});
+		const curl = Bun.which("curl");
+		if (!curl) throw new Error("curl is required for the release download contract");
+		writeFileSync(join(bin, "curl"), `#!/bin/bash
+args=()
+for arg do
+	case "$arg" in
+		https://github.com/*) args+=("$RELEASE_TEST_URL/\${arg#https://github.com/}") ;;
+		*) args+=("$arg") ;;
+	esac
+done
+exec ${JSON.stringify(curl)} "\${args[@]}"
+`);
+		chmodSync(join(bin, "curl"), 0o755);
+		try {
+			const result = await runFixtureAsync(["bash", "-c", stagePrelude + downloadStage, "release-download-test", work], {
+				cwd: ROOT, env: { ...process.env, TMPDIR: work, PATH: `${bin}:${process.env.PATH ?? ""}`, RELEASE_TEST_URL: server.url.origin }, floor_s: 10,
+			});
+			const stdout = new TextDecoder().decode(result.stdout);
+			const stderr = new TextDecoder().decode(result.stderr);
+			if (failure === "none") {
+				expect(result.rc, stderr).toBe(0);
+				expect(archives.size).toBe(3);
+				for (const [name, bytes] of payloads) expect(readFileSync(join(work, "public", name), "utf8"), name).toBe(bytes);
+				for (const name of payloads.keys()) expect(stdout).toContain(`public download ${name} took `);
+			} else {
+				expect(result.rc, stderr).toBe(4);
+				expect(stderr).toContain(failure === "http" ? `public download of ${broken} failed (curl 22)` : `public ${broken} differs from the locally signed bytes`);
+			}
+		} finally {
+			releaseDownloads();
+			server.stop(true);
+			rmSync(work, { recursive: true, force: true });
+		}
+	}, fixtureDeadlineS(20) * 1_000);
+}
+
+for (const conclusion of ["success", "failure"]) {
+	test(`attestation completion polls promptly and preserves ${conclusion}`, async () => {
+		const work = realpathSync(ownedTmp("release-poll", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const bin = join(work, "bin");
+		mkdirSync(bin);
+		writeFileSync(join(bin, "gh"), `#!/bin/sh
+case "$*" in
+	"workflow run "*) exit 0 ;;
+	"run list "*) echo 123 ;;
+	*"--log-failed"*) echo "runner failed" ;;
+	*"--log"*) echo "PUBLISHED draft=false" ;;
+	"run view "*)
+		if [ -f "$RELEASE_TEST_WORK/polled" ]; then echo "completed $RELEASE_TEST_CONCLUSION"
+		else touch "$RELEASE_TEST_WORK/polled"; echo "in_progress "; fi ;;
+	*) exit 99 ;;
+esac
+`);
+		writeFileSync(join(bin, "sleep"), '#!/bin/sh\nprintf "%s\\n" "$1" >>"$RELEASE_TEST_WORK/sleeps"\n');
+		chmodSync(join(bin, "gh"), 0o755); chmodSync(join(bin, "sleep"), 0o755);
+		try {
+			const result = await runFixtureAsync(["bash", "-c", stagePrelude + attestStage, "release-poll-test", work], {
+				cwd: ROOT, env: { ...process.env, TMPDIR: work, PATH: `${bin}:${process.env.PATH ?? ""}`, RELEASE_TEST_WORK: work, RELEASE_TEST_CONCLUSION: conclusion }, floor_s: 10,
+			});
+			const stderr = new TextDecoder().decode(result.stderr);
+			expect(readFileSync(join(work, "sleeps"), "utf8")).toBe("3\n");
+			expect(result.rc, stderr).toBe(conclusion === "success" ? 0 : 4);
+			if (conclusion === "failure") expect(stderr).toContain("attest-local run 123 ended: completed failure");
+		} finally {
+			rmSync(work, { recursive: true, force: true });
+		}
+	}, fixtureDeadlineS(20) * 1_000);
+}

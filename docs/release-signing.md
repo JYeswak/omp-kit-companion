@@ -268,3 +268,104 @@ GitHub job remains, and it never builds anything.
 `inputs.mode == 'ci-pipeline'`, which the train's dispatches (`release_reuse.py`) pass
 explicitly. Enabling `release.yml` therefore cannot start the expensive pipeline. A failure
 after the tag keeps the tag and the draft. Fix it and redispatch `attest-local`; never re-tag.
+
+### Release latency investigation (RELEASE4MIN, 2026-11-03)
+
+The 0.2.86 cut used source `26cdd547a1c44fe8170fbea620a0dc78babe0a11`.
+`cut086.log` records draft **112 s**, attest **100 s**, verify **105 s**:
+**317 s** of the approximately 406 s cut. Its receipt reports 405 s; stage
+clocks use whole seconds. This is cut time, **not** push-to-installed time
+including tests. No sub-four-minute round-trip result has been demonstrated.
+
+Read-only evidence:
+
+- Local log: tracker checkout `var/sitrep/cut086.log`, lines 41–66.
+- [Attestation run 41671758689](https://github.com/JYeswak/omp-kit-companion/actions/runs/41671758689):
+  `gh run view 41671758689 --repo JYeswak/omp-kit-companion --json createdAt,startedAt,updatedAt,jobs`
+  and the same command with `--log`.
+- [Release asset metadata](https://api.github.com/repos/JYeswak/omp-kit-companion/releases/tags/v0.2.86):
+  `gh api repos/JYeswak/omp-kit-companion/releases/tags/v0.2.86`.
+
+Historical times below distinguish recorded intervals from unavailable splits.
+Asset `updated_at - created_at` bounds the server's asset-processing interval;
+it is not a separately instrumented client upload duration. Concurrent rows do
+not add together.
+
+| Stage / sub-step | Recorded seconds | Evidence / limitation |
+|---|---:|---|
+| Draft total | 112 | Local stage clock |
+| Upload darwin archive, 76,055,040 bytes | 86 | Asset timestamps 16:10:27–16:11:53 UTC |
+| Upload linux-arm64 archive, 98,296,320 bytes | 105 | 16:10:27–16:12:12 |
+| Upload linux-x64 archive, 98,745,856 bytes | 108 | 16:10:27–16:12:15 |
+| Upload index, 887 bytes | <1 resolution | Both timestamps 16:10:27 |
+| Upload SHA256SUMS, 391 bytes | <1 resolution | Both timestamps 16:10:27 |
+| Create request, readback, local digest comparisons | Unavailable individually | Approximately 4 s outside the longest asset interval; not independently timed |
+| GitHub asset-digest polling | 0 | No poll exists: one `gh release view`, then equality checks |
+| Attest total | 100 | Local stage clock |
+| Workflow dispatch / run discovery | Unavailable individually | Local log has no command timestamps; discovery polls every 5 s |
+| Runner queue / scheduling | 6 | Run created 16:12:19, job starts 16:12:25 |
+| Runner setup / action downloads | 3 | Job step timestamps |
+| Checkout | 4 | Job step timestamps |
+| Tag/source/draft checks and five asset downloads | 8 | One step; download/check splits unavailable |
+| SBOM generation: darwin / linux-arm64 / linux-x64 | 3 / 1 / 1 | Job step timestamps |
+| Batched build provenance (three archives + index) | 8 | Inner action: predicate 0.706 s, signing/upload 7.203 s |
+| SBOM attestations: darwin / linux-arm64 / linux-x64 | 7 / 5 / 4 | Inner signing/upload actions: 6.166 / 4.735 / 4.490 s |
+| Consumer archive hash + attestation fetch + installer verify: darwin / linux-arm64 / linux-x64 | 4.73 / 4.20 / 4.46 | Consecutive success-log intervals; fetch versus verifier unavailable |
+| Index attestation verification / step tail | 3.44 | Last archive success to next step |
+| Attach three SBOMs, choose Latest, publish and read back | 7 | Job step timestamps |
+| SBOM upload intervals: darwin / linux-arm64 / linux-x64 | 1 / 1 / <1 resolution | Asset timestamps; calls are sequential |
+| Job cleanup / finalization | About 1 | Job completes 16:13:34 |
+| GitHub run lifecycle, including queue | 76 | Run created 16:12:19, updated 16:13:35 |
+| Dispatch/discovery plus completion polling and log retrieval outside run lifecycle | About 24 combined | 100 minus 76; cannot allocate among these operations |
+| Verify total | 105 | Local stage clock |
+| Public downloads: SHA256SUMS / index / darwin / linux-arm64 / linux-x64 | Unavailable individually | Five sequential curl calls, no timestamps |
+| Public byte comparisons and SHA256SUMS | Unavailable | Inside the same 105 s |
+| Attestation API fetch, each platform | Unavailable | Three sequential bounded calls |
+| Embedded installer verifier, each platform | Unavailable | Three sequential bounded calls; real pinned consumer policy |
+| Extraction, codesign and Gatekeeper | Unavailable | Gatekeeper accepted; no duration recorded |
+
+#### Prior art and ranked levers
+
+[GitHub CLI's create implementation](https://github.com/cli/cli/blob/v2.83.0/pkg/cmd/release/create/create.go)
+sets upload concurrency to five. Our single `gh release create ... "$DIST"/*`
+already uses this path; all five assets started at 16:10:27. Splitting it into
+parallel `gh release upload` processes is not a new optimization, and a single
+CLI call still performs one HTTP upload per asset.
+
+[Kronk's release workflow](https://github.com/ardanlabs/kronk/blob/main/.github/workflows/release.yaml)
+uses GoReleaser then one wildcard/multi-path provenance action for archives,
+packages, SBOMs and checksums. Our workflow already batches the three archives
+and index into one provenance action. The
+[pinned action](https://github.com/actions/attest-build-provenance/blob/e8998f949152b193b063cb0ec769d69d929409be/action.yml)
+also supports checksum-file subjects; switching inputs alone does not remove
+our mandatory byte checks. No independent upstream workflow speed measurement
+is claimed.
+
+The following savings are **estimates, not measured wins**, and are not
+additive. Retain every checksum, byte comparison, attestation policy and
+Gatekeeper check.
+
+| Rank | Lever | Expected seconds saved | Risk / disposition |
+|---|---|---:|---|
+| 1 | Smaller compressed published archives | Potentially 50–150 across upload/download if size falls 2–4x and bandwidth dominates | Proposal only: ratio and CPU cost unmeasured; changes filenames/index/installer/reuse contract and signed-archive handling |
+| 2 | Overlap five public downloads in one curl process | 0–60; upper bound is the currently unmeasured serial transfer portion | Implemented: cap five; same 600 s aggregate bound, redirects/retries and byte checks; bandwidth contention may save nothing |
+| 3 | Poll completed run every 3 s instead of 20 s | 0–17 per completion, 8.5 expected under uniformly phased completion | Implemented: same 30-minute refusal deadline and bounded API calls; more read requests, about 23 extra for a 76 s run |
+| 4 | Concurrent per-platform consumer verifications | About 8–10 on the runner, local saving unmeasured | Proposal: supervise all children and retain every failure; do not conflate runner timing with the signing Mac |
+| 5 | Concurrent SBOM attestations | About 9–10 before extra scheduling overhead | Proposal: three distinct SBOM subjects/predicates must remain; workflow/OIDC execution changes need review |
+| 6 | Batch the three SBOM asset uploads into one gh call | About 1–3 | Proposal: preserve skip-existing behavior and non-regressive Latest; small compared with archive transfer |
+| 7 | Add upload parallelism or batch provenance | 0 | Already present; keep the native implementation |
+| 8 | Tighten GitHub asset-digest polling | 0 | No such polling exists |
+
+The safe changes alone do not establish the 166+ s reduction needed for the
+four-minute goal, especially with tests and installation included. A new real
+cut and installed-version readback remain necessary.
+
+The local driver now logs `substep ... took Ns` separately for draft creation,
+digest readback, workflow dispatch/discovery/completion/log retrieval, public
+downloads, byte/checksum verification, each attestation fetch, each embedded
+installer verification, and Gatekeeper. Curl logs each asset's transfer seconds
+and result, including failed assets. Parallel downloads require curl 7.75+
+(`--parallel` and write-out `exitcode`; the signing Mac has 8.7.1). This changes
+neither published assets nor the installer trust root. The regression test uses
+real loopback curl transfers with an all-archive request barrier, an HTTP 404,
+and tampered bytes; separate controls prove runner failure still refuses.

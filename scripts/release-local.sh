@@ -108,6 +108,13 @@ stage() {
 	[ -z "$STAGE" ] || say "stage $STAGE"
 }
 sha_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
+# Keep local network/verification work separable from GitHub's runner timings.
+SUBSTEP=''; SUBSTEP_T0=0
+substep() {
+	local now; now=$(date +%s)
+	if [ -n "$SUBSTEP" ]; then say "substep $SUBSTEP took $((now - SUBSTEP_T0))s"; fi
+	SUBSTEP=$1; SUBSTEP_T0=$now
+}
 
 # ---------------------------------------------------------------------------------------------- 1. preflight
 stage preflight
@@ -115,6 +122,10 @@ stage preflight
 for tool in git gh jq python3 bun shasum codesign xcrun security spctl ditto plutil openssl curl tar timeout; do
 	command -v "$tool" >/dev/null || die "missing tool: $tool"
 done
+# Probe the newly used curl features locally, before a tag or draft can exist.
+curl_capability="$(bounded 10 curl -fsS --parallel -o /dev/null --write-out '%{exitcode}' file:///dev/null)" ||
+	die "curl 7.75+ with parallel transfers and write-out exitcode is required"
+[ "$curl_capability" = 0 ] || die "curl 7.75+ with write-out exitcode is required"
 bounded 60 gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is not authenticated to github.com"
 # RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34: fail fast on big gates). The ci-only stage runs the
 # packaged ladder through `omp-kit heavy`; when heavy work cannot be admitted (disk, load, slots) it waits queued
@@ -369,8 +380,10 @@ say "tagged v$VERSION -> $SOURCE"
 
 # --------------------------------------------------------------------------------------------------- 6. draft
 stage draft
+substep draft.create-and-upload
 bounded 1800 gh release create "v$VERSION" --repo "$REPO" --verify-tag --draft --title "v$VERSION" \
 	--notes-file "$WORK/release-notes.md" "$DIST"/* || die "draft creation failed (tag v$VERSION exists; resume from the draft, never re-tag)"
+substep draft.digest-readback
 bounded 120 gh release view "v$VERSION" --repo "$REPO" --json isDraft,assets >"$WORK/draft.json" || die "draft readback failed"
 [ "$(jq -r .isDraft "$WORK/draft.json")" = true ] || die "v$VERSION is not a draft"
 for file in "$DIST"/*; do
@@ -379,12 +392,15 @@ for file in "$DIST"/*; do
 		die "draft asset $name is not the local bytes"
 done
 say "draft v$VERSION holds $(jq -r '[.assets[].name] | join(" ")' "$WORK/draft.json")"
+substep ''
 
 # -------------------------------------------------------------------------------------------------- 7. attest
 stage attest
 dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+substep attest.dispatch
 bounded 120 gh workflow run release.yml --repo "$REPO" --ref "v$VERSION" -f version="$VERSION" -f mode=local-attest ||
 	die "dispatching release.yml (mode=local-attest) failed; is the workflow enabled?"
+substep attest.run-discovery
 RUN_ID=''
 for _ in $(seq 1 30); do
 	RUN_ID="$(bounded 60 gh run list --repo "$REPO" --workflow release.yml --event workflow_dispatch --limit 20 \
@@ -394,6 +410,7 @@ for _ in $(seq 1 30); do
 done
 [ -n "$RUN_ID" ] || die "the attest-local run did not appear"
 say "attest-local run https://github.com/$REPO/actions/runs/$RUN_ID"
+substep attest.run-completion
 deadline=$(( $(date +%s) + 1800 ))
 while :; do
 	state="$(bounded 60 gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion --jq '.status + " " + .conclusion')" || state='unknown '
@@ -403,35 +420,59 @@ while :; do
 			die "attest-local run $RUN_ID ended: $state (draft v$VERSION kept; fix and redispatch, never re-tag)" ;;
 	esac
 	[ "$(date +%s)" -lt "$deadline" ] || die "attest-local run $RUN_ID still '$state' after 30 min"
-	sleep 20
+	sleep 3
 done
+substep attest.log-download
 bounded 120 gh run view "$RUN_ID" --repo "$REPO" --log >"$WORK/attest.log" || true
 grep -E 'CONSUMER_VERIFY=|PUBLISHED ' "$WORK/attest.log" | sed 's/^.*\(CONSUMER_VERIFY=\|PUBLISHED \)/\1/' || true
+substep ''
 
 # -------------------------------------------------------------------------------------------------- 8. verify
 stage verify
 PUB="$WORK/public"
 mkdir "$PUB"
 URL="https://github.com/$REPO/releases/tag/v$VERSION"
+# One bounded curl owns every transfer, so cancellation still kills the whole
+# download set. --fail-early prevents a later success from masking an HTTP or
+# transport failure; per-operation write-out identifies the failing asset.
+substep verify.public-downloads
+download_args=(--parallel --parallel-max 5 --fail-early)
 for name in SHA256SUMS release-index.json "$DARWIN" "omp-kit-v$VERSION-linux-arm64-gnu.tar" "omp-kit-v$VERSION-linux-x64-gnu.tar"; do
-	bounded 600 curl -fsSL --retry 3 -o "$PUB/$name" "https://github.com/$REPO/releases/download/v$VERSION/$name" || die "public download of $name failed"
-	cmp -s "$PUB/$name" "$DIST/$name" || die "public $name differs from the locally signed bytes"
+	[ "${#download_args[@]}" -eq 4 ] || download_args+=(--next)
+	download_args+=(-fsSL --retry 3 -o "$PUB/$name" --write-out "$name"$'\t''%{time_total}'$'\t''%{exitcode}\n'
+		"https://github.com/$REPO/releases/download/v$VERSION/$name")
+done
+download_rc=0
+bounded 600 curl "${download_args[@]}" >"$WORK/public-downloads.tsv" || download_rc=$?
+while IFS=$'\t' read -r name seconds result; do
+	say "public download $name took ${seconds}s (curl $result)"
+	[ "$result" = 0 ] || die "public download of $name failed (curl $result)"
+done <"$WORK/public-downloads.tsv"
+[ "$download_rc" -eq 0 ] || die "public downloads failed (curl $download_rc; see per-asset results above)"
+substep verify.public-bytes-and-checksums
+for file in "$DIST"/*; do
+	name="$(basename "$file")"
+	cmp -s "$PUB/$name" "$file" || die "public $name differs from the locally signed bytes"
 done
 (cd "$PUB" && shasum -a 256 -c SHA256SUMS) || die "public SHA256SUMS check failed"
 for platform in "${SHIP[@]}"; do
 	archive="$PUB/omp-kit-v$VERSION-$platform.tar"
 	digest="$(sha_of "$archive")"
+	substep "verify.attestation-fetch.$platform"
 	# Exactly kit-update-job.ts pollPublishedRelease's fetch, then kit-update.ts authenticateUpdateArchive's verifier.
 	bounded 120 gh api --hostname github.com "repos/$REPO/attestations/sha256:$digest" --jq '.attestations[].bundle | tojson' \
 		>"$archive.sigstore.json" || die "no attestation bundle for $platform ($digest)"
+	substep "verify.installer-verifier.$platform"
 	bounded 180 python3 -I -c "$(cat "$SRC/installer/install.py")" attestation "$archive" "$VERSION" unused ||
 		die "the consumer verifier refuses $platform"
 	echo "CONSUMER_VERIFY=ok platform=$platform sha256=$digest"
 done
+substep verify.gatekeeper
 mkdir "$PUB/x"
 tar -xf "$PUB/$DARWIN" -C "$PUB/x" bin/omp-kit
 codesign --verify --strict "$PUB/x/bin/omp-kit" || die "public darwin binary signature does not verify"
 # A bare Mach-O is not an app to `--type execute`; this is devid_release.py check_signature's assessment.
 spctl --assess --type open --context context:primary-signature -vv "$PUB/x/bin/omp-kit" 2>&1 | tee "$WORK/spctl.txt"
 grep -q 'source=Notarized Developer ID' "$WORK/spctl.txt" || die "Gatekeeper does not report Notarized Developer ID"
+substep ''
 receipt released "$URL" "$RUN_ID"
