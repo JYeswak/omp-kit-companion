@@ -85,6 +85,7 @@ test("native release derives the rule manifest from rules, covers it in archive 
 	for (const hookFile of ["scripts/install-commit-msg-bead.sh", "scripts/install-pre-push-gate.sh", "scripts/pre-push-gate.sh",
 		"scripts/commit-msg-bead.sh", "scripts/check-pushed-on-main.sh", "scripts/pre-push-verification-level.sh", "scripts/check-pushed-beads.sh",
 		"scripts/ref-txn-bead.sh", "scripts/check-staged-imports.sh", "scripts/check-commit-imports.sh", "scripts/check-commit-notes.sh",
+		"scripts/ref-txn-witness.py",
 		"scripts/release-notes.ts", "scripts/check-staged-fragments.sh", "scripts/check-stale-worktree.sh", "scripts/check-staged-regexploit.sh",
 		"scripts/gate-event.sh", "scripts/check-staged-readme.sh", "scripts/readme-check.ts", "scripts/install-pre-commit-storage-root-gate.sh"])
 		expect(staged.files).toContain(hookFile);

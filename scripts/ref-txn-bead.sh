@@ -10,27 +10,58 @@
 # remote-tracking ref, whose message names no existing bead id. The judge is
 # commit-msg-bead.sh, installed beside this file, so the commit, ref and push
 # checks share one rule. Other refs and states pass untouched.
+#
+# Reviewed history transforms (HISTADMIT1, ompkit-2w7h.3): a history scrub
+# rewrites old id-less commits, so every rewritten counterpart looks new. When
+# a history operation's owner record holds the index (<gitdir>/index.lock is
+# JSON, never Git's binary index), the transaction is admitted only through
+# ref-txn-witness.py beside this file: it requires the operation's owned
+# context plus an independent, immutable review of that exact transform, and
+# prints the gained commits that are not mapped counterparts, which get the
+# ordinary check below. A missing reader refuses that operation only; with no
+# owner record, behavior is unchanged.
 set -u
 [ "${1:-}" = "prepared" ] || exit 0
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 CHECK="$HERE/commit-msg-bead.sh"
+READER="$HERE/ref-txn-witness.py"
 ZERO=0000000000000000000000000000000000000000
 rc=0
 MSG=""
+TXN=$(cat) || exit 4
+
+history_operation() { # true when a history operation's owner record holds the index
+	gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 1
+	[ -f "$gitdir/index.lock" ] && [ ! -L "$gitdir/index.lock" ] || return 1
+	[ "$(dd if="$gitdir/index.lock" bs=1 count=1 2>/dev/null)" = "{" ]
+}
+
 while read -r old new ref; do
 	[ "$ref" = "refs/heads/main" ] || continue
 	case "$new" in "$ZERO" | "") continue ;; esac
-	# No old value given (plain update-ref): judge only what is new relative
-	# to the ref's current tip, not every unpublished commit beneath it.
-	if [ "$old" = "$ZERO" ]; then old=$(git rev-parse -q --verify "$ref" 2>/dev/null) || old=""; fi
-	if [ -n "$old" ]; then
-		commits=$(git rev-list --no-merges "$new" "^$old" --not --remotes=origin 2>/dev/null) || commits="__ERR__"
+	if history_operation; then
+		if [ ! -f "$READER" ] || ! command -v python3 > /dev/null 2>&1; then
+			printf 'ref-txn-bead: a history operation holds the index but its witness reader is missing beside %s; refusing this %s update\n' "$0" "$ref" >&2
+			exit 4
+		fi
+		# runpy keeps the hook's cwd (the repository) and its stdin (the transaction lines).
+		if ! commits=$(printf '%s\n' "$TXN" | python3 -B -c 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")' "$READER" admit); then
+			printf 'ref-txn-bead: refusing %s update: the history transform has no matching independent review witness\n' "$ref" >&2
+			exit 4
+		fi
 	else
-		commits=$(git rev-list --no-merges "$new" --not --remotes=origin 2>/dev/null) || commits="__ERR__"
-	fi
-	if [ "$commits" = "__ERR__" ]; then
-		printf 'ref-txn-bead: cannot list the commits %s would gain; refusing the update\n' "$ref" >&2
-		exit 4
+		# No old value given (plain update-ref): judge only what is new relative
+		# to the ref's current tip, not every unpublished commit beneath it.
+		if [ "$old" = "$ZERO" ]; then old=$(git rev-parse -q --verify "$ref" 2>/dev/null) || old=""; fi
+		if [ -n "$old" ]; then
+			commits=$(git rev-list --no-merges "$new" "^$old" --not --remotes=origin 2>/dev/null) || commits="__ERR__"
+		else
+			commits=$(git rev-list --no-merges "$new" --not --remotes=origin 2>/dev/null) || commits="__ERR__"
+		fi
+		if [ "$commits" = "__ERR__" ]; then
+			printf 'ref-txn-bead: cannot list the commits %s would gain; refusing the update\n' "$ref" >&2
+			exit 4
+		fi
 	fi
 	for sha in $commits; do
 		if [ -z "$MSG" ]; then
@@ -52,6 +83,8 @@ while read -r old new ref; do
 			rc=4
 		fi
 	done
-done
+done <<EOF
+$TXN
+EOF
 [ -z "$MSG" ] || kitlib_tmp_cleanup "$msg_dir"
 exit "$rc"

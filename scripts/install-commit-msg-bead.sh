@@ -247,6 +247,8 @@ on_main pre-push 30-omp-kit-on-main scripts/check-pushed-on-main.sh +x
 pushed_vlevel pre-push 41-omp-kit-pushed-vlevel scripts/pre-push-verification-level.sh +x
 ref_txn reference-transaction 40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh +x
 ref_txn reference-transaction commit-msg-bead.sh scripts/commit-msg-bead.sh -x
+ref_txn reference-transaction ref-txn-witness.py scripts/ref-txn-witness.py -x
+ref_txn reference-transaction pysafe.py scripts/pysafe.py -x
 staged_imports pre-commit check-commit-imports.sh scripts/check-commit-imports.sh -x
 staged_imports pre-commit 45-omp-kit-staged-imports scripts/check-staged-imports.sh +x
 staged_fragments pre-commit 47-omp-kit-staged-fragments scripts/check-staged-fragments.sh +x
@@ -619,6 +621,7 @@ install_pushed_vlevel() {
 # install_ref_txn: the plumbing backstop. commit-tree + update-ref and
 # --no-verify never run commit-msg; git runs reference-transaction for every
 # ref update. The judge sits beside the member, non-executable (see above).
+# So do the reviewed-history witness reader and its pysafe.py (HISTADMIT1).
 install_ref_txn() {
 	dir=$(chain_dir reference-transaction)
 	member="$dir/40-omp-kit-ref-txn-bead"

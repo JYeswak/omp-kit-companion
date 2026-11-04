@@ -36,6 +36,8 @@ export const HOOK_MEMBER_PAIRS: ReadonlyArray<readonly [string, string]> = [
 	["hooks.d/pre-push/commit-msg-bead.sh", "scripts/commit-msg-bead.sh"],
 	["hooks.d/reference-transaction/40-omp-kit-ref-txn-bead", "scripts/ref-txn-bead.sh"],
 	["hooks.d/reference-transaction/commit-msg-bead.sh", "scripts/commit-msg-bead.sh"],
+	["hooks.d/reference-transaction/ref-txn-witness.py", "scripts/ref-txn-witness.py"],
+	["hooks.d/reference-transaction/pysafe.py", "scripts/pysafe.py"],
 	["hooks.d/pre-commit/45-omp-kit-staged-imports", "scripts/check-staged-imports.sh"],
 	["hooks.d/pre-commit/check-commit-imports.sh", "scripts/check-commit-imports.sh"],
 	["hooks.d/commit-msg/46-omp-kit-commit-notes", "scripts/check-commit-notes.sh"],
