@@ -1,7 +1,6 @@
 #!/bin/sh
 set -eu
 exec python3 - "$0" "$@" <<'PY'
-import datetime
 import json
 import os
 import pathlib
@@ -10,12 +9,15 @@ import subprocess
 import sys
 
 root = pathlib.Path(sys.argv[1]).resolve().parents[2]
+sys.path.insert(0, str(root / "scripts"))
+from kitlib_tmp import owned_tmp  # noqa: E402
 mutant = sys.argv[2] if len(sys.argv) == 3 else ""
 if len(sys.argv) > 3 or mutant not in ("", "stale-convert-guard", "old-output-key"):
     raise SystemExit("Usage: planning-share-name.sh [stale-convert-guard|old-output-key]")
-work = root / "var" / "agent-tmp" / ("planning-share-name." + str(os.getpid()))
-work.mkdir(parents=True)
-(work / ".owner").write_text(json.dumps({"pid": os.getpid(), "label": "planning-share-name", "repo": str(root), "created": datetime.datetime.now(datetime.timezone.utc).isoformat()}) + "\n")
+os.chdir(root)
+work_parent = root / "var" / "agent-tmp"
+work_parent.mkdir(parents=True, exist_ok=True)
+work = pathlib.Path(owned_tmp("planning-share-name", root=str(work_parent)).path)
 home = work / "home"
 home.mkdir()
 repo = work / "prose-repo"
@@ -90,7 +92,7 @@ try:
     rows = envelopes(result)
     quality = next(row for row in rows if row.get("kind") == "mission")["metrics"]["bead_self_contained"]
 except (KeyError, ValueError, StopIteration):
-    print(json.dumps({"kind": "INVALID", "case": "score-startup", "scratch": str(work), "producer": result}), flush=True)
+    print(json.dumps({"kind": "INVALID", "case": "score-startup", "producer": result}), flush=True)
     raise SystemExit(2)
 observed = {"metric": quality, "no_test_share_at_any_depth": no_test_share(rows)}
 record("score-prose", result, {"acceptance_present_share": 1, "metric_status": "PASS", "no_test_share_at_any_depth": True}, observed,
@@ -128,6 +130,6 @@ for legacy in ("test_share", "bead_self_contained_test_share"):
     observed = {"nonzero": result["exit_code"] != 0, "migration_error": "Rename legacy" in diagnostic and replacement in diagnostic}
     record("legacy-base-entry-function-" + legacy, result, {"nonzero": True, "migration_error": True}, observed, all(observed.values()))
 
-print(json.dumps({"kind": "totals", "cases": cases, "failed": failures, "in_memory_mutant": mutant or None, "scratch": str(work), "limits": ["Native public score+convert over isolated fixture data, not test quality or installed fleet adoption", "Base TOML uses the real exported score entry function because the CLI has no base-root override"]}), flush=True)
+print(json.dumps({"kind": "totals", "cases": cases, "failed": failures, "in_memory_mutant": mutant or None, "limits": ["Native public score+convert over isolated fixture data, not test quality or installed fleet adoption", "Base TOML uses the real exported score entry function because the CLI has no base-root override", "Scratch is an owned_tmp dir removed at exit; per-case evidence is the JSON lines above"]}), flush=True)
 raise SystemExit(1 if failures else 0)
 PY
