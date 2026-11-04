@@ -2,11 +2,11 @@
 # scripts/release-local.sh: LOCAL-RELEASE-V1 (ompkit-v66l.27.11, J-2026-10-18-30), the dsr-style local release.
 #
 # Run on the signing Mac. It cuts one omp-kit release without the CI qualification pipeline:
-#   1. preflight  source = an exact commit on origin/main (default: its head); version unused (no tag, no release,
-#                 no draft); the source is a developer-id release whose release.yml carries attest-local.
+#   1. prepare    default: version metadata commit, publish main, then qualify its exact export.
+#      preflight  --source resumes an exact origin/main commit; version must be unused (no tag/release/draft).
 #                 Its exact tree must have a reusable main-role full-suite PASS before the signing keychain opens.
 #                 It must also have the push-time ci-only PASS (every local gate-ci-only.tsv file: package-release,
-#                 kit-update and their split live journeys, run by release-verdict.sh); the cut never runs tests itself.
+#                 kit-update and their split live journeys, run by release-verdict.sh).
 #   2. build      after the verdict readback and signing-identity preflight, build every ship-set platform
 #                 (darwin-arm64-none, linux-arm64-gnu, linux-x64-gnu) from an exact-commit `git archive`
 #                 export with scripts/package-release.sh, exactly as ci.yml build-candidates does (bun
@@ -17,8 +17,8 @@
 #                 does; the final index changes only the darwin digests.
 #   4. checksum   SHA256SUMS over release-index.json and the archives.
 #   4b. rule-gate the postcheck's ttsr coverage gate (every rule needs fire+quiet
-#                 fixtures) on the exact-commit source; refusal exits 4, nothing remote written.
-#   --dry-run stops here: no tag, no draft, no dispatch, no remote write.
+#                 fixtures) on the exact-commit source; refusal exits 4 before any release tag/draft.
+#   --dry-run prepares a local commit but never pushes it or writes to GitHub; --source keeps the read-only cut preview.
 #   5. tag        push the lightweight tag v<version> -> source (never forced, never re-tagged).
 #   6. draft      create the draft release with the notes from release-notes.sh and require GitHub's recorded
 #                 digest of every asset to equal the local bytes.
@@ -28,8 +28,10 @@
 #   8. verify     download every asset from the public release URL, check SHA256SUMS and the local bytes, fetch
 #                 each archive's attestation bundle exactly as kit-update-job.ts does and run the embedded
 #                 installer verifier exactly as kit-update.ts does, then check Gatekeeper on the darwin binary.
+#   9. install    default for real cuts: updater, narrow browser-state reconcile, all-profile relink,
+#                 real align and CLI version readback. --no-install explicitly stops at released.
 #
-# Usage: scripts/release-local.sh [--version X.Y.Z] [--source SHA] [--dry-run]
+# Usage: scripts/release-local.sh [--version X.Y.Z | --next] [--source SHA] [--dry-run] [--install | --no-install]
 # Environment:
 #   TMPDIR                             an owned scratch directory (required); the build tree is removed on exit
 #   OMP_KIT_REPO                       GitHub repository (default: JYeswak/omp-kit-companion)
@@ -37,7 +39,8 @@
 #   OMP_KIT_NOTARY_PROFILE             notarytool profile in the signing keychain (default: omp-kit-notary)
 #   OMP_KIT_SIGNING_KEYCHAIN           signing keychain (default: ~/Library/Keychains/uds-signing.keychain-db)
 #   OMP_KIT_SIGNING_KEYCHAIN_PASSWORD  file holding its password (default: ~/.config/uds/signing-keychain.pw)
-# Exit: 0 released (or dry run complete), 2 usage, 4 refused (nothing remote written before the tag step).
+#   OMP_KIT_INSTALL_PREFIX             installed kit prefix (default: ~/.local/opt/omp-kit)
+# Exit: 0 installed/released (or dry run complete), 2 usage, 4 refused (a prepare may already be published).
 # bash only, never `sh`: macOS /bin/sh is bash in POSIX mode, which runs the early stages, then aborts on the process
 # substitution at the sign stage with no failing command, so the EXIT trap re-exited 0 (2026-10-22 lead run of 0.2.73).
 if [ -z "${BASH_VERSION:-}" ] || (set -o | grep -q '^posix[[:space:]]*on'); then
@@ -53,6 +56,7 @@ AUTHORITY='Developer ID Application: Joshua Nowak (XGL9CXRCT5)'
 NOTARY_PROFILE="${OMP_KIT_NOTARY_PROFILE:-omp-kit-notary}"
 KEYCHAIN="${OMP_KIT_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/uds-signing.keychain-db}"
 KEYCHAIN_PASSWORD="${OMP_KIT_SIGNING_KEYCHAIN_PASSWORD:-$HOME/.config/uds/signing-keychain.pw}"
+INSTALL_PREFIX="${OMP_KIT_INSTALL_PREFIX:-$HOME/.local/opt/omp-kit}"
 
 die() { echo "release-local: refused: $*" >&2; exit 4; }
 say() { echo "== $*"; }
@@ -60,18 +64,28 @@ say() { echo "== $*"; }
 DRY_RUN=0
 VERSION=''
 SOURCE=''
+NEXT=0
 TAG_PUSH_SECONDS=''
+PUSH_STARTED=''
+INSTALL=1
+INSTALLED=0
+RELEASED_AT=''
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--dry-run) DRY_RUN=1; shift ;;
 		--version) VERSION="${2:-}"; shift 2 ;;
+		--next) NEXT=1; shift ;;
 		--source) SOURCE="${2:-}"; shift 2 ;;
+		--install) INSTALL=1; shift ;;
+		--no-install) INSTALL=0; shift ;;
 		-h|--help) sed -n '2,36p' "${BASH_SOURCE[0]}"; exit 0 ;;
 		*) echo "release-local: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
 [ -z "$VERSION" ] || [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "release-local: --version must be X.Y.Z" >&2; exit 2; }
 [ -z "$SOURCE" ] || [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]] || { echo "release-local: --source must be a full commit SHA" >&2; exit 2; }
+[ "$NEXT" = 0 ] || [ -z "$VERSION" ] || { echo "release-local: use --next or --version, not both" >&2; exit 2; }
+[ "$NEXT" = 0 ] || [ -z "$SOURCE" ] || { echo "release-local: --next prepares HEAD; do not combine it with --source" >&2; exit 2; }
 if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an owned scratch directory first"; fi # tempsafe: requires the caller's owned scratch, creates nothing
 
 # Cancel safety: every external step runs bounded, with stdin from /dev/null, as a waited background child that
@@ -116,12 +130,133 @@ substep() {
 	SUBSTEP=$1; SUBSTEP_T0=$now
 }
 
+# No --source means prepare from this checkout. Never adopt foreign metadata edits,
+# even when their version happens to match. --only keeps unrelated staged work out.
+prepare_release() {
+	stage prepare
+	[ "$(git -C "$ROOT" symbolic-ref --short HEAD)" = main ] || die "prepare requires main"
+	local paths=(package.json README.md changelog.d/774u.md)
+	local dirty
+	dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all -- "${paths[@]}")" ||
+		die "cannot inspect release metadata custody"
+	[ -z "$dirty" ] || die "foreign changes on release prepare paths: $dirty"
+	python3 - "$ROOT" "$VERSION" <<'PY'
+import json, re, sys
+from pathlib import Path
+root, version = Path(sys.argv[1]), sys.argv[2]
+package = root / "package.json"
+text = package.read_text()
+doc = json.loads(text)
+old = doc["version"]
+if doc["omp"]["version"] != old:
+    raise SystemExit("release-local: package and plugin versions disagree")
+if tuple(map(int, version.split("."))) <= tuple(map(int, old.split("."))):
+    raise SystemExit("release-local: prepare version must increase; use --source for an existing prepare")
+# Keep all non-version bytes, including the export-subst revision token.
+updated, count = re.subn(r'("version"\s*:\s*)"' + re.escape(old) + '"',
+                         lambda m: m[1] + json.dumps(version), text)
+if count != 2:
+    raise SystemExit("release-local: expected exactly two version fields")
+readme = root / "README.md"
+stamp, count = re.subn(r"(?m)^Current release: v[0-9]+\.[0-9]+\.[0-9]+$",
+                      "Current release: v" + version, readme.read_text())
+if count != 1:
+    raise SystemExit("release-local: expected exactly one README release stamp")
+fragment = root / "changelog.d/774u.md"
+notes = fragment.read_text()
+entry = (f"- Set CLI and OMP plugin version metadata to {version}. "
+         "The release is qualified on this prepare commit's exact exported tree before signing.\n")
+# Validate every input before changing any of them.
+package.write_text(updated)
+readme.write_text(stamp)
+fragment.write_text(notes.rstrip() + "\n" + entry)
+PY
+	local agent="${AGENT_NAME:-$(git -C "$ROOT" config user.name)}"
+	bounded 900 git -C "$ROOT" commit --only \
+		-m "chore(release): prepare $VERSION ompkit-774u [test]" \
+		-m "Release metadata only; release-local requires fresh main and CI-only PASS verdicts on this exact exported tree before signing." \
+		-m "Gap-Bead: none (release metadata)
+Bead: ompkit-774u
+Agent: $agent" -- "${paths[@]}" || die "release prepare commit failed; metadata left for inspection"
+	SOURCE="$(git -C "$ROOT" rev-parse HEAD)"
+	if [ "$DRY_RUN" = 1 ]; then
+		say "dry run prepare: committed $SOURCE locally; no push"
+	else
+		stage push
+		PUSH_STARTED=$(date +%s)
+		bounded 900 git -C "$ROOT" -c push.followTags=false push origin main ||
+			die "prepare push failed; retry with --source $SOURCE after publishing through the normal convergence route"
+		bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' ||
+			die "prepare push readback failed"
+		MAIN="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"
+		git -C "$ROOT" merge-base --is-ancestor "$SOURCE" "$MAIN" || die "prepare commit is not published"
+	fi
+}
+
+# Reconcile only the updater's narrowly classified live-browser false PARTIAL.
+# Genuine failed tests or foreign operator writes remain blocking failures.
+install_release() {
+	stage install
+	local kit="$INSTALL_PREFIX/bin/omp-kit" store="$INSTALL_PREFIX/releases/$VERSION"
+	local update_rc=0 reconcile_id
+	substep install.update
+	bounded 3600 "$kit" update --apply --yes --version "$VERSION" \
+		--index "$PUB/release-index.json" --archive "$PUB/$DARWIN" --json >"$WORK/install-update.json" || update_rc=$?
+	cat "$WORK/install-update.json"
+	if [ "$update_rc" -ne 0 ]; then
+		jq -er --arg v "$VERSION" '
+			.data as $d | $d.receipt_id as $id |
+			select($d.action == "PARTIAL" and $d.active_version == $v and
+				$d.matcher == "PASS" and $d.live == "PASS" and $d.postcheck == "FAIL" and
+				($id | type == "string" and test("^[a-f0-9-]+$")) and
+				$d.postcheck_detail.changed_operator_paths == [] and
+				$d.postcheck_detail.failures == [] and $d.postcheck_detail.cause == null and
+				($d.postcheck_detail.live_state_paths | length > 0) and
+				(.commands | index("omp-kit update --reconcile " + $id + " --yes") != null)) | $id
+		' "$WORK/install-update.json" >"$WORK/install-reconcile-id" ||
+			die "install update failed (rc $update_rc); not the known live-browser-only PARTIAL, refusing reconciliation"
+		IFS= read -r reconcile_id <"$WORK/install-reconcile-id"
+		substep install.reconcile-live-browser-state
+		bounded 300 "$kit" update --reconcile "$reconcile_id" --yes --json >"$WORK/install-reconcile.json" ||
+			die "live-browser-state reconcile refused; installation remains unverified"
+		cat "$WORK/install-reconcile.json"
+		jq -e --arg v "$VERSION" '.ok == true and .data.action == "RECONCILED" and .data.active_version == $v' \
+			"$WORK/install-reconcile.json" >/dev/null || die "reconcile did not confirm the installed version"
+	else
+		jq -e --arg v "$VERSION" '.ok == true and .data.active_version == $v and
+			(.data.action == "UPDATED" or .data.action == "CURRENT")' "$WORK/install-update.json" >/dev/null ||
+			die "updater did not confirm the target version"
+	fi
+	substep install.plugin-relink
+	bounded 300 "$kit" apply plugin --apply --yes --store "$store" --profiles all --include-default --json \
+		>"$WORK/install-plugin.json" || die "profile plugin relink failed"
+	cat "$WORK/install-plugin.json"
+	jq -e '.ok == true' "$WORK/install-plugin.json" >/dev/null || die "profile plugin relink was not successful"
+	substep install.align-readback
+	bounded 60 python3 "$store/skills/fleet-restart/scripts/fleet_restart.py" align \
+		--home "$HOME" --releases "$INSTALL_PREFIX/releases" --version "$VERSION" >"$WORK/install-align.json" ||
+		die "installed profile alignment is stale"
+	cat "$WORK/install-align.json"
+	jq -e --arg v "$VERSION" '.ok == true and .version == $v and .stale == [] and
+		(.links | length > 0) and all(.links[]; .ok == true)' "$WORK/install-align.json" >/dev/null ||
+		die "align readback did not prove every profile link"
+	substep install.version-readback
+	[ "$(bounded 30 "$kit" --version)" = "omp-kit $VERSION" ] || die "installed CLI version readback differs from $VERSION"
+	substep ''
+	INSTALLED=1
+	say "installed $VERSION; every profile link aligned"
+}
+
 # ---------------------------------------------------------------------------------------------- 1. preflight
 stage preflight
 [ "$(uname -s)" = Darwin ] || die "the local release runs on macOS (it signs and notarizes the darwin archive)"
 for tool in git gh jq python3 bun shasum codesign xcrun security spctl ditto plutil openssl curl tar timeout; do
 	command -v "$tool" >/dev/null || die "missing tool: $tool"
 done
+if [ "$DRY_RUN" = 0 ] && [ "$INSTALL" = 1 ]; then
+	[ -x "$INSTALL_PREFIX/bin/omp-kit" ] || die "install requires the existing kit at $INSTALL_PREFIX/bin/omp-kit (or --no-install)"
+	[ -f "$ROOT/skills/fleet-restart/scripts/fleet_restart.py" ] || die "fleet align readback helper is missing"
+fi
 # Probe the newly used curl features locally, before a tag or draft can exist.
 curl_capability="$(bounded 10 curl -fsS --parallel -o /dev/null --write-out '%{exitcode}' file:///dev/null)" ||
 	die "curl 7.75+ with parallel transfers and write-out exitcode is required"
@@ -140,13 +275,21 @@ else
 fi
 bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "git fetch origin main failed"
 MAIN="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"
-if [ -z "$SOURCE" ]; then SOURCE="$MAIN"; fi
-git -C "$ROOT" cat-file -e "$SOURCE^{commit}" 2>/dev/null || die "source $SOURCE is not a known commit"
-git -C "$ROOT" merge-base --is-ancestor "$SOURCE" "$MAIN" || die "source $SOURCE is not on origin/main"
+PREPARE=0
+if [ -z "$SOURCE" ]; then PREPARE=1
+else
+	git -C "$ROOT" cat-file -e "$SOURCE^{commit}" 2>/dev/null || die "source $SOURCE is not a known commit"
+	git -C "$ROOT" merge-base --is-ancestor "$SOURCE" "$MAIN" || die "source $SOURCE is not on origin/main"
+fi
 remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin)" || die "git ls-remote --tags failed"
 if [ -z "$VERSION" ]; then
-	VERSION="$(printf '%s\n' "$remote_tags" | (cd "$ROOT" && sh scripts/release-train.sh next-version --changelog-ref "$SOURCE"))" ||
-		die "release-train.sh next-version failed"
+	if [ "$PREPARE" = 1 ] || [ "$NEXT" = 1 ]; then
+		VERSION="$(python3 -c 'import json,sys; a,b,c=map(int,json.load(open(sys.argv[1]))["version"].split(".")); print(f"{a}.{b}.{c+1}")' "$ROOT/package.json")" ||
+			die "cannot derive next patch version"
+	else
+		VERSION="$(printf '%s\n' "$remote_tags" | (cd "$ROOT" && sh scripts/release-train.sh next-version --changelog-ref "$SOURCE"))" ||
+			die "release-train.sh next-version failed"
+	fi
 fi
 grep -q "refs/tags/v$VERSION\$" <<<"$remote_tags" && die "tag v$VERSION already exists on origin; never re-tag a version"
 bounded 120 gh api --paginate --slurp "repos/$REPO/releases?per_page=100" >"$WORK/releases.json" || die "listing releases failed"
@@ -157,10 +300,10 @@ BASE_TAG="$(jq -r '[.[][] | select(.draft == false and .prerelease == false) | .
 [ -n "$BASE_TAG" ] || die "no published base release"
 python3 -c 'import sys; a, b = (tuple(map(int, v.split("."))) for v in sys.argv[1:]); sys.exit(0 if a > b else 1)' "$VERSION" "${BASE_TAG#v}" ||
 	die "v$VERSION is not newer than the latest published $BASE_TAG"
-# RELSPEED1: the source's package.json must already say $VERSION. Checked here, in 2 s, instead of only
-# at the tag stage (the 0.2.82 run refused there after 7 minutes of build, sign and tests).
+if [ "$PREPARE" = 1 ]; then prepare_release; fi
+# Explicit --source remains the immutable resume/preview path.
 sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" ||
-	die "package.json version does not match v$VERSION at $SOURCE; commit the release prepare (package.json, README stamp, changelog fragment) first"
+	die "package.json version does not match v$VERSION at $SOURCE"
 MODE="$(git -C "$ROOT" show "$SOURCE:scripts/release-signing.json" | jq -er 'select(.schema_version == 1) | .darwin_signing')" ||
 	die "source has no valid scripts/release-signing.json"
 if [ "$MODE" != developer-id ]; then
@@ -181,6 +324,27 @@ rm -f "$WORK/source.tar"
 [ "$(jq -r .source_revision "$SRC/package.json")" = "$SOURCE" ] || die "export did not stamp source_revision"
 [ "$(bun --version)" = "$(tr -d '[:space:]' <"$SRC/.bun-version")" ] || die "bun $(bun --version) differs from the source's pinned .bun-version"
 source_tree="$(git -C "$ROOT" rev-parse "$SOURCE^{tree}")" || die "cannot resolve exact source tree"
+# The verdict producer may return 0 when a different run holds its lock. Never
+# confuse that queue acknowledgement with PASS: wait on both exact-tree records.
+stage verdict
+if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
+	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" >/dev/null 2>&1 ||
+	! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
+	--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC" >/dev/null 2>&1; then
+	bounded 7200 sh "$ROOT/scripts/release-verdict.sh" --commit "$SOURCE" --no-fetch ||
+		die "release verdict failed for prepare $SOURCE"
+	verdict_deadline=$(( $(date +%s) + 7200 ))
+	while :; do
+		main_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
+			--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC")" || true
+		ci_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
+			--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC")" || true
+		if [ "$main_result" = FAIL ] || [ "$ci_result" = FAIL ]; then die "release verdict FAIL for exact prepare $SOURCE"; fi
+		[ "$main_result" != PASS ] || [ "$ci_result" != PASS ] || break
+		[ "$(date +%s)" -lt "$verdict_deadline" ] || die "timed out waiting for exact prepare verdict $SOURCE"
+		sleep 3
+	done
+fi
 if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
 	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \
 	>"$WORK/full-suite-verdict.out"; then
@@ -335,16 +499,23 @@ say "rule selftest PASS"
 receipt() {
 	local phase=$1 url=${2:-} run_id=${3:-}
 	stage ''
+	KITLIB_TMP_AUTO_CLEANUP=0 kitlib_tmp RECEIPT_DIR release-receipt
+	say "receipt $RECEIPT_DIR/release-local-v$VERSION-$phase.json"
 	python3 - "$STAGE_LOG" "$DIST/SHA256SUMS" "$phase" "$VERSION" "$SOURCE" "$BASE_TAG" "$NOTARY_ID" "$url" "$run_id" \
-		"$(( $(date +%s) - STARTED ))" "$TMPDIR/release-local-v$VERSION-$phase.json" "$TAG_PUSH_SECONDS" <<'PY' # tempsafe: receipt into the caller-owned scratch, kept past exit by contract
+		"$(( $(date +%s) - STARTED ))" "$RECEIPT_DIR/release-local-v$VERSION-$phase.json" "$TAG_PUSH_SECONDS" \
+		"${PUSH_STARTED:+$(( ${RELEASED_AT:-$(date +%s)} - ${PUSH_STARTED:-0} ))}" \
+		"$INSTALLED" "${PUSH_STARTED:+$(( $(date +%s) - ${PUSH_STARTED:-0} ))}" <<'PY'
 import json, sys
-stages, sums, phase, version, source, base, notary, url, run_id, total, out, tag_push_seconds = sys.argv[1:]
+stages, sums, phase, version, source, base, notary, url, run_id, total, out, tag_push_seconds, push_to_released, installed, push_to_endpoint = sys.argv[1:]
 doc = {"schema_version": 1, "phase": phase, "version": version, "source_sha": source, "base_tag": base,
        "notarization_submission": notary, "release_url": url or None, "attest_run_id": run_id or None,
        "sha256": {name: digest for digest, name in (line.split("  ", 1) for line in open(sums).read().splitlines())},
        "stage_seconds": {name: int(secs) for name, secs in (line.split() for line in open(stages).read().splitlines())},
        "total_seconds": int(total),
-       "tag_push_seconds": int(tag_push_seconds) if tag_push_seconds else None}
+       "tag_push_seconds": int(tag_push_seconds) if tag_push_seconds else None,
+       "push_to_released_seconds": int(push_to_released) if push_to_released else None,
+       "installed": installed == "1",
+       "push_to_installed_seconds": int(push_to_endpoint) if installed == "1" and push_to_endpoint else None}
 text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
 open(out, "w", encoding="utf-8").write(text)
 print(text, end="")
@@ -376,6 +547,8 @@ TAG_PUSH_SECONDS=$(( $(date +%s) - tag_push_started ))
 bounded 60 gh api "repos/$REPO/git/ref/tags/v$VERSION" >"$WORK/tag.json" || die "tag readback failed"
 { [ "$(jq -r .object.type "$WORK/tag.json")" = commit ] && [ "$(jq -r .object.sha "$WORK/tag.json")" = "$SOURCE" ]; } ||
 	die "remote v$VERSION does not name $SOURCE"
+bounded 300 git -C "$ROOT" fetch --quiet origin "tag" "v$VERSION" ||
+	die "tag published but local launch-check tag fetch failed"
 say "tagged v$VERSION -> $SOURCE"
 
 # --------------------------------------------------------------------------------------------------- 6. draft
@@ -475,4 +648,7 @@ codesign --verify --strict "$PUB/x/bin/omp-kit" || die "public darwin binary sig
 spctl --assess --type open --context context:primary-signature -vv "$PUB/x/bin/omp-kit" 2>&1 | tee "$WORK/spctl.txt"
 grep -q 'source=Notarized Developer ID' "$WORK/spctl.txt" || die "Gatekeeper does not report Notarized Developer ID"
 substep ''
-receipt released "$URL" "$RUN_ID"
+RELEASED_AT=$(date +%s)
+if [ "$INSTALL" = 1 ]; then install_release; fi
+if [ "$INSTALLED" = 1 ]; then receipt installed "$URL" "$RUN_ID"
+else receipt released "$URL" "$RUN_ID"; fi

@@ -248,20 +248,71 @@ is `developer-id` since that bead. The consumers' trust root is unchanged: the i
 GitHub Actions OIDC SLSA provenance from `release.yml` at the tag's source digest. So one small
 GitHub job remains, and it never builds anything.
 
-1. `scripts/release-local.sh --dry-run`: preflight (source on `origin/main`, version unused,
-   signer proven), build the ship set from an exact-commit `git archive` export with
-   `scripts/package-release.sh` (bun cross-compiles the linux targets), Developer ID sign and
-   notarize the darwin binary through `devid_release.py`, checksum (`SHA256SUMS`). It prints
-   a receipt with the digests, the notarization submission and each stage's wall time. Nothing
-   remote is written.
-2. `scripts/release-local.sh [--version X.Y.Z]`: the same, then push the lightweight tag
-   `vX.Y.Z` (never forced), create the draft release with every asset and check GitHub's
-   digests. It then dispatches `release.yml` with `mode=local-attest` at `--ref vX.Y.Z`. The
-   `attest-local` job re-checks the draft against `SHA256SUMS` and the index, attests SLSA
-   provenance and SBOMs with the workflow's OIDC identity, runs the consumer's own verifier on
-   every archive, attaches the SBOMs and publishes the draft (Latest only if it is the newest).
-   Finally the driver downloads every asset from the public URL, re-runs the consumer verifier
-   exactly as `omp-kit update` does, and checks Gatekeeper on the darwin binary.
+1. `bash scripts/release-local.sh --version X.Y.Z` (or `--next`, patch+1 from
+   checkout HEAD) prepares and cuts in one invocation. On `main`, with clean
+   `package.json`, `README.md` and `changelog.d/774u.md`, it updates both package
+   versions, the release stamp and fragment, then commits exactly those paths
+   with `--only`, subject `chore(release): prepare X.Y.Z ompkit-774u [test]` and
+   `Gap-Bead`, `Bead`, `Agent` trailers. Foreign staged, unstaged or untracked
+   changes on those paths refuse before any edit; unrelated staged work is
+   excluded. Commit hooks and push hooks remain active.
+2. It pushes main, reads back that the prepare SHA is on origin/main, and
+   invokes `release-verdict.sh --commit <prepare-sha> --no-fetch` when either
+   exact-tree verdict is missing. A verdict lock acknowledgement is not PASS:
+   it waits (bounded) for both main and CI-only records from that exact export.
+   A producer failure or recorded FAIL refuses before signing.
+3. The existing cut then builds the ship set from `git archive`, signs and
+   notarizes, checksums, checks TTSR, pushes the immutable tag, uploads a draft,
+   dispatches `release.yml mode=local-attest`, waits for verified publication,
+   and downloads and verifies the public bytes, attestations and Gatekeeper.
+4. Real cuts default to `--install` (`--no-install` explicitly stops at released).
+   The existing kit at `~/.local/opt/omp-kit/bin/omp-kit` (override prefix with
+   `OMP_KIT_INSTALL_PREFIX`) updates from the exact verified public index/archive
+   and their fetched attestation bundle. It applies all profile plugin links,
+   including default, to `releases/X.Y.Z`, runs that release's
+   `skills/fleet-restart/scripts/fleet_restart.py align` with the explicit target,
+   and reads back the installed CLI version. No seat is restarted.
+   The one automatically reconciled update failure is the updater's own
+   live-browser-state-only PARTIAL: matching target, passing matcher/live,
+   no operator-path changes, failures or cause, and the exact receipt-bound
+   reconcile command offered by the updater. Reconciliation still verifies
+   recorded postimages; any other failure refuses.
+   Stage/substep clocks cover update, optional reconcile, relink, alignment and
+   version readback. Only then does the receipt say `installed:true` and include
+   `push_to_installed_seconds`; it also retains push-to-released time.
+   Receipts persist in a kitlib-owned `release-receipt.*` directory printed in
+   the JSON output's surrounding run context, while build scratch is removed.
+   These clocks measure the four-minute goal; they do not claim it has been met.
+
+`--dry-run` without `--source` **creates the local prepare commit**, but does
+not push it, create a tag/draft or dispatch. It still qualifies, builds, signs
+and notarizes. To preview an already prepared published commit without editing
+metadata, use `--source <full-sha> --version X.Y.Z --dry-run`; the same explicit
+source form resumes a real cut. After an unsuccessful prepare push, publish
+through the normal convergence route and resume with that printed SHA, rather
+than preparing another version. `--next` cannot be combined with `--source`.
+Dry runs never install or relink, even when `--install` is specified.
+
+### Former manual steps (0.2.86) and ownership
+
+| Former lead action | Current status |
+|---|---|
+| Choose patch and hand-edit two versions, README stamp and fragment | Automated by `--next` or explicit `--version`; metadata-only fragment does not invent release-content claims |
+| Prepare exact-path commit and trailers | Automated, `--only`; custody refusal before edits |
+| Publish and identify immutable source | Automated push plus origin ancestry readback |
+| Run/wait for full suite and CI-only export verdict | Automated on exact prepare SHA; cached matching PASS reused, queue acknowledgement never accepted as PASS |
+| Check unused tag/release, version, admission, tools, GitHub and signing credentials | Existing preflights retained; credentials/certificate must already be provisioned by their owner (vendor login/key issuance cannot be manufactured by the release) |
+| Build, sign, notarize, checksum, rule gate, notes, tag, draft, attest, public verification | Automated by the cut, with stage/substep timings and a receipt |
+| Allocate owned scratch and set TMPDIR | Caller still supplies the scratch lease: its capability/lifetime belongs to the caller, not an inferred shared directory |
+| Freeze candidate / hold competing pushes and heavy lanes | The commit pins bytes automatically; scheduling other agents remains the fleet director's authority, which a source-release script cannot safely assume |
+| Install certified release and relink/check every profile | Automated by default `--install`: receipt-backed update, narrow live-browser-only reconciliation when offered, all-profile relink, real fleet align and installed-version readback |
+| Fetch the released tag into companion | Automated after exact remote tag readback, for this source checkout's launch-check consumer |
+| Check installed hooks on every hooked repo | Fleet deployment check, not a source-cut mutation: `install-commit-msg-bead.sh --check` per registered repo; reconcile through its owning installer |
+| Restart seats, close train beads | Remain director/non-author actions: a release cannot interrupt busy/paused seats or award its own acceptance |
+
+This command installs the certified kit and aligns profile links, not an npm
+publication or a seat restart. Those retain their separate credentials and
+runtime safety/approval gates.
 
 `release.yml`'s only trigger is `workflow_dispatch`, and its `mode` input defaults to
 `local-attest`. Every qualification, native-matrix and signing job requires

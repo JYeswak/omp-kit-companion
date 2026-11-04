@@ -3,7 +3,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, r
 import { join } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
-import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 // LOCAL-RELEASE-V1 (ompkit-v66l.27.11, docs/release-signing.md): enabling release.yml must never start the
@@ -55,7 +55,7 @@ test("the train's release.yml dispatches pass mode=ci-pipeline", () => {
 	for (const line of train.split("\n").filter(line => line.includes("gh workflow run release.yml"))) expect(line).toContain("-f mode=ci-pipeline");
 });
 
-test("release-local.sh dry run never reaches a remote write", () => {
+test("release-local.sh dry run never pushes or reaches a GitHub write", () => {
 	const script = readFileSync(join(ROOT, "scripts/release-local.sh"), "utf8");
 	// The dry-run branch may open with comment lines (a shellcheck directive for its `ls`) before its say.
 	const dryExit = script.search(/if \[ "\$DRY_RUN" = 1 \]; then\n(?:\t#[^\n]*\n)*\tsay "dry run/);
@@ -63,6 +63,7 @@ test("release-local.sh dry run never reaches a remote write", () => {
 	for (const write of ["push --porcelain origin", "gh release create", "gh workflow run release.yml"])
 		expect(script.indexOf(write)).toBeGreaterThan(dryExit);
 	expect(script.split("\n").filter(line => line.includes(" push ") && line.includes("--force"))).toEqual([]);
+	expect(script).toContain('if [ "$DRY_RUN" = 1 ]; then\n\t\tsay "dry run prepare: committed');
 	expect(script).not.toContain("-f mode=ci-pipeline");
 	expect(Bun.spawnSync(["bash", "-n", join(ROOT, "scripts/release-local.sh")]).exitCode).toBe(0);
 });
@@ -169,6 +170,205 @@ WORK=$1; DIST="$WORK/dist"; VERSION=0.0.0; REPO=fixture/release
 DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar"
 STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"
 ${helperScript}`;
+
+// Real git, isolated repository: execute the production prepare stage, not a
+// reimplementation of the metadata updater. Dry-run commits locally only.
+for (const dirty of [null, "package.json", "README.md", "changelog.d/774u.md"] as const) {
+	test(`release prepare dry run ${dirty ? `refuses foreign ${dirty}` : "creates metadata commit without a prior prepare"}`, () => {
+		const work = realpathSync(ownedTmp("release-prepare", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const repo = join(work, "repo");
+		mkdirSync(join(repo, "changelog.d"), { recursive: true });
+		const env = { ...process.env, GIT_CEILING_DIRECTORIES: work, GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+			GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", AGENT_NAME: "ReleaseFixture" };
+		delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
+		const git = (...args: string[]) => {
+			const result = runFixture(["git", "-C", repo, ...args], { cwd: repo, env, floor_s: 30 });
+			if (result.rc !== 0) throw new Error(new TextDecoder().decode(result.stderr));
+			return new TextDecoder().decode(result.stdout).trim();
+		};
+		try {
+			git("init", "-q", "-b", "main");
+			writeFileSync(join(repo, "package.json"), '{\n  "version": "1.2.3",\n  "omp": { "version": "1.2.3" }\n}\n');
+			writeFileSync(join(repo, "README.md"), "Current release: v1.2.3\n");
+			writeFileSync(join(repo, "changelog.d/774u.md"), "### Changed\n");
+			writeFileSync(join(repo, "foreign.txt"), "base\n");
+			git("add", "."); git("commit", "-qm", "fixture base");
+			const base = git("rev-parse", "HEAD");
+			writeFileSync(join(repo, "foreign.txt"), "foreign staged change\n");
+			git("add", "foreign.txt");
+			if (dirty) writeFileSync(join(repo, dirty), readFileSync(join(repo, dirty), "utf8") + "foreign edit\n");
+			const before = Object.fromEntries(["package.json", "README.md", "changelog.d/774u.md"].map(path => [path, readFileSync(join(repo, path), "utf8")]));
+			const script = `set -euo pipefail
+die() { echo "$*" >&2; exit 4; }
+say() { echo "$*"; }
+ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; DRY_RUN=1; VERSION=1.2.4
+${helperScript}
+prepare_release
+`;
+			const scriptPath = join(work, "prepare.sh");
+			writeFileSync(scriptPath, script);
+			const result = runFixture(["bash", scriptPath, repo, work], { cwd: repo, env, floor_s: 60 });
+			const stderr = new TextDecoder().decode(result.stderr);
+			const stdout = new TextDecoder().decode(result.stdout);
+			if (dirty) {
+				expect(result.rc, stderr).toBe(4);
+				expect(stderr).toContain("foreign changes on release prepare paths");
+				expect(git("rev-parse", "HEAD")).toBe(base);
+				for (const [path, contents] of Object.entries(before)) expect(readFileSync(join(repo, path), "utf8")).toBe(contents);
+			} else {
+				expect(result.rc, stderr).toBe(0);
+				expect(git("rev-parse", "HEAD")).not.toBe(base);
+				const pkg = JSON.parse(git("show", "HEAD:package.json"));
+				expect([pkg.version, pkg.omp.version]).toEqual(["1.2.4", "1.2.4"]);
+				expect(git("show", "HEAD:README.md")).toBe("Current release: v1.2.4");
+				expect(git("show", "HEAD:changelog.d/774u.md")).toContain("metadata to 1.2.4");
+				const message = git("log", "-1", "--format=%B");
+				expect(message).toContain("chore(release): prepare 1.2.4 ompkit-774u [test]");
+				for (const trailer of ["Gap-Bead: none (release metadata)", "Bead: ompkit-774u", "Agent: ReleaseFixture"]) expect(message).toContain(trailer);
+				expect(git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").split("\n").sort()).toEqual(["README.md", "changelog.d/774u.md", "package.json"]);
+				expect(git("diff", "--cached", "--name-only")).toBe("foreign.txt");
+				expect(stdout).toContain("locally; no push");
+			}
+		} finally { rmSync(work, { recursive: true, force: true }); }
+	}, fixtureDeadlineS(60) * 1_000);
+}
+
+for (const scenario of ["updated", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused"] as const) {
+	test(`release install ${scenario} only stamps installed after real store alignment`, async () => {
+		const work = realpathSync(ownedTmp("release-install", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const home = join(work, "home");
+		const prefix = join(home, ".local/opt/omp-kit");
+		const store = join(prefix, "releases/0.0.0");
+		const scriptDir = join(store, "skills/fleet-restart/scripts");
+		mkdirSync(scriptDir, { recursive: true });
+		mkdirSync(join(store, "scripts"), { recursive: true });
+		mkdirSync(join(store, "bin"));
+		mkdirSync(join(prefix, "bin"));
+		writeFileSync(join(store, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.0.0" }));
+		cpSync(join(ROOT, "scripts/kitlib_run.py"), join(store, "scripts/kitlib_run.py"));
+		cpSync(join(ROOT, "scripts/pysafe.py"), join(store, "scripts/pysafe.py"));
+		cpSync(join(ROOT, "skills/fleet-restart/scripts/fleet_restart.py"), join(scriptDir, "fleet_restart.py"));
+		// Only activation transport is a fixture; real align reads private symlinks.
+		const kit = join(prefix, "bin/omp-kit");
+		writeFileSync(kit, `#!${process.execPath}
+import { appendFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
+const root = process.env.RELEASE_TEST_WORK;
+const scenario = process.env.RELEASE_TEST_SCENARIO;
+const prefix = join(process.env.HOME, ".local/opt/omp-kit");
+const store = join(prefix, "releases/0.0.0");
+const args = process.argv.slice(2);
+appendFileSync(join(root, "calls"), JSON.stringify(args) + "\\n");
+const emit = (data, commands = [], ok = true) => console.log(JSON.stringify({ ok, data, commands }));
+if (args[0] === "--version") { console.log(scenario === "wrong-version" ? "omp-kit 0.0.1" : "omp-kit 0.0.0"); process.exit(0); }
+if (args[0] === "update" && args.includes("--reconcile")) {
+  if (scenario === "reconcile-refused") process.exit(1);
+  emit({ action: "RECONCILED", active_version: "0.0.0" }); process.exit(0);
+}
+if (args[0] === "update") {
+  if (["browser-partial", "foreign-write", "reconcile-refused"].includes(scenario)) {
+    emit({ action: "PARTIAL", receipt_id: "abc-123", active_version: "0.0.0", matcher: "PASS", live: "PASS", postcheck: "FAIL",
+      postcheck_detail: { changed_operator_paths: scenario === "foreign-write" ? ["config.yml"] : [], failures: [], cause: null, live_state_paths: ["Library/Application Support/Google/Chrome/Default/History"] } },
+      ["omp-kit update --reconcile abc-123 --yes"], false);
+    process.exit(1);
+  }
+  emit({ action: "UPDATED", active_version: "0.0.0" }); process.exit(0);
+}
+if (args[0] === "apply" && args[1] === "plugin") {
+  for (const profile of ["", "profiles/claude/", "profiles/codex/"]) {
+    const link = join(process.env.HOME, ".omp", profile, "plugins/node_modules/omp-kit-companion");
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(scenario === "stale-link" && profile === "profiles/codex/" ? join(prefix, "releases/old") : store, link);
+  }
+  emit({ action: "APPLIED" }); process.exit(0);
+}
+process.exit(99);
+`);
+		chmodSync(kit, 0o755);
+		const receiptFunction = releaseStage("receipt() {", 'if [ "$DRY_RUN" = 1 ]; then\n\t# shellcheck');
+		const fixture = join(work, "install.sh");
+		writeFileSync(fixture, `${stagePrelude}
+ROOT=$2; HOME=$3; INSTALL_PREFIX="$HOME/.local/opt/omp-kit"; INSTALLED=0
+PUB="$WORK/public"; mkdir "$PUB"; : >"$DIST/SHA256SUMS"
+STARTED=$(date +%s); PUSH_STARTED=$STARTED; RELEASED_AT=$STARTED
+SOURCE=fixture; BASE_TAG=v0.0.0; NOTARY_ID=fixture; TAG_PUSH_SECONDS=0
+. "$ROOT/scripts/kitlib-tmp.sh"
+${receiptFunction}
+install_release
+receipt installed fixture fixture
+`);
+		mkdirSync(join(work, "dist"));
+		try {
+			const result = await runFixtureAsync(["bash", fixture, work, ROOT, home], {
+				cwd: ROOT, env: { ...process.env, HOME: home, TMPDIR: work, RELEASE_TEST_WORK: work, RELEASE_TEST_SCENARIO: scenario }, floor_s: 30,
+			});
+			const stdout = new TextDecoder().decode(result.stdout);
+			const stderr = new TextDecoder().decode(result.stderr);
+			const successful = scenario === "updated" || scenario === "browser-partial";
+			expect(result.rc, stderr).toBe(successful ? 0 : 4);
+			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
+			expect(calls[0]).toEqual(["update", "--apply", "--yes", "--version", "0.0.0", "--index", join(work, "public/release-index.json"),
+				"--archive", join(work, "public/omp-kit-v0.0.0-darwin-arm64-none.tar"), "--json"]);
+			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(scenario === "browser-partial" || scenario === "reconcile-refused" ? 1 : 0);
+			if (successful) {
+				expect(stdout).toContain('"installed": true');
+				expect(stdout).toContain('"push_to_installed_seconds":');
+				expect(stdout).toContain("substep install.align-readback took");
+				expect(stdout).toContain("stage install took");
+				expect(JSON.parse(readFileSync(join(work, "install-align.json"), "utf8")).links).toHaveLength(3);
+				expect(calls.find(args => args[0] === "apply")).toEqual(["apply", "plugin", "--apply", "--yes", "--store", store, "--profiles", "all", "--include-default", "--json"]);
+			} else {
+				expect(stdout).not.toContain('"installed": true');
+				expect(stdout).not.toContain("installed 0.0.0; every profile link aligned");
+				const refusal = scenario === "foreign-write" ? "not the known live-browser-only PARTIAL"
+					: scenario === "stale-link" ? "installed profile alignment is stale"
+					: scenario === "wrong-version" ? "installed CLI version readback differs"
+					: "live-browser-state reconcile refused";
+				expect(stderr).toContain(refusal);
+			}
+		} finally { rmSync(work, { recursive: true, force: true }); }
+	}, fixtureDeadlineS(60) * 1_000);
+}
+
+for (const verdict of ["cached", "queued", "failure"] as const) {
+	test(`release qualification ${verdict} uses exact source and both verdicts`, async () => {
+		const work = realpathSync(ownedTmp("release-verdict-wait", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const bin = join(work, "bin");
+		mkdirSync(bin);
+		// The first read is a miss. The producer returns 0 like the real
+		// lock-holder acknowledgement, not like a completed qualification.
+		writeFileSync(join(bin, "python3"), `#!/bin/sh
+echo "$*" >>"$RELEASE_TEST_WORK/reads"
+if [ "$RELEASE_TEST_VERDICT" = cached ]; then echo PASS; exit 0; fi
+if [ -f "$RELEASE_TEST_WORK/triggered" ]; then
+  if [ "$RELEASE_TEST_VERDICT" = failure ]; then echo FAIL; exit 1; fi
+  echo PASS; exit 0
+fi
+echo MISS; exit 1
+`);
+		writeFileSync(join(bin, "sh"), `#!/bin/sh
+printf '%s\\n' "$*" >"$RELEASE_TEST_WORK/producer"
+touch "$RELEASE_TEST_WORK/triggered"
+`);
+		chmodSync(join(bin, "python3"), 0o755); chmodSync(join(bin, "sh"), 0o755);
+		const qualification = releaseStage("stage verdict\n", 'if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \\\n\t--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \\\n\t>"$WORK/full-suite-verdict.out"');
+		try {
+			const result = await runFixtureAsync(["bash", "-c", `${stagePrelude}
+ROOT="$WORK/repo"; SRC="$WORK/export"; SOURCE=0123456789012345678901234567890123456789; source_tree=exact-tree
+${qualification}`, "release-verdict-test", work], {
+				cwd: ROOT, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, RELEASE_TEST_WORK: work, RELEASE_TEST_VERDICT: verdict }, floor_s: 10,
+			});
+			expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(verdict === "failure" ? 4 : 0);
+			if (verdict === "cached") expect(existsSync(join(work, "producer"))).toBe(false);
+			else expect(readFileSync(join(work, "producer"), "utf8")).toContain("--commit 0123456789012345678901234567890123456789 --no-fetch");
+			const reads = readFileSync(join(work, "reads"), "utf8");
+			expect(reads).toContain("require-pass --repo");
+			expect(reads).toContain("require-ci-only-pass --repo");
+			expect(reads.split("\n").filter(Boolean).every(line => line.includes("--tree exact-tree") && line.includes(`--judge-root ${work}/export`))).toBe(true);
+		} finally { rmSync(work, { recursive: true, force: true }); }
+	}, fixtureDeadlineS(30) * 1_000);
+}
 
 for (const failure of ["none", "http", "bytes"] as const) {
 	test(`public release downloads ${failure === "none" ? "overlap without rejecting valid bytes" : "refuse " + failure + " failures"}`, async () => {
