@@ -15,7 +15,7 @@ import { admitClaimCut } from "../src/claim-cut.ts";
 import { captureMineReplay, type MineReplay } from "../src/mine-replay.ts";
 import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
-import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
+import { briefEditsFiles, briefHandbackRefusal, briefTargets, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
 
 /**
@@ -2520,6 +2520,48 @@ async function checkPriorArtClose(found: BeadStateWithAuthorship, request: Track
 	}
 }
 
+/** Bead ids a brief names: prefix-hash with a digit in the hash, optionally dotted children (ompkit-fp72.120.16.190). */
+const BRIEF_BEAD_ID = /(?<![\w./-])([a-z][a-z0-9]{1,15}-(?=[a-z0-9]{3})[a-z0-9]{0,15}\d[a-z0-9]{0,15}(?:\.\d{1,6}){0,8})(?![\w/-]|\.\w)/g;
+
+/**
+ * PRIORSPAWN1 (ompkit-fp72.120.16.192): R45's prior-art step is enforced when build work starts, not
+ * only at close, where a missed citation makes verified work permanently unclosable. A build task (a
+ * brief with a Change section or reserved paths) that names a bead is refused until that bead carries a
+ * validPriorArtLine comment. Comments come through the close path's readBeadState read and timeout; a
+ * tracker that cannot answer refuses, never admits.
+ */
+export async function checkPriorArtSpawn(input: unknown, cwd: string, exec: FlywheelExec): Promise<string | undefined> {
+	const context = typeof field(input, "context") === "string" ? field(input, "context") as string : "";
+	const tasks = field(input, "tasks");
+	if (!Array.isArray(tasks) || context.length > 1_000_000) return undefined;
+	const checked = new Map<string, string | undefined>();
+	for (const item of tasks) {
+		if (!item || typeof item !== "object") continue;
+		const task = item as Record<string, unknown>;
+		const body = typeof task.task === "string" ? task.task : "";
+		if (body.length > 1_000_000 || !briefEditsFiles(task, context)) continue;
+		const text = `${context}\n${body}`;
+		const ids = new Set([...text.matchAll(BRIEF_BEAD_ID)].map(match => match[1]!));
+		for (const id of ids) {
+			if (!checked.has(id)) {
+				let verdict: string | undefined = `tracker read unavailable`;
+				for (const target of briefTargets(text, cwd)) {
+					const found = await readBeadState(exec, { bin: "br", cwd: target, operation: "close" }, id);
+					if (!found.ok) { verdict = `tracker read failed: ${found.why}`; continue; }
+					const comments = found.priorArt?.comments ?? [];
+					verdict = !found.priorArt?.required || comments.some(comment => { const t = field(comment, "text"); return typeof t === "string" && validPriorArtLine(t); })
+						? undefined : "no comment carries a valid prior-art line";
+					break;
+				}
+				checked.set(id, verdict);
+			}
+			const why = checked.get(id);
+			if (why) return `kit-flywheel-guard PRIOR_ART_SPAWN_REFUSED: build task names ${id}: ${why}. Fix: br comment add ${id} "prior=<repo path:line> did=<what it does> applied=<what we change>" (or prior=none searched=<queries>), then respawn. A verification, diagnosis or replay brief starts with \`no-edit: verify\` or \`no-edit: diagnose\`.`;
+		}
+	}
+	return undefined;
+}
+
 export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: TrackerMutationDeps, attempts: CloseAttempt[] = []): Promise<FlywheelToolCallResult | undefined> {
 	if (event.toolName !== "bash") return undefined;
 	const command = field(event.input, "command");
@@ -2800,7 +2842,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
 			if (event.toolName === "task") {
-				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec);
+				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec) ?? await checkPriorArtSpawn(event.input, ctx.cwd, pi.exec);
 				if (reason) return { block: true, reason };
 			}
 			if (event.toolName === "write") {

@@ -1,4 +1,4 @@
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -1827,6 +1827,63 @@ test("BRIEFCONTRACT1 live tool-call boundary refuses a planted build and admits 
 	expect((admitted as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
 	const [readonly] = await h.emit("tool_call", { toolCallId: "brief-read", toolName: "task", input: { ...input, tasks: [{ task: "Read-only: analyze the implementation" }] } }, h.ctx(project));
 	expect((readonly as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+});
+
+describe("PRIORSPAWN1 spawn-time prior-art gate", () => {
+	const id = "ompkit-fp72.120.16.190";
+	const setup = async (comments: unknown[] | "unreadable") => {
+		const project = freshDir(base, "priorspawn-");
+		const execute: Responder = async call => {
+			if (call.command === "br") {
+				if (comments === "unreadable") return { code: 1, stdout: "", stderr: "database is locked" };
+				return { code: 0, stdout: JSON.stringify([{ id: call.args[1], status: "open", assignee: null, issue_type: "bug", created_by: "Lead", comments }]), stderr: "" };
+			}
+			const result = await runFixtureAsync([call.command, ...call.args], { cwd: call.options?.cwd ?? project, env: { ...process.env, GIT_CEILING_DIRECTORIES: base, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+			return { code: result.rc ?? 1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
+		};
+		expect((await execute({ command: "git", args: ["init", "-q", "--template=", project] })).code).toBe(0);
+		const h = await createFlywheelHost(base, { respond: execute });
+		const spawn = async (task: string) => {
+			const [verdict] = await h.emit("tool_call", { toolCallId: `ps-${freshSeq++}`, toolName: "task", input: { context: `Repo: ${project}`, tasks: [{ task }] } }, h.ctx(project));
+			return verdict as FlywheelToolCallResult | undefined;
+		};
+		return { spawn, h };
+	};
+	const build = `# Target\nBead ${id}. These paths are reserved for you: src/x.ts.\n# Change\nFix the bug.`;
+
+	test("PRIORSPAWN1 planted: a build brief whose bead has no prior= comment is refused with the fix command", async () => {
+		const { spawn } = await setup([{ author: "Lead", text: "started", created_at: "2026-11-04T00:00:00Z" }]);
+		const verdict = await spawn(build);
+		const reason = String(verdict?.reason ?? "");
+		expect(verdict?.block).toBe(true);
+		expect(reason).toContain(`PRIOR_ART_SPAWN_REFUSED: build task names ${id}`);
+		expect(reason).toContain(`br comment add ${id} "prior=`);
+	});
+
+	test("PRIORSPAWN1 control: the same brief with a valid prior= comment is admitted", async () => {
+		const { spawn } = await setup([{ author: "Lead", text: "prior=src/brief.ts:189 did=checks briefs applied=spawn gate", created_at: "2026-11-04T00:00:00Z" }]);
+		expect((await spawn(build))?.block).not.toBe(true);
+	});
+
+	test("PRIORSPAWN1 control: a verify-only brief is admitted without a tracker read", async () => {
+		const { spawn, h } = await setup([]);
+		expect((await spawn(`no-edit: verify\n# Target\nBead ${id}. Replay acceptance.\n# Change\nNone`))?.block).not.toBe(true);
+		expect(h.execs.filter(call => call.command === "br")).toEqual([]);
+	});
+
+	test("PRIORSPAWN1 planted: an unreadable tracker is refused, never admitted", async () => {
+		const { spawn } = await setup("unreadable");
+		expect(await spawn(build)).toMatchObject({ block: true, reason: expect.stringContaining("tracker read failed") });
+	});
+
+	test("PRIORSPAWN1 bead-id pattern: dotted ids match, path and word tokens do not, long near-miss is bounded", async () => {
+		const { spawn, h } = await setup([]);
+		await spawn(`# Change\nedit extensions/kit-flywheel-guard.ts and omp-kit-companion; utf-8 only.`);
+		expect(h.execs.filter(call => call.command === "br")).toEqual([]);
+		const started = performance.now();
+		await spawn(`# Change\n${"a1-".repeat(20_000)}x`);
+		expect(performance.now() - started).toBeLessThan(2000);
+	});
 });
 
 test("BRIEFCONTRACT1 parent's task-result hook refuses DONE without preflight, admits clean evidence and analysis controls", async () => {

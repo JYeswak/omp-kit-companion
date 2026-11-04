@@ -168,8 +168,12 @@ export async function briefCandidates(contract: BriefContract, paths: readonly s
 	} finally { allocation.cleanup(); }
 }
 
+/** PRIORSPAWN1: the brief contract teaches the prior-art step the spawn guard enforces. */
+export const BRIEF_PRIOR_ART_STEP = "[prior-art] Refuses: a build task naming a bead with no prior-art comment (PRIOR_ART_SPAWN_REFUSED). Comply: br comment add <id> \"prior=<repo path:line> did=<...> applied=<...>\" before spawning; a verification, diagnosis or replay brief starts with `no-edit: verify` or `no-edit: diagnose`.";
+
 export function renderBrief(contract: BriefContract, candidates: readonly BriefCandidate[] = []): string {
 	return [`Gate contract: ${contract.repo}`, ...contract.rules.map(rule => `[${rule.member}] Refuses: ${rule.refuses}. Comply: ${rule.compliant}.`),
+		BRIEF_PRIOR_ART_STEP,
 		...candidates.map(row => `${row.review} ${row.path}:${row.line}\n${row.hunk}`), contract.marker].join("\n");
 }
 
@@ -179,10 +183,35 @@ export function isBuildBriefTask(task: Record<string, unknown>): boolean {
 	const body = typeof task.task === "string" ? task.task : "";
 	if (["reviewer", "security-reviewer", "seance", "zeststream-planner", "zeststream-reviewer"].includes(selector)) return false;
 	if (/^\s*(?:#\s*)?(?:read-only|analysis-only)\b/im.test(body)) return false;
+	// PRIORSPAWN1: an explicit verification/diagnosis/replay marker declares the task edits nothing.
+	if (/^\s*(?:#\s*)?no-edit:\s*(?:verify|diagnose|replay)\b/im.test(body)) return false;
 	// BRIEFSTABLE1: a task that declares it changes nothing is not a build task.
 	if (/^\s*(?:#+\s*)?Change\s*(?::\s*|\n\s*)(?:None|N\/A|no changes?)\b/im.test(body)) return false;
 	return !(/^\s*(?:analy[sz]e|analysis|investigate|review|inspect)\b/i.test(body)
 		&& !/\b(?:implement|modify|edit|write|fix|refactor|remove|add|create|update)\b/i.test(body));
+}
+
+/** PRIORSPAWN1: a build brief edits files — it has a Change section or reserves paths. */
+export function briefEditsFiles(task: Record<string, unknown>, context = ""): boolean {
+	if (!isBuildBriefTask(task)) return false;
+	const text = `${context}\n${typeof task.task === "string" ? task.task : ""}`;
+	return /^[ \t]*#+[ \t]*Change\b/im.test(text) || /\breserved?\b[^\n]*\bfor you\b|\breserv(?:e|es|ed|ing)[ \t]+(?:these[ \t]+)?paths?\b/i.test(text);
+}
+
+/** Repositories a brief targets: explicit repo labels, absolute paths' owning repos, else the session cwd. */
+export function briefTargets(text: string, cwd: string): string[] {
+	const targets = [...text.matchAll(/(?:--repo\s+|\b(?:repo|repository)\s*[:=]\s*)["`']?([^\s"`'<>]+)/gi)].map(match => match[1]!);
+	// Absolute source paths also target their owning repo, even without a
+	// "Repo:" label; no shell evaluation or dependence on the session cwd.
+	for (const match of text.matchAll(/(?:^|[\s`"'])(\/[^\s`"'<>]+)/g)) {
+		let path = match[1]!.replace(/[),;.]$/, "");
+		while (path !== dirname(path)) {
+			if (existsSync(join(path, ".git"))) { targets.push(path); break; }
+			path = dirname(path);
+		}
+	}
+	if (!targets.length) targets.push(cwd);
+	return [...new Set(targets.map(target => resolve(cwd, target)))];
 }
 
 /** A digest is checked against current installed bytes, not merely a marker-shaped string. */
@@ -199,18 +228,7 @@ export async function checkTaskBrief(input: unknown, cwd: string, exec: BriefExe
 		if (body.length > 1_000_000) return "BRIEF_CONTRACT_REFUSED: task exceeds the 1 MB contract inspection limit.";
 		if (!isBuildBriefTask(task)) continue;
 		const text = `${context}\n${body}`;
-		const targets = [...text.matchAll(/(?:--repo\s+|\b(?:repo|repository)\s*[:=]\s*)["`']?([^\s"`'<>]+)/gi)].map(match => match[1]!);
-		// Absolute source paths also target their owning repo, even without a
-		// "Repo:" label; no shell evaluation or dependence on the session cwd.
-		for (const match of text.matchAll(/(?:^|[\s`"'])(\/[^\s`"'<>]+)/g)) {
-			let path = match[1]!.replace(/[),;.]$/, "");
-			while (path !== dirname(path)) {
-				if (existsSync(join(path, ".git"))) { targets.push(path); break; }
-				path = dirname(path);
-			}
-		}
-		if (!targets.length) targets.push(cwd);
-		for (const target of new Set(targets)) {
+		for (const target of briefTargets(text, cwd)) {
 			const contract = await briefContract(resolve(cwd, target), exec);
 			if (contract.installed && !text.split("\n").some(line => line.trim() === contract.marker)) return `BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${contract.repo}. Run omp-kit brief --repo ${JSON.stringify(contract.repo)} and paste its complete output into context (${contract.marker}).`;
 		}
