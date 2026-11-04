@@ -9,13 +9,25 @@ import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { qualifyPublicationCandidate } from "../../src/land.ts";
 import {
-	EXPECTED_SERVICE, SERVICE_BASE, actualParentSetup, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, verdictPath, writeServiceLines, LAND_DEFAULT_TIMEOUT_MS,
+	EXPECTED_SERVICE, SERVICE_BASE, actualParentSetup, cliPath, command, commandEnvironment, expectLandSchema, fixture, git, hunkSetup, landArgs, patchHold, registerPushCheck, remoteHead, repoRoot, responseCode, scratch, verdictPath, writeServiceLines, LAND_DEFAULT_TIMEOUT_MS, type CommandOptions,
 } from "./private-index-land.helpers.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
 // GATESPEED1: land defers the complete suite to the release by default; these cases assert the
 // inline suite's refusals, so this file opts in for every land command it runs.
 process.env.PRE_PUSH_FULL_SUITE = "push";
+// land resolves the pane owner with `am agents resolve-pane` under a fixed 10 s product timeout (src/land.ts
+// spawnSync timeout: 10_000) and refuses OWNER_UNKNOWN, before any mutation, when it expires. The 2026-11-04
+// 676f556d verdict (load1 40-108 on 32 cores) failed the lost-publication case at 10137 ms with that code. As in
+// private-index-land-2b, that case re-runs land only on that pre-mutation refusal, inside a load-scaled budget;
+// every other answer is asserted as before.
+function ownerResolved(work: string, args: string[], holds: unknown, options: CommandOptions) {
+	const until = Date.now() + fixtureDeadlineS(30) * 1000;
+	let run = command(work, args, holds, options);
+	while (responseCode(run.body) === "OWNER_UNKNOWN" && Date.now() < until) run = command(work, args, holds, options);
+	return run;
+}
 
 test("a rejecting commit-msg hook refuses before origin moves", () => {
 	const { work, fakeBin } = fixture();
@@ -139,7 +151,7 @@ test("lost publication observability stays UNKNOWN instead of a false zero-effec
 	const before = remoteHead(work);
 	git(work, ["remote", "remove", "origin"]);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	const run = ownerResolved(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
 	const runData = run.body.data as {
 		overall: string; commit: string; base: string;
 		phases: {
@@ -164,7 +176,7 @@ test("lost publication observability stays UNKNOWN instead of a false zero-effec
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(runData.commit);
 	expect(git(work, ["show", `${runData.commit}:owned.txt`])).toBe("owned save\n");
 	expect(readFileSync(join(work, "untouched.txt"))).toEqual(foreignWorktree);
-}, 60_000);
+}, fixtureDeadlineS(150) * 1000);
 
 test("an already-published candidate is confirmed, never published twice", () => {
 	const { work, fakeBin } = fixture();

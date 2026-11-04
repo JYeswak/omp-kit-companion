@@ -152,6 +152,12 @@ test("SCRATCHLSOF1 retains a held inode in a large expired tree, then deletes th
 		// Model the observed recursive-provider deadline failure; successful proof still comes from real lsof.
 		if (args[0] === "lsof" && (opts?.timeoutMs ?? 0) <= 15_000)
 			return { code: null, stdout: "", stderr: "" };
+		// The product gives real `lsof +D` over this 50,001-entry tree min(120 s, 15 s + 1 ms per entry) = 65 s
+		// (src/scratch.ts lsofTimeoutMs). The 2026-11-04 676f556d verdict at load1 40-108 on 32 cores ran it out
+		// (79872 ms, SKIP lsof-evidence-unavailable). The real call's deadline scales with load; a hung lsof still
+		// expires and fails the open-fd and DELETE assertions below.
+		if (args[0] === "lsof" && opts?.timeoutMs !== undefined)
+			return defaultRunner(args, { ...opts, timeoutMs: fixtureDeadlineS(opts.timeoutMs / 1000) * 1000 });
 		return defaultRunner(args, opts);
 	};
 	const deps: ApplyDeps = { liveness: planted("dead"), run: runner, home, now, lsofSnapshot: new Set([outside]) };
@@ -168,7 +174,7 @@ test("SCRATCHLSOF1 retains a held inode in a large expired tree, then deletes th
 	} finally {
 		if (held !== null) closeSync(held);
 	}
-}, 300_000);
+}, fixtureDeadlineS(300) * 1000);
 
 test("SCRATCHLSOF1 cached planning clearance cannot override unavailable deletion evidence", () => {
 	const home = tempDir("scratch-lsof-unavailable");

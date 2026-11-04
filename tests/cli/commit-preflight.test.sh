@@ -146,7 +146,9 @@ try:
     for needle in ('raw-spawn','tempsafe','pysafe','small-deadline','SC2086','DEPLOY_STEP_MISSING'):
         assert needle in text, needle
         passed += 1
-    assert elapsed < 20, elapsed  # wallclock: p99=5s headroom=4x
+    # The bound scales with the load factor sampled at start (fixtureDeadlineS(60)/60, 1..4): the 2026-11-04
+    # 676f556d verdict at load1 40-108 on 32 cores read 22.044 s against the fixed 20 s.
+    assert elapsed < 20 * (float(sys.argv[2]) / 60), elapsed  # wallclock: p99=5s headroom=4x
     passed += 1
     assert cmd(['git','write-tree'],root,env).stdout == index_before
     passed += 1

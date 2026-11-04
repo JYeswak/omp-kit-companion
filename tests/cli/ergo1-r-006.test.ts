@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const entry = resolve(import.meta.dir, "../../src/cli.ts");
 
@@ -63,14 +64,26 @@ for (const verb of ["schema", "capabilities"]) {
 		} finally { tmp.cleanup(); }
 	}, 40_000);
 }
-test("heavy preserves a harmless child's exit 42", async () => {
+// `heavy --no-wait` refuses with 75 (EX_TEMPFAIL) when machine load is over its bound; the 2026-11-04 e7e84913 verdict
+// got that 75 at a load the lead's own burner trial caused. The case pins heavy's admission load through its test seam
+// OMP_KIT_HEAVY_FAKE_LOAD1 (src/heavy.ts testFakeLoad) instead of reading live machine load, and a planted overload on
+// the same command proves the production --no-wait refusal is still 75 and never runs the child.
+async function heavyExit(fakeLoad1: string) {
  const tmp = ownedTmp("ergo1-child-exit");
  try {
   const child = await run([process.execPath, entry, "heavy", "--disk-observer", "statfs", "--no-wait", "--max-runtime", "5", "--", process.execPath, "-e", "process.exit(42)"], {
-   cwd: tmp.path, env: { ...process.env, HOME: tmp.path, XDG_CONFIG_HOME: join(tmp.path, "config"), XDG_STATE_HOME: join(tmp.path, "state") },
-   deadline_s: 15,
+   cwd: tmp.path, env: { ...process.env, HOME: tmp.path, XDG_CONFIG_HOME: join(tmp.path, "config"), XDG_STATE_HOME: join(tmp.path, "state"),
+    OMP_KIT_HEAVY_FAKE_LOAD1: fakeLoad1, GITHUB_ACTIONS: "" },
+   deadline_s: fixtureDeadlineS(15),
   });
-  expect(child.rc).toBe(42);
-  expect(new TextDecoder().decode(child.stdout)).toBe("");
+  return { rc: child.rc, stdout: new TextDecoder().decode(child.stdout) };
  } finally { tmp.cleanup(); }
-}, 20000);
+}
+test("heavy preserves a harmless child's exit 42", async () => {
+ const child = await heavyExit("0");
+ expect(child.rc).toBe(42);
+ expect(child.stdout).toBe("");
+}, fixtureDeadlineS(20) * 1000);
+test("planted: heavy --no-wait over the load bound refuses 75 before the child runs", async () => {
+ expect((await heavyExit("100000")).rc).toBe(75);
+}, fixtureDeadlineS(20) * 1000);
