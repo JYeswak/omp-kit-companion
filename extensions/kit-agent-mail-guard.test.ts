@@ -1082,3 +1082,57 @@ test("MAILXREPO1 [b] control: an unbound or spoofed pane is still refused IDENTI
 	expect(code(stale)).toBe("IDENTITY_UNBOUND");
 	expect(stale?.reason).toBe(unbound);
 });
+
+/**
+ * MAILBIND1 (ompkit-8bybq): the lead (PeachLeopard, Tern block 91, session cwd outside every fleet repo) holds a
+ * pane identity file only for its home project. register_agent without a pane_id writes no file for project B,
+ * so B has none; Agent Mail still lists PeachLeopard in B. That registration plus the block's own identity
+ * binds the send under B; a project where the name is not registered stays refused with the remedy named.
+ */
+function registeredElsewhereSeat() {
+	const home = freshDir(base, "mailbind-lead-");
+	const sessionCwd = freshDir(base, "mailbind-cwd-");
+	const sessionFile = join(home, "lead-session.jsonl");
+	const homeProject = freshDir(base, "mailbind-home-project-");
+	const identityDir = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(homeProject).digest("hex").slice(0, 12));
+	mkdirSync(identityDir, { recursive: true });
+	writeFileSync(join(identityDir, "tern-91"), JSON.stringify({ name: "PeachLeopard" }));
+	const registered = fleetRepo();
+	const unregistered = fleetRepo();
+	const respond = fleetRespond({
+		[homeProject]: [mailRow("PeachLeopard")],
+		[registered]: [mailRow("PeachLeopard"), mailRow("SilverCondor"), mailRow("RedCat")],
+		[unregistered]: [mailRow("SilverCondor")],
+	});
+	const tern = JSON.stringify({
+		sessions: [{ tabs: [{ name: "fixture", blocks: [{ id: 91, cwd: sessionCwd, live: true }] }] }],
+		panes: [{ pane: 91, cwd: sessionCwd, omp_session_file: sessionFile }],
+	});
+	const host = () => createHost({ home, env: {}, sessionFile, mailWake: undefined },
+		call => call.command === "tern" ? { code: 0, stdout: tern } : respond(call));
+	return { registered, unregistered, sessionCwd, host };
+}
+
+test("MAILBIND1 a pane named PeachLeopard and registered in project B sends under B without B's identity file", async () => {
+	const seat = registeredElsewhereSeat();
+	const h = await seat.host();
+	expect(await h.mail(seat.sessionCwd, "send_message",
+		send({ project_key: seat.registered, sender_name: "PeachLeopard", to: ["SilverCondor"], cc: [] }), "mailbind-send")).toBeUndefined();
+});
+
+test("MAILBIND1 the same pane cannot send under B as a name its identity file does not give it", async () => {
+	const seat = registeredElsewhereSeat();
+	const h = await seat.host();
+	expect(code(await h.mail(seat.sessionCwd, "send_message",
+		send({ project_key: seat.registered, sender_name: "RedCat", to: ["SilverCondor"], cc: [] }), "mailbind-borrow"))).toBe("AM_IDENTITY_MISMATCH");
+});
+
+test("MAILBIND1 a project where the pane's name is not registered stays IDENTITY_UNBOUND and names the remedy", async () => {
+	const seat = registeredElsewhereSeat();
+	const h = await seat.host();
+	const refused = await h.mail(seat.sessionCwd, "send_message",
+		send({ project_key: seat.unregistered, sender_name: "PeachLeopard", to: ["SilverCondor"], cc: [] }), "mailbind-unregistered");
+	expect(code(refused)).toBe("IDENTITY_UNBOUND");
+	expect(refused?.reason).toContain(`its pane identity names PeachLeopard, who is not registered in that project`);
+	expect(refused?.reason).toContain(`Run register_agent (project_key ${seat.unregistered}, name PeachLeopard, pane_id tern:91)`);
+});

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +12,7 @@ import {
 	type FlywheelToolCallResult,
 	type TrackerRequest,
 } from "./kit-flywheel-guard";
-import { createMailWake, type MailToolResultEvent, type MailWake } from "./kit-mail-wake";
+import { createMailWake, type MailCaller, type MailToolResultEvent, type MailWake } from "./kit-mail-wake";
 import { checkPublishedCommits, extractCitedCommitReferences, type PublishedCommitStatus } from "./kit-published-commit.ts";
 
 /**
@@ -182,6 +182,25 @@ function refuse(code: string, text: string): FlywheelToolCallResult {
 	return { block: true, reason: `kit-agent-mail-guard ${code}: ${text} Nothing was sent.` };
 }
 
+/** A proven caller plus `paneName`, the one name its block's pane identity files give it (MAILBIND1). */
+type BoundCaller = MailCaller & { paneName: string | null };
+
+/** Pane identity file body: `{"name":"X"}` (current Agent Mail writer) or one bare name (legacy). */
+function identityFileName(path: string): string | null {
+	try {
+		if (!lstatSync(path).isFile()) return null;
+		const text = readFileSync(path, "utf8").trim();
+		if (text.startsWith("{")) {
+			const name = prop(JSON.parse(text), "name");
+			return typeof name === "string" && name.trim() !== "" ? name.trim() : null;
+		}
+		const first = text.split("\n")[0]?.trim() ?? "";
+		return first !== "" ? first : null;
+	} catch {
+		return null;
+	}
+}
+
 type MailCall = { tool: string; args: { ok: true; value: unknown } | { ok: false; why: string } };
 
 /** The Agent Mail tool a call targets, with its arguments, or null for every other tool call. */
@@ -264,17 +283,41 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		return typeof file === "string" && file !== "" ? file : null;
 	}
 
-	async function caller(ctx: FlywheelContext, project: string) {
+	/** MAILBIND1 (ompkit-8bybq): every distinct name a pane identity file gives this exact Tern block, in any
+	 * project directory under ~/.config/agent-mail/identity (the files register_agent/macro_start_session write). */
+	function blockIdentityNames(block: string): string[] {
+		const root = join(home, ".config", "agent-mail", "identity");
+		let dirs: string[];
+		try { dirs = readdirSync(root); } catch { return []; }
+		const names = new Map<string, string>();
+		for (const dir of dirs) {
+			const name = identityFileName(join(root, dir, `tern-${block}`));
+			if (name) names.set(name.toLowerCase(), name);
+		}
+		return [...names.values()];
+	}
+
+	async function caller(ctx: FlywheelContext, project: string): Promise<BoundCaller | null> {
 		const file = sessionFile(ctx);
 		if (!file) return null;
 		callerResolver ??= createMailWake({ exec: pi.exec, env, home }).caller;
 		const seat = await callerResolver(file, project);
 		if (!seat) return null;
-		if (seat.repo === ctx.cwd && seat.name) return seat;
+		if (seat.repo === ctx.cwd && seat.name) return { ...seat, paneName: seat.name };
 		// MAILXREPO1: the requested project's pane identity file at this caller's own proven block binds it
 		// whatever ctx.cwd is (a lead in ~/Developer mailing an opted-in repo); another block's file never does.
-		if (seat.projectName) return { ...seat, name: seat.projectName };
-		return seat.repo === ctx.cwd ? seat : null;
+		if (seat.projectName) return { ...seat, name: seat.projectName, paneName: seat.projectName };
+		// MAILBIND1: register_agent writes no file for the project when it gets no pane_id, so a lead registered
+		// in project P can still lack P's file. This caller's own block, named X by its pane identity files
+		// (exactly one name), is bound under P only when the exact Agent Mail lookup proves X is registered in P.
+		const names = blockIdentityNames(seat.block);
+		const paneName = names.length === 1 ? names[0]! : null;
+		if (paneName !== null) {
+			const exact = await exactAgent(project, paneName);
+			if (exact.ok && exact.row !== null) return { ...seat, name: paneName, paneName };
+			return { ...seat, name: null, paneName };
+		}
+		return seat.repo === ctx.cwd ? { ...seat, paneName: null } : null;
 	}
 
 	function secretScanner(): RegExp[] {
@@ -282,16 +325,16 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		return scanner;
 	}
 
-	async function seatNames(ctx: FlywheelContext, projectKey: unknown): Promise<string[]> {
+	async function seatNames(ctx: FlywheelContext, projectKey: unknown): Promise<{ names: string[]; project: string; unbound: BoundCaller | null }> {
 		const project = typeof projectKey === "string" && projectKey !== "" ? projectKey : ctx.cwd;
 		if (sessionFile(ctx)) {
 			const seat = await caller(ctx, project);
-			if (seat) return seat.name ? [seat.name] : [];
+			if (seat) return { names: seat.name ? [seat.name] : [], project, unbound: seat.name ? null : seat };
 		}
 		const keys = [ctx.cwd, project];
 		const names = await paneIdentities(pi.exec, env, home, keys);
 		const named = env.AGENT_NAME?.trim();
-		return named ? names.filter(name => name.toLowerCase() === named.toLowerCase()) : names;
+		return { names: named ? names.filter(name => name.toLowerCase() === named.toLowerCase()) : names, project, unbound: null };
 	}
 
 	async function resolvesBead(subject: string, cwd: string): Promise<FlywheelToolCallResult | undefined> {
@@ -706,7 +749,8 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 				const seat = await caller(ctx, project);
 				const nameKey = call.tool === "macro_start_session" ? "agent_name" : "name";
 				const claimedName = prop(value, nameKey);
-				const ownName = seat?.name ?? env.AGENT_NAME?.trim();
+				// MAILBIND1: an unregistered project still registers the name this block's pane identity files give it.
+				const ownName = seat?.name ?? seat?.paneName ?? env.AGENT_NAME?.trim();
 				if (ownName && typeof claimedName === "string" && claimedName.toLowerCase() !== ownName.toLowerCase()) {
 					return refuse("AM_IDENTITY_MISMATCH", `${call.tool}: registration must keep the current caller's identity, not another agent's name.`);
 				}
@@ -736,8 +780,12 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 			if (typeof event.toolCallId !== "string" || event.toolCallId.trim() === "") {
 				return refuse("AM_CALL_ID_REQUIRED", "A send/reply needs its native tool-call ID so the persisted message can be joined to its wake row. Retry through the native mounted tool.");
 			}
-			const names = await seatNames(ctx, prop(call.args.value, "project_key"));
-			if (names.length === 0) return refuse("IDENTITY_UNBOUND", "No identity file binds this sender's actual pane. Run register_agent or macro_start_session for this pane before sending.");
+			const { names, project: sendProject, unbound } = await seatNames(ctx, prop(call.args.value, "project_key"));
+			if (names.length === 0) {
+				return refuse("IDENTITY_UNBOUND", unbound?.paneName
+					? `No identity file binds this sender's actual pane under ${sendProject}: its pane identity names ${unbound.paneName}, who is not registered in that project. Run register_agent (project_key ${sendProject}, name ${unbound.paneName}, pane_id tern:${unbound.block}) or macro_start_session for that project before sending.`
+					: "No identity file binds this sender's actual pane. Run register_agent or macro_start_session for this pane before sending.");
+			}
 			const tool = call.tool === "send_message" ? "send_message" : "reply_message";
 			const verdict = await checkMessage(tool, call.args.value, ctx, names);
 			if (verdict?.block === true) return verdict;
