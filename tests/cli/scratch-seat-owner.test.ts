@@ -240,24 +240,33 @@ test.skipIf(!HAVE_LSOF)("a chain of two respawns keeps the dir LIVE and releasab
 // past the old 3 s probe deadline, must still give a definite seat answer, never UNKNOWN (null).
 // Bun resolves a bare command from the PATH it started with, so the probe runs in a child bun whose
 // PATH starts with the stub.
+// The product runs that lsof under a fixed 10 s deadline (src/scratch.ts sessionOwnerLive, deadline_s: 10) and answers
+// null when it expires. The 2026-11-04 18:5xZ commit gate at load1 36 got null after 10058 ms: `sh` startup plus the
+// planted sleep 4 outran the 10 s. Only a null whose call ran the whole product deadline is re-observed, inside a
+// load-scaled budget; a null returned sooner fails at once, so the 4 s stub must still answer definitely in time.
+const SEAT_LSOF_DEADLINE_MS = 10_000;
 test("planted: a slow lsof (4 s) still gives a definite seat answer: held is true, unheld is false", () => {
 	const owners = join(tempDir("seat-slow-lsof"), "session-owners");
 	mkdirSync(owners, { recursive: true });
 	writeFileSync(join(owners, `${SESSION}.lock`), "");
 	const bin = tempDir("seat-slow-lsof-bin");
-	const probe = `import { defaultLiveness } from ${JSON.stringify(resolve(repo, "src/scratch.ts"))}; console.log(JSON.stringify(defaultLiveness().seatLive?.(${JSON.stringify(AGENT)}, ${JSON.stringify(SESSION)}) ?? null));`;
+	const probe = `import { defaultLiveness } from ${JSON.stringify(resolve(repo, "src/scratch.ts"))}; const started = performance.now(); const value = defaultLiveness().seatLive?.(${JSON.stringify(AGENT)}, ${JSON.stringify(SESSION)}) ?? null; console.log(JSON.stringify({ value, ms: performance.now() - started }));`;
 	const answer = (stub: string) => {
 		writeFileSync(join(bin, "lsof"), stub, { mode: 0o755 });
-		const child = runSync([process.execPath, "-e", probe], {
-			env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, OMP_KIT_SESSION_OWNERS_DIR: owners },
-			deadline_s: fixtureDeadlineS(30), max_output_bytes: 65536,
-		});
-		expect({ rc: child.rc, timedOut: child.timed_out }).toEqual({ rc: 0, timedOut: false });
-		return JSON.parse(new TextDecoder().decode(child.stdout).trim());
+		const until = Date.now() + fixtureDeadlineS(30) * 1000;
+		for (;;) {
+			const child = runSync([process.execPath, "-e", probe], {
+				env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, OMP_KIT_SESSION_OWNERS_DIR: owners },
+				deadline_s: fixtureDeadlineS(30), max_output_bytes: 65536,
+			});
+			expect({ rc: child.rc, timedOut: child.timed_out }).toEqual({ rc: 0, timedOut: false });
+			const observed: { value: boolean | null; ms: number } = JSON.parse(new TextDecoder().decode(child.stdout).trim());
+			if (observed.value !== null || observed.ms < SEAT_LSOF_DEADLINE_MS || Date.now() >= until) return observed.value;
+		}
 	};
 	expect(answer("#!/bin/sh\nsleep 4\necho 4242\n")).toBe(true);
 	expect(answer("#!/bin/sh\nsleep 4\nexit 1\n")).toBe(false);
-}, fixtureDeadlineS(60) * 1000);
+}, fixtureDeadlineS(150) * 1000);
 
 const PS_TABLE = "  100     1\n  200   100\n  300   200\n  400     1\n";
 const LOCK_A = `/Users/josh/.omp/run/session-owners/${SESSION}.lock`;
