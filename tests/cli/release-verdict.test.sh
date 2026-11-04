@@ -21,7 +21,7 @@ mkdir -p "$repo/scripts"
 git -C "$repo" init -q --template= -b main
 git -C "$repo" config user.email t@example.invalid
 git -C "$repo" config user.name t
-cp "$KITREPO/scripts/release-verdict.sh" "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
+cp "$KITREPO/scripts/release-verdict.sh" "$KITREPO/scripts/kitlib-tmp.sh" "$KITREPO/scripts/kitlib-shimpath.sh" "$repo/scripts/"
 # The committed runner records which commit it judged and from which directory it ran; the
 # working-tree copy is replaced below, so a run that used it would record WORKTREE.
 cat >"$repo/scripts/full-suite-verdict.sh" <<'EOF'

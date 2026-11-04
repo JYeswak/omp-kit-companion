@@ -79,6 +79,7 @@ describe("release-verdict.sh hands the runner a sanitized PATH", () => {
 		git(repo, "config", "user.name", "t");
 		writeFileSync(join(repo, "scripts/release-verdict.sh"), releaseVerdict);
 		copyFileSync(join(KIT, "scripts/kitlib-tmp.sh"), join(repo, "scripts/kitlib-tmp.sh"));
+		copyFileSync(join(KIT, "scripts/kitlib-shimpath.sh"), join(repo, "scripts/kitlib-shimpath.sh"));
 		const log = join(root, `${name}.path`);
 		// The stub runner records the PATH it was handed and the br it would use.
 		writeFileSync(join(repo, "scripts/full-suite-verdict.sh"),

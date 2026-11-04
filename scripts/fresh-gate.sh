@@ -1086,6 +1086,11 @@ done
 
 # GATESCR1: no step reads stdin, and no suite may block on it: every check gets /dev/null.
 exec </dev/null
+# SHIMPATH2 (ompkit-fp72.120.16.226): a seat PATH led by the agent-bin br shim refuses every fixture
+# actor, so drop it before any step or test child inherits PATH.
+# shellcheck source=scripts/kitlib-shimpath.sh
+. "$SCRIPT_DIR/kitlib-shimpath.sh"
+kitlib_drop_agent_bin fresh-gate
 require_gate_functions
 if [ -z "$ARCHIVE_DIR" ]; then
 	make_work

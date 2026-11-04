@@ -22,7 +22,7 @@ git -C "$repo" init -q --template= -b main
 git -C "$repo" config user.email t@example.invalid
 git -C "$repo" config user.name t
 cp "${RV_UNDER_TEST:-$KITREPO/scripts/release-verdict.sh}" "$repo/scripts/release-verdict.sh"
-cp "$KITREPO/scripts/kitlib-tmp.sh" "$repo/scripts/"
+cp "$KITREPO/scripts/kitlib-tmp.sh" "$KITREPO/scripts/kitlib-shimpath.sh" "$repo/scripts/"
 cat >"$repo/scripts/full-suite-verdict.sh" <<'EOF'
 #!/bin/sh
 commit=""
