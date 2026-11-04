@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Readable } from "node:stream";
@@ -8,6 +8,7 @@ import { finished } from "node:stream/promises";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { parseOwnerFile } from "./scratch.ts";
+import type { WriteFence } from "./operator-snapshot.ts";
 import { ompSourceCacheRoot } from "./omp-source-cache.ts";
 import { readTestCaseReports, type TestCaseReportCapture } from "./test-case-report.ts";
 
@@ -162,13 +163,21 @@ export function sanitizedEnv(
 }
 
 /** Run allowlisted packaged scripts under one private HOME/XDG/Bun/OMP environment. */
+/** Options for one isolated run; a write fence keeps the test off the live fleet's state (operatorWriteFence). */
+export type IsolatedRunOptions = { writeFence?: WriteFence | null };
+
 async function runIsolated(
 	script: string,
 	args: readonly string[],
 	root: string,
 	executablePath: string,
 	shell: boolean,
+	options: IsolatedRunOptions = {},
 ): Promise<BundledRunResult> {
+	const fence = options.writeFence ?? null;
+	// A requested fence never degrades to an unfenced run: a postcheck would then skip writes the test could make.
+	if (fence && !existsSync(fence.executable))
+		throw new Error(`WRITE_FENCE_UNAVAILABLE: ${fence.executable} is missing; the isolated run was not started unfenced`);
 	if (!isAbsolute(executablePath)) throw new Error(`compiled executable path must be absolute: ${executablePath}`);
 	const realExecutable = realpathSync(executablePath);
 	const realRoot = realpathSync(resolve(root));
@@ -188,7 +197,9 @@ async function runIsolated(
 		if (caseReportDirectory) mkdirSync(caseReportDirectory, { mode: 0o700 });
 		const startedScopes: string[] = [];
 		const ownsGroup = process.platform === "darwin" || process.platform === "linux";
-		const argv = shell ? ["/bin/sh", absoluteScript, ...args] : [realExecutable, absoluteScript, ...args];
+		const command = shell ? ["/bin/sh", absoluteScript, ...args] : [realExecutable, absoluteScript, ...args];
+		// sandbox-exec execs the command in place: same pid, same detached process group.
+		const argv = fence ? [fence.executable, "-p", fence.profile, ...command] : command;
 		const child = Bun.spawn(argv, {
 			cwd: realRoot,
 			env: { ...sanitizedEnv(identity, process.env, privateRoot), ...(shell ? {} : { BUN_BE_BUN: "1" }),
@@ -254,7 +265,7 @@ async function runIsolated(
 			return code;
 		});
 		const captureExecution = (interrupted: boolean): BundledRunExecution => ({
-			argv, cwd: realRoot, launched: true, exit_code: actualExitCode, signal: actualSignal, interrupted,
+			argv: command, cwd: realRoot, launched: true, exit_code: actualExitCode, signal: actualSignal, interrupted,
 			stdout_complete: stdoutComplete, stderr_complete: stderrComplete,
 			stdout_capture: { bytes: Buffer.byteLength(partialStdout, "utf8"), sha256: createHash("sha256").update(partialStdout, "utf8").digest("hex") },
 			stderr_capture: { bytes: Buffer.byteLength(partialStderr, "utf8"), sha256: createHash("sha256").update(partialStderr, "utf8").digest("hex") },
@@ -317,11 +328,13 @@ async function runIsolated(
 }
 
 /** Harness scripts use the packaged executable's embedded Bun, never host Bun. */
-export function runBundled(script: string, args: readonly string[], root: string, executablePath: string): Promise<BundledRunResult> {
-	return runIsolated(script, args, root, executablePath, false);
+export function runBundled(script: string, args: readonly string[], root: string, executablePath: string,
+	options: IsolatedRunOptions = {}): Promise<BundledRunResult> {
+	return runIsolated(script, args, root, executablePath, false, options);
 }
 
 /** Shell stages receive the same isolated identity; their Bun calls go through runtime-adapter.sh. */
-export function runIsolatedShell(script: string, args: readonly string[], root: string, executablePath: string): Promise<BundledRunResult> {
-	return runIsolated(script, args, root, executablePath, true);
+export function runIsolatedShell(script: string, args: readonly string[], root: string, executablePath: string,
+	options: IsolatedRunOptions = {}): Promise<BundledRunResult> {
+	return runIsolated(script, args, root, executablePath, true, options);
 }

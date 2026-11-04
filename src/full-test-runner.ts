@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readlinkSync, readSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { activeConcurrentWriterPaths, compareWatched, liveWriterPaths, operatorWatchedPaths, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
+import { activeConcurrentWriterPaths, compareWatched, liveWriterPaths, operatorWatchedPaths, operatorWriteFence, snapshotWatched, type WatchedComparison } from "./operator-snapshot.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import { BundledRunInterruptedError, runIsolatedShell, type BundledRunResult } from "./runtime.ts";
 import { runFastTest, type FastTestExpectations, type FastTestInput, type FastTestReport, type FastTestStatus } from "./test-runner.ts";
@@ -51,7 +51,9 @@ export type FullTestReport = {
  current_stage: { name: string; elapsed_ms: number } | null; cause: FullTestCause | null;
  proofs: { G4_live: { status: "PASS" | "FAIL" | "NOT_RUN"; expected_scenarios: number; observed_scenarios: number; plant: "PASS" | "FAIL" | "NOT_RUN" } };
  live_scenarios: { expected_ids: string[]; observed_ids: string[]; status: "PASS" | "FAIL" | "NOT_RUN" };
- snapshots: { release: { unchanged: boolean | null; complete: boolean }; home: WatchedComparison; project: WatchedComparison };
+ snapshots: { release: { unchanged: boolean | null; complete: boolean }; home: WatchedComparison; project: WatchedComparison;
+  /** The sandbox-exec profile every isolated-test process ran under, the only provenance for skipped-live-writer; null: none, nothing skipped. */
+  write_fence?: { profile: string; profile_sha256: string } | null };
  producer: FullTestProducer;
  failures: string[]; proof_scope: "ISOLATED_FIXTURE_ONLY";
 };
@@ -514,11 +516,15 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
  const watchedPaths = operatorWatchedPaths(input.home, stateRoot);
  // Only project paths a kit run could write; the rest of a real repository changes under concurrent work.
  const projectPaths = input.project ? [".omp", ".agents", ".claude"].map(name => join(input.project!, name)) : [];
- // Taken before the before-snapshot: every isolated-test process starts after it (live-writer evidence, ompkit-6gbej).
- const liveWriter = { stateRoot, runStartedMs: Date.now() };
+ // POSTFENCE (ompkit-6gbej): every isolated-test process below runs under this fence, so a change in a fenced live-fleet
+ // namespace cannot be the test's own write. Null (no sandbox-exec, not darwin): nothing is skipped as a live write.
+ const fence = operatorWriteFence(stateRoot);
+ const liveWriter = { stateRoot, fence };
+ const writeFence = fence ? { profile: fence.profile, profile_sha256: fence.profile_sha256 } : null;
  const before = { release: snapshot(input.root, true), home: snapshotWatched(watchedPaths), project: snapshotWatched(projectPaths) };
 	const fastStarted = performance.now();
-	const fast = expectedCounts ? await runFastTest(input, expectedCounts) : await runFastTest(input);
+	const fastInput = { ...input, writeFence: fence };
+	const fast = expectedCounts ? await runFastTest(fastInput, expectedCounts) : await runFastTest(fastInput);
 	const fast_duration_ms = Math.round(performance.now() - fastStarted);
  const defaults = Object.fromEntries(STAGES.map(name => [name, { status: "NOT_RUN", producer_rc: null, duration_ms: null }])) as Record<FullStageName, FullStage>;
  const empty = describeFullTestProducer(null, { source_revision: sourceRevision, references, roots: [input.root, input.home] });
@@ -529,7 +535,7 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
   ]);
   const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
    home: compareWatched(before.home, after.home, input.home, homeWriters, liveWriterPaths(before.home, after.home, liveWriter, homeWriters)),
-   project: compareWatched(before.project, after.project, input.home, projectWriters) };
+   project: compareWatched(before.project, after.project, input.home, projectWriters), write_fence: writeFence };
   const failures = [...fast.failures];
   if (!snapshots.release.unchanged) failures.push("Release snapshot changed during failed fast stage");
   for (const path of [...snapshots.home.changed_paths, ...snapshots.project.changed_paths]) failures.push(`Operator file changed during failed fast stage: ${path}`);
@@ -558,7 +564,7 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
  if (regexBudgetRuns !== undefined && regexBudgetRuns !== "1" && regexBudgetRuns !== "5")
   throw new Error("INVALID_NATIVE_REGEX_BUDGET_RUNS");
  const ladderArgs = regexBudgetRuns === "5" ? ["--regex-budget-runs", "5"] : [];
- try { result = await runIsolatedShell("scripts/ladder.sh", ladderArgs, input.root, input.executablePath); }
+ try { result = await runIsolatedShell("scripts/ladder.sh", ladderArgs, input.root, input.executablePath, { writeFence: fence }); }
  catch (error) {
   const interrupted = recoverInterruptedRun(error, privateRoots);
   cause = interrupted.cause;
@@ -570,7 +576,7 @@ const ids: string[] = parsed.filter(row => row.plant !== true && row.kind !== "p
  ]);
  const snapshots = { release: { unchanged: before.release.digest === after.release.digest, complete: before.release.complete && after.release.complete },
   home: compareWatched(before.home, after.home, input.home, homeWriters, liveWriterPaths(before.home, after.home, liveWriter, homeWriters)),
-  project: compareWatched(before.project, after.project, input.home, projectWriters) };
+  project: compareWatched(before.project, after.project, input.home, projectWriters), write_fence: writeFence };
  const redact = (text: string) => redactFullTestText(text, privateRoots);
  const producer = describeFullTestProducer(result, { source_revision: sourceRevision, references, roots: privateRoots,
   ...(artifactRepo === undefined ? {} : { artifact_root: artifactRepo }) });

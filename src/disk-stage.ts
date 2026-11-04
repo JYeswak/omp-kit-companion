@@ -71,9 +71,7 @@ function ensureState(root: string): void {
 function receipt(root: string, stage: DiskStage, freePct: number | null, action: string, detail: Record<string, unknown> = {}): string {
 	ensureState(root);
 	const path = join(root, "receipts.jsonl");
-	// Writer evidence (ompkit-6gbej): an isolated postcheck attributes an appended row only to a provably outside writer.
-	appendFileSync(path, `${JSON.stringify({ ts: new Date().toISOString(), bead: BEAD, stage, free_pct: freePct, observer: "statvfs", action, ...detail,
-		pid: process.pid, ppid: process.ppid })}\n`, { mode: 0o600 });
+	appendFileSync(path, `${JSON.stringify({ ts: new Date().toISOString(), bead: BEAD, stage, free_pct: freePct, observer: "statvfs", action, ...detail })}\n`, { mode: 0o600 });
 	return path;
 }
 

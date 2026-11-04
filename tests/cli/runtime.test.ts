@@ -5,6 +5,7 @@ import process from "node:process";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
 import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
+import { operatorWriteFence } from "../../src/operator-snapshot.ts";
 import { createScratch, type LivenessDeps } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { installReadonlyBr, resolveRealBr } from "../../src/kitlib/readonly-br.ts";
@@ -300,6 +301,66 @@ for (const termination of ["nonzero", "signal"] as const) {
 		}
 	}, 12_000);
 }
+
+// POSTFENCE (ompkit-6gbej): a kit update's isolated test runs under the operator write fence, so its write to a live-fleet
+// namespace is refused with EPERM and surfaces as the test's own failure, never as a change the postcheck must judge.
+(process.platform === "darwin" ? test : test.skip)("POSTFENCE planted: a fenced isolated test writing composer/ gets EPERM and fails itself; a missing sandbox-exec refuses to run unfenced", async () => {
+	const { base, admission } = ownedRuntimeFixture();
+	const release = join(base, "release");
+	const executable = join(release, "bin", "omp-kit");
+	const omp = createOmp(join(base, "omp"), "v1");
+	const stateRoot = join(base, "operator-state");
+	for (const directory of ["release/bin", "release/scripts", "operator-home", "tmp", "operator-state/composer", "operator-state/disk-stage"])
+		mkdirSync(join(base, directory), { recursive: true });
+	const record = join(stateRoot, "composer", "0123456789abcdef.json");
+	writeFileSync(record, '{"schema":1,"pid":1,"at":0,"empty":false}');
+	writeFileSync(executable, "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+	writeFileSync(join(release, "scripts", "ladder.sh"), [
+		`printf ran > "$2/ran"`,
+		// The setuid ps a fenced test still needs (rc 126 under a plain sandbox).
+		`/bin/ps -o pid= -p "$$" >/dev/null && printf 'ps ok\\n'`,
+		`printf forged > "$1/composer/0123456789abcdef.json" || exit 13`,
+		`printf 'unreachable\\n'`,
+	].join("\n"));
+	const fence = operatorWriteFence(stateRoot);
+	expect(fence).not.toBeNull();
+	const missing = { ...fence!, executable: join(base, "no-such-sandbox-exec") };
+	const runner = (writeFence: unknown, marks: string) => `
+		import { runIsolatedShell } from ${JSON.stringify(join(REPO_ROOT, "src/runtime.ts"))};
+		try {
+			const result = await runIsolatedShell("scripts/ladder.sh", [${JSON.stringify(stateRoot)}, ${JSON.stringify(marks)}], ${JSON.stringify(release)}, ${JSON.stringify(executable)}, { writeFence: ${JSON.stringify(writeFence)} });
+			process.stdout.write(JSON.stringify(result));
+		} catch (error) { process.stdout.write(JSON.stringify({ refused: String(error) })); }
+	`;
+	const invoke = async (writeFence: unknown, marks: string) => {
+		mkdirSync(marks, { recursive: true });
+		const child = await run([process.execPath, "--eval", runner(writeFence, marks)], { cwd: base, deadline_s: fixtureDeadlineS(30),
+			env: {
+				PATH: [dirname(omp.launcher), dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+				HOME: join(base, "operator-home"), TMPDIR: join(base, "tmp"),
+				OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source,
+				...admission,
+			} });
+		expect(child.rc, new TextDecoder().decode(child.stderr)).toBe(0);
+		return JSON.parse(new TextDecoder().decode(child.stdout));
+	};
+	const fenced = await invoke(fence, join(base, "marks-fenced"));
+	expect(fenced.code).toBe(13);
+	expect(fenced.stdout).toBe("ps ok\n");
+	expect(fenced.stderr).toContain("Operation not permitted");
+	expect(readFileSync(record, "utf8")).toBe('{"schema":1,"pid":1,"at":0,"empty":false}');
+	expect(existsSync(join(base, "marks-fenced", "ran"))).toBe(true);
+	// Paired control: the same test unfenced writes the record, which is the leak the fence closes.
+	const open = await invoke(null, join(base, "marks-open"));
+	expect(open.code).toBe(0);
+	expect(readFileSync(record, "utf8")).toBe("forged");
+	// A requested fence never degrades to an unfenced run.
+	writeFileSync(record, '{"schema":1,"pid":1,"at":0,"empty":false}');
+	const refused = await invoke(missing, join(base, "marks-refused"));
+	expect(refused.refused).toContain("WRITE_FENCE_UNAVAILABLE");
+	expect(existsSync(join(base, "marks-refused", "ran"))).toBe(false);
+	expect(readFileSync(record, "utf8")).toBe('{"schema":1,"pid":1,"at":0,"empty":false}');
+}, fixtureDeadlineS(60) * 1000);
 
 for (const interruption of ["stream-error", "SIGTERM", "leader-exit"] as const) {
 	test(`isolated ${interruption} drains real stage evidence and stops its owned descendants before scratch cleanup`, async () => {

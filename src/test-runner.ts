@@ -5,6 +5,7 @@ import { diagnose, readManifest, type Finding } from "./diagnostics.ts";
 import { RELEASE_MANIFEST_NAME, validateReleaseManifest } from "./kit-release.ts";
 import { resolveOmpIdentity, type OmpIdentity } from "./paths.ts";
 import { runBundled, type BundledRunResult } from "./runtime.ts";
+import type { WriteFence } from "./operator-snapshot.ts";
 import { isSha256Hex } from "./regex-guards.ts";
 const HARNESS = "scripts/ttsr-harness.ts";
 const CASES_PATH = "cases/cases.tsv";
@@ -64,6 +65,8 @@ export interface FastTestInput {
 	home: string;
 	/** Optional absolute project path; diagnostics read it, but no project command is run. */
 	project?: string;
+	/** The write fence every isolated harness run gets (a full test's postcheck window, ompkit-6gbej). */
+	writeFence?: WriteFence | null;
 }
 
 export type FastProofStatus = "PASS" | "FAIL" | "NOT_RUN";
@@ -432,8 +435,8 @@ export async function runFastTest(input: FastTestInput, requestedExpected?: Fast
 	// state), so the proof waits for the slower one, not their sum. Both settle before any
 	// return, and their results are consumed in the original order: gate first, then selftest.
 	const [gateRun, selftestRun] = await Promise.allSettled([
-		runBundled(HARNESS, ["--gate-json"], input.root, input.executablePath),
-		runBundled(HARNESS, ["--selftest"], input.root, input.executablePath),
+		runBundled(HARNESS, ["--gate-json"], input.root, input.executablePath, { writeFence: input.writeFence }),
+		runBundled(HARNESS, ["--selftest"], input.root, input.executablePath, { writeFence: input.writeFence }),
 	]);
 	if (gateRun.status === "rejected") {
 		const kind = blockerKind(gateRun.reason);

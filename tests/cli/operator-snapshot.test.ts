@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { compareWatched, liveWriterPaths, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
+import { compareWatched, liveWriterPaths, operatorWatchedPaths, operatorWriteFence, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { ccStateDir, KNOWN_JOBS, plistPath, serviceLabel, type OwnedStatePath } from "../../src/service.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
@@ -305,15 +306,16 @@ for (const namespace of ["chrome-jfp", "browser-profiles"]) {
 	}, fixtureDeadlineS() * 1000);
 }
 
-// POSTCHECKLIVE1 (ompkit-6gbej): 0.2.88 and 0.2.89 installs ended PARTIAL because live seats wrote composer records,
-// a fleet full-suite verdict (pid 75314) wrote under `.running.75314.log.files.75314/`, and `omp-kit heavy` appended
-// disk-stage rows during the isolated test. Each is written once, so the 1 s post-run probe never saw them. A change
-// is skipped only when its declared writer is a process proven outside the isolated test; these fixtures are real
-// processes and real ps lookups.
+// POSTCHECKLIVE1 / POSTFENCE (ompkit-6gbej): 0.2.88 and 0.2.89 installs ended PARTIAL because live seats wrote composer
+// records, a fleet full-suite verdict wrote under `.running.<pid>.log.files.<pid>/`, and `omp-kit heavy` appended
+// disk-stage rows during the isolated test. A file's content never proves who wrote it (the forged case below), so a
+// change under those namespaces is skipped only when every isolated-test process ran under the operator write fence;
+// without a fence it fails. The fenced writes here are real sandbox-exec runs of the exact profile the runner uses.
 
-/** ps etime is whole seconds and the judge rounds the start up one more second: a pre-run writer needs this lead. */
+/** ps etime is whole seconds and 1ed34c74e6's judge rounded the start up one more second: its pre-run rule needed this lead. */
 const PRE_RUN_LEAD_MS = 2_500;
 const COMPOSER_WRITE = `printf '{"schema":1,"session_file":"/fixture/session.jsonl","pid":%s,"at":0,"empty":true}' "$$" > "$1.tmp" && mv "$1.tmp" "$1"`;
+const darwinTest = process.platform === "darwin" ? test : test.skip;
 
 /** A real process that prints `pid <n>` first and `written` after its write; stop() kills its group. */
 function fixtureProcess(argv: string[]) {
@@ -357,13 +359,39 @@ function liveHome() {
 	return { home, paths, stateRoot };
 }
 
-/** The real comparison with one source line mutated so that every declared writer counts as proven. */
-async function writerCheckRemoved() {
+/** The live fleet's writes during a run: a seat's composer record, a verdict log subtree, a disk-stage row, a deleted record. */
+async function fleetWrites(home: string, stateRoot: string) {
+	const composer = join(stateRoot, "composer");
+	writeFileSync(join(composer, "4444444444444444.json"), '{"schema":1,"pid":1,"at":0,"empty":true}');
+	const receipts = join(stateRoot, "disk-stage", "receipts.jsonl");
+	writeFileSync(receipts, `${JSON.stringify({ ts: "2026-11-04T00:00:00.000Z", action: "heavy-admit" })}\n`, { mode: 0o600 });
+	return {
+		write: async () => {
+			const seat = await run(["/bin/sh", script(home, "fleet-seat", COMPOSER_WRITE), join(composer, "0123456789abcdef.json")], { deadline_s: fixtureDeadlineS() });
+			expect(seat.rc).toBe(0);
+			const verdict = join(stateRoot, "full-suite-verdicts", "repo", "tree.base.abc.running.75314.log");
+			mkdirSync(`${verdict}.files.75314/case`, { recursive: true });
+			writeFileSync(verdict, "log\n");
+			writeFileSync(`${verdict}.files.75314/case/report.json`, "{}\n");
+			appendFileSync(receipts, `${JSON.stringify({ ts: new Date().toISOString(), action: "heavy-admit" })}\n`);
+			rmSync(join(composer, "4444444444444444.json"));
+		},
+		fleetPaths: ["composer/0123456789abcdef.json", "composer/4444444444444444.json", "disk-stage/receipts.jsonl",
+			"full-suite-verdicts/repo/tree.base.abc.running.75314.log", "full-suite-verdicts/repo/tree.base.abc.running.75314.log.files.75314",
+			"full-suite-verdicts/repo/tree.base.abc.running.75314.log.files.75314/case",
+			"full-suite-verdicts/repo/tree.base.abc.running.75314.log.files.75314/case/report.json"].map(rel => `~/.local/state/omp-kit/${rel}`).sort(),
+	};
+}
+
+/** The real comparison with the fence guard removed: every namespace change counts as fenced. */
+async function fenceCheckRemoved() {
 	const src = join(import.meta.dir, "..", "..", "src");
 	const source = readFileSync(join(src, "operator-snapshot.ts"), "utf8");
-	const guard = "if (!Number.isSafeInteger(pid) || pid <= 1 || pid === this.runnerPid) return null;";
+	const guard = "if (!stateRoot || !fence || fence.stateRoot !== stateRoot) return attributed;";
+	const evidence = "profile_sha256: fence.profile_sha256 }";
 	expect(source).toContain(guard);
-	const mutated = source.replace(guard, 'return { pid, rule: "started-before-run", started_by: new Date(0).toISOString(), pgid: 0 };')
+	expect(source).toContain(evidence);
+	const mutated = source.replace(guard, "if (!stateRoot) return attributed;").replace(evidence, 'profile_sha256: fence?.profile_sha256 ?? "" }')
 		.replaceAll('from "./', `from "${src}/`);
 	const dir = ownedTmp("operator-snapshot-mutant", { root: join(import.meta.dir, "../../var/agent-tmp") }).path;
 	roots.push(dir);
@@ -373,131 +401,75 @@ async function writerCheckRemoved() {
 	return mutant;
 }
 
-test("POSTCHECKLIVE1 planted: a composer record rewritten by a writer started before the run, outside its group, is skipped-live-writer", async () => {
+darwinTest("POSTFENCE planted: under the run's write fence, live-fleet writes to composer, verdicts and disk-stage are skipped-live-writer; other state still fails", async () => {
 	const { home, paths, stateRoot } = liveHome();
-	const record = join(stateRoot, "composer", "0123456789abcdef.json");
-	writeFileSync(record, "{\"schema\":1,\"pid\":1,\"at\":0,\"empty\":false}");
-	const writer = fixtureProcess(["/bin/sh", script(home, "seat", `echo pid $$; sleep 5; ${COMPOSER_WRITE}; echo written; exec sleep 60`), record]);
+	const fence = operatorWriteFence(stateRoot);
+	expect(fence).not.toBeNull();
+	const fleet = await fleetWrites(home, stateRoot);
+	const before = snapshotWatched(paths);
+	await fleet.write();
+	writeFileSync(join(stateRoot, "unattributed.json"), "{}\n");
+	writeFileSync(join(stateRoot, "composer.bak"), "{}\n");
+	const after = snapshotWatched(paths);
+	const result = compareWatched(before, after, home, undefined, liveWriterPaths(before, after, { stateRoot, fence }));
+	expect(result.changed_paths, JSON.stringify(result)).toEqual(["~/.local/state/omp-kit/composer.bak", "~/.local/state/omp-kit/unattributed.json"]);
+	expect(result.skipped_live_writer_paths?.map(entry => entry.path)).toEqual(fleet.fleetPaths);
+	expect(result.skipped_live_writer_paths?.find(entry => entry.path.endsWith("receipts.jsonl"))?.evidence)
+		.toEqual({ source: "write-fence", namespace: join(stateRoot, "disk-stage", "receipts.jsonl"), profile_sha256: fence!.profile_sha256 });
+	expect(createHash("sha256").update(fence!.profile).digest("hex")).toBe(fence!.profile_sha256);
+}, fixtureDeadlineS(30) * 1000);
+
+test("POSTFENCE negative: with no fence (Linux, no sandbox-exec) or a fence for another state root, every live-fleet write fails", async () => {
+	const { home, paths, stateRoot } = liveHome();
+	const fleet = await fleetWrites(home, stateRoot);
+	const before = snapshotWatched(paths);
+	await fleet.write();
+	const after = snapshotWatched(paths);
+	expect(operatorWriteFence(stateRoot, "linux")).toBeNull();
+	expect(operatorWriteFence(stateRoot, "darwin", join(home, "no-such-sandbox-exec"))).toBeNull();
+	const unfenced = liveWriterPaths(before, after, { stateRoot, fence: null });
+	expect([...unfenced.keys()]).toEqual([]);
+	expect(compareWatched(before, after, home, undefined, unfenced).changed_paths).toEqual(fleet.fleetPaths);
+	const other = operatorWriteFence(join(home, "other-state"), "darwin", process.execPath);
+	expect([...liveWriterPaths(before, after, { stateRoot, fence: other }).keys()]).toEqual([]);
+	// Mutant: with the fence guard removed, the unfenced writes wrongly pass.
+	const mutant = await fenceCheckRemoved();
+	expect(mutant.compareWatched(before, after, home, undefined, mutant.liveWriterPaths(before, after, { stateRoot, fence: null })).changed_paths).toEqual([]);
+}, fixtureDeadlineS(30) * 1000);
+
+test("POSTCHECKLIVE1 forged: a runner-group process rewriting a composer record with a live pre-run seat's pid still fails", async () => {
+	const { home, paths, stateRoot } = liveHome();
+	const record = join(stateRoot, "composer", "3333333333333333.json");
+	// A real seat, alive and started before the run, owns the record (its pid in its own group).
+	const seat = fixtureProcess(["/bin/sh", script(home, "forged-seat", `echo pid $$; ${COMPOSER_WRITE}; echo written; exec sleep 60`), record]);
 	try {
-		const pid = await writer.pid;
-		expect(psPgid(pid)).toBe(pid);
-		expect(psPgid(pid)).not.toBe(psPgid(process.pid));
-		await Bun.sleep(PRE_RUN_LEAD_MS); // Real clock on purpose: the judge reads real process start times from ps.
-		const runStartedMs = Date.now();
+		const seatPid = await seat.pid;
+		await seat.written;
+		// Real clock on purpose: 1ed34c74e6 skipped this leak as started-before-run once ps showed the seat predating the run.
+		await Bun.sleep(PRE_RUN_LEAD_MS);
 		const before = snapshotWatched(paths);
-		await writer.written;
-		const after = snapshotWatched(paths);
-		const live = liveWriterPaths(before, after, { stateRoot, runStartedMs });
-		const result = compareWatched(before, after, home, undefined, live);
-		expect(result, JSON.stringify(result)).toMatchObject({ unchanged: false, complete: true, changed_paths: [], skipped_paths: [],
-			skipped_live_writer_paths: [{ path: "~/.local/state/omp-kit/composer/0123456789abcdef.json", reason: "skipped-live-writer",
-				evidence: { source: "composer-record", writers: [{ pid, rule: "started-before-run", pgid: pid }] } }] });
-		// Paired control: without the writer evidence the same change is the failure 0.2.89 reported.
-		expect(compareWatched(before, after, home).changed_paths).toEqual(["~/.local/state/omp-kit/composer/0123456789abcdef.json"]);
-	} finally { writer.stop(); await writer.done; }
-}, fixtureDeadlineS(30) * 1000);
-
-test("POSTCHECKLIVE1 negative: a composer record still fails when its writer is in the runner's process group or exited after the run began", async () => {
-	const { home, paths, stateRoot } = liveHome();
-	const inside = join(stateRoot, "composer", "1111111111111111.json"), dead = join(stateRoot, "composer", "2222222222222222.json");
-	const runStartedMs = Date.now();
-	const before = snapshotWatched(paths);
-	// The runner's background child shares its process group, exactly as an isolated-test process shares the test's.
-	const child = script(home, "inside", `sleep 2.5; ${COMPOSER_WRITE}; echo written; exec sleep 60`);
-	const runner = fixtureProcess(["/bin/sh", "-c", 'echo pid $$; /bin/sh "$1" "$2" & wait', "runner", child, inside]);
-	const exited = fixtureProcess(["/bin/sh", script(home, "dead", `echo pid $$; ${COMPOSER_WRITE}; echo written`), dead]);
-	try {
-		const runnerPid = await runner.pid, deadPid = await exited.pid;
-		await Promise.all([runner.written, exited.done]);
-		const record: unknown = JSON.parse(readFileSync(inside, "utf8"));
-		const insidePid = record && typeof record === "object" && "pid" in record && typeof record.pid === "number" ? record.pid : -1;
-		expect(insidePid).toBeGreaterThan(1);
-		expect(insidePid).not.toBe(runnerPid);
-		expect(psPgid(insidePid)).toBe(runnerPid);
-		expect(psPgid(deadPid)).toBeNull();
-		const after = snapshotWatched(paths);
-		const context = { stateRoot, runStartedMs, runnerPid };
-		const live = liveWriterPaths(before, after, context);
-		expect([...live.keys()]).toEqual([]);
-		const result = compareWatched(before, after, home, undefined, live);
-		expect(result.changed_paths).toEqual(["~/.local/state/omp-kit/composer/1111111111111111.json", "~/.local/state/omp-kit/composer/2222222222222222.json"]);
-		expect(result.skipped_live_writer_paths).toEqual([]);
-		// Mutant: with the writer check removed, both negatives wrongly pass.
-		const mutant = await writerCheckRemoved();
-		const mutantLive = mutant.liveWriterPaths(before, after, context);
-		expect(mutant.compareWatched(before, after, home, undefined, mutantLive).changed_paths).toEqual([]);
-	} finally { runner.stop(); await Promise.all([runner.done, exited.done]); }
-}, fixtureDeadlineS(30) * 1000);
-
-test("POSTCHECKLIVE1 planted: a .running.<pid> verdict file from a live outside process is skipped (darwin); an unattributed state file still fails", async () => {
-	const { home, paths, stateRoot } = liveHome();
-	const verdicts = join(stateRoot, "full-suite-verdicts", "repo");
-	// A separate runner: the verdict writer descends from this test process, not from the runner.
-	const runner = fixtureProcess(["/bin/sh", "-c", "echo pid $$; exec sleep 60"]);
-	const runnerPid = await runner.pid;
-	const runStartedMs = Date.now();
-	const before = snapshotWatched(paths);
-	const verdict = fixtureProcess(["/bin/sh", script(home, "verdict",
-		'echo pid $$; sleep 2.5; out="$1/tree.base.abc.running.$$.log"; mkdir -p "$out.files.$$/case"; printf log > "$out"; printf c > "$out.files.$$/case/report.json"; echo written; exec sleep 60'), verdicts]);
-	try {
-		const pid = await verdict.pid;
-		await verdict.written;
-		writeFileSync(join(stateRoot, "unattributed.json"), "{}\n");
-		writeFileSync(join(verdicts, "tree.base.abc.running.999999999.log"), "no such writer\n");
-		const after = snapshotWatched(paths);
-		const live = liveWriterPaths(before, after, { stateRoot, runStartedMs, runnerPid });
-		const result = compareWatched(before, after, home, undefined, live);
-		const verdictPaths = [`tree.base.abc.running.${pid}.log`, `tree.base.abc.running.${pid}.log.files.${pid}`,
-			`tree.base.abc.running.${pid}.log.files.${pid}/case`, `tree.base.abc.running.${pid}.log.files.${pid}/case/report.json`]
-			.map(name => `~/.local/state/omp-kit/full-suite-verdicts/repo/${name}`).sort();
-		const unattributed = ["~/.local/state/omp-kit/full-suite-verdicts/repo/tree.base.abc.running.999999999.log", "~/.local/state/omp-kit/unattributed.json"];
-		if (process.platform === "darwin") {
-			expect(result.changed_paths, JSON.stringify(result)).toEqual(unattributed);
-			expect(result.skipped_live_writer_paths?.map(entry => entry.path)).toEqual(verdictPaths);
-			expect(result.skipped_live_writer_paths?.[0]?.evidence).toMatchObject({ source: "verdict-running-path",
-				writers: [{ pid, rule: "alive-outside-runner", pgid: pid, ancestor: { pid: process.pid } }] });
-		} else {
-			// Linux subreapers can adopt isolated-test orphans, so only a pre-run writer counts there.
-			expect(result.changed_paths).toEqual([...verdictPaths, ...unattributed].sort());
+		// The leak: a process in this runner's process group reads the record and rewrites it, keeping the seat's pid.
+		const leak = (argv: string[]) => run([...argv, process.execPath, "-e", `const fs = require("fs"); const p = process.argv[1];
+const record = JSON.parse(fs.readFileSync(p, "utf8")); fs.writeFileSync(p, JSON.stringify({ ...record, empty: false, forged: true }));`, record],
+			{ deadline_s: fixtureDeadlineS() });
+		const fence = operatorWriteFence(stateRoot);
+		if (fence) {
+			// Under the fence the isolated test cannot make the write at all: EPERM, its own failure, nothing to judge.
+			const fenced = await leak([fence.executable, "-p", fence.profile]);
+			expect(fenced.rc).not.toBe(0);
+			expect(new TextDecoder().decode(fenced.stderr)).toContain("EPERM");
+			const untouched = snapshotWatched(paths);
+			expect(compareWatched(before, untouched, home, undefined, liveWriterPaths(before, untouched, { stateRoot, fence })).unchanged).toBe(true);
 		}
-	} finally { runner.stop(); verdict.stop(); await Promise.all([runner.done, verdict.done]); }
-}, fixtureDeadlineS(30) * 1000);
-
-test("POSTCHECKLIVE1 disk-stage: an appended admission row from a pre-run writer is skipped; a row without a writer or a rewritten prefix fails", async () => {
-	const { home, paths, stateRoot } = liveHome();
-	const receipts = join(stateRoot, "disk-stage", "receipts.jsonl");
-	// A row from before rows named their writer: never judged, because only the appended suffix is.
-	writeFileSync(receipts, `${JSON.stringify({ ts: "2026-11-04T00:00:00.000Z", action: "heavy-admit" })}\n`, { mode: 0o600 });
-	const diskStage = join(import.meta.dir, "..", "..", "src", "disk-stage.ts");
-	const writer = fixtureProcess([process.execPath, "-e", `console.log("pid " + process.pid); await Bun.sleep(5000);
-const { admitDiskWork } = await import(${JSON.stringify(diskStage)});
-admitDiskWork("heavy", "/", { stateDir: ${JSON.stringify(join(stateRoot, "disk-stage"))}, readFreePct: () => 50 });
-console.log("written"); await Bun.sleep(60000);`]);
-	try {
-		const pid = await writer.pid;
-		await Bun.sleep(PRE_RUN_LEAD_MS); // Real clock on purpose: the judge reads real process start times from ps.
-		const runStartedMs = Date.now();
-		const context = { stateRoot, runStartedMs };
-		const before = snapshotWatched(paths);
-		await writer.written;
-		const appended = snapshotWatched(paths);
-		const rows = readFileSync(receipts, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
-		expect(rows[1]).toMatchObject({ action: "heavy-admit", pid, ppid: process.pid });
-		const live = liveWriterPaths(before, appended, context);
-		expect(compareWatched(before, appended, home, undefined, live)).toMatchObject({ changed_paths: [],
-			skipped_live_writer_paths: [{ path: "~/.local/state/omp-kit/disk-stage/receipts.jsonl", reason: "skipped-live-writer",
-				evidence: { source: "disk-stage-append", writers: [{ pid, rule: "started-before-run" }] } }] });
-
-		// An older writer's row carries no pid: unattributed, still a failure.
-		appendFileSync(receipts, `${JSON.stringify({ ts: new Date().toISOString(), action: "heavy-admit" })}\n`);
-		const noWriter = snapshotWatched(paths);
-		expect(compareWatched(appended, noWriter, home, undefined, liveWriterPaths(appended, noWriter, context)).changed_paths)
-			.toEqual(["~/.local/state/omp-kit/disk-stage/receipts.jsonl"]);
-
-		// Not an append: rows naming the same proven writer do not rescue a rewritten prefix.
-		writeFileSync(receipts, `${JSON.stringify({ ts: new Date().toISOString(), action: "heavy-admit", pid, ppid: process.pid })}\n`);
-		const rewritten = snapshotWatched(paths);
-		expect(compareWatched(noWriter, rewritten, home, undefined, liveWriterPaths(noWriter, rewritten, context)).changed_paths)
-			.toEqual(["~/.local/state/omp-kit/disk-stage/receipts.jsonl"]);
-	} finally { writer.stop(); await writer.done; }
+		const leaked = await leak([]);
+		expect(leaked.rc, new TextDecoder().decode(leaked.stderr)).toBe(0);
+		const forged: unknown = JSON.parse(readFileSync(record, "utf8"));
+		expect(forged).toMatchObject({ pid: seatPid, forged: true });
+		expect(psPgid(seatPid)).toBe(seatPid);
+		const after = snapshotWatched(paths);
+		// The unfenced leak names a live, pre-run seat: content is not provenance, so it fails.
+		const result = compareWatched(before, after, home, undefined, liveWriterPaths(before, after, { stateRoot, fence: null }));
+		expect(result.changed_paths, JSON.stringify(result)).toEqual(["~/.local/state/omp-kit/composer/3333333333333333.json"]);
+		expect(result.skipped_live_writer_paths).toEqual([]);
+	} finally { seat.stop(); await seat.done; }
 }, fixtureDeadlineS(30) * 1000);
