@@ -15,6 +15,8 @@ mkdir -p "$REPO_TMP"
 . "$REPO_TMP/../../scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP pre-push-gate-test || exit 1
+# Product reports use physical paths; preserve exact path comparisons through macOS /var aliases.
+TMP=$(CDPATH='' cd -- "$TMP" && pwd -P) || exit 1
 unset FULL_SUITE_VERDICT_CACHE_DIR
 # GATESPEED1: the full suite now gates the release by default. These cases exercise the in-push
 # runner, which stays available, so they opt in; DEFER1 below covers the default.

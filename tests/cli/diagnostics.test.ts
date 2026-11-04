@@ -1668,7 +1668,7 @@ console.log(JSON.stringify({data:{running:false,socket_path:socket}}));
 	const output = decoder.decode(result.stdout);
 	expect(result.rc, output + decoder.decode(result.stderr)).toBe(0);
 	const report = JSON.parse(output).data;
-	expect(report.kit.release.root).toBe(f.root);
+	expect(report.kit.release.root).toBe(realpathSync(f.root));
 	const rows: Finding[] = report.findings;
 	expect(finding(rows, "rch")).toMatchObject({ status: "OK", evidence: { state: "NOT_RUNNING" } });
 	expect(snapshotWatched(watched)).toEqual(before);
