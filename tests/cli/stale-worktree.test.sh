@@ -86,6 +86,33 @@ stalelock_repo() {
 	printf '%s' "$d"
 }
 dead_pid() { sh -c 'exit 0' & p=$!; wait "$p"; printf '%s' "$p"; }
+# Lock holders are owned children: each execs down to one process (no orphanable grandchild), runs from
+# $TMP so a leak is visible by cwd, and is reaped on every exit path (kitlib_tmp_atexit) as well as at the
+# end of this section. STALELOCK2: a `sh -c '...; sleep 60'` holder signalled by its sh pid left the sleep
+# orphaned (ppid 1) with cwd in the scratch, so `omp-kit scratch release` read SCRATCH_RELEASE_HELD.
+stalelock_holders=""
+stalelock_hold() {
+	(cd "$TMP" && exec sh -c 'exec 3< "$1"; exec sleep 60' sh "$1") & holder=$!
+	stalelock_holders="$stalelock_holders $holder"
+}
+stalelock_reap_pid() {
+	kitlib_signal TERM "$1" 2>/dev/null
+	n=0; while kitlib_signal 0 "$1" 2>/dev/null && [ "$n" -lt 20 ]; do n=$((n + 1)); sleep 0.1; done
+	kitlib_signal KILL "$1" 2>/dev/null
+	wait "$1" 2>/dev/null
+	return 0
+}
+stalelock_reap_holders() {
+	for p in $stalelock_holders; do stalelock_reap_pid "$p"; done
+	stalelock_holders=""
+}
+kitlib_tmp_atexit stalelock_reap_holders
+# Pids of every process whose cwd is $TMP or below (bounded: lsof -S 5 stat timeout). Fails closed on lsof error.
+stalelock_cwd_survivors() {
+	listing=$(lsof -S 5 -d cwd -Fpn) || { printf 'LSOF_FAILED\n'; return 0; }
+	printf '%s\n' "$listing" | awk -v t="$TMP" -v self="$$" \
+		'/^p/ { p = substr($0, 2) } /^n/ { d = substr($0, 2); if (p != self && (d == t || index(d, t "/") == 1)) print p }'
+}
 L=$(stalelock_repo lock-orphan)
 printf 'index bytes of a killed commit\n' > "$L/.git/index.lock"; backdate "$L/.git/index.lock"
 out=$(cd "$L" && HOME="$TMP/lockhome" sh "$MEMBER" --reap-orphan-lock "$(dead_pid)" 2>&1)
@@ -100,7 +127,7 @@ check "$?" "0" "STALELOCK1-commit-after-reap" "$out" ""
 # A lock held open by a live fixture process is left alone, and git still refuses as today.
 H=$(stalelock_repo lock-held)
 printf 'held\n' > "$H/.git/index.lock"; backdate "$H/.git/index.lock"
-sh -c 'exec 3< "$1"; sleep 60' sh "$H/.git/index.lock" & holder=$!
+stalelock_hold "$H/.git/index.lock"
 n=0; until lsof -- "$H/.git/index.lock" > /dev/null 2>&1 || [ "$n" -ge 50 ]; do n=$((n + 1)); sleep 0.1; done
 out=$(cd "$H" && HOME="$TMP/lockhome" sh "$MEMBER" --reap-orphan-lock "$(dead_pid)" 2>&1)
 check "$?" "0" "STALELOCK1-held-rc" "$out" ""
@@ -114,7 +141,23 @@ grep -q 'lf.mutant' "$TMP/stalelock-mutant.sh"
 check "$?" "0" "STALELOCK1-mutant-planted" "" ""
 out=$(cd "$H" && HOME="$TMP/lockhome" sh "$TMP/stalelock-mutant.sh" --reap-orphan-lock "$(dead_pid)" 2>&1)
 check "$([ -e "$H/.git/index.lock" ] || printf removed)" "removed" "STALELOCK1-mutant-removes-live-lock" "$out" ""
-kitlib_signal TERM "$holder"; wait "$holder" 2>/dev/null
+# Planted: after the cases run, no process whose cwd is this test's scratch survives.
+stalelock_reap_holders
+survivors=$(stalelock_cwd_survivors)
+check "$survivors" "" "STALELOCK1-no-holder-survives" "" ""
+# Mutant (no reap): an owned holder left running is caught by the same check.
+stalelock_hold "$H/f"
+n=0; until [ -n "$(stalelock_cwd_survivors)" ] || [ "$n" -ge 50 ]; do n=$((n + 1)); sleep 0.1; done
+check "$(stalelock_cwd_survivors | grep -cx "$holder")" "1" "STALELOCK1-mutant-unreaped-holder-detected" "" ""
+stalelock_reap_holders
+# Mutant (the leaked shape): signalling the holder's sh orphans its sleep, which the check catches.
+(cd "$TMP" && exec sh -c 'exec 3< "$1"; sleep 60' sh "$H/f") & leaky=$!
+n=0; until [ "$(stalelock_cwd_survivors | wc -l | tr -d ' ')" -ge 2 ] || [ "$n" -ge 50 ]; do n=$((n + 1)); sleep 0.1; done
+stalelock_reap_pid "$leaky"
+orphans=$(stalelock_cwd_survivors)
+check "$([ -n "$orphans" ] && printf leaked)" "leaked" "STALELOCK1-mutant-sh-holder-orphans-sleep" "$orphans" ""
+for p in $orphans; do stalelock_reap_pid "$p"; done
+check "$(stalelock_cwd_survivors)" "" "STALELOCK1-mutant-orphans-reaped" "" ""
 if [ "${1:-}" = -t ] && [ "${2:-}" = STALELOCK1 ]; then
 	printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
 	[ "$fail" -eq 0 ]; exit
