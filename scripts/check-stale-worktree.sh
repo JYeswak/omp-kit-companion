@@ -21,6 +21,101 @@ msg=${1:?usage: check-stale-worktree.sh MSGFILE or --review}
 review=0
 [ "$msg" != --review ] || review=1
 root=$(git rev-parse --show-toplevel) || { printf 'stale-worktree: not inside a work tree\n' >&2; exit 1; }
+# STALELOCK1 (ompkit-fp72.120.16.229, from CFS cfs-y4jwx): git holds the
+# index lock for the whole hook run. A commit killed mid-hook (tool timeout,
+# agent deadline) leaves .git/index.lock with no holder and blocks every
+# later commit. GITLOCK1 (src/index-lock.ts reapLockFile) refuses non-empty
+# locks, and a killed commit's lock holds the new index, so this member
+# reaps its OWN orphan under GITLOCK1's gates plus two owner gates:
+#   (1) the git that started this hook (nearest git ancestor) is dead;
+#   (2) the lock was not modified after this hook started. Age bound: our
+#       git wrote its lock before running hooks, so anything newer belongs
+#       to another git; this replaces GITLOCK1's 120 s, which a lock killed
+#       seconds ago never reaches;
+#   (3) lsof: no process has the lock open (lsof missing/erroring: keep);
+#   (4) no live git process has its cwd in this worktree (index writers);
+#   (5) inode/size/mtime unchanged since judged.
+# Then, like GITLOCK1: rename aside to <lock>.stale-<utc> (never unlink),
+# under the .omp-kit-index-lock-mover guard, one ledger row in
+# $HOME/.local/state/omp-kit/index-lock-ledger.jsonl, evidence on stderr.
+# A group SIGKILL cannot be trapped; `omp-kit scratch index-lock` remains.
+stalelock_owner=""
+stalelock_marker=""
+stalelock_comm_is_git() {
+	case "$(ps -p "$1" -o comm= 2>/dev/null)" in git | */git | git-*) return 0 ;; esac
+	return 1
+}
+stalelock_find_owner() {
+	p=$PPID n=0
+	while [ "${p:-0}" -gt 1 ] && [ "$n" -lt 8 ]; do
+		stalelock_comm_is_git "$p" && { stalelock_owner=$p; return 0; }
+		p=$(ps -p "$p" -o ppid= 2>/dev/null | tr -d ' ')
+		n=$((n + 1))
+	done
+	return 1
+}
+# shellcheck disable=SC2317,SC2329 # reached through the EXIT/signal traps
+stalelock_ident() { stat -f '%i %z %m' "$1" 2>/dev/null || stat -c '%i %s %Y' "$1" 2>/dev/null; }
+# shellcheck disable=SC2317,SC2329 # reached through the EXIT/signal traps
+stalelock_reap_one() {
+	lf=$1
+	[ -f "$lf" ] || return 0
+	[ -n "$(find "$lf" -newer "$stalelock_marker" 2>/dev/null)" ] && return 0
+	id1=$(stalelock_ident "$lf") || return 0
+	command -v lsof > /dev/null 2>&1 || return 0
+	held=$(lsof -- "$lf" 2>&1); lrc=$?
+	[ "$lrc" -eq 1 ] && [ -z "$held" ] || return 0
+	cwds=$(lsof -a -c git -d cwd -Fn 2>&1); lrc=$?
+	{ [ "$lrc" -eq 0 ] || { [ "$lrc" -eq 1 ] && [ -z "$cwds" ]; }; } || return 0
+	printf '%s\n' "$cwds" | grep -q -e "^n$root\$" -e "^n$root/" && return 0
+	[ "$(stalelock_ident "$lf")" = "$id1" ] || return 0
+	moved="$lf.stale-$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+	mv -- "$lf" "$moved" || return 0
+	ev="owner git $stalelock_owner dead, mtime<=hook start, no lsof holder, no live git cwd, identity $id1"
+	printf 'stale-worktree: STALELOCK1 reaped orphan index lock %s -> %s (%s)\n' "$lf" "$moved" "$ev" >&2
+	ledger="${HOME:-}/.local/state/omp-kit/index-lock-ledger.jsonl"
+	[ -n "${HOME:-}" ] && mkdir -p "$(dirname "$ledger")" 2>/dev/null &&
+		printf '{"repo":"%s","lock":"%s","movedTo":"%s","checks":"owner-dead,not-newer-than-hook,file-clear,git-cwd-clear,identity","identity":"%s","owner":"%s","atMs":"%s","by":"STALELOCK1"}\n' \
+			"$root" "$lf" "$moved" "$id1" "$stalelock_owner" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$ledger" 2>/dev/null
+	return 0
+}
+# shellcheck disable=SC2317,SC2329 # reached through the EXIT/signal traps
+stalelock_reap() {
+	[ -n "$stalelock_owner" ] && [ -n "$stalelock_marker" ] && [ -f "$stalelock_marker" ] || return 0
+	stalelock_comm_is_git "$stalelock_owner" && { rm -f "$stalelock_marker"; return 0; }
+	gd=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 0
+	guard="$gd/.omp-kit-index-lock-mover"
+	if (set -C; : > "$guard") 2>/dev/null; then
+		[ -n "${GIT_INDEX_FILE:-}" ] && stalelock_reap_one "$GIT_INDEX_FILE.lock"
+		[ "${GIT_INDEX_FILE:-}" = "$gd/index" ] || stalelock_reap_one "$gd/index.lock"
+		rm -f "$guard"
+	fi
+	rm -f "$stalelock_marker"
+}
+# shellcheck disable=SC2317,SC2329 # reached through the EXIT/signal traps
+stalelock_on_signal() {
+	# Give a dying git up to ~10 s to release before judging its lock orphaned.
+	n=0
+	while [ -n "$stalelock_owner" ] && stalelock_comm_is_git "$stalelock_owner" && [ "$n" -lt 5 ]; do
+		sleep 2; n=$((n + 1))
+	done
+	stalelock_reap
+	exit 143
+}
+stalelock_arm() {
+	gd=$(git rev-parse --absolute-git-dir 2>/dev/null) || return 0
+	stalelock_marker="$gd/stale-worktree-hookstart.$$"
+	: > "$stalelock_marker" 2>/dev/null || { stalelock_marker=""; return 0; }
+	trap stalelock_reap EXIT
+	trap stalelock_on_signal HUP INT TERM
+}
+if [ "$msg" = --reap-orphan-lock ]; then
+	# Planted-test and manual entry: judge OWNER_PID as this hook's git.
+	stalelock_owner=${2:?usage: check-stale-worktree.sh --reap-orphan-lock OWNER_PID}
+	stalelock_arm
+	exit 0
+fi
+stalelock_find_owner && stalelock_arm
 if ! git rev-parse -q --verify 'HEAD^{commit}' > /dev/null; then
 	# Failure is not an unborn verdict. Git 2.46+ --exists distinguishes
 	# absence (2) from lookup failure (1); quiet --verify does not.

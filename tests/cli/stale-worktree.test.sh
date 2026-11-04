@@ -72,6 +72,54 @@ backdate() {
 	touch -t 202001010000 "$1"
 }
 
+# STALELOCK1 (ompkit-fp72.120.16.229): the member reaps its own commit's
+# orphan index.lock only when that git is dead, no process holds the lock,
+# and no live git works in the tree. `-t STALELOCK1` runs only this block.
+# shellcheck source=scripts/kitlib-proc.sh
+. "$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/kitlib-proc.sh"
+MEMBER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/check-stale-worktree.sh
+stalelock_repo() {
+	d="$TMP/$1"; mkdir -p "$d"
+	git -C "$d" init -q --template= 2>/dev/null
+	git -C "$d" config user.email "test@invalid.example"; git -C "$d" config user.name "Test"
+	printf 'x\n' > "$d/f"; git -C "$d" add f; git -C "$d" commit -q -m "[test] base" -m "Bead: t-lock"
+	printf '%s' "$d"
+}
+dead_pid() { sh -c 'exit 0' & p=$!; wait "$p"; printf '%s' "$p"; }
+L=$(stalelock_repo lock-orphan)
+printf 'index bytes of a killed commit\n' > "$L/.git/index.lock"; backdate "$L/.git/index.lock"
+out=$(cd "$L" && HOME="$TMP/lockhome" sh "$MEMBER" --reap-orphan-lock "$(dead_pid)" 2>&1)
+check "$?" "0" "STALELOCK1-orphan-rc" "$out" "STALELOCK1 reaped orphan index lock $L/.git/index.lock"
+check "$([ -e "$L/.git/index.lock" ] || printf gone)" "gone" "STALELOCK1-orphan-cleared" "$out" "no lsof holder"
+moved_n=0; for f in "$L"/.git/index.lock.stale-*; do [ -e "$f" ] && moved_n=$((moved_n + 1)); done
+check "$moved_n" "1" "STALELOCK1-orphan-moved-aside" "$out" ""
+check "$(grep -c '"by":"STALELOCK1"' "$TMP/lockhome/.local/state/omp-kit/index-lock-ledger.jsonl")" "1" "STALELOCK1-ledger-row" "$out" ""
+out=$(git -C "$L" commit -q --allow-empty -m "[test] after reap" -m "Bead: t-lock" 2>&1)
+check "$?" "0" "STALELOCK1-commit-after-reap" "$out" ""
+
+# A lock held open by a live fixture process is left alone, and git still refuses as today.
+H=$(stalelock_repo lock-held)
+printf 'held\n' > "$H/.git/index.lock"; backdate "$H/.git/index.lock"
+sh -c 'exec 3< "$1"; sleep 60' sh "$H/.git/index.lock" & holder=$!
+n=0; until lsof -- "$H/.git/index.lock" > /dev/null 2>&1 || [ "$n" -ge 50 ]; do n=$((n + 1)); sleep 0.1; done
+out=$(cd "$H" && HOME="$TMP/lockhome" sh "$MEMBER" --reap-orphan-lock "$(dead_pid)" 2>&1)
+check "$?" "0" "STALELOCK1-held-rc" "$out" ""
+check "$(cat "$H/.git/index.lock")" "held" "STALELOCK1-held-kept" "$out" ""
+out=$(git -C "$H" commit -q --allow-empty -m "[test] blocked" -m "Bead: t-lock" 2>&1)
+check "$?" "128" "STALELOCK1-held-git-refuses" "$out" "index.lock"
+# Mutant: clearing unconditionally removes the live lock (the gates are load-bearing).
+# shellcheck disable=SC2016 # literal shell text for the mutant
+sed 's/^	\[ -n "\$(find "\$lf" -newer.*$/	mv -- "$lf" "$lf.mutant"; return 0/' "$MEMBER" > "$TMP/stalelock-mutant.sh"
+grep -q 'lf.mutant' "$TMP/stalelock-mutant.sh"
+check "$?" "0" "STALELOCK1-mutant-planted" "" ""
+out=$(cd "$H" && HOME="$TMP/lockhome" sh "$TMP/stalelock-mutant.sh" --reap-orphan-lock "$(dead_pid)" 2>&1)
+check "$([ -e "$H/.git/index.lock" ] || printf removed)" "removed" "STALELOCK1-mutant-removes-live-lock" "$out" ""
+kitlib_signal TERM "$holder"; wait "$holder" 2>/dev/null
+if [ "${1:-}" = -t ] && [ "${2:-}" = STALELOCK1 ]; then
+	printf 'stale-worktree: %s pass %s fail\n' "$pass" "$fail"
+	[ "$fail" -eq 0 ]; exit
+fi
+
 # 1. stale worktree removal via `commit --only`: refused naming the landing sha
 R=$(new_repo stale-only)
 A=$(git -C "$R" rev-parse HEAD)
