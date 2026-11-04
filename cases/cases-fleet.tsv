@@ -24,6 +24,9 @@ kit-no-force-push	quiet	tool	bash	-	br update cfs-j2wma.4 --claim --force --acto
 kit-no-force-push	quiet	tool	bash	-	br close ompkit-fp72.19.1.29 --force --actor Close29 --reason "NON-AUTHOR c"	fp72.120.16.169 labeled false oct7: bead close, not a push	
 kit-no-force-push	quiet	tool	bash	-	br comment ompkit-6nv6 --actor GradeGrowth --body 'GROWTH1 claims no deletion. Needs director ruling: --force close or re-parent .7-.11.'	fp72.120.16.169 labeled false oct2: --force in a comment body	
 kit-no-force-push	quiet	tool	bash	-	git push origin main && br close x --force	--force on a later command, not on the push	
+kit-no-force-push	fire	tool	bash	-	pwd\\n\\tgit push --force origin main	RX2 red 7521fdc723: escaped newline+tab boundary before git, long flag	
+kit-no-force-push	fire	tool	bash	-	pwd\\n\\tgit push -f origin main	RX2: escaped newline+tab boundary before git, short flag	
+kit-no-force-push	quiet	tool	bash	-	pwd\\n\\tbr close x --force	escaped boundary before a non-git command stays quiet	
 kit-no-shared-merge	fire	tool	bash	-	git merge --no-edit origin/main	CFS true-positive control; direct git merge invocation remains blocked	
 kit-no-shared-merge	fire	tool	bash	-	git fetch origin && git merge --no-edit origin/main	compound shape of the same refused merge	
 kit-no-shared-merge	fire	tool	bash	-	git pull	peer pull occurrence shape per coordinator 2026-10-06	
