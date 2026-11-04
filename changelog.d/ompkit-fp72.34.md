@@ -1,1 +1,0 @@
-- `scripts/ladder.sh --selftest-interruption <stage>` emits a real stage-start marker on stderr, then hangs on an owned sleeper, so timeout receipts prove a genuinely hung stage; existing run_stage/bridge streams and refusal/probe-tail behavior unchanged. Merges TurquoiseSummit AM56984 probe_tail/verdict hunks + 2 controls. (ompkit-fp72.34)

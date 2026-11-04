@@ -1,3 +1,0 @@
-### Fixed
-
-- Pushing a brand-new tag whose target is already on the pushed-to remote's main skips fresh-gate but never the full-suite verdict: the gate fetches the literal refs/heads/main from the pre-push $1 remote (origin fallback when the chain runner drops argv, named in the line), confirms the target is an ancestor, reads the verdict for the exact target commit back from its cache, and admits only on VERDICT PASS. A cache miss is refused with the command that produces the verdict, never a silent suite inside the push. Tag moves, tags pointing off main, and branch pushes still run the full gate. (ompkit-t7cn7.2)

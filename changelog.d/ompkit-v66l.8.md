@@ -1,1 +1,0 @@
-- Unscoped inventory (status, health, doctor, repair, test) never executes the OMP launcher; the launcher-version cross-check runs only under explicit `doctor --scope omp`, with the launcher check reported NOT_RUN otherwise. (ompkit-v66l.8)

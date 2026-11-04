@@ -1,1 +1,0 @@
-- `BUN_BE_BUN` is removed from both the OMP launcher-version probe and nested OMP CLI children, preventing Bun's embedded-kit mode from misrouting `omp ttsr` on macOS. Unexpected policy-plan failures also retain their cause code and a bounded message excerpt.

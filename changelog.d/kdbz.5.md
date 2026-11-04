@@ -1,1 +1,0 @@
-- Product edits, builds, and publication now authorize the canonical companion source root and reject frozen, tracker, and symlink-alias source copies.

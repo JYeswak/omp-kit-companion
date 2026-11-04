@@ -1,3 +1,0 @@
-### Fixed
-- `omp-kit send SESSION tern:<id> MESSAGE` now sends to a Tern seat directly and proves the message landed by finding it in the seat's session file. It used to go through tmux/ntm, which can never reach a Tern seat (LIVE MISS 2026-10-19: two coordinator sends reported NOT_DELIVERED). A `tern:` address without a decimal id is refused before anything is sent, with `TERN_MALFORMED_ADDRESS`. `--cwd`, `--tern-session` and `--window-key` identify the seat.
-- New `rules/kit-teach-send-verify.md`: bare `ntm send` reminds toward `omp-kit send` (marker proof, one retry, drop-folder fallback); kit send invocations and prose mentions stay quiet.

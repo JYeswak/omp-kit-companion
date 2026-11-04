@@ -1,2 +1,0 @@
-- Prevent scratch exports from overwriting their structured `.owner` with an archived root `.owner`, preserving capability-based release.
-- Scratch exports land in `<dir>/src` (`data.exportDir`), so an archive can never replace the owned root's `.owner`; an empty root owner left by a raw extraction gets a named recovery route.

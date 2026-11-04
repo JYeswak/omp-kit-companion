@@ -1,1 +1,0 @@
-- Accept schema-valid omitted optional tracker text and labels during planning conversion; continue rejecting malformed present values, invalid identities, priorities, targets, and dependency cycles.

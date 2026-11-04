@@ -1,1 +1,0 @@
-- Allow implementing authors to hand off finished beads for review without treating the handoff as self-grading. Keep implementer close and legacy grading refusals, source-publication and claim-stability checks; closed-status updates retain close ownership and Lesson requirements.

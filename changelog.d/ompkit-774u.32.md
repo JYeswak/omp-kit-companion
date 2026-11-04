@@ -1,1 +1,0 @@
-- Prevent shell temporary-directory allocation from hanging when the caller ignores SIGPIPE by bounding entropy input before filtering; preserve six-character lowercase-alphanumeric names, ownership records, signal policy, and cleanup behavior.

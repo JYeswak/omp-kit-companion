@@ -1,1 +1,0 @@
-- `omp-kit verify` keeps an unchecked `[v][build]` judgement on the parent and reports PENDING instead of deferring it as live-readback debt.

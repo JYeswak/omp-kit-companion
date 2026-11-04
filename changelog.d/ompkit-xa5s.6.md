@@ -1,1 +1,0 @@
-- `omp-kit fleet respawn` reports panes running a stale plugin (omp started before the latest applied relink) and, with explicit `--panes` plus `--apply --yes`, respawns named idle panes with `--resume`, strictly serially with same-session verification; busy, frozen, dirty, reservation-holding and sessionless panes are reported, never touched.

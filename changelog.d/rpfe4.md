@@ -1,1 +1,0 @@
-- Reclaim stale `rework` beads to `open` so holderless work returns to the claimable pull. (ompkit-rpfe4)

@@ -1,2 +1,0 @@
-- Keep RCH diagnostic cache writes in a private temporary HOME/XDG tree while preserving the caller's selected configuration and daemon socket.
-- Preserve caller HOME metadata when TMPDIR is nested inside it, including when RCH is unavailable, by using the validated private runtime scratch boundary.

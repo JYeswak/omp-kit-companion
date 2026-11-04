@@ -1,1 +1,0 @@
-- Add `beads migrate`: preview lossless legacy acceptance repairs with canonical lint and verify grammar, preserve exact original text, and apply only as a non-author with revision checks and byte-matched readback. Underivable commands remain unchanged; newly replayable criteria lose unsupported old ticks, while status and assignment are preserved.

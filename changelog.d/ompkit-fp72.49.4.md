@@ -1,1 +1,0 @@
-- Full-suite qualification refuses declared run-count shortfalls and implausibly short runs against the last validated green reference, even after a judge change. Verdicts retain the policy, measured counts, effective wall time and named shortfalls without falsifying test failures; missing or inconsistent current qualification is never a reusable PASS.

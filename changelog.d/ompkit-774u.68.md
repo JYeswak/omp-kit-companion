@@ -1,1 +1,0 @@
-- Release-goal admission now requires an executable `release-local.sh --dry-run` box using the script’s freshly fetched origin head, rejects bead-closure prerequisites, and does not count quoted commands or argument values as dry-run proof.

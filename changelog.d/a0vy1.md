@@ -1,1 +1,0 @@
-- `scripts/e2e/planning-share-name.sh` allocates its scratch through `kitlib_tmp.owned_tmp`, which removes it at exit; it no longer writes its own bare-pid `.owner` or leaves a directory behind each run, and its totals line no longer prints a scratch path.

@@ -1,1 +1,0 @@
-- Author handoffs from repositories without `fresh-gate.sh` can use an exact-commit non-author pregrade bound to the real tracker and acceptance; missing proof stays refused with repository-declared guidance, companion handoffs retain their complete fresh-ledger requirement, and unrelated dependency-edge checks do not load pregrade modules.

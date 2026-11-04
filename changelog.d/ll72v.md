@@ -1,1 +1,0 @@
-The land test fixtures are copied from one git-built template, and a fixture git spawn that runs past its load-scaled deadline is reported as TIMEOUT_UNDER_LOAD with the load average instead of a bare failed git.

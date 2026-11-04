@@ -1,1 +1,0 @@
-- Refuse tracker closes whose evidence admits unrun, unverified, skipped, or limited acceptance checks; report the incomplete clause while preserving completed-evidence controls.

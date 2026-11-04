@@ -1,1 +1,0 @@
-- Made the linked-OMP runtime guard check observe the mock server’s published port state when filesystem notifications are absent, preserving startup deadlines and early-exit refusal.

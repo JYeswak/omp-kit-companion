@@ -1,1 +1,0 @@
-- Fixed stale-worktree commit checks in linked worktrees used by `omp-kit land --patch`: invocation scratch now uses the existing owned temporary directory, preserving stale and foreign-bead refusal checks.
