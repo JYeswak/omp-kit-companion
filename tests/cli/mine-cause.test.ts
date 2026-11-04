@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
+import { ccActionOutcome } from "../../src/cli.ts";
 import { classifyMineResult } from "../../src/mine-cause.ts";
+
+// The CC event path in mine.ts: the kit's action.result data is the record, its outcome the
+// decision and its code the rule, exactly as runCli records the verb's exit and errors[].
+function minedAction(surface: string, exitCode: number, errors?: { code: string }[]) {
+	const { outcome, code } = ccActionOutcome(exitCode, errors);
+	const data = { action_id: "fixture", outcome, code, duration_ms: 1200 };
+	return classifyMineResult({ tool: surface, result: data, text: "", is_error: false, exit_code: undefined, timed_out: undefined, outcome, ...(code ? { code } : {}) });
+}
 
 test("cause classifier respects authoritative success and false timeout metadata", () => {
 	for (const exit of [0, "0"]) expect(classifyMineResult({ tool: "bash", result: { isError: true, details: { rc: exit, timed_out: false }, content: "REFUSED: old output; timeout" } })).toBeNull();
@@ -56,5 +65,34 @@ test("untrusted tool names and guard codes cannot place credentials in class ids
 test("diagnostic prefixes reject bounded long near misses without keyword fallthrough", () => {
 	for (const prefix of ["This edit anchors to lines ", "MCP failure server: ", "fleet-guard "]) {
 		expect(classifyMineResult({ tool: "write", result: { isError: true, content: prefix + "x".repeat(65_536) + " timeout" } })?.class_id).toBe("tool-error:unclassified");
+	}
+});
+
+test("JEVDOCTOR1 planted: a doctor finding exit with no errors[] is mined as finding:<surface>, not tool-error:unclassified", () => {
+	const fire = minedAction("kit-doctor", 1);
+	expect(fire?.class_id).toBe("finding:kit-doctor");
+	expect(fire?.summary).toContain("FAIL finding");
+	// The 2026-11-04 jev rows were recorded as HANDLER_FAILED before the producer fix; the miner names that recorded code.
+	const recorded = { action_id: "c7bab9503ec07b89c23fae8191c65b9a", outcome: "failed", code: "HANDLER_FAILED", duration_ms: 4152 };
+	expect(classifyMineResult({ tool: "kit-doctor", result: recorded, text: "", is_error: false, outcome: "failed", code: "HANDLER_FAILED" })?.class_id).toBe("tool-error:kit-doctor:HANDLER_FAILED");
+	// Quiet: a passing doctor and a custody answer are not failures.
+	expect(minedAction("kit-doctor", 0)).toBeNull();
+	expect(minedAction("kit-custody", 10)).toBeNull();
+});
+
+test("JEVDOCTOR1 control: an error-coded doctor failure stays a tool error named by its code", () => {
+	expect(minedAction("kit-doctor", 1, [{ code: "HANDLER_FAILED" }])?.class_id).toBe("tool-error:kit-doctor:HANDLER_FAILED");
+	expect(minedAction("kit-doctor", 3, [{ code: "OMP_UNAVAILABLE" }])?.class_id).toBe("tool-error:kit-doctor:OMP_UNAVAILABLE");
+	expect(minedAction("kit-doctor", 2)?.class_id).toBe("tool-error:kit-doctor:USAGE_OR_BLOCKED");
+	// Exit 2 with a code is a refusal by the kit contract and keeps its guard-friction class.
+	expect(minedAction("kit-doctor", 2, [{ code: "INVALID_FLAG" }])?.class_id).toBe("guard-friction:INVALID_FLAG");
+	// Only the record's own code names the class: a guard rule on a failed call, or an uncoded failure, stays unclassified.
+	expect(classifyMineResult({ tool: "bash", result: { is_error: true, guard_rule: "WRITE_OWN_LOOKUP_UNAVAILABLE", guard_decision: "allow" }, is_error: true, outcome: "allow", code: "WRITE_OWN_LOOKUP_UNAVAILABLE" })?.class_id).toBe("tool-error:unclassified");
+	expect(classifyMineResult({ tool: "kit-check", result: { action_id: "x", outcome: "failed" }, outcome: "failed" })?.class_id).toBe("tool-error:unclassified");
+	// Non-contract codes never enter a class id.
+	for (const code of ["ghp_" + "a".repeat(40), "kit-doctor", "Finding", "FINDING\n"]) {
+		const mined = classifyMineResult({ tool: "kit-doctor", result: { outcome: "failed", code }, outcome: "failed", code });
+		expect(mined?.class_id).toBe("tool-error:unclassified");
+		expect(JSON.stringify(mined)).not.toContain("ghp_");
 	}
 });

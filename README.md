@@ -79,7 +79,7 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack has 34 rules: 17 `reminder`, 14 `tripwire`, 1 `always`
+The pack has 33 rules: 16 `reminder`, 14 `tripwire`, 1 `always`
 (`kit-standing-law`), 1 `router` (`rs-unsafe-added-router`), and 1 `canary`
 (`zz-canary-scope-probe`). The router loads unsafe-code skills for Rust `unsafe`;
 the canary tests discovery. Tripwires cover unverified "done", unevidenced closes,
@@ -156,7 +156,7 @@ The repo is an OMP plugin. `package.json` declares 12 extensions:
 | Extension | Hooks | Behavior |
 |---|---|---|
 | `kit-guard-optin.ts` | `tool_call` | Loads the guard from `KIT_GUARD_SRC` for repos with `.omp/kit-guard.json`; a missing guard blocks every tool call |
-| `fleet-guard.ts` | `tool_call` | Always on: refuses `plutil -extract|-convert|-replace|-insert|-remove` without `-o` (rewrites the input plist) (`PLUTIL_IN_PLACE`). Opt-in: forbidden scratch writes and source copies, branches and worktrees, writes outside `var/agent-tmp/` without the caller's exclusive reservation (`WRITE_OWN_*`), `AGENT_MAIL_BYPASS`/`AGENT_MAIL_GUARD_MODE` (`BYPASS_ENV`), overlong hot-path reservations |
+| `fleet-guard.ts` | `tool_call` | Always on: refuses `plutil -extract|-convert|-replace|-insert|-remove` without `-o` (`PLUTIL_IN_PLACE`) and system-temp writes. Opt-in: home-root writes and source copies, branches and worktrees, writes outside `var/agent-tmp/` without the caller's exclusive reservation (`WRITE_OWN_*`), `AGENT_MAIL_BYPASS`/`AGENT_MAIL_GUARD_MODE` (`BYPASS_ENV`), overlong hot-path reservations |
 | `kit-save-guard.ts` | session and tool hooks | Opt-in only: tracks session writes, reprompts at most twice for unsaved work, then warns. Never commits, stashes or pushes |
 | `kit-flywheel-guard.ts` | `session_compact`, `tool_call` | After compaction, re-reads `AGENTS.md` and the in-progress bead; refuses a self-close (`SELF_CLOSE_REFUSED`), `blocked` without an open fix (`BLOCK_REFUSED`) and a close that strands a blocked bead (`BLOCK_RELEASE_REQUIRED`) |
 | `kit-agent-mail-guard.ts` | `tool_call`, `tool_result` | Opt-in: refuses mail not sent as the seat, off-list subjects, untyped `ack_required`, long or secret bodies, bulk reads |
@@ -497,7 +497,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit scratch` | `scratch index-lock --repo DIR` | HELD: pid/command. Orphan helpers >30 min: start time, report only. `--reap --yes` renames; `--apply` refused | `omp-kit scratch index-lock --repo /repo --json` |
 | `omp-kit tern` | `tern catalog\|doctor\|ctl\|script\|native\|api\|sdk\|coverage\|surface\|render` | [Native SDK/control integration](docs/tern-integration.md): context-bound Luau, drift, wire codecs; explicit targets | `omp-kit tern catalog --filter cx.agents` |
 | `omp-kit tern-ref` | `tern-ref build\|query\|validate\|drift [--root DIR]` | Version-pinned local Tern Plugin SDK reference: crawl docs, chunk `tern.d.luau` per member, index nomic+qwen, blind-label eval, isolated serve checks, drift re-index | `omp-kit tern-ref query --query 'restyle without rebuild'` |
-| `omp-kit infra` | `infra pin\|check\|promote\|undo` | Pin the gate toolchain, test a candidate binary, and let a human promote it | `omp-kit infra pin --json` |
+| `omp-kit infra` | `infra pin\|check\|promote\|undo\|upgrade-plan\|upgrade-verify` | Pin, test, promote toolchain; gate machine upgrades | `omp-kit infra pin --json` |
 | `omp-kit ci` | `ci status` | Cached CI status per repo; `UNAVAILABLE` when the cache is older than 180 s | `omp-kit ci status --json` |
 | `omp-kit examples` | `examples [memory-off\|mnemopi-manual\|model-roles\|mcp\|omp-watch\|skill-set --from-history DAYS]` | Read-only profile recipes; never activates a profile | `omp-kit examples skill-set --from-history 7 --json` |
 | `omp-kit quickstart` | `quickstart` | Safe first commands and their limits | `omp-kit quickstart` |

@@ -52,7 +52,7 @@ test("omp-kit verify refuses an unpublished export before replay and admits it a
 	const args = (exportSha: string) => [
 		"bun", "run",
 		...(process.env.PUBLISH_GATE_MUTATION_PRELOAD ? ["--preload", process.env.PUBLISH_GATE_MUTATION_PRELOAD] : []),
-		"--silent", cliPath, "verify", "kit-1", "--export", exportSha, "--project", dir, "--actor", "Peer", "--dry-run", "--json",
+		"--silent", cliPath, "verify", "kit-1", "--export", exportSha, "--project", dir, "--actor", "Peer", "--lesson", "publication fixture", "--dry-run", "--json",
 	];
 
 	const missingSha = "0".repeat(40);

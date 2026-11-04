@@ -321,14 +321,17 @@ const intakeData: DataSchema = { type: "object", required: ["overall", "action"]
 } };
 const infraData: DataSchema = { type: "object", required: ["overall", "command"], properties: {
 	overall: { enum: ["OK", "CHANGED", "FINDINGS", "UNAVAILABLE", "UNVERIFIED"] },
-	command: { enum: ["pin", "check", "promote", "undo"] },
+	command: { enum: ["pin", "check", "promote", "undo", "upgrade-plan", "upgrade-verify"] },
 	tool: { type: ["string", "null"] }, version: { type: ["string", "null"] },
 	status: { type: "string" }, failed_stage: { type: ["string", "null"] },
 	stages: { type: "array", items: { type: "object" } },
 	log_tail: { type: "string" },
 	drift: { type: "array", items: { type: "object" } },
 	receipt_id: { type: ["string", "null"] }, drop_path: { type: ["string", "null"] },
-	detail: { type: "string" },
+	detail: { type: "string" }, text: { type: "string" },
+	pins: { type: "array", items: { type: "object" } }, uncovered: { type: "array", items: { type: "object" } },
+	dependents: { type: ["array", "null"], items: { type: "string" } }, checked: { type: "number" },
+	failures: { type: "array", items: { type: "object" } },
 } };
 const scratchMineData: DataSchema = { type: "object", required: ["overall", "dirs", "unreleased"], properties: {
 	overall: { enum: ["OK", "FINDINGS"] }, unreleased: { type: "number" }, note: { type: "string" },
@@ -618,15 +621,16 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--project", value: "DIR", description: "Project dir: tracker read from DIR/.beads/beads.db; refused with --db" },
 		], example: "omp-kit drain stale-claims --db ~/Developer/omp-kit/.beads/beads.db --json", runnable: false, dataSchema: drainData },
 	], example: "omp-kit drain close-queue --db ~/Developer/omp-kit/.beads/beads.db --repo ~/Developer/omp-kit-companion --json", runnable: false },
-	{ name: "verify", description: "The one non-author close verb: export the exact commit, replay every acceptance command, judge each box by its named expected outcome, tick, report the reviewer gate under your identity, close with the command log; refuses the author, a box with no command, or a failing box (REWORK naming it). Unticked [live], [after] and [v] boxes move word for word into one open LIVEREADBACK bead (label live-readback) under the bead's active parent, related to it, so the bead closes; --live-readback reads that bead back on the installed kit", usage: "verify BEAD --export SHA [--actor NAME] [--family TEXT] [--project PATH] [--dry-run] [--json] | verify CHILD --live-readback [...] | verify --live-readback --all [...]", argument: "BEAD", flags: [
+	{ name: "verify", description: "The one non-author close verb: export the exact commit, replay every acceptance command, judge each box by its named expected outcome, tick, report the reviewer gate under your identity, close with the command log and lesson. Uses --lesson or the author's newest Lesson: comment; missing lessons refuse before replay. Failed tracker acts report ACT_FAILED, not source REWORK. Unticked [live] and [after] boxes move word for word into an open LIVEREADBACK bead; --live-readback reads that bead back on the installed kit", usage: "verify BEAD --export SHA [--actor NAME] [--family TEXT] [--lesson TEXT] [--project PATH] [--dry-run] [--json] | verify CHILD --live-readback [...] | verify --live-readback --all [...]", argument: "BEAD", flags: [
 		{ name: "--export", value: "SHA", description: "The exact commit to replay against (git archive into owned scratch)" },
 		{ name: "--actor", value: "NAME", description: "The closing seat; defaults to AGENT_NAME" },
 		{ name: "--family", value: "TEXT", description: "Verifier model family, disclosed in the close reason (e.g. 'same (claude)')" },
+		{ name: "--lesson", value: "TEXT", description: "Close lesson; overrides the author's newest Lesson: comment. Missing both refuses before replay." },
 		{ name: "--project", value: "PATH", description: "Repository root; defaults to the current directory" },
 		{ name: "--dry-run", description: "Replay and print the acts; change nothing in the tracker" },
 		{ name: "--live-readback", description: "Run an open LIVEREADBACK child's boxes on the installed kit, no export: a pass ticks them and closes the child, a failure reopens the parent with REWORK naming the box" },
 		{ name: "--all", description: "With --live-readback: every open live-readback child, in id order" },
-	] },
+	], example: "omp-kit verify BEAD --export SHA --lesson TEXT", runnable: false },
 	{ name: "slice-verify", description: "Test one overlay against a clean export of HEAD: base vs overlay counts per test file, failures classified pre-existing or introduced; foreign dirt never copied; setup failures are errors, never verdicts", usage: "slice-verify --overlay PATH [--overlay PATH...] [--test FILE...] [--changed-file F...] [--base SHA] [--project PATH] [--json]", flags: [
 		{ name: "--overlay", value: "PATH", repeatable: true, description: "Worktree path to overlay onto the export (repeatable, at least one)" },
 		{ name: "--test", value: "FILE", repeatable: true, description: "Test file to run; omit to select with the push-gate selector" },
@@ -961,7 +965,15 @@ export const COMMANDS: readonly Command[] = [
 		{ name: "--director-seat", value: "SEAT", description: "ROUTE target fallback when the roster names no director" },
 		{ name: "--worker-seat", value: "SEAT", description: "ROUTE target fallback when the roster names no worker" },
 	], example: "omp-kit intake --from joshua --text 'fix this test' --seat chief --json", runnable: false, mutation: true, dataSchema: intakeData },
-	{ name: "infra", description: "Pin, check and promote the toolchain the gates run on (test before upgrade, human promotes)", usage: "infra pin|check|promote|undo", flags: [], subcommands: [
+	{ name: "infra", description: "Pin, check and promote the toolchain the gates run on (test before upgrade, human promotes); plan and verify machine tool/library upgrades against fleet pins and installed dependents", usage: "infra pin|check|promote|undo|upgrade-plan|upgrade-verify", flags: [], subcommands: [
+		{ name: "upgrade-plan", description: "Before upgrading a machine tool or library: list every fleet repo pin (.bun-version/.node-version/.nvmrc/.tool-versions, package.json engines and packageManager, rch --require-tool, rust-toolchain) and every installed dependent (brew uses --installed); refuse naming each pin the --pin-plan does not cover", usage: "infra upgrade-plan --tool NAME [--pin-plan TEXT] [--repo PATH]...", flags: [
+			{ name: "--tool", value: "NAME", description: "Tool or Homebrew formula about to be upgraded" },
+			{ name: "--pin-plan", value: "TEXT", description: "Bump plan naming every listed pin file (absolute path) changed in the same change" },
+			{ name: "--repo", value: "PATH", repeatable: true, description: "Scan exactly these repos instead of the discovered fleet set" },
+		], example: "omp-kit infra upgrade-plan --tool bun --json", runnable: false, dataSchema: infraData },
+		{ name: "upgrade-verify", description: "After the upgrade: start every binary of every installed dependent with --version and name each that no longer starts (loader error, signal or hang)", usage: "infra upgrade-verify --tool NAME", flags: [
+			{ name: "--tool", value: "NAME", description: "Tool or Homebrew formula that was upgraded" },
+		], example: "omp-kit infra upgrade-verify --tool simdjson --json", runnable: false, dataSchema: infraData },
 		{ name: "pin", description: "Show pinned toolchain versions and drift against installed", usage: "infra pin [--file PATH]", flags: [
 			{ name: "--file", value: "PATH", description: "Pin file to read (default: kit .omp/infra-pins.toml)" },
 		], example: "omp-kit infra pin --json", runnable: false, dataSchema: infraData },

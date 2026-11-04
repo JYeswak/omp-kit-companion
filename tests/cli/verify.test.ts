@@ -29,8 +29,21 @@ async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Pro
 	return new TextDecoder().decode(r.stdout);
 }
 
-/** A repo whose HEAD carries scripts/t.sh (prints `16 pass 0 fail`, exit 0) and scripts/bad.sh (exit 1). */
-async function repo(name: string, extraScripts: Record<string, string> = {}): Promise<{ dir: string; sha: string }> {
+/** A repo whose HEAD carries scripts/t.sh (prints `16 pass 0 fail`, exit 0) and scripts/bad.sh (exit 1).
+ * verify only reads a code repo (fetch, archive, replay of read-only scripts), so one published repo per
+ * script set is shared; `own` gives a caller that writes into the repo (a tracker inside it) its own. */
+const sharedRepos = new Map<string, Promise<{ dir: string; sha: string }>>();
+function repo(name: string, extraScripts: Record<string, string> = {}, own = false): Promise<{ dir: string; sha: string }> {
+	if (own) return createRepo(name, extraScripts);
+	const key = JSON.stringify(Object.entries(extraScripts).sort());
+	let created = sharedRepos.get(key);
+	if (created === undefined) {
+		created = createRepo(`shared-${sharedRepos.size}`, extraScripts);
+		sharedRepos.set(key, created);
+	}
+	return created;
+}
+async function createRepo(name: string, extraScripts: Record<string, string>): Promise<{ dir: string; sha: string }> {
 	const dir = join(base, name);
 	mkdirSync(join(dir, "scripts"), { recursive: true });
 	writeFileSync(join(dir, "scripts", "t.sh"), "#!/bin/sh\necho ' 16 pass'\necho ' 0 fail'\n");
@@ -50,22 +63,302 @@ async function publishHead(dir: string, name: string): Promise<void> {
 	await sh(["git", "push", "-q", "origin", "HEAD:main"], dir);
 }
 
-/** A fake br: `show` prints the bead; every other act appends its argv to a log file; `create` prints child id kit-1.1. */
-function fakeBr(dir: string, bead: Record<string, unknown>, opts?: { failOn?: string }): { env: Record<string, string>; acts: () => string[] } {
-	const bin = join(dir, "bin");
+type FixtureComment = { id: number; author: string; text: string; created_at: string };
+
+/** A stateful toy tracker in its own directory; close-policy assertions use the real guard below. */
+let fakeBrCount = 0;
+function fakeBr(bead: Record<string, unknown>, opts?: { failOn?: string | string[]; failMessage?: string; commitBeforeRefusal?: boolean; refusalAcceptance?: string; comments?: FixtureComment[]; extraBeads?: Record<string, unknown>[] }): { env: Record<string, string>; acts: () => string[]; state: (id?: string) => Record<string, unknown> } {
+	const home = join(base, `fake-br-${++fakeBrCount}`);
+	const bin = join(home, "bin");
 	mkdirSync(bin, { recursive: true });
-	const log = join(dir, "br-acts.log");
-	const guard = opts?.failOn ? `case " $* " in *" ${opts.failOn} "*) exit 1;; esac\n` : "";
-	writeFileSync(join(bin, "br"), `#!/bin/sh\nif [ "$1" = show ]; then printf '%s' '${JSON.stringify([bead]).replace(/'/g, "'\\''")}'; exit 0; fi\n${guard}printf '%s\\x1e' "$*" >> ${JSON.stringify(log)}\nif [ "$1" = create ]; then printf '{"id":"kit-1.1"}'; fi\nexit 0\n`);
+	const log = join(home, "br-acts.log");
+	const statePath = join(home, "tracker.json");
+	const views = join(home, "views");
+	mkdirSync(views);
+	const comments = opts?.comments ?? [{ id: 1, author: String(bead.assignee ?? "Author"), text: "Lesson: fixture review", created_at: "2026-01-01T00:00:00Z" }];
+	const initial = { beads: Object.fromEntries([bead, ...(opts?.extraBeads ?? [])].map(row => [String(row.id), row])), comments };
+	writeFileSync(statePath, JSON.stringify(initial));
+	// Reads (show, comments list) are most of verify's br calls: a sh fast path serves them from
+	// views the writer refreshes on every save, byte-identical to the writer's own read output.
+	for (const [id, row] of Object.entries(initial.beads)) writeFileSync(join(views, `show-${id}.json`), JSON.stringify([row]));
+	writeFileSync(join(views, "comments.json"), JSON.stringify(comments));
+	const writer = join(home, "br.js");
+	const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+	writeFileSync(join(bin, "br"), [
+		"#!/bin/sh",
+		"case \"$1 $2\" in",
+		"\"show \"*/*|\"show \") ;;",
+		`"show "*) f=${quote(views)}/show-"$2".json; [ -f "$f" ] || exit 3; exec cat "$f" ;;`,
+		`"comments list") exec cat ${quote(join(views, "comments.json"))} ;;`,
+		"esac",
+		`exec bun ${quote(writer)} "$@"`,
+		"",
+	].join("\n"));
+	writeFileSync(writer, String.raw`import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const file = ${JSON.stringify(statePath)};
+const views = ${JSON.stringify(views)};
+const log = ${JSON.stringify(log)};
+const failOn = ${JSON.stringify(opts?.failOn === undefined ? [] : typeof opts.failOn === "string" ? [opts.failOn] : opts.failOn)};
+const failMessage = ${JSON.stringify(opts?.failMessage ?? "fixture act refused")};
+const refusalAcceptance = ${JSON.stringify(opts?.refusalAcceptance ?? null)};
+const commitBeforeRefusal = ${JSON.stringify(opts?.commitBeforeRefusal ?? false)};
+const a = process.argv.slice(2);
+const store = JSON.parse(readFileSync(file, "utf8"));
+const save = () => {
+	writeFileSync(file, JSON.stringify(store));
+	for (const [id, bead] of Object.entries(store.beads)) writeFileSync(views + "/show-" + id + ".json", JSON.stringify([bead]));
+	writeFileSync(views + "/comments.json", JSON.stringify(store.comments));
+};
+const row = store.beads[a[1]];
+const value = flag => { const i = a.indexOf(flag); return i < 0 ? undefined : a[i + 1]; };
+if (a[0] === "show") {
+	if (!row) process.exit(3);
+	process.stdout.write(JSON.stringify([row]));
+	process.exit(0);
+}
+if (a[0] === "comments" && a[1] === "list") {
+	process.stdout.write(JSON.stringify(store.comments));
+	process.exit(0);
+}
+if (a[0] === "list") {
+	const issues = Object.values(store.beads).filter(row =>
+		(value("--status") === undefined || value("--status") === "all" || row.status === value("--status")) &&
+		(value("--label") === undefined || row.labels?.includes(value("--label"))));
+	process.stdout.write(JSON.stringify({ issues }));
+	process.exit(0);
+}
+const refused = failOn.some(pattern => (" " + a.join(" ") + " ").includes(" " + pattern + " "));
+if (refused && !commitBeforeRefusal) {
+	if (a[0] === "close" && row && refusalAcceptance !== null) {
+		row.acceptance_criteria = refusalAcceptance;
+		row.updated_at = "peer-edit";
+		save();
+	}
+	process.stderr.write(failMessage + "\n");
+	process.exit(4);
+}
+appendFileSync(log, a.join(" ") + "\x1e");
+if (a[0] === "update" && row) {
+	if (value("--if-unchanged") !== undefined && value("--if-unchanged") !== row.updated_at) process.exit(6);
+	for (const [flag, field] of [["--status", "status"], ["--description", "description"], ["--acceptance-criteria", "acceptance_criteria"], ["--acceptance", "acceptance_criteria"]])
+		if (value(flag) !== undefined) row[field] = value(flag);
+	for (const [flag, checked] of [["--check-acceptance", true], ["--uncheck-acceptance", false]]) {
+		if (value(flag) === undefined) continue;
+		const selected = new Set(value(flag).split(",").map(Number));
+		let item = 0;
+		row.acceptance_criteria = row.acceptance_criteria.split("\n").map(line => {
+			if (!line.startsWith("- [ ] ") && !line.startsWith("- [x] ") && !line.startsWith("- [X] ")) return line;
+			if (!selected.has(++item)) return line;
+			return line.slice(0, 3) + (checked ? "x" : " ") + line.slice(4);
+		}).join("\n");
+	}
+	row.updated_at = String(Number(row.revision ?? 0) + 1);
+	row.revision = Number(row.revision ?? 0) + 1;
+}
+if (a[0] === "close" && row) {
+	row.status = "closed";
+	row.closed_transition = value("--transition-comment");
+}
+if (a[0] === "reopen" && row) row.status = "open";
+if (a[0] === "create") {
+	const dependency = value("--deps")?.split(":");
+	store.beads["kit-1.1"] = {
+		id: "kit-1.1", title: a[1], status: "open", assignee: null,
+		created_by: value("--actor"), parent: value("--parent"),
+		acceptance_criteria: value("--acceptance-criteria"), description: value("--description"),
+		labels: value("-l") === undefined ? [] : [value("-l")],
+		dependencies: dependency ? [{ dependency_type: dependency[0], id: dependency[1] }] : [],
+	};
+}
+save();
+if (refused) {
+	process.stderr.write(failMessage + "\n");
+	process.exit(4);
+}
+if (a[0] === "create") process.stdout.write('{"id":"kit-1.1"}');
+`);
 	chmodSync(join(bin, "br"), 0o755);
-	return { env: { PATH: `${bin}:${process.env.PATH ?? ""}` }, acts: () => { try { return readFileSync(log, "utf8").split("\x1e").filter(Boolean); } catch { return []; } } };
+	return {
+		env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+		acts: () => { try { return readFileSync(log, "utf8").split("\x1e").filter(Boolean); } catch { return []; } },
+		state: (id = String(bead.id)) => {
+			const value: unknown = JSON.parse(readFileSync(statePath, "utf8"));
+			if (value === null || typeof value !== "object" || !("beads" in value) || value.beads === null || typeof value.beads !== "object" || !(id in value.beads)) throw new Error("fixture bead missing");
+			const row: unknown = value.beads[id as keyof typeof value.beads];
+			if (row === null || typeof row !== "object" || Array.isArray(row)) throw new Error("fixture bead malformed");
+			return row as Record<string, unknown>;
+		},
+	};
 }
 
 const inReview = (ac: string) => ({ id: "kit-1", status: "in_review", assignee: "Author", updated_at: "2026-10-26T00:00:00Z", labels: [], acceptance_criteria: ac });
+const sourceBead = { id: "kit-source", status: "closed", assignee: "Author", labels: [], acceptance_criteria: "" };
+const liveBead = (acceptance: string) => ({ id: "kit-live", status: "open", assignee: "ReadbackAuthor", updated_at: "2026-01-01T00:00:00Z", labels: [LIVE_READBACK_LABEL], acceptance_criteria: acceptance, dependencies: [{ id: "kit-source", dependency_type: "related" }] });
+const fixtureEpic = { id: "kit-epic", status: "open", assignee: null, labels: [], acceptance_criteria: "" };
+
+test("LESSONPAYLOAD1 missing lesson refuses before replay and preserves the bead", async () => {
+	const marker = join(base, "lesson-missing-replay");
+	const { dir, sha } = await repo("lesson-missing", { "entered.sh": "#!/bin/sh\nprintf entered > \"$LESSON_REPLAY_MARKER\"\nprintf '0 fail\\n'\n" });
+	const acceptance = "- [ ] [a] [build] `sh scripts/entered.sh` -> 0 fail";
+	const br = fakeBr(inReview(acceptance), { comments: [] });
+	const before = br.state();
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: { ...br.env, LESSON_REPLAY_MARKER: marker } });
+	expect(res.code).toBe("LESSON_MISSING");
+	expect(res.replays).toEqual([]);
+	expect(existsSync(marker)).toBe(false);
+	expect(br.state()).toEqual(before);
+});
+
+test("LESSONPAYLOAD1 newest author lesson reaches the real close-policy consumer", async () => {
+	const { dir, sha } = await repo("lesson-author");
+	const br = fakeBr(inReview("- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail"), { comments: [
+		{ id: 3, author: "AnotherReviewer", text: "Lesson: not the author's lesson", created_at: "2026-03-01T00:00:00Z" },
+		{ id: 2, author: "Author", text: "Review notes\nLesson: preserve the committed frontier", created_at: "2026-02-01T00:00:00Z" },
+		{ id: 1, author: "Author", text: "Lesson: old lesson", created_at: "2026-01-01T00:00:00Z" },
+	] });
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("CLOSED");
+	const closed = br.state();
+	expect(closed.status).toBe("closed");
+	expect(closed.closed_transition).toContain("Lesson: preserve the committed frontier");
+	expect(closed.closed_transition).not.toContain("not the author's lesson");
+	const guarded = await run(["sh", join(import.meta.dir, "..", "..", "scripts", "close-guard.sh"), "kit-1", "--sub", "close", "--reason", String(closed.closed_transition)], {
+		cwd: dir, deadline_s: fixtureDeadlineS(30), env: { ...process.env, ...br.env, AGENT_NAME: "Peer" },
+	});
+	expect(new TextDecoder().decode(guarded.stderr)).toBe("");
+	expect(guarded.rc).toBe(0);
+});
+
+test("LESSONPAYLOAD1 CLI explicit lesson takes precedence over author comments", async () => {
+	const { dir, sha } = await repo("lesson-cli");
+	const br = fakeBr(inReview("- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail"));
+	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--export", sha, "--project", dir, "--actor", "Peer", "--lesson", "explicit reviewer finding", "--json"], {
+		cwd: dir, deadline_s: fixtureDeadlineS(30), env: { ...process.env, ...br.env } as Record<string, string>,
+	});
+	expect(new TextDecoder().decode(r.stderr)).not.toContain("Unknown flag");
+	expect(r.rc).toBe(0);
+	expect(br.state().status).toBe("closed");
+	expect(br.state().closed_transition).toContain("Lesson: explicit reviewer finding");
+	expect(br.state().closed_transition).not.toContain("fixture review");
+});
+
+test("LESSONPAYLOAD1 refused final act reports ACT_FAILED and restores original boxes", async () => {
+	const { dir, sha } = await repo("lesson-act-failed");
+	const acceptance = "- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail";
+	const br = fakeBr(inReview(acceptance), { failOn: "close kit-1", failMessage: `policy denies final close ${"detail ".repeat(80)}ACTION_STDERR_END` });
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.replays.map(r => r.pass)).toEqual([true]);
+	expect(res.code).toBe("ACT_FAILED");
+	expect(res.log).toContain("policy denies final close");
+	expect(res.log).toContain("ACTION_STDERR_END");
+	expect(res.rollback).toMatchObject({ status: "RESTORED" });
+	expect(br.state().status).toBe("in_review");
+	expect(br.state().acceptance_criteria).toBe(acceptance);
+});
+
+test("LESSONPAYLOAD1 genuine failed replay remains REWORK with its named box", async () => {
+	const { dir, sha } = await repo("lesson-real-rework");
+	const br = fakeBr(inReview("- [ ] [b] [build] `sh scripts/bad.sh` -> prints PASS"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("REWORK");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["b", false]]);
+	expect(res.log).toContain("[b]");
+	expect(br.state().status).toBe("rework");
+});
+
+test("LESSONPAYLOAD1 rollback refusal reports the unmet atomic boundary honestly", async () => {
+	const { dir, sha } = await repo("lesson-rollback-refused");
+	const acceptance = "- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail";
+	const br = fakeBr(inReview(acceptance), { failOn: ["close kit-1", "--acceptance-criteria"], failMessage: "tracker refuses close and restoration" });
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("ACT_FAILED");
+	expect(res.rollback).toMatchObject({ status: "ROLLBACK_REFUSED" });
+	expect(res.log).toContain("tracker refuses close and restoration");
+	expect(br.state().status).toBe("in_review");
+	// This is an observed counterexample to the original [b], not atomicity qualification.
+	console.error(`LESSONPAYLOAD1[b] counterexample: original boxes unchanged=${br.state().acceptance_criteria === acceptance}; no [b] PASS claimed`);
+});
+
+test("LESSONPAYLOAD1 an update committed before its nonzero exit is not reported as untouched", async () => {
+	const { dir, sha } = await repo("lesson-update-committed");
+	const acceptance = "- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail";
+	const br = fakeBr(inReview(acceptance), { failOn: "--check-acceptance", commitBeforeRefusal: true, failMessage: "post-commit export refused" });
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("ACT_FAILED");
+	expect(res.log).toContain("post-commit export refused");
+	expect(res.rollback).toMatchObject({ status: "RESTORED" });
+	expect(br.state().acceptance_criteria).toBe(acceptance);
+	expect(br.state().status).toBe("in_review");
+});
+
+test("LESSONPAYLOAD1 concurrent acceptance is preserved and reported STATE_UNPROVEN", async () => {
+	const { dir, sha } = await repo("lesson-peer-acceptance");
+	const acceptance = "- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail";
+	const peerAcceptance = "- [ ] [c] [build] peer's revised obligation `sh scripts/t.sh` -> 0 fail";
+	const br = fakeBr(inReview(acceptance), { failOn: "close kit-1", refusalAcceptance: peerAcceptance });
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("ACT_FAILED");
+	expect(res.rollback).toMatchObject({ status: "STATE_UNPROVEN" });
+	expect(br.state().acceptance_criteria).toBe(peerAcceptance);
+	expect(br.state().status).toBe("in_review");
+});
+
+test("LESSONPAYLOAD1 live readback closes with its author's lesson and preserves the verified source", async () => {
+	const { dir } = await repo("lesson-live");
+	const acceptance = "- [ ] [c] [live] `sh scripts/t.sh` -> 0 fail";
+	const br = fakeBr(liveBead(acceptance), { extraBeads: [sourceBead] });
+	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("CLOSED");
+	expect(br.state().acceptance_criteria).toBe("- [x] [c] [live] `sh scripts/t.sh` -> 0 fail");
+	expect(br.state().closed_transition).toContain("Lesson: fixture review");
+	expect(br.state("kit-source").status).toBe("closed");
+});
+
+test("LESSONPAYLOAD1 live missing lesson refuses before replay", async () => {
+	const marker = join(base, "live-missing-lesson");
+	const { dir } = await repo("lesson-live-missing", { "entered.sh": "#!/bin/sh\nprintf entered > \"$LESSON_REPLAY_MARKER\"\nprintf '0 fail\\n'\n" });
+	const acceptance = "- [ ] [c] [live] `sh scripts/entered.sh` -> 0 fail";
+	const br = fakeBr(liveBead(acceptance), { extraBeads: [sourceBead], comments: [] });
+	const before = br.state();
+	const res = await liveReadback({ bead: "kit-live", repo: dir, actor: "Peer", env: { ...br.env, LESSON_REPLAY_MARKER: marker } });
+	expect(res.code).toBe("LESSON_MISSING");
+	expect(res.replays).toEqual([]);
+	expect(existsSync(marker)).toBe(false);
+	expect(br.state()).toEqual(before);
+});
+
+test("LESSONPAYLOAD1 CLI live-all refused act is nonzero ACT_FAILED with boxes unchanged", async () => {
+	const { dir } = await repo("lesson-live-act");
+	const acceptance = "- [ ] [c] [live] `sh scripts/t.sh` -> 0 fail";
+	const br = fakeBr(liveBead(acceptance), { extraBeads: [sourceBead], failOn: "close kit-live", failMessage: "readback close refused" });
+	const r = await run(["bun", "run", "--silent", cliPath, "verify", "--live-readback", "--all", "--project", dir, "--actor", "Peer", "--lesson", "readback evidence", "--json"], {
+		cwd: dir, deadline_s: fixtureDeadlineS(30), env: { ...process.env, ...br.env } as Record<string, string>,
+	});
+	const result = JSON.parse(new TextDecoder().decode(r.stdout));
+	expect(r.rc).toBe(2);
+	expect(result.data.results.map((row: { code: string }) => row.code)).toEqual(["ACT_FAILED"]);
+	expect(result.data.results[0].log).toContain("readback close refused");
+	expect(br.state().status).toBe("open");
+	expect(br.state().acceptance_criteria).toBe(acceptance);
+	expect(br.state("kit-source").status).toBe("closed");
+});
+
+test("LESSONPAYLOAD1 empty CLI lesson is rejected without replay", async () => {
+	const { dir, sha } = await repo("lesson-empty");
+	const br = fakeBr(inReview("- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail"));
+	const before = br.state();
+	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--export", sha, "--project", dir, "--actor", "Peer", "--lesson", "", "--json"], {
+		cwd: dir, deadline_s: fixtureDeadlineS(30), env: { ...process.env, ...br.env } as Record<string, string>,
+	});
+	const result = JSON.parse(new TextDecoder().decode(r.stdout));
+	expect(r.rc).toBe(2);
+	expect(result.errors[0].code).toBe("MISSING_VALUE");
+	expect(br.state()).toEqual(before);
+});
 
 test("verify closes a bead whose boxes name commands with expected outcomes: replays on the export, ticks, gate, close with the command log; family disclosed", async () => {
 	const { dir, sha } = await repo("good");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [landed] `sh scripts/t.sh` expect: prints 0 fail\n- [ ] [v] [live] Verification: a non-author replays."));
+	const br = fakeBr(inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [landed] `sh scripts/t.sh` expect: prints 0 fail\n- [ ] [v] [live] Verification: a non-author replays."), { extraBeads: [{ ...fixtureEpic, id: "ompkit-kup44" }] });
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, family: "same (claude)" });
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true]]);
@@ -81,6 +374,7 @@ test("verify closes a bead whose boxes name commands with expected outcomes: rep
 	expect(acts[4]).toContain("--actor Peer");
 	expect(acts[4]).toContain("[a] sh scripts/t.sh -> summary 16 pass 0 fail: found");
 	expect(acts[4]).toContain("deferred [v] to kit-1.1 (LIVEREADBACK, child of lane parent ompkit-kup44, because kit-1 has no active parent, related to kit-1)");
+	expect(acts[4]).toContain("Lesson: fixture review");
 	expect(acts).toHaveLength(5);
 	expect(res.child).toBe("kit-1.1");
 });
@@ -98,7 +392,7 @@ test("VERIFYDEDUP1: runs each distinct replay command once and judges every box 
 		"- [ ] [c] [landed] `sh scripts/shared.sh` -> gamma",
 		"- [ ] [d] [landed] `sh scripts/distinct.sh` -> delta",
 	].join("\n");
-	const br = fakeBr(dir, inReview(acceptance));
+	const br = fakeBr(inReview(acceptance));
 	let released = false;
 	let seenProgress = "";
 	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--export", sha, "--project", dir, "--actor", "Peer", "--dry-run", "--json"], {
@@ -139,7 +433,7 @@ test("VERIFYDEDUP1: runs each distinct replay command once and judges every box 
 
 test("planted: a dotted bead id proceeds past scratch allocation with the exact bead identity preserved (constant label, unchanged metadata)", async () => {
 	const { dir, sha } = await repo("dotted");
-	const br = fakeBr(dir, { ...inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"), id: "kit-1.2" });
+	const br = fakeBr({ ...inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"), id: "kit-1.2" });
 	const res = await verifyBead({ bead: "kit-1.2", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
 	expect(res.code).toBe("DRY_RUN");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true]]);
@@ -148,7 +442,7 @@ test("planted: a dotted bead id proceeds past scratch allocation with the exact 
 
 test("planted: an unresolvable bead names the unmet tracker prerequisite and writes nothing", async () => {
 	const { dir, sha } = await repo("missing");
-	const bin = join(dir, "bin-noshow");
+	const bin = join(base, "bin-noshow");
 	mkdirSync(bin, { recursive: true });
 	writeFileSync(join(bin, "br"), "#!/bin/sh\nprintf 'ISSUE_NOT_FOUND' >&2\nexit 3\n");
 	chmodSync(join(bin, "br"), 0o755);
@@ -162,7 +456,7 @@ test("planted: an unresolvable bead names the unmet tracker prerequisite and wri
 
 test("planted: the author's own seat is refused NON_AUTHOR_REQUIRED and nothing is run", async () => {
 	const { dir, sha } = await repo("self");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const br = fakeBr(inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Author", env: br.env });
 	expect(res.code).toBe("NON_AUTHOR_REQUIRED");
 	expect(res.replays).toEqual([]);
@@ -171,7 +465,7 @@ test("planted: the author's own seat is refused NON_AUTHOR_REQUIRED and nothing 
 
 test("planted: a box naming no command is ACCEPTANCE_NOT_REPLAYABLE and the bead is sent back to intake, not closed", async () => {
 	const { dir, sha } = await repo("noreplay");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] the feature works and the UI looks right\n- [ ] [b] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const br = fakeBr(inReview("- [ ] [a] [landed] the feature works and the UI looks right\n- [ ] [b] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.log).toContain("[a] names no command");
@@ -181,7 +475,7 @@ test("planted: a box naming no command is ACCEPTANCE_NOT_REPLAYABLE and the bead
 
 test("planted: a box whose command fails sets REWORK naming the box; exit 0 with the wrong output also fails (named outcome beats exit code)", async () => {
 	const { dir, sha } = await repo("rework");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [landed] `sh scripts/bad.sh` -> prints PASS\n- [ ] [c] [landed] `sh scripts/t.sh` -> 99 pass"));
+	const br = fakeBr(inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [b] [landed] `sh scripts/bad.sh` -> prints PASS\n- [ ] [c] [landed] `sh scripts/t.sh` -> 99 pass"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("REWORK");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", false], ["c", false]]);
@@ -192,7 +486,7 @@ test("planted: a box whose command fails sets REWORK naming the box; exit 0 with
 
 test("planted: a box whose first backticked span is not followed by -> or expect: is ACCEPTANCE_NOT_REPLAYABLE and never runs (quoted obligation text)", async () => {
 	const { dir, sha } = await repo("exitonly");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] the seat runs `br update <id> --status in_review` after `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const br = fakeBr(inReview("- [ ] [a] [landed] the seat runs `br update <id> --status in_review` after `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.replays).toEqual([]);
@@ -202,7 +496,7 @@ test("planted: a box whose first backticked span is not followed by -> or expect
 
 test("planted: a box with -> in its obligation text before the command is ACCEPTANCE_NOT_REPLAYABLE and never runs (arrow-before-command)", async () => {
 	const { dir, sha } = await repo("arrowfirst");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] status open -> in_review is recorded `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const br = fakeBr(inReview("- [ ] [a] [landed] status open -> in_review is recorded `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.replays).toEqual([]);
@@ -243,7 +537,7 @@ test("legacy lettered boxes keep their meaning and untagged prose stays out", ()
 
 test("planted: an unsupported tag is named and fails closed, never silently dropped", async () => {
 	const { dir, sha } = await repo("badphase");
-	const br = fakeBr(dir, inReview("- [ ] [zzz] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [build] [a] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const br = fakeBr(inReview("- [ ] [zzz] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [build] [a] `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.log).toContain("[1] unsupported phase [zzz]");
@@ -254,7 +548,7 @@ test("planted: an unsupported tag is named and fails closed, never silently drop
 
 test("planted: a commandless phase-only box is named and fails closed", async () => {
 	const { dir, sha } = await repo("nocommand");
-	const br = fakeBr(dir, inReview("- [ ] [build] prose names no command"));
+	const br = fakeBr(inReview("- [ ] [build] prose names no command"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.log).toContain("[1] names no command");
@@ -264,7 +558,7 @@ test("planted: a refusal names the indexed box and leaves the tracker's bead and
 	const ac = "- [ ] [build] prose names no command";
 	const bead = inReview(ac);
 	const { dir, sha } = await repo("untouched");
-	const br = fakeBr(dir, bead);
+	const br = fakeBr(bead);
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
 	expect(res.log).toContain("[1] names no command");
@@ -275,17 +569,19 @@ test("planted: a refusal names the indexed box and leaves the tracker's bead and
 
 test("phase-only boxes replay their literal command and are judged by the named outcome", async () => {
 	const { dir, sha } = await repo("phaseonly");
-	const br = fakeBr(dir, inReview("- [ ] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [x] [build] `sh scripts/t.sh` expect: prints 0 fail"));
+	const br = fakeBr(inReview("- [ ] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [x] [build] `sh scripts/t.sh` expect: prints 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, null, true], [2, null, true]]);
 	const acts = br.acts();
 	expect(acts[0]).toBe("update kit-1 --check-acceptance 1,2 --actor Peer");
+	expect(br.state().status).toBe("closed");
+	expect(br.state().acceptance_criteria).toBe("- [x] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [x] [build] `sh scripts/t.sh` expect: prints 0 fail");
 });
 
 test("live and after items are not executed and never passed; with an executed box passing they defer to the LIVEREADBACK child (CLOSEPASS1)", async () => {
 	const { dir, sha } = await repo("pending");
-	const br = fakeBr(dir, inReview("- [ ] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [a] [live] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [after] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const br = fakeBr({ ...inReview("- [ ] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [a] [live] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [after] `sh scripts/t.sh` -> 16 pass 0 fail"), parent: fixtureEpic.id }, { extraBeads: [fixtureEpic] });
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, null, true], [2, "a", null], [3, null, null]]);
@@ -293,11 +589,13 @@ test("live and after items are not executed and never passed; with an executed b
 	expect(res.log).toContain("[3] PENDING after phase prerequisite unmet; not executed");
 	expect(br.acts()[0]).toContain("--acceptance-criteria - [ ] [a] [live] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [after] `sh scripts/t.sh` -> 16 pass 0 fail --json");
 	expect(br.acts()[2]).toBe("update kit-1 --check-acceptance 1 --actor Peer");
+	expect(br.state().status).toBe("closed");
+	expect(br.state(res.child)).toMatchObject({ status: "open", parent: fixtureEpic.id, acceptance_criteria: "- [ ] [a] [live] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [after] `sh scripts/t.sh` -> 16 pass 0 fail" });
 });
 
 test("a failed phase-only expectation stays REWORK even when the command exits 0", async () => {
 	const { dir, sha } = await repo("phaseonlyrework");
-	const br = fakeBr(dir, inReview("- [ ] [build] `sh scripts/t.sh` -> 99 pass"));
+	const br = fakeBr(inReview("- [ ] [build] `sh scripts/t.sh` -> 99 pass"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("REWORK");
 	expect(res.replays.map(r => [r.index, r.pass])).toEqual([[1, false]]);
@@ -305,7 +603,7 @@ test("a failed phase-only expectation stays REWORK even when the command exits 0
 
 test("[v] verification notes stay skipped even when they carry a phase", async () => {
 	const { dir, sha } = await repo("vskip");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [v] [live] Verification: a non-author replays the original command."));
+	const br = fakeBr({ ...inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ ] [v] [live] Verification: a non-author replays the original command."), parent: fixtureEpic.id }, { extraBeads: [fixtureEpic] });
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.index, r.letter, r.pass])).toEqual([[1, "a", true]]);
@@ -313,22 +611,22 @@ test("[v] verification notes stay skipped even when they carry a phase", async (
 
 test("planted: an unknown export sha fails closed as UNKNOWN with no replays and no acts", async () => {
 	const { dir } = await repo("badexport");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
+	const br = fakeBr(inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"));
 	const res = await verifyBead({ bead: "kit-1", exportSha: "deadbeef".repeat(5).slice(0, 40), repo: dir, actor: "Peer", env: br.env });
 	expect(res.code).toBe("UNKNOWN");
 	expect(res.replays).toEqual([]);
 	expect(res.acts).toEqual([]);
 	expect(br.acts()).toEqual([]);
 });
-
-test("planted: a failing reviewer-gate report fails the close as REWORK naming the act, never a silent pass", async () => {
+test("planted: a failing reviewer-gate report fails the close as ACT_FAILED naming the act, never a silent pass", async () => {
 	const { dir, sha } = await repo("gaterefail");
-	const br = fakeBr(dir, inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"), { failOn: "gate" });
+	const br = fakeBr(inReview("- [ ] [a] [landed] `sh scripts/t.sh` -> 16 pass 0 fail"), { failOn: "gate" });
 	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
-	expect(res.code).toBe("REWORK");
+	expect(res.code).toBe("ACT_FAILED");
 	expect(res.log).toContain("act failed");
 	expect(res.log).toContain("gate report");
 });
+
 
 /* REPLAYBR1 (ompkit-t7cn7.21): real-tracker fixtures for the per-run read-only
    replay barrier. These use the production br binary and real trackers in
@@ -351,13 +649,26 @@ async function tracker(name: string): Promise<{ dir: string; db: string }> {
 	return { dir, db: join(dir, ".beads", "beads.db") };
 }
 
+/** One tracker per named group of tests that each create their own beads and only compare state they
+ * captured after their own setup; a test that counts or lists the whole tracker keeps its own. */
+const sharedTrackers = new Map<string, Promise<{ dir: string; db: string }>>();
+function sharedTracker(name: string, setup?: (t: { dir: string; db: string }) => Promise<void>): Promise<{ dir: string; db: string }> {
+	let created = sharedTrackers.get(name);
+	if (created === undefined) {
+		created = tracker(name).then(async t => { await setup?.(t); return t; });
+		sharedTrackers.set(name, created);
+	}
+	return created;
+}
+
 function trackerEnv(t: { dir: string; db: string }): Record<string, string> {
 	return { ...process.env, BEADS_DB: t.db } as Record<string, string>;
 }
 
-async function createBead(t: { dir: string; db: string }, title: string): Promise<string> {
+/** `fields` are br create flags (description, acceptance, assignee, parent) set in the create act itself. */
+async function createBead(t: { dir: string; db: string }, title: string, fields: string[] = []): Promise<string> {
 	const env = { ...process.env, BEADS_DB: t.db } as Record<string, string>;
-	const created = await brun(["create", title, "--json"], t.dir, env);
+	const created = await brun(["create", title, ...fields, "--json"], t.dir, env);
 	if (created.rc !== 0) throw new Error(`create -> ${created.rc}: ${created.out}`);
 	const parsed: unknown = JSON.parse(created.out);
 	const id = typeof parsed === "object" && parsed !== null && "id" in parsed && typeof parsed.id === "string" ? parsed.id : null;
@@ -385,17 +696,28 @@ test("BRINITPIN1 verify tracker init leaves ancestor tracker unchanged; unpinned
 	expect(negative.newLocks.length).toBeGreaterThan(0);
 });
 
+const REPLAY_DESC = "WHAT: owned replay-barrier fixture.\n\nWHY: proves the per-run read-only dispatch admits intended reads and refuses production writes.";
+
 /** Description, acceptance, label, per-box ticks and the in_review transition. */
 async function shapeBead(t: { dir: string; db: string }, id: string, ac: string): Promise<void> {
-	const env = trackerEnv(t);
-	const desc = "WHAT: owned replay-barrier fixture.\n\nWHY: proves the per-run read-only dispatch admits intended reads and refuses production writes.";
-	const shaped = await brun(["update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix"], t.dir, env);
+	const shaped = await brun(["update", id, "--description", REPLAY_DESC, "--acceptance", ac, "--add-label", "kind:fix"], t.dir, trackerEnv(t));
 	if (shaped.rc !== 0) throw new Error(`shape -> ${shaped.rc}: ${shaped.out}`);
+	await readyBead(t, id, ac);
+}
+
+/** shapeBead for acceptance that does not name its own bead: the fields go in the create act. */
+async function shapedBead(t: { dir: string; db: string }, title: string, ac: string): Promise<string> {
+	const id = await createBead(t, title, ["--description", REPLAY_DESC, "--acceptance-criteria", ac, "--labels", "kind:fix"]);
+	await readyBead(t, id, ac);
+	return id;
+}
+
+async function readyBead(t: { dir: string; db: string }, id: string, ac: string): Promise<void> {
+	const env = trackerEnv(t);
 	const n = ac.split("\n").filter(l => l.trim().startsWith("- [")).length;
-	for (let i = 1; i <= n; i++) {
-		const ticked = await brun(["update", id, "--check-acceptance", String(i)], t.dir, env);
-		if (ticked.rc !== 0) throw new Error(`tick ${i} -> ${ticked.rc}: ${ticked.out}`);
-	}
+	// One tick act for every box: the same end state as per-box ticks, one br write instead of n.
+	const ticked = await brun(["update", id, "--check-acceptance", Array.from({ length: n }, (_, i) => i + 1).join(",")], t.dir, env);
+	if (ticked.rc !== 0) throw new Error(`tick 1-${n} -> ${ticked.rc}: ${ticked.out}`);
 	const ready = await brun(["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "tester"], t.dir, env);
 	if (ready.rc !== 0) throw new Error(`in_review -> ${ready.rc}: ${ready.out}`);
 }
@@ -432,8 +754,8 @@ function stateHash(t: { dir: string }): string {
 }
 
 test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export replays its probe; bound and same-repo reads admitted", async () => {
-	const { dir: cdir, sha } = await repo("barrier-pos");
-	const t = await tracker("barrier-pos-t");
+	const { dir: cdir, sha } = await repo("barrier-pos", {}, true);
+	const t = await sharedTracker("replay-t");
 	const envT = trackerEnv(t);
 	const id = await createBead(t, "barrier positive probe");
 	const tin = await trackerInRepo(cdir);
@@ -442,7 +764,7 @@ test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export rep
 	await shapeBead(t, id, ac);
 	const before = snap(t);
 	const beforeHash = stateHash(t);
-	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)" });
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)", lesson: "replay-barrier fixture" });
 	expect(res.code).toBe("DRY_RUN");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true], ["d", true]]);
 	expect(res.log).toContain("exported " + sha);
@@ -452,7 +774,7 @@ test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export rep
 
 test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with the marker; T unchanged; owned write admitted; neutralization makes it fail", async () => {
 	const { dir: cdir, sha } = await repo("barrier-neg");
-	const t = await tracker("barrier-neg-t");
+	const t = await sharedTracker("replay-t");
 	const envT = trackerEnv(t);
 	const id = await createBead(t, "barrier negative probe");
 	const ac = `- [ ] [a] [build] ordinary explicit write refused: \`br --db "${t.db}" update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [b] [build] env-stripped write refused: \`env -u BEADS_DB br update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [c] [build] implicit inherited write refused: \`br update ${id} --add-label probe-label\` -> READONLY_TRACKER\n- [ ] [d] [build] admitted owned write: \`br --db "$OWNED_TRACKER_DB" create "owned probe"\` -> Created\n- [ ] [e] [build] owned readback: \`br --db "$OWNED_TRACKER_DB" list --json\` -> owned probe\n- [ ] [f] [build] export executes the computed behavior probe: \`sh scripts/probe.sh\` -> probe 5050 ok`;
@@ -460,7 +782,7 @@ test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with th
 	const before = snap(t);
 	const beforeHash = stateHash(t);
 	const beforeShow = (await brun(["show", id, "--json"], t.dir, envT)).out;
-	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)" });
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: "same (bun)", lesson: "replay-barrier fixture" });
 	expect(res.code).toBe("DRY_RUN");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true], ["d", true], ["e", true], ["f", true]]);
 	expect(res.log).toContain("READONLY_TRACKER");
@@ -476,16 +798,15 @@ test("REPLAYBR1 AC2: ordinary, env-stripped and inherited writes refused with th
 
 test("REPLAYBR1 owned tracker init leaves its nearest ancestor tracker unchanged", async () => {
 	const { dir: cdir, sha } = await repo("owned-init-project");
-	const t = await tracker("owned-init-source");
-	const id = await createBead(t, "owned replay init");
+	const t = await sharedTracker("replay-t");
 	const ac = `- [ ] [a] [build] admitted owned write: \`br --db "$OWNED_TRACKER_DB" create "owned probe"\` -> Created`;
-	await shapeBead(t, id, ac);
+	const id = await shapedBead(t, "owned replay init", ac);
 	const parent = await createParentTracker(base, "owned-init-parent");
 	const before = parent.snapshot();
 	const previous = process.env.GRADE_WAVE_SCRATCH;
 	process.env.GRADE_WAVE_SCRATCH = parent.dir;
 	try {
-		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: trackerEnv(t), dryRun: true, family: "same (bun)" });
+		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: trackerEnv(t), dryRun: true, family: "same (bun)", lesson: "owned-init fixture" });
 		expect(res.code).toBe("DRY_RUN");
 		expect(res.replays.map(replay => [replay.letter, replay.pass])).toEqual([["a", true]]);
 		expect(parent.snapshot()).toEqual(before);
@@ -537,21 +858,21 @@ async function actorPolicy(t: { dir: string }): Promise<void> {
 `);
 }
 
-/** Shape a fixture bead through the gated path as ambient/tester setup acts. */
-async function shapeActorBead(t: { dir: string; db: string }, id: string, ac: string): Promise<void> {
+/** Create a fixture bead with its fields, then move it through the gated path as ambient/tester setup acts. */
+async function actorBead(t: { dir: string; db: string }, title: string, ac: string): Promise<string> {
 	const env = ambientEnv(t.db);
 	const desc = "WHAT: verifyactor1 fixture.\n\nWHY: proves native verify binds the reviewer identity on durable mutations.";
+	const id = await createBead(t, title, ["--description", desc, "--acceptance-criteria", ac, "--labels", "kind:fix", "--assignee", "Author"]);
 	const moves: string[][] = [
-		["update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix"],
 		["update", id, "--status", "in_progress", "--transition-comment", "fixture start"],
 		["update", id, "--check-acceptance", "1"],
-		["update", id, "--assignee", "Author"],
 		["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "tester"],
 	];
 	for (const m of moves) {
 		const r = await brun(m, t.dir, env);
 		if (r.rc !== 0) throw new Error(`${m.slice(0, 3).join(" ")} -> ${r.rc}: ${r.out.slice(0, 300)}`);
 	}
+	return id;
 }
 
 async function auditActors(t: { dir: string; db: string }, id: string): Promise<{ event_type: string; actor: string }[]> {
@@ -563,18 +884,15 @@ async function auditActors(t: { dir: string; db: string }, id: string): Promise<
 
 test("VERIFYACTOR1 [a]: passing verify binds the reviewer on ticks, gate report and close; a same-tracker control bead is untouched", async () => {
 	const { dir: cdir, sha } = await repo("actorpass");
-	const t = await tracker("actorpass-t");
-	await actorPolicy(t);
+	const t = await sharedTracker("actor-t", actorPolicy);
 	const envT = ambientEnv(t.db);
-	const id = await createBead(t, "actor close probe");
-	const control = await createBead(t, "actor control probe");
 	const ac = "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass";
-	await shapeActorBead(t, id, ac);
-	await shapeActorBead(t, control, ac);
+	const id = await actorBead(t, "actor close probe", ac);
+	const control = await actorBead(t, "actor control probe", ac);
 	const beforeEvents = await auditActors(t, id);
 	const controlBefore = (await brun(["show", control, "--json"], t.dir, envT)).out;
 	const controlEventsBefore = await auditActors(t, control);
-	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, family: "same (bun)" });
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, family: "same (bun)", lesson: "reviewer identity fixture" });
 	expect(res.code).toBe("CLOSED");
 	const afterEvents = await auditActors(t, id);
 	expect(afterEvents.length).toBeGreaterThan(beforeEvents.length);
@@ -595,13 +913,11 @@ test("VERIFYACTOR1 [a]: passing verify binds the reviewer on ticks, gate report 
 
 test("VERIFYACTOR1 [a]: failing probe REWORK carries the reviewer identity, never the ambient default", async () => {
 	const { dir: cdir, sha } = await repo("actorrework");
-	const t = await tracker("actorrework-t");
-	await actorPolicy(t);
+	const t = await sharedTracker("actor-t", actorPolicy);
 	const envT = ambientEnv(t.db);
-	const id = await createBead(t, "actor rework probe");
-	await shapeActorBead(t, id, "- [ ] [a] [build] `sh scripts/bad.sh` -> prints PASS");
+	const id = await actorBead(t, "actor rework probe", "- [ ] [a] [build] `sh scripts/bad.sh` -> prints PASS");
 	const beforeEvents = await auditActors(t, id);
-	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, family: "same (bun)" });
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, family: "same (bun)", lesson: "replay-failure identity fixture" });
 	expect(res.code).toBe("REWORK");
 	expect(res.acts[0]).toEqual(["br", "update", id, "--status", "rework", "--transition-comment", expect.stringContaining(`REWORK ${id}:`), "--actor", REVIEWER]);
 	const afterEvents = await auditActors(t, id);
@@ -612,13 +928,12 @@ test("VERIFYACTOR1 [a]: failing probe REWORK carries the reviewer identity, neve
 test("VERIFYENV1: missing linked OMP identity preserves review state and acceptance; an assertion failure still becomes REWORK", async () => {
 	const { dir: cdir, sha } = await repo("verifyenv-runtime");
 	const runtimeTest = join(import.meta.dir, "kit-flywheel-guard-runtime.test.ts").replaceAll("'", "'\\''");
-	const t = await tracker("verifyenv-t");
-	const id = await createBead(t, "linked runtime environment");
+	const t = await sharedTracker("replay-t");
 	const ac = "- [ ] [a] [build] `bun test '" + runtimeTest + "' -t 'linked OMP plugin'` -> 1 pass 0 fail";
-	await shapeBead(t, id, ac);
+	const id = await shapedBead(t, "linked runtime environment", ac);
 	const before = await row(t, id);
 	const res = await verifyBead({
-		bead: id, exportSha: sha, repo: cdir, actor: "Peer",
+		bead: id, exportSha: sha, repo: cdir, actor: "Peer", lesson: "environment classification fixture",
 		env: { ...trackerEnv(t), OMP_BIN: join(base, "missing-omp-launcher") },
 	});
 	expect(res.code).toBe("ENVIRONMENT");
@@ -629,20 +944,18 @@ test("VERIFYENV1: missing linked OMP identity preserves review state and accepta
 	expect(after.acceptance_criteria).toBe(before.acceptance_criteria);
 	expect(after.labels).toContain("needs-director");
 	// A broken ambient override alone cannot turn an unrelated product failure into an environment refusal.
-	const broken = await createBead(t, "actual assertion failure");
-	await shapeBead(t, broken, "- [ ] [a] [build] `bun -e 'import { strict as assert } from \"node:assert\"; assert.equal(2 + 2, 5)'` -> prints PASS");
+	const broken = await shapedBead(t, "actual assertion failure", "- [ ] [a] [build] `bun -e 'import { strict as assert } from \"node:assert\"; assert.equal(2 + 2, 5)'` -> prints PASS");
 	const failed = await verifyBead({
-		bead: broken, exportSha: sha, repo: cdir, actor: "Peer",
+		bead: broken, exportSha: sha, repo: cdir, actor: "Peer", lesson: "assertion classification fixture",
 		env: { ...trackerEnv(t), OMP_BIN: join(base, "missing-omp-launcher") },
 	});
 	expect(failed.code).toBe("REWORK");
 	expect((await row(t, broken)).status).toBe("rework");
 	expect(failed.log).toContain("AssertionError");
 	// A command can report both a missing environment prerequisite and a real assertion defect.
-	const mixed = await createBead(t, "environment and assertion failure");
-	await shapeBead(t, mixed, "- [ ] [a] [build] `bun test '" + runtimeTest + "' -t 'linked OMP plugin'; bun -e 'import { strict as assert } from \"node:assert\"; assert.equal(2 + 2, 5)'` -> prints PASS");
+	const mixed = await shapedBead(t, "environment and assertion failure", "- [ ] [a] [build] `bun test '" + runtimeTest + "' -t 'linked OMP plugin'; bun -e 'import { strict as assert } from \"node:assert\"; assert.equal(2 + 2, 5)'` -> prints PASS");
 	const mixedFailure = await verifyBead({
-		bead: mixed, exportSha: sha, repo: cdir, actor: "Peer",
+		bead: mixed, exportSha: sha, repo: cdir, actor: "Peer", lesson: "mixed failure fixture",
 		env: { ...trackerEnv(t), OMP_BIN: join(base, "missing-omp-launcher") },
 	});
 	expect(mixedFailure.code).toBe("REWORK");
@@ -652,19 +965,17 @@ test("VERIFYENV1: missing linked OMP identity preserves review state and accepta
 
 test("VERIFYACTOR1 [a]: explicit-author refusal and dry-run leave fixture state and audit untouched", async () => {
 	const { dir: cdir, sha } = await repo("actoruntouched");
-	const t = await tracker("actoruntouched-t");
-	await actorPolicy(t);
+	const t = await sharedTracker("actor-t", actorPolicy);
 	const envT = ambientEnv(t.db);
-	const id = await createBead(t, "actor untouched probe");
-	await shapeActorBead(t, id, "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass");
+	const id = await actorBead(t, "actor untouched probe", "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass");
 	const beforeHash = stateHash(t);
 	const beforeEvents = await auditActors(t, id);
-	const refused = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Author", env: envT });
+	const refused = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Author", env: envT, lesson: "self-author refusal fixture" });
 	expect(refused.code).toBe("NON_AUTHOR_REQUIRED");
 	expect(refused.acts).toEqual([]);
 	expect(stateHash(t)).toBe(beforeHash);
 	expect(await auditActors(t, id)).toEqual(beforeEvents);
-	const dry = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, dryRun: true, family: "same (bun)" });
+	const dry = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, dryRun: true, family: "same (bun)", lesson: "dry-run identity fixture" });
 	expect(dry.code).toBe("DRY_RUN");
 	expect(dry.acts.length).toBeGreaterThan(0);
 	expect(stateHash(t)).toBe(beforeHash);
@@ -673,11 +984,9 @@ test("VERIFYACTOR1 [a]: explicit-author refusal and dry-run leave fixture state 
 
 test("VERIFYACTOR1 [a]: intake refusal binds the reviewer on the open/needs-intake mutation (durable)", async () => {
 	const { dir: cdir, sha } = await repo("actorintake");
-	const t = await tracker("actorintake-t");
-	await actorPolicy(t);
+	const t = await sharedTracker("actor-t", actorPolicy);
 	const envT = ambientEnv(t.db);
-	const id = await createBead(t, "actor intake probe");
-	await shapeActorBead(t, id, "- [ ] [a] [build] prose names no command");
+	const id = await actorBead(t, "actor intake probe", "- [ ] [a] [build] prose names no command");
 	const beforeEvents = await auditActors(t, id);
 	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: REVIEWER, env: envT, family: "same (bun)" });
 	expect(res.code).toBe("ACCEPTANCE_NOT_REPLAYABLE");
@@ -718,16 +1027,15 @@ test("VERIFYSCRATCH1: a replay's fixture tracker under $GRADE_WAVE_SCRATCH is ad
 	await sh(["git", "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "-m", "fixture [test]"], cdir);
 	await publishHead(cdir, "verify-scratch");
 	const sha = (await sh(["git", "rev-parse", "HEAD"], cdir)).trim();
-	const t = await tracker("verifyscratch-t");
-	const id = await createBead(t, "verify scratch probe");
+	const t = await sharedTracker("replay-t");
 	const ac = [
 		`- [ ] [a] [build] selftest fixture under the verify scratch is admitted: \`sh scripts/fx.sh ${outside}\` -> prints FIXTURE_OK`,
 		`- [ ] [b] [build] the same fixture outside the verify root is refused: \`mkdir -p ${outside}/direct && cd ${outside}/direct && br init --db ${outside}/direct/.beads/beads.db\` -> prints READONLY_TRACKER`,
 		`- [ ] [c] [build] planted: with GRADE_WAVE_SCRATCH removed the first fixture is refused: \`env -u GRADE_WAVE_SCRATCH sh scripts/fx.sh ${outside}\` -> prints READONLY_TRACKER`,
 	].join("\n");
-	await shapeBead(t, id, ac);
+	const id = await shapedBead(t, "verify scratch probe", ac);
 	const beforeHash = stateHash(t);
-	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: trackerEnv(t), dryRun: true, family: "same (bun)" });
+	const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: trackerEnv(t), dryRun: true, family: "same (bun)", lesson: "scratch boundary fixture" });
 	expect(res.code).toBe("DRY_RUN");
 	expect(res.replays.map(r => [r.letter, r.pass, r.detail.split(";")[0]])).toEqual([
 		["a", true, "output contains \"FIXTURE_OK\""],
@@ -757,9 +1065,8 @@ async function policyTracker(name: string): Promise<{ dir: string; db: string }>
 /** A bead Author built and moved to in_review under the policy, its boxes unticked, optionally under `parent`. */
 async function reviewBead(t: { dir: string; db: string }, title: string, ac: string, parent?: string): Promise<string> {
 	const env = trackerEnv(t);
-	const id = await createBead(t, title);
+	const id = await createBead(t, title, ["--description", "WHAT: closepass fixture.\n\nWHY: proves verify closes done work under the real close policy.", "--acceptance-criteria", ac, "--assignee", "Author", ...(parent ? ["--parent", parent] : [])]);
 	for (const args of [
-		["update", id, "--description", "WHAT: closepass fixture.\n\nWHY: proves verify closes done work under the real close policy.", "--acceptance", ac, "--assignee", "Author", ...(parent ? ["--parent", parent] : [])],
 		["update", id, "--status", "in_progress", "--actor", "Author"],
 		["update", id, "--status", "in_review", "--transition-comment", "fixture ready", "--actor", "Author"],
 	]) {
@@ -779,7 +1086,7 @@ const BUILD_BOXES = "- [ ] [a] [build] `sh scripts/t.sh` -> 16 pass 0 fail\n- [ 
 /** A closed bead under `epic` and its open LIVEREADBACK child, through a real non-dry verify. */
 async function closedWithChild(t: { dir: string; db: string }, repoDir: { dir: string; sha: string }, title: string, live: string, epic: string): Promise<{ id: string; child: string }> {
 	const id = await reviewBead(t, title, `${BUILD_BOXES}\n${live}`, epic);
-	const res = await verifyBead({ bead: id, exportSha: repoDir.sha, repo: repoDir.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)" });
+	const res = await verifyBead({ bead: id, exportSha: repoDir.sha, repo: repoDir.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)", lesson: "deferred readback fixture" });
 	if (res.code !== "CLOSED" || res.child === undefined) throw new Error(`verify ${id} -> ${res.code}: ${res.log}`);
 	return { id, child: res.child };
 }
@@ -799,7 +1106,7 @@ test("CLOSEPASS1: two passing [build] boxes and an unticked [live] box close und
 	expect(refused.out).toContain("unchecked item(s) remain");
 	const epic = await createBead(t, "closepass epic");
 	const id = await reviewBead(t, "closepass parent", ac, epic);
-	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)" });
+	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "close-policy fixture" });
 	expect(res.code).toBe("CLOSED");
 	expect(res.acts.flat()).not.toContain("--force");
 	const parent = await row(t, id);
@@ -812,7 +1119,7 @@ test("CLOSEPASS1: two passing [build] boxes and an unticked [live] box close und
 	expect(child.dependencies).toContainEqual(expect.objectContaining({ id, dependency_type: "related" }));
 	expect((await row(t, epic)).status).toBe("open");
 	const allLive = await reviewBead(t, "closepass all live", live);
-	const pending = await verifyBead({ bead: allLive, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)" });
+	const pending = await verifyBead({ bead: allLive, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "pending-phase fixture" });
 	expect(pending.code).toBe("PENDING");
 	expect(pending.child).toBeUndefined();
 	expect(pending.acts).toEqual([]);
@@ -828,7 +1135,7 @@ test("CLOSEPASS1: a commandless [v][build] judgement stays on the parent when ex
 	const acceptance = `${BUILD_BOXES}\n${judgement}`;
 	const epic = await createBead(t, "closepass v build epic");
 	const id = await reviewBead(t, "closepass v build judgement", acceptance, epic);
-	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)" });
+	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "build judgement fixture" });
 	expect(res.code).toBe("PENDING");
 	expect(res.log).toContain("[v] build judgement remains on the parent");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true]]);
@@ -848,12 +1155,12 @@ test("CLOSEPASS1 no active parent: the child goes under the constraint lane's pa
 	const live = "- [ ] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass";
 	const lane = await createBead(t, "constraint lane parent");
 	const id = await reviewBead(t, "closepass orphan", `${BUILD_BOXES}\n${live}`);
-	const missing = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", laneParent: "cp-nosuch" });
+	const missing = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", laneParent: "cp-nosuch", lesson: "missing readback home fixture" });
 	expect(missing.code).toBe("PENDING");
 	expect(missing.acts).toEqual([]);
 	expect(missing.log).toContain(`${id} has no active parent and lane parent cp-nosuch is unreadable`);
 	expect((await row(t, id)).status).toBe("in_review");
-	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", laneParent: lane });
+	const res = await verifyBead({ bead: id, exportSha: code.sha, repo: code.dir, actor: "Peer", env, family: "same (bun)", laneParent: lane, lesson: "readback home fixture" });
 	expect(res.code).toBe("CLOSED");
 	expect(await row(t, res.child!)).toMatchObject({ status: "open", parent: lane, labels: [LIVE_READBACK_LABEL] });
 	expect(JSON.stringify(await row(t, id))).toContain(`(LIVEREADBACK, child of lane parent ${lane}, because ${id} has no active parent, related to ${id})`);
@@ -864,7 +1171,7 @@ test("CLOSEPASS1.live: --live-readback runs only the child's boxes on the instal
 	const t = await policyTracker("closepass-live-t");
 	const { id, child } = await closedWithChild(t, code, "closepass live pass", "- [ ] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass", await createBead(t, "closepass live epic"));
 	expect((await liveReadback({ bead: child, repo: code.dir, actor: "Author", env: trackerEnv(t) })).code).toBe("NON_AUTHOR_REQUIRED");
-	const res = await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)" });
+	const res = await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)", lesson: "installed readback fixture" });
 	expect(res.code).toBe("CLOSED");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["c", true]]);
 	expect(await row(t, child)).toMatchObject({ status: "closed", acceptance_criteria: "- [x] [c] [live] on the installed kit `sh scripts/t.sh` -> 16 pass" });
@@ -877,7 +1184,7 @@ test("CLOSEPASS1.live planted: a failing live box reopens the parent with REWORK
 	const t = await policyTracker("closepass-livefail-t");
 	const epic = await createBead(t, "closepass livefail epic");
 	const { id, child } = await closedWithChild(t, code, "closepass live fail", "- [ ] [c] [live] on the installed kit `sh scripts/bad.sh` -> prints PASS", epic);
-	const res = await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)" });
+	const res = await liveReadback({ bead: child, repo: code.dir, actor: "Peer", env: trackerEnv(t), family: "same (bun)", lesson: "failed readback fixture" });
 	expect(res.code).toBe("REWORK");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["c", false]]);
 	expect((await row(t, id)).status).toBe("open");
@@ -896,11 +1203,11 @@ test("CLOSEPASS1.all: --live-readback --all visits exactly the open live-readbac
 	const epic = await createBead(t, "closepass all epic");
 	const open = await closedWithChild(t, code, "closepass all open", box, epic);
 	const done = await closedWithChild(t, code, "closepass all done", box, epic);
-	expect((await liveReadback({ bead: done.child, repo: code.dir, actor: "Peer", env })).code).toBe("CLOSED");
+	expect((await liveReadback({ bead: done.child, repo: code.dir, actor: "Peer", env, lesson: "completed readback fixture" })).code).toBe("CLOSED");
 	const other = await createBead(t, "closepass unlabelled open bead");
 	const labelled = await createBead(t, "closepass labelled but in progress");
 	for (const args of [["update", labelled, "--add-label", LIVE_READBACK_LABEL, "--acceptance", box], ["update", labelled, "--status", "in_progress"]]) expect((await brun(args, t.dir, env)).rc).toBe(0);
-	const res = await liveReadbackAll({ repo: code.dir, actor: "Peer", env, family: "same (bun)" });
+	const res = await liveReadbackAll({ repo: code.dir, actor: "Peer", env, family: "same (bun)", lesson: "aggregate readback fixture" });
 	expect(res.visited).toEqual([open.child]);
 	expect(res.visited).not.toContain(other);
 	expect(res.results.map(r => [r.bead, r.code])).toEqual([[open.child, "CLOSED"]]);
@@ -918,7 +1225,7 @@ test("VERIFYSCRATCH1.exportroot: the export carries var/agent-tmp (gitignored, s
 	await publishHead(dir, "exportroot");
 	const sha = (await sh(["git", "rev-parse", "HEAD"], dir)).trim();
 	const scratch = "python3 -c 'import sys; sys.path.insert(0, \"scripts\"); import kitlib_tmp; print(\"scratch\", kitlib_tmp.owned_tmp(\"replay\", root=\"var/agent-tmp\").path)'";
-	const br = fakeBr(dir, inReview([
+	const br = fakeBr(inReview([
 		`- [ ] [a] [build] kitlib scratch under the export root: \`${scratch}\` -> prints var/agent-tmp/replay`,
 		"- [ ] [b] [build] KITLIB_TMP_ROOT names that dir: `python3 -c 'import os; print(os.path.isdir(os.environ[\"KITLIB_TMP_ROOT\"]), os.environ[\"KITLIB_TMP_ROOT\"].endswith(\"/export/var/agent-tmp\"))'` -> prints True True",
 		`- [ ] [c] [build] planted: without the dir the same call fails: \`rmdir var/agent-tmp && ${scratch}\` -> prints NotADirectoryError`,

@@ -1,5 +1,5 @@
 /**
- * `omp-kit verify <bead> --export <sha> [--actor NAME] [--project PATH] [--json] [--dry-run]`
+ * `omp-kit verify <bead> --export <sha> [--lesson TEXT] [--actor NAME] [--project PATH] [--json] [--dry-run]`
  * (AUTOCOMPLETE1 ompkit-fp72.135.3.17 [b]; plan section 22 step 6, section 23.2 close row, section 26 W1).
  *
  * The one non-author close verb. It exports the exact commit into owned scratch, replays each distinct
@@ -8,7 +8,8 @@
  * command is refused ACCEPTANCE_NOT_REPLAYABLE and the bead goes back to intake. The author's own seat is
  * refused NON_AUTHOR_REQUIRED. A box whose command fails sets REWORK naming the box. Only when every box passes
  * does it tick the boxes, report the reviewer gate under the caller's identity (family disclosed), write the
- * transition comment from the command log and close. Transaction metadata is completed; the verdict is earned.
+ * transition comment from the command log and close. A lesson is required before replay. Tracker acts are
+ * separate, not atomic: a refusal returns ACT_FAILED and reports any guarded acceptance restoration.
  * Before replay, verify the exact export SHA is reachable from a freshly fetched `origin/main`; unpublished or
  * unreadable exports are refused without replay or tracker acts.
  *
@@ -60,9 +61,13 @@ export const KNOWN_PHASES: Record<string, true> = { build: true, landed: true, l
  */
 export interface Box { index: number; item: number; letter: string | null; checked: boolean; phase: string | null; body: string; line: string }
 export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; rc: number | null; pass: boolean | null; detail: string }
+export interface AcceptanceRollback {
+	status: "NOT_NEEDED" | "RESTORED" | "ROLLBACK_REFUSED" | "STATE_UNPROVEN";
+	detail: string;
+}
 export interface VerifyResult {
 	ok: boolean;
-	code: "CLOSED" | "REWORK" | "ENVIRONMENT" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
+	code: "CLOSED" | "REWORK" | "ACT_FAILED" | "LESSON_MISSING" | "ENVIRONMENT" | "NON_AUTHOR_REQUIRED" | "ACCEPTANCE_NOT_REPLAYABLE" | "NOT_IN_REVIEW" | "NOT_LIVE_READBACK" | "EXPORT_FAILED" | "DRY_RUN" | "PENDING" | "NOT_PUBLISHED" | "UNKNOWN";
 	bead: string;
 	export: string;
 	replays: BoxReplay[];
@@ -70,6 +75,8 @@ export interface VerifyResult {
 	acts: string[][];
 	/** CLOSEPASS1: the LIVEREADBACK child holding the boxes this close deferred ("{child}" in a dry run). */
 	child?: string;
+	/** A compensation observation, never proof of an atomic tracker transaction. */
+	rollback?: AcceptanceRollback;
 }
 
 export function parseBoxes(acceptance: string): Box[] {
@@ -183,7 +190,51 @@ function ompEnvironmentFailure(out: string, env: Record<string, string>): string
 }
 
 /** `laneParent` overrides LANE_PARENT (a tracker without the omp-kit lane, such as a fixture). */
-export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; laneParent?: string }
+export interface VerifyInput { bead: string; exportSha: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; laneParent?: string; lesson?: string }
+
+function commentLesson(body: string): string | null {
+	for (const raw of body.split("\n")) {
+		const line = raw.trim();
+		if (line.slice(0, 7).toLowerCase() === "lesson:" && line.slice(7).trim()) return line;
+	}
+	return null;
+}
+
+/** Only explicit input or the bead author's own comments can supply a lesson. */
+async function closeLesson(explicit: string | undefined, bead: BeadRow, repo: string, env: Record<string, string>): Promise<string | null> {
+	if (explicit !== undefined) {
+		const value = explicit.trim();
+		if (!value) return null;
+		return value.slice(0, 7).toLowerCase() === "lesson:" ? commentLesson(value) : `Lesson: ${value}`;
+	}
+	const author = bead.assignee ?? bead.createdBy;
+	if (author === null) return null;
+	const db = env.BEADS_DB ? ["--db", env.BEADS_DB] : [];
+	const result = await run(["br", "comments", "list", bead.id, "--json", ...db], { cwd: repo, deadline_s: 60, env });
+	if (result.rc !== 0 || result.truncated || result.total_truncated) return null;
+	let doc: unknown;
+	try { doc = JSON.parse(text(result.stdout)); } catch { return null; }
+	const comments = Array.isArray(doc) ? doc : doc !== null && typeof doc === "object" && "comments" in doc && Array.isArray(doc.comments) ? doc.comments : [];
+	let selected: string | null = null;
+	let selectedTime = -Infinity;
+	let selectedId = -Infinity;
+	for (const value of comments) {
+		if (value === null || typeof value !== "object") continue;
+		const row = value as Record<string, unknown>;
+		if (typeof row.author !== "string" || row.author.toLowerCase() !== author.toLowerCase() || typeof row.text !== "string") continue;
+		const lesson = commentLesson(row.text);
+		if (lesson === null) continue;
+		const parsedTime = typeof row.created_at === "string" ? Date.parse(row.created_at) : NaN;
+		const time = Number.isFinite(parsedTime) ? parsedTime : 0;
+		const id = typeof row.id === "number" ? row.id : 0;
+		if (time > selectedTime || time === selectedTime && id > selectedId) {
+			selected = lesson;
+			selectedTime = time;
+			selectedId = id;
+		}
+	}
+	return selected;
+}
 
 export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const env = { ...process.env, ...(input.env ?? {}) } as Record<string, string>;
@@ -210,6 +261,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		log.push(`not replayable: ${bad.length ? bad.map(b => { const why = unreplayableReason(b); return why === "unsupported-phase" ? `${tag(b)} unsupported phase [${b.phase}]` : why === "no-command" ? `${tag(b)} names no command` : why === "arrow-before-command" ? `${tag(b)} has -> before its first backticked span ${JSON.stringify(commandOf(b.body))}` : `${tag(b)} first backticked span ${JSON.stringify(commandOf(b.body))} is not followed by -> <expected> or expect: <expected>`; }).join("; ") : "no boxes"}`);
 		return { ok: false, code: "ACCEPTANCE_NOT_REPLAYABLE", bead: input.bead, export: input.exportSha, replays: [], log: log.join("\n"), acts: [["br", "update", input.bead, "--status", "open", "--add-label", "needs-intake", "--actor", input.actor]] };
 	}
+	if (row === null) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("UNJUDGED: bead became unreadable").join("\n"), acts };
+	const lesson = await closeLesson(input.lesson, row, input.repo, env);
+	if (lesson === null) return { ok: false, code: "LESSON_MISSING", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran").join("\n"), acts };
 	// The owned replay fixture uses an explicit database path under its per-run
 	// scratch; deleting BEADS_DB alone would still discover an ancestor tracker.
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
@@ -360,12 +414,12 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	}
 	acts.push(["br", "update", input.bead, "--check-acceptance", ticks.join(","), "--actor", input.actor]);
 	acts.push(["br", "gate", "report", input.bead, "--gate", "min_reviewers", "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
-	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${log.join("\n")}`, "--actor", input.actor]);
+	acts.push(["br", "close", input.bead, "--reason", reason, "--transition-comment", `CLOSED ${input.bead} by ${input.actor} (family: ${family})\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	if (homeNote) log.push(`LIVEREADBACK child placed under ${homeNote}`);
 	const child = deferred.length > 0 ? CHILD : undefined;
 	if (input.dryRun) return { ok: true, code: "DRY_RUN", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts, child };
-	const done = await executeActs(acts, input.repo, env);
-	if (done.failure !== null) return { ok: false, code: "REWORK", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child ?? child };
+	const done = await executeActs(acts, input.repo, env, { bead: row, actor: input.actor });
+	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: input.exportSha, replays, log: log.concat(done.failure).join("\n"), acts: done.acts, child: done.child, rollback: done.rollback };
 	return { ok: true, code: "CLOSED", bead: input.bead, export: input.exportSha, replays, log: log.join("\n"), acts: done.acts, child: done.child };
 }
 
@@ -373,28 +427,79 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
  * Run tracker acts in order. The id a `br create --json` act prints replaces CHILD in every later act, and the
  * returned acts carry that substitution. The first non-zero act stops the run and is named in `failure`.
  */
-async function executeActs(acts: string[][], cwd: string, env: Record<string, string>): Promise<{ acts: string[][]; child?: string; failure: string | null }> {
+type ActCheckpoint = { bead: BeadRow; actor: string };
+
+function acceptanceAfterAct(acceptance: string, argv: string[]): string {
+	const replacement = argv.indexOf("--acceptance-criteria");
+	let value = replacement < 0 ? acceptance : argv[replacement + 1] ?? acceptance;
+	const tick = argv.indexOf("--check-acceptance");
+	if (tick < 0) return value;
+	const selected = new Set((argv[tick + 1] ?? "").split(",").map(Number));
+	let item = 0;
+	value = value.split("\n").map(raw => {
+		if (!CHECKLIST_ITEM.test(raw.trim()) || !selected.has(++item)) return raw;
+		const bracket = raw.indexOf("[");
+		return raw.slice(0, bracket + 1) + "x" + raw.slice(bracket + 2);
+	}).join("\n");
+	return value;
+}
+
+/** Compensate only this attempt's acceptance edit; never overwrite a peer change. */
+async function restoreAcceptance(checkpoint: ActCheckpoint, expected: string, cwd: string, env: Record<string, string>, acts: string[][]): Promise<AcceptanceRollback> {
+	const before = checkpoint.bead;
+	if (expected === before.acceptance) return { status: "NOT_NEEDED", detail: "this attempt did not change acceptance" };
+	const current = await showBead(before.id, cwd, env);
+	if (current?.acceptance === before.acceptance && current.status === before.status)
+		return { status: "RESTORED", detail: "original acceptance and status are present" };
+	if (current === null || current.status !== before.status || current.acceptance !== expected || current.updatedAt === null)
+		return { status: "STATE_UNPROVEN", detail: "current tracker state differs from this attempt; no peer edit was overwritten" };
+	const undo = ["br", "update", before.id, "--acceptance-criteria", before.acceptance, "--if-unchanged", current.updatedAt, "--actor", checkpoint.actor];
+	acts.push(undo);
+	const restored = await run(undo, { cwd, deadline_s: 60, env });
+	if (restored.rc !== 0) return { status: "ROLLBACK_REFUSED", detail: `acceptance restore rc ${restored.rc}: ${text(restored.stderr)}` };
+	const checked = await showBead(before.id, cwd, env);
+	return checked?.acceptance === before.acceptance && checked.status === before.status
+		? { status: "RESTORED", detail: "original acceptance and status verified after revision-guarded restore" }
+		: { status: "STATE_UNPROVEN", detail: "acceptance restore readback did not verify original state" };
+}
+
+async function executeActs(acts: string[][], cwd: string, env: Record<string, string>, checkpoint?: ActCheckpoint): Promise<{ acts: string[][]; child?: string; failure: string | null; rollback?: AcceptanceRollback }> {
 	let child: string | undefined;
+	let expectedAcceptance = checkpoint?.bead.acceptance ?? "";
+	let failure: string | null = null;
 	const ranActs: string[][] = [];
 	const bind = (a: string[]) => child === undefined ? a : a.map(arg => arg.replaceAll(CHILD, child!));
 	for (const act of acts) {
 		const argv = bind(act);
 		ranActs.push(argv);
+		// A nonzero exit can follow a committed write (for example, export failure).
+		if (checkpoint !== undefined && argv[1] === "update" && argv[2] === checkpoint.bead.id)
+			expectedAcceptance = acceptanceAfterAct(expectedAcceptance, argv);
 		const r = await run(argv, { cwd, deadline_s: 60, env });
-		if (r.rc !== 0) return { acts: ranActs.concat(acts.slice(ranActs.length).map(bind)), child, failure: `act failed rc ${r.rc}: ${argv.slice(0, 4).join(" ")}: ${text(r.stderr).slice(0, 200)}` };
+		if (r.rc !== 0) {
+			failure = `act failed rc ${r.rc}: ${argv.slice(0, 4).join(" ")}: ${text(r.stderr)}`;
+			break;
+		}
 		if (argv[1] === "create") {
 			let doc: unknown;
 			try { doc = JSON.parse(text(r.stdout)); } catch { doc = null; }
 			const id = doc !== null && typeof doc === "object" && "id" in doc ? doc.id : undefined;
-			if (typeof id !== "string" || id === "") return { acts: ranActs, child, failure: `act failed: br create printed no child id: ${text(r.stdout).slice(0, 200)}` };
+			if (typeof id !== "string" || id === "") {
+				failure = `act failed: br create printed no child id: ${text(r.stdout)}`;
+				break;
+			}
 			child = id;
 		}
 	}
-	return { acts: ranActs, child, failure: null };
+	if (failure === null) return { acts: ranActs, child, failure: null };
+	const rollback = checkpoint === undefined
+		? { status: "NOT_NEEDED" as const, detail: "no acceptance checkpoint was changed" }
+		: await restoreAcceptance(checkpoint, expectedAcceptance, cwd, env, ranActs);
+	return { acts: ranActs, child, rollback, failure: `${failure}\nrollback: ${rollback.status}` };
 }
 
 /** The fields verify reads from one `br show --json` row, or null when br names no such bead. `related` lists the ids its `related` dependencies point at. */
-interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; labels: string[]; parent: string | null; related: string[] }
+interface BeadRow { id: string; title: string; description: string; acceptance: string; status: string; assignee: string | null; createdBy: string | null; updatedAt: string | null; labels: string[]; parent: string | null; related: string[] }
 
 async function showBead(id: string, repo: string, env: Record<string, string>): Promise<BeadRow | null> {
 	const show = await run(["br", "show", id, "--json"], { cwd: repo, deadline_s: 60, env, max_output_bytes: 4 * 1024 * 1024 });
@@ -409,10 +514,10 @@ async function showBead(id: string, repo: string, env: Record<string, string>): 
 	const related = (Array.isArray(record.dependencies) ? record.dependencies : [])
 		.map((dep: unknown) => dep !== null && typeof dep === "object" && "dependency_type" in dep && dep.dependency_type === "related" && "id" in dep && typeof dep.id === "string" ? dep.id : "")
 		.filter(dep => dep !== "");
-	return { id: field("id") ?? id, title: field("title") ?? "", description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), labels, parent: field("parent"), related };
+	return { id: field("id") ?? id, title: field("title") ?? "", description: field("description") ?? "", acceptance: field("acceptance_criteria") ?? "", status: field("status") ?? "", assignee: field("assignee"), createdBy: field("created_by"), updatedAt: field("updated_at"), labels, parent: field("parent"), related };
 }
 
-export interface LiveReadbackInput { bead: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string }
+export interface LiveReadbackInput { bead: string; repo: string; actor: string; env?: Record<string, string>; dryRun?: boolean; family?: string; lesson?: string }
 
 /**
  * `omp-kit verify <child> --live-readback` (CLOSEPASS1 ompkit-774u.52 [b]). Runs an open LIVEREADBACK child's
@@ -437,6 +542,8 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	const toRun = boxes.filter(b => b.letter !== "v" && !b.checked);
 	const bad = toRun.filter(b => unreplayableReason(b) !== null);
 	if (bad.length > 0) return refuse("ACCEPTANCE_NOT_REPLAYABLE", `not replayable: ${bad.map(b => `${tag(b)} ${unreplayableReason(b)}`).join("; ")}`);
+	const lesson = await closeLesson(input.lesson, child, input.repo, env);
+	if (lesson === null) return refuse("LESSON_MISSING", "LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran");
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
 	const scratch = ownedTmp("verify-live", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
 	const realBr = resolveRealBr(env.PATH);
@@ -462,12 +569,12 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 		const ticks = boxes.filter(b => !b.checked).map(b => b.item);
 		if (ticks.length > 0) acts.push(["br", "update", child.id, "--check-acceptance", ticks.join(","), "--actor", input.actor]);
 		acts.push(["br", "gate", "report", child.id, "--gate", "min_reviewers", "--provider", `reviewer:${input.actor}`, "--status", "pass", "--to", "closed", "--actor", input.actor]);
-		acts.push(["br", "close", child.id, "--reason", `live readback of ${parent.id} by ${input.actor} (family: ${family}) on the installed kit: ${replays.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}`, "--transition-comment", `CLOSED ${child.id} by ${input.actor} (family: ${family})\n${log.join("\n")}`, "--actor", input.actor]);
+		acts.push(["br", "close", child.id, "--reason", `live readback of ${parent.id} by ${input.actor} (family: ${family}) on the installed kit: ${replays.map(r => `${tag(r)} ${r.command} -> ${r.detail}`).join("; ")}`, "--transition-comment", `CLOSED ${child.id} by ${input.actor} (family: ${family})\n${lesson}\n${log.join("\n")}`, "--actor", input.actor]);
 	}
 	const code: VerifyResult["code"] = input.dryRun ? "DRY_RUN" : failed.length > 0 ? "REWORK" : "CLOSED";
 	if (input.dryRun) return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts };
-	const done = await executeActs(acts, input.repo, env);
-	if (done.failure !== null) return { ok: false, code: "REWORK", bead: input.bead, export: "installed", replays, log: log.concat(done.failure).join("\n"), acts: done.acts };
+	const done = await executeActs(acts, input.repo, env, failed.length > 0 ? undefined : { bead: child, actor: input.actor });
+	if (done.failure !== null) return { ok: false, code: "ACT_FAILED", bead: input.bead, export: "installed", replays, log: log.concat(done.failure).join("\n"), acts: done.acts, rollback: done.rollback };
 	return { ok: failed.length === 0, code, bead: input.bead, export: "installed", replays, log: log.join("\n"), acts: done.acts };
 }
 

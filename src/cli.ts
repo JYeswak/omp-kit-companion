@@ -90,6 +90,7 @@ import { realGradableCandidates } from "./grader-next-sources/gradable.ts";
 import { ccGapCandidates } from "./grader-next-sources/cc-gaps.ts";
 import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
+import { TOOL_NAME_PATTERN, defaultUpgradeRunner, dependentBinaries, findRepoPins, installedDependents, planUpgrade, verifyDependents } from "./infra-upgrade.ts";
 import { appendReapReceipt, defaultGitLockLedgerPath, indexLockStaleAfterMs, maybeMoveStaleIndexLock, reapRepoGitLocks, reapStaleAfterMs, reportOrphanedGitHelpers } from "./index-lock.ts";
 import { proveSend, proveTernCliSend, routeSendTarget, ternSendSeat } from "./send.ts";
 import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
@@ -3826,6 +3827,57 @@ registerCommandHandler("brief", async request => {
 		return refusal("BRIEF_UNAVAILABLE", error instanceof Error ? error.message : String(error), "Restore readable repository/gate inputs; no contract was issued.");
 	}
 });
+/** TOOLPIN1: before a tool/library upgrade list every fleet pin and installed dependent; after it, start every dependent. */
+function infraUpgradeCommand(request: ParsedCommand): CliResult {
+	const sub = request.command.name;
+	const tool = request.flags.get("--tool");
+	if (typeof tool !== "string" || !TOOL_NAME_PATTERN.test(tool))
+		return refusal("MISSING_ARGUMENT", `infra ${sub} needs --tool NAME (brew formula or tool name)`, "Pass --tool NAME; nothing was changed.");
+	const dependents = installedDependents(tool, defaultUpgradeRunner);
+	if (sub === "upgrade-verify") {
+		if (dependents === null)
+			return { code: 3, data: { overall: "UNAVAILABLE", command: sub, tool },
+				errors: [{ code: "BREW_UNAVAILABLE", message: `brew uses --installed ${tool} failed`, remediation: "Restore Homebrew; no dependent was checked." }], verification: "UNVERIFIED" };
+		const binaries = dependentBinaries(dependents, defaultUpgradeRunner);
+		const failures = verifyDependents(binaries, defaultUpgradeRunner);
+		const text = failures.length
+			? [`${failures.length} dependent binary(ies) of ${tool} no longer start:`, ...failures.map((entry) => `  ${entry.formula}: ${entry.binary} — ${entry.reason}`)].join("\n")
+			: `All ${binaries.length} binaries of ${dependents.length} installed dependent(s) of ${tool} start.`;
+		if (failures.length)
+			return { code: 1, data: { overall: "FINDINGS", command: sub, tool, dependents, checked: binaries.length, failures, text },
+				errors: [{ code: "DEPENDENT_BROKEN", message: `${failures.map((entry) => entry.formula).join(", ")} no longer start after the ${tool} upgrade`,
+					remediation: `Reinstall or upgrade the named dependents (brew upgrade/reinstall), or roll back ${tool}; rerun infra upgrade-verify --tool ${tool}.` }], verification: "UNVERIFIED" };
+		return { code: 0, data: { overall: "OK", command: sub, tool, dependents, checked: binaries.length, failures, text }, verification: "UNVERIFIED" };
+	}
+	const home = process.env.HOME;
+	const repoFlag = request.flags.get("--repo");
+	const repos = repoFlag !== undefined ? String(repoFlag).split("\n").filter((entry) => entry !== "") : home && isAbsolute(home) ? discoverFleetRepos(home) : [];
+	if (repos.length === 0 || repos.some((entry) => !isAbsolute(entry)))
+		return refusal("INVALID_REPO", "infra upgrade-plan needs absolute fleet repos (absolute HOME or --repo PATH)", "Pass --repo /absolute/repo (repeatable); nothing was changed.");
+	const read = (path: string): string | null => {
+		try {
+			const stat = lstatSync(path);
+			return stat.isFile() && stat.size <= 256 * 1024 ? readFileSync(path, "utf8") : null;
+		} catch {
+			return null;
+		}
+	};
+	const pins = repos.flatMap((repo) => findRepoPins(repo, tool, read));
+	const pinPlan = request.flags.get("--pin-plan");
+	const plan = planUpgrade(pins, dependents ?? [], typeof pinPlan === "string" ? pinPlan : undefined);
+	const dependentLine = dependents === null ? "installed dependents: UNKNOWN (brew uses failed)" : `installed dependents (${dependents.length}): ${dependents.join(", ") || "none"}`;
+	const after = `after upgrading run: omp-kit infra upgrade-verify --tool ${tool}`;
+	const pinLines = pins.map((pin) => `  ${join(pin.repo, pin.file)} (${pin.kind}) ${pin.version}`);
+	if (!plan.ok) {
+		const text = [`REFUSED: ${plan.uncovered.length} fleet pin(s) of ${tool} not covered by --pin-plan:`, ...plan.uncovered.map((pin) => `  ${join(pin.repo, pin.file)} (${pin.kind}) ${pin.version}`), dependentLine, after].join("\n");
+		return { code: 1, data: { overall: "FINDINGS", command: sub, tool, status: "REFUSED", pins, uncovered: plan.uncovered, dependents, text },
+			errors: [{ code: "UNPLANNED_PIN", message: `${tool} is pinned at ${plan.uncovered.map((pin) => join(pin.repo, pin.file)).join(", ")}`,
+				remediation: `Pass --pin-plan TEXT naming every listed pin file and how it is bumped in the same change; do not upgrade ${tool} yet.` }], verification: "UNVERIFIED" };
+	}
+	const text = [pins.length ? `Every fleet pin of ${tool} is covered by the plan:` : `No fleet repo pins ${tool}.`, ...pinLines, dependentLine, after].join("\n");
+	return { code: 0, data: { overall: "OK", command: sub, tool, status: "CLEAR", pins, uncovered: [], dependents, text }, verification: "UNVERIFIED" };
+}
+for (const subcommand of ["upgrade-plan", "upgrade-verify"]) registerCommandHandler(`infra ${subcommand}`, infraUpgradeCommand);
 for (const subcommand of ["pin", "check", "promote", "undo"]) registerCommandHandler(`infra ${subcommand}`, infraCommand);
 
 async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
@@ -4361,27 +4413,38 @@ registerCommandHandler("verify", async request => {
 	const actor = typeof actorFlag === "string" && actorFlag.trim() ? actorFlag.trim() : process.env.AGENT_NAME;
 	const familyFlag = request.flags.get("--family");
 	const family = typeof familyFlag === "string" ? familyFlag : undefined;
+	const lessonFlag = request.flags.get("--lesson");
+	if (lessonFlag !== undefined && (typeof lessonFlag !== "string" || !lessonFlag.trim()))
+		return refusal("INVALID_FLAG", "--lesson requires non-empty text", "Pass --lesson TEXT or leave an author Lesson: comment before verification.");
+	const lesson = typeof lessonFlag === "string" ? lessonFlag : undefined;
 	const repo = verifyProject(request.flags.get("--project"));
 	const dryRun = request.flags.get("--dry-run") === true;
 	if (request.flags.get("--all") === true && request.flags.get("--live-readback") !== true) return refusal("INVALID_FLAG", "--all is only valid with --live-readback", "Use omp-kit verify --live-readback --all.");
 	if (request.flags.get("--live-readback") === true) {
 		if (!actor) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
 		if (request.flags.get("--all") === true) {
-			const all = await liveReadbackAll({ repo, actor, family, dryRun });
+			const all = await liveReadbackAll({ repo, actor, family, lesson, dryRun });
 			const unread = all.visited.length === 0 && !all.ok;
-			return { code: unread ? 2 : all.results.some(r => r.code === "REWORK") ? 1 : 0, data: { overall: unread ? "UNVERIFIED" : all.ok ? "OK" : "FINDINGS", visited: all.visited, results: all.results.map(r => ({ bead: r.bead, code: r.code, replays: r.replays, acts: r.acts, log: r.log })), log: all.log }, verification: dryRun ? "NOT_RUN" : "PERFORMED" };
+			let code: 0 | 1 | 2 = unread ? 2 : 0;
+			let replayed = false;
+			for (const result of all.results) {
+				if (result.code !== "CLOSED" && result.code !== "DRY_RUN" && result.code !== "REWORK") code = 2;
+				else if (result.code === "REWORK" && code === 0) code = 1;
+				if (result.replays.length > 0) replayed = true;
+			}
+			return { code, data: { overall: unread ? "UNVERIFIED" : all.ok ? "OK" : "FINDINGS", visited: all.visited, results: all.results.map(r => ({ bead: r.bead, code: r.code, replays: r.replays, acts: r.acts, log: r.log, ...(r.rollback === undefined ? {} : { rollback: r.rollback }) })), log: all.log }, verification: dryRun || !replayed ? "NOT_RUN" : "PERFORMED" };
 		}
 		if (!request.argument) return refusal("MISSING_ARGUMENT", "A LIVEREADBACK bead id is required", "Use omp-kit verify CHILD --live-readback, or --live-readback --all.");
-		const live = await liveReadback({ bead: request.argument, repo, actor, family, dryRun });
-		return { code: live.code === "CLOSED" || live.code === "DRY_RUN" ? 0 : live.code === "REWORK" ? 1 : 2, data: { overall: live.code, bead: live.bead, export: live.export, replays: live.replays, acts: live.acts, log: live.log }, verification: live.code === "DRY_RUN" ? "NOT_RUN" : "PERFORMED" };
+		const live = await liveReadback({ bead: request.argument, repo, actor, family, lesson, dryRun });
+		return { code: live.code === "CLOSED" || live.code === "DRY_RUN" ? 0 : live.code === "REWORK" ? 1 : 2, data: { overall: live.code, bead: live.bead, export: live.export, replays: live.replays, acts: live.acts, log: live.log, ...(live.rollback === undefined ? {} : { rollback: live.rollback }) }, verification: live.code === "DRY_RUN" || live.replays.length === 0 ? "NOT_RUN" : "PERFORMED" };
 	}
 	if (!request.argument) return refusal("MISSING_ARGUMENT", "A bead id is required", "Use omp-kit verify BEAD --export SHA.");
 	const exportSha = request.flags.get("--export");
 	if (typeof exportSha !== "string" || !/^[0-9a-f]{7,40}$/.test(exportSha.trim())) return refusal("INVALID_FLAG", "--export requires a commit sha", "Pass --export <sha> of the exact commit to replay.");
 	if (!actor) return refusal("NO_SEAT_IDENTITY", "no --actor and no AGENT_NAME", "Pass --actor NAME or export AGENT_NAME.");
-	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo, actor, family, dryRun });
+	const res = await verifyBead({ bead: request.argument, exportSha: exportSha.trim(), repo, actor, family, lesson, dryRun });
 	const code = res.code === "CLOSED" || res.code === "DRY_RUN" ? 0 : res.code === "REWORK" ? 1 : 2;
-	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log, ...(res.child === undefined ? {} : { child: res.child }) }, verification: res.code === "DRY_RUN" ? "NOT_RUN" : "PERFORMED" };
+	return { code, data: { overall: res.code, bead: res.bead, export: res.export, replays: res.replays, acts: res.acts, log: res.log, ...(res.child === undefined ? {} : { child: res.child }), ...(res.rollback === undefined ? {} : { rollback: res.rollback }) }, verification: res.code === "DRY_RUN" || res.replays.length === 0 ? "NOT_RUN" : "PERFORMED" };
 });
 // SLICEVERIFY1 (ompkit-t7cn7.7): change-vs-export verdict for one overlay.
 registerCommandHandler("slice-verify", async request => {
@@ -4937,8 +5000,11 @@ export function ccActionSurface(parsed: ParseResult): string {
 
 export type CcActionOutcome = { outcome: "ok" | "refused" | "failed" | "timeout"; code: string | null };
 
-/** ok on exit 0; timeout on exit 124, exit 75 (heavy deferred: queue timeout or --no-wait busy) or a timeout-marked error code; refused when usage_or_blocked (exit 2) carries a refusal code in errors[0].code (every refusal() is code 2: CONSENT_REQUIRED, ADMISSION_REFUSED, UNKNOWN_COMMAND, ...); failed otherwise. */
-export function ccActionOutcome(exitCode: number, errors?: readonly { code: string }[]): CcActionOutcome {
+/** A failure with no errors[] is named by the verb's declared exit class, so a doctor FAIL (exit 1 = finding) reads FINDING, not HANDLER_FAILED (JEVDOCTOR1, ompkit-fp72.120.16.161). */
+const CC_EXIT_CLASS = new Map<number, string>(Object.entries(EXIT_CODES).filter(([, code]) => code !== 0).map(([name, code]) => [code, name.toUpperCase()]));
+
+/** ok on exit 0; timeout on exit 124, exit 75 (heavy deferred: queue timeout or --no-wait busy) or a timeout-marked error code; refused when usage_or_blocked (exit 2) carries a refusal code in errors[0].code (every refusal() is code 2: CONSENT_REQUIRED, ADMISSION_REFUSED, UNKNOWN_COMMAND, ...); failed otherwise, coded by errors[0].code, else by the EXIT_CODES class (FINDING, USAGE_OR_BLOCKED, UNAVAILABLE, RETRYABLE, NOT_RUN), else EXIT_<n>. relayed marks a child's status (heavy), which is no kit exit class and is always EXIT_<n>. */
+export function ccActionOutcome(exitCode: number, errors?: readonly { code: string }[], relayed = false): CcActionOutcome {
 	const errCode = errors?.[0]?.code;
 	if (exitCode === 124 || exitCode === 75 || (typeof errCode === "string" && /TIMEOUT|TIMED_OUT|DEADLINE/i.test(errCode)))
 		return { outcome: "timeout", code: typeof errCode === "string" && errCode ? errCode : "TIMEOUT" };
@@ -4948,7 +5014,8 @@ export function ccActionOutcome(exitCode: number, errors?: readonly { code: stri
 	// array so stdout JSON still renders, hence the exit-code-only match.
 	if (exitCode === 10 || exitCode === 11) return { outcome: "ok", code: exitCode === 10 ? "HELD" : "DIRTY_UNOWNED" };
 	if (exitCode === 2 && typeof errCode === "string" && errCode && errCode !== "HANDLER_FAILED") return { outcome: "refused", code: errCode };
-	return { outcome: "failed", code: typeof errCode === "string" && errCode ? errCode : "HANDLER_FAILED" };
+	if (typeof errCode === "string" && errCode) return { outcome: "failed", code: errCode };
+	return { outcome: "failed", code: (relayed ? undefined : CC_EXIT_CLASS.get(exitCode)) ?? `EXIT_${exitCode}` };
 }
 
 /** Best-effort single-envelope emit; a telemetry fault must not change the verb's exit code. */
@@ -5034,7 +5101,7 @@ export async function runCli(args: readonly string[] = process.argv.slice(2)): P
 			...(typeof maxRuntime === "string" ? { maxRuntime } : {}),
 			noWait: parsed.request.flags.has("--no-wait"),
 		});
-		outcome = ccActionOutcome(exitCode);
+		outcome = ccActionOutcome(exitCode, undefined, true);
 	} else {
 		const json = "request" in parsed ? parsed.request.json : parsed.json;
 		const version = kitIdentity().version;

@@ -120,5 +120,15 @@ export function classifyMineResult(input: MineResultInput): { class_id: string; 
 	if (timedOut !== false && (timedOut === true || exit === 124 || exit === 142 || outcome === "timeout" || timeoutDiagnostic)) {
 		return finding(`${/^mcp(?:__|[._-])/.test(tool) ? "mcp-transport" : "timeout"}:${toolName(tool)}`);
 	}
+	// JEVDOCTOR1 (ompkit-fp72.120.16.161): a failed record that carries its own contract code is
+	// that class, never unclassified. Only the record's own `code` counts: a guard rule on a failed
+	// call is not its cause. The kit's exit-1 class FINDING is a check's answer, kept visible.
+	const ownCode = text(root?.code);
+	if (failed && ownCode.length <= 96 && /^[A-Z][A-Z0-9_]*$/.test(ownCode)) {
+		const name = toolName(tool);
+		return ownCode === "FINDING"
+			? finding(`finding:${name}`, body || `${name} exited with a FAIL finding (exit class FINDING)`)
+			: finding(`tool-error:${name}:${toolName(ownCode)}`, body || `${name} failed with ${ownCode}`);
+	}
 	return failed ? finding("tool-error:unclassified") : null;
 }

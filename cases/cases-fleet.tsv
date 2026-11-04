@@ -19,6 +19,11 @@ kit-no-force-push	quiet	tool	bash	-	git push origin main	plain push stays quiet
 kit-no-force-push	fire	tool	bash	-	git push\t--force origin main	tab-separated force flag	
 kit-no-force-push	fire	tool	bash	-	git push origin main \\n--force	line-continuation before force flag	
 kit-no-force-push	quiet	tool	bash	-	cd repo && git tag -a v0.2.4 -m "v0.2.4" <sha> && AGENT_NAME=YellowSalmon git push origin v0.2.4 2>&1 | tail -1; gh workflow run release.yml -R JYeswak/omp-kit-companion --ref v0.2.4 -f version=0.2.4 2>&1 | tail -1	gh -f after ; and pipe does not belong to git push	
+kit-no-force-push	fire	tool	bash	-	git -C repo push origin HEAD:main --force	global -C option before push still fires	
+kit-no-force-push	quiet	tool	bash	-	br update cfs-j2wma.4 --claim --force --actor Wave6Port 2>&1 | cat	fp72.120.16.169 labeled false oct6: bead claim, not a push	
+kit-no-force-push	quiet	tool	bash	-	br close ompkit-fp72.19.1.29 --force --actor Close29 --reason "NON-AUTHOR c"	fp72.120.16.169 labeled false oct7: bead close, not a push	
+kit-no-force-push	quiet	tool	bash	-	br comment ompkit-6nv6 --actor GradeGrowth --body 'GROWTH1 claims no deletion. Needs director ruling: --force close or re-parent .7-.11.'	fp72.120.16.169 labeled false oct2: --force in a comment body	
+kit-no-force-push	quiet	tool	bash	-	git push origin main && br close x --force	--force on a later command, not on the push	
 kit-no-shared-merge	fire	tool	bash	-	git merge --no-edit origin/main	CFS true-positive control; direct git merge invocation remains blocked	
 kit-no-shared-merge	fire	tool	bash	-	git fetch origin && git merge --no-edit origin/main	compound shape of the same refused merge	
 kit-no-shared-merge	fire	tool	bash	-	git pull	peer pull occurrence shape per coordinator 2026-10-06	

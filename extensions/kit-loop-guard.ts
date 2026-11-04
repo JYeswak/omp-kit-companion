@@ -30,7 +30,7 @@ export const JSON_PARSE_FIX =
 	"Tool-result text is not JSON: it carries a `Wall time` trailer and large output " +
 	"is truncated into an artifact, so JSON.parse on it cannot succeed. Parse inside the " +
 	"command with jq (e.g. `br show <id> --json | jq ...`), or parse the captured stdout " +
-	"of a subprocess instead of the tool-result text. See rules/kit-tool-result-is-not-json.md.";
+	"of a subprocess instead of the tool-result text. See retired/kit-tool-result-is-not-json.md.";
 
 export interface LoopGuardState {
 	count: number;

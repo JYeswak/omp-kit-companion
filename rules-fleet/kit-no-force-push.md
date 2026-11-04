@@ -1,11 +1,12 @@
 ---
 condition:
   # A streaming prefix ending right after --force must not fire: the flag needs a
-  # real delimiter (shell separator, JSON wire close, or escaped newline), and the
-  # The short -f flag must stay inside the same git push simple command.
-  - '--force(?:(?<=\\t--force)|(?<![\w''"\x60-]--force))(?!-with-lease)(?=[\s;&|)"\x60]|\\n)(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)'
+  # real delimiter (shell separator, JSON wire close, or escaped newline).
+  # Both flags must sit inside one git push simple command (global options such as
+  # -C may come before push). fp72.120.16.169: 10/10 labeled October fires were
+  # br close/update --force or --force inside a mail/comment body, none a push.
+  - '\bgit(?:[ \t]|\\{1,3}t)(?:[^;&|\\\r\n]|\\{1,3}t|\\")*?(?<=[ \t]|\\t)push(?=[ \t]|\\{1,3}t|\\{3}n)(?=(?:[^;&|\\\r\n]|\\{1,3}t|\\{3}n|\\")*?(?<=[ \t]|\\t|\\{3}n)--force(?!-with-lease)(?=[\s;&|)"\x60]|\\n))(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)'
   - '\bgit(?:[ \t]+|\\{1,3}t)push(?=(?:[^;&|\\\r\n]|\\{1,3}t)*?(?:[ \t]|\\{1,3}t)(?<!-)-f(?=[\s;&|)"\x60]|\\n))(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)'
-  - '\\{3}n--force(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+''[^'']*)(?<!\b(?:echo|printf)\b(?:\s+(?:[^\s"''\\;&|()<>\x60]|''[^'']*''|\\"(?:[^"\\]|\\\\(?:\\.|[^\\"])|\\[^"\\])*\\")+)*\s+\\"(?:[^"\\$\x60]|\\\\(?:\\.|[^\\"])|\\[^"\\]|\$(?!\())*)(?!-with-lease)(?=[\s;&|)"\x60]|\\n)'
 scope: tool:bash
 interruptMode: never
 ---

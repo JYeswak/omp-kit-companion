@@ -421,8 +421,6 @@ kit-rea-runtime-shipped	quiet	tool	bash	-	which ghidra r2 rabin2 radare2 cutter 
 kit-rea-runtime-shipped	quiet	tool	bash	-	lldb ./target/debug/myapp --args --input fixture.bin	constructed quiet: ordinary debugging of own built code, no shipped-target signal	
 kit-rea-runtime-shipped	quiet	tool	bash	-	sudo dtruss -p 1234 -f	constructed quiet: pid-only attach with no shipped-target path signal	
 kit-rea-runtime-shipped	quiet	tool	bash	-	lldb /usr/local/bin/mytool	planted near-miss: user-managed /usr/local prefix must stay quiet; turns red if the matcher broadens to /usr/local	
-kit-tool-result-is-not-json	fire	tool	bash	-	node -e "console.log(JSON.parse(toolResult).title)"	JSON.parse on tool-result text, the measured 2h loop	
-kit-tool-result-is-not-json	quiet	tool	bash	-	br show <id> --json | jq '.title'	parse inside the command with jq	
 fleet-guard-bypass-env	fire	tool	bash	-	AGENT_MAIL_BYPASS=1 git commit --only -m m -- src/a.ts	BYPASSENV1: inline AGENT_MAIL_BYPASS skips the commit reservation guard	
 fleet-guard-bypass-env	fire	tool	bash	-	export AGENT_MAIL_GUARD_MODE=warn; git commit -m m	BYPASSENV1: exported AGENT_MAIL_GUARD_MODE=warn, the bypass the refusal text advertises	
 fleet-guard-bypass-env	fire	tool	bash	-	env AGENT_MAIL_BYPASS=1 git commit -m m	BYPASSENV1: env wrapper assignment	

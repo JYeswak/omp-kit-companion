@@ -177,7 +177,7 @@ async function verifyRefuses(acceptance: string, repo: { dir: string; sha: strin
 	// Native preflight prefers BR_REAL; verify's later show uses PATH. Bind both
 	// readers to this same fixture without discarding runtime identity or trust.
 	const res = await verifyBead({
-		bead: "kit-1", exportSha: repo.sha, repo: repo.dir, actor: "Peer", dryRun: true,
+		bead: "kit-1", exportSha: repo.sha, repo: repo.dir, actor: "Peer", dryRun: true, lesson: "replayability fixture",
 		env: { PATH: `${dir}:${process.env.PATH ?? ""}`, BR_REAL: br, BEADS_DB: database, BEADS_DIR: beads },
 	});
 	if (!["ACCEPTANCE_NOT_REPLAYABLE", "DRY_RUN", "PENDING"].includes(res.code)) {

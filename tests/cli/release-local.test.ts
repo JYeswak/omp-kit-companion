@@ -90,7 +90,7 @@ test("release gate refuses a kit rule with its fire fixture removed", () => {
 	try {
 		cpSync(cases, mutated);
 		const rows = readFileSync(mutated, "utf8").split("\n").map(row => row.endsWith("\r") ? row.slice(0, -1) : row);
-		const target = "kit-tool-result-is-not-json\tfire\t";
+		const target = "bash-pipe-exit\tfire\t";
 		const index = rows.findIndex(row => row.startsWith(target));
 		if (index < 0) throw new Error("KITPOST fixture is missing its fire row");
 		rows.splice(index, 1);
@@ -106,7 +106,7 @@ test("release gate refuses a kit rule with its fire fixture removed", () => {
 		expect(control.exitCode, control.stderr.toString()).toBe(0);
 		const negative = run(mutated);
 		expect(negative.exitCode).not.toBe(0);
-		expect(negative.stdout.toString() + negative.stderr.toString()).toContain("COVERAGE kit-tool-result-is-not-json");
+		expect(negative.stdout.toString() + negative.stderr.toString()).toContain("COVERAGE bash-pipe-exit");
 	} finally {
 		rmSync(work, { recursive: true, force: true });
 	}

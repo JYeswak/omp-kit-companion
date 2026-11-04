@@ -3,7 +3,7 @@ import { afterAll } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { ccActionOutcome, ccActionTarget, registerCommandHandler, runCli } from "../src/cli.ts";
+import { ccActionOutcome, ccActionTarget, registerCommandHandler, runCli, type CommandHandler } from "../src/cli.ts";
 import { ownedTmp, type OwnedTmp } from "../src/kitlib/tmp.ts";
 
 const repoRoot = resolve(import.meta.dir, "..");
@@ -61,37 +61,25 @@ function tripleFor(lines: Record<string, unknown>[], actionId: string): Record<s
 	return out;
 }
 
-// attempt_before_effect: the planted probe runs inside dispatch and must already
-// see its own attempt line, while the result line must not exist yet.
-test("attempt_before_effect", async () => {
-	const state = freshState();
-	let probeSawAttempt = false;
-	let probeSawResult = false;
-	registerCommandHandler("status", () => {
-		const mine = spoolLines(state).filter((line) => (line.data as Record<string, unknown>).surface === "kit-status");
-		probeSawAttempt = mine.some((line) => line.type === "action.attempt");
-		probeSawResult = mine.some((line) => line.type === "action.result");
-		return { code: 0 as const, data: { overall: "OK" }, verification: "PERFORMED" as const };
-	});
+// registerCommandHandler admits one "status" probe per process, so in-process tests swap its body.
+let statusProbe: CommandHandler = () => ({ code: 0 as const, data: { overall: "OK" }, verification: "PERFORMED" as const });
+registerCommandHandler("status", (request) => statusProbe(request));
+
+/** runCli in this process with CC_STATE=state, stdout captured and stderr dropped; env and streams restored on every exit. */
+async function runCliInProcess(state: string, agent: string, args: string[]): Promise<{ code: number; stdout: string }> {
 	const savedOut = process.stdout.write.bind(process.stdout);
 	const savedErr = process.stderr.write.bind(process.stderr);
-	let captured = "";
-	process.stdout.write = ((chunk: unknown) => { captured += String(chunk); return true; }) as typeof process.stdout.write;
+	let stdout = "";
+	process.stdout.write = ((chunk: unknown) => { stdout += String(chunk); return true; }) as typeof process.stdout.write;
 	process.stderr.write = (() => true) as typeof process.stderr.write;
 	const savedState = process.env.CC_STATE, savedAgent = process.env.AGENT_NAME;
 	const savedCc = process.env.OMP_KIT_CC;
 	process.env.OMP_KIT_CC = "1";
 	process.env.CC_STATE = state;
-	process.env.AGENT_NAME = "TestProbe";
+	process.env.AGENT_NAME = agent;
 	try {
-		// The probe is registered for "status", so the contract-safe surface is kit-status;
-		// the attempt-line check below keys on the attempt existing at probe time.
-		const code = await runCli(["status", "--json"]);
-		expect(code).toBe(0);
-		const mine = spoolLines(state);
-		expect(mine.filter((line) => line.type === "action.attempt").length).toBe(1);
-		expect(mine.filter((line) => line.type === "action.result").length).toBe(1);
-		expect(captured.length).toBeGreaterThan(0);
+		const code = await runCli(args);
+		return { code, stdout };
 	} finally {
 		process.stdout.write = savedOut;
 		process.stderr.write = savedErr;
@@ -99,6 +87,28 @@ test("attempt_before_effect", async () => {
 		if (savedCc === undefined) delete process.env.OMP_KIT_CC; else process.env.OMP_KIT_CC = savedCc;
 		if (savedAgent === undefined) delete process.env.AGENT_NAME; else process.env.AGENT_NAME = savedAgent;
 	}
+}
+
+// attempt_before_effect: the planted probe runs inside dispatch and must already
+// see its own attempt line, while the result line must not exist yet.
+test("attempt_before_effect", async () => {
+	const state = freshState();
+	let probeSawAttempt = false;
+	let probeSawResult = false;
+	statusProbe = () => {
+		const mine = spoolLines(state).filter((line) => (line.data as Record<string, unknown>).surface === "kit-status");
+		probeSawAttempt = mine.some((line) => line.type === "action.attempt");
+		probeSawResult = mine.some((line) => line.type === "action.result");
+		return { code: 0 as const, data: { overall: "OK" }, verification: "PERFORMED" as const };
+	};
+	// The probe is registered for "status", so the contract-safe surface is kit-status;
+	// the attempt-line check below keys on the attempt existing at probe time.
+	const run = await runCliInProcess(state, "TestProbe", ["status", "--json"]);
+	expect(run.code).toBe(0);
+	const mine = spoolLines(state);
+	expect(mine.filter((line) => line.type === "action.attempt").length).toBe(1);
+	expect(mine.filter((line) => line.type === "action.result").length).toBe(1);
+	expect(run.stdout.length).toBeGreaterThan(0);
 	expect(probeSawAttempt).toBe(true);
 	expect(probeSawResult).toBe(false);
 });
@@ -112,12 +122,33 @@ test("result_outcome_mapping", () => {
 	expect(ccActionOutcome(2, [{ code: "ADMISSION_REFUSED" }])).toEqual({ outcome: "refused", code: "ADMISSION_REFUSED" });
 	expect(ccActionOutcome(1, [{ code: "HANDLER_FAILED" }])).toEqual({ outcome: "failed", code: "HANDLER_FAILED" });
 	expect(ccActionOutcome(1, [{ code: "REQUIRED_FINDING_FAILED" }])).toEqual({ outcome: "failed", code: "REQUIRED_FINDING_FAILED" });
-	expect(ccActionOutcome(1)).toEqual({ outcome: "failed", code: "HANDLER_FAILED" });
+	// JEVDOCTOR1: a failure with no errors[] carries its EXIT_CODES class; HANDLER_FAILED is only a thrown handler's own code.
+	expect(ccActionOutcome(1)).toEqual({ outcome: "failed", code: "FINDING" });
 	expect(ccActionOutcome(3, [{ code: "OMP_UNAVAILABLE" }])).toEqual({ outcome: "failed", code: "OMP_UNAVAILABLE" });
-	expect(ccActionOutcome(2)).toEqual({ outcome: "failed", code: "HANDLER_FAILED" });
+	expect(ccActionOutcome(2)).toEqual({ outcome: "failed", code: "USAGE_OR_BLOCKED" });
+	expect(ccActionOutcome(3)).toEqual({ outcome: "failed", code: "UNAVAILABLE" });
+	expect(ccActionOutcome(4)).toEqual({ outcome: "failed", code: "RETRYABLE" });
+	expect(ccActionOutcome(77)).toEqual({ outcome: "failed", code: "NOT_RUN" });
+	expect(ccActionOutcome(9)).toEqual({ outcome: "failed", code: "EXIT_9" });
+	// heavy relays its child's status, which is no kit exit class.
+	expect(ccActionOutcome(1, undefined, true)).toEqual({ outcome: "failed", code: "EXIT_1" });
+	expect(ccActionOutcome(124, undefined, true)).toEqual({ outcome: "timeout", code: "TIMEOUT" });
+	expect(ccActionOutcome(0, undefined, true)).toEqual({ outcome: "ok", code: null });
 	expect(ccActionOutcome(124)).toEqual({ outcome: "timeout", code: "TIMEOUT" });
 	expect(ccActionOutcome(75)).toEqual({ outcome: "timeout", code: "TIMEOUT" });
 	expect(ccActionOutcome(1, [{ code: "READ_DEADLINE_EXCEEDED" }])).toEqual({ outcome: "timeout", code: "READ_DEADLINE_EXCEEDED" });
+});
+
+// JEVDOCTOR1 (ompkit-fp72.120.16.161): a verb that answers a finding (exit 1, no errors[]),
+// like doctor --scope stale-worktree on a dirty tracker export, records FINDING, never HANDLER_FAILED.
+test("JEVDOCTOR1 finding_exit_recorded_as_finding", async () => {
+	const state = freshState();
+	statusProbe = () => ({ code: 1 as const, data: { overall: "FAIL" }, verification: "PERFORMED" as const });
+	const run = await runCliInProcess(state, "TestFinding", ["status", "--json"]);
+	expect(run.code).toBe(1);
+	const results = spoolLines(state).filter((line) => line.type === "action.result").map((line) => line.data as Record<string, unknown>);
+	expect(results).toHaveLength(1);
+	expect(results[0]).toMatchObject({ outcome: "failed", code: "FINDING" });
 });
 
 // ok_triple: a verb that exits 0 writes exactly attempt+result+tick with outcome ok.

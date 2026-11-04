@@ -12,6 +12,7 @@ import { run } from "../../src/kitlib/run.ts";
 import { verifyBead } from "../../src/verify.ts";
 import { identifyExactSource } from "../../scripts/exact-source.ts";
 import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 const createdScratchDirs: string[] = [];
 afterAll(() => {
 	for (const dir of createdScratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -1186,7 +1187,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		for (const h of [brHash, srcHash, shimSrcHash, ompHash, acHash]) expect(h).toMatch(/^[0-9a-f]{64}$/);
 		expect(revision).toMatch(/^[0-9a-f]{40}$/);
 		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} omp=${ompHash.slice(0, 12)} ac=${acHash.slice(0, 12)} tree=${revision.slice(0, 12)}`;
-		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: fam });
+		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: fam, lesson: "native replay-barrier fixture" });
 		expect(res.code).toBe("DRY_RUN");
 		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
 		expect(res.log).toContain("owned fixture");
@@ -1194,7 +1195,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
 		// Official candidate smoke through the existing verify consumer (dry-run: no mutation, no live claim).
 		const officialEnv = { ...process.env, BEADS_DB: tdb } as Record<string, string>;
-		const official = await run([ompBin, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", "official-binary", "--dry-run", "--json"], { cwd: root, deadline_s: 600, env: officialEnv });
+		const official = await run([ompBin, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", "official-binary", "--lesson", "native replay-barrier fixture", "--dry-run", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: officialEnv });
 		const officialDoc: unknown = JSON.parse(utf8(official.stdout));
 		const officialData: unknown = typeof officialDoc === "object" && officialDoc !== null && "data" in officialDoc ? officialDoc.data : null;
 		const officialReplays = typeof officialData === "object" && officialData !== null && "replays" in officialData && Array.isArray(officialData.replays) ? officialData.replays as Array<{ letter?: unknown; pass?: unknown }> : null;
@@ -1204,7 +1205,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		// replicate the production tracker's workflow policy into the fixture.
 		writeFileSync(join(tdir, ".beads", "policy.yaml"), "workflow:\n  strict: true\n  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]\n  transitions:\n    initial: [open]\n    open: [in_progress, blocked, deferred, closed]\n    in_progress: [in_review, open, blocked, deferred]\n    in_review: [closed, rework]\n    rework: [in_progress, in_review, open]\n    blocked: [open, in_progress]\n    deferred: [open]\n    closed: [open]\n  gates:\n    \"in_review -> closed\":\n      require_all:\n        - min_reviewers: 1\n");
 		const cliPath = resolve(import.meta.dir, "..", "..", "src", "cli.ts");
-		const closed = await run([process.execPath, "run", "--silent", cliPath, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", fam, "--json"], { cwd: root, deadline_s: 600, env: envT });
+		const closed = await run([process.execPath, "run", "--silent", cliPath, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", fam, "--lesson", "native replay-barrier fixture", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: envT });
 		if (closed.rc !== 0) throw new Error(`cli close -> ${closed.rc}: out=${utf8(closed.stdout).slice(0, 500)} err=${utf8(closed.stderr).slice(0, 300)}`);
 		const closedDoc: unknown = JSON.parse(utf8(closed.stdout));
 		const closedPayload: unknown = typeof closedDoc === "object" && closedDoc !== null && "data" in closedDoc ? closedDoc.data : closedDoc;
