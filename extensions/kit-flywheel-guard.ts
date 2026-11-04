@@ -16,6 +16,7 @@ import { captureMineReplay, type MineReplay } from "../src/mine-replay.ts";
 import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
 import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
+import { parseBoxes } from "../src/verify.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -53,6 +54,10 @@ import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/b
  * $TMUX_PANE. Unknown caller identities and missing assignees allow the call
  * with a warning; failed or unparseable `br show` results refuse the close
  * under SELF_CLOSE_REFUSED (fail-closed self-certification, ompkit-xa5s.13).
+ * The bead filer and DONE-first commenters are refused too, except that a
+ * caller who only filed a bead assigned to a different seat may record its
+ * close on a non-author verification record naming an export sha and every
+ * acceptance box, with the verifier family in the reason (AGENTCLOSE1).
  *
  * CLAIM_REFUSED: native claim/start prechecks name the current holder or
  * unreadable prerequisite. br --claim remains the atomic award; an actor
@@ -994,7 +999,7 @@ export async function paneIdentities(exec: FlywheelExec, env: Record<string, str
 
 export type BeadState = { ok: true; id: string; status: string; assignee: string | null; updatedAt: string | null } | { ok: false; why: string };
 type BeadStateWithAuthorship = BeadState & {
-	authorship?: { known: boolean; createdBy: string | null; doneAuthors: string[] };
+	authorship?: { known: boolean; createdBy: string | null; doneAuthors: string[]; comments: { author: string; text: string; createdAt: number }[]; acceptance: string | null };
 	priorArt?: { required: boolean; comments: unknown[] };
 };
 
@@ -1035,12 +1040,14 @@ export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerReq
 			return { ok: false, why: `${id} returned no qualified native issue/owner record` };
 		}
 		const owner = typeof assignee === "string" ? assignee.trim() : "";
-		let authorship: { known: boolean; createdBy: string | null; doneAuthors: string[] } | undefined;
+		let authorship: BeadStateWithAuthorship["authorship"];
 		if (request.operation === "close") {
 			const rawCreator = field(row, "created_by");
 			const rawComments = field(row, "comments");
 			const createdBy = typeof rawCreator === "string" && rawCreator.trim() !== "" ? rawCreator.trim() : null;
 			const doneAuthors: string[] = [];
+			const comments: { author: string; text: string; createdAt: number }[] = [];
+			const rawAcceptance = field(row, "acceptance_criteria");
 			let known = (rawCreator === null || (typeof rawCreator === "string" && rawCreator.trim() !== ""))
 				&& Array.isArray(rawComments);
 			if (Array.isArray(rawComments)) {
@@ -1052,9 +1059,11 @@ export async function readBeadState(exec: FlywheelExec, request: Pick<TrackerReq
 						continue;
 					}
 					if (isDoneFirstComment(text)) doneAuthors.push(author.trim());
+					const at = field(comment, "created_at");
+					comments.push({ author: author.trim(), text, createdAt: typeof at === "string" ? Date.parse(at) : NaN });
 				}
 			}
-			authorship = { known, createdBy, doneAuthors };
+			authorship = { known, createdBy, doneAuthors, comments, acceptance: typeof rawAcceptance === "string" ? rawAcceptance : null };
 		}
 		const revised = field(row, "updated_at");
 		if (authorship !== undefined) {
@@ -2287,7 +2296,10 @@ export async function checkBeadLint(event: FlywheelToolCallEvent, deps: BeadLint
 		: { additionalContext: `kit-flywheel-guard ${BEAD_LINT_UNVERIFIED}: ${warnings.join("; ")}. The command was allowed without the bead-lint gate.` };
 }
 
-function closeAuthorRefusal(found: BeadStateWithAuthorship, identities: readonly string[]): FlywheelToolCallResult | undefined {
+/** A close-authorship verdict; an AGENTCLOSE1 admit carries its record's timestamp for the later rework-event check. */
+type CloseAuthorVerdict = FlywheelToolCallResult & { recordAt?: number };
+
+function closeAuthorRefusal(found: BeadStateWithAuthorship, identities: readonly string[], reason: string | null): CloseAuthorVerdict | undefined {
 	if (!found.ok || identities.length === 0) return undefined;
 	const authorship = found.authorship;
 	if (authorship === undefined || !authorship.known) {
@@ -2308,12 +2320,129 @@ function closeAuthorRefusal(found: BeadStateWithAuthorship, identities: readonly
 	const roles: string[] = [];
 	if (authorship.createdBy?.toLowerCase() === normalized) roles.push("the bead filer");
 	if (authorship.doneAuthors.some(author => author.toLowerCase() === normalized)) roles.push("a DONE-first comment author");
+	// AGENTCLOSE1 (ompkit-fp72.120.16.124, C3 J-2026-11-03-49): filing a bead is not implementing it. A caller who
+	// is only the filer may record the close on a non-author verification record when a different seat is assigned.
+	// The assignee and DONE authors stay refused; an unassigned bead has no known implementer and stays refused.
+	let detail = "";
+	if (roles.length === 1 && roles[0] === "the bead filer") {
+		const assignee = found.assignee?.trim() ?? "";
+		if (assignee === "") detail = " It has no assignee, so its implementer is unknown and a filer close cannot be admitted.";
+		else if (found.status.trim().toLowerCase() === "rework") detail = " It is in rework, which withdraws any earlier verification record.";
+		else if (!identities.some(name => name.toLowerCase() === assignee.toLowerCase())) {
+			const record = verifierRecord(authorship, assignee, identities);
+			const family = verifierFamily(reason);
+			const cited = record.ok && reasonCites(reason, record.verifier);
+			if (record.ok && family !== null && cited) {
+				return {
+					additionalContext: `kit-flywheel-guard AGENTCLOSE1: ${found.id} filer ${selfAuthor} recorded this close on the non-author verification record by ${record.verifier} (posted by ${record.author}) on export ${record.sha} (verifier family: ${family}); implementer ${assignee} did not close it.`,
+					recordAt: record.at,
+				};
+			}
+			detail = !record.ok
+				? ` ${record.why} A filer may record the close only on a non-author verification record that is the newest verification comment: an \`omp-kit verify\` comment, or a PASS/VERIFIED comment by someone other than ${assignee} and the DONE authors that names \`export <sha>\` and every acceptance box ([a], [b], ...) with no FAIL, REWORK or PENDING result. A record you posted yourself must name a distinct verifier as \`by <Name>\` (not you, ${assignee} or a DONE author; FILERCLOSE1).`
+				: ` A verification record by ${record.verifier} is present, but the close reason must cite ${record.verifier} and disclose the verifier family (\`family: <name>\` or \`<name> family\`).`;
+		}
+	}
 	return {
 		block: true,
-		reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: ${found.id} ${selfAuthor} is ${roles.join(" and ")}, which is you. `
+		reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: ${found.id} ${selfAuthor} is ${roles.join(" and ")}, which is you.${detail} `
 			+ "No self-certification (Flywheel Kernel invariant 9): report DONE with evidence (commit sha, exact commands, exit codes) "
 			+ "and let the director or an independent verifier run the close.",
 	};
+}
+
+const VERIFY_RECORD_HEAD = /^(?:PASS|VERIFIED|CLOSED\s+\S+\s+by)\b/;
+const VERIFY_RECORD_EXPORT = /\bexport(?:ed)?[ \t]+(?:sha[ \t]+)?([0-9a-f]{7,40})\b/;
+/** Comment and reason texts are tracker data; matching reads at most this many UTF-16 units of each. */
+const VERIFY_RECORD_MAX_TEXT = 65_536;
+const VERIFY_RECORD_NOT_PASS = /\b(?:FAIL(?:ED)?|REWORK|PENDING|ENVIRONMENT|UNVERIFIED)\b/;
+/** `by [lowercase descriptors] <Name>`: an agent name starts uppercase, so "by the lead" names no one. */
+const VERIFY_RECORD_BY = /\bby[ \t]+(?:[a-z][a-z-]{0,31}[ \t]+){0,3}([A-Z][A-Za-z0-9_-]{0,63})/g;
+const ACCEPTANCE_CHECKLIST_LINE = /^- \[[ xX]\] +\S/;
+
+/**
+ * AGENTCLOSE1: the newest verification-shaped comment decides. Shaped means a PASS/VERIFIED/`CLOSED <id> by` head,
+ * or a FAIL/FAILED/REWORK/PENDING/ENVIRONMENT/UNVERIFIED word together with an acceptance box tag or an export sha;
+ * a newer negative withdraws any older PASS. The deciding comment qualifies only when it passes every acceptance
+ * box on an exact export sha. FILERCLOSE1 (ompkit-l5746) exists because a filer closed its own bead on its own
+ * judgment, so a record the closer posted (a lead's background agents post as the lead) counts only when it names
+ * a distinct verifier `by <Name>`: not a closer identity, the assignee or a DONE author. Otherwise the poster is
+ * the verifier. The assignee's and DONE authors' comments are not verification and are passed over.
+ */
+function verifierRecord(authorship: NonNullable<BeadStateWithAuthorship["authorship"]>, assignee: string,
+	closers: readonly string[]): { ok: true; author: string; verifier: string; sha: string; at: number } | { ok: false; why: string } {
+	const acceptance = authorship.acceptance ?? "";
+	const boxes = parseBoxes(acceptance);
+	const checklist = acceptance.split("\n").filter(line => ACCEPTANCE_CHECKLIST_LINE.test(line.trim())).length;
+	// Every checklist line must carry a box tag the record can name; an untagged line cannot be shown passed.
+	if (boxes.length === 0 || boxes.length !== checklist) return { ok: false, why: "Its acceptance has untagged or no checklist boxes, so no record can name every box." };
+	const tags = boxes.map(box => `[${box.letter ?? box.index}]`);
+	const authors = new Set([assignee, ...authorship.doneAuthors].map(name => name.toLowerCase()));
+	const closerSet = new Set(closers.map(name => name.toLowerCase()));
+	const excluded = new Set([...authors, ...closerSet]);
+	for (const comment of [...authorship.comments].reverse()) {
+		if (authors.has(comment.author.toLowerCase())) continue;
+		const label = `The newest verification comment (by ${comment.author})`;
+		// An oversize comment cannot be judged, so it cannot be passed over either.
+		if (comment.text.length > VERIFY_RECORD_MAX_TEXT) return { ok: false, why: `${label} is too long to judge.` };
+		const text = comment.text.trimStart();
+		const sha = VERIFY_RECORD_EXPORT.exec(text)?.[1];
+		const negative = VERIFY_RECORD_NOT_PASS.exec(text)?.[0];
+		const positive = VERIFY_RECORD_HEAD.test(text);
+		if (!positive && (negative === undefined || (sha === undefined && !tags.some(tag => text.includes(tag))))) continue;
+		if (negative !== undefined) return { ok: false, why: `${label} reports ${negative}: ${JSON.stringify(text.slice(0, 120))}; it withdraws any older PASS.` };
+		if (sha === undefined || !tags.every(tag => text.includes(tag))) return { ok: false, why: `${label} does not name \`export <sha>\` and every box ${tags.join(" ")}.` };
+		let verifier: string | undefined = comment.author;
+		if (closerSet.has(comment.author.toLowerCase())) {
+			verifier = [...text.matchAll(VERIFY_RECORD_BY)].map(match => match[1]!).find(name => !excluded.has(name.toLowerCase()));
+			if (verifier === undefined) return { ok: false, why: `${label} was posted by you and names no distinct verifier.` };
+		}
+		return { ok: true, author: comment.author, verifier, sha, at: comment.createdAt };
+	}
+	return { ok: false, why: "It has no verification record." };
+}
+
+/**
+ * AGENTCLOSE1: a status transition to rework after the record withdraws it. Reads the tracker's status_changed
+ * events read-only; an unreadable record time, database or event log refuses (fail closed). Returns the refusal
+ * detail, or null when no rework transition follows the record.
+ */
+async function reworkAfterRecord(id: string, recordAt: number, request: TrackerRequest, deps: TrackerMutationDeps): Promise<string | null> {
+	if (!Number.isFinite(recordAt)) return "its verification record has no readable created_at, so a later rework transition cannot be ruled out";
+	try {
+		let db = request.db;
+		if (!db) {
+			const info = await deps.exec(request.bin, ["info", "--json", "--no-auto-import", "--no-auto-flush"], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+			if (info.code !== 0 || info.killed) return "tracker discovery for the rework-event check failed";
+			db = field(JSON.parse(info.stdout), "database_path") as string;
+		}
+		if (typeof db !== "string" || !db) return "tracker database path for the rework-event check is unavailable";
+		const sql = `SELECT created_at FROM events WHERE issue_id='${id.replace(/'/g, "''")}' AND event_type='status_changed' AND new_value='rework'`;
+		const events = await deps.exec("sqlite3", ["-readonly", db, sql], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+		if (events.code !== 0 || events.killed) return "the rework-event lookup failed";
+		const stamps = events.stdout.split("\n").map(line => line.trim()).filter(Boolean).map(stamp => ({ stamp, time: Date.parse(stamp) }));
+		const unreadable = stamps.find(entry => !Number.isFinite(entry.time));
+		if (unreadable !== undefined) return `a rework event has an unreadable time ${JSON.stringify(unreadable.stamp)}`;
+		const later = stamps.find(entry => entry.time > recordAt);
+		return later === undefined ? null : `it moved to rework at ${later.stamp}, after its verification record, which withdraws that record`;
+	} catch (error) {
+		return `the rework-event check failed (${error instanceof Error ? error.message : String(error)})`;
+	}
+}
+
+/** AGENTCLOSE1: the close reason names the verifier as a whole word (case-insensitive). */
+function reasonCites(reason: string | null, verifier: string): boolean {
+	if (reason === null || reason.length > VERIFY_RECORD_MAX_TEXT) return false;
+	const wanted = verifier.toLowerCase();
+	return reason.split(/[^A-Za-z0-9_-]+/).some(word => word.toLowerCase() === wanted);
+}
+
+/** AGENTCLOSE1: the verifier family the close reason discloses, or null when it names none (or "unknown"). */
+function verifierFamily(reason: string | null): string | null {
+	if (reason === null || reason.length > VERIFY_RECORD_MAX_TEXT) return null;
+	const match = /\bfamily[ \t]*[:=][ \t]*([A-Za-z][\w.-]{0,63})/i.exec(reason) ?? /\b([A-Za-z][\w-]{0,63})[ \t]+family\b/i.exec(reason);
+	const family = match?.[1];
+	return family === undefined || /^(?:unknown|the|a|no)$/i.test(family) ? null : family;
 }
 
 // NARROWCLOSE1: explicit incomplete-check clauses cannot qualify a close.
@@ -2465,9 +2594,9 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 			const orphaned = await checkCloseOrphansDependents(request, id, released, deps);
 			if (orphaned !== undefined) return orphaned;
 			const assignee = found.assignee?.trim();
-			const authorRefusal = closeAuthorRefusal(found, identities);
+			const authorRefusal = closeAuthorRefusal(found, identities, request.reason);
 			if (!assignee) {
-				if (authorRefusal !== undefined) {
+				if (authorRefusal?.block === true) {
 					attempts.push({ id: found.id, fromStatus: found.status, assignee: null, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 					return authorRefusal;
 				}
@@ -2490,10 +2619,22 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 						+ "and let the director or an independent verifier run the close.",
 				};
 			}
-			if (authorRefusal !== undefined) {
+			if (authorRefusal?.block === true) {
 				attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 				return authorRefusal;
 			}
+			if (authorRefusal?.recordAt !== undefined) {
+				const withdrawn = await reworkAfterRecord(found.id, authorRefusal.recordAt, request, deps);
+				if (withdrawn !== null) {
+					attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
+					return {
+						block: true,
+						reason: `kit-flywheel-guard ${SELF_CLOSE_REFUSED}: ${found.id}: you are the bead filer, and the filer close cannot be admitted: ${withdrawn}. `
+							+ "No self-certification (Flywheel Kernel invariant 9): get a fresh non-author verification record and let an independent verifier run the close; no close was executed.",
+					};
+				}
+			}
+			if (authorRefusal?.additionalContext) closeNotes.push(authorRefusal.additionalContext);
 			attempts.push({ id: found.id, fromStatus: found.status, assignee, actor, evidence, bin: request.bin, db: request.db, cwd: request.cwd, reason: request.reason });
 		}
 	}
