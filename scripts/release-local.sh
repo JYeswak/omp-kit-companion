@@ -619,12 +619,27 @@ fi
 # the install that unblocks it.
 # The commit is made on the shared main in the canonical checkout (AGENTS.md: no branches, no worktrees) with
 # `git commit --only`, exactly like the prepare stage. The new bytes are computed in an owned scratch export of HEAD,
-# because release-notes.sh promote folds every fragment it finds and the checkout may hold peers' fragments. Every
+# because release-notes.sh promote folds every fragment it finds and the checkout may hold peers' fragments. ADVANCEREF1
+# (ompkit-fp72.120.16.235): the folded fragments are exported from SOURCE, so [VERSION] holds exactly the notes that
+# shipped; a fragment HEAD changed after the cut keeps its heading and only the entries SOURCE's copy lacks (exact
+# whole-entry match, release-notes.sh residual), and only a fragment HEAD holds unchanged is deleted. Every
 # written path must be clean first (NEXT_VERSION_PATHS_DIRTY). Publication is a plain push when it fast-forwards
 # origin, else git_converge.py --push (OMP_KIT_GIT_CONVERGE overrides its path).
 advance_next_version() {
 	stage next-version
 	ADVANCE_PENDING=0
+	# Every file whose bytes return to $ROOT (package.json, README.md, CHANGELOG.md, the fragments) is read as its raw
+	# blob, never through `git archive`: .gitattributes marks package.json export-subst, so an archive expands
+	# "source_revision": "$Format:%H$" to a literal sha, and 1a24cb94af committed b55c98c0dc there (main RED until
+	# e1aec02f60). Only the scripts the advance runs come from an archive. Defined here so this function stays one block.
+	next_version_blobs() {
+		local ref=$1 dest=$2 blob
+		shift 2
+		for blob do
+			mkdir -p "$(dirname "$dest/$blob")" || return 1
+			git -C "$ROOT" cat-file blob "$ref:$blob" >"$dest/$blob" || return 1
+		done
+	}
 	local next agent export="$WORK/next" date promote_rc path dirty manual
 	local converge="${OMP_KIT_GIT_CONVERGE:-$HOME/Developer/omp-kit/scripts/git_converge.py}"
 	local -a fragments=() paths=(package.json README.md CHANGELOG.md)
@@ -644,15 +659,35 @@ advance_next_version() {
 		git -C "$ROOT" cat-file -e "HEAD:$path" 2>/dev/null && fragments+=("$path")
 	done < <(git -C "$ROOT" ls-tree --name-only "$SOURCE" -- changelog.d/)
 	paths+=(${fragments[@]+"${fragments[@]}"})
-	manual="make the commit by hand on main: in an owned scratch copy of HEAD's package.json, README.md, CHANGELOG.md, scripts/ and only these fragments [${fragments[*]:-none}], run sh scripts/release-notes.sh promote --version $VERSION --date $date --write, set package.json .version and .omp.version to $next, run sh scripts/stamp-release-line.sh --version $VERSION; copy the three files into $ROOT, delete the folded fragments there, then git commit --only -- ${paths[*]} and git push origin main (python3 $converge --repo $ROOT --push when origin moved)"
+	manual="make the commit by hand on main: in an owned scratch copy of HEAD's package.json, README.md, CHANGELOG.md and scripts/ plus $SOURCE's copies of only these fragments [${fragments[*]:-none}], run sh scripts/release-notes.sh promote --version $VERSION --date $date --write, set package.json .version and .omp.version to $next, run sh scripts/stamp-release-line.sh --version $VERSION; copy the three files into $ROOT; there, delete each of those fragments unchanged since $SOURCE and replace each changed one with the output of sh scripts/release-notes.sh residual --released <its $SOURCE copy> --current <its HEAD copy> (delete it when that is empty), then git commit --only -- ${paths[*]} and git push origin main (python3 $converge --repo $ROOT --push when origin moved)"
 	dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all -- "${paths[@]}")" || die "v$VERSION is published; cannot inspect the next-version paths"
 	[ -z "$dirty" ] || die "v$VERSION is published; NEXT_VERSION_PATHS_DIRTY: ${dirty//$'\n'/; }; nothing was written. Once those paths are clean, $manual"
-	rm -rf "$export"; mkdir -p "$export"
-	git -C "$ROOT" archive HEAD -- package.json README.md CHANGELOG.md scripts/release-notes.sh scripts/release-notes.ts \
-		scripts/stamp-release-line.sh scripts/kitlib-tmp.sh ${fragments[@]+"${fragments[@]}"} | tar -xf - -C "$export" ||
+	rm -rf "$export" "$WORK/next-head" "$WORK/next-residual"; mkdir -p "$export" "$WORK/next-head" "$WORK/next-residual"
+	git -C "$ROOT" archive HEAD -- scripts/release-notes.sh scripts/release-notes.ts scripts/stamp-release-line.sh \
+		scripts/kitlib-tmp.sh | tar -xf - -C "$export" || die "v$VERSION is published; cannot export the next-version scripts"
+	next_version_blobs HEAD "$export" package.json README.md CHANGELOG.md ||
 		die "v$VERSION is published; cannot export the next-version inputs"
+	# Shipped bytes, not HEAD's: every fragment here is present at $SOURCE.
+	local -a changed=()
+	if [ "${#fragments[@]}" -gt 0 ]; then
+		next_version_blobs "$SOURCE" "$export" "${fragments[@]}" ||
+			die "v$VERSION is published; cannot export the shipped fragments from $SOURCE"
+		for path in "${fragments[@]}"; do
+			[ "$(git -C "$ROOT" rev-parse "$SOURCE:$path")" = "$(git -C "$ROOT" rev-parse "HEAD:$path")" ] || changed+=("$path")
+		done
+	fi
+	if [ "${#changed[@]}" -gt 0 ]; then
+		next_version_blobs HEAD "$WORK/next-head" "${changed[@]}" ||
+			die "v$VERSION is published; cannot export the fragments changed after $SOURCE"
+	fi
 	# release-notes.sh resolves its root through git; the export is a private scratch repository, never a worktree.
 	git -C "$export" init -q || die "v$VERSION is published; cannot prepare the next-version export"
+	# Before promote deletes the export's fragments: what each changed one gained after the cut.
+	for path in ${changed[@]+"${changed[@]}"}; do
+		mkdir -p "$(dirname "$WORK/next-residual/$path")"
+		(cd "$export" && bounded 60 sh scripts/release-notes.sh residual --released "$export/$path" --current "$WORK/next-head/$path") \
+			>"$WORK/next-residual/$path" || die "v$VERSION is published; release-notes.sh residual failed for $path"
+	done
 	promote_rc=0
 	(cd "$export" && bounded 300 sh scripts/release-notes.sh promote --version "$VERSION" --date "$date" --write) || promote_rc=$?
 	[ "$promote_rc" = 0 ] || [ "$promote_rc" = 4 ] || die "v$VERSION is published; CHANGELOG promote failed (rc $promote_rc)"
@@ -671,8 +706,10 @@ PY
 	bounded 60 sh "$export/scripts/stamp-release-line.sh" --version "$VERSION" --readme "$export/README.md" >/dev/null ||
 		die "v$VERSION is published; cannot stamp the README release line"
 	for path in package.json README.md CHANGELOG.md; do cp "$export/$path" "$ROOT/$path"; done
-	for path in ${fragments[@]+"${fragments[@]}"}; do [ -e "$export/$path" ] || rm -f "$ROOT/$path"; done
-	rm -rf "$export"
+	for path in ${fragments[@]+"${fragments[@]}"}; do
+		if [ -s "$WORK/next-residual/$path" ]; then cp "$WORK/next-residual/$path" "$ROOT/$path"; else rm -f "$ROOT/$path"; fi
+	done
+	rm -rf "$export" "$WORK/next-head" "$WORK/next-residual"
 	if ! bounded 900 git -C "$ROOT" commit -q --only \
 		-m "chore(release): next version $next after v$VERSION ompkit-d8qic" \
 		-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \

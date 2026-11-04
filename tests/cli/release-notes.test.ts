@@ -671,3 +671,26 @@ test("fragment-for --message judges the staged commit with the release trailer a
 	expect(covered.exitCode, covered.stderr).toBe(0);
 	expect(JSON.parse(covered.stdout)).toMatchObject({ verdict: "covered", bead: "ompkit-x2", fragment: "changelog.d/x2.md" });
 });
+
+// ADVANCEREF1 (ompkit-fp72.120.16.235): residual is what a fragment gained after its cut, by exact whole-entry match.
+test("ADVANCEREF1 residual keeps a rewritten continuation line and new entries, never an identical entry", () => {
+	const shipped = "### Fixed\n\n- A.\n  - Detail one.\n- B, unchanged since the cut.\n";
+	const dir = changelogFixture("residual", releasedChangelog, {
+		"shipped.md": shipped,
+		"current.md": "### Fixed\n\n- A.\n  - Detail one, rewritten after the cut.\n- B, unchanged since the cut.\n- C, added after the cut.\n",
+		"same.md": shipped,
+		"bare.md": "- B, unchanged since the cut.\n- D, a fragment without a category line.\n",
+	});
+	const residual = (current: string) => releaseIn(dir, "residual", "--released", "changelog.d/shipped.md", "--current", `changelog.d/${current}`);
+	const changed = residual("current.md");
+	expect(changed.exitCode, changed.output).toBe(0);
+	// Planted: the first line of "A." matches the shipped entry, but its rewritten continuation line makes it new text.
+	expect(changed.output).toBe("### Fixed\n\n- A.\n  - Detail one, rewritten after the cut.\n- C, added after the cut.\n");
+	// Control: an identical copy has no residual at all.
+	const same = residual("same.md");
+	expect(same.exitCode, same.output).toBe(0);
+	expect(same.output).toBe("");
+	// A copy without a category line gets none added.
+	expect(residual("bare.md").output).toBe("- D, a fragment without a category line.\n");
+	expect(releaseIn(dir, "residual", "--released", "changelog.d/shipped.md").exitCode).not.toBe(0);
+});

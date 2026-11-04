@@ -837,3 +837,56 @@ prepare_release
 		expect(git(repo, ["status", "--porcelain"])).toBe("");
 	} finally { rmSync(work, { recursive: true, force: true }); }
 }, fixtureDeadlineS(60) * 1_000);
+
+// ADVANCEREF1 (ompkit-fp72.120.16.235): the next-version advance promotes the fragments' SOURCE bytes. A fragment changed
+// after the cut keeps only what it gained (v0.2.90: 774u.50.1 rewritten in b55c98c0dc), and an unchanged one is deleted.
+test("ADVANCEREF1 the advance promotes SOURCE's fragment bytes and keeps only post-cut entries", () => {
+	const { work, env, repo, git } = catchUpRepo("advanceref");
+	const origin = join(work, "origin.git");
+	try {
+		git(work, ["init", "-q", "--bare", "-b", "main", origin]);
+		git(work, ["init", "-q", "-b", "main", repo]);
+		for (const dir of ["scripts", "changelog.d"]) mkdirSync(join(repo, dir), { recursive: true });
+		for (const name of ["release-notes.sh", "release-notes.ts", "stamp-release-line.sh", "kitlib-tmp.sh"]) cpSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
+		writeFileSync(join(repo, "README.md"), readFileSync(join(ROOT, "README.md"), "utf8").replace(/^Current release: v\d+\.\d+\.\d+$/m, "Current release: v1.2.4"));
+		// Planted (e1aec02f60): companion's .gitattributes marks package.json export-subst, so an archive expands this field.
+		writeFileSync(join(repo, ".gitattributes"), "package.json export-subst\n");
+		writeFileSync(join(repo, "package.json"), catchUpPackage("1.2.4").replace('"name": "fixture",', '"name": "fixture",\n  "source_revision": "$Format:%H$",'));
+		writeFileSync(join(repo, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-01-01\n\n### Changed\n\n- Base release.\n");
+		writeFileSync(join(repo, "changelog.d/same.md"), "### Fixed\n\n- Unchanged since the cut.\n");
+		writeFileSync(join(repo, "changelog.d/edited.md"), "### Changed\n\n- Shipped text.\n  - Shipped detail.\n- Also shipped.\n");
+		git(repo, ["add", "."]); git(repo, ["commit", "-qm", "release 1.2.4"]);
+		git(repo, ["remote", "add", "origin", origin]);
+		git(repo, ["push", "-q", "origin", "main"]);
+		const source = git(repo, ["rev-parse", "HEAD"]);
+		git(repo, ["tag", "v1.2.4"]); git(repo, ["push", "-q", "origin", "v1.2.4"]);
+		// Landed between the cut and the advance: a continuation line rewritten in place, and one new bullet.
+		writeFileSync(join(repo, "changelog.d/edited.md"), "### Changed\n\n- Shipped text.\n  - Shipped detail, rewritten after the cut.\n- Also shipped.\n- Added after the cut.\n");
+		git(repo, ["add", "."]); git(repo, ["commit", "-qm", "post-cut edit"]); git(repo, ["push", "-q", "origin", "main"]);
+		const fixture = join(work, "advance.sh");
+		writeFileSync(fixture, `set -euo pipefail
+die() { echo "release-local: refused: $*" >&2; exit 4; }
+say() { echo "== $*"; }
+ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"; CHILD=''
+${helperScript}
+${releaseStage("# NEXTVERSION1 (ompkit-d8qic", "\n# VERSIONSRC1")}
+VERSION=1.2.4; SOURCE=${source}; INSTALLED=1; INSTALL_PREFIX=${JSON.stringify(join(work, "kit"))}
+advance_next_version
+`);
+		const result = runFixture(["bash", fixture, repo, work], { cwd: repo, env: { ...env, TMPDIR: work, README_GATE: join(work, "no-readme-update-gate") }, floor_s: 180 });
+		expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+		const show = (path: string) => git(origin, ["show", `refs/heads/main:${path}`]);
+		expect(JSON.parse(show("package.json")).version).toBe("1.2.5");
+		expect(show("package.json")).toContain('"source_revision": "$Format:%H$",');
+		// [1.2.4] holds exactly the shipped text.
+		const changelog = show("CHANGELOG.md");
+		const section = changelog.slice(changelog.indexOf("## [1.2.4] - "), changelog.indexOf("## [1.2.3]"));
+		expect(section.slice(section.indexOf("\n"))).toBe("\n\n### Changed\n\n- Shipped text.\n  - Shipped detail.\n- Also shipped.\n\n### Fixed\n\n- Unchanged since the cut.\n\n");
+		expect(changelog).not.toContain("after the cut");
+		// The unchanged fragment is deleted; the changed one keeps its heading and only its post-cut entries.
+		expect(git(origin, ["ls-tree", "-r", "--name-only", "refs/heads/main", "--", "changelog.d"])).toBe("changelog.d/edited.md");
+		expect(show("changelog.d/edited.md")).toBe("### Changed\n\n- Shipped text.\n  - Shipped detail, rewritten after the cut.\n- Added after the cut.");
+		expect(git(repo, ["status", "--porcelain"])).toBe("");
+		expect(git(repo, ["rev-parse", "HEAD"])).toBe(git(origin, ["rev-parse", "refs/heads/main"]));
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(180) * 1_000);

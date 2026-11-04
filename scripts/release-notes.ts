@@ -14,7 +14,8 @@ type Options =
 	| { mode: "source"; baseTag: string; head: string; version: string; output: string }
 	| { mode: "notes"; version: string; floor?: string; ref?: string; output?: string }
 	| { mode: "fragment-for"; bead?: string; message?: string; base?: string }
-	| { mode: "catch-up"; baseTag: string; throughTag: string; head: string; output?: string; nextVersion?: string };
+	| { mode: "catch-up"; baseTag: string; throughTag: string; head: string; output?: string; nextVersion?: string }
+	| { mode: "residual"; released: string; current: string };
 type Fragment = { path: string; content: string; pr?: string };
 type UnreleasedLine = { lineNumber: number; text: string; pr?: string };
 type UnreleasedSection = {
@@ -99,6 +100,7 @@ function run(): void {
 	if (options.mode === "source") return runSourceNotes(root, options, git, gitRaw, gitOk);
 	if (options.mode === "fragment-for") return runFragmentFor(options, git, gitRaw, gitOk);
 	if (options.mode === "catch-up") return runCatchUp(options, git, gitRaw, gitOk);
+	if (options.mode === "residual") return runResidual(options);
 
 	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseRef}^{commit}`]);
 	const head = git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
@@ -126,7 +128,7 @@ function run(): void {
 }
 
 function parseArguments(args: string[]): Options {
-	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH] | fragment-for (--bead ID | --message FILE) [--base REF] | catch-up --base-tag vX.Y.Z --through-tag vX.Y.Z [--head REF] [--output DIR] [--next-version X.Y.Z]";
+	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH] | fragment-for (--bead ID | --message FILE) [--base REF] | catch-up --base-tag vX.Y.Z --through-tag vX.Y.Z [--head REF] [--output DIR] [--next-version X.Y.Z] | residual --released FILE --current FILE";
 	const mode = args[0];
 	if (mode === "check") {
 		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--base-ref": "value", "--head": "value" }, usage);
@@ -187,6 +189,10 @@ function parseArguments(args: string[]): Options {
 		const base = values.get("--base");
 		if (typeof base === "string") options.base = base;
 		return options;
+	}
+	if (mode === "residual") {
+		const values = parseFlags(args.slice(1), { "--released": "value", "--current": "value" }, usage);
+		return { mode, released: requiredValue(values, "--released", usage), current: requiredValue(values, "--current", usage) };
 	}
 	if (mode === "catch-up") {
 		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--through-tag": "value", "--head": "value", "--output": "value", "--next-version": "value" }, usage);
@@ -675,6 +681,21 @@ function releasedEntries(changelog: Changelog): Entry[] {
 /** An entry's exact identity: every line, trailing whitespace ignored. A rewritten continuation line is new text. */
 function exactEntryKey(entry: Entry): string {
 	return entry.map(line => line.trimEnd()).join("\n").trim();
+}
+
+// ADVANCEREF1 (ompkit-fp72.120.16.235): what a fragment gained after its release cut. Prints the current copy's own
+// `### Category` line (when it has one) and only the entries whose exact text (exactEntryKey) the released copy lacks;
+// prints nothing when every entry shipped. release-local's next-version advance writes this back in place of a
+// fragment changed after SOURCE, and deletes the fragment when it is empty.
+function runResidual(options: Extract<Options, { mode: "residual" }>): void {
+	const shipped = new Set(parseFragment(options.released, readFileSync(options.released, "utf8")).entries.map(exactEntryKey));
+	const text = readFileSync(options.current, "utf8");
+	const current = parseFragment(options.current, text);
+	const residual = current.entries.filter(entry => !shipped.has(exactEntryKey(entry)));
+	if (!residual.length) return;
+	const first = text.replace(/\r\n/g, "\n").split("\n").find(line => line.trim());
+	const heading = first !== undefined && CATEGORY_HEADING.test(first) ? [`### ${current.category}`, ""] : [];
+	process.stdout.write(`${[...heading, ...residual.flat()].join("\n")}\n`);
 }
 
 function listFragments(root: string): string[] {
