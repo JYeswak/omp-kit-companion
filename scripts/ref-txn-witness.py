@@ -31,6 +31,17 @@ same-UID writer can forge every file it reads.
 
   python3 ref-txn-witness.py admit < transaction-lines      (the guard, prepared state)
   python3 ref-txn-witness.py review --plan PATH --reviewer NAME
+  python3 ref-txn-witness.py push-admit LOCAL_SHA REMOTE_REF REMOTE_SHA -- REV-LIST-ARGS...
+
+PUSHADMIT1 (ompkit-fp72.120.16.221): pre-push members 40 (pushed-beads) and 41 (pushed-vlevel) use
+push-admit. `review` stores the reviewed plan bytes read-only beside its record, as
+history-review/<plan_sha256>.plan.json, so a member finds the plan from the pushed tip alone (a copy whose
+new_tip is the tip or its ancestor), never from a caller variable. The push is admitted only when the tip
+is that new_tip, the remote sha is the plan's public main root (a moved origin is a stale lease), local main
+already equals the new root, every preservation ref holds its original, the review record verifies with the
+unchanged binding, and its reviewer is not the pusher (AGENT_NAME, required). The member then judges its own
+range minus the mapped counterparts with its ordinary check. Without a claiming plan copy the member's
+ordinary check runs unchanged.
 """
 from __future__ import annotations
 
@@ -57,6 +68,7 @@ GIT_CAP = 512 << 20
 FILE_CAP = 256 << 20
 PLAN_KEYS = ("schema_version", "operation", "repo", "gitdir", "old_tip", "new_tip", "paths", "map",
              "public_refs", "authority", "preserve_ref", "signature_policy", "writable_refs", "plan_sha256")
+PLAN_SUFFIX = ".plan.json"
 BINDING_KEYS = ("operation", "plan_sha256", "repo", "gitdir", "ref", "old_tip", "new_tip", "map_sha256",
                 "source_roots", "paths", "signature_policy", "transaction", "authority")
 RECORD_KEYS = frozenset(BINDING_KEYS + ("schema", "reviewer", "reviewed_at", "record_sha256"))
@@ -250,8 +262,11 @@ def source_roots(plan: dict) -> dict:
     return roots
 
 
-def transaction(repo: Repo, plan: dict) -> list:
-    """The helper's exact apply transaction: preservation refs, then the main update."""
+def transaction(repo: Repo, plan: dict, applied: bool = False) -> list:
+    """The helper's exact apply transaction: preservation refs, then the main update.
+
+    applied=True re-derives the transaction the reviewer bound before the apply: every preservation
+    ref must now hold its original, and each is the "create" the review recorded."""
     old = plan["old_tip"]
     prefix = "refs/preserve/history-scrub/" + old + "/"
     if plan["preserve_ref"] != prefix + "main":
@@ -263,9 +278,11 @@ def transaction(repo: Repo, plan: dict) -> list:
     commands = []
     for ref, original in sorted(preserved.items()):
         existing = repo.ref_value(ref)
+        if applied and existing != original:
+            raise Refused("PRESERVATION_REF_NOT_APPLIED " + ref)
         if existing and existing != original:
             raise Refused("PRESERVATION_REF_CONFLICT " + ref)
-        commands.append(("verify" if existing else "create") + " %s %s" % (ref, original))
+        commands.append(("verify" if existing and not applied else "create") + " %s %s" % (ref, original))
     commands.append("update %s %s %s" % (MAIN, plan["new_tip"], old))
     return commands
 
@@ -286,12 +303,12 @@ def hook_lines(repo: Repo, commands: list) -> list:
     return sorted(rows)
 
 
-def binding(repo: Repo, plan: dict) -> dict:
+def binding(repo: Repo, plan: dict, applied: bool = False) -> dict:
     return {"operation": plan["operation"], "plan_sha256": plan["plan_sha256"], "repo": repo.top,
             "gitdir": repo.gitdir, "ref": MAIN, "old_tip": plan["old_tip"], "new_tip": plan["new_tip"],
             "map_sha256": hashlib.sha256(canonical(plan["map"])).hexdigest(),
             "source_roots": source_roots(plan), "paths": plan["paths"],
-            "signature_policy": plan["signature_policy"], "transaction": transaction(repo, plan),
+            "signature_policy": plan["signature_policy"], "transaction": transaction(repo, plan, applied),
             "authority": plan["authority"]}
 
 
@@ -509,14 +526,14 @@ def check_context(repo: Repo, lock_bytes: bytes, lock: dict, plan: dict) -> dict
     return intent
 
 
-def check_review(repo: Repo, plan: dict, intent: dict) -> tuple:
+def check_review(repo: Repo, plan: dict, intent: dict, applied: bool = False) -> tuple:
     path = repo.review_path(plan["plan_sha256"])
     record = parse_json(read_owned(path, "REVIEW", read_only=True), "review record")
     if not isinstance(record, dict) or set(record) != RECORD_KEYS or record.get("schema") != SCHEMA:
         raise Refused("REVIEW_MALFORMED")
     if record["record_sha256"] != digest(record, "record_sha256"):
         raise Refused("REVIEW_DIGEST_MISMATCH")
-    expected = binding(repo, plan)
+    expected = binding(repo, plan, applied)
     for key in BINDING_KEYS:
         if record[key] != expected[key]:
             raise Refused("REVIEW_BINDING_MISMATCH " + key)
@@ -565,6 +582,88 @@ def admit() -> int:
     return 0
 
 
+def reviewed_plans(common: str, tip: str) -> list:
+    """The reviewed plan copies whose new main is the pushed tip or one of its ancestors (discovery only)."""
+    folder = os.path.join(common, "omp-kit", "history-review")
+    try:
+        names = sorted(n for n in os.listdir(folder) if n.endswith(PLAN_SUFFIX))
+    except FileNotFoundError:
+        return []
+    found = []
+    for name in names:
+        try:
+            plan = parse_json(read_owned(os.path.join(folder, name), "REVIEWED_PLAN", read_only=True), "plan")
+            new = plan.get("new_tip") if isinstance(plan, dict) else None
+            if not isinstance(new, str) or len(new) not in (40, 64) or any(c not in "0123456789abcdef" for c in new):
+                continue
+            if git("cat-file", "-t", new).strip() == b"commit" and not git("rev-list", "-n", "1", new, "^" + tip, "--"):
+                found.append((name, plan))
+        except Refused:
+            continue
+    return found
+
+
+def verify_push(repo: Repo, name: str, plan_value: object, tip: str, remote: str) -> str:
+    """Members 40/41: the push publishes exactly the applied, independently reviewed new main."""
+    plan = check_plan(repo, plan_value)
+    if name != plan["plan_sha256"] + PLAN_SUFFIX:
+        raise Refused("REVIEWED_PLAN_NAME_MISMATCH " + name)
+    if tip != plan["new_tip"]:
+        raise Refused("PUSH_TIP_NOT_REVIEWED_NEW_ROOT %s (reviewed %s)" % (tip, plan["new_tip"]))
+    if remote != plan["public_refs"][MAIN]:
+        raise Refused("STALE_LEASE remote %s is not the reviewed public root %s" % (remote, plan["public_refs"][MAIN]))
+    if repo.ref_value(MAIN) != plan["new_tip"]:
+        raise Refused("LOCAL_MAIN_NOT_NEW_ROOT")
+    applier = os.environ.get("AGENT_NAME", "").strip()
+    if not applier or applier == "operator":
+        raise Refused("APPLIER_NAME_ABSENT set AGENT_NAME to the pushing seat's registered name")
+    intent = {"actor": applier, "transaction": transaction(repo, plan, applied=True)}
+    path, record = check_review(repo, plan, intent, applied=True)
+    check_transform(repo, plan)
+    return "plan=%s ref=%s old=%s new=%s mapped=%d review=%s reviewer=%s pusher=%s" % (
+        plan["plan_sha256"], MAIN, plan["public_refs"][MAIN], plan["new_tip"], len(plan["map"]), path,
+        record["reviewer"], applier)
+
+
+def push_admit(argv: list) -> int:
+    """push-admit LOCAL_SHA REMOTE_REF REMOTE_SHA -- REV-LIST-ARGS...
+
+    Exit 3: no reviewed plan claims this push; the member runs its ordinary check unchanged.
+    Exit 0: the push is the reviewed rewrite; prints the member's own range minus the mapped
+    counterparts, which the member then judges with its ordinary check. Exit 4: refused."""
+    if len(argv) < 5 or argv[3] != "--":
+        raise Refused("USAGE push-admit LOCAL_SHA REMOTE_REF REMOTE_SHA -- REV-LIST-ARGS...")
+    tip, ref, remote, revs = argv[0], argv[1], argv[2], argv[4:]
+    if ref != MAIN or set(tip) == {"0"} or set(remote) == {"0"}:
+        return 3
+    found = reviewed_plans(line("rev-parse", "--path-format=absolute", "--git-common-dir"), tip)
+    if not found:
+        return 3
+    if len(found) != 1:
+        raise Refused("AMBIGUOUS_REVIEWED_PLANS " + " ".join(n for n, _ in found))
+    repo = Repo()
+    name, plan = found[0]
+    summary = verify_push(repo, name, plan, tip, remote)  # PUSH-VALIDATION
+    counterparts = set(plan["map"].values()) if isinstance(plan.get("map"), dict) else set()
+    for oid in git("rev-list", *revs, "--").decode().split():
+        if oid not in counterparts:
+            print(oid)
+    print("ref-txn-witness: ADMITTED reviewed rewrite push " + summary, file=sys.stderr)
+    return 0
+
+
+def write_read_only(path: str, data: bytes, what: str) -> None:
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400)
+    except FileExistsError as exc:
+        raise Refused(what + "_ALREADY_RECORDED " + path) from exc
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def review(argv: list) -> int:
     options = {}
     it = iter(argv)
@@ -575,7 +674,8 @@ def review(argv: list) -> int:
     if set(options) != {"--plan", "--reviewer"} or not options["--reviewer"].strip():
         raise Refused("USAGE review --plan PATH --reviewer NAME")
     repo = Repo()
-    plan = check_plan(repo, parse_json(read_owned(os.path.abspath(options["--plan"]), "PLAN"), "plan"))
+    plan_bytes = read_owned(os.path.abspath(options["--plan"]), "PLAN")
+    plan = check_plan(repo, parse_json(plan_bytes, "plan"))
     if line("symbolic-ref", "-q", "HEAD") != MAIN or repo.ref_value(MAIN) != plan["old_tip"]:
         raise Refused("STALE_OLD_TIP")
     check_transform(repo, plan)
@@ -584,15 +684,13 @@ def review(argv: list) -> int:
     record["record_sha256"] = digest(record, "record_sha256")
     path = repo.review_path(plan["plan_sha256"])
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400)
-    except FileExistsError as exc:
-        raise Refused("REVIEW_ALREADY_RECORDED " + path) from exc
-    try:
-        os.write(fd, canonical(record) + b"\n")
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    if os.path.lexists(path):
+        raise Refused("REVIEW_ALREADY_RECORDED " + path)
+    # The reviewed plan bytes beside the record let pre-push members find the plan by the pushed tip.
+    copy = os.path.join(os.path.dirname(path), plan["plan_sha256"] + PLAN_SUFFIX)
+    if not (os.path.isfile(copy) and read_owned(copy, "REVIEWED_PLAN", read_only=True) == plan_bytes):
+        write_read_only(copy, plan_bytes, "REVIEWED_PLAN")
+    write_read_only(path, canonical(record) + b"\n", "REVIEW")
     directory = os.open(os.path.dirname(path), os.O_RDONLY)
     try:
         os.fsync(directory)
@@ -610,7 +708,9 @@ def main() -> int:
             return admit()
         if argv[:1] == ["review"]:
             return review(argv[1:])
-        raise Refused("USAGE admit | review --plan PATH --reviewer NAME")
+        if argv[:1] == ["push-admit"]:
+            return push_admit(argv[1:])
+        raise Refused("USAGE admit | review --plan PATH --reviewer NAME | push-admit LOCAL_SHA REMOTE_REF REMOTE_SHA -- REVS...")
     except Refused as exc:
         print("ref-txn-witness: REFUSED " + str(exc), file=sys.stderr)
         return 4

@@ -8,6 +8,13 @@
 # objects only, so commit-tree commits are covered without touching the worktree.
 # It refuses (exit 4), naming the first offending sha. Test seams: --db overrides
 # the tracker, --br overrides the br binary (both forwarded).
+# PUSHADMIT1 (ompkit-fp72.120.16.221): in --pre-push mode each line also passes
+# --remote-ref. When the repo holds a reviewed plan copy
+# (<git-common-dir>/omp-kit/history-review/*.plan.json, written by
+# ref-txn-witness.py review), ref-txn-witness.py push-admit decides: exit 3
+# keeps the ordinary range, exit 0 admits the reviewed rewrite and returns the
+# range minus its mapped counterparts (still judged here), anything else
+# refuses. With no plan copy no witness runs and the check is unchanged.
 set -u
 
 REPO=""
@@ -16,6 +23,7 @@ TIP=""
 DB=""
 BRBIN=""
 PREPUSH=0
+RREF=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--repo) REPO=${2:-}; shift 2 ;;
@@ -23,6 +31,7 @@ while [ $# -gt 0 ]; do
 		--tip) TIP=${2:-}; shift 2 ;;
 		--db) DB=${2:-}; shift 2 ;;
 		--br) BRBIN=${2:-}; shift 2 ;;
+		--remote-ref) RREF=${2:-}; shift 2 ;;
 		--pre-push) PREPUSH=1; shift ;;
 		--) shift; break ;;
 		*) printf 'check-pushed-beads: unknown argument %s\n' "$1" >&2; exit 2 ;;
@@ -47,7 +56,7 @@ if [ "$PREPUSH" = "1" ]; then
 				continue
 				;;
 		esac
-		sh "$0" --repo "$REPO" --base "$4" --tip "$2" ${DB:+--db "$DB"} ${BRBIN:+--br "$BRBIN"} || rc=$?
+		sh "$0" --repo "$REPO" --base "$4" --tip "$2" --remote-ref "$3" ${DB:+--db "$DB"} ${BRBIN:+--br "$BRBIN"} || rc=$?
 	done
 	exit "$rc"
 fi
@@ -65,7 +74,29 @@ HOOK="$HOOKDIR/commit-msg-bead.sh"
 [ -f "$HOOKDIR/kitlib-tmp.sh" ] || { printf 'check-pushed-beads: kitlib-tmp.sh missing at %s\n' "$HOOKDIR" >&2; exit 2; }
 # shellcheck source=scripts/kitlib-tmp.sh
 . "$HOOKDIR/kitlib-tmp.sh"
-COMMITS=$(git -C "$REPO" rev-list --no-merges "$TIP" --not --remotes=origin 2>/dev/null) || { printf 'check-pushed-beads: cannot list commits at tip %s outside origin remotes (base %s)\n' "$TIP" "$BASE" >&2; exit 2; }
+reviewed_witness() {
+	# prints the witness reader's directory when a reviewed plan copy exists; else fails fast with no python spawned
+	common=$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+	set -- "$common"/omp-kit/history-review/*.plan.json
+	[ -e "$1" ] || return 1
+	for w in "$HOOKDIR" "$HOOKDIR/../reference-transaction"; do
+		if [ -f "$w/ref-txn-witness.py" ]; then printf '%s' "$w"; return 0; fi
+	done
+	return 1
+}
+wrc=3
+if [ -n "$RREF" ] && W=$(reviewed_witness); then
+	# A literal -c runner keeps the Python argv statically judged (staged-pysafe); the reader is cwd-bound to the repo.
+	COMMITS=$(CDPATH='' cd -- "$REPO" && python3 -B -c 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")' "$W/ref-txn-witness.py" push-admit "$TIP" "$RREF" "$BASE" -- --no-merges "$TIP" --not --remotes=origin)
+	wrc=$?
+	if [ "$wrc" != "0" ] && [ "$wrc" != "3" ]; then
+		printf 'check-pushed-beads: refusing %s -> %s: a reviewed history plan claims this push and its witness refused (exit %s)\n' "$TIP" "$RREF" "$wrc" >&2
+		exit 4
+	fi
+fi
+if [ "$wrc" = "3" ]; then
+	COMMITS=$(git -C "$REPO" rev-list --no-merges "$TIP" --not --remotes=origin 2>/dev/null) || { printf 'check-pushed-beads: cannot list commits at tip %s outside origin remotes (base %s)\n' "$TIP" "$BASE" >&2; exit 2; }
+fi
 msg_dir='' # assigned by kitlib_tmp via eval
 kitlib_tmp msg_dir pushed-beads-msg || exit 2
 TMPMSG=$msg_dir/msg

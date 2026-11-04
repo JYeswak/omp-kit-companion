@@ -53,14 +53,46 @@ is_exempt() {
 	printf '%s' "$1" | grep -qiE '^(Merge |Revert |fixup! |squash! )'
 }
 
+reviewed_commits() {
+	# reviewed_commits REPO TIP RREF RSHA: PUSHADMIT1 (ompkit-fp72.120.16.221). With no reviewed plan copy
+	# (<git-common-dir>/omp-kit/history-review/*.plan.json) return 3 and spawn nothing. Otherwise
+	# ref-txn-witness.py push-admit decides: 3 keeps the ordinary range, 0 prints the range minus the
+	# reviewed rewrite's mapped counterparts, anything else refuses the push.
+	common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 3
+	for plan in "$common"/omp-kit/history-review/*.plan.json; do
+		[ -e "$plan" ] || return 3
+		break
+	done
+	dir=${SELF%/*}
+	for w in "$dir" "$dir/../reference-transaction"; do
+		if [ -f "$w/ref-txn-witness.py" ]; then
+			# A literal -c runner keeps the Python argv statically judged (staged-pysafe); the reader is cwd-bound to the repo.
+			(CDPATH='' cd -- "$1" && python3 -B -c 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")' "$w/ref-txn-witness.py" push-admit "$2" "$3" "$4" -- "$2" --not "$4")
+			return $?
+		fi
+	done
+	return 3
+}
+
 check_range() {
-	# check_range REPO BASE TIP: refuse when the range holds a non-exempt
-	# level-less commit. Empty ranges pass.
-	repo="$1" base="$2" tip="$3"
-	commits=$(git -C "$repo" rev-list "$tip" --not "$base" 2>/dev/null) || {
-		printf 'pre-push-verification-level: cannot list range %s --not %s\n' "$tip" "$base" >&2
-		return 2
-	}
+	# check_range REPO BASE TIP [RREF]: refuse when the range holds a non-exempt
+	# level-less commit. Empty ranges pass. RREF (pre-push only) enables the
+	# reviewed-rewrite route for a concrete remote sha BASE.
+	repo="$1" base="$2" tip="$3" wrc=3
+	if [ -n "${4:-}" ]; then
+		commits=$(reviewed_commits "$repo" "$tip" "$4" "$base")
+		wrc=$?
+		if [ "$wrc" != "0" ] && [ "$wrc" != "3" ]; then
+			printf 'pre-push-verification-level: REFUSED %s -> %s: a reviewed history plan claims this push and its witness refused (exit %s)\n' "$tip" "$4" "$wrc" >&2
+			return 4
+		fi
+	fi
+	if [ "$wrc" = "3" ]; then
+		commits=$(git -C "$repo" rev-list "$tip" --not "$base" 2>/dev/null) || {
+			printf 'pre-push-verification-level: cannot list range %s --not %s\n' "$tip" "$base" >&2
+			return 2
+		}
+	fi
 	for sha in $commits; do
 		subject=$(git -C "$repo" log --format=%s -n 1 "$sha" 2>/dev/null) || {
 			printf 'pre-push-verification-level: cannot read %s\n' "$sha" >&2
@@ -88,18 +120,18 @@ pre_push() {
 		# shellcheck disable=SC2086
 		set -- $line
 		[ $# -eq 4 ] || continue
-		lsha="$2" rsha="$4"
+		lsha="$2" rsha="$4" rref="$3"
 		case "$lsha" in
 			0000000000000000000000000000000000000000) continue ;; # deletion: nothing to judge
 		esac
 		case "$rsha" in
 			0000000000000000000000000000000000000000)
-				base="--remotes=$remote"
+				base="--remotes=$remote" rref=""
 				;;
 			*) base="$rsha" ;;
 		esac
 		# shellcheck disable=SC2086
-		check_range "$repo" $base "$lsha" || rc=$?
+		check_range "$repo" $base "$lsha" "$rref" || rc=$?
 	done
 	return "$rc"
 }
