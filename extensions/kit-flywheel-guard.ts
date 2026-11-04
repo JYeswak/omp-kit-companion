@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
@@ -148,6 +148,7 @@ export const FLYWHEEL_EXEC_TIMEOUT_MS = 3000;
 export const COMPACTION_REREAD = "COMPACTION_REREAD";
 export const SELF_CLOSE_REFUSED = "SELF_CLOSE_REFUSED";
 export const SCRATCH_DISPOSAL_REFUSED = "SCRATCH_DISPOSAL_REFUSED";
+export const EXPORT_INDEX_REFUSED = "EXPORT_INDEX_REFUSED";
 export const GOAL_END_REFUSED = "GOAL_END_REFUSED";
 export const GOAL_SEND_REFUSED = "GOAL_SEND_REFUSED";
 export const NO_WAIT_REFUSED = "NO_WAIT_REFUSED";
@@ -688,12 +689,16 @@ interface BrCommandLine {
 	identities: string[];
 	/** Inline `BR_ACTOR=` assignment, innermost wins. */
 	inlineActor: string | null;
+	/** Literal environment overrides, including `env -u`, inherited by nested shells. */
+	environment: Record<string, string | undefined>;
 }
 
-/** Every `br`/`bd` argv a command runs, with the cwd selected by leading cd commands; `sh -c` strings are followed. */
-function brCommandLines(command: string, cwd: string, home: string, depth = 0, trackExpansions = false): BrCommandLine[] {
+/** Selected executable argv with cwd and inline environment; nested `sh -c` strings are followed. */
+function brCommandLines(command: string, cwd: string, home: string, depth = 0, trackExpansions = false,
+	bins: readonly string[] = ["br", "bd"], inheritedEnvironment: Record<string, string | undefined> = {}): BrCommandLine[] {
 	const lines: BrCommandLine[] = [];
 	let current = cwd;
+	const currentEnvironment = { ...inheritedEnvironment };
 	const parsed = trackExpansions ? shellCommandsWithExpansions(command) : undefined;
 	const commands = parsed?.commands ?? shellCommands(command);
 	for (let commandIndex = 0; commandIndex < commands.length; commandIndex += 1) {
@@ -701,21 +706,45 @@ function brCommandLines(command: string, cwd: string, home: string, depth = 0, t
 		const rawExpansionFlags = parsed?.expansionFlags[commandIndex];
 		const identities: string[] = [];
 		let inlineActor: string | null = null;
+		const environment = { ...currentEnvironment };
 		let at = 0;
 		while (at < raw.length) {
 			const word = raw[at]!;
 			if (isAssignment(word)) {
 				const eq = word.indexOf("=");
 				const name = word.slice(0, eq);
+				environment[name] = word.slice(eq + 1);
 				if ((IDENTITY_ENV as readonly string[]).includes(name) && word.length > eq + 1) identities.push(word.slice(eq + 1));
 				if (name === "BR_ACTOR") inlineActor = word.slice(eq + 1);
 				at += 1;
+			} else if (word === "env") {
+				at += 1;
+				while (at < raw.length && raw[at]!.startsWith("-")) {
+					const flag = raw[at++]!;
+					if (flag === "--") break;
+					if (flag === "-u" || flag === "--unset") environment[raw[at++] ?? ""] = undefined;
+					else if (flag.startsWith("--unset=")) environment[flag.slice(8)] = undefined;
+					else if (flag === "-i" || flag === "--ignore-environment") {
+						for (const key of new Set([...Object.keys(process.env), ...Object.keys(environment)])) environment[key] = undefined;
+					}
+				}
 			} else if (WRAPPERS[word] === true) at += 1;
 			else break;
 		}
 		const argv = raw.slice(at);
 		const expansionFlags = rawExpansionFlags?.slice(at);
 		if (argv.length === 0) continue;
+		if (argv[0] === "export") {
+			for (const word of argv.slice(1)) if (isAssignment(word)) {
+				const eq = word.indexOf("=");
+				currentEnvironment[word.slice(0, eq)] = word.slice(eq + 1);
+			}
+			continue;
+		}
+		if (argv[0] === "unset") {
+			for (const name of argv.slice(1)) currentEnvironment[name] = undefined;
+			continue;
+		}
 		if (argv[0] === "cd") {
 			const target = argv[1];
 			if (target === undefined) current = home;
@@ -726,15 +755,113 @@ function brCommandLines(command: string, cwd: string, home: string, depth = 0, t
 		if (SHELL_WRAPPERS[name] === true && depth < MAX_SHELL_DEPTH) {
 			const script = shellScript(argv);
 			if (script !== undefined) {
-				for (const nested of brCommandLines(script, current, home, depth + 1, trackExpansions)) {
+				for (const nested of brCommandLines(script, current, home, depth + 1, trackExpansions, bins, environment)) {
 					lines.push({ ...nested, identities: [...identities, ...nested.identities], inlineActor: nested.inlineActor ?? inlineActor });
 				}
 			}
 			continue;
 		}
-		if (name === "br" || name === "bd") lines.push({ argv, cwd: current, identities, inlineActor, ...(expansionFlags === undefined ? {} : { expansionFlags }) });
+		if (bins.includes(name)) lines.push({ argv, cwd: current, identities, inlineActor, environment, ...(expansionFlags === undefined ? {} : { expansionFlags }) });
 	}
 	return lines;
+}
+
+const INDEX_REF_GIT_COMMANDS: Record<string, true> = {
+	"read-tree": true, "update-index": true, add: true, rm: true, mv: true, commit: true, reset: true,
+	checkout: true, switch: true, restore: true, stash: true, "update-ref": true, "symbolic-ref": true,
+	branch: true, tag: true, merge: true, rebase: true, "cherry-pick": true, revert: true, am: true,
+	apply: true, fetch: true, pull: true, push: true, worktree: true, notes: true, reflog: true, "pack-refs": true,
+};
+
+/** Several git verbs list state by default; those forms must not need isolation. */
+function changesGitIndexOrRefs(verb: string, args: string[]): boolean {
+	if (INDEX_REF_GIT_COMMANDS[verb] !== true) return false;
+	if (verb === "restore") return args.some(arg => arg === "--staged" || (arg.startsWith("-") && !arg.startsWith("--") && arg.includes("S")));
+	if (verb === "apply") return args.includes("--index") || args.includes("--cached");
+	if (verb === "stash") return args[0] !== "list" && args[0] !== "show";
+	if (verb === "worktree") return args[0] !== "list";
+	if (verb === "reflog") return args.some(arg => ["delete", "drop", "expire", "write"].includes(arg));
+	if (verb === "notes") return args.some(arg => ["add", "append", "copy", "edit", "merge", "prune", "remove"].includes(arg));
+	if (verb === "symbolic-ref") return args.includes("--delete") || args.includes("-d") || args.filter(arg => !arg.startsWith("-")).length > 1;
+	if (verb === "branch" || verb === "tag") {
+		if (args.some(arg => ["--delete", "-d", "-D", "--move", "-m", "-M", "--copy", "-c", "-C", "--force", "-f"].includes(arg))) return true;
+		if (args.some(arg => ["--list", "-l", "--show-current", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at"].includes(arg))) return false;
+		return args.some(arg => !arg.startsWith("-"));
+	}
+	return true;
+}
+
+function withinDirectory(path: string, root: string): boolean {
+	const rel = relative(root, path);
+	return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+/** Innermost owned scratch boundary, also when fixtures/exported checkouts nest. */
+function scratchBoundary(cwd: string): string | undefined {
+	const parts = resolve(cwd).split(sep);
+	for (let at = parts.length - 3; at >= 0; at -= 1) {
+		if (parts[at] === "var" && parts[at + 1] === "agent-tmp" && parts[at + 2]) return parts.slice(0, at + 3).join(sep);
+	}
+	return undefined;
+}
+
+/** EXPORTINDEX1: ask git where it would write, never run the mutating command. */
+export async function checkExportIndex(event: FlywheelToolCallEvent, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
+	if (event.toolName !== "bash") return undefined;
+	const command = field(event.input, "command");
+	if (typeof command !== "string") return undefined;
+	const cwd = field(event.input, "cwd");
+	const callCwd = typeof cwd === "string" && cwd.trim() ? resolve(deps.sessionCwd, expandHome(cwd.trim(), deps.home)) : deps.sessionCwd;
+	for (const line of brCommandLines(command, callCwd, deps.home, 0, false, ["git"])) {
+		let gitCwd = line.cwd;
+		let at = 1;
+		for (; at < line.argv.length; at += 1) {
+			const word = line.argv[at]!;
+			if (!word.startsWith("-")) break;
+			if (word === "-C") gitCwd = resolve(gitCwd, expandHome(line.argv[++at] ?? "", deps.home));
+			else if (word.startsWith("-C")) gitCwd = resolve(gitCwd, expandHome(word.slice(2), deps.home));
+			else if (["-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"].includes(word)) at += 1;
+		}
+		const verb = line.argv[at];
+		if (!verb || !changesGitIndexOrRefs(verb, line.argv.slice(at + 1)) || line.argv.includes("--help")) continue;
+		const lexicalRoot = scratchBoundary(gitCwd);
+		const actualCwd = realpathSync(gitCwd);
+		const root = scratchBoundary(actualCwd) ?? (lexicalRoot === undefined ? undefined : realpathSync(lexicalRoot));
+		if (root === undefined) continue;
+		const dynamicEnvironment = Object.entries(line.environment).some(([key, value]) =>
+			key.startsWith("GIT_") && value !== undefined && (shellExpands(value) || value.startsWith("~")));
+		if (dynamicEnvironment || line.argv.slice(1, at).some(word => shellExpands(word) || word.includes("=~"))) return {
+			block: true,
+			reason: `kit-flywheel-guard ${EXPORT_INDEX_REFUSED}: git ${verb} has shell-expanded repository options that cannot be resolved before execution. `
+				+ "Use literal paths and isolate the export with its own git init or GIT_CEILING_DIRECTORIES; no command ran.",
+		};
+		const environment = { ...deps.env, ...line.environment };
+		const keys = new Set([...Object.keys(process.env), ...Object.keys(environment)].filter(key => key.startsWith("GIT_")));
+		const envArgs = [...keys].flatMap(key => environment[key] === undefined ? ["-u", key] : []);
+		for (const key of keys) if (environment[key] !== undefined) envArgs.push(`${key}=${environment[key]}`);
+		const probe = await deps.exec("env", [...envArgs, line.argv[0]!, ...line.argv.slice(1, at), "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+			{ cwd: line.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+		// A ceiling that prevents discovery is safe: the command cannot reach any outer index.
+		if (probe.code !== 0 && !probe.killed && (probe.stderr ?? "").includes("not a git repository")) continue;
+		let isolated = false;
+		if (probe.code === 0 && !probe.killed && probe.stdout.trim()) {
+			const dirs = probe.stdout.trim().split("\n");
+			isolated = dirs.length === 2 && dirs.every(dir => withinDirectory(realpathSync(resolve(gitCwd, dir)), root));
+			const index = environment.GIT_INDEX_FILE;
+			if (index) {
+				const indexPath = resolve(gitCwd, index);
+				if (!withinDirectory(join(realpathSync(dirname(indexPath)), basename(indexPath)), root)) isolated = false;
+			}
+		}
+		if (!isolated) return {
+			block: true,
+			reason: `kit-flywheel-guard ${EXPORT_INDEX_REFUSED}: git ${verb} from ${gitCwd} would use an outside or unverifiable repository/index. `
+				+ "No command ran; the shared index and refs were not changed. Use `omp-kit scratch new --export <sha>`; "
+				+ "for a manual export unset GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE, set GIT_CEILING_DIRECTORIES=<export parent>, "
+				+ "then run `git -C <export> init -q` separately before index-changing commands.",
+		};
+	}
+	return undefined;
 }
 
 /** Supported close/claim/start/block/release/review mutations, plus bare custody writes (`update --assignee` without a classified status), with the cwd selected by leading cd commands; `sh -c` strings are followed. */
@@ -2590,6 +2717,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
+			const exportIndex = await checkExportIndex(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
+			if (exportIndex !== undefined) return exportIndex;
 			const dbLiteral = checkTrackerDbLiteral(event);
 			if (dbLiteral !== undefined) return dbLiteral;
 			const gap = await checkGapMentions(event, pi.exec, ctx.cwd);

@@ -2681,11 +2681,11 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 export const SCRATCH_EXPORT_DIRECTORY = "src";
 
 /**
- * Exact-commit read-only export into the owned root's `src/` child. Administrative
- * files such as `.owner` stay outside the archive's namespace. `git archive` runs
- * from the work-tree root so a call from a subdirectory still exports the whole
- * commit. Existing content is never overwritten; a failed export may leave a
- * partial child, but the root remains releasable by its original capability.
+ * Exact-commit export into the owned root's `src/` child, with its own empty git
+ * repository so commands cannot discover and mutate the enclosing checkout.
+ * Administrative files such as `.owner` stay outside the archive's namespace.
+ * `git archive` runs from the work-tree root so subdirectory calls export the
+ * whole commit. Existing content is never overwritten; failed partial exports remain releasable.
  * Null on success, else the reason.
  */
 export function exportCommitToScratch(repo: string, commit: string, dir: string, run: ScratchRunner): string | null {
@@ -2707,6 +2707,11 @@ export function exportCommitToScratch(repo: string, commit: string, dir: string,
 		rmSync(tarball, { force: true });
 	} catch { /* best effort */ }
 	if (extracted.code !== 0) return "export-extract-failed";
+	// Clear ambient repository/index overrides: even `git init` obeys GIT_DIR.
+	// An empty template preserves the exported file tree outside .git.
+	const isolated = run(["env", ...Object.keys(process.env).filter(key => key.startsWith("GIT_")).flatMap(key => ["-u", key]),
+		`GIT_CEILING_DIRECTORIES=${dir}`, "git", "-C", exportDir, "init", "--quiet", "--template="]);
+	if (isolated.code !== 0 || !existsSync(join(exportDir, ".git"))) return "export-git-isolation-failed";
 	return null;
 }
 

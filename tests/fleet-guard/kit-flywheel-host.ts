@@ -7,6 +7,8 @@ import kitFlywheelGuard, {
  type FlywheelToolCallEvent,
  type FlywheelToolCallResult,
 } from "../../extensions/kit-flywheel-guard";
+import { run } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "../cli/fixture-process.ts";
 
 export interface FakeHost {
  emit(type: string, event: Record<string, unknown>, ctx: FlywheelContext): Promise<unknown[]>;
@@ -47,6 +49,17 @@ export async function createFlywheelHost(base: string, opts: { env?: Record<stri
 		exec: async (command: string, args: string[], options?: FlywheelExecOptions) => {
 			const call = { command, args, options };
 			execs.push(call);
+			// Repository discovery is a real read, not tracker fixture data. Gate
+			// exports put TMPDIR under var/agent-tmp, activating EXPORTINDEX1 even
+			// for fixtures that never needed a git response in a platform TMPDIR.
+			if (command === "env" && args.at(-4) === "rev-parse"
+				&& args.at(-2) === "--git-dir" && args.at(-1) === "--git-common-dir") {
+				const result = await run([command, ...args], {
+					cwd: options?.cwd ?? base, deadline_s: fixtureDeadlineS(), max_output_bytes: 65536,
+				});
+				return { code: result.rc ?? -1, killed: result.killed,
+					stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
+			}
 			return respond(call);
 		},
 	};

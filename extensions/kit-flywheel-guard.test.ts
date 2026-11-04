@@ -1,13 +1,14 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { checkNoWait, validPriorArtLine } from "./kit-flywheel-guard";
 import { checkBgWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
-import { run } from "../src/kitlib/run.ts";
+import { run, runSync } from "../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "../tests/cli/fixture-process.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -167,8 +168,11 @@ for (const roster of [null, "{broken", { sessions: null }]) {
 
 function stockRepo(parent = base): string {
 	const cwd = freshDir(parent, "stock-repo-");
-	const git = Bun.spawnSync(["git", "init", "--quiet", cwd]);
-	if (git.exitCode !== 0) throw new Error(git.stderr.toString());
+	const git = runSync(["git", "init", "--quiet", "--template=", cwd], {
+		deadline_s: fixtureDeadlineS(),
+		env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: base, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+	});
+	if (git.rc !== 0) throw new Error(new TextDecoder().decode(git.stderr));
 	return cwd;
 }
 
@@ -194,6 +198,18 @@ test("stock compaction: a git repo without AGENTS.md or br remains editable and 
 	expect(h.sent).toHaveLength(1);
 	expect(h.sent[0]!.message.content).toContain("none found");
 	expect(h.sent[0]!.message.content).toContain("none held");
+});
+
+test("EXPORTINDEX1 quiet control: own git stays allowed inside nested hermetic scratch with a gitless export root", async () => {
+	const exported = freshDir(base, "gitless-export-");
+	const nested = join(exported, "var", "agent-tmp", "suite-hermetic", "kit-flywheel-guard");
+	mkdirSync(nested, { recursive: true });
+	const cwd = stockRepo(nested);
+	expect(existsSync(join(exported, ".git"))).toBe(false);
+	const h = await createFlywheelHost(base, { env: { GIT_CEILING_DIRECTORIES: exported } });
+	const result = await toolCall(h, cwd, "git commit -m local");
+	expect(result?.block).not.toBe(true);
+	expect(h.execs.some(call => call.command === "env" && call.args.includes("--git-common-dir"))).toBe(true);
 });
 
 test("COMPACTION_REREAD: session_compact summarizes the nearest AGENTS.md", async () => {
@@ -239,7 +255,114 @@ test("COMPACTION_REREAD negative: an ordinary turn emits nothing", async () => {
 	expect(h.execs).toEqual([]);
 });
 
+// --- EXPORTINDEX1 ---------------------------------------------------------
+
+async function exportIndexFixture() {
+	const project = freshDir(base, "export-index-");
+	const exported = join(project, "var", "agent-tmp", "manual-export", "src");
+	mkdirSync(exported, { recursive: true });
+	const env: Record<string, string> = {
+		PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: base,
+		GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+		GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+	};
+	const execute = async (argv: string[], cwd = project) => {
+		const result = await run(argv, { cwd, env, deadline_s: fixtureDeadlineS(), max_output_bytes: 65536 });
+		return { code: result.rc ?? -1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
+	};
+	const git = async (args: string[], cwd = project) => {
+		const result = await execute(["git", "-c", "core.hooksPath=/dev/null", ...args], cwd);
+		expect(result.code, result.stderr).toBe(0);
+		return result.stdout.trim();
+	};
+	await git(["init", "-q"]);
+	writeFileSync(join(project, "tracked.txt"), "committed\n");
+	await git(["add", "--", "tracked.txt"]);
+	await git(["commit", "-qm", "fixture"]);
+	writeFileSync(join(project, "tracked.txt"), "staged work that read-tree must not drop\n");
+	await git(["add", "--", "tracked.txt"]);
+	const index = readFileSync(join(project, ".git", "index"));
+	const head = await git(["rev-parse", "HEAD"]);
+	const h = await createFlywheelHost(base, { env, respond: call => execute([call.command, ...call.args], call.options?.cwd ?? project) });
+	return { project, exported, git, execute, index, head, h };
+}
+
+test("EXPORTINDEX1 planted: export git mutations are refused before the shared index or refs change", async () => {
+	const f = await exportIndexFixture();
+	for (const verb of ["read-tree HEAD", "update-index --refresh", "add tracked.txt", "commit -m bad", "reset HEAD",
+		"checkout HEAD", "restore --staged tracked.txt", "stash", "update-ref refs/heads/main HEAD"]) {
+		const result = await toolCall(f.h, f.exported, `git ${verb}`);
+		expect(result?.block, verb).toBe(true);
+		expect(result?.reason).toContain("EXPORT_INDEX_REFUSED");
+	}
+	for (const command of [
+		`git -C '${f.exported}' read-tree HEAD`,
+		`cd '${f.exported}' && git read-tree HEAD`,
+		`env GIT_OBJECT_DIRECTORY='${f.project}/.git/objects' sh -c "cd '${f.exported}' && git read-tree HEAD"`,
+	]) expect((await toolCall(f.h, f.project, command))?.reason, command).toContain("EXPORT_INDEX_REFUSED");
+	expect((await bashInput(f.h, { command: "git read-tree HEAD", cwd: f.exported }))?.reason).toContain("EXPORT_INDEX_REFUSED");
+	expect(readFileSync(join(f.project, ".git", "index"))).toEqual(f.index);
+	expect(await f.git(["rev-parse", "HEAD"])).toBe(f.head);
+});
+
+test("EXPORTINDEX1 controls: checkout root, read-only export git, own git init and ceiling stay allowed", async () => {
+	const f = await exportIndexFixture();
+	expect((await toolCall(f.h, f.project, "git read-tree HEAD"))?.block).not.toBe(true);
+	for (const args of [["status", "--short"], ["log", "-1", "--oneline"], ["show", "HEAD:tracked.txt"],
+		["branch", "--show-current"], ["tag", "--list"], ["symbolic-ref", "HEAD"], ["reflog", "show"],
+		["worktree", "list"], ["notes", "list"], ["stash", "list"]]) {
+		expect((await toolCall(f.h, f.exported, `git ${args.join(" ")}`))?.block).not.toBe(true);
+		await f.git(args, f.exported);
+	}
+	const ceiling = `GIT_CEILING_DIRECTORIES='${join(f.project, "var", "agent-tmp", "manual-export")}'`;
+	expect((await toolCall(f.h, f.exported, `${ceiling} git read-tree HEAD`))?.block).not.toBe(true);
+	const stopped = await f.execute(["env", ceiling.replaceAll("'", ""), "git", "read-tree", "HEAD"], f.exported);
+	expect(stopped.code).not.toBe(0);
+	expect(stopped.stderr).toContain("not a git repository");
+	await f.git(["init", "-q"], f.exported);
+	await f.git(["commit", "--allow-empty", "-qm", "local"], f.exported);
+	expect((await toolCall(f.h, f.exported, "git read-tree HEAD"))?.block).not.toBe(true);
+	await f.git(["read-tree", "HEAD"], f.exported);
+	expect(readFileSync(join(f.project, ".git", "index"))).toEqual(f.index);
+});
+
+test("EXPORTINDEX1 planted: own .git and a ceiling never authorize explicit outside git/index overrides", async () => {
+	const f = await exportIndexFixture();
+	await f.git(["init", "-q"], f.exported);
+	symlinkSync(join(f.project, ".git"), join(f.exported, "outside-index"));
+	for (const command of [
+		`GIT_DIR='${f.project}/.git' git read-tree HEAD`,
+		`git --git-dir='${f.project}/.git' read-tree HEAD`,
+		`GIT_INDEX_FILE='${f.project}/.git/index' git read-tree HEAD`,
+		`GIT_INDEX_FILE='${f.exported}/outside-index/index' git read-tree HEAD`,
+		`GIT_COMMON_DIR='${f.project}/.git' git read-tree HEAD`,
+		`GIT_CEILING_DIRECTORIES='${f.exported}' GIT_DIR='${f.project}/.git' git read-tree HEAD`,
+		"GIT_DIR=$PARENT_GIT_DIR git read-tree HEAD",
+		"git --git-dir=$PARENT_GIT_DIR read-tree HEAD",
+		"GIT_DIR=~/outside-checkout/.git git read-tree HEAD",
+	]) expect((await toolCall(f.h, f.exported, command))?.reason, command).toContain("EXPORT_INDEX_REFUSED");
+	expect(readFileSync(join(f.project, ".git", "index"))).toEqual(f.index);
+});
+
 // --- SELF_CLOSE_REFUSED --------------------------------------------------
+
+test("SELF_CLOSE_REFUSED planted: a seat's non-author background verifier cannot close that seat's bead", async () => {
+	const project = freshDir(base, "subagent-close-");
+	for (const seat of ["PeachLeopard", "IndependentSeat"]) {
+		const h = await createFlywheelHost(base, { env: { AGENT_NAME: seat },
+			respond: brTable({ "kit-parent": bead("kit-parent", "PeachLeopard", "PeachLeopard") }) });
+		const [raw] = await h.emit("tool_call", { toolCallId: "subagent-close", toolName: "bash",
+			input: { command: "br close kit-parent --actor SpawnVerifier --reason 'verified export abcdef123456'" } },
+		{ ...h.ctx(project), agent: { kind: "sub" } });
+		const result = raw as FlywheelToolCallResult | undefined;
+		if (seat === "PeachLeopard") {
+			expect(result?.block).toBe(true);
+			expect(result?.reason).toContain("SELF_CLOSE_REFUSED");
+			expect(result?.reason).toContain("PeachLeopard");
+		} else expect(result?.block).not.toBe(true);
+	}
+});
 
 test("SELF_CLOSE_REFUSED: closing a bead assigned to the caller's pane identity is blocked", async () => {
 	const project = freshDir(base, "proj-");
@@ -596,7 +719,7 @@ test("SELF_CLOSE_REFUSED negative: unknown caller identity is allowed with a war
 });
 
 test("SELF_CLOSE_REFUSED negative: close text that is not a br/bd close never consults br", async () => {
-	const project = freshDir(base, "proj-");
+	const project = stockRepo();
 	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "BlueFox" }, respond: brTable({ "kit-1": bead("kit-1", "BlueFox") }) });
 	for (const command of [
 		"echo 'br close kit-1'",
@@ -713,7 +836,7 @@ test("BGDEADLINE1: unknown and service refusals carry job and deadline", async (
 
 /** Compacted host whose nearest AGENTS.md is `cwd/AGENTS.md`; identity TestWorker. */
 async function rereadHost(extra: string[] = [], identity: string | null = "TestWorker", respond?: Responder): Promise<{ h: FakeHost; cwd: string; agents: string }> {
-	const cwd = freshDir(base, "reread-");
+	const cwd = stockRepo();
 	const agents = join(cwd, "AGENTS.md");
 	writeFileSync(agents, "rules\n");
 	for (const name of extra) writeFileSync(join(cwd, name), "x\n");
@@ -950,7 +1073,7 @@ test("COMPACTION_REREAD planted negative: rows come only from the guard's own li
 });
 
 test("REREAD: without compaction nothing is blocked", async () => {
-	const cwd = freshDir(base, "reread-plain-");
+	const cwd = stockRepo();
 	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "TestWorker" }, respond: brTable({ "k-1": bead("k-1", null) }) });
 	const c = h.ctx(cwd);
 	expect(await h.emit("tool_call", { toolCallId: "e1", toolName: "edit", input: { path: "f" } }, c)).toEqual([undefined]);

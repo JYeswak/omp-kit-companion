@@ -8,6 +8,8 @@ import { domain, KNOWN_JOBS, runScratchPressureTrigger, scratchPressureChiefRout
 import { acquireRunLock } from "../../src/service-run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
+import { runSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const roots: string[] = [];
 const fixtureRepo = resolve(import.meta.dir, "../..");
@@ -1924,9 +1926,9 @@ test("SCRATCHLEAK1: scratch new writes a valid JSON owner carrying the bead", ()
 });
 
 /**
- * A one-commit git repo the test owns. Never the suite's own checkout: a scratch export has no .git
- * and sits in the enclosing repo's ignored var/agent-tmp, and the full-suite gate archive is a
- * commitless `git init`, so neither has a HEAD to export.
+ * A one-commit git repo the test owns. Native scratch exports and full-suite gate
+ * archives have an independent but commitless git repository, so neither has a
+ * HEAD to export; never fall through to the suite's enclosing checkout.
  */
 function commitFixture(emptyOwner = false): { source: string; head: string } {
 	const source = agentTmp("export-src");
@@ -1965,6 +1967,51 @@ test("SCRATCHLEAK1: export materializes the exact commit; unknown sha refused (p
 	expect(exportCommitToScratch(source, head, made.dir, defaultRunner)).toBe("export-destination-unavailable");
 	expect(exportCommitToScratch(source, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", made.dir, defaultRunner)).toBe("export-commit-unknown");
 }, 60000);
+
+test("EXPORTINDEX1: native export isolates git without changing archived files or the shared index", () => {
+	const { source, head } = commitFixture(true);
+	registerRepoScratchRoot(source);
+	const made = createScratch("isolated-export", source, depsFor(), {}, true, join(source, "budgets.json"));
+	expect(made.ok).toBe(true);
+	const indexPath = join(source, ".git", "index");
+	const index = readFileSync(indexPath);
+	const oldDir = process.env.GIT_DIR;
+	const oldIndex = process.env.GIT_INDEX_FILE;
+	process.env.GIT_DIR = join(source, ".git");
+	process.env.GIT_INDEX_FILE = indexPath;
+	try {
+		expect(exportCommitToScratch(source, head, made.dir, defaultRunner)).toBeNull();
+	} finally {
+		if (oldDir === undefined) delete process.env.GIT_DIR;
+		else process.env.GIT_DIR = oldDir;
+		if (oldIndex === undefined) delete process.env.GIT_INDEX_FILE;
+		else process.env.GIT_INDEX_FILE = oldIndex;
+	}
+	const exportDir = join(made.dir, "src");
+	const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: source, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+	const git = (cwd: string, ...args: string[]) => runSync(["git", ...args], { cwd, env, deadline_s: fixtureDeadlineS() });
+	const top = git(exportDir, "rev-parse", "--show-toplevel");
+	expect(top.rc).toBe(0);
+	expect(new TextDecoder().decode(top.stdout).trim()).toBe(realpathSync(exportDir));
+	const tree = git(source, "ls-tree", "--name-only", "-r", head);
+	const files = git(exportDir, "ls-files", "--others", "--exclude-standard");
+	expect(tree.rc).toBe(0);
+	expect(files.rc).toBe(0);
+	expect(new TextDecoder().decode(files.stdout)).toBe(new TextDecoder().decode(tree.stdout));
+	const planted = git(exportDir, "read-tree", "HEAD");
+	expect(planted.rc).not.toBe(0); // empty local repo: must never borrow the parent's HEAD.
+	expect(new TextDecoder().decode(planted.stderr)).not.toContain("not a git repository");
+	expect(readFileSync(indexPath)).toEqual(index);
+});
+
+test("EXPORTINDEX1 planted: failed native git isolation is reported instead of returning an unsafe export", () => {
+	const { source, head } = commitFixture();
+	const destination = agentTmp("isolation-failure");
+	roots.push(destination);
+	const result = exportCommitToScratch(source, head, destination, (argv, options) => argv[0] === "env"
+		? { code: 1, stdout: "", stderr: "git init refused" } : defaultRunner(argv, options));
+	expect(result).toBe("export-git-isolation-failed");
+});
 test("EXPORTOWNER: CLI export preserves the structured owner and capability release", () => {
 	const { source, head } = commitFixture(true);
 	const state = join(source, "state");
