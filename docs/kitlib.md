@@ -37,6 +37,9 @@ Output past `max_output_bytes` on either stream also stops the child (`killed`, 
 has the same shape as `run()`. It owns no process group: only the leader is signalled, so a command that can fork
 descendants must use async `run()`. A missing `deadline_s` throws TypeError; a non-positive one throws RangeError.
 
+TypeScript `run()` and `runSync()` reject unknown option keys with a TypeError naming the key, before spawning.
+Only async `run()` accepts `stdin`; synchronous test `runFixture()` likewise refuses supplied stdin and directs callers to `runFixtureAsync()`.
+
 ### Process adoption: inherited descriptors and live output (KL02, ompkit-t8dfi)
 
 `run()` takes three optional adoption options; with none given its behaviour is unchanged.

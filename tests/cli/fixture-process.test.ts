@@ -67,3 +67,17 @@ test("async fixtures retain command failure and classify real expiry", async () 
 		cwd, floor_s: 0.2, label: "async expiry",
 	})).rejects.toThrow("TIMEOUT_UNDER_LOAD");
 });
+
+test("sync fixtures refuse stdin instead of silently dropping it; async fixtures deliver it", async () => {
+	const argv = ["python3", "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"];
+	for (const stdin of ["x", "", Uint8Array.of(0, 120, 255)]) {
+		expect(() => runFixture(argv, { cwd, stdin })).toThrow("runFixtureAsync");
+		const result = await runFixtureAsync(argv, { cwd, stdin });
+		expect(result.rc).toBe(0);
+		expect(result.timed_out).toBe(false);
+		expect(Array.from(result.stdout)).toEqual(Array.from(typeof stdin === "string" ? new TextEncoder().encode(stdin) : stdin));
+	}
+	const result = runFixture(argv, { cwd });
+	expect(result.rc).toBe(0);
+	expect(result.stdout.byteLength).toBe(0);
+});

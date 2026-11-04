@@ -96,6 +96,21 @@ export interface RunOptions {
 	timings?: RunTimings;
 }
 
+const SYNC_OPTION_KEYS: Record<keyof RunSyncOptions, true> = {
+	deadline_s: true, max_output_bytes: true, cwd: true, env: true,
+};
+const ASYNC_OPTION_KEYS: Record<keyof RunOptions, true> = {
+	...SYNC_OPTION_KEYS, grace_s: true, stdin: true, rlimit_cpu_s: true, rlimit_as_bytes: true,
+	signal: true, inherit_fds: true, on_output: true, max_total_bytes: true, max_sink_queue_bytes: true, timings: true,
+};
+
+function rejectUnknownOptions(options: object, allowed: object, name: string): void {
+	for (const key of Reflect.ownKeys(options)) {
+		if (typeof key !== "string" || !Object.hasOwn(allowed, key))
+			throw new TypeError(`kitlib ${name}: unknown option ${String(key)}`);
+	}
+}
+
 export type OutputStream = "stdout" | "stderr";
 
 export interface RunResult {
@@ -251,6 +266,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 	if (!Array.isArray(argv)) throw new TypeError("kitlib run takes an argv array, never a shell string");
 	if (argv.length === 0 || argv.some(item => typeof item !== "string")) throw new TypeError("kitlib run needs a non-empty argv of strings");
 	if (options === null || typeof options !== "object") throw new TypeError("kitlib run needs options with deadline_s");
+	rejectUnknownOptions(options, ASYNC_OPTION_KEYS, "run");
 	if (process.platform !== "darwin" && process.platform !== "linux") throw new Error(`kitlib run needs POSIX process groups; ${process.platform} is unsupported`);
 	const deadlineMs = positive("deadline_s", options.deadline_s) * 1000;
 	const graceMs = positive("grace_s", options.grace_s ?? DEFAULT_GRACE_S) * 1000;
@@ -395,6 +411,7 @@ export function runSync(argv: readonly string[], options: RunSyncOptions): RunRe
 	if (!Array.isArray(argv)) throw new TypeError("kitlib runSync takes an argv array, never a shell string");
 	if (argv.length === 0 || argv.some(item => typeof item !== "string")) throw new TypeError("kitlib runSync needs a non-empty argv of strings");
 	if (options === null || typeof options !== "object") throw new TypeError("kitlib runSync needs options with deadline_s");
+	rejectUnknownOptions(options, SYNC_OPTION_KEYS, "runSync");
 	if (process.platform !== "darwin" && process.platform !== "linux") throw new Error(`kitlib runSync needs POSIX; ${process.platform} is unsupported`);
 	const deadlineMs = Math.max(1, Math.ceil(positive("deadline_s", options.deadline_s) * 1000));
 	const cap = options.max_output_bytes ?? DEFAULT_MAX_OUTPUT_BYTES;

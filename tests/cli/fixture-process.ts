@@ -69,10 +69,12 @@ function finishFixture(result: RunResult, context: FixtureContext): RunResult {
 	return result;
 }
 
-/** Retains runSync's leader-only timeout semantics; use async when group cancellation is required. */
+/** Retains runSync's leader-only timeout semantics; stdin requires runFixtureAsync. */
 export function runFixture(argv: readonly string[], options: FixtureOptions): RunResult {
+	if (options.stdin !== undefined) throw new TypeError("runFixture cannot deliver stdin; use runFixtureAsync");
 	const context = prepareFixture(argv, options);
-	return finishFixture(runSync(context.command, context.runOptions), context);
+	const { stdin: _stdin, ...syncOptions } = context.runOptions;
+	return finishFixture(runSync(context.command, syncOptions), context);
 }
 
 /** Retains kitlib run's process-group ownership and asynchronous pipe draining. */
