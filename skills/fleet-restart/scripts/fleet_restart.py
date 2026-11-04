@@ -567,9 +567,14 @@ def build_plan(inv, chief, protect, align_report, unprotect=()):
     return plan
 
 
+# omp's file log defaults to debug (every TTSR match, ~5 GB/day); the pane shell expands this, so an
+# operator's explicit OMP_LOG_LEVEL is kept (ompkit-fp72.120.16.203).
+LOG_LEVEL_ASSIGN = "OMP_LOG_LEVEL=${OMP_LOG_LEVEL:-info}"
+
+
 def respawn_cmd(row, argv=None):
     flags = row["flags"] if argv is None else argv
-    return "cd %s && omp %s" % (shlex.quote(row["cwd"]), " ".join(shlex.quote(f) for f in flags))
+    return "cd %s && %s omp %s" % (shlex.quote(row["cwd"]), LOG_LEVEL_ASSIGN, " ".join(shlex.quote(f) for f in flags))
 
 
 def check_cmd_flags(cmd, live_flags, added=(), resume=None):
@@ -578,6 +583,8 @@ def check_cmd_flags(cmd, live_flags, added=(), resume=None):
     and, when `resume` is given, `--resume <that saved session file>`."""
     tail = cmd.split("&&", 1)[-1]
     toks = shlex.split(tail)
+    if toks and toks[0] == LOG_LEVEL_ASSIGN:
+        toks = toks[1:]
     if not toks or os.path.basename(toks[0]) != "omp":
         return False, "NOT_AN_OMP_COMMAND"
     rest = list(toks[1:])

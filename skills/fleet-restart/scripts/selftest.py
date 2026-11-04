@@ -201,6 +201,10 @@ def main():
     row = dict(rows["uds--burn-down:0.1"])
     good_cmd = fr.respawn_cmd(row)
     case("CTL respawn cmd from live args passes flag check", fr.check_cmd_flags(good_cmd, row["flags"])[0], good_cmd)
+    pinned = "cd %s && OMP_LOG_LEVEL=${OMP_LOG_LEVEL:-info} omp " % __import__("shlex").quote(row["cwd"])
+    case("CTL respawn cmd launches omp at info unless the operator set OMP_LOG_LEVEL (TTSRLOG1)", good_cmd.startswith(pinned), good_cmd)
+    case("NEG a different env assignment before omp is not an omp command",
+         fr.check_cmd_flags(good_cmd.replace("OMP_LOG_LEVEL=", "LD_PRELOAD="), row["flags"])[1] == "NOT_AN_OMP_COMMAND")
     screen_cmd = "cd ~/Developer/uds && omp --model muse-code/muse-spark-1.3-contributor"
     ok, code = fr.check_cmd_flags(screen_cmd, row["flags"])
     case("NEG screen-rebuilt respawn cmd -> FLAGS_NOT_FROM_LIVE_ARGS", not ok and code == "FLAGS_NOT_FROM_LIVE_ARGS", code)

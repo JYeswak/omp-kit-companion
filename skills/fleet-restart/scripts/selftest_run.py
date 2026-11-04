@@ -174,6 +174,8 @@ class FakeFleet:
                 return 0, ""
             inner = shlex.split(argv[-1])[2]  # zsh -lc '<cd … && omp …; exec zsh -l>'
             toks = shlex.split(inner.split("&&", 1)[1].rsplit(";", 1)[0])
+            if toks and toks[0] == fr.LOG_LEVEL_ASSIGN:  # exactly the kit's log-level assignment, no other env token
+                toks = toks[1:]
             assert toks[0] == "omp" and argv[argv.index("-c") + 1] == p.cwd, argv
             p.restarts += 1
             p.omp, p.mcp_pid = p.next_pid + p.restarts * 10, p.next_pid + p.restarts * 10 + 1
@@ -943,9 +945,9 @@ def gate_mode(case, tmp):
     argv = fr.tmux_respawn_argv(rr)
     inner = shlex.split(argv[-1])
     toks = shlex.split(inner[2].split("&&", 1)[1].rsplit(";", 1)[0])
-    case("CTL respawn argv: tmux respawn-pane -k -t <id> -c <cwd> zsh -lc 'cd … && omp <live flags> --resume <file> --advisor; exec zsh -l'",
+    case("CTL respawn argv: tmux respawn-pane -k -t <id> -c <cwd> zsh -lc 'cd … && OMP_LOG_LEVEL=${OMP_LOG_LEVEL:-info} omp <live flags> --resume <file> --advisor; exec zsh -l'",
          argv[:7] == ["tmux", "respawn-pane", "-k", "-t", "%1", "-c", "/w d"] and inner[:2] == ["zsh", "-lc"] and inner[2].endswith("; exec zsh -l")
-         and inner[2].startswith("cd '/w d' && ") and toks == ["omp", "--profile", "codex", "--model", "m", "--resume", "/s/sessions/-w/S.jsonl", "--advisor"],
+         and inner[2].startswith("cd '/w d' && ") and toks == ["OMP_LOG_LEVEL=${OMP_LOG_LEVEL:-info}", "omp", "--profile", "codex", "--model", "m", "--resume", "/s/sessions/-w/S.jsonl", "--advisor"],
          json.dumps(argv))
     case("NEG respawn command never carries a versioned path or bun", TERN not in argv[-1] and "bun" not in argv[-1])
 
