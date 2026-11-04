@@ -65,7 +65,7 @@ try:
     assert 'path too long:' in planted_text and '/archive)' in planted_text, planted_text
     passed += 1
     # [b] quiet control: a passing file in the same export is clean.
-    (root/'ok.test.sh').write_text('#!/bin/sh\n[ ! -e .git ] || exit 3\nprintf "ok\\n"\n')
+    (root/'ok.test.sh').write_text('#!/bin/sh\nif [ ! -d .git ] || git rev-parse -q --verify HEAD >/dev/null; then\n    exit 3\nfi\nprintf "ok\\n"\n')
     ok = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','ok.test.sh','--tests','ok.test.sh'],root,env)
     ok_text = (ok.stdout+ok.stderr).decode()
     print('export-test quiet rc=' + str(ok.rc) + '\n' + ok_text, flush=True)

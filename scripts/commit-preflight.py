@@ -5,9 +5,10 @@
 effective staged index, including GIT_INDEX_FILE. Both use a private index and
 object directory, never writing the caller's index or object store. --message
 FILE supplies planned trailers; absent it Deploy-Step uses an empty message.
---tests FILE... (EXPORTTEST1) runs those test files in fresh-gate's shape: an
-exact `git archive` of the judged index tree (HEAD plus --files), no .git, a
-long TMPDIR under the export's var/agent-tmp, each file through `heavy`. A
+--tests FILE... (EXPORTTEST1, EXPORTPARITY1) runs those test files in the
+verdict's shape: a stamped `git archive` of the HEAD commit with the judged index's changes
+overlaid, a fresh `git init -q` (no history), a long TMPDIR under the export's
+var/agent-tmp, each file through `heavy`. A
 failing file is REFUSED EXPORT_TEST_FAILED naming it. Absent --tests no test runs.
 """
 import argparse
@@ -88,17 +89,47 @@ def installed_checks(root: Path, env: dict) -> tuple[list, int]:
 EXPORT_DIR = 'fresh-gate.export-test.' + '0' * 24 + '/archive'
 
 
-def export_tests(tests: list, env: dict, scratch: Path, root: Path) -> int:
-    """Run each test file in an exact export of the judged index; return failures."""
-    tree = required(['git', 'write-tree'], env).decode().strip()
+def export_tests(tests: list, env: dict, root: Path) -> int:
+    """Run each test file in an exact export of the judged index; return failures.
+
+    EXPORTPARITY1: the export has the gate/verdict layout. Like fresh-gate's
+    make_work it lives under the repository's var/agent-tmp, never the system
+    temp root; it archives the HEAD commit (export-subst stamps package.json
+    source_revision), overlays the judged index's changed bytes, and runs
+    `git init -q` like full-suite-verdict.sh. .git/omp-kit-export.json names
+    HEAD plus the overlay.
+    """
+    parent = root / 'var' / 'agent-tmp'
+    parent.mkdir(parents=True, exist_ok=True)
+    with owned_tmp('commit-preflight-export', root=str(parent)) as owned:
+        return run_export_tests(tests, env, Path(owned), root)
+
+
+def run_export_tests(tests: list, env: dict, scratch: Path, root: Path) -> int:
+    head = required(['git', 'rev-parse', '--verify', 'HEAD^{commit}'], env).decode().strip()
     archive = scratch / EXPORT_DIR
     archive.mkdir(parents=True)
     tarball = scratch / 'export.tar'
-    # Same export as fresh-gate: `git archive --format=tar TREE` then tar -x.
-    required(['git', 'archive', '--format=tar', '--output=' + str(tarball), tree], env)
+    required(['git', 'archive', '--format=tar', '--output=' + str(tarball), head], env)
     if command(['tar', '-xf', str(tarball), '-C', str(archive)], env).rc:
         raise RuntimeError('export extract failed')
     tarball.unlink()
+    changes = required(['git', 'diff', '--cached', '--name-status', '-z', '--no-renames', head], env).split(b'\0')
+    overlay, deleted = [], []
+    for status, raw in zip(changes[0::2], changes[1::2]):
+        (deleted if status == b'D' else overlay).append(os.fsdecode(raw))
+    for path in deleted:
+        (archive / path).unlink(missing_ok=True)
+    if overlay:
+        # Exact judged index bytes over the stamped HEAD tree.
+        required(['git', 'checkout-index', '-f', '--prefix=' + str(archive) + os.sep, '--', *overlay], env)
+    clean_env = {key: value for key, value in env.items() if not key.startswith('GIT_')}
+    clean_env['GIT_CEILING_DIRECTORIES'] = str(archive.parent)
+    if command(['git', '-C', str(archive), 'init', '-q'], clean_env).rc:
+        raise RuntimeError('export git init failed')
+    stamp = {'source_revision': head, 'overlay': overlay, 'deleted': deleted}
+    (archive / '.git' / 'omp-kit-export.json').write_text(json.dumps(stamp, indent=1) + '\n')
+    print('export: HEAD ' + head + ' + ' + str(len(overlay)) + ' overlaid, ' + str(len(deleted)) + ' deleted (.git/omp-kit-export.json)', flush=True)
     if (root / 'node_modules').is_dir() and not (archive / 'node_modules').exists():
         (archive / 'node_modules').symlink_to(root / 'node_modules')
     tmp = archive / 'var' / 'agent-tmp'
@@ -106,25 +137,30 @@ def export_tests(tests: list, env: dict, scratch: Path, root: Path) -> int:
     test_env = {key: value for key, value in env.items() if not key.startswith('GIT_')}
     test_env.update(TMPDIR=str(tmp), BUN_CONFIG_FILE=str(archive / 'bunfig.toml'))
     cli = HERE.parent / 'src' / 'cli.ts'
+    tree = required(['git', 'write-tree'], env).decode().strip()
+    bun_config = archive / 'bunfig.toml'
     failures = 0
-    for path in tests:
+    for index, path in enumerate(tests):
         name = 'export-test:' + path
         print('== ' + name + ' (export ' + str(archive) + ')', flush=True)
         if not (archive / path).is_file():
             failures += 1
             print('REFUSED EXPORT_TEST_FAILED ' + path + ': not in the exported tree (add it to --files)')
             continue
-        if path.endswith('.test.sh'):
-            runner = ['sh', path]
-        elif path.endswith('.py'):
-            runner = ['python3', path]
-        else:
-            runner = ['bun', 'test', './' + path]
+        # The gate's own runner: fresh-gate's run_affected_tests stage, so bun gets
+        # suite-metrics.py's flags (--timeout=120000, --config) and scripts its sh/python3 split.
+        records = scratch / ('records-' + str(index))
+        stage = ['python3', str(HERE / 'suite-metrics.py'), 'stage',
+                 '--runner', 'scripts' if path.endswith(('.test.sh', '.py')) else 'bun',
+                 '--records', str(records), '--cwd', str(archive), '--tree', tree,
+                 '--summary', str(records) + '.summary.json', '--workers', '1', '--deadline', '3600']
+        if bun_config.is_file():
+            stage += ['--bun-config', str(bun_config)]
         # Heavy lane exactly as fresh-gate's heavy_step: the gate's own cli.
         argv = ['bun', 'run', '--no-env-file', '--config=/dev/null', str(cli), 'heavy',
                 '--label', 'commit-preflight-export-test', '--disk-observer', 'statfs', '--',
-                'env', 'PATH=' + test_env.get('PATH', ''), *runner]
-        result = run(argv, deadline_s=3600, grace_s=5, max_output_bytes=8 * 1024 * 1024,
+                'env', 'PATH=' + test_env.get('PATH', ''), *stage, path]
+        result = run(argv, deadline_s=3700, grace_s=5, max_output_bytes=8 * 1024 * 1024,
                      env=test_env, cwd=str(archive))
         sys.stdout.write(result.stdout.decode(errors='replace'))
         sys.stdout.write(result.stderr.decode(errors='replace'))
@@ -255,7 +291,7 @@ def main():
                 print('UNJUDGED ' + name + ': ' + str(error) + remedy)
         if args.tests:
             try:
-                failures += export_tests(args.tests, env, scratch, root)
+                failures += export_tests(args.tests, env, root)
             except (OSError, RuntimeError) as error:
                 failures += 1
                 print('UNJUDGED export-tests: ' + str(error))

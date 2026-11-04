@@ -3,8 +3,10 @@
 # never fresh-gate or tests. Both --files (working bytes on HEAD) and default
 # (caller's staged bytes) use an isolated index and object store.
 # Usage: sh scripts/commit-preflight.sh [--message FILE] [--files PATH...]
-# Opt-in exception: [--tests FILE...] runs those files in an exact export (no
-# .git, long TMPDIR, heavy); a failure is REFUSED EXPORT_TEST_FAILED FILE.
+# Opt-in exception: [--tests FILE...] runs those files in the verdict's export
+# layout (stamped HEAD archive plus the overlay, fresh `git init -q`, long
+# TMPDIR, the gate's suite-metrics runner under heavy); a failure is
+# REFUSED EXPORT_TEST_FAILED FILE.
 # Without --message, Deploy-Step previews the obligation; stale-worktree,
 # reversal authority and commit-notes are explicitly NOT_JUDGED.
 # Exits 0 when executed checks pass (not commit admission), 1 findings or broken
