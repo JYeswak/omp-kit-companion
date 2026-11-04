@@ -2,10 +2,12 @@ import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { run } from "../../src/kitlib/run.ts";
+import { MineLedger } from "../../src/mine-ledger.ts";
 import { runMine, renderMine, type MineOptions } from "../../src/mine.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const roots: OwnedTmp[] = [];
 afterAll(() => { for (const root of roots) root.cleanup(); });
@@ -219,4 +221,88 @@ test("shared tracker origins retain one canonical owner across project cells", a
 	const report = await runMine(f.options);
 	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["rework", f.project, 1]]);
 	expect(report.ledger?.totals.PARTIAL).toBe(0);
+});
+
+const LEDGER_CELL_BYTES = 8 * 1024 * 1024;
+const sha256 = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+
+test("MINECELLCAP1 planted: an over-8-MiB project/day/source cell is split into bounded sub-cells and later projects are still mined", async () => {
+	const f = await fixture(false), later = join(f.home, "Developer", "zed"); mkdirSync(later, { recursive: true }); await quietGit(later);
+	put(join(f.home, ".config", "omp-kit", "fleet-watch.json"), JSON.stringify({ sessions: [{ session: "jev", repo: f.project }, { session: "zed", repo: later }] }));
+	// Each failed call retains an ~8 KB replay; 1400 of them on one UTC day exceed one 8 MiB ledger file.
+	const command = "echo planted-oversized-cell ".repeat(280), planted = 1400, rows: unknown[] = [{ type: "session", id: "oversized", cwd: f.project }];
+	for (let index = 0; index < planted; index++) {
+		const timestamp = new Date(Date.parse("2026-10-01T00:00:00Z") + index * 60_000).toISOString();
+		rows.push({ type: "message", timestamp, message: { role: "assistant", content: [{ type: "toolCall", id: `call-${index}`, name: "bash", arguments: { command } }] } });
+		rows.push({ type: "message", timestamp, message: { role: "toolResult", toolCallId: `call-${index}`, toolName: "bash", isError: true, content: [{ type: "text", text: `exit ${index}` }] } });
+	}
+	put(f.source, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+	put(join(f.home, ".omp", "profiles", "default", "agent", "sessions", "-Developer-zed", "later.jsonl"), [
+		{ type: "session", id: "later-project", cwd: later },
+		{ type: "message", timestamp: "2026-10-01T12:00:00Z", message: { role: "toolResult", toolCallId: "later", toolName: "bash", isError: true, content: [{ type: "text", text: "later project still mined" }] } },
+	].map(row => JSON.stringify(row)).join("\n") + "\n");
+	const first = await runMine(f.options);
+	expect(first.ledger?.cells.filter(c => c.day === "2026-10-01" && c.source === "transcripts").map(c => [c.project, c.status, c.reasons]))
+		.toEqual([[f.project, "READ", []], [later, "READ", []], ["@unattributed", "NONE-EXISTS", expect.any(Array)]]);
+	expect(first.ledger?.cells).toHaveLength(30);
+	expect(first.ledger?.totals.PARTIAL).toBe(0);
+	expect(first.classes.find(c => c.project === later)?.count).toBe(1);
+	expect(first.classes.filter(c => c.project === f.project).reduce((sum, c) => sum + c.count, 0)).toBe(planted);
+	// Every receipt stays within the unchanged per-file bound; the split cell's parts together exceed it.
+	const all = receipts(first.ledger!.path), split = all.filter(row => row.cell.part);
+	expect(all.every(row => readFileSync(row.path).length <= LEDGER_CELL_BYTES)).toBe(true);
+	expect(split.length).toBeGreaterThanOrEqual(3);
+	expect(split.every(row => row.cell.project === f.project && row.cell.day === "2026-10-01" && row.cell.source === "transcripts" && row.cell.part.count === split.length)).toBe(true);
+	expect(split.map(row => row.cell.part.index).sort((a, b) => a - b)).toEqual([...split.keys()]);
+	expect(split.reduce((sum, row) => sum + readFileSync(row.path).length, 0)).toBeGreaterThan(LEDGER_CELL_BYTES);
+	expect(split.find(row => row.cell.part.index === 0)?.cell.result.findings).toEqual([]);
+	expect(split.reduce((sum, row) => sum + row.cell.result.findings.length, 0)).toBe(planted);
+	// Resume reassembles the split cell from its parts instead of rescanning it.
+	const second = await runMine(f.options);
+	expect(second.ledger?.scanned).toBe(0);
+	expect(second.ledger?.reused).toBe(30);
+	expect(second.classes).toEqual(first.classes);
+	// A lost part is never certified: only that logical cell is rescanned and its count is unchanged.
+	rmSync(split.find(row => row.cell.part.index === split.length - 1)!.path);
+	const repaired = await runMine(f.options);
+	expect(repaired.ledger?.scanned).toBe(1);
+	expect(repaired.classes).toEqual(first.classes);
+}, fixtureDeadlineS(60) * 1000);
+
+test("MINECELLCAP1 planted: an item too large for any sub-cell is returned for a PARTIAL reason, never written, and stale parts are released", () => {
+	const root = ownedTmp("mine-cell-cap"); roots.push(root);
+	const ledger = new MineLedger(join(realpathSync(root.path), "ledger"), { since: "2026-10-01", until: "2026-10-02" }, "MINECELLCAP1");
+	const cell = { project: "/fixture/p", day: "2026-10-01", source: "transcripts" as const, input_fingerprint: "planted" };
+	const half = "h".repeat(5 * 1024 * 1024), huge = "x".repeat(LEDGER_CELL_BYTES + 1);
+	const { results, oversized } = ledger.split(cell, ["a", half, huge, half, "b"], items => ({ items }));
+	expect(oversized).toEqual([huge]);
+	expect(results).toEqual([{ items: ["a", half] }, { items: [half, "b"] }]);
+	const oversizedInput = { ...cell, status: "READ" as const, reasons: [], result: { items: ["a", half, half, "b"] } };
+	expect(ledger.fits(oversizedInput)).toBe(false);
+	expect(() => ledger.put(oversizedInput)).toThrow("MINE_LEDGER_RESULT_LIMIT_OR_INVALID");
+	const written = ledger.putParts({ ...cell, status: "PARTIAL", reasons: ["huge: omitted"], result: { items: [] as string[] } }, results);
+	expect(written.map(part => [part.part, part.attempts, part.reasons])).toEqual([[{ index: 0, count: 3 }, 1, ["huge: omitted"]], [{ index: 1, count: 3 }, 1, []], [{ index: 2, count: 3 }, 1, []]]);
+	expect(ledger.parts(cell.project, cell.day, cell.source, cell.input_fingerprint)?.map(part => part.result)).toEqual([{ items: [] }, ...results]);
+	expect(ledger.cells).toHaveLength(1);
+	expect(ledger.totals().PARTIAL).toBe(1);
+	// A later whole write releases every previous sub-cell key from the manifest.
+	const fits = ledger.put({ ...cell, status: "READ", reasons: [], result: { items: ["a"] } });
+	expect(fits.part).toBeUndefined();
+	expect(Object.keys(JSON.parse(readFileSync(ledger.path, "utf8")).entries)).toEqual([sha256(JSON.stringify([cell.project, cell.day, cell.source]))]);
+	expect(ledger.parts(cell.project, cell.day, cell.source, cell.input_fingerprint)?.map(part => part.result)).toEqual([{ items: ["a"] }]);
+});
+
+test("MINECELLCAP1 control: a run whose cells all fit writes the pre-split receipt bytes and manifest keys", async () => {
+	const f = await fixture(), report = await runMine(f.options), manifest = JSON.parse(readFileSync(report.ledger!.path, "utf8"));
+	const all = receipts(report.ledger!.path);
+	expect(report.ledger?.cells).toHaveLength(20);
+	expect(all).toHaveLength(20);
+	for (const { path, cell } of all) {
+		const { project, day, source, input_fingerprint, status, reasons, result, version, attempts } = cell;
+		// Pre-split put serialized exactly `{ ...input, version, reasons, attempts }` under key sha256([project, day, source]).
+		expect(sha256(JSON.stringify({ project, day, source, input_fingerprint, status, reasons, result, version, attempts }))).toBe(basename(path, ".json"));
+		expect(manifest.entries[sha256(JSON.stringify([project, day, source]))]).toBe(basename(path, ".json"));
+		expect(Object.keys(cell)).toEqual(["project", "day", "source", "input_fingerprint", "status", "reasons", "result", "version", "attempts"]);
+	}
+	expect(Object.keys(manifest)).toEqual(["version", "window", "revision", "entries"]);
 });

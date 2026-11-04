@@ -80,6 +80,32 @@ function payload(value: unknown): value is Payload {
 		&& (row.measured_minutes === null || typeof row.measured_minutes === "number" && Number.isFinite(row.measured_minutes) && row.measured_minutes >= 0)
 		&& typeof row.proxy_minutes === "number" && Number.isFinite(row.proxy_minutes) && row.proxy_minutes >= 0);
 }
+/** One logical cell: split receipts are reassembled in recorded order; a missing or stale part forces a rescan. */
+function whole(ledger: MineLedger, cell: MineCell<unknown>): MineCell<Payload> | null {
+	if (!cell.part) return payload(cell.result) ? cell as MineCell<Payload> : null;
+	const parts = ledger.parts<Partial<Payload>>(cell.project, cell.day, cell.source, cell.input_fingerprint);
+	if (!parts) return null;
+	const { part: _part, ...head } = parts[0]!, findings = parts.flatMap(part => Array.isArray(part.result.findings) ? part.result.findings : []);
+	const result = { report: head.result.report, findings };
+	return payload(result) ? { ...head, result } as MineCell<Payload> : null;
+}
+/**
+ * Records one cell within the per-file ledger bound (MINECELLCAP1). An oversized result keeps its summary in part 0 and
+ * packs findings into bounded sub-cells. What cannot be split is omitted and the cell is PARTIAL with the reason:
+ * a finding too large for any sub-cell (named by citation), or a summary whose coverage rows alone exceed the bound.
+ */
+function record(ledger: MineLedger, input: Omit<MineCell<Payload>, "version" | "attempts" | "part">): MineCell<Payload> {
+	if (ledger.fits(input)) return ledger.put(input);
+	const { results, oversized } = ledger.split(input, input.result.findings, findings => ({ findings }));
+	const reasons = [...input.reasons, ...oversized.map(finding => `${finding.citation.slice(0, 2048)}: MINECELLCAP1 finding of ${Buffer.byteLength(JSON.stringify(finding))} bytes exceeds one ledger sub-cell; omitted from this receipt and retried on resume`)];
+	let head = { ...input, status: oversized.length ? "PARTIAL" as const : input.status, reasons, result: { report: input.result.report, findings: [] as MineSourceFinding[] } };
+	if (!ledger.fits(head)) head = { ...head, status: "PARTIAL", result: { ...head.result, report: { ...head.result.report, coverage: [] } },
+		reasons: [...reasons, `MINECELLCAP1: cell summary exceeds the ledger bound; its ${head.result.report.coverage.length} coverage rows are omitted from this receipt and retried on resume`] };
+	if (head.reasons.length > 2048) throw new Error(`MINE_REASON_LIMIT: ${input.project} ${input.day} ${input.source}`);
+	const cell = whole(ledger, ledger.putParts<Partial<Payload>>(head, results)[0]!);
+	if (!cell) throw new Error(`MINE_LEDGER_SPLIT_READBACK: ${input.project} ${input.day} ${input.source}`);
+	return cell;
+}
 
 /** Metadata is a cache invalidator only; event inclusion still always uses event timestamps. */
 function fingerprint(paths: string[], shallowPaths: readonly string[] = []): string {
@@ -166,7 +192,8 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 	const current: MineCell<Payload>[] = [];
 	for (const target of targets) for (const source of MINE_SOURCES) for (const date of days) {
 		const signature = fingerprints.get(JSON.stringify([target, source]))!, previous = old.get(key(target, date, source));
-		if (previous && previous.input_fingerprint === signature && previous.status !== "PARTIAL" && !(source === "cc" && censusFailures.length) && payload(previous.result)) { current.push(previous as MineCell<Payload>); reused++; continue; }
+		const reusable = previous && previous.input_fingerprint === signature && previous.status !== "PARTIAL" && !(source === "cc" && censusFailures.length) ? whole(ledger, previous) : null;
+		if (reusable) { current.push(reusable); reused++; continue; }
 		const findings: MineSourceFinding[] = [], until = new Date(Date.parse(`${date}T00:00:00Z`) + 86400_000).toISOString().slice(0, 10);
 		const synthetic = target === "@unattributed" && source !== "cc" && source !== "hooks" && source !== "transcripts";
 		const report = synthetic ? { ...census, projects: [], classes: [], coverage: [], warnings: [], excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] } }
@@ -193,7 +220,7 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		index.flush();
 		// Class/occurrence projections are rebuilt from findings; persist their evidence once, even on long export paths.
 		const { occurrences: _occurrences, classes: _classes, waste_classes: _wasteClasses, ...summary } = report;
-		current.push(ledger.put({ project: target, day: date, source, input_fingerprint: signature, status, reasons, result: { report: summary, findings } })); scanned++;
+		current.push(record(ledger, { project: target, day: date, source, input_fingerprint: signature, status, reasons, result: { report: summary, findings } })); scanned++;
 	}
 	const uniqueFindings = new Map<string, MineSourceFinding>(), classes = new Map<string, MineClass>();
 	const projects = census.projects.map(p => ({ ...p, events: 0, session_spans: 0, telemetry_sources: [] as string[], source_records: {} as Record<string, number> }));
