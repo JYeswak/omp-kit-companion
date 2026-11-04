@@ -160,6 +160,69 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 // Three release-local preflights run back to back (stubbed admission, git and gh); bun's 5 s default is too tight under load.
 }, fixtureDeadlineS(60) * 1_000);
 
+// RELPENDING1 (ompkit-fp72.120.16.227): a previous install's pending recovery receipt refuses the release at preflight,
+// before any build, instead of at the install stage after publishing. Same stubs as RELFAILFAST1; the fixture HOME's
+// default state root (XDG_STATE_HOME unset) is the one omp-kit update reads. Never a real release: the stubbed fetch fails.
+test.skipIf(process.platform !== "darwin")("RELPENDING1 preflight refuses a pending kit update receipt before any build", async () => {
+	const work = realpathSync(ownedTmp("relpending", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+	const bin = join(work, "bin");
+	const home = join(work, "home");
+	const prefix = join(work, "prefix");
+	const stateRoot = join(home, ".local/state/omp-kit");
+	const pending = join(stateRoot, "kit-update.pending.json");
+	const id = "4f2daa9e-2326-4d40-be66-6d9f65b1df5e";
+	mkdirSync(bin); mkdirSync(join(prefix, "bin"), { recursive: true }); mkdirSync(stateRoot, { recursive: true });
+	const stub = (path: string, body: string) => { writeFileSync(path, `#!/bin/sh\n${body}\n`); chmodSync(path, 0o755); };
+	stub(join(bin, "gh"), "exit 0");
+	stub(join(bin, "omp-kit"), "exit 0");
+	stub(join(prefix, "bin/omp-kit"), `echo called >> "${join(work, "kit-called")}"; exit 0`);
+	stub(join(bin, "git"), `echo called >> "${join(work, "git-called")}"; exit 1`);
+	const attempt = async () => {
+		rmSync(join(work, "git-called"), { force: true });
+		const env: Record<string, string> = {};
+		for (const [name, value] of Object.entries(process.env)) if (value !== undefined && name !== "XDG_STATE_HOME") env[name] = value;
+		const started = Date.now();
+		const result = await run(["bash", join(ROOT, "scripts/release-local.sh"), "--version", "9.9.9"], {
+			deadline_s: fixtureDeadlineS(60), cwd: ROOT,
+			env: { ...env, HOME: home, PATH: `${bin}:${env.PATH ?? ""}`, TMPDIR: work, OMP_KIT_INSTALL_PREFIX: prefix },
+		});
+		return { rc: result.rc, out: new TextDecoder().decode(result.stdout), err: new TextDecoder().decode(result.stderr),
+			ms: Date.now() - started, gitCalled: existsSync(join(work, "git-called")) };
+	};
+	try {
+		// Planted: the 0.2.88 PARTIAL receipt left unreconciled.
+		const receipt = JSON.stringify({ scope: "kit", identitySha256: "0".repeat(64), kitVersion: "0.2.88", ompVersion: null, channel: null, id, state: "PENDING" });
+		writeFileSync(pending, receipt, { mode: 0o600 });
+		const held = await attempt();
+		expect(held.rc, held.err).toBe(4);
+		expect(held.err).toContain(`RELPENDING1: a previous kit update left pending recovery receipt ${id}`);
+		expect(held.err).toContain(`omp-kit update --reconcile ${id} --yes`);
+		expect(held.err).toContain("reconcile only a false PARTIAL whose postimages verify");
+		expect(held.out).not.toContain("stage source");
+		expect(held.out).not.toContain("stage build");
+		expect(held.gitCalled).toBe(false);
+		expect(existsSync(join(work, "kit-called"))).toBe(false);
+		expect(readFileSync(pending, "utf8")).toBe(receipt);
+		expect(held.ms).toBeLessThan(fixtureDeadlineS(10) * 1_000);
+		// Planted: an unreadable receipt still refuses, and says so.
+		writeFileSync(pending, "{ truncated", { mode: 0o600 });
+		const unreadable = await attempt();
+		expect(unreadable.rc, unreadable.err).toBe(4);
+		expect(unreadable.err).toContain(`RELPENDING1: pending kit update receipt ${pending} is unreadable`);
+		expect(unreadable.err).toContain("omp-kit update --reconcile <id> --yes");
+		expect(unreadable.gitCalled).toBe(false);
+		// Control: no pending receipt; preflight passes the check and reaches its next step (the stubbed fetch).
+		rmSync(pending);
+		const clear = await attempt();
+		expect(clear.rc, clear.err).toBe(4);
+		expect(clear.err).not.toContain("RELPENDING1");
+		expect(clear.err).toContain("git fetch origin main failed");
+		expect(clear.gitCalled).toBe(true);
+	} finally {
+		rmSync(work, { recursive: true, force: true });
+	}
+}, fixtureDeadlineS(60) * 1_000);
+
 // Execute the production shell stages with real curl/checksums and only the
 // GitHub transport redirected to a loopback server. No signing or remote writes.
 const localScript = readFileSync(join(ROOT, "scripts/release-local.sh"), "utf8");
@@ -349,9 +412,26 @@ receipt installed fixture fixture
 	}, fixtureDeadlineS(60) * 1_000);
 }
 
+// The verdict stage reads release-verdict.sh's lock and queue under the checkout's git dir: fixtures get an isolated repo.
+function gitFixtureEnv(work: string): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
+	delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE;
+	return { ...env, GIT_CEILING_DIRECTORIES: work, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+}
+function initFixtureRepo(work: string, env: Record<string, string>): string {
+	const repo = join(work, "repo");
+	const result = runFixture(["git", "init", "-q", repo], { cwd: work, env, floor_s: 30 });
+	if (result.rc !== 0) throw new Error(new TextDecoder().decode(result.stderr));
+	return repo;
+}
+const qualification = releaseStage("stage verdict\n", 'if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \\\n\t--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \\\n\t>"$WORK/full-suite-verdict.out"');
+
 for (const verdict of ["cached", "queued", "failure"] as const) {
 	test(`release qualification ${verdict} uses exact source and both verdicts`, async () => {
 		const work = realpathSync(ownedTmp("release-verdict-wait", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const env = gitFixtureEnv(work);
+		initFixtureRepo(work, env);
 		const bin = join(work, "bin");
 		mkdirSync(bin);
 		// The first read is a miss. The producer returns 0 like the real
@@ -370,12 +450,11 @@ printf '%s\\n' "$*" >"$RELEASE_TEST_WORK/producer"
 touch "$RELEASE_TEST_WORK/triggered"
 `);
 		chmodSync(join(bin, "python3"), 0o755); chmodSync(join(bin, "sh"), 0o755);
-		const qualification = releaseStage("stage verdict\n", 'if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \\\n\t--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \\\n\t>"$WORK/full-suite-verdict.out"');
 		try {
 			const result = await runFixtureAsync(["bash", "-c", `${stagePrelude}
 ROOT="$WORK/repo"; SRC="$WORK/export"; SOURCE=0123456789012345678901234567890123456789; source_tree=exact-tree
 ${qualification}`, "release-verdict-test", work], {
-				cwd: ROOT, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, RELEASE_TEST_WORK: work, RELEASE_TEST_VERDICT: verdict }, floor_s: 10,
+				cwd: ROOT, env: { ...env, PATH: `${bin}:${env.PATH ?? ""}`, RELEASE_TEST_WORK: work, RELEASE_TEST_VERDICT: verdict }, floor_s: 10,
 			});
 			expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(verdict === "failure" ? 4 : 0);
 			if (verdict === "cached") expect(existsSync(join(work, "producer"))).toBe(false);
@@ -386,6 +465,79 @@ ${qualification}`, "release-verdict-test", work], {
 			expect(reads.split("\n").filter(Boolean).every(line => line.includes("--tree exact-tree") && line.includes(`--judge-root ${work}/export`))).toBe(true);
 		} finally { rmSync(work, { recursive: true, force: true }); }
 	}, fixtureDeadlineS(30) * 1_000);
+}
+
+// VERDICTSTARVE1 (ompkit-fp72.120.16.198): a real fixture holder process owns release-verdict's lock and runs a
+// child whose argv names the commit it judges, as release-verdict.sh's runner children do. On the third verdict read
+// a push lands: the one-slot queue now names a newer commit. A holder judging another commit has then skipped the
+// prepare: the stage stops VERDICT_STARVED on the next poll. A holder judging the prepare lets the stage proceed.
+for (const holderJudges of ["other", "prepare"] as const) {
+	test(`VERDICTSTARVE1 verdict wait ${holderJudges === "other" ? "stops when the holder skips the prepare" : "proceeds while the holder judges the prepare"}`, async () => {
+		const work = realpathSync(ownedTmp("verdictstarve", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const env = gitFixtureEnv(work);
+		const repo = initFixtureRepo(work, env);
+		const state = join(repo, ".git/omp-kit");
+		const wanted = join(state, "release-verdict.wanted");
+		mkdirSync(join(state, "release-verdict.lock"), { recursive: true });
+		const source = "0123456789012345678901234567890123456789", other = "a".repeat(40), pushed = "b".repeat(40);
+		const bin = join(work, "bin");
+		mkdirSync(bin);
+		writeFileSync(join(bin, "python3"), `#!/bin/sh
+echo "$*" >>"$RELEASE_TEST_WORK/reads"
+n=$(($(wc -l <"$RELEASE_TEST_WORK/reads")))
+[ "$n" -ne 3 ] || printf '%s\\n' ${pushed} >${JSON.stringify(wanted)}
+if [ ${holderJudges} = prepare ] && [ "$n" -ge 4 ]; then echo PASS; exit 0; fi
+echo MISS; exit 1
+`);
+		// The producer behaves like release-verdict.sh under a live holder: queue the commit and return 0.
+		writeFileSync(join(bin, "sh"), `#!/bin/sh
+printf '%s\\n' "$*" >>"$RELEASE_TEST_WORK/producer"
+printf '%s\\n' ${source} >${JSON.stringify(wanted)}
+echo "release-verdict: run holder holds the lock; it will judge ${source} next"
+`);
+		chmodSync(join(bin, "python3"), 0o755); chmodSync(join(bin, "sh"), 0o755);
+		writeFileSync(join(work, "holder.sh"), `printf '%s\\n' "$$" >"$1/release-verdict.lock/pid"
+/bin/bash -c 'exec -a "$0" /bin/sleep 120' "sh $2/tree/scripts/full-suite-verdict.sh --repo $3 --commit $4 --judge-role main" </dev/null &
+printf '%s\\n' "$!" >"$2/runner.pid"
+echo ready
+wait
+`);
+		const judged = holderJudges === "other" ? other : source;
+		try {
+			const started = Date.now();
+			// The fixture shell owns the holder: it starts it, waits for its runner child, and stops both on every exit.
+			const result = await runFixtureAsync(["bash", "-c", `${stagePrelude}
+exec 3< <(/bin/sh "$WORK/holder.sh" "$WORK/repo/.git/omp-kit" "$WORK" "$WORK/repo" ${judged})
+IFS= read -r _ <&3
+trap 'kill "$(cat "$WORK/runner.pid")" "$(cat "$WORK/repo/.git/omp-kit/release-verdict.lock/pid")" 2>/dev/null || :' EXIT
+ROOT="$WORK/repo"; SRC="$WORK/export"; SOURCE=${source}; source_tree=exact-tree
+${qualification}`, "verdict-starve-test", work], {
+				cwd: ROOT, env: { ...env, PATH: `${bin}:${env.PATH ?? ""}`, RELEASE_TEST_WORK: work }, floor_s: 30,
+			});
+			const stdout = new TextDecoder().decode(result.stdout);
+			const stderr = new TextDecoder().decode(result.stderr);
+			const reads = readFileSync(join(work, "reads"), "utf8").trim().split("\n");
+			expect(readFileSync(join(work, "producer"), "utf8")).toBe(`${join(work, "repo/scripts/release-verdict.sh")} --commit ${source} --no-fetch\n`);
+			const holderPid = readFileSync(join(state, "release-verdict.lock/pid"), "utf8").trim();
+			// First poll: the prepare is still queued (or judged), so the stage waits and says what the holder judges.
+			expect(stdout).toContain(`verdict wait for ${source}: release-verdict run ${holderPid} judges ${judged}; queued next ${source}`);
+			// One pre-check read, then two per poll: the stage decides on the first poll after the push (read 3).
+			expect(reads.length).toBe(5);
+			if (holderJudges === "other") {
+				expect(result.rc, stderr).toBe(4);
+				expect(stderr).toContain(`VERDICT_STARVED: release-verdict run ${holderPid} judges ${other} and queues ${pushed} next, so it skips prepare ${source}`);
+				expect(stderr).toContain(`sh scripts/release-verdict.sh --commit ${source} --no-fetch`);
+				expect(stderr).toContain(`scripts/release-local.sh --source ${source} --version 0.0.0`);
+			} else {
+				expect(result.rc, stderr).toBe(0);
+				expect(stderr).not.toContain("VERDICT_STARVED");
+			}
+			// Bound: one 3 s poll plus fixture reads (reads.length above is exact), far inside the 73 s worst case.
+			expect(Date.now() - started).toBeLessThan(fixtureDeadlineS(20) * 1_000);
+		} finally {
+			rmSync(work, { recursive: true, force: true });
+		}
+	}, fixtureDeadlineS(40) * 1_000);
 }
 
 for (const failure of ["none", "http", "bytes"] as const) {

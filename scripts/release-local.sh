@@ -261,6 +261,20 @@ done
 if [ "$DRY_RUN" = 0 ] && [ "$INSTALL" = 1 ]; then
 	[ -x "$INSTALL_PREFIX/bin/omp-kit" ] || die "install requires the existing kit at $INSTALL_PREFIX/bin/omp-kit (or --no-install)"
 	[ -f "$ROOT/skills/fleet-restart/scripts/fleet_restart.py" ] || die "fleet align readback helper is missing"
+	# RELPENDING1 (ompkit-fp72.120.16.227): an unreconciled receipt from a previous install makes the install stage's
+	# `omp-kit update --apply` refuse PENDING_RECOVERY only after build, sign and publish (0.2.89: 34 min, published but
+	# never installed). Read the file the updater reads: cli.ts receiptStateRoot (XDG_STATE_HOME, or HOME/.local/state
+	# when unset, both absolute) + /omp-kit, and mutations.ts updatePendingPath. Read only: never reconcile from here.
+	kit_state_home="${XDG_STATE_HOME-${HOME:-}/.local/state}"
+	[[ "${HOME:-}" == /* && "$kit_state_home" == /* ]] ||
+		die "install requires an absolute HOME and XDG_STATE_HOME (or XDG_STATE_HOME unset), as omp-kit update does"
+	kit_pending="$kit_state_home/omp-kit/kit-update.pending.json"
+	if [ -e "$kit_pending" ] || [ -L "$kit_pending" ]; then
+		pending_id="$(jq -er '.id | select(type == "string" and test("^[a-f0-9-]{1,128}$"))' "$kit_pending" 2>/dev/null)" || pending_id=''
+		pending_warning="reconcile only a false PARTIAL whose postimages verify; nothing was built and nothing was changed"
+		[ -n "$pending_id" ] || die "RELPENDING1: pending kit update receipt $kit_pending is unreadable (no valid id), so the install stage would refuse PENDING_RECOVERY after publishing; inspect it, then run omp-kit update --reconcile <id> --yes ($pending_warning)"
+		die "RELPENDING1: a previous kit update left pending recovery receipt $pending_id ($kit_pending), so the install stage would refuse PENDING_RECOVERY after publishing; first run: omp-kit update --reconcile $pending_id --yes ($pending_warning)"
+	fi
 fi
 # Probe the newly used curl features locally, before a tag or draft can exist.
 curl_capability="$(bounded 10 curl -fsS --parallel -o /dev/null --write-out '%{exitcode}' file:///dev/null)" ||
@@ -350,14 +364,42 @@ if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass 
 	--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC" >/dev/null 2>&1; then
 	bounded 7200 sh "$ROOT/scripts/release-verdict.sh" --commit "$SOURCE" --no-fetch ||
 		die "release verdict failed for prepare $SOURCE"
+	# VERDICTSTARVE1 (ompkit-fp72.120.16.198): while another run holds its lock, release-verdict.sh writes SOURCE to its
+	# one-slot queue (release-verdict.wanted, latest wins) and returns 0. A push before the holder reaches SOURCE
+	# overwrites the slot and the holder never judges SOURCE (0.2.88: 13.6 min of polling until killed). Each poll reads
+	# the slot, then the commit the holder's runner children judge (--commit of full-suite-verdict.sh / run-ci-only),
+	# then the verdicts, so a verdict recorded before the holder moved on is always seen. SOURCE is starved once the
+	# holder is gone, or judges another commit while the slot no longer holds SOURCE: it then judges only the slot.
+	# Bound: the next poll after that state appears stops the stage, i.e. within slot/pid reads + ps (10 s) + two
+	# verdict reads (30 s each) + sleep 3 <= 73 s; while SOURCE is queued or judged the 7200 s deadline still applies.
+	rv_state="$(git -C "$ROOT" rev-parse --absolute-git-dir)/omp-kit" || die "cannot resolve the release-verdict state of $ROOT"
+	verdict_fix="produce it with: sh scripts/release-verdict.sh --commit $SOURCE --no-fetch (it queues $SOURCE while another run holds the lock), then resume: scripts/release-local.sh --source $SOURCE --version $VERSION"
 	verdict_deadline=$(( $(date +%s) + 7200 ))
+	verdict_seen=''
+	# The first --commit of a direct child of the holder that is its full-suite runner or its ci-only judge.
+	# shellcheck disable=SC2016 # an awk program, not shell expansions
+	rv_children_awk='$1 == holder && !found && /full-suite-verdict\.sh |full-suite-verdict-store\.py run-ci-only / { for (i = 2; i < NF; i++) { j = i + 1; if ($i == "--commit" && $j ~ /^[0-9a-f]+$/) { print $j; found = 1; break } } }'
 	while :; do
+		rv_wanted="$(cat "$rv_state/release-verdict.wanted" 2>/dev/null)" || rv_wanted=''
+		rv_holder="$(cat "$rv_state/release-verdict.lock/pid" 2>/dev/null)" || rv_holder=''
+		[[ "$rv_holder" =~ ^[1-9][0-9]*$ ]] && kill -0 "$rv_holder" 2>/dev/null || rv_holder=''
+		rv_judging=''
+		if [ -n "$rv_holder" ]; then
+			rv_judging="$(bounded 10 ps -A -o ppid= -o command= | awk -v holder="$rv_holder" "$rv_children_awk")" || rv_judging=''
+		fi
 		main_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
 			--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC")" || true
 		ci_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
 			--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC")" || true
 		if [ "$main_result" = FAIL ] || [ "$ci_result" = FAIL ]; then die "release verdict FAIL for exact prepare $SOURCE"; fi
 		[ "$main_result" != PASS ] || [ "$ci_result" != PASS ] || break
+		verdict_now="release-verdict run ${rv_holder:-none} judges ${rv_judging:-unknown}; queued next ${rv_wanted:-none}"
+		[ "$verdict_now" = "$verdict_seen" ] || { say "verdict wait for $SOURCE: $verdict_now"; verdict_seen=$verdict_now; }
+		[ -n "$rv_holder" ] ||
+			die "VERDICT_STARVED: no release-verdict run holds the lock and prepare $SOURCE has no verdict (main ${main_result:-none}, ci-only ${ci_result:-none}); $verdict_fix"
+		if [ -n "$rv_judging" ] && [ "$rv_judging" != "$SOURCE" ] && [ "$rv_wanted" != "$SOURCE" ]; then
+			die "VERDICT_STARVED: release-verdict run $rv_holder judges $rv_judging and queues ${rv_wanted:-nothing} next, so it skips prepare $SOURCE; $verdict_fix"
+		fi
 		[ "$(date +%s)" -lt "$verdict_deadline" ] || die "timed out waiting for exact prepare verdict $SOURCE"
 		sleep 3
 	done
