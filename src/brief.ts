@@ -200,13 +200,41 @@ export function briefEditsFiles(task: Record<string, unknown>, context = ""): bo
 	return /^[ \t]*#+[ \t]*Change\b/im.test(text) || /\breserved?\b[^\n]*\bfor you\b|\breserv(?:e|es|ed|ing)[ \t]+(?:these[ \t]+)?paths?\b/i.test(text);
 }
 
+/** BRIEFREPOWORD1: a pasted brief block (its `Gate contract:` header through its `omp-kit-brief: <path> <digest>` marker) is quoted hook text, never a target. An unterminated header hides nothing. */
+export function stripBriefBlocks(text: string): string {
+	const kept: string[] = [];
+	let block: string[] | undefined;
+	for (const line of text.split("\n")) {
+		const trimmed = line.trim();
+		if (!block) {
+			if (trimmed.startsWith("Gate contract: ")) block = [line];
+			else kept.push(line);
+			continue;
+		}
+		if (trimmed.startsWith("omp-kit-brief: ") && trimmed.charAt(trimmed.length - 65) === " " && /^[0-9a-f]{64}$/.test(trimmed.slice(-64))) block = undefined;
+		else block.push(line);
+	}
+	if (block) kept.push(...block);
+	return kept.join("\n");
+}
+
+function trimPathToken(token: string): string {
+	let end = token.length;
+	while (end > 0 && "),;.:".includes(token[end - 1]!)) end--;
+	return token.slice(0, end);
+}
+
 /** Repositories a brief targets: explicit repo labels, absolute paths' owning repos, else the session cwd. */
 export function briefTargets(text: string, cwd: string): string[] {
-	const targets = [...text.matchAll(/(?:--repo\s+|\b(?:repo|repository)\s*[:=]\s*)["`']?([^\s"`'<>]+)/gi)].map(match => match[1]!);
+	const prose = stripBriefBlocks(text);
+	// BRIEFREPOWORD1: a label names a target only when it is absolute or an existing relative directory; '-', 'any', 'the' are prose.
+	const targets = [...prose.matchAll(/(?:--repo\s+|\b(?:repo|repository)\s*[:=]\s*)["`']?([^\s"`'<>]+)/gi)]
+		.map(match => trimPathToken(match[1]!))
+		.filter(path => path && (isAbsolute(path) || (existsSync(resolve(cwd, path)) && statSync(resolve(cwd, path)).isDirectory())));
 	// Absolute source paths also target their owning repo, even without a
 	// "Repo:" label; no shell evaluation or dependence on the session cwd.
-	for (const match of text.matchAll(/(?:^|[\s`"'])(\/[^\s`"'<>]+)/g)) {
-		let path = match[1]!.replace(/[),;.]$/, "");
+	for (const match of prose.matchAll(/(?:^|[\s`"'])(\/[^\s`"'<>]+)/g)) {
+		let path = trimPathToken(match[1]!);
 		while (path !== dirname(path)) {
 			if (existsSync(join(path, ".git"))) { targets.push(path); break; }
 			path = dirname(path);
@@ -223,6 +251,7 @@ export async function checkTaskBrief(input: unknown, cwd: string, exec: BriefExe
 	const context = typeof value.context === "string" ? value.context : "";
 	if (context.length > 1_000_000) return "BRIEF_CONTRACT_REFUSED: context exceeds the 1 MB contract inspection limit.";
 	const tasks = Array.isArray(value.tasks) ? value.tasks : [];
+	const lookup = async (target: string) => { try { return await briefContract(resolve(cwd, target), exec); } catch { return undefined; } };
 	for (const item of tasks) {
 		if (!item || typeof item !== "object") continue;
 		const task = item as Record<string, unknown>;
@@ -230,9 +259,16 @@ export async function checkTaskBrief(input: unknown, cwd: string, exec: BriefExe
 		if (body.length > 1_000_000) return "BRIEF_CONTRACT_REFUSED: task exceeds the 1 MB contract inspection limit.";
 		if (!isBuildBriefTask(task)) continue;
 		const text = `${context}\n${body}`;
-		for (const target of briefTargets(text, cwd)) {
-			const contract = await briefContract(resolve(cwd, target), exec);
-			if (contract.installed && !text.split("\n").some(line => line.trim() === contract.marker)) return `BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${contract.repo}. Run omp-kit brief --repo ${JSON.stringify(contract.repo)} and paste its complete output into context (${contract.marker}).`;
+		const lines = new Set(text.split("\n").map(line => line.trim()));
+		// BRIEFREPOWORD1: a target that does not resolve is "no target named": fall back to the session cwd, never crash the guard.
+		const contracts = (await Promise.all(briefTargets(text, cwd).map(lookup))).filter(contract => contract !== undefined);
+		if (!contracts.length) {
+			const fallback = await lookup(cwd);
+			if (!fallback) return `BRIEF_CONTRACT_REFUSED: build task names no target checkout that resolves, and the session cwd ${cwd} is not a repository. Name the checkout as an absolute path and paste the complete output of omp-kit brief --repo <that path> into context.`;
+			contracts.push(fallback);
+		}
+		for (const contract of contracts) {
+			if (contract.installed && !lines.has(contract.marker)) return `BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${contract.repo}. Run omp-kit brief --repo ${JSON.stringify(contract.repo)} and paste its complete output into context (${contract.marker}).`;
 		}
 	}
 	return undefined;

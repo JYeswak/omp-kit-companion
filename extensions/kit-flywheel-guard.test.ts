@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { checkNoWait, validPriorArtLine } from "./kit-flywheel-guard";
@@ -9,7 +9,7 @@ import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder 
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
-import { briefContract, renderBrief } from "../src/brief.ts";
+import { briefContract, briefTargets, checkTaskBrief, renderBrief } from "../src/brief.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -1827,6 +1827,86 @@ test("BRIEFCONTRACT1 live tool-call boundary refuses a planted build and admits 
 	expect((admitted as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
 	const [readonly] = await h.emit("tool_call", { toolCallId: "brief-read", toolName: "task", input: { ...input, tasks: [{ task: "Read-only: analyze the implementation" }] } }, h.ctx(project));
 	expect((readonly as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+});
+
+describe("BRIEFREPOWORD1 pasted brief text never names a target", () => {
+	// The measured CFS hook prose: `omp-kit brief --repo clutterfreespaces.ios` prints "THIS REPO: - the ...", and the omp-kit commit-msg member "per-repo: any".
+	const hookProse = "# 30-db-drift-ledger WHAT THIS CAN NOT SEE: THREE OF THEM NEVER TOUCH THIS REPO: - the Supabase dashboard SQL editor\n# One history per-repo: any, --repo its own checkout\n";
+	const execute: Responder = async call => {
+		const result = await runFixtureAsync([call.command, ...call.args], { cwd: call.options?.cwd ?? base, env: { ...process.env, GIT_CEILING_DIRECTORIES: base, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+		return { code: result.rc ?? 1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
+	};
+	const repo = async (prefix: string) => {
+		const project = freshDir(base, prefix);
+		expect((await execute({ command: "git", args: ["init", "-q", "--template=", project] })).code).toBe(0);
+		const hooks = join(project, ".git", "hooks", "hooks.d", "pre-commit");
+		mkdirSync(hooks, { recursive: true });
+		writeFileSync(join(hooks, "30-db-drift-ledger"), `#!/bin/sh\n${hookProse}exit 0\n`, { mode: 0o755 });
+		return project;
+	};
+	const build = [{ task: "# Target\nThese paths are reserved for you: src/x.ts.\n# Change\nFix the bug." }];
+	const planted = async () => {
+		const cfs = await repo("cfs-");
+		const companion = await repo("companion-");
+		const briefs = [renderBrief(await briefContract(cfs)), renderBrief(await briefContract(companion))];
+		expect(briefs.join("\n")).toContain("THIS REPO: - the");
+		return { cfs, companion, input: { context: `Repo: ${cfs}\nRepo: ${companion}\n${briefs.join("\n")}`, tasks: build } };
+	};
+
+	test("BRIEFREPOWORD1 planted: complete CFS and companion briefs in context are admitted", async () => {
+		const { cfs, companion, input } = await planted();
+		const h = await createFlywheelHost(base, { respond: execute });
+		const [verdict] = await h.emit("tool_call", { toolCallId: "brw-a", toolName: "task", input }, h.ctx(cfs));
+		expect((verdict as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+		expect(briefTargets(input.context, cfs).sort()).toEqual([cfs, companion].sort());
+	});
+
+	test("BRIEFREPOWORD1 planted: the live CFS and companion briefs are admitted when those checkouts exist", async () => {
+		const live = ["/Users/josh/Developer/clutterfreespaces.ios", "/Users/josh/Developer/omp-kit-companion"].filter(path => existsSync(join(path, ".git")));
+		if (live.length < 2) return;
+		const briefs = await Promise.all(live.map(async path => renderBrief(await briefContract(path))));
+		expect(await checkTaskBrief({ context: `Repo: ${live[0]}\n${briefs.join("\n")}`, tasks: build }, live[0]!)).toBeUndefined();
+	});
+
+	test("BRIEFREPOWORD1 words '-', 'any', 'its', 'the' and trailing commas are not targets; no lookup crashes the guard", async () => {
+		const cwd = await repo("words-");
+		const text = `Repo: -\nrepo: any\n--repo its\nRepo: the companion\nRepo: ${cwd},\nscripts/full-suite-verdict.sh, ${cwd}/src/x.ts,`;
+		expect(briefTargets(text, cwd)).toEqual([cwd]);
+		expect(briefTargets("repository=/nonexistent/abs/path,", cwd)).toEqual(["/nonexistent/abs/path"]);
+		const h = await createFlywheelHost(base, { respond: execute });
+		for (const context of ["Repo: -", "per-repo: any", "Repo: /nonexistent/abs/path,", "--repo fails after a chdir"]) {
+			const [verdict] = await h.emit("tool_call", { toolCallId: `brw-b-${freshSeq++}`, toolName: "task", input: { context, tasks: build } }, h.ctx(cwd));
+			const reason = String((verdict as FlywheelToolCallResult | undefined)?.reason ?? "");
+			expect(reason).not.toContain("LOOKUP_REFUSED");
+			expect(reason).toContain(`BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${realpathSync(cwd)}`);
+		}
+		const plain = freshDir(base, "plain-");
+		expect(await checkTaskBrief({ context: "Repo: -", tasks: build }, plain, execute)).toContain("names no target checkout that resolves");
+		const started = performance.now();
+		briefTargets(`Repo: x${".".repeat(200_000)}\nGate contract: ${"a".repeat(200_000)}`, cwd);
+		expect(performance.now() - started).toBeLessThan(2000);
+	});
+
+	test("BRIEFREPOWORD1 control: a real checkout named without its marker is refused with the existing reason", async () => {
+		const { cfs, input } = await planted();
+		const h = await createFlywheelHost(base, { respond: execute });
+		const [verdict] = await h.emit("tool_call", { toolCallId: "brw-c", toolName: "task", input: { context: `Repo: ${cfs}`, tasks: build } }, h.ctx(base));
+		expect(verdict).toMatchObject({ block: true, reason: expect.stringContaining(`BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${realpathSync(cfs)}`) });
+		expect(input.context).toContain(cfs);
+	});
+
+	test("BRIEFREPOWORD1 mutant: restoring the old extraction makes the planted case fail", async () => {
+		const source = readFileSync(join(import.meta.dir, "..", "src", "brief.ts"), "utf8");
+		const old = source.replace("const prose = stripBriefBlocks(text);", "const prose = text;").replace(/\n\t\t\.filter\(path => path && \(isAbsolute[^\n]*/, "");
+		expect(old).not.toBe(source);
+		const dir = freshDir(base, "mutant-");
+		writeFileSync(join(dir, "brief.ts"), old.replaceAll('from "./', `from "${join(import.meta.dir, "..", "src")}/`));
+		// Dynamic: the mutant module is generated at test time, so no static specifier exists.
+		const mutant = await import(join(dir, "brief.ts")) as { checkTaskBrief: typeof checkTaskBrief };
+		const { cfs, input } = await planted();
+		const outcome = await mutant.checkTaskBrief(input, cfs, execute).then(reason => reason ?? "admitted", (error: unknown) => `threw ${String(error)}`);
+		expect(outcome).not.toBe("admitted");
+	});
 });
 
 describe("PRIORSPAWN1 spawn-time prior-art gate", () => {
