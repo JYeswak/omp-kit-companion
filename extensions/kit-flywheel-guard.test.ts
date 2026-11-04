@@ -1841,8 +1841,16 @@ test("BRIEFCONTRACT1 parent's task-result hook refuses DONE without preflight, a
 	expect(missingMember).toMatchObject({ isError: true, details: { accepted: false } });
 	const [unknownDespiteZero] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\nUNKNOWN installed-gate: no installed hook chain\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s");
 	expect(unknownDespiteZero).toMatchObject({ isError: true, details: { accepted: false } });
-	const [admitted] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s");
+	// EXPORTTEST1 planted: changed src without an export test run is refused even at 0 refused/unjudged.
+	const [noExportTests] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; no fresh gate or tests run");
+	expect(noExportTests).toMatchObject({ isError: true, details: { accepted: false } });
+	const [zeroTests] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts --tests tests/cli/feature.test.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; 0 export test file(s) run; no fresh gate run");
+	expect(zeroTests).toMatchObject({ isError: true, details: { accepted: false } });
+	const [admitted] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts tests/cli/feature.test.ts --tests tests/cli/feature.test.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; 1 export test file(s) run; no fresh gate run");
 	expect(admitted).toBeUndefined();
+	// Control: a docs-only handback needs no export test run.
+	const [docsOnly] = await emit("DONE\nsh scripts/commit-preflight.sh --files skills/contract.md\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; no fresh gate or tests run");
+	expect(docsOnly).toBeUndefined();
 	const [analysis] = await emit("DONE: read-only analysis", { ...input, tasks: [{ task: "Read-only: analyze feature" }] });
 	expect(analysis).toBeUndefined();
 	const [progress] = await emit("Still implementing feature");
@@ -1851,7 +1859,7 @@ test("BRIEFCONTRACT1 parent's task-result hook refuses DONE without preflight, a
 		toolName: "task", input: { ...input, tasks: [{ task: "Implement first" }, { task: "Implement second" }] },
 		content: [{ type: "text", text: "DONE: both" }],
 		details: { results: [
-			{ index: 0, id: "First", output: "DONE\nsh scripts/commit-preflight.sh --files src/first.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s" },
+			{ index: 0, id: "First", output: "DONE\nsh scripts/commit-preflight.sh --files src/first.ts --tests tests/cli/first.test.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; 1 export test file(s) run; no fresh gate run" },
 			{ index: 1, id: "Second", output: "DONE: second implemented without preflight" },
 		] },
 	}, h.ctx(base));
@@ -1863,6 +1871,6 @@ test("BRIEFCONTRACT1 direct parent DONE message after file edits needs the same 
 	await h.emit("tool_call", { toolCallId: "brief-edit", toolName: "edit", input: { path: "src/feature.ts" } }, h.ctx(base));
 	const [refused] = await h.emit("tool_call", { toolCallId: "brief-message", toolName: "write", input: { path: "agent://Main", content: "DONE: feature implemented" } }, h.ctx(base));
 	expect(refused).toMatchObject({ block: true, reason: expect.stringContaining("BRIEF_PREFLIGHT_REFUSED") });
-	const [admitted] = await h.emit("tool_call", { toolCallId: "brief-message-clean", toolName: "write", input: { path: "agent://Main", content: "DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s" } }, h.ctx(base));
+	const [admitted] = await h.emit("tool_call", { toolCallId: "brief-message-clean", toolName: "write", input: { path: "agent://Main", content: "DONE\nsh scripts/commit-preflight.sh --files src/feature.ts --tests tests/cli/feature.test.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s; 1 export test file(s) run; no fresh gate run" } }, h.ctx(base));
 	expect((admitted as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
 });

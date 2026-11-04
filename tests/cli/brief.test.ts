@@ -1,13 +1,17 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { briefCandidates, briefContract, checkTaskBrief, renderBrief, type BriefExec } from "../../src/brief.ts";
+import { briefCandidates, briefContract, checkTaskBrief, GENERIC_COMPLY, renderBrief, type BriefExec } from "../../src/brief.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
 const source = resolve(import.meta.dir, "../..");
 const scratch = ownedTmp("brief-tests");
 afterAll(() => scratch.cleanup());
+// TMPCANON1: fixtures live under a symlinked parent so a missed canonicalization fails on every host, not only under /var/folders.
+const aliased = join(scratch.path, "aliased");
+mkdirSync(join(scratch.path, "physical"));
+symlinkSync(join(scratch.path, "physical"), aliased);
 let sequence = 0;
 const execute: BriefExec = async (command, args, options) => {
 	const result = await runFixtureAsync([command, ...args], { cwd: options.cwd, env: { ...process.env, ...options.env, GIT_CEILING_DIRECTORIES: scratch.path, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
@@ -19,7 +23,7 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 	return result.stdout.trim();
 }
 async function fixture(gated = true) {
-	const repo = join(scratch.path, `repo-${++sequence}`);
+	const repo = join(aliased, `repo-${++sequence}`);
 	mkdirSync(repo);
 	await git(repo, "init", "-q", "--template=");
 	await git(repo, "config", "user.name", "Brief Fixture");
@@ -43,6 +47,8 @@ test("brief derives required rules from installed members and source checks, not
 	const scripts = join(repo, "scripts");
 	mkdirSync(scripts);
 	for (const name of ["check-staged-tempsafe.sh", "check-staged-wallclock.sh", "check-staged-br-init.sh", "fresh-gate.sh"]) writeFileSync(join(scripts, name), readFileSync(join(source, "scripts", name)));
+	await git(repo, "add", "--", "scripts");
+	await git(repo, "commit", "-qm", "land checks\n\nBead: fixture-checks");
 	const commit = join(repo, ".git/hooks/hooks.d/commit-msg");
 	mkdirSync(commit);
 	for (const [name, file] of [["49-omp-kit-stale-worktree", "check-stale-worktree.sh"], ["47-omp-kit-gap-mention", "check-gap-mention.sh"]]) {
@@ -52,10 +58,29 @@ test("brief derives required rules from installed members and source checks, not
 	}
 	const contract = await briefContract(repo, execute);
 	const text = renderBrief(contract);
-	for (const requirement of ["runFixtureAsync", "ownedTmp", "fixtureDeadlineS", "br-init", "schema-compat", "Supersedes", "GAP_UNFILED", "live scenario coverage", "exports are read-only", "changelog.d/<bead-without-ompkit-prefix>", "commit-preflight.sh --files"]) expect(text).toContain(requirement);
+	for (const requirement of ["runFixtureAsync", "ownedTmp", "fixtureDeadlineS", "br-init", "schema-compat", "Supersedes", "GAP_UNFILED", "live scenario coverage", "exports are read-only", "changelog.d/<bead-without-ompkit-prefix>", "commit-preflight.sh --files", "--tests <changed test files>"]) expect(text).toContain(requirement);
 	expect(contract.rules.every(rule => rule.member.length > 0 && rule.refuses.length > 0 && rule.compliant.length > 0)).toBe(true);
 	expect(contract.installed).toBe(true);
 	expect(text.split("\n").at(-1)).toBe(contract.marker);
+	// BRIEFSTABLE1 planted: peer working-tree edits to source checks (and new uncommitted ones) leave the digest unchanged; a commit moves it.
+	writeFileSync(join(scripts, "check-staged-tempsafe.sh"), "# peer edit in flight\n");
+	writeFileSync(join(scripts, "check-staged-new.sh"), "# uncommitted\n");
+	expect((await briefContract(repo, execute)).digest).toBe(contract.digest);
+	await git(repo, "add", "--", "scripts");
+	await git(repo, "commit", "-qm", "change checks\n\nBead: fixture-checks");
+	expect((await briefContract(repo, execute)).digest).not.toBe(contract.digest);
+});
+
+test("BRIEFSTABLE1 Comply lines come from a member's own remedy text; generic only when none exists", async () => {
+	const repo = await fixture(false);
+	const chain = join(repo, ".git/hooks/hooks.d/pre-commit");
+	mkdirSync(chain, { recursive: true });
+	const members = { "60-remedy": "#!/bin/sh\nprintf 'REFUSED: staged files hand-edit generated maps (use bun run gen:maps instead)\\n'\n", "61-fix": "#!/bin/sh\necho \"Fix: add a Sources: line naming the fetched URL\"\n", "62-silent": "#!/bin/sh\n# judges something\nexit 1\n" };
+	for (const [name, body] of Object.entries(members)) { writeFileSync(join(chain, name), body); chmodSync(join(chain, name), 0o755); }
+	const rules = (await briefContract(repo, execute)).rules;
+	expect(rules.find(rule => rule.member.endsWith("60-remedy"))).toMatchObject({ refuses: "staged files hand-edit generated maps", compliant: "use bun run gen:maps instead" });
+	expect(rules.find(rule => rule.member.endsWith("61-fix"))?.compliant).toBe("add a Sources: line naming the fetched URL");
+	expect(rules.find(rule => rule.member.endsWith("62-silent"))?.compliant).toStartWith(GENERIC_COMPLY);
 });
 
 test("build task requires the current repo-bound digest; read-only and ungated controls stay admitted", async () => {
@@ -66,6 +91,11 @@ test("build task requires the current repo-bound digest; read-only and ungated c
 	expect(await checkTaskBrief({ context, tasks }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
 	expect(await checkTaskBrief({ context: `${context}\n${renderBrief(contract)}`, tasks }, repo, execute)).toBeUndefined();
 	expect(await checkTaskBrief({ context, tasks: [{ task: "Read-only: analyze the requested change" }] }, repo, execute)).toBeUndefined();
+	// BRIEFSTABLE1: tasks declaring no change are admitted without a marker; a planted build task with a Change section is not.
+	expect(await checkTaskBrief({ context, tasks: [{ task: "# Target\nGrade bead X.\n# Change\nNone\n# Acceptance\nverdict" }] }, repo, execute)).toBeUndefined();
+	expect(await checkTaskBrief({ context, tasks: [{ task: "Verify the release. Change: none." }] }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+	expect(await checkTaskBrief({ context, tasks: [{ task: "Verify bead X.\nChange: None" }] }, repo, execute)).toBeUndefined();
+	expect(await checkTaskBrief({ context, tasks: [{ task: "# Change\nFix src/a.ts" }] }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
 	expect(await checkTaskBrief({ context, tasks: [{ agent: "reviewer", task: "Review the implementation" }] }, repo, execute)).toBeUndefined();
 	expect(await checkTaskBrief({ context, tasks: [{ task: "Analyze the implementation and report findings" }] }, repo, execute)).toBeUndefined();
 	const other = await fixture(false);
@@ -126,7 +156,7 @@ test("brief CLI prints the digest in text and JSON; --paths accepts multiple pat
 	expect(result.code).toBe(0);
 	const output = JSON.parse(result.stdout);
 	expect(output.data.candidates).toEqual([]);
-	expect(output.data.marker).toStartWith(`omp-kit-brief: ${repo} `);
+	expect(output.data.marker).toStartWith(`omp-kit-brief: ${realpathSync(repo)} `);
 	expect(output.data.text).toContain(output.data.marker);
 });
 

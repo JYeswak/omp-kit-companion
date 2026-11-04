@@ -37,9 +37,27 @@ function memberRules(member: string, source: string): BriefRule[] {
 	}
 	if (!rules.length) {
 		const header = source.split("\n").slice(0, 12).filter(line => line.startsWith("#") && !line.startsWith("#!")).map(line => line.slice(1).trim()).join(" ").slice(0, 600);
-		add(header || "violations judged by this executable member", `read and satisfy ${member} before changing its governed surface`);
+		const { refusals, remedies } = memberRemedies(source);
+		add(refusals.join("; ").slice(0, 600) || header || "violations judged by this executable member", remedies.join("; ").slice(0, 600) || `${GENERIC_COMPLY} ${member} before changing its governed surface`);
 	}
 	return rules;
+}
+
+export const GENERIC_COMPLY = "read and satisfy";
+const tidy = (text: string) => text.replace(/\\n|%[sd]|\{[^}]*\}/g, " ").replace(/\s+/g, " ").replace(/[\s;:,.(]+$/, "").trim();
+/** BRIEFSTABLE1: the member's own refusal and remedy strings, so Comply names a compliant form instead of "read the member". */
+export function memberRemedies(source: string): { refusals: string[]; remedies: string[] } {
+	const refusals = new Set<string>();
+	const remedies = new Set<string>();
+	for (const match of source.matchAll(/\b(?:Fix|Comply|[Rr]emedy)\s*:\s*([^"'`\n]{8,300})/g)) remedies.add(tidy(match[1]!));
+	for (const match of source.matchAll(/REFUSED:\s*([^"'`\n]{8,300})/g)) {
+		const text = match[1]!;
+		const clause = text.match(/\((?:use|run|rerun)\s+([^)]{4,240})\)|[;,]\s*((?:use|run|rerun|reinstall|set|name|add|remove|restore)\s[^;]{4,240})/i);
+		const head = tidy(clause ? text.slice(0, clause.index) : text);
+		if (head.length >= 8) refusals.add(head);
+		if (clause) remedies.add(tidy(clause[1] ? `use ${clause[1]}` : clause[2]!));
+	}
+	return { refusals: [...refusals].filter(Boolean).slice(0, 6), remedies: [...remedies].filter(text => text.length >= 4).slice(0, 6) };
 }
 
 /** Read the hook location Git actually resolves (including core.hooksPath), plus source staged checks. */
@@ -55,29 +73,42 @@ export async function briefContract(repoPath: string, exec: BriefExec = execute)
 	const rules: BriefRule[] = [];
 	let installed = false;
 	const visited = new Set<string>();
-	const fingerprintHelpers = (path: string, source: string): void => {
+	// BRIEFSTABLE1: source members are read from HEAD, never the working tree, so in-flight edits by peers cannot move the digest.
+	const listed = await exec("git", ["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", "scripts"], { cwd: repo, timeout: 3000 });
+	const committed = new Set(listed.code === 0 ? listed.stdout.split("\0").filter(Boolean) : []);
+	const readHead = async (path: string): Promise<string | undefined> => {
+		const rel = relative(repo, path);
+		if (!committed.has(rel)) return undefined;
+		const shown = await exec("git", ["show", `HEAD:${rel}`], { cwd: repo, timeout: 3000 });
+		if (shown.code !== 0) throw new Error(`brief: cannot read HEAD:${rel}`);
+		return shown.stdout;
+	};
+	const readInstalled = async (path: string) => existsSync(path) && statSync(path).isFile() ? readFileSync(path, "utf8") : undefined;
+	const fingerprintHelpers = async (path: string, source: string, read: (path: string) => Promise<string | undefined>): Promise<void> => {
 		for (const match of source.matchAll(/\b([A-Za-z0-9_-]+\.(?:py|ts|sh|json))\b/g)) {
 			const helper = join(dirname(path), match[1]!);
-			if (visited.has(helper) || !existsSync(helper) || !statSync(helper).isFile()) continue;
+			if (visited.has(helper)) continue;
+			const body = await read(helper);
+			if (body === undefined) continue;
 			if (visited.size >= 256) throw new Error("brief: helper closure exceeds 256 files");
 			visited.add(helper);
-			const body = readFileSync(helper, "utf8");
 			members.push({ member: `helper:${relative(repo, helper)}`, path: helper, sha256: hash(body) });
-			fingerprintHelpers(helper, body);
+			await fingerprintHelpers(helper, body, read);
 		}
 	};
-	const inspect = (path: string, member: string) => {
-		const source = readFileSync(path, "utf8");
+	const inspect = async (path: string, member: string, read: (path: string) => Promise<string | undefined>) => {
+		const source = await read(path);
+		if (source === undefined) return;
 		members.push({ member, path, sha256: hash(source) });
 		visited.add(path);
-		fingerprintHelpers(path, source);
+		await fingerprintHelpers(path, source, read);
 		rules.push(...memberRules(member, source));
 	};
 	for (const kind of ["pre-commit", "commit-msg", "pre-push"]) {
 		const runner = join(hooks, kind);
 		if (existsSync(runner) && statSync(runner).isFile() && (statSync(runner).mode & 0o111)) {
 			installed = true;
-			inspect(runner, kind);
+			await inspect(runner, kind, readInstalled);
 		}
 		const chain = join(hooks, "hooks.d", kind);
 		if (!existsSync(chain)) continue;
@@ -85,17 +116,14 @@ export async function briefContract(repoPath: string, exec: BriefExec = execute)
 			const path = join(chain, name);
 			if (!statSync(path).isFile() || !(statSync(path).mode & 0o111)) continue;
 			installed = true;
-			inspect(path, `${kind}/${name}`);
+			await inspect(path, `${kind}/${name}`, readInstalled);
 		}
 	}
-	const scripts = join(repo, "scripts");
-	if (existsSync(scripts)) {
-		for (const name of readdirSync(scripts).filter(name => /^check-staged-.*\.sh$/.test(name) || name === "fresh-gate.sh").sort()) inspect(join(scripts, name), `source:scripts/${name}`);
-	}
+	for (const rel of [...committed].filter(rel => /^scripts\/(?:check-staged-.*\.sh|fresh-gate\.sh)$/.test(rel)).sort()) await inspect(join(repo, rel), `source:${rel}`, readHead);
 	rules.push(
 		{ member: "process:EXPORTINDEX1", refuses: "writes escaping an exported test tree", compliant: "exports are read-only source inputs; fixture repositories need their own git init and GIT_CEILING_DIRECTORIES so git never discovers the parent checkout" },
 		{ member: "process:commit-notes", refuses: "a user-visible change without its own release note", compliant: "write changelog.d/<bead-without-ompkit-prefix>.md, user-facing '- ' bullets; update README's command reference for CLI changes" },
-		{ member: "process:BRIEFCONTRACT1", refuses: "DONE without clean changed-path preflight evidence", compliant: "before DONE run sh scripts/commit-preflight.sh --files <every changed path>; report the exact command and its commit-preflight: ... 0 refused/unjudged output" },
+		{ member: "process:BRIEFCONTRACT1", refuses: "DONE without clean changed-path preflight evidence", compliant: "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files>; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output" },
 	);
 	const digest = hash(JSON.stringify({ repo, members, rules }));
 	return { repo, installed, digest, marker: `omp-kit-brief: ${repo} ${digest}`, rules, members };
@@ -150,7 +178,9 @@ export function isBuildBriefTask(task: Record<string, unknown>): boolean {
 	const selector = typeof task.agent === "string" ? task.agent : "";
 	const body = typeof task.task === "string" ? task.task : "";
 	if (["reviewer", "security-reviewer", "seance", "zeststream-planner", "zeststream-reviewer"].includes(selector)) return false;
-	if (/^\s*(?:#\s*)?(?:read-only|analysis-only)\b/i.test(body)) return false;
+	if (/^\s*(?:#\s*)?(?:read-only|analysis-only)\b/im.test(body)) return false;
+	// BRIEFSTABLE1: a task that declares it changes nothing is not a build task.
+	if (/^\s*(?:#+\s*)?Change\s*(?::\s*|\n\s*)(?:None|N\/A|no changes?)\b/im.test(body)) return false;
 	return !(/^\s*(?:analy[sz]e|analysis|investigate|review|inspect)\b/i.test(body)
 		&& !/\b(?:implement|modify|edit|write|fix|refactor|remove|add|create|update)\b/i.test(body));
 }
@@ -191,8 +221,12 @@ export async function checkTaskBrief(input: unknown, cwd: string, exec: BriefExe
 export function briefHandbackRefusal(text: string): string | undefined {
 	if (text.length > 1_000_000) return "BRIEF_PREFLIGHT_REFUSED: handback exceeds the 1 MB evidence inspection limit.";
 	if (!text.split("\n").some(line => line.trimStart().startsWith("DONE") && !/[A-Za-z0-9_]/.test(line.trimStart().charAt(4)))) return undefined;
-	if (!/^[ \t]*(?:UNKNOWN|UNJUDGED|REFUSED)\b/m.test(text)
+	const clean = !/^[ \t]*(?:UNKNOWN|UNJUDGED|REFUSED)\b/m.test(text)
 		&& /\bcommit-preflight\.sh\s+--files\s+\S+/.test(text)
-		&& /commit-preflight:\s*\d+ checks, 0 refused(?:\/unjudged)?\b/.test(text)) return undefined;
-	return "BRIEF_PREFLIGHT_REFUSED: DONE requires the exact changed-path commit-preflight command and its 0 refused/unjudged output, with no UNKNOWN, UNJUDGED or REFUSED findings. Return the handback to its author; it is not accepted work.";
+		&& /commit-preflight:\s*\d+ checks, 0 refused(?:\/unjudged)?\b/.test(text);
+	if (!clean) return "BRIEF_PREFLIGHT_REFUSED: DONE requires the exact changed-path commit-preflight command and its 0 refused/unjudged output, with no UNKNOWN, UNJUDGED or REFUSED findings. Return the handback to its author; it is not accepted work.";
+	// EXPORTTEST1: a handback that changed src or test files must show those tests ran in an export.
+	const code = [...text.matchAll(/commit-preflight\.sh\b[^\n]*?--files\s+([^\n]*)/g)].some(match => match[1]!.split(/\s+/).some(path => /^(?:src|tests|extensions)\/|\.test\.[a-z]+$/.test(path)));
+	if (code && !(/\bcommit-preflight\.sh\b[^\n]*\s--tests\s+\S+/.test(text) && /commit-preflight:\s*\d+ checks, 0 refused\/unjudged\b[^\n]*;\s*[1-9]\d* export test file\(s\) run\b/.test(text))) return "BRIEF_PREFLIGHT_REFUSED: DONE names changed src/test files but shows no export test run. Rerun sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files> and report its 'commit-preflight: N checks, 0 refused/unjudged ...; M export test file(s) run' line.";
+	return undefined;
 }
