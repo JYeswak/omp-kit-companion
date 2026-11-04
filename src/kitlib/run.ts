@@ -96,6 +96,11 @@ export interface RunOptions {
 	max_sink_queue_bytes?: number;
 	/** Optional lifecycle observations; leaves the existing result contract unchanged. */
 	timings?: RunTimings;
+	/** Explicit opt-out of the parent-death reaper (GROUPREAP1): when this process dies without
+	 * cleanup, this one group is left running. Only for a caller that must leave a process behind
+	 * on purpose, such as the PPID1 orphan fixture in tests/cli/scratch-orphan-reap.helpers.ts;
+	 * never for product runs. Only `true` is accepted; the deadline, abort and exit sweeps still apply. */
+	outlive_parent?: true;
 }
 
 const SYNC_OPTION_KEYS: Record<keyof RunSyncOptions, true> = {
@@ -104,6 +109,7 @@ const SYNC_OPTION_KEYS: Record<keyof RunSyncOptions, true> = {
 const ASYNC_OPTION_KEYS: Record<keyof RunOptions, true> = {
 	...SYNC_OPTION_KEYS, grace_s: true, stdin: true, rlimit_cpu_s: true, rlimit_as_bytes: true,
 	signal: true, inherit_fds: true, on_output: true, max_total_bytes: true, max_sink_queue_bytes: true, timings: true,
+	outlive_parent: true,
 };
 
 function rejectUnknownOptions(options: object, allowed: object, name: string): void {
@@ -351,6 +357,8 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		fstatSync(fd); // a closed descriptor is refused here, never silently skipped
 	}
 	if (new Set(inherit).size !== inherit.length) throw new RangeError(`inherit_fds has duplicates: ${inherit.join(",")}`);
+	if (options.outlive_parent !== undefined && options.outlive_parent !== true) throw new TypeError("outlive_parent accepts only true");
+	const reaped = options.outlive_parent !== true;
 	abort?.throwIfAborted();
 
 	const started = performance.now();
@@ -390,8 +398,8 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 	abort?.addEventListener("abort", abortListener, { once: true });
 	let timedOut = false, killed = false, settled = false;
 	try {
-		// Before any wait: if this process dies from here on, the reaper sweeps the group's session.
-		reaperSend("add", pgid);
+		// Before any wait: if this process dies from here on, the reaper sweeps the group's session (unless outlive_parent).
+		if (reaped) reaperSend("add", pgid);
 		const deadlineAt = started + deadlineMs;
 		const remaining = () => deadlineAt - performance.now();
 		// Every wait also ends on abort, so an aborted call keeps no timer alive.
@@ -432,7 +440,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		await Promise.all([out.cancel(), err.cancel()]);
 		await pipesClosed;
 		liveGroups.delete(pgid);
-		try { reaperSend("del", pgid); } catch { /* no reaper to tell; the group is already gone */ }
+		if (reaped) { try { reaperSend("del", pgid); } catch { /* no reaper to tell; the group is already gone */ } }
 		await sink?.finish(graceMs);
 	}
 	const signalCode = child.signalCode as keyof typeof constants.signals | null;

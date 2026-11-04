@@ -60,9 +60,10 @@ or by SIGTERM without ``run_main``, runs none of the above. Each process that
 calls ``run_bounded`` therefore starts one reaper (``pysafe.py reaper``, own
 session) that reads the caller's registry over a pipe; when the pipe closes
 it sweeps every registered session whose leader still has its recorded start
-time. Every sweep (timeout, cancellation, leader exit, reaper) covers the
-whole session by ``os.getsid``, so a member that called ``setpgid`` is not
-missed, plus the leader's parent-pid tree while the leader is proven alive.
+time. Every sweep (timeout, cancellation, reaper) covers the whole session by
+``os.getsid``, so a member that called ``setpgid`` is not missed, plus the
+leader's parent-pid tree while the leader is proven alive. A normal leader
+exit kills only the leader's process group, as before.
 
 CLI (used by the pre-commit member to supervise the checker)::
 
@@ -624,12 +625,13 @@ def run_bounded(
                     break
             pump.step(min(deadline - now, 0.1))
         if outcome == OK:
-            # The leader exited; a descendant that redirected its pipes away, or
-            # moved to its own process group, is still in the session and must
-            # not outlive the call. On Linux the leader zombie is still
-            # unreaped here, so the group and session ids are not reusable.
+            # The leader exited; a descendant that redirected its pipes away is
+            # still in the group and must not outlive the call. On Linux the
+            # leader zombie is still unreaped here, so the group id is not
+            # reusable. A member that left the group (setpgid/setsid) on a normal
+            # exit is deliberately kept: only timeout, cancellation and parent
+            # death take the whole session (GROUPREAP1, R32).
             _signal_group(pgid, signal.SIGKILL)
-            _sweep_session(pgid, leader_alive=proc.returncode is None)
         else:
             _signal_group(pgid, signal.SIGTERM)
             end = time.monotonic() + grace

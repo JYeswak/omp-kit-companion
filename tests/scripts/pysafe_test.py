@@ -164,18 +164,39 @@ class GrandchildHoldsPipe(Scratch):
         self.assertEqual(result.outcome, pysafe.TIMEOUT)
         self.assertTrue(wait_dead(grandchild, 3.0), "setpgid grandchild survived the run_bounded timeout")
 
+    def test_normal_exit_keeps_a_same_session_process_that_left_the_group(self) -> None:
+        # Control for GROUPREAP1: the whole-session sweep belongs to timeout,
+        # cancellation and parent death only. On a normal leader exit, a member
+        # that deliberately moved to its own process group (same session) is
+        # left running, as before GROUPREAP1.
+        leader_file, grandchild_file = self.tmp / "leader.pid", self.tmp / "grandchild.pid"
+        result = pysafe.run_bounded([sys.executable, "-c", setpgid_tree(leader_file, grandchild_file, leader_exits=True)],
+                                    10.0, grace=0.5)
+        grandchild = read_pid(grandchild_file)
+        self.pids.append(grandchild)
+        self.assertEqual((result.outcome, result.returncode), (pysafe.OK, 0), result.text("stderr"))
+        self.assertEqual(os.getsid(grandchild), read_pid(leader_file), "fixture grandchild is not in the leader's session")
+        time.sleep(0.5)  # real processes: give a wrongful sweep time to land before checking survival
+        self.assertTrue(alive(grandchild), "a normal leader exit killed a same-session process outside its group")
 
-def setpgid_tree(leader_file: Path, grandchild_file: Path) -> str:
-    """Python source: fork a grandchild that calls setpgid(0, 0); both sleep 300 s after writing their pids."""
+
+def setpgid_tree(leader_file: Path, grandchild_file: Path, leader_exits: bool = False) -> str:
+    """Python source: fork a grandchild that calls setpgid(0, 0), detaches its stdio and sleeps 300 s.
+    The leader writes its pid and then sleeps 300 s, or, with ``leader_exits``, waits for the
+    grandchild's pid file and exits 0."""
+    tail = (f"while not os.path.exists({str(grandchild_file)!r}): time.sleep(0.02)\n"
+            "os._exit(0)\n") if leader_exits else "time.sleep(300)\n"
     return ("import os,time\n"
             "pid=os.fork()\n"
             "if pid==0:\n"
             "    os.setpgid(0,0)\n"
+            "    null=os.open(os.devnull,os.O_RDWR)\n"
+            "    [os.dup2(null,fd) for fd in (0,1,2)]\n"
             f"    open({str(grandchild_file)!r},'w').write(str(os.getpid()))\n"
             "    time.sleep(300)\n"
             "    os._exit(0)\n"
             f"open({str(leader_file)!r},'w').write(str(os.getpid()))\n"
-            "time.sleep(300)\n")
+            + tail)
 
 
 class ParentDeath(Scratch):

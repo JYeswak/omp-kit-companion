@@ -364,6 +364,31 @@ process.kill(process.pid, "SIGKILL");`;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	}, fixtureDeadlineS() * 3000);
+	test("control GROUPREAP1: with outlive_parent the child of a SIGKILLed owner keeps running", async () => {
+		const dir = scratch(), childPid = join(dir, "child.pid");
+		const module = join(import.meta.dir, "../../src/kitlib/run.ts");
+		const script = `import { existsSync } from "node:fs";
+import { run } from ${JSON.stringify(module)};
+void run(["/bin/sh", "-c", ${JSON.stringify(`echo $$ > '${childPid}'; exec sleep 300`)}], { deadline_s: 900, outlive_parent: true });
+for (let tries = 0; !existsSync(${JSON.stringify(childPid)}) && tries < 200; tries++) await Bun.sleep(25);
+process.kill(process.pid, "SIGKILL");`;
+		let child = 0;
+		try {
+			const parent = await run([process.execPath, "-e", script], { deadline_s: fixtureDeadlineS() });
+			expect(parent.rc, new TextDecoder().decode(parent.stderr)).toBe(-constants.signals.SIGKILL);
+			child = Number(readFileSync(childPid, "utf8").trim());
+			expect(child).toBeGreaterThan(1);
+			// Real clock: the planted test's 3 s reap budget must pass with the child still alive; no fake timer crosses processes.
+			await Bun.sleep(3000);
+			expect(() => process.kill(child, 0)).not.toThrow();
+		} finally {
+			if (child > 1) { try { process.kill(safePid(child), "SIGKILL"); } catch { /* already gone */ } }
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, fixtureDeadlineS() * 3000);
+	test("outlive_parent accepts only true", async () => {
+		await expect(run(["true"], { deadline_s: fixtureDeadlineS(), outlive_parent: false as unknown as true })).rejects.toThrow("outlive_parent accepts only true");
+	});
 });
 
 // runSync: the synchronous leaf-command twin (ompkit-5m6ej). No group ownership, so the corpus's descendant cases do not apply.
