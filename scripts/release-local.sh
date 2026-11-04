@@ -199,6 +199,10 @@ install_release() {
 	stage install
 	local kit="$INSTALL_PREFIX/bin/omp-kit" store="$INSTALL_PREFIX/releases/$VERSION"
 	local update_rc=0 reconcile_id
+	# RELINSTALLPATH1 (ompkit-fp72.120.16.155): `omp-kit update --apply` refuses a source that is not its own realpath
+	# (UNSAFE_KIT_SOURCE, kit-update.ts assertRegular), and $WORK under macOS TMPDIR sits below the /var -> /private/var
+	# symlink, so 0.2.75 published and then never installed. Hand the updater the physical path (same directory).
+	PUB="$(cd "$PUB" && pwd -P)" || die "cannot resolve the public download directory $PUB"
 	substep install.update
 	bounded 3600 "$kit" update --apply --yes --version "$VERSION" \
 		--index "$PUB/release-index.json" --archive "$PUB/$DARWIN" --json >"$WORK/install-update.json" || update_rc=$?
@@ -265,9 +269,11 @@ bounded 60 gh auth status --hostname github.com >/dev/null 2>&1 || die "gh is no
 # RELFAILFAST1 (ompkit-fp72.120.16.104, Joshua J-2026-11-03-34: fail fast on big gates). The ci-only stage runs the
 # packaged ladder through `omp-kit heavy`; when heavy work cannot be admitted (disk, load, slots) it waits queued
 # until package-release.test.ts hits its 900 s budget (0.2.86 dry run, 2026-11-03). Ask the same gate now, in seconds.
+# The probe uses the observer that stage uses (statfs, keeping heavy's 10 GiB floor; ompkit-fp72.120.16.154/.155): an
+# sbh pressure reading the ci-only stage never consults must not refuse a release that stage would admit.
 if command -v omp-kit >/dev/null; then
 	admit_rc=0
-	admit_out="$(bounded 60 omp-kit heavy --no-wait --label release-preflight -- true 2>&1)" || admit_rc=$?
+	admit_out="$(OMP_KIT_DISK_OBSERVER=statfs bounded 60 omp-kit heavy --no-wait --label release-preflight -- true 2>&1)" || admit_rc=$?
 	[ "$admit_rc" -ne 75 ] || die "heavy work cannot be admitted now, so the ci-only stage would time out queued; fix this first: $(printf '%s' "$admit_out" | tail -n 3)"
 	[ "$admit_rc" -eq 0 ] || die "heavy admission probe failed (rc $admit_rc): $(printf '%s' "$admit_out" | tail -n 3)"
 else

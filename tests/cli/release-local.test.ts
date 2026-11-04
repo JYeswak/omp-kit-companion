@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -122,8 +122,12 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 	const stub = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, name), 0o755); };
 	stub("gh", "exit 0");
 	stub("git", `echo called >> "${join(work, "git-called")}"; exit 1`);
-	const attempt = async (admission: number) => {
-		stub("omp-kit", admission === 75 ? "echo 'heavy: waiting: disk low: sbh check --need 10G reports pressure' >&2; exit 75" : "exit 0");
+	// Stub admission: 75 = heavy refuses under any observer (statfs below the 10 GiB floor); "sbh" = only the sbh
+	// observer reports pressure, so the statfs-observed probe must admit (ompkit-fp72.120.16.155).
+	const attempt = async (admission: 0 | 75 | "sbh") => {
+		stub("omp-kit", admission === 75 ? "echo 'heavy: waiting: disk low: statfs 4 GiB free, floor 10 GiB' >&2; exit 75"
+			: admission === "sbh" ? `[ "$OMP_KIT_DISK_OBSERVER" = statfs ] && exit 0; echo 'heavy: waiting: disk low: sbh check --need 10G reports pressure' >&2; exit 75`
+			: "exit 0");
 		rmSync(join(work, "git-called"), { force: true });
 		const started = Date.now();
 		const env: Record<string, string> = {};
@@ -145,10 +149,15 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 		expect(admitted.rc, admitted.err).toBe(4);
 		expect(admitted.err).toContain("git fetch origin main failed");
 		expect(admitted.gitCalled).toBe(true);
+		// Planted: sbh reports pressure while statfs is above the floor; the ci-only stage observes statfs, so admit.
+		const sbhOnly = await attempt("sbh");
+		expect(sbhOnly.rc, sbhOnly.err).toBe(4);
+		expect(sbhOnly.err).not.toContain("heavy work cannot be admitted now");
+		expect(sbhOnly.err).toContain("git fetch origin main failed");
 	} finally {
 		rmSync(work, { recursive: true, force: true });
 	}
-// Two release-local preflights run back to back (stubbed admission, git and gh); bun's 5 s default is too tight under load.
+// Three release-local preflights run back to back (stubbed admission, git and gh); bun's 5 s default is too tight under load.
 }, fixtureDeadlineS(60) * 1_000);
 
 // Execute the production shell stages with real curl/checksums and only the
@@ -234,9 +243,13 @@ prepare_release
 	}, fixtureDeadlineS(60) * 1_000);
 }
 
-for (const scenario of ["updated", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused"] as const) {
+for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused"] as const) {
 	test(`release install ${scenario} only stamps installed after real store alignment`, async () => {
 		const work = realpathSync(ownedTmp("release-install", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		// RELINSTALLPATH1 (ompkit-fp72.120.16.155): macOS TMPDIR lies under /var -> /private/var; the stage must hand the
+		// updater physical paths even when its work dir is reached through a symlinked parent.
+		const stageWork = scenario === "symlinked-work" ? join(work, "via-link") : work;
+		if (scenario === "symlinked-work") symlinkSync(work, stageWork);
 		const home = join(work, "home");
 		const prefix = join(home, ".local/opt/omp-kit");
 		const store = join(prefix, "releases/0.0.0");
@@ -252,7 +265,7 @@ for (const scenario of ["updated", "browser-partial", "foreign-write", "stale-li
 		// Only activation transport is a fixture; real align reads private symlinks.
 		const kit = join(prefix, "bin/omp-kit");
 		writeFileSync(kit, `#!${process.execPath}
-import { appendFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { appendFileSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 const root = process.env.RELEASE_TEST_WORK;
 const scenario = process.env.RELEASE_TEST_SCENARIO;
@@ -262,6 +275,11 @@ const args = process.argv.slice(2);
 appendFileSync(join(root, "calls"), JSON.stringify(args) + "\\n");
 const emit = (data, commands = [], ok = true) => console.log(JSON.stringify({ ok, data, commands }));
 if (args[0] === "--version") { console.log(scenario === "wrong-version" ? "omp-kit 0.0.1" : "omp-kit 0.0.0"); process.exit(0); }
+// Like kit-update.ts assertRegular: a source that is not its own realpath is UNSAFE_KIT_SOURCE.
+for (const flag of ["--index", "--archive"]) {
+  const at = args.indexOf(flag);
+  if (at >= 0 && dirname(args[at + 1]) !== realpathSync(dirname(args[at + 1]))) { console.error("UNSAFE_KIT_SOURCE " + args[at + 1]); process.exit(3); }
+}
 if (args[0] === "update" && args.includes("--reconcile")) {
   if (scenario === "reconcile-refused") process.exit(1);
   emit({ action: "RECONCILED", active_version: "0.0.0" }); process.exit(0);
@@ -300,12 +318,12 @@ receipt installed fixture fixture
 `);
 		mkdirSync(join(work, "dist"));
 		try {
-			const result = await runFixtureAsync(["bash", fixture, work, ROOT, home], {
+			const result = await runFixtureAsync(["bash", fixture, stageWork, ROOT, home], {
 				cwd: ROOT, env: { ...process.env, HOME: home, TMPDIR: work, RELEASE_TEST_WORK: work, RELEASE_TEST_SCENARIO: scenario }, floor_s: 30,
 			});
 			const stdout = new TextDecoder().decode(result.stdout);
 			const stderr = new TextDecoder().decode(result.stderr);
-			const successful = scenario === "updated" || scenario === "browser-partial";
+			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial";
 			expect(result.rc, stderr).toBe(successful ? 0 : 4);
 			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
 			expect(calls[0]).toEqual(["update", "--apply", "--yes", "--version", "0.0.0", "--index", join(work, "public/release-index.json"),
