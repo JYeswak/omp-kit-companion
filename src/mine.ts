@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, type ReadStream } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { createGunzip, type Gunzip } from "node:zlib";
 import { run } from "./kitlib/run.ts";
 import { mineTranscripts } from "./mine-transcripts.ts";
@@ -26,6 +26,18 @@ export interface MineScanOptions extends MineOptions {
 	onFinding?: (finding: MineSourceFinding) => void;
 }
 export interface MineEvidence { citation: string; timestamp: string; producer: string; summary: string; event_id?: string; replay?: MineReplay }
+export interface MineWaste {
+	kind: "commit-retries" | "rework-rounds" | "brief-corrections" | "owner-correction" | "idle-wait";
+	subject: string; causes: string[];
+	attempts?: number; rework_rounds?: number; correction_messages?: number;
+	rework_spans?: { id: string; minutes: number | null; cause: string }[];
+	cost: { rounds: number; minutes: number | null; tokens: number | null };
+	counterfactual: string;
+}
+export interface MineWasteClass {
+	id: string; project: string; count: number;
+	cost: MineWaste["cost"]; counterfactual: string; evidence: MineEvidence[];
+}
 export interface MineCoverage {
 	producer: string; location: string; status: "READ" | "MISSING" | "PARTIAL";
 	rows: number; first_timestamp: string | null; last_timestamp: string | null; detail: string;
@@ -43,21 +55,24 @@ export interface MineClass {
 export interface MineSourceFinding {
 	class_id: string; project: string; time_ms: number; producer: string; citation: string;
 	summary: string; measured_minutes: number | null; proxy_minutes: number; identity: string;
-	event_id?: string; replay?: MineReplay; related_evidence?: MineEvidence[];
+	event_id?: string; replay?: MineReplay; related_evidence?: MineEvidence[]; waste?: MineWaste;
 }
 /** Complete counted occurrence; event identity does not depend on its current class or primary citation. */
 export interface MineOccurrence extends MineEvidence {
 	event_id: string; class_id: string; project: string; related_evidence: MineEvidence[];
+	waste?: MineWaste;
 }
 export interface MineSourceContext {
 	home: string; projects: readonly { name: string; path: string }[]; since_ms: number; until_ms: number;
 	sources?: readonly MineSource[]; targetProject?: string; skipFile?: (path: string) => boolean;
+	ownerCorrectionsPath?: string; state?: string; sessionRoots?: readonly string[];
 	readLines: (path: string, producer: string, consume: (row: Record<string, unknown>, citation: string) => void) => Promise<MineCoverage>;
 	emit: (finding: MineSourceFinding) => void;
 	markSource: (project: string, producer: string, records: number) => void;
 	coverage: (producer: string, location: string, detail?: string) => MineCoverage;
 	command: (argv: string[], cwd: string, deadlineSeconds?: number, outputBytes?: number) => Promise<string | null>;
 	expired: () => boolean; warn: (message: string) => void;
+	reworkTransition?: (project: string, bead: string, from: string, to: string, at: number, citation: string, cause: string, fromTime?: number | null) => void;
 }
 export interface MineProject {
 	name: string; path: string; events: number; session_spans: number; telemetry_sources: string[]; source_records: Record<string, number>;
@@ -69,6 +84,7 @@ export interface MineReport {
 	projects: MineProject[];
 	classes: MineClass[]; coverage: MineCoverage[]; warnings: string[];
 	occurrences: MineOccurrence[];
+	waste_classes: MineWasteClass[];
 	inventory: { producer: string; covers: string; limits: string }[];
 	excluded_inputs: { unconfigured_scratch_events: number; unbound_cli_events: number; evidence: MineEvidence[] };
 	cost_basis: string;
@@ -87,7 +103,7 @@ export function mineFindingEvidence(finding: MineSourceFinding): MineEvidence & 
 }
 export function mineFindingOccurrence(finding: MineSourceFinding): MineOccurrence {
 	return { ...mineFindingEvidence(finding), class_id: finding.class_id, project: finding.project,
-		related_evidence: finding.related_evidence ?? [] };
+		related_evidence: finding.related_evidence ?? [], ...(finding.waste ? { waste: finding.waste } : {}) };
 }
 function mergeReplay(first?: MineReplay, second?: MineReplay): MineReplay | undefined {
 	if (!first) return second;
@@ -103,6 +119,17 @@ function mergeReplay(first?: MineReplay, second?: MineReplay): MineReplay | unde
 	return readMineReplay(merged) ?? undefined;
 }
 export function mergeMineFindings(first: MineSourceFinding, second: MineSourceFinding): MineSourceFinding {
+	if (first.waste?.kind === "rework-rounds" && second.waste?.kind === "rework-rounds") {
+		const spans = [...new Map([...(first.waste.rework_spans ?? []), ...(second.waste.rework_spans ?? [])].map(span => [span.id, span])).values()];
+		const minutes = spans.some(span => span.minutes !== null) ? spans.reduce((sum, span) => sum + (span.minutes ?? 0), 0) : null;
+		const causes = spans.map(span => span.cause);
+		const latest = second.time_ms > first.time_ms ? second : first;
+		return { ...latest, measured_minutes: minutes,
+			related_evidence: [mineFindingEvidence(first), ...(first.related_evidence ?? []), mineFindingEvidence(second), ...(second.related_evidence ?? [])],
+			waste: { ...first.waste, rework_spans: spans, rework_rounds: spans.length, causes,
+				cost: { rounds: spans.length, minutes, tokens: null }, counterfactual: `${enforcement("waste:rework-rounds").change} Observed causes: ${causes.join("; ")}` },
+			summary: `${first.waste.subject}: rework_rounds=${spans.length}; ${causes.join("; ")}` };
+	}
 	const score = (finding: MineSourceFinding) =>
 		(finding.class_id === "tool-error:unclassified" ? 0 : 1000)
 		+ (finding.project.startsWith("@") ? 0 : 100)
@@ -132,6 +159,7 @@ const INVENTORY: MineReport["inventory"] = [
 	{ producer: "bead history / REWORK", covers: "CC bead transitions (closed-to-open and rework), plus dated REWORK comments in the existing JSONL export. One read-only br search '-' census per tracker confirms canonical hyphenated ids; local literal issue/comment matches supply up to three existing-bead candidates per class.", limits: "Text matches are candidates, not proof the bead covers the defect. Snapshot diffs are observations, not complete audit history; missing exports/searches are reported. Comments and transitions on the same bead/day coalesce." },
 	{ producer: "primary OMP transcripts", covers: "Native project sessions across every profile, including pre-CC October tool failures, refusal messages, timeouts and heuristic user corrections; physical citations and measured endpoints when present.", limits: "Never filtered by mtime. Only observations sharing an original call/event ID coalesce across sources; unmatched CC incidents remain. Old projections without that identity cannot prove overlap. Heuristic corrections remain labeled; missing/unmapped/oversize records remain explicit." },
 	{ producer: "primary tracker / git / repo hook history", covers: "Native .br_history transitions and REWORK witnesses, dated git Revert/Supersedes commits, and timestamped repo gitdir hook/gate logs.", limits: "Snapshot transitions are observations, not complete audit receipts. Read-only snapshots only: no tracker SQLite writes or ingest. Shared/copied tracker origins and same-bead/day events coalesce." },
+	{ producer: "waste episodes", covers: "Transcript git-commit refusals joined to a retained landing (including async completions); completed rework-to-in_review rounds; delivered corrections to named task briefs; mail-wake REWORK/CORRECTION subjects joined by explicit brief/thread or bead and agent; optional OMP_KIT_OWNER_CORRECTIONS_PATH decision JSONL; completed wait spans.", limits: "Commit recognition and correction wording are heuristics, not shell execution or causal proof. attempts counts refusals, excluding the final successful attempt. Missing landing/DONE, durations, causes, usage or project binding remain unknown. Session usage tokens and elapsed retry/rework intervals are recorded work proxies, not exclusive spend; diagnostics and episodes overlap. Snapshot updated_at is only a transition-time proxy. No extra incident is invented from a quoted assistant message." },
 	{ producer: "scratch mine", covers: "Existing scratch-reap-log flags, owed scratch and expired holds.", limits: "scratch mine itself is a current ownership census, not historical incident mining; it is not invoked and no flag is appended." },
 	{ producer: "flywheel", covers: "Existing hook block/audit/timeout JSONL under the flywheel state root; repeated-ritual skill remains the lesson authoring consumer.", limits: "No skill pipeline, agent dispatch or ledger mutation is triggered." },
 	{ producer: "cass", covers: "Searchable transcript context for deeper investigation of the cited tool spans.", limits: "Not reindexed or queried by default: search hits repeat CC sessions and are not independently countable incidents. Raw transcript-only causes before CC retention remain a coverage gap." },
@@ -176,7 +204,27 @@ function openMineDatabase(path: string): Database {
 	catch (error) { database.close(); throw error; }
 	return database;
 }
+/** Rank prevention opportunities, not just failing calls. Episodes and diagnostics overlap; never sum this table as fleet spend. */
+export function rankMineWaste(report: MineReport): void {
+	report.waste_classes = report.classes.map(entry => {
+		const episodes = report.occurrences.filter(row => row.project === entry.project && row.class_id === entry.id && row.waste);
+		const sum = (field: "minutes" | "tokens"): number | null => {
+			const values = episodes.map(row => row.waste!.cost[field]);
+			return values.some(value => value !== null) ? values.reduce<number>((total, value) => total + (value ?? 0), 0) : null;
+		};
+		return { id: entry.id, project: entry.project, count: entry.count,
+			cost: { rounds: episodes.length ? episodes.reduce((total, row) => total + row.waste!.cost.rounds, 0) : entry.count,
+				minutes: episodes.length ? sum("minutes") : entry.estimated_minutes_lost, tokens: sum("tokens") },
+			counterfactual: episodes[0]?.waste?.counterfactual ?? entry.cheapest_enforcement.change, evidence: entry.evidence };
+	}).sort((a, b) => (b.cost.minutes ?? 0) - (a.cost.minutes ?? 0) || (b.cost.tokens ?? 0) - (a.cost.tokens ?? 0)
+		|| b.cost.rounds - a.cost.rounds || compare(a.project, b.project) || compare(a.id, b.id));
+}
 export function enforcement(id: string): MineClass["cheapest_enforcement"] {
+	if (id === "waste:commit-retries") return { kind: "preflight check", change: "Run the installed commit-preflight members on the exact owned paths before the first commit; put every retained refusal requirement in the build brief, without weakening the commit gate." };
+	if (id === "waste:rework-rounds") return { kind: "skill line", change: "Put the cited failed acceptance witness, its expected result, and repository gate requirements in the original bead and agent brief before implementation." };
+	if (id === "waste:brief-corrections") return { kind: "skill line", change: "Resolve the cited scope and acceptance corrections in the original agent brief, including explicit forbidden edits and the exact producer-to-consumer verification." };
+	if (id === "waste:owner-correction") return { kind: "skill line", change: "Carry the owner's cited correction into the original role contract and dispatch brief before acting; verify that requirement instead of rediscovering it through revision." };
+	if (id === "waste:idle-wait") return { kind: "skill line", change: "Dispatch independent ready work before the cited wait; use completion notifications rather than occupying a seat with an idle polling round." };
 	if (id.startsWith("commit-refusal:")) return { kind: "preflight check", change: `Expose ${id.slice(15)} in omp-kit preflight before the commit attempt; retain the commit gate as authority.` };
 	if (id.startsWith("release-fail")) return { kind: "code fix", change: "Fix the failing suite/file named by the verdict evidence; do not weaken the release gate or regenerate a passing verdict." };
 	if (id === "reopened-bead" || id === "rework") return { kind: "gate", change: "Require non-author replay of the original acceptance on the exact published revision before close; include this bead's failed witness." };
@@ -213,7 +261,7 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	const state = join(env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
 	const cc = env.CC_STATE ?? join(state, "cc");
 	const config = env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "omp-kit", "fleet-watch.json");
-	const report: MineReport = { schema_version: "omp-kit.mine.v1", since: options.since, until: options.until, status: "QUIET", projects: [], classes: [], occurrences: [], coverage: [], warnings: [], inventory: INVENTORY,
+	const report: MineReport = { schema_version: "omp-kit.mine.v1", since: options.since, until: options.until, status: "QUIET", projects: [], classes: [], occurrences: [], waste_classes: [], coverage: [], warnings: [], inventory: INVENTORY,
 		excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] },
 		cost_basis: "Ranking: available minute estimates descending (unknown ranks at zero, not claimed zero harm), count descending, project/class lexical. Explicit cost_min or failed-tool/verdict wall time is used when recorded; unmeasured event proxies: commit refusal 2m, guard friction 1m, release FAIL 15m, REWORK/blocked/git correction 5m, reopen 10m, scratch 1m, timeout 1m. Primary transcript records without measured endpoints have unknown minutes, not invented loss. Successful slow calls count only excess over 60s. Recorded spans are summed work-time proxies, not exclusive human time or causal proof. Same-bead/day REWORK/reopen events coalesce across histories. First 5 citations per class in the human-readable sample; JSON occurrences contains every counted event with a stable event_id (retained producer id, otherwise SHA-256 of the source identity) and retained replay context. Join reports on event_id, not mutable class/project/citation keys. UTC [since,until)." };
 	const warn = (message: string) => { if (!report.warnings.includes(message)) report.warnings.push(message); };
@@ -227,6 +275,10 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	const actions = new Map<string, { surface: string; repo: string | null }>();
 	const pendingFindings = new Map<string, MineSourceFinding>();
 	const start = performance.now(); let rows = 0, files = 0, bytes = 0, searches = 0;
+	const reworkTransitions: { project: string; bead: string; from: string; to: string; at: number; citation: string; cause: string; fromTime?: number | null }[] = [];
+	function reworkTransition(project: string, bead: string, from: string, to: string, at: number, citation: string, cause: string, fromTime?: number | null): void {
+		reworkTransitions.push({ project, bead, from, to, at, citation, cause: (captureMineReplay({ message: cause }).message ?? "Cause not recorded").slice(0, 400), fromTime });
+	}
 	const fileLimitBytes = options.fileIndex ? byteLimit : MAX_FILE_BYTES;
 	const expired = () => performance.now() - start >= DEADLINE_MS;
 	function addProject(path: string, name?: string): string | null {
@@ -265,14 +317,14 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 		const bead = text(row.bead) ?? text(row.target);
 		return bead && beads.has(bead) ? beads.get(bead)! : "@unattributed";
 	}
-	function emit(id: string, project: string, t: number, producer: string, citation: string, summary: string, measured: number | null, proxy: number, identity: string, extra?: Pick<MineSourceFinding, "event_id" | "replay" | "related_evidence">) {
+	function emit(id: string, project: string, t: number, producer: string, citation: string, summary: string, measured: number | null, proxy: number, identity: string, extra?: Pick<MineSourceFinding, "event_id" | "replay" | "related_evidence" | "waste">) {
 		if (t < since || t >= until) return;
 		const replay = extra?.replay ?? captureMineReplay({});
 		const finding: MineSourceFinding = { class_id: id, project, time_ms: t,
 			producer: producer === "CC observations" ? "CC projections" : producer === "CC observations:spool" ? "CC spool" : producer,
 			citation, summary: (captureMineReplay({ message: summary }).message ?? "[Unavailable diagnostic]").slice(0, 400),
 			measured_minutes: measured, proxy_minutes: proxy, identity,
-			...(extra?.event_id ? { event_id: extra.event_id } : {}), ...(extra?.related_evidence ? { related_evidence: extra.related_evidence } : {}), replay };
+			...(extra?.event_id ? { event_id: extra.event_id } : {}), ...(extra?.related_evidence ? { related_evidence: extra.related_evidence } : {}), ...(extra?.waste ? { waste: extra.waste } : {}), replay };
 		const key = mineFindingKey(finding), previous = pendingFindings.get(key);
 		pendingFindings.set(key, previous ? mergeMineFindings(previous, finding) : finding);
 	}
@@ -349,6 +401,7 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 		if (type === "bead.status" || producer === "bead-transitions") {
 			const to = text(data.to_status) ?? text(data.status), from = text(data.from_status);
 			const bead = text(row.bead) ?? text(data.bead) ?? "unknown";
+			reworkTransition(project, bead, from ?? "", to ?? "", t, citation, text(data.cause) ?? text(data.reason) ?? text(data.detail) ?? "Cause not recorded");
 			if (to === "rework") emit("rework", project, t, producer, citation, `REWORK ${code(bead)}`, null, 5, `rework:${project}:${bead}:${new Date(t).toISOString().slice(0, 10)}`);
 			else if (from === "closed" && to && to !== "closed" && to !== "tombstone") emit("reopened-bead", project, t, producer, citation, `closed -> ${code(to)} ${code(bead)}`, null, 10, `reopen:${project}:${bead}:${new Date(t).toISOString().slice(0, 10)}`);
 			return;
@@ -578,7 +631,9 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	const sourceContext: MineSourceContext = {
 		home, projects: [...projects.values()].filter(p => options.census || options.all || selectedProjects.has(p.path)), since_ms: since, until_ms: until,
 		sources: options.sources, targetProject, skipFile: options.fileIndex ? path => options.fileIndex!.canSkip(path, since, until) : undefined,
-		readLines: lines, command, expired, warn, coverage,
+		readLines: lines, command, expired, warn, coverage, reworkTransition,
+		ownerCorrectionsPath: env.OMP_KIT_OWNER_CORRECTIONS_PATH, state,
+		sessionRoots: env.OMP_KIT_MINE_SESSION_ROOTS?.split(delimiter).filter(Boolean),
 		emit: f => emit(f.class_id, f.project, f.time_ms, f.producer, f.citation, f.summary, f.measured_minutes, f.proxy_minutes, f.identity, f),
 		markSource: (project, producer, records) => {
 			const p = projects.get(project); if (!p) return;
@@ -629,6 +684,25 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 		}
 	}
 	if (wanted("transcripts")) await mineTranscripts(sourceContext);
+	const reworkOpen = new Map<string, { at: number; cause: string; citation: string }>(), reworkSeen = new Set<string>();
+	for (const transition of reworkTransitions.sort((a, b) => a.at - b.at || compare(a.citation, b.citation))) {
+		const { project, bead, from, to, at, citation, cause } = transition, key = `${project}:${bead}`;
+		const dedup = `${key}:${from}:${to}:${at}`;
+		if (reworkSeen.has(dedup)) continue;
+		reworkSeen.add(dedup);
+		if (to === "rework") reworkOpen.set(key, { at, cause, citation });
+		else if (from === "rework" && to === "in_review") {
+			const opened = reworkOpen.get(key), start = opened?.at ?? transition.fromTime;
+			const minutes = start !== null && start !== undefined && start <= at ? (at - start) / 60_000 : null;
+			const recordedCause = opened?.cause ?? cause, id = `rework-round:${key}:${at}`;
+			emit("waste:rework-rounds", project, at, "bead history snapshots", citation, `${bead}: rework_rounds=1; ${recordedCause}`, minutes, 0, `waste-rework:${key}`,
+				{ waste: { kind: "rework-rounds", subject: bead, rework_rounds: 1, rework_spans: [{ id, minutes, cause: recordedCause }],
+					causes: [recordedCause], cost: { rounds: 1, minutes, tokens: null },
+					counterfactual: `${enforcement("waste:rework-rounds").change} Observed cause: ${recordedCause}` },
+					related_evidence: opened ? [{ citation: opened.citation, timestamp: new Date(opened.at).toISOString(), producer: "bead history snapshots", summary: recordedCause }] : [] });
+			reworkOpen.delete(key);
+		}
+	}
 	for (const finding of pendingFindings.values()) aggregate(finding);
 	report.projects = [...projects.values()].filter(p => options.all || selectedProjects.has(p.path)).sort((a, b) => compare(a.path, b.path));
 	for (const p of report.projects) p.telemetry_sources.sort(compare);
@@ -659,12 +733,19 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	if (report.coverage.some(c => c.status === "PARTIAL") || report.warnings.length) report.status = "PARTIAL";
 	else report.status = report.classes.length ? "FINDINGS" : "QUIET";
 	report.warnings.sort(compare);
+	rankMineWaste(report);
 	return report;
 }
 
 function markdown(value: string): string { return value.replaceAll("\\", "\\\\").replaceAll("|", "\\|").replace(/[\r\n]/g, " ").replaceAll("`", "'"); }
 export function renderMine(report: MineReport): string {
 	const lines = [`# Mining ${report.since} to ${report.until} (UTC, exclusive)`, "", `Status: **${report.status}**. ${report.projects.length} projects; ${report.classes.reduce((sum, c) => sum + c.count, 0)} observed incidents in ${report.classes.length} classes.`, "", report.cost_basis, "", "| Rank | Project | Class | Count | Recorded min | Ranked estimate min | Existing bead | Cheapest enforcement |", "| --- | --- | --- | ---: | ---: | ---: | --- | --- |"];
+	lines.splice(6, 0, "## Top 10 waste classes by cost", "",
+		"Elapsed/recorded minutes rank first, recorded tokens next, then revision rounds; unknown is not zero. Episode intervals and individual diagnostic calls can overlap: do not add their costs together. Counterfactuals are proposed prevention, not proven causal effects.",
+		"| Rank | Project | Waste class | Rounds | Minutes | Tokens | Counterfactual prevention |",
+		"| --- | --- | --- | ---: | ---: | ---: | --- |",
+		...report.waste_classes.slice(0, 10).map((entry, index) => `| ${index + 1} | ${markdown(entry.project)} | ${markdown(entry.id)} | ${entry.cost.rounds} | ${entry.cost.minutes ?? "unknown"} | ${entry.cost.tokens ?? "unknown"} | ${markdown(entry.counterfactual)} |`),
+		"", "## Diagnostic incident ranking", "");
 	for (const [index, c] of report.classes.entries()) lines.push(`| ${index + 1} | ${markdown(c.project)} | ${c.id} | ${c.count} | ${c.measured_minutes_lost ?? "unknown"} | ${c.estimated_minutes_lost ?? "unknown"} | ${c.existing_beads.map(b => markdown(b.id)).join(", ") || (c.bead_search === "NONE" ? "none" : "UNAVAILABLE")} | ${c.cheapest_enforcement.kind}: ${markdown(c.cheapest_enforcement.change)} |`);
 	if (!report.classes.length) lines.push("", "No matching events found in readable inputs; missing/partial coverage is not proof that the month was quiet.");
 	for (const c of report.classes) {

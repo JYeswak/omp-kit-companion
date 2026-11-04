@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, symlinkSync, utimesSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { runMine, scanMine, renderMine, type MineOptions } from "../../src/mine.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
@@ -382,4 +382,207 @@ describe("mine: observed incidents, not transcript mentions", () => {
 			await expect(runMine({ since: "2026-10-01", until: "2026-11-01", all: true, ...patch })).rejects.toThrow();
 		}
 	});
+});
+
+function nativeMessage(role: string, content: unknown, time: string, extra: object = {}) {
+	return { type: "message", timestamp: time, message: { role, content, ...extra } };
+}
+function nativeCall(id: string, command: string, time: string, tokens?: number, title?: string) {
+	return nativeMessage("assistant", [{ type: "toolCall", id, name: "bash", arguments: { command, ...(title ? { title } : {}) } }], time,
+		tokens === undefined ? {} : { usage: { totalTokens: tokens } });
+}
+function nativeResult(id: string, body: string, time: string, failed = false) {
+	return nativeMessage("toolResult", [{ type: "text", text: body }], time, { toolCallId: id, toolName: "bash", isError: failed });
+}
+function nativePath(f: { home: string }, name: string) {
+	return join(f.home, ".omp", "profiles", "default", "agent", "sessions", "-projects-alpha", `${name}.jsonl`);
+}
+
+test("WASTEMINE1 three refused commits then landing is one episode with all reasons and recorded cost", async () => {
+	const f = fixture(false), command = 'git commit -m "repair original acceptance"', source = nativePath(f, "retry");
+	const rows: unknown[] = [{ type: "session", id: "retry", cwd: f.alpha }];
+	const reasons = ["MEMBER_REFUSED: first missing import", "MEMBER_REFUSED: second wrong owner", "MEMBER_REFUSED: third stale witness"];
+	for (let index = 0; index < 4; index++) {
+		rows.push(nativeCall(`commit-${index}`, command, `2026-10-15T12:0${index * 2}:00Z`, 100, index === 2 ? "Retry repair" : "Commit repair"));
+		rows.push(nativeResult(`commit-${index}`, index < 3 ? `${"M unrelated/status/path.ts\n".repeat(40)}${reasons[index]}` : "[main abcdef1234] repair original acceptance",
+			`2026-10-15T12:0${index * 2 + 1}:00Z`, index < 3));
+	}
+	put(source, jsonl(rows));
+	const before = snapshot(f.home), report = await scanMine({ ...f.options, sources: ["transcripts"], lookupBeads: false });
+	expect(snapshot(f.home)).toBe(before);
+	const episodes = report.occurrences.filter(row => row.waste?.kind === "commit-retries");
+	expect(episodes).toHaveLength(1);
+	expect(episodes[0]?.waste?.attempts).toBe(3);
+	expect(episodes[0]?.waste?.causes).toEqual(reasons);
+	expect(episodes[0]?.waste?.cost).toEqual({ rounds: 3, minutes: 7, tokens: 400 });
+	expect(episodes[0]?.related_evidence).toHaveLength(3);
+	expect(episodes[0]?.waste?.counterfactual).toContain("first missing import");
+	expect(report.waste_classes[0]?.id).toBe("waste:commit-retries");
+	expect(renderMine(report)).toContain("Top 10 waste classes by cost");
+});
+
+test("WASTEMINE1 async completion joins original commit, spans midnight, and does not count a successful quotation", async () => {
+	const f = fixture(false), source = nativePath(f, "async-retry"), command = 'git commit -m "async repair"';
+	put(source, jsonl([
+		{ type: "session", id: "async-retry", cwd: f.alpha },
+		nativeCall("async-1", command, "2026-10-14T23:58:00Z"),
+		nativeResult("async-1", "Backgrounded as bg_7", "2026-10-14T23:58:01Z"),
+		{ type: "custom_message", customType: "async-result", timestamp: "2026-10-14T23:59:00Z",
+			content: "Background job bg_7 has completed\nMEMBER_REFUSED: missing acceptance witness" },
+		nativeCall("async-2", command, "2026-10-15T00:01:00Z"),
+		nativeResult("async-2", "[main abcdef7654] async repair\nOld diagnostic REFUSED quoted in commit text", "2026-10-15T00:02:00Z"),
+		nativeCall("unrelated-read", "git log --oneline", "2026-10-15T00:03:00Z"),
+		nativeResult("unrelated-read", "[main abcdef7654] search REFUSED", "2026-10-15T00:04:00Z"),
+	]));
+	const options = { ...f.options, since: "2026-10-15", until: "2026-10-16", sources: ["transcripts"] as const, lookupBeads: false };
+	const report = await scanMine(options), episodes = report.occurrences.filter(row => row.waste);
+	expect(episodes).toHaveLength(1);
+	expect(episodes[0]?.waste?.attempts).toBe(1);
+	expect(episodes[0]?.waste?.cost).toEqual({ rounds: 1, minutes: 4, tokens: null });
+	expect(episodes[0]?.related_evidence[0]?.citation).toBe(`${source}:4`);
+});
+
+test("WASTEMINE1 native bead rework to review twice preserves two causes, not same-day coalescing", async () => {
+	const f = fixture(false), bead = "alpha-repair", history = join(f.alpha, ".beads", ".br_history");
+	const states = [
+		{ status: "in_review", updated_at: "2026-10-15T10:00:00Z" },
+		{ status: "rework", updated_at: "2026-10-15T10:01:00Z", reason: "wrong producer fixture" },
+		{ status: "in_review", updated_at: "2026-10-15T10:11:00Z" },
+		{ status: "rework", updated_at: "2026-10-15T10:12:00Z", reason: "missing mobile acceptance" },
+		{ status: "in_review", updated_at: "2026-10-15T10:32:00Z" },
+	];
+	for (const [index, state] of states.entries()) put(join(history, `issues.20261015_10000${index}_000000000.jsonl`), jsonl([{ id: bead, ...state }]));
+	put(join(f.alpha, ".beads", "issues.jsonl"), jsonl([{ id: bead, ...states.at(-1) }]));
+	const before = snapshot(f.home), report = await scanMine({ ...f.options, sources: ["tracker"], lookupBeads: false });
+	expect(snapshot(f.home)).toBe(before);
+	const episodes = report.occurrences.filter(row => row.waste?.kind === "rework-rounds");
+	expect(episodes).toHaveLength(1);
+	expect(episodes[0]?.waste?.rework_rounds).toBe(2);
+	expect(episodes[0]?.waste?.causes).toEqual(["wrong producer fixture", "missing mobile acceptance"]);
+	expect(episodes[0]?.waste?.cost).toEqual({ rounds: 2, minutes: 30, tokens: null });
+	expect(episodes[0]?.waste?.counterfactual).toContain("missing mobile acceptance");
+});
+
+test("WASTEMINE1 normalized transitions deduplicate archive/live but preserve repeated rounds", async () => {
+	const f = fixture(false), rows = [
+		{ ...envelope("r1", f.alpha, "bead.status", { from_status: "in_review", to_status: "rework", cause: "wrong scope" }, "2026-10-15T12:00:00Z"), bead: "alpha-1" },
+		{ ...envelope("v1", f.alpha, "bead.status", { from_status: "rework", to_status: "in_review" }, "2026-10-15T12:10:00Z"), bead: "alpha-1" },
+		{ ...envelope("r2", f.alpha, "bead.status", { from_status: "in_review", to_status: "rework", cause: "missing real service" }, "2026-10-15T12:11:00Z"), bead: "alpha-1" },
+		{ ...envelope("v2", f.alpha, "bead.status", { from_status: "rework", to_status: "in_review" }, "2026-10-15T12:31:00Z"), bead: "alpha-1" },
+	];
+	put(join(f.cc, "spool", "session", "2026-10-15.jsonl"), jsonl(rows));
+	put(join(f.cc, "spool-archive", "session", "2026-10-15.jsonl.gz"), gzipSync(jsonl(rows)));
+	const report = await scanMine({ ...f.options, sources: ["cc"], lookupBeads: false });
+	expect(report.occurrences.find(row => row.waste)?.waste?.rework_rounds).toBe(2);
+	expect(report.occurrences.find(row => row.waste)?.waste?.cost.minutes).toBe(30);
+});
+
+test("WASTEMINE1 corrections join an agent brief until DONE; wake retries and owner decisions do not inflate rounds", async () => {
+	const f = fixture(false), mail = join(f.home, ".local", "state", "omp-kit", "mail-wake.jsonl");
+	const correction = { ts: "2026-10-15T12:00:00Z", message_id: 1, project_key: f.alpha, sender: "Lead", recipient: "Worker", brief_id: "brief-1", subject: "CORRECTION alpha-1 do not edit exports" };
+	put(mail, jsonl([correction, { ...correction, status: "WOKEN_INPROCESS" },
+		{ ...correction, message_id: 2, ts: "2026-10-15T12:01:00Z", subject: "REWORK alpha-1 use fixtureDeadlineS" },
+		{ ...correction, message_id: 3, ts: "2026-10-15T12:05:00Z", sender: "Worker", recipient: "Lead", subject: "DONE alpha-1" },
+		{ ...correction, message_id: 4, subject: "PROGRESS alpha-1 documents explain REWORK" },
+	]));
+	const ownerCorrections = join(f.home, "owner-corrections.jsonl");
+	put(ownerCorrections, jsonl([
+		{ id: "J-correction", at: "2026-10-15T12:02:00Z", date: "2026-10-14", said: "Why did you halt for work you own?", rule: "Analyze and land owned work instead of waiting." },
+		{ id: "J-boundary", at: "2026-11-01T00:00:00Z", date: "2026-10-15", said: "Why wait?", rule: "Act." },
+		{ id: "J-decision", at: "2026-10-15T12:03:00Z", said: "Thank you", rule: "Keep going." },
+	]));
+	const report = await scanMine({ ...f.options, env: { ...f.options.env, OMP_KIT_OWNER_CORRECTIONS_PATH: ownerCorrections }, sources: ["transcripts"], lookupBeads: false });
+	const brief = report.occurrences.find(row => row.waste?.kind === "brief-corrections");
+	expect(brief?.waste?.correction_messages).toBe(2);
+	expect(brief?.waste?.cost).toEqual({ rounds: 2, minutes: 5, tokens: null });
+	expect(brief?.waste?.counterfactual).toContain("do not edit exports");
+	const owners = report.occurrences.filter(row => row.waste?.kind === "owner-correction");
+	expect(owners).toHaveLength(1);
+	expect(owners[0]?.project).toBe("@unattributed");
+	expect(owners[0]?.waste?.counterfactual).toBe("Analyze and land owned work instead of waiting.");
+	expect(owners[0]?.waste?.cost).toEqual({ rounds: 1, minutes: null, tokens: null });
+});
+
+test("WASTEMINE1 bounded long command near-miss remains quiet in the shipping Bun matcher", async () => {
+	const f = fixture(false), start = performance.now();
+	put(nativePath(f, "long-near-miss"), jsonl([
+		{ type: "session", id: "long-near-miss", cwd: f.alpha },
+		nativeCall("near-miss", `git ${" ".repeat(65_536)}commix`, "2026-10-15T12:00:00Z"),
+		nativeResult("near-miss", `[${"[".repeat(65_536)} abcdefg]`, "2026-10-15T12:01:00Z"),
+	]));
+	const report = await scanMine({ ...f.options, sources: ["transcripts"], lookupBeads: false });
+	expect(report.occurrences.filter(row => row.waste)).toEqual([]);
+	expect(performance.now() - start).toBeLessThan(fixtureDeadlineS(10) * 1000);
+});
+
+test("WASTEMINE1 delivered task-brief correction is counted but a failed send and quoted user text are not", async () => {
+	const f = fixture(false), source = nativePath(f, "direct-brief");
+	put(source, jsonl([
+		{ type: "session", id: "direct-brief", cwd: f.alpha },
+		nativeMessage("assistant", [{ type: "toolCall", id: "dispatch-1", name: "task",
+			arguments: { tasks: [{ name: "Builder", task: "Repair the original requirement" }] } }], "2026-10-15T12:00:00Z"),
+		nativeMessage("assistant", [{ type: "toolCall", id: "correction-1", name: "write",
+			arguments: { path: "agent://Builder", content: "Correction: do not edit exports; consume the native tracker." } }], "2026-10-15T12:01:00Z"),
+		nativeMessage("toolResult", [{ type: "text", text: "Delivered to Builder." }], "2026-10-15T12:01:01Z", { toolCallId: "correction-1", toolName: "write" }),
+		nativeMessage("assistant", [{ type: "toolCall", id: "correction-failed", name: "write",
+			arguments: { path: "agent://Builder", content: "REWORK wrong fixture" } }], "2026-10-15T12:02:00Z"),
+		nativeMessage("toolResult", [{ type: "text", text: "Failed: unknown agent" }], "2026-10-15T12:02:01Z", { toolCallId: "correction-failed", toolName: "write", isError: true }),
+		nativeMessage("user", "The documentation explains correction messages.", "2026-10-15T12:03:00Z"),
+	]));
+	put(nativePath(f, "copied-direct-brief"), readFileSync(source, "utf8").replace('"id":"direct-brief"', '"id":"copied-direct-brief"'));
+	const report = await scanMine({ ...f.options, sources: ["transcripts"], lookupBeads: false });
+	const episodes = report.occurrences.filter(row => row.waste?.kind === "brief-corrections");
+	expect(episodes).toHaveLength(1);
+	expect(episodes[0]?.waste?.subject).toBe("dispatch-1:Builder");
+	expect(episodes[0]?.waste?.correction_messages).toBe(1);
+	expect(episodes[0]?.waste?.cost).toEqual({ rounds: 1, minutes: null, tokens: null });
+	expect(episodes[0]?.summary).toContain("DONE endpoint not retained");
+});
+
+test("WASTEMINE1 resumable UTC cells retain rework rounds across days and owner corrections without invented project scope", async () => {
+	const f = fixture(false), bead = "alpha-crossday", ownerCorrections = join(f.home, "owner-corrections.jsonl");
+	await quietGitProject(f.alpha); await quietGitProject(f.beta);
+	const states = [
+		{ status: "in_review", updated_at: "2026-10-15T10:00:00Z" },
+		{ status: "rework", updated_at: "2026-10-15T10:01:00Z", reason: "first witness" },
+		{ status: "in_review", updated_at: "2026-10-15T10:11:00Z" },
+		{ status: "rework", updated_at: "2026-10-16T10:01:00Z", reason: "second witness" },
+		{ status: "in_review", updated_at: "2026-10-16T10:21:00Z" },
+	];
+	for (const [index, state] of states.entries()) put(join(f.alpha, ".beads", ".br_history", `issues.${index < 3 ? "20261015" : "20261016"}_10000${index}_000000000.jsonl`), jsonl([{ id: bead, ...state }]));
+	put(join(f.alpha, ".beads", "issues.jsonl"), jsonl([{ id: bead, ...states.at(-1) }]));
+	put(ownerCorrections, jsonl([{ id: "J-1", at: "2026-10-15T12:00:00Z", said: "Why wait?", rule: "Dispatch ready work." }]));
+	const options = { ...f.options, since: "2026-10-15", until: "2026-10-17", resumeDir: join(f.home, "resume"),
+		env: { ...f.options.env, OMP_KIT_OWNER_CORRECTIONS_PATH: ownerCorrections } };
+	const report = await runMine(options), again = await runMine(options);
+	const rework = report.occurrences.filter(row => row.waste?.kind === "rework-rounds");
+	expect(rework).toHaveLength(1);
+	expect(rework[0]?.waste?.rework_rounds).toBe(2);
+	expect(rework[0]?.waste?.cost.minutes).toBe(30);
+	expect(rework[0]?.waste?.causes).toEqual(["first witness", "second witness"]);
+	expect(report.occurrences.filter(row => row.waste?.kind === "owner-correction")).toHaveLength(1);
+	expect(again.occurrences).toEqual(report.occurrences);
+	expect(again.waste_classes).toEqual(report.waste_classes);
+});
+
+test("WASTEMINE1 explicitly selected coordinator sessions retain unknown repository ownership and stable deduplication", async () => {
+	const f = fixture(false), source = join(f.home, "coordinator.jsonl"), command = 'git commit -m "coordinator repair"';
+	put(source, jsonl([
+		{ type: "session", id: "coordinator", cwd: join(f.home, "workspace") },
+		nativeCall("coordinator-refused", command, "2026-10-15T12:00:00Z"),
+		nativeResult("coordinator-refused", "MEMBER_REFUSED: missing original witness", "2026-10-15T12:01:00Z", true),
+		nativeCall("coordinator-landed", command, "2026-10-15T12:02:00Z"),
+		nativeResult("coordinator-landed", "[main 1234abcdef] coordinator repair", "2026-10-15T12:03:00Z"),
+	]));
+	const copy = join(f.home, "copied-coordinator.jsonl");
+	put(copy, readFileSync(source, "utf8").replace('"id":"coordinator"', '"id":"copied-coordinator"'));
+	const report = await scanMine({ ...f.options, env: { ...f.options.env, OMP_KIT_MINE_SESSION_ROOTS: [source, copy, source].join(delimiter) }, sources: ["transcripts"], lookupBeads: false });
+	const episodes = report.occurrences.filter(row => row.waste?.kind === "commit-retries");
+	expect(episodes).toHaveLength(1);
+	expect(episodes[0]?.project).toBe("@unattributed");
+	expect(episodes[0]?.waste?.attempts).toBe(1);
+	expect(episodes[0]?.waste?.cost.minutes).toBe(3);
+	expect(episodes[0]?.citation).toBe(`${source}:5`);
+	const scoped = await scanMine({ ...f.options, all: false, project: f.alpha, env: { ...f.options.env, OMP_KIT_MINE_SESSION_ROOTS: source }, sources: ["transcripts"], lookupBeads: false });
+	expect(scoped.occurrences).toEqual([]);
 });

@@ -35,7 +35,7 @@ function observe(cov: MineCoverage, t: number): void {
 	if (!cov.first_timestamp || iso < cov.first_timestamp) cov.first_timestamp = iso;
 	if (!cov.last_timestamp || iso > cov.last_timestamp) cov.last_timestamp = iso;
 }
-type State = { status: string; updated: number | null; citation: string; project: string };
+type State = { status: string; updated: number | null; citation: string; project: string; cause: string };
 
 /** Read native history, reachable git commits and existing gitdir logs. Never opens a live tracker database. */
 export async function mineHistory(ctx: MineSourceContext): Promise<void> {
@@ -101,7 +101,11 @@ export async function mineHistory(ctx: MineSourceContext): Promise<void> {
 				}
 				const status = text(row.status)?.toLowerCase(); if (!status) return;
 				if (next.size >= MAX_ISSUES && !next.has(id)) { overflow ??= citation; return; }
-				next.set(id, { status, updated: time(row.updated_at), citation, project: target });
+				const comments = (Array.isArray(row.comments) ? row.comments : []).map(object).filter((comment): comment is Record<string, unknown> => comment !== null)
+					.filter(comment => /^(?:REWORK\b|(?:VERDICT|Verdict):[ \t]*REWORK\b)/.test((text(comment.text) ?? text(comment.body) ?? "").trimStart()))
+					.sort((a, b) => (time(b.created_at ?? b.timestamp) ?? 0) - (time(a.created_at ?? a.timestamp) ?? 0));
+				const cause = text(row.reason) ?? text(comments[0]?.text) ?? text(comments[0]?.body) ?? "Cause not recorded";
+				next.set(id, { status, updated: time(row.updated_at), citation, project: target, cause });
 			});
 			cov.rows += read.rows;
 			if (overflow) partial(cov, `${overflow}: Issue bound ${MAX_ISSUES} reached.`);
@@ -111,6 +115,8 @@ export async function mineHistory(ctx: MineSourceContext): Promise<void> {
 				if (old && old.status !== state.status) {
 					if (t === null || (old.updated !== null && t <= old.updated)) partial(cov, `${state.citation}: Changed status without increasing dated updated_at remains unknown.`);
 					else {
+						ctx.reworkTransition?.(state.project, id, old.status, state.status, t, state.citation,
+							state.status === "rework" ? state.cause : old.cause, old.updated);
 						const kind = state.status === "rework" ? "rework" : old.status === "closed" && state.status !== "tombstone" ? "reopened-bead" : state.status === "blocked" ? "bead-blocked" : null;
 						if (kind) {
 							const identity = `${kind === "rework" ? "rework" : kind === "reopened-bead" ? "reopen" : "blocked"}:${state.project}:${id}:${new Date(t).toISOString().slice(0, 10)}`;

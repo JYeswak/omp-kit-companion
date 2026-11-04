@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { run } from "./kitlib/run.ts";
 import { MineLedger, MINE_SOURCES, type MineCell, type MineCellStatus, type MineSource } from "./mine-ledger.ts";
-import { enforcement, mergeMineFindings, mineFindingEvidence, mineFindingKey, mineFindingOccurrence, scanMine, type MineClass, type MineCoverage, type MineOptions, type MineProject, type MineReport, type MineSourceFinding } from "./mine.ts";
+import { enforcement, mergeMineFindings, mineFindingEvidence, mineFindingKey, mineFindingOccurrence, rankMineWaste, scanMine, type MineClass, type MineCoverage, type MineOptions, type MineProject, type MineReport, type MineSourceFinding } from "./mine.ts";
 
 export interface MineFileIndex {
 	canSkip(path: string, since: number, until: number): boolean;
@@ -153,7 +153,7 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		.filter(entry => entry.isFile() && /(?:block|refus|timeout|audit).*\.jsonl$/.test(entry.name)).map(entry => join(flywheel, entry.name)) : [];
 	for (const target of targets) for (const source of MINE_SOURCES) {
 		const dir = target === "@unattributed" ? null : gitdir(target);
-		const paths = source === "transcripts" ? transcriptRoots : source === "tracker" ? [join(target, ".beads", "issues.jsonl"), join(target, ".beads", ".br_history")]
+		const paths = source === "transcripts" ? [...transcriptRoots, ...(env.OMP_KIT_MINE_SESSION_ROOTS?.split(delimiter).filter(Boolean) ?? []), join(state, "mail-wake.jsonl"), ...(env.OMP_KIT_OWNER_CORRECTIONS_PATH ? [env.OMP_KIT_OWNER_CORRECTIONS_PATH] : [])] : source === "tracker" ? [join(target, ".beads", "issues.jsonl"), join(target, ".beads", ".br_history")]
 			: source === "git" ? dir ? [join(dir, "HEAD"), join(dir, "refs"), join(dir, "packed-refs"), join(dir, "commondir"), join(dir, "shallow")] : [join(target, ".git")]
 			: source === "cc" ? [env.CC_STATE ?? join(state, "cc")]
 			: [join(state, "gate-events.jsonl"), join(state, "gate-events.jsonl.1"), join(state, "scratch-reap-log.jsonl"), join(state, "scratch-reap-log.jsonl.1"), flywheel, ...flywheelLogs, ...(dir ? [join(dir, "omp-kit")] : []), ...(stores.get(target) ?? [])];
@@ -168,7 +168,7 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		const signature = fingerprints.get(JSON.stringify([target, source]))!, previous = old.get(key(target, date, source));
 		if (previous && previous.input_fingerprint === signature && previous.status !== "PARTIAL" && !(source === "cc" && censusFailures.length) && payload(previous.result)) { current.push(previous as MineCell<Payload>); reused++; continue; }
 		const findings: MineSourceFinding[] = [], until = new Date(Date.parse(`${date}T00:00:00Z`) + 86400_000).toISOString().slice(0, 10);
-		const synthetic = target === "@unattributed" && source !== "cc" && source !== "hooks";
+		const synthetic = target === "@unattributed" && source !== "cc" && source !== "hooks" && source !== "transcripts";
 		const report = synthetic ? { ...census, projects: [], classes: [], coverage: [], warnings: [], excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] } }
 			: await scanMine({ ...options, since: date, until, all: target === "@unattributed", project: target === "@unattributed" ? undefined : target,
 				census: census.projects, scopeProject: target, sources: [source], lookupBeads: false, fileIndex: index, verdictOwners,
@@ -247,5 +247,6 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		"Interrupted manifests contain completed receipts only; not-started project/day/source cells are rebuilt from the requested window and refreshed project census on resume.",
 		"NONE-EXISTS means no matching source currently exists in the inventoried stores, not historical quiet. Resume skips unchanged completed cells; changed fingerprints invalidate receipts."])].sort();
 	joined.status = totals.PARTIAL || totals.MISSING ? "PARTIAL" : joined.classes.length ? "FINDINGS" : "QUIET";
+	rankMineWaste(joined);
 	return joined;
 }
