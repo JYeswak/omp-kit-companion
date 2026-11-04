@@ -59,22 +59,27 @@ test.concurrent("HEAVYDEFER1: a stalled sbh observation times out without killin
 	const groups = join(root, "observer-groups");
 	const python = Bun.which("python3");
 	if (!python) throw new Error("group fixture requires the suite's Python interpreter");
+	// The stub must start and record its group before the observer deadline. A fixed 4 s lost that race
+	// once under load (ENOENT at 4002 ms: the freshly written stub's first exec never got to write), so the
+	// deadline comes from the load factor and the stub outlives it threefold, which the timeout must cut short.
+	const deadlineS = Math.ceil(fixtureDeadlineS(4));
 	writeFileSync(join(bin, "sbh"), `#!${python} -S
 import os, time
 pid, parent = os.getpid(), os.getppid()
 with open(${JSON.stringify(groups)}, "w") as output:
     output.write(f"{parent} {os.getpgid(parent)} 0\\n{pid} {os.getpgrp()} {parent}\\n")
-time.sleep(10)
+time.sleep(${deadlineS * 3})
 `, { mode: 0o755 });
 	const started = Date.now();
 	const verdict = await diskVerdict({
-		config: { slots: 1, max_wait_s: 20, disk_observer: "sbh", disk_floor_pct: null, sbh_deadline_s: 4 },
+		config: { slots: 1, max_wait_s: 20, disk_observer: "sbh", disk_floor_pct: null, sbh_deadline_s: deadlineS },
 		cwd: root, sbhBin: join(bin, "sbh"),
 	});
 	expect(verdict).toMatchObject({ kind: "timeout", observer: "sbh" });
 	if (verdict.kind !== "timeout") throw new Error("stalled observer supplied no timeout verdict");
-	expect(verdict.text).toContain("sbh check timed out after 4s");
-	expect(Date.now() - started).toBeLessThan(8_000);
+	expect(verdict.text).toContain(`sbh check timed out after ${deadlineS}s`);
+	// The timeout, not the stub's own 3x-deadline exit, ends the observation.
+	expect(Date.now() - started).toBeLessThan(deadlineS * 2 * 1000);
 	// The timeout must target the observer's new group, never the test runner's.
 	const rows = readFileSync(groups, "utf8").trim().split("\n")
 		.map(line => line.replaceAll("\t", " ").split(" ").filter(Boolean).map(Number));
@@ -84,7 +89,7 @@ time.sleep(10)
 	expect(observer).toBeDefined();
 	expect(observer[1]).toBe(observer[0]);
 	expect(observer[1]).not.toBe(caller[1]);
-}, fixtureDeadlineS(15) * 1000);
+}, fixtureDeadlineS(40) * 1000);
 
 test.concurrent("HEAVYDEFER1 planted: an observer timeout defers with 75, persists its timing, and starts nothing", async () => {
 	const root = fixture();
@@ -140,7 +145,7 @@ test.concurrent("HEAVYCI1 planted: a missing sbh fails fast with 69 on the waiti
 	expect(again.code, again.stderr).toBe(HEAVY_PREREQ_MISSING);
 	expect(observerRefusals(root)).toHaveLength(2);
 	expect(existsSync(marker)).toBe(false);
-}, 40_000);
+}, fixtureDeadlineS(40) * 1000);
 
 test.concurrent("HEAVYCI1 planted: an sbh error answer is a missing prerequisite (69), never a 75 deferral", async () => {
 	const root = fixture();
@@ -160,7 +165,7 @@ test.concurrent("HEAVYCI1 planted: an sbh error answer is a missing prerequisite
 	})]);
 	expectFastRefusal(refusalDecisionMs(rows, finishedAtMs));
 	expect(existsSync(marker)).toBe(false);
-}, 40_000);
+}, fixtureDeadlineS(40) * 1000);
 
 test.concurrent("HEAVYDEFER1 planted mutant: a 69 that waits twenty seconds fails the unchanged fast-refusal guard", async () => {
 	const root = fixture();
@@ -221,7 +226,7 @@ test.concurrent("HEAVYCI1: an observer lost while queued returns 69, removes its
 		label: "lost-observer", phase: "admission", observer: "sbh", kind: "unavailable",
 		reason: expect.stringContaining("sbh check exited 2"),
 	})]);
-}, 40_000);
+}, fixtureDeadlineS(40) * 1000);
 
 test.concurrent("HEAVYDEFER1: a queued observer timeout returns 75, removes its job, and retains refusal evidence", async () => {
 	const root = fixture();
@@ -269,7 +274,7 @@ test.concurrent("HEAVYCI1: a queued job re-observes the disk, so pressure that a
 		label: "late-pressure", phase: "admission", observer: "sbh", kind: "pressure",
 		reason: expect.stringContaining("reports pressure"),
 	})]));
-}, 40_000);
+}, fixtureDeadlineS(40) * 1000);
 
 test.concurrent("HEAVYCI1: admission observes the disk after acquiring the state mutex, not before the lock wait (QuietBadger AM57798)", async () => {
 	const root = fixture();
@@ -334,6 +339,6 @@ test.concurrent("oq1h.1: auto with an erroring sbh fails fast with 69 naming the
 	expect(result.code).toBe(HEAVY_PREREQ_MISSING);
 	expect(result.stderr).toContain("disk_observer");
 	expect(existsSync(marker)).toBe(false);
-}, 40_000);
+}, fixtureDeadlineS(40) * 1000);
 
 afterAll(() => cleanupAllOwnedTmp());
