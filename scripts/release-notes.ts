@@ -659,6 +659,24 @@ function releasedKeys(changelog: Changelog): Set<string> {
 	return keys;
 }
 
+/** Every whole released entry (its bullet plus continuation lines), for catch-up's exact matching. */
+function releasedEntries(changelog: Changelog): Entry[] {
+	const entries: Entry[] = [];
+	let current: Entry | undefined;
+	changelog.lines.forEach((line, index) => {
+		if (index >= changelog.unreleasedStart && index < changelog.unreleasedEnd) { current = undefined; return; }
+		if (line.startsWith("- ")) { current = [line]; entries.push(current); return; }
+		if (current && /^\s+\S/.test(line)) { current.push(line); return; }
+		current = undefined;
+	});
+	return entries;
+}
+
+/** An entry's exact identity: every line, trailing whitespace ignored. A rewritten continuation line is new text. */
+function exactEntryKey(entry: Entry): string {
+	return entry.map(line => line.trimEnd()).join("\n").trim();
+}
+
 function listFragments(root: string): string[] {
 	const dir = join(root, "changelog.d");
 	if (!existsSync(dir)) return [];
@@ -759,9 +777,9 @@ function runPromote(root: string, options: Extract<Options, { mode: "promote" }>
 
 // CHANGELOGCATCHUP1 (ompkit-fp72.120.16.231): a one-time catch-up for releases that were cut without a promote. For each
 // stable tag after --base-tag through --through-tag, in version order, fold that tag's own fragments, read from the tag
-// (cut-time bytes), into its own `## [X.Y.Z] - <tag date, UTC>` section with fold's dedupe: an entry already released by
-// an older section is dropped, so a fragment shipped in vN contributes to vN+1 only the entries it gained (appended or
-// revised) by vN+1's cut. Only git objects are read (the head's CHANGELOG.md and fragments, never the working tree), and
+// (cut-time bytes), into its own `## [X.Y.Z] - <tag date, UTC>` section. An entry whose exact text (every line) an
+// older section already holds is dropped, so a fragment shipped in vN contributes to vN+1 only the entries it gained
+// (appended, or rewritten in any line) by vN+1's cut. Only git objects are read (the head's CHANGELOG.md and fragments, never the working tree), and
 // output goes only to --output: CHANGELOG.md, delete.txt (head fragments whose every entry is now released), keep.txt
 // (head fragments that still hold unreleased entries) and, with --next-version, package.json stating it.
 type CatchUpSection = { version: string; date: string; source: string; body: SectionBody; fragments: number; fresh: number; extended: number; entries: number };
@@ -788,7 +806,10 @@ function runCatchUp(options: Extract<Options, { mode: "catch-up" }>, git: Git, g
 	if (newest !== base) fail(`CHANGELOG.md at ${options.head} must end at ## [${base}] (its newest released section is ${newest ?? "none"}); catch-up never re-promotes a released version`);
 	const unreleased = parseBody(changelog.lines.slice(changelog.unreleasedStart + 1, changelog.unreleasedEnd), "CHANGELOG.md ## [Unreleased]");
 	if (bodyEntries(unreleased).length) fail(`CHANGELOG.md at ${options.head} holds entries under ## [Unreleased]; which release shipped them is unknown, so release or fold them first`);
-	const seen = releasedKeys(changelog);
+	// CHANGELOGCATCHUP1 rework: fold's first-line key called an entry released when only a continuation line was rewritten
+	// after its cut (fp72.120.16.214, 46804c8e7f), so its fragment was deleted with the new text in no section and the
+	// 0.2.90 notes check refused the commit. Catch-up matches whole entries.
+	const seen = new Set(releasedEntries(changelog).map(exactEntryKey));
 
 	const blobs = new Map<string, string>();
 	const read = (oid: string): string => {
@@ -824,8 +845,8 @@ function runCatchUp(options: Extract<Options, { mode: "catch-up" }>, git: Git, g
 			const fragment = parseFragment(`${tag}:${path}`, read(files.get(path)!));
 			let added = 0;
 			for (const entry of fragment.entries) {
-				if (seen.has(entryKey(entry))) continue;
-				seen.add(entryKey(entry));
+				if (seen.has(exactEntryKey(entry))) continue;
+				seen.add(exactEntryKey(entry));
 				const bucket = body.categories.get(fragment.category) ?? [];
 				body.categories.set(fragment.category, bucket);
 				bucket.push(entry);
@@ -853,7 +874,7 @@ function runCatchUp(options: Extract<Options, { mode: "catch-up" }>, git: Git, g
 	for (const [path, oid] of headFragments) {
 		let keys: string[];
 		try {
-			keys = parseFragment(`${options.head}:${path}`, read(oid)).entries.map(entryKey);
+			keys = parseFragment(`${options.head}:${path}`, read(oid)).entries.map(exactEntryKey);
 		} catch (error) {
 			keep.push(`${path}\tunparseable: ${error instanceof Error ? error.message : String(error)}`);
 			continue;

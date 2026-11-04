@@ -123,11 +123,14 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 	stub("gh", "exit 0");
 	stub("git", `echo called >> "${join(work, "git-called")}"; exit 1`);
 	// Stub admission: 75 = heavy refuses under any observer (statfs below the 10 GiB floor); "sbh" = only the sbh
-	// observer reports pressure, so the statfs-observed probe must admit (ompkit-fp72.120.16.155).
+	// observer reports pressure, so the statfs-observed probe must admit (ompkit-fp72.120.16.155). Like `omp-kit heavy`,
+	// the stub answers at once only with --no-wait; without it, it waits for admission (here: never).
 	const attempt = async (admission: 0 | 75 | "sbh") => {
-		stub("omp-kit", admission === 75 ? "echo 'heavy: waiting: disk low: statfs 4 GiB free, floor 10 GiB' >&2; exit 75"
+		stub("omp-kit", `printf '%s\\n' "$*" >> "${join(work, "kit-args")}"
+case " $* " in *" --no-wait "*) ;; *) exec sleep 300 ;; esac
+${admission === 75 ? "echo 'heavy: waiting: disk low: statfs 4 GiB free, floor 10 GiB' >&2; exit 75"
 			: admission === "sbh" ? `[ "$OMP_KIT_DISK_OBSERVER" = statfs ] && exit 0; echo 'heavy: waiting: disk low: sbh check --need 10G reports pressure' >&2; exit 75`
-			: "exit 0");
+			: "exit 0"}`);
 		rmSync(join(work, "git-called"), { force: true });
 		const started = Date.now();
 		const env: Record<string, string> = {};
@@ -143,7 +146,10 @@ test.skipIf(process.platform !== "darwin")("RELFAILFAST1 preflight refuses at on
 		expect(held.err).toContain("heavy work cannot be admitted now");
 		expect(held.err).toContain("disk low");
 		expect(held.gitCalled).toBe(false);
-		expect(held.ms).toBeLessThan(10_000);
+		expect(readFileSync(join(work, "kit-args"), "utf8")).toContain("heavy --no-wait --label release-preflight -- true");
+		// "In seconds": preflight's probe is `bounded 60 omp-kit heavy --no-wait`, so a probe that waited for admission
+		// ends only at that 60 s deadline. The limit is the 10 s floor scaled for load (at most 40 s), always under it.
+		expect(held.ms).toBeLessThan(fixtureDeadlineS(10) * 1_000);
 		// Control: with admission available, preflight passes the probe and reaches its next step (the stubbed fetch).
 		const admitted = await attempt(0);
 		expect(admitted.rc, admitted.err).toBe(4);
@@ -672,13 +678,15 @@ test("CHANGELOGCATCHUP1 catch-up gives each tag its own section, holding exactly
 		fragment("gone.md", "- Shipped in 1.0.1, then deleted.\n");
 		release("1.0.1", "2026-01-02");
 		fragment("a.md", "- A one.\n- A two, appended for 1.0.2.\n");
-		fragment("b.md", "### Fixed\n\n- B one.\n");
+		fragment("b.md", "### Fixed\n\n- B one.\n  - B detail.\n");
 		rmSync(join(repo, "changelog.d/gone.md"));
 		release("1.0.2", "2026-01-03");
 		fragment("c.md", "### Removed\n\n- C one.\n");
 		release("1.0.3", "2026-01-05");
 		// After the last cut: an edit to a shipped fragment and a new fragment are committed; a peer's edit is not.
 		fragment("a.md", "- A one, edited after its cut.\n- A two, appended for 1.0.2.\n");
+		// Planted (fp72.120.16.214, 46804c8e7f): a continuation line of an entry shipped in 1.0.2, rewritten in place.
+		fragment("b.md", "### Fixed\n\n- B one.\n  - B detail, rewritten after the 1.0.3 cut.\n");
 		fragment("later.md", "- Landed after 1.0.3.\n");
 		git(repo, ["add", "-A"]); git(repo, ["commit", "-qm", "later work"]);
 		const peerC = "### Removed\n\n- C one, a peer's uncommitted edit.\n";
@@ -711,6 +719,7 @@ test("CHANGELOGCATCHUP1 catch-up gives each tag its own section, holding exactly
 ### Fixed
 
 - B one.
+  - B detail.
 
 ## [1.0.1] - 2026-01-02
 
@@ -726,13 +735,13 @@ test("CHANGELOGCATCHUP1 catch-up gives each tag its own section, holding exactly
 - Base release.
 `);
 		// Fully released head fragments are listed for deletion; a fragment with an entry edited after its cut, or
-		// added after the last tag, keeps its unreleased entries for the next release.
-		expect(readFileSync(join(out, "delete.txt"), "utf8")).toBe("changelog.d/b.md\nchangelog.d/c.md\n");
-		expect(readFileSync(join(out, "keep.txt"), "utf8")).toBe("changelog.d/a.md\t1 unreleased entry\nchangelog.d/later.md\t1 unreleased entry\n");
+		// added after the last tag, or with a line rewritten after its cut, keeps them for the next release.
+		expect(readFileSync(join(out, "delete.txt"), "utf8")).toBe("changelog.d/c.md\n");
+		expect(readFileSync(join(out, "keep.txt"), "utf8")).toBe("changelog.d/a.md\t1 unreleased entry\nchangelog.d/b.md\t1 unreleased entry\nchangelog.d/later.md\t1 unreleased entry\n");
 		expect(JSON.parse(readFileSync(join(out, "package.json"), "utf8")).version).toBe("1.0.4");
 		expect(stdout).toContain("CATCHUP version=1.0.2 date=2026-01-03");
 		expect(stdout).toContain("fragments=2 new_fragments=1 extended_fragments=1 entries=2");
-		expect(stdout).toContain(`CATCHUP_TOTAL head=${head} versions=3 sections=3 entries=5 folded_fragments=4 folded_absent_at_head=1 delete=2 keep=2 package_version=1.0.3->1.0.4`);
+		expect(stdout).toContain(`CATCHUP_TOTAL head=${head} versions=3 sections=3 entries=5 folded_fragments=4 folded_absent_at_head=1 delete=1 keep=3 package_version=1.0.3->1.0.4`);
 		// Only git objects were read and nothing in the checkout changed.
 		expect(readFileSync(join(repo, "changelog.d/c.md"), "utf8")).toBe(peerC);
 		expect(readFileSync(join(repo, "CHANGELOG.md"), "utf8")).toContain("## [Unreleased]\n\n## [1.0.0]");
