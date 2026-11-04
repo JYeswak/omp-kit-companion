@@ -2,9 +2,10 @@
 // CLI (a command or doctor scope missing from its reference) or pins a release version, and nothing
 // goes RED -- the 87-commit staleness behind ompkit-readme-changelog-currency-vrrn.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { COUNT_CLAIM, VERSION_LITERAL } from "../../scripts/readme-check.ts";
+import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const script = join(repo, "scripts/readme-check.ts");
@@ -26,9 +27,9 @@ export const COMMANDS = [
 
 afterAll(() => rmSync(workspace, { recursive: true, force: true }));
 
-function check(args: string[], gate = script): { code: number | null; out: string } {
+function check(args: string[], gate = script, env: Record<string, string | undefined> = process.env): { code: number | null; out: string } {
 	const child = Bun.spawnSync(["bun", "run", "--no-env-file", "--config=/dev/null", gate, "--root", repo, "--no-readme-gate", ...args], {
-		cwd: repo, stdout: "pipe", stderr: "pipe",
+		cwd: repo, stdout: "pipe", stderr: "pipe", env,
 	});
 	return { code: child.exitCode, out: `${child.stdout.toString()}${child.stderr.toString()}` };
 }
@@ -40,7 +41,11 @@ function plantedReadme(name: string, text: string): string {
 }
 
 test("the shipped README covers every registry command and doctor scope and pins no version", () => {
-	const result = check([]);
+	// Tags are environment, not tree: between releases (NEXTVERSION1) the line names the published release, so a
+	// fixture repo carries that tag; this test then runs the same in a git-less export and in a checkout.
+	const stated = /^Current release: v(\d+\.\d+\.\d+)$/m.exec(readme)?.[1];
+	if (stated === undefined) throw new Error("README.md has no generated release line");
+	const result = check(["--repo", taggedRepo("shipped-tags", [stated])], script, ceilingEnv);
 	expect(result.out).toContain("README-CHECK: GREEN");
 	expect(result.code).toBe(0);
 });
@@ -117,9 +122,11 @@ if (!pkgManifest || typeof pkgManifest !== "object" || !("version" in pkgManifes
 	throw new Error("package.json must carry a string version for the release-line tests");
 }
 const pkgVersion = pkgManifest.version;
-/** Fixture README with a correct generated release line however the live tree looks. */
+/** Fixture README whose generated release line equals package.json however the live tree looks (NEXTVERSION1:
+ *  between releases the shipped line names the published release, one patch behind package.json). */
 function baseReadme(): string {
-	if (readme.includes("<!-- kit-release:start -->")) return readme;
+	if (readme.includes("<!-- kit-release:start -->"))
+		return readme.replace(/^Current release: v\d+\.\d+\.\d+$/m, `Current release: v${pkgVersion}`);
 	return readme.replace("</div>\n", `</div>\n\n<!-- kit-release:start -->\nCurrent release: v${pkgVersion}\n<!-- kit-release:end -->\n`);
 }
 test("a stale generated release line is RED naming both versions, without a literal finding", () => {
@@ -185,3 +192,81 @@ test("stamp-release-line.sh restamps a stale block and fails closed without mark
 	expect(missing.out).toContain("marker missing");
 	expect(run(["--version", "not-a-version", "--readme", stale]).code).toBe(2);
 });
+
+// NEXTVERSION1 (ompkit-d8qic): main states the version it will ship as, so package.json may be the next patch of
+// README's release line, which must still name a published (tagged) release. Repos below sit under `workspace`,
+// a git ceiling, so tag discovery never climbs into the enclosing checkout.
+const [major, minor, patch] = pkgVersion.split(".").map(Number);
+if (patch! < 2) throw new Error("next-patch release-line tests need a package.json patch of at least 2");
+const published = `${major}.${minor}.${patch! - 1}`;
+const ceilingEnv = { ...process.env, GIT_CEILING_DIRECTORIES: workspace };
+function taggedRepo(name: string, tags: string[]): string {
+	const dir = join(workspace, name);
+	mkdirSync(dir);
+	const env = { ...ceilingEnv, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "fixture",
+		GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
+	for (const args of [["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "fixture"], ...tags.map(tag => ["tag", `v${tag}`])]) {
+		const result = runFixture(["git", ...args], { cwd: dir, env, floor_s: 30 });
+		if (result.rc !== 0) throw new Error(`git ${args.join(" ")}: ${new TextDecoder().decode(result.stderr)}`);
+	}
+	return dir;
+}
+const releaseLine = (version: string) => baseReadme().replace(`Current release: v${pkgVersion}`, `Current release: v${version}`);
+
+test("next patch: README names a tagged release and package.json its next patch passes; untagged is RED", () => {
+	const readmePath = plantedReadme("README.next-patch.md", releaseLine(published));
+	const tagged = check(["--readme", readmePath, "--repo", taggedRepo("tags-published", [published])], script, ceilingEnv);
+	expect(tagged.out).not.toContain("release line");
+	const untagged = check(["--readme", readmePath, "--repo", taggedRepo("tags-none", [])], script, ceilingEnv);
+	expect(untagged.code).toBe(1);
+	expect(untagged.out).toContain(`tag v${published} does not exist; the line must state a published release`);
+});
+
+test("next patch fails closed when tags cannot be read", () => {
+	const notRepo = join(workspace, "not-a-repo");
+	mkdirSync(notRepo);
+	const result = check(["--readme", plantedReadme("README.next-unreadable.md", releaseLine(published)), "--repo", notRepo], script, ceilingEnv);
+	expect(result.code).toBe(1);
+	expect(result.out).toContain(`tags cannot be read to prove v${published} is published (pass --repo DIR); failing closed`);
+});
+
+test("a two-patch gap is RED even with the older tag present; an equal line needs no tag (control)", () => {
+	const twoBack = `${major}.${minor}.${patch! - 2}`;
+	const repoWithTag = taggedRepo("tags-two-back", [twoBack, published]);
+	const gap = check(["--readme", plantedReadme("README.gap.md", releaseLine(twoBack)), "--repo", repoWithTag], script, ceilingEnv);
+	expect(gap.code).toBe(1);
+	expect(gap.out).toContain(`release line says \`Current release: v${twoBack}\` but package.json is ${pkgVersion}`);
+	const equal = check(["--readme", plantedReadme("README.equal.md", baseReadme()), "--repo", taggedRepo("tags-equal", [])], script, ceilingEnv);
+	expect(equal.out).not.toContain("release line");
+});
+
+test("fresh-gate's readme gate checks the archive tree and resolves tags from ROOT", () => {
+	const freshGate = readFileSync(join(repo, "scripts/fresh-gate.sh"), "utf8");
+	const start = freshGate.indexOf("gate_readme() {");
+	const gateReadme = freshGate.slice(start, freshGate.indexOf("\n}\n", start) + 3);
+	expect(gateReadme).toContain('--repo "$ROOT"');
+	// The archive is a git-less copy of the inputs readme-check reads, as fresh-gate's `git archive` export is.
+	const archive = join(workspace, "gate-archive");
+	mkdirSync(join(archive, "scripts"), { recursive: true });
+	for (const path of ["src", "rules", "skills"]) cpSync(join(repo, path), join(archive, path), { recursive: true });
+	cpSync(script, join(archive, "scripts/readme-check.ts"));
+	cpSync(join(repo, "package.json"), join(archive, "package.json"));
+	writeFileSync(join(archive, "README.md"), releaseLine(published));
+	const gate = (root: string, body: string) => {
+		const result = runFixture(["bash", "-c", `${body}\ngate_readme`], { cwd: workspace, floor_s: 60,
+			env: { ...ceilingEnv, ARCHIVE_DIR: archive, ROOT: root, README_GATE: join(workspace, "no-readme-gate") } });
+		return { code: result.rc, out: new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr) };
+	};
+	const tagged = gate(taggedRepo("root-tagged", [published]), gateReadme);
+	expect(tagged.out).toContain("readme-check: registry");
+	expect(tagged.out).not.toContain("release line");
+	const untagged = gate(taggedRepo("root-untagged", []), gateReadme);
+	expect(untagged.code).toBe(1);
+	expect(untagged.out).toContain(`tag v${published} does not exist`);
+	// Planted: without --repo the check looks for tags in the git-less archive and fails closed.
+	const mutant = gateReadme.replace(' --repo "$ROOT"', "");
+	expect(mutant).not.toBe(gateReadme);
+	const blind = gate(taggedRepo("root-blind", [published]), mutant);
+	expect(blind.code).toBe(1);
+	expect(blind.out).toContain("failing closed");
+}, fixtureDeadlineS(120) * 1_000);

@@ -548,8 +548,9 @@ if [ "$DRY_RUN" = 1 ]; then
 fi
 
 # NEXTVERSION1 (ompkit-d8qic; Maven release:prepare "prepare for next development iteration"): after vVERSION is
-# public, shared main moves to the next patch in one commit that also promotes the vVERSION CHANGELOG section, so
-# the next cut tags an already-green origin commit with no bump commit. Only fragments present at the tagged
+# public, shared main moves to the next patch in one commit that also promotes the vVERSION CHANGELOG section and
+# stamps README's release line to vVERSION (the latest published release), so the next cut tags an already-green
+# origin commit with no bump commit. Only fragments present at the tagged
 # source are folded; later fragments stay in changelog.d/ for the next release. It runs only after the public
 # verify stage, so a run that fails earlier (build, sign, tag, draft, attest, verify) commits nothing.
 advance_next_version() {
@@ -583,10 +584,14 @@ if count != 2 or doc["version"] != version or doc["omp"]["version"] != version:
     raise SystemExit("release-local: package.json must carry exactly .version and .omp.version")
 open(path, "w", encoding="utf-8").write(updated)
 PY
-		git -C "$tree" add -A -- package.json CHANGELOG.md changelog.d || die "next-version staging failed"
+		# README states the latest published release (vVERSION); readme-check accepts it beside package.json's next patch
+		# only while tag vVERSION exists, which the tag stage of this run created.
+		bounded 60 sh "$tree/scripts/stamp-release-line.sh" --version "$VERSION" --readme "$tree/README.md" >/dev/null ||
+			die "v$VERSION is published; cannot stamp the README release line"
+		git -C "$tree" add -A -- package.json README.md CHANGELOG.md changelog.d || die "next-version staging failed"
 		bounded 900 git -C "$tree" commit -q \
 			-m "chore(release): next version $next after v$VERSION ompkit-d8qic" \
-			-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE." \
+			-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
 			-m "[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
 			-m "Gap-Bead: none (release metadata)
 Bead: ompkit-d8qic

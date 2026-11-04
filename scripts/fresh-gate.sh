@@ -671,7 +671,7 @@ gate_notes() {
 gate_readme() {
 	(
 		cd "$ARCHIVE_DIR"
-		bun run --no-env-file --config=/dev/null scripts/readme-check.ts --root "$ARCHIVE_DIR"
+		bun run --no-env-file --config=/dev/null scripts/readme-check.ts --root "$ARCHIVE_DIR" --repo "$ROOT"
 	)
 }
 

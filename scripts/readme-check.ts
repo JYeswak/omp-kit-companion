@@ -6,13 +6,16 @@
 //      as `omp-kit <command>` / `--scope <value>`.
 //   2. README.md pins no release version: no `vX.Y.Z` / `X.Y.Z` / `KIT_VERSION=X.Y.Z` outside the
 //      generated OMP footer (scripts/docs-footer.sh owns that block) and the generated release
-//      line (`<!-- kit-release:start --> … `Current release: vX.Y.Z`, stamped by the release train
-//      via scripts/stamp-release-line.sh and verified here to equal the package.json version).
+//      line (`<!-- kit-release:start --> … `Current release: vX.Y.Z`, stamped via
+//      scripts/stamp-release-line.sh). The line states the latest published release: it equals the
+//      package.json version, or (NEXTVERSION1, ompkit-d8qic: main states the version it will ship
+//      as) package.json is exactly its next patch and tag vX.Y.Z exists in the repo (--repo, default
+//      the working directory); unreadable tags fail closed with a named finding.
 //      Install snippets resolve the latest release at run time.
 //   3. The readme-update gate (skill readme-update, --profile product) passes when it is installed;
 //      the repo's own structural checks always run (CI has no skills directory).
 //
-// Usage: bun scripts/readme-check.ts [--root DIR] [--readme PATH] [--registry PATH] [--no-readme-gate]
+// Usage: bun scripts/readme-check.ts [--root DIR] [--readme PATH] [--registry PATH] [--repo DIR] [--no-readme-gate]
 // Exit 0 GREEN, 1 RED (each finding named), 2 usage or unreadable input.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -29,6 +32,8 @@ export const VERSION_LITERAL = /(?<![\w.-])v?(?:0|[1-9]\d{0,5})\.(?:0|[1-9]\d{0,
 const WORKLOG_HEADING = /^#{1,6}[ \t]+(?:changelog|release notes|what'?s new|recent(?:ly)?|new in|updates|latest|todo|this session|built today|worklog)\b/i;
 
 type Registry = { commands: string[]; scopes: string[] };
+/** Whether tag v<README release-line version> exists; "unreadable" when tags cannot be listed (fails closed). */
+export type ReleaseTag = "present" | "absent" | "unreadable";
 /** Shipped inventory the README may count: rules/*.md, package.json omp.extensions, skills/<name>/SKILL.md. */
 type Inventory = { rules: number; extensions: number; skills: number };
 
@@ -98,7 +103,8 @@ const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "sev
 /** "30 rules", "five guard extensions", "30 diagnostic scopes": a count claim about the shipped inventory. */
 export const COUNT_CLAIM = new RegExp(`(?<![\\w.-])(\\d{1,4}|${NUMBER_WORDS.join("|")})[ \\t]+(?:[a-z]+(?:-[a-z]+)*[ \\t]+)?(rules|scopes|commands|extensions|skills)\\b`, "gi");
 
-export function checkReadme(readme: string, registry: Registry, inventory: Inventory, releaseVersion?: string): string[] {
+export function checkReadme(readme: string, registry: Registry, inventory: Inventory, releaseVersion?: string,
+	releaseTag?: (version: string) => ReleaseTag): string[] {
 	const findings: string[] = [];
 	// The OMP footer sits at the end of the file so stripping it shifts no finding line; the
 	// release line sits at the top, so it stays in the scanned body and only its own line range
@@ -110,7 +116,18 @@ export function checkReadme(readme: string, registry: Registry, inventory: Inven
 	} else if (releaseVersion === undefined) {
 		findings.push("README.md release line is unverifiable: no package.json version supplied to checkReadme");
 	} else if (block !== `Current release: v${releaseVersion}`) {
-		findings.push(`README.md release line says \`${block}\` but package.json is ${releaseVersion}; refresh with sh scripts/stamp-release-line.sh --version ${releaseVersion}`);
+		const stated = /^Current release: v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(block)?.[1];
+		const [major, minor, patch] = (stated ?? "").split(".").map(Number);
+		if (stated === undefined || releaseVersion !== `${major}.${minor}.${patch! + 1}`) {
+			findings.push(`README.md release line says \`${block}\` but package.json is ${releaseVersion}; refresh with sh scripts/stamp-release-line.sh --version ${releaseVersion}`);
+		} else {
+			// package.json already states the next patch (NEXTVERSION1); README may name the release it follows only once that release exists.
+			const tag = releaseTag?.(stated) ?? "unreadable";
+			if (tag === "absent")
+				findings.push(`README.md release line says v${stated} and package.json is its next patch ${releaseVersion}, but tag v${stated} does not exist; the line must state a published release`);
+			else if (tag === "unreadable")
+				findings.push(`README.md release line says v${stated} and package.json is its next patch ${releaseVersion}, but the repository tags cannot be read to prove v${stated} is published (pass --repo DIR); failing closed`);
+		}
 	}
 	const releaseStart = body.indexOf(RELEASE_START);
 	const releaseEnd = body.indexOf(RELEASE_END);
@@ -155,6 +172,13 @@ export function checkReadme(readme: string, registry: Registry, inventory: Inven
 	return findings;
 }
 
+/** The file's one process site (kitlib-ratchet-baseline.json counts 1): the readme-update gate and the tag lookup share it. */
+function spawnText(args: string[], dir: string): { ok: boolean; stdout: string; output: string } {
+	const child = Bun.spawnSync(args, { cwd: dir, stdout: "pipe", stderr: "pipe" });
+	const stdout = child.stdout.toString();
+	return { ok: child.exitCode === 0, stdout, output: `${stdout}${child.stderr.toString()}`.trimEnd() };
+}
+
 /**
  * readme-update's validator, when installed. M1-mandatory is disabled for one reason only: its
  * contributions needle is another author's personal policy text, and this repo carries Josh's own
@@ -168,8 +192,18 @@ function runReadmeGate(readmePath: string): { ran: boolean; ok: boolean; output:
 	const args = ["python3", gate, "--profile", "product", "--disable", "M1-mandatory"];
 	if (existsSync(join(dir, "README-NOTES.md"))) args.push("--notes", join(dir, "README-NOTES.md"));
 	args.push(readmePath);
-	const child = Bun.spawnSync(args, { cwd: dir, stdout: "pipe", stderr: "pipe" });
-	return { ran: true, ok: child.exitCode === 0, output: `${child.stdout.toString()}${child.stderr.toString()}`.trimEnd() };
+	const child = spawnText(args, dir);
+	return { ran: true, ok: child.ok, output: child.output };
+}
+
+/** `git tag -l vX.Y.Z` in the repo; any git failure (or a missing repo dir) is "unreadable", never "absent". */
+function releaseTagIn(repo: string): (version: string) => ReleaseTag {
+	return version => {
+		if (!existsSync(repo)) return "unreadable";
+		const listed = spawnText(["git", "-C", repo, "tag", "-l", `v${version}`], repo);
+		if (!listed.ok) return "unreadable";
+		return listed.stdout.split("\n").includes(`v${version}`) ? "present" : "absent";
+	};
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -177,6 +211,7 @@ async function main(argv: string[]): Promise<number> {
 	let readmePath: string | undefined;
 	let registryPath: string | undefined;
 	let readmeGate = true;
+	let repo = process.cwd();
 	for (let index = 0; index < argv.length; index++) {
 		const flag = argv[index];
 		const value = argv[index + 1];
@@ -185,6 +220,7 @@ async function main(argv: string[]): Promise<number> {
 		if (flag === "--root") root = resolve(value);
 		else if (flag === "--readme") readmePath = resolve(value);
 		else if (flag === "--registry") registryPath = resolve(value);
+		else if (flag === "--repo") repo = resolve(value);
 		else usage(`unknown flag ${flag}`);
 		index++;
 	}
@@ -199,7 +235,7 @@ async function main(argv: string[]): Promise<number> {
 		const version = manifest && typeof manifest === "object" && "version" in manifest ? manifest.version : undefined;
 		if (typeof version === "string" && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) releaseVersion = version;
 	} catch { releaseVersion = undefined; }
-	const findings = checkReadme(readFileSync(readmePath, "utf8"), registry, inventory, releaseVersion);
+	const findings = checkReadme(readFileSync(readmePath, "utf8"), registry, inventory, releaseVersion, releaseTagIn(repo));
 	console.log(`readme-check: registry ${registry.commands.length} commands, ${registry.scopes.length} doctor scopes (${registryPath}); ${inventory.rules} rules, ${inventory.extensions} extensions, ${inventory.skills} skills`);
 	if (readmeGate) {
 		const gate = runReadmeGate(readmePath);

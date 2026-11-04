@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
@@ -38,7 +38,10 @@ function fixture(label: string, mainVersion: string): Fixture {
 	git(work, "init", "-q", "--bare", "-b", "main", origin);
 	git(work, "init", "-q", "-b", "main", repo);
 	for (const dir of ["scripts", "changelog.d", ".github/workflows"]) mkdirSync(join(repo, dir), { recursive: true });
-	for (const name of ["release-notes.sh", "release-notes.ts", "release-train.sh"]) copyFileSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
+	for (const name of ["release-notes.sh", "release-notes.ts", "release-train.sh", "stamp-release-line.sh", "kitlib-tmp.sh"])
+		copyFileSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
+	// README states the latest published release (v1.2.3) while main states the next version.
+	writeFileSync(join(repo, "README.md"), readFileSync(join(ROOT, "README.md"), "utf8").replace(/^Current release: v\d+\.\d+\.\d+$/m, "Current release: v1.2.3"));
 	const pkg = (version: string) => `{\n  "name": "fixture",\n  "version": "${version}",\n  "omp": {\n    "version": "${version}"\n  }\n}\n`;
 	writeFileSync(join(repo, "package.json"), pkg(mainVersion));
 	writeFileSync(join(repo, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-01-01\n\n### Changed\n\n- Base release.\n");
@@ -62,9 +65,23 @@ function fixture(label: string, mainVersion: string): Fixture {
 const originMain = (f: Fixture) => f.git(f.origin, "rev-parse", "refs/heads/main");
 const showMain = (f: Fixture, path: string) => f.git(f.origin, "show", `refs/heads/main:${path}`);
 
+/** Run the real readme-check on origin/main's README and package.json beside this tree's registry and inventory, resolving tags in `tags`. */
+function readmeGate(f: Fixture, tags: string): string {
+	const archive = join(f.work, "readme-archive");
+	mkdirSync(join(archive, "scripts"), { recursive: true });
+	for (const path of ["src", "rules", "skills"]) cpSync(join(ROOT, path), join(archive, path), { recursive: true });
+	copyFileSync(join(ROOT, "scripts/readme-check.ts"), join(archive, "scripts/readme-check.ts"));
+	for (const path of ["README.md", "package.json"]) writeFileSync(join(archive, path), `${showMain(f, path)}\n`);
+	const result = runFixture(["bun", "run", "--no-env-file", "--config=/dev/null", "scripts/readme-check.ts", "--root", archive, "--repo", tags, "--no-readme-gate"],
+		{ cwd: archive, env: { ...f.env, GIT_CEILING_DIRECTORIES: f.work }, floor_s: 60 });
+	return decode(result.stdout) + decode(result.stderr);
+}
+
 test("AC1: after vX publishes, one main commit sets the next patch and promotes only the source's fragments", () => {
 	const f = fixture("nextversion-ac1", "1.2.4");
 	const source = f.git(f.repo, "rev-parse", "HEAD");
+	// The tag stage of the run publishes v1.2.4 before the next-version step.
+	f.git(f.repo, "tag", "v1.2.4", source); f.git(f.repo, "push", "-q", "origin", "v1.2.4");
 	// Work that landed after the tagged source keeps its fragment for the next release.
 	writeFileSync(join(f.repo, "changelog.d/later.md"), "### Added\n\n- Landed after the tag.\n");
 	f.git(f.repo, "add", "."); f.git(f.repo, "commit", "-qm", "later work"); f.git(f.repo, "push", "-q", "origin", "main");
@@ -86,6 +103,14 @@ test("AC1: after vX publishes, one main commit sets the next patch and promotes 
 	const files = f.git(f.origin, "ls-tree", "-r", "--name-only", "refs/heads/main", "--", "changelog.d");
 	expect(files.split("\n")).toEqual(["changelog.d/later.md"]);
 	expect(f.git(f.origin, "log", "-1", "--format=%B", after)).toContain("Bead: ompkit-d8qic");
+	// README now states v1.2.4, the release just published, and the real readme gate accepts it beside 1.2.5.
+	expect(showMain(f, "README.md")).toContain("\nCurrent release: v1.2.4\n");
+	const gate = readmeGate(f, f.origin);
+	expect(gate).toContain("readme-check: registry");
+	expect(gate).not.toContain("release line");
+	// Control: the same commit without the published tag is RED.
+	f.git(f.origin, "tag", "-d", "v1.2.4");
+	expect(readmeGate(f, f.origin)).toContain("tag v1.2.4 does not exist");
 	expect(existsSync(join(f.work, "next"))).toBe(false);
 }, fixtureDeadlineS(120) * 1_000);
 
