@@ -3,15 +3,16 @@
 // Liveness is evidence only: who owns a dir, and who may release it, is unchanged. Subjects are real processes owned by
 // one kitlib run tree; each planted case has a passing control.
 import { afterAll, afterEach, expect, test } from "bun:test";
-import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
 	applyQuarantineExpiry, createScratch, defaultLiveness, defaultRunner, inspectSession, ownerIncarnationState, parseOwnerFile, probeOwner, quarantineDir,
-	quarantineEntryFor, releaseScratch, type ApplyDeps, type InspectDeps, type LivenessDeps,
+	quarantineEntryFor, reapLogPath, releaseScratch, type ApplyDeps, type InspectDeps, type LivenessDeps,
 } from "../../src/scratch.ts";
 import { incarnation, type Incarnation, type Probe, type ProbeState } from "../../src/kitlib/proc.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
@@ -317,9 +318,87 @@ test("QRELEASED1 a released quarantine entry expires while its owner seat lives;
 		for (const name of readdirSync(entry)) utimesSync(join(entry, name), new Date(old), new Date(old));
 		utimesSync(entry, new Date(old), new Date(old));
 	}
+	// Control: the same released entry inside its 24 h hold is not touched.
+	const early = applyQuarantineExpiry(home, { liveness: { ...planted("live"), seatLive: () => true }, run: defaultRunner, home, now: old + 3_600_000 });
+	expect(early.find(row => row.dir === releasedEntry)?.action).not.toBe("DELETE");
+	expect(existsSync(releasedEntry)).toBe(true);
 	const rows = applyQuarantineExpiry(home, { liveness: { ...planted("live"), seatLive: () => true }, run: defaultRunner, home, now });
 	expect(rows.find(row => row.dir === releasedEntry)).toMatchObject({ action: "DELETE", reason: "quarantine-expired-owner-released" });
 	expect(existsSync(releasedEntry)).toBe(false);
 	expect(rows.find(row => row.dir === keptEntry)).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
 	expect(readFileSync(join(keptEntry, "payload"), "utf8")).toBe("keep");
 }, 60_000);
+
+/** An owner-released quarantine entry `<label>.<pid>` whose owner names a seat (agent+session), quarantined 30 days before `now`. */
+function releasedQuarantineEntry(home: string, label: string, now: number, plant: (dir: string) => void = () => {}): string {
+	const old = now - 30 * 86_400_000;
+	const { root, dir } = ownedDir(process.pid, "Mon Oct  5 13:27:00 2026", label);
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	writeFileSync(join(dir, ".owner"), `${readFileSync(join(dir, ".owner"), "utf8")}agent=FixtureOwner\nsession=fixture-session\n`);
+	expect(releaseScratch(dir, home, { liveness: planted("live"), run: clearRun, now: old })).toMatchObject({ ok: true, reason: "owner-released" });
+	plant(dir);
+	const qt = quarantineDir(home);
+	mkdirSync(qt, { recursive: true, mode: 0o700 });
+	const entry = join(qt, quarantineEntryFor(`${label}.${process.pid}`, new Date(old)));
+	renameSync(dir, entry);
+	utimesSync(entry, new Date(old), new Date(old));
+	return entry;
+}
+
+// QRELEASED1 EACCES (live 2026-11-04, ownerio1-origin-replay.44384, 2.51 GB): a released expired entry holding our own
+// mode-000 dir made `lsof +D` warn "can't opendir" on stderr, so the open-fd proof read unavailable and the entry stayed,
+// with no reap-log line. The DELETE path grants owner rwx inside the entry first (lstat only, symlinks never followed).
+test("QRELEASED1 a released expired entry with an unreadable 000 subdir is deleted; a symlinked outside 000 dir keeps its mode", () => {
+	const home = tempDir("scratch-qreleased-eacces-home");
+	const outside = join(tempDir("scratch-qreleased-eacces-outside"), "sealed");
+	process.env.XDG_STATE_HOME = join(home, "state");
+	process.env.XDG_CONFIG_HOME = join(home, "config");
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+	mkdirSync(outside);
+	writeFileSync(join(outside, "keep"), "outside");
+	const now = Date.parse("2026-10-22T00:00:00.000Z");
+	const sealed = (dir: string) => join(dir, "probe-eacces", ".local", "state", "rch", "job-leases");
+	const entry = releasedQuarantineEntry(home, "eacces", now, dir => {
+		mkdirSync(sealed(dir), { recursive: true });
+		writeFileSync(join(sealed(dir), "lease"), "x".repeat(4096));
+		symlinkSync(outside, join(dir, "escape"));
+	});
+	chmodSync(sealed(entry), 0o000);
+	chmodSync(outside, 0o000);
+	try {
+		const row = applyQuarantineExpiry(home, { liveness: { ...planted("live"), seatLive: () => true }, run: defaultRunner, home, now })
+			.find(value => value.dir === entry);
+		expect(row).toMatchObject({ action: "DELETE", reason: "quarantine-expired-owner-released" });
+		expect(existsSync(entry)).toBe(false);
+		expect(lstatSync(outside).mode & 0o777).toBe(0o000);
+	} finally {
+		if (existsSync(entry)) chmodSync(sealed(entry), 0o700);
+		chmodSync(outside, 0o700);
+	}
+	expect(readFileSync(join(outside, "keep"), "utf8")).toBe("outside");
+}, fixtureDeadlineS(60) * 1000);
+
+// QRELEASED1 keep-log: every expired entry the reaper keeps or skips leaves one reap-log line naming its reason, at the
+// policy gate (owner-seat-alive) and at the proof gate (lsof-evidence-unavailable) alike, so no hold is silent.
+test("QRELEASED1 every kept expired quarantine entry logs one reap-log line with its reason", () => {
+	const home = tempDir("scratch-qreleased-keeplog-home");
+	process.env.XDG_STATE_HOME = join(home, "state");
+	process.env.XDG_CONFIG_HOME = join(home, "config");
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+	const now = Date.parse("2026-10-22T00:00:00.000Z");
+	const proofHeld = releasedQuarantineEntry(home, "proofheld", now);
+	const seatHeld = join(quarantineDir(home), quarantineEntryFor(`seatheld.${process.pid}`, new Date(now - 30 * 86_400_000)));
+	mkdirSync(seatHeld);
+	writeFileSync(join(seatHeld, ".owner"), `${ownerText(process.pid, "Mon Oct  5 13:27:00 2026", "seatheld")}agent=FixtureOwner\nsession=fixture-session\n`);
+	utimesSync(seatHeld, new Date(now - 30 * 86_400_000), new Date(now - 30 * 86_400_000));
+	const rows = applyQuarantineExpiry(home, { liveness: { ...planted("live"), seatLive: () => true }, home, now,
+		run: () => ({ code: null, stdout: "", stderr: "" }) });
+	expect(rows.find(row => row.dir === seatHeld)).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
+	expect(rows.find(row => row.dir === proofHeld)).toMatchObject({ action: "SKIP", reason: "lsof-evidence-unavailable" });
+	const logged = existsSync(reapLogPath(home)) ? readFileSync(reapLogPath(home), "utf8").split("\n").filter(line => line !== "")
+		.map(line => JSON.parse(line) as { event: string; dir: string; reason?: string }) : [];
+	const keeps = (dir: string) => logged.filter(line => line.event === "quarantine-keep" && line.dir === dir).map(line => line.reason);
+	expect(keeps(seatHeld)).toEqual(["owner-seat-alive"]);
+	expect(keeps(proofHeld)).toEqual(["lsof-evidence-unavailable"]);
+	expect(existsSync(seatHeld) && existsSync(proofHeld)).toBe(true);
+}, fixtureDeadlineS(60) * 1000);

@@ -1934,6 +1934,10 @@ function removeExpiredEntry(path: string, entry: string, owner: ScratchOwner | n
 	if (JSON.stringify(observedOwner) !== JSON.stringify(owner) ||
 		(released !== null && (released.ownerText !== ownerBefore || released.markerText !== releaseBefore || readReleaseRecord(path) === null)))
 		return { dir: path, action: "SKIP", reason: "final-delete-recheck-failed", owner: verdictOwner, sizeBytes: 0 };
+	// QRELEASED1: our own unreadable dir inside an entry the policy already chose to delete (a 000 `job-leases`) made
+	// `lsof +D` warn and the walk lose freshness, so the proofs failed closed forever. Grant owner rwx first, as REAPRO1
+	// does before a retry: lstat only, symlinks never followed, nothing outside the entry touched.
+	grantOwnerWrite(path);
 	const measure: { entries: number; newestMtimeMs: number | null; sizeBytes: number } = { entries: 0, newestMtimeMs: original.mtimeMs, sizeBytes: 0 };
 	const bytesBefore = measure.sizeBytes = dirSize(path, measure);
 	// Allow 1 ms per inspected entry beyond the base budget, capped at two minutes per proof.
@@ -2970,6 +2974,11 @@ function expireEntryUnlessUsed(path: string, entry: string, owner: ScratchOwner 
 	});
 }
 
+/** Reasons whose own event already reached the reap log; any other kept or skipped expired entry logs `quarantine-keep`. */
+const QUARANTINE_KEEP_LOGGED: Record<string, true> = {
+	"user-live": true, "delete-failed": true, "quarantine-hold-expired": true, "quarantine-hold-active": true,
+};
+
 /** Expired quarantine entries are deleted after owner-release or lsof rechecks. */
 export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVerdict[] {
 	const done: ScratchVerdict[] = [];
@@ -2996,6 +3005,13 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		appendLog(home, { event: "quarantine-read-failed", dir: qt, at, error: error instanceof Error ? error.message : String(error) });
 		return done;
 	}
+	// QRELEASED1: every expired entry kept or skipped leaves one reap-log line with its reason, so no hold is silent.
+	const record = (verdict: ScratchVerdict): void => {
+		done.push(verdict);
+		if (verdict.action !== "DELETE" && QUARANTINE_KEEP_LOGGED[verdict.reason] !== true)
+			appendLog(home, { event: "quarantine-keep", dir: verdict.dir, at, entry: basename(verdict.dir), action: verdict.action,
+				reason: verdict.reason, cause: verdict.cause ?? null, sizeBytes: verdict.sizeBytes });
+	};
 	for (const entry of entries) {
 		if (entry.startsWith(".")) continue;
 		const quarantinedAt = quarantineTimeOf(entry);
@@ -3003,29 +3019,29 @@ export function applyQuarantineExpiry(home: string, deps: ApplyDeps): ScratchVer
 		const path = join(qt, entry);
 		const { owner, malformed } = readOwner(path);
 		if (isSymlink(path)) {
-			done.push({ dir: path, action: "SKIP", reason: "quarantine-symlink", owner: null, sizeBytes: 0 });
+			record({ dir: path, action: "SKIP", reason: "quarantine-symlink", owner: null, sizeBytes: 0 });
 			continue;
 		}
 		const released = readReleaseRecord(path);
 		const eligibility = quarantineExpiryDecision(path, home, owner, malformed, released !== null, deps);
 		if (eligibility.action !== "DELETE") {
-			done.push({ dir: path, ...eligibility, owner, sizeBytes: dirSize(path) });
+			record({ dir: path, ...eligibility, owner, sizeBytes: dirSize(path) });
 			continue;
 		}
 		if (released) {
 			const identity = inodeOf(path);
 			if (identity === null) {
-				done.push({ dir: path, action: "SKIP", reason: "inode-proof-unavailable", owner: released.owner, sizeBytes: dirSize(path) });
+				record({ dir: path, action: "SKIP", reason: "inode-proof-unavailable", owner: released.owner, sizeBytes: dirSize(path) });
 				continue;
 			}
 			const rechecked = readReleaseRecord(path);
 			if (!rechecked || rechecked.markerText !== released.markerText || rechecked.ownerText !== released.ownerText ||
 				inodeOf(path) !== identity) {
-				done.push({ dir: path, action: "SKIP", reason: "final-recheck-refused", owner: released.owner, sizeBytes: dirSize(path) });
+				record({ dir: path, action: "SKIP", reason: "final-recheck-refused", owner: released.owner, sizeBytes: dirSize(path) });
 				continue;
 			}
 		}
-		done.push(expireEntryUnlessUsed(path, entry, owner, released, home, deps, at));
+		record(expireEntryUnlessUsed(path, entry, owner, released, home, deps, at));
 	}
 	return done;
 }
