@@ -90,7 +90,7 @@ import { realGradableCandidates } from "./grader-next-sources/gradable.ts";
 import { ccGapCandidates } from "./grader-next-sources/cc-gaps.ts";
 import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
-import { appendReapReceipt, defaultGitLockLedgerPath, indexLockStaleAfterMs, maybeMoveStaleIndexLock, reapRepoGitLocks, reapStaleAfterMs } from "./index-lock.ts";
+import { appendReapReceipt, defaultGitLockLedgerPath, indexLockStaleAfterMs, maybeMoveStaleIndexLock, reapRepoGitLocks, reapStaleAfterMs, reportOrphanedGitHelpers } from "./index-lock.ts";
 import { proveSend, proveTernCliSend, routeSendTarget, ternSendSeat } from "./send.ts";
 import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
@@ -4037,8 +4037,9 @@ async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResul
 	if (minAge !== null && (!Number.isInteger(minAge) || minAge < 0))
 		return refusal("SCRATCH_MIN_AGE_INVALID", "--min-age-ms must be a non-negative integer", "Pass milliseconds, e.g. --min-age-ms 120000; nothing was changed.");
 	// REAPCLI1 (ompkit-fp72.19.1.9.1): `--reap --yes` runs the gated reaper the help documents (empty, aged, no lsof
-	// holder, no git process rooted in the tree, unchanged identity; rename aside, never unlink, one ledger row each).
+	// holder, no live index-writing git command in the worktree, unchanged identity; rename aside, never unlink, one ledger row each).
 	// It used to fall through to the dry-run reporter and move nothing (jev's lock sat 7 days; cfsios today).
+	const gitHelpers = reportOrphanedGitHelpers(repoFlag, scratchRunner);
 	if (request.flags.has("--reap") && request.flags.has("--yes")) {
 		const ledgerFlag = request.flags.get("--ledger");
 		const ledger = typeof ledgerFlag === "string" ? ledgerFlag : defaultGitLockLedgerPath(process.env.HOME ?? "");
@@ -4052,13 +4053,15 @@ async function scratchIndexLockCommand(request: ParsedCommand): Promise<CliResul
 		}
 		return { code: ledgerFailed ? 1 : 0, data: {
 			overall: ledgerFailed ? "FINDINGS" : reaped > 0 ? "CHANGED" : "OK", ledger, reaped,
-			results: results.map(result => ({ file: result.file, verdict: result.verdict, moved_to: result.receipt?.movedTo ?? null })),
+			results: results.map(result => ({ file: result.file, verdict: result.verdict, holders: result.holders ?? [], moved_to: result.receipt?.movedTo ?? null })),
+			orphaned_git_helpers: gitHelpers.helpers, git_helper_report: gitHelpers.status,
 		}, verification: "PERFORMED" };
 	}
 	const outcome = maybeMoveStaleIndexLock(join(repoFlag, ".git"), {
 		run: scratchRunner, staleAfterMs: minAge ?? indexLockStaleAfterMs(), dryRun: true,
 	});
-	return { code: 0, data: { overall: "OK", verdict: outcome.verdict, receipt: outcome.receipt ?? null }, verification: "UNVERIFIED" };
+	return { code: 0, data: { overall: "OK", verdict: outcome.verdict, holders: outcome.holders ?? [], receipt: outcome.receipt ?? null,
+		orphaned_git_helpers: gitHelpers.helpers, git_helper_report: gitHelpers.status }, verification: "UNVERIFIED" };
 }
 registerCommandHandler("scratch index-lock", scratchIndexLockCommand);
  

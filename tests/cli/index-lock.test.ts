@@ -1,13 +1,15 @@
 import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, utimesSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
-import { run, runSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 import {
 	indexLockStaleAfterMs,
 	lsofFileClear,
 	maybeMoveStaleIndexLock,
+	reapStaleIndexLock,
+	reportOrphanedGitHelpers,
+	type LockHolder,
 	DEFAULT_INDEX_LOCK_STALE_MS,
 	type ScratchRunner,
 } from "../../src/index-lock.ts";
@@ -25,6 +27,102 @@ function gitDirWithLock(ageMs: number, bytes: string): { gitDir: string; lock: s
 	utimesSync(lock, back, back);
 	return { gitDir, lock, root };
 }
+
+// INDEXLOCKHELD1: lsof calls both the git dispatcher for remote-https and git blame
+// `cgit`; only argv distinguishes them from an index-writing command.
+function processRunner(root: string, command: string, fileHeld = false): ScratchRunner {
+	return args => {
+		if (args[0] === "ps") return { code: 0,
+			stdout: `95888 1 S 01:00:00 Tue Nov 3 18:13:10 2026 ${command}\n`, stderr: "" };
+		return args.includes("-c") || fileHeld
+			? { code: 0, stdout: `p95888\ncgit\nfcwd\nn${root}\n`, stderr: "" }
+			: clearRun();
+	};
+}
+
+for (const command of ["git remote-https origin https://example.invalid/repo", "git fetch-pack origin",
+	"git blame f.txt", "git log", "git show HEAD"]) {
+	test(`INDEXLOCKHELD1 stale empty lock is reaped despite ${command}`, () => {
+		const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+		try {
+			const result = reapStaleIndexLock(gitDir, { run: processRunner(root, command), staleAfterMs: AGE });
+			expect(result.verdict).toBe("REAPED");
+			expect(existsSync(lock)).toBe(false);
+		} finally { rmSync(root, { recursive: true, force: true }); }
+	});
+}
+
+test("INDEXLOCKHELD1 live index writer without an open fd blocks plan and reap with pid and command", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		const run = processRunner(root, "git -c core.fsmonitor=false commit -m fixture");
+		for (const result of [
+			maybeMoveStaleIndexLock(gitDir, { run, staleAfterMs: AGE, dryRun: true }),
+			reapStaleIndexLock(gitDir, { run, staleAfterMs: AGE }),
+		]) {
+			expect(result).toMatchObject({ verdict: "HELD", holders: [{
+				pid: 95888, command: "git -c core.fsmonitor=false commit -m fixture", reason: "index-writer",
+			}] });
+		}
+		expect(existsSync(lock)).toBe(true);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("INDEXLOCKHELD1 open lock fd blocks even a read-only command and names the holder", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		const run = processRunner(root, "git blame f.txt", true);
+		for (const result of [
+			maybeMoveStaleIndexLock(gitDir, { run, staleAfterMs: AGE, dryRun: true }),
+			reapStaleIndexLock(gitDir, { run, staleAfterMs: AGE }),
+		]) expect(result).toMatchObject({ verdict: "HELD",
+			holders: [{ pid: 95888, command: "git blame f.txt", reason: "open-file" }] });
+		expect(existsSync(lock)).toBe(true);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("INDEXLOCKHELD1 reports old orphan network helpers, never readers or young/non-orphan helpers", () => {
+	const { root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		const command = "git remote-https origin https://example.invalid/repo";
+		expect(reportOrphanedGitHelpers(root, processRunner(root, command))).toMatchObject({
+			status: "OK", helpers: [{ pid: 95888, ppid: 1, startedAt: "Tue Nov 3 18:13:10 2026", ageSeconds: 3600, command }],
+		});
+		for (const replacement of ["95888 2 S 01:00:00", "95888 1 S 30:00", "95888 1 Z 01:00:00"]) {
+			const runner = processRunner(root, command);
+			expect(reportOrphanedGitHelpers(root, (args, opts) => {
+				const out = runner(args, opts);
+				return args[0] === "ps" ? { ...out, stdout: out.stdout.replace("95888 1 S 01:00:00", replacement) } : out;
+			})).toEqual({ status: "OK", helpers: [] });
+		}
+		expect(reportOrphanedGitHelpers(root, processRunner(root, "git blame f.txt")).helpers).toEqual([]);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("INDEXLOCKHELD1 unknown argv or unreadable process evidence preserves the lock without inventing a holder", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		for (const command of ["git custom-alias", "git -c", "git -C /space path commit", "git " + "x".repeat(65_536)]) {
+			expect(reapStaleIndexLock(gitDir, { run: processRunner(root, command), staleAfterMs: AGE }).verdict).toBe("UNKNOWN");
+			expect(existsSync(lock)).toBe(true);
+		}
+		const runner = processRunner(root, "git add f.txt");
+		expect(reapStaleIndexLock(gitDir, { run: (args, opts) => args[0] === "ps"
+			? { code: null, stdout: "", stderr: "" } : runner(args, opts), staleAfterMs: AGE }).verdict).toBe("UNKNOWN");
+		expect(existsSync(lock)).toBe(true);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("INDEXLOCKHELD1 writer in a worktree subdirectory counts; sibling worktree does not", () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	try {
+		expect(reapStaleIndexLock(gitDir, { run: processRunner(join(root, "subdir"), "git add f.txt"),
+			staleAfterMs: AGE })).toMatchObject({ verdict: "HELD", holders: [{ pid: 95888, reason: "index-writer" }] });
+		expect(reapStaleIndexLock(gitDir, { run: processRunner(`${root}-other`, "git add f.txt"),
+			staleAfterMs: AGE }).verdict).toBe("REAPED");
+		expect(existsSync(lock)).toBe(false);
+	} finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 
 
 test("dry-run reports a stale holder-less empty lock without moving it", () => {
@@ -132,15 +230,12 @@ test("lock removed during lsof probe is not renamed", () => {
 test("scratch index-lock --apply is refused without moving the lock", () => {
 	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
 	try {
-		const result = Bun.spawnSync([process.execPath, "run", join(import.meta.dir, "../../src/cli.ts"),
+		const result = runFixture([process.execPath, "run", join(import.meta.dir, "../../src/cli.ts"),
 			"scratch", "index-lock", "--repo", root, "--apply", "--yes", "--json"], {
-			cwd: root,
-			env: { ...process.env, HOME: root, OMP_KIT_INDEX_LOCK_STALE_MS: "1" },
-			stdout: "pipe",
-			stderr: "pipe",
+			cwd: root, env: { ...process.env, HOME: root, OMP_KIT_INDEX_LOCK_STALE_MS: "1" },
 		});
-		const envelope = JSON.parse(result.stdout.toString()) as { data?: { verdict?: string; receipt?: unknown } };
-		expect(result.exitCode).toBe(1);
+		const envelope = JSON.parse(new TextDecoder().decode(result.stdout)) as { data?: { verdict?: string; receipt?: unknown } };
+		expect(result.rc).toBe(1);
 		expect(envelope.data?.verdict).toBe("APPLY_REFUSED");
 		expect(envelope.data?.receipt).toBeNull();
 		expect(existsSync(lock)).toBe(true);
@@ -201,7 +296,7 @@ test("non-empty lock is never moved", async () => {
 test("held lock is never moved", () => {
 	const { gitDir, root } = gitDirWithLock(AGE + 1000, "");
 	try {
-		const held: ScratchRunner = () => ({ code: 0, stdout: "git 12345 lock", stderr: "" });
+		const held = processRunner(root, "git update-index --stdin", true);
 		const result = maybeMoveStaleIndexLock(gitDir, { run: held, staleAfterMs: AGE, dryRun: true });
 		expect(result.verdict).toBe("HELD");
 	} finally {
@@ -228,7 +323,7 @@ test("lsof tri-state: rc 2, timeout, and signal leave the lock untouched", () =>
 
 test("lsof rc 1 with empty output is clear; rc 0 with rows is held", () => {
 	expect(lsofFileClear("/x", clearRun)).toBe(true);
-	expect(lsofFileClear("/x", () => ({ code: 0, stdout: "git 9 lock", stderr: "" }))).toBe(false);
+	expect(lsofFileClear("/x", processRunner("/x", "git update-index --stdin", true))).toBe(false);
 });
 
 test("age threshold reads configuration with documented default", () => {
@@ -237,58 +332,91 @@ test("age threshold reads configuration with documented default", () => {
 	expect(indexLockStaleAfterMs({ OMP_KIT_INDEX_LOCK_STALE_MS: "junk" })).toBe(DEFAULT_INDEX_LOCK_STALE_MS);
 });
 
-test("real repo: git holding index.lock blocks; after kill, dry-run reports without moving it", async () => {
-	// Integration test: exercises a real git lock-holder against the platform
-	// clock. Fake timers cannot work: the holder is a live git process and
-	// the lock file appears on its schedule, not in-process timers.
-const root = realpathSync(ownedTmp("index-lock-real").path);
+// Native git/lsof and the helper's HTTP request run outside this VM; fake timers cannot advance their readiness.
+async function waitForFixture(ready: () => boolean): Promise<void> {
+	const deadline = Date.now() + fixtureDeadlineS() * 1000;
+	while (!ready()) {
+		if (Date.now() >= deadline) throw new Error("fixture did not become ready before its deadline");
+		await Bun.sleep(20);
+	}
+}
+
+test("INDEXLOCKHELD1 live git add holds an empty lock; plan and reap name its exact pid", async () => {
+	const root = realpathSync(ownedTmp("index-lock-writer").path);
+	const env = { ...process.env, HOME: root, GIT_CEILING_DIRECTORIES: root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+	expect(runFixture(["git", "init", "-q"], { cwd: root, env }).rc).toBe(0);
+	writeFileSync(join(root, "f.txt"), "x\n");
+	writeFileSync(join(root, ".gitattributes"), "f.txt filter=hold\n");
+	const ready = join(root, ".git", "writer.ready"), stop = join(root, ".git", "writer.stop");
+	writeFileSync(join(root, ".git", "hold-clean.py"), [
+		"import os, sys, time",
+		"from pathlib import Path",
+		"Path('.git/writer.ready').write_text(str(os.getppid()))",
+		"deadline = time.monotonic() + float(sys.argv[1])",
+		"while not Path('.git/writer.stop').exists():",
+		"    if time.monotonic() >= deadline: raise TimeoutError('filter fixture expired')",
+		"    time.sleep(0.02)",
+		"sys.stdout.buffer.write(sys.stdin.buffer.read(65536))",
+	].join("\n"));
+	const writer = runFixtureAsync(["git", "-c", `filter.hold.clean=python3 .git/hold-clean.py ${fixtureDeadlineS()}`,
+		"add", "f.txt"], { cwd: root, env });
 	try {
-		const git = (args: string[], opts?: { stdin?: "pipe" | "ignore" }) => Bun.spawnSync(["git", ...args],
-			{ cwd: root, stdout: "pipe", stderr: "pipe", stdin: opts?.stdin ?? "ignore" });
-		expect(git(["init", "-q"]).exitCode).toBe(0);
-		expect(git(["config", "user.email", "t@e.invalid"]).exitCode).toBe(0);
-		writeFileSync(join(root, "f.txt"), "x\n");
-		expect(git(["add", "f.txt"]).exitCode).toBe(0);
-		// A git update-index waiting on stdin holds .git/index.lock deterministically.
-		const holder = Bun.spawn(["git", "update-index", "--stdin"], {
-			cwd: root, stdout: "ignore", stderr: "ignore", stdin: "pipe",
-		});
-		const lockPath = join(root, ".git", "index.lock");
-		const { promise: appeared, resolve: markAppeared } = Promise.withResolvers<void>();
-		const poll = async () => {
-			for (let i = 0; i < 100 && !existsSync(lockPath); i++) await new Promise(resolve => setTimeout(resolve, 100));
-			markAppeared();
-		};
-		await poll();
-		await appeared;
-		expect(existsSync(lockPath)).toBe(true);
-		const realRun: ScratchRunner = (args, opts) => {
-			const out = Bun.spawnSync(args as [string, ...string[]], { stdout: "pipe", stderr: "pipe", timeout: opts?.timeoutMs });
-			return { code: out.exitCode, stdout: out.stdout.toString(), stderr: out.stderr.toString() };
-		};
-		expect(maybeMoveStaleIndexLock(join(root, ".git"), { run: realRun, staleAfterMs: 0, dryRun: true }).verdict).toBe("HELD");
-		holder.kill(9);
-		await holder.exited;
-		expect(existsSync(lockPath)).toBe(true);
-		expect(statSync(lockPath).size).toBe(0);
-		const before = statSync(lockPath);
-		const report = maybeMoveStaleIndexLock(join(root, ".git"), { run: realRun, staleAfterMs: 0, dryRun: true });
-		expect(report.verdict).toBe("WOULD_MOVE");
-		expect(report.receipt?.lock).toBe(lockPath);
-		expect(existsSync(lockPath)).toBe(true);
-		expect(statSync(lockPath).ino).toBe(before.ino);
-		expect(statSync(lockPath).mtimeMs).toBe(before.mtimeMs);
+		await waitForFixture(() => existsSync(ready));
+		const pid = Number(readFileSync(ready, "utf8"));
+		const lock = join(root, ".git", "index.lock");
+		expect(statSync(lock).size).toBe(0);
+		for (const flags of [[], ["--reap", "--yes"]]) {
+			const result = reapCli(root, [...flags, "--min-age-ms", "0", "--ledger", join(root, "ledger.jsonl")]);
+			const observation = result.data.results?.find(row => row.file === lock) ?? result.data;
+			expect(observation.verdict).toBe("HELD");
+			expect(observation.holders?.some(holder => holder.pid === pid && holder.command.endsWith("add f.txt"))).toBe(true);
+			expect(existsSync(lock)).toBe(true);
+		}
+		expect(existsSync(join(root, "ledger.jsonl"))).toBe(false);
 	} finally {
+		writeFileSync(stop, "");
+		const result = await writer;
+		rmSync(root, { recursive: true, force: true });
+		expect(result.rc).toBe(0);
+	}
+}, fixtureDeadlineS() * 1000);
+
+test("INDEXLOCKHELD1 live remote-https cannot hold a stale lock by worktree cwd alone", async () => {
+	const { gitDir, lock, root } = gitDirWithLock(AGE + 1000, "");
+	expect(runFixture(["git", "init", "-q"], { cwd: root, env: { ...process.env, GIT_CEILING_DIRECTORIES: root } }).rc).toBe(0);
+	const response = Promise.withResolvers<Response>();
+	let requested = false;
+	const server = Bun.serve({ hostname: "127.0.0.1", port: 0,
+		fetch: () => { requested = true; return response.promise; } });
+	const helper = runFixtureAsync(["git", "remote-https", "origin", `http://127.0.0.1:${server.port}/repo`], {
+		cwd: root, stdin: "list\n", env: { ...process.env, HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+	});
+	try {
+		await waitForFixture(() => requested);
+		const plan = reapCli(root, ["--min-age-ms", String(AGE)]);
+		expect(plan.data.verdict).toBe("WOULD_MOVE");
+		expect(existsSync(lock)).toBe(true);
+		const reap = reapCli(root, ["--reap", "--yes", "--min-age-ms", String(AGE), "--ledger", join(root, "ledger.jsonl")]);
+		expect(reap.data.results?.find(row => row.file === lock)?.verdict).toBe("REAPED");
+		expect(existsSync(lock)).toBe(false);
+		expect(readdirSync(gitDir).some(name => name.startsWith("index.lock.stale-"))).toBe(true);
+	} finally {
+		response.resolve(new Response("fixture complete", { status: 500 }));
+		await helper;
+		server.stop(true);
 		rmSync(root, { recursive: true, force: true });
 	}
-}, 120_000);
+}, fixtureDeadlineS() * 1000);
 
 // REAPCLI1 (ompkit-fp72.19.1.9.1): `scratch index-lock --reap --yes` runs the gated reaper the help documents; it used to
 // print WOULD_MOVE from the dry-run reporter and move nothing (jev's lock sat 7 days, 2026-11-01).
-function reapCli(root: string, extra: string[]): { code: number; data: { overall?: string; verdict?: string; results?: Array<{ file: string; verdict: string }>; ledger?: string | null } } {
-	const result = runSync([process.execPath, "run", join(import.meta.dir, "../../src/cli.ts"),
-		"scratch", "index-lock", "--repo", root, ...extra, "--json"], { deadline_s: 60, cwd: root, env: { ...process.env, HOME: root } });
-	const envelope = JSON.parse(new TextDecoder().decode(result.stdout)) as { data: { overall?: string } };
+interface LockCliObservation { verdict?: string; holders?: LockHolder[] }
+function reapCli(root: string, extra: string[]): { code: number; data: LockCliObservation & {
+	overall?: string; results?: Array<LockCliObservation & { file: string }>; ledger?: string | null;
+} } {
+	const result = runFixture([process.execPath, "run", join(import.meta.dir, "../../src/cli.ts"),
+		"scratch", "index-lock", "--repo", root, ...extra, "--json"], { cwd: root, env: { ...process.env, HOME: root } });
+	const envelope = JSON.parse(new TextDecoder().decode(result.stdout));
 	return { code: result.rc ?? -1, data: envelope.data };
 }
 
@@ -315,16 +443,18 @@ test("REAPCLI1 planted: a lock held open by a live process stays in place and re
 	const ledger = join(root, "reap-ledger.jsonl");
 	const ready = join(root, "holder.ready");
 	const stop = join(root, "holder.stop");
-	const holder = run(["sh", "-c", 'exec 3<"$1"; : > "$2"; while [ ! -e "$3" ]; do sleep 0.1; done', "holder", lock, ready, stop], { deadline_s: 25 });
+	const holder = runFixtureAsync(["sh", "-c", 'exec 3<"$1"; printf "%s" "$$" > "$2"; while [ ! -e "$3" ]; do sleep 0.1; done', "holder", lock, ready, stop], { cwd: root });
 	try {
 		// A real separate process must hold the fd (lsof is the gate under test); poll for its ready file, no fixed wait.
-		for (let waited = 0; !existsSync(ready); waited += 50) {
-			if (waited > 10_000) throw new Error("holder never opened the lock");
-			await Bun.sleep(50);
-		}
+		await waitForFixture(() => existsSync(ready));
 		const out = reapCli(root, ["--reap", "--yes", "--min-age-ms", String(AGE), "--ledger", ledger]);
 		expect(out.code).toBe(0);
 		expect(out.data.results?.find(r => r.file === lock)?.verdict).toBe("HELD");
+		expect(out.data.results?.find(r => r.file === lock)?.holders).toContainEqual({
+			pid: Number(readFileSync(ready, "utf8")),
+			command: expect.stringContaining("holder"),
+			reason: "open-file",
+		});
 		expect(existsSync(lock)).toBe(true);
 		expect(readdirSync(gitDir).some(name => name.startsWith("index.lock.stale-"))).toBe(false);
 		expect(existsSync(ledger)).toBe(false);
@@ -333,7 +463,7 @@ test("REAPCLI1 planted: a lock held open by a live process stays in place and re
 		await holder;
 		rmSync(root, { recursive: true, force: true });
 	}
-}, 30_000);
+}, fixtureDeadlineS() * 1000);
 
 test("REAPCLI1 --reap without --yes stays a dry-run report; a lock younger than --min-age-ms is TOO_YOUNG and stays", () => {
 	const { lock, root } = gitDirWithLock(AGE + 1000, "");

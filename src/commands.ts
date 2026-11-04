@@ -453,6 +453,9 @@ const indexLockData: DataSchema = { type: "object", required: ["overall", "verdi
 	overall: { enum: ["OK", "CHANGED", "FINDINGS"] },
 	verdict: { enum: ["NOT_FOUND", "NON_EMPTY", "TOO_YOUNG", "UNKNOWN", "APPLY_REFUSED", "HELD", "WOULD_MOVE", "CHANGED", "BUSY", "REAPED"] },
 	receipt: { type: ["object", "null"] },
+	holders: { type: "array" },
+	orphaned_git_helpers: { type: "array" },
+	git_helper_report: { enum: ["OK", "UNKNOWN"] },
 	results: { type: "array" },
 	ledger: { type: ["string", "null"] },
 	ledgerAppended: { type: ["boolean", "null"] },
@@ -1015,7 +1018,7 @@ export const COMMANDS: readonly Command[] = [
 			{ name: "--reason", value: "TEXT", description: "Nonempty single-line reason recorded with the original legacy owner and releasing actor; accepted only with --legacy-owner --yes" },
 			{ name: "--yes", description: "Confirm the explicit legacy-owner release; does not waive any eligibility check" },
 		], example: "omp-kit scratch release /repo/var/agent-tmp/omp.123 --bin throwaway --now --json", runnable: false, dataSchema: scratchReleaseData },
-		{ name: "index-lock", description: "Dry-run report for a stale holder-less empty .git/index.lock; --apply is always refused. --reap --yes moves index.lock and next-index-*.lock older than --min-age-ms (default 120 s) aside with a ledger receipt", usage: "scratch index-lock --repo DIR [--reap --yes [--min-age-ms N] [--ledger PATH]]", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }, { name: "--reap", description: "Gated apply: move stale locks aside, never unlink" }, { name: "--min-age-ms", value: "N", description: "Minimum lock age in milliseconds; non-negative integer, default 120000" }, { name: "--ledger", value: "PATH", description: "Receipt ledger file; default ~/.local/state/omp-kit/index-lock-ledger.jsonl" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
+		{ name: "index-lock", description: "Report stale empty .git/index.lock, attributed live holders, and orphaned git network helpers older than 30 min (report only). --apply is always refused. --reap --yes moves stale index.lock and next-index-*.lock aside only without an open fd or live index writer, with a ledger receipt", usage: "scratch index-lock --repo DIR [--reap --yes [--min-age-ms N] [--ledger PATH]]", flags: [...planApply, { name: "--repo", value: "DIR", description: "Repository root holding .git" }, { name: "--reap", description: "Gated apply: move stale locks aside, never unlink" }, { name: "--min-age-ms", value: "N", description: "Minimum lock age in milliseconds; non-negative integer, default 120000" }, { name: "--ledger", value: "PATH", description: "Receipt ledger file; default ~/.local/state/omp-kit/index-lock-ledger.jsonl" }], example: "omp-kit scratch index-lock --repo /repo --json", runnable: false, mutation: true, dataSchema: indexLockData },
 			{ name: "apply", description: "Apply the guarded plan, delete expired quarantine, then kill orphaned harness servers; the JSON response repeats the policy and totals and includes the reaper receipt and the gap report. With --file-gaps, guarded gap classes are filed to their owning beads (one br comment per bead, only dirs no earlier run filed)", usage: "scratch apply [--apply --yes [--file-gaps [--db PATH]]]", flags: [
 			{ name: "--apply", description: "Request guarded apply" },
 			{ name: "--yes", description: "Confirm the apply in noninteractive mode" },

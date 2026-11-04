@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { runFixture } from "./fixture-process.ts";
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -19,7 +19,7 @@ function fixture(name: string): { scratch: string; repo: string; lock: string; l
 	const scratch = ownedTmp(`gitlock-reap-${name}`, { root: parent }).path;
 	const repo = join(scratch, "repo");
 	mkdirSync(repo, { recursive: true });
-	expect(spawnSync("git", ["init", "--quiet", repo]).status).toBe(0);
+	expect(runFixture(["git", "init", "--quiet", repo], { cwd: scratch, env: { ...process.env, GIT_CEILING_DIRECTORIES: scratch } }).rc).toBe(0);
 	const lock = join(repo, ".git", "index.lock");
 	return { scratch, repo, lock, log: join(scratch, "fleet-watch.jsonl"), ledger: join(scratch, "ledger.jsonl") };
 }
@@ -29,12 +29,12 @@ function plantLock(lock: string, ageFrom: number): void {
 	utimesSync(lock, ageFrom / 1000, ageFrom / 1000);
 }
 
-// lsof stand-in: rc 1 with no output means "no holder" for both the file gate and the git-cwd gate.
+// lsof stand-in: rc 1 with no output means "no holder" for both the file and index-writer gates.
 const clearRunner: ScratchRunner = () => ({ code: 1, stdout: "", stderr: "" });
 // The file gate sees a live holder.
-const heldRunner: ScratchRunner = (args) => args.includes("-c")
-	? { code: 1, stdout: "", stderr: "" }
-	: { code: 0, stdout: "COMMAND PID\ngit 4242\n", stderr: "" };
+const heldRunner: ScratchRunner = args => args[0] === "ps"
+	? { code: 0, stdout: "4242 1 S 10:00 Tue Nov 3 18:13:10 2026 git add f.txt\n", stderr: "" }
+	: { code: 0, stdout: "p4242\ncgit\n", stderr: "" };
 
 function tick(repo: string, log: string, extra: Record<string, unknown>) {
 	return runFleetWatchOnce(
@@ -65,10 +65,10 @@ test("a stale empty index.lock in a configured repo is reaped by the tick throug
 		expect(reaped[0]).toMatchObject({ session: "omp-test", repo: f.repo });
 		const ledger = readFileSync(f.ledger, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 		expect(ledger).toHaveLength(1);
-		expect(ledger[0]).toMatchObject({ kind: "GITLOCK_REAPED", checks: "empty,age,file-clear,cwd-clear,identity" });
+		expect(ledger[0]).toMatchObject({ kind: "GITLOCK_REAPED", checks: "empty,age,file-clear,index-writer-clear,identity" });
 		expect(existsSync(ledger[0].movedTo)).toBe(true);
 		expect(readFileSync(f.log, "utf8")).toContain('"kind":"GITLOCK_REAPED"');
-		expect(spawnSync("git", ["-C", f.repo, "status", "--porcelain"]).status).toBe(0);
+		expect(runFixture(["git", "-C", f.repo, "status", "--porcelain"], { cwd: f.repo }).rc).toBe(0);
 	} finally { rmSync(f.scratch, { recursive: true, force: true }); }
 });
 
@@ -99,7 +99,7 @@ test("planted: a young lock and a non-empty lock stay; a null reaper disables th
 	} finally { rmSync(f.scratch, { recursive: true, force: true }); }
 });
 
-const hasLsof = spawnSync("lsof", ["-v"]).error === undefined;
+const hasLsof = runFixture(["sh", "-c", "command -v lsof"], { cwd: import.meta.dir }).rc === 0;
 test.skipIf(!hasLsof)("with no gitLockReap option the tick still reaps, using the kit's own runner (real lsof)", () => {
 	const f = fixture("realdefault");
 	try {
