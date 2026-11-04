@@ -13,11 +13,13 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts" / "pysafe.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 from kitlib_tmp import owned_tmp  # noqa: E402  (kitlib owned temp dirs: removed on exit and on HUP/INT/TERM)
+import kitlib_proc  # noqa: E402  (safe_pid: the PIDGUARD1 signal-target check)
 _spec = importlib.util.spec_from_file_location("pysafe", HELPER)
 if _spec is None or _spec.loader is None:
     raise ImportError("cannot load scripts/pysafe.py")
@@ -150,6 +152,97 @@ class GrandchildHoldsPipe(Scratch):
         self.pids.append(read_pid(pidfile))
         self.assertEqual(result.outcome, pysafe.OK)
         self.assertLess(time.monotonic() - start, 4.0)
+
+    def test_run_bounded_timeout_kills_a_setpgid_grandchild(self) -> None:
+        # GROUPREAP1 (ompkit-fp72.120.16.193): a grandchild that moves to its own
+        # process group (setpgid) is out of reach of killpg but still in the
+        # leader's session; the timeout sweep must find it by os.getsid.
+        leader_file, grandchild_file = self.tmp / "leader.pid", self.tmp / "grandchild.pid"
+        result = pysafe.run_bounded([sys.executable, "-c", setpgid_tree(leader_file, grandchild_file)], 2.0, grace=0.5)
+        grandchild = read_pid(grandchild_file)
+        self.pids.append(grandchild)
+        self.assertEqual(result.outcome, pysafe.TIMEOUT)
+        self.assertTrue(wait_dead(grandchild, 3.0), "setpgid grandchild survived the run_bounded timeout")
+
+
+def setpgid_tree(leader_file: Path, grandchild_file: Path) -> str:
+    """Python source: fork a grandchild that calls setpgid(0, 0); both sleep 300 s after writing their pids."""
+    return ("import os,time\n"
+            "pid=os.fork()\n"
+            "if pid==0:\n"
+            "    os.setpgid(0,0)\n"
+            f"    open({str(grandchild_file)!r},'w').write(str(os.getpid()))\n"
+            "    time.sleep(300)\n"
+            "    os._exit(0)\n"
+            f"open({str(leader_file)!r},'w').write(str(os.getpid()))\n"
+            "time.sleep(300)\n")
+
+
+class ParentDeath(Scratch):
+    """GROUPREAP1 (ompkit-fp72.120.16.193): the 2026-11-04 CFS publish incident.
+
+    git_converge.py called run_bounded without run_main; the OMP bash tool sent
+    SIGTERM then SIGKILL about 1 s later, Python died before any cleanup ran,
+    and git's own session (pre-push hook, node) lived ~50 min under pid 1. The
+    callers below have no run_main and no signal handler. In each test an
+    unrelated session (a plain ``sleep``) is the control and must survive.
+    Every process here is started through run_bounded on a test thread, and
+    signalled only by the pid it recorded itself."""
+
+    def background(self, argv: list, timeout: float = 60.0) -> threading.Thread:
+        worker = threading.Thread(target=pysafe.run_bounded, args=(argv, timeout), daemon=True)
+        worker.start()
+        self.addCleanup(worker.join, 15.0)
+        return worker
+
+    def control(self) -> int:
+        pidfile = self.tmp / "control.pid"
+        self.background(["sh", "-c", f'echo $$ > "{pidfile}"; exec sleep 300'])
+        pid = read_pid(pidfile)
+        self.pids.append(pid)
+        return pid
+
+    def caller(self, child_argv: list) -> Tuple[threading.Thread, int]:
+        pidfile = self.tmp / "caller.pid"
+        code = ("import os,sys;sys.path.insert(0,%r);import pysafe\n"
+                "open(%r,'w').write(str(os.getpid()))\n"
+                "pysafe.run_bounded(%r, 900)\n") % (str(HELPER.parent), str(pidfile), child_argv)
+        worker = self.background([sys.executable, "-c", code])
+        pid = read_pid(pidfile)
+        self.pids.append(pid)
+        return worker, pid
+
+    @staticmethod
+    def kill_caller(worker: threading.Thread, pid: int, signals: tuple) -> None:
+        for index, signum in enumerate(signals):
+            if index:
+                time.sleep(1.0)  # the measured harness gap between SIGTERM and SIGKILL
+            try:
+                os.killpg(kitlib_proc.safe_pid(pid), signum)
+            except (ProcessLookupError, PermissionError):  # macOS: EPERM once only the unreaped zombie is left
+                pass
+        worker.join(10.0)
+
+    def test_sigterm_then_sigkill_caller_without_run_main_reaps_the_child_session(self) -> None:
+        control = self.control()
+        pidfile = self.tmp / "child.pid"
+        worker, caller = self.caller(["sh", "-c", f'echo $$ > "{pidfile}"; exec sleep 300'])
+        child = read_pid(pidfile)
+        self.pids.append(child)
+        self.kill_caller(worker, caller, (signal.SIGTERM, signal.SIGKILL))
+        self.assertTrue(wait_dead(child, 3.0), "run_bounded child session outlived its killed caller")
+        self.assertTrue(alive(control), "an unrelated session was killed")
+
+    def test_sigkill_only_caller_reaps_the_child_and_its_setpgid_grandchild(self) -> None:
+        control = self.control()
+        leader_file, grandchild_file = self.tmp / "leader.pid", self.tmp / "grandchild.pid"
+        worker, caller = self.caller([sys.executable, "-c", setpgid_tree(leader_file, grandchild_file)])
+        leader, grandchild = read_pid(leader_file), read_pid(grandchild_file)
+        self.pids.extend([leader, grandchild])
+        self.kill_caller(worker, caller, (signal.SIGKILL,))
+        self.assertTrue(wait_dead(leader, 3.0), "run_bounded leader outlived its SIGKILLed caller")
+        self.assertTrue(wait_dead(grandchild, 3.0), "setpgid grandchild outlived the SIGKILLed caller")
+        self.assertTrue(alive(control), "an unrelated session was killed")
 
 
 class Stdin(Scratch):
