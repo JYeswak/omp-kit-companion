@@ -70,16 +70,24 @@ with open(${JSON.stringify(groups)}, "w") as output:
     output.write(f"{parent} {os.getpgid(parent)} 0\\n{pid} {os.getpgrp()} {parent}\\n")
 time.sleep(${deadlineS * 3})
 `, { mode: 0o755 });
-	const started = Date.now();
-	const verdict = await diskVerdict({
-		config: { slots: 1, max_wait_s: 20, disk_observer: "sbh", disk_floor_pct: null, sbh_deadline_s: deadlineS },
-		cwd: root, sbhBin: join(bin, "sbh"),
-	});
-	expect(verdict).toMatchObject({ kind: "timeout", observer: "sbh" });
-	if (verdict.kind !== "timeout") throw new Error("stalled observer supplied no timeout verdict");
-	expect(verdict.text).toContain(`sbh check timed out after ${deadlineS}s`);
-	// The timeout, not the stub's own 3x-deadline exit, ends the observation.
-	expect(Date.now() - started).toBeLessThan(deadlineS * 2 * 1000);
+	// The 2026-11-04 152b8175 main verdict (load1 17-20 on 32 cores) lost the start race again with the load-scaled
+	// deadline: ENOENT at 8001 ms, so the stub never ran its first line within 8 s. That stall is the freshly
+	// written stub's start, not the observation, so only an observation whose stub never recorded its group is
+	// re-run, inside a load-scaled budget. Every observation must still time out within twice the deadline.
+	const until = Date.now() + fixtureDeadlineS(20) * 1000;
+	for (;;) {
+		const started = Date.now();
+		const verdict = await diskVerdict({
+			config: { slots: 1, max_wait_s: 20, disk_observer: "sbh", disk_floor_pct: null, sbh_deadline_s: deadlineS },
+			cwd: root, sbhBin: join(bin, "sbh"),
+		});
+		expect(verdict).toMatchObject({ kind: "timeout", observer: "sbh" });
+		if (verdict.kind !== "timeout") throw new Error("stalled observer supplied no timeout verdict");
+		expect(verdict.text).toContain(`sbh check timed out after ${deadlineS}s`);
+		// The timeout, not the stub's own 3x-deadline exit, ends the observation.
+		expect(Date.now() - started).toBeLessThan(deadlineS * 2 * 1000);
+		if (existsSync(groups) || Date.now() >= until) break;
+	}
 	// The timeout must target the observer's new group, never the test runner's.
 	const rows = readFileSync(groups, "utf8").trim().split("\n")
 		.map(line => line.replaceAll("\t", " ").split(" ").filter(Boolean).map(Number));
@@ -89,7 +97,7 @@ time.sleep(${deadlineS * 3})
 	expect(observer).toBeDefined();
 	expect(observer[1]).toBe(observer[0]);
 	expect(observer[1]).not.toBe(caller[1]);
-}, fixtureDeadlineS(40) * 1000);
+}, fixtureDeadlineS(80) * 1000);
 
 test.concurrent("HEAVYDEFER1 planted: an observer timeout defers with 75, persists its timing, and starts nothing", async () => {
 	const root = fixture();
