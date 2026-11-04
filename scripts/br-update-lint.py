@@ -387,7 +387,34 @@ def publication_citations(argv: list[str]) -> int:
     return 0
 
 
+def _commit_identity(repo: str, commit: object, cache: dict) -> str | None:
+    """The repo's own commit object minus only the committer's `<epoch> <tz>`; None when unresolvable.
+
+    Fresh-gate judges tree, parents, author, committer identity, signatures and message, so only
+    the committer time the commit gate's candidate cannot share with the landed commit is dropped.
+    """
+    if (not isinstance(commit, str) or len(commit) not in (40, 64)
+            or not set(commit) <= set("0123456789abcdef")):
+        return None
+    if commit not in cache:
+        rc, body, _ = run(["git", "-C", repo, "cat-file", "-p", commit], repo, 10)
+        identity = None
+        headers, separator, message = body.partition("\n\n")
+        lines = headers.split("\n")
+        committers = [i for i, line in enumerate(lines) if line.startswith("committer ")]
+        # A lossy decode could make distinct bytes compare equal, so it is never admitted.
+        if (rc == 0 and separator and "\ufffd" not in body and lines[0].startswith("tree ")
+                and len(committers) == 1):
+            name, _, stamp = lines[committers[0]].rpartition("> ")
+            if name and len(stamp.split(" ")) == 2:
+                lines[committers[0]] = name + ">"
+                identity = "\n".join(lines) + separator + message
+        cache[commit] = identity
+    return cache[commit]
+
+
 def _fresh_green(repo: str, commit: str) -> bool:
+    """A candidate row admits the landed commit only when the objects differ in committer time alone."""
     rc, directory, _ = run(["git", "-C", repo, "rev-parse", "--absolute-git-dir"], repo, 10)
     if rc != 0:
         return False
@@ -406,12 +433,17 @@ def _fresh_green(repo: str, commit: str) -> bool:
             data = data.partition(b"\n")[2]
         if data and not data.endswith(b"\n"):
             return False
+        identities: dict = {}
+        landed = None
         for line in reversed(data.splitlines()):
             row = json.loads(line)
             if not isinstance(row, dict):
                 return False
             if row.get("commit") != commit:
-                continue
+                if landed is None:
+                    landed = _commit_identity(repo, commit, identities) or ()
+                if not landed or _commit_identity(repo, row.get("commit"), identities) != landed:
+                    continue
             evidence = row.get("evidence")
             return (row.get("version") == 2 and type(row.get("rc")) is int and row["rc"] == 0
                     and isinstance(evidence, dict) and evidence.get("complete") is True)

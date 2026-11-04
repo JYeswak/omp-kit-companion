@@ -630,6 +630,53 @@ test("HANDOFFREPO1 companion still requires its ledger even if its committed scr
 	} finally { f.scratch.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
 
+test("HANDOFFTREE1 a GREEN candidate differing from the landed commit only in committer time admits the handoff; other parent, tree, message, author/committer email or rc 1 refuse", async () => {
+	const f = await handoffRepo(true);
+	try {
+		f.pregrade();
+		const tree = await f.checked(["git", "-C", f.code, "rev-parse", `${f.commit}^{tree}`]);
+		const parents = (await f.checked(["git", "-C", f.code, "rev-parse", `${f.commit}^@`])).split("\n").filter(Boolean);
+		const authorDate = await f.checked(["git", "-C", f.code, "log", "-1", "--format=%ad", "--date=raw", f.commit]);
+		const laterCommitterDate = `${Number(authorDate.split(" ")[0]) + 21} +0000`;
+		const commitTree = async (treeId: string, parentIds: string[], extra: Record<string, string> = {},
+			message = "owned source fixture") => {
+			const result = await run(["git", "-C", f.code, "commit-tree", treeId, ...parentIds.flatMap(p => ["-p", p]),
+				"-m", message, "-m", "Agent: HandoffAuthor"], {
+				cwd: f.code, deadline_s: fixtureDeadlineS(30), max_output_bytes: 1 << 20,
+				env: { ...f.env, GIT_COMMITTER_DATE: laterCommitterDate, GIT_AUTHOR_DATE: authorDate, ...extra },
+			});
+			expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+			return decoder.decode(result.stdout).trim();
+		};
+		const candidate = await commitTree(tree, parents);
+		expect(candidate).not.toBe(f.commit);
+		const otherParent = await commitTree(tree, [candidate]);
+		const emptyTree = await f.checked(["git", "-C", f.code, "hash-object", "-t", "tree", "-w", "/dev/null"]);
+		const otherTree = await commitTree(emptyTree, parents);
+		const otherMessage = await commitTree(tree, parents, {}, "changed source fixture");
+		const otherAuthor = await commitTree(tree, parents, { GIT_AUTHOR_EMAIL: "other@invalid.example" });
+		const otherCommitter = await commitTree(tree, parents, { GIT_COMMITTER_EMAIL: "other@invalid.example" });
+		const ledger = (commit: string, rc = 0) => {
+			const dir = join(f.code, ".git/omp-kit");
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, "fresh-gate-runs.jsonl"), JSON.stringify({ version: 2, commit, rc, evidence: { complete: true } }) + "\n");
+		};
+		const handoff = () => f.shim(["update", "hh-owned", "--status", "in_review", "--transition-comment", f.done]);
+		for (const [commit, rc] of [[otherParent, 0], [otherTree, 0], [otherMessage, 0], [otherAuthor, 0], [otherCommitter, 0],
+			[candidate, 1], ["f".repeat(40), 0]] as const) {
+			ledger(commit, rc);
+			const refused = await handoff();
+			expect(refused.rc, `${commit} rc=${rc}`).toBe(4);
+			expect(decoder.decode(refused.stderr)).toContain("HANDOFF_UNGATED");
+			expect(await f.status()).toBe("in_progress");
+		}
+		ledger(candidate);
+		const admitted = await handoff();
+		expect(admitted.rc, decoder.decode(admitted.stderr)).toBe(0);
+		expect(await f.status()).toBe("in_review");
+	} finally { f.scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1_000);
+
 test("HANDOFFREPO1 native positional, file and stdin DONE comments all use the same exact pregrade", async () => {
 	const f = await handoffRepo();
 	try {
