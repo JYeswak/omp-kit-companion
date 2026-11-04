@@ -40,14 +40,15 @@ if [ "$#" -ge 2 ] && [ "$1" = "--selftest-interruption" ]; then
   sleep 300
   exit $?
 fi
-REGEX_BUDGET_RUNS=1
+# src/full-test-runner.ts still passes --regex-budget-runs 5 for the Intel macOS row; the
+# value is validated but has no effect, since regex-budget always takes five samples.
 if [ "$#" -gt 0 ]; then
   if [ "$#" -ne 2 ] || [ "$1" != "--regex-budget-runs" ]; then
     echo "ladder: usage: --regex-budget-runs 1|5" >&2
     exit 2
   fi
   case "$2" in
-    1|5) REGEX_BUDGET_RUNS=$2 ;;
+    1|5) ;;
     *) echo "ladder: regex-budget run count must be 1 or 5" >&2; exit 2 ;;
   esac
 fi
@@ -116,14 +117,10 @@ else
   echo "NOT_RUN flywheel-invariants: map/gate not in this package (ships with ompkit-n2s6 package list); source CI runs it"
 fi
 # Regex cost gate: every rule condition timed in Bun on near-miss shapes and a
-# realistic live stream (RX1). Red names the rule, shape and encoding.
-if [ "$REGEX_BUDGET_RUNS" = "5" ]; then
-  set -- --runs 5
-else
-  set --
-fi
-if [ -n "${GITHUB_ACTIONS:-}" ]; then set -- "$@" --judge-regardless-of-load; fi
-step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts" "$@"
+# realistic live stream (RX1). Red names the rule, shape and encoding. The script
+# always takes five interleaved samples and scales the stream budget by a
+# same-moment reference (REGEXREF1), so it takes no run-count or load arguments.
+step regex-budget "$OMP_KIT_BUN" "$HERE/scripts/regex-budget.ts"
 step claim-selftest /bin/sh checkers/check-claim-discipline.sh --selftest
 # The harness imports omp's matcher; after an omp upgrade this proves it still agrees with the CLI.
 step cli-crosscheck "$OMP_KIT_BUN" "$HERE/scripts/ttsr-harness.ts" --cli-crosscheck --jobs 8

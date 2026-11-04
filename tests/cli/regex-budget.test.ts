@@ -1,9 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { OMP_SRC, loadRuleFile } from "../../scripts/rule-class.ts";
-import { DEFAULT_ENCODINGS, DEFAULT_SHAPES, DEFAULT_SIZES, DEFAULT_WRITE_EDIT_STREAM_FILE, WRITE_EDIT_STREAM_BUDGET_MS, appliesToWriteEditStream, buildWriteEditWire, failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, failsWriteEditStreamBudget, lintCondition, literalProbe, medianMs, measureCondition, runGate } from "../../scripts/regex-budget.ts";
+import { DEFAULT_ENCODINGS, DEFAULT_REFERENCE_FILE, DEFAULT_SHAPES, DEFAULT_SIZES, DEFAULT_WRITE_EDIT_STREAM_FILE, INCONCLUSIVE_EXIT_CODE, REFERENCE_RATIO_CLAMP, STREAM_BUDGET_MS, TRACKING_BAND, WRITE_EDIT_STREAM_BUDGET_MS, appliesToWriteEditStream, buildWriteEditWire, failsNearMissBudget, failsSingleCheckCeiling, failsStreamBudget, failsWriteEditStreamBudget, gateExitCode, judgeReference, judgeTracking, lintCondition, literalProbe, loadReference, medianMs, measureCondition, runGate, verdictLine } from "../../scripts/regex-budget.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const root = resolve(import.meta.dir, "../..");
@@ -332,3 +334,262 @@ test("mutant with a deleted write/edit fixture fails closed instead of passing v
 		await expect(runGate(fixture.dir, streamFile, join(fixture.dir, "missing-write-edit.md"))).rejects.toThrow();
 	} finally { cleanup(fixture.dir); }
 });
+
+// REGEXREF1 (ompkit-fp72.120.16.186): the stream budget follows a same-moment frozen reference. Live host slowdown
+// depends on host load, so the gated tests drive the judge through the timing seams; the taskpolicy -c background
+// runs live in scripts/regex-budget-slowhost-evidence.sh, outside the suite.
+const REGEX_BUDGET_SCRIPT = resolve(root, "scripts/regex-budget.ts");
+
+type GateCliRun = { rc: number | null; verdict: string; liveLine: string; liveStatus: string; totalMs: number; budgetMs: number; ratio: number | null; text: string };
+
+async function runGateCli(args: readonly string[], label: string): Promise<GateCliRun> {
+	const result = await runFixtureAsync([process.execPath, "run", "--no-env-file", "--config=/dev/null", REGEX_BUDGET_SCRIPT, ...args], { cwd: root, floor_s: 120, label, env: { ...process.env, OMP_SRC } });
+	const text = new TextDecoder().decode(result.stdout);
+	const lines = text.split("\n");
+	const liveLine = lines.find(line => line.startsWith("live stream: ")) ?? "";
+	const totals = /median=([\d.]+)ms \/ ([\d.]+)ms/.exec(liveLine);
+	if (!totals) throw new Error("REGEXREF1_LIVE_LINE_MISSING label=" + label + " rc=" + result.rc + " stderr=" + new TextDecoder().decode(result.stderr));
+	const ratio = /\bratio=([\d.]+)/.exec(liveLine);
+	console.log("REGEXREF1 " + label + " rc=" + result.rc + "\n" + lines[0] + "\n" + liveLine);
+	return { rc: result.rc, verdict: lines[0] ?? "", liveLine, liveStatus: liveLine.split(" ")[2] ?? "", totalMs: Number(totals[1]), budgetMs: Number(totals[2]), ratio: ratio ? Number(ratio[1]) : null, text };
+}
+
+/** Heavy plant: copies until the quiet total is at least 2x the base budget. kit-no-gh-poll#1's calibration-run median
+ * (rule_baseline.live in the reference fixture) is 111.548 ms: ceil(2 x 500 / 111.548) = 9 copies gives about 1004 ms,
+ * on the boundary, so one more: 10 copies, about 1115 ms (2.23x). Past the 1.6x divergence bound, it FAILs on any host. */
+const HEAVY_SLOW_RULE_COPIES = 10;
+/** Near-budget plant: 5 copies, about 560-570 ms, 1.14x over budget: inside the measured reference/rule divergence. */
+const NEAR_BUDGET_SLOW_RULE_COPIES = 5;
+
+/** Rules that each carry the frozen kit-no-gh-poll#1 condition: a real slow stream rule set. */
+function plantedSlowRules(copies: number): string {
+	const fixture = JSON.parse(readFileSync(DEFAULT_REFERENCE_FILE, "utf8")) as { conditions: Array<{ rule: string; condition_index: number; pattern: string }> };
+	const pattern = fixture.conditions.find(condition => condition.rule === "kit-no-gh-poll" && condition.condition_index === 1)?.pattern;
+	if (!pattern) throw new Error("REGEXREF1 reference fixture lacks kit-no-gh-poll#1");
+	mkdirSync(scratchRoot, { recursive: true });
+	const dir = ownedTmp("regexref-slow-rule", { root: scratchRoot }).path;
+	for (let copy = 1; copy <= copies; copy++) {
+		const file = join(dir, "fixture-slow-gh-poll-" + copy + ".md");
+		writeFileSync(file, "---\ncondition: " + JSON.stringify(pattern) + "\nscope: tool:bash\ninterruptMode: never\n---\nplanted slow rule copy " + copy + "\n");
+		expect(loadRuleFile(file).rule.condition?.[0]).toBe(pattern);
+	}
+	return dir;
+}
+
+/** The planted set fails on the stream budget alone, and its reference-normalized cost exceeds the base budget. */
+function expectSlowRuleFails(run: GateCliRun): void {
+	expect(run.rc).toBe(1);
+	expect(run.verdict).toBe("REGEX-BUDGET: FAIL");
+	expect(run.liveStatus).toBe("FAIL");
+	expect(run.ratio).not.toBeNull();
+	expect(run.ratio!).toBeLessThanOrEqual(REFERENCE_RATIO_CLAMP);
+	expect(Math.abs(run.budgetMs - STREAM_BUDGET_MS * Math.max(1, run.ratio!))).toBeLessThan(5);
+	expect(run.totalMs).toBeGreaterThan(run.budgetMs);
+	expect(run.totalMs / Math.max(1, run.ratio!)).toBeGreaterThan(STREAM_BUDGET_MS);
+	const reportLine = run.text.split("\n").find(line => line.startsWith("JSON_REPORT="));
+	if (!reportLine) throw new Error("REGEXREF1 JSON_REPORT missing");
+	const report = JSON.parse(reportLine.slice("JSON_REPORT=".length)) as { reference: { status: string }; lint_violations: unknown[]; measurements: Array<{ status: string; failures: unknown[] }> };
+	expect(report.reference.status).toBe("OK");
+	expect(report.lint_violations).toEqual([]);
+	for (const measurement of report.measurements) {
+		expect(measurement.status).toBe("MEASURED");
+		expect(measurement.failures).toEqual([]);
+	}
+}
+
+test("REGEXREF1 planted slow rule: ten copies of kit-no-gh-poll#1 (2x over budget) FAIL on a quiet host by more than the divergence bound", async () => {
+	const slowRuleQuietMs = loadReference().baseline?.live.find(row => row.rule === "kit-no-gh-poll" && row.condition_index === 1)?.ms;
+	expect(slowRuleQuietMs).toBe(111.548);
+	expect(Math.ceil(2 * STREAM_BUDGET_MS / slowRuleQuietMs!)).toBe(HEAVY_SLOW_RULE_COPIES - 1);
+	const dir = plantedSlowRules(HEAVY_SLOW_RULE_COPIES);
+	try {
+		const run = await runGateCli(["--rules", dir], "heavy-slow-rule-quiet");
+		expectSlowRuleFails(run);
+		expect(run.totalMs / run.budgetMs).toBeGreaterThan(TRACKING_BAND);
+	} finally { cleanup(dir); }
+}, fixtureDeadlineS(120) * 1000);
+
+// A 1.14x-over plant sits inside the measured reference/rule divergence (up to 1.385x): at ratio 1 it must FAIL, but on
+// a slow host the scaled budget can cover it and the tracking guard then reads INCONCLUSIVE (never PASS), so only the
+// quiet run is asserted here.
+test("REGEXREF1 planted slow rule: five copies of kit-no-gh-poll#1 (1.14x over budget) FAIL on a quiet host", async () => {
+	const dir = plantedSlowRules(NEAR_BUDGET_SLOW_RULE_COPIES);
+	try {
+		expectSlowRuleFails(await runGateCli(["--rules", dir], "near-budget-slow-rule-quiet"));
+	} finally { cleanup(dir); }
+}, fixtureDeadlineS(120) * 1000);
+
+/** Seam fixture calibration: a tiny reference (the frozen conditions over a one-line wire) calibrated at 100 ms, and an
+ * unchanged rule whose calibration-run baseline is 400 ms. The seams then inject ref_now and per-rule stream times. */
+const SEAM_CALIBRATED_MS = 100;
+const SEAM_UNCHANGED_BASELINE_MS = 400;
+
+/** One unchanged rule (in the tiny reference's baseline) plus `planted` new rules (not in it), a tiny stream and reference. */
+function seamFixture(planted: number): { dir: string; streamFile: string; referenceFile: string } {
+	mkdirSync(scratchRoot, { recursive: true });
+	const dir = ownedTmp("regexref-seam", { root: scratchRoot }).path;
+	const ruleFile = (name: string) => {
+		const file = join(dir, name + ".md");
+		writeFileSync(file, "---\ncondition: " + JSON.stringify("^a+b$") + "\nscope: tool:bash\ninterruptMode: never\n---\nseam fixture rule\n");
+		return loadRuleFile(file);
+	};
+	const unchanged = ruleFile("fixture-unchanged");
+	for (let copy = 1; copy <= planted; copy++) ruleFile("fixture-planted-" + copy);
+	const committed = JSON.parse(readFileSync(DEFAULT_REFERENCE_FILE, "utf8")) as { conditions: unknown[] };
+	writeFileSync(join(dir, "ref-wire.txt"), "echo a\n");
+	const referenceFile = join(dir, "reference.json");
+	writeFileSync(referenceFile, JSON.stringify({
+		conditions: committed.conditions,
+		wire_file: "ref-wire.txt",
+		ref_calibrated_ms: SEAM_CALIBRATED_MS,
+		rule_baseline: {
+			live: [{ rule: unchanged.name, condition_index: 0, pattern_sha256: createHash("sha256").update(unchanged.rule.condition?.[0] ?? "").digest("hex"), ms: SEAM_UNCHANGED_BASELINE_MS }],
+			write_edit: [],
+		},
+	}));
+	const streamFile = join(dir, "stream.sh");
+	writeFileSync(streamFile, "echo a\n");
+	return { dir, streamFile, referenceFile };
+}
+
+/** Judge the seam fixture on a host whose reference ran `refRatio` x slower, the unchanged rule `ruleSlowdown` x slower,
+ * and each planted rule at `plantedQuietMs` quiet cost times `ruleSlowdown`. */
+async function seamGate(fixture: { dir: string; streamFile: string; referenceFile: string }, refRatio: number, ruleSlowdown: number, plantedQuietMs = 0) {
+	return runGate(fixture.dir, fixture.streamFile, undefined, {
+		referenceFile: fixture.referenceFile,
+		referenceSampleSeam: () => SEAM_CALIBRATED_MS * refRatio,
+		streamTimingSeam: (_sample, rule) => (rule === "fixture-unchanged" ? SEAM_UNCHANGED_BASELINE_MS : plantedQuietMs) * ruleSlowdown,
+	});
+}
+
+test("REGEXREF1 seam: the heavy plant on a host with a slowed reference FAILs by more than the divergence bound", async () => {
+	// Ten copies of kit-no-gh-poll#1 at 111.548 ms quiet, carried by two planted rules (557.74 ms each).
+	const fixture = seamFixture(2);
+	try {
+		// Rules as slow as the reference (5x), and rules slowed only 5/1.6x: the most the reference may outrun them.
+		for (const ruleSlowdown of [5, 5 / TRACKING_BAND]) {
+			const report = await seamGate(fixture, 5, ruleSlowdown, HEAVY_SLOW_RULE_COPIES * 111.548 / 2);
+			expect(report.reference).toMatchObject({ status: "OK", ratio: 5, scale: 5 });
+			expect(report.stream.budget_ms).toBe(5 * STREAM_BUDGET_MS);
+			expect(report.status).toBe("FAIL");
+			expect(gateExitCode(report)).toBe(1);
+			expect(report.stream.total_ms / report.stream.budget_ms).toBeGreaterThan(TRACKING_BAND);
+		}
+	} finally { cleanup(fixture.dir); }
+}, fixtureDeadlineS(60) * 1000);
+
+test("REGEXREF1 seam: unchanged rules at reference ratio 5 PASS the scaled budget with tracking OK where the absolute judge refuses", async () => {
+	const fixture = seamFixture(0);
+	try {
+		const report = await seamGate(fixture, 5, 4.5);
+		expect(report.stream.total_ms).toBe(SEAM_UNCHANGED_BASELINE_MS * 4.5);
+		// The absolute judge (fixed 500 ms) refuses this total; the scaled budget admits it.
+		expect(failsStreamBudget(report.stream.total_ms)).toBe(true);
+		expect(report.stream.budget_ms).toBe(5 * STREAM_BUDGET_MS);
+		expect(report.stream.tracking).toMatchObject({ status: "OK", mix_ratio: 4.5, matched_conditions: 1 });
+		expect(report.status).toBe("PASS");
+		expect(gateExitCode(report)).toBe(0);
+	} finally { cleanup(fixture.dir); }
+}, fixtureDeadlineS(60) * 1000);
+
+test("REGEXREF1 seam: a reference slowed 2.0x past the unchanged rules reads INCONCLUSIVE, never PASS", async () => {
+	const fixture = seamFixture(0);
+	try {
+		const report = await seamGate(fixture, 5, 2.5);
+		expect(report.stream.total_ms).toBeGreaterThan(STREAM_BUDGET_MS);
+		expect(report.stream.total_ms).toBeLessThanOrEqual(report.stream.budget_ms);
+		expect(report.stream.tracking).toMatchObject({ status: "DIVERGED", reason: "REFERENCE_TRACKING_DIVERGED", mix_ratio: 2.5 });
+		expect(report.reference.ratio! / report.stream.tracking.mix_ratio!).toBe(2);
+		expect(report.status).toBe("INCONCLUSIVE");
+		expect(gateExitCode(report)).toBe(INCONCLUSIVE_EXIT_CODE);
+		expect(verdictLine(report).startsWith("REGEX-BUDGET: INCONCLUSIVE REFERENCE_TRACKING_DIVERGED")).toBe(true);
+	} finally { cleanup(fixture.dir); }
+}, fixtureDeadlineS(60) * 1000);
+
+test("REGEXREF1 reference judge: missing, NaN or 0 FAIL closed, a ratio past the clamp is INCONCLUSIVE, below 1 clamps to 1", () => {
+	const committed = loadReference();
+	expect(committed.loadError).toBeUndefined();
+	expect(committed.reference?.patterns).toHaveLength(2);
+	expect(committed.calibratedMs).toBeGreaterThan(0);
+	// Committed fixture JSON, checked field by field below.
+	const fixture = JSON.parse(readFileSync(DEFAULT_REFERENCE_FILE, "utf8")) as { calibration: Array<{ ref_ms: number; load1: number }> };
+	const calibration = fixture.calibration;
+	expect(calibration).toHaveLength(5);
+	expect(medianMs(calibration.map(run => run.ref_ms))).toBe(committed.calibratedMs!);
+	expect(calibration.every(run => Number.isFinite(run.load1))).toBe(true);
+	expect(committed.baseline?.live.length).toBeGreaterThan(0);
+	expect(committed.baseline?.write_edit.length).toBeGreaterThan(0);
+
+	expect(judgeReference([], 100)).toMatchObject({ status: "FAIL", reason: "REFERENCE_MISSING", scale: 1 });
+	expect(judgeReference([100, 100, undefined, 100, 100], 100)).toMatchObject({ status: "FAIL", reason: "REFERENCE_MISSING", scale: 1 });
+	expect(judgeReference([100, 100, null, 100, 100], 100)).toMatchObject({ status: "FAIL", reason: "REFERENCE_MISSING", scale: 1 });
+	expect(judgeReference([100, Number.NaN, 100, 100, 100], 100)).toMatchObject({ status: "FAIL", reason: "REFERENCE_NAN", scale: 1 });
+	expect(judgeReference([100, Number.POSITIVE_INFINITY, 100, 100, 100], 100)).toMatchObject({ status: "FAIL", reason: "REFERENCE_NAN", scale: 1 });
+	expect(judgeReference([100, 0, 100, 100, 100], 100)).toMatchObject({ status: "FAIL", reason: "REFERENCE_ZERO", scale: 1 });
+	expect(judgeReference([100], 0)).toMatchObject({ status: "FAIL", reason: "REFERENCE_CALIBRATION_INVALID", scale: 1 });
+	expect(judgeReference([100], undefined)).toMatchObject({ status: "FAIL", reason: "REFERENCE_CALIBRATION_INVALID", scale: 1 });
+	expect(REFERENCE_RATIO_CLAMP).toBe(8);
+	expect(judgeReference([801, 801, 801, 801, 801], 100)).toMatchObject({ status: "INCONCLUSIVE", reason: "REFERENCE_RATIO_ABOVE_CLAMP", scale: 1 });
+	expect(judgeReference([800, 800, 800, 800, 800], 100)).toMatchObject({ status: "OK", scale: 8 });
+	// The median, not the max: one slow sample cannot buy a looser budget.
+	expect(judgeReference([100, 100, 100, 100, 390], 100)).toMatchObject({ status: "OK", ref_now_ms: 100, scale: 1 });
+	// A fast host keeps exactly the base budget, never a tighter or looser one.
+	expect(judgeReference([50, 50, 50, 50, 50], 100)).toMatchObject({ status: "OK", ratio: 0.5, scale: 1 });
+	expect(judgeReference([250, 250, 250, 250, 250], 100).scale).toBe(2.5);
+	expect(failsStreamBudget(1250, STREAM_BUDGET_MS * 2.5)).toBe(false);
+	expect(failsStreamBudget(1250.1, STREAM_BUDGET_MS * 2.5)).toBe(true);
+	expect(failsStreamBudget(10, Number.NaN)).toBe(true);
+	expect(failsWriteEditStreamBudget(10, Number.NaN)).toBe(true);
+});
+
+test("REGEXREF1 tracking guard: a reference that stops tracking the unchanged rules cannot buy budget", () => {
+	const baseline = [
+		{ rule: "a", condition_index: 0, pattern_sha256: "aa", ms: 100 },
+		{ rule: "b", condition_index: 0, pattern_sha256: "bb", ms: 60 },
+	];
+	const tracked = [{ ...baseline[0]!, ms: 400 }, { ...baseline[1]!, ms: 240 }];
+	expect(TRACKING_BAND).toBe(1.6);
+	// The reference bought nothing (pass at the base budget, or a fail anyway): no check needed.
+	expect(judgeTracking(tracked, baseline, 4, false)).toMatchObject({ status: "NOT_NEEDED", mix_ratio: 4 });
+	expect(judgeTracking(tracked, baseline, 4, true)).toMatchObject({ status: "OK", mix_ratio: 4, matched_conditions: 2, matched_baseline_ms: 160 });
+	expect(judgeTracking(tracked, baseline, 4 * 1.59, true).status).toBe("OK");
+	expect(judgeTracking(tracked, baseline, 4 * 1.61, true)).toMatchObject({ status: "DIVERGED", reason: "REFERENCE_TRACKING_DIVERGED" });
+	expect(judgeTracking(tracked, baseline, 4 / 1.61, true)).toMatchObject({ status: "DIVERGED", reason: "REFERENCE_TRACKING_DIVERGED" });
+	expect(judgeTracking(tracked, baseline, 4 * 2, true).status).toBe("DIVERGED");
+	// New or edited rules never count as host slowdown: a planted slow rule or a changed pattern stays unmatched.
+	const planted = [...tracked, { rule: "slow", condition_index: 0, pattern_sha256: "ss", ms: 5000 }, { rule: "b", condition_index: 0, pattern_sha256: "edited", ms: 5000 }];
+	expect(judgeTracking(planted, baseline, 4, true)).toMatchObject({ status: "OK", mix_ratio: 4, matched_conditions: 2 });
+	expect(judgeTracking(tracked, undefined, 4, true)).toMatchObject({ status: "UNVERIFIED", reason: "REFERENCE_TRACKING_UNVERIFIED" });
+	expect(judgeTracking([{ ...baseline[1]!, ms: 240 }], baseline, 4, true)).toMatchObject({ status: "UNVERIFIED", matched_baseline_ms: 60 });
+	expect(judgeTracking(tracked, baseline, null, true).status).toBe("UNVERIFIED");
+});
+
+test("REGEXREF1 gate seam: an injected missing, NaN or 0 reference FAILs with its name and ratio > 8 is INCONCLUSIVE with exit 75", async () => {
+	const fixture = seamFixture(0);
+	const { dir, streamFile, referenceFile } = fixture;
+	try {
+		// Paired control: the same rule with an injected reference equal to calibration passes at the base budget.
+		const control = await runGate(dir, streamFile, undefined, { referenceFile, referenceSampleSeam: () => SEAM_CALIBRATED_MS });
+		expect(control.status).toBe("PASS");
+		expect(control.reference).toMatchObject({ status: "OK", ratio: 1, scale: 1 });
+		expect(control.stream.budget_ms).toBe(STREAM_BUDGET_MS);
+		expect(gateExitCode(control)).toBe(0);
+		for (const [injected, reason] of [[undefined, "REFERENCE_MISSING"], [Number.NaN, "REFERENCE_NAN"], [0, "REFERENCE_ZERO"]] as const) {
+			const report = await runGate(dir, streamFile, undefined, { referenceFile, referenceSampleSeam: sample => sample === 2 ? injected : SEAM_CALIBRATED_MS });
+			expect(report.status).toBe("FAIL");
+			expect(report.reference.reason).toBe(reason);
+			expect(report.stream.budget_ms).toBe(STREAM_BUDGET_MS);
+			expect(gateExitCode(report)).toBe(1);
+			expect(verdictLine(report).startsWith("REGEX-BUDGET: FAIL " + reason)).toBe(true);
+		}
+		const tooSlow = await seamGate(fixture, REFERENCE_RATIO_CLAMP + 1, REFERENCE_RATIO_CLAMP + 1);
+		expect(tooSlow.status).toBe("INCONCLUSIVE");
+		expect(tooSlow.reference.reason).toBe("REFERENCE_RATIO_ABOVE_CLAMP");
+		expect(gateExitCode(tooSlow)).toBe(INCONCLUSIVE_EXIT_CODE);
+		expect(verdictLine(tooSlow).startsWith("REGEX-BUDGET: INCONCLUSIVE REFERENCE_RATIO_ABOVE_CLAMP")).toBe(true);
+		const noFixture = await runGate(dir, streamFile, undefined, { referenceFile: join(dir, "missing-reference.json") });
+		expect(noFixture.status).toBe("FAIL");
+		expect(noFixture.reference.reason).toBe("REFERENCE_MISSING");
+		expect(noFixture.reference.load_error).toBeDefined();
+	} finally { cleanup(dir); }
+}, fixtureDeadlineS(60) * 1000);

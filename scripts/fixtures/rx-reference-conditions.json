@@ -1,0 +1,436 @@
+{
+	"schema": "rx-reference/1",
+	"bead": "ompkit-fp72.120.16.186",
+	"purpose": "Frozen REGEXREF1 stream reference: the kit-no-gh-poll stream conditions swept over a pinned wire in every regex-budget worker. Never edit these bytes to make a gate pass; a changed reference needs a fresh calibration.",
+	"source": {
+		"rule": "rules/kit-no-gh-poll.md",
+		"wire": "scripts/e2e-live.sh",
+		"commit": "895bef92c1d90fbc7a831fa57010f23ce5c2bee8"
+	},
+	"wire_file": "rx-reference-wire.txt",
+	"wire_encoding": "JSON.stringify({ command: <wire_file bytes> }), swept in 16-byte prefixes like the live stream",
+	"conditions": [
+		{
+			"rule": "kit-no-gh-poll",
+			"condition_index": 0,
+			"pattern": "(?i)(?:\\{\"command\":\"(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])*|[;&|()](?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])*|\\\\n(?:\\\\{1,3}t|\\s)*|\\b(?:if|then|do|while|until)(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+)(?=((?:[A-Za-z_][A-Za-z0-9_]*=[^\\s\"\\\\;&|]*(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+)*))\\1gh(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+run(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+watch\\b"
+		},
+		{
+			"rule": "kit-no-gh-poll",
+			"condition_index": 1,
+			"pattern": "(?i)(?:\\{\"command\":\"(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])*|[;&|()](?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])*|\\\\n(?:\\\\{1,3}t|\\s)*|\\b(?:if|then|do)(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+)(?=((?:[A-Za-z_][A-Za-z0-9_]*=[^\\s\"\\\\;&|]*(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+)*))\\1(?:for|while|until)\\b(?=(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])*(?=((?:[A-Za-z_][A-Za-z0-9_]*=[^\\s\"\\\\;&|]*(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+)*))\\2gh(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+(?:run(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+(?:view|list)|api)\\b|(?:(?!\\bdone\\b)[\\s\\S]){0,2048}(?:[;&|()](?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])*|\\b(?:if|then|do|while|until)(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+|\\\\n(?:\\\\{1,3}t|\\s)*)(?=((?:[A-Za-z_][A-Za-z0-9_]*=[^\\s\"\\\\;&|]*(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+)*))\\3gh(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+(?:run(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+(?:view|list)|api)\\b)(?=(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])*(?=((?:[A-Za-z_][A-Za-z0-9_]*=[^\\s\"\\\\;&|]*(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+)*))\\4sleep\\b|(?:(?!\\bdone\\b)[\\s\\S]){0,2048}(?:[;&|()](?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])*|\\b(?:if|then|do|while|until)(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+|\\\\n(?:\\\\{1,3}t|\\s)*)(?=((?:[A-Za-z_][A-Za-z0-9_]*=[^\\s\"\\\\;&|]*(?:\\s|\\\\[nrt]|\\\\\\\\\\\\[nrt])+)*))\\5sleep\\b)(?:(?!\\bdone\\b)[\\s\\S]){0,2048}\\bdone\\b"
+		}
+	],
+	"ref_calibrated_ms": 191.76,
+	"calibration": [
+		{
+			"run": 1,
+			"ref_ms": 191.962,
+			"load1": 15.593,
+			"load1_after": 14.346,
+			"sample_ref_ms": [
+				191.962,
+				193.344,
+				192.045,
+				191.904,
+				190.076
+			]
+		},
+		{
+			"run": 2,
+			"ref_ms": 190.335,
+			"load1": 14.346,
+			"load1_after": 11.291,
+			"sample_ref_ms": [
+				192.821,
+				190.114,
+				190.335,
+				191.746,
+				189.795
+			]
+		},
+		{
+			"run": 3,
+			"ref_ms": 191.257,
+			"load1": 11.291,
+			"load1_after": 12.123,
+			"sample_ref_ms": [
+				192.955,
+				192.133,
+				190.811,
+				191.257,
+				190.577
+			]
+		},
+		{
+			"run": 4,
+			"ref_ms": 191.76,
+			"load1": 12.123,
+			"load1_after": 9.907,
+			"sample_ref_ms": [
+				190.992,
+				191.76,
+				191.801,
+				191.002,
+				193.183
+			]
+		},
+		{
+			"run": 5,
+			"ref_ms": 191.952,
+			"load1": 9.907,
+			"load1_after": 9.191,
+			"sample_ref_ms": [
+				192.816,
+				192.901,
+				191.813,
+				191.952,
+				190.797
+			]
+		}
+	],
+	"calibration_method": "median of 5 full `bun scripts/regex-budget.ts` runs on 2026-11-04 (Apple arm64, 32 cores, nice -n 10, Bun 1.4.4); each run's ref_ms is the median of its five per-sample reference means; load1 is read before the run",
+	"rule_baseline_method": "per condition: median over the five calibration runs of each run's per-rule stream median; keyed by rule, condition index and sha256 of the pattern measured (rules/ as of the calibration runs)",
+	"rule_baseline": {
+		"live": [
+			{
+				"rule": "bash-capped-git-status",
+				"condition_index": 0,
+				"pattern_sha256": "620beb7f0f001091b4382ee81068f59b29bcc77faf99e4870e44d5c2caca5c8c",
+				"ms": 29.424
+			},
+			{
+				"rule": "bash-capped-git-status",
+				"condition_index": 1,
+				"pattern_sha256": "23938f3c821ce7fcc12822ad8d56fbb95825ec796787b4e1fe2ce6d4998d3f40",
+				"ms": 14.353
+			},
+			{
+				"rule": "bash-glob-silenced",
+				"condition_index": 0,
+				"pattern_sha256": "0a44e9629e5717578a2a7597dce09a01fac9ce1ebbd6d1aa80bb246c6eb69880",
+				"ms": 4.183
+			},
+			{
+				"rule": "bash-pipe-exit",
+				"condition_index": 0,
+				"pattern_sha256": "abeca91664bfafde6d03ff4afd63fefbb4a55c950e8050d6c58e8bdcaf47f6ea",
+				"ms": 8.868
+			},
+			{
+				"rule": "bash-silenced-filter-pipe",
+				"condition_index": 0,
+				"pattern_sha256": "c6f6f962742ec515ec4e6df2d180faa3d29e5257f806ad9d7f6dc8c64659c112",
+				"ms": 9.627
+			},
+			{
+				"rule": "kit-br-readonly-unsupported",
+				"condition_index": 0,
+				"pattern_sha256": "f556e27b988175ec5fca032c22176490e45de409c4289d009a0de6d942c0f046",
+				"ms": 29.496
+			},
+			{
+				"rule": "kit-br-readonly-unsupported",
+				"condition_index": 1,
+				"pattern_sha256": "5d4005f59bfc85176fbe9ecee4e3ade86f76a7d8fd5545cbb9585a7e4ca04b31",
+				"ms": 13.736
+			},
+			{
+				"rule": "kit-close-needs-evidence",
+				"condition_index": 0,
+				"pattern_sha256": "0773b753d396a878ef2041ab5f3da1ab029cae9ad54d459843f57a03eb5db2f6",
+				"ms": 3.966
+			},
+			{
+				"rule": "kit-close-needs-evidence",
+				"condition_index": 1,
+				"pattern_sha256": "fba217da9cb08ad45ecb7569e13865f1482a1fb2cebfcf7f7b3d154ab7bc7d3e",
+				"ms": 3.928
+			},
+			{
+				"rule": "kit-close-needs-evidence",
+				"condition_index": 2,
+				"pattern_sha256": "0492ef8a00930119b5801b884d6a467d634e3f5312ad3cdc842dfcf22dc93dac",
+				"ms": 3.939
+			},
+			{
+				"rule": "kit-close-reason-no-evidence",
+				"condition_index": 0,
+				"pattern_sha256": "652cc14e0d2406181814e24fb709f2897480373134f2b3533f4a2e736e203430",
+				"ms": 10.688
+			},
+			{
+				"rule": "kit-close-reason-no-evidence",
+				"condition_index": 1,
+				"pattern_sha256": "f4a145672e80937b26c0b62d30c48c41cf5da9819078c31438f44d4ea5287c7e",
+				"ms": 8.632
+			},
+			{
+				"rule": "kit-commit-preflight",
+				"condition_index": 0,
+				"pattern_sha256": "cc9c933896a2c34b1f657e257a34d19d1939dca342655c1f788ba01cfaf0f91d",
+				"ms": 4.879
+			},
+			{
+				"rule": "kit-gate-must-name-the-plant",
+				"condition_index": 0,
+				"pattern_sha256": "2bfad2cc2077ebc45a7e0735d56b929df4026c3146e973dafbe9644bf1921b3b",
+				"ms": 2.404
+			},
+			{
+				"rule": "kit-no-double-quoted-substitution",
+				"condition_index": 0,
+				"pattern_sha256": "2f5729f688eb475ad08c2eeb29205320ba5dc6f2fd50b4a9606a76c20f49f88d",
+				"ms": 8.429
+			},
+			{
+				"rule": "kit-no-gh-poll",
+				"condition_index": 0,
+				"pattern_sha256": "77f838725cf9dd69d115eedc0ae117bd0fb6fbdda8cb688461ab963c888b531e",
+				"ms": 79.498
+			},
+			{
+				"rule": "kit-no-gh-poll",
+				"condition_index": 1,
+				"pattern_sha256": "853f2290d573cbb0decef4a99f133ccbd319d6732713e2cd5125f4469250d5e2",
+				"ms": 111.548
+			},
+			{
+				"rule": "kit-no-verify",
+				"condition_index": 0,
+				"pattern_sha256": "4637e69f0135fdcb9cbe0c7166cd74471fbba6ad0cbd4d6c9b4cb66d925a7bfd",
+				"ms": 12.368
+			},
+			{
+				"rule": "kit-no-verify",
+				"condition_index": 1,
+				"pattern_sha256": "d2efae581c47329c766155e398afbdbbd28e0a929f83b6727ae09c4da43fda4c",
+				"ms": 1.775
+			},
+			{
+				"rule": "kit-no-verify",
+				"condition_index": 2,
+				"pattern_sha256": "d2b387023a098dccdf85f7caabf16b957170fedf31971fd3067e81923309ad1d",
+				"ms": 1.611
+			},
+			{
+				"rule": "kit-rea-runtime-shipped",
+				"condition_index": 0,
+				"pattern_sha256": "602feb759479cde237df5a57a749fab60cc0e5814d027da66485c8b929825be1",
+				"ms": 7.025
+			},
+			{
+				"rule": "kit-relative-path-not-cwd",
+				"condition_index": 0,
+				"pattern_sha256": "52e24a3d82a33231ba912c99c0d4b04b13302d791825cffb58e443fa67cf970e",
+				"ms": 2.023
+			},
+			{
+				"rule": "kit-settings-mutation",
+				"condition_index": 0,
+				"pattern_sha256": "f47366dabc8cbffb11a3cceb5d6e07faa0557c76e3c32c77a7097672a839de99",
+				"ms": 20.552
+			},
+			{
+				"rule": "zz-canary-scope-probe",
+				"condition_index": 0,
+				"pattern_sha256": "452fbfe9921bafee251b4749cf470ec1096a1cd8db5f8e482411fd874186d7c4",
+				"ms": 2.223
+			}
+		],
+		"write_edit": [
+			{
+				"rule": "kit-ast-parsing-engineering",
+				"condition_index": 0,
+				"pattern_sha256": "0004798f26a79b144c5fffe477b62f0dd9950a1948ff685e2206d225f43113ea",
+				"ms": 9.998
+			},
+			{
+				"rule": "kit-ast-parsing-engineering",
+				"condition_index": 1,
+				"pattern_sha256": "777141f9ad8473ebc9e36b2e3581de2b63332ef47952b59ea8b106285a4c2b03",
+				"ms": 3.503
+			},
+			{
+				"rule": "kit-ast-parsing-engineering",
+				"condition_index": 2,
+				"pattern_sha256": "3e584c293a7ba721d04eb640f78ecf3073a296ca9d4018d8cd587bd71c5d99ef",
+				"ms": 3.537
+			},
+			{
+				"rule": "kit-ast-parsing-engineering",
+				"condition_index": 3,
+				"pattern_sha256": "4f43de794a45374c95886accecd687adbe7e5a06c0471e79bfb34286a2ccb16c",
+				"ms": 2.634
+			},
+			{
+				"rule": "kit-ast-parsing-engineering",
+				"condition_index": 4,
+				"pattern_sha256": "9de3acc1b5e8ffd8a34c68d591e349acaa924487ae68d6bf9c9a7b13b68e46c2",
+				"ms": 0.469
+			},
+			{
+				"rule": "kit-ast-parsing-engineering",
+				"condition_index": 5,
+				"pattern_sha256": "23b280d6fca3164ac852e60eed5c4c50486d51cddadc7ce484f456a974ad28f4",
+				"ms": 5.368
+			},
+			{
+				"rule": "kit-ast-parsing-engineering",
+				"condition_index": 6,
+				"pattern_sha256": "006db5ad2742c5b6eac03f2daa255363cc98bde9581ba1354c8b144ae11b5ae7",
+				"ms": 3.547
+			},
+			{
+				"rule": "kit-jsonl-close",
+				"condition_index": 0,
+				"pattern_sha256": "25325f077132cc094f096625207f38d8e546e38144538094e1cba85a077db3be",
+				"ms": 0.516
+			},
+			{
+				"rule": "kit-probe-readable-facts",
+				"condition_index": 0,
+				"pattern_sha256": "858e0844cc21a73fc923f76a4dfc7cd02172e81c49e12032236b80e78645fa6b",
+				"ms": 23.423
+			},
+			{
+				"rule": "kit-probe-readable-facts",
+				"condition_index": 1,
+				"pattern_sha256": "27b485d1fd7981d1a09ded03076857bd36395298c0bf85339afca1ac5fdf9c17",
+				"ms": 16.54
+			},
+			{
+				"rule": "kit-probe-readable-facts",
+				"condition_index": 2,
+				"pattern_sha256": "fbe7c059e3d8992d103411b2822308ffb2a5134d0046c1ce8aa708c5b09eb7f2",
+				"ms": 16.639
+			},
+			{
+				"rule": "kit-probe-readable-facts",
+				"condition_index": 3,
+				"pattern_sha256": "df8ea1d33eac3edd89303cf22f2dd96ab83f77a82e9eb45c37d23f3be6742d76",
+				"ms": 16.681
+			},
+			{
+				"rule": "kit-probe-readable-facts",
+				"condition_index": 4,
+				"pattern_sha256": "b22f5fcc6f17454fad3df7e4fbe3f303cbe25f501eb884a0b63e1e33a5d991f4",
+				"ms": 10.662
+			},
+			{
+				"rule": "kit-probe-readable-facts",
+				"condition_index": 5,
+				"pattern_sha256": "250c4550c60f86c590ec80cdc2b4f493d66160bb578ba87e27b83914ff96cc5d",
+				"ms": 10.562
+			},
+			{
+				"rule": "kit-probe-readable-facts",
+				"condition_index": 6,
+				"pattern_sha256": "ca90c4e14024d1406baa4df1e46fe689f0452ae1d4a3b0b282d763e782f2ec40",
+				"ms": 20.278
+			},
+			{
+				"rule": "kit-regex-engineering",
+				"condition_index": 0,
+				"pattern_sha256": "7b71a22b6a29d1eabdc0fa3b15fccbf39245a29691d537aadd153a19926ca3f2",
+				"ms": 29.49
+			},
+			{
+				"rule": "kit-solo-review-not-review",
+				"condition_index": 0,
+				"pattern_sha256": "731380c41b9db3f9e18512a9e2ea340a864eb6a61620bb6c478c8a9e5b09a404",
+				"ms": 1.175
+			},
+			{
+				"rule": "kit-test-skip",
+				"condition_index": 0,
+				"pattern_sha256": "fb5672aa273ae6cf6e0a5741140cc45998bcdab73c3a6ee6df95dad7a1927443",
+				"ms": 0.497
+			},
+			{
+				"rule": "kit-test-skip",
+				"condition_index": 1,
+				"pattern_sha256": "9a79f7c1087d0f51d24b35d0670265956459c32cff71c1173616489ad99db59e",
+				"ms": 10.067
+			},
+			{
+				"rule": "kit-test-skip",
+				"condition_index": 2,
+				"pattern_sha256": "2fe238b29510823d9a93aaddaf902c84af0d3df5cb6120c26f95b577d22f00b2",
+				"ms": 0.529
+			},
+			{
+				"rule": "kit-test-skip",
+				"condition_index": 3,
+				"pattern_sha256": "5a704ef78db4d994af72d04d7ba606ade1b78864b8ff18b08a4de4cb7abe4e73",
+				"ms": 0.464
+			},
+			{
+				"rule": "kit-test-skip",
+				"condition_index": 4,
+				"pattern_sha256": "8bd42b9648976ec92ee4bcf4499ffe1af34d4f8d8ff31c864a823567e52fe7a1",
+				"ms": 0.41
+			},
+			{
+				"rule": "kit-test-skip",
+				"condition_index": 5,
+				"pattern_sha256": "71bbddf8e53d9a7b523c865462775ef26d5f01468554c625018a5ea2f90c30a1",
+				"ms": 2.99
+			},
+			{
+				"rule": "kit-test-skip",
+				"condition_index": 6,
+				"pattern_sha256": "aa1383bbd54160ab79c71c834283a31879e2c12daef8aa9006499630440e9e0b",
+				"ms": 0.729
+			},
+			{
+				"rule": "kit-test-source-runtime",
+				"condition_index": 0,
+				"pattern_sha256": "9e1563067db965476bb42ec4394d7328ca8da2cafb087d32eea0b1d54a39c740",
+				"ms": 9.773
+			},
+			{
+				"rule": "kit-test-source-runtime",
+				"condition_index": 1,
+				"pattern_sha256": "0a3c7cbad3287ba00da20996b546130c3a868557e3406c9c25007d942909d9dd",
+				"ms": 1.052
+			},
+			{
+				"rule": "kit-test-source-runtime",
+				"condition_index": 2,
+				"pattern_sha256": "6fefa56be0ee2164fc673de18400a8a1c8439e511e0b2062f67c5c1718ad066f",
+				"ms": 5.175
+			},
+			{
+				"rule": "kit-test-source-runtime",
+				"condition_index": 3,
+				"pattern_sha256": "c0c77c9207a53a0189d6ae4f04dd5a5a2353e9acb097713d66aa80b2c4e887b0",
+				"ms": 5.182
+			},
+			{
+				"rule": "kit-test-source-runtime",
+				"condition_index": 4,
+				"pattern_sha256": "b86b01c909b642f53e618bf06a4f71516b02e2b71eb02e6fc78322eb53d4c511",
+				"ms": 5.135
+			},
+			{
+				"rule": "kit-weasel-retry",
+				"condition_index": 0,
+				"pattern_sha256": "5a98f52eb8f3c4d38465c17d2392c44a3003a721942001b6019eed57ae2ac7b2",
+				"ms": 1.237
+			},
+			{
+				"rule": "kit-weasel-retry",
+				"condition_index": 1,
+				"pattern_sha256": "882a2758334a6228794cf1862aa8df39a7f0dc945ab768d4ffd1d36446b7f6fa",
+				"ms": 1.214
+			},
+			{
+				"rule": "rs-unsafe-added-router",
+				"condition_index": 0,
+				"pattern_sha256": "234efa820e8fa47bc9fc6f9d0edc7785e0f204b64d476fad751e0278d2e2d003",
+				"ms": 0.521
+			}
+		]
+	}
+}
