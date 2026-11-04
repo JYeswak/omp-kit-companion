@@ -410,57 +410,6 @@ write_exclude_block() {
 	printf 'listed installer-owned hook members in %s\n' "$exclude_file"
 }
 
-# --check names installed members that differ from this checkout (a stale
-# installed hook runs old rules after the source moves on). Exit 0 when every
-# member matches, 3 naming each missing or stale member.
-if [ "$MODE" = "check" ]; then
-	stale=0
-	while IFS=' ' read -r file_group file_chain file_dest file_source file_mode; do
-		case "$file_group" in
-			pre_push) [ "$PUSHED_BEADS" = 1 ] || continue ;;
-			native_preservation) [ "$NATIVE_PRESERVATION" = 1 ] || continue ;;
-		esac
-		dest="$HOOKS/hooks.d/$file_chain/$file_dest"
-		src="$KITROOT/$file_source"
-		if [ ! -f "$dest" ]; then
-			printf 'install-commit-msg-bead: MISSING installed member: %s\n' "$dest" >&2
-			stale=1
-		elif ! cmp -s "$dest" "$src"; then
-			printf 'install-commit-msg-bead: STALE installed member: %s differs from %s; rerun %s\n' "$dest" "$src" "$0" >&2
-			stale=1
-		fi
-	done <<EOF
-$(installation_manifest)
-EOF
-	parser="$HOOKS/hooks.d/pre-commit/check-commit-imports.sh"
-	if [ ! -f "$parser" ] || ! sh "$parser" --parser-info --repo "$TARGET"; then
-		printf 'install-commit-msg-bead: MISSING or STALE installed import parser in %s\n' "$TARGET" >&2
-		stale=1
-	fi
-	if [ "$NATIVE_PRESERVATION" = 1 ]; then
-		dir="$HOOKS/hooks.d/pre-commit"
-		if ! native_member | cmp -s "$dir/40-omp-kit-native-preserve" -; then
-			printf 'install-commit-msg-bead: MISSING or STALE native-preservation member in %s\n' "$TARGET" >&2
-			stale=1
-		fi
-	fi
-	if ! check_template_import_map; then
-		printf 'install-commit-msg-bead: MISSING or STALE reviewed template-import-map in %s\n' "$TARGET" >&2
-		stale=1
-	fi
-	rel=$(exclude_hooks_rel) || rel=UNREADABLE
-	if [ -n "$rel" ]; then
-		exclude_file=$(exclude_path) || exclude_file=''
-		if [ "$rel" = UNREADABLE ] || [ ! -f "$exclude_file" ] ||
-			! { exclude_render "$rel" "$exclude_file" || printf 'MALFORMED\n'; } | cmp -s - "$exclude_file"; then
-			printf 'install-commit-msg-bead: MISSING or STALE installer-owned block in %s; rerun %s\n' "${exclude_file:-info/exclude}" "$0" >&2
-			stale=1
-		fi
-	fi
-	if [ "$stale" = 0 ]; then printf 'install-commit-msg-bead: hooks fresh in %s\n' "$TARGET"; exit 0; fi
-	exit 3
-fi
-
 chain_dir() {
 	printf '%s/hooks.d/%s' "$HOOKS" "$1"
 }
@@ -515,15 +464,11 @@ EOF
 	[ "$manifest_found" = 1 ]
 }
 
-# write_runner <path>: the chain runner. Hook types fed on stdin (pre-push,
+# runner_body: the chain runner's exact bytes. Hook types fed on stdin (pre-push,
 # reference-transaction) replay one buffered copy to every member, so a
 # member that reads stdin cannot starve the ones after it.
-write_runner() {
-	path=$1
-	if [ -e "$path" ]; then backup "$path"; else UNDO_RM="$UNDO_RM $path"; fi
-	# Stage beside the hook; rename publishes it without truncating running readers.
-	staged="$path.install.$$"
-	cat > "$staged" <<'EOF'
+runner_body() {
+	cat <<'EOF'
 #!/bin/sh
 # chain runner: run every executable NN-<name> member in hooks.d/<type> in
 # sort order. Only numeric-prefixed entries run: helper libraries shipped
@@ -609,6 +554,27 @@ fi
 rm -f "$findings"
 exit $rc
 EOF
+}
+
+# The runner generation is read from runner_body itself, so installer upgrades and
+# --check judge staleness by one source; bump the marker in runner_body with every change.
+RUNNER_GENERATION=$(runner_body | sed -n 's/^# \(GATEEVENTS1 runner v[0-9][0-9]*\):.*/\1/p')
+[ -n "$RUNNER_GENERATION" ] || { echo 'install-commit-msg-bead: runner_body carries no GATEEVENTS1 generation marker' >&2; exit 2; }
+
+# runner_stale <path>: a kit chain runner (bespoke runners are never judged) that
+# lacks stdin replay or the current generation marker. Install and --check share it.
+runner_stale() {
+	grep -q 'chain runner: run every executable' "$1" 2>/dev/null &&
+		{ ! grep -q 'replay one buffered copy' "$1" || ! grep -qF "$RUNNER_GENERATION" "$1"; }
+}
+
+# write_runner <path>: install runner_body as the chain runner.
+write_runner() {
+	path=$1
+	if [ -e "$path" ]; then backup "$path"; else UNDO_RM="$UNDO_RM $path"; fi
+	# Stage beside the hook; rename publishes it without truncating running readers.
+	staged="$path.install.$$"
+	runner_body > "$staged" || { rm -f "$staged"; return 1; }
 	if ! chmod +x "$staged" || ! mv -f "$staged" "$path"; then
 		rm -f "$staged"
 		return 1
@@ -628,9 +594,8 @@ ensure_chain() {
 		return 0
 	fi
 	if [ -x "$entry" ] && grep -q 'hooks\.d' "$entry" 2>/dev/null; then
-		# The marker names the runner generation: bump it (here and in write_runner) with every runner change,
-		# or installed repos keep the old runner while --check reports them fresh.
-		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v7' "$entry"; }; then
+		# runner_stale names the generation from runner_body; --check reports the same predicate.
+		if runner_stale "$entry"; then
 			write_runner "$entry"
 			printf 'upgraded chain runner (stdin replay + gate-events ledger): %s\n' "$entry"
 		else
@@ -694,16 +659,83 @@ install_pre_push() {
 	member="$dir/40-omp-kit-pushed-beads"
 	install_manifest_group pre_push
 	wrapper=$(mktemp "${TMPDIR:-/tmp}/pushed-beads-member.XXXXXX") || exit 2
-	cat > "$wrapper" <<'EOF'
+	pushed_beads_wrapper > "$wrapper" || { rm -f "$wrapper"; exit 2; }
+	place "$wrapper" "$member" +x
+	rm -f "$wrapper"
+	printf 'installed pushed-beads member: %s\n' "$member"
+}
+
+# pushed_beads_wrapper: the generated pre-push member; install writes it and --check compares it.
+pushed_beads_wrapper() {
+	cat <<'EOF'
 #!/bin/sh
 # pre-push member: refuse pushed ranges with id-less commits.
 set -u
 exec sh "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/check-pushed-beads.sh" --pre-push
 EOF
-	place "$wrapper" "$member" +x
-	rm -f "$wrapper"
-	printf 'installed pushed-beads member: %s\n' "$member"
 }
+
+# --check names installed members that differ from this checkout (a stale
+# installed hook runs old rules after the source moves on). Exit 0 when every
+# member matches, 3 naming each missing or stale member.
+if [ "$MODE" = "check" ]; then
+	stale=0
+	while IFS=' ' read -r file_group file_chain file_dest file_source file_mode; do
+		case "$file_group" in
+			pre_push) [ "$PUSHED_BEADS" = 1 ] || continue ;;
+			native_preservation) [ "$NATIVE_PRESERVATION" = 1 ] || continue ;;
+		esac
+		dest="$HOOKS/hooks.d/$file_chain/$file_dest"
+		src="$KITROOT/$file_source"
+		if [ ! -f "$dest" ]; then
+			printf 'install-commit-msg-bead: MISSING installed member: %s\n' "$dest" >&2
+			stale=1
+		elif ! cmp -s "$dest" "$src"; then
+			printf 'install-commit-msg-bead: STALE installed member: %s differs from %s; rerun %s\n' "$dest" "$src" "$0" >&2
+			stale=1
+		fi
+	done <<EOF
+$(installation_manifest)
+EOF
+	parser="$HOOKS/hooks.d/pre-commit/check-commit-imports.sh"
+	if [ ! -f "$parser" ] || ! sh "$parser" --parser-info --repo "$TARGET"; then
+		printf 'install-commit-msg-bead: MISSING or STALE installed import parser in %s\n' "$TARGET" >&2
+		stale=1
+	fi
+	if [ "$NATIVE_PRESERVATION" = 1 ]; then
+		dir="$HOOKS/hooks.d/pre-commit"
+		if ! native_member | cmp -s "$dir/40-omp-kit-native-preserve" -; then
+			printf 'install-commit-msg-bead: MISSING or STALE native-preservation member in %s\n' "$TARGET" >&2
+			stale=1
+		fi
+	fi
+	if ! check_template_import_map; then
+		printf 'install-commit-msg-bead: MISSING or STALE reviewed template-import-map in %s\n' "$TARGET" >&2
+		stale=1
+	fi
+	rel=$(exclude_hooks_rel) || rel=UNREADABLE
+	if [ -n "$rel" ]; then
+		exclude_file=$(exclude_path) || exclude_file=''
+		if [ "$rel" = UNREADABLE ] || [ ! -f "$exclude_file" ] ||
+			! { exclude_render "$rel" "$exclude_file" || printf 'MALFORMED\n'; } | cmp -s - "$exclude_file"; then
+			printf 'install-commit-msg-bead: MISSING or STALE installer-owned block in %s; rerun %s\n' "${exclude_file:-info/exclude}" "$0" >&2
+			stale=1
+		fi
+	fi
+	# Chain runners judged by the installer's own upgrade predicate; bespoke runners are skipped.
+	for runner_type in pre-commit commit-msg pre-push reference-transaction; do
+		if runner_stale "$HOOKS/$runner_type"; then
+			printf 'install-commit-msg-bead: STALE chain runner: %s lacks %s; rerun %s\n' "$HOOKS/$runner_type" "$RUNNER_GENERATION" "$0" >&2
+			stale=1
+		fi
+	done
+	if [ "$PUSHED_BEADS" = 1 ] && ! pushed_beads_wrapper | cmp -s - "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads"; then
+		printf 'install-commit-msg-bead: MISSING or STALE pushed-beads member: %s; rerun %s\n' "$HOOKS/hooks.d/pre-push/40-omp-kit-pushed-beads" "$0" >&2
+		stale=1
+	fi
+	if [ "$stale" = 0 ]; then printf 'install-commit-msg-bead: hooks fresh in %s\n' "$TARGET"; exit 0; fi
+	exit 3
+fi
 
 # install_on_main: the shared-main member reads the pre-push lines itself and
 # runs before the pushed-beads member and any 40- gate, so an off-main push is

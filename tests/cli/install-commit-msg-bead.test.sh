@@ -98,5 +98,41 @@ grep -q "ADMITTED reviewed history transform plan=$SHA ref=refs/heads/main old=$
 ok "$?" "0" "witness-reviewed-transform-provenance"
 }
 
+# RUNNERCHECK1 (ompkit-fp72.120.16.236): --check reads the chain runners with the
+# installer's own upgrade predicate and the pushed-beads wrapper against its generator.
+group_runnercheck() {
+R=$(installed_repo runnercheck) || exit 1
+sh "$INSTALLER" --check "$R" > "$TMP/o-rc-fresh" 2>&1
+ok "$?" "0" "runnercheck-control-fresh-rc"
+# Planted: fresh members, but the pre-push runner is a v5 generation.
+sed 's/GATEEVENTS1 runner v[0-9][0-9]*/GATEEVENTS1 runner v5/' "$R/.git/hooks/pre-push" > "$TMP/v5" && cat "$TMP/v5" > "$R/.git/hooks/pre-push"
+sh "$INSTALLER" --check "$R" > "$TMP/o-rc-v5" 2>&1
+ok "$?" "3" "runnercheck-v5-runner-rc"
+grep -q "STALE chain runner: $R/.git/hooks/pre-push" "$TMP/o-rc-v5"
+ok "$?" "0" "runnercheck-v5-runner-named"
+grep -c 'STALE chain runner' "$TMP/o-rc-v5" | grep -qx 1
+ok "$?" "0" "runnercheck-only-planted-runner-named"
+# Mutant: the same installer with --check's runner test removed reads the v5 runner as fresh.
+mkdir -p "$TMP/mut/src" && cp -R "$(dirname -- "$INSTALLER")" "$TMP/mut/scripts" && cp "$(dirname -- "$INSTALLER")/../src/"*.v1.json "$TMP/mut/src/"
+# shellcheck disable=SC2016 # literal $ in the sed pattern, matched in the installer source
+sed 's/if runner_stale "\$HOOKS\/\$runner_type"; then/if false; then/' "$INSTALLER" > "$TMP/mut/scripts/install-commit-msg-bead.sh"
+sh "$TMP/mut/scripts/install-commit-msg-bead.sh" --check "$R" > "$TMP/o-rc-mut" 2>&1
+ok "$?" "0" "runnercheck-mutant-misses-v5"
+grep -q 'STALE chain runner' "$TMP/o-rc-mut"
+ok "$?" "1" "runnercheck-mutant-silent"
+sh "$INSTALLER" "$R" > /dev/null 2>&1
+sh "$INSTALLER" --check "$R" > /dev/null 2>&1
+ok "$?" "0" "runnercheck-reinstall-fresh"
+# Planted: a stale generated pushed-beads wrapper.
+printf '# stale wrapper\n' >> "$R/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads"
+sh "$INSTALLER" --check "$R" > "$TMP/o-rc-wrap" 2>&1
+ok "$?" "3" "runnercheck-stale-wrapper-rc"
+grep -q "STALE pushed-beads member: $R/.git/hooks/hooks.d/pre-push/40-omp-kit-pushed-beads" "$TMP/o-rc-wrap"
+ok "$?" "0" "runnercheck-stale-wrapper-named"
+sed 's/! pushed_beads_wrapper | cmp -s - /false \&\& cmp -s - /' "$INSTALLER" > "$TMP/mut/scripts/install-commit-msg-bead.sh"
+sh "$TMP/mut/scripts/install-commit-msg-bead.sh" --check "$R" > /dev/null 2>&1
+ok "$?" "0" "runnercheck-mutant-misses-wrapper"
+}
+
 start_group group_witness
-run_installer_groups group_plain group_sibling group_pathbound group_refusing group_restore group_idless group_stdin group_upgrade group_inert
+run_installer_groups group_plain group_sibling group_pathbound group_refusing group_restore group_idless group_stdin group_upgrade group_inert group_runnercheck
