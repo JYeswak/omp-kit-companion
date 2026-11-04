@@ -415,6 +415,9 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
  const trustGuardRefusal = guardFailure?.toLowerCase().includes("omp-trust-guard: fail-closed:") === true;
  let next = 0;
  let trustGuardNotRun = false;
+ // KITUPDATELOAD1: the failed stage's own evidence lines, so a postcheck failure names the failing scenario
+ // (`FAIL  <id> :: <verdict>`) or the regex-budget stream summary instead of a bare producer rc.
+ let evidence: string[] = [];
  for (const line of lines) {
   const match = /^(GREEN|RED)\s+(\S+) producer_rc=(\d+)(?: duration_ms=(\d+))?(?:\s|$)/.exec(line);
   if (!match) continue;
@@ -449,6 +452,8 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
      const end = output.stdout.indexOf("\nOMP_KIT_STAGE_START name=", begin + marker.length);
      const until = end < 0 ? output.stdout.length : end + 1;
      const length = until - begin;
+     evidence = output.stdout.slice(begin, until).split("\n").filter(text => text.startsWith("FAIL  ")
+      || (name === "regex-budget" && (text.startsWith("live stream: ") || text.startsWith("write/edit stream: "))));
      stages[name].output = {
       stdout_chars: length,
       ...(length > 2500 ? { stdout_head: output.stdout.slice(begin, begin + 2500) } : {}),
@@ -468,7 +473,7 @@ export function classifyLadder(result: BundledRunResult, ids: readonly string[],
    next++;
    if (deferral !== null) { failures.push(`Stage ${name} deferred by heavy admission (producer_rc=75): ${deferral}`); break; }
   }
-  if (match[1] === "RED") { failures.push(`Stage ${name} returned producer_rc=${match[3]}`); break; }
+  if (match[1] === "RED") { failures.push(`Stage ${name} returned producer_rc=${match[3]}`, ...evidence); break; }
  }
  const liveJudged = stages["e2e-live"].status === "PASS" || stages["e2e-live"].status === "FAIL";
  const ordinary = lines.filter(line => line.startsWith("ok    ")).map(line => line.slice(6));

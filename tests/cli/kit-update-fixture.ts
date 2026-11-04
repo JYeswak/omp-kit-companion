@@ -1,8 +1,9 @@
 import { expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import type { FullTestReport } from "../../src/full-test-runner.ts";
 import type { ReleaseAsset, ReleasePlatform } from "../../src/kit-release.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import { CASE_HEADER } from "../../src/case-corpus.ts";
@@ -11,12 +12,14 @@ import { run as runBounded } from "../../src/kitlib/run";
 import { recordOptOut } from "../../src/activation.ts";
 import { KNOWN_JOBS } from "../../src/service.ts";
 import { releaseProcess } from "./release-process.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 
 export { sha, platform, hostPlatform, scratch, tar, binary, manifest, fixtureContractFiles, fixture, input,
  RECONCILE_PROFILES, reconcilePluginLink, preparePartialReconcile, runPartialReconcile,
- buildNPlusTwoCandidate, buildCompiledReleaseFixture, writeSyntheticGhVerifier };
-export type { FixtureContext };
+ buildNPlusTwoCandidate, buildCompiledReleaseFixture, writeSyntheticGhVerifier,
+ copyReleaseSource, journeyWorkload, assertJourneyWorkload, JOURNEY_WORKLOAD, MINIMAL_SCENARIOS, runCandidateFullTest };
+export type { FixtureContext, CompiledReleaseFixture };
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const platform: ReleasePlatform = { os: "darwin", arch: "arm64", libc: "none" };
 
@@ -241,7 +244,61 @@ async function runPartialReconcile(prepared: PreparedPartialReconcile) {
 		throw new Error(`update --reconcile timed out or was not reaped: ${Buffer.from(result.stderr).toString("utf8")}`);
 	return { rc: result.rc, output: JSON.parse(Buffer.from(result.stdout).toString("utf8")) as { data: Record<string, unknown> } };
 }
-async function copyReleaseSource(sourceRoot: string, destination: string): Promise<void> {
+// KITUPDATELOAD1: the journey tests judge the updater, not the corpus. Their candidate keeps every ladder stage
+// real but ships a minimal rule set: the plant's bash rule (kit-close-needs-evidence), one write rule
+// (kit-skill-forbidden-instruction) and the two other rules docs/flywheel-invariants.tsv names as mechanisms, so that
+// stage still judges its unmodified map. Each keeps one fire and one near-miss row and its harness cases, plus the
+// admission guard pair live coverage requires and the e2e plant. The full corpus stays judged where it is the
+// subject: package-release-live, the full suite's e2e and native certification.
+const MINIMAL_RULES = {
+	"rules": ["kit-close-needs-evidence", "kit-close-reason-no-evidence"],
+	"rules-fleet": ["kit-skill-forbidden-instruction", "kit-no-shared-merge"],
+} as const;
+const MINIMAL_SCENARIOS = ["close-bare-fire", "close-help-near", "close-bare-word-reason", "close-reason-evidenced-near",
+	"skill-forbidden-fire", "skill-forbidden-near", "shared-merge-fire", "shared-merge-base-near",
+	"scratch-is-not-a-home-fire", "scratch-is-not-a-home-near", "plant-streamed-evidenced-close"] as const;
+// The workload a journey candidate may carry: TTSR rule rows (one fire, one near-miss per rule) and rules.
+const JOURNEY_WORKLOAD = { ruleScenarioRows: 8, rules: 4 } as const;
+
+function minimizeCorpus(root: string): void {
+	// Case rows of removed TTSR rules go; admission-guard rows (no rules/*.md) stay, as the harness gate requires.
+	const removed = new Set<string>();
+	for (const [directory, names] of Object.entries(MINIMAL_RULES)) {
+		const keep = new Set<string>(names.map(name => name + ".md"));
+		for (const entry of readdirSync(join(root, directory)))
+			if (entry.endsWith(".md") && !keep.has(entry)) { rmSync(join(root, directory, entry)); removed.add(entry.slice(0, -3)); }
+	}
+	for (const file of readdirSync(join(root, "cases")).filter(name => name.endsWith(".tsv"))) {
+		const casesPath = join(root, "cases", file);
+		const caseLines = readFileSync(casesPath, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "").split("\n");
+		if (caseLines[0] !== CASE_HEADER) throw new Error("minimal candidate cases have an unknown schema: " + file);
+		const caseRows = caseLines.slice(1).filter(row => row.trim() !== "" && !row.startsWith("#") && !removed.has(row.split("\t")[0]!));
+		writeFileSync(casesPath, [CASE_HEADER, ...caseRows].join("\n") + "\n");
+	}
+	const scenariosPath = join(root, "tests", "live", "scenarios.json");
+	const scenarios = JSON.parse(readFileSync(scenariosPath, "utf8")) as { id: string }[];
+	const selected = MINIMAL_SCENARIOS.map(id => scenarios.find(row => row.id === id)
+		?? (() => { throw new Error("minimal candidate scenario missing: " + id); })());
+	writeFileSync(scenariosPath, "[\n" + selected.map(row => "  " + JSON.stringify(row)).join(",\n") + "\n]\n");
+}
+
+/** Workload a candidate's ladder will run; journeys refuse a candidate above JOURNEY_WORKLOAD before any timing. */
+function journeyWorkload(root: string): { ruleScenarioRows: number; rules: number } {
+	const scenarios = JSON.parse(readFileSync(join(root, "tests", "live", "scenarios.json"), "utf8")) as
+		{ backend?: string; plant?: boolean }[];
+	const rules = ["rules", "rules-fleet"].flatMap(directory => existsSync(join(root, directory))
+		? readdirSync(join(root, directory)).filter(entry => entry.endsWith(".md")) : []);
+	return { ruleScenarioRows: scenarios.filter(row => (row.backend ?? "ttsr") === "ttsr" && !row.plant).length, rules: rules.length };
+}
+
+function assertJourneyWorkload(root: string): void {
+	const workload = journeyWorkload(root);
+	if (workload.ruleScenarioRows > JOURNEY_WORKLOAD.ruleScenarioRows || workload.rules > JOURNEY_WORKLOAD.rules)
+		throw new Error(`KITUPDATELOAD1: journey candidate exceeds its workload bound: ${workload.ruleScenarioRows} rule scenario rows `
+			+ `(max ${JOURNEY_WORKLOAD.ruleScenarioRows}), ${workload.rules} rules (max ${JOURNEY_WORKLOAD.rules})`);
+}
+
+async function copyReleaseSource(sourceRoot: string, destination: string, options: { minimal?: boolean } = {}): Promise<void> {
 	mkdirSync(destination, { recursive: true });
 	for (const directory of ["src", "installer", "scripts", "rules", "rules-fleet", "retired", "cases", "policy", "extensions", "examples", "checkers", "config", "skills", "tests/live", "plugins/omp-kit-tern"]) {
 		const target = join(destination, directory);
@@ -256,20 +313,22 @@ async function copyReleaseSource(sourceRoot: string, destination: string): Promi
 		mkdirSync(dirname(target), { recursive: true });
 		copyFileSync(join(sourceRoot, file), target);
 	}
+	if (options.minimal) minimizeCorpus(destination);
 	// MANIFEST.tsv is generated and gitignored, so an exact-commit export has
 	// no copy to take. Regenerate it from the candidate's own rules with the
 	// same generator the release packaging uses (package-release.ts
 	// packageRuleManifest); a stale live-tree copy is never an input.
 	// Bounded through kitlib run, not a raw spawn: the generator measured
 	// 0.7-0.9 s wall on this Mac (2026-10-27); the 60 s deadline only bounds hangs.
-	const manifest = await runBounded(["sh", join(destination, "scripts", "build-manifest.sh"), "--stdout"], {
+	// A minimal candidate also prunes rules-fleet/, so it rewrites both manifests in place.
+	const manifest = await runBounded(["sh", join(destination, "scripts", "build-manifest.sh"), ...(options.minimal ? [] : ["--stdout"])], {
 		deadline_s: 60, cwd: destination, env: { ...process.env, TMPDIR: process.env.TMPDIR ?? dirname(destination) },
 	});
 	if (manifest.timed_out) throw new Error("candidate MANIFEST.tsv generation timed out");
 	if (manifest.rc !== 0)
 		throw new Error("candidate MANIFEST.tsv generation failed: " + new TextDecoder().decode(manifest.stdout) + new TextDecoder().decode(manifest.stderr));
 	if (manifest.stdout.length === 0) throw new Error("candidate MANIFEST.tsv generation produced no output");
-	writeFileSync(join(destination, "MANIFEST.tsv"), manifest.stdout);
+	if (!options.minimal) writeFileSync(join(destination, "MANIFEST.tsv"), manifest.stdout);
 }
 
 async function buildNPlusTwoCandidate(ctx: FixtureContext): Promise<{
@@ -277,7 +336,8 @@ async function buildNPlusTwoCandidate(ctx: FixtureContext): Promise<{
 	targetCases: number; targetQuiet: number; packageBuildDurationMs: number;
 }> {
 	const sourceRoot = join(ctx.root, "candidate-source");
-	await copyReleaseSource(resolve(import.meta.dir, "../.."), sourceRoot);
+	await copyReleaseSource(resolve(import.meta.dir, "../.."), sourceRoot, { minimal: true });
+	assertJourneyWorkload(sourceRoot);
 	const casesPath = join(sourceRoot, "cases", "cases.tsv");
 	const rawCases = readFileSync(casesPath, "utf8").replace(/\r\n/g, "\n").replace(/\n+$/, "");
 	const caseLines = rawCases.split("\n");
@@ -327,14 +387,19 @@ type CompiledReleaseFixture = { version: string; archivePath: string; indexPath:
 
 async function buildCompiledReleaseFixture(
 	scratchRoot: string, repoRoot: string, home: string, version: string, selectedPlatform: ReleasePlatform,
+	plant?: (sourceRoot: string) => void,
 ): Promise<CompiledReleaseFixture> {
 	const output = join(scratchRoot, `package-${version}`);
 	mkdirSync(output, { mode: 0o700 });
+	const sourceRoot = join(scratchRoot, `source-${version}`);
+	await copyReleaseSource(repoRoot, sourceRoot, { minimal: true });
+	plant?.(sourceRoot);
+	assertJourneyWorkload(sourceRoot);
 	const platformKey = [selectedPlatform.os, selectedPlatform.arch, selectedPlatform.libc].join("-");
 	const path = [dirname(process.execPath), process.env.PATH ?? "", "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
 		.filter(Boolean).join(":");
-	const build = await releaseProcess(["/bin/sh", join(repoRoot, "scripts/package-release.sh"), "--version", version,
-		"--platform", platformKey, "--out", output], { cwd: repoRoot,
+	const build = await releaseProcess(["/bin/sh", join(sourceRoot, "scripts/package-release.sh"), "--version", version,
+		"--platform", platformKey, "--out", output], { cwd: sourceRoot,
 		env: { PATH: path, HOME: home, TMPDIR: scratchRoot, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
 		stdout: "pipe",
 		stderr: "pipe", deadline_s: 120 });
@@ -349,6 +414,29 @@ async function buildCompiledReleaseFixture(
 	})}\n`, { mode: 0o600, flag: "wx" });
 	writeFileSync(`${archivePath}.sigstore.json`, `${JSON.stringify({ fixture: true })}\n`, { mode: 0o600, flag: "wx" });
 	return { version, archivePath, indexPath };
+}
+
+/** Extract a compiled fixture release and run its own `test --full` (the update postcheck's ladder) in a private HOME. */
+async function runCandidateFullTest(release: CompiledReleaseFixture, scratchRoot: string): Promise<FullTestReport> {
+	const root = join(scratchRoot, `extracted-${release.version}`), home = join(scratchRoot, `full-home-${release.version}`);
+	mkdirSync(root, { mode: 0o700 });
+	mkdirSync(home, { mode: 0o700 });
+	const extract = await runBounded(["tar", "xf", release.archivePath, "-C", root], { deadline_s: fixtureDeadlineS(60), cwd: scratchRoot });
+	if (extract.rc !== 0) throw new Error("candidate extraction failed: " + Buffer.from(extract.stderr).toString("utf8"));
+	const omp = Bun.which("omp");
+	if (!omp) throw new Error("omp is required to run the candidate ladder");
+	const full = await runBounded([join(root, "bin", "omp-kit"), "test", "--full", "--json"], { deadline_s: fixtureDeadlineS(900), cwd: home,
+		env: { PATH: [dirname(omp), dirname(process.execPath), "/usr/bin", "/bin"].join(":"), HOME: home, TMPDIR: scratchRoot, CI: "1" } });
+	const stdout = Buffer.from(full.stdout).toString("utf8");
+	if (full.timed_out) throw new Error("candidate full test timed out: " + stdout.slice(-2000));
+	const envelope: unknown = JSON.parse(stdout);
+	const data = envelope && typeof envelope === "object" && "data" in envelope ? envelope.data : null;
+	const report = data && typeof data === "object" && "test" in data ? data.test : null;
+	if (!report || typeof report !== "object" || !("failures" in report) || !Array.isArray(report.failures))
+		throw new Error("candidate full test printed no report: " + stdout.slice(-2000));
+	// Shape checked above; the producer is this repository's own runFullTest.
+	const typed: FullTestReport = report as FullTestReport;
+	return typed;
 }
 
 function writeSyntheticGhVerifier(root: string, repoRoot: string): string {

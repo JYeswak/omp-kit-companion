@@ -5,14 +5,43 @@ import { runFullTest } from "../../src/full-test-runner.ts";
 import { runIsolatedShell } from "../../src/runtime.ts";
 import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
-import { applyKitUpdate, judgeKitPostcheck, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
+import { applyKitUpdate, judgeKitPostcheck, kitPostcheckDetail, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
 import { kitUpdateJobOverall } from "../../src/kit-update-job.ts";
 import { serviceLabel } from "../../src/service.ts";
-import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp";
+import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run as runBounded } from "../../src/kitlib/run";
 const repoRoot = resolve(import.meta.dir, "../..");
 import { sha, binary, manifest, tar, fixture, input, RECONCILE_PROFILES,
- reconcilePluginLink, preparePartialReconcile, runPartialReconcile } from "./kit-update-fixture.ts";
+ reconcilePluginLink, preparePartialReconcile, runPartialReconcile,
+ buildCompiledReleaseFixture, hostPlatform, runCandidateFullTest, scratch } from "./kit-update-fixture.ts";
+import type { CompiledReleaseFixture } from "./kit-update-fixture.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
+
+test("KITUPDATELOAD1: a candidate scenario that cannot pass names its FAIL line in postcheck_detail; a passing run has none", async () => {
+	const owned = ownedTmp("kit-update-fail-lines", { root: scratch });
+	try {
+		const scratchRoot = owned.path, buildHome = join(scratchRoot, "build-home");
+		mkdirSync(buildHome, { mode: 0o700 });
+		const detailOf = async (release: CompiledReleaseFixture) => {
+			const report = await runCandidateFullTest(release, scratchRoot);
+			return { report, detail: kitPostcheckDetail(judgeKitPostcheck(report, { identityKnown: true, changed: false }), [scratchRoot]) };
+		};
+		const control = await detailOf(await buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.3", hostPlatform));
+		expect(control.report.status, JSON.stringify(control.report.failures)).toBe("PASS");
+		expect(control.detail?.failures.filter(line => line.startsWith("FAIL  ")) ?? []).toEqual([]);
+		// Planted: close-bare-fire still expects its block, but its command no longer closes anything.
+		const planted = await detailOf(await buildCompiledReleaseFixture(scratchRoot, repoRoot, buildHome, "1.2.4", hostPlatform, source => {
+			const path = join(source, "tests", "live", "scenarios.json");
+			const bytes = readFileSync(path, "utf8");
+			const mutated = bytes.replace("touch .ran_close-bare-fire; br close x", "touch .ran_close-bare-fire; br list");
+			if (mutated === bytes) throw new Error("close-bare-fire plant did not apply");
+			writeFileSync(path, mutated);
+		}));
+		expect(planted.report.status).toBe("FAIL");
+		expect(planted.detail?.failed_stages).toContain("e2e-live");
+		expect(planted.detail?.failures.some(line => line.startsWith("FAIL  close-bare-fire :: ")), JSON.stringify(planted.detail)).toBe(true);
+	} finally { owned.cleanup(); }
+}, fixtureDeadlineS(1200) * 1000);
 
 
 test("unknown update failure preserves its code and original message", () => {
@@ -228,7 +257,9 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
  // A receipt can exist before a full-test report does; recovery must still be usable.
  const causeOnly = kitUpdateEnvelope(planned, { ...result, postcheck: {
   status: "NOT_RUN", matcher: "NOT_RUN", live: "NOT_RUN", reason: "KIT_UPDATE_INTERRUPTED",
-  cause: updateFailureCause(new Error(`interrupted at ${ctx.home}/private-context`)),
+  // As applyKitUpdate does: redact with the plan roots before the 200-character bound, or a long export path is cut
+  // mid-root and can no longer be redacted.
+  cause: updateFailureCause(new Error(`interrupted at ${ctx.home}/private-context`), [planned.home, planned.stateRoot, planned.prefix]),
  } });
  expect(causeOnly.commands).toEqual([undoCommand]);
  expect(causeOnly.data.postcheck_detail).toMatchObject({

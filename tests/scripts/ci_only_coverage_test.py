@@ -2,6 +2,7 @@
 """CI-only exclusions cannot lose their execution owner or reuse a two-file PASS."""
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -140,6 +141,66 @@ class CiOnlyCoverage(unittest.TestCase):
             self.assertEqual(record["verdict"], "PASS")
             self.assertEqual(record["spec"]["env"]["OMP_KIT_DISK_OBSERVER"], "statfs")
             self.assertTrue(all(row["rc"] == 0 for row in record["files"]))
+
+    def test_ladder_running_files_run_one_at_a_time(self) -> None:
+        """KITUPDATELOAD1: each CI-only file holds an exclusive marker for 1.5 s; a second concurrent file fails."""
+        fixture = (
+            'import { expect, test } from "bun:test";\n'
+            'import { mkdirSync, rmdirSync } from "node:fs";\n'
+            'test("KITUPDATELOAD1 no other CI-only file is running", async () => {\n'
+            '  const marker = process.env.KITUPDATELOAD1_MARKER!;\n'
+            '  expect(() => mkdirSync(marker)).not.toThrow();\n'
+            '  await Bun.sleep(1500);\n'
+            '  rmdirSync(marker);\n'
+            '});\n'
+        )
+        with owned_tmp("ci-only-serial") as tmp:
+            source = Path(tmp) / "source"
+            suite = Path(tmp) / "export"
+            (source / "scripts").mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts/gate-ci-only.tsv", source / "scripts/gate-ci-only.tsv")
+            for name, _limit in store.CI_ONLY_FILES:
+                target = source / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(fixture)
+            env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            env.update({
+                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CEILING_DIRECTORIES": tmp, "TMPDIR": tmp,
+                "GIT_AUTHOR_NAME": "KITUPDATELOAD1", "GIT_AUTHOR_EMAIL": "ci-only@example.invalid",
+                "GIT_COMMITTER_NAME": "KITUPDATELOAD1", "GIT_COMMITTER_EMAIL": "ci-only@example.invalid",
+                "KITUPDATELOAD1_MARKER": str(Path(tmp) / "running"),
+            })
+            for args in (["init", "-q"], ["add", "--", "scripts", "tests"],
+                         ["commit", "-qm", "KITUPDATELOAD1 serial fixture"]):
+                result = run(["git", *args], cwd=source, env=env, deadline_s=30)
+                self.assertEqual(result.rc, 0, result.stderr.decode())
+            revision = run(["git", "rev-parse", "HEAD"], cwd=source, env=env, deadline_s=30)
+            self.assertEqual(revision.rc, 0, revision.stderr.decode())
+            shutil.copytree(source, suite, ignore=shutil.ignore_patterns(".git"))
+            # Planted fire: the same files started side by side (the old schedule) collide on the marker.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(store.CI_ONLY_FILES)) as pool:
+                parallel = list(pool.map(lambda row: run(["bun", *store.CI_ONLY_BUN_ARGS, row[0]], cwd=suite, env=env,
+                                                         deadline_s=120), store.CI_ONLY_FILES))
+            self.assertTrue(any(result.rc != 0 for result in parallel), "side-by-side files never overlapped")
+            marker = Path(tmp) / "running"
+            if marker.exists():
+                marker.rmdir()
+            cache = Path(tmp) / "verdicts"
+            judged = run([
+                sys.executable, "-B", str(ROOT / "scripts/full-suite-verdict-store.py"), "run-ci-only",
+                "--repo", str(source), "--commit", revision.stdout.decode().strip(), "--judge-root", str(ROOT),
+                "--suite-root", str(suite), "--cache-dir", str(cache),
+            ], cwd=suite, env=env, deadline_s=120)
+            evidence = (judged.stdout + judged.stderr).decode()
+            self.assertFalse(judged.timed_out, evidence)
+            self.assertEqual(judged.rc, 0, evidence)
+            records = list((cache / "ci-only").glob("*.json"))
+            self.assertEqual(len(records), 1)
+            record = store.json_file(records[0])
+            self.assertEqual(record["verdict"], "PASS", evidence)
+            self.assertEqual(record["spec"]["schedule"], "serial")
+            self.assertEqual([row["path"] for row in record["files"]], [name for name, _limit in store.CI_ONLY_FILES])
 
 
 if __name__ == "__main__":

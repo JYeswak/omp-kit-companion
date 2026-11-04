@@ -662,7 +662,7 @@ def validate_ci_only_coverage(suite_root: Path) -> None:
 def ci_only_spec() -> dict:
     return {"files": [{"path": path, "timeout_s": limit} for path, limit in CI_ONLY_FILES],
             "argv": ["bun", *CI_ONLY_BUN_ARGS], "env": dict(CI_ONLY_ENV),
-            "case_cwd": "suite-root", "git": "init, fetch --depth 1 of the exact commit",
+            "case_cwd": "suite-root", "git": "init, fetch --depth 1 of the exact commit", "schedule": "serial",
             "github_only": dict(CI_ONLY_GITHUB_ONLY)}
 
 
@@ -756,7 +756,7 @@ def tail_lines(data: bytes, count: int) -> str:
 
 
 def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, cache_dir: str | None) -> int:
-    """Judge CI_ONLY_FILES on suite_root (an export of commit) side by side and record the verdict."""
+    """Judge CI_ONLY_FILES on suite_root (an export of commit) one at a time and record the verdict."""
     commit = text_output(checked_run(["git", "-C", str(repo), "rev-parse", "--verify", f"{commit}^{{commit}}"]), "commit")
     tree = text_output(checked_run(["git", "-C", str(repo), "rev-parse", "--verify", f"{commit}^{{tree}}"]), "tree")
     for name, _limit in CI_ONLY_FILES:
@@ -795,15 +795,18 @@ def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, 
         rows[index] = {"path": name, "timeout_s": limit, "rc": rc, "timed_out": timed_out,
                        "duration_ms": int((time.monotonic() - started) * 1000)}
 
-    threads = [threading.Thread(target=judge, args=(index, name, limit), daemon=True)
-               for index, (name, limit) in enumerate(CI_ONLY_FILES)]
+    # KITUPDATELOAD1: every CI-only file runs a real ladder (`test --full`, up to 8 OMP sessions each), so they run
+    # one at a time: side by side they overloaded the host and turned wall-clock gates red (a0558d56e4, 929b2a44c9).
+    def judge_all() -> None:
+        for index, (name, limit) in enumerate(CI_ONLY_FILES):
+            judge(index, name, limit)
+
+    worker = threading.Thread(target=judge_all, daemon=True)
     # A TERM/INT reaches the main thread as Cancelled; leaving the block kills every bun group run() still owns.
     with pysafe.cancel_on_signals():
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            while thread.is_alive():
-                thread.join(1.0)
+        worker.start()
+        while worker.is_alive():
+            worker.join(1.0)
     verdict = "FAIL" if any(row["rc"] != 0 for row in rows) else "PASS"
     log = "".join(ci_only_header(row) + "\n" for row in rows).encode("utf-8")
     for row, (stdout, stderr) in zip(rows, outputs):
