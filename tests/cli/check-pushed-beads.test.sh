@@ -153,6 +153,53 @@ ok "$(cat "$TMP/m40.err")" "" "ordinary-push-40-silent"
 m41 "refs/heads/main $N refs/heads/main $L2"
 ok "$?" "0" "ordinary-identified-push-41"
 
+# VLEVELDRIFT1: the installed pushed-vlevel member refuses every push while its
+# paired commit-msg vlevel member is missing or stale; the control above (both
+# present, installed by the real installer) passes.
+CM41="$H/.git/hooks/hooks.d/commit-msg/41-omp-kit-commit-msg-vlevel"
+if [ -x "$CM41" ]; then rc=0; else rc=1; fi
+ok "$rc" "0" "paired-commit-msg-vlevel-installed"
+# HOOKREFRESH1: an in-tree hooks dir lists the paired member in the installer's
+# info/exclude block through the manifest row, so `git add -A` never stages it.
+IT="$TMP/in-tree"
+git init -q -b main "$IT" && git -C "$IT" config core.hooksPath .githooks
+git -C "$IT" -c user.email=t@invalid.example -c user.name=t commit -q --no-verify --allow-empty -m "seed [test]"
+PATH="$TMP/bin:$HOST_PATH" sh "$INSTALLER" --no-pushed-beads "$IT" > "$TMP/install-it.out" 2>&1
+ok "$?" "0" "in-tree-install-rc"
+grep -qx '/.githooks/hooks.d/commit-msg/41-omp-kit-commit-msg-vlevel' "$IT/.git/info/exclude"
+ok "$?" "0" "paired-member-in-info-exclude"
+ok "$(git -C "$IT" status --porcelain --untracked-files=all)" "" "in-tree-install-clean"
+PATH="$TMP/bin:$HOST_PATH" sh "$INSTALLER" --check "$H" > "$TMP/check.out" 2>&1
+ok "$?" "0" "installer-check-fresh"
+cp -p "$CM41" "$TMP/cm41.shipped"
+printf '\n# drift\n' >> "$CM41"
+m41 "refs/heads/main $N refs/heads/main $L2"
+ok "$?" "4" "stale-paired-member-push-refused"
+grep -qF "STALE paired commit-msg member" "$TMP/m41.err"
+ok "$?" "0" "stale-paired-member-reason"
+PATH="$TMP/bin:$HOST_PATH" sh "$INSTALLER" --check "$H" > "$TMP/check.out" 2>&1
+ok "$?" "3" "installer-check-stale-commit-msg-member"
+rm "$CM41"
+m41 "refs/heads/main $N refs/heads/main $L2"
+ok "$?" "4" "missing-paired-member-push-refused"
+grep -qF "MISSING paired commit-msg member" "$TMP/m41.err"
+ok "$?" "0" "missing-paired-member-reason"
+# Mutant: the installed member with its paired check disabled admits the missing case.
+PM41="$PP/41-omp-kit-pushed-vlevel"
+cp -p "$PM41" "$TMP/pm41.shipped"
+# shellcheck disable=SC2016  # the sed pattern names the literal ${SELF%...} text
+sed 's|paired_fresh "${SELF%/hooks.d|true \|\| paired_fresh "${SELF%/hooks.d|' "$TMP/pm41.shipped" > "$PM41"
+if cmp -s "$PM41" "$TMP/pm41.shipped"; then rc=1; else rc=0; fi
+ok "$rc" "0" "paired-mutant-differs"
+m41 "refs/heads/main $N refs/heads/main $L2"
+ok "$?" "0" "paired-mutant-admits-missing"
+PATH="$TMP/bin:$HOST_PATH" sh "$INSTALLER" --check "$H" > "$TMP/check.out" 2>&1
+ok "$?" "3" "installer-check-stale-pre-push-member"
+cat "$TMP/pm41.shipped" > "$PM41"
+cp -p "$TMP/cm41.shipped" "$CM41"
+PATH="$TMP/bin:$HOST_PATH" sh "$INSTALLER" --check "$H" > "$TMP/check.out" 2>&1
+ok "$?" "0" "installer-check-restored"
+
 fx rewrite "$H" "$H/.git/scrub.map.json" --l1 "$L1" --l2 "$L2" "$N" > /dev/null
 read -r SHA NEW <<EOF
 $(fx plan "$H" "$H/.git/scrub.map.json" "$H/.git/scrub.plan.json" --old "$N" --public "$L2" --authority J-TEST-scrub)

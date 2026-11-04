@@ -252,6 +252,7 @@ pre_push pre-push check-pushed-beads.sh scripts/check-pushed-beads.sh -x
 pre_push pre-push commit-msg-bead.sh scripts/commit-msg-bead.sh -x
 on_main pre-push 30-omp-kit-on-main scripts/check-pushed-on-main.sh +x
 pushed_vlevel pre-push 41-omp-kit-pushed-vlevel scripts/pre-push-verification-level.sh +x
+commit_msg_vlevel commit-msg 41-omp-kit-commit-msg-vlevel scripts/commit-msg-verification-level.sh +x
 ref_txn reference-transaction 40-omp-kit-ref-txn-bead scripts/ref-txn-bead.sh +x
 ref_txn reference-transaction commit-msg-bead.sh scripts/commit-msg-bead.sh -x
 ref_txn reference-transaction ref-txn-witness.py scripts/ref-txn-witness.py -x
@@ -717,12 +718,21 @@ install_on_main() {
 # ompkit-xa5s.37). The fleet's documented private-index landing (commit-tree)
 # never runs commit-msg, so commit-tree commits reach the push with no level
 # unless a pre-push member judges the range. The member is a byte-equal copy
-# of the canonical omp-kit scripts/pre-push-verification-level.sh; keep the
-# companion source byte-identical and --check names any stale installation.
+# of the companion scripts/pre-push-verification-level.sh; it refuses every
+# push while its paired commit-msg member (below) is missing or stale, and
+# --check names any stale installation.
 install_pushed_vlevel() {
 	member="$(chain_dir pre-push)/41-omp-kit-pushed-vlevel"
 	install_manifest_group pushed_vlevel
 	printf 'installed pushed-verification-level member: %s\n' "$member"
+}
+
+# install_commit_msg_vlevel: the paired commit-msg member (VLEVELGAP1,
+# VLEVELDRIFT1): the commit-time close of the same verification-level rule.
+install_commit_msg_vlevel() {
+	member="$(chain_dir commit-msg)/41-omp-kit-commit-msg-vlevel"
+	install_manifest_group commit_msg_vlevel
+	printf 'installed commit-msg verification-level member: %s\n' "$member"
 }
 
 # install_ref_txn: the plumbing backstop. commit-tree + update-ref and
@@ -969,6 +979,7 @@ install_kitlib_reversal
 install_commit_gate
 ensure_chain pre-push
 install_on_main
+install_commit_msg_vlevel
 install_pushed_vlevel
 [ "$PUSHED_BEADS" = 0 ] || install_pre_push
 ensure_chain reference-transaction

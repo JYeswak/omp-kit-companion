@@ -48,7 +48,7 @@ const files = ["LICENSE", "package.json", "MANIFEST.fleet.tsv", "scripts/apply-p
 	"scripts/install-commit-msg-bead.sh", "scripts/install-pre-push-gate.sh", "scripts/install-pre-commit-storage-root-gate.sh", "scripts/pre-push-gate.sh",
 	"scripts/check-portable-paths.sh", "scripts/portable_paths_check.py", "scripts/portable-paths-baseline.json",
 	"scripts/check-staged-wallclock.sh", "scripts/wallclock_check.py", "scripts/check-staged-embed.sh",
-	"scripts/commit-msg-bead.sh", "scripts/check-pushed-on-main.sh", "scripts/pre-push-verification-level.sh", "scripts/check-pushed-beads.sh", "scripts/ref-txn-bead.sh",
+	"scripts/commit-msg-bead.sh", "scripts/check-pushed-on-main.sh", "scripts/commit-msg-verification-level.sh", "scripts/pre-push-verification-level.sh", "scripts/check-pushed-beads.sh", "scripts/ref-txn-bead.sh",
 	"scripts/ref-txn-witness.py",
 	"scripts/check-staged-imports.sh", "scripts/check-commit-imports.sh", "scripts/check-commit-notes.sh", "scripts/release-notes.ts", "scripts/check-staged-fragments.sh",
 	"scripts/check-commit-gate.sh",

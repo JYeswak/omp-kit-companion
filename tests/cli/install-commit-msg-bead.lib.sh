@@ -123,7 +123,7 @@ printf 'fix widgets with no identity\n' > "$MSG"
 ok "$?" "4" "plain-chain-refuses"
 grep -q "MARKED" "$MSG"
 ok "$?" "0" "plain-bespoke-also-ran"
-printf 'fix widgets ompkit-2w7h\n' > "$TMP/msg-b"
+printf 'fix widgets ompkit-2w7h [test]\n' > "$TMP/msg-b"
 (CDPATH='' cd -- "$B" && BEADS_DB="$TMP/absent.db" sh "$B/.git/hooks/commit-msg" "$TMP/msg-b") > /dev/null 2>&1
 ok "$?" "0" "plain-chain-skips-no-tracker"
 }
