@@ -103,7 +103,6 @@ STAGE_LOG="$WORK/stages"
 cleanup() {
 	if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null || true; wait "$CHILD" 2>/dev/null || true; fi
 	if [ "$UNLOCKED" = 1 ]; then security lock-keychain "$KEYCHAIN" </dev/null || echo "release-local: WARNING: could not re-lock $KEYCHAIN" >&2; fi
-	if [ -d "$WORK/next" ]; then git -C "$ROOT" worktree remove --force "$WORK/next" 2>/dev/null || true; fi
 }
 kitlib_tmp_atexit cleanup
 # bounded SECONDS CMD...: run CMD with a deadline and no terminal stdin, interruptible by the trap.
@@ -550,34 +549,51 @@ fi
 # NEXTVERSION1 (ompkit-d8qic; Maven release:prepare "prepare for next development iteration"): after vVERSION is
 # public, shared main moves to the next patch in one commit that also promotes the vVERSION CHANGELOG section and
 # stamps README's release line to vVERSION (the latest published release), so the next cut tags an already-green
-# origin commit with no bump commit. Only fragments present at the tagged
-# source are folded; later fragments stay in changelog.d/ for the next release. It runs only after the public
-# verify stage, so a run that fails earlier (build, sign, tag, draft, attest, verify) commits nothing, and after the
-# install stage, so the commit is judged by the hooks of the kit it just installed: the previously installed
-# readme-check would refuse README vVERSION beside package.json NEXT. Hooks are never bypassed; with --no-install the
-# commit is still attempted, and a refusal names the install that unblocks it.
+# origin commit with no bump commit. Only fragments present at the tagged source are folded; later fragments stay
+# in changelog.d/ for the next release. It runs only after the public verify stage, so a run that fails earlier
+# (build, sign, tag, draft, attest, verify) commits nothing, and after the install stage, so the commit is judged by
+# the hooks of the kit it just installed: the previously installed readme-check would refuse README vVERSION beside
+# package.json NEXT. Hooks are never bypassed; with --no-install the commit is still attempted, and a refusal names
+# the install that unblocks it.
+# The commit is made on the shared main in the canonical checkout (AGENTS.md: no branches, no worktrees) with
+# `git commit --only`, exactly like the prepare stage. The new bytes are computed in an owned scratch export of HEAD,
+# because release-notes.sh promote folds every fragment it finds and the checkout may hold peers' fragments. Every
+# written path must be clean first (NEXT_VERSION_PATHS_DIRTY). Publication is a plain push when it fast-forwards
+# origin, else git_converge.py --push (OMP_KIT_GIT_CONVERGE overrides its path).
 advance_next_version() {
 	stage next-version
-	local next tree="$WORK/next" held="$WORK/held-fragments" attempt promote_rc agent
+	local next agent export="$WORK/next" date promote_rc path dirty manual
+	local converge="${OMP_KIT_GIT_CONVERGE:-$HOME/Developer/omp-kit/scripts/git_converge.py}"
+	local -a fragments=() paths=(package.json README.md CHANGELOG.md)
 	next="$(python3 -c 'import sys; a, b, c = map(int, sys.argv[1].split(".")); print(f"{a}.{b}.{c + 1}")' "$VERSION")"
+	date="$(date -u +%Y-%m-%d)"
 	agent="${AGENT_NAME:-$(git -C "$ROOT" config user.name)}"
-	for attempt in 1 2 3; do
-		bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' ||
-			die "v$VERSION is published; next-version fetch failed (rerun the next-version commit for $next by hand)"
-		MAIN="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"
-		if [ -d "$tree" ]; then git -C "$ROOT" worktree remove --force "$tree" || die "cannot remove $tree"; fi
-		git -C "$ROOT" worktree add --quiet --detach "$tree" "$MAIN" || die "v$VERSION is published; next-version worktree failed"
-		rm -rf "$held"; mkdir -p "$held"
-		comm -13 <(git -C "$ROOT" ls-tree --name-only "$SOURCE" -- changelog.d/ | sort) \
-			<(git -C "$ROOT" ls-tree --name-only "$MAIN" -- changelog.d/ | sort) | while IFS= read -r path; do
-			mv "$tree/$path" "$held/"
-		done
-		promote_rc=0
-		(cd "$tree" && bounded 300 sh "$tree/scripts/release-notes.sh" promote --version "$VERSION" --date "$(date -u +%Y-%m-%d)" --write) ||
-			promote_rc=$?
-		[ "$promote_rc" = 0 ] || [ "$promote_rc" = 4 ] || die "v$VERSION is published; CHANGELOG promote failed (rc $promote_rc)"
-		mv "$held"/* "$tree/changelog.d/" 2>/dev/null || true
-		python3 - "$tree/package.json" "$next" <<'PY'
+	[ "$(git -C "$ROOT" symbolic-ref --short HEAD)" = main ] || die "v$VERSION is published; NEXT_VERSION_NOT_MAIN: $ROOT is not on main"
+	bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' ||
+		die "v$VERSION is published; next-version fetch failed"
+	if ! git -C "$ROOT" merge-base --is-ancestor "$SOURCE" HEAD; then
+		# The cut source is on origin but not yet in the shared main (a no-prepare cut of origin/main): integrate first.
+		bounded 900 python3 "$converge" --repo "$ROOT" --apply ||
+			die "v$VERSION is published; NEXT_VERSION_CONVERGE_FAILED: shared main lacks $SOURCE and $converge --repo $ROOT --apply refused"
+	fi
+	# Fold exactly the fragments the tagged source shipped that main still holds.
+	while IFS= read -r path; do
+		git -C "$ROOT" cat-file -e "HEAD:$path" 2>/dev/null && fragments+=("$path")
+	done < <(git -C "$ROOT" ls-tree --name-only "$SOURCE" -- changelog.d/)
+	paths+=(${fragments[@]+"${fragments[@]}"})
+	manual="make the commit by hand on main: in an owned scratch copy of HEAD's package.json, README.md, CHANGELOG.md, scripts/ and only these fragments [${fragments[*]:-none}], run sh scripts/release-notes.sh promote --version $VERSION --date $date --write, set package.json .version and .omp.version to $next, run sh scripts/stamp-release-line.sh --version $VERSION; copy the three files into $ROOT, delete the folded fragments there, then git commit --only -- ${paths[*]} and git push origin main (python3 $converge --repo $ROOT --push when origin moved)"
+	dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all -- "${paths[@]}")" || die "v$VERSION is published; cannot inspect the next-version paths"
+	[ -z "$dirty" ] || die "v$VERSION is published; NEXT_VERSION_PATHS_DIRTY: ${dirty//$'\n'/; }; nothing was written. Once those paths are clean, $manual"
+	rm -rf "$export"; mkdir -p "$export"
+	git -C "$ROOT" archive HEAD -- package.json README.md CHANGELOG.md scripts/release-notes.sh scripts/release-notes.ts \
+		scripts/stamp-release-line.sh scripts/kitlib-tmp.sh ${fragments[@]+"${fragments[@]}"} | tar -xf - -C "$export" ||
+		die "v$VERSION is published; cannot export the next-version inputs"
+	# release-notes.sh resolves its root through git; the export is a private scratch repository, never a worktree.
+	git -C "$export" init -q || die "v$VERSION is published; cannot prepare the next-version export"
+	promote_rc=0
+	(cd "$export" && bounded 300 sh scripts/release-notes.sh promote --version "$VERSION" --date "$date" --write) || promote_rc=$?
+	[ "$promote_rc" = 0 ] || [ "$promote_rc" = 4 ] || die "v$VERSION is published; CHANGELOG promote failed (rc $promote_rc)"
+	python3 - "$export/package.json" "$next" <<'PY'
 import json, re, sys
 path, version = sys.argv[1], sys.argv[2]
 text = open(path, encoding="utf-8").read()
@@ -587,30 +603,38 @@ if count != 2 or doc["version"] != version or doc["omp"]["version"] != version:
     raise SystemExit("release-local: package.json must carry exactly .version and .omp.version")
 open(path, "w", encoding="utf-8").write(updated)
 PY
-		# README states the latest published release (vVERSION); readme-check accepts it beside package.json's next patch
-		# only while tag vVERSION exists, which the tag stage of this run created.
-		bounded 60 sh "$tree/scripts/stamp-release-line.sh" --version "$VERSION" --readme "$tree/README.md" >/dev/null ||
-			die "v$VERSION is published; cannot stamp the README release line"
-		git -C "$tree" add -A -- package.json README.md CHANGELOG.md changelog.d || die "next-version staging failed"
-		bounded 900 git -C "$tree" commit -q \
-			-m "chore(release): next version $next after v$VERSION ompkit-d8qic" \
-			-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
-			-m "[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
-			-m "Gap-Bead: none (release metadata)
+	# README states the latest published release (vVERSION); readme-check accepts it beside package.json's next patch
+	# only while tag vVERSION exists, which the tag stage of this run created.
+	bounded 60 sh "$export/scripts/stamp-release-line.sh" --version "$VERSION" --readme "$export/README.md" >/dev/null ||
+		die "v$VERSION is published; cannot stamp the README release line"
+	for path in package.json README.md CHANGELOG.md; do cp "$export/$path" "$ROOT/$path"; done
+	for path in ${fragments[@]+"${fragments[@]}"}; do [ -e "$export/$path" ] || rm -f "$ROOT/$path"; done
+	rm -rf "$export"
+	if ! bounded 900 git -C "$ROOT" commit -q --only \
+		-m "chore(release): next version $next after v$VERSION ompkit-d8qic" \
+		-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
+		-m "[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
+		-m "Gap-Bead: none (release metadata)
 Bead: ompkit-d8qic
-Agent: $agent" || if [ "$INSTALLED" = 1 ]; then die "v$VERSION is published; the next-version commit for $next was refused by the installed v$VERSION commit hooks (see above)"
-		else die "v$VERSION is published but not installed (--no-install); the previously installed commit hooks refused the next-version commit for $next (an older readme-check refuses README v$VERSION beside package.json $next). Install it with: $INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION, then commit package.json $next, README v$VERSION (scripts/stamp-release-line.sh) and the CHANGELOG [$VERSION] promote (scripts/release-notes.sh promote) to main"; fi
-		if bounded 900 git -C "$tree" -c push.followTags=false push --porcelain origin HEAD:refs/heads/main; then
-			NEXT_SHA="$(git -C "$tree" rev-parse HEAD)"
-			git -C "$ROOT" worktree remove --force "$tree" || true
-			bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "next-version readback fetch failed"
-			git -C "$ROOT" merge-base --is-ancestor "$NEXT_SHA" refs/remotes/origin/main || die "next-version commit $NEXT_SHA is not on origin/main"
-			say "next version $next committed to main: $NEXT_SHA"
-			return 0
-		fi
-		echo "release-local: next-version push attempt $attempt rejected; refetching main" >&2
-	done
-	die "v$VERSION is published; next-version push for $next was rejected 3 times"
+Agent: $agent" -- "${paths[@]}"; then
+		# Only this step's own bytes are put back: every path was clean before it wrote them.
+		git -C "$ROOT" checkout HEAD -- "${paths[@]}" || echo "release-local: WARNING: could not restore ${paths[*]} in $ROOT" >&2
+		if [ "$INSTALLED" = 1 ]; then die "v$VERSION is published; the next-version commit for $next was refused by the installed v$VERSION commit hooks (see above); once fixed, $manual"
+		else die "v$VERSION is published but not installed (--no-install); the previously installed commit hooks refused the next-version commit for $next (an older readme-check refuses README v$VERSION beside package.json $next). Install it with: $INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION, then $manual"; fi
+	fi
+	NEXT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+	bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "next-version commit $NEXT_SHA made; fetch before publishing failed"
+	if git -C "$ROOT" merge-base --is-ancestor refs/remotes/origin/main HEAD; then
+		bounded 900 git -C "$ROOT" -c push.followTags=false push --porcelain origin main ||
+			die "next-version commit $NEXT_SHA is on local main; NEXT_VERSION_PUSH_FAILED: publish it with git push origin main"
+	else
+		[ -f "$converge" ] || die "next-version commit $NEXT_SHA is on local main and origin moved; NEXT_VERSION_CONVERGE_MISSING: $converge (set OMP_KIT_GIT_CONVERGE)"
+		bounded 1800 python3 "$converge" --repo "$ROOT" --push --expect-head "$NEXT_SHA" ||
+			die "next-version commit $NEXT_SHA is on local main and origin moved; NEXT_VERSION_CONVERGE_FAILED: publish it with python3 $converge --repo $ROOT --push"
+	fi
+	bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "next-version readback fetch failed"
+	git -C "$ROOT" merge-base --is-ancestor "$NEXT_SHA" refs/remotes/origin/main || die "next-version commit $NEXT_SHA is not on origin/main"
+	say "next version $next committed to main: $NEXT_SHA"
 }
 
 # VERSIONSRC1 (ompkit-fp72.135.1.14): the tagged source must state the

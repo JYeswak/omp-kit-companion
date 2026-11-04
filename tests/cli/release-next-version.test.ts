@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
@@ -86,11 +87,13 @@ function installReadmeHook(f: Fixture, name: string, readmeCheck: string): strin
 }
 const readmeCheckSource = readFileSync(join(ROOT, "scripts/readme-check.ts"), "utf8");
 
+// git_converge.py publishes when origin moved; the tests use the same default the script does.
+const CONVERGE = process.env.OMP_KIT_GIT_CONVERGE ?? join(homedir(), "Developer/omp-kit/scripts/git_converge.py");
 function advance(f: Fixture, source: string, installed: 0 | 1) {
 	// advance_next_version is defined after the dry-run exit, so no GitHub write is reachable before it.
 	const body = `${prelude}${helpers()}\n${segment("# NEXTVERSION1 (ompkit-d8qic", "\n}\n")}\nVERSION=1.2.4; SOURCE=${source}; INSTALLED=${installed}; INSTALL_PREFIX=/fixture/kit\nadvance_next_version\n`;
 	writeFileSync(join(f.work, "advance.sh"), body);
-	return runFixture(["bash", join(f.work, "advance.sh"), f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 120 });
+	return runFixture(["bash", join(f.work, "advance.sh"), f.repo, f.work], { cwd: f.repo, env: { ...f.env, OMP_KIT_GIT_CONVERGE: CONVERGE }, floor_s: 180 });
 }
 
 function publishedFixture(label: string) {
@@ -104,11 +107,15 @@ function publishedFixture(label: string) {
 	return { f, source, before: originMain(f) };
 }
 
-test("AC1: after vX publishes and installs, one main commit sets the next patch, stamps README vX and passes the installed README hook", () => {
+test("AC1: after vX publishes and installs, one shared-main commit in the checkout sets the next patch, stamps README vX and passes the installed README hook", () => {
 	const { f, source, before } = publishedFixture("nextversion-ac1");
 	const hooks = installReadmeHook(f, "hooks-installed", readmeCheckSource);
 	const result = advance(f, source, 1);
 	expect(result.rc, decode(result.stderr)).toBe(0);
+	// The commit is the fixture checkout's own main, not a detached side tree.
+	expect(f.git(f.repo, "rev-parse", "refs/heads/main")).toBe(originMain(f));
+	expect(f.git(f.repo, "status", "--porcelain")).toBe("");
+	expect(f.git(f.repo, "worktree", "list", "--porcelain").split("\n").filter(line => line.startsWith("worktree "))).toEqual([`worktree ${f.repo}`]);
 	expect(readFileSync(join(hooks, "ran"), "utf8")).toBe("ran\n");
 	const after = originMain(f);
 	expect(f.git(f.origin, "rev-list", "--count", `${before}..${after}`)).toBe("1");
@@ -142,7 +149,51 @@ test("AC1 planted old hook: a previously installed readme-check refuses the comm
 	expect(stderr).toContain("v1.2.4 is published but not installed (--no-install)");
 	expect(stderr).toContain("Install it with: /fixture/kit/bin/omp-kit update --apply --yes --version 1.2.4");
 	expect(originMain(f)).toBe(before);
+	// Its own bytes are put back; the checkout is as it was.
+	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(before);
+	expect(f.git(f.repo, "status", "--porcelain")).toBe("");
 }, fixtureDeadlineS(180) * 1_000);
+
+test("planted dirty path: a modified README refuses NEXT_VERSION_PATHS_DIRTY, writes nothing and leaves main unchanged", () => {
+	const { f, source, before } = publishedFixture("nextversion-dirty");
+	installReadmeHook(f, "hooks-installed", readmeCheckSource);
+	const readme = `${readFileSync(join(f.repo, "README.md"), "utf8")}peer edit\n`;
+	writeFileSync(join(f.repo, "README.md"), readme);
+	const pkgBefore = readFileSync(join(f.repo, "package.json"), "utf8");
+	const result = advance(f, source, 1);
+	const stderr = decode(result.stderr);
+	expect(result.rc, stderr).toBe(4);
+	expect(stderr).toContain("NEXT_VERSION_PATHS_DIRTY:  M README.md;");
+	expect(stderr).toContain("make the commit by hand on main");
+	expect(readFileSync(join(f.repo, "README.md"), "utf8")).toBe(readme);
+	expect(readFileSync(join(f.repo, "package.json"), "utf8")).toBe(pkgBefore);
+	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(before);
+	expect(originMain(f)).toBe(before);
+}, fixtureDeadlineS(180) * 1_000);
+
+test.skipIf(!existsSync(CONVERGE))("planted origin move: a peer push during the release is converged, and main holds both commits", () => {
+	const { f, source } = publishedFixture("nextversion-converge");
+	installReadmeHook(f, "hooks-installed", readmeCheckSource);
+	// A peer publishes to origin after this checkout last fetched.
+	const peer = join(f.work, "peer");
+	f.git(f.work, "clone", "-q", f.origin, peer);
+	writeFileSync(join(peer, "peer.txt"), "peer work\n");
+	f.git(peer, "add", "peer.txt"); f.git(peer, "commit", "-qm", "peer work"); f.git(peer, "push", "-q", "origin", "main");
+	const peerSha = f.git(peer, "rev-parse", "HEAD");
+	const result = advance(f, source, 1);
+	expect(result.rc, decode(result.stderr)).toBe(0);
+	const main = originMain(f);
+	expect(f.git(f.origin, "merge-base", "--is-ancestor", peerSha, main)).toBe("");
+	expect(f.git(f.origin, "log", "--format=%s", main)).toContain("chore(release): next version 1.2.5 after v1.2.4 ompkit-d8qic");
+	expect(JSON.parse(showMain(f, "package.json")).version).toBe("1.2.5");
+	expect(showMain(f, "peer.txt")).toBe("peer work");
+	expect(f.git(f.repo, "rev-parse", "refs/heads/main")).toBe(main);
+}, fixtureDeadlineS(240) * 1_000);
+
+test("release-local.sh creates no git worktree (AGENTS.md: no branches, no worktrees)", () => {
+	expect(script).not.toContain("git worktree");
+	expect(script).not.toMatch(/(?<![-\w])worktree (?:add|remove|prune|list|move|lock|unlock|repair)\b/);
+});
 
 test("AC1 planted failure: a run refused at the tag stage commits nothing and leaves package.json and main unchanged", () => {
 	const f = fixture("nextversion-ac1-fail", "1.2.4");
