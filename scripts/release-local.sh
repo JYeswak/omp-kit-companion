@@ -59,7 +59,21 @@ KEYCHAIN="${OMP_KIT_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/uds-signing.keycha
 KEYCHAIN_PASSWORD="${OMP_KIT_SIGNING_KEYCHAIN_PASSWORD:-$HOME/.config/uds/signing-keychain.pw}"
 INSTALL_PREFIX="${OMP_KIT_INSTALL_PREFIX:-$HOME/.local/opt/omp-kit}"
 
-die() { echo "release-local: refused: $*" >&2; exit 4; }
+# CHANGELOGCATCHUP1 (ompkit-fp72.120.16.231): once the public verify stage proves vVERSION published, the next-version
+# advance needs only that tag. Before this, a refused install (0.2.88 and 0.2.89: PARTIAL) exited here and skipped it, so
+# main kept stating the published version and the next cut needed a bootstrap prepare commit plus its own verdict. A
+# refusal while ADVANCE_PENDING=1 (set after verify, cleared when the advance starts) still advances main, exactly as
+# --no-install does, then exits 4 naming the install command. Its own refusal (dirty paths, refused hooks) names the
+# manual commit, and its die is a plain exit. die stays one line: stage fixtures (release-local-ci-only-reuse.test.sh)
+# cut it out by that shape, without ADVANCE_PENDING or this function.
+ADVANCE_PENDING=0
+advance_after_refusal() {
+	ADVANCE_PENDING=0
+	echo "release-local: v$VERSION is published; advancing main to the next version before exiting" >&2
+	advance_next_version
+	echo "release-local: refused: v$VERSION is published and main states the next version, but it is not installed (refusal above); install it with: $INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION" >&2
+}
+die() { echo "release-local: refused: $*" >&2; [ "${ADVANCE_PENDING:-0}" = 0 ] || advance_after_refusal; exit 4; }
 say() { echo "== $*"; }
 
 DRY_RUN=0
@@ -137,10 +151,13 @@ prepare_release() {
 	stage prepare
 	[ "$(git -C "$ROOT" symbolic-ref --short HEAD)" = main ] || die "prepare requires main"
 	local paths=(package.json README.md changelog.d/774u.md)
-	local dirty
+	local dirty fragment_absent=0
 	dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all -- "${paths[@]}")" ||
 		die "cannot inspect release metadata custody"
 	[ -z "$dirty" ] || die "foreign changes on release prepare paths: $dirty"
+	# A completed next-version advance (or the CHANGELOGCATCHUP1 catch-up) folds and deletes changelog.d/774u.md; the
+	# next prepare starts it again, and must stage the new file for its --only commit.
+	[ -e "$ROOT/changelog.d/774u.md" ] || fragment_absent=1
 	python3 - "$ROOT" "$VERSION" <<'PY'
 import json, re, sys
 from pathlib import Path
@@ -164,14 +181,17 @@ stamp, count = re.subn(r"(?m)^Current release: v[0-9]+\.[0-9]+\.[0-9]+$",
 if count != 1:
     raise SystemExit("release-local: expected exactly one README release stamp")
 fragment = root / "changelog.d/774u.md"
-notes = fragment.read_text()
+notes = fragment.read_text() if fragment.exists() else "### Changed\n"
 entry = (f"- Set CLI and OMP plugin version metadata to {version}. "
          "The release is qualified on this prepare commit's exact exported tree before signing.\n")
 # Validate every input before changing any of them.
 package.write_text(updated)
 readme.write_text(stamp)
+# git keeps no empty directory: an advance that folded every fragment leaves no changelog.d/.
+fragment.parent.mkdir(exist_ok=True)
 fragment.write_text(notes.rstrip() + "\n" + entry)
 PY
+	[ "$fragment_absent" = 0 ] || git -C "$ROOT" add -- changelog.d/774u.md || die "cannot stage the new changelog.d/774u.md"
 	local agent="${AGENT_NAME:-$(git -C "$ROOT" config user.name)}"
 	bounded 900 git -C "$ROOT" commit --only \
 		-m "chore(release): prepare $VERSION ompkit-774u [test]" \
@@ -604,6 +624,7 @@ fi
 # origin, else git_converge.py --push (OMP_KIT_GIT_CONVERGE overrides its path).
 advance_next_version() {
 	stage next-version
+	ADVANCE_PENDING=0
 	local next agent export="$WORK/next" date promote_rc path dirty manual
 	local converge="${OMP_KIT_GIT_CONVERGE:-$HOME/Developer/omp-kit/scripts/git_converge.py}"
 	local -a fragments=() paths=(package.json README.md CHANGELOG.md)
@@ -662,7 +683,7 @@ Agent: $agent" -- "${paths[@]}"; then
 		# Only this step's own bytes are put back: every path was clean before it wrote them.
 		git -C "$ROOT" checkout HEAD -- "${paths[@]}" || echo "release-local: WARNING: could not restore ${paths[*]} in $ROOT" >&2
 		if [ "$INSTALLED" = 1 ]; then die "v$VERSION is published; the next-version commit for $next was refused by the installed v$VERSION commit hooks (see above); once fixed, $manual"
-		else die "v$VERSION is published but not installed (--no-install); the previously installed commit hooks refused the next-version commit for $next (an older readme-check refuses README v$VERSION beside package.json $next). Install it with: $INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION, then $manual"; fi
+		else die "v$VERSION is published but not installed ($([ "${INSTALL:-0}" = 1 ] && echo 'its install stage refused' || echo '--no-install')); the previously installed commit hooks refused the next-version commit for $next (an older readme-check refuses README v$VERSION beside package.json $next). Install it with: $INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION, then $manual"; fi
 	fi
 	NEXT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 	bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "next-version commit $NEXT_SHA made; fetch before publishing failed"
@@ -799,6 +820,7 @@ spctl --assess --type open --context context:primary-signature -vv "$PUB/x/bin/o
 grep -q 'source=Notarized Developer ID' "$WORK/spctl.txt" || die "Gatekeeper does not report Notarized Developer ID"
 substep ''
 RELEASED_AT=$(date +%s)
+ADVANCE_PENDING=1
 if [ "$INSTALL" = 1 ]; then install_release; fi
 advance_next_version
 if [ "$INSTALLED" = 1 ]; then receipt installed "$URL" "$RUN_ID"

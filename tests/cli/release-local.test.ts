@@ -636,3 +636,195 @@ esac
 		}
 	}, fixtureDeadlineS(20) * 1_000);
 }
+
+// CHANGELOGCATCHUP1 (ompkit-fp72.120.16.231): releases cut without a promote get their notes back one tag at a time,
+// from each tag's own bytes, and a refused install no longer skips the next-version advance.
+function catchUpRepo(label: string) {
+	const work = realpathSync(ownedTmp(label, { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+	const env = { ...gitFixtureEnv(work), GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+		GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", AGENT_NAME: "ReleaseFixture" };
+	const repo = join(work, "repo");
+	const git = (cwd: string, args: string[], extra: Record<string, string> = {}) => {
+		const result = runFixture(["git", "-C", cwd, ...args], { cwd, env: { ...env, ...extra }, floor_s: 30 });
+		if (result.rc !== 0) throw new Error(`git ${args.join(" ")}: ${new TextDecoder().decode(result.stderr)}`);
+		return new TextDecoder().decode(result.stdout).trim();
+	};
+	return { work, env, repo, git };
+}
+const catchUpPackage = (version: string) => `{\n  "name": "fixture",\n  "version": "${version}",\n  "omp": {\n    "version": "${version}"\n  }\n}\n`;
+
+test("CHANGELOGCATCHUP1 catch-up gives each tag its own section, holding exactly its own fragments at cut-time bytes", () => {
+	const { work, env, repo, git } = catchUpRepo("catchup-sections");
+	mkdirSync(join(repo, "changelog.d"), { recursive: true });
+	const fragment = (name: string, text: string) => writeFileSync(join(repo, "changelog.d", name), text);
+	// Each release is a commit on main with its own committer date; release-local pushes lightweight tags.
+	const release = (version: string, date: string) => {
+		writeFileSync(join(repo, "package.json"), catchUpPackage(version));
+		git(repo, ["add", "-A"]);
+		git(repo, ["commit", "-qm", `release ${version}`], { GIT_COMMITTER_DATE: `${date}T12:00:00Z`, GIT_AUTHOR_DATE: `${date}T12:00:00Z` });
+		git(repo, ["tag", `v${version}`]);
+	};
+	try {
+		git(work, ["init", "-q", "-b", "main", repo]);
+		writeFileSync(join(repo, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n\n### Changed\n\n- Base release.\n");
+		release("1.0.0", "2026-01-01");
+		fragment("a.md", "- A one.\n");
+		fragment("gone.md", "- Shipped in 1.0.1, then deleted.\n");
+		release("1.0.1", "2026-01-02");
+		fragment("a.md", "- A one.\n- A two, appended for 1.0.2.\n");
+		fragment("b.md", "### Fixed\n\n- B one.\n");
+		rmSync(join(repo, "changelog.d/gone.md"));
+		release("1.0.2", "2026-01-03");
+		fragment("c.md", "### Removed\n\n- C one.\n");
+		release("1.0.3", "2026-01-05");
+		// After the last cut: an edit to a shipped fragment and a new fragment are committed; a peer's edit is not.
+		fragment("a.md", "- A one, edited after its cut.\n- A two, appended for 1.0.2.\n");
+		fragment("later.md", "- Landed after 1.0.3.\n");
+		git(repo, ["add", "-A"]); git(repo, ["commit", "-qm", "later work"]);
+		const peerC = "### Removed\n\n- C one, a peer's uncommitted edit.\n";
+		fragment("c.md", peerC);
+		fragment("peer.md", "- A peer's untracked fragment.\n");
+		const head = git(repo, ["rev-parse", "HEAD"]);
+		const out = join(work, "out");
+		mkdirSync(out);
+		const catchUp = (...args: string[]) => runFixture(["sh", join(ROOT, "scripts/release-notes.sh"), "catch-up", ...args], { cwd: repo, env, floor_s: 60 });
+		const result = catchUp("--base-tag", "v1.0.0", "--through-tag", "v1.0.3", "--next-version", "1.0.4", "--output", out);
+		const stdout = new TextDecoder().decode(result.stdout);
+		expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+		const changelog = readFileSync(join(out, "CHANGELOG.md"), "utf8");
+		expect(changelog).toBe(`# Changelog
+
+## [Unreleased]
+
+## [1.0.3] - 2026-01-05
+
+### Removed
+
+- C one.
+
+## [1.0.2] - 2026-01-03
+
+### Changed
+
+- A two, appended for 1.0.2.
+
+### Fixed
+
+- B one.
+
+## [1.0.1] - 2026-01-02
+
+### Changed
+
+- A one.
+- Shipped in 1.0.1, then deleted.
+
+## [1.0.0] - 2026-01-01
+
+### Changed
+
+- Base release.
+`);
+		// Fully released head fragments are listed for deletion; a fragment with an entry edited after its cut, or
+		// added after the last tag, keeps its unreleased entries for the next release.
+		expect(readFileSync(join(out, "delete.txt"), "utf8")).toBe("changelog.d/b.md\nchangelog.d/c.md\n");
+		expect(readFileSync(join(out, "keep.txt"), "utf8")).toBe("changelog.d/a.md\t1 unreleased entry\nchangelog.d/later.md\t1 unreleased entry\n");
+		expect(JSON.parse(readFileSync(join(out, "package.json"), "utf8")).version).toBe("1.0.4");
+		expect(stdout).toContain("CATCHUP version=1.0.2 date=2026-01-03");
+		expect(stdout).toContain("fragments=2 new_fragments=1 extended_fragments=1 entries=2");
+		expect(stdout).toContain(`CATCHUP_TOTAL head=${head} versions=3 sections=3 entries=5 folded_fragments=4 folded_absent_at_head=1 delete=2 keep=2 package_version=1.0.3->1.0.4`);
+		// Only git objects were read and nothing in the checkout changed.
+		expect(readFileSync(join(repo, "changelog.d/c.md"), "utf8")).toBe(peerC);
+		expect(readFileSync(join(repo, "CHANGELOG.md"), "utf8")).toContain("## [Unreleased]\n\n## [1.0.0]");
+		expect(git(repo, ["status", "--porcelain"])).toBe("M changelog.d/c.md\n?? changelog.d/peer.md");
+		// A report-only run writes nothing; a second run never overwrites the first output.
+		expect(catchUp("--base-tag", "v1.0.0", "--through-tag", "v1.0.3").rc).toBe(0);
+		expect(catchUp("--base-tag", "v1.0.0", "--through-tag", "v1.0.3", "--output", out).rc).not.toBe(0);
+		// Planted: a base that is not the CHANGELOG's newest section would re-promote released notes; refused.
+		const rebase = catchUp("--base-tag", "v1.0.1", "--through-tag", "v1.0.3");
+		expect(rebase.rc).not.toBe(0);
+		expect(new TextDecoder().decode(rebase.stderr)).toContain("must end at ## [1.0.1] (its newest released section is 1.0.0)");
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(90) * 1_000);
+
+test("CHANGELOGCATCHUP1 a release whose install ends PARTIAL still advances the version on main, then refuses naming the install", () => {
+	const { work, env, repo, git } = catchUpRepo("catchup-partial");
+	const origin = join(work, "origin.git");
+	const prefix = join(work, "kit");
+	try {
+		git(work, ["init", "-q", "--bare", "-b", "main", origin]);
+		git(work, ["init", "-q", "-b", "main", repo]);
+		for (const dir of ["scripts", "changelog.d"]) mkdirSync(join(repo, dir), { recursive: true });
+		for (const name of ["release-notes.sh", "release-notes.ts", "stamp-release-line.sh", "kitlib-tmp.sh"]) cpSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
+		writeFileSync(join(repo, "README.md"), readFileSync(join(ROOT, "README.md"), "utf8").replace(/^Current release: v\d+\.\d+\.\d+$/m, "Current release: v1.2.4"));
+		writeFileSync(join(repo, "package.json"), catchUpPackage("1.2.4"));
+		writeFileSync(join(repo, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-01-01\n\n### Changed\n\n- Base release.\n");
+		writeFileSync(join(repo, "changelog.d/shipped.md"), "### Fixed\n\n- Shipped in v1.2.4.\n");
+		git(repo, ["add", "."]); git(repo, ["commit", "-qm", "release 1.2.4"]);
+		git(repo, ["remote", "add", "origin", origin]);
+		git(repo, ["push", "-q", "origin", "main"]);
+		const source = git(repo, ["rev-parse", "HEAD"]);
+		git(repo, ["tag", "v1.2.4"]); git(repo, ["push", "-q", "origin", "v1.2.4"]);
+		// The 0.2.89 install: the updater refuses a previous PARTIAL's pending receipt, which release-local never reconciles.
+		mkdirSync(join(prefix, "bin"), { recursive: true });
+		writeFileSync(join(prefix, "bin/omp-kit"), `#!/bin/sh
+echo '{"ok":false,"data":{"action":"PARTIAL","overall":"FAIL","scope":"kit"},"commands":[],"errors":[{"code":"PENDING_RECOVERY","message":"Previous kit/OMP update requires recovery"}]}'
+exit 1
+`);
+		chmodSync(join(prefix, "bin/omp-kit"), 0o755);
+		// The production refusal, install stage, advance and post-verify tail; only the kit transport is a fixture.
+		const productionDie = releaseStage("ADVANCE_PENDING=0\nadvance_after_refusal() {", "\nsay() {");
+		const advanceFunction = releaseStage("# NEXTVERSION1 (ompkit-d8qic", "\n# VERSIONSRC1");
+		const tail = releaseStage("RELEASED_AT=$(date +%s)\n", "\nadvance_next_version\n");
+		const fixture = join(work, "partial.sh");
+		writeFileSync(fixture, `set -euo pipefail
+${productionDie}
+say() { echo "== $*"; }
+ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"; CHILD=''
+${helperScript}
+${advanceFunction}
+VERSION=1.2.4; SOURCE=${source}; INSTALL=1; INSTALLED=0; INSTALL_PREFIX=${JSON.stringify(prefix)}
+PUB="$WORK/public"; mkdir "$PUB"; DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar"
+${tail}
+advance_next_version
+echo "unreachable: the install refusal must exit"
+`);
+		const result = runFixture(["bash", fixture, repo, work], { cwd: repo, env: { ...env, TMPDIR: work, README_GATE: join(work, "no-readme-update-gate") }, floor_s: 180 });
+		const stdout = new TextDecoder().decode(result.stdout);
+		const stderr = new TextDecoder().decode(result.stderr);
+		expect(result.rc, stderr).toBe(4);
+		expect(stdout).not.toContain("unreachable");
+		expect(stderr).toContain("release-local: refused: install update failed (rc 1); not the known live-browser-only PARTIAL");
+		expect(stderr).toContain("v1.2.4 is published; advancing main to the next version before exiting");
+		expect(stderr).toContain(`v1.2.4 is published and main states the next version, but it is not installed (refusal above); install it with: ${prefix}/bin/omp-kit update --apply --yes --version 1.2.4`);
+		// The advance landed on origin main: next patch, the v1.2.4 notes promoted, the shipped fragment folded.
+		const show = (path: string) => git(origin, ["show", `refs/heads/main:${path}`]);
+		expect(JSON.parse(show("package.json")).version).toBe("1.2.5");
+		expect(show("CHANGELOG.md")).toContain("## [1.2.4] - ");
+		expect(show("CHANGELOG.md")).toContain("- Shipped in v1.2.4.");
+		expect(git(origin, ["ls-tree", "-r", "--name-only", "refs/heads/main", "--", "changelog.d"])).toBe("");
+		expect(git(repo, ["rev-parse", "HEAD"])).toBe(git(origin, ["rev-parse", "refs/heads/main"]));
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(180) * 1_000);
+
+test("CHANGELOGCATCHUP1 prepare starts the release fragment again after an advance folded it", () => {
+	const { work, env, repo, git } = catchUpRepo("catchup-prepare");
+	try {
+		git(work, ["init", "-q", "-b", "main", repo]);
+		writeFileSync(join(repo, "package.json"), catchUpPackage("1.2.3"));
+		writeFileSync(join(repo, "README.md"), "Current release: v1.2.3\n");
+		git(repo, ["add", "."]); git(repo, ["commit", "-qm", "advanced: changelog.d/774u.md was folded"]);
+		writeFileSync(join(work, "prepare.sh"), `set -euo pipefail
+die() { echo "$*" >&2; exit 4; }
+say() { echo "$*"; }
+ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; DRY_RUN=1; VERSION=1.2.4
+${helperScript}
+prepare_release
+`);
+		const result = runFixture(["bash", join(work, "prepare.sh"), repo, work], { cwd: repo, env, floor_s: 60 });
+		expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+		expect(git(repo, ["show", "HEAD:changelog.d/774u.md"])).toBe("### Changed\n- Set CLI and OMP plugin version metadata to 1.2.4. The release is qualified on this prepare commit's exact exported tree before signing.");
+		expect(git(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).split("\n").sort()).toEqual(["README.md", "changelog.d/774u.md", "package.json"]);
+		expect(git(repo, ["status", "--porcelain"])).toBe("");
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(60) * 1_000);

@@ -13,7 +13,8 @@ type Options =
 	| { mode: "promote"; version: string; date: string; write: boolean }
 	| { mode: "source"; baseTag: string; head: string; version: string; output: string }
 	| { mode: "notes"; version: string; floor?: string; ref?: string; output?: string }
-	| { mode: "fragment-for"; bead?: string; message?: string; base?: string };
+	| { mode: "fragment-for"; bead?: string; message?: string; base?: string }
+	| { mode: "catch-up"; baseTag: string; throughTag: string; head: string; output?: string; nextVersion?: string };
 type Fragment = { path: string; content: string; pr?: string };
 type UnreleasedLine = { lineNumber: number; text: string; pr?: string };
 type UnreleasedSection = {
@@ -97,6 +98,7 @@ function run(): void {
 	if (options.mode === "notes") return runNotes(root, options, gitRaw);
 	if (options.mode === "source") return runSourceNotes(root, options, git, gitRaw, gitOk);
 	if (options.mode === "fragment-for") return runFragmentFor(options, git, gitRaw, gitOk);
+	if (options.mode === "catch-up") return runCatchUp(options, git, gitRaw, gitOk);
 
 	const base = git(["rev-parse", "--verify", "--end-of-options", `${options.baseRef}^{commit}`]);
 	const head = git(["rev-parse", "--verify", "--end-of-options", `${options.head}^{commit}`]);
@@ -124,7 +126,7 @@ function run(): void {
 }
 
 function parseArguments(args: string[]): Options {
-	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH] | fragment-for (--bead ID | --message FILE) [--base REF]";
+	const usage = "Usage: release-notes.sh check (--base-tag vX.Y.Z | --base-ref REF) --head REF | source --base-tag vX.Y.Z --head REF --version X.Y.Z --output PATH | fold [--write] | promote --version X.Y.Z --date YYYY-MM-DD [--write] | notes --version X.Y.Z [--floor X.Y.Z] [--ref REF] [--output PATH] | fragment-for (--bead ID | --message FILE) [--base REF] | catch-up --base-tag vX.Y.Z --through-tag vX.Y.Z [--head REF] [--output DIR] [--next-version X.Y.Z]";
 	const mode = args[0];
 	if (mode === "check") {
 		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--base-ref": "value", "--head": "value" }, usage);
@@ -184,6 +186,22 @@ function parseArguments(args: string[]): Options {
 		if (typeof message === "string") options.message = message;
 		const base = values.get("--base");
 		if (typeof base === "string") options.base = base;
+		return options;
+	}
+	if (mode === "catch-up") {
+		const values = parseFlags(args.slice(1), { "--base-tag": "value", "--through-tag": "value", "--head": "value", "--output": "value", "--next-version": "value" }, usage);
+		const baseTag = requiredValue(values, "--base-tag", usage);
+		const throughTag = requiredValue(values, "--through-tag", usage);
+		if (!STABLE_TAG.test(baseTag) || !STABLE_TAG.test(throughTag)) fail(usage);
+		const head = values.get("--head");
+		const options: Extract<Options, { mode: "catch-up" }> = { mode, baseTag, throughTag, head: typeof head === "string" ? head : "HEAD" };
+		const output = values.get("--output");
+		if (typeof output === "string") options.output = output;
+		const nextVersion = values.get("--next-version");
+		if (typeof nextVersion === "string") {
+			if (!isStableVersion(nextVersion) || compareVersions(nextVersion, throughTag.slice(1)) <= 0) fail("--next-version must be a stable version newer than --through-tag");
+			options.nextVersion = nextVersion;
+		}
 		return options;
 	}
 	return fail(usage);
@@ -737,6 +755,132 @@ function runPromote(root: string, options: Extract<Options, { mode: "promote" }>
 		process.stdout.write(`${[`## [${options.version}] - ${options.date}`, "", ...renderEntries(folded.body)].join("\n").replace(/\n+$/, "")}\n`);
 	}
 	console.log(`PROMOTED version=${options.version} date=${options.date} entries=${entries.length} fragments=${folded.folded.length} package_version=${previous}->${options.version}${options.write ? "" : " (preview; --write applies)"}`);
+}
+
+// CHANGELOGCATCHUP1 (ompkit-fp72.120.16.231): a one-time catch-up for releases that were cut without a promote. For each
+// stable tag after --base-tag through --through-tag, in version order, fold that tag's own fragments, read from the tag
+// (cut-time bytes), into its own `## [X.Y.Z] - <tag date, UTC>` section with fold's dedupe: an entry already released by
+// an older section is dropped, so a fragment shipped in vN contributes to vN+1 only the entries it gained (appended or
+// revised) by vN+1's cut. Only git objects are read (the head's CHANGELOG.md and fragments, never the working tree), and
+// output goes only to --output: CHANGELOG.md, delete.txt (head fragments whose every entry is now released), keep.txt
+// (head fragments that still hold unreleased entries) and, with --next-version, package.json stating it.
+type CatchUpSection = { version: string; date: string; source: string; body: SectionBody; fragments: number; fresh: number; extended: number; entries: number };
+function runCatchUp(options: Extract<Options, { mode: "catch-up" }>, git: Git, gitRaw: Git, gitOk: (args: string[]) => boolean): void {
+	const commitOf = (ref: string) => git(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]);
+	const head = commitOf(options.head);
+	const base = options.baseTag.slice(1);
+	const through = options.throughTag.slice(1);
+	if (compareVersions(through, base) <= 0) fail(`--through-tag ${options.throughTag} must be newer than --base-tag ${options.baseTag}`);
+	const tags = git(["tag", "--list", "v*"]).split("\n").filter(tag => STABLE_TAG.test(tag))
+		.filter(tag => compareVersions(tag.slice(1), base) >= 0 && compareVersions(tag.slice(1), through) <= 0)
+		.sort((a, b) => compareVersions(a.slice(1), b.slice(1)));
+	if (tags[0] !== options.baseTag) fail(`base tag ${options.baseTag} does not exist`);
+	if (tags.at(-1) !== options.throughTag) fail(`through tag ${options.throughTag} does not exist`);
+	const commits = tags.map(tag => commitOf(`refs/tags/${tag}`));
+	for (let index = 1; index < tags.length; index++)
+		if (!gitOk(["merge-base", "--is-ancestor", commits[index - 1]!, commits[index]!]))
+			fail(`${tags[index - 1]} is not an ancestor of ${tags[index]}; which release shipped a fragment is undecidable across branches`);
+	if (!gitOk(["merge-base", "--is-ancestor", commits.at(-1)!, head])) fail(`${options.throughTag} is not an ancestor of ${options.head}`);
+
+	const changelog = locateUnreleased(gitRaw(["show", `${head}:CHANGELOG.md`]));
+	const newest = changelog.lines.flatMap(line => VERSION_HEADING.exec(line)?.[1] ?? [])
+		.reduce<string | undefined>((max, version) => !max || compareVersions(version, max) > 0 ? version : max, undefined);
+	if (newest !== base) fail(`CHANGELOG.md at ${options.head} must end at ## [${base}] (its newest released section is ${newest ?? "none"}); catch-up never re-promotes a released version`);
+	const unreleased = parseBody(changelog.lines.slice(changelog.unreleasedStart + 1, changelog.unreleasedEnd), "CHANGELOG.md ## [Unreleased]");
+	if (bodyEntries(unreleased).length) fail(`CHANGELOG.md at ${options.head} holds entries under ## [Unreleased]; which release shipped them is unknown, so release or fold them first`);
+	const seen = releasedKeys(changelog);
+
+	const blobs = new Map<string, string>();
+	const read = (oid: string): string => {
+		const cached = blobs.get(oid);
+		if (cached !== undefined) return cached;
+		const text = gitRaw(["cat-file", "blob", oid]);
+		blobs.set(oid, text);
+		return text;
+	};
+	// listFragments' rule on a tree: every direct changelog.d/*.md child is a fragment and must be named <bead>.md.
+	const fragmentsAt = (commit: string, label: string): Map<string, string> => {
+		const files = new Map<string, string>();
+		for (const record of gitRaw(["ls-tree", "-r", "-z", commit, "--", "changelog.d/"]).split("\0").filter(Boolean)) {
+			const tab = record.indexOf("\t");
+			const [, type, oid] = record.slice(0, tab).split(" ");
+			const path = record.slice(tab + 1);
+			if (type !== "blob" || !path.endsWith(".md") || path.slice("changelog.d/".length).includes("/")) continue;
+			if (!FRAGMENT_PATH.test(path)) fail(`${label}: fragment path must be changelog.d/<bead>.md: ${path}`);
+			files.set(path, oid!);
+		}
+		return files;
+	};
+
+	let previous = fragmentsAt(commits[0]!, options.baseTag);
+	const sections: CatchUpSection[] = [];
+	const folded = new Set<string>();
+	for (let index = 1; index < tags.length; index++) {
+		const tag = tags[index]!;
+		const files = fragmentsAt(commits[index]!, tag);
+		const body: SectionBody = { comments: [], leading: [], categories: new Map() };
+		let fresh = 0, extended = 0, entries = 0;
+		for (const path of [...files.keys()].sort()) {
+			const fragment = parseFragment(`${tag}:${path}`, read(files.get(path)!));
+			let added = 0;
+			for (const entry of fragment.entries) {
+				if (seen.has(entryKey(entry))) continue;
+				seen.add(entryKey(entry));
+				const bucket = body.categories.get(fragment.category) ?? [];
+				body.categories.set(fragment.category, bucket);
+				bucket.push(entry);
+				added++;
+			}
+			if (!added) continue;
+			entries += added;
+			folded.add(path);
+			if (previous.has(path)) extended++;
+			else fresh++;
+		}
+		const created = Number(git(["for-each-ref", "--format=%(creatordate:unix)", `refs/tags/${tag}`]));
+		sections.push({ version: tag.slice(1), date: new Date(created * 1000).toISOString().slice(0, 10), source: commits[index]!,
+			body, fragments: files.size, fresh, extended, entries });
+		previous = files;
+	}
+
+	const rendered = sections.filter(section => section.entries > 0).reverse()
+		.flatMap(section => [`## [${section.version}] - ${section.date}`, "", ...renderEntries(section.body)]);
+	const text = [...changelog.lines.slice(0, changelog.unreleasedEnd), "", ...rendered, ...changelog.lines.slice(changelog.unreleasedEnd)]
+		.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\n+$/, "");
+	const remove: string[] = [];
+	const keep: string[] = [];
+	const headFragments = fragmentsAt(head, options.head);
+	for (const [path, oid] of headFragments) {
+		let keys: string[];
+		try {
+			keys = parseFragment(`${options.head}:${path}`, read(oid)).entries.map(entryKey);
+		} catch (error) {
+			keep.push(`${path}\tunparseable: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
+		}
+		const pending = keys.filter(key => !seen.has(key)).length;
+		if (pending) keep.push(`${path}\t${pending} unreleased ${pending === 1 ? "entry" : "entries"}`);
+		else remove.push(path);
+	}
+	let nextPackage: string | undefined;
+	if (options.nextVersion) {
+		const packageText = gitRaw(["show", `${head}:package.json`]);
+		const stated = packageVersions(packageText).version;
+		if (stated !== through) fail(`package.json at ${options.head} states ${String(stated)}, not ${through}; --next-version advances only a main that states the last release`);
+		nextPackage = setPackageVersion(packageText, options.nextVersion);
+	}
+	if (options.output) {
+		if (!existsSync(options.output)) fail(`--output ${options.output} does not exist; create an owned scratch directory first`);
+		// "wx": never overwrite an earlier run's output.
+		writeFileSync(join(options.output, "CHANGELOG.md"), `${text}\n`, { flag: "wx" });
+		writeFileSync(join(options.output, "delete.txt"), remove.map(path => `${path}\n`).join(""), { flag: "wx" });
+		writeFileSync(join(options.output, "keep.txt"), keep.map(line => `${line}\n`).join(""), { flag: "wx" });
+		if (nextPackage) writeFileSync(join(options.output, "package.json"), nextPackage, { flag: "wx" });
+	}
+	for (const section of sections)
+		console.log(`CATCHUP version=${section.version} date=${section.date} source=${section.source.slice(0, 10)} fragments=${section.fragments} new_fragments=${section.fresh} extended_fragments=${section.extended} entries=${section.entries}${section.entries ? "" : " section=none"}`);
+	const absent = [...folded].filter(path => !headFragments.has(path)).length;
+	console.log(`CATCHUP_TOTAL head=${head} versions=${sections.length} sections=${sections.filter(section => section.entries > 0).length} entries=${sections.reduce((sum, section) => sum + section.entries, 0)} folded_fragments=${folded.size} folded_absent_at_head=${absent} delete=${remove.length} keep=${keep.length}${nextPackage ? ` package_version=${through}->${options.nextVersion}` : ""} output=${options.output ?? "none (report only)"}`);
 }
 
 function runNotes(root: string, options: Extract<Options, { mode: "notes" }>, gitRaw: Git): void {
