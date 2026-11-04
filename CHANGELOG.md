@@ -453,6 +453,19 @@
 
 ### Changed
 
+- Restored `extensions/jev-memory-filter.ts` as a portable vendor: the
+  machine-absolute re-export (`/Users/josh/.omp/jev-pinned/...`) is replaced
+  by a self-contained local-Clef client (plain fetch to an explicit loopback
+  gateway, exact committed calibration plus model fingerprint match, fail-open
+  KEEP on every closed outcome). Policy entry restored in
+  `policy/extensions.json`; `package.json` records it as profile-installed via
+  that policy, not loaded through the plugin manifest.
+  Covered by `tests/cli/absolute-imports.test.ts` (ABSIMPORT1: no absolute
+  import/export specifiers; every production entrypoint bundles in an exact
+  export with an empty HOME) and `tests/cli/jev-memory-filter.test.ts`
+  (wire shape, loopback gate, invalid-noul, scoring-off, enforced prune,
+  byte-exact round-trip, transport hold).
+  (ompkit-ommaa)
 - Set CLI and OMP plugin version metadata to 0.2.80, release train 4, cut by the lead under Joshua's release floor (J-2026-10-29-13). Reaches the installed kit: the full suite runs its shell suites five at a time, and a hung suite now ends at its deadline instead of running on (FULLSUITEPAR1); the release ships its installer members (PKGMEMBER1); a reconciled update relinks profile plugins before it reports OK (UPDATERELINK1); the close guard counts a bead's filer and DONE authors as authors (FILERCLOSE1); fixture trackers no longer lock the live parent tracker (BRINITPIN1); and the generated fleet-pack provenance is kept (10 commits). (ompkit-774u)
 - Fixed release packages omitting installer-placed commit hook helpers: ship check-commit-kitlib-reversal.sh and the opt-in native-br-preserve.py helper. A PKGMEMBER1 regression test derives required scripts from the installer's place calls, helper loop, and member table and checks the release ship list.
 
