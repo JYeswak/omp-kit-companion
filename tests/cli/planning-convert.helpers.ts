@@ -3,6 +3,7 @@ import { test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { run, runSync } from "../../src/kitlib/run.ts";
 export type ApplyPlanItem = { slug: string; existing: string; dependsOn?: string[]; parent?: string };
 export function planningFixture() {
@@ -195,8 +196,9 @@ const amendAcceptanceV2 = [
 const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
 function concurrentWriteFixture(trackerRoot: string, targetId: string): Record<string, string> {
-	const realBr = Bun.which("br");
-	if (!realBr) throw new Error("native br unavailable");
+	const resolved = resolveRealBr(process.env.PATH);
+	if (!resolved.ok) throw new Error(resolved.reason);
+	const realBr = resolved.path;
 	const bin = join(trackerRoot, "concurrent-bin");
 	mkdirSync(bin, { recursive: true });
 	const sentinel = join(bin, "tripped");
@@ -223,8 +225,9 @@ process.exit(result.exitCode ?? 1);
 }
 
 function nativeShapeFixture(trackerRoot: string, targetId: string, mode: string): Record<string, string> {
-	const realBr = Bun.which("br");
-	if (!realBr) throw new Error("native br unavailable");
+	const resolved = resolveRealBr(process.env.PATH);
+	if (!resolved.ok) throw new Error(resolved.reason);
+	const realBr = resolved.path;
 	const bin = join(trackerRoot, "shape-bin");
 	mkdirSync(bin, { recursive: true });
 	const wrapper = join(bin, "br");

@@ -12,7 +12,7 @@
 // the owned root baked in at install time, so it keeps working for
 // env-stripped children. Unknown future mutators refuse closed.
 import { accessSync, chmodSync, closeSync, constants, mkdirSync, openSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 export const READONLY_BR_MARKER = "READONLY_TRACKER";
 export const READONLY_BR_EXIT = 77;
@@ -130,18 +130,48 @@ esac
 deny "$SUB"
 `;
 
-/** Resolve the real br on PATH (run before the shim dir exists on PATH, so no self-match). */
-export function resolveRealBr(searchPath: string | undefined): string | null {
+export type RealBrResolution =
+	| { ok: true; path: string; skipped: string[] }
+	| { ok: false; code: "BR_REAL_ABSENT" | "BR_REAL_SHIM_ONLY"; reason: string; skipped: string[] };
+
+const realOrSelf = (p: string): string => { try { return realpathSync(p); } catch { return p; } };
+
+/**
+ * SHIMRESOLVE1 (ompkit-fp72.120.16.196): true when `candidate` is the omp-kit pane guard shim.
+ * Identity is physical, as SUITESHIMPATH1 (scripts/full-suite-verdict.sh) judges it: the
+ * candidate's directory realpath is the agent-bin dir scripts/agent-spawn-env.sh installs
+ * ($HOME/.local/share/omp-kit/agent-bin), or the candidate's realpath is a scripts/br-shim.sh.
+ * Directories are compared, not file realpaths, so macOS hard-linked stubs (HERMPATH1) never
+ * alias; the name `br` alone is never evidence.
+ */
+export function isKitBrShim(candidate: string, home: string | undefined): boolean {
+	if (realOrSelf(candidate).endsWith(`${sep}scripts${sep}br-shim.sh`)) return true;
+	if (!home || home === "/") return false;
+	const agentBin = join(home, ".local", "share", "omp-kit", "agent-bin");
+	return realOrSelf(join(candidate, "..")) === realOrSelf(agentBin);
+}
+
+/**
+ * Resolve the official br on PATH, skipping the omp-kit pane shim (run before the
+ * REPLAYBR1 dir exists on PATH, so no self-match). A PATH whose only br is the shim
+ * is BR_REAL_SHIM_ONLY, never the shim.
+ */
+export function resolveRealBr(searchPath: string | undefined, home: string | undefined = process.env.HOME): RealBrResolution {
 	const path = searchPath ?? process.env.PATH ?? "";
+	const skipped: string[] = [];
 	for (const dir of path.split(":")) {
 		if (!dir) continue;
 		const cand = join(dir, "br");
 		try {
 			accessSync(cand, constants.X_OK);
-			if (statSync(cand).isFile()) return cand;
-		} catch { /* next */ }
+			if (!statSync(cand).isFile()) continue;
+		} catch { continue; }
+		if (isKitBrShim(cand, home)) { skipped.push(cand); continue; }
+		return { ok: true, path: cand, skipped };
 	}
-	return null;
+	return skipped.length > 0
+		? { ok: false, code: "BR_REAL_SHIM_ONLY", reason: `BR_REAL_SHIM_ONLY: every br on PATH is the omp-kit pane shim (${skipped.join(", ")}); unmet prerequisite: official br binary beyond the shim`, skipped }
+		: { ok: false, code: "BR_REAL_ABSENT", reason: "BR_REAL_ABSENT: no br on PATH; unmet prerequisite: official br binary", skipped };
 }
 
 /** Owned fixture writes must skip policy scripts without changing ambient seat identity. */

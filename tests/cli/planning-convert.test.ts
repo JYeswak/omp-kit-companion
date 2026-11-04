@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { COMMANDS } from "../../src/commands.ts";
 import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp.ts";
 import { run as runBounded } from "../../src/kitlib/run.ts";
+import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { planningFixture, type ApplyPlanItem } from "./planning-convert.helpers.ts";
 afterAll(cleanupAllOwnedTmp);
 const { repoRoot, scratch, validPlan, negativePlan, childEnv, isolatedTest, runCli, nativeOutput, nativeJson, issueRows, median, planSource, writePlan, initializeTracker, createNativeIssue, showNativeIssue, applyResult, applyArgs, writeAmendPlan, amendAcceptanceV1, amendAcceptanceV2, concurrentWriteFixture } = planningFixture();
@@ -533,8 +534,9 @@ isolatedTest("missing explicit mode refuses before creating the requested databa
 });
 
 function nativeAuthorityRecorder(trackerRoot: string, mode = "record"): { env: Record<string, string>; log: string } {
-	const realBr = Bun.which("br");
-	if (!realBr) throw new Error("native br unavailable");
+	const resolved = resolveRealBr(process.env.PATH);
+	if (!resolved.ok) throw new Error(resolved.reason);
+	const realBr = resolved.path;
 	const bin = join(trackerRoot, "authority-bin");
 	mkdirSync(bin, { recursive: true });
 	const log = join(trackerRoot, "native-argv.jsonl");

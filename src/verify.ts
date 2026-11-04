@@ -268,9 +268,9 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// scratch; deleting BEADS_DB alone would still discover an ancestor tracker.
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
 	const scratch = ownedTmp("verify", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
-	const realBr = resolveRealBr(env.PATH);
-	if (realBr === null) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat("UNJUDGED: no resolvable br on PATH; unmet prerequisite: real br binary").join("\n"), acts };
-	const replayBin = installReadonlyBr(scratch.path, realBr);
+	const realBr = resolveRealBr(env.PATH, env.HOME);
+	if (!realBr.ok) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: ${realBr.reason}`).join("\n"), acts };
+	const replayBin = installReadonlyBr(scratch.path, realBr.path);
 	const wantsOwned = replayable.some(b => b.body.includes("OWNED_TRACKER_DB"));
 	let ownedDb = "";
 	if (wantsOwned) {
@@ -546,9 +546,9 @@ export async function liveReadback(input: LiveReadbackInput): Promise<VerifyResu
 	if (lesson === null) return refuse("LESSON_MISSING", "LESSON_MISSING: supply --lesson TEXT or an author Lesson: comment; no replay or tracker act ran");
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
 	const scratch = ownedTmp("verify-live", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
-	const realBr = resolveRealBr(env.PATH);
-	if (realBr === null) return refuse("NOT_IN_REVIEW", "UNJUDGED: no resolvable br on PATH; unmet prerequisite: real br binary");
-	const replayEnv = { ...env, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, PATH: `${installReadonlyBr(scratch.path, realBr)}:${env.PATH ?? "/usr/bin:/bin"}` };
+	const realBr = resolveRealBr(env.PATH, env.HOME);
+	if (!realBr.ok) return refuse("NOT_IN_REVIEW", `UNJUDGED: ${realBr.reason}`);
+	const replayEnv = { ...env, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, PATH: `${installReadonlyBr(scratch.path, realBr.path)}:${env.PATH ?? "/usr/bin:/bin"}` };
 	const replays: BoxReplay[] = [];
 	for (const box of toRun) {
 		const command = commandOf(box.body)!;

@@ -1064,18 +1064,25 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		await git(["push", "-q", "origin", "HEAD:main"]);
 		const rev = await run(["git", "rev-parse", "HEAD"], { cwd: cdir, deadline_s: 60 });
 		const sha = utf8(rev.stdout).trim();
-		const brBin = resolveRealBr(process.env.PATH);
-		if (brBin === null) throw new Error("no resolvable br on PATH; unmet prerequisite: real br binary");
+		// SHIMRESOLVE1: on a seat the omp-kit pane shim is first on PATH; the resolver must skip it.
+		const resolved = resolveRealBr(process.env.PATH);
+		if (!resolved.ok) throw new Error(resolved.reason);
+		const brBin = resolved.path;
+		// Fixture tracker writes and the fixture close act run under fixture actors, so they use the
+		// official br itself; verifyBead's replays still resolve it from the unpinned seat PATH.
+		const officialBin = join(root, "official-br");
+		mkdirSync(officialBin, { recursive: true });
+		symlinkSync(brBin, join(officialBin, "br"));
 		const stripped = { ...process.env } as Record<string, string>;
 		delete stripped.BEADS_DB;
 		const tdir = join(root, "t");
 		mkdirSync(tdir, { recursive: true });
-		const tinit = await run(["br", "init", "--db", join(tdir, ".beads", "beads.db")], { cwd: tdir, deadline_s: 60, env: stripped });
+		const tinit = await run([brBin, "init", "--db", join(tdir, ".beads", "beads.db")], { cwd: tdir, deadline_s: fixtureDeadlineS(60), env: stripped });
 		if (tinit.rc !== 0) throw new Error(`tracker init -> ${tinit.rc}: ${utf8(tinit.stderr)}`);
 		const tdb = join(tdir, ".beads", "beads.db");
 		const envT = { ...process.env, BEADS_DB: tdb } as Record<string, string>;
 		const brOut = async (args: string[], cwd: string, env?: Record<string, string>) => {
-			const r = await run(["br", ...args], { cwd, deadline_s: 60, env: env ?? envT });
+			const r = await run([brBin, ...args], { cwd, deadline_s: fixtureDeadlineS(60), env: env ?? envT });
 			return { rc: r.rc, out: utf8(r.stdout) + utf8(r.stderr) };
 		};
 		const created = await brOut(["create", "native guard probe", "--json"], tdir);
@@ -1084,7 +1091,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const id = typeof raw === "object" && raw !== null && "id" in raw && typeof raw.id === "string" ? raw.id : null;
 		if (id === null) throw new Error(`create returned no id: ${created.out.slice(0, 200)}`);
 		const ac = `- [ ] [a] [build] \`sh scripts/t.sh\` -> 16 pass 0 fail\n- [ ] [b] [build] admitted owned write: \`br --db "\${OWNED_TRACKER_DB:-${tdb}}" create "owned probe"\` -> Created\n- [ ] [c] [build] differential guard box: \`br --db "${tdb}" update ${id} --add-label guard-probe\` -> READONLY_TRACKER`;
-		const desc = "WHAT: owned native-guard fixture.\n\nWHY: proves the exact source and the official compiled verifier reach the shim guard on owned fixtures; the old guardless binary is the refused differential.";
+		const desc = "WHAT: owned native-guard fixture.\n\nWHY: proves the exact source and the official compiled verifier reach the shim guard on owned fixtures; the old guardless binary is the refused differential.\n\n## Pitfalls\n- the guardless binary must stay the refused differential";
 		const checks: Array<[string[], string]> = [
 			[["update", id, "--description", desc, "--acceptance", ac, "--add-label", "kind:fix"], "shape"],
 			[["update", id, "--check-acceptance", "1"], "tick 1"],
@@ -1100,7 +1107,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const shim = join(shimBin, "br");
 		const odir = join(root, "guard", "owned");
 		mkdirSync(odir, { recursive: true });
-		const oinit = await run(["br", "init", "--db", join(odir, ".beads", "beads.db")], { cwd: odir, deadline_s: 60, env: stripped });
+		const oinit = await run([brBin, "init", "--db", join(odir, ".beads", "beads.db")], { cwd: odir, deadline_s: fixtureDeadlineS(60), env: stripped });
 		if (oinit.rc !== 0) throw new Error(`owned init -> ${oinit.rc}: ${utf8(oinit.stderr)}`);
 		const odb = join(odir, ".beads", "beads.db");
 		const before = readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8");
@@ -1205,7 +1212,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		// replicate the production tracker's workflow policy into the fixture.
 		writeFileSync(join(tdir, ".beads", "policy.yaml"), "workflow:\n  strict: true\n  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]\n  transitions:\n    initial: [open]\n    open: [in_progress, blocked, deferred, closed]\n    in_progress: [in_review, open, blocked, deferred]\n    in_review: [closed, rework]\n    rework: [in_progress, in_review, open]\n    blocked: [open, in_progress]\n    deferred: [open]\n    closed: [open]\n  gates:\n    \"in_review -> closed\":\n      require_all:\n        - min_reviewers: 1\n");
 		const cliPath = resolve(import.meta.dir, "..", "..", "src", "cli.ts");
-		const closed = await run([process.execPath, "run", "--silent", cliPath, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", fam, "--lesson", "native replay-barrier fixture", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: envT });
+		const closed = await run([process.execPath, "run", "--silent", cliPath, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", fam, "--lesson", "native replay-barrier fixture", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: { ...envT, PATH: `${officialBin}:${envT.PATH ?? ""}` } });
 		if (closed.rc !== 0) throw new Error(`cli close -> ${closed.rc}: out=${utf8(closed.stdout).slice(0, 500)} err=${utf8(closed.stderr).slice(0, 300)}`);
 		const closedDoc: unknown = JSON.parse(utf8(closed.stdout));
 		const closedPayload: unknown = typeof closedDoc === "object" && closedDoc !== null && "data" in closedDoc ? closedDoc.data : closedDoc;
@@ -1286,5 +1293,61 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		mkdirSync(bare, { recursive: true });
 		writeFileSync(join(bare, "package.json"), unstamped);
 		expect(identifyExactSource(bare, readFileSync(join(bare, "package.json")))).toBe(null);
+	});
+});
+
+describe("SHIMRESOLVE1 resolveRealBr skips the omp-kit pane shim (ompkit-fp72.120.16.196)", () => {
+	const fixture = () => {
+		const root = realpathSync(ownedTmp("shimresolve1", { bead: "ompkit-fp72.120.16.196" }).path);
+		const home = join(root, "home");
+		const agentBin = join(home, ".local", "share", "omp-kit", "agent-bin");
+		mkdirSync(agentBin, { recursive: true });
+		symlinkSync(join(REPO_ROOT, "scripts", "br-shim.sh"), join(agentBin, "br"));
+		const official = join(root, "official");
+		mkdirSync(official, { recursive: true });
+		writeFileSync(join(official, "br"), "#!/bin/sh\necho official\n", { mode: 0o755 });
+		const empty = join(root, "empty");
+		mkdirSync(empty, { recursive: true });
+		return { root, home, agentBin, official, empty };
+	};
+
+	test("planted: agent-bin first on PATH resolves the official br and names the skipped shim", () => {
+		const f = fixture();
+		expect(resolveRealBr(`${f.agentBin}:${f.official}`, f.home)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(f.agentBin, "br")] });
+	});
+
+	test("control: a PATH whose only br is the shim is the named BR_REAL_SHIM_ONLY error, never the shim", () => {
+		const f = fixture();
+		const r = resolveRealBr(f.agentBin, f.home);
+		expect(r.ok).toBe(false);
+		if (r.ok) return;
+		expect(r.code).toBe("BR_REAL_SHIM_ONLY");
+		expect(r.reason).toStartWith("BR_REAL_SHIM_ONLY:");
+		expect(r.skipped).toEqual([join(f.agentBin, "br")]);
+		expect(resolveRealBr(f.empty, f.home)).toMatchObject({ ok: false, code: "BR_REAL_ABSENT" });
+	});
+
+	test("identity is physical: a copied shim reached through a symlinked HOME and a br-shim.sh link elsewhere are skipped; a plain br in a dir named agent-bin is not", () => {
+		const f = fixture();
+		// A copy (no br-shim.sh realpath) inside the agent-bin dir, reached through a symlinked HOME.
+		const copyHome = join(f.root, "copy-home");
+		const copyBin = join(copyHome, ".local", "share", "omp-kit", "agent-bin");
+		mkdirSync(copyBin, { recursive: true });
+		copyFileSync(join(REPO_ROOT, "scripts", "br-shim.sh"), join(copyBin, "br"));
+		chmodSync(join(copyBin, "br"), 0o755);
+		const homeLink = join(f.root, "home-link");
+		symlinkSync(copyHome, homeLink);
+		const viaLink = join(homeLink, ".local", "share", "omp-kit", "agent-bin");
+		expect(resolveRealBr(`${viaLink}:${f.official}`, copyHome)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(viaLink, "br")] });
+		// A br linked to scripts/br-shim.sh from any other directory.
+		const linkBin = join(f.root, "link-bin");
+		mkdirSync(linkBin, { recursive: true });
+		symlinkSync(join(REPO_ROOT, "scripts", "br-shim.sh"), join(linkBin, "br"));
+		expect(resolveRealBr(`${linkBin}:${f.official}`, f.home)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(linkBin, "br")] });
+		// The name alone is not identity: a non-shim br in another HOME's agent-bin dir resolves.
+		const otherBin = join(f.root, "other-home", ".local", "share", "omp-kit", "agent-bin");
+		mkdirSync(otherBin, { recursive: true });
+		writeFileSync(join(otherBin, "br"), "#!/bin/sh\necho other\n", { mode: 0o755 });
+		expect(resolveRealBr(`${otherBin}:${f.official}`, f.home)).toEqual({ ok: true, path: join(otherBin, "br"), skipped: [] });
 	});
 });
