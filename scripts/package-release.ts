@@ -166,6 +166,83 @@ export function packageSecretOutputGuard(source: Buffer): Buffer {
 	return Buffer.from(text.replace(from, '"../scripts/secret-output-policy.v1.json"'));
 }
 
+/**
+ * Packaged sources that live beside their consumer under a different path than in
+ * the checkout: the release has no src/ tree, so these ship under scripts/.
+ */
+export const RELOCATED_SOURCES: Readonly<Record<string, string>> = {
+	"src/cc-credential-shapes.v1.json": "scripts/cc-credential-shapes.v1.json",
+	"src/secret-output-policy.v1.json": "scripts/secret-output-policy.v1.json",
+};
+/** A shipped installer is any packaged scripts/install*.sh. */
+export const isShippedInstaller = (name: string): boolean => /^scripts\/install[A-Za-z0-9_.-]*\.sh$/.test(name);
+/**
+ * Every kit file an installer copies or runs: each INSTALLATION_MANIFEST row's
+ * source column, plus each non-comment literal "$KITROOT/x" or "$ROOT/x" path.
+ * The package is derived from these (closeOverInstallerReferences) and checked
+ * against them (checkShippedInstallerReferences), so no hand list can miss one.
+ */
+export function installerReferences(text: string): string[] {
+	const references = new Set<string>();
+	let inManifest = false;
+	for (const line of text.split("\n")) {
+		if (/<<\s*'INSTALLATION_MANIFEST'\s*$/.test(line)) { inManifest = true; continue; }
+		if (inManifest) {
+			if (line === "INSTALLATION_MANIFEST") { inManifest = false; continue; }
+			const fields = line.trim().split(/\s+/);
+			if (fields.length !== 5) fail(`INSTALLER_MANIFEST_ROW_MALFORMED: ${line}`);
+			references.add(fields[3]!);
+			continue;
+		}
+		if (/^\s*#/.test(line)) continue;
+		for (const match of line.matchAll(/\$\{?(?:KITROOT|ROOT)\}?\/([A-Za-z0-9_][A-Za-z0-9_./-]*)/g)) references.add(match[1]!.replace(/\/+$/, ""));
+	}
+	if (inManifest) fail("INSTALLER_MANIFEST_UNTERMINATED");
+	return [...references].sort();
+}
+/** Rewrite relocated manifest sources to their packaged path; refuses any remaining src/ reference. */
+export function packageInstaller(name: string, source: Buffer): Buffer {
+	let inManifest = false;
+	const lines = source.toString("utf8").split("\n").map(line => {
+		if (/<<\s*'INSTALLATION_MANIFEST'\s*$/.test(line)) { inManifest = true; return line; }
+		if (!inManifest) return line;
+		if (line === "INSTALLATION_MANIFEST") { inManifest = false; return line; }
+		const fields = line.split(" ");
+		const relocated = RELOCATED_SOURCES[fields[3] ?? ""];
+		if (relocated) fields[3] = relocated;
+		return fields.join(" ");
+	});
+	const packaged = Buffer.from(lines.join("\n"));
+	for (const reference of installerReferences(packaged.toString("utf8")))
+		if (reference.startsWith("src/")) fail(`INSTALLER_REFERENCE_UNSHIPPED: ${name} -> ${reference}`);
+	return packaged;
+}
+/** Pack-time check: every shipped installer's reference is a packaged regular file or packaged directory. */
+export function checkShippedInstallerReferences(stagedRoot: string, names: Iterable<string>): { file: string; error: string }[] {
+	const failures: { file: string; error: string }[] = [];
+	for (const name of [...names].filter(isShippedInstaller).sort()) {
+		for (const reference of installerReferences(readFileSync(join(stagedRoot, name), "utf8"))) {
+			const path = join(stagedRoot, reference);
+			const stat = existsSync(path) ? lstatSync(path) : undefined;
+			if (reference.split("/").includes("..") || !stat || stat.isSymbolicLink() || !(stat.isFile() || stat.isDirectory()))
+				failures.push({ file: name, error: `INSTALLER_REFERENCE_UNSHIPPED ${reference}` });
+		}
+	}
+	return failures;
+}
+/** Close the package list over installer references, following referenced installers. */
+export function closeOverInstallerReferences(names: string[], readSource: (name: string) => string): void {
+	const queue = names.filter(isShippedInstaller);
+	while (queue.length > 0) {
+		for (const reference of installerReferences(readSource(queue.shift()!))) {
+			const packaged = RELOCATED_SOURCES[reference] ?? reference;
+			if (names.includes(packaged) || names.some(name => name.startsWith(`${packaged}/`))) continue;
+			names.push(packaged);
+			if (isShippedInstaller(packaged)) queue.push(packaged);
+		}
+	}
+}
+
 function safeSource(name: string): Buffer {
 	const source = join(root, name);
 	const stat = lstatSync(source);
@@ -361,6 +438,9 @@ async function run(): Promise<void> {
 		const names = [...files, ...RELEASE_DATA_FILES.filter(path => dirname(path) === ".")];
 		for (const path of roots) expand(path, names);
 		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv", "licenses/tern-sdk/LICENSE");
+		// Ship every file a shipped installer copies or runs (ompkit-fp72.120.16.151:
+		// 0.2.86/0.2.87 installers named check-deploy-step.sh, absent from the package).
+		closeOverInstallerReferences(names, name => safeSource(name).toString("utf8"));
 		names.sort();
 		if (new Set(names).size !== names.length) fail("DUPLICATE_RELEASE_SOURCE");
 		const content = new Map<string, Buffer>();
@@ -368,9 +448,11 @@ async function run(): Promise<void> {
 			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));
 			else if (name === "MANIFEST.tsv") content.set(name, ruleManifest);
 			else if (name === "licenses/tern-sdk/LICENSE") content.set(name, safeSource("src/tern/LICENSE"));
-			else if (name === "scripts/cc-credential-shapes.v1.json" || name === "scripts/secret-output-policy.v1.json")
+			else if (Object.values(RELOCATED_SOURCES).includes(name))
 				// Runtime replay data lives beside its Python consumer, never in a source-only tree.
-				content.set(name, safeSource(`src/${name.slice("scripts/".length)}`));
+				content.set(name, safeSource(Object.keys(RELOCATED_SOURCES).find(key => RELOCATED_SOURCES[key] === name)!));
+			else if (isShippedInstaller(name))
+				content.set(name, packageInstaller(name, safeSource(name)));
 			else if (name === "extensions/secret-output-guard.ts")
 				content.set(name, packageSecretOutputGuard(safeSource(name)));
 			else if (BUNDLE_ERRORS[name]) {
@@ -397,6 +479,8 @@ async function run(): Promise<void> {
 		if (loadFailures.length > 0) fail(`EXTENSION_LOAD_FAILED: ${loadFailures.map(failure => `${failure.file} (${failure.error})`).join("; ")}`);
 		const scriptFailures = await checkPackagedScriptDependencies(loadStage);
 		if (scriptFailures.length > 0) fail(`EXTENSION_SCRIPT_DEPENDENCY_FAILED: ${scriptFailures.map(failure => `${failure.file} (${failure.error})`).join("; ")}`);
+		const installerFailures = checkShippedInstallerReferences(loadStage, content.keys());
+		if (installerFailures.length > 0) fail(`INSTALLER_REFERENCE_UNSHIPPED: ${installerFailures.map(failure => `${failure.file} (${failure.error})`).join("; ")}`);
 		// Reobserve after compilation and resource reads. This detects an observed
 		// changed/dirty HEAD, not transient edit-and-revert or authenticated source binding.
 		const finalSourcePackage = safeSource("package.json");
