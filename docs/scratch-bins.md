@@ -41,6 +41,16 @@ A hold outlives its dead owner until it expires, and shows as `LIVE held-by-bead
 
 `scratch new` creates a task directory only when its `<repo>/var/agent-tmp` root is discoverable by `scratch release`. If it is not, the command returns `SCRATCH_NEW_REFUSED` with `scratch-root-unrecognized` and the root to add to the complete `OMP_KIT_SCRATCH_ROOTS` list. It may create the empty `var/agent-tmp` parent, but not the task directory or `.owner`. Use the same root configuration for creation and later release, or run from a registered root. `scratch plan --json` reports the active roots.
 
+### Setting TMPDIR
+
+`omp-kit scratch new --label X --print-dir` follows mktemp's contract (SCRATCHNULL1): it prints only the absolute owned dir and exits 0, or prints nothing on stdout, the reason on stderr, and exits nonzero. Set TMPDIR fail-closed with the assignment apart from the export, because `export`'s own status is 0:
+
+```
+TMPDIR=$(omp-kit scratch new --label X --print-dir) || exit 1; export TMPDIR
+```
+
+Never pipe `--json` through `jq -r .data.dir`: a refusal becomes the path `null`. `--print-dir` does not print the release capability, so release by the owning seat, or use `--json` to keep it. `--print-dir` and `--json` are exclusive.
+
 ## Exporting a commit
 
 `omp-kit scratch new --label probe --export COMMIT --json` keeps ownership metadata

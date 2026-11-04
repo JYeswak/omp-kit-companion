@@ -170,10 +170,12 @@ export async function briefCandidates(contract: BriefContract, paths: readonly s
 
 /** PRIORSPAWN1: the brief contract teaches the prior-art step the spawn guard enforces. */
 export const BRIEF_PRIOR_ART_STEP = "[prior-art] Refuses: a build task naming a bead with no prior-art comment (PRIOR_ART_SPAWN_REFUSED). Comply: br comment add <id> \"prior=<repo path:line> did=<...> applied=<...>\" before spawning; a verification, diagnosis or replay brief starts with `no-edit: verify` or `no-edit: diagnose`.";
+/** SCRATCHNULL1 (ompkit-fp72.120.16.194): `jq -r .data.dir` on a refused `scratch new` yields the path `null`; teach the fail-closed form. */
+export const BRIEF_SCRATCH_STEP = "[scratch] Hazard: a refused `scratch new` piped through `jq -r .data.dir` exports TMPDIR=null and writes ./null outside owned scratch, and `export TMPDIR=$(...) || exit 1` never exits because export returns 0. Comply: TMPDIR=$(omp-kit scratch new --label <x> --print-dir) || exit 1; export TMPDIR, run inside the owning repo.";
 
 export function renderBrief(contract: BriefContract, candidates: readonly BriefCandidate[] = []): string {
 	return [`Gate contract: ${contract.repo}`, ...contract.rules.map(rule => `[${rule.member}] Refuses: ${rule.refuses}. Comply: ${rule.compliant}.`),
-		BRIEF_PRIOR_ART_STEP,
+		BRIEF_PRIOR_ART_STEP, BRIEF_SCRATCH_STEP,
 		...candidates.map(row => `${row.review} ${row.path}:${row.line}\n${row.hunk}`), contract.marker].join("\n");
 }
 

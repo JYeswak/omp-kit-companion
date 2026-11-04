@@ -10,7 +10,7 @@ import {
 	quarantineEntryFor, reapLogPath, releaseScratch, type ApplyDeps, type InspectDeps, type LivenessDeps,
 } from "../../src/scratch.ts";
 import { incarnation, type Incarnation, type Probe, type ProbeState } from "../../src/kitlib/proc.ts";
-import { run } from "../../src/kitlib/run.ts";
+import { run, type RunResult } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
@@ -401,4 +401,49 @@ test("QRELEASED1 every kept expired quarantine entry logs one reap-log line with
 	expect(keeps(seatHeld)).toEqual(["owner-seat-alive"]);
 	expect(keeps(proofHeld)).toEqual(["lsof-evidence-unavailable"]);
 	expect(existsSync(seatHeld) && existsSync(proofHeld)).toBe(true);
+}, fixtureDeadlineS(60) * 1000);
+
+// SCRATCHNULL1 (ompkit-fp72.120.16.194): `export TMPDIR=$(omp-kit scratch new ... --json | jq -r .data.dir)` turned a
+// refusal into TMPDIR=null and two agents wrote ./null. --print-dir follows mktemp: the dir alone and exit 0, or nothing
+// on stdout and a nonzero exit. The assignment is separate from `export`: `export V=$(false) || exit` never exits,
+// because export's own status is 0.
+const cli = join(repo, "src", "cli.ts");
+type Ran = { code: number | null; stdout: string; stderr: string };
+/** Each fixture gets its own kit state, so no CLI call reads or writes the operator's. */
+const fixtureEnv = (cwd: string, env: Record<string, string>): Record<string, string> => ({ ...process.env as Record<string, string>,
+	KIT_BUN: process.execPath, KIT_CLI: cli, XDG_STATE_HOME: join(cwd, ".state"), XDG_CONFIG_HOME: join(cwd, ".config"), ...env });
+const ran = (out: RunResult): Ran =>
+	({ code: out.rc, stdout: new TextDecoder().decode(out.stdout), stderr: new TextDecoder().decode(out.stderr) });
+const kit = async (cwd: string, args: string[], env: Record<string, string> = {}): Promise<Ran> =>
+	ran(await run([process.execPath, cli, "scratch", "new", "--label", "scratchnull", ...args], { deadline_s: fixtureDeadlineS(60), cwd, env: fixtureEnv(cwd, env) }));
+/** The fail-closed idiom in a fixture shell: assignment apart from export, then a write under the exported TMPDIR. */
+const idiom = async (cwd: string, env: Record<string, string> = {}): Promise<Ran> =>
+	ran(await run(["/bin/sh", "-c", 'TMPDIR=$("$KIT_BUN" "$KIT_CLI" scratch new --label scratchnull --print-dir) || exit 7; export TMPDIR; mkdir -p "$TMPDIR/out" && printf %s "$TMPDIR"'],
+		{ deadline_s: fixtureDeadlineS(60), cwd, env: fixtureEnv(cwd, env) }));
+
+test("SCRATCHNULL1 planted: outside a repo --print-dir prints nothing and exits nonzero, the idiom creates no ./null, and the --json refusal exits nonzero", async () => {
+	const outside = tempDir("scratchnull-outside");
+	const direct = await kit(outside, ["--print-dir"]);
+	expect(direct.stdout).toBe("");
+	expect(direct.code).not.toBe(0);
+	expect(direct.stderr).toContain("cwd-not-repository");
+	const fixture = await idiom(outside);
+	expect(fixture).toMatchObject({ code: 7, stdout: "" });
+	expect(existsSync(join(outside, "null")) || existsSync(join(outside, "out")) || existsSync(join(outside, "var"))).toBe(false);
+	const json = await kit(outside, ["--json"]);
+	expect(json.code).not.toBe(0);
+	expect(JSON.parse(json.stdout)).toMatchObject({ ok: false, errors: [{ code: "SCRATCH_NEW_REFUSED" }] });
+}, fixtureDeadlineS(60) * 1000);
+
+test("SCRATCHNULL1 control: inside a repo the idiom yields an owned dir under var/agent-tmp", async () => {
+	const inside = tempDir("scratchnull-inside");
+	mkdirSync(join(inside, ".git"));
+	const root = join(inside, "var", "agent-tmp");
+	const fixture = await idiom(inside, { OMP_KIT_SCRATCH_ROOTS: root });
+	expect(fixture.stderr).toBe("");
+	expect(fixture.code).toBe(0);
+	expect(fixture.stdout.startsWith(join(root, "scratchnull."))).toBe(true);
+	expect(fixture.stdout).toMatch(/\/scratchnull\.\d+$/);
+	expect(existsSync(join(fixture.stdout, ".owner")) && existsSync(join(fixture.stdout, "out"))).toBe(true);
+	expect(existsSync(join(inside, "null"))).toBe(false);
 }, fixtureDeadlineS(60) * 1000);

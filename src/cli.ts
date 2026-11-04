@@ -4009,6 +4009,12 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 	}
 	if (sub === "new") {
 		const labelFlag = request.flags.get("--label"), beadFlag = request.flags.get("--bead"), exportFlag = request.flags.get("--export");
+		// SCRATCHNULL1 (ompkit-fp72.120.16.194): mktemp's contract. --print-dir prints only the absolute dir and exits 0, or
+		// prints nothing on stdout and exits nonzero, so `$(...)` can never turn a refusal into a path such as ./null.
+		const printDir = request.flags.has("--print-dir");
+		if (printDir && request.json)
+			return refusal("SCRATCH_NEW_FLAG_INVALID", "--print-dir and --json are exclusive",
+				"Use --print-dir for TMPDIR (TMPDIR=$(omp-kit scratch new --label X --print-dir) || exit 1; export TMPDIR) or --json for the full record.");
 		if (typeof labelFlag !== "string" || labelFlag === "")
 			return refusal("SCRATCH_NEW_LABEL_REQUIRED", "scratch new needs --label LABEL",
 				"Run omp-kit scratch new --label <name> [--bead <id>] [--export <commit>] from the owning repo.");
@@ -4033,8 +4039,14 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		if (typeof exportFlag === "string") {
 			const err = exportCommitToScratch(repo, exportFlag, created.dir, deps.run);
 			// The dir exists either way, so its capability is returned either way: it is the only way to release it later.
-			if (err !== null) return { code: 1, data: { overall: "FINDINGS", dir: created.dir, exportDir, reason: err, capability: created.capability }, verification: "UNVERIFIED" };
+			if (err !== null) {
+				if (printDir) return { code: 1, data: { overall: "FINDINGS", dir: created.dir, exportDir, reason: err },
+					errors: [{ code: "SCRATCH_NEW_EXPORT_FAILED", message: `scratch new made ${created.dir} but the export failed: ${err}; release capability ${created.capability}`,
+						remediation: `Release it: omp-kit scratch release ${created.dir} --capability ${created.capability} --bin throwaway --now` }], verification: "UNVERIFIED" };
+				return { code: 1, data: { overall: "FINDINGS", dir: created.dir, exportDir, reason: err, capability: created.capability }, verification: "UNVERIFIED" };
+			}
 		}
+		if (printDir) return { code: 0, data: { overall: "OK", dir: created.dir, text: created.dir }, verification: "UNVERIFIED" };
 		return { code: 0, data: { overall: "OK", dir: created.dir, ...(exportDir ? { exportDir } : {}), exportLine: created.exportLine, capability: created.capability }, verification: "UNVERIFIED" };
 	}
 	if (sub === "mine") {
