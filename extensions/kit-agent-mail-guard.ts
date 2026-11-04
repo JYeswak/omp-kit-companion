@@ -269,7 +269,12 @@ export default async function kitAgentMailGuard(pi: AgentMailGuardApi, deps: Age
 		if (!file) return null;
 		callerResolver ??= createMailWake({ exec: pi.exec, env, home }).caller;
 		const seat = await callerResolver(file, project);
-		return seat?.repo === ctx.cwd ? seat : null;
+		if (!seat) return null;
+		if (seat.repo === ctx.cwd && seat.name) return seat;
+		// MAILXREPO1: the requested project's pane identity file at this caller's own proven block binds it
+		// whatever ctx.cwd is (a lead in ~/Developer mailing an opted-in repo); another block's file never does.
+		if (seat.projectName) return { ...seat, name: seat.projectName };
+		return seat.repo === ctx.cwd ? seat : null;
 	}
 
 	function secretScanner(): RegExp[] {

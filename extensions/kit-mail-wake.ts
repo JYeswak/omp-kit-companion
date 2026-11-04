@@ -54,7 +54,12 @@ export interface MailWakeDeps {
 }
 
 export interface Seat { name: string; session: string; block: string; repo: string; sessionFile?: string }
-export interface MailCaller { session: string; block: string; repo: string; name: string | null }
+/**
+ * `name` is the seat bound through its launch cwd (or its configured chief row); `projectName` is the
+ * requested project's own pane identity file at this block, `<sha1(projectKey)[:12]>/tern-<block>`, the
+ * name resolve_pane_identity returns for `tern:<block>` (MAILXREPO1). A chief row for the project still pins it.
+ */
+export interface MailCaller { session: string; block: string; repo: string; name: string | null; projectName: string | null }
 interface LiveBlock { session: string; block: string; cwd: string; sessionFile?: string }
 export interface Parent { name: string; basis: string }
 export type Resolution = { kind: "seat"; seat: Seat } | { kind: "none"; why: string; parent: Parent | null };
@@ -301,18 +306,28 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		return null;
 	}
 
-	function identityFor(block: LiveBlock, projectKey: string, expectedName?: string): string | null {
+	function chiefRow(block: LiveBlock, projectKey: string, expectedName?: string): unknown {
 		const watch = readJson(fleetWatchPath);
 		const others = prop(watch, "chiefs");
 		const chiefs: unknown[] = [prop(watch, "chief"), ...(Array.isArray(others) ? others : [])];
-		const row = chiefs.find(chief => prop(chief, "repo") === projectKey
+		return chiefs.find(chief => prop(chief, "repo") === projectKey
 			&& typeof prop(chief, "agent") === "string"
 			&& (expectedName === undefined || String(prop(chief, "agent")).toLowerCase() === expectedName.toLowerCase())
 			&& prop(chief, "session") === block.session && prop(chief, "pane") === `tern:${block.block}`
 			&& prop(chief, "cwd") === block.cwd);
+	}
+
+	function identityFor(block: LiveBlock, projectKey: string, expectedName?: string): string | null {
+		const row = chiefRow(block, projectKey, expectedName);
 		const identityRepo = row ? String(prop(row, "repo")) : block.cwd;
 		const path = identityPath(home, identityRepo, block.block);
 		const bound = identityName(path);
+		return bound && (!row || bound.toLowerCase() === String(prop(row, "agent")).toLowerCase()) ? bound : null;
+	}
+
+	function projectIdentity(block: LiveBlock, projectKey: string): string | null {
+		const row = chiefRow(block, projectKey);
+		const bound = identityName(identityPath(home, projectKey, block.block));
 		return bound && (!row || bound.toLowerCase() === String(prop(row, "agent")).toLowerCase()) ? bound : null;
 	}
 
@@ -325,7 +340,10 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 			if (found !== null) return null;
 			found = block;
 		}
-		return found ? { session: found.session, block: found.block, repo: found.cwd, name: identityFor(found, projectKey) } : null;
+		return found ? {
+			session: found.session, block: found.block, repo: found.cwd,
+			name: identityFor(found, projectKey), projectName: projectIdentity(found, projectKey),
+		} : null;
 	}
 
 	/** One recipient to its live seat, or why there is none plus the parent to re-address to. */

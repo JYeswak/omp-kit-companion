@@ -1030,3 +1030,55 @@ test("DONE mail: checks repo-qualified commit citations in their code-source rep
 	expect(code(offline)).toBe("AM_DONE_NOT_PUBLISHED");
 	expect(offline?.reason).toContain("UNKNOWN");
 });
+
+/**
+ * MAILXREPO1 (ompkit-fp72.120.16.171): a lead whose Tern block runs in a directory outside the opted-in
+ * recipient repo (~/Developer) holds its identity only in the recipient project's pane identity file,
+ * `<sha1(recipient)[:12]>/tern-<block>`, the file resolve_pane_identity reads. Block 91 is the caller's own
+ * live session; block 92 is another live seat in the recipient repo.
+ */
+function crossRepoSeat(bindings: Record<string, string>, sessionLive = true) {
+	const recipient = fleetRepo();
+	const home = freshDir(base, "xrepo-sender-");
+	const sessionCwd = freshDir(base, "lead-cwd-");
+	const sessionFile = join(home, "lead-session.jsonl");
+	const identityDir = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(recipient).digest("hex").slice(0, 12));
+	mkdirSync(identityDir, { recursive: true });
+	for (const [block, name] of Object.entries(bindings)) writeFileSync(join(identityDir, `tern-${block}`), JSON.stringify({ name }));
+	const respond = fleetRespond({ [recipient]: [mailRow("PlumRaven"), mailRow("BlueLake"), mailRow("RedCat")] });
+	const tern = JSON.stringify({
+		sessions: [{ tabs: [{ name: "fixture", blocks: [{ id: 91, cwd: sessionCwd, live: true }, { id: 92, cwd: recipient, live: true }] }] }],
+		panes: [
+			{ pane: 91, cwd: sessionCwd, omp_session_file: sessionLive ? sessionFile : join(home, "ended.jsonl") },
+			{ pane: 92, cwd: recipient, omp_session_file: join(home, "other.jsonl") },
+		],
+	});
+	const host = (agentName: string) => createHost({ home, env: { AGENT_NAME: agentName }, sessionFile, mailWake: undefined },
+		call => call.command === "tern" ? { code: 0, stdout: tern } : respond(call));
+	return { recipient, sessionCwd, host };
+}
+
+test("MAILXREPO1 [a] planted: a Tern seat outside the recipient repo sends under its key from that project's pane identity file", async () => {
+	const seat = crossRepoSeat({ 91: "PlumRaven" });
+	const h = await seat.host("PlumRaven");
+	expect(await h.mail(seat.sessionCwd, "send_message", send({ project_key: seat.recipient, to: ["BlueLake"], cc: [] }), "xrepo-send")).toBeUndefined();
+	// The bound name governs: the seat still cannot send as another agent under that key.
+	expect(code(await h.mail(seat.sessionCwd, "send_message", send({ project_key: seat.recipient, sender_name: "RedCat", to: ["BlueLake"], cc: [] }), "xrepo-borrow")))
+		.toBe("AM_IDENTITY_MISMATCH");
+});
+
+test("MAILXREPO1 [b] control: an unbound or spoofed pane is still refused IDENTITY_UNBOUND", async () => {
+	const unbound = "kit-agent-mail-guard IDENTITY_UNBOUND: No identity file binds this sender's actual pane. Run register_agent or macro_start_session for this pane before sending. Nothing was sent.";
+	// Another live block's binding for the recipient project never binds this caller, whatever name it claims.
+	const spoof = crossRepoSeat({ 92: "RedCat" });
+	const spoofed = await (await spoof.host("RedCat")).mail(spoof.sessionCwd, "send_message",
+		send({ project_key: spoof.recipient, sender_name: "RedCat", to: ["BlueLake"], cc: [] }), "xrepo-spoof");
+	expect(code(spoofed)).toBe("IDENTITY_UNBOUND");
+	expect(spoofed?.reason).toBe(unbound);
+	// A bound block whose session is not this caller's live session does not bind it either.
+	const ended = crossRepoSeat({ 91: "PlumRaven" }, false);
+	const stale = await (await ended.host("PlumRaven")).mail(ended.sessionCwd, "send_message",
+		send({ project_key: ended.recipient, to: ["BlueLake"], cc: [] }), "xrepo-ended");
+	expect(code(stale)).toBe("IDENTITY_UNBOUND");
+	expect(stale?.reason).toBe(unbound);
+});
