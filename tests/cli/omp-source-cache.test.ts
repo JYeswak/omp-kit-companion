@@ -6,6 +6,7 @@ import { cachedOmpPackage, ensureOmpSource } from "../../src/omp-source-cache.ts
 import { resolveOmpIdentity, verifyTernOmpSource } from "../../src/paths.ts";
 import { resolveOmpSource } from "../../scripts/rule-class.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 // Real paths: macOS tmpdir() sits under the /var -> /private/var symlink.
@@ -128,6 +129,32 @@ test("Tern observe identity binds launcher bytes and exact-version cached source
 	writeFileSync(join(cache, "9.9.9", ".verified.json"), "{}");
 	expect(verifyTernOmpSource(launcher, join(pkg, "src"))).toBe(false);
 });
+
+test("planted: a Tern launcher resolves to the verified cache over a same-version bun-global, and verify agrees", () => {
+	const cache = fresh();
+	const pkg = ensureOmpSource("9.9.9", { OMP_KIT_OMP_SRC_CACHE: cache }, { install: fakeInstall().install });
+	const manager = join(base, `tern-bun-${++n}`);
+	mkdirSync(join(manager, "versions"), { recursive: true });
+	mkdirSync(join(manager, "bin"), { recursive: true });
+	const launcher = join(manager, "versions", "9.9.9");
+	const bytes = '#!/bin/sh\necho "omp/9.9.9"\n';
+	writeFileSync(launcher, bytes);
+	chmodSync(launcher, 0o755);
+	symlinkSync("../versions/9.9.9", join(manager, "bin", "omp"));
+	writeFileSync(join(manager, "state.json"), JSON.stringify({ managed: true, installed: { version: "9.9.9", sha256: createHash("sha256").update(bytes).digest("hex") } }));
+	const bun = join(base, `bun-${n}`);
+	fakeInstall().install(join(bun, "install", "global"), "@oh-my-pi/pi-coding-agent@9.9.9");
+	const identity = resolveOmpIdentity({ PATH: join(manager, "bin"), BUN_INSTALL: bun, OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" });
+	expect(identity.source).toBe(realpathSync(join(pkg, "src")));
+	expect(verifyTernOmpSource(identity.launcher, identity.source)).toBe(true);
+	// Control: without the Tern state the same layout is generic, and the bun-global wins as before.
+	const plain = compiledLauncher("9.9.9");
+	expect(resolveOmpIdentity({ PATH: plain, BUN_INSTALL: bun, OMP_KIT_OMP_SRC_CACHE: cache, OMP_KIT_OMP_SRC_FETCH: "0" }).source)
+		.toBe(realpathSync(join(bun, "install", "global", ...PKG, "src")));
+	// Control: a cached source whose launcher sha check fails still fails verify.
+	writeFileSync(launcher, '#!/bin/sh\necho "omp/9.9.9"\n# foreign\n');
+	expect(verifyTernOmpSource(identity.launcher, identity.source)).toBe(false);
+}, fixtureDeadlineS(30) * 1000); // two `omp --version` probes, each under the product's 15 s spawn limit
 
 test("off switch, missing cache root and non-release versions refuse before any install", () => {
 	const fake = fakeInstall();

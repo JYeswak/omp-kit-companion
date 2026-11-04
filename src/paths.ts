@@ -177,6 +177,16 @@ function ternManagerState(launcher: string): TernManagerState | null {
 	}
 }
 
+/** The kit's receipt-verified exact-version source for a Tern-managed launcher, or null.
+ * The one selection both resolveOmpIdentity and verifyTernOmpSource use, so the identity the
+ * resolver picks is the identity the verifier accepts (a same-version bun-global never wins).
+ */
+function ternCachedPackage(launcher: string, env: Record<string, string | undefined>): string | null {
+	const state = ternManagerState(launcher);
+	if (!state || state.status !== "PRESENT" || state.version === null) return null;
+	return cachedOmpPackage(state.version, env);
+}
+
 /** Bind a standalone Tern launcher to its manager-recorded bytes and exact-version registry source.
  * This verifies two identities; it does not claim the registry source was extracted from the binary.
  */
@@ -194,7 +204,7 @@ export function verifyTernOmpSource(launcher: string, source: string): boolean {
 		const pkg = resolve(source, "..");
 		const versionDir = resolve(pkg, "../../..");
 		if (basename(versionDir) !== state.version) return false;
-		const cached = cachedOmpPackage(state.version, { OMP_KIT_OMP_SRC_CACHE: dirname(versionDir) });
+		const cached = ternCachedPackage(realLauncher, { OMP_KIT_OMP_SRC_CACHE: dirname(versionDir) });
 		if (!cached || realpathSync(join(cached, "src")) !== realpathSync(source)) return false;
 		const hash = createHash("sha256");
 		const fd = openSync(realLauncher, "r");
@@ -300,6 +310,8 @@ export function observeOmpManagers(env: Record<string, string | undefined> = pro
  * it reports is taken from a later `omp` on PATH, from bun's global install, or else from the kit's
  * own exact-version source cache (installed from npm on first use). Any other version is refused:
  * matching rules with a different OMP's source is the drift the identity check exists to stop.
+ * A Tern-managed launcher (state.json naming its version) checks its exact-version cache before
+ * those, so a same-version bun-global never displaces the source verifyTernOmpSource accepts.
  */
 /** A manager-laid-out omp: `<app>/versions/<V>` binary beside a state.json naming it. */
 function ternManagedPackage(launcher: string, version: string | null, env: Record<string, string | undefined>): string | null {
@@ -322,15 +334,22 @@ function packageRootFor(launcher: string, env: Record<string, string | undefined
 	const own = enclosingPackage(launcher);
 	if (own) return own.root;
 	const version = observeOmpLauncherVersion(launcher, env);
+	// Tern: the verified cache comes first, so a same-version bun-global cannot displace the source
+	// verifyTernOmpSource binds (fp72.120.16.153: release verdicts failed OMP_IDENTITY_MISMATCH).
+	const state = version === null ? null : ternManagerState(launcher);
+	if (state?.status === "PRESENT" && state.version === version) {
+		const cached = ternCachedPackage(launcher, env);
+		if (cached) return realpath(cached, "OMP Tern-managed package");
+	}
 	const bunRoot = env.BUN_INSTALL ?? (env.HOME ? join(env.HOME, ".bun") : null);
 	const candidates = executablesFromPath("omp", env.PATH).filter(other => other !== launcher);
 	if (bunRoot) candidates.push(join(bunRoot, "install", "global", "node_modules", ...PACKAGE_NAME.split("/"), "package.json"));
+	const managed = ternManagedPackage(launcher, version, env);
+	if (managed) return managed;
 	for (const candidate of candidates) {
 		const found = enclosingPackage(candidate);
 		if (found && version !== null && found.version === version) return found.root;
 	}
-	const managed = ternManagedPackage(launcher, version, env);
-	if (managed) return managed;
 	const refusal = `cannot locate ${PACKAGE_NAME} ${version ?? "(unknown version)"} for OMP launcher ${launcher}`;
 	if (version === null || !ompSourceCacheRoot(env)) throw new Error(refusal);
 	try {
