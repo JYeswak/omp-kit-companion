@@ -1125,7 +1125,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		await git(["push", "-q", "origin", "HEAD:main"]);
 		const rev = await run(["git", "rev-parse", "HEAD"], { cwd: cdir, deadline_s: 60 });
 		const sha = utf8(rev.stdout).trim();
-		// SHIMRESOLVE1: on a seat the omp-kit pane shim is first on PATH; the resolver must skip it.
+		// SHIMRESOLVE1: on a seat the pane shim, and in a grader its dispatcher, precede the native br; skip both.
 		const resolved = resolveRealBr(process.env.PATH);
 		if (!resolved.ok) throw new Error(resolved.reason);
 		const brBin = resolved.path;
@@ -1357,58 +1357,86 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 	});
 });
 
-describe("SHIMRESOLVE1 resolveRealBr skips the omp-kit pane shim (ompkit-fp72.120.16.196)", () => {
+describe("SHIMRESOLVE1 resolveRealBr returns the native br, never a policy wrapper (ompkit-fp72.120.16.196)", () => {
+	// The kit shim's own resolution rule before the grader rework: skip only a br in the kit's agent-bin dir
+	// or one whose realpath is scripts/br-shim.sh. Kept as the mutant the grader case must defeat.
+	const shimOnlyMutant = (path: string, home: string): string | null => {
+		const agentBin = realpathSync(join(home, ".local", "share", "omp-kit", "agent-bin"));
+		for (const dir of path.split(":")) {
+			const cand = join(dir, "br");
+			if (!existsSync(cand)) continue;
+			if (realpathSync(cand).endsWith("/scripts/br-shim.sh") || realpathSync(dir) === agentBin) continue;
+			return cand;
+		}
+		return null;
+	};
 	const fixture = () => {
 		const root = realpathSync(ownedTmp("shimresolve1", { bead: "ompkit-fp72.120.16.196" }).path);
 		const home = join(root, "home");
 		const agentBin = join(home, ".local", "share", "omp-kit", "agent-bin");
 		mkdirSync(agentBin, { recursive: true });
 		symlinkSync(join(REPO_ROOT, "scripts", "br-shim.sh"), join(agentBin, "br"));
+		// A native executable stands in for the official br: bun itself, reached through a symlink.
 		const official = join(root, "official");
 		mkdirSync(official, { recursive: true });
-		writeFileSync(join(official, "br"), "#!/bin/sh\necho official\n", { mode: 0o755 });
+		symlinkSync(process.execPath, join(official, "br"));
+		// grade_wave's grader dispatcher (<scratch>/bin/br): a #! script whose baked delegate is the kit shim.
+		const grader = join(root, "grader");
+		mkdirSync(join(grader, "bin"), { recursive: true });
+		writeFileSync(join(grader, "bin", "br"), [
+			"#!/usr/bin/env python3",
+			`BAKED_SCRATCH = ${JSON.stringify(grader)}`,
+			"BAKED_AGENT = 'grader-shimresolve-fixture'",
+			`BAKED_REAL = ${JSON.stringify(join(agentBin, "br"))}`,
+			"import os, sys",
+			"os.environ['AGENT_NAME'] = BAKED_AGENT",
+			"os.execv(BAKED_REAL, [BAKED_REAL] + sys.argv[1:])",
+			"",
+		].join("\n"), { mode: 0o755 });
 		const empty = join(root, "empty");
 		mkdirSync(empty, { recursive: true });
-		return { root, home, agentBin, official, empty };
+		return { root, home, agentBin, official, grader: join(grader, "bin"), empty };
 	};
 
 	test("planted: agent-bin first on PATH resolves the official br and names the skipped shim", () => {
 		const f = fixture();
-		expect(resolveRealBr(`${f.agentBin}:${f.official}`, f.home)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(f.agentBin, "br")] });
+		expect(resolveRealBr(`${f.agentBin}:${f.official}`)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(f.agentBin, "br")] });
+	});
+
+	test("planted grader PATH: dispatcher (BAKED_REAL = kit shim), then agent-bin, then native br resolves the native br; the shim-only mutant returns the dispatcher", () => {
+		const f = fixture();
+		const graderPath = `${f.grader}:${f.agentBin}:${f.official}`;
+		expect(resolveRealBr(graderPath)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(f.grader, "br"), join(f.agentBin, "br")] });
+		expect(shimOnlyMutant(graderPath, f.home)).toBe(join(f.grader, "br"));
+		expect(resolveRealBr(`${f.grader}:${f.agentBin}`)).toMatchObject({ ok: false, code: "BR_REAL_SHIM_ONLY", skipped: [join(f.grader, "br"), join(f.agentBin, "br")] });
 	});
 
 	test("control: a PATH whose only br is the shim is the named BR_REAL_SHIM_ONLY error, never the shim", () => {
 		const f = fixture();
-		const r = resolveRealBr(f.agentBin, f.home);
+		const r = resolveRealBr(f.agentBin);
 		expect(r.ok).toBe(false);
 		if (r.ok) return;
 		expect(r.code).toBe("BR_REAL_SHIM_ONLY");
 		expect(r.reason).toStartWith("BR_REAL_SHIM_ONLY:");
 		expect(r.skipped).toEqual([join(f.agentBin, "br")]);
-		expect(resolveRealBr(f.empty, f.home)).toMatchObject({ ok: false, code: "BR_REAL_ABSENT" });
+		expect(resolveRealBr(f.empty)).toMatchObject({ ok: false, code: "BR_REAL_ABSENT" });
 	});
 
-	test("identity is physical: a copied shim reached through a symlinked HOME and a br-shim.sh link elsewhere are skipped; a plain br in a dir named agent-bin is not", () => {
+	test("identity is the file's own bytes: a copied shim and a br-shim.sh link elsewhere are skipped; a native br in a dir named agent-bin resolves", () => {
 		const f = fixture();
-		// A copy (no br-shim.sh realpath) inside the agent-bin dir, reached through a symlinked HOME.
-		const copyHome = join(f.root, "copy-home");
-		const copyBin = join(copyHome, ".local", "share", "omp-kit", "agent-bin");
+		const copyBin = join(f.root, "copy-bin");
 		mkdirSync(copyBin, { recursive: true });
 		copyFileSync(join(REPO_ROOT, "scripts", "br-shim.sh"), join(copyBin, "br"));
 		chmodSync(join(copyBin, "br"), 0o755);
-		const homeLink = join(f.root, "home-link");
-		symlinkSync(copyHome, homeLink);
-		const viaLink = join(homeLink, ".local", "share", "omp-kit", "agent-bin");
-		expect(resolveRealBr(`${viaLink}:${f.official}`, copyHome)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(viaLink, "br")] });
-		// A br linked to scripts/br-shim.sh from any other directory.
+		expect(resolveRealBr(`${copyBin}:${f.official}`)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(copyBin, "br")] });
 		const linkBin = join(f.root, "link-bin");
 		mkdirSync(linkBin, { recursive: true });
 		symlinkSync(join(REPO_ROOT, "scripts", "br-shim.sh"), join(linkBin, "br"));
-		expect(resolveRealBr(`${linkBin}:${f.official}`, f.home)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(linkBin, "br")] });
-		// The name alone is not identity: a non-shim br in another HOME's agent-bin dir resolves.
+		expect(resolveRealBr(`${linkBin}:${f.official}`)).toEqual({ ok: true, path: join(f.official, "br"), skipped: [join(linkBin, "br")] });
+		// The name and directory are not identity: a native br in another HOME's agent-bin dir resolves.
 		const otherBin = join(f.root, "other-home", ".local", "share", "omp-kit", "agent-bin");
 		mkdirSync(otherBin, { recursive: true });
-		writeFileSync(join(otherBin, "br"), "#!/bin/sh\necho other\n", { mode: 0o755 });
-		expect(resolveRealBr(`${otherBin}:${f.official}`, f.home)).toEqual({ ok: true, path: join(otherBin, "br"), skipped: [] });
+		symlinkSync(process.execPath, join(otherBin, "br"));
+		expect(resolveRealBr(`${otherBin}:${f.official}`)).toEqual({ ok: true, path: join(otherBin, "br"), skipped: [] });
 	});
 });

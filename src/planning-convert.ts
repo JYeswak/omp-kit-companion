@@ -3,7 +3,7 @@ import { lstatSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileS
 import { join, parse, resolve, sep } from "node:path";
 import type { PresentationResult } from "./output.ts";
 import { scorePlanningSnapshot, type MissionScore, type PlanningBead, type PlanningScoreSnapshot } from "./planning-score.ts";
-import { resolveNativeBr } from "./kitlib/readonly-br.ts";
+import { resolveRealBr } from "./kitlib/readonly-br.ts";
 import { runSync } from "./kitlib/run.ts";
 
 type PlanItem = {
@@ -1522,12 +1522,13 @@ export function runPlanningConvert(options: PlanningConvertOptions): Presentatio
 		initial.db_refusal = database.error;
 		return finish(initial, 1);
 	}
-	const nativeBr = resolveNativeBr(process.env.PATH);
-	if (!nativeBr) {
+	const resolvedBr = resolveRealBr(process.env.PATH);
+	if (!resolvedBr.ok) {
 		initial.overall = "REFUSED";
-		initial.db_refusal = "A native br executable is required for the isolated dry-run database";
+		initial.db_refusal = `A native br executable is required for the isolated dry-run database (${resolvedBr.reason})`;
 		return finish(initial, 1);
 	}
+	const nativeBr = resolvedBr.path;
 	// This closure is created only after isolated DB admission; apply retains PATH br.
 	const runBr = (args: string[], db: string, commandCwd: string, input?: string): CapturedCommand => {
 		const descriptionPath = join(database.directory, "conversion-description.txt");
