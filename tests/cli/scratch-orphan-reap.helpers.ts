@@ -114,8 +114,7 @@ export async function runtimeFixture(body: (fixture: Fixture) => Promise<void>, 
 			"time.sleep(180)",
 		].join("; ");
 		// Both process launches use kitlib. The owner crashes deliberately after recording its child's
-		// genuine incarnation; nested run() owns a distinct session and opts out of the parent-death
-		// reaper (outlive_parent, GROUPREAP1), so the interpreter really becomes PPID1.
+		// genuine incarnation; nested run() owns a distinct session, so the interpreter really becomes PPID1.
 		// No fork/spawn escape hatch, handcrafted .owner, installed CLI, or forged one-hour age is involved.
 		const driver = `
 import { createScratch, defaultRunner, defaultLiveness } from ${JSON.stringify(scratchModule)};
@@ -138,7 +137,7 @@ if (${options.inline === true}) {
 }
 const controller = new AbortController();
 const running = run(argv, { deadline_s: 180, grace_s: 0.2, max_output_bytes: 4096,
-  cwd: ${options.fdOnly ? JSON.stringify(fixtureRepo) : "made.dir"}, env: { ...process.env, TMPDIR: made.dir }, signal: controller.signal, outlive_parent: true });
+  cwd: ${options.fdOnly ? JSON.stringify(fixtureRepo) : "made.dir"}, env: { ...process.env, TMPDIR: made.dir }, signal: controller.signal });
 const ready = join(made.dir, "ready.json"), deadline = Date.now() + 10000;
 try {
   // This observes a real OS child after its descriptors are detached; fake clocks cannot publish readiness.

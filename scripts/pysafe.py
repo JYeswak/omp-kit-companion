@@ -55,16 +55,6 @@ so locks held through context managers are released, every process group
 ``run_bounded`` still owns is killed, and registered cleanups run LIFO.
 ``run_main(main)`` wraps a script entry point and exits 128+signum on cancel.
 
-Parent death (GROUPREAP1, ompkit-fp72.120.16.193): a caller killed by SIGKILL,
-or by SIGTERM without ``run_main``, runs none of the above. Each process that
-calls ``run_bounded`` therefore starts one reaper (``pysafe.py reaper``, own
-session) that reads the caller's registry over a pipe; when the pipe closes
-it sweeps every registered session whose leader still has its recorded start
-time. Every sweep (timeout, cancellation, reaper) covers the whole session by
-``os.getsid``, so a member that called ``setpgid`` is not missed, plus the
-leader's parent-pid tree while the leader is proven alive. A normal leader
-exit kills only the leader's process group, as before.
-
 CLI (used by the pre-commit member to supervise the checker)::
 
     python3 pysafe.py run --timeout SECONDS [--cap BYTES] -- ARGV...
@@ -100,7 +90,7 @@ _CHUNK = 65536
 _DRAIN_S = 1.0
 
 _groups_lock = threading.Lock()
-_live_groups: dict = {}
+_live_groups: set = set()
 
 
 class Cancelled(BaseException):
@@ -152,14 +142,14 @@ def _check_budget(name: str, value: float) -> float:
     return float(value)
 
 
-def _register(proc: subprocess.Popen) -> None:
+def _register(pgid: int) -> None:
     with _groups_lock:
-        _live_groups[proc.pid] = proc
+        _live_groups.add(pgid)
 
 
 def _unregister(pgid: int) -> None:
     with _groups_lock:
-        _live_groups.pop(pgid, None)
+        _live_groups.discard(pgid)
 
 
 def _signal_group(pgid: int, signum: int) -> bool:
@@ -170,224 +160,11 @@ def _signal_group(pgid: int, signum: int) -> bool:
     return True
 
 
-_PS_ENV = {"LC_ALL": "C", "PATH": "/usr/bin:/bin"}
-_PS_TIMEOUT_S = 10.0
-_SWEEP_ROUNDS = 8
-
-
-def _ps(args: Sequence[str]) -> Optional[str]:
-    """One bounded ``ps`` read (a leaf: no descendants); None when it fails or times out."""
-    try:
-        proc = subprocess.Popen(["ps", *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, env=_PS_ENV, close_fds=True)
-    except OSError:
-        return None
-    try:
-        out, _ = proc.communicate(timeout=_PS_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        _reap(proc, _PS_TIMEOUT_S)
-        return None
-    return out.decode("ascii", "replace")
-
-
-def _process_table() -> Optional[List[Tuple[int, int, str]]]:
-    """``(pid, ppid, start)`` for every process (start: collapsed ``lstart``), or None when ps is unreadable."""
-    text = _ps(["-axo", "pid=,ppid=,lstart="])
-    if text is None:
-        return None
-    rows = []
-    for line in text.splitlines():
-        fields = line.split()
-        if len(fields) > 2 and fields[0].isdigit() and fields[1].isdigit():
-            rows.append((int(fields[0]), int(fields[1]), " ".join(fields[2:])))
-    return rows
-
-
-def _start_time(pid: int) -> Optional[str]:
-    """Whitespace-collapsed ``ps -o lstart=`` for ``pid`` (the kitlib_proc incarnation key), or None."""
-    text = _ps(["-o", "lstart=", "-p", str(pid)])
-    start = " ".join(text.split()) if text else ""
-    return start or None
-
-
-def _sweep_session(sid: int, leader_alive: Optional[bool], recorded_start: Optional[str] = None) -> int:
-    """SIGKILL every process whose session is ``sid`` and, when the leader is
-    alive, every descendant of it by parent pid. ``leader_alive`` True/False is
-    the caller's own proof (an unreaped/reaped child); None means prove it from
-    the first table read against ``recorded_start``: a pid ``sid`` running with
-    another start time (or one unproven at registration) is a different
-    process, and nothing is killed. Members are frozen with SIGSTOP and the
-    table re-read until no new member appears, so none can fork past the
-    sweep. Session membership is read with ``os.getsid`` (``ps -o sess`` reads
-    0 on macOS). While any process still carries session id ``sid`` the kernel
-    does not hand pid ``sid`` to a new process, so a session match is never a
-    reused pid; when the leader is not proven alive, pid ``sid`` itself is
-    excluded. Falls back to the leader's process group when ps is unreadable
-    and the leader is the caller's own child. Returns how many processes were killed."""
-    me = os.getpid()
-    found: set = set()
-    for _ in range(_SWEEP_ROUNDS):
-        table = _process_table()
-        if table is None:
-            if leader_alive is None:
-                return 0  # identity unprovable: never kill
-            return 1 if _signal_group(sid, signal.SIGKILL) else 0
-        if leader_alive is None:
-            now = next((start for pid, _ppid, start in table if pid == sid), None)
-            if now is not None and now != recorded_start:
-                return 0  # pid sid belongs to a different process: never killed
-            leader_alive = now is not None
-        new = set()
-        for pid, _ppid, _start in table:
-            if pid in found or pid == me or pid <= 1 or (pid == sid and not leader_alive):
-                continue
-            try:
-                if os.getsid(pid) == sid:
-                    new.add(pid)
-            except (ProcessLookupError, PermissionError):
-                continue
-        if leader_alive:
-            children: dict = {}
-            for pid, ppid, _start in table:
-                children.setdefault(ppid, []).append(pid)
-            stack = [sid]
-            while stack:
-                for pid in children.get(stack.pop(), ()):
-                    if pid != me and pid not in found and pid not in new:
-                        new.add(pid)
-                        stack.append(pid)
-        if not new:
-            break
-        for pid in new:
-            try:
-                os.kill(pid, signal.SIGSTOP)
-            except (ProcessLookupError, PermissionError):
-                pass
-        found |= new
-    killed = 0
-    for pid in found:
-        try:
-            os.kill(pid, signal.SIGKILL)
-            killed += 1
-        except (ProcessLookupError, PermissionError):
-            pass
-    return killed
-
-
 def kill_live_groups() -> int:
-    """SIGKILL every session ``run_bounded`` currently owns, members that left
-    the leader's process group included; returns how many sessions had a member."""
+    """SIGKILL every process group ``run_bounded`` currently owns; returns how many were signalled."""
     with _groups_lock:
-        groups = list(_live_groups.items())
-    signalled = 0
-    for pgid, proc in groups:
-        group = _signal_group(pgid, signal.SIGKILL)
-        # An unreaped leader (returncode None) still holds its pid: its descendants are provably ours.
-        if _sweep_session(pgid, leader_alive=proc.returncode is None) or group:
-            signalled += 1
-    return signalled
-
-
-# Parent-death reaper (GROUPREAP1, ompkit-fp72.120.16.193). A caller killed by
-# SIGKILL, or by SIGTERM without run_main, runs no cleanup, and the sessions
-# run_bounded started would outlive it under pid 1. Each process that calls
-# run_bounded starts one reaper (``pysafe.py reaper``) in its own session and
-# keeps the write end of a pipe the reaper reads as stdin. Lines ``add PID``
-# and ``del PID`` keep the reaper's registry; the reaper records each leader's
-# start time on ``add``. When the pipe reaches EOF (the caller died, however)
-# or the reaper itself gets SIGTERM/SIGINT/SIGHUP, it sweeps every registered
-# session whose leader is still the recorded incarnation, then exits.
-_reaper_lock = threading.Lock()
-_reaper_state: dict = {"owner": None, "fd": None, "proc": None}
-_reaper_registered: set = set()
-
-
-def _reaper_start() -> None:
-    read_fd, write_fd = os.pipe()
-    try:
-        proc = subprocess.Popen([sys.executable, "-I", os.path.realpath(__file__), "reaper"],
-                                stdin=read_fd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True, close_fds=True)
-    except BaseException:
-        os.close(write_fd)
-        raise
-    finally:
-        os.close(read_fd)
-    _reaper_state.update(owner=os.getpid(), fd=write_fd, proc=proc)
-
-
-def _reaper_send(op: str, pid: int) -> None:
-    """Deliver ``add PID`` or ``del PID``, starting the reaper on first use and
-    restarting it (with the whole registry replayed) when it has died. A forked
-    child drops the parent's reaper and registry: those sessions are not its own.
-    Raises OSError when no reaper can be reached."""
-    with _reaper_lock:
-        if _reaper_state["owner"] not in (None, os.getpid()):
-            try:
-                os.close(_reaper_state["fd"])
-            except OSError:
-                pass
-            _reaper_registered.clear()
-            _reaper_state.update(owner=None, fd=None, proc=None)
-        if op == "add":
-            _reaper_registered.add(pid)
-        else:
-            _reaper_registered.discard(pid)
-            if _reaper_state["owner"] is None:
-                return
-        for attempt in range(2):
-            if _reaper_state["owner"] is None:
-                if _reaper_state["fd"] is not None:
-                    try:
-                        os.close(_reaper_state["fd"])
-                    except OSError:
-                        pass
-                _reaper_start()
-                payload = b"".join(b"add %d\n" % each for each in sorted(_reaper_registered))
-            else:
-                payload = b"%s %d\n" % (op.encode("ascii"), pid)
-            try:
-                if payload:
-                    os.write(_reaper_state["fd"], payload)
-                return
-            except OSError:
-                if attempt:
-                    raise
-                _reaper_state["owner"] = None  # the reaper died: restart it and replay the registry
-
-
-class _ReaperStop(BaseException):
-    pass
-
-
-def _reaper_main() -> int:
-    """``pysafe.py reaper``: hold the registry until stdin reaches EOF or a stop signal, then sweep."""
-    registry: dict = {}
-
-    def stop(_signum, _frame):
-        raise _ReaperStop()
-
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(signum, stop)
-    try:
-        for raw in sys.stdin.buffer:  # pysafe: stdin is the caller's registry pipe by construction; its EOF is the parent-death signal
-            fields = raw.split()
-            if len(fields) != 2 or not fields[1].isdigit():
-                continue
-            pid = int(fields[1])
-            if fields[0] == b"add":
-                registry[pid] = _start_time(pid)
-            elif fields[0] == b"del":
-                registry.pop(pid, None)
-    except _ReaperStop:
-        pass
-    finally:
-        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            signal.signal(signum, signal.SIG_IGN)
-        for sid, recorded in registry.items():
-            _sweep_session(sid, leader_alive=None, recorded_start=recorded)
-    return 0
+        groups = list(_live_groups)
+    return sum(1 for pgid in groups if _signal_group(pgid, signal.SIGKILL))
 
 
 def _leader_exited(proc: subprocess.Popen) -> bool:
@@ -600,14 +377,12 @@ def run_bounded(
         **extra,
     )
     pgid = proc.pid
-    _register(proc)
+    _register(pgid)
     pump = _Pump(proc, bytes(input) if input is not None else None, cap_bytes, on_chunk, total_cap)
     outcome = OK
     orphans = False
     settled = False
     try:
-        # Before any wait: if this process dies from here on, its reaper sweeps the session.
-        _reaper_send("add", pgid)
         exited_at = None
         while True:
             now = time.monotonic()
@@ -627,10 +402,7 @@ def run_bounded(
         if outcome == OK:
             # The leader exited; a descendant that redirected its pipes away is
             # still in the group and must not outlive the call. On Linux the
-            # leader zombie is still unreaped here, so the group id is not
-            # reusable. A member that left the group (setpgid/setsid) on a normal
-            # exit is deliberately kept: only timeout, cancellation and parent
-            # death take the whole session (GROUPREAP1, R32).
+            # leader zombie is still unreaped here, so the group id is not reusable.
             _signal_group(pgid, signal.SIGKILL)
         else:
             _signal_group(pgid, signal.SIGTERM)
@@ -638,15 +410,13 @@ def run_bounded(
             while time.monotonic() < end and not _leader_exited(proc):
                 pump.step(min(end - time.monotonic(), 0.1))
             _signal_group(pgid, signal.SIGKILL)
-            _sweep_session(pgid, leader_alive=proc.returncode is None)
             pump.drain(_DRAIN_S)
         returncode = _reap(proc, grace)
         settled = True
     finally:
         if not settled:
-            # Cancelled (or any other exception) mid-run: the session dies first.
+            # Cancelled (or any other exception) mid-run: the group dies first.
             _signal_group(pgid, signal.SIGKILL)
-            _sweep_session(pgid, leader_alive=proc.returncode is None)
             _reap(proc, grace)
         pump.close()
         for stream in (proc.stdout, proc.stderr):
@@ -656,10 +426,6 @@ def run_bounded(
                 except OSError:
                     pass
         _unregister(pgid)
-        try:
-            _reaper_send("del", pgid)
-        except OSError:
-            pass  # no reaper to tell; the session is already swept
     out, out_trunc = pump.result(0)
     err, err_trunc = pump.result(1)
     return RunResult(tuple(os.fsdecode(a) for a in args), outcome, returncode, out, err,
@@ -824,6 +590,4 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["reaper"]:
-        sys.exit(_reaper_main())
     run_main(lambda: _cli())
