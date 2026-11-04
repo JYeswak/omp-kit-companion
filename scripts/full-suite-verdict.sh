@@ -98,6 +98,10 @@ if [ -z "$ROOT" ] || [ -z "$COMMIT" ]; then
 	usage
 	exit 2
 fi
+# VERDICTREPOABS1 (ompkit-fp72.120.16.189): a relative --repo stops resolving once the suite runner changes directory
+# (it sourced ./var/agent-tmp/.../kitlib-tmp.sh and ended RED with no evidence), so resolve it once, physically.
+ROOT_ARG=$ROOT
+ROOT=$(CDPATH='' cd -- "$ROOT_ARG" 2>/dev/null && pwd -P) || { echo "full-suite-verdict: --repo $ROOT_ARG is not a directory" >&2; exit 2; }
 if [ "$RERUN" = 1 ] && [ -z "$RERUN_REASON" ]; then
 	fail "--rerun-reason needs a non-empty reason; the cached verdict is kept and nothing reruns"
 	exit 1
@@ -730,17 +734,13 @@ load_end=$(python3 -c 'import os,json; print(json.dumps(os.getloadavg()))')
 # A complete-looking run can still have silently lost suites. Historical
 # evidence is a reference only; it never supplies a current-run PASS.
 minimum_run_assessment() (
-	case "$ROOT" in
-		/*) minimum_repo=$ROOT ;;
-		*) minimum_repo="$(pwd -P)/$ROOT" ;;
-	esac
 	case "$ARCHIVE_DIR" in
 		/*) minimum_archive=$ARCHIVE_DIR ;;
 		*) minimum_archive="$(pwd -P)/$ARCHIVE_DIR" ;;
 	esac
 	cd -- "$SCRIPT_DIR" || exit 1
 	python3 ./full-suite-verdict-store.py minimum-run \
-		--repo "$minimum_repo" --cache-dir "$CACHE_DIR" --role "$JUDGE_ROLE" --runtime "$runtime" \
+		--repo "$ROOT" --cache-dir "$CACHE_DIR" --role "$JUDGE_ROLE" --runtime "$runtime" \
 		--judge-root "$SCRIPT_DIR/.." --suite-root "$minimum_archive" --files "$METRICS_ROWS" \
 		--wall-ms "$((run_finished_ms - run_started_ms))"
 )
