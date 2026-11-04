@@ -1,5 +1,7 @@
+import { cpus } from "node:os";
 import { resolve } from "node:path";
 import { check as checkGit } from "../src/fleet-guard/git.ts";
+import { commandFromEvent } from "../src/fleet-guard/git.ts";
 import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
 import { applyScratchEnv, check as checkScratch, checkSystemTemp, hostAgentName, scratchDirFor, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 import { endSeat, liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
@@ -44,6 +46,36 @@ export interface GuardDeps {
 	seatEnd?: SeatEndDeps;
 }
 
+/**
+ * CONTENTION1 (ompkit-fp72.120.16.172). On 2026-11-04 one contention proof ran 64 unbounded `while :; do :; done`
+ * loops outside heavy admission; load reached 152 on 32 cores and every seat, Agent Mail included, stalled.
+ * Always on (the machine is shared by every session). A pure check over the command text: a busy loop is admitted
+ * only as `omp-kit heavy ... timeout <s>|--deadline ... nice -n 19`, with at most ncpu/2 copies; heavy itself
+ * refuses admission while load1 >= ncpu. Every pattern is linear: no nested or overlapping quantifiers.
+ */
+// A loop whose condition and body are both no-ops (`:`/`true`), `yes` or a /dev/zero copy discarded to /dev/null.
+const BUSY_LOOP = /(?:^|[\s;&|(`'"])(?:while\s+(?::|true)\s*(?:;\s*)?do\s+(?::|true)\s*(?:;\s*)?done|yes(?:\s+[^\s;&|<>]+)?\s*>\s*\/dev\/null|cat\s+\/dev\/(?:u?random|zero)\s*>\s*\/dev\/null)(?=$|[\s;&|)`'"])/g;
+// `for v in $(seq [a] N)` or `{a..N}`: the copy count when its body backgrounds a busy loop.
+const FAN_OUT = /(?:^|[\s;&|(`'"])for\s+\w+\s+in\s+(?:\$\(\s*seq\s+(?:\d{1,9}\s+)?(\d{1,9})\s*\)|\{\d{1,9}\.\.(\d{1,9})\})\s*(?:;\s*)?do(?=\s)/g;
+const HEAVY = /^\s*omp-kit\s+heavy\s/;
+const DEADLINE = /(?:^|\s)(?:timeout\s+\d{1,9}[smhd]?|--deadline(?:=|\s+)\d)/;
+const NICE19 = /(?:^|\s)nice\s+-n\s*19\s/;
+const CONTENTION_REMEDY = "run contention fixtures as `omp-kit heavy --label <x> -- timeout <s> nice -n 19 <cmd>`, at most ncpu/2 loops, and only when load1 < ncpu (heavy refuses admission otherwise)";
+
+export function checkContention(event: FleetGuardEvent, ncpu = cpus().length): FleetGuardBlock | undefined {
+	const command = commandFromEvent(event);
+	if (!command) return undefined;
+	const loops = command.match(BUSY_LOOP)?.length ?? 0;
+	if (loops === 0) return undefined;
+	let copies = loops;
+	if (/&/.test(command)) for (const fan of command.matchAll(FAN_OUT)) copies = Math.max(copies, loops * Number(fan[1] ?? fan[2]));
+	const cap = Math.max(1, Math.floor(ncpu / 2));
+	const bounded = HEAVY.test(command) && DEADLINE.test(command) && NICE19.test(command);
+	if (bounded && copies <= cap) return undefined;
+	const why = bounded ? `${copies} busy-loop copies exceed ncpu/2 = ${cap}` : `${copies} unbounded busy loop${copies === 1 ? "" : "s"} outside the heavy lane, deadline and nice 19`;
+	return { block: true, reason: `fleet-guard CONTENTION1: ${why}; ${CONTENTION_REMEDY}` };
+}
+
 /** Ordered chain: lexical scratch, Git, repository facts, write ownership, then reservations. First block wins. */
 export async function handleToolCall(event: FleetGuardEvent, context: FleetGuardContext): Promise<FleetGuardBlock | undefined> {
 	const reservations = { cwd: context.cwd, agentName: context.agentName,
@@ -59,7 +91,7 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	// PLUTILINPLACE1 (ompkit-ffb85): the plists it protects live outside every repository, so no opt-in scopes it.
 	// TMPWRITE1 (ompkit-fp72.120.16.158): system-temp writes are refused in every session, seat or subagent alike.
 	if (initial.kind === "off") {
-		pi.on("tool_call", async (event, context) => checkPlutilInPlace(event) ?? checkSystemTemp(event, { cwd: context?.cwd ?? cwd,
+		pi.on("tool_call", async (event, context) => checkPlutilInPlace(event) ?? checkContention(event) ?? checkSystemTemp(event, { cwd: context?.cwd ?? cwd,
 			localRoot: localRootOf(context) }));
 		return;
 	}
@@ -89,6 +121,8 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 			try { writeScratchOwner(seat.dir, { pid, label: "omp", repo: seat.repo, created: seat.created, agent, session, bin: "throwaway" }); }
 			catch { /* the pid-only owner stays valid */ }
 		}
+		const contention = checkContention(event);
+		if (contention) return contention;
 		const inPlace = checkPlutilInPlace(event);
 		if (inPlace) return inPlace;
 		const callingCwd = context?.cwd ?? cwd;

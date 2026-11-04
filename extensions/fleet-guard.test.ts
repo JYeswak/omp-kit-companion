@@ -1,7 +1,7 @@
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import fleetGuard, { handleToolCall, type GuardDeps } from "./fleet-guard.ts";
+import fleetGuard, { checkContention, handleToolCall, type GuardDeps } from "./fleet-guard.ts";
 import { liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
 import { clearReservationCache } from "../src/fleet-guard/reservations.ts";
 import type { FleetGuardBlock, FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
@@ -368,4 +368,35 @@ test.each([["stock repository", (): string => fixture(false).cwd], ["opted-in re
 	for (const command of ["mkdir -p var/agent-tmp/x && echo hi > var/agent-tmp/x/f", "cat /tmp/x", "cp /tmp/a var/agent-tmp/b",
 		"omp-kit scratch new --label probe --json", "git clone /tmp/src var/agent-tmp/clone"])
 		expect(await judge(command), command).toBeUndefined();
+});
+
+// CONTENTION1 (ompkit-fp72.120.16.172): the check is a pure function over command text; no loop ever runs here.
+const bashCall = (command: string): FleetGuardEvent => ({ toolName: "bash", input: { command } });
+test("CONTENTION1 planted: an unbounded busy loop outside the heavy lane is refused with the heavy-lane remedy", () => {
+	for (const command of ["while :; do :; done", "while true; do :; done &", "yes > /dev/null", "sh -c 'while :; do :; done' &"]) {
+		const refusal = checkContention(bashCall(command), 32);
+		expect(refusal?.block, command).toBe(true);
+		expect(refusal?.reason).toContain("omp-kit heavy --label <x> -- timeout <s> nice -n 19 <cmd>");
+		expect(refusal?.reason).toContain("load1 < ncpu");
+	}
+});
+test("CONTENTION1 planted: a 64-copy busy-loop fan-out is refused, even inside the heavy lane", () => {
+	const fanout = "for i in $(seq 64); do sh -c 'while :; do :; done' & done";
+	expect(checkContention(bashCall(fanout), 32)?.reason).toContain("64");
+	expect(checkContention(bashCall(`omp-kit heavy --label c -- timeout 30 nice -n 19 sh -c "${fanout}"`), 32)?.block).toBe(true);
+});
+test("CONTENTION1 control: a bounded heavy-wrapped fixture of at most ncpu/2 loops is admitted", () => {
+	expect(checkContention(bashCall("omp-kit heavy --label contention -- timeout 30 nice -n 19 sh -c 'for i in $(seq 16); do sh -c \"while :; do :; done\" & done; wait'"), 32)).toBeUndefined();
+	expect(checkContention(bashCall("omp-kit heavy --label contention -- timeout 30 nice -n 19 sh -c 'while :; do :; done'"), 32)).toBeUndefined();
+	expect(checkContention(bashCall("omp-kit heavy --label contention -- sh -c 'while :; do :; done'"), 32)?.block).toBe(true);
+});
+test("CONTENTION1 control: ordinary loops are admitted", () => {
+	for (const command of ["while read line; do echo \"$line\"; done < f", "for f in *; do wc -l \"$f\"; done", "while :; do sleep 5; check || break; done", "yes | head -3", "for i in $(seq 64); do echo $i & done"]) {
+		expect(checkContention(bashCall(command), 32), command).toBeUndefined();
+	}
+});
+test("CONTENTION1: a 60k near-miss is judged in under 2 s", () => {
+	const started = performance.now();
+	for (const command of [`while ${" ".repeat(60_000)}x`, `while :${" ".repeat(60_000)};do x`, `for i in $(seq ${"9".repeat(60_000)}`, `yes ${"a".repeat(60_000)}`, "while :;".repeat(7_500)]) checkContention(bashCall(command), 32);
+	expect(performance.now() - started).toBeLessThan(2_000);
 });
