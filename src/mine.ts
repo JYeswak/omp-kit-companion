@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, type ReadStream } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -44,6 +45,10 @@ export interface MineSourceFinding {
 	summary: string; measured_minutes: number | null; proxy_minutes: number; identity: string;
 	event_id?: string; replay?: MineReplay; related_evidence?: MineEvidence[];
 }
+/** Complete counted occurrence; event identity does not depend on its current class or primary citation. */
+export interface MineOccurrence extends MineEvidence {
+	event_id: string; class_id: string; project: string; related_evidence: MineEvidence[];
+}
 export interface MineSourceContext {
 	home: string; projects: readonly { name: string; path: string }[]; since_ms: number; until_ms: number;
 	sources?: readonly MineSource[]; targetProject?: string; skipFile?: (path: string) => boolean;
@@ -63,6 +68,7 @@ export interface MineReport {
 	status: "FINDINGS" | "QUIET" | "PARTIAL";
 	projects: MineProject[];
 	classes: MineClass[]; coverage: MineCoverage[]; warnings: string[];
+	occurrences: MineOccurrence[];
 	inventory: { producer: string; covers: string; limits: string }[];
 	excluded_inputs: { unconfigured_scratch_events: number; unbound_cli_events: number; evidence: MineEvidence[] };
 	cost_basis: string;
@@ -74,10 +80,14 @@ export interface MineReport {
 export function mineFindingKey(finding: MineSourceFinding): string {
 	return finding.event_id ? `event:${finding.event_id}` : finding.identity;
 }
-export function mineFindingEvidence(finding: MineSourceFinding): MineEvidence {
+export function mineFindingEvidence(finding: MineSourceFinding): MineEvidence & { event_id: string } {
 	return { citation: finding.citation, timestamp: new Date(finding.time_ms).toISOString(), producer: finding.producer,
-		summary: finding.summary, ...(finding.event_id ? { event_id: finding.event_id } : {}),
+		summary: finding.summary, event_id: finding.event_id ?? `mine:${createHash("sha256").update(finding.identity).digest("hex")}`,
 		replay: finding.replay ?? captureMineReplay({}) };
+}
+export function mineFindingOccurrence(finding: MineSourceFinding): MineOccurrence {
+	return { ...mineFindingEvidence(finding), class_id: finding.class_id, project: finding.project,
+		related_evidence: finding.related_evidence ?? [] };
 }
 function mergeReplay(first?: MineReplay, second?: MineReplay): MineReplay | undefined {
 	if (!first) return second;
@@ -104,7 +114,7 @@ export function mergeMineFindings(first: MineSourceFinding, second: MineSourceFi
 	const related = evidence.filter(row => {
 		if (row.citation === best.citation || citations.has(row.citation)) return false;
 		citations.add(row.citation); return true;
-	}).slice(0, 4);
+	});
 	return { ...best, project: best.project.startsWith("@") && !other.project.startsWith("@") ? other.project : best.project,
 		replay: mergeReplay(best.replay, other.replay),
 		measured_minutes: best.measured_minutes ?? other.measured_minutes,
@@ -203,9 +213,9 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	const state = join(env.XDG_STATE_HOME ?? join(home, ".local", "state"), "omp-kit");
 	const cc = env.CC_STATE ?? join(state, "cc");
 	const config = env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "omp-kit", "fleet-watch.json");
-	const report: MineReport = { schema_version: "omp-kit.mine.v1", since: options.since, until: options.until, status: "QUIET", projects: [], classes: [], coverage: [], warnings: [], inventory: INVENTORY,
+	const report: MineReport = { schema_version: "omp-kit.mine.v1", since: options.since, until: options.until, status: "QUIET", projects: [], classes: [], occurrences: [], coverage: [], warnings: [], inventory: INVENTORY,
 		excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] },
-		cost_basis: "Ranking: available minute estimates descending (unknown ranks at zero, not claimed zero harm), count descending, project/class lexical. Explicit cost_min or failed-tool/verdict wall time is used when recorded; unmeasured event proxies: commit refusal 2m, guard friction 1m, release FAIL 15m, REWORK/blocked/git correction 5m, reopen 10m, scratch 1m, timeout 1m. Primary transcript records without measured endpoints have unknown minutes, not invented loss. Successful slow calls count only excess over 60s. Recorded spans are summed work-time proxies, not exclusive human time or causal proof. Same-bead/day REWORK/reopen events coalesce across histories. First 5 citations per class; counts include all admitted events. UTC [since,until)." };
+		cost_basis: "Ranking: available minute estimates descending (unknown ranks at zero, not claimed zero harm), count descending, project/class lexical. Explicit cost_min or failed-tool/verdict wall time is used when recorded; unmeasured event proxies: commit refusal 2m, guard friction 1m, release FAIL 15m, REWORK/blocked/git correction 5m, reopen 10m, scratch 1m, timeout 1m. Primary transcript records without measured endpoints have unknown minutes, not invented loss. Successful slow calls count only excess over 60s. Recorded spans are summed work-time proxies, not exclusive human time or causal proof. Same-bead/day REWORK/reopen events coalesce across histories. First 5 citations per class in the human-readable sample; JSON occurrences contains every counted event with a stable event_id (retained producer id, otherwise SHA-256 of the source identity) and retained replay context. Join reports on event_id, not mutable class/project/citation keys. UTC [since,until)." };
 	const warn = (message: string) => { if (!report.warnings.includes(message)) report.warnings.push(message); };
 	const projects = new Map<string, MineProject>();
 	const configuredProjects = new Set<string>();
@@ -624,6 +634,10 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	for (const p of report.projects) p.telemetry_sources.sort(compare);
 	report.classes = [...classes.values()].filter(c => (options.all ? projects.has(c.project) || c.project === "@unattributed" : selectedProjects.has(c.project)))
 		.sort((a, b) => (b.estimated_minutes_lost ?? 0) - (a.estimated_minutes_lost ?? 0) || b.count - a.count || compare(a.project, b.project) || compare(a.id, b.id));
+	const admittedClasses = new Set(report.classes.map(c => `${c.project}\0${c.id}`));
+	for (const finding of pendingFindings.values()) {
+		if (admittedClasses.has(`${finding.project}\0${finding.class_id}`)) report.occurrences.push(mineFindingOccurrence(finding));
+	}
 	for (const c of report.classes) {
 		c.measured_minutes_lost = c.measured_minutes_lost === null ? null : round(c.measured_minutes_lost);
 		c.estimated_minutes_lost = c.estimated_minutes_lost === null ? null : round(c.estimated_minutes_lost);

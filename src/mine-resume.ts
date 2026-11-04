@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { run } from "./kitlib/run.ts";
 import { MineLedger, MINE_SOURCES, type MineCell, type MineCellStatus, type MineSource } from "./mine-ledger.ts";
-import { enforcement, mergeMineFindings, mineFindingEvidence, mineFindingKey, scanMine, type MineClass, type MineCoverage, type MineOptions, type MineProject, type MineReport, type MineSourceFinding } from "./mine.ts";
+import { enforcement, mergeMineFindings, mineFindingEvidence, mineFindingKey, mineFindingOccurrence, scanMine, type MineClass, type MineCoverage, type MineOptions, type MineProject, type MineReport, type MineSourceFinding } from "./mine.ts";
 
 export interface MineFileIndex {
 	canSkip(path: string, since: number, until: number): boolean;
@@ -13,7 +13,7 @@ export interface MineFileIndex {
 	record(path: string, signature: string, min: number | null, max: number | null): void;
 }
 type TimeReceipt = { signature: string; min: number | null; max: number | null };
-type Payload = { report: MineReport; findings: MineSourceFinding[] };
+type Payload = { report: Omit<MineReport, "occurrences">; findings: MineSourceFinding[] };
 const key = (project: string, day: string, source: MineSource) => JSON.stringify([project, day, source]);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const physical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
@@ -192,7 +192,9 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		report.classes = report.classes.filter(c => c.project === target);
 		report.projects = report.projects.filter(p => p.path === target);
 		index.flush();
-		current.push(ledger.put({ project: target, day: date, source, input_fingerprint: signature, status, reasons, result: { report, findings } })); scanned++;
+		// Findings already retain every occurrence; do not serialize a second replay copy into bounded cells.
+		const { occurrences: _occurrences, ...summary } = report;
+		current.push(ledger.put({ project: target, day: date, source, input_fingerprint: signature, status, reasons, result: { report: summary, findings } })); scanned++;
 	}
 	const uniqueFindings = new Map<string, MineSourceFinding>(), classes = new Map<string, MineClass>();
 	const projects = census.projects.map(p => ({ ...p, events: 0, session_spans: 0, telemetry_sources: [] as string[], source_records: {} as Record<string, number> }));
@@ -229,6 +231,10 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		}
 	}
 	const joined = await scanMine({ ...options, sources: [], census: projects, seedClasses: [...classes.values()], lookupBeads: true });
+	const admittedClasses = new Set(joined.classes.map(c => `${c.project}\0${c.id}`));
+	for (const finding of uniqueFindings.values()) {
+		if (admittedClasses.has(`${finding.project}\0${finding.class_id}`)) joined.occurrences.push(mineFindingOccurrence(finding));
+	}
 	joined.projects = projects; joined.excluded_inputs = excluded;
 	joined.coverage = current.flatMap(cell => cell.result.report.coverage);
 	const totals: Record<MineCellStatus, number> = { READ: 0, PARTIAL: 0, MISSING: 0, "NONE-EXISTS": 0 };

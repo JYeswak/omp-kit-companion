@@ -6,7 +6,7 @@ import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, symlinkSync, utimesSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { runMine, renderMine, type MineOptions } from "../../src/mine.ts";
+import { runMine, scanMine, renderMine, type MineOptions } from "../../src/mine.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 
 let scratch = "", fixtureNumber = 0;
@@ -62,6 +62,34 @@ function snapshot(root: string): string {
 	visit(root); return rows.join("\n");
 }
 
+for (const resumable of [false, true]) test(`MINECAP exposes all 12 occurrences with stable ids (${resumable ? "resumable" : "ephemeral"})`, async () => {
+	const f = fixture(false), source = join(f.home, ".local", "state", "omp-kit", "gate-events.jsonl");
+	await quietGitProject(f.alpha); await quietGitProject(f.beta);
+	put(source, jsonl(Array.from({ length: 12 }, (_, index) => ({
+		ts: `2026-10-15T14:00:${String(index).padStart(2, "0")}Z`, repo: f.alpha,
+		...(index % 2 === 0 ? { event_id: `retained-${index}` } : {}),
+		act: "commit", gate: "twelve-occurrences", kind: "refuse", input: { command: `original-command-${index}` },
+	}))));
+	const options = { ...f.options, since: "2026-10-15", until: "2026-10-16",
+		...(resumable ? { resumeDir: join(f.home, "mine-state") } : {}) };
+	const first = await runMine(options);
+	expect(first.classes.map(c => [c.id, c.count, c.evidence.length])).toEqual([["commit-refusal:twelve-occurrences", 12, 5]]);
+	expect(first.occurrences).toHaveLength(12);
+	expect(new Set(first.occurrences.map(row => row.event_id)).size).toBe(12);
+	for (const [index, row] of first.occurrences.entries()) {
+		expect(row.event_id.length).toBeGreaterThan(0);
+		if (index % 2 === 0) expect(row.event_id).toBe(`retained-${index}`);
+		expect(row.class_id).toBe("commit-refusal:twelve-occurrences");
+		expect(row.project).toBe(f.alpha);
+		expect(row.citation).toBe(`${source}:${index + 1}`);
+		expect(row.replay?.arguments).toEqual({ command: `original-command-${index}` });
+	}
+	expect(JSON.parse(JSON.stringify(first)).occurrences).toEqual(first.occurrences);
+	const second = await runMine(options);
+	expect(second.occurrences).toEqual(first.occurrences);
+	if (resumable) expect(second.ledger?.scanned).toBe(0);
+});
+
 test("MINEDEFECTS retained rc zero is neither a refusal nor a false timeout", async () => {
 	const f = fixture(false);
 	put(join(f.home, ".local", "state", "omp-kit", "gate-events.jsonl"), jsonl([
@@ -85,9 +113,19 @@ test("MINEDEFECTS guard and native result share one occurrence and retained inpu
 	put(join(f.home, ".local", "state", "omp-kit", "gate-events.jsonl"), jsonl([
 		{ ts: "2026-10-15T14:00:00Z", event_id: id, attempt: id, act: "wait", gate: "WAIT_REFUSED", kind: "refuse", detail: "kit-flywheel-guard WAIT_REFUSED: this call uses the wait tool" },
 	]));
+	put(join(f.cc, "spool", "session", "2026-10-15.jsonl"), jsonl([
+		envelope("normalized-guard", f.alpha, "tool.call", { tool: "wait", tool_call_id: id, is_error: true }),
+	]));
+	const beforeEnrichment = await scanMine({ ...f.options, sources: ["cc"], lookupBeads: false });
+	expect(beforeEnrichment.classes.map(c => c.id)).toEqual(["tool-error:unclassified"]);
 	const report = await runMine(f.options);
 	expect(report.classes.map(c => [c.id, c.project, c.count])).toEqual([["guard-friction:WAIT_REFUSED", f.alpha, 1]]);
 	expect(report.classes[0]?.evidence.some(e => e.event_id === id && JSON.stringify(e.replay?.arguments) === JSON.stringify(originalInput))).toBe(true);
+	expect(report.occurrences).toHaveLength(1);
+	expect(report.occurrences[0]?.event_id).toBe(beforeEnrichment.occurrences[0]?.event_id);
+	expect(report.occurrences[0]?.event_id).toBe(id);
+	expect(report.occurrences[0]?.citation).not.toBe(beforeEnrichment.occurrences[0]?.citation);
+	expect(report.occurrences[0]?.replay?.arguments).toEqual(originalInput);
 	expect(renderMine(report)).toContain(`"timeout": ${originalInput.timeout}`);
 });
 
@@ -194,6 +232,7 @@ describe("mine: observed incidents, not transcript mentions", () => {
 		]));
 		const report = await runMine(f.options);
 		expect(report.status).toBe("QUIET"); expect(report.classes).toEqual([]);
+		expect(report.occurrences).toEqual([]);
 		expect(report.projects).toHaveLength(2);
 		expect(renderMine(report)).toContain("No matching events found");
 	});
