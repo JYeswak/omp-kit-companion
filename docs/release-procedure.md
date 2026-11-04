@@ -396,6 +396,14 @@ its retained release directory must not be deleted or overwritten to force retry
 
 **Current route.** The CI pipeline and this train are suspended. Their workflows are disabled. Releases are cut on the signing Mac with `scripts/release-local.sh` as soon as accepted work is on `main` (see [release-signing.md](release-signing.md) and the stages in [AGENTS.md](../AGENTS.md#landing-the-plane)). The train described below is kept for the day CI returns. It is not the authority for done while CI is suspended.
 
+**Version order (NEXTVERSION1, ompkit-d8qic).** Shared `main` always states the version it would ship as, the way Maven's `release:prepare` ends with "prepare for next development iteration":
+
+1. A cut tags an already-green `origin/main` commit whose `package.json` `.version` and `.omp.version` state the release version. With no `--source`, `release-local.sh` reads that version from `origin/main`; when it is not yet tagged, it cuts `origin/main` as is, with no prepare commit. `--source SHA --version X.Y.Z` does the same for an explicit green commit. The VERSIONSRC1 `version-match` gate is unchanged: a commit whose `package.json` states another version, including the latest published one, is refused before the build and again before the tag.
+2. Only after the public verify stage succeeds does the run commit to `main`, in a temporary worktree at the fresh `origin/main` head: `release-notes.sh promote` moves the `changelog.d/` fragments present at the tagged source into `## [X.Y.Z] - DATE`; fragments added after the tag stay for the next release. Both package versions move to the next patch. The commit goes through the normal commit hooks and is pushed to `main` (three attempts on a moved head), then read back from `origin/main`. A run that fails at preflight, build, sign, tag, draft, attest or verify commits nothing, so no version is burned.
+3. That next-version commit needs its own full-suite and push-time CI-only verdicts like any other main commit; the following cut tags it, or any later green descendant, with no bump commit.
+
+Bootstrap: while `origin/main` states a version that is already tagged (0.2.87 on 2026-11-04), `release-local.sh` with no `--source` derives the next patch and makes the one prepare commit (`chore(release): prepare 0.2.88`), the old route. That commit must earn its own verdicts before the cut; every later release follows the order above.
+
 Each CI main push completion wakes the existing controller. It reconciles
 the newest qualified source by main ancestry, not the event's order or current
 branch head. A red/running descendant does not invalidate an eligible green

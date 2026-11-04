@@ -2,7 +2,8 @@
 # scripts/release-local.sh: LOCAL-RELEASE-V1 (ompkit-v66l.27.11, J-2026-10-18-30), the dsr-style local release.
 #
 # Run on the signing Mac. It cuts one omp-kit release without the CI qualification pipeline:
-#   1. prepare    default: version metadata commit, publish main, then qualify its exact export.
+#   1. prepare    NEXTVERSION1: origin/main already states the version; it is cut as is. Only when that version is
+#                 already tagged (bootstrap): version metadata commit, publish main, then qualify its exact export.
 #      preflight  --source resumes an exact origin/main commit; version must be unused (no tag/release/draft).
 #                 Its exact tree must have a reusable main-role full-suite PASS before the signing keychain opens.
 #                 It must also have the push-time ci-only PASS (every local gate-ci-only.tsv file: package-release,
@@ -102,6 +103,7 @@ STAGE_LOG="$WORK/stages"
 cleanup() {
 	if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null || true; wait "$CHILD" 2>/dev/null || true; fi
 	if [ "$UNLOCKED" = 1 ]; then security lock-keychain "$KEYCHAIN" </dev/null || echo "release-local: WARNING: could not re-lock $KEYCHAIN" >&2; fi
+	if [ -d "$WORK/next" ]; then git -C "$ROOT" worktree remove --force "$WORK/next" 2>/dev/null || true; fi
 }
 kitlib_tmp_atexit cleanup
 # bounded SECONDS CMD...: run CMD with a deadline and no terminal stdin, interruptible by the trap.
@@ -290,8 +292,13 @@ fi
 remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin)" || die "git ls-remote --tags failed"
 if [ -z "$VERSION" ]; then
 	if [ "$PREPARE" = 1 ] || [ "$NEXT" = 1 ]; then
-		VERSION="$(python3 -c 'import json,sys; a,b,c=map(int,json.load(open(sys.argv[1]))["version"].split(".")); print(f"{a}.{b}.{c+1}")' "$ROOT/package.json")" ||
-			die "cannot derive next patch version"
+		# NEXTVERSION1: origin/main states the version it ships as; add one only when that version is already
+		# tagged (the bootstrap from the bump-before-tag order, which then needs its own prepare commit).
+		main_version="$(git -C "$ROOT" show "$MAIN:package.json" | jq -er .version)" || die "cannot read origin/main package.json version"
+		if grep -q "refs/tags/v$main_version\$" <<<"$remote_tags"; then
+			VERSION="$(python3 -c 'import sys; a, b, c = map(int, sys.argv[1].split(".")); print(f"{a}.{b}.{c + 1}")' "$main_version")" ||
+				die "cannot derive next patch version"
+		else VERSION="$main_version"; fi
 	else
 		VERSION="$(printf '%s\n' "$remote_tags" | (cd "$ROOT" && sh scripts/release-train.sh next-version --changelog-ref "$SOURCE"))" ||
 			die "release-train.sh next-version failed"
@@ -306,6 +313,11 @@ BASE_TAG="$(jq -r '[.[][] | select(.draft == false and .prerelease == false) | .
 [ -n "$BASE_TAG" ] || die "no published base release"
 python3 -c 'import sys; a, b = (tuple(map(int, v.split("."))) for v in sys.argv[1:]); sys.exit(0 if a > b else 1)' "$VERSION" "${BASE_TAG#v}" ||
 	die "v$VERSION is not newer than the latest published $BASE_TAG"
+# NEXTVERSION1: when origin/main already states this unpublished version, tag it as is; no prepare commit.
+if [ "$PREPARE" = 1 ] && git -C "$ROOT" show "$MAIN:package.json" | jq -e --arg v "$VERSION" '.version == $v' >/dev/null; then
+	PREPARE=0; SOURCE="$MAIN"
+	say "origin/main $MAIN already states $VERSION; tagging it with no prepare commit"
+fi
 if [ "$PREPARE" = 1 ]; then prepare_release; fi
 # Explicit --source remains the immutable resume/preview path.
 sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" ||
@@ -535,6 +547,63 @@ if [ "$DRY_RUN" = 1 ]; then
 	exit 0
 fi
 
+# NEXTVERSION1 (ompkit-d8qic; Maven release:prepare "prepare for next development iteration"): after vVERSION is
+# public, shared main moves to the next patch in one commit that also promotes the vVERSION CHANGELOG section, so
+# the next cut tags an already-green origin commit with no bump commit. Only fragments present at the tagged
+# source are folded; later fragments stay in changelog.d/ for the next release. It runs only after the public
+# verify stage, so a run that fails earlier (build, sign, tag, draft, attest, verify) commits nothing.
+advance_next_version() {
+	stage next-version
+	local next tree="$WORK/next" held="$WORK/held-fragments" attempt promote_rc agent
+	next="$(python3 -c 'import sys; a, b, c = map(int, sys.argv[1].split(".")); print(f"{a}.{b}.{c + 1}")' "$VERSION")"
+	agent="${AGENT_NAME:-$(git -C "$ROOT" config user.name)}"
+	for attempt in 1 2 3; do
+		bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' ||
+			die "v$VERSION is published; next-version fetch failed (rerun the next-version commit for $next by hand)"
+		MAIN="$(git -C "$ROOT" rev-parse refs/remotes/origin/main)"
+		if [ -d "$tree" ]; then git -C "$ROOT" worktree remove --force "$tree" || die "cannot remove $tree"; fi
+		git -C "$ROOT" worktree add --quiet --detach "$tree" "$MAIN" || die "v$VERSION is published; next-version worktree failed"
+		rm -rf "$held"; mkdir -p "$held"
+		comm -13 <(git -C "$ROOT" ls-tree --name-only "$SOURCE" -- changelog.d/ | sort) \
+			<(git -C "$ROOT" ls-tree --name-only "$MAIN" -- changelog.d/ | sort) | while IFS= read -r path; do
+			mv "$tree/$path" "$held/"
+		done
+		promote_rc=0
+		(cd "$tree" && bounded 300 sh "$tree/scripts/release-notes.sh" promote --version "$VERSION" --date "$(date -u +%Y-%m-%d)" --write) ||
+			promote_rc=$?
+		[ "$promote_rc" = 0 ] || [ "$promote_rc" = 4 ] || die "v$VERSION is published; CHANGELOG promote failed (rc $promote_rc)"
+		mv "$held"/* "$tree/changelog.d/" 2>/dev/null || true
+		python3 - "$tree/package.json" "$next" <<'PY'
+import json, re, sys
+path, version = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+updated, count = re.subn(r'(?m)^([ \t]*"version"\s*:\s*)"[^"\n]*"', lambda m: m[1] + json.dumps(version), text)
+doc = json.loads(updated)
+if count != 2 or doc["version"] != version or doc["omp"]["version"] != version:
+    raise SystemExit("release-local: package.json must carry exactly .version and .omp.version")
+open(path, "w", encoding="utf-8").write(updated)
+PY
+		git -C "$tree" add -A -- package.json CHANGELOG.md changelog.d || die "next-version staging failed"
+		bounded 900 git -C "$tree" commit -q \
+			-m "chore(release): next version $next after v$VERSION ompkit-d8qic" \
+			-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE." \
+			-m "[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
+			-m "Gap-Bead: none (release metadata)
+Bead: ompkit-d8qic
+Agent: $agent" || die "v$VERSION is published; next-version commit failed"
+		if bounded 900 git -C "$tree" -c push.followTags=false push --porcelain origin HEAD:refs/heads/main; then
+			NEXT_SHA="$(git -C "$tree" rev-parse HEAD)"
+			git -C "$ROOT" worktree remove --force "$tree" || true
+			bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "next-version readback fetch failed"
+			git -C "$ROOT" merge-base --is-ancestor "$NEXT_SHA" refs/remotes/origin/main || die "next-version commit $NEXT_SHA is not on origin/main"
+			say "next version $next committed to main: $NEXT_SHA"
+			return 0
+		fi
+		echo "release-local: next-version push attempt $attempt rejected; refetching main" >&2
+	done
+	die "v$VERSION is published; next-version push for $next was rejected 3 times"
+}
+
 # VERSIONSRC1 (ompkit-fp72.135.1.14): the tagged source must state the
 # release version in package.json; a mismatch refuses the tag, never a
 # silent mislabel.
@@ -655,6 +724,7 @@ spctl --assess --type open --context context:primary-signature -vv "$PUB/x/bin/o
 grep -q 'source=Notarized Developer ID' "$WORK/spctl.txt" || die "Gatekeeper does not report Notarized Developer ID"
 substep ''
 RELEASED_AT=$(date +%s)
+advance_next_version
 if [ "$INSTALL" = 1 ]; then install_release; fi
 if [ "$INSTALLED" = 1 ]; then receipt installed "$URL" "$RUN_ID"
 else receipt released "$URL" "$RUN_ID"; fi
