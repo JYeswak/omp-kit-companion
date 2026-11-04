@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { run as kitlibRun, type RunResult } from "./kitlib/run.ts";
+import { run as kitlibRun, runSync as kitlibRunSync, type RunResult } from "./kitlib/run.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -28,6 +28,26 @@ function gitEnvironment(reflogAction?: string): Record<string, string> {
 function git(repo: string, args: string[], reflogAction?: string): GitResult {
 	const run = spawnSync("git", args, { cwd: repo, env: gitEnvironment(reflogAction), encoding: "utf8", timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
 	return { code: run.status ?? 1, out: String(run.stdout ?? ""), err: String(run.stderr ?? ""), interrupted: run.signal !== null || run.error !== undefined };
+}
+
+// LANDPUSH1 (ompkit-fp72.120.16.224): the publication push runs the pre-push hook chain (fresh gate,
+// affected tests), so it cannot share the 30 s bound of the other git calls. Measured in the companion's
+// .git/omp-kit/fresh-gate-runs.jsonl timing.wall_ms, 2026-10-30..2026-11-04: n=510, p50 38.2 s,
+// p95 257.3 s, max 1543.6 s, 289/510 over 30 s. Default 2400 s = observed max + ~55% margin.
+const LAND_PUSH_DEADLINE_ENV = "OMP_KIT_LAND_PUSH_DEADLINE_S";
+
+/** The publication push deadline in seconds: OMP_KIT_LAND_PUSH_DEADLINE_S (integer, clamped to 1..7200) or 2400. */
+function landPushDeadlineSeconds(): number {
+	const raw = process.env[LAND_PUSH_DEADLINE_ENV];
+	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+	return Number.isSafeInteger(value) ? Math.min(7200, Math.max(1, value)) : 2400;
+}
+
+/** The publication push alone runs under the push deadline; the whole hook group is reaped at the deadline. */
+function publicationPush(repo: string, args: string[], deadlineS: number): GitResult {
+	const run = kitlibRunSync(["git", ...args], { cwd: repo, env: gitEnvironment(), deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
+	const decoder = new TextDecoder();
+	return { code: run.rc ?? 1, out: decoder.decode(run.stdout), err: decoder.decode(run.stderr), interrupted: run.timed_out || run.killed || run.rc === null };
 }
 
 function gitBytes(repo: string, args: string[]): { code: number; out: Buffer; err: string; interrupted: boolean } {
@@ -935,14 +955,15 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 			verification: "PERFORMED",
 		};
 	}
-	const push = git(repo, ["push", "origin", `${candidate}:refs/heads/main`]);
+	const pushDeadlineS = landPushDeadlineSeconds();
+	const push = publicationPush(repo, ["push", "origin", `${candidate}:refs/heads/main`], pushDeadlineS);
 	if (push.interrupted) {
 		cleanup();
 		const phases = landPhaseEvidence(repo, candidate, true);
 		return {
 			code: 77,
 			data: { overall: "UNRUN", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, check: checkResult, phases },
-			errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: "The push command did not finish; publication could not be verified", remediation: "Inspect origin/main before retrying; no force-push or fallback was attempted." }],
+			errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The push did not finish: the pre-push hook was still running after ${pushDeadlineS} s, the land push deadline (${LAND_PUSH_DEADLINE_ENV}, default 2400, 1..7200); publication could not be verified`, remediation: `Inspect origin/main before retrying; raise ${LAND_PUSH_DEADLINE_ENV} if the hook chain needs longer. No force-push or fallback was attempted.` }],
 			verification: "UNVERIFIED",
 		};
 	}
