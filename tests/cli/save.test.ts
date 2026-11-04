@@ -5,16 +5,42 @@
 import { expect, test } from "bun:test";
 import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { runFixture } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
 import { cliPath, commandEnvironment, fixture, git, remoteHead, repoRoot, scratch, stringEnvironment } from "./private-index-land.helpers.ts";
 
 const decoder = new TextDecoder();
 const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 
-function save(work: string, fakeBin: string, args: string[]) {
+function saveOnce(work: string, fakeBin: string, args: string[]) {
 	const env = commandEnvironment(work, hold, { amDir: fakeBin });
 	const result = runFixture(["bun", cliPath, "save", ...args], { cwd: work, env: stringEnvironment(env), floor_s: 60 });
 	return { status: result.rc, stdout: decoder.decode(result.stdout), stderr: decoder.decode(result.stderr) };
+}
+
+// The human line is `REFUSED OWNER_UNKNOWN: …`; --json carries the code as errors[0].code.
+function ownerUnknown(stdout: string): boolean {
+	if (stdout.split("\n").some(line => line.startsWith("REFUSED OWNER_UNKNOWN: "))) return true;
+	let body: unknown;
+	try { body = JSON.parse(stdout); } catch { return false; }
+	if (!body || typeof body !== "object" || !("errors" in body) || !Array.isArray(body.errors)) return false;
+	const first: unknown = body.errors[0];
+	return !!first && typeof first === "object" && "code" in first && first.code === "OWNER_UNKNOWN";
+}
+
+// land resolves the pane owner with `am agents resolve-pane` under a fixed 10 s product timeout (src/land.ts
+// spawnSync timeout: 10_000) and refuses OWNER_UNKNOWN, before any mutation, when it expires. The 2026-11-04
+// 18:35Z commit-gate run (log 74fa3e9e…T183526Z) failed the moved-origin case here at 28591 ms with exactly that
+// refusal. As in private-index-land-2b and -3b, save re-runs only on that pre-mutation refusal, inside a load-scaled
+// budget; `retried` counts the refused runs, whose save-log rows the cases assert as REFUSED OWNER_UNKNOWN.
+function save(work: string, fakeBin: string, args: string[]) {
+	const until = Date.now() + fixtureDeadlineS(30) * 1000;
+	let result = saveOnce(work, fakeBin, args);
+	let retried = 0;
+	while (result.status === 1 && ownerUnknown(result.stdout) && Date.now() < until) {
+		retried++;
+		result = saveOnce(work, fakeBin, args);
+	}
+	return { ...result, retried };
 }
 
 function saveLog(work: string): Record<string, unknown>[] {
@@ -51,13 +77,15 @@ test("save converges a moved origin, publishes, prints one SAVED line and logs t
 	expect(git(work, ["show", `${published}:remote.txt`])).toBe("peer origin advance\n");
 
 	const rows = saveLog(work);
-	expect(rows.length).toBe(1);
-	expect(rows[0]).toMatchObject({ sha: published, outcome: "SAVED", code: "PUSHED" });
-	expect(typeof rows[0]!.elapsed_s).toBe("number");
-	expect(Number(rows[0]!.elapsed_s)).toBe(Number(match![2]));
-	expect(typeof rows[0]!.ts).toBe("string");
-	expect(typeof rows[0]!.repo).toBe("string");
-}, { timeout: 180_000 });
+	expect(rows.length).toBe(1 + run.retried);
+	for (const row of rows.slice(0, run.retried)) expect(row).toMatchObject({ outcome: "REFUSED", code: "OWNER_UNKNOWN", sha: null });
+	const savedRow = rows[run.retried]!;
+	expect(savedRow).toMatchObject({ sha: published, outcome: "SAVED", code: "PUSHED" });
+	expect(typeof savedRow.elapsed_s).toBe("number");
+	expect(Number(savedRow.elapsed_s)).toBe(Number(match![2]));
+	expect(typeof savedRow.ts).toBe("string");
+	expect(typeof savedRow.repo).toBe("string");
+}, { timeout: fixtureDeadlineS(180) * 1000 });
 
 test("a failing commit hook refuses the save: nothing committed, nothing published, REFUSED line names land's code", () => {
 	const { work, fakeBin } = fixture();
@@ -89,9 +117,13 @@ test("a failing commit hook refuses the save: nothing committed, nothing publish
 	expect(remoteHead(work)).toBe(originBefore);
 
 	const rows = saveLog(work);
-	expect(rows.length).toBe(2);
-	for (const row of rows) expect(row).toMatchObject({ outcome: "REFUSED", code: "COMMIT_CREATION_REFUSED", sha: null });
-}, { timeout: 180_000 });
+	const ownerRows = rows.filter(row => row.code === "OWNER_UNKNOWN");
+	expect(ownerRows.length).toBe(run.retried + json.retried);
+	for (const row of ownerRows) expect(row).toMatchObject({ outcome: "REFUSED", sha: null });
+	const landed = rows.filter(row => row.code !== "OWNER_UNKNOWN");
+	expect(landed.length).toBe(2);
+	for (const row of landed) expect(row).toMatchObject({ outcome: "REFUSED", code: "COMMIT_CREATION_REFUSED", sha: null });
+}, { timeout: fixtureDeadlineS(180) * 1000 });
 
 test("save grammar refuses a missing message or missing paths, and `--` stays refused elsewhere", () => {
 	const cases: [string[], string][] = [
