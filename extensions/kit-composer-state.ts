@@ -12,8 +12,10 @@ import { fleetPolicyState } from "./fleet-policy";
  * composers never reloaded onto 0.2.69-0.2.71, and their own self-restarts rolled back the same way. omp gives a
  * seat's extension its live composer text (ctx.ui.getEditorText(), interactive TUI), so the seat reports it itself:
  * one JSON record per session file under ~/.local/state/omp-kit/composer/, rewritten at session start, at each turn
- * boundary and every COMPOSER_INTERVAL_MS, removed at shutdown. The record says only whether a draft exists, never
- * its text. Inert unless the repo opted into the fleet, and outside the interactive TUI (RPC's getEditorText is "").
+ * boundary and every COMPOSER_INTERVAL_MS, removed at shutdown. The record says whether a draft exists and carries a
+ * sha256 digest and code-point count of it, never its text: RESUMEENTER1 (ompkit-fp72.120.16.215) lets a helper that
+ * pasted a line prove the composer holds exactly that line before it presses Enter a second time. Inert unless the
+ * repo opted into the fleet, and outside the interactive TUI (RPC's getEditorText is "").
  */
 export const COMPOSER_INTERVAL_MS = 5_000;
 
@@ -26,6 +28,10 @@ export interface ComposerStateRecord {
 	at: number;
 	empty: boolean;
 	idle: boolean | null;
+	/** Hex sha256 of the composer text's UTF-8 bytes, untrimmed; null when omp returned no string. Never the text. */
+	sha256: string | null;
+	/** Unicode code points in the composer text (Python len()), untrimmed; null when omp returned no string. */
+	chars: number | null;
 }
 
 /** Where the record for one session file lives: sha1 of its realpath, so the reader needs no listing. */
@@ -102,6 +108,8 @@ export default async function kitComposerState(pi: ComposerStateApi, deps: Compo
 				schema: 1, session_file: sessionFile, pid, at: now(),
 				empty: typeof text === "string" && text.trim() === "",
 				idle: typeof ctx.isIdle === "function" ? ctx.isIdle() : null,
+				sha256: typeof text === "string" ? createHash("sha256").update(text, "utf8").digest("hex") : null,
+				chars: typeof text === "string" ? [...text].length : null,
 			};
 			const path = composerRecordPath(home, sessionFile);
 			mkdirSync(dirname(path), { recursive: true, mode: 0o700 });

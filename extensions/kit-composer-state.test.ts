@@ -58,10 +58,13 @@ registry?: unknown; malformedRegistry?: boolean; registryOverride?: boolean } = 
 	return { state, fire, tick, record, path, sessionFile };
 }
 
+/** An empty composer's additive RESUMEENTER1 fields: the digest of "" and zero code points. */
+const EMPTY_DIGEST = { sha256: createHash("sha256").update("").digest("hex"), chars: 0 };
+
 test("planted: an empty composer is published as empty, keyed by the session file's realpath", async () => {
 	const s = await seat();
 	await s.fire("session_start");
-	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true });
+	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true, ...EMPTY_DIGEST });
 	expect(s.state.intervals).toBe(1);
 });
 
@@ -71,6 +74,20 @@ test("a draft is published as not empty, and the record never carries its text",
 	await s.fire("session_start");
 	expect(s.record()?.empty).toBe(false);
 	expect(readFileSync(s.path, "utf8")).not.toContain("inbox");
+});
+
+test("planted RESUMEENTER1: the record carries the draft's sha256 and code-point count, so a helper can prove its own paste", async () => {
+	const s = await seat();
+	const line = "/goal resume — é";
+	s.state.text = line;
+	await s.fire("session_start");
+	const rec = s.record();
+	expect(rec?.sha256).toBe(createHash("sha256").update(line, "utf8").digest("hex"));
+	expect(rec?.chars).toBe(16);
+	s.state.text = `${line} `;
+	await s.tick();
+	expect(s.record()?.sha256).not.toBe(rec?.sha256);
+	expect(readFileSync(s.path, "utf8")).not.toContain("goal resume");
 });
 
 test("a turn boundary republishes the composer as it is now", async () => {
@@ -114,7 +131,7 @@ const chiefCwd = repo(undefined);
 test("planted: a registered chief publishes from a cwd outside its policy repo", async () => {
 	const s = await seat({ cwd: chiefCwd, env: { TERN_PANE: "1756641624081" }, registry: registeredSeat(repo(true)) });
 	await s.fire("session_start");
-	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true });
+	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true, ...EMPTY_DIGEST });
 });
 
 test("control: an unregistered pane outside the policy repo stays silent tick after tick", async () => {
@@ -140,7 +157,7 @@ test("planted RESTARTRACE1: a seat unlisted at start publishes on the first tick
 	const registryPath = join(dirname(s.sessionFile), ".local", "state", "omp-kit", "cc", "seats.v1.json");
 	writeFileSync(registryPath, JSON.stringify(registeredSeat(policyRepo)));
 	await s.tick();
-	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true });
+	expect(s.record()).toEqual({ schema: 1, session_file: realpathSync(s.sessionFile), pid: 4242, at: 1_000, empty: true, idle: true, ...EMPTY_DIGEST });
 });
 
 test("planted negative: the admitted first-tick publish FAILS under the old session_start-only decision", async () => {
