@@ -2464,13 +2464,43 @@ const PRIOR_ART_LINE = "prior=<url or repo path:line> did=<what they do> applied
 /** Fixed rollout boundary; sitrep reads this same constant rather than duplicating it. */
 export const PRIOR_GATE_ACTIVATION = "2026-11-03T08:00:00Z";
 
-/** A citation is a structured line, not an arbitrary URL pasted into a DONE report. */
+/**
+ * A citation token is an http(s) URL or a repo path:line (path:12, path:12-20, path:4,9), optionally wrapped
+ * in "(" or "[" or followed by ),;.] punctuation. Plain scans, no backtracking regex (PRIORFORMAT1).
+ */
+function isCitationToken(raw: string): boolean {
+	let token = raw;
+	while (token.startsWith("(") || token.startsWith("[")) token = token.slice(1);
+	while (token.length > 0 && "),;.]".includes(token[token.length - 1]!)) token = token.slice(0, -1);
+	if (token.startsWith("http://") || token.startsWith("https://")) return token.length > token.indexOf("//") + 2;
+	const colon = token.lastIndexOf(":");
+	if (colon <= 0 || token.includes("=")) return false;
+	const line = token.slice(colon + 1);
+	return line.length > 0 && [...line].every(ch => (ch >= "0" && ch <= "9") || ch === "-" || ch === ",")
+		&& line[0]! >= "0" && line[0]! <= "9";
+}
+
+/**
+ * A citation is a structured line, not an arbitrary URL pasted into a DONE report: `prior=` followed by at least
+ * one URL or path:line token before ` did=`, then non-empty did= and applied= on the same line. Extra sources and
+ * notes may sit between the first token and did= (PRIORFORMAT1: every 11-04 builder note did, and 0 of 5 matched
+ * the old single-token shape). `prior=none searched=<non-empty>` is the recorded no-prior-art form.
+ */
 export function validPriorArtLine(text: string): boolean {
 	if (text.length > 16_384) return false;
 	return text.split(/\r?\n/).some(line => {
 		const none = /\bprior=none\s+searched=(.+)$/.exec(line);
 		if (none) return none[1]!.replace(/[\s,[\]{}"'`;]/g, "").length > 0;
-		return /\bprior=(?:https?:\/\/\S+|[^\s=]+:\d+)\s+did=(\S.*)\s+applied=(\S.*)$/.test(line);
+		const at = line.search(/\bprior=/);
+		if (at < 0) return false;
+		const rest = line.slice(at + "prior=".length);
+		if (rest.length === 0 || /^\s/.test(rest)) return false;
+		const did = rest.search(/\sdid=\S/);
+		if (did < 0) return false;
+		const afterDid = rest.slice(did + 1 + "did=".length);
+		const applied = afterDid.search(/\sapplied=\S/);
+		if (applied < 0 || afterDid.slice(0, applied).trim().length === 0) return false;
+		return rest.slice(0, did).split(/\s+/).some(isCitationToken);
 	});
 }
 
@@ -2508,7 +2538,9 @@ async function checkPriorArtClose(found: BeadStateWithAuthorship, request: Track
 			first = Date.parse(claim.stdout.trim());
 			basis = "first in_progress claim";
 		}
-		if (!Number.isFinite(first)) return refuse(`${basis} timestamp unavailable`);
+		if (!Number.isFinite(first)) {
+			return refuse(`${basis} timestamp unavailable: no commit in ${request.cwd} carries "Bead: ${found.id}" and the bead was never claimed in_progress. If its work landed in another checkout that shares this tracker, run the close from that checkout (cd <that repo> && br --db <this tracker's beads.db> close ${found.id} ...), so its implementation commit is found`);
+		}
 		if (first < Date.parse(PRIOR_GATE_ACTIVATION)) return {
 			additionalContext: `kit-flywheel-guard PRIOR_ART_GRANDFATHERED (activation ${PRIOR_GATE_ACTIVATION}): ${found.id} ${basis} at ${new Date(first).toISOString()} predates activation; prior-art timing gate exempt, independent-close checks still apply.`,
 		};

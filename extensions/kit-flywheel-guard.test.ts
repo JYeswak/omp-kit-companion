@@ -456,6 +456,41 @@ test("PRIORGATE1: bounded validator rejects long near-misses and empty fields", 
 	expect(validPriorArtLine("x".repeat(16385))).toBe(false);
 });
 
+test("PRIORFORMAT1: a real citation followed by more sources or notes before did= is accepted", () => {
+	// The five 2026-11-04 builder notes in shape: several sources joined by +, a parenthetical, or a
+	// non-citation word before the first path:line. 0 of 5 matched the single-token form.
+	for (const text of [
+		"prior=/opt/homebrew/bin/git-filter-repo:4476,4782 + /Users/x/guard.py:184,386 + https://git-scm.com/docs/githooks#_reference_transaction (fetched 2026-11-04: 'invoked by any Git command') did=moves refs through update-ref applied=a reviewed transform is admitted",
+		"prior=mktemp(1) contract (POSIX/BSD man mktemp: on failure exits >0) plus omp-kit-companion src/output.ts:70 (errors render stdout) did=prints nothing on failure applied=--print-dir",
+		"prior=omp-kit-companion/scripts/full-suite-verdict.sh:81-91 (SUITESHIMPATH1 refuses a shim br) did=refuses the shim applied=resolveRealBr skips it",
+		"prior=omp-kit-companion/src/mine.ts:416 (MINE1 67f835b939: any guard.decision failure -> guard-failure:<engine>) + omp-kit/scripts/cc/collect_session.py:2 did=maps failures applied=observed exits excluded",
+		"prior=scripts/cc/cc_spool_gzip.py:166 refuse_delete (manifest + HORIZON_DAYS 90), scripts/cc/ccbackup.py:79 rotate keep 7 did=rotates applied=retain verb",
+		"first line\nprior=(src/a.ts:12) did=x applied=y",
+	]) expect(validPriorArtLine(text)).toBe(true);
+});
+
+test("PRIORFORMAT1: no URL or path:line before did=, an empty field, or out-of-order fields stay refused", () => {
+	for (const text of [
+		"prior=mktemp(1) contract (POSIX man page) did=x applied=y",
+		"prior=see the design notes did=x applied=y",
+		"did=x applied=y prior=src/a.ts:3",
+		"prior=src/a.ts:3 did=x",
+		"prior=src/a.ts:3 applied=y did=x",
+		"prior=src/a.ts:3 did=  applied=y",
+		"prior= src/a.ts:3 did=x applied=y",
+		"prior=a=b:3 did=x applied=y",
+		"prior=:12 did=x applied=y",
+		"prior=file.ts:12abc did=x applied=y",
+		"prior=http:// did=x applied=y",
+	]) expect(validPriorArtLine(text)).toBe(false);
+	const started = performance.now();
+	expect(validPriorArtLine("prior=" + "a:1 ".repeat(4000))).toBe(false);
+	expect(validPriorArtLine("prior=src/a.ts:1 did=" + "y ".repeat(8000))).toBe(false);
+	const elapsed = performance.now() - started;
+	console.log(`PRIORFORMAT1 two 16 KiB near-misses: ${elapsed.toFixed(3)} ms`);
+	expect(elapsed).toBeLessThan(fixtureDeadlineS(1) * 1000);
+});
+
 test("PRIORGATE1: real git uses committer time and exact bead identity", async () => {
 	const project = freshDir(base, "prior-git-");
 	const git = async (...args: string[]) => {
