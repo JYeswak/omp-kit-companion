@@ -4,17 +4,34 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { checkInstallerBootstrap } from "../../scripts/package-release";
-import { run, type RunResult } from "../../src/kitlib/run";
+import { run, runSync, type RunResult } from "../../src/kitlib/run";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const installerSource = readFileSync(join(root, "installer/install.py"), "utf8");
+const decoder = new TextDecoder();
+// HERMPATH1: on macOS /usr/bin/python3 is one inode with ~78 names (git, make, pip3, ...), an
+// xcode-select stub that picks its tool from argv[0]. realpath of a hard link may report any of
+// those names, so realpathSync once turned python3 into /usr/bin/git and all nine tests ran git
+// (`git: unknown option: -I`, rc 129). Use the path the interpreter reports for itself, and
+// require that exact path to run as Python 3.
+function python3Probe(command: string): { major: string; executable: string; detail: string } {
+	const result = runSync([command, "-I", "-c", "import sys; print(sys.version_info[0]); print(sys.executable)"], { deadline_s: fixtureDeadlineS(), max_output_bytes: 4096 });
+	const [major = "", executable = ""] = decoder.decode(result.stdout).split("\n");
+	return { major: result.rc === 0 ? major : "", executable, detail: `rc=${result.rc} timed_out=${result.timed_out} stderr=${JSON.stringify(decoder.decode(result.stderr).slice(-400))}` };
+}
 const python = (() => {
 	const found = Bun.which("python3");
-	if (!found) throw new Error("installer bootstrap tests require Python 3");
-	return realpathSync(found);
+	if (!found) throw new Error("INSTALLER_TEST_PYTHON3_UNRESOLVED: no python3 on PATH");
+	const reported = python3Probe(found);
+	if (reported.major !== "3" || !reported.executable.startsWith("/"))
+		throw new Error(`INSTALLER_TEST_PYTHON3_UNRESOLVED: ${found} is not Python 3 or reports no absolute sys.executable (major=${JSON.stringify(reported.major)} executable=${JSON.stringify(reported.executable)} ${reported.detail})`);
+	const direct = python3Probe(reported.executable);
+	if (direct.major !== "3")
+		throw new Error(`INSTALLER_TEST_PYTHON3_UNRESOLVED: ${reported.executable} (sys.executable of ${found}) does not run as Python 3 (major=${JSON.stringify(direct.major)} ${direct.detail})`);
+	return reported.executable;
 })();
-const decoder = new TextDecoder();
 const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 const version = "1.2.3";
 const platform = `${process.platform}-${process.arch}-${process.platform === "darwin" ? "none" : "gnu"}`;
