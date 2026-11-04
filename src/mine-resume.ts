@@ -13,7 +13,7 @@ export interface MineFileIndex {
 	record(path: string, signature: string, min: number | null, max: number | null): void;
 }
 type TimeReceipt = { signature: string; min: number | null; max: number | null };
-type Payload = { report: Omit<MineReport, "occurrences">; findings: MineSourceFinding[] };
+type Payload = { report: Omit<MineReport, "occurrences" | "classes" | "waste_classes">; findings: MineSourceFinding[] };
 const key = (project: string, day: string, source: MineSource) => JSON.stringify([project, day, source]);
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const physical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
@@ -74,7 +74,7 @@ function compactCoverage(rows: MineCoverage[], source: MineSource, project: stri
 }
 function payload(value: unknown): value is Payload {
 	if (!object(value) || !object(value.report) || value.report.schema_version !== "omp-kit.mine.v1" || !Array.isArray(value.report.projects)
-		|| !Array.isArray(value.report.coverage) || !Array.isArray(value.report.classes) || !Array.isArray(value.findings) || !object(value.report.excluded_inputs)) return false;
+		|| !Array.isArray(value.report.coverage) || !Array.isArray(value.findings) || !object(value.report.excluded_inputs)) return false;
 	return value.findings.every(row => object(row) && typeof row.identity === "string" && typeof row.project === "string" && typeof row.class_id === "string"
 		&& typeof row.time_ms === "number" && Number.isFinite(row.time_ms) && typeof row.producer === "string" && typeof row.citation === "string" && typeof row.summary === "string"
 		&& (row.measured_minutes === null || typeof row.measured_minutes === "number" && Number.isFinite(row.measured_minutes) && row.measured_minutes >= 0)
@@ -189,11 +189,10 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 			: status === "NONE-EXISTS" ? ["No matching source exists in the currently inventoried stores; this is not proof that historical work was quiet."] : [];
 		if (reasons.length > 2048) throw new Error(`MINE_REASON_LIMIT: ${target} ${date} ${source}`);
 		report.coverage = compactCoverage(report.coverage, source, target, date).filter(row => status !== "NONE-EXISTS" || row.status !== "READ");
-		report.classes = report.classes.filter(c => c.project === target);
 		report.projects = report.projects.filter(p => p.path === target);
 		index.flush();
-		// Findings already retain every occurrence; do not serialize a second replay copy into bounded cells.
-		const { occurrences: _occurrences, ...summary } = report;
+		// Class/occurrence projections are rebuilt from findings; persist their evidence once, even on long export paths.
+		const { occurrences: _occurrences, classes: _classes, waste_classes: _wasteClasses, ...summary } = report;
 		current.push(ledger.put({ project: target, day: date, source, input_fingerprint: signature, status, reasons, result: { report: summary, findings } })); scanned++;
 	}
 	const uniqueFindings = new Map<string, MineSourceFinding>(), classes = new Map<string, MineClass>();

@@ -586,3 +586,76 @@ test("WASTEMINE1 explicitly selected coordinator sessions retain unknown reposit
 	const scoped = await scanMine({ ...f.options, all: false, project: f.alpha, env: { ...f.options.env, OMP_KIT_MINE_SESSION_ROOTS: source }, sources: ["transcripts"], lookupBeads: false });
 	expect(scoped.occurrences).toEqual([]);
 });
+
+test("WASTEMINE1 long export paths keep bounded class reports resumable and recover to quiet", async () => {
+	const f = fixture(false), home = join(f.home, "long-export-root".repeat(7)), project = join(home, "projects", "alpha");
+	mkdirSync(project, { recursive: true });
+	await quietGitProject(project);
+	put(join(home, ".config", "omp-kit", "fleet-watch.json"), JSON.stringify({ sessions: [{ session: "alpha", repo: project }] }));
+	const source = join(home, ".omp", "profiles", "default", "agent", "sessions", "-projects-alpha", "native.jsonl");
+	const header = { type: "session", id: "long-export-bound", cwd: project };
+	put(source, jsonl([header, ...Array.from({ length: 2050 }, (_, index) =>
+		nativeResult(`bounded-${index}`, `AssertionError: distinct cause ${index}`, "2026-10-15T12:00:00Z", true))]));
+	const options: MineOptions = { since: "2026-10-15", until: "2026-10-16", all: true, home, cwd: project,
+		env: { HOME: home, PATH: process.env.PATH ?? "" }, resumeDir: join(f.home, "long-export-state") };
+	const first = await runMine(options), reopened = await runMine(options);
+	expect(first.status).toBe("PARTIAL");
+	expect(first.classes).toHaveLength(2048);
+	expect(first.occurrences).toHaveLength(2048);
+	expect(first.waste_classes).toHaveLength(2048);
+	expect(first.ledger?.cells.some(cell => cell.status === "PARTIAL" && cell.reasons.some(reason => reason.includes("Class limit reached (2048)")))).toBe(true);
+	expect(reopened.classes).toEqual(first.classes);
+	expect(reopened.occurrences).toEqual(first.occurrences);
+	expect(reopened.waste_classes).toEqual(first.waste_classes);
+	put(source, jsonl([header, nativeResult("quiet", "Completed successfully", "2026-10-15T12:00:00Z")]));
+	const quiet = await runMine(options), quietReopened = await runMine(options);
+	expect(quiet.ledger?.totals.PARTIAL).toBe(0);
+	expect(quiet.classes).toEqual([]);
+	expect(quiet.occurrences).toEqual([]);
+	expect(quiet.waste_classes).toEqual([]);
+	expect(quietReopened.ledger?.scanned).toBe(0);
+	expect(quietReopened.waste_classes).toEqual([]);
+});
+
+for (const withWasteProjection of [false, true]) test(`WASTEMINE1 resumes legacy receipts with ${withWasteProjection ? "both cached class projections" : "cached classes only"}`, async () => {
+	const f = fixture(false), source = nativePath(f, "legacy-receipt");
+	await quietGitProject(f.alpha); await quietGitProject(f.beta);
+	// Minimized/redacted from retained v1 cell 18eb79fdc354719ca4a75d63604f2055121be3bd404287c69c1fc000b6c2199a:
+	// preserve its recorded timeout observation and replay envelope; replace machine paths, arguments and call identity.
+	const finding = {
+		class_id: "timeout:glob", project: f.alpha, time_ms: 1793672207314, producer: "omp-transcript",
+		citation: "redacted/session.jsonl:39",
+		summary: "Glob timed out after 5s before finding any matches — the scan is incomplete, NOT proof of absence. The walk is bounded by directory size, not pattern width; scope the search to a deeper directory (e.g. `sub/dir/*.ext` instead of `*.ext` at a huge root).",
+		measured_minutes: null, proxy_minutes: 0, identity: "legacy-timeout-glob", event_id: "legacy-timeout-glob",
+		replay: { version: 1, tool: "glob", arguments: { path: "redacted/**/*.ts" }, cwd: f.alpha, staged_paths: null,
+			diff_sha256: null, message: null, custody: null, redacted: true, truncated: false,
+			missing: ["staged_paths", "diff_sha256", "message", "custody"] },
+	};
+	put(source, jsonl([{ type: "session", id: "legacy-receipt", cwd: f.alpha },
+		nativeMessage("toolResult", [{ type: "text", text: finding.summary }], "2026-11-03T02:16:47.314Z",
+			{ toolCallId: finding.event_id, toolName: "glob", isError: true })]));
+	const options = { ...f.options, since: "2026-11-03", until: "2026-11-04", resumeDir: join(f.home, "legacy-state") };
+	const first = await runMine(options), manifestPath = first.ledger!.path, directory = dirname(manifestPath);
+	const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+	const entry = Object.entries<string>(manifest.entries).map(([key, digest]) =>
+		({ key, cell: JSON.parse(readFileSync(join(directory, `${digest}.json`), "utf8")) }))
+		.find(row => row.cell.project === f.alpha && row.cell.source === "transcripts")!;
+	const legacy = { ...entry.cell, result: {
+		report: { ...entry.cell.result.report, classes: first.classes.map(row => ({ ...row, count: 999 })),
+			...(withWasteProjection ? { waste_classes: first.waste_classes.map(row => ({ ...row, count: 999, cost: { ...row.cost, rounds: 999 } })) } : {}) },
+		findings: [finding],
+	} };
+	const bytes = JSON.stringify(legacy), digest = createHash("sha256").update(bytes).digest("hex");
+	writeFileSync(join(directory, `${digest}.json`), bytes, { mode: 0o600 });
+	manifest.entries[entry.key] = digest;
+	put(manifestPath, JSON.stringify(manifest));
+	const resumed = await runMine(options);
+	expect(resumed.ledger?.scanned).toBe(0); // Read the old shape; rescanning would conceal a compatibility failure.
+	expect(resumed.ledger?.reused).toBe(first.ledger?.scanned);
+	expect(resumed.classes.map(row => [row.id, row.count])).toEqual([["timeout:glob", 1]]);
+	expect(resumed.waste_classes.map(row => [row.id, row.count, row.cost.rounds])).toEqual([["timeout:glob", 1, 1]]);
+	expect(resumed.occurrences).toHaveLength(1);
+	expect(resumed.occurrences[0]?.event_id).toBe(finding.event_id);
+	expect(resumed.occurrences[0]?.citation).toBe(finding.citation);
+	expect(resumed.occurrences[0]?.replay).toEqual(finding.replay);
+});
