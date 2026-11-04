@@ -7,6 +7,9 @@ import { join, resolve } from "node:path";
 import { applyReap, callerSeat, createScratch, defaultLiveness, defaultRunner, inspectSession, parseOwnerFile, planScratch, releaseScratch,
 	type InspectDeps, type LivenessDeps, type SeatIdentity } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { pollUntil } from "../../src/kitlib/poll.ts";
+import { runSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const repo = resolve(import.meta.dir, "../..");
 const scratchParent = join(repo, "var", "agent-tmp");
@@ -15,6 +18,21 @@ const AGENT = "TurquoiseSummit";
 const SESSION = "01a15012-af9e-7628-bee6-496084668412";
 const OTHER_SESSION = "01a1502a-5647-76ba-89c5-949087f3e283";
 const HAVE_LSOF = Bun.which("lsof") !== null;
+
+// The real seat probe runs lsof under a 3 s product deadline and reports UNKNOWN (null, or the
+// owner-seat-liveness-unproven reason) when it expires. At load 30+ on 32 cores lsof alone can take
+// longer, so the real-process tests re-observe an UNKNOWN answer until a definite one arrives within
+// a load-scaled budget. A definite answer is asserted exactly as before; UNKNOWN never passes.
+async function definite<T>(probe: () => T, unknown: (value: T) => boolean): Promise<T> {
+	const polled = await pollUntil(probe, {
+		deadline_s: fixtureDeadlineS(10), interval_s: 0.1, max_observation_bytes: 1 << 20,
+		classify: value => unknown(value) ? "retry" : "success",
+	});
+	return polled.observation as T;
+}
+const seatAnswer = (real: LivenessDeps, session: string) => definite(() => real.seatLive?.(AGENT, session) ?? null, value => value === null);
+const inspected = (dir: string, root: string, deps: InspectDeps) =>
+	definite(() => inspectSession(dir, root, deps), value => value.reason === "owner-seat-liveness-unproven");
 
 const cleanup: string[] = [];
 const saved = { roots: process.env.OMP_KIT_SCRATCH_ROOTS, state: process.env.XDG_STATE_HOME, owners: process.env.OMP_KIT_SESSION_OWNERS_DIR };
@@ -152,22 +170,22 @@ test.skipIf(!HAVE_LSOF)("real seat process: a scratch dir written by a tool shel
 	try {
 		await seat.stdout.getReader().read();
 		const real = defaultLiveness();
-		expect(real.seatLive?.(AGENT, SESSION)).toBe(true);
-		expect(real.seatLive?.(AGENT, OTHER_SESSION)).toBe(false);
+		expect(await seatAnswer(real, SESSION)).toBe(true);
+		expect(await seatAnswer(real, OTHER_SESSION)).toBe(false);
 		const shell = Bun.spawnSync(["sh", "-c", "echo $$"], { stdout: "pipe" });
 		const shellPid = Number(shell.stdout.toString().trim());
 		const dir = join(root, `ts.${shellPid}`);
 		mkdirSync(dir);
 		writeFileSync(join(dir, ".owner"), `pid=${shellPid}\nlabel=ts\nrepo=${repo}\ncreated=2026-10-18T17:40:00.000Z\nagent=${AGENT}\nsession=${SESSION}\n`);
-		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
+		expect(await inspected(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
 		seat.kill("SIGTERM");
 		await seat.exited;
-		expect(real.seatLive?.(AGENT, SESSION)).toBe(false);
-		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
+		expect(await seatAnswer(real, SESSION)).toBe(false);
+		expect(await inspected(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
 	} finally {
 		seat.kill("SIGKILL");
 	}
-}, 60_000);
+}, fixtureDeadlineS(60) * 1000);
 
 test.skipIf(!HAVE_LSOF)("a chain of two respawns keeps the dir LIVE and releasable by the last seat; with no seat left it is REAP (SCRATCHCARRY1 AC3)", async () => {
 	const owners = join(tempDir("seat-chain"), "session-owners");
@@ -197,11 +215,11 @@ test.skipIf(!HAVE_LSOF)("a chain of two respawns keeps the dir LIVE and releasab
 		await stop(first);
 		const second = await start();
 		expect(real.signalAlive(first.pid)).toBe(false);
-		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
+		expect(await inspected(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
 		await stop(second);
 		const third = await start();
 		expect(real.signalAlive(first.pid)).toBe(false);
-		expect(inspectSession(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
+		expect(await inspected(dir, root, { liveness: real, run: defaultRunner })).toMatchObject({ action: "LIVE", reason: "owner-seat-alive" });
 		// The last seat releases a dir the first one created; an unrelated agent in the same session cannot.
 		const work = join(root, `work.${first.pid}`);
 		mkdirSync(work);
@@ -211,12 +229,35 @@ test.skipIf(!HAVE_LSOF)("a chain of two respawns keeps the dir LIVE and releasab
 		expect(releaseScratch(work, home, { ...sibling, callerSeat: asSeat(AGENT, [SESSION]) })).toMatchObject({ ok: true, changed: true, ownerPid: first.pid });
 		// With the last seat gone and no pid alive, the other dir is REAP as before.
 		await stop(third);
-		expect(real.seatLive?.(AGENT, SESSION)).toBe(false);
-		expect(inspectSession(dir, root, sibling)).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
+		expect(await seatAnswer(real, SESSION)).toBe(false);
+		expect(await inspected(dir, root, sibling)).toMatchObject({ action: "REAP", reason: "owner-dead-no-open-fds" });
 	} finally {
 		for (const seat of live) seat.kill("SIGKILL");
 	}
-}, 60_000);
+}, fixtureDeadlineS(60) * 1000);
+
+// Planted: lsof takes 2.4-3.7 s on a loaded 32-core Mac (2026-11-04). A stub that answers after 4 s,
+// past the old 3 s probe deadline, must still give a definite seat answer, never UNKNOWN (null).
+// Bun resolves a bare command from the PATH it started with, so the probe runs in a child bun whose
+// PATH starts with the stub.
+test("planted: a slow lsof (4 s) still gives a definite seat answer: held is true, unheld is false", () => {
+	const owners = join(tempDir("seat-slow-lsof"), "session-owners");
+	mkdirSync(owners, { recursive: true });
+	writeFileSync(join(owners, `${SESSION}.lock`), "");
+	const bin = tempDir("seat-slow-lsof-bin");
+	const probe = `import { defaultLiveness } from ${JSON.stringify(resolve(repo, "src/scratch.ts"))}; console.log(JSON.stringify(defaultLiveness().seatLive?.(${JSON.stringify(AGENT)}, ${JSON.stringify(SESSION)}) ?? null));`;
+	const answer = (stub: string) => {
+		writeFileSync(join(bin, "lsof"), stub, { mode: 0o755 });
+		const child = runSync([process.execPath, "-e", probe], {
+			env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, OMP_KIT_SESSION_OWNERS_DIR: owners },
+			deadline_s: fixtureDeadlineS(30), max_output_bytes: 65536,
+		});
+		expect({ rc: child.rc, timedOut: child.timed_out }).toEqual({ rc: 0, timedOut: false });
+		return JSON.parse(new TextDecoder().decode(child.stdout).trim());
+	};
+	expect(answer("#!/bin/sh\nsleep 4\necho 4242\n")).toBe(true);
+	expect(answer("#!/bin/sh\nsleep 4\nexit 1\n")).toBe(false);
+}, fixtureDeadlineS(60) * 1000);
 
 const PS_TABLE = "  100     1\n  200   100\n  300   200\n  400     1\n";
 const LOCK_A = `/Users/josh/.omp/run/session-owners/${SESSION}.lock`;

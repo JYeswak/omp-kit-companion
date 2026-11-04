@@ -291,7 +291,10 @@ function sessionOwnerLive(session: string): boolean | null {
 		return (error as NodeJS.ErrnoException).code === "ENOENT" ? false : null;
 	}
 	try {
-		const out = runSync(["lsof", "-t", "--", lock], { deadline_s: 3, max_output_bytes: 65536 });
+		// lsof walks every process's descriptors. Measured 2026-11-04: 30 calls at load 18-21 on 32 cores,
+		// median 2.55 s, p99 (the maximum of 30) 3.72 s, and 5 of the 30 were over the old 3 s deadline, which
+		// read a live seat as UNKNOWN. 10 s (2.7x the p99) matches the ps probes below.
+		const out = runSync(["lsof", "-t", "--", lock], { deadline_s: 10, max_output_bytes: 65536 });
 		if (out.timed_out || out.truncated) return null;
 		if (out.rc === 0 && new TextDecoder().decode(out.stdout).trim() !== "") return true;
 		return out.rc === 1 && new TextDecoder().decode(out.stderr).trim() === "" ? false : null;

@@ -1,3 +1,4 @@
 ### Fixed
 
 - Three test files no longer fail at random under machine load (32 cores at load 25-160). Child deadlines and case timeouts in `service`, `fresh-gate-admission` and `installer-bootstrap` tests now come from the kit's `fixtureDeadlineS` load factor instead of fixed seconds. The supervisor test that asserts the 500 ms scratch cap itself keeps its 2 s bound with a measured `wallclock:` annotation. (WALLCLOCKFIX1)
+- The scratch reaper no longer reads a live seat as UNKNOWN on a loaded Mac. The seat probe's `lsof` deadline is 10 s (measured p99 3.72 s at load 18-21 on 32 cores; the old 3 s deadline expired on 5 of 30 calls). The real-seat tests in `scratch-seat-owner` re-observe an UNKNOWN answer until a definite one arrives within a load-scaled budget, and a planted case proves a 4 s `lsof` still answers held or unheld. (WALLCLOCKFIX1)
