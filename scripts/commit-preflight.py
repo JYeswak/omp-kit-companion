@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Aggregate existing staged check entrypoints without running commit/fresh gates.
+"""Aggregate source staged checks and the installed pre-commit staged members.
 
---files PATH... overlays working bytes onto HEAD in a private index; no option
-judges the effective staged index, including GIT_INDEX_FILE. --message FILE
-supplies planned trailers; absent it Deploy-Step is intentionally checked against
-an empty message, so deployment obligations are discovered before composing it.
+--files PATH... overlays working bytes onto HEAD; no option judges the caller's
+effective staged index, including GIT_INDEX_FILE. Both use a private index and
+object directory, never writing the caller's index or object store. --message
+FILE supplies planned trailers; absent it Deploy-Step uses an empty message.
 """
 import argparse
 import json
 import os
 from pathlib import Path
 import sys
+import shutil
 import time
 
 from kitlib_run import run
@@ -55,6 +56,29 @@ def note_has_added_line(stdout, env):
     return False
 
 
+def installed_checks(root: Path, env: dict) -> tuple[list, int]:
+    """Resolve commit's hook location, not PATH or the source checkout's scripts."""
+    hooks = Path(os.fsdecode(required(['git', 'rev-parse', '--git-path', 'hooks'], env)).strip())
+    if not hooks.is_absolute():
+        hooks = root / hooks
+    chain = hooks / 'hooks.d' / 'pre-commit'
+    candidates = sorted(chain.glob('[0-9][0-9]-omp-kit-staged-*'))
+    if not candidates:
+        print('UNKNOWN installed-gate: no installed hook chain at ' + str(hooks), flush=True)
+        return [], 0
+    if not os.access(hooks / 'pre-commit', os.X_OK):
+        print('UNKNOWN installed-gate: installed pre-commit runner is missing or not executable at ' + str(hooks), flush=True)
+        return [], 1
+    members = [path for path in candidates if path.is_file() and os.access(path, os.X_OK)]
+    # These members are required even if an incomplete installation lost one.
+    required_members = ('50-omp-kit-staged-tempsafe', '51-omp-kit-staged-kitlib',
+                        '54-omp-kit-staged-portable-paths', '55-omp-kit-staged-wallclock')
+    missing = set(required_members) - {path.name for path in members}
+    for name in sorted(missing):
+        print('UNKNOWN installed-gate:' + name + ': missing or not executable at ' + str(chain / name), flush=True)
+    return [('installed-gate:' + path.name, [str(path)]) for path in members], len(missing)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--message', type=Path)
@@ -70,18 +94,36 @@ def main():
     scratch = Path(allocation.path)
     env = dict(os.environ, TMPDIR=str(scratch))
     try:
+        # Even git write-tree (used by the installed wallclock member) updates
+        # index cache entries. Copy default/explicit staged indexes before any
+        # check; keep all new blobs, trees and probe commits in owned scratch.
+        caller_index = Path(os.fsdecode(required(
+            ['git', 'rev-parse', '--path-format=absolute', '--git-path', 'index'], env)).strip())
+        objects = os.fsdecode(required(
+            ['git', 'rev-parse', '--path-format=absolute', '--git-path', 'objects'], env)).strip()
+        env['GIT_INDEX_FILE'] = str(scratch / 'index')
+        private_objects = scratch / 'objects'
+        private_objects.mkdir()
+        env['GIT_OBJECT_DIRECTORY'] = str(private_objects)
+        alternates = env.get('GIT_ALTERNATE_OBJECT_DIRECTORIES')
+        env['GIT_ALTERNATE_OBJECT_DIRECTORIES'] = json.dumps(objects, ensure_ascii=False) + (os.pathsep + alternates if alternates else '')
         if args.files:
             # Literal pathspecs prevent wildcard expansion and option injection.
-            env['GIT_INDEX_FILE'] = str(scratch / 'index')
             required(['git', 'read-tree', 'HEAD'], env)
             required(['git', '--literal-pathspecs', 'add', '-A', '--', *args.files], env)
+        elif caller_index.is_file():
+            shutil.copyfile(caller_index, env['GIT_INDEX_FILE'])
+            required(['git', 'update-index', '--no-split-index'], env)
+        else:
+            required(['git', 'read-tree', '--empty'], env)
         if message is None:
             message = scratch / 'message'
             message.write_text('preflight\n')
         elif not message.is_file():
             raise RuntimeError('unreadable --message file')
-        checks = [(name, ['sh', str(HERE / ('check-staged-' + name + '.sh'))]) for name in
-                  ('imports', 'readme', 'fragments', 'regexploit', 'pysafe', 'tempsafe', 'kitlib', 'sources', 'br-init', 'wallclock')]
+        checks, failures = installed_checks(root, env)
+        checks.extend((name, ['sh', str(HERE / ('check-staged-' + name + '.sh'))]) for name in
+                      ('imports', 'readme', 'fragments', 'regexploit', 'pysafe', 'tempsafe', 'kitlib', 'sources', 'br-init', 'wallclock'))
         checks.append(('portable-paths', ['python3', '-B', str(HERE / 'portable_paths_check.py'), '--staged', '--repo', str(root)]))
         checks.append(('deploy-step', ['bash', str(HERE / 'check-deploy-step.sh'), str(message)]))
         message_checks = [
@@ -125,7 +167,6 @@ def main():
             checks.append(('shellcheck:' + path, ['docker', 'run', '--pull=never', '--rm',
                            '-v', str(shell_root) + ':/archive:ro', '-w', '/archive',
                            'koalaman/shellcheck:v0.9.0', '-x', '-P', '/archive', '/archive/' + path]))
-        failures = 0
         shellcheck_probe = None
         for name, argv in checks:
             print('== ' + name, flush=True)
@@ -144,6 +185,8 @@ def main():
                 if result.rc:
                     failures += 1
                     print('REFUSED ' + name + ' (exit ' + str(result.rc) + ')')
+                elif name.startswith('installed-gate:'):
+                    print('PASS ' + name)
                 elif name == 'commit-notes-delta' and not note_has_added_line(result.stdout, env):
                     failures += 1
                     print('REFUSED commit-notes-delta (no added note line)')
@@ -151,7 +194,7 @@ def main():
                 failures += 1
                 remedy = '; require Docker and cached engine: docker pull koalaman/shellcheck:v0.9.0' if name.startswith('shellcheck:') else ''
                 print('UNJUDGED ' + name + ': ' + str(error) + remedy)
-        print(f'commit-preflight: {len(checks)} checks, {failures} refused, {time.monotonic() - started:.2f}s; no fresh gate or tests run')
+        print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; no fresh gate or tests run')
         if not args.message:
             print('commit-preflight: message-dependent checks NOT_JUDGED; this is staged-file feedback, not commit admission')
         return int(failures != 0)

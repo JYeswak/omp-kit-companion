@@ -1,12 +1,14 @@
 #!/bin/sh
-# Real checker integration: six independent refusals in one call, clean
-# control, private --files index, and staged bytes rather than working bytes.
+# Real checker integration: source and installed-gate fire/quiet controls,
+# byte-identical caller indexes, and staged bytes rather than working bytes.
 set -eu
 here=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd -P)
-exec python3 -B - "$here" <<'PY'
+fixture_deadline=$(bun --no-env-file --config=/dev/null -e 'const { fixtureDeadlineS } = await import(process.argv[1]); console.log(fixtureDeadlineS(60));' "$here/../tests/cli/fixture-process.ts")
+exec python3 -B - "$here" "$fixture_deadline" <<'PY'
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import time
 sys.path.insert(0, sys.argv[1])
@@ -14,18 +16,25 @@ from kitlib_run import run
 from kitlib_tmp import owned_tmp
 scripts = Path(sys.argv[1])
 def cmd(argv, cwd=None, env=None):
-    r = run(argv, deadline_s=60, cwd=cwd, env=env, max_output_bytes=8*1024*1024)
+    indexes = []
+    if Path(argv[1]).name == 'commit-preflight.sh':
+        for path in {Path(cwd)/'.git/index', Path((env or {}).get('GIT_INDEX_FILE', str(Path(cwd)/'.git/index')))}:
+            indexes.append((path, path.read_bytes() if path.exists() else None))
+    r = run(argv, deadline_s=float(sys.argv[2]), cwd=cwd, env=env, max_output_bytes=8*1024*1024)
     assert not r.timed_out and not r.truncated, (argv, r)
+    for path, before in indexes:
+        assert (path.read_bytes() if path.exists() else None) == before, 'preflight changed caller index bytes: ' + str(path)
     return r
 allocation = owned_tmp('preflight-test')
 root = Path(allocation.path)
 env = dict(os.environ, GIT_AUTHOR_NAME='test', GIT_AUTHOR_EMAIL='test@invalid', GIT_COMMITTER_NAME='test', GIT_COMMITTER_EMAIL='test@invalid')
-# An installed omp-kit is deliberately unavailable: the gate's extracted tree
-# has only the shipped Python helpers, and may not create native CLI scratch.
+# Native CLI resolution stays unavailable; installed hook members carry their
+# own shipped helpers and must not silently fall back to source checkers.
 env['PATH'] = os.pathsep.join(part for part in env.get('PATH', '').split(os.pathsep)
                               if part and not (Path(part) / 'omp-kit').is_file())
 for key in ('GIT_DIR','GIT_WORK_TREE','GIT_INDEX_FILE','GIT_COMMON_DIR'):
     env.pop(key, None)
+env.update(TMPDIR=str(root), GIT_CEILING_DIRECTORIES=str(root.parent), OMP_KIT_GATE_EVENTS_SKIP='1')
 passed = 0
 started = time.monotonic()
 try:
@@ -37,8 +46,72 @@ try:
     commit = cmd(['git','commit-tree',tree,'-m','fixture'],root,env).stdout.decode().strip()
     assert cmd(['git','update-ref','HEAD',commit],root,env).rc == 0
     assert cmd(['git','update-ref','refs/tags/v0.0.1',commit],root,env).rc == 0
+    (root/'quiet.txt').write_text('quiet\n')
+    absent = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','quiet.txt'],root,env)
+    absent_text = (absent.stdout+absent.stderr).decode()
+    print('no-install quiet rc=' + str(absent.rc) + '\n' + absent_text, flush=True)
+    assert absent.rc == 0 and 'UNKNOWN installed-gate: no installed hook chain' in absent_text, absent_text
+    passed += 1
+    # Use the real installer in an owned unborn repository, then copy only its
+    # pre-commit chain. No commit or unrelated tracker/ref hook ever runs.
+    template = root/'hook-template'
+    assert cmd(['git','init','-q',str(template)],env=env).rc == 0
+    installed = cmd(['sh',str(scripts/'install-commit-msg-bead.sh'),'--no-pushed-beads',str(template)],template,env)
+    assert installed.rc == 0, (installed.stdout+installed.stderr).decode()
+    hooks = root/'installed-hooks'
+    shutil.copytree(template/'.git/hooks/hooks.d/pre-commit', hooks/'hooks.d/pre-commit')
+    shutil.copy2(template/'.git/hooks/pre-commit', hooks/'pre-commit')
+    assert cmd(['git','config','core.hooksPath',str(hooks)],root,env).rc == 0
     (root/'tests').mkdir()
     (root/'scripts').mkdir()
+    baseline = root/'scripts/kitlib-ratchet-baseline.json'
+    accepted_baseline = {'schema': 1, 'counts': {'raw-spawn': {}}, 'totals': {'raw-spawn': 0}}
+    baseline.write_text(json.dumps(accepted_baseline) + '\n')
+    assert cmd(['git','add','--',str(baseline)],root,env).rc == 0
+    tree = cmd(['git','write-tree'],root,env).stdout.decode().strip()
+    commit = cmd(['git','commit-tree',tree,'-p',commit,'-m','fixture baseline'],root,env).stdout.decode().strip()
+    assert cmd(['git','update-ref','HEAD',commit],root,env).rc == 0
+    rejected_baseline = {**accepted_baseline, 'counts': {**accepted_baseline['counts'], 'unknown-rule': {}}}
+    baseline.write_text(json.dumps(rejected_baseline) + '\n')
+    assert cmd(['git','add','--',str(baseline)],root,env).rc == 0
+    baseline.write_text(json.dumps(accepted_baseline) + '\n')
+    fire = cmd(['sh',str(scripts/'commit-preflight.sh')],root,env)
+    fire_text = (fire.stdout+fire.stderr).decode()
+    print('installed-gate planted rc=' + str(fire.rc) + '\n' + fire_text, flush=True)
+    assert fire.rc == 1 and 'REFUSED installed-gate:51-omp-kit-staged-kitlib' in fire_text, fire_text
+    assert 'counts.unknown-rule: not a site rule' in fire_text, fire_text
+    passed += 1
+    quiet = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','scripts/kitlib-ratchet-baseline.json'],root,env)
+    quiet_text = (quiet.stdout+quiet.stderr).decode()
+    print('installed-gate quiet rc=' + str(quiet.rc) + '\n' + quiet_text, flush=True)
+    assert quiet.rc == 0 and 'PASS installed-gate:51-omp-kit-staged-kitlib' in quiet_text, quiet_text
+    for member in ('50-omp-kit-staged-tempsafe', '54-omp-kit-staged-portable-paths', '55-omp-kit-staged-wallclock'):
+        assert 'PASS installed-gate:' + member in quiet_text, quiet_text
+    passed += 1
+    # The default path must also preserve an explicitly supplied caller index.
+    private_index = root/'caller-index'
+    shutil.copy2(root/'.git/index', private_index)
+    explicit_env = dict(env, GIT_INDEX_FILE=str(private_index))
+    explicit = cmd(['sh',str(scripts/'commit-preflight.sh')],root,explicit_env)
+    assert explicit.rc == 1 and 'REFUSED installed-gate:51-omp-kit-staged-kitlib' in (explicit.stdout+explicit.stderr).decode()
+    passed += 1
+    assert cmd(['git','add','--',str(baseline)],root,env).rc == 0
+    baseline.write_text(json.dumps(rejected_baseline) + '\n')
+    staged_quiet = cmd(['sh',str(scripts/'commit-preflight.sh')],root,env)
+    assert staged_quiet.rc == 0, (staged_quiet.stdout+staged_quiet.stderr).decode()
+    files_fire = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','scripts/kitlib-ratchet-baseline.json'],root,env)
+    assert files_fire.rc == 1 and 'REFUSED installed-gate:51-omp-kit-staged-kitlib' in (files_fire.stdout+files_fire.stderr).decode()
+    passed += 1
+    missing_member = hooks/'hooks.d/pre-commit/51-omp-kit-staged-kitlib'
+    parked_member = root/'parked-kitlib'
+    missing_member.rename(parked_member)
+    missing_gate = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','quiet.txt'],root,env)
+    missing_text = (missing_gate.stdout+missing_gate.stderr).decode()
+    print('partial-install planted rc=' + str(missing_gate.rc) + '\n' + missing_text, flush=True)
+    assert missing_gate.rc == 1 and 'UNKNOWN installed-gate:51-omp-kit-staged-kitlib' in missing_text, missing_text
+    parked_member.rename(missing_member)
+    baseline.write_text(json.dumps(accepted_baseline) + '\n')
+    passed += 1
     (root/'tests/bad.py').write_text('import subprocess\nimport tempfile\nsubprocess.run(["true"])\ntempfile.mkdtemp()\ntimeout_s = 1\n')
     (root/'scripts/check-bad.sh').write_text('#!/bin/sh\npython3 "$dynamic"\necho $unquoted\n')
     index_before = cmd(['git','write-tree'],root,env).stdout
