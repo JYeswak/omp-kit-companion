@@ -67,11 +67,31 @@ def validate_culprit(value: object, verdict: object) -> None:
         raise ValueError("culprit method is invalid")
 
 
+def load_factor() -> tuple[float, float]:
+    """(load1, factor) with fixtureLoad()'s formula from tests/cli/fixture-process.ts: factor = load1 / ncpu * 4
+    clamped to [1, 4]. OMP_KIT_HEAVY_FAKE_LOAD1 is the same test-only load seam src/heavy.ts reads."""
+    raw = os.environ.get("OMP_KIT_HEAVY_FAKE_LOAD1", "")
+    try:
+        load1 = float(raw) if raw else os.getloadavg()[0]
+    except ValueError:
+        load1 = os.getloadavg()[0]
+    ncpu = os.cpu_count() or 1
+    return load1, max(1.0, min(4.0, load1 / ncpu * 4))
+
+
 def checked_run(argv: list[str], *, deadline_s: float = 15, cwd: Path | None = None,
                 output_bytes: int = MAX_COMMAND_OUTPUT) -> bytes:
-    result = run(argv, deadline_s=deadline_s, cwd=cwd, max_output_bytes=output_bytes)
-    if result.rc != 0 or result.timed_out or result.truncated:
-        raise ValueError(f"command did not complete: {argv[0]}")
+    # STOREDEADLINE1 (ompkit-fp72.120.16.184): the deadline is a quiet-machine floor scaled by load, as fixture
+    # deadlines are, and the refusal names its kind so a timeout never reads as a failed command.
+    load1, factor = load_factor()
+    scaled = deadline_s * factor
+    result = run(argv, deadline_s=scaled, cwd=cwd, max_output_bytes=output_bytes)
+    if result.timed_out:
+        raise ValueError(f"command did not complete: {argv[0]}: TIMEOUT after {scaled:g}s (load {load1:.2f})")
+    if result.truncated:
+        raise ValueError(f"command did not complete: {argv[0]}: OUTPUT_OVERFLOW")
+    if result.rc != 0:
+        raise ValueError(f"command did not complete: {argv[0]}: EXIT {result.rc}")
     return result.stdout
 
 

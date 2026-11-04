@@ -159,5 +159,32 @@ set -- "$store"/ci-only/"$t4".ci-only.*.json
 [ "$rc" = 0 ] && [ ! -s "$CIO_LOG" ] && [ ! -e "$1" ] && grep -Fq "CI-ONLY: SKIP tree=$t4" "$TMP/o9"
 ok $? "absent-file-skips: rc=$rc out=$(cat "$TMP/o9")"
 
+# 10. STOREDEADLINE1 (ompkit-fp72.120.16.184): checked_run scales its deadline by fixtureLoad()'s factor, injected via
+# OMP_KIT_HEAVY_FAKE_LOAD1 at factor 3. Planted: a 16 s subcommand outlives the old fixed 15 s default and completes.
+# Control: a hung subcommand is still killed at its scaled deadline (1 s floor -> 3 s) and the refusal names TIMEOUT.
+fake_load1=$(python3 -c 'import os; print((os.cpu_count() or 1) * 3 / 4)')
+store_py="${CIO_STORE_UNDER_TEST:-$KITREPO/scripts/full-suite-verdict-store.py}"
+checked() {
+	OMP_KIT_HEAVY_FAKE_LOAD1=$fake_load1 PYTHONDONTWRITEBYTECODE=1 python3 - "$store_py" "$@" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("store", sys.argv[1])
+store = importlib.util.module_from_spec(spec)
+sys.path.insert(0, sys.argv[1].rsplit("/", 1)[0])
+spec.loader.exec_module(store)
+argv = [sys.executable, "-c", f"import time; time.sleep({sys.argv[2]})"]
+try:
+    store.checked_run(argv, **({"deadline_s": float(sys.argv[3])} if len(sys.argv) > 3 else {}))
+    print("COMPLETED")
+except ValueError as exc:
+    print(exc)
+PY
+}
+out=$(checked 16 2>&1)
+[ "$out" = COMPLETED ]
+ok $? "deadline-scales-with-load: out=$out"
+out=$(checked 600 1 2>&1)
+case $out in *": TIMEOUT after 3s (load "*) st=0 ;; *) st=1 ;; esac
+ok "$st" "hung-subcommand-timeout-named: out=$out"
+
 printf 'ci-only-verdict: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = 0 ]
