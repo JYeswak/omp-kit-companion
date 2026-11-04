@@ -4053,13 +4053,22 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		if (printDir) return { code: 0, data: { overall: "OK", dir: created.dir, text: created.dir }, verification: "UNVERIFIED" };
 		return { code: 0, data: { overall: "OK", dir: created.dir, ...(exportDir ? { exportDir } : {}), exportLine: created.exportLine, capability: created.capability }, verification: "UNVERIFIED" };
 	}
+	// SCRATCHSIBLING1 (ompkit-fp72.120.16.214): `--session ID` names the calling incarnation for mine and gate. The guard
+	// extensions run in the seat's omp process, whose environment names no session, and pass the calling tool's own session
+	// here; a shell inherits PI_SESSION_ID instead. Attribution only: release authority never reads this flag.
+	const sessionFlag = (sub === "mine" || sub === "gate") && request.flags.has("--session") ? request.flags.get("--session") : undefined;
+	const namedSeat = typeof sessionFlag === "string" ? callerSeat(deps.run, { ...process.env, PI_SESSION_ID: sessionFlag }) : null;
+	if (sessionFlag !== undefined && namedSeat?.own !== sessionFlag)
+		return refusal("SCRATCH_SESSION_INVALID", "--session must be an omp session id (8-64 chars of 0-9A-Za-z-)",
+			"Pass the calling agent's own omp session id, or omit --session to use PI_SESSION_ID; nothing was listed.");
+	const censusDeps = namedSeat === null ? deps : { ...deps, callerSeat: () => namedSeat };
 	if (sub === "mine") {
 		const atFlag = request.flags.get("--at");
 		const point = OWED_FLAG_POINTS.find((candidate) => candidate === atFlag);
 		if (atFlag !== undefined && point === undefined)
 			return refusal("SCRATCH_MINE_POINT_INVALID", `--at must be one of ${OWED_FLAG_POINTS.join("|")}`,
 				"Pass the disposal point that is asking, or omit --at for a pure read.");
-		const rows = ownedScratch(home, deps);
+		const rows = ownedScratch(home, censusDeps);
 		const unreleased = rows.filter(owesRelease);
 		if (point !== undefined) logOwedFlag(home, point, rows);
 		return { code: 0, data: { overall: unreleased.length > 0 ? "FINDINGS" : "OK", dirs: rows, unreleased: unreleased.length,
@@ -4075,7 +4084,7 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		if (point === undefined)
 			return refusal("SCRATCH_GATE_POINT_REQUIRED", `--at must be one of ${OWED_FLAG_POINTS.join("|")}`,
 				"Pass the disposal point that is asking: review, close, wave, push or session-end.");
-		const gate = disposalGate(home, point, deps);
+		const gate = disposalGate(home, point, censusDeps);
 		if (gate.unproven)
 			return { code: 0, data: { overall: "UNPROVEN", point, owed: [] as string[],
 				note: "Ownership could not be listed; fail-open, nothing was blocked." }, verification: "UNVERIFIED" };

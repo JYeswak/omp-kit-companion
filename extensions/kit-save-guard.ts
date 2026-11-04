@@ -1071,8 +1071,8 @@ const SAVE_GUARD_SCRATCH_SHOWN = 5;
  * reading demands disposal.
  * SCRATCHSIBLING1 (ompkit-fp72.120.16.214): the extension runs in the seat's omp
  * process, which every background agent shares, so the ending session is handed
- * to the census as PI_SESSION_ID: a background agent is held to its own dirs,
- * the main session to its own and its finished agents', never a live sibling's.
+ * to the census as `--session`: a background agent is held to its own dirs, the
+ * main session to its own and its finished agents', never a live sibling's.
  */
 export async function checkScratchOwed(
 	exec: SaveGuardApi["exec"],
@@ -1080,11 +1080,9 @@ export async function checkScratchOwed(
 	session?: string,
 ): Promise<ScratchOwed | null> {
 	let result: SaveGuardExecResult;
-	const census = ["scratch", "mine", "--json"];
 	try {
-		result = session
-			? await exec("env", [`PI_SESSION_ID=${session}`, "omp-kit", ...census], { cwd, timeout: SAVE_GUARD_SCRATCH_TIMEOUT_MS })
-			: await exec("omp-kit", census, { cwd, timeout: SAVE_GUARD_SCRATCH_TIMEOUT_MS });
+		result = await exec("omp-kit", ["scratch", "mine", ...(session ? ["--session", session] : []), "--json"],
+			{ cwd, timeout: SAVE_GUARD_SCRATCH_TIMEOUT_MS });
 	} catch {
 		return null;
 	}

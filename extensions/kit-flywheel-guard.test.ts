@@ -1374,7 +1374,7 @@ test("SCRATCHSIBLING1: SCRATCH_OWED for background agent B asks omp-kit as B's o
 	const bDir = "/r/var/agent-tmp/bwork.1";
 	const aDir = "/r/var/agent-tmp/lead-hooks2.13390";
 	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: call => {
-		if (call.command === "env" && call.args[0] === `PI_SESSION_ID=${B}` && call.args[1] === "omp-kit")
+		if (call.command === "omp-kit" && call.args.includes("--session") && call.args[call.args.indexOf("--session") + 1] === B)
 			return mineAnswer([{ dir: bDir, state: "unreleased", bin: "unbinned" }]);
 		if (call.command === "omp-kit")
 			return mineAnswer([{ dir: bDir, state: "unreleased", bin: "unbinned" }, { dir: aDir, state: "unreleased", bin: "unbinned" }]);
@@ -1385,8 +1385,8 @@ test("SCRATCHSIBLING1: SCRATCH_OWED for background agent B asks omp-kit as B's o
 	expect(result?.block).toBe(true);
 	expect(result?.reason).toContain(`${bDir} (unreleased, bin unbinned)`);
 	expect(result?.reason).not.toContain(aDir);
-	const census = h.execs.filter(call => call.command === "omp-kit" || (call.command === "env" && call.args[1] === "omp-kit"));
-	expect(census.map(call => [call.command, ...call.args])).toEqual([["env", `PI_SESSION_ID=${B}`, "omp-kit", "scratch", "mine", "--at", "review", "--json"]]);
+	const census = h.execs.filter(call => call.command === "omp-kit");
+	expect(census.map(call => call.args)).toEqual([["scratch", "mine", "--at", "review", "--session", B, "--json"]]);
 	expect(census[0]?.options?.cwd).toBe(project);
 });
 

@@ -1748,15 +1748,14 @@ const MAX_OWED_LISTED = 5;
  * audit. Positive owed is a refusal (the caller releases first); a missing or failing omp-kit yields no note and never
  * blocks, so a broken measuring tool cannot deadlock a seat.
  * SCRATCHSIBLING1 (ompkit-fp72.120.16.214): this runs in the seat's omp process, whose environment is not the calling
- * agent's, so the tool call's own session is handed over as PI_SESSION_ID: a background agent is told about its own
- * dirs only, never the lead's or a sibling's live ones.
+ * agent's, so the tool call's own session is handed over as `--session`: a background agent is told about its own
+ * dirs only, never the lead's or a sibling's live ones. The command stays `omp-kit scratch mine`, one argv shape.
  */
 export async function scratchOwedNote(exec: FlywheelExec, cwd: string, point: "review" | "close", session?: string): Promise<string | null> {
 	let result: FlywheelExecResult;
-	const mine = ["scratch", "mine", "--at", point, "--json"];
 	try {
-		result = session ? await exec("env", [`PI_SESSION_ID=${session}`, "omp-kit", ...mine], { cwd, timeout: SCRATCH_MINE_TIMEOUT_MS })
-			: await exec("omp-kit", mine, { cwd, timeout: SCRATCH_MINE_TIMEOUT_MS });
+		result = await exec("omp-kit", ["scratch", "mine", "--at", point, ...(session ? ["--session", session] : []), "--json"],
+			{ cwd, timeout: SCRATCH_MINE_TIMEOUT_MS });
 	} catch {
 		return null;
 	}

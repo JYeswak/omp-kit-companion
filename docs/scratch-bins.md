@@ -106,6 +106,7 @@ The lead's background `task` agents run inside the lead's omp process. They shar
 
 - `scratch new` records the creator's own session as `creator_session`. When the lead's main session made the dir, it equals `session`.
 - `scratch mine` and `scratch gate` list such a dir only to its creator. The seat's main session also sees it once the creator's lease is no longer held by the seat's process, so a finished agent's leftovers stay owed.
+- A caller whose environment is not the calling agent's names that agent with `scratch mine|gate --session ID`; the guard extensions do this from the seat's omp process. The flag overrides `PI_SESSION_ID` for attribution only, a malformed id is refused `SCRATCH_SESSION_INVALID`, and release never reads it.
 - A seat release of a dir made by another incarnation whose lease is held, or cannot be proven free, is refused with `SCRATCH_RELEASE_SIBLING_LIVE`. The creator releases it, or the creator's `--capability` does.
 - Once the creator's lease is free, the seat releases the dir as before.
 - A dir with no `creator_session` keeps plain seat authority unchanged. Such a dir was made before the key existed, or by a caller whose environment named no session.

@@ -572,3 +572,43 @@ test.skipIf(!HAVE_LSOF)("SCRATCHSIBLING1 CLI: SCRATCH_RELEASE_SIBLING_LIVE while
 		for (const fd of [main, a, b]) try { closeSync(fd); } catch { /* already closed */ }
 	}
 }, fixtureDeadlineS(90) * 1000);
+
+// The guard extensions run in the seat's omp process, whose environment names no session (or the main session), so they
+// name the calling agent with `scratch mine|gate --session ID` and keep the command `omp-kit`: every exec stub that
+// recognises `omp-kit scratch` still catches it (the `env PI_SESSION_ID=… omp-kit` form slipped past kit-write-ledger's
+// stub and reached the real census, 2026-11-04). The flag overrides PI_SESSION_ID for attribution; a malformed id is refused.
+test.skipIf(!HAVE_LSOF)("SCRATCHSIBLING1 CLI: scratch mine and gate --session attribute to the named incarnation over PI_SESSION_ID; a malformed id is refused", async () => {
+	const owners = join(tempDir("sib-flag-owners"), "session-owners");
+	mkdirSync(owners, { recursive: true });
+	const lease = (session: string) => { const path = join(owners, `${session}.lock`); writeFileSync(path, ""); return openSync(path, "r"); };
+	const fds = [lease(SESSION), lease(B_SUB)];
+	const root = tempDir("sib-flag-root");
+	const state = join(tempDir("sib-flag-home"), "state");
+	const make = (name: string, creator: string) => {
+		const dir = join(root, name);
+		mkdirSync(dir);
+		writeFileSync(join(dir, ".owner"), incarnationOwner(Number(name.split(".")[1]), name.split(".")[0]!, creator));
+		return dir;
+	};
+	const bDir = make("bflag.59151", B_SUB);
+	make("leadflag.59152", SESSION);
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+	Object.assign(env, { AGENT_NAME: AGENT, PI_SESSION_ID: SESSION, OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_SESSION_OWNERS_DIR: owners });
+	const cli = (...args: string[]) => {
+		const child = runSync([process.execPath, "--no-env-file", join(repo, "src", "cli.ts"), "scratch", ...args, "--json"],
+			{ deadline_s: fixtureDeadlineS(30), env, max_output_bytes: 1 << 20 });
+		return JSON.parse(new TextDecoder().decode(child.stdout)) as { ok: boolean; data?: { dirs?: { dir: string }[]; owed?: string[] }; errors?: { code: string }[] };
+	};
+	try {
+		// A slow lsof proves no held seat and lists nothing; re-observe until the seat is seen.
+		const mine = await definite(() => cli("mine", "--session", B_SUB), value => (value.data?.dirs ?? []).length === 0);
+		expect(listed(mine.data?.dirs ?? [])).toEqual([bDir]);
+		const gate = await definite(() => cli("gate", "--at", "review", "--session", B_SUB), value => value.ok);
+		expect(gate.data?.owed).toEqual([`${bDir} (unreleased, bin unbinned)`]);
+		for (const bad of ["../x", "short"])
+			expect(cli("mine", "--session", bad).errors?.map(error => error.code)).toEqual(["SCRATCH_SESSION_INVALID"]);
+	} finally {
+		for (const fd of fds) closeSync(fd);
+	}
+}, fixtureDeadlineS(90) * 1000);
