@@ -1069,14 +1069,22 @@ const SAVE_GUARD_SCRATCH_SHOWN = 5;
  * missing, fails, times out, or answers unparseably: a broken measuring tool
  * never blocks a session end (advice-era behavior); only a positive owed
  * reading demands disposal.
+ * SCRATCHSIBLING1 (ompkit-fp72.120.16.214): the extension runs in the seat's omp
+ * process, which every background agent shares, so the ending session is handed
+ * to the census as PI_SESSION_ID: a background agent is held to its own dirs,
+ * the main session to its own and its finished agents', never a live sibling's.
  */
 export async function checkScratchOwed(
 	exec: SaveGuardApi["exec"],
 	cwd: string,
+	session?: string,
 ): Promise<ScratchOwed | null> {
 	let result: SaveGuardExecResult;
+	const census = ["scratch", "mine", "--json"];
 	try {
-		result = await exec("omp-kit", ["scratch", "mine", "--json"], { cwd, timeout: SAVE_GUARD_SCRATCH_TIMEOUT_MS });
+		result = session
+			? await exec("env", [`PI_SESSION_ID=${session}`, "omp-kit", ...census], { cwd, timeout: SAVE_GUARD_SCRATCH_TIMEOUT_MS })
+			: await exec("omp-kit", census, { cwd, timeout: SAVE_GUARD_SCRATCH_TIMEOUT_MS });
 	} catch {
 		return null;
 	}
@@ -1210,7 +1218,7 @@ export default async function kitSaveGuard(pi: SaveGuardApi): Promise<void> {
 			if (finding) applyLedgerPeerOmission(finding, repository.root, sessionId);
 			if (finding) findings.push(finding);
 		}
-		const scratch = await checkScratchOwed(pi.exec.bind(pi), ctx.cwd);
+		const scratch = await checkScratchOwed(pi.exec.bind(pi), ctx.cwd, sessionId);
 		const scratchOwed = scratch !== null && scratch.unreleased > 0;
 		if (findings.length === 0 && !scratchOwed) {
 			state.lastDemandKey = undefined;

@@ -64,6 +64,9 @@ interface FakeSaveGuard {
 
 const mineAnswer = (unreleased: number, labels: string[]) => JSON.stringify({ data: { overall: unreleased > 0 ? "FINDINGS" : "OK",
 	unreleased, dirs: labels.map((label) => ({ dir: `/x/${label}.1`, label, state: "unreleased", bin: "unbinned", bytes: 10, budget: null, overBudget: false })) } });
+// The census call, bare or (SCRATCHSIBLING1) under `env PI_SESSION_ID=<ending session>`.
+const isScratchCensus = (command: string, args: string[]) =>
+	(command === "omp-kit" && args[0] === "scratch") || (command === "env" && args[1] === "omp-kit" && args[2] === "scratch");
 
 function fakePi(cwd: string): FakeSaveGuard {
 	const handlers = new Map<string, Handler[]>();
@@ -84,7 +87,7 @@ function fakePi(cwd: string): FakeSaveGuard {
 			// The real census answers for the runner's seat (AGENT_NAME plus the omp session lease in its
 			// ancestry), so an inherited seat's undisposed dirs would block every stop. Clean unless
 			// a test supplies its own answer (scratchFake).
-			if (command === "omp-kit" && args[0] === "scratch") return { code: 0, stdout: mineAnswer(0, []) };
+			if (isScratchCensus(command, args)) return { code: 0, stdout: mineAnswer(0, []) };
 			const child = Bun.spawnSync([command, ...args],
 				{ cwd: options?.cwd, stdout: "pipe", stderr: "pipe" });
 			return { stdout: child.stdout.toString(), code: child.exitCode ?? 127 };
@@ -1312,7 +1315,7 @@ function scratchFake(root: string, answer: { code: number; stdout: string } | Er
 	const fake = fakePi(root);
 	const realExec = fake.pi.exec.bind(fake.pi);
 	fake.pi.exec = ((command: string, args: string[], options?: { cwd?: string; timeout?: number }) =>
-		command === "omp-kit" && args[0] === "scratch"
+		isScratchCensus(command, args)
 			? (answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer))
 			: realExec(command, args, options)) as SaveGuardApi["exec"];
 	return fake;
@@ -1355,13 +1358,51 @@ test("binning one dir and leaving another restarts the retry budget with the new
 	expect(await stop(fake)).toBeUndefined();
 	const second = { code: 0, stdout: mineAnswer(1, ["second"]) };
 	fake.pi.exec = ((command: string, args: string[], options?: { cwd?: string; timeout?: number }) =>
-		command === "omp-kit" && args[0] === "scratch"
+		isScratchCensus(command, args)
 			? Promise.resolve(second)
 			: Promise.resolve({ code: 127, stdout: "" })) as SaveGuardApi["exec"];
 	const reblocked = await stop(fake);
 	expect(reblocked).toMatchObject({ decision: "block" });
 	expect(reasonOf(reblocked)).toContain("second");
 	expect(reasonOf(reblocked)).not.toContain("first");
+}, 30_000);
+
+// SCRATCHSIBLING1 (ompkit-fp72.120.16.214): every background agent shares the seat's omp process, so a bare census from
+// the extension cannot tell them apart; on 2026-11-04 an ending agent was told to dispose of the lead's live TMPDIR
+// (lead-hooks2.13390). The stop asks as the ending session: a subagent as itself, the main session as itself, so the main
+// session still blocks on its own undisposed dir exactly as before.
+async function stopAsSession(session: string): Promise<{ result: unknown; calls: string[][] }> {
+	const root = repo();
+	const fake = fakePi(root);
+	fake.ctx.sessionManager = { getSessionId: () => session };
+	const calls: string[][] = [];
+	const realExec = fake.pi.exec.bind(fake.pi);
+	fake.pi.exec = ((command: string, args: string[], options?: { cwd?: string; timeout?: number }) => {
+		if (!isScratchCensus(command, args)) return realExec(command, args, options);
+		calls.push([command, ...args]);
+		return Promise.resolve({ code: 0, stdout: mineAnswer(1, ["own"]) });
+	}) as SaveGuardApi["exec"];
+	await kitSaveGuard(fake.pi);
+	await fake.emit("session_start", { type: "session_start" });
+	const [result] = await fake.emit("session_stop", { type: "session_stop", session_id: session, turn_id: "turn-1", stop_hook_active: false });
+	return { result, calls };
+}
+
+test("SCRATCHSIBLING1: a background agent's stop asks the census as its own session", async () => {
+	const sub = "01a1a751-0cd4-7400-9971-c4c20abcaa82";
+	const { result, calls } = await stopAsSession(sub);
+	expect(calls).toEqual([["env", `PI_SESSION_ID=${sub}`, "omp-kit", "scratch", "mine", "--json"]]);
+	expect(result).toMatchObject({ decision: "block" });
+	expect(reasonOf(result)).toContain("own");
+}, 30_000);
+
+test("SCRATCHSIBLING1: the main session's stop still blocks on its own undisposed dir, asked as the main session", async () => {
+	const main = "01a18ccb-7da0-7214-b51b-de1a4b4bf039";
+	const { result, calls } = await stopAsSession(main);
+	expect(calls).toEqual([["env", `PI_SESSION_ID=${main}`, "omp-kit", "scratch", "mine", "--json"]]);
+	expect(result).toMatchObject({ decision: "block" });
+	expect(reasonOf(result)).toContain("undisposed scratch");
+	expect(reasonOf(result)).toContain("omp-kit scratch release DIR");
 }, 30_000);
 
 // GUARDTMP1 (ompkit-so0li): on macOS /var is a symlink to /private/var, so a

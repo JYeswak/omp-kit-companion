@@ -2,9 +2,9 @@
 // (same agent and session, new pid) and a tool shell whose $$ exited both keep their scratch LIVE while the seat
 // lives; the pid rule is unchanged for pid-only owners.
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { applyReap, callerSeat, createScratch, defaultLiveness, defaultRunner, inspectSession, parseOwnerFile, planScratch, releaseScratch,
+import { applyReap, callerSeat, createScratch, defaultLiveness, defaultRunner, disposalGate, inspectSession, ownedScratch, parseOwnerFile, parseOwnerFileEx, planScratch, releaseScratch,
 	type InspectDeps, type LivenessDeps, type SeatIdentity } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { pollUntil } from "../../src/kitlib/poll.ts";
@@ -365,3 +365,201 @@ test("createScratch records the caller's agent and main session in the owner; an
 	expect(make({ agent: null, sessions: [SESSION], main: SESSION }, "anon")).toMatchObject({ agent: null, session: null });
 	expect(make(undefined, "plain")).toMatchObject({ agent: null, session: null, pid: process.pid });
 });
+
+// --- SCRATCHSIBLING1 (ompkit-fp72.120.16.214) -------------------------------------------------------------------------
+// Every background `task` agent runs inside the lead's omp process: one agent name, one main session, one ancestry, and
+// the seat's process holds every live incarnation's session lease (measured 2026-11-04: the lead's main and each running
+// agent's lease are held by omp pid 78248; finished agents' leases by nothing). Each incarnation names itself through
+// PI_SESSION_ID. A dir records its creator; mine, gate and release reach it only from that incarnation while its lease
+// is held.
+const A_SUB = "01a1a6d1-65fc-736e-bd99-51de45679811";
+const B_SUB = "01a1a751-0cd4-7400-9971-c4c20abcaa82";
+
+const incarnationOwner = (pid: number, label: string, creator?: string): string =>
+	`pid=${pid}\nprocess_start=Mon Oct 18 17:32:44 2026\nlabel=${label}\nrepo=${repo}\ncreated_at=2026-10-18T17:32:44Z\nargv0=omp-kit\n`
+	+ `agent=${AGENT}\nsession=${SESSION}\n${creator === undefined ? "" : `creator_session=${creator}\n`}`;
+
+/** One seat whose omp process holds the main lease and every lease in `live`; `own` is the calling incarnation. */
+function sibWorld() {
+	const root = tempDir("sib-root");
+	const home = tempDir("sib-home");
+	process.env.OMP_KIT_SCRATCH_ROOTS = root;
+	process.env.XDG_STATE_HOME = join(home, "state");
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
+	const live = new Set([SESSION, A_SUB, B_SUB]);
+	const make = (name: string, owner: string) => {
+		const dir = join(root, name);
+		mkdirSync(dir);
+		writeFileSync(join(dir, ".owner"), owner);
+		writeFileSync(join(dir, "work.txt"), "in progress");
+		return dir;
+	};
+	const as = (own: string | undefined): InspectDeps => deps({ ...noPid, seatLive: (_agent, session) => live.has(session) }, {
+		callerSeat: (): SeatIdentity => ({ agent: AGENT, sessions: [...live], main: SESSION, ...(own === undefined ? {} : { own }) }),
+		lsofSnapshot: new Set<string>() });
+	return { root, home, live, make, as };
+}
+const listed = (rows: { dir: string }[]) => rows.map(row => row.dir).sort();
+
+test("SCRATCHSIBLING1 owner records: creator_session parses only inside a seat, with the session pattern's boundaries, and stays linear on long near-misses", () => {
+	expect(parseOwnerFile(incarnationOwner(42, "a", B_SUB))).toMatchObject({ agent: AGENT, session: SESSION, creatorSession: B_SUB });
+	expect(parseOwnerFile(incarnationOwner(42, "a", SESSION))).toMatchObject({ creatorSession: SESSION });
+	expect(parseOwnerFile(incarnationOwner(42, "a"))).not.toHaveProperty("creatorSession");
+	expect(parseOwnerFile(incarnationOwner(42, "a", "0".repeat(8)))).not.toBeNull();
+	expect(parseOwnerFile(incarnationOwner(42, "a", "0".repeat(64)))).not.toBeNull();
+	for (const bad of ["0".repeat(7), "0".repeat(65), "-0000000", "0000_0000", ""])
+		expect({ bad, parsed: parseOwnerFile(incarnationOwner(42, "a", bad)) }).toEqual({ bad, parsed: null });
+	const seatless = incarnationOwner(42, "a", B_SUB).replace(`agent=${AGENT}\nsession=${SESSION}\n`, "");
+	expect(parseOwnerFileEx(seatless)).toMatchObject({ failure: { field: "creator_session" } });
+	const nearMiss = `${"0".repeat(200_000)}_`;
+	const started = performance.now();
+	expect(parseOwnerFile(incarnationOwner(42, "a", nearMiss))).toBeNull();
+	expect(performance.now() - started).toBeLessThan(500);
+});
+
+test("SCRATCHSIBLING1 callerSeat names the calling incarnation from PI_SESSION_ID, else from PI_SESSION_FILE's session record", () => {
+	const run = (args: readonly string[]) => args[0] === "ps" ? { code: 0, stdout: PS_TABLE, stderr: "" } : { code: 0, stdout: `n${LOCK_A}\nn${TRANSCRIPT_A}\n`, stderr: "" };
+	expect(callerSeat(run, { AGENT_NAME: AGENT, PI_SESSION_ID: B_SUB }, 300)).toEqual({ agent: AGENT, sessions: [SESSION], main: SESSION, own: B_SUB });
+	const transcript = join(tempDir("sib-transcript"), "ScratchSibling.jsonl");
+	writeFileSync(transcript, `${JSON.stringify({ type: "title", v: 1, title: "", pad: " ".repeat(180) })}\n`
+		+ `${JSON.stringify({ type: "session", version: 3, id: A_SUB, parentSession: "/x/main.jsonl" })}\n{"type":"model_change"}\n`);
+	expect(callerSeat(run, { AGENT_NAME: AGENT, PI_SESSION_FILE: transcript }, 300).own).toBe(A_SUB);
+	// PI_SESSION_ID wins; a malformed id, a relative or missing file, or no variable names no incarnation.
+	expect(callerSeat(run, { AGENT_NAME: AGENT, PI_SESSION_ID: B_SUB, PI_SESSION_FILE: transcript }, 300).own).toBe(B_SUB);
+	for (const env of [{ PI_SESSION_ID: "../x" }, { PI_SESSION_FILE: "ScratchSibling.jsonl" }, { PI_SESSION_FILE: join(transcript, "..", "absent.jsonl") }, {}])
+		expect(callerSeat(run, { AGENT_NAME: AGENT, ...env }, 300)).not.toHaveProperty("own");
+});
+
+test("SCRATCHSIBLING1 createScratch records the creating incarnation; a caller that names none records no creator", () => {
+	const make = (seat: SeatIdentity, label: string) => {
+		const root = tempDir("sib-create");
+		process.env.OMP_KIT_SCRATCH_ROOTS = join(root, "var", "agent-tmp");
+		const result = createScratch(label, root, deps(defaultLiveness(), { callerSeat: () => seat }), {}, false, join(root, "scratch-budgets.json"));
+		expect(result.ok).toBe(true);
+		return parseOwnerFile(readFileSync(join(result.dir, ".owner"), "utf8"));
+	};
+	expect(make({ agent: AGENT, sessions: [SESSION, B_SUB], main: SESSION, own: B_SUB }, "sub")).toMatchObject({ agent: AGENT, session: SESSION, creatorSession: B_SUB });
+	expect(make({ agent: AGENT, sessions: [SESSION, B_SUB], main: SESSION, own: SESSION }, "lead")).toMatchObject({ session: SESSION, creatorSession: SESSION });
+	expect(make({ agent: AGENT, sessions: [SESSION], main: SESSION }, "unnamed")).not.toHaveProperty("creatorSession");
+});
+
+test("SCRATCHSIBLING1 planted: two incarnations on one seat; B's mine lists only B's dir and B's release of A's live dir is refused; A's own release and a release after A exits succeed", () => {
+	const w = sibWorld();
+	const aOwn = w.make("aown.59101", incarnationOwner(59101, "aown", A_SUB));
+	const aLeft = w.make("aleft.59102", incarnationOwner(59102, "aleft", A_SUB));
+	const bDir = w.make("bwork.59103", incarnationOwner(59103, "bwork", B_SUB));
+	const lead = w.make("lead-hooks2.59104", incarnationOwner(59104, "lead-hooks2", SESSION));
+	// mine and gate: each incarnation is told about its own dirs only.
+	expect(listed(ownedScratch(w.home, w.as(B_SUB)))).toEqual([bDir]);
+	expect(listed(disposalGate(w.home, "session-end", w.as(B_SUB)).owed)).toEqual([bDir]);
+	expect(listed(ownedScratch(w.home, w.as(A_SUB)))).toEqual([aLeft, aOwn]);
+	expect(listed(ownedScratch(w.home, w.as(SESSION)))).toEqual([lead]);
+	// B's seat release of A's live dir, and of the lead's live TMPDIR (the 2026-11-04 lead-hooks2.13390 case), is refused.
+	for (const dir of [aLeft, lead]) {
+		const refused = releaseScratch(dir, w.home, w.as(B_SUB), { bin: "throwaway", now: true });
+		expect({ dir, ...refused }).toMatchObject({ dir, ok: false, changed: false, reason: "sibling-live" });
+		expect(refused.detail).toContain("--capability");
+		expect(existsSync(join(dir, "work.txt"))).toBe(true);
+		expect(existsSync(join(dir, ".omp-kit-release"))).toBe(false);
+	}
+	// The lead's main session is just another incarnation to A's dirs: refused while A lives.
+	expect(releaseScratch(aLeft, w.home, w.as(SESSION), { bin: "throwaway", now: true })).toMatchObject({ ok: false, reason: "sibling-live" });
+	// A's own release succeeds.
+	expect(releaseScratch(aOwn, w.home, w.as(A_SUB), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(existsSync(aOwn)).toBe(false);
+	// A exits: its lease is no longer held. Its leftovers fall to the seat; the main session is told about them, B is not.
+	w.live.delete(A_SUB);
+	expect(listed(ownedScratch(w.home, w.as(SESSION)))).toEqual([aLeft, lead]);
+	expect(listed(ownedScratch(w.home, w.as(B_SUB)))).toEqual([bDir]);
+	expect(releaseScratch(aLeft, w.home, w.as(B_SUB), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	expect(existsSync(aLeft)).toBe(false);
+	// B's own dir and the lead's live TMPDIR were never touched.
+	expect(existsSync(join(bDir, "work.txt")) && existsSync(join(lead, "work.txt"))).toBe(true);
+});
+
+test("SCRATCHSIBLING1: an unprovable lease is live, the capability is still the cross-process route, and the open-file and user checks still hold", () => {
+	const w = sibWorld();
+	const capability = "c".repeat(64);
+	const sha = new Bun.CryptoHasher("sha256").update(capability).digest("hex");
+	const aDir = w.make("acap.59111", `${incarnationOwner(59111, "acap", A_SUB)}capability_sha256=${sha}\n`);
+	// A's lease is outside the caller's ancestry and the probe cannot tell: unprovable reads live, never dead.
+	w.live.delete(A_SUB);
+	const unprovable = deps({ ...noPid, seatLive: () => null }, { callerSeat: (): SeatIdentity => ({ agent: AGENT, sessions: [SESSION, B_SUB], main: SESSION, own: B_SUB }),
+		lsofSnapshot: new Set<string>() });
+	const refused = releaseScratch(aDir, w.home, unprovable, { bin: "throwaway", now: true });
+	expect(refused).toMatchObject({ ok: false, reason: "sibling-live" });
+	expect(refused.detail).toContain("unprovable");
+	// The capability releases A's dir from B, through the same open-file check (held) ...
+	w.live.add(A_SUB);
+	const held = releaseScratch(aDir, w.home, { ...w.as(B_SUB), lsofSnapshot: new Set([join(aDir, "work.txt")]) }, { bin: "throwaway", now: true, capability });
+	expect(held).toMatchObject({ ok: false, changed: true, reason: "now-held-open-fds" });
+	// ... and a wrong token is still a sibling refusal, never caller-not-owner by another route.
+	expect(releaseScratch(aDir, w.home, w.as(B_SUB), { bin: "throwaway", now: true, capability: "d".repeat(64) })).toMatchObject({ ok: false, reason: "sibling-live" });
+	expect(existsSync(join(aDir, "work.txt"))).toBe(true);
+});
+
+test("SCRATCHSIBLING1 control: a dir with no creator_session (made before it existed) keeps today's seat authority, unchanged", () => {
+	const w = sibWorld();
+	const legacy = w.make("legacy.59121", incarnationOwner(59121, "legacy"));
+	// Every seat holder still sees it and may release it, as before; only the open-file and user checks decide --now.
+	for (const own of [B_SUB, A_SUB, SESSION, undefined]) expect({ own, rows: listed(ownedScratch(w.home, w.as(own))) }).toEqual({ own, rows: [legacy] });
+	expect(releaseScratch(legacy, w.home, { ...w.as(B_SUB), lsofSnapshot: new Set([join(legacy, "work.txt")]) }, { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: false, changed: true, reason: "now-held-open-fds" });
+	expect(releaseScratch(legacy, w.home, w.as(B_SUB), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	// A caller naming no incarnation (an extension's own process) keeps that authority too, and gains none over a live creator.
+	const legacy2 = w.make("legacy2.59122", incarnationOwner(59122, "legacy2"));
+	expect(releaseScratch(legacy2, w.home, w.as(undefined), { bin: "throwaway" })).toMatchObject({ ok: true, reason: "owner-released" });
+	const bDir = w.make("bwork.59123", incarnationOwner(59123, "bwork", B_SUB));
+	expect(releaseScratch(bDir, w.home, w.as(undefined), { bin: "throwaway" })).toMatchObject({ ok: false, reason: "sibling-live" });
+	expect(listed(ownedScratch(w.home, w.as(undefined)))).toEqual([legacy2]);
+});
+
+test("SCRATCHSIBLING1 control: a dead lease leaves the dir releasable by the seat; a lease that comes back (a resumed agent) refuses again", () => {
+	const w = sibWorld();
+	const first = w.make("adead.59131", incarnationOwner(59131, "adead", A_SUB));
+	const second = w.make("aback.59132", incarnationOwner(59132, "aback", A_SUB));
+	w.live.delete(A_SUB);
+	expect(releaseScratch(first, w.home, w.as(B_SUB), { bin: "throwaway" })).toMatchObject({ ok: true, changed: true, reason: "owner-released" });
+	expect(releaseScratch(first, w.home, w.as(SESSION), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	w.live.add(A_SUB);
+	expect(releaseScratch(second, w.home, w.as(SESSION), { bin: "throwaway" })).toMatchObject({ ok: false, reason: "sibling-live" });
+	expect(existsSync(join(second, ".omp-kit-release"))).toBe(false);
+});
+
+// The real lease path end to end: the CLI under PI_SESSION_ID=B, a child of this test process, which holds the seat's
+// leases open as the seat's omp process does. While A's lease is held the CLI exits SCRATCH_RELEASE_SIBLING_LIVE; once
+// only the main and B leases are held, lsof finds no holder for A and the same release retires the dir.
+test.skipIf(!HAVE_LSOF)("SCRATCHSIBLING1 CLI: SCRATCH_RELEASE_SIBLING_LIVE while A's lease is held; released once A's lease is free", async () => {
+	const owners = join(tempDir("sib-cli-owners"), "session-owners");
+	mkdirSync(owners, { recursive: true });
+	const lease = (session: string) => { const path = join(owners, `${session}.lock`); writeFileSync(path, ""); return openSync(path, "r"); };
+	const [main, a, b] = [lease(SESSION), lease(A_SUB), lease(B_SUB)];
+	const root = tempDir("sib-cli-root");
+	const state = join(tempDir("sib-cli-home"), "state");
+	const dir = join(root, "awork.59141");
+	mkdirSync(dir);
+	writeFileSync(join(dir, ".owner"), incarnationOwner(59141, "awork", A_SUB));
+	const env: Record<string, string> = {};
+	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+	Object.assign(env, { AGENT_NAME: AGENT, PI_SESSION_ID: B_SUB, OMP_KIT_SCRATCH_ROOTS: root, XDG_STATE_HOME: state, OMP_KIT_SESSION_OWNERS_DIR: owners });
+	const release = () => {
+		const child = runSync([process.execPath, "--no-env-file", join(repo, "src", "cli.ts"), "scratch", "release", dir, "--bin", "throwaway", "--now", "--json"],
+			{ deadline_s: fixtureDeadlineS(30), env, max_output_bytes: 1 << 20 });
+		const out = JSON.parse(new TextDecoder().decode(child.stdout)) as { ok: boolean; data?: { deleted?: boolean }; errors?: { code: string; message: string }[] };
+		return { code: child.rc, ok: out.ok, deleted: out.data?.deleted ?? false, error: out.errors?.[0]?.code ?? null, message: out.errors?.[0]?.message ?? "" };
+	};
+	try {
+		// A slow lsof makes the seat unproven (caller-not-owner) or the lease unprovable; re-observe until definite.
+		const refused = await definite(release, value => value.error === "SCRATCH_RELEASE_REFUSED" && value.message.includes("caller-not-owner"));
+		expect(refused).toMatchObject({ ok: false, error: "SCRATCH_RELEASE_SIBLING_LIVE" });
+		expect(refused.message).toContain(`incarnation ${A_SUB}`);
+		expect(existsSync(join(dir, ".omp-kit-release"))).toBe(false);
+		closeSync(a);
+		const released = await definite(release,
+			value => (value.error === "SCRATCH_RELEASE_SIBLING_LIVE" && value.message.includes("unprovable")) || value.message.includes("caller-not-owner"));
+		expect(released).toMatchObject({ code: 0, ok: true, deleted: true });
+		expect(existsSync(dir)).toBe(false);
+	} finally {
+		for (const fd of [main, a, b]) try { closeSync(fd); } catch { /* already closed */ }
+	}
+}, fixtureDeadlineS(90) * 1000);

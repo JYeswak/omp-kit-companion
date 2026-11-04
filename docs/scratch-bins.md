@@ -76,7 +76,7 @@ omp-kit scratch release DIR --bin evidence --ref bead:ompkit-774u.15 --now
 
 The release is the owner's act. The caller must hold one of these:
 
-- the seat that holds the recorded session (agent and omp session id);
+- the seat that holds the recorded session (agent and omp session id), from the incarnation that made the dir while that incarnation lives (see "One seat, several incarnations" below);
 - the capability that `scratch new` returned for the directory;
 - the owner process itself, or a child of it.
 
@@ -91,7 +91,25 @@ An existing bead or an unrelated tracked file proves nothing. A refused release 
 
 `--now` retires the directory in the same turn, which is how a finished task disposes of its scratch (SCRATCHRETIRE1): a throwaway at once, evidence and promote only after their reference has been verified. It rechecks what the reaper's final delete checks: the same device and inode, the unchanged owner text, the owner inside the scratch root, and no open file. When any recheck fails, the directory and its marker stay, the command exits `SCRATCH_RELEASE_HELD` with the reason (`now-held-open-fds`, `now-held-lsof-unavailable`, `now-held-owner-changed`, ...), and the directory remains yours to retire: clear the cause and run the same release with `--now` again. The reaper is only a backstop. Without `--now` the release only marks the directory.
 
+A directory released earlier is retired by a later `--bin X --now` from its owner (RELNOW2, ompkit-fp72.120.16.216):
+
+- Released earlier with the same bin and reference: it is retired.
+- Released earlier without a bin: the marker takes the bin (and its verified reference), then the directory is retired through the same rechecks.
+- Released earlier under a different bin or reference: it exits `SCRATCH_RELEASE_HELD: now-held-bin-mismatch`, naming the recorded bin. It never reports success with nothing deleted.
+- The directory no longer exists: the release is refused `directory-gone`.
+
 A release without `--bin` still works and is counted as unbinned; it cannot take `--now`.
+
+### One seat, several incarnations
+
+The lead's background `task` agents run inside the lead's omp process. They share its agent name, its session leases and its process ancestry, so the seat alone cannot tell them apart (SCRATCHSIBLING1, ompkit-fp72.120.16.214). omp gives every tool shell its own session id as `PI_SESSION_ID`; eval kernels get only `PI_SESSION_FILE`, whose header carries the id. That session's lease in `~/.omp/run/session-owners/<id>.lock` is held while the agent runs.
+
+- `scratch new` records the creator's own session as `creator_session`. When the lead's main session made the dir, it equals `session`.
+- `scratch mine` and `scratch gate` list such a dir only to its creator. The seat's main session also sees it once the creator's lease is no longer held by the seat's process, so a finished agent's leftovers stay owed.
+- A seat release of a dir made by another incarnation whose lease is held, or cannot be proven free, is refused with `SCRATCH_RELEASE_SIBLING_LIVE`. The creator releases it, or the creator's `--capability` does.
+- Once the creator's lease is free, the seat releases the dir as before.
+- A dir with no `creator_session` keeps plain seat authority unchanged. Such a dir was made before the key existed, or by a caller whose environment named no session.
+- `.users` registrations and the open-file rechecks apply exactly as before.
 
 ### The release capability
 
@@ -193,4 +211,4 @@ Every omp session in a fleet repo makes `var/agent-tmp/omp.<pid>` and its `.owne
 
 ## Scope of what exists today
 
-The owner keys (with byte budget and the release capability's `capability_sha256`), the hold rule, `scratch release --bin/--ref/--capability`, the reap gap report (printed by `scratch apply`),
+The owner keys (with byte budget, the release capability's `capability_sha256` and the creating incarnation's `creator_session`), the hold rule, `scratch release --bin/--ref/--capability`, the reap gap report (printed by `scratch apply`),

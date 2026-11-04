@@ -95,7 +95,7 @@ export interface FlywheelContext {
 	cwd: string;
 	isIdle?(): boolean;
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
-	sessionManager?: { getEntries?(): readonly unknown[] };
+	sessionManager?: { getEntries?(): readonly unknown[]; getSessionId?(): string };
 	agent?: { kind: "main" | "sub" };
 }
 
@@ -1534,6 +1534,8 @@ export interface TrackerMutationDeps {
 	sessionCwd: string;
 	/** STALEDEF1: holder liveness read at the act; absent means a third-party reclaim is never proven safe. */
 	holderLiveness?: (holder: string, nowMs: number) => Promise<HolderVerdict>;
+	/** SCRATCHSIBLING1: the omp session of the agent whose tool call this is (a background agent's own), for SCRATCH_OWED. */
+	callerSession?: string;
 }
 
 /** Production liveness: the same seat, Agent Mail and reservation sources `drain stale-claims` reads. */
@@ -1745,11 +1747,16 @@ const MAX_OWED_LISTED = 5;
  * (owner agent and held session, or its pid), excludes the live session dir, and logs one flag row for the false-flag
  * audit. Positive owed is a refusal (the caller releases first); a missing or failing omp-kit yields no note and never
  * blocks, so a broken measuring tool cannot deadlock a seat.
+ * SCRATCHSIBLING1 (ompkit-fp72.120.16.214): this runs in the seat's omp process, whose environment is not the calling
+ * agent's, so the tool call's own session is handed over as PI_SESSION_ID: a background agent is told about its own
+ * dirs only, never the lead's or a sibling's live ones.
  */
-export async function scratchOwedNote(exec: FlywheelExec, cwd: string, point: "review" | "close"): Promise<string | null> {
+export async function scratchOwedNote(exec: FlywheelExec, cwd: string, point: "review" | "close", session?: string): Promise<string | null> {
 	let result: FlywheelExecResult;
+	const mine = ["scratch", "mine", "--at", point, "--json"];
 	try {
-		result = await exec("omp-kit", ["scratch", "mine", "--at", point, "--json"], { cwd, timeout: SCRATCH_MINE_TIMEOUT_MS });
+		result = session ? await exec("env", [`PI_SESSION_ID=${session}`, "omp-kit", ...mine], { cwd, timeout: SCRATCH_MINE_TIMEOUT_MS })
+			: await exec("omp-kit", mine, { cwd, timeout: SCRATCH_MINE_TIMEOUT_MS });
 	} catch {
 		return null;
 	}
@@ -2715,7 +2722,7 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 	const parts: string[] = [...closeNotes];
 	if (warnings.length > 0) parts.push(`kit-flywheel-guard: ${warnings.join("; ")}. The close was allowed; do not close a bead you implemented.`);
 	if (requests.some(request => request.operation === "review" || request.operation === "close")) {
-		const owed = await scratchOwedNote(deps.exec, deps.sessionCwd, hasClose ? "close" : "review");
+		const owed = await scratchOwedNote(deps.exec, deps.sessionCwd, hasClose ? "close" : "review", deps.callerSession);
 		if (owed !== null) {
 			const prefix = parts.length > 0 ? `${parts.join(" ")} ` : "";
 			return { block: true,
@@ -2968,7 +2975,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (lint?.additionalContext) ctx.ui?.notify(lint.additionalContext, "warning");
 			const started = Date.now();
 			const attempts: CloseAttempt[] = [];
-			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd, holderLiveness: execHolderLiveness(pi.exec, env, home) }, attempts);
+			const result = await checkTrackerMutations(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd, holderLiveness: execHolderLiveness(pi.exec, env, home),
+				callerSession: ctx.sessionManager?.getSessionId?.() || undefined }, attempts);
 			if (typeof event.toolCallId === "string" && attempts.length > 0) {
 				if (result?.block === true) {
 					if (typeof result.reason === "string" && result.reason.includes(SELF_CLOSE_REFUSED)) {

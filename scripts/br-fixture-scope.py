@@ -22,7 +22,7 @@ BASE = {"pid", "process_start", "label", "repo", "created_at", "argv0"}
 LEGACY = {"pid", "label", "repo", "created"}
 SEAT = {"agent", "session"}
 BIN = {"bin", "purpose", "bead", "expires"}
-OPTIONAL = SEAT | BIN | {"budget", "capability_sha256"}
+OPTIONAL = SEAT | BIN | {"budget", "capability_sha256", "creator_session"}
 ALLOWED = BASE | LEGACY | OPTIONAL
 NAME = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 # ECMAScript trim, as used before JSON.parse in scratch.ts (not Python strip).
@@ -139,6 +139,10 @@ def owner_fields(text: str) -> dict[str, str] | None:
     if "budget" in fields and re.fullmatch(r"[1-9][0-9]{0,14}", fields["budget"]) is None:
         return None
     if "capability_sha256" in fields and re.fullmatch(r"[0-9a-f]{64}", fields["capability_sha256"]) is None:
+        return None
+    # SCRATCHSIBLING1: the creating incarnation, only inside a seat.
+    if "creator_session" in fields and (not SEAT <= keys
+                                        or re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z-]{7,63}", fields["creator_session"]) is None):
         return None
     return fields if bin_fields_valid(fields) else None
 

@@ -3949,6 +3949,10 @@ async function scratchCommand(request: ParsedCommand): Promise<CliResult> {
 		if (!released.ok && released.reason === "user-live") return refusal("USER_LIVE",
 			`Scratch release refused: ${released.detail ?? "a registered user is live"}`,
 			"The user must finish, or run `omp-kit scratch unuse DIR --pid PID`; no directory was marked or deleted.");
+		// SCRATCHSIBLING1 (ompkit-fp72.120.16.214): another live incarnation of this seat made the dir.
+		if (!released.ok && released.reason === "sibling-live") return refusal("SCRATCH_RELEASE_SIBLING_LIVE",
+			`Scratch release refused: ${released.detail ?? "another live incarnation of this seat made the directory"}`,
+			"Leave it to the agent that made it, or pass that agent's --capability TOKEN; no directory was marked or deleted.");
 		if (!released.ok) return refusal("SCRATCH_RELEASE_REFUSED",
 			`Scratch release refused: ${released.reason}${released.detail ? ` — ${released.detail}` : ""}`,
 			released.reason === "caller-not-owner"

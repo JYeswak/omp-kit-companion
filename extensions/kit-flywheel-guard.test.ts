@@ -1364,6 +1364,32 @@ test("SCRATCH_DISPOSAL_REFUSED: a verifier's close of another seat's bead is ref
 	expect(h.execs.find(call => call.command === "omp-kit")?.args).toEqual(["scratch", "mine", "--at", "close", "--json"]);
 });
 
+// SCRATCHSIBLING1 (ompkit-fp72.120.16.214): the guard runs in the seat's omp process, which every background agent
+// shares with the lead, so `scratch mine` from that process cannot tell them apart. The responder plays omp-kit: asked
+// with the calling agent's own session it lists only that agent's dir; asked with the process environment it lists the
+// lead's live TMPDIR as well (the 2026-11-04 lead-hooks2.13390 case). Agent B's advice must name B's dir, never A's.
+test("SCRATCHSIBLING1: SCRATCH_OWED for background agent B asks omp-kit as B's own session and never names A's live dir", async () => {
+	const project = freshDir(base, "proj-");
+	const B = "01a1a751-0cd4-7400-9971-c4c20abcaa82";
+	const bDir = "/r/var/agent-tmp/bwork.1";
+	const aDir = "/r/var/agent-tmp/lead-hooks2.13390";
+	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "BlueFox" }, respond: call => {
+		if (call.command === "env" && call.args[0] === `PI_SESSION_ID=${B}` && call.args[1] === "omp-kit")
+			return mineAnswer([{ dir: bDir, state: "unreleased", bin: "unbinned" }]);
+		if (call.command === "omp-kit")
+			return mineAnswer([{ dir: bDir, state: "unreleased", bin: "unbinned" }, { dir: aDir, state: "unreleased", bin: "unbinned" }]);
+		return brTable({})(call);
+	} });
+	const [result] = await h.emit("tool_call", { toolCallId: "c1", toolName: "bash", input: { command: "br update kit-1 --status in_review --actor BlueFox" } },
+		{ ...h.ctx(project), sessionManager: { getSessionId: () => B } }) as (FlywheelToolCallResult | undefined)[];
+	expect(result?.block).toBe(true);
+	expect(result?.reason).toContain(`${bDir} (unreleased, bin unbinned)`);
+	expect(result?.reason).not.toContain(aDir);
+	const census = h.execs.filter(call => call.command === "omp-kit" || (call.command === "env" && call.args[1] === "omp-kit"));
+	expect(census.map(call => [call.command, ...call.args])).toEqual([["env", `PI_SESSION_ID=${B}`, "omp-kit", "scratch", "mine", "--at", "review", "--json"]]);
+	expect(census[0]?.options?.cwd).toBe(project);
+});
+
 test("SCRATCH_OWED negatives: nothing owed, only the live session dir, or an unusable answer yields no advice", async () => {
 	const project = freshDir(base, "proj-");
 	const unusable: FlywheelExecResult[] = [

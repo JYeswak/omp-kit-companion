@@ -10,7 +10,7 @@ import { join, resolve } from "node:path";
 import { createScratch, releaseScratch, reapLogPath, scratchContent, lsofClear, takeLsofSnapshot,
 	type InspectDeps, type LivenessDeps, type ScratchRunner } from "../../src/scratch.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
-import { runFixture, runFixtureAsync } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixture, runFixtureAsync } from "./fixture-process.ts";
 
 const decoder = new TextDecoder();
 
@@ -220,6 +220,83 @@ test("retiring a marker-only throwaway with an open file keeps the dir and its m
 	expect(held).toMatchObject({ ok: false, reason: "now-held-open-fds" });
 	expect(existsSync(join(busy.dir, ".omp-kit-release"))).toBe(true);
 });
+
+// RELNOW2 (ompkit-fp72.120.16.216): on 2026-11-04 jevrehearse.8375 (824 MB, raw private objects) was released by its
+// capability without a bin; then `release --bin throwaway --now`, from the agent and from the lead, answered ok, action
+// RELEASED, changed false, deleted false, and the dir stayed. A bin never equalled the unbinned marker, so every retry
+// was already-released. The later --now now records the bin in the marker and retires the dir under the same rechecks.
+test("RELNOW2 planted: a release without a bin, then --bin throwaway --now, records the bin and deletes the dir", () => {
+	const marked = fixture(ownerText(process.pid));
+	writeFileSync(join(marked.dir, "objects.pack"), "x".repeat(8192));
+	expect(releaseScratch(marked.dir, marked.home, deps(), {})).toMatchObject({ ok: true, changed: true, reason: "owner-released" });
+	expect(readFileSync(join(marked.dir, ".omp-kit-release"), "utf8")).not.toContain("bin=");
+	expect(releaseScratch(marked.dir, marked.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: true, changed: true, reason: "owner-released-deleted" });
+	expect(existsSync(marked.dir)).toBe(false);
+	const events = logEvents(marked.home).filter((e) => e.dir === marked.dir).map((e) => [e.event, e.bin]);
+	expect(events).toEqual([["release", "unbinned"], ["release-bin", "throwaway"], ["release-deleted", "throwaway"]]);
+	// A second --now on the retired dir names that it is gone; it never answers ok.
+	expect(releaseScratch(marked.dir, marked.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true }))
+		.toMatchObject({ ok: false, changed: false, reason: "directory-gone" });
+});
+
+test("RELNOW2 planted: an open file holds the upgraded dir as now-held-open-fds, and the recorded bin retires it once the file closes", () => {
+	const busy = fixture(ownerText(process.pid));
+	writeFileSync(join(busy.dir, "open.txt"), "held");
+	releaseScratch(busy.dir, busy.home, deps(), {});
+	const held = releaseScratch(busy.dir, busy.home, deps({ lsofSnapshot: new Set([join(busy.dir, "open.txt")]) }), { bin: "throwaway", now: true });
+	expect(held).toMatchObject({ ok: false, changed: true, reason: "now-held-open-fds" });
+	expect(existsSync(join(busy.dir, "open.txt"))).toBe(true);
+	expect(readFileSync(join(busy.dir, ".omp-kit-release"), "utf8")).toContain("bin=throwaway\n");
+	expect(releaseScratch(busy.dir, busy.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true })).toMatchObject({ ok: true, reason: "owner-released-deleted" });
+});
+
+test("RELNOW2: an unbinned marker takes an evidence bin only with its verified ref; a conflicting bin is held with the recorded one named, never ok", () => {
+	const evidenced = fixture(ownerText(process.pid));
+	writeFileSync(join(evidenced.dir, "run.out"), "measured");
+	releaseScratch(evidenced.dir, evidenced.home, deps(), {});
+	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: gitUntracked }), { bin: "evidence", ref: "file:package.json", now: true }))
+		.toMatchObject({ ok: false, changed: false, reason: "ref-not-tracked" });
+	expect(readFileSync(join(evidenced.dir, ".omp-kit-release"), "utf8")).not.toContain("bin=");
+	expect(releaseScratch(evidenced.dir, evidenced.home, deps({ run: beadCiting(evidenced.dir), lsofSnapshot: new Set() }), { bin: "evidence", ref: "bead:ompkit-774u.15", now: true }))
+		.toMatchObject({ ok: true, reason: "owner-released-deleted" });
+	const thrown = fixture(ownerText(process.pid, "bin=evidence\nbead=ompkit-774u.15\n"));
+	writeFileSync(join(thrown.dir, "run.out"), "measured");
+	releaseScratch(thrown.dir, thrown.home, deps({ run: beadCiting(thrown.dir) }), { bin: "evidence", ref: "bead:ompkit-774u.15" });
+	const mismatch = releaseScratch(thrown.dir, thrown.home, deps({ lsofSnapshot: new Set() }), { bin: "throwaway", now: true });
+	expect(mismatch).toMatchObject({ ok: false, changed: true, reason: "now-held-bin-mismatch" });
+	expect(mismatch.detail).toContain("bin evidence with ref bead:ompkit-774u.15");
+	expect(existsSync(join(thrown.dir, "run.out"))).toBe(true);
+});
+
+interface ReleaseEnvelope { ok: boolean; data?: { deleted?: boolean; changed?: boolean }; errors?: { code: string; message: string }[] }
+
+test("RELNOW2 CLI: after a bin-less release, --bin throwaway --now reports deleted true; with a real open file it exits SCRATCH_RELEASE_HELD now-held-open-fds", () => {
+	const cli = (dir: string, home: string): ReleaseEnvelope => {
+		const child = runFixture([process.execPath, join(repo, "src", "cli.ts"), "scratch", "release", dir, "--bin", "throwaway", "--now", "--json"], {
+			cwd: repo, env: { ...process.env, HOME: home } });
+		return JSON.parse(decoder.decode(child.stdout)) as ReleaseEnvelope;
+	};
+	const busy = fixture(ownerText(process.pid));
+	writeFileSync(join(busy.dir, "open.txt"), "held");
+	expect(releaseScratch(busy.dir, busy.home, deps(), {})).toMatchObject({ ok: true, reason: "owner-released" });
+	const fd = openSync(join(busy.dir, "open.txt"), "r");
+	let held: ReleaseEnvelope;
+	try {
+		// A loaded machine can time the one lsof snapshot out (now-held-lsof-unavailable): re-observe a bounded number of times.
+		let attempt = 0;
+		do held = cli(busy.dir, busy.home); while (++attempt < 3 && held.errors?.[0]?.message.includes("now-held-lsof-unavailable"));
+	} finally {
+		closeSync(fd);
+	}
+	expect(held.ok).toBe(false);
+	expect(held.errors?.[0]?.code).toBe("SCRATCH_RELEASE_HELD");
+	expect(held.errors?.[0]?.message).toContain("now-held-open-fds");
+	expect(existsSync(join(busy.dir, "open.txt"))).toBe(true);
+	const done = cli(busy.dir, busy.home);
+	expect({ ok: done.ok, deleted: done.data?.deleted }).toEqual({ ok: true, deleted: true });
+	expect(existsSync(busy.dir)).toBe(false);
+}, fixtureDeadlineS(60) * 1000);
 
 // The --now path existed in cli.ts but the command registry never declared the flag, so `omp-kit scratch release
 // DIR --bin throwaway --now` failed UNKNOWN_FLAG and delete-at-once was unreachable from the CLI (2026-10-22).

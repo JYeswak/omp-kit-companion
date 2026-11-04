@@ -29,6 +29,13 @@ export const SCRATCH_BINS: readonly ScratchBin[] = ["throwaway", "evidence", "pr
 export interface ScratchOwner { pid: number; processStart: string | null; label: string; repo: string; createdAt: string; argv0: string | null;
 	/** The durable owner: the agent and its omp session id. Both or neither; a pid alone is only an attribute of the current process. */
 	agent: string | null; session: string | null;
+	/**
+	 * SCRATCHSIBLING1 (ompkit-fp72.120.16.214): the incarnation inside that seat that made the dir: the creating agent's
+	 * own omp session id (equal to `session` when the seat's main session made it; a background `task` agent's own id,
+	 * whose lease the seat's omp process holds while it runs). Only with agent and session. Absent on dirs made before
+	 * it existed or by a caller whose environment named no session: those keep plain seat authority.
+	 */
+	creatorSession?: string;
 	/** Where the dir goes when its work ends (ompkit-774u.15): absent means unbinned. A hold carries the bead that justifies it and an expiry within 14 days of creation. */
 	bin: ScratchBin | null; purpose: string | null; bead: string | null; expires: string | null;
 	/** Declared byte budget (ompkit-774u.15 P0): absent means unbounded. An over-budget live dir is flagged, never reaped for size alone. */
@@ -48,7 +55,8 @@ const BUDGET_FIELDS = ["budget"] as const;
 const BUDGET_PATTERN = /^[1-9][0-9]{0,14}$/;
 const CAPABILITY_FIELDS = ["capability_sha256"] as const;
 const CAPABILITY_SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS, ...BIN_FIELDS, ...BUDGET_FIELDS, ...CAPABILITY_FIELDS];
+const INCARNATION_FIELDS = ["creator_session"] as const;
+const ALLOWED_OWNER_FIELDS = [...OWNER_FIELDS, ...LEGACY_OWNER_FIELDS, ...SEAT_FIELDS, ...BIN_FIELDS, ...BUDGET_FIELDS, ...CAPABILITY_FIELDS, ...INCARNATION_FIELDS];
 const AGENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SESSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/;
 const PURPOSE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
@@ -196,8 +204,9 @@ function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 	const binned = BIN_FIELDS.filter(field => seen[field] !== undefined);
 	const budgeted = BUDGET_FIELDS.filter(field => seen[field] !== undefined);
 	const capable = CAPABILITY_FIELDS.filter(field => seen[field] !== undefined);
+	const incarnated = INCARNATION_FIELDS.filter(field => seen[field] !== undefined);
 	const base = (fields: readonly string[]): boolean => fields.every(field => seen[field] !== undefined) &&
-		Object.keys(seen).length === fields.length + seat.length + binned.length + budgeted.length + capable.length;
+		Object.keys(seen).length === fields.length + seat.length + binned.length + budgeted.length + capable.length + incarnated.length;
 	const complete = base(OWNER_FIELDS);
 	const legacy = base(LEGACY_OWNER_FIELDS);
 	if (!complete && !legacy) {
@@ -228,9 +237,15 @@ function validateOwnerFieldsEx(seen: Record<string, string>): OwnerParseResult {
 		return { failure: { field: "budget", problem: `is '${seen.budget}', want a positive integer byte count` } };
 	if (capable.length === 1 && !CAPABILITY_SHA256_PATTERN.test(seen.capability_sha256!))
 		return { failure: { field: "capability_sha256", problem: "want 64 lowercase hex digits (the sha256 of the capability token)" } };
+	if (incarnated.length === 1) {
+		if (seat.length !== 2) return { failure: { field: "creator_session", problem: "needs 'agent' and 'session': the creator is an incarnation inside a seat" } };
+		if (!SESSION_PATTERN.test(seen.creator_session!))
+			return { failure: { field: "creator_session", problem: `is '${seen.creator_session}', want an omp session id (8-64 chars of 0-9A-Za-z-)` } };
+	}
 	return { owner: { pid: Number(seen.pid), processStart: seen.process_start ?? null, label: seen.label!,
 		repo: seen.repo!, createdAt, argv0: seen.argv0 ?? null,
-		agent: seen.agent ?? null, session: seen.session ?? null, ...final,
+		agent: seen.agent ?? null, session: seen.session ?? null,
+		...(incarnated.length === 1 ? { creatorSession: seen.creator_session! } : {}), ...final,
 		bead: final.bead ?? (loneBead ? seen.bead! : null),
 		budget: budgeted.length === 1 ? Number(seen.budget) : null,
 		capabilitySha256: capable.length === 1 ? seen.capability_sha256! : null } };
@@ -555,6 +570,14 @@ export interface SeatIdentity {
 	sessions: string[];
 	/** The one main session, or null when it cannot be told apart. */
 	main: string | null;
+	/**
+	 * SCRATCHSIBLING1 (ompkit-fp72.120.16.214): the omp session the calling agent itself runs in, as omp hands it to
+	 * its tools (PI_SESSION_ID, else the id in PI_SESSION_FILE's header). A background `task` agent runs inside the
+	 * seat's omp process, so its ancestry and leases are the lead's; only this names which incarnation is calling.
+	 * Absent when the environment names none: such a caller is no incarnation, so it keeps seat authority only over dirs
+	 * that record no creator and dirs whose creator's lease is no longer held.
+	 */
+	own?: string;
 }
 
 function sessionIdOf(path: string, kind: "lock" | "transcript"): string | null {
@@ -568,16 +591,55 @@ function sessionIdOf(path: string, kind: "lock" | "transcript"): string | null {
 	return id !== null && SESSION_PATTERN.test(id) ? id : null;
 }
 
+/** Bytes of a transcript head that hold its `type: session` record (after the padded title record). */
+const SESSION_FILE_HEAD_BYTES = 8192;
+
 /**
- * Who is calling: the host agent name (AGENT_NAME, else BR_ACTOR, else BR_AGENT_NAME) and the omp sessions whose
- * lease a process in the caller's ancestry holds open. Read-only: ps and lsof.
+ * The calling agent's own omp session (SCRATCHSIBLING1): PI_SESSION_ID, which omp's bash tool sets from its session
+ * manager, else the `type: session` id in the head of PI_SESSION_FILE (eval kernels get only the file). Null when
+ * neither names a well-formed id. Self-identification only: a lease decides whether that incarnation is live.
+ */
+function ownSessionClaim(env: NodeJS.ProcessEnv): string | null {
+	const direct = env.PI_SESSION_ID?.trim();
+	if (direct) return SESSION_PATTERN.test(direct) ? direct : null;
+	const file = env.PI_SESSION_FILE?.trim();
+	if (!file || !isAbsolute(file)) return null;
+	let head: string;
+	try {
+		const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+		try {
+			const bytes = Buffer.alloc(SESSION_FILE_HEAD_BYTES);
+			head = bytes.subarray(0, readSync(fd, bytes, 0, bytes.length, 0)).toString("utf8");
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return null;
+	}
+	for (const line of head.split("\n")) {
+		let record: unknown;
+		try { record = JSON.parse(line); } catch { continue; }
+		if (typeof record === "object" && record !== null && (record as Record<string, unknown>).type === "session") {
+			const id = (record as Record<string, unknown>).id;
+			return typeof id === "string" && SESSION_PATTERN.test(id) ? id : null;
+		}
+	}
+	return null;
+}
+
+/**
+ * Who is calling: the host agent name (AGENT_NAME, else BR_ACTOR, else BR_AGENT_NAME), the omp sessions whose
+ * lease a process in the caller's ancestry holds open, and the session the calling agent itself runs in. Read-only:
+ * ps, lsof and the head of the caller's own transcript.
  */
 export function callerSeat(run: ScratchRunner, env: NodeJS.ProcessEnv = process.env, pid: number = process.pid): SeatIdentity {
 	const agent = [env.AGENT_NAME, env.BR_ACTOR, env.BR_AGENT_NAME].map(value => value?.trim()).find(value => value !== undefined && AGENT_PATTERN.test(value)) ?? null;
+	const claim = ownSessionClaim(env);
+	const own = claim === null ? {} : { own: claim };
 	const chain = ancestorPids(pid, run)?.filter(ancestor => ancestor > 1);
-	if (chain === undefined) return { agent, sessions: [], main: null };
+	if (chain === undefined) return { agent, sessions: [], main: null, ...own };
 	const out = run(["lsof", "-a", "-p", chain.join(","), "-Fn"], { timeoutMs: LSOF_TIMEOUT_MS });
-	if (out.code === null) return { agent, sessions: [], main: null };
+	if (out.code === null) return { agent, sessions: [], main: null, ...own };
 	const locks = new Set<string>();
 	const transcripts = new Set<string>();
 	for (const line of out.stdout.split("\n")) {
@@ -590,7 +652,7 @@ export function callerSeat(run: ScratchRunner, env: NodeJS.ProcessEnv = process.
 	const sessions = [...locks];
 	const both = sessions.filter(id => transcripts.has(id));
 	const main = both.length === 1 ? both[0]! : both.length === 0 && sessions.length === 1 ? sessions[0]! : null;
-	return { agent, sessions, main };
+	return { agent, sessions, main, ...own };
 }
 /**
  * Omp sessions whose lease a process in the given pid's ancestry holds open
@@ -2137,11 +2199,30 @@ function callerIsOwnedBy(ownerPid: number, callerPid: number, run: ScratchRunner
 	return chain !== null && chain.slice(1).includes(ownerPid);
 }
 
-/** A successor seat: the same agent holding the omp session the owner record names, whatever its pid. */
-function callerHoldsSeat(owner: ScratchOwner, deps: InspectDeps): boolean {
-	if (owner.agent === null || owner.session === null) return false;
+/** A successor seat: the same agent holding the omp session the owner record names, whatever its pid. The caller's seat when it holds it, else null. */
+function heldSeat(owner: ScratchOwner, deps: InspectDeps): SeatIdentity | null {
+	if (owner.agent === null || owner.session === null) return null;
 	const seat = deps.callerSeat ? deps.callerSeat() : callerSeat(deps.run);
-	return seat.agent === owner.agent && seat.sessions.includes(owner.session);
+	return seat.agent === owner.agent && seat.sessions.includes(owner.session) ? seat : null;
+}
+
+/**
+ * SCRATCHSIBLING1 (ompkit-fp72.120.16.214): why seat authority does not reach a dir another incarnation of the same seat
+ * made and still runs in, or null when it does. Every background `task` agent shares the lead's agent name, session
+ * leases and omp process, so the seat alone let each one dispose of the lead's and its siblings' live dirs. A dir that
+ * records no creator (made before creator_session existed, or by a caller naming no session) keeps plain seat
+ * authority, as does the creator itself. Otherwise a held lease means the creator is live; a lease outside the
+ * caller's ancestry is probed once (seatLive), and only a definite "nothing holds it" leaves the dir to the seat.
+ */
+function liveSiblingCreator(owner: ScratchOwner, seat: SeatIdentity, deps: InspectDeps): string | null {
+	const creator = owner.creatorSession;
+	if (creator === undefined || creator === seat.own) return null;
+	const live = seat.sessions.includes(creator) ? true : deps.liveness.seatLive?.(owner.agent!, creator) ?? null;
+	if (live === false) return null;
+	const who = creator === owner.session ? `the seat's main session ${creator}` : `incarnation ${creator} of seat ${owner.session}`;
+	const caller = seat.own === undefined ? "this caller names no omp session" : `this caller is ${seat.own}`;
+	return `${who} (${owner.agent}) made this dir and its lease is ${live ? "held" : "unprovable"}; ${caller}. `
+		+ "Only the creator releases it while it lives; pass the capability `scratch new` returned (--capability TOKEN) to release it from elsewhere";
 }
 
 /** PIDIDENT1 (ompkit-a0vy1): the token `scratch new` returns once; 256 random bits, hex. Only its sha256 reaches `.owner`. */
@@ -2375,8 +2456,12 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	let stat;
 	try {
 		stat = lstatSync(dir);
-	} catch {
-		return { ok: false, changed: false, dir, reason: "directory-unavailable", ownerPid: null };
+	} catch (error) {
+		// RELNOW2 (ompkit-fp72.120.16.216): a second --now after the dir was retired names that it is gone.
+		return (error as NodeJS.ErrnoException).code === "ENOENT"
+			? { ok: false, changed: false, dir, reason: "directory-gone", ownerPid: null,
+				detail: "nothing to release: the directory no longer exists (already retired, or the path is wrong)" }
+			: { ok: false, changed: false, dir, reason: "directory-unavailable", ownerPid: null };
 	}
 	if (!stat.isDirectory() || stat.isSymbolicLink()) return { ok: false, changed: false, dir, reason: "not-a-directory", ownerPid: null };
 	const ownerPath = join(dir, ".owner");
@@ -2390,9 +2475,13 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 	if (!/^[A-Za-z0-9._%-]+$/.test(owner.label) || owner.label === "" || owner.label.includes("/") || owner.label.startsWith("."))
 		return { ok: false, changed: false, dir, reason: "directory-owner-mismatch", ownerPid: owner.pid };
 	// Authority is the seat (agent + session lease) or the creation-time capability (PIDIDENT1 ompkit-a0vy1). The
-	// process rule below is kept only for records and callers that have neither.
-	const seatOwned = callerHoldsSeat(owner, deps);
+	// process rule below is kept only for records and callers that have neither. SCRATCHSIBLING1: the seat reaches a
+	// dir another live incarnation of it made only through that dir's capability, never through the shared process.
+	const seat = heldSeat(owner, deps);
+	const sibling = seat === null ? null : liveSiblingCreator(owner, seat, deps);
+	const seatOwned = seat !== null && sibling === null;
 	const capabilityOwned = !seatOwned && capabilityAuthorizes(owner, opts.capability);
+	if (sibling !== null && !capabilityOwned) return { ok: false, changed: false, dir, reason: "sibling-live", ownerPid: owner.pid, detail: sibling };
 	if (!seatOwned && !capabilityOwned && !callerIsOwnedBy(owner.pid, process.pid, deps.run)) {
 		const detail = owner.capabilitySha256 === null ? undefined : opts.capability === undefined || opts.capability === ""
 			? "no capability was presented; pass the one `scratch new` returned with --capability TOKEN (or OMP_KIT_SCRATCH_CAPABILITY)"
@@ -2426,11 +2515,32 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 			// SCRATCHRETIRE1 (ompkit-fp72.120.16.37): disposal follows job completion, not the reaper. A dir its owner
 			// released marker-only (without --now) is retired by that owner's later release with --now under the same bin
 			// and reference, through the same rechecks, provided the marker still pins this very inode.
-			if (opts.now === true && opts.bin !== undefined && prior.bin === opts.bin && (prior.ref ?? undefined) === opts.ref) {
+			if (opts.now === true && opts.bin !== undefined) {
 				const pinned = parseReleaseMarker(prior.markerText);
 				if (!pinned || pinned.device !== String(stat.dev) || pinned.inode !== String(stat.ino))
 					return { ok: false, changed: false, dir, reason: "release-marker-inode-mismatch", ownerPid: owner.pid };
-				return deleteReleasedNow(dir, root, home, deps, owner, ownerText, stat.dev, stat.ino, new Date(deps.now ?? Date.now()).toISOString(), opts.bin);
+				const at = new Date(deps.now ?? Date.now()).toISOString();
+				// Released (the marker stands) but not retired: the CLI exits SCRATCH_RELEASE_HELD with the reason.
+				const held = (reason: string, detail: string): ScratchReleaseResult => ({ ok: false, changed: true, dir, reason, ownerPid: owner.pid, detail });
+				if (prior.bin === null) {
+					// RELNOW2 (ompkit-fp72.120.16.216): a marker released without a bin takes this release's bin (its ref was
+					// verified above), then retires through the same rechecks. It used to answer already-released, ok with
+					// nothing deleted, so the bytes waited for the quarantine TTL.
+					const upgraded = `${prior.markerText.endsWith("\n") ? prior.markerText : `${prior.markerText}\n`}bin=${opts.bin}\n${opts.ref === undefined ? "" : `ref=${opts.ref}\n`}`;
+					try {
+						atomicReplaceBytes(markerPath, Buffer.from(upgraded), { mode: 0o600, durability: "none" });
+					} catch {
+						return held("now-held-marker-upgrade-failed", "released earlier without a bin; recording the bin failed, so it was not retired; rerun the same release with --now");
+					}
+					const rebound = readReleaseRecord(dir);
+					if (!rebound || rebound.markerText !== upgraded || rebound.ownerText !== ownerText || rebound.bin !== opts.bin)
+						return held("now-held-marker-changed", "the release marker or owner changed while the bin was recorded; it was not retired");
+					appendLog(home, { event: "release-bin", dir, at, owner: owner.pid, bin: opts.bin, from: "unbinned" });
+				} else if (prior.bin !== opts.bin || (prior.ref ?? undefined) !== opts.ref) {
+					return held("now-held-bin-mismatch", `released earlier as bin ${prior.bin}${prior.ref === null ? "" : ` with ref ${prior.ref}`}; `
+						+ "rerun --now with that bin and ref to retire it");
+				}
+				return deleteReleasedNow(dir, root, home, deps, owner, ownerText, stat.dev, stat.ino, at, opts.bin);
 			}
 			return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
 		}
@@ -2443,7 +2553,10 @@ export function releaseScratch(path: string, home: string, deps: InspectDeps, op
 		writeFileSync(markerPath, markerText, { encoding: "utf8", flag: "wx", mode: 0o600 });
 	} catch {
 		const prior = readReleaseRecord(dir);
-		if (prior && prior.ownerText === ownerText) return { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
+		// A concurrent release marked it first: with --now that is released but not yet retired, never success.
+		if (prior && prior.ownerText === ownerText) return opts.now === true
+			? { ok: false, changed: true, dir, reason: "now-held-release-raced", ownerPid: owner.pid, detail: "another release marked this dir at the same moment; rerun the same release with --now" }
+			: { ok: true, changed: false, dir, reason: "already-released", ownerPid: owner.pid };
 		return { ok: false, changed: false, dir, reason: "release-marker-write-failed", ownerPid: owner.pid };
 	}
 	const released = readReleaseRecord(dir);
@@ -2616,6 +2729,9 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 		if (!AGENT_PATTERN.test(seat.agent) || !SESSION_PATTERN.test(seat.main)) return { ok: false, dir: "", exportLine: "", reason: "seat-identity-invalid" };
 		fields.agent = seat.agent;
 		fields.session = seat.main;
+		// SCRATCHSIBLING1: which incarnation of the seat made it (the lead's main session or one background agent), so
+		// mine, gate and release reach it only from that incarnation while it lives.
+		if (seat.own !== undefined) fields.creator_session = seat.own;
 	}
 	for (const [key, value] of [["bin", bins.bin], ["purpose", bins.purpose], ["bead", bins.bead], ["expires", bins.expires]] as const) {
 		if (value === undefined) continue;
@@ -3800,11 +3916,19 @@ export interface OwnedScratchRow { dir: string; label: string; state: OwnedScrat
  * agent and a session it holds, or the caller's exact pid. Read-only; a dir
  * the owner already released is listed as released, a hold as held until its
  * expiry. Dirs of other owners and ancestor/sibling seats never appear.
+ * SCRATCHSIBLING1: a dir that records its creator is the creator's alone. The seat's main session also inherits the
+ * dirs of an incarnation whose lease the seat's process no longer holds (a finished background agent), so leftovers
+ * stay owed; release then rechecks that lease. A dir with no recorded creator stays attributed to the whole seat.
 */
 function disposalOwnerMatches(owner: ScratchOwner, deps: InspectDeps): boolean {
 	// Disposal accounting is exact-seat ownership, not process ancestry. A child
 	// seat must never be charged for a parent or sibling's scratch.
-	return callerHoldsSeat(owner, deps) || owner.pid === process.pid;
+	if (owner.pid === process.pid) return true;
+	const seat = heldSeat(owner, deps);
+	if (seat === null) return false;
+	const creator = owner.creatorSession;
+	if (creator === undefined || creator === seat.own) return true;
+	return seat.own === owner.session && !seat.sessions.includes(creator);
 }
 
 function ownerIsLive(owner: ScratchOwner, deps: InspectDeps): boolean {
