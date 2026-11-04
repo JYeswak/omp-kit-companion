@@ -37,11 +37,12 @@ export interface FleetGuardBlock {
 
 export type ScratchCheck = (event: FleetGuardEvent, context: FleetGuardContext) => FleetGuardBlock | undefined;
 
-const AGENTS_STORING = "This repository's enabled .omp/fleet.json policy keeps scratch in repo-local var/agent-tmp; system temp and home-root writes are refused.";
+const AGENTS_STORING = "This repository's enabled .omp/fleet.json policy keeps scratch in repo-local var/agent-tmp (allocate it with `omp-kit scratch new --label <x> --json`); system temp and home-root writes are refused.";
 const AGENTS_SHARED_TREE = "See AGENTS.md (shared tree: stage explicit paths, never git add -A / commit -a / add .).";
+const SYSTEM_TEMP_REMEDY = "Never write to system temp: allocate owned scratch with `omp-kit scratch new --label <x> --json` (run inside your repository) and write there.";
 
-/** Lexical roots no write may land under. Pre-resolved literals; no per-call I/O. */
-const FORBIDDEN_ROOTS = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/folders"] as const;
+/** System temp roots (TMPWRITE1): refused in every session, whatever the calling cwd's fleet policy. */
+const SYSTEM_TEMP_ROOTS = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var/folders", "/private/var/folders"] as const;
 
 function isUnder(path: string, root: string): boolean {
 	return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
@@ -102,8 +103,14 @@ function homeDir(): string {
 	return process.env.HOME ?? "";
 }
 
+// A leading $TMPDIR/$TMP/$TEMP names the process temp dir (the seat scratch when the policy is on, system temp
+// otherwise); an unset variable falls back to /tmp, as mktemp and most tools do.
+const TEMP_VAR = /^\$(?:\{(TMPDIR|TMP|TEMP)\}|(TMPDIR|TMP|TEMP))(?=\/|$)/;
+
 function resolveCandidate(cwd: string, candidate: string): string | null {
 	try {
+		const temp = TEMP_VAR.exec(candidate);
+		if (temp) candidate = (process.env[temp[1] ?? temp[2]!] || "/tmp") + candidate.slice(temp[0].length);
 		const abs = isAbsolute(candidate) ? normalize(candidate) : resolve(cwd, candidate);
 		if (!isAbsolute(abs) || abs.includes("\0")) return null;
 		return abs;
@@ -175,10 +182,22 @@ function isHomeDirectChild(absPath: string, home: string): boolean {
 	return home !== "" && dirname(absPath) === home;
 }
 
-function forbiddenTarget(absPath: string, home: string): string | null {
-	for (const root of FORBIDDEN_ROOTS) {
-		if (isUnder(absPath, root)) return root;
-	}
+/**
+ * The system temp root a write lands under, or undefined. A repository that itself lives in system temp (the commit
+ * gate exports trees under $TMPDIR) keeps its own var/agent-tmp writable: the target's var/agent-tmp must belong to
+ * the calling cwd or an ancestor strictly below the temp root, so /tmp/var/agent-tmp is never admitted.
+ */
+function systemTempRoot(absPath: string, cwd: string): string | undefined {
+	const root = SYSTEM_TEMP_ROOTS.find(temp => isUnder(absPath, temp));
+	if (root === undefined) return undefined;
+	for (let dir = cwd; dir !== root && isUnder(dir, root); dir = dirname(dir))
+		if (isUnder(absPath, join(dir, "var", "agent-tmp"))) return undefined;
+	return root;
+}
+
+function forbiddenTarget(absPath: string, home: string, cwd: string): string | null {
+	const root = systemTempRoot(absPath, cwd);
+	if (root !== undefined) return root;
 	if (isHomeDirectChild(absPath, home)) return "$HOME";
 	return null;
 }
@@ -216,7 +235,7 @@ function checkWritePaths(event: FleetGuardEvent, context: FleetGuardContext): Fl
 		} catch (error) {
 			return { block: true, reason: `fleet-guard scratch-write: cannot resolve ${candidate}: ${String(error)}. ${AGENTS_STORING}` };
 		}
-		const root = forbiddenTarget(abs, home);
+		const root = forbiddenTarget(abs, home, cwd);
 		if (root !== null) return blockScratch("scratch-write", candidate, root);
 	}
 	return undefined;
@@ -323,9 +342,130 @@ export function shellWriteTargets(command: string): string[] {
 			if (dest !== undefined) targets.push(dest);
 			continue;
 		}
+		const atCommand = i === 0 || isSep(tokens[i - 1]!);
+		const name = token.quoted || !atCommand ? "" : commandName(token.text);
+		if (name === "git" || name === "rsync" || name === "tar") {
+			const args: ShellToken[] = [];
+			for (i++; i < tokens.length && !isSep(tokens[i]!); i++) args.push(tokens[i]!);
+			targets.push(...(name === "git" ? gitWriteTargets(args) : name === "rsync" ? rsyncWriteTargets(args) : tarWriteTargets(args)));
+			continue;
+		}
 		i++;
 	}
 	return targets.filter(target => target !== "");
+}
+
+const isOption = (arg: ShellToken): boolean => !arg.quoted && arg.text.startsWith("-") && arg.text !== "-";
+
+// git clone/worktree options that consume the next word (git-clone(1), git-worktree(1)).
+const GIT_GLOBAL_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+const GIT_CLONE_VALUE = new Set(["-b", "--branch", "-o", "--origin", "-u", "--upload-pack", "--depth", "--reference",
+	"--reference-if-able", "-c", "--config", "--template", "--separate-git-dir", "--filter", "-j", "--jobs",
+	"--shallow-since", "--shallow-exclude", "--server-option", "--bundle-uri", "--ref-format"]);
+const GIT_WORKTREE_VALUE = new Set(["-b", "-B", "--reason"]);
+
+/** git clone destination (explicit, else the repository basename in cwd), --separate-git-dir, and git worktree add PATH. */
+function gitWriteTargets(args: readonly ShellToken[]): string[] {
+	let i = 0;
+	while (i < args.length && isOption(args[i]!)) i += GIT_GLOBAL_VALUE.has(args[i]!.text) ? 2 : 1;
+	const sub = args[i++]?.text;
+	const out: string[] = [];
+	if (sub === "clone") {
+		const operands: string[] = [];
+		for (; i < args.length; i++) {
+			const arg = args[i]!;
+			if (!isOption(arg)) { operands.push(arg.text); continue; }
+			const [option, attached] = arg.text.split("=", 2) as [string, string | undefined];
+			const value = attached ?? (GIT_CLONE_VALUE.has(option) ? args[++i]?.text : undefined);
+			if (option === "--separate-git-dir" && value) out.push(value);
+		}
+		if (operands.length >= 2) out.push(operands[1]!);
+		else if (operands.length === 1) {
+			let source = operands[0]!;
+			while (source.endsWith("/")) source = source.slice(0, -1);
+			if (source.endsWith(".git")) source = source.slice(0, -4);
+			out.push(source.slice(Math.max(source.lastIndexOf("/"), source.lastIndexOf(":")) + 1));
+		}
+	} else if (sub === "worktree" && args[i]?.text === "add") {
+		for (i++; i < args.length; i++) {
+			const arg = args[i]!;
+			if (!isOption(arg)) { out.push(arg.text); break; }
+			if (GIT_WORKTREE_VALUE.has(arg.text)) i++;
+		}
+	}
+	return out;
+}
+
+/** rsync's last operand is its destination; a remote (host:path) destination is not local. */
+function rsyncWriteTargets(args: readonly ShellToken[]): string[] {
+	const operands: string[] = [];
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i]!;
+		if (isOption(arg)) { if (arg.text === "-e" || arg.text === "-f" || arg.text === "-T") i++; continue; }
+		operands.push(arg.text);
+	}
+	const dest = operands.length >= 2 ? operands.at(-1)! : undefined;
+	return dest === undefined || /^[^/]*:/.test(dest) ? [] : [dest];
+}
+
+/** Extraction writes under -C/--directory; create/append/update writes only the -f archive (-C is then a source). */
+function tarWriteTargets(args: readonly ShellToken[]): string[] {
+	const out: string[] = [];
+	let writes = false;
+	let archive: string | undefined;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i]!;
+		const text = arg.text;
+		if (arg.quoted) continue;
+		if (text.startsWith("--")) {
+			const [option, attached] = text.split("=", 2) as [string, string | undefined];
+			if (option === "--directory" || option === "--file") {
+				const value = attached ?? args[++i]?.text;
+				if (value === undefined) continue;
+				if (option === "--directory") out.push(value);
+				else archive = value;
+			} else if (option === "--create" || option === "--append" || option === "--update") writes = true;
+			continue;
+		}
+		// Bundled flags: the first word may omit its dash (tar czf a.tgz); -C and -f take the next word or the rest.
+		const flags = text.startsWith("-") ? text.slice(1) : i === 0 ? text : "";
+		for (let at = 0; at < flags.length; at++) {
+			const flag = flags[at]!;
+			if (flag === "c" || flag === "r" || flag === "u") writes = true;
+			if (flag === "C" || flag === "f") {
+				const value = at + 1 < flags.length && text.startsWith("-") && flag === "C" ? flags.slice(at + 1) : args[++i]?.text;
+				if (value !== undefined) {
+					if (flag === "C") out.push(value);
+					else archive = value;
+				}
+				if (flag === "C" && at + 1 < flags.length && text.startsWith("-")) break;
+			}
+		}
+	}
+	if (writes) return archive !== undefined && archive !== "-" ? [archive] : [];
+	return out;
+}
+
+/** Directories an executed mktemp would allocate under: each literal template (beside -p DIR), else $TMPDIR (/tmp unset). */
+function mktempWriteTargets(argv: readonly ShellWord[]): string[] {
+	const name = commandName(argv[0]?.text ?? "");
+	if (name !== "mktemp" && name !== "gmktemp") return [];
+	const tempDir = process.env.TMPDIR || "/tmp";
+	let dir: string | undefined;
+	let prefix = false;
+	const templates: string[] = [];
+	for (let index = 1; index < argv.length; index++) {
+		const text = argv[index]!.text;
+		if (text === "--") { templates.push(...argv.slice(index + 1).map(word => word.text)); break; }
+		if (text.startsWith("--tmpdir")) { dir = text.includes("=") ? text.slice(text.indexOf("=") + 1) : tempDir; continue; }
+		if (text.startsWith("--")) continue;
+		if (!text.startsWith("-") || text === "-") { templates.push(text); continue; }
+		const p = text.indexOf("p"), t = text.indexOf("t");
+		if (p > 0) { dir = text.slice(p + 1) || argv[++index]?.text; continue; }
+		if (t > 0) { prefix = true; if (text.slice(t + 1) === "") index++; }
+	}
+	if (prefix || templates.length === 0) return [join(dir ?? tempDir, "mktemp")];
+	return templates.map(template => dir !== undefined && !isAbsolute(template) ? join(dir, template) : template);
 }
 
 /** git add -A/--all/./. and git commit -a/--all (blanket staging), argv machine. */
@@ -355,7 +495,7 @@ function checkBashTargets(event: FleetGuardEvent, context: FleetGuardContext): F
 	for (const target of shellWriteTargets(command)) {
 		const abs = resolveCandidate(cwd, target);
 		if (abs === null) continue;
-		const root = forbiddenTarget(abs, home);
+		const root = forbiddenTarget(abs, home, cwd);
 		if (root !== null) return blockScratch("scratch-write", target, root);
 	}
 	return undefined;
@@ -368,7 +508,7 @@ const HOST_MKTEMP: "darwin" | "portable" = process.platform === "darwin" ? "darw
 
 /** Under the var/agent-tmp of cwd or one of its ancestors (never the filesystem root's), and not a forbidden root. */
 function repoLocalScratch(target: string, cwd: string, home: string): boolean {
-	if (forbiddenTarget(target, home) !== null) return false;
+	if (forbiddenTarget(target, home, cwd) !== null) return false;
 	for (let dir = cwd; dirname(dir) !== dir; dir = dirname(dir)) {
 		if (target.startsWith(`${join(dir, "var", "agent-tmp")}/`)) return true;
 	}
@@ -443,6 +583,48 @@ function checkShellCommands(event: FleetGuardEvent, context: FleetGuardContext):
 		if (allocation) return allocation;
 		if (gitBlanketArgs(words)) return { block: true,
 			reason: `fleet-guard blanket-git: '${words.slice(0, 4).join(" ")}' stages the shared tree. ${AGENTS_SHARED_TREE}` };
+	}
+	return undefined;
+}
+
+/**
+ * TMPWRITE1 (ompkit-fp72.120.16.158): system-temp writes are refused in every session, seat or subagent, whatever
+ * the calling cwd's fleet policy; the policy-gated check above adds repo scratch and home-root rules on top.
+ * Write/edit paths, shell write operands (redirects, tee/mkdir/cp/mv, git clone/worktree, rsync, tar) and the
+ * directories an executed mktemp allocates under. Reads of system temp stay allowed.
+ */
+export function checkSystemTemp(event: FleetGuardEvent, context: FleetGuardContext): FleetGuardBlock | undefined {
+	const tool = typeof event.toolName === "string" ? event.toolName : "";
+	const cwd = resolve(eventCwd(event, context));
+	const refuse = (candidate: string, abs: string | null): FleetGuardBlock | undefined => {
+		const root = abs === null ? undefined : systemTempRoot(abs, cwd);
+		return root === undefined ? undefined : { block: true,
+			reason: `fleet-guard system-temp: writes to ${candidate} are blocked (under ${root}). ${SYSTEM_TEMP_REMEDY}` };
+	};
+	if (tool === "write" || tool === "edit") {
+		for (const candidate of candidatePaths(event.input)) {
+			let abs: string | undefined;
+			try { abs = resolveFilesystemWriteTarget(cwd, candidate, context); } catch { continue; }
+			const block = abs === undefined ? undefined : refuse(candidate, abs);
+			if (block) return block;
+		}
+		return undefined;
+	}
+	const command = commandFromEvent(event) ?? (typeof event.input === "string" ? event.input : undefined);
+	if (tool !== "bash" || !command) return undefined;
+	const inspection = executedShellCommands(command);
+	// Uninspectable text still has its literal simple commands judged; this check never refuses on parse alone.
+	const segments: ShellWord[][] = [[]];
+	if ("refusal" in inspection)
+		for (const token of shellTokens(command)) {
+			if (!token.quoted && ";&|()".includes(token.text) && token.text.length === 1) segments.push([]);
+			else segments.at(-1)!.push({ text: token.text, expanded: false });
+		}
+	const argvs = "refusal" in inspection ? segments.filter(argv => argv.length > 0) : inspection.commands.map(({ argv }) => argv);
+	const allocations = argvs.flatMap(argv => mktempWriteTargets(argv));
+	for (const target of [...shellWriteTargets(command), ...allocations]) {
+		const block = refuse(target, resolveCandidate(cwd, target));
+		if (block) return block;
 	}
 	return undefined;
 }

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp, type OwnedTmp } from "../kitlib/tmp.ts";
-import { check, gitBlanketArgs, hostAgentName, shellTokens, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
+import { check, checkSystemTemp, gitBlanketArgs, hostAgentName, shellTokens, shellWriteTargets, scratchDirFor, writeScratchOwner, applyScratchEnv } from "./scratch.ts";
 
 const agentTmp = join(import.meta.dir, "../../var/agent-tmp");
 mkdirSync(agentTmp, { recursive: true });
@@ -103,9 +103,12 @@ test("filesystem URIs are decoded before forbidden-root classification", () => {
 
 test("local URI paths use the caller root, not cwd, and reject traversal before normalization", () => {
 	const dir = home();
-	const context = { cwd: "/tmp", localRoot: join(dir, "repo", "local") };
-	for (const path of ["local://notes/out", "local:/notes/out", "local:///notes/out", "local://a%3Ab/out", "local://percent%2520/out"])
+	// cwd is HOME: a cwd-based resolution of local://out would be HOME/out, refused as a HOME-root write, so the
+	// admission proves the caller root was used wherever the test tree lives (the commit gate exports under $TMPDIR).
+	const context = { cwd: dir, localRoot: join(dir, "repo", "local") };
+	for (const path of ["local://out", "local:/out", "local:///out", "local://notes/out", "local://a%3Ab/out", "local://percent%2520/out"])
 		expect(check({ toolName: "write", input: { path } }, context)).toBeUndefined();
+	expect(check({ toolName: "write", input: { path: join(dir, "out") } }, context)?.reason).toContain("$HOME");
 	for (const path of ["local://%2e%2e/out", "local://notes/%2e%2e/out", "local://%2ftmp/out", "local://notes/%5c..%5cout"])
 		expect(check({ toolName: "write", input: { path } }, context)?.block).toBe(true);
 	expect(check({ toolName: "write", input: { path: "local://out" } }, ctx(join(dir, "repo")))?.reason).toContain("backing root");
@@ -343,4 +346,44 @@ test("five hundred checks settle well inside budget without I/O", () => {
 	const started = Date.now();
 	for (let i = 0; i < 500; i++) check(event, ctx(dir));
 	expect(Date.now() - started).toBeLessThan(5000);
+});
+
+test("TMPWRITE1: clone/worktree/rsync/tar destinations are shell write targets; their sources are not", () => {
+	expect(shellWriteTargets("git clone --depth 1 -b main https://h/r.git dest")).toEqual(["dest"]);
+	expect(shellWriteTargets("git -C repo clone https://h/team/r.git/")).toEqual(["r"]);
+	expect(shellWriteTargets("git clone --separate-git-dir=gd src out")).toEqual(["gd", "out"]);
+	expect(shellWriteTargets("git worktree add -b topic ../wt main")).toEqual(["../wt"]);
+	expect(shellWriteTargets("rsync -av -e ssh src/ dst/")).toEqual(["dst/"]);
+	expect(shellWriteTargets("rsync -a src/ host:/tmp/x")).toEqual([]);
+	expect(shellWriteTargets("tar -xzf a.tgz -C out && tar --directory=o2 -xf b.tar")).toEqual(["out", "o2"]);
+	expect(shellWriteTargets("tar czf out.tgz -C src .")).toEqual(["out.tgz"]);
+	expect(shellWriteTargets("tar -tf in.tar")).toEqual([]);
+	expect(shellWriteTargets("echo git clone a /x")).toEqual([]);
+});
+
+test("TMPWRITE1: checkSystemTemp refuses every system-temp sink with the scratch remedy, outside any opt-in", () => {
+	const dir = home();
+	process.env.TMPDIR = "/var/folders/zz/T";
+	for (const command of ["mktemp -d /tmp/x.XXXXXX", "mktemp", "mktemp -d -t x", "mktemp -d -p /var/tmp x.XXX", "mktemp -d \"$TMPDIR/x.XXX\"",
+		"git clone https://h/r.git /tmp/x", "git worktree add /private/tmp/wt", "cp a /var/tmp/b", "rsync -a s/ /var/folders/a/b",
+		"tar -x -f a.tar -C /private/var/folders/c", "echo x > $TMPDIR/f", "echo x | tee /tmp/a", "x=$(mktemp -d /tmp/y.XXX)"]) {
+		const reason = checkSystemTemp({ toolName: "bash", input: { command } }, ctx(dir))?.reason;
+		expect(reason, command).toContain("fleet-guard system-temp");
+		expect(reason).toContain("omp-kit scratch new");
+	}
+	expect(checkSystemTemp({ toolName: "write", input: { path: "/private/var/tmp/x" } }, ctx(dir))?.block).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "git clone https://h/r.git" } }, ctx("/tmp"))?.block).toBe(true);
+	const scratch = join(dir, "repo", "var", "agent-tmp");
+	process.env.TMPDIR = scratch;
+	for (const command of ["mktemp -d var/agent-tmp/x.XXXXXX", "mktemp -d", "echo x > $TMPDIR/f", "cat /tmp/x", "ls /var/folders",
+		"cp /tmp/a var/agent-tmp/b", "git clone /tmp/src var/agent-tmp/c", "omp-kit scratch new --label x --json", "tar -cf var/agent-tmp/a.tar -C /tmp src"])
+		expect(checkSystemTemp({ toolName: "bash", input: { command } }, ctx(join(dir, "repo"))), command).toBeUndefined();
+	expect(checkSystemTemp({ toolName: "read", input: { path: "/tmp/x" } }, ctx(dir))).toBeUndefined(); // tempsafe: judged only
+	// A repository hosted in system temp (the commit gate's export) keeps its own scratch; temp's own var/agent-tmp does not count.
+	const hosted = "/var/folders/zz/T/export/repo";
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "mktemp -d var/agent-tmp/x.XXX" } }, ctx(join(hosted, "sub")))).toBeUndefined();
+	expect(checkSystemTemp({ toolName: "write", input: { path: `${hosted}/var/agent-tmp/f` } }, ctx(hosted))).toBeUndefined();
+	expect(checkSystemTemp({ toolName: "write", input: { path: `${hosted}/f` } }, ctx(hosted))?.block).toBe(true);
+	expect(checkSystemTemp({ toolName: "bash", input: { command: "echo x > var/agent-tmp/f" } }, ctx("/tmp"))?.block).toBe(true);
+	expect(check({ toolName: "write", input: { path: "/var/folders/zz/T/other/var/agent-tmp/f" } }, ctx(hosted))?.block).toBe(true);
 });

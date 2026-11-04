@@ -310,7 +310,7 @@ test("stock plugin loading neither creates fleet scratch nor changes caller temp
 	expect(process.env.TMPDIR).toBe(previousTmp);
 });
 
-test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) permits temp writes and ordinary Git without fleet state", async missing => {
+test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) permits owned temp writes and ordinary Git without fleet state", async missing => {
 	const { cwd } = fixture(false);
 	if (missing === "marker-missing") mkdirSync(join(cwd, ".omp"));
 	const pi = fakePi();
@@ -321,14 +321,15 @@ test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) pe
 			expect(result?.block === true).toBe(false);
 		}
 	};
-	const temp = ownedTmp("stock-write").path;
+	const temp = ownedTmp("stock-write", { root: fleetBase }).path;
 	roots.push(temp);
 	const target = join(temp, "x");
 	await admit({ toolName: "write", input: { path: target, content: "stock temporary output\n" } });
 	writeFileSync(target, "stock temporary output\n");
 	expect(readFileSync(target, "utf8")).toBe("stock temporary output\n");
-	// Admission only: never create or overwrite a system /tmp fixture.
-	await admit({ toolName: "write", input: { path: "/tmp/x", content: "stock temporary output\n" } }); // tempsafe: fake tool-input path the guard only judges, never touched on disk
+	// TMPWRITE1: system temp stays refused without the opt-in (judged only; never created on disk).
+	for (const handler of pi.handlers)
+		expect((await handler({ toolName: "write", input: { path: "/tmp/x", content: "stock temporary output\n" } }, { cwd }))?.reason).toContain("fleet-guard system-temp"); // tempsafe: fake tool-input path the guard only judges, never touched on disk
 	const git = (...args: string[]): string => {
 		const result = Bun.spawnSync(["git", "-C", cwd, ...args], { stdout: "pipe", stderr: "pipe" });
 		if (result.exitCode !== 0) throw new Error(result.stderr.toString());
@@ -342,4 +343,29 @@ test.each(["directory-missing", "marker-missing"])("stock marker absence (%s) pe
 	git("add", "-A");
 	expect(git("diff", "--cached", "--name-only")).toBe("change.txt\n");
 	expect(existsSync(join(cwd, "var", "agent-tmp"))).toBe(false);
+});
+
+// TMPWRITE1 (ompkit-fp72.120.16.158): a background subagent ran `mktemp -d /tmp/x` and `git clone <repo> /tmp/x` from a
+// cwd without the fleet opt-in, where the guard registered only the plutil check. System temp is refused everywhere.
+test.each([["stock repository", (): string => fixture(false).cwd], ["opted-in repository", (): string => fixture().cwd]] as const)("TMPWRITE1: %s sessions refuse system-temp writes and admit owned scratch", async (_label, make) => {
+	const cwd = make();
+	const pi = fakePi();
+	await fleetGuard(pi, { cwd, pid: process.pid });
+	const judge = async (command: string, callingCwd = cwd): Promise<string | undefined> => {
+		for (const handler of pi.handlers) {
+			const result = await handler({ toolName: "bash", input: { command } }, { cwd: callingCwd });
+			if (result?.block) return result.reason;
+		}
+		return undefined;
+	};
+	// Planted fire: the incident forms and the listed sinks (fake commands the guard only judges, never run).
+	for (const command of ["mktemp -d /tmp/x.XXXXXX", "git clone https://example.invalid/r.git /tmp/x", "git worktree add /private/tmp/wt",
+		"cp a /var/tmp/b", "rsync -a src/ /var/folders/zz/x/", "tar -xzf a.tgz -C /tmp/out", "echo hi > /private/var/folders/q"])
+		expect(await judge(command), command).toContain("scratch");
+	// A subagent whose own cwd is system temp cannot clone into it either.
+	expect(await judge("git clone https://example.invalid/r.git", "/tmp")).toBeDefined();
+	// Quiet controls: owned scratch, reads of system temp, the remedy itself.
+	for (const command of ["mkdir -p var/agent-tmp/x && echo hi > var/agent-tmp/x/f", "cat /tmp/x", "cp /tmp/a var/agent-tmp/b",
+		"omp-kit scratch new --label probe --json", "git clone /tmp/src var/agent-tmp/clone"])
+		expect(await judge(command), command).toBeUndefined();
 });

@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { check as checkGit } from "../src/fleet-guard/git.ts";
 import { check as checkReservations, exportAgentMailStorageRoot } from "../src/fleet-guard/reservations.ts";
-import { applyScratchEnv, check as checkScratch, hostAgentName, scratchDirFor, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
+import { applyScratchEnv, check as checkScratch, checkSystemTemp, hostAgentName, scratchDirFor, writeScratchOwner, type FleetGuardBlock, type FleetGuardContext, type FleetGuardEvent } from "../src/fleet-guard/scratch.ts";
 import { endSeat, liveSeatEndDeps, type SeatEndDeps } from "../src/fleet-guard/seat-end.ts";
 import { check as checkDurability } from "../src/fleet-guard/durability.ts";
 import { check as checkWriteOwnership } from "../src/fleet-guard/write-own.ts";
@@ -13,7 +13,8 @@ import { fleetPolicyState } from "./fleet-policy.ts";
  * Scratch goes to the repo-local var/agent-tmp (never /tmp), work happens on main,
  * every write outside var/agent-tmp in a fleet checkout needs the caller's exclusive
  * Agent Mail reservation, and agent calls never switch the commit guard off.
- * Always on, opt-in or not: plutil edits must name their output (PLUTIL_IN_PLACE).
+ * Always on, opt-in or not: plutil edits must name their output (PLUTIL_IN_PLACE), and system temp is never written
+ * (TMPWRITE1; remedy `omp-kit scratch new`).
  * Shipped in the plugin; installed per profile by the kit.
  */
 
@@ -21,6 +22,12 @@ interface ToolCallContext {
 	cwd: string;
 	localProtocolOptions?: { getArtifactsDir?: () => string | null };
 	sessionManager?: { getSessionId?: () => string | undefined };
+}
+
+/** The calling session's local:// backing root, from OMP's own mapping; never guessed from cwd. */
+function localRootOf(context: ToolCallContext | undefined): string | undefined {
+	const artifactsDir = context?.localProtocolOptions?.getArtifactsDir?.();
+	return artifactsDir ? resolve(artifactsDir, "local") : undefined;
 }
 
 interface ExtensionApi {
@@ -50,8 +57,10 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 	const pid = deps?.pid ?? process.pid;
 	const initial = await fleetPolicyState(cwd);
 	// PLUTILINPLACE1 (ompkit-ffb85): the plists it protects live outside every repository, so no opt-in scopes it.
+	// TMPWRITE1 (ompkit-fp72.120.16.158): system-temp writes are refused in every session, seat or subagent alike.
 	if (initial.kind === "off") {
-		pi.on("tool_call", async event => checkPlutilInPlace(event));
+		pi.on("tool_call", async (event, context) => checkPlutilInPlace(event) ?? checkSystemTemp(event, { cwd: context?.cwd ?? cwd,
+			localRoot: localRootOf(context) }));
 		return;
 	}
 	// The seat dir is owned by the agent and its omp session, never by a bare pid. The session id is only known
@@ -84,13 +93,11 @@ export default async function fleetGuard(pi: ExtensionApi, deps?: GuardDeps): Pr
 		if (inPlace) return inPlace;
 		const callingCwd = context?.cwd ?? cwd;
 		const policy = await fleetPolicyState(callingCwd);
-		if (policy.kind === "off") return undefined;
+		if (policy.kind === "off") return checkSystemTemp(event, { cwd: callingCwd, localRoot: localRootOf(context) });
 		if (policy.kind === "unavailable") return { block: true, reason: `fleet-guard applicability: ${policy.reason}` };
 		// OMP supplies the calling session's mapping (including subagent sharing).
 		// No cwd/default-session guess: an absent backing root fails closed for local://.
-		const artifactsDir = context?.localProtocolOptions?.getArtifactsDir?.();
-		return handleToolCall(event, { cwd: callingCwd,
-			localRoot: artifactsDir ? resolve(artifactsDir, "local") : undefined });
+		return handleToolCall(event, { cwd: callingCwd, localRoot: localRootOf(context) });
 	});
 	// The session that recorded the seat ends it; a respawn (marker from respawn_seat) hands the dir on instead.
 	pi.on("session_shutdown", async (_event, context) => {
