@@ -12,7 +12,7 @@
  *   text        checkDelta, accumulated.
  *
  * Usage:
- *   bun scripts/ttsr-harness.ts --observe --rule NAME --line N [--rules DIR] [--cases FILE] [--rule-sha256 EXPECTED_SHA] [--timeout-ms N]
+ *   bun scripts/ttsr-harness.ts --observe --rule NAME (--line N | --lines N,N,...) [--rules DIR] [--cases FILE] [--rule-sha256 EXPECTED_SHA] [--timeout-ms N]
  *   Bind an external selection with --rule-sha256; without it, output names observed bytes but cannot reject substitution.
  *   Observation workers use a disposable HOME/XDG/tmp and preserve stderr; invoking Bun's own cache is caller-managed.
  *   bun scripts/ttsr-harness.ts --gate [--rules DIR] [--cases FILE] | --gate-json [--rules DIR] [--cases FILE]
@@ -27,7 +27,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { LoadedRule, Rule } from "./rule-class.ts";
-import { verifyTernOmpSource } from "../src/paths.ts";
+import { resolveOmpIdentity, verifyTernOmpSource } from "../src/paths.ts";
 import { check as durabilityCheck } from "../src/fleet-guard/durability.ts";
 import { checkBypassEnvironment } from "../src/fleet-guard/git.ts";
 import { checkPlutilInPlace } from "../src/fleet-guard/plutil.ts";
@@ -69,6 +69,10 @@ if (process.argv.includes("--observe") && !process.argv.includes("--observe-chil
 			const value = process.env[key];
 			if (value !== undefined) env[key] = value;
 		}
+		// Resolve before replacing HOME/BUN_INSTALL. Otherwise standalone OMP resolves
+		// its source cache inside every disposable HOME and reinstalls the package,
+		// consuming the evaluator deadline before any native match can run.
+		env.OMP_SRC ??= resolveOmpIdentity(process.env).source;
 		for (const [key, directory] of [
 			["HOME", "home"], ["TMPDIR", "tmp"], ["XDG_CONFIG_HOME", "xdg-config"],
 			["XDG_CACHE_HOME", "xdg-cache"], ["XDG_DATA_HOME", "xdg-data"],
@@ -1499,7 +1503,7 @@ async function witnessBindings(ruleFile: string, casesFile: string): Promise<Rec
 	};
 }
 
-async function observeWitness(rulesDir: string, casesFile: string, ruleName: string, caseLine: number, expectedRuleSha?: string): Promise<WitnessObservation> {
+async function observeWitness(rulesDir: string, casesFile: string, ruleName: string, caseLine: number, expectedRuleSha?: string, bindings?: Record<string, string>): Promise<WitnessObservation> {
 	const unavailable = (reason: string, detail?: string): WitnessObservation => ({ status: "UNAVAILABLE", rule: ruleName, case_line: caseLine, reason, evaluator: "UNAVAILABLE", ...(detail ? { detail } : {}) });
 	if (!/^[a-z0-9][a-z0-9_-]*$/i.test(ruleName) || !Number.isSafeInteger(caseLine) || caseLine < 2) return unavailable("INVALID_SELECTION");
 	if (expectedRuleSha !== undefined && !/^[a-f0-9]{64}$/.test(expectedRuleSha)) return unavailable("INVALID_SELECTION");
@@ -1580,7 +1584,7 @@ async function observeWitness(rulesDir: string, casesFile: string, ruleName: str
 			status: "OK", rule: lr.name, case_line: selected.line, registration: "REGISTERED",
 			whole: whole ? "fire" : "quiet",
 			prefix: first === undefined ? null : { phase: first > length ? "final" : "stream", position: first, wire_length: length },
-			evaluator: "OK", witness: { source: selected.source, tool: selected.tool, path: selected.path, expect: selected.expect }, bindings: await witnessBindings(ruleFile, casesFile),
+			evaluator: "OK", witness: { source: selected.source, tool: selected.tool, path: selected.path, expect: selected.expect }, bindings: bindings ?? await witnessBindings(ruleFile, casesFile),
 		};
 	} catch (error) {
 		return unavailable("EVALUATOR_FAILED", String(error));
@@ -1914,13 +1918,27 @@ const caseReporter = mode !== undefined && ["--gate", "--gate-json", "--selftest
 let code: number;
 switch (mode) {
 	case "--observe": {
-		const observation = await observeWitness(
-			path.resolve(flagValue("--rules") ?? path.join(KIT, "rules")),
-			path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv")),
-			flagValue("--rule") ?? "", Number(flagValue("--line") ?? NaN), flagValue("--rule-sha256"),
-		);
-		console.log(JSON.stringify(observation));
-		code = observation.status === "OK" ? 0 : 1;
+		const rawLines = flagValue("--lines");
+		const selectedLines = rawLines === undefined ? [Number(flagValue("--line") ?? NaN)] : rawLines.split(",").map(Number);
+		if (rawLines !== undefined && (flagValue("--line") !== undefined || selectedLines.some(line => !Number.isSafeInteger(line) || line < 2))) {
+			console.log(JSON.stringify({ status: "UNAVAILABLE", reason: "INVALID_SELECTION", evaluator: "UNAVAILABLE" }));
+			code = 1;
+			break;
+		}
+		const observations: WitnessObservation[] = [];
+		let bindings: Record<string, string> | undefined;
+		for (const line of selectedLines) {
+			const observation = await observeWitness(
+				path.resolve(flagValue("--rules") ?? path.join(KIT, "rules")),
+				path.resolve(flagValue("--cases") ?? path.join(KIT, "cases/cases.tsv")),
+				flagValue("--rule") ?? "", line, flagValue("--rule-sha256"), bindings,
+			);
+			observations.push(observation);
+			if (observation.status === "OK") bindings = observation.bindings;
+			else break;
+		}
+		console.log(JSON.stringify(rawLines === undefined ? observations[0] : observations));
+		code = observations.length === selectedLines.length && observations.every(observation => observation.status === "OK") ? 0 : 1;
 		break;
 	}
 	case "--gate": {
