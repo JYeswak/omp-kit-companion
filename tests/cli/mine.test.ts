@@ -7,7 +7,14 @@ import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, syml
 import { delimiter, dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { runMine, scanMine, renderMine, type MineOptions } from "../../src/mine.ts";
+import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+
+// The fixture env carries only HOME and PATH, so a seat PATH's pane shim (SHIMRESOLVE1) would refuse br
+// with BR_SHIM_IDENTITY_REQUIRED and the read-only tracker search would read UNAVAILABLE. Hand mine the
+// official br the way resolveRealBr resolves it: drop every PATH entry whose br is the pane shim.
+const brShims = new Set(resolveRealBr(process.env.PATH).skipped);
+const fixturePath = (process.env.PATH ?? "").split(delimiter).filter(dir => !brShims.has(join(dir, "br"))).join(delimiter);
 
 let scratch = "", fixtureNumber = 0;
 beforeAll(() => {
@@ -26,7 +33,7 @@ function fixture(withTrackerExport = true) {
 	mkdirSync(join(cc, "spool", "session"), { recursive: true });
 	mkdirSync(join(cc, "spool-archive", "session"), { recursive: true });
 	if (withTrackerExport) { put(join(alpha, ".beads", "issues.jsonl"), ""); put(join(beta, ".beads", "issues.jsonl"), ""); }
-	const env = { HOME: home, PATH: process.env.PATH ?? "" };
+	const env = { HOME: home, PATH: fixturePath };
 	const options: MineOptions = { since: "2026-10-01", until: "2026-11-01", all: true, cwd: alpha, home, env };
 	return { home, alpha, beta, cc, options };
 }
@@ -336,13 +343,75 @@ describe("mine: observed incidents, not transcript mentions", () => {
 			envelope("engine", f.alpha, "guard.decision", { engine: "observational-hook", decision: "failure", rule: null }),
 		]));
 		const report = await runMine(f.options);
-		expect(report.classes.map(c => c.id)).toEqual(["guard-failure:observational-hook", "tool-error:unclassified"]);
+		expect(report.classes.map(c => c.id)).toEqual(["tool-error:unclassified"]);
 		expect(report.excluded_inputs.unbound_cli_events).toBe(1);
 		expect(report.excluded_inputs.unconfigured_scratch_events).toBe(1);
-		expect(report.excluded_inputs.evidence).toHaveLength(2);
+		expect(report.excluded_inputs.duplicate_events).toEqual({ "observational-hook-bash-exit": 1 });
+		expect(report.excluded_inputs.evidence).toHaveLength(3);
 		expect(report.projects).toHaveLength(2);
 		expect(report.projects.find(p => p.path === f.beta)?.telemetry_sources).toEqual([]);
 		expect(renderMine(report)).toContain("Quarantined telemetry (not ranked)");
+	});
+
+	for (const resumable of [false, true]) test(`OBSHOOK1 planted: observed bash exits duplicate their tool span: no class rows, counted in excluded_inputs (${resumable ? "resumable" : "ephemeral"})`, async () => {
+		const f = fixture(), n = 4;
+		// The collector's cc.db row carries no kind (collect_session.py GUARD_DECISIONS bash_failure); the spool row may.
+		const exits = Array.from({ length: n }, (_, index) => envelope(`exit-${index}`, f.alpha, "guard.decision", {
+			engine: "observational-hook", decision: "failure", rule: null, tool_call_sha: `call-${index}`, ...(index % 2 ? {} : { kind: "bash_failure" }),
+		}, `2026-10-15T12:00:0${index}Z`));
+		// One call re-ingested from a resumed/forked session file is the same row, not a new one.
+		const reingested = envelope("exit-0-fork", f.alpha, "guard.decision", { engine: "observational-hook", decision: "failure", rule: null, tool_call_sha: "call-0" }, "2026-10-15T12:00:00Z");
+		put(join(f.cc, "spool", "session", "2026-10-15.jsonl"), jsonl([...exits, reingested]));
+		const report = await runMine({ ...f.options, since: "2026-10-15", until: "2026-10-16", ...(resumable ? { resumeDir: join(f.home, "mine-state") } : {}) });
+		expect(report.classes).toEqual([]);
+		expect(report.occurrences).toEqual([]);
+		expect(report.excluded_inputs.duplicate_events).toEqual({ "observational-hook-bash-exit": n });
+		expect(report.excluded_inputs.evidence.map(e => e.citation.slice(e.citation.lastIndexOf(":"))).sort()).toEqual([":1", ":2", ":3", ":4"]);
+		expect(report.excluded_inputs.evidence[0]?.summary).toContain("(observational-hook-bash-exit)");
+		expect(renderMine(report)).toContain(`observational-hook-bash-exit ${n}`);
+	});
+
+	for (const resumable of [false, true]) test(`OBSHOOK1 planted: a hook that itself errors N times a day is named, keeps its first error and is flagged for R49 demotion (${resumable ? "resumable" : "ephemeral"})`, async () => {
+		const f = fixture(), n = 3;
+		put(join(f.cc, "spool", "session", "2026-10-15.jsonl"), jsonl(Array.from({ length: n }, (_, index) => envelope(`hook-${index}`, f.alpha, "guard.decision", {
+			engine: "observational-hook", decision: "failure", rule: null, kind: "hook_error", hook: "/x/omp-extensions/observational-tool-result.ts",
+			error: index === 0 ? "TypeError: appendEntry is not a function" : `later error ${index}`,
+		}, `2026-10-15T1${index}:00:00Z`))));
+		const report = await runMine({ ...f.options, since: "2026-10-15", until: "2026-10-16", ...(resumable ? { resumeDir: join(f.home, "mine-state") } : {}) });
+		expect(report.classes.map(c => [c.id, c.count])).toEqual([["guard-failure:observational-hook:observational-tool-result", n]]);
+		const hook = report.classes[0]!;
+		expect(hook.evidence[0]?.summary).toBe("Hook observational-tool-result (engine observational-hook) failed: TypeError: appendEntry is not a function");
+		expect(hook.cheapest_enforcement.kind).toBe("gate");
+		expect(hook.cheapest_enforcement.change).toContain("Demote observational-tool-result under the guard lifecycle (R49)");
+		expect(hook.estimated_minutes_lost).toBe(n);
+	});
+
+	test("OBSHOOK1 control: other guard engines' failures are unchanged", async () => {
+		const f = fixture();
+		put(join(f.cc, "spool", "session", "2026-10-15.jsonl"), jsonl([
+			envelope("lane", f.alpha, "guard.decision", { engine: "rch-lane", decision: "failure", rule: null }),
+			envelope("dcg", f.alpha, "guard.decision", { engine: "dcg", decision: "failure", rule: null, hook: "dcg.ts", error: "boom" }, "2026-10-15T13:00:00Z"),
+		]));
+		const report = await runMine(f.options);
+		expect(report.classes.map(c => ({ id: c.id, count: c.count, estimated: c.estimated_minutes_lost, kind: c.cheapest_enforcement.kind, summary: c.evidence[0]?.summary }))).toEqual([
+			{ id: "guard-failure:dcg", count: 1, estimated: 1, kind: "code fix", summary: "Guard engine failed to observe: dcg" },
+			{ id: "guard-failure:rch-lane", count: 1, estimated: 1, kind: "code fix", summary: "Guard engine failed to observe: rch-lane" },
+		]);
+	});
+
+	test("OBSHOOK1 planted: a collector-mapped guard_error reaches the hook-error path with its error class", async () => {
+		const f = fixture();
+		// collect_session.py maps guard-rule guard_error / harm-rule harm_error to decision failure with the error's class label in rule.
+		put(join(f.cc, "spool", "session", "2026-10-15.jsonl"), jsonl([
+			envelope("guard-error", f.alpha, "guard.decision", { engine: "guard-rule", decision: "failure", rule: "TypeError", tool_call_sha: "call-g" }),
+			envelope("harm-error", f.alpha, "guard.decision", { engine: "harm-rule", decision: "failure", rule: null, tool_call_sha: "call-h" }, "2026-10-15T13:00:00Z"),
+		]));
+		const report = await runMine(f.options);
+		expect(report.classes.map(c => ({ id: c.id, kind: c.cheapest_enforcement.kind, summary: c.evidence[0]?.summary }))).toEqual([
+			{ id: "guard-failure:guard-rule:guard-rule", kind: "gate", summary: "Hook guard-rule (engine guard-rule) failed: TypeError (full error text only in the cited session record)" },
+			{ id: "guard-failure:harm-rule:omp-harm-rule", kind: "gate", summary: "Hook omp-harm-rule (engine harm-rule) failed: failure with no recorded error text" },
+		]);
+		expect(report.excluded_inputs.duplicate_events).toEqual({});
 	});
 
 	test("pre-window hook archives cannot consume the October read budget", async () => {
@@ -597,7 +666,7 @@ test("WASTEMINE1 long export paths keep bounded class reports resumable and reco
 	put(source, jsonl([header, ...Array.from({ length: 2050 }, (_, index) =>
 		nativeResult(`bounded-${index}`, `AssertionError: distinct cause ${index}`, "2026-10-15T12:00:00Z", true))]));
 	const options: MineOptions = { since: "2026-10-15", until: "2026-10-16", all: true, home, cwd: project,
-		env: { HOME: home, PATH: process.env.PATH ?? "" }, resumeDir: join(f.home, "long-export-state") };
+		env: { HOME: home, PATH: fixturePath }, resumeDir: join(f.home, "long-export-state") };
 	const first = await runMine(options), reopened = await runMine(options);
 	expect(first.status).toBe("PARTIAL");
 	expect(first.classes).toHaveLength(2048);

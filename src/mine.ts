@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, type ReadStream } from "node:fs";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { createGunzip, type Gunzip } from "node:zlib";
 import { run } from "./kitlib/run.ts";
 import { mineTranscripts } from "./mine-transcripts.ts";
@@ -86,7 +86,8 @@ export interface MineReport {
 	occurrences: MineOccurrence[];
 	waste_classes: MineWasteClass[];
 	inventory: { producer: string; covers: string; limits: string }[];
-	excluded_inputs: { unconfigured_scratch_events: number; unbound_cli_events: number; evidence: MineEvidence[] };
+	/** duplicate_events: rows another counted record already covers, by named reason (OBSHOOK1: observational-hook-bash-exit). */
+	excluded_inputs: { unconfigured_scratch_events: number; unbound_cli_events: number; duplicate_events: Record<string, number>; evidence: MineEvidence[] };
 	cost_basis: string;
 	ledger?: { path: string; totals: Record<"READ" | "PARTIAL" | "MISSING" | "NONE-EXISTS", number>; reused: number; scanned: number;
 		cells: { project: string; day: string; source: MineSource; status: "READ" | "PARTIAL" | "MISSING" | "NONE-EXISTS"; reasons: string[] }[] };
@@ -219,6 +220,8 @@ export function rankMineWaste(report: MineReport): void {
 	}).sort((a, b) => (b.cost.minutes ?? 0) - (a.cost.minutes ?? 0) || (b.cost.tokens ?? 0) - (a.cost.tokens ?? 0)
 		|| b.cost.rounds - a.cost.rounds || compare(a.project, b.project) || compare(a.id, b.id));
 }
+/** Observe-only hook engines whose failure decision is their own error, by producer file (collect_session.py GUARD_DECISIONS). */
+const HOOK_PRODUCERS: Record<string, string> = { "observational-hook": "observational-tool-result", "guard-rule": "guard-rule", "harm-rule": "omp-harm-rule" };
 export function enforcement(id: string): MineClass["cheapest_enforcement"] {
 	if (id === "waste:commit-retries") return { kind: "preflight check", change: "Run the installed commit-preflight members on the exact owned paths before the first commit; put every retained refusal requirement in the build brief, without weakening the commit gate." };
 	if (id === "waste:rework-rounds") return { kind: "skill line", change: "Put the cited failed acceptance witness, its expected result, and repository gate requirements in the original bead and agent brief before implementation." };
@@ -229,6 +232,8 @@ export function enforcement(id: string): MineClass["cheapest_enforcement"] {
 	if (id.startsWith("release-fail")) return { kind: "code fix", change: "Fix the failing suite/file named by the verdict evidence; do not weaken the release gate or regenerate a passing verdict." };
 	if (id === "reopened-bead" || id === "rework") return { kind: "gate", change: "Require non-author replay of the original acceptance on the exact published revision before close; include this bead's failed witness." };
 	if (id.startsWith("timeout:")) return { kind: "code fix", change: "Bound and cancel the named producer's entire process group and diagnose its slow dependency; preserve timeout as failure." };
+	// A hook that itself errored (OBSHOOK1): the class key names the hook; repair it or demote it under the guard lifecycle.
+	if (id.startsWith("guard-failure:") && id.split(":").length === 3) { const hook = id.slice(id.lastIndexOf(":") + 1); return { kind: "gate", change: `Demote ${hook} under the guard lifecycle (R49): it errored instead of observing, so it measures nothing until the cited first error is repaired; restore it only after a paired control proves it observes again.` }; }
 	if (id.startsWith("guard-failure:")) return { kind: "code fix", change: "Repair the named guard engine's failed observation/transport; keep a missing observation UNKNOWN instead of treating it as permission or blaming the guarded command." };
 	if (id.startsWith("finding:")) return { kind: "preflight check", change: "The named check answered FAIL on each cited run: route its finding to the owner of the cited repository and resolve it (or prove it false and fix the check); keep the finding visible rather than silencing the probe or relabeling it a tool error." };
 	if (id.startsWith("tool-error:")) return { kind: "code fix", change: "Replay the exact failing invocation in the cited transcript, repair its input/implementation at the responsible layer, and keep the error visible until the real path succeeds." };
@@ -263,7 +268,7 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	const cc = env.CC_STATE ?? join(state, "cc");
 	const config = env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "omp-kit", "fleet-watch.json");
 	const report: MineReport = { schema_version: "omp-kit.mine.v1", since: options.since, until: options.until, status: "QUIET", projects: [], classes: [], occurrences: [], waste_classes: [], coverage: [], warnings: [], inventory: INVENTORY,
-		excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] },
+		excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, duplicate_events: {}, evidence: [] },
 		cost_basis: "Ranking: available minute estimates descending (unknown ranks at zero, not claimed zero harm), count descending, project/class lexical. Explicit cost_min or failed-tool/verdict wall time is used when recorded; unmeasured event proxies: commit refusal 2m, guard friction 1m, release FAIL 15m, REWORK/blocked/git correction 5m, reopen 10m, scratch 1m, timeout 1m. Primary transcript records without measured endpoints have unknown minutes, not invented loss. Successful slow calls count only excess over 60s. Recorded spans are summed work-time proxies, not exclusive human time or causal proof. Same-bead/day REWORK/reopen events coalesce across histories. First 5 citations per class in the human-readable sample; JSON occurrences contains every counted event with a stable event_id (retained producer id, otherwise SHA-256 of the source identity) and retained replay context. Join reports on event_id, not mutable class/project/citation keys. UTC [since,until)." };
 	const warn = (message: string) => { if (!report.warnings.includes(message)) report.warnings.push(message); };
 	const projects = new Map<string, MineProject>();
@@ -275,6 +280,7 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	const telemetrySeen = new Set<string>();
 	const actions = new Map<string, { surface: string; repo: string | null }>();
 	const pendingFindings = new Map<string, MineSourceFinding>();
+	const duplicates = new Map<string, { project: string; reason: string; evidence: MineEvidence }>();
 	const start = performance.now(); let rows = 0, files = 0, bytes = 0, searches = 0;
 	const reworkTransitions: { project: string; bead: string; from: string; to: string; at: number; citation: string; cause: string; fromTime?: number | null }[] = [];
 	function reworkTransition(project: string, bead: string, from: string, to: string, at: number, citation: string, cause: string, fromTime?: number | null): void {
@@ -411,6 +417,32 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 			const timing = object(data.timing);
 			const wall = number(timing?.wall_ms);
 			emit("release-fail", project, t, producer, citation, `FAIL tree=${code(data.tree)} role=${code(data.judge_role)}`, wall === null ? null : wall / 60_000, 15, `verdict:${project}:${code(data.tree)}:${code(data.checks)}:${t}`);
+			return;
+		}
+		const engineName = String(data.engine);
+		const hookEngine = type === "guard.decision" && (decision === "failure" || decision === "error") && exit !== 0 && Object.hasOwn(HOOK_PRODUCERS, engineName) ? HOOK_PRODUCERS[engineName] : undefined;
+		if (hookEngine) {
+			const engine = engineName;
+			const kind = text(data.kind) ?? text(data.guard_kind);
+			const hookError = text(data.error) ?? text(data.detail) ?? text(data.message) ?? text(data.stderr);
+			// OBSHOOK1: the observational hook records the agent's non-zero bash exit as kind bash_failure; the collector
+			// (collect_session.py GUARD_DECISIONS) maps only that kind to decision failure and drops the kind. That is the hook
+			// working, and the call's failed tool span already counts the command failure: a duplicate, never ranked again.
+			if (engine === "observational-hook" && (kind === "bash_failure" || (kind === null && hookError === null && decision === "failure"))) {
+				const call = text(data.tool_call_sha) ?? eventId ?? identity;
+				// Rows sharing one call (re-ingested from a resumed or forked session file) are one duplicate.
+				const key = `${project}\0${call}`;
+				if (!duplicates.has(key)) duplicates.set(key, { project, reason: "observational-hook-bash-exit", evidence: { citation, timestamp: new Date(t).toISOString(), producer,
+					summary: "Observed bash exit (observational-hook-bash-exit): duplicates the call's failed tool span, which is counted; not ranked" } });
+				return;
+			}
+			// The hook itself errored. The collector carries only the error's code-safe class label in rule; the full
+			// first error stays in the cited session record, never in the CC store.
+			const hookPath = text(data.hook);
+			const hook = code(hookPath ? basename(hookPath, extname(hookPath)) : hookEngine);
+			const errorClass = text(data.rule) ? code(data.rule) : null;
+			const firstError = hookError ?? (errorClass && errorClass !== "unknown" ? `${errorClass} (full error text only in the cited session record)` : `${kind ?? decision} with no recorded error text`);
+			emit(`guard-failure:${code(engine)}:${hook}`, project, t, producer, citation, `Hook ${hook} (engine ${code(engine)}) failed: ${firstError}`, cost, 1, `guard-failure:${identity}`, extra);
 			return;
 		}
 		if (type === "guard.decision" && decision === "failure" && exit !== 0) {
@@ -713,6 +745,12 @@ export async function scanMine(options: MineScanOptions): Promise<MineReport> {
 	for (const finding of pendingFindings.values()) {
 		if (admittedClasses.has(`${finding.project}\0${finding.class_id}`)) report.occurrences.push(mineFindingOccurrence(finding));
 	}
+	// A resumable cell counts only its own project, so the joined report sums each duplicate once.
+	for (const { project, reason, evidence } of duplicates.values()) {
+		if (options.scopeProject !== undefined ? project !== options.scopeProject : options.all ? !projects.has(project) && project !== "@unattributed" : !selectedProjects.has(project)) continue;
+		report.excluded_inputs.duplicate_events[reason] = (report.excluded_inputs.duplicate_events[reason] ?? 0) + 1;
+		if (report.excluded_inputs.evidence.length < 5) report.excluded_inputs.evidence.push(evidence);
+	}
 	for (const c of report.classes) {
 		c.measured_minutes_lost = c.measured_minutes_lost === null ? null : round(c.measured_minutes_lost);
 		c.estimated_minutes_lost = c.estimated_minutes_lost === null ? null : round(c.estimated_minutes_lost);
@@ -770,6 +808,8 @@ export function renderMine(report: MineReport): string {
 	}
 	lines.push("", "## Quarantined telemetry (not ranked)",
 		`Unconfigured scratch/test events: ${report.excluded_inputs.unconfigured_scratch_events}; unbound CLI results: ${report.excluded_inputs.unbound_cli_events}. These are retained as a data-quality defect, never assigned to a project by guess.`);
+	const duplicateReasons = Object.entries(report.excluded_inputs.duplicate_events).sort((a, b) => compare(a[0], b[0]));
+	if (duplicateReasons.length) lines.push(`Duplicates of an already counted record: ${duplicateReasons.map(([reason, count]) => `${markdown(reason)} ${count}`).join("; ")}.`);
 	for (const e of report.excluded_inputs.evidence) lines.push(`- ${e.timestamp}: ${e.summary} — \`${markdown(e.citation)}\``);
 	lines.push("", "## Coverage and limitations");
 	for (const warning of report.warnings) lines.push(`- **${markdown(warning)}**`);

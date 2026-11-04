@@ -196,7 +196,7 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 		if (reusable) { current.push(reusable); reused++; continue; }
 		const findings: MineSourceFinding[] = [], until = new Date(Date.parse(`${date}T00:00:00Z`) + 86400_000).toISOString().slice(0, 10);
 		const synthetic = target === "@unattributed" && source !== "cc" && source !== "hooks" && source !== "transcripts";
-		const report = synthetic ? { ...census, projects: [], classes: [], coverage: [], warnings: [], excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] } }
+		const report = synthetic ? { ...census, projects: [], classes: [], coverage: [], warnings: [], excluded_inputs: { unconfigured_scratch_events: 0, unbound_cli_events: 0, duplicate_events: {}, evidence: [] } }
 			: await scanMine({ ...options, since: date, until, all: target === "@unattributed", project: target === "@unattributed" ? undefined : target,
 				census: census.projects, scopeProject: target, sources: [source], lookupBeads: false, fileIndex: index, verdictOwners,
 				budgetMultiplier: Math.min(4, 2 ** Math.min(2, previous?.attempts ?? 0)), onFinding: finding => { if (finding.project === target) findings.push(finding); } });
@@ -224,7 +224,7 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 	}
 	const uniqueFindings = new Map<string, MineSourceFinding>(), classes = new Map<string, MineClass>();
 	const projects = census.projects.map(p => ({ ...p, events: 0, session_spans: 0, telemetry_sources: [] as string[], source_records: {} as Record<string, number> }));
-	const excluded: MineReport["excluded_inputs"] = { unconfigured_scratch_events: 0, unbound_cli_events: 0, evidence: [] };
+	const excluded: MineReport["excluded_inputs"] = { unconfigured_scratch_events: 0, unbound_cli_events: 0, duplicate_events: {}, evidence: [] };
 	for (const cell of current) {
 		const p = projects.find(p => p.path === cell.project), sourceProject = cell.result.report.projects.find(p => p.path === cell.project);
 		if (p && sourceProject) {
@@ -232,11 +232,16 @@ export async function runResumableMine(options: MineOptions): Promise<MineReport
 			for (const name of sourceProject.telemetry_sources) if (!p.telemetry_sources.includes(name)) p.telemetry_sources.push(name);
 			for (const [name, rows] of Object.entries(sourceProject.source_records)) p.source_records[name] = (p.source_records[name] ?? 0) + rows;
 		}
+		const value = cell.result.report.excluded_inputs;
 		if (cell.project === "@unattributed" || !options.all && cell.project === targets[0]) {
-			const value = cell.result.report.excluded_inputs;
 			excluded.unconfigured_scratch_events += value.unconfigured_scratch_events; excluded.unbound_cli_events += value.unbound_cli_events;
 			for (const evidence of value.evidence) if (excluded.evidence.length < 5) excluded.evidence.push(evidence);
+		} else for (const evidence of value.evidence) {
+			// --all: this project cell's own duplicate citations (each summary names its reason); scratch/unbound rows come from @unattributed.
+			if (excluded.evidence.length < 5 && Object.keys(value.duplicate_events).some(reason => evidence.summary.includes(`(${reason})`))) excluded.evidence.push(evidence);
 		}
+		// Each cell counted duplicates for its own project only (scanMine scopeProject), so every cell's counts sum once.
+		for (const [reason, count] of Object.entries(value.duplicate_events)) excluded.duplicate_events[reason] = (excluded.duplicate_events[reason] ?? 0) + count;
 		for (const finding of cell.result.findings) {
 			const key = mineFindingKey(finding), previous = uniqueFindings.get(key);
 			uniqueFindings.set(key, previous ? mergeMineFindings(previous, finding) : finding);
