@@ -53,7 +53,8 @@ export interface MailWakeDeps {
 	fastWaitMs?: number;
 }
 
-export interface Seat { name: string; session: string; block: string; repo: string; sessionFile?: string }
+/** `repo` is the live launch cwd; `project` is the seat's canonical project (its configured chief row's repo, else its cwd). */
+export interface Seat { name: string; session: string; block: string; repo: string; project: string; sessionFile?: string }
 /**
  * `name` is the seat bound through its launch cwd (or its configured chief row); `projectName` is the
  * requested project's own pane identity file at this block, `<sha1(projectKey)[:12]>/tern-<block>`, the
@@ -354,7 +355,11 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		// Configured chiefs use canonical-project identities while preserving their actual launch cwd.
 		for (const block of live) {
 			const bound = identityFor(block, projectKey, name);
-			if (bound && bound.toLowerCase() === name.toLowerCase()) matches.push({ name: bound, session: block.session, block: block.block, repo: block.cwd, ...(block.sessionFile ? { sessionFile: block.sessionFile } : {}) });
+			if (bound && bound.toLowerCase() === name.toLowerCase()) matches.push({
+				name: bound, session: block.session, block: block.block, repo: block.cwd,
+				project: chiefRow(block, projectKey, name) ? projectKey : block.cwd,
+				...(block.sessionFile ? { sessionFile: block.sessionFile } : {}),
+			});
 		}
 		const seat = matches.find(match => match.repo === projectKey) ?? matches[0];
 		if (seat) return { kind: "seat", seat };
@@ -441,12 +446,16 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		for (const target of plan.targets) {
 			const base = { message_id: id, project_key: plan.projectKey, sender: plan.sender, recipient: target.name, subject: plan.subject, pause_state: "UNKNOWN" };
 			const seat = target.res.kind === "seat" ? target.res.seat : null;
-			let stopped = mailWakeStopReason(fleetWatchPath, plan.projectKey, seat?.repo ?? plan.projectKey, seat?.session);
+			// MAILSTOPXREPO1: a resolved seat is judged by its own project, cwd and session; the mail's project key only
+			// judges the no-seat branch. A key shared across repos must not borrow another project's pause (or enablement).
+			let stopped = seat
+				? mailWakeStopReason(fleetWatchPath, seat.project, seat.repo, seat.session)
+				: mailWakeStopReason(fleetWatchPath, plan.projectKey, plan.projectKey);
 			if (!stopped && seat?.sessionFile) {
 				const entries = recipientModeEntries(seat.sessionFile);
 				if (entries?.length) {
 					base.pause_state = mailPauseState(entries);
-					stopped = mailWakeStopReason(fleetWatchPath, plan.projectKey, seat.repo, seat.session, entries);
+					stopped = mailWakeStopReason(fleetWatchPath, seat.project, seat.repo, seat.session, entries);
 				}
 			}
 			if (stopped) {

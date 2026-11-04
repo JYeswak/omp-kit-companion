@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { FlywheelExecOptions, FlywheelExecResult } from "./kit-flywheel-guard";
-import { createMailWake, messageIdOf } from "./kit-mail-wake";
+import { createMailWake, mailWakeStopReason, messageIdOf } from "./kit-mail-wake";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "../tests/cli/fixture-process.ts";
 
@@ -22,7 +22,7 @@ const REPO = "/abs/fleet/omp-kit";
 interface Call { command: string; args: string[]; options?: FlywheelExecOptions }
 
 /** A fleet: omp-test tab with live blocks 5 (RusticPine, director) and 9 (JadeThrush); GreenRabbit is a background agent. */
-function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number; blocks?: { id: number; cwd: string; live: boolean }[]; panes?: { pane: number; omp_session_file: string }[] } = {}) {
+function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<FlywheelExecResult>; fastWaitMs?: number; blocks?: { id: number; cwd: string; live: boolean }[]; extraTabs?: { name: string; blocks: { id: number; cwd: string; live: boolean }[] }[]; panes?: { pane: number; omp_session_file: string }[] } = {}) {
 	const home = freshDir(base, "home-");
 	const ident = join(home, ".config", "agent-mail", "identity", createHash("sha1").update(REPO).digest("hex").slice(0, 12));
 	mkdirSync(ident, { recursive: true });
@@ -37,7 +37,7 @@ function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<Flywhe
 	const exec = async (command: string, args: string[], options?: FlywheelExecOptions): Promise<FlywheelExecResult> => {
 		const call = { command, args, options };
 		calls.push(call);
-		if (command === "tern") return { code: 0, stdout: JSON.stringify({ sessions: [{ name: "Default", tabs: [{ name: "omp-test", blocks: opts.blocks ?? [{ id: 5, cwd: REPO, live: true }, { id: 9, cwd: REPO, live: true }] }] }], panes: opts.panes }) };
+		if (command === "tern") return { code: 0, stdout: JSON.stringify({ sessions: [{ name: "Default", tabs: [{ name: "omp-test", blocks: opts.blocks ?? [{ id: 5, cwd: REPO, live: true }, { id: 9, cwd: REPO, live: true }] }, ...(opts.extraTabs ?? [])] }], panes: opts.panes }) };
 		if (command === "am") return { code: 0, stdout: JSON.stringify([{ name: "GreenRabbit", task_description: "MAILPROTO1 bead ompkit-fp72.134 (roster BuildMailProto)" }, { name: "StormyCove", task_description: "rhy9.16 cutover under CopperTrout" }]) };
 		if (command === "omp-kit") return opts.omp ? opts.omp(call) : { code: 0, stdout: JSON.stringify({ data: { status: "OK", detail: "landed" } }) };
 		return { code: 127, stdout: "", stderr: "unexpected" };
@@ -285,4 +285,55 @@ test("message id parsing and the task-description parent pattern", () => {
 	const start = performance.now();
 	expect(near.slice(0, 500).match(pattern)).toBeNull();
 	expect(performance.now() - start).toBeLessThan(50);
+});
+
+// MAILSTOPXREPO1 (ompkit-fp72.120.16.234): a resolved seat is judged by its own repo and session, never the mail's key.
+const CFS = "/abs/fleet/cfsios";
+function crossRepoFleet(ompTestEnabled: boolean, cfsEnabled: boolean) {
+	const f = fleet({ extraTabs: [{ name: "cfsios", blocks: [{ id: 12, cwd: CFS, live: true }] }] });
+	const ident = join(f.home, ".config", "agent-mail", "identity", createHash("sha1").update(CFS).digest("hex").slice(0, 12));
+	mkdirSync(ident, { recursive: true });
+	writeFileSync(join(ident, "tern-12"), JSON.stringify({ name: "CrimsonHorizon" }));
+	writeFileSync(f.fleetWatchPath, JSON.stringify({ sessions: [
+		{ session: "omp-test", repo: REPO, pullEnabled: ompTestEnabled }, { session: "cfsios", repo: CFS, pullEnabled: cfsEnabled },
+	] }));
+	return f;
+}
+
+test("MAILSTOPXREPO1 planted: mail under a paused project's key to an enabled seat in another repo wakes it", async () => {
+	const f = crossRepoFleet(false, true);
+	expect(await f.wake.beforeSend("xrepo", "send_message", ask("CrimsonHorizon"), REPO)).toBeUndefined();
+	const patch = await f.wake.afterSend({ toolCallId: "xrepo", content: sent(78603), isError: false });
+	expect(JSON.stringify(patch)).toContain("WAKE_DELIVERED: mail 78603 -> CrimsonHorizon at tern:12 (cfsios, /abs/fleet/cfsios)");
+	expect(f.wakes()).toHaveLength(1);
+	expect(f.ledger()).toMatchObject([{ status: "WAKE_DELIVERED", recipient: "CrimsonHorizon", session: "cfsios", repo: CFS, project_key: REPO }]);
+	// Mutant: the old call judged this seat by the mail key, which matches the paused omp-test row.
+	expect(mailWakeStopReason(f.fleetWatchPath, REPO, CFS, "cfsios")).toBe("PROJECT_STOPPED: fleet-watch pullEnabled false");
+	expect(mailWakeStopReason(f.fleetWatchPath, CFS, CFS, "cfsios")).toBeNull();
+});
+
+test("MAILSTOPXREPO1 planted: mail under an enabled project's key to a seat in a paused session stays STOPPED", async () => {
+	const f = crossRepoFleet(false, true);
+	expect(await f.wake.beforeSend("xrepo-paused", "send_message", { ...ask("JadeThrush"), project_key: CFS }, CFS)).toBeUndefined();
+	const patch = await f.wake.afterSend({ toolCallId: "xrepo-paused", content: sent(78612), isError: false });
+	expect(JSON.stringify(patch)).toContain("STOPPED_NOT_WOKEN: mail 78612 to JadeThrush");
+	expect(f.wakes()).toHaveLength(0);
+	expect(f.ledger()).toMatchObject([{ status: "STOPPED_NOT_WOKEN", session: "omp-test", repo: REPO, project_key: CFS }]);
+});
+
+test("MAILSTOPXREPO1 planted: a chief launched above its project whose session row is paused stays STOPPED", async () => {
+	const f = chiefFleet();
+	const chief = { agent: "PeachLeopard", session: "omp-test", pane: "tern:44", repo: REPO, cwd: CHIEF_CWD };
+	// The paused row covers neither the chief's project nor its cwd: only the session match stops it.
+	writeFileSync(f.fleetWatchPath, JSON.stringify({ chief, sessions: [{ session: "omp-test", repo: "/abs/unrelated", pullEnabled: false }] }));
+	expect(await f.wake.beforeSend("chief-paused", "send_message", { ...ask("PeachLeopard"), sender_name: "RusticPine" }, REPO)).toBeUndefined();
+	const patch = await f.wake.afterSend({ toolCallId: "chief-paused", content: sent(66109), isError: false });
+	expect(JSON.stringify(patch)).toContain("STOPPED_NOT_WOKEN: mail 66109 to PeachLeopard");
+	expect(f.wakes()).toHaveLength(0);
+	// A paused row on the chief's canonical project (not its cwd, which sits above it) also stops it.
+	const g = chiefFleet();
+	writeFileSync(g.fleetWatchPath, JSON.stringify({ chief, sessions: [{ session: "other-tab", repo: REPO, pullEnabled: false }] }));
+	expect(await g.wake.beforeSend("chief-project", "send_message", { ...ask("PeachLeopard"), sender_name: "RusticPine" }, REPO)).toBeUndefined();
+	expect(JSON.stringify(await g.wake.afterSend({ toolCallId: "chief-project", content: sent(66110), isError: false }))).toContain("STOPPED_NOT_WOKEN");
+	expect(g.wakes()).toHaveLength(0);
 });
