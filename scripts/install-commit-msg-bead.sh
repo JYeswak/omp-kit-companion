@@ -41,6 +41,11 @@
 # br_init_check.py beside the same kitlib ratchet engine and pysafe.py) is
 # always installed: it refuses a commit whose staged sources add an unpinned
 # br init that could lock an ancestor tracker.
+# The staged-embed member (scripts/check-staged-embed.sh, using the pysafe.py
+# and kitlib-tmp.sh the staged-pysafe and kitlib-tmp groups place beside it)
+# is always installed: when staged paths touch a generated embed's producer,
+# outputs or inputs (installer/embed-bootstrap.py EMBEDS), it refuses a stale
+# output, naming the regenerate command.
 # --no-pushed-beads installs the forward-only set (commit-msg + ref guard +
 # shared-main member): new id-less commits are refused, existing history is not
 # judged. A full install refuses (exit 5) when the unpublished range already
@@ -285,6 +290,7 @@ gate_event commit-msg kitlib_jsonl.py scripts/kitlib_jsonl.py -x
 gate_event commit-msg kitlib_lock.py scripts/kitlib_lock.py -x
 staged_readme pre-commit readme-check.ts scripts/readme-check.ts -x
 staged_readme pre-commit 46-omp-kit-staged-readme scripts/check-staged-readme.sh +x
+staged_embed pre-commit 56-omp-kit-staged-embed scripts/check-staged-embed.sh +x
 commit_notes commit-msg release-notes.ts scripts/release-notes.ts -x
 commit_notes commit-msg limit-process-tree.sh scripts/limit-process-tree.sh -x
 commit_notes commit-msg 46-omp-kit-commit-notes scripts/check-commit-notes.sh +x
@@ -742,6 +748,14 @@ install_staged_readme() {
 	install_manifest_group staged_readme
 	printf 'installed staged-readme member: %s\n' "$member"
 }
+# install_staged_embed: EMBEDDEP1 (ompkit-fp72.120.16.197) refuses a commit whose staged generated
+# embed (installer/install.py) is stale against its staged inputs; it runs the staged producer's --check.
+install_staged_embed() {
+	dir=$(chain_dir pre-commit)
+	member="$dir/56-omp-kit-staged-embed"
+	install_manifest_group staged_embed
+	printf 'installed staged-embed member: %s\n' "$member"
+}
 
 # install_commit_notes: the commit-msg member asks release-notes.ts (the code
 # the release train runs) whether the staged commit has notes coverage; it runs
@@ -863,6 +877,7 @@ install_staged_br_init
 install_staged_portable_paths
 install_staged_wallclock
 install_staged_readme
+install_staged_embed
 [ "$NATIVE_PRESERVATION" = 0 ] || install_native_preservation
 
 # Verify the whole installed chain (any failure rolls every mutation back):

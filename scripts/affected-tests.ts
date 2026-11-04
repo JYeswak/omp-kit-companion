@@ -2,6 +2,7 @@
 // affected-tests.ts — CIGATE1 (ompkit-v66l.27.1): select the test files a pushed diff affects.
 //
 // Usage: bun scripts/affected-tests.ts --root DIR [--changed-file PATH ...] [--explain] [--order path|distance]
+//            [--status-out FILE]
 //        bun scripts/affected-tests.ts --plan --budget-secs N --workers K [--timings FILE] [--deferred-out FILE]
 //            [--changed-file PATH ...] -- TEST...   (wall-budget plan; see planBudget)
 //
@@ -12,10 +13,20 @@
 //   (b) it reaches a changed path through static edges: an import/export/require/import() that Bun's
 //       own parser finds (Bun.Transpiler.scanImports, so no regex reads source), followed
 //       transitively, or a literal path naming the changed file (a test that spawns `src/cli.ts` or
-//       runs `$ROOT/scripts/x.sh`), one hop from the change.
+//       runs `$ROOT/scripts/x.sh`), one hop from the change, or
+//   (c) EMBEDDEP1 (ompkit-fp72.120.16.197): it reaches a file generated from a changed path. A
+//       producer declares `EMBEDS = {output: [inputs]}` as JSON data (installer/embed-bootstrap.py);
+//       a change to an input counts as a change to its outputs, like a Bazel genrule's outs, or
+//   (d) the change is a rule file PACK/ID.md and the test loads that rule: it calls a rule loader
+//       (an exported `loadRule*` function) and names ID, or it is, imports or names a source that
+//       calls a loader on the PACK directory (ttsr-harness.ts on "rules").
+// A change to a shared runtime (FULL_SUITE_TRIGGERS) is a FULL plan: every test file is affected.
 // stdout: one selected test path per line, sorted. stderr: a one-line summary; with --explain, one
-// `path <- changed` line per selection naming the changed path that pulled it in.
-// Exit 0 with an empty stdout means no test is affected; 2 is a usage or unreadable-root error.
+// `path <- changed` line per selection naming the changed path that pulled it in. --status-out FILE
+// writes `FULL <trigger,...>` or `SELECTED`, so a gate can run or require the full suite instead of
+// budgeting a FULL plan as an ordinary selection.
+// Exit 0 with an empty stdout means no test is affected; 2 is a usage, unreadable-root or
+// malformed-EMBEDS error.
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, normalize, relative, sep } from "node:path";
 import process from "node:process";
@@ -27,8 +38,15 @@ const SCANNED_EXT = [...SOURCE_EXT, ".sh", ".py"];
 // Never source: VCS state, dependencies, peers' scratch (var/agent-tmp) and build output.
 const SKIP_DIR: Record<string, true> = { ".git": true, node_modules: true, var: true, dist: true };
 const FIXTURE_DIR = "tests/fixtures/";
+// EMBEDDEP1: measured 2026-11-04 at 0bc1a2eb4f (var/sitrep/groupreap-reland-plan.md in omp-kit), 360 of
+// 441 test files reach one of these through imports, spawned paths or a compiled binary, so a subset
+// saves nothing, and the GROUPREAP1 push (5aa8569fd9) ran 4 files while the 55 s wall budget deferred
+// the rest to a paused CI. Like an Nx sharedGlobals input, a change to one affects every test.
+export const FULL_SUITE_TRIGGERS: readonly string[] = ["scripts/pysafe.py", "scripts/kitlib_run.py", "src/kitlib/run.ts"];
+// A generated-file producer declares its outputs and their inputs on lines starting at this marker.
+const EMBEDS_MARKER = "\nEMBEDS = {";
 
-export type Selection = { tests: string[]; reasons: Map<string, string>; distance: Map<string, number> };
+export type Selection = { tests: string[]; reasons: Map<string, string>; distance: Map<string, number>; full: string[] };
 
 function walk(root: string, at = ""): string[] {
 	const out: string[] = [];
@@ -78,11 +96,14 @@ function isPathChar(code: number): boolean {
  * the source ("../../src/cli.ts" in a resolve(import.meta.dir, ...) call), or the repo-relative tail
  * of a rooted one ("$ROOT/scripts/x.sh" reads as the token "ROOT/scripts/x.sh"; the longest tail
  * that names a repo file counts). Tokens are maximal runs of path characters; a trailing sentence
- * "." is dropped.
+ * "." is dropped. EMBEDDEP1: a run of quoted segments separated only by commas and whitespace, as in
+ * join(root, "scripts", "ttsr-harness.ts"), names the path its segments join to.
  */
 function referencedPaths(text: string, files: ReadonlySet<string>, fromRel: string): string[] {
 	const found: string[] = [];
 	const fromDir = dirname(fromRel);
+	let segments: string[] = [];
+	let segmentsEnd = -1;
 	let at = 0;
 	while (at < text.length) {
 		if (!isPathChar(text.charCodeAt(at))) { at++; continue; }
@@ -91,6 +112,21 @@ function referencedPaths(text: string, files: ReadonlySet<string>, fromRel: stri
 		while (at < text.length && isPathChar(text.charCodeAt(at))) {
 			if (text.charCodeAt(at) === 47) slash = true;
 			at++;
+		}
+		const quote = text.charCodeAt(start - 1);
+		if ((quote === 34 || quote === 39) && text.charCodeAt(at) === quote) {
+			let joins = segmentsEnd >= 0 && start - 1 - segmentsEnd <= 8;
+			for (let gap = segmentsEnd; joins && gap < start - 1; gap++) {
+				const code = text.charCodeAt(gap);
+				joins = code === 44 || code === 32 || code === 9 || code === 10 || code === 13;
+			}
+			if (!joins) segments = [];
+			segments.push(text.slice(start, at));
+			segmentsEnd = at + 1;
+			for (let first = segments.length - 2; first >= 0; first--) {
+				const joined = segments.slice(first).join("/");
+				if (files.has(joined)) { found.push(joined); break; }
+			}
 		}
 		if (!slash) continue;
 		let end = at;
@@ -132,6 +168,25 @@ function pythonImports(text: string): string[] {
 	return [...out];
 }
 
+/**
+ * A producer's declared generated files: `EMBEDS = {` at the start of a line, then a JSON object
+ * mapping each output to the repo paths it is generated from, closed by a `}` line. The producer
+ * reads the same literal, so the declaration cannot drift from what it generates.
+ */
+export function declaredEmbeds(text: string, rel: string): Record<string, string[]> {
+	const start = text.indexOf(EMBEDS_MARKER) + EMBEDS_MARKER.length - 1;
+	const end = text.indexOf("\n}", start);
+	let parsed: unknown;
+	try { parsed = JSON.parse(end === -1 ? "" : text.slice(start, end + 2)); }
+	catch { throw new Error(`EMBEDS in ${rel} is not a JSON object closed by a "}" line`); }
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(`EMBEDS in ${rel} is not a JSON object`);
+	for (const [output, inputs] of Object.entries(parsed)) {
+		if (!Array.isArray(inputs) || inputs.length === 0 || !inputs.every((input) => typeof input === "string" && input !== ""))
+			throw new Error(`EMBEDS in ${rel}: ${output} must map to a non-empty list of input paths`);
+	}
+	return parsed as Record<string, string[]>;
+}
+
 export function selectAffected(root: string, changed: readonly string[]): Selection {
 	const all = walk(root);
 	const files = new Set(all);
@@ -157,9 +212,29 @@ export function selectAffected(root: string, changed: readonly string[]): Select
 		const base = rel.slice(rel.lastIndexOf("/") + 1);
 		fixtureByBase.set(base, [...(fixtureByBase.get(base) ?? []), rel]);
 	}
+	// EMBEDDEP1: input -> outputs generated from it, from every producer's declared EMBEDS data.
+	const embedOutputs = new Map<string, string[]>();
+	// Rule loaders are the exported `loadRule*` functions; callers are every source calling one.
+	const loaderNames = new Set<string>();
+	const ruleTexts = new Map<string, string>();
 	for (const rel of all) {
 		if (!SCANNED_EXT.some((ext) => rel.endsWith(ext))) continue;
 		const text = readFileSync(join(root, rel), "utf8");
+		if (rel.endsWith(".py") && !isTestFile(rel) && !rel.startsWith(FIXTURE_DIR) && text.includes(EMBEDS_MARKER)) {
+			for (const [output, inputs] of Object.entries(declaredEmbeds(text, rel))) {
+				for (const input of inputs) embedOutputs.set(input, [...(embedOutputs.get(input) ?? []), output]);
+			}
+		}
+		if (!rel.startsWith(FIXTURE_DIR) && text.includes("loadRule")) {
+			ruleTexts.set(rel, text);
+			if (text.includes("export function loadRule") && SOURCE_EXT.some((ext) => rel.endsWith(ext))) {
+				try {
+					for (const name of new Bun.Transpiler({ loader: loaderFor(rel) }).scan(text).exports) {
+						if (name.startsWith("loadRule")) loaderNames.add(name);
+					}
+				} catch { /* An unparsable module exports no loader. */ }
+			}
+		}
 		if (SOURCE_EXT.some((ext) => rel.endsWith(ext))) {
 			let imports: { path: string }[] = [];
 			try { imports = new Bun.Transpiler({ loader: loaderFor(rel) }).scanImports(text); }
@@ -189,26 +264,54 @@ export function selectAffected(root: string, changed: readonly string[]): Select
 	const reasons = new Map<string, string>();
 	// Hops from the nearest change: 0 for a changed test, 1 for a direct importer or namer, and so on.
 	const distance = new Map<string, number>();
-	for (const start of changed) {
-		if (!files.has(start)) continue;
-		const seen = new Map<string, number>([[start, 0]]);
+	const select = (test: string, origin: string, hops: number) => {
+		if (!isTestFile(test) || !files.has(test)) return;
+		if (!reasons.has(test)) reasons.set(test, origin);
+		if (hops < (distance.get(test) ?? Number.POSITIVE_INFINITY)) distance.set(test, hops);
+	};
+	// Every test reaching START: START itself, its namers one hop, then importers transitively.
+	const reach = (start: string, origin: string, offset: number) => {
+		if (!files.has(start)) return;
+		const seen = new Map<string, number>([[start, offset]]);
 		const queue = [start];
 		for (const namer of namers.get(start) ?? []) {
-			if (!seen.has(namer)) { seen.set(namer, 1); queue.push(namer); }
+			if (!seen.has(namer)) { seen.set(namer, offset + 1); queue.push(namer); }
 		}
 		while (queue.length > 0) {
 			const node = queue.shift() as string;
 			const hops = seen.get(node) as number;
-			if (isTestFile(node)) {
-				if (!reasons.has(node)) reasons.set(node, start);
-				if (hops < (distance.get(node) ?? Number.POSITIVE_INFINITY)) distance.set(node, hops);
-			}
+			select(node, origin, hops);
 			for (const next of importers.get(node) ?? []) {
 				if (!seen.has(next)) { seen.set(next, hops + 1); queue.push(next); }
 			}
 		}
+	};
+	const callers = [...ruleTexts].filter(([, text]) => [...loaderNames].some((name) => text.includes(`${name}(`)));
+	for (const start of changed) {
+		reach(start, start, 0);
+		// A generated output changes with its input, so every test reaching the output is affected.
+		for (const output of embedOutputs.get(start) ?? []) reach(output, start, 1);
+		// A rule file PACK/ID.md: tests that load ID through a loader, and the sources loading the
+		// whole PACK with the tests that import or spawn them (one hop: the harness's own suites).
+		const parts = start.split("/");
+		if (parts.length !== 2 || !start.endsWith(".md")) continue;
+		const [pack, file] = parts as [string, string];
+		const id = file.slice(0, -".md".length);
+		const quoted = (word: string, text: string) => text.includes(`"${word}"`) || text.includes(`'${word}'`) || text.includes(`\`${word}\``);
+		for (const [rel, text] of callers) {
+			if (quoted(id, text)) select(rel, start, 1);
+			if (!quoted(pack, text)) continue;
+			select(rel, start, 1);
+			for (const user of [...(importers.get(rel) ?? []), ...(namers.get(rel) ?? [])]) select(user, start, 2);
+		}
 	}
-	return { tests: [...reasons.keys()].sort(), reasons, distance };
+	// A shared runtime changed: the plan is FULL, every test is affected.
+	const full = FULL_SUITE_TRIGGERS.filter((trigger) => changed.includes(trigger));
+	if (full.length > 0) {
+		const farthest = Math.max(0, ...distance.values()) + 1;
+		for (const test of all) select(test, `${full[0]} (shared runtime, FULL plan)`, farthest);
+	}
+	return { tests: [...reasons.keys()].sort(), reasons, distance, full };
 }
 
 // A file with no CI timing is planned at 10 s.
@@ -236,7 +339,7 @@ export function planBudget(tests: readonly string[], changed: ReadonlySet<string
 	return { run, deferred, predictedMs: Math.max(total / workers, longest) };
 }
 
-const USAGE = "usage: affected-tests.ts --root DIR [--changed-file PATH ...] [--explain] [--order path|distance]\n" +
+const USAGE = "usage: affected-tests.ts --root DIR [--changed-file PATH ...] [--explain] [--order path|distance] [--status-out FILE]\n" +
 	"       affected-tests.ts --plan --budget-secs N --workers K [--timings FILE ...] [--deferred-out FILE] [--changed-file PATH ...] -- TEST...\n";
 
 function main(argv: readonly string[]): number {
@@ -248,6 +351,7 @@ function main(argv: readonly string[]): number {
 	let workers = Number.NaN;
 	const timings: string[] = [];
 	let deferredOut = "";
+	let statusOut = "";
 	const changed: string[] = [];
 	let i = 0;
 	for (; i < argv.length; i++) {
@@ -264,6 +368,7 @@ function main(argv: readonly string[]): number {
 		else if (arg === "--workers") { workers = Number(value); i++; }
 		else if (arg === "--timings") { timings.push(value); i++; }
 		else if (arg === "--deferred-out") { deferredOut = value; i++; }
+		else if (arg === "--status-out") { statusOut = value; i++; }
 		else { process.stderr.write(USAGE); return 2; }
 	}
 	if (plan) {
@@ -289,12 +394,23 @@ function main(argv: readonly string[]): number {
 		process.stderr.write(`affected-tests: --root is not a directory: ${root || "(missing)"}\n`);
 		return 2;
 	}
-	const { tests: byPath, reasons, distance } = selectAffected(root, changed.filter((path) => path !== ""));
+	let selection: Selection;
+	try { selection = selectAffected(root, changed.filter((path) => path !== "")); }
+	catch (error) {
+		process.stderr.write(`affected-tests: ${error instanceof Error ? error.message : String(error)}\n`);
+		return 2;
+	}
+	const { tests: byPath, reasons, distance, full } = selection;
 	const tests = order === "distance"
 		? [...byPath].sort((left, right) => (distance.get(left) ?? 0) - (distance.get(right) ?? 0) || left.localeCompare(right))
 		: byPath;
 	for (const test of tests) process.stdout.write(`${test}\n`);
 	if (explain) for (const test of tests) process.stderr.write(`affected: ${test} <- ${reasons.get(test)} (${distance.get(test)} hops)\n`);
+	if (statusOut) writeFileSync(statusOut, full.length > 0 ? `FULL ${full.join(",")}\n` : "SELECTED\n");
+	if (full.length > 0) {
+		process.stderr.write(`affected-tests: FULL plan: ${full.join(", ")} ${full.length === 1 ? "is a shared runtime" : "are shared runtimes"}, so all ${tests.length} test files are affected from ${changed.length} changed paths under ${relative(process.cwd(), root) || "."}\n`);
+		return 0;
+	}
 	const direct = tests.filter((test) => distance.get(test) === 0).length;
 	process.stderr.write(`affected-tests: ${tests.length} selected (${direct} changed, ${tests.length - direct} reach a changed path) from ${changed.length} changed paths under ${relative(process.cwd(), root) || "."}\n`);
 	return 0;

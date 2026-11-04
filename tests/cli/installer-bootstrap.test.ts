@@ -307,3 +307,80 @@ test("release preflight accepts canonical payload, rejects source drift, and exp
 		expect(readFileSync(join(copy, "installer/install.py"))).toEqual(once);
 	} finally { f.scratch.cleanup(); }
 });
+
+// EMBEDDEP1 (ompkit-fp72.120.16.197): 2b7a914010 changed scripts/pysafe.py without regenerating
+// installer/install.py and passed the commit gate; every release preflight then refused it. The
+// staged-embed pre-commit member judges the INDEX with the staged producer's own --check.
+test("EMBEDDEP1 staging a pysafe.py change without regenerating installer/install.py is refused, naming the command; regenerated and staged, it is admitted", () => {
+	const scratch = ownedTmp("installer-bootstrap-embed");
+	try {
+		const work = realpathSync(scratch.path);
+		const env: Record<string, string> = {};
+		for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !key.startsWith("GIT_")) env[key] = value;
+		env.TMPDIR = work;
+		const git = (repo: string, ...args: string[]) => {
+			const result = runSync(["git", "-C", repo, "-c", "user.name=embed test", "-c", "user.email=embed@example.invalid", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", ...args], { env, deadline_s: fixtureDeadlineS(30) });
+			expect(result.rc, decoder.decode(result.stderr)).toBe(0);
+		};
+		const members = join(work, "hooks"); mkdirSync(members);
+		copyFileSync(join(root, "scripts/check-staged-embed.sh"), join(members, "56-omp-kit-staged-embed"));
+		for (const helper of ["pysafe.py", "kitlib-tmp.sh"]) copyFileSync(join(root, "scripts", helper), join(members, helper));
+		const member = (repo: string) => {
+			const started = Date.now();
+			const result = runSync(["sh", join(members, "56-omp-kit-staged-embed")], { cwd: repo, env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 65536 });
+			return { rc: result.rc, err: decoder.decode(result.stderr), seconds: (Date.now() - started) / 1000 };
+		};
+		const repo = join(work, "repo"); mkdirSync(repo);
+		for (const directory of ["installer", "scripts"]) mkdirSync(join(repo, directory));
+		for (const file of ["installer/install.py", "installer/embed-bootstrap.py", "scripts/pysafe.py", "scripts/kitlib_run.py"]) copyFileSync(join(root, file), join(repo, file));
+		writeFileSync(join(repo, "README.md"), "# fixture\n");
+		git(repo, "init", "-q");
+		git(repo, "add", "-A");
+		git(repo, "commit", "-q", "-m", "fixture");
+		// An unrelated staged path has no embed obligation.
+		writeFileSync(join(repo, "README.md"), "# fixture, edited\n");
+		git(repo, "add", "README.md");
+		expect(member(repo).rc).toBe(0);
+		// The planted escape: pysafe.py staged, installer/install.py not regenerated.
+		const pysafe = join(repo, "scripts/pysafe.py");
+		writeFileSync(pysafe, `${readFileSync(pysafe, "utf8")}\n# planted EMBEDDEP1 drift\n`);
+		git(repo, "add", "scripts/pysafe.py");
+		const stale = member(repo);
+		expect(stale.rc, stale.err).toBe(1);
+		expect(stale.err).toContain("staged-embed: REFUSED: the staged generated files do not match their staged inputs (worktree ignored)");
+		expect(stale.err).toContain("installer/install.py (from scripts/pysafe.py, scripts/kitlib_run.py)");
+		expect(stale.err).toContain("python3 -I installer/embed-bootstrap.py");
+		// Regenerated in the worktree only: the index is still stale, so it is still refused.
+		const generated = runSync([python, "-I", join(repo, "installer/embed-bootstrap.py")], { cwd: repo, env, deadline_s: fixtureDeadlineS(10) });
+		expect(generated.rc, decoder.decode(generated.stderr)).toBe(0);
+		expect(member(repo).rc).toBe(1);
+		git(repo, "add", "installer/install.py");
+		const admitted = member(repo);
+		expect(admitted.rc, admitted.err).toBe(0);
+		// The 15 s staged-check budget, scaled by machine load like every fixture deadline here.
+		expect(admitted.seconds).toBeLessThan(fixtureDeadlineS(15));
+		// A repo whose index has no producer has no embed obligation.
+		const plain = join(work, "plain"); mkdirSync(plain);
+		writeFileSync(join(plain, "pysafe.py"), "X = 1\n");
+		git(plain, "init", "-q");
+		git(plain, "add", "-A");
+		expect(member(plain).rc).toBe(0);
+		// Planted negatives: renaming the map away, or dropping the producer, never disables the check.
+		git(repo, "commit", "-q", "-m", "regenerated");
+		const producerPath = join(repo, "installer/embed-bootstrap.py");
+		const producerSource = readFileSync(producerPath, "utf8");
+		expect(producerSource).toContain("\nEMBEDS = {\n");
+		writeFileSync(producerPath, producerSource.replaceAll("EMBEDS", "GENERATED"));
+		git(repo, "add", "installer/embed-bootstrap.py");
+		const unmapped = member(repo);
+		expect(unmapped.rc, unmapped.err).toBe(1);
+		expect(unmapped.err).toContain("staged-embed: REFUSED: the staged installer/embed-bootstrap.py declares no EMBEDS map");
+		writeFileSync(producerPath, producerSource);
+		git(repo, "add", "installer/embed-bootstrap.py");
+		expect(member(repo).rc).toBe(0);
+		git(repo, "rm", "-q", "--cached", "installer/embed-bootstrap.py");
+		const removed = member(repo);
+		expect(removed.rc, removed.err).toBe(1);
+		expect(removed.err).toContain("staged-embed: REFUSED: the commit removes installer/embed-bootstrap.py");
+	} finally { scratch.cleanup(); }
+}, fixtureDeadlineS(120) * 1000);

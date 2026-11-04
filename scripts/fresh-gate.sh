@@ -281,7 +281,12 @@ judge_budget() {
 		fail "elapsed=${1}s (affected tests ${2}s, heavy queue wait ${3}s, judged ${judged}s) exceeds 180s"
 		return 1
 	fi
-	echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${1}s tests=${2}s queued=${3}s judged=${judged}s"
+	# EMBEDDEP1: a deferral while CI is paused (CIREEQUIP1) is never read as tested.
+	green_deferred=
+	if [ -s "$WORK/excluded" ] && [ "$(cat "$WORK/ci-state" 2>/dev/null)" != active ]; then
+		green_deferred=" DEFERRED_TO_PAUSED_CI: $(awk 'NF { n++ } END { print n+0 }' "$WORK/excluded") files (ci.yml state=$(cat "$WORK/ci-state" 2>/dev/null || echo UNKNOWN)): $(paste -sd , - <"$WORK/excluded")"
+	fi
+	echo "FRESH-GATE: GREEN commit=$COMMIT elapsed=${1}s tests=${2}s queued=${3}s judged=${judged}s$green_deferred"
 }
 
 # FILEBUDGET1: compare immutable predecessor policy even when no test runs.
@@ -303,13 +308,15 @@ $1"
 
 # CIGATE1 (ompkit-v66l.27.1): the bun tests a push runs are the ones its diff affects: changed test
 # files, plus tests whose static import graph reaches a changed path or that name a changed file
-# (scripts/affected-tests.ts, from the gate's own tree). Prints one path per line.
+# (scripts/affected-tests.ts, from the gate's own tree). Prints one path per line; the plan status
+# (FULL <triggers> or SELECTED) goes to $WORK/plan-status.
 select_affected_tests() {
 	set --
 	for file in $CHANGED; do
 		[ -n "$file" ] && set -- "$@" --changed-file "$file"
 	done
-	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --explain --order distance "$@"
+	bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --root "$ARCHIVE_DIR" --explain --order distance \
+		--status-out "$WORK/plan-status" "$@"
 }
 
 # K parallel bun workers for the affected tests: a quarter of the online cores, 2..4, unless
@@ -532,6 +539,9 @@ PYEOF
 	fi
 	if [ -s "$WORK/excluded" ]; then
 		echo "FRESH-GATE: VERDICT PARTIAL files=$files ran=$ran deferred=$(paste -sd , - <"$WORK/excluded"): CI runs the deferred files"
+		if [ "$(cat "$WORK/ci-state" 2>/dev/null)" != active ]; then
+			echo "FRESH-GATE: DEFERRED_TO_PAUSED_CI: $(awk 'NF { n++ } END { print n+0 }' "$WORK/excluded") files (ci.yml state=$(cat "$WORK/ci-state" 2>/dev/null || echo UNKNOWN)): CI is not running, so these were not tested; the release's full suite runs them"
+		fi
 	else
 		echo "FRESH-GATE: VERDICT TESTED files=$files ran=$ran"
 	fi
@@ -823,6 +833,31 @@ fi
 		fi
 	fi
 	affected=$(select_affected_tests) || { echo "focused: affected-test selection failed" >&2; return 1; }
+	# EMBEDDEP1 (ompkit-fp72.120.16.197): a shared runtime changed, so every suite is affected (a FULL
+	# plan). The wall budget never budgets or defers a FULL plan: the GROUPREAP1 push (5aa8569fd9) ran 4
+	# files and deferred the rest of its selection to a paused CI. The exact tree's main-role full-suite
+	# PASS admits it; without one the gate refuses, naming the command that records it.
+	plan_status=$(cat "$WORK/plan-status") || { echo "focused: the affected-test plan status is missing" >&2; return 1; }
+	case "$plan_status" in
+		"FULL "*)
+			full_triggers=${plan_status#FULL }
+			# shellcheck disable=SC2086
+			full_files=$(printf '%s\n' $affected | awk 'NF { n++ } END { print n+0 }')
+			echo "FRESH-GATE: PLAN FULL trigger=$full_triggers files=$full_files: a shared runtime changed, so every suite is affected; a FULL plan is not budgeted or deferred"
+			full_repo=${FRESH_GATE_REPO:-$ROOT}
+			full_verdict=MISS
+			if [ "${ARCHIVE_SUPPLIED:-0}" = 0 ] && full_tree=$(git -C "$full_repo" rev-parse --verify -q "$COMMIT^{tree}"); then
+				if full_verdict=$(cd "$SCRIPT_DIR" && python3 full-suite-verdict-store.py require-pass --repo "$full_repo" --tree "$full_tree" \
+					--role main --judge-root "$SCRIPT_DIR/.." --suite-root "$ARCHIVE_DIR" 2>&1); then
+					record_run 0 0 0
+					echo "FRESH-GATE: VERDICT FULL_SUITE_REUSED tree=$full_tree files=$full_files: the exact tree has a main-role full-suite PASS"
+					return 0
+				fi
+			fi
+			record_run 0 0 1
+			echo "FRESH-GATE: REFUSED reason=FULL_SUITE_REQUIRED trigger=$full_triggers files=$full_files verdict=$(printf '%s\n' "$full_verdict" | head -n 1): run sh scripts/full-suite-verdict.sh --repo $full_repo --commit $COMMIT --judge-role main, then retry" >&2
+			return 1 ;;
+	esac
 	# Nearest first (changed tests, then direct importers); explicit mappings follow; each runs once.
 	# shellcheck disable=SC2086
 	focus_tests=$(printf '%s\n' $affected $focus_tests | awk 'NF && !seen[$0]++')
@@ -854,6 +889,17 @@ fi
 		focus_tests=$(bun run --no-env-file --config=/dev/null "$SCRIPT_DIR/affected-tests.ts" --plan \
 			--budget-secs "${FRESH_GATE_TEST_BUDGET_SECS:-120}" --workers "$(test_workers)" \
 			--deferred-out "$WORK/excluded" "$@" -- $focus_tests) || return $?
+	fi
+	# EMBEDDEP1: name whether CI (ci.yml) will run what was deferred; a paused or unreadable state is
+	# reported as DEFERRED_TO_PAUSED_CI on the verdict and GREEN lines.
+	if [ -s "$WORK/excluded" ]; then
+		# gh resolves {owner}/{repo} from its working directory, the pushing checkout. The payload's $1 is
+		# that checkout, expanded by the inner sh.
+		# shellcheck disable=SC2016
+		ci_state=$(cd "$SCRIPT_DIR" && python3 -B pysafe.py run --timeout 10 -- \
+			sh -c 'cd "$1" && exec gh api "repos/{owner}/{repo}/actions/workflows/ci.yml" --jq .state' sh "${FRESH_GATE_REPO:-$ROOT}" 2>/dev/null) || ci_state=
+		case "$ci_state" in '' | *[!a-z_]*) ci_state=UNKNOWN ;; esac
+		printf '%s\n' "$ci_state" >"$WORK/ci-state"
 	fi
 	if [ -n "$focus_tests" ] && [ ! -f "$ARCHIVE_DIR/MANIFEST.tsv" ]; then
 		if ! (
@@ -889,6 +935,9 @@ fi
 		record_run 0 0 0
 		if [ -s "$WORK/excluded" ]; then
 			echo "FRESH-GATE: VERDICT PARTIAL files=0 ran=0 deferred=$(paste -sd , - <"$WORK/excluded"): only CI-only tests changed; CI runs them"
+			if [ "$(cat "$WORK/ci-state" 2>/dev/null)" != active ]; then
+				echo "FRESH-GATE: DEFERRED_TO_PAUSED_CI: $(awk 'NF { n++ } END { print n+0 }' "$WORK/excluded") files (ci.yml state=$(cat "$WORK/ci-state" 2>/dev/null || echo UNKNOWN)): CI is not running, so these were not tested; the release's full suite runs them"
+			fi
 		else
 			echo "FRESH-GATE: VERDICT DOCS_ONLY: no product code changed; no suite to run"
 		fi

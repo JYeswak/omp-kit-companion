@@ -1,8 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { runSync } from "../../src/kitlib/run.ts";
+import { AMPLE, MANIFEST_HEADER, affectedArchive, gate, gateTree, runFocused, runProbe, saveFixture } from "./fresh-gate.helpers.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 // CIGATE1 (ompkit-v66l.27.1): the selector the pre-push gate uses to pick the tests a diff affects.
 const root = resolve(import.meta.dir, "../..");
@@ -136,13 +138,20 @@ test("FRESHGATEFIXTURE1 mutants: without the fixture or Python-import edges the 
 	const dir = tree(MISSED);
 	try {
 		const source = readFileSync(selector, "utf8");
-		const noFixture = source.replace("for (const fixture of fixtures) edge(namers, rel, fixture);", "void fixtures;");
+		// EMBEDDEP1's joined-segment edge also reads join(root, "tests", "fixtures", "legacy.patch"): each
+		// edge alone still selects land.test.ts, and only removing both misses it.
+		const fixtureEdge = "for (const fixture of fixtures) edge(namers, rel, fixture);";
+		const joinedEdge = "if (files.has(joined)) { found.push(joined); break; }";
+		const noFixture = source.replace(fixtureEdge, "void fixtures;");
+		const noJoined = source.replace(joinedEdge, "void joined;");
+		const noBoth = noFixture.replace(joinedEdge, "void joined;");
 		const noPython = source.replace("if (files.has(target)) edge(importers, rel, target);", "void target;");
-		expect(noFixture).not.toBe(source);
-		expect(noPython).not.toBe(source);
-		writeFileSync(join(dir, "no-fixture.ts"), noFixture);
-		writeFileSync(join(dir, "no-python.ts"), noPython);
-		expect(select(dir, ["tests/fixtures/legacy.patch"], join(dir, "no-fixture.ts")).tests).toEqual([]);
+		for (const mutant of [noFixture, noJoined, noPython]) expect(mutant).not.toBe(source);
+		expect(noBoth).not.toBe(noFixture);
+		for (const [name, text] of [["no-fixture", noFixture], ["no-joined", noJoined], ["no-both", noBoth], ["no-python", noPython]]) writeFileSync(join(dir, `${name}.ts`), text as string);
+		expect(select(dir, ["tests/fixtures/legacy.patch"], join(dir, "no-fixture.ts")).tests).toEqual(["tests/cli/land.test.ts"]);
+		expect(select(dir, ["tests/fixtures/legacy.patch"], join(dir, "no-joined.ts")).tests).toEqual(["tests/cli/land.test.ts"]);
+		expect(select(dir, ["tests/fixtures/legacy.patch"], join(dir, "no-both.ts")).tests).toEqual([]);
 		expect(select(dir, ["scripts/bead_lint.py"], join(dir, "no-python.ts")).tests).toEqual([]);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
@@ -212,3 +221,179 @@ test("--order distance puts changed tests first, then the nearest importers", ()
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+// EMBEDDEP1 (ompkit-fp72.120.16.197): four escapes through this selector on 2026-11-04. GROUPREAP1
+// changed scripts/pysafe.py and src/kitlib/run.ts; the push ran 4 files and deferred the rest to a
+// paused CI, so installer-bootstrap, scratch-orphan-reap and private-index-land-3c broke main. G5
+// narrowed rules-fleet/kit-no-force-push.md and broke rx2-rules, which loads rules by id.
+function selectWithStatus(dir: string, changed: string[]): { code: number; tests: string[]; err: string; status: string } {
+	// The status file lives in its own owned dir, never in DIR: DIR may be the live checkout.
+	const holder = ownedTmp("affected-status", { root: scratchRoot });
+	try {
+		const status = join(holder.path, "status");
+		const result = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", selector, "--root", dir, "--explain", "--status-out", status,
+			...changed.flatMap((path) => ["--changed-file", path])], { deadline_s: fixtureDeadlineS(120) });
+		return { code: result.rc ?? -1, tests: decoder.decode(result.stdout).split("\n").filter(Boolean), err: decoder.decode(result.stderr),
+			status: existsSync(status) ? readFileSync(status, "utf8") : "" };
+	} finally { holder.cleanup(); }
+}
+const ALL_FILES_TESTS = ["tests/cli/docs.test.ts", "tests/cli/leaf.test.ts", "tests/cli/runner.test.ts", "tests/cli/spawn-cli.test.ts",
+	"tests/cli/tool.test.sh", "tests/cli/uses-helper.test.ts", "tests/cli/via-cli.test.ts", "tests/scripts/runner_test.py"];
+
+test("EMBEDDEP1 a planted shared-runtime change (scripts/pysafe.py) is a FULL plan: every test file, status FULL", () => {
+	const dir = tree({ ...FILES, "scripts/pysafe.py": "def run():\n    return 0\n" });
+	try {
+		const full = selectWithStatus(dir, ["scripts/pysafe.py"]);
+		expect(full.code, full.err).toBe(0);
+		// No fixture test reaches pysafe.py: a path walk alone selects nothing here.
+		expect(full.tests).toEqual(ALL_FILES_TESTS);
+		expect(full.status).toBe("FULL scripts/pysafe.py\n");
+		expect(full.err).toContain("affected-tests: FULL plan: scripts/pysafe.py is a shared runtime, so all 8 test files are affected");
+		expect(selectWithStatus(dir, ["src/leaf.ts"]).status).toBe("SELECTED\n");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+	// The live tree: each declared shared runtime is FULL.
+	for (const trigger of ["scripts/pysafe.py", "scripts/kitlib_run.py", "src/kitlib/run.ts"]) {
+		expect(selectWithStatus(root, [trigger]).status).toBe(`FULL ${trigger}\n`);
+	}
+});
+
+test("EMBEDDEP1 a planted embed-input change selects installer-bootstrap through the producer's declared EMBEDS", () => {
+	const producer = "#!/usr/bin/env python3\nEMBEDS = {\n    \"installer/install.py\": [\"scripts/payload.py\"]\n}\n";
+	const dir = tree({
+		...FILES,
+		"installer/embed-bootstrap.py": producer,
+		"installer/install.py": "# generated from scripts/payload\n",
+		"scripts/payload.py": "PAYLOAD = 1\n",
+		"tests/cli/installer-bootstrap.test.ts": 'const installer = "installer/install.py";\n',
+	});
+	try {
+		const input = selectWithStatus(dir, ["scripts/payload.py"]);
+		expect(input.code, input.err).toBe(0);
+		expect(input.tests).toEqual(["tests/cli/installer-bootstrap.test.ts"]);
+		expect(input.err).toContain("affected: tests/cli/installer-bootstrap.test.ts <- scripts/payload.py (2 hops)");
+		expect(input.status).toBe("SELECTED\n");
+		// A malformed declaration fails the plan; it never selects silently from a partial map.
+		writeFileSync(join(dir, "installer/embed-bootstrap.py"), "#!/usr/bin/env python3\nEMBEDS = {\n    \"installer/install.py\": \"scripts/payload.py\"\n}\n");
+		const malformed = selectWithStatus(dir, ["scripts/payload.py"]);
+		expect(malformed.code).toBe(2);
+		expect(malformed.err).toContain("EMBEDS in installer/embed-bootstrap.py: installer/install.py must map to a non-empty list of input paths");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+	// The live producer's EMBEDS is the map the selector reads, and the one the producer lists.
+	const listed = runSync(["python3", "-I", "installer/embed-bootstrap.py", "--list"], { cwd: root, deadline_s: fixtureDeadlineS(30) });
+	expect(listed.rc, decoder.decode(listed.stderr)).toBe(0);
+	expect(decoder.decode(listed.stdout).split("\n").filter(Boolean)).toEqual(["installer/install.py", "scripts/pysafe.py", "scripts/kitlib_run.py"]);
+	expect(selectWithStatus(root, ["installer/embed-bootstrap.py"]).tests).toContain("tests/cli/installer-bootstrap.test.ts");
+});
+
+test("EMBEDDEP1 a planted rules-fleet change selects the suite loading that rule by id; a rules/ change selects the pack harness suite", () => {
+	const dir = tree({
+		...FILES,
+		"scripts/rule-class.ts": "export function loadRuleFile(file: string): string { return file; }\nexport function loadRules(dir: string): string[] { return [dir]; }\n",
+		"scripts/harness.ts": 'import { join } from "node:path";\nimport { loadRules } from "./rule-class.ts";\nloadRules(join(process.cwd(), "rules"));\n',
+		"rules/kit-y.md": "---\ncondition: y\n---\n",
+		"rules-fleet/kit-x.md": "---\ncondition: x\n---\n",
+		"rules-fleet/kit-z.md": "---\ncondition: z\n---\n",
+		"tests/cli/rx2.test.ts": 'import { loadRuleFile } from "../../scripts/rule-class.ts";\nfor (const name of ["kit-x"]) loadRuleFile(`rules-fleet/${name}.md`);\n',
+		"tests/cli/harness.test.ts": 'import { join } from "node:path";\nconst harness = join(import.meta.dir, "../..", "scripts", "harness.ts");\n',
+		"tests/cli/unrelated-rule.test.ts": 'import { loadRuleFile } from "../../scripts/rule-class.ts";\nloadRuleFile(process.argv[2] ?? "");\n',
+	});
+	try {
+		const byId = selectWithStatus(dir, ["rules-fleet/kit-x.md"]);
+		expect(byId.code, byId.err).toBe(0);
+		expect(byId.tests).toEqual(["tests/cli/rx2.test.ts"]);
+		expect(selectWithStatus(dir, ["rules-fleet/kit-z.md"]).tests).toEqual([]);
+		expect(selectWithStatus(dir, ["rules/kit-y.md"]).tests).toEqual(["tests/cli/harness.test.ts"]);
+		// A join("scripts", "harness.ts") segment run names the harness, as a literal path would.
+		expect(selectWithStatus(dir, ["scripts/harness.ts"]).tests).toEqual(["tests/cli/harness.test.ts"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+	// The live tree: the G5 escape, and the echo-literal and harness suites for a rules/ rule.
+	expect(selectWithStatus(root, ["rules-fleet/kit-no-force-push.md"]).tests).toContain("tests/cli/rx2-rules.test.ts");
+	const shipped = selectWithStatus(root, ["rules/kit-rea-runtime-shipped.md"]).tests;
+	expect(shipped).toContain("tests/cli/echo-literal-rules.test.ts");
+	expect(shipped).toContain("tests/cli/ttsr-harness.test.ts");
+});
+
+test("EMBEDDEP1 control: a README-only change selects only the tests that read README, status SELECTED", () => {
+	const dir = tree({ ...FILES, "README.md": "# readme\n", "tests/cli/readme.test.ts": "readFileSync(`${ROOT}/README.md`);\n", "scripts/pysafe.py": "X = 1\n" });
+	try {
+		const readme = selectWithStatus(dir, ["README.md"]);
+		expect(readme.code, readme.err).toBe(0);
+		expect(readme.tests).toEqual(["tests/cli/readme.test.ts"]);
+		expect(readme.status).toBe("SELECTED\n");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test.skipIf(!AMPLE)("EMBEDDEP1 fresh-gate reports a FULL plan as FULL, never as over budget; an exact-tree main-role PASS admits it (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		const archive = affectedArchive(fx, 42, 42);
+		mkdirSync(join(archive, "scripts"));
+		writeFileSync(join(archive, "scripts/pysafe.py"), "def run():\n    return 0\n");
+		// A 5 s budget would defer an ordinary selection; a FULL plan is never budgeted.
+		fx.env.FRESH_GATE_TEST_BUDGET_SECS = "5";
+		const scripts = gateTree(fx, MANIFEST_HEADER);
+		const refused = runFocused(fx, source, archive, "scripts/pysafe.py", scripts);
+		expect(refused.code, refused.out).toBe(1);
+		expect(refused.out).toContain("FRESH-GATE: PLAN FULL trigger=scripts/pysafe.py files=1: a shared runtime changed");
+		expect(refused.out).toContain("FRESH-GATE: REFUSED reason=FULL_SUITE_REQUIRED trigger=scripts/pysafe.py files=1 verdict=");
+		expect(refused.out).toContain("run sh scripts/full-suite-verdict.sh --repo ");
+		expect(refused.out).not.toContain("affected-tests plan:");
+		expect(refused.out).not.toContain("wall budget");
+		expect(refused.out).not.toContain("VERDICT PARTIAL");
+		// The exact tree's PASS readback (a stub store standing in for a recorded verdict) admits it.
+		const store = join(scripts, "full-suite-verdict-store.py");
+		rmSync(store);
+		writeFileSync(store, "import sys\nprint('PASS')\nsys.exit(0)\n");
+		const reused = runFocused(fx, source, archive, "scripts/pysafe.py", scripts);
+		expect(reused.code, reused.out).toBe(0);
+		expect(reused.out).toContain("FRESH-GATE: VERDICT FULL_SUITE_REUSED tree=");
+		expect(reused.out).not.toContain("affected-tests plan:");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 120_000);
+
+test.skipIf(!AMPLE)("EMBEDDEP1 a deferral while ci.yml is paused prints DEFERRED_TO_PAUSED_CI on the verdict and GREEN lines; control: with CI enabled, no such line (needs >= 10 GiB free)", () => {
+	const source = readFileSync(gate, "utf8");
+	const fx = saveFixture(0, { slots: 8, max_wait_s: 30 });
+	try {
+		// The gate reads ci.yml's state through gh; this fixture gh answers from FAKE_CI_STATE.
+		const gh = join(fx.dir, "bin", "gh");
+		writeFileSync(gh, '#!/bin/sh\n[ "$1 $2" = "api repos/{owner}/{repo}/actions/workflows/ci.yml" ] || exit 9\nprintf \'%s\\n\' "$FAKE_CI_STATE"\n');
+		chmodSync(gh, 0o755);
+		const archive = affectedArchive(fx, 42, 42);
+		for (const n of [2, 3]) writeFileSync(join(archive, `tests/cli/mod${n}.test.ts`), `import { expect, test } from "bun:test";\nimport { answer } from "../../lib/mod.ts";\ntest("answer ${n}", () => { expect(answer()).toBe(42); });\n`);
+		fx.env.FRESH_GATE_TEST_BUDGET_SECS = "5";
+		const marker = "FRESH-GATE: DEFERRED_TO_PAUSED_CI: 2 files (ci.yml state=disabled_manually): CI is not running, so these were not tested";
+		fx.env.FAKE_CI_STATE = "disabled_manually";
+		const paused = runFocused(fx, source, archive, "lib/mod.ts\ntests/cli/mod3.test.ts");
+		expect(paused.code, paused.out).toBe(0);
+		expect(paused.out).toContain("FRESH-GATE: VERDICT PARTIAL files=1 ran=1 deferred=tests/cli/mod.test.ts,tests/cli/mod2.test.ts: CI runs the deferred files");
+		expect(paused.out).toContain(marker);
+		fx.env.FAKE_CI_STATE = "active";
+		const enabled = runFocused(fx, source, archive, "lib/mod.ts\ntests/cli/mod3.test.ts");
+		expect(enabled.code, enabled.out).toBe(0);
+		expect(enabled.out).toContain("FRESH-GATE: VERDICT PARTIAL files=1 ran=1");
+		expect(enabled.out).not.toContain("DEFERRED_TO_PAUSED_CI");
+		// The GREEN line carries the deferral and its list; with CI enabled it does not.
+		const green = (state: string) => runProbe(fx, source,
+			`mkdir -p "$WORK"\nprintf 'tests/cli/mod.test.ts\\ntests/cli/mod2.test.ts\\n' >"$WORK/excluded"\nprintf '${state}\\n' >"$WORK/ci-state"\nCOMMIT=abc\njudge_budget 10 2 0`);
+		const pausedGreen = green("disabled_manually");
+		expect(pausedGreen.code, pausedGreen.out).toBe(0);
+		expect(pausedGreen.out).toContain("FRESH-GATE: GREEN commit=abc elapsed=10s tests=2s queued=0s judged=8s DEFERRED_TO_PAUSED_CI: 2 files (ci.yml state=disabled_manually): tests/cli/mod.test.ts,tests/cli/mod2.test.ts\n");
+		const enabledGreen = green("active");
+		expect(enabledGreen.out).toContain("FRESH-GATE: GREEN commit=abc elapsed=10s tests=2s queued=0s judged=8s\n");
+		expect(enabledGreen.out).not.toContain("DEFERRED_TO_PAUSED_CI");
+	} finally {
+		rmSync(fx.dir, { recursive: true, force: true });
+	}
+}, 240_000);
