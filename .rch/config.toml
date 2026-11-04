@@ -1,6 +1,6 @@
 # Optional development routing; stock builds and CI do not require RCH.
 # Preserve the existing compiler set and admit this repository's Bun commands.
-# Source validation must pin the runtime with --require-tool bun@1.4.3 and
+# Source validation must pin the runtime with --require-tool bun@1.4.4 and
 # retain an admitted exact-source receipt; routing alone is not attestation.
 [execution]
 allowlist = [
