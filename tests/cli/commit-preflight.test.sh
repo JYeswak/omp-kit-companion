@@ -52,6 +52,28 @@ try:
     print('no-install quiet rc=' + str(absent.rc) + '\n' + absent_text, flush=True)
     assert absent.rc == 0 and 'UNKNOWN installed-gate: no installed hook chain' in absent_text, absent_text
     passed += 1
+    # EXPORTTEST1 [a]: a planted test passes in the checkout but overflows a
+    # path limit under the verdict-shaped export TMPDIR; preflight refuses it.
+    limit = len(str(root)) + 40
+    (root/'long.test.sh').write_text('#!/bin/sh\nif [ "${#TMPDIR}" -ge ' + str(limit) + ' ]; then\n    printf "path too long: %s bytes\\n" "${#TMPDIR}"\n    exit 1\nfi\n')
+    checkout_run = cmd(['sh','long.test.sh'],root,env)
+    assert checkout_run.rc == 0, 'planted file must pass in the checkout'
+    planted = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','long.test.sh','--tests','long.test.sh'],root,env)
+    planted_text = (planted.stdout+planted.stderr).decode()
+    print('export-test planted rc=' + str(planted.rc) + '\n' + planted_text, flush=True)
+    assert planted.rc == 1 and 'REFUSED EXPORT_TEST_FAILED long.test.sh (exit 1)' in planted_text, planted_text
+    assert 'path too long:' in planted_text and '/archive)' in planted_text, planted_text
+    passed += 1
+    # [b] quiet control: a passing file in the same export is clean.
+    (root/'ok.test.sh').write_text('#!/bin/sh\n[ ! -e .git ] || exit 3\nprintf "ok\\n"\n')
+    ok = cmd(['sh',str(scripts/'commit-preflight.sh'),'--files','ok.test.sh','--tests','ok.test.sh'],root,env)
+    ok_text = (ok.stdout+ok.stderr).decode()
+    print('export-test quiet rc=' + str(ok.rc) + '\n' + ok_text, flush=True)
+    assert ok.rc == 0 and 'PASS export-test:ok.test.sh' in ok_text and 'EXPORT_TEST_FAILED' not in ok_text, ok_text
+    assert '1 export test file(s) run' in ok_text, ok_text
+    (root/'long.test.sh').unlink()
+    (root/'ok.test.sh').unlink()
+    passed += 1
     # Use the real installer in an owned unborn repository, then copy only its
     # pre-commit chain. No commit or unrelated tracker/ref hook ever runs.
     template = root/'hook-template'

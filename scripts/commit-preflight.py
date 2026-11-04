@@ -5,6 +5,10 @@
 effective staged index, including GIT_INDEX_FILE. Both use a private index and
 object directory, never writing the caller's index or object store. --message
 FILE supplies planned trailers; absent it Deploy-Step uses an empty message.
+--tests FILE... (EXPORTTEST1) runs those test files in fresh-gate's shape: an
+exact `git archive` of the judged index tree (HEAD plus --files), no .git, a
+long TMPDIR under the export's var/agent-tmp, each file through `heavy`. A
+failing file is REFUSED EXPORT_TEST_FAILED naming it. Absent --tests no test runs.
 """
 import argparse
 import json
@@ -79,10 +83,65 @@ def installed_checks(root: Path, env: dict) -> tuple[list, int]:
     return [('installed-gate:' + path.name, [str(path)]) for path in members], len(missing)
 
 
+# fresh-gate's export shape: a long owned dir holding archive/, TMPDIR at
+# archive/var/agent-tmp, so path-length limits fire here and not in the verdict.
+EXPORT_DIR = 'fresh-gate.export-test.' + '0' * 24 + '/archive'
+
+
+def export_tests(tests: list, env: dict, scratch: Path, root: Path) -> int:
+    """Run each test file in an exact export of the judged index; return failures."""
+    tree = required(['git', 'write-tree'], env).decode().strip()
+    archive = scratch / EXPORT_DIR
+    archive.mkdir(parents=True)
+    tarball = scratch / 'export.tar'
+    # Same export as fresh-gate: `git archive --format=tar TREE` then tar -x.
+    required(['git', 'archive', '--format=tar', '--output=' + str(tarball), tree], env)
+    if command(['tar', '-xf', str(tarball), '-C', str(archive)], env).rc:
+        raise RuntimeError('export extract failed')
+    tarball.unlink()
+    if (root / 'node_modules').is_dir() and not (archive / 'node_modules').exists():
+        (archive / 'node_modules').symlink_to(root / 'node_modules')
+    tmp = archive / 'var' / 'agent-tmp'
+    tmp.mkdir(parents=True, exist_ok=True)
+    test_env = {key: value for key, value in env.items() if not key.startswith('GIT_')}
+    test_env.update(TMPDIR=str(tmp), BUN_CONFIG_FILE=str(archive / 'bunfig.toml'))
+    cli = HERE.parent / 'src' / 'cli.ts'
+    failures = 0
+    for path in tests:
+        name = 'export-test:' + path
+        print('== ' + name + ' (export ' + str(archive) + ')', flush=True)
+        if not (archive / path).is_file():
+            failures += 1
+            print('REFUSED EXPORT_TEST_FAILED ' + path + ': not in the exported tree (add it to --files)')
+            continue
+        if path.endswith('.test.sh'):
+            runner = ['sh', path]
+        elif path.endswith('.py'):
+            runner = ['python3', path]
+        else:
+            runner = ['bun', 'test', './' + path]
+        # Heavy lane exactly as fresh-gate's heavy_step: the gate's own cli.
+        argv = ['bun', 'run', '--no-env-file', '--config=/dev/null', str(cli), 'heavy',
+                '--label', 'commit-preflight-export-test', '--disk-observer', 'statfs', '--',
+                'env', 'PATH=' + test_env.get('PATH', ''), *runner]
+        result = run(argv, deadline_s=3600, grace_s=5, max_output_bytes=8 * 1024 * 1024,
+                     env=test_env, cwd=str(archive))
+        sys.stdout.write(result.stdout.decode(errors='replace'))
+        sys.stdout.write(result.stderr.decode(errors='replace'))
+        if result.rc or result.timed_out or result.truncated:
+            failures += 1
+            why = 'timed out' if result.timed_out else 'output truncated' if result.truncated else 'exit ' + str(result.rc)
+            print('REFUSED EXPORT_TEST_FAILED ' + path + ' (' + why + ')')
+        else:
+            print('PASS ' + name)
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--message', type=Path)
     parser.add_argument('--files', nargs='+')
+    parser.add_argument('--tests', nargs='+')
     args = parser.parse_args()
     started = time.monotonic()
     root = Path(required(['git', 'rev-parse', '--show-toplevel']).decode().strip())
@@ -194,7 +253,15 @@ def main():
                 failures += 1
                 remedy = '; require Docker and cached engine: docker pull koalaman/shellcheck:v0.9.0' if name.startswith('shellcheck:') else ''
                 print('UNJUDGED ' + name + ': ' + str(error) + remedy)
-        print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; no fresh gate or tests run')
+        if args.tests:
+            try:
+                failures += export_tests(args.tests, env, scratch, root)
+            except (OSError, RuntimeError) as error:
+                failures += 1
+                print('UNJUDGED export-tests: ' + str(error))
+            print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; {len(args.tests)} export test file(s) run; no fresh gate run')
+        else:
+            print(f'commit-preflight: {len(checks)} checks, {failures} refused/unjudged, {time.monotonic() - started:.2f}s; no fresh gate or tests run')
         if not args.message:
             print('commit-preflight: message-dependent checks NOT_JUDGED; this is staged-file feedback, not commit admission')
         return int(failures != 0)
