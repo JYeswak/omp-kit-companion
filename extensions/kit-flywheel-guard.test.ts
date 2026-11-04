@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
 import { checkNoWait, normalizeRemoteUrl, validPriorArtLine } from "./kit-flywheel-guard";
 import { checkBgWait } from "./kit-flywheel-guard";
+import { gateFromReason } from "./gate-events";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
@@ -1024,6 +1025,8 @@ test("GOAL_END_REFUSED: a fleet seat cannot drop or complete its own goal (J-202
 			expect((result as FlywheelToolCallResult)?.block).toBe(true);
 			expect((result as FlywheelToolCallResult)?.reason).toContain("GOAL_END_REFUSED");
 			expect((result as FlywheelToolCallResult)?.reason).toContain(`may not ${op} its own goal`);
+			expect((result as FlywheelToolCallResult)?.reason).toContain("send one NO-WORK line to your director and end the turn");
+			expect((result as FlywheelToolCallResult)?.reason).not.toContain("downtime");
 		}
 	}
 });
@@ -1083,15 +1086,37 @@ function constraintSeat(cwd: string): { env: Record<string, string>; line: strin
 	return { env: { AGENT_NAME: "CopperTrout", OMP_KIT_FLEET_WATCH_CONFIG: config }, line: "CONSTRAINT full-suite wall 900/600 clearing=fx-1 holder=unknown" };
 }
 
-/** KEEPALIVE2 [a][c]: the refusal's guard header, then kit-goal-keepalive's shared text led by the constraint line. */
-function expectConstraintFirst(reason: string | undefined, line: string): void {
+/** KEEPALIVE2 [a][c]: the refusal starts with the constraint line, the guard header follows on line 2 (still attributed
+ * to its code by gate-events), then kit-goal-keepalive's shared text. */
+function expectConstraintFirst(reason: string | undefined, line: string, code: string): void {
 	const lines = String(reason).split("\n");
-	expect(lines[1]).toBe(line);
+	expect(lines[0]).toBe(line);
+	expect(lines[1]).toStartWith(`kit-flywheel-guard ${code}: `);
+	expect(gateFromReason(String(reason))).toBe(code);
 	expect(lines[2]).toContain("send one NO-WORK line to your director and end the turn");
 	expect(lines[3]).toContain("never idles");
 	expect(lines[4]).toContain("comment on the nearest bead");
 	for (const banned of ["never wait", "downtime", "reality-check", "as a bead", "profiling"]) expect(String(reason).toLowerCase()).not.toContain(banned);
 }
+
+/** The BG_WAIT_NEXT text before KEEPALIVE2a (4ca4bee06d), kept verbatim as the planted negative. */
+const OLD_BG_WAIT_NEXT = "Take the next item now: your held beads, other seats' in_review beads ready for grading, bead DAG repair, "
+	+ "/skill:reality-check-for-project, then /skill:profiling-software-performance followed by "
+	+ "/skill:extreme-software-optimization. A pending job result arrives at a later tool boundary; never block your turn on it. Nothing was executed.";
+
+test("WAIT_REFUSED KEEPALIVE2 planted: restoring the old BG_WAIT_NEXT text fails the constraint-first case", async () => {
+	const cwd = freshDir(base, "bgwait-old-");
+	const seat = constraintSeat(cwd);
+	const h = await createFlywheelHost(base, { env: seat.env });
+	const [result] = await callAs(h, cwd, "w", "wait", {});
+	const reason = String((result as FlywheelToolCallResult)?.reason);
+	expectConstraintFirst(reason, seat.line, "WAIT_REFUSED"); // control: the shipped text passes
+	const restored = reason.replace("A pending job result arrives at a later tool boundary; never block your turn on it. Nothing was executed.", OLD_BG_WAIT_NEXT);
+	expect(restored).not.toBe(reason);
+	expect(() => expectConstraintFirst(restored, seat.line, "WAIT_REFUSED")).toThrow();
+	// The pre-KEEPALIVE2a layout (header first, old text, no constraint line) fails too.
+	expect(() => expectConstraintFirst(`kit-flywheel-guard WAIT_REFUSED: CopperTrout may not block its turn on its own background work (BGWAIT1): this call uses the \`wait\` tool. ${OLD_BG_WAIT_NEXT}`, seat.line, "WAIT_REFUSED")).toThrow();
+});
 
 test("NO_WAIT_REFUSED KEEPALIVE2: a fleet seat's idle_wait.py and sleep >= 30 s are refused, bare chained wrapped or sh -c, led by the constraint line", async () => {
 	const cwd = freshDir(base, "nowait-");
@@ -1118,7 +1143,7 @@ test("NO_WAIT_REFUSED KEEPALIVE2: a fleet seat's idle_wait.py and sleep >= 30 s 
 		const [result] = await callAs(h, cwd, "w", "bash", { command });
 		expect((result as FlywheelToolCallResult)?.block).toBe(true);
 		expect((result as FlywheelToolCallResult)?.reason).toContain("NO_WAIT_REFUSED");
-		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line);
+		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line, "NO_WAIT_REFUSED");
 	}
 });
 
@@ -1147,7 +1172,8 @@ test("NO_WAIT_REFUSED seam: the pure check refuses the planted wait with the giv
 	const event = { toolCallId: "w", toolName: "bash", input: { command: "sleep 600" } };
 	const refusal = checkNoWait(event, "CopperTrout", () => "CONSTRAINT none declarer=FixtureLead");
 	expect(refusal?.block).toBe(true);
-	expect(refusal?.reason.split("\n")[1]).toBe("CONSTRAINT none declarer=FixtureLead");
+	expect(refusal?.reason.split("\n").slice(0, 2)).toEqual(["CONSTRAINT none declarer=FixtureLead", expect.stringContaining("kit-flywheel-guard NO_WAIT_REFUSED: ")]);
+	expect(gateFromReason(String(refusal?.reason))).toBe("NO_WAIT_REFUSED");
 	expect(checkNoWait(event, null)).toBeUndefined();
 });
 
@@ -1704,7 +1730,7 @@ test("WAIT_REFUSED KEEPALIVE2: a fleet seat's wait tool call is refused, names t
 		expect((result as FlywheelToolCallResult)?.block).toBe(true);
 		expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
 		expect((result as FlywheelToolCallResult)?.reason).toContain("later tool boundary");
-		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line);
+		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line, "WAIT_REFUSED");
 	}
 });
 
@@ -1742,7 +1768,7 @@ test("WAIT_REFUSED KEEPALIVE2: a fleet seat's sleep-poll loops, chained sleeps a
 		const [result] = await callAs(h, cwd, "w", "bash", { command });
 		expect((result as FlywheelToolCallResult)?.block).toBe(true);
 		expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
-		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line);
+		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line, "WAIT_REFUSED");
 	}
 	const [evaled] = await callAs(h, cwd, "e", "eval", { language: "py", code: "import time\nwhile True:\n    time.sleep(5)" });
 	expect((evaled as FlywheelToolCallResult)?.block).toBe(true);
@@ -1769,7 +1795,9 @@ test("WAIT_REFUSED negatives: async jobs, short single sleeps and identity-less 
 });
 
 test("WAIT_REFUSED seam: the pure check refuses each planted form and passes without identity", () => {
-	expect(checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, "CopperTrout", undefined, () => "CONSTRAINT none declarer=FixtureLead")?.reason.split("\n")[1]).toBe("CONSTRAINT none declarer=FixtureLead");
+	const wait = checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, "CopperTrout", undefined, () => "CONSTRAINT none declarer=FixtureLead");
+	expect(wait?.reason.split("\n").slice(0, 2)).toEqual(["CONSTRAINT none declarer=FixtureLead", expect.stringContaining("kit-flywheel-guard WAIT_REFUSED: ")]);
+	expect(gateFromReason(String(wait?.reason))).toBe("WAIT_REFUSED");
 	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "while true; do sleep 1; done" } }, "CopperTrout")?.block).toBe(true);
 	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "sleep 20 && sleep 20" } }, "CopperTrout")?.block).toBe(true);
 	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "python3 -c \"import time; time.sleep(30)\"" } }, "CopperTrout")?.block).toBe(true);

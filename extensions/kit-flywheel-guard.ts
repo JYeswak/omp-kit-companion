@@ -1413,8 +1413,8 @@ export function checkGoalEnd(event: FlywheelToolCallEvent, owner: string | null)
 	return {
 		block: true,
 		reason: `kit-flywheel-guard ${GOAL_END_REFUSED}: ${owner} may not ${op} its own goal (J-2026-10-18-44). `
-			+ "Only your director or a chief changes your goal, with /goal set. Keep working your goal: if nothing is claimable, "
-			+ "take the next downtime item. Nothing was changed.",
+			+ "Only your director or a chief changes your goal, with /goal set. Keep working your goal: with no pinned work, "
+			+ "send one NO-WORK line to your director and end the turn. Nothing was changed.",
 	};
 }
 
@@ -1455,12 +1455,18 @@ export function checkGoalSend(event: FlywheelToolCallEvent, owner: string | null
 	};
 }
 
-/** KEEPALIVE2a (ompkit-774u.50.1, J-2026-10-29-18): every wait refusal ends in kit-goal-keepalive's one wake text, whose
-line 1 is the seat's constraint line and whose next sentence lets a seat off the constraint report NO-WORK and stop.
+/** KEEPALIVE2a (ompkit-774u.50.1, J-2026-10-29-18): every wait refusal is kit-goal-keepalive's one wake text with the
+guard header inserted after its line 1: the seat's constraint line, then `kit-flywheel-guard <CODE>: …` (gateFromReason
+finds it in the first three lines), then the NO-WORK sentence that lets a seat off the constraint stop.
 The default reads the process's own fleet-watch and cwd; the tool_call handler passes the session's. */
 export type WaitGuidance = () => string;
 const processWaitGuidance: WaitGuidance = () =>
 	constraintGuidance(constraintLine({ fleetWatch: fleetWatchPath(process.env), cwd: process.cwd(), now: Date.now() }));
+
+function waitRefusal(header: string, next: WaitGuidance): FlywheelToolCallResult {
+	const [constraint, ...rest] = next().split("\n");
+	return { block: true, reason: [constraint, header, ...rest].join("\n") };
+}
 
 /** `sleep` duration suffixes in seconds. String parsing only; no regex. */
 const SLEEP_UNIT_SECONDS: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
@@ -1522,11 +1528,8 @@ export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null, 
 		const name = basename(argv[0]!);
 		if (name === "idle_wait.py"
 			|| ((WAIT_SCRIPT_RUNNERS[name] === true || name.startsWith("python3")) && argv.slice(1).some(word => basename(word) === "idle_wait.py"))) {
-			return {
-				block: true,
-				reason: `kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
-					+ `this call runs idle_wait.py. Nothing was executed.\n${next()}`,
-			};
+			return waitRefusal(`kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
+				+ "this call runs idle_wait.py. Nothing was executed.", next);
 		}
 		if (name === "sleep") {
 			let total = 0;
@@ -1538,11 +1541,8 @@ export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null, 
 				total += seconds;
 			}
 			if (seen && total >= 30) {
-				return {
-					block: true,
-					reason: `kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
-						+ `this call runs \`sleep\` for about ${total} s (>= 30 s). Nothing was executed.\n${next()}`,
-				};
+				return waitRefusal(`kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
+					+ `this call runs \`sleep\` for about ${total} s (>= 30 s). Nothing was executed.`, next);
 			}
 		}
 	}
@@ -1577,10 +1577,7 @@ function hasLoopWord(fragment: string): boolean {
 }
 
 function bgWaitRefusal(owner: string, detail: string, next: WaitGuidance): FlywheelToolCallResult {
-	return {
-		block: true,
-		reason: `kit-flywheel-guard ${WAIT_REFUSED}: ${owner} may not block its turn on its own background work (BGWAIT1): ${detail} ${BG_WAIT_NEXT}\n${next()}`,
-	};
+	return waitRefusal(`kit-flywheel-guard ${WAIT_REFUSED}: ${owner} may not block its turn on its own background work (BGWAIT1): ${detail} ${BG_WAIT_NEXT}`, next);
 }
 
 /** BGWAIT1 (ompkit-fp72.19.1.24): a fleet seat never blocks its turn on its own background work. In a session

@@ -78,15 +78,23 @@ export function trackerAct(command: string): { act: string; target: string | nul
 	return null;
 }
 
-/** The gate name inside a guard refusal: the JSON `code`, else the first `<GUARD> <CODE>` token pair, else the guard. */
+/** Lines of a refusal searched for its `<GUARD> <CODE>` header: a wait refusal leads with the seat's constraint line and
+ * carries the header on line 2 (KEEPALIVE2a ompkit-774u.50.1); a header further down is quoted text, not the refusal's own. */
+const HEADER_LINES = 3;
+
+/** The gate name inside a guard refusal: the JSON `code`, else the `<GUARD> <CODE>` header in the first three lines,
+ * else the first token. */
 export function gateFromReason(reason: string): string {
 	try {
 		const parsed = JSON.parse(reason) as { code?: unknown; guard?: unknown };
 		if (typeof parsed.code === "string" && parsed.code) return parsed.code;
 		if (typeof parsed.guard === "string" && parsed.guard) return parsed.guard;
 	} catch { /* not JSON */ }
-	const m = /^(?:\[?kit-[a-z-]+\]?)\s+([A-Z][A-Z0-9_]+)/.exec(reason.trim());
-	return m?.[1] ?? reason.trim().split(/\s+/)[0] ?? "UNKNOWN";
+	for (const line of reason.trim().split("\n", HEADER_LINES)) {
+		const m = /^(?:\[?kit-[a-z-]+\]?)\s+([A-Z][A-Z0-9_]+)/.exec(line.trim());
+		if (m) return m[1]!;
+	}
+	return reason.trim().split(/\s+/)[0] ?? "UNKNOWN";
 }
 
 export async function recordGateEvent(event: GateEvent, options: { env?: Record<string, string | undefined>; home?: string; path?: string } = {}): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
