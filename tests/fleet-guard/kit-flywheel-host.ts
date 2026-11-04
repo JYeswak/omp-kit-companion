@@ -6,6 +6,7 @@ import kitFlywheelGuard, {
  type FlywheelMessage,
  type FlywheelToolCallEvent,
  type FlywheelToolCallResult,
+ type FlywheelToolResultEvent,
 } from "../../extensions/kit-flywheel-guard";
 import { run } from "../../src/kitlib/run.ts";
 import { fixtureDeadlineS } from "../cli/fixture-process.ts";
@@ -24,13 +25,15 @@ type SessionStartHandler = (event: { type: "session_start" }, ctx: FlywheelConte
 type CompactHandler = (event: { type: "session_compact" }, ctx: FlywheelContext) => unknown;
 type ToolHandler = (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown;
 type EndHandler = (event: Record<string, unknown>, ctx: FlywheelContext) => unknown;
-type HostRegistration = ["session_start", SessionStartHandler] | ["session_compact", CompactHandler] | ["tool_call", ToolHandler] | ["tool_execution_end", EndHandler];
+type ResultHandler = (event: FlywheelToolResultEvent, ctx: FlywheelContext) => unknown;
+type HostRegistration = ["session_start", SessionStartHandler] | ["session_compact", CompactHandler] | ["tool_call", ToolHandler] | ["tool_execution_end", EndHandler] | ["tool_result", ResultHandler];
 /** Fake omp host: records handlers, sent messages and every exec the guard makes. */
 export async function createFlywheelHost(base: string, opts: { env?: Record<string, string | undefined>; home?: string; respond?: Responder } = {}): Promise<FakeHost> {
 	const starts: SessionStartHandler[] = [];
 	const compacts: CompactHandler[] = [];
 	const tools: ToolHandler[] = [];
 	const ends: EndHandler[] = [];
+	const resultHandlers: ResultHandler[] = [];
 	const sent: FakeHost["sent"] = [];
 	const execs: ExecCall[] = [];
 	const notices: string[] = [];
@@ -43,6 +46,7 @@ export async function createFlywheelHost(base: string, opts: { env?: Record<stri
 		}
 		if (args[0] === "session_compact") compacts.push(args[1]);
 		else if (args[0] === "tool_execution_end") ends.push(args[1]);
+		else if (args[0] === "tool_result") resultHandlers.push(args[1]);
 		else tools.push(args[1]);
 		},
 		sendMessage: (message: FlywheelMessage, options?: { deliverAs?: string }) => void sent.push({ message, options }),
@@ -74,6 +78,8 @@ export async function createFlywheelHost(base: string, opts: { env?: Record<stri
 			for (const handler of tools) results.push(await handler({ ...event, type: "tool_call" }, ctx));
 		} else if (type === "tool_execution_end") {
 			for (const handler of ends) results.push(await handler({ ...event, type: "tool_execution_end" }, ctx));
+		} else if (type === "tool_result") {
+			for (const handler of resultHandlers) results.push(await handler(event as unknown as FlywheelToolResultEvent, ctx));
 		}
 		return results;
 	};

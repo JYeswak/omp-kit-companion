@@ -17,7 +17,7 @@ Current release: v0.2.87
 <!-- kit-release:end -->
 
 A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-56 top-level commands for an existing OMP install.
+57 top-level commands for an existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -60,7 +60,7 @@ Fleet guards, services and the update channel are opt-in.
 | Know a rule fires | `omp-kit test` runs every authored case through the installed OMP matcher (G1 registration, G2 payload, G3 prefixes); `--full` adds the isolated live stage (G4) |
 | Change profiles safely | `apply rules\|policy\|extensions\|plugin\|mcp` print a plan; `--apply --yes` writes, records a receipt, and reads each changed key back |
 | Reverse a change | `omp-kit undo RUN_ID --yes` restores one receipt and refuses if a file changed since |
-| See what is broken | `omp-kit doctor --scope NAME` covers 40 scopes |
+| See what is broken | `omp-kit doctor --scope NAME` covers installed components and measured push latency |
 | Keep agents in bounds | `fleet-guard`, `kit-save-guard`, `kit-flywheel-guard`, `kit-agent-mail-guard`, `kit-guard-optin`, `kit-callback` extensions |
 | Stay current | The `kit-update` service installs each published release and relinks the plugin |
 | Script it | Every command takes `--json` and returns one envelope; `omp-kit schema --json` describes it |
@@ -124,7 +124,7 @@ Receipts live under the private state root (`$XDG_STATE_HOME/omp-kit`, else
 update is pending, refuses an already-undone receipt, and refuses when a
 postimage changed after the apply.
 
-### Doctor: 40 scopes
+### Doctor: 41 scopes
 
 Read-only findings report `OK`, `DEGRADED`, `DRIFT`, `UNVERIFIED`, `FAIL`, or
 `NOT_RUN`, with a next step. See the [scope table](#doctor-scopes).
@@ -486,6 +486,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit save` | `save -m MSG -- PATH...` | `land --apply --yes` in one step; one `SAVED`/`REFUSED` line | `omp-kit save -m 'fix: x [pending]' -- src/a.ts` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Tags agent text; bare slash commands; refuses forgeries | `omp-kit send s %1 "status" --json` |
+| `omp-kit brief` | `brief --repo PATH [--paths PATH...]` | Gate contract/digest; landed-line deletion candidates require author review | `omp-kit brief --repo . --json` |
 | `omp-kit sha` | `sha SHA [--repo PATH]...` | Which fleet repos hold a commit; exit 0 found, 1 absent everywhere | `omp-kit sha dd82fb4e --json` |
 | `omp-kit custody` | `custody check --repo PATH [--agent NAME] [--reserve [--ttl SECONDS] [--reason TEXT]] PATH` | Answer whether one repo-relative path may be edited, from git and reservations; one PATH per call | `omp-kit custody check --repo /path/to/repo --json doc/README.md` |
 | `omp-kit beads` | `beads migrate [--apply --yes]` | Lossless non-author repair | `omp-kit beads migrate --actor Reviewer` |
@@ -593,6 +594,7 @@ it does not certify those IDs exist in an apply tracker.
 | `--scope plugin_release` | Linked vs latest published plugin version, per profile | `omp-kit doctor --scope plugin_release` |
 | `--scope mission` | Repos building through rch and whether their gate calls the kit lease | `omp-kit doctor --scope mission` |
 | `--scope hooks` | Stale hook members per fleet repo | `omp-kit doctor --scope hooks` |
+| `--scope push-latency` | Repo median/max pre-push span and five slowest members from gate-events/current + `.1` (32 MiB/file); excludes transport and untimed rows; incomplete input is `PARTIAL` | `omp-kit doctor --scope push-latency --json` |
 | `--scope rch` | Worker gc roots and health | `omp-kit doctor --scope rch` |
 | `--scope land` | Land guard identity: pane identity and reservations qualified against the publication parent | `omp-kit doctor --scope land --project PATH` |
 | `--scope activation` | ON, OFF-WITH-REASON, or OFF-NO-REASON for rule packs, extensions, profile links, kit services, and hook members; OFF-NO-REASON exits nonzero | `omp-kit doctor --scope activation` |
@@ -661,37 +663,19 @@ report without writing.
 Example files:
 
 ```jsonc
-// $XDG_CONFIG_HOME/omp-kit/ttsr-profiles.json: unique profile names, "default" allowed.
-// An empty, duplicated, or invalid list fails closed (PROFILE_LIST_UNVERIFIED).
+// ttsr-profiles.json: unique profile names; "default" allowed.
+// Empty/invalid/duplicate lists fail closed: PROFILE_LIST_UNVERIFIED.
 ["default", "work"]
 ```
 
 ```jsonc
-// $XDG_CONFIG_HOME/omp-kit/load.json: slots 1..64, max_wait_s in seconds,
-// disk_observer "sbh"|"statfs"|"auto" (default "auto": sbh when on PATH else statfs),
-// disk_floor_pct 0..50; runtime: flag > runtime_budget_s.<label> > label table
-// --lane NAME: lane_slots.NAME (default 1, 1..64).
+// load.json: slots/lane_slots 1..64; max_wait_s seconds; disk_floor_pct 0..50.
+// disk_observer: sbh|statfs|auto (default); runtime: flag > runtime_budget_s.<label> > label table.
 { "slots": 2, "max_wait_s": 600, "disk_observer": "auto" }
 ```
 
-```jsonc
-// ~/.config/omp-kit/fleet-watch.json (full reference: docs/fleet-watch.md)
-{
-  "enabled": true,
-  "intervalSeconds": 120,
-  "noDecisionChecks": 5,
-  "sessions": [
-    {
-      "session": "feature-workers",       // worker tmux session
-      "coordinatorSession": "orchestrator",
-      "coordinatorPane": "%54",
-      "repo": "<repo-path-on-this-dispatcher>",
-      "workerPanes": ["%1", "%2"],
-      "readyCommand": "br ready --json"
-    }
-  ]
-}
-```
+See [docs/fleet-watch.md](docs/fleet-watch.md) for `fleet-watch.json`:
+session/repo selection, coordinator and worker panes, readiness commands and polling.
 
 Turn on automatic updates (the environment is captured into the job file):
 

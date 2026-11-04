@@ -17,7 +17,9 @@
 # delete+add (no -M follow): the delete side is judged by the rules above.
 # Exit 1 refuses the commit, naming path, sha and subject.
 set -u
-msg=${1:?usage: check-stale-worktree.sh MSGFILE}
+msg=${1:?usage: check-stale-worktree.sh MSGFILE or --review}
+review=0
+[ "$msg" != --review ] || review=1
 root=$(git rev-parse --show-toplevel) || { printf 'stale-worktree: not inside a work tree\n' >&2; exit 1; }
 if ! git rev-parse -q --verify 'HEAD^{commit}' > /dev/null; then
 	# Failure is not an unborn verdict. Git 2.46+ --exists distinguishes
@@ -35,9 +37,16 @@ fi
 # Current message bead and declared reverts (empty when absent). A
 # `Supersedes: <sha>` trailer declares an intended rewrite with the same
 # strength as `Revert: <sha>`; the trailer line itself logs it in the commit.
-bead=$(grep -E -m1 '^[[:space:]]*[Bb]ead:[[:space:]]*[A-Za-z0-9._-]+' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//')
-reverts=$(grep -E -o '^[[:space:]]*[Rr]evert:[[:space:]]*[0-9a-fA-F]{7,64}|^[[:space:]]*[Ss]upersedes:[[:space:]]*[0-9a-fA-F]{7,64}' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//')
-[ -f "$msg" ] || { printf 'stale-worktree: cannot read %s\n' "$msg" >&2; exit 1; }
+if [ "$review" -eq 1 ]; then
+	# Review has no rewrite authority. Attribute every foreign-bead removal
+	# with the SAME move/export/mtime predicates as commit admission below.
+	bead=brief-review
+	reverts=""
+else
+	bead=$(grep -E -m1 '^[[:space:]]*[Bb]ead:[[:space:]]*[A-Za-z0-9._-]+' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//' -e 's/[[:space:]]*$//')
+	reverts=$(grep -E -o '^[[:space:]]*[Rr]evert:[[:space:]]*[0-9a-fA-F]{7,64}|^[[:space:]]*[Ss]upersedes:[[:space:]]*[0-9a-fA-F]{7,64}' "$msg" 2>/dev/null | sed -e 's/^[^:]*:[[:space:]]*//')
+	[ -f "$msg" ] || { printf 'stale-worktree: cannot read %s\n' "$msg" >&2; exit 1; }
+fi
 
 # Check the producer before using empty output as "nothing committed".
 # Actual path data is materialized NUL-separated below; --only stays judged.
@@ -263,6 +272,7 @@ while IFS= read -r path; do
 		done
 		# Rule (a): worktree predates the landing (absent file skips: no mtime).
 		if [ -n "$mt" ] && [ -n "$cdate" ] && [ "$cdate" -gt "$mt" ] && [ "$declared" -eq 0 ]; then
+			[ "$review" -eq 0 ] || printf 'REVIEW_CANDIDATE\t%s\t%s\t%s\t%s\n' "$path" "$sha" "$cbead" "$ln"
 			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s)\n' "$path" "$sha" "$subject" >> "$metadata_dir/report" || exit 1; printf '%s\n' "$sha" >> "$metadata_dir/shas" || exit 1 ;; esac
 			seen="$seen $sha"
 			printf '1\n' >> "$metadata_dir/refused" || exit 1
@@ -277,6 +287,7 @@ while IFS= read -r path; do
 		[ "$export_ok" -eq 1 ] && skip_b=1
 		case "$moved" in *" $ln "*) skip_b=1 ;; esac
 		if [ "$skip_b" -eq 0 ] && [ -n "$cbead" ] && [ -n "$bead" ] && [ "$cbead" != "$bead" ] && [ "$declared" -eq 0 ]; then
+			[ "$review" -eq 0 ] || printf 'REVIEW_CANDIDATE\t%s\t%s\t%s\t%s\n' "$path" "$sha" "$cbead" "$ln"
 			case "$seen" in *"$sha"*) ;; *) printf 'STALE_WORKTREE %s reverts %s (%s) from bead %s\n' "$path" "$sha" "$subject" "$cbead" >> "$metadata_dir/report" || exit 1; printf '%s\n' "$sha" >> "$metadata_dir/shas" || exit 1 ;; esac
 			seen="$seen $sha"
 			printf '1\n' >> "$metadata_dir/refused" || exit 1
@@ -284,6 +295,7 @@ while IFS= read -r path; do
 	done < "$mvhit" || exit 1
  done < "$metadata_dir/paths.lines" || { printf 'stale-worktree: cannot evaluate removed sites\n' >&2; exit 1; }
  if [ -s "$metadata_dir/refused" ]; then
+	[ "$review" -eq 0 ] || exit 1
  	report=$(cat "$metadata_dir/report" 2>/dev/null)
 	printf 'stale-worktree: REFUSED: commit would revert landed lines:\n%s\n' "$report" >&2
  	printf 'stale-worktree: declare each intended revert with a "Revert: <sha>" trailer line (or "Supersedes: <sha>" for a rewrite), or rework on a fresh worktree\n' >&2

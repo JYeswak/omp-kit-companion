@@ -8,7 +8,8 @@ import { checkBgWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { run, runSync } from "../src/kitlib/run.ts";
-import { fixtureDeadlineS } from "../tests/cli/fixture-process.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "../tests/cli/fixture-process.ts";
+import { briefContract, renderBrief } from "../src/brief.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -1803,4 +1804,65 @@ test("DBLITERAL2 control: a literal --db path is not refused by this check", asy
 	const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Holder" }, respond: brTable({ "kit-1": bead("kit-1", "Holder") }) });
 	const result = await toolCall(h, project, "br update kit-1 --priority 2 --db /abs/repo/.beads/beads.db");
 	expect(result?.reason ?? "").not.toContain("TRACKER_DB_UNEXPANDED");
+});
+
+test("BRIEFCONTRACT1 live tool-call boundary refuses a planted build and admits current digest and read-only controls", async () => {
+	const project = freshDir(base, "brief-");
+	const execute: Responder = async call => {
+		const result = await runFixtureAsync([call.command, ...call.args], { cwd: call.options?.cwd ?? project, env: { ...process.env, GIT_CEILING_DIRECTORIES: base, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+		return { code: result.rc ?? 1, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
+	};
+	const initialized = await execute({ command: "git", args: ["init", "-q", "--template=", project] });
+	expect(initialized.code).toBe(0);
+	const hooks = join(project, ".git", "hooks", "hooks.d", "pre-commit");
+	mkdirSync(hooks, { recursive: true });
+	const member = join(hooks, "51-omp-kit-staged-kitlib");
+	writeFileSync(member, "#!/bin/sh\n# Refuse raw process spawn; use src/kitlib/run.ts\nexit 0\n", { mode: 0o755 });
+	const h = await createFlywheelHost(base, { respond: execute });
+	const input = { context: `Repo: ${project}`, tasks: [{ task: "Implement the requested change. Do not edit unrelated paths." }] };
+	const [refused] = await h.emit("tool_call", { toolCallId: "brief-missing", toolName: "task", input }, h.ctx(project));
+	expect(refused).toMatchObject({ block: true, reason: expect.stringContaining("BRIEF_CONTRACT_REFUSED") });
+	const contract = await briefContract(project);
+	const [admitted] = await h.emit("tool_call", { toolCallId: "brief-present", toolName: "task", input: { ...input, context: `${input.context}\n${renderBrief(contract)}` } }, h.ctx(project));
+	expect((admitted as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+	const [readonly] = await h.emit("tool_call", { toolCallId: "brief-read", toolName: "task", input: { ...input, tasks: [{ task: "Read-only: analyze the implementation" }] } }, h.ctx(project));
+	expect((readonly as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
+});
+
+test("BRIEFCONTRACT1 parent's task-result hook refuses DONE without preflight, admits clean evidence and analysis controls", async () => {
+	const h = await createFlywheelHost(base);
+	const input = { context: "Repo: /fixture", tasks: [{ task: "Implement feature" }] };
+	const emit = (text: string, taskInput = input) => h.emit("tool_result", { toolName: "task", input: taskInput, content: [{ type: "text", text }] }, h.ctx(base));
+	const [refused] = await emit("DONE: implemented feature");
+	expect(refused).toMatchObject({ isError: true, details: { code: "BRIEF_PREFLIGHT_REFUSED", accepted: false } });
+	const [nonzero] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\ncommit-preflight: 12 checks, 1 refused/unjudged, 1.00s");
+	expect(nonzero).toMatchObject({ isError: true });
+	const [missingMember] = await emit("DONE\nsh scripts/commit-preflight.sh --files skills/contract.md\nUNKNOWN installed-gate:55-omp-kit-staged-wallclock: missing or not executable\ncommit-preflight: 22 checks, 1 refused/unjudged, 1.00s");
+	expect(missingMember).toMatchObject({ isError: true, details: { accepted: false } });
+	const [unknownDespiteZero] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\nUNKNOWN installed-gate: no installed hook chain\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s");
+	expect(unknownDespiteZero).toMatchObject({ isError: true, details: { accepted: false } });
+	const [admitted] = await emit("DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s");
+	expect(admitted).toBeUndefined();
+	const [analysis] = await emit("DONE: read-only analysis", { ...input, tasks: [{ task: "Read-only: analyze feature" }] });
+	expect(analysis).toBeUndefined();
+	const [progress] = await emit("Still implementing feature");
+	expect(progress).toBeUndefined();
+	const [mixed] = await h.emit("tool_result", {
+		toolName: "task", input: { ...input, tasks: [{ task: "Implement first" }, { task: "Implement second" }] },
+		content: [{ type: "text", text: "DONE: both" }],
+		details: { results: [
+			{ index: 0, id: "First", output: "DONE\nsh scripts/commit-preflight.sh --files src/first.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s" },
+			{ index: 1, id: "Second", output: "DONE: second implemented without preflight" },
+		] },
+	}, h.ctx(base));
+	expect(mixed).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringContaining("Second: BRIEF_PREFLIGHT_REFUSED") }] });
+});
+
+test("BRIEFCONTRACT1 direct parent DONE message after file edits needs the same preflight evidence", async () => {
+	const h = await createFlywheelHost(base);
+	await h.emit("tool_call", { toolCallId: "brief-edit", toolName: "edit", input: { path: "src/feature.ts" } }, h.ctx(base));
+	const [refused] = await h.emit("tool_call", { toolCallId: "brief-message", toolName: "write", input: { path: "agent://Main", content: "DONE: feature implemented" } }, h.ctx(base));
+	expect(refused).toMatchObject({ block: true, reason: expect.stringContaining("BRIEF_PREFLIGHT_REFUSED") });
+	const [admitted] = await h.emit("tool_call", { toolCallId: "brief-message-clean", toolName: "write", input: { path: "agent://Main", content: "DONE\nsh scripts/commit-preflight.sh --files src/feature.ts\ncommit-preflight: 12 checks, 0 refused/unjudged, 1.00s" } }, h.ctx(base));
+	expect((admitted as FlywheelToolCallResult | undefined)?.block).not.toBe(true);
 });

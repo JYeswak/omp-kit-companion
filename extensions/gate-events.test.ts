@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gateEventsPath, gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
@@ -40,6 +40,7 @@ test("recordGateEvent appends one row per event under the state dir and never th
 	const rows = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
 	expect(rows.map(r => [r.act, r.gate, r.kind, r.target])).toEqual([["close", "SELF_CLOSE_REFUSED", "refuse", "ompkit-a1"], ["close", "flywheel", "pass", "ompkit-a1"]]);
 	expect(rows.every(r => typeof r.ts === "string" && r.seat === "PlumRaven")).toBe(true);
+	expect(rows.every(r => "repo" in r && r.member === r.gate && Number.isFinite(Date.parse(r.started_at)) && r.duration_s >= 0)).toBe(true);
 	// planted: a path whose parent is a file is reported, not thrown; the good ledger is untouched
 	writeFileSync(join(base, "not-a-dir"), "x");
 	const bad = await recordGateEvent({ seat: null, act: "claim", target: null, gate: "x", kind: "refuse" }, { path: join(base, "not-a-dir", "gate-events.jsonl") });
@@ -68,6 +69,17 @@ test("recordGateEvent retains sanitized replay and raw event identity before bou
 	expect(Buffer.byteLength(JSON.stringify(row.replay))).toBeLessThanOrEqual(32768);
 	expect(JSON.stringify(row)).not.toContain(sentinel);
 	expect(JSON.stringify(row)).not.toContain("private-binding-value");
+});
+
+test("recordGateEvent records repo root and supplied check clock without replacing old fields", async () => {
+	const repo = join(base, "timed-repo"), nested = join(repo, "nested");
+	mkdirSync(join(repo, ".git"), { recursive: true }); mkdirSync(nested);
+	const path = join(base, "timed.jsonl"), started_at = "2026-11-03T12:00:00Z";
+	await recordGateEvent({ seat: "Fixture", act: "publish", target: "main", gate: "40-full", kind: "pass",
+		replay: captureMineReplay({ cwd: nested }), started_at, duration_s: 12.5 }, { path });
+	expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ repo, member: "40-full", started_at, duration_s: 12.5,
+		act: "publish", target: "main", gate: "40-full", kind: "pass" });
+	expect((await recordGateEvent({ seat: null, act: "publish", target: null, gate: "bad", kind: "pass", duration_s: -1 }, { path })).ok).toBe(false);
 });
 
 test("recordGateEvent scrubs bounded metadata including unexpected credential-shaped IDs", async () => {

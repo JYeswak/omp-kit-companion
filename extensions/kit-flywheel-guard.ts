@@ -15,6 +15,7 @@ import { admitClaimCut } from "../src/claim-cut.ts";
 import { captureMineReplay, type MineReplay } from "../src/mine-replay.ts";
 import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
+import { briefHandbackRefusal, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -111,6 +112,13 @@ export interface FlywheelToolExecutionEndEvent {
 	isError?: unknown;
 }
 
+export interface FlywheelToolResultEvent {
+	toolName: string;
+	input: Record<string, unknown>;
+	content: { type: string; text?: string }[];
+	details?: unknown;
+}
+
 export interface FlywheelToolCallResult {
 	block?: boolean;
 	reason?: string;
@@ -130,6 +138,7 @@ export interface FlywheelGuardApi {
 	on(event: "session_start", handler: (event: { type: "session_start" }, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_call", handler: (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_execution_end", handler: (event: FlywheelToolExecutionEndEvent, ctx: FlywheelContext) => unknown): void;
+	on(event: "tool_result", handler: (event: FlywheelToolResultEvent, ctx: FlywheelContext) => unknown): void;
 	sendMessage(message: FlywheelMessage, options?: { triggerTurn?: boolean; deliverAs?: "nextTurn" | "aside" }): void;
 	exec: FlywheelExec;
 }
@@ -2508,6 +2517,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	let selfDeclared: string | null = null;
 	const pendingCalls = new Map<string, RereadCall>();
 	const pendingReplays = new Map<string, MineReplay>();
+	const pendingClocks = new Map<string, { started_at: string; monotonic: number }>();
+	let buildWorkObserved = false;
 	// Observation only: no write-tree, tracker mutation, reservation or custody --reserve.
 	const replayFor = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<MineReplay> => {
 		const tool = typeof event.toolName === "string" ? event.toolName : undefined;
@@ -2591,6 +2602,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	pi.on("session_compact", async (_event, ctx) => {
 		pendingCalls.clear();
 		pendingReplays.clear();
+		pendingClocks.clear();
 		closeIntents.clear();
 		const envIdentities = IDENTITY_ENV.map(name => env[name]?.trim()).filter((value): value is string => Boolean(value));
 		let identities: string[];
@@ -2646,6 +2658,19 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	// ledger never changes a verdict: a write failure is a warning.
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
+			if (event.toolName === "task") {
+				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec);
+				if (reason) return { block: true, reason };
+			}
+			if (event.toolName === "write") {
+				const path = field(event.input, "path");
+				const content = field(event.input, "content");
+				if (typeof path === "string" && path.startsWith("agent://") && buildWorkObserved && typeof content === "string") {
+					const reason = briefHandbackRefusal(content);
+					if (reason) return { block: true, reason };
+				}
+			}
+			if (event.toolName === "edit" || (event.toolName === "write" && typeof field(event.input, "path") === "string" && !String(field(event.input, "path")).includes("://"))) buildWorkObserved = true;
 			if (event.toolName === "ask") {
 				// AGENT_NAME is set by the fleet launcher; older tmux seats use the
 				// same Agent Mail pane-identity binding as the other guard checks.
@@ -2752,6 +2777,9 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		}
 	};
 	pi.on("tool_call", async (event, ctx) => {
+		const clock = { started_at: new Date().toISOString(), monotonic: performance.now() };
+		const timing = () => ({ started_at: clock.started_at, duration_s: (performance.now() - clock.monotonic) / 1000 });
+		if (typeof event.toolCallId === "string") pendingClocks.set(event.toolCallId, clock);
 		let replay: MineReplay;
 		try { replay = await replayFor(event, ctx); }
 		catch { replay = captureMineReplay({ ...(typeof event.toolName === "string" ? { tool: event.toolName } : {}), arguments: event.input, cwd: ctx.cwd }); }
@@ -2774,14 +2802,14 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					exec: (argv, cwd) => git(argv.slice(1), cwd) });
 				if (plan !== null) {
 					for (const done of plan.completed) {
-						await recordGateEvent({ seat, act: "commit", target: plan.bead, gate: "commit-autocomplete", kind: "auto_complete", detail: `${done.what}: ${done.detail}`.slice(0, 200), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
+						await recordGateEvent({ ...timing(), repo: top.stdout.trim(), seat, act: "commit", target: plan.bead, gate: "commit-autocomplete", kind: "auto_complete", detail: `${done.what}: ${done.detail}`.slice(0, 200), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId } : {}) }, { env, home });
 						ctx.ui?.notify(`AUTO_COMPLETED:${done.what}: ${done.detail}`, "info");
 					}
 					if (plan.findings.length > 0) {
 						const envelope = renderEnvelope({ ok: false, act: "commit", target: plan.bead, snapshot: `tree:${(await git(["write-tree"], repo)).stdout.trim()}`, findings: plan.findings });
 						const reason = `kit-flywheel-guard COMMIT_INCOMPLETE: ${envelope}\nNothing was completed and nothing was run.`;
-						await recordGateEvent({ seat, act: "commit", target: plan.bead, gate: "COMMIT_INCOMPLETE", kind: "refuse", replay, detail: plan.findings.map(f => f.code).join(","), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}) }, { env, home });
-						if (typeof event.toolCallId === "string") { pendingReplays.delete(event.toolCallId); pendingCalls.delete(event.toolCallId); }
+						await recordGateEvent({ ...timing(), repo: top.stdout.trim(), seat, act: "commit", target: plan.bead, gate: "COMMIT_INCOMPLETE", kind: "refuse", replay, detail: plan.findings.map(f => f.code).join(","), ...(typeof event.toolCallId === "string" ? { attempt: event.toolCallId, event_id: event.toolCallId } : {}) }, { env, home });
+						if (typeof event.toolCallId === "string") { pendingReplays.delete(event.toolCallId); pendingCalls.delete(event.toolCallId); pendingClocks.delete(event.toolCallId); }
 						return { block: true, reason };
 					}
 					if (plan.command !== command) {
@@ -2799,6 +2827,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 		}
 		if (act !== null || verdict?.block === true) {
 			const row = await recordGateEvent({
+				...timing(),
 				seat: admissionOwner(env) ?? selfDeclared ?? await paneIdentities(pi.exec, env, home, [ctx.cwd]).then(names => names[0] ?? null).catch(() => null),
 				act: act?.act ?? (typeof event.toolName === "string" ? event.toolName.toLowerCase() : "unknown"),
 				target: act?.target ?? null,
@@ -2810,12 +2839,41 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			}, { env, home });
 			if (!row.ok) ctx.ui?.notify(`kit-flywheel-guard GATE_LEDGER_UNWRITTEN: ${row.why}; the verdict stands.`, "warning");
 		}
-		if (verdict?.block === true && typeof event.toolCallId === "string") { pendingCalls.delete(event.toolCallId); pendingReplays.delete(event.toolCallId); }
+		if (verdict?.block === true && typeof event.toolCallId === "string") { pendingCalls.delete(event.toolCallId); pendingReplays.delete(event.toolCallId); pendingClocks.delete(event.toolCallId); }
 		return verdict;
+	});
+	// This is the parent's actual tool-result boundary, not an agent_end observer.
+	// Async auto-delivery and arbitrary final text do not pass through this hook.
+	pi.on("tool_result", event => {
+		if (event.toolName !== "task") return;
+		const tasks = field(event.input, "tasks");
+		if (!Array.isArray(tasks)) return;
+		const results = field(event.details, "results");
+		const refusals: string[] = [];
+		if (Array.isArray(results) && results.length > 0) {
+			for (const result of results) {
+				const index = field(result, "index");
+				const task = typeof index === "number" ? tasks[index] : undefined;
+				if (task === null || typeof task !== "object" || !isBuildBriefTask(task as Record<string, unknown>)) continue;
+				const output = field(result, "output");
+				if (typeof output !== "string") continue;
+				const reason = briefHandbackRefusal(output);
+				if (reason) refusals.push(`${String(field(result, "id") ?? index)}: ${reason}`);
+			}
+		} else if (tasks.some(task => task !== null && typeof task === "object" && isBuildBriefTask(task as Record<string, unknown>))) {
+			for (const part of event.content) {
+				if (part.type !== "text") continue;
+				const reason = briefHandbackRefusal(part.text ?? "");
+				if (reason) refusals.push(reason);
+			}
+		}
+		if (refusals.length > 0) return { isError: true, content: [{ type: "text", text: refusals.join("\n") }], details: { code: "BRIEF_PREFLIGHT_REFUSED", accepted: false } };
 	});
 	pi.on("tool_execution_end", async (_event, ctx) => {
 		try {
 			if (typeof _event.toolCallId !== "string") return;
+			const clock = pendingClocks.get(_event.toolCallId);
+			pendingClocks.delete(_event.toolCallId);
 			const replay = pendingReplays.get(_event.toolCallId);
 			pendingReplays.delete(_event.toolCallId);
 			const call = pendingCalls.get(_event.toolCallId);
@@ -2824,6 +2882,7 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			const sourceRc = replayExitCode(_event.result);
 			if (cause !== null) {
 				await recordGateEvent({ seat: admissionOwner(env) ?? selfDeclared, act: call?.toolName.toLowerCase() ?? "unknown", target: null,
+					...(clock ? { started_at: clock.started_at, duration_s: (performance.now() - clock.monotonic) / 1000 } : {}),
 					gate: cause.class_id, kind: "refuse", event_id: _event.toolCallId, attempt: _event.toolCallId,
 					detail: cause.summary, replay: replay ?? captureMineReplay({ tool: typeof _event.toolName === "string" ? _event.toolName : "unknown", cwd: ctx.cwd }),
 					// A zero found only inside prior nested command output is not this failing tool's rc.

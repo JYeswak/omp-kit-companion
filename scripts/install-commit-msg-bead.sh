@@ -424,7 +424,7 @@ case "$kind" in
 		;;
 esac
 rc=0
-# GATEEVENTS1 runner v6: actual member rc and hook arguments accompany replay observations;
+# GATEEVENTS1 runner v7: per-member wall start and monotonic elapsed accompany verdicts;
 # each verdict is one gate-events row (act = commit/publish, gate = member name); FINDING lines (kitlib-findings.sh
 # grammar) from every member are collected into ONE envelope printed once at the end, and the chain exits
 # non-zero once iff any member found something. A legacy member that exits non-zero without FINDING lines
@@ -432,6 +432,9 @@ rc=0
 ledger="$here/hooks.d/commit-msg/gate-event.sh"
 case "$kind" in pre-commit | commit-msg | prepare-commit-msg) act=commit ;; pre-push) act=publish ;; *) act=$kind ;; esac
 target=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '%s' '')
+# A pre-push invocation is one latency sample, even if a long-lived parent shell reuses its pid.
+attempt="git-$PPID"
+if [ "$kind" = pre-push ]; then attempt="$attempt-$(python3 -c 'import time; print(time.time_ns())')"; fi
 findings=$(mktemp "${TMPDIR:-/tmp}/hook-findings.XXXXXX") || exit 1
 run_member() {
 	first=''
@@ -447,7 +450,12 @@ for hook in "$here/hooks.d/$kind"/[0-9][0-9]-*; do
 	member=$(basename -- "$hook")
 	member_rc=0
 	errf=$(mktemp "${TMPDIR:-/tmp}/hook-stderr.XXXXXX") || exit 1
+	# Python <3.10 on macOS makes monotonic() process-relative; use the shared kernel clock.
+	member_clock=$(python3 -c 'import time; print(time.time(), time.clock_gettime(time.CLOCK_MONOTONIC))')
+	member_started_epoch=${member_clock% *}
+	member_started_mono=${member_clock#* }
 	if [ -n "$input" ]; then out=$(run_member "$@" < "$input" 2> "$errf") || member_rc=$?; else out=$(run_member "$@" 2> "$errf") || member_rc=$?; fi
+	member_finished_mono=$(python3 -c 'import time; print(time.clock_gettime(time.CLOCK_MONOTONIC))')
 	n=$(printf '%s\n' "$out" | grep -c '^FINDING	' || :)
 	printf '%s\n' "$out" | grep '^FINDING	' >> "$findings" || :
 	# Converted members speak only in FINDING lines; anything else on stdout is passed through unchanged.
@@ -466,8 +474,10 @@ for hook in "$here/hooks.d/$kind"/[0-9][0-9]-*; do
 		if [ "$member_rc" -eq 0 ]; then row=pass; else row=refuse; fi
 		message_file=''
 		case "$kind" in commit-msg | prepare-commit-msg) message_file=${1:-} ;; esac
+		OMP_KIT_GATE_EVENT_STARTED_EPOCH=$member_started_epoch OMP_KIT_GATE_EVENT_STARTED_MONO=$member_started_mono \
+		OMP_KIT_GATE_EVENT_FINISHED_MONO=$member_finished_mono \
 		OMP_KIT_GATE_EVENT_RC=$member_rc OMP_KIT_GATE_EVENT_HOOK=$kind OMP_KIT_GATE_EVENT_MESSAGE_FILE=$message_file \
-			sh "$ledger" "$act" "$target" "$member" "$row" "git-$PPID" "findings=$n rc=$member_rc" "$@" || :
+			sh "$ledger" "$act" "$target" "$member" "$row" "$attempt" "findings=$n rc=$member_rc" "$@" || :
 	fi
 done
 [ -z "$input" ] || rm -f "$input"
@@ -504,7 +514,7 @@ ensure_chain() {
 	if [ -x "$entry" ] && grep -q 'hooks\.d' "$entry" 2>/dev/null; then
 		# The marker names the runner generation: bump it (here and in write_runner) with every runner change,
 		# or installed repos keep the old runner while --check reports them fresh.
-		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v6' "$entry"; }; then
+		if grep -q 'chain runner: run every executable' "$entry" && { ! grep -q 'replay one buffered copy' "$entry" || ! grep -q 'GATEEVENTS1 runner v7' "$entry"; }; then
 			write_runner "$entry"
 			printf 'upgraded chain runner (stdin replay + gate-events ledger): %s\n' "$entry"
 		else

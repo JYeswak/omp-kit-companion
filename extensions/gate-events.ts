@@ -1,6 +1,6 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { appendJsonl } from "../src/kitlib/jsonl.ts";
 import { captureMineReplay, readMineReplay, type MineReplay } from "../src/mine-replay.ts";
 
@@ -10,7 +10,7 @@ import { captureMineReplay, readMineReplay, type MineReplay } from "../src/mine-
  * rows from shell (`scripts/gate-event.sh`); `omp-kit`'s `scripts/measure.py` reads them (M-REFUSAL-RATE,
  * M-REFUSAL-CHAIN, M-FIRST-ATTEMPT, M-AUTO-COMPLETED).
  *
- * Row: { ts, seat, act, target, gate, kind, detail }. `kind` is pass | refuse | inject | auto_complete.
+ * Row: { ts, seat, act, target, gate, kind, repo, member, started_at, duration_s, detail }.
  * `act` names what the agent was trying to do (commit, close, claim, in-review, release, publish, bash);
  * `gate` names the check that answered (CLAIM_REFUSED, SELF_CLOSE_REFUSED, commit-notes, ...).
  * Writing is best effort and never throws into the guard: a ledger failure is reported, never a refusal.
@@ -23,6 +23,12 @@ export interface GateEvent {
 	target: string | null;
 	gate: string;
 	kind: GateEventKind;
+	/** Git worktree root (resolved from replay.cwd when omitted); null outside a repository. */
+	repo?: string | null;
+	member?: string;
+	/** Check start, not ledger append time. Omitted clocks describe only this recorder invocation. */
+	started_at?: string;
+	duration_s?: number;
 	/** One act attempt: the tool call id, or the git process pid shared by every hook runner of one git command. */
 	attempt?: string;
 	event_id?: string;
@@ -35,6 +41,18 @@ export interface GateEvent {
 export function gateEventsPath(env: Record<string, string | undefined> = process.env, home: string = homedir()): string {
 	const state = env.XDG_STATE_HOME && env.XDG_STATE_HOME.trim() !== "" ? env.XDG_STATE_HOME : join(home, ".local", "state");
 	return join(state, "omp-kit", "gate-events.jsonl");
+}
+
+function eventRepo(cwd: string): string | null {
+	try {
+		let path = realpathSync(resolve(cwd));
+		for (;;) {
+			if (existsSync(join(path, ".git"))) return path;
+			const parent = dirname(path);
+			if (parent === path) return null;
+			path = parent;
+		}
+	} catch { return null; }
 }
 
 /** The tracker act a bash command performs, or null when it is not a tracker act. */
@@ -72,6 +90,11 @@ export function gateFromReason(reason: string): string {
 }
 
 export async function recordGateEvent(event: GateEvent, options: { env?: Record<string, string | undefined>; home?: string; path?: string } = {}): Promise<{ ok: true; path: string } | { ok: false; why: string }> {
+	const recordedAt = new Date().toISOString();
+	const startedAt = event.started_at ?? recordedAt;
+	const duration = event.duration_s ?? 0;
+	if (!Number.isFinite(Date.parse(startedAt)) || !Number.isFinite(duration) || duration < 0)
+		return { ok: false, why: "Invalid gate event timing" };
 	const path = options.path ?? gateEventsPath(options.env, options.home);
 	const replay = event.replay === undefined ? undefined : readMineReplay(event.replay);
 	let metadataRedacted = false;
@@ -83,7 +106,9 @@ export async function recordGateEvent(event: GateEvent, options: { env?: Record<
 		metadataTruncated ||= captured.truncated;
 		return captured.message ?? "[OMITTED]";
 	};
-	const row = { ts: new Date().toISOString(), seat: clean(event.seat), act: clean(event.act), target: clean(event.target), gate: clean(event.gate),
+	const row = { ts: recordedAt, seat: clean(event.seat), act: clean(event.act), target: clean(event.target), gate: clean(event.gate),
+		repo: clean(event.repo === null ? null : eventRepo(event.repo ?? replay?.cwd ?? process.cwd())),
+		member: clean(event.member ?? event.gate), started_at: startedAt, duration_s: duration,
 		kind: event.rc === 0 && event.kind === "refuse" ? "pass" : clean(event.kind),
 		...(event.attempt ? { attempt: clean(event.attempt) } : {}),
 		...(event.event_id ? { event_id: clean(event.event_id) } : {}),

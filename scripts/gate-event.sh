@@ -1,9 +1,10 @@
 #!/bin/sh
 # gate-event.sh ACT TARGET GATE KIND [ATTEMPT [DETAIL]]: append one row to the gate-events ledger
 # (GATEEVENTS1, ompkit-fp72.135.3.12; plan section 23.4). Same row shape as extensions/gate-events.ts:
-# {ts, seat, act, target, gate, kind, detail}. Best effort: never fails the caller, never prints.
+# {ts, seat, act, target, gate, kind, repo, member, started_at, duration_s, detail}. Best effort: never fails the caller, never prints.
 # Seat: BR_ACTOR, BR_AGENT_NAME or AGENT_NAME, else null. Writes go through kitlib_jsonl.py beside
 # this script (the installed hooks dir ships it) so the lock and torn-tail contract match the TypeScript half.
+# Runners supply OMP_KIT_GATE_EVENT_STARTED_EPOCH/STARTED_MONO/FINISHED_MONO; direct recorder calls have zero duration.
 set -u
 [ "$#" -ge 4 ] || exit 0
 act=$1 target=$2 gate=$3 kind=$4 attempt=${5:-} detail=${6:-}

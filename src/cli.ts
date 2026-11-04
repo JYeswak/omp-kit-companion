@@ -38,6 +38,7 @@ import { inspectOmpSessions } from "./session-doctor.ts";
 import { censusLoad } from "./load-doctor.ts";
 import { inspectSecrets, secretsScanInputFromEnv } from "./secrets-doctor.ts";
 import { inspectStaleWorktree } from "./stale-worktree-doctor.ts";
+import { inspectPushLatency } from "./push-latency.ts";
 import { loadFleetWatchConfig, paneTarget, runFleetWatchOnce, STRANDED_ESCALATION_LIMIT_MINUTES } from "./fleet-watch.ts";
 import { inspectLspReadiness, planLspSetup, type LspReadinessInput, type LspReadinessReport } from "./lsp-readiness.ts";
 import { probeLspReadiness } from "./lsp-probe.ts";
@@ -114,6 +115,7 @@ import { formatNext, next } from "./next.ts";
 import { agentMailRetentionRoot, retainAgentMailRotations } from "./am-retain.ts";
 import { retainFleetCaches } from "./cache-retain.ts";
 import { beadsMigrateCommand } from "./beads-migrate.ts";
+import { briefContract, briefCandidates, renderBrief } from "./brief.ts";
 
 const SCHEMA_VERSION = "1";
 const PROOF_CLASSES = ["G1 registration", "G2 payload", "G3 prefixes", "G4 isolated live", "installed files", "project shadow", "effective profile"] as const;
@@ -322,6 +324,9 @@ function parse(args: readonly string[]): ParseResult {
 			const value = attached ?? outerArgs[++i];
 			if (!value || value.startsWith("--")) return { failure: refusal("MISSING_VALUE", `${name} needs ${flag.value}`, `Use ${name} ${flag.value}.`), json };
 			flags.set(name ?? "", flag.repeatable && typeof flags.get(name ?? "") === "string" ? `${String(flags.get(name ?? ""))}\n${value}` : value);
+			if (command?.name === "brief" && name === "--paths") {
+				while (outerArgs[i + 1] && !outerArgs[i + 1]!.startsWith("-")) flags.set(name, `${String(flags.get(name))}\n${outerArgs[++i]}`);
+			}
 		} else {
 			if (attached !== undefined) return { failure: refusal("UNEXPECTED_VALUE", `${name} does not take a value`, `Use ${name} without a value.`), json };
 			flags.set(name ?? "", true);
@@ -626,6 +631,10 @@ async function diagnosticInventory(request: ParsedCommand): Promise<CliResult> {
 			code: report.refusal.code, message: report.refusal.reason,
 			remediation: "Use read-only omp-kit doctor --json; no migratory probe was run or backup created.",
 		}], verification: "UNVERIFIED" };
+	}
+	if (request.command.name === "doctor" && request.flags.get("--scope") === "push-latency") {
+		const report = inspectPushLatency();
+		return { code: report.overall === "PARTIAL" ? 1 : 0, data: { ...report }, verification: "PERFORMED" };
 	}
 	if (request.command.name === "doctor" && request.flags.get("--scope") === "browsers") {
 		const collected = collectBrowserProcesses();
@@ -3805,6 +3814,18 @@ function shaCommand(request: ParsedCommand): CliResult {
 	return { code: 0, data: { overall: "OK", sha, repos, hits, text }, verification: "UNVERIFIED" };
 }
 registerCommandHandler("sha", shaCommand);
+registerCommandHandler("brief", async request => {
+	const repo = request.flags.get("--repo");
+	if (typeof repo !== "string") return refusal("MISSING_REPO", "brief requires --repo PATH", "Run omp-kit brief --repo PATH.");
+	try {
+		const contract = await briefContract(repo);
+		const paths = request.flags.get("--paths");
+		const candidates = await briefCandidates(contract, typeof paths === "string" ? paths.split("\n") : []);
+		return { code: 0, data: { ...contract, candidates, text: renderBrief(contract, candidates) }, verification: "UNVERIFIED" };
+	} catch (error) {
+		return refusal("BRIEF_UNAVAILABLE", error instanceof Error ? error.message : String(error), "Restore readable repository/gate inputs; no contract was issued.");
+	}
+});
 for (const subcommand of ["pin", "check", "promote", "undo"]) registerCommandHandler(`infra ${subcommand}`, infraCommand);
 
 async function scratchCommand(request: ParsedCommand): Promise<CliResult> {

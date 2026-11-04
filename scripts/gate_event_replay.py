@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 
 import kitlib_jsonl
 from kitlib_run import run
@@ -361,9 +362,23 @@ def capture_hook(argv: list[str], screen: CredentialScreen) -> dict:
 def main(argv: list[str]) -> None:
     screen = CredentialScreen()
     env = os.environ
-    row = {'ts': datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
+    now = datetime.datetime.now(datetime.timezone.utc)
+    started_epoch = float(env.get('OMP_KIT_GATE_EVENT_STARTED_EPOCH', now.timestamp()))
+    started_mono = float(env.get('OMP_KIT_GATE_EVENT_STARTED_MONO', time.clock_gettime(time.CLOCK_MONOTONIC)))
+    finished_mono = float(env.get('OMP_KIT_GATE_EVENT_FINISHED_MONO', started_mono))
+    duration = finished_mono - started_mono
+    if not all(math.isfinite(value) for value in (started_epoch, started_mono, finished_mono)) or duration < 0:
+        raise ValueError('Invalid gate event timing')
+    repo_bytes, _lost = observe_git(os.getcwd(), ['rev-parse', '--show-toplevel'])
+    repo = repo_bytes.decode('utf-8', errors='replace').strip() if repo_bytes is not None else None
+    row = {'ts': now.isoformat().replace('+00:00', 'Z'),
            'seat': env.get('GATE_EVENT_SEAT') or None, 'act': env['GATE_EVENT_ACT'],
-           'target': env.get('GATE_EVENT_TARGET') or None, 'gate': env['GATE_EVENT_GATE'], 'kind': env['GATE_EVENT_KIND']}
+           'target': env.get('GATE_EVENT_TARGET') or None, 'gate': env['GATE_EVENT_GATE'], 'kind': env['GATE_EVENT_KIND'],
+           'repo': repo, 'member': env['GATE_EVENT_GATE'],
+           'started_at': datetime.datetime.fromtimestamp(started_epoch, datetime.timezone.utc).isoformat().replace('+00:00', 'Z'),
+           'duration_s': duration}
+    if env.get('OMP_KIT_GATE_EVENT_HOOK'):
+        row['hook'] = env['OMP_KIT_GATE_EVENT_HOOK']
     attempt = env.get('GATE_EVENT_ATTEMPT')
     if attempt:
         row.update(attempt=attempt, event_id=attempt)
@@ -379,7 +394,7 @@ def main(argv: list[str]) -> None:
         row['kind'] = 'pass'
     if env.get('GATE_EVENT_DETAIL'):
         row['detail'] = env['GATE_EVENT_DETAIL']
-    for key in ('seat', 'act', 'target', 'gate', 'kind', 'attempt', 'event_id', 'detail'):
+    for key in ('seat', 'act', 'target', 'gate', 'kind', 'repo', 'member', 'hook', 'attempt', 'event_id', 'detail'):
         if isinstance(row.get(key), str):
             metadata = capture({'message': row[key]}, screen)
             row[key] = metadata['message'] if metadata['message'] is not None else '[OMITTED]'

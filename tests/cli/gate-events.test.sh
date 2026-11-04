@@ -4,7 +4,7 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 python3 - "$root" <<'PY'
 from __future__ import annotations
-import hashlib, json, os, pathlib, shutil, sys
+import datetime, hashlib, json, os, pathlib, shutil, sys
 root = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(root / 'scripts'))
 from kitlib_tmp import owned_tmp
@@ -19,6 +19,8 @@ def execute(argv: list[str], *, cwd: pathlib.Path | None = None, env: dict[str, 
 
 with owned_tmp('gate-event-replay') as scratch:
     base = pathlib.Path(scratch)
+    os.environ['GIT_CEILING_DIRECTORIES'] = str(base)
+    os.environ['TMPDIR'] = str(base)
     repo = base / 'repo'; repo.mkdir()
     def git(*args: str) -> bytes:
         return execute(['git', '-C', str(repo), *args]).stdout
@@ -37,6 +39,9 @@ with owned_tmp('gate-event-replay') as scratch:
     row = json.loads(ledger.read_text().splitlines()[0])
     assert row['event_id'] == 'native-shell-17'
     assert row['rc'] == 7
+    assert row['repo'] == str(repo) and row['member'] == 'fixture-hook'
+    assert datetime.datetime.fromisoformat(row['started_at'].replace('Z', '+00:00')).tzinfo is not None
+    assert row['duration_s'] == 0
     replay = row['replay']
     assert replay['cwd'] == str(repo)
     assert replay['staged_paths'] == ['ordinary.txt']
@@ -83,10 +88,29 @@ with owned_tmp('gate-event-replay') as scratch:
     result = execute(['sh', str(repo / '.git' / 'hooks' / 'commit-msg'), str(message)], cwd=repo, env=runner_env, check=False)
     assert result.rc == 7
     hooked = json.loads(ledger.read_text().splitlines()[-1])
-    assert hooked['gate'] == '00-replay-fixture' and hooked['rc'] == 7
+    assert hooked['gate'] == '00-replay-fixture' and hooked['rc'] == 7, (hooked, result.stdout, result.stderr)
     assert hooked['replay']['arguments']['argv'] == [str(message)]
     assert hooked['replay']['message'] == message.read_text()
     assert hooked['replay']['staged_paths'] == ['ordinary.txt']
+    assert hooked['repo'] == str(repo) and hooked['member'] == '00-replay-fixture'
+    assert hooked['duration_s'] > 0 and hooked['started_at'] <= hooked['ts']
+    # A real pre-push chain records both the quiet control and planted refusal, with distinct attempts.
+    push_members = repo / '.git' / 'hooks' / 'hooks.d' / 'pre-push'
+    for member in push_members.glob('[0-9][0-9]-*'):
+        member.chmod(0o600)
+    for name, body in [('00-quiet-fixture', 'exit 0'), ('01-refusing-fixture', 'sleep 0.05\nexit 9')]:
+        member = push_members / name
+        member.write_text('#!/bin/sh\n' + body + '\n'); member.chmod(0o700)
+    previous = len(ledger.read_text().splitlines())
+    push = execute(['sh', str(repo / '.git' / 'hooks' / 'pre-push'), 'origin', 'fixture-remote'], cwd=repo, env=runner_env, check=False)
+    assert push.rc == 9, (push.rc, push.stdout, push.stderr)
+    push_rows = [json.loads(line) for line in ledger.read_text().splitlines()[previous:]]
+    assert [(row['member'], row['kind'], row['rc']) for row in push_rows] == [('00-quiet-fixture', 'pass', 0), ('01-refusing-fixture', 'refuse', 9)], (push_rows, push.stdout, push.stderr)
+    assert all(row['repo'] == str(repo) and row['hook'] == 'pre-push' and row['duration_s'] > 0 and row['started_at'] <= row['ts'] for row in push_rows)
+    assert len({row['attempt'] for row in push_rows}) == 1
+    assert push_rows[1]['duration_s'] >= 0.05
+    again = execute(['sh', str(repo / '.git' / 'hooks' / 'pre-push'), 'origin', 'fixture-remote'], cwd=repo, env=runner_env, check=False)
+    assert again.rc == 9 and json.loads(ledger.read_text().splitlines()[-1])['attempt'] != push_rows[0]['attempt']
     # Every metadata field is another secret surface, not just the replay object.
     metadata_env = dict(env, BR_ACTOR=sentinel, OMP_KIT_GATE_EVENT_RC='7')
     execute(['sh', str(script), sentinel, sentinel, sentinel, 'refuse', sentinel, sentinel + 'x' * 70000], cwd=repo, env=metadata_env)
