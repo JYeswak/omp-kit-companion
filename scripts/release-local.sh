@@ -552,7 +552,10 @@ fi
 # stamps README's release line to vVERSION (the latest published release), so the next cut tags an already-green
 # origin commit with no bump commit. Only fragments present at the tagged
 # source are folded; later fragments stay in changelog.d/ for the next release. It runs only after the public
-# verify stage, so a run that fails earlier (build, sign, tag, draft, attest, verify) commits nothing.
+# verify stage, so a run that fails earlier (build, sign, tag, draft, attest, verify) commits nothing, and after the
+# install stage, so the commit is judged by the hooks of the kit it just installed: the previously installed
+# readme-check would refuse README vVERSION beside package.json NEXT. Hooks are never bypassed; with --no-install the
+# commit is still attempted, and a refusal names the install that unblocks it.
 advance_next_version() {
 	stage next-version
 	local next tree="$WORK/next" held="$WORK/held-fragments" attempt promote_rc agent
@@ -595,7 +598,8 @@ PY
 			-m "[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
 			-m "Gap-Bead: none (release metadata)
 Bead: ompkit-d8qic
-Agent: $agent" || die "v$VERSION is published; next-version commit failed"
+Agent: $agent" || if [ "$INSTALLED" = 1 ]; then die "v$VERSION is published; the next-version commit for $next was refused by the installed v$VERSION commit hooks (see above)"
+		else die "v$VERSION is published but not installed (--no-install); the previously installed commit hooks refused the next-version commit for $next (an older readme-check refuses README v$VERSION beside package.json $next). Install it with: $INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION, then commit package.json $next, README v$VERSION (scripts/stamp-release-line.sh) and the CHANGELOG [$VERSION] promote (scripts/release-notes.sh promote) to main"; fi
 		if bounded 900 git -C "$tree" -c push.followTags=false push --porcelain origin HEAD:refs/heads/main; then
 			NEXT_SHA="$(git -C "$tree" rev-parse HEAD)"
 			git -C "$ROOT" worktree remove --force "$tree" || true
@@ -729,7 +733,7 @@ spctl --assess --type open --context context:primary-signature -vv "$PUB/x/bin/o
 grep -q 'source=Notarized Developer ID' "$WORK/spctl.txt" || die "Gatekeeper does not report Notarized Developer ID"
 substep ''
 RELEASED_AT=$(date +%s)
-advance_next_version
 if [ "$INSTALL" = 1 ]; then install_release; fi
+advance_next_version
 if [ "$INSTALLED" = 1 ]; then receipt installed "$URL" "$RUN_ID"
 else receipt released "$URL" "$RUN_ID"; fi

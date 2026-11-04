@@ -24,7 +24,8 @@ ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"; CHILD=''
 `;
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 type Fixture = { work: string; origin: string; repo: string; git: (cwd: string, ...args: string[]) => string; env: Record<string, string | undefined> };
-function fixture(label: string, mainVersion: string): Fixture {
+/** fullTree: the README-checked inputs (src registry, rules, skills, the real package.json) so the staged README hook can judge commits. */
+function fixture(label: string, mainVersion: string, fullTree = false): Fixture {
 	const work = realpathSync(ownedTmp(label, { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 	const origin = join(work, "origin.git");
 	const repo = join(work, "repo");
@@ -43,7 +44,10 @@ function fixture(label: string, mainVersion: string): Fixture {
 	// README states the latest published release (v1.2.3) while main states the next version.
 	writeFileSync(join(repo, "README.md"), readFileSync(join(ROOT, "README.md"), "utf8").replace(/^Current release: v\d+\.\d+\.\d+$/m, "Current release: v1.2.3"));
 	const pkg = (version: string) => `{\n  "name": "fixture",\n  "version": "${version}",\n  "omp": {\n    "version": "${version}"\n  }\n}\n`;
-	writeFileSync(join(repo, "package.json"), pkg(mainVersion));
+	writeFileSync(join(repo, "package.json"), fullTree
+		? readFileSync(join(ROOT, "package.json"), "utf8").replace(/^([ \t]*"version": )"[^"\n]*"/gm, `$1"${mainVersion}"`)
+		: pkg(mainVersion));
+	if (fullTree) for (const path of ["src", "rules", "skills"]) cpSync(join(ROOT, path), join(repo, path), { recursive: true });
 	writeFileSync(join(repo, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-01-01\n\n### Changed\n\n- Base release.\n");
 	writeFileSync(join(repo, "changelog.d/shipped.md"), "### Fixed\n\n- Shipped in the tagged source.\n");
 	writeFileSync(join(repo, "scripts/release-signing.json"), '{"schema_version": 1, "darwin_signing": "developer-id"}\n');
@@ -58,39 +62,54 @@ function fixture(label: string, mainVersion: string): Fixture {
 	// The only GitHub read on these paths is the release listing; anything else is a test failure.
 	writeFileSync(join(bin, "gh"), `#!/bin/sh\ncase "$*" in\n\t"api --paginate --slurp "*) echo '[[{"tag_name":"v1.2.3","draft":false,"prerelease":false}]]' ;;\n\t*) echo "unexpected gh $*" >&2; exit 97 ;;\nesac\n`);
 	chmodSync(join(bin, "gh"), 0o755);
-	const runEnv = { ...env, PATH: `${bin}:${process.env.PATH ?? ""}`, TMPDIR: work };
+	// README_GATE: the optional readme-update skill gate is machine state, not part of this contract.
+	const runEnv = { ...env, PATH: `${bin}:${process.env.PATH ?? ""}`, TMPDIR: work, README_GATE: join(work, "no-readme-update-gate") };
 	return { work, origin, repo, git, env: runEnv };
 }
 
 const originMain = (f: Fixture) => f.git(f.origin, "rev-parse", "refs/heads/main");
 const showMain = (f: Fixture, path: string) => f.git(f.origin, "show", `refs/heads/main:${path}`);
 
-/** Run the real readme-check on origin/main's README and package.json beside this tree's registry and inventory, resolving tags in `tags`. */
-function readmeGate(f: Fixture, tags: string): string {
-	const archive = join(f.work, "readme-archive");
-	mkdirSync(join(archive, "scripts"), { recursive: true });
-	for (const path of ["src", "rules", "skills"]) cpSync(join(ROOT, path), join(archive, path), { recursive: true });
-	copyFileSync(join(ROOT, "scripts/readme-check.ts"), join(archive, "scripts/readme-check.ts"));
-	for (const path of ["README.md", "package.json"]) writeFileSync(join(archive, path), `${showMain(f, path)}\n`);
-	const result = runFixture(["bun", "run", "--no-env-file", "--config=/dev/null", "scripts/readme-check.ts", "--root", archive, "--repo", tags, "--no-readme-gate"],
-		{ cwd: archive, env: { ...f.env, GIT_CEILING_DIRECTORIES: f.work }, floor_s: 60 });
-	return decode(result.stdout) + decode(result.stderr);
+/**
+ * Install the shipped pre-commit README member (scripts/check-staged-readme.sh) as the repo's commit hook, beside the
+ * given readme-check source, the way the kit installs it. Every hook run is recorded in `<hooks>/ran`.
+ */
+function installReadmeHook(f: Fixture, name: string, readmeCheck: string): string {
+	const hooks = join(f.work, name);
+	mkdirSync(hooks);
+	for (const file of ["check-staged-readme.sh", "kitlib-tmp.sh"]) copyFileSync(join(ROOT, "scripts", file), join(hooks, file));
+	writeFileSync(join(hooks, "readme-check.ts"), readmeCheck);
+	writeFileSync(join(hooks, "pre-commit"), `#!/bin/sh\necho ran >>"${join(hooks, "ran")}"\nexec sh "${join(hooks, "check-staged-readme.sh")}"\n`);
+	chmodSync(join(hooks, "pre-commit"), 0o755);
+	f.git(f.repo, "config", "core.hooksPath", hooks);
+	return hooks;
+}
+const readmeCheckSource = readFileSync(join(ROOT, "scripts/readme-check.ts"), "utf8");
+
+function advance(f: Fixture, source: string, installed: 0 | 1) {
+	// advance_next_version is defined after the dry-run exit, so no GitHub write is reachable before it.
+	const body = `${prelude}${helpers()}\n${segment("# NEXTVERSION1 (ompkit-d8qic", "\n}\n")}\nVERSION=1.2.4; SOURCE=${source}; INSTALLED=${installed}; INSTALL_PREFIX=/fixture/kit\nadvance_next_version\n`;
+	writeFileSync(join(f.work, "advance.sh"), body);
+	return runFixture(["bash", join(f.work, "advance.sh"), f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 120 });
 }
 
-test("AC1: after vX publishes, one main commit sets the next patch and promotes only the source's fragments", () => {
-	const f = fixture("nextversion-ac1", "1.2.4");
+function publishedFixture(label: string) {
+	const f = fixture(label, "1.2.4", true);
 	const source = f.git(f.repo, "rev-parse", "HEAD");
 	// The tag stage of the run publishes v1.2.4 before the next-version step.
 	f.git(f.repo, "tag", "v1.2.4", source); f.git(f.repo, "push", "-q", "origin", "v1.2.4");
 	// Work that landed after the tagged source keeps its fragment for the next release.
 	writeFileSync(join(f.repo, "changelog.d/later.md"), "### Added\n\n- Landed after the tag.\n");
 	f.git(f.repo, "add", "."); f.git(f.repo, "commit", "-qm", "later work"); f.git(f.repo, "push", "-q", "origin", "main");
-	const before = originMain(f);
-	// advance_next_version is defined after the dry-run exit, so no GitHub write is reachable before it.
-	const body = `${prelude}${helpers()}\n${segment("# NEXTVERSION1 (ompkit-d8qic", "\n}\n")}\nVERSION=1.2.4; SOURCE=${source}\nadvance_next_version\n`;
-	writeFileSync(join(f.work, "advance.sh"), body);
-	const result = runFixture(["bash", join(f.work, "advance.sh"), f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 60 });
+	return { f, source, before: originMain(f) };
+}
+
+test("AC1: after vX publishes and installs, one main commit sets the next patch, stamps README vX and passes the installed README hook", () => {
+	const { f, source, before } = publishedFixture("nextversion-ac1");
+	const hooks = installReadmeHook(f, "hooks-installed", readmeCheckSource);
+	const result = advance(f, source, 1);
 	expect(result.rc, decode(result.stderr)).toBe(0);
+	expect(readFileSync(join(hooks, "ran"), "utf8")).toBe("ran\n");
 	const after = originMain(f);
 	expect(f.git(f.origin, "rev-list", "--count", `${before}..${after}`)).toBe("1");
 	expect(f.git(f.origin, "rev-parse", `${after}^`)).toBe(before);
@@ -103,16 +122,27 @@ test("AC1: after vX publishes, one main commit sets the next patch and promotes 
 	const files = f.git(f.origin, "ls-tree", "-r", "--name-only", "refs/heads/main", "--", "changelog.d");
 	expect(files.split("\n")).toEqual(["changelog.d/later.md"]);
 	expect(f.git(f.origin, "log", "-1", "--format=%B", after)).toContain("Bead: ompkit-d8qic");
-	// README now states v1.2.4, the release just published, and the real readme gate accepts it beside 1.2.5.
+	// README states v1.2.4, the release just published, beside package.json 1.2.5.
 	expect(showMain(f, "README.md")).toContain("\nCurrent release: v1.2.4\n");
-	const gate = readmeGate(f, f.origin);
-	expect(gate).toContain("readme-check: registry");
-	expect(gate).not.toContain("release line");
-	// Control: the same commit without the published tag is RED.
-	f.git(f.origin, "tag", "-d", "v1.2.4");
-	expect(readmeGate(f, f.origin)).toContain("tag v1.2.4 does not exist");
 	expect(existsSync(join(f.work, "next"))).toBe(false);
-}, fixtureDeadlineS(120) * 1_000);
+}, fixtureDeadlineS(180) * 1_000);
+
+test("AC1 planted old hook: a previously installed readme-check refuses the commit, main is unchanged and the error names the install", () => {
+	const { f, source, before } = publishedFixture("nextversion-ac1-oldhook");
+	// The pre-NEXTVERSION1 rule: the README line must equal package.json.
+	const oldCheck = readmeCheckSource.replace("if (stated === undefined || releaseVersion !==", "if (stated !== undefined || releaseVersion !==");
+	expect(oldCheck).not.toBe(readmeCheckSource);
+	const hooks = installReadmeHook(f, "hooks-old", oldCheck);
+	const result = advance(f, source, 0);
+	const stderr = decode(result.stderr);
+	expect(result.rc, stderr).toBe(4);
+	expect(readFileSync(join(hooks, "ran"), "utf8")).toBe("ran\n");
+	expect(stderr).toContain("staged-readme: REFUSED");
+	expect(stderr).toContain("release line says `Current release: v1.2.4` but package.json is 1.2.5");
+	expect(stderr).toContain("v1.2.4 is published but not installed (--no-install)");
+	expect(stderr).toContain("Install it with: /fixture/kit/bin/omp-kit update --apply --yes --version 1.2.4");
+	expect(originMain(f)).toBe(before);
+}, fixtureDeadlineS(180) * 1_000);
 
 test("AC1 planted failure: a run refused at the tag stage commits nothing and leaves package.json and main unchanged", () => {
 	const f = fixture("nextversion-ac1-fail", "1.2.4");
@@ -133,12 +163,13 @@ test("AC1 planted failure: a run refused at the tag stage commits nothing and le
 	expect(originMain(f)).toBe(before);
 	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(source);
 	expect(readFileSync(join(f.repo, "package.json"), "utf8")).toBe(pkgBefore);
-	// Order contract: the next-version commit follows the public verify stage and precedes install.
+	// Order contract: the next-version commit follows the public verify stage and the install stage, so the
+	// just-installed hooks judge it.
 	const verify = script.indexOf("stage verify\n");
 	const call = script.indexOf("\nadvance_next_version\n");
 	expect(verify).toBeGreaterThan(script.indexOf("stage tag\n"));
 	expect(call).toBeGreaterThan(script.indexOf("verify.gatekeeper", verify));
-	expect(call).toBeLessThan(script.indexOf('if [ "$INSTALL" = 1 ]; then install_release; fi'));
+	expect(call).toBeGreaterThan(script.indexOf('if [ "$INSTALL" = 1 ]; then install_release; fi'));
 }, fixtureDeadlineS(120) * 1_000);
 
 const preflight = () => segment('PREPARE=0\nif [ -z "$SOURCE" ]; then PREPARE=1', 'say "source $SOURCE (origin/main $MAIN) version $VERSION base $BASE_TAG mode $MODE"');
