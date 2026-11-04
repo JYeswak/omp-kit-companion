@@ -521,6 +521,45 @@ test("PRIORGATE1: real git uses committer time and exact bead identity", async (
 	}
 }, 30_000);
 
+test("PRIORFORMAT1: a bead whose commit is only in a sibling checkout sharing the tracker resolves its first commit time", async () => {
+	const parent = freshDir(base, "prior-xrepo-");
+	const shared = join(parent, "tracker", ".beads");
+	mkdirSync(shared, { recursive: true });
+	writeFileSync(join(shared, "beads.db"), "");
+	const git = async (cwd: string, ...args: string[]) => {
+		const result = await run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", ...args], {
+			cwd, deadline_s: 10, max_output_bytes: 65536, env: { ...process.env,
+				GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.org",
+				GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.org",
+				GIT_AUTHOR_DATE: "2026-10-01T00:00:00Z", GIT_COMMITTER_DATE: "2026-11-04T09:00:00Z" } as Record<string, string> });
+		return { code: result.rc!, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
+	};
+	for (const name of ["a", "b"]) {
+		mkdirSync(join(parent, name, ".beads"), { recursive: true });
+		symlinkSync(join(shared, "beads.db"), join(parent, name, ".beads", "beads.db"));
+		expect((await git(join(parent, name), "init", "-q")).code).toBe(0);
+	}
+	expect((await git(join(parent, "a"), "commit", "--allow-empty", "-qm", "Unrelated")).code).toBe(0);
+	expect((await git(join(parent, "b"), "commit", "--allow-empty", "-qm", "Implementation\n\nBead: kit-xrepo.1")).code).toBe(0);
+	const repoA = join(parent, "a");
+	for (const [id, at, refused, text] of [
+		["kit-xrepo.1", "2026-11-04T08:00:00Z", false, ""],
+		["kit-xrepo.1", "2026-11-04T10:00:00Z", true, "citation must be before first implementation commit at 2026-11-04T09:00:00.000Z"],
+		["kit-xrepo.2", "2026-11-04T08:00:00Z", true, "first in_progress claim timestamp unavailable"],
+	] as const) {
+		const row = { id, status: "in_review", assignee: "Builder", created_by: "Filer", issue_type: "feature",
+			comments: [{ author: "Builder", text: "prior=src/x.ts:4 (note) + https://e.org did=a applied=b", created_at: at }] };
+		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: call => {
+			if (call.command === "git") return git(call.options?.cwd ?? repoA, ...call.args);
+			if (call.command === "sqlite3") return { code: 0, stdout: "\n" };
+			return brTable({ [id]: { code: 0, stdout: JSON.stringify([row]) } })(call);
+		} });
+		const result = await toolCall(h, repoA, `br --db ${JSON.stringify(join(shared, "beads.db"))} close ${id} --reason "bun test -> 3 passed"`);
+		expect(result?.block === true).toBe(refused);
+		if (text) expect(result?.reason).toContain(text);
+	}
+}, 30_000);
+
 // --- FILERCLOSE1 ---------------------------------------------------------
 
 test("FILERCLOSE1: the bead filer cannot close their own bead", async () => {

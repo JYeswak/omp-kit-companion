@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2510,6 +2510,48 @@ export function validPriorArtLine(text: string): boolean {
 	});
 }
 
+/** PRIORFORMAT1: most sibling checkouts scanned for a bead's first commit, and the per-process cache of them. */
+const PRIOR_SIBLING_REPO_CAP = 16;
+const priorSiblingCache = new Map<string, string[]>();
+
+/**
+ * Git checkouts that share one tracker: the directories next to the close cwd and next to the tracker's
+ * own repo whose .beads/beads.db realpath equals the tracker db's realpath. Derived from the
+ * filesystem, never a hardcoded list; only directories holding .git are returned, so git never runs
+ * outside a checkout. Cached per process and computed only at close time.
+ */
+function priorSiblingCheckouts(trackerDb: string, cwd: string): string[] {
+	let tracker: string;
+	try { tracker = realpathSync(trackerDb); } catch { return []; }
+	const key = `${tracker}\0${cwd}`;
+	const cached = priorSiblingCache.get(key);
+	if (cached) return cached;
+	const found: string[] = [];
+	const seen = new Set<string>();
+	let self = "";
+	try { self = realpathSync(cwd); } catch { /* cwd unreadable: nothing to exclude */ }
+	const parents = [...new Set([dirname(cwd), dirname(dirname(dirname(tracker)))])];
+	outer: for (const parent of parents) {
+		let names: string[];
+		try { names = readdirSync(parent); } catch { continue; }
+		for (const name of names.sort()) {
+			if (found.length >= PRIOR_SIBLING_REPO_CAP) break outer;
+			const dir = join(parent, name);
+			let real: string;
+			try { real = realpathSync(dir); } catch { continue; }
+			if (real === self || seen.has(real)) continue;
+			seen.add(real);
+			try {
+				if (!existsSync(join(dir, ".git"))) continue;
+				if (realpathSync(join(dir, ".beads", "beads.db")) !== tracker) continue;
+			} catch { continue; }
+			found.push(dir);
+		}
+	}
+	priorSiblingCache.set(key, found);
+	return found;
+}
+
 async function checkPriorArtClose(found: BeadStateWithAuthorship, request: TrackerRequest, deps: TrackerMutationDeps): Promise<FlywheelToolCallResult | undefined> {
 	if (!found.ok || !found.priorArt?.required) return undefined;
 	const refuse = (why: string): FlywheelToolCallResult => ({
@@ -2524,12 +2566,18 @@ async function checkPriorArtClose(found: BeadStateWithAuthorship, request: Track
 	});
 	try {
 		const escaped = found.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const commits = await deps.exec("git", ["log", "--all", "--extended-regexp", `--grep=Bead:[[:space:]]+${escaped}([^[:alnum:]_.-]|$)`, "--format=%ct"], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
-		if (commits.code !== 0 || commits.killed) return refuse("first implementation commit lookup failed");
-		const stamps = commits.stdout.trim() ? commits.stdout.trim().split(/\s+/).map(value => Number(value) * 1000) : [];
-		if (stamps.some(time => !Number.isFinite(time))) return refuse("unreadable implementation commit time");
-		let first = stamps.length ? Math.min(...stamps) : NaN;
+		const commitTimes = async (cwd: string): Promise<number[] | string> => {
+			const commits = await deps.exec("git", ["log", "--all", "--extended-regexp", `--grep=Bead:[[:space:]]+${escaped}([^[:alnum:]_.-]|$)`, "--format=%ct"], { cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+			if (commits.code !== 0 || commits.killed) return "first implementation commit lookup failed";
+			const stamps = commits.stdout.trim() ? commits.stdout.trim().split(/\s+/).map(value => Number(value) * 1000) : [];
+			if (stamps.some(time => !Number.isFinite(time))) return "unreadable implementation commit time";
+			return stamps;
+		};
+		const local = await commitTimes(request.cwd);
+		if (typeof local === "string") return refuse(local);
+		let stamps = local;
 		let basis = "first implementation commit";
+		let tracker = "";
 		if (!stamps.length) {
 			let db = request.db;
 			if (!db) {
@@ -2538,8 +2586,17 @@ async function checkPriorArtClose(found: BeadStateWithAuthorship, request: Track
 				db = field(JSON.parse(info.stdout), "database_path") as string;
 			}
 			if (typeof db !== "string" || !db) return refuse("claim-time database path unavailable");
+			tracker = db;
+			// PRIORFORMAT1: a bead tracked here is often built in a sibling checkout sharing this tracker.
+			for (const sibling of priorSiblingCheckouts(isAbsolute(db) ? db : resolve(request.cwd, db), request.cwd)) {
+				const times = await commitTimes(sibling);
+				if (typeof times !== "string") stamps = stamps.concat(times);
+			}
+		}
+		let first = stamps.length ? Math.min(...stamps) : NaN;
+		if (!stamps.length) {
 			const sql = `SELECT min(created_at) FROM events WHERE issue_id='${found.id.replace(/'/g, "''")}' AND event_type='status_changed' AND new_value='in_progress'`;
-			const claim = await deps.exec("sqlite3", ["-readonly", db, sql], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
+			const claim = await deps.exec("sqlite3", ["-readonly", tracker, sql], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
 			if (claim.code !== 0 || claim.killed) return refuse("in_progress claim-time lookup failed");
 			first = Date.parse(claim.stdout.trim());
 			basis = "first in_progress claim";
