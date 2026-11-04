@@ -270,3 +270,69 @@ test("fresh-gate's readme gate checks the archive tree and resolves tags from RO
 	expect(blind.code).toBe(1);
 	expect(blind.out).toContain("failing closed");
 }, fixtureDeadlineS(120) * 1_000);
+
+// README APPLY1 (ompkit-v66l.22.3): the staged-readme hook runs this checker in every repo with a README obligation.
+// A CFS-shaped tree (README plus package.json; no src/commands.ts, rules/, skills/ or checker of its own) gets each
+// undeclared rule as one NOT_APPLICABLE line; the old unconditional registry import crashed on it.
+function cfsTree(name: string, readmeText: string, extra: Record<string, string> = {}): string {
+	const root = join(workspace, name);
+	mkdirSync(root);
+	writeFileSync(join(root, "README.md"), readmeText);
+	writeFileSync(join(root, "package.json"), "{\"name\":\"clutterfree-spaces-api\",\"version\":\"1.0.0\"}\n");
+	for (const [path, text] of Object.entries(extra)) {
+		mkdirSync(join(root, path, ".."), { recursive: true });
+		writeFileSync(join(root, path), text);
+	}
+	return root;
+}
+const CFS_README = "# ClutterFreeSpaces\n\nRuns 7 commands and 12 rules for the business, on Node 16.0.0.\n\n## 🛠️ **Command Reference**\n\n| `/checkin` | `./checkin.sh` |\n\n## 📜 **License**\n\nPrivate.\n";
+function checkRoot(root: string, gate = script): { code: number | null; out: string } {
+	const result = runFixture(["bun", "run", "--no-env-file", "--config=/dev/null", gate, "--root", root, "--repo", root, "--no-readme-gate"],
+		{ cwd: root, env: ceilingEnv, floor_s: 30 });
+	return { code: result.rc, out: new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr) };
+}
+const UNCONDITIONAL_IMPORT = "registryDeclared ? await loadRegistry(registryPath) : null";
+test("README APPLY1 planted: a CFS-shaped tree is GREEN with each undeclared rule named NOT_APPLICABLE", () => {
+	const result = checkRoot(cfsTree("cfs-green", CFS_README));
+	expect(result.out).toContain("README-CHECK: GREEN");
+	expect(result.code).toBe(0);
+	for (const rule of ["command-reference: no COMMANDS registry at src/commands.ts", "release-line:", "rules-count:", "extensions-count:", "skills-count:", "kit-sections:"])
+		expect(result.out.split("\n").filter(line => line.startsWith(`NOT_APPLICABLE ${rule}`))).toHaveLength(1);
+});
+
+test("README APPLY1 negatives: rules with declared inputs still refuse in a CFS-shaped tree; the kit policy still requires its registry", () => {
+	const worklog = checkRoot(cfsTree("cfs-worklog", CFS_README.replace("## 📜", "## Recent updates\n\n- [x] shipped\n\n## 📜")));
+	expect(worklog.code).toBe(1);
+	expect(worklog.out).toContain("worklog/changelog heading");
+	expect(worklog.out).toContain("task checkbox (readme-update W7)");
+	// Declaring an input turns its rule on: a registry, a rules/ directory, release markers.
+	const declared = checkRoot(cfsTree("cfs-declared", `<!-- kit-release:start -->\nCurrent release: v0.9.0\n<!-- kit-release:end -->\n\n${CFS_README}`, {
+		"src/commands.ts": "export const COMMANDS = [{ name: \"alpha\" }, { name: \"doctor\", flags: [{ name: \"--scope\", value: \"red\" }] }];\n",
+		"rules/a.md": "# a\n",
+	}));
+	expect(declared.code).toBe(1);
+	expect(declared.out).toContain("README.md has no `## Command reference` section");
+	expect(declared.out).toContain("claims \"7 commands\" but the tree ships 2 commands");
+	expect(declared.out).toContain("claims \"12 rules\" but the tree ships 1 rules");
+	expect(declared.out).toContain("release line says `Current release: v0.9.0` but package.json is 1.0.0");
+	expect(declared.out).toContain("pins a release version literal `16.0.0`");
+	expect(declared.out).not.toContain("NOT_APPLICABLE command-reference");
+	// A tree that ships its own checker declares the whole kit policy: a missing registry still fails, as before.
+	const kit = checkRoot(cfsTree("cfs-kit-policy", CFS_README, { "scripts/readme-check.ts": readFileSync(script, "utf8") }));
+	expect(kit.code).not.toBe(0);
+	expect(kit.out).toContain("Cannot find module");
+	expect(kit.out).not.toContain("README-CHECK: GREEN");
+});
+
+test("README APPLY1 mutant: restoring the unconditional registry import crashes on the CFS-shaped tree", () => {
+	const source = readFileSync(script, "utf8");
+	expect(source).toContain(UNCONDITIONAL_IMPORT);
+	const mutantPath = join(workspace, "readme-check.unconditional-import.ts");
+	writeFileSync(mutantPath, source.replace(UNCONDITIONAL_IMPORT, "await loadRegistry(registryPath)"));
+	const root = cfsTree("cfs-mutant", CFS_README);
+	expect(checkRoot(root).code).toBe(0);
+	const mutant = checkRoot(root, mutantPath);
+	expect(mutant.code).not.toBe(0);
+	expect(mutant.out).toContain("Cannot find module");
+	expect(mutant.out).not.toContain("README-CHECK: GREEN");
+});

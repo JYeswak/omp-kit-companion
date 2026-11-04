@@ -15,6 +15,17 @@
 //   3. The readme-update gate (skill readme-update, --profile product) passes when it is installed;
 //      the repo's own structural checks always run (CI has no skills directory).
 //
+// Applicability (README APPLY1, ompkit-v66l.22.3). The staged-readme hook runs this checker in any repo with a README
+// obligation (check-staged-readme.sh: README.md or scripts/readme-check.ts in the index or HEAD), and CFS's README is
+// not omp-kit's. So each rule runs only where the tree declares its inputs:
+//   - a repo shipping its own scripts/readme-check.ts declares the whole kit README policy: every rule runs and every
+//     input is required (a missing registry, rules/ or package.json fails exactly as before);
+//   - otherwise rule 1 and the command/scope counts need src/commands.ts (or --registry); rule 2 needs the README's
+//     kit-release markers or scripts/stamp-release-line.sh; rules/extensions/skills counts need rules/, package.json
+//     omp.extensions and skills/; the Limitations / About Contributions / License-last sections need the kit policy;
+//   - worklog headings, task checkboxes and the readme-update gate (rule 3) judge every README.
+// A rule whose input is not declared prints one `NOT_APPLICABLE <rule>: <missing input>` line; it never passes silently.
+//
 // Usage: bun scripts/readme-check.ts [--root DIR] [--readme PATH] [--registry PATH] [--repo DIR] [--no-readme-gate]
 // Exit 0 GREEN, 1 RED (each finding named), 2 usage or unreadable input.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -34,16 +45,24 @@ const WORKLOG_HEADING = /^#{1,6}[ \t]+(?:changelog|release notes|what'?s new|rec
 type Registry = { commands: string[]; scopes: string[] };
 /** Whether tag v<README release-line version> exists; "unreadable" when tags cannot be listed (fails closed). */
 export type ReleaseTag = "present" | "absent" | "unreadable";
-/** Shipped inventory the README may count: rules/*.md, package.json omp.extensions, skills/<name>/SKILL.md. */
-type Inventory = { rules: number; extensions: number; skills: number };
+/** Shipped inventory the README may count: rules/*.md, package.json omp.extensions, skills/<name>/SKILL.md; null when the tree declares no such inventory. */
+type Inventory = { rules: number | null; extensions: number | null; skills: number | null };
 
-function loadInventory(root: string): Inventory {
-	const rules = readdirSync(join(root, "rules")).filter(name => name.endsWith(".md")).length;
-	const manifest: unknown = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-	const omp = manifest && typeof manifest === "object" && "omp" in manifest ? manifest.omp : undefined;
-	const extensions = omp && typeof omp === "object" && "extensions" in omp && Array.isArray(omp.extensions) ? omp.extensions.length : 0;
-	const skillsDir = join(root, "skills");
-	const skills = existsSync(skillsDir) ? readdirSync(skillsDir).filter(name => existsSync(join(skillsDir, name, "SKILL.md"))).length : 0;
+/** Under the kit policy every inventory input is required (a missing rules/ or package.json throws, as before). */
+function loadInventory(root: string, kitPolicy: boolean): Inventory {
+	const rulesDir = join(root, "rules"), skillsDir = join(root, "skills"), manifestPath = join(root, "package.json");
+	const rules = kitPolicy || existsSync(rulesDir) ? readdirSync(rulesDir).filter(name => name.endsWith(".md")).length : null;
+	let extensions: number | null = null;
+	if (kitPolicy || existsSync(manifestPath)) {
+		let manifest: unknown;
+		try { manifest = JSON.parse(readFileSync(manifestPath, "utf8")); }
+		catch (error) { if (kitPolicy) throw error; }
+		const omp = manifest && typeof manifest === "object" && "omp" in manifest ? manifest.omp : undefined;
+		const declared = omp && typeof omp === "object" && "extensions" in omp && Array.isArray(omp.extensions) ? omp.extensions.length : null;
+		extensions = declared ?? (kitPolicy ? 0 : null);
+	}
+	const skills = existsSync(skillsDir) ? readdirSync(skillsDir).filter(name => existsSync(join(skillsDir, name, "SKILL.md"))).length
+		: kitPolicy ? 0 : null;
 	return { rules, extensions, skills };
 }
 
@@ -103,15 +122,21 @@ const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "sev
 /** "30 rules", "five guard extensions", "30 diagnostic scopes": a count claim about the shipped inventory. */
 export const COUNT_CLAIM = new RegExp(`(?<![\\w.-])(\\d{1,4}|${NUMBER_WORDS.join("|")})[ \\t]+(?:[a-z]+(?:-[a-z]+)*[ \\t]+)?(rules|scopes|commands|extensions|skills)\\b`, "gi");
 
-export function checkReadme(readme: string, registry: Registry, inventory: Inventory, releaseVersion?: string,
+/** Which input-dependent rules the tree declares (see Applicability above); registry null means rule 1 is not applicable. */
+export type ReadmeScope = { registry: Registry | null; inventory: Inventory; release: boolean; sections: boolean };
+
+export function checkReadme(readme: string, scope: ReadmeScope, releaseVersion?: string,
 	releaseTag?: (version: string) => ReleaseTag): string[] {
+	const { registry, inventory } = scope;
 	const findings: string[] = [];
 	// The OMP footer sits at the end of the file so stripping it shifts no finding line; the
 	// release line sits at the top, so it stays in the scanned body and only its own line range
 	// is exempt from the version-literal rule (stripping it would misnumber every finding below).
 	const body = withoutBlock(readme, FOOTER_START, FOOTER_END);
 	const block = releaseBlock(readme);
-	if (block === undefined) {
+	if (!scope.release) {
+		// Rule 2 is not applicable: no release train stamps this README.
+	} else if (block === undefined) {
 		findings.push(`README.md has no generated release line (${RELEASE_START} … ${RELEASE_END}); the release train stamps it at tag time with sh scripts/stamp-release-line.sh`);
 	} else if (releaseVersion === undefined) {
 		findings.push("README.md release line is unverifiable: no package.json version supplied to checkReadme");
@@ -133,8 +158,10 @@ export function checkReadme(readme: string, registry: Registry, inventory: Inven
 	const releaseEnd = body.indexOf(RELEASE_END);
 	const exemptFrom = releaseStart < 0 ? -1 : body.slice(0, releaseStart).split("\n").length - 1;
 	const exemptTo = releaseEnd < releaseStart ? -1 : body.slice(0, releaseEnd + RELEASE_END.length).split("\n").length - 1;
-	const reference = section(body, "## Command reference");
-	if (reference === undefined) {
+	const reference = registry ? section(body, "## Command reference") : undefined;
+	if (!registry) {
+		// Rule 1 is not applicable: the tree has no COMMANDS registry to document.
+	} else if (reference === undefined) {
 		findings.push("README.md has no `## Command reference` section");
 	} else {
 		for (const name of registry.commands) {
@@ -147,23 +174,25 @@ export function checkReadme(readme: string, registry: Registry, inventory: Inven
 		}
 	}
 	body.split("\n").forEach((line, index) => {
-		if (index < exemptFrom || index > exemptTo)
+		if (scope.release && (index < exemptFrom || index > exemptTo))
 			for (const match of line.matchAll(VERSION_LITERAL))
 				findings.push(`README.md:${index + 1} pins a release version literal \`${match[0]}\`; resolve the latest release at run time instead`);
 		if (WORKLOG_HEADING.test(line)) findings.push(`README.md:${index + 1} worklog/changelog heading (readme-update W1-W3); history belongs in CHANGELOG.md: ${line.trim()}`);
 		if (/^[ \t]*[-*][ \t]+\[[ xX]\][ \t]/.test(line)) findings.push(`README.md:${index + 1} task checkbox (readme-update W7)`);
-		const actual: Record<string, number> = {
-			rules: inventory.rules, scopes: registry.scopes.length, commands: registry.commands.length,
+		const actual: Record<string, number | null> = {
+			rules: inventory.rules, scopes: registry ? registry.scopes.length : null, commands: registry ? registry.commands.length : null,
 			extensions: inventory.extensions, skills: inventory.skills,
 		};
 		for (const match of line.matchAll(COUNT_CLAIM)) {
 			const word = match[1]!.toLowerCase();
 			const claimed = /^\d+$/.test(word) ? Number(word) : NUMBER_WORDS.indexOf(word);
 			const kind = match[2]!.toLowerCase();
-			if (claimed !== actual[kind])
+			// A kind the tree declares no inventory for (a business README's "12 rules") is not a shipped-inventory claim.
+			if (actual[kind] !== null && claimed !== actual[kind])
 				findings.push(`README.md:${index + 1} claims "${match[0]}" but the tree ships ${actual[kind]} ${kind}; update the count`);
 		}
 	});
+	if (!scope.sections) return findings;
 	const h2 = body.split("\n").filter(line => /^## /.test(line)).map(line => line.slice(3).trim());
 	for (const required of ["Limitations", "About Contributions", "License"]) {
 		if (!h2.includes(required)) findings.push(`README.md has no \`## ${required}\` section`);
@@ -224,19 +253,31 @@ async function main(argv: string[]): Promise<number> {
 		else usage(`unknown flag ${flag}`);
 		index++;
 	}
+	const registryFlag = registryPath;
 	readmePath ??= join(root, "README.md");
 	registryPath ??= join(root, "src/commands.ts");
 	if (!existsSync(readmePath)) usage(`no README at ${readmePath}`);
-	const registry = await loadRegistry(registryPath);
-	const inventory = loadInventory(root);
+	const readme = readFileSync(readmePath, "utf8");
+	// Declarations (see Applicability above): the repo's own checker declares the whole kit README policy.
+	const kitPolicy = existsSync(join(root, "scripts", "readme-check.ts"));
+	const registryDeclared = kitPolicy || registryFlag !== undefined || existsSync(registryPath);
+	const registry = registryDeclared ? await loadRegistry(registryPath) : null;
+	const inventory = loadInventory(root, kitPolicy);
+	const release = kitPolicy || readme.includes(RELEASE_START) || readme.includes(RELEASE_END) || existsSync(join(root, "scripts", "stamp-release-line.sh"));
 	let releaseVersion: string | undefined;
 	try {
 		const manifest: unknown = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 		const version = manifest && typeof manifest === "object" && "version" in manifest ? manifest.version : undefined;
 		if (typeof version === "string" && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) releaseVersion = version;
 	} catch { releaseVersion = undefined; }
-	const findings = checkReadme(readFileSync(readmePath, "utf8"), registry, inventory, releaseVersion, releaseTagIn(repo));
-	console.log(`readme-check: registry ${registry.commands.length} commands, ${registry.scopes.length} doctor scopes (${registryPath}); ${inventory.rules} rules, ${inventory.extensions} extensions, ${inventory.skills} skills`);
+	const findings = checkReadme(readme, { registry, inventory, release, sections: kitPolicy }, releaseVersion, releaseTagIn(repo));
+	const count = (value: number | null) => value ?? "undeclared";
+	console.log(`readme-check: ${registry ? `registry ${registry.commands.length} commands, ${registry.scopes.length} doctor scopes (${registryPath})` : "no registry"}; ${count(inventory.rules)} rules, ${count(inventory.extensions)} extensions, ${count(inventory.skills)} skills`);
+	if (!registry) console.log("NOT_APPLICABLE command-reference: no COMMANDS registry at src/commands.ts; the command reference and command/scope counts are not judged");
+	if (!release) console.log(`NOT_APPLICABLE release-line: README.md has no ${RELEASE_START} block and the repo has no scripts/stamp-release-line.sh; the release line and version pins are not judged`);
+	for (const [kind, input] of [["rules", "rules/ directory"], ["extensions", "package.json omp.extensions"], ["skills", "skills/ directory"]] as const)
+		if (inventory[kind] === null) console.log(`NOT_APPLICABLE ${kind}-count: no ${input}; "N ${kind}" claims are not judged`);
+	if (!kitPolicy) console.log("NOT_APPLICABLE kit-sections: the repo ships no scripts/readme-check.ts; the Limitations / About Contributions / License-last sections are omp-kit README policy");
 	if (readmeGate) {
 		const gate = runReadmeGate(readmePath);
 		console.log(gate.output);

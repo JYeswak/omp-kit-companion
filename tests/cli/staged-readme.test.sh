@@ -285,5 +285,74 @@ git -C "$R" rm -q README.md
 out=$(commit "$R" -m "[test] required README deleted")
 check "$?" "1" "required-readme-deletion-refused" "$out" "staged-readme: REFUSED"
 
+# README APPLY1 (ompkit-v66l.22.3): CFS tracks a README, so it has a README
+# obligation, but it ships no COMMANDS registry, release train, kit inventory
+# or its own checker. The installed checker imported <tree>/src/commands.ts
+# unconditionally and crashed (`Cannot find module`), refusing every CFS
+# commit that staged README.md or package.json.
+write_cfs_readme() {
+	cat > "$1/README.md" <<'MD'
+# ClutterFreeSpaces Business Intelligence Platform
+
+## 🎯 **Project Overview**
+
+Montana's professional organizing service, with 7 commands for the daily dashboard.
+
+## 🛠️ **Command Reference**
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `/checkin` | Daily business dashboard | `./checkin.sh` |
+
+## 📜 **License**
+
+Private.
+MD
+}
+cfs_repo() {
+	R="$TMP/$1"
+	mkdir -p "$R"
+	git -C "$R" init -q
+	git -C "$R" config user.email test@invalid.example
+	git -C "$R" config user.name Test
+	git -C "$R" commit -q --allow-empty -m "[test] root"
+	cp -R "$TMP/installed-baseline/.git/hooks/." "$R/.git/hooks/"
+	cp "$TMP/installed-baseline/gate-stub.py" "$R/gate-stub.py"
+	write_cfs_readme "$R"
+	printf '{"name":"clutterfree-spaces-api","version":"1.0.0"}\n' > "$R/package.json"
+	printf '%s' "$R"
+}
+
+# Planted: the CFS-shaped commit passes, and rule 1 is named NOT_APPLICABLE.
+R=$(cfs_repo cfs-shaped)
+git -C "$R" add README.md package.json
+out=$(commit "$R" -m "[test] CFS README and package.json")
+check "$?" "0" "cfs-shaped-commit" "$out" "staged-readme: NOT_APPLICABLE command-reference: no COMMANDS registry"
+check "$(git -C "$R" rev-list --count HEAD)" "2" "cfs-shaped-head-moved" "$out" "NOT_APPLICABLE kit-sections"
+
+# Planted negative: a rule that applies to every README still refuses there.
+R=$(cfs_repo cfs-worklog)
+printf "## What's new\n\n- Added the dashboard.\n" >> "$R/README.md"
+git -C "$R" add README.md package.json
+out=$(commit "$R" -m "[test] CFS README with a worklog heading")
+check "$?" "1" "cfs-worklog-refused" "$out" "worklog/changelog heading"
+
+# Planted negative: an omp-kit-shaped README missing a registry command is still refused.
+R=$(new_repo kit-missing-command)
+grep -v 'omp-kit alpha' "$R/README.md" > "$R/README.next" && mv "$R/README.next" "$R/README.md"
+git -C "$R" add README.md
+out=$(commit "$R" -m "[test] README drops a command")
+check "$?" "1" "kit-missing-command-refused" "$out" "command reference is missing \`omp-kit alpha\`"
+
+# Planted negative: a tree that ships its own checker declares the whole kit policy,
+# so the kit sections stay required there.
+R=$(new_repo kit-policy-sections)
+mkdir -p "$R/scripts"
+cp "$(dirname "$INSTALLER")/readme-check.ts" "$R/scripts/readme-check.ts"
+grep -v -e '^## Limitations$' -e '^Small on purpose\.$' "$R/README.md" > "$R/README.next" && mv "$R/README.next" "$R/README.md"
+git -C "$R" add README.md scripts/readme-check.ts
+out=$(commit "$R" -m "[test] kit README drops Limitations")
+check "$?" "1" "kit-policy-sections-refused" "$out" "no \`## Limitations\` section"
+
 printf 'staged-readme: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

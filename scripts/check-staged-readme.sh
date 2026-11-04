@@ -33,6 +33,9 @@ EOF
 [ "$triggered" = 1 ] || exit 0
 # A foreign repo without a README or its own checker has no README obligation.
 # HEAD still declares it when a candidate deletes the README (or its checker).
+# Which readme-check rules then apply is the checker's call: each rule runs only
+# where the candidate tree declares its inputs (readme-check.ts "Applicability"),
+# and every rule it does not apply is printed below as NOT_APPLICABLE.
 required=0
 for declared in README.md scripts/readme-check.ts; do
 	if git cat-file -e ":$declared" 2>/dev/null || git cat-file -e "HEAD:$declared" 2>/dev/null; then
@@ -52,6 +55,9 @@ tmp='' # assigned by kitlib_tmp via eval
 kitlib_tmp tmp staged-readme || { printf 'staged-readme: cannot stage the candidate tree\n' >&2; exit 1; }
 git archive "$tree" | tar -xf - -C "$tmp" || { printf 'staged-readme: cannot extract the candidate tree\n' >&2; exit 1; }
 if out=$(CDPATH='' cd -- "$root" && bun run --no-env-file --config=/dev/null "$checker" --root "$tmp" 2>&1); then
+	printf '%s\n' "$out" | while IFS= read -r line; do
+		case "$line" in NOT_APPLICABLE\ *) printf 'staged-readme: %s\n' "$line" >&2 ;; esac
+	done
 	exit 0
 fi
 printf 'staged-readme: REFUSED: readme-check rejects the candidate tree (worktree ignored)\n%s\n' "$out" >&2
