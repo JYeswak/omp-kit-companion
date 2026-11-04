@@ -14,8 +14,29 @@ const execute: BriefExec = async (command, args, options) => {
 };
 export interface BriefRule { member: string; refuses: string; compliant: string }
 export interface BriefMember { member: string; path: string; sha256: string }
-export interface BriefContract { repo: string; installed: boolean; digest: string; marker: string; rules: BriefRule[]; members: BriefMember[] }
+export interface BriefContract { repo: string; installed: boolean; digest: string; marker: string; rules: BriefRule[]; members: BriefMember[]; kit: string }
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+
+let kitRelease: string | undefined;
+/**
+ * BRIEFSTABLE1: the kit release whose gate contract this code teaches, so a brief from another release
+ * never matches. Read from the release-manifest.json beside the running module (the bundled guard) or
+ * the compiled binary's release root; a source checkout reports "unreleased".
+ */
+export function briefKitRelease(): string {
+	if (kitRelease !== undefined) return kitRelease;
+	for (const root of [() => resolve(dirname(fileURLToPath(import.meta.url)), ".."), () => releaseRoot(process.execPath)]) {
+		try {
+			const manifest: unknown = JSON.parse(readFileSync(join(root(), "release-manifest.json"), "utf8"));
+			if (manifest && typeof manifest === "object" && "version" in manifest && typeof manifest.version === "string") return kitRelease = manifest.version;
+		} catch { /* not a release root */ }
+	}
+	return kitRelease = "unreleased";
+}
+
+/** Committed blob bodies by object id: content-addressed, so a per-process cache never goes stale. */
+const blobCache = new Map<string, string>();
+const BLOB_CACHE_CAP = 4096;
 
 /** Vocabulary is attached only to observed members, never to a repository name. */
 function memberRules(member: string, source: string): BriefRule[] {
@@ -60,8 +81,13 @@ export function memberRemedies(source: string): { refusals: string[]; remedies: 
 	return { refusals: [...refusals].filter(Boolean).slice(0, 6), remedies: [...remedies].filter(text => text.length >= 4).slice(0, 6) };
 }
 
-/** Read the hook location Git actually resolves (including core.hooksPath), plus source staged checks. */
-export async function briefContract(repoPath: string, exec: BriefExec = execute): Promise<BriefContract> {
+/**
+ * Read the hook location Git actually resolves (including core.hooksPath), plus source staged checks
+ * at `rev` (default HEAD). `kit` defaults to the running release.
+ */
+export async function briefContract(repoPath: string, exec: BriefExec = execute, options: { rev?: string; kit?: string } = {}): Promise<BriefContract> {
+	const rev = options.rev ?? "HEAD";
+	const kit = options.kit ?? briefKitRelease();
 	const cwd = realpathSync(resolve(repoPath));
 	const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 3000 });
 	if (top.code !== 0) throw new Error(`brief: not a repository: ${cwd}`);
@@ -73,14 +99,24 @@ export async function briefContract(repoPath: string, exec: BriefExec = execute)
 	const rules: BriefRule[] = [];
 	let installed = false;
 	const visited = new Set<string>();
-	// BRIEFSTABLE1: source members are read from HEAD, never the working tree, so in-flight edits by peers cannot move the digest.
-	const listed = await exec("git", ["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", "scripts"], { cwd: repo, timeout: 3000 });
-	const committed = new Set(listed.code === 0 ? listed.stdout.split("\0").filter(Boolean) : []);
+	// BRIEFSTABLE1: source members are read from a commit, never the working tree, so in-flight edits by peers cannot move the digest.
+	const listed = await exec("git", ["ls-tree", "-r", "-z", rev, "--", "scripts"], { cwd: repo, timeout: 3000 });
+	const committed = new Map<string, string>();
+	if (listed.code === 0) for (const entry of listed.stdout.split("\0")) {
+		const tab = entry.indexOf("\t");
+		const [, type, oid] = entry.slice(0, tab).split(" ");
+		if (tab > 0 && type === "blob" && oid) committed.set(entry.slice(tab + 1), oid);
+	}
 	const readHead = async (path: string): Promise<string | undefined> => {
 		const rel = relative(repo, path);
-		if (!committed.has(rel)) return undefined;
-		const shown = await exec("git", ["show", `HEAD:${rel}`], { cwd: repo, timeout: 3000 });
-		if (shown.code !== 0) throw new Error(`brief: cannot read HEAD:${rel}`);
+		const oid = committed.get(rel);
+		if (oid === undefined) return undefined;
+		const cached = blobCache.get(oid);
+		if (cached !== undefined) return cached;
+		const shown = await exec("git", ["cat-file", "blob", oid], { cwd: repo, timeout: 3000 });
+		if (shown.code !== 0) throw new Error(`brief: cannot read ${rev}:${rel}`);
+		if (blobCache.size >= BLOB_CACHE_CAP) blobCache.clear();
+		blobCache.set(oid, shown.stdout);
 		return shown.stdout;
 	};
 	const readInstalled = async (path: string) => existsSync(path) && statSync(path).isFile() ? readFileSync(path, "utf8") : undefined;
@@ -119,14 +155,14 @@ export async function briefContract(repoPath: string, exec: BriefExec = execute)
 			await inspect(path, `${kind}/${name}`, readInstalled);
 		}
 	}
-	for (const rel of [...committed].filter(rel => /^scripts\/(?:check-staged-.*\.sh|fresh-gate\.sh)$/.test(rel)).sort()) await inspect(join(repo, rel), `source:${rel}`, readHead);
+	for (const rel of [...committed.keys()].filter(rel => /^scripts\/(?:check-staged-.*\.sh|fresh-gate\.sh)$/.test(rel)).sort()) await inspect(join(repo, rel), `source:${rel}`, readHead);
 	rules.push(
 		{ member: "process:EXPORTINDEX1", refuses: "writes escaping an exported test tree", compliant: "exports are read-only source inputs; fixture repositories need their own git init and GIT_CEILING_DIRECTORIES so git never discovers the parent checkout" },
 		{ member: "process:commit-notes", refuses: "a user-visible change without its own release note", compliant: "write changelog.d/<bead-without-ompkit-prefix>.md, user-facing '- ' bullets; update README's command reference for CLI changes" },
 		{ member: "process:BRIEFCONTRACT1", refuses: "DONE without clean changed-path preflight evidence", compliant: "before DONE run sh scripts/commit-preflight.sh --files <every changed path> --tests <changed test files>; report the exact command and its commit-preflight: ... 0 refused/unjudged ...; N export test file(s) run output" },
 	);
-	const digest = hash(JSON.stringify({ repo, members, rules }));
-	return { repo, installed, digest, marker: `omp-kit-brief: ${repo} ${digest}`, rules, members };
+	const digest = hash(JSON.stringify({ repo, kit, members, rules }));
+	return { repo, installed, digest, marker: `omp-kit-brief: ${repo} ${digest}`, rules, members, kit };
 }
 
 export interface BriefCandidate { path: string; sha: string; bead: string; line: number; hunk: string; review: string }
@@ -244,7 +280,35 @@ export function briefTargets(text: string, cwd: string): string[] {
 	return [...new Set(targets.map(target => resolve(cwd, target)))];
 }
 
-/** A digest is checked against current installed bytes, not merely a marker-shaped string. */
+/**
+ * BRIEFSTABLE1: a brief stays valid for BRIEF_WINDOW_MINUTES after a landing supersedes it, so a
+ * landing between `omp-kit brief` and the spawn no longer refuses a freshly pasted contract.
+ * Measured 2026-11-04 (companion, 167 first-parent commits since 11-03, gate-events.jsonl refusals):
+ * the HEAD-bound digest changed 60 times with a median lifetime of 33.1 min; of 22 measured
+ * companion paste ages, 16 were <= 14.9 min, and a 30 min window admits 20 of 22 (the two refused
+ * pastes were 43 and 93 min old, older than a median digest lifetime). The walk is capped at
+ * BRIEF_WINDOW_REVS first-parent commits: the peak in any 30 min window was 11.
+ */
+export const BRIEF_WINDOW_MINUTES = 30;
+export const BRIEF_WINDOW_REVS = 16;
+
+/** True when `lines` carries the marker of HEAD or of a first-parent ancestor superseded within the window. */
+export async function briefMarkerAccepted(current: BriefContract, lines: ReadonlySet<string>, exec: BriefExec = execute, now = Date.now()): Promise<boolean> {
+	if (lines.has(current.marker)) return true;
+	const log = await exec("git", ["log", "--first-parent", `--max-count=${BRIEF_WINDOW_REVS + 1}`, "--format=%H %ct", "HEAD", "--"], { cwd: current.repo, timeout: 3000 });
+	if (log.code !== 0) return false;
+	const revs = log.stdout.trim().split("\n").map(line => line.split(" "));
+	for (let k = 1; k < revs.length; k++) {
+		// revs[k]'s contract was current until revs[k - 1] landed.
+		if (Number(revs[k - 1]![1]) * 1000 < now - BRIEF_WINDOW_MINUTES * 60_000) return false;
+		try {
+			if (lines.has((await briefContract(current.repo, exec, { rev: revs[k]![0], kit: current.kit })).marker)) return true;
+		} catch { /* an unreadable ancestor admits nothing */ }
+	}
+	return false;
+}
+
+/** A digest is checked against installed bytes, committed sources and the kit release, not merely a marker-shaped string. */
 export async function checkTaskBrief(input: unknown, cwd: string, exec: BriefExec = execute): Promise<string | undefined> {
 	if (!input || typeof input !== "object") return undefined;
 	const value = input as Record<string, unknown>;
@@ -268,7 +332,7 @@ export async function checkTaskBrief(input: unknown, cwd: string, exec: BriefExe
 			contracts.push(fallback);
 		}
 		for (const contract of contracts) {
-			if (contract.installed && !lines.has(contract.marker)) return `BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${contract.repo}. Run omp-kit brief --repo ${JSON.stringify(contract.repo)} and paste its complete output into context (${contract.marker}).`;
+			if (contract.installed && !await briefMarkerAccepted(contract, lines, exec)) return `BRIEF_CONTRACT_REFUSED: build task lacks the current contract for ${contract.repo}. Run omp-kit brief --repo ${JSON.stringify(contract.repo)} and paste its complete output into context (${contract.marker}). A brief stays valid ${BRIEF_WINDOW_MINUTES} min after a landing supersedes it; one from another kit release or gate contract never matches.`;
 		}
 	}
 	return undefined;

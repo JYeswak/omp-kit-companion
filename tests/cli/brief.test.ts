@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { briefCandidates, briefContract, checkTaskBrief, GENERIC_COMPLY, renderBrief, type BriefExec } from "../../src/brief.ts";
+import { BRIEF_WINDOW_MINUTES, briefCandidates, briefContract, checkTaskBrief, GENERIC_COMPLY, renderBrief, type BriefExec } from "../../src/brief.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 
@@ -109,6 +109,71 @@ test("build task requires the current repo-bound digest; read-only and ungated c
 	const withHelper = await briefContract(repo, execute);
 	writeFileSync(join(repo, ".git/hooks/hooks.d/pre-commit/helper.py"), "# changed checker\n");
 	expect(await checkTaskBrief({ context: `${context}\n${withHelper.marker}`, tasks }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
+});
+
+/** BRIEFSTABLE1 fixture: a gated repo whose source check lands once per entry, committed `minutesAgo` minutes before now. */
+async function landedChecks(minutesAgo: readonly number[]) {
+	const repo = await fixture();
+	mkdirSync(join(repo, "scripts"));
+	const revs: string[] = [];
+	for (const [index, minutes] of minutesAgo.entries()) {
+		writeFileSync(join(repo, "scripts/check-staged-tempsafe.sh"), `${readFileSync(join(source, "scripts/check-staged-tempsafe.sh"), "utf8")}\n# landing ${index}\n`);
+		await git(repo, "add", "--", "scripts");
+		const at = new Date(Date.now() - minutes * 60_000).toISOString();
+		const landed = await execute("git", ["commit", "-qm", `land check ${index}\n\nBead: fixture-checks`], { cwd: repo, timeout: fixtureDeadlineS() * 1000, env: { GIT_COMMITTER_DATE: at, GIT_AUTHOR_DATE: at } });
+		expect(landed.code).toBe(0);
+		revs.push(await git(repo, "rev-parse", "HEAD"));
+	}
+	return { repo, revs };
+}
+const buildTasks = [{ task: "# Change\nFix scripts/check-staged-tempsafe.sh" }];
+
+test("BRIEFSTABLE1 window: a pasted brief survives a peer's working-tree edit and a landing inside the window", async () => {
+	const { repo, revs } = await landedChecks([BRIEF_WINDOW_MINUTES * 4, BRIEF_WINDOW_MINUTES * 2, 1]);
+	const pasted = await briefContract(repo, execute);
+	// A peer edits the referenced script in the working tree after the paste: still admitted.
+	writeFileSync(join(repo, "scripts/check-staged-tempsafe.sh"), "# peer edit in flight\n");
+	expect(await checkTaskBrief({ context: `Repo: ${repo}\n${renderBrief(pasted)}`, tasks: buildTasks }, repo, execute)).toBeUndefined();
+	// The brief taken one landing ago, superseded 1 min ago (inside the window): admitted.
+	const previous = await briefContract(repo, execute, { rev: revs[1] });
+	expect(previous.marker).not.toBe(pasted.marker);
+	expect(await checkTaskBrief({ context: `Repo: ${repo}\n${previous.marker}`, tasks: buildTasks }, repo, execute)).toBeUndefined();
+	// The brief superseded 2 windows ago: refused, naming the current digest.
+	const stale = await briefContract(repo, execute, { rev: revs[0] });
+	const refused = await checkTaskBrief({ context: `Repo: ${repo}\n${stale.marker}`, tasks: buildTasks }, repo, execute);
+	expect(refused).toContain("BRIEF_CONTRACT_REFUSED");
+	expect(refused).toContain(pasted.marker);
+});
+
+test("BRIEFSTABLE1 window: a brief from another kit release or a changed gate contract is refused naming the current digest", async () => {
+	const { repo } = await landedChecks([1]);
+	const current = await briefContract(repo, execute);
+	const older = await briefContract(repo, execute, { kit: "0.2.88" });
+	expect(older.marker).not.toBe(current.marker);
+	const fromOlder = await checkTaskBrief({ context: `Repo: ${repo}\n${older.marker}`, tasks: buildTasks }, repo, execute);
+	expect(fromOlder).toContain("BRIEF_CONTRACT_REFUSED");
+	expect(fromOlder).toContain(current.marker);
+	const member = join(repo, ".git/hooks/hooks.d/pre-commit/51-omp-kit-staged-kitlib");
+	writeFileSync(member, `${readFileSync(member, "utf8")}\n# reinstalled gate\n`);
+	const changed = await briefContract(repo, execute);
+	const fromChanged = await checkTaskBrief({ context: `Repo: ${repo}\n${current.marker}`, tasks: buildTasks }, repo, execute);
+	expect(fromChanged).toContain("BRIEF_CONTRACT_REFUSED");
+	expect(fromChanged).toContain(changed.marker);
+});
+
+test("BRIEFSTABLE1 window mutant: the old working-tree binding refuses the peer-edit case", async () => {
+	const original = readFileSync(join(source, "src/brief.ts"), "utf8");
+	const old = original.replace("await inspect(join(repo, rel), `source:${rel}`, readHead);", "await inspect(join(repo, rel), `source:${rel}`, readInstalled);");
+	expect(old).not.toBe(original);
+	const dir = join(scratch.path, `mutant-${++sequence}`);
+	mkdirSync(dir);
+	writeFileSync(join(dir, "brief.ts"), old.replaceAll('from "./', `from "${join(source, "src")}/`));
+	// Dynamic: the mutant module is generated at test time, so no static specifier exists.
+	const mutant = await import(join(dir, "brief.ts")) as { briefContract: typeof briefContract; checkTaskBrief: typeof checkTaskBrief };
+	const { repo } = await landedChecks([1]);
+	const pasted = await mutant.briefContract(repo, execute);
+	writeFileSync(join(repo, "scripts/check-staged-tempsafe.sh"), "# peer edit in flight\n");
+	expect(await mutant.checkTaskBrief({ context: `Repo: ${repo}\n${pasted.marker}`, tasks: buildTasks }, repo, execute)).toContain("BRIEF_CONTRACT_REFUSED");
 });
 
 test("stale and foreign deletion candidates show real hunks without granting Supersedes; only declared replacements pass", async () => {
