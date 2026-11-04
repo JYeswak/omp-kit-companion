@@ -676,7 +676,8 @@ def main(argv: list[str]) -> int:
     admission = None
     try:
         from bead_lint import (BoxGrammarUnavailable, goal_path_legacy, lint_bead_failures,
-                               live_dependents, replayable_claim_refusal, replayable_findings)
+                               live_dependents, pitfalls_legacy, replayable_claim_refusal,
+                               replayable_findings)
         import ac_phase
         live = show_bead(real, project, db, args.bead_id)
         bead = prospective(live, args, project)
@@ -693,6 +694,9 @@ def main(argv: list[str]) -> int:
             dependents = live_dependents(real, db, project)
             failures = lint_bead_failures(bead, byid, graph=rows, dependents=dependents)
             for line in goal_path_legacy(bead, rows, dependents):
+                print(f"br-update-lint: {line}", file=sys.stderr)
+            # BEADPITFALL1: a pre-cutover build bead without Pitfalls is reported, never refused.
+            for line in pitfalls_legacy(bead):
                 print(f"br-update-lint: {line}", file=sys.stderr)
             # REPLAYABLE1: only a box this edit adds or changes can fail; boxes
             # left as stored are reported, never refused. An edit that does not

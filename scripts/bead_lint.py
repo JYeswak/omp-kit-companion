@@ -21,6 +21,11 @@ Check catalog (all trace to the beads-north-star standard):
   i-mention-edges  j-stale-blocked (warning)  k-close-receipt
   l-ac-phase  l-ac-phase-legacy (warning)  r-verify-replayable (admission only)
   m-goal-path (admission + goal_path_report; legacy rows are warnings)
+  p-pitfalls (admission; pre-cutover beads get PITFALLS_LEGACY warnings)
+p-pitfalls (BEADPITFALL1 ompkit-fp72.120.16.159): a kind:fix/kind:feature bead
+created at or after PITFALLS_CUTOVER carries a Pitfalls section with at least
+one concrete item, or the owning repo's `omp-kit-brief: <repo> <sha256>` line;
+the create and update gates refuse it naming the missing section and the fix.
 RELLINT1 admission: a kind:goal/pillar:release acceptance must execute the
 release-local.sh dry-run using its default freshly fetched origin head.
 An explicit --source override or a printed command is not that readback;
@@ -1815,6 +1820,106 @@ def release_goal_failures(bead: dict) -> list[str]:
     return failures
 
 
+# ---- BEADPITFALL1 (ompkit-fp72.120.16.159, J-2026-11-03-52): p-pitfalls ----
+# A build bead (kind:fix / kind:feature) states the rules its work will be judged
+# by: a Pitfalls section with at least one concrete item, or the owning repo's
+# `omp-kit-brief: <repo> <sha256>` digest line (the BRIEFCONTRACT1 task-brief
+# line). Beads created at or after PITFALLS_CUTOVER (a create's created_at is its
+# admission clock) are refused by the create and update gates; older beads get
+# PITFALLS_LEGACY warning lines only (pitfalls_legacy), never a refusal.
+PITFALLS_CHECK = "p-pitfalls"
+PITFALLS_CUTOVER = "2026-11-05T00:00:00Z"  # BEADPITFALL1 landed 2026-11-04; creates from this UTC midnight are enforced
+BUILD_LABELS = ("kind:fix", "kind:feature")
+PITFALLS_HEADING_RE = re.compile(
+    r"^\s{0,3}(?:#{1,6}\s*)?(?:\*\*)?pitfalls(?:\*\*)?\s*(?::(?:\*\*)?\s*(.*))?$", re.I)
+PITFALLS_SECTION_END_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s+\S|[A-Z][A-Z0-9_ -]{0,30}:(?:\s|$))")
+PITFALLS_ITEM_RE = re.compile(r"^\s{0,3}(?:[-*+]|\d{1,3}[.)])\s+(.*)$")
+PITFALL_PLACEHOLDER_RE = re.compile(
+    r"^(?:none|n/?a|nothing|nil|tbd|todo|unknown|see above|same as above)\b", re.I)
+BRIEF_LINE_RE = re.compile(r"^[ \t]*omp-kit-brief:[ \t]+/\S+[ \t]+[0-9a-f]{64}[ \t]*$", re.M)
+
+
+def pitfall_items(desc: str | None) -> tuple[bool, list[str]]:
+    """(has a Pitfalls heading, the items under every such heading).
+
+    A section runs from `Pitfalls`/`## Pitfalls`/`Pitfalls: <text>` to the next
+    markdown heading or upper-case `LABEL:` line; bullets, numbered items and
+    plain lines are items, indented lines continue the item above."""
+    lines = (desc or "").splitlines()
+    found, items, i = False, [], 0
+    while i < len(lines):
+        heading = PITFALLS_HEADING_RE.match(lines[i])
+        i += 1
+        if not heading:
+            continue
+        found = True
+        if (heading.group(1) or "").strip():
+            items.append(heading.group(1).strip())
+        while i < len(lines):
+            line = lines[i]
+            if line.strip() and (PITFALLS_HEADING_RE.match(line) or PITFALLS_SECTION_END_RE.match(line)):
+                break
+            i += 1
+            if not line.strip():
+                continue
+            item = PITFALLS_ITEM_RE.match(line)
+            if item:
+                items.append(item.group(1).strip())
+            elif items and line[:1].isspace():
+                items[-1] += " " + line.strip()
+            else:
+                items.append(line.strip())
+    return found, items
+
+
+def concrete_pitfall(text: str) -> bool:
+    """A pitfall names something checkable: three or more words, not a placeholder."""
+    core = text.strip(" \t.:;-*`_")
+    return len(re.findall(r"[\w/.'`-]+", core)) >= 3 and not PITFALL_PLACEHOLDER_RE.match(core)
+
+
+def pitfalls_finding(bead: dict) -> list[str]:
+    """p-pitfalls finding for one build bead, whatever its age."""
+    labels = bead.get("labels") or []
+    build = [lab for lab in BUILD_LABELS if lab in labels]
+    if not build or (bead.get("status") or "") in ("closed", "tombstone"):
+        return []
+    desc = bead.get("description") or ""
+    if BRIEF_LINE_RE.search(desc):
+        return []
+    found, items = pitfall_items(desc)
+    if any(concrete_pitfall(item) for item in items):
+        return []
+    bid = bead.get("id") or "<new>"
+    why = ("its Pitfalls section has no concrete item (each item needs three or more words "
+           "and no placeholder such as none/n/a)") if found else "its description has no Pitfalls section"
+    return [f"{PITFALLS_CHECK}:PITFALLS_MISSING {bid} is a build bead ({','.join(build)}) and {why}, "
+            f"so the rules its work is judged by are unstated; fix: add to the description a "
+            f"`## Pitfalls` section with at least one concrete `- <item>` (a repo gate it must pass, "
+            f"a file held by another seat, a limit never to raise), or the "
+            f"`omp-kit-brief: <repo> <sha256>` line `omp-kit brief --repo <owning repo>` prints"]
+
+
+def pitfalls_enforced(created_at: str | None) -> bool:
+    ts = parse_iso(created_at or "")
+    cut = parse_iso(PITFALLS_CUTOVER)
+    return ts is None or ts >= cut
+
+
+def pitfalls_failure(bead: dict) -> list[str]:
+    """Refusing p-pitfalls failure: beads (and creates) created at or after PITFALLS_CUTOVER."""
+    if not pitfalls_enforced(bead.get("created_at")):
+        return []
+    return pitfalls_finding(bead)
+
+
+def pitfalls_legacy(bead: dict) -> list[str]:
+    """PITFALLS_LEGACY warning lines for a pre-cutover build bead (never refused)."""
+    if pitfalls_enforced(bead.get("created_at")):
+        return []
+    return [line.replace(f"{PITFALLS_CHECK}:PITFALLS_MISSING", "PITFALLS_LEGACY", 1)
+            for line in pitfalls_finding(bead)]
+
 
 def lint_bead(bead: dict, byid: set[str] | None = None) -> dict[str, list[str]]:
     """Per-bead LINTGATE1 verdict over GATE_CHECKS.
@@ -1860,6 +1965,7 @@ def lint_bead_failures(
     failures.extend(elapsed_time_mix_failure(bead))
     failures.extend(ac_phase_failure(bead))
     failures.extend(release_goal_failures(bead))
+    failures.extend(pitfalls_failure(bead))
     if graph is not None:
         failures.extend(goal_path_failure(bead, graph, dependents))
     if template_missing(

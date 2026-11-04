@@ -696,7 +696,7 @@ test("BRINITPIN1 verify tracker init leaves ancestor tracker unchanged; unpinned
 	expect(negative.newLocks.length).toBeGreaterThan(0);
 });
 
-const REPLAY_DESC = "WHAT: owned replay-barrier fixture.\n\nWHY: proves the per-run read-only dispatch admits intended reads and refuses production writes.";
+const REPLAY_DESC = "WHAT: owned replay-barrier fixture.\n\nWHY: proves the per-run read-only dispatch admits intended reads and refuses production writes.\n\n## Pitfalls\n- a production tracker write must stay refused";
 
 /** Description, acceptance, label, per-box ticks and the in_review transition. */
 async function shapeBead(t: { dir: string; db: string }, id: string, ac: string): Promise<void> {
@@ -861,7 +861,7 @@ async function actorPolicy(t: { dir: string }): Promise<void> {
 /** Create a fixture bead with its fields, then move it through the gated path as ambient/tester setup acts. */
 async function actorBead(t: { dir: string; db: string }, title: string, ac: string): Promise<string> {
 	const env = ambientEnv(t.db);
-	const desc = "WHAT: verifyactor1 fixture.\n\nWHY: proves native verify binds the reviewer identity on durable mutations.";
+	const desc = "WHAT: verifyactor1 fixture.\n\nWHY: proves native verify binds the reviewer identity on durable mutations.\n\n## Pitfalls\n- the reviewer identity must come from native verify";
 	const id = await createBead(t, title, ["--description", desc, "--acceptance-criteria", ac, "--labels", "kind:fix", "--assignee", "Author"]);
 	const moves: string[][] = [
 		["update", id, "--status", "in_progress", "--transition-comment", "fixture start"],

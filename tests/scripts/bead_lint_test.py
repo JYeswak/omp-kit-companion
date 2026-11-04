@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""RELLINT1: release-goal admission follows the real release dry-run, not bead closure."""
+"""RELLINT1: release-goal admission follows the real release dry-run, not bead closure.
+BEADPITFALL1: a post-cutover build bead states its Pitfalls or the repo brief digest."""
+from datetime import timedelta
 from pathlib import Path
 import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import bead_lint
+import br_create_guard_core
 
 
 DRY_RUN = (
@@ -88,6 +91,97 @@ class ReleaseGoalLintTests(unittest.TestCase):
         for labels in (["kind:goal", "pillar:proven"], ["kind:fix", "pillar:release"]):
             with self.subTest(labels=labels):
                 self.assertEqual(self.failures(acceptance, labels), [])
+
+
+PITFALL_DESC = "WHAT: (a) refuse a widget. WHY: the widget leaks.\n"
+BRIEF = "omp-kit-brief: /Users/x/repo " + "0123456789abcdef" * 4
+PITFALL_ACC = "- [ ] [a] [build] planted bad widget is refused `true` -> rc 0"
+
+
+def build_bead(desc: str, created_at: str, labels=None) -> dict:
+    return {
+        "id": "fixture-build",
+        "status": "open",
+        "issue_type": "task",
+        "created_at": created_at,
+        "labels": ["kind:fix"] if labels is None else labels,
+        "description": desc,
+        "acceptance_criteria": PITFALL_ACC,
+        "dependencies": [],
+    }
+
+
+class PitfallLintTests(unittest.TestCase):
+    AFTER = bead_lint.PITFALLS_CUTOVER
+    CUT = bead_lint.parse_iso(bead_lint.PITFALLS_CUTOVER)
+    BEFORE = (CUT - timedelta(microseconds=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def pitfall_failures(self, desc: str, created_at=None, labels=None) -> list[str]:
+        bead = build_bead(desc, created_at or self.AFTER, labels)
+        return [f for f in bead_lint.lint_bead_failures(bead) if f.startswith("p-pitfalls")]
+
+    def test_pitfall_missing_section_refused_naming_section_and_fix(self):
+        failures = self.pitfall_failures(PITFALL_DESC)
+        self.assertEqual(len(failures), 1, failures)
+        self.assertIn("PITFALLS_MISSING", failures[0])
+        self.assertIn("has no Pitfalls section", failures[0])
+        self.assertIn("## Pitfalls", failures[0])
+        self.assertIn("omp-kit-brief:", failures[0])
+
+    def test_pitfall_feature_beads_are_judged_too(self):
+        self.assertEqual(len(self.pitfall_failures(PITFALL_DESC, labels=["kind:feature"])), 1)
+
+    def test_pitfall_placeholder_or_empty_section_refused(self):
+        for section in ("## Pitfalls\n", "## Pitfalls\n- none\n", "Pitfalls: n/a\n",
+                        "## Pitfalls\n- TBD later\n", "## Pitfalls\n- careful\n\nWHERE: x\n",
+                        "## Pitfalls\n\n## Steps\n- refuse the widget in all paths\n"):
+            with self.subTest(section=section):
+                failures = self.pitfall_failures(PITFALL_DESC + section)
+                self.assertEqual(len(failures), 1, failures)
+                self.assertIn("no concrete item", failures[0])
+
+    def test_pitfall_concrete_section_admitted(self):
+        for section in (
+            "## Pitfalls\n- Never write /tmp; use omp-kit scratch new.\n",
+            "Pitfalls:\n1. src/cli.ts is held by another seat\n",
+            "Pitfalls: never raise the 15s box-lint timeout to pass\n",
+            "**Pitfalls**\n* commit-preflight must print 0 refused\n",
+        ):
+            with self.subTest(section=section):
+                self.assertEqual(self.pitfall_failures(PITFALL_DESC + section), [])
+
+    def test_pitfall_brief_digest_line_admitted(self):
+        self.assertEqual(self.pitfall_failures(PITFALL_DESC + BRIEF + "\n"), [])
+        # A malformed digest is no substitute.
+        self.assertEqual(len(self.pitfall_failures(PITFALL_DESC + BRIEF[:-1] + "\n")), 1)
+
+    def test_pitfall_legacy_bead_reported_never_refused(self):
+        self.assertEqual(self.pitfall_failures(PITFALL_DESC, created_at=self.BEFORE), [])
+        legacy = bead_lint.pitfalls_legacy(build_bead(PITFALL_DESC, self.BEFORE))
+        self.assertEqual(len(legacy), 1, legacy)
+        self.assertTrue(legacy[0].startswith("PITFALLS_LEGACY fixture-build"), legacy)
+        self.assertEqual(bead_lint.pitfalls_legacy(build_bead(PITFALL_DESC, self.AFTER)), [])
+
+    def test_pitfall_non_build_and_closed_beads_unchanged(self):
+        self.assertEqual(self.pitfall_failures(PITFALL_DESC, labels=["kind:goal"]), [])
+        bead = build_bead(PITFALL_DESC, self.AFTER)
+        bead["status"] = "closed"
+        self.assertEqual(bead_lint.pitfalls_failure(bead), [])
+
+    def test_pitfall_create_gate_refuses_after_cutover_only(self):
+        def create(desc: str, now) -> list[str]:
+            parsed = br_create_guard_core.parse_create_args([
+                "create", "Pitfall gate create", "-t", "task", "-l", "kind:fix,kind:intake",
+                "--description", desc, "--acceptance", PITFALL_ACC,
+            ])
+            root = str(Path(__file__).resolve().parents[2])
+            return [f for f in br_create_guard_core.lint_prospective(parsed, [], root, now=now)
+                    if f.startswith("p-pitfalls")]
+        refused = create(PITFALL_DESC, self.CUT)
+        self.assertEqual(len(refused), 1, refused)
+        self.assertIn("<new> is a build bead (kind:fix)", refused[0])
+        self.assertEqual(create(PITFALL_DESC + "## Pitfalls\n- never weaken a gate to land\n", self.CUT), [])
+        self.assertEqual(create(PITFALL_DESC, self.CUT - timedelta(seconds=1)), [])
 
 
 if __name__ == "__main__":
