@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fixtureLauncherTableBin } from "./launcher-table-fixture.ts";
 import { checkService, checkServiceLinux, ciPollerEnvironment, installService, installSystemd, KNOWN_JOBS, notifyJobFailure, parseLaunchctlPrint, planInstall, plistDiff, queryPrint, renderLaunchdPlist, renderSystemdUnits, serviceLabel, systemctlState, systemdTimer, uninstallService, uninstallSystemd, validateLabel, type ServiceJobDef, type ServiceRunResult } from "../../src/service.ts";
-import { launchdLoaded, superviseScratchJob } from "../../src/service.ts";
+import { backupDir, launchdLoaded, superviseScratchJob } from "../../src/service.ts";
 import { checkPlistContract, checkSystemdContract } from "../../src/service-contract.ts";
 import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -376,6 +376,22 @@ test("install retries bootout plus bootstrap when already loaded", () => {
   expect(calls.filter(call => call[1] === "bootout")).toHaveLength(2);
 });
 
+/** INSTALLROLLBACK1 [a]: what is wrong with the backup a rolled-back install reports (empty when it holds). The
+ * reported path must be parsed from the detail, equal result.backup, exist, be a file the install had written
+ * before its first bootout, and hold the pre-apply plist bytes. */
+function reportedBackupProblems(result: { backup: string | null; detail: string }, preApply: string,
+  beforeBootout: ReadonlyMap<string, string>): string[] {
+  const reported = /\(backup ([^)]+)\)/.exec(result.detail)?.[1] ?? null;
+  if (reported === null) return ["no backup path in the detail"];
+  const problems: string[] = [];
+  if (reported !== result.backup) problems.push(`detail path ${reported} differs from result.backup ${result.backup}`);
+  if (!existsSync(reported)) return [...problems, `reported backup ${reported} does not exist`];
+  if (!beforeBootout.has(reported)) problems.push(`reported backup ${reported} was not written before bootout`);
+  else if (beforeBootout.get(reported) !== preApply) problems.push("backup held other bytes at bootout");
+  if (readFileSync(reported, "utf8") !== preApply) problems.push("reported backup bytes differ from the pre-apply plist");
+  return problems;
+}
+
 // INSTALLROLLBACK1 (ompkit-fp72.120.16.84): a failed install never leaves the job unloaded.
 test("INSTALLROLLBACK1: a bootstrap that fails after bootout restores the previous plist and reloads it", () => {
   const { home, launcher, watch } = fixture();
@@ -386,7 +402,12 @@ test("INSTALLROLLBACK1: a bootstrap that fails after bootout restores the previo
   writeFileSync(dest, old);
   let bootstraps = 0;
   let bytesAtLastBootstrap: string | null = null;
+  // The backup dir as the first bootout saw it: path -> bytes.
+  const backupsAtBootout = new Map<string, string>();
+  let bootouts = 0;
   const run = runner(calls, args => {
+    if (args[1] === "bootout" && bootouts++ === 0 && existsSync(backupDir(home)))
+      for (const name of readdirSync(backupDir(home))) backupsAtBootout.set(join(backupDir(home), name), readFileSync(join(backupDir(home), name), "utf8"));
     if (args[1] === "bootstrap") {
       bootstraps++;
       bytesAtLastBootstrap = readFileSync(dest, "utf8");
@@ -406,6 +427,17 @@ test("INSTALLROLLBACK1: a bootstrap that fails after bootout restores the previo
   expect(readFileSync(dest, "utf8")).toBe(old);
   expect(bytesAtLastBootstrap).toBe(old);
   expect(bootstraps).toBe(3);
+  // [a] the reported backup path exists, was written before bootout, and holds the pre-apply plist.
+  expect(result.backup).toStartWith(backupDir(home));
+  expect(reportedBackupProblems(result, old, backupsAtBootout)).toEqual([]);
+  // Mutants: a detail naming a wrong path, no path, or a path written only after bootout each fail the check.
+  const wrong = join(backupDir(home), "other.plist");
+  expect(reportedBackupProblems({ ...result, detail: result.detail.replace(result.backup ?? "", wrong) }, old, backupsAtBootout).length).toBeGreaterThan(0);
+  expect(reportedBackupProblems({ ...result, detail: result.detail.replace(/ \(backup [^)]+\)/, "") }, old, backupsAtBootout)).toEqual(["no backup path in the detail"]);
+  writeFileSync(wrong, old);
+  expect(reportedBackupProblems({ backup: wrong, detail: result.detail.replace(result.backup ?? "", wrong) }, old, backupsAtBootout))
+    .toEqual([`reported backup ${wrong} was not written before bootout`]);
+  expect(reportedBackupProblems(result, old.replace("Other", "Changed"), backupsAtBootout).length).toBeGreaterThan(0);
 });
 
 test("INSTALLROLLBACK1: the retry bootstrap waits until the old label reads absent", () => {
