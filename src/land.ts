@@ -1,6 +1,6 @@
-import { lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { run as kitlibRun, runSync as kitlibRunSync, type RunResult } from "./kitlib/run.ts";
+import { run as kitlibRun, type RunResult } from "./kitlib/run.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -43,11 +43,27 @@ function landPushDeadlineSeconds(): number {
 	return Number.isSafeInteger(value) ? Math.min(7200, Math.max(1, value)) : 2400;
 }
 
-/** The publication push alone runs under the push deadline; the whole hook group is reaped at the deadline. */
-function publicationPush(repo: string, args: string[], deadlineS: number): GitResult {
-	const run = kitlibRunSync(["git", ...args], { cwd: repo, env: gitEnvironment(), deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
+type PushResult = GitResult & { log: string | null };
+
+/** The publication push alone runs under the push deadline; kitlib reaps the whole git+hook group at the
+ * deadline. An interrupted push keeps its captured hook output in <git-dir>/omp-kit/land-push/ so the
+ * refusal can name it. */
+async function publicationPush(repo: string, gitDir: string, candidate: string, deadlineS: number): Promise<PushResult> {
+	const run = await kitlibRun(["git", "push", "origin", `${candidate}:refs/heads/main`], { cwd: repo, env: gitEnvironment(), deadline_s: deadlineS, max_output_bytes: 8 * 1024 * 1024 });
 	const decoder = new TextDecoder();
-	return { code: run.rc ?? 1, out: decoder.decode(run.stdout), err: decoder.decode(run.stderr), interrupted: run.timed_out || run.killed || run.rc === null };
+	const out = decoder.decode(run.stdout), err = decoder.decode(run.stderr);
+	const interrupted = run.timed_out || run.killed || run.rc === null;
+	let log: string | null = null;
+	if (interrupted) {
+		const dir = join(gitDir, "omp-kit", "land-push");
+		const path = join(dir, `${candidate}.${Date.now()}.log`);
+		try {
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(path, `# git push origin ${candidate}:refs/heads/main; deadline ${deadlineS} s; timed_out=${run.timed_out} elapsed_s=${run.elapsed_s.toFixed(1)}\n# stderr (pre-push hook output)\n${err}\n# stdout\n${out}`);
+			log = path;
+		} catch { /* the refusal still reports the deadline; it says the log could not be written */ }
+	}
+	return { code: run.rc ?? 1, out, err, interrupted, log };
 }
 
 function gitBytes(repo: string, args: string[]): { code: number; out: Buffer; err: string; interrupted: boolean } {
@@ -956,14 +972,14 @@ async function landPatchCommand(repo: string, request: ParsedCommand): Promise<C
 		};
 	}
 	const pushDeadlineS = landPushDeadlineSeconds();
-	const push = publicationPush(repo, ["push", "origin", `${candidate}:refs/heads/main`], pushDeadlineS);
+	const push = await publicationPush(repo, gitDir.out.trim(), candidate, pushDeadlineS);
 	if (push.interrupted) {
 		cleanup();
 		const phases = landPhaseEvidence(repo, candidate, true);
 		return {
 			code: 77,
 			data: { overall: "UNRUN", commit: candidate, candidate_sha: candidate, pushed_sha: null, owner: owner.owner, paths, base, localMain, check: checkResult, phases },
-			errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The push did not finish: the pre-push hook was still running after ${pushDeadlineS} s, the land push deadline (${LAND_PUSH_DEADLINE_ENV}, default 2400, 1..7200); publication could not be verified`, remediation: `Inspect origin/main before retrying; raise ${LAND_PUSH_DEADLINE_ENV} if the hook chain needs longer. No force-push or fallback was attempted.` }],
+			errors: [{ code: "LAND_PUBLICATION_UNVERIFIED", message: `The push did not finish: the pre-push hook was still running after ${pushDeadlineS} s, the land push deadline (${LAND_PUSH_DEADLINE_ENV}, default 2400, 1..7200); hook log: ${push.log ?? "not written (could not create it under the git dir's omp-kit/land-push)"}; publication could not be verified`, remediation: `Read the hook log, inspect origin/main before retrying, and raise ${LAND_PUSH_DEADLINE_ENV} if the hook chain needs longer. No force-push or fallback was attempted.` }],
 			verification: "UNVERIFIED",
 		};
 	}
