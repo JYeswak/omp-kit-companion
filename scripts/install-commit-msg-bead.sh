@@ -64,6 +64,13 @@
 # It only preserves an exact native snapshot; it grants no creator/grader role.
 # Existing bespoke pre-commit checks remain first. Their owner must retire a
 # replaced legacy snapshot checker; this installer never silently bypasses it.
+# Installed members are deployment artifacts, not repo source (HOOKREFRESH1,
+# ompkit-v66l.22.3). When the hooks dir lies inside the work tree
+# (core.hooksPath=.githooks), each install rewrites one marked block in the
+# repo's info/exclude naming every path it wrote, so `git add -A` never stages
+# kit bytes and the repo's staged gates never judge them; --check verifies the
+# block. git ignores exclude rules for tracked paths, so a tracked repo-owned
+# member or adaptation stays staged and judged byte for byte.
 # Optional reviewed template projections: --template-import-map FILE
 # --template-import-map-sha256 SHA installs digest-bound data, never candidate
 # policy. With no options, existing reviewed data is retained.
@@ -311,6 +318,97 @@ native_preservation pre-commit native-br-preserve.py scripts/native-br-preserve.
 INSTALLATION_MANIFEST
 }
 
+EXCLUDE_BEGIN='# BEGIN omp-kit installer-owned hook members (install-commit-msg-bead.sh rewrites this block; --check verifies it)'
+EXCLUDE_END='# END omp-kit installer-owned hook members'
+
+# exclude_hooks_rel: the hooks dir relative to the work tree, or nothing when git
+# never lists its files (outside the tree, or inside the git dir as .git/hooks is).
+exclude_hooks_rel() {
+	hooks_real=$(CDPATH='' cd -- "$HOOKS" 2>/dev/null && pwd -P) || return 0
+	top=$(git -C "$TARGET" rev-parse --show-toplevel 2>/dev/null) || return 0
+	top=$(CDPATH='' cd -- "$top" && pwd -P) || return 0
+	common=$(git -C "$TARGET" rev-parse --git-common-dir) || return 1
+	case "$common" in /*) ;; *) common="$TARGET/$common" ;; esac
+	common=$(CDPATH='' cd -- "$common" && pwd -P) || return 1
+	gitdir=$(git -C "$TARGET" rev-parse --absolute-git-dir) || return 1
+	gitdir=$(CDPATH='' cd -- "$gitdir" && pwd -P) || return 1
+	case "$hooks_real/" in "$common"/* | "$gitdir"/*) return 0 ;; esac
+	case "$hooks_real" in
+		"$top"/*) printf '%s\n' "${hooks_real#"$top"/}" ;;
+	esac
+}
+
+# exclude_block REL: the marked block, one anchored line per path this installer
+# writes under REL: the manifest rows of this mode, the generated wrappers, and
+# every hook entry that is a kit chain runner (a bespoke runner is never listed).
+exclude_block() {
+	rel_pattern=$(printf '%s' "$1" | sed 's/[][*?\\]/\\&/g')
+	printf '%s\n' "$EXCLUDE_BEGIN"
+	{
+		while IFS=' ' read -r file_group file_chain file_dest file_source file_mode; do
+			case "$file_group" in
+				pre_push) [ "$PUSHED_BEADS" = 1 ] || continue ;;
+				native_preservation) [ "$NATIVE_PRESERVATION" = 1 ] || continue ;;
+			esac
+			printf 'hooks.d/%s/%s\n' "$file_chain" "$file_dest"
+		done <<EOF
+$(installation_manifest)
+EOF
+		[ "$PUSHED_BEADS" = 0 ] || printf '%s\n' hooks.d/pre-push/40-omp-kit-pushed-beads
+		[ "$NATIVE_PRESERVATION" = 0 ] || printf '%s\n' hooks.d/pre-commit/40-omp-kit-native-preserve
+		for runner_type in commit-msg pre-commit pre-push reference-transaction; do
+			if grep -q 'chain runner: run every executable' "$HOOKS/$runner_type" 2>/dev/null; then
+				printf '%s\n' "$runner_type"
+			fi
+		done
+	} | LC_ALL=C sort -u | while IFS= read -r owned; do printf '/%s/%s\n' "$rel_pattern" "$owned"; done
+	printf '%s\n' "$EXCLUDE_END"
+}
+
+# exclude_render REL FILE: FILE with the marked block replaced in place (or
+# appended); every other line is kept. Fails on a duplicated or unterminated block.
+exclude_render() {
+	block=$(exclude_block "$1") || return 1
+	[ -f "$2" ] || { printf '%s\n' "$block"; return 0; }
+	BLOCK=$block BEGIN_LINE=$EXCLUDE_BEGIN END_LINE=$EXCLUDE_END awk '
+		$0 == ENVIRON["BEGIN_LINE"] { if (inside || seen) bad = 1; inside = 1; seen = 1; print ENVIRON["BLOCK"]; next }
+		$0 == ENVIRON["END_LINE"] { if (!inside) bad = 1; inside = 0; next }
+		!inside { print }
+		END { if (inside) bad = 1; if (!seen) print ENVIRON["BLOCK"]; exit bad }' "$2"
+}
+
+exclude_path() {
+	exclude_file=$(git -C "$TARGET" rev-parse --git-path info/exclude) || return 1
+	case "$exclude_file" in /*) ;; *) exclude_file="$TARGET/$exclude_file" ;; esac
+	printf '%s\n' "$exclude_file"
+}
+
+# write_exclude_block: publish the block after every probe passed. Same bytes on a
+# repeat install; recorded for rollback like every other installer mutation.
+write_exclude_block() {
+	rel=$(exclude_hooks_rel) || return 1
+	[ -n "$rel" ] || return 0
+	case "$rel" in *'
+'*) return 1 ;; esac
+	exclude_file=$(exclude_path) || return 1
+	mkdir -p "$(dirname -- "$exclude_file")" || return 1
+	staged="$exclude_file.install.$$"
+	if ! exclude_render "$rel" "$exclude_file" > "$staged"; then
+		rm -f "$staged"
+		return 1
+	fi
+	if [ -f "$exclude_file" ] && cmp -s "$staged" "$exclude_file"; then
+		rm -f "$staged"
+		return 0
+	fi
+	if [ -e "$exclude_file" ]; then backup "$exclude_file"; else UNDO_RM="$UNDO_RM $exclude_file"; fi
+	if ! mv -f "$staged" "$exclude_file"; then
+		rm -f "$staged"
+		return 1
+	fi
+	printf 'listed installer-owned hook members in %s\n' "$exclude_file"
+}
+
 # --check names installed members that differ from this checkout (a stale
 # installed hook runs old rules after the source moves on). Exit 0 when every
 # member matches, 3 naming each missing or stale member.
@@ -348,6 +446,15 @@ EOF
 	if ! check_template_import_map; then
 		printf 'install-commit-msg-bead: MISSING or STALE reviewed template-import-map in %s\n' "$TARGET" >&2
 		stale=1
+	fi
+	rel=$(exclude_hooks_rel) || rel=UNREADABLE
+	if [ -n "$rel" ]; then
+		exclude_file=$(exclude_path) || exclude_file=''
+		if [ "$rel" = UNREADABLE ] || [ ! -f "$exclude_file" ] ||
+			! { exclude_render "$rel" "$exclude_file" || printf 'MALFORMED\n'; } | cmp -s - "$exclude_file"; then
+			printf 'install-commit-msg-bead: MISSING or STALE installer-owned block in %s; rerun %s\n' "${exclude_file:-info/exclude}" "$0" >&2
+			stale=1
+		fi
 	fi
 	if [ "$stale" = 0 ]; then printf 'install-commit-msg-bead: hooks fresh in %s\n' "$TARGET"; exit 0; fi
 	exit 3
@@ -955,6 +1062,7 @@ if [ "$NATIVE_PRESERVATION" = 1 ]; then
 		rollback "native-preservation member refused the actual candidate in $TARGET"
 	fi
 fi
+write_exclude_block || rollback "cannot list the installer-owned hook members in $TARGET's info/exclude"
 # shellcheck disable=SC2086
 for path in $UNDO_RESTORE; do rm -f -- "$(dirname -- "$path")/.undo.$$.$(basename -- "$path")" "$(dirname -- "$path")/.undo.$$.$(basename -- "$path").mode"; done
 printf 'verified active in %s\n' "$TARGET"

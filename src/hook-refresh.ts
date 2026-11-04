@@ -9,10 +9,12 @@
 // Contract:
 // - After a successful install, runKitUpdateJob re-runs the hook installer
 //   for every fleet-watch sessions[].repo with pullEnabled true, recording
-//   each member's before/after sha256. A repo whose hooks path is tracked
-//   (core.hooksPath=.githooks, e.g. clutterfreespaces.ios) is NOT committed
-//   by kit-update: it records PENDING_COMMIT with the paths so the repo's
-//   director commits them (owner route).
+//   each member's before/after sha256. Installed members are deployment
+//   artifacts: in a hooks dir inside the work tree (core.hooksPath=.githooks,
+//   e.g. clutterfreespaces.ios) the installer lists them in the repo's
+//   info/exclude, so a refresh leaves nothing to commit. Only a refreshed
+//   member the repo still tracks records PENDING_COMMIT with its paths, for the
+//   repo's director to commit or untrack (owner route); kit-update never commits.
 // - `doctor --scope hooks` (via diagnose()) lists per repo the members whose
 //   digest differs from the active release (this checkout's scripts/).
 //
@@ -203,7 +205,7 @@ export function inspectHooks(io: HookFreshnessIo): Finding[] {
 		reason,
 		recommended_action: staleRepos.length > 0
 			? (trackedPending.length > 0
-				? `Rerun the hook installer in each stale repo (sh <release>/scripts/install-commit-msg-bead.sh <repo>); ${trackedPending.map((repo) => basename(repo)).join(", ")} track(s) its hooks path, so its director commits the refreshed members with a Bead: trailer under a reservation — kit-update never commits them.`
+				? `Rerun the hook installer in each stale repo (sh <release>/scripts/install-commit-msg-bead.sh <repo>); ${trackedPending.map((repo) => basename(repo)).join(", ")} track(s) files in its hooks path: the installer git-ignores the members it writes, and its director commits or untracks any refreshed member it still tracks, with a Bead: trailer under a reservation — kit-update never commits them.`
 				: "Rerun the hook installer in each stale repo: sh <release>/scripts/install-commit-msg-bead.sh <repo>.")
 			: rows.length === 0 ? "Register the fleet repos in fleet-watch.json." : "No action required.",
 		evidence: {
@@ -249,6 +251,14 @@ export async function inspectHookInstallers(repo: string, kitRoot: string): Prom
 		}
 	}
 	return findings;
+}
+
+/** The subset of absolute paths git tracks in repo (ls-files); a path git cannot answer for counts as tracked. */
+function trackedPaths(repo: string, paths: string[]): string[] {
+	const listed = gitOut(repo, ["ls-files", "-z", "--", ...paths.map((path) => relative(repo, path))]);
+	if (listed === null) return paths;
+	const tracked = new Set(listed.split("\0").filter((rel) => rel.length > 0).map((rel) => resolve(repo, rel)));
+	return paths.filter((path) => tracked.has(resolve(path)));
 }
 
 function gitOut(repo: string, args: string[]): string | null {
@@ -316,7 +326,7 @@ export interface HookRepoRefresh {
 	status: HookRepoRefreshStatus;
 	hooks_dir: string | null;
 	tracked: boolean;
-	/** Installed abs paths changed by the installer (commit set for PENDING_COMMIT). */
+	/** Installed abs paths changed by the installer; for PENDING_COMMIT, only the tracked ones (the owner's commit set). */
 	paths: string[];
 	members: HookMemberRefresh[];
 	detail: string;
@@ -372,13 +382,16 @@ export async function refreshFleetHooks(io: HookRefreshIo): Promise<HookRefreshR
 		} else if (changed.length === 0) {
 			report.fresh += 1;
 			report.results.push({ repo, source: entry.source, status: "FRESH", hooks_dir: located.dir, tracked: located.tracked, paths: [], members, detail: "every member already matched the active release" });
-		} else if (located.tracked) {
-			// Owner route: the hooks path is tracked, so the director commits.
-			report.pending_commit += 1;
-			report.results.push({ repo, source: entry.source, status: "PENDING_COMMIT", hooks_dir: located.dir, tracked: true, paths: changed, members, detail: `refreshed ${changed.length} member(s); tracked hooks path — director commits under a reservation` });
 		} else {
-			report.refreshed += 1;
-			report.results.push({ repo, source: entry.source, status: "REFRESHED", hooks_dir: located.dir, tracked: false, paths: changed, members, detail: `refreshed ${changed.length} member(s) in the untracked hooks dir` });
+			// Owner route only for refreshed members the repo still tracks; the rest are git-ignored deployment artifacts.
+			const trackedChanged = located.tracked ? trackedPaths(repo, changed) : [];
+			if (trackedChanged.length > 0) {
+				report.pending_commit += 1;
+				report.results.push({ repo, source: entry.source, status: "PENDING_COMMIT", hooks_dir: located.dir, tracked: true, paths: trackedChanged, members, detail: `refreshed ${changed.length} member(s); ${trackedChanged.length} still tracked — the director commits or untracks them under a reservation` });
+			} else {
+				report.refreshed += 1;
+				report.results.push({ repo, source: entry.source, status: "REFRESHED", hooks_dir: located.dir, tracked: located.tracked, paths: changed, members, detail: `refreshed ${changed.length} untracked member(s)` });
+			}
 		}
 	}
 	report.repos = report.results.length;

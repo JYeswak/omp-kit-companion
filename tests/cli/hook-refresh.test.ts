@@ -17,6 +17,7 @@ import {
 } from "../../src/hook-refresh.ts";
 import { diagnose } from "../../src/diagnostics.ts";
 import { run } from "../../src/kitlib/run.ts";
+import { runFixture } from "./fixture-process.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -156,6 +157,46 @@ test("a tracked hooks path records PENDING_COMMIT and leaves the commit to the d
 	expect(run(["status", "--porcelain"]).stdout.toString()).toContain("49-omp-kit-stale-worktree");
 	rmSync(kit, { recursive: true, force: true });
 	rmSync(repo, { recursive: true, force: true });
+});
+
+test("a tracked hooks dir whose refreshed members are untracked is REFRESHED, not PENDING_COMMIT", async () => {
+	const kit = fixtureKit();
+	const scratch = ownedTmp("hookrefresh-ignored", { bead: "ompkit-v66l.22.3" });
+	const repo = scratch.path;
+	const run = (args: string[]) => runFixture(["git", ...args], { cwd: repo, floor_s: 30 });
+	run(["init", "-q"]);
+	run(["config", "user.email", "test@example.com"]);
+	run(["config", "user.name", "test"]);
+	run(["config", "core.hooksPath", ".githooks"]);
+	const githooks = join(repo, ".githooks");
+	// Only a repo-owned member is tracked; the kit members are installer-owned deployment artifacts.
+	mkdirSync(join(githooks, "hooks.d/pre-commit"), { recursive: true });
+	writeFileSync(join(githooks, "hooks.d/pre-commit/10-repo-owned"), "#!/bin/sh\nexit 0\n");
+	run(["add", "."]);
+	run(["commit", "-qm", "track repo-owned member"]);
+	for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
+		const path = join(githooks, installedRel);
+		mkdirSync(join(path, ".."), { recursive: true });
+		writeFileSync(path, readFileSync(join(kit, sourceRel)));
+	}
+	writeFileSync(join(githooks, "hooks.d/commit-msg/49-omp-kit-stale-worktree"), "# OLD member\n");
+	const base = memIo(kit, [{ repo, hooksDir: githooks, tracked: true }]);
+	const report = await refreshFleetHooks({
+		...base,
+		pullRepos: () => [{ repo, source: "t:ignored" }],
+		runInstaller: (target) => {
+			for (const [installedRel, sourceRel] of HOOK_MEMBER_PAIRS) {
+				writeFileSync(join(target, ".githooks", installedRel), readFileSync(join(kit, sourceRel)));
+			}
+			return { ok: true, detail: "seam refreshed all members" };
+		},
+	});
+	expect(report.pending_commit).toBe(0);
+	expect(report.refreshed).toBe(1);
+	expect(report.results[0]!.status).toBe("REFRESHED");
+	expect(report.results[0]!.paths).toEqual([join(githooks, "hooks.d/commit-msg/49-omp-kit-stale-worktree")]);
+	rmSync(kit, { recursive: true, force: true });
+	scratch.cleanup();
 });
 
 test("planted negative: an installer that leaves stale bytes is FAILED, never reported refreshed", async () => {

@@ -69,6 +69,28 @@ a new reviewed declaration. A matching digest proves integrity, not the quality
 or authority of its review. Source support is not live activation; historical
 commits without a matching reviewed projection can still fail.
 
+## Installer-owned members in a tracked hooks dir
+
+The installer's members, helper copies and chain runners are deployment
+artifacts, not repository source. When the hooks directory lies inside the
+work tree (`core.hooksPath=.githooks`), every install rewrites one marked block
+in the repository's `info/exclude` that names each path the installer wrote:
+the manifest rows, the generated wrappers, and every hook entry that is a kit
+chain runner. A bespoke runner the installer keeps is never listed. The block
+is written only after every probe passes, rolled back with the rest of a
+failed install, and byte-identical on a repeat install. Other lines in the
+file are kept. `--check` reports a missing or stale block (exit 3). A hooks
+directory inside the Git directory (`.git/hooks`) gets no block, because Git
+never lists it.
+
+With the block in place, `git add -A` never stages kit bytes, so a project's
+staged gates never judge them, and a refresh leaves nothing to commit. No staged
+gate skips anything. Git ignores exclude rules for tracked paths, so a member
+the repository tracks (its own members, or an adaptation of a kit member) is
+staged and judged byte for byte, and so is a force-added copy. To hand a tracked
+plain copy back to the installer, its owner untracks it (`git rm --cached`).
+The block then ignores it.
+
 ## Regression execution
 
 The core CI matrix runs `tests/cli/commit-imports.test.sh`,
