@@ -1072,9 +1072,31 @@ test("GOAL_SEND_REFUSED negatives: arm_seat, ordinary sends, mentions and identi
 	expect(await callAs(person, cwd, "s", "bash", { command: "tern send 5 paste '/goal set x'" })).toEqual([undefined]);
 });
 
-test("NO_WAIT_REFUSED: a fleet seat's idle_wait.py and sleep >= 30 s are refused, bare chained wrapped or sh -c (J-2026-10-18-43)", async () => {
+/** KEEPALIVE2a (ompkit-774u.50.1): a fixture fleet-watch whose session repo is `cwd`, with a fresh declared constraint. */
+function constraintSeat(cwd: string): { env: Record<string, string>; line: string } {
+	const config = join(cwd, "fleet-watch.json");
+	const constraint = {
+		name: "full-suite wall", value: 900, budget: 600, read_at: new Date(Date.now() - 3600_000).toISOString(),
+		producer: { command: "omp-kit test --full --json", field: "wall_s" }, clearing_bead: "fx-1", set_by: "FixtureLead", decision: "J-fixture",
+	};
+	writeFileSync(config, JSON.stringify({ chief: { agent: "FixtureLead" }, sessions: [{ session: "fx", repo: cwd, milestone: { epic: "e", pinned: ["fx-1"], constraint } }] }));
+	return { env: { AGENT_NAME: "CopperTrout", OMP_KIT_FLEET_WATCH_CONFIG: config }, line: "CONSTRAINT full-suite wall 900/600 clearing=fx-1 holder=unknown" };
+}
+
+/** KEEPALIVE2 [a][c]: the refusal's guard header, then kit-goal-keepalive's shared text led by the constraint line. */
+function expectConstraintFirst(reason: string | undefined, line: string): void {
+	const lines = String(reason).split("\n");
+	expect(lines[1]).toBe(line);
+	expect(lines[2]).toContain("send one NO-WORK line to your director and end the turn");
+	expect(lines[3]).toContain("never idles");
+	expect(lines[4]).toContain("comment on the nearest bead");
+	for (const banned of ["never wait", "downtime", "reality-check", "as a bead", "profiling"]) expect(String(reason).toLowerCase()).not.toContain(banned);
+}
+
+test("NO_WAIT_REFUSED KEEPALIVE2: a fleet seat's idle_wait.py and sleep >= 30 s are refused, bare chained wrapped or sh -c, led by the constraint line", async () => {
 	const cwd = freshDir(base, "nowait-");
-	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	const seat = constraintSeat(cwd);
+	const h = await createFlywheelHost(base, { env: seat.env });
 	for (const command of [
 		"python3 scripts/idle_wait.py --minutes 10",
 		"python3.13 /tmp/idle_wait.py",
@@ -1096,9 +1118,7 @@ test("NO_WAIT_REFUSED: a fleet seat's idle_wait.py and sleep >= 30 s are refused
 		const [result] = await callAs(h, cwd, "w", "bash", { command });
 		expect((result as FlywheelToolCallResult)?.block).toBe(true);
 		expect((result as FlywheelToolCallResult)?.reason).toContain("NO_WAIT_REFUSED");
-		expect((result as FlywheelToolCallResult)?.reason).toContain("bead DAG repair");
-		expect((result as FlywheelToolCallResult)?.reason).toContain("/skill:reality-check-for-project");
-		expect((result as FlywheelToolCallResult)?.reason).toContain("/skill:profiling-software-performance");
+		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line);
 	}
 });
 
@@ -1123,9 +1143,11 @@ test("NO_WAIT_REFUSED negatives: short sleeps, mere mentions and identity-less s
 	expect(await callAs(person, cwd, "s", "bash", { command: "python3 idle_wait.py" })).toEqual([undefined]);
 });
 
-test("NO_WAIT_REFUSED seam: the pure check refuses the planted wait and passes without identity", () => {
+test("NO_WAIT_REFUSED seam: the pure check refuses the planted wait with the given guidance and passes without identity", () => {
 	const event = { toolCallId: "w", toolName: "bash", input: { command: "sleep 600" } };
-	expect(checkNoWait(event, "CopperTrout")?.block).toBe(true);
+	const refusal = checkNoWait(event, "CopperTrout", () => "CONSTRAINT none declarer=FixtureLead");
+	expect(refusal?.block).toBe(true);
+	expect(refusal?.reason.split("\n")[1]).toBe("CONSTRAINT none declarer=FixtureLead");
 	expect(checkNoWait(event, null)).toBeUndefined();
 });
 
@@ -1673,15 +1695,16 @@ test("DRAIN1 custody: repairs on ownerless or open beads pass", async () => {
 
 // --- BGWAIT1 (ompkit-fp72.19.1.24): seats never block their turn on their own background work ---
 
-test("WAIT_REFUSED: a fleet seat's wait tool call is refused and names the next action (BGWAIT1)", async () => {
+test("WAIT_REFUSED KEEPALIVE2: a fleet seat's wait tool call is refused, names the later tool boundary and leads with the constraint line (BGWAIT1)", async () => {
 	const cwd = freshDir(base, "bgwait-");
-	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	const seat = constraintSeat(cwd);
+	const h = await createFlywheelHost(base, { env: seat.env });
 	for (const input of [{}, { timeout: 120000 }]) {
 		const [result] = await callAs(h, cwd, "w", "wait", input);
 		expect((result as FlywheelToolCallResult)?.block).toBe(true);
 		expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
-		expect((result as FlywheelToolCallResult)?.reason).toContain("Take the next item");
 		expect((result as FlywheelToolCallResult)?.reason).toContain("later tool boundary");
+		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line);
 	}
 });
 
@@ -1702,9 +1725,10 @@ test("SUBAGENTWAIT1: inherited fleet identity allows subagent wait, not main-sea
 	expect((otherGuard as FlywheelToolCallResult)?.reason).toContain("NO_WAIT_REFUSED");
 });
 
-test("WAIT_REFUSED: a fleet seat's sleep-poll loops, chained sleeps and time.sleep idles are refused (BGWAIT1)", async () => {
+test("WAIT_REFUSED KEEPALIVE2: a fleet seat's sleep-poll loops, chained sleeps and time.sleep idles are refused, led by the constraint line (BGWAIT1)", async () => {
 	const cwd = freshDir(base, "bgwait-");
-	const h = await createFlywheelHost(base, { env: { AGENT_NAME: "CopperTrout" } });
+	const seat = constraintSeat(cwd);
+	const h = await createFlywheelHost(base, { env: seat.env });
 	for (const command of [
 		"for i in $(seq 1 100); do [ -f rc ] && break; sleep 10; done",
 		"while [ ! -f rc ]; do sleep 5; done",
@@ -1718,7 +1742,7 @@ test("WAIT_REFUSED: a fleet seat's sleep-poll loops, chained sleeps and time.sle
 		const [result] = await callAs(h, cwd, "w", "bash", { command });
 		expect((result as FlywheelToolCallResult)?.block).toBe(true);
 		expect((result as FlywheelToolCallResult)?.reason).toContain("WAIT_REFUSED");
-		expect((result as FlywheelToolCallResult)?.reason).toContain("Take the next item");
+		expectConstraintFirst((result as FlywheelToolCallResult)?.reason, seat.line);
 	}
 	const [evaled] = await callAs(h, cwd, "e", "eval", { language: "py", code: "import time\nwhile True:\n    time.sleep(5)" });
 	expect((evaled as FlywheelToolCallResult)?.block).toBe(true);
@@ -1745,7 +1769,7 @@ test("WAIT_REFUSED negatives: async jobs, short single sleeps and identity-less 
 });
 
 test("WAIT_REFUSED seam: the pure check refuses each planted form and passes without identity", () => {
-	expect(checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, "CopperTrout")?.block).toBe(true);
+	expect(checkBgWait({ toolCallId: "w", toolName: "wait", input: {} }, "CopperTrout", undefined, () => "CONSTRAINT none declarer=FixtureLead")?.reason.split("\n")[1]).toBe("CONSTRAINT none declarer=FixtureLead");
 	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "while true; do sleep 1; done" } }, "CopperTrout")?.block).toBe(true);
 	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "sleep 20 && sleep 20" } }, "CopperTrout")?.block).toBe(true);
 	expect(checkBgWait({ toolCallId: "w", toolName: "bash", input: { command: "python3 -c \"import time; time.sleep(30)\"" } }, "CopperTrout")?.block).toBe(true);

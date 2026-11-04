@@ -7,6 +7,7 @@ import type { PullRefusal } from "../src/fleet-watch";
 import { ccSpool } from "../src/cc-spool.ts";
 import { holderVerdict, readLivenessSourcesAsync, type HolderVerdict } from "../src/holder-liveness.ts";
 import { gateFromReason, recordGateEvent, trackerAct } from "./gate-events";
+import { constraintGuidance, constraintLine, fleetWatchPath } from "./kit-goal-keepalive";
 import { parseCommit, planAutocomplete } from "./commit-autocomplete";
 import { renderEnvelope } from "../src/kitlib/findings.ts";
 import { agentMailStorageRoot } from "../src/holder-liveness.ts";
@@ -1454,11 +1455,12 @@ export function checkGoalSend(event: FlywheelToolCallEvent, owner: string | null
 	};
 }
 
-/** Downtime work named in every timed-wait refusal (J-2026-10-18-43). */
-const NO_WAIT_NEXT =
-	"Instead take the next downtime item: your held beads, other seats' in_review beads ready for grading, "
-	+ "bead DAG repair, /skill:reality-check-for-project, then /skill:profiling-software-performance followed by "
-	+ "/skill:extreme-software-optimization. Nothing was executed.";
+/** KEEPALIVE2a (ompkit-774u.50.1, J-2026-10-29-18): every wait refusal ends in kit-goal-keepalive's one wake text, whose
+line 1 is the seat's constraint line and whose next sentence lets a seat off the constraint report NO-WORK and stop.
+The default reads the process's own fleet-watch and cwd; the tool_call handler passes the session's. */
+export type WaitGuidance = () => string;
+const processWaitGuidance: WaitGuidance = () =>
+	constraintGuidance(constraintLine({ fleetWatch: fleetWatchPath(process.env), cwd: process.cwd(), now: Date.now() }));
 
 /** `sleep` duration suffixes in seconds. String parsing only; no regex. */
 const SLEEP_UNIT_SECONDS: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
@@ -1511,7 +1513,7 @@ function noWaitArgvs(command: string, depth = 0): string[][] {
 (admissionOwner), a bash call that runs idle_wait.py (directly or as an interpreter operand) or `sleep` for
 30 s or more in total (bare, chained, wrapped, or in sh -c) is refused. `sleep` under 30 s and sessions
 without a fleet identity pass untouched. */
-export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null): FlywheelToolCallResult | undefined {
+export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null, next: WaitGuidance = processWaitGuidance): FlywheelToolCallResult | undefined {
 	if (owner === null || event.toolName !== "bash") return undefined;
 	if (field(event.input, "async") === true) return undefined;
 	const command = field(event.input, "command");
@@ -1523,7 +1525,7 @@ export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null):
 			return {
 				block: true,
 				reason: `kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
-					+ "this call runs idle_wait.py. " + NO_WAIT_NEXT,
+					+ `this call runs idle_wait.py. Nothing was executed.\n${next()}`,
 			};
 		}
 		if (name === "sleep") {
@@ -1539,7 +1541,7 @@ export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null):
 				return {
 					block: true,
 					reason: `kit-flywheel-guard ${NO_WAIT_REFUSED}: ${owner} may not idle-wait in a fleet seat (J-2026-10-18-43): `
-						+ `this call runs \`sleep\` for about ${total} s (>= 30 s). ` + NO_WAIT_NEXT,
+						+ `this call runs \`sleep\` for about ${total} s (>= 30 s). Nothing was executed.\n${next()}`,
 				};
 			}
 		}
@@ -1548,11 +1550,8 @@ export function checkNoWait(event: FlywheelToolCallEvent, owner: string | null):
 }
 export const WAIT_REFUSED = "WAIT_REFUSED";
 
-/** Next action named in every BGWAIT1 refusal (ompkit-fp72.19.1.24): a seat never parks its turn on its own background work. */
-const BG_WAIT_NEXT =
-	"Take the next item now: your held beads, other seats' in_review beads ready for grading, bead DAG repair, "
-	+ "/skill:reality-check-for-project, then /skill:profiling-software-performance followed by "
-	+ "/skill:extreme-software-optimization. A pending job result arrives at a later tool boundary; never block your turn on it. Nothing was executed.";
+/** The BGWAIT1 sentence before the shared guidance (ompkit-fp72.19.1.24): a seat never parks its turn on its own background work. */
+const BG_WAIT_NEXT = "A pending job result arrives at a later tool boundary; never block your turn on it. Nothing was executed.";
 
 /** Shell loop openers: a `sleep` inside one parks the turn, however short the single sleep. */
 const BG_LOOP_OPENERS: Record<string, true> = { for: true, while: true, until: true, do: true };
@@ -1577,10 +1576,10 @@ function hasLoopWord(fragment: string): boolean {
 	return false;
 }
 
-function bgWaitRefusal(owner: string, detail: string): FlywheelToolCallResult {
+function bgWaitRefusal(owner: string, detail: string, next: WaitGuidance): FlywheelToolCallResult {
 	return {
 		block: true,
-		reason: `kit-flywheel-guard ${WAIT_REFUSED}: ${owner} may not block its turn on its own background work (BGWAIT1): ${detail} ${BG_WAIT_NEXT}`,
+		reason: `kit-flywheel-guard ${WAIT_REFUSED}: ${owner} may not block its turn on its own background work (BGWAIT1): ${detail} ${BG_WAIT_NEXT}\n${next()}`,
 	};
 }
 
@@ -1593,11 +1592,11 @@ OMP ExtensionContext.agent.kind is authoritative (not depth or inherited env):
 src/extensibility/extensions/types.ts:520-536,731-732; task/executor.ts:4663-4666.
 The session manager's parentSession is not sufficient: ordinary forks also set it
 (src/session/session-manager.ts:3944). */
-export function checkBgWait(event: FlywheelToolCallEvent, owner: string | null, ctx?: Pick<FlywheelContext, "agent">): FlywheelToolCallResult | undefined {
+export function checkBgWait(event: FlywheelToolCallEvent, owner: string | null, ctx?: Pick<FlywheelContext, "agent">, next: WaitGuidance = processWaitGuidance): FlywheelToolCallResult | undefined {
 	if (owner === null || ctx?.agent?.kind === "sub") return undefined;
 	const tool = typeof event.toolName === "string" ? event.toolName.toLowerCase() : "";
 	if (tool === "wait") {
-		return bgWaitRefusal(owner, "this call uses the `wait` tool.");
+		return bgWaitRefusal(owner, "this call uses the `wait` tool.", next);
 	}
 	if (tool === "bash") {
 		if (field(event.input, "async") === true) return undefined;
@@ -1621,17 +1620,17 @@ export function checkBgWait(event: FlywheelToolCallEvent, owner: string | null, 
 			}
 		}
 		if (loop && sleepSeen) {
-			return bgWaitRefusal(owner, "this call parks the turn in a sleep-poll loop.");
+			return bgWaitRefusal(owner, "this call parks the turn in a sleep-poll loop.", next);
 		}
 		if (sleepSeen && sleepTotal >= 30) {
-			return bgWaitRefusal(owner, `this call runs \`sleep\` for about ${sleepTotal} s in total (>= 30 s).`);
+			return bgWaitRefusal(owner, `this call runs \`sleep\` for about ${sleepTotal} s in total (>= 30 s).`, next);
 		}
 		const naps = timeSleepSeconds(command);
 		if (naps.length > 0) {
 			const total = naps.reduce((a, b) => a + b, 0);
 			const looped = loop || hasLoopWord(command);
 			if (looped || total >= 20) {
-				return bgWaitRefusal(owner, `this call idles in time.sleep for about ${total} s${looped ? " in a loop" : ""} (>= 20 s or looped).`);
+				return bgWaitRefusal(owner, `this call idles in time.sleep for about ${total} s${looped ? " in a loop" : ""} (>= 20 s or looped).`, next);
 			}
 		}
 		return undefined;
@@ -1643,7 +1642,7 @@ export function checkBgWait(event: FlywheelToolCallEvent, owner: string | null, 
 		if (naps.length === 0) return undefined;
 		const total = naps.reduce((a, b) => a + b, 0);
 		if (hasLoopWord(code) || total >= 20) {
-			return bgWaitRefusal(owner, `this eval idles in time.sleep for about ${total} s (>= 20 s or looped).`);
+			return bgWaitRefusal(owner, `this eval idles in time.sleep for about ${total} s (>= 20 s or looped).`, next);
 		}
 		return undefined;
 	}
@@ -3219,9 +3218,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			// message and every call stays allowed (ompkit-j27dd).
 			const goalEnd = checkGoalEnd(event, admissionOwner(env)) ?? checkGoalSend(event, admissionOwner(env));
 			if (goalEnd !== undefined) return goalEnd;
-			const noWait = checkNoWait(event, admissionOwner(env));
+			const waitNext = () => constraintGuidance(constraintLine({ fleetWatch: fleetWatchPath(env, home), cwd: ctx.cwd, now: Date.now() }));
+			const noWait = checkNoWait(event, admissionOwner(env), waitNext);
 			if (noWait !== undefined) return noWait;
-			const bgWait = checkBgWait(event, admissionOwner(env), ctx);
+			const bgWait = checkBgWait(event, admissionOwner(env), ctx, waitNext);
 			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
