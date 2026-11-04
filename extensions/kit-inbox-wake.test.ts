@@ -1,21 +1,23 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import kitInboxWake, { cursorPath, type InboxEvent, type InboxRead, type InboxWakeDeps, wakeText } from "./kit-inbox-wake";
+import { fixtureDeadlineS } from "../tests/cli/fixture-process.ts";
 
-type Sent = { content: string; deliverAs?: string; triggerTurn?: boolean };
+type Sent = { customType: string; content: string; deliverAs?: string; triggerTurn?: boolean };
 
-function harness(deps: InboxWakeDeps) {
+function harness(deps: InboxWakeDeps, entries: unknown[] = []) {
 	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
 	const sent: Sent[] = [];
 	const intervals: Array<() => unknown> = [];
 	const pi = {
 		on: (event: string, handler: (event: never, ctx: never) => unknown) => handlers.set(event, handler),
-		sendMessage: (message: { content: string }, options?: { deliverAs?: string; triggerTurn?: boolean }) =>
-			sent.push({ content: message.content, deliverAs: options?.deliverAs, triggerTurn: options?.triggerTurn }),
+		sendMessage: (message: { customType: string; content: string }, options?: { deliverAs?: string; triggerTurn?: boolean }) => {
+			sent.push({ customType: message.customType, content: message.content, deliverAs: options?.deliverAs, triggerTurn: options?.triggerTurn });
+		},
 	};
-	const ctx = { cwd: "/repo", setInterval: (cb: () => unknown) => { intervals.push(cb); return intervals.length; }, clearTimer: () => {} };
+	const ctx = { cwd: "/repo", sessionManager: { getEntries: () => entries }, setInterval: (cb: () => unknown) => { intervals.push(cb); return intervals.length; }, clearTimer: () => {} };
 	return {
 		sent, intervals,
 		start: async () => { await kitInboxWake(pi, deps); await (handlers.get("session_start") as (e: never, c: never) => Promise<void>)({} as never, ctx as never); },
@@ -32,6 +34,9 @@ afterEach(() => { for (const d of dirs.splice(0)) d.cleanup(); });
 function fixture(reads: Array<InboxRead | null>, env: Record<string, string> = { AGENT_NAME: "PeachLeopard" }) {
 	const dir = ownedTmp("inbox-wake-test");
 	dirs.push(dir);
+	const config = join(dir.path, ".config/omp-kit/fleet-watch.json");
+	mkdirSync(join(config, ".."), { recursive: true });
+	writeFileSync(config, JSON.stringify({ sessions: [{ session: "omp-test", repo: "/repo", pullEnabled: true }] }));
 	const calls: Array<number | null> = [];
 	const deps: InboxWakeDeps = {
 		home: dir.path, env, now: () => new Date("2026-10-26T17:00:00Z"), policyOn: async () => true,
@@ -63,6 +68,74 @@ describe("kit-inbox-wake", () => {
 		const ledger = readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
 		expect(ledger.map(r => [r.message_id, r.status, r.recipient])).toEqual([[69601, "WOKEN_INPROCESS", "PeachLeopard"], [69602, "WOKEN_INPROCESS", "PeachLeopard"]]);
 	});
+
+	test.each(["project", "goal", "both"] as const)("MAILSTOP1 planted: %s stopped seat receives no custom_message turn trigger", async kind => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(78388, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const entries: unknown[] = [{ type: "mode_change", mode: "goal" }];
+		const h = harness(f.deps, entries);
+		await h.start();
+		if (kind !== "goal") {
+			const config = join(f.dir, ".config/omp-kit/fleet-watch.json");
+			mkdirSync(join(config, ".."), { recursive: true });
+			writeFileSync(config, JSON.stringify({ sessions: [{ session: "omp-test", repo: "/repo", pullEnabled: false }] }));
+		}
+		if (kind !== "project") entries.push({ type: "mode_change", mode: "goal_paused" });
+		await h.tick();
+		expect(h.sent).toEqual([]);
+		expect(JSON.parse(readFileSync(cursorPath(f.dir, "PeachLeopard", "/repo"), "utf8")).cursor).toBe(101);
+		const rows = readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
+		expect(rows).toMatchObject([{ message_id: 78388, status: "STOPPED_NOT_WOKEN",
+			reason: expect.stringContaining(kind === "goal" ? "GOAL_PAUSED" : "PROJECT_STOPPED") }]);
+	}, fixtureDeadlineS() * 1000);
+
+	test("MAILSTOP1 active control still delivers a custom_message with the idle-turn trigger", async () => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(78389, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const h = harness(f.deps, [{ type: "mode_change", mode: "goal_paused" }, { type: "mode_change", mode: "goal" }]);
+		await h.start();
+		await h.tick();
+		expect(h.sent).toHaveLength(1);
+		expect(h.sent[0]).toMatchObject({ customType: "kit-inbox-wake", deliverAs: "followUp", triggerTurn: true });
+	}, fixtureDeadlineS() * 1000);
+
+	test.each([false, true])("MAILSTOP1 fleet unreadable=%s: suppress only unreadable fleet, not unknown active goal mode", async unreadable => {
+		const f = fixture([
+			{ events: [], next_cursor: 100, tail_cursor: 100 },
+			{ events: [event(78391, 101)], next_cursor: 101, tail_cursor: 101 },
+		]);
+		const h = harness(f.deps);
+		await h.start();
+		if (unreadable) writeFileSync(join(f.dir, ".config/omp-kit/fleet-watch.json"), "{");
+		await h.tick();
+		expect(h.sent).toHaveLength(unreadable ? 0 : 1);
+		const row = JSON.parse(readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim());
+		expect(row).toMatchObject({ status: unreadable ? "STOPPED_NOT_WOKEN" : "WOKEN_INPROCESS", pause_state: "UNKNOWN" });
+		if (unreadable) expect(row.reason).toContain("FLEET_STATE_UNREADABLE");
+	}, fixtureDeadlineS() * 1000);
+
+	test("MAILSTOP1 owner pause during an in-flight read suppresses the follow-up", async () => {
+		const f = fixture([{ events: [], next_cursor: 100, tail_cursor: 100 }]);
+		const pending = Promise.withResolvers<InboxRead>();
+		let first = true;
+		const entries: unknown[] = [{ type: "mode_change", mode: "goal" }];
+		const h = harness({ ...f.deps, read: async (...args) => {
+			if (first) { first = false; return f.deps.read!(...args); }
+			return pending.promise;
+		} }, entries);
+		await h.start();
+		const tick = h.tick();
+		entries.push({ type: "mode_change", mode: "goal_paused" });
+		pending.resolve({ events: [event(78390, 101)], next_cursor: 101, tail_cursor: 101 });
+		await tick;
+		expect(h.sent).toEqual([]);
+		const row = JSON.parse(readFileSync(join(f.dir, ".local/state/omp-kit/mail-wake.jsonl"), "utf8").trim());
+		expect(row).toMatchObject({ status: "STOPPED_NOT_WOKEN", reason: expect.stringContaining("GOAL_PAUSED") });
+	}, fixtureDeadlineS() * 1000);
 
 	test("planted: an unreadable inbox keeps the cursor, so the same mail is delivered on the next poll", async () => {
 		const f = fixture([

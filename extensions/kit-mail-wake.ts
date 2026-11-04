@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import type { FlywheelExec, FlywheelToolCallResult } from "./kit-flywheel-guard";
 
 /**
@@ -53,7 +53,7 @@ export interface MailWakeDeps {
 	fastWaitMs?: number;
 }
 
-export interface Seat { name: string; session: string; block: string; repo: string }
+export interface Seat { name: string; session: string; block: string; repo: string; sessionFile?: string }
 export interface MailCaller { session: string; block: string; repo: string; name: string | null }
 interface LiveBlock { session: string; block: string; cwd: string; sessionFile?: string }
 export interface Parent { name: string; basis: string }
@@ -72,7 +72,7 @@ export interface MailWake {
 	/** Current caller selected by its actual OMP session file, never by its claimed name or PID. */
 	caller(sessionFile: string, projectKey: string): Promise<MailCaller | null>;
 	/** One recipient to its live seat, or why there is none plus the parent to re-address to. */
-	resolve(name: string, projectKey: string, blocks?: { session: string; block: string; cwd: string }[] | null): Promise<Resolution>;
+	resolve(name: string, projectKey: string, blocks?: LiveBlock[] | null): Promise<Resolution>;
 	/** Plans the wake for a send that passed every guard check; an ask with no wake path is refused NO_WAKE_PATH. */
 	beforeSend(toolCallId: unknown, tool: "send_message" | "reply_message", args: unknown, projectKey: string): Promise<FlywheelToolCallResult | undefined>;
 	/** Queues the planned wake once the send succeeded; returns the result patch naming each outcome. */
@@ -101,6 +101,61 @@ function names(value: unknown): string[] {
 
 function readJson(path: string): unknown {
 	try { return JSON.parse(readFileSync(path, "utf8")); } catch { return undefined; }
+}
+
+/** MAILSTOP1: pullEnabled is the owner's stop switch (loop_sentinel.active_fleet).
+ * Match both canonical project and actual launch cwd; chiefs may launch above their project. */
+export function mailWakeStopReason(fleetWatchPath: string, project: string, cwd: string, session?: string, entries: readonly unknown[] = []): string | null {
+	// No fleet-watch file means no owner stop is configured (a machine outside the fleet): only the seat's own
+	// paused goal can stop the wake. A file that exists but can't be read or parsed fails closed.
+	if (!existsSync(fleetWatchPath)) return mailPauseState(entries) === "PAUSED" ? "GOAL_PAUSED: latest goal mode is goal_paused" : null;
+	const watch = readJson(fleetWatchPath);
+	if (typeof watch !== "object" || watch === null) return "FLEET_STATE_UNREADABLE: fleet-watch could not be read";
+	const rows = [prop(watch, "sessions"), prop(watch, "herdr")].flatMap(value => Array.isArray(value) ? value : []);
+	for (const row of rows) {
+		if (prop(row, "pullEnabled") !== false) continue;
+		const repo = prop(row, "repo");
+		if ((session !== undefined && prop(row, "session") === session)
+			|| (typeof repo === "string" && [project, cwd].some(path => {
+				const root = resolvePath(repo), candidate = resolvePath(path);
+				return candidate === root || candidate.startsWith(`${root}/`);
+			}))) return "PROJECT_STOPPED: fleet-watch pullEnabled false";
+	}
+	return mailPauseState(entries) === "PAUSED" ? "GOAL_PAUSED: latest goal mode is goal_paused" : null;
+}
+
+export function mailPauseState(entries: readonly unknown[]): "UNKNOWN" | "PAUSED" | "NOT_PAUSED" {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		if (prop(entries[i], "type") === "mode_change") return prop(entries[i], "mode") === "goal_paused" ? "PAUSED" : "NOT_PAUSED";
+	}
+	return "UNKNOWN";
+}
+
+/** Never load a recipient's potentially gigabyte-sized journal into a sender's extension.
+ * Unproven seat modes remain UNKNOWN; only a proven pause overrides an active project's wake. */
+function recipientModeEntries(path: string): readonly unknown[] | null {
+	let fd: number | undefined;
+	try {
+		fd = openSync(path, "r");
+		const size = fstatSync(fd).size;
+		const start = Math.max(0, size - 256 * 1024);
+		const buffer = Buffer.alloc(Math.min(size, 256 * 1024));
+		const count = readSync(fd, buffer, 0, buffer.length, start);
+		const lines = buffer.subarray(0, count).toString("utf8").split("\n");
+		if (start > 0) lines.shift(); // a partial first record never proves a mode
+		for (let i = lines.length - 1; i >= 0; i--) {
+			if (!lines[i].includes('"mode_change"')) continue;
+			try {
+				const entry: unknown = JSON.parse(lines[i]);
+				if (prop(entry, "type") === "mode_change") return [entry];
+			} catch { /* incomplete final append does not hide the last complete mode */ }
+		}
+		return start === 0 ? [] : null;
+	} catch {
+		return null;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
 }
 
 /** Identity file body: `{"name":"X"}` (current writer) or a bare name (legacy). */
@@ -274,14 +329,14 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 	}
 
 	/** One recipient to its live seat, or why there is none plus the parent to re-address to. */
-	async function resolve(name: string, projectKey: string, blocks?: { session: string; block: string; cwd: string }[] | null): Promise<Resolution> {
+	async function resolve(name: string, projectKey: string, blocks?: LiveBlock[] | null): Promise<Resolution> {
 		const live = blocks === undefined ? await liveBlocks() : blocks;
 		if (live === null) return { kind: "none", why: "Tern could not be read (`tern inspect --json` failed), so no live seat is proven", parent: await parentOf(name, projectKey, null) };
 		const matches: Seat[] = [];
 		// Configured chiefs use canonical-project identities while preserving their actual launch cwd.
 		for (const block of live) {
 			const bound = identityFor(block, projectKey, name);
-			if (bound && bound.toLowerCase() === name.toLowerCase()) matches.push({ name: bound, session: block.session, block: block.block, repo: block.cwd });
+			if (bound && bound.toLowerCase() === name.toLowerCase()) matches.push({ name: bound, session: block.session, block: block.block, repo: block.cwd, ...(block.sessionFile ? { sessionFile: block.sessionFile } : {}) });
 		}
 		const seat = matches.find(match => match.repo === projectKey) ?? matches[0];
 		if (seat) return { kind: "seat", seat };
@@ -317,7 +372,8 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		for (const name of recipients) targets.push({ name, res: await resolve(name, projectKey, blocks) });
 		const subject = typeof prop(args, "subject") === "string" ? (prop(args, "subject") as string) : "";
 		if (prop(args, "ack_required") === true) {
-			const dead = targets.filter(target => target.res.kind === "none");
+			const dead = targets.filter(target => target.res.kind === "none"
+				&& mailWakeStopReason(fleetWatchPath, projectKey, projectKey) === null);
 			if (dead.length) {
 				for (const target of dead) ledger({ status: "NO_WAKE_PATH", message_id: null, project_key: projectKey, sender, recipient: target.name, subject, refused: true });
 				const lines = dead.map(target => {
@@ -365,22 +421,37 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		}
 		const notices: string[] = [];
 		for (const target of plan.targets) {
-			const base = { message_id: id, project_key: plan.projectKey, sender: plan.sender, recipient: target.name, subject: plan.subject };
+			const base = { message_id: id, project_key: plan.projectKey, sender: plan.sender, recipient: target.name, subject: plan.subject, pause_state: "UNKNOWN" };
+			const seat = target.res.kind === "seat" ? target.res.seat : null;
+			let stopped = mailWakeStopReason(fleetWatchPath, plan.projectKey, seat?.repo ?? plan.projectKey, seat?.session);
+			if (!stopped && seat?.sessionFile) {
+				const entries = recipientModeEntries(seat.sessionFile);
+				if (entries?.length) {
+					base.pause_state = mailPauseState(entries);
+					stopped = mailWakeStopReason(fleetWatchPath, plan.projectKey, seat.repo, seat.session, entries);
+				}
+			}
+			if (stopped) {
+				ledger({ ...base, status: "STOPPED_NOT_WOKEN", reason: stopped, ...(seat ? { seat: `tern:${seat.block}`, session: seat.session, repo: seat.repo } : {}) });
+				notices.push(`STOPPED_NOT_WOKEN: mail ${id ?? "?"} to ${target.name} is persisted without a wake (${stopped}).`);
+				continue;
+			}
 			if (target.res.kind === "none") {
 				ledger({ ...base, status: "UNSIGNALED", reason: "NO_WAKE_PATH", detail: target.res.why, parent: target.res.parent?.name ?? null });
 				notices.push(`UNSIGNALED: mail ${id ?? "?"} to ${target.name} is persisted but wakes nobody (NO_WAKE_PATH: ${target.res.why}).${target.res.parent ? ` Its parent is ${target.res.parent.name} (${target.res.parent.basis}); send there if it needs action.` : ""}`);
 				continue;
 			}
-			const seat = target.res.seat;
+			// The none-resolution path above has returned; this target owns a live seat.
+			const liveSeat = target.res.seat;
 			if (id === null) {
-				ledger({ ...base, status: "UNSIGNALED", reason: "NO_MESSAGE_ID", seat: `tern:${seat.block}` });
+				ledger({ ...base, status: "UNSIGNALED", reason: "NO_MESSAGE_ID", seat: `tern:${liveSeat.block}` });
 				notices.push(`UNSIGNALED: the send result carried no message id, so no wake was queued for ${target.name}; tell them directly.`);
 				continue;
 			}
 			const line = `MAIL ${id} from ${plan.sender}: ${plan.subject.replace(/\s+/g, " ").slice(0, 160)}`;
-			const where = `tern:${seat.block} (${seat.session}, ${seat.repo})`;
-			const pending = wake(seat, line).then(outcome => {
-				ledger({ ...base, status: outcome.status, seat: `tern:${seat.block}`, session: seat.session, repo: seat.repo, line, detail: outcome.detail });
+			const where = `tern:${liveSeat.block} (${liveSeat.session}, ${liveSeat.repo})`;
+			const pending = wake(liveSeat, line).then(outcome => {
+				ledger({ ...base, status: outcome.status, seat: `tern:${liveSeat.block}`, session: liveSeat.session, repo: liveSeat.repo, line, detail: outcome.detail });
 				return outcome;
 			});
 			const timer = Promise.withResolvers<null>();
@@ -390,7 +461,7 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 			if (outcome === null) {
 				inFlight.add(pending);
 				void pending.finally(() => inFlight.delete(pending));
-				ledger({ ...base, status: "WAKE_QUEUED", seat: `tern:${seat.block}`, session: seat.session, repo: seat.repo, line });
+				ledger({ ...base, status: "WAKE_QUEUED", seat: `tern:${liveSeat.block}`, session: liveSeat.session, repo: liveSeat.repo, line });
 				notices.push(`WAKE_QUEUED: mail ${id} -> ${target.name} at ${where}; lands at its next turn boundary (until-delivered ${untilS}s). Outcome: ${ledgerPath}`);
 			} else if (outcome.ok) {
 				notices.push(`WAKE_DELIVERED: mail ${id} -> ${target.name} at ${where}.`);

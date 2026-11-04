@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fleetPolicyState } from "./fleet-policy";
 import { run } from "../src/kitlib/run.ts";
+import { mailPauseState, mailWakeStopReason } from "./kit-mail-wake";
 
 /**
  * kit-inbox-wake (MAILWAKE1.2, ompkit-uk9wn.2): a seat wakes itself on its own Agent Mail.
@@ -50,6 +51,7 @@ export interface InboxWakeContext {
 	cwd: string;
 	setInterval?: (callback: () => unknown, ms: number) => unknown;
 	clearTimer?: (timer: unknown) => void;
+	sessionManager?: { getEntries?: () => readonly unknown[] };
 }
 
 export interface InboxWakeApi {
@@ -67,6 +69,7 @@ export interface InboxWakeDeps {
 	/** Reads delivery events after `after` (or the tail position when `after` is null); null when unreadable. */
 	read?: (agent: string, project: string, after: number | null) => Promise<InboxRead | null>;
 	policyOn?: (project: string) => Promise<boolean>;
+	fleetWatchPath?: string;
 }
 
 /** The repo a registered Tern seat belongs to (the CC seat registry), else null. */
@@ -153,6 +156,8 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 	let project = "";
 	let path = "";
 	let cwd = "";
+	let context: InboxWakeContext | undefined;
+	const fleetWatchPath = deps.fleetWatchPath ?? env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
 
 	/** RESTARTRACE1 (J-2026-10-26-20): the registry naming this seat's project lists a Tern block only while omp runs
 	 *  in it, so a restarted seat can start before it is re-listed (lead 2026-10-26: omp up 17:26:51Z, block re-listed
@@ -180,14 +185,20 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 			}
 			const fresh = got.events.filter(e => e.from !== agent && (e.kind === "to" || e.kind === "cc"));
 			if (fresh.length > 0) {
-				pi.sendMessage({ customType: "kit-inbox-wake", content: wakeText(agent!, fresh), display: true },
+				// Re-read after the asynchronous inbox read: the owner may stop the project or goal while it runs.
+				const entries = context?.sessionManager?.getEntries?.() ?? [];
+				const stopped = mailWakeStopReason(fleetWatchPath, project, cwd, undefined, entries);
+				if (!stopped) pi.sendMessage({ customType: "kit-inbox-wake", content: wakeText(agent!, fresh), display: true },
 					{ deliverAs: "followUp", triggerTurn: true });
 				const ledger = join(home, ".local", "state", "omp-kit", "mail-wake.jsonl");
+				mkdirSync(join(ledger, ".."), { recursive: true });
 				const ts = now().toISOString();
 				for (const e of fresh) {
 					appendFileSync(ledger, JSON.stringify({
 						ts, message_id: e.message_id, project_key: project, sender: e.from, recipient: agent,
-						subject: e.subject, status: "WOKEN_INPROCESS", detail: "kit-inbox-wake followUp", cursor: e.cursor,
+						subject: e.subject, status: stopped ? "STOPPED_NOT_WOKEN" : "WOKEN_INPROCESS",
+						...(stopped ? { reason: stopped } : {}), pause_state: mailPauseState(entries),
+						detail: "kit-inbox-wake followUp", cursor: e.cursor,
 					}) + "\n");
 				}
 			}
@@ -201,6 +212,7 @@ export default async function kitInboxWake(pi: InboxWakeApi, deps: InboxWakeDeps
 
 	pi.on("session_start", async (_event, ctx) => {
 		cwd = ctx.cwd;
+		context = ctx;
 		await tick();
 		if (timer === null && typeof ctx.setInterval === "function") timer = ctx.setInterval(() => tick(), INBOX_POLL_MS);
 	});

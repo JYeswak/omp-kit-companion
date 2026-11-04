@@ -1,10 +1,11 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { FlywheelExecOptions, FlywheelExecResult } from "./kit-flywheel-guard";
 import { createMailWake, messageIdOf } from "./kit-mail-wake";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
+import { fixtureDeadlineS } from "../tests/cli/fixture-process.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -50,6 +51,75 @@ function fleet(opts: { omp?: (call: Call) => FlywheelExecResult | Promise<Flywhe
 
 const sent = (id: number) => [{ type: "text", text: JSON.stringify({ deliveries: [{ project: REPO, payload: { id, subject: "s" } }], count: 1 }) }];
 const ask = (to: string) => ({ project_key: REPO, sender_name: "PeachLeopard", to: [to], subject: "QUESTION ompkit-uk9wn: who owns sitrep?", body_md: "b", ack_required: true });
+
+test("MAILSTOP1 planted: stopping after send planning persists the mail without invoking omp-kit send", async () => {
+	const f = fleet();
+	expect(await f.wake.beforeSend("stopped", "send_message", ask("JadeThrush"), REPO)).toBeUndefined();
+	writeFileSync(f.fleetWatchPath, JSON.stringify({ sessions: [{ session: "omp-test", repo: REPO, pullEnabled: false }] }));
+	const patch = await f.wake.afterSend({ toolCallId: "stopped", content: sent(78388), isError: false });
+	expect(f.wakes()).toHaveLength(0);
+	expect(JSON.stringify(patch)).toContain("STOPPED_NOT_WOKEN");
+	expect(f.ledger()).toMatchObject([{ message_id: 78388, status: "STOPPED_NOT_WOKEN", reason: expect.stringContaining("PROJECT_STOPPED") }]);
+}, fixtureDeadlineS() * 1000);
+
+test.each([
+	[["goal", "goal_paused"], false],
+	[["goal_paused", "goal"], true],
+	[["goal_paused", "none"], true],
+] as const)("MAILSTOP1 recipient journal latest mode %j controls wake (%s)", async (modes, active) => {
+	const f = fleet();
+	const sessionFile = join(f.home, "recipient.jsonl");
+	writeFileSync(sessionFile, modes.map(mode => JSON.stringify({ type: "mode_change", mode })).join("\n") + "\n");
+	const other = fleet({ panes: [{ pane: 9, omp_session_file: sessionFile }] });
+	expect(await other.wake.beforeSend("paused", "send_message", ask("JadeThrush"), REPO)).toBeUndefined();
+	await other.wake.afterSend({ toolCallId: "paused", content: sent(78389), isError: false });
+	expect(other.wakes()).toHaveLength(active ? 1 : 0);
+	expect(other.ledger()[0].status).toBe(active ? "WAKE_DELIVERED" : "STOPPED_NOT_WOKEN");
+}, fixtureDeadlineS() * 1000);
+
+test("MAILSTOP1 bounded tail handles an 877 MiB journal without reading its body", async () => {
+	const f = fleet();
+	const sessionFile = join(f.home, "large.jsonl");
+	const fd = openSync(sessionFile, "w");
+	try {
+		const size = 877 * 1024 * 1024;
+		ftruncateSync(fd, size);
+		writeSync(fd, '\n{"type":"mode_change","mode":"goal_paused"}\n', size - 48);
+	} finally { closeSync(fd); }
+	const seat = fleet({ panes: [{ pane: 9, omp_session_file: sessionFile }] });
+	await seat.wake.beforeSend("large", "send_message", ask("JadeThrush"), REPO);
+	await seat.wake.afterSend({ toolCallId: "large", content: sent(78390), isError: false });
+	expect(seat.wakes()).toHaveLength(0);
+	expect(seat.ledger()[0]).toMatchObject({ status: "STOPPED_NOT_WOKEN", reason: expect.stringContaining("GOAL_PAUSED") });
+}, fixtureDeadlineS() * 1000);
+
+test("MAILSTOP1 malformed fleet state never invokes a sender", async () => {
+	const f = fleet();
+	await f.wake.beforeSend("unreadable", "send_message", ask("JadeThrush"), REPO);
+	writeFileSync(f.fleetWatchPath, "{");
+	await f.wake.afterSend({ toolCallId: "unreadable", content: sent(78391), isError: false });
+	expect(f.wakes()).toHaveLength(0);
+	expect(f.ledger()[0]).toMatchObject({ status: "STOPPED_NOT_WOKEN", reason: expect.stringContaining("FLEET_STATE_UNREADABLE") });
+}, fixtureDeadlineS() * 1000);
+
+test("MAILSTOP1 control: no fleet-watch file configures no owner stop (portable machine), so it is never FLEET_STATE_UNREADABLE", async () => {
+	const f = fleet();
+	await f.wake.beforeSend("nofleet", "send_message", ask("JadeThrush"), REPO);
+	rmSync(f.fleetWatchPath);
+	await f.wake.afterSend({ toolCallId: "nofleet", content: sent(78392), isError: false });
+	for (const row of f.ledger()) expect(String(row.reason ?? "")).not.toContain("FLEET_STATE_UNREADABLE");
+}, fixtureDeadlineS() * 1000);
+
+test("MAILSTOP1 active project with mode outside bounded tail wakes and records UNKNOWN", async () => {
+	const f = fleet();
+	const sessionFile = join(f.home, "old-mode.jsonl");
+	writeFileSync(sessionFile, '{"type":"mode_change","mode":"goal"}\n' + ('{"type":"message"}\n'.repeat(20_000)));
+	const seat = fleet({ panes: [{ pane: 9, omp_session_file: sessionFile }] });
+	await seat.wake.beforeSend("unknown", "send_message", ask("JadeThrush"), REPO);
+	await seat.wake.afterSend({ toolCallId: "unknown", content: sent(78392), isError: false });
+	expect(seat.wakes()).toHaveLength(1);
+	expect(seat.ledger()[0]).toMatchObject({ status: "WAKE_DELIVERED", pause_state: "UNKNOWN" });
+}, fixtureDeadlineS() * 1000);
 
 const CHIEF_CWD = "/abs/fleet";
 function chiefFleet(chief: Record<string, unknown> = {}, identity = "PeachLeopard") {
