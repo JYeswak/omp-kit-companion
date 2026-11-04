@@ -8,6 +8,7 @@ import { checkPlistContract, checkSystemdContract } from "../../src/service-cont
 import { collectBrowserProcesses } from "../../src/browser-doctor.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { runSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS, fixtureLoad } from "./fixture-process.ts";
 // Fresh clones have no var/agent-tmp; ownedTmp below requires its root to exist.
 const AGENT_TMP = join(import.meta.dir, "../../var/agent-tmp");
 
@@ -874,7 +875,7 @@ test("planted: service run kit-update with no tuple and no poll refuses KIT_UPDA
   // every refusal code, including this one, maps to 2. The stable pin is the error code.
   expect(result.code).toBe(2);
   expect(result.envelope.errors[0].code).toBe("KIT_UPDATE_JOB_CONFIG");
-}, 60000);
+}, fixtureDeadlineS(60) * 1000);
 
 test("service run kit-update with poll-only config reaches the job instead of refusing", () => {
   const home = ownedTmp("service-run", { root: AGENT_TMP }).path;
@@ -884,7 +885,7 @@ test("service run kit-update with poll-only config reaches the job instead of re
     { OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_UPDATE_POLL: "github", OMP_KIT_UPDATE_REPO: "o/r" });
   expect(result.code).toBe(0);
   expect(result.envelope.data).toMatchObject({ overall: "OK", job: "kit-update", status: "DISABLED" });
-}, 60000);
+}, fixtureDeadlineS(60) * 1000);
 
 test("scratch worker refuses a forged keeper before inspecting its root", () => {
   const { home } = fixture();
@@ -916,17 +917,18 @@ test("REAP1 whole scheduled scratch job preempts a synchronous owner read and re
   const lsof = join(bin, "lsof");
   writeFileSync(lsof, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   // The worker execs this stub (its lsof snapshot) before its first INSPECT, and macOS assesses a newly
-  // written executable on its first exec (0.18-0.55 s measured in this worker, 1.3 s under load; ~20 ms
-  // after, from any process). Finish that one-time exec before the 600 ms cap, which must time the
-  // worker's owner read, not the stub's first launch.
-  const warm = runSync([lsof], { deadline_s: 5 });
+  // written executable on its first exec (0.18-0.55 s measured in this worker, 1.3 s under load, over 5 s
+  // at load 30+ on 32 cores; ~20 ms after, from any process). Finish that one-time exec before the
+  // 600 ms cap, which must time the worker's owner read, not the stub's first launch.
+  const warm = runSync([lsof], { deadline_s: fixtureDeadlineS(5) });
   expect({ rc: warm.rc, timedOut: warm.timed_out }).toEqual({ rc: 1, timedOut: false });
   const started = Date.now();
   const result = cli(["service", "run", "scratch-reaper"], home, {
     OMP_KIT_SCRATCH_ROOTS: root, TMPDIR: home, OMP_KIT_LOAD_OVERRIDE: "0/1", OMP_KIT_RUN_CAP_MS: "600",
     PATH: `${bin}:${process.env.PATH ?? ""}`,
   });
-  expect(Date.now() - started).toBeLessThan(3000);
+  // The 600 ms cap preempts the blocked owner read; the rest is the CLI's own start, which load slows.
+  expect(Date.now() - started).toBeLessThan(3000 * fixtureLoad().factor);
   expect(result.code).toBe(1);
   expect(result.envelope.data.status).toBe("TIMEOUT");
   expect(result.envelope.data.interruptedAction).toMatchObject({ action: "INSPECT", path: blocked });
@@ -937,7 +939,7 @@ test("REAP1 whole scheduled scratch job preempts a synchronous owner read and re
   expect(existsSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.lock"))).toBe(false);
   const receipt = JSON.parse(readFileSync(join(home, ".local", "state", "omp-kit", "jobs", "scratch-reaper.json"), "utf8"));
   expect(receipt.status).toBe("TIMEOUT");
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("REAP1 supervisor caps synchronous browser work and kills its owned process group", async () => {
   const { home } = fixture();
@@ -947,7 +949,7 @@ test("REAP1 supervisor caps synchronous browser work and kills its owned process
   const code = `import {collectBrowserProcesses} from ${JSON.stringify(browserModule)}; const {readFileSync,writeFileSync}=require("node:fs"); collectBrowserProcesses(() => { writeFileSync(${JSON.stringify(join(home, "entered"))},String(process.pid)); readFileSync(${JSON.stringify(blocked)}); return {exitCode:1,stdout:""}; });`;
   const result = await superviseScratchJob([process.execPath, "-e", code], { ...process.env, HOME: home }, 500);
   expect(result.status).toBe("TIMEOUT");
-  expect(result.elapsedMs).toBeLessThan(2000);
+  expect(result.elapsedMs).toBeLessThan(2000); // asserts the 500 ms cap itself; wallclock: p99=533ms headroom=3.75x (20 runs, load1 161 on 32 cores)
   const pid = Number(readFileSync(join(home, "entered"), "utf8"));
   expect(() => process.kill(pid, 0)).toThrow();
   expect(existsSync(blocked)).toBe(true);

@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { runSync } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS, fixtureLoad } from "./fixture-process.ts";
 
 import { root, gate, AMPLE, LOW_BASE, NEED_BYTES, freeBytes, runProbe, saveFixture, type SaveFixture } from "./fresh-gate.helpers.ts";
 test.skipIf(!AMPLE)("SAVEFIRST1 planted (a): sbh pressure with ample bytes admits the save step and prints one WARN (needs >= 10 GiB free)", () => {
@@ -15,7 +16,7 @@ test.skipIf(!AMPLE)("SAVEFIRST1 planted (a): sbh pressure with ample bytes admit
 	const fx = saveFixture(1, { slots: 8, max_wait_s: 1 });
 	try {
 		// Positive control for the plant: this sbh really vetoes heavy's default admission.
-		const veto = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", "src/cli.ts", "heavy", "--no-wait", "--", "true"], { cwd: root, env: { ...process.env, ...fx.env }, deadline_s: 30 });
+		const veto = runSync([process.execPath, "run", "--no-env-file", "--config=/dev/null", "src/cli.ts", "heavy", "--no-wait", "--", "true"], { cwd: root, env: { ...process.env, ...fx.env }, deadline_s: fixtureDeadlineS(30) });
 		expect(veto.rc).toBe(75);
 		expect(Buffer.from(veto.stderr).toString()).toContain("disk low: sbh check --need 10G reports pressure");
 		const marker = join(fx.dir, "saved");
@@ -38,7 +39,7 @@ test.skipIf(!AMPLE)("SAVEFIRST1 planted (a): sbh pressure with ample bytes admit
 	} finally {
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
-}, 30_000);
+}, fixtureDeadlineS(30) * 1000);
 
 test("SAVEFIRST1: no WARN when sbh is healthy or absent", () => {
 	const source = readFileSync(gate, "utf8");
@@ -75,7 +76,7 @@ test.skipIf(LOW_BASE === null)("SAVEFIRST1 planted (b): below the 10 GiB physica
 		rmSync(low, { recursive: true, force: true });
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
-}, 30_000);
+}, fixtureDeadlineS(30) * 1000);
 
 test.skipIf(!AMPLE)("planted: a heavy step runs on the gate's own PATH, never bun run's ancestor node_modules/.bin (needs >= 10 GiB free)", () => {
 	const source = readFileSync(gate, "utf8");
@@ -100,13 +101,13 @@ test.skipIf(!AMPLE)("planted: a heavy step runs on the gate's own PATH, never bu
 	} finally {
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
-}, 30_000);
+}, fixtureDeadlineS(30) * 1000);
 
 // A peer's running heavy job: an orphaned sleep (re-parented, so its exit is reaped while this test
 // blocks in spawnSync and heavy's liveness probe sees it end) recorded as the slot holder.
 function holdSlot(fx: SaveFixture, seconds: number): void {
-	const pid = Buffer.from(runSync(["sh", "-c", 'sleep "$1" >/dev/null 2>&1 & echo $!', "sh", String(seconds)], { deadline_s: 30 }).stdout).toString().trim();
-	const lstart = Buffer.from(runSync(["ps", "-p", pid, "-o", "lstart="], { deadline_s: 30 }).stdout).toString().trim();
+	const pid = Buffer.from(runSync(["sh", "-c", 'sleep "$1" >/dev/null 2>&1 & echo $!', "sh", String(seconds)], { deadline_s: fixtureDeadlineS(30) }).stdout).toString().trim();
+	const lstart = Buffer.from(runSync(["ps", "-p", pid, "-o", "lstart="], { deadline_s: fixtureDeadlineS(30) }).stdout).toString().trim();
 	expect(lstart).not.toBe("");
 	const jobs = join(fx.dir, "state", "omp-kit", "load", "jobs");
 	mkdirSync(jobs, { recursive: true, mode: 0o700 });
@@ -130,7 +131,9 @@ test("SAVEFIRST1 planted (c): heavy queue wait is recorded apart from the step's
 		expect(readFileSync(marker, "utf8")).toBe("ran");
 		const wait = queued(fx);
 		expect(wait).toBeGreaterThanOrEqual(2);
-		expect(wait).toBeLessThanOrEqual(5);
+		// The holder sleeps 3 s; heavy then notices its exit through liveness polls that load slows (7 s
+		// observed at load 25-36 on 32 cores). The seconds-minus-wait check below separates wait from the work.
+		expect(wait).toBeLessThanOrEqual(5 * fixtureLoad().factor);
 		expect(honest.out).toContain(`heavy admission wait: ${wait}s (harness)`);
 		// The 4 s of work is not wait: wall time exceeds the recorded wait by the work, less clock rounding.
 		expect(honest.seconds - wait).toBeGreaterThanOrEqual(2.5);
@@ -145,7 +148,7 @@ test("SAVEFIRST1 planted (c): heavy queue wait is recorded apart from the step's
 	} finally {
 		rmSync(fx.dir, { recursive: true, force: true });
 	}
-}, 60_000);
+}, fixtureDeadlineS(60) * 1000);
 
 test("SAVEFIRST1 planted (c): the 180 s budget subtracts queue wait but still judges slow gate work", () => {
 	const source = readFileSync(gate, "utf8");

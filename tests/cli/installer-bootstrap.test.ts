@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { checkInstallerBootstrap } from "../../scripts/package-release";
 import { run, runSync, type RunResult } from "../../src/kitlib/run";
 import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp";
-import { fixtureDeadlineS } from "./fixture-process.ts";
+import { fixtureDeadlineS, fixtureLoad } from "./fixture-process.ts";
 
 const root = resolve(import.meta.dir, "../..");
 const installerSource = readFileSync(join(root, "installer/install.py"), "utf8");
@@ -103,7 +103,7 @@ function fixture(): Fixture {
 	};
 }
 
-async function invoke(f: Fixture, args: string[], mode: "isolated" | "file" | "shell" = "isolated", extra: Record<string, string> = {}, deadline = 15): Promise<RunResult> {
+async function invoke(f: Fixture, args: string[], mode: "isolated" | "file" | "shell" = "isolated", extra: Record<string, string> = {}, deadline = fixtureDeadlineS(15)): Promise<RunResult> {
 	const argv = mode === "isolated" ? [python, "-I", "-c", installerSource, ...args]
 		: mode === "file" ? [python, "-I", join(f.work, "bootstrap/install.py"), ...args]
 		: ["/bin/sh", join(f.work, "bootstrap/install.sh"), ...args];
@@ -206,7 +206,7 @@ test("download keeps a complete 16 MiB valid bundle, refuses overflow and checke
 			expect(existsSync(`${input}.sigstore.json`)).toBe(false);
 		}
 	} finally { f.scratch.cleanup(); }
-}, 30_000);
+}, fixtureDeadlineS(30) * 1000);
 
 test("staged identity probe preserves checked failures and never activates truncated or tampered candidate bytes", async () => {
 	const f = fixture();
@@ -222,7 +222,7 @@ test("staged identity probe preserves checked failures and never activates trunc
 		expectRefusal(await invoke(f, ["install", a.index, version, platform, a.path, a.prefix, "0"]), "archive SHA-256 mismatch");
 		expect(existsSync(join(a.prefix, "bin/omp-kit"))).toBe(false);
 	} finally { f.scratch.cleanup(); }
-});
+}, fixtureDeadlineS(60) * 1000);
 
 test("in-memory bootstrap isolates existing module/path state and preserves raw checked exception bytes", async () => {
 	const f = fixture();
@@ -235,22 +235,23 @@ ns = {'__name__': 'installer_contract'}
 exec(compile(${JSON.stringify(installerSource)}, '<standalone installer>', 'exec'), ns)
 assert sys.modules['pysafe'] is poison and sys.path == before
 try:
-    ns['_run']([sys.executable, '-I', '-c', 'import os; os.write(1, b"\\\\xffout"); os.write(2, b"\\\\xfeerr"); raise SystemExit(7)'], deadline_s=5, max_output_bytes=1024, check=True)
+    ns['_run']([sys.executable, '-I', '-c', 'import os; os.write(1, b"\\\\xffout"); os.write(2, b"\\\\xfeerr"); raise SystemExit(7)'], deadline_s=${fixtureDeadlineS(5)}, max_output_bytes=1024, check=True)
 except subprocess.CalledProcessError as error:
     assert error.returncode == 7 and error.output == b'\\xffout' and error.stderr == b'\\xfeerr', repr(error)
 else:
     raise AssertionError('checked failure accepted')
-# These are real platform deadline/pipe semantics; fake timers cannot drive the child.
+# These are real platform deadline/pipe semantics; fake timers cannot drive the child. The child must
+# start and write before the deadline (load slows that), and the deadline stays far below its 10 s sleep.
 try:
-    ns['_run']([sys.executable, '-I', '-c', 'import os,time; os.write(1, b"\\\\xffout"); os.write(2, b"\\\\xfeerr"); time.sleep(10)'], deadline_s=0.5, max_output_bytes=1024)
+    ns['_run']([sys.executable, '-I', '-c', 'import os,time; os.write(1, b"\\\\xffout"); os.write(2, b"\\\\xfeerr"); time.sleep(10)'], deadline_s=${fixtureDeadlineS(0.5)}, max_output_bytes=1024)
 except subprocess.TimeoutExpired as error:
     assert error.output == b'\\xffout' and error.stderr == b'\\xfeerr', repr(error)
 else:
     raise AssertionError('deadline result did not retain timeout exception semantics')
 `;
-		expectSuccess(await run([python, "-I", "-c", code], { cwd: f.work, env: f.env, deadline_s: 10, grace_s: 1, max_output_bytes: 65536 }));
+		expectSuccess(await run([python, "-I", "-c", code], { cwd: f.work, env: f.env, deadline_s: fixtureDeadlineS(10), grace_s: 1, max_output_bytes: 65536 }));
 	} finally { f.scratch.cleanup(); }
-});
+}, fixtureDeadlineS(15) * 1000);
 
 test("original 30-second tag lookup deadline kills a TERM-ignoring descendant and preserves unavailable classification", async () => {
 	const f = fixture();
@@ -258,14 +259,15 @@ test("original 30-second tag lookup deadline kills a TERM-ignoring descendant an
 	let needsCleanup = true;
 	try {
 		const a = archive(f);
-		const result = await invoke(f, ["attestation", a.path, version, platform], "isolated", { GH_CASE: "source-timeout", CHILD_RECORD: record }, 40);
+		// The installer's own 30 s lookup deadline is the subject; only the outer fixture bound scales.
+		const result = await invoke(f, ["attestation", a.path, version, platform], "isolated", { GH_CASE: "source-timeout", CHILD_RECORD: record }, fixtureDeadlineS(40));
 		expectRefusal(result, "KIT_ATTESTATION_VERIFIER_UNAVAILABLE");
 		expect(decoder.decode(result.stderr)).toContain("timed out after 30 seconds");
 		const child = JSON.parse(readFileSync(record, "utf8")) as { pid: number; pgid: number };
-		const end = performance.now() + 3000;
+		const end = performance.now() + 3000 * fixtureLoad().factor;
 		let alive = true;
 		do {
-			const observed = await run(["/bin/ps", "-p", String(child.pid), "-o", "stat="], { deadline_s: 2, grace_s: 0.1, max_output_bytes: 1024 });
+			const observed = await run(["/bin/ps", "-p", String(child.pid), "-o", "stat="], { deadline_s: fixtureDeadlineS(2), grace_s: 0.1, max_output_bytes: 1024 });
 			expect(observed.timed_out).toBe(false);
 			expect([0, 1]).toContain(observed.rc);
 			const state = decoder.decode(observed.stdout).trim();
@@ -280,12 +282,12 @@ test("original 30-second tag lookup deadline kills a TERM-ignoring descendant an
 		if (needsCleanup && existsSync(record)) {
 			const { pid, pgid } = JSON.parse(readFileSync(record, "utf8")) as { pid: number; pgid: number };
 			const cleanup = await run([python, "-I", "-c", "import os,signal,sys\npid,pgid = map(int, sys.argv[1:])\ntry:\n    if os.getpgid(pid) == pgid and pgid != os.getpgrp(): os.killpg(pgid, signal.SIGKILL)\nexcept ProcessLookupError: pass", String(pid), String(pgid)],
-				{ deadline_s: 3, grace_s: 0.1, max_output_bytes: 1024 });
+				{ deadline_s: fixtureDeadlineS(3), grace_s: 0.1, max_output_bytes: 1024 });
 			expectSuccess(cleanup);
 		}
 		f.scratch.cleanup();
 	}
-}, 45_000);
+}, fixtureDeadlineS(45) * 1000);
 
 test("release preflight accepts canonical payload, rejects source drift, and explicit regeneration repairs only generated delivery", async () => {
 	const f = fixture();
@@ -297,11 +299,11 @@ test("release preflight accepts canonical payload, rejects source drift, and exp
 		const path = join(copy, "scripts/kitlib_run.py");
 		writeFileSync(path, `${readFileSync(path, "utf8")}\n# controlled canonical-source drift\n`);
 		await expect(checkInstallerBootstrap(copy)).rejects.toThrow("INSTALLER_BOOTSTRAP_STALE_OR_UNAVAILABLE");
-		const generated = await run([python, "-I", join(copy, "installer/embed-bootstrap.py")], { cwd: copy, deadline_s: 10, grace_s: 1, max_output_bytes: 65536 });
+		const generated = await run([python, "-I", join(copy, "installer/embed-bootstrap.py")], { cwd: copy, deadline_s: fixtureDeadlineS(10), grace_s: 1, max_output_bytes: 65536 });
 		expectSuccess(generated);
 		await checkInstallerBootstrap(copy);
 		const once = readFileSync(join(copy, "installer/install.py"));
-		expectSuccess(await run([python, "-I", join(copy, "installer/embed-bootstrap.py")], { cwd: copy, deadline_s: 10, grace_s: 1, max_output_bytes: 65536 }));
+		expectSuccess(await run([python, "-I", join(copy, "installer/embed-bootstrap.py")], { cwd: copy, deadline_s: fixtureDeadlineS(10), grace_s: 1, max_output_bytes: 65536 }));
 		expect(readFileSync(join(copy, "installer/install.py"))).toEqual(once);
 	} finally { f.scratch.cleanup(); }
 });
