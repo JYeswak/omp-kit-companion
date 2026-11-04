@@ -243,22 +243,41 @@ const FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 type FullSuiteJudge = { root: string; script: string };
 
-function archiveFullSuiteJudge(repo: string, base: string): FullSuiteJudge | null {
+async function archiveFullSuiteJudge(repo: string, base: string): Promise<FullSuiteJudge | null> {
 	const manifest = git(repo, ["ls-tree", base, "--", "scripts/gate-ci-only.tsv"]);
 	if (manifest.code !== 0 || manifest.interrupted) return null;
 	const gatePaths = ["scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh", "scripts/kitlib-tmp.sh"];
 	const metrics = git(repo, ["ls-tree", base, "--", "scripts/suite-metrics.py"]);
 	if (metrics.code !== 0 || metrics.interrupted) return null;
-	if (metrics.out.trim()) gatePaths.push(
-		"scripts/suite-metrics.py", "scripts/kitlib_run.py", "scripts/pysafe.py",
-		"scripts/test-budget.ts", ".github/test-budget.json",
-	);
-	// MAINRED3 (ompkit-kup44.4.1), after HERMETIC1 50bdf7c3bb: suite-metrics.py imports kitlib_tmp and runs every file through
-	// suite-hermetic-env.sh; a judge archive without them can never produce PASS evidence. Older
-	// bases carry neither, so only the ones the base tree has are archived.
-	const hermetic = git(repo, ["ls-tree", "--name-only", base, "--", "scripts/suite-hermetic-env.sh", "scripts/kitlib_tmp.py"]);
-	if (hermetic.code !== 0 || hermetic.interrupted) return null;
-	gatePaths.push(...hermetic.out.split("\n").filter(Boolean));
+	if (metrics.out.trim()) {
+		// JUDGECLOSURE1: the base owns its judging dependencies, including a legacy base's
+		// smaller closure. Parse its literal declaration without executing base Python.
+		const source = gitBytes(repo, ["show", `${base}:scripts/suite-metrics.py`]);
+		if (source.code !== 0 || source.interrupted) return null;
+		const closure = await kitlibRun(["python3", "-c", `
+import ast, json, sys
+if sys.stdin.isatty(): raise ValueError('judging source must be piped')
+tree = ast.parse(sys.stdin.read())
+values = [ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'JUDGING_FILES' for t in n.targets)]
+if len(values) != 1: raise ValueError('missing or ambiguous JUDGING_FILES')
+paths = values[0]
+if not isinstance(paths, (tuple, list)) or not paths or any(not isinstance(p, str) or not p or p.startswith('/') or any(c in ('', '.', '..') for c in p.split('/')) or '\\\\' in p or '\\n' in p or '\\r' in p for p in paths): raise ValueError('invalid judging paths')
+print(json.dumps(paths))
+`], {
+			cwd: repo, env: gitEnvironment(), stdin: source.out, deadline_s: 30,
+			max_output_bytes: FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES, max_total_bytes: FULL_SUITE_VERDICT_MAX_OUTPUT_BYTES,
+		});
+		if (closure.rc !== 0 || closure.timed_out || closure.killed || closure.truncated || closure.total_truncated) return null;
+		let paths: unknown;
+		try { paths = JSON.parse(new TextDecoder().decode(closure.stdout)); } catch { return null; }
+		if (!Array.isArray(paths) || !paths.every((path): path is string => typeof path === "string")) return null;
+		gatePaths.push(...paths);
+	}
+	// Historical metrics closures can predate the shell runner's direct process
+	// helper. Retain that helper when the base supplies it, never from the worktree.
+	const processHelper = git(repo, ["ls-tree", "--name-only", base, "--", "scripts/kitlib-proc.sh"]);
+	if (processHelper.code !== 0 || processHelper.interrupted) return null;
+	gatePaths.push(...processHelper.out.split("\n").filter(Boolean));
 	if (manifest.out.trim()) gatePaths.push("scripts/gate-ci-only.tsv");
 	const archive = gitBytes(repo, ["archive", base, ...gatePaths]);
 	if (archive.code !== 0 || archive.interrupted) return null;
@@ -299,7 +318,7 @@ async function runFullSuiteVerdict(repo: string, base: string, candidate: string
 	// the release (release-local refuses without a main-role PASS for the exact tree, and the push gate
 	// starts scripts/release-verdict.sh for the pushed commit). PRE_PUSH_FULL_SUITE=push runs it inline.
 	if ((process.env.PRE_PUSH_FULL_SUITE ?? "release") !== "push") return "PASS";
-	const judge = archiveFullSuiteJudge(repo, base);
+	const judge = await archiveFullSuiteJudge(repo, base);
 	if (judge === null) return "UNRUN";
 	const configuredTimeoutSeconds = process.env.FULL_SUITE_TIMEOUT_SECS === undefined
 		? 1800

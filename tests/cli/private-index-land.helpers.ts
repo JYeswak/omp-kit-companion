@@ -207,9 +207,13 @@ try {
 	mkdirSync(join(templateWork, "scripts"), { recursive: true });
 	mkdirSync(join(templateWork, ".github"), { recursive: true });
 	// The JUDGING_FILES closure of scripts/suite-metrics.py: a fixture missing one cannot run its gate.
-	const gateFiles = ["scripts/full-suite-verdict.sh", "scripts/full-suite-verdict-store.py", "scripts/fresh-gate.sh", "scripts/pre-push-gate.sh", "scripts/kitlib-tmp.sh",
-		"scripts/suite-metrics.py", "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
-		"scripts/pysafe.py", "scripts/test-budget.ts", "scripts/regexploit-gate.py", ".github/test-budget.json"];
+	// JUDGECLOSURE1: derive the closure from suite-metrics.py, never a literal copy (a new judged file broke 15 cases).
+	const judgingFiles = runFixture(["python3", join(repoRoot, "scripts", "suite-metrics.py"), "judging-files"], { cwd: repoRoot, floor_s: 30 });
+	if (judgingFiles.rc !== 0 || judgingFiles.timed_out || judgingFiles.killed || judgingFiles.truncated || judgingFiles.total_truncated)
+		throw new Error(`judging-files failed: ${new TextDecoder().decode(judgingFiles.stderr)}`);
+	// Beyond the judge: the push gate and the helpers it imports.
+	const gateFiles = [...new Set([...new TextDecoder().decode(judgingFiles.stdout).trim().split("\n"),
+		"scripts/pre-push-gate.sh", "scripts/regexploit-gate.py", "scripts/kitlib_io.py", "scripts/kitlib_jsonl.py", "scripts/kitlib_lock.py"])];
 	if (existsSync(join(repoRoot, "scripts", "gate-ci-only.tsv"))) gateFiles.push("scripts/gate-ci-only.tsv");
 	for (const path of gateFiles)
 		writeFileSync(join(templateWork, path), readFileSync(join(repoRoot, path)), { mode: path.endsWith(".sh") ? 0o755 : 0o644 });
