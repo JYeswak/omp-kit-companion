@@ -17,6 +17,9 @@ the real helper source by parsing it.
   plan REPO MAP OUT --old OID --public OID --authority A [--drop-key OID] [--add-key OID] [--repo-override P]
                                               -> "<plan_sha256> <new_tip>"
   forge-review REPO PLAN --reviewer NAME [--set KEY=JSON]... [--alter-after-digest] [--writable]
+               [--approval-from NAME] [--no-approval-copy] [--tamper-approval] [--legacy-v1]
+  approval REPO OUT --plan PLAN --id N --from NAME [--subject TEXT]
+                                              -> an exported Agent Mail APPROVE message (JSON)
   drive REPO PLAN [--actor NAME] [--commands JSON] [--intent-commands JSON] [--no-lock]
                   [--foreign-child] [--tamper-lock] [--prepare-only]
   record-child PLAN ACTOR OWNER_PID CHILD_PID  (drive's Git-child shell only)
@@ -200,14 +203,37 @@ def plan(repo: str, argv: list) -> None:
     print(result["plan_sha256"], result["new_tip"])
 
 
+def approval_message(message_id: int, sender: str, plan_sha256: str, subject: str = "") -> bytes:
+    """An exported Agent Mail message, in the fields fetch_inbox returns."""
+    return (json.dumps({"id": message_id, "from": sender, "subject": subject or "APPROVE history scrub " + plan_sha256,
+                        "body_md": "APPROVE plan_sha256=%s after independent review.\n" % plan_sha256,
+                        "created_ts": "2026-11-04T00:00:00+00:00", "importance": "high"}, sort_keys=True) + "\n").encode()
+
+
+def approval(repo: str, argv: list) -> None:
+    found, rest = options(argv, (), ("--plan", "--id", "--from", "--subject"))
+    value = json.loads(open(found["--plan"][0], encoding="utf-8").read(1 << 20))
+    with open(rest[0], "wb") as handle:
+        handle.write(approval_message(int(found["--id"][0]), found["--from"][0], value["plan_sha256"],
+                                      found.get("--subject", [""])[0]))
+    print(rest[0])
+
+
 def forge_review(repo: str, argv: list) -> None:
-    found, rest = options(argv, ("--alter-after-digest", "--writable"), ("--reviewer", "--set"))
+    found, rest = options(argv, ("--alter-after-digest", "--writable", "--no-approval-copy", "--tamper-approval",
+                                 "--legacy-v1"), ("--reviewer", "--set", "--approval-from"))
     os.chdir(repo)
     module = witness()
     checkout = module.Repo()
     value = json.loads(open(rest[0], encoding="utf-8").read(1 << 20))
-    record = {"schema": module.SCHEMA, **module.binding(checkout, value), "reviewer": found["--reviewer"][0],
-              "reviewed_at": "2026-11-04T00:00:00+00:00"}
+    reviewer = found["--reviewer"][0]
+    body = approval_message(7, found.get("--approval-from", [reviewer])[0], value["plan_sha256"])
+    record = {"schema": module.SCHEMA, **module.binding(checkout, value), "reviewer": reviewer,
+              "reviewed_at": "2026-11-04T00:00:00+00:00", "approval_message_id": 7,
+              "approval_sha256": hashlib.sha256(body).hexdigest()}
+    if "--legacy-v1" in found:  # a record written before HISTQUIESCE1 part 3: no approval fields
+        record = {k: v for k, v in record.items() if not k.startswith("approval_")}
+        record["schema"] = module.LEGACY_SCHEMA
     for item in found.get("--set", []):
         key, _, raw = item.partition("=")
         record[key] = json.loads(raw)
@@ -219,6 +245,11 @@ def forge_review(repo: str, argv: list) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
     os.chmod(path, 0o644 if "--writable" in found else 0o444)
+    if "--no-approval-copy" not in found and "--legacy-v1" not in found:
+        copy = path[:-len(".json")] + module.APPROVAL_SUFFIX
+        with open(copy, "wb") as handle:
+            handle.write(body.replace(b"independent", b"tampered") if "--tamper-approval" in found else body)
+        os.chmod(copy, 0o444)
     print(path)
 
 
@@ -370,6 +401,8 @@ def main() -> int:
         plan(repo, argv)
     elif command == "forge-review":
         forge_review(repo, argv)
+    elif command == "approval":
+        approval(repo, argv)
     elif command == "drive":
         return drive(repo, argv)
     else:

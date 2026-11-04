@@ -159,11 +159,16 @@ $(fx plan "$H" "$H/.git/scrub.map.json" "$H/.git/scrub.plan.json" --old "$N" --p
 EOF
 RTX="$H/.git/hooks/hooks.d/reference-transaction"
 W="$RTX/ref-txn-witness.py"
-(CDPATH='' cd -- "$H" && AGENT_NAME=independent-reviewer python3 -B -c 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")' "$W" review --plan "$H/.git/scrub.plan.json" --reviewer independent-reviewer) > /dev/null
+# HISTQUIESCE1 part 3: the review binds the exported Agent Mail APPROVE it relies on.
+fx approval "$H" "$H/.git/scrub.approval.json" --plan "$H/.git/scrub.plan.json" --id 51 --from independent-reviewer > /dev/null
+(CDPATH='' cd -- "$H" && AGENT_NAME=independent-reviewer python3 -B -c 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")' "$W" review --plan "$H/.git/scrub.plan.json" --reviewer independent-reviewer --approval-message-id 51 --approval-file "$H/.git/scrub.approval.json") > /dev/null
 ok "$?" "0" "independent-review-rc"
 REC="$H/.git/omp-kit/history-review/$SHA.json"
 if [ -f "$H/.git/omp-kit/history-review/$SHA.plan.json" ] && [ ! -w "$H/.git/omp-kit/history-review/$SHA.plan.json" ]; then rc=0; else rc=1; fi
 ok "$rc" "0" "reviewed-plan-copy-read-only"
+APPR="$H/.git/omp-kit/history-review/$SHA.approval.json"
+cmp -s "$APPR" "$H/.git/scrub.approval.json"
+ok "$?" "0" "approval-copy-recorded"
 ok "$(fx drive "$H" "$H/.git/scrub.plan.json" 2> "$TMP/apply.err")" "COMMITTED" "reviewed-apply-through-ref-guard"
 ok "$(git -C "$H" rev-parse refs/heads/main)" "$NEW" "local-main-is-new-root"
 
@@ -195,6 +200,14 @@ negatives() {
 	mv "$REC" "$TMP/rec.saved"
 	neg "$m" review-absent "REFUSED REVIEW_ABSENT" "$REWRITE_LINE"
 	mv "$TMP/rec.saved" "$REC"
+	mv "$APPR" "$TMP/appr.saved"
+	neg "$m" approval-absent "REFUSED REVIEW_APPROVAL_ABSENT" "$REWRITE_LINE"
+	{ cat "$TMP/appr.saved"; printf ' '; } > "$APPR"
+	chmod 0400 "$APPR"
+	if cmp -s "$APPR" "$TMP/appr.saved"; then rc=1; else rc=0; fi
+	ok "$rc" "0" "$m-approval-tamper-applied"
+	neg "$m" approval-digest "REFUSED REVIEW_APPROVAL_DIGEST_MISMATCH" "$REWRITE_LINE"
+	mv "$TMP/appr.saved" "$APPR"
 	chmod u+w "$REC"
 	sed 's/"reviewer":"independent-reviewer"/"reviewer":"someone-else"/' "$TMP/rec.orig" > "$REC"
 	chmod 0400 "$REC"

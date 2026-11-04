@@ -30,7 +30,7 @@ authority. Like the helper's owner lock, this is a cooperation boundary: a
 same-UID writer can forge every file it reads.
 
   python3 ref-txn-witness.py admit < transaction-lines      (the guard, prepared state)
-  python3 ref-txn-witness.py review --plan PATH --reviewer NAME
+  python3 ref-txn-witness.py review --plan PATH --reviewer NAME --approval-message-id ID --approval-file PATH
   python3 ref-txn-witness.py push-admit LOCAL_SHA REMOTE_REF REMOTE_SHA -- REV-LIST-ARGS...
 
 PUSHADMIT1 (ompkit-fp72.120.16.221): pre-push members 40 (pushed-beads) and 41 (pushed-vlevel) use
@@ -42,6 +42,16 @@ already equals the new root, every preservation ref holds its original, the revi
 unchanged binding, and its reviewer is not the pusher (AGENT_NAME, required). The member then judges its own
 range minus the mapped counterparts with its ordinary check. Without a claiming plan copy the member's
 ordinary check runs unchanged.
+
+HISTQUIESCE1 part 3 (ompkit-fp72.120.16.222): the reviewer is bound to the APPROVE it relies on. `review`
+requires --approval-message-id and --approval-file: the Agent Mail message exported as JSON (its "id",
+"from", "subject" and "body_md" fields). `review`, an operator command, refuses unless the id matches, the
+sender equals the reviewer and the subject or body names APPROVE and the plan_sha256. It stores the exact
+bytes read-only as history-review/<plan_sha256>.approval.json and binds approval_message_id and
+approval_sha256 into the self-digested record. admit and push-admit share check_review, which re-verifies
+the copy offline: its sha256 equals the recorded one and its content passes the same test. No hook ever
+calls Agent Mail. Every plan requires an approval. A record written before this change (schema v1, without
+approval fields) fails closed as REVIEW_APPROVAL_ABSENT; re-run `review` for it.
 """
 from __future__ import annotations
 
@@ -56,7 +66,8 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pysafe  # noqa: E402  (cancel-safe spawn: own process group, stdin DEVNULL, hard deadline)
 
-SCHEMA = "omp-kit.history-review.v1"
+SCHEMA = "omp-kit.history-review.v2"
+LEGACY_SCHEMA = "omp-kit.history-review.v1"  # pre-approval records: refused, never admitted
 OPERATIONS = ("scrub-dag-v1",)
 LOCK_OPERATION = "history-remove"
 SIGNATURE_POLICY = "invalidate-pgp-ssh-preserve-originals"
@@ -69,9 +80,12 @@ FILE_CAP = 256 << 20
 PLAN_KEYS = ("schema_version", "operation", "repo", "gitdir", "old_tip", "new_tip", "paths", "map",
              "public_refs", "authority", "preserve_ref", "signature_policy", "writable_refs", "plan_sha256")
 PLAN_SUFFIX = ".plan.json"
+APPROVAL_SUFFIX = ".approval.json"
+APPROVAL_CAP = 1 << 20
 BINDING_KEYS = ("operation", "plan_sha256", "repo", "gitdir", "ref", "old_tip", "new_tip", "map_sha256",
                 "source_roots", "paths", "signature_policy", "transaction", "authority")
-RECORD_KEYS = frozenset(BINDING_KEYS + ("schema", "reviewer", "reviewed_at", "record_sha256"))
+RECORD_KEYS = frozenset(BINDING_KEYS + ("schema", "reviewer", "reviewed_at", "approval_message_id",
+                                        "approval_sha256", "record_sha256"))
 # HISTPREP1 record contracts, as history_remove_apply.py writes them (ompkit-fp72.120.14.1): the owner
 # lock body, every journal record's common fields, and the two phases recorded before Git prepares.
 # Exact key sets: a helper or reader change that drifts refuses instead of silently matching.
@@ -526,9 +540,29 @@ def check_context(repo: Repo, lock_bytes: bytes, lock: dict, plan: dict) -> dict
     return intent
 
 
+def check_approval(body: bytes, message_id: object, reviewer: str, plan_sha256: str) -> None:
+    """The exported APPROVE message: same id, sent by the reviewer, naming APPROVE and the plan digest."""
+    if len(body) > APPROVAL_CAP:
+        raise Refused("APPROVAL_TOO_LARGE")
+    message = parse_json(body, "approval message")
+    if not isinstance(message, dict) or not all(isinstance(message.get(k), str) for k in ("from", "subject", "body_md")):
+        raise Refused("APPROVAL_MALFORMED needs the exported message's id, from, subject and body_md")
+    if type(message.get("id")) is not int or type(message_id) is not int or message["id"] != message_id:
+        raise Refused("APPROVAL_MESSAGE_ID_MISMATCH")
+    if message["from"] != reviewer:
+        raise Refused("APPROVAL_SENDER_MISMATCH sender %s is not the reviewer %s" % (message["from"], reviewer))
+    text = message["subject"] + "\n" + message["body_md"]
+    if "APPROVE" not in (word.strip(".,:;!()[]*_`") for word in text.split()):
+        raise Refused("APPROVAL_NOT_APPROVE")
+    if plan_sha256 not in text:
+        raise Refused("APPROVAL_NOT_FOR_PLAN")
+
+
 def check_review(repo: Repo, plan: dict, intent: dict, applied: bool = False) -> tuple:
     path = repo.review_path(plan["plan_sha256"])
     record = parse_json(read_owned(path, "REVIEW", read_only=True), "review record")
+    if isinstance(record, dict) and record.get("schema") == LEGACY_SCHEMA:
+        raise Refused("REVIEW_APPROVAL_ABSENT pre-approval record; re-run review with --approval-message-id and --approval-file")
     if not isinstance(record, dict) or set(record) != RECORD_KEYS or record.get("schema") != SCHEMA:
         raise Refused("REVIEW_MALFORMED")
     if record["record_sha256"] != digest(record, "record_sha256"):
@@ -544,6 +578,12 @@ def check_review(repo: Repo, plan: dict, intent: dict, applied: bool = False) ->
         raise Refused("REVIEWER_IS_APPLIER")
     if intent.get("transaction") != record["transaction"]:
         raise Refused("INTENT_TRANSACTION_MISMATCH")
+    # HISTQUIESCE1 part 3: the APPROVE this review relies on, verified offline from its read-only copy.
+    approval = path[:-len(".json")] + APPROVAL_SUFFIX
+    body = read_owned(approval, "REVIEW_APPROVAL", read_only=True)
+    if hashlib.sha256(body).hexdigest() != record["approval_sha256"]:
+        raise Refused("REVIEW_APPROVAL_DIGEST_MISMATCH")
+    check_approval(body, record["approval_message_id"], reviewer, plan["plan_sha256"])
     return path, record
 
 
@@ -665,22 +705,32 @@ def write_read_only(path: str, data: bytes, what: str) -> None:
 
 
 def review(argv: list) -> int:
+    usage = "USAGE review --plan PATH --reviewer NAME --approval-message-id ID --approval-file PATH"
+    flags = ("--plan", "--reviewer", "--approval-message-id", "--approval-file")
     options = {}
     it = iter(argv)
     for flag in it:
-        if flag not in ("--plan", "--reviewer") or flag in options:
-            raise Refused("USAGE review --plan PATH --reviewer NAME")
+        if flag not in flags or flag in options:
+            raise Refused(usage)
         options[flag] = next(it, "")
-    if set(options) != {"--plan", "--reviewer"} or not options["--reviewer"].strip():
-        raise Refused("USAGE review --plan PATH --reviewer NAME")
+    if not {"--plan", "--reviewer"} <= set(options) or not options["--reviewer"].strip():
+        raise Refused(usage)
+    if set(options) != set(flags):
+        raise Refused("APPROVAL_REQUIRED review needs --approval-message-id and --approval-file (the exported APPROVE)")
+    message_id = options["--approval-message-id"]
+    if not message_id.isdigit() or not message_id.isascii() or int(message_id) <= 0:
+        raise Refused("APPROVAL_MESSAGE_ID_MALFORMED")
     repo = Repo()
     plan_bytes = read_owned(os.path.abspath(options["--plan"]), "PLAN")
     plan = check_plan(repo, parse_json(plan_bytes, "plan"))
+    approval_bytes = read_owned(os.path.abspath(options["--approval-file"]), "APPROVAL")
+    check_approval(approval_bytes, int(message_id), options["--reviewer"], plan["plan_sha256"])
     if line("symbolic-ref", "-q", "HEAD") != MAIN or repo.ref_value(MAIN) != plan["old_tip"]:
         raise Refused("STALE_OLD_TIP")
     check_transform(repo, plan)
     record = {"schema": SCHEMA, **binding(repo, plan), "reviewer": options["--reviewer"],
-              "reviewed_at": datetime.now(timezone.utc).isoformat()}
+              "reviewed_at": datetime.now(timezone.utc).isoformat(), "approval_message_id": int(message_id),
+              "approval_sha256": hashlib.sha256(approval_bytes).hexdigest()}
     record["record_sha256"] = digest(record, "record_sha256")
     path = repo.review_path(plan["plan_sha256"])
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
@@ -690,6 +740,10 @@ def review(argv: list) -> int:
     copy = os.path.join(os.path.dirname(path), plan["plan_sha256"] + PLAN_SUFFIX)
     if not (os.path.isfile(copy) and read_owned(copy, "REVIEWED_PLAN", read_only=True) == plan_bytes):
         write_read_only(copy, plan_bytes, "REVIEWED_PLAN")
+    # The exact APPROVE bytes beside the record let every hook re-verify it offline.
+    approval = path[:-len(".json")] + APPROVAL_SUFFIX
+    if not (os.path.isfile(approval) and read_owned(approval, "REVIEW_APPROVAL", read_only=True) == approval_bytes):
+        write_read_only(approval, approval_bytes, "REVIEW_APPROVAL")
     write_read_only(path, canonical(record) + b"\n", "REVIEW")
     directory = os.open(os.path.dirname(path), os.O_RDONLY)
     try:
@@ -697,7 +751,8 @@ def review(argv: list) -> int:
     finally:
         os.close(directory)
     print(json.dumps({"status": "REVIEWED", "record": path, "plan_sha256": plan["plan_sha256"],
-                      "reviewer": record["reviewer"]}, sort_keys=True))
+                      "reviewer": record["reviewer"], "approval_message_id": record["approval_message_id"]},
+                     sort_keys=True))
     return 0
 
 
@@ -710,7 +765,8 @@ def main() -> int:
             return review(argv[1:])
         if argv[:1] == ["push-admit"]:
             return push_admit(argv[1:])
-        raise Refused("USAGE admit | review --plan PATH --reviewer NAME | push-admit LOCAL_SHA REMOTE_REF REMOTE_SHA -- REVS...")
+        raise Refused("USAGE admit | review --plan PATH --reviewer NAME --approval-message-id ID --approval-file PATH"
+                      " | push-admit LOCAL_SHA REMOTE_REF REMOTE_SHA -- REVS...")
     except Refused as exc:
         print("ref-txn-witness: REFUSED " + str(exc), file=sys.stderr)
         return 4

@@ -189,29 +189,67 @@ read -r SHA_P NEW <<EOF
 $(mkplan reviewed good)
 EOF
 PLAN_P="$H/.git/reviewed.plan.json"
-for name in noreview altered writable applier othertip wrongref; do mkplan "$name" good > /dev/null; done
+for name in noreview altered writable applier othertip wrongref noapproval tamperapproval senderapproval legacy; do mkplan "$name" good > /dev/null; done
 mkplan wrongrepo good --repo-override "$TMP/elsewhere" > /dev/null
 mkplan incomplete good --drop-key "$ROOT" > /dev/null
 SIDE=$(printf 'side work ompkit-2w7h\n' | git -C "$H" commit-tree "$ROOT^{tree}" -p "$ROOT")
 mkplan extra good --add-key "$SIDE" > /dev/null
 for name in conflict tree retained metadata signature; do mkplan "$name" "$name" > /dev/null; done
 
+# HISTQUIESCE1 part 3: an exported Agent Mail APPROVE (id, sender, plan digest) is required by `review`.
+appr() { # appr <plan name> <message id> <sender> [--subject TEXT]: writes $H/.git/<plan>.approval.<sender>.json
+	aplan=$1 aid=$2 afrom=$3
+	shift 3
+	fx approval "$H" "$H/.git/$aplan.approval.$afrom.json" --plan "$H/.git/$aplan.plan.json" --id "$aid" --from "$afrom" "$@" > /dev/null
+}
+appr tree 40 independent-reviewer
+appr reviewed 41 independent-reviewer
+appr reviewed 42 someone-else
+appr reviewed 43 another-reviewer
+appr tree 44 another-reviewer
+APPR_P="$H/.git/reviewed.approval.independent-reviewer.json"
+review_neg() { # review_neg <name> <reason> <review args...>: refused for the reason, recording nothing
+	rname=$1 rwant=$2
+	shift 2
+	witness "$H" review "$@" > /dev/null 2> "$TMP/review-neg.err"
+	ok "$?" "4" "review-$rname-refused"
+	grep -qF -- "REFUSED $rwant" "$TMP/review-neg.err"
+	ok "$?" "0" "review-$rname-reason"
+	if [ ! -e "$H/.git/omp-kit/history-review/$SHA_P.json" ]; then rc=0; else rc=1; fi
+	ok "$rc" "0" "review-$rname-records-nothing"
+}
+review_neg no-approval APPROVAL_REQUIRED --plan "$PLAN_P" --reviewer independent-reviewer
+review_neg approval-without-file APPROVAL_REQUIRED --plan "$PLAN_P" --reviewer independent-reviewer --approval-message-id 41
+review_neg approval-id-mismatch APPROVAL_MESSAGE_ID_MISMATCH --plan "$PLAN_P" --reviewer independent-reviewer --approval-message-id 99 --approval-file "$APPR_P"
+review_neg approval-other-sender APPROVAL_SENDER_MISMATCH --plan "$PLAN_P" --reviewer independent-reviewer --approval-message-id 42 --approval-file "$H/.git/reviewed.approval.someone-else.json"
+review_neg approval-other-plan APPROVAL_NOT_FOR_PLAN --plan "$PLAN_P" --reviewer another-reviewer --approval-message-id 44 --approval-file "$H/.git/tree.approval.another-reviewer.json"
+
 # The product reviewer refuses an unreviewable transform and records nothing.
-witness "$H" review --plan "$H/.git/tree.plan.json" --reviewer independent-reviewer > /dev/null 2> "$TMP/review-bad.err"
+witness "$H" review --plan "$H/.git/tree.plan.json" --reviewer independent-reviewer --approval-message-id 40 --approval-file "$H/.git/tree.approval.independent-reviewer.json" > /dev/null 2> "$TMP/review-bad.err"
 ok "$?" "4" "review-refuses-unapproved-tree"
 grep -q 'REFUSED UNAPPROVED_TREE_CHANGE' "$TMP/review-bad.err"
 ok "$?" "0" "review-refusal-reason"
 TREE_SHA=$(sed -n 's/.*"plan_sha256": "\([0-9a-f]*\)".*/\1/p' "$H/.git/tree.plan.json")
 if [ -n "$TREE_SHA" ] && [ ! -e "$H/.git/omp-kit/history-review/$TREE_SHA.json" ]; then rc=0; else rc=1; fi
 ok "$rc" "0" "review-refusal-records-nothing"
-# The independent reviewer records the exact transform once, read-only.
-witness "$H" review --plan "$PLAN_P" --reviewer independent-reviewer > "$TMP/review.out"
+# The independent reviewer records the exact transform once, read-only, with its APPROVE bound.
+witness "$H" review --plan "$PLAN_P" --reviewer independent-reviewer --approval-message-id 41 --approval-file "$APPR_P" > "$TMP/review.out"
 ok "$?" "0" "review-rc"
 REC_P="$H/.git/omp-kit/history-review/$SHA_P.json"
 if [ -r "$REC_P" ] && [ ! -w "$REC_P" ] && grep -q '"status": "REVIEWED"' "$TMP/review.out"; then rc=0; else rc=1; fi
 ok "$rc" "0" "review-recorded-read-only"
-witness "$H" review --plan "$PLAN_P" --reviewer another-reviewer > /dev/null 2> "$TMP/review-again.err"
+APPR_COPY="$H/.git/omp-kit/history-review/$SHA_P.approval.json"
+if [ ! -w "$APPR_COPY" ] && cmp -s "$APPR_COPY" "$APPR_P" &&
+	grep -qF "\"approval_message_id\":41,\"approval_sha256\":\"$(shasum -a 256 "$APPR_P" | cut -d ' ' -f 1)\"" "$REC_P"; then rc=0; else rc=1; fi
+ok "$rc" "0" "review-binds-approval-id-and-digest"
+witness "$H" review --plan "$PLAN_P" --reviewer another-reviewer --approval-message-id 43 --approval-file "$H/.git/reviewed.approval.another-reviewer.json" > /dev/null 2> "$TMP/review-again.err"
 ok "$?" "4" "review-once-only"
+grep -q 'REFUSED REVIEW_ALREADY_RECORDED' "$TMP/review-again.err"
+ok "$?" "0" "review-once-only-reason"
+forge noapproval reviewer --no-approval-copy
+forge tamperapproval reviewer --tamper-approval
+forge senderapproval reviewer --approval-from someone-else
+forge legacy reviewer --legacy-v1
 forge altered reviewer --alter-after-digest
 forge writable reviewer --writable
 forge applier applier
@@ -277,6 +315,10 @@ negatives() { # negatives <normal|mutant>
 	case_ "$m" reviewer-is-applier "REFUSED REVIEWER_IS_APPLIER" admit drive "$H/.git/applier.plan.json"
 	case_ "$m" review-other-tip "REFUSED REVIEW_BINDING_MISMATCH new_tip" admit drive "$H/.git/othertip.plan.json"
 	case_ "$m" review-wrong-ref "REFUSED REVIEW_BINDING_MISMATCH ref" admit drive "$H/.git/wrongref.plan.json"
+	case_ "$m" approval-absent "REFUSED REVIEW_APPROVAL_ABSENT" admit drive "$H/.git/noapproval.plan.json"
+	case_ "$m" approval-digest "REFUSED REVIEW_APPROVAL_DIGEST_MISMATCH" admit drive "$H/.git/tamperapproval.plan.json"
+	case_ "$m" approval-sender "REFUSED APPROVAL_SENDER_MISMATCH" admit drive "$H/.git/senderapproval.plan.json"
+	case_ "$m" legacy-v1-review "REFUSED REVIEW_APPROVAL_ABSENT" admit drive "$H/.git/legacy.plan.json"
 	case_ "$m" wrong-repo "REFUSED PLAN_REPOSITORY_MISMATCH" admit drive "$H/.git/wrongrepo.plan.json"
 	git -C "$H" update-ref refs/heads/main "$C" "$L2"
 	ok "$?" "0" "$m-stale-setup-forward"
