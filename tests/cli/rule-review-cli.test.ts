@@ -6,6 +6,8 @@ import { join, resolve } from "node:path";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
+import { run } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const source = resolve(import.meta.dir, "../..");
@@ -33,7 +35,7 @@ function snapshot(root: string): string[] {
 	});
 }
 
-beforeAll(() => {
+beforeAll(async () => {
 	const omp = resolveOmpIdentity(process.env);
 	base = realpathSync(ownedTmp("omp-kit-review-cli").path);
 	release = join(base, "relocated", "release");
@@ -47,7 +49,11 @@ beforeAll(() => {
 		mkdirSync(dir, { recursive: true });
 	}
 	for (const dir of ["rules", "retired", "cases", "policy", "extensions"]) cpSync(join(source, dir), join(release, dir), { recursive: true });
-	for (const file of ["MANIFEST.tsv", "scripts/rule-class.ts"]) writeFileSync(join(release, file), readFileSync(join(source, file)));
+	writeFileSync(join(release, "scripts/rule-class.ts"), readFileSync(join(source, "scripts/rule-class.ts")));
+	// MANIFEST.tsv is git-ignored, so an exported tree has none: build it from the selected rules, as docs.test.ts does.
+	const manifest = await run(["sh", join(source, "scripts/build-manifest.sh"), "--stdout"], { cwd: source, deadline_s: fixtureDeadlineS(30) });
+	if (manifest.rc !== 0) throw new Error("review fixture manifest failed (" + manifest.rc + "): " + new TextDecoder().decode(manifest.stderr));
+	writeFileSync(join(release, "MANIFEST.tsv"), manifest.stdout);
 	writeBundledHarness(release);
 	writeFileSync(join(home, "canary"), "operator state must not change\n");
 	writeFileSync(join(project, "canary"), "project contents are data, not executable configuration\n");
@@ -112,3 +118,72 @@ test("missing native OMP cannot become a quiet no-delta comparison", async () =>
 	expect(result.envelope.meta.verification).toBe("UNVERIFIED");
 	expect(result.envelope.data.status).toBe("UNAVAILABLE");
 }, 60_000);
+
+// TTSRFRICTION1 (ompkit-fp72.120.16.169): the labeled October sample in omp-kit
+// docs/evidence/mine-october-2026-11-04/ttsr-friction.json rated all 10 kit-no-force-push fires false.
+// The review replays that sample through the native matcher. A rule whose fires on the labeled sample
+// are mostly labeled-false refusals is flagged for narrowing. Planted: the pre-narrowing rule text
+// (sha256 103d683e…, the fixture). Control: the tree's rules-fleet/kit-no-force-push.md.
+const forcePushSample: ["fire" | "quiet", string, string][] = [
+	["quiet", `br close cfs-kqcfq --actor GradeI --force --reason "node --test scripts/twenty-a"`, "labeled false oct1"],
+	["quiet", "br comment ompkit-6nv6 --actor GradeGrowth --body 'GROWTH1 claims no deletion. Needs director ruling: --force close or re-parent .7-.11.'", "labeled false oct2"],
+	["quiet", "br --db /x/probe/.beads/beads.db update br-ugc --status closed --actor ProbeTest --force 2>&1 | head -n 5", "labeled false oct3"],
+	["quiet", "am mail send --to RusticPine --subject 'QUESTION 6nv6: force-close or re-parent .7-.11' --body 'Options: (a) --force close 6nv6, children live on; (b) re-parent'", "labeled false oct4"],
+	["quiet", "am mail send --to RainyTurtle --subject 'j2wma.9 is in_review; close with --force (j2wma.6 is follow-up)'", "labeled false oct5"],
+	["quiet", "br update cfs-j2wma.4 --claim --force --actor Wave6Port 2>&1 | cat", "labeled false oct6"],
+	["quiet", `br close ompkit-fp72.19.1.29 --force --actor Close29 --reason "NON-AUTHOR c"`, "labeled false oct7"],
+	["quiet", `br close ompkit-fp72.19.1.26 --force --actor Close26 --reason "nice -n 10 p"`, "labeled false oct8"],
+	["quiet", `br update cfs-gbp-tracking-number-j6c4t --claim --force --actor CollectiveViper; echo "exit=$?"`, "labeled false oct9"],
+	["quiet", `set -o pipefail; br comments add --actor Nordark ompkit-fp72.12 --message "1/1 open children. No --force without director ruling."`, "labeled false oct10"],
+	["fire", "git push --force origin main", "true control: bare force push"],
+	["fire", "git -C repo push origin HEAD:main --force", "true control: global option before push"],
+	["fire", String.raw`pwd\\n\\tgit push --force origin main`, "true control: escaped newline+tab before git (RX2 red 7521fdc723)"],
+	["fire", String.raw`pwd\\n\\tgit push -f origin main`, "true control: escaped boundary, short flag"],
+];
+
+type ReviewSide = "incumbent" | "candidate";
+interface ReviewedWitness {
+	expectationProvenance: Partial<Record<ReviewSide, { expectation: "fire" | "quiet" }>>;
+	incumbent: { status: string; whole?: string };
+	candidate: { status: string; whole?: string };
+}
+
+function flaggedForNarrowing(transitions: ReviewedWitness[], side: ReviewSide): { fires: number; falseFires: number; flagged: boolean } {
+	const fired = transitions.filter(entry => entry[side].status === "OK" && entry[side].whole === "fire");
+	const falseFires = fired.filter(entry => entry.expectationProvenance[side]?.expectation === "quiet").length;
+	return { fires: fired.length, falseFires, flagged: falseFires * 2 > fired.length };
+}
+
+async function reviewPacks(incumbentRoot: string, candidateRoot: string) {
+	const result = await run([binary, "review", "rules", "--incumbent-rules", join(incumbentRoot, "rules"), "--incumbent-cases", join(incumbentRoot, "cases.tsv"),
+		"--candidate-rules", join(candidateRoot, "rules"), "--candidate-cases", join(candidateRoot, "cases.tsv"), "--json"], { cwd: project, env: environment, deadline_s: fixtureDeadlineS(150) });
+	const stdout = new TextDecoder().decode(result.stdout);
+	const stderr = new TextDecoder().decode(result.stderr);
+	if (!stdout.trim()) throw new Error(JSON.stringify({ rc: result.rc, timed_out: result.timed_out, stdout, stderr }));
+	return { stderr, envelope: JSON.parse(stdout) };
+}
+
+test("TTSRFRICTION1: a rule whose labeled-sample fires are mostly false refusals is flagged for narrowing; the narrowed rule is not", async () => {
+	const planted = join(source, "tests/cli/fixtures/ttsrfriction1-kit-no-force-push.incumbent.md");
+	expect(hash(readFileSync(planted))).toBe("103d683ec251f0493e0e0bd90258729eb5b4b161137ba39d1e4f1540c0adf102");
+	const root = join(base, "ttsrfriction1");
+	const cases = header + forcePushSample.map(([want, snippet, note]) => ["kit-no-force-push", want, "tool", "bash", "-", snippet, note, ""].join("\t")).join("\n") + "\n";
+	for (const [side, rule] of [["incumbent", planted], ["candidate", join(source, "rules-fleet/kit-no-force-push.md")]] as const) {
+		mkdirSync(join(root, side, "rules"), { recursive: true });
+		writeFileSync(join(root, side, "rules", "kit-no-force-push.md"), readFileSync(rule));
+		writeFileSync(join(root, side, "cases.tsv"), cases);
+	}
+	const result = await reviewPacks(join(root, "incumbent"), join(root, "candidate"));
+	expect(result.stderr).toBe("");
+	const review = result.envelope.data.review as { status: string; conflicts: unknown[]; denominator: unknown; rules: { changed: string[] }; transitions: ReviewedWitness[] };
+	expect(review.conflicts).toEqual([]);
+	expect(review.denominator).toEqual({ exercised: forcePushSample.length, total: forcePushSample.length });
+	expect(review.status).toBe("DELTA");
+	expect(review.rules.changed).toEqual(["kit-no-force-push"]);
+	const plantedReview = flaggedForNarrowing(review.transitions, "incumbent");
+	expect(plantedReview.falseFires).toBe(10);
+	expect(plantedReview.flagged).toBe(true);
+	const control = flaggedForNarrowing(review.transitions, "candidate");
+	expect(control).toEqual({ fires: 4, falseFires: 0, flagged: false });
+	for (const entry of review.transitions) expect(entry.candidate.whole).toBe(entry.expectationProvenance.candidate?.expectation);
+}, fixtureDeadlineS(180) * 1000);
