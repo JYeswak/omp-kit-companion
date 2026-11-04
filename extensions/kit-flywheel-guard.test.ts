@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FLYWHEEL_EXEC_TIMEOUT_MS, isMutatingCall, trackerRequests, type FlywheelExecResult, type FlywheelToolCallResult } from "./kit-flywheel-guard";
-import { checkNoWait, validPriorArtLine } from "./kit-flywheel-guard";
+import { checkNoWait, normalizeRemoteUrl, validPriorArtLine } from "./kit-flywheel-guard";
 import { checkBgWait } from "./kit-flywheel-guard";
 import { createFlywheelHost, toolCall, bashInput, type FakeHost, type Responder } from "../tests/fleet-guard/kit-flywheel-host";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
@@ -344,6 +344,94 @@ test("EXPORTINDEX1 planted: own .git and a ceiling never authorize explicit outs
 		"GIT_DIR=~/outside-checkout/.git git read-tree HEAD",
 	]) expect((await toolCall(f.h, f.exported, command))?.reason, command).toContain("EXPORT_INDEX_REFUSED");
 	expect(readFileSync(join(f.project, ".git", "index"))).toEqual(f.index);
+});
+
+// --- CLONEGUARD1 ----------------------------------------------------------
+
+/** A checkout `repo` beside a sibling `companion`, each with only a `.git/config` naming its origin. */
+async function cloneGuardFixture() {
+	const parent = freshDir(base, "clone-guard-");
+	const project = join(parent, "repo");
+	for (const [dir, origin] of [[project, "https://github.com/JYeswak/omp-kit"], [join(parent, "companion"), "git@github.com:JYeswak/omp-kit-companion.git"]] as const) {
+		mkdirSync(join(dir, ".git"), { recursive: true });
+		writeFileSync(join(dir, ".git", "config"), `[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://github.com/someone/other\n[remote "origin"]\n\turl = ${origin}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`);
+	}
+	const scratch = join(project, "var", "agent-tmp", "a.1");
+	mkdirSync(join(scratch, "fixture"), { recursive: true });
+	mkdirSync(join(scratch, "f"), { recursive: true });
+	const h = await createFlywheelHost(base, { env: { TMPDIR: scratch }, respond: () => ({ code: 128, stdout: "", stderr: "fatal: not a git repository" }) });
+	return { project, scratch, h };
+}
+
+test("CLONEGUARD1 planted: a clone or fetch of an outside repository into scratch is refused, naming the alternatives", async () => {
+	const f = await cloneGuardFixture();
+	for (const command of [
+		"git clone --shared /Users/x/repo var/agent-tmp/a.1/c",
+		"cd var/agent-tmp/a.1 && git clone --shared /Users/x/repo c",
+		"cd var/agent-tmp/a.1 && git clone /Users/x/repo.git",
+		"git clone --reference /Users/x/repo --local /Users/x/repo var/agent-tmp/a.1/l",
+		"git clone -b main --mirror -- /Users/x/repo var/agent-tmp/a.1/m",
+		"git -C var/agent-tmp/a.1 clone file:///Users/x/repo c",
+		"env GIT_TRACE=0 sh -c 'cd var/agent-tmp/a.1 && git clone --shared /Users/x/repo c'",
+		"git clone --shared /Users/x/repo \"$TMPDIR/c\"",
+		"export SCRATCH=var/agent-tmp/a.1; git clone /Users/x/repo $SCRATCH/c",
+		"git clone /Users/x/repo \"$(mktemp -d var/agent-tmp/a.1/x.XXXX)\"",
+		"git clone https://github.com/JYeswak/omp-kit-companion.git var/agent-tmp/a.1/x",
+		"git clone --depth 1 ssh://git@GitHub.com:22/JYeswak/omp-kit-companion/ var/agent-tmp/a.1/x2",
+		"cd var/agent-tmp/a.1/f && git clone git@github.com:JYeswak/omp-kit var/agent-tmp/a.1/own",
+		"cd var/agent-tmp/a.1/f && git fetch /Users/x/repo main",
+		"cd var/agent-tmp/a.1/f && git pull ../../../../outside main",
+	]) {
+		const result = await toolCall(f.h, f.project, command);
+		expect(result?.block, command).toBe(true);
+		expect(result?.reason, command).toContain("CLONEGUARD1");
+		expect(result?.reason, command).toContain("omp-kit scratch new --export <sha>");
+		expect(result?.reason, command).toContain("git init");
+		expect(result?.reason, command).toContain("UNVERIFIED");
+	}
+});
+
+test("CLONEGUARD1 controls: same-scratch fixture clones, git init, clones outside scratch and remote-name fetches stay admitted", async () => {
+	const f = await cloneGuardFixture();
+	for (const command of [
+		"git clone var/agent-tmp/a.1/fixture var/agent-tmp/a.1/c2",
+		"cd var/agent-tmp/a.1 && git clone --shared fixture c3",
+		"git clone \"$TMPDIR/fixture\" \"$TMPDIR/c4\"",
+		"git init var/agent-tmp/a.1/f",
+		"cd var/agent-tmp/a.1 && git init -q new-fixture",
+		"git clone https://github.com/x/repo /Users/x/Developer/repo",
+		"git clone /Users/x/repo /Users/x/copy",
+		"git clone --help",
+		"git clone https://github.com/someone/other var/agent-tmp/a.1/y",
+		"git clone git@gitlab.com:JYeswak/omp-kit-companion.git var/agent-tmp/a.1/other-host",
+	]) {
+		const result = await toolCall(f.h, f.project, command);
+		expect(result?.block === true ? result.reason : "admitted", command).toBe("admitted");
+	}
+	for (const command of ["cd var/agent-tmp/a.1/f && git fetch origin", "cd var/agent-tmp/a.1/f && git log -1"]) {
+		expect((await toolCall(f.h, f.project, command))?.reason ?? "", command).not.toContain("CLONEGUARD1");
+	}
+	// Bounded: 16 KiB colon-laden, slash-laden and `$`-laden near-miss words parse in linear time.
+	const started = performance.now();
+	for (const command of [
+		`git clone ${"a:".repeat(8192)} /Users/x/elsewhere${"$a".repeat(4096)}`,
+		`git clone ${"a:".repeat(8192)} var/agent-tmp/a.1/z`,
+		`git clone https://h/${"/".repeat(16000)}x var/agent-tmp/a.1/z2`,
+	]) {
+		const long = await toolCall(f.h, f.project, command);
+		expect(long?.block === true ? long.reason : "admitted").toBe("admitted");
+	}
+	const elapsed = performance.now() - started;
+	console.log(`CLONEGUARD1 three 16 KiB near-misses: ${elapsed.toFixed(3)} ms`);
+	expect(elapsed).toBeLessThan(fixtureDeadlineS(1) * 1000);
+});
+
+test("CLONEGUARD1 remote normalization: scp, ssh and https forms of one repository compare equal", () => {
+	for (const url of ["git@github.com:JYeswak/omp-kit-companion.git", "https://GitHub.com/JYeswak/omp-kit-companion", "ssh://git@github.com:22/JYeswak/omp-kit-companion.git/", "https://user@github.com/JYeswak/omp-kit-companion.git"]) {
+		expect(normalizeRemoteUrl(url), url).toBe("github.com/JYeswak/omp-kit-companion");
+	}
+	for (const url of ["/Users/x/repo", "./repo", "file:///Users/x/repo", "https://github.com", "relative/a:b"]) expect(normalizeRemoteUrl(url), url).toBeUndefined();
+	expect(normalizeRemoteUrl("https://github.com/JYeswak/Other")).not.toBe(normalizeRemoteUrl("https://github.com/JYeswak/other"));
 });
 
 // --- SELF_CLOSE_REFUSED --------------------------------------------------

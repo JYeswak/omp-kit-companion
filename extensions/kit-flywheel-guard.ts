@@ -878,6 +878,211 @@ export async function checkExportIndex(event: FlywheelToolCallEvent, deps: Track
 	return undefined;
 }
 
+export const CLONE_GUARD_REFUSED = "CLONEGUARD1";
+const CLONE_GUARD_ALTERNATIVES = "For read-only work use `omp-kit scratch new --export <sha>`; for a test that needs commits build a synthetic fixture with `git init` inside scratch (a clone whose source is a fixture in the same scratch is allowed); otherwise report UNVERIFIED and name the command that would verify.";
+/** `git clone` options that take the next word as their value. */
+const CLONE_VALUE_FLAGS: Record<string, true> = {
+	"--reference": true, "--reference-if-able": true, "-o": true, "--origin": true, "-b": true, "--branch": true,
+	"-u": true, "--upload-pack": true, "--template": true, "-c": true, "--config": true, "--depth": true,
+	"--shallow-since": true, "--shallow-exclude": true, "--separate-git-dir": true, "-j": true, "--jobs": true,
+	"--filter": true, "--server-option": true, "--bundle-uri": true, "--ref-format": true,
+};
+
+/** Real path through the nearest existing ancestor, so a destination that does not exist yet still canonicalizes. */
+function canonicalPath(path: string): string {
+	let head = resolve(path);
+	const tail: string[] = [];
+	for (;;) {
+		try { return join(realpathSync(head), ...tail.reverse()); } catch { /* not created yet */ }
+		const parent = dirname(head);
+		if (parent === head) return resolve(path);
+		tail.push(basename(head));
+		head = parent;
+	}
+}
+
+/**
+ * `host/path` for a network remote, so `git@host:o/r`, `ssh://git@host:22/o/r.git` and
+ * `https://Host/o/r` compare equal: host lowercased, user and port dropped, `.git` and slashes
+ * trimmed. Undefined for a local path. Plain scans, no backtracking regex.
+ */
+export function normalizeRemoteUrl(url: string): string | undefined {
+	const text = url.trim();
+	let host: string;
+	let path: string;
+	const scheme = text.indexOf("://");
+	if (scheme > 0) {
+		if (text.slice(0, scheme).toLowerCase() === "file") return undefined;
+		const rest = text.slice(scheme + 3);
+		const slash = rest.indexOf("/");
+		if (slash <= 0) return undefined;
+		host = rest.slice(0, slash);
+		path = rest.slice(slash + 1);
+		const colon = host.indexOf(":", host.lastIndexOf("@") + 1);
+		if (colon >= 0) host = host.slice(0, colon);
+	} else {
+		const colon = text.indexOf(":");
+		if (colon <= 0 || text.slice(0, colon).includes("/")) return undefined;
+		host = text.slice(0, colon);
+		path = text.slice(colon + 1);
+	}
+	host = host.slice(host.lastIndexOf("@") + 1).toLowerCase();
+	let start = 0;
+	let end = path.length;
+	while (start < end && path[start] === "/") start += 1;
+	while (end > start && path[end - 1] === "/") end -= 1;
+	if (path.slice(start, end).endsWith(".git")) end -= 4;
+	while (end > start && path[end - 1] === "/") end -= 1;
+	return host && end > start ? `${host}/${path.slice(start, end)}` : undefined;
+}
+
+/** `remote "origin"` url from a checkout's git config (following a `.git` file and commondir), or undefined. */
+function checkoutOrigin(checkout: string): string | undefined {
+	try {
+		let gitDir = join(checkout, ".git");
+		if (statSync(gitDir).isFile()) {
+			const pointer = readFileSync(gitDir, "utf8").trim();
+			if (!pointer.startsWith("gitdir:")) return undefined;
+			gitDir = resolve(checkout, pointer.slice("gitdir:".length).trim());
+		}
+		const common = join(gitDir, "commondir");
+		if (existsSync(common)) gitDir = resolve(gitDir, readFileSync(common, "utf8").trim());
+		let inOrigin = false;
+		for (const raw of readFileSync(join(gitDir, "config"), "utf8").split("\n")) {
+			const line = raw.trim();
+			if (line.startsWith("[")) { inOrigin = line === '[remote "origin"]'; continue; }
+			const eq = line.indexOf("=");
+			if (inOrigin && eq > 0 && line.slice(0, eq).trim() === "url") return line.slice(eq + 1).trim();
+		}
+	} catch { /* unreadable checkout: no origin */ }
+	return undefined;
+}
+
+/** Most checkouts whose origins are compared, and the per-process cache of normalized origins by parent directory. */
+const CLONE_FLEET_REPO_CAP = 16;
+const cloneFleetOrigins = new Map<string, Set<string>>();
+
+/**
+ * Normalized origins of the fleet checkouts around `from`: the first checkout found walking up from
+ * `from` that is not inside `scratchRoot`, plus the git checkouts beside it (capped, cached per
+ * process). Built only when a network clone targets scratch.
+ */
+function fleetOrigins(from: string, scratchRoot: string): Set<string> {
+	let top: string | undefined;
+	for (let dir = resolve(from); ; dir = dirname(dir)) {
+		if (existsSync(join(dir, ".git")) && !withinDirectory(dir, scratchRoot)) { top = dir; break; }
+		if (dirname(dir) === dir) break;
+	}
+	if (top === undefined) return new Set();
+	const parent = dirname(top);
+	const cached = cloneFleetOrigins.get(parent);
+	if (cached) return cached;
+	const origins = new Set<string>();
+	const checkouts = [top];
+	let names: string[] = [];
+	try { names = readdirSync(parent).sort(); } catch { /* unreadable parent: the cwd repo alone */ }
+	for (const name of names) {
+		if (checkouts.length >= CLONE_FLEET_REPO_CAP) break;
+		const dir = join(parent, name);
+		if (dir !== top && existsSync(join(dir, ".git"))) checkouts.push(dir);
+	}
+	for (const checkout of checkouts) {
+		const origin = checkoutOrigin(checkout);
+		const normalized = origin === undefined ? undefined : normalizeRemoteUrl(origin);
+		if (normalized !== undefined) origins.add(normalized);
+	}
+	cloneFleetOrigins.set(parent, origins);
+	return origins;
+}
+
+/**
+ * CLONEGUARD1 (ompkit-fp72.120.16.232): a repository copied into scratch is a second history, the
+ * worktree the fleet forbids. Refuse `git clone` (any flags: --shared, --reference, --local,
+ * --mirror...) and `git fetch`/`pull` of a literal local path when the destination resolves inside a
+ * `<repo>/var/agent-tmp/<dir>` scratch and the source is not inside that same scratch. A network
+ * clone of external code (R45 prior-art reading) is admitted unless its URL normalizes to a fleet
+ * checkout's origin. `git init` fixtures and clones of a fixture made in the same scratch stay
+ * admitted. Wrapped forms (cd, env, sh -c) are followed the way EXPORTINDEX1 follows them; nothing runs.
+ */
+export function checkCloneScratch(event: FlywheelToolCallEvent, deps: { env: Record<string, string | undefined>; home: string; sessionCwd: string }): FlywheelToolCallResult | undefined {
+	if (event.toolName !== "bash") return undefined;
+	const command = field(event.input, "command");
+	if (typeof command !== "string") return undefined;
+	const cwd = field(event.input, "cwd");
+	const callCwd = typeof cwd === "string" && cwd.trim() ? resolve(deps.sessionCwd, expandHome(cwd.trim(), deps.home)) : deps.sessionCwd;
+	for (const line of brCommandLines(command, callCwd, deps.home, 0, false, ["git"])) {
+		let gitCwd = line.cwd;
+		let at = 1;
+		for (; at < line.argv.length; at += 1) {
+			const word = line.argv[at]!;
+			if (!word.startsWith("-")) break;
+			if (word === "-C") gitCwd = resolve(gitCwd, expandHome(line.argv[++at] ?? "", deps.home));
+			else if (word.startsWith("-C")) gitCwd = resolve(gitCwd, expandHome(word.slice(2), deps.home));
+			else if (["-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"].includes(word)) at += 1;
+		}
+		const verb = line.argv[at];
+		if ((verb !== "clone" && verb !== "fetch" && verb !== "pull") || line.argv.includes("--help")) continue;
+		const environment = { ...deps.env, ...line.environment };
+		const literal = (word: string): string | undefined => {
+			const text = word.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (whole, braced: string | undefined, bare: string | undefined) => environment[braced ?? bare ?? ""] ?? whole);
+			return shellExpands(text) ? undefined : text;
+		};
+		const positionals: string[] = [];
+		for (let index = at + 1; index < line.argv.length; index += 1) {
+			const word = line.argv[index]!;
+			if (word === "--") { positionals.push(...line.argv.slice(index + 1)); break; }
+			if (word.startsWith("-")) { if (verb === "clone" && CLONE_VALUE_FLAGS[word] === true) index += 1; continue; }
+			positionals.push(word);
+		}
+		const [sourceWord, destinationWord] = positionals;
+		if (sourceWord === undefined) continue;
+		const source = literal(sourceWord);
+		/** A local source path, or null for a network URL or remote name. */
+		const localSource = (text: string): string | null => {
+			if (/^file:\/\//i.test(text)) return text.slice("file://".length);
+			if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(text)) return null;
+			if (/^[^/]*:/.test(text) && !text.startsWith(".") && !text.startsWith("~")) return null;
+			if (verb !== "clone" && !text.includes("/") && !text.startsWith("~")) return null;
+			return resolve(gitCwd, expandHome(text, deps.home));
+		};
+		let destination: string | undefined;
+		if (verb === "clone") {
+			const text = destinationWord === undefined ? (source === undefined ? undefined : basename(source).replace(/\.git$/, "")) : literal(destinationWord);
+			destination = text === undefined ? undefined : resolve(gitCwd, expandHome(text, deps.home));
+		} else destination = gitCwd;
+		const root = destination === undefined ? undefined : scratchBoundary(canonicalPath(destination)) ?? scratchBoundary(destination);
+		if (destination === undefined || source === undefined) {
+			if (verb !== "clone") continue;
+			// The destination's literal prefix (or the cwd for an implied destination) decides whether scratch is reachable.
+			const cut = destinationWord?.search(/[$`]/) ?? -1;
+			const prefix = destinationWord === undefined ? gitCwd : resolve(gitCwd, expandHome(cut < 0 ? destinationWord : destinationWord.slice(0, cut), deps.home));
+			const mentionsScratch = [sourceWord, destinationWord ?? ""].some(word => word.includes("agent-tmp") || word.includes("TMPDIR"));
+			if (root === undefined && !mentionsScratch && scratchBoundary(canonicalPath(prefix)) === undefined) continue;
+			return {
+				block: true,
+				reason: `kit-flywheel-guard ${CLONE_GUARD_REFUSED}: git clone has a shell-expanded source or destination that cannot be resolved before execution, and it may copy a repository into scratch. No command ran. Use literal paths, or: ${CLONE_GUARD_ALTERNATIVES}`,
+			};
+		}
+		if (root === undefined) continue;
+		const local = localSource(source!);
+		if (verb !== "clone" && local === null) continue;
+		if (local !== null && (withinDirectory(canonicalPath(local), root) || withinDirectory(local, root))) continue;
+		if (local === null) {
+			const remote = normalizeRemoteUrl(source!);
+			if (remote === undefined || !fleetOrigins(gitCwd, root).has(remote)) continue;
+			return {
+				block: true,
+				reason: `kit-flywheel-guard ${CLONE_GUARD_REFUSED}: git clone of ${source} into ${destination} copies a fleet repository (its remote matches a fleet checkout's origin) into scratch (${root}): a second history, which the fleet forbids like a worktree. No command ran. ${CLONE_GUARD_ALTERNATIVES}`,
+			};
+		}
+		return {
+			block: true,
+			reason: `kit-flywheel-guard ${CLONE_GUARD_REFUSED}: git ${verb} of ${source} into ${destination} copies a repository into scratch (${root}): a second history, which the fleet forbids like a worktree. No command ran. ${CLONE_GUARD_ALTERNATIVES}`,
+		};
+	}
+	return undefined;
+}
+
 /** Supported close/claim/start/block/release/review mutations, plus bare custody writes (`update --assignee` without a classified status), with the cwd selected by leading cd commands; `sh -c` strings are followed. */
 export function trackerRequests(command: string, cwd: string, home: string): TrackerRequest[] {
 	const requests: TrackerRequest[] = [];
@@ -3020,6 +3225,8 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 			if (bgWait !== undefined) return bgWait;
 			const admission = checkBashAdmission(event, admissionOwner(env));
 			if (admission !== undefined) return admission;
+			const clone = checkCloneScratch(event, { env, home, sessionCwd: ctx.cwd });
+			if (clone !== undefined) return clone;
 			const exportIndex = await checkExportIndex(event, { exec: pi.exec, env, home, sessionCwd: ctx.cwd });
 			if (exportIndex !== undefined) return exportIndex;
 			const dbLiteral = checkTrackerDbLiteral(event);
