@@ -3,6 +3,7 @@ import type { Subprocess } from "bun";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const WRAPPER = join(import.meta.dir, "../../scripts/kit-commit.py");
 const CLI = join(import.meta.dir, "../../src/cli.ts");
@@ -56,7 +57,12 @@ test("planted GITLOCK1: two concurrent wrapper commits both land with zero lock 
 }, 120_000);
 
 test("planted GITLOCK1: commit TERM-killed during its pre-commit hook leaves no index.lock", async () => {
-	const root = fixture("kit-commit-killed", "#!/bin/sh\n# Hold .git/index.lock like a hook-spawned git command (the outer\n# commit itself holds no lock during hooks on modern git): sleep keeps the\n# stdin pipe open so update-index blocks holding the lock.\nsleep 30 | git update-index --stdin\n");
+	// The lock appears only after python3, the wrapper, git and the hook have started. The 2026-11-04
+	// b9e77980c8 verdict (load1 17-22 on 32 cores) ran out the old fixed 100 x 100 ms wait (10196 ms,
+	// lock not yet present). The wait and the hook's hold scale with load; the hold stays three times
+	// the wait so the lock is still held when the kill lands.
+	const waitS = fixtureDeadlineS(10);
+	const root = fixture("kit-commit-killed", `#!/bin/sh\n# Hold .git/index.lock like a hook-spawned git command (the outer\n# commit itself holds no lock during hooks on modern git): sleep keeps the\n# stdin pipe open so update-index blocks holding the lock.\nsleep ${Math.ceil(waitS * 3)} | git update-index --stdin\n`);
 	const shim = realpathSync(ownedTmp("kit-commit-shim").path);
 	try {
 		writeFileSync(join(root, "A"), "a1\n");
@@ -72,7 +78,8 @@ test("planted GITLOCK1: commit TERM-killed during its pre-commit hook leaves no 
 		// Live git holder: fake timers cannot work, the lock appears on the platform clock.
 		const { promise: appeared, resolve: markAppeared } = Promise.withResolvers<void>();
 		const poll = async () => {
-			for (let i = 0; i < 100 && !existsSync(lock); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+			const until = Date.now() + waitS * 1000;
+			while (Date.now() < until && !existsSync(lock)) await new Promise((resolve) => setTimeout(resolve, 100));
 			markAppeared();
 		};
 		await poll();
@@ -86,7 +93,7 @@ test("planted GITLOCK1: commit TERM-killed during its pre-commit hook leaves no 
 		rmSync(root, { recursive: true, force: true });
 		rmSync(shim, { recursive: true, force: true });
 	}
-}, 120_000);
+}, fixtureDeadlineS(120) * 1000);
 
 test("planted GITLOCK1: one transient lock collision is retried, not surfaced", async () => {
 	const root = fixture("kit-commit-retry", null);

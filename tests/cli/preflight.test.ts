@@ -1,13 +1,15 @@
 import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { envelope, parseFindingLines, renderEnvelope } from "../../src/kitlib/findings.ts";
+import { envelope, parseFindingLines, renderEnvelope, type Envelope } from "../../src/kitlib/findings.ts";
 import { checkPublishedCommits, preflightBead, preflightCommit } from "../../src/preflight.ts";
 import { admitClaimCut } from "../../src/claim-cut.ts";
 import { run } from "../../src/kitlib/run.ts";
+import { pollUntil } from "../../src/kitlib/poll.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { callerSeat, defaultRunner } from "../../src/scratch.ts";
 import { nativeBr } from "./lib/native-br.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const base = ownedTmp("preflight-test").path;
 
@@ -819,6 +821,19 @@ test("CUTCLAIM1 native: canonical repo selection, conflicting rows, malformed ed
 	} finally { f.cleanup(); }
 });
 
+// The claim path reads BR_REAL under a fixed 3 s product deadline (src/preflight.ts readTracker and
+// missingBeadDetail) and turns an expired read into UNJUDGED or CLAIM_CUT_UNKNOWN whose detail says
+// "failed (timeout)". The 2026-11-04 b9e77980c8 verdict at load1 17-22 on 32 cores got exactly that
+// (9006 ms, [UNJUDGED, CLAIM_CUT_UNKNOWN]) from this sh fixture tracker. Only that timeout answer is
+// re-observed, inside a load-scaled budget; every other answer is asserted exactly as before.
+async function claimAnswer(repo: string, id: string, env: Record<string, string>): Promise<Envelope> {
+	const polled = await pollUntil(() => preflightBead("claim", repo, id, { actor: "Holder", env }), {
+		deadline_s: fixtureDeadlineS(10), interval_s: 0.1, max_observation_bytes: 1 << 20,
+		classify: value => value.findings.some(finding => finding.detail.includes("failed (timeout)")) ? "retry" : "success",
+	});
+	return polled.observation as Envelope;
+}
+
 test("CUTCLAIM1 native: portable BR_REAL reader binds every show and graph read to BEADS_DB", async () => {
 	const f = preflightCutFixture();
 	try {
@@ -844,10 +859,10 @@ esac
 `);
 		chmodSync(real, 0o755);
 		const env = { ...f.env, BR_REAL: real };
-		expect((await preflightBead("claim", f.repo, "k-2", { actor: "Holder", env })).findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
-		expect((await preflightBead("claim", f.repo, "k-1", { actor: "Holder", env })).ok).toBe(true);
+		expect((await claimAnswer(f.repo, "k-2", env)).findings.map(finding => finding.code)).toContain("CLAIM_OUT_OF_CUT");
+		expect((await claimAnswer(f.repo, "k-1", env)).ok).toBe(true);
 	} finally { f.cleanup(); }
-});
+}, fixtureDeadlineS(30) * 1000);
 
 test("CUTCLAIM1 native: legacy repo-only rows and minimal epic/pinned cuts do not require unused fleet metadata", async () => {
 	const f = preflightCutFixture();

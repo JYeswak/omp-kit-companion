@@ -2,16 +2,31 @@ import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-	command, fixture, git, landArgs, registerPushCheck, remoteHead, responseCode, scratch, LAND_DEFAULT_TIMEOUT_MS,
+	command, fixture, git, landArgs, registerPushCheck, remoteHead, responseCode, scratch, LAND_DEFAULT_TIMEOUT_MS, type CommandOptions,
 } from "./private-index-land.helpers.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
+
+// land resolves the pane owner with `am agents resolve-pane` under a fixed 10 s product timeout
+// (src/land.ts spawnSync timeout: 10_000) and refuses OWNER_UNKNOWN, before any mutation, when it
+// expires. The 2026-11-04 b9e77980c8 verdict at load1 17-22 on 32 cores failed five cases here at
+// 10079-10107 ms with exactly that code. These cases re-run land only on that pre-mutation refusal,
+// inside a load-scaled budget; every other answer is asserted as before, and the unregistered-pane
+// cases still assert OWNER_UNKNOWN from a single run.
+function ownerResolved(work: string, args: string[], holds: unknown, options: CommandOptions) {
+	const until = Date.now() + fixtureDeadlineS(30) * 1000;
+	let run = command(work, args, holds, options);
+	while (responseCode(run.body) === "OWNER_UNKNOWN" && Date.now() < until) run = command(work, args, holds, options);
+	return run;
+}
+const OWNER_CASE_TIMEOUT_MS = fixtureDeadlineS(150) * 1000;
 
 test("saves and publishes consecutive owned commits directly on shared main", () => {
 	const { work, fakeBin } = fixture();
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
 	writeFileSync(join(work, "owned.txt"), "base owned\nfirst change\n");
-	const first = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	const first = ownerResolved(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
 	expect(first.status).toBe(0);
 	const firstData = first.body.data;
 	expect(firstData !== null && typeof firstData === "object" && "overall" in firstData && firstData.overall).toBe("PUSHED");
@@ -33,7 +48,7 @@ test("saves and publishes consecutive owned commits directly on shared main", ()
 	writeFileSync(join(work, "peer.txt"), "peer dirty between lands\n");
 	const peerEntry = git(work, ["ls-files", "-s", "--", "peer.txt"]);
 	writeFileSync(join(work, "owned.txt"), "base owned\nfirst change\nsecond change\n");
-	const second = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	const second = ownerResolved(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
 	expect(second.status).toBe(0);
 	const secondData = second.body.data;
 	expect(secondData !== null && typeof secondData === "object" && "overall" in secondData && secondData.overall).toBe("PUSHED");
@@ -49,7 +64,7 @@ test("saves and publishes consecutive owned commits directly on shared main", ()
 	expect(readFileSync(join(work, "untouched.txt"), "utf8")).toBe("remote between owned lands\n");
 	const secondBlob = git(work, ["ls-tree", secondSha, "--", "owned.txt"]).trim().split("\t")[0].split(" ")[2];
 	expect(git(work, ["ls-files", "-s", "--", "owned.txt"]).trim().split("\t")[0].split(" ")[1]).toBe(secondBlob);
-});
+}, OWNER_CASE_TIMEOUT_MS);
 test("refuses detached HEAD without creating or publishing an off-main candidate", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "owner change\n");
@@ -59,7 +74,7 @@ test("refuses detached HEAD without creating or publishing an off-main candidate
 	git(work, ["update-ref", "refs/heads/main", elsewhere]);
 	const index = readFileSync(join(work, ".git", "index"));
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	const run = ownerResolved(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
 	expect(run.status).toBe(1);
 	expect(responseCode(run.body)).toBe("LAND_MAIN_REQUIRED");
 	expect(remoteHead(work)).toBe(detached);
@@ -67,7 +82,7 @@ test("refuses detached HEAD without creating or publishing an off-main candidate
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(detached);
 	expect(readFileSync(join(work, ".git", "index"))).toEqual(index);
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("owner change\n");
-});
+}, OWNER_CASE_TIMEOUT_MS);
 test("preserves worktree edits made during publication without off-main catch-up", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "owner change\n");
@@ -75,7 +90,7 @@ test("preserves worktree edits made during publication without off-main catch-up
 	writeFileSync(hook, `#!/bin/sh\nprintf 'post-build edit\n' >> '${work}/owned.txt'\n`);
 	chmodSync(hook, 0o755);
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	const run = ownerResolved(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
 	expect(run.status).toBe(0);
 	const data = run.body.data;
 	expect(data !== null && typeof data === "object" && "overall" in data && data.overall).toBe("PUSHED");
@@ -85,7 +100,7 @@ test("preserves worktree edits made during publication without off-main catch-up
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(commit);
 	expect(git(work, ["show", ":owned.txt"])).toBe("owner change\n");
 	expect(readFileSync(join(work, "owned.txt"), "utf8")).toBe("owner change\npost-build edit\n");
-});
+}, OWNER_CASE_TIMEOUT_MS);
 test("shared-main landing preserves peer staged and worktree bytes", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "owner change\n");
@@ -95,7 +110,7 @@ test("shared-main landing preserves peer staged and worktree bytes", () => {
 	const peerContents = readFileSync(join(work, "untouched.txt"));
 	const peerEntry = git(work, ["ls-files", "-s", "--", "untouched.txt"]).trim();
 	const hold = [{ agent: "DarkFern", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
+	const run = ownerResolved(work, landArgs("owned.txt"), hold, { amDir: fakeBin });
 	expect(run.status).toBe(0);
 	const data = run.body.data;
 	expect(data !== null && typeof data === "object" && "overall" in data && data.overall).toBe("PUSHED");
@@ -106,7 +121,7 @@ test("shared-main landing preserves peer staged and worktree bytes", () => {
 	expect(git(work, ["ls-files", "-s", "--", "untouched.txt"]).trim()).toBe(peerEntry);
 	const commitBlob = git(work, ["ls-tree", commit, "--", "owned.txt"]).trim().split("\t")[0].split(" ")[2];
 	expect(git(work, ["ls-files", "-s", "--", "owned.txt"]).trim().split("\t")[0].split(" ")[1]).toBe(commitBlob);
-});
+}, OWNER_CASE_TIMEOUT_MS);
 test("refuses an unregistered pane identity without mutation", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "unpublished change\n");
@@ -127,7 +142,7 @@ test("lands for a registered Tern caller through the tern key", () => {
 	writeFileSync(join(work, "owned.txt"), "tern owner change\n");
 	const head = git(work, ["rev-parse", "HEAD"]).trim();
 	const hold = [{ agent: "TernAgent", path: "owned.txt", exclusive: true, remaining_seconds: 3600 }];
-	const run = command(work, landArgs("owned.txt"), hold, { amDir: fakeBin, tmuxPane: null, ternPane: "1756641624115", ternAgent: "TernAgent", claimed: "TernAgent" });
+	const run = ownerResolved(work, landArgs("owned.txt"), hold, { amDir: fakeBin, tmuxPane: null, ternPane: "1756641624115", ternAgent: "TernAgent", claimed: "TernAgent" });
 	expect(run.status).toBe(0);
 	const data = run.body.data;
 	expect(data !== null && typeof data === "object" && "overall" in data && data.overall).toBe("PUSHED");
@@ -137,7 +152,7 @@ test("lands for a registered Tern caller through the tern key", () => {
 	expect(git(work, ["rev-parse", "refs/heads/main"]).trim()).toBe(commit);
 	expect(git(work, ["rev-parse", "HEAD"]).trim()).toBe(commit);
 	expect(remoteHead(work)).toBe(commit);
-});
+}, OWNER_CASE_TIMEOUT_MS);
 test("refuses an unregistered Tern pane without mutation", () => {
 	const { work, fakeBin } = fixture();
 	writeFileSync(join(work, "owned.txt"), "unpublished change\n");
