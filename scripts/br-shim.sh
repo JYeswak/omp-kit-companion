@@ -54,6 +54,21 @@ done
 if [ "$real" = "$self_path" ]; then
 	fail "BR_SHIM_LOOP refusing to exec the shim itself (no real br beyond it on PATH)"
 fi
+# SHIMHELP1 (ompkit-kup44.9): help and version output cannot touch a tracker, so run the real br
+# before any identity or reservation check. prompt_lint T1 probes `br update --help` in exports
+# Agent Mail has never seen; gating it refused every orchestration commit. Only exact help shapes
+# qualify: a list that also carries a subcommand's real arguments keeps the ordinary policy.
+shim_help=0
+case "$#:${1:-}:${2:-}" in
+	1:--help:|1:-h:|1:--version:|1:-V:|1:help:) shim_help=1 ;;
+	2:help:-*) ;;
+	2:help:*) shim_help=1 ;;
+	2:-*) ;;
+	2:*:--help|2:*:-h) shim_help=1 ;;
+esac
+if [ "$shim_help" = 1 ]; then
+	exec "$real" "$@"
+fi
 # SYNC1 box 4: run the close gate at review entry and every close route.
 # Author handoff is not grading; closed status updates use the close stage
 # so they retain ownership, publication and Lesson requirements.

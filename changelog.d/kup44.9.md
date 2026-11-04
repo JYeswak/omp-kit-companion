@@ -1,0 +1,3 @@
+### Fixed
+
+- The br shim no longer treats help as a tracker write. `scripts/br-shim.sh` now runs the real br before any identity, Agent Mail or reservation check when the argument list is exactly help or version output: `--help`, `-h`, `--version` or `-V` alone, `help` or `help <sub>`, and `<sub> --help` or `<sub> -h`. Before, `br update --help` exited 4 (`BR_SHIM_RESERVATION_UNKNOWN`) in any clone Agent Mail had never seen, so prompt_lint T1 in the `~/.claude` storegate refused every orchestration commit made from an export. Lists that also carry a subcommand's real arguments, such as `br update X --status open --help`, keep the ordinary refusals; `br list --json` without `AGENT_NAME` still exits 4 `BR_SHIM_IDENTITY_REQUIRED`. (ompkit-kup44.9)

@@ -434,6 +434,63 @@ for mode in unregistered unreachable query-fail; do
 		printf 'FAIL fail-closed [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$mode" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
 	fi
 done
+
+# 13b. SHIMHELP1 (ompkit-kup44.9): help and version never need identity or reservations.
+# The export below is git-less (ceiling at $TMP), has no tracker and no BEADS_DB, and
+# Agent Mail has never seen it; AGENT_NAME is unset. Help shapes reach the real br;
+# lists that carry a subcommand's real arguments keep the ordinary refusals.
+mkdir -p "$TMP/unseen-export"
+help_run() {
+	help_identity=$1
+	shift
+	: > "$TMP/argv"
+	: > "$AM_LOG"
+	if [ "$help_identity" = none ]; then
+		(CDPATH='' cd -- "$TMP/unseen-export" && env -u AGENT_NAME -u BEADS_DB GIT_CEILING_DIRECTORIES="$TMP" br "$@") > "$TMP/out" 2>&1
+	else
+		(CDPATH='' cd -- "$TMP/unseen-export" && env -u BEADS_DB GIT_CEILING_DIRECTORIES="$TMP" AGENT_NAME="$help_identity" br "$@") > "$TMP/out" 2>&1
+	fi
+	got_rc=$?
+}
+help_prev_mode=$AM_FAKE_MODE
+AM_FAKE_MODE=unregistered
+# `none` is the unset pane identity; TestShim is the 2026-11-02 incident shape (name set, unseen project).
+for help_identity in none TestShim; do
+for kind in "--help" "-h" "--version" "-V" "help" "help update" "update --help" "update -h" "list --help" "close --help"; do
+	# shellcheck disable=SC2086
+	help_run "$help_identity" $kind
+	recorded=$(tr '\n' ' ' < "$TMP/argv" | sed 's/ $//')
+	# The fake br answers `list` from its fixture without recording argv; that answer is its proof of running.
+	if [ "$kind" = "list --help" ] && grep -Fq '"has_more"' "$TMP/out"; then recorded=$kind; fi
+	if [ "$got_rc" = "0" ] && [ "$recorded" = "$kind" ] && [ ! -s "$AM_LOG" ]; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		printf 'FAIL help-passthrough %s [%s]: rc=%s argv<<<%s>>> am<<<%s>>> out<<<%s>>>\n' "$help_identity" "$kind" "$got_rc" "$recorded" "$(cat "$AM_LOG")" "$(cat "$TMP/out")"
+	fi
+done
+done
+for kind in "list --json" "update X --status open" "update X --help" "update X --status open --help" "--json --help" "help update X"; do
+	# shellcheck disable=SC2086
+	help_run none $kind
+	if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -Fq "BR_SHIM_IDENTITY_REQUIRED" "$TMP/out"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		printf 'FAIL help-control-identity [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$kind" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+	fi
+done
+for kind in "update X --status open" "update X --status open --help"; do
+	# shellcheck disable=SC2086
+	help_run TestShim $kind
+	if [ "$got_rc" = "4" ] && [ ! -s "$TMP/argv" ] && grep -Fq "BR_SHIM_RESERVATION_UNKNOWN" "$TMP/out"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		printf 'FAIL help-control-reservation [%s]: rc=%s argv<<<%s>>> out<<<%s>>>\n' "$kind" "$got_rc" "$(cat "$TMP/argv")" "$(cat "$TMP/out")"
+	fi
+done
+AM_FAKE_MODE=$help_prev_mode
 export BEADS_DB="$REPO_ROOT/.beads/beads.db"
 export XDG_STATE_HOME="$TMP/state"
 export PATH="$TMP/shimbindir:$TMP/sendbin:$TMP/realbin:$PATH"
