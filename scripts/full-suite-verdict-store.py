@@ -631,7 +631,7 @@ CI_ONLY_GITHUB_ONLY = {
         "Explicit CI live Agent Mail suite needs 127.0.0.1:8765; it is not a hermetic local verdict.",
 }
 CI_ONLY_BUN_ARGS = ("test", "--timeout=120000")
-CI_ONLY_ENV = (("OMP_KIT_HEAVY_MAX_WAIT_S", "180"),)
+CI_ONLY_ENV = (("OMP_KIT_HEAVY_MAX_WAIT_S", "180"), ("OMP_KIT_DISK_OBSERVER", "statfs"))
 CI_ONLY_KEYS = frozenset(("version", "kind", "tree", "commit", "checks", "runtime", "spec", "verdict", "files",
                           "log_sha256", "finished_ms"))
 CI_ONLY_FILE_KEYS = frozenset(("path", "timeout_s", "rc", "timed_out", "duration_ms"))
