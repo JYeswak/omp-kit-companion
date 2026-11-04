@@ -110,10 +110,20 @@ test("removing either check makes its planted negative pass (the checks are load
 	const versionMutant = join(workspace, "readme-check.no-versions.ts");
 	writeFileSync(commandMutant, noCommands);
 	writeFileSync(versionMutant, noVersions);
-	expect(check(["--registry", join(workspace, "planted-registry.ts")], commandMutant).out).not.toContain("missing `omp-kit planted-fake`");
-	const planted = plantedReadme("README.mutant.md", readme.replace("\n## ", "\n```sh\nKIT_VERSION=0.2.15\n```\n\n## "));
+	const registry = join(workspace, "planted-registry.ts");
+	expect(check(["--registry", registry]).out).toContain("missing `omp-kit planted-fake`");
+	expect(check(["--registry", registry], commandMutant).out).not.toContain("missing `omp-kit planted-fake`");
+	// READMECAP1 (ompkit-fp72.120.16.239): plant into baseReadme(), whose release line equals package.json, so the
+	// verdict needs no release tag. The live README names the published release (NEXTVERSION1), and the full suite's
+	// archive (`git init`, no tags) judged that line RED as an absent tag, failing this case for a rule it never mutated.
+	const planted = plantedReadme("README.mutant.md", baseReadme().replace("\n## ", "\n```sh\nKIT_VERSION=0.2.15\n```\n\n## "));
+	const realRun = check(["--readme", planted]);
+	expect(realRun.out).toContain("pins a release version literal `0.2.15`");
+	expect(realRun.out).toContain("README-CHECK: RED (1 findings)");
+	expect(realRun.code).toBe(1);
 	const mutantRun = check(["--readme", planted], versionMutant);
 	expect(mutantRun.out).not.toContain("pins a release version literal");
+	expect(mutantRun.out).toContain("README-CHECK: GREEN");
 	expect(mutantRun.code).toBe(0);
 });
 
