@@ -10,9 +10,12 @@ set -u
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 
 INSTALLER=$(CDPATH='' cd -- "$(dirname -- "$0")/../../scripts" && pwd)/install-commit-msg-bead.sh
-REPO_TMP=$(CDPATH='' cd -- "$(dirname -- "$0")/../../var/agent-tmp" && pwd)
+# var/agent-tmp is git-ignored, so an exact-commit export lacks it: create it inside the repo.
+REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+mkdir -p "$REPO/var/agent-tmp" || exit 1
+REPO_TMP="$REPO/var/agent-tmp"
 # shellcheck source=scripts/kitlib-tmp.sh
-. "$REPO_TMP/../../scripts/kitlib-tmp.sh"
+. "$REPO/scripts/kitlib-tmp.sh"
 printenv TMPDIR >/dev/null || KITLIB_TMP_ROOT=$REPO_TMP
 kitlib_tmp TMP ref-txn-bead-test || exit 1
 
