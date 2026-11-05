@@ -8,6 +8,7 @@
 #                 Its exact tree must have a reusable main-role full-suite PASS before the signing keychain opens.
 #                 It must also have the push-time ci-only PASS (every local gate-ci-only.tsv file: package-release,
 #                 kit-update and their split live journeys, run by release-verdict.sh).
+#                 RELCARD1: its docs/releases/v<version>.md must pass scripts/release-card-check.py (before a prepare push).
 #   2. build      after the verdict readback and signing-identity preflight, build every ship-set platform
 #                 (darwin-arm64-none, linux-arm64-gnu, linux-x64-gnu) from an exact-commit `git archive`
 #                 export with scripts/package-release.sh, exactly as ci.yml build-candidates does (bun
@@ -93,7 +94,7 @@ while [ "$#" -gt 0 ]; do
 		--source) SOURCE="${2:-}"; shift 2 ;;
 		--install) INSTALL=1; shift ;;
 		--no-install) INSTALL=0; shift ;;
-		-h|--help) sed -n '2,36p' "${BASH_SOURCE[0]}"; exit 0 ;;
+		-h|--help) sed -n '2,37p' "${BASH_SOURCE[0]}"; exit 0 ;;
 		*) echo "release-local: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
@@ -143,6 +144,16 @@ substep() {
 	local now; now=$(date +%s)
 	if [ -n "$SUBSTEP" ]; then say "substep $SUBSTEP took $((now - SUBSTEP_T0))s"; fi
 	SUBSTEP=$1; SUBSTEP_T0=$now
+}
+
+# RELCARD1 (ompkit-fp72.120.16.254, Joshua J-2026-11-05-03): a cut ships a gap lane and 1-3 optimization ideas with
+# one applied and measured (docs/release-rubric.md). The card is read from the exact commit, never the working tree,
+# and refuses before a prepare push or the keychain: RELEASE_CARD_MISSING, RELEASE_CARD_INCOMPLETE section N, RELEASE_WAVE.
+release_card_check() {
+	local verdict
+	verdict="$(bounded 60 python3 "$ROOT/scripts/release-card-check.py" --repo "$ROOT" --rev "$1" --version "$VERSION" 2>&1)" ||
+		die "$verdict"
+	say "$verdict"
 }
 
 # No --source means prepare from this checkout. Never adopt foreign metadata edits,
@@ -351,10 +362,15 @@ if [ "$PREPARE" = 1 ] && git -C "$ROOT" show "$MAIN:package.json" | jq -e --arg 
 	PREPARE=0; SOURCE="$MAIN"
 	say "origin/main $MAIN already states $VERSION; tagging it with no prepare commit"
 fi
-if [ "$PREPARE" = 1 ]; then prepare_release; fi
+if [ "$PREPARE" = 1 ]; then
+	# The prepare commit changes only version metadata, so HEAD's card is the card it will carry.
+	release_card_check "$(git -C "$ROOT" rev-parse HEAD)"
+	prepare_release
+fi
 # Explicit --source remains the immutable resume/preview path.
 sh "$ROOT/scripts/release-train.sh" version-match --version "$VERSION" --sha "$SOURCE" --repo "$ROOT" ||
 	die "package.json version does not match v$VERSION at $SOURCE"
+release_card_check "$SOURCE"
 MODE="$(git -C "$ROOT" show "$SOURCE:scripts/release-signing.json" | jq -er 'select(.schema_version == 1) | .darwin_signing')" ||
 	die "source has no valid scripts/release-signing.json"
 if [ "$MODE" != developer-id ]; then

@@ -232,10 +232,18 @@ function runPreflight(f: Fixture, version: string, source: string) {
 
 test("AC2: a green origin commit that states the next version is cut as is, with no new commit", () => {
 	const f = fixture("nextversion-ac2", "1.2.4");
+	// RELCARD1 (ompkit-fp72.120.16.254): the preflight judges the exact source's release card before the keychain.
+	mkdirSync(join(f.repo, "docs/releases"), { recursive: true });
+	for (const name of ["release-card-check.py", "pysafe.py"]) copyFileSync(join(ROOT, "scripts", name), join(f.repo, "scripts", name));
+	writeFileSync(join(f.repo, "docs/releases/v1.2.4.md"), "# Release card: v1.2.4\n\n## 1. Gap lane\n\n| Bead | Defect | State |\n|---|---|---|\n| fixture-1 | a fixture defect | closed |\n\n## 2. Optimization lane\n\n| # | Idea | Measure | Evidence | Decision |\n|---|---|---|---|---|\n| 1 | a fixture idea | a measure | a profile | applied: 10 s → 5 s |\n\n## 3. Measures\n\n| Measure | Before | After |\n|---|---|---|\n| Change lead time | 66 min | |\n\n## 4. Error budget\n\nWithin budget.\n");
+	f.git(f.repo, "add", "."); f.git(f.repo, "commit", "-qm", "release card");
+	f.git(f.repo, "push", "-q", "origin", "main");
+	f.git(f.repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
 	const main = originMain(f);
 	const result = runPreflight(f, "", "");
 	expect(result.rc, decode(result.stderr)).toBe(0);
 	expect(decode(result.stdout)).toContain(`source ${main} (origin/main ${main}) version 1.2.4 base v1.2.3`);
+	expect(decode(result.stdout)).toContain(`== RELEASE_CARD_OK docs/releases/v1.2.4.md at ${main}`);
 	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(main);
 	expect(originMain(f)).toBe(main);
 	// The explicit --source form reaches the same cut.

@@ -890,3 +890,112 @@ advance_next_version
 		expect(git(repo, ["rev-parse", "HEAD"])).toBe(git(origin, ["rev-parse", "refs/heads/main"]));
 	} finally { rmSync(work, { recursive: true, force: true }); }
 }, fixtureDeadlineS(180) * 1_000);
+
+// RELCARD1 (ompkit-fp72.120.16.254, Joshua J-2026-11-05-03): a cut needs a complete two-lane release card at the exact
+// source commit (docs/release-rubric.md "Card grammar"). Fixture repos commit the card; the checker reads it with git,
+// so a different working-tree card never changes the verdict. No release, tag or signing step runs.
+const realCard = readFileSync(join(ROOT, "docs/releases/v0.2.92.md"), "utf8");
+const appliedCell = "| **applied** (companion e61fef4b64)";
+// Planted: the only applied idea is filed for later; its gap rows still ship, so this is incomplete, not a wave.
+const noAppliedCard = realCard.replace(appliedCell, "| next release (companion e61fef4b64)");
+// Planted: a version-bump-only card, with no shipped gap and no applied idea.
+const bumpOnlyCard = "# Release card: v0.2.92\n\n## 1. Gap lane\n\nVersion metadata set to 0.2.92.\n\n## 2. Optimization lane\n\nNone.\n\n## 3. Measures\n\n| Measure | Before | After |\n|---|---|---|\n| Change lead time (push → installed) | 66 min | |\n\n## 4. Error budget\n\nWithin budget.\n";
+function cardRepo(label: string, cards: Record<string, string>) {
+	const fixture = catchUpRepo(label);
+	const { repo, git } = fixture;
+	mkdirSync(join(repo, "scripts"), { recursive: true });
+	mkdirSync(join(repo, "docs/releases"), { recursive: true });
+	for (const name of ["release-card-check.py", "pysafe.py"]) cpSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
+	git(fixture.work, ["init", "-q", "-b", "main", repo]);
+	git(repo, ["add", "scripts"]); git(repo, ["commit", "-qm", "checker"]);
+	const shas: Record<string, string> = { none: git(repo, ["rev-parse", "HEAD"]) };
+	for (const [name, text] of Object.entries(cards)) {
+		writeFileSync(join(repo, "docs/releases/v0.2.92.md"), text);
+		git(repo, ["add", "docs"]); git(repo, ["commit", "-qm", `card ${name}`]);
+		shas[name] = git(repo, ["rev-parse", "HEAD"]);
+	}
+	return { ...fixture, shas };
+}
+function checkCard(repo: string, rev: string, env: Record<string, string>) {
+	const result = runFixture(["python3", "-B", join(ROOT, "scripts/release-card-check.py"), "--repo", repo, "--rev", rev, "--version", "0.2.92"], { cwd: repo, env, floor_s: 30 });
+	return { rc: result.rc, out: new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr) };
+}
+
+test("RELCARD1 checker: the real v0.2.92 card passes; a card missing its applied idea names section 2; a bump-only card is a wave", () => {
+	const { work, env, repo, shas } = cardRepo("relcard-check", {
+		real: realCard, noApplied: noAppliedCard, bumpOnly: bumpOnlyCard,
+		fourIdeas: realCard.replace("\n\n## 3. Measures", "\n| 4 | a fourth idea | x | y | later |\n\n## 3. Measures"),
+		emptyBefore: realCard.replace("| Published releases, 24 h | 5 |", "| Published releases, 24 h |  |"),
+		noBudget: realCard.replace("## 4. Error budget", "## 4b. Budget notes"),
+		noClosedGap: realCard.replace(/\| (closed|landed)[^|\n]*\|\n/g, "| open |\n"),
+	});
+	try {
+		const real = checkCard(repo, shas.real, env);
+		expect(real.rc, real.out).toBe(0);
+		expect(real.out).toStartWith(`RELEASE_CARD_OK docs/releases/v0.2.92.md at ${shas.real}: 10 gap row(s) closed or landed; 3 idea(s), applied: PYCACHE1`);
+		const noApplied = checkCard(repo, shas.noApplied, env);
+		expect(noApplied.rc, noApplied.out).toBe(1);
+		expect(noApplied.out).toStartWith("RELEASE_CARD_INCOMPLETE section 2 (Optimization lane): no idea's Decision starts with applied");
+		expect(noApplied.out).toContain("docs/release-rubric.md §2");
+		const bump = checkCard(repo, shas.bumpOnly, env);
+		expect(bump.rc, bump.out).toBe(1);
+		expect(bump.out).toStartWith("RELEASE_WAVE: docs/releases/v0.2.92.md at");
+		const missing = checkCard(repo, shas.none, env);
+		expect(missing.rc, missing.out).toBe(1);
+		expect(missing.out).toStartWith(`RELEASE_CARD_MISSING: source ${shas.none} has no docs/releases/v0.2.92.md`);
+		for (const [name, refusal] of [
+			["fourIdeas", "RELEASE_CARD_INCOMPLETE section 2 (Optimization lane): the optimization table lists 4 ideas"],
+			["emptyBefore", "RELEASE_CARD_INCOMPLETE section 3 (Measures): the Before column is empty for DORA row(s): Published releases, 24 h"],
+			["noBudget", "RELEASE_CARD_INCOMPLETE section 4 (Error budget)"],
+			["noClosedGap", "RELEASE_CARD_INCOMPLETE section 1 (Gap lane): no gap-lane row has State closed or landed"],
+		] as const) {
+			const result = checkCard(repo, shas[name]!, env);
+			expect([name, result.rc], result.out).toEqual([name, 1]);
+			expect(result.out).toStartWith(refusal);
+		}
+		// The exact commit decides: the complete card in the working tree does not admit the committed incomplete card.
+		writeFileSync(join(repo, "docs/releases/v0.2.92.md"), realCard);
+		expect(checkCard(repo, shas.noApplied, env).out).toStartWith("RELEASE_CARD_INCOMPLETE section 2");
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(60) * 1_000);
+
+test("RELCARD1 release-local refuses an incomplete card before the keychain and a prepare push; the mutant without the check admits it", () => {
+	const cardStage = releaseStage('release_card_check "$SOURCE"\n', "MODE=");
+	const prepareStage = releaseStage('if [ "$PREPARE" = 1 ]; then\n\t# The prepare commit', "# Explicit --source");
+	// Order: both checks run before the keychain opens, before signing and before the tag; HEAD's check precedes the prepare.
+	for (const call of ['release_card_check "$SOURCE"', 'release_card_check "$(git -C "$ROOT" rev-parse HEAD)"\n\tprepare_release'])
+		for (const later of ["keychain-unlock", "stage sign", "stage tag"]) expect(localScript.indexOf(call)).toBeLessThan(localScript.indexOf(later));
+	expect(localScript.indexOf('release_card_check "$SOURCE"')).toBeGreaterThan(localScript.indexOf("release-train.sh\" version-match"));
+	const { work, env, repo, git, shas } = cardRepo("relcard-wiring", { noApplied: noAppliedCard, real: realCard });
+	const runStage = (stage: string, rev: string) => {
+		const script = join(work, "card-stage.sh");
+		writeFileSync(script, `${stagePrelude}
+ROOT=${JSON.stringify(repo)}; SOURCE=${rev}; VERSION=0.2.92; PREPARE=1
+prepare_release() { echo "PREPARED at $(git -C "$ROOT" rev-parse HEAD)"; }
+${stage}`);
+		const result = runFixture(["bash", script, work], { cwd: repo, env: { ...env, TMPDIR: work }, floor_s: 30 });
+		return { rc: result.rc, out: new TextDecoder().decode(result.stdout), err: new TextDecoder().decode(result.stderr) };
+	};
+	try {
+		const refused = runStage(cardStage, shas.noApplied!);
+		expect(refused.rc, refused.err).toBe(4);
+		expect(refused.err).toContain("release-local: refused: RELEASE_CARD_INCOMPLETE section 2 (Optimization lane)");
+		const admitted = runStage(cardStage, shas.real!);
+		expect(admitted.rc, admitted.err).toBe(0);
+		expect(admitted.out).toContain(`== RELEASE_CARD_OK docs/releases/v0.2.92.md at ${shas.real}`);
+		// Mutant: the same stage with the check bypassed admits the incomplete card.
+		const mutant = runStage(cardStage.replace('release_card_check "$SOURCE"', ":"), shas.noApplied!);
+		expect(mutant.rc, mutant.err).toBe(0);
+		expect(mutant.err).not.toContain("RELEASE_CARD");
+		// The prepare path judges HEAD before prepare_release can commit or push.
+		git(repo, ["checkout", "-q", shas.noApplied!]);
+		const prepRefused = runStage(prepareStage, "");
+		expect(prepRefused.rc, prepRefused.err).toBe(4);
+		expect(prepRefused.err).toContain("RELEASE_CARD_INCOMPLETE section 2");
+		expect(prepRefused.out).not.toContain("PREPARED");
+		git(repo, ["checkout", "-q", shas.real!]);
+		const prepared = runStage(prepareStage, "");
+		expect(prepared.rc, prepared.err).toBe(0);
+		expect(prepared.out).toContain(`PREPARED at ${shas.real}`);
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(60) * 1_000);

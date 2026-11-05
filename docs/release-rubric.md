@@ -71,3 +71,28 @@ own; the card shows them all side by side.
 
 A cut is a wave, and is refused, when its card shows no closed gap bead and no applied idea with a
 measured change. Version bumps, notes-only promotions and re-cuts of the same content are waves.
+
+## Card grammar (RELCARD1, enforced)
+
+`scripts/release-local.sh` runs `scripts/release-card-check.py --repo DIR --rev SHA --version X.Y.Z` before a prepare
+push and again on the exact source commit, before the signing keychain opens. The checker reads the card with
+`git cat-file blob SHA:docs/releases/vX.Y.Z.md`, never from the working tree, and refuses with one line:
+
+- `RELEASE_CARD_MISSING`: the source commit has no card.
+- `RELEASE_WAVE`: no gap row is closed or landed and no idea is applied with a measured change (Wave test).
+- `RELEASE_CARD_INCOMPLETE section N (title)`: section N below fails its rule; the line says which rule.
+
+The grammar is deliberately small:
+
+- A section starts at a heading `## N. Title` and runs to the next `## ` heading. The titles must start with
+  `Gap lane` (1), `Optimization lane` (2), `Measures` (3) and `Error budget` (4).
+- Each rule reads the section's first pipe table: a header row, a `|---|` row, then data rows. Cells split on `|`;
+  `*` and backticks are ignored when a cell is compared. Columns are found by the start of their header text.
+- Section 1: at least one row's `State` cell starts with the word `closed` or `landed`.
+- Section 2: the table has 1 to 3 data rows (ideas), and at least one `Decision` cell starts with the word
+  `applied` and records a measured change `X → Y`: a number, optionally followed by a unit word, an arrow (`→` or
+  `->`), and a number. Only a cell's first 2000 characters are read.
+- Section 3: a `Before` column exists, at least one row is a DORA row, and every DORA row has a non-empty Before.
+  A DORA row's first cell starts with `Change lead time`, `Deployment frequency`, `Published releases`,
+  `Failed deployment recovery`, `Change fail rate` or `Deployment rework rate`.
+- Section 4: the section exists and has at least one non-blank line.
