@@ -846,7 +846,9 @@ fi
 			echo "FRESH-GATE: PLAN FULL trigger=$full_triggers files=$full_files: a shared runtime changed, so every suite is affected; a FULL plan is not budgeted or deferred"
 			full_repo=${FRESH_GATE_REPO:-$ROOT}
 			full_verdict=MISS
-			if [ "${ARCHIVE_SUPPLIED:-0}" = 0 ] && full_tree=$(git -C "$full_repo" rev-parse --verify -q "$COMMIT^{tree}"); then
+			# FULLREUSE1: f4a62980f1 skipped pre-push's archive even when its candidate repo was supplied.
+			# A caller-owned archive without that repo must not consult the operator's verdict store.
+			if { [ "${ARCHIVE_SUPPLIED:-0}" = 0 ] || [ -n "${FRESH_GATE_REPO:-}" ]; } && full_tree=$(git -C "$full_repo" rev-parse --verify -q "$COMMIT^{tree}"); then
 				if full_verdict=$(cd "$SCRIPT_DIR" && python3 full-suite-verdict-store.py require-pass --repo "$full_repo" --tree "$full_tree" \
 					--role main --judge-root "$SCRIPT_DIR/.." --suite-root "$ARCHIVE_DIR" 2>&1); then
 					record_run 0 0 0
