@@ -4,6 +4,88 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.94] - 2026-11-05
+
+### Added
+
+- PINORDER1 (ompkit-fp72.120.16.275): `omp-kit milestone pin SESSION BEAD... --first --reason TEXT` moves the
+  named pins to the front of the cut in argument order, through the same tracker validation, lock, atomic write
+  and one pinLog row (`first: [...]`) as plain pin. Every other pin keeps its relative order; plain pin still
+  appends. A constraint change now reorders the cut in one audited call instead of unpinning and repinning every
+  pin ahead of the clearing bead, so launch_check SUBORDINATE reads GO.
+- MSDATE1 (ompkit-fp72.120.16.278): `omp-kit milestone date SESSION YYYY-MM-DD[THH:MMZ] --reason TEXT [--by NAME]`
+  sets `milestone.due` in fleet-watch.json under the same lock and atomic writer as pin/unpin, appending one
+  `pinLog` row with actor, time, old/new due and reason. A date before today (UTC) refuses `PAST_DUE`; a malformed
+  or impossible date refuses `MILESTONE_USAGE`. Directors can now re-date their own milestone without hand-editing
+  the config.
+
+### Changed
+
+- RELPREREG1 (ompkit-fp72.120.16.258, Joshua J-2026-11-05-05): from card version 0.2.94,
+  `scripts/release-card-check.py` treats every applied optimization idea as a preregistered paired experiment. Section 2
+  of the card must hold a `### Prereg <id>` block (endpoint, direction, producer, unit, mde and its source, sigma_d and
+  its source, alpha, power, n_pairs, stopping, control) and a `### Result <id>` block of paired readings with load1.
+  The checker recomputes the required n, drops VOID pairs (load1 delta > 2.0 or load1 > 0.75 × ncpu), computes the
+  paired-t CI with the standard library, and accepts only SHIPPED (CI above 0 and mean ≥ mde/2; a deterministic count
+  with sigma_d 0 ships when its difference reaches mde). New one-line refusals: `RELEASE_PREREG_MISSING`,
+  `RELEASE_UNDERPOWERED`, `RELEASE_INCONCLUSIVE`, `RELEASE_NO_EFFECT`, `RELEASE_REGRESSED`. The v0.2.92 and v0.2.93
+  cards keep their RELCARD1 verdicts and are not migrated. Grammar: `docs/release-rubric.md` ("Preregistration
+  grammar").
+- DEADLINETESTS1 (ompkit-fp72.120.16.265): per-test fixture deadlines in the deadline-ranked test files were re-measured
+  against the full-suite verdict logs written after each file's last change (per-test durations joined to the
+  file's load_1m, normalized by the `fixtureDeadlineS` load factor). Only bounds below 3× their p95 at load1 ≥ 18 moved:
+  the `br-shim.test.ts` CUTCLAIM1 claim run goes from `fixtureDeadlineS(15)` to `fixtureDeadlineS(25)`, and its case
+  budget from `fixtureDeadlineS(40)` to `fixtureDeadlineS(60)`; the `verify.test.ts` "LESSONPAYLOAD1 newest author
+  lesson" case goes from the file default `fixtureDeadlineS(15)` to `fixtureDeadlineS(25)`; and the land fixtures'
+  `git()` helper (`private-index-land.helpers.ts`) goes from the default 10 s floor to 20 s. All other bounds in
+  br-shim, verify, portable-paths, heavy*, installer-bootstrap and private-index-land* already sit above 3× p95 and
+  are unchanged. Planted hung-child refusals keep their bounded deadlines.
+- RELREMEDY2 (ompkit-fp72.120.16.274): release-local's kit live-writer reconcile class no longer requires `.commands` to list `omp-kit update --reconcile <id> --yes`; the real updater lists only `omp-kit undo <id> --yes`, so the 0.2.93 install PARTIAL refused and needed a hand reconcile. The receipt still comes from `.data.receipt_id` and every other condition stays. Tests replay the recorded 0.2.93 updater JSON verbatim (planted reconciles, foreign-path control refuses, commands-condition mutant refuses).
+
+### Fixed
+
+- VERIFYABSPATH1 (ompkit-fp72.120.16.267): `omp-kit verify` no longer replays an acceptance command that names
+  the verified repo by an absolute, `~`, `$HOME` or `${HOME}` path against the live working tree while the close
+  reads "on export <sha>". Before each replay, `mapRepoPaths` resolves every such path token (following
+  symlinks) and, when it lands inside the verified repo, rewrites it to the same relative path under the export;
+  the log records `REPO_PATH_MAPPED <token> -> <export path>`. Paths outside the repo (system tools, other repos,
+  sibling directories sharing a prefix) are left as written, as is the repo's own `.beads` tracker, which is
+  live state read through the read-only br (REPLAYBR1), not committed code. A token whose export path would not be shell-safe is
+  not executed: the box is UNJUDGED `REPO_PATH_UNMAPPED` naming the token, and verify returns ENVIRONMENT, never
+  PASS. New VERIFYABSPATH1 cases: a live-pass/export-fail fixture with an absolute-path box reports REWORK; the
+  relative-path control on the same commit reports the export's FAIL, and a committed passing script named
+  absolutely still closes; the mutant (unmapped command in the export cwd) passes on the live tree.
+- STAGE0WAKE1 (ompkit-fp72.120.16.276): kit-mail-wake now wakes the one seat a chief armed with
+  `arm_seat --override-pause` under a paused project. The exception is read from the seat's latest arm_seat receipt
+  (`goal-replacements.jsonl`, `override_pause`) and counts only when it is stamped at or after the current pause
+  (the last `pauseHistory` row with `pullEnabled` false). Every other seat of the session stays `STOPPED_NOT_WOKEN`;
+  a later receipt without the override, a receipt older than the pause, or a pause with no recorded start is no
+  exception. The ledger row records `pause_override`.
+- VERIFYTESTENV1 (ompkit-fp72.120.16.277): `tests/cli/verify.test.ts` no longer inherits the caller's identity.
+  From a seat, its real-br fixtures reached the pane br shim and failed with `BR_SHIM_ACTOR_MISMATCH`
+  (AGENT_NAME=PeachLeopard), `BR_SHIM_IDENTITY_REQUIRED` (AGENT_NAME unset) or `BR_SHIM_RESERVATION_UNKNOWN`. The
+  file now drops every policy-script br from PATH, puts a fixture bin whose br is the official native br first, and
+  binds AGENT_NAME to a fixture identity, restoring the caller's env afterwards. A mutant case shows that an
+  inherited seat identity through `scripts/br-shim.sh` still reproduces the mismatch.
+- VERIFYTESTENV1 rework: the file also drops the caller's tracker selectors (BEADS_DIR, BEADS_DB, BEADS_JSONL,
+  BEADS_CACHE_DIR, BD_DB, BD_DATABASE, BR_REAL, BR_BIN, BR_ACTOR, BR_AGENT_NAME, BR_OUTPUT_FORMAT) for its run.
+  Under `omp-kit verify` the replay inherits BEADS_DIR, and native br resolved every fixture `br init` to the
+  caller's tracker ("Already initialized"), failing 16 cases. A second mutant shows that an inherited BEADS_DIR
+  still sends the fixture's init to the caller's tracker.
+- LANDPANETIMEOUT1 (ompkit-fp72.120.16.280): land's `am agents resolve-pane` now runs through kitlib's bounded
+  synchronous runner under a 30 s base deadline scaled by the 1-minute load per core (factor 1..4, at most 120 s),
+  instead of a fixed 10 s spawnSync timeout. A resolve-pane that does not answer in time is refused
+  `OWNER_RESOLVE_TIMEOUT` with the deadline and a command to check; only a real "not registered" answer stays
+  `OWNER_UNKNOWN`. Under load the old bound turned land tests (and real lands) into false `OWNER_UNKNOWN`
+  refusals: 45 verdict-log cases, 33 of them at 10.09-10.35 s. `OMP_KIT_LAND_RESOLVE_BASE_S` overrides the 30 s
+  base (integer seconds, clamped to 1..600) only when set.
+- MINEPIDCOLLIDE1 (ompkit-fp72.120.16.283): the scratch-mine "one listing" test no longer fails when the OS gives
+  the bun runner a pid of 60000..60039. Its 40 fixture owner pids were 60000+index, and `ownedScratch` charges a
+  dir whose owner pid equals the caller's own pid, so a colliding runner counted 1 owned dir where 0 were expected
+  (reproduced with process.pid pinned to 60005: 1 owned, `d5`). The fixture pids now start at 60000 and skip the
+  caller's pid and its parent. New MINEPIDCOLLIDE1 cases pin the caller pid: at 60005 the listing still reads 0;
+  at 59999 the original pids still read 40 then 0; with no exclusion, 60005 reads 1 (`d5`).
+
 ## [0.2.93] - 2026-11-05
 
 ### Changed
