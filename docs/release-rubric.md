@@ -1,4 +1,4 @@
-# Release rubric (RELRUBRIC1)
+# Release rubric (RELRUBRIC3)
 
 Every kit release is cut against this rubric. A cut that fails it is not a release, even if every
 test is green. This was decided by Joshua, J-2026-11-05-03: "every release should identify at least
@@ -23,8 +23,8 @@ completed with the after-measures. It has the five parts below.
 
 - Name 1 to 3 ideas that would change a measure of the system, not just fix one more instance of a
   known defect. For each, give the hypothesis, the measure it should move, and where the data comes from.
-- Apply at least one idea in this release, with a before and an after reading of its measure on the
-  same producer. "Applied" means it is landed and installed, not filed.
+- Land and install at least one idea in this release, with a before and an after reading of its measure on the
+  same producer. From v0.2.95, label its evidence class below: a mechanism verification is not an applied field effect.
 - The ideas you don't apply are carried into the next card with a decision: next, later or dropped,
   and the reason.
 - An idea comes from evidence: a profile, the gate-events ledger, a mined failure class, or prior art
@@ -34,6 +34,37 @@ completed with the after-measures. It has the five parts below.
   (https://basecamp.com/shapeup/2.2-chapter-08, read 2026-11-05). DORA's improvement loop: "Have the
   whole team commit to making an improvement in the most significant constraint or bottleneck ...
   Check your progress ... Repeat" (https://dora.dev/guides/dora-metrics-four-keys, read 2026-11-05).
+
+### Evidence classes (RELRUBRIC3, from card version 0.2.95)
+
+| Class | What the evidence supports | Decision / verdict words |
+|---|---|---|
+| **MECHANISM** | A deterministic fixture or mutant pair proves “the code does X” on the stated inputs, not an outcome on the fleet. | **MECHANISM VERIFIED** |
+| **FIELD EFFECT** | A measurement on real seats, with the comparison, treatment assignment or verified exposure, controls, power and assumptions stated. | `applied, effect` / **SHIPPED** |
+
+A single pair with `sigma_d: 0`, or an explicit fixture or mutant arm, is MECHANISM regardless of how large its
+before/after difference is. Repeating a fixture does not turn it into FIELD EFFECT. A fixture's number of repaired
+paths, or a mutant's failure count, is not the real seats' failure rate. Only FIELD EFFECT may use SHIPPED or
+`applied` as an effect claim; bare `applied` is treated as an effect claim too. A MECHANISM VERIFIED idea may satisfy
+the release's landed-and-installed idea requirement without claiming an effect. Neither class waives the ship gates.
+
+For FIELD EFFECT, name the real seats, comparison and outcome denominator; record how treatment was assigned or
+when exposure was verified (a commit time alone is not activation); justify unaffected controls, power for the MDE,
+and assumptions about dependence, workload and spillover. The checker detects the mechanism signatures below; an
+absence of those signatures is not independent verification that a field design or its causal assumptions are sound.
+
+Sequential tests need a declared null, alternative and beta (type-II error). Per-observation confidence sequences
+are not valid on autocorrelated fleet series: the frozen spike found false-positive rates up to 0.590 on matched
+Markov series and 0.680 on block-resampled history at alpha 0.05. Use a dependence-justified observation unit and
+analysis, not an iid confidence sequence applied to every ledger row. Source: `omp-kit/docs/research/relrubric3-2026-11-05/stats-spike.md`
+(RUBRICSTATS1, ompkit-fp72.120.16.290, 2026-11-05, “Conclusion”: “Applied per observation to our autocorrelated series,
+the CS is **not** anytime-valid.”).
+
+The reviewer panel is **not adopted**: the benchmark found no measured benefit. In the post-pilot primary analysis,
+plain versus retrieval-augmented balanced accuracy was 0.750 versus 0.744, with one plain-arm parse failure retained.
+This small synthetic benchmark does not establish either reviewer as a release gate. Source: `omp-kit/docs/research/relrubric3-2026-11-05/panel-bench.md`
+(PANELBENCH1, ompkit-fp72.120.16.291, 2026-11-05, “Results”: “No superiority conclusion is supported.”).
+
 
 ## 3. Measures before and after: DORA five, read from our own producers
 
@@ -69,8 +100,9 @@ own; the card shows them all side by side.
 
 ## Wave test
 
-A cut is a wave, and is refused, when its card shows no closed gap bead and no applied idea with a
-measured change. Version bumps, notes-only promotions and re-cuts of the same content are waves.
+A cut is a wave, and is refused, when its card shows no closed gap bead and no verified idea with a measured change
+(MECHANISM VERIFIED or a SHIPPED FIELD EFFECT from v0.2.95). Version bumps, notes-only promotions and re-cuts of the
+same content are waves.
 
 ## Card grammar (RELCARD1, enforced)
 
@@ -82,8 +114,10 @@ push and again on the exact source commit, before the signing keychain opens. Th
 - `RELEASE_WAVE`: no gap row is closed or landed and no idea is applied with a measured change (Wave test).
 - `RELEASE_CARD_INCOMPLETE section N (title)`: section N below fails its rule; the line says which rule.
 - From card version 0.2.94 (RELPREREG1): `RELEASE_PREREG_MISSING`, `RELEASE_UNDERPOWERED`, `RELEASE_INCONCLUSIVE`,
-  `RELEASE_NO_EFFECT` or `RELEASE_REGRESSED` when an applied idea's preregistered experiment does not reach SHIPPED
-  (Preregistration grammar below).
+  `RELEASE_NO_EFFECT` or `RELEASE_REGRESSED` when an applied idea's preregistered experiment does not reach its
+  admissible verdict (Preregistration grammar below).
+- From card version 0.2.95 (RELRUBRIC3): `RELEASE_EVIDENCE_CLASS` when MECHANISM evidence claims SHIPPED/applied as an
+  effect, or when MECHANISM VERIFIED has no supporting mechanism signature.
 
 The grammar is deliberately small:
 
@@ -94,7 +128,9 @@ The grammar is deliberately small:
 - Section 1: at least one row's `State` cell starts with the word `closed` or `landed`.
 - Section 2: the table has 1 to 3 data rows (ideas), and at least one `Decision` cell starts with the word
   `applied` and records a measured change `X → Y`: a number, optionally followed by a unit word, an arrow (`→` or
-  `->`), and a number. Only a cell's first 2000 characters are read.
+  `->`), and a number. Only a cell's first 2000 characters are read. From v0.2.95 a Decision may instead start with
+  `MECHANISM VERIFIED` for mechanism evidence (or `SHIPPED` for FIELD EFFECT); its measured change is read from the
+  preregistered Result, not required in the Decision cell.
 - Section 3: a `Before` column exists, at least one row is a DORA row, and every DORA row has a non-empty Before.
   A DORA row's first cell starts with `Change lead time`, `Deployment frequency`, `Published releases`,
   `Failed deployment recovery`, `Change fail rate` or `Deployment rework rate`.
@@ -104,9 +140,12 @@ The grammar is deliberately small:
 
 Joshua J-2026-11-05-05 (RELRUBRIC2). Cards for v0.2.92 and v0.2.93 were cut before this rule and are judged by the
 rules above only; they are not migrated. From v0.2.94 every section-2 row whose `Decision` starts with `applied` (no
-`X → Y` needed) is a preregistered paired experiment, and only a SHIPPED verdict satisfies `applied`. The idea's id
-is the first word of its `Idea` cell (`**PYCACHE1** (…)` → `PYCACHE1`). Section 2 then holds two blocks per applied
-idea; each runs from its `### ` heading to the next `### ` or `## ` heading, and a repeated block is refused.
+`X → Y` needed) is a preregistered paired experiment. For historical v0.2.94 only a SHIPPED verdict satisfies
+`applied`; published cards through v0.2.94 keep their treatment. The pending v0.2.95 card is not historical: from
+v0.2.95 the same blocks are required for MECHANISM VERIFIED
+and SHIPPED decisions, with the evidence-class ceiling above. The idea's id is the first word of its `Idea` cell
+(`**PYCACHE1** (…)` → `PYCACHE1`). Section 2 holds two blocks per credited idea; each runs from its `### ` heading to
+the next `### ` or `## ` heading, and a repeated block is refused.
 
 - `### Prereg <id>`: `key: value` lines (fences, blank lines and `  # comments` ignored; an indented line continues
   the previous key) with every field `endpoint`, `direction` (`lower` or `higher` is better), `producer` (the exact
@@ -115,18 +154,27 @@ idea; each runs from its `### ` heading to the next `### ` or `## ` heading, and
   `control`. Numbers may lead with `~`/`≈`, use a Unicode minus `−`, and carry a unit word. A missing or invalid
   field refuses `RELEASE_PREREG_MISSING`.
 - The checker recomputes n = ⌈σ_d² (z₁₋α/₂ + z_power)² / mde² + z₁₋α/₂² / 2⌉ (at least 2), or n = 1 when
-  `sigma_d` is 0 (a deterministic count). `n_pairs` below it refuses `RELEASE_UNDERPOWERED`.
+  `sigma_d` is 0 (a deterministic count). `n_pairs` below it refuses `RELEASE_UNDERPOWERED`. From v0.2.95, n = 1 and
+  `sigma_d: 0` classify the result as MECHANISM, never a powered field-effect estimate.
 - `### Result <id>`: an `ncpu: N` line and a pipe table with `before`, `after`, `load1_before` and `load1_after`
   columns, one row per pair. A pair is VOID when |load1_before − load1_after| > 2.0 or either load1 > 0.75 × ncpu;
   VOID pairs are dropped and may be replaced up to `n_pairs` times (more refuses `RELEASE_INCONCLUSIVE`). Fewer valid
   pairs than `n_pairs` (or no Result block) refuses `RELEASE_UNDERPOWERED`; more refuses `RELEASE_INCONCLUSIVE`
   (fixed-n stopping).
 - d = before − after (`lower`) or after − before (`higher`), so a positive d is an improvement. The CI is
-  d̄ ± t₁₋α′/₂,ₙ₋₁ · s_d/√n with α′ = alpha / (number of applied ideas) (Bonferroni). The t quantile is computed with
+  d̄ ± t₁₋α′/₂,ₙ₋₁ · s_d/√n with α′ = alpha / (number of credited ideas) (Bonferroni). The t quantile is computed with
   the standard library (regularized incomplete beta) and matches the published table to 4 dp.
-- Verdict: **SHIPPED** when the CI's lower bound > 0 and d̄ ≥ mde/2; **REGRESSED** when its upper bound < 0;
-  **NO EFFECT** when it lies within (−mde, +mde); **INCONCLUSIVE** otherwise. They refuse `RELEASE_REGRESSED`,
-  `RELEASE_NO_EFFECT` and `RELEASE_INCONCLUSIVE`. A deterministic endpoint (`sigma_d: 0`) ships when its d ≥ mde;
-  if its differences vary, it refuses `RELEASE_INCONCLUSIVE`.
-- Example: PYCACHE1's "pyc writes per create 62 → 0" is `sigma_d: 0`, `n_pairs: 1`, mde 10 writes and one Result row
-  `| 1 | 62 | 0 | … |`: SHIPPED. Its CPU reading (one unpaired run) could not ship under this grammar.
+- Verdict: **SHIPPED** for FIELD EFFECT when the CI's lower bound > 0 and d̄ ≥ mde/2; **REGRESSED** when its upper
+  bound < 0; **NO EFFECT** when it lies within (−mde, +mde); **INCONCLUSIVE** otherwise. They refuse
+  `RELEASE_REGRESSED`, `RELEASE_NO_EFFECT` and `RELEASE_INCONCLUSIVE`. A deterministic endpoint (`sigma_d: 0`)
+  meets its numerical threshold when d ≥ mde; if its differences vary, it refuses `RELEASE_INCONCLUSIVE`.
+- From v0.2.95 the checker also classifies an explicit `fixture`/`mutant` arm in the preregistered `endpoint`,
+  `producer`, `sigma_source` or Result block as MECHANISM, even with multiple pairs or nonzero SD. A mechanism
+  meeting its numerical threshold returns **MECHANISM VERIFIED**, without a population CI. Its Decision must say
+  `MECHANISM VERIFIED`, not SHIPPED/applied; a SHIPPED Result verdict is refused too. Controls alone do not reclassify
+  a real-seat primary comparison. Numeric thresholds and load/stopping rules remain in force for both classes.
+- Historical example: PYCACHE1's “pyc writes per create 62 → 0” (`sigma_d: 0`, `n_pairs: 1`, mde 10 writes) earned
+  SHIPPED under RELPREREG1. Under RELRUBRIC3 the same pair can earn only **MECHANISM VERIFIED**.
+- The pending v0.2.95 card's DIRECTORREACH1 is MECHANISM: one deterministic fixture/mutant pair, failed paths 2 → 0.
+  Its former `applied` Decision is refused `RELEASE_EVIDENCE_CLASS`; its corrected MECHANISM VERIFIED reading is
+  n=1, mean d 2 paths, s_d 0 paths, mde 1 path. The live field effect remains unmeasured until the post-install canary.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""release-card-check: refuse a release whose card is missing, incomplete or a wave (RELCARD1), or whose applied idea
-lacks a preregistered, powered, SHIPPED paired experiment (RELPREREG1).
+"""release-card-check: refuse missing, incomplete or wave cards (RELCARD1), unpowered experiments (RELPREREG1),
+and mechanism evidence promoted to a field-effect claim (RELRUBRIC3).
 
 ompkit-fp72.120.16.254, Joshua J-2026-11-05-03: every release carries a gap lane and 1 to 3 optimization ideas,
 at least one applied and measured. The card is docs/releases/v<version>.md, read from the exact source commit with
@@ -11,10 +11,14 @@ ompkit-fp72.120.16.258, Joshua J-2026-11-05-05 (RELRUBRIC2): from card version 0
 required n, drops VOID pairs, computes the paired-t CI and accepts only a SHIPPED verdict. Cards before 0.2.94 were
 cut under RELCARD1 alone and are judged by it unchanged.
 
+ompkit-fp72.120.16.301 (RELRUBRIC3): from card version 0.2.95, a deterministic single pair or an explicit fixture
+or mutant arm is MECHANISM evidence and can earn only MECHANISM VERIFIED, never SHIPPED/applied as an effect.
+Published cards through v0.2.94 retain their original grammar and verdicts; v0.2.95 is not yet released.
+
 Usage: release-card-check.py --repo DIR --rev SHA --version X.Y.Z
 Exit 0 prints one RELEASE_CARD_OK line. Exit 1 prints one refusal line: RELEASE_CARD_MISSING, RELEASE_WAVE,
 RELEASE_CARD_INCOMPLETE section <n> (<title>), RELEASE_PREREG_MISSING, RELEASE_UNDERPOWERED, RELEASE_INCONCLUSIVE,
-RELEASE_NO_EFFECT or RELEASE_REGRESSED. Exit 2 is a usage or git error.
+RELEASE_NO_EFFECT, RELEASE_REGRESSED or RELEASE_EVIDENCE_CLASS. Exit 2 is a usage or git error.
 """
 from __future__ import annotations
 
@@ -49,6 +53,12 @@ HEADING = re.compile(r"## +([0-9]{1,2})\. +(.*)")
 CARD_CAP = 1 << 20
 # RELPREREG1: the first card version judged under the preregistration grammar (v0.2.92 and v0.2.93 were cut before it).
 PREREG_FROM = (0, 2, 94)
+# RELRUBRIC3: published cards through v0.2.94 retain their grammar; the pending v0.2.95 cut uses evidence classes.
+EVIDENCE_FROM = (0, 2, 95)
+MECHANISM_VERIFIED = re.compile(r"mechanism verified\b", re.IGNORECASE)
+MECHANISM_ARM = re.compile(r"\b(?:fixtures?|mutants?)\b", re.IGNORECASE)
+EFFECT_CLAIM = re.compile(r"\b(?:shipped|applied)\b", re.IGNORECASE)
+SHIPPED_VERDICT = re.compile(r"(?:verdict:\s*)?shipped\b", re.IGNORECASE)
 PREREG_FIELDS = ("endpoint", "direction", "producer", "unit", "mde", "mde_source", "sigma_d", "sigma_source", "alpha",
                  "power", "n_pairs", "stopping", "control")
 BLOCK = re.compile(r"### +(Prereg|Result) +(\S+)")
@@ -223,9 +233,10 @@ def fields(lines: List[str], known: Tuple[str, ...]) -> Dict[str, str]:
     return found
 
 
-def prereg_verdict(idea: str, found: Dict[Tuple[str, str], List[str]], applied_count: int) -> str:
-    """Judge one applied idea's preregistered paired experiment; return its SHIPPED summary or raise its refusal."""
-    where = f"applied idea {idea}"
+def prereg_verdict(idea: str, found: Dict[Tuple[str, str], List[str]], applied_count: int,
+                   evidence_classes: bool = False, decision: str = "") -> str:
+    """Judge one experiment under its card's versioned evidence grammar."""
+    where = f"idea {idea}" if evidence_classes else f"applied idea {idea}"
     if ("Prereg", idea) not in found:
         raise Refusal(f"RELEASE_PREREG_MISSING: {where} has no '### Prereg {idea}' block in section 2 ({RUBRIC} "
                       "Card grammar)")
@@ -291,18 +302,33 @@ def prereg_verdict(idea: str, found: Dict[Tuple[str, str], List[str]], applied_c
     if sigma == 0 and spread > 0:
         raise Refusal(f"RELEASE_INCONCLUSIVE: {where} preregistered a deterministic endpoint (sigma_d 0) but its "
                       f"paired differences vary (s_d {spread:.4g} {unit}); preregister sigma_d and recompute n")
+    mechanism = evidence_classes and (
+        (valid == 1 and sigma == 0) or
+        MECHANISM_ARM.search("\n".join([prereg[name] for name in ("endpoint", "producer", "sigma_source")] + result))
+        is not None)
+    if mechanism:
+        if EFFECT_CLAIM.search(decision) or any(SHIPPED_VERDICT.match(plain(line)) for line in result):
+            raise Refusal(f"RELEASE_EVIDENCE_CLASS: {where} is MECHANISM, not FIELD EFFECT; SHIPPED/applied effect "
+                          "claims require FIELD EFFECT; state MECHANISM VERIFIED")
+    elif evidence_classes and MECHANISM_VERIFIED.match(decision):
+        raise Refusal(f"RELEASE_EVIDENCE_CLASS: {where} has no deterministic single pair or fixture/mutant arm "
+                      "for MECHANISM VERIFIED; document the FIELD EFFECT design and use applied, effect")
     # Bonferroni across the card's applied ideas (conservative; equals Holm's first step).
     level = alpha / applied_count
     half = t_quantile(1 - level / 2, valid - 1) * spread / math.sqrt(valid) if spread > 0 else 0.0
     low, high = mean - half, mean + half
     reading = (f"n={valid}, mean d {mean:.4g} {unit}, {100 * (1 - level):.4g}% CI {low:.4g}..{high:.4g} {unit}, "
                f"mde {mde:g} {unit}")
+    if mechanism:
+        reading = f"n={valid}, mean d {mean:.4g} {unit}, s_d {spread:.4g} {unit}, mde {mde:g} {unit}"
     if sigma == 0:
         shipped = mean >= mde  # deterministic: no sampling noise, so the full mde is owed
     else:
         shipped = low > 0 and mean >= mde / 2
     if shipped:
-        return f"{idea} SHIPPED ({reading})"
+        if mechanism:
+            return f"{idea} MECHANISM VERIFIED ({reading})"
+        return f"{idea} SHIPPED ({reading})" + (" [FIELD EFFECT]" if evidence_classes else "")
     if high < 0:
         raise Refusal(f"RELEASE_REGRESSED: {where}: the CI lies wholly below 0 ({reading})")
     if low > -mde and high < mde:
@@ -312,7 +338,7 @@ def prereg_verdict(idea: str, found: Dict[Tuple[str, str], List[str]], applied_c
                   "carry it as next with n recomputed from the observed s_d")
 
 
-def judge(card: str, text: str, prereg: bool = False) -> str:
+def judge(card: str, text: str, prereg: bool = False, evidence_classes: bool = False) -> str:
     found = sections(text)
     gap_lines, idea_lines = section(found, 1), section(found, 2)
     shipped: List[str] = []
@@ -324,18 +350,22 @@ def judge(card: str, text: str, prereg: bool = False) -> str:
     ideas: List[List[str]] = []
     applied: List[str] = []
     applied_ids: List[str] = []
+    applied_decisions: List[str] = []
     decision = None
     if idea_lines is not None:
         header, ideas = first_table(idea_lines)
         decision = column(header, "Decision")
         if decision is not None:
             for row in ideas:
-                if len(row) > decision and APPLIED.match(plain(row[decision]).lower()) and (
-                        prereg or MEASURED.search(row[decision][:DECISION_SCAN])):
+                wording = plain(row[decision]) if len(row) > decision else ""
+                if (APPLIED.match(wording.lower()) or
+                        (evidence_classes and (MECHANISM_VERIFIED.match(wording) or SHIPPED_VERDICT.match(wording)))) and (
+                        prereg or MEASURED.search(wording[:DECISION_SCAN])):
                     name = plain(row[1] if len(row) > 1 else row[0])
                     applied.append(name[:80])
                     match = IDEA_ID.match(name)
                     applied_ids.append(match[0] if match else "")
+                    applied_decisions.append(wording)
     if not shipped and not applied:
         raise Refusal(f"RELEASE_WAVE: {card} shows no closed or landed gap bead and no applied idea with a measured "
                       f"change; version bumps, notes-only promotions and re-cuts are waves ({RUBRIC} Wave test)")
@@ -351,11 +381,14 @@ def judge(card: str, text: str, prereg: bool = False) -> str:
         raise incomplete(2, f"the optimization table lists {len(ideas)} ideas; it needs 1 to 3")
     if not applied:
         raise incomplete(2, "no idea's Decision starts with applied" + (
-            "" if prereg else " and records a measured change X → Y"))
+            ", SHIPPED or MECHANISM VERIFIED" if evidence_classes else
+            ("" if prereg else " and records a measured change X → Y")))
     verdicts = ""
     if prereg:
         found_blocks = blocks(idea_lines)
-        verdicts = "; " + "; ".join(prereg_verdict(idea, found_blocks, len(applied_ids)) for idea in applied_ids)
+        verdicts = "; " + "; ".join(
+            prereg_verdict(idea, found_blocks, len(applied_ids), evidence_classes, wording)
+            for idea, wording in zip(applied_ids, applied_decisions))
     measure_lines = section(found, 3)
     if measure_lines is None:
         raise incomplete(3, "no '## 3. Measures' section")
@@ -373,7 +406,7 @@ def judge(card: str, text: str, prereg: bool = False) -> str:
     if budget is None or not any(line.strip() for line in budget):
         raise incomplete(4, "no '## 4. Error budget' section with a reading")
     return (f"RELEASE_CARD_OK {card}: {len(shipped)} gap row(s) closed or landed; {len(ideas)} idea(s), "
-            f"applied: {applied[0]}{verdicts}")
+            f"{'evidence' if evidence_classes else 'applied'}: {applied[0]}{verdicts}")
 
 
 def main() -> int:
@@ -386,7 +419,9 @@ def main() -> int:
     if not version:
         print("release-card-check: --version must be X.Y.Z", file=sys.stderr)
         return 2
-    prereg = tuple(int(part) for part in version.groups()) >= PREREG_FROM
+    card_version = tuple(int(part) for part in version.groups())
+    prereg = card_version >= PREREG_FROM
+    evidence_classes = card_version >= EVIDENCE_FROM
     rc, out, err = git(args.repo, "rev-parse", "--verify", "--quiet", args.rev + "^{commit}")
     if rc != 0:
         print(f"release-card-check: {args.rev} is not a commit in {args.repo} {err.decode(errors='replace').strip()}",
@@ -401,7 +436,7 @@ def main() -> int:
                           "and commit it before the cut")
         if len(out) > CARD_CAP:
             raise Refusal(f"RELEASE_CARD_INCOMPLETE: {card} at {sha} exceeds {CARD_CAP} bytes")
-        print(judge(f"{card} at {sha}", out.decode("utf-8", errors="replace"), prereg))
+        print(judge(f"{card} at {sha}", out.decode("utf-8", errors="replace"), prereg, evidence_classes))
         return 0
     except Refusal as refusal:
         print(str(refusal))
