@@ -18,6 +18,7 @@ import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
 import { briefEditsFiles, briefHandbackRefusal, briefTargets, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
+import { readSpawnModelInputs, resolveSpawnPatterns, resolveTaskModels, taskModelRefusal, type SpawnModelIdentity } from "../src/spawn-model.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -98,6 +99,8 @@ export interface FlywheelContext {
 	ui?: { notify(message: string, type?: "info" | "warning" | "error"): void };
 	sessionManager?: { getEntries?(): readonly unknown[]; getSessionId?(): string };
 	agent?: { kind: "main" | "sub" };
+	model?: SpawnModelIdentity;
+	models?: { resolve(patterns: string): SpawnModelIdentity | undefined };
 }
 
 export interface FlywheelToolCallEvent {
@@ -138,6 +141,13 @@ export interface FlywheelMessage {
 	details?: unknown;
 }
 
+export interface FlywheelBeforeSubagentSpawnEvent {
+	type: "before_subagent_spawn";
+	agent: string;
+	invocationKind: "task" | "eval";
+	patterns: string[];
+}
+
 /** The slice of omp's ExtensionAPI this guard touches. */
 export interface FlywheelGuardApi {
 	on(event: "session_compact", handler: (event: { type: "session_compact" }, ctx: FlywheelContext) => unknown): void;
@@ -145,6 +155,7 @@ export interface FlywheelGuardApi {
 	on(event: "tool_call", handler: (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_execution_end", handler: (event: FlywheelToolExecutionEndEvent, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_result", handler: (event: FlywheelToolResultEvent, ctx: FlywheelContext) => unknown): void;
+	getAllTools?(): readonly { name: string }[];
 	sendMessage(message: FlywheelMessage, options?: { triggerTurn?: boolean; deliverAs?: "nextTurn" | "aside" }): void;
 	exec: FlywheelExec;
 }
@@ -152,7 +163,7 @@ export interface FlywheelGuardApi {
 export interface FlywheelGuardDeps {
 	env?: Record<string, string | undefined>;
 	home?: string;
-	/** Same roster contract and default as kit-mail-wake. */
+	/** Explicit operator roster; otherwise OMP_KIT_FLEET_ROSTER, then the XDG config default. */
 	rosterPath?: string;
 	/** Directory of the bead-lint helpers; defaults to the loaded release's scripts/ (BEAD_LINT_SCRIPTS_DIR). */
 	lintScriptsDir?: string;
@@ -1370,6 +1381,26 @@ export function admissionOwner(env: Record<string, string | undefined>): string 
 		if (value) return value;
 	}
 	return null;
+}
+
+/** Same roster membership used by ASKBLOCK1/ASKDEFAULT1, never task-authored roles. */
+function rosterRoles(parsed: unknown): { sessions: Record<string, unknown>; chiefs: string[] } {
+	const rows = field(parsed, "sessions");
+	if (rows === null || typeof rows !== "object" || Array.isArray(rows)) throw new Error("sessions is not an object");
+	const chiefRow = field(parsed, "chiefs");
+	const peers = field(chiefRow, "peers");
+	return { sessions: rows as Record<string, unknown>,
+		chiefs: [field(chiefRow, "lead"), ...(Array.isArray(peers) ? peers : [])].filter((name): name is string => typeof name === "string") };
+}
+
+function orchestrationSeat(name: string, sessions: Record<string, unknown>, chiefs: readonly string[]): boolean {
+	if (chiefs.some(chief => chief.toLowerCase() === name.toLowerCase())) return true;
+	return Object.values(sessions).some(session => {
+		const seats = field(session, "seats");
+		if (seats === null || typeof seats !== "object" || Array.isArray(seats)) return false;
+		const seat = Object.entries(seats).find(([seatName]) => seatName.toLowerCase() === name.toLowerCase())?.[1];
+		return field(seat, "role") === "director";
+	});
 }
 
 /** ASKDEFAULT1: the session's goal is active when its latest `mode_change` transcript entry is mode `goal` (omp's
@@ -2992,6 +3023,56 @@ export async function checkTrackerMutations(event: FlywheelToolCallEvent, deps: 
 export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: FlywheelGuardDeps = {}): Promise<void> {
 	const env = deps.env ?? process.env;
 	const home = deps.home ?? homedir();
+	// Operator data is not part of a skill installation. An explicit roster
+	// override supports existing fleets; portable installs follow XDG config.
+	const configHome = env.XDG_CONFIG_HOME && isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : join(home, ".config");
+	const configuredRoster = deps.rosterPath !== undefined || env.OMP_KIT_FLEET_ROSTER !== undefined;
+	const rosterPath = deps.rosterPath ?? env.OMP_KIT_FLEET_ROSTER?.trim() ?? join(configHome, "omp-kit", "fleet-roster.json");
+	const protectedSpawner = async (ctx: FlywheelContext): Promise<boolean | "SPAWN_ROSTER_UNREADABLE"> => {
+		// Child sessions inherit launcher variables, not the chief's seat role.
+		if (ctx.agent?.kind === "sub") return false;
+		const name = env.AGENT_NAME?.trim() || (await paneIdentities(pi.exec, env, home, [ctx.cwd]))[0];
+		if (!name) return false;
+		// A stock install has no fleet to protect. An explicit roster, an
+		// unreadable default, or a dangling default symlink is configured state.
+		if (!configuredRoster) {
+			try {
+				lstatSync(rosterPath);
+			} catch (error) {
+				if (field(error, "code") === "ENOENT") return false;
+				return "SPAWN_ROSTER_UNREADABLE";
+			}
+		}
+		try {
+			const { sessions, chiefs } = rosterRoles(JSON.parse(readFileSync(rosterPath, "utf8")));
+			return orchestrationSeat(name, sessions, chiefs);
+		} catch {
+			return "SPAWN_ROSTER_UNREADABLE";
+		}
+	};
+	// Native hosts expose the tool registry even before tools are initialized.
+	// Their spawn event includes final session-local policy; minimal legacy
+	// hosts still receive the task-call check. Auth fallback remains upstream.
+	if (pi.getAllTools) {
+		const on: unknown = pi.on;
+		if (typeof on !== "function") throw new Error("Native spawn event registration is unavailable");
+		on.call(pi, "before_subagent_spawn", async (event: FlywheelBeforeSubagentSpawnEvent, ctx: FlywheelContext) => {
+			try {
+				const scope = await protectedSpawner(ctx);
+				if (scope === false) return undefined;
+				if (typeof scope === "string") return { block: true, reason: taskModelRefusal([{ index: 0, agent: event.agent, patterns: [], reason: scope }]) };
+				const models = ctx.models;
+				const resolution = models
+					? resolveSpawnPatterns(0, event.agent, event.patterns, patterns => models.resolve(patterns))
+					: { index: 0, agent: event.agent, patterns: event.patterns, reason: "MODEL_QUERY_UNAVAILABLE" };
+				const reason = taskModelRefusal([resolution]);
+				if (reason) return { block: true, reason };
+			} catch {
+				return { block: true, reason: taskModelRefusal([{ index: 0, agent: event.agent, patterns: [], reason: "SPAWN_INPUTS_UNOBSERVABLE" }]) };
+			}
+			return undefined;
+		});
+	}
 	/** Seat-identity fallback for the commit-autocomplete lookup and the compaction summary. */
 	let selfDeclared: string | null = null;
 	const pendingCalls = new Map<string, RereadCall>();
@@ -3138,6 +3219,20 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
 			if (event.toolName === "task") {
+				try {
+					const scope = await protectedSpawner(ctx);
+					if (typeof scope === "string") return { block: true, reason: taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: scope }]) };
+					if (scope) {
+						const models = ctx.models;
+						if (!models) return { block: true, reason: taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "MODEL_QUERY_UNAVAILABLE" }]) };
+						const inputs = await readSpawnModelInputs(ctx.cwd, patterns => models.resolve(patterns), home);
+						const parent = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+						const reason = taskModelRefusal(resolveTaskModels(event.input, inputs.agents, inputs.settings, parent));
+						if (reason) return { block: true, reason };
+					}
+				} catch {
+					return { block: true, reason: taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "SPAWN_INPUTS_UNOBSERVABLE" }]) };
+				}
 				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec) ?? await checkPriorArtSpawn(event.input, ctx.cwd, pi.exec);
 				if (reason) return { block: true, reason };
 			}
@@ -3154,30 +3249,22 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 				// AGENT_NAME is set by the fleet launcher; older tmux seats use the
 				// same Agent Mail pane-identity binding as the other guard checks.
 				const name = env.AGENT_NAME?.trim() || (await paneIdentities(pi.exec, env, home, [ctx.cwd]))[0];
-				const rosterPath = deps.rosterPath ?? join(home, ".claude", "skills", "omp-kit-orchestration", "fleet-roster.json");
 				let sessions: Record<string, unknown>;
 				let chiefs: string[] = [];
 				try {
-					const parsed: unknown = JSON.parse(readFileSync(rosterPath, "utf8"));
-					const rows = field(parsed, "sessions");
-					if (rows === null || typeof rows !== "object" || Array.isArray(rows)) throw new Error("sessions is not an object");
-					sessions = rows as Record<string, unknown>;
-					const chiefRow = field(parsed, "chiefs");
-					const peers = field(chiefRow, "peers");
-					chiefs = [field(chiefRow, "lead"), ...(Array.isArray(peers) ? peers : [])].filter((c): c is string => typeof c === "string");
+					({ sessions, chiefs } = rosterRoles(JSON.parse(readFileSync(rosterPath, "utf8"))));
 				} catch (error) {
 					const warning = `kit-flywheel-guard ASKBLOCK1: roster unreadable (${rosterPath}: ${error instanceof Error ? error.message : String(error)}); ask allowed (fail-open).`;
 					ctx.ui?.notify(warning, "warning");
 					return { additionalContext: warning };
 				}
 				if (!name) return undefined;
-				let director = chiefs.some(chief => chief.toLowerCase() === name.toLowerCase());
+				const director = orchestrationSeat(name, sessions, chiefs);
 				for (const session of Object.values(sessions)) {
 					const seats = field(session, "seats");
 					if (seats === null || typeof seats !== "object" || Array.isArray(seats)) continue;
 					const seat = Object.entries(seats).find(([seatName]) => seatName.toLowerCase() === name.toLowerCase())?.[1];
 					const role = field(seat, "role");
-					if (role === "director") director = true;
 					if (role !== "builder" && role !== "grader") continue;
 					// The held bead lives in a tracker the seat used, not only its cwd's: read every tracker this
 					// session reached plus the cwd's, and with no `.beads` ancestor let br discover from the cwd.
