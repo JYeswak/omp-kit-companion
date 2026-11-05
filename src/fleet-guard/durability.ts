@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileException } from "node:child_process";
 import { constants } from "node:fs";
 import type { Stats } from "node:fs";
 import { promisify } from "node:util";
@@ -22,8 +22,8 @@ export type DurabilityBlock = FleetGuardBlock & (
 );
 
 class UnknownReadError extends Error {
-	constructor(readonly read: string, cause: unknown) {
-		super(cause instanceof Error ? cause.message : String(cause), { cause });
+	constructor(readonly read: string, cause: unknown, detail = cause instanceof Error ? cause.message : String(cause)) {
+		super(detail, { cause });
 	}
 }
 
@@ -52,7 +52,14 @@ function git(repo: string, args: string[], input?: string): Promise<string> {
 	running.child.stdin?.end(input);
 	const end = args.indexOf("--");
 	const read = `git ${(end < 0 ? args : args.slice(0, end)).join(" ")}`;
-	return running.then(result => result.stdout, error => { throw new UnknownReadError(read, error); });
+	return running.then(result => result.stdout, (error: ExecFileException & { stderr?: string }) => {
+		// GUARDGITLOAD1: classify the next failure before a long command/path can hide its cause.
+		// Keep the original error as cause; like git.ts firstLine(), bound stderr to 200 characters.
+		const stderr = (error.stderr ?? "").slice(0, 200).split("\n", 1)[0] ?? "";
+		throw new UnknownReadError(read, error, `git exec failed: killed=${error.killed ?? "UNKNOWN"}`
+			+ ` signal=${error.signal === undefined ? "UNKNOWN" : error.signal}`
+			+ ` code=${error.code === undefined ? "UNKNOWN" : error.code} stderr=${JSON.stringify(stderr)}`);
+	});
 }
 
 // SCRATCHOWNERFORM1 (ompkit-ma3sn): the bound is the work this comparison may do, not the repository's size. Real
