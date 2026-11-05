@@ -312,8 +312,12 @@ prepare_release
 	}, fixtureDeadlineS(60) * 1_000);
 }
 
-for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused"] as const) {
-	test(`release install ${scenario} only stamps installed after real store alignment`, async () => {
+// RELREMEDY1 (ompkit-fp72.120.16.246): writer-* replay the 0.2.91 PARTIAL whose only failures are the kit's own live
+// writers (gate-events.jsonl, inbox-wake/*.json) plus the state-root snapshot budget overflow.
+const writerScenarios = ["writer-partial", "writer-foreign", "writer-mutant"] as const;
+for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios] as const) {
+	const writer = (writerScenarios as readonly string[]).includes(scenario);
+	test(`${writer ? "RELREMEDY1 " : ""}release install ${scenario} only stamps installed after real store alignment`, async () => {
 		const work = realpathSync(ownedTmp("release-install", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 		// RELINSTALLPATH1 (ompkit-fp72.120.16.155): macOS TMPDIR lies under /var -> /private/var; the stage must hand the
 		// updater physical paths even when its work dir is reached through a symlinked parent.
@@ -360,6 +364,16 @@ if (args[0] === "update") {
       ["omp-kit update --reconcile abc-123 --yes"], false);
     process.exit(1);
   }
+  if (scenario.startsWith("writer-")) {
+    const changed = ["~/.local/state/omp-kit/gate-events.jsonl", "~/.local/state/omp-kit/inbox-wake/PeachLeopard.15fbe370fb29.json",
+      ...(scenario === "writer-foreign" ? ["~/.omp/agent/config.yml"] : [])];
+    emit({ action: "PARTIAL", receipt_id: "cd03799d-67fd", active_version: "0.0.0", matcher: "PASS", live: "PASS", postcheck: "FAIL",
+      postcheck_detail: { status: "FAIL", changed_operator_paths: changed, failed_stages: [], deferred_stages: [],
+        failures: [...changed.map(path => "Operator file changed during isolated test: " + path), "Operator file could not be read completely: ~/.local/state/omp-kit"],
+        cause: { cause_code: "Error", cause_message: "KIT_POSTCHECK_FAILED" }, live_state_paths: ["~/.local/state/omp-kit/chrome-jfp"] } },
+      ["omp-kit update --reconcile cd03799d-67fd --yes"], false);
+    process.exit(1);
+  }
   emit({ action: "UPDATED", active_version: "0.0.0" }); process.exit(0);
 }
 if (args[0] === "apply" && args[1] === "plugin") {
@@ -373,11 +387,15 @@ if (args[0] === "apply" && args[1] === "plugin") {
 process.exit(99);
 `);
 		chmodSync(kit, 0o755);
+		// The mutant drops the live-writer class: its writer-only PARTIAL must fall back to the refusal.
+		const installHelpers = scenario === "writer-mutant"
+			? stagePrelude.replace(/^RELREMEDY_LIVE_WRITER=.*$/m, "RELREMEDY_LIVE_WRITER='^$.'") : stagePrelude;
+		if (scenario === "writer-mutant") expect(installHelpers).not.toBe(stagePrelude);
 		const receiptFunction = releaseStage("receipt() {", 'if [ "$DRY_RUN" = 1 ]; then\n\t# shellcheck');
 		const fixture = join(work, "install.sh");
-		writeFileSync(fixture, `${stagePrelude}
+		writeFileSync(fixture, `${installHelpers}
 ROOT=$2; HOME=$3; INSTALL_PREFIX="$HOME/.local/opt/omp-kit"; INSTALLED=0
-PUB="$WORK/public"; mkdir "$PUB"; : >"$DIST/SHA256SUMS"
+PUB="$WORK/public"; mkdir "$PUB"; : >"$DIST/SHA256SUMS"; : >"$PUB/release-index.json"; : >"$PUB/$DARWIN"
 STARTED=$(date +%s); PUSH_STARTED=$STARTED; RELEASED_AT=$STARTED
 SOURCE=fixture; BASE_TAG=v0.0.0; NOTARY_ID=fixture; TAG_PUSH_SECONDS=0
 . "$ROOT/scripts/kitlib-tmp.sh"
@@ -387,17 +405,31 @@ receipt installed fixture fixture
 `);
 		mkdirSync(join(work, "dist"));
 		try {
-			const result = await runFixtureAsync(["bash", fixture, stageWork, ROOT, home], {
-				cwd: ROOT, env: { ...process.env, HOME: home, TMPDIR: work, RELEASE_TEST_WORK: work, RELEASE_TEST_SCENARIO: scenario }, floor_s: 30,
-			});
+			const env: Record<string, string | undefined> = { ...process.env, HOME: home, TMPDIR: work, RELEASE_TEST_WORK: work, RELEASE_TEST_SCENARIO: scenario };
+			delete env.XDG_STATE_HOME;
+			const result = await runFixtureAsync(["bash", fixture, stageWork, ROOT, home], { cwd: ROOT, env: env as Record<string, string>, floor_s: 30 });
 			const stdout = new TextDecoder().decode(result.stdout);
 			const stderr = new TextDecoder().decode(result.stderr);
-			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial";
+			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial";
 			expect(result.rc, stderr).toBe(successful ? 0 : 4);
 			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
 			expect(calls[0]).toEqual(["update", "--apply", "--yes", "--version", "0.0.0", "--index", join(work, "public/release-index.json"),
 				"--archive", join(work, "public/omp-kit-v0.0.0-darwin-arm64-none.tar"), "--json"]);
-			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(scenario === "browser-partial" || scenario === "reconcile-refused" ? 1 : 0);
+			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(["browser-partial", "reconcile-refused", "writer-partial"].includes(scenario) ? 1 : 0);
+			if (scenario === "writer-partial") {
+				expect(calls.find(args => args.includes("--reconcile"))).toEqual(["update", "--reconcile", "cd03799d-67fd", "--yes", "--json"]);
+				expect(stdout).toContain("substep install.reconcile-kit-live-writer-state");
+				expect(stderr).toContain("release-local: postcheck: ~/.local/state/omp-kit: exceeds the postcheck snapshot budget");
+				expect(stderr).toContain("gate-events.jsonl: written by a kit service during the isolated test (live-writer race)");
+			}
+			if (scenario === "writer-foreign" || scenario === "writer-mutant") {
+				expect(stderr).toContain("not the known live-browser or kit live-writer PARTIAL");
+				expect(stderr).toContain(`reconcile it with: ${kit} update --reconcile cd03799d-67fd --yes`);
+				const apply = /re-apply with: (\S+) update --apply --yes --version 0\.0\.0 --index (\/\S+) --archive (\/\S+)$/m.exec(stderr);
+				expect(apply?.[1]).toBe(kit);
+				for (const source of [apply![2]!, apply![3]!]) { expect(existsSync(source)).toBe(true); expect(source.startsWith(join(work, "public"))).toBe(false); }
+				if (scenario === "writer-foreign") expect(stderr).toContain("~/.omp/agent/config.yml: changed outside the kit live-writer class");
+			}
 			if (successful) {
 				expect(stdout).toContain('"installed": true');
 				expect(stdout).toContain('"push_to_installed_seconds":');
@@ -408,7 +440,7 @@ receipt installed fixture fixture
 			} else {
 				expect(stdout).not.toContain('"installed": true');
 				expect(stdout).not.toContain("installed 0.0.0; every profile link aligned");
-				const refusal = scenario === "foreign-write" ? "not the known live-browser-only PARTIAL"
+				const refusal = scenario === "foreign-write" || scenario === "writer-foreign" || scenario === "writer-mutant" ? "not the known live-browser or kit live-writer PARTIAL"
 					: scenario === "stale-link" ? "installed profile alignment is stale"
 					: scenario === "wrong-version" ? "installed CLI version readback differs"
 					: "live-browser-state reconcile refused";
@@ -834,10 +866,11 @@ exit 1
 ${productionDie}
 say() { echo "== $*"; }
 ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"; CHILD=''
+. "$ROOT/scripts/kitlib-tmp.sh"
 ${helperScript}
 ${advanceFunction}
 VERSION=1.2.4; SOURCE=${source}; INSTALL=1; INSTALLED=0; INSTALL_PREFIX=${JSON.stringify(prefix)}
-PUB="$WORK/public"; mkdir "$PUB"; DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar"
+PUB="$WORK/public"; mkdir "$PUB"; DARWIN="omp-kit-v$VERSION-darwin-arm64-none.tar"; : >"$PUB/release-index.json"; : >"$PUB/$DARWIN"
 ${tail}
 advance_next_version
 echo "unreachable: the install refusal must exit"
@@ -847,9 +880,12 @@ echo "unreachable: the install refusal must exit"
 		const stderr = new TextDecoder().decode(result.stderr);
 		expect(result.rc, stderr).toBe(4);
 		expect(stdout).not.toContain("unreachable");
-		expect(stderr).toContain("release-local: refused: install update failed (rc 1); not the known live-browser-only PARTIAL");
+		expect(stderr).toContain("release-local: refused: install update failed (rc 1); not the known live-browser or kit live-writer PARTIAL");
 		expect(stderr).toContain("v1.2.4 is published; advancing main to the next version before exiting");
-		expect(stderr).toContain(`v1.2.4 is published and main states the next version, but it is not installed (refusal above); install it with: ${prefix}/bin/omp-kit update --apply --yes --version 1.2.4`);
+		// RELREMEDY1: the remedy is runnable: --index/--archive name sources kept past the work dir's cleanup.
+		const remedy = /not installed \(refusal above\); install it with: (\S+) update --apply --yes --version 1\.2\.4 --index (\/\S+) --archive (\/\S+)$/m.exec(stderr);
+		expect(remedy?.[1]).toBe(`${prefix}/bin/omp-kit`);
+		for (const source of [remedy![2]!, remedy![3]!]) expect(existsSync(source)).toBe(true);
 		// The advance landed on origin main: next patch, the v1.2.4 notes promoted, the shipped fragment folded.
 		const show = (path: string) => git(origin, ["show", `refs/heads/main:${path}`]);
 		expect(JSON.parse(show("package.json")).version).toBe("1.2.5");

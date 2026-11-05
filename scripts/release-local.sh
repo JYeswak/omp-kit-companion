@@ -72,7 +72,7 @@ advance_after_refusal() {
 	ADVANCE_PENDING=0
 	echo "release-local: v$VERSION is published; advancing main to the next version before exiting" >&2
 	advance_next_version
-	echo "release-local: refused: v$VERSION is published and main states the next version, but it is not installed (refusal above); install it with: $INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION" >&2
+	echo "release-local: refused: v$VERSION is published and main states the next version, but it is not installed (refusal above); install it with: ${INSTALL_REMEDY:-$INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION --index <abs release-index.json> --archive <abs $DARWIN>}" >&2
 }
 die() { echo "release-local: refused: $*" >&2; [ "${ADVANCE_PENDING:-0}" = 0 ] || advance_after_refusal; exit 4; }
 say() { echo "== $*"; }
@@ -225,12 +225,56 @@ Agent: $agent" -- "${paths[@]}" || die "release prepare commit failed; metadata 
 	fi
 }
 
-# Reconcile only the updater's narrowly classified live-browser false PARTIAL.
+# Reconcile only the updater's narrowly classified false PARTIALs: live-browser state, or the kit's own live writers.
 # Genuine failed tests or foreign operator writes remain blocking failures.
+#
+# RELREMEDY1 (ompkit-fp72.120.16.246): 0.2.90, 0.2.91 and 0.2.92 ended PARTIAL only because the postcheck watches the
+# kit state root while the kit's own services write it: extensions/gate-events.ts appends gate-events.jsonl (rotating
+# to .1) and extensions/kit-inbox-wake.ts writes inbox-wake/<agent>.<id>.json. The root itself reads incomplete when
+# it exceeds the snapshot budget (operator-snapshot.ts MAX_ENTRIES_PER_ROOT 20000 / MAX_BYTES_PER_ROOT 512 MiB; the
+# 2026-11-05 root held 323k files, 28 GB). Only those writer paths and that root-budget overflow form the class; any
+# other changed or unreadable operator file still refuses. Every refusal names the receipt id and runnable commands.
+RELREMEDY_LIVE_WRITER='^(gate-events\.jsonl(\.1)?|inbox-wake/[A-Za-z0-9._-]+\.json)$'
+# jq prelude: $root is the absolute kit state root, $home expands the updater's ~/ display form.
+# shellcheck disable=SC2016 # jq variables, not shell expansions
+RELREMEDY_JQ='
+	def abs: if startswith("~/") then $home + .[1:] else . end;
+	def writer: abs | startswith($root + "/") and (.[($root | length) + 1:] | test($rx));
+	def failure_ok($changed):
+		(capture("^Operator file changed during isolated test: (?<p>.+)$").p as $p | ($changed | index($p)) != null and ($p | writer))
+		// (capture("^Operator file could not be read completely: (?<p>.+)$").p | abs == $root)
+		// false;'
+install_class_jq() {
+	jq "$@" --arg v "$VERSION" --arg home "$HOME" --arg root "$kit_state_root" --arg rx "$RELREMEDY_LIVE_WRITER" \
+		"$RELREMEDY_JQ $class_filter" "$WORK/install-update.json"
+}
+# Why the postcheck could not read the state root completely, or which kit writer raced it.
+install_postcheck_cause() {
+	# shellcheck disable=SC2016 # jq program
+	class_filter='.data.postcheck_detail as $p |
+		(($p.failures // [])[] | select(startswith("Operator file could not be read completely: ")) | .[44:] as $q |
+			if ($q | abs) == $root then "\($q): exceeds the postcheck snapshot budget (20000 entries or 512 MiB per root): size, not a race"
+			else "\($q): unreadable mid-read, a live-writer race" end),
+		(($p.changed_operator_paths // [])[] | if writer then "\(.): written by a kit service during the isolated test (live-writer race)"
+			else "\(.): changed outside the kit live-writer class (gate-events.jsonl, inbox-wake/*.json)" end)'
+	install_class_jq -r 2>/dev/null | sed 's/^/release-local: postcheck: /' >&2 || true
+}
+# Keep the verified sources past $WORK cleanup, so the printed apply command stays runnable after exit.
+install_remedy() {
+	local keep id
+	id="$(jq -r '.data.receipt_id // empty | select(type == "string" and test("^[a-f0-9-]{1,128}$"))' "$WORK/install-update.json" 2>/dev/null)" || id=''
+	KITLIB_TMP_AUTO_CLEANUP=0 kitlib_tmp keep release-install-source
+	keep="$(cd "$keep" && pwd -P)" && cp "$PUB/release-index.json" "$PUB/$DARWIN" "$keep/" || keep="$PUB"
+	INSTALL_REMEDY="$kit update --apply --yes --version $VERSION --index $keep/release-index.json --archive $keep/$DARWIN"
+	install_postcheck_cause
+	[ -z "$id" ] || echo "release-local: receipt $id; when its postimages verify, reconcile it with: $kit update --reconcile $id --yes" >&2
+	echo "release-local: otherwise re-apply with: $INSTALL_REMEDY" >&2
+}
 install_release() {
 	stage install
 	local kit="$INSTALL_PREFIX/bin/omp-kit" store="$INSTALL_PREFIX/releases/$VERSION"
-	local update_rc=0 reconcile_id
+	local update_rc=0 reconcile_id kit_state_root class_filter reconcile_class=live-browser
+	kit_state_root="${XDG_STATE_HOME-$HOME/.local/state}/omp-kit"
 	# RELINSTALLPATH1 (ompkit-fp72.120.16.155): `omp-kit update --apply` refuses a source that is not its own realpath
 	# (UNSAFE_KIT_SOURCE, kit-update.ts assertRegular), and $WORK under macOS TMPDIR sits below the /var -> /private/var
 	# symlink, so 0.2.75 published and then never installed. Hand the updater the physical path (same directory).
@@ -240,7 +284,7 @@ install_release() {
 		--index "$PUB/release-index.json" --archive "$PUB/$DARWIN" --json >"$WORK/install-update.json" || update_rc=$?
 	cat "$WORK/install-update.json"
 	if [ "$update_rc" -ne 0 ]; then
-		jq -er --arg v "$VERSION" '
+		if ! jq -er --arg v "$VERSION" '
 			.data as $d | $d.receipt_id as $id |
 			select($d.action == "PARTIAL" and $d.active_version == $v and
 				$d.matcher == "PASS" and $d.live == "PASS" and $d.postcheck == "FAIL" and
@@ -249,12 +293,28 @@ install_release() {
 				$d.postcheck_detail.failures == [] and $d.postcheck_detail.cause == null and
 				($d.postcheck_detail.live_state_paths | length > 0) and
 				(.commands | index("omp-kit update --reconcile " + $id + " --yes") != null)) | $id
-		' "$WORK/install-update.json" >"$WORK/install-reconcile-id" ||
-			die "install update failed (rc $update_rc); not the known live-browser-only PARTIAL, refusing reconciliation"
+		' "$WORK/install-update.json" >"$WORK/install-reconcile-id"; then
+			# shellcheck disable=SC2016 # jq program
+			class_filter='.data as $d | $d.receipt_id as $id | ($d.postcheck_detail // {}) as $p |
+				select($d.action == "PARTIAL" and $d.active_version == $v and
+					$d.matcher == "PASS" and $d.live == "PASS" and $d.postcheck == "FAIL" and
+					($id | type == "string" and test("^[a-f0-9-]+$")) and
+					(($p.failed_stages // []) == []) and
+					($p.cause == null or $p.cause.cause_message == "KIT_POSTCHECK_FAILED") and
+					(($p.changed_operator_paths // []) | all(writer)) and
+					(($p.failures // []) | length > 0 and all(failure_ok($p.changed_operator_paths // []))) and
+					(.commands | index("omp-kit update --reconcile " + $id + " --yes") != null)) | $id'
+			install_class_jq -er >"$WORK/install-reconcile-id" || {
+				install_remedy
+				die "install update failed (rc $update_rc); not the known live-browser or kit live-writer PARTIAL, refusing reconciliation"
+			}
+			install_postcheck_cause
+			reconcile_class='kit-live-writer'
+		fi
 		IFS= read -r reconcile_id <"$WORK/install-reconcile-id"
-		substep install.reconcile-live-browser-state
+		substep "install.reconcile-$reconcile_class-state"
 		bounded 300 "$kit" update --reconcile "$reconcile_id" --yes --json >"$WORK/install-reconcile.json" ||
-			die "live-browser-state reconcile refused; installation remains unverified"
+			{ install_remedy; die "$reconcile_class-state reconcile refused; installation remains unverified"; }
 		cat "$WORK/install-reconcile.json"
 		jq -e --arg v "$VERSION" '.ok == true and .data.action == "RECONCILED" and .data.active_version == $v' \
 			"$WORK/install-reconcile.json" >/dev/null || die "reconcile did not confirm the installed version"
