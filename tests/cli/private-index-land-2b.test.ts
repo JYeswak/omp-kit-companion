@@ -8,16 +8,18 @@ import { fixtureDeadlineS } from "./fixture-process.ts";
 
 setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
 
-// land resolves the pane owner with `am agents resolve-pane` under a fixed 10 s product timeout
-// (src/land.ts spawnSync timeout: 10_000) and refuses OWNER_UNKNOWN, before any mutation, when it
-// expires. The 2026-11-04 b9e77980c8 verdict at load1 17-22 on 32 cores failed five cases here at
-// 10079-10107 ms with exactly that code. These cases re-run land only on that pre-mutation refusal,
-// inside a load-scaled budget; every other answer is asserted as before, and the unregistered-pane
-// cases still assert OWNER_UNKNOWN from a single run.
+// land resolves the pane owner with `am agents resolve-pane` and reads reservations with `am robot
+// reservations` before any mutation. Under the former fixed 10 s product timeout an expiry refused
+// OWNER_UNKNOWN; the 2026-11-04 b9e77980c8 verdict at load1 17-22 on 32 cores failed five cases here at
+// 10079-10107 ms with exactly that code. Both calls now run under a load-scaled bound whose expiry refuses
+// OWNER_RESOLVE_TIMEOUT or RESERVATION_TIMEOUT (LANDPANETIMEOUT1, LANDRESVTIMEOUT1). These cases re-run land
+// only on those pre-mutation refusals, inside a load-scaled budget; every other answer is asserted as before,
+// and the unregistered-pane cases still assert OWNER_UNKNOWN from a single run.
+const PRE_MUTATION_RETRY_CODES: Record<string, true> = { OWNER_UNKNOWN: true, OWNER_RESOLVE_TIMEOUT: true, RESERVATION_TIMEOUT: true };
 function ownerResolved(work: string, args: string[], holds: unknown, options: CommandOptions) {
 	const until = Date.now() + fixtureDeadlineS(30) * 1000;
 	let run = command(work, args, holds, options);
-	while (responseCode(run.body) === "OWNER_UNKNOWN" && Date.now() < until) run = command(work, args, holds, options);
+	while (PRE_MUTATION_RETRY_CODES[String(responseCode(run.body))] === true && Date.now() < until) run = command(work, args, holds, options);
 	return run;
 }
 const OWNER_CASE_TIMEOUT_MS = fixtureDeadlineS(150) * 1000;

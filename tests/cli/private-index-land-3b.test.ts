@@ -17,15 +17,17 @@ setDefaultTimeout(LAND_DEFAULT_TIMEOUT_MS);
 // GATESPEED1: land defers the complete suite to the release by default; these cases assert the
 // inline suite's refusals, so this file opts in for every land command it runs.
 process.env.PRE_PUSH_FULL_SUITE = "push";
-// land resolves the pane owner with `am agents resolve-pane` under a fixed 10 s product timeout (src/land.ts
-// spawnSync timeout: 10_000) and refuses OWNER_UNKNOWN, before any mutation, when it expires. The 2026-11-04
-// 676f556d verdict (load1 40-108 on 32 cores) failed the lost-publication case at 10137 ms with that code. As in
-// private-index-land-2b, that case re-runs land only on that pre-mutation refusal, inside a load-scaled budget;
-// every other answer is asserted as before.
+// land resolves the pane owner with `am agents resolve-pane` and reads reservations with `am robot reservations`
+// before any mutation. Under the former fixed 10 s product timeout an expiry refused OWNER_UNKNOWN; the 2026-11-04
+// 676f556d verdict (load1 40-108 on 32 cores) failed the lost-publication case at 10137 ms with that code. Both
+// calls now run under a load-scaled bound whose expiry refuses OWNER_RESOLVE_TIMEOUT or RESERVATION_TIMEOUT
+// (LANDPANETIMEOUT1, LANDRESVTIMEOUT1). As in private-index-land-2b, that case re-runs land only on those
+// pre-mutation refusals, inside a load-scaled budget; every other answer is asserted as before.
+const PRE_MUTATION_RETRY_CODES: Record<string, true> = { OWNER_UNKNOWN: true, OWNER_RESOLVE_TIMEOUT: true, RESERVATION_TIMEOUT: true };
 function ownerResolved(work: string, args: string[], holds: unknown, options: CommandOptions) {
 	const until = Date.now() + fixtureDeadlineS(30) * 1000;
 	let run = command(work, args, holds, options);
-	while (responseCode(run.body) === "OWNER_UNKNOWN" && Date.now() < until) run = command(work, args, holds, options);
+	while (PRE_MUTATION_RETRY_CODES[String(responseCode(run.body))] === true && Date.now() < until) run = command(work, args, holds, options);
 	return run;
 }
 

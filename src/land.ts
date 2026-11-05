@@ -9,7 +9,7 @@ import { authorizeSourceAct } from "./source-authority.ts";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { convergeRepository, type ConvergeResult } from "./converge.ts";
 import { defaultLiveness, defaultRunner, disposalGate } from "./scratch.ts";
-import { parseReservationRead } from "./fleet-guard/git.ts";
+import { parseReservationRead, type AttestedReservation } from "./fleet-guard/git.ts";
 
 
 type GitResult = { code: number; out: string; err: string; interrupted: boolean };
@@ -602,8 +602,9 @@ function paneKey(): PaneKey {
 const RESOLVE_PANE_BASE_DEADLINE_S = 30;
 const RESOLVE_PANE_BASE_ENV = "OMP_KIT_LAND_RESOLVE_BASE_S";
 
-/** The resolve-pane base deadline in seconds before load scaling: OMP_KIT_LAND_RESOLVE_BASE_S (integer, clamped
- * to 1..600) when set, else 30. */
+/** The base deadline in seconds, before load scaling, for land's `am` calls (resolve-pane and, since
+ * LANDRESVTIMEOUT1, robot reservations): OMP_KIT_LAND_RESOLVE_BASE_S (integer, clamped to 1..600) when set,
+ * else 30. */
 function resolvePaneBaseSeconds(): number {
 	const raw = process.env[RESOLVE_PANE_BASE_ENV];
 	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
@@ -628,18 +629,25 @@ function landLoadFactor(): number {
 	return Math.max(1, Math.min(4, load1 / ncpu * 4));
 }
 
-/** Resolve the live owner of one pane through Agent Mail under the load-scaled bound. A timeout is its own
- * refusal, OWNER_RESOLVE_TIMEOUT; only an answer (or an absent/failed am) reads OWNER_UNKNOWN. am is a single
- * leaf binary and every caller is synchronous, so this uses kitlib's synchronous bounded run (SIGKILL at the deadline). */
-export function resolvePaneOwner(repo: string, pane: string): { owner: string } | { error: CliResult } {
+/** Run one `am` call under the shared load-scaled bound (LANDPANETIMEOUT1, LANDRESVTIMEOUT1). am is a single
+ * leaf binary and every caller is synchronous, so this uses kitlib's synchronous bounded run (SIGKILL at the
+ * deadline). `run` is absent when am could not be spawned. */
+function runAmBounded(argv: string[], repo: string, maxOutputBytes: number): { baseS: number; deadlineS: number; run?: RunResult } {
 	const baseS = resolvePaneBaseSeconds();
 	const deadlineS = Math.ceil(baseS * landLoadFactor());
-	let identity: RunResult;
 	try {
-		identity = kitlibRunSync(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], { cwd: repo, deadline_s: deadlineS, max_output_bytes: 1024 * 1024 });
+		return { baseS, deadlineS, run: kitlibRunSync(argv, { cwd: repo, deadline_s: deadlineS, max_output_bytes: maxOutputBytes }) };
 	} catch {
-		return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing; no files were changed.") };
+		return { baseS, deadlineS };
 	}
+}
+
+/** Resolve the live owner of one pane through Agent Mail under the load-scaled bound. A timeout is its own
+ * refusal, OWNER_RESOLVE_TIMEOUT; only an answer (or an absent/failed am) reads OWNER_UNKNOWN. */
+export function resolvePaneOwner(repo: string, pane: string): { owner: string } | { error: CliResult } {
+	const { baseS, deadlineS, run: identity } = runAmBounded(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], repo, 1024 * 1024);
+	if (!identity)
+		return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing; no files were changed.") };
 	if (identity.timed_out)
 		return { error: refused("OWNER_RESOLVE_TIMEOUT", `am agents resolve-pane did not answer within ${deadlineS} s (${baseS} s base scaled by the 1-minute load), so the pane owner is unknown, not unregistered`, `Check that \`am agents resolve-pane --project ${repo} --pane ${pane} --json\` answers, then retry land; no files were changed.`) };
 	if (identity.rc !== 0) return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing; no files were changed.") };
@@ -652,6 +660,21 @@ export function resolvePaneOwner(repo: string, pane: string): { owner: string } 
 	return { owner };
 }
 
+// LANDRESVTIMEOUT1 (ompkit-fp72.120.16.282): `am robot reservations` ran under the same fixed 10 s spawnSync
+// timeout, and a load-cut read RESERVATION_UNAVAILABLE. It now shares resolve-pane's load-scaled bound and a
+// timeout is its own refusal, RESERVATION_TIMEOUT.
+/** Read the owner's active reservations through Agent Mail under the load-scaled bound. */
+export function readActiveReservations(repo: string, owner: string): { rows: AttestedReservation[] } | { error: CliResult } {
+	const { baseS, deadlineS, run: active } = runAmBounded(["am", "robot", "reservations", "--project", repo, "--agent", owner, "--json"], repo, 2 * 1024 * 1024);
+	if (!active) return { error: refused("RESERVATION_UNAVAILABLE", "Active file reservations could not be read", "Restore the Agent Mail reservation service; no files were changed.") };
+	if (active.timed_out)
+		return { error: refused("RESERVATION_TIMEOUT", `am robot reservations did not answer within ${deadlineS} s (${baseS} s base scaled by the 1-minute load), so the held reservations are unknown, not absent`, `Check that \`am robot reservations --project ${repo} --agent ${owner} --json\` answers, then retry land; no files were changed.`) };
+	if (active.rc !== 0) return { error: refused("RESERVATION_UNAVAILABLE", "Active file reservations could not be read", "Restore the Agent Mail reservation service; no files were changed.") };
+	const read = parseReservationRead(new TextDecoder().decode(active.stdout));
+	if ("why" in read) return { error: refused("RESERVATION_UNREADABLE", `The current reservation read could not be verified: ${read.why}`, "Repair the Agent Mail response and retry; no files were changed.") };
+	return { rows: read.rows };
+}
+
 function authorizedOwner(repo: string, paths: string[]): { owner: string } | { error: CliResult } {
 	const claimed = process.env.AGENT_NAME;
 	const selected = paneKey();
@@ -661,10 +684,8 @@ function authorizedOwner(repo: string, paths: string[]): { owner: string } | { e
 	if ("error" in resolved) return resolved;
 	const owner = resolved.owner;
 	if (owner !== claimed) return { error: refused("OWNER_MISMATCH", "AGENT_NAME does not match the live pane owner", "Use the identity registered for this pane; no files were changed.") };
-	const active = spawnSync("am", ["robot", "reservations", "--project", repo, "--agent", owner, "--json"], { cwd: repo, encoding: "utf8", timeout: 10_000, maxBuffer: 2 * 1024 * 1024 });
-	if (active.status !== 0) return { error: refused("RESERVATION_UNAVAILABLE", "Active file reservations could not be read", "Restore the Agent Mail reservation service; no files were changed.") };
-	const read = parseReservationRead(String(active.stdout));
-	if ("why" in read) return { error: refused("RESERVATION_UNREADABLE", `The current reservation read could not be verified: ${read.why}`, "Repair the Agent Mail response and retry; no files were changed.") };
+	const read = readActiveReservations(repo, owner);
+	if ("error" in read) return read;
 	const held = new Set<string>();
 	for (const row of read.rows) {
 		if (row.agent === owner && row.exclusive === true && row.remaining_seconds > 0) held.add(row.path);
