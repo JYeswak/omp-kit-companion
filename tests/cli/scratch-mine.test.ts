@@ -80,27 +80,85 @@ test("ancestor and sibling owners are excluded from exact caller disposal accoun
 	expect(ownedScratch(home, withTable).map((row) => row.label)).toEqual([]);
 });
 
-test("one listing reads the process table and the seat once, however many dirs it walks", () => {
+// Owner pids for the "one listing" fixtures: 60000 upward, skipping every pid in `exclude` (the caller's pid and its
+// parent; the stubbed process table makes pid 1 process.pid's only other ancestor). ownedScratch charges a dir whose
+// owner pid is the caller's own pid (disposalOwnerMatches), so a fixture pid equal to the runner's pid counts as owned;
+// the OS picks that pid, so the raw range 60000+index went red whenever bun ran as one of 60000..60039.
+const fixturePids = (count: number, exclude: readonly number[]): number[] => {
+	const pids: number[] = [];
+	for (let pid = 60000; pids.length < count; pid++) if (!exclude.includes(pid)) pids.push(pid);
+	return pids;
+};
+
+// Runs `body` with process.pid pinned to `pid` (a writable data property in bun), restoring the real descriptor after.
+function asCaller<T>(pid: number, body: () => T): T {
+	const real = Object.getOwnPropertyDescriptor(process, "pid")!;
+	Object.defineProperty(process, "pid", { ...real, value: pid });
+	try { return body(); } finally { Object.defineProperty(process, "pid", real); }
+}
+
+interface Listing { seated: number; seats: number; seatedRuns: number; unseated: string[]; unseatedRuns: number }
+// Plants 40 seat-owned dirs with the given owner pids, lists them, strips the seat fields, and lists again.
+const listTwice = (pids: readonly number[], callerPid?: number): Listing => {
 	const root = ownedTmp("mine", { root: scratchParent }).path;
 	const home = ownedTmp("mine-home", { root: scratchParent }).path;
 	cleanup.push(root, home);
 	process.env.OMP_KIT_SCRATCH_ROOTS = root;
 	process.env.XDG_STATE_HOME = join(home, "state");
 	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
-	for (let index = 0; index < 40; index++) {
+	pids.forEach((pid, index) => {
 		mkdirSync(join(root, `d.${index}`));
-		writeFileSync(join(root, `d.${index}`, ".owner"), owner(60000 + index, `d${index}`, `agent=${AGENT}\nsession=${SESSION}\n`));
-	}
+		writeFileSync(join(root, `d.${index}`, ".owner"), owner(pid, `d${index}`, `agent=${AGENT}\nsession=${SESSION}\n`));
+	});
 	let runs = 0;
 	let seats = 0;
 	const counting: InspectDeps = { ...deps(seat(AGENT, [SESSION])), run: () => { runs++; return { code: 0, stdout: `${process.pid} 1\n1 0\n`, stderr: "" }; },
 		callerSeat: () => { seats++; return { agent: AGENT, sessions: [SESSION], main: SESSION }; } };
-	expect(ownedScratch(home, counting)).toHaveLength(40);
-	expect(seats).toBe(1);
-	expect(runs).toBeLessThanOrEqual(1);
+	const list = () => (callerPid === undefined ? ownedScratch(home, counting) : asCaller(callerPid, () => ownedScratch(home, counting)));
+	const seated = list().length;
+	const seatedRuns = runs;
 	// Dirs whose owner names neither this seat nor the caller pid are excluded without ancestry attribution.
-	for (let index = 0; index < 40; index++) writeFileSync(join(root, `d.${index}`, ".owner"), owner(60000 + index, `d${index}`));
+	pids.forEach((pid, index) => writeFileSync(join(root, `d.${index}`, ".owner"), owner(pid, `d${index}`)));
 	runs = 0;
-	expect(ownedScratch(home, counting)).toHaveLength(0);
-	expect(runs).toBe(0);
+	const unseated = list().map((row) => row.label);
+	return { seated, seats, seatedRuns, unseated, unseatedRuns: runs };
+};
+
+test("one listing reads the process table and the seat once, however many dirs it walks", () => {
+	const listing = listTwice(fixturePids(40, [process.pid, process.ppid]));
+	expect(listing.seated).toBe(40);
+	expect(listing.seats).toBe(1);
+	expect(listing.seatedRuns).toBeLessThanOrEqual(1);
+	expect(listing.unseated).toHaveLength(0);
+	expect(listing.unseatedRuns).toBe(0);
+});
+
+// ompkit-fp72.120.16.283: the fixture owner pids can never be the caller's, whatever pid the OS gives the runner.
+test("MINEPIDCOLLIDE1 planted: a caller pid of 60005 inside the fixture range still reads 0 unseated dirs", () => {
+	const pids = asCaller(60005, () => fixturePids(40, [process.pid, process.ppid]));
+	expect(pids).toHaveLength(40);
+	expect(new Set(pids).size).toBe(40);
+	expect(pids).not.toContain(60005);
+	const listing = listTwice(pids, 60005);
+	expect(listing.seated).toBe(40);
+	expect(listing.unseated).toEqual([]);
+	expect(listing.unseatedRuns).toBe(0);
+});
+
+test("MINEPIDCOLLIDE1 control: a caller pid outside the range keeps the original pids and reads 40 then 0", () => {
+	const pids = asCaller(59999, () => fixturePids(40, [59999, 1]));
+	expect(pids).toEqual(Array.from({ length: 40 }, (_, index) => 60000 + index));
+	const listing = listTwice(pids, 59999);
+	expect(listing.seated).toBe(40);
+	expect(listing.seats).toBe(1);
+	expect(listing.unseated).toEqual([]);
+	expect(listing.unseatedRuns).toBe(0);
+});
+
+test("MINEPIDCOLLIDE1 mutant: without the exclusion a caller pid of 60005 reads 1 unseated dir", () => {
+	const pids = fixturePids(40, []);
+	expect(pids).toContain(60005);
+	const listing = listTwice(pids, 60005);
+	expect(listing.seated).toBe(40);
+	expect(listing.unseated).toEqual(["d5"]);
 });
