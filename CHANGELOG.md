@@ -4,6 +4,47 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.93] - 2026-11-05
+
+### Changed
+
+- RELCARD1 (ompkit-fp72.120.16.254, Joshua J-2026-11-05-03): `scripts/release-local.sh` now refuses a cut without a
+  complete two-lane release card. `scripts/release-card-check.py` reads `docs/releases/v<version>.md` from the exact
+  commit with git (never the working tree), before a prepare push and again on the source before the signing keychain
+  opens. It refuses `RELEASE_CARD_MISSING`, `RELEASE_WAVE` (no closed or landed gap and no applied idea), or
+  `RELEASE_CARD_INCOMPLETE section N` naming the rubric section: no shipped gap row (1), not 1-3 ideas or no idea
+  applied with a measured `X → Y` (2), an empty Before for a DORA row (3), or no error-budget section (4). The grammar
+  is documented in `docs/release-rubric.md` ("Card grammar"); the v0.2.92 card passes unchanged.
+
+### Fixed
+
+- PUSHADMIT2 (ompkit-fp72.120.14.4): `scripts/ref-txn-witness.py push-admit` now decides every writable ref a
+  reviewed history plan rewrites, not only `refs/heads/main`. A backup ref's reviewed new root is the mapped
+  counterpart of its public root and must agree with the plan's `new_roots`; pre-push members 40 and 41 admit exactly
+  that push and still refuse an unmapped extra commit, a wrong new oid and a stale lease. A plan stops claiming a ref
+  once origin holds its new root, so ordinary later pushes (main after the jev scrub) are judged ordinarily instead of
+  refused. Reinstall the hooks in a repo with a reviewed plan copy (`install-commit-msg-bead.sh <repo>`).
+- RUNTIMEMISS1 (ompkit-fp72.120.16.242): `full-suite-verdict-store.py require-pass` and `require-ci-only-pass` no
+  longer read a verdict stored under another runtime id as a bare MISS. When the exact key misses but a valid record
+  for the same tree and checks exists under another runtime, they print `RUNTIME_MISMATCH` with both env digests and
+  the differing fields (version fields, and the PATH entry added when one entry explains the digest). It is never a
+  PASS. When both verdicts read PASS or `RUNTIME_MISMATCH`, `scripts/release-local.sh` refuses with the mismatch
+  instead of `VERDICT_STARVED` and starts no verdict run; a genuine MISS still starts one. `suite-metrics.py` exposes
+  `runtime_parts()` and `environment_digest()`; `runtime_identity()` is unchanged.
+- RELREMEDY1 (ompkit-fp72.120.16.246): when a kit update ends PARTIAL and every postcheck failure belongs to the
+  kit's own live writers, release-local now reconciles the receipt itself. The live writers are `gate-events.jsonl`
+  and `inbox-wake/*.json` under the state root, plus the state root overflowing the snapshot budget (20000 entries
+  or 512 MiB per root). It also prints why each read failed: a live-writer race, or size. Any other PARTIAL still
+  refuses, and the refusal now names the receipt in `omp-kit update --reconcile <id> --yes` and gives a runnable
+  `update --apply --yes --version V --index <abs> --archive <abs>`. Both paths point at kept copies that outlive
+  the work dir. 0.2.91 took 66 min from push to installed because the old remedy failed with
+  LOCAL_SOURCE_REQUIRED.
+- ROOTSHERMETIC1 (ompkit-fp72.120.16.271): `tests/cli/scratch-roots.test.ts` `fixtureHome()` now points
+  `XDG_STATE_HOME` at an empty fixture state dir, so the earlier-list case no longer reads the machine's scratch-root
+  registry. A root that `omp-kit scratch new` registered outside ~/Developer (~/.claude/var/agent-tmp) had turned the
+  full suite red and blocked the v0.2.93 release train. A planted case proves an ambient registered root stays out
+  under the fixture state and leaks in without the override.
+
 ## [0.2.92] - 2026-11-05
 
 ### Changed
