@@ -16,6 +16,7 @@
 #        ONLY="id id ..." (run just these scenario ids)
 #        OMP_KIT_TEST_WORK_ROOT=/repo/var/agent-tmp/<dir> (optional; requires .owner)
 #        OMP_KIT_CASE_CWD=/caller/repo (workspace owning the supplied scratch root)
+#        OMP_KIT_E2E_EVIDENCE_DIR=/abs/dir keeps failing scenarios' transcripts in an e2e-live.<pid> child
 #        OMP_KIT_PLUGIN_SOURCE=/abs/dir  link that package (needs package.json with an omp
 #        field) instead of building a temp one; plant mode refuses this to protect the checkout
 #        OMP_KIT_PLUGIN_DISABLE_AFTER_LINK=name  disable that plugin right after linking
@@ -92,6 +93,12 @@ export OMP_KIT_CASE_CWD
 if [ "${OMP_KIT_TEST_WORK_ROOT+x}" = x ]; then
   OMP_KIT_TEST_WORK_ROOT=$("$OMP_KIT_BUN" --validate-work-root) || exit 2
   export OMP_KIT_TEST_WORK_ROOT
+fi
+# LIVEEVAL1 (ompkit-fp72.120.16.248): failing full-mode scenarios' evidence outlives scratch in this caller dir.
+EVIDENCE_DIR=${OMP_KIT_E2E_EVIDENCE_DIR:-}; EVIDENCE_RUN=""
+case "$EVIDENCE_DIR" in ''|/*) ;; *) echo "OMP_KIT_E2E_EVIDENCE_DIR must be absolute: $EVIDENCE_DIR" >&2; exit 2 ;; esac
+if [ -n "$EVIDENCE_DIR" ] && { [ -L "$EVIDENCE_DIR" ] || [ ! -d "$EVIDENCE_DIR" ]; }; then
+  echo "OMP_KIT_E2E_EVIDENCE_DIR is not an existing directory: $EVIDENCE_DIR" >&2; exit 2
 fi
 # Mock data always lives in a private mode-700 child, even if caller scratch is 755.
 WORK_ROOT=$("$OMP_KIT_BUN" --workdir) || exit 2
@@ -261,6 +268,20 @@ OMP_VERSION=$(isolate && "$OMP" --version) || exit 2
 OMP_BINARY_SHA=$(shasum -a 256 "$OMP" | cut -d' ' -f1) || exit 2
 OMP_NATIVE_SEED_ID=$(printf '%s\n%s\n' "$OMP_VERSION" "$OMP_BINARY_SHA" | shasum -a 256 | cut -d' ' -f1) || exit 2
 echo "omp: $OMP_VERSION ($OMP; native seed $OMP_NATIVE_SEED_ID)"
+# LIVEEVAL1: OMP probes PATH pythons under one 10 s budget; the macOS /usr/bin/python3 xcrun shim took up to
+# 9.9 s cold (its interpreter 0.03 s), so loaded py eval cells never ran ("Python backend is unavailable").
+# Pin the interpreter python3 launches, resolved once; with no python3, OMP discovery decides.
+if (isolate && command -v python3 >/dev/null); then
+  PY_INTERPRETER=$(isolate && "$LIMIT" 60 python3 -c 'import sys; print(sys.executable)' </dev/null) || { py_rc=$?; KEEP_WORK=1; echo "python3 resolve producer_rc=$py_rc" >&2; exit 2; }
+  py_ok=0
+  case "$PY_INTERPRETER" in
+    *'"'*|*\\*) ;;
+    /*) [ ! -x "$PY_INTERPRETER" ] || py_ok=1 ;;
+  esac
+  [ "$py_ok" = 1 ] || { KEEP_WORK=1; echo "python3 reported no usable interpreter path: '$PY_INTERPRETER'" >&2; exit 2; }
+  printf 'python:\n  interpreter: "%s"\n' "$PY_INTERPRETER" >>"$H/.omp/agent/config.yml" || { KEEP_WORK=1; echo "python pin failed" >&2; exit 2; }
+  echo "python: $PY_INTERPRETER (python.interpreter)"
+fi
 if [ "${OMP_KIT_RULES_VIA:-agents}" = plugin ]; then
   (isolate && "$OMP" plugin link "${PLUGIN_SOURCE:-$T/kit-plugin}" >/dev/null) || { link_rc=$?; KEEP_WORK=1; echo "plugin link producer_rc=$link_rc" >&2; exit "$link_rc"; }
   if [ -n "${OMP_KIT_PLUGIN_DISABLE_AFTER_LINK:-}" ]; then
@@ -432,6 +453,16 @@ run_scenario() {
   printf '%s\n' "$rc" >"$T/result-$i.omp-rc"
   printf '%s\n' "$DEFIANT_MOCK_SCENARIOS" >"$T/result-$i.defiant"
 }
+keep_failure_evidence() { # LIVEEVAL1: this run's own EVIDENCE_DIR child, made at its first failure
+  if [ -z "$EVIDENCE_RUN" ]; then
+    evidence_n=0; EVIDENCE_RUN="$EVIDENCE_DIR/e2e-live.$$"
+    while [ -e "$EVIDENCE_RUN" ] || [ -L "$EVIDENCE_RUN" ]; do evidence_n=$((evidence_n+1)); EVIDENCE_RUN="$EVIDENCE_DIR/e2e-live.$$.$evidence_n"; done
+    mkdir -m 0700 "$EVIDENCE_RUN" || { echo "cannot create $EVIDENCE_RUN" >&2; EVIDENCE_RUN=""; return 2; }
+  fi
+  for evidence_file in "log-$1.jsonl" "out-$1.txt" "mock-$1.txt"; do
+    [ ! -f "$T/$evidence_file" ] || cp "$T/$evidence_file" "$EVIDENCE_RUN/$evidence_file" || { echo "cannot keep $T/$evidence_file" >&2; return 2; }
+  done
+}
 # A bounded work-conserving pool: a slow scenario never holds every other slot
 # idle. Only the parent reports cases, preserving order and the end counter.
 finish_batch() {
@@ -462,7 +493,12 @@ finish_batch() {
       pass=$((pass+1)); echo "ok    $name"
       if [ "$MODE" = full ]; then report_test_case "$name" PASS; fi
     else
-      fail=$((fail+1)); echo "FAIL  $name :: $verdict (omp exit $rc; transcript: $T/log-$name.jsonl)"
+      transcript="$T/log-$name.jsonl"
+      if [ "$MODE" = full ] && [ -n "$EVIDENCE_DIR" ]; then
+        keep_failure_evidence "$name" || { KEEP_WORK=1; return 2; }
+        transcript="$EVIDENCE_RUN/log-$name.jsonl"
+      fi
+      fail=$((fail+1)); echo "FAIL  $name :: $verdict (omp exit $rc; transcript: $transcript)"
       if [ "$MODE" = full ]; then report_test_case "$name" FAIL; fi
     fi
   done
@@ -532,6 +568,7 @@ else
   report_test_case mock-server-cleanup PASS
 fi
 echo "e2e-live ($MODE): $pass passed, $fail failed"
+[ -z "$EVIDENCE_RUN" ] || echo "failure evidence kept: $EVIDENCE_RUN"
 plant_caught=0
 if [ "$MODE" = plant ] && [ "$fail" -gt 0 ] && [ "$pass" -eq 0 ]; then
   case "$verdict" in *"unexpected rule kit-close-needs-evidence"*) plant_caught=1 ;; esac

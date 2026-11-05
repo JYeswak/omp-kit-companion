@@ -141,6 +141,65 @@ class CiOnlyCoverage(unittest.TestCase):
             self.assertEqual(record["verdict"], "PASS")
             self.assertEqual(record["spec"]["env"]["OMP_KIT_DISK_OBSERVER"], "statfs")
             self.assertTrue(all(row["rc"] == 0 for row in record["files"]))
+            self.assertFalse(records[0].with_suffix(".evidence").exists(), "a PASS keeps no evidence directory")
+            self.assertEqual(sorted(path.name for path in (cache / "ci-only").iterdir()),
+                             sorted([records[0].name, records[0].with_suffix(".log").name]))
+
+    def test_failing_live_transcript_is_kept_beside_the_record(self) -> None:
+        """LIVEEVAL1: e2e-live copies a failing scenario's transcript into OMP_KIT_E2E_EVIDENCE_DIR, kept as <record>.evidence."""
+        fixture = (
+            'import { expect, test } from "bun:test";\n'
+            'import { mkdirSync, writeFileSync } from "node:fs";\n'
+            'import { join } from "node:path";\n'
+            'test("LIVEEVAL1 the judge names an existing evidence directory", () => {\n'
+            '  const evidence = process.env.OMP_KIT_E2E_EVIDENCE_DIR!;\n'
+            '  mkdirSync(join(evidence, `e2e-live.${process.pid}`));\n'
+            '  if (import.meta.path.endsWith("package-release-live.test.ts")) {\n'
+            '    writeFileSync(join(evidence, `e2e-live.${process.pid}`, "log-planted.jsonl"), "LIVEEVAL1 planted transcript\\n");\n'
+            '    expect("planted live scenario").toBe("passing");\n'
+            '  }\n'
+            '});\n'
+        )
+        with owned_tmp("ci-only-evidence") as tmp:
+            source = Path(tmp) / "source"
+            suite = Path(tmp) / "export"
+            (source / "scripts").mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts/gate-ci-only.tsv", source / "scripts/gate-ci-only.tsv")
+            for name, _limit in store.CI_ONLY_FILES:
+                target = source / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(fixture)
+            env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            env.update({
+                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CEILING_DIRECTORIES": tmp, "TMPDIR": tmp,
+                "GIT_AUTHOR_NAME": "LIVEEVAL1", "GIT_AUTHOR_EMAIL": "ci-only@example.invalid",
+                "GIT_COMMITTER_NAME": "LIVEEVAL1", "GIT_COMMITTER_EMAIL": "ci-only@example.invalid",
+            })
+            for args in (["init", "-q"], ["add", "--", "scripts", "tests"], ["commit", "-qm", "LIVEEVAL1 evidence fixture"]):
+                result = run(["git", *args], cwd=source, env=env, deadline_s=30)
+                self.assertEqual(result.rc, 0, result.stderr.decode())
+            revision = run(["git", "rev-parse", "HEAD"], cwd=source, env=env, deadline_s=30)
+            self.assertEqual(revision.rc, 0, revision.stderr.decode())
+            shutil.copytree(source, suite, ignore=shutil.ignore_patterns(".git"))
+            cache = Path(tmp) / "verdicts"
+            judged = run([
+                sys.executable, "-B", str(ROOT / "scripts/full-suite-verdict-store.py"), "run-ci-only",
+                "--repo", str(source), "--commit", revision.stdout.decode().strip(), "--judge-root", str(ROOT),
+                "--suite-root", str(suite), "--cache-dir", str(cache),
+            ], cwd=suite, env=env, deadline_s=120)
+            evidence = (judged.stdout + judged.stderr).decode()
+            self.assertFalse(judged.timed_out, evidence)
+            self.assertEqual(judged.rc, 1, evidence)
+            records = list((cache / "ci-only").glob("*.json"))
+            self.assertEqual(len(records), 1)
+            self.assertEqual(store.json_file(records[0])["verdict"], "FAIL")
+            kept = records[0].with_suffix(".evidence")
+            copies = sorted(kept.glob("e2e-live.*/log-planted.jsonl"))
+            self.assertEqual(len(copies), 1, evidence)
+            self.assertEqual(copies[0].read_text(), "LIVEEVAL1 planted transcript\n")
+            self.assertIn(f"CI-ONLY: failing live scenario transcripts kept beside the record: {kept.resolve()}", evidence)
+            self.assertEqual([path.name for path in (cache / "ci-only").iterdir() if path.name.endswith(".tmp")], [])
 
     def test_ladder_running_files_run_one_at_a_time(self) -> None:
         """KITUPDATELOAD1: each CI-only file holds an exclusive marker for 1.5 s; a second concurrent file fails."""

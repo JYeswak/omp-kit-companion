@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { sanitizedEnv } from "../../src/runtime.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -33,6 +33,19 @@ test("RELFAILFAST1: sanitizedEnv carries only a whole-seconds heavy wait cap int
 	expect("OMP_KIT_HEAVY_MAX_WAIT_S" in sanitizedEnv(identity, { OMP_KIT_HEAVY_MAX_WAIT_S: "2m" }, "/private")).toBe(false);
 	expect("OMP_KIT_HEAVY_MAX_WAIT_S" in sanitizedEnv(identity, { OMP_KIT_HEAVY_MAX_WAIT_S: "12345" }, "/private")).toBe(false);
 	expect("OMP_KIT_HEAVY_MAX_WAIT_S" in sanitizedEnv(identity, { OMP_KIT_HEAVY_MAX_WAIT_S: "" }, "/private")).toBe(false);
+});
+
+test("LIVEEVAL1: sanitizedEnv carries only an existing absolute real evidence directory into the isolated run", () => {
+	const fixture = ownedTmp("liveeval-env", { root: scratchRoot });
+	try {
+		const directory = join(fixture.path, "evidence"), link = join(fixture.path, "link"), file = join(fixture.path, "file");
+		mkdirSync(directory);
+		symlinkSync(directory, link);
+		writeFileSync(file, "");
+		expect(sanitizedEnv(identity, { OMP_KIT_E2E_EVIDENCE_DIR: directory }, "/private").OMP_KIT_E2E_EVIDENCE_DIR).toBe(directory);
+		for (const refused of [undefined, "", "evidence", link, file, join(fixture.path, "absent"), join(file, "child")])
+			expect("OMP_KIT_E2E_EVIDENCE_DIR" in sanitizedEnv(identity, { OMP_KIT_E2E_EVIDENCE_DIR: refused }, "/private")).toBe(false);
+	} finally { fixture.cleanup(); }
 });
 
 test("SAVEFIRST1: the gate exports the statfs observer for everything under it", () => {

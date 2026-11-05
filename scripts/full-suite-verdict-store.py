@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import sys
 import threading
@@ -798,6 +799,14 @@ def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, 
     env = dict(os.environ)
     env.update(CI_ONLY_ENV)
     env["OMP_KIT_CASE_CWD"] = str(suite_root)
+    # LIVEEVAL1 (ompkit-fp72.120.16.248): the export and every scratch root under it are deleted after this run, so
+    # e2e-live copies a failing live scenario's transcript here; it becomes <record>.evidence beside the record.
+    evidence = path.with_suffix(".evidence")
+    pending = path.with_suffix(f".evidence.{os.getpid()}.tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(pending, ignore_errors=True)  # only a dead run with this pid could have left it
+    pending.mkdir(mode=0o700)
+    env["OMP_KIT_E2E_EVIDENCE_DIR"] = str(pending)
     rows: list[dict] = [{} for _ in CI_ONLY_FILES]
     outputs: list[tuple[bytes, bytes]] = [(b"", b"") for _ in CI_ONLY_FILES]
 
@@ -823,10 +832,14 @@ def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, 
 
     worker = threading.Thread(target=judge_all, daemon=True)
     # A TERM/INT reaches the main thread as Cancelled; leaving the block kills every bun group run() still owns.
-    with pysafe.cancel_on_signals():
-        worker.start()
-        while worker.is_alive():
-            worker.join(1.0)
+    try:
+        with pysafe.cancel_on_signals():
+            worker.start()
+            while worker.is_alive():
+                worker.join(1.0)
+    except BaseException:
+        shutil.rmtree(pending, ignore_errors=True)
+        raise
     verdict = "FAIL" if any(row["rc"] != 0 for row in rows) else "PASS"
     log = "".join(ci_only_header(row) + "\n" for row in rows).encode("utf-8")
     for row, (stdout, stderr) in zip(rows, outputs):
@@ -834,7 +847,15 @@ def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, 
     entry = {"version": 1, "kind": "ci-only", "tree": tree, "commit": commit, "checks": checks, "runtime": runtime,
              "spec": ci_only_spec(), "verdict": verdict, "files": rows,
              "log_sha256": hashlib.sha256(log).hexdigest(), "finished_ms": int(time.time() * 1000)}
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if evidence.is_symlink() or evidence.is_file():
+        evidence.unlink()
+    elif evidence.exists():
+        shutil.rmtree(evidence)  # the superseded record's evidence
+    kept = any(pending.iterdir())
+    if kept:
+        os.replace(pending, evidence)
+    else:
+        pending.rmdir()
     write_atomic(path.with_suffix(".log"), log)
     write_atomic(path, (json.dumps(entry, sort_keys=True, indent=1) + "\n").encode("utf-8"))
     for row in rows:
@@ -845,6 +866,8 @@ def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, 
             print(f"CI-ONLY: {row['path']} FAIL; output (last 60 lines of stderr, then stdout):")
             print(tail_lines(stderr, 60))
             print(tail_lines(stdout, 20))
+    if kept:
+        print(f"CI-ONLY: failing live scenario transcripts kept beside the record: {evidence}")
     print(f"CI-ONLY: VERDICT {verdict} tree={tree} record={path}")
     return 0 if verdict == "PASS" else 1
 

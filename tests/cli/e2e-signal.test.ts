@@ -1,9 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run } from "../../src/kitlib/run";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 // Integration test: exercises real SIGTERM delivery and child reaping against
 // the platform clock. Fake timers cannot work: the waits synchronize with a
@@ -217,5 +218,46 @@ test("parallel live cases retain ordered reports, private models and read-only n
 		rmSync(kept![2]!, { recursive: true, force: true });
 	} finally { fixture.cleanup(); }
 }, 180_000);
+
+test("LIVEEVAL1: a failing scenario's transcript is copied into OMP_KIT_E2E_EVIDENCE_DIR and its FAIL line names the copy", async () => {
+	// Planted failure: a stub OMP sends one tool-bearing request to the scenario's mock model, so the mock writes a
+	// one-request transcript and the verdict fails (it wants >= 2 requests). The work root is then deleted, as the
+	// ci-only export is; only the evidence copy may survive. A mutant that skips the copy leaves no evidence file.
+	const fixture = ownedTmp("e2e-evidence");
+	try {
+		const evidenceRoot = join(fixture.path, "evidence");
+		mkdirSync(evidenceRoot, { mode: 0o700 });
+		const stub = join(fixture.path, "stub-omp.sh");
+		writeFileSync(stub, [
+			"#!/bin/sh",
+			'if [ "$1" = "--version" ]; then echo "stub-omp 0.0.0"; exit 0; fi',
+			"port=$(sed -n 's#.*baseUrl: http://127.0.0.1:\\([0-9]*\\)/v1#\\1#p' \"$HOME/.omp/agent/models.yml\")",
+			'curl -sS -o /dev/null -X POST -H "content-type: application/json" "http://127.0.0.1:$port/v1/chat/completions" \\',
+			"  -d '{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"bash\"}}],\"messages\":[{\"role\":\"user\",\"content\":\"LIVEEVAL1 planted transcript\"}]}'",
+			"",
+		].join("\n"));
+		chmodSync(stub, 0o755);
+		const env = Object.fromEntries(Object.entries({
+			...process.env, OMP: stub, ONLY: "canary-near", TIMEOUT: "60", OMP_KIT_TEST_NO_COVERAGE: "1",
+			OMP_KIT_TEST_WORK_ROOT: fixture.path, OMP_KIT_CASE_CWD: REPO_ROOT, OMP_KIT_E2E_EVIDENCE_DIR: evidenceRoot,
+		}).filter((entry): entry is [string, string] => entry[1] !== undefined));
+		const result = await run(["sh", "scripts/e2e-live.sh"], { cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(150) });
+		const stdout = Buffer.from(result.stdout).toString(), stderr = Buffer.from(result.stderr).toString();
+		expect(result.rc, stdout + stderr).toBe(1);
+		const failure = /^FAIL {2}canary-near :: .*transcript: (\S+)\)$/m.exec(stdout);
+		expect(failure, stdout + stderr).not.toBeNull();
+		const copy = failure![1]!;
+		const runDir = /^failure evidence kept: (\S+)$/m.exec(stdout)?.[1];
+		expect(runDir).toBe(join(evidenceRoot, readdirSync(evidenceRoot)[0]!));
+		expect(copy).toBe(join(runDir!, "log-canary-near.jsonl"));
+		const kept = /kept private e2e output: (\S+) \(work root (\S+)\)/.exec(stdout);
+		expect(kept, stdout).not.toBeNull();
+		const original = readFileSync(join(kept![1]!, "log-canary-near.jsonl"));
+		rmSync(kept![2]!, { recursive: true, force: true });
+		expect(readFileSync(copy)).toEqual(original);
+		expect(original.toString()).toContain("LIVEEVAL1 planted transcript");
+		expect(readdirSync(runDir!).sort()).toEqual(["log-canary-near.jsonl", "mock-canary-near.txt", "out-canary-near.txt"]);
+	} finally { fixture.cleanup(); }
+}, fixtureDeadlineS(180) * 1000);
 
 afterAll(() => cleanupAllOwnedTmp());
