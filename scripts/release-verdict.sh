@@ -130,7 +130,7 @@ culprit_step() {
 	fi
 	culprit_out="$WORK/culprit.$sha.out"
 	culprit_rc=0
-	(cd "$tree" && env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB TMPDIR="$WORK" \
+	(cd "$tree" && env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
 		python3 -B scripts/verdict-culprit.py --repo "$ROOT" --commit "$sha" "$@") >"$culprit_out" </dev/null || culprit_rc=$?
 	if grep -q '^CULPRIT ' "$culprit_out"; then
 		grep -E '^(CULPRIT |PROPOSE: )' "$culprit_out" | sed 's/^/release-verdict: /'
@@ -161,14 +161,14 @@ while :; do
 	if grep -q '"run-ci-only"' "$tree/scripts/full-suite-verdict-store.py" 2>/dev/null; then
 		mkdir -p "$ci_tree"
 		git -C "$ROOT" archive "$sha" | tar -xf - -C "$ci_tree"
-		env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB TMPDIR="$WORK" \
+		env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
 			python3 -B "$ci_tree/scripts/full-suite-verdict-store.py" run-ci-only --repo "$ROOT" --commit "$sha" \
 			</dev/null >"$WORK/ci-only.$sha.out" 2>&1 &
 		ci_pid=$!
 	fi
 	printf 'release-verdict: judging %s with its own runner\n' "$sha"
 	rc=0
-	env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB TMPDIR="$WORK" \
+	env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
 		sh "$tree/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$sha" --judge-role main </dev/null || rc=$?
 	printf 'release-verdict: %s producer_rc=%s\n' "$sha" "$rc"
 	[ "$rc" = 0 ] || culprit_step || :

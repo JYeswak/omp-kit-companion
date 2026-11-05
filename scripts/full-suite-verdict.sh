@@ -117,7 +117,7 @@ case "$TIMEOUT_SECS" in ''|*[!0-9]*|0) fail "FULL_SUITE_TIMEOUT_SECS must be a p
 # No suite may block on stdin (pre-push hooks inherit a pipe whose writer never closes).
 exec </dev/null
 # HERMETIC1-B: discard caller authority before Git probes and suite execution, not the requested verdict.
-unset GIT_DIR GIT_WORK_TREE BEADS_DB
+unset GIT_DIR GIT_WORK_TREE BEADS_DB BEADS_DIR
 case "$JUDGE_ROLE" in base|main) ;; *) fail "--judge-role must be base or main"; exit 2 ;; esac
 
 command -v bun >/dev/null 2>&1 || { fail "bun is not on PATH; the full suite cannot run"; exit 1; }
@@ -572,7 +572,7 @@ run_suite() {
 		}
 		# Publisher tracker selection must not redirect tests away from their own fixtures.
 		# Tests can still select an explicit tracker after the suite child starts.
-		unset BEADS_DB
+		unset BEADS_DB BEADS_DIR
 		cd "$ARCHIVE_DIR"
 		# This subshell's own pid ($$ names the verdict process here). The deadline's TERM round spares
 		# it: the kitlib trap installed below re-raises a caught TERM at $$, which would kill the verdict

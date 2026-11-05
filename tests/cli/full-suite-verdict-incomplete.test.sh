@@ -131,23 +131,24 @@ from pathlib import Path
 inherited = os.environ.get('BEADS_DB')
 if inherited is not None:
     Path(inherited).write_text('leaked tracker authority')
-for name in ('BEADS_DB', 'GIT_DIR', 'GIT_WORK_TREE'):
+for name in ('BEADS_DB', 'BEADS_DIR', 'GIT_DIR', 'GIT_WORK_TREE'):
     assert name not in os.environ, name
 print('HERMETIC1_B_PYTHON_UNSET', flush=True)"
 	addfile tests/cli/inherited.test.sh "set -eu
 test \"\${BEADS_DB+x}\" != x
+test \"\${BEADS_DIR+x}\" != x
 test \"\${GIT_DIR+x}\" != x
 test \"\${GIT_WORK_TREE+x}\" != x
 printf 'HERMETIC1_B_SHELL_UNSET\n'"
 	addfile tests/cli/inherited.test.ts 'import { expect, test } from "bun:test";
 test("inherited repository and tracker authority is absent", () => {
-  for (const name of ["BEADS_DB", "GIT_DIR", "GIT_WORK_TREE"]) {
+  for (const name of ["BEADS_DB", "BEADS_DIR", "GIT_DIR", "GIT_WORK_TREE"]) {
     expect(process.env[name]).toBeUndefined();
   }
   console.log("HERMETIC1_B_BUN_UNSET");
 });'
 	mkrepo_commit
-	run_verdict_with_envs "$label" BEADS_DB="$caller_db" \
+	run_verdict_with_envs "$label" BEADS_DB="$caller_db" BEADS_DIR="$TMP/$label.caller-beads" \
 		GIT_DIR="$TMP/not-a-git-directory" GIT_WORK_TREE="$TMP/not-a-work-tree"
 	if [ "$rc" -eq 0 ] && grep -F 'VERDICT PASS' "$out" >/dev/null \
 		&& grep -F 'HERMETIC1_B_PYTHON_UNSET' "$repo.cache/$tree.log" >/dev/null 2>&1 \
