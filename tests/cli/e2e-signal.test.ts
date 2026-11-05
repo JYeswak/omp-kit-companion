@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -12,6 +12,34 @@ import { resolveOmpIdentity } from "../../src/paths.ts";
 // live subprocess, not in-process timers.
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
+
+/** A caller work root e2e-live.sh admits: under this tree's var/agent-tmp, with an .owner naming the tree. TMPDIR
+ * is not used: a gitless grader export has its own var/agent-tmp (absent until created) and TMPDIR may lie elsewhere
+ * or behind a symlink (macOS /var), both of which runtime-adapter.sh correctly refuses. */
+function workRoot(label: string) {
+	const root = join(REPO_ROOT, "var/agent-tmp");
+	mkdirSync(root, { recursive: true });
+	return ownedTmp(label, { root });
+}
+
+/** The tree whose scripts/e2e-live.sh a LIVEEVAL1 case runs. runtime-adapter.sh runs Bun scripts only from a packaged
+ * tree (bin/omp-kit) or a source checkout (.git); a gitless grader export is neither, and that refusal stays. There the
+ * case runs a git-initialized copy of these same bytes inside its owned fixture, so the adapter sees a real checkout;
+ * the caller workspace (OMP_KIT_CASE_CWD) and its work-root ownership checks are still this tree's. */
+async function liveTree(fixture: string): Promise<string> {
+	if (existsSync(join(REPO_ROOT, ".git"))) return REPO_ROOT;
+	const tree = join(fixture, "tree");
+	mkdirSync(tree);
+	// Entry by entry: the fixture lies under this tree's var/, and cpSync refuses a destination inside its source.
+	for (const entry of readdirSync(REPO_ROOT)) {
+		if (entry !== "var" && entry !== "node_modules" && entry !== ".git")
+			cpSync(join(REPO_ROOT, entry), join(tree, entry), { recursive: true, verbatimSymlinks: true });
+	}
+	const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => !entry[0].startsWith("GIT_") && entry[1] !== undefined));
+	const init = await run(["git", "init", "-q", tree], { env, deadline_s: fixtureDeadlineS(30) });
+	if (init.rc !== 0) throw new Error(`git init ${tree}: ${Buffer.from(init.stderr).toString()}`);
+	return tree;
+}
 
 /** Pids whose ancestor chain reaches root, via ps. -ax is required: bare ps
  * only lists the caller's session, which never contains piped children, so
@@ -224,7 +252,7 @@ test("LIVEEVAL1: a failing scenario's transcript is copied into OMP_KIT_E2E_EVID
 	// Planted failure: a stub OMP sends one tool-bearing request to the scenario's mock model, so the mock writes a
 	// one-request transcript and the verdict fails (it wants >= 2 requests). The work root is then deleted, as the
 	// ci-only export is; only the evidence copy may survive. A mutant that skips the copy leaves no evidence file.
-	const fixture = ownedTmp("e2e-evidence");
+	const fixture = workRoot("e2e-evidence");
 	try {
 		const evidenceRoot = join(fixture.path, "evidence");
 		mkdirSync(evidenceRoot, { mode: 0o700 });
@@ -242,7 +270,7 @@ test("LIVEEVAL1: a failing scenario's transcript is copied into OMP_KIT_E2E_EVID
 			...process.env, OMP: stub, ONLY: "canary-near", TIMEOUT: "60", OMP_KIT_TEST_NO_COVERAGE: "1",
 			OMP_KIT_TEST_WORK_ROOT: fixture.path, OMP_KIT_CASE_CWD: REPO_ROOT, OMP_KIT_E2E_EVIDENCE_DIR: evidenceRoot,
 		}).filter((entry): entry is [string, string] => entry[1] !== undefined));
-		const result = await run(["sh", "scripts/e2e-live.sh"], { cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(150) });
+		const result = await run(["sh", join(await liveTree(fixture.path), "scripts/e2e-live.sh")], { cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(150) });
 		const stdout = Buffer.from(result.stdout).toString(), stderr = Buffer.from(result.stderr).toString();
 		expect(result.rc, stdout + stderr).toBe(1);
 		const failure = /^FAIL {2}canary-near :: .*transcript: (\S+)\)$/m.exec(stdout);
@@ -270,8 +298,9 @@ test.skipIf(!realPython3)("LIVEEVAL1: a python3 that stalls past OMP's probe bud
 	// the check, which is eval's "Python backend is unavailable". Control: with a fast python3 the pin is that
 	// interpreter and the unpinned check still passes. No model is called: a stub OMP ends each scenario at once, and
 	// plant mode skips packaging a kit candidate; only the base isolated HOME is read.
-	const fixture = ownedTmp("e2e-python-pin");
+	const fixture = workRoot("e2e-python-pin");
 	try {
+		const tree = await liveTree(fixture.path);
 		const omp = resolveOmpIdentity(process.env).launcher;
 		const stub = join(fixture.path, "stub-omp.sh");
 		writeFileSync(stub, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "stub-omp 0.0.0"; fi\nexit 0\n');
@@ -286,7 +315,7 @@ test.skipIf(!realPython3)("LIVEEVAL1: a python3 that stalls past OMP's probe bud
 			const env = Object.fromEntries(Object.entries({ ...process.env, OMP: stub, PATH: path, TIMEOUT: "60",
 				OMP_KIT_TEST_WORK_ROOT: fixture.path, OMP_KIT_CASE_CWD: REPO_ROOT,
 			}).filter((entry): entry is [string, string] => entry[1] !== undefined));
-			const result = await run(["sh", "scripts/e2e-live.sh", "--plant"], { cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(120) });
+			const result = await run(["sh", join(tree, "scripts/e2e-live.sh"), "--plant"], { cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(120) });
 			const stdout = Buffer.from(result.stdout).toString(), stderr = Buffer.from(result.stderr).toString();
 			const kept = /kept private e2e output: (\S+) \(work root (\S+)\)/.exec(stdout);
 			expect(kept, stdout + stderr).not.toBeNull();
