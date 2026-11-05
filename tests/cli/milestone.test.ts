@@ -20,7 +20,7 @@ const args = process.argv.slice(2);
 if (args.includes("init")) throw Error("no tracker writes permitted");
 if (process.env.BEADS_DB === "/foreign/tracker.db" || process.env.BEADS_DIR) throw Error("foreign tracker environment leaked");
 const ids = args.slice(args.indexOf("show") + 1).filter(x => !x.startsWith("--"));
-if (ids.some(id => !["fixture-epic", "fixture-a", "fixture-b"].includes(id))) process.exit(1);
+if (ids.some(id => !["fixture-epic", "fixture-a", "fixture-b", "fixture-clear"].includes(id))) process.exit(1);
 console.log(JSON.stringify(ids.map(id => ({id, status: "open", dependencies: [], dependents: []}))));
 `, { mode: 0o700 });
 	writeFileSync(config, JSON.stringify({ untouched: { operator: true }, sessions: [{ session: "demo", repo, milestone: { epic: "fixture-epic", due: "2026-11-05", declaredAt: "2026-11-03", pinned: [], decision: "keep" } }] }) + "\n", { mode: 0o640 });
@@ -152,4 +152,43 @@ test("MSDATE1 mutant: an unknown subcommand leaves due unchanged", async () => {
 	expect(result.errors?.[0]?.code).toBe("MILESTONE_USAGE");
 	expect(readFileSync(f.config)).toEqual(before);
 	expect(f.read().sessions[0].milestone.due).toBe("2026-11-05");
+});
+
+// Mirrors omp-kit scripts/launch_check.py constraint_checks for a one-bead lane: GO only when no pin precedes the clearing bead.
+const subordinate = (pins: string[], lane: string) => pins[0] === lane ? "GO" : "RED";
+async function clearingLast() {
+	const f = fixture();
+	expect((await runMilestone(request("pin", "demo fixture-a fixture-b fixture-clear"), f.env)).code).toBe(0);
+	expect(subordinate(f.read().sessions[0].milestone.pinned, "fixture-clear")).toBe("RED");
+	return f;
+}
+test("PINORDER1 planted: one pin --first moves only the clearing bead to the front with one audit row; SUBORDINATE reads GO", async () => {
+	const f = await clearingLast();
+	const result = await runMilestone(request("pin", "demo fixture-clear", [["--reason", "constraint changed"], ["--first", true]]), f.env);
+	expect(result.code).toBe(0);
+	const ms = f.read().sessions[0].milestone;
+	expect(ms.pinned).toEqual(["fixture-clear", "fixture-a", "fixture-b"]);
+	expect(subordinate(ms.pinned, "fixture-clear")).toBe("GO");
+	expect(ms.pinLog).toHaveLength(2);
+	expect(ms.pinLog[1]).toMatchObject({ by: "CutWrite", why: "constraint changed", added: [], first: ["fixture-clear"] });
+});
+test("PINORDER1 control: plain pin still appends; negative: unknown bead with --first refuses without mutation", async () => {
+	const f = fixture();
+	expect((await runMilestone(request("pin", "demo fixture-a"), f.env)).code).toBe(0);
+	expect((await runMilestone(request("pin", "demo fixture-b"), f.env)).code).toBe(0);
+	expect(f.read().sessions[0].milestone.pinned).toEqual(["fixture-a", "fixture-b"]);
+	const before = readFileSync(f.config);
+	const refused = await runMilestone(request("pin", "demo unknown-planted", [["--reason", "x"], ["--first", true]]), f.env);
+	expect(refused.errors?.[0]?.code).toBe("MILESTONE_BEAD_UNKNOWN");
+	expect(readFileSync(f.config)).toEqual(before);
+	const fresh = await runMilestone(request("pin", "demo fixture-clear", [["--reason", "new lane"], ["--first", true]]), f.env);
+	expect(fresh.code).toBe(0);
+	expect(f.read().sessions[0].milestone.pinned).toEqual(["fixture-clear", "fixture-a", "fixture-b"]);
+});
+test("PINORDER1 mutant: re-pinning without --first leaves the order unchanged and SUBORDINATE RED", async () => {
+	const f = await clearingLast();
+	expect((await runMilestone(request("pin", "demo fixture-clear"), f.env)).code).toBe(0);
+	const pins = f.read().sessions[0].milestone.pinned;
+	expect(pins).toEqual(["fixture-a", "fixture-b", "fixture-clear"]);
+	expect(subordinate(pins, "fixture-clear")).toBe("RED");
 });

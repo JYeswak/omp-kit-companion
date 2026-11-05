@@ -18,9 +18,9 @@ export const MILESTONE_COMMAND: Command = {
 	name: "milestone", description: "Inspect a session's milestone cut, change its validated pins or set its due date with an audit trail", usage: "milestone pin|unpin|date|show SESSION [BEAD...|DATE]", flags: [], example: "omp-kit milestone show omp-test --json", runnable: true,
 	subcommands: ["pin", "unpin", "show"].map(action => ({
 		name: action, description: action === "show" ? "Read the declared milestone and recent pin history; validate every pinned id in its tracker" : `${action === "pin" ? "Add" : "Remove"} tracker-validated bead pins atomically; append actor, time and reason`,
-		usage: `milestone ${action} SESSION${action === "show" ? "" : " BEAD... --reason TEXT [--by NAME]"}`,
+		usage: `milestone ${action} SESSION${action === "show" ? "" : ` BEAD... --reason TEXT [--by NAME]${action === "pin" ? " [--first]" : ""}`}`,
 		argument: action === "show" ? "SESSION" : "SESSION BEAD...", maxArguments: action === "show" ? 1 : 129,
-		flags: action === "show" ? [] : auditFlags,
+		flags: action === "show" ? [] : action === "pin" ? [...auditFlags, { name: "--first", description: "Move the named pins to the front of the cut in argument order; every other pin keeps its relative order" }] : auditFlags,
 		example: action === "show" ? "omp-kit milestone show SESSION --json" : `omp-kit milestone ${action} SESSION BEAD --reason 'Director replan' --json`,
 		runnable: true, mutation: action !== "show", dataSchema,
 	} as Command)).concat([{
@@ -116,11 +116,11 @@ export async function runMilestone(request: ParsedCommand, env: NodeJS.ProcessEn
 			milestone.pinLog = [...pinLog, { at: new Date().toISOString(), by: actor, due: { from: dates.due, to: due }, why }];
 			dates.due = due;
 		} else {
-			const selected = new Set(unique), existing = new Set(pinned);
+			const selected = new Set(unique), existing = new Set(pinned), first = action === "pin" && request.flags.has("--first");
 			const delta = action === "pin" ? unique.filter(id => !existing.has(id)) : pinned.filter(id => selected.has(id));
-			milestone.pinned = action === "pin" ? [...pinned, ...delta] : pinned.filter(id => !selected.has(id));
+			milestone.pinned = first ? [...unique, ...pinned.filter(id => !selected.has(id))] : action === "pin" ? [...pinned, ...delta] : pinned.filter(id => !selected.has(id));
 			milestone.pinLog = [...pinLog, { at: new Date().toISOString(), by: actor,
-				[action === "pin" ? "added" : "removed"]: delta, why }];
+				[action === "pin" ? "added" : "removed"]: delta, ...(first ? { first: unique } : {}), why }];
 		}
 		atomicReplaceBytes(configPath, Buffer.from(JSON.stringify(config, null, 2) + "\n"), { mode: stat.mode & 0o755, durability: "full" });
 		return { code: 0, data: { overall: "OK", session, repo: row.repo, epic: milestone.epic, ...dates, pinned: ids(milestone.pinned) ? milestone.pinned : pinned, pinLog: (milestone.pinLog as unknown[]).slice(-10) }, verification: "NOT_RUN" };
