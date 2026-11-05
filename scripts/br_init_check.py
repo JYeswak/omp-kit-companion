@@ -582,9 +582,11 @@ def _js_calls(source: bytes, path: str) -> core.Scan:
 
 
 def _split_shell(line: str) -> Optional[List[List[str]]]:
+    # A newline separates commands like ';' (BRINITSCAN1: a multi-line $( ... ) body is scanned as one text).
     try:
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()\n")
         lexer.whitespace_split = True
+        lexer.whitespace = lexer.whitespace.replace("\n", "")
         lexer.commenters = ""
         tokens = list(lexer)
     except ValueError:
@@ -592,7 +594,7 @@ def _split_shell(line: str) -> Optional[List[List[str]]]:
     commands: List[List[str]] = []
     current: List[str] = []
     for token in tokens:
-        if token and all(char in ";&|()" for char in token):
+        if token and all(char in ";&|()\n" for char in token):
             if current:
                 commands.append(current)
                 current = []
@@ -717,8 +719,9 @@ def _command_substitution_end(source: str, start: int, nesting: int = 0) -> Opti
     return None
 
 
-def _shell_expansions(source: str, initial_quote: str) -> Tuple[List[str], str, Optional[str]]:
-    expansions: List[str] = []
+def _shell_expansions(source: str, initial_quote: str) -> Tuple[List[Tuple[str, int]], str, Optional[str]]:
+    """Each closed $( ) / backtick body with its start offset in ``source``; the quote state at the end; an error."""
+    expansions: List[Tuple[str, int]] = []
     quote = initial_quote
     index = 0
     while index < len(source):
@@ -750,13 +753,13 @@ def _shell_expansions(source: str, initial_quote: str) -> Tuple[List[str], str, 
                 end = _command_substitution_end(source, index)
                 if end is None:
                     return expansions, quote, "unclosed command substitution"
-                expansions.append(source[index + 2:end])
+                expansions.append((source[index + 2:end], index + 2))
                 index = end + 1
             elif char == "`":
                 end = _backtick_end(source, index)
                 if end is None:
                     return expansions, quote, "unclosed backtick substitution"
-                expansions.append(source[index + 1:end])
+                expansions.append((source[index + 1:end], index + 1))
                 index = end + 1
             else:
                 index += 1
@@ -781,13 +784,13 @@ def _shell_expansions(source: str, initial_quote: str) -> Tuple[List[str], str, 
             end = _command_substitution_end(source, index)
             if end is None:
                 return expansions, quote, "unclosed command substitution"
-            expansions.append(source[index + 2:end])
+            expansions.append((source[index + 2:end], index + 2))
             index = end + 1
         elif char == "`":
             end = _backtick_end(source, index)
             if end is None:
                 return expansions, quote, "unclosed backtick substitution"
-            expansions.append(source[index + 1:end])
+            expansions.append((source[index + 1:end], index + 1))
             index = end + 1
         else:
             index += 1
@@ -861,6 +864,7 @@ def _shell_line_continues(line: str, quote: str) -> bool:
 
 
 def _scan_shell_line(line: str, number: int, hits: core.Hits) -> None:
+    """Judge every br command in ``line``; ``line`` may span physical lines, which ``number`` starts."""
     commands = _split_shell(_mask_escaped_substitutions(line))
     if commands is None:
         return
@@ -879,7 +883,10 @@ def _scan_shell_line(line: str, number: int, hits: core.Hits) -> None:
             continue
         if _word_env_is_fixture_db(words[:command]) or own_db:
             continue
-        hits.add(rule, number, max(1, line.find(words[command]) + 1), "br init" if rule == RULE else "br call")
+        position = max(0, line.find(words[command]))
+        line_start = line.rfind("\n", 0, position) + 1
+        hits.add(rule, number + line.count("\n", 0, position), position - line_start + 1,
+                 "br init" if rule == RULE else "br call")
 
 
 def _scan_shell_expansions(source: str, number: int, hits: core.Hits, initial_quote: str,
@@ -894,22 +901,35 @@ def _scan_shell_expansions(source: str, number: int, hits: core.Hits, initial_qu
     if error is not None:
         hits.add("parse-error", number, 1, error)
         return quote
-    pending = [(expansion, 1) for expansion in expansions]
+    pending = [(expansion, offset, 1) for expansion, offset in expansions]
     while pending:
-        expression, depth = pending.pop()
+        expression, offset, depth = pending.pop()
         work[0] += len(expression)
         if work[0] > max_work:
             hits.add("parse-error", number, 1, "shell expansion work limit exceeded")
             break
-        _scan_shell_line(expression, number, hits)
+        _scan_shell_line(expression, number + source.count("\n", 0, offset), hits)
         nested, _, nested_error = _shell_expansions(expression, "")
         if nested_error is not None:
             hits.add("parse-error", number, 1, nested_error)
         elif depth >= max_depth and nested:
             hits.add("parse-error", number, 1, "shell expansion nesting limit exceeded")
         else:
-            pending.extend((child, depth + 1) for child in nested)
+            pending.extend((child, offset + child_offset, depth + 1) for child, child_offset in nested)
     return quote
+
+
+# BRINITSCAN1 (ompkit-fp72.120.16.251): a $( ... ), backtick or $(( ... )) left open at the end of a line is
+# buffered with the following code lines until it closes, then judged as one text, so a multi-line substitution
+# such as `x=$(\n if ...; then python3 -c '<body>'; fi\n)` parses. A block that never closes within the bound
+# (or by end of file) is a parse-error at its first line and every buffered line is still judged on its own,
+# exactly as before, so an unpinned br init inside an unparseable region keeps refusing.
+MAX_BLOCK_LINES = 400
+MAX_BLOCK_BYTES = 64 * 1024
+
+
+def _unclosed(error: Optional[str]) -> bool:
+    return error is not None and error.startswith("unclosed ")
 
 
 def _shell_calls(source: bytes, path: str) -> core.Scan:
@@ -920,9 +940,54 @@ def _shell_calls(source: bytes, path: str) -> core.Scan:
     pending_line = [0]
     pending_quote = [""]
     continued_first_lines: Dict[int, str] = {}
+    block: List[Tuple[int, str]] = []
+    block_quote = [""]
+    block_texts: Dict[int, str] = {}
     work = [0]
 
+    def block_text() -> str:
+        # Pad lines the block did not receive (heredoc bodies, continued lines) so offsets map to physical lines.
+        parts: List[str] = []
+        for index, (number, code) in enumerate(block):
+            if index:
+                parts.extend([""] * (number - block[index - 1][0] - 1))
+            parts.append(code)
+        return "\n".join(parts)
+
+    def finish_block(hits: core.Hits) -> None:
+        text = block_text()
+        first = block[0][0]
+        _, _, error = _shell_expansions(text, block_quote[0])
+        if not _unclosed(error):
+            if block_quote[0] == "":
+                _scan_shell_line(text, first, hits)
+            quote[0] = _scan_shell_expansions(text, first, hits, block_quote[0], work)
+        else:
+            line_quote = block_quote[0]
+            for number, code in block:
+                if line_quote == "":
+                    _scan_shell_line(code, number, hits)
+                line_quote = _scan_shell_expansions(code, number, hits, line_quote, work)
+            quote[0] = line_quote
+        block.clear()
+
     def scan_code(code: str, number: int, initial_quote: str, hits: core.Hits) -> None:
+        if block:
+            block.append((number, code))
+            block_texts[number] = code
+            if (len(block) < MAX_BLOCK_LINES and sum(len(text) for _, text in block) < MAX_BLOCK_BYTES
+                    and not any(char in code for char in ")`")):
+                return
+            if (len(block) < MAX_BLOCK_LINES and sum(len(text) for _, text in block) < MAX_BLOCK_BYTES
+                    and _unclosed(_shell_expansions(block_text(), block_quote[0])[2])):
+                return
+            finish_block(hits)
+            return
+        if _unclosed(_shell_expansions(code, initial_quote)[2]):
+            block.append((number, code))
+            block_texts[number] = code
+            block_quote[0] = initial_quote
+            return
         if initial_quote == "":
             _scan_shell_line(code, number, hits)
         quote[0] = _scan_shell_expansions(code, number, hits, initial_quote, work)
@@ -955,9 +1020,13 @@ def _shell_calls(source: bytes, path: str) -> core.Scan:
     scanned = core.scan_sh(source.decode("utf-8", "replace"), on_code, on_heredoc)
     if pending_code:
         scanned.hits.add("parse-error", pending_line[0], 1, "line continuation at end of file")
+    if block:
+        finish_block(scanned.hits)
     for number in scanned.hits.lines():
         if number not in scanned.texts and number in continued_first_lines:
             scanned.texts[number] = continued_first_lines[number]
+        if number not in scanned.texts and number in block_texts:
+            scanned.texts[number] = block_texts[number]
     return core.Scan(scanned.hits, scanned.texts, [])
 
 

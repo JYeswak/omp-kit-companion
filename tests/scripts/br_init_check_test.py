@@ -123,5 +123,57 @@ class ShellCalls(unittest.TestCase):
         self.assertFalse(checker.RULESET.is_exempt("tests/fixtures/br-init/other.sh"))
 
 
+CLEAN_SUBSTITUTION = "x=$(\n if true; then python3 -c 'print(\"a\")'; fi\n)\n"
+# The shape of omp-kit scripts/sitrep.sh:1063: a multi-line $( ) whose single-quoted python body holds ", %, ) and #.
+SITREP_SUBSTITUTION = """ack_pairs=$(
+\tif [ "$ready" -eq 1 ]; then
+\t\tCFG="$CFG" python3 -c '
+import json, os
+# a comment with ) and "quotes" and 100%
+print("%s" % os.environ.get("CFG"))
+'
+\tfi
+)
+"""
+
+
+class MultiLineSubstitutions(unittest.TestCase):
+    """BRINITSCAN1 (ompkit-fp72.120.16.251)."""
+
+    def test_planted_multi_line_substitutions_parse(self) -> None:
+        self.assertEqual(active("sh", CLEAN_SUBSTITUTION), [])
+        self.assertEqual(active("sh", SITREP_SUBSTITUTION), [])
+        self.assertEqual(active("sh", "line=$(jq -r 'if .a then\n  .b\nelse .c end' <<<\"$x\")\necho \"$line\"\n"), [])
+        self.assertEqual(active("sh", "v=`\n echo one\n`\n"), [])
+
+    def test_br_init_inside_a_multi_line_substitution_still_refuses_at_its_own_line(self) -> None:
+        self.assertEqual(active("sh", 'x=$(\n  cd "$d" &&\n  br init\n)\n'), [(3, "unpinned-br-init")])
+        self.assertEqual(active("sh", 'v=$(\n echo "$(br init)"\n)\n'), [(2, "unpinned-br-init")])
+        self.assertEqual(active("sh", SITREP_SUBSTITUTION.replace("\tfi\n", "\tfi\n\tbr init\n")), [(9, "unpinned-br-init")])
+        self.assertEqual(active("sh", 'x=$(\n  br init --db "$child/.beads/beads.db"\n)\n'), [])
+        self.assertEqual(active("sh", "x=$(\n python3 -c '\nprint(\"br init\")\n'\n)\n"), [])
+
+    def test_an_unparseable_region_cannot_hide_a_br_init(self) -> None:
+        self.assertEqual(active("sh", "x=$(\n  br init\n"), [(1, "parse-error"), (2, "unpinned-br-init")])
+        bound = checker.MAX_BLOCK_LINES
+        checker.MAX_BLOCK_LINES = 3
+        try:
+            findings = active("sh", "x=$(\n :\n :\n br init\n)\n")
+        finally:
+            checker.MAX_BLOCK_LINES = bound
+        self.assertIn((1, "parse-error"), findings)
+        self.assertIn((4, "unpinned-br-init"), findings)
+
+    def test_mutant_old_line_scanner_refuses_the_clean_fixture(self) -> None:
+        # MAX_BLOCK_LINES = 1 never buffers past the opening line: the pre-BRINITSCAN1 scanner.
+        bound = checker.MAX_BLOCK_LINES
+        checker.MAX_BLOCK_LINES = 1
+        try:
+            self.assertEqual(active("sh", CLEAN_SUBSTITUTION), [(1, "parse-error")])
+            self.assertEqual(active("sh", SITREP_SUBSTITUTION), [(1, "parse-error")])
+        finally:
+            checker.MAX_BLOCK_LINES = bound
+
+
 if __name__ == "__main__":
     unittest.main()
