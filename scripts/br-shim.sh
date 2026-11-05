@@ -30,7 +30,9 @@ for arg in "$@"; do
 done
 
 real="${BR_REAL:-}"
+real_from_path=0
 if [ -z "$real" ]; then
+	real_from_path=1
 	self_dir=$(dirname -- "$0") || fail "BR_SHIM_NO_REAL_BR cannot resolve shim directory"
 	case "$self_dir" in
 		/*) ;;
@@ -53,6 +55,30 @@ while [ -L "$self_path" ]; do
 done
 if [ "$real" = "$self_path" ]; then
 	fail "BR_SHIM_LOOP refusing to exec the shim itself (no real br beyond it on PATH)"
+fi
+# SHIMCHAIN1 (ompkit-fp72.120.16.247): a grade_wave grader dispatcher (<scratch>/bin/br) resets AGENT_NAME to its
+# BAKED_AGENT and execs its BAKED_REAL. When that delegate is itself a pane shim, judging here as well would put two
+# identities on one call: this shim appended --actor <AGENT_NAME>, and the inner shim refused it for the dispatcher's
+# identity (BR_SHIM_ACTOR_MISMATCH), so every grader read through PATH br failed. Such a chain is judged once, by the
+# inner shim under the dispatcher's identity: pass the arguments through untouched. The dispatcher is recognized by
+# the header grade_wave writes (BAKED_AGENT and a single-quoted BAKED_REAL in its first lines) and only when
+# BAKED_REAL resolves to a br-shim.sh; any other next hop keeps this shim's full policy. An explicit BR_REAL is the
+# caller's chosen backend and is never inspected, so that path costs no extra process.
+if [ "$real_from_path" = 1 ] && [ -f "$real" ] && [ "$(head -c 2 "$real" 2>/dev/null)" = '#!' ]; then
+	chain_delegate=$(awk 'BEGIN { q = sprintf("%c", 39) } NR > 12 { exit } /^BAKED_AGENT = / { agent = 1 } /^BAKED_REAL = / { value = substr($0, 14) } END { if (agent && length(value) > 2 && substr(value, 1, 1) == q && substr(value, length(value), 1) == q) print substr(value, 2, length(value) - 2) }' "$real" 2>/dev/null) || chain_delegate=""
+	case "$chain_delegate" in
+		/*)
+			while [ -L "$chain_delegate" ]; do
+				link=$(readlink "$chain_delegate") || break
+				case "$link" in
+					/*) chain_delegate="$link" ;;
+					*) chain_delegate="$(dirname -- "$chain_delegate")/$link" ;;
+				esac
+			done
+			case "$chain_delegate" in
+				*/br-shim.sh) exec "$real" "$@" ;;
+			esac ;;
+	esac
 fi
 # SHIMHELP1 (ompkit-kup44.9): help and version output cannot touch a tracker, so run the real br
 # before any identity or reservation check. prompt_lint T1 probes `br update --help` in exports

@@ -762,10 +762,14 @@ function hermeticFixture(): HermeticFixture {
 async function hermeticCall(fixture: HermeticFixture, args: string[], options: {
 	shim?: string; env?: Record<string, string>; native?: boolean; implicit?: boolean;
 } = {}) {
+	// FIXTUREDEADLINE1: load-aware bound, floor 30 s like this file's other shim-driven fixtures. A shim create runs
+	// the fixture-scope helper, Agent Mail, the create guard (whose own hops are bounded at 30 s) and native br; at
+	// the load gate's concurrency 6 it was measured at up to 30.3 s (load1 32), and the old 15 s floor (34 s at the
+	// gate's load1 18) SIGTERMed TRACKERLEASE1 creates at -15 before the product could answer.
 	const result = await run(options.native
 		? [fixture.backend, "--db", fixture.database, ...args]
 		: ["/bin/sh", options.shim ?? join(root, "scripts/br-shim.sh"), ...(options.implicit ? [] : ["--db", fixture.database]), ...args],
-	{ cwd: fixture.path, env: options.env ?? fixture.env, deadline_s: fixtureDeadlineS(15), max_output_bytes: 1024 * 1024 });
+	{ cwd: fixture.path, env: options.env ?? fixture.env, deadline_s: fixtureDeadlineS(30), max_output_bytes: 1024 * 1024 });
 	return { rc: result.rc, timedOut: result.timed_out, truncated: result.truncated,
 		stdout: decoder.decode(result.stdout), output: decoder.decode(result.stdout) + decoder.decode(result.stderr) };
 }
@@ -1126,3 +1130,110 @@ test("TRACKERLEASE1 lease: disabling the explicit-flush guard exposes the same n
 		expect(leaseExport(fixture).map(row => row.id).sort()).toEqual((await leaseRows(fixture)).map(row => row.id).sort());
 	} finally { fixture.cleanup(); }
 }, fixtureDeadlineS(120) * 1_000);
+
+/* SHIMCHAIN1 (ompkit-fp72.120.16.247): a pane shim ahead of a grade_wave grader dispatcher whose BAKED_REAL is a pane
+   shim. The dispatcher is a fixture shaped like grade_wave's header (BAKED_* lines, identity reset, exec of BAKED_REAL);
+   the backend records each call and touches no tracker; `am` refuses every identity and records which one it judged.
+   Each shim is this checkout's exact br-shim.sh bytes, copied alone into its directory: with no br-fixture-scope.py
+   beside it no tracker can be an owned fixture, every write meets the reservation check, and a call starts no Python
+   except the dispatcher (run without site imports), so the cases stay cheap at the load gate's concurrency. */
+const SHIMCHAIN_START = "# SHIMCHAIN1 (";
+const SHIMCHAIN_END = "# SHIMHELP1 (";
+
+function shimChainFixture(delegate: "pane-shim" | "backend") {
+	const scratch = ownedTmp("shimchain1");
+	const dir = (name: string) => { const path = join(scratch.path, name); mkdirSync(path, { recursive: true }); return path; };
+	const pane = dir("pane"), inner = dir("inner"), dispatch = dir("dispatch"), backend = dir("backend"), tools = dir("tools"), mutant = dir("mutant");
+	const foreign = dir("foreign");
+	mkdirSync(join(foreign, ".beads"));
+	const install = (bin: string, source: string) => {
+		writeFileSync(join(bin, "br-shim.sh"), source, { mode: 0o755 });
+		symlinkSync(join(bin, "br-shim.sh"), join(bin, "br"));
+	};
+	install(pane, shimSource);
+	install(inner, shimSource);
+	const start = shimSource.indexOf(SHIMCHAIN_START), end = shimSource.indexOf(SHIMCHAIN_END);
+	if (start < 0 || end < start) throw new Error("SHIMCHAIN1 mutation did not match");
+	install(mutant, shimSource.slice(0, start) + shimSource.slice(end));
+	const brLog = join(scratch.path, "backend.log"), amLog = join(scratch.path, "am.log");
+	writeFileSync(join(backend, "br"), `#!/bin/sh\nprintf '%s|%s\\n' "\${AGENT_NAME-}" "$*" >> "$BR_LOG"\nprintf '[{"id":"fx-1"}]\\n'\n`, { mode: 0o755 });
+	writeFileSync(join(tools, "am"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$AM_LOG"\nprintf 'fixture mail refuses every identity\\n' >&2\nexit 2\n`, { mode: 0o755 });
+	const system = "/usr/bin:/bin";
+	const py = (value: string) => { if (value.includes("'")) throw new Error("SHIMCHAIN1 fixture path holds a quote"); return `'${value}'`; };
+	const bakedReal = delegate === "pane-shim" ? join(inner, "br") : join(backend, "br");
+	writeFileSync(join(dispatch, "br"), [
+		"#!/usr/bin/env -S python3 -S -E",
+		`BAKED_SCRATCH = ${py(scratch.path)}`,
+		"BAKED_AGENT = 'GraderBaked'",
+		`BAKED_REAL = ${py(bakedReal)}`,
+		`BAKED_PATH = ${py(`${inner}:${backend}:${tools}:${system}`)}`,
+		"import os, sys",
+		"os.environ['AGENT_NAME'] = BAKED_AGENT",
+		"os.environ['PATH'] = BAKED_PATH",
+		"os.execv(BAKED_REAL, [BAKED_REAL] + sys.argv[1:])",
+		"",
+	].join("\n"), { mode: 0o755 });
+	// No BR_REAL: each shim resolves its next hop from PATH.
+	const env = { AGENT_NAME: "ShellPane", HOME: scratch.path, TMPDIR: scratch.path, XDG_STATE_HOME: join(scratch.path, "state"),
+		BR_LOG: brLog, AM_LOG: amLog };
+	const call = async (entry: string, args: string[], pathHead = pane) => {
+		const result = await run([entry, ...args], { cwd: scratch.path, env: { ...env, PATH: `${pathHead}:${dispatch}:${backend}:${tools}:${system}` },
+			deadline_s: fixtureDeadlineS(30), max_output_bytes: 1024 * 1024 });
+		const read = (path: string) => existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : [];
+		return { rc: result.rc, incomplete: result.timed_out || result.truncated,
+			output: decoder.decode(result.stdout) + decoder.decode(result.stderr), backend: read(brLog), judged: read(amLog) };
+	};
+	const reset = () => { for (const path of [brLog, amLog]) if (existsSync(path)) unlinkSync(path); };
+	return { scratch, pane, dispatch, mutant, foreign, call, reset };
+}
+
+test("SHIMCHAIN1 planted: pane shim ahead of a shim-bound dispatcher reads under the dispatcher's actor; a write is judged once, under that identity", async () => {
+	const f = shimChainFixture("pane-shim");
+	try {
+		const read = await f.call(join(f.pane, "br"), ["show", "fx-1", "--json"]);
+		expect({ rc: read.rc, incomplete: read.incomplete }, read.output).toEqual({ rc: 0, incomplete: false });
+		expect(read.backend).toEqual(["GraderBaked|show fx-1 --json --actor GraderBaked"]);
+		f.reset();
+		const write = await f.call(join(f.pane, "br"), ["--db", join(f.foreign, ".beads/beads.db"), "update", "fx-1", "--add-label", "probe"]);
+		expect({ rc: write.rc, incomplete: write.incomplete }, write.output).toEqual({ rc: 4, incomplete: false });
+		expect(write.output).toContain("BR_SHIM_RESERVATION_UNKNOWN Agent Mail cannot verify GraderBaked");
+		expect(write.judged.map(line => line.split(" ").at(-1))).toEqual(["GraderBaked"]);
+		expect(write.backend).toEqual([]);
+	} finally { f.scratch.cleanup(); }
+}, CASE_BUDGET_MS);
+
+test("SHIMCHAIN1 control: the dispatcher first is unchanged; a dispatcher whose delegate is not a pane shim keeps the outer shim's full policy", async () => {
+	const first = shimChainFixture("pane-shim");
+	try {
+		const read = await first.call(join(first.dispatch, "br"), ["show", "fx-1", "--json"], first.dispatch);
+		expect(read.rc, read.output).toBe(0);
+		expect(read.backend).toEqual(["GraderBaked|show fx-1 --json --actor GraderBaked"]);
+		first.reset();
+		const write = await first.call(join(first.dispatch, "br"), ["--db", join(first.foreign, ".beads/beads.db"), "update", "fx-1", "--add-label", "probe"], first.dispatch);
+		expect(write.rc, write.output).toBe(4);
+		expect(write.judged.map(line => line.split(" ").at(-1))).toEqual(["GraderBaked"]);
+		expect(write.backend).toEqual([]);
+	} finally { first.scratch.cleanup(); }
+	const direct = shimChainFixture("backend");
+	try {
+		const read = await direct.call(join(direct.pane, "br"), ["show", "fx-1", "--json"]);
+		expect(read.rc, read.output).toBe(0);
+		expect(read.backend).toEqual(["GraderBaked|show fx-1 --json --actor ShellPane"]);
+		direct.reset();
+		const write = await direct.call(join(direct.pane, "br"), ["--db", join(direct.foreign, ".beads/beads.db"), "update", "fx-1", "--add-label", "probe"]);
+		expect(write.rc, write.output).toBe(4);
+		expect(write.output).toContain("Agent Mail cannot verify ShellPane");
+		expect(write.judged.map(line => line.split(" ").at(-1))).toEqual(["ShellPane"]);
+		expect(write.backend).toEqual([]);
+	} finally { direct.scratch.cleanup(); }
+}, CASE_BUDGET_MS);
+
+test("SHIMCHAIN1 mutant: without the chain rule the same pane-shim-first read is refused BR_SHIM_ACTOR_MISMATCH", async () => {
+	const f = shimChainFixture("pane-shim");
+	try {
+		const read = await f.call(join(f.mutant, "br"), ["show", "fx-1", "--json"], f.mutant);
+		expect({ rc: read.rc, incomplete: read.incomplete }, read.output).toEqual({ rc: 4, incomplete: false });
+		expect(read.output).toContain("BR_SHIM_ACTOR_MISMATCH refusing --actor ShellPane for pane identity GraderBaked");
+		expect(read.backend).toEqual([]);
+	} finally { f.scratch.cleanup(); }
+}, CASE_BUDGET_MS);
