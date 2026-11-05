@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../src/kitlib/tmp.ts";
 import kitGoalKeepalive, {
@@ -8,17 +8,19 @@ import kitGoalKeepalive, {
 	downtimeMessage,
 	GOAL_IDLE_ESCALATE,
 	GOAL_REPEAT_SUPPRESSED,
+	IDLE_HEARTBEAT_MS,
 	IDLE_WAKE_MS,
 	MAX_QUIET_WAKES,
 	MIN_WAKE_INTERVAL_MS,
 	newestGateKind,
 	seatIdentity,
 	turnChangedState,
+	type AsyncJobView,
 	type GoalKeepaliveApi,
 	type GoalKeepaliveContext,
 	type GoalKeepaliveDeps,
+	type KeepaliveEntry,
 	type KeepaliveMessage,
-	type KeepaliveModeEntry,
 } from "./kit-goal-keepalive.ts";
 
 afterAll(cleanupAllOwnedTmp);
@@ -42,7 +44,7 @@ interface FakeSeat {
 	emit: (event: string, e?: never) => unknown;
 }
 
-function fakeHost(opts: { env?: Record<string, string | undefined>; idle?: boolean; clock?: { at: number }; sessionEntries?: KeepaliveModeEntry[] } = {}): FakeSeat {
+function fakeHost(opts: { env?: Record<string, string | undefined>; idle?: boolean; clock?: { at: number }; sessionEntries?: KeepaliveEntry[]; jobs?: { snapshot: AsyncJobView | null } } = {}): FakeSeat {
 	const sent: Sent[] = [];
 	const entries: { customType: string; data: unknown }[] = [];
 	const sessionEntries = opts.sessionEntries ?? [];
@@ -64,7 +66,8 @@ function fakeHost(opts: { env?: Record<string, string | undefined>; idle?: boole
 	};
 	const ctx: GoalKeepaliveContext & { fireDue: () => number; armed: () => number } = {
 		isIdle: () => idle,
-		sessionManager: { getEntries: () => sessionEntries },
+		sessionManager: { getEntries: () => sessionEntries, getBranch: () => sessionEntries },
+		getAsyncJobSnapshot: () => opts.jobs?.snapshot ?? null,
 		setTimeout: (cb) => {
 			const handle = nextHandle++;
 			timers[handle] = cb;
@@ -444,7 +447,7 @@ test("resume: session_start with a persisted active goal arms the wake with no g
 	expect(h.sent[0]!.content).toContain("held bead");
 });
 test("resume planted: paused, exited, empty, or malformed transcript wakes nothing", async () => {
-	const cases: KeepaliveModeEntry[][] = [
+	const cases: KeepaliveEntry[][] = [
 		[{ type: "mode_change", mode: "goal_paused", data: { goal: { status: "paused" } } }],
 		[{ type: "mode_change", mode: "none" }],
 		[],
@@ -556,4 +559,140 @@ test("rearm control: a seat that starts a turn before T+10 min gets no wake", as
 	h.clock.at += MIN_WAKE_INTERVAL_MS;
 	h.ctx.fireDue();
 	expect(h.sent).toHaveLength(1);
+});
+
+// GOALBREATHE1 fixtures. A todo result as omp persists it (pi-coding-agent tools/todo.ts canonicalTodoPhases reads it).
+type FxTask = { content: string; status: string; blocker?: string };
+const todoEntry = (...tasks: FxTask[]): KeepaliveEntry =>
+	({ type: "message", message: { role: "toolResult", toolName: "todo", isError: false, details: { op: "block", phases: [{ name: "wave", tasks }] } } });
+const SHIPPED: FxTask = { content: "land the companion change", status: "completed" };
+const VERDICT: FxTask = { content: "close .286 on the release verdict", status: "blocked" };
+const LIVE_JOB: AsyncJobView = { running: [{ id: "bg_7", type: "task", status: "running" }], delivery: { queued: 0, delivering: false } };
+const NO_JOB: AsyncJobView = { running: [], delivery: { queued: 0, delivering: false } };
+// The turn a finished job's owner-routed delivery starts (session/async-job-delivery.ts ASYNC_RESULT_MESSAGE_TYPE).
+const ASYNC_RESULT_TURN = [{ role: "custom", customType: "async-result", content: "bg_7 completed" }, ...QUIET_TURN] as KeepaliveMessage[];
+const HEARTBEAT = (on: string) => "[kit-goal-keepalive] QuietBadger: idle-state heartbeat (at most one per 30m): all 1 open todo item(s) "
+	+ `are blocked, waiting on ${on}. If that event already arrived, act on it; otherwise end the turn.`;
+
+/** Fake time that honours each timer's delay: run(ms) fires every timer due within ms, in due order, at its due time. */
+function fakeTime(h: FakeSeat): (ms: number) => void {
+	type Due = { at: number; cb: (...args: unknown[]) => void };
+	const due = new Map<symbol, Due>();
+	h.ctx.setTimeout = ((cb: (...args: unknown[]) => void, ms?: number) => {
+		const handle = Symbol("timer");
+		due.set(handle, { at: h.clock.at + (ms ?? 0), cb });
+		return handle;
+	}) as GoalKeepaliveContext["setTimeout"];
+	h.ctx.clearTimer = timer => { due.delete(timer as symbol); };
+	h.ctx.armed = () => due.size;
+	return ms => {
+		const end = h.clock.at + ms;
+		for (;;) {
+			let next: [symbol, Due] | undefined;
+			for (const entry of due) if (entry[1].at <= end && (next === undefined || entry[1].at < next[1].at)) next = entry;
+			if (next === undefined) break;
+			due.delete(next[0]);
+			h.clock.at = next[1].at;
+			next[1].cb();
+		}
+		h.clock.at = end;
+	};
+}
+
+/** The planted seat (every open todo blocked, job bg_7 live) for 12 min: wake at 2 min if any, a quiet turn, 10 more
+ * min. Returns the wakes sent. */
+async function quietPlantedWakes(extension: typeof kitGoalKeepalive): Promise<number> {
+	const h = fakeHost({ sessionEntries: [todoEntry(SHIPPED, VERDICT)], jobs: { snapshot: LIVE_JOB } });
+	const run = fakeTime(h);
+	await extension(h.api, { ...SEAT, now: () => h.clock.at });
+	h.emit("goal_updated", ACTIVE_GOAL);
+	h.emit("agent_end", { messages: QUIET_TURN } as never);
+	run(IDLE_WAKE_MS);
+	h.emit("agent_end", { messages: QUIET_TURN } as never);
+	run(MIN_WAKE_INTERVAL_MS);
+	return h.sent.length;
+}
+
+test("GOALBREATHE1 planted: an all-blocked seat with a live job gets no wake until the job completes; the 30-min ceiling heartbeat fires", async () => {
+	const jobs: { snapshot: AsyncJobView | null } = { snapshot: LIVE_JOB };
+	const h = fakeHost({ sessionEntries: [todoEntry(SHIPPED, VERDICT)], jobs });
+	const run = fakeTime(h);
+	await idleSeat(h);
+	run(IDLE_HEARTBEAT_MS - 1);
+	expect(h.sent).toHaveLength(0); // 30 min of fake time less 1 ms: no wake
+	expect(h.ctx.armed()).toBe(1); // asleep to the ceiling, never disarmed
+	run(1);
+	expect(h.sent).toHaveLength(1); // the ceiling heartbeat
+	const heartbeat = h.sent[0]!.content.split("\n");
+	expect(heartbeat[0]).toBe(FIXTURE_LINE);
+	expect(heartbeat.at(-2)).toBe("[kit-goal-keepalive] QuietBadger: goal active, idle 30m.");
+	expect(heartbeat.at(-1)).toBe(HEARTBEAT("job bg_7"));
+	// The heartbeat turn ends quietly a minute later; the job still runs, so the next 10 min stay silent.
+	run(60_000);
+	h.emit("agent_end", { messages: QUIET_TURN } as never);
+	run(MIN_WAKE_INTERVAL_MS);
+	expect(h.sent).toHaveLength(1);
+	expect(h.ctx.armed()).toBe(1);
+	// The job completes: its async-result delivery starts a turn, and that turn's end lifts the idle state.
+	jobs.snapshot = NO_JOB;
+	h.emit("agent_start");
+	h.emit("agent_end", { messages: ASYNC_RESULT_TURN } as never);
+	run(IDLE_WAKE_MS);
+	expect(h.sent).toHaveLength(2);
+	expect(h.sent[1]!.content).not.toContain("idle-state heartbeat");
+	expect(h.sent[1]!.content.split("\n").at(-1)).toBe("[kit-goal-keepalive] QuietBadger: goal active, idle 2m.");
+});
+
+test("GOALBREATHE1 planted: a named blocker with no job, or a job result queued for delivery, also sleeps to the ceiling", async () => {
+	const cases: [KeepaliveEntry, AsyncJobView, string][] = [
+		[todoEntry(SHIPPED, { ...VERDICT, blocker: "release verdict for .286" }), NO_JOB, "release verdict for .286"],
+		[todoEntry(SHIPPED, VERDICT), { running: [], delivery: { queued: 1, delivering: false } }, "job result queued for delivery"],
+	];
+	for (const [todos, snapshot, on] of cases) {
+		const h = fakeHost({ sessionEntries: [todos], jobs: { snapshot } });
+		const run = fakeTime(h);
+		await idleSeat(h);
+		run(IDLE_HEARTBEAT_MS - 1);
+		expect([on, h.sent.length]).toEqual([on, 0]);
+		run(1);
+		expect([on, h.sent.map(s => s.content.split("\n").at(-1))]).toEqual([on, [HEARTBEAT(on)]]);
+	}
+});
+
+test("GOALBREATHE1 control: an actionable item, unknown status, no todos, or nothing to wait on keeps the ordinary wakes", async () => {
+	const work: FxTask = { content: "write the test", status: "pending" };
+	const cases: [string, KeepaliveEntry[], AsyncJobView][] = [
+		["in_progress beside blocked", [todoEntry(VERDICT, { ...work, status: "in_progress" })], LIVE_JOB],
+		["pending beside blocked", [todoEntry(VERDICT, work)], LIVE_JOB],
+		["a later user todo edit adds work", [todoEntry(SHIPPED, VERDICT), { type: "custom", customType: "user_todo_edit", data: { phases: [{ name: "wave", tasks: [VERDICT, work] }] } }], LIVE_JOB],
+		["unknown status beside blocked", [todoEntry(VERDICT, { ...work, status: "someday" })], LIVE_JOB],
+		["no todos", [], LIVE_JOB],
+		["all blocked, nothing named, no job", [todoEntry(SHIPPED, VERDICT)], NO_JOB],
+	];
+	for (const [name, sessionEntries, snapshot] of cases) {
+		const h = fakeHost({ sessionEntries, jobs: { snapshot } });
+		const run = fakeTime(h);
+		await idleSeat(h);
+		run(IDLE_WAKE_MS);
+		expect([name, h.sent.length]).toEqual([name, 1]);
+		h.emit("agent_end", { messages: QUIET_TURN } as never);
+		run(MIN_WAKE_INTERVAL_MS);
+		expect([name, h.sent.length]).toEqual([name, 2]); // continuations keep firing
+		expect(h.sent.every(s => !s.content.includes("idle-state heartbeat"))).toBe(true);
+	}
+});
+
+test("GOALBREATHE1 mutant: without the idle state the planted seat keeps getting wakes", async () => {
+	const source = readFileSync(join(import.meta.dir, "kit-goal-keepalive.ts"), "utf8");
+	const mutated = source.replace("const wait = idleState(ctx);", "const wait = null;");
+	expect(mutated).not.toBe(source);
+	const dir = join(FX, "goalbreathe1-mutant");
+	mkdirSync(dir, { recursive: true });
+	const parent = join(import.meta.dir, "..");
+	writeFileSync(join(dir, "kit-goal-keepalive.ts"), mutated.replaceAll('from "./', `from "${import.meta.dir}/`)
+		.replaceAll('from "../', `from "${parent}/`).replaceAll('import("../', `import("${parent}/`));
+	// Dynamic: the mutant module is generated at test time, so no static specifier exists.
+	const mutant = await import(join(dir, "kit-goal-keepalive.ts")) as { default: typeof kitGoalKeepalive };
+	expect(await quietPlantedWakes(kitGoalKeepalive)).toBe(0);
+	expect(await quietPlantedWakes(mutant.default)).toBe(2);
 });

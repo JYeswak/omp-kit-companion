@@ -41,6 +41,18 @@ import { gateEventsPath, trackerAct } from "./gate-events.ts";
  *
  * Identity is the same env names admissionOwner uses (BR_ACTOR, BR_AGENT_NAME,
  * AGENT_NAME). Sessions without a fleet identity never wake.
+ *
+ * Idle state (GOALBREATHE1 ompkit-fp72.120.16.286, J-2026-11-05-09): a seat whose latest todos hold no in_progress
+ * or pending item and at least one blocked item, and that waits on something which delivers its own turn (a live
+ * background job, a job result queued for delivery, or an event a blocked item names in its `blocker`), is not
+ * woken: the job's async-result delivery, mail or a user message starts its turn, and that turn's agent_end re-reads
+ * the state, so the wake resumes once the event has fired and nothing is left to wait on. An idle-state seat is
+ * woken at most once per 30 min (IDLE_HEARTBEAT_MS), so a lost event cannot strand it. The todos come from the
+ * transcript branch, read the way omp restores them (tools/todo.ts getLatestTodoPhasesFromEntries); the jobs come
+ * from ctx.getAsyncJobSnapshot(). An unreadable source, an empty todo list or any actionable item keeps the
+ * ordinary wake. omp core owns the 'Continue active goal' turns, which already stop when every todo is blocked;
+ * no extension hook can veto one (a custom submission skips the `input` event, and a `before_agent_start`
+ * result carries no cancel).
  */
 
 /** ms of still-idle time before one wake. */
@@ -53,8 +65,12 @@ export const MAX_QUIET_WAKES = 3;
 export const GOAL_IDLE_ESCALATE = "GOAL_IDLE_ESCALATE";
 /** Custom entry recorded instead of a wake when omp suppressed a repeated continuation. */
 export const GOAL_REPEAT_SUPPRESSED = "GOAL_REPEAT_SUPPRESSED";
+/** Longest an idle-state seat sleeps without a wake (GOALBREATHE1): one heartbeat per 30 min. */
+export const IDLE_HEARTBEAT_MS = 1_800_000;
 /** omp's continuation message type (interactive-mode.ts #scheduleGoalContinuation). */
 const GOAL_CONTINUATION = "goal-continuation";
+/** omp's user todo edit entry (pi-coding-agent tools/todo.ts USER_TODO_EDIT_CUSTOM_TYPE). */
+const USER_TODO_EDIT = "user_todo_edit";
 
 const IDENTITY_ENV = ["BR_ACTOR", "BR_AGENT_NAME", "AGENT_NAME"] as const;
 
@@ -202,9 +218,14 @@ export function constraintGuidance(line: string, blockedBead: string | null = nu
 	return lines.join("\n");
 }
 
-/** The wake body: the shared guidance, then the seat and its idle time. */
-export function downtimeMessage(seat: string, idleMs: number, constraint: string, blockedBead: string | null = null): string {
-	return `${constraintGuidance(constraint, blockedBead)}\n[kit-goal-keepalive] ${seat}: goal active, idle ${formatIdle(idleMs)}.`;
+/** The wake body: the shared guidance, then the seat and its idle time. An idle-state heartbeat (GOALBREATHE1) adds
+ * what the seat waits on. */
+export function downtimeMessage(seat: string, idleMs: number, constraint: string, blockedBead: string | null = null, wait: IdleWait | null = null): string {
+	const body = `${constraintGuidance(constraint, blockedBead)}\n[kit-goal-keepalive] ${seat}: goal active, idle ${formatIdle(idleMs)}.`;
+	if (wait === null) return body;
+	const on = [...wait.jobs.map(id => `job ${id}`), ...wait.events].join("; ");
+	return `${body}\n[kit-goal-keepalive] ${seat}: idle-state heartbeat (at most one per ${formatIdle(IDLE_HEARTBEAT_MS)}): `
+		+ `all ${wait.blocked} open todo item(s) are blocked, waiting on ${on}. If that event already arrived, act on it; otherwise end the turn.`;
 }
 
 /** An assistant message block, as seen in AgentEndEvent messages. */
@@ -282,12 +303,21 @@ export interface GoalKeepaliveApi {
 	appendEntry(customType: string, data?: unknown): void;
 }
 
-/** A persisted mode transition, as pi's goal runtime writes it
- * (`appendModeChange("goal" | "goal_paused" | "none", { goal })`). */
-export interface KeepaliveModeEntry {
+/** A persisted session entry this extension reads: a mode transition, as pi's goal runtime writes it
+ * (`appendModeChange("goal" | "goal_paused" | "none", { goal })`), or a todo snapshot, as omp restores todos
+ * (tools/todo.ts canonicalTodoPhases: a `todo` tool result, or a `user_todo_edit` custom entry). */
+export interface KeepaliveEntry {
 	type?: string;
 	mode?: string;
-	data?: { goal?: { status?: string } | null } | null;
+	customType?: string;
+	data?: { goal?: { status?: string } | null; phases?: unknown } | null;
+	message?: { role?: string; toolName?: string; isError?: boolean; details?: { op?: unknown; phases?: unknown } | null } | null;
+}
+
+/** The part of omp's async job snapshot the idle state reads (session/agent-session-types.ts AsyncJobSnapshot). */
+export interface AsyncJobView {
+	running?: readonly unknown[];
+	delivery?: { queued?: number; delivering?: boolean } | null;
 }
 
 export interface GoalKeepaliveContext {
@@ -295,7 +325,9 @@ export interface GoalKeepaliveContext {
 	isIdle?: () => boolean;
 	setTimeout(callback: (...args: unknown[]) => void, ms?: number): unknown;
 	clearTimer(timer: unknown): void;
-	sessionManager?: { getEntries?: () => readonly KeepaliveModeEntry[] };
+	sessionManager?: { getEntries?: () => readonly KeepaliveEntry[]; getBranch?: () => readonly KeepaliveEntry[] };
+	/** Background jobs this session owns (ExtensionContext.getAsyncJobSnapshot). */
+	getAsyncJobSnapshot?: () => AsyncJobView | null;
 }
 
 export interface GoalKeepaliveDeps {
@@ -336,6 +368,55 @@ export function newestGateKind(ledger: string, bead: string): string | null {
 		} catch { /* a torn first line of the tail window */ }
 	}
 	return null;
+}
+
+/** The seat's latest persisted todo phases, decoded as omp restores them (tools/todo.ts
+ * getLatestTodoPhasesFromEntries): the newest `user_todo_edit` entry or successful non-view `todo` result; [] when
+ * none. */
+export function latestTodoPhases(entries: readonly KeepaliveEntry[]): unknown[] {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		const message = entry?.message;
+		const phases = entry?.type === "custom" && entry.customType === USER_TODO_EDIT ? entry.data?.phases
+			: entry?.type === "message" && message?.role === "toolResult" && message.toolName === "todo" && message.isError !== true
+				&& message.details?.op !== "view" ? message.details?.phases : undefined;
+		if (Array.isArray(phases)) return phases;
+	}
+	return [];
+}
+
+/** What an idle-state seat waits on (GOALBREATHE1). */
+export interface IdleWait {
+	/** Open todo items, every one blocked. */
+	blocked: number;
+	/** Live background job ids, plus a result queued for delivery. */
+	jobs: string[];
+	/** The events blocked items name in their `blocker`. */
+	events: string[];
+}
+
+/** The idle state: every open todo item is blocked (omp's own test, interactive-mode #goalOpenWorkAllBlocked: no
+ * in_progress or pending item, at least one blocked) and the seat waits on a live job, a queued job result or a named
+ * event. Null for an actionable item, an item of unknown status, an empty list, or nothing to wait on. */
+export function idleWait(phases: readonly unknown[], jobs: AsyncJobView | null): IdleWait | null {
+	let blocked = 0;
+	const events: string[] = [];
+	for (const phase of phases) {
+		const tasks = prop(phase, "tasks");
+		if (!Array.isArray(tasks)) return null;
+		for (const task of tasks) {
+			const status = prop(task, "status");
+			if (status === "completed" || status === "abandoned") continue;
+			if (status !== "blocked") return null;
+			blocked += 1;
+			const blocker = prop(task, "blocker");
+			if (nonempty(blocker)) events.push(blocker.trim());
+		}
+	}
+	if (blocked === 0) return null;
+	const running = (jobs?.running ?? []).map(job => { const id = prop(job, "id"); return nonempty(id) ? id : "unnamed"; });
+	if ((jobs?.delivery?.queued ?? 0) > 0 || jobs?.delivery?.delivering === true) running.push("result queued for delivery");
+	return running.length > 0 || events.length > 0 ? { blocked, jobs: running, events } : null;
 }
 
 function brHeldBeads(seat: string, cwd: string): string[] {
@@ -402,6 +483,26 @@ export default async function kitGoalKeepalive(
 		return true;
 	};
 
+	/** Arm the one timer; an unwired timer stays silent and never throws out of a handler. */
+	const schedule = (ctx: GoalKeepaliveContext, ms: number) => {
+		timerCtx = ctx;
+		try {
+			timer = ctx.setTimeout(fire, ms);
+		} catch {
+			timer = null;
+			timerCtx = null;
+		}
+	};
+
+	/** GOALBREATHE1's reading at fire time; an unreadable transcript or job snapshot reads null, keeping the wake. */
+	const idleState = (ctx: GoalKeepaliveContext): IdleWait | null => {
+		try {
+			return idleWait(latestTodoPhases(ctx.sessionManager?.getBranch?.() ?? []), ctx.getAsyncJobSnapshot?.() ?? null);
+		} catch {
+			return null;
+		}
+	};
+
 	/** The timer callback: uses the ctx captured at arm time (contained timers pass no ctx). */
 	const fire = () => {
 		const ctx = timerCtx;
@@ -416,14 +517,13 @@ export default async function kitGoalKeepalive(
 			// interval edge instead of never (RusticPine/QuietBadger 2026-10-20
 			// HOLDING-turn idles: the 120 s timer fired inside the 10-min
 			// window, returned, and nothing was armed again).
-			const delay = lastWakeAt + MIN_WAKE_INTERVAL_MS - at;
-			timerCtx = ctx;
-			try {
-				timer = ctx.setTimeout(fire, delay);
-			} catch {
-				timer = null; // timer unwired: stay silent, never throw out of fire
-				timerCtx = null;
-			}
+			schedule(ctx, lastWakeAt + MIN_WAKE_INTERVAL_MS - at);
+			return;
+		}
+		const wait = idleState(ctx);
+		if (wait !== null && at - idleSince < IDLE_HEARTBEAT_MS) {
+			// GOALBREATHE1: the awaited event delivers its own turn, whose agent_end re-arms; sleep to the ceiling.
+			schedule(ctx, idleSince + IDLE_HEARTBEAT_MS - at);
 			return;
 		}
 		const seat = seatIdentity(env);
@@ -441,7 +541,7 @@ export default async function kitGoalKeepalive(
 		pi.sendMessage(
 			{
 				customType: "kit-goal-keepalive",
-				content: downtimeMessage(seat, at - idleSince, constraintLine({ fleetWatch: fleetWatchPath(env, home), cwd, now: at }), blocked),
+				content: downtimeMessage(seat, at - idleSince, constraintLine({ fleetWatch: fleetWatchPath(env, home), cwd, now: at }), blocked, wait),
 				display: true,
 			},
 			{ deliverAs: "aside" },
@@ -454,13 +554,7 @@ export default async function kitGoalKeepalive(
 		cancel(ctx);
 		if (!eligible()) return;
 		idleSince = now();
-		timerCtx = ctx;
-		try {
-			timer = ctx.setTimeout(fire, IDLE_WAKE_MS);
-		} catch {
-			timer = null; // timer unwired: stay silent, never throw out of agent_end
-			timerCtx = null;
-		}
+		schedule(ctx, IDLE_WAKE_MS);
 	};
 
 	type GoalEvent = { goal?: { status?: string } | null; state?: { enabled?: boolean } | null };
@@ -476,7 +570,7 @@ export default async function kitGoalKeepalive(
 	 * overwrites this. Never arms, never throws.
 	 */
 	const reconcileFromSession = (ctx: GoalKeepaliveContext) => {
-		let entries: readonly KeepaliveModeEntry[];
+		let entries: readonly KeepaliveEntry[];
 		try {
 			entries = ctx.sessionManager?.getEntries?.() ?? [];
 		} catch {
