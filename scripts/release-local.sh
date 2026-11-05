@@ -294,6 +294,8 @@ install_release() {
 				($d.postcheck_detail.live_state_paths | length > 0) and
 				(.commands | index("omp-kit update --reconcile " + $id + " --yes") != null)) | $id
 		' "$WORK/install-update.json" >"$WORK/install-reconcile-id"; then
+			# RELREMEDY2 (ompkit-fp72.120.16.274): the receipt comes from .data.receipt_id; the real updater lists only
+			# `omp-kit undo <id> --yes` in .commands, so a reconcile-command condition never matched production output.
 			# shellcheck disable=SC2016 # jq program
 			class_filter='.data as $d | $d.receipt_id as $id | ($d.postcheck_detail // {}) as $p |
 				select($d.action == "PARTIAL" and $d.active_version == $v and
@@ -302,8 +304,7 @@ install_release() {
 					(($p.failed_stages // []) == []) and
 					($p.cause == null or $p.cause.cause_message == "KIT_POSTCHECK_FAILED") and
 					(($p.changed_operator_paths // []) | all(writer)) and
-					(($p.failures // []) | length > 0 and all(failure_ok($p.changed_operator_paths // []))) and
-					(.commands | index("omp-kit update --reconcile " + $id + " --yes") != null)) | $id'
+					(($p.failures // []) | length > 0 and all(failure_ok($p.changed_operator_paths // [])))) | $id'
 			install_class_jq -er >"$WORK/install-reconcile-id" || {
 				install_remedy
 				die "install update failed (rc $update_rc); not the known live-browser or kit live-writer PARTIAL, refusing reconciliation"

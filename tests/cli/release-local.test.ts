@@ -1209,3 +1209,34 @@ test("RELPREREG1 prereg: cut cards keep their verdict at their commits; the same
 		}
 	} finally { rmSync(work, { recursive: true, force: true }); }
 }, fixtureDeadlineS(60) * 1_000);
+
+// RELREMEDY2 (ompkit-fp72.120.16.274): the recorded 0.2.93 updater result (verbatim, lists only `omp-kit undo <id> --yes`)
+// must reconcile through the live-writer class filter release-local.sh actually runs.
+{
+	const source = readFileSync(join(ROOT, "scripts/release-local.sh"), "utf8");
+	const liveWriter = /^RELREMEDY_LIVE_WRITER='([^']*)'$/m.exec(source)![1]!;
+	const helpers = /^RELREMEDY_JQ='([^']*)'$/m.exec(source)![1]!;
+	const classFilter = /\t\t\tclass_filter='(\.data as \$d \| \$d\.receipt_id[^']*)'/.exec(source)![1]!;
+	const recorded = readFileSync(join(ROOT, "tests/fixtures/release-local/0.2.93-install-update.json"), "utf8");
+	const home = "/Users/fixture";
+	const classify = async (json: string, filter = classFilter) => {
+		const result = await run(["jq", "-er", "--arg", "v", "0.2.93", "--arg", "home", home, "--arg", "root", `${home}/.local/state/omp-kit`,
+			"--arg", "rx", liveWriter, `${helpers} ${filter}`], { deadline_s: fixtureDeadlineS(30), cwd: ROOT, stdin: json });
+		return { rc: result.rc, id: new TextDecoder().decode(result.stdout).trim() };
+	};
+	test("RELREMEDY2 planted: the recorded 0.2.93 updater PARTIAL reconciles in the live-writer class", async () => {
+		expect(JSON.parse(recorded).commands).toEqual(["omp-kit undo ba04340e-a087-4fbd-aa17-1288061f263b --yes"]);
+		expect(await classify(recorded)).toEqual({ rc: 0, id: "ba04340e-a087-4fbd-aa17-1288061f263b" });
+	});
+	test("RELREMEDY2 control: the recorded PARTIAL plus a foreign changed operator path refuses", async () => {
+		const foreign = JSON.parse(recorded);
+		foreign.data.postcheck_detail.changed_operator_paths = ["~/.omp/agent/config.yml"];
+		foreign.data.postcheck_detail.failures.push("Operator file changed during isolated test: ~/.omp/agent/config.yml");
+		expect((await classify(JSON.stringify(foreign))).rc).not.toBe(0);
+	});
+	test("RELREMEDY2 mutant: restoring the commands-list condition refuses the recorded PARTIAL", async () => {
+		const mutant = classFilter.replace(/\)\) \| \$id$/, ') and\n(.commands | index("omp-kit update --reconcile " + $id + " --yes") != null)) | $id');
+		expect(mutant).not.toBe(classFilter);
+		expect((await classify(recorded, mutant)).rc).not.toBe(0);
+	});
+}
