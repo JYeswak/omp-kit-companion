@@ -136,7 +136,9 @@ export function mailWakeStopReason(fleetWatchPath: string, project: string, cwd:
 
 /** STAGE0WAKE1 (ompkit-fp72.120.16.276): the override reason when `session/block`'s latest arm_seat receipt carries
  * `override_pause` stamped at or after the current pause began (the last pauseHistory row with pullEnabled false).
- * A later receipt without the override disarms it; no pause start on record, or unreadable files, is no override. */
+ * A later receipt without the override disarms it; no pause start on record, or unreadable files, is no override.
+ * STAGE0WAKE2 (ompkit-fp72.120.16.284): arm_seat.py is the one producer; every apply path (--set's managed_goal and
+ * mode rows, --replace-goal's step rows, the plain arm row) is dated and carries the --override-pause reason. */
 export function pauseOverrideReason(fleetWatchPath: string, receiptsPath: string, session: string, block: string): string | null {
 	const watch = readJson(fleetWatchPath);
 	const rows = [prop(watch, "sessions"), prop(watch, "herdr")].flatMap(value => Array.isArray(value) ? value : []);

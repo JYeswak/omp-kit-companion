@@ -1,11 +1,12 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { FlywheelExecOptions, FlywheelExecResult } from "./kit-flywheel-guard";
-import { createMailWake, mailWakeStopReason, messageIdOf, pauseOverrideReason } from "./kit-mail-wake";
+import { createMailWake, mailWakeStopReason, messageIdOf, pauseOverrideReason, type MailWake } from "./kit-mail-wake";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
-import { fixtureDeadlineS } from "../tests/cli/fixture-process.ts";
+import { fixtureDeadlineS, runFixture } from "../tests/cli/fixture-process.ts";
 
 let freshSeq = 0;
 /** A unique empty child dir under an owned parent; the parent's cleanup removes it. */
@@ -339,10 +340,11 @@ test("MAILSTOPXREPO1 planted: a chief launched above its project whose session r
 });
 
 // STAGE0WAKE1 (ompkit-fp72.120.16.276): arm_seat --override-pause on one seat lets that seat's mail wake under the pause.
-function stage0Fleet(receipts: Record<string, unknown>[]) {
+function stage0Fleet(receipts: Record<string, unknown>[] | null) {
 	const f = fleet();
 	writeFileSync(f.fleetWatchPath, JSON.stringify({ sessions: [{ session: "omp-test", repo: REPO, pullEnabled: false,
 		pauseHistory: [{ at: "2026-11-02T17:15:00Z", pullEnabled: false, reason: "fleet stop" }] }] }));
+	if (receipts === null) return f; // STAGE0WAKE2: the real producer writes the receipts file itself
 	const dir = join(f.home, ".local", "state", "omp-kit-orchestration");
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, "goal-replacements.jsonl"), receipts.map(r => JSON.stringify(r)).join("\n") + "\n");
@@ -378,3 +380,114 @@ test("STAGE0WAKE1 mutant: without the override lookup the director is stopped", 
 	expect(mailWakeStopReason(f.fleetWatchPath, REPO, REPO, "omp-test")).toBe("PROJECT_STOPPED: fleet-watch pullEnabled false");
 	expect(mailWakeStopReason(f.fleetWatchPath, REPO, REPO, "omp-test", [], true)).toBeNull();
 });
+
+// STAGE0WAKE2 (ompkit-fp72.120.16.284): STAGE0WAKE1 passed on hand-written receipts while the live arm (--set
+// --apply --override-pause, 2026-11-05 06:5xZ) wrote only an undated managed_goal row, so mail 78766 to the director
+// read PROJECT_STOPPED. These receipts come from arm_seat.py's real main(): its seat reads, the journal the proof
+// reads and every Tern call are intercepted in the child, so nothing reaches a live seat.
+const ARM_SEAT = join(homedir(), ".claude", "skills", "omp-kit-orchestration", "scripts", "arm_seat.py");
+const PRODUCER = Bun.which("python3", { PATH: process.env.PATH ?? "" }) !== null && existsSync(ARM_SEAT);
+const STAGE0_REASON = "launch stage 0: wake the director (STAGE0WAKE2)";
+const ARM_DRIVER = String.raw`
+import contextlib, importlib.util, io, json, pathlib, sys, time
+from unittest import mock
+path, fleet_watch, variant, repo, reason = sys.argv[1:6]
+spec = importlib.util.spec_from_file_location("arm_seat", path)
+me = importlib.util.module_from_spec(spec)
+sys.modules["arm_seat"] = me
+spec.loader.exec_module(me)
+journal = [{"type": "mode_change", "id": "m0", "mode": "goal", "data": {"goal": {"id": "old1", "objective": "Old."}}}]
+sends = []
+
+def run(argv, timeout=0):
+    if list(argv[:3]) != ["tern", "send", "5"]:
+        return 127, "", "fixture: unexpected native call"
+    sends.append(list(argv[3:]))
+    if list(argv[3:]) == ["keys", "Enter"]:
+        journal.extend([{"type": "message", "message": {"role": "user"}},
+                        {"type": "mode_change", "id": "m1", "mode": "goal",
+                         "data": {"goal": {"id": "new1", "objective": "Direct omp-test as RusticPine."}}}])
+    return 0, "", ""
+
+seat = {"repo": repo, "role": "director", "session_file": str(pathlib.Path.home() / "rustic.jsonl"),
+        "name": "RusticPine", "binding": "fixture", "goal": ("goal", "old1"), "ok": True, "why": "fixture"}
+prompt = {"id": "director-loop-objective@v21", "body": "/goal Direct omp-test as <your agent name>.",
+          "basis": "fixture", "body_sha256": "fixture"}
+argv = ["--session", "omp-test", "--block", "5", "--version", "21", "--set", "--apply"]
+if variant != "control":
+    argv += ["--override-pause", reason]
+patches = [mock.patch.object(me, "read_seat", return_value=seat),
+           mock.patch.object(me, "select_prompt", return_value=prompt),
+           mock.patch.object(me, "tern_pane", return_value=({"omp_session_file": seat["session_file"]}, "director")),
+           mock.patch.object(me, "session_entries", side_effect=lambda p: list(journal)),
+           mock.patch.object(me.fsa, "FLEET_WATCH", pathlib.Path(fleet_watch)),
+           mock.patch.object(me.fsa, "run", side_effect=run),
+           mock.patch.object(time, "sleep", return_value=None)]
+if variant == "mutant":  # the producer before STAGE0WAKE2: the reason never reaches the receipt row
+    real = me.receipt
+    patches.append(mock.patch.object(me, "receipt",
+                                     side_effect=lambda row: real({k: v for k, v in row.items() if k != "override_pause"})))
+buf = io.StringIO()
+with contextlib.ExitStack() as stack, contextlib.redirect_stdout(buf):
+    for p in patches:
+        stack.enter_context(p)
+    rc = me.main(argv)
+print(json.dumps({"rc": rc, "out": json.loads(buf.getvalue().strip().splitlines()[-1]), "sends": sends,
+                  "receipts": str(me.RECEIPTS)}))
+`;
+
+/** One real arm_seat.py `--set --apply` of the director (block 5) while omp-test is paused, then its receipt rows. */
+function armUnderPause(variant: "planted" | "control" | "mutant") {
+	const f = stage0Fleet(null);
+	const state = join(f.home, ".local", "state");
+	const run = runFixture(["python3", "-c", ARM_DRIVER, ARM_SEAT, f.fleetWatchPath, variant, REPO, STAGE0_REASON], {
+		cwd: f.home, floor_s: 30, label: `arm_seat STAGE0WAKE2 ${variant}`,
+		env: { PATH: process.env.PATH, HOME: f.home, XDG_STATE_HOME: state, LANG: "C.UTF-8" },
+	});
+	const stderr = new TextDecoder().decode(run.stderr);
+	if (run.rc !== 0) throw new Error(`arm_seat driver rc=${run.rc}: ${stderr}`);
+	const arm = JSON.parse(new TextDecoder().decode(run.stdout).trim().split("\n").at(-1)!);
+	const receiptsPath = join(state, "omp-kit-orchestration", "goal-replacements.jsonl");
+	expect(arm.receipts).toBe(receiptsPath); // producer and kit-mail-wake resolve one file
+	const rows = existsSync(receiptsPath)
+		? readFileSync(receiptsPath, "utf8").split("\n").filter(line => line.trim()).map(line => JSON.parse(line))
+		: [];
+	return { f, arm, rows };
+}
+
+async function mailDirector(wake: MailWake, id: number) {
+	expect(await wake.beforeSend(`w${id}`, "send_message", { ...ask("RusticPine"), to: ["RusticPine", "JadeThrush"] }, REPO)).toBeUndefined();
+	return JSON.stringify(await wake.afterSend({ toolCallId: `w${id}`, content: sent(id), isError: false }));
+}
+
+const SET_SENDS = [["keys", "ctrl+e"], ["keys", "ctrl+u"], ["paste", "/goal set Direct omp-test as RusticPine."], ["keys", "Enter"]];
+
+test.skipIf(!PRODUCER)("STAGE0WAKE2 planted: arm_seat --set --override-pause under the pause writes the row kit-mail-wake reads, and the director's mail is woken with pause_override", async () => {
+	const { f, arm, rows } = armUnderPause("planted");
+	expect(arm).toMatchObject({ rc: 0, out: { result: "DELIVERED", override_pause: STAGE0_REASON }, sends: SET_SENDS });
+	expect(rows).toEqual([expect.objectContaining({ kind: "managed_goal", session: "omp-test", block: "5", at: expect.any(String), override_pause: STAGE0_REASON })]);
+	const text = await mailDirector(f.wake, 78766);
+	expect(text).toContain("WAKE_DELIVERED: mail 78766 -> RusticPine at tern:5");
+	expect(f.wakes()).toHaveLength(1);
+	expect(f.ledger()).toMatchObject([{ status: "WAKE_DELIVERED", recipient: "RusticPine", pause_override: STAGE0_REASON },
+		{ status: "STOPPED_NOT_WOKEN", recipient: "JadeThrush", reason: "PROJECT_STOPPED: fleet-watch pullEnabled false" }]);
+}, fixtureDeadlineS(60) * 1000);
+
+test.skipIf(!PRODUCER)("STAGE0WAKE2 control: without --override-pause the arm is refused, writes no row, and the director's mail reads PROJECT_STOPPED", async () => {
+	const { f, arm, rows } = armUnderPause("control");
+	expect(arm).toMatchObject({ rc: 2, out: { result: "REFUSED_PAUSED" }, sends: [] });
+	expect(rows).toEqual([]);
+	expect(await mailDirector(f.wake, 78767)).toContain("STOPPED_NOT_WOKEN: mail 78767 to RusticPine");
+	expect(f.wakes()).toHaveLength(0);
+	expect(f.ledger()[0]).toMatchObject({ status: "STOPPED_NOT_WOKEN", recipient: "RusticPine", reason: "PROJECT_STOPPED: fleet-watch pullEnabled false" });
+}, fixtureDeadlineS(60) * 1000);
+
+test.skipIf(!PRODUCER)("STAGE0WAKE2 mutant: a producer whose receipt row drops override_pause (0.2.94: stdout only) leaves the director PROJECT_STOPPED", async () => {
+	const { f, arm, rows } = armUnderPause("mutant");
+	expect(arm).toMatchObject({ rc: 0, out: { result: "DELIVERED", override_pause: STAGE0_REASON }, sends: SET_SENDS });
+	expect(rows).toEqual([expect.objectContaining({ kind: "managed_goal", session: "omp-test", block: "5", at: expect.any(String) })]);
+	expect(rows[0]).not.toHaveProperty("override_pause");
+	expect(await mailDirector(f.wake, 78768)).toContain("STOPPED_NOT_WOKEN: mail 78768 to RusticPine");
+	expect(f.wakes()).toHaveLength(0);
+	expect(f.ledger()[0]).toMatchObject({ status: "STOPPED_NOT_WOKEN", recipient: "RusticPine", reason: "PROJECT_STOPPED: fleet-watch pullEnabled false" });
+}, fixtureDeadlineS(60) * 1000);
