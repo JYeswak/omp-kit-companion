@@ -546,6 +546,50 @@ ${qualification}`, "verdict-starve-test", work], {
 	}, fixtureDeadlineS(40) * 1_000);
 }
 
+// RUNTIMEMISS1 (ompkit-fp72.120.16.242): a verdict stored under another runtime id reads RUNTIME_MISMATCH. When every
+// read is PASS or RUNTIME_MISMATCH, the stage refuses with the mismatch and starts no verdict run. A genuine ci-only
+// MISS still needs a run, so that case starts one; when it leaves ci-only missing, starvation is the true cause and
+// the VERDICT_STARVED refusal carries the main mismatch text.
+for (const ciOnly of ["PASS", "MISS"] as const) {
+	test(`RUNTIMEMISS1 verdict stage with a main runtime mismatch and ci-only ${ciOnly}`, async () => {
+		const work = realpathSync(ownedTmp("runtimemiss", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const env = gitFixtureEnv(work);
+		initFixtureRepo(work, env);
+		const bin = join(work, "bin");
+		mkdirSync(bin);
+		const mismatch = "RUNTIME_MISMATCH stored env-aaaa current env-bbbb: PATH added /seat/agent-bin (stored PASS)";
+		writeFileSync(join(bin, "python3"), `#!/bin/sh
+echo "$*" >>"$RELEASE_TEST_WORK/reads"
+case "$2" in require-pass) echo ${JSON.stringify(mismatch)}; exit 1 ;; esac
+echo ${ciOnly}; [ ${ciOnly} = PASS ]
+`);
+		writeFileSync(join(bin, "sh"), `#!/bin/sh
+printf '%s\\n' "$*" >>"$RELEASE_TEST_WORK/producer"
+`);
+		chmodSync(join(bin, "python3"), 0o755); chmodSync(join(bin, "sh"), 0o755);
+		try {
+			const result = await runFixtureAsync(["bash", "-c", `${stagePrelude}
+ROOT="$WORK/repo"; SRC="$WORK/export"; SOURCE=0123456789012345678901234567890123456789; source_tree=exact-tree
+${qualification}`, "runtimemiss-test", work], {
+				cwd: ROOT, env: { ...env, PATH: `${bin}:${env.PATH ?? ""}`, RELEASE_TEST_WORK: work }, floor_s: 10,
+			});
+			const stderr = new TextDecoder().decode(result.stderr);
+			expect(result.rc, stderr).toBe(4);
+			const reads = readFileSync(join(work, "reads"), "utf8").trim().split("\n");
+			if (ciOnly === "PASS") {
+				expect(stderr).toContain(`release-local: refused: ${mismatch} (main verdict of prepare 0123456789012345678901234567890123456789`);
+				expect(stderr).not.toContain("VERDICT_STARVED");
+				expect(existsSync(join(work, "producer"))).toBe(false);
+				expect(reads.length).toBe(2);
+			} else {
+				expect(stderr).toContain(`VERDICT_STARVED: no release-verdict run holds the lock and prepare 0123456789012345678901234567890123456789 has no verdict (main ${mismatch}, ci-only MISS)`);
+				expect(readFileSync(join(work, "producer"), "utf8")).toContain("--commit 0123456789012345678901234567890123456789 --no-fetch");
+				expect(reads.length).toBe(4);
+			}
+		} finally { rmSync(work, { recursive: true, force: true }); }
+	}, fixtureDeadlineS(30) * 1_000);
+}
+
 for (const failure of ["none", "http", "bytes"] as const) {
 	test(`public release downloads ${failure === "none" ? "overlap without rejecting valid bytes" : "refuse " + failure + " failures"}`, async () => {
 		const work = realpathSync(ownedTmp("release-download", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);

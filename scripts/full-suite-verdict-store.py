@@ -625,6 +625,66 @@ def lookup(repo: Path, tree: str, role: str, checks: str, runtime: str, *,
                            commit=commit, exact_filename=True)
 
 
+# RUNTIMEMISS1 (ompkit-fp72.120.16.242): the runtime id hashes PATH, so a PASS judged under another PATH (for example
+# with agent-bin first) reads back as MISS and release-local re-ran a 15 min suite for a tree that had passed. On an
+# exact-key miss, a valid record for the same tree and checks under another runtime is named RUNTIME_MISMATCH with
+# both env digests and the differing fields. It is never a PASS.
+RUNTIME_FIELDS = ("system", "machine", "bun", "python")
+
+
+def describe_runtime_mismatch(metrics, stored: str, prefix: str, environment: dict[str, str]) -> str:
+    """Both runtime ids' env digests and every field that differs, PATH entries decoded where the digest allows."""
+    current_env = metrics.environment_digest(environment)
+    stored_prefix, _sep, stored_env = stored.rpartition("/env-")
+    fields = [f"{name} {old} -> {new}" for name, old, new in
+              zip(RUNTIME_FIELDS, stored_prefix.split("/"), prefix.split("/")) if old != new]
+    if stored_env != current_env:
+        entries = environment.get("PATH", "").split(os.pathsep)
+        added = [entry for index, entry in enumerate(entries)
+                 if metrics.environment_digest({**environment, "PATH": os.pathsep.join(entries[:index] + entries[index + 1:])})
+                 == stored_env]
+        others = [key for key in sorted(environment) if key != "PATH"
+                  and metrics.environment_digest({**environment, key: ""}) == stored_env]
+        if added:
+            fields.append("PATH added " + ", ".join(dict.fromkeys(added)))
+        elif others:
+            fields.append("unset in the stored runtime: " + ", ".join(others))
+        else:
+            fields.append("environment differs (PATH entries removed or reordered; no single added entry explains it)")
+    return (f"RUNTIME_MISMATCH stored env-{stored_env} current env-{current_env}: "
+            + ("; ".join(fields) or "runtime ids differ"))
+
+
+def read_back(exact: dict | None, others: list[dict], metrics, prefix: str, environment: dict[str, str]) -> str:
+    """PASS, FAIL or MISS for the exact key; on a miss, RUNTIME_MISMATCH for a valid record under another runtime."""
+    if exact is not None:
+        return "PASS" if exact["verdict"] == "PASS" else "FAIL"
+    for entry in others:
+        return describe_runtime_mismatch(metrics, entry["runtime"], prefix, environment) + f" (stored {entry['verdict']})"
+    return "MISS"
+
+
+def other_runtime_records(candidates, runtime: str, validate) -> list[dict]:
+    """Valid records among candidates whose runtime differs from runtime, in name order."""
+    found = []
+    for path in sorted(candidates):
+        try:
+            stored = json_file(path).get("runtime")
+        except (OSError, ValueError, UnicodeError):
+            continue
+        if isinstance(stored, str) and stored != runtime:
+            entry, _reason = validate(path, stored)
+            if entry is not None:
+                found.append(entry)
+    return found
+
+
+def current_runtime_parts(judge_root: Path) -> tuple[object, str, dict[str, str]]:
+    metrics = load_metrics(judge_root)
+    prefix, environment = metrics.runtime_parts()
+    return metrics, prefix, environment
+
+
 def command_identity(args: argparse.Namespace, judge_root: Path) -> tuple[str, str]:
     checks = getattr(args, "checks", None) or judge_identity(judge_root)
     runtime = getattr(args, "runtime", None) or runtime_identity(judge_root)
@@ -1023,11 +1083,19 @@ def main() -> int:
             entry, _reason = lookup(repo, args.tree, args.role, checks, runtime,
                                    judge_root=judge_root, cache_dir=args.cache_dir,
                                    suite_root=Path(args.suite_root).expanduser().resolve(), commit=None)
-            if entry is not None and entry["verdict"] == "PASS":
-                print("PASS")
-                return 0
-            print("FAIL" if entry is not None else "MISS")
-            return 1
+            if entry is None:
+                tree, role, checks, runtime = normalized_identity(args.tree, args.role, checks, runtime)
+                suite_root = Path(args.suite_root).expanduser().resolve()
+                others = other_runtime_records(
+                    directory.glob(f"{tree}.{role}.*.json"), runtime,
+                    lambda path, stored: validate_record(path, judge_root=judge_root, tree=tree, role=role,
+                                                         checks=checks, runtime=stored, suite_root=suite_root,
+                                                         exact_filename=True))
+                if others:
+                    print(read_back(None, others, *current_runtime_parts(judge_root)))
+                    return 1
+            print(read_back(entry, [], None, "", {}))
+            return 0 if entry is not None and entry["verdict"] == "PASS" else 1
         if args.action == "run-ci-only":
             suite_root = Path(args.suite_root).expanduser().resolve() if args.suite_root else judge_root
             try:
@@ -1043,13 +1111,16 @@ def main() -> int:
                                                      suite_root=Path(args.suite_root).expanduser().resolve(),
                                                      cache_dir=args.cache_dir)
             entry, reason = validate_ci_only_record(path, tree=args.tree, checks=checks, runtime=runtime)
-            if entry is not None and entry["verdict"] == "PASS":
-                print("PASS")
-                return 0
-            print("FAIL" if entry is not None else "MISS")
             if entry is None:
+                others = other_runtime_records(
+                    path.parent.glob(f"{args.tree}.ci-only.*.json"), runtime,
+                    lambda other, stored: validate_ci_only_record(other, tree=args.tree, checks=checks, runtime=stored))
+                if others:
+                    print(read_back(None, others, *current_runtime_parts(judge_root)))
+                    return 1
                 print(f"ci-only record {path.name}: {reason}", file=sys.stderr)
-            return 1
+            print(read_back(entry, [], None, "", {}))
+            return 0 if entry is not None and entry["verdict"] == "PASS" else 1
         result = records(repo, directory, judge_root, args.tree)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 0

@@ -394,10 +394,25 @@ source_tree="$(git -C "$ROOT" rev-parse "$SOURCE^{tree}")" || die "cannot resolv
 # The verdict producer may return 0 when a different run holds its lock. Never
 # confuse that queue acknowledgement with PASS: wait on both exact-tree records.
 stage verdict
-if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
-	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" >/dev/null 2>&1 ||
-	! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
-	--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC" >/dev/null 2>&1; then
+# RUNTIMEMISS1 (ompkit-fp72.120.16.242): a PASS stored under another runtime id (PATH differs) reads RUNTIME_MISMATCH,
+# naming both env digests and the differing fields. A plain main MISS or FAIL needs a verdict run whatever ci-only
+# reads, so ci-only is read only after main reads PASS or RUNTIME_MISMATCH (one read on a miss, as before). When both
+# read PASS or RUNTIME_MISMATCH, release-local refuses with the mismatch and starts no verdict run.
+main_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
+	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" 2>/dev/null)" || true
+ci_result=''
+case "$main_result" in PASS | RUNTIME_MISMATCH*)
+	ci_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
+		--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC" 2>/dev/null)" || true ;;
+esac
+verdict_mismatch() {
+	case "$1" in PASS | RUNTIME_MISMATCH*) ;; *) return 0 ;; esac
+	case "$2" in PASS | RUNTIME_MISMATCH*) ;; *) return 0 ;; esac
+	case "$1" in RUNTIME_MISMATCH*) die "$1 (main verdict of prepare $SOURCE; rerun release-local under the PATH that judged it)" ;; esac
+	case "$2" in RUNTIME_MISMATCH*) die "$2 (ci-only verdict of prepare $SOURCE; rerun release-local under the PATH that judged it)" ;; esac
+}
+verdict_mismatch "$main_result" "$ci_result"
+if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
 	bounded 7200 sh "$ROOT/scripts/release-verdict.sh" --commit "$SOURCE" --no-fetch ||
 		die "release verdict failed for prepare $SOURCE"
 	# VERDICTSTARVE1 (ompkit-fp72.120.16.198): while another run holds its lock, release-verdict.sh writes SOURCE to its
@@ -431,9 +446,12 @@ if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass 
 		[ "$main_result" != PASS ] || [ "$ci_result" != PASS ] || break
 		verdict_now="release-verdict run ${rv_holder:-none} judges ${rv_judging:-unknown}; queued next ${rv_wanted:-none}"
 		[ "$verdict_now" = "$verdict_seen" ] || { say "verdict wait for $SOURCE: $verdict_now"; verdict_seen=$verdict_now; }
-		[ -n "$rv_holder" ] ||
+		if [ -z "$rv_holder" ]; then
+			verdict_mismatch "$main_result" "$ci_result"
 			die "VERDICT_STARVED: no release-verdict run holds the lock and prepare $SOURCE has no verdict (main ${main_result:-none}, ci-only ${ci_result:-none}); $verdict_fix"
+		fi
 		if [ -n "$rv_judging" ] && [ "$rv_judging" != "$SOURCE" ] && [ "$rv_wanted" != "$SOURCE" ]; then
+			verdict_mismatch "$main_result" "$ci_result"
 			die "VERDICT_STARVED: release-verdict run $rv_holder judges $rv_judging and queues ${rv_wanted:-nothing} next, so it skips prepare $SOURCE; $verdict_fix"
 		fi
 		[ "$(date +%s)" -lt "$verdict_deadline" ] || die "timed out waiting for exact prepare verdict $SOURCE"

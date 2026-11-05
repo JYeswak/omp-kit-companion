@@ -56,8 +56,8 @@ def judge_identity(root: Path | str, scope: str) -> str:
     return digest.hexdigest()
 
 
-def runtime_identity() -> str:
-    """Bind executable versions and the environment inputs admitted to the full-suite runner."""
+def runtime_parts() -> tuple[str, dict[str, str]]:
+    """The executable-version prefix and the environment inputs admitted to the full-suite runner."""
     bun = run(["bun", "--version"], deadline_s=10)
     if bun.rc != 0 or bun.timed_out or bun.truncated:
         raise ValueError("bun version is unavailable or incomplete")
@@ -86,11 +86,20 @@ def runtime_identity() -> str:
         "LANG": os.environ.get("LANG", "C"),
         "PATH": search_path,
     }
-    environment_bytes = json.dumps(environment, ensure_ascii=False, sort_keys=True,
-                                    separators=(",", ":")).encode("utf-8")
-    environment_digest = hashlib.sha256(environment_bytes).hexdigest()
     return (f"{platform.system()}/{platform.machine()}/bun-{bun_version}"
-            f"/python-{sys.version.split()[0]}/env-{environment_digest}")
+            f"/python-{sys.version.split()[0]}"), environment
+
+
+def environment_digest(environment: dict[str, str]) -> str:
+    environment_bytes = json.dumps(environment, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(environment_bytes).hexdigest()
+
+
+def runtime_identity() -> str:
+    """Bind executable versions and the environment inputs admitted to the full-suite runner."""
+    prefix, environment = runtime_parts()
+    return f"{prefix}/env-{environment_digest(environment)}"
 
 
 def hex_digest(value: object, length: int = 64) -> bool:
