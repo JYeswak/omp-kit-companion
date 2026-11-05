@@ -51,6 +51,8 @@ export interface MailWakeDeps {
 	ledgerPath?: string;
 	untilDeliveredS?: number;
 	fastWaitMs?: number;
+	/** arm_seat.py receipts (goal-replacements.jsonl); a live `override_pause` arm lets one seat wake under a pause. */
+	armReceiptsPath?: string;
 }
 
 /** `repo` is the live launch cwd; `project` is the seat's canonical project (its configured chief row's repo, else its cwd). */
@@ -111,7 +113,7 @@ function readJson(path: string): unknown {
 
 /** MAILSTOP1: pullEnabled is the owner's stop switch (loop_sentinel.active_fleet).
  * Match both canonical project and actual launch cwd; chiefs may launch above their project. */
-export function mailWakeStopReason(fleetWatchPath: string, project: string, cwd: string, session?: string, entries: readonly unknown[] = []): string | null {
+export function mailWakeStopReason(fleetWatchPath: string, project: string, cwd: string, session?: string, entries: readonly unknown[] = [], pauseOverride = false): string | null {
 	// No fleet-watch file means no owner stop is configured (a machine outside the fleet): only the seat's own
 	// paused goal can stop the wake. A file that exists but can't be read or parsed fails closed.
 	if (!existsSync(fleetWatchPath)) return mailPauseState(entries) === "PAUSED" ? "GOAL_PAUSED: latest goal mode is goal_paused" : null;
@@ -120,6 +122,8 @@ export function mailWakeStopReason(fleetWatchPath: string, project: string, cwd:
 	const rows = [prop(watch, "sessions"), prop(watch, "herdr")].flatMap(value => Array.isArray(value) ? value : []);
 	for (const row of rows) {
 		if (prop(row, "pullEnabled") !== false) continue;
+		// STAGE0WAKE1: the overridden session's own row yields; other paused rows still hold.
+		if (pauseOverride && session !== undefined && prop(row, "session") === session) continue;
 		const repo = prop(row, "repo");
 		if ((session !== undefined && prop(row, "session") === session)
 			|| (typeof repo === "string" && [project, cwd].some(path => {
@@ -128,6 +132,31 @@ export function mailWakeStopReason(fleetWatchPath: string, project: string, cwd:
 			}))) return "PROJECT_STOPPED: fleet-watch pullEnabled false";
 	}
 	return mailPauseState(entries) === "PAUSED" ? "GOAL_PAUSED: latest goal mode is goal_paused" : null;
+}
+
+/** STAGE0WAKE1 (ompkit-fp72.120.16.276): the override reason when `session/block`'s latest arm_seat receipt carries
+ * `override_pause` stamped at or after the current pause began (the last pauseHistory row with pullEnabled false).
+ * A later receipt without the override disarms it; no pause start on record, or unreadable files, is no override. */
+export function pauseOverrideReason(fleetWatchPath: string, receiptsPath: string, session: string, block: string): string | null {
+	const watch = readJson(fleetWatchPath);
+	const rows = [prop(watch, "sessions"), prop(watch, "herdr")].flatMap(value => Array.isArray(value) ? value : []);
+	const row = rows.find(r => prop(r, "session") === session);
+	if (prop(row, "pullEnabled") !== false) return null;
+	const history = prop(row, "pauseHistory");
+	const starts = (Array.isArray(history) ? history : []).filter(h => prop(h, "pullEnabled") === false).map(h => prop(h, "at"));
+	const since = starts.length ? Date.parse(String(starts[starts.length - 1])) : NaN;
+	if (Number.isNaN(since)) return null;
+	let text: string;
+	try { text = readFileSync(receiptsPath, "utf8"); } catch { return null; }
+	let latest: unknown;
+	for (const line of text.split("\n")) {
+		let rec: unknown;
+		try { rec = JSON.parse(line); } catch { continue; }
+		if (prop(rec, "session") === session && String(prop(rec, "block")) === block && typeof prop(rec, "at") === "string") latest = rec;
+	}
+	const reason = prop(latest, "override_pause");
+	const at = Date.parse(String(prop(latest, "at")));
+	return typeof reason === "string" && reason.trim() && !Number.isNaN(at) && at >= since ? reason.trim() : null;
 }
 
 export function mailPauseState(entries: readonly unknown[]): "UNKNOWN" | "PAUSED" | "NOT_PAUSED" {
@@ -227,6 +256,7 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 	const rosterPath = deps.rosterPath ?? join(home, ".claude", "skills", "omp-kit-orchestration", "fleet-roster.json");
 	const fleetWatchPath = deps.fleetWatchPath ?? env.OMP_KIT_FLEET_WATCH_CONFIG ?? join(home, ".config", "omp-kit", "fleet-watch.json");
 	const ledgerPath = deps.ledgerPath ?? join(env.XDG_STATE_HOME || join(home, ".local", "state"), "omp-kit", "mail-wake.jsonl");
+	const armReceiptsPath = deps.armReceiptsPath ?? join(env.XDG_STATE_HOME || join(home, ".local", "state"), "omp-kit-orchestration", "goal-replacements.jsonl");
 	const untilS = deps.untilDeliveredS ?? WAKE_UNTIL_DELIVERED_S;
 	const fastWaitMs = deps.fastWaitMs ?? WAKE_FAST_WAIT_MS;
 	const plans = new Map<string, Plan>();
@@ -448,14 +478,16 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 			const seat = target.res.kind === "seat" ? target.res.seat : null;
 			// MAILSTOPXREPO1: a resolved seat is judged by its own project, cwd and session; the mail's project key only
 			// judges the no-seat branch. A key shared across repos must not borrow another project's pause (or enablement).
+			const override = seat ? pauseOverrideReason(fleetWatchPath, armReceiptsPath, seat.session, seat.block) : null;
 			let stopped = seat
-				? mailWakeStopReason(fleetWatchPath, seat.project, seat.repo, seat.session)
+				? mailWakeStopReason(fleetWatchPath, seat.project, seat.repo, seat.session, [], override !== null)
 				: mailWakeStopReason(fleetWatchPath, plan.projectKey, plan.projectKey);
+			if (override !== null) Object.assign(base, { pause_override: override });
 			if (!stopped && seat?.sessionFile) {
 				const entries = recipientModeEntries(seat.sessionFile);
 				if (entries?.length) {
 					base.pause_state = mailPauseState(entries);
-					stopped = mailWakeStopReason(fleetWatchPath, seat.project, seat.repo, seat.session, entries);
+					stopped = mailWakeStopReason(fleetWatchPath, seat.project, seat.repo, seat.session, entries, override !== null);
 				}
 			}
 			if (stopped) {

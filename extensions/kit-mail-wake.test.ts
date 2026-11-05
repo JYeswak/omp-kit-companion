@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { FlywheelExecOptions, FlywheelExecResult } from "./kit-flywheel-guard";
-import { createMailWake, mailWakeStopReason, messageIdOf } from "./kit-mail-wake";
+import { createMailWake, mailWakeStopReason, messageIdOf, pauseOverrideReason } from "./kit-mail-wake";
 import { ownedTmp } from "../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "../tests/cli/fixture-process.ts";
 
@@ -336,4 +336,45 @@ test("MAILSTOPXREPO1 planted: a chief launched above its project whose session r
 	expect(await g.wake.beforeSend("chief-project", "send_message", { ...ask("PeachLeopard"), sender_name: "RusticPine" }, REPO)).toBeUndefined();
 	expect(JSON.stringify(await g.wake.afterSend({ toolCallId: "chief-project", content: sent(66110), isError: false }))).toContain("STOPPED_NOT_WOKEN");
 	expect(g.wakes()).toHaveLength(0);
+});
+
+// STAGE0WAKE1 (ompkit-fp72.120.16.276): arm_seat --override-pause on one seat lets that seat's mail wake under the pause.
+function stage0Fleet(receipts: Record<string, unknown>[]) {
+	const f = fleet();
+	writeFileSync(f.fleetWatchPath, JSON.stringify({ sessions: [{ session: "omp-test", repo: REPO, pullEnabled: false,
+		pauseHistory: [{ at: "2026-11-02T17:15:00Z", pullEnabled: false, reason: "fleet stop" }] }] }));
+	const dir = join(f.home, ".local", "state", "omp-kit-orchestration");
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "goal-replacements.jsonl"), receipts.map(r => JSON.stringify(r)).join("\n") + "\n");
+	return f;
+}
+const overrideArm = { at: "2026-11-05T06:57:00Z", session: "omp-test", block: "5", override_pause: "launch stage 0 canary" };
+
+test("STAGE0WAKE1 planted: the excepted director wakes under the pause and a worker stays STOPPED", async () => {
+	const f = stage0Fleet([overrideArm]);
+	expect(await f.wake.beforeSend("s0", "send_message", { ...ask("RusticPine"), to: ["RusticPine", "JadeThrush"] }, REPO)).toBeUndefined();
+	const text = JSON.stringify(await f.wake.afterSend({ toolCallId: "s0", content: sent(78726), isError: false }));
+	expect(text).toContain("WAKE_DELIVERED: mail 78726 -> RusticPine at tern:5");
+	expect(text).toContain("STOPPED_NOT_WOKEN: mail 78726 to JadeThrush");
+	expect(f.wakes()).toHaveLength(1);
+	expect(f.ledger()).toMatchObject([{ status: "WAKE_DELIVERED", recipient: "RusticPine", pause_override: "launch stage 0 canary" },
+		{ status: "STOPPED_NOT_WOKEN", recipient: "JadeThrush", reason: "PROJECT_STOPPED: fleet-watch pullEnabled false" }]);
+});
+
+test("STAGE0WAKE1 control: no exception (none, stale before the pause, or disarmed) stops both", async () => {
+	for (const receipts of [[], [{ ...overrideArm, at: "2026-11-01T00:00:00Z" }], [overrideArm, { at: "2026-11-05T07:00:00Z", session: "omp-test", block: "5" }]]) {
+		const f = stage0Fleet(receipts);
+		expect(await f.wake.beforeSend("c0", "send_message", { ...ask("RusticPine"), to: ["RusticPine", "JadeThrush"] }, REPO)).toBeUndefined();
+		const text = JSON.stringify(await f.wake.afterSend({ toolCallId: "c0", content: sent(78727), isError: false }));
+		expect(text).toContain("STOPPED_NOT_WOKEN: mail 78727 to RusticPine");
+		expect(text).toContain("STOPPED_NOT_WOKEN: mail 78727 to JadeThrush");
+		expect(f.wakes()).toHaveLength(0);
+	}
+});
+
+test("STAGE0WAKE1 mutant: without the override lookup the director is stopped", () => {
+	const f = stage0Fleet([overrideArm]);
+	expect(pauseOverrideReason(f.fleetWatchPath, join(f.home, ".local", "state", "omp-kit-orchestration", "goal-replacements.jsonl"), "omp-test", "5")).toBe("launch stage 0 canary");
+	expect(mailWakeStopReason(f.fleetWatchPath, REPO, REPO, "omp-test")).toBe("PROJECT_STOPPED: fleet-watch pullEnabled false");
+	expect(mailWakeStopReason(f.fleetWatchPath, REPO, REPO, "omp-test", [], true)).toBeNull();
 });
