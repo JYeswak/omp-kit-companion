@@ -81,6 +81,9 @@ push and again on the exact source commit, before the signing keychain opens. Th
 - `RELEASE_CARD_MISSING`: the source commit has no card.
 - `RELEASE_WAVE`: no gap row is closed or landed and no idea is applied with a measured change (Wave test).
 - `RELEASE_CARD_INCOMPLETE section N (title)`: section N below fails its rule; the line says which rule.
+- From card version 0.2.94 (RELPREREG1): `RELEASE_PREREG_MISSING`, `RELEASE_UNDERPOWERED`, `RELEASE_INCONCLUSIVE`,
+  `RELEASE_NO_EFFECT` or `RELEASE_REGRESSED` when an applied idea's preregistered experiment does not reach SHIPPED
+  (Preregistration grammar below).
 
 The grammar is deliberately small:
 
@@ -96,3 +99,34 @@ The grammar is deliberately small:
   A DORA row's first cell starts with `Change lead time`, `Deployment frequency`, `Published releases`,
   `Failed deployment recovery`, `Change fail rate` or `Deployment rework rate`.
 - Section 4: the section exists and has at least one non-blank line.
+
+### Preregistration grammar (RELPREREG1, enforced from card version 0.2.94)
+
+Joshua J-2026-11-05-05 (RELRUBRIC2). Cards for v0.2.92 and v0.2.93 were cut before this rule and are judged by the
+rules above only; they are not migrated. From v0.2.94 every section-2 row whose `Decision` starts with `applied` (no
+`X → Y` needed) is a preregistered paired experiment, and only a SHIPPED verdict satisfies `applied`. The idea's id
+is the first word of its `Idea` cell (`**PYCACHE1** (…)` → `PYCACHE1`). Section 2 then holds two blocks per applied
+idea; each runs from its `### ` heading to the next `### ` or `## ` heading, and a repeated block is refused.
+
+- `### Prereg <id>`: `key: value` lines (fences, blank lines and `  # comments` ignored; an indented line continues
+  the previous key) with every field `endpoint`, `direction` (`lower` or `higher` is better), `producer` (the exact
+  replayable command), `unit` (its first word is printed), `mde` (> 0, absolute), `mde_source`, `sigma_d` (≥ 0, SD of
+  the paired differences), `sigma_source`, `alpha` (two-sided), `power`, `n_pairs` (integer), `stopping` and
+  `control`. Numbers may lead with `~`/`≈`, use a Unicode minus `−`, and carry a unit word. A missing or invalid
+  field refuses `RELEASE_PREREG_MISSING`.
+- The checker recomputes n = ⌈σ_d² (z₁₋α/₂ + z_power)² / mde² + z₁₋α/₂² / 2⌉ (at least 2), or n = 1 when
+  `sigma_d` is 0 (a deterministic count). `n_pairs` below it refuses `RELEASE_UNDERPOWERED`.
+- `### Result <id>`: an `ncpu: N` line and a pipe table with `before`, `after`, `load1_before` and `load1_after`
+  columns, one row per pair. A pair is VOID when |load1_before − load1_after| > 2.0 or either load1 > 0.75 × ncpu;
+  VOID pairs are dropped and may be replaced up to `n_pairs` times (more refuses `RELEASE_INCONCLUSIVE`). Fewer valid
+  pairs than `n_pairs` (or no Result block) refuses `RELEASE_UNDERPOWERED`; more refuses `RELEASE_INCONCLUSIVE`
+  (fixed-n stopping).
+- d = before − after (`lower`) or after − before (`higher`), so a positive d is an improvement. The CI is
+  d̄ ± t₁₋α′/₂,ₙ₋₁ · s_d/√n with α′ = alpha / (number of applied ideas) (Bonferroni). The t quantile is computed with
+  the standard library (regularized incomplete beta) and matches the published table to 4 dp.
+- Verdict: **SHIPPED** when the CI's lower bound > 0 and d̄ ≥ mde/2; **REGRESSED** when its upper bound < 0;
+  **NO EFFECT** when it lies within (−mde, +mde); **INCONCLUSIVE** otherwise. They refuse `RELEASE_REGRESSED`,
+  `RELEASE_NO_EFFECT` and `RELEASE_INCONCLUSIVE`. A deterministic endpoint (`sigma_d: 0`) ships when its d ≥ mde;
+  if its differences vary, it refuses `RELEASE_INCONCLUSIVE`.
+- Example: PYCACHE1's "pyc writes per create 62 → 0" is `sigma_d: 0`, `n_pairs: 1`, mde 10 writes and one Result row
+  `| 1 | 62 | 0 | … |`: SHIPPED. Its CPU reading (one unpaired run) could not ship under this grammar.

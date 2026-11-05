@@ -1079,3 +1079,133 @@ ${stage}`);
 		expect(prepared.out).toContain(`PREPARED at ${shas.real}`);
 	} finally { rmSync(work, { recursive: true, force: true }); }
 }, fixtureDeadlineS(60) * 1_000);
+
+// RELPREREG1 (ompkit-fp72.120.16.258, Joshua J-2026-11-05-05): from card version 0.2.94 an applied idea needs a
+// `### Prereg <id>` block and a `### Result <id>` block of paired readings; the checker recomputes n, drops VOID pairs,
+// computes the paired-t CI and accepts only SHIPPED. v0.2.92 and v0.2.93 were cut before it and keep their verdicts.
+type Pair = [before: number, after: number, loadBefore?: number, loadAfter?: number];
+const shippedDiffs = [2, 18, 10, 0, 20, 4, 16]; // mean 10, s_d 8.16: 95% CI 2.45..17.55 > 0 and mean >= mde/2
+const pairsOf = (diffs: number[]): Pair[] => diffs.map((d) => [60 + d, 60]);
+function preregBlock(fields: Partial<Record<string, string>> = {}): string {
+	const values: Record<string, string> = {
+		endpoint: "cpu_s_per_run", direction: "lower", producer: "scripts/bench-pair.sh --target tests/cli/br-shim.test.ts --metric cpu_s",
+		unit: "s (user+sys CPU of one targeted test-file run)", mde: "10 s", mde_source: "profile var/sitrep/perf-shimchain1",
+		sigma_d: "8 s", sigma_source: "pilot 2026-11-05 4 pairs", alpha: "0.05 (two-sided)", power: "0.80", n_pairs: "7",
+		stopping: "fixed-n; no peeking", control: "paired ABBA order, same host;\n            a pair is VOID if |load1 delta| > 2.0 or load1 > 0.75*ncpu",
+		...fields,
+	};
+	const lines = Object.entries(values).filter(([, value]) => value !== "").map(([key, value]) => `${key}: ${value}`);
+	return `### Prereg PREREGFIX1\n\n\`\`\`\n${lines.join("\n")}\n\`\`\`\n`;
+}
+function resultBlock(pairs: Pair[]): string {
+	const rows = pairs.map(([before, after, a = 3.1, b = 3.4], index) => `| ${index + 1} | ${before} | ${after} | ${a} | ${b} |`);
+	return `### Result PREREGFIX1\n\nncpu: 32\n\n| Pair | before | after | load1_before | load1_after |\n|---|---|---|---|---|\n${rows.join("\n")}\n`;
+}
+function preregCard(version: string, blocks: string): string {
+	return `# Release card: v${version}\n\n## 1. Gap lane\n\n| Bead | Defect | State |\n|---|---|---|\n| fixture-1 | a fixture defect | closed |\n\n` +
+		"## 2. Optimization lane\n\n| # | Idea | Hypothesis and measure | Evidence | Decision |\n|---|---|---|---|---|\n" +
+		"| 1 | **PREREGFIX1** (fixture): a fixture idea | measure: CPU s per run | a profile | **applied** (fixture): see Prereg and Result |\n" +
+		`| 2 | a second idea | a measure | a profile | next release |\n\n${blocks}\n` +
+		"## 3. Measures\n\n| Measure | Before | After |\n|---|---|---|\n| Change lead time (push → installed) | 35 min | |\n\n## 4. Error budget\n\nWithin budget.\n";
+}
+function preregRepo(label: string, cards: Record<string, { version: string; text: string }>) {
+	const fixture = catchUpRepo(label);
+	const { repo, git } = fixture;
+	git(fixture.work, ["init", "-q", "-b", "main", repo]);
+	mkdirSync(join(repo, "docs/releases"), { recursive: true });
+	const shas: Record<string, string> = {};
+	for (const [name, { version, text }] of Object.entries(cards)) {
+		writeFileSync(join(repo, `docs/releases/v${version}.md`), text);
+		git(repo, ["add", "docs"]); git(repo, ["commit", "-qm", `card ${name}`]);
+		shas[name] = git(repo, ["rev-parse", "HEAD"]);
+	}
+	return { ...fixture, shas };
+}
+function checkCardAt(repo: string, rev: string, version: string, env: Record<string, string>) {
+	const result = runFixture(["python3", "-B", join(ROOT, "scripts/release-card-check.py"), "--repo", repo, "--rev", rev, "--version", version], { cwd: repo, env, floor_s: 30 });
+	return { rc: result.rc, out: new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr) };
+}
+
+test("RELPREREG1 prereg: the stdlib t quantile matches the published table and n recomputes to 7 pairs", () => {
+	const probe = `import importlib.util as u
+s = u.spec_from_file_location("card", ${JSON.stringify(join(ROOT, "scripts/release-card-check.py"))}); m = u.module_from_spec(s); s.loader.exec_module(m)
+print(" ".join(f"{m.t_quantile(p, df):.4f}" for p, df in ((0.975, 1), (0.975, 6), (0.975, 30), (0.975, 60), (0.995, 4))))
+print(m.required_pairs(10, 8, 0.05, 0.80), m.required_pairs(10, 0, 0.05, 0.80))`;
+	const result = runFixture(["python3", "-B", "-c", probe], { cwd: ROOT, floor_s: 30 });
+	expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+	expect(new TextDecoder().decode(result.stdout)).toBe("12.7062 2.4469 2.0423 2.0003 4.6041\n7 1\n");
+}, fixtureDeadlineS(30) * 1_000);
+
+test("RELPREREG1 prereg: a 7-pair card ships; underpowered, inconclusive, no-effect and regressed cards refuse", () => {
+	const at = (blocks: string) => ({ version: "0.2.94", text: preregCard("0.2.94", blocks) });
+	const { work, env, repo, shas } = preregRepo("relprereg-verdicts", {
+		shipped: at(preregBlock() + resultBlock(pairsOf(shippedDiffs))),
+		// One VOID pair (load1 delta 3.0) is replaced by an eighth pair: the 7 valid pairs still ship.
+		voidReplaced: at(preregBlock() + resultBlock([[90, 60, 3.0, 6.0], ...pairsOf(shippedDiffs)])),
+		// The pyc-writes endpoint: deterministic (sigma_d 0), one pair, 62 → 0 against mde 10.
+		deterministic: at(preregBlock({ endpoint: "pyc_writes_per_create", unit: "writes", mde: "10 writes", sigma_d: "0", sigma_source: "deterministic count", n_pairs: "1" }) + resultBlock([[62, 0]])),
+		fivePairs: at(preregBlock() + resultBlock(pairsOf(shippedDiffs.slice(0, 5)))),
+		fiveDeclared: at(preregBlock({ n_pairs: "5" }) + resultBlock(pairsOf(shippedDiffs.slice(0, 5)))),
+		voidUnreplaced: at(preregBlock() + resultBlock([[90, 60, 3.0, 6.0], ...pairsOf(shippedDiffs.slice(1))])),
+		noResult: at(preregBlock()),
+		inconclusive: at(preregBlock() + resultBlock(pairsOf([-20, 25, 2, -15, 20, 5, -3]))),
+		noEffect: at(preregBlock() + resultBlock(pairsOf([1, -1, 0, 2, -2, 1, -1]))),
+		regressed: at(preregBlock() + resultBlock(pairsOf(shippedDiffs.map((d) => -d)))),
+		noPrereg: at(resultBlock(pairsOf(shippedDiffs))),
+		noMde: at(preregBlock({ mde: "" }) + resultBlock(pairsOf(shippedDiffs))),
+	});
+	try {
+		for (const name of ["shipped", "voidReplaced"]) {
+			const result = checkCardAt(repo, shas[name]!, "0.2.94", env);
+			expect([name, result.rc], result.out).toEqual([name, 0]);
+			expect(result.out).toContain("PREREGFIX1 SHIPPED (n=7, mean d 10 s, 95% CI 2.449..17.55 s, mde 10 s)");
+		}
+		const deterministic = checkCardAt(repo, shas.deterministic!, "0.2.94", env);
+		expect(deterministic.rc, deterministic.out).toBe(0);
+		expect(deterministic.out).toContain("PREREGFIX1 SHIPPED (n=1, mean d 62 writes");
+		for (const [name, refusal] of [
+			["fivePairs", "RELEASE_UNDERPOWERED: applied idea PREREGFIX1 has 5 valid pairs (0 VOID) of the 7 preregistered"],
+			["fiveDeclared", "RELEASE_UNDERPOWERED: '### Prereg PREREGFIX1' preregisters n_pairs 5, but mde 10, sigma_d 8, alpha 0.05 and power 0.8 require 7"],
+			["voidUnreplaced", "RELEASE_UNDERPOWERED: applied idea PREREGFIX1 has 6 valid pairs (1 VOID) of the 7 preregistered"],
+			["noResult", "RELEASE_UNDERPOWERED: applied idea PREREGFIX1 has no '### Result PREREGFIX1' block"],
+			["inconclusive", "RELEASE_INCONCLUSIVE: applied idea PREREGFIX1: the CI straddles"],
+			["noEffect", "RELEASE_NO_EFFECT: applied idea PREREGFIX1: the CI lies within ±mde"],
+			["regressed", "RELEASE_REGRESSED: applied idea PREREGFIX1: the CI lies wholly below 0"],
+			["noPrereg", "RELEASE_PREREG_MISSING: applied idea PREREGFIX1 has no '### Prereg PREREGFIX1' block"],
+			["noMde", "RELEASE_PREREG_MISSING: '### Prereg PREREGFIX1' lacks field(s): mde"],
+		] as const) {
+			const result = checkCardAt(repo, shas[name]!, "0.2.94", env);
+			expect([name, result.rc], result.out).toEqual([name, 1]);
+			expect(result.out).toStartWith(refusal);
+			expect(result.out.trim().split("\n")).toHaveLength(1);
+		}
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(90) * 1_000);
+
+test("RELPREREG1 prereg: cut cards keep their verdict at their commits; the same card as v0.2.94 needs a Prereg block", () => {
+	// The cut cards' committed text (a gitless or fresh-init export has no release history, so read the tracked files).
+	const card93 = readFileSync(join(ROOT, "docs/releases/v0.2.93.md"), "utf8");
+	const card92 = readFileSync(join(ROOT, "docs/releases/v0.2.92.md"), "utf8");
+	const { work, env, repo, shas } = preregRepo("relprereg-grandfather", {
+		v92: { version: "0.2.92", text: card92 }, v93: { version: "0.2.93", text: card93 },
+		v94: { version: "0.2.94", text: card93.replace("# Release card: v0.2.93", "# Release card: v0.2.94") },
+	});
+	try {
+		for (const [name, version, applied] of [["v92", "0.2.92", "PYCACHE1"], ["v93", "0.2.93", "RUNTIMEMISS1 readback"]] as const) {
+			const result = checkCardAt(repo, shas[name]!, version, env);
+			expect([name, result.rc], result.out).toEqual([name, 0]);
+			expect(result.out).toStartWith(`RELEASE_CARD_OK docs/releases/v${version}.md at ${shas[name]}`);
+			expect(result.out).toContain(`applied: ${applied}`);
+		}
+		const v94 = checkCardAt(repo, shas.v94!, "0.2.94", env);
+		expect(v94.rc, v94.out).toBe(1);
+		expect(v94.out).toStartWith("RELEASE_PREREG_MISSING: applied idea RUNTIMEMISS1 has no '### Prereg RUNTIMEMISS1' block");
+		// The published commits themselves, read with git cat-file, wherever this checkout carries the release history.
+		for (const [rev, version] of [["43c45850b6", "0.2.92"], ["a29b8c97ef", "0.2.93"]] as const) {
+			if (runFixture(["git", "-C", ROOT, "cat-file", "-e", `${rev}^{commit}`], { cwd: ROOT, floor_s: 30 }).rc !== 0) continue;
+			const result = checkCardAt(ROOT, rev, version, env);
+			expect([version, result.rc], result.out).toEqual([version, 0]);
+			expect(result.out).toStartWith(`RELEASE_CARD_OK docs/releases/v${version}.md at ${rev}`);
+		}
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(60) * 1_000);
