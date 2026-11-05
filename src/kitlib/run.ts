@@ -42,8 +42,12 @@
  *   the per-stream `max_output_bytes` (`total_truncated`). Bytes are never
  *   decoded; strict UTF-8 is caller policy.
  */
+import { createHash } from "node:crypto";
 import { fstatSync } from "node:fs";
 import { constants } from "node:os";
+import type { FileSink, Subprocess } from "bun";
+// The reaper's one implementation (scripts/pysafe.py), embedded so a compiled binary needs no scripts/ beside it.
+import { PYSAFE_SHA256, PYSAFE_SOURCE_BASE64 } from "./pysafe-source.ts";
 
 export const DEFAULT_GRACE_S = 2;
 export const DEFAULT_MAX_OUTPUT_BYTES = 1 << 20;
@@ -94,6 +98,11 @@ export interface RunOptions {
 	max_sink_queue_bytes?: number;
 	/** Optional lifecycle observations; leaves the existing result contract unchanged. */
 	timings?: RunTimings;
+	/** Explicit opt-out of the parent-death reaper (GROUPREAP1): when this process dies without
+	 * cleanup, this one group is left running. Only for a caller that must leave a process behind
+	 * on purpose, such as the PPID1 orphan fixture in tests/cli/scratch-orphan-reap.helpers.ts;
+	 * never for product runs. Only `true` is accepted; the deadline, abort and exit sweeps still apply. */
+	outlive_parent?: true;
 }
 
 const SYNC_OPTION_KEYS: Record<keyof RunSyncOptions, true> = {
@@ -102,6 +111,7 @@ const SYNC_OPTION_KEYS: Record<keyof RunSyncOptions, true> = {
 const ASYNC_OPTION_KEYS: Record<keyof RunOptions, true> = {
 	...SYNC_OPTION_KEYS, grace_s: true, stdin: true, rlimit_cpu_s: true, rlimit_as_bytes: true,
 	signal: true, inherit_fds: true, on_output: true, max_total_bytes: true, max_sink_queue_bytes: true, timings: true,
+	outlive_parent: true,
 };
 
 function rejectUnknownOptions(options: object, allowed: object, name: string): void {
@@ -146,6 +156,61 @@ export function killLiveGroups(): number {
 		try { process.kill(-pgid, "SIGKILL"); signalled++; } catch { /* group already gone */ }
 	}
 	return signalled;
+}
+
+/**
+ * Parent-death reaper (GROUPREAP1, ompkit-fp72.120.16.193): the same watchdog
+ * `pysafe.run_bounded` uses, so one implementation serves both languages. A
+ * Bun process killed by SIGKILL never runs its `exit` sweep, and the detached
+ * groups `run()` started would live on under pid 1. The first `run()` starts a
+ * `python3 -I` reaper in its own session and keeps the write end of its stdin.
+ * The reaper's code is `scripts/pysafe.py`, embedded in this module at build
+ * time (a compiled binary anywhere, inside a release or not, carries it): the
+ * stdin pipe first carries the source's byte length and bytes, which a fixed
+ * bootstrap loads as a module and runs as `pysafe.py reaper` would; after that
+ * the same pipe carries the `add PID` / `del PID` registry lines. When this
+ * process dies the pipe closes and the reaper sweeps every registered session
+ * whose leader still has the start time recorded at `add`.
+ */
+let reaper: { child: Subprocess<"pipe", "ignore", "ignore">; stdin: FileSink } | null = null;
+const reaperRegistered = new Set<number>();
+const reaperSource = Buffer.from(PYSAFE_SOURCE_BASE64, "base64");
+if (createHash("sha256").update(reaperSource).digest("hex") !== PYSAFE_SHA256)
+	throw new Error("kitlib run: embedded pysafe source does not match its SHA-256; run python3 -I installer/embed-bootstrap.py");
+
+function startReaper(): FileSink {
+	const child = Bun.spawn(["python3", "-I", "-c", "import sys, types\nsize = int(sys.stdin.buffer.readline(32))  # pysafe: stdin is the registry pipe run() owns, never a terminal\nsource = sys.stdin.buffer.read(size)  # pysafe: the length-prefixed reaper source run() writes first on its own pipe\nmodule = types.ModuleType('pysafe_reaper')\nmodule.__file__ = 'pysafe.py'\nsys.modules['pysafe_reaper'] = module\nexec(compile(source, 'pysafe.py', 'exec'), module.__dict__)\nsys.exit(module._reaper_main())\n"], { stdin: "pipe", stdout: "ignore", stderr: "ignore", detached: true });
+	child.unref();
+	const stdin = child.stdin;
+	stdin.unref();
+	stdin.write(`${reaperSource.byteLength}\n`);
+	stdin.write(reaperSource);
+	reaper = { child, stdin };
+	return stdin;
+}
+
+/** Throws when no reaper can be started or reached: a run() that could orphan its group does not start. */
+function reaperSend(op: "add" | "del", pid: number): void {
+	if (op === "add") reaperRegistered.add(pid);
+	else {
+		reaperRegistered.delete(pid);
+		if (reaper === null) return;
+	}
+	for (let attempt = 0; ; attempt++) {
+		try {
+			if (reaper === null || reaper.child.exitCode !== null || reaper.child.signalCode !== null) {
+				const stdin = startReaper();
+				for (const each of reaperRegistered) stdin.write(`add ${each}\n`);
+			} else {
+				reaper.stdin.write(`${op} ${pid}\n`);
+			}
+			reaper!.stdin.flush();
+			return;
+		} catch (error) {
+			reaper = null;
+			if (attempt > 0) throw new Error(`kitlib run: parent-death reaper unavailable: ${String(error)}`);
+		}
+	}
 }
 
 function positive(name: string, value: unknown): number {
@@ -289,6 +354,8 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		fstatSync(fd); // a closed descriptor is refused here, never silently skipped
 	}
 	if (new Set(inherit).size !== inherit.length) throw new RangeError(`inherit_fds has duplicates: ${inherit.join(",")}`);
+	if (options.outlive_parent !== undefined && options.outlive_parent !== true) throw new TypeError("outlive_parent accepts only true");
+	const reaped = options.outlive_parent !== true;
 	abort?.throwIfAborted();
 
 	const started = performance.now();
@@ -328,6 +395,8 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 	abort?.addEventListener("abort", abortListener, { once: true });
 	let timedOut = false, killed = false, settled = false;
 	try {
+		// Before any wait: if this process dies from here on, the reaper sweeps the group's session (unless outlive_parent).
+		if (reaped) reaperSend("add", pgid);
 		const deadlineAt = started + deadlineMs;
 		const remaining = () => deadlineAt - performance.now();
 		// Every wait also ends on abort, so an aborted call keeps no timer alive.
@@ -368,6 +437,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
 		await Promise.all([out.cancel(), err.cancel()]);
 		await pipesClosed;
 		liveGroups.delete(pgid);
+		if (reaped) { try { reaperSend("del", pgid); } catch { /* no reaper to tell; the group is already gone */ } }
 		await sink?.finish(graceMs);
 	}
 	const signalCode = child.signalCode as keyof typeof constants.signals | null;

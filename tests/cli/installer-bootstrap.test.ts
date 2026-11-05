@@ -293,8 +293,8 @@ test("release preflight accepts canonical payload, rejects source drift, and exp
 	const f = fixture();
 	try {
 		const copy = join(f.work, "producer"); mkdirSync(copy);
-		for (const directory of ["installer", "scripts"]) mkdirSync(join(copy, directory));
-		for (const file of ["installer/install.py", "installer/embed-bootstrap.py", "scripts/pysafe.py", "scripts/kitlib_run.py"]) copyFileSync(join(root, file), join(copy, file));
+		for (const directory of ["installer", "scripts", "src/kitlib"]) mkdirSync(join(copy, directory), { recursive: true });
+		for (const file of ["installer/install.py", "installer/embed-bootstrap.py", "scripts/pysafe.py", "scripts/kitlib_run.py", "src/kitlib/pysafe-source.ts"]) copyFileSync(join(root, file), join(copy, file));
 		await checkInstallerBootstrap(copy);
 		const path = join(copy, "scripts/kitlib_run.py");
 		writeFileSync(path, `${readFileSync(path, "utf8")}\n# controlled canonical-source drift\n`);
@@ -305,6 +305,12 @@ test("release preflight accepts canonical payload, rejects source drift, and exp
 		const once = readFileSync(join(copy, "installer/install.py"));
 		expectSuccess(await run([python, "-I", join(copy, "installer/embed-bootstrap.py")], { cwd: copy, deadline_s: fixtureDeadlineS(10), grace_s: 1, max_output_bytes: 65536 }));
 		expect(readFileSync(join(copy, "installer/install.py"))).toEqual(once);
+		// GROUPREAP1: run.ts's embedded reaper source is generated delivery too; drift is refused and regeneration restores it.
+		const embed = join(copy, "src/kitlib/pysafe-source.ts");
+		writeFileSync(embed, `${readFileSync(embed, "utf8")}// controlled embed drift\n`);
+		await expect(checkInstallerBootstrap(copy)).rejects.toThrow("INSTALLER_BOOTSTRAP_STALE_OR_UNAVAILABLE");
+		expectSuccess(await run([python, "-I", join(copy, "installer/embed-bootstrap.py")], { cwd: copy, deadline_s: fixtureDeadlineS(10), grace_s: 1, max_output_bytes: 65536 }));
+		expect(readFileSync(embed)).toEqual(readFileSync(join(root, "src/kitlib/pysafe-source.ts")));
 	} finally { f.scratch.cleanup(); }
 });
 
@@ -331,8 +337,8 @@ test("EMBEDDEP1 staging a pysafe.py change without regenerating installer/instal
 			return { rc: result.rc, err: decoder.decode(result.stderr), seconds: (Date.now() - started) / 1000 };
 		};
 		const repo = join(work, "repo"); mkdirSync(repo);
-		for (const directory of ["installer", "scripts"]) mkdirSync(join(repo, directory));
-		for (const file of ["installer/install.py", "installer/embed-bootstrap.py", "scripts/pysafe.py", "scripts/kitlib_run.py"]) copyFileSync(join(root, file), join(repo, file));
+		for (const directory of ["installer", "scripts", "src/kitlib"]) mkdirSync(join(repo, directory), { recursive: true });
+		for (const file of ["installer/install.py", "installer/embed-bootstrap.py", "scripts/pysafe.py", "scripts/kitlib_run.py", "src/kitlib/pysafe-source.ts"]) copyFileSync(join(root, file), join(repo, file));
 		writeFileSync(join(repo, "README.md"), "# fixture\n");
 		git(repo, "init", "-q");
 		git(repo, "add", "-A");
@@ -349,12 +355,17 @@ test("EMBEDDEP1 staging a pysafe.py change without regenerating installer/instal
 		expect(stale.rc, stale.err).toBe(1);
 		expect(stale.err).toContain("staged-embed: REFUSED: the staged generated files do not match their staged inputs (worktree ignored)");
 		expect(stale.err).toContain("installer/install.py (from scripts/pysafe.py, scripts/kitlib_run.py)");
+		// GROUPREAP1: run.ts's embedded reaper source is the second output of pysafe.py.
+		expect(stale.err).toContain("src/kitlib/pysafe-source.ts (from scripts/pysafe.py)");
 		expect(stale.err).toContain("python3 -I installer/embed-bootstrap.py");
 		// Regenerated in the worktree only: the index is still stale, so it is still refused.
 		const generated = runSync([python, "-I", join(repo, "installer/embed-bootstrap.py")], { cwd: repo, env, deadline_s: fixtureDeadlineS(10) });
 		expect(generated.rc, decoder.decode(generated.stderr)).toBe(0);
 		expect(member(repo).rc).toBe(1);
 		git(repo, "add", "installer/install.py");
+		// One regenerated output staged, the other still stale: refused.
+		expect(member(repo).rc).toBe(1);
+		git(repo, "add", "src/kitlib/pysafe-source.ts");
 		const admitted = member(repo);
 		expect(admitted.rc, admitted.err).toBe(0);
 		// The 15 s staged-check budget, scaled by machine load like every fixture deadline here.

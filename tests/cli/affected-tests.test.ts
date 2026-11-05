@@ -285,7 +285,7 @@ test("EMBEDDEP1 a planted embed-input change selects installer-bootstrap through
 	// The live producer's EMBEDS is the map the selector reads, and the one the producer lists.
 	const listed = runSync(["python3", "-I", "installer/embed-bootstrap.py", "--list"], { cwd: root, deadline_s: fixtureDeadlineS(30) });
 	expect(listed.rc, decoder.decode(listed.stderr)).toBe(0);
-	expect(decoder.decode(listed.stdout).split("\n").filter(Boolean)).toEqual(["installer/install.py", "scripts/pysafe.py", "scripts/kitlib_run.py"]);
+	expect(decoder.decode(listed.stdout).split("\n").filter(Boolean)).toEqual(["installer/install.py", "scripts/pysafe.py", "scripts/kitlib_run.py", "src/kitlib/pysafe-source.ts"]);
 	expect(selectWithStatus(root, ["installer/embed-bootstrap.py"]).tests).toContain("tests/cli/installer-bootstrap.test.ts");
 });
 
