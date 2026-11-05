@@ -200,10 +200,16 @@ cp -p "$TMP/cm41.shipped" "$CM41"
 PATH="$TMP/bin:$HOST_PATH" sh "$INSTALLER" --check "$H" > "$TMP/check.out" 2>&1
 ok "$?" "0" "installer-check-restored"
 
-fx rewrite "$H" "$H/.git/scrub.map.json" --l1 "$L1" --l2 "$L2" "$N" > /dev/null
+# PUSHADMIT2 (ompkit-fp72.120.14.4): a public non-branch writable ref with an id-less,
+# level-less backup commit is rewritten by the same reviewed plan.
+B=$(printf 'backup: work in progress with no identity\n' | git -C "$H" commit-tree "$L2^{tree}" -p "$L2")
+git -C "$H" update-ref refs/backup/x "$B"
+ok "$?" "0" "backup-ref-planted"
+fx rewrite "$H" "$H/.git/scrub.map.json" --l1 "$L1" --l2 "$L2" "$N" "$B" > /dev/null
 read -r SHA NEW <<EOF
-$(fx plan "$H" "$H/.git/scrub.map.json" "$H/.git/scrub.plan.json" --old "$N" --public "$L2" --authority J-TEST-scrub)
+$(fx plan "$H" "$H/.git/scrub.map.json" "$H/.git/scrub.plan.json" --old "$N" --public "$L2" --authority J-TEST-scrub --backup "refs/backup/x=$B")
 EOF
+NB=$(python3 -B -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$H/.git/scrub.map.json" "$B")
 RTX="$H/.git/hooks/hooks.d/reference-transaction"
 W="$RTX/ref-txn-witness.py"
 # HISTQUIESCE1 part 3: the review binds the exported Agent Mail APPROVE it relies on.
@@ -304,6 +310,26 @@ ok "$?" "0" "reviewed-rewrite-admitted-41"
 git -C "$H" push -q --force-with-lease="refs/heads/main:$L2" origin main:refs/heads/main 2> "$TMP/push.err"
 ok "$?" "0" "real-reviewed-push-rc"
 ok "$(git --git-dir="$ORIGIN_URL" rev-parse refs/heads/main)" "$NEW" "origin-is-new-root"
+
+# PUSHADMIT2: the backup ref's reviewed new root is admitted by both members, an unmapped extra
+# commit on it is refused by both, and once origin main holds the new root a later ordinary main
+# push is judged ordinarily (not claimed by the plan).
+BACKUP_LINE="refs/backup/x $NB refs/backup/x $B"
+for member in m40 m41; do
+	"$member" "$BACKUP_LINE"
+	ok "$?" "0" "reviewed-backup-admitted-$member"
+	grep -qF "ADMITTED reviewed rewrite push plan=$SHA ref=refs/backup/x" "$TMP/$member.err"
+	ok "$?" "0" "reviewed-backup-provenance-$member"
+done
+XB=$(printf '[test] extra on the rewritten backup ompkit-2w7h\n' | git -C "$H" commit-tree "$NB^{tree}" -p "$NB")
+neg normal backup-unmapped-extra "REFUSED PUSH_TIP_NOT_REVIEWED_NEW_ROOT" "refs/backup/x $XB refs/backup/x $B"
+LATER=$(printf '[test] later work on main ompkit-2w7h\n' | git -C "$H" commit-tree "$NEW^{tree}" -p "$NEW")
+for member in m40 m41; do
+	"$member" "refs/heads/main $LATER refs/heads/main $NEW"
+	ok "$?" "0" "later-main-push-ordinary-$member"
+	if grep -q ref-txn-witness "$TMP/$member.err"; then rc=1; else rc=0; fi
+	ok "$rc" "0" "later-main-push-unclaimed-$member"
+done
 
 printf 'check-pushed-beads: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

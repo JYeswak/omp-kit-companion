@@ -16,6 +16,7 @@ the real helper source by parsing it.
                                               [--alter-message] [--wrong-parent]
   plan REPO MAP OUT --old OID --public OID --authority A [--drop-key OID] [--add-key OID] [--repo-override P]
                                               -> "<plan_sha256> <new_tip>"
+  plan ... [--backup REF=OID]...              (PUSHADMIT2) adds a reviewed writable non-branch ref
   forge-review REPO PLAN --reviewer NAME [--set KEY=JSON]... [--alter-after-digest] [--writable]
                [--approval-from NAME] [--no-approval-copy] [--tamper-approval] [--legacy-v1]
   approval REPO OUT --plan PLAN --id N --from NAME [--subject TEXT]
@@ -181,7 +182,8 @@ def rewrite(repo: str, argv: list) -> None:
 
 
 def plan(repo: str, argv: list) -> None:
-    found, rest = options(argv, (), ("--old", "--public", "--authority", "--drop-key", "--add-key", "--repo-override"))
+    found, rest = options(argv, (), ("--old", "--public", "--authority", "--drop-key", "--add-key", "--repo-override",
+                                     "--backup"))
     mapping = json.loads(open(rest[0], encoding="utf-8").read(1 << 20))
     out, old = rest[1], found["--old"][0]
     for key in found.get("--drop-key", []):
@@ -197,6 +199,12 @@ def plan(repo: str, argv: list) -> None:
               "writable_refs": ["refs/heads/main"], "new_roots": {},
               "signature_policy": "invalidate-pgp-ssh-preserve-originals", "signature_invalidations": [],
               "tree_map": {}, "commit_witnesses": {}, "readonly_residuals": {}}
+    # PUSHADMIT2: --backup REF=OID adds a reviewed writable non-branch ref, as the jev scrub plan recorded them.
+    for item in found.get("--backup", []):
+        ref, _, public = item.partition("=")
+        result["public_refs"][ref] = public
+        result["writable_refs"].append(ref)
+        result["new_roots"][ref] = {"old": public, "new": mapping[public]}
     result["plan_sha256"] = witness().digest(result, "plan_sha256")
     with open(out, "w", encoding="utf-8") as handle:
         json.dump(result, handle, sort_keys=True)

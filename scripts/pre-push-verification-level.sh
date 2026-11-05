@@ -47,6 +47,16 @@
 #       with both present; a mutant without the paired check passes the
 #       missing case. All fixtures live under
 #       "${TMPDIR:-/tmp}" and are removed on exit.
+#       (i) PUSHADMIT2 (ompkit-fp72.120.14.4): a reviewed, applied history
+#       plan (tests/cli/ref-txn-witness-fixtures.py) rewriting main and the
+#       non-branch writable ref refs/backup/x: the backup ref's mapped new
+#       root with a level-less subject is admitted; an unmapped extra commit
+#       on it, a wrong new oid and a stale lease are refused by the witness;
+#       once origin holds a new root, a later leveled push on main or the
+#       backup ref is ordinary again. A mutant witness that routes only
+#       refs/heads/main refuses the reviewed backup push, and a mutant with the
+#       PUSHADMIT1 claim rule (any descendant of the new root) refuses the
+#       ordinary later main push.
 set -u
 
 SELF=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)/$(basename -- "$0")
@@ -384,6 +394,92 @@ do_selftest() {
 		sed 's|paired_fresh "${SELF%/hooks.d|true \|\| paired_fresh "${SELF%/hooks.d|' "$pm" >"$pm.mut" && mv "$pm.mut" "$pm"
 		leveled "$w" "$pm"; rc=$?
 		if [ "$rc" -eq 0 ]; then ok "mutant without paired check passes missing case"; else bad "mutant without paired check still refused (rc=$rc)"; fi
+	fi
+
+	# (i) PUSHADMIT2: every writable ref a reviewed plan rewrites is decided by push-admit, not only main.
+	fxdir="${SELF%/*}/../tests/cli"
+	fx() { (CDPATH='' cd -- "$fxdir" && python3 -B ref-txn-witness-fixtures.py "$@"); }
+	ct() { # ct REPO PARENT SUBJECT [TREE-OF]: a fixture commit-tree commit
+		printf '%s\n' "$3" | git -C "$1" -c user.email=t@t -c user.name=t commit-tree "${4:-$2}^{tree}" -p "$2"
+	}
+	H=""
+	if [ -f "$fxdir/ref-txn-witness-fixtures.py" ] && BUILD=$(fx build "$root"); then
+		H=$(printf '%s\n' "$BUILD" | sed -n 's/^repo //p')
+		R0=$(printf '%s\n' "$BUILD" | sed -n 's/^root //p')
+		L1=$(printf '%s\n' "$BUILD" | sed -n 's/^l1 //p')
+		L2=$(printf '%s\n' "$BUILD" | sed -n 's/^l2 //p')
+		B=$(ct "$H" "$L2" "backup: work in progress without a level") && git -C "$H" update-ref refs/backup/x "$B" || H=""
+	else
+		bad "(i) history fixture build ($fxdir/ref-txn-witness-fixtures.py)"
+	fi
+	if [ -n "$H" ]; then
+		if ! { fx rewrite "$H" "$H/.git/scrub.map.json" --l1 "$L1" --l2 "$L2" "$L2" "$B" >/dev/null \
+			&& PLAN=$(fx plan "$H" "$H/.git/scrub.map.json" "$H/.git/scrub.plan.json" --old "$L2" --public "$R0" \
+				--authority J-TEST-scrub --backup "refs/backup/x=$B") \
+			&& fx approval "$H" "$H/.git/scrub.approval.json" --plan "$H/.git/scrub.plan.json" --id 51 --from independent-reviewer >/dev/null \
+			&& (CDPATH='' cd -- "$H" && python3 -B -c 'import runpy, sys; sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name="__main__")' \
+				"${SELF%/*}/ref-txn-witness.py" review --plan "$H/.git/scrub.plan.json" --reviewer independent-reviewer \
+				--approval-message-id 51 --approval-file "$H/.git/scrub.approval.json") >/dev/null \
+			&& [ "$(fx drive "$H" "$H/.git/scrub.plan.json" --no-lock 2>/dev/null)" = COMMITTED ]; }; then
+			bad "(i) reviewed plan setup"
+			H=""
+		fi
+	fi
+	if [ -n "$H" ]; then
+		NEW=${PLAN#* }
+		NB=$(python3 -B -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$H/.git/scrub.map.json" "$B")
+		X=$(ct "$H" "$NB" "extra on the rewritten backup [test]")
+		W=$(ct "$H" "$B" "wrong new root [test]" "$NB")
+		S=$(ct "$H" "$B" "origin moved [test]")
+		M=$(ct "$H" "$NEW" "later work on main [test]")
+		# feed MEMBER LINE: the member as git runs it, with the pusher named; stderr kept for reasons
+		feed() { printf '%s\n' "$2" | (cd "$H" && AGENT_NAME=applier sh "$1" --pre-push origin --repo "$H" 2>"$root/i.err" >/dev/null); }
+		feed "$SELF" "refs/backup/x $NB refs/backup/x $B"; rc=$?
+		if [ "$rc" -eq 0 ] && grep -qF "ADMITTED reviewed rewrite push plan=${PLAN%% *} ref=refs/backup/x" "$root/i.err"; then
+			ok "(i) reviewed backup-ref push admitted by the witness"
+		else
+			bad "(i) reviewed backup-ref push rc=$rc want 0: $(cat "$root/i.err")"
+		fi
+		for c in "unmapped extra commit|$X|$B|PUSH_TIP_NOT_REVIEWED_NEW_ROOT" "wrong new oid|$W|$B|PUSH_TIP_NOT_REVIEWED_NEW_ROOT" \
+			"stale lease|$NB|$S|STALE_LEASE"; do
+			IFS='|' read -r what tip rsha reason <<EOF
+$c
+EOF
+			feed "$SELF" "refs/backup/x $tip refs/backup/x $rsha"; rc=$?
+			if [ "$rc" -eq 4 ] && grep -qF "REFUSED $reason" "$root/i.err"; then ok "(i) backup-ref $what refused ($reason)"; else bad "(i) backup-ref $what rc=$rc want 4 $reason"; fi
+		done
+		feed "$SELF" "refs/backup/x $X refs/backup/x $NB"; rc=$?
+		if [ "$rc" -eq 0 ] && ! grep -q ref-txn-witness "$root/i.err"; then ok "(i) published backup root: later push ordinary"; else bad "(i) published backup root: later push rc=$rc"; fi
+		feed "$SELF" "refs/heads/main $M refs/heads/main $NEW"; rc=$?
+		if [ "$rc" -eq 0 ] && ! grep -q ref-txn-witness "$root/i.err"; then ok "(i) published main root: later push ordinary"; else bad "(i) published main root: later push rc=$rc"; fi
+		# mutant: the PUSHADMIT1 witness that routed only refs/heads/main judges the backup tip itself
+		mkdir -p "$root/mut" && cp "$SELF" "${SELF%/*}/pysafe.py" "$root/mut/" \
+			&& sed 's/^    if set(tip) == {"0"} or set(remote) == {"0"}:$/    if ref != MAIN or set(tip) == {"0"} or set(remote) == {"0"}:/' \
+				"${SELF%/*}/ref-txn-witness.py" >"$root/mut/ref-txn-witness.py"
+		if cmp -s "$root/mut/ref-txn-witness.py" "${SELF%/*}/ref-txn-witness.py"; then
+			bad "mutant main-only witness did not apply"
+		else
+			feed "$root/mut/${SELF##*/}" "refs/backup/x $NB refs/backup/x $B"; rc=$?
+			if [ "$rc" -eq 4 ] && grep -qF "REFUSED $NB subject=backup:" "$root/i.err"; then
+				ok "mutant main-only witness refuses the reviewed backup push"
+			else
+				bad "mutant main-only witness rc=$rc want 4"
+			fi
+		fi
+		# mutant: the PUSHADMIT1 claim rule (any tip descending from the new root, even once origin holds it)
+		# refuses the ordinary later main push: the outage once origin main moved to the reviewed root
+		sed 's/^            if roots is None or remote == roots\[1\]:$/            if roots is None:/' \
+			"${SELF%/*}/ref-txn-witness.py" >"$root/mut/ref-txn-witness.py"
+		if cmp -s "$root/mut/ref-txn-witness.py" "${SELF%/*}/ref-txn-witness.py"; then
+			bad "mutant old claim rule did not apply"
+		else
+			feed "$root/mut/${SELF##*/}" "refs/heads/main $M refs/heads/main $NEW"; rc=$?
+			if [ "$rc" -eq 4 ] && grep -qF "REFUSED PUSH_TIP_NOT_REVIEWED_NEW_ROOT $M" "$root/i.err"; then
+				ok "mutant old claim rule refuses the ordinary later main push"
+			else
+				bad "mutant old claim rule rc=$rc want 4"
+			fi
+		fi
 	fi
 
 	printf 'selftest: %d passed, %d failed\n' "$pass" "$fail"

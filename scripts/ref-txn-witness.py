@@ -35,13 +35,17 @@ same-UID writer can forge every file it reads.
 
 PUSHADMIT1 (ompkit-fp72.120.16.221): pre-push members 40 (pushed-beads) and 41 (pushed-vlevel) use
 push-admit. `review` stores the reviewed plan bytes read-only beside its record, as
-history-review/<plan_sha256>.plan.json, so a member finds the plan from the pushed tip alone (a copy whose
-new_tip is the tip or its ancestor), never from a caller variable. The push is admitted only when the tip
-is that new_tip, the remote sha is the plan's public main root (a moved origin is a stale lease), local main
-already equals the new root, every preservation ref holds its original, the review record verifies with the
-unchanged binding, and its reviewer is not the pusher (AGENT_NAME, required). The member then judges its own
-range minus the mapped counterparts with its ordinary check. Without a claiming plan copy the member's
-ordinary check runs unchanged.
+history-review/<plan_sha256>.plan.json, so a member finds the plan from the push line alone, never from a
+caller variable. PUSHADMIT2 (ompkit-fp72.120.14.4): every writable ref the plan rewrites is decided here,
+not only main. A ref's reviewed new root is new_tip for main and map[public_refs[ref]] for any other
+writable ref, and must agree with the plan's new_roots entry when one is recorded. A plan claims a push line
+while origin does not yet hold that new root and either origin still holds the reviewed public root or the
+pushed tip descends from the new root; once origin holds the new root, later pushes are ordinary. A claimed
+push is admitted only when the tip is that new root, the remote sha is the ref's public root (a moved
+origin is a stale lease), local main already equals new_tip, every preservation ref holds its original, the
+review record verifies with the unchanged binding, and its reviewer is not the pusher (AGENT_NAME,
+required). The member then judges its own range minus the mapped counterparts with its ordinary check.
+Without a claiming plan copy the member's ordinary check runs unchanged.
 
 HISTQUIESCE1 part 3 (ompkit-fp72.120.16.222): the reviewer is bound to the APPROVE it relies on. `review`
 requires --approval-message-id and --approval-file: the Agent Mail message exported as JSON (its "id",
@@ -622,8 +626,30 @@ def admit() -> int:
     return 0
 
 
-def reviewed_plans(common: str, tip: str) -> list:
-    """The reviewed plan copies whose new main is the pushed tip or one of its ancestors (discovery only)."""
+def reviewed_root(plan: object, ref: str) -> tuple | None:
+    """(public root, reviewed new root) of a writable ref the plan rewrites, else None.
+
+    main's new root is new_tip (its public root may be an ancestor of old_tip); any other writable ref's
+    new root is the mapped counterpart of its public root. A ref the plan leaves unchanged is not claimed."""
+    if not isinstance(plan, dict):
+        return None
+    public, writable, mapping = plan.get("public_refs"), plan.get("writable_refs"), plan.get("map")
+    if not (isinstance(public, dict) and isinstance(writable, list) and isinstance(mapping, dict)):
+        return None
+    old = public.get(ref)
+    if ref not in writable or not isinstance(old, str):
+        return None
+    new = plan.get("new_tip") if ref == MAIN else mapping.get(old)
+    if not isinstance(new, str) or len(new) not in (40, 64) or any(c not in "0123456789abcdef" for c in new):
+        return None
+    return None if new == old else (old, new)
+
+
+def reviewed_plans(common: str, ref: str, tip: str, remote: str) -> list:
+    """The reviewed plan copies claiming this push line (discovery only).
+
+    A plan claims REF while origin does not yet hold REF's reviewed new root and either origin still holds
+    the reviewed public root or the pushed tip is the new root or one of its descendants."""
     folder = os.path.join(common, "omp-kit", "history-review")
     try:
         names = sorted(n for n in os.listdir(folder) if n.endswith(PLAN_SUFFIX))
@@ -633,25 +659,34 @@ def reviewed_plans(common: str, tip: str) -> list:
     for name in names:
         try:
             plan = parse_json(read_owned(os.path.join(folder, name), "REVIEWED_PLAN", read_only=True), "plan")
-            new = plan.get("new_tip") if isinstance(plan, dict) else None
-            if not isinstance(new, str) or len(new) not in (40, 64) or any(c not in "0123456789abcdef" for c in new):
+            roots = reviewed_root(plan, ref)
+            if roots is None or remote == roots[1]:
                 continue
-            if git("cat-file", "-t", new).strip() == b"commit" and not git("rev-list", "-n", "1", new, "^" + tip, "--"):
+            old, new = roots
+            if remote == old or (git("cat-file", "-t", new).strip() == b"commit"
+                                 and not git("rev-list", "-n", "1", new, "^" + tip, "--")):
                 found.append((name, plan))
         except Refused:
             continue
     return found
 
 
-def verify_push(repo: Repo, name: str, plan_value: object, tip: str, remote: str) -> str:
-    """Members 40/41: the push publishes exactly the applied, independently reviewed new main."""
+def verify_push(repo: Repo, name: str, plan_value: object, ref: str, tip: str, remote: str) -> str:
+    """Members 40/41: the push publishes exactly REF's reviewed new root of the applied, independently reviewed plan."""
     plan = check_plan(repo, plan_value)
     if name != plan["plan_sha256"] + PLAN_SUFFIX:
         raise Refused("REVIEWED_PLAN_NAME_MISMATCH " + name)
-    if tip != plan["new_tip"]:
-        raise Refused("PUSH_TIP_NOT_REVIEWED_NEW_ROOT %s (reviewed %s)" % (tip, plan["new_tip"]))
-    if remote != plan["public_refs"][MAIN]:
-        raise Refused("STALE_LEASE remote %s is not the reviewed public root %s" % (remote, plan["public_refs"][MAIN]))
+    roots = reviewed_root(plan, ref)
+    if roots is None:
+        raise Refused("REF_NOT_REVIEWED_WRITABLE " + ref)
+    old, new = roots
+    recorded = plan.get("new_roots", {})
+    if not isinstance(recorded, dict) or (ref in recorded and recorded[ref] != {"old": old, "new": new}):
+        raise Refused("NEW_ROOT_MISMATCH %s plan new_roots disagrees with its map (%s -> %s)" % (ref, old, new))
+    if tip != new:
+        raise Refused("PUSH_TIP_NOT_REVIEWED_NEW_ROOT %s (reviewed %s for %s)" % (tip, new, ref))
+    if remote != old:
+        raise Refused("STALE_LEASE remote %s is not the reviewed public root %s of %s" % (remote, old, ref))
     if repo.ref_value(MAIN) != plan["new_tip"]:
         raise Refused("LOCAL_MAIN_NOT_NEW_ROOT")
     applier = os.environ.get("AGENT_NAME", "").strip()
@@ -661,8 +696,7 @@ def verify_push(repo: Repo, name: str, plan_value: object, tip: str, remote: str
     path, record = check_review(repo, plan, intent, applied=True)
     check_transform(repo, plan)
     return "plan=%s ref=%s old=%s new=%s mapped=%d review=%s reviewer=%s pusher=%s" % (
-        plan["plan_sha256"], MAIN, plan["public_refs"][MAIN], plan["new_tip"], len(plan["map"]), path,
-        record["reviewer"], applier)
+        plan["plan_sha256"], ref, old, new, len(plan["map"]), path, record["reviewer"], applier)
 
 
 def push_admit(argv: list) -> int:
@@ -674,16 +708,16 @@ def push_admit(argv: list) -> int:
     if len(argv) < 5 or argv[3] != "--":
         raise Refused("USAGE push-admit LOCAL_SHA REMOTE_REF REMOTE_SHA -- REV-LIST-ARGS...")
     tip, ref, remote, revs = argv[0], argv[1], argv[2], argv[4:]
-    if ref != MAIN or set(tip) == {"0"} or set(remote) == {"0"}:
+    if set(tip) == {"0"} or set(remote) == {"0"}:
         return 3
-    found = reviewed_plans(line("rev-parse", "--path-format=absolute", "--git-common-dir"), tip)
+    found = reviewed_plans(line("rev-parse", "--path-format=absolute", "--git-common-dir"), ref, tip, remote)
     if not found:
         return 3
     if len(found) != 1:
         raise Refused("AMBIGUOUS_REVIEWED_PLANS " + " ".join(n for n, _ in found))
     repo = Repo()
     name, plan = found[0]
-    summary = verify_push(repo, name, plan, tip, remote)  # PUSH-VALIDATION
+    summary = verify_push(repo, name, plan, ref, tip, remote)  # PUSH-VALIDATION
     counterparts = set(plan["map"].values()) if isinstance(plan.get("map"), dict) else set()
     for oid in git("rev-list", *revs, "--").decode().split():
         if oid not in counterparts:
