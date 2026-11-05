@@ -236,5 +236,122 @@ out=$(verdict "$flake" "$f0"); rc=$?
 	&& [ "$(culprit_field "$(record "$flake" "$f0")" method)" = '"flake-rerun"' ] && [ "$(wc -l <"$br_log" | tr -d ' ')" = 1 ]
 ok $? "flake-no-culprit: rc=$rc out=$out br=$(cat "$br_log")"
 
+# 7. CIFLAKE1: the same real release path classifies CI-only failures without bisecting.
+# Two failing files also prove each rerun gets a fresh export: a shared export leaves a marker
+# that makes the second rerun fail, so it cannot incorrectly pass the flake control.
+ci="$TMP/ci"
+seed "$ci"
+cp "$KITREPO/scripts/gate-ci-only.tsv" "$ci/scripts/gate-ci-only.tsv"
+printf '#!/bin/sh\nexit 0\n' >"$ci/tests/cli/green.test.sh"
+export CI_CULPRIT_LOG="$TMP/ci-reruns.jsonl"
+: >"$CI_CULPRIT_LOG"
+for name in package-release kit-update kit-update-nplus-two kit-update-compiled kit-update-relink package-release-live; do
+	cat >"$ci/tests/cli/$name.test.ts" <<'EOF'
+import { expect, test } from "bun:test";
+import { appendFileSync, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename } from "node:path";
+
+test("CI-only fixture runs at the exact head in an isolated repository", () => {
+  const cwd = realpathSync(process.cwd());
+  expect(realpathSync(process.env.OMP_KIT_CASE_CWD!)).toBe(cwd);
+  expect(readFileSync(".git/FETCH_HEAD", "utf8")).toMatch(/^[0-9a-f]{40,64}\s/);
+  expect(process.env.OMP_KIT_HEAVY_MAX_WAIT_S).toBe("180");
+  const name = basename(import.meta.path);
+  if (!["package-release.test.ts", "kit-update.test.ts"].includes(name)) return;
+  const rerun = /\/culprit-[0-9a-f]+[/.]/.test(cwd);
+  if (rerun) {
+    expect(existsSync("ci-rerun.marker")).toBe(false);
+    writeFileSync("ci-rerun.marker", name);
+  }
+  appendFileSync(process.env.CI_CULPRIT_LOG!, JSON.stringify({ name, cwd, rerun }) + "\n");
+  expect(readFileSync("lib/mode.txt", "utf8").trim() === "flake" && rerun).toBe(true);
+});
+EOF
+done
+ci0=$(change "$ci" ci@example.invalid ompkit-ci "[test] reproducing CI-only failure" lib/mode.txt red)
+ci_record() {
+	set -- "$store/ci-only/$(git -C "$ci" rev-parse "$1^{tree}")".ci-only.*.json
+	printf '%s\n' "$1"
+}
+printf '[test] unrelated next commit\n' >"$TMP/commit-message"
+printf 'next\n' >"$ci/notes-next.txt"
+git -C "$ci" add notes-next.txt
+red_main() {
+	(cd "$KITREPO" && python3 -B scripts/check-red-main.py "$ci" "$1" "$TMP/commit-message") 2>&1
+}
+out=$(verdict "$ci" "$ci0"); rc=$?
+ci_red=$(ci_record "$ci0")
+[ "$rc" != 0 ] && printf '%s\n' "$out" | grep -q 'FULL-SUITE: VERDICT PASS' \
+	&& printf '%s\n' "$out" | grep -q 'CI-ONLY: VERDICT FAIL' \
+	&& printf '%s\n' "$out" | grep -qx 'release-verdict: CULPRIT none (reproduces at head)' \
+	&& [ "$(culprit_field "$ci_red" method)" = '"unattributed"' ] \
+	&& [ "$(culprit_field "$ci_red" reason)" = '"reproduces at head"' ]
+ok $? "ci-reproducing-stays-red: rc=$rc out=$out"
+guard_out=$(red_main "$ci0"); guard_rc=$?
+[ "$guard_rc" = 1 ] && printf '%s\n' "$guard_out" | grep -q 'commit-gate: REFUSED:.*is RED' \
+	&& printf '%s\n' "$guard_out" | grep -q 'tests/cli/package-release.test.ts'
+ok $? "ci-reproducing-refuses-unrelated: rc=$guard_rc out=$guard_out"
+
+# 8. The next head flakes only on its first run; the FAIL stays recorded but the guard
+# subtracts the two freshly rerun files and admits an unrelated next commit.
+: >"$CI_CULPRIT_LOG"
+ci1=$(change "$ci" ci@example.invalid ompkit-ci "[test] CI-only flake" lib/mode.txt flake)
+printf 'another\n' >"$ci/notes-next.txt"
+git -C "$ci" add notes-next.txt
+out=$(verdict "$ci" "$ci1"); rc=$?
+ci_flake=$(ci_record "$ci1")
+[ "$rc" != 0 ] && printf '%s\n' "$out" | grep -q 'FULL-SUITE: VERDICT PASS' \
+	&& printf '%s\n' "$out" | grep -qx 'release-verdict: CULPRIT none (flake: passes on rerun at head)' \
+	&& [ "$(culprit_field "$ci_flake" method)" = '"flake-rerun"' ] \
+	&& [ "$(culprit_field "$ci_flake" failing_files)" = '["tests/cli/kit-update.test.ts", "tests/cli/package-release.test.ts"]' ]
+ok $? "ci-flake-records-culprit: rc=$rc out=$out"
+guard_out=$(red_main "$ci1"); guard_rc=$?
+[ "$guard_rc" = 0 ] && ! printf '%s\n' "$guard_out" | grep -q 'REFUSED\|UNKNOWN'
+ok $? "ci-flake-admits-unrelated: rc=$guard_rc out=$guard_out"
+python3 - "$CI_CULPRIT_LOG" <<'PY'
+import json
+import sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+reruns = [row for row in rows if row["rerun"]]
+assert len(rows) == 4 and len(reruns) == 2, rows
+assert len({row["cwd"] for row in reruns}) == 2, reruns
+assert sorted(row["name"] for row in reruns) == ["kit-update.test.ts", "package-release.test.ts"], reruns
+PY
+ok $? "ci-one-rerun-per-file-in-fresh-export"
+out=$(cd "$KITREPO" && python3 -B scripts/verdict-culprit.py --repo "$ci" --commit "$ci1" --ci-only 2>&1); rc=$?
+[ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qx 'CULPRIT none (flake: passes on rerun at head)' \
+	&& [ "$(wc -l <"$CI_CULPRIT_LOG" | tr -d ' ')" = 4 ] && [ "$(wc -l <"$br_log" | tr -d ' ')" = 1 ]
+ok $? "ci-attribution-idempotent-no-comments: rc=$rc out=$out"
+
+# 9. Old CI-only records without a culprit still validate; new attributions validate through
+# the same reader check-red-main uses. Invalid attribution keys or methods must not be admitted.
+python3 -B - "$KITREPO/scripts" "$ci_red" "$ci_flake" "$TMP/ci-validation" <<'PY'
+import importlib.util
+import json
+from pathlib import Path
+import shutil
+import sys
+
+scripts, red, flake, scratch = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("store", scripts / "full-suite-verdict-store.py")
+store = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(store)
+scratch.mkdir()
+for source in (red, flake):
+    entry = json.loads(source.read_text())
+    path = scratch / source.name
+    shutil.copyfile(source.with_suffix(".log"), path.with_suffix(".log"))
+    def validate(value):
+        path.write_text(json.dumps(value))
+        return store.validate_ci_only_record(path, tree=entry["tree"], checks=entry["checks"], runtime=entry["runtime"])
+    assert entry["verdict"] == "FAIL" and entry["version"] == 1, entry
+    assert validate(entry)[0] is not None, validate(entry)
+    legacy = {key: value for key, value in entry.items() if key != "culprit"}
+    assert validate(legacy)[0] is not None, validate(legacy)
+    for culprit in ({**entry["culprit"], "method": "unknown"}, {**entry["culprit"], "extra": True}):
+        assert validate({**entry, "culprit": culprit})[0] is None, culprit
+PY
+ok $? "ci-old-new-records-valid-malformed-culprit-refused"
+
 printf 'verdict-culprit: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = 0 ]

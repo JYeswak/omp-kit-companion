@@ -801,7 +801,8 @@ def validate_ci_only_record(path: Path, *, tree: str, checks: str, runtime: str)
     """A bounded record whose identity, spec, verdict and digested log all agree, else None and why."""
     try:
         entry = json_file(path)
-        if set(entry) != CI_ONLY_KEYS or entry["version"] != 1 or entry["kind"] != "ci-only":
+        if (set(entry) not in (CI_ONLY_KEYS, CI_ONLY_KEYS | {"culprit"})
+                or entry["version"] != 1 or entry["kind"] != "ci-only"):
             raise ValueError("ci-only record schema is invalid")
         if entry["tree"] != tree or entry["checks"] != checks or entry["runtime"] != runtime:
             raise ValueError("ci-only record identity differs")
@@ -826,6 +827,8 @@ def validate_ci_only_record(path: Path, *, tree: str, checks: str, runtime: str)
                 raise ValueError("ci-only record timing is invalid")
         if entry["verdict"] != ("FAIL" if any(row["rc"] != 0 for row in files) else "PASS"):
             raise ValueError("ci-only verdict disagrees with its exit codes")
+        if "culprit" in entry:
+            validate_culprit(entry["culprit"], entry["verdict"])
         log_path = path.with_suffix(".log")
         if not stat.S_ISREG(log_path.lstat().st_mode):
             raise ValueError("ci-only paired log is not a regular file")
@@ -863,6 +866,17 @@ def tail_lines(data: bytes, count: int) -> str:
     return "\n".join(data.decode("utf-8", errors="replace").rstrip("\n").splitlines()[-count:])
 
 
+def ci_only_environment(repo: Path, commit: str, suite_root: Path) -> dict[str, str]:
+    """Prepare an exact-commit export for both the CI-only verdict and its per-file reruns."""
+    # package-release archives from Git; the work-root check needs this export as its case cwd.
+    checked_run(["git", "-C", str(suite_root), "-c", "init.defaultBranch=main", "init", "-q"], deadline_s=60)
+    checked_run(["git", "-C", str(suite_root), "fetch", "-q", "--depth", "1", str(repo), commit], deadline_s=120)
+    env = dict(os.environ)
+    env.update(CI_ONLY_ENV)
+    env["OMP_KIT_CASE_CWD"] = str(suite_root)
+    return env
+
+
 def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, cache_dir: str | None) -> int:
     """Judge CI_ONLY_FILES on suite_root (an export of commit) one at a time and record the verdict."""
     commit = text_output(checked_run(["git", "-C", str(repo), "rev-parse", "--verify", f"{commit}^{{commit}}"]), "commit")
@@ -879,13 +893,7 @@ def run_ci_only(repo: Path, commit: str, *, judge_root: Path, suite_root: Path, 
     if entry is not None and entry["verdict"] == "PASS":
         print(f"CI-ONLY: VERDICT PASS tree={tree} (already recorded: {path.name})")
         return 0
-    # The export becomes a throwaway git root holding the exact commit, as release-local makes it: package-release
-    # archives from a repository root, and the runtime work-root check requires OMP_KIT_CASE_CWD to be that root.
-    checked_run(["git", "-C", str(suite_root), "-c", "init.defaultBranch=main", "init", "-q"], deadline_s=60)
-    checked_run(["git", "-C", str(suite_root), "fetch", "-q", "--depth", "1", str(repo), commit], deadline_s=120)
-    env = dict(os.environ)
-    env.update(CI_ONLY_ENV)
-    env["OMP_KIT_CASE_CWD"] = str(suite_root)
+    env = ci_only_environment(repo, commit, suite_root)
     # LIVEEVAL1 (ompkit-fp72.120.16.248): the export and every scratch root under it are deleted after this run, so
     # e2e-live copies a failing live scenario's transcript here; it becomes <record>.evidence beside the record.
     evidence = path.with_suffix(".evidence")

@@ -24,6 +24,8 @@
 #      reuses a PASS instead of running them (up to 900/2400 s) after build, sign and notarize. Its
 #      output (every failing file's, in one run) is printed after the suite's. Exports without
 #      run-ci-only (commits before it) skip this step silently; release-local then runs the files.
+#      CIFLAKE1: a failed CI-only verdict reruns its failing files once in fresh exact-head exports;
+#      its validated culprit marks flakes or leaves reproducing files red without bisection.
 #
 # A tree that already has a verdict is a cache hit and returns at once. Called with no arguments by
 # the publisher after a successful push, or by hand before release-local.
@@ -120,7 +122,7 @@ else
 	fi
 	printf 'release-verdict: SUITE_LEASE_ABSENT: %s predates scripts/suite-lease.sh, so this run takes no suite lease\n' "$ROOT"
 fi
-# culprit_step: name the commit that broke $sha (see step 4). Its output and status never decide ours.
+# culprit_step [--ci-only]: attribute a failed verdict at $sha. Output and status never decide ours.
 culprit_step() {
 	if [ ! -f "$tree/scripts/verdict-culprit.py" ]; then
 		printf 'release-verdict: CULPRIT none (no culprit tool in %s)\n' "$sha"
@@ -129,7 +131,7 @@ culprit_step() {
 	culprit_out="$WORK/culprit.$sha.out"
 	culprit_rc=0
 	(cd "$tree" && env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB TMPDIR="$WORK" \
-		python3 -B scripts/verdict-culprit.py --repo "$ROOT" --commit "$sha") >"$culprit_out" </dev/null || culprit_rc=$?
+		python3 -B scripts/verdict-culprit.py --repo "$ROOT" --commit "$sha" "$@") >"$culprit_out" </dev/null || culprit_rc=$?
 	if grep -q '^CULPRIT ' "$culprit_out"; then
 		grep -E '^(CULPRIT |PROPOSE: )' "$culprit_out" | sed 's/^/release-verdict: /'
 	else
@@ -176,6 +178,7 @@ while :; do
 		ci_pid=''
 		cat "$WORK/ci-only.$sha.out"
 		printf 'release-verdict: %s ci_only_rc=%s\n' "$sha" "$ci_rc"
+		[ "$ci_rc" = 0 ] || culprit_step --ci-only || :
 		[ "$rc" != 0 ] || rc=$ci_rc
 	fi
 	rm -rf "$tree" "$ci_tree"
