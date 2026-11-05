@@ -464,11 +464,26 @@ EOF
 	[ "$manifest_found" = 1 ]
 }
 
+# emit_heredoc: copy stdin to stdout with shell builtins only. --check runs under a
+# restricted PATH (no cat/sed/grep), so the generators and their readers never exec a tool.
+emit_heredoc() {
+	while IFS= read -r emit_line; do printf '%s\n' "$emit_line"; done
+}
+
+# has_line_with <file> <literal>: some line of <file> contains <literal> (builtins only).
+has_line_with() {
+	[ -f "$1" ] || return 1
+	while IFS= read -r has_line || [ -n "$has_line" ]; do
+		case "$has_line" in *"$2"*) return 0 ;; esac
+	done < "$1"
+	return 1
+}
+
 # runner_body: the chain runner's exact bytes. Hook types fed on stdin (pre-push,
 # reference-transaction) replay one buffered copy to every member, so a
 # member that reads stdin cannot starve the ones after it.
 runner_body() {
-	cat <<'EOF'
+	emit_heredoc <<'EOF'
 #!/bin/sh
 # chain runner: run every executable NN-<name> member in hooks.d/<type> in
 # sort order. Only numeric-prefixed entries run: helper libraries shipped
@@ -558,14 +573,22 @@ EOF
 
 # The runner generation is read from runner_body itself, so installer upgrades and
 # --check judge staleness by one source; bump the marker in runner_body with every change.
-RUNNER_GENERATION=$(runner_body | sed -n 's/^# \(GATEEVENTS1 runner v[0-9][0-9]*\):.*/\1/p')
+runner_generation() {
+	while IFS= read -r gen_line; do
+		case "$gen_line" in
+			'# GATEEVENTS1 runner v'[0-9]*:*) gen_line=${gen_line#'# '}; printf '%s\n' "${gen_line%%:*}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+RUNNER_GENERATION=$(runner_body | runner_generation) || RUNNER_GENERATION=''
 [ -n "$RUNNER_GENERATION" ] || { echo 'install-commit-msg-bead: runner_body carries no GATEEVENTS1 generation marker' >&2; exit 2; }
 
 # runner_stale <path>: a kit chain runner (bespoke runners are never judged) that
 # lacks stdin replay or the current generation marker. Install and --check share it.
 runner_stale() {
-	grep -q 'chain runner: run every executable' "$1" 2>/dev/null &&
-		{ ! grep -q 'replay one buffered copy' "$1" || ! grep -qF "$RUNNER_GENERATION" "$1"; }
+	has_line_with "$1" 'chain runner: run every executable' &&
+		{ ! has_line_with "$1" 'replay one buffered copy' || ! has_line_with "$1" "$RUNNER_GENERATION:"; }
 }
 
 # write_runner <path>: install runner_body as the chain runner.
@@ -667,7 +690,7 @@ install_pre_push() {
 
 # pushed_beads_wrapper: the generated pre-push member; install writes it and --check compares it.
 pushed_beads_wrapper() {
-	cat <<'EOF'
+	emit_heredoc <<'EOF'
 #!/bin/sh
 # pre-push member: refuse pushed ranges with id-less commits.
 set -u
