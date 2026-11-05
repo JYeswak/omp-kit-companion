@@ -141,11 +141,16 @@ if (!Number.isFinite(plantedSpawnSleepS) || plantedSpawnSleepS < 0)
 // Explicit per-test caps remain unchanged.
 export const LAND_DEFAULT_TIMEOUT_MS = Math.round(fixtureDeadlineS(Math.max(5, LAND_COMMAND_DEADLINE_MS / 1000)) * 1000);
 
+// DEADLINETESTS1: fixture git ops measure p95 0.73 s (commit, n=30, load1 12-13), yet five full-suite
+// verdicts since 2026-11-02 hit the old 10 s floor in `git commit` at load1 8.9-14.9. The floor is 20 s:
+// still under the 30 s land command floor and the case default, so a hung git reports its own deadline.
+const GIT_FIXTURE_FLOOR_S = 20;
+
 export function git(cwd: string, args: string[], planted = false): string {
 	const gitArgv = ["git", "-c", "user.name=LAND1 test", "-c", "user.email=land1@example.invalid", ...args];
 	const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] ??= value;
-	const run = runFixture(gitArgv, { cwd, env, label: `git ${args[0]}`,
+	const run = runFixture(gitArgv, { cwd, env, label: `git ${args[0]}`, floor_s: GIT_FIXTURE_FLOOR_S,
 		planted_sleep_s: planted ? plantedSpawnSleepS : 0 });
 	const decode = new TextDecoder();
 	if (run.rc !== 0) throw new Error(`git ${args.join(" ")} failed (${run.rc}): ${decode.decode(run.stderr)}`);

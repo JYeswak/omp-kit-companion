@@ -227,7 +227,8 @@ test("LESSONPAYLOAD1 newest author lesson reaches the real close-policy consumer
 	});
 	expect(new TextDecoder().decode(guarded.stderr)).toBe("");
 	expect(guarded.rc).toBe(0);
-});
+// DEADLINETESTS1: 3x its observed load-normalized p95 (8.3 s, n=28 full-suite runs at load1 >= 18).
+}, fixtureDeadlineS(25) * 1_000);
 
 test("LESSONPAYLOAD1 CLI explicit lesson takes precedence over author comments", async () => {
 	const { dir, sha } = await repo("lesson-cli");

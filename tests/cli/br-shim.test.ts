@@ -22,8 +22,10 @@ const root = resolve(import.meta.dir, "../..");
 const shimSource = readFileSync(join(root, "scripts/br-shim.sh"), "utf8");
 const decoder = new TextDecoder();
 // Admission tests are not latency benchmarks. Each case owns at most two load-scaled
-// 15s subprocess fixtures plus bounded reap and cleanup; the file gate is unchanged.
-const CASE_BUDGET_MS = fixtureDeadlineS(40) * 1_000;
+// 25s subprocess fixtures plus bounded reap and cleanup; the file gate is unchanged.
+// DEADLINETESTS1: a CUTCLAIM1 case's load-normalized p95 is 8.1 s (n=79 full-suite runs at
+// load1 >= 18), so one claim gets 3x that whole-case p95, and a case two claims plus setup.
+const CASE_BUDGET_MS = fixtureDeadlineS(60) * 1_000;
 const claimPrograms = ownedTmp("cutclaim-programs");
 
 // Share immutable executable bytes, never scenario data or tracker mutations.
@@ -229,7 +231,7 @@ process.exitCode = doc.ok ? 0 : 1;
 		const env = { ...process.env };
 		delete env.OMP_KIT_FLEET_WATCH_CONFIG;
 		const result = await run(["/bin/sh", shim, ...(options.explicitDb ? ["--db", db] : []), "update", id, ...(options.extraIds ?? []), "--claim", ...(options.claimArgs ?? [])], {
-			cwd: decoy, deadline_s: fixtureDeadlineS(15),
+			cwd: decoy, deadline_s: fixtureDeadlineS(25),
 			env: { ...env, HOME: home, PATH: bin, AGENT_NAME: "CutClaimShellFixture",
 				XDG_CONFIG_HOME: join(home, ".config"), XDG_STATE_HOME: join(home, ".local/state"),
 				...(options.config === "default-missing" ? {} : { OMP_KIT_FLEET_WATCH_CONFIG: config }), BR_REAL: realBr,
