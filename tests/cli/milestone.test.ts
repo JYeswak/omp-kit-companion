@@ -112,3 +112,44 @@ test("show limits returned history without truncating persisted pinLog", async (
 	expect(result.data.pinLog).toEqual(doc.sessions[0].milestone.pinLog.slice(-10));
 	expect(f.read().sessions[0].milestone.pinLog).toHaveLength(15);
 });
+
+const future = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+test("MSDATE1 planted: a past-due milestone takes a future date with one audit row through the atomic writer", async () => {
+	const f = fixture();
+	const planted = f.read();
+	planted.sessions[0].milestone.due = "2026-11-05T00:00Z";
+	writeFileSync(f.config, JSON.stringify(planted) + "\n");
+	const before = f.read().sessions[0].milestone;
+	expect(before.due < new Date().toISOString()).toBe(true);
+	const due = `${future(7)}T12:00Z`;
+	const result = await runMilestone(request("date", `demo ${due}`, [["--reason", "director replan"], ["--by", "RusticPine"]]), f.env);
+	expect(result.code).toBe(0);
+	const after = f.read();
+	expect(after.untouched).toEqual({ operator: true });
+	expect(after.sessions[0].milestone.due).toBe(due);
+	expect(after.sessions[0].milestone.pinLog).toHaveLength(1);
+	expect(after.sessions[0].milestone.pinLog[0]).toMatchObject({ by: "RusticPine", due: { from: before.due, to: due }, why: "director replan" });
+	const shown = await runMilestone(request("show", "demo", []), f.env);
+	expect((shown.data as { due: string }).due).toBe(due);
+});
+
+test("MSDATE1 control: a past date refuses PAST_DUE and a malformed date refuses usage, without mutation", async () => {
+	const f = fixture(), before = readFileSync(f.config);
+	const past = await runMilestone(request("date", `demo ${future(-1)}`), f.env);
+	expect(past.code).not.toBe(0);
+	expect(past.errors?.[0]?.code).toBe("PAST_DUE");
+	const bogus = await runMilestone(request("date", "demo 2026-02-30"), f.env);
+	expect(bogus.errors?.[0]?.code).toBe("MILESTONE_USAGE");
+	const unreasoned = await runMilestone(request("date", `demo ${future(3)}`, []), f.env);
+	expect(unreasoned.errors?.[0]?.code).toBe("MILESTONE_REASON_REQUIRED");
+	expect(readFileSync(f.config)).toEqual(before);
+});
+
+test("MSDATE1 mutant: an unknown subcommand leaves due unchanged", async () => {
+	const f = fixture(), before = readFileSync(f.config);
+	const date = request("date", `demo ${future(7)}`);
+	const result = await runMilestone({ ...date, command: { ...date.command, name: "redate" } }, f.env);
+	expect(result.errors?.[0]?.code).toBe("MILESTONE_USAGE");
+	expect(readFileSync(f.config)).toEqual(before);
+	expect(f.read().sessions[0].milestone.due).toBe("2026-11-05");
+});

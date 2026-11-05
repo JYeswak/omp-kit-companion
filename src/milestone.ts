@@ -13,17 +13,30 @@ const dataSchema: DataSchema = { type: "object", required: ["overall", "session"
 	pinned: { type: "array", items: { type: "string" } }, pinLog: { type: "array", items: { type: "object" } },
 	due: { type: ["string", "null"] }, declaredAt: { type: ["string", "null"] },
 } };
+const auditFlags = [{ name: "--reason", value: "TEXT", description: "Required reason recorded in milestone.pinLog" }, { name: "--by", value: "NAME", description: "Audit actor (default AGENT_NAME, then operating-system user)" }];
 export const MILESTONE_COMMAND: Command = {
-	name: "milestone", description: "Inspect a session's milestone cut or change its validated pins with an audit trail", usage: "milestone pin|unpin|show SESSION [BEAD...]", flags: [], example: "omp-kit milestone show omp-test --json", runnable: true,
+	name: "milestone", description: "Inspect a session's milestone cut, change its validated pins or set its due date with an audit trail", usage: "milestone pin|unpin|date|show SESSION [BEAD...|DATE]", flags: [], example: "omp-kit milestone show omp-test --json", runnable: true,
 	subcommands: ["pin", "unpin", "show"].map(action => ({
 		name: action, description: action === "show" ? "Read the declared milestone and recent pin history; validate every pinned id in its tracker" : `${action === "pin" ? "Add" : "Remove"} tracker-validated bead pins atomically; append actor, time and reason`,
 		usage: `milestone ${action} SESSION${action === "show" ? "" : " BEAD... --reason TEXT [--by NAME]"}`,
 		argument: action === "show" ? "SESSION" : "SESSION BEAD...", maxArguments: action === "show" ? 1 : 129,
-		flags: action === "show" ? [] : [{ name: "--reason", value: "TEXT", description: "Required reason recorded in milestone.pinLog" }, { name: "--by", value: "NAME", description: "Audit actor (default AGENT_NAME, then operating-system user)" }],
+		flags: action === "show" ? [] : auditFlags,
 		example: action === "show" ? "omp-kit milestone show SESSION --json" : `omp-kit milestone ${action} SESSION BEAD --reason 'Director replan' --json`,
 		runnable: true, mutation: action !== "show", dataSchema,
-	})),
+	} as Command)).concat([{
+		name: "date", description: "Set milestone.due (today or later, UTC) atomically; append actor, time, old/new due and reason to pinLog",
+		usage: "milestone date SESSION YYYY-MM-DD[THH:MMZ] --reason TEXT [--by NAME]", argument: "SESSION DATE", maxArguments: 2, flags: auditFlags,
+		example: "omp-kit milestone date SESSION 2026-11-12 --reason 'Director replan' --json", runnable: true, mutation: true, dataSchema,
+	} as Command]),
 };
+const DUE = /^(\d{4}-\d{2}-\d{2})(T([01]\d|2[0-3]):[0-5]\dZ)?$/;
+/** Returns the UTC day of a valid due string, or undefined when malformed or not a real calendar date. */
+function dueDay(value: string): string | undefined {
+	const match = DUE.exec(value);
+	if (!match) return undefined;
+	const parsed = new Date(match[2] ? value.replace("Z", ":00Z") : `${value}T00:00:00Z`);
+	return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== match[1] ? undefined : match[1];
+}
 
 type Row = Record<string, unknown>;
 const record = (value: unknown): value is Row => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -45,10 +58,16 @@ function trackerEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
 export async function runMilestone(request: ParsedCommand, env: NodeJS.ProcessEnv = process.env): Promise<CliResult> {
 	const action = request.command.name;
 	const [session, ...wanted] = (request.argument ?? "").split(/\s+/).filter(Boolean);
-	if (!session || !["pin", "unpin", "show"].includes(action) || (action === "show" ? wanted.length !== 0 : wanted.length === 0 || wanted.length > 128) || !ids(wanted))
-		return refuse("MILESTONE_USAGE", "Expected milestone pin|unpin|show SESSION [BEAD...]; bead ids cannot be options.");
+	if (!session || !["pin", "unpin", "date", "show"].includes(action) || (action === "show" ? wanted.length !== 0 : action === "date" ? wanted.length !== 1 : wanted.length === 0 || wanted.length > 128 || !ids(wanted)))
+		return refuse("MILESTONE_USAGE", "Expected milestone pin|unpin|show SESSION [BEAD...] or milestone date SESSION YYYY-MM-DD[THH:MMZ]; bead ids cannot be options.");
 	const why = request.flags.get("--reason");
-	if (action !== "show" && !text(why)) return refuse("MILESTONE_REASON_REQUIRED", "pin/unpin need a nonempty --reason TEXT.");
+	if (action !== "show" && !text(why)) return refuse("MILESTONE_REASON_REQUIRED", "pin/unpin/date need a nonempty --reason TEXT.");
+	const due = action === "date" ? wanted[0] : undefined;
+	if (due !== undefined) {
+		const day = dueDay(due);
+		if (!day) return refuse("MILESTONE_USAGE", `Due date ${due} must be a real YYYY-MM-DD or YYYY-MM-DDTHH:MMZ.`);
+		if (day < new Date().toISOString().slice(0, 10)) return refuse("PAST_DUE", `Due date ${due} is before today (UTC); a milestone must be dated today or later.`);
+	}
 	const explicitActor = request.flags.get("--by");
 	if (explicitActor !== undefined && !text(explicitActor)) return refuse("MILESTONE_USAGE", "--by needs a nonempty actor.");
 	let lock: PrivateLock | undefined;
@@ -80,7 +99,7 @@ export async function runMilestone(request: ParsedCommand, env: NodeJS.ProcessEn
 		const pinLog = Array.isArray(milestone.pinLog) ? milestone.pinLog : [];
 		const childEnv = trackerEnvironment(env);
 		childEnv.BEADS_DB = join(row.repo, ".beads", "beads.db");
-		const unique = [...new Set(action === "show" ? pinned : wanted)];
+		const unique = [...new Set(action === "show" ? pinned : action === "date" ? [] : wanted)];
 		if (unique.length > 0) {
 			const shown = await run(["br", "--no-auto-import", "--no-auto-flush", "--db", join(row.repo, ".beads", "beads.db"), "show", ...unique, "--json"], { cwd: row.repo, env: childEnv, deadline_s: 30, max_output_bytes: 16 * 1024 * 1024 });
 			if (shown.rc !== 0 || shown.timed_out || shown.truncated) throw new MilestoneError("MILESTONE_BEAD_UNKNOWN", `Tracker refused pin ids in ${row.repo}: ${Buffer.from(shown.stderr).toString("utf8").slice(0, 1000)}`);
@@ -91,14 +110,20 @@ export async function runMilestone(request: ParsedCommand, env: NodeJS.ProcessEn
 		}
 		const dates = { due: typeof milestone.due === "string" ? milestone.due : null, declaredAt: typeof milestone.declaredAt === "string" ? milestone.declaredAt : null };
 		if (action === "show") return { code: 0, data: { overall: "OK", session, repo: row.repo, epic: milestone.epic, ...dates, pinned, pinLog: pinLog.slice(-10) }, verification: "NOT_RUN" };
-		const selected = new Set(unique), existing = new Set(pinned);
-		const delta = action === "pin" ? unique.filter(id => !existing.has(id)) : pinned.filter(id => selected.has(id));
-		milestone.pinned = action === "pin" ? [...pinned, ...delta] : pinned.filter(id => !selected.has(id));
 		const actor = [explicitActor, env.AGENT_NAME, env.USER].find(text) ?? userInfo().username;
-		milestone.pinLog = [...pinLog, { at: new Date().toISOString(), by: actor,
-			[action === "pin" ? "added" : "removed"]: delta, why }];
+		if (due !== undefined) {
+			milestone.due = due;
+			milestone.pinLog = [...pinLog, { at: new Date().toISOString(), by: actor, due: { from: dates.due, to: due }, why }];
+			dates.due = due;
+		} else {
+			const selected = new Set(unique), existing = new Set(pinned);
+			const delta = action === "pin" ? unique.filter(id => !existing.has(id)) : pinned.filter(id => selected.has(id));
+			milestone.pinned = action === "pin" ? [...pinned, ...delta] : pinned.filter(id => !selected.has(id));
+			milestone.pinLog = [...pinLog, { at: new Date().toISOString(), by: actor,
+				[action === "pin" ? "added" : "removed"]: delta, why }];
+		}
 		atomicReplaceBytes(configPath, Buffer.from(JSON.stringify(config, null, 2) + "\n"), { mode: stat.mode & 0o755, durability: "full" });
-		return { code: 0, data: { overall: "OK", session, repo: row.repo, epic: milestone.epic, ...dates, pinned: milestone.pinned, pinLog: milestone.pinLog.slice(-10) }, verification: "NOT_RUN" };
+		return { code: 0, data: { overall: "OK", session, repo: row.repo, epic: milestone.epic, ...dates, pinned: ids(milestone.pinned) ? milestone.pinned : pinned, pinLog: (milestone.pinLog as unknown[]).slice(-10) }, verification: "NOT_RUN" };
 	} catch (error) {
 		if (error instanceof AtomicReplaceError && error.published) return { code: 3, data: { overall: "UNVERIFIED", published: true }, errors: [{ code: "MILESTONE_DURABILITY_UNKNOWN", message: error.message, remediation: "The new config is visible, but directory durability failed. Read milestone show before retrying." }], verification: "UNVERIFIED" };
 		return refuse(error instanceof MilestoneError ? error.code : "MILESTONE_UNAVAILABLE", error instanceof Error ? error.message : String(error), error instanceof MilestoneError ? 2 : 3);
