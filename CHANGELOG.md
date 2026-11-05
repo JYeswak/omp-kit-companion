@@ -4,6 +4,24 @@
 
 <!-- New notes go in changelog.d/<bead>.md (optional first line `### Added|Changed|Fixed|Removed|Breaking Changes`); the release train folds them here. -->
 
+## [0.2.91] - 2026-11-05
+
+### Added
+
+- New `close-pass` service job (every 300 s, not at load) runs the unattended close pass from the fleet-watch.json `closePass` `{argv, cwd}`, never a kit path. Without the key, `omp-kit service install close-pass` refuses `CLOSE_PASS_UNCONFIGURED`, naming the key and the config path; `--plan` shows the configured argv and cwd. Each tick runs `omp-kit service run close-pass`, which holds the job's run lock for the whole pass. A tick that finds a pass still running starts no second pass, leaves the running one alone, and logs `close-pass SKIPPED-OVERLAP holder_pid=<pid>`, so a bead is never closed or commented twice.
+
+### Changed
+
+- The goal keepalive wake and the kit-flywheel-guard wait refusals (`NO_WAIT_REFUSED`, `WAIT_REFUSED`) now share one text (`constraintGuidance` in `extensions/kit-goal-keepalive.ts`). It leads with the seat's `CONSTRAINT` line read from fleet-watch: name, value/budget, clearing bead and its holder, or `CONSTRAINT none declarer=<lead>`, `INVALID` or `UNKNOWN`, and never an invented one. The next sentence lets a seat off the constraint with no pinned work send one NO-WORK line and end the turn. J-2026-10-29-18's "never idles" and "comment on the nearest bead" sentences follow. The never-wait downtime list, reality-check and "as a bead" are gone from every one of these texts, and from `GOAL_END_REFUSED`. In a refusal the constraint line is line 1 and the `kit-flywheel-guard <CODE>:` header is line 2. `gateFromReason` (`extensions/gate-events.ts`) now finds the header in the first three lines, so the gate-events ledger still records `WAIT_REFUSED`/`NO_WAIT_REFUSED`, not `CONSTRAINT`. (ompkit-774u.50.1)
+- br-update-lint: an in_review `DONE <repo>@<sha>` handoff now accepts a fresh-gate GREEN recorded for the commit gate's candidate when `git cat-file -p` of the candidate and the landed commit are identical except for the committer's `<epoch> <tz>` (tree, parents, author line, committer name/email, signatures and message must match byte for byte). Version 2, rc 0 and complete evidence are still required; unresolvable rows and rows that differ in parent, tree, message or author/committer identity are refused. (ompkit-fp72.120.16.237)
+- readme-check test: the load-bearing version-mutant case now plants into a README whose release line equals package.json, and checks that the real gate on the same file reports exactly the one version finding. The full suite's exported tree (`git init`, no tags) had judged the live README's published-release line as a missing tag and failed the case for a rule it never mutated. README size played no part. (ompkit-fp72.120.16.239)
+
+### Fixed
+
+- `release-notes.sh catch-up` now treats an entry as released only when an older section holds its exact text, every line included. Before, it compared only an entry's first line, so a fragment whose continuation line was rewritten after its cut (fp72.120.16.214) was listed for deletion, its new text was in no section, and the 0.2.90 notes check refused the commit. Such a fragment is now kept for the next release. (ompkit-fp72.120.16.231)
+- The next-version advance in `scripts/release-local.sh` now promotes the released section from the fragments' bytes at the tagged source, not main's later copies. A fragment changed after the cut keeps its category line and only the entries the shipped copy lacks (whole entries compared exactly, every line included), so those notes ship in the next release; only fragments unchanged since the cut are deleted. The new `release-notes.sh residual --released FILE --current FILE` prints that remainder. (ompkit-fp72.120.16.235)
+- The next-version advance no longer writes a literal commit sha into `package.json`'s `source_revision`. It read package.json through `git archive`, which applies `.gitattributes` export-subst and expands `$Format:%H$`; the manual 0.2.91 advance committed one and turned main red. It now reads package.json, README.md, CHANGELOG.md and the fragments as raw blobs, so the placeholder stays. (ompkit-fp72.120.16.235)
+
 ## [0.2.90] - 2026-11-04
 
 ### Changed
