@@ -26,6 +26,10 @@ ROLES = ("base", "main")
 # 8 MiB keeps a bound with headroom for several times the current suite.
 MAX_RECORD_BYTES = 8 << 20
 MAX_COMMAND_OUTPUT = 16 << 20
+# MINRUNANCESTOR1: 67 successful release verdict commits had a largest consecutive
+# gap of 50 commits on 2026-11-05. 1024 bounds the walk with >20x that observed gap.
+MINIMUM_ANCESTOR_LIMIT = 1024
+MINIMUM_BASELINE_RULE = "ancestor-tree-v1"
 
 # CULPRIT1 (ompkit-6xxhu): the one optional key scripts/verdict-culprit.py adds to a FAIL record.
 CULPRIT_KEYS = frozenset(("sha", "author", "bead", "failing_files", "method", "reason"))
@@ -438,6 +442,15 @@ def validate_minimum_report(report: object, files: list[dict], wall_ms: object,
                 or any(not isinstance(n, int) or isinstance(n, bool) or n < 0 for n in old_counts.values())
                 or not isinstance(old_wall, int) or isinstance(old_wall, bool) or old_wall < 0):
             raise ValueError("minimum-run baseline measurements are invalid")
+    # Optional on historical version-1 reports; new reports name the no-reference
+    # first-run behavior rather than falling back to an unrelated candidate PASS.
+    if "baseline_rule" in report or "reference_status" in report:
+        status = report.get("reference_status")
+        if (report.get("baseline_rule") != MINIMUM_BASELINE_RULE
+                or report.get("ancestor_limit") != MINIMUM_ANCESTOR_LIMIT
+                or status not in ("ancestor-pass", "no-commit", "no-ancestor-pass")
+                or (baseline is not None) != (status == "ancestor-pass")):
+            raise ValueError("minimum-run baseline selection is invalid")
     expected = minimum_shortfalls(counts, wall_ms, policy, baseline)
     if (report.get("counts") != counts or report.get("wall_ms") != wall_ms
             or report.get("shortfalls") != expected
@@ -562,8 +575,17 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
         return None, str(error)
 
 
-def last_green(directory: Path, judge_root: Path, role: str, runtime: str) -> dict | None:
-    """Newest validated complete PASS in this repository/role/platform, across judge revisions."""
+def last_green(directory: Path, judge_root: Path, role: str, runtime: str, *,
+               repo: Path, commit: str | None) -> dict | None:
+    """Newest validated PASS whose tree is in the judged commit's bounded ancestry."""
+    if commit is None:
+        return None
+    # Resolve a commit first: an invalid supplied ref is an error, not a first run.
+    resolved = checked_run(["git", "-C", str(repo), "rev-parse", "--verify",
+                            "--end-of-options", commit + "^{commit}"]).decode().strip()
+    trees = set(checked_run(["git", "-C", str(repo), "rev-list",
+                             f"--max-count={MINIMUM_ANCESTOR_LIMIT}",
+                             "--format=%T", "--no-commit-header", resolved, "--"]).decode().splitlines())
     candidates = []
     for path in directory.glob("*.json"):
         try:
@@ -571,7 +593,8 @@ def last_green(directory: Path, judge_root: Path, role: str, runtime: str) -> di
             timing = raw.get("timing", {})
             wall = timing.get("wall_ms")
             started = timing.get("started_ms")
-            if (raw.get("verdict") != "PASS" or raw.get("judge_role") != role
+            if (raw.get("tree") not in trees
+                    or raw.get("verdict") != "PASS" or raw.get("judge_role") != role
                     or runtime_platform(raw.get("runtime", "")) != runtime_platform(runtime)
                     or not isinstance(wall, int) or isinstance(wall, bool) or wall < 0
                     or not isinstance(started, int) or isinstance(started, bool) or started < 0):
@@ -594,7 +617,8 @@ def last_green(directory: Path, judge_root: Path, role: str, runtime: str) -> di
 
 
 def assess_minimum_run(judge_root: Path, suite_root: Path, directory: Path,
-                       role: str, runtime: str, files_path: Path, wall_ms: int) -> dict:
+                       role: str, runtime: str, files_path: Path, wall_ms: int, *,
+                       repo: Path, commit: str | None) -> dict:
     if wall_ms < 0:
         raise ValueError("minimum-run wall time is negative")
     files = json_value(files_path)
@@ -606,9 +630,12 @@ def assess_minimum_run(judge_root: Path, suite_root: Path, directory: Path,
     wall_ms = measured_wall(files, wall_ms)
     policy = load_minimum_policy(suite_root)
     counts = measured_counts(files)
-    baseline = last_green(directory, judge_root, role, runtime)
+    baseline = last_green(directory, judge_root, role, runtime, repo=repo, commit=commit)
     shortfalls = minimum_shortfalls(counts, wall_ms, policy, baseline)
     return {"version": 1, "status": "FAIL" if shortfalls else "PASS", "policy": policy,
+            "baseline_rule": MINIMUM_BASELINE_RULE, "ancestor_limit": MINIMUM_ANCESTOR_LIMIT,
+            "reference_status": ("ancestor-pass" if baseline is not None else
+                                 "no-commit" if commit is None else "no-ancestor-pass"),
             "baseline": baseline, "counts": counts, "wall_ms": wall_ms, "shortfalls": shortfalls}
 
 
@@ -1028,6 +1055,7 @@ def main() -> int:
     minimum_cmd.add_argument("--suite-root", required=True)
     minimum_cmd.add_argument("--files", required=True)
     minimum_cmd.add_argument("--wall-ms", type=int, required=True)
+    minimum_cmd.add_argument("--commit")
     failing_cmd = actions.add_parser("failing-tests")
     failing_cmd.add_argument("--log", required=True)
     args = parser.parse_args()
@@ -1062,7 +1090,8 @@ def main() -> int:
             return 0
         if args.action == "minimum-run":
             report = assess_minimum_run(judge_root, Path(args.suite_root).resolve(), directory,
-                                        args.role, args.runtime, Path(args.files), args.wall_ms)
+                                        args.role, args.runtime, Path(args.files), args.wall_ms,
+                                        repo=repo, commit=args.commit)
             print(json.dumps(report, sort_keys=True, separators=(",", ":")))
             return 0
         if args.action == "lookup":

@@ -823,7 +823,7 @@ minimum_run_assessment() (
 	esac
 	cd -- "$SCRIPT_DIR" || exit 1
 	python3 ./full-suite-verdict-store.py minimum-run \
-		--repo "$ROOT" --cache-dir "$CACHE_DIR" --role "$JUDGE_ROLE" --runtime "$runtime" \
+		--repo "$ROOT" --commit "$COMMIT" --cache-dir "$CACHE_DIR" --role "$JUDGE_ROLE" --runtime "$runtime" \
 		--judge-root "$SCRIPT_DIR/.." --suite-root "$minimum_archive" --files "$METRICS_ROWS" \
 		--wall-ms "$((run_finished_ms - run_started_ms))"
 )

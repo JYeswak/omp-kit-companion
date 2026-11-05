@@ -1443,11 +1443,47 @@ assert d["evidence"]["bun_ran"] == 2
 assert d["evidence"]["shell_suites"] == 2
 assert d["evidence"]["py_suites"] == 2
 assert d["timing"]["wall_ms"] > 0
+assert d["minimum_run"]["baseline"] is None
+assert d["minimum_run"]["reference_status"] == "no-ancestor-pass"
 PY
 }
 if [ "$rc" = "0" ] && minrun_assert_reference; then
 	ok "MINRUN1 full native reference records ran counts and wall time"
 else not_ok "MINRUN1 full native reference did not pass (rc=$rc)"; cat "$out"; fi
+minrun_no_commit_control() {
+python3 - "$judge_dir" "$repo" "$cache" "$entry" "$runtime" <<'PY'
+import importlib.util, json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+spec = importlib.util.spec_from_file_location("minrun_store", Path(sys.argv[1]) / "full-suite-verdict-store.py")
+store = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(store)
+path = Path(sys.argv[4])
+d = json.loads(path.read_text())
+files = d["evidence"]["files"]
+rows = path.parent / "no-commit-files"
+rows.write_text(json.dumps(files))
+try:
+    report = store.assess_minimum_run(Path(sys.argv[1]).parent, Path(sys.argv[2]),
+                                     Path(sys.argv[3]), "base", sys.argv[5], rows,
+                                     d["timing"]["wall_ms"], repo=Path(sys.argv[2]), commit=None)
+    assert report["status"] == "PASS"
+    assert report["baseline"] is None
+    assert report["reference_status"] == "no-commit"
+    assert store.validate_minimum_report(report, files, d["timing"]["wall_ms"], "base", sys.argv[5]) == []
+finally:
+    rows.unlink()
+# Keep the original version-1 schema as a historical reference for the later
+# ancestor and skipped-suite controls; optional selection metadata did not exist.
+for key in ("baseline_rule", "ancestor_limit", "reference_status"):
+    del d["minimum_run"][key]
+assert store.validate_minimum_report(d["minimum_run"], files, d["timing"]["wall_ms"], "base", sys.argv[5]) == []
+path.write_text(json.dumps(d))
+PY
+}
+if minrun_no_commit_control; then
+	ok "MINRUNANCESTOR1 no commit explicitly has no reference and historical version-1 reports validate"
+else not_ok "MINRUNANCESTOR1 no-commit or historical-report control failed"; fi
 
 printf '\n# A genuinely different measured producer for the historical reference drill.\n' >> "$minrun_judge/scripts/suite-metrics.py"
 VERDICT=$minrun_original_verdict
@@ -1455,6 +1491,39 @@ VERDICT=$minrun_original_verdict
 
 minimum_run_cases() {
 VERDICT="$minrun_judge/scripts/full-suite-verdict.sh"
+# MINRUNANCESTOR1: a newer sibling's genuinely measured, larger PASS must
+# never supply main's reference. Keep both branches and all stored records.
+minrun_main_branch=$(git -C "$repo" symbolic-ref --short HEAD)
+git -C "$repo" switch -qc minrun-sibling
+addfile tests/cli/c.test.ts 'import {test,expect} from "bun:test"; test("sibling arithmetic case",()=>expect(4*4).toBe(16));'
+# shellcheck disable=SC2016 # the fixture body is literal shell, expanded by the suite
+addfile tests/cli/c.test.sh 'test "$((4 * 4))" -eq 16'
+addfile tests/cli/c_test.py 'assert 4 * 4 == 16'
+minrun_commit "MINRUNANCESTOR1 larger sibling"
+run_verdict minrun-sibling
+minrun_sibling_tree=$tree_hash
+if [ "$rc" = 0 ]; then ok "MINRUNANCESTOR1 larger sibling stores a real PASS"
+else not_ok "MINRUNANCESTOR1 sibling reference failed (rc=$rc)"; cat "$out"; fi
+git -C "$repo" switch -q "$minrun_main_branch"
+addfile main-marker.txt 'The main run must ignore the newer larger sibling.'
+minrun_commit "MINRUNANCESTOR1 main after sibling verdict"
+run_verdict minrun-main
+minrun_assert_ancestor() {
+python3 - "$entry" "$minrun_reference_tree" "$minrun_sibling_tree" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+m = d["minimum_run"]
+assert d["verdict"] == "PASS"
+assert m["baseline"]["tree"] == sys.argv[2] != sys.argv[3]
+assert m["reference_status"] == "ancestor-pass"
+assert m["baseline_rule"] == "ancestor-tree-v1"
+assert m["counts"] == {"bun": 2, "shell": 2, "python": 2}
+PY
+}
+if [ "$rc" = 0 ] && minrun_assert_ancestor; then
+	ok "MINRUNANCESTOR1 main ignores the newest larger sibling PASS for its real ancestor"
+else not_ok "MINRUNANCESTOR1 sibling poisoned main's minimum-run baseline (rc=$rc)"; cat "$out"; fi
+minrun_reference_tree=$tree_hash
 git -C "$repo" rm -q tests/cli/b.test.ts tests/cli/b.test.sh tests/cli/b_test.py
 minrun_commit "MINRUN1 planted skipped suites"
 run_verdict minrun-skipped
