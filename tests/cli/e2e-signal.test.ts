@@ -5,6 +5,7 @@ import process from "node:process";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 import { run } from "../../src/kitlib/run";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+import { resolveOmpIdentity } from "../../src/paths.ts";
 
 // Integration test: exercises real SIGTERM delivery and child reaping against
 // the platform clock. Fake timers cannot work: the waits synchronize with a
@@ -259,5 +260,70 @@ test("LIVEEVAL1: a failing scenario's transcript is copied into OMP_KIT_E2E_EVID
 		expect(readdirSync(runDir!).sort()).toEqual(["log-canary-near.jsonl", "mock-canary-near.txt", "out-canary-near.txt"]);
 	} finally { fixture.cleanup(); }
 }, fixtureDeadlineS(180) * 1000);
+
+const realPython3 = Bun.which("python3", { PATH: process.env.PATH ?? "" });
+test.skipIf(!realPython3)("LIVEEVAL1: a python3 that stalls past OMP's probe budget still leaves the eval tool a pinned working interpreter", async () => {
+	// Planted: a `python` and `python3` that stall 12 s before starting (OMP probes every PATH python under one 10 s
+	// budget; a cold macOS xcrun shim took up to 9.9 s) sit first on PATH. e2e-live must still pin the interpreter
+	// python3 launches as python.interpreter in the isolated config, and real OMP's own Python availability check
+	// (`omp setup python --json`, the probe eval uses) must accept it. Mutant: the same config without that pin fails
+	// the check, which is eval's "Python backend is unavailable". Control: with a fast python3 the pin is that
+	// interpreter and the unpinned check still passes. No model is called: a stub OMP ends each scenario at once, and
+	// plant mode skips packaging a kit candidate; only the base isolated HOME is read.
+	const fixture = ownedTmp("e2e-python-pin");
+	try {
+		const omp = resolveOmpIdentity(process.env).launcher;
+		const stub = join(fixture.path, "stub-omp.sh");
+		writeFileSync(stub, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "stub-omp 0.0.0"; fi\nexit 0\n');
+		chmodSync(stub, 0o755);
+		const slow = join(fixture.path, "slow-bin");
+		mkdirSync(slow);
+		for (const name of ["python", "python3"]) {
+			writeFileSync(join(slow, name), `#!/bin/sh\nsleep 12\nexec ${JSON.stringify(realPython3)} "$@"\n`);
+			chmodSync(join(slow, name), 0o755);
+		}
+		const harness = async (path: string) => {
+			const env = Object.fromEntries(Object.entries({ ...process.env, OMP: stub, PATH: path, TIMEOUT: "60",
+				OMP_KIT_TEST_WORK_ROOT: fixture.path, OMP_KIT_CASE_CWD: REPO_ROOT,
+			}).filter((entry): entry is [string, string] => entry[1] !== undefined));
+			const result = await run(["sh", "scripts/e2e-live.sh", "--plant"], { cwd: REPO_ROOT, env, deadline_s: fixtureDeadlineS(120) });
+			const stdout = Buffer.from(result.stdout).toString(), stderr = Buffer.from(result.stderr).toString();
+			const kept = /kept private e2e output: (\S+) \(work root (\S+)\)/.exec(stdout);
+			expect(kept, stdout + stderr).not.toBeNull();
+			const pin = /^python: (\S+) \(python\.interpreter\)$/m.exec(stdout)?.[1];
+			expect(pin, stdout + stderr).toBeDefined();
+			const config = readFileSync(join(kept![1]!, "home", ".omp", "agent", "config.yml"), "utf8");
+			rmSync(kept![2]!, { recursive: true, force: true });
+			return { pin: pin!, config };
+		};
+		const check = async (path: string, config: string, label: string) => {
+			const home = join(fixture.path, `home-${label}`);
+			mkdirSync(join(home, ".omp", "agent"), { recursive: true });
+			mkdirSync(join(home, "tmp"));
+			writeFileSync(join(home, ".omp", "agent", "config.yml"), config);
+			const result = await run([omp, "setup", "python", "--json"], { cwd: home, deadline_s: fixtureDeadlineS(60),
+				env: { PATH: path, HOME: home, TMPDIR: join(home, "tmp"), XDG_CONFIG_HOME: join(home, ".config"),
+					XDG_CACHE_HOME: join(home, ".cache"), XDG_DATA_HOME: join(home, ".local", "share"), XDG_STATE_HOME: join(home, ".local", "state") } });
+			const stdout = Buffer.from(result.stdout).toString();
+			return { rc: result.rc, report: JSON.parse(stdout) as { available: boolean; pythonPath?: string } };
+		};
+		const unpin = (config: string) => config.replace(/^python:\n {2}interpreter: .*\n/m, "");
+		const fastPath = process.env.PATH ?? "", slowPath = `${slow}:${fastPath}`;
+		const planted = await harness(slowPath);
+		expect(planted.pin.startsWith(slow)).toBe(false);
+		expect(planted.config).toContain(`python:\n  interpreter: ${JSON.stringify(planted.pin)}\n`);
+		expect(await check(slowPath, planted.config, "planted")).toEqual({ rc: 0, report: expect.objectContaining({ available: true, pythonPath: planted.pin }) });
+		const mutant = await check(slowPath, unpin(planted.config), "mutant");
+		expect(unpin(planted.config)).not.toContain("interpreter:");
+		expect(mutant.rc).toBe(1);
+		expect(mutant.report.available).toBe(false);
+		expect(mutant.report.pythonPath?.startsWith(slow)).toBe(true);
+		const control = await harness(fastPath);
+		expect(control.pin).toBe(planted.pin);
+		expect(unpin(control.config)).toBe(unpin(planted.config));
+		expect((await check(fastPath, control.config, "control")).report).toMatchObject({ available: true, pythonPath: control.pin });
+		expect((await check(fastPath, unpin(control.config), "control-unpinned")).report.available).toBe(true);
+	} finally { fixture.cleanup(); }
+}, fixtureDeadlineS(300) * 1000);
 
 afterAll(() => cleanupAllOwnedTmp());
