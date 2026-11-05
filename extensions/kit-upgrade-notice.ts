@@ -93,8 +93,10 @@ export function upgradeNoticeMessage(installed: string, loaded: string, fleet = 
 	return (
 		head +
 		`At your next turn boundary, without starting new work, restart this seat yourself:\n` +
-		`1. Save your work: \`git commit --only -m "<msg>" -- <your reserved paths>\` and publish, ` +
-		`or a \`[pending]\` commit.\n` +
+		`1. Restart only after every background task agent has returned and its result is collected: a restart ` +
+		`aborts a running agent mid-work. Collect each running agent's result (or message it to wrap up and wait ` +
+		`for its report); the helper refuses while one still runs (REFUSED_LIVE_AGENTS). Then save your work: ` +
+		`\`git commit --only -m "<msg>" -- <your reserved paths>\` and publish, or a \`[pending]\` commit.\n` +
 		`2. Run the self-restart helper: \`${SELF_RESTART_COMMAND}\`\n` +
 		`3. End your turn now with no further tool call. The helper pauses your goal (Esc), reloads this seat ` +
 		`on omp-kit ${installed} and resumes your goal.\n` +

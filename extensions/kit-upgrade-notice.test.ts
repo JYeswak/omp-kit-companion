@@ -104,7 +104,7 @@ test("semver: numeric comparison (0.2.7 < 0.2.55 < 0.2.57); lexicographic order 
 test("message (fleet): the three self-restart steps in order, each with its exact command", () => {
 	const msg = upgradeNoticeMessage("0.2.58", "0.2.57", true);
 	expect(msg).toContain("omp-kit 0.2.58 is installed; this seat runs 0.2.57; upgrade now");
-	const save = msg.indexOf("1. Save your work: `git commit --only");
+	const save = msg.indexOf("Then save your work: `git commit --only");
 	const run = msg.indexOf("2. Run the self-restart helper: `python3 ~/.claude/skills/omp-kit-orchestration/scripts/self_restart.py`");
 	const end = msg.indexOf("3. End your turn now with no further tool call.");
 	expect(save).toBeGreaterThan(-1);
@@ -120,6 +120,24 @@ test("message (fleet): the three self-restart steps in order, each with its exac
 	// Retired steps: no seat waits on the chief's sentinel, and no hand-written handoff ledger.
 	expect(msg).not.toContain("loop_sentinel");
 	expect(msg).not.toContain("handoff");
+});
+
+test("LIVEAGENTS1: the notice restarts the seat only after every background agent has returned and its result is collected", () => {
+	// ompkit-fp72.120.16.243 (J-2026-11-05-01): CrimsonHorizon self-restarted on this notice while two background
+	// agents ran; both were aborted mid-work.
+	const msg = upgradeNoticeMessage("0.2.91", "0.2.90", true);
+	const wait = msg.indexOf(
+		"1. Restart only after every background task agent has returned and its result is collected",
+	);
+	const save = msg.indexOf("Then save your work:");
+	const run = msg.indexOf("2. Run the self-restart helper:");
+	expect(wait).toBeGreaterThan(-1);
+	expect(save).toBeGreaterThan(wait);
+	expect(run).toBeGreaterThan(save);
+	expect(msg).toContain("Collect each running agent's result (or message it to wrap up and wait for its report)");
+	expect(msg).toContain("REFUSED_LIVE_AGENTS");
+	// Control: a paused seat never self-restarts, so it gets no wrap-up step.
+	expect(upgradeNoticeMessage("0.2.91", "0.2.90", true, true)).not.toContain("REFUSED_LIVE_AGENTS");
 });
 
 test("message (stock): only how to restart omp; no fleet command, sentinel or handoff", () => {
