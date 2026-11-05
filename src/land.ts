@@ -1,9 +1,9 @@
 import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { run as kitlibRun, type RunResult } from "./kitlib/run.ts";
+import { run as kitlibRun, runSync as kitlibRunSync, type RunResult } from "./kitlib/run.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { homedir } from "node:os";
+import { availableParallelism, homedir, loadavg } from "node:os";
 import type { CliResult, ParsedCommand } from "./cli.ts";
 import { authorizeSourceAct } from "./source-authority.ts";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
@@ -593,20 +593,73 @@ function paneKey(): PaneKey {
 	return { key: `tern:${id}` };
 }
 
+// LANDPANETIMEOUT1 (ompkit-fp72.120.16.280): `am agents resolve-pane` ran under a fixed 10 s spawnSync timeout
+// and a timeout read as OWNER_UNKNOWN. Measured 2026-11-05: the real am answers in 15-24 ms (n=10, load1 16.8 on
+// 32 cores), but in ~/.local/state/omp-kit/full-suite-verdicts logs 45 land-test cases read OWNER_UNKNOWN from a
+// trivial /bin/sh stub, 33 of them at 10.09-10.35 s test wall, i.e. the stub had not answered when the 10 s bound
+// fired, at sampled load1 10-30 on 32 cores. The stall is load, not work, and its length is unobserved past 10 s,
+// so the bound is 30 s scaled by the fixtures' load factor (1..4): 30 s idle, at most 120 s for a hung am.
+const RESOLVE_PANE_BASE_DEADLINE_S = 30;
+const RESOLVE_PANE_BASE_ENV = "OMP_KIT_LAND_RESOLVE_BASE_S";
+
+/** The resolve-pane base deadline in seconds before load scaling: OMP_KIT_LAND_RESOLVE_BASE_S (integer, clamped
+ * to 1..600) when set, else 30. */
+function resolvePaneBaseSeconds(): number {
+	const raw = process.env[RESOLVE_PANE_BASE_ENV];
+	const value = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+	return Number.isSafeInteger(value) ? Math.min(600, Math.max(1, value)) : RESOLVE_PANE_BASE_DEADLINE_S;
+}
+
+/** The production load factor, the same scaling as tests/cli/fixture-process.ts: 1-minute load per core x 4,
+ * clamped to 1..4. OMP_KIT_LOAD_OVERRIDE ("load1/ncpu", the test seam cli.ts already reads) pins it; an
+ * unreadable reading takes the widest bound. */
+function landLoadFactor(): number {
+	const override = process.env.OMP_KIT_LOAD_OVERRIDE;
+	let load1: number, ncpu: number;
+	if (override !== undefined) {
+		const parts = override.split("/");
+		load1 = Number(parts[0]);
+		ncpu = Number(parts[1] ?? "");
+	} else {
+		load1 = loadavg()[0] ?? Number.NaN;
+		ncpu = availableParallelism();
+	}
+	if (!(load1 >= 0) || !(ncpu > 0)) return 4;
+	return Math.max(1, Math.min(4, load1 / ncpu * 4));
+}
+
+/** Resolve the live owner of one pane through Agent Mail under the load-scaled bound. A timeout is its own
+ * refusal, OWNER_RESOLVE_TIMEOUT; only an answer (or an absent/failed am) reads OWNER_UNKNOWN. am is a single
+ * leaf binary and every caller is synchronous, so this uses kitlib's synchronous bounded run (SIGKILL at the deadline). */
+export function resolvePaneOwner(repo: string, pane: string): { owner: string } | { error: CliResult } {
+	const baseS = resolvePaneBaseSeconds();
+	const deadlineS = Math.ceil(baseS * landLoadFactor());
+	let identity: RunResult;
+	try {
+		identity = kitlibRunSync(["am", "agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], { cwd: repo, deadline_s: deadlineS, max_output_bytes: 1024 * 1024 });
+	} catch {
+		return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing; no files were changed.") };
+	}
+	if (identity.timed_out)
+		return { error: refused("OWNER_RESOLVE_TIMEOUT", `am agents resolve-pane did not answer within ${deadlineS} s (${baseS} s base scaled by the 1-minute load), so the pane owner is unknown, not unregistered`, `Check that \`am agents resolve-pane --project ${repo} --pane ${pane} --json\` answers, then retry land; no files were changed.`) };
+	if (identity.rc !== 0) return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing; no files were changed.") };
+	let owner: unknown;
+	try {
+		const parsed: unknown = JSON.parse(new TextDecoder().decode(identity.stdout));
+		owner = typeof parsed === "object" && parsed !== null && "agent_name" in parsed ? parsed.agent_name : null;
+	} catch { owner = null; }
+	if (typeof owner !== "string" || owner.length === 0) return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing.") };
+	return { owner };
+}
+
 function authorizedOwner(repo: string, paths: string[]): { owner: string } | { error: CliResult } {
 	const claimed = process.env.AGENT_NAME;
 	const selected = paneKey();
 	if ("refusal" in selected) return { error: selected.refusal };
 	if (!claimed) return { error: refused("OWNER_UNKNOWN", "The agent name claim is required", "Set AGENT_NAME to the identity registered for this pane; no files were changed.") };
-	const pane = selected.key;
-	const identity = spawnSync("am", ["agents", "resolve-pane", "--project", repo, "--pane", pane, "--json"], { cwd: repo, encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 });
-	if (identity.status !== 0) return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing; no files were changed.") };
-	let owner: unknown;
-	try {
-		const parsed: unknown = JSON.parse(String(identity.stdout));
-		owner = typeof parsed === "object" && parsed !== null && "agent_name" in parsed ? parsed.agent_name : null;
-	} catch { owner = null; }
-	if (typeof owner !== "string" || owner.length === 0) return { error: refused("OWNER_UNKNOWN", "The pane has no registered owner", "Register the pane with Agent Mail before landing.") };
+	const resolved = resolvePaneOwner(repo, selected.key);
+	if ("error" in resolved) return resolved;
+	const owner = resolved.owner;
 	if (owner !== claimed) return { error: refused("OWNER_MISMATCH", "AGENT_NAME does not match the live pane owner", "Use the identity registered for this pane; no files were changed.") };
 	const active = spawnSync("am", ["robot", "reservations", "--project", repo, "--agent", owner, "--json"], { cwd: repo, encoding: "utf8", timeout: 10_000, maxBuffer: 2 * 1024 * 1024 });
 	if (active.status !== 0) return { error: refused("RESERVATION_UNAVAILABLE", "Active file reservations could not be read", "Restore the Agent Mail reservation service; no files were changed.") };
