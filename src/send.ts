@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
@@ -1379,7 +1379,10 @@ export async function deliverToTernSeat(input: {
 				: "OBSERVATION_UNKNOWN";
 		return fail(code, `seat not provably idle (${observation.reason ?? "unknown"}); zero sends`);
 	}
-	const identityProject = input.seat.identityProject ?? (input.env ?? process.env).AGENT_MAIL_PROJECT;
+	// WAKEWINDOW1-R: without an explicit or caller project, the target seat's configured repo (fleet-watch `repo`, or
+	// the Tern-discovered cwd) is its Agent Mail project; resolve-pane must still bind that exact pane and project.
+	const identityProject = input.seat.identityProject ?? ((input.env ?? process.env).AGENT_MAIL_PROJECT
+		|| (input.seat.cwd && isAbsolute(input.seat.cwd) ? input.seat.cwd : undefined));
 	const identity = await identify({ ...input.seat, identityProject }, input.io, observeOpts);
 	if (identity.status !== "IDENTIFIED" || identity.runtimeBinding === null) {
 		const code = identity.status === "REFUSED" ? identity.code : "IDENTITY_UNKNOWN";
@@ -1387,7 +1390,8 @@ export async function deliverToTernSeat(input: {
 		return fail(code, `seat identity not bound (${reason}); zero sends`);
 	}
 	// The initially observed target process and the Agent Mail candidate must name the same agent.
-	if (observation.fg?.agentName !== identity.agent)
+	const observedAgent = observation.fg?.agentName ?? null;
+	if (observedAgent !== null && observedAgent !== identity.agent)
 		return fail("SEAT_REBOUND", "target AGENT_NAME changed since observation; zero sends");
 	// ACT58584 + SENDX1: the seat must not move between observe and identify,
 	// and both must be the configured pane, so the effect and its proof can

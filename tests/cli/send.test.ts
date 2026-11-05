@@ -1,9 +1,10 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec } from "../../src/send.ts";
+import * as sendModule from "../../src/send.ts";
 import { classifyTernObservation, parseSessionJournal } from "../../src/plane-tern.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
@@ -1273,3 +1274,87 @@ test("SENDFAST1.proof: a session path that cannot be stat'ed is re-read every ti
 	expect(r).toMatchObject({ status: "OK", code: "PROVEN", sends: 1 });
 	expect(ms).toBeLessThan(300);
 }, 2_000);
+// WAKEWINDOW1-R (ompkit-774u.58 [b]): the live chief send to omp-test tern:5 refused PLANE_SEAT_UNBOUND because macOS
+// `ps eww` shows no environment for the target (no AGENT_NAME) and the chief has no AGENT_MAIL_PROJECT. The fixture
+// replays exactly those inputs: fleet-watch omp-test entry, a ps line with no environment, empty caller env.
+const WW1R_CONFIG = (repo: string) => ({ sessions: [{ session: "omp-test", ternSession: "Default", coordinatorPane: "tern:5", repo }] });
+function ww1rFixture(repo: string, resolvePane: boolean) {
+	const sessionFile = join(repo, "director.jsonl");
+	let journal = [
+		JSON.stringify({ type: "session", id: "ww1r-uuid", cwd: repo, version: 3 }),
+		JSON.stringify({ type: "message", id: "m1", parentId: null, message: { role: "user", content: "prior" } }),
+		JSON.stringify({ type: "message", id: "m2", parentId: "m1", message: { role: "assistant", content: "done", stopReason: "stop" } }),
+		"",
+	].join("\n");
+	writeFileSync(sessionFile, journal);
+	const taken = { runs: [] as string[][], sends: 0 };
+	let pasted: string | null = null;
+	const io: TernObserverIo = {
+		run(argv) {
+			taken.runs.push([...argv]);
+			if (argv.includes("send") && argv.includes("paste")) { taken.sends++; pasted = argv[argv.indexOf("paste") + 1] ?? ""; return { code: 0, out: "" }; }
+			if (argv.includes("send") && argv.includes("keys")) {
+				if (pasted === null) return { code: 1, out: "" };
+				journal += JSON.stringify({ type: "message", id: "m-live", parentId: "m2", message: { role: "user", content: pasted } }) + "\n";
+				writeFileSync(sessionFile, journal);
+				pasted = null;
+				return { code: 0, out: "" };
+			}
+			// The live macOS read: lstart + argv, and no environment at all.
+			if (argv[0] === "/bin/ps") return { code: 0, out: "Tue Oct 27 16:39:19 2026 omp --profile codex\n" };
+			if (argv[0] === "am") return resolvePane && argv.includes(repo)
+				? { code: 0, out: JSON.stringify({ schema_version: "am.agents.resolve-pane.v1", agent_name: "RusticPine", pane_id: "tern:5",
+					project_key: repo, source: "canonical", binding: "legacy-unverified" }) }
+				: { code: 1, out: "" };
+			if (argv.includes("process")) return { code: 0, out: JSON.stringify({ pane: 5, foreground: { argv: ["omp", "--profile", "codex"], pid: 17471, cwd: repo, name: "18.15.0" } }) };
+			if (argv.includes("inspect")) return { code: 0, out: JSON.stringify({ sessions: [{ id: 7, name: "Default", tabs: [{ blocks: [{ id: 5, exited: null }] }] }],
+				panes: [{ pane: 5, cwd: repo, working: false, exited: null, omp_session_file: sessionFile }] }) };
+			return { code: 1, out: "" };
+		},
+		readSessionFile: (path) => path === sessionFile ? journal : null,
+		wait: noWait,
+	};
+	return { io, taken };
+}
+async function ww1rSend(mod: typeof sendModule, resolvePane: boolean) {
+	const repo = join(scratch, "ww1r-" + Math.random().toString(36).slice(2));
+	const dropDir = join(repo, "send-drop");
+	mkdirSync(dropDir, { recursive: true });
+	const { io, taken } = ww1rFixture(repo, resolvePane);
+	const seat = mod.ternSendSeat(WW1R_CONFIG(repo), "omp-test", "tern:5", {}, "/Users/josh/Developer");
+	const got = await mod.proveTernCliSend({ session: seat.session, pane: "tern:5", message: "WAKEWINDOW1-probe", dropDir, cwd: seat.cwd,
+		windowKey: seat.windowKey, knownPrefixes: new Set<string>(), env: {}, pollMs: 1, deadlineMs: 50, wait: noWait, io,
+		composer: () => ({ state: "EMPTY" }) });
+	return { got, taken };
+}
+test("WAKEWINDOW1-R planted: a fleet-watch director with no readable AGENT_NAME and no caller project binds and delivers", async () => {
+	const { got, taken } = await ww1rSend(sendModule, true);
+	expect(got).toMatchObject({ status: "OK", code: "PROVEN", sends: 1 });
+	expect(taken.sends).toBe(1);
+	expect(taken.runs.some((argv) => argv[0] === "am" && argv.includes("tern:5"))).toBe(true);
+});
+test("WAKEWINDOW1-R control: a target Agent Mail cannot resolve still refuses PLANE_SEAT_UNBOUND with zero sends", async () => {
+	const { got, taken } = await ww1rSend(sendModule, false);
+	expect(got).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", sends: 0 });
+	expect(taken.sends).toBe(0);
+});
+test("WAKEWINDOW1-R mutant: with the 0.2.94 identity guard restored, the planted inputs refuse PLANE_SEAT_UNBOUND", async () => {
+	// The mutant is a copy of src with identifyTernSeat's pre-fix guard put back: a null target AGENT_NAME refuses.
+	const mutantSrc = join(scratch, "ww1r-mutant-src-" + Math.random().toString(36).slice(2));
+	cpSync(join(repoRoot, "src"), mutantSrc, { recursive: true });
+	const planeFile = join(mutantSrc, "plane-tern.ts");
+	const fixed = "\tif (typeof seat.identityProject !== \"string\" || !isAbsolute(seat.identityProject)) {\n"
+		+ "\t\treturn { status: \"REFUSED\", code: \"PLANE_SEAT_UNBOUND\",\n"
+		+ "\t\t\treason: \"caller Agent Mail project is unavailable\",";
+	const prefix = "\tif (typeof seat.identityProject !== \"string\" || !isAbsolute(seat.identityProject) || !targetAgent) {\n"
+		+ "\t\treturn { status: \"REFUSED\", code: \"PLANE_SEAT_UNBOUND\",\n"
+		+ "\t\t\treason: \"Tern target AGENT_NAME or caller Agent Mail project is unavailable\",";
+	const source = readFileSync(planeFile, "utf8");
+	expect(source.split(fixed).length).toBe(2);
+	writeFileSync(planeFile, source.replace(fixed, prefix));
+	// Dynamic import: the mutant module lives at a path generated at run time.
+	const { got, taken } = await ww1rSend(await import(join(mutantSrc, "send.ts")), true);
+	expect(got).toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", sends: 0 });
+	expect(got.detail).toContain("AGENT_NAME or caller Agent Mail project is unavailable");
+	expect(taken.sends).toBe(0);
+});

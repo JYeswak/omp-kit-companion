@@ -1347,10 +1347,13 @@ export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo
 		return { status: "UNKNOWN", reason, agent: null, binding: null, cwdOk: false, runtimeBinding: null };
 	}
 	const paneId = paneNumber(seat)!;
-	const targetAgent = observation.fg?.agentName;
-	if (typeof seat.identityProject !== "string" || !isAbsolute(seat.identityProject) || !targetAgent) {
+	// WAKEWINDOW1-R: macOS `ps eww` omits another process's environment, so a live target's AGENT_NAME is often
+	// unreadable (null). The exact pane+project Agent Mail row then names the seat, never upgraded to runtime-verified;
+	// a readable AGENT_NAME must still agree with it.
+	const targetAgent = observation.fg?.agentName ?? null;
+	if (typeof seat.identityProject !== "string" || !isAbsolute(seat.identityProject)) {
 		return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND",
-			reason: "Tern target AGENT_NAME or caller Agent Mail project is unavailable", agent: null, binding: null,
+			reason: "caller Agent Mail project is unavailable", agent: null, binding: null,
 			cwdOk: false, runtimeBinding: observation.runtimeBinding };
 	}
 	const projectKey = resolve(seat.identityProject);
@@ -1368,12 +1371,12 @@ export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo
 			runtimeBinding: observation.runtimeBinding };
 	}
 	// The exact pane and project resolved; a different target runtime name is a rebound, not an absent seat.
-	if (row.agent_name !== targetAgent) {
+	if (targetAgent !== null && row.agent_name !== targetAgent) {
 		return { status: "REFUSED", code: "SEAT_REBOUND",
 			reason: "Target AGENT_NAME differs from the resolved Agent Mail identity", agent: null,
 			binding: row.binding, cwdOk: false, runtimeBinding: observation.runtimeBinding };
 	}
-	const binding = row.binding === "legacy-unverified" ? "runtime-verified" : row.binding;
-	return { status: "IDENTIFIED", agent: targetAgent, binding, cwdOk: true,
+	const binding = row.binding === "legacy-unverified" && targetAgent !== null ? "runtime-verified" : row.binding;
+	return { status: "IDENTIFIED", agent: row.agent_name, binding, cwdOk: true,
 		runtimeBinding: observation.runtimeBinding! };
 }
