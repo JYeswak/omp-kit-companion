@@ -38,7 +38,8 @@ test("KITUPDATELOAD1: a candidate scenario that cannot pass names its FAIL line 
 			writeFileSync(path, mutated);
 		}));
 		expect(planted.report.status).toBe("FAIL");
-		expect(planted.detail?.failed_stages).toContain("e2e-live");
+		// KITUPDATECAUSE1: the CI-only runs that failed here kept no cause; print the planted report.
+		expect(planted.detail?.failed_stages, JSON.stringify(planted.report)).toContain("e2e-live");
 		expect(planted.detail?.failures.some(line => line.startsWith("FAIL  close-bare-fire :: ")), JSON.stringify(planted.detail)).toBe(true);
 	} finally { owned.cleanup(); }
 }, fixtureDeadlineS(1200) * 1000);
