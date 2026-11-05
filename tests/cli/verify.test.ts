@@ -1,12 +1,13 @@
-import { expect, jest, test } from "bun:test";
+import { afterAll, beforeAll, expect, jest, test } from "bun:test";
 
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, join } from "node:path";
 import { LIVE_READBACK_LABEL, expectedOf, liveReadback, liveReadbackAll, parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { createParentTracker, runUnpinnedInitControl } from "./tracker-init-parent.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 // This bounds fixture Git initialization/publication and verification subprocesses,
@@ -22,6 +23,44 @@ function testBase(label: string): string {
 
 const base = testBase("verify-test");
 const cliPath = join(import.meta.dir, "..", "..", "src", "cli.ts");
+
+/** VERIFYTESTENV1 (ompkit-fp72.120.16.277): the fixtures own their identity instead of inheriting the caller's.
+ * A seat's PATH carries the pane br shim, which judges every real-br fixture write against the caller's
+ * AGENT_NAME (BR_SHIM_ACTOR_MISMATCH / _IDENTITY_REQUIRED) and its Agent Mail reservations
+ * (BR_SHIM_RESERVATION_UNKNOWN). Like mine.test.ts, drop every PATH entry whose br is a policy script, put a
+ * fixture bin whose br is the official native br first, and bind AGENT_NAME to a fixture identity; each case
+ * still names its own --actor. Restored after the file so a shared-process suite sees the caller's env. */
+const FIXTURE_AGENT = "VerifyFixture";
+const callerPath = process.env.PATH ?? "";
+const callerAgent = process.env.AGENT_NAME;
+const shimDirs = new Set(resolveRealBr(callerPath).skipped.map(p => dirname(p)));
+const shimFreePath = callerPath.split(delimiter).filter(dir => dir !== "" && !shimDirs.has(dir)).join(delimiter);
+function fixtureIdentityEnv(): { PATH: string; AGENT_NAME: string } {
+	const real = resolveRealBr(callerPath);
+	if (!real.ok) throw new Error(real.reason);
+	const bin = join(base, "fixture-identity-bin");
+	mkdirSync(bin, { recursive: true });
+	if (!existsSync(join(bin, "br"))) symlinkSync(real.path, join(bin, "br"));
+	return { PATH: `${bin}${delimiter}${shimFreePath}`, AGENT_NAME: FIXTURE_AGENT };
+}
+beforeAll(() => { Object.assign(process.env, fixtureIdentityEnv()); });
+afterAll(() => {
+	process.env.PATH = callerPath;
+	if (callerAgent === undefined) delete process.env.AGENT_NAME; else process.env.AGENT_NAME = callerAgent;
+});
+
+test("VERIFYTESTENV1 mutant: a fixture that inherits the caller's identity through the pane shim reproduces BR_SHIM_ACTOR_MISMATCH; the owned identity does not", async () => {
+	const shim = join(import.meta.dir, "..", "..", "scripts", "br-shim.sh");
+	const dir = join(base, "identity-mutant");
+	mkdirSync(dir, { recursive: true });
+	// Mutant: the caller's planted seat identity reaches the shim while the case acts as Peer.
+	const inherited = await run(["sh", shim, "list", "--actor", "Peer", "--json"], { cwd: dir, deadline_s: fixtureDeadlineS(30), env: { ...process.env, AGENT_NAME: "PeachLeopard" } as Record<string, string> });
+	expect(new TextDecoder().decode(inherited.stderr)).toContain("BR_SHIM_ACTOR_MISMATCH refusing --actor Peer for pane identity PeachLeopard");
+	expect(inherited.rc).not.toBe(0);
+	// Owned: the fixture br resolved for this file is the native binary, never a policy script.
+	expect(resolveRealBr(process.env.PATH).skipped).toEqual([]);
+	expect(process.env.AGENT_NAME).toBe(FIXTURE_AGENT);
+});
 
 async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {
 	const r = await run(cmd, { cwd, deadline_s: fixtureDeadlineS(60), env: env ? { ...process.env, ...env } as Record<string, string> : undefined });
