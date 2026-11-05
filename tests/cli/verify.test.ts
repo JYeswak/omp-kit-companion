@@ -29,10 +29,17 @@ const cliPath = join(import.meta.dir, "..", "..", "src", "cli.ts");
  * AGENT_NAME (BR_SHIM_ACTOR_MISMATCH / _IDENTITY_REQUIRED) and its Agent Mail reservations
  * (BR_SHIM_RESERVATION_UNKNOWN). Like mine.test.ts, drop every PATH entry whose br is a policy script, put a
  * fixture bin whose br is the official native br first, and bind AGENT_NAME to a fixture identity; each case
- * still names its own --actor. Restored after the file so a shared-process suite sees the caller's env. */
+ * still names its own --actor. The caller's tracker selectors are dropped too: `omp-kit verify` replays with
+ * BEADS_DIR bound to the caller's tracker, and native br then resolves every fixture `br init` to it
+ * ("Already initialized at <caller>/.beads/beads.db"). Restored after the file so a shared-process suite
+ * sees the caller's env. */
 const FIXTURE_AGENT = "VerifyFixture";
+/** Tracker selectors and identity aliases read by native br (BEADS_*, BD_*, BR_AGENT_NAME, BR_OUTPUT_FORMAT),
+ * scripts/br-shim.sh (BR_REAL) and src/ (BR_ACTOR, BR_BIN); each case passes its own explicitly. */
+const INHERITED_SELECTORS = ["BEADS_DIR", "BEADS_DB", "BEADS_JSONL", "BEADS_CACHE_DIR", "BD_DB", "BD_DATABASE", "BR_REAL", "BR_BIN", "BR_ACTOR", "BR_AGENT_NAME", "BR_OUTPUT_FORMAT"] as const;
 const callerPath = process.env.PATH ?? "";
 const callerAgent = process.env.AGENT_NAME;
+const callerSelectors = new Map(INHERITED_SELECTORS.map(key => [key, process.env[key]]));
 const shimDirs = new Set(resolveRealBr(callerPath).skipped.map(p => dirname(p)));
 const shimFreePath = callerPath.split(delimiter).filter(dir => dir !== "" && !shimDirs.has(dir)).join(delimiter);
 function fixtureIdentityEnv(): { PATH: string; AGENT_NAME: string } {
@@ -43,10 +50,14 @@ function fixtureIdentityEnv(): { PATH: string; AGENT_NAME: string } {
 	if (!existsSync(join(bin, "br"))) symlinkSync(real.path, join(bin, "br"));
 	return { PATH: `${bin}${delimiter}${shimFreePath}`, AGENT_NAME: FIXTURE_AGENT };
 }
-beforeAll(() => { Object.assign(process.env, fixtureIdentityEnv()); });
+beforeAll(() => {
+	for (const key of INHERITED_SELECTORS) delete process.env[key];
+	Object.assign(process.env, fixtureIdentityEnv());
+});
 afterAll(() => {
 	process.env.PATH = callerPath;
 	if (callerAgent === undefined) delete process.env.AGENT_NAME; else process.env.AGENT_NAME = callerAgent;
+	for (const [key, value] of callerSelectors) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 });
 
 test("VERIFYTESTENV1 mutant: a fixture that inherits the caller's identity through the pane shim reproduces BR_SHIM_ACTOR_MISMATCH; the owned identity does not", async () => {
@@ -60,10 +71,33 @@ test("VERIFYTESTENV1 mutant: a fixture that inherits the caller's identity throu
 	// Owned: the fixture br resolved for this file is the native binary, never a policy script.
 	expect(resolveRealBr(process.env.PATH).skipped).toEqual([]);
 	expect(process.env.AGENT_NAME).toBe(FIXTURE_AGENT);
+	for (const key of INHERITED_SELECTORS) expect(process.env[key]).toBeUndefined();
+});
+
+test("VERIFYTESTENV1 mutant: a fixture that inherits the caller's BEADS_DIR has its tracker init resolved to the caller's tracker; the owned env inits its own", async () => {
+	// A stand-in caller tracker in scratch, never a real one.
+	const caller = join(base, "beads-dir-caller");
+	mkdirSync(caller, { recursive: true });
+	await sh(["br", "init", "--db", join(caller, ".beads", "beads.db")], caller);
+	const fixture = join(base, "beads-dir-fixture");
+	mkdirSync(fixture, { recursive: true });
+	const init = (env: Record<string, string>) => run(["br", "init", "--db", join(fixture, ".beads", "beads.db")], { cwd: fixture, deadline_s: fixtureDeadlineS(60), env });
+	// Mutant: the caller's BEADS_DIR reaches the fixture's br init.
+	const inherited = await init({ ...process.env, BEADS_DIR: join(caller, ".beads") } as Record<string, string>);
+	// macOS may print the TMPDIR path through /private, so match the caller-owned suffix.
+	expect(new TextDecoder().decode(inherited.stdout) + new TextDecoder().decode(inherited.stderr)).toMatch(/Already initialized at '[^']*\/beads-dir-caller\/\.beads\/beads\.db'/);
+	expect(inherited.rc).not.toBe(0);
+	expect(existsSync(join(fixture, ".beads", "beads.db"))).toBe(false);
+	// Owned: with the selectors dropped the same init creates the fixture's own tracker.
+	const owned = await init({ ...process.env } as Record<string, string>);
+	expect(new TextDecoder().decode(owned.stderr)).not.toContain("Already initialized");
+	expect(owned.rc).toBe(0);
+	expect(existsSync(join(fixture, ".beads", "beads.db"))).toBe(true);
 });
 
 async function sh(cmd: string[], cwd: string, env?: Record<string, string>): Promise<string> {
-	const r = await run(cmd, { cwd, deadline_s: fixtureDeadlineS(60), env: env ? { ...process.env, ...env } as Record<string, string> : undefined });
+	// Always the live process.env: a spawn without env keeps selectors the file dropped in beforeAll.
+	const r = await run(cmd, { cwd, deadline_s: fixtureDeadlineS(60), env: { ...process.env, ...(env ?? {}) } as Record<string, string> });
 	if (r.rc !== 0) throw new Error(`${cmd.join(" ")} -> ${r.rc}: ${new TextDecoder().decode(r.stderr)}`);
 	return new TextDecoder().decode(r.stdout);
 }
