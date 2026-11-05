@@ -1,6 +1,6 @@
 import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { runSync } from "../src/kitlib/run.ts";
 import { gateEventsPath, trackerAct } from "./gate-events.ts";
 
@@ -53,6 +53,11 @@ import { gateEventsPath, trackerAct } from "./gate-events.ts";
  * ordinary wake. omp core owns the 'Continue active goal' turns, which already stop when every todo is blocked;
  * no extension hook can veto one (a custom submission skips the `input` event, and a `before_agent_start`
  * result carries no cancel).
+ *
+ * VERDICTWAKE1 timer fallback: at that existing timer check, a blocked todo naming a full release SHA or
+ * a prefix of at least 10 hex characters is matched against the last 2 MiB of its repo's release-verdict.log.
+ * Recorded producer_rc / ci_only_rc values accompany the wake. This is not event delivery: a result arriving
+ * after the initial 120-second check may wait until the 30-minute heartbeat. No additional polling loop.
  */
 
 /** ms of still-idle time before one wake. */
@@ -419,6 +424,50 @@ export function idleWait(phases: readonly unknown[], jobs: AsyncJobView | null):
 	return running.length > 0 || events.length > 0 ? { blocked, jobs: running, events } : null;
 }
 
+/** Resolve from a nested cwd too; Git's gitdir file is relative to the directory containing it. */
+function releaseVerdictPath(cwd: string): string | null {
+	let root = resolve(cwd);
+	for (;;) {
+		const git = join(root, ".git");
+		try {
+			if (statSync(git).isDirectory()) return join(git, "omp-kit", "release-verdict.log");
+			const target = /^gitdir: (.+)\r?\n?$/.exec(readBounded(git, 4096) ?? "")?.[1];
+			if (target) return join(resolve(root, target), "omp-kit", "release-verdict.log");
+		} catch { /* try the parent repository */ }
+		const parent = dirname(root);
+		if (parent === root) return null;
+		root = parent;
+	}
+}
+
+/** Only complete durable lines count. Bound reads like the gate ledger; retain the latest rc per kind/head. */
+export function matchingReleaseVerdicts(path: string, events: readonly string[]): string[] {
+	let text: string;
+	try {
+		const fd = openSync(path, "r");
+		try {
+			const size = fstatSync(fd).size;
+			const length = Math.min(size, GATE_EVENTS_TAIL_BYTES);
+			const buffer = Buffer.alloc(length);
+			readSync(fd, buffer, 0, length, size - length);
+			text = buffer.toString("utf8");
+			if (size > length) text = text.slice(text.indexOf("\n") + 1);
+		} finally { closeSync(fd); }
+	} catch { return []; }
+	const named = new Set(events.flatMap(event => event.match(/\b[0-9a-f]{10,40}\b/gi) ?? []).map(sha => sha.toLowerCase()));
+	const verdicts = new Map<string, Map<string, string>>();
+	for (const line of text.slice(0, text.lastIndexOf("\n") + 1).split("\n")) {
+		const row = /^release-verdict: ([0-9a-f]{40}) ((?:producer|ci_only)_rc)=(-?\d+)\s*$/i.exec(line);
+		if (!row) continue;
+		const sha = row[1]!.toLowerCase();
+		if (![...named].some(prefix => sha.startsWith(prefix))) continue;
+		const values = verdicts.get(sha) ?? new Map<string, string>();
+		values.set(row[2]!.toLowerCase(), row[3]!);
+		verdicts.set(sha, values);
+	}
+	return [...verdicts].map(([sha, values]) => `release-verdict: ${sha} ${[...values].map(([key, rc]) => `${key}=${rc}`).join(" ")}`);
+}
+
 function brHeldBeads(seat: string, cwd: string): string[] {
 	const result = runSync(["br", "list", "--status", "in_progress", "--assignee", seat, "--json"], { deadline_s: 10, cwd }); // product-deadline: one wake, at most every 10 min
 	if (result.rc !== 0) return [];
@@ -462,6 +511,8 @@ export default async function kitGoalKeepalive(
 	let previousContinuation: string | undefined;
 	/** One GOAL_REPEAT_SUPPRESSED entry per repeat streak. */
 	let repeatRecorded = false;
+	// Do not repeat a durable result on every quiet turn; reset when switching sessions.
+	const deliveredVerdicts = new Set<string>();
 
 	const cancel = (ctx: GoalKeepaliveContext) => {
 		if (timer !== null) {
@@ -521,7 +572,8 @@ export default async function kitGoalKeepalive(
 			return;
 		}
 		const wait = idleState(ctx);
-		if (wait !== null && at - idleSince < IDLE_HEARTBEAT_MS) {
+		const ready = releaseResults(ctx, wait);
+		if (ready.length === 0 && wait !== null && at - idleSince < IDLE_HEARTBEAT_MS) {
 			// GOALBREATHE1: the awaited event delivers its own turn, whose agent_end re-arms; sleep to the ceiling.
 			schedule(ctx, idleSince + IDLE_HEARTBEAT_MS - at);
 			return;
@@ -541,13 +593,21 @@ export default async function kitGoalKeepalive(
 		pi.sendMessage(
 			{
 				customType: "kit-goal-keepalive",
-				content: downtimeMessage(seat, at - idleSince, constraintLine({ fleetWatch: fleetWatchPath(env, home), cwd, now: at }), blocked, wait),
+				content: downtimeMessage(seat, at - idleSince, constraintLine({ fleetWatch: fleetWatchPath(env, home), cwd, now: at }), blocked, ready.length > 0 ? null : wait)
+					+ (ready.length > 0 ? `\n[kit-goal-keepalive] Awaited release verdict recorded:\n${ready.join("\n")}` : ""),
 				display: true,
 			},
 			{ deliverAs: "aside" },
 		);
 		lastWakeAt = at;
+		for (const result of ready) deliveredVerdicts.add(result);
 		wakePending = true;
+	};
+
+	const releaseResults = (ctx: GoalKeepaliveContext, wait: IdleWait | null): string[] => {
+		if (wait === null) return [];
+		const path = releaseVerdictPath(ctx.cwd ?? deps.cwd ?? process.cwd());
+		return path === null ? [] : matchingReleaseVerdicts(path, wait.events).filter(result => !deliveredVerdicts.has(result));
 	};
 
 	const arm = (ctx: GoalKeepaliveContext) => {
@@ -592,6 +652,8 @@ export default async function kitGoalKeepalive(
 	const reconcileAs = (reset: boolean) =>
 		((_e: never, ctx: GoalKeepaliveContext) => {
 			if (reset) goal = null; // a switch may land on a goal-less session
+			cancel(ctx);
+			if (reset) deliveredVerdicts.clear();
 			previousContinuation = undefined;
 			reconcileFromSession(ctx);
 		}) as (e: never, ctx: GoalKeepaliveContext) => unknown;

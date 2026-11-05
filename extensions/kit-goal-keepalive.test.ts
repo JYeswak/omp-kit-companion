@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp, ownedTmp } from "../src/kitlib/tmp.ts";
 import kitGoalKeepalive, {
@@ -13,6 +13,7 @@ import kitGoalKeepalive, {
 	MAX_QUIET_WAKES,
 	MIN_WAKE_INTERVAL_MS,
 	newestGateKind,
+	matchingReleaseVerdicts,
 	seatIdentity,
 	turnChangedState,
 	type AsyncJobView,
@@ -695,4 +696,73 @@ test("GOALBREATHE1 mutant: without the idle state the planted seat keeps getting
 	const mutant = await import(join(dir, "kit-goal-keepalive.ts")) as { default: typeof kitGoalKeepalive };
 	expect(await quietPlantedWakes(kitGoalKeepalive)).toBe(0);
 	expect(await quietPlantedWakes(mutant.default)).toBe(2);
+});
+
+const VERDICT_SHA = "cc4b06b369012345678901234567890123456789";
+const OTHER_VERDICT_SHA = "2849919677012345678901234567890123456789";
+
+function verdictFixture(label: string): { repo: string; log: string } {
+	const repo = join(FX, label);
+	mkdirSync(join(repo, ".git", "omp-kit"), { recursive: true });
+	return { repo, log: join(repo, ".git", "omp-kit", "release-verdict.log") };
+}
+
+function verdictTodos(sha: string): KeepaliveEntry[] {
+	return [{ type: "custom", customType: "user_todo_edit", data: {
+		phases: [{ tasks: [{ status: "blocked", blocker: `release verdict for ${sha}` }] }],
+	} }];
+}
+
+test.each([VERDICT_SHA, VERDICT_SHA.slice(0, 10)])("VERDICTWAKE1 timer fallback: blocked seat naming %s receives recorded rc values at its existing check", async named => {
+	const { repo, log } = verdictFixture(`verdict-${named}`);
+	const h = fakeHost({ sessionEntries: verdictTodos(named) });
+	await idleSeat(h, { ...SEAT, cwd: repo });
+	try {
+		writeFileSync(log, `release-verdict: ${VERDICT_SHA} producer_rc=0\nrelease-verdict: ${VERDICT_SHA} ci_only_rc=7\n`);
+		advance(h, IDLE_WAKE_MS);
+		expect(h.sent).toHaveLength(1);
+		expect(h.sent[0]!.content).toContain(`release-verdict: ${VERDICT_SHA} producer_rc=0 ci_only_rc=7`);
+		expect(h.sent[0]!.deliverAs).toBe("aside");
+		expect(h.sent[0]!.content).not.toContain("idle-state heartbeat");
+		h.emit("agent_end", { messages: STATUS_TURN } as never);
+		advance(h, MIN_WAKE_INTERVAL_MS);
+		expect(h.sent).toHaveLength(1);
+	} finally { h.emit("session_stop"); }
+});
+
+test("VERDICTWAKE1 planted: another head and a short prefix do not wake a blocked seat", async () => {
+	const { repo, log } = verdictFixture("verdict-negative");
+	for (const named of [VERDICT_SHA, OTHER_VERDICT_SHA.slice(0, 9)]) {
+		const h = fakeHost({ sessionEntries: verdictTodos(named) });
+		await idleSeat(h, { ...SEAT, cwd: repo });
+		try {
+			writeFileSync(log, `release-verdict: ${OTHER_VERDICT_SHA} producer_rc=0\nrelease-verdict: ${OTHER_VERDICT_SHA} ci_only_rc=0\n`);
+			advance(h, IDLE_WAKE_MS);
+			expect(h.sent).toHaveLength(0);
+			expect(h.ctx.armed()).toBe(1);
+		} finally { h.emit("session_stop"); }
+	}
+});
+
+test("VERDICTWAKE1: durable results survive missing watcher events; partial lines wait for completion", async () => {
+	const { repo, log } = verdictFixture("verdict-durable");
+	const h = fakeHost({ sessionEntries: verdictTodos(VERDICT_SHA.slice(0, 12)) });
+	writeFileSync(log, `release-verdict: ${VERDICT_SHA} ci_only_rc=2`);
+	await idleSeat(h, { ...SEAT, cwd: repo });
+	try {
+		advance(h, IDLE_WAKE_MS);
+		expect(h.sent).toHaveLength(0);
+		appendFileSync(log, "\n");
+		advance(h, IDLE_HEARTBEAT_MS - IDLE_WAKE_MS);
+		expect(h.sent).toHaveLength(1);
+		expect(h.sent[0]!.content).toContain(`release-verdict: ${VERDICT_SHA} ci_only_rc=2`);
+	} finally { h.emit("session_stop"); }
+});
+
+test("VERDICTWAKE1: bounded long near-miss rejects malformed verdict rows", () => {
+	const { log } = verdictFixture("verdict-malformed");
+	writeFileSync(log, `release-verdict: ${VERDICT_SHA} producer_rc=${"0".repeat(100_000)}x\n`);
+	const start = performance.now();
+	expect(matchingReleaseVerdicts(log, [`release verdict for ${VERDICT_SHA}`])).toEqual([]);
+	console.log(`VERDICTWAKE1 long near-miss: ${(performance.now() - start).toFixed(2)} ms`);
 });
