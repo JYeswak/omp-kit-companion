@@ -4,7 +4,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
-import { LIVE_READBACK_LABEL, expectedOf, liveReadback, liveReadbackAll, parseBoxes, verifyBead } from "../../src/verify.ts";
+import { LIVE_READBACK_LABEL, expectedOf, liveReadback, liveReadbackAll, mapRepoPaths, parseBoxes, verifyBead } from "../../src/verify.ts";
 import { run } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { resolveRealBr } from "../../src/kitlib/readonly-br.ts";
@@ -1308,4 +1308,98 @@ test("VERIFYSCRATCH1.exportroot: the export carries var/agent-tmp (gitignored, s
 	expect(res.code).toBe("DRY_RUN");
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
 	expect(br.acts()).toEqual([]);
+});
+
+// VERIFYABSPATH1 (ompkit-fp72.120.16.267): a repo path named absolutely, by ~ or by $HOME replays the export.
+const LIVE_PASS = "#!/bin/sh\necho ' 0 fail'\n";
+const EXPORT_FAIL = "#!/bin/sh\necho 'selftest: FAIL'\nexit 1\n";
+async function livePassExportFail(name: string): Promise<{ dir: string; sha: string }> {
+	const made = await repo(name, { "live.sh": EXPORT_FAIL }, true);
+	writeFileSync(join(made.dir, "scripts", "live.sh"), LIVE_PASS); // dirty live tree; the commit still fails
+	return made;
+}
+
+test("VERIFYABSPATH1 planted: a live-pass/export-fail absolute-path box is not PASS and names the token", async () => {
+	const { dir, sha } = await livePassExportFail("abspath-planted");
+	const token = join(dir, "scripts", "live.sh");
+	const br = fakeBr(inReview(`- [ ] [a] [build] \`sh ${token}\` -> 0 fail`));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("REWORK");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", false]]);
+	expect(res.log).toContain(`REPO_PATH_MAPPED ${JSON.stringify(token)}`);
+	expect(res.replays[0]!.detail).toContain("selftest: FAIL");
+	expect(br.state().status).toBe("rework");
+});
+
+test("VERIFYABSPATH1 control: the relative-path box on the same commit reports the export's result", async () => {
+	const { dir, sha } = await livePassExportFail("abspath-control");
+	const br = fakeBr(inReview("- [ ] [a] [build] `sh scripts/live.sh` -> 0 fail"));
+	const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+	expect(res.code).toBe("REWORK");
+	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", false]]);
+	expect(res.log).not.toContain("REPO_PATH_MAPPED");
+	// Control for the control: a committed passing script, named absolutely, still closes.
+	const ok = await repo("abspath-control-pass", {}, true);
+	const okBr = fakeBr(inReview(`- [ ] [a] [build] \`sh ${join(ok.dir, "scripts", "t.sh")}\` -> 0 fail`));
+	const closed = await verifyBead({ bead: "kit-1", exportSha: ok.sha, repo: ok.dir, actor: "Peer", env: okBr.env });
+	expect(closed.code).toBe("CLOSED");
+});
+
+test("VERIFYABSPATH1 mutant: without the mapping the planted absolute-path command reports PASS", async () => {
+	const { dir, sha } = await livePassExportFail("abspath-mutant");
+	const token = join(dir, "scripts", "live.sh");
+	const exportDir = join(base, "abspath-mutant-export");
+	mkdirSync(exportDir, { recursive: true });
+	await sh(["sh", "-c", `git -C ${JSON.stringify(dir)} archive ${sha} | tar -x -C ${JSON.stringify(exportDir)}`], base);
+	// The pre-fix replay: the unmapped command, in the export cwd, runs the live tree and passes.
+	const unmapped = await run(["sh", token], { cwd: exportDir, deadline_s: fixtureDeadlineS(30), env: { ...process.env } as Record<string, string> });
+	expect(unmapped.rc).toBe(0);
+	expect(new TextDecoder().decode(unmapped.stdout)).toContain("0 fail");
+	// The mapped command runs the export's bytes and fails.
+	const mapped = mapRepoPaths(`sh ${token}`, dir, exportDir);
+	expect(mapped.command).toBe(`sh ${join(exportDir, "scripts", "live.sh")}`);
+	const fixed = await run(["sh", join(exportDir, "scripts", "live.sh")], { cwd: exportDir, deadline_s: fixtureDeadlineS(30), env: { ...process.env } as Record<string, string> });
+	expect(fixed.rc).toBe(1);
+});
+
+test("VERIFYABSPATH1 mapping: ~, $HOME, ${HOME} and symlinked aliases map; outside, sibling-prefix and .beads tracker paths stay; unsafe export is unmapped", () => {
+	const home = join(base, "abspath-home");
+	const root = join(home, "proj");
+	mkdirSync(join(root, "scripts"), { recursive: true });
+	writeFileSync(join(root, "scripts", "x.py"), "");
+	const alias = join(home, "alias");
+	if (!existsSync(alias)) symlinkSync(root, alias);
+	const exp = join(base, "abspath-export");
+	const m = mapRepoPaths(`python3 ~/proj/scripts/x.py --a=$HOME/proj/scripts/x.py "\${HOME}/proj" '${alias}/scripts/x.py' ${root}/new/file`, root, exp, home);
+	expect(m.command).toBe(`python3 ${exp}/scripts/x.py --a=${exp}/scripts/x.py "${exp}" '${exp}/scripts/x.py' ${exp}/new/file`);
+	expect(m.unmapped).toEqual([]);
+	const keep = `br --db ${root}/.beads/beads.db show x && /usr/bin/env sh ${root}-other/x ~/other/y scripts/x.py ~user/proj $HOMER/proj https://h/proj ${home}`;
+	expect(mapRepoPaths(keep, root, exp, home)).toEqual({ command: keep, mapped: [], unmapped: [] });
+	const unsafe = mapRepoPaths(`sh ${root}/scripts/x.py`, root, join(base, "export dir"), home);
+	expect(unsafe.unmapped).toEqual([`${root}/scripts/x.py`]);
+	expect(unsafe.command).toBe(`sh ${root}/scripts/x.py`);
+	// Linear scan: a 200 KB near-miss (no boundary before any /) finishes fast.
+	const t0 = performance.now();
+	mapRepoPaths("a/".repeat(100_000), root, exp, home);
+	expect(performance.now() - t0).toBeLessThan(1_000);
+});
+
+test("VERIFYABSPATH1 unmappable: a repo path that cannot be rewritten is UNJUDGED naming the token, never PASS", async () => {
+	const { dir, sha } = await livePassExportFail("abspath-unmapped");
+	const token = join(dir, "scripts", "live.sh");
+	const br = fakeBr(inReview(`- [ ] [a] [build] \`sh ${token}\` -> 0 fail`));
+	// A scratch root with a space makes the export path shell-unsafe, so the token cannot be rewritten.
+	const unsafeRoot = join(base, "unsafe root");
+	mkdirSync(unsafeRoot, { recursive: true });
+	const prior = process.env.GRADE_WAVE_SCRATCH;
+	process.env.GRADE_WAVE_SCRATCH = unsafeRoot;
+	let res: Awaited<ReturnType<typeof verifyBead>>;
+	try {
+		res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env, dryRun: true });
+	} finally {
+		if (prior === undefined) delete process.env.GRADE_WAVE_SCRATCH; else process.env.GRADE_WAVE_SCRATCH = prior;
+	}
+	expect(res.code).toBe("ENVIRONMENT");
+	expect(res.replays.map(r => [r.letter, r.pass, r.rc])).toEqual([["a", null, null]]);
+	expect(res.replays[0]!.detail).toContain(`UNJUDGED REPO_PATH_UNMAPPED: ${JSON.stringify(token)}`);
 });

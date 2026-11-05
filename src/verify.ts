@@ -29,8 +29,9 @@
  * This grammar is defined only here: scripts/box-lint.ts runs parseBoxes and unreplayableReason
  * for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  */
-import { existsSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { run, type RunResult } from "./kitlib/run.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { checkPublishedCommits, preflightBead } from "./preflight.ts";
@@ -109,6 +110,49 @@ export function parseBoxes(acceptance: string): Box[] {
 /** The command a box names: its FIRST backticked span, or null when it names none. */
 export function commandOf(body: string): string | null {
 	return CMD.exec(body)?.[1] ?? null;
+}
+
+/** A path token: absolute, `~`, or `$HOME`/`${HOME}` rooted, starting a word or after `=`/`:`/`(`/a quote. */
+const PATH_TOKEN = /(?<=^|[\s'"=:(])(?:(?:~|\$\{HOME\}|\$HOME)(?=[\s/'";|&<>()`]|$)|\/)[^\s'";|&<>()`]*/g;
+/** A replacement the shell reads the same bare, single- or double-quoted. */
+const SHELL_SAFE = /^[A-Za-z0-9_./+@%,-]+$/;
+
+/** `path` with every existing ancestor's symlinks resolved; the missing tail is kept as written. */
+function realOrLexical(path: string): string {
+	const tail: string[] = [];
+	let at = resolve(path);
+	for (;;) {
+		if (existsSync(at)) {
+			try { return join(realpathSync(at), ...tail.reverse()); } catch { return resolve(path); }
+		}
+		const up = dirname(at);
+		if (up === at) return resolve(path);
+		tail.push(basename(at));
+		at = up;
+	}
+}
+
+/**
+ * VERIFYABSPATH1 (ompkit-fp72.120.16.267): rewrite every absolute, `~` or `$HOME` path token in `command`
+ * that resolves (symlinks followed) inside `repoRoot` to the same relative path under `exportDir`, so the
+ * replay runs the exported commit's bytes, never the live tree. Paths outside the repo stay as they are, and
+ * so does the repo's `.beads` tracker: it is live state read through the read-only br (REPLAYBR1), not code.
+ * A token whose export path is not shell-safe is returned in `unmapped`; its box is not judged.
+ */
+export function mapRepoPaths(command: string, repoRoot: string, exportDir: string, home: string = homedir()): { command: string; mapped: { token: string; to: string }[]; unmapped: string[] } {
+	const root = realOrLexical(repoRoot);
+	const mapped: { token: string; to: string }[] = [];
+	const unmapped: string[] = [];
+	const out = command.replace(PATH_TOKEN, token => {
+		const rel = relative(root, realOrLexical(token.replace(/^(?:~|\$\{HOME\}|\$HOME)/, home)));
+		if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return token;
+		if (rel === ".beads" || rel.startsWith(`.beads${sep}`)) return token;
+		const to = rel === "" ? exportDir : join(exportDir, rel);
+		if (!SHELL_SAFE.test(to)) { unmapped.push(token); return token; }
+		mapped.push({ token, to });
+		return to;
+	});
+	return { command: out, mapped, unmapped };
 }
 
 /** Why verify cannot replay a box (REPLAYABLE1); box-lint refuses and reports by the same names. */
@@ -309,14 +353,25 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 			log.push(`${tag(box)} PENDING ${box.phase} phase prerequisite unmet; not executed`);
 			continue;
 		}
-		const command = commandOf(box.body)!;
+		const named = commandOf(box.body)!;
 		const expected = expectedOf(box.body)!; // non-null: unreplayableReason refused every box without one
-		const cached = commandResults.get(command);
+		// VERIFYABSPATH1: a repo path named absolutely, by ~ or by $HOME replays the export, not the live tree.
+		const paths = mapRepoPaths(named, input.repo, exportDir, replayEnv.HOME || homedir());
+		if (paths.unmapped.length > 0) {
+			const detail = `UNJUDGED REPO_PATH_UNMAPPED: ${paths.unmapped.map(t => JSON.stringify(t)).join(", ")} names the verified repo ${input.repo} but cannot be rewritten into export ${exportDir}; not executed`;
+			environmentFailures.push(`${tag(box)} ${detail}`);
+			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: null, pass: null, detail });
+			log.push(`${tag(box)} ${detail}`);
+			continue;
+		}
+		for (const m of paths.mapped) log.push(`${tag(box)} REPO_PATH_MAPPED ${JSON.stringify(m.token)} -> ${m.to} (export, not live tree)`);
+		const command = paths.command; // what runs; `named` is the box's own text, reported everywhere
+		const cached = commandResults.get(named);
 		const reused = cached !== undefined;
 		let replay: ReplayOutcome;
 		if (cached === undefined) {
 			const started = Date.now();
-			process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(command)} elapsed=0ms verdict=RUNNING`);
+			process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(named)} elapsed=0ms verdict=RUNNING`);
 			const result = await run(["sh", "-c", command], { cwd: exportDir, deadline_s: 900, env: replayEnv, max_output_bytes: 4 * 1024 * 1024 });
 			replay = {
 				rc: result.rc,
@@ -327,7 +382,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 				out: text(result.stdout) + text(result.stderr),
 				elapsedMs: Date.now() - started,
 			};
-			commandResults.set(command, replay);
+			commandResults.set(named, replay);
 		} else {
 			replay = cached;
 		}
@@ -336,19 +391,19 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 		const environment = !v.pass && replay.rc !== null && replay.rc !== 0 && !replay.timed_out && !replay.killed && !replay.truncated && !replay.total_truncated
 			? ompEnvironmentFailure(out, replayEnv) : null;
 		if (environment !== null) {
-			if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(command)} elapsed=${elapsedMs}ms verdict=ENVIRONMENT\n`);
+			if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(named)} elapsed=${elapsedMs}ms verdict=ENVIRONMENT\n`);
 			else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=ENVIRONMENT\n`);
 			environmentFailures.push(`${tag(box)} ${environment}`);
 			const detail = `environment prerequisite unmet: ${environment}${childExcerpt(replay.rc, replay.timed_out, out)}`;
-			replays.push({ index: box.index, letter: box.letter, command, expected, rc: replay.rc, pass: null, detail });
-			log.push(`${tag(box)} ENVIRONMENT ${command}: ${detail}; needs-director`);
+			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: null, detail });
+			log.push(`${tag(box)} ENVIRONMENT ${named}: ${detail}; needs-director`);
 			continue;
 		}
-		if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(command)} elapsed=${elapsedMs}ms verdict=${v.pass ? "PASS" : "FAIL"}\n`);
+		if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(named)} elapsed=${elapsedMs}ms verdict=${v.pass ? "PASS" : "FAIL"}\n`);
 		else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=${v.pass ? "PASS" : "FAIL"}\n`);
 		const excerpt = v.pass ? "" : childExcerpt(replay.rc, replay.timed_out, out);
-		replays.push({ index: box.index, letter: box.letter, command, expected, rc: replay.rc, pass: v.pass, detail: v.detail + excerpt });
-		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${command} -> ${v.detail}${excerpt} (${elapsedMs} ms)${replay.timed_out ? " TIMEOUT" : ""}`);
+		replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: v.pass, detail: v.detail + excerpt });
+		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${named} -> ${v.detail}${excerpt} (${elapsedMs} ms)${replay.timed_out ? " TIMEOUT" : ""}`);
 	}
 	const failed = replays.filter(r => r.pass === false);
 	if (failed.length > 0) {
