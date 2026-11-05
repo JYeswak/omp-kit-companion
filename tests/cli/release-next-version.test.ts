@@ -235,7 +235,8 @@ test("AC2: a green origin commit that states the next version is cut as is, with
 	// RELCARD1 (ompkit-fp72.120.16.254): the preflight judges the exact source's release card before the keychain.
 	mkdirSync(join(f.repo, "docs/releases"), { recursive: true });
 	for (const name of ["release-card-check.py", "pysafe.py"]) copyFileSync(join(ROOT, "scripts", name), join(f.repo, "scripts", name));
-	writeFileSync(join(f.repo, "docs/releases/v1.2.4.md"), "# Release card: v1.2.4\n\n## 1. Gap lane\n\n| Bead | Defect | State |\n|---|---|---|\n| fixture-1 | a fixture defect | closed |\n\n## 2. Optimization lane\n\n| # | Idea | Measure | Evidence | Decision |\n|---|---|---|---|---|\n| 1 | FIXIDEA1 a fixture idea | a measure | a profile | applied: 10 s → 5 s |\n\n### Prereg FIXIDEA1\n\nendpoint: fixture_s\ndirection: lower\nproducer: a fixture command\nunit: s\nmde: 1 s\nmde_source: fixture\nsigma_d: 0\nsigma_source: deterministic fixture count\nalpha: 0.05\npower: 0.80\nn_pairs: 1\nstopping: fixed-n\ncontrol: paired, same host\n\n### Result FIXIDEA1\n\nncpu: 8\n\n| Pair | before | after | load1_before | load1_after |\n|---|---|---|---|---|\n| 1 | 10 | 5 | 1.0 | 1.0 |\n\n## 3. Measures\n\n| Measure | Before | After |\n|---|---|---|\n| Change lead time | 66 min | |\n\n## 4. Error budget\n\nWithin budget.\n");
+	// RELRUBRIC3: v1.2.4 is above the evidence-class gate; this deterministic fixture proves only the mechanism.
+	writeFileSync(join(f.repo, "docs/releases/v1.2.4.md"), "# Release card: v1.2.4\n\n## 1. Gap lane\n\n| Bead | Defect | State |\n|---|---|---|\n| fixture-1 | a fixture defect | closed |\n\n## 2. Optimization lane\n\n| # | Idea | Measure | Evidence | Decision |\n|---|---|---|---|---|\n| 1 | FIXIDEA1 a fixture idea | a measure | a profile | MECHANISM VERIFIED: 10 s → 5 s |\n\n### Prereg FIXIDEA1\n\nendpoint: fixture_s\ndirection: lower\nproducer: a fixture command\nunit: s\nmde: 1 s\nmde_source: fixture\nsigma_d: 0\nsigma_source: deterministic fixture count\nalpha: 0.05\npower: 0.80\nn_pairs: 1\nstopping: fixed-n\ncontrol: paired, same host\n\n### Result FIXIDEA1\n\nncpu: 8\n\n| Pair | before | after | load1_before | load1_after |\n|---|---|---|---|---|\n| 1 | 10 | 5 | 1.0 | 1.0 |\n\n## 3. Measures\n\n| Measure | Before | After |\n|---|---|---|\n| Change lead time | 66 min | |\n\n## 4. Error budget\n\nWithin budget.\n");
 	f.git(f.repo, "add", "."); f.git(f.repo, "commit", "-qm", "release card");
 	f.git(f.repo, "push", "-q", "origin", "main");
 	f.git(f.repo, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main");
@@ -244,11 +245,13 @@ test("AC2: a green origin commit that states the next version is cut as is, with
 	expect(result.rc, decode(result.stderr)).toBe(0);
 	expect(decode(result.stdout)).toContain(`source ${main} (origin/main ${main}) version 1.2.4 base v1.2.3`);
 	expect(decode(result.stdout)).toContain(`== RELEASE_CARD_OK docs/releases/v1.2.4.md at ${main}`);
+	expect(decode(result.stdout)).toContain("FIXIDEA1 MECHANISM VERIFIED (n=1, mean d 5 s, s_d 0 s, mde 1 s)");
 	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(main);
 	expect(originMain(f)).toBe(main);
 	// The explicit --source form reaches the same cut.
 	const explicit = runPreflight(f, "1.2.4", main);
 	expect(explicit.rc, decode(explicit.stderr)).toBe(0);
+	expect(decode(explicit.stdout)).toContain("FIXIDEA1 MECHANISM VERIFIED (n=1, mean d 5 s, s_d 0 s, mde 1 s)");
 	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(main);
 }, fixtureDeadlineS(120) * 1_000);
 
