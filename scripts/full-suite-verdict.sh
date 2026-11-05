@@ -762,6 +762,8 @@ else
 fi
 
 # Record the finished verdict atomically beside its evidence log. Only complete runs land here.
+# PHANTOMRED1: keep the runner's own status rows (finish_logs removes their file) for the failing list.
+suite_rows=$(cat "$SUITE_STATUS")
 finish_logs "$log_entry"
 write_complete_verdict() {
 MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
@@ -874,7 +876,7 @@ else
 	printf 'FULL-SUITE: minimum-run assessment %s\n' "$minimum_run" >&2
 	# Keep failing names beside the reused log for the pre-push gate.
 	echo "FULL-SUITE: failing tests (full log: $log_entry):" >&2
-	awk '/^[A-Za-z0-9_.\/-]+\.test\.ts:$/ { file = $0 } /^\(fail\)/ { print "  " file " " $0 }' "$log_entry" | head -n 40 >&2
-	grep -E '^RED (script|python)-suite ' "$log_entry" | sed 's/^/  /' | head -n 20 >&2
+	printf '%s\n' "$suite_rows" | (cd -- "$SCRIPT_DIR" && python3 ./full-suite-verdict-store.py failing-tests --log "$log_entry") >&2 \
+		|| echo "  (failing-test listing unavailable; read the full log)" >&2
 	exit "$code"
 fi

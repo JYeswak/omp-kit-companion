@@ -892,6 +892,28 @@ def records(repo: Path, directory: Path, judge_root: Path, tree: str | None) -> 
     return {"overall": "OK", "repo_key": repo_key(repo), "store": str(directory), "records": rows}
 
 
+# PHANTOMRED1 (ompkit-fp72.120.16.252): a suite red is listed only from the runner's own status rows.
+# The combined log also carries every suite's raw output, and a passing test whose nested fixture prints
+# "RED script-suite <name>" put a phantom red in every failing list it shared a log with.
+OUTER_SUITE_RED = re.compile(r"RED (?:script|python)-suite \S+ rc=-?[0-9]+")
+BUN_FILE_HEADER = re.compile(r"[A-Za-z0-9_./-]+\.test\.ts:")
+
+
+def failing_tests(log_text: str, status_text: str) -> list[str]:
+    """The verdict's failing-test lines: bun (fail) lines under their file header from the combined log
+    (at most 40), then the outer runner's RED suite rows from its status file (at most 20)."""
+    bun: list[str] = []
+    current = ""
+    for line in log_text.splitlines():
+        if BUN_FILE_HEADER.fullmatch(line):
+            current = line
+        if line.startswith("(fail)"):
+            bun.append(f"  {current} {line}")
+    reds = [f"  {row}" for row in status_text.splitlines() if OUTER_SUITE_RED.fullmatch(row)]
+    return bun[:40] + reds[:20]
+
+
+
 def add_store_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--cache-dir")
@@ -946,7 +968,23 @@ def main() -> int:
     minimum_cmd.add_argument("--suite-root", required=True)
     minimum_cmd.add_argument("--files", required=True)
     minimum_cmd.add_argument("--wall-ms", type=int, required=True)
+    failing_cmd = actions.add_parser("failing-tests")
+    failing_cmd.add_argument("--log", required=True)
     args = parser.parse_args()
+    if args.action == "failing-tests":
+        # The runner's status rows arrive on stdin: the verdict removes its status file with the run state.
+        try:
+            log_text = Path(args.log).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            print("VERDICT_STORE_ERROR: " + str(error), file=sys.stderr)
+            return 2
+        outcome, rows, _truncated = pysafe.read_stdin(30)
+        if outcome != pysafe.OK:
+            print(f"VERDICT_STORE_ERROR: status rows on stdin: {outcome}", file=sys.stderr)
+            return 2
+        for line in failing_tests(log_text, rows.decode("utf-8", "replace")):
+            print(line)
+        return 0
     try:
         repo = repository_root(args.repo)
         judge_root = Path(getattr(args, "judge_root", None) or Path(__file__).resolve().parent.parent).expanduser().resolve()
