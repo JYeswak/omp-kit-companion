@@ -206,8 +206,15 @@ export async function briefCandidates(contract: BriefContract, paths: readonly s
 
 /** PRIORSPAWN1: the brief contract teaches the prior-art step the spawn guard enforces. */
 export const BRIEF_PRIOR_ART_STEP = "[prior-art] Refuses: a build task naming a bead with no prior-art comment (PRIOR_ART_SPAWN_REFUSED). Comply: br comment add <id> \"prior=<repo path:line> did=<...> applied=<...>\" before spawning; a verification, diagnosis or replay brief starts with `no-edit: verify` or `no-edit: diagnose`.";
-/** SCRATCHNULL1 (ompkit-fp72.120.16.194): `jq -r .data.dir` on a refused `scratch new` yields the path `null`; teach the fail-closed form. */
-export const BRIEF_SCRATCH_STEP = "[scratch] Hazard: a refused `scratch new` piped through `jq -r .data.dir` exports TMPDIR=null and writes ./null outside owned scratch, and `export TMPDIR=$(...) || exit 1` never exits because export returns 0. Comply: TMPDIR=$(omp-kit scratch new --label <x> --print-dir) || exit 1; export TMPDIR, run inside the owning repo.";
+/**
+ * SCRATCHNULL1 (ompkit-fp72.120.16.194): `jq -r .data.dir` on a refused `scratch new` yields the path `null`; teach the
+ * fail-closed form. PRINTDIRCAP1 (ompkit-fp72.120.16.240): the taught form also keeps the release capability in an
+ * unexported shell variable, because `--print-dir` returns none and an unseated creator then has no way to release.
+ */
+export const BRIEF_SCRATCH_CREATE = "S=$(omp-kit scratch new --label <x> --json) || { printf '%s\\n' \"$S\" >&2; exit 1; }; TMPDIR=$(printf '%s' \"$S\" | jq -er .data.dir) || exit 1; CAP=$(printf '%s' \"$S\" | jq -er .data.capability) || exit 1; export TMPDIR";
+export const BRIEF_SCRATCH_RELEASE = "omp-kit scratch release \"$TMPDIR\" --capability \"$CAP\" --bin throwaway --now";
+export const BRIEF_SCRATCH_STEP = "[scratch] Hazard: a refused `scratch new` piped through `jq -r .data.dir` exports TMPDIR=null and writes ./null outside owned scratch, `export TMPDIR=$(...) || exit 1` never exits because export returns 0, and `--print-dir` returns no release capability, so a dir made that way outside a seat is left to the reaper. "
+	+ `Comply: ${BRIEF_SCRATCH_CREATE}, run inside the owning repo; keep CAP unexported and unprinted; when done: ${BRIEF_SCRATCH_RELEASE}.`;
 
 export function renderBrief(contract: BriefContract, candidates: readonly BriefCandidate[] = []): string {
 	return [`Gate contract: ${contract.repo}`, ...contract.rules.map(rule => `[${rule.member}] Refuses: ${rule.refuses}. Comply: ${rule.compliant}.`),

@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, rmSync, statfsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { incarnationSync, isDead, normalizeStart, probeIncarnationSync, type Incarnation, type Probe, type ProbeState } from "./kitlib/proc.ts";
@@ -1338,7 +1338,7 @@ export function fleetTestTmpBase(): string {
 
 export interface ScratchRootEntry {
 	root: string;
-	/** Where this root came from: override, developer, fleet-watch:<session>, herdr:<session>, chief, fleet-test-tmp or temp. */
+	/** Where this root came from: override, developer, fleet-watch:<session>, herdr:<session>, chief, registered, fleet-test-tmp or temp. */
 	sources: string[];
 }
 
@@ -1378,9 +1378,63 @@ export function fleetWatchRepos(home: string): { repo: string; source: string }[
 }
 
 /**
+ * PRINTDIRCAP1 (ompkit-fp72.120.16.240): where `scratch new` records a git repo's own var/agent-tmp that the default
+ * set does not name (~/.claude is outside ~/Developer and fleet-watch). One file per root, named by the root's
+ * sha256 and holding its path, so concurrent registrations never lose each other.
+ */
+export function scratchRootRegistryDir(env: NodeJS.ProcessEnv = process.env): string {
+	return join(env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "omp-kit", "scratch-roots");
+}
+
+/**
+ * `<repo>/var/agent-tmp` when `repo` is a git work tree top holding that dir, under the developer rule's no-symlink
+ * checks (repo, var and agent-tmp are each real); null otherwise.
+ */
+function repoScratchRoot(repo: string): string | null {
+	const root = join(repo, "var", "agent-tmp");
+	try {
+		if (!existsSync(join(repo, ".git")) || isSymlink(repo) || isSymlink(join(repo, "var")) || isSymlink(root) || !statSync(root).isDirectory()) return null;
+	} catch {
+		return null;
+	}
+	return root;
+}
+
+/** Registered roots that still pass repoScratchRoot; a record whose name is not its path's sha256 (a stage file) is ignored. */
+function registeredScratchRoots(): string[] {
+	const registry = scratchRootRegistryDir();
+	let names: string[];
+	try {
+		names = readdirSync(registry);
+	} catch {
+		return [];
+	}
+	const roots: string[] = [];
+	for (const name of names) {
+		if (name.length !== 64) continue;
+		const root = readText(join(registry, name));
+		if (root === null || !isAbsolute(root) || resolve(root) !== root || createHash("sha256").update(root, "utf8").digest("hex") !== name) continue;
+		if (basename(root) === "agent-tmp" && repoScratchRoot(dirname(dirname(root))) === root) roots.push(root);
+	}
+	return roots;
+}
+
+function registerScratchRoot(root: string): boolean {
+	const registry = scratchRootRegistryDir();
+	try {
+		mkdirSync(registry, { recursive: true, mode: 0o700 });
+		atomicReplaceBytes(join(registry, createHash("sha256").update(root, "utf8").digest("hex")), Buffer.from(root, "utf8"), { mode: 0o600, durability: "full" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Scratch roots with their sources, de-duplicated by real path so a symlink alias and its target are one root:
  * the explicit override alone, else ~/Developer/*, every repo fleet-watch.json names (outside ~/Developer too),
- * the fleet test base and the omp-* temp dirs. Without fleet-watch.json this is exactly the earlier list.
+ * every repo root `scratch new` registered from inside that repo (PRINTDIRCAP1), the fleet test base and the omp-*
+ * temp dirs. Without fleet-watch.json or registrations this is exactly the earlier list.
  */
 export function resolveScratchRootEntries(home: string): ScratchRootEntry[] {
 	const override = process.env.OMP_KIT_SCRATCH_ROOTS;
@@ -1425,6 +1479,7 @@ export function resolveScratchRootEntries(home: string): ScratchRootEntry[] {
 			continue;
 		}
 	}
+	for (const root of registeredScratchRoots()) add(root, "registered");
 	try {
 		if (statSync(fleetTestTmpBase()).isDirectory() && !isSymlink(fleetTestTmpBase())) add(fleetTestTmpBase(), "fleet-test-tmp");
 	} catch {
@@ -2706,8 +2761,10 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	// is actually a repository, rather than creating a root that the reaper cannot
 	// discover from any repository.  Programmatic callers may still provide a
 	// fixture/alternate owner path explicitly.
+	let insideRepo: boolean;
 	try {
-		if (repo === resolve(process.cwd()) && !existsSync(join(repo, ".git"))) {
+		insideRepo = repo === resolve(process.cwd());
+		if (insideRepo && !existsSync(join(repo, ".git"))) {
 			return { ok: false, dir: "", exportLine: "", reason: "cwd-not-repository" };
 		}
 	} catch {
@@ -2768,6 +2825,10 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	if (reserved + reservation > cap)
 		return { ok: false, dir: "", exportLine: "", reason: "seat-budget-exceeded",
 			detail: `seat ${seatKey} holds ${reserved} bytes of ${cap} budgeted; dir ${label} refusing (needs ${reservation}); release a dir first` };
+	// PRINTDIRCAP1: a repo opts in to registration by already holding var/agent-tmp; what this call creates for a root
+	// it then refuses is removed again, so a refusal never leaves the opt-in behind for the next call.
+	const optedIn = repoScratchRoot(repo) === root;
+	const created = [root, join(repo, "var")].filter(path => !existsSync(path));
 	try {
 		mkdirSync(root, { recursive: true, mode: 0o700 });
 	} catch {
@@ -2775,8 +2836,22 @@ export function createScratch(label: string, repoDir: string, deps: InspectDeps,
 	}
 	const home = process.env.HOME ?? homedir();
 	if (!scratchRootForDirectory(dir, home)) {
-		return { ok: false, dir: "", exportLine: "", reason: "scratch-root-unrecognized",
-			detail: `Root ${root} is not in the release root set. Configure OMP_KIT_SCRATCH_ROOTS with this and the other roots you need for both create and release, or use a registered scratch root; no scratch directory was created.` };
+		const override = process.env.OMP_KIT_SCRATCH_ROOTS;
+		const overridden = override !== undefined && override !== "";
+		const unrecognized = (): ScratchCreateResult => {
+			for (const path of created) {
+				try { rmdirSync(path); } catch { /* not empty or already gone: keep it */ }
+			}
+			return { ok: false, dir: "", exportLine: "", reason: "scratch-root-unrecognized",
+				detail: `Root ${root} is not in the release root set. Configure OMP_KIT_SCRATCH_ROOTS with this and the other roots you need for both create and release, or use a registered scratch root${insideRepo && !overridden ? `, or create ${root} in this repository and rerun here to register it` : ""}; no scratch directory was created.` };
+		};
+		// PRINTDIRCAP1 (ompkit-fp72.120.16.240): the caller's own git repo (~/.claude, outside ~/Developer and
+		// fleet-watch) that already holds var/agent-tmp has that root registered, so release and the reaper find it from
+		// any cwd. Only the repo the caller runs inside, never under the explicit override, which replaces the set.
+		if (!insideRepo || overridden || !optedIn) return unrecognized();
+		if (!registerScratchRoot(root)) return { ok: false, dir: "", exportLine: "", reason: "scratch-root-register-failed",
+			detail: `Root ${root} could not be recorded in ${scratchRootRegistryDir()}, so release and the reaper could not find it; no scratch directory was created.` };
+		if (!scratchRootForDirectory(dir, home)) return unrecognized();
 	}
 	try {
 		mkdirSync(dir, { mode: 0o700 });
@@ -3236,7 +3311,7 @@ export function summarizeScratch(sessions: ScratchVerdict[], roots: string[]): S
 }
 
 export type ScratchPressure = "NORMAL" | "WARN" | "RECLAIM" | "UNKNOWN";
-/** `sources` records where the root came from (override, developer, fleet-watch:<session>, herdr:<session>, chief, fleet-test-tmp, temp, system-work). */
+/** `sources` records where the root came from (override, developer, fleet-watch:<session>, herdr:<session>, chief, registered, fleet-test-tmp, temp, system-work). */
 export interface ScratchRootMetric { root: string; free_pct: number | null; scratch_gb: number; sources: string[] }
 export interface QuarantineBucket { entries: number; bytes: number }
 export interface QuarantineBucketReport {

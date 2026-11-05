@@ -7,12 +7,14 @@ import { chmodSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, openS
 import { join, resolve } from "node:path";
 import {
 	applyQuarantineExpiry, createScratch, defaultLiveness, defaultRunner, inspectSession, ownerIncarnationState, parseOwnerFile, probeOwner, quarantineDir,
-	quarantineEntryFor, reapLogPath, releaseScratch, type ApplyDeps, type InspectDeps, type LivenessDeps,
+	quarantineEntryFor, reapLogPath, releaseScratch, resolveScratchRootEntries, type ApplyDeps, type InspectDeps, type LivenessDeps,
 } from "../../src/scratch.ts";
 import { incarnation, type Incarnation, type Probe, type ProbeState } from "../../src/kitlib/proc.ts";
 import { run, type RunResult } from "../../src/kitlib/run.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+import { BRIEF_SCRATCH_CREATE, BRIEF_SCRATCH_RELEASE, BRIEF_SCRATCH_STEP } from "../../src/brief.ts";
+import { createHash } from "node:crypto";
 afterAll(cleanupAllOwnedTmp);
 
 const repo = resolve(import.meta.dir, "../..");
@@ -453,3 +455,151 @@ test("SCRATCHNULL1 control: inside a repo the idiom yields an owned dir under va
 	expect(existsSync(join(fixture.stdout, ".owner")) && existsSync(join(fixture.stdout, "out"))).toBe(true);
 	expect(existsSync(join(inside, "null"))).toBe(false);
 }, fixtureDeadlineS(60) * 1000);
+
+// PRINTDIRCAP1 (ompkit-fp72.120.16.240): the brief taught `--print-dir`, which returns no release capability, so a dir an
+// unseated agent made that way could be released by nobody and waited for the reaper. The taught idiom now keeps the
+// capability (--json into a variable, read with `jq -e`); release authority is unchanged: seat or capability. Each
+// fixture runs the brief's own constants through an `omp-kit` shim, with no seat (no agent name, no session claim).
+const unseated = { AGENT_NAME: "", BR_ACTOR: "", BR_AGENT_NAME: "", PI_SESSION_ID: "", PI_SESSION_FILE: "", OMP_KIT_SCRATCH_CAPABILITY: "" };
+function shimmed(dir: string): string {
+	const bin = join(dir, "bin");
+	mkdirSync(bin, { recursive: true });
+	writeFileSync(join(bin, "omp-kit"), '#!/bin/sh\nexec "$KIT_BUN" "$KIT_CLI" "$@"\n');
+	chmodSync(join(bin, "omp-kit"), 0o755);
+	return bin;
+}
+let scripts = 0;
+/** The script body is the brief's own text, built at runtime, so it is written to a fixture file and run as `/bin/sh FILE`. */
+async function runScript(cwd: string, body: string, env: Record<string, string>): Promise<Ran> {
+	const bin = shimmed(cwd);
+	const file = join(bin, `script.${++scripts}.sh`);
+	writeFileSync(file, `${body}\n`);
+	return ran(await run(["/bin/sh", file], { deadline_s: fixtureDeadlineS(60), cwd,
+		env: fixtureEnv(cwd, { ...unseated, PATH: `${bin}:${process.env.PATH ?? ""}`, ...env }) }));
+}
+/** One fixture repo with its own scratch root and an `omp-kit` shim; `sh` runs a script there as an unseated caller. */
+function printDirFixture(label: string) {
+	const inside = tempDir(label);
+	mkdirSync(join(inside, ".git"));
+	const root = join(inside, "var", "agent-tmp");
+	const sh = (body: string, extra: Record<string, string> = {}): Promise<Ran> =>
+		runScript(inside, body, { OMP_KIT_SCRATCH_ROOTS: root, OWNER_COPY: join(inside, "owner.copy"), ...extra });
+	return { inside, root, sh };
+}
+const create = BRIEF_SCRATCH_CREATE.replace("<x>", "printdircap");
+const output = (out: Ran) => `${out.stdout}\n${out.stderr}`;
+
+test("PRINTDIRCAP1 planted: a dir made by the brief's idiom is released --now by its unseated creator, and the capability is never printed", async () => {
+	expect(BRIEF_SCRATCH_STEP).toContain(BRIEF_SCRATCH_CREATE);
+	expect(BRIEF_SCRATCH_STEP).toContain(BRIEF_SCRATCH_RELEASE);
+	const { root, sh, inside } = printDirFixture("printdircap-planted");
+	const out = await sh(`${create}; mkdir -p "$TMPDIR/out" || exit 8; cp "$TMPDIR/.owner" "$OWNER_COPY" || exit 9; `
+		+ `${BRIEF_SCRATCH_RELEASE} >&2 || exit 10; test ! -e "$TMPDIR" || exit 11; printf %s "$TMPDIR"`);
+	expect({ code: out.code, ...(out.code === 0 ? {} : { output: output(out) }) }).toEqual({ code: 0 });
+	expect(out.stdout.startsWith(join(root, "printdircap."))).toBe(true);
+	expect(out.stdout).toMatch(/\/printdircap\.\d+$/);
+	expect(existsSync(out.stdout)).toBe(false);
+	const recorded = readFileSync(join(inside, "owner.copy"), "utf8").match(/"capability_sha256":\s*"([0-9a-f]{64})"/)?.[1];
+	expect(recorded).toMatch(/^[0-9a-f]{64}$/);
+	// The capability sits only in the creator's unexported variable: no printed 64-hex token hashes to the recorded one.
+	for (const token of output(out).match(/[0-9a-f]{64}/g) ?? [])
+		expect(new Bun.CryptoHasher("sha256").update(token).digest("hex")).not.toBe(recorded);
+	// SCRATCHNULL1 kept: outside a repo the same idiom exits at the create, before any write, and leaves no ./null.
+	const outside = tempDir("printdircap-outside");
+	const refused = await runScript(outside, `${create}; mkdir -p "$TMPDIR/out"; printf %s "$TMPDIR"`, {});
+	expect({ code: refused.code, stdout: refused.stdout }).toEqual({ code: 1, stdout: "" });
+	expect(["null", "out", "var"].some(name => existsSync(join(outside, name)))).toBe(false);
+}, fixtureDeadlineS(120) * 1000);
+
+test("PRINTDIRCAP1 control: another session's release of that dir is still refused caller-not-owner, with no token or with another dir's", async () => {
+	const { sh, inside } = printDirFixture("printdircap-control");
+	const made = await sh(`${create}; printf %s "$TMPDIR"`);
+	expect(made.code).toBe(0);
+	const dir = made.stdout;
+	expect(existsSync(join(dir, ".owner"))).toBe(true);
+	const other = await kit(inside, ["--json"], { ...unseated, OMP_KIT_SCRATCH_ROOTS: join(inside, "var", "agent-tmp") });
+	const otherCapability = other.stdout.match(/"capability":\s*"([0-9a-f]{64})"/)?.[1] ?? "";
+	expect(otherCapability).toMatch(/^[0-9a-f]{64}$/);
+	for (const extra of [{ PI_SESSION_ID: "othersession-0001" }, { PI_SESSION_ID: "othersession-0001", OMP_KIT_SCRATCH_CAPABILITY: otherCapability }]) {
+		const refused = await sh(`omp-kit scratch release "$DIR" --bin throwaway --now`, { DIR: dir, ...extra });
+		expect(refused.code).not.toBe(0);
+		expect(output(refused)).toContain("caller-not-owner");
+		expect(existsSync(join(dir, ".owner"))).toBe(true);
+	}
+}, fixtureDeadlineS(120) * 1000);
+
+test("PRINTDIRCAP1 mutant: with the capability carry removed from the taught release, the creator itself is refused caller-not-owner and the dir stays", async () => {
+	const mutant = BRIEF_SCRATCH_RELEASE.replace(' --capability "$CAP"', "");
+	expect(mutant).not.toBe(BRIEF_SCRATCH_RELEASE);
+	const { sh } = printDirFixture("printdircap-mutant");
+	const out = await sh(`${create}; printf '%s\\n' "$TMPDIR"; ${mutant} >&2; echo "rc=$?"`);
+	const [dir, rc] = out.stdout.trim().split("\n");
+	expect(rc).toMatch(/^rc=[1-9]\d*$/);
+	expect(out.stderr).toContain("caller-not-owner");
+	expect(existsSync(join(dir!, ".owner"))).toBe(true);
+}, fixtureDeadlineS(120) * 1000);
+
+// PRINTDIRCAP1 [b]: `scratch new` from the top of a git repo the default root set does not name (~/.claude) records that
+// repo's own var/agent-tmp, so release and the reaper find it from any cwd; outside a repo it is still refused. Each
+// fixture has its own HOME (no ~/Developer, no fleet-watch) and state, and no OMP_KIT_SCRATCH_ROOTS override.
+function dotRepoFixture(label: string) {
+	const home = tempDir(label);
+	const repo = join(home, ".claude");
+	const root = join(repo, "var", "agent-tmp");
+	mkdirSync(join(repo, ".git"), { recursive: true });
+	mkdirSync(root, { recursive: true });
+	const state = join(home, ".state");
+	const env = { HOME: home, XDG_STATE_HOME: state, XDG_CONFIG_HOME: join(home, ".config"), OMP_KIT_SCRATCH_ROOTS: "",
+		OMP_KIT_FLEET_WATCH_CONFIG: join(home, "fleet-watch.json") };
+	const record = join(state, "omp-kit", "scratch-roots", createHash("sha256").update(root, "utf8").digest("hex"));
+	return { home, repo, root, state, env, record };
+}
+
+test("PRINTDIRCAP1 planted: scratch new inside a non-companion git repo with var/agent-tmp (the ~/.claude shape) is admitted there, and released --now from outside it", async () => {
+	const f = dotRepoFixture("printdircap-dotrepo");
+	const out = await runScript(f.repo, `${create}; cd "$HOME" || exit 8; ${BRIEF_SCRATCH_RELEASE} >&2 || exit 10; test ! -e "$TMPDIR" || exit 11; printf %s "$TMPDIR"`, f.env);
+	expect({ code: out.code, ...(out.code === 0 ? {} : { output: output(out) }) }).toEqual({ code: 0 });
+	expect(out.stdout.startsWith(join(f.root, "printdircap."))).toBe(true);
+	expect(out.stdout).toMatch(/\/printdircap\.\d+$/);
+	expect(readFileSync(f.record, "utf8")).toBe(f.root);
+	// The reaper's root set (what plan and apply walk) names it from any cwd, as a registered root.
+	process.env.XDG_STATE_HOME = f.state;
+	delete process.env.OMP_KIT_SCRATCH_ROOTS;
+	expect(resolveScratchRootEntries(f.home).find(entry => entry.root === f.root)?.sources).toContain("registered");
+}, fixtureDeadlineS(120) * 1000);
+
+test("PRINTDIRCAP1 control: outside any repo scratch new is still refused, a repo without var/agent-tmp is refused, and only the repo the caller is inside gets recorded", async () => {
+	const f = dotRepoFixture("printdircap-dotrepo-control");
+	const refused = await runScript(f.home, `${create}; mkdir -p "$TMPDIR/out"; printf %s "$TMPDIR"`, f.env);
+	expect({ code: refused.code, stdout: refused.stdout }).toEqual({ code: 1, stdout: "" });
+	expect(refused.stderr).toContain("cwd-not-repository");
+	expect(["null", "out", "var"].some(name => existsSync(join(f.home, name))) || existsSync(f.record)).toBe(false);
+	// A git repo that has not opted in (no var/agent-tmp) is refused, twice: the refusal leaves no var behind.
+	const bare = join(f.home, "bare");
+	mkdirSync(join(bare, ".git"), { recursive: true });
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const notOptedIn = await runScript(bare, `${create}; printf %s "$TMPDIR"`, f.env);
+		expect({ code: notOptedIn.code, stdout: notOptedIn.stdout }).toEqual({ code: 1, stdout: "" });
+		expect(notOptedIn.stderr).toContain("scratch-root-unrecognized");
+		expect(existsSync(join(bare, "var"))).toBe(false);
+	}
+	const other = join(f.home, "work");
+	mkdirSync(join(other, ".git"), { recursive: true });
+	mkdirSync(join(other, "var", "agent-tmp"), { recursive: true });
+	const made = await runScript(other, `${create}; printf %s "$TMPDIR"`, f.env);
+	expect(made.code).toBe(0);
+	expect(made.stdout.startsWith(join(other, "var", "agent-tmp", "printdircap."))).toBe(true);
+	expect(existsSync(f.record)).toBe(false);
+	process.env.XDG_STATE_HOME = f.state;
+	delete process.env.OMP_KIT_SCRATCH_ROOTS;
+	expect(resolveScratchRootEntries(f.home).some(entry => entry.root === f.root)).toBe(false);
+}, fixtureDeadlineS(120) * 1000);
+
+test("PRINTDIRCAP1 mutant: with the recording bypassed (an explicit OMP_KIT_SCRATCH_ROOTS replaces the set), the same repo is refused scratch-root-unrecognized and nothing is created or recorded", async () => {
+	const f = dotRepoFixture("printdircap-dotrepo-mutant");
+	const refused = await runScript(f.repo, `${create}; printf %s "$TMPDIR"`, { ...f.env, OMP_KIT_SCRATCH_ROOTS: join(f.home, "elsewhere") });
+	expect({ code: refused.code, stdout: refused.stdout }).toEqual({ code: 1, stdout: "" });
+	expect(refused.stderr).toContain("scratch-root-unrecognized");
+	expect(readdirSync(f.root)).toEqual([]);
+	expect(existsSync(f.record)).toBe(false);
+}, fixtureDeadlineS(120) * 1000);

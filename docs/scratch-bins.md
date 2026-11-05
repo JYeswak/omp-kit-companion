@@ -37,19 +37,25 @@ A hold outlives its dead owner until it expires, and shows as `LIVE held-by-bead
 
 ## Scratch roots
 
-`scratch new`, `release`, `use`, `unuse` and `plan` share the same root set. By default it includes existing `~/Developer/*/var/agent-tmp` roots, roots for repositories named by the fleet-watch configuration, the fleet-test root, and `omp-*` directories under `TMPDIR` or `/tmp`. `OMP_KIT_SCRATCH_ROOTS` replaces that default set; it is a path-delimited list, not an additive root.
+`scratch new`, `release`, `use`, `unuse` and `plan` share the same root set. By default it includes existing `~/Developer/*/var/agent-tmp` roots, roots for repositories named by the fleet-watch configuration, registered repository roots, the fleet-test root, and `omp-*` directories under `TMPDIR` or `/tmp`. `OMP_KIT_SCRATCH_ROOTS` replaces that default set; it is a path-delimited list, not an additive root.
 
-`scratch new` creates a task directory only when its `<repo>/var/agent-tmp` root is discoverable by `scratch release`. If it is not, the command returns `SCRATCH_NEW_REFUSED` with `scratch-root-unrecognized` and the root to add to the complete `OMP_KIT_SCRATCH_ROOTS` list. It may create the empty `var/agent-tmp` parent, but not the task directory or `.owner`. Use the same root configuration for creation and later release, or run from a registered root. `scratch plan --json` reports the active roots.
+A registered root is a git repository's own `var/agent-tmp` (PRINTDIRCAP1). Suppose `scratch new` runs from the top of a git repository that already holds `var/agent-tmp` and whose root the default set does not name, such as `~/.claude`. It records that root under `$XDG_STATE_HOME/omp-kit/scratch-roots` (default `~/.local/state/omp-kit/scratch-roots`). From then on, release and the reaper find the root from any working directory. A repository opts in by holding `var/agent-tmp`; one without it is refused. Only the repository the caller runs inside is recorded. A recorded root whose repository, `var` or `var/agent-tmp` is gone or has become a symlink no longer counts. Nothing is recorded while `OMP_KIT_SCRATCH_ROOTS` is set.
+
+`scratch new` creates a task directory only when its `<repo>/var/agent-tmp` root is discoverable by `scratch release`. If it is not, the command returns `SCRATCH_NEW_REFUSED` with `scratch-root-unrecognized` and the root to add to the complete `OMP_KIT_SCRATCH_ROOTS` list. It creates no task directory or `.owner`, and removes any empty `var/agent-tmp` or `var` it made for the refused root. If recording the root fails, it returns `scratch-root-register-failed` and creates nothing. Use the same root configuration for creation and later release, or run from a registered root. `scratch plan --json` reports the active roots and their sources.
 
 ### Setting TMPDIR
 
-`omp-kit scratch new --label X --print-dir` follows mktemp's contract (SCRATCHNULL1): it prints only the absolute owned dir and exits 0, or prints nothing on stdout, the reason on stderr, and exits nonzero. Set TMPDIR fail-closed with the assignment apart from the export, because `export`'s own status is 0:
+Set TMPDIR fail-closed and keep the release capability (PRINTDIRCAP1). Capture `--json` in a variable, then read each field with `jq -e`, so a refusal fails the assignment instead of becoming the path `null`; a refused create prints its JSON reason on stderr. Keep each assignment apart from the export, because `export`'s own status is 0. Keep `CAP` unexported and unprinted:
 
 ```
-TMPDIR=$(omp-kit scratch new --label X --print-dir) || exit 1; export TMPDIR
+S=$(omp-kit scratch new --label X --json) || { printf '%s\n' "$S" >&2; exit 1; }; TMPDIR=$(printf '%s' "$S" | jq -er .data.dir) || exit 1; CAP=$(printf '%s' "$S" | jq -er .data.capability) || exit 1; export TMPDIR
+# ... work under $TMPDIR ...
+omp-kit scratch release "$TMPDIR" --capability "$CAP" --bin throwaway --now
 ```
 
-Never pipe `--json` through `jq -r .data.dir`: a refusal becomes the path `null`. `--print-dir` does not print the release capability, so release by the owning seat, or use `--json` to keep it. `--print-dir` and `--json` are exclusive.
+Another session without that capability is refused `caller-not-owner`. Never pipe `--json` through `jq -r .data.dir`: a refusal becomes the path `null`.
+
+`omp-kit scratch new --label X --print-dir` follows mktemp's contract (SCRATCHNULL1): it prints only the absolute owned dir and exits 0, or prints nothing on stdout, the reason on stderr, and exits nonzero. It prints no release capability, so only the creating seat incarnation (AGENT_NAME plus its held omp session lease) can release the dir. A dir made with it outside a seat can be released by nobody and waits for the reaper. `--print-dir` and `--json` are exclusive.
 
 ## Exporting a commit
 
