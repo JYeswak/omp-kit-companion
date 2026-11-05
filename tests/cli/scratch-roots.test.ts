@@ -1,6 +1,7 @@
 // ompkit-774u.9.4 ROOTS1: scratch roots come from the fleet's repos, not only a ~/Developer glob. A repo that
 // fleet-watch.json names outside ~/Developer is inspected, its source is recorded, a symlink alias and its target
 // are one root, and a stock user without fleet-watch.json gets exactly the earlier roots.
+import { createHash } from "node:crypto";
 import { afterEach, expect, test } from "bun:test";
 import { lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
@@ -32,6 +33,9 @@ function fixtureHome(): string {
 	delete process.env.OMP_KIT_SCRATCH_ROOTS;
 	delete process.env.OMP_KIT_FLEET_WATCH_CONFIG;
 	process.env.TMPDIR = tmp;
+	// ROOTSHERMETIC1: an empty fixture state dir, so the machine's scratch-root registry (scratch new) is not read.
+	process.env.XDG_STATE_HOME = join(home, ".local", "state");
+	mkdirSync(process.env.XDG_STATE_HOME, { recursive: true });
 	return home;
 }
 function repoWithScratch(parent: string, name: string): string {
@@ -154,6 +158,34 @@ test("without fleet-watch.json the roots equal the earlier list exactly, in orde
 	expect(resolveScratchRoots(home)).toEqual(earlierRoots(home));
 	expect(resolveScratchRoots(home).some((root) => root.includes("linkproj"))).toBe(false);
 	expect(resolveScratchRootEntries(home).filter((entry) => entry.root.startsWith(join(home, "Developer"))).map((entry) => entry.sources)).toEqual([["developer"], ["developer"]]);
+});
+
+/** A registry under `state` holding one registered real root (a git repo top with var/agent-tmp), as scratch new writes it. */
+function plantRegisteredRoot(state: string): string {
+	const parent = fixtureDir("roots-registered");
+	cleanup.push(parent);
+	const repo = repoWithScratch(parent, "registered");
+	mkdirSync(join(repo, ".git"));
+	const root = join(repo, "var", "agent-tmp");
+	const registry = join(state, "omp-kit", "scratch-roots");
+	mkdirSync(registry, { recursive: true });
+	writeFileSync(join(registry, createHash("sha256").update(root, "utf8").digest("hex")), root);
+	return root;
+}
+
+test("ROOTSHERMETIC1: an ambient registered root leaves the earlier list intact under the fixture state; without the override it leaks in", () => {
+	const ambient = fixtureDir("roots-ambient-state");
+	cleanup.push(ambient);
+	const root = plantRegisteredRoot(ambient);
+	process.env.XDG_STATE_HOME = ambient;
+	const home = fixtureHome();
+	repoWithScratch(join(home, "Developer"), "alpha");
+	expect(resolveScratchRoots(home)).toEqual(earlierRoots(home));
+	expect(resolveScratchRoots(home)).not.toContain(root);
+	// Mutant: fixtureHome without the XDG override reads the ambient registry, so the earlier-list case would fail.
+	process.env.XDG_STATE_HOME = ambient;
+	expect(resolveScratchRoots(home)).toContain(root);
+	expect(resolveScratchRoots(home)).not.toEqual(earlierRoots(home));
 });
 
 test("an unusable fleet-watch.json, a relative repo, a missing or symlinked scratch dir and the override change nothing", () => {
