@@ -33,6 +33,9 @@ JUDGING_FILES = (
     "scripts/fresh-gate.sh", "scripts/suite-metrics.py",
     "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
     "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh",
+    # SUITESERIAL1 (ompkit-fp72.120.16.264): the suite lease the runner takes and the kitlib lock and process
+    # identity it uses, so land's archived judge carries them and a lease change never reuses a verdict.
+    "scripts/suite-lease.sh", "scripts/kitlib_lock.py", "scripts/kitlib_proc.py",
     "scripts/test-budget.ts",
     "scripts/kitlib-ratchet-signal-baseline.json",
     ".github/test-budget.json",

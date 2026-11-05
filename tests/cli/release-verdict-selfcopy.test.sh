@@ -23,6 +23,11 @@ git -C "$repo" config user.email t@example.invalid
 git -C "$repo" config user.name t
 cp "${RV_UNDER_TEST:-$KITREPO/scripts/release-verdict.sh}" "$repo/scripts/release-verdict.sh"
 cp "$KITREPO/scripts/kitlib-tmp.sh" "$KITREPO/scripts/kitlib-shimpath.sh" "$repo/scripts/"
+# SUITESERIAL1: the real suite lease and its kitlib helpers, in a lease dir of this test's own.
+cp "$KITREPO/scripts/suite-lease.sh" "$KITREPO/scripts/kitlib_lock.py" "$KITREPO/scripts/kitlib_proc.py" \
+	"$KITREPO/scripts/kitlib_run.py" "$KITREPO/scripts/pysafe.py" "$repo/scripts/"
+FULL_SUITE_LEASE_DIR="$TMP/lease"
+export FULL_SUITE_LEASE_DIR
 cat >"$repo/scripts/full-suite-verdict.sh" <<'EOF'
 #!/bin/sh
 commit=""
@@ -43,14 +48,18 @@ sh "$repo/scripts/release-verdict.sh" --commit "$c1" --no-fetch >"$TMP/out" 2>&1
 holder=$!
 i=0
 while [ ! -f "$RV_STARTED" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+# The rewrite outgrows the script (21-byte lines, twice its size plus 400 lines): a fixed 400 lines (8.4 KB)
+# stopped reaching the old read offsets once the script grew past that, and a non-copying mutant passed.
+lines=$(( $(wc -c <"$repo/scripts/release-verdict.sh") * 2 / 21 + 400 ))
 n=0
-while [ "$n" -lt 400 ]; do printf 'printf "REWRITTEN\\n"\n'; n=$((n + 1)); done >"$TMP/rewrite"
+while [ "$n" -lt "$lines" ]; do printf 'printf "REWRITTEN\\n"\n'; n=$((n + 1)); done >"$TMP/rewrite"
 cat "$TMP/rewrite" >"$repo/scripts/release-verdict.sh"
 wait "$holder"
 rc=$?
-# Exactly the run's own two lines: no REWRITTEN, no parse error from reading new bytes at old offsets.
-[ "$rc" = 0 ] && grep -qx "judged $c1" "$RV_LOG" && [ "$(grep -c . "$TMP/out")" = 2 ] \
-	&& [ "$(grep -c '^release-verdict: ' "$TMP/out")" = 2 ]
+# Exactly the run's own three lines (its suite lease, the judging line, the producer status): no REWRITTEN,
+# no parse error from reading new bytes at old offsets.
+[ "$rc" = 0 ] && grep -qx "judged $c1" "$RV_LOG" && [ "$(grep -c . "$TMP/out")" = 3 ] \
+	&& [ "$(grep -c '^release-verdict: ' "$TMP/out")" = 3 ] && grep -q '^release-verdict: suite lease held for ' "$TMP/out"
 ok $? "running-verdict-ignores-rewrite: rc=$rc out=$(cat "$TMP/out")"
 set -- "$repo"/.git/omp-kit/release-verdict.run.*
 [ ! -e "$1" ]

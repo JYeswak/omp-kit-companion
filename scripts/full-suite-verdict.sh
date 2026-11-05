@@ -28,10 +28,17 @@
 # FULL_SUITE_VERDICT_CACHE_DIR overrides the configured store for isolated tests and operators.
 # Otherwise scripts/full-suite-verdict-store.py uses
 # $XDG_CONFIG_HOME/omp-kit/full-suite-verdict.json and $XDG_STATE_HOME/omp-kit/full-suite-verdicts.
-# Files share FULL_SUITE_JOBS workers (default ncpu/4 clamped to 2..6; see the measurement at pool_default).
+# Files share FULL_SUITE_JOBS workers (default ncpu/4 clamped to 2..6; see the measurement at pool_default),
+# and no width exceeds 6 (SUITESERIAL1).
 # Unknown files run first, then longest recorded elapsed time for this judge/role.
 # Suite bound: FULL_SUITE_TIMEOUT_SECS (default 1800). The suite runs at nice 10 inside the gate's
 # own admission; it takes no heavy slot.
+# SUITESERIAL1 (ompkit-fp72.120.16.264): a run that needs a suite takes the machine-wide suite lease
+# (scripts/suite-lease.sh) after the cache misses; a request for the exact tree and role of the running
+# holder joins it and reads its verdict, and any other waits in a bounded queue or exits 75 with
+# SUITE_LEASE_QUEUE_FULL or SUITE_LEASE_WAIT_TIMEOUT. Cache hits take no lease. A judge whose
+# JUDGING_FILES predate the lease prints SUITE_LEASE_ABSENT and runs unserialized; one whose closure
+# lists scripts/suite-lease.sh refuses when it is missing.
 set -eu
 umask 077
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd -P)
@@ -127,6 +134,19 @@ case "$tree" in *[!0-9a-f]*|???????????????????????????????????????) fail "candi
 [ -f "$SCRIPT_DIR/full-suite-verdict.sh" ] || { fail "judging script is absent beside the gate"; exit 1; }
 [ -f "$SCRIPT_DIR/full-suite-verdict-store.py" ] || { fail "verdict store helper is absent beside the gate"; exit 1; }
 [ -f "$SCRIPT_DIR/fresh-gate.sh" ] || { fail "scripts/fresh-gate.sh is absent beside the gate"; exit 1; }
+# SUITESERIAL1: a judge whose JUDGING_FILES list the suite lease must carry it; only a closure that
+# predates the lease (an old export or a partial copy of one) may run without it, and says so below.
+LEASE_PRESENT=1
+if [ ! -f "$SCRIPT_DIR/suite-lease.sh" ]; then
+	lease_closure=$(PYTHONPATH="$SCRIPT_DIR" python3 -B -m suite-metrics judging-files) || {
+		fail "the judging closure is unreadable, so a missing scripts/suite-lease.sh cannot be excused"; exit 1;
+	}
+	if printf '%s\n' "$lease_closure" | grep -qx 'scripts/suite-lease.sh'; then
+		fail "SUITE_LEASE_MISSING: scripts/suite-lease.sh is absent beside the gate, but this judge's JUDGING_FILES list it"
+		exit 1
+	fi
+	LEASE_PRESENT=0
+fi
 checks=$(python3 "$SCRIPT_DIR/suite-metrics.py" identity --root "$SCRIPT_DIR/.." --scope full) || {
 	fail "the complete judging dependency identity is unreadable"; exit 1;
 }
@@ -134,6 +154,8 @@ runtime=$(python3 "$SCRIPT_DIR/suite-metrics.py" runtime) || {
 	fail "the complete judging runtime identity is unreadable"; exit 1;
 }
 if [ -z "$CACHE_DIR" ]; then CACHE_DIR=${FULL_SUITE_VERDICT_CACHE_DIR:-}; fi
+# An explicit store is an isolated one (tests, fixtures); its suite lease lives beside it (suite-lease.sh).
+STORE_OVERRIDE=$CACHE_DIR
 if [ -n "$CACHE_DIR" ]; then
 	entry=$(python3 "$SCRIPT_DIR/full-suite-verdict-store.py" path --repo "$ROOT" --tree "$tree" \
 		--role "$JUDGE_ROLE" --checks "$checks" --runtime "$runtime" --judge-root "$SCRIPT_DIR/.." \
@@ -152,19 +174,37 @@ mkdir -p "$CACHE_DIR" || { fail "verdict store is not writable: $CACHE_DIR"; exi
 
 # A record is reusable only after the canonical store validates its role, judge/runtime identity,
 # exact commit suite set, complete measured rows and paired log digest.
-cached=MISS
-if [ -f "$entry" ]; then
+# verdict_lookup: set cached to PASS, FAIL <rc> or MISS for this exact tree, role and identity.
+verdict_lookup() {
+	cached=MISS
+	[ -f "$entry" ] || return 0
 	if ! cached=$(python3 "$SCRIPT_DIR/full-suite-verdict-store.py" lookup --repo "$ROOT" \
 		--tree "$tree" --role "$JUDGE_ROLE" --checks "$checks" --runtime "$runtime" \
 		--judge-root "$SCRIPT_DIR/.." --commit "$COMMIT" --cache-dir "$CACHE_DIR"); then
 		fail "shared verdict lookup failed"
 		exit 1
 	fi
-fi
+}
+# verdict_reuse: report a reusable verdict and exit with it; return for a miss and for a FAIL being rerun.
+verdict_reuse() {
+	case "$cached" in
+		PASS)
+			echo "FULL-SUITE: VERDICT REUSED PASS tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime"
+			exit 0 ;;
+		FAIL*)
+			[ "$RERUN" = 0 ] || return 0
+			code=$(printf '%s' "$cached" | cut -d' ' -f2)
+			case "$code" in ''|*[!0-9]*|0) code=1 ;; esac
+			[ "$code" -gt 125 ] && code=1
+			echo "FULL-SUITE: VERDICT REUSED FAIL tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime producer_rc=$code; the push is refused without rerun" >&2
+			exit "$code" ;;
+		MISS) return 0 ;;
+		*) fail "shared verdict lookup returned an invalid result"; exit 1 ;;
+	esac
+}
+verdict_lookup
+verdict_reuse
 case "$cached" in
-	PASS)
-		echo "FULL-SUITE: VERDICT REUSED PASS tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime"
-		exit 0 ;;
 	FAIL*)
 		if [ "$RERUN" = 1 ]; then
 			# Preserve the complete superseded FAIL and its matching log before rerunning.
@@ -189,16 +229,53 @@ case "$cached" in
 			[ -n "$RERUN_ACTOR" ] || RERUN_ACTOR=unknown
 			export SUPERSEDED_DIGEST="$superseded_digest" SUPERSEDED_FILE="$SUPERSEDED_BASE.json"
 			echo "FULL-SUITE: RERUN reason='$RERUN_REASON' actor='$RERUN_ACTOR' superseded=$SUPERSEDED_BASE.json; running the complete suite again"
-		else
-			code=$(printf '%s' "$cached" | cut -d' ' -f2)
-			case "$code" in ''|*[!0-9]*|0) code=1 ;; esac
-			[ "$code" -gt 125 ] && code=1
-			echo "FULL-SUITE: VERDICT REUSED FAIL tree=$tree role=$JUDGE_ROLE checks=$checks runtime=$runtime producer_rc=$code; the push is refused without rerun" >&2
-			exit "$code"
 		fi ;;
-	MISS) echo "FULL-SUITE: cache miss for tree $tree role=$JUDGE_ROLE (no reusable verdict); running the complete suite" ;;
-	*) fail "shared verdict lookup returned an invalid result"; exit 1 ;;
+	*) echo "FULL-SUITE: cache miss for tree $tree role=$JUDGE_ROLE (no reusable verdict); running the complete suite" ;;
 esac
+
+# SUITESERIAL1 (ompkit-fp72.120.16.264): one full suite at a time machine-wide, whatever launched it
+# (scripts/suite-lease.sh). A cache hit never reaches here. kitlib-tmp.sh is sourced once, here: the lease
+# registers its release in kitlib's exit registry, and a second source would reset that registry.
+# shellcheck source=scripts/kitlib-tmp.sh
+. "$SCRIPT_DIR/kitlib-tmp.sh"
+if [ "$LEASE_PRESENT" = 0 ]; then
+	echo "FULL-SUITE: SUITE_LEASE_ABSENT: this judge's JUDGING_FILES predate scripts/suite-lease.sh, so this run takes no suite lease and may overlap another suite"
+else
+	SUITE_LEASE_LIB=$SCRIPT_DIR
+	# shellcheck source=scripts/suite-lease.sh
+	. "$SCRIPT_DIR/suite-lease.sh"
+	lease_store=''
+	[ -z "$STORE_OVERRIDE" ] || lease_store=$CACHE_DIR
+	# A rerun is explicit: it never joins another run's verdict. Otherwise the request joins a holder judging
+	# this exact tree and role, or returns as soon as this record appears.
+	lease_join=1
+	lease_entry=$entry
+	if [ "$RERUN" = 1 ]; then lease_join=0; lease_entry=''; fi
+	lease_rc=0
+	suite_lease_take full-suite-verdict "$tree" "$JUDGE_ROLE" "$COMMIT" "$lease_store" "$lease_join" "$lease_entry" || lease_rc=$?
+	if [ "$lease_rc" = 0 ] && [ "$SUITE_LEASE_STATE" = joined ]; then
+		echo "FULL-SUITE: JOINED the suite run for tree $tree role=$JUDGE_ROLE ($SUITE_LEASE_DETAIL); reading its verdict"
+		verdict_lookup
+		verdict_reuse
+		echo "FULL-SUITE: the joined run left no reusable verdict for tree $tree role=$JUDGE_ROLE; queueing for a run of its own"
+		suite_lease_take full-suite-verdict "$tree" "$JUDGE_ROLE" "$COMMIT" "$lease_store" 0 '' || lease_rc=$?
+	fi
+	if [ "$lease_rc" != 0 ]; then
+		echo "FULL-SUITE: REFUSED: no suite lease for tree $tree role=$JUDGE_ROLE (rc=$lease_rc); no suite ran and nothing was cached" >&2
+		exit "$lease_rc"
+	fi
+	case "$SUITE_LEASE_STATE" in
+		held)
+			echo "FULL-SUITE: suite lease held by run $$ for tree $tree role=$JUDGE_ROLE ($SUITE_LEASE_DETAIL)"
+			# A run for this exact tree may have recorded its verdict while this one queued.
+			if [ "$RERUN" = 0 ]; then
+				verdict_lookup
+				verdict_reuse
+			fi ;;
+		nested) echo "FULL-SUITE: suite lease held by the enclosing run ($SUITE_LEASE_DETAIL); this nested run takes none" ;;
+		*) fail "suite lease ended in state '$SUITE_LEASE_STATE'"; exit 75 ;;
+	esac
+fi
 
 # The exact-commit archive under judgment. A caller-supplied archive (the pre-push gate's
 # candidate extract) is used as is; otherwise the candidate is exported from git objects only,
@@ -208,8 +285,7 @@ if [ -z "$ARCHIVE_DIR" ]; then
 	WORK_PARENT="$ROOT/var/agent-tmp"
 	mkdir -p "$WORK_PARENT" || { fail "cannot stage the candidate archive"; exit 1; }
 	export KITLIB_TMP_ROOT="$WORK_PARENT"
-	# shellcheck source=scripts/kitlib-tmp.sh
-	. "$SCRIPT_DIR/kitlib-tmp.sh"
+	# kitlib-tmp.sh is already sourced (SUITESERIAL1, above).
 	kitlib_tmp ARCHIVE_DIR full-suite-verdict || { fail "cannot stage the candidate archive"; exit 1; }
 	OWN_ARCHIVE=1
 fi
@@ -402,9 +478,16 @@ pool_default=$((ncpu / 4))
 [ "$pool_default" -ge 2 ] || pool_default=2
 [ "$pool_default" -le 6 ] || pool_default=6
 # Legacy name retained until the foreign-dirty complement test is migrated by its owner.
-# An explicit width is authoritative; load includes this release's own tests.
+# An explicit width is authoritative up to the cap below; load includes this release's own tests.
 POOL_JOBS=${FULL_SUITE_JOBS:-${FULL_SUITE_SHELL_JOBS:-$pool_default}}
 case "$POOL_JOBS" in ''|*[!0-9]*|0) cleanup_archive; fail "FULL_SUITE_JOBS must be a positive integer"; exit 1 ;; esac
+# SUITESERIAL1: at most 6 inner workers, whatever is asked. omp-kit/var/sitrep/capacity-plan.md line 259: at 28
+# workers 0 of 9 runs passed (P(clean) 0.00, run-load 35.7) against 0.45 at 6 (line 258); the sweep above agrees.
+POOL_CAP=6
+if [ "$POOL_JOBS" -gt "$POOL_CAP" ]; then
+	echo "full-suite: FULL_SUITE_JOBS=$POOL_JOBS exceeds the inner-worker cap; using $POOL_CAP (SUITESERIAL1)"
+	POOL_JOBS=$POOL_CAP
+fi
 pool_files=$((bun_count + shell_count + py_count))
 if [ "$pool_files" -gt 0 ] && [ "$POOL_JOBS" -gt "$pool_files" ]; then POOL_JOBS=$pool_files; fi
 SHELL_JOBS=$POOL_JOBS

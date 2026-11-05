@@ -110,6 +110,12 @@ By default it is `$XDG_STATE_HOME/omp-kit/full-suite-verdicts` (or
 `FULL_SUITE_VERDICT_CACHE_DIR` environment variable overrides that location for a process. The
 store is never committed. Pruning entries only costs a rerun. The suite is bounded by
 `FULL_SUITE_TIMEOUT_SECS` (default 1800) and runs at nice 10 inside the gate's own admission.
+One full suite runs at a time on the machine, whatever launched it (SUITESERIAL1): after a cache
+miss the judge takes the suite lease (`scripts/suite-lease.sh`). A request for the exact tree and
+role already running joins that run and reads its verdict; any other request waits in a bounded
+queue or exits 75 with `SUITE_LEASE_QUEUE_FULL` or `SUITE_LEASE_WAIT_TIMEOUT`
+(`FULL_SUITE_LEASE_QUEUE_MAX`, default 3; `FULL_SUITE_LEASE_WAIT_SECS`, default 3600). A suite
+uses at most 6 inner workers, whatever `FULL_SUITE_JOBS` asks for.
 
 Inspect stored entries with `omp-kit full-suite verdict list [TREE] [--repo PATH]`; use
 `omp-kit full-suite verdict get TREE [--repo PATH]` for one tree. Listing includes invalid

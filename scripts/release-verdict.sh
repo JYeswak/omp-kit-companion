@@ -8,6 +8,8 @@
 #   1. resolve the commit (default: the remote-tracking origin/main after a fetch);
 #   2. take a per-repo lock; when another run holds it, record the wanted commit and exit 0, and the
 #      holder runs again for the newest published head before it releases the lock;
+#   2b. SUITESERIAL1 (ompkit-fp72.120.16.264): take the machine-wide suite lease for the commit
+#      (scripts/suite-lease.sh), first in its queue, and hold it through steps 3 to 5;
 #   3. export the exact commit and run that commit's own scripts/full-suite-verdict.sh from the export
 #      (never the working tree: editing the runner mid-run killed a 25-minute suite on 2026-10-31);
 #   4. CULPRIT1 (ompkit-6xxhu): when the runner fails, run that export's scripts/verdict-culprit.py,
@@ -28,7 +30,7 @@
 #
 # Usage: scripts/release-verdict.sh [--commit SHA] [--no-fetch]
 # Exit: the verdict runner's status (0 PASS), else the ci-only step's when the runner passed; 0 when
-# another run will cover the commit, 2 usage.
+# another run will cover the commit, 2 usage, 75 when the suite lease refuses (queue full, wait bound).
 set -eu
 # Run from a private copy (ompkit-6xxhu): a running sh reads its script as it goes, so a commit that
 # rewrites this file while a verdict runs (e78aa29091 did, 2026-11-01) would feed the live run new bytes
@@ -52,7 +54,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--commit) COMMIT=${2:-}; shift 2 ;;
 		--no-fetch) FETCH=0; shift ;;
-		-h|--help) sed -n '2,31p' "$0"; exit 0 ;;
+		-h|--help) sed -n '2,33p' "$0"; exit 0 ;;
 		*) printf 'release-verdict: unknown argument: %s\n' "$1" >&2; exit 2 ;;
 	esac
 done
@@ -93,6 +95,31 @@ kitlib_tmp_atexit "rm -rf \"$LOCK\""
 ci_pid=''
 # shellcheck disable=SC2016 # expanded at exit, when ci_pid names the live judge (or is empty)
 kitlib_tmp_atexit '[ -z "$ci_pid" ] || kill -TERM "$ci_pid" 2>/dev/null || :'
+# SUITESERIAL1 (ompkit-fp72.120.16.264): one full suite at a time machine-wide, whatever launched it. Each
+# commit is judged under the suite lease (scripts/suite-lease.sh), held around its runner, the CI-only judge
+# beside it and the culprit step, so none of them overlaps another launcher's suite. The runner finds the lease
+# held by this enclosing run and takes none. release-verdict requests go first in the lease queue, so the
+# release-local stage waiting on this run is never starved. A checkout whose JUDGING_FILES predate the lease
+# runs without it (SUITE_LEASE_ABSENT); one whose closure lists scripts/suite-lease.sh refuses when it is missing.
+rv_lease=0
+if [ -f "$ROOT/scripts/suite-lease.sh" ]; then
+	SUITE_LEASE_LIB="$ROOT/scripts"
+	# shellcheck source=scripts/suite-lease.sh
+	. "$ROOT/scripts/suite-lease.sh"
+	rv_lease=1
+else
+	rv_closure=''
+	if [ -f "$ROOT/scripts/suite-metrics.py" ]; then
+		rv_closure=$(PYTHONPATH="$ROOT/scripts" python3 -B -m suite-metrics judging-files) || {
+			printf 'release-verdict: the judging closure of %s is unreadable\n' "$ROOT" >&2; exit 1;
+		}
+	fi
+	if printf '%s\n' "$rv_closure" | grep -qx 'scripts/suite-lease.sh'; then
+		printf 'release-verdict: SUITE_LEASE_MISSING: scripts/suite-lease.sh is absent from %s, but its JUDGING_FILES list it\n' "$ROOT" >&2
+		exit 1
+	fi
+	printf 'release-verdict: SUITE_LEASE_ABSENT: %s predates scripts/suite-lease.sh, so this run takes no suite lease\n' "$ROOT"
+fi
 # culprit_step: name the commit that broke $sha (see step 4). Its output and status never decide ours.
 culprit_step() {
 	if [ ! -f "$tree/scripts/verdict-culprit.py" ]; then
@@ -113,6 +140,17 @@ culprit_step() {
 rc=0
 while :; do
 	rm -f "$WANTED"
+	if [ "$rv_lease" = 1 ]; then
+		rv_tree=$(git -C "$ROOT" rev-parse "$sha^{tree}") || { printf 'release-verdict: cannot read the tree of %s\n' "$sha" >&2; rc=1; break; }
+		lease_rc=0
+		suite_lease_take release-verdict "$rv_tree" main "$sha" "${FULL_SUITE_VERDICT_CACHE_DIR:-}" 0 '' || lease_rc=$?
+		if [ "$lease_rc" != 0 ]; then
+			printf 'release-verdict: %s not judged: no suite lease (rc=%s)\n' "$sha" "$lease_rc"
+			rc=$lease_rc
+			break
+		fi
+		printf 'release-verdict: suite lease %s for %s (%s)\n' "$SUITE_LEASE_STATE" "$sha" "$SUITE_LEASE_DETAIL"
+	fi
 	tree="$WORK/tree.$sha"
 	mkdir -p "$tree"
 	git -C "$ROOT" archive "$sha" | tar -xf - -C "$tree"
@@ -141,6 +179,7 @@ while :; do
 		[ "$rc" != 0 ] || rc=$ci_rc
 	fi
 	rm -rf "$tree" "$ci_tree"
+	if [ "$rv_lease" = 1 ]; then suite_lease_release || :; fi
 	[ -s "$WANTED" ] || break
 	next=$(cat "$WANTED")
 	[ "$next" != "$sha" ] || break

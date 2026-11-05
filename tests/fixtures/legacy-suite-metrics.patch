@@ -1,7 +1,7 @@
 diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
 --- a/scripts/suite-metrics.py
 +++ b/scripts/suite-metrics.py
-@@ -25,12 +25,16 @@ from typing import Sequence
+@@ -25,12 +25,19 @@ from typing import Sequence
  
  sys.path.insert(0, str(Path(__file__).resolve().parent))
  from kitlib_run import run
@@ -14,12 +14,15 @@ diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
 -    "scripts/kitlib_run.py", "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/test-budget.ts",
 +    "scripts/suite-hermetic-env.sh", "scripts/kitlib_run.py", "scripts/kitlib_tmp.py",
 +    "scripts/pysafe.py", "scripts/kitlib-tmp.sh", "scripts/kitlib-proc.sh", "scripts/kitlib-shimpath.sh",
++    # SUITESERIAL1 (ompkit-fp72.120.16.264): the suite lease the runner takes and the kitlib lock and process
++    # identity it uses, so land's archived judge carries them and a lease change never reuses a verdict.
++    "scripts/suite-lease.sh", "scripts/kitlib_lock.py", "scripts/kitlib_proc.py",
 +    "scripts/test-budget.ts",
 +    "scripts/kitlib-ratchet-signal-baseline.json",
      ".github/test-budget.json",
  )
  
-@@ -188,22 +192,40 @@ def execute(args: argparse.Namespace) -> int:
+@@ -188,22 +195,40 @@ def execute(args: argparse.Namespace) -> int:
      # The native process writes directly to a retained file, never through a
      # helper-owned pipe/sink thread: even SIGKILL of this helper cannot discard
      # bytes the native process already flushed. Exec preserves its PID/group.
