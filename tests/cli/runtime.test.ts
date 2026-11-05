@@ -1126,14 +1126,18 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		const rev = await run(["git", "rev-parse", "HEAD"], { cwd: cdir, deadline_s: 60 });
 		const sha = utf8(rev.stdout).trim();
 		// SHIMRESOLVE1: on a seat the pane shim, and in a grader its dispatcher, precede the native br; skip both.
+		// This is the resolution under test: the ambient PATH (agent-bin or a grader dispatcher first) yields the native br.
 		const resolved = resolveRealBr(process.env.PATH);
 		if (!resolved.ok) throw new Error(resolved.reason);
 		const brBin = resolved.path;
-		// Fixture tracker writes and the fixture close act run under fixture actors, so they use the
-		// official br itself; verifyBead's replays still resolve it from the unpinned seat PATH.
+		// verify reads its tracker through PATH `br` (the seat's own br for a real tracker). For this fixture tracker
+		// every verify run gets the resolved official br first, so an ambient chain (pane shim -> grader dispatcher ->
+		// pane shim, each appending or enforcing its own --actor) cannot refuse the fixture's reads (SHIMRESOLVE1 rework 2:
+		// in a grader that chain refused `br show` with BR_SHIM_ACTOR_MISMATCH and verify answered NOT_IN_REVIEW).
 		const officialBin = join(root, "official-br");
 		mkdirSync(officialBin, { recursive: true });
 		symlinkSync(brBin, join(officialBin, "br"));
+		const officialPath = `${officialBin}:${process.env.PATH ?? ""}`;
 		const stripped = { ...process.env } as Record<string, string>;
 		delete stripped.BEADS_DB;
 		const tdir = join(root, "t");
@@ -1164,6 +1168,14 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 			const r = await brOut(args, tdir);
 			if (r.rc !== 0) throw new Error(`${what} -> ${r.rc}: ${r.out}`);
 		}
+		// Every fixture step is read back, so a skipped or refused transition fails here, not as a verify verdict.
+		const readyShow = await brOut(["show", id, "--json"], tdir);
+		if (readyShow.rc !== 0) throw new Error(`ready readback -> ${readyShow.rc}: ${readyShow.out}`);
+		const readyParsed: unknown = JSON.parse(readyShow.out);
+		const readyRow: unknown = Array.isArray(readyParsed) ? readyParsed[0] : readyParsed;
+		expect(readyRow).toMatchObject({ id, status: "in_review" });
+		const readyAcceptance = typeof readyRow === "object" && readyRow !== null && "acceptance_criteria" in readyRow ? String(readyRow.acceptance_criteria) : "";
+		expect(readyAcceptance.split("\n").filter(line => line.startsWith("- [x]")).length, readyAcceptance).toBe(3);
 		const shimBin = installReadonlyBr(join(root, "guard"), brBin);
 		const shim = join(shimBin, "br");
 		const odir = join(root, "guard", "owned");
@@ -1255,15 +1267,15 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		for (const h of [brHash, srcHash, shimSrcHash, ompHash, acHash]) expect(h).toMatch(/^[0-9a-f]{64}$/);
 		expect(revision).toMatch(/^[0-9a-f]{40}$/);
 		const fam = `guard-native src=${srcHash.slice(0, 12)} shim=${shimSrcHash.slice(0, 12)} br=${brHash.slice(0, 12)} omp=${ompHash.slice(0, 12)} ac=${acHash.slice(0, 12)} tree=${revision.slice(0, 12)}`;
-		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: envT, dryRun: true, family: fam, lesson: "native replay-barrier fixture" });
-		expect(res.code).toBe("DRY_RUN");
+		const verifyEnv = { ...envT, PATH: officialPath };
+		const res = await verifyBead({ bead: id, exportSha: sha, repo: cdir, actor: "Peer", env: verifyEnv, dryRun: true, family: fam, lesson: "native replay-barrier fixture" });
+		expect(res.code, res.log).toBe("DRY_RUN");
 		expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", true], ["c", true]]);
 		expect(res.log).toContain("owned fixture");
 		expect(res.acts[2]?.join(" ") ?? "").toContain(fam);
 		expect(readFileSync(join(tdir, ".beads", "issues.jsonl"), "utf8")).toBe(before);
 		// Official candidate smoke through the existing verify consumer (dry-run: no mutation, no live claim).
-		const officialEnv = { ...process.env, BEADS_DB: tdb } as Record<string, string>;
-		const official = await run([ompBin, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", "official-binary", "--lesson", "native replay-barrier fixture", "--dry-run", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: officialEnv });
+		const official = await run([ompBin, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", "official-binary", "--lesson", "native replay-barrier fixture", "--dry-run", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: verifyEnv });
 		const officialDoc: unknown = JSON.parse(utf8(official.stdout));
 		const officialData: unknown = typeof officialDoc === "object" && officialDoc !== null && "data" in officialDoc ? officialDoc.data : null;
 		const officialReplays = typeof officialData === "object" && officialData !== null && "replays" in officialData && Array.isArray(officialData.replays) ? officialData.replays as Array<{ letter?: unknown; pass?: unknown }> : null;
@@ -1273,7 +1285,7 @@ describe("REPLAYBR1 AC3 native guard (ompkit-t7cn7.21)", () => {
 		// replicate the production tracker's workflow policy into the fixture.
 		writeFileSync(join(tdir, ".beads", "policy.yaml"), "workflow:\n  strict: true\n  statuses: [open, in_progress, in_review, rework, blocked, deferred, closed]\n  transitions:\n    initial: [open]\n    open: [in_progress, blocked, deferred, closed]\n    in_progress: [in_review, open, blocked, deferred]\n    in_review: [closed, rework]\n    rework: [in_progress, in_review, open]\n    blocked: [open, in_progress]\n    deferred: [open]\n    closed: [open]\n  gates:\n    \"in_review -> closed\":\n      require_all:\n        - min_reviewers: 1\n");
 		const cliPath = resolve(import.meta.dir, "..", "..", "src", "cli.ts");
-		const closed = await run([process.execPath, "run", "--silent", cliPath, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", fam, "--lesson", "native replay-barrier fixture", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: { ...envT, PATH: `${officialBin}:${envT.PATH ?? ""}` } });
+		const closed = await run([process.execPath, "run", "--silent", cliPath, "verify", id, "--export", sha, "--project", cdir, "--actor", "Peer", "--family", fam, "--lesson", "native replay-barrier fixture", "--json"], { cwd: root, deadline_s: fixtureDeadlineS(600), env: verifyEnv });
 		if (closed.rc !== 0) throw new Error(`cli close -> ${closed.rc}: out=${utf8(closed.stdout).slice(0, 500)} err=${utf8(closed.stderr).slice(0, 300)}`);
 		const closedDoc: unknown = JSON.parse(utf8(closed.stdout));
 		const closedPayload: unknown = typeof closedDoc === "object" && closedDoc !== null && "data" in closedDoc ? closedDoc.data : closedDoc;
