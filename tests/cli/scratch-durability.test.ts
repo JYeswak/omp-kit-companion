@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { handleToolCall } from "../../extensions/fleet-guard.ts";
 import { check as durabilityCheck } from "../../src/fleet-guard/durability.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
-import { fixtureDeadlineS } from "./fixture-process.ts";
+import { fixtureDeadlineS, runFixtureAsync } from "./fixture-process.ts";
 afterAll(cleanupAllOwnedTmp);
 
 const roots: string[] = [];
@@ -47,13 +47,19 @@ test("identical owned-scratch input is quiet until its canonical source is actua
 	expect(denied?.reason).toContain("scratch-is-not-a-home");
 });
 
-async function failedGitRead(script: string) {
+async function failedGitRead(script: string, warmupExitCode?: number) {
 	const base = join(import.meta.dir, "../../var/agent-tmp");
 	mkdirSync(base, { recursive: true });
 	const shim = ownedTmp("durability-git-failure", { root: base });
 	const previousPath = process.env.PATH;
 	try {
 		writeFileSync(join(shim.path, "git"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+		if (warmupExitCode !== undefined) {
+			// GUARDDIAG1: first execution of a fresh script can exhaust the product's two-second deadline.
+			// Warm only the exit/stderr plants under a fixture bound; the kill plant stays unprimed.
+			const warmup = await runFixtureAsync([join(shim.path, "git")], { cwd: shim.path });
+			expect(warmup.rc, new TextDecoder().decode(warmup.stderr)).toBe(warmupExitCode);
+		}
 		process.env.PATH = `${shim.path}:${previousPath ?? ""}`;
 		return await durabilityCheck({
 			toolName: "write",
@@ -67,7 +73,7 @@ async function failedGitRead(script: string) {
 }
 
 test("GUARDGITLOAD1: failed Git read stays UNKNOWN and reports exit code and first stderr line", async () => {
-	const result = await failedGitRead("printf '%s\\n' 'fatal: planted not a git repository' 'second line is not reported' >&2\nexit 128");
+	const result = await failedGitRead("printf '%s\\n' 'fatal: planted not a git repository' 'second line is not reported' >&2\nexit 128", 128);
 	expect(result).toMatchObject({ block: true, status: "UNKNOWN", read: "git rev-parse --show-toplevel" });
 	expect(result?.reason).toContain("killed=false");
 	expect(result?.reason).toContain("signal=null");
@@ -75,7 +81,7 @@ test("GUARDGITLOAD1: failed Git read stays UNKNOWN and reports exit code and fir
 	expect(result?.reason).toContain('stderr="fatal: planted not a git repository"');
 	expect(result?.reason).not.toContain("second line is not reported");
 	expect(result?.reason).not.toContain("Command failed: git");
-});
+}, fixtureDeadlineS() * 1000);
 
 test("GUARDGITLOAD1: a Git read killed by the unchanged deadline stays UNKNOWN and names its signal", async () => {
 	// exec leaves one process for the existing two-second deadline to kill and reap.
@@ -88,10 +94,10 @@ test("GUARDGITLOAD1: a Git read killed by the unchanged deadline stays UNKNOWN a
 
 test("GUARDGITLOAD1: a long Git stderr first line is bounded without hiding the failure fields", async () => {
 	const line = `fatal: ${"x".repeat(2_000)}`;
-	const result = await failedGitRead(`printf '%s\\n' '${line}' >&2\nexit 128`);
+	const result = await failedGitRead(`printf '%s\\n' '${line}' >&2\nexit 128`, 128);
 	expect(result).toMatchObject({ block: true, status: "UNKNOWN", read: "git rev-parse --show-toplevel" });
 	expect(result?.reason).toContain("code=128");
 	expect(result?.reason).toContain('stderr="fatal: ');
 	expect(result?.reason).not.toContain(line);
 	expect(result?.reason.length).toBeLessThan(700);
-});
+}, fixtureDeadlineS() * 1000);
