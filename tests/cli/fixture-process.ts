@@ -1,5 +1,6 @@
 import { availableParallelism, loadavg } from "node:os";
 import { run, runSync, type RunResult } from "../../src/kitlib/run.ts";
+import { fixturePycachePrefix } from "./lib/fixture-pycache.ts";
 
 export function fixtureLoad(): { load1: number; ncpu: number; factor: number; workers: string } {
 	const load1 = loadavg()[0] ?? 0;
@@ -42,6 +43,8 @@ function prepareFixture(argv: readonly string[], options: FixtureOptions) {
 		env = {};
 		for (const [key, value] of Object.entries(options.env))
 			if (value !== undefined) env[key] = value;
+		// PYCACHE1: a fixture HOME must not cost every python3 child a cold bytecode cache.
+		env.PYTHONPYCACHEPREFIX ??= fixturePycachePrefix();
 	}
 	return {
 		command, load, deadlineS, plantedSleepS,

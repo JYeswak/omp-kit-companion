@@ -66,7 +66,7 @@ reserved = {
     "BUN_INSTALL", "BUN_CONFIG_FILE", "KITLIB_TMP_ROOT", "KITROOT",
     "OMP_KIT_CASE_CWD", "OMP_KIT_TEST_WORK_ROOT", "OMP_KIT_OMP_SRC_FETCH",
     "OMP_KIT_DISK_OBSERVER", "KIT_TEST_LOOPBACK_PORT", "GIT_DIR", "GIT_WORK_TREE", "BEADS_DB",
-    "OMP_KIT_CC",
+    "OMP_KIT_CC", "PYTHONPYCACHEPREFIX",
 }
 reserved.update(thread_caps)
 for name in options.allow_env:
@@ -91,6 +91,16 @@ if not archive.is_dir() or not scratch.is_dir() or archive == Path("/") or scrat
     refuse("archive and scratch must be non-root directories")
 if "\n" in options.suite or "\r" in options.suite:
     refuse("suite identifier must be one line")
+
+# PYCACHE1 (ompkit-fp72.120.16.249): fixtures give python3 fresh HOMEs, and Apple's python3 keeps bytecode under
+# $HOME, so every fixture python3 recompiled and rewrote its imports (18.5 s of one 23.2 s create guard under
+# load). Both environment modes share one bytecode cache per archive, inside its gitignored var/; bytecode is
+# keyed on source path and mtime, so one archive's cache never serves another's sources.
+pycache = archive / "var" / "pycache"
+try:
+    pycache.mkdir(parents=True, exist_ok=True)
+except OSError as error:
+    refuse("cannot create the archive bytecode cache: " + str(error))
 
 
 def mark_exec() -> None:
@@ -122,6 +132,7 @@ if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") != "1":
     inherited = dict(os.environ)
     for name in ("TMPDIR", "TMP", "TEMP"):
         inherited[name] = str(scratch)
+    inherited.setdefault("PYTHONPYCACHEPREFIX", str(pycache))
     print("SUITE-HERMETIC suite=" + options.suite + " env=inherited fence=off-optin", flush=True)
     mark_exec()
     os.execvpe(command[0], command, inherited)
@@ -256,6 +267,7 @@ env = {
     "OMP_KIT_OMP_SRC_FETCH": "0",
     "OMP_KIT_DISK_OBSERVER": "statfs",
     "KIT_TEST_LOOPBACK_PORT": str(loopback_port),
+    "PYTHONPYCACHEPREFIX": str(pycache),
 }
 env.update(thread_caps)
 bun_config = archive / "bunfig.toml"

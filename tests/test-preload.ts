@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { fixturePycachePrefix } from "./cli/lib/fixture-pycache.ts";
 
 mkdirSync(resolve(import.meta.dir, "../var/agent-tmp"), { recursive: true });
 // Fixture Git processes must resolve repositories from their explicit cwd,
@@ -18,3 +19,7 @@ process.umask(0o022);
 // tmux. Strip the session pin so socket discovery never resolves to the
 // runner's live session; suites that need tmux pass explicit env.
 for (const name of ["TMUX", "TMUX_PANE", "TMUX_TMPDIR"]) delete process.env[name];
+
+// PYCACHE1 (ompkit-fp72.120.16.249): every child that inherits this environment, whatever HOME a fixture
+// gives it, reuses one per-checkout bytecode cache; an explicit caller PYTHONPYCACHEPREFIX is kept.
+process.env.PYTHONPYCACHEPREFIX = fixturePycachePrefix();

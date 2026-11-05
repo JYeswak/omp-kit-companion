@@ -9,6 +9,7 @@ import { unlinkSync } from "node:fs";
 import { callerScratchRoot } from "../../src/runtime.ts";
 import { readJsonl } from "../../src/kitlib/jsonl.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
+import { fixturePycachePrefix } from "./lib/fixture-pycache.ts";
 
 // Each scenario owns its scratch, tracker, authority and environment. No case
 // observes another case's mutations, so native subprocess waits may overlap.
@@ -752,9 +753,10 @@ function hermeticFixture(): HermeticFixture {
 	const backend = nativeBr();
 	return {
 		path: scratch.path, database: join(scratch.path, ".beads/beads.db"), backend,
+		// PYCACHE1: the fresh HOME must not make every shim python3 recompile its imports.
 		env: { PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, HOME: scratch.path,
 			TMPDIR: scratch.path, XDG_STATE_HOME: join(scratch.path, "state"),
-			OMP_KIT_CASE_CWD: root, BR_REAL: backend },
+			OMP_KIT_CASE_CWD: root, BR_REAL: backend, PYTHONPYCACHEPREFIX: fixturePycachePrefix() },
 		cleanup: () => scratch.cleanup(),
 	};
 }
