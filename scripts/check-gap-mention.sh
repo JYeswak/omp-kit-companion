@@ -23,14 +23,17 @@ fi
 
 # gap_sentences BODYFILE: one line per sentence that names a gap and carries no bead id. Quoted and
 # backticked spans are blanked first so a test name like "a defect row" never fires. Sentences split
-# on ". ", ";", newline. The trigger set is the bead's list, anchored on word boundaries.
+# on a period or semicolon followed by at least one space or the end of text, and on newline
+# (GAPSPLIT1 ompkit-fp72.120.16.250: a zero-space split cut dotted bead ids and decimals out of their
+# sentence). The trigger set is the bead's list, anchored on word boundaries.
 GAP_RE='finding class|second time|follow-up|follow up|should (be|say|name|have|refuse|print)|not blocking|defect|gap:'
+GAP_SPLIT_RE='[.;]( +|$)'
 gap_sentences() {
 	# Callers remove commit subjects; producer prose is scanned in full.
 	# shellcheck disable=SC2016
 	sed -e 's/`[^`]*`/ /g' -e 's/"[^"]*"/ /g' -e "s/'[^']*'/ /g" -e 's/^$/./' "$1" \
-		| tr '\n' ' ' | sed -e 's/[.;] */\
-/g' \
+		| tr '\n' ' ' | sed -E -e "s/$GAP_SPLIT_RE/\\
+/g" \
 		| grep -i -E "(^|[^[:alnum:]])($GAP_RE)([^[:alnum:]]|$)" \
 		| grep -v -E 'ompkit-[a-z0-9]+(\.[0-9]+)*' \
 		| sed -e 's/^ *//' -e 's/ *$//' | grep -v '^$' || :
@@ -93,6 +96,16 @@ selftest() {
 	out=$(cd "$t" && judge "$t/m4"); clean "planted: defect inside a quoted test name does not fire" "$out"
 	printf 'feat: v [test]\n\nnothing to see here, all wired\n' > "$t/m5"
 	out=$(cd "$t" && judge "$t/m5"); clean "control: a body with no gap phrase passes" "$out"
+	# GAPSPLIT1: a dotted bead id and a decimal stay inside their sentence; the zero-space mutant splits both.
+	printf 'fix: u [test]\n\nsee ompkit-fp72.120.16.249, the gate should say X there\n' > "$t/m7"
+	out=$(cd "$t" && judge "$t/m7"); clean "planted: a gap sentence naming a dotted bead id passes" "$out"
+	printf 'fix: s [test]\n\ntook 50.2 s; the gate should say X within 1.5 s\n' > "$t/m8"
+	out=$(cd "$t" && judge "$t/m8"); n=$(printf '%s\n' "$out" | grep -c '^FINDING	' || :)
+	if [ "$n" -eq 1 ] && printf '%s' "$out" | grep -q '"the gate should say X within 1.5 s"'; then ok "planted: a decimal does not split its sentence; the unfiled gap is refused once"; else not_ok "decimal (n=$n)"; printf '%s\n' "$out"; fi
+	mutant=$(sed 1d "$t/m7" | (GAP_SPLIT_RE='[.;] *'; gap_sentences /dev/stdin))
+	if [ -n "$mutant" ]; then ok "mutant: the zero-space split refuses the dotted-id sentence"; else not_ok "mutant: zero-space split admitted the dotted-id sentence"; fi
+	mutant=$(sed 1d "$t/m8" | (GAP_SPLIT_RE='[.;] *'; gap_sentences /dev/stdin))
+	if [ "$mutant" = "the gate should say X within 1" ]; then ok "mutant: the zero-space split cuts the decimal"; else not_ok "mutant decimal: $mutant"; fi
 	# regex checklist: a long near-miss stays fast (no nested quantifiers; grep -E is linear here)
 	long=$(printf 'defec%.0s' $(seq 1 20000)); printf 'x [test]\n\n%s\n' "$long" > "$t/m6"
 	start=$(date +%s); out=$(cd "$t" && judge "$t/m6"); el=$(( $(date +%s) - start ))
