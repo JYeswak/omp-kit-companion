@@ -272,10 +272,69 @@ install_remedy() {
 	[ -z "$id" ] || echo "release-local: receipt $id; when its postimages verify, reconcile it with: $kit update --reconcile $id --yes" >&2
 	echo "release-local: otherwise re-apply with: $INSTALL_REMEDY" >&2
 }
+# RELFAST1: reconcile's relink already validates the apply receipt. Reuse it only
+# while that durable receipt covers the complete current profile set and every
+# live link still targets the verified release. Missing/old evidence means apply,
+# not a release refusal; the final align and version readbacks remain mandatory.
+reconcile_plugins_current() {
+	bounded 30 python3 -c '
+import json, sys
+from pathlib import Path
+def require(condition):
+    if not condition:
+        raise ValueError("reconcile plugin proof is incomplete")
+try:
+    result, state, store, home, version = sys.argv[1:]
+    envelope = json.loads(Path(result).read_text())
+    data = envelope["data"]
+    verified = data["verified"]
+    require(envelope["ok"] is True and data["action"] == "RECONCILED")
+    require(data["active_version"] == version and data["plugin_relink"] == "APPLIED")
+    require(verified["version"] == version and verified["binary"] == str(Path(store) / "bin/omp-kit"))
+    receipt_id = data["plugin_receipt_id"]
+    require(isinstance(receipt_id, str) and 0 < len(receipt_id) <= 128)
+    require(all(c in "abcdef0123456789-" for c in receipt_id))
+    receipt = json.loads((Path(state) / ("plugin-" + receipt_id + ".json")).read_text())
+    require(receipt["schema_version"] == 1 and receipt["id"] == receipt_id and receipt["store"] == store)
+    roots = {"default": Path(home) / ".omp"}
+    profiles = Path(home) / ".omp/profiles"
+    if profiles.exists():
+        for profile in profiles.iterdir():
+            require(profile.is_dir() and not profile.is_symlink() and profile.name != "default")
+            roots[profile.name] = profile
+    rows = receipt["rows"]
+    require(len(rows) == len(roots) and {row["profile"] for row in rows} == set(roots))
+    for row in rows:
+        require(row["status"] in ("APPLIED", "UNCHANGED") and isinstance(row["before"], dict))
+        after = row["after"]
+        link = roots[row["profile"]] / "plugins/node_modules/omp-kit-companion"
+        require(after["link_kind"] == "SYMLINK" and after["target"] == store and after["link_path"] == str(link))
+        require(link.is_symlink() and str(link.resolve(strict=True)) == store)
+except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+    sys.exit(1)
+' "$WORK/install-reconcile.json" "$kit_state_root" "$store" "$HOME" "$VERSION"
+}
+install_plugin_relink() {
+	substep install.plugin-relink
+	bounded 300 "$kit" apply plugin --apply --yes --store "$store" --profiles all --include-default --json \
+		>"$WORK/install-plugin.json" || die "profile plugin relink failed"
+	cat "$WORK/install-plugin.json"
+	jq -e '.ok == true' "$WORK/install-plugin.json" >/dev/null || die "profile plugin relink was not successful"
+}
+install_align_readback() {
+	substep install.align-readback
+	bounded 60 python3 "$store/skills/fleet-restart/scripts/fleet_restart.py" align \
+		--home "$HOME" --releases "$INSTALL_PREFIX/releases" --version "$VERSION" >"$WORK/install-align.json" ||
+		die "installed profile alignment is stale"
+	cat "$WORK/install-align.json"
+	jq -e --arg v "$VERSION" '.ok == true and .version == $v and .stale == [] and
+		(.links | length > 0) and all(.links[]; .ok == true)' "$WORK/install-align.json" >/dev/null ||
+		die "align readback did not prove every profile link"
+}
 install_release() {
 	stage install
 	local kit="$INSTALL_PREFIX/bin/omp-kit" store="$INSTALL_PREFIX/releases/$VERSION"
-	local update_rc=0 reconcile_id kit_state_root class_filter reconcile_class=live-browser
+	local update_rc=0 reconcile_id kit_state_root class_filter reconcile_class=live-browser reused_relink=0
 	kit_state_root="${XDG_STATE_HOME-$HOME/.local/state}/omp-kit"
 	# RELINSTALLPATH1 (ompkit-fp72.120.16.155): `omp-kit update --apply` refuses a source that is not its own realpath
 	# (UNSAFE_KIT_SOURCE, kit-update.ts assertRegular), and $WORK under macOS TMPDIR sits below the /var -> /private/var
@@ -327,19 +386,21 @@ install_release() {
 			die "updater did not confirm the target version"
 	fi
 	substep install.plugin-relink
-	bounded 300 "$kit" apply plugin --apply --yes --store "$store" --profiles all --include-default --json \
-		>"$WORK/install-plugin.json" || die "profile plugin relink failed"
-	cat "$WORK/install-plugin.json"
-	jq -e '.ok == true' "$WORK/install-plugin.json" >/dev/null || die "profile plugin relink was not successful"
+	if [ "$update_rc" -ne 0 ] && reconcile_plugins_current; then
+		reused_relink=1
+		say "reusing reconcile plugin receipt; every current profile already targets $store"
+	else
+		install_plugin_relink
+	fi
 	stage readback
-	substep install.align-readback
-	bounded 60 python3 "$store/skills/fleet-restart/scripts/fleet_restart.py" align \
-		--home "$HOME" --releases "$INSTALL_PREFIX/releases" --version "$VERSION" >"$WORK/install-align.json" ||
-		die "installed profile alignment is stale"
-	cat "$WORK/install-align.json"
-	jq -e --arg v "$VERSION" '.ok == true and .version == $v and .stale == [] and
-		(.links | length > 0) and all(.links[]; .ok == true)' "$WORK/install-align.json" >/dev/null ||
-		die "align readback did not prove every profile link"
+	install_align_readback
+	if [ "$reused_relink" = 1 ] && ! reconcile_plugins_current; then
+		# A newly discovered profile can be absent from a link-only align report.
+		# Repair once with the normal full-scope apply, then repeat real alignment.
+		say "profile coverage changed during readback; applying the full profile relink"
+		install_plugin_relink
+		install_align_readback
+	fi
 	substep install.version-readback
 	[ "$(bounded 30 "$kit" --version)" = "omp-kit $VERSION" ] || die "installed CLI version readback differs from $VERSION"
 	substep ''
@@ -934,18 +995,12 @@ for file in "$DIST"/*; do
 	cmp -s "$PUB/$name" "$file" || die "public $name differs from the locally signed bytes"
 done
 (cd "$PUB" && shasum -a 256 -c SHA256SUMS) || die "public SHA256SUMS check failed"
-for platform in "${SHIP[@]}"; do
-	archive="$PUB/omp-kit-v$VERSION-$platform.tar"
-	digest="$(sha_of "$archive")"
-	substep "verify.attestation-fetch.$platform"
-	# Exactly kit-update-job.ts pollPublishedRelease's fetch, then kit-update.ts authenticateUpdateArchive's verifier.
-	bounded 120 gh api --hostname github.com "repos/$REPO/attestations/sha256:$digest" --jq '.attestations[].bundle | tojson' \
-		>"$archive.sigstore.json" || die "no attestation bundle for $platform ($digest)"
-	substep "verify.installer-verifier.$platform"
-	bounded 180 python3 -I -c "$(cat "$SRC/installer/install.py")" attestation "$archive" "$VERSION" unused ||
-		die "the consumer verifier refuses $platform"
-	echo "CONSUMER_VERIFY=ok platform=$platform sha256=$digest"
-done
+substep verify.archive-chains
+# The three fetch -> embedded consumer-verifier chains share no mutable files.
+# The helper owns bounded process groups, joins every result, and fails closed
+# on any chain failure. Checksums above and Gatekeeper below remain serial fences.
+bounded 330 python3 "$ROOT/scripts/release-public-verify.py" --public "$PUB" --source "$SRC" \
+	--version "$VERSION" --repo "$REPO" "${SHIP[@]}" || die "public archive verification failed"
 substep verify.gatekeeper
 mkdir "$PUB/x"
 tar -xf "$PUB/$DARWIN" -C "$PUB/x" bin/omp-kit

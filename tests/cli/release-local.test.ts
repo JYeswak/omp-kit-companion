@@ -239,7 +239,7 @@ function releaseStage(start: string, end: string): string {
 	return localScript.slice(first, last);
 }
 const helperScript = releaseStage("bounded() {", "# ---------------------------------------------------------------------------------------------- 1. preflight");
-const downloadStage = releaseStage("stage verify\n", 'for platform in "${SHIP[@]}"; do');
+const downloadStage = releaseStage("stage verify\n", "substep verify.archive-chains");
 const attestStage = releaseStage("stage attest\n", "# -------------------------------------------------------------------------------------------------- 8. verify");
 const stagePrelude = `set -euo pipefail
 die() { echo "release-local: refused: $*" >&2; exit 4; }
@@ -315,7 +315,8 @@ prepare_release
 // RELREMEDY1 (ompkit-fp72.120.16.246): writer-* replay the 0.2.91 PARTIAL whose only failures are the kit's own live
 // writers (gate-events.jsonl, inbox-wake/*.json) plus the state-root snapshot budget overflow.
 const writerScenarios = ["writer-partial", "writer-foreign", "writer-mutant"] as const;
-for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios] as const) {
+const reconcileScenarios = ["reconciled-complete", "reconciled-missing-profile", "reconciled-wrong-store", "reconciled-stale-link", "reconciled-no-receipt", "reconciled-new-profile"] as const;
+for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign-write", "stale-link", "wrong-version", "reconcile-refused", ...writerScenarios, ...reconcileScenarios] as const) {
 	const writer = (writerScenarios as readonly string[]).includes(scenario);
 	test(`${writer ? "RELREMEDY1 " : ""}release install ${scenario} only stamps installed after real store alignment`, async () => {
 		const work = realpathSync(ownedTmp("release-install", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
@@ -335,10 +336,17 @@ for (const scenario of ["updated", "symlinked-work", "browser-partial", "foreign
 		cpSync(join(ROOT, "scripts/kitlib_run.py"), join(store, "scripts/kitlib_run.py"));
 		cpSync(join(ROOT, "scripts/pysafe.py"), join(store, "scripts/pysafe.py"));
 		cpSync(join(ROOT, "skills/fleet-restart/scripts/fleet_restart.py"), join(scriptDir, "fleet_restart.py"));
+		if (scenario === "reconciled-new-profile") {
+			const alignPath = join(scriptDir, "fleet_restart.py");
+			// A profile is created after the reuse decision, while final alignment
+			// inventories links. Link-only alignment cannot see its missing link.
+			writeFileSync(alignPath, readFileSync(alignPath, "utf8").replace("def align_check(home, releases_root, version):",
+				'def align_check(home, releases_root, version):\n    os.makedirs(os.path.join(home, ".omp/profiles/new/agent"), exist_ok=True)'));
+		}
 		// Only activation transport is a fixture; real align reads private symlinks.
 		const kit = join(prefix, "bin/omp-kit");
 		writeFileSync(kit, `#!${process.execPath}
-import { appendFileSync, mkdirSync, realpathSync, symlinkSync } from "node:fs";
+import { appendFileSync, mkdirSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 const root = process.env.RELEASE_TEST_WORK;
 const scenario = process.env.RELEASE_TEST_SCENARIO;
@@ -355,10 +363,29 @@ for (const flag of ["--index", "--archive"]) {
 }
 if (args[0] === "update" && args.includes("--reconcile")) {
   if (scenario === "reconcile-refused") process.exit(1);
+  if (scenario.startsWith("reconciled-")) {
+    const rows = [];
+    for (const profile of ["default", "claude", "codex"]) {
+      const base = join(process.env.HOME, ".omp", ...(profile === "default" ? [] : ["profiles", profile]));
+      mkdirSync(join(base, "agent"), { recursive: true });
+      const link = join(base, "plugins/node_modules/omp-kit-companion");
+      if (scenario === "reconciled-missing-profile" && profile === "codex") continue;
+      mkdirSync(dirname(link), { recursive: true });
+      const target = scenario === "reconciled-stale-link" && profile === "codex" ? join(prefix, "releases/old") : store;
+      symlinkSync(target, link);
+      rows.push({ profile, status: "APPLIED", before: {}, after: { link_kind: "SYMLINK", target: store, link_path: link } });
+    }
+    const state = join(process.env.HOME, ".local/state/omp-kit");
+    mkdirSync(state, { recursive: true });
+    if (scenario !== "reconciled-no-receipt") writeFileSync(join(state, "plugin-abc-456.json"),
+      JSON.stringify({ schema_version: 1, id: "abc-456", store: scenario === "reconciled-wrong-store" ? join(prefix, "releases/old") : store, rows }));
+    emit({ action: "RECONCILED", active_version: "0.0.0", plugin_relink: "APPLIED", plugin_receipt_id: "abc-456",
+      verified: { version: "0.0.0", binary: join(store, "bin/omp-kit") } }); process.exit(0);
+  }
   emit({ action: "RECONCILED", active_version: "0.0.0" }); process.exit(0);
 }
 if (args[0] === "update") {
-  if (["browser-partial", "foreign-write", "reconcile-refused"].includes(scenario)) {
+  if (["browser-partial", "foreign-write", "reconcile-refused"].includes(scenario) || scenario.startsWith("reconciled-")) {
     emit({ action: "PARTIAL", receipt_id: "abc-123", active_version: "0.0.0", matcher: "PASS", live: "PASS", postcheck: "FAIL",
       postcheck_detail: { changed_operator_paths: scenario === "foreign-write" ? ["config.yml"] : [], failures: [], cause: null, live_state_paths: ["Library/Application Support/Google/Chrome/Default/History"] } },
       ["omp-kit update --reconcile abc-123 --yes"], false);
@@ -377,9 +404,10 @@ if (args[0] === "update") {
   emit({ action: "UPDATED", active_version: "0.0.0" }); process.exit(0);
 }
 if (args[0] === "apply" && args[1] === "plugin") {
-  for (const profile of ["", "profiles/claude/", "profiles/codex/"]) {
+  for (const profile of ["", "profiles/claude/", "profiles/codex/", ...(scenario === "reconciled-new-profile" ? ["profiles/new/"] : [])]) {
     const link = join(process.env.HOME, ".omp", profile, "plugins/node_modules/omp-kit-companion");
     mkdirSync(dirname(link), { recursive: true });
+    rmSync(link, { force: true });
     symlinkSync(scenario === "stale-link" && profile === "profiles/codex/" ? join(prefix, "releases/old") : store, link);
   }
   emit({ action: "APPLIED" }); process.exit(0);
@@ -410,12 +438,12 @@ receipt installed fixture fixture
 			const result = await runFixtureAsync(["bash", fixture, stageWork, ROOT, home], { cwd: ROOT, env: env as Record<string, string>, floor_s: 30 });
 			const stdout = new TextDecoder().decode(result.stdout);
 			const stderr = new TextDecoder().decode(result.stderr);
-			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial";
+			const successful = scenario === "updated" || scenario === "symlinked-work" || scenario === "browser-partial" || scenario === "writer-partial" || scenario.startsWith("reconciled-");
 			expect(result.rc, stderr).toBe(successful ? 0 : 4);
 			const calls = readFileSync(join(work, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line) as string[]);
 			expect(calls[0]).toEqual(["update", "--apply", "--yes", "--version", "0.0.0", "--index", join(work, "public/release-index.json"),
 				"--archive", join(work, "public/omp-kit-v0.0.0-darwin-arm64-none.tar"), "--json"]);
-			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(["browser-partial", "reconcile-refused", "writer-partial"].includes(scenario) ? 1 : 0);
+			expect(calls.filter(args => args.includes("--reconcile")).length).toBe(["browser-partial", "reconcile-refused", "writer-partial"].includes(scenario) || scenario.startsWith("reconciled-") ? 1 : 0);
 			if (scenario === "writer-partial") {
 				expect(calls.find(args => args.includes("--reconcile"))).toEqual(["update", "--reconcile", "cd03799d-67fd", "--yes", "--json"]);
 				expect(stdout).toContain("substep install.reconcile-kit-live-writer-state");
@@ -435,8 +463,9 @@ receipt installed fixture fixture
 				expect(stdout).toContain('"push_to_installed_seconds":');
 				expect(stdout).toContain("substep install.align-readback took");
 				expect(stdout).toContain("stage install took");
-				expect(JSON.parse(readFileSync(join(work, "install-align.json"), "utf8")).links).toHaveLength(3);
-				expect(calls.find(args => args[0] === "apply")).toEqual(["apply", "plugin", "--apply", "--yes", "--store", store, "--profiles", "all", "--include-default", "--json"]);
+				expect(JSON.parse(readFileSync(join(work, "install-align.json"), "utf8")).links).toHaveLength(scenario === "reconciled-new-profile" ? 4 : 3);
+				if (scenario === "reconciled-complete") expect(calls.filter(args => args[0] === "apply")).toEqual([]);
+				else expect(calls.find(args => args[0] === "apply")).toEqual(["apply", "plugin", "--apply", "--yes", "--store", store, "--profiles", "all", "--include-default", "--json"]);
 			} else {
 				expect(stdout).not.toContain('"installed": true');
 				expect(stdout).not.toContain("installed 0.0.0; every profile link aligned");
@@ -1561,4 +1590,73 @@ test("RELPREREG1 prereg: cut cards keep their verdict at their commits; the same
 			}
 		}, fixtureDeadlineS(300) * 1_000);
 	}
+}
+
+// RELFAST1: run the real checksum + fetch + embedded consumer-verifier stage.
+// Only gh's authority transport is a fixture; all three fetches must reach the
+// barrier before any returns, so the serial implementation cannot pass.
+for (const failure of ["none", "fetch", "verify"] as const) {
+	test(`RELFAST1 public chains overlap and ${failure === "none" ? "all verify" : failure + " failure refuses the stage"}`, async () => {
+		const work = realpathSync(ownedTmp("release-chains", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+		const bin = join(work, "bin");
+		const dist = join(work, "dist");
+		const pub = join(work, "public");
+		const platforms = ["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"];
+		for (const dir of [bin, dist, pub]) mkdirSync(dir);
+		const digests = new Map<string, string>();
+		for (const platform of platforms) {
+			const bytes = Buffer.from(platform);
+			const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+			digests.set(platform, digest);
+			writeFileSync(join(dist, `omp-kit-v0.0.0-${platform}.tar`), bytes);
+		}
+		writeFileSync(join(dist, "SHA256SUMS"), platforms.map(platform => `${digests.get(platform)}  omp-kit-v0.0.0-${platform}.tar\n`).join(""));
+		for (const name of readdirSync(dist)) cpSync(join(dist, name), join(pub, name));
+		writeFileSync(join(bin, "gh"), `#!${process.execPath}
+import { existsSync, readdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { join } from "node:path";
+const root = process.env.RELEASE_CHAIN_WORK, args = process.argv.slice(2);
+if (args[0] === "api" && args.some(a => a.includes("/attestations/"))) {
+  const digest = args.find(a => a.includes("/attestations/")).split(":").pop();
+  writeFileSync(join(root, "start-" + digest), "");
+  const deadline = Date.now() + 5000;
+  while (readdirSync(root).filter(n => n.startsWith("start-")).length !== 3) {
+    if (Date.now() >= deadline) { console.error("serial fetch: overlap barrier timed out"); process.exit(19); }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+  }
+  if (process.env.RELEASE_CHAIN_FAILURE === "fetch" && digest === "${digests.get("linux-arm64-gnu")}") process.exit(17);
+  console.log("{}"); process.exit(0);
+}
+if (args[0] === "api" && args.some(a => a.includes("/commits/"))) { console.log("a".repeat(40)); process.exit(0); }
+if (args[0] === "attestation" && args[1] === "verify") {
+  appendFileSync(join(root, "verified"), args[2] + "\\n");
+  if (process.env.RELEASE_CHAIN_FAILURE === "verify" && args[2].includes("linux-arm64-gnu")) process.exit(18);
+  process.exit(0);
+}
+process.exit(99);
+`);
+		chmodSync(join(bin, "gh"), 0o755);
+		const fixture = join(work, "verify.sh");
+		writeFileSync(fixture, `${stagePrelude}
+ROOT=$2; SRC=$2; PUB="$WORK/public"; SHIP=(${platforms.join(" ")})
+stage verify
+${releaseStage("substep verify.public-bytes-and-checksums", "substep verify.gatekeeper")}
+stage readback
+echo VERIFIED_ALL
+`);
+		try {
+			const result = await runFixtureAsync(["bash", fixture, work, ROOT], { cwd: ROOT,
+				env: { ...process.env, TMPDIR: work, PATH: `${bin}:${process.env.PATH}`, RELEASE_CHAIN_WORK: work, RELEASE_CHAIN_FAILURE: failure }, floor_s: 45 });
+			const stdout = new TextDecoder().decode(result.stdout), stderr = new TextDecoder().decode(result.stderr);
+			expect(readdirSync(work).filter(name => name.startsWith("start-")).sort()).toEqual([...digests.values()].map(digest => `start-${digest}`).sort());
+			expect(result.rc, stdout + stderr).toBe(failure === "none" ? 0 : 4);
+			if (failure === "none") {
+				expect(stdout).toContain("VERIFIED_ALL");
+				for (const platform of platforms) expect(stdout).toContain(`CONSUMER_VERIFY=ok platform=${platform} sha256=${digests.get(platform)}`);
+			} else {
+				expect(stdout).not.toContain("VERIFIED_ALL");
+				expect(stderr).toContain(failure === "fetch" ? "no attestation bundle for linux-arm64-gnu" : "the consumer verifier refuses linux-arm64-gnu");
+			}
+		} finally { rmSync(work, { recursive: true, force: true }); }
+	}, fixtureDeadlineS(60) * 1_000);
 }
