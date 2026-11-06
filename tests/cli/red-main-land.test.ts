@@ -76,13 +76,15 @@ spec = importlib.util.spec_from_file_location("store", root / "scripts/full-suit
 s = importlib.util.module_from_spec(spec); spec.loader.exec_module(s)
 sha = options.get("commit") or s.checked_run(["git", "-C", str(repo), "rev-parse", "refs/remotes/origin/main"]).decode().strip()
 tree = s.checked_run(["git", "-C", str(repo), "rev-parse", sha + "^{tree}"]).decode().strip()
-checks, runtime, stamp = "a" * 64, "Darwin/arm64/fixture", options.get("stamp", 1)
+# FIXEDENV1: a ci-only record binds the environment its runtime id hashes.
+environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+checks, runtime, stamp = "a" * 64, "Darwin/arm64/fixture/env-" + s.load_metrics(root).environment_digest(environment), options.get("stamp", 1)
 if options.get("ci"):
     directory = directory / "ci-only"; directory.mkdir(exist_ok=True)
     files = [{"path": p, "timeout_s": limit, "rc": int(mode == "FAIL" and i == 0), "timed_out": False, "duration_ms": 1} for i, (p, limit) in enumerate(s.CI_ONLY_FILES)]
     log = ("\\n".join(s.ci_only_header(row) for row in files) + "\\n").encode()
     path = directory / (s.ci_only_key(tree, checks, runtime) + ".json")
-    entry = {"version": 1, "kind": "ci-only", "tree": tree, "commit": sha, "checks": checks, "runtime": runtime, "spec": s.ci_only_spec(), "verdict": mode, "files": files, "log_sha256": hashlib.sha256(log).hexdigest(), "finished_ms": stamp}
+    entry = {"version": 1, "kind": "ci-only", "tree": tree, "commit": sha, "checks": checks, "runtime": runtime, "spec": s.ci_only_spec(), "verdict": mode, "files": files, "environment": environment, "log_sha256": hashlib.sha256(log).hexdigest(), "finished_ms": stamp}
 else:
     metrics = s.load_metrics(root)
     names = ["tests/cli/broken.test.sh"] + ([options["extraFailure"]] if options.get("extraFailure") else [])

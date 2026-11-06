@@ -57,6 +57,18 @@ esac
 	chmodSync(join(fakeBin, "sbh"), 0o755);
 	return { ...SKIP_BUDGET, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, FRESH_GATE_REPO: repo };
 }
+// FIXEDENV1: the gate pins PATH from its own scripts/fixed-env.sh, so a caller PATH cannot select tools.
+// The manifest cases run a fixture-owned copy of the gate whose policy puts the fixture bin first;
+// production policy is unchanged and fixed-env.test.ts proves callers cannot override it.
+function pinnedGate(dir: string): string {
+	const copy = join(dir, "gate-copy");
+	cpSync(join(root, "scripts"), join(copy, "scripts"), { recursive: true });
+	cpSync(join(root, ".github"), join(copy, ".github"), { recursive: true }); // the gate reads its test budget beside scripts/
+	const policy = readFileSync(join(root, "scripts/fixed-env.sh"), "utf8");
+	if (!policy.includes('\nPATH="')) throw new Error("fixed-env.sh PATH line moved");
+	writeFileSync(join(copy, "scripts/fixed-env.sh"), policy.replace('\nPATH="', `\nPATH="${join(dir, "bin")}:`));
+	return join(copy, "scripts/fresh-gate.sh");
+}
 
 
 
@@ -70,7 +82,8 @@ test("fresh gate refuses an edited rule with a stale manifest", () => {
 		const rule = join(dir, "rules/bash-glob-silenced.md");
 		writeFileSync(join(dir, "MANIFEST.tsv"), "name\tsha256\tclass\tpack\n");
 		writeFileSync(rule, readFileSync(rule, "utf8") + "\nStale manifest plant.\n");
-		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], manifestTestEnv(dir));
+		const env = manifestTestEnv(dir);
+		const result = run(pinnedGate(dir), ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], env);
 		const output = result.stdout.toString() + result.stderr.toString();
 		expect(result.exitCode).not.toBe(0);
 		expect(output).toContain("build-manifest --check: FAIL");
@@ -86,7 +99,8 @@ test("fresh gate validates the package-time manifest for rule-only edits", () =>
 		const rule = join(dir, "rules/bash-glob-silenced.md");
 		const editedRule = readFileSync(rule, "utf8") + "\nPackage-time manifest plant.\n";
 		writeFileSync(rule, editedRule);
-		const result = run(gate, ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], manifestTestEnv(dir));
+		const env = manifestTestEnv(dir);
+		const result = run(pinnedGate(dir), ["--archive-dir", dir, "--changed-file", "rules/bash-glob-silenced.md"], env);
 		const output = result.stdout.toString() + result.stderr.toString();
 		expect(result.exitCode).not.toBe(0);
 		expect(output).toContain("GREEN manifest");
@@ -201,6 +215,7 @@ test("fresh gate selftest refuses a deleted CLI boot check", () => {
 		const deleted = source.replace(/\ngate_cli_boot\(\) \{[\s\S]*?\n\}\n/, "\n");
 		expect(deleted).not.toBe(source);
 		writeFileSync(mutant, deleted);
+		cpSync(join(root, "scripts/fixed-env.sh"), join(dir, "scripts/fixed-env.sh")); // FIXEDENV1: the gate sources its sibling policy
 		chmodSync(mutant, 0o755);
 		const result = run(mutant, ["--selftest"]);
 		const output = result.stdout.toString() + result.stderr.toString();
@@ -219,6 +234,7 @@ test("fresh gate selftest refuses a deleted gate function", () => {
 		const deleted = source.replace(/\ngate_harness\(\) \{[\s\S]*?\n\}\n/, "\n");
 		expect(deleted).not.toBe(source);
 		writeFileSync(mutant, deleted);
+		cpSync(join(root, "scripts/fixed-env.sh"), join(dir, "scripts/fixed-env.sh")); // FIXEDENV1: the gate sources its sibling policy
 		chmodSync(mutant, 0o755);
 		const result = run(mutant, ["--selftest"]);
 		const output = result.stdout.toString() + result.stderr.toString();

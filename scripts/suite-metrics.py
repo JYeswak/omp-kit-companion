@@ -103,6 +103,12 @@ def qualification_environment(*, gate: bool = False) -> dict[str, str]:
         "OMP_KIT_CC": "0", "OMP_KIT_DISK_OBSERVER": "statfs", "OMP_KIT_OMP_SRC_FETCH": "0",
         "UV_THREADPOOL_SIZE": "4", "TOKIO_WORKER_THREADS": "4", "RAYON_NUM_THREADS": "4",
     })
+    # Fixtures give OMP a private HOME, so a Tern launcher (first on the pinned PATH) could not find its
+    # exact-version source under that HOME. Name the operator's read-only cache explicitly (fetch stays
+    # off); an explicit OMP_KIT_OMP_SRC_CACHE below still wins. kit-update-nplus-two failed without it.
+    source_cache = Path(home) / ".local" / "opt" / "omp-kit" / "omp-src"
+    if source_cache.is_dir():
+        environment["OMP_KIT_OMP_SRC_CACHE"] = str(source_cache)
     for name in (*SUITE_INPUTS, *(GATE_INPUTS if gate else ())):
         if name in os.environ:
             environment[name] = os.environ[name]
@@ -263,6 +269,9 @@ def execute(args: argparse.Namespace) -> int:
         # The suite fence still denies writes outside its scratch and archive.
         if os.environ.get("OMP_KIT_OMP_SRC_CACHE"):
             wrapped.extend(["--allow-env", "OMP_KIT_OMP_SRC_CACHE"])
+        # The gate's own worker count reaches fixtures' TIMEOUT_UNDER_LOAD diagnostics (GATEFLAKE1).
+        if os.environ.get("OMP_KIT_TEST_WORKERS"):
+            wrapped.extend(["--allow-env", "OMP_KIT_TEST_WORKERS"])
         if args.loopback_port is not None:
             wrapped.extend(["--loopback-port", str(args.loopback_port)])
         wrapped.extend(["--", *command])
