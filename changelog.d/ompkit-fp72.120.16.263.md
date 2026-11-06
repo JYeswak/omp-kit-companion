@@ -1,2 +1,2 @@
 ### Fixed
-- Local release prepare and next-version commits declare the prior writers of rewritten package and README version lines, so stale-worktree admits intended version bumps without authorizing unrelated writers. Dirty post-cut changelog fragments stay untouched; dirty metadata and folded fragments still refuse before any write.
+- Resume a published release's next-version advance with `scripts/release-local.sh --advance-only --version X.Y.Z`, without rebuilding, signing, publishing or installing. Unpublished or unattested releases refuse before checkout writes; completed advances are idempotent. Commit refusals retain the actual hook diagnostic and retry command instead of a manual recipe.

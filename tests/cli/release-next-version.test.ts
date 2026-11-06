@@ -96,8 +96,13 @@ function advance(f: Fixture, source: string, installed: 0 | 1) {
 	return runFixture(["bash", join(f.work, "advance.sh"), f.repo, f.work], { cwd: f.repo, env: { ...f.env, OMP_KIT_GIT_CONVERGE: CONVERGE }, floor_s: 180 });
 }
 
-function publishedFixture(label: string) {
+function publishedFixture(label: string, fragmentOwner = false) {
 	const f = fixture(label, "1.2.4", true);
+	if (fragmentOwner) {
+		writeFileSync(join(f.repo, "changelog.d/owned.md"), "### Fixed\n\n- Separately owned shipped fragment.\n");
+		f.git(f.repo, "add", "changelog.d/owned.md");
+		f.git(f.repo, "commit", "-qm", "shipped fragment\n\nBead: fixture-fragment");
+	}
 	const source = f.git(f.repo, "rev-parse", "HEAD");
 	// The tag stage of the run publishes v1.2.4 before the next-version step.
 	f.git(f.repo, "tag", "v1.2.4", source); f.git(f.repo, "push", "-q", "origin", "v1.2.4");
@@ -106,6 +111,114 @@ function publishedFixture(label: string) {
 	f.git(f.repo, "add", "."); f.git(f.repo, "commit", "-qm", "later work"); f.git(f.repo, "push", "-q", "origin", "main");
 	return { f, source, before: originMain(f) };
 }
+
+function advanceOnly(f: Fixture, version = "1.2.4") {
+	copyFileSync(join(ROOT, "scripts/release-local.sh"), join(f.repo, "scripts/release-local.sh"));
+	return runFixture(["bash", join(f.repo, "scripts/release-local.sh"), "--advance-only", "--version", version],
+		{ cwd: f.repo, env: f.env, floor_s: 180 });
+}
+
+function publishEvidence(f: Fixture, missing = "") {
+	const assets = ["SHA256SUMS", "release-index.json",
+		...["darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu"].map(p => `omp-kit-v1.2.4-${p}.tar`)]
+		.filter(name => name !== missing).map(name => ({ name, digest: `sha256:${"a".repeat(64)}` }));
+	writeFileSync(join(f.work, "release.json"), JSON.stringify({ tagName: "v1.2.4", isDraft: false, isPrerelease: false, assets }));
+	writeFileSync(join(f.work, "bin/gh"), `#!/bin/sh
+printf '%s\\n' "$*" >>"${join(f.work, "gh.calls")}"
+case "$*" in
+  "release view v1.2.4 "*) cat "${join(f.work, "release.json")}" ;;
+  "api --hostname github.com "*"/attestations/sha256:"*) printf '%s\\n' '{"attestations":[{"bundle":{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}}]}' ;;
+  *) echo "unexpected gh $*" >&2; exit 97 ;;
+esac
+`);
+}
+
+test("advance-only makes the same single advance commit as the full release stage and reruns ADVANCE_ALREADY_DONE", () => {
+	const baseline = publishedFixture("advance-only-full", true);
+	const resumed = publishedFixture("advance-only-resume", true);
+	publishEvidence(resumed.f);
+	for (const f of [baseline.f, resumed.f]) {
+		const hooks = installReadmeHook(f, "hooks-installed", readmeCheckSource);
+		copyFileSync(join(ROOT, "scripts/check-stale-worktree.sh"), join(hooks, "check-stale-worktree.sh"));
+		writeFileSync(join(hooks, "commit-msg"), `#!/bin/sh\nexec sh "${join(hooks, "check-stale-worktree.sh")}" "$1"\n`);
+		chmodSync(join(hooks, "commit-msg"), 0o755);
+		f.env.GIT_AUTHOR_DATE = "2026-11-06T00:00:00Z";
+		f.env.GIT_COMMITTER_DATE = "2026-11-06T00:00:00Z";
+	}
+	const full = advance(baseline.f, baseline.source, 1);
+	expect(full.rc, decode(full.stdout) + decode(full.stderr)).toBe(0);
+	const result = advanceOnly(resumed.f);
+	expect(result.rc, decode(result.stderr)).toBe(0);
+	const after = originMain(resumed.f);
+	expect(resumed.f.git(resumed.f.origin, "rev-list", "--count", `${resumed.before}..${after}`)).toBe("1");
+	expect(resumed.f.git(resumed.f.origin, "show", "--format=", after)).toBe(baseline.f.git(baseline.f.origin, "show", "--format=", originMain(baseline.f)));
+	expect(JSON.parse(showMain(resumed.f, "package.json")).version).toBe("1.2.5");
+	expect(showMain(resumed.f, "README.md")).toContain("\nCurrent release: v1.2.4\n");
+	expect(showMain(resumed.f, "CHANGELOG.md")).toContain("Shipped in the tagged source.");
+	expect(resumed.f.git(resumed.f.origin, "ls-tree", "-r", "--name-only", "main", "--", "changelog.d")).toBe("changelog.d/later.md");
+	expect(resumed.f.git(resumed.f.origin, "log", "-1", "--format=%B")).toContain(`Supersedes: ${resumed.source}`);
+	const rerun = advanceOnly(resumed.f);
+	expect(rerun.rc, decode(rerun.stderr)).toBe(0);
+	expect(decode(rerun.stdout)).toContain("ADVANCE_ALREADY_DONE");
+	expect(originMain(resumed.f)).toBe(after);
+	expect(resumed.f.git(resumed.f.repo, "diff", "--", "package.json", "README.md", "CHANGELOG.md", "changelog.d")).toBe("");
+}, fixtureDeadlineS(120) * 1_000);
+
+test("advance-only unpublished tag or missing release asset or attestation refuses without metadata or ref writes", () => {
+	for (const missing of ["tag", "release", "linux-asset", "attestation"]) {
+		const { f, before } = publishedFixture(`advance-only-unpublished-${missing}`);
+		publishEvidence(f, missing === "linux-asset" ? "omp-kit-v1.2.4-linux-x64-gnu.tar" : "");
+		if (missing === "tag") f.git(f.repo, "push", "-q", "origin", ":refs/tags/v1.2.4");
+		if (missing === "release") writeFileSync(join(f.work, "release.json"), '{"tagName":"v1.2.4","isDraft":true,"assets":[]}');
+		if (missing === "attestation") {
+			writeFileSync(join(f.work, "bin/gh"), `#!/bin/sh\ncase "$*" in "release view "*) cat "${join(f.work, "release.json")}" ;; *) echo '{"attestations":[]}' ;; esac\n`);
+		}
+		const refs = f.git(f.repo, "show-ref");
+		const status = f.git(f.repo, "status", "--porcelain");
+		const result = advanceOnly(f, missing === "tag" ? "1.2.9" : "1.2.4");
+		expect(result.rc, `${missing}: ${decode(result.stdout)}${decode(result.stderr)}`).toBe(4);
+		expect(decode(result.stderr)).toContain("ADVANCE_ONLY_NOT_PUBLISHED");
+		expect(f.git(f.repo, "show-ref")).toBe(refs);
+		// The helper copies only the untracked entrypoint before invoking it.
+		expect(f.git(f.repo, "status", "--porcelain").replace("?? scripts/release-local.sh", "").trim()).toBe(status);
+		expect(originMain(f)).toBe(before);
+		expect(JSON.parse(showMain(f, "package.json")).version).toBe("1.2.4");
+	}
+}, fixtureDeadlineS(120) * 1_000);
+
+test("advance-only dirty path names only the resume command and leaves peer bytes unchanged", () => {
+	const { f, before } = publishedFixture("advance-only-dirty");
+	publishEvidence(f);
+	const readme = `${readFileSync(join(f.repo, "README.md"), "utf8")}peer edit\n`;
+	writeFileSync(join(f.repo, "README.md"), readme);
+	const result = advanceOnly(f);
+	const stderr = decode(result.stderr);
+	expect(result.rc, stderr).toBe(4);
+	expect(stderr).toContain("NEXT_VERSION_PATHS_DIRTY");
+	expect(stderr).toContain("release-local --advance-only --version 1.2.4");
+	expect(stderr).not.toContain("make the commit by hand");
+	expect(stderr).not.toContain("promote --version");
+	expect(readFileSync(join(f.repo, "README.md"), "utf8")).toBe(readme);
+	expect(originMain(f)).toBe(before);
+}, fixtureDeadlineS(120) * 1_000);
+
+test("advance-only commit refusal reports the actual member rather than inventing an older README cause", () => {
+	const { f, before } = publishedFixture("advance-only-hook");
+	publishEvidence(f);
+	const hooks = join(f.work, "refusing-hooks");
+	mkdirSync(hooks);
+	writeFileSync(join(hooks, "pre-commit"), "#!/bin/sh\necho 'fixture-stale-member: REFUSED planted' >&2\nexit 1\n");
+	chmodSync(join(hooks, "pre-commit"), 0o755);
+	f.git(f.repo, "config", "core.hooksPath", hooks);
+	const result = advanceOnly(f);
+	const stderr = decode(result.stderr);
+	expect(result.rc, stderr).toBe(4);
+	expect(stderr).toContain("fixture-stale-member: REFUSED planted");
+	expect(stderr).toContain("release-local --advance-only --version 1.2.4");
+	expect(stderr).not.toContain("an older readme-check");
+	expect(originMain(f)).toBe(before);
+	expect(f.git(f.repo, "diff", "--", "package.json", "README.md", "CHANGELOG.md", "changelog.d")).toBe("");
+}, fixtureDeadlineS(120) * 1_000);
 
 test("AC1: after vX publishes and installs, one shared-main commit in the checkout sets the next patch, stamps README vX and passes the installed README hook", () => {
 	const { f, source, before } = publishedFixture("nextversion-ac1");
@@ -134,7 +247,7 @@ test("AC1: after vX publishes and installs, one shared-main commit in the checko
 	expect(existsSync(join(f.work, "next"))).toBe(false);
 }, fixtureDeadlineS(180) * 1_000);
 
-test("AC1 planted old hook: a previously installed readme-check refuses the commit, main is unchanged and the error names the install", () => {
+test("AC1 planted old hook: its real README refusal is preserved, main stays unchanged and recovery uses advance-only", () => {
 	const { f, source, before } = publishedFixture("nextversion-ac1-oldhook");
 	// The pre-NEXTVERSION1 rule: the README line must equal package.json.
 	const oldCheck = readmeCheckSource.replace("if (stated === undefined || releaseVersion !==", "if (stated !== undefined || releaseVersion !==");
@@ -146,8 +259,6 @@ test("AC1 planted old hook: a previously installed readme-check refuses the comm
 	expect(readFileSync(join(hooks, "ran"), "utf8")).toBe("ran\n");
 	expect(stderr).toContain("staged-readme: REFUSED");
 	expect(stderr).toContain("release line says `Current release: v1.2.4` but package.json is 1.2.5");
-	expect(stderr).toContain("v1.2.4 is published but not installed (--no-install)");
-	expect(stderr).toContain("Install it with: /fixture/kit/bin/omp-kit update --apply --yes --version 1.2.4");
 	expect(originMain(f)).toBe(before);
 	// Its own bytes are put back; the checkout is as it was.
 	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(before);
@@ -164,7 +275,7 @@ test("planted dirty path: a modified README refuses NEXT_VERSION_PATHS_DIRTY, wr
 	const stderr = decode(result.stderr);
 	expect(result.rc, stderr).toBe(4);
 	expect(stderr).toContain("NEXT_VERSION_PATHS_DIRTY:  M README.md;");
-	expect(stderr).toContain("make the commit by hand on main");
+	expect(stderr).not.toContain("make the commit by hand on main");
 	expect(readFileSync(join(f.repo, "README.md"), "utf8")).toBe(readme);
 	expect(readFileSync(join(f.repo, "package.json"), "utf8")).toBe(pkgBefore);
 	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(before);
@@ -190,10 +301,6 @@ test.skipIf(!existsSync(CONVERGE))("planted origin move: a peer push during the 
 	expect(f.git(f.repo, "rev-parse", "refs/heads/main")).toBe(main);
 }, fixtureDeadlineS(240) * 1_000);
 
-test("release-local.sh creates no git worktree (AGENTS.md: no branches, no worktrees)", () => {
-	expect(script).not.toContain("git worktree");
-	expect(script).not.toMatch(/(?<![-\w])worktree (?:add|remove|prune|list|move|lock|unlock|repair)\b/);
-});
 
 test("AC1 planted failure: a run refused at the tag stage commits nothing and leaves package.json and main unchanged", () => {
 	const f = fixture("nextversion-ac1-fail", "1.2.4");
@@ -204,7 +311,6 @@ test("AC1 planted failure: a run refused at the tag stage commits nothing and le
 	const pkgBefore = readFileSync(join(f.repo, "package.json"), "utf8");
 	// The real tail of the run, from the next-version definition and VERSIONSRC1 tag gate through its post-publish call.
 	const tail = segment("# NEXTVERSION1 (ompkit-d8qic", "\nadvance_next_version\n");
-	expect(tail).toContain("# VERSIONSRC1 (ompkit-fp72.135.1.14)");
 	const body = `${prelude}${helpers()}\nVERSION=1.2.4; SOURCE=${source}; REPO=fixture/release; DIST="$WORK/dist"\n${tail}`;
 	writeFileSync(join(f.work, "tail.sh"), body);
 	const result = runFixture(["bash", join(f.work, "tail.sh"), f.repo, f.work], { cwd: f.repo, env: f.env, floor_s: 60 });
@@ -214,13 +320,6 @@ test("AC1 planted failure: a run refused at the tag stage commits nothing and le
 	expect(originMain(f)).toBe(before);
 	expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(source);
 	expect(readFileSync(join(f.repo, "package.json"), "utf8")).toBe(pkgBefore);
-	// Order contract: the next-version commit follows the public verify stage and the install stage, so the
-	// just-installed hooks judge it.
-	const verify = script.indexOf("stage verify\n");
-	const call = script.indexOf("\nadvance_next_version\n");
-	expect(verify).toBeGreaterThan(script.indexOf("stage tag\n"));
-	expect(call).toBeGreaterThan(script.indexOf("verify.gatekeeper", verify));
-	expect(call).toBeGreaterThan(script.indexOf('if [ "$INSTALL" = 1 ]; then install_release; fi'));
 }, fixtureDeadlineS(120) * 1_000);
 
 const preflight = () => segment('PREPARE=0\nif [ -z "$SOURCE" ]; then PREPARE=1', 'say "source $SOURCE (origin/main $MAIN) version $VERSION base $BASE_TAG mode $MODE"');

@@ -34,6 +34,7 @@
 #                 real align and CLI version readback. --no-install explicitly stops at released.
 #
 # Usage: scripts/release-local.sh [--version X.Y.Z | --next] [--source SHA] [--dry-run] [--install | --no-install]
+# Resume only the next-version advance of a published release: --advance-only --version X.Y.Z
 # Environment:
 #   TMPDIR                             an owned scratch directory (required); the build tree is removed on exit
 #   OMP_KIT_REPO                       GitHub repository (default: JYeswak/omp-kit-companion)
@@ -65,7 +66,7 @@ INSTALL_PREFIX="${OMP_KIT_INSTALL_PREFIX:-$HOME/.local/opt/omp-kit}"
 # main kept stating the published version and the next cut needed a bootstrap prepare commit plus its own verdict. A
 # refusal while ADVANCE_PENDING=1 (set after verify, cleared when the advance starts) still advances main, exactly as
 # --no-install does, then exits 4 naming the install command. Its own refusal (dirty paths, refused hooks) names the
-# manual commit, and its die is a plain exit. die stays one line: stage fixtures (release-local-ci-only-reuse.test.sh)
+# advance-only retry command, and its die is a plain exit. die stays one line: stage fixtures (release-local-ci-only-reuse.test.sh)
 # cut it out by that shape, without ADVANCE_PENDING or this function.
 ADVANCE_PENDING=0
 advance_after_refusal() {
@@ -78,6 +79,7 @@ die() { echo "release-local: refused: $*" >&2; [ "${ADVANCE_PENDING:-0}" = 0 ] |
 say() { echo "== $*"; }
 
 DRY_RUN=0
+ADVANCE_ONLY=0
 VERSION=''
 SOURCE=''
 NEXT=0
@@ -89,6 +91,7 @@ RELEASED_AT=''
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--dry-run) DRY_RUN=1; shift ;;
+		--advance-only) ADVANCE_ONLY=1; shift ;;
 		--version) VERSION="${2:-}"; shift 2 ;;
 		--next) NEXT=1; shift ;;
 		--source) SOURCE="${2:-}"; shift 2 ;;
@@ -102,6 +105,10 @@ done
 [ -z "$SOURCE" ] || [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]] || { echo "release-local: --source must be a full commit SHA" >&2; exit 2; }
 [ "$NEXT" = 0 ] || [ -z "$VERSION" ] || { echo "release-local: use --next or --version, not both" >&2; exit 2; }
 [ "$NEXT" = 0 ] || [ -z "$SOURCE" ] || { echo "release-local: --next prepares HEAD; do not combine it with --source" >&2; exit 2; }
+if [ "$ADVANCE_ONLY" = 1 ]; then
+	{ [ -n "$VERSION" ] && [ "$NEXT" = 0 ] && [ -z "$SOURCE" ] && [ "$DRY_RUN" = 0 ]; } ||
+		{ echo "release-local: use release-local --advance-only --version X.Y.Z without --next, --source or --dry-run" >&2; exit 2; }
+fi
 if [ -z "${TMPDIR:-}" ] || [ ! -d "$TMPDIR" ]; then die "export TMPDIR to an owned scratch directory first"; fi # tempsafe: requires the caller's owned scratch, creates nothing
 
 # Cancel safety: every external step runs bounded, with stdin from /dev/null, as a waited background child that
@@ -168,7 +175,7 @@ release_version_supersedes() {
 	bounded 60 python3 -c '
 import re, subprocess, sys
 from pathlib import Path
-root, bead = sys.argv[1:]
+root, bead, *fragments = sys.argv[1:]
 def git(*args):
     return subprocess.check_output(["git", "-C", root, *args], text=True)
 head = git("rev-parse", "HEAD").strip()
@@ -191,10 +198,21 @@ for path, pattern in (
             paths = rewrites.setdefault(fields[0], [])
             if path not in paths:
                 paths.append(path)
+# Only fully deleted shipped fragments need whole-file supersession. Version
+# attribution above remains restricted to the rewritten version lines.
+for path in fragments:
+    if (Path(root) / path).exists():
+        continue
+    for record in git("blame", "--line-porcelain", head, "--", path).splitlines():
+        fields = record.split()
+        if len(fields) >= 3 and re.fullmatch(r"[0-9a-f]{40}", fields[0]):
+            paths = rewrites.setdefault(fields[0], [])
+            if path not in paths:
+                paths.append(path)
 for sha, paths in rewrites.items():
     scope = ", ".join(paths)
-    print(f"Supersedes: {sha} by {bead}: version lines ({scope})")
-' "$ROOT" "$1"
+    print(f"Supersedes: {sha} by {bead}: release metadata ({scope})")
+' "$ROOT" "$@"
 }
 
 # No --source means prepare from this checkout. Never adopt foreign metadata edits,
@@ -450,6 +468,8 @@ install_release() {
 }
 
 # ---------------------------------------------------------------------------------------------- 1. preflight
+# Advance-only bypasses all prepare/build/sign/publish/verify/install stages.
+if [ "$ADVANCE_ONLY" = 0 ]; then
 stage preflight
 [ "$(uname -s)" = Darwin ] || die "the local release runs on macOS (it signs and notarizes the darwin archive)"
 for tool in git gh jq python3 bun shasum codesign xcrun security spctl ditto plutil openssl curl tar timeout; do
@@ -833,16 +853,15 @@ if [ "$DRY_RUN" = 1 ]; then
 	receipt dry-run
 	exit 0
 fi
+fi # normal release preparation
 
 # NEXTVERSION1 (ompkit-d8qic; Maven release:prepare "prepare for next development iteration"): after vVERSION is
 # public, shared main moves to the next patch in one commit that also promotes the vVERSION CHANGELOG section and
 # stamps README's release line to vVERSION (the latest published release), so the next cut tags an already-green
 # origin commit with no bump commit. Only fragments present at the tagged source are folded; later fragments stay
-# in changelog.d/ for the next release. It runs only after the public verify stage, so a run that fails earlier
-# (build, sign, tag, draft, attest, verify) commits nothing, and after the install stage, so the commit is judged by
-# the hooks of the kit it just installed: the previously installed readme-check would refuse README vVERSION beside
-# package.json NEXT. Hooks are never bypassed; with --no-install the commit is still attempted, and a refusal names
-# the install that unblocks it.
+# in changelog.d/ for the next release. A full run reaches it after public verification and install;
+# --advance-only admits an already-published tag without repeating either stage. Both routes use
+# the installed commit hooks unchanged and preserve their actual refusal diagnostics.
 # The commit is made on the shared main in the canonical checkout (AGENTS.md: no branches, no worktrees) with
 # `git commit --only`, exactly like the prepare stage. The new bytes are computed in an owned scratch export of HEAD,
 # because release-notes.sh promote folds every fragment it finds and the checkout may hold peers' fragments. ADVANCEREF1
@@ -866,7 +885,8 @@ advance_next_version() {
 			git -C "$ROOT" cat-file blob "$ref:$blob" >"$dest/$blob" || return 1
 		done
 	}
-	local next agent export="$WORK/next" date promote_rc path dirty manual supersedes
+	local next agent export="$WORK/next" date promote_rc path dirty supersedes
+	local resume="release-local --advance-only --version $VERSION"
 	local converge="${OMP_KIT_GIT_CONVERGE:-$HOME/Developer/omp-kit/scripts/git_converge.py}"
 	local -a fragments=() paths=(package.json README.md CHANGELOG.md)
 	next="$(python3 -c 'import sys; a, b, c = map(int, sys.argv[1].split(".")); print(f"{a}.{b}.{c + 1}")' "$VERSION")"
@@ -878,16 +898,24 @@ advance_next_version() {
 	if ! git -C "$ROOT" merge-base --is-ancestor "$SOURCE" HEAD; then
 		# The cut source is on origin but not yet in the shared main (a no-prepare cut of origin/main): integrate first.
 		bounded 900 python3 "$converge" --repo "$ROOT" --apply ||
-			die "v$VERSION is published; NEXT_VERSION_CONVERGE_FAILED: shared main lacks $SOURCE and $converge --repo $ROOT --apply refused"
+			die "v$VERSION is published; NEXT_VERSION_CONVERGE_FAILED: shared main lacks $SOURCE (see above); retry: $resume"
 	fi
+	# The exact advance marker also covers a historical retry after newer releases.
+	NEXT_SHA="$(git -C "$ROOT" log -1 --format=%H --fixed-strings \
+		--grep="NEXTVERSION1: v$VERSION is published from $SOURCE;" "$SOURCE..HEAD")" ||
+		die "cannot inspect the next-version history; retry: $resume"
+	if [ -n "$NEXT_SHA" ] && git -C "$ROOT" merge-base --is-ancestor "$NEXT_SHA" refs/remotes/origin/main; then
+		say "ADVANCE_ALREADY_DONE: v$VERSION advanced in $NEXT_SHA"
+		return 0
+	fi
+	if [ -z "$NEXT_SHA" ]; then
 	# Fold exactly the fragments the tagged source shipped that main still holds.
 	while IFS= read -r path; do
 		git -C "$ROOT" cat-file -e "HEAD:$path" 2>/dev/null && fragments+=("$path")
 	done < <(git -C "$ROOT" ls-tree --name-only "$SOURCE" -- changelog.d/)
 	paths+=(${fragments[@]+"${fragments[@]}"})
-	manual="make the commit by hand on main: in an owned scratch copy of HEAD's package.json, README.md, CHANGELOG.md and scripts/ plus $SOURCE's copies of only these fragments [${fragments[*]:-none}], run sh scripts/release-notes.sh promote --version $VERSION --date $date --write, set package.json .version and .omp.version to $next, run sh scripts/stamp-release-line.sh --version $VERSION; copy the three files into $ROOT; there, delete each of those fragments unchanged since $SOURCE and replace each changed one with the output of sh scripts/release-notes.sh residual --released <its $SOURCE copy> --current <its HEAD copy> (delete it when that is empty), then git commit --only -- ${paths[*]} and git push origin main (python3 $converge --repo $ROOT --push when origin moved)"
 	dirty="$(git -C "$ROOT" status --porcelain --untracked-files=all -- "${paths[@]}")" || die "v$VERSION is published; cannot inspect the next-version paths"
-	[ -z "$dirty" ] || die "v$VERSION is published; NEXT_VERSION_PATHS_DIRTY: ${dirty//$'\n'/; }; nothing was written. Once those paths are clean, $manual"
+	[ -z "$dirty" ] || die "v$VERSION is published; NEXT_VERSION_PATHS_DIRTY: ${dirty//$'\n'/; }; nothing was written. Once those paths are clean, retry: $resume"
 	rm -rf "$export" "$WORK/next-head" "$WORK/next-residual"; mkdir -p "$export" "$WORK/next-head" "$WORK/next-residual"
 	git -C "$ROOT" archive HEAD -- scripts/release-notes.sh scripts/release-notes.ts scripts/stamp-release-line.sh \
 		scripts/kitlib-tmp.sh | tar -xf - -C "$export" || die "v$VERSION is published; cannot export the next-version scripts"
@@ -936,7 +964,7 @@ PY
 		if [ -s "$WORK/next-residual/$path" ]; then cp "$WORK/next-residual/$path" "$ROOT/$path"; else rm -f "$ROOT/$path"; fi
 	done
 	rm -rf "$export" "$WORK/next-head" "$WORK/next-residual"
-	supersedes="$(release_version_supersedes ompkit-d8qic)" || die "v$VERSION is published; cannot attribute next-version version lines"
+	supersedes="$(release_version_supersedes ompkit-d8qic ${fragments[@]+"${fragments[@]}"})" || die "v$VERSION is published; cannot attribute next-version rewrites; retry: $resume"
 	if ! bounded 900 git -C "$ROOT" commit -q --only \
 		-m "chore(release): next version $next after v$VERSION ompkit-d8qic" \
 		-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
@@ -947,23 +975,82 @@ Bead: ompkit-d8qic
 Agent: $agent" -- "${paths[@]}"; then
 		# Only this step's own bytes are put back: every path was clean before it wrote them.
 		git -C "$ROOT" checkout HEAD -- "${paths[@]}" || echo "release-local: WARNING: could not restore ${paths[*]} in $ROOT" >&2
-		if [ "$INSTALLED" = 1 ]; then die "v$VERSION is published; the next-version commit for $next was refused by the installed v$VERSION commit hooks (see above); once fixed, $manual"
-		else die "v$VERSION is published but not installed ($([ "${INSTALL:-0}" = 1 ] && echo 'its install stage refused' || echo '--no-install')); the previously installed commit hooks refused the next-version commit for $next (an older readme-check refuses README v$VERSION beside package.json $next). Install it with: $INSTALL_PREFIX/bin/omp-kit update --apply --yes --version $VERSION, then $manual"; fi
+		die "v$VERSION is published; NEXT_VERSION_COMMIT_REFUSED: the commit member's diagnostic is above; once fixed, retry: $resume"
 	fi
 	NEXT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+	fi
 	bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "next-version commit $NEXT_SHA made; fetch before publishing failed"
 	if git -C "$ROOT" merge-base --is-ancestor refs/remotes/origin/main HEAD; then
 		bounded 900 git -C "$ROOT" -c push.followTags=false push --porcelain origin main ||
-			die "next-version commit $NEXT_SHA is on local main; NEXT_VERSION_PUSH_FAILED: publish it with git push origin main"
+			die "next-version commit $NEXT_SHA is on local main; NEXT_VERSION_PUSH_FAILED; retry: $resume"
 	else
-		[ -f "$converge" ] || die "next-version commit $NEXT_SHA is on local main and origin moved; NEXT_VERSION_CONVERGE_MISSING: $converge (set OMP_KIT_GIT_CONVERGE)"
+		[ -f "$converge" ] || die "next-version commit $NEXT_SHA is on local main and origin moved; NEXT_VERSION_CONVERGE_MISSING: $converge; retry: $resume"
 		bounded 1800 python3 "$converge" --repo "$ROOT" --push --expect-head "$NEXT_SHA" ||
-			die "next-version commit $NEXT_SHA is on local main and origin moved; NEXT_VERSION_CONVERGE_FAILED: publish it with python3 $converge --repo $ROOT --push"
+			die "next-version commit $NEXT_SHA is on local main and origin moved; NEXT_VERSION_CONVERGE_FAILED (see above); retry: $resume"
 	fi
 	bounded 300 git -C "$ROOT" fetch --quiet origin '+refs/heads/main:refs/remotes/origin/main' || die "next-version readback fetch failed"
 	git -C "$ROOT" merge-base --is-ancestor "$NEXT_SHA" refs/remotes/origin/main || die "next-version commit $NEXT_SHA is not on origin/main"
 	say "next version $next committed to main: $NEXT_SHA"
 }
+
+# ADVANCEONLY1: publication admission is read-only until every required asset and
+# archive attestation is present. The normal release's consumer verification is
+# deliberately not repeated here; this entrypoint changes only next-version metadata.
+if [ "${ADVANCE_ONLY:-0}" = 1 ]; then
+	stage advance-only
+	resume="release-local --advance-only --version $VERSION"
+	for tool in git gh jq python3 bun tar timeout; do
+		command -v "$tool" >/dev/null || die "missing tool: $tool; retry: $resume"
+	done
+	remote_tags="$(bounded 120 git -C "$ROOT" ls-remote --tags origin "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}")" ||
+		die "ADVANCE_ONLY_NOT_PUBLISHED: origin tag lookup failed; retry: $resume"
+	tag_source=''; peeled_source=''
+	while read -r sha ref; do
+		case "$ref" in
+			"refs/tags/v$VERSION") tag_source=$sha ;;
+			"refs/tags/v$VERSION^{}") peeled_source=$sha ;;
+		esac
+	done <<<"$remote_tags"
+	[ -n "$tag_source" ] || die "ADVANCE_ONLY_NOT_PUBLISHED: origin has no v$VERSION; retry: $resume"
+	bounded 120 gh release view "v$VERSION" --repo "$REPO" --json tagName,isDraft,isPrerelease,assets >"$WORK/published.json" ||
+		die "ADVANCE_ONLY_NOT_PUBLISHED: release v$VERSION is unavailable; retry: $resume"
+	# GitHub's asset digests identify the archive attestations exactly as in the
+	# public verifier. Checksums/index must exist; only archives carry attestations.
+	bounded 30 python3 -c '
+import json, re, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+version = sys.argv[2]
+required = ["SHA256SUMS", "release-index.json"] + [
+    f"omp-kit-v{version}-{platform}.tar"
+    for platform in ("darwin-arm64-none", "linux-arm64-gnu", "linux-x64-gnu")]
+if doc.get("tagName") != "v" + version or doc.get("isDraft") is not False or doc.get("isPrerelease") is not False:
+    raise SystemExit("release is not public and stable")
+assets = doc.get("assets", [])
+for name in required:
+    matches = [asset for asset in assets if asset.get("name") == name]
+    if len(matches) != 1 or not re.fullmatch(r"sha256:[0-9a-f]{64}", matches[0].get("digest", "")):
+        raise SystemExit(f"missing or ambiguous published asset digest: {name}")
+    if name.endswith(".tar"):
+        print(matches[0]["digest"])
+' "$WORK/published.json" "$VERSION" >"$WORK/published-digests" ||
+		die "ADVANCE_ONLY_NOT_PUBLISHED: incomplete release assets; retry: $resume"
+	while IFS= read -r digest; do
+		bounded 120 gh api --hostname github.com "repos/$REPO/attestations/$digest" >"$WORK/published-attestation.json" ||
+			die "ADVANCE_ONLY_NOT_PUBLISHED: no attestation for $digest; retry: $resume"
+		jq -e '.attestations | type == "array" and length > 0 and any(.[]; (.bundle | type == "object" and length > 0))' \
+			"$WORK/published-attestation.json" >/dev/null ||
+			die "ADVANCE_ONLY_NOT_PUBLISHED: no attestation bundle for $digest; retry: $resume"
+	done <"$WORK/published-digests"
+	# Only now may the local tag ref change; never replace a conflicting local tag.
+	bounded 300 git -C "$ROOT" fetch --quiet origin "refs/tags/v$VERSION:refs/tags/v$VERSION" ||
+		die "ADVANCE_ONLY_NOT_PUBLISHED: cannot fetch the published tag; retry: $resume"
+	SOURCE="$(git -C "$ROOT" rev-parse "v$VERSION^{commit}")" ||
+		die "ADVANCE_ONLY_NOT_PUBLISHED: tag is not a commit; retry: $resume"
+	[ "$SOURCE" = "${peeled_source:-$tag_source}" ] ||
+		die "ADVANCE_ONLY_NOT_PUBLISHED: origin tag changed during admission; retry: $resume"
+	advance_next_version
+	exit 0
+fi
 
 # VERSIONSRC1 (ompkit-fp72.135.1.14): the tagged source must state the
 # release version in package.json; a mismatch refuses the tag, never a
