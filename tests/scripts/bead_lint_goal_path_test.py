@@ -85,9 +85,13 @@ class GoalPath(unittest.TestCase):
         rows[0]["dependencies"].append(dep("g-rel", "w-shut"))
         self.assertEqual(bead_lint.goal_path_failure(by(rows, "w-shut"), rows), [])
 
-    def test_parent_child_does_not_place(self) -> None:
+    def test_child_of_open_goal_is_placed(self) -> None:
+        # GOALCHILD1: a parent-child descendant of an open goal is on its path.
         rows = tracker()
-        self.assertTrue(bead_lint.goal_path_failure(by(rows, "w-parent"), rows))
+        self.assertEqual(bead_lint.goal_path_failure(by(rows, "w-parent"), rows), [])
+        # Planted negative: a child of a CLOSED goal is still refused.
+        rows.append(mk("w-orphan", created_at=POST, deps=[dep("w-orphan", "g-shut", "parent-child")]))
+        self.assertTrue(bead_lint.goal_path_failure(by(rows, "w-orphan"), rows))
 
     def test_create_label_target(self) -> None:
         rows = tracker()
@@ -108,7 +112,7 @@ class GoalPath(unittest.TestCase):
 
     def test_report_splits_enforced_and_legacy(self) -> None:
         self.assertEqual(bead_lint.goal_path_report(tracker()), {
-            "enforced": ["w-loose", "w-parent", "w-shut"], "legacy": ["w-old"]})
+            "enforced": ["w-loose", "w-shut"], "legacy": ["w-old"]})  # w-parent: child of open g-rel (GOALCHILD1)
 
     def test_lint_bead_failures_needs_graph(self) -> None:
         rows = tracker()

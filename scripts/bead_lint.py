@@ -699,6 +699,11 @@ def goal_path_finding(bead: dict, rows: list[dict], dependents=None) -> list[str
         starts = [bid]
     if starts and goal_path_target(starts, goal_ids, dependents):
         return []
+    # GOALCHILD1 (ompkit-1ra0d, 2026-11-06): a parent-child descendant of an open goal is on that goal's path (the goal
+    # cannot close while the child is open). The only other edge, goal -> child blocks, is refused by PARENTBLOCK1 and
+    # EPICWAIT1 because it hides every child from br ready, so without this every child of a goal epic was unplaceable.
+    if parent_child_ancestors(bead, rows) & goal_ids:
+        return []
     named = "; ".join(f"{g['id']} ({(g.get('title') or '')[:80]})" for g in goals)
     # PARENTBLOCK1 (rz5.134): never tell an author to make one of the bead's own parent-child ancestors wait on it;
     # that edge parent-blocks every child of the ancestor (2026-11-01: 54 of 61 release-train children hidden).
