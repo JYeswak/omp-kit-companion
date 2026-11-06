@@ -673,7 +673,9 @@ PYEOF
 }
 
 gate_notes() {
-	sh "$SCRIPT_DIR/check-pushed-notes.sh" --repo "$ROOT" --base "$BASE" --tip "$COMMIT" --archive-dir "$ARCHIVE_DIR"
+	# The base focused phase can initialize the candidate archive's empty .git.
+	# Resolve range objects in the pushing checkout, never that test repository.
+	sh "$SCRIPT_DIR/check-pushed-notes.sh" --repo "${FRESH_GATE_REPO:-$ROOT}" --base "$BASE" --tip "$COMMIT" --archive-dir "$ARCHIVE_DIR"
 }
 
 # README currency: every registry command and doctor scope documented, no pinned
