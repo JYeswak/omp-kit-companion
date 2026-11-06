@@ -1355,6 +1355,8 @@ export async function deliverToTernSeat(input: {
 	identify?: typeof identifyTernSeat;
 	/** Composer truth for paste admission (no window key); default reads the seat's kit-composer-state record. */
 	composer?: (sessionFile: string) => ComposerVerdict;
+	/** Test-only v0.2.95 mutant: replaced journals remain pending, with no acknowledgement transition. */
+	testOnlyPendingSettlement?: "v0.2.95";
 }): Promise<TernDeliverResult> {
 	const observe = input.observe ?? observeTernSeat;
 	const identify = input.identify ?? identifyTernSeat;
@@ -1535,7 +1537,8 @@ export async function deliverToTernSeat(input: {
 		const proof = proofView === null ? null : proveTernEntry(proofView, rec);
 		if (proof?.status === "PROVEN") {
 			settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", proof.offset);
-		} else if (proof?.status === "UNCERTAIN" && proof.reason === "JOURNAL_REPLACED" && proofView !== null) {
+		} else if (input.testOnlyPendingSettlement !== "v0.2.95"
+			&& proof?.status === "UNCERTAIN" && proof.reason === "JOURNAL_REPLACED" && proofView !== null) {
 			const replacement = proveReplacedTernEntry(input.io, sessionFile, proofView, rec);
 			const status = replacement.status === "PROVEN" ? "CONSUMED_LATER" : "REPLACED_UNPROVEN";
 			if (!settleTernPending(pendingDir, name, rec, status, replacement.status === "PROVEN" ? replacement.offset : null)) {

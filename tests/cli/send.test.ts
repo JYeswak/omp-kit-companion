@@ -875,17 +875,30 @@ function replacedPending(journal: string, originalJournal = settledJournal) {
 	return { dir, marker, payload, path, fake, io };
 }
 
-test("SENDSTUCK1: replacement journal's exact typed USER entry settles CONSUMED_LATER and permits the next send", async () => {
+async function sendreachTypedEntry(arm: "case" | "mutant") {
 	const payload = "old\n[kit-send-0123456789ac]";
-	// Rewriting can move the entry before the old byte cursor.
+	// Both arms rewrite the exact USER entry before the old byte cursor.
 	const journal = HEADER + userEntry("old-u", null, payload) + assistantEntry("m1", "old-u");
 	const fx = replacedPending(journal, HEADER + assistantEntry("m1", null, "old history ".repeat(100)));
-	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io });
-	expect(result.status).toBe("OK");
-	expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
-	expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)))
-		.toMatchObject([{ status: "CONSUMED_LATER", marker: fx.marker, offset: Buffer.byteLength(HEADER) }]);
-});
+	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io,
+		testOnlyPendingSettlement: arm === "mutant" ? "v0.2.95" : undefined });
+	const suppressed = result.code === "SUPPRESSED_PENDING" || result.code === "REPLACED_UNPROVEN" ? 1 : 0;
+	console.log(`SENDREACH1 arm=${arm} fixture=1 suppressed=${suppressed}`);
+	expect(suppressed).toBe(arm === "case" ? 0 : 1);
+	if (arm === "mutant") {
+		expect(result).toMatchObject({ status: "PENDING_CONSUME", code: "SUPPRESSED_PENDING", sends: 0 });
+		expect(fx.fake.sent).toEqual([]);
+		expect(existsSync(fx.path)).toBe(true);
+	} else {
+		expect(result.status).toBe("OK");
+		expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
+		expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)))
+			.toMatchObject([{ status: "CONSUMED_LATER", marker: fx.marker, offset: Buffer.byteLength(HEADER) }]);
+	}
+}
+
+test("SENDSTUCK1 case 1: typed replacement consumption releases the seat", () => sendreachTypedEntry("case"));
+test("SENDSTUCK1 mutant 1: v0.2.95 leaves typed replacement consumption suppressed", () => sendreachTypedEntry("mutant"));
 
 test("SENDSTUCK1 planted: absent, substring-only and assistant echo replacement entries never release suppression", async () => {
 	const payload = "old\n[kit-send-0123456789ac]";
@@ -957,22 +970,40 @@ test("SENDSTUCK1: a replaced-unproven record still requires acknowledgement afte
 	expect(existsSync(fx.path)).toBe(true);
 });
 
-test("SENDSTUCK1: explicit CLI acknowledgement clears only a replaced-unproven record and sends nothing", async () => {
+async function sendreachAcknowledgement(arm: "case" | "mutant") {
 	const fx = replacedPending(settledJournal);
-	// Model a prior send's durable classification; acknowledgement never inspects or actuates the seat.
-	const record = JSON.parse(readFileSync(fx.path, "utf8"));
-	writeFileSync(fx.path, JSON.stringify({ ...record, status: "REPLACED_UNPROVEN" }) + "\n");
-	const home = join(dirname(fx.dir), "home");
-	mkdirSync(home);
-	const acknowledged = await run([process.execPath, "run", "src/cli.ts", "send", "--ack-pending", fx.path,
-		"--drop-dir", fx.dir, "--json"], { deadline_s: fixtureDeadlineS(), cwd: repoRoot, env: { ...process.env, HOME: home } });
-	expect(acknowledged.rc, new TextDecoder().decode(acknowledged.stderr)).toBe(0);
-	expect(JSON.parse(new TextDecoder().decode(acknowledged.stdout)).data).toMatchObject({ status: "ACKNOWLEDGED", marker: fx.marker, sends: 0 });
-	expect(existsSync(fx.path)).toBe(false);
-	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io });
-	expect(result.status).toBe("OK");
-	expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
-});
+	const delivery = { dropDir: fx.dir, io: fx.io,
+		testOnlyPendingSettlement: arm === "mutant" ? "v0.2.95" as const : undefined };
+	const initial = await deliverTern(fx.fake, "new", delivery);
+	expect(initial).toMatchObject({ code: arm === "case" ? "REPLACED_UNPROVEN" : "SUPPRESSED_PENDING", sends: 0 });
+	expect(fx.fake.sent).toEqual([]);
+	if (arm === "case") {
+		expect(JSON.parse(readFileSync(fx.path, "utf8")).status).toBe("REPLACED_UNPROVEN");
+		const home = join(dirname(fx.dir), "home");
+		mkdirSync(home);
+		const acknowledged = await run([process.execPath, "run", "src/cli.ts", "send", "--ack-pending", fx.path,
+			"--drop-dir", fx.dir, "--json"], { deadline_s: fixtureDeadlineS(), cwd: repoRoot, env: { ...process.env, HOME: home } });
+		expect(acknowledged.rc, new TextDecoder().decode(acknowledged.stderr)).toBe(0);
+		expect(JSON.parse(new TextDecoder().decode(acknowledged.stdout)).data).toMatchObject({ status: "ACKNOWLEDGED", marker: fx.marker, sends: 0 });
+		expect(existsSync(fx.path)).toBe(false);
+	}
+	// v0.2.95 had no acknowledgement command: the old arm retains its pending attempt.
+	const result = await deliverTern(fx.fake, "new", delivery);
+	const suppressed = result.code === "SUPPRESSED_PENDING" || result.code === "REPLACED_UNPROVEN" ? 1 : 0;
+	console.log(`SENDREACH1 arm=${arm} fixture=2 suppressed=${suppressed}`);
+	expect(suppressed).toBe(arm === "case" ? 0 : 1);
+	if (arm === "mutant") {
+		expect(result).toMatchObject({ status: "PENDING_CONSUME", code: "SUPPRESSED_PENDING", sends: 0 });
+		expect(fx.fake.sent).toEqual([]);
+		expect(existsSync(fx.path)).toBe(true);
+	} else {
+		expect(result.status).toBe("OK");
+		expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
+	}
+}
+
+test("SENDSTUCK1 case 2: explicit acknowledgement releases the replaced-unproven seat", () => sendreachAcknowledgement("case"));
+test("SENDSTUCK1 mutant 2: v0.2.95 has no acknowledgement path and stays suppressed", () => sendreachAcknowledgement("mutant"));
 
 test("SENDSTUCK1 acknowledgement negative: an ordinary unconsumed attempt cannot be acknowledged away", async () => {
 	const dir = ternDropDir();
