@@ -218,26 +218,32 @@ test("parallel live cases retain ordered reports, private models and read-only n
 		const kept = /kept private e2e output: (\S+) \(work root (\S+)\)/.exec(stdout);
 		expect(kept).not.toBeNull();
 		const tree = kept![1]!;
-		const models = names.map((_, index) => readFileSync(join(tree, `home-${index}`, ".omp/agent/models.yml"), "utf8"));
+		// A scenario's home is numbered by its index in the full scenario list (result-N.name records which), not by its
+		// position in ONLY: a rule added or retired ahead of these names shifts every number.
+		const homeOf = new Map(readdirSync(tree).filter(file => /^result-\d+\.name$/.test(file))
+			.map(file => [readFileSync(join(tree, file), "utf8").trim(), `home-${file.slice("result-".length, -".name".length)}`] as const));
+		const homes = names.map(name => homeOf.get(name)!);
+		expect(homes.every(Boolean)).toBe(true);
+		const models = homes.map(home => readFileSync(join(tree, home, ".omp/agent/models.yml"), "utf8"));
 		expect(new Set(models).size).toBe(names.length);
 		const rows = readFileSync(reportPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
 		expect(rows.filter(row => row.event === "case").map(row => row.name)).toEqual([...names, "launchd-isolation", "mock-server-cleanup"]);
 		expect(rows.at(-1)).toMatchObject({ event: "end", cases: names.length + 2 });
-		const nativeRoot = join(tree, "home-1/.omp/natives");
+		const nativeRoot = join(tree, homes[1]!, ".omp/natives");
 		if (existsSync(nativeRoot)) {
 			const versions = readdirSync(nativeRoot);
 			const binding = readdirSync(join(nativeRoot, versions[0]!)).find(name => name.endsWith(".node"))!;
 			const first = statSync(join(nativeRoot, versions[0]!, binding));
-			const next = statSync(join(tree, "home-2/.omp/natives", versions[0]!, binding));
+			const next = statSync(join(tree, homes[2]!, ".omp/natives", versions[0]!, binding));
 			expect(first.ino).toBe(next.ino);
 			expect(first.mode & 0o222).toBe(0);
 		}
-		const firstCache = join(tree, "home-1/.cache/bun");
+		const firstCache = join(tree, homes[1]!, ".cache/bun");
 		if (existsSync(firstCache)) {
 			for (const group of readdirSync(firstCache)) {
 				for (const file of readdirSync(join(firstCache, group)).filter(name => name.endsWith(".pile"))) {
 					const first = join(firstCache, group, file);
-					const next = join(tree, "home-2/.cache/bun", group, file);
+					const next = join(tree, homes[2]!, ".cache/bun", group, file);
 					if (!existsSync(next)) continue;
 					expect(statSync(first).ino).not.toBe(statSync(next).ino);
 					expect(readFileSync(first)).toEqual(readFileSync(next));
