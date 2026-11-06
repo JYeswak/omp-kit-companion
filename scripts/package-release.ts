@@ -458,9 +458,7 @@ async function run(): Promise<void> {
 				content.set(name, packageSecretOutputGuard(safeSource(name)));
 			else if (BUNDLE_ERRORS[name]) {
 				// Bundle local helpers so the installed script needs no checkout source tree.
-				// ompkit-xa5s.45: host OMP modules stay external; OMP's extension loader binds them at load time.
-				const bundled = await Bun.build({ entrypoints: [join(root, name)], target: "bun", format: "esm", minify: false,
-					external: ["@oh-my-pi/pi-coding-agent", "@oh-my-pi/pi-coding-agent/*"] });
+				const bundled = await Bun.build({ entrypoints: [join(root, name)], target: "bun", format: "esm", minify: false });
 				if (!bundled.success || bundled.outputs.length !== 1) fail(BUNDLE_ERRORS[name]!);
 				content.set(name, Buffer.from(await bundled.outputs[0]!.text()));
 			} else if (name === "package.json") continue;

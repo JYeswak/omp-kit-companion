@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ownedTmp } from "./kitlib/tmp.ts";
-import { isOpusClass, loadSpawnModelRuntime, nativeSpawnModelSettings, readSpawnModelInputs, readSpawnModelSession, resolveTaskModels, taskModelRefusal, type SpawnAgentDefinition } from "./spawn-model.ts";
+import { isOpusClass, loadSpawnModelRuntime, nativeSpawnModelSettings, readSpawnModelInputs, resolveTaskModels, taskModelRefusal, type SpawnAgentDefinition } from "./spawn-model.ts";
 
 const runtime = await loadSpawnModelRuntime();
 // Catalog location is selected by the installed OMP, not by this checkout.
@@ -108,105 +108,5 @@ describe("AGENTMODEL1 native task model resolution", () => {
 		expect(session.scope).toBe("session");
 		expect(resolveTaskModels(task, session.agents, session.settings, OPUS)[0]?.model).toBe(SOL);
 		expect(readFileSync(join(project, ".omp", "config.yml"), "utf8")).toContain(OPUS);
-	});
-
-	test("standalone Bun reads Sol when the host runtime import fails", async () => {
-		const home = join(base, "fallback-home"), project = join(base, "fallback-project");
-		mkdirSync(join(home, ".omp", "agent"), { recursive: true });
-		mkdirSync(project, { recursive: true });
-		writeFileSync(join(home, ".omp", "agent", "config.yml"), `task:\n  agentModelOverrides:\n    task: ${SOL}\n`);
-		const inputs = await readSpawnModelInputs(project, settings().resolve, home, {
-			loadRuntime: async () => { throw new Error("host cannot import @oh-my-pi/pi-catalog"); },
-		});
-		expect(inputs.scope).toBe("subprocess");
-		expect(inputs.settings.agentModelOverrides).toEqual({ task: SOL });
-		const resolved = resolveTaskModels(task, inputs.agents, inputs.settings, OPUS);
-		expect(resolved[0]?.model).toBe(SOL);
-		expect(taskModelRefusal(resolved)).toBeUndefined();
-	});
-
-	test("planted: failed standalone read throws with child stderr and host cause", async () => {
-		await expect(readSpawnModelInputs(base, settings().resolve, base, {
-			loadRuntime: async () => { throw new Error("host import failed"); },
-			source: join(base, "missing-omp-source"),
-		})).rejects.toThrow("missing-omp-source/config/settings.ts");
-	});
-
-	test("fallback carries runtime Sol over persisted project Opus without claiming session scope", async () => {
-		const home = join(base, "fallback-session-home"), project = join(base, "fallback-session-project");
-		const agentDir = join(home, ".omp", "agent");
-		mkdirSync(agentDir, { recursive: true });
-		mkdirSync(join(project, ".omp"), { recursive: true });
-		writeFileSync(join(project, ".omp", "config.yml"), `task:\n  agentModelOverrides:\n    task: ${OPUS}\n`);
-		const native = await runtime.Settings.loadReadOnly({ cwd: project, agentDir });
-		runtime.cfgTaskAgentModelOverrides.override(native, { task: SOL });
-		const inputs = await readSpawnModelInputs(project, settings().resolve, home, {
-			loadRuntime: async () => { throw new Error("host import failed"); },
-		});
-		expect(inputs.scope).toBe("subprocess");
-		expect(inputs.settings.agentModelOverrides).toEqual({ task: SOL });
-		expect(resolveTaskModels(task, inputs.agents, inputs.settings, OPUS)[0]?.model).toBe(SOL);
-		// The fallback must not silently discard this same session's Opus override either.
-		runtime.cfgTaskAgentModelOverrides.override(native, { task: OPUS });
-		const denied = await readSpawnModelInputs(project, settings().resolve, home, {
-			loadRuntime: async () => { throw new Error("host import failed"); },
-		});
-		expect(resolveTaskModels(task, denied.agents, denied.settings, OPUS)[0]?.reason).toBe("OPUS_CLASS_CANDIDATE");
-	});
-
-	test("fallback consumes the guard's observed live scope even when scope imports fail", async () => {
-		const home = join(base, "observed-home"), project = join(base, "observed-project");
-		mkdirSync(join(home, ".omp", "agent"), { recursive: true });
-		mkdirSync(join(project, ".omp"), { recursive: true });
-		writeFileSync(join(project, ".omp", "config.yml"), `task:\n  agentModelOverrides:\n    task: ${OPUS}\n`);
-		for (const model of [SOL, OPUS]) {
-			const inputs = await readSpawnModelInputs(project, settings().resolve, home, {
-				loadRuntime: async () => { throw new Error("compiled host import failed"); },
-				loadScope: async () => { throw new Error("private bundled namespace unavailable"); },
-				observeSession: async () => ({ agentModelOverrides: { task: model }, modelRoles: { task: SOL } }),
-			});
-			expect(inputs.scope).toBe("subprocess");
-			const resolved = resolveTaskModels(task, inputs.agents, inputs.settings, OPUS);
-			expect(resolved[0]?.model).toBe(model);
-			expect(taskModelRefusal(resolved) === undefined).toBe(model === SOL);
-			expect(resolveTaskModels({ task: "Read", model: "@task" }, inputs.agents, inputs.settings, OPUS)[0]?.model).toBe(SOL);
-		}
-		expect(readFileSync(join(project, ".omp", "config.yml"), "utf8")).toContain(OPUS);
-	});
-
-	test("planted: unavailable live host settings are named instead of trusting disk", async () => {
-		await expect(readSpawnModelInputs(base, settings().resolve, base, {
-			loadRuntime: async () => { throw new Error("compiled host import failed"); },
-			observeSession: async () => { throw new Error("host exposes no session settings"); },
-		})).rejects.toThrow("host exposes no session settings");
-	});
-
-	test("planted: live host with no active settings must not substitute disk scope", async () => {
-		await expect(readSpawnModelSession(base, base, async () => ({
-			findScopedSettings: () => undefined,
-			cfgTaskAgentModelOverrides: runtime.cfgTaskAgentModelOverrides,
-		}))).rejects.toThrow("host exposes no active session settings");
-	});
-
-	test("planted: unreadable host session scope refuses rather than trusting disk", async () => {
-		await expect(readSpawnModelInputs(base, settings().resolve, base, {
-			loadRuntime: async () => { throw new Error("host import failed"); },
-			loadScope: async () => { throw new Error("session registry unavailable"); },
-		})).rejects.toThrow("SESSION_SCOPE_UNOBSERVABLE");
-	});
-
-	test("fallback uses native role expansion and per-call precedence", async () => {
-		const home = join(base, "fallback-roles-home"), project = join(base, "fallback-roles-project");
-		mkdirSync(join(home, ".omp", "agent"), { recursive: true });
-		mkdirSync(project, { recursive: true });
-		writeFileSync(join(home, ".omp", "agent", "config.yml"), `modelRoles:\n  task: ${SOL}\ntask:\n  agentModelOverrides:\n    task: ${OPUS}\n`);
-		const inputs = await readSpawnModelInputs(project, settings().resolve, home, {
-			loadRuntime: async () => { throw new Error("host import failed"); },
-		});
-		const inherited = resolveTaskModels(task, inputs.agents, inputs.settings, SOL);
-		expect(inherited[0]?.reason).toBe("OPUS_CLASS_CANDIDATE");
-		const requested = resolveTaskModels({ task: "Read", model: "@task" }, inputs.agents, inputs.settings, OPUS);
-		expect(requested[0]?.model).toBe(SOL);
-		expect(taskModelRefusal(requested)).toBeUndefined();
 	});
 });

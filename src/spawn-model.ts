@@ -1,9 +1,7 @@
-import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolveOmpIdentity } from "./paths.ts";
-import { run, runSync, type RunResult } from "./kitlib/run.ts";
 import { isRecord } from "./type-guards.ts";
 
 export const SPAWN_MODEL_REFUSED = "SPAWN_MODEL_REFUSED";
@@ -109,7 +107,6 @@ export interface NativeSpawnSettings {
 	reloadFromDisk(): Promise<void>;
 	getCwd(): string;
 	getAgentDir(): string;
-	getModelRoles(): Readonly<Record<string, string>>;
 }
 export interface SpawnModelRuntime {
 	Settings: {
@@ -153,133 +150,13 @@ export function nativeSpawnModelSettings(runtime: SpawnModelRuntime, settings: N
 	};
 }
 
-type SpawnModelScopeRuntime = Pick<SpawnModelRuntime, "findScopedSettings" | "cfgTaskAgentModelOverrides">;
-export interface SpawnModelSessionSnapshot {
-	agentModelOverrides: Readonly<Record<string, unknown>>;
-	modelRoles: Readonly<Record<string, string>>;
-}
-interface SpawnModelInputOptions {
-	loadRuntime?: () => Promise<SpawnModelRuntime>;
-	loadScope?: () => Promise<SpawnModelScopeRuntime>;
-	/** Called inside the live extension handler's native settings scope. */
-	observeSession?: () => Promise<SpawnModelSessionSnapshot | undefined>;
-	source?: string;
-}
-
-/** Only standalone Bun may infer scope from source modules. A compiled host
- * must supply its live scope from the extension entrypoint: OMP rewrites host
- * imports there, not in arbitrary absolute-imported helper modules. */
-async function loadSpawnModelScope(source: string): Promise<SpawnModelScopeRuntime> {
-	const bun = Bun.which("bun");
-	if (!bun || realpathSync(bun) !== realpathSync(process.execPath)) {
-		throw new Error("compiled host must supply observable session settings from its extension API");
-	}
-	const [settings, taskSettings] = await Promise.all([
-		import(pathToFileURL(join(source, "config/settings.ts")).href),
-		import(pathToFileURL(join(source, "task/settings.ts")).href),
-	]);
-	return { findScopedSettings: settings.findScopedSettings, cfgTaskAgentModelOverrides: taskSettings.cfgTaskAgentModelOverrides };
-}
-
-/** Capture effective live values, including overlays/runtime, not disk-only data.
- * Never substitute the global singleton: concurrent sessions may share a cwd. */
-export async function readSpawnModelSession(cwd: string, home = homedir(), loadScope?: () => Promise<SpawnModelScopeRuntime>): Promise<SpawnModelSessionSnapshot | undefined> {
-	try {
-		const scope = await (loadScope?.() ?? loadSpawnModelScope(resolveOmpIdentity().source));
-		const scoped = scope.findScopedSettings(cwd, home === homedir() ? undefined : join(home, ".omp", "agent"));
-		if (!scoped) {
-			if (loadScope) throw new Error("host exposes no active session settings");
-			return undefined;
-		}
-		await scoped.reloadFromDisk();
-		return { agentModelOverrides: scope.cfgTaskAgentModelOverrides.get(scoped), modelRoles: scoped.getModelRoles() };
-	} catch (error) {
-		throw new Error(`SESSION_SCOPE_UNOBSERVABLE: host exposes no readable session settings: ${String(error)}`, { cause: error });
-	}
-}
-
-// The read uses native discovery/config loading; selection is a short leaf
-// command over an isolated snapshot (no disk discovery or descendant processes).
-// Only patterns cross this boundary. Credential/model resolution stays in the host.
-const SPAWN_MODEL_READ_SCRIPT = `
-const request = JSON.parse(process.argv.at(-1));
-const moduleUrl = path => new URL(path + ".ts", request.sourceUrl).href;
-const { Settings } = await import(moduleUrl("config/settings"));
-const { cfgTaskAgentModelOverrides } = await import(moduleUrl("task/settings"));
-const settings = request.snapshot ? Settings.isolated(request.snapshot)
-	: await Settings.loadReadOnly({ cwd: request.cwd, ...(request.agentDir ? { agentDir: request.agentDir } : {}) });
-if (request.selection) {
-	const { resolveAgentModelSelection } = await import(moduleUrl("config/model-resolver"));
-	console.log(JSON.stringify({ patterns: resolveAgentModelSelection({ ...request.selection, settings }).patterns }));
-} else {
-	const { discoverAgents } = await import(moduleUrl("task/discovery"));
-	const { agents } = await discoverAgents(request.cwd, request.home);
-	console.log(JSON.stringify({ agents, agentModelOverrides: cfgTaskAgentModelOverrides.get(settings), modelRoles: settings.getModelRoles() }));
-}
-`;
-const SPAWN_MODEL_READ_BOUNDS = { deadline_s: 10, max_output_bytes: 1024 * 1024 };
-
-function subprocessData(result: RunResult): Record<string, unknown> {
-	const stderr = new TextDecoder().decode(result.stderr).trim();
-	if (result.rc !== 0 || result.timed_out || result.killed || result.truncated || result.total_truncated) {
-		throw new Error(`standalone Bun spawn-model read failed (exit=${result.rc}, timeout=${result.timed_out}, truncated=${result.truncated}): ${stderr}`);
-	}
-	try {
-		const data: unknown = JSON.parse(new TextDecoder().decode(result.stdout));
-		if (isRecord(data)) return data;
-	} catch (error) {
-		throw new Error(`invalid standalone Bun spawn-model output: ${String(error)}; stderr: ${stderr}`, { cause: error });
-	}
-	throw new Error(`invalid standalone Bun spawn-model output; stderr: ${stderr}`);
-}
-
-async function readSpawnModelSubprocess(cwd: string, resolve: SpawnModelSettings["resolve"], home: string, agentDir: string | undefined, options: SpawnModelInputOptions) {
-	const { source } = resolveOmpIdentity();
-	const observed = options.observeSession
-		? await options.observeSession()
-		: await readSpawnModelSession(cwd, home, options.loadScope);
-	const snapshot = observed ? {
-		"task.agentModelOverrides": observed.agentModelOverrides,
-		modelRoles: observed.modelRoles,
-	} : undefined;
-	const request = { sourceUrl: pathToFileURL(`${options.source ?? source}/`).href, cwd, home, agentDir, snapshot };
-	const argv = (data: object) => ["bun", "--eval", SPAWN_MODEL_READ_SCRIPT, JSON.stringify(data)];
-	const data = subprocessData(await run(argv(request), { ...SPAWN_MODEL_READ_BOUNDS, cwd }));
-	if (!Array.isArray(data.agents) || !data.agents.every(agent => isRecord(agent) && typeof agent.name === "string" && (agent.model === undefined || modelPattern(agent.model) !== undefined))
-		|| !isRecord(data.agentModelOverrides) || !isRecord(data.modelRoles)) throw new Error("invalid standalone Bun spawn-model inputs");
-	const agents: SpawnAgentDefinition[] = data.agents.map(agent => ({ name: agent.name, model: modelPattern(agent.model) }));
-	const selectionSnapshot = { "task.agentModelOverrides": data.agentModelOverrides, modelRoles: data.modelRoles };
-	return {
-		agents,
-		settings: {
-			agentModelOverrides: data.agentModelOverrides,
-			selectPatterns: (selection: ModelSelectionInput): readonly string[] => {
-				const selected = subprocessData(runSync(argv({ ...request, snapshot: selectionSnapshot, selection }), SPAWN_MODEL_READ_BOUNDS));
-				if (!Array.isArray(selected.patterns) || !selected.patterns.every(pattern => typeof pattern === "string")) throw new Error("invalid standalone Bun spawn-model patterns");
-				return selected.patterns;
-			},
-			resolve,
-		},
-		scope: "subprocess" as const,
-	};
-}
-
-/** Native loading supplies global config -> project -> overlays/runtime. A
- * standalone-Bun fallback explicitly carries observable session overrides and
- * roles, or refuses when the host scope cannot be observed. It never claims
- * session equivalence, opens agent.db, or writes operator settings. */
-export async function readSpawnModelInputs(cwd: string, resolve: SpawnModelSettings["resolve"], home = homedir(), options: SpawnModelInputOptions = {}): Promise<{ agents: SpawnAgentDefinition[]; settings: SpawnModelSettings; scope: "session" | "disk" | "subprocess" }> {
+/** Native loading supplies global config -> project -> overlays/runtime. The
+ * scoped instance, when observable in extension execution, retains session-only
+ * overrides. The read-only fallback uses OMP's own config filenames/discovery,
+ * never opens agent.db, and never writes migrations or operator settings. */
+export async function readSpawnModelInputs(cwd: string, resolve: SpawnModelSettings["resolve"], home = homedir()): Promise<{ agents: SpawnAgentDefinition[]; settings: SpawnModelSettings; scope: "session" | "disk" }> {
+	const runtime = await loadSpawnModelRuntime();
 	const agentDir = home === homedir() ? undefined : join(home, ".omp", "agent");
-	let runtime: SpawnModelRuntime;
-	try {
-		runtime = await (options.loadRuntime ?? loadSpawnModelRuntime)();
-	} catch (error) {
-		try {
-			return await readSpawnModelSubprocess(cwd, resolve, home, agentDir, options);
-		} catch (fallbackError) {
-			throw new Error(`spawn-model host import failed: ${String(error)}; fallback failed: ${String(fallbackError)}`, { cause: fallbackError });
-		}
-	}
 	const scoped = runtime.findScopedSettings(cwd, agentDir);
 	const settings = scoped ?? await runtime.Settings.loadReadOnly({ cwd, ...(agentDir ? { agentDir } : {}) });
 	if (scoped) await settings.reloadFromDisk();
