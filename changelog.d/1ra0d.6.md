@@ -1,0 +1,1 @@
+- Keep personal fleet decisions out of the default standing rule; preserve them unchanged in the opt-in fleet rule pack.

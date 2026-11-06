@@ -1,4 +1,5 @@
 name	sha256	class	pack
+kit-fleet-standing-law	a73c6e1c05ecc0b80e4b24c7e3b26395f1ef534e763e33b6cc82b6ede0aaa61c	always	0210d2f52e
 kit-no-ask-rmrf	ca49518338516ad238414f0debbc72e1988b0748ec23714c07bb37e386c69397	tripwire	2c4cc2bc10
 kit-no-force-push	80b9069fcf4bf9700f91418b51fe9042ac23a19f7ff7b6c50ad5b23464df00f9	reminder	2c4cc2bc10
 kit-no-live-tracker-sqlite	62ecbc2f5b797581c45ce3bb7c9eb028c2b3ba6fa29b88cf0a59acc10a398420	tripwire	2c4cc2bc10

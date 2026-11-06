@@ -23,6 +23,13 @@ function fixture(run: (f: F) => void): void {
 	try { run({ root, home, installed: join(home, ".agents", "rules") }); } finally { owned.cleanup(); }
 }
 
+test("shipped default rules contain no personal decision ids", () => {
+	const rules = resolve(import.meta.dir, "../../rules");
+	const personal = readdirSync(rules).filter(name =>
+		name.endsWith(".md") && readFileSync(join(rules, name), "utf8").includes("J-"));
+	expect(personal).toEqual([]);
+});
+
 test("default plan installs only the default pack and never reads the fleet pack", () => fixture(f => {
 	const plan = planRules({ root: f.root, home: f.home });
 	expect(plan.entries.map(e => [e.name, e.action])).toEqual([["alpha", "install"]]);

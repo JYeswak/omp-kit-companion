@@ -1,5 +1,6 @@
 [
   {"id":"standing-law-system","rule":"kit-standing-law","class":"always","kind":"system","turns":[{"text":"Done."}],"expect":{"rules":{},"min_requests":1,"system_contains":["A step you can satisfy by believing you did it is not a step."]}},
+  {"id":"fleet-standing-law-system","rule":"kit-fleet-standing-law","class":"always","kind":"system","turns":[{"text":"Done."}],"expect":{"rules":{},"min_requests":1,"system_contains":["## Joshua standing decisions","[J-2026-10-19-58,J-2026-10-25-97,J-2026-10-26-22]"]}},
   {"id":"canary-fire","rule":"zz-canary-scope-probe","class":"canary","kind":"fire","turns":[{"tool":{"name":"bash","args":{"command":"touch .ran_canary-fire; echo zzzz_systemwide_canary_9c42"}}}],"expect":{"rules":{"zz-canary-scope-probe":1},"marker":"present"}},
   {"id":"canary-near","rule":"zz-canary-scope-probe","class":"canary","kind":"near-miss","turns":[{"tool":{"name":"bash","args":{"command":"touch .ran_canary-near; echo zzzz_systemwide_canary_9c4"}}}],"expect":{"rules":{},"marker":"present"}},
   {"id":"unsafe-router-fire","rule":"rs-unsafe-added-router","class":"router","kind":"fire","turns":[{"tool":{"name":"write","args":{"path":"src/ffi.rs","content":"pub fn f(p: *const u8) -> u8 {\n    unsafe { *p }\n}\n"}}}],"expect":{"rules":{"rs-unsafe-added-router":1},"files_present":["src/ffi.rs"]}},
