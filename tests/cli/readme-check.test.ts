@@ -250,11 +250,11 @@ test("a two-patch gap is RED even with the older tag present; an equal line need
 	expect(equal.out).not.toContain("release line");
 });
 
-test("fresh-gate's readme gate checks the archive tree and resolves tags from ROOT", () => {
+test("fresh-gate's readme gate checks the archive tree and resolves tags from FRESH_GATE_REPO, defaulting to ROOT", () => {
 	const freshGate = readFileSync(join(repo, "scripts/fresh-gate.sh"), "utf8");
 	const start = freshGate.indexOf("gate_readme() {");
 	const gateReadme = freshGate.slice(start, freshGate.indexOf("\n}\n", start) + 3);
-	expect(gateReadme).toContain('--repo "$ROOT"');
+	expect(gateReadme).toContain('--repo "${FRESH_GATE_REPO:-$ROOT}"');
 	// The archive is a git-less copy of the inputs readme-check reads, as fresh-gate's `git archive` export is.
 	const archive = join(workspace, "gate-archive");
 	mkdirSync(join(archive, "scripts"), { recursive: true });
@@ -274,7 +274,7 @@ test("fresh-gate's readme gate checks the archive tree and resolves tags from RO
 	expect(untagged.code).toBe(1);
 	expect(untagged.out).toContain(`tag v${published} does not exist`);
 	// Planted: without --repo the check looks for tags in the git-less archive and fails closed.
-	const mutant = gateReadme.replace(' --repo "$ROOT"', "");
+	const mutant = gateReadme.replace(' --repo "${FRESH_GATE_REPO:-$ROOT}"', "");
 	expect(mutant).not.toBe(gateReadme);
 	const blind = gate(taggedRepo("root-blind", [published]), mutant);
 	expect(blind.code).toBe(1);

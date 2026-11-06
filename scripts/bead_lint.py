@@ -786,7 +786,7 @@ def goal_path_selftest() -> tuple[list[str], dict]:
     ]
     fails: list[str] = []
     report = goal_path_report(rows)
-    want = {"enforced": ["gp-parent-only", "gp-under-shut", "gp-unplaced"],
+    want = {"enforced": ["gp-under-shut", "gp-unplaced"],
             "legacy": ["gp-legacy"]}
     if report != want:
         fails.append(f"report: want {want} got {report}")
@@ -799,11 +799,12 @@ def goal_path_selftest() -> tuple[list[str], dict]:
     advice = goal_path_failure(rows[5], epic_only)
     if not advice or "br dep add gp-goal" in advice[0] or "kind:intake" not in advice[0]:
         fails.append(f"an epic with open children was offered as the wait target: {advice}")
-    # PARENTBLOCK1 (rz5.134): a child of the only open goal is never told to make that goal wait on it (the edge
-    # parent-blocks every sibling); the unplaced control above still gets the `br dep add` remedy.
+    # GOALCHILD1 (ompkit-1ra0d): a parent-child descendant of an open goal is on its path, so it is admitted with no
+    # remedy at all; PARENTBLOCK1 (rz5.134) still holds because no `br dep add <goal> <child>` advice is ever produced.
+    # The unplaced control above still gets the `br dep add` remedy.
     child = goal_path_failure(rows[6], rows)
-    if not child or "br dep add gp-goal gp-parent-only" in child[0] or "kind:intake" not in child[0]:
-        fails.append(f"child of the only goal told to block its own parent: {child}")
+    if child:
+        fails.append(f"child of an open goal epic refused as off-path: {child}")
     new_ok = mkbead("<new>", labels=["selftest", GOAL_PATH_LABEL + "gp-w2"], created_at=post)
     new_bad = mkbead("<new>", labels=["selftest", GOAL_PATH_LABEL + "gp-under-shut"], created_at=post)
     new_none = mkbead("<new>", created_at=post)

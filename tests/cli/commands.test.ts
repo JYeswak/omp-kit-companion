@@ -389,7 +389,12 @@ describe("omp-kit CLI grammar and refusal", () => {
 		const drift = invoke("doctor", "--scope", "rules");
 		expect(drift.code).toBe(0);
 		expect(drift.envelope.data.findings.find((row: { component: string }) => row.component === "installed_rules").evidence.drifted).toEqual(["rule-a"]);
-		expect(drift.envelope.data.findings.find((row: { component: string }) => row.component === "effective_rules").recommended_action).toContain("omp-kit apply plugin --plan");
+		// DOCTORDEGRADED1 (ompkit-1ra0d.9): this fixture has no profile agent directory, so effective rules cannot be
+		// probed; that is UNVERIFIED with the native probe commands, never a missing-rule claim with a plugin repair.
+		const effective = drift.envelope.data.findings.find((row: { component: string }) => row.component === "effective_rules");
+		expect(effective.status).toBe("UNVERIFIED");
+		expect(effective.recommended_action).toContain("omp ttsr list --json");
+		expect(effective.recommended_action).not.toContain("omp-kit apply plugin");
 		expect(drift.envelope.data.recommended_actions.some((action: string) => action.includes("omp-kit apply rules --plan"))).toBe(true);
 		writeFileSync(join(release, "retired", "old-rule.md"), "retired source\n");
 		writeFileSync(join(home, ".agents", "rules", "old-rule.md"), "unowned retirement\n");

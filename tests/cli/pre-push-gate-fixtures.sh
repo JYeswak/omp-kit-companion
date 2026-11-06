@@ -1093,7 +1093,7 @@ printf '#!/bin/sh\necho $$ > "$FG_PIDFILE"\nsleep 300 &\necho $! > "$FG_SLEEPFIL
 fg_run() {
 	rm -f "$TMP/fg.pid" "$TMP/fg.sleep"
 	( cd -- "$repo" && FG_PIDFILE="$TMP/fg.pid" FG_SLEEPFILE="$TMP/fg.sleep" FRESH_GATE_LEDGER='' \
-		exec sh "$repo/tools/fresh-gate.sh" --archive-dir "$TMP/fg-archive" --changed-file README.md ) > "$TMP/fg.out" 2>&1 &
+		exec sh "$repo/tools/fresh-gate.sh" --archive-dir "$TMP/fg-archive" --changed-file rules/fixture.md ) > "$TMP/fg.out" 2>&1 &
 	fgpid=$!
 	wait_files "$TMP/fg.pid" "$TMP/fg.sleep"
 	sleep 0.3
