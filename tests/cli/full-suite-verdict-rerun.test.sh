@@ -170,16 +170,29 @@ fi
 # Timing-split control: the one-worker native start times expose dispatch order, not merge order.
 # The existing fixture is also unknown; the explicit unknown sorts before it.
 for name in a b c; do
-	printf 'import sys\nsys.exit(%s)\n' "$(if [ "$name" = c ]; then echo 4; else echo 0; fi)" >"$repo/tests/cli/${name}_test.py"
+	cat >"$repo/tests/cli/${name}_test.py" <<PYEOF
+import os, sys
+from pathlib import Path
+scratch = Path(os.environ["TMPDIR"])
+assert not (scratch / "previous-suite").exists(), "previous suite leaked its temp state"
+(scratch / "previous-suite").write_text("$name")
+print("PRIVATE-SCRATCH " + str(scratch), flush=True)
+sys.exit($(if [ "$name" = c ]; then echo 4; else echo 0; fi))
+PYEOF
 done
 printf 'exit 0\n' >"$repo/tests/cli/d.test.sh"
-cat >"$repo/tests/cli/e.test.ts" <<'TSEOF'
+for name in e f; do
+	cat >"$repo/tests/cli/$name.test.ts" <<'TSEOF'
 import { test, expect } from "bun:test";
-test("native mixed-pool fixture", async () => {
-	await Bun.sleep(100);
-	expect(1 + 1).toBe(2);
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+test("native mixed-pool fixture has private temp state", () => {
+	const marker = join(process.env.TMPDIR!, "previous-suite");
+	expect(existsSync(marker)).toBe(false);
+	writeFileSync(marker, "bun suite");
 });
 TSEOF
+done
 git -C "$repo" add -A
 git -C "$repo" commit -q -m "[test] timing split dispatch"
 tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
@@ -203,9 +216,15 @@ rows = json.load(open(sys.argv[1]))["evidence"]["files"]
 order = [r["path"] for r in sorted(rows, key=lambda r: r["started_ms"])]
 assert order.index("tests/cli/c_test.py") < order.index("tests/cli/b_test.py") < order.index("tests/cli/a_test.py"), order
 assert {r["runner"] for r in rows} == {"bun", "sh", "python3"}
-assert len(rows) == 6
+assert len(rows) == 7
+expected_rc = {"tests/cli/c_test.py": 4, "tests/cli/fixture_test.py": 1}
+assert {r["path"]: r["rc"] for r in rows} == {r["path"]: expected_rc.get(r["path"], 0) for r in rows}, rows
 ordered = sorted(rows, key=lambda r: r["started_ms"])
 assert all(a["finished_ms"] <= b["started_ms"] for a, b in zip(ordered, ordered[1:])), ordered
+scratch_paths = [r["launcher"][r["launcher"].index("--scratch") + 1] for r in rows]
+assert len(set(scratch_paths)) == len(rows), scratch_paths
+assert all(not __import__("pathlib").Path(path).exists() for path in scratch_paths), scratch_paths
+assert all("native_timing_ms" in r and r["native_timing_ms"] >= 0 for r in rows if r["runner"] == "bun"), rows
 PYEOF
 then ok "timing split starts unknown files first then descending recorded elapsed time"
 else not_ok "timing split dispatch order"; cat "$out"
@@ -220,6 +239,28 @@ assert entry["evidence"]["py_suites"] == 4
 PYEOF
 then ok "timing split retains every file and planted rc=4 still fails verdict"
 else not_ok "timing split lost the planted failure"; cat "$out"
+fi
+
+# A changed tracked input must execute the files again, never inherit the preceding
+# tree's evidence. Its new FAIL remains FAIL on a cache hit, without running a file.
+printf 'changed input\n' >"$repo/input.txt"
+git -C "$repo" add input.txt
+git -C "$repo" commit -q -m "[test] changed input needs fresh judgment"
+tree=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+run_verdict changed-input
+entry=$("$judge_dir/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree" \
+	--role base --checks "$checks" --runtime "$runtime" --judge-root "$judge_root" --cache-dir "$cache")
+if [ "$rc" -ne 0 ] && ! grep -Fq 'VERDICT REUSED' "$out" &&
+	grep -Fq 'PRIVATE-SCRATCH ' "${entry%.json}.log"; then
+	ok "changed input executes fresh files and retains their FAIL"
+else
+	not_ok "changed input reused preceding evidence"; cat "$out"
+fi
+run_verdict changed-fail-replay
+if [ "$rc" -ne 0 ] && grep -Fq 'VERDICT REUSED FAIL' "$out"; then
+	ok "changed tree FAIL never carries over as PASS"
+else
+	not_ok "changed tree FAIL was not retained"; cat "$out"
 fi
 
 echo "full-suite-verdict-rerun: pass=$pass fail=$fail"

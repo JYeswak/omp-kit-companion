@@ -636,16 +636,19 @@ items.sort(key=lambda item: (item[2] in history, -history.get(item[2], 0), item[
 for kind, index, path in items:
     print(kind, index, path)
 PYQUEUE
-		# Allocate in the supervisor: kitlib's signal traps re-raise at $$, which in
-		# POSIX worker subshells still names the outer verdict process.
-		while read -r kind index suite; do
-			kitlib_tmp suite_tmp "full-suite-$kind" || exit 1
-			eval "suite_tmp_${kind}_$index=\$suite_tmp"
-			if [ "$kind" = bun ]; then
-				kitlib_tmp suite_timing_dir bun-timings || exit 1
-				eval "suite_timing_${kind}_$index=\$suite_timing_dir"
-			fi
-		done <"$queue"
+		# Allocate staging in the supervisor: kitlib's signal traps re-raise at $$,
+		# which in POSIX worker subshells still names the outer verdict process.
+		# suite-metrics creates and cleans a fresh owned scratch for EVERY file;
+		# suite-hermetic-env assigns TMPDIR/TMP/TEMP to that private scratch.
+		# Only the worker's launcher root and Bun timing transport are shared.
+		# RELFAST1: avoid serially allocating a redundant outer root per file and
+		# a second directory per Bun file (779 directories for 446 suites).
+		w=0
+		while [ "$w" -lt "$POOL_JOBS" ]; do
+			w=$((w + 1))
+			kitlib_tmp worker_tmp full-suite-worker || exit 1
+			eval "worker_tmp_$w=\$worker_tmp"
+		done
 		workers=""
 		# shellcheck disable=SC2317,SC2329 # invoked indirectly: kitlib_tmp_atexit runs it on exit
 		stop_workers() {
@@ -655,13 +658,15 @@ PYQUEUE
 		kitlib_tmp_atexit 'stop_workers'
 		pool_worker() {
 			# Workers inherit paths, not signal traps; the supervisor owns their cleanup.
+			worker_tmp=""
+			eval "worker_tmp=\$worker_tmp_$1"
+			TMPDIR=$worker_tmp
+			export TMPDIR
 			while read -r kind index suite; do
 				[ ! -e "$timeout_mark" ] || return 0
 				mkdir "$METRICS_DIR/$kind-$index.claim" 2>/dev/null || continue
-				eval "TMPDIR=\$suite_tmp_${kind}_$index"
-				export TMPDIR
 				case "$kind" in
-					bun) runner='bun'; bun_timing_dir=''; eval "bun_timing_dir=\$suite_timing_${kind}_$index"; set -- bun "${bun_config:---config=/dev/null}" test --timeout=120000 "--timings=$bun_timing_dir/bun.timings" --update-timings "./$suite" ;;
+					bun) runner='bun'; set -- bun "${bun_config:---config=/dev/null}" test --timeout=120000 "--timings=$worker_tmp/bun.timings" --update-timings "./$suite" ;;
 					shell) runner='sh'; set -- sh "$suite"; mkdir "$SHELL_DIR/$index.claim" ;;
 					python) runner='python3'; set -- python3 "$suite" ;;
 				esac
@@ -676,7 +681,7 @@ PYQUEUE
 		}
 		w=0
 		while [ "$w" -lt "$POOL_JOBS" ]; do
-			w=$((w + 1)); pool_worker & workers="$workers $!"
+			w=$((w + 1)); pool_worker "$w" & workers="$workers $!"
 		done
 		lost=0
 		for worker in $workers; do wait "$worker" || lost=1; done
