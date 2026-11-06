@@ -1,2 +1,0 @@
-### Fixed
-- Release verdicts notify blocked goal seats through Agent Mail after both judges finish, including the exact head and both exit codes. SHA-scoped subscriptions ignore other heads, deduplicate delivery, and leave verdict status unchanged when mail is unavailable; the existing keepalive timer remains the fallback. Notifications use the existing Agent Mail HTTP client and the publisher's `AGENT_NAME` / `AGENT_MAIL_SENDER_TOKEN` credentials. Flake admission is unchanged.

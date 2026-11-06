@@ -1,5 +1,0 @@
-### Changed
-- Release installation reuses a completed reconciliation's plugin relink only while its durable receipt covers every current profile and live links target the verified release; final alignment and version checks remain mandatory, with relinking if profile coverage changes during readback.
-- Public release verification runs up to three independent attestation-fetch and installer-verifier chains concurrently, preserving all byte, checksum, authority and Gatekeeper checks and refusing on any failed, timed-out or truncated chain.
-- Local release verdict logs report wall-clock starts, ends and elapsed seconds for source export, stored-verdict lookup, producer invocation, observed per-repo holder wait, polling, exact-tree readback and signing preflight without changing qualification or release decisions.
-- Verdict runner logs separate exact-commit and CI-only exports, canonical-store lookup, suite-lease wait and main/CI-only dispatch-to-observed-completion intervals, including refusals, without changing qualification or cancellation behavior.
