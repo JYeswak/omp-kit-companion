@@ -1,0 +1,180 @@
+diff --git a/tests/cli/full-suite-complement.test.sh b/tests/cli/full-suite-complement.test.sh
+index b0bcb0f592..592948000b 100755
+--- a/tests/cli/full-suite-complement.test.sh
++++ b/tests/cli/full-suite-complement.test.sh
+@@ -467,5 +467,26 @@ else
+ 	cat "$TMP/verdictid1-truncated-record.out"
+ fi
+ 
++step "VERDICTID1 land producer reaches the pre-push consumer"
++bun test --test-name-pattern='checks the exact candidate with the base-registered push check before publishing' \
++	tests/cli/private-index-land.test.ts >"$TMP/verdictid1-land.out" 2>&1
++land_rc=$?
++if [ "$land_rc" -eq 0 ] && grep -Fq '1 pass' "$TMP/verdictid1-land.out" && grep -Fq '0 fail' "$TMP/verdictid1-land.out"; then
++	ok "VERDICTID1: land's base-role PASS is reused by the actual pre-push hook"
++else
++	not_ok "VERDICTID1: land/pre-push consumer (rc=$land_rc)"
++	cat "$TMP/verdictid1-land.out"
++fi
++
++step "VERDICTID1 watchdog producer reaches release-local consumer"
++sh "$KITROOT_DIR/tests/cli/release-verdict.test.sh" >"$TMP/verdictid1-release.out" 2>&1
++release_rc=$?
++if [ "$release_rc" -eq 0 ] && grep -Fq 'release-verdict: 7 pass 0 fail' "$TMP/verdictid1-release.out"; then
++	ok "VERDICTID1: watchdog's second-checkout PASS is reused by release-local in the first"
++else
++	not_ok "VERDICTID1: watchdog/release-local consumer (rc=$release_rc)"
++	cat "$TMP/verdictid1-release.out"
++fi
++
+ printf 'full-suite-complement: %s pass %s fail\n' "$pass" "$fail"
+ [ "$fail" = 0 ]
+diff --git a/tests/cli/release-verdict.test.sh b/tests/cli/release-verdict.test.sh
+index 912400561c..e15401387b 100755
+--- a/tests/cli/release-verdict.test.sh
++++ b/tests/cli/release-verdict.test.sh
+@@ -6,6 +6,8 @@
+ . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
+ set -u
+ KITREPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
++# shellcheck source=tests/cli/ci-only-verdict-fixtures.sh
++. "$KITREPO/tests/cli/ci-only-verdict-fixtures.sh"
+ REPO_TMP="$KITREPO/var/agent-tmp"
+ mkdir -p "$REPO_TMP"
+ # shellcheck source=scripts/kitlib-tmp.sh
+@@ -85,5 +85,135 @@ rc=$?
+ [ "$rc" = 0 ] && grep -qx "judged $c2 from-export" "$RV_LOG"
+ ok $? "stale-lock: rc=$rc"
+ 
++	# VERDICTID1: the watchdog in a second checkout must publish a main-role PASS
++	# that release-local in the first checkout consumes before opening its keychain.
++seed="$TMP/shared-seed"
++origin="$TMP/shared-origin.git"
++first="$TMP/release-first"
++second="$TMP/release-second"
++store="$TMP/shared-verdicts"
++mkdir -p "$seed/scripts" "$seed/tests/cli" "$seed/.github/workflows" "$origin" "$TMP/fake-bin" "$TMP/home"
++git -C "$seed" init -q --template= -b main
++git -C "$seed" config user.email t@example.invalid
++git -C "$seed" config user.name t
++for path in $(PYTHONPATH="$KITREPO/scripts" python3 -B -m suite-metrics judging-files) \
++	scripts/kitlib_io.py scripts/kitlib_jsonl.py; do
++	mkdir -p "$seed/$(dirname -- "$path")"
++	cp "$KITREPO/$path" "$seed/$path" || exit 1
++done
++for path in scripts/release-verdict.sh scripts/release-local.sh scripts/release-train.sh scripts/release-signing.json scripts/release-card-check.py; do
++	cp "$KITREPO/$path" "$seed/$path" || exit 1
++done
++cp "$KITREPO/scripts/gate-ci-only.tsv" "$seed/scripts/gate-ci-only.tsv"
++for file in package-release kit-update kit-update-nplus-two kit-update-compiled kit-update-relink package-release-live; do
++	printf '// CI-only fixture, executed by cio_stub_bin\\n' >"$seed/tests/cli/$file.test.ts"
++done
++cat >"$seed/scripts/fresh-gate.sh" <<'EOF'
++#!/bin/sh
++case "${1:-}" in --test-workers) printf "1\n" ;; *) exit 0 ;; esac
++EOF
++chmod +x "$seed/scripts/fresh-gate.sh"
++printf '#!/bin/sh\nprintf "shared fixture suite ran\\n"\n' >"$seed/tests/cli/shared.test.sh"
++printf '%s\n' 'package.json export-subst' >"$seed/.gitattributes"
++cat >"$seed/package.json" <<'EOF'
++{"version":"0.2.83","source_revision":"$Format:%H$","omp":{"version":"0.2.83"}}
++EOF
++printf '%s\n' "$(bun --version)" >"$seed/.bun-version"
++printf '%s\n' '{"schema_version":1,"darwin_signing":"developer-id"}' >"$seed/scripts/release-signing.json"
++printf '%s\n' 'name: fixture' 'jobs:' '  attest-local:' >"$seed/.github/workflows/release.yml"
++mkdir -p "$seed/docs/releases"
++cat >"$seed/docs/releases/v0.2.83.md" <<'EOF'
++# Fixture release card (not live release evidence)
++## 1. Gap lane
++| Bead | State |
++|---|---|
++| fixture | landed |
++## 2. Optimization lane
++| # | Idea | Decision |
++|---|---|---|
++| 1 | fixture | applied: 2 -> 1 calls in this synthetic fixture |
++## 3. Measures
++| Metric | Before | After |
++|---|---|---|
++| Change lead time | 2 fixture calls | 1 fixture call |
++## 4. Error budget
++Synthetic fixture only; no production claim.
++EOF
++git -C "$seed" add -A
++git -C "$seed" commit -qm '[test] VERDICTID1 checkout fixture'
++source_sha=$(git -C "$seed" rev-parse HEAD)
++source_tree=$(git -C "$seed" rev-parse 'HEAD^{tree}')
++git -C "$seed" tag v0.2.82
++git -C "$seed" init --bare -q --template= "$origin"
++git -C "$seed" remote add origin "$origin"
++git -C "$seed" push -q origin main --tags
++git clone -q --branch main "$origin" "$first"
++git clone -q --branch main "$origin" "$second"
++for tool in codesign xcrun security spctl ditto plutil openssl shasum; do
++	printf '#!/bin/sh\nexit 0\n' >"$TMP/fake-bin/$tool"
++	chmod +x "$TMP/fake-bin/$tool"
++done
++cat >"$TMP/fake-bin/uname" <<'EOF'
++#!/bin/sh
++case "$1" in -s) printf "Darwin\n" ;; -m) printf "arm64\n" ;; *) printf "Darwin\n" ;; esac
++EOF
++printf '#!/bin/sh\nshift\nexec "$@"\n' >"$TMP/fake-bin/timeout"
++cat >"$TMP/fake-bin/gh" <<'EOF'
++#!/bin/sh
++case "${1:-}" in auth) exit 0 ;; api) printf '[[{"tag_name":"v0.2.82","draft":false,"prerelease":false}]]\n' ;; *) exit 2 ;; esac
++EOF
++chmod +x "$TMP/fake-bin/uname" "$TMP/fake-bin/timeout" "$TMP/fake-bin/gh"
++cio_stub_bin "$TMP/fake-bin" || exit 1
++CIO_LOG="$TMP/ci-only.log"
++export CIO_LOG
++
++if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \
++	FULL_SUITE_TIMEOUT_SECS=120 FULL_SUITE_SHELL_JOBS=1 FULL_SUITE_VERDICT_CACHE_DIR="$store" \
++	sh "$second/scripts/release-verdict.sh" --commit "$source_sha" --no-fetch >"$TMP/watchdog.out" 2>&1; then
++	watchdog_rc=0
++else
++	watchdog_rc=$?
++fi
++if [ "$watchdog_rc" = 0 ] && grep -Fq "FULL-SUITE: VERDICT PASS tree=$source_tree role=main" "$TMP/watchdog.out"; then
++	ok 0 "watchdog-second-checkout-produces-main-pass"
++else
++	ok 1 "watchdog-second-checkout: rc=$watchdog_rc output=$(cat "$TMP/watchdog.out")"
++fi
++
++if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \
++	FULL_SUITE_TIMEOUT_SECS=120 FULL_SUITE_SHELL_JOBS=1 FULL_SUITE_VERDICT_CACHE_DIR="$store" \
++	OMP_KIT_SIGNING_KEYCHAIN="$TMP/missing.keychain" \
++	bash "$first/scripts/release-local.sh" --source "$source_sha" --version 0.2.83 --no-install >"$TMP/release-hit.out" 2>&1; then
++	release_hit_rc=0
++else
++	release_hit_rc=$?
++fi
++if [ "$release_hit_rc" = 4 ] \
++	&& grep -Fq "full-suite verdict $source_tree: PASS (main role)" "$TMP/release-hit.out" \
++	&& ! grep -Fq "shared fixture suite ran" "$TMP/release-hit.out" \
++	&& grep -Fq "signing keychain $TMP/missing.keychain not found" "$TMP/release-hit.out"; then
++	ok 0 "release-local-first-checkout-reuses-watchdog-pass"
++else
++	ok 1 "release-local-first-checkout: rc=$release_hit_rc output=$(cat "$TMP/release-hit.out")"
++fi
++
++if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \
++	FULL_SUITE_TIMEOUT_SECS=120 FULL_SUITE_SHELL_JOBS=1 FULL_SUITE_VERDICT_CACHE_DIR="$TMP/empty-verdicts" \
++	OMP_KIT_SIGNING_KEYCHAIN="$TMP/missing.keychain" \
++	bash "$first/scripts/release-local.sh" --source "$source_sha" --version 0.2.83 --no-install >"$TMP/release-miss.out" 2>&1; then
++	release_miss_rc=0
++else
++	release_miss_rc=$?
++fi
++if [ "$release_miss_rc" = 4 ] \
++	&& grep -Fq "cache miss for tree $source_tree role=main" "$TMP/release-miss.out" \
++	&& grep -Fq "FULL-SUITE: VERDICT PASS tree=$source_tree role=main" "$TMP/release-miss.out" \
++	&& grep -Fq "full-suite verdict $source_tree: PASS (main role)" "$TMP/release-miss.out" \
++	&& grep -Fq "signing keychain $TMP/missing.keychain not found" "$TMP/release-miss.out"; then
++	ok 0 "release-local-missing-verdict-requires-fresh-exact-tree-pass-before-keychain"
++else
++	ok 1 "release-local-negative-control: rc=$release_miss_rc output=$(cat "$TMP/release-miss.out")"
++fi
++
+ printf 'release-verdict: %s pass %s fail\n' "$pass" "$fail"
+ [ "$fail" = 0 ]

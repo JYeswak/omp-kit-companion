@@ -6,6 +6,10 @@
 . "$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/git-env-fixtures.sh"
 set -u
 KITREPO=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+# Match the producer's runtime identity, including its agent-bin sanitation.
+# shellcheck source=scripts/kitlib-shimpath.sh
+. "$KITREPO/scripts/kitlib-shimpath.sh"
+kitlib_drop_agent_bin release-verdict-test
 REPO_TMP="$KITREPO/var/agent-tmp"
 mkdir -p "$REPO_TMP"
 # shellcheck source=scripts/kitlib-tmp.sh

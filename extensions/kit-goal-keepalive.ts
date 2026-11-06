@@ -1,8 +1,9 @@
 import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { runSync } from "../src/kitlib/run.ts";
 import { gateEventsPath, trackerAct } from "./gate-events.ts";
+import { releaseVerdictHeads, releaseVerdictLocation, subscribeReleaseVerdicts } from "../src/release-verdict-mail.ts";
 
 /**
  * kit-goal-keepalive (GOALKEEP1 ompkit-fp72.120.16.23.1, J-2026-10-18-51; KEEPALIVE2a ompkit-774u.50.1,
@@ -54,10 +55,9 @@ import { gateEventsPath, trackerAct } from "./gate-events.ts";
  * no extension hook can veto one (a custom submission skips the `input` event, and a `before_agent_start`
  * result carries no cancel).
  *
- * VERDICTWAKE1 timer fallback: at that existing timer check, a blocked todo naming a full release SHA or
- * a prefix of at least 10 hex characters is matched against the last 2 MiB of its repo's release-verdict.log.
- * Recorded producer_rc / ci_only_rc values accompany the wake. This is not event delivery: a result arriving
- * after the initial 120-second check may wait until the 30-minute heartbeat. No additional polling loop.
+ * VERDICTMAIL1: a terminal blocked seat subscribes to its named release SHA(s) in Git's private state.
+ * release-verdict.sh sends an Agent Mail event after both judges finish; kit-inbox-wake delivers the turn.
+ * The existing timer remains a fallback, reading the last 2 MiB of release-verdict.log; no file watcher.
  */
 
 /** ms of still-idle time before one wake. */
@@ -424,22 +424,6 @@ export function idleWait(phases: readonly unknown[], jobs: AsyncJobView | null):
 	return running.length > 0 || events.length > 0 ? { blocked, jobs: running, events } : null;
 }
 
-/** Resolve from a nested cwd too; Git's gitdir file is relative to the directory containing it. */
-function releaseVerdictPath(cwd: string): string | null {
-	let root = resolve(cwd);
-	for (;;) {
-		const git = join(root, ".git");
-		try {
-			if (statSync(git).isDirectory()) return join(git, "omp-kit", "release-verdict.log");
-			const target = /^gitdir: (.+)\r?\n?$/.exec(readBounded(git, 4096) ?? "")?.[1];
-			if (target) return join(resolve(root, target), "omp-kit", "release-verdict.log");
-		} catch { /* try the parent repository */ }
-		const parent = dirname(root);
-		if (parent === root) return null;
-		root = parent;
-	}
-}
-
 /** Only complete durable lines count. Bound reads like the gate ledger; retain the latest rc per kind/head. */
 export function matchingReleaseVerdicts(path: string, events: readonly string[]): string[] {
 	let text: string;
@@ -454,13 +438,13 @@ export function matchingReleaseVerdicts(path: string, events: readonly string[])
 			if (size > length) text = text.slice(text.indexOf("\n") + 1);
 		} finally { closeSync(fd); }
 	} catch { return []; }
-	const named = new Set(events.flatMap(event => event.match(/\b[0-9a-f]{10,40}\b/gi) ?? []).map(sha => sha.toLowerCase()));
+	const named = releaseVerdictHeads(events);
 	const verdicts = new Map<string, Map<string, string>>();
 	for (const line of text.slice(0, text.lastIndexOf("\n") + 1).split("\n")) {
 		const row = /^release-verdict: ([0-9a-f]{40}) ((?:producer|ci_only)_rc)=(-?\d+)\s*$/i.exec(line);
 		if (!row) continue;
 		const sha = row[1]!.toLowerCase();
-		if (![...named].some(prefix => sha.startsWith(prefix))) continue;
+		if (!named.some(prefix => sha.startsWith(prefix))) continue;
 		const values = verdicts.get(sha) ?? new Map<string, string>();
 		values.set(row[2]!.toLowerCase(), row[3]!);
 		verdicts.set(sha, values);
@@ -513,6 +497,23 @@ export default async function kitGoalKeepalive(
 	let repeatRecorded = false;
 	// Do not repeat a durable result on every quiet turn; reset when switching sessions.
 	const deliveredVerdicts = new Set<string>();
+	let unsubscribeVerdict: (() => void) | null = null;
+	let verdictSubscriptionCwd: string | null = null;
+	const clearVerdictSubscription = () => {
+		try { unsubscribeVerdict?.(); } catch { /* timer fallback remains when private state is unavailable */ }
+		unsubscribeVerdict = null;
+		verdictSubscriptionCwd = null;
+	};
+	const updateVerdictSubscription = (ctx: GoalKeepaliveContext) => {
+		const seat = seatIdentity(env);
+		if (!eligible() || seat === null) { clearVerdictSubscription(); return; }
+		const cwd = ctx.cwd ?? deps.cwd ?? process.cwd();
+		if (verdictSubscriptionCwd !== null && verdictSubscriptionCwd !== cwd) clearVerdictSubscription();
+		try {
+			unsubscribeVerdict = subscribeReleaseVerdicts(cwd, seat, idleState(ctx)?.events ?? [], env.AGENT_MAIL_PROJECT);
+			verdictSubscriptionCwd = cwd;
+		} catch { /* mail cannot disable the existing keepalive fallback */ }
+	};
 
 	const cancel = (ctx: GoalKeepaliveContext) => {
 		if (timer !== null) {
@@ -606,8 +607,8 @@ export default async function kitGoalKeepalive(
 
 	const releaseResults = (ctx: GoalKeepaliveContext, wait: IdleWait | null): string[] => {
 		if (wait === null) return [];
-		const path = releaseVerdictPath(ctx.cwd ?? deps.cwd ?? process.cwd());
-		return path === null ? [] : matchingReleaseVerdicts(path, wait.events).filter(result => !deliveredVerdicts.has(result));
+		const location = releaseVerdictLocation(ctx.cwd ?? deps.cwd ?? process.cwd());
+		return location === null ? [] : matchingReleaseVerdicts(join(location.state, "release-verdict.log"), wait.events).filter(result => !deliveredVerdicts.has(result));
 	};
 
 	const arm = (ctx: GoalKeepaliveContext) => {
@@ -652,6 +653,7 @@ export default async function kitGoalKeepalive(
 	const reconcileAs = (reset: boolean) =>
 		((_e: never, ctx: GoalKeepaliveContext) => {
 			if (reset) goal = null; // a switch may land on a goal-less session
+			clearVerdictSubscription();
 			cancel(ctx);
 			if (reset) deliveredVerdicts.clear();
 			previousContinuation = undefined;
@@ -660,10 +662,12 @@ export default async function kitGoalKeepalive(
 	pi.on("goal_updated", (event: GoalEvent) => {
 		if (event.goal === undefined && event.state === undefined) return;
 		goal = { enabled: event.state?.enabled === true, status: String(event.goal?.status ?? "") };
+		if (!goal.enabled || goal.status !== "active") clearVerdictSubscription();
 	});
 	pi.on("session_start", reconcileAs(false));
 	pi.on("session_switch", reconcileAs(true));
 	pi.on("agent_end", ((event: EndEvent, ctx: GoalKeepaliveContext) => {
+		updateVerdictSubscription(ctx);
 		const messages = event.messages ?? [];
 		// KEEPALIVE2 (d): mirror omp's suppression (interactive-mode.ts #handleGoalSessionEvent): a continuation whose
 		// activity repeats the previous continuation's gets no next continuation, and a wake would only repeat it.
@@ -721,5 +725,8 @@ export default async function kitGoalKeepalive(
 	cancelOn("agent_start");
 	cancelOn("turn_start");
 	cancelOn("input");
-	cancelOn("session_stop");
+	pi.on("session_stop", ((_e: never, ctx: GoalKeepaliveContext) => {
+		cancel(ctx);
+		clearVerdictSubscription();
+	}) as (e: never, ctx: GoalKeepaliveContext) => unknown);
 }

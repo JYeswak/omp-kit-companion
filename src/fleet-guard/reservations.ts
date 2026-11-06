@@ -214,11 +214,12 @@ export async function exportAgentMailStorageRoot(): Promise<string | undefined> 
 	return AGENT_MAIL_STORAGE_ROOT;
 }
 
-async function callAgentMail(toolName: string, argumentsValue: Record<string, unknown>): Promise<unknown> {
+export async function callAgentMail(toolName: string, argumentsValue: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
 	const token = process.env.AGENTMAIL_HTTP_BEARER_TOKEN ?? process.env.AGENT_MAIL_TOKEN;
 	if (!token) throw new Error("Agent Mail bearer token is unavailable");
 	const response = await fetch(process.env.AGENTMAIL_HTTP_URL ?? "http://127.0.0.1:8765/api", {
 		method: "POST",
+		...(signal ? { signal } : {}),
 		headers: { authorization: "Bearer " + token, "content-type": "application/json" },
 		body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method: "tools/call", params: { name: toolName, arguments: argumentsValue } }),
 	});
