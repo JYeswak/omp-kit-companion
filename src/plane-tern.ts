@@ -51,10 +51,10 @@ export type TernWindowResolution =
 	| { ok: false; code: "PLANE_SEAT_UNBOUND"; reason: string };
 
 export interface TernRuntimeBinding {
-	sessionId: number;
+	sessionId: string;
 	sessionFile: string;
 	sessionUuid: string;
-	paneId: number;
+	paneId: string;
 	foregroundPid: number;
 	foregroundName: string;
 	foregroundStarted: string;
@@ -73,8 +73,8 @@ export interface TernForegroundProcess {
 }
 
 export type TernInspectionResult =
-	| { status: "FOUND"; sessionId: number; sessionName: string | null; paneId: number; cwd: string; working: boolean; exited: null; sessionFile: string }
-	| { status: "DEAD"; sessionId: number; sessionName: string | null; paneId: number; cwd: string | null; working: false; exited: number | null; sessionFile: string | null; reason: string }
+	| { status: "FOUND"; sessionId: string; sessionName: string | null; paneId: string; cwd: string; working: boolean; exited: null; sessionFile: string }
+	| { status: "DEAD"; sessionId: string; sessionName: string | null; paneId: string; cwd: string | null; working: false; exited: number | null; sessionFile: string | null; reason: string }
 	| { status: "REFUSED"; code: "PLANE_SEAT_UNBOUND" | "TERN_WINDOW_UNBOUND" | "SEAT_REBOUND" | "SEAT_CWD_MISMATCH"; reason: string }
 	| { status: "UNKNOWN"; reason: string };
 
@@ -237,10 +237,20 @@ function toolResultId(primary: unknown, alias: unknown): { id: string | null } |
 	return { id: first ?? second };
 }
 
-function paneNumber(seat: TernSeatBinding): number | null {
-	const value = seat.pane.startsWith("tern:") ? seat.pane.slice(5) : seat.pane;
-	const paneId = Number(value);
-	return Number.isSafeInteger(paneId) && paneId > 0 && String(paneId) === value ? paneId : null;
+/** Canonical positive decimal ids; never coerce a wire id through Number. */
+export function ternPaneId(pane: string): string | null {
+	const value = pane.startsWith("tern:") ? pane.slice(5) : pane;
+	return exactTernId(value);
+}
+
+function exactTernId(value: unknown): string | null {
+	if (typeof value === "number") return Number.isSafeInteger(value) && value > 0 ? String(value) : null;
+	if (typeof value !== "string" || value.length === 0 || value[0] === "0") return null;
+	for (let index = 0; index < value.length; index++) {
+		const code = value.charCodeAt(index);
+		if (code < 48 || code > 57) return null;
+	}
+	return value;
 }
 
 function withinRepo(repo: string, cwd: string): boolean {
@@ -253,34 +263,33 @@ function withinRepo(repo: string, cwd: string): boolean {
  * containing session or tab; the empty string is discovery-only for CLI sends whose fleet label has no
  * Tern binding. Subsequent observation and identity checks still bind the exact pane and cwd. */
 export type BlockLocation =
-	| { status: "ok"; sessionId: number; sessionName: string | null; tabId: number | null; tabName: string | null; tab: unknown }
+	| { status: "ok"; sessionId: string; sessionName: string | null; tabId: string | null; tabName: string | null; tab: unknown }
 	| { status: "absent" }
 	| { status: "ambiguous" }
 	| { status: "rebound"; sessionName: string | null; tabName: string | null }
 	| { status: "schema"; reason: string };
 
-// Tern ids are 64-bit: browser and picture-in-picture blocks get ids above 2^53, which JSON.parse cannot hold
-// exactly. Such an id is still a well-formed integer and can never equal a configured pane (paneNumber admits safe
-// integers only), so it is skipped as not ours; only a non-integer id is schema drift (WAKEBIGID1, ompkit-774u.82).
-export function locateBlock(root: Record<string, unknown>, paneId: number, seatSession: string): BlockLocation {
+/** Wire ids are decoded losslessly before this join; already-decoded safe numeric fixtures are normalized here. */
+export function locateBlock(root: Record<string, unknown>, paneId: string, seatSession: string): BlockLocation {
 	if (!Array.isArray(root.sessions)) return { status: "schema", reason: "INSPECT_SCHEMA_UNKNOWN" };
 	const hits: Extract<BlockLocation, { status: "ok" }>[] = [];
 	for (const rawSession of root.sessions) {
 		const session = objectValue(rawSession);
-		if (!session || !Number.isInteger(session.id) || (typeof session.name !== "string" && session.name !== null)
+		const sessionId = exactTernId(session?.id);
+		if (!session || sessionId === null || (typeof session.name !== "string" && session.name !== null)
 			|| (session.tabs !== undefined && !Array.isArray(session.tabs))) {
 			return { status: "schema", reason: "INSPECT_SESSION_SCHEMA_UNKNOWN" };
 		}
-		const sessionId = session.id as number;
 		const sessionName = typeof session.name === "string" ? session.name : null;
 		for (const rawTab of Array.isArray(session.tabs) ? session.tabs : []) {
 			const tab = objectValue(rawTab);
 			if (!tab || !Array.isArray(tab.blocks)) return { status: "schema", reason: "INSPECT_TAB_SCHEMA_UNKNOWN" };
 			for (const rawBlock of tab.blocks) {
 				const block = objectValue(rawBlock);
-				if (!block || !Number.isInteger(block.id)) return { status: "schema", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" };
-				if (block.id === paneId) {
-					hits.push({ status: "ok", sessionId, sessionName, tabId: Number.isSafeInteger(tab.id) ? tab.id as number : null,
+				const blockId = exactTernId(block?.id);
+				if (!block || blockId === null) return { status: "schema", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" };
+				if (blockId === paneId) {
+					hits.push({ status: "ok", sessionId, sessionName, tabId: exactTernId(tab.id),
 						tabName: typeof tab.name === "string" ? tab.name : null, tab: rawTab });
 				}
 			}
@@ -301,7 +310,7 @@ export type TernSeatDiscoveryResult =
 /** Resolve an unconfigured Tern block by its exact id in one live inspect snapshot. */
 export function discoverTernSeatFromInspection(snapshot: unknown, pane: string,
 	options: { cwd?: string; windowKey?: string } = {}): TernSeatDiscoveryResult {
-	const paneId = paneNumber({ session: "", pane, windowKey: options.windowKey ?? "", cwd: "" });
+	const paneId = ternPaneId(pane);
 	if (paneId === null) return { status: "REFUSED", code: "PLANE_SEAT_UNBOUND", reason: "Tern pane must be an exact decimal block id or tern:<id>" };
 	const decoded = parseJson(snapshot);
 	if ("error" in decoded) return { status: "UNKNOWN", reason: decoded.error };
@@ -310,7 +319,7 @@ export function discoverTernSeatFromInspection(snapshot: unknown, pane: string,
 	const location = locateBlock(root, paneId, "");
 	if (location.status === "schema") return { status: "UNKNOWN", reason: location.reason };
 	if (location.status === "ambiguous") return { status: "UNKNOWN", reason: "INSPECT_BLOCK_AMBIGUOUS" };
-	const rows = root.panes.map(objectValue).filter((row): row is Record<string, unknown> => row?.pane === paneId);
+	const rows = root.panes.map(objectValue).filter((row): row is Record<string, unknown> => row !== null && exactTernId(row.pane) === paneId);
 	if (rows.length !== 1) return { status: "UNKNOWN", reason: "INSPECT_PANE_ROW_MISSING_OR_DUPLICATE" };
 	const record = rows[0]!;
 	if (record.exited !== null && (typeof record.exited !== "number" || !Number.isFinite(record.exited)))
@@ -345,7 +354,7 @@ export function windowHostsName(root: Record<string, unknown>, name: string): bo
 }
 
 type SeatValidation =
-	| { ok: true; paneId: number }
+	| { ok: true; paneId: string }
 	| { ok: false; code: "PLANE_SEAT_UNBOUND" | "TERN_WINDOW_UNBOUND"; reason: string };
 
 function validateSeat(seat: TernSeatBinding): SeatValidation {
@@ -360,7 +369,7 @@ function validateSeat(seat: TernSeatBinding): SeatValidation {
 	if (typeof seat.pane !== "string") {
 		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern pane must be an exact decimal block id or tern:<id>" };
 	}
-	const paneId = paneNumber(seat);
+	const paneId = ternPaneId(seat.pane);
 	if (paneId === null) {
 		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern pane must be an exact decimal block id or tern:<id>" };
 	}
@@ -404,7 +413,7 @@ export function resolveTernWindow(
 	if (typeof seat.session !== "string" || !seat.session.trim() || typeof seat.cwd !== "string" || !isAbsolute(seat.cwd)) {
 		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern seat needs a configured session and absolute repository cwd" };
 	}
-	if (typeof seat.pane !== "string" || paneNumber(seat) === null) {
+	if (typeof seat.pane !== "string" || ternPaneId(seat.pane) === null) {
 		return { ok: false, code: "PLANE_SEAT_UNBOUND", reason: "Tern pane must be an exact decimal block id or tern:<id>" };
 	}
 	const socket = resolveDaemonSocket(env);
@@ -419,7 +428,7 @@ export function resolveTernWindow(
 	}
 	const decoded = parseJson(raw.out);
 	const root = "error" in decoded ? null : objectValue(decoded.value);
-	const paneId = paneNumber(seat) as number;
+	const paneId = ternPaneId(seat.pane)!;
 	const where = root ? locateBlock(root, paneId, seat.session) : null;
 	// The window qualifies when it hosts the configured session or tab (by name or id, read from the tree);
 	// whether the block is in it is parseTernInspection's decision.
@@ -446,9 +455,18 @@ export function ternWindowEnv(resolution: Extract<TernWindowResolution, { ok: tr
 }
 
 
+/** Quote Tern's integer id tokens before JSON.parse, as rch-cycle does for build ids.
+ * Consume whole JSON strings too: a title containing `"id":123` must remain inert.
+ * Only integer tokens at a JSON value boundary qualify; fractions/exponents are not ids. */
+function parseTernJson(raw: string): unknown {
+	return JSON.parse(raw.replace(/"((?:[^"\\]|\\.)*)"(?:([ \t\r\n]*:[ \t\r\n]*)(0|[1-9][0-9]*)(?=[ \t\r\n]*[,}]))?/g,
+		(match, key: string, separator: string | undefined, id: string | undefined) =>
+			id !== undefined && (key === "id" || key === "pane") ? `"${key}"${separator}"${id}"` : match)) as unknown;
+}
+
 function parseJson(raw: unknown): { value: unknown } | { error: string } {
 	if (typeof raw !== "string") return { value: raw };
-	try { return { value: JSON.parse(raw) as unknown }; }
+	try { return { value: parseTernJson(raw) }; }
 	catch { return { error: "MALFORMED_JSON" }; }
 }
 
@@ -474,12 +492,13 @@ export function parseTernInspection(snapshot: unknown, seat: TernSeatBinding): T
 	}
 	if (where.status === "absent") {
 		const own = Array.isArray(root.sessions) ? root.sessions.map(objectValue).find(s => s && (s.name === seat.session || String(s.id) === seat.session)) : null;
-		if (!own || !Number.isSafeInteger(own.id)) return { status: "REFUSED", code: "SEAT_REBOUND", reason: "block is in no tab and the configured session is absent from the selected window" };
-		return { status: "DEAD", sessionId: own.id as number, sessionName: typeof own.name === "string" ? own.name : null, paneId, cwd: null, working: false,
+		const sessionId = exactTernId(own?.id);
+		if (!own || sessionId === null) return { status: "REFUSED", code: "SEAT_REBOUND", reason: "block is in no tab and the configured session is absent from the selected window" };
+		return { status: "DEAD", sessionId, sessionName: typeof own.name === "string" ? own.name : null, paneId, cwd: null, working: false,
 			exited: null, sessionFile: null, reason: "PANE_MISSING_FROM_CONFIGURED_SESSION" };
 	}
 	const selected = { id: where.sessionId, name: where.sessionName };
-	const matchingPanes = root.panes.filter((rawPane) => objectValue(rawPane)?.pane === paneId);
+	const matchingPanes = root.panes.filter((rawPane) => exactTernId(objectValue(rawPane)?.pane) === paneId);
 	if (matchingPanes.length !== 1) return { status: "UNKNOWN", reason: "INSPECT_PANE_ROW_MISSING_OR_DUPLICATE" };
 	const pane = objectValue(matchingPanes[0]);
 	if (!pane || typeof pane.cwd !== "string" || typeof pane.working !== "boolean"
@@ -523,11 +542,11 @@ function commandIsOmp(process: Record<string, unknown>, argv: string[]): boolean
 }
 
 /** Parse Tern's actual per-pane process result; only its foreground OMP process is accepted. */
-export function parseTernProcess(snapshot: unknown, repo: string, paneId: number): TernProcessResult {
+export function parseTernProcess(snapshot: unknown, repo: string, paneId: string): TernProcessResult {
 	const decoded = parseJson(snapshot);
 	if ("error" in decoded) return { status: "UNKNOWN", reason: decoded.error };
 	const root = objectValue(decoded.value);
-	if (!root || root.pane !== paneId) return { status: "UNKNOWN", reason: "PROCESS_PANE_MISMATCH" };
+	if (!root || exactTernId(root.pane) !== paneId) return { status: "UNKNOWN", reason: "PROCESS_PANE_MISMATCH" };
 	const foreground = objectValue(root.foreground);
 	if (!foreground || !Array.isArray(foreground.argv)) return { status: "UNKNOWN", reason: "PROCESS_SCHEMA_UNKNOWN" };
 	const argv = foreground.argv as string[];
@@ -1139,7 +1158,7 @@ function runCommand(
 	try {
 		const result = io.run(argv, env);
 		if (result.code !== 0) return { error: `${operation.toUpperCase()}_FAILED` };
-		try { return { value: JSON.parse(result.out) as unknown }; }
+		try { return { value: parseTernJson(result.out) }; }
 		catch { return { error: `${operation.toUpperCase()}_MALFORMED_JSON` }; }
 	} catch {
 		return { error: `${operation.toUpperCase()}_FAILED` };
@@ -1346,7 +1365,7 @@ export async function identifyTernSeat(seat: TernSeatBinding, io: TernObserverIo
 		}
 		return { status: "UNKNOWN", reason, agent: null, binding: null, cwdOk: false, runtimeBinding: null };
 	}
-	const paneId = paneNumber(seat)!;
+	const paneId = ternPaneId(seat.pane)!;
 	// WAKEWINDOW1-R: macOS `ps eww` omits another process's environment, so a live target's AGENT_NAME is often
 	// unreadable (null). The exact pane+project Agent Mail row then names the seat, never upgraded to runtime-verified;
 	// a readable AGENT_NAME must still agree with it.

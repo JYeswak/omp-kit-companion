@@ -355,7 +355,7 @@ test.skipIf(!tmuxAvailable)("TMUX1 unchanged: explicit TMUX_TMPDIR is honored an
 // message entries with content blocks, goal mode_change), as observed in a
 // live omp 18.12.2 session file on 2026-10-19.
 const ternSeat: TernSeatBinding = { session: "s", pane: "7", windowKey: "W", cwd: "/repo", identityProject: "/repo" };
-const ternRuntimeBinding = { sessionId: 1, sessionFile: "/sf", sessionUuid: "s1", paneId: 7, foregroundPid: 11,
+const ternRuntimeBinding = { sessionId: "1", sessionFile: "/sf", sessionUuid: "s1", paneId: "7", foregroundPid: 11,
 	foregroundName: "omp", foregroundStarted: "22", foregroundArgv: ["omp"], cwd: "/repo" };
 const ompForeground = { pid: 11, name: "omp", cwd: "/repo", argv: ["omp"], started: "22", agentName: "A" };
 const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
@@ -550,7 +550,7 @@ test("SENDX1 on Tern: the native turn targets only the configured window and pan
 
 test("SENDX1 on Tern planted: an observation of another pane than the configured one refuses with zero sends", async () => {
 	const fake = ternFake({ respond: journalsUser() });
-	const elsewhere = { ...ternRuntimeBinding, paneId: 8 };
+	const elsewhere = { ...ternRuntimeBinding, paneId: "8" };
 	const r = await deliverTern(fake, "hello", { observe: idleOf(fake, { runtimeBinding: elsewhere }),
 		identify: async () => ({ ...ternIdentified, runtimeBinding: elsewhere }) });
 	expect(r.status).toBe("REFUSED");
@@ -1324,13 +1324,13 @@ function pasteFake(opts: { steering: boolean }) {
 }
 
 test("SENDFAST1: the steer opt-in reads a working seat whose journal is mid-turn as BUSY with its runtime binding", () => {
-	const inspection = { status: "FOUND" as const, sessionId: 1, sessionName: "s", paneId: 7, cwd: "/repo", working: true,
+	const inspection = { status: "FOUND" as const, sessionId: "1", sessionName: "s", paneId: "7", cwd: "/repo", working: true,
 		exited: null, sessionFile: "/sf" };
 	const process = { status: "FOUND" as const, foreground: ompForeground };
 	const journal = parseSessionJournal(inFlightJournal);
 	expect(journal).toMatchObject({ status: "KNOWN", oracleBusy: null, leafId: "a3" });
 	expect(classifyTernObservation(inspection, process, journal, { turnInFlightIsBusy: true }))
-		.toMatchObject({ state: "BUSY", reason: null, runtimeBinding: { paneId: 7, sessionUuid: "s1" } });
+		.toMatchObject({ state: "BUSY", reason: null, runtimeBinding: { paneId: "7", sessionUuid: "s1" } });
 	// Control: every other observer keeps the in-flight UNKNOWN, and an idle Tern flag never reads as BUSY.
 	expect(classifyTernObservation(inspection, process, journal))
 		.toMatchObject({ state: "UNKNOWN", reason: "SESSION_TURN_IN_FLIGHT", runtimeBinding: null });

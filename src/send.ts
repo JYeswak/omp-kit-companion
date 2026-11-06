@@ -4,11 +4,12 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { resolveTmuxSocket } from "./tmux-socket.ts";
-import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
+import { admitActuator } from "./actuator-admission.ts";
+import type { AdmissionInput } from "./actuator-admission.ts";
 import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
 import { defaultTernIo, discoverTernSeatFromInspection, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView,
-	resolveDaemonSocket, sessionViewOfText, SESSION_TAIL_WINDOW_BYTES } from "./plane-tern.ts";
+	resolveDaemonSocket, sessionViewOfText, SESSION_TAIL_WINDOW_BYTES, ternPaneId } from "./plane-tern.ts";
 import type { SessionJournalView, TernObserveOptions, TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
 import { atomicReplaceBytes } from "./kitlib/io.ts";
 
@@ -913,17 +914,6 @@ function firstSpaceAt(text: string): number {
 	return -1;
 }
 
-/** Pane id of a Tern seat: exact decimal digits, optionally `tern:`-prefixed. */
-export function ternPaneId(pane: string): number | null {
-	const digits = pane.startsWith("tern:") ? pane.slice("tern:".length) : pane;
-	if (digits.length === 0) return null;
-	for (let i = 0; i < digits.length; i++) {
-		const code = digits.charCodeAt(i);
-		if (code < 48 || code > 57) return null;
-	}
-	const id = Number(digits);
-	return Number.isSafeInteger(id) ? id : null;
-}
 
 /**
  * What a Tern payload is to the OMP composer it lands in (2.4 GOALSEND,
@@ -1616,14 +1606,14 @@ export async function deliverToTernSeat(input: {
 			const socket = resolveDaemonSocket();
 			const env = socket === null ? undefined : { TERN_DAEMON_SOCKET: socket };
 			try {
-				if (input.io.run([ternCtlBin(), "send", String(paneId), "paste", payload], env).code === 0) {
-					dispatched = input.io.run([ternCtlBin(), "send", String(paneId), "keys", "Enter"], env).code === 0;
+				if (input.io.run([ternCtlBin(), "send", paneId, "paste", payload], env).code === 0) {
+					dispatched = input.io.run([ternCtlBin(), "send", paneId, "keys", "Enter"], env).code === 0;
 				}
 			} catch {
 				dispatched = false;
 			}
 		} else {
-			const lua = buildNativeSendTurn(String(paneId), payload);
+			const lua = buildNativeSendTurn(paneId, payload);
 			if (lua === null) {
 				try { rmSync(pendingPath, { force: true }); } catch {}
 				return { status: "REFUSED", marker, sends: 0, sessionFile, offset: null, drop_path: null,

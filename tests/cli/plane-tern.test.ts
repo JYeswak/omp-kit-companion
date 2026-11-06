@@ -22,9 +22,8 @@ import {
 	sessionJournalDecision,
 	ternWindowArgv,
 	ternWindowEnv,
-	type TernObserverIo,
-	type SessionJournalResult,
 } from "../../src/plane-tern.ts";
+import type { TernObserverIo, SessionJournalResult } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { buildTernProofKey, proveTernEntry } from "../../src/send.ts";
 
@@ -53,7 +52,7 @@ const terminalJournal = [header, user, assistant, JSON.stringify({ type: "model_
 
 test("Tern inspect binds the configured session and block without rejecting a shell-backed agent", async () => {
 	const result = parseTernInspection(inspectFixture, seat);
-	expect(result).toMatchObject({ status: "FOUND", sessionId: 41, sessionName: "Default", paneId: 123,
+	expect(result).toMatchObject({ status: "FOUND", sessionId: "41", sessionName: "Default", paneId: "123",
 		cwd: "/repo", working: false, exited: null, sessionFile: "/sessions/session-1.jsonl" });
 });
 
@@ -82,11 +81,11 @@ const fleetInspect = {
 
 test("TERNADDR1: the block's tab is derived and the configured name checks against it (planted: old code refused SEAT_REBOUND)", () => {
 	const result = parseTernInspection(fleetInspect, { session: "omp-chief", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" });
-	expect(result).toMatchObject({ status: "FOUND", sessionId: 4, sessionName: "Default", paneId: 1756641624081, sessionFile: "/sessions/chief.jsonl" });
+	expect(result).toMatchObject({ status: "FOUND", sessionId: "4", sessionName: "Default", paneId: "1756641624081", sessionFile: "/sessions/chief.jsonl" });
 });
 
 test("TERNADDR1: a tab id checks too; a block that lives in another tab is SEAT_REBOUND naming where it is", () => {
-	expect(parseTernInspection(fleetInspect, { session: "55834574850", pane: "5", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", paneId: 5, working: true });
+	expect(parseTernInspection(fleetInspect, { session: "55834574850", pane: "5", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", paneId: "5", working: true });
 	expect(parseTernInspection(fleetInspect, { session: "omp-test", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND", reason: expect.stringContaining("tab omp-chief") });
 });
 
@@ -95,11 +94,11 @@ test("TERNADDR1: a block in no tab is DEAD only when its configured session exis
 	expect(parseTernInspection(fleetInspect, { session: "omp-test", pane: "999", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "REFUSED", code: "SEAT_REBOUND" });
 	const twice = { ...fleetInspect, sessions: [{ ...fleetInspect.sessions[0]!, tabs: [...fleetInspect.sessions[0]!.tabs, { ...fleetInspect.sessions[0]!.tabs[0]!, id: 99, number: 3 }] }] };
 	expect(parseTernInspection(twice, { session: "omp-chief", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "UNKNOWN", reason: "INSPECT_BLOCK_AMBIGUOUS" });
-	expect(parseTernInspection(fleetInspect, { session: "Default", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", sessionId: 4 });
+	expect(parseTernInspection(fleetInspect, { session: "Default", pane: "tern:1756641624081", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", sessionId: "4" });
 });
 test("SENDANY1: derive the block's Tern session when no fleet binding exists", () => {
-	const result = locateBlock(fleetInspect, 1756641624081, "");
-	expect(result).toMatchObject({ status: "ok", sessionId: 4, sessionName: "Default", tabId: 55834574849, tabName: "omp-chief" });
+	const result = locateBlock(fleetInspect, "1756641624081", "");
+	expect(result).toMatchObject({ status: "ok", sessionId: "4", sessionName: "Default", tabId: "55834574849", tabName: "omp-chief" });
 });
 
 // WAKEBIGID1 (ompkit-774u.82): Tern browser and picture-in-picture blocks carry 64-bit ids above 2^53. Live on
@@ -108,14 +107,12 @@ test("SENDANY1: derive the block's Tern session when no fleet binding exists", (
 test("WAKEBIGID1: an unrelated 64-bit block id never hides the configured seat; a non-integer id is still schema drift", () => {
 	const raw = JSON.stringify(fleetInspect).replace('"blocks":[{"id":5,', '"blocks":[{"id":9275462912049159,"cwd":"/repo","program":"","browser":"about:blank"},{"id":5,');
 	expect(raw).toContain("9275462912049159");
-	const withPip = JSON.parse(raw) as typeof fleetInspect;
-	expect(locateBlock(withPip, 5, "omp-test")).toMatchObject({ status: "ok", tabName: "omp-test" });
-	expect(parseTernInspection(withPip, { session: "omp-test", pane: "5", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", paneId: 5 });
+	expect(parseTernInspection(raw, { session: "omp-test", pane: "5", windowKey: "", cwd: "/repo" })).toMatchObject({ status: "FOUND", paneId: "5" });
 	const io = { ...defaultTernIo(), run: (argv: string[]) => argv[0] === "tern" && argv.includes("inspect")
 		? { code: 0, out: raw } : { code: 1, out: "" } } as TernObserverIo;
 	expect(resolveTernWindow({ session: "omp-test", pane: "5", windowKey: "", cwd: "/repo" }, io, {})).toMatchObject({ ok: true, kind: "default" });
-	const stringId = JSON.parse(raw.replace("9275462912049159", '"9275462912049159"')) as typeof fleetInspect;
-	expect(locateBlock(stringId, 5, "omp-test")).toMatchObject({ status: "schema", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" });
+	const fractionalId = JSON.parse(raw.replace("9275462912049159", "12.5")) as typeof fleetInspect;
+	expect(locateBlock(fractionalId, "5", "omp-test")).toMatchObject({ status: "schema", reason: "INSPECT_BLOCK_SCHEMA_UNKNOWN" });
 });
 
 test("TERNADDR1: resolveTernWindow admits the default window when the fleet session is a tab of it", () => {
@@ -135,7 +132,7 @@ test("Tern inspect rejects cwd outside the configured repository", () => {
 });
 
 test("TERNADDR1 AC2: an empty window key is Tern's documented default window and binds; a non-string key is still refused", () => {
-	expect(parseTernInspection(inspectFixture, { ...seat, windowKey: "" })).toMatchObject({ status: "FOUND", paneId: 123 });
+	expect(parseTernInspection(inspectFixture, { ...seat, windowKey: "" })).toMatchObject({ status: "FOUND", paneId: "123" });
 	expect(parseTernInspection(inspectFixture, { ...seat, windowKey: 7 as unknown as string })).toMatchObject({ status: "REFUSED", code: "TERN_WINDOW_UNBOUND" });
 });
 
@@ -155,13 +152,13 @@ test("a terminal assistant stop with an unresolved async tool has unknown oracle
 	const result = parseSessionJournal([header, user, assistantWithTool, runningTool, usage].join("\n") + "\n");
 	expect(result).toMatchObject({ status: "KNOWN", terminalAssistantStop: true, unresolvedAsyncTool: true, oracleBusy: null });
 	const inspection = parseTernInspection(inspectFixture, seat);
-	const process = parseTernProcess(processFixture, "/repo", 123);
+	const process = parseTernProcess(processFixture, "/repo", "123");
 	expect(classifyTernObservation(inspection, process, result)).toMatchObject({ state: "UNKNOWN", oracleBusy: null });
 });
 test("a busy Tern inspection preserves working when the session branch is not yet provable", () => {
-	const inspection = { status: "FOUND" as const, sessionId: 41, sessionName: "Default", paneId: 123,
+	const inspection = { status: "FOUND" as const, sessionId: "41", sessionName: "Default", paneId: "123",
 		cwd: "/repo", working: true, exited: null, sessionFile: "/sessions/session-1.jsonl" };
-	const process = parseTernProcess(processFixture, "/repo", 123);
+	const process = parseTernProcess(processFixture, "/repo", "123");
 	const journal = { status: "UNKNOWN", reason: "ACTIVE_BRANCH_UNAVAILABLE" } as const;
 	expect(classifyTernObservation(inspection, process, journal)).toMatchObject({
 		state: "UNKNOWN", working: true, reason: "ACTIVE_BRANCH_UNAVAILABLE",
@@ -315,8 +312,8 @@ test("identity returns the registered Tern pane and runtime binding", async () =
 		binding: "verified-live",
 		agent: "SilverCondor",
 		cwdOk: true,
-		runtimeBinding: { sessionId: 41, sessionFile: "/sessions/session-1.jsonl", sessionUuid: "session-1",
-			paneId: 123, foregroundPid: 13, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 14 19:39:32 2026",
+		runtimeBinding: { sessionId: "41", sessionFile: "/sessions/session-1.jsonl", sessionUuid: "session-1",
+			paneId: "123", foregroundPid: 13, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 14 19:39:32 2026",
 			foregroundArgv: ["omp", "--profile", "codex"], cwd: "/repo" },
 	});
 });
@@ -335,16 +332,16 @@ test("identity requires a separate Agent Mail project", async () => {
 		.toMatchObject({ status: "REFUSED", code: "PLANE_SEAT_UNBOUND", agent: null });
 });
 test("identity trusts matching runtime proof over a stale fleet-watch prior binding", async () => {
-	const previousBinding = { sessionId: 40, sessionFile: "/sessions/old-session.jsonl", sessionUuid: "old-session",
-		paneId: 123, foregroundPid: 99, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 13 19:39:32 2026",
+	const previousBinding = { sessionId: "40", sessionFile: "/sessions/old-session.jsonl", sessionUuid: "old-session",
+		paneId: "123", foregroundPid: 99, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 13 19:39:32 2026",
 		foregroundArgv: ["omp", "--profile", "codex"], cwd: "/old-repo" };
 	const legacyAgent = { ...agentResolution, binding: "legacy-unverified" };
 	const result = await identifyTernSeat({ ...seat, previousBinding }, testIo(false, terminalJournal, legacyAgent));
 	expect(result).toMatchObject({ status: "IDENTIFIED", agent: "SilverCondor", binding: "runtime-verified", cwdOk: true });
 });
 test("identity refuses a stale-prior seat when target AGENT_NAME differs from Agent Mail", async () => {
-	const previousBinding = { sessionId: 40, sessionFile: "/sessions/old-session.jsonl", sessionUuid: "old-session",
-		paneId: 123, foregroundPid: 99, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 13 19:39:32 2026",
+	const previousBinding = { sessionId: "40", sessionFile: "/sessions/old-session.jsonl", sessionUuid: "old-session",
+		paneId: "123", foregroundPid: 99, foregroundName: "18.11.0", foregroundStarted: "Wed Oct 13 19:39:32 2026",
 		foregroundArgv: ["omp", "--profile", "codex"], cwd: "/old-repo" };
 	const otherAgent = { ...agentResolution, agent_name: "OtherAgent", binding: "legacy-unverified" };
 	const result = await identifyTernSeat({ ...seat, previousBinding }, testIo(false, terminalJournal, otherAgent));
@@ -352,12 +349,12 @@ test("identity refuses a stale-prior seat when target AGENT_NAME differs from Ag
 });
 
 test("Tern process parser refuses a result for another block", () => {
-	expect(parseTernProcess({ ...processFixture, pane: 456 }, "/repo", 123))
+	expect(parseTernProcess({ ...processFixture, pane: 456 }, "/repo", "123"))
 		.toMatchObject({ status: "UNKNOWN", reason: "PROCESS_PANE_MISMATCH" });
 });
 test("Tern process parser rejects a non-OMP foreground", () => {
 	const snapshot = { ...processFixture, foreground: { ...processFixture.foreground, argv: ["node"] } };
-	expect(parseTernProcess(snapshot, "/repo", 123))
+	expect(parseTernProcess(snapshot, "/repo", "123"))
 		.toMatchObject({ status: "UNKNOWN", reason: "FOREGROUND_OMP_MISSING" });
 });
 
@@ -366,15 +363,15 @@ const TERN_BUNDLED_OMP = "/Users/fixture/Library/Application Support/Tern/omp/ve
 const withForeground = (argv0: string, name = basename(argv0)) =>
 	({ ...processFixture, foreground: { ...processFixture.foreground, name, argv: [argv0, "--profile", "codex"] } });
 test("SENDOMP1: the parser accepts Tern's bundled OMP (omp/versions/<semver>, named for its version) and still accepts omp", () => {
-	expect(parseTernProcess(withForeground(TERN_BUNDLED_OMP), "/repo", 123)).toMatchObject({ status: "FOUND",
+	expect(parseTernProcess(withForeground(TERN_BUNDLED_OMP), "/repo", "123")).toMatchObject({ status: "FOUND",
 		foreground: { name: "18.13.3", argv: [TERN_BUNDLED_OMP, "--profile", "codex"] } });
-	expect(parseTernProcess(withForeground("omp", "18.11.0"), "/repo", 123)).toMatchObject({ status: "FOUND" });
-	expect(parseTernProcess(withForeground("/opt/other/Tern/omp/versions/19.0.12"), "/repo", 123)).toMatchObject({ status: "FOUND" });
+	expect(parseTernProcess(withForeground("omp", "18.11.0"), "/repo", "123")).toMatchObject({ status: "FOUND" });
+	expect(parseTernProcess(withForeground("/opt/other/Tern/omp/versions/19.0.12"), "/repo", "123")).toMatchObject({ status: "FOUND" });
 });
 test("SENDOMP1 planted: a version-named process outside an omp/versions/ directory stays FOREGROUND_OMP_MISSING", () => {
 	for (const argv0 of ["/usr/bin/18.13.3", "/opt/tools/versions/18.13.3", "/x/omp/18.13.3", "/x/omp/bin/versions/18.13.3",
 		"omp/versions/18.13.3", "/x/omp/versions/latest", "/x/omp/versions/18.13", "/x/omp/versions/18.13.3-rc1", "/x/omp/versions/1..3"]) {
-		expect([argv0, parseTernProcess(withForeground(argv0), "/repo", 123)])
+		expect([argv0, parseTernProcess(withForeground(argv0), "/repo", "123")])
 			.toMatchObject([argv0, { status: "UNKNOWN", reason: "FOREGROUND_OMP_MISSING" }]);
 	}
 });
@@ -405,7 +402,7 @@ test("SENDOMP1: a bundled seat whose launcher path holds a space ('Application S
 // for the model to answer next. Live 2026-10-30: SilverCondor's journal ended in a kit-flywheel-guard custom_message
 // for 26 s before the next assistant message, so a steer read SESSION_ORACLE_STATE_UNKNOWN for the whole 3 s bound.
 test("SENDFAST1.context: a working seat whose branch ends in injected context reads BUSY only for the steer opt-in", () => {
-	const inspection = { status: "FOUND" as const, sessionId: 41, sessionName: "Default", paneId: 123, cwd: "/repo",
+	const inspection = { status: "FOUND" as const, sessionId: "41", sessionName: "Default", paneId: "123", cwd: "/repo",
 		working: true, exited: null, sessionFile: "/sessions/session-1.jsonl" };
 	const process = { status: "FOUND" as const, foreground: { pid: 13, name: "omp", cwd: "/repo", argv: ["omp"],
 		started: "Thu Oct 30 02:01:27 2026", agentName: "SilverCondor" } };
@@ -423,7 +420,7 @@ test("SENDFAST1.context: a working seat whose branch ends in injected context re
 		const journal = ending(entry);
 		expect([label, journal]).toMatchObject([label, { status: "KNOWN", oracleBusy: null }]);
 		expect([label, classifyTernObservation(inspection, process, journal, { turnInFlightIsBusy: true })])
-			.toMatchObject([label, { state: "BUSY", reason: null, runtimeBinding: { paneId: 123, sessionUuid: "session-1" } }]);
+			.toMatchObject([label, { state: "BUSY", reason: null, runtimeBinding: { paneId: "123", sessionUuid: "session-1" } }]);
 		// Control: without the opt-in every other observer keeps SESSION_ORACLE_STATE_UNKNOWN.
 		expect([label, classifyTernObservation(inspection, process, journal)])
 			.toMatchObject([label, { state: "UNKNOWN", reason: "SESSION_ORACLE_STATE_UNKNOWN", runtimeBinding: null }]);
@@ -501,7 +498,7 @@ describe("SENDFAST1.leaf", () => {
 });
 
 test("Tern process parser extracts the actual foreground OMP record", () => {
-	const result = parseTernProcess(processFixture, "/repo", 123);
+	const result = parseTernProcess(processFixture, "/repo", "123");
 	expect(result).toMatchObject({
 		status: "FOUND",
 		foreground: { pid: 13, name: "18.11.0", cwd: "/repo", argv: ["omp", "--profile", "codex"], started: null },
@@ -509,7 +506,7 @@ test("Tern process parser extracts the actual foreground OMP record", () => {
 });
 
 test("Tern observation stays unknown when inspect and session oracle disagree", async () => {
-	const inspection = { status: "FOUND", sessionId: 41, sessionName: "Default", paneId: 123, cwd: "/repo",
+	const inspection = { status: "FOUND", sessionId: "41", sessionName: "Default", paneId: "123", cwd: "/repo",
 		working: false, exited: null, sessionFile: "/sessions/session-1.jsonl" } as const;
 	const process = { status: "FOUND" as const, foreground: { pid: 13, name: "18.11.0", cwd: "/repo",
 		argv: ["omp"], started: null } };
