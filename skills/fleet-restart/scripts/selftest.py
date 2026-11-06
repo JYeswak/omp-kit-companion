@@ -177,7 +177,7 @@ def main():
     case("NEG chief pane -> SKIP_CHIEF", rows["omp-test:0.1"]["action"] == "SKIP_CHIEF", rows["omp-test:0.1"]["action"])
     case("NEG /private/tmp cwd -> HOLD_CWD", rows["modeltest:0.2"]["action"] == "HOLD_CWD", rows["modeltest:0.2"]["action"])
     # --- Tern compiled omp (measured ps shapes 2026-10-11): an agent by its own first token or versioned path
-    tern = "/Users/Shared/Library/Application Support/Tern/omp/versions/18.9.2"
+    tern = "/opt/tern/Library/Application Support/Tern/omp/versions/18.9.2"
     for args, want in [("omp --profile codex --model gpt-6-luna", ["--profile", "codex", "--model", "gpt-6-luna"]),
                        ("/opt/homebrew/bin/omp -p --profile claude", ["-p", "--profile", "claude"]),
                        (tern + " --profile muse --thinking high", ["--profile", "muse", "--thinking", "high"]),

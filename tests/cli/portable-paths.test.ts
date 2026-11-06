@@ -5,13 +5,15 @@ import {
 	cpSync,
 	existsSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	mkdirSync,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { run as runProcess, type RunResult } from "../../src/kitlib/run.ts";
+import { run as runProcess } from "../../src/kitlib/run.ts";
+import type { RunResult } from "../../src/kitlib/run.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS } from "./fixture-process.ts";
 
@@ -231,6 +233,34 @@ function expectRefusal(result: RunResult, file: string): void {
 	expect(transcript).toContain(file);
 	expect(transcript).toContain("resolve through the installed release or a documented config/env setting");
 }
+
+function skillMachinePaths(root: string, paths: string[]): string[] {
+	return paths.filter(path => readFileSync(join(root, path), "utf8").includes("/Users/")).sort();
+}
+
+test("shipped skills contain no machine-specific user paths", async () => {
+	// Exact-tree gate exports have an empty index; include their non-ignored sources.
+	const files = await command(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "skills"], repoRoot);
+	if (files.rc !== 0) throw new Error(`skill inventory failed\n${output(files)}`);
+	const paths = new TextDecoder().decode(files.stdout).split("\0").filter(Boolean);
+	expect(paths).toContain("skills/omp-kit-native/SKILL.md");
+	expect(skillMachinePaths(repoRoot, paths)).toEqual([]);
+});
+
+test("shipped skills portability rejects planted paths in instructions and bundled scripts", () => {
+	const root = join(scratch.path, "skill-paths");
+	const scripts = join(root, "example", "scripts");
+	mkdirSync(scripts, { recursive: true });
+	const skill = join(root, "example", "SKILL.md");
+	const script = join(scripts, "helper.py");
+	writeFileSync(skill, "Run /Users/josh/private/helper.py\n");
+	writeFileSync(script, 'ROOT = "/Users/another/private"\n');
+	const paths = ["example/SKILL.md", "example/scripts/helper.py"];
+	expect(skillMachinePaths(root, paths)).toEqual(paths);
+	writeFileSync(skill, 'Run `omp-kit scratch mine --json`.\n');
+	writeFileSync(script, 'ROOT = os.environ["HOME"]\n');
+	expect(skillMachinePaths(root, paths)).toEqual([]);
+});
 
 test("gates: baseline-less repositories admit clean changes without losing the ratchet", async () => {
 	const repo = await newPrecommitRepo("precommit-baseline-less", false);

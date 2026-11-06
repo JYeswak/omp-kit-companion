@@ -31,7 +31,7 @@ import fr_watchers as fw
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUN_OMP = "bun ~/.bun/bin/omp"
 BUN = "/opt/homebrew/Cellar/bun/1.3.8/bin/bun"
-TERN = "/Users/Shared/Library/Application Support/Tern/omp/versions/"
+TERN = "/opt/tern/Library/Application Support/Tern/omp/versions/"
 TARGET = TERN + "18.10.3"
 TARGET_INFO = {"ok": True, "command": "omp", "which": "/opt/homebrew/bin/omp", "path": TARGET, "version": "18.10.3", "via": "fake",
               "bytes_sha256": "9f2cb4109db2f7d3f1c8d4e5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5"}
@@ -1769,7 +1769,7 @@ def gate_verdict_resume(case, root, home, agents, good_env, uid, aligned):
 
 def home_hits(text):
     """Per-user home-root literals, mirroring scripts/publishability-check.sh
-    (the /Users/Shared documentation exemption). Built by concatenation so
+    (the shared system directory documentation exemption). Built by concatenation so
     this probe never trips the scan itself (ompkit-oq1h.9)."""
     pat = re.compile("/Users" + "/[^ /:]+" + "|/home" + "/[^ /:]+")
     return [ln for ln in text.splitlines()
@@ -1799,7 +1799,7 @@ def gate_portability(case, tmp):
     planted = "x " + "/Users" + "/planted/bin " + "y"
     case("NEG probe flags a planted per-user home literal", len(home_hits(planted)) == 1, planted)
     case("CTL probe passes the shared-docs exemption and bare tildes",
-         home_hits("x /Users/Shared/y\nz ~/w\n") == [], "exempt/tilde")
+         home_hits("x " + "/Users" + "/Shared/y\nz ~/w\n") == [], "exempt/tilde")
     roots = [os.path.dirname(HERE), os.path.join(os.path.dirname(os.path.dirname(HERE)), "fleet-round")]
     found = []
     for root in roots:

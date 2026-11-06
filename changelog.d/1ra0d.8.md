@@ -1,0 +1,1 @@
+- Make shipped skill instructions resolve installed kit resources instead of private checkouts, document `scratch mine`, and reject machine-specific user paths in shipped skill files.

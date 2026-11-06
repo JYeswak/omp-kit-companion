@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Check that every row of omp-kit-native's situation table names a runnable native verb and a measured misuse.
 
-Failure mode it catches: a teaching row that cites a verb the kit does not ship (2026-10-19: an order
-named `omp-kit scratch mine`, which does not exist), a flag the verb's --help does not print, a row
-with no measured misuse, or a required situation missing from the table.
+Failure mode it catches: a teaching row that cites a verb the kit does not ship, a flag the
+verb's --help does not print, a row with no measured misuse, or a required situation missing
+from the table.
 
 Per row of the `| Situation | Native verb | Replaces (measured) |` table in SKILL.md:
   - the first backticked command in column 2 resolves: `omp-kit <verb> [<sub>]` is in
@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import shutil
+import shlex
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -80,7 +81,7 @@ def kit_inventory():
 
 def resolve(cmd, inv, helper=run_help):
     """-> (ok, reason). Checks the verb exists and every --flag is in its help."""
-    words = cmd.split()
+    words = shlex.split(cmd)
     if not words:
         return False, "empty command"
     if words[0] in OMP_TOOLS:
@@ -100,7 +101,7 @@ def resolve(cmd, inv, helper=run_help):
         script = next((w for w in words if w.endswith(".py")), None)
         if not script:
             return False, "not an omp-kit verb, kit script or OMP tool"
-        path = os.path.expanduser(script)
+        path = os.path.expanduser(os.path.expandvars(script))
         if not os.path.isfile(path):
             return False, f"script {script} not found"
         after = words[words.index(script) + 1:words.index(script) + 2]
@@ -131,7 +132,7 @@ def check(text, inv, helper=run_help):
 
 
 def selftest():
-    inv = {"ci": {"status"}, "scratch": {"plan", "release"}, "send": set()}
+    inv = {"ci": {"status"}, "scratch": {"plan", "release", "mine"}, "send": set()}
 
     def helper(argv):
         return "--json --max --repo --push --agent --bin"
@@ -141,7 +142,8 @@ def selftest():
     clean = head + "| CI x | `omp-kit ci status --json` | gh polling 0.93/seat-h |\n" + tail
     cases = [
         ("clean fixture passes", clean, True),
-        ("nonexistent subcommand fails", head + "| scratch x | `omp-kit scratch mine` | 1/seat-h |\n" + tail, False),
+        ("scratch mine exists", head + "| scratch x | `omp-kit scratch mine --json` | 1/seat-h |\n" + tail, True),
+        ("nonexistent subcommand fails", head + "| scratch x | `omp-kit scratch nonexistent` | 1/seat-h |\n" + tail, False),
         ("unknown verb fails", head + "| x | `omp-kit bogus` | 1/seat-h |\n" + tail, False),
         ("flag absent from --help fails", head + "| x | `omp-kit ci status --forever` | 1/seat-h |\n" + tail, False),
         ("row without measured misuse fails", head + "| x | `omp-kit ci status` | gh polling |\n" + tail, False),

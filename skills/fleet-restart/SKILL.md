@@ -9,7 +9,7 @@ distribution: subscribers
 
 > One approved run from "restart the fleet" to a fleet on the target OMP build, with its watchers back, its sessions kept and its advisors on. `run --plan` shows the operator everything the run will touch. One approval bound to that plan's sha256 lets `run --apply` do the rest and write a report. The script refuses the mistakes the 2026-10-11 restart made.
 
-Worked example: `~/Developer/omp-kit/docs/handoffs/fleet-restart-20261011.md`. Tracker: ompkit-bj08.13 (restart tool), ompkit-fp72.19.1 (autonomous run), ompkit-uxr3 (defects fixed here), ompkit-fp72.* (gaps found that day).
+Historical operator example: `docs/handoffs/fleet-restart-20261011.md` in the operator's tracker checkout (optional, not bundled or required). Tracker: ompkit-bj08.13 (restart tool), ompkit-fp72.19.1 (autonomous run), ompkit-uxr3 (defects fixed here), ompkit-fp72.* (gaps found that day).
 
 ## When to use
 
@@ -71,10 +71,13 @@ Triggers: "restart the fleet", "fleet-wide restart", "restart all agents on the 
 Call the script by its full path in every command. Never put the launcher in a shell variable: an unset launcher variable once ran `/usr/bin/env` and printed every secret (ompkit-uxr3).
 
 ```bash
-SKILL=<directory holding this SKILL.md>      # e.g. ~/.local/opt/omp-kit/releases/<v>/skills/fleet-restart
-RUN=$HOME/Developer/omp-test/var/agent-tmp/fleet-restart-$(date +%Y%m%d).$$
-mkdir -p "$RUN"; printf 'pid=%s\nlabel=fleet-restart\npurpose=fleet restart run\n' $$ > "$RUN/.owner"; export TMPDIR="$RUN"
-export TMUX_TMPDIR=$HOME/.tmux-sockets
+KIT_ROOT=$(omp-kit --info | jq -er '.release.root') &&
+  test -f "$KIT_ROOT/skills/fleet-restart/scripts/fleet_restart.py" || exit 1
+SKILL="$KIT_ROOT/skills/fleet-restart"
+RUN=$(omp-kit scratch new --label fleet-restart --json | jq -er '.data.dir') || exit 1
+export TMPDIR="$RUN"
+# Optional tmux adapter: use the operator's socket directory only if present.
+if [ -d "$HOME/.tmux-sockets" ]; then export TMUX_TMPDIR="$HOME/.tmux-sockets"; fi
 python3 "$SKILL/scripts/selftest.py"                              # every gate must bite; stop on FAIL
 python3 "$SKILL/scripts/fleet_restart.py" check-env               # exit 2 = TMUX env/socket missing
 ```
@@ -227,10 +230,12 @@ Manual `verify` checks pid, MCP children, flags and idle. It does not check the 
 ### 5. HANDOFF
 
 ```bash
-python3 "$SKILL/scripts/fleet_restart.py" handoff --run "$RUN" --out ~/Developer/omp-kit/docs/handoffs/fleet-restart-$(date +%Y%m%d).md
+python3 "$SKILL/scripts/fleet_restart.py" handoff --run "$RUN" --out <durable-project-handoff.md>
 ```
 
 `--run` reads `plan.json` and the stage-1 snapshot from the run manifest; a different `--snapshot` is refused (`SNAPSHOT_NOT_STAGE1`). Fill the open sections from `report.md` and evidence: queued panes, HEALTH/INIT per repo, beads awaiting INTEGRATE, open PRs, defects (one bead each). Save it through the omp-kit save path.
+
+Choose a durable handoff path in the owning project, not an assumed operator checkout.
 
 ### 6. CHIEF RESPAWN **OPERATOR**
 
@@ -265,6 +270,10 @@ After the operator's go for a step: `approval-template` → fill → send that s
 - Every director replies with one callback line; DONE needs a sha on origin/main, BLOCKED needs the blocker. A prose-only reply is not a callback; ask once, then record BLOCKED.
 - Read the fleet through the parser: `python3 "$SKILL/scripts/sitrep.py" --repo <tracker repo with no agent pane> --out "$RUN/sitrep.json"` (after `python3 "$SKILL/scripts/sitrep.py" --selftest`). Every number in the handoff sitrep traces to a field of that JSON.
 - Traps the parser handles: `br list --json` without `--status` omits closed beads; real callbacks carry `;` inside the evidence (split on the last `; NEXT`).
+
+After all run stages and callbacks finish, preserve the required run artifacts at the
+durable handoff location, then release with
+`omp-kit scratch release "$RUN" --bin evidence --ref file:<durable-project-handoff.md> --now`.
 
 ### 9. DAILY MEASURE **OPERATOR**
 
