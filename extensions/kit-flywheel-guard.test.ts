@@ -535,6 +535,33 @@ for (const specimen of [
 	});
 }
 
+for (const specimen of [
+	{ name: "owner cancellation", reason: "Cancelled by owner J-2026-11-06-08, commit c763895e5c", refused: false },
+	{ name: "bare reason", reason: "cancelled", refused: true },
+	{ name: "decision without commit", reason: "Cancelled by owner J-2026-11-06-08", refused: true },
+	{ name: "commit without decision", reason: "Cancelled at commit c763895e5c", refused: true },
+	{ name: "malformed decision", reason: "Cancelled J-2026-11-06, commit c763895e5c", refused: true },
+	{ name: "short commit", reason: "Cancelled J-2026-11-06-08, commit c76389", refused: true },
+	{ name: "claimed work", reason: "Cancelled J-2026-11-06-08, commit c763895e5c", claim: "2026-11-06T09:00:00Z", refused: true },
+	{ name: "implemented work", reason: "Cancelled J-2026-11-06-08, commit c763895e5c", commit: "1793955600", refused: true },
+	{ name: "failed claim lookup", reason: "Cancelled J-2026-11-06-08, commit c763895e5c", claimCode: 1, refused: true },
+	{ name: "unreadable claim", reason: "Cancelled J-2026-11-06-08, commit c763895e5c", claim: "unreadable", refused: true },
+]) {
+	test(`CLOSECANCEL1: ${specimen.name}`, async () => {
+		const project = freshDir(base, "close-cancel-");
+		const row = { id: "kit-cancel", status: "deferred", assignee: null, created_by: "Filer",
+			issue_type: "bug", labels: [], comments: [] };
+		const h = await createFlywheelHost(base, { env: { BR_ACTOR: "Verifier" }, respond: call => {
+			if (call.command === "git") return { code: 0, stdout: specimen.commit ?? "" };
+			if (call.command === "sqlite3") return { code: specimen.claimCode ?? 0, stdout: specimen.claim ?? "" };
+			return brTable({ "kit-cancel": { code: 0, stdout: JSON.stringify([row]) } })(call);
+		} });
+		const result = await toolCall(h, project, `br --db /tracker/beads.db close kit-cancel --reason '${specimen.reason}'`);
+		expect(result?.block === true).toBe(specimen.refused);
+		if (specimen.refused) expect(result?.reason).toContain("PRIOR_ART_REFUSED");
+	});
+}
+
 test("PRIORGATE1: bounded validator rejects long near-misses and empty fields", () => {
 	expect(validPriorArtLine("prior=https://example.org did=required sections applied=added gate")).toBe(true);
 	for (const text of ["prior=none searched=", "prior=none searched= [ , ]", "prior=src/gate.ts did=x applied=y", "prior=https://example.org did= applied=y"]) {

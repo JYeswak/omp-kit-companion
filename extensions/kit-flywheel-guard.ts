@@ -2830,6 +2830,12 @@ async function checkPriorArtClose(found: BeadStateWithAuthorship, request: Track
 			const sql = `SELECT min(created_at) FROM events WHERE issue_id='${found.id.replace(/'/g, "''")}' AND event_type='status_changed' AND new_value='in_progress'`;
 			const claim = await deps.exec("sqlite3", ["-readonly", tracker, sql], { cwd: request.cwd, timeout: FLYWHEEL_EXEC_TIMEOUT_MS });
 			if (claim.code !== 0 || claim.killed) return refuse("in_progress claim-time lookup failed");
+			// CLOSECANCEL1: owner-cancelled work has neither implementation nor claim history.
+			// Only a successful empty lookup qualifies; unreadable history still fails closed.
+			const reason = request.reason;
+			if (claim.stdout.trim() === "" && reason !== null && reason.length <= 16_384
+				&& /\bJ-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2,6}\b/.test(reason)
+				&& /\b[0-9a-f]{7,40}\b/i.test(reason)) return undefined;
 			first = Date.parse(claim.stdout.trim());
 			basis = "first in_progress claim";
 		}
