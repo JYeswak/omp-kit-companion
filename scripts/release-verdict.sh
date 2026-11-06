@@ -139,17 +139,31 @@ culprit_step() {
 	fi
 	return 0
 }
+# RELFAST1: wall-clock runner intervals, matching release-local's substep format.
+# Keep CI's timestamp separate: its existing background judge overlaps main.
+# CI ends when the parent observes completion at wait, not necessarily at process exit.
+substep_start() {
+	rv_substep_t0=$(date +%s)
+	printf '== substep %s start=%s\n' "$1" "$rv_substep_t0"
+}
+substep_end() {
+	rv_substep_t1=$(date +%s)
+	printf '== substep %s took %ss start=%s end=%s\n' "$1" "$((rv_substep_t1 - $2))" "$2" "$rv_substep_t1"
+}
 rc=0
 while :; do
 	rm -f "$WANTED"
 	tree="$WORK/tree.$sha"
+	substep_start verdict.archive-export
 	mkdir -p "$tree"
 	git -C "$ROOT" archive "$sha" | tar -xf - -C "$tree"
+	substep_end verdict.archive-export "$rv_substep_t0"
 	rv_tree=$(git -C "$ROOT" rev-parse "$sha^{tree}") || { printf 'release-verdict: cannot read the tree of %s\n' "$sha" >&2; rc=1; break; }
 	# RELFAST1: use the same canonical validators as release-local, before queueing for CPU.
 	# Only a successful exact PASS can skip work; FAIL, missing/corrupt evidence, changed
 	# checker bytes, runtime or tree keep the original producer/refusal path.
 	main_result=''
+	substep_start verdict.store-lookup
 	ci_result=''
 	ci_supported=0
 	if [ -f "$tree/scripts/full-suite-verdict-store.py" ]; then
@@ -166,9 +180,12 @@ while :; do
 		# Old commits without CI-only qualification retain their original main-only contract.
 		ci_result=PASS
 	fi
+	substep_end verdict.store-lookup "$rv_substep_t0"
 	if [ "$rv_lease" = 1 ] && { [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; }; then
 		lease_rc=0
+		substep_start verdict.suite-lease-wait
 		suite_lease_take release-verdict "$rv_tree" main "$sha" "${FULL_SUITE_VERDICT_CACHE_DIR:-}" 0 '' || lease_rc=$?
+		substep_end verdict.suite-lease-wait "$rv_substep_t0"
 		if [ "$lease_rc" != 0 ]; then
 			printf 'release-verdict: %s not judged: no suite lease (rc=%s)\n' "$sha" "$lease_rc"
 			rc=$lease_rc
@@ -179,8 +196,12 @@ while :; do
 	# Step 5 gets its own export: git-initializing the full suite's tree would change what its tests see.
 	ci_tree="$WORK/ci-only.$sha"
 	if [ "$ci_supported" = 1 ] && [ "$ci_result" != PASS ]; then
+		substep_start verdict.ci-only-archive-export
 		mkdir -p "$ci_tree"
 		git -C "$ROOT" archive "$sha" | tar -xf - -C "$ci_tree"
+		substep_end verdict.ci-only-archive-export "$rv_substep_t0"
+		substep_start verdict.ci-only-judge
+		rv_ci_t0=$rv_substep_t0
 		env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
 			python3 -B "$ci_tree/scripts/full-suite-verdict-store.py" run-ci-only --repo "$ROOT" --commit "$sha" \
 			</dev/null >"$WORK/ci-only.$sha.out" 2>&1 &
@@ -195,8 +216,10 @@ while :; do
 	ci_rc=''
 	rc=0
 	if [ "$main_result" != PASS ]; then
+		substep_start verdict.main-judge
 		env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u BEADS_DB -u BEADS_DIR TMPDIR="$WORK" \
 			sh "$tree/scripts/full-suite-verdict.sh" --repo "$ROOT" --commit "$sha" --judge-role main </dev/null || rc=$?
+		substep_end verdict.main-judge "$rv_substep_t0"
 	fi
 	producer_rc=$rc
 	printf 'release-verdict: %s producer_rc=%s\n' "$sha" "$rc"
@@ -204,6 +227,7 @@ while :; do
 	if [ -n "$ci_pid" ]; then
 		ci_rc=0
 		wait "$ci_pid" || ci_rc=$?
+		substep_end verdict.ci-only-judge "$rv_ci_t0"
 		ci_pid=''
 		cat "$WORK/ci-only.$sha.out"
 		printf 'release-verdict: %s ci_only_rc=%s\n' "$sha" "$ci_rc"

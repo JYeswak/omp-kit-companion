@@ -17,6 +17,26 @@ pass=0
 fail=0
 ok() { if [ "$1" = 0 ]; then pass=$((pass + 1)); else fail=$((fail + 1)); printf 'FAIL %s\n' "$2"; fi; }
 
+# Runner intervals are output contracts, not exact-duration goldens. Judge intervals
+# cover dispatch through parent-observed completion; CI may finish before main joins it.
+timings() {
+	python3 - "$@" <<'PY'
+import sys
+from pathlib import Path
+lines = Path(sys.argv[1]).read_text().splitlines()
+for name in sys.argv[2:]:
+    prefix = "== substep " + name + " "
+    starts = [line[len(prefix):] for line in lines if line.startswith(prefix + "start=")]
+    ends = [line[len(prefix):].split() for line in lines if line.startswith(prefix + "took ")]
+    assert len(starts) == len(ends) == 1, (name, starts, ends)
+    took, duration, start, end = ends[0]
+    assert took == "took" and duration.endswith("s"), (name, ends)
+    start_s, end_s = int(start.removeprefix("start=")), int(end.removeprefix("end="))
+    assert starts == ["start=" + str(start_s)], (name, starts)
+    assert end_s >= start_s > 0 and int(duration[:-1]) == end_s - start_s, (name, ends)
+PY
+}
+
 # A real canonical store supplies PASS controls for RELFAST1's cache invalidations.
 seed="$TMP/shared-seed"
 origin="$TMP/shared-origin.git"
@@ -108,6 +128,9 @@ if [ "$watchdog_rc" = 0 ] && grep -Fq "FULL-SUITE: VERDICT PASS tree=$source_tre
 else
 	ok 1 "watchdog-second-checkout: rc=$watchdog_rc output=$(cat "$TMP/watchdog.out")"
 fi
+timings "$TMP/watchdog.out" verdict.archive-export verdict.store-lookup verdict.suite-lease-wait \
+	verdict.ci-only-archive-export verdict.main-judge verdict.ci-only-judge
+ok $? "cold-run-emits-each-runner-interval"
 
 # RELFAST1: a fully qualified exact tree must not queue behind an unrelated suite.
 # Only the checkout's lease is refused; the committed judge and records stay unchanged.
@@ -125,6 +148,12 @@ else
 fi
 [ "$warm_rc" = 0 ] && ! grep -Fq 'fixture lease refused' "$TMP/warm.out"
 ok $? "qualified-tree-bypasses-suite-lease: rc=$warm_rc output=$(cat "$TMP/warm.out")"
+timings "$TMP/warm.out" verdict.archive-export verdict.store-lookup
+ok $? "warm-run-emits-export-and-store-intervals"
+! grep -Fq '== substep verdict.suite-lease-wait ' "$TMP/warm.out" \
+	&& ! grep -Fq '== substep verdict.main-judge ' "$TMP/warm.out" \
+	&& ! grep -Fq '== substep verdict.ci-only-judge ' "$TMP/warm.out"
+ok $? "warm-run-does-not-invent-skipped-intervals"
 
 # Main PASS alone is reusable: run the missing CI files without invoking main again.
 main_only="$TMP/main-only"
@@ -139,6 +168,8 @@ else
 fi
 [ "$missing_ci_rc" = 75 ] && grep -Fq 'fixture lease refused' "$TMP/missing-ci-lease.out"
 ok $? "missing-ci-still-requires-suite-lease: rc=$missing_ci_rc"
+timings "$TMP/missing-ci-lease.out" verdict.suite-lease-wait
+ok $? "refused-lease-emits-completed-wait-interval"
 cp "$TMP/original-lease.sh" "$second/scripts/suite-lease.sh"
 : >"$CIO_LOG"
 if env PATH="$TMP/fake-bin:$PATH" HOME="$TMP/home" TMPDIR="$TMP" \
@@ -219,6 +250,8 @@ for attempt in fresh cached; do
 	[ "$failed_rc" != 0 ] && ! grep -Fq 'reusing exact-tree main PASS' "$TMP/fail-$attempt.out" \
 		&& grep -Fq "VERDICT" "$TMP/fail-$attempt.out"
 	ok $? "valid-fail-$attempt-refuses: rc=$failed_rc output=$(cat "$TMP/fail-$attempt.out")"
+	timings "$TMP/fail-$attempt.out" verdict.main-judge
+	ok $? "failed-main-$attempt-emits-completed-judge-interval"
 done
 grep -Fq "cache miss for tree $failed_tree role=main" "$TMP/fail-fresh.out"
 ok $? "different-candidate-tree-runs-suite"
