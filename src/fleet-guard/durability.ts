@@ -42,24 +42,35 @@ async function readBounded(path: string, limit = LIMIT): Promise<string> {
 const GIT_DEADLINE_MS = 2_000;
 
 // No inherited Git redirection, lazy-fetch, pager, credential or network operations.
-function git(repo: string, args: string[], input?: string): Promise<string> {
+async function git(repo: string, args: string[], input?: string, retryFirstExec = false): Promise<string> {
 	const env = { ...process.env };
 	for (const key of Object.keys(env)) if (key.startsWith("GIT_")) delete env[key];
 	Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_OPTIONAL_LOCKS: "0" });
-	const running = promisify(execFile)("git", ["--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...args],
-		{ env, timeout: GIT_DEADLINE_MS, maxBuffer: INDEX_LIMIT, encoding: "utf8" });
-	running.child.stdin?.on("error", () => { running.child.kill(); });
-	running.child.stdin?.end(input);
 	const end = args.indexOf("--");
 	const read = `git ${(end < 0 ? args : args.slice(0, end)).join(" ")}`;
-	return running.then(result => result.stdout, (error: ExecFileException & { stderr?: string }) => {
-		// GUARDGITLOAD1: classify the next failure before a long command/path can hide its cause.
-		// Keep the original error as cause; like git.ts firstLine(), bound stderr to 200 characters.
-		const stderr = (error.stderr ?? "").slice(0, 200).split("\n", 1)[0] ?? "";
-		throw new UnknownReadError(read, error, `git exec failed: killed=${error.killed ?? "UNKNOWN"}`
-			+ ` signal=${error.signal === undefined ? "UNKNOWN" : error.signal}`
-			+ ` code=${error.code === undefined ? "UNKNOWN" : error.code} stderr=${JSON.stringify(stderr)}`);
-	});
+	for (let attempt = 0; ; attempt++) {
+		const started = performance.now();
+		let stdinFailed = false;
+		const running = promisify(execFile)("git", ["--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", repo, ...args],
+			{ env, timeout: GIT_DEADLINE_MS, maxBuffer: INDEX_LIMIT, encoding: "utf8" });
+		running.child.stdin?.on("error", () => { stdinFailed = true; running.child.kill(); });
+		running.child.stdin?.end(input);
+		try { return (await running).stdout; }
+		catch (cause) {
+			const error = cause as ExecFileException & { stderr?: string };
+			// GUARDGITLOAD1: fresh executable startup measured 340/478/490 ms p50/p95/max
+			// at load 16-17; GUARDDIAG1 also captured SIGTERM at 2004 ms. Do not extrapolate
+			// a larger deadline from that tail: retry only the admission's first read once.
+			// A persistent hang still refuses after two 2 s attempts; all later reads get one.
+			if (retryFirstExec && attempt === 0 && !stdinFailed && error.killed === true
+				&& error.signal === "SIGTERM" && error.code === null && performance.now() - started >= GIT_DEADLINE_MS) continue;
+			// Keep the original error as cause; like git.ts firstLine(), bound stderr to 200 characters.
+			const stderr = (error.stderr ?? "").slice(0, 200).split("\n", 1)[0] ?? "";
+			throw new UnknownReadError(read, error, `git exec failed: killed=${error.killed ?? "UNKNOWN"}`
+				+ ` signal=${error.signal === undefined ? "UNKNOWN" : error.signal}`
+				+ ` code=${error.code === undefined ? "UNKNOWN" : error.code} stderr=${JSON.stringify(stderr)}`);
+		}
+	}
 }
 
 // SCRATCHOWNERFORM1 (ompkit-ma3sn): the bound is the work this comparison may do, not the repository's size. Real
@@ -195,7 +206,7 @@ export async function check(event: FleetGuardEvent, context: FleetGuardContext):
 			// created beneath the destination. A synthetic repository may itself
 			// live in an owned test directory without making its canonical files copies.
 			read = "calling repository realpath";
-			referenceRepo ??= await realpath((await git(cwd, ["rev-parse", "--show-toplevel"])).trimEnd());
+			referenceRepo ??= await realpath((await git(cwd, ["rev-parse", "--show-toplevel"], undefined, true)).trimEnd());
 			const repo = referenceRepo;
 			const scratchRoot = join(repo, "var", "agent-tmp");
 			if (inside(repo, physical) && !inside(scratchRoot, physical)) {
