@@ -599,7 +599,12 @@ export default async function kitGoalKeepalive(
 		const seat = seatIdentity(env);
 		if (seat === null) return;
 		const cwd = ctx.cwd ?? deps.cwd ?? process.cwd();
-		if (sessionPaused({ fleetWatch: fleetWatchPath(env, home), cwd })) return; // KEEPALIVEPAUSE1: paused project, no wake
+		if (sessionPaused({ fleetWatch: fleetWatchPath(env, home), cwd })) {
+			// KEEPALIVEPAUSE1: a paused project gets no wake, but the timer stays armed (a config read, no model turn) so
+			// the seat wakes on the next interval after pullEnabled turns true; nothing else re-arms an idle seat.
+			schedule(ctx, MIN_WAKE_INTERVAL_MS);
+			return;
+		}
 		let blocked: string | null = null;
 		if (preflightBlocked) {
 			try {
