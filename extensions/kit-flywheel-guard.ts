@@ -18,7 +18,7 @@ import { resolveCustodyScript } from "../src/custody.ts";
 import { classifyMineResult } from "../src/mine-cause.ts";
 import { briefEditsFiles, briefHandbackRefusal, briefTargets, checkTaskBrief, isBuildBriefTask } from "../src/brief.ts";
 import { parseBoxes } from "../src/verify.ts";
-import { readSpawnModelInputs, resolveSpawnPatterns, resolveTaskModels, taskModelRefusal, type SpawnModelIdentity } from "../src/spawn-model.ts";
+import { readSpawnModelInputs, readSpawnModelSession, resolveSpawnPatterns, resolveTaskModels, taskModelRefusal, type SpawnModelIdentity, type SpawnModelRuntime } from "../src/spawn-model.ts";
 
 /**
  * kit-flywheel-guard: lifecycle invariants enforced at the act.
@@ -150,6 +150,8 @@ export interface FlywheelBeforeSubagentSpawnEvent {
 
 /** The slice of omp's ExtensionAPI this guard touches. */
 export interface FlywheelGuardApi {
+	/** Host SDK namespace; absent in standalone guard harnesses. */
+	pi?: unknown;
 	on(event: "session_compact", handler: (event: { type: "session_compact" }, ctx: FlywheelContext) => unknown): void;
 	on(event: "session_start", handler: (event: { type: "session_start" }, ctx: FlywheelContext) => unknown): void;
 	on(event: "tool_call", handler: (event: FlywheelToolCallEvent, ctx: FlywheelContext) => unknown): void;
@@ -167,6 +169,8 @@ export interface FlywheelGuardDeps {
 	rosterPath?: string;
 	/** Directory of the bead-lint helpers; defaults to the loaded release's scripts/ (BEAD_LINT_SCRIPTS_DIR). */
 	lintScriptsDir?: string;
+	/** Native runtime loader; injectable to exercise compiled-host import failure. */
+	loadSpawnModelRuntime?: () => Promise<SpawnModelRuntime>;
 }
 
 /** Per-command ceiling for `br show` and the tmux pane-key lookup. */
@@ -3225,14 +3229,26 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 					if (scope) {
 						const models = ctx.models;
 						if (!models) return { block: true, reason: taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "MODEL_QUERY_UNAVAILABLE" }]) };
-						const inputs = await readSpawnModelInputs(ctx.cwd, patterns => models.resolve(patterns), home);
+						const inputs = await readSpawnModelInputs(ctx.cwd, patterns => models.resolve(patterns), home, {
+							...(deps.loadSpawnModelRuntime ? { loadRuntime: deps.loadSpawnModelRuntime } : {}),
+							// Literal imports in this extension entrypoint are host-bound by
+							// OMP's loader. Static imports cannot run in standalone harnesses.
+							observeSession: () => readSpawnModelSession(ctx.cwd, home, pi.pi ? async () => {
+								const [settings, task] = await Promise.all([
+									import("@oh-my-pi/pi-coding-agent/config/settings"),
+									import("@oh-my-pi/pi-coding-agent/task/settings"),
+								]);
+								return { findScopedSettings: settings.findScopedSettings, cfgTaskAgentModelOverrides: task.cfgTaskAgentModelOverrides };
+							} : undefined),
+						});
 						const parent = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 						const reason = taskModelRefusal(resolveTaskModels(event.input, inputs.agents, inputs.settings, parent));
 						if (reason) return { block: true, reason };
 					}
 				} catch (error) {
-					// ompkit-fp72.120.16.45: the swallowed cause hid an unresolvable OMP import; name it.
-					const cause = String((error as Error)?.message ?? error).slice(0, 600).replace(/\s+/g, " ").slice(0, 300);
+					// Preserve the decisive fallback cause before bounding the diagnostic.
+					const failure = error instanceof Error && error.cause instanceof Error ? error.cause : error;
+					const cause = String(failure instanceof Error ? failure.message : failure).slice(0, 600).replace(/\s+/g, " ").slice(0, 300);
 					return { block: true, reason: `${taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: "SPAWN_INPUTS_UNOBSERVABLE" }])}\ncause: ${cause}` };
 				}
 				const reason = await checkTaskBrief(event.input, ctx.cwd, pi.exec) ?? await checkPriorArtSpawn(event.input, ctx.cwd, pi.exec);

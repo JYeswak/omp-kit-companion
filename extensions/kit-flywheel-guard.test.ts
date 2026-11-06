@@ -2344,6 +2344,41 @@ describe("AGENTMODEL1 registered task-call guard", () => {
 		expect(query?.block).toBe(true);
 		expect(query?.reason).toContain("MODEL_QUERY_UNAVAILABLE");
 	});
+
+	test("compiled-host fallback observes runtime Sol over persisted project Opus, and still refuses runtime Opus", async () => {
+		const runtime = await loadSpawnModelRuntime();
+		const { getBundledModels } = await import(import.meta.resolve("@oh-my-pi/pi-catalog/models", join(runtime.source, "index.ts")));
+		const models: SpawnModelIdentity[] = ["anthropic", "openai-codex"].flatMap(provider => getBundledModels(provider));
+		const home = freshDir(base, "fallback-guard-home-"), project = freshDir(base, "fallback-guard-project-");
+		const agentDir = join(home, ".omp", "agent"), rosterDir = join(home, ".config", "omp-kit");
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(rosterDir, { recursive: true });
+		mkdirSync(join(project, ".omp"), { recursive: true });
+		writeFileSync(join(project, ".omp", "config.yml"), JSON.stringify({ task: { agentModelOverrides: { task: OPUS } } }));
+		writeFileSync(join(rosterDir, "fleet-roster.json"), JSON.stringify({
+			chiefs: { lead: "FallbackSeat", peers: [] }, sessions: { test: { seats: { FallbackSeat: { role: "chief" } } } },
+		}));
+		const native = await runtime.Settings.loadReadOnly({ cwd: project, agentDir });
+		const handlers = new Map<string, unknown>();
+		await kitFlywheelGuard({
+			on: (event: string, handler: unknown) => { handlers.set(event, handler); },
+			getAllTools: () => [], sendMessage: () => {},
+			exec: async () => ({ stdout: "", stderr: "not needed", code: 127 }),
+		}, { home, env: { AGENT_NAME: "FallbackSeat" },
+			loadSpawnModelRuntime: async () => { throw new Error("compiled host cannot import native source"); } });
+		const handler = handlers.get("tool_call");
+		if (typeof handler !== "function") throw new Error("Task-call guard was not registered");
+		const ctx: FlywheelContext = { cwd: project, agent: { kind: "main" },
+			model: { provider: "anthropic", id: "claude-opus-5-5" },
+			models: { resolve: patterns => runtime.resolveModelRoleValue(patterns, models, { settings: native }).model } };
+		for (const model of [SOL, OPUS]) {
+			runtime.cfgTaskAgentModelOverrides.override(native, { task: model });
+			const result = await handler({ toolName: "task", input: { tasks: [{ task: "Read-only analysis" }] } }, ctx) as FlywheelToolCallResult | undefined;
+			expect(result?.block === true).toBe(model === OPUS);
+			if (model === OPUS) expect(result?.reason).toContain("OPUS_CLASS_CANDIDATE");
+		}
+		expect(readFileSync(join(project, ".omp", "config.yml"), "utf8")).toContain(OPUS);
+	});
 });
 
 describe("AGENTMODEL1 native final-policy boundary", () => {
