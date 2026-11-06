@@ -70,7 +70,6 @@ test("a partial update preserves all release and poll recovery artifacts", async
 		status: "PARTIAL", exitCode: 1, receiptId: "partial-fixture", activeVersion: "1.0.5",
 		postcheck: { status: "FAIL", matcher: "FAIL", live: "NOT_RUN" }, provenance: "INTEGRITY_ONLY",
 	});
-	f.dependencies.reconcileReceipt = () => { throw new Error("fixture postimage mismatch"); };
 	const before = readdirSync(join(f.prefix, "releases")).sort();
 	const result = await runKitUpdateJob(f.config, f.dependencies);
 	expect(result.status).toBe("PENDING");

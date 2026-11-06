@@ -180,13 +180,13 @@ parallel installer or a second activation authority.
   candidate/Tern-source-cache combination must be covered, not just npm-managed
   hosted consumers. Missing scenario results still fail.
 - **Compensation truth:** `applyKitUpdate` may return PARTIAL with the new CLI
-  still active. `undoKitUpdate` is a separate, receipt/postimage-checked action.
-  The job does not call it and no longer says it did: after PARTIAL it checks the
-  kit's own postimages as `update --reconcile` does (stable-link target and binary
-  sha). If they match, the receipt ends RECONCILED, the profiles are relinked and
-  the job reports FINDINGS with the postcheck reason. If they do not, the job
-  reports PENDING and the receipt stays pending. Both notifications name
-  `omp-kit undo RECEIPT --yes`.
+  still active. The service tick calls the guarded `undoKitUpdate` only for a
+  current-tick FAIL classified as `KIT_FAST_TEST_FAILED`, `KIT_LIVE_TEST_FAILED`
+  or `KIT_POSTCHECK_FAILED`. Under the update lock it requires kit-only scope,
+  audit PENDING, READY activation, an exact live after-image and an intact prior
+  binary. Only a restored link plus compensated receipt permits UNDONE; the
+  original failed postcheck remains FINDINGS. Other reasons or failed checks
+  refuse unattended recovery without relinking profiles or changing the service.
 - **Postcheck:** require the candidate manifest's complete expected named-result
   set, not a fixed scenario-count constant. In this incident, 109/110 was a failure.
   Attribute effects using isolated state and an adversarial foreign-write control;
@@ -210,13 +210,12 @@ parallel installer or a second activation authority.
 
 Source-only branches are distinguished below from the observed old-harness failure:
 
-1. Fixed (FLEETUPG1): the job mapped `applyKitUpdate` PARTIAL to UNDONE and said
-   undo completed, though nothing was undone. It now finishes the receipt by its
-   postimages (RECONCILED, or PENDING on a mismatch) and never claims an undo.
-2. The job returns CURRENT before pending-recovery, profile and service
-   reconciliation when no newer CLI is found. A partial update can leave the
-   latest CLI active with unresolved recovery; CURRENT must not hide that state.
-   The normal relink path is reached only after UPDATED or a verified PARTIAL.
+1. Fixed (KITREC1): the earlier job could label PARTIAL as UNDONE without
+   restoring anything, then used postimage reconciliation instead. The tick now
+   performs strict guarded compensation and reports UNDONE only after recovery.
+2. A restarted tick checks pending recovery before polling, so CURRENT cannot
+   hide an unresolved activation. Without the original postcheck/OMP witness,
+   automatic recovery refuses. Normal relink runs only after UPDATED.
 3. Fixed (FLEETUPG1): a relink, service-reconcile or postcheck failure after a
    verified activation is overall FINDINGS with exit 1, no longer OK/exit 0.
 4. Fixed (FLEETUPG1): per-version poll staging is idempotent (see Retryable staging).
@@ -382,10 +381,18 @@ For an eligible pending READY receipt only, `omp-kit update --reconcile RECEIPT 
 rescans the active kit link, release bytes and recorded postimages. It marks
 RECONCILED only when those match. This records state consistency, not a passing
 missing scenario or a repaired health regression. Fix or explicitly undo a real
-failed postcheck; do not use receipt reconciliation to relabel it healthy. The
-`kit-update` job runs this same check after a PARTIAL apply. Its record keeps the
-failed postcheck (`postcheck`, `postcheckReason`, `postcheckDetail`: failed stages,
-changed operator paths, first failures) and its overall stays FINDINGS.
+failed postcheck; do not use receipt reconciliation to relabel it healthy.
+The `kit-update` job instead attempts strict automatic compensation of a current
+PARTIAL: kit-only scope, audit PENDING, READY activation, exact live after-image,
+intact prior binary, and a FAIL reason of `KIT_FAST_TEST_FAILED`,
+`KIT_LIVE_TEST_FAILED` or `KIT_POSTCHECK_FAILED`. An OMP change, unknown identity,
+deferred postcheck, reconciled receipt or failed integrity check refuses.
+Successful recovery reports UNDONE with `ABORTED_AFTER_COMPENSATION` and the
+prior version active. A restored link with unfinished receipt finalization stays
+PENDING. Both retain the failed postcheck (`postcheck`, `postcheckReason`,
+`postcheckDetail`: failed stages, changed operator paths, first failures), so
+overall remains FINDINGS. Restarted ticks require manual inspection because
+their postcheck/OMP identity witness is unavailable.
 
 The prefix is derived from the receipt; an explicit relocated `--prefix PATH`
 must match the same postimages. A mismatch stays pending. A receipt already
@@ -496,11 +503,11 @@ Install on publish (existing `kit-update` service, no new daemon):
   `OMP_KIT_UPDATE_REPO=owner/repo`, each service tick fetches the newest
   published release; only a version newer than the live install is
   downloaded (index plus platform archive into one private directory)
-  and applied under the existing update receipt and reconcile path
+  and applied under the existing update receipt and guarded recovery path
   (`src/kit-update-job.ts`, covered by `tests/cli/kit-update-job.test.ts`).
-- After UPDATED, or after PARTIAL when the kit's own postimages verify, the job
-  relinks selected profiles, keeps the plugin receipt and reconciles the service.
-  A postimage that does not match its activation record stays PENDING and nothing is relinked.
+- Only UPDATED relinks selected profiles, keeps the plugin receipt and reconciles
+  the service. PARTIAL either restores the prior release under the strict
+  automatic-undo preconditions or refuses unattended recovery; neither relinks.
   Relink, reconcile or postcheck failures report overall FINDINGS, even when the result says UPDATED.
   The 300-second tick is a configured interval, not loaded-state or latency proof.
   CURRENT-version reconciliation, repeated-tick recovery and actual loaded-version

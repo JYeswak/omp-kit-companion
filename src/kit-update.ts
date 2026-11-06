@@ -40,7 +40,12 @@ export type KitUpdatePreview = KitUpdatePlan | KitUpdateRefusal;
 /** DEFERRED: heavy admission refused a ladder stage, so the release was never judged; it is not PASS and not a FAIL verdict. */
 export type KitPostcheck = { status: "PASS" | "FAIL" | "DEFERRED" | "NOT_RUN"; matcher: "PASS" | "FAIL" | "NOT_RUN"; live: "PASS" | "FAIL" | "NOT_RUN"; report?: FullTestReport; reason?: string; cause?: FullTestCause };
 export type KitUpdateResult = { status: "UPDATED" | "CURRENT" | "PARTIAL"; exitCode: 0 | 1; receiptId: string | null; activeVersion: string | null; postcheck: KitPostcheck; provenance: "INTEGRITY_ONLY" | "SIGSTORE_VERIFIED" };
-export type KitUndoInput = { prefix: string; stateRoot: string; receiptId: string };
+export type KitUndoInput = {
+ prefix: string; stateRoot: string; receiptId: string;
+ /** Only the current tick's failed, kit-only postcheck may authorize unattended compensation. Omit for manual undo. */
+ automatic?: KitPostcheck;
+};
+export type KitUndoResult = { status: "RESTORED"; receiptId: string; activeVersion: string; updatePending: boolean };
 export function updateFailureCause(error: unknown, roots: readonly string[] = []): FullTestCause {
  const isError = error instanceof Error;
  const record = error !== null && typeof error === "object" ? error as { code?: unknown } : null;
@@ -489,7 +494,7 @@ export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult)
 }
 
 /** Only the recorded, unchanged postimage may switch back; the new release remains intact. */
-export function undoKitUpdate(input: KitUndoInput): { status: "RESTORED"; receiptId: string; activeVersion: string; updatePending: boolean } {
+export function undoKitUpdate(input: KitUndoInput): KitUndoResult {
  const heldLock = acquireKitUpdateLock(input.stateRoot);
  try {
   const receipt = readReceipt(input.stateRoot, input.receiptId);
@@ -498,6 +503,15 @@ export function undoKitUpdate(input: KitUndoInput): { status: "RESTORED"; receip
    receipt.after.target !== relativeTarget(receipt.after.version)) throw new Error("KIT_RECEIPT_INVALID");
   const known = auditMutations(input.stateRoot).find(row => row.id === receipt.id && row.kind === "update");
   if (!known || !["PENDING", "RECONCILED"].includes(known.status)) throw new Error("KIT_RECEIPT_INVALID");
+  if (input.automatic) {
+   const check = input.automatic;
+   if (check.status !== "FAIL" || (check.reason !== "KIT_FAST_TEST_FAILED" &&
+    check.reason !== "KIT_LIVE_TEST_FAILED" && check.reason !== "KIT_POSTCHECK_FAILED"))
+    throw new Error("KIT_AUTO_UNDO_UNSAFE_POSTCHECK");
+   if (known.scope !== "kit") throw new Error("KIT_AUTO_UNDO_SCOPE");
+   const pending = inspectPendingKitUpdate(input.stateRoot);
+   if (known.status !== "PENDING" || pending?.id !== receipt.id) throw new Error("KIT_RECEIPT_INVALID");
+  }
   if (!matches(input.prefix, receipt.after)) throw new Error("POSTIMAGE_CHANGED");
   const priorBinary = installedBinary(input.prefix, receipt.before.version);
   if (!lstatSync(priorBinary).isFile() || realpathSync(priorBinary) !== priorBinary || shaFile(priorBinary) !== receipt.before.sha256)

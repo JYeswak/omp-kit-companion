@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { kitUpdateJobOverall, pollPublishedRelease, runKitUpdateJob, type KitUpdateJobConfig, type KitUpdateJobDependencies, type KitUpdateJobResult } from "../../src/kit-update-job.ts";
-import type { KitUpdateResult } from "../../src/kit-update.ts";
+import { reconcilePendingUpdate, type KitUpdateResult } from "../../src/kit-update.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -219,19 +219,22 @@ test("planted: an OMP no-op cannot claim a complete update when a profile remain
 });
 
 /** What applyKitUpdate leaves before its postcheck: the stable link on 1.2.4, a pending kit receipt and its READY activation record. */
-function activate(value: KitUpdateJobConfig, recordedBinary?: Buffer): string {
+function activate(value: KitUpdateJobConfig, recordedBinary?: Buffer, scope: "kit" | "all" = "kit"): string {
 	rmSync(join(value.prefix, "bin", "omp-kit"));
 	installSymlink(value.prefix, "1.2.4");
+	const binary = (version: string) => join(value.prefix, "releases", version, "bin", "omp-kit");
+	mkdirSync(dirname(binary("1.2.3")), { recursive: true });
+	if (!existsSync(binary("1.2.3"))) writeFileSync(binary("1.2.3"), "known-good prior binary", { mode: 0o755 });
+	const priorSha = sha(readFileSync(binary("1.2.3")));
 	mkdirSync(value.stateRoot, { recursive: true, mode: 0o700 });
 	chmodSync(value.stateRoot, 0o700);
 	const lock = acquireKitUpdateLock(value.stateRoot);
 	let id: string;
-	try { id = beginKitUpdateReceipt(value.stateRoot, lock, { scope: "kit", identitySha256: "a".repeat(64), kitVersion: "1.2.3", ompVersion: null, channel: null }).id; }
+	try { id = beginKitUpdateReceipt(value.stateRoot, lock, { scope, identitySha256: priorSha, kitVersion: "1.2.3", ompVersion: null, channel: null }).id; }
 	finally { lock.release(); }
-	const binary = (version: string) => join(value.prefix, "releases", version, "bin", "omp-kit");
 	const path = join(value.stateRoot, `kit-activation-${id}.json`);
 	writeFileSync(path, JSON.stringify({ schema_version: 1, id,
-		before: { version: "1.2.3", sha256: "a".repeat(64), target: "../releases/1.2.3/bin/omp-kit", binary: binary("1.2.3") },
+		before: { version: "1.2.3", sha256: priorSha, target: "../releases/1.2.3/bin/omp-kit", binary: binary("1.2.3") },
 		after: { version: "1.2.4", sha256: sha(recordedBinary ?? readFileSync(binary("1.2.4"))), target: "../releases/1.2.4/bin/omp-kit", binary: binary("1.2.4") },
 		state: "READY" }), { mode: 0o600 });
 	chmodSync(path, 0o600);
@@ -249,10 +252,10 @@ function contaminatedPostcheck(changed: string): KitUpdateResult["postcheck"] {
 	} as never };
 }
 
-test("a postcheck the live fleet contaminated cannot strand a verified activation: RECONCILED, plugins relinked, reason kept", async () => {
+test("KITREC1: safe PARTIAL automatically undoes to the prior release with compensated recovery and preserves failure detail", async () => {
 	await withPollEnv(null, async () => {
 		const value = config();
-		const { newStore, exec } = preparePluginUpdate(value);
+		const { oldStore, exec } = preparePluginUpdate(value);
 		installSymlink(value.prefix, "1.2.3");
 		let receiptId = "";
 		const result = await runKitUpdateJob(value, {
@@ -269,16 +272,20 @@ test("a postcheck the live fleet contaminated cannot strand a verified activatio
 			notify: () => {},
 		});
 		const detail = result.postcheckDetail;
-		expect(result).toMatchObject({ status: "UPDATED", receiptId, activeVersion: "1.2.4", receipt: "RECONCILED", postcheck: "FAIL",
-			postcheckReason: "KIT_POSTCHECK_FAILED", relink: "APPLIED", service: "APPLIED" });
+		expect(result).toMatchObject({ status: "UNDONE", receiptId, activeVersion: "1.2.3", receipt: "ABORTED_AFTER_COMPENSATION", postcheck: "FAIL",
+			postcheckReason: "KIT_POSTCHECK_FAILED", relink: "NOT_RUN", service: "NOT_RUN" });
 		expect(detail).toMatchObject({ changed_operator_paths: ["~/state/send-drop/cfsios-1.json"], failures: ["Operator file changed during isolated test: ~/state/send-drop/cfsios-1.json"] });
 		expect(kitUpdateJobOverall(result)).toBe("FINDINGS");
 		expect(inspectPendingKitUpdate(value.stateRoot)).toBeNull();
-		expect(auditMutations(value.stateRoot)).toEqual(expect.arrayContaining([expect.objectContaining({ id: receiptId, status: "RECONCILED" })]));
-		for (const profile of ["default", "claude", "codex", "muse"]) expect(readlinkSync(pluginLink(value.home, profile))).toBe(newStore);
-		const records = readdirSync(value.stateRoot).filter(name => name.startsWith("kit-update-job-"));
-		expect(records).toHaveLength(1);
-		expect(JSON.parse(readFileSync(join(value.stateRoot, records[0]!), "utf8"))).toMatchObject({ receipt: "RECONCILED",
+		expect(auditMutations(value.stateRoot)).toEqual(expect.arrayContaining([expect.objectContaining({ id: receiptId, status: "ABORTED_AFTER_COMPENSATION" })]));
+		expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.3/bin/omp-kit");
+		expect(JSON.parse(readFileSync(join(value.stateRoot, `kit-activation-${receiptId}.json`), "utf8")).state).toBe("RESTORED");
+		for (const profile of ["default", "claude", "codex", "muse"]) expect(readlinkSync(pluginLink(value.home, profile))).toBe(oldStore);
+		value.pollRelease = async () => null;
+		expect(await runKitUpdateJob(value)).toMatchObject({ status: "CURRENT", activeVersion: "1.2.3" });
+		const records = readdirSync(value.stateRoot).filter(name => name.startsWith("kit-update-job-"))
+			.map(name => JSON.parse(readFileSync(join(value.stateRoot, name), "utf8")));
+		expect(records.find(record => record.status === "UNDONE")).toMatchObject({ receipt: "ABORTED_AFTER_COMPENSATION",
 			postcheckReason: "KIT_POSTCHECK_FAILED", postcheckDetail: { changed_operator_paths: ["~/state/send-drop/cfsios-1.json"] } });
 	});
 }, fixtureDeadlineS() * 1000);
@@ -299,14 +306,14 @@ test("planted: a live install that does not match its activation record stays PE
 			reconcile: async () => { throw new Error("service reconcile must not run for a pending receipt"); },
 			notify: message => { notes.push(message); },
 		});
-		expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "PENDING_RECOVERY", postcheck: "FAIL",
+		expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "POSTIMAGE_CHANGED", postcheck: "FAIL",
 			postcheckReason: "KIT_POSTCHECK_FAILED", relink: "NOT_RUN", service: "NOT_RUN", notification: true });
 		expect(relinked).toBe(false);
 		expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
 		expect(kitUpdateJobOverall(result)).toBe("FINDINGS");
 		expect(notes).toHaveLength(1);
-		expect(notes[0]).toContain(`omp-kit undo ${receiptId} --yes`);
-		expect(notes[0]).not.toContain("automatic undo");
+		expect(notes[0]).toContain("Inspect");
+		expect(notes[0]).not.toContain("omp-kit undo");
 	});
 });
 
@@ -337,7 +344,6 @@ test("KITREC1 planted: an OMP-changed PARTIAL cannot be automatically reconciled
 			return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: "1.2.4", provenance: "SIGSTORE_VERIFIED",
 				postcheck: { status: "FAIL", matcher: "PASS", live: "PASS", reason: "OMP_CHANGED_DURING_KIT_UPDATE" } };
 		},
-		reconcileReceipt: () => { throw new Error("must not reconcile an OMP-changed update"); },
 		notify: message => { notes.push(message); },
 	});
 	expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "OMP_CHANGED_DURING_KIT_UPDATE" });
@@ -366,6 +372,56 @@ test("KITREC1 planted: null activeVersion names bricked activation without offer
 	expect(notes[0]).toContain("known-good release binary");
 	expect(notes[0]).not.toContain("omp-kit undo");
 });
+
+for (const plant of ["control", "all-scope", "not-ready", "prior-tamper", "reconciled", "missing-audit", "unsafe-reason", "unknown-reason", "deferred"] as const) {
+	test(`KITREC1 strict automatic undo preconditions: ${plant}`, async () => {
+		await withPollEnv(null, async () => {
+			const value = config(); installSymlink(value.prefix, "1.2.3");
+			preparePluginUpdate(value);
+			let receiptId = "";
+			const notes: string[] = [];
+			const result = await runKitUpdateJob(value, {
+				plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+				apply: async () => {
+					receiptId = activate(value, undefined, plant === "all-scope" ? "all" : "kit");
+					const activation = join(value.stateRoot, `kit-activation-${receiptId}.json`);
+					if (plant === "not-ready") {
+						const receipt = JSON.parse(readFileSync(activation, "utf8"));
+						writeFileSync(activation, JSON.stringify({ ...receipt, state: "UNDO_PENDING" }));
+					}
+					if (plant === "prior-tamper") writeFileSync(join(value.prefix, "releases", "1.2.3", "bin", "omp-kit"), "tampered prior binary");
+					if (plant === "reconciled") reconcilePendingUpdate({ stateRoot: value.stateRoot, prefix: value.prefix, id: receiptId });
+					if (plant === "missing-audit") rmSync(join(value.stateRoot, "kit-update.pending.json"));
+					const postcheck = contaminatedPostcheck("~/state/send-drop/event.json");
+					if (plant === "unsafe-reason") postcheck.reason = "OMP_VERSION_UNVERIFIED";
+					if (plant === "unknown-reason") postcheck.reason = "UNRECOGNIZED_POSTCHECK_FAILURE";
+					if (plant === "deferred") { postcheck.status = "DEFERRED"; postcheck.reason = "KIT_POSTCHECK_DEFERRED"; }
+					return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: "1.2.4", postcheck, provenance: "SIGSTORE_VERIFIED" };
+				},
+				relink: async () => { throw new Error("PARTIAL must not change plugin links"); },
+				reconcile: async () => { throw new Error("PARTIAL must not change the service"); },
+				notify: message => { notes.push(message); },
+			});
+			if (plant === "control") {
+				expect(result).toMatchObject({ status: "UNDONE", activeVersion: "1.2.3", receipt: "ABORTED_AFTER_COMPENSATION" });
+				expect(inspectPendingKitUpdate(value.stateRoot)).toBeNull();
+				expect(auditMutations(value.stateRoot).find(row => row.id === receiptId)?.status).toBe("ABORTED_AFTER_COMPENSATION");
+				expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.3/bin/omp-kit");
+				expect(notes[0]).toContain("UNDONE");
+			} else {
+				const reason = plant === "prior-tamper" ? "PRIOR_RELEASE_CHANGED"
+					: ["unsafe-reason", "unknown-reason", "deferred"].includes(plant) ? "KIT_AUTO_UNDO_UNSAFE_POSTCHECK"
+					: plant === "all-scope" ? "KIT_AUTO_UNDO_SCOPE" : "KIT_RECEIPT_INVALID";
+				expect(result).toMatchObject({ status: "PENDING", receiptId, activeVersion: "1.2.4", reason, relink: "NOT_RUN", service: "NOT_RUN" });
+				expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.4/bin/omp-kit");
+				expect(JSON.parse(readFileSync(join(value.stateRoot, `kit-activation-${receiptId}.json`), "utf8")).state).toBe(plant === "not-ready" ? "UNDO_PENDING" : "READY");
+				expect(inspectPendingKitUpdate(value.stateRoot)?.id ?? null).toBe(["reconciled", "missing-audit"].includes(plant) ? null : receiptId);
+				expect(notes[0]).not.toContain("UNDONE");
+			}
+			expect(kitUpdateJobOverall(result)).toBe("FINDINGS");
+		});
+	});
+}
 
 test("the job never hands a project to plan or apply, even when its config carries one", async () => {
 	const value = config(); const seen: object[] = [];

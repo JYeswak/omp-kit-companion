@@ -302,13 +302,13 @@ await plugin({ name: "actguide1-source", setup(build) {
   if (args.path === target) {
    intercepted = true;
    if (arm === "mutant") {
-    // Restore the old undo-on-null policy, not a fabricated guidance result.
+    // Restore the old undo-on-null policy; fixture 2's locked recovery now also rejects a guard bypass.
     const before = fixtureNumber === 1
      ? 'outcome.status === "PARTIAL" && outcome.activeVersion === null'
-     : 'if (activeVersion === null || result.postcheck.reason === "OMP_CHANGED_DURING_KIT_UPDATE") {';
+     : '"Use a known-good release binary to inspect the activation receipt and repair the stable link before reconciling."';
     const after = fixtureNumber === 1
      ? "false"
-     : 'if (result.postcheck.reason === "OMP_CHANGED_DURING_KIT_UPDATE") {';
+     : '("Run omp-kit undo " + result.receiptId + " --yes to restore the prior release.")';
     assert.equal(contents.split(before).length, 2, "ACTGUIDE1 mutant must change exactly one decision");
     contents = contents.replace(before, after);
    }

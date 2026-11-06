@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
-import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, type KitPostcheck, type KitPostcheckDetail, type KitReconcileResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
+import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, undoKitUpdate, type KitPostcheck, type KitPostcheckDetail, type KitUndoResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
 import { acquireKitUpdateLock, inspectPendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
 import { makeDirsWritable } from "./kitlib/tmp.ts";
@@ -32,8 +32,6 @@ export type KitUpdateJobDependencies = {
 	relink?: (binary: string, store: string) => Promise<PluginRelinkResult>;
 	/** Test seam for the new binary's `service install kit-update --apply --yes`. Production uses spawnSync. */
 	reconcile?: (binary: string) => Promise<{ ok: boolean; detail: string }>;
-	/** Test seam for finishing a PARTIAL receipt by its postimages. Production uses `reconcilePendingUpdate`, the `update --reconcile` path. */
-	reconcileReceipt?: (input: { stateRoot: string; prefix: string; id: string }) => KitReconcileResult;
 	/**
 	 * HOOKREFRESH1 test seam for the post-install fleet hook refresh.
 	 * Production re-runs scripts/install-commit-msg-bead.sh for every
@@ -42,10 +40,10 @@ export type KitUpdateJobDependencies = {
 	refreshHooks?: (store: string, home: string) => Promise<HookRefreshReport>;
 };
 export type KitUpdateJobResult = {
-	status: "DISABLED" | "CURRENT" | "UPDATED" | "REFUSED" | "PENDING" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string;
-	/** How the kit receipt ended: RECONCILED once its postimages verified, PENDING when they did not. */
-	receipt?: "RECONCILED" | "PENDING";
-	/** The release's full-test postcheck, with its reason and detail when it did not pass; it never decides the receipt. */
+	status: "DISABLED" | "CURRENT" | "UPDATED" | "UNDONE" | "REFUSED" | "PENDING" | "FAILED"; receiptId: string | null; activeVersion: string | null; notification: boolean; reason?: string;
+	/** Failed, safely restored updates are compensated, never relabeled as successful postchecks. */
+	receipt?: "RECONCILED" | "ABORTED_AFTER_COMPENSATION" | "PENDING";
+	/** Preserve the release's full-test verdict even when the tick safely restores its prior binary. */
 	postcheck?: KitPostcheck["status"]; postcheckReason?: string; postcheckDetail?: KitPostcheckDetail | null;
 	relink?: "APPLIED" | "FAILED" | "NOT_RUN"; pluginReceiptId?: string; pluginUndoCommand?: string; service?: "APPLIED" | "FAILED" | "NOT_RUN";
 	/**
@@ -304,7 +302,6 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		const out = (ran.stdout + ran.stderr).trim().slice(-500);
 		return ran.exit === 0 ? { ok: true, detail: out } : { ok: false, detail: `exit ${ran.exit}: ${out}` };
 	});
-	const reconcileReceipt = dependencies.reconcileReceipt ?? reconcilePendingUpdate;
 	let runId = randomUUID();
 	try {
 		// A restart has no trustworthy postcheck/OMP identity witness. Never guess an undo reason or
@@ -337,7 +334,7 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 			? { postcheck: result.postcheck.status }
 			: { postcheck: result.postcheck.status, postcheckReason: result.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
 				postcheckDetail: kitPostcheckDetail(result.postcheck, [config.home, config.stateRoot, config.prefix]) };
-		let activeVersion = result.activeVersion;
+		const activeVersion = result.activeVersion;
 		if (result.status === "PARTIAL") {
 			// Neither a missing activation nor an OMP mutation is a kit-only, revert-safe failure.
 			if (activeVersion === null || result.postcheck.reason === "OMP_CHANGED_DURING_KIT_UPDATE") {
@@ -349,18 +346,27 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion,
 					notification: true, reason, receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
 			}
-			// The postcheck runs on a machine the live fleet keeps writing, so it never decides the receipt. The kit's
-			// own postimages do, exactly as `update --reconcile` verifies them: the stable link target and binary sha.
-			let verified: KitReconcileResult | null = null, refusal = "KIT_RECEIPT_INVALID";
-			try { if (result.receiptId) verified = reconcileReceipt({ stateRoot: config.stateRoot, prefix: config.prefix, id: result.receiptId }); }
-			catch (error) { refusal = error instanceof Error ? error.message : String(error); }
-			if (!verified) {
-				await dependencies.notify?.(`omp-kit update PENDING: postcheck ${postcheck.postcheckReason} and the live install does not match the recorded postimage (${refusal}); kit receipt ${result.receiptId} stays pending. Inspect \`omp-kit audit --json\`, then run \`omp-kit undo ${result.receiptId} --yes\``);
-				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion, notification: true, reason: refusal, receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
+			// Reuse manual undo's locked postimage/prior-binary checks, adding stricter unattended
+			// admission. Never reconcile first: automatic compensation requires an audit PENDING.
+			let restored: KitUndoResult | null = null, refusal = "KIT_RECEIPT_INVALID";
+			try {
+				if (result.receiptId) restored = undoKitUpdate({ stateRoot: config.stateRoot, prefix: config.prefix,
+					receiptId: result.receiptId, automatic: result.postcheck });
+			} catch (error) { refusal = error instanceof Error ? error.message : String(error); }
+			if (!restored) {
+				await dependencies.notify?.(`omp-kit update PENDING: recovery refused (${refusal}); kit receipt ${result.receiptId}. Inspect OMP and \`omp-kit audit --json\` before choosing manual recovery.`);
+				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion,
+					notification: true, reason: refusal, receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
 			}
-			activeVersion = verified.activeVersion;
+			if (restored.updatePending) {
+				await dependencies.notify?.(`omp-kit update PENDING: prior release ${restored.activeVersion} restored but kit receipt ${result.receiptId} still needs recovery finalization; inspect \`omp-kit audit --json\`.`);
+				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion: restored.activeVersion,
+					notification: true, reason: "KIT_UNDO_FINALIZATION_PENDING", receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
+			}
+			await dependencies.notify?.(`omp-kit update UNDONE: restored ${restored.activeVersion}; kit receipt ${result.receiptId} compensated after ${postcheck.postcheckReason}; postcheck failure retained in the job record.`);
+			return record(config.stateRoot, runId, { status: "UNDONE", receiptId: result.receiptId, activeVersion: restored.activeVersion,
+				notification: true, receipt: "ABORTED_AFTER_COMPENSATION", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
 		}
-		const findings = result.status === "PARTIAL" ? `; postimage verified but postcheck ${postcheck.postcheckReason} (detail in the job record); undo the kit with \`omp-kit undo ${result.receiptId} --yes\`` : "";
 		// The kit symlink now points at the new release; relink every covered OMP
 		// profile to that exact store and retain the plugin receipt for recovery.
 		const binary = join(config.prefix, "bin", "omp-kit");
@@ -378,14 +384,14 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 			const recovery = link.receiptId && link.undoCommand
 				? `; plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\``
 				: "";
-			await dependencies.notify?.(`omp-kit update BLOCKED: plugin relink failed for ${activeVersion ?? "unknown version"} (kit receipt ${result.receiptId})${recovery}${findings}; run \`omp-kit apply plugin --plan --store <release-root> --profiles all --include-default\` before retrying: ${link.detail}`);
+			await dependencies.notify?.(`omp-kit update BLOCKED: plugin relink failed for ${activeVersion ?? "unknown version"} (kit receipt ${result.receiptId})${recovery}; run \`omp-kit apply plugin --plan --store <release-root> --profiles all --include-default\` before retrying: ${link.detail}`);
 			return record(config.stateRoot, runId, { ...activated, reason: "PLUGIN_RELINK_FAILED", relink: "FAILED", ...pluginReceipt });
 		}
 		// The new release may carry a new tick interval: re-render the installed
 		// plist with the new binary itself so StartInterval tracks the code.
 		const reconciled = await reconcile(binary);
 		if (!reconciled.ok) {
-			await dependencies.notify?.(`omp-kit update BLOCKED: service reconcile failed for ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`${findings}; kit is on ${activeVersion}, rerun \`omp-kit service install kit-update --apply --yes\`: ${reconciled.detail}`);
+			await dependencies.notify?.(`omp-kit update BLOCKED: service reconcile failed for ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; kit is on ${activeVersion}, rerun \`omp-kit service install kit-update --apply --yes\`: ${reconciled.detail}`);
 			return record(config.stateRoot, runId, { ...activated, reason: "SERVICE_RECONCILE_FAILED", relink: "APPLIED", service: "FAILED", ...pluginReceipt });
 		}
 		// HOOKREFRESH1: the kit symlink points at the new release, so re-run the
@@ -412,7 +418,7 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 		const hookNote = hooks.repos === 0 ? "; no fleet repos to refresh hooks in"
 			: `; hooks ${hooks.status}: ${hooks.refreshed} refreshed, ${hooks.fresh} fresh, ${hooks.pending_commit} pending director commit, ${hooks.failed} failed over ${hooks.repos} repo(s)`;
 		const retentionNote = retention?.status === "FAILED" ? "; release retention FAILED (see job record)" : "";
-		await dependencies.notify?.(`omp-kit updated to ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${findings}${hookNote}${retentionNote}`);
+		await dependencies.notify?.(`omp-kit updated to ${activeVersion} (kit receipt ${result.receiptId}); plugin receipt ${link.receiptId}; undo with \`${link.undoCommand}\`; plugin relink applied${hookNote}${retentionNote}`);
 		return record(config.stateRoot, runId, { ...activated, relink: "APPLIED", service: "APPLIED", ...pluginReceipt, hooks, ...(retention ? { retention } : {}) });
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
