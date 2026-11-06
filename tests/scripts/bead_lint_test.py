@@ -184,5 +184,67 @@ class PitfallLintTests(unittest.TestCase):
         self.assertEqual(create(PITFALL_DESC, self.CUT - timedelta(seconds=1)), [])
 
 
+LP_DESC = "WHAT: refuse a widget. WHY: the widget leaks.\n## Pitfalls\n- never weaken the gate\n"
+LP_PEER = "ompkit-fp72.9.9"
+LP_MENTION_DESC = LP_DESC.replace("leaks.", f"leaks, as {LP_PEER} showed.")
+LP_CLEAN_ACC = "- [ ] [a] [build] planted bad widget is refused `true` -> rc 0"
+LP_PROSE_ACC = "- [ ] [a] [build] planted `widget.ts` record is refused `true` -> rc 0"
+
+
+class CreateInReviewParityTests(unittest.TestCase):
+    """LINTPARITY1 (ompkit-fp72.120.16.238): br create refuses what the in_review handoff refuses."""
+
+    ROWS = [{"id": LP_PEER, "status": "open", "labels": [], "dependencies": []}]
+
+    def create(self, desc=LP_DESC, acc=LP_CLEAN_ACC, extra=()) -> list[str]:
+        parsed = br_create_guard_core.parse_create_args([
+            "create", "Parity create", "-t", "task", "-l", "kind:fix,kind:intake",
+            "--description", desc, "--acceptance", acc, *extra,
+        ])
+        root = str(Path(__file__).resolve().parents[2])
+        return br_create_guard_core.lint_prospective(parsed, self.ROWS, root)
+
+    def in_review(self, desc=LP_DESC, acc=LP_CLEAN_ACC) -> list[str]:
+        # The handoff's own checks (br-update-lint.py --status in_review).
+        bead = {"id": "fixture-handoff", "status": "open", "issue_type": "task",
+                "labels": ["kind:fix", "kind:intake"], "description": desc,
+                "acceptance_criteria": acc, "created_at": bead_lint.PITFALLS_CUTOVER,
+                "dependencies": []}
+        return (bead_lint.lint_bead_failures(bead, {LP_PEER, bead["id"]})
+                + bead_lint.replayable_claim_refusal(bead))
+
+    def test_planted_prose_first_backtick_refused_with_in_review_text(self):
+        handoff = bead_lint.replayable_claim_refusal({"acceptance_criteria": LP_PROSE_ACC})
+        self.assertTrue(handoff and "first backticked span" in handoff[0], handoff)
+        refused = [f for f in self.create(acc=LP_PROSE_ACC) if f.startswith("r-verify-replayable")]
+        self.assertEqual(len(refused), 1, refused)
+        for line in handoff:
+            self.assertIn(line, refused[0])
+
+    def test_planted_edgeless_mention_refused_like_in_review(self):
+        self.assertIn("i-mention-edges", self.in_review(desc=LP_MENTION_DESC))
+        self.assertIn("i-mention-edges", self.create(desc=LP_MENTION_DESC))
+
+    def test_control_clean_create_admitted(self):
+        self.assertEqual(self.in_review(), [])
+        self.assertEqual(self.create(), [])
+
+    def test_control_mention_with_create_flag_edge_admitted(self):
+        for extra in (("--deps", f"related:{LP_PEER}"), ("--parent", LP_PEER)):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.create(desc=LP_MENTION_DESC, extra=extra), [])
+
+    def test_mutant_without_shared_checks_admits_planted(self):
+        real_i, real_r = bead_lint.check_i, bead_lint.replayable_findings
+        try:
+            bead_lint.check_i = lambda *a, **k: []
+            bead_lint.replayable_findings = lambda *a, **k: ([], [])
+            self.assertEqual(self.create(desc=LP_MENTION_DESC), [])
+            self.assertEqual(self.create(acc=LP_PROSE_ACC), [])
+        finally:
+            bead_lint.check_i, bead_lint.replayable_findings = real_i, real_r
+        self.assertIn("i-mention-edges", self.create(desc=LP_MENTION_DESC))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
