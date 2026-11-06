@@ -188,6 +188,9 @@ jobs:
     needs: resolve-omp-versions
     strategy:
       fail-fast: false
+      # Release qualification shares five macOS slots: two CLI suites + one ladder + two native tracks.
+      # Keep every matrix leg; defer the third suite rather than starving native certification.
+      max-parallel: ${{ inputs.version != '' && 2 || 256 }}
       matrix:
         os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-15"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-24.04"]') || fromJSON('["ubuntu-24.04", "macos-15"]')) }}
         suite: ${{ fromJSON(needs.resolve-omp-versions.outputs.suites) }}
@@ -283,6 +286,7 @@ jobs:
           python3 tests/scripts/pysafe_check_test.py
           python3 tests/scripts/tempsafe_check_test.py
           sh tests/cli/check-staged-tempsafe.test.sh
+          sh tests/cli/ci-concurrency.test.sh
           python3 tests/scripts/kitlib_ratchet_test.py
           sh tests/cli/check-staged-kitlib.test.sh
           sh tests/cli/check-staged-kitlib-reversal.test.sh
@@ -473,6 +477,9 @@ jobs:
     needs: resolve-omp-versions
     strategy:
       fail-fast: false
+      # Together with cli-contracts-suites' release ceiling, leave both native tracks runnable.
+      # Push, PR, daily and OMP certification retain their existing matrix parallelism.
+      max-parallel: ${{ inputs.version != '' && 1 || 256 }}
       matrix:
         os: ${{ inputs.reuse_fast_ci && fromJSON('["macos-latest"]') || ((github.event_name == 'push' || github.event_name == 'pull_request') && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]')) }}
         omp: ${{ fromJSON(needs.resolve-omp-versions.outputs.matrix) }}
