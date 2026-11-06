@@ -138,9 +138,8 @@ const parseFrontmatter = utilsMod.parseFrontmatter as (
 	options?: { source?: unknown },
 ) => { frontmatter: Record<string, unknown>; body: string };
 
-/** The README contract: two named rules, then always / reminder / tripwire from omp's rule object. */
+/** The README contract: named unsafe router, then classification from OMP's rule object. */
 export function ruleClass(name: string, rule: Rule): RuleClass {
-	if (name === "zz-canary-scope-probe") return "canary";
 	if (name === "rs-unsafe-added-router") return "router";
 	const hasCond = (rule.condition?.length ?? 0) > 0 || (rule.astCondition?.length ?? 0) > 0 || !!rule.question;
 	if (rule.alwaysApply && !hasCond) return "always";

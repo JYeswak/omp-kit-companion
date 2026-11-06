@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import { inspectEffectiveRules, inspectEffectiveRulesAsync, isolatedProbeHome, profilePluginRuleStatus, runEffectiveRuleProbe, type EffectiveRulesInput, type Finding } from "../../src/diagnostics.ts";
-import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
+import { inspectEffectiveRules, inspectEffectiveRulesAsync, isolatedProbeHome, profilePluginRuleStatus, runEffectiveRuleProbe } from "../../src/diagnostics.ts";
+import type { EffectiveRulesInput, Finding } from "../../src/diagnostics.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import type { OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 
 const home = "/fixture/home";
@@ -71,7 +73,7 @@ test("rejects legacy rules even when every legacy byte is present", () => {
 	expect(finding.recommended_action).toContain("apply plugin");
 });
 test("real native probe invokes the stub with cwd and clean profile environment", () => {
-	const root = join(process.cwd(), "var", "agent-tmp", "prof2-stub.77773");
+	const root = scratch("prof-native-probe");
 	const homeDir = join(root, "home");
 	const stub = join(root, "omp-stub.sh");
 	mkdirSync(homeDir, { recursive: true, mode: 0o700 });
@@ -82,7 +84,7 @@ test("real native probe invokes the stub with cwd and clean profile environment"
 	expect(result[0]?.path).toContain(homeDir);
 });
 test("bounded async profile probes stay parallel", async () => {
-	const root = join(process.cwd(), "var", "agent-tmp", "prof2-stub.77773");
+	const root = scratch("prof-parallel-probe");
 	const homeDir = join(root, "home");
 	const stub = join(root, "omp-stub-sleep.sh");
 	const inflight = join(root, "inflight");
@@ -119,14 +121,14 @@ const fixStanding = `---\ndescription: "fixture standing law"\nalwaysApply: true
 const fixASha = createHash("sha256").update(fixRuleA).digest("hex");
 const fixStandingSha = createHash("sha256").update(fixStanding).digest("hex");
 // DI seam: the manifest sha lookup the doctor wires from MANIFEST.tsv.
-const fixLookup = (name: string): string | null => name === "kit-a" ? fixASha : name === "kit-standing-law" ? fixStandingSha : null;
+const fixLookup = (name: string): string | null => name === "kit-a" ? fixASha : name === "fixture-always" ? fixStandingSha : null;
 
 function fixRelease(base: string, version: string, tag: string, stream = fixRuleA): string {
 	const dir = join(base, `release-${tag}`);
 	mkdirSync(join(dir, "rules"), { recursive: true });
 	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "omp-kit-companion", version, description: "fixture release", omp: { name: "omp-kit-companion", version, description: "fixture release", extensions: [] } }));
 	writeFileSync(join(dir, "rules", "kit-a.md"), stream);
-	writeFileSync(join(dir, "rules", "kit-standing-law.md"), fixStanding);
+	writeFileSync(join(dir, "rules", "fixture-always.md"), fixStanding);
 	return dir;
 }
 
@@ -198,7 +200,7 @@ test("profilePluginRuleStatus grades ON, STALE, MISSING and UNVERIFIED", () => {
 	const home = fixHome(base, "home", release, "7.7.7", false);
 	const at = { version: "7.7.7", sha256: fixLookup };
 	expect(profilePluginRuleStatus(home, "default", "kit-a", at).status).toBe("ON");
-	expect(profilePluginRuleStatus(home, "default", "kit-standing-law", at).status).toBe("ON");
+	expect(profilePluginRuleStatus(home, "default", "fixture-always", at).status).toBe("ON");
 	const stale = fixHome(base, "stale", release, "7.7.6", false);
 	expect(profilePluginRuleStatus(stale, "default", "kit-a", at)).toMatchObject({ status: "STALE", version: "7.7.6" });
 	const drifted = fixRelease(base, "7.7.7", "drift", `${fixRuleA}drift\n`);
@@ -212,7 +214,7 @@ test("profilePluginRuleStatus grades ON, STALE, MISSING and UNVERIFIED", () => {
 async function liveFinding(home: string): Promise<Finding> {
 	return inspectEffectiveRulesAsync({
 		home, ompPath: resolveOmpIdentity(process.env).launcher, kitVersion: "7.7.7", ompVersion: null,
-		rules: ["kit-a", "kit-standing-law"], always_rules: ["kit-standing-law"], ruleSha256: fixLookup,
+		rules: ["kit-a", "fixture-always"], always_rules: ["fixture-always"], ruleSha256: fixLookup,
 		profiles: [{ name: "default" }],
 	});
 }
@@ -239,7 +241,7 @@ test("fixture HOME with real omp: no plugin link reports every kit rule missing"
 	expect(finding.status).toBe("DEGRADED");
 	expect(row.plugin_version).toBeNull();
 	expect(row.kit_rules.missing).toEqual(["kit-a"]);
-	expect(row.kit_rules.always_apply.missing).toEqual(["kit-standing-law"]);
+	expect(row.kit_rules.always_apply.missing).toEqual(["fixture-always"]);
 }, 120_000);
 
 test("fixture HOME with real omp: older linked release reports STALE", async () => {
@@ -249,7 +251,7 @@ test("fixture HOME with real omp: older linked release reports STALE", async () 
 	const row = rowOf(finding);
 	expect(finding.status).toBe("DEGRADED");
 	expect(row.versionMismatch).toBe("7.7.6 vs 7.7.7");
-	expect(row.kit_rules.always_apply.missing).toEqual(["kit-standing-law"]);
+	expect(row.kit_rules.always_apply.missing).toEqual(["fixture-always"]);
 }, 120_000);
 
 test("fixture HOME with real omp: native overlay keeps OK and is listed", async () => {

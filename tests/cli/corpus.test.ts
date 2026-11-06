@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Socket } from "node:net";
+import { createServer } from "node:net";
+import type { Socket } from "node:net";
 import process from "node:process";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import type { OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { sanitizedEnv } from "../../src/runtime.ts";
 import { nativeCacheEnv, writeBundledHarness } from "./release-manifest-fixture.ts";
@@ -58,7 +60,7 @@ beforeAll(() => {
 		`{"type":"session","version":3,"id":"s1","timestamp":"2026-09-30T10:00:00.000Z","cwd":"/tmp"}`,
 		`{"version": `,
 		assistantText("t1", "fixture note"),
-		toolCall("c1", "bash", { command: "echo zzzz_systemwide_canary_9c42" }),
+		toolCall("c1", "bash", { command: "printf '%s\\n' plain-data" }),
 		toolCall("c2", "bash", { command: "grep -rl 'x' crates/*/Cargo.toml 2>/dev/null" }),
 		toolCall("c3", "bash", { command: "echo hello" }),
 		...["c1", "c2", "c3"].map((toolCallId, index) => JSON.stringify({
@@ -123,16 +125,13 @@ test("corpus reports exact planted fire counts with Wilson intervals", () => {
 	expect(set.corpus?.parse_errors).toBe(1);
 	expect(set.corpus?.versions).toEqual(["v:1", "version:3"]);
 	expect(set.corpus?.events).toMatchObject({ bash: 3, text: 1 });
-	const canary = findRule(set.corpus?.rules, "zz-canary-scope-probe", "bash");
-	expect(canary.scanned).toBe(3);
-	expect(canary.fires).toBe(1);
-	expect(canary.rate).toBeCloseTo(1 / 3, 6);
-	expect(canary.ci_low).toBeCloseTo(0.0615, 3);
-	expect(canary.ci_high).toBeCloseTo(0.7923, 3);
-	expect(canary.upper_3n).toBeNull();
 	const glob = findRule(set.corpus?.rules, "bash-glob-silenced", "bash");
 	expect(glob.scanned).toBe(3);
 	expect(glob.fires).toBe(1);
+	expect(glob.rate).toBeCloseTo(1 / 3, 6);
+	expect(glob.ci_low).toBeCloseTo(0.0615, 3);
+	expect(glob.ci_high).toBeCloseTo(0.7923, 3);
+	expect(glob.upper_3n).toBeNull();
 	const close = findRule(set.corpus?.rules, "kit-close-needs-evidence", "bash");
 	expect(close.scanned).toBe(3);
 	expect(close.fires).toBe(0);

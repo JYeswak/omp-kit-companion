@@ -33,15 +33,6 @@ kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "fixed: cargo
 kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "cargo test -> 41 passed; commit a1b2c3d"	session regression: evidence reason; quiet on every prefix	
 kit-close-reason-no-evidence	quiet	tool	bash	-	br close x --reason "ledger row R51 records the refusal"	ledger row is evidence	
 kit-close-reason-no-evidence	quiet	tool	bash	-	br close x	no reason at all: kit-close-needs-evidence owns it	
-kit-gate-must-name-the-plant	fire	tool	bash	-	sh starter-kit/scripts/check-claim-discipline.sh claims.tsv	runs the zip checker	
-kit-gate-must-name-the-plant	fire	tool	bash	-	sh starter-kit/scripts/init.sh	runs the zip init	
-kit-gate-must-name-the-plant	fire	tool	bash	-	cd /tmp/proj && bash ../starter-kit/scripts/init.sh	init after cd, relative path	
-kit-gate-must-name-the-plant	fire	tool	bash	-	./starter-kit/scripts/check-claim-discipline.sh claims.tsv	direct exec	
-kit-gate-must-name-the-plant	quiet	tool	bash	-	cat starter-kit/scripts/init.sh	reads the script, does not run it	
-kit-gate-must-name-the-plant	quiet	tool	bash	-	sh checkers/check-claim-discipline.sh --selftest	the fixed checker run from the kit checkout	
-kit-gate-must-name-the-plant	quiet	tool	bash	-	grep -n IFS starter-kit/scripts/check-claim-discipline.sh	greps the script	
-kit-gate-must-name-the-plant	fire	tool	bash	-	cd /tmp\nsh starter-kit/scripts/check-claim-discipline.sh claims.tsv	newline command boundary	
-kit-gate-must-name-the-plant	fire	tool	bash	-	\tsh starter-kit/scripts/check-claim-discipline.sh claims.tsv	escaped tab command prefix	
 kit-jsonl-close	fire	tool	edit	.beads/issues.jsonl	{"id":"kit-a1","status":"closed","closed_at":"2026-09-22T00:00:00Z"}	baseline: closed, no close_reason	
 kit-jsonl-close	fire	tool	edit	.beads/issues.jsonl	{"id":"kit-a1","status":"closed","close_reason":"done"}	baseline: short close_reason	
 kit-jsonl-close	fire	tool	write	.beads/issues.jsonl	{"id":"kit-a0","status":"open"}\n{"id":"kit-a1","status": "closed"}\n	write, second line closed without reason	
@@ -151,13 +142,6 @@ kit-no-verify	fire	tool	bash	-	echo `git commit --no-verify`	unquoted shell back
 kit-no-verify	fire	tool	bash	-	result=`git commit --no-verify`	backtick command substitution in an assignment	
 kit-no-verify	quiet	tool	bash	-	grep -q x '`git commit --no-verify`' /dev/null	single-quoted immediate-backtick pair stays literal	
 kit-no-verify	fire	tool	bash	-	printf x\ngrep -q x "`git commit --no-verify`" /dev/null	newline-start search still executes its backtick substitution	
-kit-relative-path-not-cwd	fire	tool	bash	-	sh starter-kit/scripts/check-readiness.sh notes/packet.md	runs the zip readiness checker	
-kit-relative-path-not-cwd	fire	tool	bash	-	cd /tmp && sh ~/zip/starter-kit/scripts/check-readiness.sh notes/packet.md	the measured cwd bug shape	
-kit-relative-path-not-cwd	quiet	tool	bash	-	sh checkers/check-readiness.sh notes/packet.md	fixed checker run from the kit checkout	
-kit-relative-path-not-cwd	quiet	tool	bash	-	sed -n 1,40p starter-kit/scripts/check-readiness.sh	reads the script	
-kit-relative-path-not-cwd	fire	tool	bash	-	cd /tmp\nsh starter-kit/scripts/check-readiness.sh notes/packet.md	multiline command boundary	
-kit-relative-path-not-cwd	fire	tool	bash	-	\tsh starter-kit/scripts/check-readiness.sh notes/packet.md	escaped tab command boundary	
-kit-relative-path-not-cwd	quiet	tool	bash	-	cat docs/planning/packet.md	old condition fired on any packet path	
 kit-settings-mutation	fire	tool	bash	-	omp config set ttsr.enabled false	P3 spec: live on 18.3.0, no dialog	
 kit-settings-mutation	fire	tool	bash	-	omp --profile sample-lab config set disabledProviders '["agents"]'	removes the ~/.agents/rules source; --profile before config	
 kit-settings-mutation	fire	tool	bash	-	omp config reset ttsr.repeatGap	reset counts as a mutation	
@@ -235,14 +219,6 @@ kit-unverified-done	fire	text	-	-	The migration is now completed.	the old comple
 kit-unverified-done	quiet	text	-	-	Ran cargo test -p parser: 41 passed, 0 failed.	baseline: command plus counts	
 kit-unverified-done	quiet	text	-	-	the receipt is at cead414	regression	
 kit-unverified-done	quiet	text	-	-	UNVERIFIED: cargo test -p parser has not been run.	honest UNVERIFIED	
-kit-weasel-retry	fire	tool	edit	docs/evidence/NEGATIVE_EVIDENCE.md	- **Retry predicate:** later	baseline: weasel at end of the digest	
-kit-weasel-retry	fire	tool	edit	docs/evidence/NEGATIVE_EVIDENCE.md	- **Retry predicate:** TBD once we know more	baseline	
-kit-weasel-retry	fire	tool	write	docs/evidence/NEGATIVE_EVIDENCE.md	## R52\n- **Retry predicate:**\n- **Evidence:** bench.log\n	empty predicate, row continues	
-kit-weasel-retry	fire	tool	edit	NEGATIVE_EVIDENCE.md	retry predicate: later	regression	
-kit-weasel-retry	quiet	tool	edit	docs/evidence/NEGATIVE_EVIDENCE.md	- **Retry predicate:** when the A/A null on worker X is under 2% for 3 runs	baseline: testable predicate; quiet on every prefix	
-kit-weasel-retry	quiet	tool	edit	docs/evidence/NEGATIVE_EVIDENCE.md	- **Retry predicate:** native build p95 under 2 ms on worker X for 3 runs	predicate starting with na	
-kit-weasel-retry	quiet	tool	edit	NEGATIVE_EVIDENCE.md	retry predicate: a new receipt lands	regression	
-kit-weasel-retry	quiet	tool	edit	src/notes.md	- **Retry predicate:** later	baseline: not the ledger	
 rs-unsafe-added-router	fire	tool	edit	/tmp/probe.rs	unsafe fn f() {}	regression: .rs edit adds unsafe	
 rs-unsafe-added-router	fire	tool	write	/tmp/lib.rs	let x = unsafe { 1 };	regression: .rs write adds unsafe	
 rs-unsafe-added-router	quiet	tool	edit	/tmp/probe.rs	fn main() {}	regression: .rs without unsafe	
@@ -252,11 +228,6 @@ ttsr-embedded-inline-flag	fire	tool	write	/tmp/probe.md	condition: 'foo|(?i)bar'
 ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	condition: '(?i)leading_is_legal'	regression: leading flag is legal	
 ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	condition: 'grep[^|;&]*2>/dev/null'	regression: ordinary condition	
 ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	the docs say (?i) is invalid here	regression: prose	
-zz-canary-scope-probe	fire	tool	bash	-	echo zzzz_systemwide_canary_9c42	the canary token	
-zz-canary-scope-probe	quiet	tool	bash	-	echo zzzz_systemwide_canary_9c43	near token	
-zz-canary-scope-probe	fire	tool	bash	-	printf x\nprintf zzzz_systemwide_canary_9c42	newline-delimited canary argument	
-zz-canary-scope-probe	fire	tool	bash	-	printf x\tzzzz_systemwide_canary_9c42	tab-delimited canary argument	
-zz-canary-scope-probe	quiet	tool	bash	-	printf '%s' 'zzzz_systemwide_canary_9c42'	quoted printf data remains quiet	
 kit-close-needs-evidence	fire	tool	bash	-	br close x --reason	E4 reason flag without a value	
 kit-close-needs-evidence	fire	tool	bash	-	br close x --reason ""	E4 empty reason	
 kit-close-needs-evidence	quiet	tool	bash	-	br close x '--reason' 'cargo test -> 41 passed'	E4 quoted option is still a reason	
@@ -297,8 +268,6 @@ bash-pipe-exit	quiet	tool	bash	-	./SCRIPTS/LANE-STATUS.SH 2>&1 | TAIL -16; ECHO 
 kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X	H3: uppercase stays quiet	
 kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X --REASON ""	H3: empty reason stays quiet	
 kit-close-needs-evidence	quiet	tool	bash	-	BR CLOSE X --REASON	H3: bare flag stays quiet	
-kit-gate-must-name-the-plant	quiet	tool	bash	-	SH STARTER-KIT/SCRIPTS/CHECK-CLAIM-DISCIPLINE.SH CLAIMS.TSV	H3: uppercase stays quiet	
-kit-relative-path-not-cwd	quiet	tool	bash	-	CD /TMP && SH ~/ZIP/STARTER-KIT/SCRIPTS/CHECK-READINESS.SH NOTES/PACKET.MD	H3: uppercase stays quiet	
 kit-settings-mutation	quiet	tool	bash	-	OMP CONFIG SET TTSR.ENABLED FALSE	H3: uppercase stays quiet	
 kit-solo-review-not-review	quiet	tool	write	samples/packet.md	## 11. INDEPENDENT REVIEW\n<!-- CHECK: REVIEW -->\nINDEPENDENT REVIEW: NOT PERFORMED. AN UNTRACKED PLANNING DRAFT INFORMED THIS WORKING COPY.\n	H3: uppercase stays quiet	
 kit-test-skip	quiet	tool	edit	src/lib.rs	#[TEST]\n#[IGNORE]\nFN PARSES() {}	H3: uppercase markers stay quiet	
@@ -310,7 +279,6 @@ kit-test-skip	quiet	tool	write	tests/test_x.go	T.SKIPNOW()	H3: uppercase stays q
 kit-test-skip	quiet	tool	write	tests/test_x.py	@UNITTEST.SKIP	H3: uppercase stays quiet	
 rs-unsafe-added-router	quiet	tool	edit	/tmp/probe.rs	UNSAFE FN F() {}	H3: uppercase stays quiet	
 ttsr-embedded-inline-flag	quiet	tool	write	/tmp/probe.md	CONDITION: 'FOO|(?i)BAR'	H3: uppercase stays quiet	
-zz-canary-scope-probe	quiet	tool	bash	-	ECHO ZZZZ_SYSTEMWIDE_CANARY_9C42	H3: uppercase stays quiet	
 kit-structure-not-truth	quiet	text	-	-	READY: ALL 12 CHECKS PASS ON THE PACKET.	H3: uppercase stays quiet	
 kit-close-reason-no-evidence	fire	tool	bash	-	BR CLOSE X --REASON DONE	H3: unquoted value fires only via cond1 (?i)	
 kit-jsonl-close	fire	tool	edit	.beads/issues.jsonl	{"ID":"KIT-A1","STATUS":"CLOSED","CLOSE_REASON":"DONE"}	H3: uppercase fires only via (?i)	

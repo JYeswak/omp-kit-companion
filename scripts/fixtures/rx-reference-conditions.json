@@ -172,12 +172,6 @@
 				"ms": 4.879
 			},
 			{
-				"rule": "kit-gate-must-name-the-plant",
-				"condition_index": 0,
-				"pattern_sha256": "2bfad2cc2077ebc45a7e0735d56b929df4026c3146e973dafbe9644bf1921b3b",
-				"ms": 2.404
-			},
-			{
 				"rule": "kit-no-double-quoted-substitution",
 				"condition_index": 0,
 				"pattern_sha256": "2f5729f688eb475ad08c2eeb29205320ba5dc6f2fd50b4a9606a76c20f49f88d",
@@ -220,22 +214,10 @@
 				"ms": 7.025
 			},
 			{
-				"rule": "kit-relative-path-not-cwd",
-				"condition_index": 0,
-				"pattern_sha256": "52e24a3d82a33231ba912c99c0d4b04b13302d791825cffb58e443fa67cf970e",
-				"ms": 2.023
-			},
-			{
 				"rule": "kit-settings-mutation",
 				"condition_index": 0,
 				"pattern_sha256": "f47366dabc8cbffb11a3cceb5d6e07faa0557c76e3c32c77a7097672a839de99",
 				"ms": 20.552
-			},
-			{
-				"rule": "zz-canary-scope-probe",
-				"condition_index": 0,
-				"pattern_sha256": "452fbfe9921bafee251b4749cf470ec1096a1cd8db5f8e482411fd874186d7c4",
-				"ms": 2.223
 			}
 		],
 		"write_edit": [
@@ -412,18 +394,6 @@
 				"condition_index": 4,
 				"pattern_sha256": "b86b01c909b642f53e618bf06a4f71516b02e2b71eb02e6fc78322eb53d4c511",
 				"ms": 5.135
-			},
-			{
-				"rule": "kit-weasel-retry",
-				"condition_index": 0,
-				"pattern_sha256": "5a98f52eb8f3c4d38465c17d2392c44a3003a721942001b6019eed57ae2ac7b2",
-				"ms": 1.237
-			},
-			{
-				"rule": "kit-weasel-retry",
-				"condition_index": 1,
-				"pattern_sha256": "882a2758334a6228794cf1862aa8df39a7f0dc945ab768d4ffd1d36446b7f6fa",
-				"ms": 1.214
 			},
 			{
 				"rule": "rs-unsafe-added-router",

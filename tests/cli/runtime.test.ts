@@ -6,7 +6,8 @@ import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { releaseRoot, resolveBundledScript, resolveOmpIdentity } from "../../src/paths.ts";
 import { runtimeTempRoot, sanitizedEnv } from "../../src/runtime.ts";
 import { operatorWriteFence } from "../../src/operator-snapshot.ts";
-import { createScratch, type LivenessDeps } from "../../src/scratch.ts";
+import { createScratch } from "../../src/scratch.ts";
+import type { LivenessDeps } from "../../src/scratch.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp.ts";
 import { installReadonlyBr, resolveRealBr } from "../../src/kitlib/readonly-br.ts";
 import { run } from "../../src/kitlib/run.ts";
@@ -658,13 +659,16 @@ describe("release paths", () => {
 		const versioned = join(prefix, "releases", "v1.2.3");
 		const executable = join(versioned, "bin", "omp-kit");
 		const stable = join(prefix, "bin", "omp-kit");
-		const fakeOmp = createOmp(join(base, "fake-omp"), "v18.4.2");
+		const omp = resolveOmpIdentity(process.env);
+		const nativeBin = join(base, "native-bin");
+		mkdirSync(nativeBin);
+		symlinkSync(omp.launcher, join(nativeBin, "omp"));
 		mkdirSync(join(versioned, "scripts"), { recursive: true });
 		mkdirSync(join(versioned, "bin"), { recursive: true });
 		const ruleClass = join(REPO_ROOT, "scripts", "rule-class.ts");
 		writeFileSync(join(versioned, "scripts", "rule-class.ts"), readFileSync(ruleClass));
 		mkdirSync(join(versioned, "rules"), { recursive: true });
-		const ruleFile = join(versioned, "rules", "zz-canary-scope-probe.md");
+		const ruleFile = join(versioned, "rules", "fixture-reminder.md");
 		writeFileSync(ruleFile, "---\ninterruptMode: never\n---\nfixture\n");
 		writeFileSync(join(versioned, "scripts", "role-check.ts"), "console.log('REMOVED_ROLE_CHECK_EXECUTED');\n");
 		writeFileSync(join(versioned, "scripts", "not-allowlisted.ts"), "console.log('UNALLOWLISTED_RESOURCE_EXECUTED');\n");
@@ -708,9 +712,9 @@ describe("release paths", () => {
 		const hostileTmp = join(canaries, "TMPDIR-marker");
 		writeFileSync(hostileTmp, "TMPDIR:regular-file\n");
 		const env = {
-			...hostile, PATH: [dirname(fakeOmp.launcher), "/usr/bin", "/bin"].join(delimiter),
+			...hostile, PATH: [nativeBin, "/usr/bin", "/bin"].join(delimiter),
 			TMPDIR: hostileTmp, TMP: hostileTmp, TEMP: hostileTmp,
-			OMP: fakeOmp.launcher, OMP_BIN: fakeOmp.launcher, OMP_PATH: fakeOmp.launcher, OMP_SRC: fakeOmp.source,
+			OMP: omp.launcher, OMP_BIN: omp.launcher, OMP_PATH: omp.launcher, OMP_SRC: omp.source,
 			...admission,
 		};
 		const releaseBefore = snapshotTree(prefix);
@@ -729,7 +733,7 @@ describe("release paths", () => {
 
 		const allowed = run("scripts/rule-class.ts");
 		expect(allowed.exitCode, allowed.stderr.toString()).toBe(0);
-		expect(allowed.stdout.toString()).toBe("zz-canary-scope-probe\tcanary\n");
+		expect(allowed.stdout.toString()).toBe("fixture-reminder\treminder\n");
 
 		const retired = run("scripts/role-check.ts");
 		expect(retired.exitCode).not.toBe(0);

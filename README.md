@@ -16,8 +16,8 @@
 Current release: v0.2.97
 <!-- kit-release:end -->
 
-A tested rule pack, 12 guard extensions, five skills, and a guarded CLI with
-57 top-level commands for an existing OMP install.
+A tested rule pack, 12 guard extensions, five skills, and a guarded CLI for an
+existing OMP install.
 
 ```sh
 # Resolve the newest published release at run time, then dry-run the installer.
@@ -79,15 +79,13 @@ ls rules/*.md | wc -l
 bun scripts/rule-class.ts rules/*.md
 ```
 
-The pack has 33 rules: 16 `reminder`, 14 `tripwire`, 1 `always`
-(`kit-standing-law`), 1 `router` (`rs-unsafe-added-router`), and 1 `canary`
-(`zz-canary-scope-probe`). The router loads unsafe-code skills for Rust `unsafe`;
-the canary tests discovery. Tripwires cover unverified "done", unevidenced closes,
-`--no-verify`, secrets, configuration mutation, copied runtime facts, test skips and Actions polling.
-Reminders cover pipe exit status, silenced stderr before filter pipelines, and
-force-push without `--force-with-lease`, pattern kills and unsupported embedded
-JS regex flags. Retired rules and reasons live in `retired/` and
-`retired/REASONS.tsv`.
+The pack has 28 rules: 14 `reminder`, 13 `tripwire`, and one `router`
+(`rs-unsafe-added-router`, for Rust unsafe-code skills).
+Use `omp-kit doctor --scope rules` to check discovery.
+Tripwires cover unverified completion, unevidenced closes, `--no-verify`,
+secrets, config mutation, copied runtime facts, skips, and Actions polling.
+Reminders cover pipe exits, silenced filter stderr, force pushes, pattern kills,
+and embedded JS regex flags. Retirements: `retired/REASONS.tsv`.
 
 ```sh
 omp-kit test --json                       # bundled pack, G1-G3
@@ -493,6 +491,7 @@ Use repeatable `--done` for explicit reports.
 | `omp-kit rch` | `rch lease --slots N --plan -- COMMAND` | Native remote-build plan | `omp-kit rch lease --slots 2 --plan -- cargo test --locked -j 2` |
 | `omp-kit converge` | `converge --repo PATH [--apply] [--push] [--no-fetch] [--ours PATH]... [--theirs PATH]...` | Report or resolve shared-main convergence; keeps peer staged/worktree state, refuses owner conflicts, never force-pushes | `omp-kit converge --repo . --json` |
 | `omp-kit land` | `land --paths PATH... --message MSG --apply --yes` | Commit reserved paths, pass `commit-msg` and the [push check](docs/land.md), publish without force: `PUSHED`/`REFUSED`/`UNRUN` | `omp-kit land --paths src/a.ts --message 'fix: x [pending]' --apply --yes --json` |
+| `omp-kit ovnfs-land` | `ovnfs-land --repo PATH --checkout PATH --base SHA --apply --yes` | Serialize a committed worker checkout into main | `omp-kit help ovnfs-land` |
 | `omp-kit save` | `save -m MSG -- PATH...` | `land --apply --yes` in one step; one `SAVED`/`REFUSED` line | `omp-kit save -m 'fix: x [pending]' -- src/a.ts` |
 | `omp-kit service` | `service list\|install\|uninstall\|status\|doctor\|logs\|run` | Manage the kit's launchd/systemd jobs; reads foreign jobs, never rewrites them | `omp-kit service list --json` |
 | `omp-kit send` | `send SESSION PANE MESSAGE [--no-bead-reason TEXT] [--drop-dir PATH]` | Tags agent text; bare slash commands; refuses forgeries | `omp-kit send s %1 "status" --json` |

@@ -183,7 +183,7 @@ function pluginFixture(editCount: number): Fixture {
 	mkdirSync(join(pluginDir, "rules"), { recursive: true });
 	writeFileSync(join(pluginDir, "package.json"), JSON.stringify({ name: "test-migrate-plugin", version: "0.0.1", omp: { rules: ["rules/"] } }));
 	for (const name of kitNames) writeFileSync(join(pluginDir, "rules", `${name}.md`), readFileSync(join(repoRules, `${name}.md`)));
-	const edited = kitNames.slice(12, 12 + editCount).filter((name) => name !== "kit-standing-law");
+	const edited = kitNames.slice(12, 12 + editCount);
 	const identical = kitNames.filter((name) => !edited.includes(name));
 	for (const name of identical) writeFileSync(join(rulesDir, `${name}.md`), readFileSync(join(repoRules, `${name}.md`)));
 	for (const name of edited) writeFileSync(join(rulesDir, `${name}.md`), `${readFileSync(join(repoRules, `${name}.md`), "utf8")}# local edit\n`);
@@ -215,11 +215,7 @@ test("migrate plan lists each legacy copy with its plugin equivalent and byte di
 			expect(row.verdict).toBe("identical-to-manifest");
 		}
 	}
-	const standing = rowByName(rows, "kit-standing-law");
-	expect(standing.verdict).toBe("identical-to-manifest");
-	expect(standing.pluginSha256).toBeNull();
-	expect(standing.overlay).toBe(false);
-	for (const name of kitNames.slice(12, 18).filter((entry) => entry !== "kit-standing-law")) {
+	for (const name of kitNames.slice(12, 18)) {
 		const row = rowByName(rows, name);
 		expect(row.verdict).toBe("edited");
 		expect(row.overlay).toBe(true);
@@ -324,14 +320,12 @@ test("after migration, disabling the plugin reactivates no kit rule", async () =
 	const { home, kitNames, pluginName } = pluginFixture(0);
 	const applied = await cli(["migrate", "--apply", "--yes"], home, realOmpDir());
 	expect(applied.code).toBe(0);
-	// kit-standing-law is never plugin-listed, so it stays as an edited keep by design.
-	expect(applied.envelope.data.kept).toEqual(["kit-standing-law"]);
+	expect(applied.envelope.data.kept).toEqual([]);
 	omp(["plugin", "disable", pluginName], home, realOmpDir());
 	const list = JSON.parse(omp(["ttsr", "list", "--json"], home, realOmpDir()));
 	const items = Array.isArray(list) ? list : list.rules;
 	const names = new Set(items.map((entry: { name: string }) => entry.name));
 	for (const name of kitNames) {
-		if (name === "kit-standing-law") continue;
 		expect(names.has(name)).toBe(false);
 	}
 	omp(["plugin", "enable", pluginName], home, realOmpDir());
@@ -419,23 +413,6 @@ test("an installed native overlay wins over the plugin in ttsr test", () => {
 	expect((shadowed.triggered ?? []).filter((entry: { name?: string }) => entry.name === "bash-pipe-exit")).toEqual([]);
 });
 
-test("kit-standing-law stays unlisted with and without a native overlay", async () => {
-	const { home } = pluginFixture(0);
-	const namesOf = (json: string): Set<string> => {
-		const data = JSON.parse(json);
-		const items = Array.isArray(data) ? data : data.rules;
-		return new Set(items.map((entry: { name: string }) => entry.name));
-	};
-	const before = namesOf(omp(["ttsr", "list", "--json"], home, realOmpDir()));
-	expect(before.has("kit-standing-law")).toBe(false);
-	const nativeDir = join(home, ".omp", "agent", "rules");
-	mkdirSync(nativeDir, { recursive: true });
-	writeFileSync(join(nativeDir, "kit-standing-law.md"), readFileSync(join(repoRules, "kit-standing-law.md")));
-	const after = namesOf(omp(["ttsr", "list", "--json"], home, realOmpDir()));
-	expect(after.has("kit-standing-law")).toBe(false);
-	const plan = await cli(["migrate", "--plan"], home, realOmpDir());
-	expect(rowByName(plan.envelope.data.rows, "kit-standing-law").unlisted).toBe(true);
-});
 
 test("unifiedDiff marks changed lines with context", () => {
 	const diff = unifiedDiff("a\nb\nc\nd\ne\nf\ng\n", "a\nB\nc\nd\ne\nf\ng\n", "a/old", "b/new");

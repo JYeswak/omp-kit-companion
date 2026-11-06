@@ -91,9 +91,8 @@ need_rc plugin-link 0 "$omp_candidate" plugin link "$REPO"
 need_rc plugin-list 0 "$omp_candidate" plugin list
 grep -q "omp-kit-companion" "$LASTLOG" || { echo "FAIL plugin-list: linked plugin absent; see $LASTLOG" >&2; exit 1; }
 
-# 2. The 17 condition-bearing kit rules arrive via omp-plugins.
-# kit-standing-law has no stream condition (alwaysApply prompt), so the
-# matcher never lists it; every other rules/*.md must appear exactly once.
+# 2. Condition-bearing kit rules arrive via omp-plugins; every stream rule must
+# appear exactly once in native discovery.
 step list-rules "$omp_candidate" ttsr list --json || { echo "FAIL list-rules rc!=0" >&2; exit 1; }
 LISTLOG="$LASTLOG"
 python3 - "$LISTLOG" "$REPO/rules" <<'EOF' || exit 1
