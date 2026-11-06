@@ -29,9 +29,9 @@
  * This grammar is defined only here: scripts/box-lint.ts runs parseBoxes and unreplayableReason
  * for bead_lint's create and update admission (REPLAYABLE1 ompkit-fp72.135.3.71).
  */
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { run, type RunResult } from "./kitlib/run.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { checkPublishedCommits, preflightBead } from "./preflight.ts";
@@ -61,7 +61,7 @@ export const KNOWN_PHASES: Record<string, true> = { build: true, landed: true, l
  * `item` is its 1-based position among all `- [ ]` checklist lines, tagged or not: the number br's --check-acceptance takes.
  */
 export interface Box { index: number; item: number; letter: string | null; checked: boolean; phase: string | null; body: string; line: string }
-export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; rc: number | null; pass: boolean | null; detail: string }
+export interface BoxReplay { index: number; letter: string | null; command: string | null; expected: string | null; rc: number | null; pass: boolean | null; detail: string; output?: { path: string; bytes: number; complete: boolean } }
 export interface AcceptanceRollback {
 	status: "NOT_NEEDED" | "RESTORED" | "ROLLBACK_REFUSED" | "STATE_UNPROVEN";
 	detail: string;
@@ -205,6 +205,9 @@ export function judge(expected: string, rc: number | null, out: string): { pass:
 /** Bounded child-output excerpt for a failed replay, so a future failure carries its own evidence. Passes keep the detail byte-identical. */
 const CHILD_HEAD = 1000;
 const CHILD_TAIL = 3000;
+/** Preserve the existing 4 MiB/stream capture budget: at most 8 MiB of raw evidence per failed box.
+ * Boundary proof: VERIFYENV1 product tests measure both streams at the cap and an over-cap refusal. */
+const REPLAY_STREAM_BYTES = 4 * 1024 * 1024;
 function childExcerpt(rc: number | null, timedOut: boolean, out: string): string {
 	const total = out.length;
 	if (total === 0) return `; child rc ${rc}${timedOut ? " TIMEOUT" : ""}: no stdout/stderr captured`;
@@ -313,6 +316,14 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	const harnessRoot = process.env.GRADE_WAVE_SCRATCH || undefined;
 	const scratch = ownedTmp("verify", { bead: input.bead, ...(harnessRoot === undefined ? {} : { root: harnessRoot }) });
 	const realBr = resolveRealBr(env.PATH);
+	// HERMETIC1-B: tracker management keeps caller authority; acceptance never inherits it.
+	const replayBase = { ...env };
+	delete replayBase.BEADS_DIR;
+	delete replayBase.BEADS_DB;
+	delete replayBase.GIT_DIR;
+	delete replayBase.GIT_WORK_TREE;
+	replayBase.PATH = (env.PATH ?? "/usr/bin:/bin").split(delimiter)
+		.filter(dir => basename(resolve(dir)) !== "agent-bin" && basename(realOrLexical(dir)) !== "agent-bin").join(delimiter);
 	if (!realBr.ok) return { ok: false, code: "NOT_IN_REVIEW", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`UNJUDGED: ${realBr.reason}`).join("\n"), acts };
 	const replayBin = installReadonlyBr(scratch.path, realBr.path);
 	const wantsOwned = replayable.some(b => b.body.includes("OWNED_TRACKER_DB"));
@@ -320,10 +331,8 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	if (wantsOwned) {
 		const fixtureDir = join(scratch.path, "fixture");
 		mkdirSync(fixtureDir, { recursive: true });
-		const unboundEnv: Record<string, string> = {};
-		for (const [k, v] of Object.entries(env)) if (k !== "BEADS_DB") unboundEnv[k] = v;
 		ownedDb = join(fixtureDir, ".beads", "beads.db");
-		const fixtureInit = await run(["br", "init", "--db", ownedDb], { cwd: fixtureDir, deadline_s: 60, env: unboundEnv });
+		const fixtureInit = await run([realBr.path, "init", "--db", ownedDb], { cwd: fixtureDir, deadline_s: 60, env: replayBase });
 		if (fixtureInit.rc !== 0) return { ok: false, code: "EXPORT_FAILED", bead: input.bead, export: input.exportSha, replays: [], log: log.concat(`owned fixture init failed rc ${fixtureInit.rc}: ${text(fixtureInit.stderr).slice(0, 200)}; unmet prerequisite: owned tracker binding`).join("\n"), acts };
 	}
 	// VERIFYSCRATCH1 (ompkit-fp72.135.3.81): selftests that build fixture trackers under GRADE_WAVE_SCRATCH
@@ -332,7 +341,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	// VERIFYSCRATCH1 export root: var/agent-tmp is gitignored, so the export has none; kitlib scratch under the
 	// repo root needs it, as the gates provide it (fresh-gate.sh, full-suite-verdict.sh).
 	const exportTmp = join(exportDir, "var", "agent-tmp");
-	const replayEnv = { ...env, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, KITLIB_TMP_ROOT: exportTmp, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}:${env.PATH ?? process.env.PATH ?? "/usr/bin:/bin"}` };
+	const replayEnv = { ...replayBase, TMPDIR: scratch.path, GRADE_WAVE_SCRATCH: scratch.path, KITLIB_TMP_ROOT: exportTmp, ...(wantsOwned ? { OWNED_TRACKER_DB: ownedDb } : {}), PATH: `${replayBin}${delimiter}${replayBase.PATH}` };
 	if (wantsOwned) log.push(`owned fixture ${ownedDb} (per-run read-only replay)`);
 	mkdirSync(exportDir, { recursive: true });
 	const archive = await run(["sh", "-c", `git -C ${JSON.stringify(input.repo)} archive ${JSON.stringify(input.exportSha)} | tar -x -C ${JSON.stringify(exportDir)}`], { deadline_s: 300, env });
@@ -343,7 +352,7 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 	log.push(`exported ${input.exportSha} to ${exportDir}`);
 	const replays: BoxReplay[] = [];
 	const environmentFailures: string[] = [];
-	type ReplayOutcome = Pick<RunResult, "rc" | "timed_out" | "killed" | "truncated" | "total_truncated"> & { out: string; elapsedMs: number };
+	type ReplayOutcome = Pick<RunResult, "rc" | "timed_out" | "killed" | "truncated" | "total_truncated" | "stdout" | "stderr"> & { out: string; elapsedMs: number };
 	const commandResults = new Map<string, ReplayOutcome>();
 	for (const box of replayable) {
 		if (box.phase === "live" || box.phase === "after") {
@@ -379,6 +388,8 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 				killed: result.killed,
 				truncated: result.truncated,
 				total_truncated: result.total_truncated,
+				stdout: result.stdout,
+				stderr: result.stderr,
 				out: text(result.stdout) + text(result.stderr),
 				elapsedMs: Date.now() - started,
 			};
@@ -387,24 +398,46 @@ export async function verifyBead(input: VerifyInput): Promise<VerifyResult> {
 			replay = cached;
 		}
 		const { out, elapsedMs } = replay;
-		const v = judge(expected, replay.rc, out);
+		const v = replay.truncated || replay.total_truncated
+			? { pass: false, detail: `OUTPUT_LIMIT: capture exceeded ${REPLAY_STREAM_BYTES} bytes per stream; full output unavailable` }
+			: judge(expected, replay.rc, out);
+		let output: BoxReplay["output"];
+		let evidence = "";
+		if (!v.pass) {
+			// Evidence is outside the disposable export and survives CLI exit, owned by this bead.
+			const root = join(input.repo, "var", "verify-evidence");
+			mkdirSync(root, { recursive: true, mode: 0o700 });
+			const retained = ownedTmp("verify-output", { root, bead: input.bead, autoCleanup: false });
+			const path = join(retained.path, `box-${box.index}.log`);
+			try {
+				// Raw stdout followed by raw stderr, matching judge/display order without UTF-8 loss.
+				writeFileSync(path, replay.stdout, { mode: 0o600, flag: "wx" });
+				writeFileSync(path, replay.stderr, { flag: "a" });
+			} catch (error) {
+				retained.cleanup();
+				throw error;
+			}
+			output = { path, bytes: replay.stdout.byteLength + replay.stderr.byteLength, complete: !replay.truncated && !replay.total_truncated };
+			evidence = `; ${output.complete ? "complete" : "INCOMPLETE"} child output ${output.bytes} bytes: ${path}`;
+		}
 		const environment = !v.pass && replay.rc !== null && replay.rc !== 0 && !replay.timed_out && !replay.killed && !replay.truncated && !replay.total_truncated
 			? ompEnvironmentFailure(out, replayEnv) : null;
 		if (environment !== null) {
 			if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(named)} elapsed=${elapsedMs}ms verdict=ENVIRONMENT\n`);
 			else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=ENVIRONMENT\n`);
 			environmentFailures.push(`${tag(box)} ${environment}`);
-			const detail = `environment prerequisite unmet: ${environment}${childExcerpt(replay.rc, replay.timed_out, out)}`;
-			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: null, detail });
+			const detail = `environment prerequisite unmet: ${environment}${evidence}${childExcerpt(replay.rc, replay.timed_out, out)}`;
+			replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: null, detail, output });
 			log.push(`${tag(box)} ENVIRONMENT ${named}: ${detail}; needs-director`);
 			continue;
 		}
 		if (reused) process.stderr.write(`verify progress ${tag(box)} command=${JSON.stringify(named)} elapsed=${elapsedMs}ms verdict=${v.pass ? "PASS" : "FAIL"}\n`);
 		else process.stderr.write(`; completed_elapsed=${elapsedMs}ms final_verdict=${v.pass ? "PASS" : "FAIL"}\n`);
 		const excerpt = v.pass ? "" : childExcerpt(replay.rc, replay.timed_out, out);
-		replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: v.pass, detail: v.detail + excerpt });
-		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${named} -> ${v.detail}${excerpt} (${elapsedMs} ms)${replay.timed_out ? " TIMEOUT" : ""}`);
+		replays.push({ index: box.index, letter: box.letter, command: named, expected, rc: replay.rc, pass: v.pass, detail: v.detail + evidence + excerpt, ...(output === undefined ? {} : { output }) });
+		log.push(`${tag(box)} ${v.pass ? "PASS" : "FAIL"} ${named} -> ${v.detail}${evidence}${excerpt} (${elapsedMs} ms)${replay.timed_out ? " TIMEOUT" : ""}`);
 	}
+	scratch.cleanup();
 	const failed = replays.filter(r => r.pass === false);
 	if (failed.length > 0) {
 		const comment = `REWORK ${input.bead}: ${failed.map(f => `${tag(f)} ${f.detail}`).join("; ")}\n${log.join("\n")}`;

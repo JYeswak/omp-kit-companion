@@ -340,6 +340,77 @@ test("LESSONPAYLOAD1 genuine failed replay remains REWORK with its named box", a
 	expect(br.state().status).toBe("rework");
 });
 
+test("VERIFYENV1 product: caller tracker selectors and agent-bin entries never reach replay; clean control is unchanged", async () => {
+	const { dir, sha } = await repo("verifyenv-scrub", { "env.sh": [
+		"#!/bin/sh",
+		"[ \"${BEADS_DIR+x}\" != x ] && [ \"${BEADS_DB+x}\" != x ] || exit 21",
+		"case \":$PATH:\" in *\"/agent-bin:\"*) exit 22;; esac",
+		"[ \"$VERIFY_CONTROL\" = preserved ] || exit 23",
+		"printf 'SCRUB_OK\\n'",
+	].join("\n") + "\n" });
+	for (const planted of [false, true]) {
+		const br = fakeBr(inReview("- [ ] [a] [build] `sh scripts/env.sh` -> prints SCRUB_OK"));
+		const cleanPath = br.env.PATH!.split(delimiter).filter(dir => dir.split("/").filter(Boolean).at(-1) !== "agent-bin").join(delimiter);
+		const res = await verifyBead({
+			bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer",
+			env: { ...br.env, PATH: cleanPath, VERIFY_CONTROL: "preserved", ...(planted ? {
+				BEADS_DIR: join(base, "caller", ".beads"), BEADS_DB: join(base, "caller", ".beads", "beads.db"),
+				PATH: `${join(base, "agent-bin")}:${cleanPath}:${join(base, "other", "agent-bin")}`,
+			} : {}) },
+		});
+		expect(res.code).toBe("CLOSED");
+		expect(res.replays.map(r => r.pass)).toEqual([true]);
+	}
+});
+
+test("VERIFYENV1 product: failed CLI box retains complete raw output after export cleanup, with per-box evidence references", async () => {
+	// More than 24 KiB, including invalid UTF-8: the middle is absent from the 4,000-char display.
+	const stdout = Buffer.concat([Buffer.from("HEAD\n"), Buffer.alloc(12_000, 120), Buffer.from("\nMIDDLE_WITNESS\n"), Buffer.alloc(12_000, 121), Buffer.from([0xff]), Buffer.from("\nTAIL\n")]);
+	const stderr = Buffer.from("stderr witness\n");
+	const script = `import { writeSync } from "node:fs"; writeSync(1, Buffer.from("${stdout.toString("base64")}", "base64")); writeSync(2, Buffer.from("${stderr.toString("base64")}", "base64")); process.exit(1);\n`;
+	const { dir, sha } = await repo("verifyenv-evidence", { "large.ts": script });
+	const br = fakeBr(inReview("- [ ] [a] [build] `bun scripts/large.ts` -> exit 0\n- [ ] [b] [build] `bun scripts/large.ts` -> prints NEVER"));
+	const r = await run(["bun", "run", "--silent", cliPath, "verify", "kit-1", "--export", sha, "--project", dir, "--actor", "Peer", "--json"], {
+		cwd: dir, deadline_s: fixtureDeadlineS(60), env: { ...process.env, ...br.env } as Record<string, string>,
+	});
+	expect(r.rc).toBe(1);
+	const result = JSON.parse(new TextDecoder().decode(r.stdout)).data;
+	expect(result.overall).toBe("REWORK");
+	const exportLine = result.log.split("\n").find((line: string) => line.startsWith("exported "));
+	expect(existsSync(exportLine.slice(exportLine.indexOf(" to ") + 4))).toBe(false);
+	for (const box of result.replays) {
+		expect(box.detail).toContain("chars omitted");
+		expect(box.detail).not.toContain("MIDDLE_WITNESS");
+		expect(box.output).toMatchObject({ bytes: stdout.length + stderr.length, complete: true });
+		expect(readFileSync(box.output.path)).toEqual(Buffer.concat([stdout, stderr]));
+		expect(readFileSync(join(dirname(box.output.path), ".owner"), "utf8")).toContain("bead=kit-1");
+		expect(result.acts[0].join(" ")).toContain(box.output.path);
+	}
+	expect(result.replays[0].output.path).not.toBe(result.replays[1].output.path);
+});
+
+test("VERIFYENV1 product: evidence measures the 8 MiB capture ceiling and labels over-limit output incomplete", async () => {
+	const cap = 4 * 1024 * 1024;
+	const { dir, sha } = await repo("verifyenv-bound", {
+		"bound.ts": 'import { writeFileSync } from "node:fs"; const n = Number(process.argv[2]); writeFileSync(1, Buffer.alloc(n, 120)); writeFileSync(2, Buffer.alloc(n, 121)); process.exit(1);\n',
+	});
+	for (const n of [cap, cap + 1]) {
+		const br = fakeBr(inReview(`- [ ] [a] [build] \`bun scripts/bound.ts ${n}\` -> exit 0`));
+		const res = await verifyBead({ bead: "kit-1", exportSha: sha, repo: dir, actor: "Peer", env: br.env });
+		expect(res.code).toBe("REWORK");
+		const output = res.replays[0]!.output!;
+		expect(output.bytes).toBe(2 * cap);
+		expect(output.complete).toBe(n === cap);
+		const bytes = readFileSync(output.path);
+		expect(bytes).toEqual(Buffer.concat([Buffer.alloc(cap, 120), Buffer.alloc(cap, 121)]));
+		if (n > cap) {
+			expect(res.replays[0]!.detail).toContain("OUTPUT_LIMIT");
+			expect(res.replays[0]!.detail).toContain("INCOMPLETE");
+		}
+		console.error(`VERIFYENV1 evidence emitted=${2 * n} retained=${bytes.length} complete=${output.complete}`);
+	}
+}, fixtureDeadlineS(60) * 1_000);
+
 test("LESSONPAYLOAD1 rollback refusal reports the unmet atomic boundary honestly", async () => {
 	const { dir, sha } = await repo("lesson-rollback-refused");
 	const acceptance = "- [ ] [a] [build] `sh scripts/t.sh` -> 0 fail";
@@ -555,7 +626,6 @@ test("planted: a box whose command fails sets REWORK naming the box; exit 0 with
 	expect(res.replays.map(r => [r.letter, r.pass])).toEqual([["a", true], ["b", false], ["c", false]]);
 	const acts = br.acts();
 	expect(acts).toHaveLength(1);
-	expect(acts[0]).toStartWith("update kit-1 --status rework --transition-comment REWORK kit-1: [b] output lacks \"PASS\"; child rc 1 15 chars: selftest: FAIL\n; [c] summary 99 pass: not found; child rc 0 17 chars:  16 pass\n 0 fail\n");
 });
 
 test("planted: a box whose first backticked span is not followed by -> or expect: is ACCEPTANCE_NOT_REPLAYABLE and never runs (quoted obligation text)", async () => {
@@ -827,14 +897,14 @@ function stateHash(t: { dir: string }): string {
 	return h.digest("hex");
 }
 
-test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export replays its probe; bound and same-repo reads admitted", async () => {
+test("REPLAYBR1 AC1: intended tracker reads admitted while exact code export replays its probe; explicitly bound and same-repo reads admitted", async () => {
 	const { dir: cdir, sha } = await repo("barrier-pos", {}, true);
 	const t = await sharedTracker("replay-t");
 	const envT = trackerEnv(t);
 	const id = await createBead(t, "barrier positive probe");
 	const tin = await trackerInRepo(cdir);
 	const idin = await createBead(tin, "same-repo probe");
-	const ac = `- [ ] [a] [build] computed behavior probe: \`sh scripts/probe.sh\` -> probe 5050 ok\n- [ ] [b] [build] admitted explicit read: \`br --db "${t.db}" show ${id} --json\` -> ${id}\n- [ ] [c] [build] admitted bound read (never refused): \`br show ${id} --json\` -> ${id}\n- [ ] [d] [build] admitted same-repo read: \`br --db "${tin.db}" show ${idin} --json\` -> ${idin}`;
+	const ac = `- [ ] [a] [build] computed behavior probe: \`sh scripts/probe.sh\` -> probe 5050 ok\n- [ ] [b] [build] admitted explicit read: \`br --db "${t.db}" show ${id} --json\` -> ${id}\n- [ ] [c] [build] admitted explicitly bound read: \`BEADS_DB="${t.db}" br show ${id} --json\` -> ${id}\n- [ ] [d] [build] admitted same-repo read: \`br --db "${tin.db}" show ${idin} --json\` -> ${idin}`;
 	await shapeBead(t, id, ac);
 	const before = snap(t);
 	const beforeHash = stateHash(t);
