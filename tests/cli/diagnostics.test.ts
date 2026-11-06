@@ -1,14 +1,18 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:net";
+import { createServer } from "node:net";
+import type { Server } from "node:net";
 import { delimiter, dirname, join } from "node:path";
-import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, readRchSocketBaseline, writeRchSocketBaseline, type Finding, type RchConfigRead, type RchDaemonWorker, type RchProbeWorker, type RchReachabilityDeps, type RchSocketBaseline, type RchWorkerHealthDeps } from "../../src/diagnostics.ts";
+import { defaultRchGcRoots, defaultRchReachability, defaultRchWorkerHealth, diagnose as diagnoseNative, health, inspectActionsBilling, inspectDicklesworthstone, inspectEffectiveRules, inspectEffectiveRulesAsync, inspectPaneIdentity, inspectRchGcRoots, inspectRchReachability, inspectRchWorkerHealth, inspectRegexTools, parseRchDaemonWorkers, parseRchProbeWorkers, rchConfigDir, readRchSocketBaseline, writeRchSocketBaseline } from "../../src/diagnostics.ts";
+import type { Finding, RchConfigRead, RchDaemonWorker, RchProbeWorker, RchReachabilityDeps, RchSocketBaseline, RchWorkerHealthDeps } from "../../src/diagnostics.ts";
 // Separate additive import: the shared import above stays byte-identical (fp72.96).
-import { attributeAckSender, type IdentityAck, type PaneBinding, type ReservationHolder, type SeatBindingRow } from "../../src/diagnostics.ts";
+import { attributeAckSender } from "../../src/diagnostics.ts";
+import type { IdentityAck, PaneBinding, ReservationHolder, SeatBindingRow } from "../../src/diagnostics.ts";
 import { STACK_SOURCE } from "../../src/diagnostics.ts";
 import { RCH_DAEMON_STATUS_TIMEOUT_MS } from "../../src/diagnostics.ts";
-import { ownedTmp, type OwnedTmp } from "../../src/kitlib/tmp.ts";
+import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import type { OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { ompFingerprint, recordTestReceipt } from "../../src/omp-watch.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
 import { snapshotWatched } from "../../src/operator-snapshot.ts";
@@ -300,6 +304,75 @@ test("stale plugin symlink fails by profile and the installed release target pas
 	expect(current.status).toBe("OK");
 	expect(current.evidence?.stale_profiles).toEqual([]);
 });
+
+test("DOCTORDEGRADED1: fresh plugin rule installation is OK and a removed rule names its file", async () => {
+	const f = fixture();
+	writeFileSync(join(f.root, "package.json"), JSON.stringify({ name: "omp-kit-companion", version: "0.2.24" }));
+	mkdirSync(join(f.root, "extensions"));
+	const installed = join(f.base, "installed-plugin");
+	mkdirSync(join(installed, "rules"), { recursive: true });
+	writeFileSync(join(installed, "package.json"), readFileSync(join(f.root, "package.json")));
+	const rule = join(installed, "rules", "rule-a.md");
+	writeFileSync(rule, f.bytes);
+	const link = join(f.home, ".omp", "plugins", "node_modules", "omp-kit-companion");
+	mkdirSync(dirname(link), { recursive: true });
+	symlinkSync(installed, link);
+	const input = { root: f.root, home: f.home, scope: "rules", project: f.project };
+	const healthy = await diagnose(input);
+	expect(finding(healthy, "installed_rules").status).toBe("OK");
+	expect(health(healthy)).toBe("OK");
+	rmSync(rule);
+	const degraded = finding(await diagnose(input), "installed_rules");
+	expect(degraded.status).toBe("DEGRADED");
+	expect(degraded.reason).toContain(join(installed, "rules", "rule-a.md"));
+	expect(degraded.recommended_action).toContain("omp-kit apply plugin --plan");
+	expect(existsSync(rule)).toBe(false);
+});
+
+test("DOCTORDEGRADED1: unknown activation is not a missing-rule claim; confirmed missing rules remain degraded", () => {
+	const input = { home: "/fixture", ompPath: "/bin/omp", kitVersion: "0.2.24", ompVersion: "18.4.0", rules: ["rule-a"], profiles: [{ name: "default" }] };
+	const unknown = inspectEffectiveRules({ ...input, probe: () => { throw new Error("ttsr exited 3"); } });
+	expect(unknown.status).toBe("UNVERIFIED");
+	expect(unknown.reason).toContain("could not be verified");
+	expect(unknown.recommended_action).toContain("omp ttsr list --json");
+	const missing = inspectEffectiveRules({ ...input, probe: (_, command) => command === "ttsr" ? [] : { npm: [], marketplace: [] } });
+	expect(missing.status).toBe("DEGRADED");
+	expect(missing.reason).toContain("rule-a.md");
+	const mixed = inspectEffectiveRules({ ...input, profiles: [{ name: "default" }, { name: "other", issue: "no config" }], probe: (_, command) => command === "ttsr" ? [] : { npm: [], marketplace: [] } });
+	expect(mixed.status).toBe("DEGRADED");
+});
+
+test("DOCTORDEGRADED1: doctor CLI rules scope accepts a fresh HOME plugin and rejects a removed file", () => {
+	const f = fixture(); installOmp(f);
+	const root = join(import.meta.dir, "../..");
+	const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+	const manifest = readFileSync(join(root, "MANIFEST.tsv"), "utf8").trimEnd().split("\n").slice(1);
+	const names = manifest.map(row => row.split("\t")[0]!);
+	const installed = join(f.base, "plugin");
+	mkdirSync(join(installed, "rules"), { recursive: true });
+	writeFileSync(join(installed, "package.json"), JSON.stringify({ name: "omp-kit-companion", version }));
+	for (const name of names) writeFileSync(join(installed, "rules", `${name}.md`), readFileSync(join(root, "rules", `${name}.md`)));
+	const link = join(f.home, ".omp", "plugins", "node_modules", "omp-kit-companion");
+	mkdirSync(dirname(link), { recursive: true });
+	symlinkSync(installed, link);
+	mkdirSync(join(f.home, ".omp", "agent"), { recursive: true });
+	writeFileSync(join(f.home, ".omp", "agent", "config.yml"), "{}\n");
+	const plugin = JSON.stringify({ npm: [{ name: "omp-kit-companion", version, path: installed }], marketplace: [] });
+	const rules = JSON.stringify(names.map(name => ({ name, path: join(installed, "rules", `${name}.md`) })));
+	const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+	writeFileSync(f.ompPath, `#!/bin/sh\ncase "$1" in\n--version) printf 'omp/18.4.0\\n';;\nplugin) printf '%s\\n' ${quote(plugin)};;\nttsr) printf '%s\\n' ${quote(rules)};;\n*) exit 91;;\nesac\n`);
+	const env = { ...process.env, HOME: f.home, PATH: `${dirname(f.ompPath)}:/usr/bin:/bin`, BUN_INSTALL: f.bunRoot, XDG_STATE_HOME: join(f.base, "state") };
+	const argv = [process.execPath, join(root, "src/cli.ts"), "doctor", "--scope", "rules", "--json"];
+	const healthy = runFixture(argv, { cwd: f.project, env });
+	expect(healthy.rc, decoder.decode(healthy.stderr)).toBe(0);
+	expect(JSON.parse(decoder.decode(healthy.stdout)).data.overall).toBe("OK");
+	const removed = join(installed, "rules", `${names[0]}.md`);
+	rmSync(removed);
+	const negative = runFixture(argv, { cwd: f.project, env });
+	const result = JSON.parse(decoder.decode(negative.stdout));
+	expect(result.data.overall).toBe("DEGRADED");
+	expect(result.data.findings.find((row: Finding) => row.component === "installed_rules").reason).toContain(removed);
+});
 test("STAMP1: lock version differing from the release manifest is DEGRADED with versionMismatch", async () => {
 	const f = fixture();
 	mkdirSync(join(f.root, "extensions"));
@@ -348,7 +421,7 @@ test("effective profile probes do not replace installed-byte diagnostics", async
 	const f = fixture(); installOmp(f);
 	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
 	const effective = finding(rows, "effective_rules");
-	expect(effective.status).toBe("DEGRADED");
+	expect(effective.status).toBe("UNVERIFIED");
 	expect((effective.evidence?.profiles as Array<{ status: string }>)[0]?.status).toBe("UNVERIFIED");
 	expect(finding(rows, "installed_rules").evidence?.missing).toEqual(["rule-a"]);
 });
@@ -1532,6 +1605,19 @@ test("oq1h.5: an unscoped inventory does not judge a planning skill the user nev
 	expect(finding(await diagnose(input), "planning_skill").status).toBe("OK");
 	planningSkillFixture(f, "different");
 	expect(finding(await diagnose(input), "planning_skill").status).toBe("DRIFT");
+});
+
+test("DOCTORDEGRADED1: planning skill drift supplies an executable explicit repair", async () => {
+	const f = fixture();
+	planningSkillFixture(f, "different");
+	const input = { root: f.root, home: f.home, scope: "kit" };
+	const drift = finding(await diagnose(input), "planning_skill");
+	expect(drift.status).toBe("DRIFT");
+	const command = drift.recommended_action.split("run: ")[1];
+	expect(command).toBeDefined();
+	const repaired = runFixture(["/bin/sh", "-c", command!], { cwd: f.project, env: process.env });
+	expect(repaired.rc, decoder.decode(repaired.stderr)).toBe(0);
+	expect(finding(await diagnose(input), "planning_skill").status).toBe("OK");
 });
 
 test("oq1h.5: an unscoped inventory omits rch when it is not installed, and the rch diagnostic scope still says so", async () => {

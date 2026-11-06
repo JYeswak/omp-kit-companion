@@ -9,7 +9,8 @@ import { YAML } from "bun";
 import { observeOmpLauncherVersion, observeOmpManagers, resolveOmpIdentity } from "./paths.ts";
 import { readDrainStore, staleClaims } from "./drain.ts";
 import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./holder-liveness.ts";
-import { scoreFlywheel, type Grade } from "./flywheel-score.ts";
+import { scoreFlywheel } from "./flywheel-score.ts";
+import type { Grade } from "./flywheel-score.ts";
 import { scanDerivedText, shouldScanFile } from "./derived-check.ts";
 import { inspectStateRoot } from "./state-root.ts";
 import { runtimeTempRoot } from "./runtime.ts";
@@ -20,7 +21,8 @@ import { checkExtensionImports } from "./extensions.ts";
 import { pluginPackageHash } from "./apply-plugin.ts";
 import { inspectPluginRelease, livePluginReleaseIo } from "./plugin-release.ts";
 import { inspectHookInstallers, inspectHooks, liveHookFreshnessIo } from "./hook-refresh.ts";
-import { analyzeBeadBreadth, loadPlanningScoreConfig, type LoadedPlanningScoreConfig, type PlanningBead } from "./planning-score.ts";
+import { analyzeBeadBreadth, loadPlanningScoreConfig } from "./planning-score.ts";
+import type { LoadedPlanningScoreConfig, PlanningBead } from "./planning-score.ts";
 import { inspectTestScope } from "./test-scope.ts";
 import { inspectGatePlane } from "./gate-plane.ts";
 
@@ -1463,6 +1465,28 @@ export function profilePluginRuleStatus(home: string, profile: string, rule: str
 	return { ...base, target, version, sha256: sha, expected_sha256: expectedSha, status: "ON", reason: "linked plugin version and rule bytes match the release" };
 }
 
+function inspectInstalledPluginRules(root: string, home: string, rules: readonly ManifestRule[]): Finding | null {
+	const links = inspectPluginLinks(root, home);
+	const observations = links.evidence?.links as Array<{ profile: string; status: string }> | undefined;
+	if (!observations?.some(link => link.status !== "MISSING")) return null;
+	let version: string | null = null;
+	try {
+		const pkg = readJsonObject(join(root, "package.json"));
+		if (typeof pkg.version === "string") version = pkg.version;
+	} catch { /* Unreadable version remains unverified. */ }
+	const hashes = new Map(rules.map(rule => [rule.name, rule.sha256]));
+	const profiles = observations.flatMap(link => rules.map(rule =>
+		profilePluginRuleStatus(home, link.profile, rule.name, { version, sha256: name => hashes.get(name) ?? null })));
+	const defects = profiles.filter(row => row.status === "MISSING" || row.status === "STALE");
+	const uncertain = links.evidence?.inventory_issue || observations.some(link => link.status === "UNVERIFIED") || profiles.some(row => row.status === "UNVERIFIED");
+	return finding("installed_rules", defects.length ? "DEGRADED" : uncertain ? "UNVERIFIED" : "OK",
+		defects.length ? defects.map(row => `${row.profile}: ${join(row.target ?? row.link, "rules", `${row.rule}.md`)}: ${row.reason}`).join("; ") :
+			uncertain ? "Plugin rule inventory could not be verified" : "All profile plugin rule bytes match the release; runtime activation remains unverified",
+		defects.length ? "Run omp-kit apply plugin --plan, review it, then omp-kit apply plugin --apply." :
+			uncertain ? "Run omp-kit doctor --scope rules --json and inspect the per-profile evidence." : "No action required.",
+		{ source: "profile_plugins", profiles, inventory_issue: links.evidence?.inventory_issue ?? null });
+}
+
 export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 	// The ttsr and plugin outputs of one profile are compared path-by-path, so both commands observe a single isolated HOME per profile. Separate homes diverge (different temp roots) and every kit rule reads absent.
 	const sharedHomes = input.probe ? undefined : new Map<string, { home: string; cleanup: () => void }>();
@@ -1478,7 +1502,7 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 	let failed = false;
 	try {
 	for (const profile of input.profiles) {
-		if (profile.issue) { profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: profile.issue }); failed = true; continue; }
+		if (profile.issue) { profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: profile.issue }); continue; }
 		try {
 			const rules = probe(profile.name, "ttsr");
 			const plugins = pluginEntries(probe(profile.name, "plugin"));
@@ -1499,7 +1523,7 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			if (status !== "OK") failed = true;
 			profileRows.push({ profile: profile.name, status, plugin_version: pluginVersion, expected_kit_version: input.kitVersion, ...(versionMismatch ? { versionMismatch: `${pluginVersion} vs ${input.kitVersion}` } : {}), omp_version: input.ompVersion, kit_rules: { plugin: pluginRules, overlays, legacy, missing, always_apply: { rules: [...alwaysRules], missing: alwaysMissing, method: "plugin-rules-dir" } }, extensions: kitPlugin?.extensions ?? kitPlugin?.extension_paths ?? [] });
 		} catch (error) {
-			failed = true;
+			// Probe failure is uncertainty, not evidence that a rule is missing.
 			profileRows.push({ profile: profile.name, status: "UNVERIFIED", issue: errorText(error) });
 		}
 	}
@@ -1512,7 +1536,18 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			}
 		}
 	}
-	return finding("effective_rules", failed ? "DEGRADED" : "OK", failed ? "One or more OMP profiles do not load every kit rule from the matching plugin" : "Every covered OMP profile loads kit rules from the matching plugin or a declared native overlay", "Run omp-kit apply plugin --plan, then apply the approved per-profile plugin plan; legacy ~/.agents/rules copies are owned by migrate.", { profiles: profileRows, kit_version: input.kitVersion, omp_version: input.ompVersion, legacy_rules_not_considered_authority: true });
+	const unknown = profileRows.some(row => row.status === "UNVERIFIED") || profileRows.length === 0;
+	const missingFiles = profileRows.flatMap(row => {
+		const kit = row.kit_rules as { missing: string[]; always_apply: { missing: string[] } } | undefined;
+		return kit ? [...kit.missing, ...kit.always_apply.missing].map(name => `${row.profile}: ${name}.md`) : [];
+	});
+	return finding("effective_rules", failed ? "DEGRADED" : unknown ? "UNVERIFIED" : "OK",
+		failed ? `One or more OMP profiles do not load every kit rule from the matching plugin${missingFiles.length ? `: ${missingFiles.join(", ")}` : ""}` :
+			unknown ? "Effective OMP profile rules could not be verified; inspect the per-profile issues" :
+				"Every covered OMP profile loads kit rules from the matching plugin or a declared native overlay",
+		failed ? "Run omp-kit apply plugin --plan, review it, then omp-kit apply plugin --apply; legacy ~/.agents/rules copies are owned by migrate." :
+			unknown ? "Run omp ttsr list --json and omp plugin list --json (named profiles: omp --profile NAME ttsr list --json and omp --profile NAME plugin list --json); resolve the reported errors, then rerun omp-kit doctor --scope rules --json." : "No action required.",
+		{ profiles: profileRows, kit_version: input.kitVersion, omp_version: input.ompVersion, legacy_rules_not_considered_authority: true });
 }
 export async function inspectEffectiveRulesAsync(input: EffectiveRulesInput, concurrency = 6): Promise<Finding> {
 	const started = performance.now();
@@ -1550,17 +1585,20 @@ export async function inspectEffectiveRulesAsync(input: EffectiveRulesInput, con
 function inspectPlanningSkill(root: string, home: string): Finding {
 	const kitPath = join(root, "skills", "jeff-planning-enhanced", "SKILL.md");
 	const localPath = join(home, ".agents", "skills", "jeff-planning-enhanced", "SKILL.md");
+	const quotedKit = `'${kitPath.replaceAll("'", "'\\''")}'`;
+	const quotedLocal = `'${localPath.replaceAll("'", "'\\''")}'`;
+	const repair = `After reviewing the local changes, run: cp -- ${quotedKit} ${quotedLocal}`;
 	if (pathState(kitPath) !== "file") return finding("planning_skill", "UNVERIFIED", "Kit planning skill is missing or unsafe", "Repair the kit release; doctor does not write either skill copy.", { kit_path: kitPath });
 	let kitBytes: Buffer;
 	try { kitBytes = fileBytes(kitPath); }
 	catch { return finding("planning_skill", "UNVERIFIED", "Kit planning skill cannot be read safely", "Inspect the kit-owned skill file without changing either copy.", { kit_path: kitPath }); }
 	const localState = pathState(localPath);
-	if (localState === "missing") return finding("planning_skill", "DRIFT", "Local planning skill copy is missing", "Review the kit-owned skill source and restore the local copy explicitly.", { kit_path: kitPath, local_path: localPath, kit_sha256: digest(kitBytes), local_status: "MISSING" });
+	if (localState === "missing") return finding("planning_skill", "DRIFT", "Local planning skill copy is missing", `Create its directory if absent, then ${repair}`, { kit_path: kitPath, local_path: localPath, kit_sha256: digest(kitBytes), local_status: "MISSING" });
 	if (localState !== "file") return finding("planning_skill", "UNVERIFIED", "Local planning skill path is unsafe or unreadable", "Inspect the local skill path; doctor never replaces or follows it.", { kit_path: kitPath, local_path: localPath, local_status: "UNSAFE" });
 	try {
 		const localBytes = fileBytes(localPath);
 		const matches = kitBytes.equals(localBytes);
-		return finding("planning_skill", matches ? "OK" : "DRIFT", matches ? "Local planning skill matches the kit-owned source" : "Local planning skill differs from the kit-owned source", matches ? "No action required." : "Review and synchronize the local copy from the kit-owned skill file.", { kit_path: kitPath, local_path: localPath, kit_sha256: digest(kitBytes), local_sha256: digest(localBytes) });
+		return finding("planning_skill", matches ? "OK" : "DRIFT", matches ? "Local planning skill matches the kit-owned source" : "Local planning skill differs from the kit-owned source", matches ? "No action required." : repair, { kit_path: kitPath, local_path: localPath, kit_sha256: digest(kitBytes), local_sha256: digest(localBytes) });
 	} catch {
 		return finding("planning_skill", "UNVERIFIED", "Local planning skill cannot be read safely", "Inspect the local skill path; doctor never writes either copy.", { kit_path: kitPath, local_path: localPath });
 	}
@@ -2314,6 +2352,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 		rows.push(finding("project_rules", "UNVERIFIED", "Source manifest is invalid", "Replace the release before assessing project shadows."));
 	} else if (wants("installed_rules", "retired_rules", "unknown_rules", "project_rules")) {
 		const target = join(home, ".agents", "rules");
+		const pluginInstalled = inspectInstalledPluginRules(root, home, manifest.rules);
 		const state = directoryPath(home, [".agents", "rules"]);
 		const matching: string[] = [], missing: string[] = [], drifted: string[] = [], unsafe: string[] = [];
 		const images = new Map<string, Image>();
@@ -2348,7 +2387,7 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 			legacyRecord(home, manifest.rules) : owned.length === manifest.rules.length && !ownershipDrift.length ? "KIT_OWNED" : "UNVERIFIED";
 		const installedStatus = unsafe.length || drifted.length || missing.length || ownershipDrift.length || record.status === "UNSAFE" ? "DEGRADED" :
 			owned.length === manifest.rules.length && record.status === "PRESENT" ? "OK" : "UNVERIFIED";
-		rows.push(finding("installed_rules", installedStatus, unsafe.length ? "Installed rule path is unsafe or unreadable" : drifted.length ? "Installed rule bytes differ from the release" : missing.length ? "Kit rules have not all been applied" :
+		rows.push(pluginInstalled ?? finding("installed_rules", installedStatus, unsafe.length ? "Installed rule path is unsafe or unreadable" : drifted.length ? "Installed rule bytes differ from the release" : missing.length ? "Kit rules have not all been applied" :
 			record.status === "UNSAFE" ? "Rule ownership record is unsafe or unreadable" : ownershipDrift.length ? "Kit ownership image differs from installed metadata or release" :
 			installedStatus === "OK" ? "All installed rule images match the manifest and kit ownership record; runtime activation remains unverified" :
 			"Installed rule bytes match; ownership and effective activation remain unverified",
@@ -2378,8 +2417,9 @@ export async function diagnose(input: DiagnoseInput): Promise<Finding[]> {
 				}
 			} catch (error) { extrasError = errorText(error); }
 		} else if (state === "unsafe") extrasError = "installed rules directory is unsafe";
-		rows.push(finding("retired_rules", retirementError || extrasError || state === "missing" ? "UNVERIFIED" : present.length || presentUnsafe.length ? "DEGRADED" : "OK", retirementError || extrasError || (state === "missing" ? "Installed rules directory is absent; retired entries were not inspected" : present.length || presentUnsafe.length ? "Retired names remain installed; ownership is not established" : "No retired names found in installed rules"), "Inspect omp-kit apply rules --plan; do not remove unowned files automatically.", { present: present.sort(), unsafe: presentUnsafe.sort() }));
-		rows.push(finding("unknown_rules", extrasError || state === "missing" ? "UNVERIFIED" : unknown.length || retiredUnsafe.length ? "DEGRADED" : "OK", extrasError ?? (state === "missing" ? "Installed rules directory is absent; extra Markdown was not inspected" : unknown.length || retiredUnsafe.length ? "Unmanaged Markdown exists in the installed rule directory" : "No extra Markdown found"), "Inspect installed rules when present; omp-kit does not own unknown Markdown.", { names: unknown.sort(), unsafe: retiredUnsafe.sort() }));
+		const legacyAbsent = state === "missing" && pluginInstalled === null;
+		rows.push(finding("retired_rules", retirementError || extrasError || legacyAbsent ? "UNVERIFIED" : present.length || presentUnsafe.length ? "DEGRADED" : "OK", retirementError || extrasError || (legacyAbsent ? "Installed rules directory is absent; retired entries were not inspected" : present.length || presentUnsafe.length ? "Retired names remain installed; ownership is not established" : "No retired names found in installed rules"), "Inspect omp-kit apply rules --plan; do not remove unowned files automatically.", { present: present.sort(), unsafe: presentUnsafe.sort() }));
+		rows.push(finding("unknown_rules", extrasError || legacyAbsent ? "UNVERIFIED" : unknown.length || retiredUnsafe.length ? "DEGRADED" : "OK", extrasError ?? (legacyAbsent ? "Installed rules directory is absent; extra Markdown was not inspected" : unknown.length || retiredUnsafe.length ? "Unmanaged Markdown exists in the installed rule directory" : "No extra Markdown found"), "Inspect installed rules when present; omp-kit does not own unknown Markdown.", { names: unknown.sort(), unsafe: retiredUnsafe.sort() }));
 		if (!input.project) rows.push(finding("project_rules", "UNVERIFIED", "No project was selected for shadow inspection", "Pass an absolute --project path to inspect project shadows."));
 		else {
 			const project = resolve(input.project);
