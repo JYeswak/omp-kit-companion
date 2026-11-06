@@ -54,13 +54,15 @@ run_stage() {
 	stage_out=$(cat "$TMP/stage.$n.out")
 	test_runs=$(grep -c '^test --timeout=120000 tests/cli/' "$CIO_LOG")
 }
-# record STORE [CIO_FAIL]: the push-time verdict's record for c1, from its own export.
+# record STORE [FAILING FILES]: the push-time verdict's record for c1, from its own export.
 record() {
 	export_dir="$TMP/judge.$1"
 	mkdir -p "$export_dir"
 	git -C "$repo" archive "$c1" | tar -xf - -C "$export_dir"
-	(cd "$export_dir" && CIO_FAIL=${2:-} python3 -B scripts/full-suite-verdict-store.py run-ci-only --repo "$repo" \
+	printf '%s\n' "${2:-}" >"$TMP/bin/cio-fail"
+	(cd "$export_dir" && python3 -B scripts/full-suite-verdict-store.py run-ci-only --repo "$repo" \
 		--commit "$c1" --cache-dir "$TMP/$1") >"$TMP/record.$1.out" 2>&1
+	rm -f "$TMP/bin/cio-fail"
 }
 
 # 1. A push-time PASS for the exact tree: reused, neither file runs, the export is not even git-initialized.

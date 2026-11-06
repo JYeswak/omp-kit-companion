@@ -72,7 +72,7 @@ resolve_cache_paths() {
 	judge_dir=$(CDPATH='' cd -- "$(dirname -- "$VERDICT")" && pwd -P) || return 1
 	judge_root=$(CDPATH='' cd -- "$judge_dir/.." && pwd -P) || return 1
 	checks=$(python3 "$judge_dir/suite-metrics.py" identity --root "$judge_root" --scope full) || return 1
-	runtime=$(python3 "$judge_dir/suite-metrics.py" runtime) || return 1
+	runtime=$(env "$@" python3 "$judge_dir/suite-metrics.py" runtime) || return 1
 	entry=$(python3 "$judge_dir/full-suite-verdict-store.py" path --repo "$repo" --tree "$tree_hash" \
 		--role base --checks "$checks" --runtime "$runtime" --judge-root "$judge_root" \
 		--cache-dir "$cache") || return 1
@@ -104,7 +104,7 @@ run_verdict_with_env() {
 	env "$2=$3" KITROOT="$KITROOT_DIR" OMP_KIT_OMP_SRC_FETCH=0 \
 		sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
 	rc=$?
-	resolve_cache_paths || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
+	resolve_cache_paths "$2=$3" || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
 }
 
 run_verdict_with_envs() {
@@ -113,7 +113,7 @@ run_verdict_with_envs() {
 	env "$@" KITROOT="$KITROOT_DIR" OMP_KIT_OMP_SRC_FETCH=0 \
 		sh "$VERDICT" --repo "$repo" --commit HEAD --cache-dir "$repo.cache" >"$out" 2>&1
 	rc=$?
-	resolve_cache_paths || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
+	resolve_cache_paths "$@" || { rc=2; echo "test harness: cannot resolve verdict cache paths" >>"$out"; }
 }
 fixture_br() {
 	env -u BEADS_DB OMP_KIT_CASE_CWD="$FIXTURE_WORKSPACE" \
@@ -608,7 +608,9 @@ if env OMP_KIT_SUITE_HERMETIC_ENABLE=0 HERMETIC_CONTROL=retained \
 	python3 -c 'import os
 for name in ("BEADS_DB", "GIT_DIR", "GIT_WORK_TREE"):
     assert name not in os.environ, name
-assert os.environ["HERMETIC_CONTROL"] == "retained"
+# FIXEDENV1 (ompkit-1ra0d.31): the suite child environment is allowlisted, so an undeclared caller variable is
+# dropped too, not only Git/tracker authority.
+assert "HERMETIC_CONTROL" not in os.environ, "HERMETIC_CONTROL"
 print("HERMETIC1_B_HELPER_INHERITED_UNSET")' >"$helper_inherited_out" 2>&1; then
 	helper_inherited_rc=0
 else
@@ -616,7 +618,7 @@ else
 fi
 if [ "$helper_inherited_rc" -eq 0 ] \
 	&& grep -F 'HERMETIC1_B_HELPER_INHERITED_UNSET' "$helper_inherited_out" >/dev/null; then
-	ok "the helper discards Git/tracker bindings in inherited mode without dropping unrelated env"
+	ok "the helper discards Git/tracker bindings and undeclared caller variables in inherited mode"
 else
 	not_ok "the helper refused or leaked inherited Git/tracker authority (rc=$helper_inherited_rc)"
 	cat "$helper_inherited_out"
@@ -1706,6 +1708,16 @@ else not_ok "MINRUN1 covered-work interval or floor boundary is wrong"; fi
 # Focused real/planted entrypoints exercise the same assertion as the full suite.
 # The pool-trap negative plants only the owned copy; never mutate the live judge there.
 case "${1-}" in
+	--fixed-env-only)
+		mkrepo_begin fresh-environment
+		mkrepo_commit
+		fresh_refusal_case GIT_DIR git-dir
+		fresh_refusal_case GIT_WORK_TREE work-tree
+		fresh_refusal_case BEADS_DB live-db
+		echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
+		[ "$fail" -eq 0 ]
+		exit $?
+		;;
 	--beads-dir-only)
 		inherited_tracker_dir_case nonhermetic-tracker-dir
 		echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"

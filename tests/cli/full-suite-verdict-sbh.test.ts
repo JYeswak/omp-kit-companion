@@ -42,6 +42,7 @@ test("full-suite sibling inherits statfs while auto/sbh still refuses", async ()
 	// HERMETIC1 points a suite's KITROOT at the candidate archive, so the candidate carries the CLI
 	// (and the files it imports) that its suite runs as "$KITROOT/src/cli.ts heavy".
 	cpSync(join(repoRoot, "src"), join(fixture, "src"), { recursive: true });
+	cpSync(join(repoRoot, "extensions"), join(fixture, "extensions"), { recursive: true }); // src/cli.ts imports extensions/
 	mkdirSync(join(fixture, "config"));
 	copyFileSync(join(repoRoot, "config", "heavy-labels.json"), join(fixture, "config", "heavy-labels.json"));
 	mkdirSync(join(fixture, "installer"));
@@ -96,7 +97,7 @@ rm -rf "$case_tmp"
 `, { mode: 0o755 });
 	chmodSync(suite, 0o755);
 	await git(fixture, "add", "--", "tests/cli/savefirst-sibling-pressure.test.sh", "scripts/kitlib-tmp.sh",
-		"scripts/tern-script-routes.json", "src", "config", "installer");
+		"scripts/tern-script-routes.json", "src", "extensions", "config", "installer");
 	await git(fixture, "commit", "-q", "-m", "[test] SAVEFIRST1 sibling fixture");
 
 	const candidate = await git(fixture, "rev-parse", "HEAD");

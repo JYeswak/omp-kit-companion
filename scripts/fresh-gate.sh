@@ -18,6 +18,10 @@ if [ "${BEADS_DB+x}" = x ]; then echo "FRESH-GATE: REFUSED caller BEADS_DB is se
 SCRIPT_DIR=$(CDPATH='' cd -- "$(/usr/bin/dirname "$0")" && pwd -P)
 # shellcheck source=scripts/fixed-env.sh
 . "$SCRIPT_DIR/fixed-env.sh"
+if [ "${1:-}" = --check-env ]; then
+	cd "$SCRIPT_DIR"
+	exec python3 -B -m suite-metrics runtime-environment
+fi
 ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd -P)
 COMMIT=HEAD
 BASE=

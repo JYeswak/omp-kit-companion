@@ -51,10 +51,15 @@ gate_run() { # $1 = gate script to install
 	mkdir -p "$repo/scripts" "$TMP/archive.$2"
 	cp "$1" "$repo/scripts/fresh-gate.sh"
 	cp "$KITREPO/scripts/kitlib-shimpath.sh" "$repo/scripts/"
+	# FIXEDENV1: the gate re-execs itself in the constructed environment its sibling policy defines.
+	for dep in fixed-env.sh suite-metrics.py kitlib_run.py kitlib_tmp.py pysafe.py; do cp "$KITREPO/scripts/$dep" "$repo/scripts/"; done
 	HOME=$home PATH=$planted sh "$repo/scripts/fresh-gate.sh" --archive-dir "$TMP/archive.$2" 2>&1
 }
 out=$(gate_run "${FRESH_GATE_UNDER_TEST:-$KITREPO/scripts/fresh-gate.sh}" real)
-printf '%s\n' "$out" | grep -qxF "fresh-gate: PATH sanitized (removed $agent_bin)"; ok $? "fresh-gate scrubs the planted PATH: $out"
+# FIXEDENV1: fresh-gate pins PATH from scripts/fixed-env.sh before anything runs, so the planted agent-bin never
+# reaches it at all (the older scrub message has nothing left to remove).
+pinned=$(HOME=$home PATH=$planted sh -c '. "$1/scripts/fixed-env.sh"; printf "%s" "$PATH"' sh "$TMP/repo.real")
+case ":$pinned:" in *":$agent_bin:"*) false ;; *) true ;; esac; ok $? "fresh-gate runs on a pinned PATH without the planted agent-bin: $pinned"
 printf '%s\n' "$out" | grep -qF "archive is missing the gate scripts"; ok $? "fresh-gate reached its first archive check"
 
 # 3. Mutant: the same gate with the helper call removed keeps the shim; the planted case must fail.

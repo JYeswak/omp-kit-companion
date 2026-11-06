@@ -17,6 +17,7 @@ import os
 import platform
 from pathlib import Path
 import resource
+import shlex
 import signal
 import sys
 import threading
@@ -60,43 +61,74 @@ def judge_identity(root: Path | str, scope: str) -> str:
     return digest.hexdigest()
 
 
+# Gate transport/custody controls are not suite inputs. In particular a scratch
+# relocation, store location or different reserving agent must not invalidate PASS.
+# None of these are forwarded by suite_environment().
+GATE_INPUTS = (
+    "TMPDIR", "AGENT_NAME", "KITLIB_TMP_ROOT",
+    "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+    "FULL_SUITE_VERDICT_CACHE_DIR", "FULL_SUITE_JOBS", "FULL_SUITE_SHELL_JOBS",
+    "FULL_SUITE_LEASE_DIR", "FULL_SUITE_LEASE_WAIT_SECS", "FULL_SUITE_LEASE_QUEUE_MAX",
+    "FRESH_GATE_REPO", "FRESH_GATE_TEST_WORKERS", "FRESH_GATE_LEDGER",
+    "FRESH_GATE_PASSED_IN", "FRESH_GATE_PASSED_OUT", "FRESH_GATE_SKIP_REGEX",
+    "RELEASE_VERDICT_ROOT", "RELEASE_VERDICT_COPY",
+    "OMP_KIT_REPO", "OMP_KIT_DEVID_SHA1", "OMP_KIT_NOTARY_PROFILE",
+    "OMP_KIT_SIGNING_KEYCHAIN", "OMP_KIT_SIGNING_KEYCHAIN_PASSWORD", "OMP_KIT_INSTALL_PREFIX",
+    "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "STOREGATE_COMMIT_MODE",
+)
+SUITE_INPUTS = (
+    "FULL_SUITE_RUNTIME_ID", "FULL_SUITE_TIMEOUT_SECS", "OMP_KIT_OMP_SRC_CACHE",
+    "OMP_KIT_SUITE_HERMETIC_ENABLE", "OMP_KIT_SUITE_FENCE_ENABLE",
+)
+
+
+def qualification_environment(*, gate: bool = False) -> dict[str, str]:
+    """Construct from empty; the shell policy owns tool order, not the caller."""
+    home = os.environ.get("HOME", str(Path.home()))
+    policy = Path(__file__).absolute().with_name("fixed-env.sh")
+    result = run(["/bin/sh", "-c", '. "$1"; exec /usr/bin/env -0', "fixed-env", str(policy)],
+                 env={"HOME": home}, deadline_s=10)
+    if result.rc != 0 or result.timed_out or result.truncated:
+        raise ValueError("pinned runtime environment is unavailable")
+    environment = {"HOME": home}
+    for item in result.stdout.decode("utf-8", errors="strict").split("\0"):
+        key, separator, value = item.partition("=")
+        if separator and key in ("PATH", "LANG", "LC_ALL"):
+            environment[key] = value
+    if not {"PATH", "LANG", "LC_ALL"}.issubset(environment):
+        raise ValueError("pinned runtime environment is incomplete")
+    environment.update({
+        "FULL_SUITE_RUNTIME_ID": os.environ.get("FULL_SUITE_RUNTIME_ID", ""),
+        "FULL_SUITE_TIMEOUT_SECS": os.environ.get("FULL_SUITE_TIMEOUT_SECS", "1800"),
+        "OMP_KIT_CC": "0", "OMP_KIT_DISK_OBSERVER": "statfs", "OMP_KIT_OMP_SRC_FETCH": "0",
+        "UV_THREADPOOL_SIZE": "4", "TOKIO_WORKER_THREADS": "4", "RAYON_NUM_THREADS": "4",
+    })
+    for name in (*SUITE_INPUTS, *(GATE_INPUTS if gate else ())):
+        if name in os.environ:
+            environment[name] = os.environ[name]
+    return environment
+
+
+def suite_environment() -> dict[str, str]:
+    """Exactly the runtime-bound inputs; the harness adds its generated paths later."""
+    return qualification_environment()
+
+
 def runtime_parts() -> tuple[str, dict[str, str]]:
-    """The executable-version prefix and the environment inputs admitted to the full-suite runner."""
-    bun = run(["bun", "--version"], deadline_s=10)
+    """Bind versions observed under exactly the constructed suite environment."""
+    environment = suite_environment()
+    bun = run(["bun", "--version"], env=environment, deadline_s=10)
     if bun.rc != 0 or bun.timed_out or bun.truncated:
         raise ValueError("bun version is unavailable or incomplete")
     bun_version = bun.stdout.decode("utf-8", errors="strict").strip()
     if not bun_version:
         raise ValueError("bun version is empty")
-    git_exec = run(["git", "--exec-path"], deadline_s=10)
-    if git_exec.rc != 0 or git_exec.timed_out or git_exec.truncated:
-        raise ValueError("git exec path is unavailable or incomplete")
-    git_exec_path = git_exec.stdout.decode("utf-8", errors="strict").strip()
-    if not git_exec_path:
-        raise ValueError("git exec path is empty")
-    python = run(["python3", "--version"], deadline_s=10)
+    python = run(["python3", "--version"], env=environment, deadline_s=10)
     if python.rc != 0 or python.timed_out or python.truncated:
         raise ValueError("python3 version is unavailable or incomplete")
     python_version = python.stdout.decode("utf-8", errors="strict").strip().removeprefix("Python ")
     if not python_version:
         raise ValueError("python3 version is empty")
-    search_path = os.environ.get("PATH", "")
-    path_parts = search_path.split(os.pathsep)
-    # Git prepends its exec directory to PATH for hooks, once per nested git
-    # invocation (a hook that runs git gets it twice). pre-push-gate clears
-    # GIT_* before judging, so discard every exact leading copy, nothing else.
-    exec_real = os.path.realpath(git_exec_path)
-    while path_parts and path_parts[0] and os.path.realpath(path_parts[0]) == exec_real:
-        path_parts.pop(0)
-    search_path = os.pathsep.join(path_parts)
-    environment = {
-        "FULL_SUITE_RUNTIME_ID": os.environ.get("FULL_SUITE_RUNTIME_ID", ""),
-        "FULL_SUITE_TIMEOUT_SECS": os.environ.get("FULL_SUITE_TIMEOUT_SECS", "1800"),
-        "GIT_EXEC_PATH": git_exec_path,
-        "LANG": os.environ.get("LANG", "C"),
-        "LC_ALL": os.environ.get("LC_ALL", ""),
-        "PATH": search_path,
-    }
     return (f"{platform.system()}/{platform.machine()}/bun-{bun_version}"
             f"/python-{python_version}"), environment
 
@@ -114,19 +146,10 @@ def runtime_identity() -> str:
 
 
 def pin_runtime() -> None:
-    """Use the shell policy even for direct Python verdict-store invocations."""
-    policy = Path(__file__).resolve().with_name("fixed-env.sh")
-    result = run(["/bin/sh", "-c", '. "$1"; exec env -0', "fixed-env", str(policy)], deadline_s=10)
-    if result.rc != 0 or result.timed_out or result.truncated:
-        raise ValueError("pinned runtime environment is unavailable")
-    selected = {}
-    for item in result.stdout.decode("utf-8", errors="strict").split("\0"):
-        key, separator, value = item.partition("=")
-        if separator and key in ("PATH", "LANG", "LC_ALL"):
-            selected[key] = value
-    if set(selected) != {"PATH", "LANG", "LC_ALL"}:
-        raise ValueError("pinned runtime environment is incomplete")
-    os.environ.update(selected)
+    """Also cover Python-only verdict-store and storegate invocations."""
+    environment = qualification_environment(gate=True)
+    os.environ.clear()
+    os.environ.update(environment)
 
 
 def hex_digest(value: object, length: int = 64) -> bool:
@@ -492,7 +515,7 @@ def load(args: argparse.Namespace) -> int:
     # hang guard; the load verdict comes from native copy failures, not elapsed
     # time. The ordinary focused cap already passed and remains unchanged.
     allowance = args.workers
-    env_mode = "scrubbed" if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") == "1" else "inherited"
+    env_mode = "scrubbed" if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") == "1" else "allowlisted"
     for index, path in enumerate(selected):
         ceiling = policy["grandfathered"].get(path, policy["cap_s"])
         directory = Path(args.records) / str(index)
@@ -549,6 +572,7 @@ def main() -> int:
     subs.add_parser("runtime")
     subs.add_parser("runtime-environment", help="Print the judged runtime and its admitted environment")
     subs.add_parser("judging-files", help="Print the canonical judged-file closure, one repository-relative path per line")
+    subs.add_parser("shell-environment", help="Print a shell-quoted allowlisted env invocation")
     copies = subs.add_parser("check-judging-copies", help="Reject fixture-local literal copies of the judged-file closure")
     copies.add_argument("paths", nargs="+")
     child = subs.add_parser("run")
@@ -584,6 +608,10 @@ def main() -> int:
     stress.add_argument("paths", nargs="*")
     args = parser.parse_args()
     try:
+        if args.action == "shell-environment":
+            environment = qualification_environment(gate=True)
+            print(shlex.join(["/usr/bin/env", "-i", *(f"{key}={value}" for key, value in environment.items())]))
+            return 0
         if args.action == "judging-files":
             print("\n".join(JUDGING_FILES))
             return 0

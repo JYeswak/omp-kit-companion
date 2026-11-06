@@ -24,6 +24,9 @@ git -C "$repo" config user.name t
 cp "${RV_UNDER_TEST:-$KITREPO/scripts/release-verdict.sh}" "$repo/scripts/release-verdict.sh"
 cp "$KITREPO/scripts/kitlib-tmp.sh" "$KITREPO/scripts/kitlib-shimpath.sh" "$repo/scripts/"
 cp "$KITREPO/scripts/fixed-env.sh" "$repo/scripts/"
+# The self-copy fixture owns its runner's RV_* controls; fixed-env.test.ts
+# exercises the production allowlist with a real verdict.
+printf '\nfixed_env_exec() { shift; exec "$@"; }\n' >>"$repo/scripts/fixed-env.sh"
 # SUITESERIAL1: the real suite lease and its kitlib helpers, in a lease dir of this test's own.
 cp "$KITREPO/scripts/suite-lease.sh" "$KITREPO/scripts/kitlib_lock.py" "$KITREPO/scripts/kitlib_proc.py" \
 	"$KITREPO/scripts/kitlib_run.py" "$KITREPO/scripts/pysafe.py" "$repo/scripts/"

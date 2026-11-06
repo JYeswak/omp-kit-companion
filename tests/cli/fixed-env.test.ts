@@ -14,6 +14,17 @@ for (const tool of ["python3", "bun", "git", "tsc"]) {
 	writeFileSync(join(poison, tool), "#!/bin/sh\necho CALLER_TOOL_WAS_USED >&2\nexit 97\n");
 	chmodSync(join(poison, tool), 0o755);
 }
+const foreignOmp = join(poison, "omp");
+writeFileSync(foreignOmp, "#!/bin/sh\nexit 97\n");
+chmodSync(foreignOmp, 0o755);
+const foreignIdentity = { OMP_PATH: foreignOmp, OMP_BIN: foreignOmp, OMP: foreignOmp, OMP_SRC: poison };
+const hostileParent = {
+	...foreignIdentity, OMP_PROFILE: "muse", PI_PROFILE: "muse",
+	PI_CODING_AGENT_DIR: poison, PI_SESSION_FILE: join(poison, "session"),
+	PI_SESSION_ID: "foreign-session", PI_TOOL_CALL_ID: "foreign-call",
+	GIT_DIR: poison, GIT_WORK_TREE: poison, BEADS_DB: join(poison, "beads.db"),
+	FIXED_ENV_RANDOM_CALLER_VALUE: "must-not-reach-qualification",
+};
 const env = (path: string, agent = "caller-a") => ({
 	HOME: process.env.HOME, PATH: path, LANG: "caller-locale", LC_ALL: "C", AGENT_NAME: agent,
 	TMPDIR: process.env.TMPDIR!, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1",
@@ -24,21 +35,43 @@ function command(argv: string[], environment = env(process.env.PATH!)) {
 	expect({ rc: r.rc, err: text(r.stderr), out: text(r.stdout) }).toMatchObject({ rc: 0 });
 	return text(r.stdout).trim();
 }
-function probe(script: string, path: string, agent?: string) {
+// fresh-gate refuses caller Git/tracker authority outright (HERMETIC1, tested there); every other hostile
+// variable must leave each gate's constructed suite environment unchanged.
+const { GIT_DIR: _gd, GIT_WORK_TREE: _gw, BEADS_DB: _bd, ...gateHostile } = hostileParent;
+function probe(script: string, path: string, agent?: string, hostile = false) {
 	return JSON.parse(command([script.endsWith("release-local.sh") ? "/bin/bash" : "/bin/sh",
-		join(kit, "scripts", script), "--check-env"], env(path, agent)));
+		join(kit, "scripts", script), "--check-env"], { ...env(path, agent), ...(hostile ? gateHostile : {}) }));
 }
 
 test("release, post-push and suite gates ignore reordered/extended caller PATH and identity", () => {
 	const paths = [`${poison}:/usr/bin:/bin`, `/bin:/usr/bin:${poison}`];
 	const control = probe("full-suite-verdict.sh", process.env.PATH!);
-	for (const script of ["release-local.sh", "release-verdict.sh", "full-suite-verdict.sh"]) {
+	for (const script of ["release-local.sh", "release-verdict.sh", "full-suite-verdict.sh", "fresh-gate.sh"]) {
 		for (const path of paths) {
-			const observed = probe(script, path, "another-agent");
+			const observed = probe(script, path, "another-agent", true);
 			expect(observed).toEqual(control);
 			expect(observed.environment.PATH.split(":" )).not.toContain(poison);
 			expect(observed.environment.LANG).toBe("C");
 		}
+	}
+});
+
+test("shell and Python qualification construct the same environment despite arbitrary caller inputs", () => {
+	const resolver = `import { resolveOmpIdentity } from ${JSON.stringify(join(kit, "src/paths.ts"))}; console.log(JSON.stringify(resolveOmpIdentity()));`;
+	const shell = ["/bin/sh", "-c", '. "$1"; fixed_env_exec "$2" bun -e "$3"', "fixture",
+		join(kit, "scripts/fixed-env.sh"), join(kit, "scripts"), resolver];
+	const python = ["/usr/bin/python3", "-c",
+		"import os,runpy,sys; runpy.run_path(sys.argv[1])['pin_runtime'](); os.execvp('bun', ['bun', '-e', sys.argv[2]])",
+		join(kit, "scripts/suite-metrics.py"), resolver];
+	const control = command(python);
+	// Compare the complete environment without exposing any admitted gate credential on failure.
+	const snapshot = "import os,json,hashlib; print(hashlib.sha256(json.dumps(dict(os.environ), sort_keys=True).encode()).hexdigest())";
+	const snapshotArgv = ["/usr/bin/python3", "-c",
+		"import os,runpy,sys; runpy.run_path(sys.argv[1])['pin_runtime'](); exec(sys.argv[2])",
+		join(kit, "scripts/suite-metrics.py"), snapshot];
+	expect(command(snapshotArgv, { ...env(process.env.PATH!), ...hostileParent })).toBe(command(snapshotArgv));
+	for (const argv of [shell, python]) {
+		expect(command(argv, { ...env(process.env.PATH!), ...hostileParent })).toBe(control);
 	}
 });
 
@@ -56,14 +89,21 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 	const ciFiles: string[] = JSON.parse(command(["/usr/bin/python3", "-c",
 		"import json,runpy,sys; print(json.dumps([p for p,_ in runpy.run_path(sys.argv[1])['CI_ONLY_FILES']]))",
 		join(kit, "scripts/full-suite-verdict-store.py")]));
-	for (const path of ciFiles) writeFileSync(join(repo, path),
-		`import { expect, test } from "bun:test";\ntest("pinned qualification locale", () => { expect(process.env.LANG).toBe("C"); expect(process.env.PATH?.split(":")).not.toContain(${JSON.stringify(poison)}); });\n`);
+	mkdirSync(join(repo, "src"), { recursive: true });
+	for (const file of ["paths.ts", "omp-source-cache.ts"]) copyFileSync(join(kit, "src", file), join(repo, "src", file));
+	const identitySuite = join(repo, "tests/cli/omp-identity.test.ts");
+	const expectedIdentity = JSON.parse(command(["/bin/sh", "-c", '. "$1"; exec bun -e "$2"', "fixture",
+		join(kit, "scripts/fixed-env.sh"),
+		`import { resolveOmpIdentity } from ${JSON.stringify(join(kit, "src/paths.ts"))}; console.log(JSON.stringify(resolveOmpIdentity()));`]));
+	const identityControl = `import { expect, test } from "bun:test";\nimport { resolveOmpIdentity } from "../../src/paths.ts";\ntest("qualification resolves the pinned OMP identity without caller state", () => { expect(resolveOmpIdentity()).toEqual(${JSON.stringify(expectedIdentity)}); for (const name of ${JSON.stringify(Object.keys(hostileParent))}) expect(process.env[name]).toBeUndefined(); });\n`;
+	for (const path of ciFiles) writeFileSync(join(repo, path), identityControl);
+	writeFileSync(identitySuite, identityControl);
 	writeFileSync(join(repo, "tests/cli/control.test.sh"), "#!/bin/sh\nprintf 'ACTUAL_SUITE_RAN\\n'\n");
 	const git = (...args: string[]) => command(["git", "-C", repo, ...args]);
 	git("init", "-q", "--template=", "-b", "main");
 	git("config", "user.name", "fixture");
 	git("config", "user.email", "fixture@example.invalid");
-	git("add", "--", "scripts", "tests", ".github");
+	git("add", "--", "scripts", "src", "tests", ".github");
 	git("commit", "-qm", "[test] fixture");
 	const argv = ["/bin/sh", join(kit, "scripts/full-suite-verdict.sh"), "--repo", repo,
 		"--commit", "HEAD", "--judge-role", "main", "--cache-dir", cache];
@@ -78,11 +118,22 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 	const release = probe("release-local.sh", `/bin:/usr/bin:${poison}`);
 	expect(record.runtime).toBe(release.runtime);
 	expect(record.environment).toEqual(release.environment);
-	const secondRun = await runFixtureAsync(argv, { cwd: kit, env: env(`/bin:/usr/bin:${poison}`, "caller-b"), floor_s: 30 });
+	const secondRun = await runFixtureAsync(argv, { cwd: kit,
+		env: { ...env(`/bin:/usr/bin:${poison}`, "caller-b"), ...hostileParent }, floor_s: 30 });
 	expect({ rc: secondRun.rc, out: text(secondRun.stdout), err: text(secondRun.stderr) }).toMatchObject({ rc: 0 });
 	const second = text(secondRun.stdout);
 	expect(second).toContain("VERDICT REUSED PASS");
 	expect(second).not.toContain("ACTUAL_SUITE_RAN");
+	// A cold verdict must also pass: reuse alone would hide poisoned suite execution.
+	const foreignRun = await runFixtureAsync([...argv.slice(0, -1), join(scratch.path, "foreign-cache")], {
+		cwd: kit, env: { ...env(`${poison}:/usr/bin:/bin`), ...hostileParent }, floor_s: 30,
+	});
+	expect({ rc: foreignRun.rc, out: text(foreignRun.stdout), err: text(foreignRun.stderr) }).toMatchObject({ rc: 0 });
+	expect(text(foreignRun.stdout)).toContain("VERDICT PASS");
+	const foreignRecordName = readdirSync(join(scratch.path, "foreign-cache")).find(name => name.endsWith(".json"))!;
+	const foreignRecord = JSON.parse(readFileSync(join(scratch.path, "foreign-cache", foreignRecordName), "utf8"));
+	expect(foreignRecord.runtime).toBe(record.runtime);
+	expect(foreignRecord.environment).toEqual(record.environment);
 	const postPush = await runFixtureAsync(["/bin/sh", join(repo, "scripts/release-verdict.sh"),
 		"--commit", "HEAD", "--no-fetch"], { cwd: repo,
 		env: { ...env(`${poison}:/usr/bin:/bin`), FULL_SUITE_VERDICT_CACHE_DIR: cache }, floor_s: 30 });
@@ -95,6 +146,14 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 	const ciLookup = ["/usr/bin/python3", join(kit, "scripts/full-suite-verdict-store.py"), "require-ci-only-pass",
 		"--repo", repo, "--tree", record.tree, "--judge-root", kit, "--suite-root", repo, "--cache-dir", cache];
 	expect(command(ciLookup, env(`${poison}:/usr/bin:/bin`))).toBe("PASS");
+	expect(command(ciLookup, { ...env(`${poison}:/usr/bin:/bin`), ...hostileParent })).toBe("PASS");
+	const directCi = await runFixtureAsync(["/usr/bin/python3", join(kit, "scripts/full-suite-verdict-store.py"),
+		"run-ci-only", "--repo", repo, "--commit", "HEAD", "--judge-root", kit, "--suite-root", repo,
+		"--cache-dir", join(scratch.path, "foreign-ci-cache")], {
+		cwd: kit, env: { ...env(process.env.PATH!), ...hostileParent }, floor_s: 30,
+	});
+	expect({ rc: directCi.rc, out: text(directCi.stdout), err: text(directCi.stderr) }).toMatchObject({ rc: 0 });
+	expect(text(directCi.stdout)).toContain("CI-ONLY: VERDICT PASS");
 	ciRecord.environment.PATH += ":/planted-unjudged-tool";
 	writeFileSync(join(cache, "ci-only", ciRecords[0]!), JSON.stringify(ciRecord));
 	const tampered = runFixture(ciLookup, { cwd: kit, env: env(process.env.PATH!), floor_s: 30 });
@@ -108,4 +167,14 @@ test("a real stored suite PASS is reused across caller shells and retains the ju
 	const changed = runFixture(lookup, { cwd: kit, env: { ...env(process.env.PATH!), FULL_SUITE_RUNTIME_ID: "planted-change" }, floor_s: 60 });
 	expect(changed.rc).toBe(1);
 	expect(text(changed.stdout)).toContain("RUNTIME_MISMATCH");
+	// Candidate-owned overrides are defects, not caller contamination to discard.
+	writeFileSync(identitySuite, `process.env.OMP_PATH = ${JSON.stringify(foreignOmp)};\n${identityControl}`);
+	git("add", "--", "tests/cli/omp-identity.test.ts");
+	git("commit", "-qm", "[test] candidate mixed OMP identity");
+	const broken = await runFixtureAsync(argv, { cwd: kit, env: env(process.env.PATH!), floor_s: 30 });
+	expect(broken.rc).toBe(1);
+	expect(text(broken.stdout) + text(broken.stderr)).toContain("VERDICT FAIL");
+	const brokenLogs = readdirSync(cache).filter(name => name.endsWith(".log"))
+		.map(name => readFileSync(join(cache, name), "utf8")).join("\n");
+	expect(brokenLogs).toContain("OMP_PATH conflicts with the PATH-selected OMP launcher");
 }, fixtureDeadlineS(30) * 1000);

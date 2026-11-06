@@ -7,5 +7,14 @@ PATH="${HOME}/Library/Application Support/Tern/omp/bin:/usr/bin:/bin:/opt/homebr
 LANG=C
 LC_ALL=C
 export PATH LANG LC_ALL
+# Execute a gate in the allowlist constructed by suite-metrics. The directory is
+# explicit so sourced helpers and fixture-owned policies use their own judge.
+fixed_env_exec() {
+	fixed_env_dir=$1
+	shift
+	fixed_env_command=$(CDPATH='' cd -- "$fixed_env_dir" && python3 -I -B suite-metrics.py shell-environment) || exit 1
+	# Only trusted, shlex-quoted constructor output is evaluated. Arguments stay
+	# positional; exec preserves the gate PID and its existing lifecycle owner.
+	eval "exec $fixed_env_command \"\$@\""
+}
 hash -r
-# Keep AGENT_NAME for reservation/commit custody; it is not a runtime input.

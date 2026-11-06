@@ -27,6 +27,9 @@ git -C "$repo" config user.email t@example.invalid
 git -C "$repo" config user.name t
 cp "$KITREPO/scripts/release-verdict.sh" "$KITREPO/scripts/kitlib-tmp.sh" "$KITREPO/scripts/kitlib-shimpath.sh" "$repo/scripts/"
 cp "$KITREPO/scripts/fixed-env.sh" "$repo/scripts/"
+# This transport/lock fixture owns its runner's RV_* controls. The real
+# allowlisted execution and reuse pair runs in fixed-env.test.ts.
+printf '\nfixed_env_exec() { shift; exec "$@"; }\n' >>"$repo/scripts/fixed-env.sh"
 # The committed runner records which commit it judged and from which directory it ran; the
 # working-tree copy is replaced below, so a run that used it would record WORKTREE.
 cat >"$repo/scripts/full-suite-verdict.sh" <<'EOF'

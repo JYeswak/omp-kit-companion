@@ -1,18 +1,21 @@
 #!/bin/sh
 # Execute one measured suite with isolated environment and filesystem/network authority.
 # The suite-metrics producer supplies an owned scratch directory and its exact archive root.
-exec python3 - "$@" <<'PY'
+exec python3 - "$0" "$@" <<'PY'
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
+import runpy
 import socket
 import subprocess
 import sys
 import sysconfig
 import time
+
+helper = Path(sys.argv.pop(1)).absolute()
 
 
 def refuse(message: str) -> None:
@@ -119,21 +122,26 @@ def mark_exec() -> None:
     except OSError as error:
         refuse("cannot write exec marker: " + str(error))
 
-# The environment scrub and the write/network fence are opt-in (OMP_KIT_SUITE_HERMETIC_ENABLE=1) until
-# ompkit-kup44.4's own control, "the full declared suite on one tree is GREEN" under them, passes. Measured
-# 2026-10-30 on published 32ad93461e: the main-role full suite under the scrub failed 100 bun tests and 10 script
-# or python suites. A scratch HOME hides the linked omp install and the flywheel probe, and the scratch git link
-# makes git look for its templates and helpers in scratch. tests/cli/profile-rules.test.ts passes 14 of 14 run
-# directly and fails 4 under this helper, and its 077 umask fails the mode-preserving audit, migrate, repair and
-# operator-snapshot tests. Without the opt-in a suite runs with the caller's environment and umask, as in 0.2.80,
-# except that TMPDIR, TMP and TEMP still name the suite's owned scratch; full-suite-verdict-incomplete.test.sh
-# enables the scrub and the fence and keeps proving both.
+# The scratch-HOME/write fence remains opt-in: it hides operator OMP installs
+# and changes umask. Environment allowlisting does not depend on that opt-in.
+# Candidate-authored overrides after this boundary remain real test failures.
 if os.environ.get("OMP_KIT_SUITE_HERMETIC_ENABLE") != "1":
-    inherited = dict(os.environ)
+    metrics = runpy.run_path(str(helper.with_name("suite-metrics.py")))
+    inherited = metrics["suite_environment"]()
+    # Generated harness paths, not caller authority.
+    inherited["KITLIB_TMP_ROOT"] = str(archive / "var" / "agent-tmp")
+    inherited["OMP_KIT_CASE_CWD"] = str(archive)
+    inherited["KITROOT"] = str(archive)  # as in the fenced mode: suites address the archive under test
+    if (archive / "bunfig.toml").is_file():
+        inherited["BUN_CONFIG_FILE"] = str(archive / "bunfig.toml")
     for name in ("TMPDIR", "TMP", "TEMP"):
         inherited[name] = str(scratch)
-    inherited.setdefault("PYTHONPYCACHEPREFIX", str(pycache))
-    print("SUITE-HERMETIC suite=" + options.suite + " env=inherited fence=off-optin", flush=True)
+    inherited["PYTHONPYCACHEPREFIX"] = str(pycache)
+    # A runner's explicit --allow-env is a declared input in both modes (validated above against wrapper names).
+    for name in options.allow_env:
+        if name in os.environ:
+            inherited[name] = os.environ[name]
+    print("SUITE-HERMETIC suite=" + options.suite + " env=allowlisted fence=off-optin", flush=True)
     mark_exec()
     os.execvpe(command[0], command, inherited)
 

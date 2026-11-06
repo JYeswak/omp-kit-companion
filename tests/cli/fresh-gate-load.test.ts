@@ -46,12 +46,9 @@ import { expect, test } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 test("hermetic fixed-name control", async () => {
-  const inherited = ${JSON.stringify({
-		HOME: join(dir, "home"), XDG_CONFIG_HOME: join(dir, "home/.config"),
-		XDG_CACHE_HOME: join(dir, "home/.cache"), XDG_DATA_HOME: join(dir, "home/.local/share"),
-		XDG_STATE_HOME: join(dir, "home/.state"), GIT_CONFIG_GLOBAL: join(dir, "home/.gitconfig"),
-	})};
-  for (const [name, value] of Object.entries(inherited)) expect(process.env[name]).toBe(value);
+  expect(process.env.HOME).toBe(${JSON.stringify(join(dir, "home"))});
+  for (const name of ["XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "GIT_CONFIG_GLOBAL"])
+    expect(process.env[name]).toBeUndefined();
   expect(readFileSync(join(process.env.HOME!, "runtime-canary"), "utf8")).toBe("linked-runtime-present");
   writeFileSync(join(process.env.TMPDIR!, ${JSON.stringify(`exclusive-${name}`)}), "owned", { flag: "wx" });
   expect(existsSync(join(process.env.TMPDIR!, ".owner"))).toBe(true);
@@ -85,7 +82,7 @@ run_affected_tests ${paths.map(path => JSON.stringify(path)).join(" ")}
 	return fx.invoke(["sh", probe]);
 }
 
-test("LOADGATE1: changed hermetic file inherits the suite environment with K private temp copies; unchanged importer runs only once", () => {
+test("LOADGATE1: changed file keeps the linked runtime with K private temp copies; unchanged importer runs only once", () => {
 	const fx = fixture();
 	try {
 		control(fx.dir, "control.test.ts");
@@ -93,7 +90,6 @@ test("LOADGATE1: changed hermetic file inherits the suite environment with K pri
 		const result = focused(fx, ["tests/cli/control.test.ts", "tests/cli/unchanged.test.ts"], ["tests/cli/control.test.ts"]);
 		expect(result.rc, result.out).toBe(0);
 		expect(result.out).toContain(`LOADGATE1 GREEN file=tests/cli/control.test.ts concurrency=${width}`);
-		expect(result.out.split("\n").find(line => line.startsWith("LOADGATE1 GREEN"))).toContain(" env=inherited ");
 		expect(result.out).not.toContain("LOADGATE1 GREEN file=tests/cli/unchanged.test.ts");
 		const audits = readdirSync(join(fx.dir, "audit"));
 		expect(audits.filter(name => name.startsWith("control.test.ts-"))).toHaveLength(width + 1);
@@ -143,7 +139,6 @@ test("deadline-only-alone plant", async () => {
 		expect(result.out).toContain(" 1 pass\n 0 fail\nRan 1 test across 1 file.");
 		expect(result.out).toContain("(fail) deadline-only-alone plant");
 		expect(result.out).toContain(`LOADGATE1 file=tests/cli/control.test.ts concurrency=${width} load1=`);
-		expect(result.out.split("\n").find(line => line.startsWith("FRESH-GATE: RED: LOADGATE1"))).toContain(" env=inherited;");
 		expect(result.out).toContain("affected tests did not pass");
 	} finally { fx.scratch.cleanup(); }
 }, 30_000);

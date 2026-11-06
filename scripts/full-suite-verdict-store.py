@@ -883,8 +883,11 @@ def ci_only_environment(repo: Path, commit: str, suite_root: Path) -> dict[str, 
     # package-release archives from Git; the work-root check needs this export as its case cwd.
     checked_run(["git", "-C", str(suite_root), "-c", "init.defaultBranch=main", "init", "-q"], deadline_s=60)
     checked_run(["git", "-C", str(suite_root), "fetch", "-q", "--depth", "1", str(repo), commit], deadline_s=120)
-    env = dict(os.environ)
+    env = load_metrics(Path(__file__).resolve().parent.parent).suite_environment()
     env.update(CI_ONLY_ENV)
+    if os.environ.get("TMPDIR"):
+        env["TMPDIR"] = os.environ["TMPDIR"]
+    env["KITLIB_TMP_ROOT"] = str(suite_root / "var" / "agent-tmp")
     env["OMP_KIT_CASE_CWD"] = str(suite_root)
     return env
 

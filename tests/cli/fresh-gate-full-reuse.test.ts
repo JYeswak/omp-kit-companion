@@ -34,13 +34,18 @@ function runArchive(pass: boolean, supplyRepo = true) {
 	const shim = join(fx.dir, "bin/python3");
 	writeFileSync(shim, `#!/bin/sh
 if [ "$1" = full-suite-verdict-store.py ]; then
-  printf '%s\\n' "$@" >"$STORE_CALL"
+  printf '%s\\n' "$@" >${JSON.stringify(calls)}
   echo ${pass ? "PASS" : "MISS"}
   exit ${pass ? 0 : 1}
 fi
 exec '${python}' "$@"
 `);
 	chmodSync(shim, 0o755);
+	// Replace the fixture-owned policy link before admitting its store shim.
+	const policy = join(scripts, "fixed-env.sh");
+	const pinned = readFileSync(policy, "utf8");
+	unlinkSync(policy);
+	writeFileSync(policy, `${pinned}\nPATH="${join(fx.dir, "bin")}:$PATH"\nexport PATH\n`);
 	const git = (args: string[]) => {
 		const result = runSync(["git", "-C", repo, ...args], { deadline_s: fixtureDeadlineS(10) });
 		if (result.rc !== 0) throw new Error(Buffer.from(result.stderr).toString());

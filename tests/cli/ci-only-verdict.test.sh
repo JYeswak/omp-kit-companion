@@ -110,8 +110,9 @@ git -C "$repo" add FAILING && git -C "$repo" commit -qm "[test] failing tree"
 c3=$(git -C "$repo" rev-parse HEAD)
 t3=$(git -C "$repo" rev-parse 'HEAD^{tree}')
 rc=0
-CIO_FAIL="package-release.test.ts kit-update.test.ts" sh "$repo/scripts/release-verdict.sh" --commit "$c3" --no-fetch \
-	>"$TMP/o6" 2>&1 || rc=$?
+printf '%s\n' "package-release.test.ts kit-update.test.ts" >"$TMP/bin/cio-fail"
+sh "$repo/scripts/release-verdict.sh" --commit "$c3" --no-fetch >"$TMP/o6" 2>&1 || rc=$?
+rm -f "$TMP/bin/cio-fail"
 export_of "$c3" "$TMP/x3"
 require "$t3" "$TMP/x3"
 [ "$rc" = 1 ] && grep -Fq "CI-ONLY: VERDICT FAIL tree=$t3" "$TMP/o6" \

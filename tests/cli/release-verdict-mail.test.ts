@@ -16,7 +16,7 @@ type Mail = { name: string; arguments: { to: string[]; subject: string; body_md:
 async function fixture() {
 	const repo = join(base, `repo-${++index}`);
 	mkdirSync(join(repo, "scripts"), { recursive: true });
-	for (const name of ["release-verdict.sh", "kitlib-tmp.sh", "kitlib-shimpath.sh"]) {
+	for (const name of ["release-verdict.sh", "kitlib-tmp.sh", "kitlib-shimpath.sh", "fixed-env.sh"]) { // FIXEDENV1: release-verdict sources its pinned policy
 		copyFileSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
 	}
 	// The test runs the canonical notifier, not a mocked mail command or am CLI.

@@ -33,7 +33,7 @@ fail=0
 # The immutable anchor needs its real bounded executor. These are declared
 # fixture dependencies, copied once; they are not fixture verdicts.
 carry_suite_executor() {
-	if [ -f "$1/scripts/suite-metrics.py" ] && [ -f "$1/scripts/suite-hermetic-env.sh" ] \
+	if [ -f "$1/scripts/suite-metrics.py" ] && [ -f "$1/scripts/suite-hermetic-env.sh" ] && [ -f "$1/scripts/fixed-env.sh" ] \
 		&& [ -f "$1/scripts/kitlib_run.py" ] && [ -f "$1/scripts/kitlib_tmp.py" ] && [ -f "$1/scripts/pysafe.py" ]; then
 		return 0
 	fi
@@ -45,7 +45,7 @@ sys.path.insert(0, str(source))
 import kitlib_run
 import pysafe
 def main():
-    names = ("suite-metrics.py", "suite-hermetic-env.sh", "kitlib_run.py", "kitlib_tmp.py", "pysafe.py")
+    names = ("suite-metrics.py", "suite-hermetic-env.sh", "fixed-env.sh", "kitlib_run.py", "kitlib_tmp.py", "pysafe.py")
     result = kitlib_run.run(["cp", *[str(source / name) for name in names], destination], deadline_s=30)
     sys.stdout.buffer.write(result.stdout)
     sys.stderr.buffer.write(result.stderr)

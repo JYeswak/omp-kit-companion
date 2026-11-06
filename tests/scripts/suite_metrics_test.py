@@ -198,37 +198,23 @@ class JudgeIdentityTests(unittest.TestCase):
         self.assertEqual(len(first.stdout), 65)
         self.assertTrue(all(c in b"0123456789abcdef" for c in first.stdout[:-1]))
 
-    def test_git_hook_exec_path_prefix_does_not_change_runtime_identity(self) -> None:
-        original_path = os.environ.get("PATH")
-        original_git_dir = os.environ.get("GIT_DIR")
-        had_git_dir = "GIT_DIR" in os.environ
-        try:
-            self.assertIsNotNone(original_path)
-            os.environ["PATH"] = original_path or ""
-            os.environ.pop("GIT_DIR", None)
+    def test_runtime_binds_constructed_inputs_not_arbitrary_parent_state(self) -> None:
+        from unittest.mock import patch
+        with patch.dict(os.environ, {}, clear=False):
             before = metrics.runtime_identity()
-
-            git_exec = metrics.run(["git", "--exec-path"], deadline_s=10)
-            self.assertEqual(git_exec.rc, 0, git_exec.stderr)
-            git_exec_path = git_exec.stdout.decode("utf-8", errors="strict").strip()
-            self.assertTrue(git_exec_path)
-
-            os.environ["PATH"] = git_exec_path + os.pathsep + (original_path or "")
+            environment = metrics.runtime_parts()[1]
+            os.environ.update({
+                "PATH": "/untrusted/bin", "OMP_PATH": "/untrusted/omp",
+                "OMP_PROFILE": "muse", "PI_PROFILE": "muse",
+                "PI_CODING_AGENT_DIR": "/untrusted/profile",
+                "PI_SESSION_FILE": "/untrusted/session", "GIT_DIR": "/untrusted/git",
+                "BEADS_DB": "/untrusted/beads.db", "RANDOM_CALLER_INPUT": "hostile",
+            })
             self.assertEqual(metrics.runtime_identity(), before)
-
-            extra_path = self.root / "operator-bin"
-            extra_path.mkdir()
-            os.environ["PATH"] = str(extra_path) + os.pathsep + (original_path or "")
+            self.assertEqual(metrics.runtime_parts()[1], environment)
+            self.assertEqual(environment, metrics.suite_environment())
+            os.environ["FULL_SUITE_RUNTIME_ID"] = "different-declared-runtime"
             self.assertNotEqual(metrics.runtime_identity(), before)
-        finally:
-            if original_path is None:
-                os.environ.pop("PATH", None)
-            else:
-                os.environ["PATH"] = original_path
-            if had_git_dir:
-                os.environ["GIT_DIR"] = original_git_dir or ""
-            else:
-                os.environ.pop("GIT_DIR", None)
 
 
     def test_relocated_checkout_has_identical_identity(self) -> None:

@@ -34,13 +34,18 @@ cio_fixture() {
 cio_stub_bin() {
 	mkdir -p "$1" || return 1
 	cio_bun_version=$(bun --version) || return 1
+	# FIXEDENV1: suite children get an allowlisted environment, so the stub cannot read the test's CIO_LOG or
+	# CIO_FAIL variables. Its log path is fixed at creation (beside the bin dir, where both tests put bun.log),
+	# and a test names the files to fail in <bin>/cio-fail.
+	cio_stub_log="${1%/*}/bun.log"
 	cat >"$1/bun" <<EOF
 #!/bin/sh
 case "\${1:-}" in --version) printf '%s\n' "$cio_bun_version"; exit 0 ;; esac
 file=\$3
 printf '%s|%s|%s|%s|%s\n' "\$*" "\$(pwd -P)" "\${OMP_KIT_CASE_CWD:-}" "\${OMP_KIT_HEAVY_MAX_WAIT_S:-}" \\
-	"\$(git -C "\${OMP_KIT_CASE_CWD:-.}" rev-parse FETCH_HEAD 2>/dev/null)" >>"\$CIO_LOG"
-case " \${CIO_FAIL:-} " in
+	"\$(git -C "\${OMP_KIT_CASE_CWD:-.}" rev-parse FETCH_HEAD 2>/dev/null)" >>"$cio_stub_log"
+fail=\$(cat "$1/cio-fail" 2>/dev/null)
+case " \$fail " in
 	*" \${file##*/} "*) printf 'boom-stdout %s\n' "\$file"; printf 'boom-stderr %s\n' "\$file" >&2; exit 1 ;;
 esac
 printf 'ok %s\n' "\$file"
