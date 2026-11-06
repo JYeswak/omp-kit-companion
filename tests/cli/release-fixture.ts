@@ -37,6 +37,8 @@ export function fixture(label: string, mainVersion: string, fullTree = false): F
 	};
 	git(work, "init", "-q", "--bare", "-b", "main", origin);
 	git(work, "init", "-q", "-b", "main", repo);
+	// release-local names the commit agent from AGENT_NAME or user.name; a grader shell may have neither.
+	git(repo, "config", "user.name", "fixture");
 	for (const dir of ["scripts", "changelog.d", ".github/workflows"]) mkdirSync(join(repo, dir), { recursive: true });
 	for (const name of ["release-notes.sh", "release-notes.ts", "release-train.sh", "stamp-release-line.sh", "kitlib-tmp.sh"])
 		copyFileSync(join(ROOT, "scripts", name), join(repo, "scripts", name));

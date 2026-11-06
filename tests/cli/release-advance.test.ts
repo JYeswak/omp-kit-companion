@@ -1,9 +1,9 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cleanupAllOwnedTmp } from "../../src/kitlib/tmp.ts";
 import { fixtureDeadlineS, runFixture } from "./fixture-process.ts";
-import { advance, CONVERGE, decode, fixture, originMain, publishedFixture, ROOT } from "./release-fixture.ts";
+import { advance, decode, fixture, originMain, publishedFixture, ROOT } from "./release-fixture.ts";
 import type { Fixture } from "./release-fixture.ts";
 afterAll(cleanupAllOwnedTmp);
 
@@ -32,7 +32,7 @@ function member(f: Fixture, name: string, message: string): number {
 		{ cwd: f.repo, env: f.env, floor_s: 30 }).rc ?? -1;
 }
 
-test.skipIf(!existsSync(CONVERGE))("subject: the advance commit carries a proof level, passes every commit-msg member, and the old subject is refused", () => {
+test("subject: the advance commit carries a proof level, passes every commit-msg member, and the old subject is refused", () => {
 	const { f, source } = publishedFixture("reladvance-subject");
 	const hooks = installCommitMsgHook(f);
 	const before = originMain(f);
