@@ -117,6 +117,8 @@ STAGE_LOG="$WORK/stages"
 : >"$STAGE_LOG"
 cleanup() {
 	# Preserve the interrupted stage's timing too: a qualification refusal must not erase its wait.
+	substep ''
+	if declare -F verdict_queue_end >/dev/null; then verdict_queue_end; fi
 	stage ''
 	if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null || true; wait "$CHILD" 2>/dev/null || true; fi
 	if [ "$UNLOCKED" = 1 ]; then security lock-keychain "$KEYCHAIN" </dev/null || echo "release-local: WARNING: could not re-lock $KEYCHAIN" >&2; fi
@@ -144,8 +146,9 @@ sha_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
 SUBSTEP=''; SUBSTEP_T0=0
 substep() {
 	local now; now=$(date +%s)
-	if [ -n "$SUBSTEP" ]; then say "substep $SUBSTEP took $((now - SUBSTEP_T0))s"; fi
+	if [ -n "$SUBSTEP" ]; then say "substep $SUBSTEP took $((now - SUBSTEP_T0))s start=$SUBSTEP_T0 end=$now"; fi
 	SUBSTEP=$1; SUBSTEP_T0=$now
+	[ -z "$SUBSTEP" ] || say "substep $SUBSTEP start=$now"
 }
 
 # RELCARD1 (ompkit-fp72.120.16.254, Joshua J-2026-11-05-03): a cut ships a gap lane and 1-3 optimization ideas with
@@ -510,9 +513,11 @@ stage source
 SRC="$WORK/src"
 mkdir -p "$SRC" "$WORK/tmp" "$WORK/build"
 # Check the exact main tree's PASS before unlocking the signing keychain.
+substep source.archive
 git -C "$ROOT" archive --format=tar "$SOURCE" >"$WORK/source.tar"
 tar -xf "$WORK/source.tar" -C "$SRC"
 rm -f "$WORK/source.tar"
+substep ''
 [ "$(jq -r .source_revision "$SRC/package.json")" = "$SOURCE" ] || die "export did not stamp source_revision"
 [ "$(bun --version)" = "$(tr -d '[:space:]' <"$SRC/.bun-version")" ] || die "bun $(bun --version) differs from the source's pinned .bun-version"
 source_tree="$(git -C "$ROOT" rev-parse "$SOURCE^{tree}")" || die "cannot resolve exact source tree"
@@ -523,6 +528,7 @@ stage verdict
 # naming both env digests and the differing fields. A plain main MISS or FAIL needs a verdict run whatever ci-only
 # reads, so ci-only is read only after main reads PASS or RUNTIME_MISMATCH (one read on a miss, as before). When both
 # read PASS or RUNTIME_MISMATCH, release-local refuses with the mismatch and starts no verdict run.
+substep verdict.store-lookup
 main_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
 	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" 2>/dev/null)" || true
 ci_result=''
@@ -537,9 +543,12 @@ verdict_mismatch() {
 	case "$2" in RUNTIME_MISMATCH*) die "$2 (ci-only verdict of prepare $SOURCE; rerun release-local under the PATH that judged it)" ;; esac
 }
 verdict_mismatch "$main_result" "$ci_result"
+substep ''
 if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
+	substep verdict.producer
 	bounded 7200 sh "$ROOT/scripts/release-verdict.sh" --commit "$SOURCE" --no-fetch ||
 		die "release verdict failed for prepare $SOURCE"
+	substep verdict.polling
 	# VERDICTSTARVE1 (ompkit-fp72.120.16.198): while another run holds its lock, release-verdict.sh writes SOURCE to its
 	# one-slot queue (release-verdict.wanted, latest wins) and returns 0. A push before the holder reaches SOURCE
 	# overwrites the slot and the holder never judges SOURCE (0.2.88: 13.6 min of polling until killed). Each poll reads
@@ -552,6 +561,13 @@ if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
 	verdict_fix="produce it with: sh scripts/release-verdict.sh --commit $SOURCE --no-fetch (it queues $SOURCE while another run holds the lock), then resume: scripts/release-local.sh --source $SOURCE --version $VERSION"
 	verdict_deadline=$(( $(date +%s) + 7200 ))
 	verdict_seen=''
+	verdict_queue_t0=''
+	verdict_queue_end() {
+		[ -n "$verdict_queue_t0" ] || return 0
+		local now; now=$(date +%s)
+		say "substep verdict.per-repo-holder took $((now - verdict_queue_t0))s start=$verdict_queue_t0 end=$now"
+		verdict_queue_t0=''
+	}
 	# The first --commit of a direct child of the holder that is its full-suite runner or its ci-only judge.
 	# shellcheck disable=SC2016 # an awk program, not shell expansions
 	rv_children_awk='$1 == holder && !found && /full-suite-verdict\.sh |full-suite-verdict-store\.py run-ci-only / { for (i = 2; i < NF; i++) { j = i + 1; if ($i == "--commit" && $j ~ /^[0-9a-f]+$/) { print $j; found = 1; break } } }'
@@ -563,10 +579,19 @@ if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
 		if [ -n "$rv_holder" ]; then
 			rv_judging="$(bounded 10 ps -A -o ppid= -o command= | awk -v holder="$rv_holder" "$rv_children_awk")" || rv_judging=''
 		fi
+		if [ -n "$rv_holder" ] && [ "$rv_judging" != "$SOURCE" ] && [ "$rv_wanted" = "$SOURCE" ] && [ -z "$verdict_queue_t0" ]; then
+			verdict_queue_t0=$(date +%s)
+			say "substep verdict.per-repo-holder start=$verdict_queue_t0"
+		fi
 		main_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
 			--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC")" || true
 		ci_result="$(bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-ci-only-pass \
 			--repo "$ROOT" --tree "$source_tree" --judge-root "$SRC" --suite-root "$SRC")" || true
+		if [ "$rv_judging" = "$SOURCE" ] || [ -z "$rv_holder" ] || [ "$rv_wanted" != "$SOURCE" ] ||
+			[ "$main_result" = FAIL ] || [ "$ci_result" = FAIL ] ||
+			{ [ "$main_result" = PASS ] && [ "$ci_result" = PASS ]; }; then
+			verdict_queue_end
+		fi
 		if [ "$main_result" = FAIL ] || [ "$ci_result" = FAIL ]; then die "release verdict FAIL for exact prepare $SOURCE"; fi
 		[ "$main_result" != PASS ] || [ "$ci_result" != PASS ] || break
 		verdict_now="release-verdict run ${rv_holder:-none} judges ${rv_judging:-unknown}; queued next ${rv_wanted:-none}"
@@ -582,7 +607,9 @@ if [ "$main_result" != PASS ] || [ "$ci_result" != PASS ]; then
 		[ "$(date +%s)" -lt "$verdict_deadline" ] || die "timed out waiting for exact prepare verdict $SOURCE"
 		sleep 3
 	done
+	verdict_queue_end
 fi
+substep verdict.readback
 if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \
 	--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \
 	>"$WORK/full-suite-verdict.out"; then
@@ -604,6 +631,7 @@ if [ "$ci_only_status" != 0 ] || [ "$(cat "$WORK/ci-only-verdict.out")" != PASS 
 	die "source tree $source_tree has no push-time ci-only PASS ($(head -n 1 "$WORK/ci-only-verdict.out") $(head -n 1 "$WORK/ci-only-verdict.err")); produce it with: sh scripts/release-verdict.sh --commit $SOURCE"
 fi
 say "ci-only verdict $source_tree: PASS (push time)"
+substep verdict.signing-preflight
 
 [ -f "$KEYCHAIN" ] || die "signing keychain $KEYCHAIN not found"
 # The password is read in-process by devid_release.py and never reaches argv, stdout or a log.
@@ -633,6 +661,7 @@ openssl x509 -noout -checkend $((30 * 24 * 60 * 60)) -in "$WORK/identity.pem" >/
 bounded 120 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" --keychain "$KEYCHAIN" --output-format json >"$WORK/notary-history.json" ||
 	die "notarytool history failed for keychain profile '$NOTARY_PROFILE'"
 say "identity $SHA1 ($AUTHORITY); notary profile $NOTARY_PROFILE proven"
+substep ''
 
 # -------------------------------------------------------------------------------------------------- 2. build
 stage build

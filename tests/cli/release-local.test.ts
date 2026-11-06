@@ -494,6 +494,74 @@ function initFixtureRepo(work: string, env: Record<string, string>): string {
 }
 const qualification = releaseStage("stage verdict\n", 'if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \\\n\t--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \\\n\t>"$WORK/full-suite-verdict.out"');
 
+function expectSubstepTiming(output: string, name: string): void {
+	const prefix = `== substep ${name}`;
+	const start = output.split("\n").find(line => line.startsWith(`${prefix} start=`));
+	const end = output.split("\n").find(line => line.startsWith(`${prefix} took `));
+	expect(start, output).toBeDefined();
+	expect(end, output).toBeDefined();
+	const fields = end!.split(" ");
+	const started = Number(fields[5]!.slice("start=".length));
+	const ended = Number(fields[6]!.slice("end=".length));
+	expect(Number.isInteger(started)).toBe(true);
+	expect(Number.isInteger(ended)).toBe(true);
+	expect(ended - started).toBe(Number(fields[4]!.slice(0, -1)));
+	expect(start).toBe(`${prefix} start=${started}`);
+}
+
+test("release source archive reports its wall-clock interval around the exact commit export", async () => {
+	const work = realpathSync(ownedTmp("release-export-timing", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+	const env = gitFixtureEnv(work);
+	const repo = initFixtureRepo(work, env);
+	writeFileSync(join(repo, "payload"), "committed release bytes\n");
+	try {
+		for (const args of [["add", "payload"], ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+			"commit", "-qm", "fixture release"]]) {
+			const result = runFixture(["git", "-C", repo, ...args], { cwd: repo, env, floor_s: 10 });
+			expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+		}
+		const result = await runFixtureAsync(["bash", "-c", `${stagePrelude}
+ROOT="$WORK/repo"; SRC="$WORK/export"; SOURCE=HEAD
+mkdir "$SRC"
+${releaseStage("substep source.archive", '[ "$(jq -r .source_revision "$SRC/package.json")"')}
+`, "release-export-timing", work], { cwd: ROOT, env, floor_s: 10 });
+		expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+		expect(readFileSync(join(work, "export/payload"), "utf8")).toBe("committed release bytes\n");
+		expectSubstepTiming(new TextDecoder().decode(result.stdout), "source.archive");
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(30) * 1_000);
+
+test("release signing preflight reports its wall-clock interval without exposing keychain inputs", async () => {
+	const work = realpathSync(ownedTmp("release-signing-timing", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
+	const bin = join(work, "bin");
+	mkdirSync(bin);
+	const sha = "A".repeat(40);
+	const stub = (name: string, body: string) => {
+		writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`); chmodSync(join(bin, name), 0o755);
+	};
+	stub("python3", "exit 0");
+	stub("openssl", "exit 0");
+	stub("xcrun", "printf '{}\\n'");
+	stub("security", `case "$1" in
+find-identity) printf '1) ${sha} "Fixture Authority"\\n' ;;
+find-certificate) printf 'SHA-1 hash: ${sha}\\n-----BEGIN CERTIFICATE-----\\nfixture\\n-----END CERTIFICATE-----\\n' ;;
+*) exit 2 ;;
+esac`);
+	writeFileSync(join(work, "keychain"), "");
+	try {
+		const result = await runFixtureAsync(["bash", "-c", `${stagePrelude}
+ROOT="$WORK"; KEYCHAIN="$WORK/keychain"; KEYCHAIN_PASSWORD="$WORK/private-password-input"
+AUTHORITY="Fixture Authority"; NOTARY_PROFILE=fixture; OMP_KIT_DEVID_SHA1=${sha}
+${releaseStage("substep verdict.signing-preflight", "# -------------------------------------------------------------------------------------------------- 2. build")}
+`, "release-signing-timing", work], {
+			cwd: ROOT, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` }, floor_s: 10,
+		});
+		expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(0);
+		const stdout = new TextDecoder().decode(result.stdout);
+		expectSubstepTiming(stdout, "verdict.signing-preflight");
+		expect(stdout + new TextDecoder().decode(result.stderr)).not.toContain("private-password-input");
+	} finally { rmSync(work, { recursive: true, force: true }); }
+}, fixtureDeadlineS(30) * 1_000);
 for (const verdict of ["cached", "missing-main", "missing-ci", "queued", "failure"] as const) {
 	test(`release qualification ${verdict} uses exact source and both verdicts`, async () => {
 		const work = realpathSync(ownedTmp("release-verdict-wait", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
@@ -522,10 +590,18 @@ touch "$RELEASE_TEST_WORK/triggered"
 		try {
 			const result = await runFixtureAsync(["bash", "-c", `${stagePrelude}
 ROOT="$WORK/repo"; SRC="$WORK/export"; SOURCE=0123456789012345678901234567890123456789; source_tree=exact-tree
-${qualification}`, "release-verdict-test", work], {
+${qualification}
+${releaseStage('if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \\\n\t--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \\\n\t>"$WORK/full-suite-verdict.out"', "substep verdict.signing-preflight")}
+substep ''`, "release-verdict-test", work], {
 				cwd: ROOT, env: { ...env, PATH: `${bin}:${env.PATH ?? ""}`, RELEASE_TEST_WORK: work, RELEASE_TEST_VERDICT: verdict }, floor_s: 10,
 			});
 			expect(result.rc, new TextDecoder().decode(result.stderr)).toBe(verdict === "failure" ? 4 : 0);
+			if (verdict !== "failure") {
+				const stdout = new TextDecoder().decode(result.stdout);
+				for (const step of ["verdict.store-lookup", "verdict.readback",
+					...(verdict === "cached" ? [] : ["verdict.producer", "verdict.polling"])])
+					expectSubstepTiming(stdout, step);
+			}
 			if (verdict === "cached") expect(existsSync(join(work, "producer"))).toBe(false);
 			else expect(readFileSync(join(work, "producer"), "utf8")).toContain("--commit 0123456789012345678901234567890123456789 --no-fetch");
 			const reads = readFileSync(join(work, "reads"), "utf8");
@@ -594,6 +670,7 @@ ${qualification}`, "verdict-starve-test", work], {
 			expect(reads.length).toBe(5);
 			if (holderJudges === "other") {
 				expect(result.rc, stderr).toBe(4);
+				expectSubstepTiming(stdout, "verdict.per-repo-holder");
 				expect(stderr).toContain(`VERDICT_STARVED: release-verdict run ${holderPid} judges ${other} and queues ${pushed} next, so it skips prepare ${source}`);
 				expect(stderr).toContain(`sh scripts/release-verdict.sh --commit ${source} --no-fetch`);
 				expect(stderr).toContain(`scripts/release-local.sh --source ${source} --version 0.0.0`);
