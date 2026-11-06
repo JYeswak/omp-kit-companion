@@ -284,6 +284,112 @@ test("KITREC1: null activation requires known-good binary repair, not undo or re
  expect(unverified.errors?.[0]?.remediation).not.toContain("omp-kit update --reconcile");
 }));
 
+// ACTGUIDE1 runs the canonical source in a fresh runtime. The default seam loads it
+// unchanged; mutants are memory-only, so no product flag or copied source can ship.
+async function actguideFixture(fixtureNumber: 1 | 2, arm: "case" | "mutant" = "case"): Promise<void> {
+ await fixture(async ctx => {
+  const script = `
+import assert from "node:assert/strict";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { plugin } from "bun";
+const fixtureNumber = ${fixtureNumber}, arm = ${JSON.stringify(arm)};
+const target = ${JSON.stringify(join(repoRoot, "src"))} + (fixtureNumber === 1 ? "/kit-update.ts" : "/kit-update-job.ts");
+let intercepted = false;
+await plugin({ name: "actguide1-source", setup(build) {
+ build.onLoad({ filter: /\\/src\\/kit-update(?:-job)?\\.ts$/ }, args => {
+  let contents = readFileSync(args.path, "utf8");
+  if (args.path === target) {
+   intercepted = true;
+   if (arm === "mutant") {
+    // Restore the old undo-on-null policy, not a fabricated guidance result.
+    const before = fixtureNumber === 1
+     ? 'outcome.status === "PARTIAL" && outcome.activeVersion === null'
+     : 'if (activeVersion === null || result.postcheck.reason === "OMP_CHANGED_DURING_KIT_UPDATE") {';
+    const after = fixtureNumber === 1
+     ? "false"
+     : 'if (result.postcheck.reason === "OMP_CHANGED_DURING_KIT_UPDATE") {';
+    assert.equal(contents.split(before).length, 2, "ACTGUIDE1 mutant must change exactly one decision");
+    contents = contents.replace(before, after);
+   }
+  }
+  return { contents, loader: "ts" };
+ });
+} });
+// Dynamic imports are intentional: the source-loader seam must register before module loading.
+const { planKitUpdate, kitUpdateEnvelope } = await import(${JSON.stringify(join(repoRoot, "src/kit-update.ts"))});
+const { acquireKitUpdateLock, beginKitUpdateReceipt, inspectPendingKitUpdate } = await import(${JSON.stringify(join(repoRoot, "src/mutations.ts"))});
+const input = ${JSON.stringify(input(ctx))};
+const plan = await planKitUpdate(input);
+assert.equal(plan.status, "UPDATE_AVAILABLE");
+const partial = { status: "PARTIAL", exitCode: 1, receiptId: "receipt-actguide1",
+ activeVersion: null, provenance: "SIGSTORE_VERIFIED",
+ postcheck: { status: "NOT_RUN", matcher: "NOT_RUN", live: "NOT_RUN", reason: "KIT_POSTIMAGE_CHANGED" } };
+let guidance;
+if (fixtureNumber === 1) {
+ const envelope = kitUpdateEnvelope(plan, partial);
+ assert.equal(envelope.code, 1);
+ assert.equal(envelope.data.active_version, null);
+ guidance = [...(envelope.commands ?? []), ...(envelope.errors ?? []).map(error => error.remediation ?? "")];
+ if (arm === "case") {
+  assert.equal(envelope.data.reason, "KIT_ACTIVATION_UNVERIFIED");
+  assert.deepEqual(envelope.commands ?? [], []);
+  assert.equal(envelope.errors[0].code, "KIT_ACTIVATION_UNVERIFIED");
+  assert.ok(envelope.errors[0].remediation.includes("known-good release binary"));
+ }
+} else {
+ const { runKitUpdateJob } = await import(${JSON.stringify(join(repoRoot, "src/kit-update-job.ts"))});
+ const notes = [];
+ const result = await runKitUpdateJob({ ...input, enabled: true, pollRelease: async () => input }, {
+  plan: async () => plan,
+  apply: async () => {
+   const lock = acquireKitUpdateLock(input.stateRoot);
+   try {
+    partial.receiptId = beginKitUpdateReceipt(input.stateRoot, lock, { scope: "kit",
+     identitySha256: "a".repeat(64), kitVersion: plan.current.version, ompVersion: null, channel: null }).id;
+   } finally { lock.release(); }
+   rmSync(join(input.prefix, "bin", "omp-kit"));
+   return partial;
+  },
+  exec: async () => { throw new Error("ACTGUIDE1 must not contact the network"); },
+  relink: async () => { throw new Error("ACTGUIDE1 must not relink an unverified activation"); },
+  notify: message => { notes.push(message); },
+ });
+ assert.equal(result.status, "PENDING");
+ assert.equal(result.activeVersion, null);
+ assert.equal(result.receiptId, partial.receiptId);
+ assert.equal(inspectPendingKitUpdate(input.stateRoot)?.id, partial.receiptId);
+ assert.equal(result.relink, "NOT_RUN");
+ assert.equal(result.service, "NOT_RUN");
+ assert.equal(notes.length, 1);
+ if (arm === "case") {
+  assert.equal(result.reason, "KIT_ACTIVATION_UNVERIFIED");
+  assert.ok(notes[0].includes("known-good release binary"));
+ }
+ guidance = notes;
+}
+assert.ok(intercepted, "source-loader seam must exercise the selected canonical path");
+const wrong = Number(guidance.some(text => text.includes("omp-kit undo ")));
+console.log(JSON.stringify({ wrong }));
+`;
+  const ran = await runBounded([process.execPath, "--no-env-file", "--config=/dev/null", "-e", script], {
+   cwd: repoRoot, env: { ...process.env, OMP_KIT_UPDATE_POLL: "" },
+   deadline_s: fixtureDeadlineS(30), max_output_bytes: 128 * 1024,
+  });
+  const stdout = new TextDecoder().decode(ran.stdout), stderr = new TextDecoder().decode(ran.stderr);
+  expect({ rc: ran.rc, timed_out: ran.timed_out, truncated: ran.truncated }, stdout + stderr)
+   .toEqual({ rc: 0, timed_out: false, truncated: false });
+  const { wrong } = JSON.parse(stdout);
+  console.log(`ACTGUIDE1 arm=${arm} fixture=${fixtureNumber} wrong=${wrong}`);
+  expect(wrong).toBe(arm === "case" ? 0 : 1);
+ }, { nextVersion: "1.2.4" });
+}
+
+test("ACTGUIDE1 case 1", () => actguideFixture(1), fixtureDeadlineS(40) * 1000);
+test("ACTGUIDE1 case 2", () => actguideFixture(2), fixtureDeadlineS(40) * 1000);
+test("ACTGUIDE1 mutant 1", () => actguideFixture(1, "mutant"), fixtureDeadlineS(40) * 1000);
+test("ACTGUIDE1 mutant 2", () => actguideFixture(2, "mutant"), fixtureDeadlineS(40) * 1000);
+
 // An operator facing PARTIAL must see which stages failed, which of their paths changed, and the exact recovery command.
 test("failed postcheck envelope names failed stages, changed operator paths and the undo command", async () => fixture(async ctx => {
  const planned = await planKitUpdate(input(ctx));
