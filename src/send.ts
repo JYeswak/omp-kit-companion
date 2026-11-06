@@ -8,8 +8,9 @@ import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { paneRunsShell, refuseShellPayload } from "./send-payload-guard.ts";
 import { paneIsBusy } from "./fleet-watch.ts";
 import { defaultTernIo, discoverTernSeatFromInspection, identifyTernSeat, observeTernSeat, parseSessionView, readSessionView,
-	resolveDaemonSocket, sessionViewOfText } from "./plane-tern.ts";
+	resolveDaemonSocket, sessionViewOfText, SESSION_TAIL_WINDOW_BYTES } from "./plane-tern.ts";
 import type { SessionJournalView, TernObserveOptions, TernObserverIo, TernSeatBinding } from "./plane-tern.ts";
+import { atomicReplaceBytes } from "./kitlib/io.ts";
 
 export const SEND_POLL_MS = 1500;
 export const SEND_DEADLINE_MS = 15000;
@@ -1070,10 +1071,10 @@ const TERN_PROOF_ANCHOR_BYTES = 64 * 1024;
  */
 export function proveTernEntry(journal: string | SessionJournalView, key: TernProofKey): TernProof {
 	const view = typeof journal === "string" ? sessionViewOfText(journal) : journal;
-	if (view.fileSize < key.cursorBytes) return { status: "UNCERTAIN", reason: "JOURNAL_SHRANK" };
 	if (key.fileIdentity !== null && view.identity !== null && view.identity !== key.fileIdentity) {
 		return { status: "UNCERTAIN", reason: "JOURNAL_REPLACED" };
 	}
+	if (view.fileSize < key.cursorBytes) return { status: "UNCERTAIN", reason: "JOURNAL_SHRANK" };
 	let bytes = view.tail;
 	let base = view.tailStart;
 	let reachesEnd = true;
@@ -1137,6 +1138,49 @@ export function proveTernEntry(journal: string | SessionJournalView, key: TernPr
 	return { status: "ABSENT", reason: "NO_MATCHING_ENTRY" };
 }
 
+/**
+ * A replacement loses byte-cursor/prefix authority. Reconcile only this attempt's unique, typed USER
+ * payload in the same session, never a marker echo. Goal controls carry no marker and remain unproven.
+ * Scan from the current body in bounded record-aligned windows, not just the latest tail; a changing
+ * snapshot, unreadable range or a record larger than a window leaves the attempt blocked for acknowledgement.
+ */
+function proveReplacedTernEntry(io: TernObserverIo, path: string, snapshot: SessionJournalView, key: TernProofKey): TernProof {
+	const journal = parseSessionView(snapshot);
+	if (journal.status !== "KNOWN" || journal.sessionId !== key.sessionId || key.kind !== "message" || !key.marker) {
+		return { status: "UNCERTAIN", reason: "REPLACEMENT_KEY_UNPROVABLE" };
+	}
+	let position = ternJournalBodyStart(snapshot.head);
+	while (position < snapshot.fileSize) {
+		const view = position >= snapshot.tailStart ? snapshot
+			: readSessionView(io, path, { start: position, cursor: position });
+		if (view === null || view.identity !== snapshot.identity || view.sha256 !== snapshot.sha256) {
+			return { status: "UNCERTAIN", reason: "REPLACEMENT_CHANGED_DURING_PROOF" };
+		}
+		const range = position >= view.tailStart ? { start: view.tailStart, bytes: view.tail } : view.proofRange;
+		if (!range || range.start > position || range.start + range.bytes.length <= position) {
+			return { status: "UNCERTAIN", reason: "REPLACEMENT_RANGE_UNAVAILABLE" };
+		}
+		const bytes = range.bytes;
+		const end = Math.min(bytes.length, position - range.start + SESSION_TAIL_WINDOW_BYTES);
+		let cursor = position - range.start;
+		const start = cursor;
+		while (cursor < end) {
+			const newline = bytes.indexOf(0x0a, cursor);
+			if (newline < 0 || newline >= end) break;
+			const offset = range.start + cursor;
+			let record: Record<string, unknown> | null = null;
+			try { record = recordOf(JSON.parse(bytes.subarray(cursor, newline).toString("utf8"))); } catch {}
+			cursor = newline + 1;
+			if (!record || typeof record.id !== "string" || !record.id) continue;
+			const match = entryProves(record, key);
+			if (match) return { status: "PROVEN", offset, entryId: record.id, steering: match.steering };
+		}
+		if (cursor === start) return { status: "UNCERTAIN", reason: "REPLACEMENT_PARTIAL_OR_OVERSIZE_RECORD" };
+		position = range.start + cursor;
+	}
+	return { status: "ABSENT", reason: "NO_MATCHING_ENTRY" };
+}
+
 /** Build the proof key for an attempt from the exact pre-send journal snapshot (whole text or bounded view). */
 export function buildTernProofKey(journalRead: string | SessionJournalView, journal: { sessionId: string; leafId: string },
 	sent: { kind: "message" | "goal-set"; payload: string; marker: string; objective: string }): TernProofKey {
@@ -1168,6 +1212,7 @@ export interface TernPendingRecord extends TernProofKey {
 	sessionSha: string;
 	textSha256: string;
 	createdAt: string;
+	status?: "REPLACED_UNPROVEN";
 }
 
 const TERN_PENDING_STRINGS = ["marker", "payloadSha256", "objective", "sessionId", "leafId", "prefixSha256",
@@ -1195,6 +1240,7 @@ function readTernPending(path: string): TernPendingRecord | null {
 	if (fileIdentity !== null && typeof fileIdentity !== "string") return null;
 	const priorGoalIdsComplete = rec.priorGoalIdsComplete === undefined ? true : rec.priorGoalIdsComplete;
 	if (typeof priorGoalIdsComplete !== "boolean") return null;
+	if (rec.status !== undefined && rec.status !== "REPLACED_UNPROVEN") return null;
 	return { ...rec, prefixStart, fileIdentity, priorGoalIdsComplete } as unknown as TernPendingRecord;
 }
 
@@ -1226,13 +1272,41 @@ function persistTernAttempt(path: string, record: TernPendingRecord): boolean {
 	}
 }
 
-/** A later consumption or a gone incarnation changes the ledger only; nothing is ever resent. */
-function settleTernPending(pendingDir: string, name: string, rec: TernPendingRecord, status: string, offset: number | null): void {
+/** Settlement is ledger-first: failed persistence never removes the suppression record. */
+function settleTernPending(pendingDir: string, name: string, rec: TernPendingRecord,
+	status: "CONSUMED_LATER" | "INCARNATION_GONE" | "REPLACED_UNPROVEN" | "ACKNOWLEDGED", offset: number | null): boolean {
 	try {
 		appendFileSync(join(pendingDir, "ledger.jsonl"), JSON.stringify({ at: new Date().toISOString(), status,
 			marker: rec.marker, seatKey: rec.seatKey, sessionId: rec.sessionId, offset }) + "\n");
-	} catch {}
-	try { rmSync(join(pendingDir, name), { force: true }); } catch {}
+		if (status === "REPLACED_UNPROVEN") {
+			atomicReplaceBytes(join(pendingDir, name), Buffer.from(JSON.stringify({ ...rec, status }) + "\n"),
+				{ mode: 0o600, durability: "full" });
+		} else {
+			rmSync(join(pendingDir, name));
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Explicit loss-of-proof acknowledgement, not consumption proof and never a resend. */
+export function acknowledgeTernPending(path: string, dropDir: string): {
+	ok: boolean; code: string; detail: string; marker: string; sessionId: string; seatKey: string;
+} {
+	const pendingDir = resolve(join(dropDir, "..", "tern-pending"));
+	const refused = { ok: false, code: "PENDING_ACK_REFUSED", detail: "Only an exact REPLACED_UNPROVEN record in this drop folder's tern-pending directory can be acknowledged; nothing sent or cleared.",
+		marker: "", sessionId: "", seatKey: "" };
+	if (!isAbsolute(path) || dirname(resolve(path)) !== pendingDir) return refused;
+	const rec = readTernPending(path);
+	if (rec === null || rec.status !== "REPLACED_UNPROVEN") return refused;
+	const name = `${rec.seatKey}.${sha256Hex(rec.sessionId).slice(0, 16)}.json`;
+	if (resolve(path) !== join(pendingDir, name)) return refused;
+	if (!settleTernPending(pendingDir, name, rec, "ACKNOWLEDGED", null)) {
+		return { ...refused, code: "PENDING_ACK_FAILED", detail: `Could not ledger and clear ${path}; nothing sent. Inspect the record before retrying.` };
+	}
+	return { ok: true, code: "ACKNOWLEDGED", detail: `Acknowledged unproven attempt ${path}; consumption is not proven; nothing sent.`,
+		marker: rec.marker, sessionId: rec.sessionId, seatKey: rec.seatKey };
 }
 
 /**
@@ -1434,6 +1508,12 @@ export async function deliverToTernSeat(input: {
 	// journal session identity, never the mutable content hash, so appends
 	// and BUSY/IDLE flaps cannot release suppression (AM58562-4, B5).
 	const pendingDir = resolve(join(input.dropDir, "..", "tern-pending"));
+	const refuseReplaced = (path: string, rec: TernPendingRecord): TernDeliverResult => {
+		const quoted = [path, input.dropDir].map((arg) => `'${arg.split("'").join("'\\''")}'`);
+		const command = `omp-kit send --ack-pending ${quoted[0]} --drop-dir ${quoted[1]}`;
+		return fail("REPLACED_UNPROVEN", `Journal replaced; consumption of ${path} (${rec.marker}) is unproven; no resend. `
+			+ `To acknowledge this loss of proof without sending, run: ${command}`);
+	};
 	let pendingNames: string[] = [];
 	try {
 		pendingNames = readdirSync(pendingDir);
@@ -1444,6 +1524,7 @@ export async function deliverToTernSeat(input: {
 		if (!name.startsWith(`${seatKey}.`) || !name.endsWith(".json")) continue;
 		const rec = readTernPending(join(pendingDir, name));
 		if (rec === null) continue;
+		if (rec.status === "REPLACED_UNPROVEN") return refuseReplaced(join(pendingDir, name), rec);
 		if (rec.sessionId !== journal.sessionId) {
 			settleTernPending(pendingDir, name, rec, "INCARNATION_GONE", null);
 			continue;
@@ -1452,11 +1533,21 @@ export async function deliverToTernSeat(input: {
 		const proofView = rec.prefixStart < journalView.tailStart
 			? readSessionView(input.io, sessionFile, { start: rec.prefixStart, cursor: rec.cursorBytes }) : journalView;
 		const proof = proofView === null ? null : proveTernEntry(proofView, rec);
-		if (proof?.status === "PROVEN") settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", proof.offset);
+		if (proof?.status === "PROVEN") {
+			settleTernPending(pendingDir, name, rec, "CONSUMED_LATER", proof.offset);
+		} else if (proof?.status === "UNCERTAIN" && proof.reason === "JOURNAL_REPLACED" && proofView !== null) {
+			const replacement = proveReplacedTernEntry(input.io, sessionFile, proofView, rec);
+			const status = replacement.status === "PROVEN" ? "CONSUMED_LATER" : "REPLACED_UNPROVEN";
+			if (!settleTernPending(pendingDir, name, rec, status, replacement.status === "PROVEN" ? replacement.offset : null)) {
+				return fail("PENDING_SETTLEMENT_FAILED", `Could not settle pending record ${join(pendingDir, name)}; nothing sent.`);
+			}
+			if (status === "REPLACED_UNPROVEN") return refuseReplaced(join(pendingDir, name), rec);
+		}
 	}
 	const pendingPath = resolve(join(pendingDir, `${seatKey}.${sha256Hex(journal.sessionId).slice(0, 16)}.json`));
 	const pending = readTernPending(pendingPath);
 	if (pending !== null && pending.sessionId === journal.sessionId) {
+		if (pending.status === "REPLACED_UNPROVEN") return refuseReplaced(pendingPath, pending);
 		return { status: "PENDING_CONSUME", marker: pending.marker, sends: 0, sessionFile, offset: null, drop_path: null,
 			detail: `earlier attempt unproven on this runtime incarnation; new send suppressed`, code: "SUPPRESSED_PENDING",
 			...(queued ? { queue_states: ["QUEUED", "PENDING_CONSUME"] as const } : {}) };

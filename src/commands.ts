@@ -292,11 +292,12 @@ const serviceData: DataSchema = { type: "object", required: ["overall", "job"], 
 const sendData: DataSchema = { type: "object", required: ["overall", "session", "pane", "status"], properties: {
 	overall: { enum: ["OK", "NOT_DELIVERED", "PENDING_CONSUME", "UNAVAILABLE", "UNVERIFIED"] },
 	session: { type: "string" }, pane: { type: "string" },
-	status: { enum: ["OK", "DELIVERED", "NOT_DELIVERED", "UNDELIVERED", "PENDING_SUBMIT", "PENDING_CONSUME"] },
+	status: { enum: ["OK", "DELIVERED", "NOT_DELIVERED", "UNDELIVERED", "PENDING_SUBMIT", "PENDING_CONSUME", "ACKNOWLEDGED"] },
 	marker: { type: ["string", "null"] }, sends: { type: ["number", "null"] },
 	drop_path: { type: ["string", "null"] }, detail: { type: "string" },
 	bead_ids: { type: "array", items: { type: "string" } }, no_bead_reason: { type: ["string", "null"] },
 	session_file: { type: ["string", "null"] }, offset: { type: ["number", "null"] }, tern_code: { type: "string" },
+	pending_path: { type: "string" },
 } };
 const shaData: DataSchema = { type: "object", required: ["overall", "sha", "hits"], properties: {
 	overall: { enum: ["OK", "NOT_FOUND"] },
@@ -901,8 +902,9 @@ export const COMMANDS: readonly Command[] = [
 		], example: "omp-kit service logs omp-watch --json", runnable: false, dataSchema: serviceData },
 		{ name: "run", description: "Execute one job now (what launchd runs); writes a receipt (omp-watch tests OMP, scratch-reaper applies scratch quarantine/deletion)", usage: "service run JOB", argument: "JOB", flags: [], example: "omp-kit service run omp-watch --json", runnable: false, dataSchema: serviceData },
 	], example: "omp-kit service list --json", runnable: false, dataSchema: serviceData },
-	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback; tern:<id> resolves a live Tern block from inspection at send time)", usage: "send SESSION PANE MESSAGE", flags: [
+	{ name: "send", description: "Send a message to a fleet pane and prove it landed (marker poll up to 15 s, one retry, drop-folder fallback; tern:<id> resolves a live Tern block from inspection at send time)", usage: "send SESSION PANE MESSAGE | send --ack-pending RECORD", flags: [
 		{ name: "--drop-dir", value: "PATH", description: "Drop folder for undelivered messages (default: state-root send-drop)" },
+		{ name: "--ack-pending", value: "RECORD", description: "Acknowledge the exact REPLACED_UNPROVEN pending-record path, ledger it and clear suppression; never sends or proves consumption; cannot include a message" },
 		{ name: "--no-bead-reason", value: "TEXT", description: "Send a work dispatch that cites no bead id; the reason is recorded in the result" },
 		{ name: "--until-delivered", value: "SECONDS", description: "Bound in seconds for a busy-seat send (default 300 for Tern sends and dispatches, off for other tmux sends; 0 refuses immediately)" },
 		{ name: "--cwd", value: "PATH", description: "Absolute repository cwd the tern:<id> seat is bound to (default: the session's cwd or repo in fleet-watch.json)" },

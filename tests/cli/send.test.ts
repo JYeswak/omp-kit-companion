@@ -5,9 +5,11 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSyn
 import { dirname, join, resolve } from "node:path";
 import { BEAD_ID, buildNativeSendTurn, buildTernProofKey, classifyTernPayload, deliverToTernSeat, dispatchBeads, fleetBeadPrefixes, isBareGoalDirective, luaCharCodes, proveSend, proveTernEntry, submitQueuedToTernSeat, ternSendSeat, trackerPrefix, TERN_STEER_BOUND_MS, TERN_TURN_BOUNDARY_WAIT_MS, type ComposerVerdict, type SendExec } from "../../src/send.ts";
 import * as sendModule from "../../src/send.ts";
-import { classifyTernObservation, parseSessionJournal } from "../../src/plane-tern.ts";
+import { classifyTernObservation, parseSessionJournal, readSessionTail, sessionViewOfText } from "../../src/plane-tern.ts";
 import type { TernIdentityResult, TernObservation, TernObserverIo, TernSeatBinding } from "../../src/plane-tern.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
+import { run } from "../../src/kitlib/run.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 const repoRoot = resolve(import.meta.dir, "../..");
 const scratchRoot = join(repoRoot, "var", "agent-tmp");
 mkdirSync(scratchRoot, { recursive: true });
@@ -857,6 +859,131 @@ test("TERN2.4 B5-7: unconsumed pending suppresses the new send; later consumptio
 	const ledger = readFileSync(join(dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
 	expect(ledger).toMatchObject([{ status: "CONSUMED_LATER", marker: oldMarker, offset: Buffer.byteLength(settledJournal) }]);
 	expect(JSON.parse(readFileSync(pendingPath, "utf8")).marker).toBe(resumed.marker);
+});
+
+/** A pending key on the old inode, with current journal reads on its replacement. */
+function replacedPending(journal: string, originalJournal = settledJournal) {
+	const dir = ternDropDir();
+	const marker = "kit-send-0123456789ac";
+	const payload = `old\n[${marker}]`;
+	const path = seedPending(dir, originalJournal, marker, payload);
+	const record = JSON.parse(readFileSync(path, "utf8"));
+	writeFileSync(path, JSON.stringify({ ...record, fileIdentity: "1:old" }) + "\n");
+	const fake = ternFake({ journal, respond: journalsUser() });
+	const io: TernObserverIo = { ...fake.io, readSessionFile: () => null,
+		readSessionTail: () => ({ ...sessionViewOfText(fake.journal.text), identity: "1:new" }) };
+	return { dir, marker, payload, path, fake, io };
+}
+
+test("SENDSTUCK1: replacement journal's exact typed USER entry settles CONSUMED_LATER and permits the next send", async () => {
+	const payload = "old\n[kit-send-0123456789ac]";
+	// Rewriting can move the entry before the old byte cursor.
+	const journal = HEADER + userEntry("old-u", null, payload) + assistantEntry("m1", "old-u");
+	const fx = replacedPending(journal, HEADER + assistantEntry("m1", null, "old history ".repeat(100)));
+	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io });
+	expect(result.status).toBe("OK");
+	expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
+	expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)))
+		.toMatchObject([{ status: "CONSUMED_LATER", marker: fx.marker, offset: Buffer.byteLength(HEADER) }]);
+});
+
+test("SENDSTUCK1 planted: absent, substring-only and assistant echo replacement entries never release suppression", async () => {
+	const payload = "old\n[kit-send-0123456789ac]";
+	for (const journal of [
+		settledJournal,
+		HEADER + userEntry("old-u", null, `quoted ${payload}`) + assistantEntry("m1", "old-u"),
+		HEADER + assistantEntry("m1", null, payload),
+	]) {
+		const fx = replacedPending(journal);
+		const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io });
+		expect(result.status).toBe("REFUSED");
+		expect(result.code).toBe("REPLACED_UNPROVEN");
+		expect(result.sends).toBe(0);
+		expect(result.detail).toContain(fx.path);
+		expect(result.detail).toContain("omp-kit send --ack-pending");
+		expect(fx.fake.sent).toEqual([]);
+		expect(JSON.parse(readFileSync(fx.path, "utf8")).status).toBe("REPLACED_UNPROVEN");
+		const again = await deliverTern(fx.fake, "new again", { dropDir: fx.dir, io: fx.io });
+		expect(again.code).toBe("REPLACED_UNPROVEN");
+		expect(fx.fake.sent).toEqual([]);
+		expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)))
+			.toMatchObject([{ status: "REPLACED_UNPROVEN", marker: fx.marker }]);
+	}
+});
+
+test("SENDSTUCK1 partial replacement: unsettled journal refuses before reconciliation with zero sends", async () => {
+	const fx = replacedPending(settledJournal + userEntry("old-u", "m1", "old\n[kit-send-0123456789ac]").trimEnd());
+	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io });
+	expect(result.status).toBe("REFUSED");
+	expect(result.code).toBe("ELIGIBILITY_UNSETTLED");
+	expect(fx.fake.sent).toEqual([]);
+	expect(existsSync(fx.path)).toBe(true);
+});
+
+test("SENDSTUCK1: replacement proof scans history before the current bounded tail", async () => {
+	const payload = "old\n[kit-send-0123456789ac]";
+	const padding = Array.from({ length: 160 }, (_, index) =>
+		jline({ type: "custom", id: `pad-${index}`, parentId: index ? `pad-${index - 1}` : "old-u",
+			customType: "memory_recall", data: "x".repeat(64 * 1024) })).join("");
+	const journal = HEADER + userEntry("old-u", null, payload) + padding
+		+ assistantEntry("m1", null) + jline({ type: "model_usage", id: "pin", parentId: "m1", activeLeafId: "m1" });
+	const fx = replacedPending(journal);
+	const file = join(dirname(fx.dir), "replacement.jsonl");
+	writeFileSync(file, journal);
+	const io: TernObserverIo = { ...fx.io, readSessionTail: (_path, proof) => {
+		// Keep the file in sync with the fixture's native send.
+		writeFileSync(file, fx.fake.journal.text);
+		return readSessionTail(file, undefined, proof);
+	} };
+	const view = readSessionTail(file)!;
+	expect(view.tailStart).toBeGreaterThan(Buffer.byteLength(HEADER + userEntry("old-u", null, payload)));
+	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io,
+		observe: async () => ({ ...ternIdle, sessionSha: readSessionTail(file)!.sha256 }) });
+	expect(result.status).toBe("OK");
+	expect(readFileSync(join(fx.dir, "..", "tern-pending", "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)))
+		.toMatchObject([{ status: "CONSUMED_LATER", marker: fx.marker, offset: Buffer.byteLength(HEADER) }]);
+});
+
+test("SENDSTUCK1: a replaced-unproven record still requires acknowledgement after a runtime incarnation changes", async () => {
+	const fx = replacedPending(settledJournal);
+	expect((await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io })).code).toBe("REPLACED_UNPROVEN");
+	fx.fake.journal.text = HEADER.replace('"s1"', '"s2"') + assistantEntry("m1", null);
+	const bound = { ...ternRuntimeBinding, sessionUuid: "s2" };
+	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io,
+		observe: idleOf(fx.fake, { runtimeBinding: bound }),
+		identify: async () => ({ ...ternIdentified, runtimeBinding: bound }) });
+	expect(result.code).toBe("REPLACED_UNPROVEN");
+	expect(fx.fake.sent).toEqual([]);
+	expect(existsSync(fx.path)).toBe(true);
+});
+
+test("SENDSTUCK1: explicit CLI acknowledgement clears only a replaced-unproven record and sends nothing", async () => {
+	const fx = replacedPending(settledJournal);
+	// Model a prior send's durable classification; acknowledgement never inspects or actuates the seat.
+	const record = JSON.parse(readFileSync(fx.path, "utf8"));
+	writeFileSync(fx.path, JSON.stringify({ ...record, status: "REPLACED_UNPROVEN" }) + "\n");
+	const home = join(dirname(fx.dir), "home");
+	mkdirSync(home);
+	const acknowledged = await run([process.execPath, "run", "src/cli.ts", "send", "--ack-pending", fx.path,
+		"--drop-dir", fx.dir, "--json"], { deadline_s: fixtureDeadlineS(), cwd: repoRoot, env: { ...process.env, HOME: home } });
+	expect(acknowledged.rc, new TextDecoder().decode(acknowledged.stderr)).toBe(0);
+	expect(JSON.parse(new TextDecoder().decode(acknowledged.stdout)).data).toMatchObject({ status: "ACKNOWLEDGED", marker: fx.marker, sends: 0 });
+	expect(existsSync(fx.path)).toBe(false);
+	const result = await deliverTern(fx.fake, "new", { dropDir: fx.dir, io: fx.io });
+	expect(result.status).toBe("OK");
+	expect(fx.fake.sent).toEqual([`[from agent GoldenStone via omp-kit send]\nnew\n[${result.marker}]`]);
+});
+
+test("SENDSTUCK1 acknowledgement negative: an ordinary unconsumed attempt cannot be acknowledged away", async () => {
+	const dir = ternDropDir();
+	const path = seedPending(dir, settledJournal, "kit-send-0123456789ad", "still pending");
+	const home = join(dirname(dir), "home");
+	mkdirSync(home);
+	const refused = await run([process.execPath, "run", "src/cli.ts", "send", "--ack-pending", path,
+		"--drop-dir", dir, "--json"], { deadline_s: fixtureDeadlineS(), cwd: repoRoot, env: { ...process.env, HOME: home } });
+	expect(refused.rc).not.toBe(0);
+	expect(JSON.parse(new TextDecoder().decode(refused.stdout)).errors).toContainEqual(expect.objectContaining({ code: "PENDING_ACK_REFUSED" }));
+	expect(existsSync(path)).toBe(true);
 });
 
 test("TERN2.4 AM58562-4: journal append without consumption keeps suppression", async () => {

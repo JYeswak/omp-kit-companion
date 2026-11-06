@@ -92,7 +92,7 @@ import { defaultLivenessProbe, holderVerdict, readLivenessSources } from "./hold
 import { checkInfraCandidate, diffInfraPins, loadGate, parseInfraPins, promoteInfra, updatePinVersion, type InfraPins } from "./infra.ts";
 import { TOOL_NAME_PATTERN, defaultUpgradeRunner, dependentBinaries, findRepoPins, installedDependents, planUpgrade, verifyDependents } from "./infra-upgrade.ts";
 import { appendReapReceipt, defaultGitLockLedgerPath, indexLockStaleAfterMs, maybeMoveStaleIndexLock, reapRepoGitLocks, reapStaleAfterMs, reportOrphanedGitHelpers } from "./index-lock.ts";
-import { proveSend, proveTernCliSend, routeSendTarget, ternSendSeat } from "./send.ts";
+import { acknowledgeTernPending, proveSend, proveTernCliSend, routeSendTarget, ternSendSeat } from "./send.ts";
 import { SHA_PATTERN, discoverFleetRepos, formatShaText, lookupSha, type ShaRunner } from "./sha.ts";
 import { admitActuator, type AdmissionInput } from "./actuator-admission.ts";
 import { auditReservationAge } from "./reservation-age.ts";
@@ -361,9 +361,11 @@ function parse(args: readonly string[]): ParseResult {
 		if (!flags.has("--help") && typeof flags.get("--message") !== "string") return { failure: refusal("MISSING_VALUE", "save needs -m MSG", "Use omp-kit save -m MSG -- PATH...; nothing was committed."), json };
 		if (!flags.has("--help") && (!childArgs || childArgs.length === 0)) return { failure: refusal("MISSING_ARGUMENT", "save needs `-- PATH...`", "Pass each reserved path after `--`; nothing was committed."), json };
 	} else if (command.name === "send") {
-		// send is the one three-positional command (SESSION PANE MESSAGE); the
-		// message keeps its spaces because the request joins rest (see sendCommand).
-		if (rest.length !== 3 && !flags.has("--help")) return { failure: refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent."), json };
+		// Sending keeps exactly three positionals; acknowledgement is a separate, zero-positional operation.
+		if (!flags.has("--help") && rest.length !== (flags.has("--ack-pending") ? 0 : 3)) {
+			return { failure: refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE, or --ack-pending RECORD alone",
+				"Run omp-kit help send; nothing was sent or cleared."), json };
+		}
 	} else if ((!command.argument && rest.length) || (command.argument && rest.length > (command.maxArguments ?? (command.name === "help" ? 2 : 1)))) {
 		return { failure: refusal("UNEXPECTED_ARGUMENT", `Unexpected argument: ${rest[0]}`, `Run omp-kit help ${command.name}.`), json };
 	}
@@ -3428,6 +3430,18 @@ async function serviceCommand(request: ParsedCommand): Promise<CliResult> {
 	return refusal("UNKNOWN_SERVICE_COMMAND", `Unknown service subcommand: ${sub}`, "Run omp-kit help service for exact grammar.");
 }
 
+/** Acknowledgement has no transport dependency and never shares the sending branch. */
+function acknowledgePendingSendCommand(request: ParsedCommand, path: string, dropDir: string): CliResult {
+	if (request.argument || [...request.flags.keys()].some((name) => name !== "--ack-pending" && name !== "--drop-dir" && name !== "--json")) {
+		return refusal("PENDING_ACK_ARGUMENTS", "Acknowledgement cannot include a message or send flags",
+			"Run omp-kit send --ack-pending RECORD [--drop-dir PATH]; nothing was sent or cleared.");
+	}
+	const ack = acknowledgeTernPending(path, dropDir);
+	if (!ack.ok) return refusal(ack.code, ack.detail, "Inspect the exact pending record; ordinary pending attempts cannot be acknowledged.");
+	return { code: 0, data: { overall: "OK", status: "ACKNOWLEDGED", session: ack.sessionId, pane: ack.seatKey,
+		marker: ack.marker, sends: 0, pending_path: path, detail: ack.detail }, verification: "UNVERIFIED" };
+}
+
 /** SEND1: send a fleet message and prove the marker landed; exit code is delivery, not the send call. */
 async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 	try {
@@ -3437,12 +3451,6 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			errors: [{ code: "HOME_UNAVAILABLE", message: "Send needs an absolute HOME",
 				remediation: "Run with an absolute HOME; nothing was sent." }], verification: "UNVERIFIED" };
 	}
-	// The parser joins the three positionals; session and pane never contain
-	// spaces, so the first two tokens delimit and the remainder is the message.
-	const [session, pane, ...messageParts] = (request.argument ?? "").split(" ").filter(part => part !== "");
-	if (!session || !pane || messageParts.length === 0) {
-		return refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent.");
-	}
 	const stateRoot = receiptStateRoot();
 	if (!stateRoot) return refusal("INVALID_STATE_ROOT", "A canonical absolute HOME and state root are required",
 		"Set an absolute HOME and XDG_STATE_HOME, or leave XDG_STATE_HOME unset; nothing was sent.");
@@ -3450,6 +3458,15 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 	if (typeof dropFlag === "string" && !isAbsolute(dropFlag)) {
 		return refusal("INVALID_DROP_DIR", "The drop folder requires a canonical absolute path",
 			"Pass an absolute --drop-dir; nothing was sent.");
+	}
+	const dropDir = typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop");
+	const ackFlag = request.flags.get("--ack-pending");
+	if (typeof ackFlag === "string") return acknowledgePendingSendCommand(request, ackFlag, dropDir);
+	// The parser joins the three positionals; session and pane never contain
+	// spaces, so the first two tokens delimit and the remainder is the message.
+	const [session, pane, ...messageParts] = (request.argument ?? "").split(" ").filter(part => part !== "");
+	if (!session || !pane || messageParts.length === 0) {
+		return refusal("MISSING_ARGUMENT", "send needs SESSION PANE MESSAGE", "Run omp-kit send SESSION PANE MESSAGE; nothing was sent.");
 	}
 	const reasonFlag = request.flags.get("--no-bead-reason");
 	const untilFlag = request.flags.get("--until-delivered");
@@ -3459,7 +3476,6 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			"Pass --until-delivered <seconds>; nothing was sent.");
 		untilDeliveredMs = Number(untilFlag) * 1000;
 	}
-	const dropDir = typeof dropFlag === "string" ? dropFlag : join(stateRoot, "send-drop");
 	const noBeadReason = typeof reasonFlag === "string" ? reasonFlag : undefined;
 	// SEND1 Tern route (rz5.125) + TERNADDR1 (ompkit-fixjo): a tern:<block> pane is a Tern seat; tmux is never consulted.
 	const route = routeSendTarget(pane);
@@ -3473,7 +3489,7 @@ async function sendCommand(request: ParsedCommand): Promise<CliResult> {
 			windowKey: seat.windowKey, noBeadReason, untilDeliveredMs });
 		if (tern.status === "REFUSED") return refusal(tern.code, tern.detail, tern.code === "TERN_WINDOW_UNBOUND"
 			? "Open the fleet Tern window with `tern --control EP` and pass --window-key EP (or set windowKey in fleet-watch.json); nothing was sent."
-			: "Nothing was sent; fix the named cause and resend.");
+			: tern.code === "REPLACED_UNPROVEN" ? tern.detail : "Nothing was sent; fix the named cause and resend.");
 		const data = { session, pane, status: tern.status, tern_code: tern.code, queue_states: tern.queue_states,
 			marker: tern.marker, sends: tern.sends, drop_path: tern.drop_path, detail: tern.detail, session_file: tern.sessionFile,
 			offset: tern.offset, bead_ids: tern.bead_ids, no_bead_reason: tern.no_bead_reason };
@@ -4800,7 +4816,9 @@ async function dispatch(request: ParsedCommand, version: string): Promise<CliRes
 	if (path === "lessons") return { code: 0, data: { text: help(command) }, verification: "PERFORMED" };
 	if (path === "lessons add" || path === "checkin") return lessonRecordCommand(request);
 	const handler = handlers.get(path);
-	const missingTool = TOOL_GATED_COMMANDS[path]?.find((tool) => !toolPresent(tool));
+	// Pending acknowledgement only edits the send ledger; it neither observes nor actuates a terminal.
+	const missingTool = path === "send" && flags.has("--ack-pending") ? undefined
+		: TOOL_GATED_COMMANDS[path]?.find((tool) => !toolPresent(tool));
 	if (missingTool) {
 		const code = TOOL_UNAVAILABLE_CODES[missingTool] ?? "TOOL_UNAVAILABLE";
 		return { code: 3, data: { overall: "UNAVAILABLE" },

@@ -218,11 +218,10 @@ omp-kit ci status --json                     # cached CI, never calls GitHub
 omp-kit heavy --label cli-tests -- bun test tests/cli   # load-admitted, nice 10
 ```
 
-`send` proves delivery (tmux via `ntm`; `tern:<block>` natively, given
-`--window-key EP`) and drops undelivered messages into
-the state root; the exit code is delivery (`OK`, `PENDING_SUBMIT`, `NOT_DELIVERED`). Fleet Watch
-is an opt-in service that nudges idle workers and escalates to the coordinator;
-see [docs/fleet-watch.md](docs/fleet-watch.md).
+`send` proves delivery (tmux via `ntm`; `tern:<block>` natively, given `--window-key EP`), drops
+undelivered messages into the state root and exits with the delivery status (`OK`, `PENDING_SUBMIT`,
+`NOT_DELIVERED`, or `REPLACED_UNPROVEN`, cleared by `--ack-pending`). Fleet Watch is opt-in:
+[docs/fleet-watch.md](docs/fleet-watch.md).
 
 ### Reviewed installed-template imports
 
