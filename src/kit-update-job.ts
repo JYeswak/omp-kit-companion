@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { parseReleaseIndexJson } from "./kit-release.ts";
 import { applyKitUpdate, kitPostcheckDetail, planKitUpdate, reconcilePendingUpdate, type KitPostcheck, type KitPostcheckDetail, type KitReconcileResult, type KitUpdateInput, type KitUpdatePlan, type KitUpdatePreview, type KitUpdateRefusal, type KitUpdateResult } from "./kit-update.ts";
 import { refreshFleetHooksLive, type HookRefreshReport } from "./hook-refresh.ts";
-import { acquireKitUpdateLock, type UpdateLockToken } from "./mutations.ts";
+import { acquireKitUpdateLock, inspectPendingKitUpdate, type UpdateLockToken } from "./mutations.ts";
 import { makeDirsWritable } from "./kitlib/tmp.ts";
 
 /** The job installs the kit for the whole machine: it has no project, and its service cwd (HOME) is never watched as one. */
@@ -307,6 +307,19 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 	const reconcileReceipt = dependencies.reconcileReceipt ?? reconcilePendingUpdate;
 	let runId = randomUUID();
 	try {
+		// A restart has no trustworthy postcheck/OMP identity witness. Never guess an undo reason or
+		// hide the receipt behind CURRENT when polling finds no newer release.
+		const pending = inspectPendingKitUpdate(config.stateRoot);
+		if (pending) {
+			const activeVersion = installedVersion(config.prefix);
+			const reason = activeVersion === null ? "KIT_ACTIVATION_UNVERIFIED" : "KIT_RECOVERY_UNVERIFIED";
+			const guidance = activeVersion === null
+				? "Use a known-good release binary to inspect the activation receipt and repair the stable link; keep the pending receipt until its postimage is verified."
+				: `Inspect OMP and \`omp-kit audit --json\`; after verifying the recorded postimage, run \`omp-kit update --reconcile ${pending.id} --yes\`.`;
+			await dependencies.notify?.(`omp-kit update PENDING: ${reason}; kit receipt ${pending.id}. ${guidance}`);
+			return record(config.stateRoot, runId, { status: "PENDING", receiptId: pending.id, activeVersion,
+				notification: true, reason, receipt: "PENDING", relink: "NOT_RUN", service: "NOT_RUN" });
+		}
 		// Install-on-publish: a newer published release replaces the static tuple.
 		// Anything else (disabled poll, nothing newer) keeps today's static path.
 		const published = await pollPublishedRelease(config.prefix, config.stateRoot, config.platform, dependencies);
@@ -326,6 +339,16 @@ export async function runKitUpdateJob(config: KitUpdateJobConfig, dependencies: 
 				postcheckDetail: kitPostcheckDetail(result.postcheck, [config.home, config.stateRoot, config.prefix]) };
 		let activeVersion = result.activeVersion;
 		if (result.status === "PARTIAL") {
+			// Neither a missing activation nor an OMP mutation is a kit-only, revert-safe failure.
+			if (activeVersion === null || result.postcheck.reason === "OMP_CHANGED_DURING_KIT_UPDATE") {
+				const reason = activeVersion === null ? "KIT_ACTIVATION_UNVERIFIED" : "OMP_CHANGED_DURING_KIT_UPDATE";
+				const guidance = activeVersion === null
+					? "Use a known-good release binary to inspect the activation receipt and repair the stable link before reconciling."
+					: "Inspect OMP and both component postimages before choosing manual recovery.";
+				await dependencies.notify?.(`omp-kit update PENDING: ${reason}; kit receipt ${result.receiptId}. ${guidance}`);
+				return record(config.stateRoot, runId, { status: "PENDING", receiptId: result.receiptId, activeVersion,
+					notification: true, reason, receipt: "PENDING", ...postcheck, relink: "NOT_RUN", service: "NOT_RUN" });
+			}
 			// The postcheck runs on a machine the live fleet keeps writing, so it never decides the receipt. The kit's
 			// own postimages do, exactly as `update --reconcile` verifies them: the stable link target and binary sha.
 			let verified: KitReconcileResult | null = null, refusal = "KIT_RECEIPT_INVALID";

@@ -7,6 +7,7 @@ import type { KitUpdateResult } from "../../src/kit-update.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
 import type { PluginReceipt } from "../../src/apply-plugin.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 const dirs: string[] = [];
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function config(enabled = true): KitUpdateJobConfig {
@@ -280,7 +281,7 @@ test("a postcheck the live fleet contaminated cannot strand a verified activatio
 		expect(JSON.parse(readFileSync(join(value.stateRoot, records[0]!), "utf8"))).toMatchObject({ receipt: "RECONCILED",
 			postcheckReason: "KIT_POSTCHECK_FAILED", postcheckDetail: { changed_operator_paths: ["~/state/send-drop/cfsios-1.json"] } });
 	});
-});
+}, fixtureDeadlineS() * 1000);
 
 test("planted: a live install that does not match its activation record stays PENDING and never relinks", async () => {
 	await withPollEnv(null, async () => {
@@ -307,6 +308,63 @@ test("planted: a live install that does not match its activation record stays PE
 		expect(notes[0]).toContain(`omp-kit undo ${receiptId} --yes`);
 		expect(notes[0]).not.toContain("automatic undo");
 	});
+});
+
+test("KITREC1: a restarted tick exposes pending recovery before polling, even without a newer release", async () => {
+	const value = config(); installSymlink(value.prefix, "1.2.3");
+	preparePluginUpdate(value);
+	const receiptId = activate(value);
+	value.pollRelease = async () => { throw new Error("pending recovery must precede polling"); };
+	const notes: string[] = [];
+	const result = await runKitUpdateJob(value, { notify: message => { notes.push(message); } });
+	expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "KIT_RECOVERY_UNVERIFIED",
+		activeVersion: "1.2.4", relink: "NOT_RUN", service: "NOT_RUN" });
+	expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
+	expect(readlinkSync(join(value.prefix, "bin", "omp-kit"))).toBe("../releases/1.2.4/bin/omp-kit");
+	expect(notes[0]).toContain(`omp-kit update --reconcile ${receiptId} --yes`);
+	expect(notes[0]).not.toContain("omp-kit undo");
+});
+
+test("KITREC1 planted: an OMP-changed PARTIAL cannot be automatically reconciled or undone", async () => {
+	const value = config(); installSymlink(value.prefix, "1.2.3");
+	preparePluginUpdate(value);
+	let receiptId = "";
+	const notes: string[] = [];
+	const result = await runKitUpdateJob(value, {
+		plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+		apply: async () => {
+			receiptId = activate(value);
+			return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: "1.2.4", provenance: "SIGSTORE_VERIFIED",
+				postcheck: { status: "FAIL", matcher: "PASS", live: "PASS", reason: "OMP_CHANGED_DURING_KIT_UPDATE" } };
+		},
+		reconcileReceipt: () => { throw new Error("must not reconcile an OMP-changed update"); },
+		notify: message => { notes.push(message); },
+	});
+	expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "OMP_CHANGED_DURING_KIT_UPDATE" });
+	expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
+	expect(notes[0]).toContain("Inspect OMP");
+	expect(notes[0]).not.toContain("omp-kit undo");
+});
+
+test("KITREC1 planted: null activeVersion names bricked activation without offering an undo that must refuse", async () => {
+	const value = config(); installSymlink(value.prefix, "1.2.3");
+	preparePluginUpdate(value);
+	let receiptId = "";
+	const notes: string[] = [];
+	const result = await runKitUpdateJob(value, {
+		plan: async input => ({ ...input, status: "UPDATE_AVAILABLE", exitCode: 0, provenance: "INTEGRITY_ONLY" } as never),
+		apply: async () => {
+			receiptId = activate(value);
+			rmSync(join(value.prefix, "bin", "omp-kit"));
+			return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: null, provenance: "SIGSTORE_VERIFIED",
+				postcheck: { status: "NOT_RUN", matcher: "NOT_RUN", live: "NOT_RUN", reason: "KIT_POSTIMAGE_CHANGED" } };
+		},
+		notify: message => { notes.push(message); },
+	});
+	expect(result).toMatchObject({ status: "PENDING", receiptId, receipt: "PENDING", reason: "KIT_ACTIVATION_UNVERIFIED", activeVersion: null });
+	expect(inspectPendingKitUpdate(value.stateRoot)?.id).toBe(receiptId);
+	expect(notes[0]).toContain("known-good release binary");
+	expect(notes[0]).not.toContain("omp-kit undo");
 });
 
 test("the job never hands a project to plan or apply, even when its config carries one", async () => {

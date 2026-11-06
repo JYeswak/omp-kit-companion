@@ -1,15 +1,15 @@
 import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { reconcilePendingUpdate } from "../../src/kit-update.ts";
+import { reconcilePendingUpdate, undoKitUpdate } from "../../src/kit-update.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
 
 // ompkit-3isy.1 UPDREC1: a supported reconcile path for PARTIAL receipts.
 
 const repoRoot = resolve(import.meta.dir, "../..");
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const ID = "abcdef0123456789abcdef0123456789ab";
+const ID = "abcdef01-2345-6789-abcd-ef0123456789";
 
 function makePrefix(root: string, name: string, version: string, bytes: Buffer): string {
 	const prefix = join(root, name);
@@ -172,6 +172,30 @@ test("[1c] explicit relocated prefix records the observed binary path", () => {
 		expect(recorded.verified.binary).toBe(movedBinary);
 	} finally {
 		rmSync(ctx.root, { recursive: true, force: true });
+	}
+});
+
+test("KITREC1: reconcile-then-undo is supported once, and post-reconcile tamper still refuses", () => {
+	for (const tampered of [false, true]) {
+		const ctx = fixture();
+		try {
+			const prior = join(ctx.prefix, "releases", "0.2.16", "bin", "omp-kit");
+			mkdirSync(join(ctx.prefix, "releases", "0.2.16", "bin"), { recursive: true });
+			writeFileSync(prior, "old", { mode: 0o755 });
+			reconcilePendingUpdate({ stateRoot: ctx.stateRoot, prefix: ctx.prefix, id: ID });
+			const input = { stateRoot: ctx.stateRoot, prefix: ctx.prefix, receiptId: ID };
+			if (tampered) {
+				writeFileSync(join(ctx.prefix, "releases", "0.2.17", "bin", "omp-kit"), "tampered");
+				expect(() => undoKitUpdate(input)).toThrow("POSTIMAGE_CHANGED");
+				expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/0.2.17/bin/omp-kit");
+				expect(JSON.parse(readFileSync(join(ctx.stateRoot, `kit-activation-${ID}.json`), "utf8")).state).toBe("READY");
+			} else {
+				expect(undoKitUpdate(input)).toMatchObject({ status: "RESTORED", activeVersion: "0.2.16", updatePending: false });
+				expect(readlinkSync(join(ctx.prefix, "bin", "omp-kit"))).toBe("../releases/0.2.16/bin/omp-kit");
+				expect(() => undoKitUpdate(input)).toThrow("KIT_RECEIPT_INVALID");
+			}
+			expect(existsSync(join(ctx.stateRoot, "kit-update.pending.json"))).toBe(false);
+		} finally { rmSync(ctx.root, { recursive: true, force: true }); }
 	}
 });
 
