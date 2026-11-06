@@ -15,6 +15,7 @@ import kitGoalKeepalive, {
 	newestGateKind,
 	matchingReleaseVerdicts,
 	seatIdentity,
+	sessionPaused,
 	turnChangedState,
 	type AsyncJobView,
 	type GoalKeepaliveApi,
@@ -385,6 +386,21 @@ test("KEEPALIVE2 [b]: a held bead whose newest gate row is a refusal names omp-k
 	expect(newestGateKind(join(state, "omp-kit", "gate-events.jsonl"), "fx-1")).toBe("refuse");
 	expect(newestGateKind(join(state, "omp-kit", "gate-events.jsonl"), "fx-9")).toBeNull();
 	expect(newestGateKind(join(state, "absent.jsonl"), "fx-1")).toBeNull();
+});
+
+test("KEEPALIVEPAUSE1: a seat in a paused session (pullEnabled false) gets no wake; the same seat unpaused does", async () => {
+	expect(sessionPaused({ fleetWatch: fleetWatch("paused-q", [{ repo: FX_REPO, pullEnabled: false }]), cwd: join(FX_REPO, "src") })).toBe(true);
+	expect(sessionPaused({ fleetWatch: fleetWatch("live-q", [{ repo: FX_REPO, pullEnabled: true }]), cwd: FX_REPO })).toBe(false);
+	expect(sessionPaused({ fleetWatch: join(FX, "absent.json"), cwd: FX_REPO })).toBe(false); // unreadable keeps the wake
+	const paused = fakeHost();
+	await idleSeat(paused, { ...SEAT, env: { ...SEAT.env, OMP_KIT_FLEET_WATCH_CONFIG: fleetWatch("paused", [{ repo: FX_REPO, pullEnabled: false }]) } });
+	advance(paused, IDLE_WAKE_MS);
+	expect(paused.sent.length).toBe(0);
+	// Planted negative: the same seat in a session that may pull is woken.
+	const live = fakeHost();
+	await idleSeat(live, { ...SEAT, env: { ...SEAT.env, OMP_KIT_FLEET_WATCH_CONFIG: fleetWatch("live", [{ repo: FX_REPO, pullEnabled: true }]) } });
+	advance(live, IDLE_WAKE_MS);
+	expect(live.sent.length).toBe(1);
 });
 
 test("KEEPALIVE2 [b]: the constraint line is the declared record with its holder, or none naming the lead, never invented", () => {

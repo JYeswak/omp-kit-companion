@@ -176,17 +176,9 @@ export interface ConstraintSource {
 	now: number;
 }
 
-/** CONSTRAINT1 line 1 for this seat, in sitrep's form without the pin (launch_check.py constraint_header):
- * `CONSTRAINT <name> <value>/<budget> clearing=<id> holder=<seat|none|unknown>`, `CONSTRAINT none declarer=<lead>`,
- * `CONSTRAINT INVALID <error> declarer=<lead>` or `CONSTRAINT UNKNOWN (<why>)`. Never invents a constraint. */
-export function constraintLine(source: ConstraintSource): string {
-	const text = readBounded(source.fleetWatch, FLEET_WATCH_MAX_BYTES);
-	if (text === null) return `CONSTRAINT UNKNOWN (fleet-watch unreadable: ${source.fleetWatch})`;
-	let watch: unknown;
-	try { watch = JSON.parse(text); } catch { return `CONSTRAINT UNKNOWN (fleet-watch is not JSON: ${source.fleetWatch})`; }
-	const agent = prop(prop(watch, "chief"), "agent");
-	const lead = nonempty(agent) ? agent : "unknown";
-	const cwd = realOrResolved(source.cwd);
+/** The fleet-watch session (or herdr) row whose repo most deeply contains `cwd`, or undefined. */
+function sessionRowFor(watch: unknown, cwdPath: string): unknown {
+	const cwd = realOrResolved(cwdPath);
 	let row: unknown;
 	let depth = -1;
 	for (const candidate of [prop(watch, "sessions"), prop(watch, "herdr")].flatMap(v => Array.isArray(v) ? v : [])) {
@@ -198,6 +190,31 @@ export function constraintLine(source: ConstraintSource): string {
 			depth = root.length;
 		}
 	}
+	return row;
+}
+
+/** KEEPALIVEPAUSE1 (ompkit-1ra0d.3): true when the seat's session is paused (pullEnabled false). A paused project
+ * spends no keepalive turns (2026-11-06: omp-test's director logged 145 keepalive entries while paused). An unreadable
+ * config or a seat outside every session reads false, keeping the wake. */
+export function sessionPaused(source: Omit<ConstraintSource, "now">): boolean {
+	const text = readBounded(source.fleetWatch, FLEET_WATCH_MAX_BYTES);
+	if (text === null) return false;
+	let watch: unknown;
+	try { watch = JSON.parse(text); } catch { return false; }
+	return prop(sessionRowFor(watch, source.cwd), "pullEnabled") === false;
+}
+
+/** CONSTRAINT1 line 1 for this seat, in sitrep's form without the pin (launch_check.py constraint_header):
+ * `CONSTRAINT <name> <value>/<budget> clearing=<id> holder=<seat|none|unknown>`, `CONSTRAINT none declarer=<lead>`,
+ * `CONSTRAINT INVALID <error> declarer=<lead>` or `CONSTRAINT UNKNOWN (<why>)`. Never invents a constraint. */
+export function constraintLine(source: ConstraintSource): string {
+	const text = readBounded(source.fleetWatch, FLEET_WATCH_MAX_BYTES);
+	if (text === null) return `CONSTRAINT UNKNOWN (fleet-watch unreadable: ${source.fleetWatch})`;
+	let watch: unknown;
+	try { watch = JSON.parse(text); } catch { return `CONSTRAINT UNKNOWN (fleet-watch is not JSON: ${source.fleetWatch})`; }
+	const agent = prop(prop(watch, "chief"), "agent");
+	const lead = nonempty(agent) ? agent : "unknown";
+	const row = sessionRowFor(watch, source.cwd);
 	const record = prop(prop(row, "milestone"), "constraint");
 	const valid = validConstraint(record, source.now);
 	if (!valid.ok) return valid.error === "not declared" ? `CONSTRAINT none declarer=${lead}` : `CONSTRAINT INVALID ${valid.error} declarer=${lead}`;
@@ -582,6 +599,7 @@ export default async function kitGoalKeepalive(
 		const seat = seatIdentity(env);
 		if (seat === null) return;
 		const cwd = ctx.cwd ?? deps.cwd ?? process.cwd();
+		if (sessionPaused({ fleetWatch: fleetWatchPath(env, home), cwd })) return; // KEEPALIVEPAUSE1: paused project, no wake
 		let blocked: string | null = null;
 		if (preflightBlocked) {
 			try {
