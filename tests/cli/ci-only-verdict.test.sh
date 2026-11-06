@@ -82,6 +82,15 @@ require "$t2" "$TMP/x2"
 st=1; [ "$req_rc" = 1 ] && [ "$req_out" = MISS ] && st=0
 ok "$st" "planted-other-tree-miss: rc=$req_rc out=$req_out"
 
+# RELFAST1 planted negative: the previous tree's PASS must not suppress a new tree's CI-only judgment.
+: >"$CIO_LOG"
+rc=0
+sh "$repo/scripts/release-verdict.sh" --commit "$c2" --no-fetch >"$TMP/missing-ci.out" 2>&1 || rc=$?
+require "$t2" "$TMP/x2"
+[ "$rc" = 0 ] && [ "$(grep -c . "$CIO_LOG")" = 6 ] && [ "$req_rc" = 0 ] && [ "$req_out" = PASS ] \
+	&& grep -Fq "CI-ONLY: VERDICT PASS tree=$t2 record=" "$TMP/missing-ci.out"
+ok $? "planted-missing-ci-pass-still-judges-all-files: rc=$rc require=$req_rc/$req_out out=$(cat "$TMP/missing-ci.out")"
+
 # 5. Planted: a judge whose identity differs (suite-metrics.py bytes), and a suite whose test file differs.
 export_of "$c1" "$TMP/x1-judge"
 printf '# another judge\n' >>"$TMP/x1-judge/scripts/suite-metrics.py"

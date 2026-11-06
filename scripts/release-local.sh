@@ -116,6 +116,8 @@ STARTED=$(date +%s)
 STAGE_LOG="$WORK/stages"
 : >"$STAGE_LOG"
 cleanup() {
+	# Preserve the interrupted stage's timing too: a qualification refusal must not erase its wait.
+	stage ''
 	if [ -n "$CHILD" ]; then kill -TERM "$CHILD" 2>/dev/null || true; wait "$CHILD" 2>/dev/null || true; fi
 	if [ "$UNLOCKED" = 1 ]; then security lock-keychain "$KEYCHAIN" </dev/null || echo "release-local: WARNING: could not re-lock $KEYCHAIN" >&2; fi
 }
@@ -329,6 +331,7 @@ install_release() {
 		>"$WORK/install-plugin.json" || die "profile plugin relink failed"
 	cat "$WORK/install-plugin.json"
 	jq -e '.ok == true' "$WORK/install-plugin.json" >/dev/null || die "profile plugin relink was not successful"
+	stage readback
 	substep install.align-readback
 	bounded 60 python3 "$store/skills/fleet-restart/scripts/fleet_restart.py" align \
 		--home "$HOME" --releases "$INSTALL_PREFIX/releases" --version "$VERSION" >"$WORK/install-align.json" ||

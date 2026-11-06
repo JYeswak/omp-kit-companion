@@ -1081,6 +1081,25 @@ else
 	fail=$((fail + 1)); printf 'FAIL land1a-control: rc=%s out<<<%s>>>\n' "$rc" "$out"
 fi
 
+# RELFAST1: even a push that already judged the main suite must schedule CI-only qualification.
+# Exercise the actual adapter; the detached producer logs the immutable commit it receives.
+export RV_PUSH_LOG="$TMP/push-judgments"
+# shellcheck disable=SC2016 # expanded by the detached fixture producer, not this shell
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"$RV_PUSH_LOG"\n' >"$vrepro/scripts/release-verdict.sh"
+for push_mode in push release; do
+	: >"$RV_PUSH_LOG"
+	rc=$(PRE_PUSH_FULL_SUITE=$push_mode run_adapter "$vrepro")
+	expected="--commit $(git -C "$vrepro" rev-parse HEAD) --no-fetch"
+	attempt=0
+	while [ ! -s "$RV_PUSH_LOG" ] && [ "$attempt" -lt 50 ]; do sleep 0.1; attempt=$((attempt + 1)); done
+	if [ "$rc" = 0 ] && [ "$(cat "$RV_PUSH_LOG")" = "$expected" ]; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1)); printf 'FAIL relfast1-main-push-starts-qualification mode=%s rc=%s log=%s\n' "$push_mode" "$rc" "$(cat "$RV_PUSH_LOG")"
+	fi
+done
+export PRE_PUSH_FULL_SUITE=push
+
 # DEFER1 (GATESPEED1, J-2026-10-31-09): by default the push does not run the complete suite. A tree
 # whose only failure is an unselected suite is admitted at push, names the release command, and
 # runs nothing; release-local's require-pass readback is what refuses it.

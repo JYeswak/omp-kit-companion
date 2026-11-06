@@ -1,0 +1,1 @@
+- Main pushes now start background release qualification even when the push already ran the full suite, so CI-only tests are not left until release time. Exact-tree verdict reuse remains fail-closed; release logs also time interrupted stages and separate installed readback from installation.

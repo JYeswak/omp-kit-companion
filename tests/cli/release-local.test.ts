@@ -465,18 +465,20 @@ function initFixtureRepo(work: string, env: Record<string, string>): string {
 }
 const qualification = releaseStage("stage verdict\n", 'if ! bounded 30 python3 "$SRC/scripts/full-suite-verdict-store.py" require-pass \\\n\t--repo "$ROOT" --tree "$source_tree" --role main --judge-root "$SRC" --suite-root "$SRC" \\\n\t>"$WORK/full-suite-verdict.out"');
 
-for (const verdict of ["cached", "queued", "failure"] as const) {
+for (const verdict of ["cached", "missing-main", "missing-ci", "queued", "failure"] as const) {
 	test(`release qualification ${verdict} uses exact source and both verdicts`, async () => {
 		const work = realpathSync(ownedTmp("release-verdict-wait", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 		const env = gitFixtureEnv(work);
 		initFixtureRepo(work, env);
 		const bin = join(work, "bin");
 		mkdirSync(bin);
-		// The first read is a miss. The producer returns 0 like the real
-		// lock-holder acknowledgement, not like a completed qualification.
+		// Planted negatives: either PASS alone is insufficient. The producer returns
+		// a queue acknowledgement, so only subsequent reads can prove qualification.
 		writeFileSync(join(bin, "python3"), `#!/bin/sh
 echo "$*" >>"$RELEASE_TEST_WORK/reads"
 if [ "$RELEASE_TEST_VERDICT" = cached ]; then echo PASS; exit 0; fi
+if [ "$RELEASE_TEST_VERDICT" = missing-main ] && [ "$2" = require-ci-only-pass ]; then echo PASS; exit 0; fi
+if [ "$RELEASE_TEST_VERDICT" = missing-ci ] && [ "$2" = require-pass ]; then echo PASS; exit 0; fi
 if [ -f "$RELEASE_TEST_WORK/triggered" ]; then
   if [ "$RELEASE_TEST_VERDICT" = failure ]; then echo FAIL; exit 1; fi
   echo PASS; exit 0
