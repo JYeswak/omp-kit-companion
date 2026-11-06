@@ -572,5 +572,28 @@ else
 	fail=$((fail + 1)); printf 'FAIL parser-mixed-modes\n'
 fi
 
+# TSCSHIM1: a launcher shim with no sibling lib/typescript.js first on PATH (pnpm global) falls through to a real host
+# tsc later on PATH; with only the shim and node, the parser is still unavailable.
+mkdir -p "$TMP/shim-bin" "$TMP/node-only"
+printf '#!/bin/sh\nexec node /nonexistent/typescript/bin/tsc "$@"\n' > "$TMP/shim-bin/tsc"
+chmod +x "$TMP/shim-bin/tsc"
+ln -sf "$(command -v node)" "$TMP/node-only/node"
+out=$(PATH="$TMP/shim-bin:$PATH" sh "$CHECKER" --parser-info --repo "$repo" 2>&1)
+rc=$?
+printf 'parser-shim-fallthrough: rc=%s out<<<%s>>>\n' "$rc" "$out"
+if [ "$rc" = 0 ] && printf '%s' "$out" | grep -Fq '"parser"' && ! printf '%s' "$out" | grep -Fq "$TMP/shim-bin"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL parser-shim-fallthrough\n'
+fi
+out=$(PATH="$TMP/shim-bin:$TMP/node-only" /bin/sh "$CHECKER" --parser-info --repo "$repo" 2>&1)
+rc=$?
+printf 'parser-shim-only: rc=%s out<<<%s>>>\n' "$rc" "$out"
+if [ "$rc" = 4 ] && printf '%s' "$out" | grep -Fq PARSER_UNAVAILABLE; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1)); printf 'FAIL parser-shim-only\n'
+fi
+
 printf 'commit-imports: %s pass %s fail\n' "$pass" "$fail"
 [ "$fail" = "0" ]

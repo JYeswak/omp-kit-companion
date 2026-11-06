@@ -40,19 +40,26 @@ done
 # Source bytes are git blobs; createSourceFile parses but never executes them.
 native_imports() {
 	node_bin=$(command -v node 2>/dev/null) || node_bin=""
-	tsc_bin=$(command -v tsc 2>/dev/null) || tsc_bin=""
-	if [ -z "$node_bin" ] || [ -z "$tsc_bin" ]; then
+	# TSCSHIM1 (ompkit-1ra0d.1): every tsc on PATH, in order, so a launcher shim with no sibling lib/typescript.js
+	# (pnpm global ~/.local/bin/tsc, first on headless builders' PATH) falls through to a real install.
+	tsc_bins=""
+	old_ifs=$IFS; IFS=:
+	for dir in $PATH; do
+		[ -n "$dir" ] && [ -f "$dir/tsc" ] && [ -x "$dir/tsc" ] && tsc_bins="$tsc_bins${tsc_bins:+:}$dir/tsc"
+	done
+	IFS=$old_ifs
+	if [ -z "$node_bin" ] || [ -z "$tsc_bins" ]; then
 		printf 'check-commit-imports: PARSER_UNAVAILABLE (host node and tsc required)\n' >&2
 		return 4
 	fi
-	NODE_OPTIONS='' NODE_PATH='' "$node_bin" --input-type=commonjs - "$tsc_bin" "$@" <<'JS'
+	NODE_OPTIONS='' NODE_PATH='' "$node_bin" --input-type=commonjs - "$tsc_bins" "$@" <<'JS'
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { execFileSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
-const [tscExecutable, mode, repo, sha, file] = process.argv.slice(2);
+const [tscExecutables, mode, repo, sha, file] = process.argv.slice(2);
 const SOURCE_BYTES = 4 * 1024 * 1024;
 const OUTPUT_BYTES = 1024 * 1024;
 const NODE_LIMIT = 250000;
@@ -75,13 +82,19 @@ function compiler() {
     let root, executable, modulePath, ts, fingerprint;
     try {
         root = fs.realpathSync(repo || process.cwd());
-        executable = fs.realpathSync(tscExecutable);
-        modulePath = fs.realpathSync(path.join(path.dirname(executable), "../lib/typescript.js"));
+        // TSCSHIM1: the first tsc on PATH whose real path has a sibling lib/typescript.js.
+        for (const candidate of tscExecutables.split(":")) {
+            try {
+                const real = fs.realpathSync(candidate);
+                const lib = fs.realpathSync(path.join(path.dirname(real), "../lib/typescript.js"));
+                if (fs.statSync(lib).isFile()) { executable = real; modulePath = lib; break; }
+            } catch { /* a shim without a sibling library: try the next tsc on PATH */ }
+        }
+        if (!modulePath) refuse("PARSER_UNAVAILABLE");
         if (inside(root, executable) || inside(root, modulePath) ||
             inside(root, fs.realpathSync(process.execPath))) {
             refuse("PARSER_INSIDE_TARGET");
         }
-        if (!fs.statSync(modulePath).isFile()) refuse("PARSER_UNAVAILABLE");
         fingerprint = crypto.createHash("sha256").update(fs.readFileSync(modulePath)).digest("hex");
         ts = require(modulePath);
     } catch (error) {
