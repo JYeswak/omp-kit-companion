@@ -6,7 +6,7 @@
 // The rows come from the 2026-10-18 pid-keyed state inventory: every row that is not class NONE has an entry.
 
 export type OwnershipClass = "REHOME" | "REAP" | "RELEASE";
-export type OwnerKey = "agent+session" | "pid+start" | "pid+start+session" | "pid+token" | "pid" | "wrapper-pid+birth" | "pid+ref-token" | "process-group" | "ppid";
+export type OwnerKey = "agent+session" | "agent+project" | "pid+start" | "pid+start+session" | "pid+token" | "pid" | "wrapper-pid+birth" | "pid+ref-token" | "process-group" | "ppid";
 /** What the keyed process is: a seat survives a respawn as the same agent, the others do not outlive their run. */
 export type OwnerScope = "seat" | "service" | "cli-run" | "child-process" | "external-tool";
 export type TerminalOutcome = "handed-over" | "released" | "reaped" | "self-heals";
@@ -290,6 +290,16 @@ export const OWNERSHIP_REGISTRY: readonly OwnershipEntry[] = [
 		respawn: "the pid names only a unique temp file, never the owner",
 		terminal: { outcome: "reaped", producer: "atomicReplaceBytes rename or failure cleanup" },
 		census: null, noCensus: "transient temp name: gone after rename except for crash orphans", ownerBead: "ompkit-67i70",
+	},
+	{
+		id: "release-verdict-mail", title: "Release verdict subscriptions <git-state>/release-verdict-subscribers/<sha256(project, lowercase agent)>.json and their <record>.<pid>.tmp files",
+		rows: [], class: "REHOME", ownerKey: "agent+project", scope: "seat", survivesRespawn: true,
+		writers: ["src/release-verdict-mail.ts"],
+		cancel: "subscribeReleaseVerdicts returns a remover; kit-goal-keepalive invokes it on shutdown, session reconciliation, cwd change or loss of eligibility; an empty wait removes the subscription; finally removes the atomic-write temp",
+		crash: "the last renamed subscription survives; a crash before rename can leave <record>.<pid>.tmp, which notification ignores and no automatic sweep reaps; sent markers remain for deduplication",
+		respawn: "the same project and lowercase agent rewrite the same subscription; pid names only the atomic-write temp, not the seat",
+		terminal: { outcome: "self-heals", producer: "subscribeReleaseVerdicts rewrites or removes the subscription; notifyReleaseVerdict writes a digest-keyed sent marker after confirmed mail delivery" },
+		census: null, noCensus: "per-repo subscriptions and sent markers have no doctor census; sent markers are keyed by project, agent, sha and verdict statuses, not pid", ownerBead: "ompkit-fp72.120.16.307",
 	},
 ];
 
