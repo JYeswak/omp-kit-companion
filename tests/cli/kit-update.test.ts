@@ -5,7 +5,7 @@ import { runFullTest } from "../../src/full-test-runner.ts";
 import { runIsolatedShell } from "../../src/runtime.ts";
 import { activeConcurrentWriterPaths, compareWatched, operatorWatchedPaths, snapshotWatched } from "../../src/operator-snapshot.ts";
 import { acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate } from "../../src/mutations.ts";
-import { applyKitUpdate, judgeKitPostcheck, kitPostcheckDetail, kitUpdateEnvelope, planKitUpdate, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
+import { applyKitUpdate, judgeKitPostcheck, kitPostcheckDetail, kitUpdateEnvelope, planKitUpdate, runKitPostcheck, undoKitUpdate, updateFailureCause } from "../../src/kit-update.ts";
 import { kitUpdateJobOverall } from "../../src/kit-update-job.ts";
 import { serviceLabel } from "../../src/service.ts";
 import { cleanupAllOwnedTmp, ownedTmp } from "../../src/kitlib/tmp";
@@ -44,6 +44,31 @@ test("KITUPDATELOAD1: a candidate scenario that cannot pass names its FAIL line 
 	} finally { owned.cleanup(); }
 }, fixtureDeadlineS(1200) * 1000);
 
+// A target owns its report and stage vocabulary; the old updater must not run its harness again.
+test("UPDPOST1: candidate-owned postcheck preserves target failures and rejects malformed or contradictory output", async () => {
+	const owned = ownedTmp("candidate-postcheck", { root: scratch });
+	try {
+		const executablePath = join(owned.path, "candidate");
+		const invocation = { executablePath, home: owned.path, stateRoot: join(owned.path, "omp-kit") };
+		const failed = { status: "FAIL", exitCode: 1, failures: ["Stage target-only returned producer_rc=7"],
+			fast: { status: "FAIL", proofs: { G1_registration: { status: "FAIL" }, G2_payload: { status: "NOT_RUN" }, G3_quiet_prefix: { status: "NOT_RUN" } } },
+			omp_version: null, stages: { "target-only": { status: "FAIL", producer_rc: 7 } },
+			proofs: { G4_live: { status: "NOT_RUN" } }, snapshots: { home: { changed_paths: [] }, project: { changed_paths: [] } } };
+		const candidate = (output: unknown, rc: number) => {
+			writeFileSync(executablePath, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(output).replaceAll("'", "'\\''")}'\nexit ${rc}\n`, { mode: 0o755 });
+			chmodSync(executablePath, 0o755);
+		};
+		candidate({ data: { test: failed } }, 1);
+		expect(await runKitPostcheck(invocation)).toEqual(failed);
+		candidate({ data: { test: failed } }, 0);
+		await expect(runKitPostcheck(invocation)).rejects.toThrow("KIT_POSTCHECK_REPORT_INVALID");
+		candidate({ data: { test: { status: "PASS", exitCode: 0 } } }, 0);
+		await expect(runKitPostcheck(invocation)).rejects.toThrow("KIT_POSTCHECK_REPORT_INVALID");
+		candidate({ version: "future" }, 0);
+		await expect(runKitPostcheck(invocation)).rejects.toThrow("KIT_POSTCHECK_REPORT_INVALID");
+	} finally { owned.cleanup(); }
+}, fixtureDeadlineS(10) * 1000);
+
 
 test("unknown update failure preserves its code and original message", () => {
  expect(updateFailureCause(new Error("boom lower"))).toMatchObject({
@@ -58,7 +83,7 @@ test("UPDATERELINK1: native reconcile relinks every covered profile to the verif
 	for (const profile of RECONCILE_PROFILES)
 		expect(readlinkSync(reconcilePluginLink(ctx.home, profile))).toBe(prepared.store);
 	expect(result.output.data).toMatchObject({ overall: "OK", action: "RECONCILED", plugin_relink: "APPLIED", active_version: ctx.nextVersion });
-}));
+}), fixtureDeadlineS(60) * 1000);
 
 test("UPDATERELINK1 planted negative: an incomplete profile relink cannot report OK", async () => fixture(async ctx => {
 	const prepared = preparePartialReconcile(ctx, "codex");
@@ -68,7 +93,7 @@ test("UPDATERELINK1 planted negative: an incomplete profile relink cannot report
 	expect(readlinkSync(reconcilePluginLink(ctx.home, "codex"))).toBe(prepared.oldStore);
 	for (const profile of RECONCILE_PROFILES.filter(profile => profile !== "codex"))
 		expect(readlinkSync(reconcilePluginLink(ctx.home, profile))).toBe(prepared.store);
-}));
+}), fixtureDeadlineS(60) * 1000);
 
 
 
@@ -234,6 +259,31 @@ test("verified archive activates one symlink, retains old release and leaves fai
  expect(inspectPendingKitUpdate(ctx.stateRoot)).toBeNull();
 }));
 
+test("KITREC1: null activation requires known-good binary repair, not undo or reconciliation", async () => fixture(async ctx => {
+ const planned = await planKitUpdate(input(ctx));
+ if (planned.status !== "UPDATE_AVAILABLE") throw new Error("fixture plan rejected");
+ const partial = { status: "PARTIAL" as const, exitCode: 1 as const, receiptId: "receipt-smoke",
+  activeVersion: "1.2.4", provenance: "SIGSTORE_VERIFIED" as const,
+  postcheck: { status: "NOT_RUN" as const, matcher: "NOT_RUN" as const, live: "NOT_RUN" as const,
+   reason: "KIT_POSTIMAGE_CHANGED" } };
+ const active = kitUpdateEnvelope(planned, partial);
+ expect(active.code).toBe(1);
+ expect(active.data.reason).toBe("KIT_POSTIMAGE_CHANGED");
+ expect(active.commands).toEqual(["omp-kit undo receipt-smoke --yes"]);
+ expect(active.errors?.[0]?.code).toBe("KIT_POSTIMAGE_CHANGED");
+
+ const unverified = kitUpdateEnvelope(planned, { ...partial, activeVersion: null });
+ expect(unverified.code).toBe(1);
+ expect(unverified.data).toMatchObject({ overall: "FAIL", active_version: null, reason: "KIT_ACTIVATION_UNVERIFIED" });
+ expect(unverified.commands ?? []).toEqual([]);
+ expect(unverified.errors?.[0]?.code).toBe("KIT_ACTIVATION_UNVERIFIED");
+ expect(unverified.errors?.[0]?.message).toContain("activation");
+ expect(unverified.errors?.[0]?.remediation).toContain("known-good release binary");
+ expect(unverified.errors?.[0]?.remediation).toContain("repair the stable link");
+ expect(unverified.errors?.[0]?.remediation).not.toContain("omp-kit undo");
+ expect(unverified.errors?.[0]?.remediation).not.toContain("omp-kit update --reconcile");
+}));
+
 // An operator facing PARTIAL must see which stages failed, which of their paths changed, and the exact recovery command.
 test("failed postcheck envelope names failed stages, changed operator paths and the undo command", async () => fixture(async ctx => {
  const planned = await planKitUpdate(input(ctx));
@@ -244,7 +294,7 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
   throw new Error(`expected a PARTIAL outcome carrying its full-test report, observed ${JSON.stringify({ status: result.status, receipt: result.receiptId, postcheck: result.postcheck.status, reason: result.postcheck.reason, report: Boolean(report) })}`);
  const undoCommand = `omp-kit undo ${result.receiptId} --yes`;
 
- // The real failed postcheck already explains itself: the first failure is in the error message.
+ // The target's failed report already explains itself: the first failure is in the error message.
  const real = kitUpdateEnvelope(planned, result);
  const realDetail = real.data.postcheck_detail as { failures: string[] } | null;
  expect(realDetail?.failures.length ?? 0, JSON.stringify(real.data)).toBeGreaterThan(0);
@@ -281,6 +331,11 @@ test("failed postcheck envelope names failed stages, changed operator paths and 
  expect(liveState.commands).toEqual([reconcileCommand]);
  expect(liveState.errors?.[0]?.remediation).toContain(reconcileCommand);
  expect(liveState.data.postcheck_detail).toMatchObject({ changed_operator_paths: [], live_state_paths: ["~/.local/state/omp-kit/chrome-jfp"] });
+ const unverifiedLiveState = kitUpdateEnvelope(planned, { ...liveStateOutcome, activeVersion: null });
+ expect(unverifiedLiveState.data.reason).toBe("KIT_ACTIVATION_UNVERIFIED");
+ expect(unverifiedLiveState.commands ?? []).toEqual([]);
+ expect(unverifiedLiveState.errors?.[0]?.remediation).toContain("known-good release binary");
+ expect(unverifiedLiveState.errors?.[0]?.remediation).not.toContain(reconcileCommand);
  const operatorChanged = kitUpdateEnvelope(planned, { ...liveStateOutcome, postcheck: { ...liveStateOutcome.postcheck,
   report: { ...liveStateReport, failures: ["Operator file changed during isolated test: ~/.agents/rules/planted.md"],
    snapshots: { ...liveStateReport.snapshots, home: { ...liveStateReport.snapshots.home, changed_paths: ["~/.agents/rules/planted.md"] } } },
@@ -364,7 +419,7 @@ test("POSTCHECKBROWSER1: a concurrent operator writer is skipped; installed cc s
 		await loop.stop();
 		if (previousXdg === undefined) delete process.env.XDG_STATE_HOME; else process.env.XDG_STATE_HOME = previousXdg;
 	}
-}));
+}, { postcheck: "real" }), fixtureDeadlineS(60) * 1000);
 
 
 // ompkit-v66l.22 FLEETUPG1: browser caches are volatile; profile files that a separate live browser continues
@@ -394,7 +449,7 @@ test("POSTCHECKBROWSER1: live browser profile writer is skipped while its cache 
 	} finally {
 		await loop.stop();
 	}
-}));
+}, { postcheck: "real" }), fixtureDeadlineS(60) * 1000);
 
 test("POSTCHECKBROWSER1 planted negative: an isolated test write to operator state remains a change", async () => fixture(async ctx => {
 	const releaseRoot = join(ctx.prefix, "releases", ctx.currentVersion);
@@ -565,7 +620,7 @@ test("a null full-test OMP version is a named postcheck failure, not an OMP chan
 		expect(detail.failed_stages).toContain("fast-test");
 		expect(detail.failed_stages).toContain("omp-version");
 	} finally { process.env.PATH = previousPath; }
-}));
+}, { postcheck: "real" }), fixtureDeadlineS(60) * 1000);
 
 test("already-current version does not create a pending receipt or re-switch the stable link", async () => fixture(async ctx => {
  const release = join(ctx.prefix, "releases", "1.2.3");

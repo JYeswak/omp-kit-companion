@@ -512,7 +512,8 @@ export async function runFullTest(input: FullTestInput, expectedCounts?: FastTes
  const sourceRevision = fullTestSourceRevision(input.root);
  const references = input.references ?? process.env.OMP_KIT_FULL_TEST_REFERENCES;
  const artifactRepo = process.env.OMP_KIT_CASE_CWD ?? process.env.GITHUB_WORKSPACE;
- const stateRoot = input.stateRoot ?? join(process.env.XDG_STATE_HOME ?? join(input.home, ".local", "state"), "omp-kit");
+ // The updater delegates execution to this target runtime without changing the watched receipt-state root.
+ const stateRoot = input.stateRoot ?? process.env.OMP_KIT_POSTCHECK_STATE_ROOT ?? join(process.env.XDG_STATE_HOME ?? join(input.home, ".local", "state"), "omp-kit");
  const watchedPaths = operatorWatchedPaths(input.home, stateRoot);
  // Only project paths a kit run could write; the rest of a real repository changes under concurrent work.
  const projectPaths = input.project ? [".omp", ".agents", ".claude"].map(name => join(input.project!, name)) : [];

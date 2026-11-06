@@ -31,7 +31,7 @@ type FixtureFile = { name: string; bytes: Buffer };
 type FixtureContext = { root: string; prefix: string; stateRoot: string; home: string; source: string;
 	indexPath: string; archivePath: string; oldBinary: Buffer; contractFiles: FixtureFile[];
 	platform: ReleasePlatform; currentVersion: string; nextVersion: string };
-type FixtureOptions = { platform?: ReleasePlatform; currentVersion?: string; nextVersion?: string };
+type FixtureOptions = { platform?: ReleasePlatform; currentVersion?: string; nextVersion?: string; postcheck?: "stub" | "real" };
 
 function tar(entries: { name: string; bytes: Buffer }[]): Buffer {
 	const blocks: Buffer[] = [];
@@ -53,10 +53,31 @@ function tar(entries: { name: string; bytes: Buffer }[]): Buffer {
 	}
 	return Buffer.concat([...blocks, Buffer.alloc(1024)]);
 }
-function binary(version: string, selectedPlatform: ReleasePlatform = platform): Buffer {
+// Most updater tests judge activation/recovery, not the full suite. Only snapshot/transport tests opt into it.
+function binary(version: string, selectedPlatform: ReleasePlatform = platform, postcheck: "stub" | "real" = "stub"): Buffer {
 	const info = JSON.stringify(JSON.stringify({ version, source_tag: "v" + version,
 		platform: { os: selectedPlatform.os, arch: selectedPlatform.arch } }));
-	return Buffer.from("#!/bin/sh\nprintf '%s\\n' " + info + "\n");
+	const snapshot = { unchanged: true, complete: true, changed_paths: [], incomplete_paths: [], skipped_paths: [], live_state_paths: [] };
+	const stub = {
+		status: "FAIL", exitCode: 1, omp_version: null, fast_duration_ms: 0, current_stage: null, cause: null,
+		fast: { status: "FAIL", proofs: { G1_registration: { status: "FAIL" },
+			G2_payload: { status: "NOT_RUN" }, G3_quiet_prefix: { status: "NOT_RUN" } } },
+		stages: { manifest: { status: "NOT_RUN", producer_rc: null, duration_ms: null } },
+		proofs: { G4_live: { status: "NOT_RUN", expected_scenarios: 0, observed_scenarios: 0, plant: "NOT_RUN" } },
+		snapshots: { release: { unchanged: true, complete: true }, home: snapshot, project: snapshot },
+		failures: ["Synthetic target postcheck failure; no full suite was run"],
+	};
+	const script = postcheck === "stub"
+		? `console.log(${JSON.stringify(JSON.stringify({ data: { test: stub } }))}); process.exit(1);`
+		: `import { runFullTest } from ${JSON.stringify(join(repoRoot, "src/full-test-runner.ts"))};
+import { realpathSync } from "node:fs";
+import { dirname } from "node:path";
+const executablePath = realpathSync(process.argv[1]);
+const report = await runFullTest({ root: dirname(dirname(executablePath)), executablePath, home: process.env.HOME });
+console.log(JSON.stringify({ data: { test: report } }));
+process.exit(report.exitCode);`;
+	return Buffer.from("#!/bin/sh\nif [ \"$1\" = test ]; then\nexec '" + process.execPath.replaceAll("'", "'\\''")
+		+ "' -e '" + script.replaceAll("'", "'\\''") + "' \"$0\"\nfi\nprintf '%s\\n' " + info + "\n");
 }
 function manifest(version: string, executable: Buffer, extraFiles: readonly FixtureFile[] = []): Buffer {
 	const files = [{ path: "bin/omp-kit", sha256: sha(executable) },
@@ -88,7 +109,7 @@ async function fixture<T>(run: (ctx: FixtureContext) => Promise<T>, options: Fix
 	writeFileSync(join(prefix, "releases", currentVersion, "release-manifest.json"), manifest(currentVersion, oldBinary));
 	symlinkSync("../releases/" + currentVersion + "/bin/omp-kit", join(prefix, "bin", "omp-kit"));
 	const contractFiles = fixtureContractFiles();
-	const next = binary(nextVersion, selectedPlatform), releaseManifest = manifest(nextVersion, next, contractFiles);
+	const next = binary(nextVersion, selectedPlatform, options.postcheck), releaseManifest = manifest(nextVersion, next, contractFiles);
 	const archive = tar([{ name: "bin/omp-kit", bytes: next }, ...contractFiles, { name: "release-manifest.json", bytes: releaseManifest }]);
 	const key = [selectedPlatform.os, selectedPlatform.arch, selectedPlatform.libc].join("-");
 	const filename = "omp-kit-v" + nextVersion + "-" + key + ".tar";

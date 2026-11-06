@@ -4,13 +4,11 @@ import { atomicReplaceBytes } from "./kitlib/io.ts";
 import { ownedTmp } from "./kitlib/tmp.ts";
 import { run } from "./kitlib/run.ts";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform, type StagedKitRelease } from "./kit-release.ts";
-import { redactFullTestCause, runFullTest, type FullTestCause, type FullTestInput, type FullTestReport } from "./full-test-runner.ts";
+import { assertFreshKitPlan, parseReleaseIndexJson, previewKitRelease, stageKitRelease, type BinaryReleaseInfo, type KitReleasePlan, type ReleaseManifest, type ReleasePlatform } from "./kit-release.ts";
+import { redactFullTestCause, type FullTestCause, type FullTestReport } from "./full-test-runner.ts";
 import { abortCompensatedKitUpdateReceipt, acquireKitUpdateLock, auditMutations, beginKitUpdateReceipt, inspectPendingKitUpdate, reconcileKitUpdateReceipt, writePrivate } from "./mutations.ts";
 import { resolveOmpIdentity } from "./paths.ts";
 import type { PresentationResult } from "./output.ts";
-import { parseRuleManifest } from "./diagnostics.ts";
-import { countCaseRows, type FastTestExpectations } from "./test-runner.ts";
 import { isSha256Hex } from "./regex-guards.ts";
 import installerVerifierPath from "../installer/install.py";
 const hashBuffer = Buffer.allocUnsafe(128 * 1024);
@@ -89,26 +87,6 @@ function verifiedRelease(root: string, manifest: ReleaseManifest, manifestSha256
  } catch { return false; }
 }
 
-function releaseTestExpectations(staged: StagedKitRelease): FastTestExpectations {
-	try {
-		const root = staged.root, manifest = staged.manifest;
-		const readVerified = (path: string): Buffer => {
-			const entry = manifest.files.find(file => file.path === path);
-			if (!entry) throw new Error("KIT_POSTCHECK_FAILED");
-			const bytes = regular(join(root, path));
-			if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256) throw new Error("KIT_POSTCHECK_FAILED");
-			return bytes;
-		};
-		const rules = parseRuleManifest(readVerified("MANIFEST.tsv").toString("utf8"));
-		const { cases, quietCases } = countCaseRows(readVerified("cases/cases.tsv").toString("utf8"));
-		let ttsrRules = 0;
-		for (const rule of rules) if (rule.ruleClass !== "always") ttsrRules++;
-		return { rules: rules.length, ttsrRules, cases, quietCases };
-	} catch {
-		rmSync(staged.root, { recursive: true, force: true });
-		throw new Error("KIT_POSTCHECK_FAILED");
-	}
-}
 function readInstallation(prefix: string): { target: string; binary: string; sha256: string } {
  directory(prefix);
  directory(join(prefix, "bin"));
@@ -230,6 +208,37 @@ function matches(prefix: string, image: KitInstallation): boolean {
   return current.target === image.target && current.binary === image.binary && current.sha256 === image.sha256;
  } catch { return false; }
 }
+/**
+ * Run exactly one postcheck in the authenticated target's runtime. The target owns its stage vocabulary,
+ * harness environment and service-state policy; the updater only checks transport and judges its report.
+ */
+export async function runKitPostcheck(input: { executablePath: string; home: string; stateRoot: string; project?: string }): Promise<FullTestReport> {
+ const argv = [input.executablePath, "test", "--full", "--json"];
+ if (input.project) argv.push("--project", input.project);
+ const env: Record<string, string> = {};
+ for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
+ env.HOME = input.home;
+ env.OMP_KIT_POSTCHECK_STATE_ROOT = input.stateRoot;
+ const result = await run(argv, { deadline_s: 1200, max_output_bytes: 16 * 1024 * 1024, env, cwd: input.home });
+ if (result.timed_out) throw new Error("KIT_POSTCHECK_TIMEOUT");
+ if (result.killed || result.truncated) throw new Error("KIT_POSTCHECK_REPORT_INVALID");
+ try {
+  const report = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(result.stdout)).data?.test;
+  if (!report || !["PASS", "FAIL", "BLOCKED", "DEFERRED"].includes(report.status) ||
+   ![0, 1, 3].includes(report.exitCode) || report.exitCode !== result.rc ||
+   (report.status === "PASS") !== (result.rc === 0) ||
+   !Array.isArray(report.failures) || !report.failures.every((failure: unknown) => typeof failure === "string") ||
+   !report.fast?.proofs?.G1_registration || !report.fast.proofs.G2_payload || !report.fast.proofs.G3_quiet_prefix ||
+   !report.proofs?.G4_live || !report.stages || typeof report.stages !== "object" || Array.isArray(report.stages) ||
+   !Object.keys(report.stages).length || !Object.values(report.stages).every(stage => stage && typeof stage === "object" &&
+    "status" in stage && ["PASS", "FAIL", "NOT_RUN", "DEFERRED"].includes(String(stage.status))) ||
+   !Array.isArray(report.snapshots?.home?.changed_paths) || !Array.isArray(report.snapshots?.project?.changed_paths) ||
+   !(report.omp_version === null || typeof report.omp_version === "string"))
+   throw new Error("KIT_POSTCHECK_REPORT_INVALID");
+  return report as FullTestReport;
+ } catch { throw new Error("KIT_POSTCHECK_REPORT_INVALID"); }
+}
+
 const notRun = (): KitPostcheck => ({ status: "NOT_RUN", matcher: "NOT_RUN", live: "NOT_RUN" });
 
 type OmpSnapshot = { launcher: string; packageRoot: string; source: string; nativeRoot: string;
@@ -373,7 +382,6 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
   const archive = regular(source.archivePath);
   await authenticateUpdateArchive(plan, archive);
   const staged = await stageKitRelease({ archive, plan: plan.release, stagingParent: join(plan.prefix, "releases"), probeBinaryInfo: binaryInfo });
-  const expectedCounts = releaseTestExpectations(staged);
   const next: KitInstallation = { version: staged.version, target: relativeTarget(staged.version), binary: installedBinary(plan.prefix, staged.version),
    sha256: staged.manifest.files.find(file => file.path === "bin/omp-kit")!.sha256 };
   let postcheck = notRun();
@@ -388,7 +396,7 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
    if (!verifiedRelease(targetRoot, staged.manifest, plan.release.asset.manifest_sha256)) throw new Error("KIT_STAGE_CHANGED");
    switchLink(plan.prefix, staged.version);
    if (!matches(plan.prefix, next)) throw new Error("KIT_POSTIMAGE_CHANGED");
-   const report = await runFullTest({ root: targetRoot, executablePath: join(plan.prefix, "bin", "omp-kit"), home: plan.home, project: plan.project, stateRoot: plan.stateRoot } satisfies FullTestInput, expectedCounts);
+   const report = await runKitPostcheck({ executablePath: next.binary, home: plan.home, stateRoot: plan.stateRoot, project: plan.project });
    const observedOmp = selectedOmpSnapshot();
    const ompIdentityKnown = selectedOmp !== null && observedOmp !== null && report.omp_version !== null && report.omp_version === selectedOmp.version;
    const ompChanged = selectedOmp !== null && observedOmp !== null &&
@@ -404,7 +412,8 @@ export async function applyKitUpdate(plan: KitUpdatePlan): Promise<KitUpdateResu
   } catch (error) {
    if (!receiptId) throw error;
    const cause = updateFailureCause(error, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]);
-   const message = error instanceof Error ? error.message : "KIT_UPDATE_INTERRUPTED";
+   const message = selectedOmp && !sameOmpSnapshot(selectedOmp, selectedOmpSnapshot())
+    ? "OMP_CHANGED_DURING_KIT_UPDATE" : error instanceof Error ? error.message : "KIT_UPDATE_INTERRUPTED";
    return { status: "PARTIAL", exitCode: 1, receiptId, activeVersion: matches(plan.prefix, next) ? next.version : matches(plan.prefix, current) ? current.version : null,
     postcheck: { ...postcheck, reason: /^[A-Z][A-Z_]+$/.test(message) ? message : "KIT_UPDATE_INTERRUPTED", cause }, provenance: "SIGSTORE_VERIFIED" };
   }
@@ -450,8 +459,9 @@ export function kitPostcheckDetail(postcheck: KitPostcheck, roots: readonly stri
  */
 export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult): PresentationResult {
  const postcheckDetail = kitPostcheckDetail(outcome.postcheck, [plan.home, plan.stateRoot, plan.prefix, plan.project ?? ""]);
- const recover = outcome.status === "PARTIAL" && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
- const deferred = outcome.postcheck.status === "DEFERRED";
+ const activationUnverified = outcome.status === "PARTIAL" && outcome.activeVersion === null;
+ const recover = outcome.status === "PARTIAL" && !activationUnverified && outcome.receiptId ? `omp-kit undo ${outcome.receiptId} --yes` : null;
+ const deferred = !activationUnverified && outcome.postcheck.status === "DEFERRED";
  const report = outcome.postcheck.report;
  const onlyLiveState = report !== null && report !== undefined
   && [...(report.snapshots.home.live_state_paths ?? []), ...(report.snapshots.project.live_state_paths ?? [])].length > 0
@@ -464,8 +474,11 @@ export function kitUpdateEnvelope(plan: KitUpdatePlan, outcome: KitUpdateResult)
  return { code: outcome.exitCode, data: { overall: outcome.status === "PARTIAL" && !deferred ? "FAIL" : "UNVERIFIED",
   scope: "kit", action: outcome.status, receipt_id: outcome.receiptId, active_version: outcome.activeVersion,
   provenance: outcome.provenance, matcher: outcome.postcheck.matcher, live: outcome.postcheck.live,
-  postcheck: outcome.postcheck.status, reason: outcome.postcheck.reason ?? null, postcheck_detail: postcheckDetail },
-  ...(recover ? { commands: [reconcile ?? recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
+  postcheck: outcome.postcheck.status, reason: activationUnverified ? "KIT_ACTIVATION_UNVERIFIED" : outcome.postcheck.reason ?? null, postcheck_detail: postcheckDetail },
+  ...(activationUnverified ? { errors: [{ code: "KIT_ACTIVATION_UNVERIFIED",
+   message: `Kit update to ${plan.release.version} left activation unverified; see postcheck_detail`,
+   remediation: "Use a known-good release binary to inspect the activation receipt and repair the stable link; keep the pending receipt until its postimage is verified." }] }
+   : recover ? { commands: [reconcile ?? recover], errors: [{ code: outcome.postcheck.reason ?? "KIT_POSTCHECK_FAILED",
    message: deferred
     ? `Kit update to ${plan.release.version} is active but unverified: heavy admission deferred its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`
     : `Kit update to ${plan.release.version} did not pass its postcheck; ${postcheckDetail?.failures[0] ?? "see postcheck_detail"}`,
