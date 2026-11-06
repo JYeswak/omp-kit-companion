@@ -966,7 +966,7 @@ PY
 	rm -rf "$export" "$WORK/next-head" "$WORK/next-residual"
 	supersedes="$(release_version_supersedes ompkit-d8qic ${fragments[@]+"${fragments[@]}"})" || die "v$VERSION is published; cannot attribute next-version rewrites; retry: $resume"
 	if ! bounded 900 git -C "$ROOT" commit -q --only \
-		-m "chore(release): next version $next after v$VERSION ompkit-d8qic" \
+		-m "chore(release): next version $next after v$VERSION ompkit-d8qic [pending]" \
 		-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
 		-m "[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
 		-m "$supersedes" \

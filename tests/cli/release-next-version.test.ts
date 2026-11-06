@@ -296,6 +296,8 @@ test.skipIf(!existsSync(CONVERGE))("planted origin move: a peer push during the 
 	const main = originMain(f);
 	expect(f.git(f.origin, "merge-base", "--is-ancestor", peerSha, main)).toBe("");
 	expect(f.git(f.origin, "log", "--format=%s", main)).toContain("chore(release): next version 1.2.5 after v1.2.4 ompkit-d8qic");
+	// RELADVANCE1: the commit-msg verification-level member refuses a subject with no proof level.
+	expect(f.git(f.origin, "log", "--format=%s", main)).toMatch(/chore\(release\): next version 1\.2\.5 after v1\.2\.4 ompkit-d8qic \[(pending|selftest|test|mutation|oracle|live)\]/);
 	expect(JSON.parse(showMain(f, "package.json")).version).toBe("1.2.5");
 	expect(showMain(f, "peer.txt")).toBe("peer work");
 	expect(f.git(f.repo, "rev-parse", "refs/heads/main")).toBe(main);

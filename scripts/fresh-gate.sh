@@ -683,7 +683,9 @@ gate_notes() {
 gate_readme() {
 	(
 		cd "$ARCHIVE_DIR"
-		bun run --no-env-file --config=/dev/null scripts/readme-check.ts --root "$ARCHIVE_DIR" --repo "$ROOT"
+		# RELADVANCE1: tags live in the canonical repo; the focused phase initializes a .git in ARCHIVE_DIR, which
+		# hides ancestor tags, so ROOT (the archive) would read a published tag as absent.
+		bun run --no-env-file --config=/dev/null scripts/readme-check.ts --root "$ARCHIVE_DIR" --repo "${FRESH_GATE_REPO:-$ROOT}"
 	)
 }
 
