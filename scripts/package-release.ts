@@ -5,9 +5,11 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run as runBounded } from "../src/kitlib/run.ts";
 import type { FlywheelExec } from "../extensions/kit-flywheel-guard.ts";
-import { RELEASE_BINARY_NAME, RELEASE_MANIFEST_NAME, validateReleaseManifest, type ReleaseAsset } from "../src/kit-release.ts";
+import { RELEASE_BINARY_NAME, RELEASE_MANIFEST_NAME, validateReleaseManifest } from "../src/kit-release.ts";
+import type { ReleaseAsset } from "../src/kit-release.ts";
 import { RELEASE_DATA_FILES } from "../src/release-assets.ts";
 import { authorizeSourceAct } from "../src/source-authority.ts";
+import { record } from "../src/tern/model.ts";
 const root = resolve(import.meta.dir, "..");
 const platformTargets: Record<string, string> = {
 	"darwin-arm64-none": "bun-darwin-arm64",
@@ -417,6 +419,7 @@ async function run(): Promise<void> {
 	await checkInstallerBootstrap(root);
 	const sourcePackage = safeSource("package.json");
 	const initialSourceRevision = packageSourceRevision(root, sourcePackage);
+	const components = releaseComponents(root);
 	const filename = `omp-kit-v${version}-${key}.tar`;
 	const output = join(out, filename);
 	try { lstatSync(output); fail("RELEASE_ARCHIVE_EXISTS"); } catch (error) {
@@ -438,7 +441,7 @@ async function run(): Promise<void> {
 		if (build.exitCode !== 0) fail(`COMPILE_FAILED (${build.exitCode}): ${build.stdout.toString()} ${build.stderr.toString()}`);
 		const names = [...files, ...RELEASE_DATA_FILES.filter(path => dirname(path) === ".")];
 		for (const path of roots) expand(path, names);
-		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv", "licenses/tern-sdk/LICENSE");
+		names.push(RELEASE_BINARY_NAME, "MANIFEST.tsv", "licenses/tern-sdk/LICENSE", "release-components.json");
 		// Ship every file a shipped installer copies or runs (ompkit-fp72.120.16.151:
 		// 0.2.86/0.2.87 installers named check-deploy-step.sh, absent from the package).
 		closeOverInstallerReferences(names, name => safeSource(name).toString("utf8"));
@@ -448,6 +451,7 @@ async function run(): Promise<void> {
 		for (const name of names) {
 			if (name === RELEASE_BINARY_NAME) content.set(name, safeCompiled(binary));
 			else if (name === "MANIFEST.tsv") content.set(name, ruleManifest);
+			else if (name === "release-components.json") content.set(name, Buffer.from(JSON.stringify({ bunVersion: Bun.version, components })));
 			else if (name === "licenses/tern-sdk/LICENSE") content.set(name, safeSource("src/tern/LICENSE"));
 			else if (Object.values(RELOCATED_SOURCES).includes(name))
 				// Runtime replay data lives beside its Python consumer, never in a source-only tree.
@@ -516,7 +520,7 @@ async function run(): Promise<void> {
 		const archiveBytes = readFileSync(output);
 		const archiveSha = sha(archiveBytes);
 		const sbomFilename = `${filename}.sbom.spdx.json`;
-		const sbom = Buffer.from(`${JSON.stringify(spdxSbom({ version, key, filename, archiveSha, bunVersion: Bun.version,
+		const sbom = Buffer.from(`${JSON.stringify(spdxSbom({ version, key, filename, archiveSha, bunVersion: Bun.version, components,
 			binarySha: sha(content.get(RELEASE_BINARY_NAME)!),
 			files: names.map(path => ({ path, sha256: sha(content.get(path)!) })) }))}\n`);
 		const sbomPath = join(out, sbomFilename);
@@ -548,11 +552,64 @@ async function run(): Promise<void> {
 		rmSync(compileTmp, { recursive: true, force: true });
 	}
 }
-type SpdxInput = { version: string; key: string; filename: string; archiveSha: string; bunVersion: string; binarySha: string; files: { path: string; sha256: string }[] };
-/** Deterministic SPDX 2.3 document derived from the exact bytes just sealed into the archive:
- * the archive itself, the compiled binary, the embedding Bun toolchain (the bundled runtime;
- * this kit ships zero third-party runtime dependencies), and every bundled source file. */
-function spdxSbom(input: SpdxInput) {
+type Component = { name: string; version: string; parent: "bun" | "binary"; purl?: string };
+
+/** Bun's native library revisions, not its Node/V8/OpenSSL compatibility version aliases. */
+const BUN_LIBRARIES = ["boringssl", "llhttp", "libarchive", "mimalloc", "picohttpparser",
+	"uwebsockets", "webkit", "zlib", "tinycc", "lolhtml", "ares", "libdeflate",
+	"usockets", "lshpack", "zstd", "icu", "sqlite"];
+
+export function releaseComponents(sourceRoot: string, lockfile?: string): Component[] {
+	const components: Component[] = [];
+	const lockPath = lockfile ?? join(sourceRoot, "bun.lock");
+	// This dependency-free tree has no lockfile. If one is present (or explicitly
+	// requested), never turn a read/parse failure into a successful empty inventory.
+	if (lockfile !== undefined || lstatSync(lockPath, { throwIfNoEntry: false }) !== undefined) {
+		let text: string;
+		try { text = readFileSync(lockPath, "utf8"); } catch { return fail("SBOM_LOCKFILE_UNREADABLE"); }
+		let lock: unknown;
+		try { lock = Bun.JSON5.parse(text); } catch { return fail("SBOM_LOCKFILE_INVALID"); }
+		if (!record(lock) || lock.lockfileVersion !== 1 || !record(lock.packages)
+			|| Object.keys(lock.packages).length === 0 || !record(lock.workspaces)
+			|| !record(lock.workspaces[""])) return fail("SBOM_LOCKFILE_INVALID");
+		const packages = lock.packages;
+		const seen = new Set<string>();
+		const visit = (dependencies: unknown, parent = ""): void => {
+			if (dependencies === undefined) return;
+			if (!record(dependencies)) fail("SBOM_LOCKFILE_INVALID");
+			for (const name of Object.keys(dependencies)) {
+				let scope = parent;
+				let key = scope ? `${scope}/${name}` : name;
+				while (!(key in packages) && scope) {
+					scope = scope.slice(0, Math.max(0, scope.lastIndexOf("/")));
+					key = scope ? `${scope}/${name}` : name;
+				}
+				if (seen.has(key)) continue;
+				const entry = packages[key];
+				if (!Array.isArray(entry) || typeof entry[0] !== "string" || !entry[0].startsWith(`${name}@`)
+					|| !entry[0].slice(name.length + 1).trim() || !record(entry[2])) fail("SBOM_LOCKFILE_INVALID");
+				seen.add(key);
+				const version = entry[0].slice(name.length + 1);
+				components.push({ name, version, parent: "binary",
+					purl: `pkg:npm/${name.replace("@", "%40")}@${encodeURIComponent(version)}` });
+				visit(entry[2].dependencies, key);
+			}
+		};
+		visit(lock.workspaces[""].dependencies);
+	}
+	for (const name of BUN_LIBRARIES) {
+		const version = process.versions[name];
+		if (version) components.push({ name, version, parent: "bun" });
+	}
+	const catalog: unknown = JSON.parse(readFileSync(join(sourceRoot, "src/tern/catalog.json"), "utf8"));
+	if (!record(catalog) || typeof catalog.sdk_commit !== "string" || !catalog.sdk_commit.trim()) fail("SBOM_SDK_VERSION_MISSING");
+	components.push({ name: "tern-sdk", version: catalog.sdk_commit, parent: "binary" });
+	return components;
+}
+
+type SpdxInput = { version: string; key: string; filename: string; archiveSha: string; bunVersion: string; binarySha: string; files: { path: string; sha256: string }[]; components: Component[] };
+/** SPDX 2.3 from sealed archive bytes and the builder's embedded component inventory. */
+export function spdxSbom(input: SpdxInput) {
 	const iso = new Date().toISOString();
 	const created = `${iso.slice(0, 19)}Z`;
 	const fileEntries = input.files.map((file, index) => ({
@@ -595,7 +652,7 @@ function spdxSbom(input: SpdxInput) {
 				licenseConcluded: "NOASSERTION",
 				copyrightText: "NOASSERTION",
 				primaryPackagePurpose: "APPLICATION",
-				comment: "Single-file compiled binary; embeds the Bun toolchain below.",
+				comment: "Single-file compiled binary; embeds the Bun runtime and the components below.",
 			},
 			{
 				name: "bun",
@@ -606,8 +663,14 @@ function spdxSbom(input: SpdxInput) {
 				licenseConcluded: "NOASSERTION",
 				copyrightText: "NOASSERTION",
 				primaryPackagePurpose: "OTHER",
-				comment: "Bundled runtime: compiler toolchain embedded in the binary. Reported from the builder's actual Bun runtime; no third-party runtime dependencies ship in this kit.",
+				comment: "Bundled runtime, reported by the compiler that produced this binary.",
 			},
+			...input.components.map((component, index) => ({
+				name: component.name, versionInfo: component.version, SPDXID: `SPDXRef-Component-${index + 1}`,
+				downloadLocation: "NOASSERTION", filesAnalyzed: false, licenseConcluded: "NOASSERTION",
+				copyrightText: "NOASSERTION", primaryPackagePurpose: "LIBRARY",
+				...(component.purl ? { externalRefs: [{ referenceCategory: "PACKAGE-MANAGER", referenceType: "purl", referenceLocator: component.purl }] } : {}),
+			})),
 		],
 		files: fileEntries,
 		relationships: [
@@ -615,8 +678,38 @@ function spdxSbom(input: SpdxInput) {
 			{ spdxElementId: "SPDXRef-Archive", relationshipType: "CONTAINS", relatedSpdxElement: "SPDXRef-Binary" },
 			...fileEntries.map(file => ({ spdxElementId: "SPDXRef-Archive", relationshipType: "CONTAINS", relatedSpdxElement: file.SPDXID })),
 			{ spdxElementId: "SPDXRef-Binary", relationshipType: "GENERATED_FROM", relatedSpdxElement: "SPDXRef-Runtime-Bun" },
+			...input.components.map((component, index) => ({
+				spdxElementId: component.parent === "bun" ? "SPDXRef-Runtime-Bun" : "SPDXRef-Binary",
+				relationshipType: "CONTAINS", relatedSpdxElement: `SPDXRef-Component-${index + 1}`,
+			})),
 		],
 	};
+}
+
+/** Re-signing changes archive/binary digests, not the packaged build-time inventory.
+ * The attestation runner must never substitute its own Bun/Linux component versions. */
+export async function sbomFromArchive(archive: Uint8Array, filename: string) {
+	const members = await new Bun.Archive(archive).files();
+	const inventoryFile = members.get("release-components.json");
+	if (!inventoryFile) fail("SBOM_INVENTORY_MISSING");
+	const inventory: unknown = JSON.parse(await inventoryFile.text());
+	if (!record(inventory) || typeof inventory.bunVersion !== "string" || !inventory.bunVersion.trim()
+		|| !Array.isArray(inventory.components) || inventory.components.length === 0
+		|| !inventory.components.every((item: unknown) => record(item)
+			&& typeof item.name === "string" && item.name.trim() && typeof item.version === "string" && item.version.trim()
+			&& (item.parent === "bun" || item.parent === "binary")
+			&& (item.purl === undefined || typeof item.purl === "string"))) fail("SBOM_INVENTORY_INVALID");
+	const manifestFile = members.get(RELEASE_MANIFEST_NAME);
+	if (!manifestFile) fail("SBOM_MANIFEST_MISSING");
+	const manifest = validateReleaseManifest(JSON.parse(await manifestFile.text()));
+	const prefix = `omp-kit-v${manifest.version}-`;
+	const key = filename.startsWith(prefix) && filename.endsWith(".tar") ? filename.slice(prefix.length, -4) : "";
+	if (!platformTargets[key]) fail("SBOM_PLATFORM_INVALID");
+	const binary = members.get(RELEASE_BINARY_NAME);
+	if (!binary) fail("SBOM_BINARY_MISSING");
+	return spdxSbom({ version: manifest.version, key, filename, archiveSha: sha(archive),
+		bunVersion: inventory.bunVersion, binarySha: sha(new Uint8Array(await binary.arrayBuffer())),
+		files: manifest.files, components: inventory.components as Component[] });
 }
 
 function safeCompiled(binary: string): Buffer {
@@ -625,7 +718,13 @@ function safeCompiled(binary: string): Buffer {
 	return readFileSync(binary);
 }
 if (import.meta.main) {
- try { await run(); } catch (error) {
+ try {
+  const args = process.argv.slice(2);
+  if (args[0] === "--sbom-archive" && args[2] === "--sbom-output" && args.length === 4) {
+   const sbom = await sbomFromArchive(readFileSync(args[1]!), args[1]!.split("/").pop()!);
+   await Bun.write(args[3]!, `${JSON.stringify(sbom)}\n`);
+  } else await run();
+ } catch (error) {
   process.stderr.write(`package-release: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
  }

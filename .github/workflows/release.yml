@@ -442,14 +442,23 @@ jobs:
           path: candidate/
           if-no-files-found: error
           retention-days: 7
-      - name: Generate SBOM for the exact candidate archive
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          path: candidate/
-          format: spdx-json
-          artifact-name: sbom-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
-          output-file: ${{ github.workspace }}/sbom-${{ matrix.platform }}.spdx.json
-          upload-release-assets: false
+          bun-version-file: .bun-version
+      - name: Generate SBOM from the exact candidate's packaged component inventory
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          bun scripts/package-release.ts --sbom-archive "candidate/omp-kit-v$VERSION-$PLATFORM.tar" --sbom-output "sbom-$PLATFORM.spdx.json"
+          cp "sbom-$PLATFORM.spdx.json" "sbom-$PLATFORM-attempt-${{ github.run_attempt }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sbom-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          path: sbom-${{ matrix.platform }}-attempt-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
       - name: Attest build provenance at the final tag ref
         if: inputs.certified_run_id != '' && !inputs.rehearsal
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
@@ -672,7 +681,7 @@ jobs:
           # A rerun may find SBOMs an earlier attempt attached; they are never re-downloaded, compared or clobbered.
           [[ "$(jq -r '[.[0].assets[].name | select((startswith("sbom-") and endswith(".spdx.json")) | not)] | sort | join(" ")' releases.json)" == "$(printf '%s\n' "${want[@]}" | sort | paste -sd ' ' -)" ]] \
             || { echo "draft assets are not exactly: ${want[*]} (plus optional SBOMs)" >&2; exit 4; }
-          # anchore/sbom-action writes output-file without creating its directory.
+          # Component inventories are carried inside the checksum-verified archives.
           mkdir dist sbom
           while read -r id name digest; do
             gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "dist/$name"
@@ -687,33 +696,16 @@ jobs:
           for platform in "${ship[@]}"; do
             python3 -I installer/install.py inspect dist/release-index.json "$VERSION" "$platform" > /dev/null
             python3 scripts/release_reuse.py verify-archive --index dist/release-index.json --platform "$platform" --archive-dir dist/
-            mkdir -p "sbom-in/$platform"
-            cp "dist/omp-kit-v$VERSION-$platform.tar" "sbom-in/$platform/"
           done
-      - name: SBOM darwin-arm64-none
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          path: sbom-in/darwin-arm64-none/
-          format: spdx-json
-          output-file: ${{ github.workspace }}/sbom/sbom-darwin-arm64-none.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
-      - name: SBOM linux-arm64-gnu
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
-        with:
-          path: sbom-in/linux-arm64-gnu/
-          format: spdx-json
-          output-file: ${{ github.workspace }}/sbom/sbom-linux-arm64-gnu.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
-      - name: SBOM linux-x64-gnu
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
-        with:
-          path: sbom-in/linux-x64-gnu/
-          format: spdx-json
-          output-file: ${{ github.workspace }}/sbom/sbom-linux-x64-gnu.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
+          bun-version-file: .bun-version
+      - name: Generate platform SBOMs from the packaged builder inventories
+        run: |
+          set -euo pipefail
+          for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
+            bun scripts/package-release.ts --sbom-archive "dist/omp-kit-v$VERSION-$platform.tar" --sbom-output "sbom/sbom-$platform.spdx.json"
+          done
       - name: Attest build provenance for the archives and the index at the tag ref
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
         with:
