@@ -69,7 +69,9 @@ ok "$st" "lookup-exact-tree-pass: rc=$req_rc out=$req_out err=$(cat "$TMP/requir
 : >"$CIO_LOG"
 rc=0
 sh "$repo/scripts/release-verdict.sh" --commit "$c1" --no-fetch >"$TMP/o3" 2>&1 || rc=$?
-[ "$rc" = 0 ] && [ ! -s "$CIO_LOG" ] && grep -Fq "CI-ONLY: VERDICT PASS tree=$t1 (already recorded" "$TMP/o3"
+# RELFAST1 (5d5c4024fc): release-verdict now reuses the recorded PASS itself instead of asking the store, so the
+# reuse is named by its own line; the contract is unchanged: rc 0 and neither file runs again.
+[ "$rc" = 0 ] && [ ! -s "$CIO_LOG" ] && grep -Fq "release-verdict: reusing exact-tree ci-only PASS for $c1" "$TMP/o3"
 ok $? "recorded-pass-not-rerun: rc=$rc log=$(cat "$CIO_LOG") out=$(cat "$TMP/o3")"
 
 # 4. Planted: another tree (one more commit) has no PASS, though the judge and test files are identical.
