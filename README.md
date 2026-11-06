@@ -170,24 +170,15 @@ Installing the plugin loads the extensions declared in `package.json`.
 into the profiles you select:
 
 <!-- default-extensions:start -->
-- `kit-guard-optin.ts`
-- `fleet-guard.ts`
 - `adapter.ts`
-- `cass-search.ts`
-- `dcg-tool-bridge.ts`
-- `ee-ambient-session-start.ts`
-- `ee-failure-journal.ts`
-- `jev-memory-filter.ts`
 - `observational-tool-result.ts`
-- `rch-lane-bind-bridge.ts`
-- `rch-mutator.ts`
-- `skill-topology-session-start.ts`
-- `slb-guard-fail-closed.ts`
-- `zestgraph-danger-gate.ts`
-- `zeststream-cast-spawn-cap.ts`
 <!-- default-extensions:end -->
 
 `bun scripts/readme-check.ts` keeps this list equal to the policy.
+Fleet integrations (external guards, CASS, EE, RCH, Jev/Clef and skill topology)
+are opt-in: `omp-kit apply extensions --fleet --plan` selects
+`policy/extensions-fleet.json` instead; `--apply --yes` installs it.
+Existing profile entries are preserved; use their original receipt to undo them.
 
 ### Skills
 
@@ -532,7 +523,7 @@ Use repeatable `--done` for explicit reports.
 |---|---|---|
 | `apply rules` | Install or update kit-owned rules | `omp-kit apply rules --apply --yes` |
 | `apply policy` | Per-profile TTSR keys via native `omp config set`, with profile backup and read-back; `--profiles NAMES\|all`, `--include-default` | `omp-kit apply policy --plan --json` |
-| `apply extensions` | Install `kit-guard-optin.ts` and `fleet-guard.ts` into selected profiles | `omp-kit apply extensions --plan --profiles all --json` |
+| `apply extensions` | Install portable defaults into selected profiles; `--fleet` selects the external-tool fleet integrations instead | `omp-kit apply extensions --plan --profiles all --json` |
 | `apply plugin` | Link the installed kit package into covered profiles; `--regex-budget-report` disables slow rules in named profiles only | `omp-kit apply plugin --plan --store /abs/kit-release --regex-budget-report /abs/regex-budget.out --profiles all --include-default --json` |
 | `apply mcp` | Import MCP servers from claude, cursor, codex, project or a file into profiles' `mcp.json`, or edit servers already there (`--env-command`, `--enable`) | `omp-kit apply mcp --from claude --servers z3-prover --profiles all --plan --json` |
 | `activation opt-out` | Record an opt-out with a reason; empty reasons are refused and nothing is written | `omp-kit activation opt-out --item service:kit-update --reason 'no launchd' --json` |

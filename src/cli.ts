@@ -1629,7 +1629,7 @@ function extensionCommand(request: ParsedCommand): CliResult {
 	const stateRoot = join(xdgState, "omp-kit");
 	try {
 		const plan = planExtensions({ root, home, stateRoot, project: process.cwd(), profiles,
-			includeDefault: request.flags.has("--include-default") });
+			includeDefault: request.flags.has("--include-default"), fleet: request.flags.has("--fleet") });
 		const steps = plan.steps.map(step => ({ kind: step.kind, ...(step.profile ? { profile: step.profile } : {}) }));
 		const guard = plan.guard;
 		if (!request.flags.has("--apply"))

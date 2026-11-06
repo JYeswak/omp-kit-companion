@@ -79,7 +79,7 @@ test("profile-installed extension dependencies resolve from the copied tree", ()
 	writeProfileConfig(home, "default", "model: test\nextensions: []\n", 0o666);
 	const plan = planExtensions({ root, home, stateRoot: join(workspace, "state"), profiles: "all", includeDefault: true });
 	applyExtensions(plan);
-	expect(checkExtensionImports({ home })).toMatchObject({ status: "OK", files_checked: 15, findings: [] });
+	expect(checkExtensionImports({ home })).toMatchObject({ status: "OK", findings: [] });
 });
 
 test("skipProfiles excludes named profile while install and default config share one receipt", () => {
@@ -295,6 +295,15 @@ test("compiled opt-in plans without writes, receipts exact changes, and never ce
 	expect(readFileSync(skippedConfig)).toEqual(skippedBefore);
 	expect(readFileSync(selectedConfig, "utf8")).toContain(f.destination);
 	expect(readFileSync(config)).toEqual(appliedConfig);
+	const fleetName = "dcg-tool-bridge.ts", fleetDestination = join(f.home, ".omp", "omp-extensions", fleetName);
+	const fleetSource = readFileSync(resolve(import.meta.dir, "../../extensions", fleetName));
+	writeFileSync(join(f.release, "policy", "extensions-fleet.json"), JSON.stringify({ extensions: [fleetName], skipProfiles: [] }));
+	writeFileSync(join(f.release, "extensions", fleetName), fleetSource);
+	expect(run(["--plan", "--fleet", "--profiles", "work"]).code).toBe(1);
+	expect(existsSync(fleetDestination)).toBe(false);
+	expect(run(["--apply", "--yes", "--fleet", "--profiles", "work"]).output.data.action).toBe("APPLIED");
+	expect(readFileSync(fleetDestination)).toEqual(fleetSource);
+	expect(readFileSync(selectedConfig, "utf8")).toContain(fleetDestination);
 	const interruptedConfig = f.profile("later");
 	const pendingPlan = planExtensions({ ...f.input, stateRoot: join(f.home, ".local", "state", "omp-kit"),
 		project, profiles: ["later"] });

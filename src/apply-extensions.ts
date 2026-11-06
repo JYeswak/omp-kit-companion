@@ -6,7 +6,7 @@ import { applyMutation, inspectPendingMutations, planMutation, undoMutation, typ
 import { relativePathWithinRoot } from "./paths.ts";
 import { checkExtensionImports, extractImportSpecifiers } from "./extensions.ts";
 import { matchesBounded } from "./regex-guards.ts";
-export type ExtensionInput = { root: string; home: string; stateRoot: string; project?: string; profiles?: "all" | readonly string[]; includeDefault?: boolean };
+export type ExtensionInput = { root: string; home: string; stateRoot: string; project?: string; profiles?: "all" | readonly string[]; includeDefault?: boolean; fleet?: boolean };
 export type ExtensionStep = { kind: "extension" | "support" | "profile"; path: string; profile?: string; owners?: readonly string[]; beforeSha256: string | null; afterSha256: string };
 export type ExtensionPlan = {
 	readonly destination: string;
@@ -265,7 +265,7 @@ export function inspectExtensionGuard(input: ExtensionInput): GuardInspection {
 export function planExtensions(input: ExtensionInput): ExtensionPlan {
 	const root = absolute(input.root), home = absolute(input.home), stateRoot = absolute(input.stateRoot);
 	if (!inspectDirectory(root) || !inspectDirectory(home)) stop("UNSAFE_PATH");
-	const policy = required(join(root, "policy", "extensions.json"));
+	const policy = required(join(root, "policy", input.fleet ? "extensions-fleet.json" : "extensions.json"));
 	let manifest: unknown;
 	try { manifest = JSON.parse(policy.bytes.toString("utf8")); } catch { stop("INVALID_EXTENSION_POLICY"); }
 	if (!record(manifest) || !stringArray(manifest.extensions) || !stringArray(manifest.skipProfiles) ||
