@@ -1,0 +1,959 @@
+diff --git a/changelog.d/fp72.120.16.309.md b/changelog.d/fp72.120.16.309.md
+index 09c029f979..118f33fd0d 100644
+--- a/changelog.d/fp72.120.16.309.md
++++ b/changelog.d/fp72.120.16.309.md
+@@ -1,3 +1,5 @@
+ ### Fixed
+ - Release qualification reads validated exact-tree main and CI-only PASS records before waiting for the suite lease, and runs only missing qualification; changed trees, checkers, runtimes and invalid evidence still require the original gate.
+ - Full-suite qualification allocates launcher staging per worker instead of per test file, while retaining fresh private scratch, native timing evidence, and execution for every declared file.
++- Experimental `FULL_SUITE_FILE_REUSE=1` carries named per-file PASS evidence only when its closed primitive-module inputs, shared runtime, judge and toolchain match; the default full-suite and release judgment remain unchanged.
++- Carried files retain their origin commit, tree, native measurements and validated source log. Unknown effects, loader configuration, shell/Python suites and failed evidence always execute; unchanged minimum-run count and wall floors can still refuse an opt-in verdict.
+diff --git a/docs/release-signing.md b/docs/release-signing.md
+index 7dcff8a1df..a085e75d91 100644
+--- a/docs/release-signing.md
++++ b/docs/release-signing.md
+@@ -426,3 +426,31 @@ and result, including failed assets. Parallel downloads require curl 7.75+
+ neither published assets nor the installer trust root. The regression test uses
+ real loopback curl transfers with an all-archive request barrier, an HTTP 404,
+ and tampered bytes; separate controls prove runner failure still refuses.
++
++### Experimental per-file suite reuse (FILEREUSE)
++
++`FULL_SUITE_FILE_REUSE=1 sh scripts/full-suite-verdict.sh --repo . --commit <sha>
++--judge-role main` explicitly enables file-input PASS reuse. It is **off by default**;
++release qualification is unchanged. Opt-in records have a separate runtime identity
++and cannot satisfy an ordinary release lookup.
++
++Each eligible file is keyed by its bytes, the transitive import/named-input graph,
++declared shared-runtime bytes (including absent inputs), complete judging identity,
++Bun/Python versions and OS release. Every carried file appears in `file_reuse.carried`
++with its immutable origin commit/tree and digest-bound native verdict. Its original
++measurements remain historical; they are not relabeled as current execution.
++Missing/corrupt origin evidence, failed files and changed inputs execute natively.
++
++Eligibility is intentionally conservative: only primitive-expression TS/JS modules
++with closed relative imports and ordinary `bun:test` assertions are currently proved.
++Ambient names, arbitrary property access, dynamic imports/reads, external modules,
++loader/preload/package/environment configuration and shell/Python suites stay cold.
++The current repository's preload configuration is unproved, so this feature does
++**not** yet reduce its real release suite. It is not an activation recommendation.
++
++MINRUN1 remains enforced against native counts and current/focused wall work.
++Consequently a shorter opt-in replay can be recorded as **FAIL despite all native
++tests passing**: carried tests do not satisfy an ancestor's minimum-run count.
++Do not lower the policy or credit historical durations to obtain PASS. Removing
++the environment opt-in restores the incumbent full-file execution path.
++
+diff --git a/scripts/affected-tests.ts b/scripts/affected-tests.ts
+index 02294e84ff..188bb735e5 100755
+--- a/scripts/affected-tests.ts
++++ b/scripts/affected-tests.ts
+@@ -187,6 +187,45 @@ export function declaredEmbeds(text: string, rel: string): Record<string, string
+ 	return parsed as Record<string, string[]>;
+ }
+ 
++/**
++ * FILEREUSE needs a forward, transitive input graph, not the focused selector's
++ * intentionally one-hop naming heuristic. Include data references at every hop.
++ * This graph supplies candidate inputs only; suite-file-inputs proves closure.
++ */
++export function fileInputGraph(root: string): Map<string, string[]> {
++	const files = new Set(walk(root));
++	const graph = new Map<string, string[]>();
++	for (const rel of files) {
++		const edges = new Set<string>();
++		if (SCANNED_EXT.some((ext) => rel.endsWith(ext))) {
++			const text = readFileSync(join(root, rel), "utf8");
++			for (const target of referencedPaths(text, files, rel)) edges.add(target);
++			if (SOURCE_EXT.some((ext) => rel.endsWith(ext))) {
++				try {
++					for (const item of new Bun.Transpiler({ loader: loaderFor(rel) }).scanImports(text)) {
++						const target = resolveSpecifier(files, rel, item.path);
++						if (target) edges.add(target);
++					}
++				} catch { /* The independent closure proof refuses unparseable source. */ }
++			}
++			if (rel.endsWith(".py") && text.includes(EMBEDS_MARKER)) {
++				for (const [output, inputs] of Object.entries(declaredEmbeds(text, rel))) {
++					graph.set(output, [...(graph.get(output) ?? []), ...inputs]);
++				}
++			}
++			if (rel.endsWith(".py")) {
++				for (const module of pythonImports(text)) {
++					for (const target of [join(dirname(rel), `${module}.py`), `scripts/${module}.py`]) {
++						if (files.has(target)) edges.add(target);
++					}
++				}
++			}
++		}
++		graph.set(rel, [...new Set([...(graph.get(rel) ?? []), ...edges])].sort());
++	}
++	return graph;
++}
++
+ export function selectAffected(root: string, changed: readonly string[]): Selection {
+ 	const all = walk(root);
+ 	const files = new Set(all);
+diff --git a/scripts/full-suite-verdict-store.py b/scripts/full-suite-verdict-store.py
+index 347cfc21fd..30d83986f4 100755
+--- a/scripts/full-suite-verdict-store.py
++++ b/scripts/full-suite-verdict-store.py
+@@ -8,6 +8,7 @@ import importlib.util
+ import json
+ import os
+ from pathlib import Path
++import platform
+ import re
+ import shutil
+ import stat
+@@ -342,6 +343,8 @@ def measured_counts(files: list[dict]) -> dict[str, int]:
+     """Include verified focused rows, not only this invocation's complement."""
+     counts = {"bun": 0, "shell": 0, "python": 0}
+     for row in files:
++        if row.get("origin") == "file-reuse":
++            continue  # Historical PASS is coverage, not work executed now (MINRUN1).
+         runner = row["runner"]
+         if runner == "bun":
+             count = row.get("test_count")
+@@ -361,6 +364,8 @@ def measured_wall(files: list[dict], invocation_ms: int) -> int:
+     """Count verified focused work once, excluding idle gaps between invocations."""
+     intervals = []
+     for row in files:
++        if row.get("origin") == "file-reuse":
++            continue
+         start, end = row["started_ms"], row["finished_ms"]
+         if (not isinstance(start, int) or isinstance(start, bool) or start < 0
+                 or not isinstance(end, int) or isinstance(end, bool) or end < start):
+@@ -458,13 +463,184 @@ def validate_minimum_report(report: object, files: list[dict], wall_ms: object,
+         raise ValueError("minimum-run report disagrees with its measurements")
+     return expected
+ 
++# FILEREUSE is deliberately separate from exact-tree evidence. A carried row
++# keeps its original tree and measurements; its key proves unchanged inputs.
++def file_keys(judge_root: Path, suite_root: Path, checks: str, runtime: str, role: str) -> dict:
++    if (any(os.environ.get(name) for name in ("BUN_OPTIONS", "NODE_OPTIONS", "BUN_CONFIG_FILE"))
++            or (home_dir() / ".bunfig.toml").exists()
++            or (xdg_dir("XDG_CONFIG_HOME", home_dir() / ".config") / ".bunfig.toml").exists()):
++        print("FILEREUSE: external loader configuration is unprovable; all files run", file=sys.stderr)
++        return {}
++    try:
++        raw = checked_run(["bun", "run", "--no-env-file", "--config=/dev/null",
++                           str(judge_root / "scripts/suite-file-inputs.ts"), str(suite_root)], deadline_s=120)
++        proofs = json.loads(raw)
++    except (OSError, ValueError, TypeError) as error:
++        print("FILEREUSE: analyser cannot prove inputs; all files run: " + str(error), file=sys.stderr)
++        return {}
++    keys = {}
++    shared = (*load_metrics(judge_root).JUDGING_FILES, "scripts/gate-ci-only.tsv",
++              "bunfig.toml", "package.json", "tsconfig.json")
++    for path, proof in proofs.items():
++        if proof.get("provable") is not True:
++            continue
++        inputs = {}
++        try:
++            for name in sorted(set(proof["inputs"]) | set(shared)):
++                relative = Path(name)
++                target = suite_root / relative
++                if (relative.is_absolute() or ".." in relative.parts or target.is_symlink()
++                        or any((suite_root / parent).is_symlink() for parent in relative.parents)):
++                    raise ValueError("unsafe file input: " + name)
++                if target.is_file():
++                    digest = hashlib.sha256()
++                    with target.open("rb") as handle:
++                        for chunk in iter(lambda: handle.read(1 << 20), b""):
++                            digest.update(chunk)
++                    inputs[name] = digest.hexdigest()
++                elif target.exists():
++                    raise ValueError("input is not a regular file: " + name)
++                else:
++                    inputs[name] = None
++        except (OSError, ValueError) as error:
++            print(f"FILEREUSE: {path} has unprovable inputs; running: {error}", file=sys.stderr)
++            continue
++        identity = {"version": 1, "path": path, "inputs": inputs, "checks": checks,
++                    "runtime": runtime, "role": role, "os_release": platform.release()}
++        key = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
++        keys[path] = {"key": key, "identity": identity}
++    return keys
++
++
++def file_origin_digest(path: Path) -> str:
++    if not stat.S_ISREG(path.lstat().st_mode):
++        raise ValueError("file origin is not a regular record")
++    with path.open("rb") as handle:
++        data = handle.read(MAX_RECORD_BYTES + 1)
++    if len(data) > MAX_RECORD_BYTES:
++        raise ValueError("file origin exceeds the record bound")
++    return hashlib.sha256(data).hexdigest()
++
++
++def validate_file_carries(entry: dict, path: Path, judge_root: Path, seen: frozenset[str]) -> None:
++    reuse = entry.get("file_reuse")
++    if reuse is None:
++        if any(row.get("origin") == "file-reuse" for row in entry["evidence"]["files"]):
++            raise ValueError("carried row has no file-reuse proof")
++        return
++    if os.environ.get("FULL_SUITE_FILE_REUSE") != "1" or reuse.get("version") != 1:
++        raise ValueError("file reuse is not enabled or has an unknown schema")
++    if not valid_hex(entry.get("commit"), (40, 64)):
++        raise ValueError("file reuse requires an immutable origin commit")
++    keys, carried = reuse["keys"], reuse["carried"]
++    if not isinstance(keys, dict) or not isinstance(carried, list):
++        raise ValueError("invalid file-reuse keys or carried list")
++    for name, value in keys.items():
++        identity = value["identity"]
++        key = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
++        if (key != value["key"] or identity["path"] != name
++                or identity["checks"] != entry["checks"] or identity["runtime"] != entry["runtime"]
++                or identity["role"] != entry["judge_role"] or identity["os_release"] != platform.release()):
++            raise ValueError("file input key identity mismatch")
++    rows = {row["path"]: row for row in entry["evidence"]["files"] if row.get("origin") == "file-reuse"}
++    if len(carried) != len(rows) or len({item["path"] for item in carried}) != len(rows):
++        raise ValueError("carried file set mismatch")
++    for item in carried:
++        if item.get("verdict") != "PASS":
++            raise ValueError("a failed file cannot carry")
++        name = item["path"]
++        row = rows[name]
++        origin_name = item["origin_record"]
++        if Path(origin_name).name != origin_name or not origin_name.endswith(".json"):
++            raise ValueError("unsafe file origin path")
++        origin_path = path.parent / origin_name
++        if file_origin_digest(origin_path) != item["origin_digest"]:
++            raise ValueError("file origin digest mismatch")
++        origin, reason = validate_record(origin_path, judge_root=judge_root, role=entry["judge_role"],
++                                         checks=entry["checks"], runtime=entry["runtime"], _seen=seen)
++        if origin is None or origin["verdict"] != "PASS":
++            raise ValueError("file origin is not a validated PASS: " + reason)
++        native = next((r for r in origin["evidence"]["files"] if r["path"] == name), None)
++        if (native is None or native.get("origin") is not None or native["rc"] != 0
++                or {k: v for k, v in row.items() if k != "origin"} != native
++                or origin["tree"] != item["origin_tree"] or origin.get("commit") != item["origin_commit"]
++                or keys.get(name) != origin.get("file_reuse", {}).get("keys", {}).get(name)
++                or keys[name]["key"] != item["key"]):
++            raise ValueError("carried file differs from native PASS or input key")
++
++
++def plan_file_reuse(args: argparse.Namespace, repo: Path, directory: Path, judge_root: Path) -> None:
++    suite_root = Path(args.suite_root).resolve()
++    keys = file_keys(judge_root, suite_root, args.checks, args.runtime, args.role)
++    plan = {"version": 1, "keys": keys, "carried": []}
++    records_dir = Path(args.records)
++    for kind, variable in (("bun", "KEPT_BUN"), ("shell", "KEPT_SH"), ("python", "KEPT_PY")):
++        for index, name in enumerate(os.environ.get(variable, "").split(), 1):
++            value = keys.get(name)
++            if value is None:
++                continue
++            pointer = directory / "file-pass" / (value["key"] + ".json")
++            try:
++                item = json_file(pointer)
++                if item.get("verdict") != "PASS":
++                    raise ValueError("file has no PASS")
++                origin_name = item["origin_record"]
++                if Path(origin_name).name != origin_name:
++                    raise ValueError("unsafe origin path")
++                origin_path = directory / origin_name
++                if file_origin_digest(origin_path) != item["origin_digest"]:
++                    raise ValueError("origin changed")
++                origin, reason = validate_record(origin_path, judge_root=judge_root, role=args.role,
++                                                 checks=args.checks, runtime=args.runtime)
++                if origin is None or origin["verdict"] != "PASS":
++                    raise ValueError(reason)
++                native = next(row for row in origin["evidence"]["files"] if row["path"] == name)
++                if (native.get("origin") is not None or native["rc"] != 0
++                        or origin.get("file_reuse", {}).get("keys", {}).get(name) != value
++                        or item["path"] != name or item["key"] != value["key"]
++                        or origin["tree"] != item["origin_tree"] or origin.get("commit") != item["origin_commit"]):
++                    raise ValueError("not an unchanged native PASS")
++            except (OSError, ValueError, KeyError, TypeError, StopIteration):
++                continue  # A corrupt/missing/failed origin is always a cold execution.
++            plan["carried"].append(item)
++            prefix = records_dir / f"{kind}-{index}"
++            write_atomic(prefix.with_suffix(".json"), json.dumps({**native, "origin": "file-reuse"}).encode())
++            prefix.with_suffix(".rc").write_text("0\n")
++            prefix.with_suffix(".out").write_text(f"FILEREUSE carried {name} origin_commit={item['origin_commit']} key={value['key']}\n")
++    plan["carried"].sort(key=lambda item: item["path"])
++    write_atomic(Path(args.plan), json.dumps(plan, sort_keys=True).encode())
++    print(f"FILEREUSE: eligible={len(keys)} carried={len(plan['carried'])}")
++
++
++def save_file_passes(path: Path, judge_root: Path, suite_root: Path) -> None:
++    entry, reason = validate_record(path, judge_root=judge_root, suite_root=suite_root)
++    if entry is None:
++        raise ValueError("cannot save file PASS from invalid verdict: " + reason)
++    directory = path.parent / "file-pass"
++    directory.mkdir(exist_ok=True)
++    keys = entry["file_reuse"]["keys"]
++    digest = file_origin_digest(path)
++    for row in entry["evidence"]["files"]:
++        name = row["path"]
++        if (name not in keys or row.get("origin") is not None
++                or (row["rc"] == 0 and entry["verdict"] != "PASS")):
++            continue
++        item = {"path": name, "key": keys[name]["key"], "origin_commit": entry["commit"],
++                "origin_tree": entry["tree"], "origin_record": path.name, "origin_digest": digest,
++                "verdict": "PASS" if row["rc"] == 0 else "FAIL"}
++        write_atomic(directory / (keys[name]["key"] + ".json"), json.dumps(item, sort_keys=True).encode())
++
+ 
+ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, role: str | None = None,
+                     checks: str | None = None, runtime: str | None = None,
+                     suite_root: Path | None = None, repo: Path | None = None,
+                     commit: str | None = None, exact_filename: bool = False,
+-                    historical: bool = False) -> tuple[dict | None, str]:
++                    historical: bool = False, _seen: frozenset[str] = frozenset()) -> tuple[dict | None, str]:
+     try:
++        resolved = str(path.resolve())
++        if resolved in _seen or len(_seen) >= 32:
++            raise ValueError("cyclic or overlong file-reuse provenance")
++        seen = _seen | {resolved}
+         entry = json_file(path)
+         if entry.get("version") != 3:
+             raise ValueError("record schema is not version 3")
+@@ -536,14 +712,19 @@ def validate_record(path: Path, *, judge_root: Path, tree: str | None = None, ro
+         covered_count = sum(len(rows) for rows in covered)
+         if len(files) != bun_files + shell_suites + py_suites + covered_count or not files:
+             raise ValueError("suite counts do not match measured rows")
+-        if (bun_files == 0 and bun_ran != 0) or (bun_files > 0 and bun_ran == 0):
++        carried_bun = sum(row.get("origin") == "file-reuse" and row["runner"] == "bun" for row in files)
++        if (bun_files == 0 and bun_ran != 0) or (bun_files > carried_bun and bun_ran == 0):
+             raise ValueError("Bun run count is inconsistent")
+         if bun_fail > bun_ran or shell_fail > shell_suites or py_fail > py_suites:
+             raise ValueError("failure counts exceed the run counts")
+         for row in files:
+             closure = row.get("closure")
+-            if not isinstance(closure, dict) or closure.get("tree") != entry_tree:
++            if not isinstance(closure, dict) or (row.get("origin") != "file-reuse" and closure.get("tree") != entry_tree):
+                 raise ValueError("measured row does not bind the candidate tree")
++        validate_file_carries(entry, path, judge_root, seen)
++        if suite_root is not None and "file_reuse" in entry:
++            if entry["file_reuse"]["keys"] != file_keys(judge_root, suite_root, entry_checks, entry_runtime, entry_role):
++                raise ValueError("file input proof differs from the exact tree")
+         minimum_failures = []
+         if "minimum_run" not in entry and (not historical or files[0]["judge"]["sha256"] == metrics.JUDGE_SHA256):
+             raise ValueError("current verdict has no minimum-run qualification")
+@@ -1066,6 +1247,15 @@ def main() -> int:
+     minimum_cmd.add_argument("--commit")
+     failing_cmd = actions.add_parser("failing-tests")
+     failing_cmd.add_argument("--log", required=True)
++    file_plan = actions.add_parser("file-plan")
++    add_store_options(file_plan)
++    for option in ("judge-root", "suite-root", "checks", "runtime", "role", "records", "plan"):
++        file_plan.add_argument("--" + option, required=True)
++    file_save = actions.add_parser("file-save")
++    add_store_options(file_save)
++    file_save.add_argument("--judge-root", required=True)
++    file_save.add_argument("--entry", required=True)
++    file_save.add_argument("--suite-root", required=True)
+     args = parser.parse_args()
+     if args.action == "failing-tests":
+         # The runner's status rows arrive on stdin: the verdict removes its status file with the run state.
+@@ -1085,6 +1275,14 @@ def main() -> int:
+         repo = repository_root(args.repo)
+         judge_root = Path(getattr(args, "judge_root", None) or Path(__file__).resolve().parent.parent).expanduser().resolve()
+         directory = cache_directory(repo, args.cache_dir)
++        if args.action in ("file-plan", "file-save"):
++            if os.environ.get("FULL_SUITE_FILE_REUSE") != "1":
++                raise ValueError("FILEREUSE requires FULL_SUITE_FILE_REUSE=1")
++            if args.action == "file-plan":
++                plan_file_reuse(args, repo, directory, judge_root)
++            else:
++                save_file_passes(Path(args.entry), judge_root, Path(args.suite_root))
++            return 0
+         if args.action == "path":
+             checks = args.checks or judge_identity(Path(args.judge_root).expanduser().resolve()
+                                                    if args.judge_root else Path(__file__).resolve().parent.parent)
+diff --git a/scripts/full-suite-verdict.sh b/scripts/full-suite-verdict.sh
+index fe33036aa4..4865306c76 100755
+--- a/scripts/full-suite-verdict.sh
++++ b/scripts/full-suite-verdict.sh
+@@ -28,6 +28,10 @@
+ # FULL_SUITE_VERDICT_CACHE_DIR overrides the configured store for isolated tests and operators.
+ # Otherwise scripts/full-suite-verdict-store.py uses
+ # $XDG_CONFIG_HOME/omp-kit/full-suite-verdict.json and $XDG_STATE_HOME/omp-kit/full-suite-verdicts.
++# FULL_SUITE_FILE_REUSE=1 explicitly enables experimental input-keyed file PASS
++# carry. OFF runs the incumbent path; opt-in runtime identity cannot qualify it.
++# Unknown inputs always run, original measurements retain their origin tree,
++# and MINRUN1 never counts carried work as current execution.
+ # Files share FULL_SUITE_JOBS workers (default ncpu/4 clamped to 2..6; see the measurement at pool_default),
+ # and no width exceeds 6 (SUITESERIAL1).
+ # Unknown files run first, then longest recorded elapsed time for this judge/role.
+@@ -56,6 +60,9 @@ JUDGE_ROLE=base
+ TIMEOUT_SECS=${FULL_SUITE_TIMEOUT_SECS:-1800}
+ FOCUSED_PASSED=
+ CHECK_ENV=0
++FILE_REUSE_PLAN=
++FILE_REUSE_COMMIT=
++FILE_REUSE_BUN=0
+ usage() {
+ 	echo "usage: full-suite-verdict.sh --repo ROOT --commit SHA [--judge-role base|main] [--archive-dir DIR] [--cache-dir DIR] [--focused-passed FILE] [--rerun-reason TEXT]" >&2
+ 	echo "       full-suite-verdict.sh --check-env   (run only the environment guard below)" >&2
+@@ -291,6 +298,7 @@ if [ -z "$ARCHIVE_DIR" ]; then
+ fi
+ cleanup_archive() {
+ 	if [ "$OWN_ARCHIVE" = 1 ]; then kitlib_tmp_cleanup "$ARCHIVE_DIR" 2>/dev/null || :; fi
++	[ -z "$FILE_REUSE_PLAN" ] || rm -f "$FILE_REUSE_PLAN"
+ 	return 0
+ }
+ if [ "$OWN_ARCHIVE" = 1 ] && ! git -C "$ROOT" archive "$COMMIT" | tar -xf - -C "$ARCHIVE_DIR"; then
+@@ -560,6 +568,22 @@ shell_unfinished() {
+ 	done
+ }
+ 
++if [ "${FULL_SUITE_FILE_REUSE:-0}" = 1 ]; then
++	FILE_REUSE_PLAN="$SUITE_OUT.file-inputs"
++	FILE_REUSE_COMMIT=$(git -C "$ROOT" rev-parse "$COMMIT^{commit}") || { cleanup_archive; fail "file-reuse origin commit is unavailable"; exit 1; }
++	if ! KEPT_BUN="$kept_bun" KEPT_SH="$kept_shell" KEPT_PY="$kept_py" \
++		python3 "$SCRIPT_DIR/full-suite-verdict-store.py" file-plan \
++		--repo "$ROOT" --cache-dir "$CACHE_DIR" --judge-root "$SCRIPT_DIR/.." \
++		--suite-root "$ARCHIVE_DIR" --checks "$checks" --runtime "$runtime" --role "$JUDGE_ROLE" \
++		--records "$METRICS_DIR" --plan "$FILE_REUSE_PLAN"; then
++		finish_logs "$incomplete_log"
++		cleanup_archive
++		fail "file input planning failed; no verdict was cached"
++		exit 1
++	fi
++	FILE_REUSE_BUN=$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); bun=set(sys.argv[2].split()); print(sum(r["path"] in bun for r in p["carried"]))' "$FILE_REUSE_PLAN" "$kept_bun")
++fi
++
+ # One deadline for the whole suite: every phase runs to completion and appends to the evidence
+ # log, so a failing suite yields a complete FAIL record (cached RED) instead of an incomplete run.
+ # Timeout kills the suite's process tree, refuses, and records nothing, so a retry reruns.
+@@ -572,7 +596,7 @@ run_suite() {
+ 		}
+ 		# Publisher tracker selection must not redirect tests away from their own fixtures.
+ 		# Tests can still select an explicit tracker after the suite child starts.
+-		unset BEADS_DB BEADS_DIR
++		unset BEADS_DB BEADS_DIR FULL_SUITE_FILE_REUSE
+ 		cd "$ARCHIVE_DIR"
+ 		# This subshell's own pid ($$ names the verdict process here). The deadline's TERM round spares
+ 		# it: the kitlib trap installed below re-raises a caught TERM at $$, which would kill the verdict
+@@ -609,10 +633,12 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+ 		failed=0
+ 		# All languages claim work from the same immutable timing-sorted queue.
+ 		queue="$METRICS_DIR/queue"
+-		KEPT_BUN="$kept_bun" KEPT_SH="$kept_shell" KEPT_PY="$kept_py" CACHE="$CACHE_DIR" ROLE="$JUDGE_ROLE" CHECKS="$checks" python3 - <<'PYQUEUE' >"$queue"
++		FILE_REUSE_PLAN="$FILE_REUSE_PLAN" KEPT_BUN="$kept_bun" KEPT_SH="$kept_shell" KEPT_PY="$kept_py" CACHE="$CACHE_DIR" ROLE="$JUDGE_ROLE" CHECKS="$checks" python3 - <<'PYQUEUE' >"$queue"
+ import json, os
+ from pathlib import Path
+ history = {}
++plan = os.environ.get('FILE_REUSE_PLAN')
++carried = {row['path'] for row in json.loads(Path(plan).read_text())['carried']} if plan else set()
+ # Only this judge/role supplies scheduling hints; a hint never supplies a verdict.
+ for entry in sorted(Path(os.environ['CACHE']).glob('*.json'), key=lambda p: p.stat().st_mtime, reverse=True):
+     try:
+@@ -631,6 +657,8 @@ for entry in sorted(Path(os.environ['CACHE']).glob('*.json'), key=lambda p: p.st
+ items = []
+ for kind, key in [('bun','KEPT_BUN'), ('shell','KEPT_SH'), ('python','KEPT_PY')]:
+     for index, path in enumerate(os.environ[key].split(), 1):
++        if path in carried:
++            continue
+         items.append((kind, index, path))
+ items.sort(key=lambda item: (item[2] in history, -history.get(item[2], 0), item[2]))
+ for kind, index, path in items:
+@@ -695,7 +723,7 @@ PYQUEUE
+ 				src=$(cat "$METRICS_DIR/$kind-$i.rc" 2>/dev/null) || { lost=1; continue; }
+ 				cat "$METRICS_DIR/$kind-$i.out"
+ 				if [ "$kind" = bun ]; then
+-					counts=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["test_count"],r["test_failures"])' "$METRICS_DIR/$kind-$i.json") || { lost=1; continue; }
++					counts=$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(0,0) if r.get("origin") == "file-reuse" else print(r["test_count"],r["test_failures"])' "$METRICS_DIR/$kind-$i.json") || { lost=1; continue; }
+ 					set -- $counts; b_tests=$((b_tests + $1)); b_failed=$((b_failed + $2))
+ 					[ "$src" -eq 0 ] || bun_rc=1
+ 				else
+@@ -789,6 +817,8 @@ if [ "$bun_count" -eq 0 ] 2>/dev/null; then
+ 	[ "$bun_status" -eq 0 ] 2>/dev/null || complete=0
+ elif [ "$bun_count" -gt 0 ] 2>/dev/null && [ "$bun_ran" -gt 0 ] 2>/dev/null && [ "$bun_status" -eq 1 ] 2>/dev/null; then
+ 	:
++elif [ "$FILE_REUSE_BUN" -eq "$bun_count" ] && [ "$bun_status" -eq 1 ] 2>/dev/null; then
++	: # Every Bun file has a validated carried PASS, not a manufactured native run.
+ else
+ 	complete=0
+ fi
+@@ -854,6 +884,7 @@ fi
+ suite_rows=$(cat "$SUITE_STATUS")
+ finish_logs "$log_entry"
+ write_complete_verdict() {
++FILE_REUSE_PLAN="$FILE_REUSE_PLAN" FILE_REUSE_COMMIT="$FILE_REUSE_COMMIT" \
+ MINIMUM_RUN="$minimum_run" METRICS_ROWS="$METRICS_ROWS" METRICS_DECLARED="$METRICS_DECLARED" RUN_START="$run_started_ms" RUN_END="$run_finished_ms" LOAD_START="$load_start" LOAD_END="$load_end" WORKERS_SHELL="$SHELL_JOBS" RERUN_FLAG=$RERUN RERUN_WHY="$RERUN_REASON" RERUN_WHO=${RERUN_ACTOR:-} RERUN_SUP_DIGEST=${SUPERSEDED_DIGEST:-} RERUN_SUP_FILE=${SUPERSEDED_FILE:-} TREE=$tree ROLE=$JUDGE_ROLE CHECKS=$checks RUNTIME=$runtime VERDICT=$verdict CODE=$code BUNF=$bun_count BUNRAN=$bun_ran BUNFAIL=$bun_fail SHC=$shell_count SHR=$shell_red PYC=$py_count PYR=$py_red EXCL="$excluded" COVB="$covered_bun" COVS="$covered_shell" COVP="$covered_py" COVI="$covered_ignored" FJOIN="$focused_join" ENTRY="$entry" LOG="$log_entry" python3 - <<'PYEOF'
+ import hashlib, json, math, os
+ log_digest = hashlib.sha256()
+@@ -875,7 +906,7 @@ def phase_total(rows, field):
+     return sum(values)
+ stages = {}
+ for runner in ("bun", "sh", "python3"):
+-    selected = [row for row in files if row["runner"] == runner and row.get("origin") != "focused"]
++    selected = [row for row in files if row["runner"] == runner and row.get("origin") not in ("focused", "file-reuse")]
+     stages[runner] = {
+         "wall_ms": max(row["finished_ms"] for row in selected) - min(row["started_ms"] for row in selected) if selected else 0,
+         "wait_ms": phase_total(selected, "wait_ms"),
+@@ -923,6 +954,10 @@ entry = {
+     },
+     "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+ }
++if os.environ.get("FILE_REUSE_PLAN"):
++    with open(os.environ["FILE_REUSE_PLAN"]) as handle:
++        entry["file_reuse"] = json.load(handle)
++    entry["commit"] = os.environ["FILE_REUSE_COMMIT"]
+ entry["minimum_run"] = json.loads(os.environ["MINIMUM_RUN"])
+ if entry["minimum_run"]["status"] == "FAIL":
+     entry["verdict"] = "FAIL"
+@@ -953,6 +988,23 @@ case "$recorded_verdict" in
+ 	FAIL) verdict=FAIL; [ "$code" -ne 0 ] || code=1 ;;
+ 	*) cleanup_archive; fail "recorded verdict is invalid"; exit 1 ;;
+ esac
++if [ -n "$FILE_REUSE_PLAN" ]; then
++	if ! (
++		case "$ARCHIVE_DIR" in
++			/*) reuse_archive=$ARCHIVE_DIR ;;
++			*) reuse_archive="$(pwd -P)/$ARCHIVE_DIR" ;;
++		esac
++		cd -- "$SCRIPT_DIR" || exit 1
++		python3 ./full-suite-verdict-store.py file-save \
++			--repo "$ROOT" --cache-dir "$CACHE_DIR" --judge-root "$SCRIPT_DIR/.." \
++			--suite-root "$reuse_archive" --entry "$entry"
++	); then
++		rm -f "$entry" "$METRICS_ROWS" "$METRICS_DECLARED"
++		cleanup_archive
++		fail "file-reuse evidence failed validation; no verdict is reusable (log: $log_entry)"
++		exit 1
++	fi
++fi
+ rm -f "$METRICS_ROWS" "$METRICS_DECLARED"
+ cleanup_archive
+ if [ "$verdict" = "PASS" ]; then
+diff --git a/scripts/install-commit-msg-bead.sh b/scripts/install-commit-msg-bead.sh
+index 5fe03d794f..0da72b2ce3 100755
+--- a/scripts/install-commit-msg-bead.sh
++++ b/scripts/install-commit-msg-bead.sh
+@@ -312,6 +312,8 @@ commit_gate commit-msg 55-omp-kit-commit-gate scripts/check-commit-gate.sh +x
+ commit_gate commit-msg scripts/check-red-main.py scripts/check-red-main.py -x
+ commit_gate commit-msg scripts/full-suite-verdict-store.py scripts/full-suite-verdict-store.py -x
+ commit_gate commit-msg scripts/suite-metrics.py scripts/suite-metrics.py -x
++commit_gate commit-msg scripts/affected-tests.ts scripts/affected-tests.ts -x
++commit_gate commit-msg scripts/suite-file-inputs.ts scripts/suite-file-inputs.ts -x
+ commit_gate commit-msg scripts/kitlib_run.py scripts/kitlib_run.py -x
+ commit_gate commit-msg scripts/kitlib_tmp.py scripts/kitlib_tmp.py -x
+ commit_gate commit-msg scripts/pysafe.py scripts/pysafe.py -x
+diff --git a/scripts/suite-file-inputs.ts b/scripts/suite-file-inputs.ts
+new file mode 100755
+index 0000000000..b441614bff
+--- /dev/null
++++ b/scripts/suite-file-inputs.ts
+@@ -0,0 +1,191 @@
++#!/usr/bin/env bun
++// FILEREUSE: an intentionally small closed language, not an effect heuristic.
++// No computed properties, ambient names, side-effect imports, dynamic reads,
++// external modules, callbacks supplied as values, configuration or preloads.
++// Anything outside this grammar is unprovable and must execute natively.
++import { existsSync, readFileSync } from "node:fs";
++import { dirname, join, normalize } from "node:path";
++import { fileInputGraph, FULL_SUITE_TRIGGERS, isTestFile } from "./affected-tests.ts";
++
++type Token = { text: string; literal: boolean };
++function tokens(source: string): Token[] {
++	const out: Token[] = [];
++	const letter = (c: string) => c >= "a" && c <= "z" || c >= "A" && c <= "Z" || c === "_";
++	const digit = (c: string) => c >= "0" && c <= "9";
++	for (let i = 0; i < source.length;) {
++		const c = source[i]!;
++		if (" \t\r\n".includes(c)) { i++; continue; }
++		if (source.startsWith("//", i)) { while (i < source.length && source[i] !== "\n") i++; continue; }
++		if (source.startsWith("/*", i)) {
++			const end = source.indexOf("*/", i + 2);
++			if (end < 0) throw new Error("unterminated comment");
++			i = end + 2; continue;
++		}
++		if (c === '"' || c === "'") {
++			const start = ++i;
++			while (i < source.length && source[i] !== c) {
++				if (source[i] === "\\" || source[i] === "\n" || source[i] === "\r") throw new Error("escaped or multiline literal");
++				i++;
++			}
++			if (i === source.length) throw new Error("unterminated literal");
++			out.push({ text: source.slice(start, i++), literal: true }); continue;
++		}
++		const start = i++;
++		if (letter(c)) while (i < source.length && (letter(source[i]!) || digit(source[i]!))) i++;
++		else if (digit(c)) while (i < source.length && (digit(source[i]!) || source[i] === ".")) i++;
++		else if (!"(){};,=+-*!<>?:.".includes(c)) throw new Error("unsupported token");
++		out.push({ text: source.slice(start, i), literal: false });
++	}
++	return out;
++}
++
++// Recursive descent over a closed expression language. The scope contains only
++// proven local values/functions and parameters; assertions cannot become values.
++function importsOf(source: string): string[] {
++	const ts = tokens(source);
++	let at = 0;
++	const scope = new Set<string>();
++	const callable = new Set<string>();
++	const imports: string[] = [];
++	let hasTest = false, hasExpect = false;
++	const peek = (text: string) => ts[at]?.text === text && !ts[at]?.literal;
++	const take = (text: string) => { if (!peek(text)) throw new Error(`expected ${text}`); at++; };
++	const name = () => {
++		const token = ts[at++];
++		if (!token || token.literal || !token.text || !"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_".includes(token.text[0]!)) throw new Error("expected local name");
++		if (["test", "expect", "true", "false", "null", "return", "import", "export", "const", "function"].includes(token.text)) throw new Error("reserved name");
++		return token.text;
++	};
++	const literal = () => { const token = ts[at++]; if (!token?.literal) throw new Error("expected literal"); return token.text; };
++	const expression = (locals: ReadonlySet<string>): void => {
++		const primary = (): void => {
++			if (peek("!") || peek("-") || peek("+")) { at++; primary(); return; }
++			if (peek("(")) { at++; expression(locals); take(")"); return; }
++			const token = ts[at++];
++			if (!token) throw new Error("missing expression");
++			if (token.literal || ["true", "false", "null"].includes(token.text) || Number.isFinite(Number(token.text))) return;
++			if (!locals.has(token.text) && !scope.has(token.text)) throw new Error("ambient identifier");
++			if (peek("(")) {
++				if (!callable.has(token.text) || locals.has(token.text)) throw new Error("unproven callable");
++				at++;
++				if (!peek(")")) { expression(locals); while (peek(",")) { at++; expression(locals); } }
++				take(")");
++			}
++		};
++		primary();
++		while (ts[at] && !ts[at]!.literal && ["+", "-", "*", "<", ">", "=", "!"].includes(ts[at]!.text)) {
++			// Operators need no evaluation here: Bun separately parses every module.
++			at++;
++			while (peek("=")) at++;
++			primary();
++		}
++		if (peek("?")) { at++; expression(locals); take(":"); expression(locals); }
++	};
++	while (at < ts.length) {
++		if (peek("import")) {
++			at++; take("{");
++			const names: string[] = [];
++			while (!peek("}")) {
++				const token = ts[at++];
++				if (!token || token.literal) throw new Error("unsupported import");
++				names.push(token.text);
++				if (!peek(",")) break;
++				at++;
++			}
++			take("}"); take("from"); const specifier = literal(); take(";");
++			if (specifier === "bun:test") {
++				if (names.some((n) => n !== "test" && n !== "expect")) throw new Error("unsupported test API");
++				hasTest ||= names.includes("test"); hasExpect ||= names.includes("expect");
++			} else {
++				if (!specifier.startsWith("./") && !specifier.startsWith("../")) throw new Error("external import");
++				imports.push(specifier);
++				for (const n of names) {
++					if (["test", "expect"].includes(n) || scope.has(n)) throw new Error("shadowed name");
++					scope.add(n); callable.add(n);
++				}
++			}
++		} else if (peek("test")) {
++			if (!hasTest || !hasExpect) throw new Error("missing test API");
++			at++; take("("); literal(); take(","); take("("); take(")"); take("="); take(">"); take("{");
++			let assertions = 0;
++			while (!peek("}")) {
++				take("expect"); take("("); expression(new Set()); take(")"); take(".");
++				if (!peek("toBe") && !peek("toEqual")) throw new Error("unsupported assertion");
++				at++; take("("); expression(new Set()); take(")"); take(";"); assertions++;
++			}
++			if (!assertions) throw new Error("empty test");
++			take("}"); take(")"); take(";");
++		} else {
++			if (peek("export")) at++;
++			if (peek("const")) {
++				at++; const n = name(); if (scope.has(n)) throw new Error("shadowed binding");
++				take("="); expression(new Set()); take(";"); scope.add(n);
++			} else {
++				take("function"); const n = name(); if (scope.has(n)) throw new Error("shadowed binding");
++				scope.add(n); callable.add(n); take("("); const locals = new Set<string>();
++				if (!peek(")")) { locals.add(name()); while (peek(",")) { at++; locals.add(name()); } }
++				take(")"); take("{"); take("return"); expression(locals); take(";"); take("}");
++			}
++		}
++	}
++	return imports;
++}
++
++export type FileInputProof = { inputs: string[]; provable: boolean; reason: string };
++export function proveFileInputs(root: string): Record<string, FileInputProof> {
++	const graph = fileInputGraph(root);
++	// Bun/TS configuration can install preloads, aliases, macros or extends outside
++	// the graph. Until those effects have a proof, every affected suite stays cold.
++	const loaderNames = ["package.json", "bunfig.toml", ".bunfig.toml", "tsconfig.json", "jsconfig.json",
++		".env", ".env.local", ".env.test", ".env.test.local", ".env.development", ".env.production"];
++	const config = [...graph.keys()].some((p) => {
++		const name = p.slice(p.lastIndexOf("/") + 1);
++		return loaderNames.includes(name) || name.startsWith(".env.");
++	});
++	const results: Record<string, FileInputProof> = {};
++	for (const path of graph.keys()) {
++		if (!isTestFile(path)) continue;
++		const inputs = new Set<string>([path, ...FULL_SUITE_TRIGGERS]);
++		const seen = new Set<string>();
++		const visit = (p: string) => {
++			if (seen.has(p)) return;
++			seen.add(p); inputs.add(p);
++			for (const dep of graph.get(p) ?? []) visit(dep);
++		};
++		visit(path);
++		for (const p of graph.keys()) if (["package.json", "bun.lock", "bun.lockb", "bunfig.toml", "tsconfig.json", "jsconfig.json"].includes(p.slice(p.lastIndexOf("/") + 1))) inputs.add(p);
++		let reason = "closed primitive module grammar";
++		try {
++			if (config) throw new Error("unproven loader configuration");
++			const checked = new Set<string>();
++			const prove = (p: string): void => {
++				if (checked.has(p)) return;
++				checked.add(p);
++				if (!p.endsWith(".ts") && !p.endsWith(".js")) throw new Error("unsupported source language");
++				for (let directory = dirname(p); ; directory = dirname(directory)) {
++					if (loaderNames.some((name) => existsSync(join(root, directory, name)))) throw new Error("unproven loader configuration");
++					if (directory === ".") break;
++				}
++				const text = readFileSync(join(root, p), "utf8");
++				const specs = importsOf(text);
++				const parsed = new Bun.Transpiler({ loader: p.endsWith(".ts") ? "ts" : "js" }).scanImports(text);
++				if (parsed.some((item) => item.kind !== "import-statement")) throw new Error("non-static import");
++				for (const spec of specs) {
++					if (!spec.endsWith(".ts") && !spec.endsWith(".js")) throw new Error("extensionless import");
++					const target = normalize(join(dirname(p), spec));
++					if (target.startsWith("../") || !graph.has(target)) throw new Error("unresolved import");
++					if (target.endsWith(".js") && graph.has(target.slice(0, -3) + ".ts")) throw new Error("ambiguous JS/TS resolution");
++					inputs.add(target); prove(target);
++				}
++			};
++			prove(path);
++			results[path] = { inputs: [...inputs].sort(), provable: true, reason };
++		} catch (error) {
++			reason = error instanceof Error ? error.message : String(error);
++			results[path] = { inputs: [...inputs].sort(), provable: false, reason };
++		}
++	}
++	return results;
++}
++
++if (import.meta.main) process.stdout.write(JSON.stringify(proveFileInputs(process.argv[2]!)) + "\n");
+diff --git a/scripts/suite-metrics.py b/scripts/suite-metrics.py
+index b0422dbbe7..a5a5b6cf92 100755
+--- a/scripts/suite-metrics.py
++++ b/scripts/suite-metrics.py
+@@ -39,6 +39,7 @@ JUDGING_FILES = (
+     "scripts/test-budget.ts",
+     "scripts/kitlib-ratchet-signal-baseline.json",
+     ".github/test-budget.json",
++    "scripts/affected-tests.ts", "scripts/suite-file-inputs.ts",
+ )
+ 
+ 
+@@ -102,7 +103,9 @@ def environment_digest(environment: dict[str, str]) -> str:
+ def runtime_identity() -> str:
+     """Bind executable versions and the environment inputs admitted to the full-suite runner."""
+     prefix, environment = runtime_parts()
+-    return f"{prefix}/env-{environment_digest(environment)}"
++    identity = f"{prefix}/env-{environment_digest(environment)}"
++    # Opt-in proof never satisfies the incumbent's exact-tree release lookup.
++    return identity + ("/file-reuse-1" if os.environ.get("FULL_SUITE_FILE_REUSE") == "1" else "")
+ 
+ 
+ def hex_digest(value: object, length: int = 64) -> bool:
+diff --git a/tests/cli/fresh-gate-budget.test.ts b/tests/cli/fresh-gate-budget.test.ts
+index 5aa71f81cc..4e2dbb8cca 100644
+--- a/tests/cli/fresh-gate-budget.test.ts
++++ b/tests/cli/fresh-gate-budget.test.ts
+@@ -14,7 +14,7 @@ test.skipIf(!AMPLE)("SUITEBUDGET1 reports, without refusing, a successful file o
+ 		mkdirSync(scripts, { recursive: true });
+ 		mkdirSync(join(judge, ".github"));
+ 		copyJudgingFiles(judge, [".github/test-budget.json"]);
+-		for (const name of ["gate-disk-floor.ts", "affected-tests.ts", "gate-ci-only.tsv"]) {
++		for (const name of ["gate-disk-floor.ts", "gate-ci-only.tsv"]) {
+ 			symlinkSync(join(root, "scripts", name), join(scripts, name));
+ 		}
+ 		const policy = join(judge, ".github/test-budget.json");
+diff --git a/tests/cli/fresh-gate.helpers.ts b/tests/cli/fresh-gate.helpers.ts
+index 73cb26661b..6d6107c31b 100644
+--- a/tests/cli/fresh-gate.helpers.ts
++++ b/tests/cli/fresh-gate.helpers.ts
+@@ -197,7 +197,7 @@ export function gateTree(fx: SaveFixture, manifest: string): string {
+ 	const dir = ownedTmp("gate", { root: fx.dir }).path;
+ 	mkdirSync(join(dir, "scripts"));
+ 	symlinkSync(join(root, "src"), join(dir, "src"));
+-	for (const name of ["affected-tests.ts", "gate-disk-floor.ts"]) cpSync(join(root, "scripts", name), join(dir, "scripts", name));
++	cpSync(join(root, "scripts/gate-disk-floor.ts"), join(dir, "scripts/gate-disk-floor.ts"));
+ 	copyJudgingFiles(dir, ["scripts/suite-metrics.py"]);
+ 	writeFileSync(join(dir, "scripts/suite-metrics.py"), fixtureMetrics(readFileSync(join(root, "scripts/suite-metrics.py"), "utf8")));
+ 	writeFileSync(join(dir, "scripts/gate-ci-only.tsv"), manifest);
+diff --git a/tests/scripts/full_suite_file_reuse_test.py b/tests/scripts/full_suite_file_reuse_test.py
+new file mode 100755
+index 0000000000..849c5263ed
+--- /dev/null
++++ b/tests/scripts/full_suite_file_reuse_test.py
+@@ -0,0 +1,171 @@
++#!/usr/bin/env python3
++"""FILEREUSE: native suite replays, input invalidation and unchanged OFF judgment."""
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++import shutil
++import sys
++import unittest
++
++ROOT = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(ROOT / "scripts"))
++from kitlib_tmp import owned_tmp
++from kitlib_run import run
++
++
++class FileReuseTests(unittest.TestCase):
++    def test_closed_input_proof_refuses_unknown_effects(self) -> None:
++        with owned_tmp("file-input-proof") as temporary:
++            root = Path(temporary)
++            (root / "src").mkdir()
++            (root / "tests/cli").mkdir(parents=True)
++            (root / "src/leaf.ts").write_text("export const leaf = 7;\n")
++            middle = root / "src/mid.ts"
++            middle.write_text('import { leaf } from "./leaf.ts";\nexport function next(value) { return value + leaf; }\n')
++            test = root / "tests/cli/pure.test.ts"
++            body = ('import { test, expect } from "bun:test";\n'
++                    'import { next } from "../../src/mid.ts";\n'
++                    'test("calculation", () => { expect(next(1)).toBe(8); });\n')
++            test.write_text(body)
++
++            def proof() -> dict:
++                result = run(["nice", "-n", "10", "bun", "run", "--no-env-file", "--config=/dev/null",
++                              str(ROOT / "scripts/suite-file-inputs.ts"), str(root)],
++                             deadline_s=60, max_output_bytes=4 << 20)
++                self.assertEqual(result.rc, 0, result.stdout + result.stderr)
++                return json.loads(result.stdout)["tests/cli/pure.test.ts"]
++
++            control = proof()
++            self.assertTrue(control["provable"], control)
++            self.assertTrue({"src/leaf.ts", "src/mid.ts", "tests/cli/pure.test.ts"}.issubset(control["inputs"]))
++            for mutant in ('Bun.file("secret.txt");', 'globalThis["Bun"].file("secret.txt");',
++                           'eval("Bun.file(\\\"secret.txt\\\")");', 'process.env.HOME;',
++                           'import x from "node:fs";', 'import("./dynamic.ts");',
++                           'const escaped = "\\u0065val";',
++                           'test("ambient", () => { expect(Date.now()).toBe(0); });'):
++                test.write_text(body + "\n" + mutant + "\n")
++                self.assertFalse(proof()["provable"], mutant)
++            test.write_text(body)
++            middle.write_text(middle.read_text() + '\nconst unknown = Bun.file("hidden.txt");\n')
++            self.assertFalse(proof()["provable"])
++            middle.write_text('import { leaf } from "./leaf.ts";\nexport function next(value) { return value + leaf; }\n')
++            (root / "bunfig.toml").write_text('preload = ["./side-effect.ts"]\n')
++            self.assertFalse(proof()["provable"])
++
++    def test_native_cold_warm_invalidation_fail_and_off(self) -> None:
++        with owned_tmp("file-reuse-acceptance") as temporary:
++            base = Path(temporary)
++            repo, cache = base / "repo", base / "cache"
++            for directory in (repo / "scripts", repo / "src", repo / "tests/cli"):
++                directory.mkdir(parents=True, exist_ok=True)
++            shutil.copyfile(ROOT / "scripts/kitlib-tmp.sh", repo / "scripts/kitlib-tmp.sh")
++            (repo / "src/value.ts").write_text("export const value = 7;\n")
++            (repo / "src/other.ts").write_text("export const other = 11;\n")
++            for name, symbol in (("value", "value"), ("other", "other")):
++                (repo / f"tests/cli/{name}.test.ts").write_text(
++                    'import { test, expect } from "bun:test";\n'
++                    f'import {{ {symbol} }} from "../../src/{name}.ts";\n'
++                    f'test("{name} arithmetic", () => {{ expect({symbol} + 1).toBe({8 if name == "value" else 12}); }});\n')
++            # Unknown environmental inputs are executed on every tree, never inferred absent.
++            (repo / "tests/cli/external_test.py").write_text("import os\nassert os.getcwd()\n")
++            env = {key: value for key, value in os.environ.items()
++                   if not key.startswith("GIT_") and key not in ("BEADS_DIR", "BEADS_DB", "FULL_SUITE_FILE_REUSE",
++                                                                "BUN_CONFIG_FILE", "BUN_OPTIONS", "NODE_OPTIONS")}
++            home = base / "home"
++            home.mkdir()
++            env.update(RCH_DISABLE="1", RCH_LOCAL="1", FULL_SUITE_JOBS="2", OMP_KIT_OMP_SRC_FETCH="0",
++                       HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"))
++
++            def command(argv: list[str], *, enabled: bool = True) -> tuple[int | None, str, float]:
++                selected = {**env, "FULL_SUITE_FILE_REUSE": "1"} if enabled else env
++                result = run(argv, env=selected, cwd=str(repo), deadline_s=180, max_output_bytes=16 << 20)
++                output = (result.stdout + result.stderr).decode(errors="replace")
++                self.assertFalse(result.timed_out or result.truncated, output)
++                print(json.dumps({"command": argv, "exit_code": result.rc, "wall_s": result.elapsed_s}), flush=True)
++                print(output, flush=True)
++                return result.rc, output, result.elapsed_s
++
++            def commit(message: str) -> str:
++                for args in (["add", "--all"], ["commit", "-qm", message]):
++                    rc, output, _ = command(["git", "-C", str(repo), *args])
++                    self.assertEqual(rc, 0, output)
++                result = run(["git", "-C", str(repo), "rev-parse", "HEAD"], env=env, deadline_s=10)
++                self.assertEqual(result.rc, 0, result.stderr)
++                return result.stdout.decode().strip()
++
++            def judge(label: str, *, enabled: bool = True, expected_rc: int = 0) -> tuple[dict, float]:
++                rc, output, wall = command(["nice", "-n", "10", "sh", str(ROOT / "scripts/full-suite-verdict.sh"),
++                                           "--repo", str(repo), "--commit", "HEAD", "--judge-role", "main",
++                                           "--cache-dir", str(cache)], enabled=enabled)
++                self.assertEqual(rc, expected_rc, output)
++                records = [json.loads(path.read_text()) for path in cache.glob("*.json")]
++                record = max(records, key=lambda value: value["timing"]["started_ms"])
++                print("FILEREUSE-SAMPLE " + json.dumps({"label": label, "wall_s": wall,
++                      "carried": record.get("file_reuse", {}).get("carried", []),
++                      "native": [row["path"] for row in record["evidence"]["files"] if row.get("origin") != "file-reuse"]}), flush=True)
++                return record, wall
++
++            for args in (["init", "-q"], ["config", "user.name", "FILEREUSE fixture"],
++                         ["config", "user.email", "filereuse@example.invalid"]):
++                rc, output, _ = command(["git", "-C", str(repo), *args])
++                self.assertEqual(rc, 0, output)
++            origin = commit("[test] cold fixture")
++            cold, cold_wall = judge("cold")
++            self.assertIn("file_reuse", cold)
++            self.assertEqual(cold["file_reuse"]["carried"], [])
++            # Changing exactly one src file must execute its consumer but carry the unrelated PASS.
++            (repo / "src/value.ts").write_text("export const value = 3 + 4;\n")
++            commit("[test] one source input changes")
++            warm, warm_wall = judge("one-src-warm", expected_rc=1)
++            carried = warm["file_reuse"]["carried"]
++            self.assertEqual([(row["path"], row["origin_commit"]) for row in carried],
++                             [("tests/cli/other.test.ts", origin)])
++            self.assertEqual([row["path"] for row in warm["evidence"]["files"] if row.get("origin") != "file-reuse"],
++                             ["tests/cli/external_test.py", "tests/cli/value.test.ts"])
++            self.assertEqual(warm["minimum_run"]["status"], "FAIL")
++            self.assertIn({"measure": "bun", "observed": 1, "minimum": 2}, warm["minimum_run"]["shortfalls"])
++            print(f"FILEREUSE-MEASURE cold_files=3 warm_files=2 cold_s={cold_wall:.3f} warm_s={warm_wall:.3f}", flush=True)
++            # Returning to previously proved bytes can carry every Bun file, but
++            # historical test counts must not masquerade as native execution.
++            (repo / "src/value.ts").write_text("export const value = 7;\n")
++            (repo / "README.md").write_text("new tree, unchanged proved inputs\n")
++            commit("[test] all Bun inputs match earlier PASS")
++            all_carried, _ = judge("all-bun-carried", expected_rc=1)
++            self.assertEqual(all_carried["evidence"]["bun_ran"], 0)
++            self.assertEqual([row["path"] for row in all_carried["file_reuse"]["carried"]],
++                             ["tests/cli/other.test.ts", "tests/cli/value.test.ts"])
++            self.assertIn({"measure": "bun", "observed": 0, "minimum": 2}, all_carried["minimum_run"]["shortfalls"])
++            # A new undeclared read is not accepted merely because the old import closure was pure.
++            test_path = repo / "tests/cli/other.test.ts"
++            test_path.write_text(test_path.read_text() + '\nawait Bun.file("undeclared.txt").text();\n')
++            (repo / "undeclared.txt").write_text("changed external input\n")
++            commit("[test] undeclared-read mutant")
++            mutant, _ = judge("undeclared-read", expected_rc=1)
++            self.assertNotIn("tests/cli/other.test.ts", [row["path"] for row in mutant["file_reuse"]["carried"]])
++            # The unchanged external file is still native, as is the newly unprovable TS file.
++            self.assertEqual(next(row for row in mutant["evidence"]["files"] if row["path"].endswith("other.test.ts")).get("origin"), None)
++            (repo / "src/value.ts").write_text("export const value = 9;\n")
++            commit("[test] failing changed input")
++            failed, _ = judge("fail", expected_rc=1)
++            self.assertEqual(next(row for row in failed["evidence"]["files"] if row["path"].endswith("value.test.ts"))["rc"], 1)
++            (repo / "README.md").write_text("new tree, same failed input\n")
++            commit("[test] failed input never carries")
++            failed_again, _ = judge("fail-never-carries", expected_rc=1)
++            self.assertNotIn("tests/cli/value.test.ts", [row["path"] for row in failed_again["file_reuse"]["carried"]])
++            (repo / "src/value.ts").write_text("export const value = 7;\n")
++            commit("[test] OFF runs every declared file")
++            off, _ = judge("off", enabled=False)
++            self.assertNotIn("file_reuse", off)
++            self.assertTrue(all(row.get("origin") != "file-reuse" for row in off["evidence"]["files"]))
++            # A declared runtime change invalidates even unrelated pure consumers.
++            test_path.write_text('import { test, expect } from "bun:test";\nimport { other } from "../../src/other.ts";\ntest("other", () => { expect(other).toBe(11); });\n')
++            (repo / "scripts/pysafe.py").write_text("# shared-runtime change\n")
++            commit("[test] shared runtime invalidates")
++            shared, _ = judge("shared-runtime")
++            self.assertEqual(shared["file_reuse"]["carried"], [])
++
++
++if __name__ == "__main__":
++    unittest.main()
