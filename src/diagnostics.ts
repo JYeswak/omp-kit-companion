@@ -344,8 +344,9 @@ function readProfile(name: string, dir: string, home: string): ConfigInspection 
 	if (directoryPath(home, segments) !== "directory") return { name, dir, issue: "profile agent directory was removed or is unsafe" };
 	const present = CONFIG_NAMES.filter((file) => pathState(join(dir, file)) !== "missing");
 	if (!present.length) return { name, dir, issue: "no on-disk profile config; OMP defaults and migrations were not resolved" };
-	const selected = present[0];
-	if (!selected || present.length !== 1 || selected === "config.json" || selected === "settings.json") return { name, dir, issue: "legacy or multiple profile settings formats are not safely resolved" };
+	// OMP selects the first YAML config; legacy JSON is a migration source only when YAML is absent.
+	const selected = present.find(file => file === "config.yml" || file === "config.yaml");
+	if (!selected) return { name, dir, issue: "legacy profile settings are not safely resolved without a YAML config" };
 	const config = join(dir, selected);
 	try {
 		if (pathState(config) !== "file") throw new Error("unsafe config file");
@@ -613,9 +614,7 @@ function inspectExtensions(root: string, home: string, profiles: readonly Config
 		if (profile.issue || !strings(profile.data?.extensions)) {
 			unverified.push(profile.name);
 			if (profile.issue) {
-				const files = CONFIG_NAMES.filter(file => pathState(join(profile.dir, file)) !== "missing");
 				const reason = profile.issue.includes("no on-disk profile config") ? "NO_CONFIG: no config.yml/yaml present; the kit creates nothing unasked" :
-					files.length > 1 ? `DUAL_CONFIG: ${files.join(" + ")} present; OMP loads config.yml first and merges settings.json separately, so a single-file edit cannot be proven effective` :
 					/removed or is unsafe|disappeared|unsafe config|not safely resolved|could not be listed/.test(profile.issue) ? `UNREADABLE: ${profile.issue}` :
 					`UNPARSEABLE: ${profile.issue}`;
 				notCovered.push({ profile: profile.name, reason });
@@ -1318,6 +1317,7 @@ export function isolatedProbeHome(home: string, profile: string): { home: string
 	const owned = ownedTmp("omp-kit-probe-home");
 	const root = owned.path;
 	const tempHome = join(root, "home");
+	mkdirSync(tempHome, { mode: 0o700 });
 	copyProbeConfigs(join(home, ".omp", "agent"), join(tempHome, ".omp", "agent"));
 	const agentDir = profile === "default" ? join(home, ".omp", "agent") : join(home, ".omp", "profiles", profile, "agent");
 	const tempAgentDir = profile === "default" ? join(tempHome, ".omp", "agent") : join(tempHome, ".omp", "profiles", profile, "agent");
@@ -1357,17 +1357,18 @@ function probeEnv(isolatedHome: string): Record<string, string> {
 	return env;
 }
 
-function spawnProbeSync(ompPath: string, home: string, isolatedHome: string, profile: string, command: "ttsr" | "plugin"): unknown {
+// Keep project discovery inside the isolated HOME too: cwd=home would let ~/.omp/plugins shadow named profiles.
+function spawnProbeSync(ompPath: string, isolatedHome: string, profile: string, command: "ttsr" | "plugin"): unknown {
 	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
-	const result = runSync([executable!, ...args], { deadline_s: 15, cwd: home, env: probeEnv(isolatedHome) });
+	const result = runSync([executable!, ...args], { deadline_s: 15, cwd: isolatedHome, env: probeEnv(isolatedHome) });
 	if (result.truncated) throw new Error(`${command} output exceeded the capture cap`);
 	if (result.rc !== 0) throw new Error(`${command} exited ${result.rc ?? "unknown"}`);
 	return JSON.parse(Buffer.from(result.stdout).toString("utf8"));
 }
 
-async function spawnProbeAsync(ompPath: string, home: string, isolatedHome: string, profile: string, command: "ttsr" | "plugin"): Promise<unknown> {
+async function spawnProbeAsync(ompPath: string, isolatedHome: string, profile: string, command: "ttsr" | "plugin"): Promise<unknown> {
 	const [executable, ...args] = nativeProfileArgs(ompPath, profile, command);
-	const result = await run([executable!, ...args], { deadline_s: 15, cwd: home, env: probeEnv(isolatedHome) });
+	const result = await run([executable!, ...args], { deadline_s: 15, cwd: isolatedHome, env: probeEnv(isolatedHome) });
 	if (result.truncated) throw new Error(`${command} output exceeded the capture cap`);
 	if (result.rc !== 0) throw new Error(`${command} exited ${result.rc ?? "unknown"}`);
 	return JSON.parse(Buffer.from(result.stdout).toString("utf8"));
@@ -1376,7 +1377,7 @@ async function spawnProbeAsync(ompPath: string, home: string, isolatedHome: stri
 export function runEffectiveRuleProbe(ompPath: string, home: string, profile: string, command: "ttsr" | "plugin"): unknown {
 	const isolated = isolatedProbeHome(home, profile);
 	try {
-		return rehomeProbeOutput(spawnProbeSync(ompPath, home, isolated.home, profile, command), isolated.home, home);
+		return rehomeProbeOutput(spawnProbeSync(ompPath, isolated.home, profile, command), isolated.home, home);
 	} finally {
 		isolated.cleanup();
 	}
@@ -1496,7 +1497,7 @@ export function inspectEffectiveRules(input: EffectiveRulesInput): Finding {
 			isolated = isolatedProbeHome(input.home, profile);
 			sharedHomes?.set(profile, isolated);
 		}
-		return rehomeProbeOutput(spawnProbeSync(input.ompPath, input.home, isolated.home, profile, command), isolated.home, input.home);
+		return rehomeProbeOutput(spawnProbeSync(input.ompPath, isolated.home, profile, command), isolated.home, input.home);
 	});
 	const profileRows: Record<string, unknown>[] = [];
 	let failed = false;
@@ -1564,7 +1565,7 @@ export async function inspectEffectiveRulesAsync(input: EffectiveRulesInput, con
 				isolated = isolatedProbeHome(input.home, profile.name);
 				sharedHomes.set(profile.name, isolated);
 			}
-			try { const [ttsr, plugin] = await Promise.all([spawnProbeAsync(input.ompPath, input.home, isolated.home, profile.name, "ttsr"), spawnProbeAsync(input.ompPath, input.home, isolated.home, profile.name, "plugin")]); outputs.set(profile.name, { ttsr: rehomeProbeOutput(ttsr, isolated.home, input.home), plugin: rehomeProbeOutput(plugin, isolated.home, input.home) }); }
+			try { const [ttsr, plugin] = await Promise.all([spawnProbeAsync(input.ompPath, isolated.home, profile.name, "ttsr"), spawnProbeAsync(input.ompPath, isolated.home, profile.name, "plugin")]); outputs.set(profile.name, { ttsr: rehomeProbeOutput(ttsr, isolated.home, input.home), plugin: rehomeProbeOutput(plugin, isolated.home, input.home) }); }
 			catch (error) { outputs.set(profile.name, error instanceof Error ? error : new Error(String(error))); }
 		}
 	});

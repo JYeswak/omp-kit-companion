@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import { inspectEffectiveRules, inspectEffectiveRulesAsync, isolatedProbeHome, profilePluginRuleStatus, runEffectiveRuleProbe } from "../../src/diagnostics.ts";
+import { DIAGNOSTIC_SCOPE_COMPONENTS, diagnose, health, inspectEffectiveRules, inspectEffectiveRulesAsync, isolatedProbeHome, profilePluginRuleStatus, runEffectiveRuleProbe } from "../../src/diagnostics.ts";
 import type { EffectiveRulesInput, Finding } from "../../src/diagnostics.ts";
 import { ownedTmp } from "../../src/kitlib/tmp.ts";
 import type { OwnedTmp } from "../../src/kitlib/tmp.ts";
 import { resolveOmpIdentity } from "../../src/paths.ts";
+import { fixtureDeadlineS } from "./fixture-process.ts";
 
 const home = "/fixture/home";
 const kitVersion = "0.2.5";
@@ -264,3 +265,43 @@ test("fixture HOME with real omp: native overlay keeps OK and is listed", async 
 	expect(row.kit_rules.missing).toEqual([]);
 	expect(row.kit_rules.always_apply.missing).toEqual([]);
 }, 120_000);
+
+test("rules doctor with real omp: YAML plus legacy settings stays OK until a rule is removed", async () => {
+	const base = scratch("prof-doctor-legacy");
+	const release = fixRelease(base, "7.7.7", "expected");
+	const installed = fixRelease(base, "7.7.7", "installed");
+	for (const dir of [release, installed]) mkdirSync(join(dir, "extensions"));
+	mkdirSync(join(release, "retired"));
+	writeFileSync(join(release, "MANIFEST.tsv"), `name\tsha256\tclass\tpack\nkit-a\t${fixASha}\ttripwire\tabc1234\nfixture-always\t${fixStandingSha}\talways\tabc1234\n`);
+	const home = fixHome(base, "home", installed, "7.7.7", false);
+	const agent = join(home, ".omp", "agent");
+	const legacy = '{"packages": []}\n';
+	writeFileSync(join(agent, "settings.json"), legacy);
+	// The inspected HOME is also a potential project root. Its default plugin must not shadow the named profile.
+	const named = join(home, ".omp", "profiles", "claude");
+	mkdirSync(join(named, "agent"), { recursive: true });
+	writeFileSync(join(named, "agent", "config.yml"), "memory:\n  backend: off\n");
+	writeFileSync(join(named, "agent", "settings.json"), legacy);
+	mkdirSync(join(named, "plugins", "node_modules"), { recursive: true });
+	symlinkSync(installed, join(named, "plugins", "node_modules", "omp-kit-companion"));
+	for (const file of ["omp-plugins.lock.json", "installed_plugins.json", "package.json"]) {
+		writeFileSync(join(named, "plugins", file), readFileSync(join(home, ".omp", "plugins", file)));
+	}
+	const input = { root: release, home, project: home, scope: "rules", ompPath: resolveOmpIdentity(process.env).launcher };
+	const selected = DIAGNOSTIC_SCOPE_COMPONENTS.rules ?? [];
+	const healthy = (await diagnose(input)).filter(row => selected.includes(row.component));
+	expect(healthy.find(row => row.component === "effective_rules")?.status).toBe("OK");
+	expect(health(healthy), JSON.stringify(healthy)).toBe("OK");
+	expect(readFileSync(join(agent, "settings.json"), "utf8")).toBe(legacy);
+	expect(stateFiles(home)).toEqual([]);
+	rmSync(join(installed, "rules", "kit-a.md"));
+	const broken = (await diagnose(input)).filter(row => selected.includes(row.component));
+	expect(health(broken), JSON.stringify(broken)).toBe("DEGRADED");
+	expect(broken.find(row => row.component === "installed_rules")?.reason).toContain(join(installed, "rules", "kit-a.md"));
+	const effective = broken.find(row => row.component === "effective_rules");
+	expect(effective?.status).toBe("DEGRADED");
+	if (!effective) throw new Error("missing effective_rules finding");
+	expect(rowOf(effective).kit_rules.missing).toEqual(["kit-a"]);
+	expect(readFileSync(join(agent, "settings.json"), "utf8")).toBe(legacy);
+	expect(stateFiles(home)).toEqual([]);
+}, fixtureDeadlineS(120) * 1000);

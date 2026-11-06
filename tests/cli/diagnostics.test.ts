@@ -782,6 +782,30 @@ test("recognized default and named YAML compare policy and extension bytes witho
 	expect(finding(rows, "effective_profile").evidence?.backup_scope).toContain(join(f.home, ".omp", "profiles", "work", "agent", "settings.json"));
 });
 
+test("profile YAML takes precedence over ignored legacy settings without migrating them", async () => {
+	const f = fixture(); installOmp(f);
+	const policy = { enabled: true, repeatMode: "after-gap", repeatGap: 0, contextMode: "keep", disabledRules: [] };
+	mkdirSync(join(f.root, "policy"));
+	writeFileSync(join(f.root, "policy", "ttsr.json"), JSON.stringify(policy));
+	for (const [name, filename] of [["default", "config.yml"], ["claude", "config.yaml"]] as const) {
+		const dir = name === "default" ? join(f.home, ".omp", "agent") : join(f.home, ".omp", "profiles", name, "agent");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, filename), `ttsr: ${JSON.stringify(policy)}\n`);
+		writeFileSync(join(dir, "settings.json"), '{"ttsr":{"enabled":false},"packages":[]}');
+	}
+	writeFileSync(join(f.home, ".omp", "agent", "config.yaml"), "ttsr:\n  enabled: false\n");
+	const before = tree(f.home);
+	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath, scope: "settings" });
+	expect(finding(rows, "policy").status).toBe("OK");
+	expect(finding(rows, "policy").evidence?.matching_profiles).toEqual(["default", "claude"]);
+	expect(tree(f.home)).toEqual(before);
+	// Neither valid legacy settings nor lower-priority YAML may hide invalid selected YAML.
+	writeFileSync(join(f.home, ".omp", "agent", "config.yml"), "ttsr: [\n");
+	const broken = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath, scope: "settings" });
+	expect(finding(broken, "policy").status).toBe("UNVERIFIED");
+	expect(finding(broken, "policy").evidence?.unverified_profiles).toEqual(["default"]);
+});
+
 test("opaque or malformed profile remains unverified with concrete backup and consent boundary", async () => {
 	const f = fixture(); installOmp(f);
 	mkdirSync(join(f.root, "policy"));
@@ -1021,7 +1045,7 @@ test("dicklesworthstone scope reports installed vs latest with one source per to
 	}
 });
 
-test("dual-config and policy-skipped profiles surface as not covered with named reasons", async () => {
+test("YAML plus legacy settings is covered while policy-skipped profiles name their opt-out", async () => {
 	const f = fixture(); installOmp(f);
 	mkdirSync(join(f.root, "policy")); mkdirSync(join(f.root, "extensions"));
 	writeFileSync(join(f.root, "policy", "extensions.json"), '{"extensions":["kit-guard-optin.ts"],"skipProfiles":["work"]}');
@@ -1041,8 +1065,9 @@ test("dual-config and policy-skipped profiles surface as not covered with named 
 	const rows = await diagnose({ root: f.root, home: f.home, ompPath: f.ompPath });
 	const notCovered = finding(rows, "extensions").evidence?.not_covered_profiles as { profile: string; reason: string }[];
 	const reasons = Object.fromEntries(notCovered.map(entry => [entry.profile, entry.reason]));
-	expect(reasons.work).toMatch(/policy skipProfiles/);
-	expect(reasons.claude).toMatch(/^DUAL_CONFIG: config\.yml \+ settings\.json/);
+	expect(reasons.work).toContain("policy skipProfiles");
+	expect(reasons.claude).toBeUndefined();
+	expect(finding(rows, "extensions").evidence?.listed_profiles).toEqual(["default", "claude"]);
 	expect(finding(rows, "extensions").evidence?.skipped_profiles).toEqual(["work"]);
 });
 

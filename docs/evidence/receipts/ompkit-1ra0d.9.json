@@ -1,0 +1,52 @@
+{
+ "authority": "test",
+ "confidence": "observed",
+ "evidence_id": "ev_a7eb0a46d4f16059a085b76f4e1f0d9a7ad74274d000b52d21df280a2fe5e446",
+ "limitations": [
+  "Candidate source and native OMP launcher tested; installed release replay remains outstanding.",
+  "Real HOME overall remains DEGRADED because four unmanaged rules exist; no operator files were changed.",
+  "PATH trust-wrapper launcher cannot run under an isolated HOME; proof selects the installed native launcher."
+ ],
+ "operation": "doctor-profile-precedence-and-probe-isolation",
+ "parameters": {
+  "bead": "ompkit-1ra0d.9",
+  "source_sha256": "6446cdc1da4d0dfa4802e0570e3fb7bf3090314d26d2562ad5d10024a7ed99ed"
+ },
+ "producer": "CobaltWaterfall",
+ "result_ref": {
+  "negative": {
+   "legacy_rejection_mutant": "test failed expected OK received UNVERIFIED",
+   "named_profile_project_shadow": "test failed expected OK received DEGRADED",
+   "removed_rule": "paired test reports DEGRADED naming installed rules/kit-a.md"
+  },
+  "real_home": {
+   "changed_paths": [],
+   "command": "bun src/cli.ts doctor --scope rules --json",
+   "effective_rules": "OK",
+   "exit_code": 0,
+   "incomplete": [],
+   "installed_rules": "OK",
+   "overall": "DEGRADED",
+   "profiles": 20,
+   "project_rules": "OK",
+   "retired_rules": "OK",
+   "sandbox": "writes to inspected .omp and .agents/rules denied",
+   "unknown_rules": "DEGRADED: four unmanaged rule names",
+   "watched_paths": 199
+  },
+  "tests": {
+   "tests/cli/diagnostics.test.ts": {
+    "exit_code": 0,
+    "fail": 0,
+    "output_sha256": "a36730d3c8bc727820d266e9c7acd036170dc0193b45756197a1430afb722864",
+    "pass": 101
+   },
+   "tests/cli/profile-rules.test.ts": {
+    "exit_code": 0,
+    "fail": 0,
+    "output_sha256": "3ccccd220865731c1bc13aab424b158dfccda05d57293a52625727623421ce4e",
+    "pass": 15
+   }
+  }
+ }
+}
