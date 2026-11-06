@@ -123,9 +123,10 @@ test("MAILSTOP1 active project with mode outside bounded tail wakes and records 
 }, fixtureDeadlineS() * 1000);
 
 const CHIEF_CWD = "/abs/fleet";
-function chiefFleet(chief: Record<string, unknown> = {}, identity = "PeachLeopard") {
+function chiefFleet(chief: Record<string, unknown> = {}, identity = "PeachLeopard", sessionFile?: string) {
 	const f = fleet({
 		blocks: [{ id: 44, cwd: CHIEF_CWD, live: true }],
+		panes: sessionFile ? [{ pane: 44, omp_session_file: sessionFile }] : [],
 		omp: call => {
 			const cwd = call.args[call.args.indexOf("--cwd") + 1];
 			return cwd === CHIEF_CWD
@@ -134,7 +135,7 @@ function chiefFleet(chief: Record<string, unknown> = {}, identity = "PeachLeopar
 		},
 	});
 	const ident = join(f.home, ".config", "agent-mail", "identity", createHash("sha1").update(REPO).digest("hex").slice(0, 12));
-	writeFileSync(join(ident, "tern-44"), JSON.stringify({ name: identity }));
+	if (identity) writeFileSync(join(ident, "tern-44"), JSON.stringify({ name: identity }));
 	writeFileSync(f.fleetWatchPath, JSON.stringify({
 		chief: { agent: "PeachLeopard", session: "omp-test", pane: "tern:44", repo: REPO, cwd: CHIEF_CWD, ...chief },
 	}));
@@ -166,6 +167,63 @@ test("configured chief metadata cannot override a different identity-file name",
 	const f = chiefFleet({}, "OtherAgent");
 	expect((await f.wake.beforeSend("wrong-name", "send_message", { ...ask("PeachLeopard"), sender_name: "RusticPine" }, REPO))?.reason).toStartWith("NO_WAKE_PATH");
 	expect(f.wakes()).toHaveLength(0);
+});
+
+test.each(["chief", "chiefs"] as const)("CHIEFXPROJ1 %s resolves the chief's canonical seat for another mail project and honors its journal", async field => {
+	const sessionFile = join(freshDir(base, "chief-session-"), "seat.jsonl");
+	writeFileSync(sessionFile, '{"type":"mode_change","mode":"goal"}\n');
+	const f = chiefFleet({}, "PeachLeopard", sessionFile);
+	if (field === "chiefs") {
+		const { chief } = JSON.parse(readFileSync(f.fleetWatchPath, "utf8"));
+		writeFileSync(f.fleetWatchPath, JSON.stringify({ chiefs: [chief] }));
+	}
+	expect(await f.wake.resolve("PeachLeopard", CFS)).toEqual({
+		kind: "seat", seat: { name: "PeachLeopard", session: "omp-test", block: "44", repo: CHIEF_CWD, project: REPO, sessionFile },
+	});
+	expect(await f.wake.caller(sessionFile, CFS)).toEqual({
+		session: "omp-test", block: "44", repo: CHIEF_CWD, name: "PeachLeopard", projectName: null,
+	});
+	const args = { ...ask("PeachLeopard"), sender_name: "CrimsonHorizon", project_key: CFS };
+	expect(await f.wake.beforeSend("cross-chief", "send_message", args, CFS)).toBeUndefined();
+	const patch = await f.wake.afterSend({ toolCallId: "cross-chief", content: sent(78982), isError: false });
+	expect(JSON.stringify(patch)).toContain("WAKE_DELIVERED: mail 78982 -> PeachLeopard at tern:44 (omp-test, /abs/fleet)");
+	expect(f.ledger()).toMatchObject([{ status: "WAKE_DELIVERED", project_key: CFS, recipient: "PeachLeopard", pause_state: "NOT_PAUSED" }]);
+	// The mail project has no journal binding. Only the resolved seat's journal can stop this wake.
+	writeFileSync(sessionFile, '{"type":"mode_change","mode":"goal_paused"}\n');
+	expect(await f.wake.beforeSend("cross-chief-paused", "send_message", args, CFS)).toBeUndefined();
+	await f.wake.afterSend({ toolCallId: "cross-chief-paused", content: sent(78983), isError: false });
+	expect(f.wakes()).toHaveLength(1);
+	expect(f.ledger()[1]).toMatchObject({ status: "STOPPED_NOT_WOKEN", pause_state: "PAUSED", reason: expect.stringContaining("GOAL_PAUSED") });
+});
+
+test.each([
+	["non-chief", {}, "PeachLeopard", "GreenRabbit"],
+	["wrong identity name", {}, "OtherAgent", "PeachLeopard"],
+	["missing identity", {}, "", "PeachLeopard"],
+	["wrong block", { pane: "tern:45" }, "PeachLeopard", "PeachLeopard"],
+	["wrong session", { session: "another-tab" }, "PeachLeopard", "PeachLeopard"],
+	["wrong cwd", { cwd: "/abs/elsewhere" }, "PeachLeopard", "PeachLeopard"],
+	["wrong canonical repo", { repo: "/abs/elsewhere" }, "PeachLeopard", "PeachLeopard"],
+	["wrong configured agent", { agent: "OtherAgent" }, "PeachLeopard", "PeachLeopard"],
+] as const)("CHIEFXPROJ1 planted %s remains NO_WAKE_PATH under another project", async (_label, chief, identity, recipient) => {
+	const f = chiefFleet(chief, identity);
+	const args = { ...ask(recipient), sender_name: "CrimsonHorizon", project_key: CFS };
+	expect(await f.wake.resolve(recipient, CFS)).toMatchObject({ kind: "none" });
+	expect((await f.wake.beforeSend("cross-chief-refused", "send_message", args, CFS))?.reason).toStartWith("NO_WAKE_PATH");
+	expect(await f.wake.afterSend({ toolCallId: "cross-chief-refused", content: sent(78984), isError: false })).toBeUndefined();
+	expect(f.wakes()).toHaveLength(0);
+	expect(f.ledger()).toMatchObject([{ status: "NO_WAKE_PATH", refused: true, recipient, project_key: CFS }]);
+});
+
+test("CHIEFXPROJ1 canonical-project stop still applies when mail is under another project", async () => {
+	const f = chiefFleet();
+	const { chief } = JSON.parse(readFileSync(f.fleetWatchPath, "utf8"));
+	writeFileSync(f.fleetWatchPath, JSON.stringify({ chief, sessions: [{ session: "other-tab", repo: REPO, pullEnabled: false }] }));
+	const args = { ...ask("PeachLeopard"), sender_name: "CrimsonHorizon", project_key: CFS };
+	expect(await f.wake.beforeSend("cross-chief-stopped", "send_message", args, CFS)).toBeUndefined();
+	await f.wake.afterSend({ toolCallId: "cross-chief-stopped", content: sent(78985), isError: false });
+	expect(f.wakes()).toHaveLength(0);
+	expect(f.ledger()).toMatchObject([{ status: "STOPPED_NOT_WOKEN", reason: "PROJECT_STOPPED: fleet-watch pullEnabled false", project_key: CFS }]);
 });
 
 // MAILWAKECWD1 (ompkit-774u.38): the three omp-chief blocks share cwd ~/Developer; each configured `chiefs[]` row

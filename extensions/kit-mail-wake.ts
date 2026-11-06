@@ -339,19 +339,18 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		return null;
 	}
 
-	function chiefRow(block: LiveBlock, projectKey: string, expectedName?: string): unknown {
+	function chiefRow(block: LiveBlock): unknown {
 		const watch = readJson(fleetWatchPath);
 		const others = prop(watch, "chiefs");
 		const chiefs: unknown[] = [prop(watch, "chief"), ...(Array.isArray(others) ? others : [])];
-		return chiefs.find(chief => prop(chief, "repo") === projectKey
+		return chiefs.find(chief => typeof prop(chief, "repo") === "string"
 			&& typeof prop(chief, "agent") === "string"
-			&& (expectedName === undefined || String(prop(chief, "agent")).toLowerCase() === expectedName.toLowerCase())
 			&& prop(chief, "session") === block.session && prop(chief, "pane") === `tern:${block.block}`
 			&& prop(chief, "cwd") === block.cwd);
 	}
 
-	function identityFor(block: LiveBlock, projectKey: string, expectedName?: string): string | null {
-		const row = chiefRow(block, projectKey, expectedName);
+	function identityFor(block: LiveBlock): string | null {
+		const row = chiefRow(block);
 		const identityRepo = row ? String(prop(row, "repo")) : block.cwd;
 		const path = identityPath(home, identityRepo, block.block);
 		const bound = identityName(path);
@@ -359,9 +358,9 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 	}
 
 	function projectIdentity(block: LiveBlock, projectKey: string): string | null {
-		const row = chiefRow(block, projectKey);
+		const row = chiefRow(block);
 		const bound = identityName(identityPath(home, projectKey, block.block));
-		return bound && (!row || bound.toLowerCase() === String(prop(row, "agent")).toLowerCase()) ? bound : null;
+		return bound && (prop(row, "repo") !== projectKey || bound.toLowerCase() === String(prop(row, "agent")).toLowerCase()) ? bound : null;
 	}
 
 	async function caller(sessionFile: string, projectKey: string): Promise<MailCaller | null> {
@@ -375,7 +374,7 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		}
 		return found ? {
 			session: found.session, block: found.block, repo: found.cwd,
-			name: identityFor(found, projectKey), projectName: projectIdentity(found, projectKey),
+			name: identityFor(found), projectName: projectIdentity(found, projectKey),
 		} : null;
 	}
 
@@ -384,12 +383,12 @@ export function createMailWake(deps: MailWakeDeps): MailWake {
 		const live = blocks === undefined ? await liveBlocks() : blocks;
 		if (live === null) return { kind: "none", why: "Tern could not be read (`tern inspect --json` failed), so no live seat is proven", parent: await parentOf(name, projectKey, null) };
 		const matches: Seat[] = [];
-		// Configured chiefs use canonical-project identities while preserving their actual launch cwd.
+		// Configured chiefs serve mail from any project; their identity and stop policy use their canonical repo.
 		for (const block of live) {
-			const bound = identityFor(block, projectKey, name);
+			const bound = identityFor(block);
 			if (bound && bound.toLowerCase() === name.toLowerCase()) matches.push({
 				name: bound, session: block.session, block: block.block, repo: block.cwd,
-				project: chiefRow(block, projectKey, name) ? projectKey : block.cwd,
+				project: String(prop(chiefRow(block), "repo") ?? block.cwd),
 				...(block.sessionFile ? { sessionFile: block.sessionFile } : {}),
 			});
 		}
