@@ -167,6 +167,46 @@ test("inherited repository and tracker authority is absent", () => {
 	fi
 }
 
+# VERIFYENV1: prove the judge's own cleanup, without the hermetic wrapper scrubbing BEADS_DIR.
+inherited_tracker_dir_case() {
+	label=$1
+	mkrepo_begin "$label"
+	caller="$TMP/$label.caller"
+	caller_db="$caller/.beads/beads.db"
+	mkdir -p "$caller"
+	git -C "$caller" init -q
+	if ! (
+		unset BEADS_DIR
+		cd "$caller" || exit 1
+		fixture_br init --db "$caller_db" --prefix caller --json
+	) >"$TMP/$label.init.out" 2>&1; then
+		not_ok "non-hermetic BEADS_DIR caller tracker initialization failed"
+		cat "$TMP/$label.init.out"
+		return
+	fi
+	# A leaked initialized tracker makes br init refuse, even with an explicit fixture --db.
+	# Assert the requested database exists so a successful but redirected init cannot pass.
+	addfile tests/cli/tracker.test.sh "set -eu
+mkdir -p suite-tracker
+cd suite-tracker
+git init -q
+db=\"\$PWD/.beads/beads.db\"
+br init --db \"\$db\" --prefix suite --json
+test -f \"\$db\"
+printf 'VERIFYENV1_NONHERMETIC_TRACKER_INITIALIZED\n'"
+	mkrepo_commit
+	run_verdict_with_envs "$label" OMP_KIT_SUITE_HERMETIC_ENABLE=0 \
+		OMP_KIT_SUITE_FENCE_ENABLE=0 BEADS_DIR="$caller/.beads"
+	if [ "$rc" -eq 0 ] && grep -F 'VERDICT PASS' "$out" >/dev/null \
+		&& grep -F 'VERIFYENV1_NONHERMETIC_TRACKER_INITIALIZED' "$repo.cache/$tree.log" >/dev/null 2>&1; then
+		ok "non-hermetic suites initialize their own tracker despite caller BEADS_DIR"
+	else
+		not_ok "non-hermetic suite inherited BEADS_DIR or failed its own tracker init (rc=$rc)"
+		cat "$out"
+		[ ! -f "$repo.cache/$tree.log" ] || cat "$repo.cache/$tree.log"
+	fi
+}
+
 fresh_refusal_case() {
 	name=$1
 	value_kind=$2
@@ -235,6 +275,7 @@ if no_incomplete_log; then ok "complete run writes no incomplete log"; else not_
 
 # HERMETIC1-B: the judge discards inherited authority; fresh-gate's separate entry policy is unchanged.
 inherited_authority_case inherited-authority
+inherited_tracker_dir_case nonhermetic-tracker-dir
 fresh_refusal_case GIT_DIR git-dir
 fresh_refusal_case GIT_WORK_TREE work-tree
 fresh_refusal_case BEADS_DB live-db
@@ -1663,8 +1704,14 @@ else not_ok "MINRUN1 covered-work interval or floor boundary is wrong"; fi
 }
 
 # Focused real/planted entrypoints exercise the same assertion as the full suite.
-# The negative plants only the owned copy; never mutate the live judge.
+# The pool-trap negative plants only the owned copy; never mutate the live judge there.
 case "${1-}" in
+	--beads-dir-only)
+		inherited_tracker_dir_case nonhermetic-tracker-dir
+		echo "full-suite-verdict-incomplete: pass=$pass fail=$fail"
+		[ "$fail" -eq 0 ]
+		exit $?
+		;;
 	--pooltrap-only|--pooltrap-planted)
 		POOLTRAP_PLANT=0
 		[ "$1" != --pooltrap-planted ] || POOLTRAP_PLANT=1
