@@ -2344,6 +2344,31 @@ describe("AGENTMODEL1 registered task-call guard", () => {
 		expect(query?.block).toBe(true);
 		expect(query?.reason).toContain("MODEL_QUERY_UNAVAILABLE");
 	});
+	test("SPAWNNATIVE1: on a native host the task call no longer runs the settings-import check; its spawn event still refuses Opus and admits Sol", async () => {
+		const home = freshDir(base, "native-task-home-"), project = freshDir(base, "native-task-project-");
+		const rosterPath = join(home, "roster.json");
+		writeFileSync(rosterPath, JSON.stringify({ chiefs: { lead: "SpawnSeat", peers: [] }, sessions: {} }));
+		const handlers = new Map<string, unknown>();
+		await kitFlywheelGuard({
+			on: (event: string, handler: unknown) => { handlers.set(event, handler); },
+			getAllTools: () => [],
+			sendMessage: () => {},
+			exec: async () => ({ code: 127, stdout: "", stderr: "not needed" }),
+		}, { home, env: { AGENT_NAME: "SpawnSeat" }, rosterPath });
+		const opusModel = { provider: "anthropic", id: "claude-opus-5-5" }, solModel = { provider: "openai-codex", id: "gpt-6.1-sol" };
+		// An Opus parent with no override: the legacy task-call path refuses this child (OPUS inheritance).
+		const ctx: FlywheelContext = { cwd: project, model: opusModel,
+			models: { resolve: (p: string) => p.includes("sol") ? solModel : opusModel } };
+		const call = handlers.get("tool_call") as (e: unknown, c: FlywheelContext) => Promise<FlywheelToolCallResult | undefined>;
+		const taskResult = await call({ toolName: "task", toolCallId: "native-task", input: { context: "Read-only analysis", tasks: [{ task: "Read-only: analyze the model choice" }] } }, ctx);
+		expect(taskResult?.reason ?? "").not.toContain("SPAWN_MODEL_REFUSED");
+		const spawn = handlers.get("before_subagent_spawn") as (e: FlywheelBeforeSubagentSpawnEvent, c: FlywheelContext) => Promise<FlywheelToolCallResult | undefined>;
+		const opus = await spawn({ type: "before_subagent_spawn", agent: "task", invocationKind: "task", patterns: [OPUS] }, ctx);
+		expect(opus?.block).toBe(true);
+		expect(opus?.reason).toContain("SPAWN_MODEL_REFUSED");
+		const sol = await spawn({ type: "before_subagent_spawn", agent: "task", invocationKind: "task", patterns: [SOL] }, ctx);
+		expect(sol?.block ?? false).toBe(false);
+	});
 });
 
 describe("AGENTMODEL1 native final-policy boundary", () => {

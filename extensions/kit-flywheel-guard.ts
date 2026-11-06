@@ -3219,7 +3219,10 @@ export default async function kitFlywheelGuard(pi: FlywheelGuardApi, deps: Flywh
 	const guardVerdict = async (event: FlywheelToolCallEvent, ctx: FlywheelContext): Promise<FlywheelToolCallResult | undefined> => {
 		try {
 			if (event.toolName === "task") {
-				try {
+				// SPAWNNATIVE1: native hosts enforce the spawn-model policy in before_subagent_spawn (above), from the
+				// resolved patterns the host supplies. The task-call path re-imported OMP's settings source, which the
+				// compiled 18.17 host cannot resolve, and refused every spawn; it runs only on legacy hosts now.
+				if (!pi.getAllTools) try {
 					const scope = await protectedSpawner(ctx);
 					if (typeof scope === "string") return { block: true, reason: taskModelRefusal([{ index: 0, agent: "task", patterns: [], reason: scope }]) };
 					if (scope) {
