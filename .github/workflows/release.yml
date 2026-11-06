@@ -738,13 +738,12 @@ jobs:
       - name: Verify every archive with the consumer's own verifier, as omp-kit update fetches it
         run: |
           set -euo pipefail
-          for platform in darwin-arm64-none linux-arm64-gnu linux-x64-gnu; do
-            archive="dist/omp-kit-v$VERSION-$platform.tar"
-            digest="$(sha256sum "$archive" | cut -d' ' -f1)"
-            gh api --hostname github.com "repos/$GITHUB_REPOSITORY/attestations/sha256:$digest" --jq '.attestations[].bundle | tojson' > "$archive.sigstore.json"
-            python3 -I -c "$(cat installer/install.py)" attestation "$archive" "$VERSION" unused
-            echo "CONSUMER_VERIFY=ok platform=$platform sha256=$digest"
-          done
+          # Reuse the public check's three bounded fetch -> consumer-verifier chains.
+          # The helper joins every result and refuses on any fetch/verifier failure;
+          # the index proof below and publication step remain serial fences.
+          python3 scripts/release-public-verify.py --public dist --source . \
+            --version "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            darwin-arm64-none linux-arm64-gnu linux-x64-gnu
           gh attestation verify dist/release-index.json --repo "$GITHUB_REPOSITORY" \
             --cert-oidc-issuer https://token.actions.githubusercontent.com \
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \

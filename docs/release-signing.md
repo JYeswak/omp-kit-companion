@@ -320,6 +320,12 @@ runtime safety/approval gates.
 explicitly. Enabling `release.yml` therefore cannot start the expensive pipeline. A failure
 after the tag keeps the tag and the draft. Fix it and redispatch `attest-local`; never re-tag.
 
+`attest-local` uses the same bounded, three-worker archive verifier as the local
+public check (`scripts/release-public-verify.py`). Each archive still fetches its
+own attestation and runs the embedded consumer verifier; every result is joined.
+Any failed fetch or consumer proof refuses the job. The index attestation check
+still follows all three archive proofs, and publication follows the index check.
+
 ### Release latency investigation (RELEASE4MIN, 2026-11-03)
 
 The 0.2.86 cut used source `26cdd547a1c44fe8170fbea620a0dc78babe0a11`.

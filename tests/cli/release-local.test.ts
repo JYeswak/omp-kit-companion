@@ -9,7 +9,7 @@ afterAll(cleanupAllOwnedTmp);
 // LOCAL-RELEASE-V1 (ompkit-v66l.27.11, docs/release-signing.md): enabling release.yml must never start the
 // expensive pipeline. Its default mode runs only attest-local; every other job needs mode=ci-pipeline.
 const ROOT = join(import.meta.dir, "..", "..");
-type Job = { if?: string; needs?: string | string[]; steps?: { run?: string; uses?: string; with?: Record<string, unknown> }[] };
+type Job = { if?: string; needs?: string | string[]; steps?: { name?: string; run?: string; uses?: string; with?: Record<string, unknown> }[] };
 type Workflow = { on: Record<string, { inputs?: Record<string, { default?: unknown; options?: string[] }> } | null>; jobs: Record<string, Job> };
 const release = Bun.YAML.parse(readFileSync(join(ROOT, ".github/workflows/release.yml"), "utf8")) as Workflow;
 
@@ -37,10 +37,9 @@ test("attest-local verifies the draft and the consumer policy before it publishe
 	expect(scripts).toContain('[[ "$GITHUB_REF" == "refs/tags/v$VERSION" ]]');
 	expect(scripts).toContain("sha256sum --strict -c SHA256SUMS");
 	expect(scripts).toContain("mkdir dist sbom"); // v0.2.56's attest-local died on ENOENT writing sbom/ (run 39205018538)
-	expect(scripts).toContain('python3 -I -c "$(cat installer/install.py)" attestation "$archive" "$VERSION" unused');
 	expect(scripts).toContain("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/release.yml\"");
 	expect(scripts).not.toContain("--clobber");
-	const order = steps.map(step => step.uses?.split("@")[0] ?? (step.run?.includes("--draft=false") ? "publish" : step.run?.includes("attestation \"$archive\"") ? "consumer-verify" : "run"));
+	const order = steps.map(step => step.uses?.split("@")[0] ?? (step.run?.includes("--draft=false") ? "publish" : step.name?.startsWith("Verify every archive") ? "consumer-verify" : "run"));
 	expect(order.indexOf("actions/attest-build-provenance")).toBeLessThan(order.indexOf("consumer-verify"));
 	expect(order.indexOf("consumer-verify")).toBeLessThan(order.indexOf("publish"));
 });
@@ -1749,8 +1748,9 @@ test("RELPREREG1 prereg: cut cards keep their verdict at their commits; the same
 // RELFAST1: run the real checksum + fetch + embedded consumer-verifier stage.
 // Only gh's authority transport is a fixture; all three fetches must reach the
 // barrier before any returns, so the serial implementation cannot pass.
-for (const failure of ["none", "fetch", "verify"] as const) {
-	test(`RELFAST1 public chains overlap and ${failure === "none" ? "all verify" : failure + " failure refuses the stage"}`, async () => {
+for (const surface of ["public", "attest-local"] as const) {
+for (const failure of (surface === "public" ? ["none", "fetch", "verify"] : ["none", "fetch", "verify", "index"]) as readonly string[]) {
+	test(`RELFAST1 ${surface} chains overlap and ${failure === "none" ? "all verify" : failure + " failure refuses the stage"}`, async () => {
 		const work = realpathSync(ownedTmp("release-chains", { root: process.env.TMPDIR ?? join(ROOT, "var", "agent-tmp") }).path);
 		const bin = join(work, "bin");
 		const dist = join(work, "dist");
@@ -1765,7 +1765,10 @@ for (const failure of ["none", "fetch", "verify"] as const) {
 			writeFileSync(join(dist, `omp-kit-v0.0.0-${platform}.tar`), bytes);
 		}
 		writeFileSync(join(dist, "SHA256SUMS"), platforms.map(platform => `${digests.get(platform)}  omp-kit-v0.0.0-${platform}.tar\n`).join(""));
+		writeFileSync(join(dist, "release-index.json"), "{}\n");
 		for (const name of readdirSync(dist)) cpSync(join(dist, name), join(pub, name));
+		symlinkSync(join(ROOT, "scripts"), join(work, "scripts"));
+		symlinkSync(join(ROOT, "installer"), join(work, "installer"));
 		writeFileSync(join(bin, "gh"), `#!${process.execPath}
 import { existsSync, readdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
@@ -1784,6 +1787,7 @@ if (args[0] === "api" && args.some(a => a.includes("/attestations/"))) {
 if (args[0] === "api" && args.some(a => a.includes("/commits/"))) { console.log("a".repeat(40)); process.exit(0); }
 if (args[0] === "attestation" && args[1] === "verify") {
   appendFileSync(join(root, "verified"), args[2] + "\\n");
+  if (process.env.RELEASE_CHAIN_FAILURE === "index" && args[2] === "dist/release-index.json") { console.error("index attestation refused"); process.exit(20); }
   if (process.env.RELEASE_CHAIN_FAILURE === "verify" && args[2].includes("linux-arm64-gnu")) process.exit(18);
   process.exit(0);
 }
@@ -1791,7 +1795,13 @@ process.exit(99);
 `);
 		chmodSync(join(bin, "gh"), 0o755);
 		const fixture = join(work, "verify.sh");
-		writeFileSync(fixture, `${stagePrelude}
+		const workflowVerification = release.jobs["attest-local"]!.steps!.find(step => step.name?.startsWith("Verify every archive"))!.run!;
+		writeFileSync(fixture, surface === "attest-local" ? `${stagePrelude}
+export GITHUB_REPOSITORY="$REPO" GITHUB_SHA=${"a".repeat(40)}
+cd "$WORK"
+${workflowVerification}
+echo VERIFIED_ALL
+` : `${stagePrelude}
 ROOT=$2; SRC=$2; PUB="$WORK/public"; SHIP=(${platforms.join(" ")})
 stage verify
 ${releaseStage("substep verify.public-bytes-and-checksums", "substep verify.gatekeeper")}
@@ -1802,15 +1812,16 @@ echo VERIFIED_ALL
 			const result = await runFixtureAsync(["bash", fixture, work, ROOT], { cwd: ROOT,
 				env: { ...process.env, TMPDIR: work, PATH: `${bin}:${process.env.PATH}`, RELEASE_CHAIN_WORK: work, RELEASE_CHAIN_FAILURE: failure }, floor_s: 45 });
 			const stdout = new TextDecoder().decode(result.stdout), stderr = new TextDecoder().decode(result.stderr);
-			expect(readdirSync(work).filter(name => name.startsWith("start-")).sort()).toEqual([...digests.values()].map(digest => `start-${digest}`).sort());
-			expect(result.rc, stdout + stderr).toBe(failure === "none" ? 0 : 4);
+			expect(readdirSync(work).filter(name => name.startsWith("start-")).sort(), stdout + stderr).toEqual([...digests.values()].map(digest => `start-${digest}`).sort());
+			expect(result.rc, stdout + stderr).toBe(failure === "none" ? 0 : failure === "index" ? 20 : 4);
 			if (failure === "none") {
 				expect(stdout).toContain("VERIFIED_ALL");
 				for (const platform of platforms) expect(stdout).toContain(`CONSUMER_VERIFY=ok platform=${platform} sha256=${digests.get(platform)}`);
 			} else {
 				expect(stdout).not.toContain("VERIFIED_ALL");
-				expect(stderr).toContain(failure === "fetch" ? "no attestation bundle for linux-arm64-gnu" : "the consumer verifier refuses linux-arm64-gnu");
+				expect(stderr).toContain(failure === "fetch" ? "no attestation bundle for linux-arm64-gnu" : failure === "index" ? "index attestation refused" : "the consumer verifier refuses linux-arm64-gnu");
 			}
 		} finally { rmSync(work, { recursive: true, force: true }); }
 	}, fixtureDeadlineS(60) * 1_000);
+}
 }
