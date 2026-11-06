@@ -161,6 +161,42 @@ release_card_check() {
 	say "$verdict"
 }
 
+# Attribute only version lines this release actually rewrote, not each file's
+# latest commit (which may own unrelated work). The stale-worktree member
+# consumes these SHAs; its normal checks still judge all other attribution.
+release_version_supersedes() {
+	bounded 60 python3 -c '
+import re, subprocess, sys
+from pathlib import Path
+root, bead = sys.argv[1:]
+def git(*args):
+    return subprocess.check_output(["git", "-C", root, *args], text=True)
+head = git("rev-parse", "HEAD").strip()
+rewrites = {}
+for path, pattern in (
+    ("package.json", r"\"version\"[ \t]*:[ \t]*\"[^\"\n]*\""),
+    ("README.md", r"^Current release: v[0-9]+\.[0-9]+\.[0-9]+$"),
+):
+    before = git("show", f"{head}:{path}").splitlines()
+    after = set((Path(root) / path).read_text().splitlines())
+    lines = [n for n, old in enumerate(before, 1)
+             if old not in after and re.search(pattern, old)]
+    if not lines:
+        continue
+    ranges = [arg for n in lines for arg in ("-L", f"{n},{n}")]
+    blame = git("blame", "--line-porcelain", *ranges, head, "--", path)
+    for record in blame.splitlines():
+        fields = record.split()
+        if len(fields) >= 3 and re.fullmatch(r"[0-9a-f]{40}", fields[0]):
+            paths = rewrites.setdefault(fields[0], [])
+            if path not in paths:
+                paths.append(path)
+for sha, paths in rewrites.items():
+    scope = ", ".join(paths)
+    print(f"Supersedes: {sha} by {bead}: version lines ({scope})")
+' "$ROOT" "$1"
+}
+
 # No --source means prepare from this checkout. Never adopt foreign metadata edits,
 # even when their version happens to match. --only keeps unrelated staged work out.
 prepare_release() {
@@ -208,10 +244,12 @@ fragment.parent.mkdir(exist_ok=True)
 fragment.write_text(notes.rstrip() + "\n" + entry)
 PY
 	[ "$fragment_absent" = 0 ] || git -C "$ROOT" add -- changelog.d/774u.md || die "cannot stage the new changelog.d/774u.md"
-	local agent="${AGENT_NAME:-$(git -C "$ROOT" config user.name)}"
+	local agent="${AGENT_NAME:-$(git -C "$ROOT" config user.name)}" supersedes
+	supersedes="$(release_version_supersedes ompkit-774u)" || die "cannot attribute release prepare version lines"
 	bounded 900 git -C "$ROOT" commit --only \
 		-m "chore(release): prepare $VERSION ompkit-774u [test]" \
 		-m "Release metadata only; release-local requires fresh main and CI-only PASS verdicts on this exact exported tree before signing." \
+		-m "$supersedes" \
 		-m "Gap-Bead: none (release metadata)
 Bead: ompkit-774u
 Agent: $agent" -- "${paths[@]}" || die "release prepare commit failed; metadata left for inspection"
@@ -828,7 +866,7 @@ advance_next_version() {
 			git -C "$ROOT" cat-file blob "$ref:$blob" >"$dest/$blob" || return 1
 		done
 	}
-	local next agent export="$WORK/next" date promote_rc path dirty manual
+	local next agent export="$WORK/next" date promote_rc path dirty manual supersedes
 	local converge="${OMP_KIT_GIT_CONVERGE:-$HOME/Developer/omp-kit/scripts/git_converge.py}"
 	local -a fragments=() paths=(package.json README.md CHANGELOG.md)
 	next="$(python3 -c 'import sys; a, b, c = map(int, sys.argv[1].split(".")); print(f"{a}.{b}.{c + 1}")' "$VERSION")"
@@ -898,10 +936,12 @@ PY
 		if [ -s "$WORK/next-residual/$path" ]; then cp "$WORK/next-residual/$path" "$ROOT/$path"; else rm -f "$ROOT/$path"; fi
 	done
 	rm -rf "$export" "$WORK/next-head" "$WORK/next-residual"
+	supersedes="$(release_version_supersedes ompkit-d8qic)" || die "v$VERSION is published; cannot attribute next-version version lines"
 	if ! bounded 900 git -C "$ROOT" commit -q --only \
 		-m "chore(release): next version $next after v$VERSION ompkit-d8qic" \
 		-m "NEXTVERSION1: v$VERSION is published from $SOURCE; main now states $next so the next cut tags a green origin commit with no bump commit. CHANGELOG [$VERSION] holds the notes folded from the fragments present at $SOURCE; README states v$VERSION, the latest published release." \
 		-m "[no-changelog] release next-version commit; its notes are the promoted CHANGELOG section" \
+		-m "$supersedes" \
 		-m "Gap-Bead: none (release metadata)
 Bead: ompkit-d8qic
 Agent: $agent" -- "${paths[@]}"; then

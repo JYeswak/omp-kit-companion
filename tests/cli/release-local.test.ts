@@ -271,8 +271,16 @@ for (const dirty of [null, "package.json", "README.md", "changelog.d/774u.md"] a
 			writeFileSync(join(repo, "README.md"), "Current release: v1.2.3\n");
 			writeFileSync(join(repo, "changelog.d/774u.md"), "### Changed\n");
 			writeFileSync(join(repo, "foreign.txt"), "base\n");
-			git("add", "."); git("commit", "-qm", "fixture base");
+			git("add", "."); git("commit", "-qm", "fixture base", "-m", "Bead: ompkit-old-release");
 			const base = git("rev-parse", "HEAD");
+			if (!dirty) {
+				// Version lines and unrelated package data belong to different landed
+				// beads. Release authority must cover only the former's attribution.
+				writeFileSync(join(repo, "package.json"), '{\n  "version": "1.2.3",\n  "description": "landed peer change",\n  "omp": { "version": "1.2.3" }\n}\n');
+				git("add", "package.json"); git("commit", "-qm", "peer metadata", "-m", "Bead: ompkit-peer");
+				writeFileSync(join(repo, ".git/hooks/commit-msg"), `#!/bin/sh\nexec sh ${JSON.stringify(join(ROOT, "scripts/check-stale-worktree.sh"))} "$1"\n`);
+				chmodSync(join(repo, ".git/hooks/commit-msg"), 0o755);
+			}
 			writeFileSync(join(repo, "foreign.txt"), "foreign staged change\n");
 			git("add", "foreign.txt");
 			if (dirty) writeFileSync(join(repo, dirty), readFileSync(join(repo, dirty), "utf8") + "foreign edit\n");
@@ -307,6 +315,15 @@ prepare_release
 				expect(git("diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").split("\n").sort()).toEqual(["README.md", "changelog.d/774u.md", "package.json"]);
 				expect(git("diff", "--cached", "--name-only")).toBe("foreign.txt");
 				expect(stdout).toContain("locally; no push");
+				// Reusing the release message must not authorize reverting peer data,
+				// even on a version-bearing path. Run the real hook against that index.
+				writeFileSync(join(work, "release-message"), message);
+				writeFileSync(join(repo, "package.json"), readFileSync(join(repo, "package.json"), "utf8").replace('  "description": "landed peer change",\n', ""));
+				git("add", "package.json");
+				const negative = runFixture(["sh", join(ROOT, "scripts/check-stale-worktree.sh"), join(work, "release-message")],
+					{ cwd: repo, env: { ...env, TMPDIR: work }, floor_s: 60 });
+				expect(negative.rc).toBe(1);
+				expect(new TextDecoder().decode(negative.stderr)).toContain("from bead ompkit-peer");
 			}
 		} finally { rmSync(work, { recursive: true, force: true }); }
 	}, fixtureDeadlineS(60) * 1_000);
@@ -1078,6 +1095,66 @@ advance_next_version
 		expect(git(repo, ["rev-parse", "HEAD"])).toBe(git(origin, ["rev-parse", "refs/heads/main"]));
 	} finally { rmSync(work, { recursive: true, force: true }); }
 }, fixtureDeadlineS(180) * 1_000);
+
+// Real production advance + real stale-worktree hook. Dirty post-cut fragments
+// are outside the write set; dirty shipped fragments and metadata remain owned.
+for (const dirty of [null, "changelog.d/later.md", "package.json", "changelog.d/shipped.md"] as const) {
+	test(`release advance supersedes version lines ${dirty ? `with dirty ${dirty}` : "through the installed stale-worktree gate"}`, () => {
+		const { work, env, repo, git } = catchUpRepo("advance-supersedes");
+		const origin = join(work, "origin.git");
+		try {
+			git(work, ["init", "-q", "--bare", "-b", "main", origin]);
+			git(work, ["init", "-q", "-b", "main", repo]);
+			for (const dir of ["scripts", "changelog.d"]) mkdirSync(join(repo, dir), { recursive: true });
+			for (const name of ["release-notes.sh", "release-notes.ts", "stamp-release-line.sh", "kitlib-tmp.sh"]) cpSync(join(ROOT, "scripts", name), join(repo, "scripts", name));
+			writeFileSync(join(repo, "README.md"), "<!-- kit-release:start -->\nCurrent release: v1.2.2\n<!-- kit-release:end -->\n");
+			writeFileSync(join(repo, "package.json"), catchUpPackage("1.2.3"));
+			writeFileSync(join(repo, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-01-01\n");
+			writeFileSync(join(repo, "changelog.d/shipped.md"), "### Fixed\n\n- Shipped fix.\n");
+			git(repo, ["add", "."]); git(repo, ["commit", "-qm", "fixture base"]);
+			writeFileSync(join(repo, "package.json"), catchUpPackage("1.2.4"));
+			git(repo, ["add", "package.json"]); git(repo, ["commit", "-qm", "previous package bump", "-m", "Bead: ompkit-previous-package"]);
+			writeFileSync(join(repo, "README.md"), "<!-- kit-release:start -->\nCurrent release: v1.2.3\n<!-- kit-release:end -->\n");
+			git(repo, ["add", "README.md"]); git(repo, ["commit", "-qm", "previous README bump", "-m", "Bead: ompkit-previous-readme"]);
+			const source = git(repo, ["rev-parse", "HEAD"]);
+			git(repo, ["remote", "add", "origin", origin]); git(repo, ["push", "-q", "origin", "main"]);
+			writeFileSync(join(repo, "changelog.d/later.md"), "- Post-cut work.\n");
+			git(repo, ["add", "changelog.d/later.md"]); git(repo, ["commit", "-qm", "post-cut work", "-m", "Bead: ompkit-later"]);
+			git(repo, ["push", "-q", "origin", "main"]);
+			const before = git(repo, ["rev-parse", "HEAD"]);
+			const original = Object.fromEntries(["package.json", "README.md", "CHANGELOG.md", "changelog.d/shipped.md", "changelog.d/later.md"].map(path => [path, readFileSync(join(repo, path), "utf8")]));
+			if (dirty) writeFileSync(join(repo, dirty), original[dirty] + "peer dirty bytes\n");
+			writeFileSync(join(repo, ".git/hooks/commit-msg"), `#!/bin/sh\nexec sh ${JSON.stringify(join(ROOT, "scripts/check-stale-worktree.sh"))} "$1"\n`);
+			chmodSync(join(repo, ".git/hooks/commit-msg"), 0o755);
+			const fixture = join(work, "advance.sh");
+			writeFileSync(fixture, `set -euo pipefail
+die() { echo "release-local: refused: $*" >&2; exit 4; }
+say() { echo "== $*"; }
+ROOT=$1; WORK=$2; STAGE_LOG="$WORK/stages"; : >"$STAGE_LOG"; CHILD=''
+${helperScript}
+${releaseStage("# NEXTVERSION1 (ompkit-d8qic", "\n# VERSIONSRC1")}
+VERSION=1.2.4; SOURCE=${source}; INSTALLED=1; INSTALL_PREFIX=${JSON.stringify(join(work, "kit"))}
+advance_next_version
+`);
+			const result = runFixture(["bash", fixture, repo, work], { cwd: repo, env: { ...env, TMPDIR: work }, floor_s: 180 });
+			const stderr = new TextDecoder().decode(result.stderr);
+			if (dirty && dirty !== "changelog.d/later.md") {
+				expect(result.rc, stderr).toBe(4);
+				expect(stderr).toContain("NEXT_VERSION_PATHS_DIRTY");
+				expect(git(repo, ["rev-parse", "HEAD"])).toBe(before);
+				for (const [path, bytes] of Object.entries(original)) expect(readFileSync(join(repo, path), "utf8")).toBe(bytes + (path === dirty ? "peer dirty bytes\n" : ""));
+			} else {
+				expect(result.rc, stderr).toBe(0);
+				expect(JSON.parse(git(origin, ["show", "main:package.json"])).version).toBe("1.2.5");
+				expect(git(origin, ["show", "main:README.md"])).toBe("<!-- kit-release:start -->\nCurrent release: v1.2.4\n<!-- kit-release:end -->");
+				expect(git(origin, ["show", "main:CHANGELOG.md"])).toContain("- Shipped fix.");
+				expect(existsSync(join(repo, "changelog.d/shipped.md"))).toBe(false);
+				expect(readFileSync(join(repo, "changelog.d/later.md"), "utf8")).toBe(original["changelog.d/later.md"] + (dirty ? "peer dirty bytes\n" : ""));
+				expect(git(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]).split("\n").sort()).toEqual(["CHANGELOG.md", "README.md", "changelog.d/shipped.md", "package.json"]);
+			}
+		} finally { rmSync(work, { recursive: true, force: true }); }
+	}, fixtureDeadlineS(180) * 1_000);
+}
 
 // RELCARD1 (ompkit-fp72.120.16.254, Joshua J-2026-11-05-03): a cut needs a complete two-lane release card at the exact
 // source commit (docs/release-rubric.md "Card grammar"). Fixture repos commit the card; the checker reads it with git,
