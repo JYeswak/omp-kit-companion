@@ -336,7 +336,7 @@ archive="$archive_root/tree"
 git -C "$ROOT" archive "$local_sha" | tar -xf - -C "$archive"
 set -- --archive-dir "$archive"
 if [ -n "${base_ref:-}" ]; then
-	changed=$(git -C "$ROOT" diff --name-only "$base_ref" "$local_sha")
+	changed=$(git -C "$ROOT" diff --no-renames --name-only "$base_ref" "$local_sha")
 else
 	changed=$(git -C "$ROOT" diff-tree --root --no-commit-id --name-only -r "$local_sha")
 fi
@@ -345,6 +345,33 @@ while IFS= read -r path; do
 done <<EOF
 $changed
 EOF
+# GATE1-B: only a change to executable judging inputs needs a second fresh
+# gate. This set comes from fresh-gate's phases, the adapter's policy/contract
+# runners and suite-metrics.py's JUDGING_FILES, not the candidate's selector.
+# src is compiled into the CLI (including heavy); tests are dynamically selected
+# and may source helpers/fixtures. Keep their whole input trees authoritative.
+# Data under rules/cases is judged by the unchanged candidate gate, not executed.
+base_gate_changed=0
+while IFS= read -r gate_path; do
+	case "$gate_path" in
+		src/*|tests/*|bin/*|bunfig.toml|tsconfig.json|package.json|\
+		scripts/pre-push-gate.sh|scripts/fresh-gate.sh|scripts/check-*.sh|\
+		scripts/full-suite-verdict.sh|scripts/full-suite-verdict-store.py|\
+		scripts/suite-metrics.py|scripts/suite-hermetic-env.sh|scripts/suite-lease.sh|\
+		scripts/kitlib*|scripts/pysafe.py|scripts/tempsafe_check.py|scripts/br_init_check.py|\
+		scripts/regexploit-gate.py|scripts/doc-drift-check.sh|scripts/commit-msg-bead.sh|\
+		scripts/ref-txn-witness.py|scripts/portable_paths_check.py|scripts/portable-paths-baseline.json|\
+		scripts/build-manifest.sh|scripts/runtime-adapter.sh|scripts/rule-class.ts|\
+		scripts/ttsr-harness.ts|scripts/test-budget.ts|scripts/affected-tests.ts|\
+		scripts/gate-disk-floor.ts|scripts/regex-budget.ts|scripts/readme-check.ts|\
+		scripts/release-notes.sh|scripts/release-notes.ts|scripts/release_reuse.py|\
+		scripts/gate-ci-only.tsv|.github/test-budget.json|.github/core-test-timings.json)
+			base_gate_changed=1
+			break ;;
+	esac
+done <<GATE_PATHS_EOF
+$changed
+GATE_PATHS_EOF
 if [ -n "${base_ref:-}" ]; then
 	set -- "$@" --base "$base_ref" --commit "$local_sha"
 fi
@@ -619,13 +646,11 @@ else
 fi
 # Not `exec`: exec replaces this shell, so the EXIT trap above never ran and every push leaked
 # its archive extracts into var/agent-tmp (ompkit-fp72.40). The gate runs as a child.
-# LAND1 + RUNFROMTREE1: immutable policy checks and bootstrap contracts above
-# come from base. The candidate then judges its own exact tree with its own
-# scripts, so a broken new runner cannot borrow a PASS from the old runner.
-# A main-role verdict has the candidate's judging identity and is reusable by
-# the existing new-tag gate; a base-role verdict is not that qualification.
+# GATE1-B: when judging code changes, the base's fresh gate judges candidate
+# data before the candidate can judge itself. Unchanged judging code needs no
+# duplicate run. RUNFROMTREE1 still requires the candidate runner/contracts;
+# only its focused report may qualify its main-role full-suite verdict.
 checker_contracts "$archive" candidate
-gate_scripts="$archive"
 ledger_git=$(git -C "$ROOT" rev-parse --absolute-git-dir) || { printf 'pre-push-gate: cannot resolve git dir for fresh-gate ledger\n' >&2; exit 1; }
 # NODOUBLEPASS1 (ompkit-bp50d): the focused gate reports what it ran GREEN on this tree; the verdict
 # below runs only the complement. The report lives beside the archive, inside this gate's owned dir.
@@ -639,6 +664,14 @@ gate_elapsed=$(($(date +%s) - gate_t0))
 focus_budget=$((${PRE_PUSH_BUDGET_SECS:-55} - gate_elapsed - 15))
 [ "$focus_budget" -ge 15 ] || focus_budget=15
 printf 'push budget: %ss used before the focused stage; focused budget %ss\n' "$gate_elapsed" "${FRESH_GATE_TEST_BUDGET_SECS:-$focus_budget}"
+if [ -n "${base_ref:-}" ] && [ "$base_gate_changed" = 1 ]; then
+	printf '== fresh-gate role=base\n'
+	FRESH_GATE_TEST_BUDGET_SECS="${FRESH_GATE_TEST_BUDGET_SECS:-$focus_budget}" \
+	FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" \
+	FRESH_GATE_PASSED_OUT="$archive_root/base-focused-passed.txt" FRESH_GATE_PASSED_IN="$archive_root/contracts-passed.txt" \
+		sh "$gate_scripts/scripts/fresh-gate.sh" "$@"
+fi
+gate_scripts="$archive"
 FRESH_GATE_TEST_BUDGET_SECS="${FRESH_GATE_TEST_BUDGET_SECS:-$focus_budget}" \
 FRESH_GATE_REPO="$ROOT" FRESH_GATE_LEDGER="$ledger_git/omp-kit/fresh-gate-runs.jsonl" FRESH_GATE_PASSED_OUT="$focused_passed" FRESH_GATE_PASSED_IN="$archive_root/contracts-passed.txt" \
 	sh "$gate_scripts/scripts/fresh-gate.sh" "$@"

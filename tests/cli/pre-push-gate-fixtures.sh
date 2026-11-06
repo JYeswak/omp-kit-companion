@@ -224,8 +224,134 @@ if [ \"\$fixture_value\" != healthy ]; then
 	printf 'RUNFROMTREE-FIXTURE-REJECTED: %s\n' \"\$fixture_value\" >&2
 	exit 23
 fi"
+
+# Opt-in measurement at the real Git transport boundary. Each sample publishes
+# a new commit; no force, reset, reused verdict or synthetic adapter invocation.
+latency_pushes() {
+	for push_kind in ordinary gate; do
+		repo=$(mkrepo "latency-$push_kind" "$candidate_fixture_gate
+printf 'LATENCY-POLICY-CHECK\n'" "$candidate_fixture_gate
+printf 'LATENCY-POLICY-CHECK\n'" "" healthy)
+		remote="$repo.origin.git"
+		git init --template= -q --bare --initial-branch=main "$remote" || return 1
+		git -C "$repo" remote add origin "$remote" || return 1
+		git -C "$repo" push -q origin HEAD:refs/heads/main || return 1
+		mkdir -p "$repo/.git/hooks"
+		cp "$ADAPTER" "$repo/.git/hooks/pre-push"
+		chmod +x "$repo/.git/hooks/pre-push"
+		git -C "$repo" config core.hooksPath "$repo/.git/hooks"
+		sample=1
+		while [ "$sample" -le 5 ]; do
+			if [ "$push_kind" = gate ]; then
+				printf '# measured revision %s\n' "$sample" >>"$repo/scripts/fresh-gate.sh"
+				push_path=scripts/fresh-gate.sh
+			else
+				printf 'measured revision %s\n' "$sample" >"$repo/ordinary.txt"
+				push_path=ordinary.txt
+			fi
+			git -C "$repo" add -- "$push_path" || return 1
+			git -C "$repo" commit -qm "[test] latency $push_kind $sample" || return 1
+			python3 -B - "$KITREPO/scripts" "$repo" "$push_kind" "$sample" <<'PY'
+import os, sys, time
+helpers, repo, kind, sample = sys.argv[1:]
+sys.path.insert(0, helpers)
+import kitlib_run
+start_load = os.getloadavg()
+start = time.monotonic()
+result = kitlib_run.run(["git", "-C", repo, "push", "origin", "HEAD:refs/heads/main"], deadline_s=120)
+elapsed = time.monotonic() - start
+sys.stdout.buffer.write(result.stdout)
+sys.stdout.buffer.write(result.stderr)
+sys.stdout.flush()
+base_runs = result.stdout.count(b"== fresh-gate role=base")
+print(f"LATENCY kind={kind} sample={sample} elapsed_s={elapsed:.6f} "
+      f"rc={result.rc} base_runs={base_runs} load_start={start_load} load_end={os.getloadavg()}")
+sys.exit(125 if result.timed_out or result.killed or result.truncated or result.rc is None else result.rc)
+PY
+			latency_rc=$?
+			[ "$latency_rc" = 0 ] || return "$latency_rc"
+			sample=$((sample + 1))
+		done
+	done
+}
 # Scenario families mutate only their own fixture root; execute them independently.
 adapter_cases() {
+# GATE1-B: a candidate replaces fresh-gate with exit 0. The committed base
+# must still judge candidate data, through a real local push to a bare origin.
+for fixture_value in broken healthy; do
+	repo=$(mkrepo "base-policy-$fixture_value" "$candidate_fixture_gate
+printf 'BASE-POLICY-CHECK\n'" 'exit 0' "" "$fixture_value")
+	base=$(git -C "$repo" rev-parse HEAD~1)
+	head=$(git -C "$repo" rev-parse HEAD)
+	remote="$repo.origin.git"
+	git init --template= -q --bare --initial-branch=main "$remote"
+	git -C "$repo" remote add origin "$remote"
+	git -C "$repo" push -q origin "$base:refs/heads/main" || exit 1
+	git -C "$repo" config core.hooksPath "$repo/.git/hooks"
+	mkdir -p "$repo/.git/hooks"
+	cp "$ADAPTER" "$repo/.git/hooks/pre-push"
+	chmod +x "$repo/.git/hooks/pre-push"
+	git -C "$repo" push origin HEAD:refs/heads/main >"$TMP/base-policy-$fixture_value.out" 2>&1
+	push_rc=$?
+	remote_after=$(git --git-dir="$remote" rev-parse refs/heads/main)
+	if [ "$fixture_value" = broken ] && [ "$push_rc" != 0 ] && [ "$remote_after" = "$base" ] \
+		&& grep -Fq 'RUNFROMTREE-FIXTURE-REJECTED: broken' "$TMP/base-policy-$fixture_value.out"; then
+		pass=$((pass + 1))
+		printf 'PASS base-policy-exit-zero-refused: push rc=%s; base gate rc=23; origin unchanged\n' "$push_rc"
+	elif [ "$fixture_value" = healthy ] && [ "$push_rc" = 0 ] && [ "$remote_after" = "$head" ] \
+		&& grep -Fq BASE-POLICY-CHECK "$TMP/base-policy-$fixture_value.out"; then
+		pass=$((pass + 1))
+		printf 'PASS base-policy-exit-zero-control: push rc=0; base step ran; origin advanced\n'
+	else
+		fail=$((fail + 1))
+		printf 'FAIL base-policy-%s: push_rc=%s base=%s head=%s remote=%s out<<<%s>>>\n' \
+			"$fixture_value" "$push_rc" "$base" "$head" "$remote_after" "$(cat "$TMP/base-policy-$fixture_value.out")"
+	fi
+done
+
+# The unchanged candidate policy still runs, but an ordinary push pays once.
+repo=$(mkrepo ordinary-policy "$candidate_fixture_gate
+printf 'ORDINARY-POLICY-CHECK\n'" "" "" healthy)
+printf 'ordinary change\n' >"$repo/ordinary.txt"
+git -C "$repo" add -- ordinary.txt
+git -C "$repo" commit -qm '[test] ordinary fixture change'
+rc=$(run_adapter "$repo")
+policy_runs=$(grep -Fc ORDINARY-POLICY-CHECK "$TMP/out")
+if [ "$rc" = 0 ] && [ "$policy_runs" = 1 ]; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL ordinary-policy-once: rc=%s policy_runs=%s <<<%s>>>\n' "$rc" "$policy_runs" "$(cat "$TMP/out")"
+fi
+
+# A helper-only edit cannot remove the predecessor's judging pass.
+for gate_helper in scripts/check-example.sh scripts/kitlib_run.py scripts/readme-check.ts src/kitlib/run.ts tests/cli/helper.sh; do
+	repo=$(mkrepo "helper-${gate_helper##*/}" "$candidate_fixture_gate" "" "" broken)
+	mkdir -p "$repo/${gate_helper%/*}"
+	printf '# helper revision\n' >"$repo/$gate_helper"
+	git -C "$repo" add -- "$gate_helper"
+	git -C "$repo" commit -qm '[test] change only judging helper'
+	rc=$(run_adapter "$repo")
+	if [ "$rc" = 23 ] && grep -Fq '== fresh-gate role=base' "$TMP/out" \
+		&& grep -Fq 'RUNFROMTREE-FIXTURE-REJECTED: broken' "$TMP/out"; then
+		pass=$((pass + 1))
+	else
+		fail=$((fail + 1))
+		printf 'FAIL base-policy-helper %s: rc=%s <<<%s>>>\n' "$gate_helper" "$rc" "$(cat "$TMP/out")"
+	fi
+done
+# Git's rename detection must not hide the removed executable input behind a
+# non-gate destination name (the last fixture above carries tests/cli/helper.sh).
+git -C "$repo" mv -- tests/cli/helper.sh ordinary.txt
+git -C "$repo" commit -qm '[test] move judging helper outside its input tree'
+rc=$(run_adapter "$repo")
+if [ "$rc" = 23 ] && grep -Fq '== fresh-gate role=base' "$TMP/out"; then
+	pass=$((pass + 1))
+else
+	fail=$((fail + 1))
+	printf 'FAIL base-policy-renamed-helper: rc=%s <<<%s>>>\n' "$rc" "$(cat "$TMP/out")"
+fi
+
 repo=$(mkrepo candidate-runner-refuses 'exit 0' "$candidate_fixture_gate" "" broken)
 rc=$(run_adapter "$repo")
 if [ "$rc" = 23 ]; then

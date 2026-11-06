@@ -71,6 +71,29 @@ The full-suite verdict for the exact tree (`scripts/full-suite-verdict.sh`) gate
 release, so a push takes minutes (GATESPEED1, J-2026-10-31-09); `PRE_PUSH_FULL_SUITE=push` runs the
 complete suite inside the push again. The focused suites never substitute for this verdict.
 
+When a push changes executable judging inputs, the adapter runs the committed base's
+`fresh-gate.sh` against the candidate archive before running the candidate's own gate.
+This includes both gate scripts, `scripts/check-*.sh`, their runner/helper dependencies,
+the compiled CLI source tree, dynamically selected tests and their fixtures, and judging
+configuration. Selection uses the adapter's own path set, never candidate code.
+A candidate that deletes or replaces a gate step with `exit 0` still faces base policy;
+neither run reads dirty working-tree gate code. Other changes run the unchanged candidate
+gate once, without an additional base fresh-gate invocation.
+The candidate must always pass its own runner and checker contracts. Base-focused results
+are separate and never stand in for candidate main-role qualification. With no remote base
+(an initial push), only the candidate gate is available.
+
+Measure five real local fixture pushes per change class (ordinary and gate-editing):
+
+```sh
+nice -n 10 sh -c '. ./tests/cli/pre-push-gate-fixtures.sh; latency_pushes' tests/cli/pre-push-gate.test.sh
+```
+
+Each sample publishes a new commit to a disposable bare origin through the real adapter;
+output includes elapsed time, exit status, base-run count and machine load. The probe is
+separate from the test entrypoint; it never substitutes for the contract suite. These tiny
+fixture policies measure transport/adapter overhead, not production fresh-gate duration.
+
 The complete declared suite is every bun test under `tests/cli` and `tests/fleet-guard`, every
 shell suite `tests/cli/*.test.sh`, and every python suite under `tests/cli` and `tests/scripts`
 (`*_test.py`, `*.test.py`), run against the exact-commit archive. Rows of
